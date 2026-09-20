@@ -334,12 +334,13 @@ test("gossip byte refusal preserves both accepted request directions and real co
     expect(pair.right.diagnostics().requests.occupied).toBe(1);
     expect(pair.right.diagnostics().incoming.occupied).toBe(1);
     await pair.left.publishGossip(TOPIC, new Uint8Array(10 * 1024 * 1024).fill(17), {allowZeroPeers: false});
-    for (let i = 0; i < 2000 && pair.right.diagnostics().gossip.byteRefusals === 0n; i++) await delay(5);
+    const refused = 'lodestar_native_gossipsub_storage_refusals_total{reason="processor_capacity"} 1\n';
+    for (let i = 0; i < 2000 && !pair.right.getMetrics().includes(refused); i++) await delay(5);
+    expect(pair.right.getMetrics()).toContain(refused);
     expect(pair.right.diagnostics().gossip).toMatchObject({
-      byteRefusals: 1n,
       occupied: 0,
       reportsAccepted: 0n,
-      reportsAppliedIgnore: 1n,
+      reportsAppliedIgnore: 0n,
       reservedBytes: 0,
     });
     await Promise.all([

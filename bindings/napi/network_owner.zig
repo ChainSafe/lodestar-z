@@ -23,7 +23,6 @@ pub const Owner = struct {
     records: [d.types.bootstrap_max]d.identity.enr.Record = undefined,
     outputs: [32]n.peers.Event = undefined,
     application_outputs: [32]n.reqresp.Event = undefined,
-    gossip_outputs: [32]n.gossipsub.Event = undefined,
     application: application_config.Config = undefined,
 
     pub fn readIdentity(self: *const Owner) !r.Identity {
@@ -105,6 +104,10 @@ fn serve(self: *Runtime) !void {
     std.debug.assert(self.heavy.?.core_live);
     const io = self.heavy.?.threaded.io();
     try publishReady(self);
+    var ingress: gossip_mod.Ingress = .{ .runtime = self, .io = io };
+    const sink = ingress.sink();
+    self.heavy.?.core.service.gossipsub.message_sink = &sink;
+    defer self.heavy.?.core.service.gossipsub.message_sink = null;
     while (true) {
         self.lock();
         const stop = self.stop;
@@ -162,14 +165,14 @@ fn serve(self: *Runtime) !void {
         try incoming_mod.flags(self, timestamp);
         const terminal_accepted = try @import("network_incoming_phase_faults.zig").terminalBarrier(self, true);
         const sequence = try self.advanceSequence();
-        const result = self.heavy.?.core.step(io, timestamp, slot, .{ .peers = self.heavy.?.outputs[0..@min(peer_room, self.heavy.?.outputs.len)], .application = &self.heavy.?.application_outputs, .gossipsub = &self.heavy.?.gossip_outputs }, commands.waitLimit(self, timestamp));
+        const result = self.heavy.?.core.step(io, timestamp, slot, .{ .peers = self.heavy.?.outputs[0..@min(peer_room, self.heavy.?.outputs.len)], .application = &self.heavy.?.application_outputs }, commands.waitLimit(self, timestamp));
+        if (ingress.failure) |err| return err;
         self.lock();
         self.reports.sync(&self.heavy.?.core.peer_manager.catalog);
         self.unlock();
         @import("network_gossip_faults.zig").afterStep(self);
         if (terminal_accepted) |proof| @import("network_incoming_phase_faults.zig").afterStep(self, &proof, self.heavy.?.application_outputs[0..result.counts.application]);
         try requests_mod.capture(self, self.heavy.?.application_outputs[0..result.counts.application], timestamp);
-        try gossip_mod.capture(self, self.heavy.?.gossip_outputs[0..result.counts.gossipsub], try gossip_mod.sample(io));
         commands.completeConnects(self, timestamp);
 
         publishTurn(self, &result, timestamp, sequence);

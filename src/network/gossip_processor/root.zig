@@ -154,8 +154,23 @@ pub const GossipProcessor = struct {
     pub fn reserve(self: *GossipProcessor, len: usize) !Token {
         return self.reserveKind(.beacon_block, len);
     }
+    /// A capacity hint, not a reservation. reserveKind remains authoritative.
+    pub fn hasCapacity(self: *const GossipProcessor, kind: Kind, len: usize) bool {
+        assert(len <= payload_max);
+        if (self.closed or self.order == std.math.maxInt(u64)) return false;
+        const k = @intFromEnum(kind);
+        const pages = storage.Store.pagesFor(len);
+        if (self.limits) |limits| {
+            if (self.used_items[k] >= limits[k].items or
+                pages * storage.page_bytes > limits[k].bytes - self.used_bytes[k]) return false;
+        } else if (len * 2 > self.budget.limit - self.budget.used) return false;
+        return self.diag.occupied < self.cells.len and
+            pages <= self.store.free_pages - self.staging_pages and
+            self.store.used_entries + self.store.retired_entries + self.staging_items < self.store.entries.len;
+    }
     pub fn reserveKind(self: *GossipProcessor, kind: Kind, len: usize) !Token {
         assert(len <= payload_max);
+        if (self.closed) return error.NetworkGossipFull;
         const k = @intFromEnum(kind);
         const pages = storage.Store.pagesFor(len);
         if (self.limits) |limits| {

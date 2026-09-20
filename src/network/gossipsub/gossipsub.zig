@@ -33,6 +33,7 @@ pub const MessageId = topic_mod.MessageId;
 pub const Verdict = validation_mod.Verdict;
 pub const ValidationHandle = validation_mod.Handle;
 pub const ReportOutcome = validation_mod.Outcome;
+pub const MessageSink = @import("messages.zig").MessageSink;
 
 pub const Event = union(enum) {
     /// A new message the host must validate and then close out with
@@ -99,6 +100,8 @@ pub const Gossipsub = struct {
     sessions: *Sessions,
     peers: peers_mod.PeerBook,
     messages: @import("messages.zig").Messages,
+    /// The sink and its context must outlive every pump that uses them.
+    message_sink: ?*const MessageSink = null,
     cycle: @import("heartbeat_cycle.zig").Cycle = .{},
     overlay: *overlay_mod.Overlay,
     heartbeat_at: u64 = 0,
@@ -483,8 +486,13 @@ pub const Gossipsub = struct {
         return .done;
     }
 
+    pub fn acceptsRpc(self: *Gossipsub, index: u16, now: Now) bool {
+        return self.peers.rows[self.logical(index).index].direct or
+            self.peerScore(index, now.mono_ms) >= self.options.score_params.graylist_threshold;
+    }
+
     pub fn ignoreRpc(self: *Gossipsub, index: u16, now: Now) bool {
-        if (self.peers.rows[self.logical(index).index].direct or self.peerScore(index, now.mono_ms) >= self.options.score_params.graylist_threshold) return false;
+        if (self.acceptsRpc(index, now)) return false;
         self.rpc_metrics.graylist_dropped +|= 1;
         return true;
     }
@@ -723,12 +731,16 @@ pub const Gossipsub = struct {
                 };
             },
             .admitted => |event| {
-                turn.events[turn.count] = .{ .message = event };
                 self.resolvePromises(event.id, .{ .now_ms = now.mono_ms });
                 self.counters.messages_received += 1;
                 self.topic_metrics.get(event.topic).admitted +|= 1;
                 if (msg.data.len >= self.options.idontwant_min_data_size) self.broadcastIdontwant(self.overlay.findTopic(event.topic).?, event.id, index);
-                turn.count += 1;
+                if (turn.sink) |sink| {
+                    sink.deliver(sink.context, &event);
+                } else {
+                    turn.events[turn.count] = .{ .message = event };
+                    turn.count += 1;
+                }
                 return .done;
             },
         }
@@ -903,6 +915,7 @@ pub const Gossipsub = struct {
 };
 
 test {
+    _ = @import("gossipsub_ingress_test.zig");
     _ = @import("gossipsub_owner_messages_test.zig");
     _ = @import("gossipsub_owner_policy_test.zig");
     _ = @import("gossipsub_owner_resources_test.zig");

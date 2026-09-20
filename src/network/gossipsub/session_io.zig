@@ -314,15 +314,20 @@ fn readPeer(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *T
     // A turn consumes at least one item, byte, or transport-call credit per iteration.
     for (0..self.options.items_per_peer + self.options.calls_per_peer + self.options.input_per_peer + 1) |_| {
         if (io.rpc != null) {
-            const done = processRpc(self, index, turn, peer) catch {
+            const done = processRpc(self, index, turn, peer) catch |err| {
                 const conn = self.sessions.rows[index].conn;
-                std.log.scoped(.network_gossip).debug("gossip_rpc_refused connection={d}:{d} reason=malformed", .{ conn.index, conn.generation });
+                std.log.scoped(.network_gossip).debug("gossip_rpc_refused connection={d}:{d} reason={s}", .{ conn.index, conn.generation, @errorName(err) });
                 self.counters.malformed_rpcs += 1;
+                self.peers.penalize(self.sessions.rows[index].logical, 1);
                 resetInbound(self, engine, index);
                 return;
             };
             if (done != .done) return;
             _ = self.sessions.finishFrame(io);
+            if (!self.acceptsRpc(index, now)) {
+                resetInbound(self, engine, index);
+                return;
+            }
         }
         if (io.unread_start < io.unread_end) {
             if (peer.input == 0 or turn.budget.input == 0) return;
@@ -339,7 +344,10 @@ fn readPeer(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *T
                     self.counters.receive_capacity_refusals += 1;
                     self.counters.local_pressure_resets += 1;
                     self.cancelPromises(index, true);
-                } else self.counters.malformed_rpcs += 1;
+                } else {
+                    self.counters.malformed_rpcs += 1;
+                    self.peers.penalize(logical, 1);
+                }
                 resetInbound(self, engine, index);
                 return;
             };
@@ -448,6 +456,9 @@ pub fn runTurn(self: *Gossipsub, router: *routing.Router, engine: *Engine, turn:
             continue;
         }
         if (first_serviced == null) first_serviced = index;
+        if (self.sessions.rows[index].in_stream != null and self.ignoreRpc(@intCast(index), now)) {
+            resetInbound(self, engine, @intCast(index));
+        }
         const io = &self.sessions.rows[index].io;
         var peer = Credits.peer(&self.options);
         const write_first = io.write_first;
@@ -471,8 +482,8 @@ pub fn processRpc(self: *Gossipsub, index: u16, turn: *Turn, peer: *Credits) pro
     const now = turn.now;
     const io = &self.sessions.rows[index].io;
     const rpc = &io.rpc.?;
-    if (self.ignoreRpc(index, now)) return .done;
     for (0..self.options.items_per_peer) |_| {
+        if (self.ignoreRpc(index, now)) return .done;
         if (peer.items == 0 or turn.budget.items == 0) return .credits;
         peer.items -= 1;
         turn.budget.items -= 1;
@@ -491,10 +502,6 @@ pub fn processRpc(self: *Gossipsub, index: u16, turn: *Turn, peer: *Credits) pro
                 .deferred => return .credits,
                 .skipped => continue,
             }
-        }
-        if (!rpc.permitsItem()) {
-            rpc.consumeItem();
-            continue;
         }
         if (pending) {
             const cost = rpc.item.?.fieldCost();
@@ -588,7 +595,9 @@ pub const Admission = enum { admitted, duplicate, capacity, unauthenticated };
 pub fn beginPump(self: *Gossipsub, now: Now, events: []Event) Turn {
     self.last_now_ms = now.mono_ms;
     self.messages.expire(&self.peers, now.mono_ms);
-    return Turn.init(&self.options, now, events, self.decompressed, self.msg_scratch);
+    var turn = Turn.init(&self.options, now, events, self.decompressed, self.msg_scratch);
+    turn.sink = self.message_sink;
+    return turn;
 }
 
 pub fn finishPump(self: *Gossipsub, now: Now) void {
