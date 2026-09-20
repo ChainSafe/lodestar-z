@@ -52,10 +52,28 @@ pub export fn zig_fuzz_test(buf: [*]const u8, len: usize) callconv(.c) void {
         }
         std.debug.assert(copied == rpc.len);
         var reader = gossip.protobuf.RpcReader.initView(.{ .prefix = rpc[0..prefix_len], .pool = &pool, .first = chain.first, .len = rpc.len });
+        var contiguous = gossip.protobuf.RpcReader.init(rpc);
         for (0..4096) |_| {
             if (steps_left == 0) return;
             steps_left -= 1;
-            const step = reader.step(&fields_left) catch break;
+            var mirror_fields = fields_left;
+            const paged_result = reader.step(&fields_left);
+            const contiguous_result = contiguous.step(&mirror_fields);
+            const step = paged_result catch |err| {
+                _ = contiguous_result catch |other| {
+                    std.debug.assert(err == other);
+                    return;
+                };
+                @panic("paged protobuf rejects a contiguous-valid frame");
+            };
+            const mirror = contiguous_result catch @panic("paged protobuf accepts a contiguous-invalid frame");
+            std.debug.assert(std.meta.activeTag(step) == std.meta.activeTag(mirror));
+            std.debug.assert(fields_left == mirror_fields);
+            if (step == .item) {
+                std.debug.assert(step.item.kind == mirror.item.kind);
+                std.debug.assert(step.item.bytes.start.pos == mirror.item.bytes.start.pos);
+                std.debug.assert(step.item.bytes.len == mirror.item.bytes.len);
+            }
             const item = switch (step) {
                 .item => |item| reader.decode(item, &item_scratch) catch break,
                 .skipped => continue,

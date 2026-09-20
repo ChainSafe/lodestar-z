@@ -68,21 +68,56 @@ pub fn flags(runtime: *Runtime, io: std.Io) !void {
         runtime.signalLocked();
     }
 }
-pub fn capture(runtime: *Runtime, events: []const native.Event, clock: Clock) !void {
-    const table = if (runtime.gossip) |*table| table else return;
-    const now: n.Now = .{ .mono_ms = clock.mono_ms, .unix_s = @intCast(clock.unix_ms / 1000) };
-    for (events) |event| {
-        if (event != .message) continue;
-        const message = event.message;
+pub const Ingress = struct {
+    runtime: *Runtime,
+    io: std.Io,
+    failure: ?anyerror = null,
+
+    pub fn sink(self: *Ingress) native.MessageSink {
+        return .{ .context = self, .has_capacity = hasCapacity, .deliver = deliver };
+    }
+
+    fn hasCapacity(context: *anyopaque, kind: native.topic.Kind, len: usize) bool {
+        const self: *Ingress = @ptrCast(@alignCast(context));
+        if (self.failure != null) return false;
+        const runtime = self.runtime;
+        runtime.lock();
+        defer runtime.unlock();
+        if (runtime.stop) return false;
+        const table = if (runtime.gossip) |*table| table else return false;
+        return table.hasCapacity(kind, len);
+    }
+
+    fn deliver(context: *anyopaque, message: *const native.MessageEvent) void {
+        const self: *Ingress = @ptrCast(@alignCast(context));
+        self.capture(message) catch |err| {
+            self.failure = err;
+            _ = self.runtime.heavy.?.core.reportValidation(message.handle, .ignore, .{
+                .mono_ms = message.admitted_ms,
+                .unix_s = 0,
+            });
+        };
+    }
+
+    fn capture(self: *Ingress, message: *const native.MessageEvent) !void {
+        const runtime = self.runtime;
+        const clock = try sample(self.io);
+        const now: n.Now = .{ .mono_ms = clock.mono_ms, .unix_s = @intCast(clock.unix_ms / 1000) };
         const received_at = try projectWall(message.admitted_ms, clock);
         runtime.lock();
-        const kind = native.topic.parseCanonical(message.topic).?.name.kind;
+        defer runtime.unlock();
+        const table = &runtime.gossip.?;
+        if (runtime.stop or table.closed or now.mono_ms >= message.deadline) {
+            table.outcome(runtime.heavy.?.core.reportValidation(message.handle, .ignore, now));
+            return;
+        }
+        const parsed = native.topic.parseCanonical(message.topic).?;
+        const kind = parsed.name.kind;
         var electra = false;
         var deneb = false;
         if (table.limits != null) {
-            const digest = native.topic.parseCanonical(message.topic).?.digest;
             const config = &runtime.heavy.?.config;
-            for (config.chain.forks[0..config.chain.supported_count]) |fork| if (std.mem.eql(u8, &fork.digest, &digest)) {
+            for (config.chain.forks[0..config.chain.supported_count]) |fork| if (std.mem.eql(u8, &fork.digest, &parsed.digest)) {
                 electra = @intFromEnum(fork.fork) >= @intFromEnum(@as(@TypeOf(fork.fork), .electra));
                 deneb = @intFromEnum(fork.fork) >= @intFromEnum(@as(@TypeOf(fork.fork), .deneb));
                 break;
@@ -92,20 +127,15 @@ pub fn capture(runtime: *Runtime, events: []const native.Event, clock: Clock) !v
         if (table.limits != null and !processor.metadata_mod.eligible(&metadata, kind, deneb, runtime.slot)) {
             table.diag.slotRefusals +|= 1;
             table.outcome(runtime.heavy.?.core.reportValidation(message.handle, .ignore, now));
-            runtime.unlock();
-            continue;
+            return;
         }
         const token = table.reserveKind(kind, message.bytes.len) catch |err| {
             switch (err) {
                 error.NetworkGossipFull, error.NetworkBridgeFull => {},
-                else => {
-                    runtime.unlock();
-                    return err;
-                },
+                else => return err,
             }
             table.outcome(runtime.heavy.?.core.reportValidation(message.handle, .ignore, now));
-            runtime.unlock();
-            continue;
+            return;
         };
         const cell = table.get(token).?;
         cell.metadata = metadata;
@@ -123,13 +153,9 @@ pub fn capture(runtime: *Runtime, events: []const native.Event, clock: Clock) !v
         cell.admitted_ms = message.admitted_ms;
         const empty = !table.hasWork();
         table.install(token, message.bytes);
-        if (runtime.stop) table.retire(token) else {
-            table.expire(clock.mono_ms);
-            if (empty and table.hasWork()) runtime.pingLocked();
-        }
-        runtime.unlock();
+        if (empty and table.hasWork()) runtime.pingLocked();
     }
-}
+};
 pub fn closeLocked(runtime: *Runtime) void {
     if (runtime.gossip) |*table| table.close();
 }

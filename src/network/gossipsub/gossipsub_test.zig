@@ -248,21 +248,27 @@ fn expectControlFloodBounded(control_tag: u8) !void {
     const now = setup.shared.pair.now.mono_ms;
     const controls_per_rpc = 4096;
     const io = &setup.shared.server.gossipsub.sessions.rows[peer].io;
-    var rpc: [8195]u8 = undefined;
+    var rpc: [5 * controls_per_rpc + 8]u8 = undefined;
     var writer = @import("protobuf.zig").Writer.init(&rpc);
-    writer.bytes(&.{ 0x1a, 0x80, 0x40 });
-    for (0..controls_per_rpc) |_| writer.bytes(&.{ control_tag, 0 });
-    var framed: [8197]u8 = undefined;
+    writer.tag(3, 2);
+    writer.varint(controls_per_rpc * @as(usize, if (control_tag == 0x0a) 5 else 2));
+    for (0..controls_per_rpc) |_| {
+        writer.bytes(&.{ control_tag, if (control_tag == 0x0a) 3 else 0 });
+        if (control_tag == 0x0a) writer.bytesField(1, "t");
+    }
+    var framed: [rpc.len + 8]u8 = undefined;
     const wire = @import("frame.zig").writeFrame(&framed, writer.written());
     for (0..17) |rpc_index| {
-        try std.testing.expectEqual(
-            wire.len,
-            try setup.shared.pair.client.write(setup.clientStream(), wire, false),
-        );
+        var sent: usize = 0;
         for (0..controls_per_rpc + 4) |_| {
+            if (sent < wire.len) sent += setup.shared.pair.client.write(setup.clientStream(), wire[sent..], false) catch |err| switch (err) {
+                error.WouldBlock => 0,
+                else => return err,
+            };
             try setup.pumpOnce();
             if (setup.shared.server.gossipsub.counters.rpcs_received == before + rpc_index + 1 and io.rpc == null) break;
         }
+        try std.testing.expectEqual(wire.len, sent);
         try std.testing.expectEqual(before + rpc_index + 1, setup.shared.server.gossipsub.counters.rpcs_received);
         try std.testing.expect(io.rpc == null);
         try std.testing.expectEqual(items_before + (rpc_index + 1) * controls_per_rpc, setup.shared.server.gossipsub.rpc_metrics.items[@intFromEnum(item)]);
@@ -697,8 +703,8 @@ test "gossipsub completed frame expiry releases pages without blaming the peer" 
     const before = g.peers.score(peer.logical, setup.shared.pair.now.mono_ms);
     var body: [256]u8 = undefined;
     var writer = @import("protobuf.zig").Writer.init(&body);
-    writer.bytesField(9, &([_]u8{0} ** 100));
-    writer.bytesField(9, "remaining field");
+    @import("protobuf.zig").writeSubscription(&writer, true, test_topic);
+    @import("protobuf.zig").writeSubscription(&writer, false, test_topic);
     var frame: [260]u8 = undefined;
     const wire = @import("frame.zig").writeFrame(&frame, writer.written());
     try std.testing.expectEqual(wire.len, try setup.shared.pair.client.write(setup.clientStream(), wire, false));
@@ -879,4 +885,73 @@ test "gossipsub receive page exhaustion resets only the requesting stream withou
     try std.testing.expect(g.sessions.rows[peer].outStream() != null);
     try std.testing.expect(g.sessions.rows[peer].io.reader.declaredLen() == null);
     try std.testing.expectEqual(@as(usize, 0), g.sessions.receive_pool.free_pages);
+}
+
+test "gossipsub graylist refuses bulk reception and releases an idle partial frame" {
+    for ([_]bool{ false, true }) |partial| {
+        var setup: Pair = .{};
+        try setup.initOpts(.{ .random_seed = 1 }, .{ .random_seed = 1, .body_buffer_bytes = 64 });
+        defer setup.deinit();
+        for (0..16) |_| try setup.pumpOnce();
+        const g = setup.shared.server.gossipsub;
+        const index = g.sessions.findPeer(setup.shared.handles.server).?;
+        const row = &g.sessions.rows[index];
+        var wire: [1024]u8 = undefined;
+        var writer = @import("protobuf.zig").Writer.init(&wire);
+        writer.varint(@import("constants.zig").GOSSIP_MAX_SIZE);
+        writer.bytes(&([_]u8{0} ** 128));
+        if (!partial) try std.testing.expect(g.setPeerScore(row.conn, g.options.score_params.graylist_threshold - 1));
+        const before = g.rpc_metrics.received_bytes;
+        try std.testing.expectEqual(writer.len, try setup.shared.pair.client.write(setup.clientStream(), writer.written(), false));
+        for (0..8) |_| try setup.pumpOnce();
+        if (partial) {
+            try std.testing.expect(row.io.overflow.pages > 0);
+            try std.testing.expect(!row.io.rx_ready);
+            try std.testing.expect(g.setPeerScore(row.conn, g.options.score_params.graylist_threshold - 1));
+            try setup.pumpOnce();
+        } else try std.testing.expectEqual(before, g.rpc_metrics.received_bytes);
+        try std.testing.expect(row.in_stream == null and row.io.rpc == null);
+        try std.testing.expectEqual(g.sessions.receive_pool.next.len, g.sessions.receive_pool.free_pages);
+        try std.testing.expectEqual(@as(u64, 1), g.rpc_metrics.graylist_dropped);
+        try std.testing.expectEqual(@as(u64, 0), g.counters.malformed_rpcs);
+        try std.testing.expectEqual(@as(f64, 0), g.peers.scores.rows[row.logical.index].behaviour);
+    }
+}
+
+test "gossipsub malformed framing and RPCs penalize authenticated sources across stream resets" {
+    var setup: Pair = .{};
+    try setup.initOpts(.{ .random_seed = 1 }, .{ .random_seed = 1, .score_params = .{ .behaviour_threshold = 0 } });
+    defer setup.deinit();
+    for (0..16) |_| try setup.pumpOnce();
+    const g = setup.shared.server.gossipsub;
+    const index = g.sessions.findPeer(setup.shared.handles.server).?;
+    const row = &g.sessions.rows[index];
+    const source = row.logical;
+    const malformed = [_][]const u8{
+        &.{ 2, 0x2a, 0 },
+        &.{ 0x80, 0x00 },
+    };
+    for (malformed, 0..) |wire, i| {
+        try std.testing.expectEqual(wire.len, try setup.shared.pair.client.write(setup.clientStream(), wire, false));
+        for (0..32) |_| {
+            try setup.pumpOnce();
+            if (g.counters.malformed_rpcs == i + 1) break;
+        }
+        try std.testing.expectEqual(i + 1, g.counters.malformed_rpcs);
+        try std.testing.expect(row.in_stream == null);
+        try std.testing.expectEqual(source, row.logical);
+        try std.testing.expectEqual(@as(f64, @floatFromInt(i + 1)), g.peers.scores.rows[source.index].behaviour);
+        try std.testing.expect(g.peers.score(source, setup.shared.pair.now.mono_ms) < 0);
+        try std.testing.expectEqual(@as(u64, 0), g.peers.scores.penalties.invalid_message);
+        try std.testing.expectEqual(g.sessions.receive_pool.next.len, g.sessions.receive_pool.free_pages);
+        for (0..16) |_| try setup.pumpOnce();
+        if (i + 1 < malformed.len) {
+            const client = setup.shared.client.gossipsub;
+            const client_index = client.sessions.findPeer(setup.shared.handles.client).?;
+            try std.testing.expectEqual(.none, client.sessions.rows[client_index].outbound);
+            client.sessions.setOutbound(client_index, .pending);
+            for (0..16) |_| try setup.pumpOnce();
+            try std.testing.expect(client.sessions.rows[client_index].outStream() != null);
+        }
+    }
 }

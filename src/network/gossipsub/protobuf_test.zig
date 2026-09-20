@@ -26,37 +26,37 @@ const pb = @import("../wire/protobuf.zig");
 test "protobuf round trips an idontwant control rpc" {
     var buf: [64]u8 = undefined;
     var w = Writer.init(&buf);
-    beginIdontwantRpc(&w, 1, 4);
-    writeIdontwantId(&w, "id09");
-    try std.testing.expectEqual(idontwantRpcSize(1, 4), w.len);
+    beginIdontwantRpc(&w, 1, 20);
+    writeIdontwantId(&w, "id090000000000000000");
+    try std.testing.expectEqual(idontwantRpcSize(1, 20), w.len);
     var reader = RpcReader.init(w.written());
     const item = (try reader.next()).?;
     var ids = item.idontwant.ids();
-    try std.testing.expectEqualStrings("id09", (try ids.next()).?);
+    try std.testing.expectEqualStrings("id090000000000000000", (try ids.next()).?);
 }
 
 test "protobuf round trips ihave and iwant control rpcs" {
     var buf: [256]u8 = undefined;
     var w = Writer.init(&buf);
-    beginIhaveRpc(&w, "t", 2, 4);
-    writeIhaveId(&w, "id01");
-    writeIhaveId(&w, "id02");
-    try std.testing.expectEqual(ihaveRpcSize("t", 2, 4), w.len);
+    beginIhaveRpc(&w, "t", 2, 20);
+    writeIhaveId(&w, "id010000000000000000");
+    writeIhaveId(&w, "id020000000000000000");
+    try std.testing.expectEqual(ihaveRpcSize("t", 2, 20), w.len);
     var reader = RpcReader.init(w.written());
     const ihave = (try reader.next()).?;
     try std.testing.expectEqualStrings("t", ihave.ihave.topic);
     var ids = ihave.ihave.ids();
-    try std.testing.expectEqualStrings("id01", (try ids.next()).?);
-    try std.testing.expectEqualStrings("id02", (try ids.next()).?);
+    try std.testing.expectEqualStrings("id010000000000000000", (try ids.next()).?);
+    try std.testing.expectEqualStrings("id020000000000000000", (try ids.next()).?);
 
     w = Writer.init(&buf);
-    beginIwantRpc(&w, 1, 4);
-    writeIwantId(&w, "id03");
-    try std.testing.expectEqual(iwantRpcSize(1, 4), w.len);
+    beginIwantRpc(&w, 1, 20);
+    writeIwantId(&w, "id030000000000000000");
+    try std.testing.expectEqual(iwantRpcSize(1, 20), w.len);
     reader = RpcReader.init(w.written());
     const iwant = (try reader.next()).?;
     var wids = iwant.iwant.ids();
-    try std.testing.expectEqualStrings("id03", (try wids.next()).?);
+    try std.testing.expectEqualStrings("id030000000000000000", (try wids.next()).?);
 }
 
 test "protobuf round trips graft and prune control rpcs" {
@@ -85,7 +85,7 @@ test "protobuf round trips an RPC with subscriptions, messages, and control" {
     writeMessage(&w, "payload", "topic_a");
     // control: graft topic_a, then idontwant [id1,id2]
     const graft_content = bytesFieldSize(1, "topic_a".len);
-    const idontwant_content = bytesFieldSize(1, 3) + bytesFieldSize(1, 3);
+    const idontwant_content = bytesFieldSize(1, 20) + bytesFieldSize(1, 20);
     const control_content = bytesFieldSize(3, graft_content) + bytesFieldSize(5, idontwant_content);
     w.tag(3, wire_len);
     w.varint(control_content);
@@ -94,8 +94,8 @@ test "protobuf round trips an RPC with subscriptions, messages, and control" {
     w.bytesField(1, "topic_a");
     w.tag(5, wire_len);
     w.varint(idontwant_content);
-    w.bytesField(1, "aaa");
-    w.bytesField(1, "bbb");
+    w.bytesField(1, "aaa00000000000000000");
+    w.bytesField(1, "bbb00000000000000000");
 
     var reader = RpcReader.init(w.written());
     const sub = (try reader.next()).?;
@@ -109,8 +109,8 @@ test "protobuf round trips an RPC with subscriptions, messages, and control" {
     try std.testing.expectEqualStrings("topic_a", graft.graft);
     const idontwant = (try reader.next()).?;
     var ids = idontwant.idontwant.ids();
-    try std.testing.expectEqualStrings("aaa", (try ids.next()).?);
-    try std.testing.expectEqualStrings("bbb", (try ids.next()).?);
+    try std.testing.expectEqualStrings("aaa00000000000000000", (try ids.next()).?);
+    try std.testing.expectEqualStrings("bbb00000000000000000", (try ids.next()).?);
     try std.testing.expect((try ids.next()) == null);
     try std.testing.expect((try reader.next()) == null);
 }
@@ -118,30 +118,30 @@ test "protobuf round trips an RPC with subscriptions, messages, and control" {
 test "protobuf decodes ihave and iwant ids" {
     var buf: [256]u8 = undefined;
     var w = Writer.init(&buf);
-    const ihave_content = bytesFieldSize(1, "t".len) + bytesFieldSize(2, 4) + bytesFieldSize(2, 4);
-    const iwant_content = bytesFieldSize(1, 4);
+    const ihave_content = bytesFieldSize(1, "t".len) + bytesFieldSize(2, 20) + bytesFieldSize(2, 20);
+    const iwant_content = bytesFieldSize(1, 20);
     const control_content = bytesFieldSize(1, ihave_content) + bytesFieldSize(2, iwant_content);
     w.tag(3, wire_len);
     w.varint(control_content);
     w.tag(1, wire_len);
     w.varint(ihave_content);
     w.bytesField(1, "t");
-    w.bytesField(2, "id01");
-    w.bytesField(2, "id02");
+    w.bytesField(2, "id010000000000000000");
+    w.bytesField(2, "id020000000000000000");
     w.tag(2, wire_len);
     w.varint(iwant_content);
-    w.bytesField(1, "id03");
+    w.bytesField(1, "id030000000000000000");
 
     var reader = RpcReader.init(w.written());
     const ihave = (try reader.next()).?;
     try std.testing.expectEqualStrings("t", ihave.ihave.topic);
     var hids = ihave.ihave.ids();
-    try std.testing.expectEqualStrings("id01", (try hids.next()).?);
-    try std.testing.expectEqualStrings("id02", (try hids.next()).?);
+    try std.testing.expectEqualStrings("id010000000000000000", (try hids.next()).?);
+    try std.testing.expectEqualStrings("id020000000000000000", (try hids.next()).?);
     try std.testing.expect((try hids.next()) == null);
     const iwant = (try reader.next()).?;
     var wids = iwant.iwant.ids();
-    try std.testing.expectEqualStrings("id03", (try wids.next()).?);
+    try std.testing.expectEqualStrings("id030000000000000000", (try wids.next()).?);
 }
 
 test "protobuf rejects truncated and malformed input" {
@@ -170,44 +170,31 @@ test "protobuf varintLen matches the encoded width" {
     }
 }
 
-test "protobuf tolerates a field number above u32 without overflow" {
-    // tag varint 0x800000000 => field 2^32, wire 0; a u32 field would panic here.
-    var r = Reader.init(&[_]u8{ 0x80, 0x80, 0x80, 0x80, 0x80, 0x01 });
-    const t = try r.tag();
-    try std.testing.expect(t.field > std.math.maxInt(u32));
-    try std.testing.expectEqual(@as(u3, 0), t.wire);
+test "protobuf rejects field numbers outside the protobuf range" {
+    var r = Reader.init(&.{ 0x80, 0x80, 0x80, 0x80, 0x80, 0x01 });
+    try std.testing.expectError(error.InvalidField, r.tag());
 }
 
-test "protobuf skips a field carrying an unexpected wire type" {
+test "protobuf rejects a field carrying an unexpected wire type" {
     var buf: [64]u8 = undefined;
     var w = Writer.init(&buf);
-    w.varintField(1, 12_345); // field 1 as a varint: not a valid subscription
+    w.varintField(1, 12_345);
     writeSubscription(&w, true, "topic_a");
     var reader = RpcReader.init(w.written());
-    const sub = (try reader.next()).?;
-    try std.testing.expect(sub.subscription.subscribe);
-    try std.testing.expectEqualStrings("topic_a", sub.subscription.topic);
-    try std.testing.expect((try reader.next()) == null);
+    try std.testing.expectError(error.BadWireType, reader.next());
 }
 
-test "gossip protobuf steps unknown fields under explicit scan credit" {
+test "gossip protobuf rejects unknown field floods on their first field" {
     var bytes: [8192]u8 = undefined;
     for (0..4096) |i| @memcpy(bytes[i * 2 ..][0..2], &[_]u8{ 0x38, 0 });
     var rpc = RpcReader.init(&bytes);
-    for (0..4096) |_| {
-        var fields: usize = 1;
-        try std.testing.expectEqual(RpcReader.Step.skipped, try rpc.step(&fields));
-        try std.testing.expectEqual(@as(usize, 0), fields);
-        try std.testing.expectEqual(RpcReader.Step.deferred, try rpc.step(&fields));
-    }
     var fields: usize = 1;
-    try std.testing.expectEqual(RpcReader.Step.end, try rpc.step(&fields));
+    try std.testing.expectError(error.UnsupportedField, rpc.step(&fields));
+    try std.testing.expectError(error.UnsupportedField, Message.decode(&bytes));
+    try std.testing.expectEqual(@as(usize, 0), rpc.top.cursor.pos);
 }
 
-test "gossip protobuf rejects excessive nested field visits and preserves deferred cursor" {
-    var bytes: [16386]u8 = undefined;
-    for (0..8193) |i| @memcpy(bytes[i * 2 ..][0..2], &[_]u8{ 0x38, 0 });
-    try std.testing.expectError(error.FieldLimit, Message.decode(&bytes));
+test "gossip protobuf prevalidation preserves a deferred dispatch cursor" {
     var encoded: [256]u8 = undefined;
     var w = Writer.init(&encoded);
     writeMessage(&w, "data", "topic");

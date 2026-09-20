@@ -157,9 +157,22 @@ export async function exerciseRaw(Child, waitFor, binary) {
     const controlBefore = rawEvents().flatMap((event) => event.iwant).length;
     const errorsBefore = (await zig.command("snapshot")).malformedRpcs;
     await js.command("rawRpc", {kind: "badId"});
+    await waitFor(async () => (await zig.command("snapshot")).malformedRpcs === errorsBefore + 1);
+    await js.command("rawOpen", {address: address.address});
     await fresh(0x71000108);
     assert.equal(rawEvents().flatMap((event) => event.iwant).length, controlBefore);
-    assert.equal((await zig.command("snapshot")).malformedRpcs, errorsBefore);
+    assert.equal((await zig.command("snapshot")).malformedRpcs, errorsBefore + 1);
+    for (const variant of ["duplicateControl", "group", "noncanonicalTag", "unknownField", "wrongWire"]) {
+      const prior = await zig.command("snapshot");
+      assert.equal(prior.remoteSubscriptions, 1);
+      await js.command("rawRpc", {kind: "invalidEnvelope", variant});
+      await waitFor(async () => (await zig.command("snapshot")).malformedRpcs === prior.malformedRpcs + 1);
+      const rejected = await zig.command("snapshot");
+      assert.equal(rejected.remoteSubscriptions, prior.remoteSubscriptions, "invalid RPC applied its valid prefix");
+      assert.equal(rejected.connectionGeneration, generation);
+      assert.equal(rejected.heldFrames, 0);
+      await js.command("rawOpen", {address: address.address});
+    }
     await cleanStore();
     assert.equal(countId("iwant", recoveryId), 1);
     assert.equal(

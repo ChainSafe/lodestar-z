@@ -13,24 +13,7 @@ pub const ActiveRpc = struct {
     item: ?protobuf.RpcReader.ItemRange = null,
     item_observed: bool = false,
     had_control: bool = false,
-    subscriptions: usize = 0,
-    messages: usize = 0,
-    controls: usize = 0,
-
-    pub fn permitsItem(self: *const ActiveRpc) bool {
-        return switch (self.item.?.kind) {
-            .subscription => self.subscriptions < constants.max_subscriptions_per_rpc,
-            .message => self.messages < constants.max_publish_per_rpc,
-            else => self.controls < constants.max_control_per_rpc,
-        };
-    }
-
     pub fn consumeItem(self: *ActiveRpc) void {
-        if (self.permitsItem()) switch (self.item.?.kind) {
-            .subscription => self.subscriptions += 1,
-            .message => self.messages += 1,
-            else => self.controls += 1,
-        };
         self.item = null;
         self.item_observed = false;
     }

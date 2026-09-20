@@ -4,6 +4,13 @@ const protobuf = @import("protobuf.zig");
 const std = @import("std");
 const writeFrame = @import("frame.zig").writeFrame;
 
+test "frame reader rejects nonminimal length prefixes across reads" {
+    var reader: Reader = .{};
+    try std.testing.expectEqual(@as(usize, 1), try reader.readPrefix(&.{0x81}));
+    try std.testing.expectError(error.VarintTooLong, reader.readPrefix(&.{0}));
+    try std.testing.expect(reader.declaredLen() == null);
+}
+
 test "frame reader reads a whole frame and round trips writeFrame" {
     var out: [64]u8 = undefined;
     const framed = writeFrame(&out, "hello frame");

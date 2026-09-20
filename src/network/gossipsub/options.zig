@@ -92,8 +92,9 @@ pub fn validate(o: *const Options) (error{InvalidLimits} || @import("topic_polic
     try range(o.peers_per_pump, 1, constants.peers_cap);
     try range(o.items_per_peer, 1, 4096);
     try range(o.items_per_pump, 1, 16384);
-    try range(o.fields_per_peer, 16_385, 1_048_576);
-    try range(o.fields_per_pump, 16_385, 4_194_304);
+    const field_min = @import("protobuf.zig").fields_per_item_max;
+    try range(o.fields_per_peer, field_min, 1_048_576);
+    try range(o.fields_per_pump, field_min, 4_194_304);
     try range(o.calls_per_peer, 1, 4096);
     try range(o.calls_per_pump, 1, 65536);
     const byte_credits = [_]usize{ o.input_per_peer, o.input_per_pump, o.output_per_peer, o.output_per_pump, o.work_per_pump, o.decompress_per_peer_bytes };

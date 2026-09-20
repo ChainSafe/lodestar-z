@@ -3,17 +3,34 @@ const varint_mod = @import("varint.zig");
 
 const assert = std.debug.assert;
 
-pub const Error = error{ Truncated, Overflow, BadWireType, FieldLimit };
+pub const Error = error{ Truncated, Overflow, NonCanonical, InvalidField, BadWireType, FieldLimit };
 
 pub const wire_varint: u3 = 0;
 pub const wire_len: u3 = 2;
 pub const wire_i64: u3 = 1;
 pub const wire_i32: u3 = 5;
 
-pub const Tag = struct { field: u64, wire: u3 };
+pub const Tag = struct {
+    field: u32,
+    wire: u3,
 
-/// A bounds-checked reader over one protobuf message's bytes.
+    pub fn decode(raw: u64) Error!Tag {
+        const field = raw >> 3;
+        if (field == 0 or field > std.math.maxInt(u29)) return error.InvalidField;
+        const wire: u3 = @intCast(raw & 7);
+        switch (wire) {
+            wire_varint, wire_len, wire_i64, wire_i32 => {},
+            else => return error.BadWireType,
+        }
+        return .{ .field = @intCast(field), .wire = wire };
+    }
+};
+
+/// Network protobuf requires minimal varints and excludes deprecated groups.
+/// The owning protocol must additionally enforce its schema and resource limits.
 pub const Reader = struct {
+    pub const field_limit = 8192;
+
     data: []const u8,
     pos: usize = 0,
     fields: usize = 0,
@@ -37,16 +54,19 @@ pub const Reader = struct {
             if (count == 9 and byte > 1) return error.Overflow;
             const shift: u6 = @intCast(count * 7);
             result |= @as(u64, byte & 0x7f) << shift;
-            if (byte & 0x80 == 0) return result;
+            if (byte & 0x80 == 0) {
+                if (count > 0 and byte == 0) return error.NonCanonical;
+                return result;
+            }
         }
         return error.Overflow;
     }
 
     pub fn tag(self: *Reader) Error!Tag {
-        if (self.fields == 8192) return error.FieldLimit;
+        if (self.fields == field_limit) return error.FieldLimit;
         self.fields += 1;
         const raw = try self.varint();
-        return .{ .field = raw >> 3, .wire = @intCast(raw & 0x7) };
+        return Tag.decode(raw);
     }
 
     pub fn lenDelimited(self: *Reader) Error![]const u8 {

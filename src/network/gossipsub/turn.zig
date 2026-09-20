@@ -34,6 +34,7 @@ pub const Turn = struct {
     scratch: []u8,
     large_used: bool = false,
     large_copy_used: bool = false,
+    sink: ?*const @import("messages.zig").MessageSink = null,
 
     pub fn init(options: *const Options, now: @import("../types.zig").Now, events: []@import("gossipsub.zig").Event, arena: []u8, scratch: []u8) Turn {
         return .{
@@ -67,7 +68,7 @@ pub const Turn = struct {
     }
 
     pub fn workspace(self: *Turn, peer: *Credits) Workspace {
-        return .{ .arena = self.arena, .scratch = self.scratch, .used = &self.used, .peer_work = &peer.work, .work = &self.budget.work, .large_used = &self.large_used, .event_available = self.count < self.events.len };
+        return .{ .arena = self.arena, .scratch = self.scratch, .used = &self.used, .peer_work = &peer.work, .work = &self.budget.work, .large_used = &self.large_used, .event_available = self.count < self.events.len, .sink = self.sink };
     }
 };
 
@@ -79,6 +80,7 @@ pub const Workspace = struct {
     work: *usize,
     large_used: *bool,
     event_available: bool,
+    sink: ?*const @import("messages.zig").MessageSink = null,
 
     pub fn charge(workspace: *const Workspace, options: *const Options, compressed: usize, decoded: usize) bool {
         return workspace.chargeWork(options, compressed * 2 + decoded * 2);

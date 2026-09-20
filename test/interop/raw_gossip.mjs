@@ -66,6 +66,20 @@ export class RawGossip {
   }
 
   async command(command) {
+    if (command.kind === "invalidEnvelope") {
+      const suffix = {
+        duplicateControl: [26, 0, 26, 0],
+        group: [11, 12],
+        noncanonicalTag: [154, 0, 0],
+        unknownField: [32, 0],
+        wrongWire: [8, 0],
+      }[command.variant];
+      assert(suffix, "unknown invalid envelope variant");
+      const unsubscribe = RPC.encode({subscriptions: [{subscribe: false, topic: TOPIC}]}).subarray();
+      const body = Buffer.concat([unsubscribe, Buffer.from(suffix)]);
+      await sendFragments(this.outbound, Buffer.concat([prefix(body.length), body]), AbortSignal.timeout(10000));
+      return {sent: true};
+    }
     if (command.kind === "oversize") {
       await sendFragments(this.outbound, prefix(RPC_MAX + 1), AbortSignal.timeout(10000));
       return {sent: true};
