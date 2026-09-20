@@ -9,6 +9,13 @@ const gossip = @import("gossipsub/root.zig");
 const options = @import("managed_test_support.zig").options;
 const Setup = @import("managed_test_support.zig").Setup;
 
+fn subscribeServer(setup: *Setup, name: []const u8) !void {
+    setup.client_service.gossipsub.options.observe_subscriptions = false;
+    setup.server_service.gossipsub.options.observe_subscriptions = false;
+    try setup.client_service.gossipsub.configureTopic(name, &.{ .weight = 0 });
+    try std.testing.expect(setup.server_service.gossipsub.subscribe(name));
+}
+
 test "managed native two owners establish relevance and fetch initial metadata without public output" {
     for ([_]@import("config").ForkSeq{ .phase0, .altair, .fulu }) |fork| {
         const local: t.LocalState = .{
@@ -774,10 +781,14 @@ test "managed coverage authenticated custody differs from gossip delivery and in
     var local: t.LocalState = .{ .fork = .{ .fork = .fulu }, .status = .{ .earliest_available_slot = 0 }, .metadata = .{ .syncnets = 1, .custody_group_count = 128 } };
     try setup.init(&local);
     defer setup.deinit();
+    try subscribeServer(&setup, "/eth2/00000000/sync_committee_0/ssz_snappy");
+    try subscribeServer(&setup, "/eth2/00000000/data_column_sidecar_0/ssz_snappy");
     var demand: t.Demand = .{ .syncnets = 1, .expires_at_slot = 200 };
     demand.group_targets[0] = 1;
     try setup.client.setDemand(&demand);
     for (0..60) |_| try setup.step(0);
+    setup.pair.advance(1_000);
+    setup.client.reconcile(&setup.client_service, setup.pair.now);
     try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().groups);
     try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().sync);
     var snapshots: [4]t.Snapshot = undefined;
@@ -921,6 +932,8 @@ test "managed coverage outbound deficit uses hard room or retires inbound before
         _ = try setup.pair.dial();
         for (0..60) |_| try setup.step(0);
         if (maximum == 1) {
+            setup.pair.advance(setup.server.control.options.inbound_status_grace_ms);
+            setup.server.reconcile(&setup.server_service, setup.pair.now);
             try std.testing.expect(setup.server.counters.policy_disconnects > 0);
             setup.pair.advance(2000);
             for (0..8) |_| try setup.step(0);
@@ -1148,9 +1161,12 @@ test "managed reconciliation raw mutators and deadlines invalidate once" {
     const local: t.LocalState = .{ .fork = .{ .fork = .altair }, .metadata = .{ .syncnets = 1 } };
     try setup.init(&local);
     defer setup.deinit();
+    try subscribeServer(&setup, "/eth2/00000000/sync_committee_0/ssz_snappy");
     const demand: t.Demand = .{ .syncnets = 1, .expires_at_slot = 200 };
     try setup.client.setDemand(&demand);
     for (0..60) |_| try setup.step(0);
+    setup.pair.advance(setup.client.control.options.inbound_status_grace_ms);
+    setup.client.reconcile(&setup.client_service, setup.pair.now);
     try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().sync);
     var snapshots: [4]t.Snapshot = undefined;
     _ = setup.client.snapshots(&snapshots);
@@ -1165,8 +1181,9 @@ test "managed reconciliation raw mutators and deadlines invalidate once" {
     try std.testing.expectEqual(before, setup.client.counters.selections);
     try std.testing.expect(setup.client.catalog.updateMetadata(peer, conn, &.{ .seq_number = 10, .syncnets = 0 }, setup.pair.now.mono_ms));
     setup.client.reconcile(&setup.client_service, setup.pair.now);
-    try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().sync);
+    try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().sync);
     try std.testing.expectEqual(before + 1, setup.client.counters.selections);
+    try std.testing.expectEqual(@as(u4, 0), setup.client.policy_scratch[0].stable.syncnets);
     try std.testing.expect(setup.client.catalog.updateMetadata(peer, conn, &.{ .seq_number = 11, .syncnets = 1 }, setup.pair.now.mono_ms));
     setup.client.reconcile(&setup.client_service, setup.pair.now);
     try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().sync);
@@ -1180,8 +1197,9 @@ test "managed reconciliation raw mutators and deadlines invalidate once" {
     try std.testing.expectEqual(deadline, setup.client.reconciliation_deadline.?);
     clock.mono_ms = deadline;
     setup.client.reconcile(&setup.client_service, clock);
-    try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().sync);
-    try std.testing.expectEqual(@as(u8, 1), setup.client.discoveryNeed().syncnets);
+    try std.testing.expectEqual(@as(u4, 0), setup.client.policy_scratch[0].stable.syncnets);
+    try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().sync);
+    try std.testing.expectEqual(@as(u8, 0), setup.client.discoveryNeed().syncnets);
     try std.testing.expectEqual(fresh + 1, setup.client.counters.selections);
     clock.mono_ms += 1;
     setup.client.reconcile(&setup.client_service, clock);
@@ -1452,8 +1470,12 @@ fn waitSampling(setup: *Setup) !t.Snapshot {
 test "managed sampling delivery follows real outbound stream retirement replacement and stale events" {
     var setup: Setup = .{};
     const local: t.LocalState = .{ .fork = .{ .fork = .fulu, .minimum_sampling_groups = 8 }, .status = .{ .earliest_available_slot = 0 }, .metadata = .{ .custody_group_count = 4 } };
-    try setup.init(&local);
+    var opts = options();
+    opts.service.gossipsub.topic_policy = &.{@import("gossipsub/topic_fixture.zig").full(@splat(0))};
+    opts.service.gossipsub.observe_subscriptions = false;
+    try setup.initOwnersWithOptions(&local, opts);
     defer setup.deinit();
+    _ = try setup.pair.dial();
     const snapshot = try waitSampling(&setup);
     try std.testing.expectEqual(@as(usize, 4), snapshot.custody_groups.?.count());
     try std.testing.expectEqual(@as(usize, 8), snapshot.sampling_groups.?.count());
@@ -1461,6 +1483,16 @@ test "managed sampling delivery follows real outbound stream retirement replacem
     for (0..128) |i| if (snapshot.sampling_groups.?.isSet(i)) {
         demand.group_targets[i] = 1;
     };
+    for (0..@import("preset").NUMBER_OF_COLUMNS) |column| {
+        if (!snapshot.sampling_groups.?.isSet(column % local.fork.custody_groups)) continue;
+        var buffer: [80]u8 = undefined;
+        const name = try std.fmt.bufPrint(&buffer, "/eth2/00000000/data_column_sidecar_{d}/ssz_snappy", .{column});
+        try subscribeServer(&setup, name);
+    }
+    for (0..40) |_| {
+        try setup.step(0);
+        setup.pair.advance(25);
+    }
     try setup.client.setDemand(&demand);
     setup.client.reconcile(&setup.client_service, setup.pair.now);
     try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().groups);
@@ -1481,6 +1513,11 @@ test "managed sampling delivery follows real outbound stream retirement replacem
     for (0..16) |_| try setup.step(1);
     _ = try setup.pair.dial();
     const replacement = try waitSampling(&setup);
+    for (0..80) |_| {
+        try setup.step(0);
+        setup.pair.advance(25);
+    }
+    setup.client.reconcile(&setup.client_service, setup.pair.now);
     try std.testing.expect(!std.meta.eql(snapshot.connection, replacement.connection));
     const replacement_index = handler.sessions.findPeer(replacement.connection.?).?;
     const replacement_stream = handler.sessions.rows[replacement_index].outbound.live.stream;

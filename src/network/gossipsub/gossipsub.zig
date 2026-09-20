@@ -133,6 +133,25 @@ pub const Gossipsub = struct {
         return self.sessions.delivery_revision;
     }
 
+    pub fn coverageRevision(self: *const Gossipsub) [4]u64 {
+        return .{ self.overlay.subscription_revision, if (self.overlay.namespace) |*ns| ns.revision else 0, self.peers.scores.revision, self.cycle.epoch };
+    }
+
+    pub fn coverageSubscriptions(self: *Gossipsub, conn: Handle, digest: [4]u8, local: *const @import("topic_policy.zig").Subnets, now: Now) @import("topic_policy.zig").Subnets {
+        const index = self.sessions.findPeer(conn) orelse return .{};
+        if (self.sessions.rows[index].outStream() == null) return .{};
+        var result = self.overlay.subnetSubscriptions(index, digest);
+        if (self.peers.rows[self.logical(index).index].direct) return result;
+        const value = self.peerScore(index, now.mono_ms);
+        if (value < self.options.score_params.publish_threshold) return .{};
+        if (value < 0) {
+            result.attnets &= ~local.attnets;
+            result.syncnets &= ~local.syncnets;
+            result.columns = result.columns.differenceWith(local.columns);
+        }
+        return result;
+    }
+
     pub const Counters = struct {
         heartbeats_skipped: u64 = 0,
         retained_penalty_evictions: u64 = 0,

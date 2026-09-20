@@ -36,7 +36,7 @@ pub const Hints = struct {
 const Row = struct {
     automatic: bool = false,
     selected: bool = true,
-    priority: u1 = 0,
+    priority: u2 = 0,
     hints: ?Hints = null,
     hints_at_ms: u64 = 0,
     history_until_ms: u64 = 0,
@@ -200,7 +200,7 @@ pub const DialQueue = struct {
         self.selection_dirty = true;
         var free: ?*Row = null;
         var victim: ?*Row = null;
-        var victim_utility: u1 = 1;
+        var victim_utility: u2 = 2;
         for (self.rows) |*row| {
             if (row.occupied and row.peer.eql(&candidate.peer)) {
                 if (row.hints) |previous| {
@@ -224,7 +224,7 @@ pub const DialQueue = struct {
                 continue;
             }
             if (!row.automatic or row.direct or row.connected or row.attempt or row.conn != null or now_ms < row.eligible_at_ms) continue;
-            const usefulness: u1 = if (row.failures != 0) 0 else matchesDemand(row, context, wanted, now_ms);
+            const usefulness: u2 = if (row.failures != 0) 0 else matchesDemand(row, context, wanted, now_ms);
             if (incoming_utility < usefulness or (row.failures == 0 and incoming_utility == usefulness and now_ms < row.history_until_ms)) continue;
             if (victim == null or usefulness < victim_utility or (usefulness == victim_utility and row.history_until_ms < victim.?.history_until_ms)) {
                 victim = row;
@@ -268,10 +268,11 @@ pub const DialQueue = struct {
             row.custody_work = null;
             return;
         }
-        const count = hints.custody_group_count orelse {
+        const count = hints.custody_group_count orelse context.custody_requirement;
+        if (count == 0) {
             row.custody_work = null;
             return;
-        };
+        }
         if (std.meta.eql(row.custody_context, context.*)) if (row.custody_work) |work| if (work.requested == count) return;
         row.custody_context = context.*;
         row.custody_work = custody.Derivation.init(&hints.node_id, .{ .groups = context.custody_groups, .columns = @import("preset").NUMBER_OF_COLUMNS }, count) catch null;
@@ -281,13 +282,19 @@ pub const DialQueue = struct {
         if (now_ms >= row.hints_at_ms +| hint_freshness_ms or !hints.validFor(context)) return .{};
         var result: t.Coverage = .{ .attnets = if (hints.attnets) |bits| std.mem.readInt(u64, &bits, .little) else 0, .syncnets = @intCast(hints.syncnets orelse 0) };
         if (std.meta.eql(row.custody_context, context.*)) if (row.custody_work) |work| {
-            if (!work.exhausted and work.groups.count() == work.requested) result.groups = work.groups;
+            if (!work.exhausted and work.groups.count() == work.requested) {
+                result.groups = work.groups;
+                result.custody_groups = work.groups;
+            }
         };
         return result;
     }
 
-    fn matchesDemand(row: *const Row, context: *const t.ForkContext, wanted: *const t.Coverage, now_ms: u64) u1 {
-        return @intFromBool(policy.utility(&coverage(row, context, now_ms), wanted) > 0);
+    fn matchesDemand(row: *const Row, context: *const t.ForkContext, wanted: *const t.Coverage, now_ms: u64) u2 {
+        const available = coverage(row, context, now_ms);
+        if (available.attnets & wanted.attnets != 0 or available.syncnets & wanted.syncnets != 0 or
+            available.custody_groups.intersectWith(wanted.custody_groups).count() > 0) return 2;
+        return @intFromBool(policy.utility(&available, wanted) > 0);
     }
     pub fn advanceCustody(self: *DialQueue, context: *const t.ForkContext, now_ms: u64, budget: *u16) bool {
         var pending = false;

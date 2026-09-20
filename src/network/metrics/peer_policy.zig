@@ -78,6 +78,16 @@ pub const Snapshot = struct {
             .help = "Requested sampling groups with insufficient usable peers",
         }, self.deficits.missing.groups.count());
         try w.scalar(.{
+            .name = "lodestar_native_custody_peers_missing",
+            .kind = .gauge,
+            .help = "Missing custody service memberships across requested groups",
+        }, self.deficits.custody_groups);
+        try w.scalar(.{
+            .name = "lodestar_native_custody_groups_missing",
+            .kind = .gauge,
+            .help = "Requested groups with insufficient custodians",
+        }, self.deficits.missing.custody_groups.count());
+        try w.scalar(.{
             .name = "lodestar_native_peer_outbound_deficit",
             .kind = .gauge,
             .help = "Missing relevant outbound peers after selection",
@@ -85,13 +95,24 @@ pub const Snapshot = struct {
         const sampling_groups = try w.family(.{
             .name = "lodestar_peer_count_per_sampling_group",
             .kind = .gauge,
-            .help = "Retained peers with fresh compatible metadata and available gossip delivery per sampling group",
+            .help = "Retained eligible subscribers to every current fork column subnet in each group",
             .labels = &.{"groupIndex"},
         });
         for (self.coverage.groups[0..self.group_count], 0..) |count, index| {
             var buffer: [5]u8 = undefined;
             const label = std.fmt.bufPrint(&buffer, "{d}", .{index}) catch unreachable;
             try sampling_groups.sample(.{label}, count);
+        }
+        const custodians = try w.family(.{
+            .name = "lodestar_native_custody_peers",
+            .kind = .gauge,
+            .help = "Retained healthy custodians with fresh compatible metadata per group",
+            .labels = &.{"groupIndex"},
+        });
+        for (self.coverage.custody_groups[0..self.group_count], 0..) |count, index| {
+            var buffer: [5]u8 = undefined;
+            const label = std.fmt.bufPrint(&buffer, "{d}", .{index}) catch unreachable;
+            try custodians.sample(.{label}, count);
         }
         const subnet_peers = try w.histograms(.{
             .name = "lodestar_peer_manager_peers_per_active_subnet",

@@ -4,6 +4,7 @@ const reputation = @import("reputation.zig");
 pub const Input = struct {
     peer: t.PeerRef = .{ .index = 0, .generation = 0 },
     coverage: t.Coverage = .{},
+    stable: t.Coverage = .{},
     direct: bool = false,
     outbound: bool = false,
     relevant: bool = true,
@@ -16,6 +17,7 @@ pub const Deficits = struct {
     attestation: u16 = 0,
     sync: u16 = 0,
     groups: u16 = 0,
+    custody_groups: u16 = 0,
     outbound: u16 = 0,
     missing: t.Coverage = .{},
 };
@@ -30,12 +32,14 @@ pub const Result = struct {
 pub fn utility(coverage: *const t.Coverage, wanted: *const t.Coverage) u16 {
     return @as(u16, @popCount(coverage.attnets & wanted.attnets)) +
         @as(u16, @popCount(coverage.syncnets & wanted.syncnets)) +
-        @as(u16, @intCast(coverage.groups.intersectWith(wanted.groups).count()));
+        @as(u16, @intCast(coverage.groups.intersectWith(wanted.groups).count())) +
+        @as(u16, @intCast(coverage.custody_groups.intersectWith(wanted.custody_groups).count()));
 }
 pub const Counts = struct {
     attestation: [64]u16 = @splat(0),
     sync: [4]u16 = @splat(0),
     groups: [128]u16 = @splat(0),
+    custody_groups: [128]u16 = @splat(0),
     outbound: u16 = 0,
 
     fn change(self: *Counts, input: *const Input, add: bool) void {
@@ -48,6 +52,9 @@ pub const Counts = struct {
         };
         for (0..128) |i| if (input.coverage.groups.isSet(i)) {
             adjust(&self.groups[i], add);
+        };
+        for (0..128) |i| if (input.coverage.custody_groups.isSet(i)) {
+            adjust(&self.custody_groups[i], add);
         };
     }
     fn scarce(self: *const Counts, demand: *const t.Demand) t.Coverage {
@@ -65,6 +72,8 @@ pub const Counts = struct {
         for (0..128) |i| {
             if (demand.group_targets[i] > 0 and self.groups[i] <= demand.group_targets[i])
                 result.groups.set(i);
+            if (demand.custody_group_targets[i] > 0 and self.custody_groups[i] <= demand.custody_group_targets[i])
+                result.custody_groups.set(i);
         }
         return result;
     }
@@ -85,10 +94,12 @@ pub const Counts = struct {
             if (missing > 0) result.missing.syncnets |= bit;
         }
         for (0..128) |i| {
-            if (demand.group_targets[i] == 0) continue;
             const missing = demand.group_targets[i] -| self.groups[i];
             result.groups += missing;
             if (missing > 0) result.missing.groups.set(i);
+            const custody_missing = demand.custody_group_targets[i] -| self.custody_groups[i];
+            result.custody_groups += custody_missing;
+            if (custody_missing > 0) result.missing.custody_groups.set(i);
         }
         return result;
     }
@@ -106,7 +117,10 @@ const Rank = struct {
     evaluating: bool,
     ready: bool,
     health: f64,
+    essential_loss: u16,
+    sampling_loss: u16,
     coverage_loss: u16,
+    stable_loss: u16,
     outbound: bool,
     tie: u32,
 };
@@ -119,7 +133,10 @@ fn less(a: *const Rank, b: *const Rank) bool {
     const b_poor = b.health < reputation.prune_score;
     if (a_poor != b_poor) return a_poor;
     if (a_poor and a.health != b.health) return a.health < b.health;
+    if (a.essential_loss != b.essential_loss) return a.essential_loss < b.essential_loss;
+    if (a.sampling_loss != b.sampling_loss) return a.sampling_loss < b.sampling_loss;
     if (a.coverage_loss != b.coverage_loss) return a.coverage_loss < b.coverage_loss;
+    if (a.stable_loss != b.stable_loss) return a.stable_loss < b.stable_loss;
     if (a.health != b.health) return a.health < b.health;
     if (a.outbound != b.outbound) return !a.outbound;
     return a.tie < b.tie;
@@ -133,6 +150,13 @@ fn removal(
     ties: []const u32,
 ) ?u16 {
     const scarce = result.coverage.scarce(demand);
+    const wanted = demand.wanted();
+    var essential = scarce;
+    essential.groups = .initEmpty();
+    const sampled = scarce.groups.intersectWith(wanted.custody_groups);
+    const missing = result.coverage.deficits(demand, options.min_outbound);
+    const essential_missing = missing.outbound > 0 or missing.attestation > 0 or missing.sync > 0 or missing.custody_groups > 0;
+    const sampling_missing = missing.missing.groups.intersectWith(wanted.custody_groups).count() > 0;
     const hard = result.retained_count > options.max_peers;
     var best: ?Rank = null;
     for (inputs, 0..) |*input, i| {
@@ -150,10 +174,15 @@ fn removal(
                 std.math.clamp(input.score, -1e6, 1e6)
             else
                 -1e6,
+            .essential_loss = utility(&input.coverage, &essential),
+            .sampling_loss = @intCast(input.coverage.groups.intersectWith(sampled).count()),
             .coverage_loss = utility(&input.coverage, &scarce),
+            .stable_loss = utility(&input.stable, &wanted),
             .outbound = input.outbound,
             .tie = ties[i],
         };
+        if (result.retained_count <= options.target_peers and !essential_missing and
+            (rank.essential_loss > 0 or (!sampling_missing and rank.sampling_loss > 0))) continue;
         if (best == null or less(&rank, &best.?)) best = rank;
     }
     return if (best) |rank| rank.index else null;
@@ -162,11 +191,15 @@ fn removal(
 fn needsReplacement(result: *const Result, demand: *const t.Demand, minimum: u16) bool {
     const missing = result.coverage.deficits(demand, minimum);
     return missing.outbound > 0 or missing.attestation > 0 or
-        missing.sync > 0 or missing.groups > 0;
+        missing.sync > 0 or missing.groups > 0 or missing.custody_groups > 0;
 }
 
 /// Inputs are stable copied values, bounded by the managed connection ceiling.
 pub fn select(inputs: []const Input, demand: *const t.Demand, options: t.Options, seed: u64) Result {
+    return selectWithReplacement(inputs, demand, options, seed, true);
+}
+
+pub fn selectWithReplacement(inputs: []const Input, demand: *const t.Demand, options: t.Options, seed: u64, allow_replacement: bool) Result {
     std.debug.assert(inputs.len <= 256);
     std.debug.assert(options.target_peers <= options.max_peers);
     var result: Result = .{};
@@ -186,7 +219,7 @@ pub fn select(inputs: []const Input, demand: *const t.Demand, options: t.Options
     }
     for (0..inputs.len) |_| {
         const hard = result.retained_count > options.max_peers;
-        const replacement = result.retained_count == options.max_peers and evaluating == 0 and
+        const replacement = allow_replacement and result.retained_count == options.max_peers and evaluating == 0 and
             needsReplacement(&result, demand, options.min_outbound);
         if (!hard and result.retained_count - evaluating <= options.target_peers and !replacement)
             break;
@@ -200,8 +233,8 @@ pub fn select(inputs: []const Input, demand: *const t.Demand, options: t.Options
     }
     std.debug.assert(result.retained_count <= options.max_peers);
     result.deficits = result.coverage.deficits(demand, options.min_outbound);
-    const coverage_missing = result.deficits.attestation > 0 or result.deficits.sync > 0 or result.deficits.groups > 0;
-    const wanted = @max(options.target_peers -| result.retained_count, @max(result.deficits.outbound, @as(u16, if (coverage_missing) 1 else 0)));
+    const coverage_missing = result.deficits.attestation > 0 or result.deficits.sync > 0 or result.deficits.groups > 0 or result.deficits.custody_groups > 0;
+    const wanted = @max(options.target_peers -| result.retained_count, @max(result.deficits.outbound, @as(u16, if (coverage_missing and allow_replacement) 1 else 0)));
     result.dial_budget = @min(wanted, options.max_peers -| result.retained_count);
     return result;
 }

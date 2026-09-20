@@ -269,6 +269,8 @@ export interface NativeDemand {
   attnets: Uint8Array;
   syncnets: number;
   groupTargets: readonly number[];
+  /** Standing custody service targets. Request consumers still check slot availability. */
+  custodyGroupTargets: readonly number[];
   attestationTarget: number;
   syncTarget: number;
   expiresAtSlot: bigint;

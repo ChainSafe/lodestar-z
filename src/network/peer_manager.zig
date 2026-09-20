@@ -9,6 +9,10 @@ const engine_mod = @import("quic/engine.zig");
 const rr = @import("reqresp/root.zig");
 const gossip = @import("gossipsub/root.zig");
 const Now = @import("types.zig").Now;
+const coverage = @import("peers/coverage.zig");
+
+pub const coverage_reconcile_interval_ms = 1_000;
+pub const replacement_interval_ms = 5_000;
 
 pub const Options = struct {
     peers: t.Options = .{},
@@ -40,8 +44,10 @@ pub const DiscoveryNeed = struct {
 const SelectionRevision = struct {
     catalog: u64,
     delivery: u64,
+    gossip: [4]u64,
 
     fn cacheable(self: *const SelectionRevision) bool {
+        for (self.gossip) |revision| if (revision == std.math.maxInt(u64)) return false;
         return self.catalog != std.math.maxInt(u64) and self.delivery != std.math.maxInt(u64);
     }
 };
@@ -64,6 +70,8 @@ pub const PeerManager = struct {
     reconciliation_deadline: ?u64 = null,
     custody_pending: bool = false,
     selection_deadline: ?u64 = null,
+    coverage_reconcile_after_ms: u64 = 0,
+    replacement_after_ms: u64 = 0,
     native_dial_room: u16 = 0,
     metadata_freshness_ms: u64,
     policy_seed: u64,
@@ -308,15 +316,14 @@ pub const PeerManager = struct {
         self.counters.candidate_lookup_rows +|= self.catalog.rows.len;
     }
     /// Reconciles at the supplied clock without pumping protocols or borrowing an Engine.
-    /// Health only ranks removals. Once pruned, changing health alone cannot remove
-    /// a retained peer while count, coverage and protection remain unchanged.
     pub fn reconcile(self: *PeerManager, service: *service_mod.Service, now: Now) void {
         if (self.stopped or self.quiescing) return;
         self.catalog.refresh(now.mono_ms);
         const expired = if (self.reconciliation_deadline) |due| now.mono_ms >= due else false;
         if (expired) self.candidates_revision = null;
-        if (self.policyChanged(service) or expired) {
+        if ((if (self.policyWakeup(service, now)) |due| now.mono_ms >= due else false) or expired) {
             self.refreshSelection(service, now);
+            self.coverage_reconcile_after_ms = now.mono_ms +| coverage_reconcile_interval_ms;
             self.refreshDiscoveryNeed();
             const revision = self.currentSelectionRevision(service);
             self.selection_revision = if (revision.cacheable()) revision else null;
@@ -332,10 +339,18 @@ pub const PeerManager = struct {
         }
     }
     fn currentSelectionRevision(self: *const PeerManager, service: *const service_mod.Service) SelectionRevision {
-        return .{ .catalog = self.catalog.revision, .delivery = service.gossipsub.deliveryRevision() };
+        return .{ .catalog = self.catalog.revision, .delivery = service.gossipsub.deliveryRevision(), .gossip = service.gossipsub.coverageRevision() };
     }
     pub fn policyChanged(self: *const PeerManager, service: *const service_mod.Service) bool {
         return !std.meta.eql(self.selection_revision, self.currentSelectionRevision(service));
+    }
+    pub fn policyWakeup(self: *const PeerManager, service: *const service_mod.Service, now: Now) ?u64 {
+        const before = self.selection_revision orelse return now.mono_ms;
+        const after = self.currentSelectionRevision(service);
+        if (before.catalog != after.catalog or before.delivery != after.delivery) return now.mono_ms;
+        if (!after.cacheable() or !std.meta.eql(before.gossip, after.gossip))
+            return @max(now.mono_ms, self.coverage_reconcile_after_ms);
+        return null;
     }
     pub fn updateNativeRoom(self: *PeerManager, engine: *const engine_mod.Engine) void {
         const ceiling = @min(self.catalog.options.max_peers, engine.limits.connections_max);
@@ -403,6 +418,7 @@ pub const PeerManager = struct {
         self.counters.selection_rows +|= self.catalog.rows.len;
         self.selection_deadline = null;
         const count = self.catalog.snapshots(self.snapshot_scratch);
+        const local_subscriptions = service.gossipsub.overlay.subnetSubscriptions(null, self.local.fork.digest);
         var input_count: usize = 0;
         for (self.snapshot_scratch[0..count]) |*snapshot| {
             const conn = snapshot.connection orelse continue;
@@ -410,17 +426,20 @@ pub const PeerManager = struct {
             std.debug.assert(input_count < self.policy_scratch.len);
             const input = &self.policy_scratch[input_count];
             input_count += 1;
-            input.* = self.selectionInput(service, snapshot, conn, now);
+            input.* = self.selectionInput(service, snapshot, conn, &local_subscriptions, now);
             const grace = snapshot.connected_at_ms +| self.control.options.inbound_status_grace_ms;
-            if (!input.ready and input.reject == null and now.mono_ms < grace) {
+            if (input.reject == null and now.mono_ms < grace) {
                 input.evaluating = true;
                 self.selection_deadline = @min(self.selection_deadline orelse grace, grace);
             }
         }
-        self.selection = policy.select(self.policy_scratch[0..input_count], &self.demand, self.catalog.options, self.policy_seed);
+        self.selection = policy.selectWithReplacement(self.policy_scratch[0..input_count], &self.demand, self.catalog.options, self.policy_seed, now.mono_ms >= self.replacement_after_ms);
         for (self.policy_scratch[0..input_count], 0..) |input, i| if (self.selection.reasons[i]) |reason| {
             if (self.disconnect(input.peer, reason, now)) self.counters.policy_disconnects +|= 1;
+            if (reason == .count_pruning) self.replacement_after_ms = now.mono_ms +| replacement_interval_ms;
         };
+        if (now.mono_ms < self.replacement_after_ms)
+            self.selection_deadline = @min(self.selection_deadline orelse self.replacement_after_ms, self.replacement_after_ms);
     }
 
     fn selectionInput(
@@ -428,6 +447,7 @@ pub const PeerManager = struct {
         service: *service_mod.Service,
         snapshot: *const t.Snapshot,
         conn: t.Handle,
+        local_subscriptions: *const gossip.topic_policy.Subnets,
         now: Now,
     ) policy.Input {
         var input: policy.Input = .{
@@ -457,6 +477,8 @@ pub const PeerManager = struct {
                 input.reject = .gossip_unavailable;
         }
         if (!snapshot.relevant or input.reject != null) return input;
+        const subscriptions = service.gossipsub.coverageSubscriptions(conn, self.local.fork.digest, local_subscriptions, now);
+        input.coverage = coverage.gossip(&subscriptions, &self.local.fork);
         const metadata = snapshot.metadata orelse return input;
         peers.control_wire.validateMetadata(&metadata, self.local.fork) catch return input;
         const deadline = snapshot.metadata_at_ms +| self.metadata_freshness_ms;
@@ -464,10 +486,11 @@ pub const PeerManager = struct {
         self.selection_deadline = @min(self.selection_deadline orelse deadline, deadline);
         if (delivery == .available) {
             input.ready = !self.local.fork.fork.gte(.fulu) or snapshot.sampling_groups != null;
-            input.coverage.attnets = std.mem.readInt(u64, &metadata.attnets, .little);
-            input.coverage.syncnets = @intCast(metadata.syncnets);
-            input.coverage.groups = snapshot.sampling_groups orelse .initEmpty();
+            input.stable = coverage.stable(&input.coverage, &metadata, snapshot.sampling_groups);
         }
+        if (self.local.fork.fork.gte(.fulu) and snapshot.score >= peers.reputation.prune_score and
+            (service.gossipsub.scoreSnapshot(conn, now) orelse 0) >= 0)
+            input.coverage.custody_groups = snapshot.custody_groups orelse .initEmpty();
         return input;
     }
     fn refreshDiscoveryNeed(self: *PeerManager) void {
@@ -478,7 +501,7 @@ pub const PeerManager = struct {
         if (self.current_slot >= self.demand.expires_at_slot) return;
         std.mem.writeInt(u64, &self.discovery_need.attnets, self.selection.deficits.missing.attnets, .little);
         self.discovery_need.syncnets = self.selection.deficits.missing.syncnets;
-        self.discovery_need.custody = self.selection.deficits.groups > 0;
+        self.discovery_need.custody = self.selection.deficits.groups > 0 or self.selection.deficits.custody_groups > 0;
     }
     pub fn dialRoom(self: *const PeerManager) u16 {
         const attempts = self.dial_queue.attempts();
@@ -510,7 +533,10 @@ pub const PeerManager = struct {
         }
         self.local = local.*;
         service.reqresp.setRequestFork(local.fork.fork);
-        for (self.local.fork.custody_groups..128) |index| self.demand.group_targets[index] = 0;
+        for (self.local.fork.custody_groups..128) |index| {
+            self.demand.group_targets[index] = 0;
+            self.demand.custody_group_targets[index] = 0;
+        }
         var budget: u16 = 0;
         _ = self.catalog.advanceCustody(&self.local.fork, now.mono_ms, self.metadata_freshness_ms, &budget);
         _ = self.dial_queue.advanceCustody(&self.local.fork, now.mono_ms, &budget);
@@ -615,7 +641,12 @@ pub const PeerManager = struct {
         self.dial_queue.expire(engine, now.mono_ms);
         self.reconcile(service, now);
         self.updateNativeRoom(engine);
-        return self.dial_queue.poll(now.mono_ms, out[0..@min(out.len, self.dialRoom())]);
+        const count = self.dial_queue.poll(now.mono_ms, out[0..@min(out.len, self.dialRoom())]);
+        if (count > 0 and self.selection.retained_count >= self.catalog.options.target_peers and self.selection.deficits.outbound == 0) {
+            self.replacement_after_ms = now.mono_ms +| replacement_interval_ms;
+            self.selection_revision = null;
+        }
+        return count;
     }
     pub fn dialStarted(self: *PeerManager, token: dial_mod.Token, conn: t.Handle) bool {
         return self.dial_queue.dialStarted(token, conn);

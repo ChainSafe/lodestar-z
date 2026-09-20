@@ -114,16 +114,20 @@ test "peer discovery TALK send failure preserves call expiry progress" {
 }
 
 test "peer discovery publishes signed referrals before their discovery endpoint responds" {
-    try referralCase(null);
+    try referralCase(null, false);
 }
 
 test "peer discovery referrals retain fork demand endpoint and output bounds" {
     for ([_]discovery.Rejection{ .incompatible_fork, .demand, .endpoint_scope, .no_quic, .output_capacity }) |reason| {
-        try referralCase(reason);
+        try referralCase(reason, false);
     }
 }
 
-fn referralCase(rejection: ?discovery.Rejection) !void {
+test "peer discovery retains absent custody advertisements for conservative Fulu discovery" {
+    try referralCase(null, true);
+}
+
+fn referralCase(rejection: ?discovery.Rejection, custody_only: bool) !void {
     var a: Node = undefined;
     try a.init(1, 9001);
     defer a.deinit();
@@ -139,10 +143,14 @@ fn referralCase(rejection: ?discovery.Rejection) !void {
     _ = try a.transport.engine.confirmPeer(&b_peer, b.transport.engine.localRecord(), now);
     _ = try b.transport.engine.confirmPeer(&c_peer, c.transport.engine.localRecord(), now);
     var fork = context;
+    if (custody_only) {
+        fork.fork = .fulu;
+        fork.custody_requirement = 4;
+    }
     if (rejection == .incompatible_fork) fork.digest[0] = 9;
     var controller = try discovery.Discovery.init(std.testing.allocator, &a.transport, &fork, &.{}, now, .{});
     defer controller.deinit();
-    try controller.request(if (rejection == .demand) .{ .syncnets = 1 } else .{ .general = true }, now);
+    try controller.request(if (rejection == .demand) .{ .syncnets = 1 } else if (custody_only) .{ .custody = true } else .{ .general = true }, now);
     const seed = a.transport.engine.peerRecord(&b_peer.node_id).?;
     var lookup: d.Lookup = undefined;
     try lookup.init(&controller.storage.candidates, a.transport.engine.localRecord().node_id, c_peer.node_id, &.{seed}, .dual);
@@ -170,6 +178,7 @@ fn referralCase(rejection: ?discovery.Rejection) !void {
         return;
     }
     try std.testing.expect(found != null);
+    if (custody_only) try std.testing.expect(found.?.custody_group_count == null);
     try std.testing.expectEqual(@as(u64, 1), controller.counters.referrals_published);
     _ = try a.transport.stepUntil(std.testing.io, &expiries, now);
     try adapter.requireIdentity(c.transport.engine.localRecord(), &found.?.peer);

@@ -24,10 +24,12 @@ pub const ForkContext = struct {
     digest: [4]u8 = @splat(0),
     custody_groups: u16 = @min(128, @import("preset").NUMBER_OF_COLUMNS),
     minimum_sampling_groups: u16 = 0,
+    custody_requirement: u16 = 0,
 
     pub fn validate(self: ForkContext) error{InvalidForkContext}!void {
         if (self.custody_groups == 0 or self.custody_groups > 128 or
             self.minimum_sampling_groups > self.custody_groups or
+            self.custody_requirement > self.custody_groups or
             @import("preset").NUMBER_OF_COLUMNS % self.custody_groups != 0)
             return error.InvalidForkContext;
     }
@@ -127,11 +129,13 @@ pub const Coverage = struct {
     attnets: u64 = 0,
     syncnets: u4 = 0,
     groups: @import("custody.zig").Groups = .initEmpty(),
+    custody_groups: @import("custody.zig").Groups = .initEmpty(),
 };
 pub const Demand = struct {
     attnets: u64 = 0,
     syncnets: u4 = 0,
     group_targets: [128]u16 = @splat(0),
+    custody_group_targets: [128]u16 = @splat(0),
     attestation_target: u16 = 1,
     sync_target: u16 = 1,
     expires_at_slot: u64 = 0,
@@ -141,6 +145,9 @@ pub const Demand = struct {
         for (self.group_targets, 0..) |target, index| if (target > 0) {
             result.groups.set(index);
         };
+        for (self.custody_group_targets, 0..) |target, index| if (target > 0) {
+            result.custody_groups.set(index);
+        };
         return result;
     }
 
@@ -149,8 +156,10 @@ pub const Demand = struct {
         if (max_peers == 0 or max_peers > 256 or self.attestation_target == 0 or
             self.sync_target == 0 or self.attestation_target > max_peers or
             self.sync_target > max_peers) return error.InvalidDemand;
-        for (self.group_targets, 0..) |target, index| {
-            if (target > max_peers or (index >= context.custody_groups and target != 0))
+        for (self.group_targets, self.custody_group_targets, 0..) |gossip_target, custody_target, index| {
+            if (@max(gossip_target, custody_target) > max_peers or
+                (index >= context.custody_groups and (gossip_target != 0 or custody_target != 0)) or
+                (!context.fork.gte(.fulu) and custody_target != 0))
                 return error.InvalidDemand;
         }
     }

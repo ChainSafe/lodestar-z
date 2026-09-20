@@ -4,6 +4,79 @@ const t = @import("types.zig");
 const expect = std.testing.expect;
 const equal = std.testing.expectEqual;
 const options: t.Options = .{ .capacity = 8, .outbound_reserve = 1, .target_peers = 2, .max_peers = 4, .min_outbound = 1 };
+
+test "peer policy separates sampling routes from custody service deficits" {
+    var demand: t.Demand = .{ .expires_at_slot = 10 };
+    var input: p.Input = .{};
+    for (0..8) |group| {
+        demand.group_targets[group] = 1;
+        demand.custody_group_targets[group] = 1;
+        input.coverage.groups.set(group);
+        if (group < 4) input.coverage.custody_groups.set(group);
+    }
+    const result = p.select(&.{input}, &demand, .{ .target_peers = 1, .max_peers = 2, .min_outbound = 0 }, 1);
+    try equal(@as(u16, 0), result.deficits.groups);
+    try equal(@as(u16, 4), result.deficits.custody_groups);
+    try equal(@as(u16, 1), result.dial_budget);
+    for (0..8) |group| try equal(group >= 4, result.deficits.missing.custody_groups.isSet(group));
+}
+
+test "peer policy protects scarce custodians and duties before broad publication redundancy" {
+    var demand: t.Demand = .{ .attnets = 1, .group_targets = @splat(1) };
+    demand.custody_group_targets[0] = 1;
+    var inputs = [_]p.Input{ .{}, .{ .coverage = .{ .attnets = 1 } }, .{ .coverage = .{ .groups = .initFull() } } };
+    inputs[0].coverage.custody_groups.set(0);
+    const result = p.select(&inputs, &demand, .{ .target_peers = 2, .max_peers = 4, .min_outbound = 0 }, 1);
+    try expect(result.retained.isSet(0));
+    try expect(result.retained.isSet(1));
+    try expect(!result.retained.isSet(2));
+    try equal(@as(u16, 0), result.deficits.custody_groups);
+    try equal(@as(u16, 0), result.deficits.attestation);
+    try equal(@as(u16, 128), result.deficits.groups);
+}
+
+test "peer policy prefers stable subscribers without denying temporary duty coverage" {
+    var inputs = [_]p.Input{ .{ .coverage = .{ .attnets = 1 }, .stable = .{ .attnets = 1 } }, .{ .coverage = .{ .attnets = 1 } } };
+    const configured: t.Options = .{ .target_peers = 1, .max_peers = 3, .min_outbound = 0 };
+    var result = p.select(&inputs, &.{ .attnets = 1 }, configured, 2);
+    try expect(result.retained.isSet(0));
+    inputs[0].coverage = .{};
+    inputs[0].stable = .{};
+    result = p.select(&inputs, &.{ .attnets = 1 }, configured, 2);
+    try expect(result.retained.isSet(1));
+    try equal(@as(u16, 0), result.deficits.attestation);
+}
+
+test "peer policy replacement cooldown preserves unmet deficits and independent count floors" {
+    const configured: t.Options = .{ .target_peers = 2, .max_peers = 2, .min_outbound = 0 };
+    const inputs = [_]p.Input{ .{}, .{} };
+    const held = p.selectWithReplacement(&inputs, &.{ .attnets = 1 }, configured, 1, false);
+    try equal(@as(u16, 2), held.retained_count);
+    try equal(@as(u16, 1), held.deficits.attestation);
+    try equal(@as(u16, 0), held.dial_budget);
+    const replace = p.selectWithReplacement(&inputs, &.{ .attnets = 1 }, configured, 1, true);
+    try equal(@as(u16, 1), replace.retained_count);
+    try equal(@as(u16, 1), replace.dial_budget);
+    const refill = p.selectWithReplacement(inputs[0..1], &.{}, configured, 1, false);
+    try equal(@as(u16, 1), refill.dial_budget);
+}
+
+test "peer policy does not sacrifice satisfied duties to chase broad publication at the ceiling" {
+    var demand: t.Demand = .{ .attnets = 3 };
+    demand.group_targets[5] = 1;
+    const inputs = [_]p.Input{ .{ .coverage = .{ .attnets = 1 } }, .{ .coverage = .{ .attnets = 2 } } };
+    const configured: t.Options = .{ .target_peers = 2, .max_peers = 2, .min_outbound = 0 };
+    const held = p.select(&inputs, &demand, configured, 1);
+    try equal(@as(u16, 2), held.retained_count);
+    try equal(@as(u16, 0), held.deficits.attestation);
+    try equal(@as(u16, 1), held.deficits.groups);
+    try equal(@as(u16, 0), held.dial_budget);
+    demand.attnets = 1;
+    const replace = p.select(&inputs, &demand, configured, 1);
+    try equal(@as(u16, 1), replace.retained_count);
+    try expect(replace.retained.isSet(0));
+    try equal(@as(u16, 1), replace.dial_budget);
+}
 test "peer policy coverage cannot pin the connection ceiling with unmet demand" {
     const configured: t.Options = .{ .target_peers = 2, .max_peers = 3, .min_outbound = 1 };
     const inputs = [_]p.Input{

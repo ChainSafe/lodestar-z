@@ -24,6 +24,7 @@ pub const Plan = struct {
     fulu_scheduled: bool,
     custody_groups: u16,
     sampling_groups: u16,
+    custody_requirement: u16,
     serve_light_clients: bool,
 
     pub fn init(cfg: *const config.BeaconConfig, serve_light_clients: bool) !Plan {
@@ -31,6 +32,7 @@ pub const Plan = struct {
         if (chain.PRESET_BASE != preset.active_preset or chain.BLOB_SCHEDULE.len > boundary_max - config.ForkSeq.count or
             chain.MAX_PAYLOAD_SIZE == 0 or chain.MAX_PAYLOAD_SIZE > @import("gossipsub/constants.zig").MAX_PAYLOAD_SIZE or
             chain.NUMBER_OF_CUSTODY_GROUPS == 0 or chain.NUMBER_OF_CUSTODY_GROUPS > preset.NUMBER_OF_CUSTODY_GROUPS or
+            chain.CUSTODY_REQUIREMENT == 0 or chain.CUSTODY_REQUIREMENT > chain.NUMBER_OF_CUSTODY_GROUPS or
             chain.SAMPLES_PER_SLOT == 0 or chain.SAMPLES_PER_SLOT > chain.NUMBER_OF_CUSTODY_GROUPS)
             return error.InvalidNetworkChain;
         var epochs: [boundary_max]u64 = undefined;
@@ -57,6 +59,7 @@ pub const Plan = struct {
             .fulu_scheduled = chain.FULU_FORK_EPOCH != constants.FAR_FUTURE_EPOCH,
             .custody_groups = @intCast(chain.NUMBER_OF_CUSTODY_GROUPS),
             .sampling_groups = @intCast(chain.SAMPLES_PER_SLOT),
+            .custody_requirement = @intCast(chain.CUSTODY_REQUIREMENT),
             .serve_light_clients = serve_light_clients,
         };
         for (epochs[0..count]) |epoch| {
@@ -106,6 +109,7 @@ pub const Plan = struct {
             .digest = current.digest,
             .custody_groups = self.custody_groups,
             .minimum_sampling_groups = if (current.fork.gte(.fulu)) self.sampling_groups else 0,
+            .custody_requirement = if (current.fork.gte(.fulu)) self.custody_requirement else 0,
         };
         result.local.status.fork_digest = current.digest;
         if (index + 1 < self.boundary_count) {

@@ -41,8 +41,8 @@ pub const Demand = struct {
     fn active(self: *const Demand, now_ms: u64) bool {
         return now_ms < self.expires_ms and (self.general or self.custody or self.syncnets != 0 or !std.mem.allEqual(u8, &self.attnets, 0));
     }
-    fn matches(self: *const Demand, candidate: *const adapter.Candidate) bool {
-        if (self.general or (self.custody and candidate.custody_group_count != null)) return true;
+    fn matches(self: *const Demand, candidate: *const adapter.Candidate, context: *const types.ForkContext) bool {
+        if (self.general or (self.custody and (candidate.custody_group_count != null or context.custody_requirement > 0))) return true;
         if (candidate.syncnets) |bits| if (bits & self.syncnets != 0) return true;
         if (candidate.attnets) |bits| {
             for (bits, self.attnets) |actual, wanted| if (actual & wanted != 0) return true;
@@ -382,7 +382,7 @@ pub const Discovery = struct {
             self.rejected(if (supported == 0) .endpoint_family else .endpoint_scope, result);
             return;
         }
-        if (!self.demand.matches(&candidate)) {
+        if (!self.demand.matches(&candidate, &self.context)) {
             self.rejected(.demand, result);
             return;
         }

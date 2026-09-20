@@ -137,6 +137,7 @@ export function localIntent(config: NativeApplicationConfig): NativeLocalIntent 
     demand: {
       attestationTarget: 1,
       attnets: new Uint8Array(8),
+      custodyGroupTargets: Array<number>(128).fill(0),
       expiresAtSlot: config.initialSlot + 100n,
       groupTargets: Array<number>(128).fill(0),
       syncTarget: 1,

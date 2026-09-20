@@ -133,7 +133,8 @@ pub fn nextWakeup(
     for ([_]?u64{
         self.control.nextWakeup(&self.catalog, now),
         self.dial_queue.nextWakeup(now.mono_ms, @min(dial_capacity, self.dialRoom())),
-        if (self.policyChanged(service) or self.dial_queue.selection_dirty) now.mono_ms else null,
+        self.policyWakeup(service, now),
+        if (self.dial_queue.selection_dirty) now.mono_ms else null,
         self.reconciliation_deadline,
         self.dial_queue.selection_deadline,
         if (self.custody_pending) now.mono_ms +| 1 else null,
@@ -227,6 +228,7 @@ pub fn shutdown(self: *PeerManager, service: *service_mod.Service, engine: *engi
 }
 
 test {
+    _ = @import("managed_coverage_test.zig");
     _ = @import("managed_control_test.zig");
     _ = @import("managed_test.zig");
 }
