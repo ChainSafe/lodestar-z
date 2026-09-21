@@ -199,7 +199,7 @@ pub const NetworkCore = struct {
         self.memory = .{ .transport_bytes = self.reservations.bytes, .transport = self.transport.memoryPlan() };
         self.service = try service_mod.Service.init(allocator, managed.serviceOptions(options.core, &local));
         errdefer self.service.deinit();
-        self.peer_manager = try manager.PeerManager.init(allocator, &self.transport.peerId(), &local, managed.peerOptions(options.core), &self.service);
+        self.peer_manager = try manager.PeerManager.init(allocator, &self.transport.peerId(), &local, managed.peerOptions(options.core), &self.service, self.transport.engine.limits.connections_max);
         errdefer self.peer_manager.deinit();
         if (self.service.identify) |*identify| identify.bind(&self.transport.engine);
         self.peer_manager.metrics_io = io;
@@ -312,22 +312,31 @@ pub const NetworkCore = struct {
     pub fn directPeers(self: *const NetworkCore, out: []t.PeerId) error{OutputTooSmall}!usize {
         return self.peer_manager.directPeers(out);
     }
-    pub fn closePeer(self: *NetworkCore, peer: t.PeerRef, connection: t.Handle, now: Now) bool {
+    pub fn isConnected(self: *const NetworkCore, identity: *const t.PeerId) bool {
+        const peer = self.peer_manager.catalog.find(identity) orelse return false;
+        return self.peer_manager.catalog.get(peer).?.connection != null;
+    }
+    pub fn closePeer(self: *NetworkCore, identity: *const t.PeerId, now: Now) bool {
+        const peer = self.peer_manager.catalog.find(identity) orelse return false;
+        const connection = self.peer_manager.catalog.get(peer).?.connection orelse return false;
         return self.peer_manager.closePeer(&self.service, &self.transport.engine, peer, connection, now);
     }
-    pub fn reStatusPeer(self: *NetworkCore, peer: t.PeerRef, connection: t.Handle, now: Now) bool {
+    pub fn reStatusPeer(self: *NetworkCore, identity: *const t.PeerId, now: Now) bool {
+        const peer = self.peer_manager.catalog.find(identity) orelse return false;
+        const connection = self.peer_manager.catalog.get(peer).?.connection orelse return false;
         return self.peer_manager.reStatusPeer(peer, connection, now);
     }
-    pub fn reportPeer(self: *NetworkCore, peer: t.PeerRef, action: t.PeerAction, now: Now) ?t.ReputationDecision {
+    pub fn reportPeer(self: *NetworkCore, identity: *const t.PeerId, action: t.PeerAction, now: Now) ?t.ReputationDecision {
+        const peer = self.peer_manager.catalog.find(identity) orelse return null;
         return self.peer_manager.reportPeer(peer, action, now);
     }
     pub fn updateStatus(self: *NetworkCore, status: *const t.Status) !void {
         if (self.peer_manager.stopped) return error.Stopped;
         try self.peer_manager.updateStatus(&self.service, status);
     }
-    pub fn sendReqRespRequest(self: *NetworkCore, peer: t.PeerRef, protocol: rr.Protocol, request: []const u8, sink: []u8, options: rr.RequestOptions, now: Now) !rr.RequestHandle {
-        const snapshot = self.peer_manager.catalog.get(peer) orelse return error.StalePeer;
-        const conn = snapshot.connection orelse return error.Disconnected;
+    pub fn sendReqRespRequest(self: *NetworkCore, identity: *const t.PeerId, protocol: rr.Protocol, request: []const u8, sink: []u8, options: rr.RequestOptions, now: Now) !rr.RequestHandle {
+        const peer = self.peer_manager.catalog.find(identity) orelse return error.StalePeer;
+        const conn = self.peer_manager.catalog.get(peer).?.connection orelse return error.Disconnected;
         return managed.sendReqRespRequest(&self.peer_manager, &self.service, &self.transport.engine, conn, protocol, request, sink, options, now);
     }
     pub fn consume(self: *NetworkCore, request: rr.RequestHandle) bool {

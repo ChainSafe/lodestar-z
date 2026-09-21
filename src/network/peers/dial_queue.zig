@@ -187,15 +187,14 @@ pub const DialQueue = struct {
         self.selection_dirty = true;
     }
     /// Consumes copied Discovery.step output, whose QUIC scope was checked against the
-    /// authenticated discovery source. Bare enr.decode output does not satisfy this precondition.
+    /// authenticated discovery source and whose identity and node ID share a verified ENR.
+    /// Bare enr.decode output does not satisfy this precondition.
     pub fn enqueueDiscovered(self: *DialQueue, candidate: *const enr.Candidate, context: *const t.ForkContext, wanted: *const t.Coverage, now_ms: u64) !void {
         try context.validate();
         if (candidate.address_count == 0 or candidate.address_count > 2) return error.InvalidCandidate;
         const hints: Hints = .{ .node_id = candidate.node_id, .sequence = candidate.sequence, .record_hash = candidate.record_hash, .fork = candidate.fork, .next_fork_digest = candidate.next_fork_digest, .attnets = candidate.attnets, .syncnets = candidate.syncnets, .custody_group_count = candidate.custody_group_count };
         if (!hints.validFor(context)) return error.InvalidCandidate;
         for (candidate.addresses[0..candidate.address_count]) |address| if (address.port() == 0) return error.InvalidCandidate;
-        const node_id = custody.nodeId(&candidate.peer) catch return error.InvalidCandidate;
-        if (!std.mem.eql(u8, &node_id, &candidate.node_id)) return error.InvalidCandidate;
         var incoming: Row = .{ .occupied = true, .automatic = true, .peer = candidate.peer, .eligible_at_ms = now_ms, .history_until_ms = now_ms +| history_retention_ms, .hints = hints, .hints_at_ms = now_ms };
         copyAddresses(&incoming, candidate);
         resetCustody(&incoming, context);

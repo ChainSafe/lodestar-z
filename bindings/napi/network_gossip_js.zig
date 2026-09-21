@@ -85,7 +85,7 @@ fn descriptor(runtime: *Runtime, token: g.Token, cell: *const g.Cell, ordinal: u
     try put(connection, "index", try env.createUint32(cell.connection.index));
     try put(connection, "generation", try env.createUint32(cell.connection.generation));
     try put(object, "connection", connection);
-    try put(object, "peerId", try bytes(env, &cell.identity.bytes));
+    try put(object, "peerId", try @import("network_js.zig").peerIdValue(env, &cell.identity));
     try put(object, "topic", try env.createStringUtf8(cell.topic[0..cell.topic_len]));
     try put(object, "id", try bytes(env, &cell.id));
     var destination: [*]u8 = undefined;
@@ -194,7 +194,7 @@ pub fn checks(runtime: *Runtime) !Value {
         try put(object, "handle", handle);
         try put(object, "root", try bytes(env, &cell.metadata.root.?));
         try put(object, "slot", try env.createBigintUint64(cell.metadata.slot.?));
-        try put(object, "peerId", try bytes(env, &cell.identity.bytes));
+        try put(object, "peerId", try @import("network_js.zig").peerIdValue(env, &cell.identity));
         try put(object, "topic", try env.createStringUtf8(cell.topic[0..cell.topic_len]));
         try element(array, i, object);
     }
@@ -246,7 +246,7 @@ pub fn dropQueued(runtime: *Runtime) !Value {
 
 pub fn trackSearch(runtime: *Runtime, root_value: Value, peer_value: Value) !Value {
     const root = try cfg.fixed(32, root_value);
-    const peer: ?n.PeerId = if (try peer_value.typeof() == .null) null else try n.PeerId.fromBytes(&(try cfg.fixed(n.wire.peer_id.length, peer_value)));
+    const peer: ?n.PeerId = if (try peer_value.typeof() == .null) null else try cfg.peerIdFrom(peer_value);
     runtime.lock();
     defer runtime.unlock();
     const accepted = !runtime.quiescent and !runtime.stop and runtime.gossip.?.trackSearch(root, peer, try g.monotonic());

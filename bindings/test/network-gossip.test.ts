@@ -1,5 +1,13 @@
 import {expect, test, vi} from "vitest";
-import {applicationConfig, localIntent, requestForks, startRuntime, subscriptions, topicName} from "./utils/network.js";
+import {
+  applicationConfig,
+  localIntent,
+  peerIdFromHex,
+  requestForks,
+  startRuntime,
+  subscriptions,
+  topicName,
+} from "./utils/network.js";
 import {startPeer} from "./utils/network-peer.js";
 
 test("gossip drain and stale verdict on an activated application", async () => {
@@ -179,7 +187,7 @@ test.each([
     expect(message.receivedAtUnixMs).toBeGreaterThanOrEqual(before);
     expect(message.receivedAtUnixMs).toBeLessThan(Date.now());
     expect(Number.isSafeInteger(message.receivedAtUnixMs)).toBe(true);
-    message.peerId.fill(0);
+
     message.connection.generation++;
     message.data.fill(0);
     expect(pair.right.reportGossip(message.handle, verdict)).toBe(true);
@@ -213,7 +221,7 @@ test.each([
       expect(scored.topics[0].invalidMessageDeliveries).toBeGreaterThan(0);
       expect(scored.topics[0].weights.p4).toBeLessThan(0);
     }
-    scored.identity.fill(0);
+
     scored.ip.fill(0);
     scored.topics.length = 0;
     expect((await pair.right.getGossipDiagnostics()).peers[0].identity).toEqual(pair.identity.peerId);
@@ -430,7 +438,7 @@ for (const hoodi of [false, true]) {
         await runtime.applyIntent(intent, config.initialSlot);
         await peer.command("gossipSubscribe", {topic: firstTopic});
         await peer.command("gossipSubscribe", {topic: secondTopic});
-        const remote = Uint8Array.from(Buffer.from(info.peer, "hex"));
+        const remote = peerIdFromHex(info.peer);
         const endpoint = {
           address: Uint8Array.of(127, 0, 0, 1),
           family: 4 as const,
@@ -737,7 +745,7 @@ test("gossip diagnostics paginate retained peers and peer drains expose remainin
       const remote = await startPeer(remoteConfig);
       try {
         const identity = await remote.identity;
-        identities.add(Buffer.from(identity.peerId).toString("hex"));
+        identities.add(identity.peerId);
         await remote.applyIntent(localIntent(remoteConfig), remoteConfig.initialSlot);
         await runtime.connect(identity.peerId, [identity.localEndpoint], 5000n);
         await vi.waitFor(
@@ -760,9 +768,7 @@ test("gossip diagnostics paginate retained peers and peer drains expose remainin
     expect(second.peers).toHaveLength(1);
     expect(second.nextCursor).toBeNull();
     expect(second.ownerSequence).toBeGreaterThanOrEqual(first.ownerSequence);
-    expect(
-      new Set([...first.peers, ...second.peers].map((peer) => Buffer.from(peer.identity).toString("hex")))
-    ).toEqual(identities);
+    expect(new Set([...first.peers, ...second.peers].map((peer) => peer.identity))).toEqual(identities);
     expect([...first.peers, ...second.peers].every((peer) => !peer.connected)).toBe(true);
     const batch = runtime.drainPeers(1);
     expect(batch.events).toHaveLength(1);

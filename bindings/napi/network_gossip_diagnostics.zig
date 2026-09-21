@@ -31,7 +31,7 @@ pub fn copy(env: napi.Env, page: *const d.Page) !Value {
     const peers = try env.createArrayWithLength(page.peer_count);
     for (page.peers[0..page.peer_count], 0..) |*peer, i| {
         const row = try env.createObject();
-        try put(row, "identity", try bytes(env, &peer.identity.bytes));
+        try put(row, "identity", try @import("network_js.zig").peerIdValue(env, &peer.identity));
         try put(row, "ip", try bytes(env, &peer.address));
         try put(row, "connected", try env.getBoolean(peer.connected));
         try put(row, "outboundReady", try env.getBoolean(peer.outbound_ready));

@@ -193,13 +193,10 @@ pub fn submit(runtime: *Runtime, token: Token, now: n.Now) !void {
         cell.terminal = if (runtime.stop) .closed else .{ .failed = .{ .reason = .cancelled, .phase = null } };
     } else {
         const core = &runtime.heavy.?.core;
-        const peer = core.peer_manager.catalog.find(&cell.peer);
-        if (peer) |ref| {
-            cell.native = core.sendReqRespRequest(ref, cell.protocol, cell.input, cell.sink, cell.options, now) catch |err| blk: {
-                cell.terminal = .{ .rejected = try rejection(err) };
-                break :blk null;
-            };
-        } else cell.terminal = .{ .rejected = .disconnected };
+        cell.native = core.sendReqRespRequest(&cell.peer, cell.protocol, cell.input, cell.sink, cell.options, now) catch |err| blk: {
+            cell.terminal = .{ .rejected = try rejection(err) };
+            break :blk null;
+        };
     }
     cell.state = if (cell.native != null) .native else .terminal;
     if (cell.native) |handle| {

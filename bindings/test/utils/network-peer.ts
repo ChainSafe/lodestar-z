@@ -81,7 +81,7 @@ export async function startPeer(config: NativeApplicationConfig): Promise<PeerRu
     const overrides = {
       closed,
       identity,
-      request(peer: Uint8Array, protocol: string, data: Uint8Array, options?: NativeRequestOptions) {
+      request(peer: string, protocol: string, data: Uint8Array, options?: NativeRequestOptions) {
         const handle = call<number>("request", [peer, protocol, data, options]);
         void handle.catch(() => undefined);
         return {
@@ -111,7 +111,7 @@ export async function startPeer(config: NativeApplicationConfig): Promise<PeerRu
       async takeIncomingRequest(): Promise<NativeIncomingRequest | null> {
         const descriptor = await call<{
           id: number;
-          peerId: Uint8Array;
+          peerId: string;
           connection: NativeIncomingRequest["connection"];
           protocol: string;
           data: Uint8Array;

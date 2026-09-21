@@ -2,6 +2,7 @@ const std = @import("std");
 const t = @import("types.zig");
 const custody = @import("custody.zig");
 const reputation = @import("reputation.zig");
+const identity_index = @import("identity_index.zig");
 
 pub const Row = struct {
     identify: ?@import("../identify/root.zig").Metadata = null,
@@ -10,6 +11,7 @@ pub const Row = struct {
     generation: u64 = 0,
     occupied: bool = false,
     identity: t.PeerId = undefined,
+    node_id: ?[32]u8 = null,
     connection: ?t.Handle = null,
     closing_reason: ?t.DisconnectReason = null,
     direction: t.Direction = .inbound,
@@ -28,19 +30,34 @@ pub const Row = struct {
 
 pub const Catalog = struct {
     rows: []Row,
+    by_identity: identity_index.Index,
+    by_connection: []?u16,
     options: t.Options,
     revision: u64 = 0,
     event_cursor: usize = 0,
     custody_cursor: usize = 0,
 
-    pub fn init(a: std.mem.Allocator, options: t.Options) !Catalog {
+    pub fn init(a: std.mem.Allocator, options: t.Options, connections_max: u16, seed: u64) !Catalog {
         try options.validate();
+        if (connections_max == 0 or connections_max > @import("../quic/limits.zig").connections_max_ceiling) return error.InvalidOptions;
         const rows = try a.alloc(Row, options.capacity);
+        errdefer a.free(rows);
+
+        const slots = try a.alloc(u16, identity_index.capacity(rows.len));
+        errdefer a.free(slots);
+
+        const connections = try a.alloc(?u16, connections_max);
+        errdefer a.free(connections);
+
         @memset(rows, .{});
-        return .{ .rows = rows, .options = options };
+        @memset(slots, identity_index.empty);
+        @memset(connections, null);
+        return .{ .rows = rows, .options = options, .by_identity = .{ .slots = slots, .seed = seed }, .by_connection = connections };
     }
 
     pub fn deinit(self: *Catalog, a: std.mem.Allocator) void {
+        a.free(self.by_connection);
+        a.free(self.by_identity.slots);
         a.free(self.rows);
         self.* = undefined;
     }
@@ -48,7 +65,7 @@ pub const Catalog = struct {
     pub fn memoryPlan(self: *const Catalog) t.MemoryPlan {
         return .{
             .inline_bytes = @sizeOf(Catalog),
-            .allocated_bytes = self.rows.len * @sizeOf(Row),
+            .allocated_bytes = self.rows.len * @sizeOf(Row) + self.by_identity.slots.len * @sizeOf(u16) + self.by_connection.len * @sizeOf(?u16),
             .rows = self.options.capacity,
             .notification_slots = self.options.capacity,
         };
@@ -76,8 +93,8 @@ pub const Catalog = struct {
                 self.revision +|= 1;
                 row.custody_work = null;
                 row.custody_context = context.*;
-                const node_id = custody.nodeId(&row.identity) catch continue;
-                row.custody_work = custody.SamplingDerivation.init(&node_id, .{ .groups = context.custody_groups, .columns = @import("preset").NUMBER_OF_COLUMNS }, count, context.minimum_sampling_groups) catch continue;
+                if (row.node_id == null) row.node_id = custody.nodeId(&row.identity) catch continue;
+                row.custody_work = custody.SamplingDerivation.init(&row.node_id.?, .{ .groups = context.custody_groups, .columns = @import("preset").NUMBER_OF_COLUMNS }, count, context.minimum_sampling_groups) catch continue;
             }
             if (now_ms >= row.metadata_at_ms +| freshness_ms) continue;
             const work = &row.custody_work.?;
@@ -95,11 +112,15 @@ pub const Catalog = struct {
         return pending;
     }
     pub fn find(self: *const Catalog, identity: *const t.PeerId) ?t.PeerRef {
-        for (self.rows, 0..) |*row, index| {
-            if (row.occupied and row.identity.eql(identity))
-                return .{ .index = @intCast(index), .generation = row.generation };
-        }
-        return null;
+        const index = self.by_identity.find(self.rows, identity) orelse return null;
+        return .{ .index = index, .generation = self.rows[index].generation };
+    }
+
+    pub fn findConnection(self: *const Catalog, conn: t.Handle) ?t.PeerRef {
+        if (conn.index >= self.by_connection.len) return null;
+        const index = self.by_connection[conn.index] orelse return null;
+        const row = &self.rows[index];
+        return if (row.occupied and std.meta.eql(row.connection, conn)) .{ .index = index, .generation = row.generation } else null;
     }
 
     fn rowFor(self: *const Catalog, ref: t.PeerRef) ?*Row {
@@ -161,6 +182,7 @@ pub const Catalog = struct {
         conn: t.Handle,
         options: *const t.AdmissionOptions,
     ) t.Admission {
+        std.debug.assert(conn.index < self.by_connection.len);
         if (identity.eql(local)) return .duplicate;
         if (self.find(identity)) |ref| {
             const row = self.rowFor(ref).?;
@@ -181,15 +203,20 @@ pub const Catalog = struct {
                 displaced = current;
             } else if (self.connectedCount() >= self.options.max_peers) return .capacity;
             row.reputation = current_reputation;
+            if (displaced) |old| self.by_connection[old.index] = null;
             connect(row, conn, options);
+            self.by_connection[conn.index] = ref.index;
             self.revision +|= 1;
             return .{ .admitted = .{ .peer = ref, .displaced = displaced, .fresh = false } };
         }
         if (self.connectedCount() >= self.options.max_peers) return .capacity;
         const index = self.reclaimable(options.direction, options.now_ms) orelse return .capacity;
         const row = &self.rows[index];
+        if (row.occupied) self.by_identity.remove(self.rows, &row.identity);
         row.* = .{ .occupied = true, .generation = row.generation + 1, .identity = identity.* };
+        self.by_identity.insert(self.rows, @intCast(index));
         connect(row, conn, options);
+        self.by_connection[conn.index] = @intCast(index);
         self.revision +|= 1;
         return .{ .admitted = .{
             .peer = .{ .index = @intCast(index), .generation = row.generation },
@@ -229,6 +256,7 @@ pub const Catalog = struct {
         row.identify = null;
         row.custody_work = null;
         row.custody_context = null;
+        if (row.node_id == null) row.node_id = options.node_id;
         row.connection = conn;
         row.closing_reason = null;
         row.direction = options.direction;
@@ -272,6 +300,7 @@ pub const Catalog = struct {
         const row = self.connectedRow(ref, conn) orelse return false;
         std.log.scoped(.network_peers).debug("peer_disconnected peer={f} connection={d}:{d} reason={s} connected_ms={d} relevant={any} agent={f}", .{ @import("../logging.zig").peer(&row.identity), conn.index, conn.generation, @tagName(reason), now_ms -| row.connected_at_ms, row.status != null, std.json.fmt(@import("client.zig").agent(&row.identify), .{}) });
         self.revision +|= 1;
+        self.by_connection[conn.index] = null;
         row.connection = null;
         row.custody_work = null;
         row.custody_context = null;

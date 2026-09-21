@@ -121,7 +121,7 @@ test("incoming copied metadata and acknowledged multiple contexts preserve wire 
     expect(incoming.peerId).toEqual(pair.identity.peerId);
     const peers = await pair.right.getPeers();
     expect(incoming.connection).toEqual(peers.peers[0].connection);
-    incoming.peerId.fill(0);
+
     incoming.connection.generation++;
     incoming.data.fill(0);
     const payload = new Uint8Array(4000).fill(31);

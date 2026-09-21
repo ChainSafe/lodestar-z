@@ -1,5 +1,6 @@
 import {execFileSync} from "node:child_process";
 import {privateKeyFromRaw} from "@libp2p/crypto/keys";
+import {peerIdFromPublicKey} from "@libp2p/peer-id";
 import {expect, it} from "vitest";
 import {initializeNativeNetworkRuntime} from "../src/network.js";
 import {
@@ -16,12 +17,33 @@ import {startPeer} from "./utils/network-peer.js";
 
 it("owns a real native socket and releases it on idempotent close", async () => {
   const config = applicationConfig();
-  const expectedPeerId = privateKeyFromRaw(config.identitySecretKey).publicKey.toMultihash().bytes;
+  const expectedPeerId = peerIdFromPublicKey(privateKeyFromRaw(config.identitySecretKey).publicKey).toString();
   const runtime = startRuntime(config, () => undefined);
   const terminal = runtime.closed;
   try {
     const identity = await runtime.identity;
     expect(identity.peerId).toEqual(expectedPeerId);
+    expect(typeof identity.peerId).toBe("string");
+    for (const invalid of [
+      "",
+      "1".repeat(56),
+      "x".repeat(4096),
+      "not-a-peer",
+      `z${identity.peerId}`,
+      `${identity.peerId}\0`,
+      `${identity.peerId}é`,
+    ]) {
+      expect(() => runtime.reportPeer(invalid, "fatal")).toThrow("InvalidNetworkPeerId");
+      expect(() => runtime.connect(invalid, [identity.localEndpoint], 1000n)).toThrow("InvalidNetworkPeerId");
+      expect(() => runtime.reStatusPeers([invalid])).toThrow("InvalidNetworkPeerId");
+      expect(() => runtime.trackGossipSearch(new Uint8Array(32), invalid)).toThrow("InvalidNetworkPeerId");
+      expect(() =>
+        runtime.request(invalid, "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy", new Uint8Array(0))
+      ).toThrow("InvalidNetworkPeerId");
+    }
+    for (const invalid of [null, 1, new Uint8Array(39), {toString: () => identity.peerId}]) {
+      expect(() => Reflect.apply(runtime.reportPeer, runtime, [invalid, "fatal"])).toThrow("InvalidNetworkPeerId");
+    }
     expect(identity.localEndpoint.port).toBeGreaterThan(0);
     expect(runtime.state).toBe("running");
     const diagnostics = runtime.diagnostics();
@@ -55,7 +77,7 @@ it("owns a real native socket and releases it on idempotent close", async () => 
 
 it("copies inputs before returning and advances the clock only through intents", async () => {
   const config = applicationConfig();
-  const expected = privateKeyFromRaw(config.identitySecretKey).publicKey.toMultihash().bytes;
+  const expected = peerIdFromPublicKey(privateKeyFromRaw(config.identitySecretKey).publicKey).toString();
   config.local.metadata.syncnets = 2;
   const runtime = initializeNativeNetworkRuntime(config, () => undefined);
   expect(runtime.identity.metadata.syncnets).toBe(2);
@@ -171,7 +193,7 @@ it.each([
 it("rejects another initialization during operation and after close", async () => {
   const runtime = startRuntime(applicationConfig());
   expect(runtime.state).toBe("running");
-  expect(runtime.identity.peerId).toHaveLength(39);
+  expect(typeof runtime.identity.peerId).toBe("string");
   expect(() => startRuntime(applicationConfig())).toThrow("NetworkAlreadyInitialized");
   expect((await runtime.getIdentity()).peerId).toEqual(runtime.identity.peerId);
   await runtime.close();
@@ -362,8 +384,8 @@ it("publishes copied peer observations without repeating unread notifications", 
     const ready = batch.events.find((event) => event.type === "ready");
     expect(ready).toBeDefined();
     if (!ready || ready.type !== "ready") throw new Error("Missing peerReady");
-    expect(ready.state.peer.generation).toBeGreaterThan(0n);
-    expect(ready.state.identity.length).toBe(39);
+    expect(ready.state).not.toHaveProperty("peer");
+    expect(typeof ready.state.identity).toBe("string");
     const retained = ready.state.identity.slice();
     await runtime.close();
     expect(ready.state.identity).toEqual(retained);

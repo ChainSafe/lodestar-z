@@ -108,6 +108,7 @@ pub const Setup = struct {
             local,
             managed.peerOptions(opts),
             &self.client_service,
+            self.pair.client.limits.connections_max,
         );
         errdefer self.client.deinit();
         self.server_service = try @import("service.zig").Service.init(std.testing.allocator, managed.serviceOptions(opts, local));
@@ -118,6 +119,7 @@ pub const Setup = struct {
             local,
             managed.peerOptions(opts),
             &self.server_service,
+            self.pair.server.limits.connections_max,
         );
     }
     pub fn deinit(self: *Setup) void {

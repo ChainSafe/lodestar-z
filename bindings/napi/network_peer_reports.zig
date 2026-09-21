@@ -1,83 +1,71 @@
 const std = @import("std");
 const n = @import("network");
 const t = n.peers.types;
+const identity_index = n.peers.identity_index;
 const capacity = 512;
 const Row = struct {
-    generation: u64 = 0,
-    identity: ?n.PeerId = null,
+    occupied: bool = false,
+    identity: n.PeerId = undefined,
     counts: [4]u8 = @splat(0),
 };
-pub const Report = struct { peer: t.PeerRef, action: t.PeerAction };
+pub const Report = struct { identity: n.PeerId, action: t.PeerAction };
 
 pub const Table = struct {
     rows: [capacity]Row = @splat(.{}),
+    by_identity: [identity_index.capacity(capacity)]u16 = @splat(identity_index.empty),
+    seed: u64 = 0,
     pending: u32 = 0,
     ignored: u64 = 0,
     cursor: u16 = 0,
 
-    pub fn sync(self: *Table, catalog: *const n.peers.catalog.Catalog) void {
-        std.debug.assert(catalog.rows.len <= capacity);
-        for (catalog.rows, 0..) |*source, i| {
-            const row = &self.rows[i];
-            if (source.occupied and row.identity != null and source.generation == row.generation) continue;
-            for (row.counts) |count| self.pending -= count;
-            row.* = .{ .generation = source.generation, .identity = if (source.occupied) source.identity else null };
-        }
+    fn index(self: *Table) identity_index.Index {
+        return .{ .slots = &self.by_identity, .seed = self.seed };
     }
 
     pub fn add(self: *Table, identity: *const n.PeerId, action: t.PeerAction) void {
-        for (&self.rows) |*row| {
-            const known = row.identity orelse continue;
-            if (!known.eql(identity)) continue;
-            const count = &row.counts[@intFromEnum(action)];
-            // A hundred of the smallest penalty already reaches the score floor.
-            if (count.* < 100) {
-                count.* += 1;
-                self.pending += 1;
+        const lookup = self.index();
+        const row_index = lookup.find(&self.rows, identity) orelse vacant: {
+            for (&self.rows, 0..) |*row, i| {
+                if (row.occupied) continue;
+                row.* = .{ .occupied = true, .identity = identity.* };
+                lookup.insert(&self.rows, @intCast(i));
+                break :vacant @as(u16, @intCast(i));
             }
+            self.ignored +|= 1;
             return;
+        };
+        const count = &self.rows[row_index].counts[@intFromEnum(action)];
+        // A hundred of the smallest penalty already reaches the score floor.
+        if (count.* < 100) {
+            count.* += 1;
+            self.pending += 1;
         }
-        self.ignored +|= 1;
     }
 
     pub fn next(self: *Table) ?Report {
         if (self.pending == 0) return null;
         for (0..capacity) |_| {
-            const index = self.cursor;
+            const row_index = self.cursor;
             self.cursor = (self.cursor + 1) % capacity;
-            const row = &self.rows[index];
+            const row = &self.rows[row_index];
+            if (!row.occupied) continue;
             for (&row.counts, 0..) |*count, action| {
                 if (count.* == 0) continue;
                 count.* -= 1;
                 self.pending -= 1;
-                return .{ .peer = .{ .index = index, .generation = row.generation }, .action = @enumFromInt(action) };
+                const report: Report = .{ .identity = row.identity, .action = @enumFromInt(action) };
+                if (std.mem.allEqual(u8, &row.counts, 0)) {
+                    self.index().remove(&self.rows, &row.identity);
+                    row.* = .{};
+                }
+                return report;
             }
+            unreachable;
         }
         unreachable;
     }
 };
 
-test "peer reports accumulate independently and retire with the peer generation" {
-    var table: Table = .{};
-    const identity: n.PeerId = .{ .bytes = @splat(1) };
-    table.rows[0] = .{ .identity = identity, .generation = 1 };
-    for (0..3) |_| table.add(&identity, .high_tolerance);
-    table.add(&identity, .low_tolerance);
-    var counts = [_]u8{0} ** 4;
-    for (0..4) |_| {
-        const report = table.next().?;
-        try std.testing.expectEqual(@as(u64, 1), report.peer.generation);
-        counts[@intFromEnum(report.action)] += 1;
-    }
-    try std.testing.expectEqual(@as(u8, 3), counts[@intFromEnum(t.PeerAction.high_tolerance)]);
-    try std.testing.expectEqual(@as(u8, 1), counts[@intFromEnum(t.PeerAction.low_tolerance)]);
-    try std.testing.expect(table.next() == null);
-    for (0..256) |_| table.add(&identity, .high_tolerance);
-    try std.testing.expectEqual(@as(u32, 100), table.pending);
-    var catalog = try n.peers.catalog.Catalog.init(std.testing.allocator, .{});
-    defer catalog.deinit(std.testing.allocator);
-    table.sync(&catalog);
-    try std.testing.expect(table.next() == null);
-    table.add(&identity, .fatal);
-    try std.testing.expectEqual(@as(u64, 1), table.ignored);
+test {
+    _ = @import("network_peer_reports_test.zig");
 }

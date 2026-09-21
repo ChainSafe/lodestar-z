@@ -1,3 +1,6 @@
+/** Canonical unprefixed base58btc secp256k1 identity multihash, equal to libp2p PeerId.toString(). */
+export type PeerIdStr = string;
+
 export type NetworkFork = "phase0" | "altair" | "bellatrix" | "capella" | "deneb" | "electra" | "fulu" | "gloas";
 
 /** IPv4 uses four address bytes; IPv6 uses sixteen and excludes IPv4-mapped addresses. */
@@ -151,7 +154,7 @@ export interface NativeRuntimeConfig {
 }
 
 export interface NativeIdentity {
-  peerId: Uint8Array;
+  peerId: PeerIdStr;
   localEndpoint: IpEndpoint;
   localEndpoints: readonly IpEndpoint[];
   localMultiaddr: Uint8Array;
@@ -304,7 +307,7 @@ export interface NativeIdentitySnapshot extends NativeIdentity {
 }
 
 export interface NativeDirectSnapshot {
-  identities: Uint8Array[];
+  identities: PeerIdStr[];
   ownerSequence: bigint;
 }
 
@@ -361,7 +364,7 @@ export interface NativeNetworkApplicationRuntime {
   classifyGossip(handle: NativeGossipHandle, available: boolean): boolean;
   notifyGossipBlock(root: Uint8Array): void;
   dropQueuedGossip(): void;
-  trackGossipSearch(root: Uint8Array, peer: Uint8Array | null): boolean;
+  trackGossipSearch(root: Uint8Array, peer: PeerIdStr | null): boolean;
   /** Completes host execution even when false means the protocol verdict has already expired. */
   reportGossip(handle: NativeGossipHandle, verdict: NativeGossipVerdict): boolean;
   /** Copies admitted input. Admission pressure rejects with admission_full before any publication. */
@@ -372,7 +375,7 @@ export interface NativeNetworkApplicationRuntime {
   ): Promise<NativeGossipPublishResult>;
   takeIncomingRequest(): NativeIncomingRequest | null;
   request(
-    peerId: Uint8Array,
+    peerId: PeerIdStr,
     protocol: string,
     data: Uint8Array,
     options?: NativeRequestOptions
@@ -387,15 +390,19 @@ export interface NativeNetworkApplicationRuntime {
   getGossipDiagnostics(cursor?: number): Promise<NativeGossipDiagnosticsPage>;
   getPeers(): Promise<NativePeerSnapshot>;
   /** One-shot connection attempt, retired on success or timeout. Use addDirectPeer for persistent membership. */
-  connect(peerId: Uint8Array, addresses: readonly IpEndpoint[], timeoutMs: bigint): Promise<void>;
+  connect(peerId: PeerIdStr, addresses: readonly IpEndpoint[], timeoutMs: bigint): Promise<void>;
   /** Closes the connection and rejects pending connects with NetworkConnectCancelled. Direct membership remains. */
-  disconnect(peerId: Uint8Array): Promise<void>;
-  reStatusPeers(peerIds: readonly Uint8Array[]): Promise<void>;
-  addDirectPeer(peerId: Uint8Array, addresses: readonly IpEndpoint[]): Promise<void>;
-  removeDirectPeer(peerId: Uint8Array): Promise<boolean>;
+  disconnect(peerId: PeerIdStr): Promise<void>;
+  reStatusPeers(peerIds: readonly PeerIdStr[]): Promise<void>;
+  addDirectPeer(peerId: PeerIdStr, addresses: readonly IpEndpoint[]): Promise<void>;
+  removeDirectPeer(peerId: PeerIdStr): Promise<boolean>;
   getDirectPeers(): Promise<NativeDirectSnapshot>;
-  /** Accumulates penalties independently of command capacity. Ignores unknown peers and closed runtimes. */
-  reportPeer(peerId: Uint8Array, action: NativePeerAction): void;
+  /**
+   * Accumulates penalties independently of command capacity, including for disconnected retained identities.
+   * Counts unknown identities at execution and full pending-table refusals in peerReportsIgnored.
+   * Ignores reports after runtime close.
+   */
+  reportPeer(peerId: PeerIdStr, action: NativePeerAction): void;
   drainPeers(maxEvents: number): NativePeerBatch;
   close(): Promise<NativeRuntimeCloseResult>;
 }
@@ -454,17 +461,12 @@ export type NativeDisconnectReason =
   | "count_pruning"
   | "gossip_unavailable"
   | "health_error";
-export interface NativePeerRef {
-  index: number;
-  generation: bigint;
-}
 export interface NativeConnection {
   index: number;
   generation: number;
 }
 export interface NativePeerState {
-  peer: NativePeerRef;
-  identity: Uint8Array;
+  identity: PeerIdStr;
   connection: NativeConnection | null;
   direction: "inbound" | "outbound";
   endpoint: IpEndpoint;
@@ -489,9 +491,8 @@ export type NativePeerObservation =
   | {type: "ready" | "updated"; state: NativePeerState; ownerSequence: bigint}
   | {
       type: "closed";
-      peer: NativePeerRef;
       connection: NativeConnection;
-      identity: Uint8Array;
+      identity: PeerIdStr;
       reason: NativeDisconnectReason;
       ownerSequence: bigint;
     };
@@ -581,7 +582,7 @@ export interface NativeRequestDiagnostics {
 }
 
 export interface NativeIncomingRequest {
-  readonly peerId: Uint8Array;
+  readonly peerId: PeerIdStr;
   readonly connection: NativeConnection;
   readonly protocol: string;
   readonly data: Uint8Array;
@@ -660,14 +661,14 @@ export interface NativeGossipDependencyCheck {
   handle: NativeGossipHandle;
   root: Uint8Array;
   slot: bigint;
-  peerId: Uint8Array;
+  peerId: PeerIdStr;
   topic: string;
 }
 export interface NativeGossipMessage {
   attestationData: string | null;
   slot: bigint | null;
   handle: NativeGossipHandle;
-  peerId: Uint8Array;
+  peerId: PeerIdStr;
   connection: NativeConnection;
   topic: string;
   id: Uint8Array;
@@ -770,7 +771,7 @@ export interface NativeGossipTopicScoreDiagnostic {
   weights: {p1: number; p2: number; p3: number; p3b: number; p4: number};
 }
 export interface NativeGossipPeerDiagnostic {
-  identity: Uint8Array;
+  identity: PeerIdStr;
   ip: Uint8Array;
   connected: boolean;
   outboundReady: boolean;

@@ -160,12 +160,6 @@ pub const Control = struct {
         const row = &self.schedules[peer.index];
         return if (std.meta.eql(row.peer, peer) and std.meta.eql(row.conn, conn)) row else null;
     }
-    pub fn peerFor(self: *Control, conn: t.Handle) ?t.PeerRef {
-        for (self.schedules) |row| if (row.peer) |peer| {
-            if (std.meta.eql(row.conn, conn)) return peer;
-        };
-        return null;
-    }
     pub fn connected(
         self: *Control,
         peer: t.PeerRef,
@@ -533,7 +527,7 @@ pub const Control = struct {
         now: Now,
         slot: u64,
     ) void {
-        const peer = self.peerFor(event.peer) orelse {
+        const peer = catalog.findConnection(event.peer) orelse {
             _ = service.reqresp.cancel(event.request);
             return;
         };

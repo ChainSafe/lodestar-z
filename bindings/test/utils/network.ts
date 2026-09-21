@@ -1,3 +1,5 @@
+import {publicKeyFromProtobuf} from "@libp2p/crypto/keys";
+import {peerIdFromPublicKey} from "@libp2p/peer-id";
 import {testChain} from "../../../test/interop/network_chain.mjs";
 import {initializeNativeNetworkRuntime} from "../../src/network.js";
 export {testChain};
@@ -214,4 +216,8 @@ export function subscriptions(...names: string[]): NativeSubscriptionSet[] {
     set.subnets[kind] = mask;
   }
   return [...sets.values()];
+}
+
+export function peerIdFromHex(hex: string): string {
+  return peerIdFromPublicKey(publicKeyFromProtobuf(Buffer.from(hex, "hex").subarray(2))).toString();
 }

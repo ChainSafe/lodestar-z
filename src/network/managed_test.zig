@@ -210,7 +210,7 @@ fn allocationCheck(a: std.mem.Allocator) !void {
     const identity: t.PeerId = .{ .bytes = @splat(1) };
     var service = try @import("service.zig").Service.init(a, managed.serviceOptions(options(), &.{}));
     defer service.deinit();
-    var core = try managed.PeerManager.init(a, &identity, &localState(.{}), managed.peerOptions(options()), &service);
+    var core = try managed.PeerManager.init(a, &identity, &localState(.{}), managed.peerOptions(options()), &service, 4);
     defer core.deinit();
     try std.testing.expect(core.memoryPlan().allocated_bytes > core.memoryPlan().control_bytes);
 }
@@ -221,7 +221,7 @@ test "managed startup allocation failure cleans every prefix and memory accounts
     const identity: t.PeerId = .{ .bytes = @splat(1) };
     var service = try @import("service.zig").Service.init(failing.allocator(), managed.serviceOptions(options(), &.{}));
     defer service.deinit();
-    var core = try managed.PeerManager.init(failing.allocator(), &identity, &localState(.{}), managed.peerOptions(options()), &service);
+    var core = try managed.PeerManager.init(failing.allocator(), &identity, &localState(.{}), managed.peerOptions(options()), &service, 4);
     const expected = core.memoryPlan().allocated_bytes + service.allocatedBytes();
     std.debug.print("sampling core allocation={d} prefixes={d} inline={d}\n", .{ expected, failing.alloc_index, @sizeOf(managed.PeerManager) });
     try std.testing.expectEqual(expected, failing.allocated_bytes);
@@ -1043,7 +1043,7 @@ test "managed reconciliation scans retained deadlines once and accounts for cand
     const sync_before = core.counters;
     const lookup_before = core.dial_queue.counters.sync_lookup_rows;
     try core.connect(&offline.identity, &.{support.server_address}, now);
-    try std.testing.expectEqual(@as(u64, opts.peers.capacity), core.counters.candidate_lookup_rows - sync_before.candidate_lookup_rows);
+    try std.testing.expectEqual(@as(u64, 1), core.counters.candidate_lookup_rows - sync_before.candidate_lookup_rows);
     try std.testing.expectEqual(@as(u64, opts.peers.capacity), core.counters.catalog_deadline_rows - sync_before.catalog_deadline_rows);
     try std.testing.expectEqual(@as(u64, candidates + 1), core.dial_queue.counters.sync_lookup_rows - lookup_before);
     try std.testing.expectEqual(due, core.dial_queue.rows[candidates].eligible_at_ms);

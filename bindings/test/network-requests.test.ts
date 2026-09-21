@@ -1,5 +1,5 @@
 import {expect, test} from "vitest";
-import {applicationConfig, localIntent, requestForks, startRuntime} from "./utils/network.js";
+import {applicationConfig, localIntent, peerIdFromHex, requestForks, startRuntime} from "./utils/network.js";
 import {startPeer} from "./utils/network-peer.js";
 
 test("application request rejects control protocols at the exported boundary", async () => {
@@ -68,7 +68,7 @@ async function connected() {
     runtime = startRuntime(config, () => undefined);
     await runtime.identity;
     await runtime.applyIntent(localIntent(config), config.initialSlot);
-    const id = Uint8Array.from(Buffer.from(info.peer, "hex"));
+    const id = peerIdFromHex(info.peer);
     await runtime.connect(
       id,
       [{address: Uint8Array.of(127, 0, 0, 1), family: 4, port: Number(info.address.split("/")[4])}],
@@ -572,7 +572,7 @@ test.skipIf(!NATIVE_PEER)(
       await runtime.identity;
       await runtime.applyIntent(localIntent(config), config.initialSlot);
       const parts = remote.address.split("/");
-      const id = Uint8Array.from(Buffer.from(remote.peer, "hex"));
+      const id = peerIdFromHex(remote.peer);
       await runtime.connect(id, [{address: Uint8Array.of(127, 0, 0, 1), family: 4, port: Number(parts[4])}], 5000n);
       const stream = runtime.request(id, "/eth2/beacon_chain/req/beacon_blocks_by_range/2/ssz_snappy", rangeRequest());
       const first = await stream.next();
@@ -643,7 +643,7 @@ async function connectedNative(scenario?: string) {
     closed = prepared.closed;
     await prepared.identity;
     await native.applyIntent(localIntent(config), config.initialSlot);
-    const id = Uint8Array.from(Buffer.from(remote.peer, "hex"));
+    const id = peerIdFromHex(remote.peer);
     await native.connect(
       id,
       [{address: Uint8Array.of(127, 0, 0, 1), family: 4, port: Number(remote.address.split("/")[4])}],

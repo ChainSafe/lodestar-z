@@ -560,7 +560,7 @@ fn handoff(candidate: *const adapter.Candidate) !void {
     const local = @import("../managed_test_support.zig").localState(.{ .fork = context, .status = .{ .fork_digest = context.digest } });
     var service = try @import("../service.zig").Service.init(std.testing.allocator, core_mod.serviceOptions(opts, &local));
     defer service.deinit();
-    var core = try core_mod.PeerManager.init(std.testing.allocator, &pair.client_ctx.local_peer_id, &local, core_mod.peerOptions(opts), &service);
+    var core = try core_mod.PeerManager.init(std.testing.allocator, &pair.client_ctx.local_peer_id, &local, core_mod.peerOptions(opts), &service, pair.client.limits.connections_max);
     defer core.deinit();
     defer core_mod.shutdown(&core, &service, &pair.client, pair.now);
     try std.testing.expectEqual(@as(u16, 1), core.discoveredBatch(&service, &.{candidate.*}, pair.now).accepted);

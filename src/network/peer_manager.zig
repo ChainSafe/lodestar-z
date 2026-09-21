@@ -145,6 +145,7 @@ pub const PeerManager = struct {
         local: *const t.LocalState,
         options: Options,
         service: *const service_mod.Service,
+        connections_max: u16,
     ) !PeerManager {
         var copied: t.LocalState = undefined;
         try peers.control_wire.copyServingLocal(&copied, local, service.router.capabilities().receive);
@@ -152,7 +153,7 @@ pub const PeerManager = struct {
         if (service.reqresp.options.outbound_control_reserved < options.peers.max_peers or
             service.router.negotiator.outbound_control_reserved < options.peers.max_peers)
             return error.InvalidOptions;
-        var catalog = try peers.Catalog.init(a, options.peers);
+        var catalog = try peers.Catalog.init(a, options.peers, connections_max, options.dial.seed);
         errdefer catalog.deinit(a);
         var control = try control_mod.Control.init(
             a,
@@ -222,11 +223,12 @@ pub const PeerManager = struct {
                 const identity = connected.peer_id;
                 const endpoint = engine.peerAddress(connected.conn) orelse return;
                 const direction = connected.direction;
+                const hints = self.dial_queue.candidateHints(&identity, now.mono_ms);
                 const decision = self.catalog.admit(
                     &identity,
                     &self.local_identity,
                     connected.conn,
-                    &.{ .direction = direction, .endpoint = endpoint, .now_ms = now.mono_ms },
+                    &.{ .direction = direction, .endpoint = endpoint, .now_ms = now.mono_ms, .node_id = if (hints) |value| value.node_id else null },
                 );
                 switch (decision) {
                     .admitted => |admission| {
@@ -260,7 +262,7 @@ pub const PeerManager = struct {
             },
             .closed => |closed| {
                 _ = self.dial_queue.dialClosed(closed.conn, now.mono_ms);
-                if (self.control.peerFor(closed.conn)) |peer| {
+                if (self.catalog.findConnection(closed.conn)) |peer| {
                     const goodbye = service.reqresp.closingGoodbye(engine, closed.conn, now);
                     if (goodbye) |code| self.control.receivedGoodbye(&self.catalog, peer, closed.conn, code, now, true);
                     const snapshot = self.catalog.get(peer).?;
@@ -278,7 +280,7 @@ pub const PeerManager = struct {
                 }
             },
             .path_changed => |changed| {
-                if (self.control.peerFor(changed.conn)) |peer| {
+                if (self.catalog.findConnection(changed.conn)) |peer| {
                     _ = self.catalog.updateEndpoint(peer, changed.conn, &changed.peer);
                 }
             },
@@ -308,15 +310,11 @@ pub const PeerManager = struct {
         return self.catalog.nextDeadline(now_ms);
     }
     fn syncIdentity(self: *PeerManager, identity: *const t.PeerId, now: Now) void {
-        for (self.catalog.rows, 0..) |*row, index| {
-            if (!row.occupied or !row.identity.eql(identity)) continue;
-            self.counters.candidate_lookup_rows +|= index + 1;
-            const snapshot = self.catalog.get(.{ .index = @intCast(index), .generation = row.generation }).?;
-            const deadline = if (candidateBlocked(&snapshot, now.mono_ms)) self.catalogDeadline(now.mono_ms) else null;
-            self.syncCandidate(&snapshot, now, deadline);
-            return;
-        }
-        self.counters.candidate_lookup_rows +|= self.catalog.rows.len;
+        const peer = self.catalog.find(identity) orelse return;
+        self.counters.candidate_lookup_rows +|= 1;
+        const snapshot = self.catalog.get(peer).?;
+        const deadline = if (candidateBlocked(&snapshot, now.mono_ms)) self.catalogDeadline(now.mono_ms) else null;
+        self.syncCandidate(&snapshot, now, deadline);
     }
     /// Reconciles at the supplied clock without pumping protocols or borrowing an Engine.
     pub fn reconcile(self: *PeerManager, service: *service_mod.Service, now: Now) void {

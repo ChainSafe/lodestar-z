@@ -102,7 +102,13 @@ pub const Admission = union(enum) {
     cooldown,
     capacity,
 };
-pub const AdmissionOptions = struct { direction: Direction, endpoint: Address, now_ms: u64 };
+pub const AdmissionOptions = struct {
+    direction: Direction,
+    endpoint: Address,
+    now_ms: u64,
+    /// Derived from the same identity in a verified discovery record.
+    node_id: ?[32]u8 = null,
+};
 pub const Options = struct {
     capacity: u16 = 512,
     outbound_reserve: u16 = 32,
