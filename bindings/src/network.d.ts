@@ -150,7 +150,6 @@ export interface NativeRuntimeConfig {
 }
 
 export interface NativeIdentity {
-  session: bigint;
   peerId: Uint8Array;
   localEndpoint: IpEndpoint;
   localEndpoints: readonly IpEndpoint[];
@@ -159,7 +158,7 @@ export interface NativeIdentity {
   metadata: NativeLocalState["metadata"];
 }
 
-export type NativeRuntimeState = "starting" | "prepared" | "running" | "stopping" | "closed" | "failed";
+export type NativeRuntimeState = "running" | "stopping" | "closed" | "failed";
 
 export interface NativeRuntimeDiagnostics {
   requests: NativeRequestDiagnostics;
@@ -167,7 +166,6 @@ export interface NativeRuntimeDiagnostics {
   gossip: NativeGossipDiagnostics;
   state: NativeRuntimeState;
   terminalErrorCode: string | null;
-  session: bigint;
   currentSlot: bigint;
   ownerTurns: bigint;
   lastMonotonicMs: bigint;
@@ -219,7 +217,7 @@ export interface NativeRuntimeDiagnostics {
 }
 
 export interface NativeRuntimeCloseResult {
-  reason: "requested" | "startupCancelled" | "failed";
+  reason: "requested" | "failed";
 }
 
 export type NativeLogLevel = "error" | "warn" | "info" | "debug" | "off";
@@ -228,7 +226,6 @@ export interface NativeLogRecord {
   level: Exclude<NativeLogLevel, "off">;
   scope: string;
   message: string;
-  session: bigint;
   sequence: bigint;
   timestampMs: bigint;
   monotonicMs: bigint;
@@ -343,11 +340,11 @@ export interface NativeNetworkApplicationRuntime {
     data: Uint8Array,
     options?: NativeRequestOptions
   ): AsyncIterableIterator<NativeResponseChunk>;
-  readonly ready: Promise<NativeIdentity>;
+  readonly identity: NativeIdentity;
   readonly state: NativeRuntimeState;
   diagnostics(): NativeRuntimeDiagnostics;
   applyIntent(intent: NativeLocalIntent, slot: bigint): Promise<NativeIntentResult>;
-  /** Updates Status for the active fork; preserves clock, subscriptions, Metadata, ENR and demand. Requires activation. */
+  /** Updates Status for the active fork; preserves clock, subscriptions, Metadata, ENR and demand. */
   updateStatus(status: NetworkStatusUpdate): Promise<void>;
   getIdentity(): Promise<NativeIdentitySnapshot>;
   getGossipDiagnostics(cursor?: number): Promise<NativeGossipDiagnosticsPage>;
@@ -366,10 +363,14 @@ export interface NativeNetworkApplicationRuntime {
   close(): Promise<NativeRuntimeCloseResult>;
 }
 
-/** Call bindings.config.set(chain, genesisValidatorsRoot) first. Construction synchronously copies a derived network plan. */
-export function createNativeNetworkApplicationRuntime(
+/**
+ * Initialize once per process from the owning thread, after configuring BeaconConfig.
+ * Copies configuration and returns a running runtime; failure is terminal.
+ * Calls onWorkAvailable on that thread when peer events, incoming requests, or gossip work can be drained.
+ */
+export function initializeNativeNetworkRuntime(
   config: NativeApplicationConfig,
-  onReadable: () => void
+  onWorkAvailable: () => void
 ): NativeNetworkApplicationRuntime;
 
 export type NativeProtocolId =
@@ -425,7 +426,6 @@ export interface NativeConnection {
   generation: number;
 }
 export interface NativePeerState {
-  session: bigint;
   peer: NativePeerRef;
   identity: Uint8Array;
   connection: NativeConnection | null;
@@ -452,7 +452,6 @@ export type NativePeerObservation =
   | {type: "ready" | "updated"; state: NativePeerState; ownerSequence: bigint}
   | {
       type: "closed";
-      session: bigint;
       peer: NativePeerRef;
       connection: NativeConnection;
       identity: Uint8Array;
@@ -617,7 +616,6 @@ export interface NativeIncomingDiagnostics {
 }
 
 export interface NativeGossipHandle {
-  session: bigint;
   index: number;
   generation: bigint;
 }

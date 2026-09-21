@@ -100,8 +100,7 @@ pub const Messages = struct {
     storage_refusals: StorageRefusals = @splat(0),
     fast: []FastEntry,
 
-    pub fn init(a: std.mem.Allocator, options: *const Options) !Messages {
-        const layout = @import("layout.zig").Layout.init(options);
+    pub fn init(a: std.mem.Allocator, options: *const Options, layout: *const @import("layout.zig").Layout) !Messages {
         var store = try storage.Store.init(a, layout.payload_entries, layout.payload_bytes);
         errdefer store.deinit(a);
         store.limits = options.processor_limits;

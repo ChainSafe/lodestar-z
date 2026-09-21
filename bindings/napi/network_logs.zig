@@ -19,7 +19,6 @@ pub fn drain(runtime: *Runtime, limit: Value) !js.Value {
         try put(value, "level", try env.createStringUtf8(logging.levelName(record.level)));
         try put(value, "scope", try env.createStringUtf8(@tagName(record.scope)));
         try put(value, "message", try env.createStringUtf8(record.message[0..record.len]));
-        try put(value, "session", try env.createBigintUint64(runtime.diag.session));
         try put(value, "sequence", try env.createBigintUint64(record.sequence));
         try put(value, "timestampMs", try env.createBigintUint64(record.timestamp_ms));
         try put(value, "monotonicMs", try env.createBigintUint64(record.monotonic_ms));

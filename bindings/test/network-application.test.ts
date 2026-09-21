@@ -1,19 +1,23 @@
 import {execFileSync} from "node:child_process";
+import {createSocket} from "node:dgram";
+import {once} from "node:events";
 import {setTimeout as delay} from "node:timers/promises";
+import {privateKeyFromRaw} from "@libp2p/crypto/keys";
 import {expect, test} from "vitest";
 import type {NativeNetworkApplicationRuntime, NativePeerObservation} from "../src/network.js";
-import {createNativeNetworkApplicationRuntime} from "../src/network.js";
 import {
   applicationConfig,
   configureChain,
   discoveryConfig,
   localIntent,
+  startRuntime,
   testChain,
   topicName,
 } from "./utils/network.js";
 import {networkBindings as bindings} from "./utils/network-bindings.js";
+import {startPeer} from "./utils/network-peer.js";
 
-test("application stays prepared across the host clock fork boundary and activates fresh intent", async () => {
+test("running application advances fork state only when the host updates intent", async () => {
   const config = applicationConfig();
   const boundarySlot = 128n;
   const slotsPerEpoch = process.env.LODESTAR_PRESET === "minimal" ? 8n : 32n;
@@ -21,17 +25,16 @@ test("application stays prepared across the host clock fork boundary and activat
   config.local.status.headSlot = config.initialSlot;
   config.discovery = discoveryConfig().discovery;
   configureChain({ELECTRA_FORK_EPOCH: Number(boundarySlot / slotsPerEpoch)});
-  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+  const runtime = startRuntime(config, () => undefined);
   try {
-    const identity = await runtime.ready;
+    const identity = await runtime.identity;
     let hostSlot = config.initialSlot;
     expect(hostSlot).toBeLessThan(boundarySlot);
     await delay(40);
     hostSlot = boundarySlot;
     const slot = hostSlot;
     expect(slot).toBeGreaterThanOrEqual(boundarySlot);
-    expect(runtime.state).toBe("prepared");
-    expect(runtime.diagnostics().ownerTurns).toBe(0n);
+    expect(runtime.state).toBe("running");
     expect(runtime.diagnostics().currentSlot).toBe(config.initialSlot);
     const fresh = localIntent(config);
     fresh.demand.expiresAtSlot = slot + 100n;
@@ -48,9 +51,9 @@ test("application stays prepared across the host clock fork boundary and activat
 
 test("owned chain plan follows Fulu and BPO with Lodestar topics and fixed native storage", async () => {
   const config = discoveryConfig();
-  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+  const runtime = startRuntime(config, () => undefined);
   try {
-    let identity = await runtime.ready;
+    let identity = await runtime.identity;
     const before = runtime.diagnostics();
     configureChain({BLOB_SCHEDULE: [], ELECTRA_FORK_EPOCH: Infinity, FULU_FORK_EPOCH: Infinity});
     const epochs = [testChain.FULU_FORK_EPOCH, testChain.BLOB_SCHEDULE[0].EPOCH];
@@ -80,20 +83,19 @@ test("owned chain plan follows Fulu and BPO with Lodestar topics and fixed nativ
   }
 });
 
-test("failed intent does not activate or advance the clock", async () => {
+test("failed intent leaves running state and clock unchanged", async () => {
   const config = applicationConfig();
-  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+  const runtime = startRuntime(config, () => undefined);
   const terminal = runtime.closed;
   try {
-    await runtime.ready;
-    expect(() => runtime.getPeers()).toThrow("NetworkNotActive");
-    expect(() => runtime.updateStatus(config.local.status)).toThrow("NetworkNotActive");
+    await runtime.identity;
+    expect((await runtime.getPeers()).peers).toEqual([]);
+    await runtime.updateStatus(config.local.status);
     const intent = localIntent(config);
     intent.subscriptions = [{name: "/invalid", params: config.gossipPolicy.score.defaultTopic}];
     await expect(runtime.applyIntent(intent, 101n)).rejects.toThrow();
-    expect(runtime.state).toBe("prepared");
+    expect(runtime.state).toBe("running");
     expect(runtime.diagnostics().currentSlot).toBe(100n);
-    expect(runtime.diagnostics().ownerTurns).toBe(0n);
     const first = await runtime.applyIntent(localIntent(config), 102n);
     expect(first.slot).toBe(102n);
     const next = await runtime.applyIntent(localIntent(config), 103n);
@@ -114,10 +116,10 @@ test("Status-only updates copy inputs and preserve advertisement and subscriptio
   config.local.metadata.sequenceNumber = 18446744073709551615n;
   const other = applicationConfig();
   other.identitySecretKey[31] = 2;
-  const a = createNativeNetworkApplicationRuntime(config, () => undefined);
-  const b = createNativeNetworkApplicationRuntime(other, () => undefined);
+  const a = startRuntime(config, () => undefined);
+  const b = await startPeer(other);
   try {
-    const [identity] = await Promise.all([a.ready, b.ready]);
+    const [identity] = await Promise.all([a.identity, b.identity]);
     const intent = localIntent(config);
     intent.subscriptions = [{name: topicName(), params: config.gossipPolicy.score.defaultTopic}];
     intent.demand.attnets[0] = 5;
@@ -161,9 +163,9 @@ test("Status-only validation uses the active fork and leaves rejected updates un
   const config = applicationConfig();
   configureChain({ELECTRA_FORK_EPOCH: 0, FULU_FORK_EPOCH: 0});
   config.local.status.earliestAvailableSlot = 0n;
-  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+  const runtime = startRuntime(config, () => undefined);
   try {
-    await runtime.ready;
+    await runtime.identity;
     const intent = localIntent(config);
     await runtime.applyIntent(intent, 100n);
     for (const [field, value] of [
@@ -198,8 +200,8 @@ test("Status-only validation uses the active fork and leaves rejected updates un
 
 test("reentrant close during Status copying retires its command without publication", async () => {
   const config = applicationConfig();
-  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
-  await runtime.ready;
+  const runtime = startRuntime(config, () => undefined);
+  await runtime.identity;
   await runtime.applyIntent(localIntent(config), 100n);
   const status = structuredClone(config.local.status);
   Object.defineProperty(status, "headRoot", {
@@ -217,9 +219,9 @@ test("reentrant close during Status copying retires its command without publicat
 
 test("identity metadata belongs to its owner snapshot across queued intent updates", async () => {
   const config = applicationConfig();
-  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+  const runtime = startRuntime(config, () => undefined);
   try {
-    const ready = await runtime.ready;
+    const ready = await runtime.identity;
     expect(ready.metadata).toEqual(config.local.metadata);
     const first = localIntent(config);
     first.update.local.metadata.sequenceNumber = ready.metadata.sequenceNumber + 1n;
@@ -249,16 +251,16 @@ test("complete getters, membership and command results survive a throwing notifi
   const config = applicationConfig();
   let notifierCalls = 0;
   let callbackCommand: Promise<unknown> | undefined;
-  const runtime = createNativeNetworkApplicationRuntime(config, () => {
+  const runtime = startRuntime(config, () => {
     notifierCalls++;
     callbackCommand ??= runtime.getIdentity();
     throw Error("notifier");
   });
   const other = applicationConfig();
   other.identitySecretKey[31] = 8;
-  const remote = createNativeNetworkApplicationRuntime(other, () => undefined);
+  const remote = await startPeer(other);
   try {
-    const ready = await runtime.ready;
+    const ready = await runtime.identity;
     const identity = await runtime.getIdentity();
     expect(identity.peerId).toEqual(ready.peerId);
     await runtime.applyIntent(localIntent(config), 100n);
@@ -274,7 +276,7 @@ test("complete getters, membership and command results survive a throwing notifi
     await runtime.disconnect(ready.peerId);
     await runtime.reStatusPeers([]);
     expect(runtime.drainPeers(64)).toMatchObject({events: [], more: false, updatesReplaceState: true});
-    const remoteIdentity = await remote.ready;
+    const remoteIdentity = await remote.identity;
     await remote.applyIntent(localIntent(other), 100n);
     const connected = runtime.connect(remoteIdentity.peerId, [remoteIdentity.localEndpoint], 5000n);
     const accepted = [runtime.getIdentity(), runtime.getDirectPeers()];
@@ -293,9 +295,9 @@ test("complete getters, membership and command results survive a throwing notifi
 
 test("bounded typed stores refuse the third intent and unwind malformed input", async () => {
   const config = applicationConfig();
-  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+  const runtime = startRuntime(config, () => undefined);
   try {
-    await runtime.ready;
+    await runtime.identity;
     const one = runtime.applyIntent(localIntent(config), 100n);
     const two = runtime.applyIntent(localIntent(config), 101n);
     expect(() => runtime.applyIntent(localIntent(config), 102n)).toThrow("NetworkCommandFull");
@@ -324,8 +326,8 @@ test("bounded typed stores refuse the third intent and unwind malformed input", 
 
 test("reentrant close during input copying cancels publication", async () => {
   const config = applicationConfig();
-  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
-  await runtime.ready;
+  const runtime = startRuntime(config, () => undefined);
+  await runtime.identity;
   const intent = localIntent(config);
   Object.defineProperty(intent, "update", {
     enumerable: true,
@@ -355,9 +357,9 @@ test("actual 200/210 resources resolve and publish complete capacity", async () 
     receiveBudgetBytes: 512 * 1024 * 1024,
     targetPeers: 200,
   };
-  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+  const runtime = startRuntime(config, () => undefined);
   try {
-    await runtime.ready;
+    await runtime.identity;
     await runtime.applyIntent(localIntent(config), 100n);
     expect((await runtime.getPeers()).capacity).toBe(512);
     expect(runtime.diagnostics().resolvedCapacities).toEqual({
@@ -385,10 +387,10 @@ test("real authenticated connect, direct membership and generation-preserving im
   const config = applicationConfig();
   const other = applicationConfig();
   other.identitySecretKey[31] = 2;
-  const a = createNativeNetworkApplicationRuntime(config, () => undefined);
-  const b = createNativeNetworkApplicationRuntime(other, () => undefined);
+  const a = startRuntime(config, () => undefined);
+  const b = await startPeer(other);
   try {
-    const [identityA, identityB] = await Promise.all([a.ready, b.ready]);
+    const [identityA, identityB] = await Promise.all([a.identity, b.identity]);
     await Promise.all([a.applyIntent(localIntent(config), 100n), b.applyIntent(localIntent(other), 100n)]);
     await a.connect(identityB.peerId, [identityB.localEndpoint], 5000n);
     await a.connect(identityB.peerId, [identityB.localEndpoint], 5000n);
@@ -420,11 +422,11 @@ test("connect timeout retains independently wanted direct membership", async () 
   const config = applicationConfig();
   const other = applicationConfig();
   other.identitySecretKey[31] = 3;
-  const a = createNativeNetworkApplicationRuntime(config, () => undefined);
-  const b = createNativeNetworkApplicationRuntime(other, () => undefined);
+  const a = startRuntime(config, () => undefined);
+  const b = await silentPeer(other.identitySecretKey);
   try {
-    await a.ready;
-    const identity = await b.ready;
+    await a.identity;
+    const identity = await b.identity;
     await a.applyIntent(localIntent(config), 100n);
     await a.addDirectPeer(identity.peerId, [identity.localEndpoint]);
     await expect(a.connect(identity.peerId, [identity.localEndpoint], 30n)).rejects.toThrow("NetworkConnectTimeout");
@@ -438,10 +440,10 @@ test("peer penalties accumulate while the command lane is full", async () => {
   const first = applicationConfig();
   const second = applicationConfig();
   second.identitySecretKey[31] = 2;
-  const a = createNativeNetworkApplicationRuntime(first, () => undefined);
-  const b = createNativeNetworkApplicationRuntime(second, () => undefined);
+  const a = startRuntime(first, () => undefined);
+  const b = await startPeer(second);
   try {
-    const [, remote] = await Promise.all([a.ready, b.ready]);
+    const [, remote] = await Promise.all([a.identity, b.identity]);
     await Promise.all([a.applyIntent(localIntent(first), 100n), b.applyIntent(localIntent(second), 100n)]);
     await a.connect(remote.peerId, [remote.localEndpoint], 5000n);
     const pending = Array.from({length: 32}, () => a.getIdentity());
@@ -467,11 +469,11 @@ test("disconnect cancels pending one-shot connects and releases their dial inten
   const config = applicationConfig();
   const other = applicationConfig();
   other.identitySecretKey[31] = 3;
-  const a = createNativeNetworkApplicationRuntime(config, () => undefined);
-  const b = createNativeNetworkApplicationRuntime(other, () => undefined);
+  const a = startRuntime(config, () => undefined);
+  const b = await startPeer(other);
   try {
-    await a.ready;
-    const identity = await b.ready;
+    await a.identity;
+    const identity = await b.identity;
     await a.applyIntent(localIntent(config), 100n);
     const pending = a.connect(identity.peerId, [identity.localEndpoint], 60000n).catch((error: Error) => error.message);
     await a.disconnect(identity.peerId);
@@ -488,8 +490,8 @@ test("disconnect cancels pending one-shot connects and releases their dial inten
 
 test("closed facade releases heavy native and typed storage", async () => {
   const config = applicationConfig();
-  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
-  await runtime.ready;
+  const runtime = startRuntime(config, () => undefined);
+  await runtime.identity;
   await runtime.applyIntent(localIntent(config), 100n);
   const before = runtime.diagnostics();
   await runtime.close();
@@ -506,11 +508,11 @@ test("all typed stores and the connect allowance reject without partial admissio
   const config = applicationConfig();
   const remoteConfig = applicationConfig();
   remoteConfig.identitySecretKey[31] = 9;
-  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
-  const remote = createNativeNetworkApplicationRuntime(remoteConfig, () => undefined);
+  const runtime = startRuntime(config, () => undefined);
+  const remote = await silentPeer(remoteConfig.identitySecretKey);
   try {
-    await runtime.ready;
-    const identity = await remote.ready;
+    await runtime.identity;
+    const identity = await remote.identity;
     await runtime.applyIntent(localIntent(config), 100n);
     const snapshots = [runtime.getPeers(), runtime.getPeers()];
     expect(() => runtime.getPeers()).toThrow("NetworkCommandFull");
@@ -536,7 +538,15 @@ test("all typed stores and the connect allowance reject without partial admissio
 test.each(["gc", "exit"])("application lifecycle subprocess %s", (mode) => {
   const output = execFileSync(
     process.execPath,
-    ["--expose-gc", "--import", "tsx", "bindings/test/fixtures/network-application-lifecycle.mjs", mode],
+    [
+      "--import",
+      "tsx",
+      "--expose-gc",
+      "--import",
+      "tsx",
+      "bindings/test/fixtures/network-application-lifecycle.mjs",
+      mode,
+    ],
     {encoding: "utf8", timeout: 15000}
   );
   expect(output).toContain(mode === "exit" ? "application-ready-exit" : "application-command-settled NetworkClosed");
@@ -547,7 +557,15 @@ test.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")(
   () => {
     const output = execFileSync(
       process.execPath,
-      ["--expose-gc", "--import", "tsx", "bindings/test/fixtures/network-application-lifecycle.mjs", "copy-failure"],
+      [
+        "--import",
+        "tsx",
+        "--expose-gc",
+        "--import",
+        "tsx",
+        "bindings/test/fixtures/network-application-lifecycle.mjs",
+        "copy-failure",
+      ],
       {encoding: "utf8", timeout: 15000}
     );
     expect(output).toContain("application-command-settled NetworkResultAllocationFailed");
@@ -557,9 +575,9 @@ test.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")(
 test("identity reads the current signed ENR and copied intent ignores later input mutation", async () => {
   const config = applicationConfig();
   config.discovery = discoveryConfig().discovery;
-  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+  const runtime = startRuntime(config, () => undefined);
   try {
-    const ready = await runtime.ready;
+    const ready = await runtime.identity;
     expect(ready.localEnr).not.toBeNull();
     const intent = localIntent(config);
     intent.update.local.metadata.attnets[0] = 1;
@@ -581,9 +599,9 @@ test("incomplete early metadata rejects the whole intent without publishing loca
   const config = applicationConfig();
   config.discovery = discoveryConfig().discovery;
   configureChain({BLOB_SCHEDULE: [], FULU_FORK_EPOCH: Infinity});
-  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+  const runtime = startRuntime(config, () => undefined);
   try {
-    await runtime.ready;
+    await runtime.identity;
     await runtime.applyIntent(localIntent(config), 100n);
     const before = await runtime.getIdentity();
     const intent = localIntent(config);
@@ -605,10 +623,10 @@ test("graceful physical shutdown progresses while host callbacks are stalled", a
   const config = applicationConfig();
   const other = applicationConfig();
   other.identitySecretKey[31] = 21;
-  const a = createNativeNetworkApplicationRuntime(config, () => undefined);
-  const b = createNativeNetworkApplicationRuntime(other, () => undefined);
+  const a = startRuntime(config, () => undefined);
+  const b = await startPeer(other);
   try {
-    const [, identity] = await Promise.all([a.ready, b.ready]);
+    const [, identity] = await Promise.all([a.identity, b.identity]);
     await Promise.all([a.applyIntent(localIntent(config), 100n), b.applyIntent(localIntent(other), 100n)]);
     await a.connect(identity.peerId, [identity.localEndpoint], 5000n);
     const closed = a.close();
@@ -629,10 +647,10 @@ test.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")(
     const other = applicationConfig();
     other.identitySecretKey[31] = 22;
     bindings.networkTestScenario("application_peer_lane");
-    const a = createNativeNetworkApplicationRuntime(config, () => undefined);
-    const b = createNativeNetworkApplicationRuntime(other, () => undefined);
+    const a = startRuntime(config, () => undefined);
+    const b = await startPeer(other);
     try {
-      const [local, remote] = await Promise.all([a.ready, b.ready]);
+      const remote = b.identity;
       expect(a.diagnostics().peerLaneOccupied).toBe(64);
       await Promise.all([a.applyIntent(localIntent(config), 100n), b.applyIntent(localIntent(other), 100n)]);
       await a.connect(remote.peerId, [remote.localEndpoint], 5000n);
@@ -649,7 +667,6 @@ test.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")(
           connection: {generation: 4294967295 - i, index: i % 16},
           ownerSequence: 0n,
           peer: {generation: 18446744073709551615n - BigInt(i), index: i},
-          session: local.session,
           type: "closed",
         });
       }
@@ -680,23 +697,19 @@ test.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")(
     const other = applicationConfig();
     other.identitySecretKey[31] = 23;
     bindings.networkTestScenario("application_peer_lane");
-    const a = createNativeNetworkApplicationRuntime(config, () => undefined);
-    const b = createNativeNetworkApplicationRuntime(other, () => undefined);
+    const a = startRuntime(config, () => undefined);
+    const b = await startPeer(other);
     try {
-      const [local, remote] = await Promise.all([a.ready, b.ready]);
+      const [local, remote] = await Promise.all([a.identity, b.identity]);
       await Promise.all([a.applyIntent(localIntent(config), 100n), b.applyIntent(localIntent(other), 100n)]);
       await a.connect(remote.peerId, [remote.localEndpoint], 5000n);
       const old = (await a.getPeers()).peers[0];
       expect(old.connection).not.toBeNull();
       expect(a.diagnostics().peerLaneOccupied).toBe(64);
       await a.disconnect(remote.peerId);
-      let settled = false;
-      const reconnect = a.connect(remote.peerId, [remote.localEndpoint], 5000n).then(() => {
-        settled = true;
-      });
+      const reconnect = a.connect(remote.peerId, [remote.localEndpoint], 5000n);
       expect((await a.getIdentity()).peerId).toEqual(local.peerId);
       expect((await a.getPeers()).counts.connected).toBe(0);
-      expect(settled).toBe(false);
       expect(a.diagnostics().peerLaneOccupied).toBe(64);
       const background = a.drainPeers(64).events;
       expect(background).toHaveLength(64);
@@ -706,7 +719,7 @@ test.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")(
       const closed = events.filter((event) => event.type === "closed");
       expect(closed).toHaveLength(1);
       expect(events[0]).toEqual(closed[0]);
-      expect(closed[0]).toMatchObject({connection: old.connection, peer: old.peer, session: local.session});
+      expect(closed[0]).toMatchObject({connection: old.connection, peer: old.peer});
       const ready = events.find((event) => event.type === "ready");
       expect(ready?.type).toBe("ready");
       if (ready?.type !== "ready") throw Error("missing reconnect ready");
@@ -731,11 +744,11 @@ test.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")(
     config.identitySecretKey[31] = 2;
     const other = applicationConfig();
     bindings.networkTestScenario("application_peer_lane");
-    const a = createNativeNetworkApplicationRuntime(config, () => undefined);
-    const b = createNativeNetworkApplicationRuntime(other, () => undefined);
-    const replacement = createNativeNetworkApplicationRuntime(other, () => undefined);
+    const a = startRuntime(config, () => undefined);
+    const b = await startPeer(other);
+    const replacement = await startPeer(other);
     try {
-      const [local, remote, duplicate] = await Promise.all([a.ready, b.ready, replacement.ready]);
+      const [local, remote, duplicate] = await Promise.all([a.identity, b.identity, replacement.identity]);
       expect(Buffer.compare(local.peerId, remote.peerId)).toBeGreaterThan(0);
       expect(duplicate.peerId).toEqual(remote.peerId);
       await Promise.all([
@@ -776,7 +789,6 @@ test.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")(
         direction: "inbound",
         identity: remote.peerId,
         peer: old.peer,
-        session: local.session,
       });
       expect(ready.ownerSequence).toBeGreaterThan(0n);
       for (let i = 1; i < events.length; i++) {
@@ -793,3 +805,22 @@ test.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")(
   },
   15000
 );
+
+async function silentPeer(secret: Uint8Array) {
+  const socket = createSocket("udp4");
+  try {
+    const listening = once(socket, "listening");
+    socket.bind(0, "127.0.0.1");
+    await listening;
+    return {
+      close: () => new Promise<void>((resolve) => socket.close(() => resolve())),
+      identity: {
+        localEndpoint: {address: Uint8Array.of(127, 0, 0, 1), family: 4 as const, port: socket.address().port},
+        peerId: privateKeyFromRaw(secret).publicKey.toMultihash().bytes,
+      },
+    };
+  } catch (error) {
+    socket.close();
+    throw error;
+  }
+}

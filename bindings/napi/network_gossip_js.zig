@@ -37,10 +37,6 @@ pub fn drain(runtime: *Runtime, options: Value) !Value {
         runtime.unlock();
         return err;
     };
-    if (!runtime.active and !runtime.quiescent) {
-        runtime.unlock();
-        return error.NetworkNotActive;
-    }
     const table = &runtime.gossip.?;
     const previous_due = table.batch_due;
     const batch = if (runtime.quiescent) g.Batch{} else table.claimDemand(mono_ms, demand);
@@ -52,7 +48,7 @@ pub fn drain(runtime: *Runtime, options: Value) !Value {
         runtime.lock();
         table.finish(&batch, success);
         if (runtime.quiescent) table.trim() else if (!reported_more and table.hasWork()) {
-            runtime.readable_rearm = true;
+            runtime.work_rearm = true;
             runtime.signalLocked();
         }
         runtime.unlock();
@@ -82,7 +78,6 @@ fn descriptor(runtime: *Runtime, token: g.Token, cell: *const g.Cell, ordinal: u
     const env = runtime.env;
     const object = try env.createObject();
     const handle = try env.createObject();
-    try put(handle, "session", try env.createBigintUint64(runtime.diag.session));
     try put(handle, "index", try env.createUint32(token.index));
     try put(handle, "generation", try env.createBigintUint64(token.generation));
     try put(object, "handle", handle);
@@ -109,11 +104,10 @@ fn descriptor(runtime: *Runtime, token: g.Token, cell: *const g.Cell, ordinal: u
 pub fn report(runtime: *Runtime, value: Value, verdict_value: Value) !Value {
     runtime.retain();
     defer runtime.release();
-    try cfg.completeObject(value, &.{ "session", "index", "generation" });
-    const session = try cfg.bigint(try cfg.get(value, "session"));
+    try cfg.completeObject(value, &.{ "index", "generation" });
     const index = try cfg.integer(try cfg.get(value, "index"), 9007199254740991);
     const generation = try cfg.bigint(try cfg.get(value, "generation"));
-    if (session == 0 or generation == 0) return error.InvalidGossipHandle;
+    if (generation == 0) return error.InvalidGossipHandle;
     var text: [16]u8 = undefined;
     const len = try app.text(verdict_value, &text);
     const verdict = std.meta.stringToEnum(n.gossipsub.Verdict, text[0..len]) orelse return error.InvalidGossipVerdict;
@@ -123,9 +117,9 @@ pub fn report(runtime: *Runtime, value: Value, verdict_value: Value) !Value {
         return err;
     };
     var accepted = false;
-    if (!runtime.quiescent and !runtime.stop and runtime.active and session == runtime.diag.session and index < n.gossip_processor.limits_mod.capacity_max) {
+    if (!runtime.quiescent and !runtime.stop and index < n.gossip_processor.limits_mod.capacity_max) {
         accepted = runtime.gossip.?.report(.{ .index = @intCast(index), .generation = generation }, verdict, mono_ms);
-        runtime.readable_rearm = true;
+        runtime.work_rearm = true;
         runtime.signalLocked();
     } else runtime.gossip.?.diag.staleReports +|= 1;
     runtime.unlock();
@@ -220,7 +214,7 @@ pub fn checks(runtime: *Runtime) !Value {
         return err;
     };
     const table = &runtime.gossip.?;
-    const batch = if (runtime.active and !runtime.quiescent and !runtime.stop) table.claimChecks(now) else g.Batch{};
+    const batch = if (!runtime.quiescent and !runtime.stop) table.claimChecks(now) else g.Batch{};
     var cells: [g.batch_max]g.Cell = undefined;
     for (batch.tokens[0..batch.len], 0..) |token, i| cells[i] = table.get(token).?.*;
     runtime.unlock();
@@ -228,7 +222,7 @@ pub fn checks(runtime: *Runtime) !Value {
     defer if (!success) {
         runtime.lock();
         table.retryChecks(&batch);
-        runtime.readable_rearm = true;
+        runtime.work_rearm = true;
         runtime.signalLocked();
         runtime.unlock();
     };
@@ -238,7 +232,6 @@ pub fn checks(runtime: *Runtime) !Value {
         const cell = &cells[i];
         const object = try env.createObject();
         const handle = try env.createObject();
-        try put(handle, "session", try env.createBigintUint64(runtime.diag.session));
         try put(handle, "index", try env.createUint32(token.index));
         try put(handle, "generation", try env.createBigintUint64(token.generation));
         try put(object, "handle", handle);
@@ -253,20 +246,19 @@ pub fn checks(runtime: *Runtime) !Value {
 }
 
 pub fn classify(runtime: *Runtime, handle: Value, available: Value) !Value {
-    try cfg.completeObject(handle, &.{ "session", "index", "generation" });
-    const session = try cfg.bigint(try cfg.get(handle, "session"));
+    try cfg.completeObject(handle, &.{ "index", "generation" });
     const index = try cfg.integer(try cfg.get(handle, "index"), 9007199254740991);
     const generation = try cfg.bigint(try cfg.get(handle, "generation"));
     const ready = try cfg.boolean(available);
-    if (session == 0 or generation == 0) return error.InvalidGossipHandle;
+    if (generation == 0) return error.InvalidGossipHandle;
     runtime.lock();
     defer runtime.unlock();
     var accepted = false;
-    if (runtime.active and !runtime.stop and !runtime.quiescent and session == runtime.diag.session and index < n.gossip_processor.limits_mod.capacity_max) {
+    if (!runtime.stop and !runtime.quiescent and index < n.gossip_processor.limits_mod.capacity_max) {
         runtime.gossip.?.expire(try g.monotonic());
         accepted = runtime.gossip.?.classify(.{ .index = @intCast(index), .generation = generation }, ready);
         if (accepted) {
-            runtime.readable_rearm = true;
+            runtime.work_rearm = true;
             runtime.signalLocked();
         }
     }
@@ -279,7 +271,7 @@ pub fn notifyBlock(runtime: *Runtime, value: Value) !Value {
     defer runtime.unlock();
     if (!runtime.quiescent and !runtime.stop) {
         runtime.gossip.?.notifyBlock(root);
-        runtime.readable_rearm = true;
+        runtime.work_rearm = true;
         runtime.signalLocked();
     }
     return runtime.env.getUndefined();

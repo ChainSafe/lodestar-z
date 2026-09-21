@@ -1,9 +1,10 @@
+import {startRuntime} from "../utils/network.js";
 import assert from "node:assert/strict";
-import {createNativeNetworkApplicationRuntime} from "../../src/network.js";
+
 import {applicationConfig} from "../utils/network.ts";
 
-const runtime = createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined);
-await runtime.ready;
+const runtime = startRuntime(applicationConfig(), () => undefined);
+await runtime.identity;
 await runtime.close();
 let setterCalls = 0;
 Object.defineProperty(Object.prototype, "level", {

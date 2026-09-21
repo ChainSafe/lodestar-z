@@ -3,6 +3,27 @@ const p = @import("root.zig");
 const Budget = @import("../byte_budget.zig").Budget;
 const t = std.testing;
 
+test "gossip processor backing bytes match allocations at page boundaries" {
+    const page = @import("../gossipsub/message_store.zig").page_bytes;
+    for ([_]usize{ 1, 64 }) |capacity| {
+        for ([_]usize{ page, page + 1, 2 * page - 1, 2 * page }) |bytes| {
+            var measured = t.FailingAllocator.init(t.allocator, .{});
+            var budget: Budget = .{};
+            {
+                var table = try p.GossipProcessor.initPlanned(measured.allocator(), capacity, bytes, &budget, null);
+                defer table.deinit();
+                try t.expectEqual(measured.allocated_bytes, p.GossipProcessor.backingBytes(capacity, bytes));
+            }
+            try t.expectEqual(measured.allocated_bytes, measured.freed_bytes);
+            for (0..measured.alloc_index) |prefix| {
+                var failing = t.FailingAllocator.init(t.allocator, .{ .fail_index = prefix });
+                try t.expectError(error.OutOfMemory, p.GossipProcessor.initPlanned(failing.allocator(), capacity, bytes, &budget, null));
+                try t.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+            }
+        }
+    }
+}
+
 fn add(table: *p.GossipProcessor, kind: p.limits_mod.Kind, root: ?[32]u8) !p.Token {
     const token = try table.reserveKind(kind, 1);
     const cell = table.get(token).?;

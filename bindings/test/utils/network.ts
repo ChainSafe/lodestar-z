@@ -1,4 +1,5 @@
 import {testChain} from "../../../test/interop/network_chain.mjs";
+import {initializeNativeNetworkRuntime} from "../../src/network.js";
 export {testChain};
 
 import {type ChainConfig, createBeaconConfig} from "@lodestar/config";
@@ -95,7 +96,18 @@ export function discoveryConfig(): NativeApplicationConfig & {
   };
 }
 
+let chainOverrides: Partial<ChainConfig> = {};
+
+export function configuredChain() {
+  return {
+    ...Object.fromEntries(Object.entries(testChain).filter(([key]) => key.toUpperCase() === key)),
+    ...chainOverrides,
+    genesisValidatorsRoot: testChain.genesisValidatorsRoot,
+  };
+}
+
 export function configureChain(overrides: Partial<ChainConfig> = {}) {
+  chainOverrides = overrides;
   const chain = createBeaconConfig({...testChain, ...overrides}, testChain.genesisValidatorsRoot);
   bindings.config.set(chain, chain.genesisValidatorsRoot);
   return chain;
@@ -149,4 +161,8 @@ export function localIntent(config: NativeApplicationConfig): NativeLocalIntent 
       local: structuredClone(config.local),
     },
   };
+}
+
+export function startRuntime(config: NativeApplicationConfig, onWorkAvailable: () => void = () => undefined) {
+  return initializeNativeNetworkRuntime(config, onWorkAvailable);
 }

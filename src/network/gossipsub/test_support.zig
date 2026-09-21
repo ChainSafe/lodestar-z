@@ -52,7 +52,7 @@ pub fn ageHistory(g: *gossip.Gossipsub) void {
 
 pub fn sessions(a: std.mem.Allocator, capacity: u16) !sessions_mod.Sessions {
     const options: @import("options.zig").Options = .{ .connected_capacity = capacity };
-    return sessions_mod.Sessions.init(a, &options);
+    return sessions_mod.Sessions.init(a, &options, &@import("layout.zig").Layout.init(&options));
 }
 
 const Gossipsub = gossip.Gossipsub;

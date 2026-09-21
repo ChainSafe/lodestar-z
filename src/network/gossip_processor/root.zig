@@ -129,7 +129,7 @@ pub const GossipProcessor = struct {
         return .{ .cells = cells, .backing = backing, .budget = budget, .store = store, .limits = limits, .diag = .{ .capacity = capacity, .fixedPayloadBytes = store.bytes.len + capacity * storage.inline_bytes } };
     }
     pub fn backingBytes(capacity: usize, bytes: usize) usize {
-        return capacity * @sizeOf(Cell) + storage.Store.metadataBytes(capacity, bytes) + bytes;
+        return capacity * @sizeOf(Cell) + storage.Store.metadataBytes(capacity, bytes) + bytes / storage.page_bytes * storage.page_bytes;
     }
     pub fn deinit(self: *GossipProcessor) void {
         assert(self.diag.occupied == 0 and self.diag.reservedBytes == 0);

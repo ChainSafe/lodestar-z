@@ -19,6 +19,13 @@ duties. Native networking does not make received consensus objects trusted.
 The supported Node.js integration loads one version of `@chainsafe/lodestar-z` per process. Passing
 native class instances between addon versions is unsupported.
 
+The beacon node initializes one native network runtime per process, from its owning Node.js thread.
+Initialization installs complete configuration and initial protocol state before starting network
+work. The host applies subscriptions and peer demand through ordinary runtime updates.
+An initialization failure or shutdown is terminal; a second initialization, including from another
+Node.js environment, is rejected. The owning thread coordinates shutdown and joins the network
+thread. Environment cleanup also stops the owner and retires outstanding native obligations.
+
 The assets protected here are:
 
 - Ethereum consensus safety and liveness;

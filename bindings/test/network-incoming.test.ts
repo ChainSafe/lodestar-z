@@ -1,13 +1,13 @@
 import {expect, test} from "vitest";
-import {createNativeNetworkApplicationRuntime} from "../src/network.js";
-import {applicationConfig, localIntent, requestForks} from "./utils/network.js";
+import {applicationConfig, localIntent, requestForks, startRuntime} from "./utils/network.js";
+import {startPeer} from "./utils/network-peer.js";
 
 test("incoming request take is empty on an active application", async () => {
   const config = applicationConfig();
   config.resources.bridgeBudgetBytes = 512 * 1024 * 1024;
-  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+  const runtime = startRuntime(config, () => undefined);
   try {
-    await runtime.ready;
+    await runtime.identity;
     await runtime.applyIntent(localIntent(config), config.initialSlot);
     expect(runtime.takeIncomingRequest()).toBeNull();
     const diagnostics = runtime.diagnostics().incoming;
@@ -377,16 +377,21 @@ stock(
     const {Child} = await import("../../test/interop/child.mjs");
     const {payload, summary} = await import("../../test/interop/codec.mjs");
     let peer: InstanceType<typeof Child> | undefined;
-    let runtime: ReturnType<typeof createNativeNetworkApplicationRuntime> | undefined;
+    let runtime: ReturnType<typeof startRuntime> | undefined;
     try {
       const host = process.env.LODESTAR_Z_NETWORK_STOCK_HOST;
       if (!host) throw Error("stock host path required");
-      peer = new Child("incoming-stock", process.execPath, ["test/interop/request_responder.mjs", host]);
+      peer = new Child("incoming-stock", process.execPath, [
+        "--import",
+        "tsx",
+        "test/interop/request_responder.mjs",
+        host,
+      ]);
       await peer.command("ready");
       const config = applicationConfig();
       config.resources.bridgeBudgetBytes = 512 * 1024 * 1024;
-      runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
-      const identity = await runtime.ready;
+      runtime = startRuntime(config, () => undefined);
+      const identity = await runtime.identity;
       await runtime.applyIntent(localIntent(config), config.initialSlot);
       const addressBytes = Buffer.from(identity.localMultiaddr).toString("hex");
       for (const status of [0, 1, 2, 3, 139]) {
@@ -542,17 +547,27 @@ test.each([
   const {execFileSync} = await import("node:child_process");
   const output = execFileSync(
     process.execPath,
-    ["--expose-gc", "--import", "tsx", "bindings/test/fixtures/network-incoming-lifecycle.mjs", mode],
+    [
+      "--import",
+      "tsx",
+      "--expose-gc",
+      "--import",
+      "tsx",
+      "bindings/test/fixtures/network-incoming-lifecycle.mjs",
+      mode,
+    ],
     {encoding: "utf8", timeout: 20000}
   );
   expect(output).toContain(`incoming-lifecycle ${mode} ok`);
 }, 25000);
 
-test("incoming exact byte admission includes fixed metadata and shares outbound credit", async () => {
-  const baseline = await incomingPair();
-  const fixed = baseline.right.diagnostics().bridgeRequestedBytes;
-  await Promise.all([baseline.left.close(), baseline.right.close()]);
-  for (const extra of [63, 64]) {
+test.each([63, 64])("incoming exact byte admission includes fixed metadata at %s bytes", async (extra) => {
+  const probeConfig = applicationConfig();
+  probeConfig.resources.bridgeBudgetBytes = 512 * 1024 * 1024;
+  const baseline = await startPeer(probeConfig);
+  const fixed = (await baseline.diagnostics()).bridgeRequestedBytes;
+  await baseline.stop();
+  {
     const pair = await incomingPair(undefined, fixed + 10 * 1024 * 1024 + extra);
     try {
       const pending = pair.left.request(pair.remote.peerId, BLOCKS, new Uint8Array(32)).next();
@@ -585,7 +600,6 @@ test("incoming exact byte admission includes fixed metadata and shares outbound 
 }, 20000);
 
 interface IncomingHandle {
-  session: bigint;
   index: number;
   generation: bigint;
 }
@@ -594,10 +608,10 @@ interface IncomingDescriptor {
   closed: Promise<void>;
 }
 interface DirectIncomingBridge {
-  prepare(
+  initialize(
     config: ReturnType<typeof applicationConfig>,
-    notifier: () => void
-  ): {ready: Promise<import("../src/network.js").NativeIdentity>; closed: Promise<unknown>};
+    onWorkAvailable: () => void
+  ): {identity: import("../src/network.js").NativeIdentity; closed: Promise<unknown>};
   applyIntent(intent: ReturnType<typeof localIntent>, slot: bigint): Promise<unknown>;
   takeIncomingRequest(): IncomingDescriptor | null;
   incomingTerminal(handle: IncomingHandle, action: number, status?: number, message?: Uint8Array): void;
@@ -611,7 +625,7 @@ interface DirectIncomingBridge {
   close(): void;
 }
 
-test("incoming tokens isolate sessions and replacement generations", async () => {
+test("incoming tokens reject malformed handles and stale slot generations", async () => {
   const {networkBindings: exports} = await import("./utils/network-bindings.js");
   const {NativeNetworkRuntime} = exports as unknown as {NativeNetworkRuntime: new () => DirectIncomingBridge};
   const config = applicationConfig();
@@ -619,13 +633,13 @@ test("incoming tokens isolate sessions and replacement generations", async () =>
   config.identitySecretKey[31] = 2;
   const clientConfig = applicationConfig();
   clientConfig.resources.bridgeBudgetBytes = 512 * 1024 * 1024;
-  const client = createNativeNetworkApplicationRuntime(clientConfig, () => undefined);
+  const client = await startPeer(clientConfig);
   const native = new NativeNetworkRuntime();
   let closed: Promise<unknown> | undefined;
   try {
-    const promises = native.prepare(config, () => undefined);
+    const promises = native.initialize(config, () => undefined);
     closed = promises.closed;
-    const [, identity] = await Promise.all([client.ready, promises.ready]);
+    const [, identity] = await Promise.all([client.identity, promises.identity]);
     await Promise.all([
       client.applyIntent(localIntent(clientConfig), clientConfig.initialSlot),
       native.applyIntent(localIntent(config), config.initialSlot),
@@ -649,8 +663,8 @@ test("incoming tokens isolate sessions and replacement generations", async () =>
       if (!incoming) throw Error("missing incoming descriptor");
       const descriptor = incoming as IncomingDescriptor;
       const handle = descriptor.handle;
-      for (const invalid of [{...handle, session: handle.session + 1n}])
-        expect(() => native.incomingTerminal(invalid, 2, undefined, undefined)).toThrow("InvalidIncomingHandle");
+      for (const invalid of [{...handle, index: -1}])
+        expect(() => native.incomingTerminal(invalid, 2, undefined, undefined)).toThrow("InvalidNetworkInteger");
       expect(() => native.requestPull(handle)).toThrow();
       if (previous) {
         const ack = native.incomingRespond(handle, new Uint8Array(4000), requestForks[0]);
@@ -740,7 +754,7 @@ instrumented("incoming table allocation failure unwinds startup before publicati
   const config = applicationConfig();
   config.resources.bridgeBudgetBytes = 512 * 1024 * 1024;
   hooks.networkTestFail("incoming_table");
-  expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow("InjectedNetworkFailure");
+  expect(() => startRuntime(config, () => undefined)).toThrow("InjectedNetworkFailure");
   await expect
     .poll(() => {
       global.gc?.();

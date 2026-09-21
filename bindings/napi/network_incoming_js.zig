@@ -22,14 +22,12 @@ fn connectionValue(env: napi.Env, connection: @import("network").quic.engine.Han
 fn tokenValue(runtime: *Runtime, token: incoming.Token) !Value {
     const env = runtime.env;
     const object = try env.createObject();
-    try put(object, "session", try env.createBigintUint64(runtime.diag.session));
     try put(object, "index", try env.createUint32(token.index));
     try put(object, "generation", try env.createBigintUint64(token.generation));
     return object;
 }
-fn parseHandle(runtime: *Runtime, value: Value) !incoming.Token {
-    try cfg.completeObject(value, &.{ "session", "index", "generation" });
-    if (try cfg.bigint(try cfg.get(value, "session")) != runtime.diag.session) return error.InvalidIncomingHandle;
+fn parseHandle(value: Value) !incoming.Token {
+    try cfg.completeObject(value, &.{ "index", "generation" });
     return .{
         .index = @intCast(try cfg.integer(try cfg.get(value, "index"), 31)),
         .generation = try cfg.bigint(try cfg.get(value, "generation")),
@@ -51,7 +49,7 @@ pub fn take(runtime: *Runtime) !Value {
     runtime.retain();
     defer runtime.release();
     runtime.lock();
-    if (!runtime.active or runtime.stop or runtime.quiescent) {
+    if (runtime.stop or runtime.quiescent) {
         runtime.unlock();
         return runtime.env.getNull();
     }
@@ -123,7 +121,7 @@ fn viewLength(value: Value, max: usize) !usize {
     return view.length;
 }
 pub fn respond(runtime: *Runtime, value: Value, data: Value, context_value: Value) !Value {
-    const handle = try parseHandle(runtime, value);
+    const handle = try parseHandle(value);
     const context = try contextFor(context_value);
     runtime.retain();
     defer runtime.release();
@@ -184,7 +182,7 @@ pub fn respond(runtime: *Runtime, value: Value, data: Value, context_value: Valu
     return deferred.getPromise();
 }
 pub fn terminal(runtime: *Runtime, value: Value, action_value: Value, status_value: Value, message_value: Value) !Value {
-    const handle = try parseHandle(runtime, value);
+    const handle = try parseHandle(value);
     const action: incoming.Action = switch (try cfg.integer(action_value, 2)) {
         0 => .finish,
         1 => .fail,
@@ -224,7 +222,7 @@ pub fn terminal(runtime: *Runtime, value: Value, action_value: Value, status_val
 }
 
 pub fn release(runtime: *Runtime, value: Value) !Value {
-    const handle = try parseHandle(runtime, value);
+    const handle = try parseHandle(value);
     runtime.lock();
     const cell = cellFor(runtime, handle) catch |err| {
         runtime.unlock();
@@ -237,7 +235,7 @@ pub fn release(runtime: *Runtime, value: Value) !Value {
 }
 
 pub fn ready(runtime: *Runtime, value: Value) !Value {
-    const handle = try parseHandle(runtime, value);
+    const handle = try parseHandle(value);
     const deferred = try runtime.env.createPromise();
     errdefer deferred.resolve(runtime.env.getUndefined() catch unreachable) catch unreachable;
     runtime.lock();

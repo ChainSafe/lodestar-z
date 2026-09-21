@@ -1,45 +1,39 @@
 import {execFileSync} from "node:child_process";
 import {expect, test} from "vitest";
-import {
-  type NativeLogRecord,
-  type NativeNetworkApplicationRuntime,
-  createNativeNetworkApplicationRuntime,
-} from "../src/network.js";
-import {applicationConfig} from "./utils/network.js";
+import type {NativeLogRecord, NativeNetworkApplicationRuntime} from "../src/network.js";
+import {applicationConfig, startRuntime} from "./utils/network.js";
 import {BLOCKS, incomingPair, takeIncoming} from "./utils/network-incoming.js";
+import {type PeerRuntime, startPeer} from "./utils/network-peer.js";
 
-function drain(runtime: Pick<NativeNetworkApplicationRuntime, "drainLogs">): NativeLogRecord[] {
+async function drain(
+  runtime: Pick<NativeNetworkApplicationRuntime, "drainLogs"> | Pick<PeerRuntime, "drainLogs">
+): Promise<NativeLogRecord[]> {
   const records: NativeLogRecord[] = [];
   for (let i = 0; i < 4; i++) {
-    const batch = runtime.drainLogs(32);
+    const batch = await runtime.drainLogs(32);
     records.push(...batch.records);
     if (!batch.more) return records;
   }
   throw Error("Unexpected log volume");
 }
 
-test("native std.log captures lifecycle, timestamps and isolated sessions through close", async () => {
-  const left = createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined);
-  const right = createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined);
+test("native std.log captures lifecycle, timestamps and isolated processes through close", async () => {
+  const left = startRuntime(applicationConfig(), () => undefined);
+  const right = await startPeer(applicationConfig());
   try {
-    const identities = await Promise.all([left.ready, right.ready]);
     await Promise.all([left.close(), right.close()]);
-    for (const [runtime, identity] of [
-      [left, identities[0]],
-      [right, identities[1]],
-    ] as const) {
+    for (const runtime of [left, right]) {
       const {networkBindings: addon} = await import("./utils/network-bindings.js");
-      if (typeof addon.networkTestFail === "function") {
+      if (runtime === left && typeof addon.networkTestFail === "function") {
         addon.networkTestFail("drain_copy");
         expect(() => runtime.drainLogs()).toThrow("InjectedNetworkFailure");
       }
-      const records = drain(runtime);
+      const records = await drain(runtime);
       expect(records.some((r) => r.message.startsWith("owner_initializing"))).toBe(true);
-      expect(records.some((r) => r.message.startsWith("owner_ready "))).toBe(true);
+      expect(records.some((r) => r.message.startsWith("owner_initialized "))).toBe(true);
       expect(records.some((r) => r.message.startsWith("owner_stopped reason=requested "))).toBe(true);
       let sequence = 0n;
       for (const record of records) {
-        expect(record.session).toBe(identity.session);
         expect(record.sequence).toBeGreaterThan(sequence);
         expect(record.timestampMs).toBeGreaterThan(BigInt(Date.now() - 20000));
         expect(record.monotonicMs).toBeGreaterThan(0n);
@@ -47,10 +41,9 @@ test("native std.log captures lifecycle, timestamps and isolated sessions throug
         expect([...record.message].every((char) => char.charCodeAt(0) >= 32 && char.charCodeAt(0) <= 126)).toBe(true);
         sequence = record.sequence;
       }
-      expect(runtime.drainLogs().records).toEqual([]);
-      expect(runtime.getMetrics()).toContain("lodestar_native_logs_queued 0\n");
+      expect((await runtime.drainLogs()).records).toEqual([]);
+      expect(await runtime.getMetrics()).toContain("lodestar_native_logs_queued 0\n");
     }
-    expect(identities[0].session).not.toBe(identities[1].session);
   } finally {
     await Promise.all([left.close(), right.close()]);
   }
@@ -65,10 +58,10 @@ test("ReleaseSafe debug logs correlate real requests without draining request da
       const snapshots = await Promise.all([pair.left.getPeers(), pair.right.getPeers()]);
       return snapshots.every((snapshot) => snapshot.peers[0]?.status && snapshot.peers[0]?.metadata);
     });
-    pair.left.setLogLevel("debug");
+    await pair.left.setLogLevel("debug");
     pair.right.setLogLevel("debug");
-    drain(pair.left);
-    drain(pair.right);
+    await drain(pair.left);
+    await drain(pair.right);
     const request = pair.left.request(pair.remote.peerId, BLOCKS, new Uint8Array(32).fill(7));
     const pending = request.next();
     void pending.catch(() => undefined);
@@ -76,7 +69,7 @@ test("ReleaseSafe debug logs correlate real requests without draining request da
     await incoming.finish();
     expect(await pending).toEqual({done: true, value: undefined});
     for (const runtime of [pair.left, pair.right]) {
-      const allRecords = drain(runtime);
+      const allRecords = await drain(runtime);
       const records = allRecords.filter((r) => r.message.includes("method=blocks_by_root_v2"));
       const started = records.find((r) => r.message.startsWith("request_started "));
       const completed = records.find((r) => r.message.startsWith("request_completed "));
@@ -95,13 +88,13 @@ test("ReleaseSafe debug logs correlate real requests without draining request da
     await rejectedIncoming.fail(2, new TextEncoder().encode("untrusted response text\nsecret"));
     await rejected;
     await rejectedIncoming.closed;
-    const failures = drain(pair.left).filter((r) => r.scope === "network_reqresp_errors");
+    const failures = (await drain(pair.left)).filter((r) => r.scope === "network_reqresp_errors");
     const failure = failures.find(
       (r) => r.message.startsWith("request_failed ") && r.message.includes("reason=peer_error ")
     );
     expect(failure?.message).toContain("detail=none ");
     expect(failure?.message).toContain("peer_code=2 ");
-    const responses = drain(pair.right).filter((r) => r.message.includes("method=blocks_by_root_v2"));
+    const responses = (await drain(pair.right)).filter((r) => r.message.includes("method=blocks_by_root_v2"));
     const errorResponses = responses.filter((r) => r.message.startsWith("request_error_response "));
     expect(errorResponses).toHaveLength(1);
     expect(errorResponses[0].message).toContain("code=2 ");
@@ -117,9 +110,9 @@ test("ReleaseSafe debug logs correlate real requests without draining request da
 }, 20000);
 
 test("native logging rejects malformed controls and honors off", async () => {
-  const runtime = createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined);
+  const runtime = startRuntime(applicationConfig(), () => undefined);
   try {
-    await runtime.ready;
+    await runtime.identity;
     for (const level of ["debug-extra", "info-extra", "error-extra", "", "trace", "DEBUG", "debug\0", null, 0]) {
       expect(() => Reflect.apply(runtime.setLogLevel, runtime, [level])).toThrow("InvalidNetworkLogLevel");
     }
@@ -127,9 +120,9 @@ test("native logging rejects malformed controls and honors off", async () => {
       expect(() => Reflect.apply(runtime.drainLogs, runtime, [limit])).toThrow("InvalidDrainLimit");
     }
     runtime.setLogLevel("off");
-    drain(runtime);
+    await drain(runtime);
     await runtime.close();
-    expect(drain(runtime)).toEqual([]);
+    expect(await drain(runtime)).toEqual([]);
   } finally {
     await runtime.close();
   }
@@ -144,15 +137,15 @@ test.each([
 ] as const)("native log level %s filters request traces", async (level) => {
   const pair = await incomingPair();
   try {
-    pair.left.setLogLevel(level);
-    drain(pair.left);
+    await pair.left.setLogLevel(level);
+    await drain(pair.left);
     const request = pair.left.request(pair.remote.peerId, BLOCKS, new Uint8Array(32));
     const pending = request.next();
     void pending.catch(() => undefined);
     const incoming = await takeIncoming(pair.right);
     await incoming.finish();
     expect(await pending).toEqual({done: true, value: undefined});
-    const records = drain(pair.left);
+    const records = await drain(pair.left);
     expect(records.some((record) => record.message.startsWith("request_started "))).toBe(level === "debug");
     if (level === "off") expect(records).toEqual([]);
     else {

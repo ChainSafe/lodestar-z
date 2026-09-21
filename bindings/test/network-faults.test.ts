@@ -1,9 +1,9 @@
 import {execFileSync} from "node:child_process";
 import {setTimeout as delay} from "node:timers/promises";
 import {describe, expect, it} from "vitest";
-import {createNativeNetworkApplicationRuntime} from "../src/network.js";
-import {applicationConfig, configureChain, discoveryConfig, requestForks} from "./utils/network.js";
+import {applicationConfig, configureChain, discoveryConfig, requestForks, startRuntime} from "./utils/network.js";
 import {networkBindings as bindings} from "./utils/network-bindings.js";
+import {startPeer} from "./utils/network-peer.js";
 
 async function collected() {
   for (let i = 0; i < 100; i++) {
@@ -21,147 +21,65 @@ describe.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")("test-buil
     "wake",
     "notify",
     "hook",
-    "ready_promise",
     "close_promise",
     "copy_error_ref",
     "requested_ref",
-    "cancelled_ref",
     "failed_ref",
     "promise_holder",
     "spawn",
   ])("unwinds synchronous %s", async (stage) => {
     bindings.networkTestFail(stage);
-    expect(() => createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined)).toThrow(
-      "InjectedNetworkFailure"
-    );
+    expect(() => startRuntime(applicationConfig(), () => undefined)).toThrow("InjectedNetworkFailure");
     await collected();
   });
 
   it.each(["entropy", "key", "core", "wake_attach"])("unwinds owner %s", async (stage) => {
     bindings.networkTestFail(stage);
-    expect(() => createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined)).toThrow(
-      "InjectedNetworkFailure"
-    );
+    expect(() => startRuntime(applicationConfig(), () => undefined)).toThrow("InjectedNetworkFailure");
     await collected();
   });
 
   it("unwinds an ENR acquisition with a canonical signed bootstrap", async () => {
-    let source: ReturnType<typeof createNativeNetworkApplicationRuntime> | null = createNativeNetworkApplicationRuntime(
-      discoveryConfig(),
-      () => undefined
-    );
-    const enr = (await source.ready).localEnr;
+    const source = await startPeer(discoveryConfig());
+    const enr = (await source.identity).localEnr;
     expect(enr).toBeInstanceOf(Uint8Array);
     if (!enr) throw new Error("Missing signed ENR");
     await source.close();
-    source = null;
     await collected();
     const config = discoveryConfig();
     if (!config.discovery) throw new Error("Missing discovery config");
     config.discovery.bootstrapEnrs = [enr];
     bindings.networkTestFail("enr");
-    expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow("InjectedNetworkFailure");
+    expect(() => startRuntime(config, () => undefined)).toThrow("InjectedNetworkFailure");
     await collected();
   });
 
-  it.each(["startup_copy", "identity_copy"])("settles ready and closes after %s", async (stage) => {
-    bindings.networkTestFail(stage);
-    let runtime: ReturnType<typeof createNativeNetworkApplicationRuntime> | null =
-      createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined);
-    await expect(runtime.ready).rejects.toThrow("InjectedNetworkFailure");
-    expect(await runtime.close()).toEqual({reason: "failed"});
-    runtime = null;
+  it("unwinds identity projection before exposing the runtime", async () => {
+    bindings.networkTestFail("identity_copy");
+    expect(() => startRuntime(applicationConfig())).toThrow("InjectedNetworkFailure");
     await collected();
   });
 
   it("retries a terminal scalar copy once after physical join", async () => {
-    let runtime: ReturnType<typeof createNativeNetworkApplicationRuntime> | null =
-      createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined);
-    await runtime.ready;
+    let runtime: ReturnType<typeof startRuntime> | null = startRuntime(applicationConfig(), () => undefined);
+    await runtime.identity;
     bindings.networkTestFail("close_copy");
     expect(await runtime.close()).toEqual({reason: "requested"});
     runtime = null;
     await collected();
   });
 
-  it("keeps spawned instance credits until stopped owners are joined", async () => {
-    const runtimes = Array.from({length: 4}, () =>
-      createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined)
-    );
-    const readiness = runtimes.map((runtime) => runtime.ready.catch((error: Error) => error.message));
-    const closing = runtimes.map((runtime) => runtime.close());
-    try {
-      const wait = new Int32Array(new SharedArrayBuffer(4));
-      for (let i = 0; i < 500 && bindings.networkTestStats().owners !== 0; i++) Atomics.wait(wait, 0, 0, 10);
-      expect(bindings.networkTestStats().owners).toBe(0);
-      expect(() => createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined)).toThrow(
-        "NetworkInstanceLimit"
-      );
-    } finally {
-      await Promise.all(readiness);
-      await Promise.all(closing);
-    }
-    const replacement = createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined);
-    await replacement.ready;
-    await replacement.close();
+  it("does not reopen initialization after failure", async () => {
+    bindings.networkTestFail("spawn");
+    expect(() => startRuntime(applicationConfig())).toThrow("InjectedNetworkFailure");
+    await collected();
+    expect(() => startRuntime(applicationConfig())).toThrow("NetworkAlreadyInitialized");
   });
 
-  it.each(["before_ready"])("cancels a held actual owner at %s", async (stage) => {
-    bindings.networkTestScenario(stage);
-    let runtime: ReturnType<typeof createNativeNetworkApplicationRuntime> | null =
-      createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined);
-    let settlements = 0;
-    const ready = runtime.ready.then(
-      () => {
-        settlements++;
-        return "ready";
-      },
-      (error: Error) => {
-        settlements++;
-        return error.message;
-      }
-    );
-    try {
-      for (let i = 0; i < 500 && bindings.networkTestStage() !== stage; i++) await delay(10);
-      expect(bindings.networkTestStage()).toBe(stage);
-      expect(runtime.state).toBe("starting");
-      const closing = runtime.close();
-      expect(runtime.close()).toBe(closing);
-      expect(await ready).toBe("AbortError");
-      expect(await closing).toEqual({reason: "startupCancelled"});
-      expect(settlements).toBe(1);
-      expect(runtime.state).toBe("closed");
-    } finally {
-      await runtime.close();
-      runtime = null;
-      await collected();
-    }
-  });
-
-  it("preserves a committed wake failure when held startup is cancelled", async () => {
-    bindings.networkTestScenario("before_ready");
-    let runtime: ReturnType<typeof createNativeNetworkApplicationRuntime> | null =
-      createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined);
-    const ready = runtime.ready.catch((error: Error) => error.message);
-    try {
-      for (let i = 0; i < 500 && bindings.networkTestStage() !== "before_ready"; i++) await delay(10);
-      expect(bindings.networkTestStage()).toBe("before_ready");
-      bindings.networkTestFail("wake_signal");
-      const closing = runtime.close();
-      expect(await ready).toBe("NetworkWakeFailed");
-      expect(await closing).toEqual({reason: "failed"});
-      expect(runtime.diagnostics()).toMatchObject({state: "failed", terminalErrorCode: "NetworkWakeFailed"});
-    } finally {
-      await runtime.close();
-      runtime = null;
-      await collected();
-    }
-  });
-
-  it("joins a prepared owner after its close wake signal fails", async () => {
-    const runtime = createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined);
-    await runtime.ready;
-    expect(runtime.state).toBe("prepared");
+  it("joins a running owner after its close wake signal fails", async () => {
+    const runtime = startRuntime(applicationConfig(), () => undefined);
+    await runtime.identity;
+    expect(runtime.state).toBe("running");
     bindings.networkTestFail("wake_signal");
     expect(await runtime.close()).toEqual({reason: "failed"});
     expect(runtime.diagnostics()).toMatchObject({state: "failed", terminalErrorCode: "NetworkWakeFailed"});
@@ -171,6 +89,8 @@ describe.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")("test-buil
     const output = execFileSync(
       process.execPath,
       [
+        "--import",
+        "tsx",
         "--expose-gc",
         "--force-node-api-uncaught-exceptions-policy",
         "bindings/test/fixtures/network-lifecycle.mjs",
@@ -235,13 +155,13 @@ describe.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")("test-buil
       validationTombstoneMs: 32000n,
     };
     bindings.networkTestScenario("gossip");
-    const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+    const runtime = startRuntime(config, () => undefined);
     config.gossipPolicy.ipAllowlist[0].fill(0);
     config.gossipPolicy.score.decayIntervalMs = 12000n;
     config.gossipPolicy.iwantFollowupMs = 1n;
     config.gossipPolicy.idontwantMinDataSize = 0;
     try {
-      await runtime.ready;
+      await runtime.identity;
       // biome-ignore-start lint/style/useNamingConvention: The copied snapshot preserves native names to verify JS-to-native field mapping.
       expect(bindings.networkTestGossip()).toMatchObject({
         ipAllowlist: [Uint8Array.of(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 127, 0, 0, 1)],
@@ -307,10 +227,10 @@ describe.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")("test-buil
     configureChain({ELECTRA_FORK_EPOCH: 0, FULU_FORK_EPOCH: 0, SAMPLES_PER_SLOT: 8});
     config.local.status.earliestAvailableSlot = 0n;
     bindings.networkTestScenario("gossip");
-    const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+    const runtime = startRuntime(config, () => undefined);
     configureChain();
     try {
-      await runtime.ready;
+      await runtime.identity;
       expect(bindings.networkTestGossip()).toMatchObject({minimumSamplingGroups: 8});
     } finally {
       await runtime.close();
@@ -319,10 +239,10 @@ describe.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")("test-buil
   it("forwards immutable topic namespace into the actual native owner", async () => {
     const config = applicationConfig();
     bindings.networkTestScenario("gossip");
-    const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+    const runtime = startRuntime(config, () => undefined);
     configureChain({ELECTRA_FORK_EPOCH: 0});
     try {
-      await runtime.ready;
+      await runtime.identity;
       const snapshot = bindings.networkTestGossip();
       expect(snapshot).toMatchObject({
         topicPolicy: expect.arrayContaining([{digest: requestForks[0].digest, rules: expect.any(Array)}]),

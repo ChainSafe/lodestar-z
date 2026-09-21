@@ -86,9 +86,8 @@ fn identify(env: napi.Env, value: *const n.identify.Metadata) !Value {
     try put(object, "protocols", protocols);
     return object;
 }
-pub fn state(env: napi.Env, value: *const t.Snapshot, session: u64) !Value {
+pub fn state(env: napi.Env, value: *const t.Snapshot) !Value {
     const object = try env.createObject();
-    try put(object, "session", try env.createBigintUint64(session));
     try put(object, "peer", try reference(env, value.peer));
     try put(object, "identity", try bytes(env, &value.identity.bytes));
     try put(object, "connection", if (value.connection) |handle| try connection(env, handle) else try env.getNull());
@@ -108,14 +107,13 @@ pub fn state(env: napi.Env, value: *const t.Snapshot, session: u64) !Value {
         try put(object, pair[0], try env.createBigintUint64(@field(value, pair[1])));
     return object;
 }
-pub fn observation(env: napi.Env, entry: *const Entry, session: u64) !Value {
+pub fn observation(env: napi.Env, entry: *const Entry) !Value {
     const object = try env.createObject();
     try put(object, "type", try env.createStringUtf8(@tagName(entry.event)));
     try put(object, "ownerSequence", try env.createBigintUint64(entry.sequence));
     switch (entry.event) {
-        .ready, .updated => |*value| try put(object, "state", try state(env, value, session)),
+        .ready, .updated => |*value| try put(object, "state", try state(env, value)),
         .closed => |value| {
-            try put(object, "session", try env.createBigintUint64(session));
             try put(object, "peer", try reference(env, value.peer));
             try put(object, "connection", try connection(env, value.connection));
             try put(object, "identity", try bytes(env, &value.identity.bytes));

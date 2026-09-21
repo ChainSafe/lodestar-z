@@ -5,19 +5,20 @@ import {NativeRequest} from "./network-request.js";
 class NativeRuntime {
   #native;
   #closed;
-  #onReadable;
+  #onWorkAvailable;
 
-  constructor(config, onReadable) {
-    if (typeof onReadable !== "function") throw new Error("InvalidNetworkConfig");
+  constructor(config, onWorkAvailable) {
     this.#native = new bindings.NativeNetworkRuntime();
-    this.#onReadable = onReadable;
-    const promises = this.#native.prepare(config, NativeRuntime.#notifier(new WeakRef(this)));
-    this.ready = promises.ready;
-    this.#closed = promises.closed;
+    this.#onWorkAvailable = onWorkAvailable;
+    const callback =
+      typeof onWorkAvailable === "function" ? NativeRuntime.#notifier(new WeakRef(this)) : onWorkAvailable;
+    const initialized = this.#native.initialize(config, callback);
+    this.identity = initialized.identity;
+    this.#closed = initialized.closed;
   }
 
   static #notifier(weak) {
-    return () => weak.deref()?.#onReadable();
+    return () => weak.deref()?.#onWorkAvailable();
   }
 
   get closed() {
@@ -120,6 +121,6 @@ class NativeRuntime {
   }
 }
 
-export function createNativeNetworkApplicationRuntime(config, onReadable) {
-  return new NativeRuntime(config, onReadable);
+export function initializeNativeNetworkRuntime(config, onWorkAvailable) {
+  return new NativeRuntime(config, onWorkAvailable);
 }

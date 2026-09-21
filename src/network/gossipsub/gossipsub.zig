@@ -196,7 +196,7 @@ pub const Gossipsub = struct {
 
         const sessions = try allocator.create(Sessions);
         errdefer allocator.destroy(sessions);
-        sessions.* = try Sessions.init(allocator, &options);
+        sessions.* = try Sessions.init(allocator, &options, &layout);
         errdefer sessions.deinit(allocator);
 
         const overlay = try allocator.create(overlay_mod.Overlay);
@@ -206,9 +206,9 @@ pub const Gossipsub = struct {
         var peers = try peers_mod.PeerBook.init(allocator, &options);
         errdefer peers.deinit(allocator);
 
-        var messages = try @import("messages.zig").Messages.init(allocator, &options);
+        var messages = try @import("messages.zig").Messages.init(allocator, &options, &layout);
         errdefer messages.deinit(allocator, &peers);
-        const msg_scratch = try allocator.alloc(u8, memory.compression_bytes);
+        const msg_scratch = try allocator.alloc(u8, constants.GOSSIP_MAX_SIZE);
         errdefer allocator.free(msg_scratch);
         const decompressed = try allocator.alloc(u8, layout.output_bytes);
         errdefer allocator.free(decompressed);

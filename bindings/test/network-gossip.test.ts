@@ -1,17 +1,15 @@
 import {expect, test, vi} from "vitest";
-import {createNativeNetworkApplicationRuntime} from "../src/network.js";
-import {applicationConfig, localIntent, requestForks, topicName} from "./utils/network.js";
+import {applicationConfig, localIntent, requestForks, startRuntime, topicName} from "./utils/network.js";
+import {startPeer} from "./utils/network-peer.js";
 
 test("gossip drain and stale verdict on an activated application", async () => {
   const config = applicationConfig();
-  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+  const runtime = startRuntime(config, () => undefined);
   try {
-    await runtime.ready;
+    await runtime.identity;
     await runtime.applyIntent(localIntent(config), config.initialSlot);
     expect(runtime.drainGossip()).toEqual({grouped: false, messages: [], more: false});
-    expect(runtime.reportGossip({generation: 1n, index: 0, session: runtime.diagnostics().session}, "ignore")).toBe(
-      false
-    );
+    expect(runtime.reportGossip({generation: 1n, index: 0}, "ignore")).toBe(false);
   } finally {
     await runtime.close();
   }
@@ -62,15 +60,14 @@ async function gossipPair(timeoutMs = 30000n, budget?: number, beforeServer?: ()
 
 test("gossip lifecycle, strict representations and canonical publication refusals", async () => {
   const config = applicationConfig();
-  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
-  const handle = {generation: 1n, index: 0, session: runtime.diagnostics().session};
+  const runtime = startRuntime(config, () => undefined);
+  const handle = {generation: 1n, index: 0};
   try {
-    await runtime.ready;
-    expect(() => runtime.drainGossip()).toThrow("NetworkNotActive");
-    expect(() => runtime.publishGossip(TOPIC, new Uint8Array(4000))).toThrow("NetworkNotActive");
+    await runtime.identity;
+    expect(runtime.drainGossip().messages).toEqual([]);
     await runtime.applyIntent(localIntent(config), config.initialSlot);
     for (const malformed of [
-      {...handle, session: 0n},
+      {...handle, extra: 1},
       {...handle, generation: 0n},
       {...handle, generation: 1n << 64n},
       {...handle, index: -1},
@@ -79,7 +76,7 @@ test("gossip lifecycle, strict representations and canonical publication refusal
     ])
       expect(() => runtime.reportGossip(malformed, "ignore")).toThrow();
     expect(() => runtime.reportGossip(handle, "ACCEPT" as "accept")).toThrow();
-    expect(runtime.reportGossip({...handle, session: handle.session + 1n}, "ignore")).toBe(false);
+    expect(runtime.reportGossip({...handle}, "ignore")).toBe(false);
     expect(runtime.reportGossip({...handle, index: Number.MAX_SAFE_INTEGER}, "ignore")).toBe(false);
     expect(() =>
       runtime.publishGossip(TOPIC, new Uint8Array(4000), {flood: 0} as unknown as {flood: boolean})
@@ -153,21 +150,21 @@ test.each([
     await delay(40);
     const message = await nextGossip(pair.right);
     await vi.waitFor(
-      () => {
-        expect(pair.left.getMetrics()).toContain('gossipsub_msg_publish_count_total{topic="beacon_block"} 1\n');
+      async () => {
+        expect(await pair.left.getMetrics()).toContain('gossipsub_msg_publish_count_total{topic="beacon_block"} 1\n');
         expect(pair.right.getMetrics()).toContain('gossipsub_pre_validation_valid_total{topic="beacon_block"} 1\n');
         expect(pair.right.getMetrics()).toContain(
           'gossipsub_msg_received_prevalidation_total{topic="beacon_block"} 1\n'
         );
         expect(pair.right.getMetrics()).toContain("gossipsub_rpc_recv_message_total 1\n");
-        expect(pair.left.getMetrics()).toContain("gossipsub_rpc_sent_message_total 1\n");
-        expect(pair.left.getMetrics()).toContain("gossipsub_rpc_recv_message_total 0\n");
-        expect(pair.left.getMetrics()).toMatch(/gossipsub_rpc_sent_bytes_total [1-9][0-9]*\n/);
+        expect(await pair.left.getMetrics()).toContain("gossipsub_rpc_sent_message_total 1\n");
+        expect(await pair.left.getMetrics()).toContain("gossipsub_rpc_recv_message_total 0\n");
+        expect(await pair.left.getMetrics()).toMatch(/gossipsub_rpc_sent_bytes_total [1-9][0-9]*\n/);
         expect(pair.right.getMetrics()).toMatch(/gossipsub_rpc_recv_bytes_total [1-9][0-9]*\n/);
-        expect(pair.left.getMetrics()).toMatch(
+        expect(await pair.left.getMetrics()).toMatch(
           /gossipsub_msg_publish_bytes_total\{topic="beacon_block"\} [1-9][0-9]*\n/
         );
-        expect(pair.left.getMetrics()).toContain(
+        expect(await pair.left.getMetrics()).toContain(
           `lodestar_gossip_topic_peers_by_type_count{type="beacon_block",boundary="${Buffer.from(requestForks[0].digest).toString("hex")}"} 1\n`
         );
       },
@@ -189,7 +186,7 @@ test.each([
     expect(pair.right.reportGossip(message.handle, verdict)).toBe(false);
     const verdictMetric = {accept: "accepted", ignore: "ignored", reject: "rejected"}[verdict];
     await vi.waitFor(
-      () => {
+      async () => {
         const metrics = pair.right.getMetrics();
         expect(metrics).toContain(`gossipsub_${verdictMetric}_messages_total{topic="beacon_block"} 1\n`);
         expect(metrics).toContain("gossipsub_async_validation_delay_from_first_seen_count 1\n");
@@ -236,7 +233,7 @@ test.each([
   } finally {
     await Promise.all([pair.left.close(), pair.right.close()]);
   }
-  expect(pair.left.getMetrics()).toContain("gossipsub_rpc_sent_message_total 1\n");
+  expect(await pair.left.getMetrics()).toContain("gossipsub_rpc_sent_message_total 1\n");
   expect(pair.right.getMetrics()).toContain("gossipsub_rpc_recv_message_total 1\n");
   expect(pair.right.getMetrics()).toContain('gossipsub_cache_size{cache="seenCache"} 0\n');
   expect(pair.right.getMetrics()).toContain('gossipsub_cache_size{cache="gossipTracer.promises"} 0\n');
@@ -297,16 +294,16 @@ test.skipIf(!faultApi.networkTestFail)(
     try {
       faultApi.networkTestFail?.("operation_copy");
       await expect(
-        pair.left.publishGossip(TOPIC, new Uint8Array(4000).fill(4), {allowZeroPeers: false})
+        pair.right.publishGossip(TOPIC, new Uint8Array(4000).fill(4), {allowZeroPeers: false})
       ).rejects.toMatchObject({code: "NetworkResultAllocationFailed"});
-      await pair.left.close();
-      expect(pair.left.diagnostics()).toMatchObject({
+      await pair.right.close();
+      expect(await pair.right.diagnostics()).toMatchObject({
         liveNativeRequestedBytes: 0,
         operationOccupied: 0,
         state: "failed",
         terminalErrorCode: "NetworkResultAllocationFailed",
       });
-      expect(pair.left.diagnostics().gossip).toMatchObject({
+      expect((await pair.right.diagnostics()).gossip).toMatchObject({
         publicationBytes: 0,
         publicationCopies: 1n,
         publicationQueued: 1n,
@@ -410,6 +407,8 @@ for (const hoodi of [false, true]) {
       const {Child} = await import("../../test/interop/child.mjs");
       const {messageId, payload, summary} = await import("../../test/interop/codec.mjs");
       const peer = new Child("gossip-stock", process.execPath, [
+        "--import",
+        "tsx",
         "test/interop/request_responder.mjs",
         HOST ?? "",
         HOODI ?? "",
@@ -422,8 +421,8 @@ for (const hoodi of [false, true]) {
         config.resources.bridgeBudgetBytes = 128 * 1024 * 1024;
         const firstTopic = topicName("beacon_block", 2);
         const secondTopic = topicName("beacon_block", 3);
-        runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
-        const identity = await runtime.ready;
+        runtime = startRuntime(config, () => undefined);
+        const identity = await runtime.identity;
         const intent = localIntent(config);
         intent.subscriptions = [firstTopic, secondTopic].map((name) => ({
           name,
@@ -563,6 +562,8 @@ test("gossip operation promises and weak notifier permit facade collection", () 
   const output = execFileSync(
     process.execPath,
     [
+      "--import",
+      "tsx",
       "--expose-gc",
       "--force-node-api-uncaught-exceptions-policy",
       "bindings/test/fixtures/network-gossip-lifecycle.mjs",
@@ -602,9 +603,9 @@ test("one maximum native gossip payload owns exactly two copy allowances until d
 
 test("gossip publication rechecks a detached view and rolls back reentrant close", async () => {
   const config = applicationConfig();
-  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+  const runtime = startRuntime(config, () => undefined);
   try {
-    await runtime.ready;
+    await runtime.identity;
     await runtime.applyIntent(localIntent(config), config.initialSlot);
     const data = new Uint8Array(4000);
     expect(() =>
@@ -637,9 +638,9 @@ test.skipIf(!faultApi.networkTestFail)(
   "gossip publication allocation refusal unwinds shared bytes and operation",
   async () => {
     const config = applicationConfig();
-    const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+    const runtime = startRuntime(config, () => undefined);
     try {
-      await runtime.ready;
+      await runtime.identity;
       await runtime.applyIntent(localIntent(config), config.initialSlot);
       faultApi.networkTestFail?.("gossip_publication");
       expect(() => runtime.publishGossip(TOPIC, new Uint8Array(4000))).toThrow("InjectedNetworkFailure");
@@ -656,12 +657,8 @@ test.skipIf(!faultApi.networkTestFail)(
 
 test.skipIf(!faultApi.networkTestFail)("gossip table allocation failure unwinds application startup", async () => {
   faultApi.networkTestFail?.("gossip_table");
-  expect(() => createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined)).toThrow(
-    "InjectedNetworkFailure"
-  );
-  const runtime = createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined);
-  await runtime.ready;
-  await runtime.close();
+  expect(() => startRuntime(applicationConfig(), () => undefined)).toThrow("InjectedNetworkFailure");
+  expect(() => startRuntime(applicationConfig())).toThrow("NetworkAlreadyInitialized");
 });
 
 test.skipIf(!faultApi.networkTestGossipRelease)(
@@ -694,33 +691,24 @@ test.skipIf(!faultApi.networkTestGossipRelease)(
   15000
 );
 
-test("gossip session restart cannot report against a replacement cell with the same index", async () => {
-  const first = await gossipPair();
-  let old: NativeGossipMessage;
+test("closed runtime rejects a retained verdict and cannot be replaced", async () => {
+  const pair = await gossipPair();
   try {
-    await first.left.publishGossip(TOPIC, new Uint8Array(4000).fill(61), {allowZeroPeers: false});
-    old = await nextGossip(first.right);
+    await pair.left.publishGossip(TOPIC, new Uint8Array(4000));
+    const old = await nextGossip(pair.right);
+    await pair.right.close();
+    expect(pair.right.reportGossip(old.handle, "accept")).toBe(false);
+    expect(() => startRuntime(applicationConfig())).toThrow("NetworkAlreadyInitialized");
   } finally {
-    await Promise.all([first.left.close(), first.right.close()]);
+    await Promise.all([pair.left.close(), pair.right.close()]);
   }
-  const second = await gossipPair();
-  try {
-    await second.left.publishGossip(TOPIC, new Uint8Array(4000).fill(62), {allowZeroPeers: false});
-    const current = await nextGossip(second.right);
-    expect(current.handle.index).toBe(old.handle.index);
-    expect(current.handle.session).not.toBe(old.handle.session);
-    expect(second.right.reportGossip(old.handle, "reject")).toBe(false);
-    expect(second.right.reportGossip(current.handle, "accept")).toBe(true);
-  } finally {
-    await Promise.all([second.left.close(), second.right.close()]);
-  }
-}, 15000);
+});
 
 test("gossip diagnostics validate cursors and share bounded snapshot admission", async () => {
   const config = applicationConfig();
-  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+  const runtime = startRuntime(config, () => undefined);
   try {
-    await runtime.ready;
+    await runtime.identity;
     await runtime.applyIntent(localIntent(config), config.initialSlot);
     for (const cursor of [-1, 0.5, 513, Number.NaN]) {
       expect(() => runtime.getGossipDiagnostics(cursor)).toThrow();
@@ -739,17 +727,17 @@ test("gossip diagnostics validate cursors and share bounded snapshot admission",
 
 test("gossip diagnostics paginate retained peers and peer drains expose remaining events", async () => {
   const config = applicationConfig();
-  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+  const runtime = startRuntime(config, () => undefined);
   const identities = new Set<string>();
   try {
-    await runtime.ready;
+    await runtime.identity;
     await runtime.applyIntent(localIntent(config), config.initialSlot);
     for (let i = 0; i < 9; i++) {
       const remoteConfig = applicationConfig();
       remoteConfig.identitySecretKey[31] = 70 + i;
-      const remote = createNativeNetworkApplicationRuntime(remoteConfig, () => undefined);
+      const remote = await startPeer(remoteConfig);
       try {
-        const identity = await remote.ready;
+        const identity = await remote.identity;
         identities.add(Buffer.from(identity.peerId).toString("hex"));
         await remote.applyIntent(localIntent(remoteConfig), remoteConfig.initialSlot);
         await runtime.connect(identity.peerId, [identity.localEndpoint], 5000n);

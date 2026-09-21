@@ -34,8 +34,7 @@ pub const Sessions = struct {
         self.delivery_revision +|= 1;
     }
 
-    pub fn init(a: std.mem.Allocator, options: *const @import("options.zig").Options) !Sessions {
-        const layout = @import("layout.zig").Layout.init(options);
+    pub fn init(a: std.mem.Allocator, options: *const @import("options.zig").Options, layout: *const @import("layout.zig").Layout) !Sessions {
         const rows = try a.alloc(Session, layout.sessions);
         errdefer a.free(rows);
         const per_peer = layout.session_buffer_bytes;

@@ -1,6 +1,6 @@
 import {expect, it} from "vitest";
-import {type NativeRuntimeConfig, createNativeNetworkApplicationRuntime} from "../src/network.js";
-import {applicationConfig, configureChain, discoveryConfig} from "./utils/network.js";
+import type {NativeRuntimeConfig} from "../src/network.js";
+import {applicationConfig, configureChain, discoveryConfig, startRuntime} from "./utils/network.js";
 import {networkBindings as bindings} from "./utils/network-bindings.js";
 
 const cases: readonly [string, (config: NativeRuntimeConfig) => void, string][] = [
@@ -191,7 +191,7 @@ it.each(cases)("rejects %s before acquiring native thread or socket ownership", 
   const config = applicationConfig();
   mutate(config);
   const before: unknown = typeof bindings.networkTestStats === "function" ? bindings.networkTestStats() : null;
-  expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow(code);
+  expect(() => startRuntime(config, () => undefined)).toThrow(code);
   if (before) expect(bindings.networkTestStats()).toEqual(before);
 });
 
@@ -199,15 +199,15 @@ it("rejects a noncanonical bootstrap encoding during ordinary owner startup", as
   const config = discoveryConfig();
   if (!config.discovery) throw new Error("Missing discovery config");
   config.discovery.bootstrapEnrs = [Uint8Array.of(0xf8, 0x00)];
-  expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow("InvalidRecord");
+  expect(() => startRuntime(config, () => undefined)).toThrow("InvalidRecord");
 });
 
 it("accepts explicit host wire policy and zero IDONTWANT threshold", async () => {
   const config = applicationConfig();
   Object.assign(config.gossipPolicy, {idontwantMinDataSize: 0, iwantFollowupMs: 12000n});
-  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+  const runtime = startRuntime(config, () => undefined);
   try {
-    await runtime.ready;
+    await runtime.identity;
   } finally {
     await runtime.close();
   }
@@ -232,7 +232,7 @@ it.each([
   for (const [key, value] of Object.entries(fields))
     if (value === undefined) Reflect.deleteProperty(config.gossipPolicy, key);
   const before: unknown = typeof bindings.networkTestStats === "function" ? bindings.networkTestStats() : null;
-  expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow(code);
+  expect(() => startRuntime(config, () => undefined)).toThrow(code);
   if (before) expect(bindings.networkTestStats()).toEqual(before);
 });
 
@@ -245,31 +245,36 @@ it.each([
 ])("rejects independent chain input %s", (field) => {
   const config = applicationConfig();
   Reflect.set(config, field, {});
-  expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow("InvalidNetworkConfig");
+  expect(() => startRuntime(config, () => undefined)).toThrow("InvalidNetworkConfig");
 });
 
 it.each([0, 129])("rejects chain custody group bound %s", (groups) => {
   const config = applicationConfig();
   configureChain({NUMBER_OF_CUSTODY_GROUPS: groups});
-  expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow("InvalidNetworkChain");
+  expect(() => startRuntime(config, () => undefined)).toThrow("InvalidNetworkChain");
 });
 
 it("derives the Fulu availability requirement from shared chain configuration", () => {
   const config = applicationConfig();
   configureChain({ELECTRA_FORK_EPOCH: 0, FULU_FORK_EPOCH: 0});
-  expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow("MissingAvailability");
+  expect(() => startRuntime(config, () => undefined)).toThrow("MissingAvailability");
 });
 
-it("requires custody advertisement even when Fulu is unscheduled", async () => {
+it.each([
+  [false, null],
+  [true, null],
+  [true, 1n],
+] as const)("validates startup custody with unscheduled Fulu=%s, custody=%s", async (unscheduled, custody) => {
   const config = applicationConfig();
-  Reflect.set(config.local.metadata, "custodyGroupCount", null);
-  expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow("MissingCustodyAdvertisement");
-  configureChain({BLOB_SCHEDULE: [], FULU_FORK_EPOCH: Infinity});
-  expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow("MissingCustodyAdvertisement");
-  config.local.metadata.custodyGroupCount = 1n;
-  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+  if (unscheduled) configureChain({BLOB_SCHEDULE: [], FULU_FORK_EPOCH: Infinity});
+  Reflect.set(config.local.metadata, "custodyGroupCount", custody);
+  if (custody === null) {
+    expect(() => startRuntime(config)).toThrow("MissingCustodyAdvertisement");
+    return;
+  }
+  const runtime = startRuntime(config);
   try {
-    expect((await runtime.ready).metadata.custodyGroupCount).toBe(1n);
+    expect(runtime.identity.metadata.custodyGroupCount).toBe(1n);
   } finally {
     await runtime.close();
   }
