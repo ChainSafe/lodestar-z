@@ -17,24 +17,20 @@ const request_js = @import("network_request_js.zig");
 pub const js_meta = js.class(.{});
 
 runtime: ?*Runtime = null,
-started: bool = false,
 stopped: bool = false,
 
 pub fn init() @This() {
     return .{};
 }
 
-pub fn prepare(self: *@This(), config: js.Value, callback: js.Value) !js.Value {
-    if (self.started) return error.NetworkAlreadyStarted;
-    self.started = true;
+pub fn initialize(self: *@This(), config: js.Value, callback: js.Value) !js.Value {
+    try r.beginInitialization();
     if (self.stopped) return error.NetworkClosed;
     if (try callback.val.typeof() != .function) return error.InvalidNetworkConfig;
-    const session = try r.reserve();
-    errdefer r.unreserve();
     try faults.check(.runtime_alloc);
     const runtime = try r.allocator.create(Runtime);
     faults.count(&faults.runtimes, true);
-    runtime.* = .{ .env = js.env(), .diag = .{ .session = session, .currentSlot = 0 } };
+    runtime.* = .{ .env = js.env(), .diag = .{ .currentSlot = 0 } };
     if (comptime faults.enabled) runtime.test_scenario = faults.takeScenario();
     errdefer runtime.release();
     errdefer runtime.disposeJsReferences();
@@ -50,37 +46,54 @@ pub fn prepare(self: *@This(), config: js.Value, callback: js.Value) !js.Value {
     try faults.check(.wake);
     runtime.wake = try @import("network_wake.zig").Wake.init();
     errdefer if (runtime.wake) |*wake| wake.deinit();
-    const name = try js.env().createStringUtf8("NativeNetworkRuntime");
+    try @import("network_owner.zig").initialize(runtime);
+    runtime.identity = try runtime.heavy.?.readIdentity();
+    if (comptime faults.enabled) {
+        if (runtime.test_scenario == .application_peer_lane) {
+            for (0..64) |i| {
+                const event: n.peers.Event = .{ .closed = .{
+                    .peer = .{ .index = @intCast(i), .generation = std.math.maxInt(u64) - i },
+                    .connection = .{ .index = @intCast(i % 16), .generation = std.math.maxInt(u32) - @as(u32, @intCast(i)) },
+                    .identity = runtime.identity.peer,
+                    .reason = .host,
+                } };
+                runtime.lane.?.publish(&.{event}, 0);
+            }
+        }
+    }
+
+    const env = js.env();
+    const name = try env.createStringUtf8("NativeNetworkRuntime");
     try faults.check(.notify);
-    runtime.notify = try r.Notify.create(js.env(), callback.val, null, name, 1, 1, runtime, Runtime.finalize, onNotify);
+    runtime.notify = try r.Notify.create(env, callback.val, null, name, 1, 1, runtime, Runtime.finalize, onNotify);
     faults.count(&faults.notifications, true);
     runtime.retain();
     errdefer runtime.notify.release(.abort) catch unreachable;
+    try runtime.notify.unref(env);
     try faults.check(.hook);
-    try js.env().addEnvCleanupHook(Runtime, runtime, Runtime.cleanup);
+    try env.addEnvCleanupHook(Runtime, runtime, Runtime.cleanup);
     runtime.hook_live = true;
     runtime.retain();
     errdefer runtime.removeHook();
-    runtime.retain();
-    errdefer runtime.release();
-    const env = js.env();
-    try faults.check(.ready_promise);
-    runtime.ready_deferred = try env.createPromise();
-    errdefer runtime.ready_deferred.?.resolve(env.getUndefined() catch unreachable) catch unreachable;
     try faults.check(.close_promise);
     runtime.close_deferred = try env.createPromise();
     errdefer runtime.close_deferred.?.resolve(env.getUndefined() catch unreachable) catch unreachable;
     try prepareCloseResults(env, runtime);
     try faults.check(.promise_holder);
     const holder = try env.createObject();
-    try put(holder, "ready", runtime.ready_deferred.?.getPromise());
+    try put(holder, "identity", try identity(env, &runtime.identity));
     try put(holder, "closed", runtime.close_deferred.?.getPromise());
-    try @import("network_owner.zig").initialize(runtime);
+    if (self.stopped) return error.NetworkClosed;
+    runtime.retain();
+    errdefer runtime.release();
     try faults.check(.spawn);
     faults.count(&faults.owners, true);
     errdefer faults.count(&faults.owners, false);
     runtime.thread = try std.Thread.spawn(.{ .stack_size = std.Thread.SpawnConfig.default_stack_size }, @import("network_owner.zig").run, .{runtime});
     self.runtime = runtime;
+    runtime.lock();
+    runtime.pingLocked();
+    runtime.unlock();
     return .{ .val = holder };
 }
 
@@ -104,14 +117,8 @@ fn prepareApplicationStorage(runtime: *Runtime, app: *const application_cfg.Conf
         .dialEngineCapacity = resolved.limits.dialing_max,
     };
     const limits = resolved.core.service.reqresp;
-    const request_capacity: usize = @min(32, limits.outbound_max - limits.outbound_control_reserved);
-    const incoming_capacity: usize = @min(32, limits.inbound_max - limits.inbound_control_reserved);
-    resolved.core.service.reqresp.inbound_max = @intCast(incoming_capacity + limits.inbound_control_reserved);
-    resolved.core.service.reqresp.admission = try n.reqresp.reqresp.AdmissionOptions.defaults(
-        &limits.admission.?.policy,
-        limits.admission.?.limits.identities,
-        resolved.core.service.reqresp.inbound_max,
-    );
+    const request_capacity: usize = limits.outbound_max - limits.outbound_control_reserved;
+    const incoming_capacity: usize = limits.inbound_max - limits.inbound_control_reserved;
     const gossip_options = &resolved.core.service.gossipsub;
     const gossip_capacity = gossip_options.validation_capacity;
     const gossip_bytes = if (gossip_options.processor_limits) |work_limits| n.gossip_processor.limits_mod.bytes(&work_limits) else gossip_options.mcache_arena_bytes;
@@ -138,10 +145,10 @@ fn prepareCloseResults(env: napi.Env, runtime: *Runtime) !void {
     try put(fallback, "message", try env.createStringUtf8("NetworkResultAllocationFailed"));
     try faults.check(.copy_error_ref);
     runtime.copy_error = try napi.Ref.create(env.env, fallback, 1);
-    inline for (.{ "requested", "startupCancelled", "failed" }, 0..) |reason, i| {
+    inline for (.{ "requested", "failed" }, 0..) |reason, i| {
         const result = try env.createObject();
         try put(result, "reason", try env.createStringUtf8(reason));
-        try faults.check(([_]faults.Stage{ .requested_ref, .cancelled_ref, .failed_ref })[i]);
+        try faults.check(([_]faults.Stage{ .requested_ref, .failed_ref })[i]);
         runtime.close_results[i] = try napi.Ref.create(env.env, result, 1);
     }
 }
@@ -160,26 +167,8 @@ fn onNotify(env: napi.Env, callback: Value, runtime: *Runtime, _: *void) void {
     runtime.lock();
     runtime.notification_pending = false;
     const alive = runtime.env_alive;
-    const startup = runtime.startup;
-    const startup_error = runtime.startup_error;
-    const session = runtime.diag.session;
-    var ready_identity: r.Identity = undefined;
-    if (startup == .ready) ready_identity = runtime.identity;
     runtime.unlock();
     if (!alive) return;
-    if (!runtime.ready_settled and startup != .pending) {
-        runtime.ready_settled = true;
-        if (startup == .ready) {
-            const copied = copyStartup(env, &ready_identity, session) catch |err| {
-                rejectReady(env, runtime, err);
-                runtime.failDelivery();
-                settleOperations(env, runtime);
-                settleClose(env, runtime);
-                return;
-            };
-            runtime.ready_deferred.?.resolve(copied) catch unreachable;
-        } else rejectReady(env, runtime, startup_error.?);
-    }
     settleOperations(env, runtime);
     request_js.settle(env, runtime);
     incoming_js.settle(env, runtime);
@@ -189,21 +178,13 @@ fn onNotify(env: napi.Env, callback: Value, runtime: *Runtime, _: *void) void {
     if (idle) runtime.notify.unref(env) catch {};
     settleClose(env, runtime);
     runtime.lock();
-    const readable = !runtime.disposed and !runtime.quiescent and ((runtime.lane != null and runtime.lane.?.len > 0) or (runtime.incoming != null and runtime.incoming.?.oldest() != null) or (runtime.gossip != null and runtime.gossip.?.oldest() != null));
+    const work_available = !runtime.disposed and !runtime.quiescent and ((runtime.lane != null and runtime.lane.?.len > 0) or (runtime.incoming != null and runtime.incoming.?.oldest() != null) or (runtime.gossip != null and runtime.gossip.?.oldest() != null));
     runtime.unlock();
-    if (readable) _ = env.callFunction(callback, env.getUndefined() catch return, .{}) catch return;
+    if (work_available) _ = env.callFunction(callback, env.getUndefined() catch return, .{}) catch return;
 }
 fn makeError(env: napi.Env, err: anyerror) !Value {
     const name = try env.createStringUtf8(@errorName(err));
     return env.createError(name, name);
-}
-fn rejectReady(env: napi.Env, runtime: *Runtime, err: anyerror) void {
-    const value = makeError(env, err) catch runtime.copy_error.?.getValue() catch unreachable;
-    runtime.ready_deferred.?.reject(value) catch unreachable;
-}
-fn copyStartup(env: napi.Env, value: *const r.Identity, session: u64) !Value {
-    try faults.check(.startup_copy);
-    return identity(env, value, session);
 }
 fn settleClose(env: napi.Env, runtime: *Runtime) void {
     runtime.lock();
@@ -219,7 +200,7 @@ fn settleClose(env: napi.Env, runtime: *Runtime) void {
     const reason = runtime.reason;
     runtime.unlock();
     runtime.removeHook();
-    const value = copyClose(runtime, reason) catch copyClose(runtime, reason) catch runtime.close_results[2].?.getValue() catch unreachable;
+    const value = copyClose(runtime, reason) catch copyClose(runtime, reason) catch runtime.close_results[1].?.getValue() catch unreachable;
     runtime.close_settled = true;
     runtime.close_deferred.?.resolve(value) catch unreachable;
 }
@@ -260,10 +241,9 @@ const endpoint = @import("network_js.zig").endpoint;
 fn text(value: []const u8) !Value {
     return js.env().createStringUtf8(value);
 }
-fn identity(env: napi.Env, value: *const r.Identity, session: u64) !Value {
+fn identity(env: napi.Env, value: *const r.Identity) !Value {
     try faults.check(.identity_copy);
     const object = try env.createObject();
-    try put(object, "session", try env.createBigintUint64(session));
     try put(object, "peerId", try bytes(env, &value.peer.bytes));
     try put(object, "metadata", try projection.metadata(env, &value.metadata));
     const endpoints = try env.createArrayWithLength(@intFromBool(value.endpoints[0] != null) + @as(u32, @intFromBool(value.endpoints[1] != null)));
@@ -456,7 +436,7 @@ fn copyOperation(env: napi.Env, runtime: *Runtime, index: usize) !Value {
     const object = switch (operation.input.command) {
         .publishGossip => return gossip_js.publishResult(env, operation.publication),
         .getGossipDiagnostics => try @import("network_gossip_diagnostics.zig").copy(env, &runtime.stores.?.gossip_diagnostics[store.?]),
-        .getIdentity => try identity(env, &operation.identity, runtime.diag.session),
+        .getIdentity => try identity(env, &operation.identity),
         .applyIntent, .getPeers, .getDirectPeers => try env.createObject(),
         .removeDirectPeer => return env.getBoolean(operation.boolean),
         else => return env.getUndefined(),
@@ -469,7 +449,7 @@ fn copyOperation(env: napi.Env, runtime: *Runtime, index: usize) !Value {
         },
         .getPeers => {
             const peers = try env.createArrayWithLength(operation.count);
-            for (runtime.stores.?.snapshots[store.?][0..operation.count], 0..) |*row, i| try element(peers, i, try projection.state(env, row, runtime.diag.session));
+            for (runtime.stores.?.snapshots[store.?][0..operation.count], 0..) |*row, i| try element(peers, i, try projection.state(env, row));
             try put(object, "peers", peers);
             try put(object, "occupiedCount", try env.createDouble(@floatFromInt(operation.count)));
             try put(object, "capacity", try env.createUint32(runtime.peer_capacity));
@@ -503,7 +483,7 @@ pub fn drainPeers(self: *@This(), limit: js.Value) !js.Value {
     runtime.unlock();
     const env = js.env();
     const array = try env.createArrayWithLength(count);
-    for (events[0..count], 0..) |*event, i| try element(array, i, try projection.observation(env, event, runtime.diag.session));
+    for (events[0..count], 0..) |*event, i| try element(array, i, try projection.observation(env, event));
     const object = try env.createObject();
     try put(object, "events", array);
     try put(object, "ownerSequence", try env.createBigintUint64(sequence));
@@ -513,7 +493,7 @@ pub fn drainPeers(self: *@This(), limit: js.Value) !js.Value {
     runtime.lock();
     if (lane) |storage| {
         storage.commit(count);
-        if (!more and storage.len > 0 and !runtime.quiescent) runtime.readable_rearm = true;
+        if (!more and storage.len > 0 and !runtime.quiescent) runtime.work_rearm = true;
         if (!runtime.quiescent) runtime.signalLocked();
     }
     runtime.unlock();

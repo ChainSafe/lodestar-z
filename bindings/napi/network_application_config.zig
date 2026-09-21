@@ -22,6 +22,7 @@ pub const Config = struct {
             .forks = common.chain.forks[0..common.chain.supported_count],
             .limits = .{ .connections_max = r.connectionCapacity, .handshaking_max = r.handshakingCapacity, .dialing_max = r.dialingCapacity, .receive_budget_bytes = r.receiveBudgetBytes },
             .peers = .{ .capacity = r.peerCapacity, .target_peers = r.targetPeers, .max_peers = r.maxPeers, .min_outbound = r.minOutbound, .outbound_reserve = r.outboundReserve },
+            .application_requests_max = 32,
             .admission_policy = common.chain.requestPolicy(),
             .gossip = gossip_options,
             .router = .{ .identify = true, .capabilities = (try common.chain.update(common.local, null, common.slot)).capabilities },

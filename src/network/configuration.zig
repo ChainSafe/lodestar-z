@@ -28,6 +28,7 @@ pub const Request = struct {
     gossip: GossipOverrides = .{},
     router: RouterOverrides = .{},
     identify: IdentifyOverrides = .{},
+    application_requests_max: ?u16 = null,
     admission_policy: ?@import("reqresp/request_policy.zig").Config = null,
     control: ?@import("peers/control.zig").Options = null,
     byte_limit: ?usize = null,
@@ -70,6 +71,12 @@ pub fn resolve(request: Request) !Resolved {
         .inbound_application_per_peer_max = if (small) 4 else 8,
     };
     applyOverrides(&requests, request.reqresp);
+    if (request.application_requests_max) |maximum| {
+        if (maximum == 0 or requests.inbound_max < requests.inbound_control_reserved or requests.outbound_max < requests.outbound_control_reserved) return error.InvalidOptions;
+        requests.inbound_max = requests.inbound_control_reserved + @min(maximum, requests.inbound_max - requests.inbound_control_reserved);
+        requests.outbound_max = requests.outbound_control_reserved + @min(maximum, requests.outbound_max - requests.outbound_control_reserved);
+    }
+
     if (request.admission_policy) |policy_config| {
         if (requests.admission != null) return error.InvalidOptions;
         requests.admission = try rr.AdmissionOptions.defaults(&policy_config, peer_options.capacity, requests.inbound_max);

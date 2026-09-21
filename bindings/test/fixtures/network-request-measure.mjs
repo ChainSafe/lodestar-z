@@ -1,40 +1,65 @@
+import {startPeer} from "../utils/network-peer.js";
+import {startRuntime} from "../utils/network.js";
 import assert from "node:assert/strict";
-import {createNativeNetworkApplicationRuntime} from "../../src/network.js";
+
 import {applicationConfig, localIntent} from "../utils/network.ts";
 const rows = [];
 for (const profile of ["small", "beaconNode"]) {
   const config = applicationConfig();
   config.profile = profile;
-  if (profile === "beaconNode") config.resources = {
-    bridgeBudgetBytes: 16 * 1024 * 1024, connectionCapacity: 256, dialingCapacity: 16,
-    handshakingCapacity: 32, maxPeers: 210, minOutbound: 16, nativeBudgetBytes: 512 * 1024 * 1024,
-    outboundReserve: 32, peerCapacity: 512, receiveBudgetBytes: 512 * 1024 * 1024, targetPeers: 200,
-  };
-  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
-  await runtime.ready;
+  if (profile === "beaconNode")
+    config.resources = {
+      bridgeBudgetBytes: 128 * 1024 * 1024,
+      connectionCapacity: 256,
+      dialingCapacity: 16,
+      handshakingCapacity: 32,
+      maxPeers: 210,
+      minOutbound: 16,
+      nativeBudgetBytes: 512 * 1024 * 1024,
+      outboundReserve: 32,
+      peerCapacity: 512,
+      receiveBudgetBytes: 512 * 1024 * 1024,
+      targetPeers: 200,
+    };
+  const runtime = await startPeer(config);
+  await runtime.identity;
   await runtime.applyIntent(localIntent(config), config.initialSlot);
-  const before = runtime.diagnostics();
+  const before = await runtime.diagnostics();
   await runtime.close();
-  const after = runtime.diagnostics();
+  const after = await runtime.diagnostics();
   assert.equal(after.liveBridgeRequestedBytes, after.ownerShellBytes + after.peerLaneBytes);
   assert.equal(after.requests.reservedBytes, 0);
   rows.push({profile, before, after});
+  await runtime.stop();
 }
-console.log(JSON.stringify({preset: process.env.LODESTAR_PRESET ?? "mainnet", rows}, (_, value) => typeof value === "bigint" ? `${value}` : value, 2));
+console.log(
+  JSON.stringify(
+    {preset: process.env.LODESTAR_PRESET ?? "mainnet", rows},
+    (_, value) => (typeof value === "bigint" ? `${value}` : value),
+    2
+  )
+);
 
 if (process.env.LODESTAR_Z_NETWORK_STOCK_HOST) {
   const {Child} = await import("../../../test/interop/child.mjs");
-  const peer = new Child("measure-stock", process.execPath, ["test/interop/request_responder.mjs", process.env.LODESTAR_Z_NETWORK_STOCK_HOST]);
+  const peer = new Child("measure-stock", process.execPath, [
+    "test/interop/request_responder.mjs",
+    process.env.LODESTAR_Z_NETWORK_STOCK_HOST,
+  ]);
   let runtime;
   try {
     const remote = await peer.command("ready");
     const config = applicationConfig();
     config.resources.bridgeBudgetBytes = 128 * 1024 * 1024;
-    runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
-    await runtime.ready;
+    runtime = startRuntime(config, () => undefined);
+    await runtime.identity;
     await runtime.applyIntent(localIntent(config), config.initialSlot);
     const id = Uint8Array.from(Buffer.from(remote.peer, "hex"));
-    await runtime.connect(id, [{family: 4, address: Uint8Array.of(127, 0, 0, 1), port: Number(remote.address.split("/")[4])}], 5000n);
+    await runtime.connect(
+      id,
+      [{family: 4, address: Uint8Array.of(127, 0, 0, 1), port: Number(remote.address.split("/")[4])}],
+      5000n
+    );
     await peer.command("scenario", {scenario: "hold"});
     const held = runtime.request(id, "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy", new Uint8Array(32));
     const heldPull = held.next().catch((error) => error.code);
@@ -61,8 +86,18 @@ if (process.env.LODESTAR_Z_NETWORK_STOCK_HOST) {
     const retired = runtime.diagnostics();
     assert.equal(retired.requests.occupied, 0);
     assert.equal(retired.liveBridgeRequestedBytes, retired.ownerShellBytes + retired.peerLaneBytes);
-    console.log(JSON.stringify({payload: {admitted, pending, copied, closed, retired}}, (_, value) => typeof value === "bigint" ? `${value}` : value, 2));
+    console.log(
+      JSON.stringify(
+        {payload: {admitted, pending, copied, closed, retired}},
+        (_, value) => (typeof value === "bigint" ? `${value}` : value),
+        2
+      )
+    );
   } finally {
-    try { await runtime?.close(); } finally { await peer.stop(); }
+    try {
+      await runtime?.close();
+    } finally {
+      await peer.stop();
+    }
   }
 }

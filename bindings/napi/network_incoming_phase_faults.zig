@@ -4,7 +4,7 @@ const faults = @import("network_faults.zig");
 const incoming = @import("network_incoming.zig");
 const Runtime = @import("network_runtime.zig").Runtime;
 pub const Preparation = enum { buffer, deferred };
-pub const TerminalProof = struct { session: u64, handle: @import("network").reqresp.RequestHandle };
+pub const TerminalProof = struct { handle: @import("network").reqresp.RequestHandle };
 const Snapshot = struct {
     preparing: bool = false,
     heavyFreed: bool = false,
@@ -132,7 +132,7 @@ pub fn terminalBarrier(runtime: *Runtime, accepted: bool) !?TerminalProof {
     std.Io.Threaded.mutexLock(&mutex);
     snapshot = .{ .terminalBefore = !accepted, .terminalAccepted = accepted, .nativeFinishing = native.state == .finishing, .nativeErrorWriting = native.state == .writing_chunk and native.close_after_write, .nativeTerminal = native.request.terminalEvent() != null, .chunks = native.request.chunks };
     std.Io.Threaded.mutexUnlock(&mutex);
-    const proof: TerminalProof = .{ .session = runtime.diag.session, .handle = cell.handle };
+    const proof: TerminalProof = .{ .handle = cell.handle };
     runtime.unlock();
     for (0..500) |_| {
         runtime.lock();
@@ -157,7 +157,6 @@ pub fn afterStep(runtime: *Runtime, proof: *const TerminalProof, events: []const
     if (comptime !faults.enabled) return;
     runtime.lock();
     defer runtime.unlock();
-    std.debug.assert(runtime.diag.session == proof.session);
     for (runtime.incoming.?.cells) |*cell| {
         if (!cell.native or !std.meta.eql(cell.handle, proof.handle)) continue;
         std.debug.assert(cell.action == .cancel);

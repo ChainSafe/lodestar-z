@@ -12,30 +12,14 @@ pub const projection = @import("network_peer_projection.zig");
 const Wake = @import("network_wake.zig").Wake;
 pub const Owner = @import("network_owner.zig").Owner;
 pub const allocator = std.heap.c_allocator;
-pub const State = enum { starting, prepared, running, stopping, closed, failed };
-pub const Reason = enum { requested, startupCancelled, failed };
+pub const State = enum { running, stopping, closed, failed };
+pub const Reason = enum { requested, failed };
 pub const Notify = napi.ThreadSafeFunction(Runtime, void);
-// Shared across Node environments. Each runtime releases its instance reservation on teardown;
-// session IDs never reset and their allocation is serialized by session_mutex.
-var instances = std.atomic.Value(u32).init(0);
-var sessions: u64 = 0;
-var session_mutex: std.Io.Mutex = .init;
+var initialized = std.atomic.Value(bool).init(false);
 
-pub fn reserve() !u64 {
-    const old = instances.fetchAdd(1, .acq_rel);
-    if (old >= 4) {
-        _ = instances.fetchSub(1, .acq_rel);
-        return error.NetworkInstanceLimit;
-    }
-    errdefer unreserve();
-    std.Io.Threaded.mutexLock(&session_mutex);
-    defer std.Io.Threaded.mutexUnlock(&session_mutex);
-    if (sessions == std.math.maxInt(u64)) return error.NetworkSessionExhausted;
-    sessions += 1;
-    return sessions;
-}
-pub fn unreserve() void {
-    std.debug.assert(instances.fetchSub(1, .acq_rel) > 0);
+/// The beacon node initializes once, from its owning Node environment. Teardown never resets this guard.
+pub fn beginInitialization() !void {
+    if (initialized.swap(true, .acq_rel)) return error.NetworkAlreadyInitialized;
 }
 
 pub const Identity = struct {
@@ -63,9 +47,8 @@ pub const ResolvedCapacities = struct {
     dialEngineCapacity: u16 = 0,
 };
 pub const Diagnostics = struct {
-    state: State = .starting,
+    state: State = .running,
     terminal_error: ?anyerror = null,
-    session: u64,
     currentSlot: u64,
     ownerTurns: u64 = 0,
     lastMonotonicMs: u64 = 0,
@@ -155,7 +138,6 @@ pub const Runtime = struct {
     refs: std.atomic.Value(u32) = .init(1),
     mutex: std.Io.Mutex = .init,
     heavy: ?*Owner = null,
-    active: bool = false,
     graceful: bool = false,
     closing_deadline: ?u64 = null,
     stores: ?*Stores = null,
@@ -178,22 +160,19 @@ pub const Runtime = struct {
     notify_live: bool = true,
     notify_finalized: bool = false,
     notification_pending: bool = false,
-    readable_rearm: bool = false,
+    work_rearm: bool = false,
     env_alive: bool = true,
     disposed: bool = false,
-    ready_deferred: ?napi.Deferred = null,
     close_deferred: ?napi.Deferred = null,
-    ready_settled: bool = false,
     close_settled: bool = false,
     copy_error: ?napi.Ref = null,
-    close_results: [3]?napi.Ref = @splat(null),
+    close_results: [2]?napi.Ref = @splat(null),
     hook_live: bool = false,
     env: napi.Env,
     stop: bool = false,
     reason: Reason = .requested,
     quiescent: bool = false,
-    startup: enum { pending, ready, failed } = .pending,
-    startup_error: ?anyerror = null,
+    terminal_error: ?anyerror = null,
     identity: Identity = undefined,
     slot: u64 = 0,
     diag: Diagnostics,
@@ -271,7 +250,7 @@ pub const Runtime = struct {
         defer self.unlock();
         if (self.stop or self.quiescent) return;
         self.stop = true;
-        self.reason = if (self.startup == .pending) .startupCancelled else .requested;
+        self.reason = .requested;
         self.diag.state = .stopping;
         self.signalLocked();
     }
@@ -279,7 +258,7 @@ pub const Runtime = struct {
         if (self.wake) |*wake| signal(wake) catch {
             self.stop = true;
             self.reason = .failed;
-            self.startup_error = error.NetworkWakeFailed;
+            self.terminal_error = error.NetworkWakeFailed;
         };
     }
     fn signal(wake: *const Wake) !void {
@@ -290,7 +269,7 @@ pub const Runtime = struct {
         self.lock();
         defer self.unlock();
         var result = self.diag;
-        result.terminal_error = if (self.reason == .failed) self.startup_error else null;
+        result.terminal_error = if (self.reason == .failed) self.terminal_error else null;
         result.operationOccupied = self.table.occupied;
         result.operationHighWater = self.table.high_water;
         result.operationRefusals = self.table.refusals;
@@ -363,7 +342,7 @@ pub const Runtime = struct {
                 self.notification_pending = false;
                 self.stop = true;
                 self.reason = .failed;
-                self.startup_error = err;
+                self.terminal_error = err;
             },
         };
     }
@@ -371,7 +350,6 @@ pub const Runtime = struct {
         if (self.thread) |thread| {
             thread.join();
             self.thread = null;
-            unreserve();
         }
     }
     pub fn removeHook(self: *Runtime) void {
@@ -385,7 +363,7 @@ pub const Runtime = struct {
         defer self.unlock();
         self.stop = true;
         self.reason = .failed;
-        self.startup_error = error.NetworkResultAllocationFailed;
+        self.terminal_error = error.NetworkResultAllocationFailed;
         if (self.quiescent) self.diag.state = .failed;
         self.signalLocked();
     }
@@ -463,7 +441,7 @@ pub const Runtime = struct {
             switch (cell.state) {
                 .queued, .executing, .waiting => {
                     gossip_mod.releasePublicationLocked(self, &self.table.cells[i].input);
-                    self.table.cells[i].failure = self.startup_error orelse error.NetworkClosed;
+                    self.table.cells[i].failure = self.terminal_error orelse error.NetworkClosed;
                     cell.state = .terminal;
                 },
                 else => {},
@@ -475,8 +453,8 @@ pub const Runtime = struct {
             if (err != error.AbortError) std.log.scoped(.network_runtime).err("owner_failed reason={s}", .{@errorName(err)});
             self.lock();
             if (self.reason != .failed) {
-                self.startup_error = err;
-                self.reason = if (err == error.AbortError) .startupCancelled else .failed;
+                self.terminal_error = err;
+                self.reason = .failed;
             }
             self.unlock();
         }
@@ -486,10 +464,6 @@ pub const Runtime = struct {
         incoming_mod.closeLocked(self);
         gossip_mod.closeLocked(self);
         self.cancelCommandsLocked();
-        if (self.startup == .pending) {
-            self.startup = .failed;
-            self.startup_error = self.startup_error orelse error.AbortError;
-        }
         if (self.wake) |*wake| wake.deinit();
         self.wake = null;
         self.quiescent = true;
@@ -513,12 +487,11 @@ pub const Runtime = struct {
         self.lock();
         defer self.unlock();
         if (self.stop or self.quiescent) return error.NetworkClosed;
-        if (!self.active and command != .applyIntent and command != .getIdentity) return error.NetworkNotActive;
         const token = self.table.reserve(command) catch |err| {
             if (err == error.NetworkSequenceExhausted) {
                 self.stop = true;
                 self.reason = .failed;
-                self.startup_error = err;
+                self.terminal_error = err;
                 self.signalLocked();
             }
             return err;
@@ -573,7 +546,7 @@ test "authenticated connect completion latches before a later close in the borro
         .{ .connected = .{ .conn = handle, .peer_id = peer, .direction = .outbound } },
         .{ .closed = .{ .conn = handle, .peer_id = peer, .direction = .outbound, .reason = .host } },
     };
-    var runtime: Runtime = .{ .env = undefined, .diag = .{ .session = 1, .currentSlot = 100 }, .notify_live = false, .env_alive = false };
+    var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 100 }, .notify_live = false, .env_alive = false };
     const token = try runtime.table.reserve(.connect);
     runtime.table.get(token).state = .waiting;
     runtime.table.cells[token.index].input.peer = peer;
@@ -587,7 +560,7 @@ test "authenticated connect completion latches before a later close in the borro
 }
 
 test "stop preserves latched success and cancels accepted nonterminal commands" {
-    var runtime: Runtime = .{ .env = undefined, .diag = .{ .session = 1, .currentSlot = 100 }, .notify_live = false, .env_alive = false };
+    var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 100 }, .notify_live = false, .env_alive = false };
     const success = try runtime.table.reserve(.getIdentity);
     const waiting = try runtime.table.reserve(.connect);
     const queued = try runtime.table.reserve(.getIdentity);
@@ -610,7 +583,7 @@ test {
 }
 
 test "request table storage retires only after physical quiescence and final pins" {
-    var runtime: Runtime = .{ .env = undefined, .diag = .{ .session = 1, .currentSlot = 0 } };
+    var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 } };
     runtime.payload_budget.limit = 32 + 2 * n.reqresp.Protocol.blocks_by_root_v2.info().response_max;
     runtime.requests = try requests_mod.Table.init(std.testing.allocator, 1, &runtime.payload_budget);
     defer runtime.requests.?.deinit();

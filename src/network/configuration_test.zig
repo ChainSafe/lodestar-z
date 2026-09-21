@@ -152,3 +152,24 @@ test "resolved admission and Identify overrides use final profile capacities" {
     try std.testing.expectEqualStrings("resolved-agent", identify.agent);
     try std.testing.expectEqualStrings("resolved-version", identify.protocol_version);
 }
+
+test "application request limits preserve control capacity and size admission from final limits" {
+    for ([_]Profile{ .small, .beacon_node }) |profile| {
+        const resolved = try resolve(.{
+            .profile = profile,
+            .seed = 91,
+            .forks = &.{},
+            .application_requests_max = 32,
+            .admission_policy = @import("reqresp/policy_fixture.zig").config(),
+        });
+        const requests = resolved.core.service.reqresp;
+        const application_max: u16 = if (profile == .small) 6 else 32;
+        try std.testing.expectEqual(application_max, requests.inbound_max - requests.inbound_control_reserved);
+        try std.testing.expectEqual(application_max, requests.outbound_max - requests.outbound_control_reserved);
+        try std.testing.expectEqual(resolved.core.peers.max_peers, requests.outbound_control_reserved);
+        const ping = requests.admission.?.limits.global[@intFromEnum(@import("config").ForkSeq.fulu)][@intFromEnum(@import("reqresp/protocol.zig").Protocol.ping_v1)];
+        try std.testing.expectEqual(@as(u32, requests.inbound_max), ping.tokens);
+    }
+    try std.testing.expectError(error.InvalidOptions, resolve(.{ .seed = 1, .forks = &.{}, .application_requests_max = 0 }));
+    try std.testing.expectError(error.InvalidOptions, resolve(.{ .seed = 1, .forks = &.{}, .application_requests_max = 32, .reqresp = .{ .inbound_max = 1 } }));
+}

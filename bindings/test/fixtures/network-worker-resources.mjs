@@ -1,9 +1,11 @@
+import {startPeer} from "../utils/network-peer.js";
+import {startRuntime} from "../utils/network.js";
 import assert from "node:assert/strict";
 import {createSocket} from "node:dgram";
 import {once} from "node:events";
 import {setTimeout as delay} from "node:timers/promises";
 import {isMainThread, parentPort, Worker} from "node:worker_threads";
-import {createNativeNetworkApplicationRuntime} from "../../src/network.js";
+
 import {applicationConfig, localIntent, topicName} from "../utils/network.ts";
 
 const topic = topicName();
@@ -19,8 +21,8 @@ async function until(read) {
 const config = applicationConfig();
 config.identitySecretKey[31] = isMainThread ? 61 : 62;
 config.resources.bridgeBudgetBytes = 512 * 1024 * 1024;
-const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
-const identity = await runtime.ready;
+const runtime = isMainThread ? await startPeer(config) : startRuntime(config);
+const identity = await runtime.identity;
 const intent = localIntent(config);
 intent.subscriptions = [{name: topic, params: config.gossipPolicy.score.defaultTopic}];
 await runtime.applyIntent(intent, config.initialSlot);

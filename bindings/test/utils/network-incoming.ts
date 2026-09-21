@@ -4,15 +4,15 @@ import type {
   NativeIncomingRequest,
   NativeNetworkApplicationRuntime,
 } from "../../src/network.js";
-import {createNativeNetworkApplicationRuntime} from "../../src/network.js";
-import {applicationConfig, localIntent} from "./network.js";
+import {applicationConfig, localIntent, startRuntime} from "./network.js";
+import {type PeerRuntime, startPeer} from "./network-peer.js";
 
 export const BLOCKS = "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy";
 
 export async function incomingPair(
   beforeServer?: () => void,
   serverBudget?: number,
-  onServerReadable: () => void = () => undefined,
+  onServerWorkAvailable: () => void = () => undefined,
   configure?: (left: NativeApplicationConfig, right: NativeApplicationConfig) => void
 ) {
   const leftConfig = applicationConfig();
@@ -21,14 +21,13 @@ export async function incomingPair(
   rightConfig.resources.bridgeBudgetBytes = serverBudget ?? 512 * 1024 * 1024;
   rightConfig.identitySecretKey[31] = 2;
   configure?.(leftConfig, rightConfig);
-  let left: NativeNetworkApplicationRuntime | undefined;
+  let left: PeerRuntime | undefined;
   let right: NativeNetworkApplicationRuntime | undefined;
   try {
-    left = createNativeNetworkApplicationRuntime(leftConfig, () => undefined);
-    void left.ready.catch(() => undefined);
+    left = await startPeer(leftConfig);
     beforeServer?.();
-    right = createNativeNetworkApplicationRuntime(rightConfig, onServerReadable);
-    const [identity, remote] = await Promise.all([left.ready, right.ready]);
+    right = startRuntime(rightConfig, onServerWorkAvailable);
+    const [identity, remote] = await Promise.all([left.identity, right.identity]);
     await Promise.all([
       left.applyIntent(localIntent(leftConfig), leftConfig.initialSlot),
       right.applyIntent(localIntent(rightConfig), rightConfig.initialSlot),
@@ -41,9 +40,11 @@ export async function incomingPair(
   }
 }
 
-export async function takeIncoming(runtime: NativeNetworkApplicationRuntime): Promise<NativeIncomingRequest> {
+export async function takeIncoming(
+  runtime: NativeNetworkApplicationRuntime | PeerRuntime
+): Promise<NativeIncomingRequest> {
   for (let i = 0; i < 1000; i++) {
-    const incoming = runtime.takeIncomingRequest();
+    const incoming = await runtime.takeIncomingRequest();
     if (incoming) return incoming;
     await delay(5);
   }

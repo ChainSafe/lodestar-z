@@ -1,19 +1,28 @@
 import {execFileSync} from "node:child_process";
 import {privateKeyFromRaw} from "@libp2p/crypto/keys";
 import {expect, it} from "vitest";
-import {createNativeNetworkApplicationRuntime} from "../src/network.js";
-import {applicationConfig, configureChain, localIntent, requestForks} from "./utils/network.js";
+import {initializeNativeNetworkRuntime} from "../src/network.js";
+import {
+  applicationConfig,
+  configureChain,
+  discoveryConfig,
+  localIntent,
+  requestForks,
+  startRuntime,
+  topicName,
+} from "./utils/network.js";
+import {startPeer} from "./utils/network-peer.js";
 
 it("owns a real native socket and releases it on idempotent close", async () => {
   const config = applicationConfig();
   const expectedPeerId = privateKeyFromRaw(config.identitySecretKey).publicKey.toMultihash().bytes;
-  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+  const runtime = startRuntime(config, () => undefined);
   const terminal = runtime.closed;
   try {
-    const identity = await runtime.ready;
+    const identity = await runtime.identity;
     expect(identity.peerId).toEqual(expectedPeerId);
     expect(identity.localEndpoint.port).toBeGreaterThan(0);
-    expect(runtime.state).toBe("prepared");
+    expect(runtime.state).toBe("running");
     const diagnostics = runtime.diagnostics();
     expect(diagnostics.nativeRequestedBytes).toBeGreaterThan(0);
     expect(diagnostics.quicReceiveWindowBytes).toBe(
@@ -30,6 +39,8 @@ it("owns a real native socket and releases it on idempotent close", async () => 
     execFileSync(
       process.execPath,
       [
+        "--import",
+        "tsx",
         "--input-type=module",
         "-e",
         `import {createSocket} from 'node:dgram'; const socket = createSocket('udp4'); socket.on('error', () => process.exit(1)); socket.bind(${identity.localEndpoint.port}, '127.0.0.1', () => socket.close());`,
@@ -44,16 +55,21 @@ it("owns a real native socket and releases it on idempotent close", async () => 
 it("copies inputs before returning and advances the clock only through intents", async () => {
   const config = applicationConfig();
   const expected = privateKeyFromRaw(config.identitySecretKey).publicKey.toMultihash().bytes;
+  config.local.metadata.syncnets = 2;
+  const runtime = initializeNativeNetworkRuntime(config, () => undefined);
+  expect(runtime.identity.metadata.syncnets).toBe(2);
+  config.local.metadata.syncnets = 4;
+  expect(runtime.identity.metadata.syncnets).toBe(2);
   const intent = localIntent(config);
-  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
   config.identitySecretKey.fill(0);
   if (!("address" in config.bind)) throw new Error("Expected a single bind address");
   config.bind.address.fill(0);
   config.local.status.headRoot.fill(99);
   try {
-    const identity = await runtime.ready;
+    const identity = await runtime.identity;
     expect(identity.peerId).toEqual(expected);
     expect(await runtime.applyIntent(intent, 101n)).toMatchObject({slot: 101n});
+    expect((await runtime.getIdentity()).metadata.syncnets).toBe(4);
     await expect(runtime.applyIntent(intent, 100n)).rejects.toThrow("ClockRegression");
     expect(() => runtime.applyIntent(intent, -1n)).toThrow("InvalidNetworkInteger");
     expect(() => runtime.applyIntent(intent, 1n << 64n)).toThrow("InvalidNetworkInteger");
@@ -63,6 +79,29 @@ it("copies inputs before returning and advances the clock only through intents",
   }
   expect(() => runtime.applyIntent(intent, 102n)).toThrow("NetworkClosed");
 }, 20000);
+
+it("starts without subscriptions and accepts ordinary updates after rejecting an invalid intent", async () => {
+  const config = applicationConfig();
+  const runtime = initializeNativeNetworkRuntime(config, () => undefined);
+  try {
+    expect(runtime.state).toBe("running");
+    expect((await runtime.getGossipDiagnostics()).topics.some((topic) => topic.subscribed)).toBe(false);
+    expect(runtime.drainGossip()).toEqual({grouped: false, messages: [], more: false});
+    expect(runtime.takeIncomingRequest()).toBeNull();
+    const intent = localIntent(config);
+    intent.subscriptions = [{name: "/invalid", params: config.gossipPolicy.score.defaultTopic}];
+    await expect(runtime.applyIntent(intent, config.initialSlot)).rejects.toThrow("InvalidTopic");
+    expect(runtime.state).toBe("running");
+    const topic = topicName();
+    intent.subscriptions = [{name: topic, params: config.gossipPolicy.score.defaultTopic}];
+    await runtime.applyIntent(intent, config.initialSlot);
+    expect((await runtime.getGossipDiagnostics()).topics).toContainEqual(
+      expect.objectContaining({subscribed: true, topic})
+    );
+  } finally {
+    await runtime.close();
+  }
+});
 
 it.each([
   [
@@ -125,57 +164,32 @@ it.each([
 ] as const)("rejects %s before startup", (_name, mutate, code) => {
   const config = applicationConfig();
   mutate(config);
-  expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow(code);
+  expect(() => startRuntime(config, () => undefined)).toThrow(code);
 });
 
-it("reserves only four active owners and releases capacity on close", async () => {
-  const runtimes = Array.from({length: 4}, () =>
-    createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined)
-  );
-  try {
-    await Promise.all(runtimes.map((runtime) => runtime.ready));
-    expect(() => createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined)).toThrow(
-      "NetworkInstanceLimit"
-    );
-    await runtimes[0].close();
-    const replacement = createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined);
-    try {
-      await replacement.ready;
-    } finally {
-      await replacement.close();
-    }
-    expect((await runtimes[1].getIdentity()).peerId).toHaveLength(39);
-  } finally {
-    await Promise.all(runtimes.map((runtime) => runtime.close()));
-  }
-}, 30000);
+it("rejects another initialization during operation and after close", async () => {
+  const runtime = startRuntime(applicationConfig());
+  expect(runtime.state).toBe("running");
+  expect(runtime.identity.peerId).toHaveLength(39);
+  expect(() => startRuntime(applicationConfig())).toThrow("NetworkAlreadyInitialized");
+  expect((await runtime.getIdentity()).peerId).toEqual(runtime.identity.peerId);
+  await runtime.close();
+  expect(() => startRuntime(applicationConfig())).toThrow("NetworkAlreadyInitialized");
+});
 
-it("settles immediate close coherently whichever startup outcome wins", async () => {
-  const runtime = createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined);
-  let settlements = 0;
-  const ready = runtime.ready.then(
-    () => {
-      settlements++;
-      return "ready";
-    },
-    (error: Error) => {
-      settlements++;
-      return error.message;
-    }
-  );
+it("joins immediately after initialization and closes idempotently", async () => {
+  const runtime = startRuntime(applicationConfig());
   const closing = runtime.close();
   expect(runtime.close()).toBe(closing);
-  const outcome = await ready;
-  expect(["ready", "AbortError"]).toContain(outcome);
-  expect(await closing).toEqual({reason: outcome === "ready" ? "requested" : "startupCancelled"});
-  expect(settlements).toBe(1);
+  expect(await closing).toEqual({reason: "requested"});
   expect(runtime.state).toBe("closed");
-}, 20000);
+  expect(runtime.diagnostics().liveNativeRequestedBytes).toBe(0);
+});
 
 it("rejects every invalid drain limit", async () => {
-  const runtime = createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined);
+  const runtime = startRuntime(applicationConfig(), () => undefined);
   try {
-    await runtime.ready;
+    await runtime.identity;
     for (const limit of [0, -1, 0.5, 65, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1]) {
       expect(() => runtime.drainPeers(limit)).toThrow("InvalidDrainLimit");
     }
@@ -187,68 +201,57 @@ it("rejects every invalid drain limit", async () => {
 }, 20000);
 
 it.each(["gc", "exit", "promises"])("finishes bounded %s subprocess lifecycle", (mode) => {
-  const output = execFileSync(process.execPath, ["--expose-gc", "bindings/test/fixtures/network-lifecycle.mjs", mode], {
-    encoding: "utf8",
-    timeout: 10000,
-  });
+  const output = execFileSync(
+    process.execPath,
+    ["--import", "tsx", "--expose-gc", "bindings/test/fixtures/network-lifecycle.mjs", mode],
+    {
+      encoding: "utf8",
+      timeout: 10000,
+    }
+  );
   expect(output).toContain(mode === "gc" ? "gc-rebound" : mode === "exit" ? "ready-exit" : "promises-settled");
 }, 15000);
 
 it("releases live requests, incoming cells and gossip batches on worker termination", () => {
-  const output = execFileSync(process.execPath, ["bindings/test/fixtures/network-worker-resources.mjs"], {
-    encoding: "utf8",
-    timeout: 20000,
-  });
+  const output = execFileSync(
+    process.execPath,
+    ["--import", "tsx", "bindings/test/fixtures/network-worker-resources.mjs"],
+    {
+      encoding: "utf8",
+      timeout: 20000,
+    }
+  );
   expect(output).toContain("live-worker-resources-released");
 }, 25000);
 
-it("survives abrupt teardown of a second Node environment", async () => {
+it("rejects initialization from another Node environment", async () => {
   const {Worker} = await import("node:worker_threads");
-  const runtime = createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined);
-  const worker = new Worker(new URL("./fixtures/network-worker.mjs", import.meta.url));
+  const runtime = startRuntime(applicationConfig());
+  const worker = new Worker(new URL("./fixtures/network-worker.mjs", import.meta.url), {execArgv: ["--import", "tsx"]});
   try {
-    await runtime.ready;
-    const port = await new Promise<number>((resolve, reject) => {
-      worker.once("message", resolve);
-      worker.once("error", reject);
-    });
-    await worker.terminate();
-    expect((await runtime.getIdentity()).peerId).toHaveLength(39);
-    execFileSync(
-      process.execPath,
-      [
-        "--input-type=module",
-        "-e",
-        `import {createSocket} from 'node:dgram'; const socket = createSocket('udp4'); socket.on('error', () => process.exit(1)); socket.bind(${port}, '127.0.0.1', () => socket.close());`,
-      ],
-      {timeout: 5000}
-    );
+    const failure = await new Promise<Error>((resolve) => worker.once("error", resolve));
+    expect(failure.message).toContain("NetworkAlreadyInitialized");
+    expect((await runtime.getIdentity()).peerId).toEqual(runtime.identity.peerId);
   } finally {
     await worker.terminate();
     await runtime.close();
   }
-}, 20000);
+});
 
-it("gates raw reentrant prepare and close before config getters execute", async () => {
+it("gates raw reentrant initialization and close before config getters execute", async () => {
   const {networkBindings: addon} = await import("./utils/network-bindings.js");
   const raw = new addon.NativeNetworkRuntime();
   const config = applicationConfig();
   Object.defineProperty(config, "profile", {
     enumerable: true,
     get() {
-      expect(() => raw.prepare(applicationConfig(), () => undefined)).toThrow("NetworkAlreadyStarted");
+      expect(() => raw.initialize(applicationConfig(), () => undefined)).toThrow("NetworkAlreadyInitialized");
       raw.close();
       return "small";
     },
   });
-  expect(() => raw.prepare(config, () => undefined)).toThrow("NetworkClosed");
-  expect(() => raw.prepare(applicationConfig(), () => undefined)).toThrow("NetworkAlreadyStarted");
-  const runtime = createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined);
-  try {
-    await runtime.ready;
-  } finally {
-    await runtime.close();
-  }
+  expect(() => raw.initialize(config, () => undefined)).toThrow("NetworkClosed");
+  expect(() => raw.initialize(applicationConfig(), () => undefined)).toThrow("NetworkAlreadyInitialized");
 }, 20000);
 
 it("initializes signed discovery without waiting for bootstrap reachability", async () => {
@@ -259,9 +262,9 @@ it("initializes signed discovery without waiting for bootstrap reachability", as
     bootstrapEnrs: [],
     sequenceNumber: 7n,
   };
-  const first = createNativeNetworkApplicationRuntime(config, () => undefined);
+  const first = startRuntime(config, () => undefined);
   try {
-    const identity = await first.ready;
+    const identity = await first.identity;
     expect(identity.localEnr).toBeInstanceOf(Uint8Array);
     const enr = identity.localEnr;
     if (!enr) throw new Error("Missing ENR");
@@ -269,19 +272,14 @@ it("initializes signed discovery without waiting for bootstrap reachability", as
     const secondConfig = applicationConfig();
     secondConfig.identitySecretKey[31] = 2;
     secondConfig.discovery = {...config.discovery, bootstrapEnrs: [enr.slice()]};
-    const second = createNativeNetworkApplicationRuntime(secondConfig, () => undefined);
+    const second = await startPeer(secondConfig);
     secondConfig.discovery.bootstrapEnrs[0].fill(0);
     try {
-      const secondIdentity = await second.ready;
+      const secondIdentity = await second.identity;
       expect(secondIdentity.localEnr).toBeInstanceOf(Uint8Array);
     } finally {
       await second.close();
     }
-    const bad = applicationConfig();
-    const corrupt = enr.slice();
-    corrupt[6] ^= 1;
-    bad.discovery = {...config.discovery, bootstrapEnrs: [corrupt]};
-    expect(() => createNativeNetworkApplicationRuntime(bad, () => undefined)).toThrow("InvalidSignature");
   } finally {
     await first.close();
   }
@@ -297,7 +295,7 @@ it("fails wildcard discovery advertisement omissions cleanly", async () => {
     bootstrapEnrs: [],
     sequenceNumber: 1n,
   };
-  expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow("InvalidAdvertisement");
+  expect(() => startRuntime(config, () => undefined)).toThrow("InvalidAdvertisement");
 }, 20000);
 
 it("publishes copied peer observations without repeating unread notifications", async () => {
@@ -312,23 +310,24 @@ it("publishes copied peer observations without repeating unread notifications", 
   config.local.status.finalizedRoot = Uint8Array.from({length: 32}, (_, i) => i);
   config.local.status.headRoot = Uint8Array.from({length: 32}, (_, i) => 255 - i);
   let notifications = 0;
-  let readable: () => void = () => undefined;
+  let workAvailable: () => void = () => undefined;
   const pending = new Promise<void>((resolve) => {
-    readable = resolve;
+    workAvailable = resolve;
   });
-  const runtime = createNativeNetworkApplicationRuntime(config, () => {
+  const runtime = startRuntime(config, () => {
     notifications++;
-    readable();
+    workAvailable();
   });
   const remote = new Child("native-runtime-peer", process.execPath, [
+    "--import",
+    "tsx",
     "test/interop/libp2p_peer.mjs",
     "v12",
     "managed",
     Buffer.from(requestForks[0].digest).toString("hex"),
   ]);
   try {
-    const identity = await runtime.ready;
-    await runtime.applyIntent(localIntent(config), config.initialSlot);
+    const identity = await runtime.identity;
     const address = multiaddr(identity.localMultiaddr).toString();
     await remote.command("dial", {address});
     await remote.command("control", {address, protocol: "/eth2/beacon_chain/req/status/1/ssz_snappy"});
@@ -372,3 +371,14 @@ it("publishes copied peer observations without repeating unread notifications", 
     await runtime.close();
   }
 }, 20000);
+
+it("rejects a bootstrap with an invalid signature before starting", async () => {
+  const config = discoveryConfig();
+  const source = await startPeer(config);
+  const corrupt = source.identity.localEnr;
+  await source.stop();
+  if (!corrupt) throw new Error("Missing ENR");
+  corrupt[6] ^= 1;
+  config.discovery.bootstrapEnrs = [corrupt];
+  expect(() => startRuntime(config)).toThrow("InvalidSignature");
+});

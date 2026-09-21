@@ -194,7 +194,7 @@ pub fn executeCommands(self: *Runtime, timestamp: n.Now) !void {
         }
         self.lock();
         if (cell.state == .executing) {
-            if (self.stop and self.table.cells[i].input.command != .publishGossip) self.table.cells[i].failure = self.startup_error orelse error.NetworkClosed;
+            if (self.stop and self.table.cells[i].input.command != .publishGossip) self.table.cells[i].failure = self.terminal_error orelse error.NetworkClosed;
             cell.state = .terminal;
         }
         self.reports.sync(&self.heavy.?.core.peer_manager.catalog);
@@ -232,8 +232,6 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
             operation.boolean = try core.applyIntent(intent, timestamp);
             self.lock();
             self.slot = input.slot;
-            if (!self.active) std.log.scoped(.network_runtime).info("owner_activated slot={d}", .{input.slot});
-            self.active = true;
             self.diag.currentSlot = input.slot;
             if (!self.stop) self.diag.state = .running;
             self.unlock();

@@ -64,7 +64,7 @@ pub fn flags(runtime: *Runtime, io: std.Io) !void {
     }
     table.expire(now.mono_ms);
     if (applied > 0 and table.hasWork()) {
-        runtime.readable_rearm = true;
+        runtime.work_rearm = true;
         runtime.signalLocked();
     }
 }

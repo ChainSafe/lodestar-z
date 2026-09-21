@@ -1,12 +1,12 @@
 import {expect, test} from "vitest";
-import {createNativeNetworkApplicationRuntime} from "../src/network.js";
-import {applicationConfig, localIntent, requestForks} from "./utils/network.js";
+import {applicationConfig, localIntent, requestForks, startRuntime} from "./utils/network.js";
+import {startPeer} from "./utils/network-peer.js";
 
 test("application request rejects control protocols at the exported boundary", async () => {
   const config = applicationConfig();
-  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+  const runtime = startRuntime(config, () => undefined);
   try {
-    const identity = await runtime.ready;
+    const identity = await runtime.identity;
     await runtime.applyIntent(localIntent(config), config.initialSlot);
     expect(() =>
       runtime.request(identity.peerId, "/eth2/beacon_chain/req/ping/1/ssz_snappy", new Uint8Array(8))
@@ -19,9 +19,9 @@ test("application request rejects control protocols at the exported boundary", a
 test("request admission owns terminal state and a bounded single pull", async () => {
   const config = applicationConfig();
   config.resources.bridgeBudgetBytes = 512 * 1024 * 1024;
-  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+  const runtime = startRuntime(config, () => undefined);
   try {
-    const identity = await runtime.ready;
+    const identity = await runtime.identity;
     await runtime.applyIntent(localIntent(config), config.initialSlot);
     const stream = runtime.request(
       identity.peerId,
@@ -54,17 +54,19 @@ async function connected() {
   if (!HOST) throw Error("LODESTAR_Z_NETWORK_STOCK_HOST is required");
   const {Child} = await import("../../test/interop/child.mjs");
   const peer = new Child("request-stock", process.execPath, [
+    "--import",
+    "tsx",
     "test/interop/request_responder.mjs",
     HOST,
     ...(HOODI ? [HOODI] : []),
   ]);
-  let runtime: ReturnType<typeof createNativeNetworkApplicationRuntime> | undefined;
+  let runtime: ReturnType<typeof startRuntime> | undefined;
   try {
     const info = await peer.command("ready");
     const config = applicationConfig();
     config.resources.bridgeBudgetBytes = 512 * 1024 * 1024;
-    runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
-    await runtime.ready;
+    runtime = startRuntime(config, () => undefined);
+    await runtime.identity;
     await runtime.applyIntent(localIntent(config), config.initialSlot);
     const id = Uint8Array.from(Buffer.from(info.peer, "hex"));
     await runtime.connect(
@@ -184,9 +186,9 @@ stockTest(
 
 test("request validation rejects late malformed options and detached backing without retained ownership", async () => {
   const config = applicationConfig();
-  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+  const runtime = startRuntime(config, () => undefined);
   try {
-    const identity = await runtime.ready;
+    const identity = await runtime.identity;
     await runtime.applyIntent(localIntent(config), config.initialSlot);
     for (const options of [
       {responseTimeoutMs: 0},
@@ -337,7 +339,7 @@ test.each([
   const {execFileSync} = await import("node:child_process");
   const output = execFileSync(
     process.execPath,
-    ["--expose-gc", "--import", "tsx", "bindings/test/fixtures/network-request-lifecycle.mjs", mode],
+    ["--import", "tsx", "--expose-gc", "--import", "tsx", "bindings/test/fixtures/network-request-lifecycle.mjs", mode],
     {encoding: "utf8", timeout: 20000}
   );
   expect(output).toContain(`request-lifecycle ${mode} ok`);
@@ -347,15 +349,15 @@ test("native peers refuse requests without bridge bytes while managed control re
   const leftConfig = applicationConfig();
   const rightConfig = applicationConfig();
   leftConfig.resources.bridgeBudgetBytes = 128 * 1024 * 1024;
-  const baseline = createNativeNetworkApplicationRuntime(rightConfig, () => undefined);
-  await baseline.ready;
-  rightConfig.resources.bridgeBudgetBytes = baseline.diagnostics().bridgeRequestedBytes;
-  await baseline.close();
+  const baseline = await startPeer(rightConfig);
+  await baseline.identity;
+  rightConfig.resources.bridgeBudgetBytes = (await baseline.diagnostics()).bridgeRequestedBytes;
+  await baseline.stop();
   rightConfig.identitySecretKey[31] = 2;
-  const left = createNativeNetworkApplicationRuntime(leftConfig, () => undefined);
-  const right = createNativeNetworkApplicationRuntime(rightConfig, () => undefined);
+  const left = startRuntime(leftConfig, () => undefined);
+  const right = await startPeer(rightConfig);
   try {
-    const [identity, remote] = await Promise.all([left.ready, right.ready]);
+    const [identity, remote] = await Promise.all([left.identity, right.identity]);
     await Promise.all([
       left.applyIntent(localIntent(leftConfig), leftConfig.initialSlot),
       right.applyIntent(localIntent(rightConfig), rightConfig.initialSlot),
@@ -434,32 +436,23 @@ stockTest(
   20000
 );
 
-test("application request byte admission is exact", async () => {
+test.each([0, -1])("application request byte admission at delta %s", async (delta) => {
   const config = applicationConfig();
-  const probe = createNativeNetworkApplicationRuntime(config, () => undefined);
-  await probe.ready;
-  const fixed = probe.diagnostics().bridgeRequestedBytes;
-  await probe.close();
-  for (const delta of [0, -1]) {
-    const nextConfig = applicationConfig();
-    nextConfig.resources.bridgeBudgetBytes = fixed + 32 + 2 * 10 * 1024 * 1024 + delta;
-    const runtime = createNativeNetworkApplicationRuntime(nextConfig, () => undefined);
-    try {
-      const identity = await runtime.ready;
-      await runtime.applyIntent(localIntent(nextConfig), nextConfig.initialSlot);
-      if (delta === 0) {
-        const stream = runtime.request(identity.peerId, BLOCKS, new Uint8Array(32));
-        await expect(stream.next()).rejects.toMatchObject({reason: "disconnected"});
-      } else expect(() => runtime.request(identity.peerId, BLOCKS, new Uint8Array(32))).toThrow("NetworkBridgeFull");
-      expect(runtime.diagnostics().requests).toMatchObject({
-        inputBytes: 0,
-        occupied: 0,
-        reservedBytes: 0,
-        sinkBytes: 0,
+  const probe = await startPeer(config);
+  const fixed = (await probe.diagnostics()).bridgeRequestedBytes;
+  await probe.stop();
+  config.resources.bridgeBudgetBytes = fixed + 32 + 2 * 10 * 1024 * 1024 + delta;
+  const runtime = startRuntime(config);
+  try {
+    if (delta === 0)
+      await expect(runtime.request(runtime.identity.peerId, BLOCKS, new Uint8Array(32)).next()).rejects.toMatchObject({
+        reason: "disconnected",
       });
-    } finally {
-      await runtime.close();
-    }
+    else
+      expect(() => runtime.request(runtime.identity.peerId, BLOCKS, new Uint8Array(32))).toThrow("NetworkBridgeFull");
+    expect(runtime.diagnostics().requests).toMatchObject({inputBytes: 0, occupied: 0, reservedBytes: 0, sinkBytes: 0});
+  } finally {
+    await runtime.close();
   }
 });
 
@@ -493,12 +486,12 @@ test("native bridge validates full handles and stale retirement", async () => {
   const config = applicationConfig();
   config.resources.bridgeBudgetBytes = 128 * 1024 * 1024;
   const native = new bindings.NativeNetworkRuntime();
-  const lifecycle = native.prepare(config, () => undefined);
+  const lifecycle = native.initialize(config, () => undefined);
   try {
-    const identity = await lifecycle.ready;
+    const identity = await lifecycle.identity;
     await native.applyIntent(localIntent(config), config.initialSlot);
     const handle = native.requestStart(identity.peerId, BLOCKS, new Uint8Array(32), undefined);
-    expect(() => native.requestPull({...handle, session: handle.session + 1n})).toThrow("InvalidRequestHandle");
+    expect(() => native.requestPull({...handle, generation: 0n})).toThrow("InvalidRequestHandle");
     expect(() => native.requestPull({...handle, generation: handle.generation + 1n})).toThrow("InvalidRequestHandle");
     const pending = native.requestPull(handle);
     await expect(pending).rejects.toMatchObject({reason: "disconnected"});
@@ -568,11 +561,11 @@ test.skipIf(!NATIVE_PEER)(
     const peer = new Child("request-native", NATIVE_PEER ?? "", ["--application"]);
     const config = applicationConfig();
     config.resources.bridgeBudgetBytes = 128 * 1024 * 1024;
-    const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+    const runtime = startRuntime(config, () => undefined);
     try {
       const remote = await peer.command("listen");
       await peer.command("respond", {seed: 71, size: 4000});
-      await runtime.ready;
+      await runtime.identity;
       await runtime.applyIntent(localIntent(config), config.initialSlot);
       const parts = remote.address.split("/");
       const id = Uint8Array.from(Buffer.from(remote.peer, "hex"));
@@ -593,23 +586,9 @@ test.skipIf(!NATIVE_PEER)(
 stockTest(
   "direct native calls allow exactly one pending pull",
   async () => {
-    const {runtime, peer, id, config} = await connected();
-    const {networkBindings: bindings} = await import("./utils/network-bindings.js");
-    const native = new bindings.NativeNetworkRuntime();
-    let closed: Promise<unknown> | undefined;
+    const {native, peer, id, stop} = await connectedNative();
     try {
-      await runtime.close();
       await peer.command("scenario", {scenario: "hold"});
-      const prepared = native.prepare(config, () => undefined);
-      closed = prepared.closed;
-      await prepared.ready;
-      await native.applyIntent(localIntent(config), config.initialSlot);
-      const remote = await peer.command("ready");
-      await native.connect(
-        id,
-        [{address: Uint8Array.of(127, 0, 0, 1), family: 4, port: Number(remote.address.split("/")[4])}],
-        5000n
-      );
       const handle = native.requestStart(id, BLOCKS, new Uint8Array(32), undefined);
       const pending = native.requestPull(handle);
       await expect(native.requestPull(handle)).rejects.toMatchObject({code: "NetworkRequestBusy"});
@@ -624,10 +603,7 @@ stockTest(
       await native.requestRetire(handle, false);
       await cancelled;
     } finally {
-      native.close();
-      await closed;
-      await runtime.close();
-      await peer.stop();
+      await stop();
     }
   },
   20000
@@ -637,7 +613,12 @@ async function connectedNative(scenario?: string) {
   if (!HOST) throw Error("LODESTAR_Z_NETWORK_STOCK_HOST is required");
   const {Child} = await import("../../test/interop/child.mjs");
   const {networkBindings: bindings} = await import("./utils/network-bindings.js");
-  const peer = new Child("request-phase-stock", process.execPath, ["test/interop/request_responder.mjs", HOST]);
+  const peer = new Child("request-phase-stock", process.execPath, [
+    "--import",
+    "tsx",
+    "test/interop/request_responder.mjs",
+    HOST,
+  ]);
   let native: InstanceType<typeof bindings.NativeNetworkRuntime> | undefined;
   let closed: Promise<unknown> | undefined;
   const stop = async () => {
@@ -654,9 +635,9 @@ async function connectedNative(scenario?: string) {
     config.resources.bridgeBudgetBytes = 128 * 1024 * 1024;
     if (scenario) bindings.networkTestScenario(scenario);
     native = new bindings.NativeNetworkRuntime();
-    const prepared = native.prepare(config, () => undefined);
+    const prepared = native.initialize(config, () => undefined);
     closed = prepared.closed;
-    await prepared.ready;
+    await prepared.identity;
     await native.applyIntent(localIntent(config), config.initialSlot);
     const id = Uint8Array.from(Buffer.from(remote.peer, "hex"));
     await native.connect(

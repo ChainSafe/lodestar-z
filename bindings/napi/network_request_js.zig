@@ -20,19 +20,16 @@ fn result(env: napi.Env, value: ?Value) !Value {
     try put(object, "value", value orelse try env.getUndefined());
     return object;
 }
-fn tokenValue(env: napi.Env, token: requests.Token, session: u64) !Value {
+fn tokenValue(env: napi.Env, token: requests.Token) !Value {
     const object = try env.createObject();
-    try put(object, "session", try env.createBigintUint64(session));
     try put(object, "index", try env.createUint32(token.index));
     try put(object, "generation", try env.createBigintUint64(token.generation));
     return object;
 }
-fn tokenFor(runtime: *Runtime, value: Value) !requests.Token {
-    try cfg.completeObject(value, &.{ "session", "index", "generation" });
-    const session = try cfg.bigint(try cfg.get(value, "session"));
+fn tokenFor(value: Value) !requests.Token {
+    try cfg.completeObject(value, &.{ "index", "generation" });
     const index = try cfg.integer(try cfg.get(value, "index"), 31);
     const generation = try cfg.bigint(try cfg.get(value, "generation"));
-    if (session != runtime.diag.session) return error.InvalidRequestHandle;
     return .{ .index = @intCast(index), .generation = generation };
 }
 fn optionsFor(value: Value) !n.reqresp.RequestOptions {
@@ -95,7 +92,7 @@ pub fn start(runtime: *Runtime, peer: Value, protocol: Value, data: Value, optio
     const cell = runtime.requests.?.get(token).?;
     cell.peer = identity;
     cell.options = request_options;
-    const value = try tokenValue(runtime.env, token, runtime.diag.session);
+    const value = try tokenValue(runtime.env, token);
     try cfg.bytes(data, cell.input);
     runtime.lock();
     defer runtime.unlock();
@@ -107,7 +104,7 @@ pub fn start(runtime: *Runtime, peer: Value, protocol: Value, data: Value, optio
     return value;
 }
 pub fn pull(runtime: *Runtime, handle: Value) !Value {
-    const token = try tokenFor(runtime, handle);
+    const token = try tokenFor(handle);
     const env = runtime.env;
     runtime.lock();
     const cell = runtime.requests.?.get(token) orelse {
@@ -136,7 +133,7 @@ pub fn pull(runtime: *Runtime, handle: Value) !Value {
     return deferred.getPromise();
 }
 pub fn retire(runtime: *Runtime, handle: Value, abandoned: bool) !Value {
-    const token = try tokenFor(runtime, handle);
+    const token = try tokenFor(handle);
     const env = runtime.env;
     runtime.lock();
     const cell = runtime.requests.?.get(token) orelse {

@@ -1,7 +1,6 @@
 const constants = @import("constants.zig");
 const storage = @import("message_store.zig");
 const delivery = @import("delivery.zig");
-const validation = @import("validation.zig");
 const policy = @import("topic_policy.zig");
 const Options = @import("options.zig").Options;
 
@@ -10,13 +9,9 @@ pub const Plan = struct {
     page_count: usize,
     message_entries: usize,
     validation_capacity: usize,
-    duplicate_attributions_per_validation: usize,
     data_descriptors_per_peer: usize,
-    data_descriptors_total: usize,
     data_descriptors_reserved_per_peer: usize,
-    legal_atomic_work_bytes: usize,
     page_bytes: usize,
-    rounding_per_message_max: usize,
     frame_bytes: usize,
     event_bytes: usize,
     compression_bytes: usize,
@@ -75,16 +70,9 @@ pub const Layout = struct {
             .page_count = self.payload_bytes / storage.page_bytes,
             .message_entries = self.payload_entries,
             .validation_capacity = self.validations,
-            .duplicate_attributions_per_validation = validation.duplicates_max,
             .data_descriptors_per_peer = delivery.per_peer_limit,
-            .data_descriptors_total = self.deliveries,
             .data_descriptors_reserved_per_peer = delivery.per_peer_reserve,
-            .legal_atomic_work_bytes = constants.GOSSIP_MAX_SIZE + @max(
-                2 * constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE) + 2 * constants.MAX_PAYLOAD_SIZE,
-                @import("gossipsub.zig").Gossipsub.ihaveWorkBound(constants.GOSSIP_MAX_SIZE, self.seen + validation.Validation.attributionCapacity(self.validations), constants.promises_cap, constants.promises_cap),
-            ),
             .page_bytes = storage.page_bytes,
-            .rounding_per_message_max = storage.page_bytes - 1,
             .frame_bytes = frames,
             .event_bytes = self.output_bytes,
             .compression_bytes = constants.GOSSIP_MAX_SIZE,

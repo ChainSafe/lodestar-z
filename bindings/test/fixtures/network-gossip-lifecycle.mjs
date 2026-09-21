@@ -1,18 +1,25 @@
+import {startPeer} from "../utils/network-peer.js";
+import {startRuntime} from "../utils/network.js";
 import assert from "node:assert/strict";
 import {setTimeout as delay} from "node:timers/promises";
-import {createNativeNetworkApplicationRuntime} from "../../src/network.js";
+
 import {applicationConfig, localIntent, topicName} from "../utils/network.ts";
 
 let notifierErrors = 0;
-process.on("uncaughtException", (error) => { assert.equal(error.message, "expected gossip notifier"); notifierErrors++; });
+process.on("uncaughtException", (error) => {
+  assert.equal(error.message, "expected gossip notifier");
+  notifierErrors++;
+});
 const config = applicationConfig();
-let runtime = createNativeNetworkApplicationRuntime(config, () => { throw Error("expected gossip notifier"); });
-await runtime.ready;
+let runtime = startRuntime(config, () => {
+  throw Error("expected gossip notifier");
+});
+await runtime.identity;
 await runtime.applyIntent(localIntent(config), config.initialSlot);
 const remoteConfig = applicationConfig();
 remoteConfig.identitySecretKey[31] = 63;
-const remote = createNativeNetworkApplicationRuntime(remoteConfig, () => undefined);
-const remoteIdentity = await remote.ready;
+const remote = await startPeer(remoteConfig);
+const remoteIdentity = await remote.identity;
 await remote.applyIntent(localIntent(remoteConfig), remoteConfig.initialSlot);
 await runtime.connect(remoteIdentity.peerId, [remoteIdentity.localEndpoint], 5000n);
 for (let i = 0; i < 100 && notifierErrors === 0; i++) await delay(10);
@@ -20,8 +27,11 @@ assert(notifierErrors > 0);
 const weak = new WeakRef(runtime);
 const pending = [];
 for (let i = 0; i < 32; i++) {
-  try { pending.push(runtime.publishGossip(topicName(), new Uint8Array(4000).fill(i))); }
-  catch (error) { assert.equal(error.code, "NetworkCommandFull"); }
+  try {
+    pending.push(runtime.publishGossip(topicName(), new Uint8Array(4000).fill(i)));
+  } catch (error) {
+    assert.equal(error.code, "NetworkCommandFull");
+  }
 }
 const results = Promise.allSettled(pending);
 runtime = null;

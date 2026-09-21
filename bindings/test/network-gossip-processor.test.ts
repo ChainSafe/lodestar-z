@@ -5,8 +5,7 @@ import type {
   NativeGossipMessage,
   NativeNetworkApplicationRuntime,
 } from "../src/network.js";
-import {createNativeNetworkApplicationRuntime} from "../src/network.js";
-import {applicationConfig, localIntent, topicName} from "./utils/network.js";
+import {applicationConfig, localIntent, startRuntime, topicName} from "./utils/network.js";
 import {incomingPair} from "./utils/network-incoming.js";
 
 const BLOCK = topicName();
@@ -21,14 +20,14 @@ test.each([
 ])("rejects incompatible processor plan %j before allocation", ({length, items, bytes}) => {
   const config = applicationConfig();
   config.gossipPolicy.processor = Array.from({length}, () => ({bytes, items}));
-  expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow("InvalidGossipProcessorLimits");
+  expect(() => startRuntime(config, () => undefined)).toThrow("InvalidGossipProcessorLimits");
 });
 
 test("processor commands validate credits, roots and generation-bound handles", async () => {
   const config = applicationConfig();
-  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+  const runtime = startRuntime(config, () => undefined);
   try {
-    await runtime.ready;
+    await runtime.identity;
     await runtime.applyIntent(localIntent(config), config.initialSlot);
     expect(() => runtime.drainGossip({bytes: 1, items: 65, ordinary: true})).toThrow("InvalidNetworkInteger");
     expect(() => runtime.drainGossip({bytes: 16 * 1024 * 1024 + 1, items: 1, ordinary: true})).toThrow(
@@ -38,9 +37,9 @@ test("processor commands validate credits, roots and generation-bound handles", 
     expect(() => runtime.notifyGossipBlock(new Uint8Array(31))).toThrow();
     expect(() => runtime.trackGossipSearch(new Uint8Array(33), null)).toThrow();
     expect(() => runtime.trackGossipSearch(new Uint8Array(32), new Uint8Array(32))).toThrow();
-    const handle = {generation: 1n, index: 0, session: runtime.diagnostics().session};
+    const handle = {generation: 1n, index: 0};
     expect(runtime.classifyGossip(handle, true)).toBe(false);
-    expect(runtime.classifyGossip({...handle, session: handle.session + 1n}, false)).toBe(false);
+    expect(runtime.classifyGossip({...handle}, false)).toBe(false);
     expect(() => runtime.classifyGossip({...handle, generation: 0n}, true)).toThrow("InvalidGossipHandle");
     expect(runtime.trackGossipSearch(new Uint8Array(32), null)).toBe(true);
     expect(runtime.trackGossipSearch(new Uint8Array(32), null)).toBe(false);

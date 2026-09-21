@@ -11,15 +11,14 @@ import type {
 interface RequestHandle {
   generation: bigint;
   index: number;
-  session: bigint;
 }
 
 interface NativeBridge extends Pick<NativeNetworkApplicationRuntime, "applyIntent" | "connect" | "diagnostics"> {
   close(): void;
-  prepare(
+  initialize(
     config: unknown,
-    callback: () => void
-  ): {ready: Promise<NativeIdentity>; closed: Promise<NativeRuntimeCloseResult>};
+    onWorkAvailable: () => void
+  ): {identity: NativeIdentity; closed: Promise<NativeRuntimeCloseResult>};
   requestStart(
     peer: Uint8Array,
     protocol: NativeProtocolId,

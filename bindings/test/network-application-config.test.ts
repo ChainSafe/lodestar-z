@@ -1,13 +1,12 @@
 import {setTimeout as delay} from "node:timers/promises";
 import {expect, test} from "vitest";
-import {createNativeNetworkApplicationRuntime} from "../src/network.js";
-import {applicationConfig} from "./utils/network.js";
+import {applicationConfig, startRuntime} from "./utils/network.js";
 import {networkBindings as bindings} from "./utils/network-bindings.js";
 
 test.each(["resources", "identify", "serveLightClients"])("rejects missing %s", (field) => {
   const config = applicationConfig();
   Reflect.deleteProperty(config, field);
-  expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow();
+  expect(() => startRuntime(config, () => undefined)).toThrow();
 });
 
 test.each([
@@ -25,7 +24,7 @@ test.each([
 ] as const)("rejects %s above its resource maximum", (field, maximum) => {
   const config = applicationConfig();
   config.resources[field] = maximum + 1;
-  expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow("InvalidNetworkInteger");
+  expect(() => startRuntime(config, () => undefined)).toThrow("InvalidNetworkInteger");
 });
 
 test.each([
@@ -39,7 +38,7 @@ test.each([
 ])("rejects native byte ceiling %s", (value) => {
   const config = applicationConfig();
   config.resources.nativeBudgetBytes = value;
-  expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow();
+  expect(() => startRuntime(config, () => undefined)).toThrow();
 });
 
 test.each([
@@ -70,16 +69,16 @@ test.each([
 ])("rejects malformed complete application configuration %#", (mutate) => {
   const config = applicationConfig();
   mutate(config);
-  expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow();
+  expect(() => startRuntime(config, () => undefined)).toThrow();
 });
 
-test("rejects insufficient fixed reservations before owner spawn", () => {
+test.each(["native", "bridge"])("rejects insufficient %s reservation before owner spawn", (kind) => {
   const config = applicationConfig();
-  config.resources.nativeBudgetBytes = 1;
-  expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow("NetworkNativeBudgetExceeded");
-  config.resources.nativeBudgetBytes = 96 * 1024 * 1024;
-  config.resources.bridgeBudgetBytes = 1;
-  expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow("NetworkBridgeBudgetExceeded");
+  if (kind === "native") config.resources.nativeBudgetBytes = 1;
+  else config.resources.bridgeBudgetBytes = 1;
+  expect(() => startRuntime(config)).toThrow(
+    kind === "native" ? "NetworkNativeBudgetExceeded" : "NetworkBridgeBudgetExceeded"
+  );
 });
 
 test
@@ -93,11 +92,9 @@ test
     "wake",
     "notify",
     "hook",
-    "ready_promise",
     "close_promise",
     "copy_error_ref",
     "requested_ref",
-    "cancelled_ref",
     "failed_ref",
     "promise_holder",
     "entropy",
@@ -107,9 +104,7 @@ test
     "spawn",
   ])("application acquisition prefix %s releases every owner", async (stage) => {
   bindings.networkTestFail(stage);
-  expect(() => createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined)).toThrow(
-    "InjectedNetworkFailure"
-  );
+  expect(() => startRuntime(applicationConfig(), () => undefined)).toThrow("InjectedNetworkFailure");
   for (let i = 0; i < 100; i++) {
     await delay(10);
     global.gc?.();
@@ -118,15 +113,16 @@ test
   expect(bindings.networkTestStats()).toEqual({notifications: 0, owners: 0, runtimes: 0});
 });
 
-test("retained peer capacity matches the native gossip ceiling", async () => {
+test.each([512, 513])("retained peer capacity %s respects the native gossip ceiling", async (capacity) => {
   const config = applicationConfig();
-  config.resources.peerCapacity = 513;
-  expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow("InvalidNetworkInteger");
-  config.resources.peerCapacity = 512;
+  config.resources.peerCapacity = capacity;
   config.resources.nativeBudgetBytes = 128 * 1024 * 1024;
-  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+  if (capacity === 513) {
+    expect(() => startRuntime(config)).toThrow("InvalidNetworkInteger");
+    return;
+  }
+  const runtime = startRuntime(config);
   try {
-    await runtime.ready;
     expect(runtime.diagnostics().resolvedCapacities).toMatchObject({gossipRetainedCapacity: 512, peerCapacity: 512});
   } finally {
     await runtime.close();

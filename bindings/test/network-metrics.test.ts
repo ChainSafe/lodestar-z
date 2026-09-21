@@ -1,7 +1,6 @@
 import {setTimeout as delay} from "node:timers/promises";
 import {expect, test, vi} from "vitest";
-import {createNativeNetworkApplicationRuntime} from "../src/network.js";
-import {applicationConfig, localIntent} from "./utils/network.js";
+import {applicationConfig, localIntent, startRuntime} from "./utils/network.js";
 import {BLOCKS, incomingPair, takeIncoming} from "./utils/network-incoming.js";
 
 function samples(text: string): Map<string, number> {
@@ -27,12 +26,12 @@ function samples(text: string): Map<string, number> {
 
 test("metrics are available through startup and remain readable after close", async () => {
   const config = applicationConfig();
-  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+  const runtime = startRuntime(config, () => undefined);
   const capacities = new Map<string, number>();
   try {
     expect(samples(runtime.getMetrics()).get("libp2p_peers")).toBe(0);
     expect(samples(runtime.getMetrics()).get("lodestar_peer_connection_seconds_count")).toBe(0);
-    await runtime.ready;
+    await runtime.identity;
     await runtime.applyIntent(localIntent(config), config.initialSlot);
     await vi.waitFor(() => expect(samples(runtime.getMetrics()).get("lodestar_native_network_running")).toBe(1));
     const metrics = samples(runtime.getMetrics());
@@ -124,8 +123,8 @@ test("real request and peer metrics are isolated, cumulative and do not drain re
     await request.finish();
     expect(await pending).toEqual({done: true, value: undefined});
     await vi.waitFor(
-      () => {
-        const left = samples(pair.left.getMetrics());
+      async () => {
+        const left = samples(await pair.left.getMetrics());
         const right = samples(pair.right.getMetrics());
         expect(left.get("libp2p_peers")).toBe(1);
         expect(left.get('lodestar_peer_connected_total{direction="outbound",status="open"}')).toBe(1);
@@ -169,17 +168,19 @@ test("real request and peer metrics are isolated, cumulative and do not drain re
       },
       {timeout: 5000}
     );
-    for (let i = 0; i < 10; i++) expect(samples(pair.left.getMetrics()).get(outgoing)).toBe(1);
+    for (let i = 0; i < 10; i++) expect(samples(await pair.left.getMetrics()).get(outgoing)).toBe(1);
   } finally {
     await Promise.all([pair.left.close(), pair.right.close()]);
   }
-  expect(samples(pair.left.getMetrics()).get(outgoing)).toBe(1);
+  expect(samples(await pair.left.getMetrics()).get(outgoing)).toBe(1);
   expect(samples(pair.right.getMetrics()).get(incoming)).toBe(1);
-  expect(samples(pair.left.getMetrics()).get("libp2p_peers")).toBe(0);
-  expect(samples(pair.left.getMetrics()).get('lodestar_peer_disconnected_total{direction="outbound"}')).toBe(1);
+  expect(samples(await pair.left.getMetrics()).get("libp2p_peers")).toBe(0);
+  expect(samples(await pair.left.getMetrics()).get('lodestar_peer_disconnected_total{direction="outbound"}')).toBe(1);
   expect(samples(pair.right.getMetrics()).get('lodestar_peer_disconnected_total{direction="inbound"}')).toBe(1);
-  expect(samples(pair.left.getMetrics()).get("lodestar_peer_manager_connected_peers_map_size")).toBe(0);
-  expect(samples(pair.left.getMetrics()).get("lodestar_peers_requested_total_to_connect")).toBe(0);
-  expect(samples(pair.left.getMetrics()).get('lodestar_discovery_dial_time_seconds_count{status="success"}')).toBe(1);
-  expect(samples(pair.left.getMetrics()).get("lodestar_peer_connection_seconds_count")).toBe(0);
+  expect(samples(await pair.left.getMetrics()).get("lodestar_peer_manager_connected_peers_map_size")).toBe(0);
+  expect(samples(await pair.left.getMetrics()).get("lodestar_peers_requested_total_to_connect")).toBe(0);
+  expect(
+    samples(await pair.left.getMetrics()).get('lodestar_discovery_dial_time_seconds_count{status="success"}')
+  ).toBe(1);
+  expect(samples(await pair.left.getMetrics()).get("lodestar_peer_connection_seconds_count")).toBe(0);
 }, 20000);

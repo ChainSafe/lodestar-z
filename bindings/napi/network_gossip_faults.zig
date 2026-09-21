@@ -63,7 +63,7 @@ pub fn afterStep(runtime: *Runtime) void {
             if (wait_failed or !released.load(.acquire)) {
                 runtime.stop = true;
                 runtime.reason = .failed;
-                runtime.startup_error = if (wait_failed) error.NetworkWakeFailed else error.NetworkTestBarrierTimeout;
+                runtime.terminal_error = if (wait_failed) error.NetworkWakeFailed else error.NetworkTestBarrierTimeout;
             }
         }
     }

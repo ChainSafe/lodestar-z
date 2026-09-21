@@ -56,7 +56,7 @@ pub fn prepareConfiguration(self: *Runtime) !void {
 }
 
 pub fn initialize(self: *Runtime) !void {
-    std.debug.assert(self.thread == null and self.startup == .pending);
+    std.debug.assert(self.thread == null);
     const previous_log = n.logging.bind(&self.logs);
     defer _ = n.logging.bind(previous_log);
     std.log.scoped(.network_runtime).info("owner_initializing", .{});
@@ -81,6 +81,9 @@ pub fn initialize(self: *Runtime) !void {
     self.heavy.?.core_live = true;
     try faults.check(.wake_attach);
     try self.heavy.?.core.setHostWake(self.wake.?.read_fd);
+    if (comptime faults.enabled) {
+        if (self.test_scenario == .gossip) faults.captureGossip(self.heavy.?.core.service.gossipsub, &self.heavy.?.core.peer_manager.local.fork);
+    }
 
     const plan = self.heavy.?.core.memoryPlan();
     self.diag.nativeRequestedBytes = plan.inline_bytes + plan.allocated_bytes;
@@ -88,6 +91,7 @@ pub fn initialize(self: *Runtime) !void {
     self.diag.quicReceiveWindowBytes = plan.transport.engine.receive_window_bytes;
     self.diag.quicConnectionWindowBytes = plan.transport.engine.connection_window_bytes;
     self.diag.quicStreamWindowBytes = plan.transport.engine.stream_window_bytes;
+    std.log.scoped(.network_runtime).info("owner_initialized target_peers={d} max_peers={d}", .{ self.diag.resolvedCapacities.targetPeers, self.diag.resolvedCapacities.maxPeers });
 }
 pub fn run(self: *Runtime) void {
     defer self.release();
@@ -103,7 +107,6 @@ pub fn run(self: *Runtime) void {
 fn serve(self: *Runtime) !void {
     std.debug.assert(self.heavy.?.core_live);
     const io = self.heavy.?.threaded.io();
-    try publishReady(self);
     var ingress: gossip_mod.Ingress = .{ .runtime = self, .io = io };
     const sink = ingress.sink();
     self.heavy.?.core.service.gossipsub.message_sink = &sink;
@@ -111,7 +114,7 @@ fn serve(self: *Runtime) !void {
     while (true) {
         self.lock();
         const stop = self.stop;
-        const graceful = self.graceful and self.active and self.reason == .requested;
+        const graceful = self.graceful and self.reason == .requested;
         self.unlock();
         if (stop and !graceful) break;
         const timestamp = now(io);
@@ -140,25 +143,18 @@ fn serve(self: *Runtime) !void {
         self.wake.?.drain() catch {
             self.stop = true;
             self.reason = .failed;
-            self.startup_error = error.NetworkWakeFailed;
+            self.terminal_error = error.NetworkWakeFailed;
         };
-        if (self.readable_rearm) {
-            self.readable_rearm = false;
+        if (self.work_rearm) {
+            self.work_rearm = false;
             if (!self.stop and ((self.lane != null and self.lane.?.len > 0) or (self.incoming != null and self.incoming.?.oldest() != null) or (self.gossip != null and self.gossip.?.hasWork()))) self.pingLocked();
         }
         const slot = self.slot;
         self.diag.currentSlot = slot;
-        const stopped = self.stop and !(self.graceful and self.active and self.reason == .requested);
-        const active = self.active;
+        const stopped = self.stop and !(self.graceful and self.reason == .requested);
         const peer_room: usize = if (self.lane) |lane| 64 - @as(usize, lane.len) else self.heavy.?.outputs.len;
         self.unlock();
         if (stopped) break;
-        if (!active) {
-            var fd = std.c.pollfd{ .fd = self.wake.?.read_fd, .events = std.c.POLL.IN, .revents = 0 };
-            const rc = std.c.poll(@ptrCast(&fd), 1, @intCast(commands.waitLimit(self, timestamp)));
-            if (rc < 0 and std.c.errno(rc) != .INTR) return error.NetworkWakeFailed;
-            continue;
-        }
         try gossip_mod.flags(self, io);
         requests_mod.flags(self);
         _ = try @import("network_incoming_phase_faults.zig").terminalBarrier(self, false);
@@ -177,39 +173,6 @@ fn serve(self: *Runtime) !void {
 
         publishTurn(self, &result, timestamp, sequence);
     }
-}
-fn publishReady(self: *Runtime) !void {
-    if (comptime faults.enabled) {
-        if (self.test_scenario == .gossip) faults.captureGossip(self.heavy.?.core.service.gossipsub, &self.heavy.?.core.peer_manager.local.fork);
-    }
-    const identity = try self.heavy.?.readIdentity();
-    try startupBarrier(self, .before_ready);
-    self.lock();
-    if (self.stop) {
-        self.unlock();
-        return error.AbortError;
-    }
-    self.identity = identity;
-    if (comptime faults.enabled) {
-        if (self.test_scenario == .application_peer_lane) {
-            if (self.lane) |lane| for (0..64) |i| {
-                const event: n.peers.Event = .{ .closed = .{
-                    .peer = .{ .index = @intCast(i), .generation = std.math.maxInt(u64) - i },
-                    .connection = .{ .index = @intCast(i % 16), .generation = std.math.maxInt(u32) - @as(u32, @intCast(i)) },
-                    .identity = identity.peer,
-                    .reason = .host,
-                } };
-                lane.publish(&.{event}, 0);
-            };
-        }
-    }
-    self.startup = .ready;
-    self.diag.state = .prepared;
-    std.log.scoped(.network_runtime).info("owner_ready state={s} peer={f} target_peers={d} max_peers={d}", .{ @tagName(self.diag.state), n.logging.peer(&self.identity.peer), self.diag.resolvedCapacities.targetPeers, self.diag.resolvedCapacities.maxPeers });
-    const plan = self.heavy.?.core.memoryPlan();
-    self.diag.nativeRequestedBytes = plan.inline_bytes + plan.allocated_bytes;
-    self.pingLocked();
-    self.unlock();
 }
 fn publishTurn(self: *Runtime, result: *const n.network_core.Result, timestamp: n.Now, sequence: u64) void {
     const counts = self.heavy.?.core.peerCounts();
@@ -244,7 +207,7 @@ fn publishTurn(self: *Runtime, result: *const n.network_core.Result, timestamp: 
         if (result.readiness.failure != null) {
             self.stop = true;
             self.reason = .failed;
-            self.startup_error = err;
+            self.terminal_error = err;
         }
     }
     self.diag.ownerTurns +|= 1;
@@ -252,24 +215,6 @@ fn publishTurn(self: *Runtime, result: *const n.network_core.Result, timestamp: 
     self.diag.peerCount = counts.connected;
     self.diag.readyPeerCount = counts.relevant;
     self.unlock();
-}
-fn startupBarrier(self: *Runtime, stage: faults.Scenario) !void {
-    if (comptime !faults.enabled) return;
-    if (self.test_scenario != stage) return;
-    faults.reached.store(stage, .release);
-    for (0..500) |_| {
-        if (cancelled(self)) return error.AbortError;
-        var fd = std.c.pollfd{ .fd = self.wake.?.read_fd, .events = std.c.POLL.IN, .revents = 0 };
-        const result = std.c.poll(@ptrCast(&fd), 1, 10);
-        if (result < 0 and std.c.errno(result) != .INTR) return error.NetworkWakeFailed;
-        if (result > 0) try self.wake.?.drain();
-    }
-    return error.NetworkTestBarrierTimeout;
-}
-fn cancelled(self: *Runtime) bool {
-    self.lock();
-    defer self.unlock();
-    return self.stop;
 }
 pub fn now(io: std.Io) n.Now {
     const mono = std.Io.Timestamp.now(io, .awake);

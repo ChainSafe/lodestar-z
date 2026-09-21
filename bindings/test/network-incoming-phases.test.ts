@@ -85,7 +85,7 @@ instrumented.each([
         liveNativeRequestedBytes: 0,
         preparingPins: 0,
       });
-      await checkReplacement(incoming, pair.right.diagnostics().session);
+      await expectClosedRequest(incoming);
       await pending;
     } finally {
       await Promise.all([pair.left.close(), pair.right.close()]);
@@ -190,24 +190,9 @@ instrumented.each(["finish", "fail"] as const)(
   15000
 );
 
-async function checkReplacement(incoming: NativeIncomingRequest, session: bigint) {
-  const replacement = await incomingPair();
-  try {
-    expect(replacement.right.diagnostics().session).not.toBe(session);
-    const stream = replacement.left.request(replacement.remote.peerId, BLOCKS, new Uint8Array(32));
-    const read = stream.next();
-    void read.catch(() => undefined);
-    const next = await takeIncoming(replacement.right);
-    const ack = next.respond(new Uint8Array(4000).fill(29), requestForks[0]);
-    expect(incoming.cancel()).toBe(incoming.closed);
-    await expect(incoming.respond(new Uint8Array(4000), requestForks[0])).rejects.toMatchObject({
-      code: "NetworkIncomingClosed",
-    });
-    await ack;
-    expect((await read).value?.data).toEqual(new Uint8Array(4000).fill(29));
-    expect(await next.finish()).toBeUndefined();
-    expect((await stream.next()).done).toBe(true);
-  } finally {
-    await Promise.all([replacement.left.close(), replacement.right.close()]);
-  }
+async function expectClosedRequest(incoming: NativeIncomingRequest) {
+  expect(incoming.cancel()).toBe(incoming.closed);
+  await expect(incoming.respond(new Uint8Array(4000), requestForks[0])).rejects.toMatchObject({
+    code: "NetworkIncomingClosed",
+  });
 }

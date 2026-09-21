@@ -38,7 +38,7 @@ export const EXPECTED_PACKAGE_EXPORTS = [
   "./shuffle",
   "./state-transition",
 ];
-export const EXPECTED_NETWORK_EXPORTS = ["createNativeNetworkApplicationRuntime"];
+export const EXPECTED_NETWORK_EXPORTS = ["initializeNativeNetworkRuntime"];
 
 export function validateBuildRecord(record) {
   if (!record || typeof record !== "object" || Array.isArray(record)) fail("InvalidBuildRecord");
