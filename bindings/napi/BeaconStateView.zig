@@ -722,7 +722,7 @@ pub fn getAllValidators(self: *const BeaconStateView) !js.Array {
     const env = js.env();
     const cached_state = try self.requireState();
 
-    const validators = try cached_state.state.validatorsSlice(allocator);
+    const validators = try cached_state.state.validatorsAlloc(allocator);
     defer allocator.free(validators);
 
     const result = try env.createArray();
@@ -745,7 +745,7 @@ pub fn getAllBalances(self: *const BeaconStateView) !js.Array {
     const env = js.env();
     const cached_state = try self.requireState();
 
-    const balances = try cached_state.state.balancesSlice(allocator);
+    const balances = try cached_state.state.balancesAlloc(allocator);
     defer allocator.free(balances);
 
     return js_types.wrap(js.Array, try numberSliceToNapiValue(env, u64, balances, .{}));
@@ -763,7 +763,7 @@ pub fn getValidatorsByStatus(self: *const BeaconStateView, statuses_set: js.Valu
     const set_value = statuses_set.toValue();
     const has_fn = try set_value.getNamedProperty("has");
 
-    const validators = try cached_state.state.validatorsSlice(allocator);
+    const validators = try cached_state.state.validatorsAlloc(allocator);
     defer allocator.free(validators);
 
     const result = try env.createArray();

@@ -409,7 +409,7 @@ pub const AnyBeaconState = union(ForkSeq) {
     /// Returns a read-only slice of validators.
     /// This is read-only in the sense that modifications will not be reflected back to the state.
     /// Caller owns the returned slice and must free it with the same allocator.
-    pub fn validatorsSlice(self: *AnyBeaconState, allocator: Allocator) ![]ct.phase0.Validator.Type {
+    pub fn validatorsAlloc(self: *AnyBeaconState, allocator: Allocator) ![]ct.phase0.Validator.Type {
         return switch (self.*) {
             inline else => |state| {
                 var validators_view = try state.getReadonly("validators");
@@ -419,11 +419,11 @@ pub const AnyBeaconState = union(ForkSeq) {
         };
     }
 
-    /// Pointer-slice version of `validatorsSlice` that hands out
+    /// Pointer-slice version of `validatorsAlloc` that hands out
     /// `*const Validator.Type` into the pool's container_struct payloads —
     /// no clone. Pointers are valid only while the validators list is not
     /// mutated; copy out values that must survive a `tree.set`.
-    pub fn validatorsPtrSlice(self: *AnyBeaconState, allocator: Allocator) ![]*const ct.phase0.Validator.Type {
+    pub fn validatorsPtrsAlloc(self: *AnyBeaconState, allocator: Allocator) ![]*const ct.phase0.Validator.Type {
         return switch (self.*) {
             inline else => |state| {
                 var validators_view = try state.getReadonly("validators");
@@ -449,7 +449,7 @@ pub const AnyBeaconState = union(ForkSeq) {
     /// Returns a read-only slice of balances.
     /// This is read-only in the sense that modifications will not be reflected back to the state.
     /// Caller owns the returned slice and must free it with the same allocator.
-    pub fn balancesSlice(self: *AnyBeaconState, allocator: Allocator) ![]u64 {
+    pub fn balancesAlloc(self: *AnyBeaconState, allocator: Allocator) ![]u64 {
         return switch (self.*) {
             inline else => |state| {
                 var balances_view = try state.get("balances");
@@ -891,7 +891,7 @@ pub const AnyBeaconState = union(ForkSeq) {
 
     /// Returns a read-only slice of proposer_lookahead values.
     /// Caller owns the returned slice and must free it with the same allocator.
-    pub fn proposerLookaheadSlice(self: *AnyBeaconState, allocator: Allocator) !*[ct.fulu.ProposerLookahead.length]u64 {
+    pub fn proposerLookaheadAlloc(self: *AnyBeaconState, allocator: Allocator) !*[ct.fulu.ProposerLookahead.length]u64 {
         var lookahead_view = try self.proposerLookahead();
         return @ptrCast(try lookahead_view.getAll(allocator));
     }

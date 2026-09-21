@@ -27,7 +27,7 @@ pub fn processRewardsAndPenalties(
     const penalties = cache.penalties;
     try getRewardsAndPenalties(fork, config, epoch_cache, state, cache, rewards, penalties);
 
-    const balances = try state.balancesSlice(allocator);
+    const balances = try state.balancesAlloc(allocator);
     errdefer allocator.free(balances);
 
     for (rewards, penalties, balances) |reward, penalty, *balance| {

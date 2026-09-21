@@ -38,7 +38,7 @@ pub fn upgradeStateToElectra(
     // [EIP-7251]: add validators that are not yet active to pending balance deposits
     var pre_activation: std.ArrayList(ct.primitive.ValidatorIndex.Type) = .empty;
     defer pre_activation.deinit(allocator);
-    const validators_slice = try state.validatorsSlice(allocator);
+    const validators_slice = try state.validatorsAlloc(allocator);
     defer allocator.free(validators_slice);
     for (validators_slice, 0..) |validator, validator_index| {
         const activation_epoch = validator.activation_epoch;

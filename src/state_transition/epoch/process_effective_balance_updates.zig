@@ -36,7 +36,7 @@ pub fn processEffectiveBalanceUpdates(
     const balances = if (cache.balances) |balances_arr|
         balances_arr.items
     else
-        try state.balancesSlice(allocator);
+        try state.balancesAlloc(allocator);
     defer if (cache.balances == null) {
         allocator.free(balances);
     };

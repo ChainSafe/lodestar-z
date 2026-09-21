@@ -301,7 +301,7 @@ pub fn FixedContainerType(comptime ST: type) type {
 /// This trades a ~50% reduction in struct-decode work (no per-field tree
 /// walk + leaf re-decode) for opaque tree navigation: gindex paths into the
 /// container's interior are not navigable. Use this for hot-path types where
-/// callers consume the whole struct (e.g. `validatorsSlice`).
+/// callers consume the whole struct (e.g. `validatorsAlloc`).
 ///
 /// Wraps an underlying `FixedContainerType(ST)` and re-exports its
 /// merkleization, serialization, JSON, and field metadata. The differences

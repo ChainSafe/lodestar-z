@@ -204,7 +204,7 @@ pub const EpochCache = struct {
         var exit_queue_epoch = computeActivationExitEpoch(current_epoch);
         var exit_queue_churn: u64 = 0;
 
-        const validators = try state.validatorsPtrSlice(allocator);
+        const validators = try state.validatorsPtrsAlloc(allocator);
         defer allocator.free(validators);
 
         const validator_count = validators.len;

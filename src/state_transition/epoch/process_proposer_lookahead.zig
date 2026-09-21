@@ -25,7 +25,7 @@ pub fn processProposerLookahead(
     state: *BeaconState(fork),
     epoch_transition_cache: *const EpochTransitionCache,
 ) !void {
-    const proposer_lookahead: *[ssz.fulu.ProposerLookahead.length]u64 = try state.proposerLookaheadSlice(allocator);
+    const proposer_lookahead: *[ssz.fulu.ProposerLookahead.length]u64 = try state.proposerLookaheadAlloc(allocator);
     defer allocator.free(@as([]u64, proposer_lookahead));
 
     const lookahead_epochs = preset.MIN_SEED_LOOKAHEAD + 1;

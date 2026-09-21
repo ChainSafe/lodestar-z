@@ -91,7 +91,7 @@ pub fn buildFromStateIfNeeded(
     const latest_block_slot = try latest_block_header.get("slot");
     if (slashings_cache.isInitialized(latest_block_slot)) return;
 
-    const validators = try state.validatorsPtrSlice(allocator);
+    const validators = try state.validatorsPtrsAlloc(allocator);
     defer allocator.free(validators);
     var new_cache = try SlashingsCache.initFromValidators(allocator, latest_block_slot, validators);
     errdefer new_cache.deinit();
