@@ -299,7 +299,9 @@ stockTest(
       });
       await peer.command("scenario", {scenario: "hold"});
       const streams = Array.from({length: 6}, () => runtime.request(id, BLOCKS, new Uint8Array(32)));
-      expect(() => runtime.request(id, BLOCKS, new Uint8Array(32))).toThrow("NetworkRequestFull");
+      expect(() => runtime.request(id, BLOCKS, new Uint8Array(32))).toThrow(
+        expect.objectContaining({code: "NetworkRequestRejected", reason: "slots_exhausted"})
+      );
       await expect(streams[2].next()).rejects.toMatchObject({
         code: "NetworkRequestRejected",
         reason: "too_many_requests",
@@ -312,10 +314,10 @@ stockTest(
       expect((await runtime.getPeers()).peers[0].metadata?.sequenceNumber).toBe(1n);
       await Promise.all(streams.map((stream) => stream.return?.()));
       const commands = Array.from({length: 32}, () => runtime.getIdentity());
-      expect(() => runtime.request(id, BLOCKS, new Uint8Array(32))).toThrow("NetworkCommandFull");
+      const independent = runtime.request(id, BLOCKS, new Uint8Array(32));
       await Promise.all(commands);
+      await independent.return?.();
       expect(runtime.diagnostics().requests).toMatchObject({
-        commandFull: 1n,
         occupied: 0,
         requestFull: 1n,
         reservedBytes: 0,
@@ -449,7 +451,9 @@ test.each([0, -1])("application request byte admission at delta %s", async (delt
         reason: "disconnected",
       });
     else
-      expect(() => runtime.request(runtime.identity.peerId, BLOCKS, new Uint8Array(32))).toThrow("NetworkBridgeFull");
+      expect(() => runtime.request(runtime.identity.peerId, BLOCKS, new Uint8Array(32))).toThrow(
+        expect.objectContaining({code: "NetworkRequestRejected", reason: "slots_exhausted"})
+      );
     expect(runtime.diagnostics().requests).toMatchObject({inputBytes: 0, occupied: 0, reservedBytes: 0, sinkBytes: 0});
   } finally {
     await runtime.close();
@@ -779,7 +783,9 @@ phaseTest.each([false, true])(
       await waitFor(() => native.diagnostics().requests.occupied === 0);
       const after = native.diagnostics();
       expect(after.requests.occupied).toBe(0);
-      expect(after.liveBridgeRequestedBytes).toBe(after.ownerShellBytes + after.peerLaneBytes);
+      expect(after.liveBridgeRequestedBytes).toBe(
+        after.ownerShellBytes + after.peerLaneBytes + after.metricsExportBytes
+      );
     } finally {
       await stop();
     }

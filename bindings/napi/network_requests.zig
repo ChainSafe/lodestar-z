@@ -25,6 +25,7 @@ pub const Rejection = enum { disconnected, protocol_disabled, invalid_request, i
 pub const Cell = struct {
     state: State = .free,
     generation: u64 = 0,
+    order: u64 = 0,
     peer: n.PeerId = undefined,
     protocol: rr.Protocol = .blocks_by_root_v2,
     options: rr.RequestOptions = .{},
@@ -58,7 +59,6 @@ pub const Diagnostics = struct {
     chunksCopied: u64 = 0,
     bytesCopied: u64 = 0,
     requestFull: u64 = 0,
-    commandFull: u64 = 0,
     bridgeFull: u64 = 0,
     busyPulls: u64 = 0,
 };
@@ -106,6 +106,16 @@ pub const Table = struct {
         self.diag.reservedBytes += amount;
         self.diag.reservedBytesHighWater = @max(self.diag.reservedBytesHighWater, self.diag.reservedBytes);
         return token;
+    }
+    pub fn oldest(self: *Table) ?Token {
+        var selected: ?Token = null;
+        var order: u64 = std.math.maxInt(u64);
+        for (self.cells, 0..) |cell, i| {
+            if (cell.state != .queued or cell.order >= order) continue;
+            order = cell.order;
+            selected = .{ .index = @intCast(i), .generation = cell.generation };
+        }
+        return selected;
     }
     pub fn allocate(self: *Table, token: Token, len: usize) !void {
         const cell = self.get(token).?;
@@ -173,6 +183,7 @@ pub fn rejection(err: anyerror) !Rejection {
 }
 
 const Runtime = @import("network_runtime.zig").Runtime;
+pub const turn_max = 16;
 pub fn submit(runtime: *Runtime, token: Token, now: n.Now) !void {
     runtime.lock();
     defer runtime.unlock();

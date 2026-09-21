@@ -35,8 +35,8 @@ const Consumer = struct {
         const self: *Consumer = @ptrCast(@alignCast(context));
         const table = self.table;
         const publication = if (self.fill_during_delivery) table.budget.limit - table.budget.used else 0;
-        table.reservePublication(publication) catch unreachable;
-        defer table.releasePublication(publication);
+        table.budget.reserve(publication) catch unreachable;
+        defer table.budget.release(publication);
         const kind = @import("topic.zig").parseCanonical(message.topic).?.name.kind;
         const token = table.reserveKind(kind, message.bytes.len) catch |err| switch (err) {
             error.NetworkBridgeFull, error.NetworkGossipFull => {

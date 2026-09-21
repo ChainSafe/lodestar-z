@@ -125,7 +125,7 @@ pub fn report(runtime: *Runtime, value: Value, verdict_value: Value) !Value {
     runtime.unlock();
     return runtime.env.getBoolean(accepted);
 }
-fn optionsFor(value: Value) !n.gossipsub.Gossipsub.PublishOptions {
+pub fn optionsFor(value: Value) !n.gossipsub.Gossipsub.PublishOptions {
     var result: n.gossipsub.Gossipsub.PublishOptions = .{};
     if (try value.typeof() == .undefined) return result;
     try cfg.object(value, &.{ "allowZeroPeers", "ignoreDuplicate", "flood" });
@@ -134,50 +134,6 @@ fn optionsFor(value: Value) !n.gossipsub.Gossipsub.PublishOptions {
         if (try option.typeof() != .undefined) @field(result, field[1]) = try cfg.boolean(option);
     }
     return result;
-}
-pub fn publish(runtime: *Runtime, topic: Value, data: Value, options: Value) !Value {
-    const token = try runtime.reserveCommand(.publishGossip);
-    errdefer runtime.abortCommand(token);
-    const operation = &runtime.table.cells[token.index];
-    const input = &operation.input;
-    input.topic_len = @intCast(try app.text(topic, &input.topic));
-    input.publish_options = try optionsFor(options);
-    if (!try data.isTypedarray()) return error.InvalidNetworkBytes;
-    const view = try data.getTypedarrayInfo();
-    if (view.array_type != .uint8 or try view.arraybuffer.isDetachedArrayBuffer()) return error.InvalidNetworkBytes;
-    const len = view.length;
-    if (len > g.payload_max) return error.PayloadTooLarge;
-    runtime.lock();
-    if (runtime.stop or runtime.quiescent) {
-        runtime.unlock();
-        return error.NetworkClosed;
-    }
-    runtime.gossip.?.reservePublication(len) catch |err| {
-        runtime.unlock();
-        return err;
-    };
-    input.publication_reservation = len;
-    runtime.unlock();
-    try faults.check(.gossip_publication);
-    const copy = try r.allocator.alloc(u8, len);
-    errdefer r.allocator.free(copy);
-    const deferred = try runtime.env.createPromise();
-    errdefer deferred.resolve(runtime.env.getUndefined() catch unreachable) catch unreachable;
-    try cfg.bytes(data, copy);
-    runtime.lock();
-    if (runtime.stop or runtime.quiescent) {
-        runtime.unlock();
-        return error.NetworkClosed;
-    }
-    input.publication = copy;
-    operation.deferred = deferred;
-    runtime.gossip.?.diag.publicationCopies +|= 1;
-    runtime.gossip.?.diag.publicationBytesCopied +|= len;
-    runtime.table.get(token).state = .queued;
-    runtime.signalLocked();
-    runtime.unlock();
-    runtime.notify.ref(runtime.env) catch {};
-    return deferred.getPromise();
 }
 pub fn publishResult(env: napi.Env, result: n.gossipsub.Gossipsub.PublishOutcome) !Value {
     const object = try env.createObject();
@@ -191,6 +147,7 @@ pub fn publishError(env: napi.Env, err: anyerror) !Value {
         error.PayloadTooSmall => "payload_too_small",
         error.PayloadTooLarge => "payload_too_large",
         error.CompressFailed => "compress_failed",
+        error.PublicationQueueFull, error.NetworkBridgeFull => "admission_full",
         error.ResourceExhausted => "resource_exhausted",
         error.Duplicate => "duplicate",
         error.NoPeersSubscribedToTopic => "no_peers_subscribed_to_topic",

@@ -29,7 +29,6 @@ pub const Cell = struct {
     identity: @import("network_runtime.zig").Identity = undefined,
     count: usize = 0,
     counts: n.PeerManager.PeerCounts = undefined,
-    publication: n.gossipsub.Gossipsub.PublishOutcome = .{},
 };
 pub const Table = struct {
     cells: [capacity]Cell = @splat(.{}),
@@ -46,6 +45,11 @@ pub const Table = struct {
     pub fn advance(self: *Table) !u64 {
         self.sequence = std.math.add(u64, self.sequence, 1) catch return error.NetworkSequenceExhausted;
         return self.sequence;
+    }
+    pub fn nextOrder(self: *Table) !u64 {
+        if (self.admission_sequence >= std.math.maxInt(u64) - 1) return error.NetworkSequenceExhausted;
+        self.admission_sequence += 1;
+        return self.admission_sequence;
     }
     fn storeKind(kind: Kind) ?usize {
         return switch (kind) {
@@ -77,8 +81,7 @@ pub const Table = struct {
         for (&self.cells, 0..) |*cell, i| {
             if (cell.state != .free) continue;
             const generation = std.math.add(u64, cell.generation, 1) catch return error.NetworkSequenceExhausted;
-            const order = std.math.add(u64, self.admission_sequence, 1) catch return error.NetworkSequenceExhausted;
-            self.admission_sequence = order;
+            const order = try self.nextOrder();
             cell.* = .{ .state = .preparing, .generation = generation, .kind = kind, .store = store, .order = order, .input = .{ .command = command } };
             if (storeKind(kind)) |which| self.stores[which][store.?] = true;
             self.connects += @intFromBool(kind == .connect);
@@ -93,7 +96,7 @@ pub const Table = struct {
         }
         return error.NetworkCommandFull;
     }
-    fn nextQueued(self: *Table) ?Token {
+    pub fn nextQueued(self: *Table) ?Token {
         var selected: ?Token = null;
         var order: u64 = std.math.maxInt(u64);
         for (&self.cells, 0..) |*cell, i| {
@@ -132,10 +135,13 @@ test "typed reservations unwind and identities never wrap" {
     try std.testing.expectError(error.NetworkSequenceExhausted, table.reserve(.getIdentity));
     table.sequence = std.math.maxInt(u64);
     try std.testing.expectError(error.NetworkSequenceExhausted, table.advance());
+    table.admission_sequence = std.math.maxInt(u64) - 2;
+    try std.testing.expectEqual(std.math.maxInt(u64) - 1, try table.nextOrder());
+    try std.testing.expectError(error.NetworkSequenceExhausted, table.nextOrder());
 }
 
 const n = @import("network");
-pub const Command = enum { applyIntent, updateStatus, getIdentity, getPeers, getGossipDiagnostics, connect, disconnect, reStatusPeers, addDirectPeer, removeDirectPeer, getDirectPeers, request, publishGossip };
+pub const Command = enum { applyIntent, updateStatus, getIdentity, getPeers, getGossipDiagnostics, connect, disconnect, reStatusPeers, addDirectPeer, removeDirectPeer, getDirectPeers };
 fn storageKind(command: Command) Kind {
     return switch (command) {
         .applyIntent => .intent,
@@ -148,12 +154,6 @@ fn storageKind(command: Command) Kind {
 pub const Input = struct {
     command: Command,
     status: n.peers.types.Status = undefined,
-    publication: []u8 = &.{},
-    publication_reservation: usize = 0,
-    topic: [@import("network_gossip.zig").topic_max]u8 = undefined,
-    topic_len: u16 = 0,
-    publish_options: n.gossipsub.Gossipsub.PublishOptions = .{},
-    request: @import("network_requests.zig").Token = undefined,
     peer: n.PeerId = undefined,
     addresses: [2]n.Address = undefined,
     address_count: u8 = 0,
@@ -164,43 +164,20 @@ pub const Input = struct {
 };
 
 const Runtime = @import("network_runtime.zig").Runtime;
-pub fn executeCommands(self: *Runtime, timestamp: n.Now) !void {
-    for (0..turn_max) |_| {
-        self.lock();
-        if (self.stop) {
-            self.unlock();
-            break;
-        }
-        const token = self.table.nextQueued() orelse {
-            self.unlock();
-            break;
-        };
-        const i = token.index;
-        const cell = self.table.get(token);
-        cell.state = .executing;
-        self.table.cells[i].sequence = self.table.advance() catch |err| {
-            self.unlock();
-            return err;
-        };
-        self.unlock();
-        executeOne(self, i, timestamp) catch |err| {
-            std.log.scoped(.network_bridge).debug("command_failed command={s} operation={d}:{d} sequence={d} reason={s}", .{ @tagName(self.table.cells[i].input.command), token.index, token.generation, self.table.cells[i].sequence, @errorName(err) });
-            self.table.cells[i].failure = err;
-        };
-        if (self.table.cells[i].input.command == .request) {
-            if (self.table.cells[i].failure) |err| return err;
-            self.abortCommand(token);
-            continue;
-        }
-        self.lock();
-        if (cell.state == .executing) {
-            if (self.stop and self.table.cells[i].input.command != .publishGossip) self.table.cells[i].failure = self.terminal_error orelse error.NetworkClosed;
-            cell.state = .terminal;
-        }
-        self.reports.sync(&self.heavy.?.core.peer_manager.catalog);
-        if (cell.state == .terminal) self.pingLocked();
-        self.unlock();
+pub fn execute(self: *Runtime, token: Token, timestamp: n.Now) void {
+    const cell = self.table.get(token);
+    executeOne(self, token.index, timestamp) catch |err| {
+        std.log.scoped(.network_bridge).debug("command_failed command={s} operation={d}:{d} reason={s}", .{ @tagName(cell.input.command), token.index, token.generation, @errorName(err) });
+        cell.failure = err;
+    };
+    self.lock();
+    defer self.unlock();
+    if (cell.state == .executing) {
+        if (self.stop) cell.failure = self.terminal_error orelse error.NetworkClosed;
+        cell.state = .terminal;
     }
+    self.reports.sync(&self.heavy.?.core.peer_manager.catalog);
+    if (cell.state == .terminal) self.pingLocked();
 }
 fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
     const operation = &self.table.cells[index];
@@ -208,23 +185,6 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
     const core = &self.heavy.?.core;
     const store = self.table.cells[index].store;
     switch (input.command) {
-        .publishGossip => {
-            defer {
-                self.lock();
-                @import("network_gossip.zig").releasePublicationLocked(self, input);
-                self.unlock();
-            }
-            operation.publication = try core.publishGossipWithOptions(input.topic[0..input.topic_len], input.publication, input.publish_options, timestamp);
-            if (operation.publication.pressured > 0) std.log.scoped(.network_bridge).debug("publication_pressured topic={s} queued={d} pressured={d} unavailable={d}", .{ input.topic[0..input.topic_len], operation.publication.queued, operation.publication.pressured, operation.publication.unavailable });
-            self.lock();
-            @import("network_gossip.zig").published(self, operation.publication);
-            self.unlock();
-        },
-        .request => {
-            try @import("network_faults.zig").requestBarrier(self, input.request, .request_queued);
-            try @import("network_requests.zig").submit(self, input.request, timestamp);
-            try @import("network_faults.zig").requestBarrier(self, input.request, .request_negotiation);
-        },
         .applyIntent => {
             if (input.slot < self.slot) return error.ClockRegression;
             const intent = &self.stores.?.intents[store.?].value;
@@ -307,6 +267,8 @@ pub fn waitLimit(self: *Runtime, timestamp: n.Now) u32 {
     self.lock();
     defer self.unlock();
     if (self.reports.pending != 0) return 0;
+    if (self.publications) |*table| if (table.oldest() != null) return 0;
+    if (self.requests) |*table| if (table.oldest() != null) return 0;
     var limit: u64 = 100;
     for (&self.table.cells, 0..) |*cell, i| {
         if (cell.state == .queued) return 0;

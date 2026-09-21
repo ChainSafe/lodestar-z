@@ -161,6 +161,7 @@ export interface NativeIdentity {
 export type NativeRuntimeState = "running" | "stopping" | "closed" | "failed";
 
 export interface NativeRuntimeDiagnostics {
+  publications: NativePublicationDiagnostics;
   requests: NativeRequestDiagnostics;
   incoming: NativeIncomingDiagnostics;
   gossip: NativeGossipDiagnostics;
@@ -313,6 +314,31 @@ export interface NativePeerBatch {
   updatesReplaceState: true;
 }
 
+export interface NativePublicationDiagnostics {
+  capacity: number;
+  urgentReserved: number;
+  occupied: number;
+  highWater: number;
+  refusals: bigint;
+  byteRefusals: bigint;
+  reservedBytes: number;
+  reservedBytesHighWater: number;
+  payloadBytes: number;
+  copies: bigint;
+  bytesCopied: bigint;
+  queued: bigint;
+  pressured: bigint;
+  selected: bigint;
+  unavailable: bigint;
+  duplicates: bigint;
+  latencyCount: bigint;
+  latencyMsTotal: bigint;
+  latencyMsMax: bigint;
+  /** Upper histogram bucket bounds, in milliseconds. */
+  latencyMsP50: bigint;
+  latencyMsP99: bigint;
+}
+
 export interface NativeNetworkApplicationRuntime {
   drainLogs(maxRecords?: number): NativeLogBatch;
   setLogLevel(level: NativeLogLevel): void;
@@ -329,6 +355,7 @@ export interface NativeNetworkApplicationRuntime {
   trackGossipSearch(root: Uint8Array, peer: Uint8Array | null): boolean;
   /** Completes host execution even when false means the protocol verdict has already expired. */
   reportGossip(handle: NativeGossipHandle, verdict: NativeGossipVerdict): boolean;
+  /** Copies admitted input. Admission pressure rejects with admission_full before any publication. */
   publishGossip(
     topic: string,
     data: Uint8Array,
@@ -540,7 +567,6 @@ export interface NativeRequestDiagnostics {
   chunksCopied: bigint;
   bytesCopied: bigint;
   requestFull: bigint;
-  commandFull: bigint;
   bridgeFull: bigint;
   busyPulls: bigint;
 }
@@ -709,6 +735,7 @@ export type NetworkGossipPublishFailed = Error & {
     | "payload_too_small"
     | "payload_too_large"
     | "compress_failed"
+    | "admission_full"
     | "resource_exhausted"
     | "duplicate"
     | "no_peers_subscribed_to_topic";

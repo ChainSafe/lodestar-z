@@ -27,11 +27,7 @@ assert(notifierErrors > 0);
 const weak = new WeakRef(runtime);
 const pending = [];
 for (let i = 0; i < 32; i++) {
-  try {
-    pending.push(runtime.publishGossip(topicName(), new Uint8Array(4000).fill(i)));
-  } catch (error) {
-    assert.equal(error.code, "NetworkCommandFull");
-  }
+  pending.push(runtime.publishGossip(topicName(), new Uint8Array(4000).fill(i)));
 }
 const results = Promise.allSettled(pending);
 runtime = null;

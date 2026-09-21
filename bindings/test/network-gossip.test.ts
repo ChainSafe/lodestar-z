@@ -78,16 +78,16 @@ test("gossip lifecycle, strict representations and canonical publication refusal
     expect(() => runtime.reportGossip(handle, "ACCEPT" as "accept")).toThrow();
     expect(runtime.reportGossip({...handle}, "ignore")).toBe(false);
     expect(runtime.reportGossip({...handle, index: Number.MAX_SAFE_INTEGER}, "ignore")).toBe(false);
-    expect(() =>
+    await expect(
       runtime.publishGossip(TOPIC, new Uint8Array(4000), {flood: 0} as unknown as {flood: boolean})
-    ).toThrow();
-    expect(() =>
+    ).rejects.toThrow();
+    await expect(
       runtime.publishGossip(TOPIC, new Uint8Array(4000), {unknown: true} as unknown as {flood: boolean})
-    ).toThrow();
-    expect(() => runtime.publishGossip(TOPIC, new Uint16Array(10) as unknown as Uint8Array)).toThrow();
+    ).rejects.toThrow();
+    await expect(runtime.publishGossip(TOPIC, new Uint16Array(10) as unknown as Uint8Array)).rejects.toThrow();
     const detached = new Uint8Array(4000);
     structuredClone(detached, {transfer: [detached.buffer]});
-    expect(() => runtime.publishGossip(TOPIC, detached)).toThrow();
+    await expect(runtime.publishGossip(TOPIC, detached)).rejects.toThrow();
     await expect(runtime.publishGossip("/invalid", new Uint8Array(4000))).rejects.toMatchObject({
       code: "NetworkGossipPublishFailed",
       reason: "unknown_topic",
@@ -96,7 +96,7 @@ test("gossip lifecycle, strict representations and canonical publication refusal
       code: "NetworkGossipPublishFailed",
       reason: "payload_too_small",
     });
-    expect(() => runtime.publishGossip(TOPIC, new Uint8Array(10 * 1024 * 1024 + 1))).toThrow("PayloadTooLarge");
+    await expect(runtime.publishGossip(TOPIC, new Uint8Array(10 * 1024 * 1024 + 1))).rejects.toThrow("PayloadTooLarge");
     await expect(runtime.publishGossip(TOPIC, new Uint8Array(4000), {allowZeroPeers: false})).rejects.toMatchObject({
       code: "NetworkGossipPublishFailed",
       reason: "no_peers_subscribed_to_topic",
@@ -124,7 +124,7 @@ test("gossip lifecycle, strict representations and canonical publication refusal
   }
   expect(runtime.drainGossip()).toEqual({grouped: false, messages: [], more: false});
   expect(runtime.reportGossip(handle, "ignore")).toBe(false);
-  expect(() => runtime.publishGossip(TOPIC, new Uint8Array(4000))).toThrow("NetworkClosed");
+  await expect(runtime.publishGossip(TOPIC, new Uint8Array(4000))).rejects.toThrow("NetworkClosed");
   expect(runtime.diagnostics().gossip).toMatchObject({
     capacity: 64,
     occupied: 0,
@@ -608,26 +608,26 @@ test("gossip publication rechecks a detached view and rolls back reentrant close
     await runtime.identity;
     await runtime.applyIntent(localIntent(config), config.initialSlot);
     const data = new Uint8Array(4000);
-    expect(() =>
+    await expect(
       runtime.publishGossip(TOPIC, data, {
         get flood() {
           structuredClone(data, {transfer: [data.buffer]});
           return false;
         },
       })
-    ).toThrow("InvalidNetworkBytes");
+    ).rejects.toThrow("InvalidNetworkBytes");
     expect(runtime.diagnostics()).toMatchObject({
       gossip: {publicationBytes: 0, reservedBytes: 0},
       operationOccupied: 0,
     });
-    expect(() =>
+    await expect(
       runtime.publishGossip(TOPIC, new Uint8Array(4000), {
         get flood() {
           void runtime.close();
           return false;
         },
       })
-    ).toThrow("NetworkClosed");
+    ).rejects.toThrow("NetworkClosed");
   } finally {
     await runtime.close();
   }
@@ -643,7 +643,7 @@ test.skipIf(!faultApi.networkTestFail)(
       await runtime.identity;
       await runtime.applyIntent(localIntent(config), config.initialSlot);
       faultApi.networkTestFail?.("gossip_publication");
-      expect(() => runtime.publishGossip(TOPIC, new Uint8Array(4000))).toThrow("InjectedNetworkFailure");
+      await expect(runtime.publishGossip(TOPIC, new Uint8Array(4000))).rejects.toThrow("InjectedNetworkFailure");
       expect(runtime.diagnostics()).toMatchObject({
         gossip: {publicationBytes: 0, publicationCopies: 0n, reservedBytes: 0},
         operationOccupied: 0,
