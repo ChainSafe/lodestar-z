@@ -7,6 +7,8 @@ const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeacon
 const SyncCommitteeCache = @import("sync_committee_cache.zig").SyncCommitteeCache;
 const EpochCache = @import("epoch_cache.zig").EpochCache;
 const SyncCommitteeCacheRc = @import("sync_committee_cache.zig").SyncCommitteeCacheRc;
+const EffectiveBalanceIncrementsRc = @import("effective_balance_increments.zig").EffectiveBalanceIncrementsRc;
+const effectiveBalanceIncrementsInit = @import("effective_balance_increments.zig").effectiveBalanceIncrementsInit;
 
 test "memory_safety: setSyncCommitteesIndexed should release each cache once on allocation failure" {
     const allocator = std.testing.allocator;
@@ -202,4 +204,29 @@ test "memory_safety: afterProcessEpoch should preserve shuffling state when deci
     try std.testing.expectEqual(previous_decision_root, epoch_cache.previous_decision_root);
     try std.testing.expectEqual(current_decision_root, epoch_cache.current_decision_root);
     try std.testing.expectEqual(next_decision_root, epoch_cache.next_decision_root);
+}
+
+test "effectiveBalanceIncrementsSet grows in place only when the list is not shared" {
+    const allocator = std.testing.allocator;
+    var epoch_cache: EpochCache = undefined;
+    {
+        var increments = try effectiveBalanceIncrementsInit(allocator, 4);
+        errdefer increments.deinit(allocator);
+        epoch_cache.effective_balance_increments = try EffectiveBalanceIncrementsRc.init(allocator, increments);
+    }
+    defer epoch_cache.effective_balance_increments.unref();
+
+    const shared = epoch_cache.effective_balance_increments.ref();
+    defer shared.unref();
+    try epoch_cache.effectiveBalanceIncrementsSet(allocator, 4, 32_000_000_000);
+    try std.testing.expect(epoch_cache.effective_balance_increments != shared);
+    try std.testing.expectEqual(4, shared.get().items.len);
+    try std.testing.expectEqual(5, epoch_cache.effective_balance_increments.get().items.len);
+
+    const unique = epoch_cache.effective_balance_increments;
+    const items_ptr = unique.get().items.ptr;
+    try epoch_cache.effectiveBalanceIncrementsSet(allocator, 5, 1_000_000_000);
+    try std.testing.expectEqual(unique, epoch_cache.effective_balance_increments);
+    try std.testing.expectEqual(items_ptr, unique.get().items.ptr);
+    try std.testing.expectEqualSlices(u16, &.{ 0, 0, 0, 0, 32, 1 }, unique.get().items);
 }
