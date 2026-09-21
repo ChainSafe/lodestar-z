@@ -905,8 +905,8 @@ pub const EpochCache = struct {
     pub fn effectiveBalanceIncrementsSet(self: *EpochCache, allocator: Allocator, index: usize, effective_balance: u64) !void {
         const rc = self.effective_balance_increments;
         const old_len = rc.instance.items.len;
-        if (index >= old_len and 
-            index < rc.instance.capacity and 
+        if (index >= old_len and
+            index < rc.instance.capacity and
             // Fast path: allow `self.effective_balance_increments` to grow
             // in-place while this is the only reference.
             // Avoids up to `preset.MAX_PENDING_DEPOSITS_PER_EPOCH`
@@ -916,7 +916,8 @@ pub const EpochCache = struct {
             // NOTE: We run `beforeEpochTransition()` before this,
             // which guarantees a ref count of 1 since we init a new
             // rc prior to processing pending deposits.
-            rc._ref_count.load(.acquire) == 1) {
+            rc._ref_count.load(.acquire) == 1)
+        {
             rc.instance.items.len = index + 1;
             @memset(rc.instance.items[old_len..], 0);
         } else if (index >= old_len) {
