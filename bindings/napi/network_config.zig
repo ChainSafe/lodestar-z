@@ -225,7 +225,7 @@ fn parseGossip(value: Value, out: *Config) !void {
     out.allowlist_count = @intCast(try array(allowlist, out.allowlist.len));
     for (0..out.allowlist_count) |i| out.allowlist[i] = try fixed(16, try allowlist.getElement(@intCast(i)));
     const score = try get(policy, "score");
-    try object(score, &.{ "appWeight", "ipColocationWeight", "ipColocationThreshold", "behaviourWeight", "behaviourThreshold", "behaviourDecay", "topicCap", "decayIntervalMs", "decayToZero", "gossipThreshold", "publishThreshold", "graylistThreshold", "opportunisticGraftThreshold", "defaultTopic" });
+    try object(score, &.{ "appWeight", "ipColocationWeight", "ipColocationThreshold", "behaviourWeight", "behaviourThreshold", "behaviourDecay", "topicCap", "decayIntervalMs", "decayToZero", "gossipThreshold", "publishThreshold", "graylistThreshold", "opportunisticGraftThreshold", "topics" });
     var params: n.gossipsub.score.Params = .{};
     params.app_weight = try number(try get(score, "appWeight"));
     params.ip_colocation_weight = try number(try get(score, "ipColocationWeight"));
@@ -240,9 +240,25 @@ fn parseGossip(value: Value, out: *Config) !void {
     params.publish_threshold = try number(try get(score, "publishThreshold"));
     params.graylist_threshold = try number(try get(score, "graylistThreshold"));
     params.opportunistic_graft_threshold = try number(try get(score, "opportunisticGraftThreshold"));
-    try parseTopicParams(try get(score, "defaultTopic"), &params.topic);
+    const topics = try get(score, "topics");
+    try completeObject(topics, &topic_kind_names);
+    var policies: [n.gossipsub.topic_policy.kind_count]n.gossipsub.score.TopicPolicy = undefined;
+    inline for (std.meta.fields(n.gossipsub.topic.Kind), 0..) |field, i| {
+        const topic = try get(topics, field.name);
+        try parseTopicParams(topic, &policies[i].params);
+        policies[i].mesh_delivery_start_slot = try bigint(try get(topic, "meshDeliveryStartSlot"));
+    }
+    out.gossip.topic_params = policies;
+    out.gossip.initial_slot = out.slot;
+    params.topic.weight = 0;
     out.gossip.score_params = params;
 }
+
+pub const topic_kind_names = blk: {
+    var names: [n.gossipsub.topic_policy.kind_count][]const u8 = undefined;
+    for (std.meta.fieldNames(n.gossipsub.topic.Kind), 0..) |name, i| names[i] = name;
+    break :blk names;
+};
 
 pub fn completeObject(value: Value, comptime names: []const []const u8) !void {
     try object(value, names);
@@ -273,7 +289,7 @@ pub fn parseLocal(local: Value, out: *t.LocalState) !void {
 }
 
 pub fn parseTopicParams(topic: Value, out: *n.gossipsub.score.TopicParams) !void {
-    try object(topic, &.{ "weight", "timeInMeshWeight", "timeInMeshCap", "timeInMeshQuantumMs", "firstDeliveryWeight", "firstDeliveryCap", "firstDeliveryDecay", "meshDeliveryWeight", "meshDeliveryThreshold", "meshDeliveryCap", "meshDeliveryDecay", "meshDeliveryActivationMs", "meshDeliveryWindowMs", "meshFailureWeight", "meshFailureDecay", "invalidWeight", "invalidDecay" });
+    try completeObject(topic, &.{ "meshDeliveryStartSlot", "weight", "timeInMeshWeight", "timeInMeshCap", "timeInMeshQuantumMs", "firstDeliveryWeight", "firstDeliveryCap", "firstDeliveryDecay", "meshDeliveryWeight", "meshDeliveryThreshold", "meshDeliveryCap", "meshDeliveryDecay", "meshDeliveryActivationMs", "meshDeliveryWindowMs", "meshFailureWeight", "meshFailureDecay", "invalidWeight", "invalidDecay" });
     out.*.weight = try number(try get(topic, "weight"));
     out.*.time_in_mesh_weight = try number(try get(topic, "timeInMeshWeight"));
     out.*.time_in_mesh_cap = try number(try get(topic, "timeInMeshCap"));

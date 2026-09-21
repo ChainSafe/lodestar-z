@@ -52,6 +52,8 @@ export interface NativeDiscoveryConfig {
 }
 
 export interface NativeTopicScoreParams {
+  /** First accepted slot with mesh-delivery penalties enabled. */
+  meshDeliveryStartSlot: bigint;
   weight: number;
   timeInMeshWeight: number;
   timeInMeshCap: number;
@@ -85,7 +87,7 @@ export interface NativeGlobalScoreParams {
   publishThreshold: number;
   graylistThreshold: number;
   opportunisticGraftThreshold: number;
-  defaultTopic: NativeTopicScoreParams;
+  topics: Readonly<Record<NativeTopicKind, NativeTopicScoreParams>>;
 }
 
 export interface NativeGossipProcessorLimit {
@@ -267,12 +269,19 @@ export interface NativeApplicationConfig extends NativeRuntimeConfig {
 export interface NativeDemand {
   attnets: Uint8Array;
   syncnets: number;
-  groupTargets: readonly number[];
-  /** Standing custody service targets. Request consumers still check slot availability. */
-  custodyGroupTargets: readonly number[];
+  /** At most 128 targets; omitted trailing entries are zero. Each target is bounded by maxPeers. */
+  groupTargets: Uint16Array;
+  /** Same bounds as groupTargets. Standing custody service targets; request consumers still check slot availability. */
+  custodyGroupTargets: Uint16Array;
   attestationTarget: number;
   syncTarget: number;
   expiresAtSlot: bigint;
+}
+
+export interface NativeSubscriptionSet {
+  digest: Uint8Array;
+  /** Bit i selects subnet i; singleton kinds use bit 0. Missing kinds are unsubscribed. */
+  subnets: Partial<Record<NativeTopicKind, Uint8Array>>;
 }
 
 export interface NativeLocalIntent {
@@ -281,7 +290,8 @@ export interface NativeLocalIntent {
     endpoints: AdvertisedEndpoints | null;
   };
   demand: NativeDemand;
-  subscriptions: readonly {name: string; params: NativeTopicScoreParams}[];
+  /** One set per configured boundary; omitted boundaries are unsubscribed. */
+  subscriptions: readonly NativeSubscriptionSet[];
 }
 
 export interface NativeIntentResult {

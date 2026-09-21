@@ -11,6 +11,7 @@ import {
   discoveryConfig,
   localIntent,
   startRuntime,
+  subscriptions,
   testChain,
   topicName,
 } from "./utils/network.js";
@@ -64,10 +65,7 @@ test("owned chain plan follows Fulu and BPO with Lodestar topics and fixed nativ
       intent.update.local.status.earliestAvailableSlot = 0n;
       intent.update.local.metadata.custodyGroupCount = 8n;
       intent.demand.expiresAtSlot = slot + 100n;
-      intent.subscriptions = ["beacon_block", "data_column_sidecar_0"].map((kind) => ({
-        name: topicName(kind, i + 2),
-        params: config.gossipPolicy.score.defaultTopic,
-      }));
+      intent.subscriptions = subscriptions(topicName("beacon_block", i + 2), topicName("data_column_sidecar_0", i + 2));
       await runtime.applyIntent(intent, slot);
       const current = await runtime.getIdentity();
       expect(current.localEnr).not.toEqual(identity.localEnr);
@@ -92,7 +90,7 @@ test("failed intent leaves running state and clock unchanged", async () => {
     expect((await runtime.getPeers()).peers).toEqual([]);
     await runtime.updateStatus(config.local.status);
     const intent = localIntent(config);
-    intent.subscriptions = [{name: "/invalid", params: config.gossipPolicy.score.defaultTopic}];
+    intent.subscriptions = [{digest: new Uint8Array(4).fill(255), subnets: {}}];
     await expect(runtime.applyIntent(intent, 101n)).rejects.toThrow();
     expect(runtime.state).toBe("running");
     expect(runtime.diagnostics().currentSlot).toBe(100n);
@@ -121,7 +119,7 @@ test("Status-only updates copy inputs and preserve advertisement and subscriptio
   try {
     const [identity] = await Promise.all([a.identity, b.identity]);
     const intent = localIntent(config);
-    intent.subscriptions = [{name: topicName(), params: config.gossipPolicy.score.defaultTopic}];
+    intent.subscriptions = subscriptions(topicName());
     intent.demand.attnets[0] = 5;
     intent.demand.expiresAtSlot = 103n;
     await Promise.all([a.applyIntent(intent, 100n), b.applyIntent(localIntent(other), 100n)]);
@@ -300,20 +298,15 @@ test("bounded typed stores refuse the third intent and unwind malformed input", 
     await runtime.identity;
     const one = runtime.applyIntent(localIntent(config), 100n);
     const two = runtime.applyIntent(localIntent(config), 101n);
-    expect(() => runtime.applyIntent(localIntent(config), 102n)).toThrow("NetworkCommandFull");
+    await expect(runtime.applyIntent(localIntent(config), 102n)).rejects.toThrow("NetworkCommandFull");
     await Promise.all([one, two]);
     const invalid = localIntent(config);
-    Reflect.set(invalid.demand.groupTargets, 127, 1.5);
-    expect(() => runtime.applyIntent(invalid, 103n)).toThrow();
-    for (const targets of [
-      Array<number>(127).fill(0),
-      Array<number>(129).fill(0),
-      Array<number>(128).fill(1.5),
-      Array<number>(128).fill(config.resources.maxPeers + 1),
-    ]) {
+    Reflect.set(invalid.demand.groupTargets, 127, config.resources.maxPeers + 1);
+    await expect(runtime.applyIntent(invalid, 103n)).rejects.toThrow();
+    for (const targets of [new Uint16Array(129), new Uint16Array(128).fill(config.resources.maxPeers + 1)]) {
       const malformed = localIntent(config);
       malformed.demand.custodyGroupTargets = targets;
-      expect(() => runtime.applyIntent(malformed, 103n)).toThrow();
+      await expect(runtime.applyIntent(malformed, 103n)).rejects.toThrow();
     }
     await runtime.applyIntent(localIntent(config), 103n);
     const pending = Array.from({length: 32}, () => runtime.getIdentity());
@@ -336,7 +329,7 @@ test("reentrant close during input copying cancels publication", async () => {
       return localIntent(config).update;
     },
   });
-  expect(() => runtime.applyIntent(intent, 101n)).toThrow("NetworkClosed");
+  await expect(runtime.applyIntent(intent, 101n)).rejects.toThrow("NetworkClosed");
   await runtime.close();
   expect(runtime.diagnostics().currentSlot).toBe(100n);
 });

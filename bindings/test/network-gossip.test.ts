@@ -1,5 +1,5 @@
 import {expect, test, vi} from "vitest";
-import {applicationConfig, localIntent, requestForks, startRuntime, topicName} from "./utils/network.js";
+import {applicationConfig, localIntent, requestForks, startRuntime, subscriptions, topicName} from "./utils/network.js";
 import {startPeer} from "./utils/network-peer.js";
 
 test("gossip drain and stale verdict on an activated application", async () => {
@@ -43,7 +43,7 @@ async function gossipPair(timeoutMs = 30000n, budget?: number, beforeServer?: ()
       [pair.right, pair.rightConfig],
     ] as const) {
       const intent = localIntent(config);
-      intent.subscriptions = [{name: TOPIC, params: config.gossipPolicy.score.defaultTopic}];
+      intent.subscriptions = subscriptions(TOPIC);
       await runtime.applyIntent(intent, config.initialSlot);
     }
     await Promise.all([
@@ -424,10 +424,7 @@ for (const hoodi of [false, true]) {
         runtime = startRuntime(config, () => undefined);
         const identity = await runtime.identity;
         const intent = localIntent(config);
-        intent.subscriptions = [firstTopic, secondTopic].map((name) => ({
-          name,
-          params: config.gossipPolicy.score.defaultTopic,
-        }));
+        intent.subscriptions = subscriptions(firstTopic, secondTopic);
         await runtime.applyIntent(intent, config.initialSlot);
         await peer.command("gossipSubscribe", {topic: firstTopic});
         await peer.command("gossipSubscribe", {topic: secondTopic});

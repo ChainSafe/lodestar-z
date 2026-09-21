@@ -4,7 +4,6 @@ const constants = @import("constants.zig");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 
-/// Generic defaults. Hosts copy independently tuned parameters for each topic.
 pub const TopicParams = struct {
     weight: f64 = 1.0,
     time_in_mesh_weight: f64 = 0.03,
@@ -23,6 +22,20 @@ pub const TopicParams = struct {
     mesh_failure_decay: f64 = 0.9,
     invalid_weight: f64 = -100.0,
     invalid_decay: f64 = 0.9,
+};
+
+pub const TopicPolicy = struct {
+    params: TopicParams = .{},
+    mesh_delivery_start_slot: u64 = 0,
+
+    pub fn atSlot(self: *const TopicPolicy, slot: u64) TopicParams {
+        var params = self.params;
+        if (slot < self.mesh_delivery_start_slot) {
+            params.mesh_delivery_weight = 0;
+            params.mesh_delivery_threshold = 0;
+        }
+        return params;
+    }
 };
 
 /// Global weights, thresholds, and decay cadence.

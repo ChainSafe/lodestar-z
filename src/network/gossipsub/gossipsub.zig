@@ -206,6 +206,7 @@ pub const Gossipsub = struct {
         const overlay = try allocator.create(overlay_mod.Overlay);
         errdefer allocator.destroy(overlay);
         overlay.* = overlay_mod.Overlay.init(options.random_seed.?);
+        overlay.slot = options.initial_slot;
 
         var peers = try peers_mod.PeerBook.init(allocator, &options);
         errdefer peers.deinit(allocator);
@@ -283,10 +284,10 @@ pub const Gossipsub = struct {
         self.overlay.reclaimTopic(&context, &pins, topic);
     }
 
-    pub fn prepareSubscriptions(self: *Gossipsub, subscriptions: []const local_intent.Subscription, workspace: *local_intent.Workspace, now: Now) local_intent.Error!bool {
+    pub fn prepareSubscriptions(self: *Gossipsub, subscriptions: []const local_intent.Boundary, workspace: *local_intent.Workspace, now: Now, slot: u64) local_intent.Error!bool {
         const context = self.overlayContext(self.last_now_ms);
         const pins = self.messages.topicPins();
-        return self.overlay.prepareSubscriptions(&context, &pins, subscriptions, workspace, now.mono_ms);
+        return self.overlay.prepareSubscriptions(&context, &pins, subscriptions, workspace, now.mono_ms, slot);
     }
 
     pub fn commitSubscriptions(self: *Gossipsub, workspace: *local_intent.Workspace) void {

@@ -20,3 +20,39 @@ pub fn hoodi() [5]topic_policy.Boundary {
     }
     return out;
 }
+
+const local = @import("local_intent.zig");
+const topic = @import("topic.zig");
+const std = @import("std");
+
+pub fn subscriptions(comptime names: []const []const u8) []const local.Boundary {
+    return comptime blk: {
+        @setEvalBranchQuota(100_000);
+        var buffer: [topic_policy.boundary_max]local.Boundary = undefined;
+        const value = subscriptionsInto(names, &buffer) catch unreachable;
+        const result = buffer[0..value.len].*;
+        break :blk &result;
+    };
+}
+
+pub fn subscriptionsInto(names: []const []const u8, out: *[topic_policy.boundary_max]local.Boundary) ![]const local.Boundary {
+    std.debug.assert(names.len <= topic_policy.topic_max);
+    var len: usize = 0;
+    for (names) |name| {
+        const parsed = topic.parseCanonical(name) orelse return error.InvalidTopic;
+        const index = for (out[0..len], 0..) |*entry, i| {
+            if (std.mem.eql(u8, &entry.digest, &parsed.digest)) break i;
+        } else index: {
+            if (len == out.len) return error.TopicCapacity;
+            out[len] = .{ .digest = parsed.digest };
+            len += 1;
+            break :index len - 1;
+        };
+        const entry = &out[index];
+        const byte = parsed.name.subnet / 8;
+        entry.mask(parsed.name.kind)[byte] |= @as(u8, 1) << @intCast(parsed.name.subnet % 8);
+        const k = @intFromEnum(parsed.name.kind);
+        entry.lengths[k] = @max(entry.lengths[k], @as(u8, @intCast(byte + 1)));
+    }
+    return out[0..len];
+}

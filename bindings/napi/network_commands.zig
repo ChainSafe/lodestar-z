@@ -189,6 +189,7 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
             if (input.slot < self.slot) return error.ClockRegression;
             const intent = &self.stores.?.intents[store.?].value;
             intent.update = try self.heavy.?.config.chain.update(intent.update.local, intent.update.endpoints, input.slot);
+            intent.slot = input.slot;
             operation.boolean = try core.applyIntent(intent, timestamp);
             self.lock();
             self.slot = input.slot;

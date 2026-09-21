@@ -1,7 +1,14 @@
 import {execFileSync} from "node:child_process";
 import {setTimeout as delay} from "node:timers/promises";
 import {describe, expect, it} from "vitest";
-import {applicationConfig, configureChain, discoveryConfig, requestForks, startRuntime} from "./utils/network.js";
+import {
+  applicationConfig,
+  configureChain,
+  discoveryConfig,
+  requestForks,
+  startRuntime,
+  topicScores,
+} from "./utils/network.js";
 import {networkBindings as bindings} from "./utils/network-bindings.js";
 import {startPeer} from "./utils/network-peer.js";
 
@@ -122,7 +129,14 @@ describe.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")("test-buil
         behaviourWeight: -11,
         decayIntervalMs: 6000n,
         decayToZero: 0.02,
-        defaultTopic: {
+        gossipThreshold: -4001,
+        graylistThreshold: -16001,
+        ipColocationThreshold: 4,
+        ipColocationWeight: -2,
+        opportunisticGraftThreshold: 6,
+        publishThreshold: -8001,
+        topicCap: 3300,
+        topics: topicScores({
           firstDeliveryCap: 101,
           firstDeliveryDecay: 0.8,
           firstDeliveryWeight: 2,
@@ -131,6 +145,7 @@ describe.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")("test-buil
           meshDeliveryActivationMs: 31000n,
           meshDeliveryCap: 51,
           meshDeliveryDecay: 0.8,
+          meshDeliveryStartSlot: 0n,
           meshDeliveryThreshold: 6,
           meshDeliveryWeight: -2,
           meshDeliveryWindowMs: 11n,
@@ -140,14 +155,7 @@ describe.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")("test-buil
           timeInMeshQuantumMs: 900n,
           timeInMeshWeight: 0.04,
           weight: 2,
-        },
-        gossipThreshold: -4001,
-        graylistThreshold: -16001,
-        ipColocationThreshold: 4,
-        ipColocationWeight: -2,
-        opportunisticGraftThreshold: 6,
-        publishThreshold: -8001,
-        topicCap: 3300,
+        }),
       },
       seenTtlMs: 192000n,
       txTimeoutMs: 34000n,

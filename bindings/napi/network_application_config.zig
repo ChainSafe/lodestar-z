@@ -91,8 +91,7 @@ pub fn parse(value: Value, common: *cfg.Config, out: *Config) !void {
 
 pub const Intent = struct {
     value: n.network_core.LocalIntent,
-    names: [512][n.gossipsub.topic.topic_max_len]u8,
-    subscriptions: [512]n.gossipsub.local_intent.Subscription,
+    subscriptions: [n.gossipsub.topic_policy.boundary_max]n.gossipsub.local_intent.Boundary,
 };
 pub fn parseIntent(value: Value, out: *Intent, max_peers: u16) !void {
     try cfg.completeObject(value, &.{ "update", "demand", "subscriptions" });
@@ -110,20 +109,36 @@ pub fn parseIntent(value: Value, out: *Intent, max_peers: u16) !void {
     out.value.demand.attestation_target = @intCast(try cfg.integer(try cfg.get(demand, "attestationTarget"), max_peers));
     out.value.demand.sync_target = @intCast(try cfg.integer(try cfg.get(demand, "syncTarget"), max_peers));
     out.value.demand.expires_at_slot = try cfg.bigint(try cfg.get(demand, "expiresAtSlot"));
-    const targets = try cfg.get(demand, "groupTargets");
-    if (try cfg.array(targets, 128) != 128) return error.InvalidDemand;
-    for (&out.value.demand.group_targets, 0..) |*target, i| target.* = @intCast(try cfg.integer(try targets.getElement(@intCast(i)), max_peers));
-    const custody_targets = try cfg.get(demand, "custodyGroupTargets");
-    if (try cfg.array(custody_targets, 128) != 128) return error.InvalidDemand;
-    for (&out.value.demand.custody_group_targets, 0..) |*target, i| target.* = @intCast(try cfg.integer(try custody_targets.getElement(@intCast(i)), max_peers));
+    try targets(try cfg.get(demand, "groupTargets"), &out.value.demand.group_targets, max_peers);
+    try targets(try cfg.get(demand, "custodyGroupTargets"), &out.value.demand.custody_group_targets, max_peers);
     const subscriptions = try cfg.get(value, "subscriptions");
-    const count = try cfg.array(subscriptions, 512);
+    const count = try cfg.array(subscriptions, n.gossipsub.topic_policy.boundary_max);
     for (out.subscriptions[0..count], 0..) |*subscription, i| {
         const entry = try subscriptions.getElement(@intCast(i));
-        try cfg.completeObject(entry, &.{ "name", "params" });
-        const len = try text(try cfg.get(entry, "name"), &out.names[i]);
-        subscription.name = out.names[i][0..len];
-        try cfg.parseTopicParams(try cfg.get(entry, "params"), &subscription.params);
+        try cfg.completeObject(entry, &.{ "digest", "subnets" });
+        subscription.* = .{ .digest = try cfg.fixed(4, try cfg.get(entry, "digest")) };
+        const subnets = try cfg.get(entry, "subnets");
+        try cfg.object(subnets, &cfg.topic_kind_names);
+        inline for (std.meta.fields(n.gossipsub.topic.Kind), 0..) |field, k| {
+            if (try subnets.hasNamedProperty(field.name)) {
+                const input = try cfg.get(subnets, field.name);
+                if (!try input.isTypedarray()) return error.InvalidNetworkBytes;
+                const info = try input.getTypedarrayInfo();
+                const mask = subscription.mask(@enumFromInt(k));
+                if (info.array_type != .uint8 or info.length > mask.len or try info.arraybuffer.isDetachedArrayBuffer()) return error.InvalidNetworkBytes;
+                @memcpy(mask[0..info.length], info.data);
+                subscription.lengths[k] = @intCast(info.length);
+            }
+        }
     }
     out.value.subscriptions = out.subscriptions[0..count];
+}
+
+fn targets(value: Value, out: *[128]u16, max_peers: u16) !void {
+    if (!try value.isTypedarray()) return error.InvalidNetworkBytes;
+    const info = try value.getTypedarrayInfo();
+    if (info.array_type != .uint16 or info.length > out.len or try info.arraybuffer.isDetachedArrayBuffer()) return error.InvalidNetworkBytes;
+    @memset(out, 0);
+    @memcpy(std.mem.sliceAsBytes(out[0..info.length]), info.data);
+    for (out) |target| if (target > max_peers) return error.InvalidNetworkInteger;
 }

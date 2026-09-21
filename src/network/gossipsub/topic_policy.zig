@@ -127,6 +127,17 @@ pub const Namespace = struct {
         return null;
     }
 
+    pub fn topicAt(self: *const Namespace, ordinal: u16) topic.Canonical {
+        assert(ordinal < self.topic_count);
+        for (self.boundaries, self.offsets) |*boundary, *starts| {
+            for (boundary.rules, starts, 0..) |rule, start, k| {
+                if (ordinal >= start and ordinal - start < rule.count)
+                    return .{ .digest = boundary.digest, .name = .{ .kind = @enumFromInt(k), .subnet = ordinal - start } };
+            }
+        }
+        unreachable;
+    }
+
     pub fn setSubscription(self: *Namespace, peer: u16, ordinal: u16, subscribed_value: bool) void {
         assert(peer < self.connected_capacity and ordinal < self.topic_count);
         const word = &self.subscriptions[@as(usize, peer) * self.words_per_peer + ordinal / 64];

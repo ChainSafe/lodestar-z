@@ -1,42 +1,58 @@
 const std = @import("std");
 const constants = @import("constants.zig");
 const topic = @import("topic.zig");
-const score = @import("score.zig");
+const policy = @import("topic_policy.zig");
 
-pub const Subscription = struct {
-    name: []const u8,
-    params: score.TopicParams,
+const mask_offsets = blk: {
+    var offsets: [policy.kind_count + 1]usize = @splat(0);
+    for (0..policy.kind_count) |i| {
+        const kind: topic.Kind = @enumFromInt(i);
+        offsets[i + 1] = offsets[i] + (kind.countMax() + 7) / 8;
+    }
+    break :blk offsets;
 };
+
+pub const Boundary = struct {
+    digest: [4]u8,
+    masks: [mask_offsets[policy.kind_count]]u8 = @splat(0),
+    lengths: [policy.kind_count]u8 = @splat(0),
+
+    pub fn mask(self: *Boundary, kind: topic.Kind) []u8 {
+        const k = @intFromEnum(kind);
+        return self.masks[mask_offsets[k]..mask_offsets[k + 1]];
+    }
+
+    pub fn maskConst(self: *const Boundary, kind: topic.Kind) []const u8 {
+        const k = @intFromEnum(kind);
+        return self.masks[mask_offsets[k]..mask_offsets[k + 1]];
+    }
+};
+pub const OrdinalSet = std.StaticBitSet(policy.topic_max);
 pub const TopicSet = std.StaticBitSet(constants.topics_cap);
 pub const Pins = struct {
     validation: TopicSet = .initEmpty(),
     outbound: TopicSet = .initEmpty(),
 };
 pub const Assignment = struct {
-    bytes: [topic.topic_max_len]u8,
-    len: u8,
-    ordinal: u16,
-    params: score.TopicParams,
-    row: ?u16,
     generation: u64,
+    ordinal: u16,
+    row: u16,
     existing: bool,
-
-    pub fn name(self: *const Assignment) []const u8 {
-        return self.bytes[0..self.len];
-    }
 };
 
 /// Private scratch between preparation and commit in one serialized owner call.
 pub const Workspace = struct {
     entries: [constants.topics_cap]Assignment = undefined,
     len: u16 = 0,
+    desired: OrdinalSet = .initEmpty(),
     reserved: TopicSet = .initEmpty(),
     pins: Pins = .{},
     now_ms: u64 = 0,
+    slot: u64 = 0,
     prepared: bool = false,
 };
 
-pub const Error = error{ TopicCapacity, DuplicateTopic, InvalidTopic, InvalidLimits, TopicPolicyRequired };
+pub const Error = error{ TopicCapacity, DuplicateBoundary, InvalidTopic, TopicPolicyRequired };
 
 test {
     _ = @import("local_intent_test.zig");

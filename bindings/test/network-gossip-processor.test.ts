@@ -5,7 +5,7 @@ import type {
   NativeGossipMessage,
   NativeNetworkApplicationRuntime,
 } from "../src/network.js";
-import {applicationConfig, localIntent, startRuntime, topicName} from "./utils/network.js";
+import {applicationConfig, localIntent, startRuntime, subscriptions, topicName} from "./utils/network.js";
 import {incomingPair} from "./utils/network-incoming.js";
 
 const BLOCK = topicName();
@@ -74,10 +74,7 @@ test("native processor retains dependencies, protects blocks, batches ready work
       [pair.right, pair.rightConfig],
     ] as const) {
       const intent = localIntent(config);
-      intent.subscriptions = [BLOCK, ATTESTATION].map((name) => ({
-        name,
-        params: config.gossipPolicy.score.defaultTopic,
-      }));
+      intent.subscriptions = subscriptions(BLOCK, ATTESTATION);
       await runtime.applyIntent(intent, config.initialSlot);
     }
     await Promise.all([
@@ -155,7 +152,7 @@ test("expired validation execution remains visible until late host completion", 
       [pair.right, pair.rightConfig],
     ] as const) {
       const intent = localIntent(config);
-      intent.subscriptions = [{name: BLOCK, params: config.gossipPolicy.score.defaultTopic}];
+      intent.subscriptions = subscriptions(BLOCK);
       await runtime.applyIntent(intent, config.initialSlot);
     }
     await Promise.all([

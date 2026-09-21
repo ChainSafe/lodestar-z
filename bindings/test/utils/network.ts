@@ -9,6 +9,9 @@ import type {
   NativeDiscoveryConfig,
   NativeLocalIntent,
   NativeRuntimeConfig,
+  NativeSubscriptionSet,
+  NativeTopicKind,
+  NativeTopicScoreParams,
 } from "../../src/network.js";
 
 export function networkConfig(): NativeRuntimeConfig {
@@ -34,7 +37,14 @@ export function networkConfig(): NativeRuntimeConfig {
         behaviourWeight: -10,
         decayIntervalMs: 12000n,
         decayToZero: 0.01,
-        defaultTopic: {
+        gossipThreshold: -4000,
+        graylistThreshold: -16000,
+        ipColocationThreshold: 3,
+        ipColocationWeight: 0,
+        opportunisticGraftThreshold: 5,
+        publishThreshold: -8000,
+        topicCap: 3200,
+        topics: topicScores({
           firstDeliveryCap: 100,
           firstDeliveryDecay: 0.9,
           firstDeliveryWeight: 1,
@@ -43,6 +53,7 @@ export function networkConfig(): NativeRuntimeConfig {
           meshDeliveryActivationMs: 30000n,
           meshDeliveryCap: 50,
           meshDeliveryDecay: 0.9,
+          meshDeliveryStartSlot: 0n,
           meshDeliveryThreshold: 5,
           meshDeliveryWeight: -1,
           meshDeliveryWindowMs: 10n,
@@ -52,14 +63,7 @@ export function networkConfig(): NativeRuntimeConfig {
           timeInMeshQuantumMs: 1000n,
           timeInMeshWeight: 0.03,
           weight: 1,
-        },
-        gossipThreshold: -4000,
-        graylistThreshold: -16000,
-        ipColocationThreshold: 3,
-        ipColocationWeight: 0,
-        opportunisticGraftThreshold: 5,
-        publishThreshold: -8000,
-        topicCap: 3200,
+        }),
       },
       seenTtlMs: 384000n,
       txTimeoutMs: 30000n,
@@ -149,9 +153,9 @@ export function localIntent(config: NativeApplicationConfig): NativeLocalIntent 
     demand: {
       attestationTarget: 1,
       attnets: new Uint8Array(8),
-      custodyGroupTargets: Array<number>(128).fill(0),
+      custodyGroupTargets: new Uint16Array(128),
       expiresAtSlot: config.initialSlot + 100n,
-      groupTargets: Array<number>(128).fill(0),
+      groupTargets: new Uint16Array(128),
       syncTarget: 1,
       syncnets: 0,
     },
@@ -165,4 +169,51 @@ export function localIntent(config: NativeApplicationConfig): NativeLocalIntent 
 
 export function startRuntime(config: NativeApplicationConfig, onWorkAvailable: () => void = () => undefined) {
   return initializeNativeNetworkRuntime(config, onWorkAvailable);
+}
+
+export const topicKinds: readonly NativeTopicKind[] = [
+  "beacon_block",
+  "beacon_aggregate_and_proof",
+  "beacon_attestation",
+  "proposer_slashing",
+  "attester_slashing",
+  "voluntary_exit",
+  "sync_committee_contribution_and_proof",
+  "sync_committee",
+  "light_client_finality_update",
+  "light_client_optimistic_update",
+  "bls_to_execution_change",
+  "blob_sidecar",
+  "data_column_sidecar",
+];
+
+export function topicScores(params: NativeTopicScoreParams): Record<NativeTopicKind, NativeTopicScoreParams> {
+  return Object.fromEntries(topicKinds.map((kind) => [kind, {...params}])) as Record<
+    NativeTopicKind,
+    NativeTopicScoreParams
+  >;
+}
+
+export function subscriptions(...names: string[]): NativeSubscriptionSet[] {
+  const sets = new Map<string, NativeSubscriptionSet>();
+  for (const name of names) {
+    const match = /^\/eth2\/([0-9a-f]{8})\/([a-z_]+?)(?:_(\d+))?\/ssz_snappy$/.exec(name);
+    if (!match) throw Error(`Invalid fixture topic: ${name}`);
+    const [, digest, type, index] = match;
+    const kind = topicKinds.find((kind) => kind === type);
+    if (!kind) throw Error(`Invalid fixture kind: ${type}`);
+    const subnet = Number(index ?? 0);
+    if (subnet >= 128) throw Error(`Invalid fixture subnet: ${subnet}`);
+    let set = sets.get(digest);
+    if (!set) {
+      set = {digest: Uint8Array.from(Buffer.from(digest, "hex")), subnets: {}};
+      sets.set(digest, set);
+    }
+    const prior = set.subnets[kind];
+    const mask = new Uint8Array(Math.max(prior?.length ?? 0, (subnet >> 3) + 1));
+    if (prior) mask.set(prior);
+    mask[subnet >> 3] |= 1 << (subnet % 8);
+    set.subnets[kind] = mask;
+  }
+  return [...sets.values()];
 }
