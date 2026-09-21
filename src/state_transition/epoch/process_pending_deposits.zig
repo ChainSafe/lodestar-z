@@ -144,12 +144,12 @@ fn applyPendingDeposit(
         // Verify the deposit signature (proof of possession) which is not checked by the deposit contract
         if (validateDepositSignature(config, pubkey, withdrawal_credentials, amount, signature)) {
             try addValidatorToRegistry(fork, allocator, io, epoch_cache, state, pubkey, withdrawal_credentials, amount);
-            try cache.is_compounding_validator_arr.append(allocator, hasCompoundingWithdrawalCredential(withdrawal_credentials));
+            try cache.is_compounding_validator_arr.append(hasCompoundingWithdrawalCredential(withdrawal_credentials));
             // set balance, so that the next deposit of same pubkey will increase the balance correctly
             // this is to fix the double deposit issue found in mekong
             // see https://github.com/ChainSafe/lodestar/pull/7255
             if (cache.balances) |*balances| {
-                try balances.append(allocator, amount);
+                try balances.append(cache.allocator, amount);
             }
         } else |_| {
             // invalid deposit signature, ignore the deposit

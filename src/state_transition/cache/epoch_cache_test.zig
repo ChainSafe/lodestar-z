@@ -9,6 +9,7 @@ const EpochCache = @import("epoch_cache.zig").EpochCache;
 const SyncCommitteeCacheRc = @import("sync_committee_cache.zig").SyncCommitteeCacheRc;
 const EffectiveBalanceIncrementsRc = @import("effective_balance_increments.zig").EffectiveBalanceIncrementsRc;
 const effectiveBalanceIncrementsInit = @import("effective_balance_increments.zig").effectiveBalanceIncrementsInit;
+const SLOTS_PER_EPOCH = @import("preset").preset.SLOTS_PER_EPOCH;
 
 test "memory_safety: setSyncCommitteesIndexed should release each cache once on allocation failure" {
     const allocator = std.testing.allocator;
@@ -229,4 +230,66 @@ test "effectiveBalanceIncrementsAppend grows in place only when the list is not 
     try std.testing.expectEqual(unique, epoch_cache.effective_balance_increments);
     try std.testing.expectEqual(items_ptr, unique.get().items.ptr);
     try std.testing.expectEqualSlices(u16, &.{ 0, 0, 0, 0, 32, 1 }, unique.get().items);
+}
+
+test "memory_safety: attesting indices belong to the caller's allocator, not the cache's" {
+    // The cache and the caller deliberately use different allocators. The returned list is
+    // caller-owned, so allocating it from the cache's allocator would free across allocators.
+    var cache_allocator_state: std.heap.DebugAllocator(.{}) = .init;
+    defer std.debug.assert(cache_allocator_state.deinit() == .ok);
+    const cache_allocator = cache_allocator_state.allocator();
+    const caller_allocator = std.testing.allocator;
+
+    var pool = try Node.Pool.init(.{
+        .page_allocator = cache_allocator,
+        .allocator = cache_allocator,
+        .pool_size = 500_000,
+    });
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(cache_allocator, &pool, 256);
+    defer test_state.deinit();
+
+    const epoch_cache = test_state.cached_state.epoch_cache;
+    const slot = epoch_cache.epoch * SLOTS_PER_EPOCH;
+    const committee = try epoch_cache.getBeaconCommittee(slot, 0);
+    try std.testing.expect(committee.len > 0);
+
+    var data = std.mem.zeroes(ct.phase0.AttestationData.Type);
+    data.slot = slot;
+
+    var phase0_attestation: ct.phase0.Attestation.Type = .{
+        .aggregation_bits = try .fromBitLen(caller_allocator, committee.len),
+        .data = data,
+        .signature = std.mem.zeroes(ct.primitive.BLSSignature.Type),
+    };
+    defer phase0_attestation.aggregation_bits.deinit(caller_allocator);
+    try phase0_attestation.aggregation_bits.set(caller_allocator, 0, true);
+
+    var electra_attestation: ct.electra.Attestation.Type = .{
+        .aggregation_bits = try .fromBitLen(caller_allocator, committee.len),
+        .data = data,
+        .signature = std.mem.zeroes(ct.primitive.BLSSignature.Type),
+        .committee_bits = .empty,
+    };
+    defer electra_attestation.aggregation_bits.deinit(caller_allocator);
+    try electra_attestation.aggregation_bits.set(caller_allocator, 0, true);
+    try electra_attestation.committee_bits.set(0, true);
+
+    // Each list must be fully accounted for by the caller's allocator. A list allocated
+    // from the cache's allocator would leave `cache_allocator_state` non-`.ok` at teardown
+    // and make `caller_allocator` free memory it never handed out.
+    var phase0_indices = try epoch_cache.getAttestingIndicesPhase0(caller_allocator, &phase0_attestation);
+    phase0_indices.deinit(caller_allocator);
+
+    var electra_indices = try epoch_cache.getAttestingIndicesElectra(caller_allocator, &electra_attestation);
+    electra_indices.deinit(caller_allocator);
+
+    var indexed: ct.phase0.IndexedAttestation.Type = undefined;
+    try epoch_cache.computeIndexedAttestationPhase0(caller_allocator, &phase0_attestation, &indexed);
+    ct.phase0.IndexedAttestation.deinit(caller_allocator, &indexed);
+
+    var indexed_electra: ct.electra.IndexedAttestation.Type = undefined;
+    try epoch_cache.computeIndexedAttestationElectra(caller_allocator, &electra_attestation, &indexed_electra);
+    ct.electra.IndexedAttestation.deinit(caller_allocator, &indexed_electra);
 }
