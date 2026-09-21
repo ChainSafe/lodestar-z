@@ -1,3 +1,4 @@
+const gossip_test = @import("test_support.zig");
 const std = @import("std");
 const gossip = @import("gossipsub.zig");
 const SessionRef = @import("sessions.zig").SessionRef;
@@ -11,7 +12,7 @@ const Node = struct {
     pending: [8]?struct { handle: gossip.ValidationHandle, due: u64 } = @splat(null),
 
     fn init(identity: u8, seed: u64) !Node {
-        var core = try gossip.Gossipsub.init(std.testing.allocator, .{
+        var core = try gossip_test.init(std.testing.allocator, .{
             .random_seed = seed,
             .connected_capacity = 2,
             .retained_capacity = 4,
@@ -22,7 +23,7 @@ const Node = struct {
             .heartbeat_interval_ms = 100,
         });
         errdefer core.deinit();
-        try std.testing.expect(core.subscribe(name));
+        try gossip_test.subscribe(&core, name);
         const session = core.addPeer(.{ .index = 0, .generation = 1 }, &.{
             .identity = .{ .bytes = @splat(identity) },
             .address = .unspecified,

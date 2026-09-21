@@ -9,6 +9,7 @@ const snappy = @import("snappy");
 const block = "/eth2/01020304/beacon_block/ssz_snappy";
 const attestation = "/eth2/01020304/beacon_attestation_0/ssz_snappy";
 const options: gossip.Options = .{
+    .topic_policy = &.{@import("topic_fixture.zig").bytes(.{ 1, 2, 3, 4 })},
     .random_seed = 1,
     .connected_capacity = 4,
     .retained_capacity = 8,
@@ -74,7 +75,7 @@ test "gossip direct processor admission drains paged RPCs while the host queue s
     try pair.initOpts(options, options);
     defer pair.deinit();
     const g = pair.shared.server.gossipsub;
-    try t.expect(g.subscribe(block));
+    try support.subscribe(g, block);
     pair.server_event_capacity = 0;
     var budget: @import("../byte_budget.zig").Budget = .{ .limit = 65536 };
     var table = try processor.GossipProcessor.initPlanned(t.allocator, 2, 16384, &budget, null);
@@ -131,7 +132,7 @@ test "gossip direct processor admission drains paged RPCs while the host queue s
 
 test "gossip full processor preserves duplicate attribution without runtime allocations" {
     var ledger: @import("../reservations.zig").Reservations = .{ .backing = t.allocator };
-    var g = try gossip.Gossipsub.init(ledger.allocator(), options);
+    var g = try support.init(ledger.allocator(), options);
     defer g.deinit();
     var budget: @import("../byte_budget.zig").Budget = .{ .limit = 65536 };
     var table = try processor.GossipProcessor.initPlanned(ledger.allocator(), 1, 4096, &budget, null);
@@ -140,7 +141,7 @@ test "gossip full processor preserves duplicate attribution without runtime allo
     var consumer: Consumer = .{ .owner = &g, .table = &table };
     const sink = consumer.sink();
     g.message_sink = &sink;
-    try t.expect(g.subscribe(block));
+    try support.subscribe(&g, block);
     for (0..2) |i| _ = support.addPeer(&g, .{ .index = @intCast(i), .generation = 1 }, .v1_2).?;
     const allocations = ledger.allocation_calls;
     ledger.byte_limit = ledger.bytes;
@@ -161,7 +162,7 @@ test "gossip full processor preserves duplicate attribution without runtime allo
 }
 
 test "gossip saturated attestation intake preserves block priority and storage" {
-    var g = try gossip.Gossipsub.init(t.allocator, options);
+    var g = try support.init(t.allocator, options);
     defer g.deinit();
     var budget: @import("../byte_budget.zig").Budget = .{};
     const limits: processor.limits_mod.Limits = @splat(.{ .items = 2, .bytes = 8192 });
@@ -172,7 +173,8 @@ test "gossip saturated attestation intake preserves block priority and storage" 
     const sink = consumer.sink();
     g.message_sink = &sink;
     _ = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
-    try t.expect(g.subscribe(block) and g.subscribe(attestation));
+    try support.subscribe(&g, block);
+    try support.subscribe(&g, attestation);
     for ([_][]const u8{ "first", "second", "refused" }) |payload| try receive(&g, 0, attestation, payload);
     try receive(&g, 0, block, "urgent");
     try t.expectEqual(@as(usize, 3), table.diag.occupied);
@@ -184,7 +186,7 @@ test "gossip saturated attestation intake preserves block priority and storage" 
 }
 
 test "gossip capacity lost after preflight ignores delivery and refunds validation" {
-    var g = try gossip.Gossipsub.init(t.allocator, options);
+    var g = try support.init(t.allocator, options);
     defer g.deinit();
     var budget: @import("../byte_budget.zig").Budget = .{ .limit = 100 };
     var table = try processor.GossipProcessor.initPlanned(t.allocator, 1, 4096, &budget, null);
@@ -194,7 +196,7 @@ test "gossip capacity lost after preflight ignores delivery and refunds validati
     const sink = consumer.sink();
     g.message_sink = &sink;
     _ = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
-    try t.expect(g.subscribe(block));
+    try support.subscribe(&g, block);
     try receive(&g, 0, block, "racing publication");
     try t.expectEqual(@as(usize, 0), table.diag.occupied);
     try t.expectEqual(@as(usize, 0), budget.used);
@@ -204,11 +206,14 @@ test "gossip capacity lost after preflight ignores delivery and refunds validati
 }
 
 test "gossip invalid verdict stops remaining publications in the same RPC" {
-    var g = try gossip.Gossipsub.init(t.allocator, options);
+    var opts = options;
+    opts.score_params.gossip_threshold = -20;
+    opts.score_params.publish_threshold = -40;
+    opts.score_params.graylist_threshold = -50;
+    var g = try support.init(t.allocator, opts);
     defer g.deinit();
     const source = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
-    try t.expect(g.subscribe(block));
-    try t.expect(g.setPeerScore(g.sessions.rows[source.index].conn, g.options.score_params.graylist_threshold + 50));
+    try support.subscribe(&g, block);
     var body: [1024]u8 = undefined;
     var writer = protobuf.Writer.init(&body);
     for (0..3) |_| protobuf.writeMessage(&writer, &.{5}, block);

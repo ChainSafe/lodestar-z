@@ -70,11 +70,15 @@ fn parseArgs(args: []const [:0]const u8) !Options {
 }
 
 fn currentEpoch(net: *const Network, unix_s: i64) u64 {
+    return currentSlot(net, unix_s) / slots_per_epoch;
+}
+
+fn currentSlot(net: *const Network, unix_s: i64) u64 {
     const chain = net.config.chain;
     const scheduled: i64 = @intCast(chain.MIN_GENESIS_TIME + chain.GENESIS_DELAY);
     const genesis = if (net.genesis_time != 0) net.genesis_time else scheduled;
     const elapsed: u64 = if (unix_s > genesis) @intCast(unix_s - genesis) else 0;
-    return elapsed / (chain.SECONDS_PER_SLOT * slots_per_epoch);
+    return elapsed / chain.SECONDS_PER_SLOT;
 }
 
 fn hex(bytes: anytype) [2 * bytes.len]u8 {
@@ -160,7 +164,12 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
             else => {},
         };
         if (!subscribed and beacon_block.len > 0) {
-            if (!service.gossipsub.subscribe(beacon_block)) return error.SubscriptionRefused;
+            var subscription: gossipsub.local_intent.Boundary = .{ .digest = gossipsub.topic.parseCanonical(beacon_block).?.digest };
+            subscription.mask(.beacon_block)[0] = 1;
+            subscription.lengths[@intFromEnum(gossipsub.topic.Kind.beacon_block)] = 1;
+            var workspace: gossipsub.local_intent.Workspace = .{};
+            _ = try service.gossipsub.prepareSubscriptions(&.{subscription}, &workspace, result.now, currentSlot(options.network, result.now.unix_s));
+            service.gossipsub.commitSubscriptions(&workspace);
             subscribed = true;
         }
         const transport_events = events[0..result.events];

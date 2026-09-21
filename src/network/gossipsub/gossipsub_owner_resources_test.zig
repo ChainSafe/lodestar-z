@@ -16,14 +16,14 @@ const testMessage = support.message;
 
 test "gossipsub rejects incompatible memory plans and cleans partial startup allocations" {
     const a = std.testing.allocator;
-    try std.testing.expectError(error.InvalidLimits, Gossipsub.init(a, .{ .random_seed = 1, .receive_arena_bytes = 65536 }));
-    try std.testing.expectError(error.InvalidLimits, Gossipsub.init(a, .{ .random_seed = 1, .decompressed_arena_bytes = 4096 }));
-    try std.testing.expectError(error.InvalidLimits, Gossipsub.init(a, .{ .random_seed = 1, .receive_arena_bytes = 1024 * 1024 * 1024 + 4096 }));
-    try std.testing.expectError(error.InvalidLimits, Gossipsub.init(a, .{ .random_seed = 1, .fields_per_pump = 1 }));
+    try std.testing.expectError(error.InvalidLimits, support.init(a, .{ .random_seed = 1, .receive_arena_bytes = 65536 }));
+    try std.testing.expectError(error.InvalidLimits, support.init(a, .{ .random_seed = 1, .decompressed_arena_bytes = 4096 }));
+    try std.testing.expectError(error.InvalidLimits, support.init(a, .{ .random_seed = 1, .receive_arena_bytes = 1024 * 1024 * 1024 + 4096 }));
+    try std.testing.expectError(error.InvalidLimits, support.init(a, .{ .random_seed = 1, .fields_per_pump = 1 }));
     try std.testing.checkAllAllocationFailures(a, testStartup, .{});
 }
 fn testStartup(a: Allocator) !void {
-    var g = try Gossipsub.init(a, .{ .random_seed = 1, .seen_capacity = 1, .mcache_capacity = 1, .validation_capacity = 1, .body_buffer_bytes = 1, .control_bytes = 1, .critical_bytes = 32 + topic_mod.topic_max_len });
+    var g = try support.init(a, .{ .random_seed = 1, .seen_capacity = 1, .mcache_capacity = 1, .validation_capacity = 1, .body_buffer_bytes = 1, .control_bytes = 1, .critical_bytes = 32 + topic_mod.topic_max_len });
     defer g.deinit();
     const plan = g.memoryPlan();
     try std.testing.expectEqual(@as(usize, 4096), plan.page_bytes);
@@ -32,7 +32,7 @@ fn testStartup(a: Allocator) !void {
 }
 
 test "gossipsub resource snapshot starts empty" {
-    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1 });
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
     defer g.deinit();
     const snapshot = g.resourceSnapshot();
     try std.testing.expectEqual(@as(usize, 0), snapshot.admitted_peers);
@@ -43,7 +43,7 @@ test "gossipsub resource snapshot starts empty" {
 
 test "gossip resolved capacities allocate owner rows and reject stale ceiling handles" {
     var ledger: @import("../reservations.zig").Reservations = .{ .backing = std.testing.allocator };
-    var g = try Gossipsub.init(ledger.allocator(), .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1 });
+    var g = try support.init(ledger.allocator(), .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1 });
     try std.testing.expectEqual(@as(usize, 2), g.sessions.rows.len);
     try std.testing.expectEqual(@as(usize, 4), g.peers.rows.len);
     try std.testing.expectEqual(@as(usize, 4), g.peers.scores.rows.len);
@@ -57,7 +57,7 @@ test "gossip resolved capacities allocate owner rows and reject stale ceiling ha
 test "gossip default owner memory reconciles requested allocations" {
     var ledger: @import("../reservations.zig").Reservations = .{ .backing = std.testing.allocator };
     {
-        var g = try Gossipsub.init(ledger.allocator(), .{ .random_seed = 1 });
+        var g = try support.init(ledger.allocator(), .{ .random_seed = 1 });
         defer g.deinit();
         const plan = g.memoryPlan();
         try std.testing.expectEqual(ledger.bytes, plan.total_bytes - @sizeOf(Gossipsub));
@@ -67,7 +67,7 @@ test "gossip default owner memory reconciles requested allocations" {
 
 test "gossip diagnostics tracks queued age and preserves peaks after owner release" {
     var ledger: @import("../reservations.zig").Reservations = .{ .backing = std.testing.allocator };
-    var g = try Gossipsub.init(ledger.allocator(), .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1 });
+    var g = try support.init(ledger.allocator(), .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1 });
     defer g.deinit();
     const calls = ledger.allocation_calls;
     const conn: Handle = .{ .index = 0, .generation = 1 };
@@ -99,13 +99,13 @@ test "gossip diagnostics tracks queued age and preserves peaks after owner relea
 }
 
 test "gossip lifecycle sequence preserves ownership under pressure reconnect and late verdicts" {
-    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 91, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1, .validation_capacity = 2, .mcache_capacity = 4, .seen_capacity = 8, .mcache_arena_bytes = constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE) + storage.page_bytes, .validation_timeout_ms = 100, .validation_tombstone_ms = 200 });
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 91, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1, .validation_capacity = 2, .mcache_capacity = 4, .seen_capacity = 8, .mcache_arena_bytes = constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE) + storage.page_bytes, .validation_timeout_ms = 100, .validation_tombstone_ms = 200 });
     defer g.deinit();
     var rng = std.Random.DefaultPrng.init(17);
     var conn: Handle = .{ .index = 0, .generation = 1 };
     var source = @import("test_support.zig").addPeer(&g, conn, .v1_2).?;
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
-    try std.testing.expect(g.subscribe(name));
+    try support.subscribe(&g, name);
     const metadata: peers_mod.Metadata = .{ .identity = g.peers.rows[g.sessions.rows[source.index].logical.index].identity, .address = .unspecified, .direction = .inbound };
     g.markDirect(conn);
     g.sessions.rows[source.index].outbound = .{ .live = .{ .stream = .{ .conn = conn, .id = 2, .slot = 0 }, .version = .v1_2 } };
@@ -144,8 +144,8 @@ test "gossip lifecycle sequence preserves ownership under pressure reconnect and
             6 => {
                 const subscribed = if (g.overlay.findTopic(name)) |topic| g.overlay.subscribed(topic) else false;
                 if (subscribed) {
-                    try std.testing.expect(g.unsubscribe(name));
-                } else try std.testing.expect(g.subscribe(name));
+                    try support.unsubscribe(&g, name);
+                } else try support.subscribe(&g, name);
             },
             7 => {
                 support.heartbeat(&g, now);

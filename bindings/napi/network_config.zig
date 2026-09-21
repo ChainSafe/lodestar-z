@@ -225,9 +225,8 @@ fn parseGossip(value: Value, out: *Config) !void {
     out.allowlist_count = @intCast(try array(allowlist, out.allowlist.len));
     for (0..out.allowlist_count) |i| out.allowlist[i] = try fixed(16, try allowlist.getElement(@intCast(i)));
     const score = try get(policy, "score");
-    try object(score, &.{ "appWeight", "ipColocationWeight", "ipColocationThreshold", "behaviourWeight", "behaviourThreshold", "behaviourDecay", "topicCap", "decayIntervalMs", "decayToZero", "gossipThreshold", "publishThreshold", "graylistThreshold", "opportunisticGraftThreshold", "topics" });
+    try object(score, &.{ "ipColocationWeight", "ipColocationThreshold", "behaviourWeight", "behaviourThreshold", "behaviourDecay", "topicCap", "decayIntervalMs", "decayToZero", "gossipThreshold", "publishThreshold", "graylistThreshold", "opportunisticGraftThreshold", "topics" });
     var params: n.gossipsub.score.Params = .{};
-    params.app_weight = try number(try get(score, "appWeight"));
     params.ip_colocation_weight = try number(try get(score, "ipColocationWeight"));
     params.ip_colocation_threshold = @intCast(try integer(try get(score, "ipColocationThreshold"), 65535));
     params.behaviour_weight = try number(try get(score, "behaviourWeight"));

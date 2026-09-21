@@ -254,20 +254,6 @@ pub const Gossipsub = struct {
 
     // Subscriptions ----------------------------------------------------------
 
-    pub fn subscribe(self: *Gossipsub, name: []const u8) bool {
-        const topic = self.internTopic(name) orelse return false;
-        const context = self.overlayContext(self.last_now_ms);
-        self.overlay.setLocal(&context, topic, true);
-        return true;
-    }
-
-    pub fn unsubscribe(self: *Gossipsub, name: []const u8) bool {
-        const topic = self.overlay.findTopic(name) orelse return false;
-        const context = self.overlayContext(self.last_now_ms);
-        self.overlay.setLocal(&context, topic, false);
-        return true;
-    }
-
     fn internTopic(self: *Gossipsub, name: []const u8) ?u16 {
         const context = self.overlayContext(self.last_now_ms);
         const pins = self.messages.topicPins();
@@ -294,16 +280,6 @@ pub const Gossipsub = struct {
         self.last_now_ms = workspace.now_ms;
         const context = self.overlayContext(self.last_now_ms);
         self.overlay.commitSubscriptions(&context, workspace);
-    }
-
-    pub const ConfigureTopicError = error{ InvalidLimits, InvalidTopic, TopicCapacity };
-
-    pub fn configureTopic(self: *Gossipsub, name: []const u8, params: *const score_mod.TopicParams) ConfigureTopicError!void {
-        const copied = params.*;
-        try score_mod.validateTopic(copied);
-        if (!self.validTopic(name)) return error.InvalidTopic;
-        const topic = self.internTopic(name) orelse return error.TopicCapacity;
-        self.peers.scores.applyValidatedTopic(topic, copied);
     }
 
     // Peer lifecycle ---------------------------------------------------------
@@ -689,12 +665,6 @@ pub const Gossipsub = struct {
 
     fn belowGossip(self: *Gossipsub, index: u16, now_ms: u64) bool {
         return self.peerScore(index, now_ms) < self.options.score_params.gossip_threshold;
-    }
-
-    /// The host's application-specific P5 term for a peer, from its own signals.
-    pub fn setPeerScore(self: *Gossipsub, conn: Handle, value: f64) bool {
-        const index = self.sessions.findPeer(conn) orelse return false;
-        return self.peers.scores.setAppScore(self.logical(index).index, value);
     }
 
     pub fn scoreSnapshot(self: *Gossipsub, conn: Handle, now: Now) ?f64 {

@@ -1,3 +1,4 @@
+const gossip_test = @import("gossipsub/test_support.zig");
 const std = @import("std");
 const support = @import("test_support.zig");
 const engine = @import("quic/engine.zig");
@@ -20,7 +21,7 @@ test "router composes simultaneous ping and meshsub on one connection" {
     defer pair.deinit();
     var client = try @import("service.zig").Service.init(std.testing.allocator, rr_options);
     defer client.deinit();
-    var server = try @import("service.zig").Service.init(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1 }, .reqresp = rr_options.reqresp });
+    var server = try @import("service.zig").Service.init(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1, .topic_policy = &.{@import("gossipsub/topic_fixture.zig").bytes(.{ 1, 2, 3, 4 })} }, .reqresp = rr_options.reqresp });
     defer server.deinit();
     const requests = &server.reqresp;
     const gossip = server.gossipsub;
@@ -28,7 +29,7 @@ test "router composes simultaneous ping and meshsub on one connection" {
     _ = gossip.peerConnected(&pair.server, handles.server, pair.now);
     var topic_buf: [topic_mod.topic_max_len]u8 = undefined;
     const topic = topic_mod.build(.{ 1, 2, 3, 4 }, "beacon_block", &topic_buf);
-    try std.testing.expect(gossip.subscribe(topic));
+    try gossip_test.subscribe(gossip, topic);
     const ping = [_]u8{ 42, 0, 0, 0, 0, 0, 0, 0 };
     var response: [8]u8 = undefined;
     _ = try client.request(&pair.client, handles.client, .ping_v1, &ping, &response, .{}, pair.now);
@@ -296,7 +297,6 @@ test "router gossip capacity refusal preserves reqresp and explicit host retry" 
         retained[i] = ref;
         server.gossipsub.peers.retain(ref);
         server.gossipsub.peers.scores.penalize(ref.index, 20);
-        _ = server.gossipsub.peers.scores.setAppScore(ref.index, -1);
         server.gossipsub.peers.disconnect(ref, pair.now.mono_ms);
     }
     try std.testing.expectEqual(gs.Gossipsub.Admission.capacity, server.gossipsub.peerConnected(&pair.server, handles.server, pair.now));

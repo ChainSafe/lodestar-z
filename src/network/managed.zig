@@ -156,34 +156,9 @@ pub fn sendReqRespRequest(
     return service.request(engine, conn, protocol, bytes, sink, options, now);
 }
 
-pub fn configureTopic(self: *PeerManager, service: *service_mod.Service, topic: []const u8, params: *const gossip.score.TopicParams) (gossip.Gossipsub.ConfigureTopicError || error{Stopped})!void {
-    if (self.stopped or self.quiescing) return error.Stopped;
-    try service.gossipsub.configureTopic(topic, params);
-}
-
-pub fn publishGossip(
-    self: *PeerManager,
-    service: *service_mod.Service,
-    topic: []const u8,
-    bytes: []const u8,
-    now: Now,
-) !gossip.Gossipsub.PublishOutcome {
-    if (self.stopped or self.quiescing) return error.Stopped;
-    return publishGossipWithOptions(self, service, topic, bytes, .{}, now);
-}
-
 pub fn publishGossipWithOptions(self: *PeerManager, service: *service_mod.Service, topic: []const u8, bytes: []const u8, options: gossip.Gossipsub.PublishOptions, now: Now) !gossip.Gossipsub.PublishOutcome {
     if (self.stopped or self.quiescing) return error.Stopped;
     return service.gossipsub.publishWithOptions(topic, bytes, options, now);
-}
-
-pub fn subscribe(self: *PeerManager, service: *service_mod.Service, topic: []const u8) bool {
-    if (self.stopped or self.quiescing) return false;
-    return service.gossipsub.subscribe(topic);
-}
-
-pub fn unsubscribe(_: *PeerManager, service: *service_mod.Service, topic: []const u8) bool {
-    return service.gossipsub.unsubscribe(topic);
 }
 
 pub fn beginGracefulClose(self: *PeerManager, service: *service_mod.Service, now: Now) void {

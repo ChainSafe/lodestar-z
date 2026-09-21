@@ -24,6 +24,45 @@ fn apply(g: *gossip.Gossipsub, w: *local.Workspace, desired: []const []const u8)
     return changed;
 }
 
+test "intent and publication prefer unused rows and reclaim only their selected retirement" {
+    for ([_]bool{ false, true }) |subscribe| {
+        var opts = options();
+        opts.retained_score_ms = 1;
+        var g = try gossip.Gossipsub.init(std.testing.allocator, opts);
+        defer g.deinit();
+        unavailableExcept(&g, 3);
+        try support.subscribe(&g, name);
+        try support.subscribe(&g, next);
+        var workspace: local.Workspace = .{};
+        try std.testing.expect(!try apply(&g, &workspace, &.{ name, next }));
+        try support.unsubscribe(&g, name);
+        try support.unsubscribe(&g, next);
+        const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+        const logical = g.sessions.rows[peer.index].logical;
+        for (0..2) |index| g.peers.scores.invalid(logical.index, @intCast(index));
+        const generations = [2]u64{ g.overlay.rows[0].generation, g.overlay.rows[1].generation };
+        const third = "/eth2/01020304/beacon_aggregate_and_proof/ssz_snappy";
+        if (subscribe) {
+            try std.testing.expect(try apply(&g, &workspace, &.{third}));
+        } else _ = try g.publish(third, "0123456789", now);
+        try std.testing.expectEqual(@as(?u16, 2), g.overlay.findTopic(third));
+        for (0..2) |index| {
+            try std.testing.expectEqual(generations[index], g.overlay.rows[index].generation);
+            try std.testing.expect(g.peers.scores.retainsTopic(@intCast(index)));
+        }
+        const fourth = "/eth2/05060708/beacon_block/ssz_snappy";
+        if (subscribe) {
+            try std.testing.expect(try apply(&g, &workspace, &.{ third, fourth }));
+        } else _ = try g.publish(fourth, "0123456789", now);
+        try std.testing.expectEqual(@as(?u16, 0), g.overlay.findTopic(fourth));
+        try std.testing.expectEqual(generations[0] + 1, g.overlay.rows[0].generation);
+        try std.testing.expect(!g.peers.scores.retainsTopic(0));
+        try std.testing.expectEqualStrings(next, g.overlay.topicString(1));
+        try std.testing.expectEqual(generations[1], g.overlay.rows[1].generation);
+        try std.testing.expect(g.peers.scores.retainsTopic(1));
+    }
+}
+
 test "local intent exact capacity excess and namespace refusal" {
     var ledger: @import("../reservations.zig").Reservations = .{ .backing = std.testing.allocator };
     var g = try gossip.Gossipsub.init(ledger.allocator(), options());
@@ -66,8 +105,8 @@ test "local intent reserves reclaimable desired rows and copies alias before rep
     defer std.testing.allocator.destroy(w);
     w.* = .{};
     unavailableExcept(&g, 2);
-    try g.configureTopic(name, &.{ .weight = 2 });
-    try g.configureTopic(next, &.{});
+    g.peers.scores.applyValidatedTopic(support.intern(&g, name).?, .{ .weight = 2 });
+    _ = support.intern(&g, next).?;
     const aliased = g.overlay.topicString(0);
     const generation = g.overlay.rows[0].generation;
     const replace = "/eth2/05060708/beacon_block/ssz_snappy";
@@ -85,7 +124,7 @@ test "local intent separate validation control score backoff and generation pins
     defer std.testing.allocator.destroy(w);
     w.* = .{};
     unavailableExcept(&g, 1);
-    try g.configureTopic(name, &.{});
+    _ = support.intern(&g, name).?;
     const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const logical = g.sessions.rows[peer.index].logical;
     const io = &g.sessions.rows[peer.index].io;
@@ -161,11 +200,12 @@ test "local intent copies retired row input before another assignment reuses it"
     defer std.testing.allocator.destroy(w);
     w.* = .{};
     unavailableExcept(&g, 3);
-    try g.configureTopic(name, &.{});
-    try g.configureTopic(next, &.{});
-    try g.configureTopic("/eth2/01020304/proposer_slashing/ssz_snappy", &.{});
+    _ = support.intern(&g, name).?;
+    _ = support.intern(&g, next).?;
+    _ = support.intern(&g, "/eth2/01020304/proposer_slashing/ssz_snappy").?;
     const input = g.overlay.topicString(1);
-    try g.configureTopic("/eth2/05060708/beacon_block/ssz_snappy", &.{});
+    _ = support.intern(&g, "/eth2/05060708/beacon_block/ssz_snappy").?;
+    g.overlay.reclaimTopic(&g.overlayContext(g.last_now_ms), &g.messages.topicPins(), 1);
     try std.testing.expect(!g.overlay.rows[1].active);
     try std.testing.expectEqualStrings(next, input);
     const replacement = "/eth2/090a0b0c/beacon_block/ssz_snappy";
@@ -197,8 +237,8 @@ fn cachedRetirement(complete_intent: bool) !void {
         defer std.testing.allocator.destroy(w);
         w.* = .{};
         unavailableExcept(&g, 1);
-        try std.testing.expect(g.subscribe(name));
-        try std.testing.expect(g.unsubscribe(name));
+        try support.subscribe(&g, name);
+        try support.unsubscribe(&g, name);
         const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
         const logical = g.sessions.rows[peer.index].logical.index;
         if (negative) g.peers.scores.invalid(logical, 0) else g.peers.scores.deliverEligible(logical, 0, false);
@@ -214,7 +254,7 @@ fn cachedRetirement(complete_intent: bool) !void {
             try std.testing.expect(try apply(&g, w, &.{next}));
         } else {
             g.last_now_ms = now.mono_ms;
-            try g.configureTopic(next, &params);
+            _ = try g.publish(next, "0123456789", now);
         }
         try std.testing.expectEqualStrings(next, g.overlay.topicString(0));
         try std.testing.expectEqual(generation + 1, g.overlay.rows[0].generation);

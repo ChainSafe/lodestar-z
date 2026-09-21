@@ -1,3 +1,4 @@
+const gossip_test = @import("gossipsub/test_support.zig");
 const std = @import("std");
 const core = @import("network_core.zig");
 const metrics = @import("metrics/export.zig");
@@ -109,11 +110,11 @@ test "metrics include remote subscriptions without overlay rows and follow local
     try contains(output, "lodestar_gossip_topic_peers_by_beacon_attestation_subnet_count{subnet=\"00\",boundary=\"fulu_100\"} 0\n");
     try std.testing.expect(std.mem.indexOf(u8, output, "fulu_200") == null);
     const future = "/eth2/01010101/beacon_block/ssz_snappy";
-    try std.testing.expect(g.subscribe(future));
+    try gossip_test.subscribe(g, future);
     output = try f.render(true);
     try contains(output, "lodestar_gossip_mesh_peers_by_type_count{type=\"beacon_block\",boundary=\"fulu_200\"} 0\n");
     try contains(output, "lodestar_native_gossip_subscriptions_by_type_count{type=\"beacon_block\",boundary=\"fulu_200\"} 1\n");
-    try std.testing.expect(g.unsubscribe(future));
+    try gossip_test.unsubscribe(g, future);
     output = try f.render(true);
     try std.testing.expect(std.mem.indexOf(u8, output, "fulu_200") == null);
     ns.clearPeer(0);
@@ -131,7 +132,7 @@ test "metrics maximum configured topic domain fits its startup exposition reserv
     const g = f.node.service.gossipsub;
     for (boundaries) |value| {
         var name: [@import("gossipsub/topic.zig").topic_max_len]u8 = undefined;
-        try std.testing.expect(g.subscribe(@import("gossipsub/topic.zig").build(value.digest, "beacon_block", &name)));
+        try gossip_test.subscribe(g, @import("gossipsub/topic.zig").build(value.digest, "beacon_block", &name));
     }
     f.node.counters.dial_started = std.math.maxInt(u64);
     const output = try f.render(true);
@@ -144,15 +145,14 @@ test "metrics preserve outgoing queue refusals across session retirement and reu
     var f = try Fixture.init(&.{});
     defer f.deinit();
     const g = f.node.service.gossipsub;
-    const support = @import("gossipsub/test_support.zig");
-    const first = support.addPeer(g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const first = gossip_test.addPeer(g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     g.sessions.rows[first.index].io.tx.drops[0] = 3;
     try contains(try f.render(true), "lodestar_native_gossip_queue_drops_total{reason=\"data_descriptors\"} 3\n");
     const conn = g.sessions.rows[first.index].conn;
     g.connectionClosed(conn);
     g.connectionClosed(conn);
     try contains(try f.render(true), "lodestar_native_gossip_queue_drops_total{reason=\"data_descriptors\"} 3\n");
-    const next = support.addPeer(g, .{ .index = 0, .generation = 2 }, .v1_2).?;
+    const next = gossip_test.addPeer(g, .{ .index = 0, .generation = 2 }, .v1_2).?;
     try std.testing.expectEqual(first.index, next.index);
     g.sessions.rows[next.index].io.tx.drops[0] = 2;
     try contains(try f.render(true), "lodestar_native_gossip_queue_drops_total{reason=\"data_descriptors\"} 5\n");

@@ -10,6 +10,26 @@ pub fn full(digest: [4]u8) topic_policy.Boundary {
     return boundary;
 }
 
+pub fn bytes(digest: [4]u8) topic_policy.Boundary {
+    var boundary = full(digest);
+    for (&boundary.rules) |*rule| {
+        rule.ssz_min = 0;
+        rule.ssz_max = @import("constants.zig").MAX_PAYLOAD_SIZE;
+    }
+    return boundary;
+}
+
+pub const churn = [_]topic_policy.Boundary{ bytes(.{ 1, 2, 3, 4 }), bytes(.{ 5, 6, 7, 8 }), bytes(.{ 9, 10, 11, 12 }) };
+
+pub fn churnTopic(index: usize, out: []u8) ![]const u8 {
+    std.debug.assert(index < @import("constants.zig").topics_cap);
+    return std.fmt.bufPrint(out, "/eth2/{x:0>8}/{s}_{d}/ssz_snappy", .{
+        @as(u32, if (index < 256) 0x01020304 else 0x05060708),
+        @as([]const u8, if (index % 256 < 128) "blob_sidecar" else "data_column_sidecar"),
+        index % 128,
+    });
+}
+
 pub fn hoodi() [5]topic_policy.Boundary {
     var out: [5]topic_policy.Boundary = undefined;
     const digests = [_][4]u8{ .{ 0xd2, 0xf1, 0x99, 0x7f }, .{ 0x82, 0x55, 0x6a, 0x32 }, .{ 0xe2, 0xab, 0xcc, 0xa4 }, .{ 0xae, 0x9f, 0x70, 0xa0 }, .{ 0xc6, 0xec, 0xb7, 0x6c } };

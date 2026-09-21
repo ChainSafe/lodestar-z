@@ -1,3 +1,4 @@
+const gossip_test = @import("gossipsub/test_support.zig");
 const std = @import("std");
 const support = @import("test_support.zig");
 const managed = @import("managed.zig");
@@ -13,8 +14,9 @@ const Setup = @import("managed_test_support.zig").Setup;
 fn subscribeServer(setup: *Setup, name: []const u8) !void {
     setup.client_service.gossipsub.options.observe_subscriptions = false;
     setup.server_service.gossipsub.options.observe_subscriptions = false;
-    try setup.client_service.gossipsub.configureTopic(name, &.{ .weight = 0 });
-    try std.testing.expect(setup.server_service.gossipsub.subscribe(name));
+    const g = setup.client_service.gossipsub;
+    g.peers.scores.applyValidatedTopic(gossip_test.intern(g, name).?, .{ .weight = 0 });
+    try gossip_test.subscribe(setup.server_service.gossipsub, name);
 }
 
 test "managed native two owners establish relevance and fetch initial metadata without public output" {
@@ -84,7 +86,7 @@ test "managed native ping coalesces metadata and confirms unchanged freshness th
     _ = setup.client.snapshots(&snapshots);
     try std.testing.expect(snapshots[0].metadata_at_ms > before);
     const changed: t.Metadata = .{ .seq_number = 10, .attnets = @splat(9) };
-    try setup.server.updateMetadata(&setup.server_service, &localState(.{ .metadata = changed }).metadata);
+    try @import("managed_test_support.zig").updateLocal(&setup.server, &setup.server_service, &metadataUpdate(&setup.server, &localState(.{ .metadata = changed }).metadata), setup.pair.now);
     setup.pair.advance(21_000);
     for (0..50) |_| try setup.step(0);
     _ = setup.client.snapshots(&snapshots);
@@ -110,7 +112,7 @@ test "managed native immutable metadata response survives local update during pe
             if (slot.request.protocol != .metadata_v1) continue;
             try std.testing.expect(slot.request.io.writing);
             const changed: t.Metadata = .{ .seq_number = 5, .attnets = @splat(9) };
-            try setup.server.updateMetadata(&setup.server_service, &localState(.{ .metadata = changed }).metadata);
+            try @import("managed_test_support.zig").updateLocal(&setup.server, &setup.server_service, &metadataUpdate(&setup.server, &localState(.{ .metadata = changed }).metadata), setup.pair.now);
             pending = true;
             break;
         };
@@ -131,11 +133,7 @@ test "managed native wrong fork Goodbye hard closes with zero output and shutdow
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
-    try setup.server.updateFork(
-        &setup.server_service,
-        &localState(.{ .fork = .{ .digest = @splat(1) }, .status = .{ .fork_digest = @splat(1) } }),
-        setup.pair.now,
-    );
+    try @import("managed_test_support.zig").updateLocal(&setup.server, &setup.server_service, &localState(.{ .fork = .{ .digest = @splat(1) }, .status = .{ .fork_digest = @splat(1) } }), setup.pair.now);
     for (0..40) |_| try setup.step(0);
     try std.testing.expectEqual(@as(u16, 0), setup.client.peerCounts().relevant);
     setup.pair.advance(2_001);
@@ -456,7 +454,7 @@ test "managed direct removal clears both pins and gossip score reads have no fee
     _ = setup.client.snapshots(&snapshots);
     try std.testing.expect(snapshots[0].direct);
     const conn = snapshots[0].connection.?;
-    try std.testing.expect(setup.client_service.gossipsub.setPeerScore(conn, -3));
+    @import("gossipsub/test_support.zig").penalize(setup.client_service.gossipsub, conn, 7);
     const before = setup.client.gossipScore(&setup.client_service, snapshots[0].peer, setup.pair.now).?;
     try std.testing.expect(std.math.isFinite(before));
     _ = setup.client.reportPeer(snapshots[0].peer, .high_tolerance, setup.pair.now);
@@ -481,8 +479,8 @@ test "managed native preserves gossip events under one output and caller validat
     try setup.init(&.{});
     defer setup.deinit();
     const topic = "/eth2/00000000/beacon_block/ssz_snappy";
-    try std.testing.expect(managed.subscribe(&setup.client, &setup.client_service, topic));
-    try std.testing.expect(managed.subscribe(&setup.server, &setup.server_service, topic));
+    try gossip_test.subscribe(setup.client_service.gossipsub, topic);
+    try gossip_test.subscribe(setup.server_service.gossipsub, topic);
     for (0..50) |_| try setup.step(0);
     setup.pair.advance(1_001);
     for (0..30) |_| try setup.step(0);
@@ -503,7 +501,7 @@ test "managed native preserves gossip events under one output and caller validat
     for (0..10) |_| try setup.step(0);
     const payload = "bounded managed gossip payload";
     _ = try managed.publishGossipWithOptions(&setup.client, &setup.client_service, topic, payload, .{ .allow_zero_peers = false }, setup.pair.now);
-    try std.testing.expectError(error.Duplicate, managed.publishGossip(&setup.client, &setup.client_service, topic, payload, setup.pair.now));
+    try std.testing.expectError(error.Duplicate, managed.publishGossipWithOptions(&setup.client, &setup.client_service, topic, payload, .{}, setup.pair.now));
     try std.testing.expect((try managed.publishGossipWithOptions(&setup.client, &setup.client_service, topic, payload, .{ .ignore_duplicate = true }, setup.pair.now)).duplicate);
     var received: usize = 0;
     for (0..50) |_| {
@@ -532,7 +530,7 @@ test "managed native preserves gossip events under one output and caller validat
         ), &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
     }
     try std.testing.expectEqual(@as(usize, 1), received);
-    try std.testing.expect(managed.unsubscribe(&setup.client, &setup.client_service, topic));
+    try gossip_test.unsubscribe(setup.client_service.gossipsub, topic);
 }
 
 test "raw Service defaults stay unreserved" {
@@ -548,7 +546,7 @@ test "managed native continuous reStatus cannot starve due metadata sequence con
     try setup.init(&.{});
     defer setup.deinit();
     for (0..50) |_| try setup.step(0);
-    try setup.server.updateMetadata(&setup.server_service, &localState(.{ .metadata = .{ .seq_number = 12 } }).metadata);
+    try @import("managed_test_support.zig").updateLocal(&setup.server, &setup.server_service, &metadataUpdate(&setup.server, &localState(.{ .metadata = .{ .seq_number = 12 } }).metadata), setup.pair.now);
     setup.pair.advance(21_000);
     for (0..60) |_| {
         setup.client.reStatusPeers(setup.pair.now);
@@ -810,7 +808,7 @@ test "managed coverage authenticated custody differs from gossip delivery and in
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().groups);
     local.fork.custody_groups = 64;
     local.metadata.custody_group_count = 64;
-    try setup.client.updateFork(&setup.client_service, &local, setup.pair.now);
+    try @import("managed_test_support.zig").updateLocal(&setup.client, &setup.client_service, &local, setup.pair.now);
     _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().groups);
     _ = setup.client.snapshots(&snapshots);
@@ -865,7 +863,7 @@ test "managed coverage automatic retention renews only at authenticated Status s
     try setup.initOwners(&.{});
     defer setup.deinit();
     var candidate = try candidateFor(&setup.pair.server_ctx.local_peer_id, null);
-    try setup.client.discovered(&setup.client_service, &candidate, setup.pair.now);
+    try std.testing.expectEqual(@as(u16, 1), setup.client.discoveredBatch(&setup.client_service, &.{candidate}, setup.pair.now).accepted);
     _ = try setup.pair.dial();
     for (0..50) |_| try setup.step(0);
     const horizon = setup.client.dial_queue.rows[0].history_until_ms;
@@ -873,7 +871,7 @@ test "managed coverage automatic retention renews only at authenticated Status s
     for (0..10) |_| try setup.step(0);
     try std.testing.expectEqual(horizon, setup.client.dial_queue.rows[0].history_until_ms);
     candidate.sequence = 2;
-    try setup.client.discovered(&setup.client_service, &candidate, setup.pair.now);
+    try std.testing.expectEqual(@as(u16, 1), setup.client.discoveredBatch(&setup.client_service, &.{candidate}, setup.pair.now).accepted);
     setup.pair.advance(21_000);
     for (0..50) |_| try setup.step(0);
     try std.testing.expectEqual(horizon, setup.client.dial_queue.rows[0].history_until_ms);
@@ -901,7 +899,7 @@ test "managed coverage bounded custody work resumes without output and stale met
         const key = (try @import("wire/keys.zig").KeyPair.fromSecretKey(&secret)).publicKey();
         const peer = t.PeerId.fromPublicKey(&key);
         const candidate = try candidateFor(&peer, 127);
-        try setup.client.discovered(&setup.client_service, &candidate, setup.pair.now);
+        try std.testing.expectEqual(@as(u16, 1), setup.client.discoveredBatch(&setup.client_service, &.{candidate}, setup.pair.now).accepted);
     }
     var saw_pending = false;
     for (0..80) |_| {
@@ -948,7 +946,7 @@ test "managed coverage outbound deficit uses hard room or retires inbound before
         const key = (try @import("wire/keys.zig").KeyPair.fromSecretKey(&secret)).publicKey();
         const peer = t.PeerId.fromPublicKey(&key);
         const candidate = try candidateFor(&peer, null);
-        try setup.server.discovered(&setup.server_service, &candidate, setup.pair.now);
+        try std.testing.expectEqual(@as(u16, 1), setup.server.discoveredBatch(&setup.server_service, &.{candidate}, setup.pair.now).accepted);
         var out: [1]managed.DialIntent = undefined;
         try std.testing.expectEqual(@as(usize, 1), setup.server.dialIntents(&setup.server_service, &setup.pair.server, setup.pair.now, &out));
         try std.testing.expect(out[0].peer.eql(&peer));
@@ -963,18 +961,18 @@ test "managed coverage review same-digest group update disables cached automatic
     var candidate = try candidateFor(&setup.pair.server_ctx.local_peer_id, 128);
     candidate.syncnets = 1;
     try setup.client.setDemand(&.{ .syncnets = 1 });
-    try setup.client.discovered(&setup.client_service, &candidate, setup.pair.now);
+    try std.testing.expectEqual(@as(u16, 1), setup.client.discoveredBatch(&setup.client_service, &.{candidate}, setup.pair.now).accepted);
     _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
     local.fork.custody_groups = 64;
     local.metadata.custody_group_count = 64;
-    try setup.client.updateFork(&setup.client_service, &local, setup.pair.now);
+    try @import("managed_test_support.zig").updateLocal(&setup.client, &setup.client_service, &local, setup.pair.now);
     var out: [1]managed.DialIntent = undefined;
     try std.testing.expectEqual(@as(usize, 0), setup.client.dialIntents(&setup.client_service, &setup.pair.client, setup.pair.now, &out));
     try std.testing.expectEqual(@as(u16, 0), setup.client.dial_queue.rows[0].priority);
     try std.testing.expectEqual(@as(u64, 1), setup.client.dial_queue.rows[0].hints.?.sequence);
     candidate.sequence = 2;
     candidate.custody_group_count = 64;
-    try setup.client.discovered(&setup.client_service, &candidate, setup.pair.now);
+    try std.testing.expectEqual(@as(u16, 1), setup.client.discoveredBatch(&setup.client_service, &.{candidate}, setup.pair.now).accepted);
     try std.testing.expectEqual(@as(usize, 1), setup.client.dialIntents(&setup.client_service, &setup.pair.client, setup.pair.now, &out));
     try std.testing.expect(out[0].peer.eql(&candidate.peer));
 }
@@ -990,7 +988,7 @@ test "managed reconciliation idle and candidate batch work" {
     const c = setup.client.counters;
     const requested = setup.client.requested_connect;
     const candidate = try candidateFor(&setup.pair.server_ctx.local_peer_id, null);
-    for (0..4) |_| try setup.client.discovered(&setup.client_service, &candidate, setup.pair.now);
+    for (0..4) |_| try std.testing.expectEqual(@as(u16, 1), setup.client.discoveredBatch(&setup.client_service, &.{candidate}, setup.pair.now).accepted);
     var out: [1]managed.DialIntent = undefined;
     try std.testing.expectEqual(@as(usize, 1), setup.client.dialIntents(&setup.client_service, &setup.pair.client, setup.pair.now, &out));
     const after = setup.client.counters;
@@ -1212,10 +1210,10 @@ test "managed reconciliation raw mutators and deadlines invalidate once" {
     setup.client.reconcile(&setup.client_service, clock);
     try std.testing.expectEqual(fresh + 1, setup.client.counters.selections);
 
-    try std.testing.expect(setup.client_service.gossipsub.setPeerScore(conn, -10));
+    @import("gossipsub/test_support.zig").penalize(setup.client_service.gossipsub, conn, 7);
     setup.client.reconcile(&setup.client_service, clock);
     try std.testing.expectEqual(fresh + 1, setup.client.counters.selections);
-    try std.testing.expect(setup.client_service.gossipsub.setPeerScore(conn, -10));
+    _ = setup.client_service.gossipsub.scoreSnapshot(conn, clock);
     setup.client.reconcile(&setup.client_service, clock);
     try std.testing.expectEqual(fresh + 1, setup.client.counters.selections);
     _ = setup.client.reportPeer(peer, .high_tolerance, clock);
@@ -1295,7 +1293,7 @@ test "managed reconciliation ban expiry still defers until strict score recovery
     try std.testing.expectEqual(t.ReputationDecision.ban, setup.client.reportPeer(peer, .fatal, setup.pair.now).?);
     setup.client.control.close(&setup.client_service, &setup.client.catalog, &setup.pair.client, peer, conn, .banned, setup.pair.now);
     const candidate = try candidateFor(&snapshots[0].identity, null);
-    try setup.client.discovered(&setup.client_service, &candidate, setup.pair.now);
+    try std.testing.expectEqual(@as(u16, 1), setup.client.discoveredBatch(&setup.client_service, &.{candidate}, setup.pair.now).accepted);
     var out: [1]managed.DialIntent = undefined;
     const ban = setup.client.catalog.get(peer).?.ban_until_ms;
     var clock = setup.pair.now;
@@ -1558,7 +1556,7 @@ test "managed sampling demand rejects atomically trims fork bound and persists u
     setup.client.reconcile(&setup.client_service, setup.pair.now);
     try std.testing.expectEqual(@as(u16, 4), setup.client.coverageDeficits().groups);
     local.fork.custody_groups = 64;
-    try setup.client.updateFork(&setup.client_service, &local, setup.pair.now);
+    try @import("managed_test_support.zig").updateLocal(&setup.client, &setup.client_service, &local, setup.pair.now);
     try std.testing.expectEqual(@as(u16, 0), setup.client.demand.group_targets[127]);
     try std.testing.expectEqual(@as(u16, 4), setup.client.coverageDeficits().groups);
     setup.client.reconcile(&setup.client_service, setup.pair.now);
@@ -1602,4 +1600,10 @@ test "managed replaces failed gossip below target without a reputation penalty o
     try std.testing.expectEqual(@as(u64, 0), after.ban_until_ms);
     setup.client.control.maintain(&setup.client_service, &setup.client.catalog, &setup.pair.client, &setup.client.local, setup.pair.now);
     try std.testing.expectEqual(started, driver.counters.negotiation_started);
+}
+
+fn metadataUpdate(manager: *const managed.PeerManager, metadata: *const t.Metadata) t.LocalState {
+    var local = manager.local;
+    local.metadata = metadata.*;
+    return local;
 }

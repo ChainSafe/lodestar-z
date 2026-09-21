@@ -1,3 +1,4 @@
+const gossip_test = @import("test_support.zig");
 const topic_mod = @import("topic.zig");
 const protobuf = @import("protobuf.zig");
 const Overlay = @import("overlay.zig").Overlay;
@@ -11,10 +12,10 @@ const Fixture = struct {
     topic: u16,
 
     fn init(count: usize) !Fixture {
-        var g = try @import("gossipsub.zig").Gossipsub.init(std.testing.allocator, .{ .random_seed = 17 });
+        var g = try gossip_test.init(std.testing.allocator, .{ .random_seed = 17 });
         errdefer g.deinit();
         const name = "/eth2/01020304/beacon_block/ssz_snappy";
-        assert(g.subscribe(name));
+        gossip_test.subscribe(&g, name) catch unreachable;
         const topic = g.overlay.findTopic(name).?;
         for (0..count) |index| {
             const peer = @import("test_support.zig").addPeer(&g, .{ .index = @intCast(index), .generation = 1 }, .v1_2).?;
@@ -44,7 +45,7 @@ test "mesh metrics count actual transitions once and distinguish local changes f
     f.g.markDirect(f.g.sessions.rows[2].conn);
     const stream = f.g.sessions.rows[3].outStream().?;
     f.g.sessions.setOutbound(3, .{ .closing = stream });
-    try std.testing.expect(f.g.peers.scores.setAppScore(f.g.sessions.rows[4].logical.index, -10_000));
+    f.g.peers.scores.penalize(f.g.sessions.rows[4].logical.index, 50);
     f.g.overlay.maintain(&context, f.topic);
     const disconnected = f.g.sessions.rows[6].conn;
     f.g.connectionClosed(disconnected);
@@ -81,7 +82,7 @@ test "gossip opportunistic graft improves a mesh below its target degree" {
     var f = try Fixture.init(8);
     defer f.g.deinit();
     for (0..6) |peer| f.g.overlay.rows[f.topic].mesh.set(peer);
-    for (6..8) |peer| try std.testing.expect(f.g.peers.scores.setAppScore(@intCast(peer), 1));
+    for (6..8) |peer| f.g.peers.scores.deliverEligible(@intCast(peer), f.topic, false);
     const context = f.context(2);
     f.g.cycle.takeSnapshot(context.sessions, context.peers, context.now);
     f.g.overlay.opportunistic(&context, f.topic);
@@ -103,7 +104,7 @@ test "gossip policy mesh trimming preserves highest scores and outbound quota" {
     for (0..16) |peer| {
         f.g.overlay.rows[f.topic].mesh.set(peer);
         f.g.peers.scores.graft(@intCast(peer), f.topic, 1);
-        if (peer < 4) try std.testing.expect(f.g.peers.scores.setAppScore(@intCast(peer), 100));
+        if (peer < 4) f.g.peers.scores.deliverEligible(@intCast(peer), f.topic, false);
     }
     f.g.peers.rows[f.g.sessions.rows[14].logical.index].direction = .outbound;
     f.g.peers.rows[f.g.sessions.rows[15].logical.index].direction = .outbound;
@@ -148,7 +149,7 @@ test "gossip policy mesh queue pressure preserves required action ownership" {
     try std.testing.expectEqual(@as(u64, 1), f.g.overlay.metrics.additions[0][0]);
     f.g.sessions.rows[0].io.tx.cancelStream(&f.g.messages.store);
     try std.testing.expect(f.g.sessions.rows[0].io.tx.injectFrame(bytes, true, null, 2) != null);
-    try std.testing.expect(f.g.peers.scores.setAppScore(0, -1));
+    f.g.peers.scores.penalize(0, 7);
     f.g.cycle.takeSnapshot(context.sessions, context.peers, context.now);
     f.g.overlay.maintain(&context, f.topic);
     try std.testing.expectEqual(@as(usize, 0), f.g.overlay.mesh(f.topic).count());
@@ -223,7 +224,7 @@ test "gossip policy adaptive gossip randomizes recipients and fanout expires" {
     var f = try Fixture.init(64);
     defer f.g.deinit();
     f.g.markDirect(f.g.sessions.rows[0].conn);
-    try std.testing.expect(f.g.peers.scores.setAppScore(1, -10_000));
+    f.g.peers.scores.penalize(1, 50);
     var context = f.context(2);
     f.g.cycle.takeSnapshot(context.sessions, context.peers, context.now);
     const recipients = f.g.overlay.gossipRecipients(&context, f.topic, 0.5);
@@ -256,12 +257,12 @@ test "gossip PRUNE exhaustion ends eligibility even after queue capacity returns
     defer std.testing.allocator.free(full);
     @memset(full, 0);
     try std.testing.expect(io.tx.injectFrame(full, true, null, 1) != null);
-    try std.testing.expect(f.g.unsubscribe(f.g.overlay.topicString(f.topic)));
+    try gossip_test.unsubscribe(&f.g, f.g.overlay.topicString(f.topic));
     try std.testing.expect(f.g.sessions.rows[0].outbound == .closing);
     try std.testing.expect(!f.g.overlay.mesh(f.topic).isSet(0));
     io.tx.cancelStream(&f.g.messages.store);
     context.now = c.prune_backoff_ms * 2;
-    try std.testing.expect(f.g.subscribe(f.g.overlay.topicString(f.topic)));
+    try gossip_test.subscribe(&f.g, f.g.overlay.topicString(f.topic));
     f.g.overlay.onGraft(&context, f.topic, 0);
     try std.testing.expect(!f.g.overlay.mesh(f.topic).isSet(0));
     try std.testing.expect(!io.tx.pending());
@@ -304,7 +305,7 @@ test "overlay unsubscribe and disconnect retire membership and score together" {
 }
 
 test "gossip policy topic capacity supports two full fork subnet sets" {
-    var gossip = try @import("gossipsub.zig").Gossipsub.init(std.testing.allocator, .{ .random_seed = 1 });
+    var gossip = try gossip_test.init(std.testing.allocator, .{ .random_seed = 1, .topic_policy = &.{ @import("topic_fixture.zig").bytes(.{ 0, 0, 0, 0 }), @import("topic_fixture.zig").bytes(.{ 1, 0, 0, 0 }), @import("topic_fixture.zig").bytes(.{ 2, 0, 0, 0 }) } });
     defer gossip.deinit();
     const overlay = gossip.overlay;
     var name: [topic_mod.name_max_len]u8 = undefined;
@@ -313,7 +314,7 @@ test "gossip policy topic capacity supports two full fork subnet sets" {
         if (fork == 2) {
             for (&overlay.rows, 0..) |*topic, index| {
                 if (topic.active and std.mem.startsWith(u8, overlay.topicString(@intCast(index)), "/eth2/00000000/")) {
-                    try std.testing.expect(gossip.unsubscribe(overlay.topicString(@intCast(index))));
+                    try gossip_test.unsubscribe(&gossip, overlay.topicString(@intCast(index)));
                 }
             }
         }
@@ -321,34 +322,35 @@ test "gossip policy topic capacity supports two full fork subnet sets" {
         for ([_]topic_mod.Kind{ .beacon_attestation, .data_column_sidecar, .sync_committee }) |kind| {
             for (0..kind.countMax()) |subnet| {
                 const formatted = try std.fmt.bufPrint(&name, "{s}_{d}", .{ @tagName(kind), subnet });
-                try std.testing.expect(gossip.subscribe(topic_mod.build(digest, formatted, &buffer)));
+                try gossip_test.subscribe(&gossip, topic_mod.build(digest, formatted, &buffer));
             }
         }
         for (std.enums.values(topic_mod.Kind)) |kind| {
-            if (kind.countMax() == 1) try std.testing.expect(gossip.subscribe(topic_mod.build(digest, @tagName(kind), &buffer)));
+            if (kind.countMax() == 1) try gossip_test.subscribe(&gossip, topic_mod.build(digest, @tagName(kind), &buffer));
         }
     }
-    try std.testing.expect(overlay.findTopic("/eth2/00000000/beacon_block/ssz_snappy") == null);
+    if (overlay.findTopic("/eth2/00000000/beacon_block/ssz_snappy")) |old| try std.testing.expect(!overlay.subscribed(old));
     try std.testing.expect(overlay.findTopic("/eth2/01000000/beacon_block/ssz_snappy") != null);
     try std.testing.expect(overlay.findTopic("/eth2/02000000/beacon_block/ssz_snappy") != null);
 }
 
 test "gossip state intern snapshots an aliased retiring topic string" {
-    var overlay = @import("overlay.zig").Overlay.init(1);
-    defer overlay.deinit(std.testing.allocator);
+    var g = try @import("gossipsub.zig").Gossipsub.init(std.testing.allocator, .{ .random_seed = 1 });
+    defer g.deinit();
+    const overlay = g.overlay;
     const oversized = [_]u8{'x'} ** (topic_mod.topic_max_len + 1);
-    try std.testing.expectEqual(@as(?u16, null), overlay.internVacant(&oversized));
-    try std.testing.expectEqual(@as(?u16, null), overlay.internVacant("invalid"));
+    try std.testing.expectEqual(@as(?u16, null), gossip_test.intern(&g, &oversized));
+    try std.testing.expectEqual(@as(?u16, null), gossip_test.intern(&g, "invalid"));
     const original = "/eth2/00000000/a/ssz_snappy/b/ssz_snappy";
     const shorter = "/eth2/00000000/a/ssz_snappy";
-    try std.testing.expectEqual(@as(?u16, 0), overlay.internVacant(original));
+    try std.testing.expectEqual(@as(?u16, 0), gossip_test.intern(&g, original));
     const input = overlay.topicString(0)[0..shorter.len];
     overlay.rows[0].active = false;
-    try std.testing.expectEqual(@as(?u16, 0), overlay.internVacant(input));
+    try std.testing.expectEqual(@as(?u16, 0), gossip_test.intern(&g, input));
     try std.testing.expectEqualStrings(shorter, overlay.topicString(0));
     try std.testing.expectEqual(@as(u64, 2), overlay.rows[0].generation);
     const maximum = "/eth2/00000000/sync_committee_contribution_and_proof/ssz_snappy";
     try std.testing.expectEqual(topic_mod.topic_max_len, maximum.len);
-    try std.testing.expectEqual(@as(?u16, 1), overlay.internVacant(maximum));
+    try std.testing.expectEqual(@as(?u16, 1), gossip_test.intern(&g, maximum));
     try std.testing.expectEqualStrings(maximum, overlay.topicString(1));
 }

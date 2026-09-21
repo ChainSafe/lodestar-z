@@ -31,7 +31,6 @@ export function networkConfig(): NativeRuntimeConfig {
       pressureTimeoutMs: 30000n,
       retainedScoreMs: 38400000n,
       score: {
-        appWeight: 1,
         behaviourDecay: 0.9,
         behaviourThreshold: 6,
         behaviourWeight: -10,

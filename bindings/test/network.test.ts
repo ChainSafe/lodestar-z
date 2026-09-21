@@ -123,7 +123,7 @@ it.each([
   [
     "infinite score",
     (c: ReturnType<typeof applicationConfig>) => {
-      c.gossipPolicy.score.appWeight = Number.POSITIVE_INFINITY;
+      c.gossipPolicy.score.behaviourWeight = Number.NEGATIVE_INFINITY;
     },
     "InvalidNetworkConfig",
   ],

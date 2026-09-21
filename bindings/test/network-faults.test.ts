@@ -123,7 +123,6 @@ describe.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")("test-buil
       pressureTimeoutMs: 33000n,
       retainedScoreMs: 19200000n,
       score: {
-        appWeight: 2,
         behaviourDecay: 0.8,
         behaviourThreshold: 7,
         behaviourWeight: -11,
@@ -191,7 +190,6 @@ describe.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")("test-buil
           validation_tombstone_ms: 32000n,
         },
         score: {
-          app_weight: 2,
           behaviour_decay: 0.8,
           behaviour_threshold: 7,
           behaviour_weight: -11,

@@ -44,14 +44,14 @@ const Peer = struct {
         if (std.mem.eql(u8, instruction.op, "dial")) {
             const target = try network.Multiaddr.parse(instruction.address orelse return error.MissingAddress);
             if (target.address != .ip4 or !std.mem.eql(u8, &target.address.ip4.octets, &.{ 127, 0, 0, 1 })) return error.NotLoopback;
-            try self.node.connect(&(target.peer orelse return error.MissingPeer), &.{target.address}, self.now);
+            try self.node.connectUntil(&(target.peer orelse return error.MissingPeer), &.{target.address}, self.now, self.now.mono_ms +| network.peers.dial_queue.connect_timeout_ms);
         } else if (std.mem.eql(u8, instruction.op, "capacity")) {
             const capacity = instruction.capacity orelse return error.MissingCapacity;
             if (capacity > 1) return error.InvalidCapacity;
             self.capacity = capacity;
         } else if (std.mem.eql(u8, instruction.op, "snapshot")) {
             var rows: [4]t.Snapshot = undefined;
-            const count = self.node.snapshots(&rows);
+            const count = self.node.peer_manager.snapshots(&rows);
             var seq: [24]u8 = undefined;
             var native_generation: ?u32 = null;
             var metadata_sequence: ?[]const u8 = null;
@@ -70,7 +70,7 @@ const Peer = struct {
             };
             return control.emit(self.allocator, .{ .id = instruction.id, .ok = true, .connected = self.node.peerCounts().connected, .relevant = self.node.peerCounts().relevant, .generation = native_generation, .sequence = metadata_sequence, .custody = custody, .sampling = sampling, .closed = self.node.isClosed(), .memory = self.node.memoryPlan().allocated_bytes, .reason = reason, .deadline = deadline, .now = self.now.mono_ms });
         } else if (std.mem.eql(u8, instruction.op, "disconnect")) {
-            if (!self.node.disconnect(self.peer orelse return error.NoPeer, .host, self.now)) return error.NoPeer;
+            if (!self.node.peer_manager.disconnect(self.peer orelse return error.NoPeer, .host, self.now)) return error.NoPeer;
         } else if (std.mem.eql(u8, instruction.op, "shutdown")) {
             self.node.shutdown(self.now);
             for (0..100) |_| {

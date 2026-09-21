@@ -5,7 +5,7 @@ const support = @import("test_support.zig");
 const topic = "/eth2/01020304/beacon_block/ssz_snappy";
 
 test "publication refusal retry duplicate and exact expiry preserve admission" {
-    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1, .seen_ttl_ms = 100, .mcache_capacity = 2, .seen_capacity = 2 });
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .seen_ttl_ms = 100, .mcache_capacity = 2, .seen_capacity = 2 });
     defer g.deinit();
     const id = topic_mod.validMessageId(topic, "local", .{});
     try std.testing.expectError(error.NoPeersSubscribedToTopic, g.publishWithOptions(topic, "local", .{ .allow_zero_peers = false }, .{ .mono_ms = 10, .unix_s = 0 }));
@@ -33,9 +33,9 @@ test "publication refusal retry duplicate and exact expiry preserve admission" {
 }
 
 test "publication recipient policy tops up without graft and accounts unique shared descriptors" {
-    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1, .connected_capacity = 16, .retained_capacity = 32, .retained_outbound_reserve = 1 });
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .score_params = .{ .publish_threshold = -9000 }, .connected_capacity = 16, .retained_capacity = 32, .retained_outbound_reserve = 1 });
     defer g.deinit();
-    try std.testing.expect(g.subscribe(topic));
+    try support.subscribe(&g, topic);
     const t = g.overlay.findTopic(topic).?;
     for (0..12) |index| {
         const conn: @import("../quic/engine.zig").Handle = .{ .index = @intCast(index), .generation = 1 };
@@ -44,9 +44,10 @@ test "publication recipient policy tops up without graft and accounts unique sha
         g.sessions.rows[peer.index].outbound = .{ .live = .{ .stream = .{ .conn = conn, .id = 2, .slot = 0 }, .version = .v1_2 } };
     }
     g.markDirect(g.sessions.rows[0].conn);
-    try std.testing.expect(g.setPeerScore(g.sessions.rows[0].conn, -10_000));
-    try std.testing.expect(g.setPeerScore(g.sessions.rows[10].conn, g.options.score_params.publish_threshold - 1));
-    try std.testing.expect(g.setPeerScore(g.sessions.rows[9].conn, g.options.score_params.publish_threshold));
+    support.penalize(&g, g.sessions.rows[0].conn, 40);
+    support.penalize(&g, g.sessions.rows[10].conn, 40);
+    support.penalize(&g, g.sessions.rows[9].conn, 36);
+    try std.testing.expectEqual(g.options.score_params.publish_threshold, g.scoreSnapshot(g.sessions.rows[9].conn, .{ .mono_ms = 0, .unix_s = 0 }).?);
     g.options.pressure_timeout_ms = 1;
     g.sessions.setOutbound(11, .{ .closing = g.sessions.rows[11].outStream().? });
     g.overlay.rows[t].mesh.set(1);
@@ -77,7 +78,7 @@ test "publication recipient policy tops up without graft and accounts unique sha
 }
 
 test "publication failed history admission retains payloads and recovery attribution" {
-    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1, .mcache_capacity = 1, .validation_capacity = 1 });
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .mcache_capacity = 1, .validation_capacity = 1 });
     defer g.deinit();
     const conn: @import("../quic/engine.zig").Handle = .{ .index = 0, .generation = 1 };
     const peer = support.addPeer(&g, conn, .v1_2).?;
@@ -120,9 +121,9 @@ test "publication failed history admission retains payloads and recovery attribu
 }
 
 test "publication empty subscribed mesh reuses bounded fanout and full mesh excludes extra peers" {
-    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1, .connected_capacity = 16, .retained_capacity = 32, .retained_outbound_reserve = 1 });
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .connected_capacity = 16, .retained_capacity = 32, .retained_outbound_reserve = 1 });
     defer g.deinit();
-    try std.testing.expect(g.subscribe(topic));
+    try support.subscribe(&g, topic);
     const t = g.overlay.findTopic(topic).?;
     for (0..10) |index| {
         const conn: @import("../quic/engine.zig").Handle = .{ .index = @intCast(index), .generation = 1 };
@@ -148,8 +149,8 @@ test "publication local IDONTWANT cannot suppress exact bytes over QUIC" {
     var pair: @import("test_pair.zig").Pair = .{};
     try pair.init();
     defer pair.deinit();
-    try std.testing.expect(pair.shared.client.gossipsub.subscribe(topic));
-    try std.testing.expect(pair.shared.server.gossipsub.subscribe(topic));
+    try support.subscribe(pair.shared.client.gossipsub, topic);
+    try support.subscribe(pair.shared.server.gossipsub, topic);
     for (0..20) |_| try pair.pumpOnce();
     const destination = pair.shared.client.gossipsub.sessions.findPeer(pair.shared.handles.client).?;
     const id = topic_mod.validMessageId(topic, "originated wire bytes", .{});
@@ -170,12 +171,12 @@ test "publication local IDONTWANT cannot suppress exact bytes over QUIC" {
 }
 
 test "publication distinguishes topic capacity from unknown wire names" {
-    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1 });
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .topic_policy = &@import("topic_fixture.zig").churn });
     defer g.deinit();
     for (0..@import("constants.zig").topics_cap) |i| {
         var bytes: [128]u8 = undefined;
-        const name = try std.fmt.bufPrint(&bytes, "/eth2/01020304/topic_{d}/ssz_snappy", .{i});
-        try std.testing.expect(g.subscribe(name));
+        const name = try @import("topic_fixture.zig").churnTopic(i, &bytes);
+        try support.subscribe(&g, name);
     }
     try std.testing.expectError(error.ResourceExhausted, g.publish(topic, "body", .{ .mono_ms = 1, .unix_s = 0 }));
     try std.testing.expectError(error.UnknownTopic, g.publish("invalid", "body", .{ .mono_ms = 1, .unix_s = 0 }));
