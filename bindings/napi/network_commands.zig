@@ -176,7 +176,6 @@ pub fn execute(self: *Runtime, token: Token, timestamp: n.Now) void {
         if (self.stop) cell.failure = self.terminal_error orelse error.NetworkClosed;
         cell.state = .terminal;
     }
-    self.reports.sync(&self.heavy.?.core.peer_manager.catalog);
     if (cell.state == .terminal) self.pingLocked();
 }
 fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
@@ -212,7 +211,7 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
         .removeDirectPeer => operation.boolean = core.removeDirectPeer(&input.peer),
         .addDirectPeer => try core.addDirectPeer(&input.peer, input.addresses[0..input.address_count], timestamp),
         .connect => {
-            if (core.peer_manager.catalog.find(&input.peer)) |peer| if (core.peer_manager.catalog.get(peer).?.connection != null) return;
+            if (core.isConnected(&input.peer)) return;
             operation.deadline = timestamp.mono_ms +| input.timeout_ms;
             try core.connectUntil(&input.peer, input.addresses[0..input.address_count], timestamp, operation.deadline);
             self.lock();
@@ -228,14 +227,10 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
                 cell.state = .terminal;
             }
             self.unlock();
-            if (core.peer_manager.catalog.find(&input.peer)) |peer| {
-                if (core.peer_manager.catalog.get(peer).?.connection) |handle| _ = core.closePeer(peer, handle, timestamp);
-            }
+            _ = core.closePeer(&input.peer, timestamp);
         },
         .reStatusPeers => for (self.stores.?.targets[store.?][0..input.target_count]) |*identity| {
-            if (core.peer_manager.catalog.find(identity)) |peer| if (core.peer_manager.catalog.get(peer).?.connection) |handle| {
-                _ = core.reStatusPeer(peer, handle, timestamp);
-            };
+            _ = core.reStatusPeer(identity, timestamp);
         },
     }
 }

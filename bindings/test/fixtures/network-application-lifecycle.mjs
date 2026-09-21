@@ -1,4 +1,4 @@
-import {startRuntime} from "../utils/network.js";
+import {peerIdFromHex, startRuntime} from "../utils/network.js";
 import assert from "node:assert/strict";
 import {createSocket} from "node:dgram";
 import {setTimeout as delay} from "node:timers/promises";
@@ -21,9 +21,7 @@ if (mode === "exit") {
   const pending =
     mode === "gc"
       ? runtime.connect(
-          Uint8Array.from(
-            Buffer.from("00250802122102c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5", "hex")
-          ),
+          peerIdFromHex("00250802122102c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"),
           [{family: 4, address: Uint8Array.of(127, 0, 0, 1), port: 9}],
           60000n
         )

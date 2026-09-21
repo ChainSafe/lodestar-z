@@ -20,7 +20,7 @@ interface NativeBridge extends Pick<NativeNetworkApplicationRuntime, "applyInten
     onWorkAvailable: () => void
   ): {identity: NativeIdentity; closed: Promise<NativeRuntimeCloseResult>};
   requestStart(
-    peer: Uint8Array,
+    peer: string,
     protocol: NativeProtocolId,
     data: Uint8Array,
     options: NativeRequestOptions | undefined

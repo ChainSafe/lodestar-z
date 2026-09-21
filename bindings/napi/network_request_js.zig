@@ -56,8 +56,7 @@ pub fn start(runtime: *Runtime, peer: Value, protocol: Value, data: Value, optio
     const which = n.reqresp.Protocol.fromId(protocol_buffer[0..protocol_len]) orelse return error.UnknownProtocol;
     if (which.isControl()) return error.ControlProtocol;
     const request_options = try optionsFor(options);
-    const peer_bytes = try cfg.fixed(n.wire.peer_id.length, peer);
-    const identity = try n.PeerId.fromBytes(&peer_bytes);
+    const identity = try cfg.peerIdFrom(peer);
     if (!try data.isTypedarray()) return error.InvalidNetworkBytes;
     const view = try data.getTypedarrayInfo();
     if (view.array_type != .uint8 or try view.arraybuffer.isDetachedArrayBuffer()) return error.InvalidNetworkBytes;

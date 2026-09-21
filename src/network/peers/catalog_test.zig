@@ -39,7 +39,7 @@ fn admit(
     });
 }
 test "peer catalog identity duplicates and obsolete close preserve replacement" {
-    var c = try Catalog.init(std.testing.allocator, opts);
+    var c = try Catalog.init(std.testing.allocator, opts, 1024, 0);
     defer c.deinit(std.testing.allocator);
     const ref = admit(&c, &remote, first, .inbound, 0).admitted.peer;
     try std.testing.expectEqual(
@@ -56,7 +56,7 @@ test "peer catalog identity duplicates and obsolete close preserve replacement" 
     try std.testing.expect(!std.meta.eql(ref, other));
 }
 test "peer catalog zero output closes native ownership and pins terminal until one output" {
-    var c = try Catalog.init(std.testing.allocator, opts);
+    var c = try Catalog.init(std.testing.allocator, opts, 1024, 0);
     defer c.deinit(std.testing.allocator);
     const ref = admit(&c, &remote, first, .outbound, 0).admitted.peer;
     try std.testing.expect(c.updateStatus(ref, first, &.{}, 0));
@@ -76,7 +76,7 @@ test "peer catalog zero output closes native ownership and pins terminal until o
 }
 
 test "peer catalog endpoint observations preserve publication and connection generations" {
-    var c = try Catalog.init(std.testing.allocator, opts);
+    var c = try Catalog.init(std.testing.allocator, opts, 1024, 0);
     defer c.deinit(std.testing.allocator);
     const ref = admit(&c, &remote, first, .inbound, 0).admitted.peer;
     const initial: t.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 4001 } };
@@ -111,7 +111,7 @@ test "peer catalog endpoint observations preserve publication and connection gen
 test "peer catalog bounds banned retention while preserving the outbound reserve" {
     var options = opts;
     options.outbound_reserve = 1;
-    var c = try Catalog.init(std.testing.allocator, options);
+    var c = try Catalog.init(std.testing.allocator, options, 1024, 0);
     defer c.deinit(std.testing.allocator);
     const ref = admit(&c, &remote, first, .inbound, 0).admitted.peer;
     try std.testing.expectEqual(t.ReputationDecision.ban, c.report(ref, .fatal, 0).?);
@@ -128,7 +128,7 @@ test "peer catalog bounds banned retention while preserving the outbound reserve
     try std.testing.expect(recovered.peer.index != fresh.peer.index);
 }
 test "peer catalog cooldown churn cannot exclude a fresh inbound identity" {
-    var c = try Catalog.init(std.testing.allocator, opts);
+    var c = try Catalog.init(std.testing.allocator, opts, 1024, 0);
     defer c.deinit(std.testing.allocator);
     for ([_]t.PeerId{ remote, third }, 0..) |identity_value, index| {
         const conn: Handle = .{ .index = @intCast(index), .generation = 1 };
@@ -145,7 +145,7 @@ test "peer catalog cooldown churn cannot exclude a fresh inbound identity" {
 }
 
 test "peer catalog local pruning permits healthy reconnection during redial backoff" {
-    var c = try Catalog.init(std.testing.allocator, opts);
+    var c = try Catalog.init(std.testing.allocator, opts, 1024, 0);
     defer c.deinit(std.testing.allocator);
     const ref = admit(&c, &remote, first, .inbound, 0).admitted.peer;
     try std.testing.expect(c.deferRedial(ref, first, 0, 300_000));
@@ -163,7 +163,7 @@ test "peer catalog local pruning permits healthy reconnection during redial back
 }
 
 test "peer catalog exhausted generations never wrap and allocator cleanup" {
-    var c = try Catalog.init(std.testing.allocator, opts);
+    var c = try Catalog.init(std.testing.allocator, opts, 1024, 0);
     defer c.deinit(std.testing.allocator);
     c.rows[0].generation = std.math.maxInt(u64);
     const ref = admit(&c, &remote, first, .outbound, 0).admitted.peer;
@@ -171,15 +171,15 @@ test "peer catalog exhausted generations never wrap and allocator cleanup" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationCheck, .{});
 }
 fn allocationCheck(a: std.mem.Allocator) !void {
-    var c = try Catalog.init(a, opts);
+    var c = try Catalog.init(a, opts, 1024, 0);
     defer c.deinit(a);
     try std.testing.expectEqual(
-        opts.capacity * @sizeOf(@import("catalog.zig").Row),
+        opts.capacity * @sizeOf(@import("catalog.zig").Row) + c.by_identity.slots.len * @sizeOf(u16) + c.by_connection.len * @sizeOf(?u16),
         c.memoryPlan().allocated_bytes,
     );
 }
 test "peer catalog published replacement updates availability and rejects stale completions" {
-    var c = try Catalog.init(std.testing.allocator, opts);
+    var c = try Catalog.init(std.testing.allocator, opts, 1024, 0);
     defer c.deinit(std.testing.allocator);
     const ref = admit(&c, &remote, first, .inbound, 0).admitted.peer;
     try std.testing.expect(c.updateStatus(ref, first, &.{}, 0));
@@ -198,7 +198,7 @@ test "peer catalog published replacement updates availability and rejects stale 
     try std.testing.expectEqual(@as(usize, 0), c.pollEvents(&out));
 }
 test "peer catalog larger local identity prefers inbound and unchanged direction keeps owner" {
-    var c = try Catalog.init(std.testing.allocator, opts);
+    var c = try Catalog.init(std.testing.allocator, opts, 1024, 0);
     defer c.deinit(std.testing.allocator);
     const ref = c.admit(&local, &remote, first, &.{
         .direction = .outbound,
@@ -218,7 +218,7 @@ test "peer catalog larger local identity prefers inbound and unchanged direction
     try std.testing.expectEqual(replacement, c.get(ref).?.connection.?);
 }
 test "peer catalog unpublished closure coalesces updates without artificial ready" {
-    var c = try Catalog.init(std.testing.allocator, opts);
+    var c = try Catalog.init(std.testing.allocator, opts, 1024, 0);
     defer c.deinit(std.testing.allocator);
     const ref = admit(&c, &remote, first, .outbound, 0).admitted.peer;
     try std.testing.expect(c.updateStatus(ref, first, &.{}, 1));
@@ -236,7 +236,7 @@ test "peer catalog negative reconnect survives while direct and pending slots re
     options.capacity = 1;
     options.max_peers = 1;
     options.target_peers = 1;
-    var c = try Catalog.init(std.testing.allocator, options);
+    var c = try Catalog.init(std.testing.allocator, options, 1024, 0);
     defer c.deinit(std.testing.allocator);
     const ref = admit(&c, &remote, first, .outbound, 0).admitted.peer;
     _ = c.report(ref, .mid_tolerance, 0);
@@ -263,7 +263,7 @@ test "peer catalog negative reconnect survives while direct and pending slots re
     try std.testing.expectEqual(next, snapshots[0].peer);
 }
 test "peer catalog rejected banned reconnect does not mutate retained reputation" {
-    var c = try Catalog.init(std.testing.allocator, opts);
+    var c = try Catalog.init(std.testing.allocator, opts, 1024, 0);
     defer c.deinit(std.testing.allocator);
     const ref = admit(&c, &remote, first, .outbound, 0).admitted.peer;
     _ = c.report(ref, .fatal, 0);
@@ -290,7 +290,7 @@ test "peer catalog rejected banned reconnect does not mutate retained reputation
 }
 test "peer catalog memory plan equals actual allocation reservation" {
     var a = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    var c = try Catalog.init(a.allocator(), .{});
+    var c = try Catalog.init(a.allocator(), .{}, 1024, 0);
     const plan = c.memoryPlan();
     try std.testing.expectEqual(a.allocated_bytes, plan.allocated_bytes);
     c.deinit(a.allocator());
@@ -299,7 +299,7 @@ test "peer catalog memory plan equals actual allocation reservation" {
 }
 
 test "peer catalog accepts native generation zero and still rejects another full handle" {
-    var c = try Catalog.init(std.testing.allocator, opts);
+    var c = try Catalog.init(std.testing.allocator, opts, 1024, 0);
     defer c.deinit(std.testing.allocator);
     const zero: Handle = .{ .index = 0, .generation = 0 };
     const ref = admit(&c, &remote, zero, .outbound, 0).admitted.peer;
@@ -310,7 +310,7 @@ test "peer catalog accepts native generation zero and still rejects another full
 }
 
 test "peer catalog custody binds authenticated generations and preserves unchanged freshness work" {
-    var c = try Catalog.init(std.testing.allocator, opts);
+    var c = try Catalog.init(std.testing.allocator, opts, 1024, 0);
     defer c.deinit(std.testing.allocator);
     const ref = admit(&c, &remote, first, .inbound, 0).admitted.peer;
     const fork: t.ForkContext = .{ .fork = .fulu, .custody_groups = 128 };
@@ -340,7 +340,7 @@ test "peer catalog custody binds authenticated generations and preserves unchang
 }
 
 test "peer catalog changed custody metadata immediately invalidates copied groups" {
-    var c = try Catalog.init(std.testing.allocator, opts);
+    var c = try Catalog.init(std.testing.allocator, opts, 1024, 0);
     defer c.deinit(std.testing.allocator);
     const ref = admit(&c, &remote, first, .inbound, 0).admitted.peer;
     try std.testing.expect(c.updateStatus(ref, first, &.{}, 0));
@@ -353,7 +353,7 @@ test "peer catalog changed custody metadata immediately invalidates copied group
 }
 
 test "peer catalog revisions follow canonical generation replacement and reject stale mutations" {
-    var c = try Catalog.init(std.testing.allocator, opts);
+    var c = try Catalog.init(std.testing.allocator, opts, 1024, 0);
     defer c.deinit(std.testing.allocator);
     const ref = admit(&c, &remote, first, .inbound, 0).admitted.peer;
     const admitted_revision = c.revision;
@@ -378,7 +378,7 @@ test "peer catalog revisions follow canonical generation replacement and reject 
 }
 
 test "peer catalog zero hash custody completion invalidates prior policy observation" {
-    var c = try Catalog.init(std.testing.allocator, opts);
+    var c = try Catalog.init(std.testing.allocator, opts, 1024, 0);
     defer c.deinit(std.testing.allocator);
     const ref = admit(&c, &remote, first, .outbound, 0).admitted.peer;
     try std.testing.expect(c.updateStatus(ref, first, &.{ .earliest_available_slot = 0 }, 0));
@@ -392,7 +392,7 @@ test "peer catalog zero hash custody completion invalidates prior policy observa
 }
 
 test "identify catalog metadata copies only to current full peer and transport generation" {
-    var c = try Catalog.init(std.testing.allocator, opts);
+    var c = try Catalog.init(std.testing.allocator, opts, 1024, 0);
     defer c.deinit(std.testing.allocator);
     const ref = admit(&c, &remote, first, .inbound, 0).admitted.peer;
     try std.testing.expect(c.updateStatus(ref, first, &.{}, 0));
@@ -414,7 +414,7 @@ test "identify catalog metadata copies only to current full peer and transport g
 }
 
 test "peer catalog sampling publishes complete pair and invalidates closed generation" {
-    var c = try Catalog.init(std.testing.allocator, opts);
+    var c = try Catalog.init(std.testing.allocator, opts, 1024, 0);
     defer c.deinit(std.testing.allocator);
     const ref = admit(&c, &remote, first, .inbound, 0).admitted.peer;
     var fork: t.ForkContext = .{ .fork = .fulu, .custody_groups = 128, .minimum_sampling_groups = 127 };
@@ -453,7 +453,7 @@ test "peer catalog sampling publishes complete pair and invalidates closed gener
 }
 
 test "peer catalog sampling exhaustion never exposes custody checkpoint or retries" {
-    var c = try Catalog.init(std.testing.allocator, opts);
+    var c = try Catalog.init(std.testing.allocator, opts, 1024, 0);
     defer c.deinit(std.testing.allocator);
     const ref = admit(&c, &remote, first, .inbound, 0).admitted.peer;
     const fork: t.ForkContext = .{ .fork = .fulu, .minimum_sampling_groups = 127 };
@@ -483,7 +483,7 @@ test "peer catalog sampling exhaustion never exposes custody checkpoint or retri
 }
 
 test "unchanged metadata confirms freshness without publishing or changing policy revision" {
-    var c = try Catalog.init(std.testing.allocator, opts);
+    var c = try Catalog.init(std.testing.allocator, opts, 1024, 0);
     defer c.deinit(std.testing.allocator);
     const ref = admit(&c, &remote, first, .inbound, 0).admitted.peer;
     try std.testing.expect(c.updateStatus(ref, first, &.{}, 0));
@@ -499,4 +499,69 @@ test "unchanged metadata confirms freshness without publishing or changing polic
     try std.testing.expect(!c.updateMetadata(ref, first, &.{ .seq_number = 6 }, 21));
     try std.testing.expect(c.updateMetadata(ref, first, &.{ .seq_number = 8 }, 22));
     try std.testing.expectEqual(@as(usize, 1), c.pollEvents(&events));
+}
+
+test "catalog indexes retain disconnected identity and reject displaced and recycled connections" {
+    var c = try Catalog.init(std.testing.allocator, opts, 4, 71);
+    defer c.deinit(std.testing.allocator);
+    const ref = admit(&c, &remote, first, .inbound, 0).admitted.peer;
+    try std.testing.expectEqual(ref, c.find(&remote).?);
+    try std.testing.expectEqual(ref, c.findConnection(first).?);
+    const preferred: Handle = .{ .index = 2, .generation = 1 };
+    const admitted = admit(&c, &remote, preferred, .outbound, 1).admitted;
+    try std.testing.expectEqual(first, admitted.displaced.?);
+    try std.testing.expect(c.findConnection(first) == null);
+    try std.testing.expectEqual(ref, c.findConnection(preferred).?);
+    try std.testing.expect(!c.disconnect(ref, first, .transport_closed, 2));
+    try std.testing.expectEqual(ref, c.findConnection(preferred).?);
+    try std.testing.expect(c.disconnect(ref, preferred, .host, 3));
+    try std.testing.expect(c.findConnection(preferred) == null);
+    try std.testing.expectEqual(ref, c.find(&remote).?);
+    try std.testing.expectEqual(t.ReputationDecision.none, c.report(ref, .high_tolerance, 3).?);
+    var events: [2]t.Event = undefined;
+    _ = c.pollEvents(&events);
+    const renewed: Handle = .{ .index = 2, .generation = 2 };
+    try std.testing.expectEqual(ref, admit(&c, &remote, renewed, .outbound, 4).admitted.peer);
+    try std.testing.expectEqual(ref, c.findConnection(renewed).?);
+    try std.testing.expect(!c.disconnect(ref, preferred, .transport_closed, 5));
+    try std.testing.expectEqual(ref, c.findConnection(renewed).?);
+    const other = admit(&c, &third, replacement, .inbound, 6).admitted.peer;
+    try std.testing.expectEqual(other, c.findConnection(replacement).?);
+    try std.testing.expect(c.findConnection(first) == null);
+    try std.testing.expect(c.findConnection(.{ .index = 4, .generation = 1 }) == null);
+    for (c.rows, 0..) |row, i| {
+        if (!row.occupied) continue;
+        try std.testing.expectEqual(@as(u16, @intCast(i)), c.find(&row.identity).?.index);
+        if (row.connection) |conn| try std.testing.expectEqual(@as(u16, @intCast(i)), c.findConnection(conn).?.index);
+    }
+}
+
+test "catalog caches node ID across custody changes and reconnects and resets it on identity reuse" {
+    var c = try Catalog.init(std.testing.allocator, opts, 4, 9);
+    defer c.deinit(std.testing.allocator);
+    const ref = admit(&c, &remote, first, .outbound, 0).admitted.peer;
+    try std.testing.expect(c.rows[ref.index].node_id == null);
+    try std.testing.expect(c.updateStatus(ref, first, &.{ .earliest_available_slot = 0 }, 0));
+    try std.testing.expect(c.updateMetadata(ref, first, &.{ .custody_group_count = 4 }, 0));
+    var budget: u16 = 0;
+    _ = c.advanceCustody(&.{ .fork = .fulu }, 0, 60_000, &budget);
+    const expected = try @import("custody.zig").nodeId(&remote);
+    try std.testing.expectEqual(expected, c.rows[ref.index].node_id.?);
+    try std.testing.expect(c.updateMetadata(ref, first, &.{ .seq_number = 1, .custody_group_count = 8 }, 1));
+    _ = c.advanceCustody(&.{ .fork = .fulu, .minimum_sampling_groups = 16 }, 1, 60_000, &budget);
+    try std.testing.expectEqual(expected, c.rows[ref.index].node_id.?);
+    try std.testing.expect(c.disconnect(ref, first, .host, 2));
+    var events: [2]t.Event = undefined;
+    _ = c.pollEvents(&events);
+    try std.testing.expectEqual(ref, admit(&c, &remote, replacement, .outbound, 3).admitted.peer);
+    try std.testing.expectEqual(expected, c.rows[ref.index].node_id.?);
+    try std.testing.expect(c.disconnect(ref, replacement, .host, 4));
+    _ = c.pollEvents(&events);
+    const third_id = try @import("custody.zig").nodeId(&third);
+    const reused = c.admit(&third, &local, .{ .index = 1, .generation = 3 }, &.{ .direction = .outbound, .endpoint = .unspecified, .now_ms = 5, .node_id = third_id }).admitted.peer;
+    try std.testing.expectEqual(ref.index, reused.index);
+    try std.testing.expect(reused.generation > ref.generation);
+    try std.testing.expect(c.find(&remote) == null);
+    try std.testing.expectEqual(reused, c.find(&third).?);
+    try std.testing.expectEqual(third_id, c.rows[reused.index].node_id.?);
 }

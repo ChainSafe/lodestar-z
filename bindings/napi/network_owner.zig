@@ -49,6 +49,7 @@ pub fn prepareConfiguration(self: *Runtime) !void {
     var seed: u64 = undefined;
     try faults.check(.entropy);
     try io.randomSecure(std.mem.asBytes(&seed));
+    self.reports.seed = seed;
     const request = try self.heavy.?.application.buildRequest(&self.heavy.?.config, seed);
     self.heavy.?.resolved = n.configuration.resolve(request) catch |err| switch (err) {
         error.InvalidLimits => return error.InvalidNetworkConfig,
@@ -138,7 +139,11 @@ fn serve(self: *Runtime) !void {
                 const report = self.reports.next();
                 self.unlock();
                 const item = report orelse break;
-                _ = self.heavy.?.core.reportPeer(item.peer, item.action, timestamp);
+                if (self.heavy.?.core.reportPeer(&item.identity, item.action, timestamp) == null) {
+                    self.lock();
+                    self.reports.ignored +|= 1;
+                    self.unlock();
+                }
             }
             try executeWork(self, io);
         }
@@ -168,9 +173,6 @@ fn serve(self: *Runtime) !void {
         const sequence = try self.advanceSequence();
         const result = self.heavy.?.core.step(io, timestamp, slot, .{ .peers = self.heavy.?.outputs[0..@min(peer_room, self.heavy.?.outputs.len)], .application = &self.heavy.?.application_outputs }, commands.waitLimit(self, timestamp));
         if (ingress.failure) |err| return err;
-        self.lock();
-        self.reports.sync(&self.heavy.?.core.peer_manager.catalog);
-        self.unlock();
         @import("network_gossip_faults.zig").afterStep(self);
         if (terminal_accepted) |proof| @import("network_incoming_phase_faults.zig").afterStep(self, &proof, self.heavy.?.application_outputs[0..result.counts.application]);
         try requests_mod.capture(self, self.heavy.?.application_outputs[0..result.counts.application], timestamp);
@@ -259,7 +261,7 @@ fn publishTurn(self: *Runtime, result: *const n.network_core.Result, timestamp: 
     self.lock();
     if (timestamp.mono_ms >= self.health_log_due_ms) {
         const active_requests = self.heavy.?.core.service.reqresp.active();
-        std.log.scoped(.network_runtime).info("network_health peers={d} relevant={d} target={d} requests_outbound={d} requests_inbound={d} dial_started={d} dial_deferred={d} discovery_peers={d} gossip_pressure_resets={d} received_bytes={d} sent_bytes={d}", .{ counts.connected, counts.relevant, self.heavy.?.core.peer_manager.catalog.options.target_peers, active_requests.outbound, active_requests.inbound, self.heavy.?.core.counters.dial_started, self.heavy.?.core.counters.dial_deferred, if (self.heavy.?.core.discovery) |discovery| discovery.transport.engine.peerCount() else 0, self.heavy.?.core.service.gossipsub.counters.local_pressure_resets, self.heavy.?.core.transport.udp.counters.received_bytes, self.heavy.?.core.transport.udp.counters.sent_bytes });
+        std.log.scoped(.network_runtime).info("network_health peers={d} relevant={d} target={d} requests_outbound={d} requests_inbound={d} dial_started={d} dial_deferred={d} discovery_peers={d} gossip_pressure_resets={d} received_bytes={d} sent_bytes={d}", .{ counts.connected, counts.relevant, self.heavy.?.resolved.core.peers.target_peers, active_requests.outbound, active_requests.inbound, self.heavy.?.core.counters.dial_started, self.heavy.?.core.counters.dial_deferred, if (self.heavy.?.core.discovery) |discovery| discovery.transport.engine.peerCount() else 0, self.heavy.?.core.service.gossipsub.counters.local_pressure_resets, self.heavy.?.core.transport.udp.counters.received_bytes, self.heavy.?.core.transport.udp.counters.sent_bytes });
         self.health_log_due_ms = timestamp.mono_ms +| 30000;
     }
     if (self.lane) |lane| {

@@ -25,6 +25,11 @@ pub fn bytes(env: napi.Env, value: []const u8) !Value {
     return env.createTypedarray(.uint8, value.len, try env.createArrayBufferCopy(value, null), 0);
 }
 
+pub fn peerIdValue(env: napi.Env, identity: *const @import("network").PeerId) !Value {
+    var text: [@import("network").wire.peer_id.text_length_max]u8 = undefined;
+    return env.createStringUtf8(identity.toText(&text));
+}
+
 pub fn endpoint(env: napi.Env, value: @import("network").Address) !Value {
     const object = try env.createObject();
     switch (value) {

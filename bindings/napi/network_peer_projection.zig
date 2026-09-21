@@ -32,12 +32,6 @@ const put = @import("network_js.zig").put;
 const element = @import("network_js.zig").element;
 const bytes = @import("network_js.zig").bytes;
 const endpoint = @import("network_js.zig").endpoint;
-fn reference(env: napi.Env, peer: t.PeerRef) !Value {
-    const object = try env.createObject();
-    try put(object, "index", try env.createUint32(peer.index));
-    try put(object, "generation", try env.createBigintUint64(peer.generation));
-    return object;
-}
 fn connection(env: napi.Env, handle: t.Handle) !Value {
     const object = try env.createObject();
     try put(object, "index", try env.createUint32(handle.index));
@@ -88,8 +82,7 @@ fn identify(env: napi.Env, value: *const n.identify.Metadata) !Value {
 }
 pub fn state(env: napi.Env, value: *const t.Snapshot) !Value {
     const object = try env.createObject();
-    try put(object, "peer", try reference(env, value.peer));
-    try put(object, "identity", try bytes(env, &value.identity.bytes));
+    try put(object, "identity", try @import("network_js.zig").peerIdValue(env, &value.identity));
     try put(object, "connection", if (value.connection) |handle| try connection(env, handle) else try env.getNull());
     try put(object, "direction", try env.createStringUtf8(@tagName(value.direction)));
     try put(object, "endpoint", try endpoint(env, value.endpoint));
@@ -114,9 +107,8 @@ pub fn observation(env: napi.Env, entry: *const Entry) !Value {
     switch (entry.event) {
         .ready, .updated => |*value| try put(object, "state", try state(env, value)),
         .closed => |value| {
-            try put(object, "peer", try reference(env, value.peer));
             try put(object, "connection", try connection(env, value.connection));
-            try put(object, "identity", try bytes(env, &value.identity.bytes));
+            try put(object, "identity", try @import("network_js.zig").peerIdValue(env, &value.identity));
             try put(object, "reason", try env.createStringUtf8(@tagName(value.reason)));
         },
     }
@@ -145,7 +137,7 @@ test "production peer lane preserves closed generations at capacity" {
 }
 
 test "full production lane leaves catalog close pending until output resumes" {
-    var catalog = try n.peers.Catalog.init(std.testing.allocator, .{ .capacity = 2, .outbound_reserve = 0, .target_peers = 1, .max_peers = 2, .min_outbound = 0 });
+    var catalog = try n.peers.Catalog.init(std.testing.allocator, .{ .capacity = 2, .outbound_reserve = 0, .target_peers = 1, .max_peers = 2, .min_outbound = 0 }, 1024, 0);
     defer catalog.deinit(std.testing.allocator);
     const local_key = try n.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{1}));
     const remote_key = try n.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{2}));

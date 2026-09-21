@@ -77,7 +77,7 @@ pub fn process(
     for ([_][]const rr.Event{ application[0..counts.application], controls[0..counts.control] }) |batch| {
         for (batch) |event| {
             const conn = service.reqresp.incompleteRequestTimeout(event) orelse continue;
-            if (self.control.peerFor(conn)) |peer| _ = self.reportPeer(peer, .low_tolerance, now);
+            if (self.catalog.findConnection(conn)) |peer| _ = self.reportPeer(peer, .low_tolerance, now);
         }
     }
     self.control.identifyResults(&self.catalog, identify_results[0..counts.identify]);

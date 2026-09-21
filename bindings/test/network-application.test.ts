@@ -3,6 +3,7 @@ import {createSocket} from "node:dgram";
 import {once} from "node:events";
 import {setTimeout as delay} from "node:timers/promises";
 import {privateKeyFromRaw} from "@libp2p/crypto/keys";
+import {peerIdFromPublicKey} from "@libp2p/peer-id";
 import {expect, test} from "vitest";
 import type {NativeNetworkApplicationRuntime, NativePeerObservation} from "../src/network.js";
 import {
@@ -135,9 +136,7 @@ test("Status-only updates copy inputs and preserve advertisement and subscriptio
       }
       let observed: Awaited<ReturnType<typeof b.getPeers>>["peers"][number]["status"] = null;
       for (let i = 0; i < 200; i++) {
-        observed =
-          (await b.getPeers()).peers.find((peer) => peer.identity.every((byte, j) => byte === identity.peerId[j]))
-            ?.status ?? null;
+        observed = (await b.getPeers()).peers.find((peer) => peer.identity === identity.peerId)?.status ?? null;
         if (observed?.headSlot === headSlot) break;
         await delay(10);
       }
@@ -400,7 +399,7 @@ test("real authenticated connect, direct membership and generation-preserving im
     const closed = events.filter((event) => event.type === "closed");
     expect(closed).toHaveLength(1);
     expect(closed[0].connection).toEqual(before.peers[0].connection);
-    expect(closed[0].peer).toEqual(before.peers[0].peer);
+    expect(closed[0].identity).toEqual(before.peers[0].identity);
     expect(closed[0].reason).toBe("host");
     expect(identityA.peerId).not.toEqual(identityB.peerId);
   } finally {
@@ -449,7 +448,18 @@ test("peer penalties accumulate while the command lane is full", async () => {
     expect(score).toBeLessThan(-2.9);
     expect(score).toBeGreaterThanOrEqual(-3);
     a.reportPeer((await a.getIdentity()).peerId, "fatal");
+    for (let i = 0; i < 100 && a.diagnostics().peerReportsIgnored === 0n; i++) await delay(10);
     expect(a.diagnostics().peerReportsIgnored).toBe(1n);
+    await a.disconnect(remote.peerId);
+    a.reportPeer(remote.peerId, "low_tolerance");
+    for (let i = 0; i < 100; i++) {
+      const retained = (await a.getPeers()).peers.find((peer) => peer.identity === remote.peerId);
+      if (retained && retained.score < -12.9) break;
+      await delay(10);
+    }
+    const retained = (await a.getPeers()).peers.find((peer) => peer.identity === remote.peerId);
+    expect(retained?.connection).toBeNull();
+    expect(retained?.score).toBeLessThan(-12.9);
   } finally {
     await Promise.all([a.close(), b.close()]);
   }
@@ -711,11 +721,11 @@ test.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")(
       const closed = events.filter((event) => event.type === "closed");
       expect(closed).toHaveLength(1);
       expect(events[0]).toEqual(closed[0]);
-      expect(closed[0]).toMatchObject({connection: old.connection, peer: old.peer});
+      expect(closed[0]).toMatchObject({connection: old.connection, identity: old.identity});
       const ready = events.find((event) => event.type === "ready");
       expect(ready?.type).toBe("ready");
       if (ready?.type !== "ready") throw Error("missing reconnect ready");
-      expect(ready.state.peer).toEqual(old.peer);
+      expect(ready.state.identity).toEqual(old.identity);
       expect(ready.state.connection).not.toEqual(old.connection);
       expect(ready.state.connection).toEqual((await a.getPeers()).peers[0].connection);
       expect(events.filter((event) => event.type === "ready")).toHaveLength(1);
@@ -741,7 +751,7 @@ test.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")(
     const replacement = await startPeer(other);
     try {
       const [local, remote, duplicate] = await Promise.all([a.identity, b.identity, replacement.identity]);
-      expect(Buffer.compare(local.peerId, remote.peerId)).toBeGreaterThan(0);
+      expect(Buffer.compare(Buffer.from(local.peerId), Buffer.from(remote.peerId))).toBeGreaterThan(0);
       expect(duplicate.peerId).toEqual(remote.peerId);
       await Promise.all([
         a.applyIntent(localIntent(config), 100n),
@@ -759,7 +769,7 @@ test.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")(
         current = await a.getPeers();
       }
       expect(current.counts.connected).toBe(1);
-      expect(current.peers[0]).toMatchObject({direction: "inbound", peer: old.peer, relevant: true});
+      expect(current.peers[0]).toMatchObject({direction: "inbound", identity: old.identity, relevant: true});
       expect(current.peers[0].connection).not.toEqual(old.connection);
       let displaced = await b.getPeers();
       for (let i = 0; i < 200 && displaced.counts.connected !== 0; i++) {
@@ -780,7 +790,6 @@ test.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")(
         connection: current.peers[0].connection,
         direction: "inbound",
         identity: remote.peerId,
-        peer: old.peer,
       });
       expect(ready.ownerSequence).toBeGreaterThan(0n);
       for (let i = 1; i < events.length; i++) {
@@ -808,7 +817,7 @@ async function silentPeer(secret: Uint8Array) {
       close: () => new Promise<void>((resolve) => socket.close(() => resolve())),
       identity: {
         localEndpoint: {address: Uint8Array.of(127, 0, 0, 1), family: 4 as const, port: socket.address().port},
-        peerId: privateKeyFromRaw(secret).publicKey.toMultihash().bytes,
+        peerId: peerIdFromPublicKey(privateKeyFromRaw(secret).publicKey).toString(),
       },
     };
   } catch (error) {

@@ -36,7 +36,7 @@ test("processor commands validate credits, roots and generation-bound handles", 
     expect(runtime.drainGossip({bytes: 0, items: 0, ordinary: false}).messages).toEqual([]);
     expect(() => runtime.notifyGossipBlock(new Uint8Array(31))).toThrow();
     expect(() => runtime.trackGossipSearch(new Uint8Array(33), null)).toThrow();
-    expect(() => runtime.trackGossipSearch(new Uint8Array(32), new Uint8Array(32))).toThrow();
+    expect(() => runtime.trackGossipSearch(new Uint8Array(32), "not-a-peer")).toThrow();
     const handle = {generation: 1n, index: 0};
     expect(runtime.classifyGossip(handle, true)).toBe(false);
     expect(runtime.classifyGossip({...handle}, false)).toBe(false);

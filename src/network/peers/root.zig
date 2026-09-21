@@ -11,6 +11,7 @@ pub const dial_queue = @import("dial_queue.zig");
 pub const DialQueue = dial_queue.DialQueue;
 pub const types = @import("types.zig");
 pub const catalog = @import("catalog.zig");
+pub const identity_index = @import("identity_index.zig");
 pub const reputation = @import("reputation.zig");
 pub const control_wire = @import("control_wire.zig");
 pub const Catalog = catalog.Catalog;

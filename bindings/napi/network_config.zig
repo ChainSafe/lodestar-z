@@ -86,6 +86,22 @@ pub fn fixed(comptime len: usize, value: Value) ![len]u8 {
     try bytes(value, &out);
     return out;
 }
+pub fn peerIdFrom(value: Value) !n.PeerId {
+    if (try value.typeof() != .string) return error.InvalidNetworkPeerId;
+    var len: usize = 0;
+    try napi.status.check(napi.c.napi_get_value_string_utf16(value.env, value.value, null, 0, &len));
+    if (len == 0 or len > n.wire.peer_id.text_length_max) return error.InvalidNetworkPeerId;
+    var buffer: [n.wire.peer_id.text_length_max + 1]u16 = undefined;
+    const text = try value.getValueStringUtf16(buffer[0 .. len + 1]);
+    if (text.len != len) return error.InvalidNetworkPeerId;
+    var encoded: [n.wire.peer_id.text_length_max]u8 = undefined;
+    for (text, encoded[0..len]) |char, *byte| {
+        if (char > 127) return error.InvalidNetworkPeerId;
+        byte.* = @intCast(char);
+    }
+    return n.PeerId.fromText(encoded[0..len]) catch return error.InvalidNetworkPeerId;
+}
+
 pub fn array(value: Value, max: usize) !u32 {
     if (!try value.isArray()) return error.InvalidNetworkConfig;
     const count = try value.getArrayLength();

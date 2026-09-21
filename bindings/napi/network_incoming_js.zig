@@ -93,7 +93,7 @@ fn descriptorValue(runtime: *Runtime, token: incoming.Token, cell: *const incomi
     const env = runtime.env;
     const object = try env.createObject();
     try put(object, "handle", try tokenValue(runtime, token));
-    try put(object, "peerId", try bytes(env, &cell.identity.bytes));
+    try put(object, "peerId", try @import("network_js.zig").peerIdValue(env, &cell.identity));
     try put(object, "connection", try connectionValue(env, cell.connection));
     try put(object, "protocol", try env.createStringUtf8(cell.protocol.id()));
     var destination: [*]u8 = undefined;

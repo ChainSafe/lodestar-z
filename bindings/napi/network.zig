@@ -253,7 +253,7 @@ fn text(value: []const u8) !Value {
 fn identity(env: napi.Env, value: *const r.Identity) !Value {
     try faults.check(.identity_copy);
     const object = try env.createObject();
-    try put(object, "peerId", try bytes(env, &value.peer.bytes));
+    try put(object, "peerId", try @import("network_js.zig").peerIdValue(env, &value.peer));
     try put(object, "metadata", try projection.metadata(env, &value.metadata));
     const endpoints = try env.createArrayWithLength(@intFromBool(value.endpoints[0] != null) + @as(u32, @intFromBool(value.endpoints[1] != null)));
     var endpoint_index: u32 = 0;
@@ -305,10 +305,6 @@ const application_cfg = @import("network_application_config.zig");
 const projection = @import("network_peer_projection.zig");
 const n = @import("network");
 
-fn peerId(value: Value) !n.PeerId {
-    const encoded = try cfg.fixed(n.wire.peer_id.length, value);
-    return n.PeerId.fromBytes(&encoded);
-}
 fn parseAddresses(value: Value, input: *commands.Input) !void {
     input.address_count = @intCast(try cfg.array(value, 2));
     if (input.address_count == 0) return error.InvalidNetworkConfig;
@@ -338,12 +334,12 @@ fn submit(self: *@This(), comptime command: commands.Command, args: []const Valu
         .reStatusPeers => {
             operation.input.target_count = @intCast(try cfg.array(args[0], 256));
             for (runtime.stores.?.targets[store.?][0..operation.input.target_count], 0..) |*peer, i| {
-                peer.* = try peerId(try args[0].getElement(@intCast(i)));
+                peer.* = try cfg.peerIdFrom(try args[0].getElement(@intCast(i)));
                 for (runtime.stores.?.targets[store.?][0..i]) |*prior| if (peer.eql(prior)) return error.InvalidNetworkConfig;
             }
         },
         else => {
-            operation.input.peer = try peerId(args[0]);
+            operation.input.peer = try cfg.peerIdFrom(args[0]);
             if (command == .connect or command == .addDirectPeer) try parseAddresses(args[1], &operation.input);
             if (command == .connect) {
                 operation.input.timeout_ms = try cfg.bigint(args[2]);
@@ -394,7 +390,7 @@ pub fn getDirectPeers(self: *@This()) !js.Value {
 }
 pub fn reportPeer(self: *@This(), peer: js.Value, action: js.Value) !js.Value {
     const runtime = try self.owner();
-    const reported_peer = try peerId(peer.val);
+    const reported_peer = try cfg.peerIdFrom(peer.val);
     var buffer: [32]u8 = undefined;
     const length = try application_cfg.text(action.val, &buffer);
     const parsed = std.meta.stringToEnum(n.peers.types.PeerAction, buffer[0..length]) orelse return error.InvalidNetworkConfig;
@@ -467,7 +463,7 @@ fn copyOperation(env: napi.Env, runtime: *Runtime, index: usize) !Value {
         },
         .getDirectPeers => {
             const identities = try env.createArrayWithLength(operation.count);
-            for (runtime.stores.?.direct[store.?][0..operation.count], 0..) |*peer, i| try element(identities, i, try bytes(env, &peer.bytes));
+            for (runtime.stores.?.direct[store.?][0..operation.count], 0..) |*peer, i| try element(identities, i, try @import("network_js.zig").peerIdValue(env, peer));
             try put(object, "identities", identities);
         },
         else => {},

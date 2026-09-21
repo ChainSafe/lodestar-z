@@ -98,14 +98,14 @@ pub fn main(init: std.process.Init) !void {
     defer b.deinit(io);
     var topic_buffer: [network.gossipsub.topic.topic_max_len]u8 = undefined;
     const topic = network.gossipsub.topic.build(plan.forks[0].digest, "beacon_block", &topic_buffer);
-    const peer = try connectPair(a, b, io, topic);
+    try connectPair(a, b, io, topic);
     for (0..warmup_turns) |_| {
         _ = try turn(a, io, .{});
         _ = try turn(b, io, .{});
     }
     const allocations_a = a.reservations.allocation_calls;
     const allocations_b = b.reservations.allocation_calls;
-    try pressure(a, b, sinks, io, peer, topic, plan.forks[0]);
+    try pressure(a, b, sinks, io, topic, plan.forks[0]);
     printReconciliation(a, "connected_cumulative");
     std.debug.print("turn_allocation_calls_a={} turn_allocation_calls_b={} process_rss=external_time_maximum_resident_set_kbytes\n", .{ a.reservations.allocation_calls - allocations_a, b.reservations.allocation_calls - allocations_b });
 }
@@ -131,23 +131,34 @@ fn initialize(node: *network.NetworkCore, a: std.mem.Allocator, io: std.Io, key:
     } else try node.initRaw(a, io, options(key, plan, &update));
 }
 
-fn connectPair(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, topic: []const u8) !t.PeerRef {
-    try a.addDirectPeer(&b.peerId(), &.{b.localAddress()}, try network.transport.currentTime(io));
+fn connectPair(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, topic: []const u8) !void {
+    try a.addDirectPeer(&b.peerId(), &.{b.transport.localAddress()}, try network.transport.currentTime(io));
     var rows: [4]t.Snapshot = undefined;
     var peer: ?t.PeerRef = null;
     for (0..10000) |_| {
         _ = try turn(a, io, .{});
         _ = try turn(b, io, .{});
-        for (rows[0..a.snapshots(&rows)]) |row| {
+        for (rows[0..a.peer_manager.snapshots(&rows)]) |row| {
             if (row.relevant) peer = row.peer;
         }
         if (peer != null and b.peerCounts().relevant == 1) break;
     }
     if (peer == null) return error.ConnectionDeadline;
-    try b.addDirectPeer(&a.peerId(), &.{a.localAddress()}, try network.transport.currentTime(io));
+    try b.addDirectPeer(&a.peerId(), &.{a.transport.localAddress()}, try network.transport.currentTime(io));
     var peer_events: [4]t.Event = undefined;
     var gossip_events: [1]network.gossipsub.Event = undefined;
-    if (!a.subscribe(topic) or !b.subscribe(topic)) return error.SubscriptionRefused;
+    var subscription: network.gossipsub.local_intent.Boundary = .{ .digest = network.gossipsub.topic.parseCanonical(topic).?.digest };
+    subscription.mask(.beacon_block)[0] = 1;
+    subscription.lengths[@intFromEnum(network.gossipsub.topic.Kind.beacon_block)] = 1;
+    for ([_]*network.NetworkCore{ a, b }) |node| {
+        const intent: network.network_core.LocalIntent = .{
+            .update = .{ .local = node.localState(), .schedule = node.schedule, .endpoints = node.advertisementEndpoints(), .capabilities = node.service.router.capabilities() },
+            .demand = node.peer_manager.demand,
+            .subscriptions = &.{subscription},
+            .slot = 100,
+        };
+        _ = try node.applyIntent(&intent, try network.transport.currentTime(io));
+    }
     for (0..4000) |_| {
         const result_a = a.step(io, try network.transport.currentTime(io), 100, .{ .peers = &peer_events, .gossipsub = &gossip_events }, 1);
         if (result_a.failure) |err| return err;
@@ -160,10 +171,9 @@ fn connectPair(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, top
         std.debug.print("setup a={any} b={any} gossip_a={any} gossip_b={any}\n", .{ a.peerCounts(), b.peerCounts(), a.service.gossipsub.resourceSnapshot(), b.service.gossipsub.resourceSnapshot() });
         return error.SubscriptionDeadline;
     }
-    return peer.?;
 }
 
-fn pressure(a: *network.NetworkCore, b: *network.NetworkCore, sinks: []u8, io: std.Io, peer: t.PeerRef, topic: []const u8, context: rr.ForkEntry) !void {
+fn pressure(a: *network.NetworkCore, b: *network.NetworkCore, sinks: []u8, io: std.Io, topic: []const u8, context: rr.ForkEntry) !void {
     var payload: [64 * 1024]u8 = undefined;
     var random = std.Random.DefaultPrng.init(123);
     random.random().bytes(&payload);
@@ -180,17 +190,17 @@ fn pressure(a: *network.NetworkCore, b: *network.NetworkCore, sinks: []u8, io: s
     var requests: [4]rr.RequestHandle = undefined;
     for (&requests, 0..) |*handle, i| {
         const protocol: rr.Protocol = if (i < 2) .blocks_by_range_v2 else .blocks_by_root_v2;
-        handle.* = try a.sendReqRespRequest(peer, protocol, request[0..if (i < 2) 24 else 32], sinks[i * sink_size ..][0..sink_size], .{ .expected_chunks = 1 }, try network.transport.currentTime(io));
+        handle.* = try a.sendReqRespRequest(&b.peerId(), protocol, request[0..if (i < 2) 24 else 32], sinks[i * sink_size ..][0..sink_size], .{ .expected_chunks = 1 }, try network.transport.currentTime(io));
     }
     var status = b.localState().status;
     status.head_slot = 42;
-    try b.updateStatus(&status, try network.transport.currentTime(io));
-    a.reStatusPeers(try network.transport.currentTime(io));
+    try b.updateStatus(&status);
+    _ = a.reStatusPeer(&b.peerId(), try network.transport.currentTime(io));
     var samples: Samples = .{};
     for (0..turns) |i| {
         if (i < 256) {
             std.mem.writeInt(u64, payload[0..8], i, .little);
-            const published = try a.publishGossip(topic, &payload, try network.transport.currentTime(io));
+            const published = try a.publishGossipWithOptions(topic, &payload, .{}, try network.transport.currentTime(io));
             gossip_queued += published.queued;
             gossip_pressured += published.pressured;
         }
@@ -215,7 +225,7 @@ fn pressure(a: *network.NetworkCore, b: *network.NetworkCore, sinks: []u8, io: s
     if (gossip_queued == 0 or handle_count == 0 or peak_validations == 0) return error.GossipDidNotDeliver;
     var rows: [4]t.Snapshot = undefined;
     var control_progress = false;
-    for (rows[0..a.snapshots(&rows)]) |row| {
+    for (rows[0..a.peer_manager.snapshots(&rows)]) |row| {
         if (row.status) |remote| if (remote.head_slot == 42) {
             control_progress = true;
         };

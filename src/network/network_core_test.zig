@@ -90,7 +90,7 @@ test "managed maintenance isolates slow peers and full application capacity" {
         std.testing.allocator.free(sinks);
     }
     const calls = hub.reservations.allocation_calls;
-    for (0..2) |index| _ = try hub.sendReqRespRequest(slow, .blocks_by_root_v2, &([_]u8{1} ** 32), sinks[index * size ..][0..size], .{}, hub.last_now);
+    for (0..2) |index| _ = try hub.sendReqRespRequest(&fixture.nodes[1].peerId(), .blocks_by_root_v2, &([_]u8{1} ** 32), sinks[index * size ..][0..size], .{}, hub.last_now);
     for (0..11) |_| _ = try hub.service.router.beginMeshsub(&hub.transport.engine, conn, hub.last_now);
     try std.testing.expectError(error.NegotiationTableFull, hub.service.router.beginMeshsub(&hub.transport.engine, conn, hub.last_now));
     var status = healthy.localState().status;
@@ -301,9 +301,9 @@ fn applicationAndFork(a: *runtime.NetworkCore, b: *runtime.NetworkCore) !void {
     var handles: [4]rr.RequestHandle = undefined;
     for (&handles, 0..) |*handle, i| {
         const protocol: rr.Protocol = if (i < 2) .blocks_by_range_v2 else .blocks_by_root_v2;
-        handle.* = try a.sendReqRespRequest(peer_a.?, protocol, if (i < 2) &request else &([_]u8{0} ** 32), sinks[i * sink_size ..][0..sink_size], .{ .expected_chunks = 1 }, now);
+        handle.* = try a.sendReqRespRequest(&b.peerId(), protocol, if (i < 2) &request else &([_]u8{0} ** 32), sinks[i * sink_size ..][0..sink_size], .{ .expected_chunks = 1 }, now);
     }
-    try std.testing.expectError(error.TooManyRequests, a.sendReqRespRequest(peer_a.?, .blocks_by_range_v2, &request, sinks[0..sink_size], .{}, now));
+    try std.testing.expectError(error.TooManyRequests, a.sendReqRespRequest(&b.peerId(), .blocks_by_range_v2, &request, sinks[0..sink_size], .{}, now));
     a.peer_manager.reStatusPeers(now);
     b.peer_manager.reStatusPeers(now);
     for (0..20) |_| {
@@ -654,7 +654,7 @@ fn failureAndReplacement(a: *runtime.NetworkCore, b: *runtime.NetworkCore) !void
         target = snapshot.peer;
     };
     const now = try @import("transport.zig").currentTime(std.testing.io);
-    try std.testing.expectEqual(t.ReputationDecision.ban, a.reportPeer(target.?, .fatal, now).?);
+    try std.testing.expectEqual(t.ReputationDecision.ban, a.reportPeer(&a.peer_manager.catalog.get(target.?).?.identity, .fatal, now).?);
     var faults: FaultIo = .{ .receive = .{ .socket = a.transport.udp.sockets.primary().handle } };
     faults.init(std.testing.io);
     defer faults.deinit();
@@ -1308,7 +1308,7 @@ test "managed runtime targeted Status serves two current schedules and immediate
     a.peer_manager.control.schedules[other.peer.index].status_due_ms = now.mono_ms;
     const unselected = a.peer_manager.control.schedules[other.peer.index];
     const before = a.peer_manager.control.schedules[selected.peer.index];
-    try std.testing.expect(a.reStatusPeer(selected.peer, selected.connection.?, now));
+    try std.testing.expect(a.reStatusPeer(&selected.identity, now));
     var expected = before;
     expected.status_due_ms = now.mono_ms;
     try std.testing.expectEqualDeep(expected, a.peer_manager.control.schedules[selected.peer.index]);
@@ -1321,8 +1321,8 @@ test "managed runtime targeted Status serves two current schedules and immediate
     };
     try std.testing.expectEqual(@as(usize, 2), status_started);
     try std.testing.expectEqual(before.identify_state, a.peer_manager.control.schedules[selected.peer.index].identify_state);
-    try std.testing.expect(a.closePeer(selected.peer, selected.connection.?, now));
-    try std.testing.expect(!a.reStatusPeer(selected.peer, selected.connection.?, now));
+    try std.testing.expect(a.closePeer(&selected.identity, now));
+    try std.testing.expect(!a.reStatusPeer(&selected.identity, now));
     try std.testing.expectEqual(@as(u16, 1), a.peerCounts().connected);
     var direct: [2]t.PeerId = undefined;
     const owner: *const runtime.NetworkCore = &a;
@@ -1360,12 +1360,10 @@ fn recycledPeerOperations(a: *runtime.NetworkCore, b: *runtime.NetworkCore, c: *
     const selected = current orelse return error.ReplacementNotReady;
     try std.testing.expectEqual(previous.peer.index, selected.peer.index);
     try std.testing.expect(previous.peer.generation != selected.peer.generation);
-    try std.testing.expect(!a.closePeer(previous.peer, selected.connection.?, a.last_now));
-    try std.testing.expect(!a.reStatusPeer(previous.peer, selected.connection.?, a.last_now));
-    try std.testing.expect(!a.closePeer(selected.peer, previous.connection.?, a.last_now));
-    try std.testing.expect(!a.reStatusPeer(selected.peer, previous.connection.?, a.last_now));
+    try std.testing.expect(!a.closePeer(&previous.identity, a.last_now));
+    try std.testing.expect(!a.reStatusPeer(&previous.identity, a.last_now));
     try std.testing.expectEqualDeep(selected, a.peer_manager.catalog.get(selected.peer).?);
-    try std.testing.expect(a.closePeer(selected.peer, selected.connection.?, a.last_now));
+    try std.testing.expect(a.closePeer(&selected.identity, a.last_now));
 }
 
 test "managed runtime complete local intent rejects invalid last topic atomically" {
@@ -1711,13 +1709,12 @@ test "managed runtime local intent fork BPO announcements remembered peer and ev
     try std.testing.expect(announced and withdrawn);
     const borrowed_topic = gb.overlay.findTopic(bpo).?;
     try std.testing.expectEqual(@as(f64, 7), gb.peers.scores.topic_params[borrowed_topic].weight);
-    const peer = pair.a.peer_manager.catalog.find(&pair.b.peerId()).?;
     var request: [24]u8 = @splat(0);
     request[8] = 1;
     request[16] = 1;
     const sink = try std.testing.allocator.alloc(u8, @import("reqresp/root.zig").Protocol.blocks_by_range_v2.info().response_max);
     defer std.testing.allocator.free(sink);
-    _ = try pair.a.sendReqRespRequest(peer, .blocks_by_range_v2, &request, sink, .{}, pair.a.last_now);
+    _ = try pair.a.sendReqRespRequest(&pair.b.peerId(), .blocks_by_range_v2, &request, sink, .{}, pair.a.last_now);
     _ = try pair.a.publishGossipWithOptions(bpo, "borrowed gossip", .{}, pair.a.last_now);
     var got_request = false;
     var got_message = false;

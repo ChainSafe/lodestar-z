@@ -77,7 +77,7 @@ if (!isMainThread) {
     } finally {
       socket.close();
     }
-    assert.equal(incoming.peerId.length, 39);
+    assert.equal(incoming.peerId, remote.peerId);
     await runtime.close();
     await pending;
     console.log("live-worker-resources-released");
