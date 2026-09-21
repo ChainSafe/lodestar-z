@@ -17,8 +17,7 @@ pub const Descriptor = struct {
     bounds: []const f64 = &.{},
 };
 
-/// Collectors borrow one immutable context for the entire gather. Only descriptors are
-/// shared across instances; registration retains no pointers to live owner state.
+/// Collection runs on the state owner. Registration retains only static descriptors.
 pub fn Registry(comptime Context: type, comptime collectors: anytype) type {
     std.debug.assert(collectors.len > 0 and collectors.len <= 32);
     return struct {

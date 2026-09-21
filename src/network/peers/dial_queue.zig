@@ -33,6 +33,8 @@ pub const Hints = struct {
         return true;
     }
 };
+pub const Source = enum { discovery, manual, direct };
+
 const Row = struct {
     automatic: bool = false,
     selected: bool = true,
@@ -68,6 +70,7 @@ pub const DialQueue = struct {
     custody_cursor: usize = 0,
     random: std.Random.DefaultPrng,
     counters: Counters = .{},
+    selected_attempts: [std.meta.fields(Source).len]u64 = @splat(0),
     durations: [2]DialTime = @splat(.{}),
 
     pub const Counters = struct {
@@ -586,6 +589,7 @@ pub const DialQueue = struct {
             const row = &self.rows[index];
             row.generation += 1;
             row.attempt = true;
+            self.selected_attempts[dialTier(row, now_ms)] +|= 1;
             row.attempt_started_ms = now_ms;
             row.lease_expires_at_ms = if (row.direct or row.automatic) now_ms +| 10_000 else @min(row.manual_until_ms, now_ms +| 10_000);
             out[count] = .{

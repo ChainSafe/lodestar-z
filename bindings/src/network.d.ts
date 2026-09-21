@@ -195,6 +195,7 @@ export interface NativeRuntimeDiagnostics {
   liveBridgeRequestedBytes: number;
   operationBytes: number;
   typedStoreBytes: number;
+  metricsExportBytes: number;
   peerLaneBytes: number;
   ownerShellBytes: number;
   ownerAllocationBytes: number;
@@ -315,7 +316,7 @@ export interface NativePeerBatch {
 export interface NativeNetworkApplicationRuntime {
   drainLogs(maxRecords?: number): NativeLogBatch;
   setLogLevel(level: NativeLogLevel): void;
-  /** Prometheus text from an owner snapshot refreshed at most once per second. Counters survive close. */
+  /** Prometheus text rendered by the network owner once per second. Counters survive close. */
   getMetrics(): string;
   readonly closed: Promise<NativeRuntimeCloseResult>;
   /** Copies work within host credits, up to 64 messages/16 MiB. Processor plans also apply kind and ordinary scheduling gates. */

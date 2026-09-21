@@ -21,6 +21,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Handle = engine_mod.Handle;
 const Now = types.Now;
+const timing = @import("../metrics/timing.zig");
 const Sessions = sessions_mod.Sessions;
 
 pub const Options = @import("options.zig").Options;
@@ -103,6 +104,9 @@ pub const Gossipsub = struct {
     /// The sink and its context must outlive every pump that uses them.
     message_sink: ?*const MessageSink = null,
     cycle: @import("heartbeat_cycle.zig").Cycle = .{},
+    metrics_io: std.Io = std.Io.Threaded.global_single_threaded.io(),
+    maintenance: timing.Gossip = .{},
+    retired_queue_drops: [@import("outbox.zig").drop_reason_count]u64 = @splat(0),
     overlay: *overlay_mod.Overlay,
     heartbeat_at: u64 = 0,
     opportunistic_at: u64 = 0,
@@ -338,6 +342,8 @@ pub const Gossipsub = struct {
         self.overlay.peerDisconnected(&context, index);
         const ref = self.logical(index);
         self.peers.disconnect(ref, self.last_now_ms);
+        for (&self.retired_queue_drops, self.sessions.rows[index].io.tx.drops) |*total, value| total.* +|= value;
+        self.sessions.rows[index].io.tx.drops = @splat(0);
         self.sessions.removePeer(index);
     }
 
@@ -464,7 +470,11 @@ pub const Gossipsub = struct {
         if (self.heartbeat_at == 0) {
             self.heartbeat_at = now.mono_ms +| self.options.heartbeat_interval_ms;
         } else if (now.mono_ms >= self.heartbeat_at) {
+            const start = timing.now(self.metrics_io);
+            self.maintenance.lateness.observe((now.mono_ms - self.heartbeat_at) *| 1_000_000);
+            if (!self.cycle.isActive()) self.maintenance.started_ns = start;
             self.heartbeat(now);
+            self.maintenance.setup.observe(timing.now(self.metrics_io) -| start);
             self.heartbeat_at = now.mono_ms +| self.options.heartbeat_interval_ms;
         }
     }
@@ -567,10 +577,11 @@ pub const Gossipsub = struct {
         for (self.overlay.rows) |topic| {
             if (!topic.active) continue;
             for (0..self.sessions.rows.len) |peer| {
-                if (topic.subscribers.isSet(peer)) result.remote_subscriptions += 1;
+                if (self.overlay.namespace == null and topic.subscribers.isSet(peer)) result.remote_subscriptions += 1;
                 if (topic.mesh.isSet(peer)) result.mesh_members += 1;
             }
         }
+        if (self.overlay.namespace) |*ns| result.remote_subscriptions = ns.subscription_count;
         for (self.messages.store.entries) |entry| result.held_tx_retains += entry.tx;
         result.pending_validations = self.messages.stats().pending;
         return result;
@@ -589,6 +600,9 @@ pub const Gossipsub = struct {
     }
 
     pub fn maintainTopics(self: *Gossipsub, now: Now) void {
+        if (!self.cycle.isActive()) return;
+        const start = timing.now(self.metrics_io);
+        defer self.maintenance.topics.observe(timing.now(self.metrics_io) -| start);
         var serviced: usize = 0;
         for (0..constants.topics_cap) |_| {
             const index = self.cycle.next() orelse break;
@@ -604,7 +618,10 @@ pub const Gossipsub = struct {
             serviced += 1;
             if (serviced == self.options.topics_per_pump) break;
         }
-        if (self.cycle.complete()) |epoch| self.messages.history.age(&self.messages.store, epoch);
+        if (self.cycle.complete()) |epoch| {
+            self.messages.history.age(&self.messages.store, epoch);
+            self.maintenance.completed(timing.now(self.metrics_io), std.Io.Timestamp.now(self.metrics_io, .real).toSeconds());
+        }
     }
 
     fn emitGossip(self: *Gossipsub, topic: u16, context: *const overlay_mod.Context) void {
@@ -695,7 +712,7 @@ pub const Gossipsub = struct {
         self.peers.rows[self.logical(index).index].direct = true;
         const context = self.overlayContext(self.last_now_ms);
         for (&self.overlay.rows, 0..) |*topic, t| {
-            if (topic.mesh.isSet(index)) self.overlay.prune(&context, @intCast(t), index, constants.prune_backoff_ms);
+            if (topic.mesh.isSet(index)) self.overlay.prune(&context, @intCast(t), index, constants.prune_backoff_ms, .direct);
             topic.fanout.unset(index);
         }
     }

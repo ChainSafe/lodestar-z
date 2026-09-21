@@ -165,7 +165,7 @@ test.each([
           /gossipsub_msg_publish_bytes_total\{topic="beacon_block"\} [1-9][0-9]*\n/
         );
         expect(await pair.left.getMetrics()).toContain(
-          `lodestar_gossip_topic_peers_by_type_count{type="beacon_block",boundary="${Buffer.from(requestForks[0].digest).toString("hex")}"} 1\n`
+          `lodestar_gossip_topic_peers_by_type_count{type="beacon_block",boundary="${requestForks[0].fork}_0"} 1\n`
         );
       },
       {timeout: 5000}
@@ -320,7 +320,7 @@ test.skipIf(!faultApi.networkTestFail)(
 test("gossip byte refusal preserves both accepted request directions and real control progress", async () => {
   const maxPayload = 10 * 1024 * 1024;
   const decodedArena = 32 + maxPayload + Math.floor(maxPayload / 6) + 4096;
-  const pair = await gossipPair(30000n, 34 * 1024 * 1024 + decodedArena);
+  const pair = await gossipPair(30000n, 37 * 1024 * 1024 + decodedArena);
   try {
     const outgoing = pair.right.request(pair.identity.peerId, BLOCKS, new Uint8Array(32));
     const outboundPull = outgoing.next();

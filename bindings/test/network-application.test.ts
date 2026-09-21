@@ -499,7 +499,9 @@ test("closed facade releases heavy native and typed storage", async () => {
   expect(after.liveNativeRequestedBytes).toBe(0);
   expect(after.typedStoreBytes).toBe(0);
   expect(after.operationOccupied).toBe(0);
-  expect(after.liveBridgeRequestedBytes).toBe(after.ownerShellBytes + after.peerLaneBytes);
+  expect(after.metricsExportBytes).toBe(before.metricsExportBytes / 2);
+  expect(Buffer.byteLength(runtime.getMetrics())).toBeLessThan(after.metricsExportBytes);
+  expect(after.liveBridgeRequestedBytes).toBe(after.ownerShellBytes + after.peerLaneBytes + after.metricsExportBytes);
   expect(after.liveBridgeRequestedBytes).toBeLessThan(before.liveBridgeRequestedBytes);
   console.log("application small memory", {after, before});
 });

@@ -129,15 +129,27 @@ test "topic namespace exact bitmap capacity clears and isolates physical rows" {
         try std.testing.expectEqual(ledger.bytes, ns.allocatedBytes());
         ns.setSubscription(0, case.count - 1, true);
         ns.setSubscription(255, case.count - 1, true);
+        ns.setSubscription(255, case.count - 1, true);
+        try std.testing.expectEqual(@as(u16, 2), ns.subscriber_counts[case.count - 1]);
+        try std.testing.expectEqual(@as(usize, 2), ns.subscription_count);
         try std.testing.expect(ns.subscribed(0, case.count - 1));
         try std.testing.expect(!ns.subscribed(1, case.count - 1));
         var subscribers: @import("sessions.zig").PeerSet = .initEmpty();
         ns.initializeSubscribers(case.count - 1, &subscribers);
         try std.testing.expectEqual(@as(usize, 2), subscribers.count());
         ns.clearPeer(0);
+        ns.clearPeer(0);
+        try std.testing.expectEqual(@as(u16, 1), ns.subscriber_counts[case.count - 1]);
+        try std.testing.expectEqual(@as(usize, 1), ns.subscription_count);
         try std.testing.expect(!ns.subscribed(0, case.count - 1));
         try std.testing.expect(ns.subscribed(255, case.count - 1));
         ns.setSubscription(255, case.count - 1, false);
+        ns.setSubscription(255, case.count - 1, false);
+        try std.testing.expectEqual(@as(u16, 0), ns.subscriber_counts[case.count - 1]);
+        try std.testing.expectEqual(@as(usize, 0), ns.subscription_count);
+        ns.setSubscription(0, case.count - 1, true);
+        ns.clearPeer(0);
+        try std.testing.expectEqual(@as(usize, 0), ns.subscription_count);
         ns.initializeSubscribers(case.count - 1, &subscribers);
         try std.testing.expectEqual(@as(usize, 0), subscribers.count());
         ns.deinit(ledger.allocator());
@@ -150,4 +162,35 @@ fn allocationFailure(a: std.mem.Allocator) !void {
     const boundaries = hoodi();
     var ns = try root.topic_policy.Namespace.init(a, &boundaries, 3);
     defer ns.deinit(a);
+}
+
+test "topic namespace metrics agree with the subscription matrix after mixed updates and peer reuse" {
+    var ns = try root.topic_policy.Namespace.init(std.testing.allocator, &.{ full(@splat(0)), full(@splat(1)) }, 4);
+    defer ns.deinit(std.testing.allocator);
+    for (0..ns.connected_capacity) |peer| {
+        for (0..ns.topic_count) |ordinal| {
+            ns.setSubscription(@intCast(peer), @intCast(ordinal), ordinal % 5 <= peer);
+        }
+    }
+    try expectSubscriptionCounts(&ns);
+    ns.clearPeer(1);
+    ns.clearPeer(1);
+    for (0..ns.topic_count) |ordinal| ns.setSubscription(0, @intCast(ordinal), false);
+    try expectSubscriptionCounts(&ns);
+    for (0..ns.topic_count) |ordinal| {
+        ns.setSubscription(1, @intCast(ordinal), true);
+        ns.setSubscription(1, @intCast(ordinal), true);
+    }
+    try expectSubscriptionCounts(&ns);
+}
+
+fn expectSubscriptionCounts(ns: *const root.topic_policy.Namespace) !void {
+    var total: usize = 0;
+    for (0..ns.topic_count) |ordinal| {
+        var count: u16 = 0;
+        for (0..ns.connected_capacity) |peer| count += @intFromBool(ns.subscribed(@intCast(peer), @intCast(ordinal)));
+        try std.testing.expectEqual(count, ns.subscriber_counts[ordinal]);
+        total += count;
+    }
+    try std.testing.expectEqual(total, ns.subscription_count);
 }

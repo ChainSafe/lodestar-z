@@ -2,24 +2,24 @@ const std = @import("std");
 const catalog = @import("../peers/catalog.zig");
 const client = @import("../peers/client.zig");
 const prom = @import("registry.zig");
-const Distribution = @import("histogram.zig").Distribution;
+const Histogram = @import("histogram.zig").Distribution;
 const client_count = @typeInfo(client.Client).@"enum".fields.len;
-const AppScore = Distribution(&.{ -100, -50, -20, 0, 25 });
-const GossipScore = Distribution(&.{ -16000, -8000, -4000, -1000, 0, 5, 100 });
+const AppScore = Histogram(&.{ -100, -50, -20, 0, 25 });
+const GossipScore = Histogram(&.{ -16000, -8000, -4000, -1000, 0, 5, 100 });
 
-pub const Snapshot = struct {
+pub const Distribution = struct {
     app_scores: [client_count]AppScore = @splat(.{}),
     gossip_scores: [client_count]GossipScore = @splat(.{}),
     directions: [client_count][2]u16 = @splat(@splat(0)),
-    ages: Distribution(&.{ 5, 20, 60, 180, 600, 1200, 3600, 21600, 86400 }) = .{},
-    attnets: Distribution(&.{ 0, 4, 16, 32, 64 }) = .{},
-    custody: Distribution(&.{ 0, 4, 8, 16, 32, 64, 128 }) = .{},
+    ages: Histogram(&.{ 5, 20, 60, 180, 600, 1200, 3600, 21600, 86400 }) = .{},
+    attnets: Histogram(&.{ 0, 4, 16, 32, 64 }) = .{},
+    custody: Histogram(&.{ 0, 4, 8, 16, 32, 64, 128 }) = .{},
     metadata: u16 = 0,
     custody_metadata: u16 = 0,
     identified: u16 = 0,
     closing: u16 = 0,
 
-    pub fn observe(self: *Snapshot, row: *const catalog.Row, kind: client.Client, now_ms: u64) void {
+    pub fn observe(self: *Distribution, row: *const catalog.Row, kind: client.Client, now_ms: u64) void {
         std.debug.assert(row.connection != null);
         const index = @intFromEnum(kind);
         self.directions[index][@intFromEnum(row.direction)] += 1;
@@ -41,12 +41,12 @@ pub const Snapshot = struct {
         self.custody.observe(@floatFromInt(custody));
     }
 
-    pub fn clientCount(self: *const Snapshot, kind: client.Client) u16 {
+    pub fn clientCount(self: *const Distribution, kind: client.Client) u16 {
         const counts = self.directions[@intFromEnum(kind)];
         return counts[0] + counts[1];
     }
 
-    pub fn directionCounts(self: *const Snapshot) [2]u16 {
+    pub fn directionCounts(self: *const Distribution) [2]u16 {
         var counts: [2]u16 = @splat(0);
         for (self.directions) |row| for (&counts, row) |*total, count| {
             total.* += count;
@@ -54,13 +54,13 @@ pub const Snapshot = struct {
         return counts;
     }
 
-    pub fn directionCount(self: *const Snapshot, direction: @import("../types.zig").Direction) u16 {
+    pub fn directionCount(self: *const Distribution, direction: @import("../types.zig").Direction) u16 {
         return self.directionCounts()[@intFromEnum(direction)];
     }
 
-    pub fn write(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
+    pub fn write(self: *const Distribution, w: *prom.Encoder) prom.Error!void {
         inline for (.{
-            .{ "lodestar_peer_connection_seconds", "ages", "Current connection ages in seconds; rebuilt each snapshot", prom.Unit.seconds },
+            .{ "lodestar_peer_connection_seconds", "ages", "Current connection ages in seconds; collected from the current population", prom.Unit.seconds },
             .{ "lodestar_peer_long_lived_attnets_count", "attnets", "Current connected peer attnet counts; unavailable metadata counts as zero", prom.Unit.scalar },
             .{ "lodestar_peer_column_group_count", "custody", "Current advertised custody group counts; unavailable metadata counts as zero", prom.Unit.scalar },
         }) |metric| {
@@ -80,7 +80,7 @@ pub const Snapshot = struct {
             const scores = try w.histograms(.{
                 .name = metric[0],
                 .kind = .histogram,
-                .help = "Current connected peer scores; rebuilt each snapshot",
+                .help = "Current connected peer scores; collected from the current population",
                 .labels = &.{"client"},
                 .unit = .scalar,
             }, @TypeOf(@field(self, metric[1])[0]));

@@ -75,6 +75,8 @@ pub const Plan = struct {
             }
             result.forks[result.supported_count] = .{ .fork = fork.fork_seq, .digest = digest };
             result.topics[result.supported_count] = try topicBoundary(chain, fork.fork_seq, digest);
+            result.topics[result.supported_count].fork = fork.fork_seq;
+            result.topics[result.supported_count].epoch = epoch;
             result.supported_count += 1;
             if (fork.fork_seq == .phase0) result.phase0_digest = digest;
         }

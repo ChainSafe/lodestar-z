@@ -58,8 +58,6 @@ const inline_test_allowlist = [_][]const u8{
     "src/network/gossipsub/overlay.zig",
     // Private score counters: PeerScore.tc.
     "src/network/gossipsub/score.zig",
-    // Private resource projection: Snapshot.collectGossipResources.
-    "src/network/metrics/snapshot.zig",
     // Private conversion of the bounded poll timeout: receiveTimeout.
     "src/network/transport.zig",
     // Private helper: compatibleUnionOptionsAreCompatible.

@@ -1,4 +1,4 @@
-const Snapshot = @import("scores.zig").Snapshot;
+const Distribution = @import("scores.zig").Distribution;
 const TopicKinds = @import("scores.zig").TopicKinds;
 const policy = @import("../gossipsub/topic_policy.zig");
 const prom = @import("registry.zig");
@@ -6,7 +6,7 @@ const score = @import("../gossipsub/score.zig");
 const std = @import("std");
 
 test "score gauges include inclusive thresholds, negative-only populations and empty peers" {
-    var snapshot: Snapshot = .{};
+    var snapshot: Distribution = .{};
     const params: score.Params = .{};
     try std.testing.expectEqual(@as(f64, 0), snapshot.average());
     snapshot.observe(-16000, &params);
@@ -23,7 +23,7 @@ test "score gauges include inclusive thresholds, negative-only populations and e
 }
 
 test "metrics score weights sum subnet contributions before averaging peers" {
-    var values: Snapshot = .{};
+    var values: Distribution = .{};
     var details: score.Breakdown = .{};
     var kinds: TopicKinds = @splat(null);
     kinds[0] = @intFromEnum(policy.Kind.beacon_attestation);

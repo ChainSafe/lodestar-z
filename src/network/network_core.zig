@@ -208,6 +208,8 @@ pub const NetworkCore = struct {
         self.peer_manager = try manager.PeerManager.init(allocator, &self.transport.peerId(), &local, managed.peerOptions(options.core), &self.service);
         errdefer self.peer_manager.deinit();
         if (self.service.identify) |*identify| identify.bind(&self.transport.engine);
+        self.peer_manager.metrics_io = io;
+        self.service.gossipsub.metrics_io = io;
         self.memory.peer_bytes = self.peer_manager.memoryPlan().allocated_bytes;
         self.memory.service_bytes = self.service.allocatedBytes();
         const event_capacity = @as(usize, options.transport.limits.connections_max) *
@@ -733,4 +735,5 @@ fn defaultEndpoints(quic: [2]?t.Address, udp: *const @import("udp").Sockets) err
 
 test {
     _ = @import("network_core_test.zig");
+    _ = @import("network_core_metrics_test.zig");
 }

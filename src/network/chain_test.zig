@@ -44,6 +44,12 @@ test "network chain resolves same epoch forks BPO contexts and clock identity" {
     try std.testing.expect(!std.mem.eql(u8, &fulu.local.fork.digest, &bpo.local.fork.digest));
     try std.testing.expectEqual(fulu.local.fork.digest, plan.forks[2].digest);
     try std.testing.expectEqual(bpo.local.fork.digest, plan.forks[3].digest);
+    try std.testing.expectEqual(.deneb, plan.topics[0].fork.?);
+    try std.testing.expectEqual(@as(u64, 0), plan.topics[0].epoch);
+    try std.testing.expectEqual(.fulu, plan.topics[2].fork.?);
+    try std.testing.expectEqual(@as(u64, 3), plan.topics[2].epoch);
+    try std.testing.expectEqual(.fulu, plan.topics[3].fork.?);
+    try std.testing.expectEqual(@as(u64, 5), plan.topics[3].epoch);
     try std.testing.expectEqual(@as(u64, 8), bpo.schedule.next_epoch);
     try std.testing.expectError(error.UnsupportedNetworkFork, plan.update(local, null, 8 * preset.preset.SLOTS_PER_EPOCH));
     cfg = config.BeaconConfig.init(fixture(), @splat(2));

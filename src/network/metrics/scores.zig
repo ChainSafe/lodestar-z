@@ -29,7 +29,7 @@ pub const Range = struct {
     }
 };
 
-pub const Snapshot = struct {
+pub const Distribution = struct {
     values: Range = .{},
     weights: [kind_count][topic_fields.len]Range = @splat(@splat(.{})),
     global: [global_fields.len]Range = @splat(.{}),
@@ -39,7 +39,7 @@ pub const Snapshot = struct {
     gossip: u16 = 0,
     mesh: u16 = 0,
 
-    pub fn observe(self: *Snapshot, value: f64, params: *const score.Params) void {
+    pub fn observe(self: *Distribution, value: f64, params: *const score.Params) void {
         self.values.observe(value);
         self.graylist += @intFromBool(value >= params.graylist_threshold);
         self.publish += @intFromBool(value >= params.publish_threshold);
@@ -47,11 +47,11 @@ pub const Snapshot = struct {
         self.mesh += @intFromBool(value >= 0);
     }
 
-    pub fn average(self: *const Snapshot) f64 {
+    pub fn average(self: *const Distribution) f64 {
         return self.values.average();
     }
 
-    pub fn observeWeights(self: *Snapshot, details: *const score.Breakdown, kinds: *const TopicKinds) void {
+    pub fn observeWeights(self: *Distribution, details: *const score.Breakdown, kinds: *const TopicKinds) void {
         var totals: [kind_count][topic_fields.len]f64 = @splat(@splat(0));
         for (&details.topics, kinds) |*weights, kind| {
             const index = kind orelse continue;
@@ -63,7 +63,7 @@ pub const Snapshot = struct {
         inline for (global_fields, 0..) |field, p| self.global[p].observe(@field(details.global, field.name));
     }
 
-    pub fn write(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
+    pub fn write(self: *const Distribution, w: *prom.Encoder) prom.Error!void {
         inline for (.{ "min", "max", "avg" }) |stat| {
             const value = if (comptime std.mem.eql(u8, stat, "avg")) self.average() else @field(self.values, stat);
             try w.scalar(.{
@@ -113,41 +113,34 @@ fn kindName(index: usize) []const u8 {
     return if (index == policy.kind_count) "unknown" else @tagName(@as(policy.Kind, @enumFromInt(index)));
 }
 
-pub const Totals = struct {
-    calls: u64 = 0,
-    runs: u64 = 0,
-    cache_delta: score.CacheDelta = .{},
-    penalties: score.Penalties = .{},
-
-    pub fn write(self: *const Totals, w: *prom.Encoder) prom.Error!void {
-        try w.scalar(.{
-            .name = "gossipsub_score_fn_calls_total",
-            .kind = .counter,
-            .help = "Policy score calls, excluding telemetry snapshots",
-        }, self.calls);
-        try w.scalar(.{
-            .name = "gossipsub_score_fn_runs_total",
-            .kind = .counter,
-            .help = "Policy score calculations that did not use the cache",
-        }, self.runs);
-        const cache_delta = try w.histograms(.{
-            .name = "gossipsub_score_cache_delta",
-            .kind = .histogram,
-            .help = "Absolute change from the previous cached score for the same peer identity",
-            .labels = &.{},
-            .unit = .scalar,
-        }, @TypeOf(self.cache_delta));
-        try cache_delta.histogram(.{}, &self.cache_delta);
-        const penalties = try w.family(.{
-            .name = "gossipsub_scoring_penalties_total",
-            .kind = .counter,
-            .help = "Score penalty events; message deficits count retained mesh-failure penalties on prune",
-            .labels = &.{"penalty"},
-        });
-        inline for (std.meta.fields(score.Penalties)) |field|
-            try penalties.sample(.{field.name}, @field(self.penalties, field.name));
-    }
-};
+pub fn writeTotals(self: *const score.PeerScore, w: *prom.Encoder) prom.Error!void {
+    try w.scalar(.{
+        .name = "gossipsub_score_fn_calls_total",
+        .kind = .counter,
+        .help = "Policy score calls, excluding telemetry snapshots",
+    }, self.calls);
+    try w.scalar(.{
+        .name = "gossipsub_score_fn_runs_total",
+        .kind = .counter,
+        .help = "Policy score calculations that did not use the cache",
+    }, self.calculations);
+    const cache_delta = try w.histograms(.{
+        .name = "gossipsub_score_cache_delta",
+        .kind = .histogram,
+        .help = "Absolute change from the previous cached score for the same peer identity",
+        .labels = &.{},
+        .unit = .scalar,
+    }, @TypeOf(self.cache_delta));
+    try cache_delta.histogram(.{}, &self.cache_delta);
+    const penalties = try w.family(.{
+        .name = "gossipsub_scoring_penalties_total",
+        .kind = .counter,
+        .help = "Score penalty events; message deficits count retained mesh-failure penalties on prune",
+        .labels = &.{"penalty"},
+    });
+    inline for (std.meta.fields(score.Penalties)) |field|
+        try penalties.sample(.{field.name}, @field(self.penalties, field.name));
+}
 
 test {
     _ = @import("scores_test.zig");
