@@ -1,3 +1,4 @@
+const gossip_test = @import("test_support.zig");
 const std = @import("std");
 const c = @import("constants.zig");
 const score = @import("score.zig");
@@ -27,7 +28,6 @@ pub const Peer = struct {
     address: [16]u8,
     retain_until: u64,
     score: f64,
-    app_score: f64,
     behaviour: f64,
     weights: score.GlobalWeights,
     topics: [c.topics_cap]TopicScore = undefined,
@@ -69,7 +69,7 @@ pub fn capture(g: *const Gossipsub, cursor: u16, now: @import("../types.zig").No
         var weights: score.Breakdown = undefined;
         const total = g.peers.snapshotWeights(.{ .index = @intCast(index), .generation = row.generation }, now.mono_ms, &weights);
         const peer = &out.peers[out.peer_count];
-        peer.* = .{ .identity = row.identity, .connected = row.connection != null, .outbound_ready = if (session) |i| g.sessions.rows[i].outStream() != null else false, .address = row.address, .retain_until = row.retain_until, .score = total, .app_score = g.peers.scores.rows[index].app_score, .behaviour = g.peers.scores.rows[index].behaviour, .weights = weights.global };
+        peer.* = .{ .identity = row.identity, .connected = row.connection != null, .outbound_ready = if (session) |i| g.sessions.rows[i].outStream() != null else false, .address = row.address, .retain_until = row.retain_until, .score = total, .behaviour = g.peers.scores.rows[index].behaviour, .weights = weights.global };
         for (out.topics[0..out.topic_count]) |*known| {
             const counters = &g.peers.scores.topics[index * c.topics_cap + known.index];
             const member = if (session) |i| g.overlay.rows[known.index].mesh.isSet(i) else false;
@@ -84,10 +84,10 @@ pub fn capture(g: *const Gossipsub, cursor: u16, now: @import("../types.zig").No
 
 test "gossip diagnostic pages bound peers preserve scores and include empty meshes" {
     const a = std.testing.allocator;
-    var g = try Gossipsub.init(a, .{ .random_seed = 1, .connected_capacity = 10, .retained_capacity = 16, .retained_outbound_reserve = 1 });
+    var g = try gossip_test.init(a, .{ .random_seed = 1, .connected_capacity = 10, .retained_capacity = 16, .retained_outbound_reserve = 1 });
     defer g.deinit();
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
-    try std.testing.expect(g.subscribe(name));
+    try gossip_test.subscribe(&g, name);
     const t = g.overlay.findTopic(name).?;
     for (0..10) |i| {
         const peer = @import("test_support.zig").addPeer(&g, .{ .index = @intCast(i), .generation = 1 }, .v1_2).?;

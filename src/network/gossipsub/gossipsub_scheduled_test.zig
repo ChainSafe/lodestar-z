@@ -1,3 +1,4 @@
+const gossip_test = @import("test_support.zig");
 const std = @import("std");
 const gossip = @import("gossipsub.zig");
 const Service = @import("../service.zig").Service;
@@ -24,6 +25,7 @@ const Simulation = struct {
         errdefer for (self.nodes[0..initialized]) |*node| node.deinit();
         for (&self.nodes, 0..) |*node, i| {
             node.* = try Service.init(std.testing.allocator, .{ .reqresp = .{ .forks = &.{}, .peers = 4, .outbound_max = 1, .inbound_max = 1, .inbound_per_peer_max = 1 }, .router = .{ .negotiations_max = 4 }, .gossipsub = .{
+                .topic_policy = &.{@import("topic_fixture.zig").bytes(.{ 1, 2, 3, 4 })},
                 .random_seed = seed + i,
                 .connected_capacity = 2,
                 .retained_capacity = 4,
@@ -37,7 +39,7 @@ const Simulation = struct {
                 .body_buffer_bytes = 64,
             } });
             initialized += 1;
-            try std.testing.expect(node.gossipsub.subscribe(name));
+            try gossip_test.subscribe(node.gossipsub, name);
         }
         const connected = try support.connectPair(&self.pair);
         self.connections = .{ connected.client, connected.server };
@@ -147,9 +149,9 @@ test "gossip scheduler converges through pressure loss stream replacement and se
         sim.pair.server.closeStream(old_stream, 0);
         try sim.until(start + 1000);
         sim.pair.drop_to_server = false;
-        try std.testing.expect(sim.nodes[1].gossipsub.unsubscribe(name));
+        try gossip_test.unsubscribe(sim.nodes[1].gossipsub, name);
         try sim.until(start + 1100);
-        try std.testing.expect(sim.nodes[1].gossipsub.subscribe(name));
+        try gossip_test.subscribe(sim.nodes[1].gossipsub, name);
         const sender = sim.nodes[0].gossipsub.sessions;
         const sender_index = sender.findPeer(sim.connections[0]).?;
         const attempts = sim.nodes[0].gossipsub.counters.negotiation_started;

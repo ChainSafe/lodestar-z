@@ -1,3 +1,4 @@
+const gossip_test = @import("test_support.zig");
 const std = @import("std");
 const gossipsub = @import("gossipsub.zig");
 const topic_mod = @import("topic.zig");
@@ -21,8 +22,8 @@ test "gossipsub peers exchange subscriptions over the mesh streams" {
 
     var buf: [topic_mod.topic_max_len]u8 = undefined;
     const beacon_block = buildTopic("beacon_block", &buf);
-    try std.testing.expect(setup.shared.client.gossipsub.subscribe(beacon_block));
-    try std.testing.expect(setup.shared.server.gossipsub.subscribe(beacon_block));
+    try gossip_test.subscribe(setup.shared.client.gossipsub, beacon_block);
+    try gossip_test.subscribe(setup.shared.server.gossipsub, beacon_block);
 
     var client_saw = false;
     var server_saw = false;
@@ -60,8 +61,8 @@ test "gossipsub forms a mesh through the heartbeat" {
 
     var buf: [topic_mod.topic_max_len]u8 = undefined;
     const beacon_block = buildTopic("beacon_block", &buf);
-    try std.testing.expect(setup.shared.client.gossipsub.subscribe(beacon_block));
-    try std.testing.expect(setup.shared.server.gossipsub.subscribe(beacon_block));
+    try gossip_test.subscribe(setup.shared.client.gossipsub, beacon_block);
+    try gossip_test.subscribe(setup.shared.server.gossipsub, beacon_block);
 
     var rounds: usize = 0;
     while (rounds < 10) : (rounds += 1) try setup.pumpOnce();
@@ -82,8 +83,8 @@ test "gossipsub delivers a published message to a mesh peer" {
 
     var buf: [topic_mod.topic_max_len]u8 = undefined;
     const beacon_block = buildTopic("beacon_block", &buf);
-    try std.testing.expect(setup.shared.client.gossipsub.subscribe(beacon_block));
-    try std.testing.expect(setup.shared.server.gossipsub.subscribe(beacon_block));
+    try gossip_test.subscribe(setup.shared.client.gossipsub, beacon_block);
+    try gossip_test.subscribe(setup.shared.server.gossipsub, beacon_block);
 
     var rounds: usize = 0;
     while (rounds < 10) : (rounds += 1) try setup.pumpOnce();
@@ -120,8 +121,8 @@ test "gossipsub prunes a peer whose messages are rejected" {
 
     var buf: [topic_mod.topic_max_len]u8 = undefined;
     const beacon_block = buildTopic("beacon_block", &buf);
-    try std.testing.expect(setup.shared.client.gossipsub.subscribe(beacon_block));
-    try std.testing.expect(setup.shared.server.gossipsub.subscribe(beacon_block));
+    try gossip_test.subscribe(setup.shared.client.gossipsub, beacon_block);
+    try gossip_test.subscribe(setup.shared.server.gossipsub, beacon_block);
 
     var rounds: usize = 0;
     while (rounds < 10) : (rounds += 1) try setup.pumpOnce();
@@ -162,8 +163,8 @@ test "gossipsub credits first delivery only after the host accepts" {
 
     var buf: [topic_mod.topic_max_len]u8 = undefined;
     const beacon_block = buildTopic("beacon_block", &buf);
-    try std.testing.expect(setup.shared.client.gossipsub.subscribe(beacon_block));
-    try std.testing.expect(setup.shared.server.gossipsub.subscribe(beacon_block));
+    try gossip_test.subscribe(setup.shared.client.gossipsub, beacon_block);
+    try gossip_test.subscribe(setup.shared.server.gossipsub, beacon_block);
 
     var rounds: usize = 0;
     while (rounds < 10) : (rounds += 1) try setup.pumpOnce();
@@ -202,8 +203,8 @@ test "gossipsub receives a message larger than the per-peer body buffer" {
 
     var buf: [topic_mod.topic_max_len]u8 = undefined;
     const beacon_block = buildTopic("beacon_block", &buf);
-    try std.testing.expect(setup.shared.client.gossipsub.subscribe(beacon_block));
-    try std.testing.expect(setup.shared.server.gossipsub.subscribe(beacon_block));
+    try gossip_test.subscribe(setup.shared.client.gossipsub, beacon_block);
+    try gossip_test.subscribe(setup.shared.server.gossipsub, beacon_block);
 
     var rounds: usize = 0;
     while (rounds < 10) : (rounds += 1) try setup.pumpOnce();
@@ -324,8 +325,8 @@ test "gossipsub uses configured message IDs on publish and wire receive" {
         );
         defer setup.deinit();
         const topic = "/eth2/01020304/beacon_block/ssz_snappy";
-        try std.testing.expect(setup.shared.client.gossipsub.subscribe(topic));
-        try std.testing.expect(setup.shared.server.gossipsub.subscribe(topic));
+        try gossip_test.subscribe(setup.shared.client.gossipsub, topic);
+        try gossip_test.subscribe(setup.shared.server.gossipsub, topic);
         for (0..20) |_| try setup.pumpOnce();
         setup.shared.pair.advance(constants_heartbeat + 100);
         for (0..10) |_| try setup.pumpOnce();
@@ -365,13 +366,13 @@ test "gossipsub uses configured message IDs on publish and wire receive" {
 }
 
 test "gossipsub queues incompressible 64 KiB publish" {
-    var g = try Gossipsub.init(std.testing.allocator, .{
+    var g = try gossip_test.init(std.testing.allocator, .{
         .random_seed = 1,
     });
     defer g.deinit();
     const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const topic = "/eth2/01020304/beacon_block/ssz_snappy";
-    try std.testing.expect(g.subscribe(topic));
+    try gossip_test.subscribe(&g, topic);
     g.overlay.rows[g.overlay.findTopic(topic).?].mesh.set(peer.index);
     var payload: [65536]u8 = undefined;
     var rng = std.Random.DefaultPrng.init(42);
@@ -383,8 +384,8 @@ test "gossipsub queues incompressible 64 KiB publish" {
 const test_topic = "/eth2/01020304/beacon_block/ssz_snappy";
 
 fn connectMesh(setup: *Pair) !void {
-    try std.testing.expect(setup.shared.client.gossipsub.subscribe(test_topic));
-    try std.testing.expect(setup.shared.server.gossipsub.subscribe(test_topic));
+    try gossip_test.subscribe(setup.shared.client.gossipsub, test_topic);
+    try gossip_test.subscribe(setup.shared.server.gossipsub, test_topic);
     for (0..20) |_| try setup.pumpOnce();
     setup.shared.pair.advance(constants_heartbeat + 1);
     for (0..20) |_| try setup.pumpOnce();
@@ -488,8 +489,8 @@ test "gossipsub legal maximum IWANT response uses actual IO without mesh publish
     var setup: Pair = .{};
     try setup.init();
     defer setup.deinit();
-    try std.testing.expect(setup.shared.server.gossipsub.subscribe(test_topic));
-    try std.testing.expect(setup.shared.client.gossipsub.subscribe(test_topic));
+    try gossip_test.subscribe(setup.shared.server.gossipsub, test_topic);
+    try gossip_test.subscribe(setup.shared.client.gossipsub, test_topic);
     for (0..20) |_| try setup.pumpOnce();
     const payload = try std.testing.allocator.alloc(u8, @import("constants.zig").MAX_PAYLOAD_SIZE);
     defer std.testing.allocator.free(payload);
@@ -567,20 +568,21 @@ test "gossipsub holds multiple messages and unread RPCs under zero event pressur
 
 test "gossipsub subscription cursors synchronize all topics through small critical queues" {
     const topic_capacity = @import("constants.zig").topics_cap;
+    const topics = &@import("topic_fixture.zig").churn;
     var setup: Pair = .{};
-    try setup.initOpts(.{ .random_seed = 1, .critical_bytes = 256, .control_bytes = 64 }, .{ .random_seed = 1, .critical_bytes = 256, .control_bytes = 64 });
+    try setup.initOpts(.{ .random_seed = 1, .topic_policy = topics, .critical_bytes = 256, .control_bytes = 64 }, .{ .random_seed = 1, .topic_policy = topics, .critical_bytes = 256, .control_bytes = 64 });
     defer setup.deinit();
     var buf: [topic_mod.topic_max_len]u8 = undefined;
     for (0..topic_capacity) |i| {
-        const topic = try std.fmt.bufPrint(&buf, "/eth2/01020304/topic_{d}/ssz_snappy", .{i});
-        try std.testing.expect(setup.shared.client.gossipsub.subscribe(topic));
-        try std.testing.expect(setup.shared.server.gossipsub.subscribe(topic));
+        const topic = try @import("topic_fixture.zig").churnTopic(i, &buf);
+        try gossip_test.subscribe(setup.shared.client.gossipsub, topic);
+        try gossip_test.subscribe(setup.shared.server.gossipsub, topic);
     }
     var received: usize = 0;
     for (0..128) |_| {
         try setup.pumpOnce();
         for (setup.serverEvents()) |event| if (event == .subscription_change) {
-            const expected = try std.fmt.bufPrint(&buf, "/eth2/01020304/topic_{d}/ssz_snappy", .{received});
+            const expected = try @import("topic_fixture.zig").churnTopic(received, &buf);
             try std.testing.expectEqualStrings(expected, event.subscription_change.topic);
             received += 1;
         };
@@ -595,8 +597,9 @@ test "gossipsub subscription cursors synchronize all topics through small critic
     for (0..128) |_| {
         try setup.pumpOnce();
         for (setup.serverEvents()) |event| if (event == .subscription_change) {
-            const parsed = topic_mod.parse(event.subscription_change.topic).?;
-            const number = try std.fmt.parseInt(usize, parsed.name[6..], 10);
+            const parsed = topic_mod.parseCanonical(event.subscription_change.topic).?;
+            const number = @as(usize, if (parsed.digest[0] == 1) 0 else 256) +
+                @as(usize, if (parsed.name.kind == .blob_sidecar) 0 else 128) + parsed.name.subnet;
             try std.testing.expect(number < topic_capacity and !seen.isSet(number));
             seen.set(number);
             received += 1;
@@ -662,7 +665,7 @@ test "gossipsub large frame deadline releases receive pages despite byte progres
     for (0..4) |_| try setup.pumpOnce();
     try std.testing.expect(setup.shared.server.gossipsub.sessions.rows[server_peer].io.reader.declaredLen() != null);
     try std.testing.expectEqual(@as(u32, 1), setup.shared.server.gossipsub.sessions.rows[server_peer].io.overflow.pages);
-    try std.testing.expect(setup.shared.client.gossipsub.subscribe(test_topic));
+    try gossip_test.subscribe(setup.shared.client.gossipsub, test_topic);
     setup.shared.client.gossipsub.overlay.rows[setup.shared.client.gossipsub.overlay.findTopic(test_topic).?].mesh.set(client_peer);
     _ = try setup.shared.client.gossipsub.publish(test_topic, "held transmit payload", setup.shared.pair.now);
     for (0..4) |_| try setup.pumpOnce();
@@ -900,21 +903,21 @@ test "gossipsub graylist refuses bulk reception and releases an idle partial fra
         var writer = @import("protobuf.zig").Writer.init(&wire);
         writer.varint(@import("constants.zig").GOSSIP_MAX_SIZE);
         writer.bytes(&([_]u8{0} ** 128));
-        if (!partial) try std.testing.expect(g.setPeerScore(row.conn, g.options.score_params.graylist_threshold - 1));
+        if (!partial) @import("test_support.zig").penalize(g, row.conn, 50);
         const before = g.rpc_metrics.received_bytes;
         try std.testing.expectEqual(writer.len, try setup.shared.pair.client.write(setup.clientStream(), writer.written(), false));
         for (0..8) |_| try setup.pumpOnce();
         if (partial) {
             try std.testing.expect(row.io.overflow.pages > 0);
             try std.testing.expect(!row.io.rx_ready);
-            try std.testing.expect(g.setPeerScore(row.conn, g.options.score_params.graylist_threshold - 1));
+            @import("test_support.zig").penalize(g, row.conn, 50);
             try setup.pumpOnce();
         } else try std.testing.expectEqual(before, g.rpc_metrics.received_bytes);
         try std.testing.expect(row.in_stream == null and row.io.rpc == null);
         try std.testing.expectEqual(g.sessions.receive_pool.next.len, g.sessions.receive_pool.free_pages);
         try std.testing.expectEqual(@as(u64, 1), g.rpc_metrics.graylist_dropped);
         try std.testing.expectEqual(@as(u64, 0), g.counters.malformed_rpcs);
-        try std.testing.expectEqual(@as(f64, 0), g.peers.scores.rows[row.logical.index].behaviour);
+        try std.testing.expectEqual(@as(f64, 50), g.peers.scores.rows[row.logical.index].behaviour);
     }
 }
 

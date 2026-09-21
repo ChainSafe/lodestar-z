@@ -1,3 +1,4 @@
+const gossip_test = @import("test_support.zig");
 const std = @import("std");
 const gossipsub = @import("gossipsub.zig");
 const service_mod = @import("../service.zig");
@@ -19,8 +20,8 @@ test "gossipsub service composes the mesh and delivers a message" {
 
     var buf: [topic_mod.topic_max_len]u8 = undefined;
     const beacon_block = topic_mod.build(digest, "beacon_block", &buf);
-    try std.testing.expect(setup.shared.client.gossipsub.subscribe(beacon_block));
-    try std.testing.expect(setup.shared.server.gossipsub.subscribe(beacon_block));
+    try gossip_test.subscribe(setup.shared.client.gossipsub, beacon_block);
+    try gossip_test.subscribe(setup.shared.server.gossipsub, beacon_block);
 
     var rounds: usize = 0;
     while (rounds < 10) : (rounds += 1) try setup.pumpOnce();
@@ -54,14 +55,14 @@ test "gossipsub service preserves coalesced negotiation subscription and FIN" {
     defer pair.deinit();
     var server = try Service.init(std.testing.allocator, .{
         .reqresp = .{ .forks = &.{}, .peers = 4, .outbound_max = 1, .inbound_max = 1, .inbound_per_peer_max = 1 },
-        .gossipsub = .{ .random_seed = 1 },
+        .gossipsub = .{ .random_seed = 1, .topic_policy = &.{@import("topic_fixture.zig").bytes(digest)} },
     });
     defer server.deinit();
     const handles = try support.connectPair(&pair);
     _ = server.gossipsub.peerConnected(&pair.server, handles.server, pair.now);
     var topic_buffer: [topic_mod.topic_max_len]u8 = undefined;
     const topic = topic_mod.build(digest, "beacon_block", &topic_buffer);
-    try std.testing.expect(server.gossipsub.subscribe(topic));
+    try gossip_test.subscribe(server.gossipsub, topic);
     const stream = try pair.client.openStream(handles.client);
     const multistream = @import("../wire/multistream.zig");
     const protobuf = @import("protobuf.zig");
@@ -121,8 +122,8 @@ test "gossipsub direct send timeout retries once after a bounded delay" {
         defer setup.deinit();
         const topic = "/eth2/6a95a1a9/beacon_block/ssz_snappy";
         const g = setup.shared.client.gossipsub;
-        try std.testing.expect(g.subscribe(topic));
-        try std.testing.expect(setup.shared.server.gossipsub.subscribe(topic));
+        try gossip_test.subscribe(g, topic);
+        try gossip_test.subscribe(setup.shared.server.gossipsub, topic);
         for (0..32) |_| try setup.pumpOnce();
         g.markDirect(setup.shared.handles.client);
         for (0..4) |_| try setup.pumpOnce();
@@ -191,7 +192,7 @@ test "gossipsub replacement resets a partial frame and keeps directional version
     defer setup.deinit();
     var topic_buf: [topic_mod.topic_max_len]u8 = undefined;
     const topic = topic_mod.build(digest, "beacon_block", &topic_buf);
-    try std.testing.expect(setup.shared.server.gossipsub.subscribe(topic));
+    try gossip_test.subscribe(setup.shared.server.gossipsub, topic);
     for (0..16) |_| try setup.pumpOnce();
     const index = setup.shared.server.gossipsub.sessions.findPeer(setup.shared.handles.server).?;
     const first = try propose(&setup.shared.pair, setup.shared.handles.client, "/meshsub/1.1.0", &.{ 0x80, 0x01, 0x08 });
@@ -238,7 +239,7 @@ test "gossipsub service subscribes only after negotiation and retirement cancels
     defer setup.deinit();
     setup.shared.client.gossipsub.options.pressure_timeout_ms = 5;
     const topic = "/eth2/6a95a1a9/beacon_block/ssz_snappy";
-    try std.testing.expect(setup.shared.client.gossipsub.subscribe(topic));
+    try gossip_test.subscribe(setup.shared.client.gossipsub, topic);
     _ = setup.shared.client.gossipsub.pump(&setup.shared.client.router, &setup.shared.pair.client, setup.shared.pair.now, &setup.client_events);
     const index = setup.shared.client.gossipsub.sessions.findPeer(setup.shared.handles.client).?;
     const session = &setup.shared.client.gossipsub.sessions.rows[index];
@@ -299,7 +300,7 @@ test "gossipsub service detects an idle stop and reopens only on a new inbound s
     defer setup.deinit();
     var topic_buffer: [topic_mod.topic_max_len]u8 = undefined;
     const topic = topic_mod.build(digest, "beacon_block", &topic_buffer);
-    try std.testing.expect(setup.shared.server.gossipsub.subscribe(topic));
+    try gossip_test.subscribe(setup.shared.server.gossipsub, topic);
     for (0..16) |_| try setup.pumpOnce();
     const client_index = setup.shared.client.gossipsub.sessions.findPeer(setup.shared.handles.client).?;
     const server_index = setup.shared.server.gossipsub.sessions.findPeer(setup.shared.handles.server).?;
@@ -324,7 +325,7 @@ test "gossipsub service detects an idle stop and reopens only on a new inbound s
     for (0..16) |_| try setup.pumpOnce();
     const replacement = setup.shared.client.gossipsub.sessions.outStream(client_index).?;
     try std.testing.expect(!std.meta.eql(first, replacement));
-    try std.testing.expect(setup.shared.client.gossipsub.subscribe(topic));
+    try gossip_test.subscribe(setup.shared.client.gossipsub, topic);
     var received = false;
     for (0..16) |_| {
         try setup.pumpOnce();
@@ -344,7 +345,7 @@ test "gossipsub service preserves a remotely half-closed outbound stream without
     defer setup.deinit();
     var topic_buffer: [topic_mod.topic_max_len]u8 = undefined;
     const topic = topic_mod.build(digest, "beacon_block", &topic_buffer);
-    try std.testing.expect(setup.shared.server.gossipsub.subscribe(topic));
+    try gossip_test.subscribe(setup.shared.server.gossipsub, topic);
     for (0..16) |_| try setup.pumpOnce();
     const client_index = setup.shared.client.gossipsub.sessions.findPeer(setup.shared.handles.client).?;
     const server_index = setup.shared.server.gossipsub.sessions.findPeer(setup.shared.handles.server).?;
@@ -361,7 +362,7 @@ test "gossipsub service preserves a remotely half-closed outbound stream without
         _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, &.{}, setup.shared.pair.now, .{ .gossipsub = &out });
         try std.testing.expect(!setup.shared.pair.client.takeHostWork());
     }
-    try std.testing.expect(setup.shared.client.gossipsub.subscribe(topic));
+    try gossip_test.subscribe(setup.shared.client.gossipsub, topic);
     var received = false;
     for (0..16) |_| {
         try setup.pumpOnce();
@@ -412,7 +413,7 @@ test "gossipsub negotiation timeout releases resources without creating a retry 
     try setup.init();
     defer setup.deinit();
     setup.shared.client.gossipsub.markDirect(setup.shared.handles.client);
-    try std.testing.expect(setup.shared.client.gossipsub.subscribe("/eth2/6a95a1a9/beacon_block/ssz_snappy"));
+    try gossip_test.subscribe(setup.shared.client.gossipsub, "/eth2/6a95a1a9/beacon_block/ssz_snappy");
     _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, &.{}, setup.shared.pair.now, .{ .gossipsub = &setup.client_events });
     setup.shared.pair.advance(@import("../negotiate.zig").negotiate_timeout_ms + 1);
     _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, &.{}, setup.shared.pair.now, .{ .gossipsub = &setup.client_events });
@@ -434,8 +435,8 @@ test "gossipsub PRUNE exhaustion closes gossip streams and leaves the transport 
     try setup.init();
     defer setup.deinit();
     const topic = "/eth2/6a95a1a9/beacon_block/ssz_snappy";
-    try std.testing.expect(setup.shared.client.gossipsub.subscribe(topic));
-    try std.testing.expect(setup.shared.server.gossipsub.subscribe(topic));
+    try gossip_test.subscribe(setup.shared.client.gossipsub, topic);
+    try gossip_test.subscribe(setup.shared.server.gossipsub, topic);
     for (0..32) |_| try setup.pumpOnce();
     const g = setup.shared.client.gossipsub;
     const index = g.sessions.findPeer(setup.shared.handles.client).?;

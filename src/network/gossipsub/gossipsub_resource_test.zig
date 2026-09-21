@@ -7,9 +7,9 @@ const options: gossip.Options = .{ .random_seed = 1, .connected_capacity = 3, .r
 
 test "gossip validation finishes without allocation while shared deliveries are full" {
     var allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    var g = try gossip.Gossipsub.init(allocator.allocator(), options);
+    var g = try support.init(allocator.allocator(), options);
     defer g.deinit();
-    try std.testing.expect(g.subscribe(name));
+    try support.subscribe(&g, name);
     const topic = g.overlay.findTopic(name).?;
     const message = g.messages.publish(@splat(1), name, "retained", 0, 0).?;
     for (0..3) |i| {
@@ -45,7 +45,7 @@ test "gossip validation finishes without allocation while shared deliveries are 
 }
 
 test "gossip recovery refusal restores promise slots and identity pins before returning" {
-    var g = try gossip.Gossipsub.init(std.testing.allocator, options);
+    var g = try support.init(std.testing.allocator, options);
     defer g.deinit();
     const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const row = &g.sessions.rows[peer.index];
@@ -73,9 +73,9 @@ test "gossip recovery refusal restores promise slots and identity pins before re
 test "gossip optional subscription observations do not consume validation event capacity" {
     var config = options;
     config.observe_subscriptions = false;
-    var g = try gossip.Gossipsub.init(std.testing.allocator, config);
+    var g = try support.init(std.testing.allocator, config);
     defer g.deinit();
-    try std.testing.expect(g.subscribe(name));
+    try support.subscribe(&g, name);
     const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     var turn = @import("session_io.zig").beginPump(&g, .{ .mono_ms = 1, .unix_s = 0 }, &.{});
     var credits = @import("turn.zig").Credits.peer(&g.options);

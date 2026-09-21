@@ -94,16 +94,17 @@ pub const Overlay = struct {
     pub fn internTopic(self: *Overlay, context: *const Context, validation_pins: *const local_intent.TopicSet, name: []const u8) ?u16 {
         if (!self.validTopic(name)) return null;
         if (self.findTopic(name)) |topic| return topic;
-        if (self.internVacant(name)) |topic| return self.initializeTopic(context, topic);
         const pins = retirementPins(context, validation_pins);
-        for (0..constants.topics_cap) |index| {
-            const topic: u16 = @intCast(index);
-            if (self.rows[topic].generation == std.math.maxInt(u64) or
-                !self.retirement(context, topic, &pins, context.now).reusable) continue;
-            for (0..constants.topics_cap) |reclaim| self.reclaimObserved(context, @intCast(reclaim), self.retirement(context, @intCast(reclaim), &pins, context.now));
-            return self.initializeTopic(context, self.internVacant(name) orelse unreachable);
-        }
-        return null;
+        var cursor: usize = 0;
+        const index = self.vacantRow(context, &pins, &.initEmpty(), &cursor, context.now) orelse return null;
+        var bytes: [topic_mod.topic_max_len]u8 = undefined;
+        const copied = bytes[0..name.len];
+        @memcpy(copied, name);
+        const row = &self.rows[index];
+        if (row.active) context.peers.scores.resetTopic(index);
+        row.active = false;
+        self.assignTopic(index, copied, row.generation);
+        return self.initializeTopic(context, index);
     }
 
     pub fn validTopic(self: *const Overlay, name: []const u8) bool {
@@ -147,6 +148,21 @@ pub const Overlay = struct {
             }
         }
         return .{ .blocked = false, .expired = expired, .reusable = (expired or !context.peers.scores.retainsTopic(topic)) and !backoff };
+    }
+
+    fn vacantRow(self: *const Overlay, context: *const Context, pins: *const local_intent.Pins, reserved: *const local_intent.TopicSet, cursor: *usize, now_ms: u64) ?u16 {
+        assert(cursor.* <= 2 * constants.topics_cap);
+        // Exhaust unused rows before reclaiming retained topic state.
+        while (cursor.* < 2 * constants.topics_cap) {
+            const reclaim = cursor.* >= constants.topics_cap;
+            const index: u16 = @intCast(cursor.* % constants.topics_cap);
+            cursor.* += 1;
+            const row = &self.rows[index];
+            if (row.active != reclaim or reserved.isSet(index) or row.generation == std.math.maxInt(u64)) continue;
+            if (reclaim and !self.retirement(context, index, pins, now_ms).reusable) continue;
+            return index;
+        }
+        return null;
     }
 
     fn reclaimObserved(self: *Overlay, context: *const Context, topic: u16, observed: Retirement) void {
@@ -224,16 +240,10 @@ pub const Overlay = struct {
         for (0..constants.topics_cap) |_| {
             const ordinal = desired.next() orelse break;
             changed = true;
-            const index = while (cursor < constants.topics_cap) : (cursor += 1) {
-                const row = &self.rows[cursor];
-                if (workspace.reserved.isSet(cursor) or row.generation == std.math.maxInt(u64)) continue;
-                if (row.active and !self.retirement(context, @intCast(cursor), &workspace.pins, workspace.now_ms).reusable) continue;
-                break cursor;
-            } else return error.TopicCapacity;
+            const index = self.vacantRow(context, &workspace.pins, &workspace.reserved, &cursor, workspace.now_ms) orelse return error.TopicCapacity;
             workspace.entries[workspace.len] = .{ .ordinal = @intCast(ordinal), .row = @intCast(index), .generation = self.rows[index].generation, .existing = false };
             workspace.len += 1;
             workspace.reserved.set(index);
-            cursor += 1;
         }
         assert(workspace.len == count);
         workspace.prepared = true;
@@ -263,18 +273,6 @@ pub const Overlay = struct {
             if (row.active and row.subscribed and !workspace.reserved.isSet(index)) self.setLocal(context, @intCast(index), false);
         }
     }
-    pub fn internVacant(self: *Overlay, topic_str: []const u8) ?u16 {
-        if (topic_str.len > topic_mod.topic_max_len) return null;
-        var copied_bytes: [topic_mod.topic_max_len]u8 = undefined;
-        const copied = copied_bytes[0..topic_str.len];
-        @memcpy(copied, topic_str);
-        _ = topic_mod.parse(copied) orelse return null;
-        if (self.findTopic(copied)) |index| return index;
-        const index = self.freeTopic() orelse return null;
-        self.assignTopic(@intCast(index), copied, self.rows[index].generation);
-        return @intCast(index);
-    }
-
     fn assignTopic(self: *Overlay, index: u16, copied: []const u8, generation: u64) void {
         assert(copied.len <= topic_mod.topic_max_len);
         const topic = &self.rows[index];
@@ -350,12 +348,6 @@ pub const Overlay = struct {
         return &self.rows[topic].fanout;
     }
 
-    fn freeTopic(self: *Overlay) ?usize {
-        for (&self.rows, 0..) |*topic, index| {
-            if (!topic.active and topic.generation != std.math.maxInt(u64)) return index;
-        }
-        return null;
-    }
     pub fn init(seed: u64) Overlay {
         return .{ .rng = std.Random.DefaultPrng.init(seed) };
     }

@@ -40,7 +40,6 @@ pub const TopicPolicy = struct {
 
 /// Global weights, thresholds, and decay cadence.
 pub const Params = struct {
-    app_weight: f64 = 1.0,
     ip_colocation_weight: f64 = 0,
     ip_colocation_threshold: u16 = 3,
     behaviour_weight: f64 = -10.0,
@@ -103,7 +102,6 @@ pub const PeerScore = struct {
     topic_params: [constants.topics_cap]TopicParams,
 
     pub const PeerState = struct {
-        app_score: f64 = 0,
         behaviour: f64 = 0,
         connected: bool = false,
         last_decay_ms: ?u64 = null,
@@ -205,15 +203,6 @@ pub const PeerScore = struct {
         self.rows[peer].behaviour = @min(counter_max, self.rows[peer].behaviour + amount);
     }
 
-    pub fn setAppScore(self: *PeerScore, peer: u16, value: f64) bool {
-        if (!safeMagnitude(value)) return false;
-        if (self.rows[peer].app_score == value) return true;
-        self.revision +|= 1;
-        self.rows[peer].dirty = true;
-        self.rows[peer].app_score = value;
-        return true;
-    }
-
     pub fn score(self: *PeerScore, peer: u16, now_ms: u64, ip_count: u16) f64 {
         assert(peer < self.rows.len);
         const row = &self.rows[peer];
@@ -294,8 +283,7 @@ pub const PeerScore = struct {
         if (self.params.topic_cap > 0 and total > self.params.topic_cap) {
             total = self.params.topic_cap;
         }
-        var global: GlobalWeights = .{ .p5 = self.params.app_weight * row.app_score };
-        total += global.p5;
+        var global: GlobalWeights = .{};
         if (row.behaviour > self.params.behaviour_threshold) {
             const excess = row.behaviour - self.params.behaviour_threshold;
             global.p7 = self.params.behaviour_weight * excess * excess;
@@ -480,7 +468,7 @@ test "score weight limit keeps worst case arithmetic finite" {
     const worst = score.score(0, 0, 0);
     try std.testing.expect(std.math.isFinite(worst) and worst < 0 and worst > -1e40);
     try std.testing.expectError(error.InvalidLimits, score.configureTopic(0, .{ .weight = weight_max + 1 }));
-    try std.testing.expectError(error.InvalidLimits, validateParams(.{ .app_weight = weight_max + 1 }));
+    try std.testing.expectError(error.InvalidLimits, validateParams(.{ .behaviour_weight = -weight_max - 1 }));
     try std.testing.expectError(error.InvalidLimits, validateParams(.{ .behaviour_threshold = counter_max + 1 }));
 }
 
@@ -577,7 +565,6 @@ test "gossip policy score matches independent libp2p 17.1.1 two topic oracle" {
     var ip_count: u16 = 0;
     var score = try testScores(std.testing.allocator, .{
         .topic_cap = 50,
-        .app_weight = 2,
         .ip_colocation_weight = -5,
         .ip_colocation_threshold = 3,
         .behaviour_weight = -3,
@@ -596,29 +583,25 @@ test "gossip policy score matches independent libp2p 17.1.1 two topic oracle" {
     try score.configureTopic(1, second);
     score.tc(0, 0).* = .{ .in_mesh = true, .graft_ms = 1, .first_deliveries = 4, .mesh_deliveries = 2, .mesh_failures = 1.5, .invalid = 2 };
     score.tc(0, 1).* = .{ .first_deliveries = 3, .mesh_failures = 2, .invalid = 1 };
-    try std.testing.expect(score.setAppScore(0, 7));
     score.penalize(0, 5);
     ip_count = 5;
-    try std.testing.expectEqual(@as(f64, -124), score.score(0, 40_001, ip_count));
+    try std.testing.expectEqual(@as(f64, -138), score.score(0, 40_001, ip_count));
     ip_count = 0;
-    try std.testing.expectEqual(@as(f64, -104), score.score(0, 40_001, ip_count));
+    try std.testing.expectEqual(@as(f64, -118), score.score(0, 40_001, ip_count));
     ip_count = 5;
     score.rows[0].behaviour = 2;
-    try std.testing.expectEqual(@as(f64, -97), score.score(0, 40_002, ip_count));
+    try std.testing.expectEqual(@as(f64, -111), score.score(0, 40_002, ip_count));
     score.tc(0, 0).* = .{ .first_deliveries = 20 };
     score.tc(0, 1).* = .{ .first_deliveries = 3 };
     ip_count = 0;
     score.rows[0].behaviour = 0;
-    try std.testing.expectEqual(@as(f64, 64), score.score(0, 40_001, ip_count));
+    try std.testing.expectEqual(@as(f64, 50), score.score(0, 40_001, ip_count));
 }
 
-test "gossip policy host scores and saturated penalties stay finite" {
+test "gossip policy saturated penalties stay finite" {
     var score = try testScores(std.testing.allocator, .{}, peer_capacity);
     defer score.deinit(std.testing.allocator);
-    try std.testing.expect(score.setAppScore(0, 5));
-    try std.testing.expect(!score.setAppScore(0, std.math.nan(f64)));
-    try std.testing.expect(!score.setAppScore(0, std.math.floatMax(f64)));
-    try std.testing.expectEqual(@as(f64, 5), score.score(0, 1, 0));
+    try std.testing.expectEqual(@as(f64, 0), score.score(0, 1, 0));
     score.tc(0, 0).invalid = counter_max;
     score.invalid(0, 0);
     try std.testing.expectEqual(counter_max, score.tc(0, 0).invalid);
@@ -680,18 +663,18 @@ test "score cache mutation IP topic and heartbeat decay boundaries remain exact"
     try std.testing.expectEqual(@as(u64, 2), score.calculations);
     ip_count = 5;
     try std.testing.expectEqual(@as(f64, -19.5), score.score(0, 11, ip_count));
-    try std.testing.expect(score.setAppScore(0, 7));
-    try std.testing.expectEqual(@as(f64, -12.5), score.score(0, 11, ip_count));
+    score.penalize(0, 7);
+    try std.testing.expectEqual(@as(f64, -29.5), score.score(0, 11, ip_count));
     score.deliverEligible(0, 0, false);
-    try std.testing.expectEqual(@as(f64, -11.5), score.score(0, 11, ip_count));
+    try std.testing.expectEqual(@as(f64, -28.5), score.score(0, 11, ip_count));
     try score.configureTopic(0, .{ .first_delivery_weight = 2, .first_delivery_decay = 0.5 });
-    try std.testing.expectEqual(@as(f64, -10), score.score(0, 11, ip_count));
+    try std.testing.expectEqual(@as(f64, -27), score.score(0, 11, ip_count));
     score.setConnected(0, false, 11);
     score.refresh(1000);
-    try std.testing.expectEqual(@as(f64, -10), score.score(0, 1000, ip_count));
+    try std.testing.expectEqual(@as(f64, -27), score.score(0, 1000, ip_count));
     const frozen = score.calculations;
     score.refresh(2000);
-    try std.testing.expectEqual(@as(f64, -10), score.score(0, 2000, ip_count));
+    try std.testing.expectEqual(@as(f64, -27), score.score(0, 2000, ip_count));
     try std.testing.expectEqual(frozen, score.calculations);
 }
 
@@ -843,7 +826,6 @@ test "metrics score snapshots preserve cache state and match policy evaluation" 
 test "metrics score weights use policy thresholds and snapshots do not count as cache calls" {
     var ip_count: u16 = 0;
     var scores = try testScores(std.testing.allocator, .{
-        .app_weight = 2,
         .ip_colocation_weight = -3,
         .ip_colocation_threshold = 1,
         .behaviour_weight = -2,
@@ -857,22 +839,21 @@ test "metrics score weights use policy thresholds and snapshots do not count as 
     scores.invalid(0, 0);
     scores.tc(0, 0).mesh_failures = 1;
     scores.penalize(0, 3);
-    try std.testing.expect(scores.setAppScore(0, 3));
     ip_count = 3;
     var details: Breakdown = undefined;
     const value = scores.snapshotWeights(0, 2000, ip_count, &details);
     try std.testing.expectEqualDeep(TopicWeights{ .p1 = 2, .p2 = 3, .p3 = -20, .p3b = -7, .p4 = -11 }, details.topics[0]);
-    try std.testing.expectEqualDeep(GlobalWeights{ .p5 = 6, .p6 = -12, .p7 = -8 }, details.global);
-    try std.testing.expectEqual(@as(f64, -80), value);
+    try std.testing.expectEqualDeep(GlobalWeights{ .p5 = 0, .p6 = -12, .p7 = -8 }, details.global);
+    try std.testing.expectEqual(@as(f64, -86), value);
     try std.testing.expectEqual(@as(u64, 0), scores.calls);
     try std.testing.expectEqual(value, scores.score(0, 2000, ip_count));
     try std.testing.expectEqual(value, scores.score(0, 2000, ip_count));
     try std.testing.expectEqual(@as(u64, 2), scores.calls);
     try std.testing.expectEqual(@as(u64, 1), scores.calculations);
     try std.testing.expectEqual(@as(u64, 0), scores.cache_delta.count);
-    try std.testing.expect(scores.setAppScore(0, 13));
-    try std.testing.expectEqual(value + 20, scores.score(0, 2000, ip_count));
-    try std.testing.expectEqual(@as(f64, 20), scores.cache_delta.sum);
+    scores.penalize(0, 2);
+    try std.testing.expectEqual(value - 24, scores.score(0, 2000, ip_count));
+    try std.testing.expectEqual(@as(f64, 24), scores.cache_delta.sum);
     try std.testing.expectEqualSlices(u64, &.{ 0, 1, 0, 0 }, &scores.cache_delta.buckets);
     scores.resetPeer(0);
     _ = scores.score(0, 2000, ip_count);

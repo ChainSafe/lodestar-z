@@ -13,6 +13,12 @@ pub fn localState(overrides: t.LocalState) t.LocalState {
     return local;
 }
 
+pub fn updateLocal(manager: *managed.PeerManager, service: *@import("service.zig").Service, local: *const t.LocalState, now: @import("types.zig").Now) !void {
+    var copied: t.LocalState = undefined;
+    try @import("peers/control_wire.zig").copyServingLocal(&copied, local, service.router.capabilities().receive);
+    manager.commitLocal(service, &copied, now);
+}
+
 pub fn options() managed.Options {
     const gc = @import("gossipsub/constants.zig");
     return .{
@@ -38,6 +44,7 @@ pub fn options() managed.Options {
                 .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }},
             },
             .gossipsub = .{
+                .topic_policy = comptime &.{@import("gossipsub/topic_fixture.zig").bytes(@splat(0))},
                 .random_seed = 1,
                 .seen_capacity = 16,
                 .mcache_capacity = 8,

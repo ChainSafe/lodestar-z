@@ -1,3 +1,4 @@
+const gossip_test = @import("gossipsub/test_support.zig");
 const managed = @import("managed.zig");
 const std = @import("std");
 const localState = @import("managed_test_support.zig").localState;
@@ -146,14 +147,14 @@ test "managed stale metadata finishes one refresh while periodic Status and late
         row.status_due_ms = setup.pair.now.mono_ms + 2000;
         try std.testing.expectEqual(@as(usize, 1), setup.server.snapshots(&snapshots));
         const remote = snapshots[0].peer;
-        try setup.server.updateMetadata(&setup.server_service, &localState(.{ .metadata = .{ .seq_number = 11 } }).metadata);
+        try @import("managed_test_support.zig").updateLocal(&setup.server, &setup.server_service, &metadataUpdate(&setup.server, &localState(.{ .metadata = .{ .seq_number = 11 } }).metadata), setup.pair.now);
         setup.server.control.schedules[remote.index].ping_due_ms = setup.pair.now.mono_ms;
         for (0..80) |_| {
             try setup.step(0);
             if (setup.client_service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing > started) break;
         }
         try std.testing.expectEqual(started + 1, setup.client_service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing);
-        try setup.server.updateMetadata(&setup.server_service, &localState(.{ .metadata = .{ .seq_number = reply_sequence } }).metadata);
+        try @import("managed_test_support.zig").updateLocal(&setup.server, &setup.server_service, &metadataUpdate(&setup.server, &localState(.{ .metadata = .{ .seq_number = reply_sequence } }).metadata), setup.pair.now);
         for (0..80) |_| try setup.step(0);
         try std.testing.expect(row.metadata_due_ms == null);
         try std.testing.expectEqual(@as(u64, 10), setup.client.catalog.get(peer).?.metadata.?.seq_number);
@@ -165,7 +166,7 @@ test "managed stale metadata finishes one refresh while periodic Status and late
         try std.testing.expectEqual(statuses + 1, setup.client_service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing);
         try std.testing.expectEqual(started + 1, setup.client_service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing);
         setup.pair.advance(rr.Protocol.metadata_v1.info().quota_period_ms);
-        try setup.server.updateMetadata(&setup.server_service, &localState(.{ .metadata = .{ .seq_number = 12 } }).metadata);
+        try @import("managed_test_support.zig").updateLocal(&setup.server, &setup.server_service, &metadataUpdate(&setup.server, &localState(.{ .metadata = .{ .seq_number = 12 } }).metadata), setup.pair.now);
         setup.client.control.schedules[peer.index].ping_due_ms = setup.pair.now.mono_ms;
         for (0..80) |_| try setup.step(0);
         try std.testing.expectEqual(started + 2, setup.client_service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing);
@@ -195,7 +196,7 @@ test "managed native stalled fork transition only wakes for eligible work" {
         .status = .{ .fork_digest = @splat(1), .earliest_available_slot = 0 },
         .metadata = .{ .seq_number = 1, .custody_group_count = 1 },
     };
-    try setup.client.updateFork(&setup.client_service, &updated, setup.pair.now);
+    try @import("managed_test_support.zig").updateLocal(&setup.client, &setup.client_service, &updated, setup.pair.now);
     setup.pair.advance(1500);
     for (0..8) |_| {
         _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
@@ -212,7 +213,7 @@ test "managed native stalled fork transition only wakes for eligible work" {
     try std.testing.expect(setup.client.control.nextWakeup(&setup.client.catalog, setup.pair.now) == null);
     const core_due = managed.nextWakeup(&setup.client, &setup.client_service, setup.pair.now, 0, 0, 0, 0).?;
     try std.testing.expect(core_due > setup.pair.now.mono_ms and core_due <= service_due);
-    try setup.server.updateFork(&setup.server_service, &updated, setup.pair.now);
+    try @import("managed_test_support.zig").updateLocal(&setup.server, &setup.server_service, &updated, setup.pair.now);
     for (0..80) |_| try setup.step(0);
     try std.testing.expect(setup.client.catalog.get(peer).?.relevant);
     try std.testing.expect(setup.client.control.nextWakeup(&setup.client.catalog, setup.pair.now).? > setup.pair.now.mono_ms);
@@ -239,8 +240,8 @@ test "managed native host fork transition cancels old maintenance without revivi
         .status = .{ .fork_digest = @splat(1), .earliest_available_slot = 0 },
         .metadata = .{ .seq_number = 1, .custody_group_count = 1 },
     };
-    try setup.client.updateFork(&setup.client_service, &updated, setup.pair.now);
-    try setup.server.updateFork(&setup.server_service, &updated, setup.pair.now);
+    try @import("managed_test_support.zig").updateLocal(&setup.client, &setup.client_service, &updated, setup.pair.now);
+    try @import("managed_test_support.zig").updateLocal(&setup.server, &setup.server_service, &updated, setup.pair.now);
     try std.testing.expectEqual(@as(u16, 0), setup.client.peerCounts().relevant);
     const invalidated = setup.client.catalog.get(before.peer).?;
     try std.testing.expectEqualDeep(before.connection, invalidated.connection);
@@ -259,7 +260,7 @@ test "managed native host fork transition cancels old maintenance without revivi
     var next = updated;
     next.fork.digest = @splat(2);
     next.status.fork_digest = @splat(2);
-    try setup.client.updateFork(&setup.client_service, &next, setup.pair.now);
+    try @import("managed_test_support.zig").updateLocal(&setup.client, &setup.client_service, &next, setup.pair.now);
     try std.testing.expectEqual(t.DisconnectReason.host, setup.client.catalog.get(before.peer).?.disconnect_reason.?);
     try std.testing.expectEqual(deadline, setup.client.control.schedules[before.peer.index].closing.?.deadline_ms);
 }
@@ -277,8 +278,8 @@ test "managed native previous fork request grace does not refresh relevance and 
         .status = .{ .fork_digest = @splat(1), .earliest_available_slot = 0 },
         .metadata = .{ .seq_number = 1, .custody_group_count = 1 },
     };
-    try setup.client.updateFork(&setup.client_service, &updated, setup.pair.now);
-    try setup.server.updateFork(&setup.server_service, &updated, setup.pair.now);
+    try @import("managed_test_support.zig").updateLocal(&setup.client, &setup.client_service, &updated, setup.pair.now);
+    try @import("managed_test_support.zig").updateLocal(&setup.server, &setup.server_service, &updated, setup.pair.now);
     for (0..80) |_| try setup.step(1);
     const before = setup.server.catalog.get(peer).?;
     const deadline = setup.server.control.schedules[peer.index].transition_until_ms;
@@ -672,7 +673,7 @@ test "managed native older Ping sequence cannot confirm cached metadata freshnes
     var snapshots: [4]t.Snapshot = undefined;
     _ = setup.client.snapshots(&snapshots);
     const before = snapshots[0].metadata_at_ms;
-    try setup.server.updateMetadata(&setup.server_service, &localState(.{ .metadata = .{ .seq_number = 9 } }).metadata);
+    try @import("managed_test_support.zig").updateLocal(&setup.server, &setup.server_service, &metadataUpdate(&setup.server, &localState(.{ .metadata = .{ .seq_number = 9 } }).metadata), setup.pair.now);
     setup.pair.advance(21_000);
     for (0..50) |_| try setup.step(0);
     _ = setup.client.snapshots(&snapshots);
@@ -815,7 +816,7 @@ test "managed control cancelled canonical requests retain buffers until local re
         .status = .{ .fork_digest = @splat(1), .earliest_available_slot = 0 },
         .metadata = .{ .custody_group_count = 1 },
     };
-    try setup.client.updateFork(&setup.client_service, &updated, setup.pair.now);
+    try @import("managed_test_support.zig").updateLocal(&setup.client, &setup.client_service, &updated, setup.pair.now);
     try std.testing.expect(op.cancelled);
     const started = setup.client.control.counters.started;
     const deferred = setup.client.control.counters.deferred;
@@ -1184,8 +1185,8 @@ fn quiescenceGossip(hold_selection: bool) !void {
     try setup.init(&.{});
     defer setup.deinit();
     const topic = "/eth2/00000000/beacon_block/ssz_snappy";
-    try std.testing.expect(managed.subscribe(&setup.client, &setup.client_service, topic));
-    try std.testing.expect(managed.subscribe(&setup.server, &setup.server_service, topic));
+    try gossip_test.subscribe(setup.client_service.gossipsub, topic);
+    try gossip_test.subscribe(setup.server_service.gossipsub, topic);
     for (0..50) |_| try setup.step(0);
     setup.pair.advance(1001);
     for (0..30) |_| try setup.step(0);
@@ -1348,4 +1349,10 @@ test "managed penalizes silent inbound request owners before host request delive
     _ = setup.server.snapshots(&peers);
     try std.testing.expectEqual(@as(f64, -20), peers[0].score);
     try std.testing.expectEqual(t.DisconnectReason.reputation, setup.server.catalog.rows[peers[0].peer.index].closing_reason.?);
+}
+
+fn metadataUpdate(manager: *const managed.PeerManager, metadata: *const t.Metadata) t.LocalState {
+    var local = manager.local;
+    local.metadata = metadata.*;
+    return local;
 }

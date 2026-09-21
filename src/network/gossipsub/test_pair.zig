@@ -16,7 +16,12 @@ pub const Pair = struct {
 
     pub fn initOpts(self: *Pair, client: gossip.Options, server: gossip.Options) !void {
         const reqresp: @import("../reqresp/reqresp.zig").Options = .{ .forks = &.{}, .peers = 128, .outbound_max = 1, .inbound_max = 1, .inbound_per_peer_max = 1 };
-        try self.shared.init(.{ .reqresp = reqresp, .gossipsub = client, .router = .{ .negotiations_max = 8 } }, .{ .reqresp = reqresp, .gossipsub = server, .router = .{ .negotiations_max = 8 } });
+        const topics = &.{ @import("topic_fixture.zig").bytes(.{ 1, 2, 3, 4 }), @import("topic_fixture.zig").bytes(.{ 0x6a, 0x95, 0xa1, 0xa9 }) };
+        var client_options = client;
+        client_options.topic_policy = client.topic_policy orelse topics;
+        var server_options = server;
+        server_options.topic_policy = server.topic_policy orelse topics;
+        try self.shared.init(.{ .reqresp = reqresp, .gossipsub = client_options, .router = .{ .negotiations_max = 8 } }, .{ .reqresp = reqresp, .gossipsub = server_options, .router = .{ .negotiations_max = 8 } });
     }
 
     pub fn deinit(self: *Pair) void {

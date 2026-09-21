@@ -74,7 +74,6 @@ export interface NativeTopicScoreParams {
 }
 
 export interface NativeGlobalScoreParams {
-  appWeight: number;
   ipColocationWeight: number;
   ipColocationThreshold: number;
   behaviourWeight: number;

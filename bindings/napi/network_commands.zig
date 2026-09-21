@@ -200,7 +200,7 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
         .updateStatus => {
             var status = input.status;
             status.fork_digest = core.localState().status.fork_digest;
-            try core.updateStatus(&status, timestamp);
+            try core.updateStatus(&status);
         },
         .getIdentity => operation.identity = try self.heavy.?.readIdentity(),
         .getPeers => {

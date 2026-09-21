@@ -207,6 +207,8 @@ test.each([
     expect(scored.connected).toBe(true);
     expect(scored.outboundReady).toBe(true);
     expect(Number.isFinite(scored.score)).toBe(true);
+    expect(scored.appScore).toBe(0);
+    expect(scored.weights.p5).toBe(0);
     if (verdict === "reject") {
       expect(scored.topics[0].invalidMessageDeliveries).toBeGreaterThan(0);
       expect(scored.topics[0].weights.p4).toBeLessThan(0);

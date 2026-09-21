@@ -37,7 +37,7 @@ pub fn copy(env: napi.Env, page: *const d.Page) !Value {
         try put(row, "outboundReady", try env.getBoolean(peer.outbound_ready));
         try put(row, "expireAtMs", try env.createBigintUint64(peer.retain_until));
         try put(row, "score", try env.createDouble(peer.score));
-        try put(row, "appScore", try env.createDouble(peer.app_score));
+        try put(row, "appScore", try env.createDouble(0));
         try put(row, "behaviourPenalty", try env.createDouble(peer.behaviour));
         try put(row, "weights", try weights(env, &peer.weights));
         const scores = try env.createArrayWithLength(peer.topic_count);

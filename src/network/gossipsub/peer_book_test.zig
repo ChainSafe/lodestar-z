@@ -23,7 +23,7 @@ test "gossip policy peers retain identity and reserve outbound recovery under ne
             metadata.direction = .outbound;
         }
         const result = peers.admit(.{ .index = 0, .generation = 1 }, &metadata, i).admitted;
-        _ = peers.scores.setAppScore(result.peer.index, -1);
+        peers.scores.penalize(result.peer.index, 7);
         peers.disconnect(result.peer, i);
     }
     metadata.identity.bytes[2] = 1;
@@ -40,7 +40,7 @@ test "gossip policy peers retain identity and reserve outbound recovery under ne
     try std.testing.expect(fallback.penalty_evicted);
     try std.testing.expectEqual(@as(u16, 1), fallback.peer.index);
     try std.testing.expectEqual(Admission.duplicate, peers.admit(.{ .index = 1, .generation = 1 }, &metadata, 1001));
-    _ = peers.scores.setAppScore(fallback.peer.index, -1);
+    peers.scores.penalize(fallback.peer.index, 7);
     peers.disconnect(fallback.peer, 1001);
     const resumed = peers.admit(.{ .index = 2, .generation = 1 }, &metadata, 1002).admitted;
     try std.testing.expect(!resumed.fresh);
@@ -76,7 +76,7 @@ test "gossip policy identity generation exhaustion cannot revive stale reference
     const metadata: Metadata = .{ .identity = .{ .bytes = [_]u8{1} ** @import("../wire/peer_id.zig").length }, .address = .unspecified, .direction = .inbound };
     const first = peers.admit(.{ .index = 0, .generation = 1 }, &metadata, 0).admitted.peer;
     try std.testing.expectEqual(@as(u16, 1), first.index);
-    _ = peers.scores.setAppScore(first.index, -1);
+    peers.scores.penalize(first.index, 7);
     peers.disconnect(first, 0);
     const next = peers.admit(.{ .index = 0, .generation = 2 }, &metadata, 100).admitted.peer;
     try std.testing.expectEqual(first.index, next.index);
@@ -93,7 +93,7 @@ test "gossip pinned backoff survives identity churn" {
         std.mem.writeInt(u16, metadata.identity.bytes[0..2], @intCast(i), .little);
         const ref = peers.admit(connection, &metadata, i).admitted.peer;
         if (i == 0) peers.addBackoff(ref, 0, 1, 0, 60_000);
-        _ = peers.scores.setAppScore(ref.index, if (i != 0) -1 else 0);
+        if (i != 0) peers.scores.penalize(ref.index, 7);
         peers.disconnect(ref, i);
     }
     const original: Ref = .{ .index = 0, .generation = peers.rows[0].generation };
@@ -110,14 +110,13 @@ test "gossip pinned backoff survives identity churn" {
     try std.testing.expect(!resumed.fresh);
     try std.testing.expectEqual(original, resumed.peer);
     try std.testing.expect(peers.backedOff(original, 0, 1, 1000));
-    _ = peers.scores.setAppScore(resumed.peer.index, 0);
     peers.disconnect(resumed.peer, 1000);
     metadata.direction = .outbound;
     metadata.identity.bytes[2] = 1;
     for (0..outbound_reserve) |i| {
         std.mem.writeInt(u16, metadata.identity.bytes[0..2], @intCast(i), .little);
         const ref = peers.admit(connection, &metadata, 1001 + i).admitted.peer;
-        _ = peers.scores.setAppScore(ref.index, -1);
+        peers.scores.penalize(ref.index, 7);
         peers.disconnect(ref, 1001 + i);
     }
     metadata.identity.bytes[2] = 2;

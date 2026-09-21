@@ -90,13 +90,6 @@ pub const Result = struct {
     dial_deferred: u8 = 0,
     dial_failed: u8 = 0,
 };
-pub const FutureForkHint = struct {
-    record_sequence: u64,
-    fork: peers.enr.ForkId,
-    next_digest: ?[4]u8,
-    /// Null means the next digest is missing and no explicit schedule mismatch was found.
-    compatible: ?bool,
-};
 pub const Counters = struct {
     discovered: u64 = 0,
     candidates_refused: u64 = 0,
@@ -281,9 +274,6 @@ pub const NetworkCore = struct {
     pub fn peerId(self: *const NetworkCore) t.PeerId {
         return self.transport.peerId();
     }
-    pub fn localAddress(self: *const NetworkCore) t.Address {
-        return self.transport.localAddress();
-    }
     pub fn localMultiaddr(self: *const NetworkCore) @import("wire/multiaddr.zig").Multiaddr {
         return self.transport.localMultiaddr();
     }
@@ -296,10 +286,6 @@ pub const NetworkCore = struct {
     pub fn localState(self: *const NetworkCore) t.LocalState {
         return self.peer_manager.local;
     }
-    pub fn futureForkHint(self: *const NetworkCore, identity: *const t.PeerId, now: Now) ?FutureForkHint {
-        const hints = self.peer_manager.candidateHints(identity, now) orelse return null;
-        return .{ .record_sequence = hints.sequence, .fork = hints.fork, .next_digest = hints.next_fork_digest, .compatible = compatibleHint(hints.fork, hints.next_fork_digest, self.schedule) };
-    }
     /// Copied bounded observations. Does not advance time, policy, scores or event borrows.
     pub fn diagnostics(self: *const NetworkCore) Diagnostics {
         return .{ .runtime = self.counters, .transport = self.transport.engine.counters, .transport_resources = self.transport.engine.resourceSnapshot(), .core = self.peer_manager.diagnostics(&self.service) };
@@ -308,18 +294,8 @@ pub const NetworkCore = struct {
         std.debug.assert(self.reservations.bytes == self.memory.allocated_bytes);
         return self.memory;
     }
-    pub fn setDemand(self: *NetworkCore, demand: *const t.Demand) !void {
-        try self.peer_manager.setDemand(demand);
-    }
-    /// Returns the coverage evaluated by the last owner reconciliation.
-    pub fn coverageDeficits(self: *const NetworkCore) peers.policy.Deficits {
-        return self.peer_manager.coverageDeficits();
-    }
     pub fn peerCounts(self: *const NetworkCore) manager.PeerManager.PeerCounts {
         return self.peer_manager.peerCounts();
-    }
-    pub fn connect(self: *NetworkCore, identity: *const t.PeerId, addresses: []const t.Address, now: Now) !void {
-        try self.peer_manager.connect(identity, addresses, now);
     }
     pub fn connectUntil(self: *NetworkCore, identity: *const t.PeerId, addresses: []const t.Address, now: Now, deadline_ms: u64) !void {
         try self.peer_manager.connectUntil(identity, addresses, now, deadline_ms);
@@ -342,23 +318,12 @@ pub const NetworkCore = struct {
     pub fn reStatusPeer(self: *NetworkCore, peer: t.PeerRef, connection: t.Handle, now: Now) bool {
         return self.peer_manager.reStatusPeer(peer, connection, now);
     }
-    pub fn disconnect(self: *NetworkCore, peer: t.PeerRef, reason: t.DisconnectReason, now: Now) bool {
-        return self.peer_manager.disconnect(peer, reason, now);
-    }
     pub fn reportPeer(self: *NetworkCore, peer: t.PeerRef, action: t.PeerAction, now: Now) ?t.ReputationDecision {
         return self.peer_manager.reportPeer(peer, action, now);
     }
-    pub fn reStatusPeers(self: *NetworkCore, now: Now) void {
-        self.peer_manager.reStatusPeers(now);
-    }
-    pub fn updateStatus(self: *NetworkCore, status: *const t.Status, _: Now) !void {
+    pub fn updateStatus(self: *NetworkCore, status: *const t.Status) !void {
         if (self.peer_manager.stopped) return error.Stopped;
         try self.peer_manager.updateStatus(&self.service, status);
-    }
-    pub fn updateMetadata(self: *NetworkCore, metadata: *const t.Metadata, now: Now) !void {
-        var local = self.localState();
-        local.metadata = metadata.*;
-        _ = try self.updateLocal(&local, self.schedule, now);
     }
     pub fn sendReqRespRequest(self: *NetworkCore, peer: t.PeerRef, protocol: rr.Protocol, request: []const u8, sink: []u8, options: rr.RequestOptions, now: Now) !rr.RequestHandle {
         const snapshot = self.peer_manager.catalog.get(peer) orelse return error.StalePeer;
@@ -383,23 +348,9 @@ pub const NetworkCore = struct {
     pub fn errorMessage(self: *const NetworkCore, request: rr.RequestHandle) []const u8 {
         return self.service.reqresp.errorMessage(request);
     }
-    /// Copies topic bytes and scalar policy without publishing or invalidating event borrows.
-    pub fn configureTopic(self: *NetworkCore, topic: []const u8, params: *const gossip.score.TopicParams) (gossip.Gossipsub.ConfigureTopicError || error{Stopped})!void {
-        try managed.configureTopic(&self.peer_manager, &self.service, topic, params);
-    }
-
-    pub fn publishGossip(self: *NetworkCore, topic: []const u8, bytes: []const u8, now: Now) !gossip.Gossipsub.PublishOutcome {
-        return self.publishGossipWithOptions(topic, bytes, .{}, now);
-    }
 
     pub fn publishGossipWithOptions(self: *NetworkCore, topic: []const u8, bytes: []const u8, options: gossip.Gossipsub.PublishOptions, now: Now) !gossip.Gossipsub.PublishOutcome {
         return managed.publishGossipWithOptions(&self.peer_manager, &self.service, topic, bytes, options, now);
-    }
-    pub fn subscribe(self: *NetworkCore, topic: []const u8) bool {
-        return managed.subscribe(&self.peer_manager, &self.service, topic);
-    }
-    pub fn unsubscribe(self: *NetworkCore, topic: []const u8) bool {
-        return managed.unsubscribe(&self.peer_manager, &self.service, topic);
     }
     pub fn reportValidation(self: *NetworkCore, handle: gossip.ValidationHandle, verdict: gossip.Verdict, now: Now) gossip.ReportOutcome {
         return self.service.gossipsub.report(handle, verdict, now);
@@ -414,9 +365,6 @@ pub const NetworkCore = struct {
     }
     pub fn beginGracefulClose(self: *NetworkCore, now: Now) void {
         managed.beginGracefulClose(&self.peer_manager, &self.service, now);
-    }
-    pub fn snapshots(self: *const NetworkCore, out: []t.Snapshot) usize {
-        return self.peer_manager.snapshots(out);
     }
 
     /// Caller sequence input is ignored on updates; only changed metadata advances its counter.

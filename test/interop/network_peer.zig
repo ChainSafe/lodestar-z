@@ -195,7 +195,14 @@ pub const Peer = struct {
             const identify = if (self.service.identify) |*value| value else return error.IdentifyDisabled;
             try identify.start(&self.service.router, &self.transport.engine, .{ .index = 0, .generation = conn.generation }, conn, self.now);
         } else if (std.mem.eql(u8, c.op, "subscribe")) {
-            if (!self.service.gossipsub.subscribe(c.topic orelse topic)) return error.SubscriptionFailed;
+            const parsed = Gossip.topic.parseCanonical(c.topic orelse topic) orelse return error.InvalidTopic;
+            if (parsed.name.kind != .beacon_block) return error.InvalidTopic;
+            var subscription: Gossip.local_intent.Boundary = .{ .digest = parsed.digest };
+            subscription.mask(.beacon_block)[0] = 1;
+            subscription.lengths[@intFromEnum(Gossip.topic.Kind.beacon_block)] = 1;
+            var workspace: Gossip.local_intent.Workspace = .{};
+            _ = try self.service.gossipsub.prepareSubscriptions(&.{subscription}, &workspace, self.now, 0);
+            self.service.gossipsub.commitSubscriptions(&workspace);
         } else if (std.mem.eql(u8, c.op, "publish")) {
             const size = c.size orelse 65537;
             if (size > max_payload) return error.MessageTooLarge;
@@ -281,9 +288,11 @@ pub fn main(init: std.process.Init) !void {
     const identify_enabled = application or (args.len == 2 and std.mem.eql(u8, args[1], "--identify"));
     var blob_schedule: [network.reqresp.request_policy.schedule_max]network.reqresp.request_policy.BlobLimit = undefined;
     const policy = try network.reqresp.request_policy.Config.fromBeaconConfig(&@import("config").mainnet.config, &blob_schedule);
+    var gossip_topics: [1]Gossip.topic_policy.Boundary = .{.{ .digest = if (application) applicationDigest() else .{ 1, 0, 0, 0 } }};
+    gossip_topics[0].rules[@intFromEnum(Gossip.topic.Kind.beacon_block)] = .{ .count = 1, .ssz_min = 0, .ssz_max = max_payload };
     const peer = try a.create(Peer);
     defer a.destroy(peer);
-    peer.* = .{ .application = application, .allocator = a, .io = init.io, .service = try network.Service.init(a, .{ .identify = if (identify_enabled) .{ .agent = "lodestar-z-identify" } else null, .reqresp = .{ .policy = policy, .peers = 4, .outbound_max = 1, .inbound_max = if (application) 8 else 1, .inbound_per_peer_max = if (application) 8 else 1, .inbound_control_reserved = if (application) 2 else 0, .forks = &.{.{ .digest = if (application) applicationDigest() else .{ 1, 0, 0, 0 }, .fork = .deneb }}, .progress_timeout_ms = 5000, .quotas = quotas }, .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .message_id_policy = .{ .phase0_digest = .{ 1, 0, 0, 0 } }, .random_seed = 0x6d2b79f5 } }), .sink = undefined, .response = undefined };
+    peer.* = .{ .application = application, .allocator = a, .io = init.io, .service = try network.Service.init(a, .{ .identify = if (identify_enabled) .{ .agent = "lodestar-z-identify" } else null, .reqresp = .{ .policy = policy, .peers = 4, .outbound_max = 1, .inbound_max = if (application) 8 else 1, .inbound_per_peer_max = if (application) 8 else 1, .inbound_control_reserved = if (application) 2 else 0, .forks = &.{.{ .digest = if (application) applicationDigest() else .{ 1, 0, 0, 0 }, .fork = .deneb }}, .progress_timeout_ms = 5000, .quotas = quotas }, .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .topic_policy = &gossip_topics, .message_id_policy = .{ .phase0_digest = .{ 1, 0, 0, 0 } }, .random_seed = 0x6d2b79f5 } }), .sink = undefined, .response = undefined };
     defer peer.service.deinit();
     peer.sink = try a.alloc(u8, max_payload);
     defer a.free(peer.sink);

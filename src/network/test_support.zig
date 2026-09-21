@@ -258,5 +258,41 @@ pub fn networkOptions(key: *const keys.KeyPair) @import("network_core.zig").Opti
         .{ .digest = @splat(0), .fork = .phase0 },
         .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu },
     };
+    result.core.service.gossipsub.topic_policy = comptime &.{
+        @import("gossipsub/topic_fixture.zig").bytes(@splat(0)),
+        @import("gossipsub/topic_fixture.zig").bytes(.{ 1, 2, 3, 4 }),
+    };
     return result;
+}
+
+const core = @import("network_core.zig");
+const local_intent = @import("gossipsub/local_intent.zig");
+const topic_policy = @import("gossipsub/topic_policy.zig");
+
+pub fn intent(node: *const core.NetworkCore, subscriptions: []const local_intent.Boundary) core.LocalIntent {
+    return .{
+        .update = .{
+            .local = node.localState(),
+            .schedule = node.schedule,
+            .endpoints = node.advertisementEndpoints(),
+            .capabilities = node.service.router.capabilities(),
+        },
+        .demand = node.peer_manager.demand,
+        .subscriptions = subscriptions,
+        .slot = node.service.gossipsub.overlay.slot,
+    };
+}
+
+pub fn subscribe(node: *core.NetworkCore, name: []const u8) !void {
+    try setSubscription(node, name, true);
+}
+
+pub fn unsubscribe(node: *core.NetworkCore, name: []const u8) !void {
+    try setSubscription(node, name, false);
+}
+
+fn setSubscription(node: *core.NetworkCore, name: []const u8, subscribed: bool) !void {
+    var boundaries: [topic_policy.boundary_max]local_intent.Boundary = undefined;
+    const desired = intent(node, try @import("gossipsub/test_support.zig").subscriptionUpdate(node.service.gossipsub, name, subscribed, &boundaries));
+    _ = try node.applyIntent(&desired, node.last_now);
 }

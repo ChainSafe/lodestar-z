@@ -20,13 +20,13 @@ const receiveForTest = support.receiveMessage;
 const testMessage = support.message;
 
 test "gossip graylist drops an RPC before decoding or admitting messages" {
-    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1 });
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
     defer g.deinit();
     const conn: Handle = .{ .index = 0, .generation = 1 };
     const session = support.addPeer(&g, conn, .v1_2).?;
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
-    try std.testing.expect(g.subscribe(name));
-    try std.testing.expect(g.setPeerScore(conn, g.options.score_params.graylist_threshold - 1));
+    try support.subscribe(&g, name);
+    support.penalize(&g, conn, 50);
     var encoded: [256]u8 = undefined;
     var compressed: [64]u8 = undefined;
     const len = try snappy.raw.compress("payload", &compressed);
@@ -44,7 +44,7 @@ test "gossip graylist drops an RPC before decoding or admitting messages" {
 }
 
 test "gossip IWANT admits 5000 IDs and rejects larger envelopes before service" {
-    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1 });
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
     defer g.deinit();
     const session = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     for ([_]usize{ constants.max_iwant_ids_per_rpc, constants.max_iwant_ids_per_rpc + 1 }) |count| {
@@ -71,11 +71,11 @@ test "gossip IWANT admits 5000 IDs and rejects larger envelopes before service" 
 }
 
 test "gossip turn separates credit exhaustion from host pressure and preserves event borrows" {
-    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1, .work_per_pump = 1, .decompress_per_peer_bytes = 1 });
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .work_per_pump = 1, .decompress_per_peer_bytes = 1 });
     defer g.deinit();
     const session = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
-    try std.testing.expect(g.subscribe(name));
+    try support.subscribe(&g, name);
     var encoded: [256]u8 = undefined;
     var compressed: [64]u8 = undefined;
     var writer = protobuf.Writer.init(&encoded);
@@ -112,13 +112,13 @@ test "gossip turn separates credit exhaustion from host pressure and preserves e
 }
 
 test "gossipsub preserves admission after zero event capacity" {
-    var g = try Gossipsub.init(std.testing.allocator, .{
+    var g = try support.init(std.testing.allocator, .{
         .random_seed = 1,
     });
     defer g.deinit();
     const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const topic = "/eth2/01020304/beacon_block/ssz_snappy";
-    try std.testing.expect(g.subscribe(topic));
+    try support.subscribe(&g, topic);
     var compressed: [128]u8 = undefined;
     const n = try snappy.raw.compress("payload", &compressed);
     const msg = protobuf.Message{ .data = compressed[0..n], .topic = topic };
@@ -130,11 +130,11 @@ test "gossipsub preserves admission after zero event capacity" {
 }
 
 test "gossipsub metrics count a deferred RPC item only once" {
-    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1 });
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
     defer g.deinit();
     const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
-    try std.testing.expect(g.subscribe(name));
+    try support.subscribe(&g, name);
     var compressed: [128]u8 = undefined;
     const n = try snappy.raw.compress("payload", &compressed);
     var bytes: [256]u8 = undefined;
@@ -159,8 +159,8 @@ test "gossipsub metrics distinguish partial writes from complete publication RPC
     try setup.init();
     defer setup.deinit();
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
-    try std.testing.expect(setup.shared.client.gossipsub.subscribe(name));
-    try std.testing.expect(setup.shared.server.gossipsub.subscribe(name));
+    try support.subscribe(setup.shared.client.gossipsub, name);
+    try support.subscribe(setup.shared.server.gossipsub, name);
     for (0..20) |_| try setup.pumpOnce();
     setup.shared.pair.advance(1000);
     for (0..128) |_| try setup.pumpOnce();
@@ -189,7 +189,7 @@ test "gossipsub metrics distinguish partial writes from complete publication RPC
     try std.testing.expectEqual(@as(u64, 1), setup.shared.server.gossipsub.topic_metrics.get(name).prevalidation);
     try std.testing.expect(setup.shared.client.gossipsub.rpc_metrics.sent_bytes > before.sent_bytes + 1);
     try std.testing.expectEqual(setup.shared.client.gossipsub.rpc_metrics.sent_bytes, setup.shared.server.gossipsub.rpc_metrics.received_bytes);
-    try std.testing.expect(setup.shared.client.gossipsub.unsubscribe(name));
+    try support.unsubscribe(setup.shared.client.gossipsub, name);
     for (0..1000) |_| {
         try setup.pumpOnce();
         if (setup.shared.server.gossipsub.rpc_metrics.items[@intFromEnum(ItemKind.prune)] > 0 and
@@ -201,11 +201,11 @@ test "gossipsub metrics distinguish partial writes from complete publication RPC
 }
 
 test "gossipsub pending validation survives history churn and report publish event reuse" {
-    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1, .mcache_capacity = 1, .validation_capacity = 2, .seen_capacity = 1 });
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .mcache_capacity = 1, .validation_capacity = 2, .seen_capacity = 1 });
     defer g.deinit();
     const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const topic = "/eth2/01020304/beacon_block/ssz_snappy";
-    try std.testing.expect(g.subscribe(topic));
+    try support.subscribe(&g, topic);
     var events: [1]Event = undefined;
     try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, peer.index, "pending", 1, &events));
     const event = events[0].message;
@@ -217,7 +217,7 @@ test "gossipsub pending validation survives history churn and report publish eve
     }
     try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, peer.index, "pending", 3, &events));
     try std.testing.expectEqual(ReportOutcome{ .applied = .ignore }, g.report(event.handle, .ignore, .{ .mono_ms = 4, .unix_s = 1 }));
-    _ = try g.publish("/eth2/01020304/other/ssz_snappy", "reuse", .{ .mono_ms = 5, .unix_s = 1 });
+    _ = try g.publish("/eth2/01020304/voluntary_exit/ssz_snappy", "reuse", .{ .mono_ms = 5, .unix_s = 1 });
     try std.testing.expectEqualStrings("pending", event.bytes);
     try std.testing.expectEqualStrings(topic, event.topic);
     try std.testing.expectEqual(ReportOutcome.already_resolved, g.report(event.handle, .accept, .{ .mono_ms = 6, .unix_s = 1 }));
@@ -228,11 +228,11 @@ test "gossipsub pending validation survives history churn and report publish eve
 }
 
 test "gossipsub duplicate invalid bytes do not evict useful history" {
-    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1, .mcache_capacity = 1 });
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .mcache_capacity = 1 });
     defer g.deinit();
     const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const topic = "/eth2/01020304/beacon_block/ssz_snappy";
-    try std.testing.expect(g.subscribe(topic));
+    try support.subscribe(&g, topic);
     _ = try g.publish(topic, "useful", .{ .mono_ms = 1, .unix_s = 1 });
     const useful = topic_mod.validMessageId(topic, "useful", .{});
     const retained = g.messages.history.message(g.messages.history.get(&g.messages.store, useful).?);
@@ -245,11 +245,11 @@ test "gossipsub duplicate invalid bytes do not evict useful history" {
 }
 
 test "gossipsub IWANT promises commit on queue and start at completed control transmission" {
-    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1, .control_bytes = 64 });
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .control_bytes = 64 });
     defer g.deinit();
     const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const topic = "/eth2/01020304/beacon_block/ssz_snappy";
-    try std.testing.expect(g.subscribe(topic));
+    try support.subscribe(&g, topic);
     var body: [32]u8 = undefined;
     var w = protobuf.Writer.init(&body);
     const id = [_]u8{7} ** 20;
@@ -285,11 +285,11 @@ test "gossipsub IWANT promises commit on queue and start at completed control tr
 }
 
 test "gossipsub IHAVE pending and duplicate prefixes do not hide new tail IDs" {
-    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1 });
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
     defer g.deinit();
     const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
-    try std.testing.expect(g.subscribe(name));
+    try support.subscribe(&g, name);
     var bytes: [8192]u8 = undefined;
     var writer = protobuf.Writer.init(&bytes);
     for (0..constants.gossip_ids_max) |i| {
@@ -310,10 +310,10 @@ test "gossipsub IHAVE pending and duplicate prefixes do not hide new tail IDs" {
 }
 
 test "gossipsub IHAVE samples eligible IDs across the advertisement independently per peer" {
-    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1 });
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1 });
     defer g.deinit();
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
-    try std.testing.expect(g.subscribe(name));
+    try support.subscribe(&g, name);
     var bytes: [16384]u8 = undefined;
     var writer = protobuf.Writer.init(&bytes);
     for (0..512) |i| {
@@ -347,11 +347,11 @@ test "gossipsub IHAVE samples eligible IDs across the advertisement independentl
 }
 
 test "gossipsub IHAVE security bounds one identity and deduplicates queued requests" {
-    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1, .iwant_followup_ms = 12000 });
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .iwant_followup_ms = 12000 });
     defer g.deinit();
     const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
-    try std.testing.expect(g.subscribe(name));
+    try support.subscribe(&g, name);
     var bytes: [4096]u8 = undefined;
     var writer = protobuf.Writer.init(&bytes);
     const duplicate = [_]u8{7} ** 20;
@@ -393,8 +393,8 @@ test "gossipsub legal maximum host acceptance forwards retained pages through ac
     try setup.initOpts(small.core.service.gossipsub, small.core.service.gossipsub);
     defer setup.deinit();
     const topic = "/eth2/01020304/beacon_block/ssz_snappy";
-    try std.testing.expect(setup.shared.client.gossipsub.subscribe(topic));
-    try std.testing.expect(setup.shared.server.gossipsub.subscribe(topic));
+    try support.subscribe(setup.shared.client.gossipsub, topic);
+    try support.subscribe(setup.shared.server.gossipsub, topic);
     for (0..20) |_| try setup.pumpOnce();
     const destination = setup.shared.server.gossipsub.sessions.findPeer(setup.shared.handles.server).?;
     const source = @import("test_support.zig").addPeer(setup.shared.server.gossipsub, .{ .index = 77, .generation = 1 }, .v1_2).?;
@@ -430,10 +430,10 @@ test "gossipsub rotates the legal atomic allowance past a duplicate flood" {
     var pair: @import("../test_support.zig").Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
-    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1, .decompress_per_peer_bytes = 1 });
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .decompress_per_peer_bytes = 1 });
     defer g.deinit();
     const topic = "/eth2/01020304/beacon_block/ssz_snappy";
-    try std.testing.expect(g.subscribe(topic));
+    try support.subscribe(&g, topic);
     var first_rpc: [128]u8 = undefined;
     var second_rpc: [128]u8 = undefined;
     var compressed: [64]u8 = undefined;
@@ -465,7 +465,7 @@ test "gossipsub rotates the legal atomic allowance past a duplicate flood" {
 }
 
 test "gossipsub validation attribution cannot penalize reused source or duplicate slots" {
-    var g = try Gossipsub.init(std.testing.allocator, .{
+    var g = try support.init(std.testing.allocator, .{
         .random_seed = 1,
     });
     defer g.deinit();
@@ -474,7 +474,7 @@ test "gossipsub validation attribution cannot penalize reused source or duplicat
     const source = @import("test_support.zig").addPeer(&g, source_conn, .v1_2).?;
     const duplicate = @import("test_support.zig").addPeer(&g, duplicate_conn, .v1_2).?;
     const topic = "/eth2/01020304/beacon_block/ssz_snappy";
-    try std.testing.expect(g.subscribe(topic));
+    try support.subscribe(&g, topic);
     var events: [1]Event = undefined;
     try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, source.index, "invalid", 1, &events));
     const handle = events[0].message.handle;
@@ -493,7 +493,7 @@ test "gossip independent RPC enumerates every receive split through admission" {
     const wire = @embedFile("testdata/independent-two.rpc");
     const name = "/eth2/01000000/beacon_block/ssz_snappy";
     try std.testing.expect(wire[0] & 0x80 != 0);
-    var g = try Gossipsub.init(std.testing.allocator, .{
+    var g = try support.init(std.testing.allocator, .{
         .random_seed = 1,
         .mcache_capacity = 2,
         .validation_capacity = 4,
@@ -501,10 +501,11 @@ test "gossip independent RPC enumerates every receive split through admission" {
         .seen_ttl_ms = 1,
         .validation_tombstone_ms = 1,
         .body_buffer_bytes = 1,
+        .topic_policy = &.{@import("topic_fixture.zig").bytes(.{ 1, 0, 0, 0 })},
     });
     defer g.deinit();
     const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
-    try std.testing.expect(g.subscribe(name));
+    try support.subscribe(&g, name);
     var expected: [2][64]u8 = undefined;
     for (0..64) |i| {
         expected[0][i] = @intCast(i);
@@ -551,7 +552,7 @@ test "gossip independent RPC enumerates every receive split through admission" {
 }
 
 test "gossipsub history queue refusal and authenticated reconnect preserve retransmission counts" {
-    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1, .mcache_capacity = 2 });
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .mcache_capacity = 2 });
     defer g.deinit();
     const metadata: peers_mod.Metadata = .{
         .identity = .{ .bytes = [_]u8{1} ** @import("../wire/peer_id.zig").length },
@@ -598,7 +599,7 @@ test "gossipsub history queue refusal and authenticated reconnect preserve retra
 }
 
 test "recovery owner clear releases sent and unsent attribution pins" {
-    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1 });
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
     defer g.deinit();
     const conn: Handle = .{ .index = 0, .generation = 1 };
     const peer = @import("test_support.zig").addPeer(&g, conn, .v1_2).?;
@@ -615,7 +616,7 @@ test "recovery owner clear releases sent and unsent attribution pins" {
 }
 
 test "gossipsub configured IWANT receipt starts twelve second deadline once" {
-    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1, .iwant_followup_ms = 12_000 });
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .iwant_followup_ms = 12_000 });
     defer g.deinit();
     const conn: Handle = .{ .index = 0, .generation = 1 };
     const p = @import("test_support.zig").addPeer(&g, conn, .v1_2).?;
@@ -643,12 +644,12 @@ test "gossipsub configured IWANT receipt starts twelve second deadline once" {
 }
 
 test "gossipsub configured IDONTWANT uses admitted compressed wire bytes" {
-    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1, .idontwant_min_data_size = 128 });
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .idontwant_min_data_size = 128 });
     defer g.deinit();
     const source = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const destination = @import("test_support.zig").addPeer(&g, .{ .index = 1, .generation = 1 }, .v1_2).?;
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
-    try std.testing.expect(g.subscribe(name));
+    try support.subscribe(&g, name);
     g.overlay.rows[g.overlay.findTopic(name).?].mesh.set(destination.index);
     var payload: [126]u8 = undefined;
     for (&payload, 0..) |*byte, index| byte.* = @intCast(index);
@@ -683,8 +684,8 @@ test "gossipsub remote forwarding honors IDONTWANT and preserves borrowed event 
     try pair.init();
     defer pair.deinit();
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
-    try std.testing.expect(pair.shared.client.gossipsub.subscribe(name));
-    try std.testing.expect(pair.shared.server.gossipsub.subscribe(name));
+    try support.subscribe(pair.shared.client.gossipsub, name);
+    try support.subscribe(pair.shared.server.gossipsub, name);
     for (0..20) |_| try pair.pumpOnce();
     const destination = pair.shared.server.gossipsub.sessions.findPeer(pair.shared.handles.server).?;
     const source = @import("test_support.zig").addPeer(pair.shared.server.gossipsub, .{ .index = 77, .generation = 1 }, .v1_2).?;
@@ -728,11 +729,11 @@ test "gossipsub remote forwarding honors IDONTWANT and preserves borrowed event 
 }
 
 test "gossip duplicate fast path ignores host capacity and malformed bodies receive penalties" {
-    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1, .validation_capacity = 1 });
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .validation_capacity = 1 });
     defer g.deinit();
     const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
-    try std.testing.expect(g.subscribe(name));
+    try support.subscribe(&g, name);
     var events: [1]Event = undefined;
     try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, peer.index, "pending", 1, &events));
     const handle = events[0].message.handle;
@@ -749,12 +750,12 @@ test "gossip duplicate fast path ignores host capacity and malformed bodies rece
 }
 
 test "gossip recent attribution survives validation slot reuse and duplicate pressure" {
-    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1, .validation_capacity = 1 });
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .validation_capacity = 1 });
     defer g.deinit();
     const source = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const duplicate = @import("test_support.zig").addPeer(&g, .{ .index = 1, .generation = 1 }, .v1_2).?;
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
-    try std.testing.expect(g.subscribe(name));
+    try support.subscribe(&g, name);
     var events: [1]Event = undefined;
     try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, source.index, "rejected", 1, &events));
     const old = events[0].message.handle;
@@ -779,11 +780,11 @@ test "gossip recent attribution survives validation slot reuse and duplicate pre
 }
 
 test "gossipsub IHAVE work preflight defers without consuming the advertisement" {
-    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1 });
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
     defer g.deinit();
     const session = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
-    try std.testing.expect(g.subscribe(name));
+    try support.subscribe(&g, name);
     var bytes: [4096]u8 = undefined;
     var writer = protobuf.Writer.init(&bytes);
     protobuf.beginIhaveRpc(&writer, name, 128, constants.message_id_length);
@@ -835,11 +836,11 @@ test "gossipsub IHAVE maximum advertisement shares oversized allowance with data
     var options = small.core.service.gossipsub;
     options.work_per_pump = 1;
     options.decompress_per_peer_bytes = 1;
-    var g = try Gossipsub.init(std.testing.allocator, options);
+    var g = try support.init(std.testing.allocator, options);
     defer g.deinit();
     const session = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
-    try std.testing.expect(g.subscribe(name));
+    try support.subscribe(&g, name);
     const bytes = try std.testing.allocator.alloc(u8, 128 * 1024);
     defer std.testing.allocator.free(bytes);
     var writer = protobuf.Writer.init(bytes);
@@ -891,12 +892,14 @@ test "gossipsub IHAVE maximum advertisement shares oversized allowance with data
 }
 
 test "gossip pending validation quota preserves room for another peer and refunds completed work" {
+    var boundary: @import("topic_policy.zig").Boundary = .{ .digest = .{ 1, 2, 3, 4 } };
+    boundary.rules[@intFromEnum(topic_mod.Kind.beacon_block)] = .{ .count = 1, .ssz_max = 1024 };
     for ([_]bool{ false, true }) |planned| {
-        var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1, .validation_capacity = if (planned) 4 * @import("../gossip_processor/limits.zig").kind_count else 4, .processor_limits = if (planned) @as(@import("../gossip_processor/limits.zig").Limits, @splat(.{ .items = 4, .bytes = 4096 })) else null });
+        var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .topic_policy = &.{boundary}, .validation_capacity = if (planned) 4 * @import("../gossip_processor/limits.zig").kind_count else 4, .processor_limits = if (planned) @as(@import("../gossip_processor/limits.zig").Limits, @splat(.{ .items = 4, .bytes = 4096 })) else null });
         defer g.deinit();
         const first = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
         const second = support.addPeer(&g, .{ .index = 1, .generation = 1 }, .v1_2).?;
-        try std.testing.expect(g.subscribe("/eth2/01020304/beacon_block/ssz_snappy"));
+        try support.subscribe(&g, "/eth2/01020304/beacon_block/ssz_snappy");
         var events: [1]Event = undefined;
         try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, first.index, "first", 1, &events));
         const held = events[0].message.handle;
@@ -912,7 +915,7 @@ test "gossip pending validation quota preserves room for another peer and refund
 }
 
 test "gossip unsent IWANT expiry refunds recovery slots without blaming the peer" {
-    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1 });
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
     defer g.deinit();
     const conn: Handle = .{ .index = 0, .generation = 1 };
     const peer = support.addPeer(&g, conn, .v1_2).?;
@@ -931,7 +934,7 @@ test "gossip unsent IWANT expiry refunds recovery slots without blaming the peer
 
 test "gossip paged RPC cursors survive shared workspace reuse without runtime allocation" {
     var ledger: @import("../reservations.zig").Reservations = .{ .backing = std.testing.allocator };
-    var g = try Gossipsub.init(ledger.allocator(), .{
+    var g = try support.init(ledger.allocator(), .{
         .random_seed = 1,
         .connected_capacity = 4,
         .retained_capacity = 8,
@@ -942,7 +945,7 @@ test "gossip paged RPC cursors survive shared workspace reuse without runtime al
     const calls = ledger.allocation_calls;
     ledger.byte_limit = ledger.bytes;
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
-    try std.testing.expect(g.subscribe(name));
+    try support.subscribe(&g, name);
     for (0..4) |i| {
         const peer = support.addPeer(&g, .{ .index = @intCast(i), .generation = 1 }, .v1_2).?;
         try std.testing.expectEqual(i, peer.index);

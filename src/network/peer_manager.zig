@@ -344,9 +344,6 @@ pub const PeerManager = struct {
     fn currentSelectionRevision(self: *const PeerManager, service: *const service_mod.Service) SelectionRevision {
         return .{ .catalog = self.catalog.revision, .delivery = service.gossipsub.deliveryRevision(), .gossip = service.gossipsub.coverageRevision() };
     }
-    pub fn policyChanged(self: *const PeerManager, service: *const service_mod.Service) bool {
-        return !std.meta.eql(self.selection_revision, self.currentSelectionRevision(service));
-    }
     pub fn policyWakeup(self: *const PeerManager, service: *const service_mod.Service, now: Now) ?u64 {
         const before = self.selection_revision orelse return now.mono_ms;
         const after = self.currentSelectionRevision(service);
@@ -388,14 +385,8 @@ pub const PeerManager = struct {
     pub fn discoveryNeed(self: *const PeerManager) DiscoveryNeed {
         return self.discovery_need;
     }
-    /// Requires Discovery.step output or equivalent authenticated-source scope authorization.
-    pub fn discovered(self: *PeerManager, service: *service_mod.Service, candidate: *const peers.enr.Candidate, now: Now) !void {
-        if (self.stopped) return error.Stopped;
-        self.reconcile(service, now);
-        try self.enqueueDiscovered(candidate, now);
-    }
     pub const DiscoveryIntake = struct { accepted: u16 = 0, refused: u16 = 0 };
-    /// Each candidate has the same authenticated-source precondition as discovered.
+    /// Requires Discovery.step output or equivalent authenticated-source scope authorization.
     pub fn discoveredBatch(self: *PeerManager, service: *service_mod.Service, candidates: []const peers.enr.Candidate, now: Now) DiscoveryIntake {
         std.debug.assert(candidates.len <= 16);
         self.reconcile(service, now);
@@ -519,17 +510,6 @@ pub const PeerManager = struct {
         local.status = status.*;
         try peers.control_wire.copyServingLocal(&self.local, &local, service.router.capabilities().receive);
         self.selection_revision = null;
-    }
-    pub fn updateMetadata(self: *PeerManager, service: *const service_mod.Service, metadata: *const t.Metadata) !void {
-        var local = self.local;
-        local.metadata = metadata.*;
-        try peers.control_wire.copyServingLocal(&self.local, &local, service.router.capabilities().receive);
-        self.selection_revision = null;
-    }
-    pub fn updateFork(self: *PeerManager, service: *service_mod.Service, local: *const t.LocalState, now: Now) !void {
-        var copied: t.LocalState = undefined;
-        try peers.control_wire.copyServingLocal(&copied, local, service.router.capabilities().receive);
-        self.commitLocal(service, &copied, now);
     }
 
     /// The caller must validate the complete local state before committing it.

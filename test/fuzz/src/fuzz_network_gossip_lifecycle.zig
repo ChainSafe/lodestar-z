@@ -1,6 +1,7 @@
 const std = @import("std");
 const gossip = @import("network").gossipsub;
 const Messages = @FieldType(gossip.Gossipsub, "messages");
+const Layout = std.meta.Child(@typeInfo(@TypeOf(Messages.init)).@"fn".params[2].type.?);
 const Peers = @FieldType(gossip.Gossipsub, "peers");
 const Validation = @FieldType(Messages, "validation");
 const Store = @FieldType(Messages, "store");
@@ -17,7 +18,8 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
     var peers = Peers.init(a, &.{ .retained_score_ms = 20, .retained_capacity = 4, .retained_outbound_reserve = 1 }) catch unreachable;
     defer peers.deinit(a);
     const options: @import("network").gossipsub.Options = .{ .random_seed = 1, .mcache_capacity = 4, .validation_capacity = 2, .seen_capacity = 8, .retained_capacity = 4, .mcache_arena_bytes = 12288, .validation_timeout_ms = 10, .validation_tombstone_ms = 20 };
-    var messages = Messages.init(a, &options) catch unreachable;
+    const layout = Layout.init(&options);
+    var messages = Messages.init(a, &options, &layout) catch unreachable;
     defer messages.deinit(a, &peers);
     const source = peers.admit(.{ .index = 0, .generation = 1 }, &.{ .identity = .{ .bytes = @splat(1) }, .address = .unspecified, .direction = .inbound }, 0).admitted.peer;
     const duplicate = peers.admit(.{ .index = 1, .generation = 1 }, &.{ .identity = .{ .bytes = @splat(2) }, .address = .unspecified, .direction = .inbound }, 0).admitted.peer;
@@ -79,7 +81,7 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
                 _ = Validation.duplicate(validation.attribution(handles[at]), &peers, duplicate, byte < 128);
             },
             9 => {
-                _ = peers.scores.setAppScore(source.index, -1);
+                peers.scores.penalize(source.index, 7);
                 peers.disconnect(source, now);
                 const admitted = peers.admit(.{ .index = 0, .generation = @intCast(step + 2) }, &.{ .identity = .{ .bytes = @splat(1) }, .address = .unspecified, .direction = .inbound }, now).admitted;
                 assert(std.meta.eql(source, admitted.peer));
