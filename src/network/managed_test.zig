@@ -985,6 +985,7 @@ test "managed reconciliation idle and candidate batch work" {
         _ = setup.client.dialIntents(&setup.client_service, &setup.pair.client, setup.pair.now, &.{});
     }
     const c = setup.client.counters;
+    const requested = setup.client.requested_connect;
     const candidate = try candidateFor(&setup.pair.server_ctx.local_peer_id, null);
     for (0..4) |_| try setup.client.discovered(&setup.client_service, &candidate, setup.pair.now);
     var out: [1]managed.DialIntent = undefined;
@@ -993,6 +994,8 @@ test "managed reconciliation idle and candidate batch work" {
     try std.testing.expectEqual(@as(u64, 1), c.selections);
     try std.testing.expectEqual(@as(u64, 1), c.candidate_syncs);
     try std.testing.expectEqual(@as(u64, 0), after.selections - c.selections);
+    try std.testing.expectEqual(requested, setup.client.requested_connect);
+    try std.testing.expectEqual(c.selections, setup.client.selection_duration.count);
     try std.testing.expect(after.candidate_syncs - c.candidate_syncs <= 1);
 }
 

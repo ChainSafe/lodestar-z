@@ -9,9 +9,9 @@ const goodbye = @import("../peers/goodbye.zig");
 const discovery_metrics = @import("../peers/discovery.zig");
 const outbox = @import("../gossipsub/outbox.zig");
 
-const Snapshot = @import("snapshot.zig").Snapshot;
+const Context = @import("context.zig").Context;
 const Client = peer_client.Client;
-pub const registry = prom.Registry(Snapshot, .{
+pub const registry = prom.Registry(Context, .{
     writePeers,
     writeTopics,
     writeRequests,
@@ -32,36 +32,37 @@ pub const registry = prom.Registry(Snapshot, .{
     writePeerCloses,
     writeDiscoveryProgress,
     writeGossipTopics,
+    writeMaintenance,
 });
 
-fn writePeers(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
+fn writePeers(self: *const Context, w: *prom.Encoder) prom.Error!void {
     try w.scalar(.{
         .name = "libp2p_peers",
         .kind = .gauge,
         .help = "Authenticated connected peers",
-    }, self.live.peers);
+    }, self.peer_count);
     try w.scalar(.{
         .name = "lodestar_native_network_relevant_peers",
         .kind = .gauge,
         .help = "Peers with compatible Status",
-    }, self.live.relevant);
+    }, self.relevant);
     try w.scalar(.{
-        .name = "lodestar_peer_manager_starved_bool",
+        .name = "lodestar_native_peer_below_target",
         .kind = .gauge,
         .help = "Connected peers below target while running",
-    }, @intFromBool(self.live.running and self.live.peers < self.config.target));
+    }, @intFromBool(self.running and self.peer_count < self.owner.peer_manager.catalog.options.target_peers));
     try w.scalar(.{
         .name = "lodestar_peer_manager_outbound_peers_ratio",
         .kind = .gauge,
         .help = "Fraction of connected peers that are outbound",
-    }, if (self.live.peers == 0) @as(f64, 0) else @as(f64, @floatFromInt(self.live.peer_population.directionCount(.outbound))) / @as(f64, @floatFromInt(self.live.peers)));
+    }, if (self.peer_count == 0) @as(f64, 0) else @as(f64, @floatFromInt(self.population.directionCount(.outbound))) / @as(f64, @floatFromInt(self.peer_count)));
     const directions = try w.family(.{
         .name = "lodestar_peers_by_direction_count",
         .kind = .gauge,
         .help = "Connected peers by direction",
         .labels = &.{"direction"},
     });
-    for ([_][]const u8{ "inbound", "outbound" }, self.live.peer_population.directionCounts()) |direction, count| try directions.sample(.{direction}, count);
+    for ([_][]const u8{ "inbound", "outbound" }, self.population.directionCounts()) |direction, count| try directions.sample(.{direction}, count);
     inline for (.{ .{ "lodestar_peers_by_client_count", "clients", "Connected peers by client" }, .{ "lodestar_gossip_mesh_peers_by_client_count", "mesh_clients", "Peers in at least one gossip mesh by client" } }) |metric| {
         const clients = try w.family(.{
             .name = metric[0],
@@ -71,64 +72,38 @@ fn writePeers(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
         });
         inline for (std.meta.fields(Client)) |field| {
             const count = if (comptime std.mem.eql(u8, metric[1], "clients"))
-                self.live.peer_population.clientCount(@enumFromInt(field.value))
+                self.population.clientCount(@enumFromInt(field.value))
             else
-                self.live.mesh_clients[field.value];
+                self.mesh_clients[field.value];
             try clients.sample(.{field.name}, count);
         }
     }
 }
 
-fn writeRuntime(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
-    try w.scalar(.{
-        .name = "lodestar_discovery_total_dial_attempts",
-        .kind = .counter,
-        .help = "Started native QUIC dials",
-    }, self.totals.runtime.dial_started);
-    if (self.config.discovery_enabled) {
-        try w.scalar(.{
-            .name = "lodestar_discv5_active_session_count",
-            .kind = .gauge,
-            .help = "Stored discovery sessions",
-        }, self.live.discovery_sessions);
-        try w.scalar(.{
-            .name = "lodestar_discv5_kad_table_size",
-            .kind = .gauge,
-            .help = "Discovery routing table entries",
-        }, self.live.discovery_peers);
-        try w.scalar(.{
-            .name = "lodestar_discv5_lookup_count",
-            .kind = .gauge,
-            .help = "Active foreground discovery lookups",
-        }, self.live.discovery_lookups);
+fn writeRuntime(self: *const Context, w: *prom.Encoder) prom.Error!void {
+    if (self.owner.discovery) |discovery| {
+        try w.scalar(.{ .name = "lodestar_discv5_active_session_count", .kind = .gauge, .help = "Stored discovery sessions" }, self.live(discovery.transport.engine.channel.sessions.sessionCount()));
+        try w.scalar(.{ .name = "lodestar_discv5_kad_table_size", .kind = .gauge, .help = "Discovery routing table entries" }, self.live(discovery.transport.engine.peerCount()));
+        try w.scalar(.{ .name = "lodestar_discv5_lookup_count", .kind = .gauge, .help = "Active foreground discovery lookups" }, self.live(@as(usize, @intFromBool(discovery.coordinator.lookup != null))));
     }
-    try w.scalar(.{
-        .name = "lodestar_native_network_metrics_snapshot_monotonic_seconds",
-        .kind = .gauge,
-        .help = "Monotonic time of the last owner snapshot",
-        .unit = .seconds,
-    }, @as(f64, @floatFromInt(self.sampled_ms)) / 1000);
-    try w.scalar(.{
-        .name = "lodestar_native_network_running",
-        .kind = .gauge,
-        .help = "Network owner is running",
-    }, @intFromBool(self.live.running));
-    try w.counters("lodestar_native_network_", &self.totals.runtime);
-    try w.counters("lodestar_native_quic_", &self.totals.transport);
+    try w.scalar(.{ .name = "lodestar_native_network_metrics_updated_timestamp_seconds", .kind = .gauge, .help = "Unix time at which the owner last collected this metrics export", .unit = .seconds }, self.now.unix_s);
+    try w.scalar(.{ .name = "lodestar_native_network_running", .kind = .gauge, .help = "Network owner is running" }, @intFromBool(self.running));
+    try w.counters("lodestar_native_network_", &self.owner.counters);
+    try w.counters("lodestar_native_quic_", &self.owner.transport.engine.counters);
 }
 
-fn writeNativeCounters(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
+fn writeNativeCounters(self: *const Context, w: *prom.Encoder) prom.Error!void {
     try w.scalar(.{
         .name = "lodestar_native_negotiation_refused_total",
         .kind = .counter,
         .help = "Inbound streams refused at negotiation capacity",
-    }, self.totals.negotiations.refused);
+    }, self.owner.service.router.counters.refused);
     try w.enums(.{
         .name = "lodestar_native_negotiation_failed_total",
         .kind = .counter,
         .help = "Inbound negotiation failures",
         .labels = &.{"reason"},
-    }, @import("../negotiate.zig").Failure, &self.totals.negotiations.inbound_failures);
+    }, @import("../negotiate.zig").Failure, &self.owner.service.router.counters.inbound_failures);
     inline for (.{
         .{ "received_bytes", "Complete QUIC UDP payload bytes received, excluding truncated datagrams" },
         .{ "sent_bytes", "QUIC UDP payload bytes sent, including successful prefixes of failed batches" },
@@ -139,17 +114,20 @@ fn writeNativeCounters(self: *const Snapshot, w: *prom.Encoder) prom.Error!void 
         .name = "lodestar_native_quic_udp_" ++ metric[0] ++ "_total",
         .kind = .counter,
         .help = metric[1],
-    }, @field(self.totals.udp, metric[0]));
-    try w.counters("lodestar_native_reqresp_", &self.totals.requests);
-    try w.counters("lodestar_native_gossipsub_", &self.totals.gossip_counts);
-    try w.counters("lodestar_native_dial_", &self.totals.dial);
-    try w.counters("lodestar_native_discovery_", &self.totals.discovery_counts);
+    }, @field(self.owner.transport.udp.counters, metric[0]));
+    try w.counters("lodestar_native_reqresp_", &self.owner.service.reqresp.counters);
+    try w.counters("lodestar_native_gossipsub_", &self.owner.service.gossipsub.counters);
+    try w.counters("lodestar_native_dial_", &self.owner.peer_manager.dial_queue.counters);
+    const discovery_counts = if (self.owner.discovery) |d| d.coordinator.counters else discovery_metrics.Counters{};
+    const rejections = if (self.owner.discovery) |d| d.coordinator.rejections else @as([discovery_metrics.rejection_count]u64, @splat(0));
+    const admissions = if (self.owner.discovery) |d| d.transport.engine.channel.admission.counts else @as(@import("discv5").admission.Counts, @splat(@splat(0)));
+    try w.counters("lodestar_native_discovery_", &discovery_counts);
     try w.enums(.{
         .name = "lodestar_native_discovery_candidate_rejections_total",
         .kind = .counter,
         .help = "Authenticated discovery candidates rejected by reason",
         .labels = &.{"reason"},
-    }, discovery_metrics.Rejection, &self.totals.discovery_rejections);
+    }, discovery_metrics.Rejection, &rejections);
     const admission = @import("discv5").admission;
     const discovery_admission = try w.family(.{
         .name = "lodestar_native_discovery_admission_total",
@@ -159,40 +137,41 @@ fn writeNativeCounters(self: *const Snapshot, w: *prom.Encoder) prom.Error!void 
     });
     inline for (std.meta.fields(admission.Stage)) |stage| {
         inline for (std.meta.fields(admission.Outcome)) |outcome| {
-            try discovery_admission.sample(.{ stage.name, outcome.name }, self.totals.discovery_admission[stage.value][outcome.value]);
+            try discovery_admission.sample(.{ stage.name, outcome.name }, admissions[stage.value][outcome.value]);
         }
     }
+    var drops = self.owner.service.gossipsub.retired_queue_drops;
+    for (self.owner.service.gossipsub.sessions.rows) |*row| for (&drops, row.io.tx.drops) |*total, value| {
+        total.* +|= value;
+    };
     try w.enums(.{
         .name = "lodestar_native_gossip_queue_drops_total",
         .kind = .counter,
         .help = "Gossip queue admissions refused by resource limit, including mesh control",
         .labels = &.{"reason"},
-    }, outbox.DropReason, &self.totals.gossip_queue_drops);
+    }, outbox.DropReason, &drops);
 }
 
-fn writeGossipResources(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
-    try w.scalar(.{
-        .name = "lodestar_native_gossip_data_descriptors_per_peer",
-        .kind = .gauge,
-        .help = "Bounded outgoing data descriptors per gossip peer",
-    }, outbox.data_capacity);
-    if (self.config.gossip_capacity) |*resources| try writeResourceFields("lodestar_native_gossipsub_", "Native gossip ", resources, w);
-    if (self.totals.gossip_high_water) |*resources| try writeResourceFields("lodestar_native_gossipsub_", "Native gossip ", resources, w);
-    if (self.live.gossip_resources) |*resources| try writeResourceFields("lodestar_native_gossipsub_", "Native gossip ", resources, w);
+fn writeGossipResources(self: *const Context, w: *prom.Encoder) prom.Error!void {
+    try w.scalar(.{ .name = "lodestar_native_gossip_data_descriptors_per_peer", .kind = .gauge, .help = "Bounded outgoing data descriptors per gossip peer" }, outbox.data_capacity);
+    const resources = self.owner.service.gossipsub.resourceSnapshot();
+    try writeResourceFields("lodestar_native_gossipsub_", "Native gossip ", &resources, self.running, w);
 }
 
-fn writeRequestResources(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
-    if (self.config.request_capacity) |*resources| try writeResourceFields("lodestar_native_reqresp_resources_", "Native request resources ", resources, w);
-    try writeResourceFields("lodestar_native_reqresp_resources_", "Native request resources ", &self.live.request_resources, w);
-    if (self.config.control_capacity) |*resources| try writeResourceFields("lodestar_native_control_", "Native peer control ", resources, w);
-    try writeResourceFields("lodestar_native_control_", "Native peer control ", &self.live.control_resources, w);
+fn writeRequestResources(self: *const Context, w: *prom.Encoder) prom.Error!void {
+    const requests = self.owner.service.reqresp.resourceSnapshot();
+    const controls = self.owner.peer_manager.control.resourceSnapshot();
+    try writeResourceFields("lodestar_native_reqresp_resources_", "Native request resources ", &requests, self.running, w);
+    try writeResourceFields("lodestar_native_control_", "Native peer control ", &controls, self.running, w);
 }
 
-fn writeResourceFields(comptime prefix: []const u8, comptime description: []const u8, resources: anytype, w: *prom.Encoder) prom.Error!void {
+fn writeResourceFields(comptime prefix: []const u8, comptime description: []const u8, resources: anytype, running: bool, w: *prom.Encoder) prom.Error!void {
     inline for (std.meta.fields(@TypeOf(resources.*))) |field| {
         if (comptime std.mem.eql(u8, field.name, "inbound_phases")) continue;
+        const persistent = comptime std.mem.endsWith(u8, field.name, "_capacity") or std.mem.endsWith(u8, field.name, "_high_water") or std.mem.endsWith(u8, field.name, "_control_reserved");
+        const current = if (running or persistent) @field(resources, field.name) else std.mem.zeroes(field.type);
         if (comptime @typeInfo(field.type) == .optional) {
-            if (@field(resources, field.name)) |value| {
+            if (current) |value| {
                 if (comptime std.mem.endsWith(u8, field.name, "_ms")) {
                     try w.scalar(.{
                         .name = prefix ++ field.name[0 .. field.name.len - 3] ++ "_seconds",
@@ -210,17 +189,17 @@ fn writeResourceFields(comptime prefix: []const u8, comptime description: []cons
             .name = prefix ++ field.name,
             .kind = .gauge,
             .help = description ++ field.name,
-        }, @field(resources, field.name));
+        }, current);
     }
 }
 
-fn writePeerCloses(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
+fn writePeerCloses(self: *const Context, w: *prom.Encoder) prom.Error!void {
     try w.enums(.{
         .name = "lodestar_native_peer_closes_total",
         .kind = .counter,
         .help = "Peer closes initiated by native peer control",
         .labels = &.{"reason"},
-    }, peer_types.DisconnectReason, &self.totals.closed);
+    }, peer_types.DisconnectReason, &self.owner.peer_manager.control.counters.closed);
     const closes_by_client = try w.family(.{
         .name = "lodestar_native_peer_closes_by_client_total",
         .kind = .counter,
@@ -229,7 +208,7 @@ fn writePeerCloses(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
     });
     inline for (@typeInfo(Client).@"enum".fields) |client| {
         inline for (@typeInfo(peer_types.DisconnectReason).@"enum".fields) |reason| {
-            try closes_by_client.sample(.{ client.name, reason.name }, self.totals.closed_by_client[client.value][reason.value]);
+            try closes_by_client.sample(.{ client.name, reason.name }, self.owner.peer_manager.control.counters.closed_by_client[client.value][reason.value]);
         }
     }
     try w.enums(.{
@@ -237,88 +216,69 @@ fn writePeerCloses(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
         .kind = .counter,
         .help = "Received Ethereum Goodbye reasons; unknown wire codes share one label",
         .labels = &.{"reason"},
-    }, goodbye.Reason, &self.totals.peer_events.goodbyes);
+    }, goodbye.Reason, &self.owner.peer_manager.control.counters.events.goodbyes);
 }
 
-fn writePeerProcessing(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
+fn writePeerProcessing(self: *const Context, w: *prom.Encoder) prom.Error!void {
     const processing = try w.family(.{
         .name = "lodestar_native_peer_processing_total",
         .kind = .counter,
         .help = "Peer policy decisions and processing work by bounded operation",
         .labels = &.{"operation"},
     });
-    inline for (std.meta.fields(@TypeOf(self.totals.peer_work))) |field| {
-        try processing.sample(.{field.name}, @field(self.totals.peer_work, field.name));
+    inline for (std.meta.fields(@TypeOf(self.owner.peer_manager.counters))) |field| {
+        try processing.sample(.{field.name}, @field(self.owner.peer_manager.counters, field.name));
     }
-    try processing.sample(.{"dial_sync_lookup_rows"}, self.totals.dial.sync_lookup_rows);
+    try processing.sample(.{"dial_sync_lookup_rows"}, self.owner.peer_manager.dial_queue.counters.sync_lookup_rows);
 }
 
-fn writePeeringProgress(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
+fn writePeeringProgress(self: *const Context, w: *prom.Encoder) prom.Error!void {
     try w.scalar(.{
         .name = "lodestar_native_peer_identify_started_total",
         .kind = .counter,
         .help = "Started Identify exchanges",
-    }, self.totals.identify_started);
+    }, self.owner.peer_manager.control.counters.identify_started);
     try w.scalar(.{
         .name = "lodestar_native_peer_identify_deferred_total",
         .kind = .counter,
         .help = "Identify starts deferred by local pressure",
-    }, self.totals.identify_deferred);
+    }, self.owner.peer_manager.control.counters.identify_deferred);
     try w.enums(.{
         .name = "lodestar_native_peer_identify_failures_total",
         .kind = .counter,
         .help = "Identify failures by bounded protocol reason",
         .labels = &.{"reason"},
-    }, @import("../identify/root.zig").Failure, &self.totals.identify_failures);
-    if (self.config.transport_capacity) |capacity| {
-        try w.scalar(.{
-            .name = "lodestar_native_quic_connections_capacity",
-            .kind = .gauge,
-            .help = "Native QUIC connection slots capacity",
-        }, capacity);
-        const resources = &self.live.transport_resources;
-        inline for (std.meta.fields(@TypeOf(resources.*))) |field|
-            try w.scalar(.{
-                .name = "lodestar_native_quic_connections_" ++ field.name,
-                .kind = .gauge,
-                .help = "Native QUIC connection slots " ++ field.name,
-            }, @field(resources, field.name));
-    }
-    if (self.config.dial_capacity) |capacity| {
-        try w.scalar(.{
-            .name = "lodestar_native_dial_capacity",
-            .kind = .gauge,
-            .help = "Native dial queue rows capacity",
-        }, capacity);
-        const resources = &self.live.dial_resources;
-        inline for (std.meta.fields(@TypeOf(resources.*))) |field|
-            try w.scalar(.{
-                .name = "lodestar_native_dial_" ++ field.name,
-                .kind = .gauge,
-                .help = "Native dial queue rows " ++ field.name,
-            }, @field(resources, field.name));
+    }, @import("../identify/root.zig").Failure, &self.owner.peer_manager.control.counters.identify_failures);
+    const transport = self.owner.transport.engine.resourceSnapshot();
+    const dial = self.owner.peer_manager.dial_queue.resourceSnapshot();
+    inline for (.{ .{ "lodestar_native_quic_connections_", transport }, .{ "lodestar_native_dial_", dial } }) |group| {
+        inline for (std.meta.fields(@TypeOf(group[1]))) |field| {
+            const value = @field(group[1], field.name);
+            try w.scalar(.{ .name = group[0] ++ field.name, .kind = .gauge, .help = "Native bounded resource " ++ field.name }, if (comptime std.mem.eql(u8, field.name, "capacity")) value else self.live(value));
+        }
     }
 }
 
-fn writeDiscoveryProgress(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
+fn writeDiscoveryProgress(self: *const Context, w: *prom.Encoder) prom.Error!void {
+    try w.enums(.{ .name = "lodestar_native_peer_dial_selections_total", .kind = .counter, .help = "Selected peer connection attempts by initiating demand, including immediate errors and local start deferrals", .labels = &.{"source"} }, @import("../peers/dial_queue.zig").Source, &self.owner.peer_manager.dial_queue.selected_attempts);
     const dial_time = try w.histograms(.{
-        .name = "lodestar_discovery_dial_time_seconds",
+        .name = "lodestar_native_peer_dial_time_seconds",
         .kind = .histogram,
         .help = "Time from selecting a dial through authenticated connection or terminal failure; cancellations excluded",
         .labels = &.{"status"},
         .unit = .seconds,
-    }, @TypeOf(self.totals.dial_time[0]));
+    }, @TypeOf(self.owner.peer_manager.dial_queue.durations[0]));
     inline for (.{ "success", "error" }, 0..) |status, index|
-        try dial_time.histogram(.{status}, &self.totals.dial_time[index]);
-    if (!self.config.discovery_enabled) return;
+        try dial_time.histogram(.{status}, &self.owner.peer_manager.dial_queue.durations[index]);
+    const discovery = self.owner.discovery orelse return;
     const lookup_time = try w.histograms(.{
         .name = "lodestar_discovery_find_node_query_time_seconds",
         .kind = .histogram,
         .help = "Time to finish a foreground FINDNODE walk; cancelled walks excluded",
         .labels = &.{},
         .unit = .seconds,
-    }, @TypeOf(self.totals.lookup_time));
-    try lookup_time.histogram(.{}, &self.totals.lookup_time);
+    }, @TypeOf(discovery.coordinator.lookup_time));
+    try lookup_time.histogram(.{}, &discovery.coordinator.lookup_time);
     const lookup_finishes = try w.family(.{
         .name = "lodestar_native_discovery_lookup_finishes_total",
         .kind = .counter,
@@ -327,60 +287,32 @@ fn writeDiscoveryProgress(self: *const Snapshot, w: *prom.Encoder) prom.Error!vo
     });
     inline for (@typeInfo(@import("discv5").Lookup.FinishReason).@"enum".fields) |field| {
         if (comptime !std.mem.eql(u8, field.name, "cancelled"))
-            try lookup_finishes.sample(.{field.name}, self.totals.lookup_finishes[field.value]);
+            try lookup_finishes.sample(.{field.name}, discovery.coordinator.lookup_finishes[field.value]);
     }
     try w.scalar(.{
         .name = "lodestar_native_discovery_pending_revalidations",
         .kind = .gauge,
         .help = "Routing buckets waiting for incumbent revalidation",
-    }, self.live.discovery_pending_revalidations);
+    }, self.live(discovery.transport.engine.routing.pendingCount()));
     try w.scalar(.{
         .name = "lodestar_native_discovery_waiting_queries",
         .kind = .gauge,
         .help = "Foreground FINDNODE calls awaiting responses",
-    }, self.live.discovery_waiting_queries);
-    if (self.live.discovery_candidate_idle_ms) |elapsed|
+    }, self.live(if (discovery.coordinator.lookup) |*lookup| lookup.waitingCount() else @as(usize, 0)));
+    if (if (self.running) discovery.coordinator.last_candidate_ms else null) |last|
         try w.scalar(.{
             .name = "lodestar_native_discovery_candidate_idle_seconds",
             .kind = .gauge,
             .help = "Time since the last candidate publication while running; absent before first publication",
             .unit = .seconds,
-        }, @as(f64, @floatFromInt(elapsed)) / 1000);
+        }, @as(f64, @floatFromInt(self.now.mono_ms -| last)) / 1000);
 }
 
-fn writeTopics(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
-    inline for (.{ .{ "mesh", "mesh" }, .{ "topic", "subscribers" } }) |metric| {
-        const prefix = "lodestar_gossip_" ++ metric[0] ++ "_peers_by_";
-        inline for (.{ "type", "beacon_attestation_subnet", "sync_committee_subnet", "data_column_subnet" }) |suffix| {
-            const memberships = try w.family(.{
-                .name = prefix ++ suffix ++ "_count",
-                .kind = .gauge,
-                .help = "Peer memberships in active native topics; boundary is the fork digest",
-                .labels = &.{ if (std.mem.eql(u8, suffix, "type")) "type" else "subnet", "boundary" },
-            });
-            for (self.live.topics[0..self.live.topic_count]) |*entry| {
-                const entry_suffix = switch (entry.kind) {
-                    .beacon_attestation => "beacon_attestation_subnet",
-                    .sync_committee => "sync_committee_subnet",
-                    .data_column_sidecar => "data_column_subnet",
-                    else => "type",
-                };
-                if (!std.mem.eql(u8, suffix, entry_suffix)) continue;
-                const boundary = std.fmt.bytesToHex(entry.digest, .lower);
-                const value = @field(entry, metric[1]);
-                var subnet_buffer: [5]u8 = undefined;
-                const label = switch (entry.kind) {
-                    .beacon_attestation => std.fmt.bufPrint(&subnet_buffer, "{d:0>2}", .{entry.subnet}) catch unreachable,
-                    .sync_committee, .data_column_sidecar => std.fmt.bufPrint(&subnet_buffer, "{d}", .{entry.subnet}) catch unreachable,
-                    else => @tagName(entry.kind),
-                };
-                try memberships.sample(.{ label, &boundary }, value);
-            }
-        }
-    }
+fn writeTopics(self: *const Context, w: *prom.Encoder) prom.Error!void {
+    try @import("topics.zig").write(self, w);
 }
 
-fn writeRequests(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
+fn writeRequests(self: *const Context, w: *prom.Encoder) prom.Error!void {
     inline for (.{
         .{ "beacon_reqresp_outgoing_requests_total", "outgoing", "Started outgoing native requests, including control methods" },
         .{ "beacon_reqresp_incoming_requests_total", "incoming", "Accepted incoming native request streams, including control methods" },
@@ -401,7 +333,7 @@ fn writeRequests(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
         for (rr.protocol.methods, 0..) |method, index| {
             if (!firstMethod(index)) continue;
             var count: u64 = 0;
-            for (rr.protocol.methods, &self.totals.protocols) |candidate, *values| {
+            for (rr.protocol.methods, &self.owner.service.reqresp.protocol_counters) |candidate, *values| {
                 if (std.mem.eql(u8, candidate, method)) count +|= @field(values, metric[1]);
             }
             try requests.sample(.{method}, count);
@@ -417,7 +349,7 @@ fn writeRequests(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
         if (!firstMethod(index)) continue;
         inline for (std.meta.fields(rr.reqresp.metrics.AdmissionRefusal)) |reason| {
             var count: u64 = 0;
-            for (rr.protocol.methods, &self.totals.protocols) |candidate, *values| {
+            for (rr.protocol.methods, &self.owner.service.reqresp.protocol_counters) |candidate, *values| {
                 if (std.mem.eql(u8, candidate, method)) count +|= values.admission_refusals[reason.value];
             }
             try refusals.sample(.{ method, reason.name }, count);
@@ -428,10 +360,10 @@ fn writeRequests(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
         .kind = .gauge,
         .help = "Occupied incoming request slots by current phase, including terminal owners awaiting recycling",
         .labels = &.{"phase"},
-    }, rr.reqresp.metrics.InboundPhase, &self.live.request_resources.inbound_phases);
+    }, rr.reqresp.metrics.InboundPhase, &self.live(self.owner.service.reqresp.resourceSnapshot().inbound_phases));
 }
 
-fn writeRequestTimes(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
+fn writeRequestTimes(self: *const Context, w: *prom.Encoder) prom.Error!void {
     inline for (.{
         .{ "beacon_reqresp_outgoing_request_roundtrip_time_seconds", "outgoing_time", "Outgoing request duration from stream creation through native completion or failure" },
         .{ "beacon_reqresp_incoming_request_handler_time_seconds", "incoming_time", "Incoming request duration from accepted stream through native completion or failure" },
@@ -442,11 +374,11 @@ fn writeRequestTimes(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
             .help = metric[2],
             .labels = &.{"method"},
             .unit = .seconds,
-        }, @TypeOf(@field(self.totals.protocols[0], metric[1])));
+        }, @TypeOf(@field(self.owner.service.reqresp.protocol_counters[0], metric[1])));
         for (rr.protocol.methods, 0..) |method, index| {
             if (!firstMethod(index)) continue;
-            var aggregate: @TypeOf(@field(self.totals.protocols[0], metric[1])) = .{};
-            for (rr.protocol.methods, &self.totals.protocols) |candidate, *values| {
+            var aggregate: @TypeOf(@field(self.owner.service.reqresp.protocol_counters[0], metric[1])) = .{};
+            for (rr.protocol.methods, &self.owner.service.reqresp.protocol_counters) |candidate, *values| {
                 if (std.mem.eql(u8, candidate, method)) aggregate.merge(&@field(values, metric[1]));
             }
             try durations.histogram(.{method}, &aggregate);
@@ -457,32 +389,32 @@ fn writeRequestTimes(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
         .kind = .counter,
         .help = "Terminal outgoing native failures using host request error labels",
         .labels = &.{"reason"},
-    }, rr.reqresp.metrics.ErrorReason, &self.totals.outgoing_error_reasons);
+    }, rr.reqresp.metrics.ErrorReason, &self.owner.service.reqresp.outgoing_error_reasons);
 }
 
-fn writeScores(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
-    try self.live.scores.write(w);
-    try self.totals.scores.write(w);
+fn writeScores(self: *const Context, w: *prom.Encoder) prom.Error!void {
+    try self.scores.write(w);
+    try @import("scores.zig").writeTotals(&self.owner.service.gossipsub.peers.scores, w);
     try w.scalar(.{
         .name = "lodestar_gossip_score_avg_min_max_min",
         .kind = .gauge,
         .help = "Minimum connected gossip peer score",
-    }, self.live.scores.values.min);
+    }, self.scores.values.min);
     try w.scalar(.{
         .name = "lodestar_gossip_score_avg_min_max_max",
         .kind = .gauge,
         .help = "Maximum connected gossip peer score",
-    }, self.live.scores.values.max);
+    }, self.scores.values.max);
     try w.scalar(.{
         .name = "lodestar_gossip_score_avg_min_max_avg",
         .kind = .gauge,
         .help = "Average connected gossip peer score",
-    }, self.live.scores.average());
+    }, self.scores.average());
     try w.scalar(.{
         .name = "lodestar_native_gossip_scored_peers",
         .kind = .gauge,
         .help = "Connected gossip peers included in score gauges",
-    }, self.live.scores.values.count);
+    }, self.scores.values.count);
     const thresholds = try w.family(.{
         .name = "lodestar_gossip_peer_score_by_threshold_count",
         .kind = .gauge,
@@ -490,89 +422,90 @@ fn writeScores(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
         .labels = &.{"threshold"},
     });
     inline for (.{ "graylist", "publish", "gossip", "mesh" }) |threshold| {
-        try thresholds.sample(.{threshold}, @field(self.live.scores, threshold));
+        try thresholds.sample(.{threshold}, @field(self.scores, threshold));
     }
 }
 
-fn writeGossipExecution(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
+fn writeGossipExecution(self: *const Context, w: *prom.Encoder) prom.Error!void {
     try w.scalar(.{
         .name = "lodestar_native_gossip_expired_executing",
         .kind = .gauge,
         .help = "Delivered gossip validations still awaiting host completion after their verdict deadlines",
-    }, self.live.gossip_expired_executing);
+    }, self.expired_executing);
     try w.scalar(.{
         .name = "lodestar_native_gossip_oldest_expired_execution_age_seconds",
         .kind = .gauge,
         .help = "Seconds past the earliest verdict deadline among delivered validations awaiting host completion; zero when none",
         .unit = .seconds,
-    }, @as(f64, @floatFromInt(self.live.gossip_oldest_expired_execution_age_ms)) / 1000);
+    }, @as(f64, @floatFromInt(self.oldest_expired_execution_age_ms)) / 1000);
 }
 
-fn writeGossip(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
+fn writeGossip(self: *const Context, w: *prom.Encoder) prom.Error!void {
+    const caches_now = self.owner.service.gossipsub.messages.stats();
     try w.enums(.{
         .name = "lodestar_native_gossipsub_storage_refusals_total",
         .kind = .counter,
         .help = "Gossip storage admission attempts refused by bounded resource reason",
         .labels = &.{"reason"},
-    }, @import("../gossipsub/messages.zig").StorageRefusal, &self.totals.gossip_storage_refusals);
-    try self.totals.gossip_rpc.write(w);
+    }, @import("../gossipsub/messages.zig").StorageRefusal, &self.owner.service.gossipsub.messages.storage_refusals);
+    try self.owner.service.gossipsub.rpc_metrics.write(w);
     try w.scalar(.{
         .name = "gossipsub_fast_message_id_hits_total",
         .kind = .counter,
         .help = "Exact compressed fingerprints avoiding repeated decompression",
-    }, self.totals.gossip_fast_hits);
+    }, self.owner.service.gossipsub.messages.fast_hits);
     try w.scalar(.{
         .name = "gossipsub_message_decode_total",
         .kind = .counter,
         .help = "Snappy body decode attempts",
-    }, self.totals.gossip_decoded);
+    }, self.owner.service.gossipsub.messages.decoded_messages);
     try w.scalar(.{
         .name = "gossipsub_delivery_attribution_evictions_total",
         .kind = .counter,
         .help = "Resolved delivery records replaced before their attribution deadline",
-    }, self.totals.gossip_delivery_evictions);
-    try self.totals.gossip_recovery.write(w);
+    }, self.owner.service.gossipsub.messages.validation.delivery_evictions);
+    try self.owner.service.gossipsub.recovery.metrics.write(w);
     try w.scalar(.{
         .name = "gossipsub_rpc_recv_err_count_total",
         .kind = .counter,
         .help = "Malformed incoming RPC frames or protobuf items",
-    }, self.totals.gossip_counts.malformed_rpcs);
+    }, self.owner.service.gossipsub.counters.malformed_rpcs);
     try w.scalar(.{
         .name = "gossipsub_iwant_promise_broken",
         .kind = .counter,
         .help = "Randomly sampled IWANT batch promises that expired without their sampled message",
-    }, self.totals.gossip_counts.broken_promises);
+    }, self.owner.service.gossipsub.counters.broken_promises);
     try w.scalar(.{
         .name = "gossipsub_mcache_size",
         .kind = .gauge,
         .help = "Stored message history entries",
-    }, self.live.gossip_history);
+    }, self.live(caches_now.history));
     const caches = try w.family(.{
         .name = "gossipsub_cache_size",
         .kind = .gauge,
         .help = "Native bounded cache entry counts",
         .labels = &.{"cache"},
     });
-    try caches.sample(.{"seenCache"}, self.live.gossip_seen);
-    try caches.sample(.{"mcache"}, self.live.gossip_history);
-    try caches.sample(.{"deliveryCache"}, self.live.gossip_recent);
-    try caches.sample(.{"gossipTracer.promises"}, if (self.live.gossip_resources) |r| r.promises else @as(usize, 0));
+    try caches.sample(.{"seenCache"}, self.live(caches_now.seen));
+    try caches.sample(.{"mcache"}, self.live(caches_now.history));
+    try caches.sample(.{"deliveryCache"}, self.live(caches_now.recent));
+    try caches.sample(.{"gossipTracer.promises"}, self.live(self.owner.service.gossipsub.recovery.len));
     try w.scalar(.{
         .name = "gossipsub_rpc_recv_count_total",
         .kind = .counter,
         .help = "Complete received gossip RPCs",
-    }, self.totals.gossip_counts.rpcs_received);
+    }, self.owner.service.gossipsub.counters.rpcs_received);
     const validation_time = try w.histograms(.{
         .name = "gossipsub_async_validation_delay_from_first_seen",
         .kind = .histogram,
         .help = "Seconds from native gossip admission until an applied validation verdict",
         .labels = &.{},
         .unit = .seconds,
-    }, @TypeOf(self.totals.validation_time));
-    try validation_time.histogram(.{}, &self.totals.validation_time);
+    }, @TypeOf(self.owner.service.gossipsub.validation_time));
+    try validation_time.histogram(.{}, &self.owner.service.gossipsub.validation_time);
 }
 
-fn writeGossipTopics(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
+fn writeGossipTopics(self: *const Context, w: *prom.Encoder) prom.Error!void {
     inline for (.{
         .{ "gossipsub_accepted_messages_total", "accepted" },
         .{ "gossipsub_rejected_messages_total", "rejected" },
@@ -596,13 +529,13 @@ fn writeGossipTopics(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
             .labels = &.{"topic"},
         });
         inline for (@typeInfo(gossip.topic_policy.Kind).@"enum".fields) |field| {
-            try messages.sample(.{field.name}, @field(self.totals.gossip_topics.counts[field.value], metric[1]));
+            try messages.sample(.{field.name}, @field(self.owner.service.gossipsub.topic_metrics.counts[field.value], metric[1]));
         }
-        try messages.sample(.{"unknown"}, @field(self.totals.gossip_topics.counts[gossip.topic_policy.kind_count], metric[1]));
+        try messages.sample(.{"unknown"}, @field(self.owner.service.gossipsub.topic_metrics.counts[gossip.topic_policy.kind_count], metric[1]));
     }
 }
-fn writeConnections(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
-    const counters = &self.totals.connections;
+fn writeConnections(self: *const Context, w: *prom.Encoder) prom.Error!void {
+    const counters = &self.owner.transport.engine.connection_metrics;
     try w.enums(.{
         .name = "lodestar_native_quic_connections_established_total",
         .kind = .counter,
@@ -628,12 +561,30 @@ fn firstMethod(index: usize) bool {
     return true;
 }
 
-fn writePopulation(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
-    try self.live.peer_population.write(w);
+fn writePopulation(self: *const Context, w: *prom.Encoder) prom.Error!void {
+    try self.population.write(w);
 }
-fn writePeerEvents(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
-    try self.totals.peer_events.write(w);
+fn writePeerEvents(self: *const Context, w: *prom.Encoder) prom.Error!void {
+    try self.owner.peer_manager.control.counters.events.write(w);
 }
-fn writePeerPolicy(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
-    try self.live.peer_policy.write(w);
+fn writePeerPolicy(self: *const Context, w: *prom.Encoder) prom.Error!void {
+    try @import("peer_policy.zig").write(&self.owner.peer_manager, self.running, w);
+}
+
+fn writeMaintenance(self: *const Context, w: *prom.Encoder) prom.Error!void {
+    const g = self.owner.service.gossipsub;
+    try g.overlay.metrics.write(w);
+    inline for (.{
+        .{ "gossipsub_heartbeat_duration_seconds", "cycles", "Elapsed duration of a completed gossip maintenance cycle, including time between slices" },
+        .{ "lodestar_native_gossip_heartbeat_lateness_seconds", "lateness", "Delay from the scheduled heartbeat deadline until it is serviced" },
+    }) |metric| {
+        const histogram = try w.histograms(.{ .name = metric[0], .kind = .histogram, .help = metric[2], .unit = .seconds }, @import("timing.zig").Duration);
+        try histogram.histogram(.{}, &@field(g.maintenance, metric[1]));
+    }
+    const slices = try w.histograms(.{ .name = "lodestar_native_gossip_maintenance_slice_seconds", .kind = .histogram, .help = "Elapsed time inside uninterrupted maintenance regions, including OS preemption; excludes time between slices", .unit = .seconds, .labels = &.{"phase"} }, @import("timing.zig").Duration);
+    inline for (.{ "setup", "topics" }) |phase| try slices.histogram(.{phase}, &@field(g.maintenance, phase));
+    try w.scalar(.{ .name = "lodestar_native_gossip_maintenance_active", .kind = .gauge, .help = "A gossip maintenance cycle is unfinished" }, @intFromBool(self.running and g.cycle.isActive()));
+    try w.scalar(.{ .name = "lodestar_native_gossip_maintenance_completed_timestamp_seconds", .kind = .gauge, .help = "Unix time of the last completed gossip maintenance cycle; zero before the first completion", .unit = .seconds }, g.maintenance.completed_unix_s);
+    const selection = try w.histograms(.{ .name = "lodestar_native_peer_selection_seconds", .kind = .histogram, .help = "Elapsed time building and applying an uncached peer selection", .unit = .seconds }, @import("timing.zig").Duration);
+    try selection.histogram(.{}, &self.owner.peer_manager.selection_duration);
 }

@@ -27,6 +27,43 @@ const Fixture = struct {
     }
 };
 
+test "mesh metrics count actual transitions once and distinguish local changes from peer failures" {
+    var f = try Fixture.init(7);
+    defer f.g.deinit();
+    const context = f.g.overlayContext(2);
+    const name = f.g.overlay.topicString(f.topic);
+    for (0..7) |peer| f.g.overlay.onGraft(&context, f.topic, @intCast(peer));
+    try std.testing.expectEqual(@as(usize, 7), f.g.overlay.mesh(f.topic).count());
+    f.g.overlay.onGraft(&context, f.topic, 0);
+    f.g.overlay.onPrune(&context, f.topic, 0, c.prune_backoff_ms);
+    f.g.overlay.onPrune(&context, f.topic, 0, c.prune_backoff_ms);
+    f.g.overlay.onGraft(&context, f.topic, 0);
+    _ = f.g.overlay.peerSubscription(&context, 1, name, false);
+    _ = f.g.overlay.peerSubscription(&context, 1, name, false);
+    f.g.markDirect(f.g.sessions.rows[2].conn);
+    f.g.markDirect(f.g.sessions.rows[2].conn);
+    const stream = f.g.sessions.rows[3].outStream().?;
+    f.g.sessions.setOutbound(3, .{ .closing = stream });
+    try std.testing.expect(f.g.peers.scores.setAppScore(f.g.sessions.rows[4].logical.index, -10_000));
+    f.g.overlay.maintain(&context, f.topic);
+    const disconnected = f.g.sessions.rows[6].conn;
+    f.g.connectionClosed(disconnected);
+    f.g.connectionClosed(disconnected);
+    f.g.overlay.setLocal(&context, f.topic, false);
+    f.g.overlay.setLocal(&context, f.topic, false);
+
+    const events = @import("mesh_metrics.zig");
+    const kind = @intFromEnum(@import("topic_policy.zig").Kind.beacon_block);
+    const counts = &f.g.overlay.metrics;
+    try std.testing.expectEqual(@as(u64, 7), counts.additions[kind][@intFromEnum(events.Addition.remote_graft)]);
+    inline for (.{ .prune, .remote_unsubscribe, .direct, .stream_unavailable, .bad_score, .disconnected, .local_unsubscribe }) |reason| {
+        try std.testing.expectEqual(@as(u64, 1), counts.removals[kind][@intFromEnum(@as(events.Removal, reason))]);
+    }
+    try std.testing.expectEqual(@as(u64, 0), counts.removals[kind][@intFromEnum(events.Removal.backoff)]);
+    try std.testing.expectEqual(@as(u64, 0), counts.removals[kind][@intFromEnum(events.Removal.excess)]);
+    try std.testing.expectEqual(@as(usize, 0), f.g.overlay.mesh(f.topic).count());
+}
+
 test "gossip heartbeat admits sessions newer than its score snapshot" {
     var f = try Fixture.init(0);
     defer f.g.deinit();
@@ -104,9 +141,11 @@ test "gossip policy mesh queue pressure preserves required action ownership" {
     f.g.cycle.takeSnapshot(context.sessions, context.peers, context.now);
     f.g.overlay.maintain(&context, f.topic);
     try std.testing.expectEqual(@as(usize, 0), f.g.overlay.mesh(f.topic).count());
+    try std.testing.expectEqual(@as(u64, 0), f.g.overlay.metrics.additions[0][0]);
     f.g.sessions.rows[0].io.tx.cancelStream(&f.g.messages.store);
     f.g.overlay.maintain(&context, f.topic);
     try std.testing.expectEqual(@as(usize, 1), f.g.overlay.mesh(f.topic).count());
+    try std.testing.expectEqual(@as(u64, 1), f.g.overlay.metrics.additions[0][0]);
     f.g.sessions.rows[0].io.tx.cancelStream(&f.g.messages.store);
     try std.testing.expect(f.g.sessions.rows[0].io.tx.injectFrame(bytes, true, null, 2) != null);
     try std.testing.expect(f.g.peers.scores.setAppScore(0, -1));

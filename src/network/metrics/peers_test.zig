@@ -1,12 +1,12 @@
 const ConnectionClients = @import("peers.zig").ConnectionClients;
-const Snapshot = @import("peers.zig").Snapshot;
+const Distribution = @import("peers.zig").Distribution;
 const catalog = @import("../peers/catalog.zig");
 const client = @import("../peers/client.zig");
 const prom = @import("registry.zig");
 const std = @import("std");
 
 test "peer population metrics preserve metadata availability, direction, age and source scores" {
-    var snapshot: Snapshot = .{};
+    var snapshot: Distribution = .{};
     var row: catalog.Row = .{ .connection = .{ .index = 0, .generation = 0 }, .connected_at_ms = 1000 };
     row.reputation.score = -20;
     snapshot.observe(&row, .Unknown, 6000);

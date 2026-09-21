@@ -10,7 +10,7 @@ pub const topic_max = boundary_max * topics_per_boundary_max;
 pub const Kind = topic.Kind;
 pub const kind_count = @typeInfo(Kind).@"enum".fields.len;
 pub const Rule = struct { count: u16 = 0, ssz_min: u32 = 0, ssz_max: u32 = 0 };
-pub const Boundary = struct { digest: [4]u8, rules: [kind_count]Rule = @splat(.{}) };
+pub const Boundary = struct { digest: [4]u8, fork: ?@import("config").ForkSeq = null, epoch: u64 = 0, rules: [kind_count]Rule = @splat(.{}) };
 pub const Match = struct { ordinal: u16, rule: Rule };
 pub const Error = error{InvalidTopicPolicy};
 
@@ -52,6 +52,8 @@ pub const Namespace = struct {
     boundaries: []const Boundary,
     offsets: []const [kind_count]u16,
     subscriptions: []u64,
+    subscriber_counts: []u16,
+    subscription_count: usize = 0,
     topic_count: u16,
     connected_capacity: u16,
     words_per_peer: usize,
@@ -71,6 +73,10 @@ pub const Namespace = struct {
         const subscriptions = try a.alloc(u64, word_count);
         errdefer a.free(subscriptions);
 
+        const subscriber_counts = try a.alloc(u16, count);
+        errdefer a.free(subscriber_counts);
+        @memset(subscriber_counts, 0);
+
         var offset: u16 = 0;
         for (boundaries, offsets) |*boundary, *starts| {
             for (boundary.rules, starts) |rule, *start| {
@@ -80,10 +86,11 @@ pub const Namespace = struct {
         }
         assert(offset == count);
         @memset(subscriptions, 0);
-        return .{ .boundaries = boundaries, .offsets = offsets, .subscriptions = subscriptions, .topic_count = count, .connected_capacity = connected_capacity, .words_per_peer = words_per_peer };
+        return .{ .boundaries = boundaries, .offsets = offsets, .subscriptions = subscriptions, .subscriber_counts = subscriber_counts, .topic_count = count, .connected_capacity = connected_capacity, .words_per_peer = words_per_peer };
     }
 
     pub fn deinit(self: *Namespace, a: std.mem.Allocator) void {
+        a.free(self.subscriber_counts);
         a.free(self.subscriptions);
         a.free(self.offsets);
         a.free(self.boundaries);
@@ -91,7 +98,7 @@ pub const Namespace = struct {
     }
 
     pub fn allocatedBytes(self: *const Namespace) usize {
-        return self.boundaries.len * @sizeOf(Boundary) + self.offsets.len * @sizeOf([kind_count]u16) + self.subscriptions.len * @sizeOf(u64);
+        return self.boundaries.len * @sizeOf(Boundary) + self.offsets.len * @sizeOf([kind_count]u16) + self.subscriptions.len * @sizeOf(u64) + self.subscriber_counts.len * @sizeOf(u16);
     }
 
     pub fn backingBytes(input: []const Boundary, connected_capacity: u16) usize {
@@ -100,7 +107,7 @@ pub const Namespace = struct {
             count += rule.count;
         };
         return input.len * (@sizeOf(Boundary) + @sizeOf([kind_count]u16)) +
-            subscriptionWords(count, connected_capacity) * @sizeOf(u64);
+            subscriptionWords(count, connected_capacity) * @sizeOf(u64) + count * @sizeOf(u16);
     }
 
     fn subscriptionWords(topics: usize, peers: u16) usize {
@@ -125,7 +132,17 @@ pub const Namespace = struct {
         const word = &self.subscriptions[@as(usize, peer) * self.words_per_peer + ordinal / 64];
         const mask = @as(u64, 1) << @as(u6, @intCast(ordinal % 64));
         if ((word.* & mask != 0) == subscribed_value) return;
-        if (subscribed_value) word.* |= mask else word.* &= ~mask;
+        if (subscribed_value) {
+            assert(self.subscriber_counts[ordinal] < self.connected_capacity);
+            word.* |= mask;
+            self.subscriber_counts[ordinal] += 1;
+            self.subscription_count += 1;
+        } else {
+            assert(self.subscriber_counts[ordinal] > 0 and self.subscription_count > 0);
+            word.* &= ~mask;
+            self.subscriber_counts[ordinal] -= 1;
+            self.subscription_count -= 1;
+        }
         self.revision +|= 1;
     }
 
@@ -138,6 +155,17 @@ pub const Namespace = struct {
         assert(peer < self.connected_capacity);
         const words = self.subscriptions[@as(usize, peer) * self.words_per_peer ..][0..self.words_per_peer];
         if (std.mem.allEqual(u64, words, 0)) return;
+        for (words, 0..) |bits, index| {
+            var remaining = bits;
+            for (0..64) |_| {
+                if (remaining == 0) break;
+                const ordinal = index * 64 + @as(usize, @ctz(remaining));
+                assert(ordinal < self.topic_count and self.subscriber_counts[ordinal] > 0);
+                self.subscriber_counts[ordinal] -= 1;
+                self.subscription_count -= 1;
+                remaining &= remaining - 1;
+            }
+        }
         @memset(words, 0);
         self.revision +|= 1;
     }

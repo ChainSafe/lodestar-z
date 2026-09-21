@@ -239,3 +239,24 @@ pub fn step(transport: *transport_mod.Transport, io: std.Io, events: []Event, ac
     if (result.failure) |err| return err;
     return result.progress;
 }
+
+pub fn networkOptions(key: *const keys.KeyPair) @import("network_core.zig").Options {
+    var result: @import("network_core.zig").Options = .{
+        .wait_mode = if (@import("network_core.zig").wait.supported) .native_poll else .portable,
+        .transport = .{ .host = key, .bind = .{ .ip4 = .loopback(0) }, .limits = .{
+            .connections_max = 4,
+            .handshaking_max = 4,
+            .handshaking_per_source_max = 4,
+            .dialing_max = 2,
+        } },
+        .core = @import("managed_test_support.zig").options(),
+        .local = @import("managed_test_support.zig").localState(.{}),
+        .schedule = .{},
+    };
+    result.core.service.reqresp.outbound_per_peer_max = 4;
+    result.core.service.reqresp.forks = &.{
+        .{ .digest = @splat(0), .fork = .phase0 },
+        .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu },
+    };
+    return result;
+}

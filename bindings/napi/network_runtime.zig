@@ -86,6 +86,7 @@ pub const Diagnostics = struct {
     liveBridgeRequestedBytes: usize = 0,
     operationBytes: usize = @sizeOf(commands.Table),
     typedStoreBytes: usize = 0,
+    metricsExportBytes: usize = 0,
     peerLaneBytes: usize = 0,
     ownerShellBytes: usize = @sizeOf(Runtime),
     ownerAllocationBytes: usize = @sizeOf(Owner),
@@ -131,7 +132,7 @@ pub const Stores = struct {
 
 pub const Runtime = struct {
     logs: n.logging.Sink = .{},
-    metrics: n.metrics.Snapshot = .{},
+    metrics: @import("network_metrics.zig").Export = .{},
     metrics_due_ms: u64 = 0,
     health_log_due_ms: u64 = 0,
     test_scenario: if (faults.enabled) faults.Scenario else void = if (faults.enabled) .none else {},
@@ -212,8 +213,14 @@ pub const Runtime = struct {
         if (self.heavy) |heavy| {
             if (heavy.core_live) {
                 heavy.core.shutdown(@import("network_owner.zig").now(heavy.threaded.io()));
-                self.metrics.collect(&heavy.core, self.diag.lastMonotonicMs);
-                self.metrics.stop();
+                if (self.metrics.allocatedBytes() > 0) {
+                    const context = n.metrics.Context.init(&heavy.core, @import("network_owner.zig").now(heavy.threaded.io()), false);
+                    if (self.metrics.render(&context)) |index| {
+                        self.metrics.published = index;
+                        self.metrics.failure = null;
+                    } else |err| self.metrics.failure = err;
+                    self.metrics.finish();
+                }
                 heavy.core.deinit(heavy.threaded.io());
             }
             if (heavy.threaded_live) heavy.threaded.deinit();
@@ -235,6 +242,7 @@ pub const Runtime = struct {
     pub fn release(self: *Runtime) void {
         if (self.refs.fetchSub(1, .acq_rel) == 1) {
             self.destroyOwner();
+            self.metrics.deinit();
             if (self.stores) |stores| stores.destroy();
             if (self.lane) |lane| allocator.destroy(lane);
             if (self.requests) |*requests| requests.deinit();
@@ -306,7 +314,8 @@ pub const Runtime = struct {
             for (requests.cells) |cell| result.copyingPins += @intFromBool(cell.copying);
         }
         result.liveNativeRequestedBytes = if (self.heavy != null) self.diag.nativeRequestedBytes else 0;
-        result.liveBridgeRequestedBytes = @sizeOf(Runtime) + result.peerLaneBytes + result.typedStoreBytes + if (self.heavy != null) @sizeOf(Owner) - @sizeOf(n.NetworkCore) else @as(usize, 0);
+        result.metricsExportBytes = self.metrics.allocatedBytes();
+        result.liveBridgeRequestedBytes = result.metricsExportBytes + @sizeOf(Runtime) + result.peerLaneBytes + result.typedStoreBytes + if (self.heavy != null) @sizeOf(Owner) - @sizeOf(n.NetworkCore) else @as(usize, 0);
 
         if (self.requests) |*requests| result.liveBridgeRequestedBytes += requests.cells.len * @sizeOf(requests_mod.Cell) + result.requests.inputBytes + result.requests.sinkBytes;
         if (self.incoming) |*incoming| {
@@ -323,11 +332,6 @@ pub const Runtime = struct {
             result.liveBridgeRequestedBytes += gossip_mod.Table.backingBytes(gossip.cells.len, gossip.store.bytes.len) + result.gossip.publicationBytes;
         }
         return result;
-    }
-    pub fn metricsSnapshot(self: *Runtime) n.metrics.Snapshot {
-        self.lock();
-        defer self.unlock();
-        return self.metrics;
     }
     pub fn pingLocked(self: *Runtime) void {
         if (self.notification_pending or !self.notify_live or !self.env_alive) return;

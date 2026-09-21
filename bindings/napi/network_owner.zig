@@ -91,6 +91,7 @@ pub fn initialize(self: *Runtime) !void {
     self.diag.quicReceiveWindowBytes = plan.transport.engine.receive_window_bytes;
     self.diag.quicConnectionWindowBytes = plan.transport.engine.connection_window_bytes;
     self.diag.quicStreamWindowBytes = plan.transport.engine.stream_window_bytes;
+    try publishMetrics(self, now(io));
     std.log.scoped(.network_runtime).info("owner_initialized target_peers={d} max_peers={d}", .{ self.diag.resolvedCapacities.targetPeers, self.diag.resolvedCapacities.maxPeers });
 }
 pub fn run(self: *Runtime) void {
@@ -176,24 +177,18 @@ fn serve(self: *Runtime) !void {
 }
 fn publishTurn(self: *Runtime, result: *const n.network_core.Result, timestamp: n.Now, sequence: u64) void {
     const counts = self.heavy.?.core.peerCounts();
-    var metrics: ?n.metrics.Snapshot = null;
     if (timestamp.mono_ms >= self.metrics_due_ms) {
-        metrics = .{};
-        metrics.?.collect(&self.heavy.?.core, timestamp.mono_ms);
+        publishMetrics(self, now(self.heavy.?.threaded.io())) catch |err| {
+            self.lock();
+            self.metrics.failure = err;
+            self.unlock();
+        };
         self.metrics_due_ms = timestamp.mono_ms +| n.metrics.interval_ms;
     }
     self.lock();
-    if (metrics) |*value| {
-        if (self.gossip) |*gossip| {
-            const diagnostics = gossip.snapshot(timestamp.mono_ms);
-            value.live.gossip_expired_executing = diagnostics.expiredExecuting;
-            value.live.gossip_oldest_expired_execution_age_ms = diagnostics.oldestExpiredExecutionAgeMs;
-        }
-        self.metrics = value.*;
-    }
     if (timestamp.mono_ms >= self.health_log_due_ms) {
         const active_requests = self.heavy.?.core.service.reqresp.active();
-        std.log.scoped(.network_runtime).info("network_health peers={d} relevant={d} target={d} requests_outbound={d} requests_inbound={d} dial_started={d} dial_deferred={d} discovery_peers={d} gossip_pressure_resets={d} received_bytes={d} sent_bytes={d}", .{ counts.connected, counts.relevant, self.metrics.config.target, active_requests.outbound, active_requests.inbound, self.metrics.totals.runtime.dial_started, self.metrics.totals.runtime.dial_deferred, self.metrics.live.discovery_peers, self.metrics.totals.gossip_counts.local_pressure_resets, self.metrics.totals.udp.received_bytes, self.metrics.totals.udp.sent_bytes });
+        std.log.scoped(.network_runtime).info("network_health peers={d} relevant={d} target={d} requests_outbound={d} requests_inbound={d} dial_started={d} dial_deferred={d} discovery_peers={d} gossip_pressure_resets={d} received_bytes={d} sent_bytes={d}", .{ counts.connected, counts.relevant, self.heavy.?.core.peer_manager.catalog.options.target_peers, active_requests.outbound, active_requests.inbound, self.heavy.?.core.counters.dial_started, self.heavy.?.core.counters.dial_deferred, if (self.heavy.?.core.discovery) |discovery| discovery.transport.engine.peerCount() else 0, self.heavy.?.core.service.gossipsub.counters.local_pressure_resets, self.heavy.?.core.transport.udp.counters.received_bytes, self.heavy.?.core.transport.udp.counters.sent_bytes });
         self.health_log_due_ms = timestamp.mono_ms +| 30000;
     }
     if (self.lane) |lane| {
@@ -219,4 +214,20 @@ fn publishTurn(self: *Runtime, result: *const n.network_core.Result, timestamp: 
 pub fn now(io: std.Io) n.Now {
     const mono = std.Io.Timestamp.now(io, .awake);
     return .{ .mono_ms = @intCast(@max(0, mono.toMilliseconds())), .unix_s = std.Io.Timestamp.now(io, .real).toSeconds() };
+}
+
+fn publishMetrics(self: *Runtime, timestamp: n.Now) n.metrics.registry.Error!void {
+    var context = n.metrics.Context.init(&self.heavy.?.core, timestamp, true);
+    self.lock();
+    if (self.gossip) |*table| {
+        const state = table.snapshot(timestamp.mono_ms);
+        context.expired_executing = state.expiredExecuting;
+        context.oldest_expired_execution_age_ms = state.oldestExpiredExecutionAgeMs;
+    }
+    self.unlock();
+    const index = try self.metrics.render(&context);
+    self.lock();
+    self.metrics.published = index;
+    self.metrics.failure = null;
+    self.unlock();
 }

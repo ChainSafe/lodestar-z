@@ -19,6 +19,7 @@ test "peer discovery uses the configured custody minimum only for an absent ENR 
     try std.testing.expectEqual(@as(u2, 2), q.rows[0].priority);
     var out: [1]mod.DialIntent = undefined;
     try std.testing.expectEqual(@as(usize, 1), q.poll(0, &out));
+    try std.testing.expectEqual(@as(u64, 1), q.selected_attempts[@intFromEnum(mod.Source.discovery)]);
     candidate.sequence += 1;
     candidate.custody_group_count = 0;
     try std.testing.expectError(error.InvalidCandidate, q.enqueueDiscovered(&candidate, &context, &wanted, 0));
@@ -95,6 +96,7 @@ test "peer dial metrics count each completed attempt once and exclude local defe
     var out: [1]mod.DialIntent = undefined;
     try std.testing.expectEqual(@as(usize, 1), q.poll(0, &out));
     try std.testing.expect(q.dialDeferred(out[0].token, 100));
+    try std.testing.expectEqual(@as(u64, 1), q.selected_attempts[@intFromEnum(mod.Source.direct)]);
     try std.testing.expectEqual(@as(u64, 0), q.durations[1].count);
     try std.testing.expectEqual(@as(usize, 1), q.poll(1100, &out));
     const conn: t.Handle = .{ .index = 0, .generation = 1 };
@@ -112,6 +114,8 @@ test "peer dial metrics count each completed attempt once and exclude local defe
     try std.testing.expect(!q.dialFailed(out[0].token, due + 300));
     try std.testing.expectEqual(@as(u64, 1), q.durations[1].count);
     try std.testing.expectEqual(@as(u128, 250), q.durations[1].sum);
+    try std.testing.expectEqual(@as(u64, 3), q.selected_attempts[@intFromEnum(mod.Source.direct)]);
+    try std.testing.expectEqual(@as(u64, 0), q.selected_attempts[@intFromEnum(mod.Source.manual)]);
 }
 
 test "peer dial custody diagnostics count unfinished derivations without mutating retained coverage" {

@@ -128,7 +128,7 @@ export function applicationConfig(): NativeApplicationConfig {
     ...config,
     identify: {agentVersion: "lodestar-z/application-test", protocolVersion: "eth2/1.0.0"},
     resources: {
-      bridgeBudgetBytes: 16 * 1024 * 1024,
+      bridgeBudgetBytes: 32 * 1024 * 1024,
       connectionCapacity: 16,
       dialingCapacity: 4,
       handshakingCapacity: 8,

@@ -5,26 +5,7 @@ const t = @import("peers/types.zig");
 const keys = @import("wire/keys.zig");
 const d = @import("discv5");
 
-fn options(key: *const keys.KeyPair) runtime.Options {
-    var result: runtime.Options = .{
-        .wait_mode = if (runtime.wait.supported) .native_poll else .portable,
-        .transport = .{ .host = key, .bind = .{ .ip4 = .loopback(0) }, .limits = .{
-            .connections_max = 4,
-            .handshaking_max = 4,
-            .handshaking_per_source_max = 4,
-            .dialing_max = 2,
-        } },
-        .core = @import("managed_test_support.zig").options(),
-        .local = @import("managed_test_support.zig").localState(.{}),
-        .schedule = .{},
-    };
-    result.core.service.reqresp.outbound_per_peer_max = 4;
-    result.core.service.reqresp.forks = &.{
-        .{ .digest = @splat(0), .fork = .phase0 },
-        .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu },
-    };
-    return result;
-}
+const options = @import("test_support.zig").networkOptions;
 
 const MaintenancePeers = struct {
     nodes: []runtime.NetworkCore,
@@ -156,10 +137,12 @@ test "managed runtime metrics copy peer processing work without advancing it" {
     const peer_work = node.peer_manager.counters;
     const dial_work = node.peer_manager.dial_queue.counters;
     try std.testing.expect(peer_work.catalog_deadline_rows > 0);
-    var snapshot: @import("metrics/snapshot.zig").Snapshot = .{};
-    snapshot.collect(&node, node.last_now.mono_ms);
-    try std.testing.expectEqualDeep(peer_work, snapshot.totals.peer_work);
-    try std.testing.expectEqualDeep(dial_work, snapshot.totals.dial);
+    const metrics = @import("metrics/export.zig");
+    const context = metrics.Context.init(&node, node.last_now, true);
+    const bytes = try std.testing.allocator.alloc(u8, metrics.fixed_text_capacity);
+    defer std.testing.allocator.free(bytes);
+    var writer = std.Io.Writer.fixed(bytes);
+    try metrics.write(&context, &writer);
     try std.testing.expectEqualDeep(peer_work, node.peer_manager.counters);
     try std.testing.expectEqualDeep(dial_work, node.peer_manager.dial_queue.counters);
 }
@@ -1599,34 +1582,22 @@ test "managed runtime metrics aggregate subnets and count distinct mesh peers" {
     try std.testing.expect(try pair.a.applyIntent(&a_intent, pair.a.last_now));
     try std.testing.expect(try pair.b.applyIntent(&b_intent, pair.b.last_now));
     try pair.a.connect(&pair.b.peerId(), &.{pair.b.localAddress()}, pair.a.last_now);
-    var snapshot: @import("metrics/snapshot.zig").Snapshot = .{};
+    const metrics = @import("metrics/export.zig");
     const start = pair.a.last_now.mono_ms;
     var mesh_count: usize = 0;
     for (0..3000) |_| {
         _ = try pair.pump();
         if (pair.a.last_now.mono_ms - start > 10_000) break;
-        snapshot.collect(&pair.a, pair.a.last_now.mono_ms);
-        mesh_count = 0;
-        for (snapshot.live.topics[0..snapshot.live.topic_count]) |entry| mesh_count += entry.mesh;
+        mesh_count = pair.a.service.gossipsub.resourceSnapshot().mesh_members;
         if (mesh_count == 3) break;
     }
+    const context = metrics.Context.init(&pair.a, pair.a.last_now, true);
     try std.testing.expectEqual(@as(usize, 3), mesh_count);
-    try std.testing.expectEqual(@as(usize, 1), snapshot.live.peers);
-    try std.testing.expectEqual(@as(usize, 2), snapshot.live.topic_count);
-    try std.testing.expectEqual(@as(u16, 1), snapshot.live.scores.values.count);
+    try std.testing.expectEqual(@as(usize, 1), context.peer_count);
+    try std.testing.expectEqual(@as(u16, 1), context.scores.values.count);
     var clients: usize = 0;
-    for (snapshot.live.mesh_clients) |count| clients += count;
+    for (context.mesh_clients) |count| clients += count;
     try std.testing.expectEqual(@as(usize, 1), clients);
-    for (snapshot.live.topics[0..snapshot.live.topic_count]) |entry| {
-        const expected: usize = if (entry.kind == .blob_sidecar) 2 else 1;
-        try std.testing.expectEqual(expected, entry.mesh);
-        try std.testing.expectEqual(expected, entry.subscribers);
-        try std.testing.expectEqual(@as(u16, 1), snapshot.live.scores.mesh_scores[@intFromEnum(entry.kind)].count);
-    }
-    snapshot.stop();
-    try std.testing.expectEqual(@as(usize, 0), snapshot.live.peers);
-    try std.testing.expectEqual(@as(usize, 0), snapshot.live.topic_count);
-    for (snapshot.live.mesh_clients) |count| try std.testing.expectEqual(@as(usize, 0), count);
 }
 
 test "managed runtime local intent fork BPO announcements remembered peer and event borrows" {

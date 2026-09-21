@@ -123,8 +123,11 @@ fn prepareApplicationStorage(runtime: *Runtime, app: *const application_cfg.Conf
     const gossip_capacity = gossip_options.validation_capacity;
     const gossip_bytes = if (gossip_options.processor_limits) |work_limits| n.gossip_processor.limits_mod.bytes(&work_limits) else gossip_options.mcache_arena_bytes;
     const gossip_backing = gossip.Table.backingBytes(gossip_capacity, gossip_bytes);
-    const bridge = gossip_backing + incoming_capacity * @sizeOf(incoming.Cell) + request_capacity * @sizeOf(requests.Cell) + @sizeOf(Runtime) + @sizeOf(r.Owner) - @sizeOf(n.NetworkCore) + r.Stores.bytes(runtime.peer_capacity) + @sizeOf(projection.Lane);
+    const chain = &runtime.heavy.?.config.chain;
+    const metrics_capacity = n.metrics.textCapacity(chain.topics[0..chain.supported_count]);
+    const bridge = 2 * metrics_capacity + gossip_backing + incoming_capacity * @sizeOf(incoming.Cell) + request_capacity * @sizeOf(requests.Cell) + @sizeOf(Runtime) + @sizeOf(r.Owner) - @sizeOf(n.NetworkCore) + r.Stores.bytes(runtime.peer_capacity) + @sizeOf(projection.Lane);
     if (bridge > app.resources.bridgeBudgetBytes) return error.NetworkBridgeBudgetExceeded;
+    runtime.metrics = try @import("network_metrics.zig").Export.init(metrics_capacity);
     runtime.requests = try requests.Table.init(r.allocator, request_capacity, &runtime.payload_budget);
     runtime.payload_budget.limit = app.resources.bridgeBudgetBytes - bridge;
     try faults.check(.incoming_table);
@@ -260,18 +263,15 @@ fn identity(env: napi.Env, value: *const r.Identity) !Value {
 }
 
 pub fn getMetrics(self: *@This()) !js.String {
-    const metrics = @import("network").metrics;
     const runtime = try self.owner();
-    const snapshot = runtime.metricsSnapshot();
+    runtime.lock();
+    defer runtime.unlock();
     const logs = runtime.logs.snapshot();
-    const buffer = try r.allocator.alloc(u8, metrics.text_capacity);
-    defer r.allocator.free(buffer);
-    var writer: std.Io.Writer = .fixed(buffer);
-    metrics.write(&snapshot, &logs, &writer) catch |err| switch (err) {
-        error.WriteFailed, error.MetricCapacity => return error.NetworkMetricsCapacity,
-        error.DuplicateMetric => return error.NetworkMetricsSchema,
+    const metrics_text = runtime.metrics.text(&logs) catch |err| return switch (err) {
+        error.WriteFailed, error.MetricCapacity => error.NetworkMetricsCapacity,
+        error.DuplicateMetric => error.NetworkMetricsSchema,
     };
-    return js.String.from(writer.buffered());
+    return js.String.from(metrics_text);
 }
 
 pub fn drainLogs(self: *@This(), limit: js.Value) !js.Value {

@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const Unit = enum { scalar, seconds, milliseconds };
+pub const Unit = enum { scalar, seconds, milliseconds, nanoseconds };
 
 pub const Options = struct {
     unit: Unit = .scalar,
@@ -72,7 +72,11 @@ pub fn Histogram(comptime Value: type, comptime bounds_: []const Value, comptime
                 @floatFromInt(value)
             else
                 value;
-            return if (unit == .milliseconds) number / 1000 else number;
+            return switch (unit) {
+                .milliseconds => number / 1000,
+                .nanoseconds => number / 1_000_000_000,
+                else => number,
+            };
         }
     };
 }

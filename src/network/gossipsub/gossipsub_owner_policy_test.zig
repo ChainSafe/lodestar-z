@@ -313,6 +313,10 @@ test "gossip policy review I4 heartbeat fanout and advertisements share one snap
     support.heartbeat(&g, start);
     @import("session_io.zig").finishPump(&g, start);
     try std.testing.expectEqual(@as(usize, 1), g.cycle.cursor);
+    try std.testing.expectEqual(@as(u64, 0), g.maintenance.cycles.count);
+    try std.testing.expectEqual(@as(u64, 1), g.maintenance.setup.count);
+    try std.testing.expectEqual(@as(u64, 1), g.maintenance.topics.count);
+    const cycle_started = g.maintenance.started_ns.?;
     const retained = g.overlay.fanoutMembers(second).findFirstSet().?;
     var advertised: u16 = 0;
     for (0..9) |i| if (!g.overlay.fanoutMembers(second).isSet(i)) {
@@ -325,6 +329,8 @@ test "gossip policy review I4 heartbeat fanout and advertisements share one snap
     g.opportunistic_at = 2;
     support.heartbeat(&g, .{ .mono_ms = 2, .unix_s = 0 });
     try std.testing.expect(!g.cycle.opportunistic);
+    try std.testing.expectEqual(cycle_started, g.maintenance.started_ns.?);
+    try std.testing.expectEqual(@as(u64, 1), g.counters.heartbeats_skipped);
     @import("session_io.zig").finishPump(&g, .{ .mono_ms = 2, .unix_s = 0 });
     try std.testing.expect(g.overlay.fanoutMembers(second).isSet(retained));
     try std.testing.expectEqual(@as(usize, 8), g.overlay.fanoutMembers(second).count());
@@ -332,6 +338,11 @@ test "gossip policy review I4 heartbeat fanout and advertisements share one snap
     try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[retained].io.tx.control.count);
     @import("session_io.zig").finishPump(&g, .{ .mono_ms = 3, .unix_s = 0 });
     try std.testing.expect(!g.cycle.isActive());
+    try std.testing.expect(g.maintenance.started_ns == null);
+    try std.testing.expectEqual(@as(u64, 1), g.maintenance.cycles.count);
+    try std.testing.expectEqual(@as(u64, 2), g.maintenance.setup.count);
+    try std.testing.expectEqual(@as(u64, 3), g.maintenance.topics.count);
+    try std.testing.expect(g.maintenance.completed_unix_s > 0);
     for (g.sessions.rows) |*peer| peer.io.tx.cancelStream(&g.messages.store);
     g.last_now_ms = 701;
     support.heartbeat(&g, .{ .mono_ms = 701, .unix_s = 0 });

@@ -78,6 +78,10 @@ pub const PeerManager = struct {
     stopped: bool = false,
     quiescing: bool = false,
     counters: Counters = .{},
+    metrics_io: std.Io = std.Io.Threaded.global_single_threaded.io(),
+    selection_duration: @import("metrics/timing.zig").Duration = .{},
+    requested_connect: u64 = 0,
+    requested_disconnect: [std.meta.fields(t.DisconnectReason).len]u64 = @splat(0),
 
     pub const Counters = struct {
         rejected: u64 = 0,
@@ -414,6 +418,9 @@ pub const PeerManager = struct {
         self.syncIdentity(&candidate.peer, now);
     }
     fn refreshSelection(self: *PeerManager, service: *service_mod.Service, now: Now) void {
+        const timing = @import("metrics/timing.zig");
+        const start = timing.now(self.metrics_io);
+        defer self.selection_duration.observe(timing.now(self.metrics_io) -| start);
         self.counters.selections +|= 1;
         self.counters.selection_rows +|= self.catalog.rows.len;
         self.selection_deadline = null;
@@ -434,7 +441,9 @@ pub const PeerManager = struct {
             }
         }
         self.selection = policy.selectWithReplacement(self.policy_scratch[0..input_count], &self.demand, self.catalog.options, self.policy_seed, now.mono_ms >= self.replacement_after_ms);
+        self.requested_connect +|= self.selection.dial_budget;
         for (self.policy_scratch[0..input_count], 0..) |input, i| if (self.selection.reasons[i]) |reason| {
+            self.requested_disconnect[@intFromEnum(reason)] +|= 1;
             if (self.disconnect(input.peer, reason, now)) self.counters.policy_disconnects +|= 1;
             if (reason == .count_pruning) self.replacement_after_ms = now.mono_ms +| replacement_interval_ms;
         };
