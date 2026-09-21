@@ -147,6 +147,18 @@ pub const EpochCache = struct {
         return try EpochShufflingRc.init(allocator, epoch_shuffling);
     }
 
+    fn initEpochShufflingRcFromList(
+        allocator: Allocator,
+        state: *AnyBeaconState,
+        active_indices: *std.ArrayList(ValidatorIndex),
+        epoch: Epoch,
+    ) !*EpochShufflingRc {
+        const indices = try active_indices.toOwnedSlice(allocator);
+        errdefer allocator.free(indices);
+
+        return initEpochShufflingRc(allocator, state, indices, epoch);
+    }
+
     fn initCurrentSyncCommitteeCacheRc(
         allocator: Allocator,
         state: *AnyBeaconState,
@@ -271,28 +283,28 @@ pub const EpochCache = struct {
             total_active_balance_increments = 1;
         }
 
-        const previous_shuffling_rc = rc: {
-            const active_indices = try previous_active_indices_array_list.toOwnedSlice(allocator);
-            errdefer allocator.free(active_indices);
-
-            break :rc try initEpochShufflingRc(allocator, state, active_indices, previous_epoch);
-        };
+        const previous_shuffling_rc = try initEpochShufflingRcFromList(
+            allocator,
+            state,
+            &previous_active_indices_array_list,
+            previous_epoch,
+        );
         errdefer previous_shuffling_rc.unref();
 
-        const current_shuffling_rc = rc: {
-            const active_indices = try current_active_indices_array_list.toOwnedSlice(allocator);
-            errdefer allocator.free(active_indices);
-
-            break :rc try initEpochShufflingRc(allocator, state, active_indices, current_epoch);
-        };
+        const current_shuffling_rc = try initEpochShufflingRcFromList(
+            allocator,
+            state,
+            &current_active_indices_array_list,
+            current_epoch,
+        );
         errdefer current_shuffling_rc.unref();
 
-        const next_shuffling_rc = rc: {
-            const active_indices = try next_active_indices_array_list.toOwnedSlice(allocator);
-            errdefer allocator.free(active_indices);
-
-            break :rc try initEpochShufflingRc(allocator, state, active_indices, next_epoch);
-        };
+        const next_shuffling_rc = try initEpochShufflingRcFromList(
+            allocator,
+            state,
+            &next_active_indices_array_list,
+            next_epoch,
+        );
         errdefer next_shuffling_rc.unref();
 
         const fork_seq = config.forkSeqAtEpoch(current_epoch);
