@@ -233,8 +233,6 @@ test "effectiveBalanceIncrementsAppend grows in place only when the list is not 
 }
 
 test "memory_safety: attesting indices belong to the caller's allocator, not the cache's" {
-    // The cache and the caller deliberately use different allocators. The returned list is
-    // caller-owned, so allocating it from the cache's allocator would free across allocators.
     var cache_allocator_state: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(cache_allocator_state.deinit() == .ok);
     const cache_allocator = cache_allocator_state.allocator();
@@ -276,9 +274,6 @@ test "memory_safety: attesting indices belong to the caller's allocator, not the
     try electra_attestation.aggregation_bits.set(caller_allocator, 0, true);
     try electra_attestation.committee_bits.set(0, true);
 
-    // Each list must be fully accounted for by the caller's allocator. A list allocated
-    // from the cache's allocator would leave `cache_allocator_state` non-`.ok` at teardown
-    // and make `caller_allocator` free memory it never handed out.
     var phase0_indices = try epoch_cache.getAttestingIndicesPhase0(caller_allocator, &phase0_attestation);
     phase0_indices.deinit(caller_allocator);
 

@@ -86,13 +86,7 @@ const ShufflingJob = struct {
     }
 };
 
-/// Borrowed handle to growable storage owned by `ReusedEpochTransitionCache`.
-///
-/// The owner resizes and frees this storage with the allocator it retained at first
-/// initialization, so growing it through a per-call allocator would hand the owner a
-/// buffer it cannot free. The handle carries the owner's allocator and exposes no
-/// allocator parameter, which keeps that mismatch unrepresentable at call sites.
-pub const BorrowedBoolArray = struct {
+const BorrowedBoolArray = struct {
     array: *BoolArray,
     owner_allocator: Allocator,
 
@@ -221,8 +215,7 @@ pub fn deinitReusedEpochTransitionCache(io: std.Io) void {
 /// `init` through `deinit` and exclude `deinitReusedEpochTransitionCache` throughout.
 /// The internal lock protects acquisition and resizing, not the borrowed lifetime.
 pub const EpochTransitionCache = struct {
-    /// Allocator for the lists this cache owns. Retained so `deinit` and in-flight growth
-    /// cannot pick a different allocator than `init` used.
+    /// Allocator used for cache-owned lists.
     allocator: Allocator,
     prev_epoch: Epoch,
     current_epoch: Epoch,

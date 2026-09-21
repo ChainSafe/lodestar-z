@@ -8,8 +8,6 @@ const GENESIS_EPOCH = @import("preset").GENESIS_EPOCH;
 const getAttestationDeltas = @import("./get_attestation_deltas.zig").getAttestationDeltas;
 const getRewardsAndPenaltiesAltair = @import("./get_rewards_and_penalties.zig").getRewardsAndPenaltiesAltair;
 
-/// `cache` takes ownership of the recomputed balances, so they are allocated with the
-/// cache's own allocator rather than a caller-chosen one.
 pub fn processRewardsAndPenalties(
     comptime fork: ForkSeq,
     config: *const BeaconConfig,

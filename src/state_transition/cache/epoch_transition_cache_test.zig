@@ -90,9 +90,6 @@ test "memory_safety: borrowed scratch growth stays with the owner across sequent
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
     defer test_state.deinit();
 
-    // The reused cache is a process-global singleton whose owner is fixed by whichever
-    // caller created it first. `TestCachedBeaconState.init` already did, so the second
-    // caller below borrows storage it does not own.
     var second_caller = std.testing.FailingAllocator.init(allocator, .{});
 
     var cache = try EpochTransitionCache.init(
@@ -108,15 +105,12 @@ test "memory_safety: borrowed scratch growth stays with the owner across sequent
     const owner_is_not_caller = scratch.owner_allocator.ptr != second_caller.allocator().ptr;
     try std.testing.expect(owner_is_not_caller);
 
-    // Grow past capacity so the append has to reallocate, which is where a per-call
-    // allocator would take over storage the owner later resizes and frees.
     const grown_len = scratch.array.capacity + 1;
     const bytes_before = second_caller.allocated_bytes;
     while (scratch.items().len < grown_len) {
         try scratch.append(true);
     }
 
-    // The growth must be invisible to the borrowing caller's allocator.
     try std.testing.expectEqual(bytes_before, second_caller.allocated_bytes);
     try std.testing.expectEqual(grown_len, scratch.items().len);
 
