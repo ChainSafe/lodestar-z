@@ -180,7 +180,7 @@ pub fn addValidatorToRegistry(
     // - Simplify genesis fn applyDeposits(): effectiveBalanceIncrements is populated immediately
     // - Keep related code together to reduce risk of breaking this cache
     // - Should have equal performance since it sets a value in a flat array
-    try epoch_cache.effectiveBalanceIncrementsSet(allocator, validator_index, effective_balance);
+    try epoch_cache.effectiveBalanceIncrementsAppend(allocator, validator_index, effective_balance);
 
     try epoch_cache.pubkey_cache.append(io, pubkey.*, validator_index);
 

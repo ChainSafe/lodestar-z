@@ -901,10 +901,26 @@ pub const EpochCache = struct {
         self.current_sync_committee_indexed = current_sync_committee_indexed_rc;
     }
 
-    /// This is different from typescript version: only allocate new EffectiveBalanceIncrements if needed
-    pub fn effectiveBalanceIncrementsSet(self: *EpochCache, allocator: Allocator, index: usize, effective_balance: u64) !void {
+    /// Append an `effective_balance`, extending the arraylist if necessary
+    /// and detach it when shared.
+    /// 
+    /// We directly write to indices (without extending the arraylist) in two places:
+    /// 1) process_effective_balance_updates.zig
+    /// 2) upgrade_state_to_electra.zig
+    ///
+    /// These calls never grow the arraylist, which makes direct writes safe.
+    ///
+    /// SAFETY: `index` must equal the current effective-balance-increments length.
+    pub fn effectiveBalanceIncrementsAppend(
+        self: *EpochCache,
+        allocator: Allocator,
+        index: usize,
+        effective_balance: u64,
+    ) !void {
         const old = self.effective_balance_increments.get();
-        if (index >= old.items.len) grow: {
+        std.debug.assert(index == old.items.len);
+
+        grow: {
             if (index < old.capacity) {
                 // Fast path: allow `self.effective_balance_increments` to grow
                 // in-place while this is the only reference.
