@@ -60,11 +60,12 @@ test("compact subscriptions reject invalid boundaries and masks atomically", asy
   }
 });
 
-test("demand target typed arrays validate bounds, offsets and zero padding", async () => {
+test("demand validates fields and target array bounds, offsets and zero padding atomically", async () => {
   const config = applicationConfig();
   const runtime = startRuntime(config);
   const intent = localIntent(config);
   try {
+    intent.demand.attnets[0] = 3;
     const backing = Uint16Array.of(65535, 0, 0, 65535);
     intent.demand.groupTargets = backing.subarray(1, 3);
     intent.demand.custodyGroupTargets = new Uint16Array(0);
@@ -72,6 +73,10 @@ test("demand target typed arrays validate bounds, offsets and zero padding", asy
     const same = structuredClone(intent);
     same.demand.groupTargets = new Uint16Array(128);
     same.demand.custodyGroupTargets = new Uint16Array(128);
+    expect((await runtime.applyIntent(same, config.initialSlot)).changed).toBe(false);
+    const expiring = {...same, demand: {...same.demand, expiresAtSlot: config.initialSlot + 2n}};
+    await expect(runtime.applyIntent(expiring, config.initialSlot + 1n)).rejects.toThrow("InvalidNetworkConfig");
+    expect(runtime.diagnostics().currentSlot).toBe(config.initialSlot);
     expect((await runtime.applyIntent(same, config.initialSlot)).changed).toBe(false);
     for (const targets of [new Uint16Array(129), Uint16Array.of(config.resources.maxPeers + 1)]) {
       intent.demand.groupTargets = targets;

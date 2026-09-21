@@ -131,6 +131,7 @@ pub const Coverage = struct {
     groups: @import("custody.zig").Groups = .initEmpty(),
     custody_groups: @import("custody.zig").Groups = .initEmpty(),
 };
+/// Desired coverage persists until replacement; the host owns validator duty expiry.
 pub const Demand = struct {
     attnets: u64 = 0,
     syncnets: u4 = 0,
@@ -138,7 +139,6 @@ pub const Demand = struct {
     custody_group_targets: [128]u16 = @splat(0),
     attestation_target: u16 = 1,
     sync_target: u16 = 1,
-    expires_at_slot: u64 = 0,
 
     pub fn wanted(self: *const Demand) Coverage {
         var result: Coverage = .{ .attnets = self.attnets, .syncnets = self.syncnets };

@@ -601,7 +601,7 @@ pub const NetworkCore = struct {
         self.last_now = tick;
         result.counts = managed.process(&self.peer_manager, &self.service, &self.transport.engine, self.native_events[0..result.transport.events], self.activity[0..result.transport.activity], tick, current_slot, outputs.peers, outputs.application, outputs.gossipsub);
         if (!self.peer_manager.stopped and !self.peer_manager.quiescing) {
-            // Expiry and this turn's coverage selection already ran, without a second protocol pump.
+            // This turn's coverage selection already ran, without a second protocol pump.
             if (self.discovery) |owned| {
                 const need = self.peer_manager.discoveryNeed();
                 owned.coordinator.request(need.query(tick.mono_ms +| 1_000), tick.mono_ms) catch unreachable;

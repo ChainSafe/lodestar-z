@@ -8,7 +8,7 @@ const SubnetPeers = Distribution(&.{ 0, 2, 4, 6, 8, 12 });
 pub fn write(manager: *const @import("../peer_manager.zig").PeerManager, running: bool, w: *prom.Encoder) prom.Error!void {
     const empty: policy.Result = .{};
     const selection = if (running) &manager.selection else &empty;
-    const wanted: t.Coverage = if (running and manager.current_slot < manager.demand.expires_at_slot) manager.demand.wanted() else .{};
+    const wanted: t.Coverage = if (running) manager.demand.wanted() else .{};
     const group_count = manager.local.fork.custody_groups;
     var catalog_entries: usize = 0;
     var managed_connections: usize = 0;

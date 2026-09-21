@@ -160,13 +160,12 @@ test "metrics preserve outgoing queue refusals across session retirement and reu
     try contains(try f.render(false), "lodestar_native_gossip_queue_drops_total{reason=\"data_descriptors\"} 5\n");
 }
 
-test "metrics use retained usable coverage and expire active subnet demand" {
+test "metrics use retained usable coverage and accepted demand until replacement or shutdown" {
     var f = try Fixture.init(&.{});
     defer f.deinit();
     const manager = &f.node.peer_manager;
     manager.local.fork.custody_groups = 128;
-    manager.current_slot = 9;
-    manager.demand = .{ .attnets = 3, .syncnets = 1, .attestation_target = 2, .sync_target = 1, .expires_at_slot = 10 };
+    manager.demand = .{ .attnets = 3, .syncnets = 1, .attestation_target = 2, .sync_target = 1 };
     manager.demand.group_targets[0] = 2;
     const selection = @import("peers/policy.zig");
     var inputs = [_]selection.Input{ .{ .coverage = .{ .attnets = 1, .syncnets = 1 }, .outbound = true }, .{ .coverage = .{ .attnets = 3 }, .reject = .banned } };
@@ -178,7 +177,9 @@ test "metrics use retained usable coverage and expire active subnet demand" {
     try contains(output, "lodestar_discovery_subnet_peers_to_connect{type=\"attnets\"} 3\n");
     try contains(output, "lodestar_native_peers_per_active_subnet_count{type=\"attnets\"} 2\n");
     try contains(output, "lodestar_native_peer_disconnects_requested{reason=\"banned\"} 1\n");
-    manager.current_slot = 10;
+    try contains(try f.render(false), "lodestar_native_peers_per_active_subnet_count{type=\"attnets\"} 0\n");
+    try contains(try f.render(true), "lodestar_native_peers_per_active_subnet_count{type=\"attnets\"} 2\n");
+    try manager.setDemand(&.{});
     manager.selection = .{};
     try contains(try f.render(true), "lodestar_native_peers_per_active_subnet_count{type=\"attnets\"} 0\n");
 }

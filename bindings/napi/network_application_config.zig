@@ -102,13 +102,12 @@ pub fn parseIntent(value: Value, out: *Intent, max_peers: u16) !void {
     out.value.update.capabilities = .{ .receive = .initEmpty(), .request = .initEmpty() };
     out.value.update.endpoints = try cfg.parseEndpoints(try cfg.get(update, "endpoints"));
     const demand = try cfg.get(value, "demand");
-    try cfg.completeObject(demand, &.{ "attnets", "syncnets", "groupTargets", "custodyGroupTargets", "attestationTarget", "syncTarget", "expiresAtSlot" });
+    try cfg.completeObject(demand, &.{ "attnets", "syncnets", "groupTargets", "custodyGroupTargets", "attestationTarget", "syncTarget" });
     const attnets = try cfg.fixed(8, try cfg.get(demand, "attnets"));
     out.value.demand.attnets = std.mem.readInt(u64, &attnets, .little);
     out.value.demand.syncnets = @intCast(try cfg.integer(try cfg.get(demand, "syncnets"), 15));
     out.value.demand.attestation_target = @intCast(try cfg.integer(try cfg.get(demand, "attestationTarget"), max_peers));
     out.value.demand.sync_target = @intCast(try cfg.integer(try cfg.get(demand, "syncTarget"), max_peers));
-    out.value.demand.expires_at_slot = try cfg.bigint(try cfg.get(demand, "expiresAtSlot"));
     try targets(try cfg.get(demand, "groupTargets"), &out.value.demand.group_targets, max_peers);
     try targets(try cfg.get(demand, "custodyGroupTargets"), &out.value.demand.custody_group_targets, max_peers);
     const subscriptions = try cfg.get(value, "subscriptions");

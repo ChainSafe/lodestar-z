@@ -473,7 +473,7 @@ test "managed runtime sequence exhaustion rolls back and future fork hints stay 
     try std.testing.expectEqualSlices(u8, record.slice(), node.localRecord().?.slice());
 }
 
-test "managed runtime demand expires before discovery submission without another borrow window" {
+test "managed runtime demand persists until replacement and reaches discovery after selection" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{23}));
     var opts = options(&key);
     opts.core.peers.target_peers = 0;
@@ -482,13 +482,13 @@ test "managed runtime demand expires before discovery submission without another
     var node: runtime.NetworkCore = undefined;
     try node.initRaw(std.testing.allocator, std.testing.io, opts);
     defer node.deinit(std.testing.io);
-    try node.setDemand(&.{ .attnets = 1, .expires_at_slot = 5 });
+    try node.setDemand(&.{ .attnets = 1 });
     const now = try @import("transport.zig").currentTime(std.testing.io);
     _ = node.step(std.testing.io, now, 4, .{}, 0);
     try std.testing.expectEqual(@as(u8, 1), node.discovery.?.coordinator.demand.attnets[0]);
     const view: *const runtime.NetworkCore = &node;
     const evaluated = view.coverageDeficits();
-    try node.setDemand(&.{ .attnets = 2, .expires_at_slot = 5 });
+    try node.setDemand(&.{ .attnets = 2 });
     try std.testing.expectEqual(node.last_now.mono_ms, node.nextWakeup(node.last_now, .{}).?);
     try std.testing.expectEqualDeep(evaluated, view.coverageDeficits());
     try std.testing.expectEqual(@as(u8, 1), view.peer_manager.discoveryNeed().attnets[0]);
@@ -496,11 +496,19 @@ test "managed runtime demand expires before discovery submission without another
     _ = node.step(std.testing.io, node.last_now, 4, .{}, 0);
     try std.testing.expectEqual(@as(u8, 2), view.peer_manager.discoveryNeed().attnets[0]);
     try std.testing.expectEqual(@as(u8, 2), node.discovery.?.coordinator.demand.attnets[0]);
-    _ = node.step(std.testing.io, node.last_now, 5, .{}, 0);
+    _ = node.step(std.testing.io, node.last_now, 10_000, .{}, 0);
+    try std.testing.expectEqual(@as(u16, 1), view.coverageDeficits().attestation);
+    try std.testing.expectEqual(@as(u8, 2), view.peer_manager.discoveryNeed().attnets[0]);
+    try std.testing.expectEqual(@as(u8, 2), node.discovery.?.coordinator.demand.attnets[0]);
+    try std.testing.expectError(error.InvalidDemand, node.setDemand(&.{ .attnets = 4, .attestation_target = 0 }));
+    _ = node.step(std.testing.io, node.last_now, 10_001, .{}, 0);
+    try std.testing.expectEqual(@as(u16, 1), view.coverageDeficits().attestation);
+    try std.testing.expectEqual(@as(u8, 2), view.peer_manager.discoveryNeed().attnets[0]);
+    try std.testing.expectEqual(@as(u8, 2), node.discovery.?.coordinator.demand.attnets[0]);
+    try node.setDemand(&.{});
+    _ = node.step(std.testing.io, node.last_now, 10_001, .{}, 0);
     try std.testing.expectEqual(@as(u16, 0), view.coverageDeficits().attestation);
     try std.testing.expectEqual(@as(u8, 0), view.peer_manager.discoveryNeed().attnets[0]);
-    try std.testing.expectEqual(@as(u8, 0), node.discovery.?.coordinator.demand.attnets[0]);
-    _ = node.step(std.testing.io, node.last_now, 4, .{}, 0);
     try std.testing.expectEqual(@as(u8, 0), node.discovery.?.coordinator.demand.attnets[0]);
 }
 
@@ -1401,7 +1409,7 @@ test "managed runtime Status-only update preserves local owners and permits a re
     var desired = intentFor(&node);
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
     desired.subscriptions = @import("gossipsub/topic_fixture.zig").subscriptions(&.{name});
-    desired.demand = .{ .attnets = 7, .syncnets = 3, .expires_at_slot = 10 };
+    desired.demand = .{ .attnets = 7, .syncnets = 3 };
     try std.testing.expect(try node.applyIntent(&desired, node.last_now));
     var expected = ActivationSnapshot.capture(&node);
     const identify = node.service.identify.?.local;
@@ -1480,7 +1488,7 @@ test "managed runtime local intent demand candidate sequence and stopped refusal
         desired.update.local.fork = node.peer_manager.local.fork;
         desired.demand.group_targets[1] = node.peer_manager.catalog.options.max_peers + 1;
         try std.testing.expectError(error.InvalidDemand, node.applyIntent(&desired, node.last_now));
-        desired.demand = .{ .attnets = 1, .expires_at_slot = 100 };
+        desired.demand = .{ .attnets = 1 };
         desired.update.local.metadata.attnets[0] = 1;
         try std.testing.expectError(error.SequenceExhausted, node.applyIntent(&desired, node.last_now));
         try before.expectUnchanged(&node);
@@ -1520,7 +1528,7 @@ test "managed runtime local intent topic demand no-op preserves Status schedulin
     const retained = g.overlay.rows[row].retire_after_ms;
     try std.testing.expect(!try node.applyIntent(&desired, node.last_now));
     try std.testing.expectEqual(revision, g.peers.scores.revision);
-    desired.demand = .{ .attnets = 1, .expires_at_slot = 100 };
+    desired.demand = .{ .attnets = 1 };
     try std.testing.expect(try node.applyIntent(&desired, node.last_now));
     try std.testing.expect(!try node.applyIntent(&desired, node.last_now));
     try std.testing.expectEqualDeep(desired.demand, node.peer_manager.demand);
@@ -1728,7 +1736,6 @@ test "managed runtime local intent fork BPO announcements remembered peer and ev
 
 fn intentBorrowUpdate(node: *runtime.NetworkCore, desired: *runtime.LocalIntent) !void {
     desired.demand.attnets ^= 1;
-    desired.demand.expires_at_slot = 1000;
     desired.subscriptions = if (desired.demand.attnets == 1) @import("gossipsub/topic_fixture.zig").subscriptions(&.{ "/eth2/05060708/beacon_block/ssz_snappy", "/eth2/05060708/voluntary_exit/ssz_snappy" }) else @import("gossipsub/topic_fixture.zig").subscriptions(&.{ "/eth2/05060708/beacon_block/ssz_snappy", "/eth2/05060708/proposer_slashing/ssz_snappy" });
     try std.testing.expect(try node.applyIntent(desired, node.last_now));
     var invalid = desired.*;
@@ -1788,7 +1795,7 @@ test "managed runtime local intent three boundaries fit and all-column overlap r
     try std.testing.expectEqual(@as(usize, 615), union_topics.len);
     desired.subscriptions = &union_topics.entries;
     desired.update.local.metadata.attnets[0] = 2;
-    desired.demand = .{ .attnets = 3, .expires_at_slot = 100 };
+    desired.demand = .{ .attnets = 3 };
     try std.testing.expectError(error.TopicCapacity, node.applyIntent(&desired, node.last_now));
     try before.expectUnchanged(&node);
     try std.testing.expectEqualDeep(old_demand, node.peer_manager.demand);
