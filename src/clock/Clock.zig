@@ -317,7 +317,7 @@ const WallTime = struct { now_ms: u64, slot: ?Slot };
 ///
 /// Normally catchUp drains every pending event before returning, so the
 /// returned slot is never ahead of delivery. The two exceptions are a query
-/// from inside a listener callback (see the reentrancy notes in the module
+/// from inside a listener callback (see the reentrancy notes in the file
 /// header) and a stop() from a callback, which freezes the cursor and
 /// suppresses the slots past it.
 fn catchUp(self: *Clock) WallTime {
