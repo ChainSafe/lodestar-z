@@ -13,7 +13,7 @@ const getBlockRootAtSlot = @import("./block_root.zig").getBlockRootAtSlot;
 const AnchorCheckpoint = @import("../AnchorCheckpoint.zig");
 const RefCount = @import("./ref_count.zig").RefCount;
 
-pub const EpochShufflingRc = RefCount(EpochShuffling);
+pub const EpochShufflingRc = RefCount(*EpochShuffling);
 
 const Committee = []const ValidatorIndex;
 const SlotCommittees = []const Committee;
@@ -36,16 +36,18 @@ pub const EpochShuffling = struct {
 
     committees_per_slot: usize,
 
-    /// Takes ownership of `active_indices` only on success; the caller retains it on error.
-    pub fn init(allocator: Allocator, seed: [32]u8, epoch: Epoch, active_indices: []const ValidatorIndex) !EpochShuffling {
+    pub fn init(allocator: Allocator, seed: [32]u8, epoch: Epoch, active_indices: []const ValidatorIndex) !*EpochShuffling {
         const shuffling = try allocator.alloc(ValidatorIndex, active_indices.len);
         errdefer allocator.free(shuffling);
-
         std.mem.copyForwards(ValidatorIndex, shuffling, active_indices);
         try unshuffleList(shuffling, seed[0..], preset.SHUFFLE_ROUND_COUNT);
         const committees = try buildCommitteesFromShuffling(allocator, shuffling);
+        errdefer for (committees) |slot_committees| {
+            allocator.free(slot_committees);
+        };
 
-        return EpochShuffling{
+        const epoch_shuffling_ptr = try allocator.create(EpochShuffling);
+        epoch_shuffling_ptr.* = EpochShuffling{
             .allocator = allocator,
             .epoch = epoch,
             .active_indices = active_indices,
@@ -53,6 +55,8 @@ pub const EpochShuffling = struct {
             .committees = committees,
             .committees_per_slot = computeCommitteeCount(active_indices.len),
         };
+
+        return epoch_shuffling_ptr;
     }
 
     pub fn deinit(self: *EpochShuffling) void {
@@ -63,6 +67,7 @@ pub const EpochShuffling = struct {
         self.allocator.free(self.active_indices);
         self.allocator.free(self.shuffling);
         // no need to free `commitees` because it's stack allocation
+        self.allocator.destroy(self);
     }
 
     fn buildCommitteesFromShuffling(allocator: Allocator, shuffling: []const ValidatorIndex) !EpochCommittees {
@@ -108,7 +113,7 @@ test EpochShuffling {
 }
 
 /// Takes ownership of `active_indices` only on success; the caller retains it on error.
-pub fn computeEpochShuffling(allocator: Allocator, state: *AnyBeaconState, active_indices: []ValidatorIndex, epoch: Epoch) !EpochShuffling {
+pub fn computeEpochShuffling(allocator: Allocator, state: *AnyBeaconState, active_indices: []ValidatorIndex, epoch: Epoch) !*EpochShuffling {
     var seed = [_]u8{0} ** 32;
     switch (state.forkSeq()) {
         inline else => |f| try getSeed(f, state.castToFork(f), epoch, c.DOMAIN_BEACON_ATTESTER, &seed),

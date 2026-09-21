@@ -33,7 +33,7 @@ test "memory_safety: EpochShuffling.init should free completed committees when a
     try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
 }
 
-test "memory_safety: EpochShuffling.init should free completed committees when the last slot allocation fails" {
+test "memory_safety: EpochShuffling.init should free committees when the final allocation fails" {
     const allocator = std.testing.allocator;
     const active_indices = try allocator.alloc(ct.primitive.ValidatorIndex.Type, 256);
     defer allocator.free(active_indices);
@@ -41,10 +41,10 @@ test "memory_safety: EpochShuffling.init should free completed committees when t
         index.* = @intCast(i);
     }
 
-    // The shuffling allocation precedes one allocation per slot; the last slot fails.
+    // One shuffling allocation and one allocation per slot precede the final struct allocation.
     var failing = std.testing.FailingAllocator.init(
         allocator,
-        .{ .fail_index = preset.SLOTS_PER_EPOCH },
+        .{ .fail_index = 1 + preset.SLOTS_PER_EPOCH },
     );
     try std.testing.expectError(
         error.OutOfMemory,

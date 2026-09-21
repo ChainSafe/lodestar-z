@@ -134,22 +134,17 @@ pub const EpochCache = struct {
 
     /// Initializes a reference counted `EpochShuffling` in a `EpochShufflingRc`.
     ///
-    /// Takes ownership of `active_indices` only on success; the caller retains it on error.
-    /// The cell is allocated up front so that handing the slice to the shuffling is the last
-    /// step, with no failure able to follow it.
+    /// The `EpochShuffling` takes ownership of the given `active_indices`.
     fn initEpochShufflingRc(
         allocator: Allocator,
         state: *AnyBeaconState,
         active_indices: []ValidatorIndex,
         epoch: Epoch,
     ) !*EpochShufflingRc {
-        const shuffling_rc = try allocator.create(EpochShufflingRc);
-        errdefer allocator.destroy(shuffling_rc);
-
         const epoch_shuffling = try computeEpochShuffling(allocator, state, active_indices, epoch);
-        EpochShufflingRc.initIn(shuffling_rc, allocator, epoch_shuffling);
+        errdefer epoch_shuffling.deinit();
 
-        return shuffling_rc;
+        return try EpochShufflingRc.init(allocator, epoch_shuffling);
     }
 
     fn initCurrentSyncCommitteeCacheRc(
@@ -332,7 +327,7 @@ pub const EpochCache = struct {
                         current_proposer_seed,
                         current_epoch,
                         current_shuffling_rc.get().active_indices,
-                        effective_balance_increments.*,
+                        effective_balance_increments,
                         &proposers,
                     ),
                 }
@@ -357,7 +352,7 @@ pub const EpochCache = struct {
                         next_proposer_seed,
                         next_epoch,
                         next_shuffling_rc.get().active_indices,
-                        effective_balance_increments.*,
+                        effective_balance_increments,
                         &next_proposers.?,
                     ),
                 }
@@ -556,7 +551,7 @@ pub const EpochCache = struct {
 
     /// Utility method to return SyncCommitteeCache so that consumers don't have to deal with ".get()" call
     pub fn getEffectiveBalanceIncrements(self: *const EpochCache) EffectiveBalanceIncrements {
-        return self.effective_balance_increments.get().*;
+        return self.effective_balance_increments.get();
     }
 
     pub fn afterProcessEpoch(self: *EpochCache, state: *AnyBeaconState, epoch_transition_cache: *const EpochTransitionCache) !void {
@@ -645,7 +640,7 @@ pub const EpochCache = struct {
                         upcoming_proposer_seed,
                         self.epoch,
                         self.current_shuffling.get().active_indices,
-                        self.effective_balance_increments.get().*,
+                        self.effective_balance_increments.get(),
                         &self.proposers,
                     );
                     const next_epoch_indices = self.next_shuffling.get().active_indices;
@@ -661,7 +656,7 @@ pub const EpochCache = struct {
                                 next_proposer_seed,
                                 self.epoch + 1,
                                 next_epoch_indices,
-                                self.effective_balance_increments.get().*,
+                                self.effective_balance_increments.get(),
                                 &self.proposers_next_epoch.?,
                             ),
                         }
@@ -864,9 +859,9 @@ pub const EpochCache = struct {
     pub fn getIndexedSyncCommitteeAtEpoch(self: *const EpochCache, epoch: Epoch) !SyncCommitteeCacheAllForks {
         const sync_period = computeSyncPeriodAtEpoch(epoch);
         if (sync_period == self.sync_period) {
-            return self.current_sync_committee_indexed.get().*;
+            return self.current_sync_committee_indexed.get();
         } else if (sync_period == self.sync_period + 1) {
-            return self.next_sync_committee_indexed.get().*;
+            return self.next_sync_committee_indexed.get();
         } else {
             return error.SyncCommitteeNotFound;
         }
