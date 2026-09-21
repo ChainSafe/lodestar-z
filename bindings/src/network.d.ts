@@ -266,6 +266,7 @@ export interface NativeApplicationConfig extends NativeRuntimeConfig {
   serveLightClients: boolean;
 }
 
+/** Desired coverage persists until replacement; the host owns validator duty expiry. */
 export interface NativeDemand {
   attnets: Uint8Array;
   syncnets: number;
@@ -275,7 +276,6 @@ export interface NativeDemand {
   custodyGroupTargets: Uint16Array;
   attestationTarget: number;
   syncTarget: number;
-  expiresAtSlot: bigint;
 }
 
 export interface NativeSubscriptionSet {

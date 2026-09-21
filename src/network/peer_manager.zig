@@ -36,7 +36,7 @@ pub const DiscoveryNeed = struct {
     syncnets: u8 = 0,
     custody: bool = false,
 
-    /// Query lifetime is a host/runtime monotonic scheduling decision, independent of slot expiry.
+    /// Query lifetime bounds discovery work independently of the desired peer coverage.
     pub fn query(self: DiscoveryNeed, expires_ms: u64) peers.discovery.Demand {
         return .{ .general = self.general, .attnets = self.attnets, .syncnets = self.syncnets, .custody = self.custody, .expires_ms = expires_ms };
     }
@@ -64,7 +64,6 @@ pub const PeerManager = struct {
     selection: policy.Result = .{},
     discovery_need: DiscoveryNeed = .{},
     demand: t.Demand = .{},
-    current_slot: u64 = 0,
     selection_revision: ?SelectionRevision = null,
     candidates_revision: ?u64 = null,
     reconciliation_deadline: ?u64 = null,
@@ -386,7 +385,6 @@ pub const PeerManager = struct {
         return self.dial_queue.candidateHints(identity, now.mono_ms);
     }
     /// Returns the same completed evaluation as coverageDeficits without advancing policy.
-    /// The host must schedule the next process slot turn for demand expiry.
     pub fn discoveryNeed(self: *const PeerManager) DiscoveryNeed {
         return self.discovery_need;
     }
@@ -507,7 +505,6 @@ pub const PeerManager = struct {
         if (self.selection.dial_budget == 0) return;
         self.discovery_need.general = self.catalog.relevantCount() < self.catalog.options.target_peers or
             self.selection.deficits.outbound > 0;
-        if (self.current_slot >= self.demand.expires_at_slot) return;
         std.mem.writeInt(u64, &self.discovery_need.attnets, self.selection.deficits.missing.attnets, .little);
         self.discovery_need.syncnets = self.selection.deficits.missing.syncnets;
         self.discovery_need.custody = self.selection.deficits.groups > 0 or self.selection.deficits.custody_groups > 0;

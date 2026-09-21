@@ -753,11 +753,11 @@ test "managed review early native close preserves selected reason and counts it 
     }
 }
 
-test "managed coverage demand copies expires at host slot and keeps general discovery independent" {
+test "managed coverage demand copies persists across slots and keeps general discovery independent" {
     var setup: Setup = .{};
     try setup.initOwners(&.{});
     defer setup.deinit();
-    var demand: t.Demand = .{ .syncnets = 1, .expires_at_slot = 101 };
+    var demand: t.Demand = .{ .syncnets = 1 };
     try setup.client.setDemand(&demand);
     demand.syncnets = 2;
     _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
@@ -766,10 +766,13 @@ test "managed coverage demand copies expires at host slot and keeps general disc
     try std.testing.expect(setup.client.discoveryNeed().general);
     setup.pair.advance(60_000);
     setup.client.reconcile(&setup.client_service, setup.pair.now);
-    try std.testing.expectEqual(@as(u64, 100), setup.client.current_slot);
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().sync);
     try std.testing.expectEqual(@as(u8, 1), setup.client.discoveryNeed().syncnets);
-    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 101, &.{}, &.{}, &.{});
+    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 10_000, &.{}, &.{}, &.{});
+    try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().sync);
+    try std.testing.expectEqual(@as(u8, 1), setup.client.discoveryNeed().syncnets);
+    try setup.client.setDemand(&.{});
+    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 10_000, &.{}, &.{}, &.{});
     try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().sync);
     try std.testing.expectEqual(@as(u8, 0), setup.client.discoveryNeed().syncnets);
     try std.testing.expect(setup.client.discoveryNeed().general);
@@ -784,7 +787,7 @@ test "managed coverage authenticated custody differs from gossip delivery and in
     defer setup.deinit();
     try subscribeServer(&setup, "/eth2/00000000/sync_committee_0/ssz_snappy");
     try subscribeServer(&setup, "/eth2/00000000/data_column_sidecar_0/ssz_snappy");
-    var demand: t.Demand = .{ .syncnets = 1, .expires_at_slot = 200 };
+    var demand: t.Demand = .{ .syncnets = 1 };
     demand.group_targets[0] = 1;
     try setup.client.setDemand(&demand);
     for (0..60) |_| try setup.step(0);
@@ -884,7 +887,7 @@ test "managed coverage bounded custody work resumes without output and stale met
     const local: t.LocalState = .{ .fork = .{ .fork = .fulu }, .status = .{ .earliest_available_slot = 0 }, .metadata = .{ .custody_group_count = 127, .syncnets = 1 } };
     try setup.init(&local);
     defer setup.deinit();
-    var demand: t.Demand = .{ .syncnets = 1, .expires_at_slot = 200 };
+    var demand: t.Demand = .{ .syncnets = 1 };
     demand.group_targets[0] = 1;
     try setup.client.setDemand(&demand);
     for (0..50) |_| try setup.step(0);
@@ -959,7 +962,7 @@ test "managed coverage review same-digest group update disables cached automatic
     defer setup.deinit();
     var candidate = try candidateFor(&setup.pair.server_ctx.local_peer_id, 128);
     candidate.syncnets = 1;
-    try setup.client.setDemand(&.{ .syncnets = 1, .expires_at_slot = 200 });
+    try setup.client.setDemand(&.{ .syncnets = 1 });
     try setup.client.discovered(&setup.client_service, &candidate, setup.pair.now);
     _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
     local.fork.custody_groups = 64;
@@ -1059,7 +1062,7 @@ test "managed reconciliation reads preserve completed demand and catalog evaluat
     const view: *const managed.PeerManager = &setup.client;
     try std.testing.expectEqualDeep(@import("peers/policy.zig").Deficits{}, view.coverageDeficits());
     try std.testing.expectEqualDeep(managed.DiscoveryNeed{}, view.discoveryNeed());
-    var demand: t.Demand = .{ .attnets = 0x81, .syncnets = 1, .expires_at_slot = 200 };
+    var demand: t.Demand = .{ .attnets = 0x81, .syncnets = 1 };
     demand.group_targets[0] = 1;
     try setup.client.setDemand(&demand);
     _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
@@ -1140,7 +1143,7 @@ test "managed reconciliation clears policy observations at quiescence and shutdo
         var setup: Setup = .{};
         try setup.initOwners(&.{});
         defer setup.deinit();
-        try setup.client.setDemand(&.{ .syncnets = 1, .expires_at_slot = 200 });
+        try setup.client.setDemand(&.{ .syncnets = 1 });
         _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
         try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().sync);
         try std.testing.expect(setup.client.discoveryNeed().general);
@@ -1166,7 +1169,7 @@ test "managed reconciliation raw mutators and deadlines invalidate once" {
     try setup.init(&local);
     defer setup.deinit();
     try subscribeServer(&setup, "/eth2/00000000/sync_committee_0/ssz_snappy");
-    const demand: t.Demand = .{ .syncnets = 1, .expires_at_slot = 200 };
+    const demand: t.Demand = .{ .syncnets = 1 };
     try setup.client.setDemand(&demand);
     for (0..60) |_| try setup.step(0);
     setup.pair.advance(setup.client.control.options.inbound_status_grace_ms);
@@ -1483,7 +1486,7 @@ test "managed sampling delivery follows real outbound stream retirement replacem
     const snapshot = try waitSampling(&setup);
     try std.testing.expectEqual(@as(usize, 4), snapshot.custody_groups.?.count());
     try std.testing.expectEqual(@as(usize, 8), snapshot.sampling_groups.?.count());
-    var demand: t.Demand = .{ .expires_at_slot = 200 };
+    var demand: t.Demand = .{};
     for (0..128) |i| if (snapshot.sampling_groups.?.isSet(i)) {
         demand.group_targets[i] = 1;
     };
@@ -1538,13 +1541,14 @@ test "managed sampling delivery follows real outbound stream retirement replacem
     try std.testing.expect(!handler.deliveryAvailable(snapshot.connection.?));
 }
 
-test "managed sampling demand rejects atomically trims fork bound and expires exclusively" {
+test "managed sampling demand rejects atomically trims fork bound and persists until replacement" {
     var setup: Setup = .{};
     var local: t.LocalState = .{ .fork = .{ .fork = .fulu, .minimum_sampling_groups = 8 }, .status = .{ .earliest_available_slot = 0 }, .metadata = .{ .custody_group_count = 4 } };
     try setup.initOwners(&local);
     defer setup.deinit();
-    var demand: t.Demand = .{ .expires_at_slot = 101 };
+    var demand: t.Demand = .{};
     demand.group_targets[0] = 1;
+    demand.custody_group_targets[0] = 1;
     demand.group_targets[127] = setup.client.catalog.options.max_peers;
     try setup.client.setDemand(&demand);
     const before = setup.client.demand;
@@ -1561,8 +1565,15 @@ test "managed sampling demand rejects atomically trims fork bound and expires ex
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().groups);
     _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().groups);
-    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 101, &.{}, &.{}, &.{});
+    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 10_000, &.{}, &.{}, &.{});
+    try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().groups);
+    try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().custody_groups);
+    try std.testing.expect(setup.client.discoveryNeed().custody);
+    try setup.client.setDemand(&.{});
+    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 10_000, &.{}, &.{}, &.{});
     try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().groups);
+    try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().custody_groups);
+    try std.testing.expect(!setup.client.discoveryNeed().custody);
     try std.testing.expectEqualDeep(t.Demand{}, setup.client.demand);
 }
 

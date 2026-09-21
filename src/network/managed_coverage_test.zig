@@ -37,7 +37,7 @@ test "managed coverage counts real duty subscriptions separately from custodians
     try equal(@as(usize, 1), setup.client.snapshots(&snapshots));
     const peer = snapshots[0];
     try equal(@as(usize, 8), peer.sampling_groups.?.count());
-    var demand: t.Demand = .{ .attnets = 1 << 7, .expires_at_slot = 200 };
+    var demand: t.Demand = .{ .attnets = 1 << 7 };
     for (0..128) |group| if (peer.sampling_groups.?.isSet(group)) {
         demand.group_targets[group] = 1;
         demand.custody_group_targets[group] = 1;
@@ -75,7 +75,7 @@ test "managed coverage coalesces subscription and score changes with operation e
     try init(&setup, &.{ .fork = .{ .fork = .altair } });
     defer setup.deinit();
     try settle(&setup);
-    try setup.client.setDemand(&.{ .attnets = 1 << 7, .expires_at_slot = 200 });
+    try setup.client.setDemand(&.{ .attnets = 1 << 7 });
     setup.client.reconcile(&setup.client_service, setup.pair.now);
     const g = setup.client_service.gossipsub;
     var snapshots: [4]t.Snapshot = undefined;
@@ -127,7 +127,7 @@ test "managed coverage gives initial subscriptions finite grace even after metad
     opts.peers.min_outbound = 0;
     try setup.initOwnersWithOptions(&.{}, opts);
     defer setup.deinit();
-    try setup.client.setDemand(&.{ .attnets = 1, .expires_at_slot = 200 });
+    try setup.client.setDemand(&.{ .attnets = 1 });
     _ = try setup.pair.dial();
     try settle(&setup);
     var snapshots: [4]t.Snapshot = undefined;
@@ -136,7 +136,7 @@ test "managed coverage gives initial subscriptions finite grace even after metad
     try equal(@as(u16, 1), setup.client.selection.retained_count);
     const grace = snapshots[0].connected_at_ms + setup.client.control.options.inbound_status_grace_ms;
     setup.pair.advance(grace - setup.pair.now.mono_ms - 1);
-    try setup.client.setDemand(&.{ .attnets = 3, .expires_at_slot = 200 });
+    try setup.client.setDemand(&.{ .attnets = 3 });
     setup.client.reconcile(&setup.client_service, setup.pair.now);
     try equal(@as(u16, 1), setup.client.selection.retained_count);
     setup.pair.advance(1);

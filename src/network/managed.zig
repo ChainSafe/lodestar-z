@@ -69,11 +69,6 @@ pub fn process(
         .application = 0,
         .gossipsub = 0,
     };
-    self.current_slot = slot;
-    if (slot >= self.demand.expires_at_slot and !std.meta.eql(self.demand, t.Demand{})) {
-        self.demand = .{};
-        self.selection_revision = null;
-    }
     if (!self.quiescing) self.dial_queue.expire(engine, now.mono_ms);
     for (events) |event| self.transportEvent(service, engine, event, now);
     var controls: [controls_per_turn]rr.Event = undefined;

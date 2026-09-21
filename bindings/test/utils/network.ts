@@ -154,7 +154,6 @@ export function localIntent(config: NativeApplicationConfig): NativeLocalIntent 
       attestationTarget: 1,
       attnets: new Uint8Array(8),
       custodyGroupTargets: new Uint16Array(128),
-      expiresAtSlot: config.initialSlot + 100n,
       groupTargets: new Uint16Array(128),
       syncTarget: 1,
       syncnets: 0,

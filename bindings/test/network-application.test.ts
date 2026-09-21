@@ -38,7 +38,6 @@ test("running application advances fork state only when the host updates intent"
     expect(runtime.state).toBe("running");
     expect(runtime.diagnostics().currentSlot).toBe(config.initialSlot);
     const fresh = localIntent(config);
-    fresh.demand.expiresAtSlot = slot + 100n;
     const result = await runtime.applyIntent(fresh, slot);
     expect(result).toMatchObject({changed: true, slot});
     expect(runtime.state).toBe("running");
@@ -64,7 +63,6 @@ test("owned chain plan follows Fulu and BPO with Lodestar topics and fixed nativ
       intent.update.local.status.headSlot = 1n;
       intent.update.local.status.earliestAvailableSlot = 0n;
       intent.update.local.metadata.custodyGroupCount = 8n;
-      intent.demand.expiresAtSlot = slot + 100n;
       intent.subscriptions = subscriptions(topicName("beacon_block", i + 2), topicName("data_column_sidecar_0", i + 2));
       await runtime.applyIntent(intent, slot);
       const current = await runtime.getIdentity();
@@ -121,7 +119,6 @@ test("Status-only updates copy inputs and preserve advertisement and subscriptio
     const intent = localIntent(config);
     intent.subscriptions = subscriptions(topicName());
     intent.demand.attnets[0] = 5;
-    intent.demand.expiresAtSlot = 103n;
     await Promise.all([a.applyIntent(intent, 100n), b.applyIntent(localIntent(other), 100n)]);
     const topics = (await a.getGossipDiagnostics()).topics;
     const status = structuredClone(config.local.status);

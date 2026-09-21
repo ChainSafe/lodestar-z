@@ -6,7 +6,7 @@ const equal = std.testing.expectEqual;
 const options: t.Options = .{ .capacity = 8, .outbound_reserve = 1, .target_peers = 2, .max_peers = 4, .min_outbound = 1 };
 
 test "peer policy separates sampling routes from custody service deficits" {
-    var demand: t.Demand = .{ .expires_at_slot = 10 };
+    var demand: t.Demand = .{};
     var input: p.Input = .{};
     for (0..8) |group| {
         demand.group_targets[group] = 1;
@@ -153,7 +153,7 @@ test "peer policy ordinary negative scores preserve scarce coverage" {
 }
 
 test "peer policy overlapping coverage updates after each removal" {
-    var demand: t.Demand = .{ .attnets = 1, .syncnets = 1, .expires_at_slot = 10 };
+    var demand: t.Demand = .{ .attnets = 1, .syncnets = 1 };
     demand.group_targets[5] = 1;
     var inputs = [_]p.Input{
         .{ .coverage = .{ .attnets = 1, .syncnets = 1 }, .outbound = true },
@@ -191,7 +191,7 @@ test "peer policy direct bans hard capacity deficits and outbound replacement" {
     try equal(@as(u16, 1), result.dial_budget);
 }
 
-test "peer policy finite ranking expiry and infeasible demanded coverage" {
+test "peer policy finite ranking demand replacement and infeasible demanded coverage" {
     var demand: t.Demand = .{ .attnets = 1, .syncnets = 1, .attestation_target = 2 };
     const inputs = [_]p.Input{ .{ .score = std.math.nan(f64) }, .{ .coverage = .{ .attnets = 1 }, .outbound = true }, .{ .direct = true } };
     var result = p.select(&inputs, &demand, options, 7);
