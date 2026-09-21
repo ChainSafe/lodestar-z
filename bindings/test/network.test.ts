@@ -9,6 +9,7 @@ import {
   localIntent,
   requestForks,
   startRuntime,
+  subscriptions,
   topicName,
 } from "./utils/network.js";
 import {startPeer} from "./utils/network-peer.js";
@@ -71,13 +72,13 @@ it("copies inputs before returning and advances the clock only through intents",
     expect(await runtime.applyIntent(intent, 101n)).toMatchObject({slot: 101n});
     expect((await runtime.getIdentity()).metadata.syncnets).toBe(4);
     await expect(runtime.applyIntent(intent, 100n)).rejects.toThrow("ClockRegression");
-    expect(() => runtime.applyIntent(intent, -1n)).toThrow("InvalidNetworkInteger");
-    expect(() => runtime.applyIntent(intent, 1n << 64n)).toThrow("InvalidNetworkInteger");
+    await expect(runtime.applyIntent(intent, -1n)).rejects.toThrow("InvalidNetworkInteger");
+    await expect(runtime.applyIntent(intent, 1n << 64n)).rejects.toThrow("InvalidNetworkInteger");
     expect(identity.peerId).toEqual(expected);
   } finally {
     await runtime.close();
   }
-  expect(() => runtime.applyIntent(intent, 102n)).toThrow("NetworkClosed");
+  await expect(runtime.applyIntent(intent, 102n)).rejects.toThrow("NetworkClosed");
 }, 20000);
 
 it("starts without subscriptions and accepts ordinary updates after rejecting an invalid intent", async () => {
@@ -89,11 +90,11 @@ it("starts without subscriptions and accepts ordinary updates after rejecting an
     expect(runtime.drainGossip()).toEqual({grouped: false, messages: [], more: false});
     expect(runtime.takeIncomingRequest()).toBeNull();
     const intent = localIntent(config);
-    intent.subscriptions = [{name: "/invalid", params: config.gossipPolicy.score.defaultTopic}];
+    intent.subscriptions = [{digest: new Uint8Array(4).fill(255), subnets: {}}];
     await expect(runtime.applyIntent(intent, config.initialSlot)).rejects.toThrow("InvalidTopic");
     expect(runtime.state).toBe("running");
     const topic = topicName();
-    intent.subscriptions = [{name: topic, params: config.gossipPolicy.score.defaultTopic}];
+    intent.subscriptions = subscriptions(topic);
     await runtime.applyIntent(intent, config.initialSlot);
     expect((await runtime.getGossipDiagnostics()).topics).toContainEqual(
       expect.objectContaining({subscribed: true, topic})

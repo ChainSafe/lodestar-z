@@ -547,7 +547,7 @@ test "local intent reclaimed history answers actual IWANT with original wire top
     _ = try g.publish(name, "original payload", now);
     const id = topic_mod.validMessageId(name, "original payload", .{});
     const message = g.messages.history.message(g.messages.history.get(&g.messages.store, id).?);
-    try std.testing.expect(try g.prepareSubscriptions(&.{.{ .name = replacement, .params = .{} }}, workspace, now));
+    try std.testing.expect(try g.prepareSubscriptions(@import("topic_fixture.zig").subscriptions(&.{replacement}), workspace, now, 0));
     g.commitSubscriptions(workspace);
     const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     var request: [64]u8 = undefined;

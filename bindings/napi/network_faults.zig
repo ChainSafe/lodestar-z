@@ -33,7 +33,7 @@ pub fn captureGossip(owner: *const gossip.Gossipsub, context: *const @import("ne
         .options = owner.options,
         .minimum_sampling_groups = context.minimum_sampling_groups,
         .score = owner.peers.scores.params,
-        .topic = owner.peers.scores.topic_params[0],
+        .topic = if (owner.options.topic_params) |*policies| policies[0].atSlot(owner.overlay.slot) else owner.peers.scores.topic_params[0],
         .allowlist = owner.peers.ip_allowlist,
         .allowlist_len = owner.peers.ip_allowlist_len,
         .topic_boundaries = undefined,

@@ -36,7 +36,8 @@ pub const LocalUpdate = struct {
 pub const LocalIntent = struct {
     update: LocalUpdate,
     demand: peers.Demand,
-    subscriptions: []const gossip.local_intent.Subscription,
+    subscriptions: []const gossip.local_intent.Boundary,
+    slot: u64 = 0,
 };
 pub const DiscoveryOptions = struct {
     advertisement: ?AdvertisementEndpoints = null,
@@ -533,15 +534,15 @@ pub const NetworkCore = struct {
         const prepared = try self.prepareLocal(&intent.update);
         const demand = intent.demand;
         try demand.validate(&prepared.local.fork, self.peer_manager.catalog.options.max_peers);
-        const topics_changed = try self.service.gossipsub.prepareSubscriptions(intent.subscriptions, self.local_intent_workspace, now);
+        const topics_changed = try self.service.gossipsub.prepareSubscriptions(intent.subscriptions, self.local_intent_workspace, now, intent.slot);
         const demand_changed = !std.meta.eql(demand, self.peer_manager.demand);
-        if (!prepared.changed and !topics_changed and !demand_changed) return false;
+        const changed = prepared.changed or topics_changed or demand_changed;
         try self.publishLocal(&prepared);
         if (prepared.changed) self.commitLocal(&prepared, now);
-        if (topics_changed) self.service.gossipsub.commitSubscriptions(self.local_intent_workspace);
+        self.service.gossipsub.commitSubscriptions(self.local_intent_workspace);
         if (demand_changed) self.peer_manager.commitDemand(&demand);
-        std.log.scoped(.network_core).debug("intent_applied local_changed={any} topics_changed={any} demand_changed={any} subscriptions={d} fork={s} digest={x}", .{ prepared.changed, topics_changed, demand_changed, intent.subscriptions.len, @tagName(prepared.local.fork.fork), prepared.local.fork.digest });
-        return true;
+        if (changed) std.log.scoped(.network_core).debug("intent_applied local_changed={any} topics_changed={any} demand_changed={any} subscriptions={d} fork={s} digest={x}", .{ prepared.changed, topics_changed, demand_changed, intent.subscriptions.len, @tagName(prepared.local.fork.fork), prepared.local.fork.digest });
+        return changed;
     }
 
     /// Borrows a readable OS descriptor. The host drains it after a returned

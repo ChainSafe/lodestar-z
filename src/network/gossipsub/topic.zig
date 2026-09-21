@@ -61,6 +61,13 @@ pub const Name = struct {
 
 pub const Canonical = struct { digest: ForkDigest, name: Name };
 
+pub fn buildCanonical(value: Canonical, out: *[topic_max_len]u8) []const u8 {
+    assert(value.name.subnet < value.name.kind.countMax());
+    var buffer: [name_max_len]u8 = undefined;
+    const name = if (value.name.kind.countMax() == 1) @tagName(value.name.kind) else std.fmt.bufPrint(&buffer, "{s}_{d}", .{ @tagName(value.name.kind), value.name.subnet }) catch unreachable;
+    return build(value.digest, name, out);
+}
+
 pub fn parseCanonical(wire: []const u8) ?Canonical {
     const parsed = parse(wire) orelse return null;
     const hex = std.fmt.bytesToHex(parsed.digest, .lower);

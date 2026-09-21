@@ -25,6 +25,8 @@ pub const Row = struct {
     generation: u64 = 0,
     active: bool = false,
     subscribed: bool = false,
+    ordinal: ?u16 = null,
+    kind: ?topic_mod.Kind = null,
     string: [topic_mod.topic_max_len]u8 = undefined,
     string_len: u8 = 0,
     subscribers: PeerSet = PeerSet.initEmpty(),
@@ -45,6 +47,7 @@ pub const Overlay = struct {
     rows: [constants.topics_cap]Row = @splat(.{}),
     namespace: ?topic_policy.Namespace = null,
     subscription_revision: u64 = 0,
+    slot: u64 = 0,
 
     pub fn deinit(self: *Overlay, a: std.mem.Allocator) void {
         if (self.namespace) |*ns| ns.deinit(a);
@@ -91,14 +94,14 @@ pub const Overlay = struct {
     pub fn internTopic(self: *Overlay, context: *const Context, validation_pins: *const local_intent.TopicSet, name: []const u8) ?u16 {
         if (!self.validTopic(name)) return null;
         if (self.findTopic(name)) |topic| return topic;
-        if (self.internVacant(name)) |topic| return self.initializeTopic(topic);
+        if (self.internVacant(name)) |topic| return self.initializeTopic(context, topic);
         const pins = retirementPins(context, validation_pins);
         for (0..constants.topics_cap) |index| {
             const topic: u16 = @intCast(index);
             if (self.rows[topic].generation == std.math.maxInt(u64) or
                 !self.retirement(context, topic, &pins, context.now).reusable) continue;
             for (0..constants.topics_cap) |reclaim| self.reclaimObserved(context, @intCast(reclaim), self.retirement(context, @intCast(reclaim), &pins, context.now));
-            return self.initializeTopic(self.internVacant(name) orelse unreachable);
+            return self.initializeTopic(context, self.internVacant(name) orelse unreachable);
         }
         return null;
     }
@@ -108,7 +111,8 @@ pub const Overlay = struct {
         return name.len <= topic_mod.topic_max_len and topic_mod.parse(name) != null;
     }
 
-    fn initializeTopic(self: *Overlay, topic: u16) u16 {
+    fn initializeTopic(self: *Overlay, context: *const Context, topic: u16) u16 {
+        context.peers.scores.applyValidatedTopic(topic, self.topicParams(context, self.rows[topic].kind, self.slot));
         if (self.namespace) |*ns| {
             const match = ns.lookup(self.topicString(topic)).?;
             ns.initializeSubscribers(match.ordinal, &self.rows[topic].subscribers);
@@ -159,53 +163,79 @@ pub const Overlay = struct {
         self.reclaimObserved(context, topic, self.retirement(context, topic, &pins, context.now));
     }
 
+    fn topicParams(_: *const Overlay, context: *const Context, kind: ?topic_mod.Kind, slot: u64) score_mod.TopicParams {
+        if (kind) |k| if (context.options.topic_params) |*policies| return policies[@intFromEnum(k)].atSlot(slot);
+        return context.options.score_params.topic;
+    }
+
     /// Does not mutate protocol state or end event borrows. Commit must immediately follow acceptance.
-    pub fn prepareSubscriptions(self: *Overlay, context: *const Context, validation_pins: *const local_intent.TopicSet, subscriptions: []const local_intent.Subscription, workspace: *local_intent.Workspace, now_ms: u64) local_intent.Error!bool {
+    pub fn prepareSubscriptions(self: *Overlay, context: *const Context, validation_pins: *const local_intent.TopicSet, subscriptions: []const local_intent.Boundary, workspace: *local_intent.Workspace, now_ms: u64, slot: u64) local_intent.Error!bool {
         workspace.prepared = false;
-        if (subscriptions.len > constants.topics_cap) return error.TopicCapacity;
+        if (subscriptions.len > topic_policy.boundary_max) return error.TopicCapacity;
         if (subscriptions.len > 0 and self.namespace == null) return error.TopicPolicyRequired;
-        workspace.len = @intCast(subscriptions.len);
+        workspace.len = 0;
+        workspace.desired = .initEmpty();
         workspace.reserved = .initEmpty();
         workspace.now_ms = @max(context.now, now_ms);
-        var changed = false;
-        for (subscriptions, 0..) |*subscription, i| {
-            const match = self.namespace.?.lookup(subscription.name) orelse return error.InvalidTopic;
-            try score_mod.validateTopic(subscription.params);
-            const entry = &workspace.entries[i];
-            entry.ordinal = match.ordinal;
-            entry.len = @intCast(subscription.name.len);
-            @memcpy(entry.bytes[0..entry.len], subscription.name);
-            entry.params = subscription.params;
-            for (workspace.entries[0..i]) |*earlier| {
-                if (std.mem.eql(u8, entry.name(), earlier.name())) return error.DuplicateTopic;
+        workspace.slot = slot;
+        var boundaries = std.StaticBitSet(topic_policy.boundary_max).initEmpty();
+        var count: usize = 0;
+        for (subscriptions) |*subscription| {
+            const ns = &self.namespace.?;
+            const boundary_index = for (ns.boundaries, 0..) |*boundary, i| {
+                if (std.mem.eql(u8, &boundary.digest, &subscription.digest)) break i;
+            } else return error.InvalidTopic;
+            if (boundaries.isSet(boundary_index)) return error.DuplicateBoundary;
+            boundaries.set(boundary_index);
+            for (ns.boundaries[boundary_index].rules, ns.offsets[boundary_index], 0..) |rule, start, k| {
+                const mask = subscription.maskConst(@enumFromInt(k));
+                if (subscription.lengths[k] > (rule.count + 7) / 8) return error.InvalidTopic;
+                for (mask, 0..) |bits, byte| {
+                    var remaining = bits;
+                    for (0..8) |_| {
+                        if (remaining == 0) break;
+                        const subnet = byte * 8 + @as(usize, @ctz(remaining));
+                        if (byte >= subscription.lengths[k] or subnet >= rule.count) return error.InvalidTopic;
+                        count += 1;
+                        if (count > constants.topics_cap) return error.TopicCapacity;
+                        workspace.desired.set(start + subnet);
+                        remaining &= remaining - 1;
+                    }
+                }
             }
-            entry.row = self.findTopic(entry.name());
-            entry.existing = entry.row != null;
-            if (entry.row) |row| {
-                workspace.reserved.set(row);
-                entry.generation = self.rows[row].generation;
-                changed = changed or !self.subscribed(row) or !std.meta.eql(entry.params, context.peers.scores.topic_params[row]);
-            } else changed = true;
+        }
+        var changed = false;
+        // Reserve retained matches before selecting any rows for replacement.
+        for (&self.rows, 0..) |*row, i| {
+            if (!row.active) continue;
+            if (row.ordinal) |ordinal| if (workspace.desired.isSet(ordinal)) {
+                workspace.entries[workspace.len] = .{ .ordinal = ordinal, .row = @intCast(i), .generation = row.generation, .existing = true };
+                workspace.len += 1;
+                workspace.reserved.set(i);
+                workspace.desired.unset(ordinal);
+                changed = changed or !row.subscribed or !std.meta.eql(context.peers.scores.topic_params[i], self.topicParams(context, row.kind, slot));
+                continue;
+            };
+            if (row.subscribed) changed = true;
         }
         workspace.pins = retirementPins(context, validation_pins);
         var cursor: usize = 0;
-        for (workspace.entries[0..workspace.len]) |*entry| {
-            if (entry.existing) continue;
-            while (cursor < constants.topics_cap) : (cursor += 1) {
+        var desired = workspace.desired.iterator(.{});
+        for (0..constants.topics_cap) |_| {
+            const ordinal = desired.next() orelse break;
+            changed = true;
+            const index = while (cursor < constants.topics_cap) : (cursor += 1) {
                 const row = &self.rows[cursor];
                 if (workspace.reserved.isSet(cursor) or row.generation == std.math.maxInt(u64)) continue;
                 if (row.active and !self.retirement(context, @intCast(cursor), &workspace.pins, workspace.now_ms).reusable) continue;
-                entry.row = @intCast(cursor);
-                entry.generation = row.generation;
-                workspace.reserved.set(cursor);
-                cursor += 1;
-                break;
-            }
-            if (entry.row == null) return error.TopicCapacity;
+                break cursor;
+            } else return error.TopicCapacity;
+            workspace.entries[workspace.len] = .{ .ordinal = @intCast(ordinal), .row = @intCast(index), .generation = self.rows[index].generation, .existing = false };
+            workspace.len += 1;
+            workspace.reserved.set(index);
+            cursor += 1;
         }
-        for (&self.rows, 0..) |*row, index| {
-            if (row.active and row.subscribed and !workspace.reserved.isSet(index)) changed = true;
-        }
+        assert(workspace.len == count);
         workspace.prepared = true;
         return changed;
     }
@@ -213,17 +243,20 @@ pub const Overlay = struct {
     pub fn commitSubscriptions(self: *Overlay, context: *const Context, workspace: *local_intent.Workspace) void {
         assert(workspace.prepared and context.now == workspace.now_ms);
         workspace.prepared = false;
+        self.slot = workspace.slot;
         for (workspace.entries[0..workspace.len]) |*entry| {
-            const index = entry.row.?;
+            const index = entry.row;
             const row = &self.rows[index];
             assert(row.generation == entry.generation);
             if (!entry.existing) {
                 context.peers.scores.resetTopic(index);
                 row.active = false;
-                self.assignTopic(index, entry.name(), entry.generation);
+                var bytes: [topic_mod.topic_max_len]u8 = undefined;
+                const name = topic_mod.buildCanonical(self.namespace.?.topicAt(entry.ordinal), &bytes);
+                self.assignTopic(index, name, entry.generation);
                 self.namespace.?.initializeSubscribers(entry.ordinal, &row.subscribers);
             }
-            context.peers.scores.applyValidatedTopic(index, entry.params);
+            context.peers.scores.applyValidatedTopic(index, self.topicParams(context, row.kind, self.slot));
             self.setLocal(context, index, true);
         }
         for (&self.rows, 0..) |*row, index| {
@@ -250,6 +283,8 @@ pub const Overlay = struct {
         topic.* = .{ .active = true, .generation = generation + 1 };
         @memcpy(topic.string[0..copied.len], copied);
         topic.string_len = @intCast(copied.len);
+        if (topic_mod.parseCanonical(copied)) |parsed| topic.kind = parsed.name.kind;
+        if (self.namespace) |*ns| topic.ordinal = ns.lookup(copied).?.ordinal;
     }
 
     pub fn findTopic(self: *const Overlay, topic_str: []const u8) ?u16 {
