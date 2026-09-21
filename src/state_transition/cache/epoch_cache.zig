@@ -134,17 +134,22 @@ pub const EpochCache = struct {
 
     /// Initializes a reference counted `EpochShuffling` in a `EpochShufflingRc`.
     ///
-    /// The `EpochShuffling` takes ownership of the given `active_indices`.
+    /// Takes ownership of `active_indices` only on success; the caller retains it on error.
+    /// The cell is allocated up front so that handing the slice to the shuffling is the last
+    /// step, with no failure able to follow it.
     fn initEpochShufflingRc(
         allocator: Allocator,
         state: *AnyBeaconState,
         active_indices: []ValidatorIndex,
         epoch: Epoch,
     ) !*EpochShufflingRc {
-        const epoch_shuffling = try computeEpochShuffling(allocator, state, active_indices, epoch);
-        errdefer epoch_shuffling.deinit();
+        const shuffling_rc = try allocator.create(EpochShufflingRc);
+        errdefer allocator.destroy(shuffling_rc);
 
-        return try EpochShufflingRc.init(allocator, epoch_shuffling);
+        const epoch_shuffling = try computeEpochShuffling(allocator, state, active_indices, epoch);
+        EpochShufflingRc.initIn(shuffling_rc, allocator, epoch_shuffling);
+
+        return shuffling_rc;
     }
 
     fn initCurrentSyncCommitteeCacheRc(
@@ -271,28 +276,28 @@ pub const EpochCache = struct {
             total_active_balance_increments = 1;
         }
 
-        const previous_shuffling_rc = try initEpochShufflingRc(
-            allocator,
-            state,
-            try previous_active_indices_array_list.toOwnedSlice(allocator),
-            previous_epoch,
-        );
+        const previous_shuffling_rc = rc: {
+            const active_indices = try previous_active_indices_array_list.toOwnedSlice(allocator);
+            errdefer allocator.free(active_indices);
+
+            break :rc try initEpochShufflingRc(allocator, state, active_indices, previous_epoch);
+        };
         errdefer previous_shuffling_rc.unref();
 
-        const current_shuffling_rc = try initEpochShufflingRc(
-            allocator,
-            state,
-            try current_active_indices_array_list.toOwnedSlice(allocator),
-            current_epoch,
-        );
+        const current_shuffling_rc = rc: {
+            const active_indices = try current_active_indices_array_list.toOwnedSlice(allocator);
+            errdefer allocator.free(active_indices);
+
+            break :rc try initEpochShufflingRc(allocator, state, active_indices, current_epoch);
+        };
         errdefer current_shuffling_rc.unref();
 
-        const next_shuffling_rc = try initEpochShufflingRc(
-            allocator,
-            state,
-            try next_active_indices_array_list.toOwnedSlice(allocator),
-            next_epoch,
-        );
+        const next_shuffling_rc = rc: {
+            const active_indices = try next_active_indices_array_list.toOwnedSlice(allocator);
+            errdefer allocator.free(active_indices);
+
+            break :rc try initEpochShufflingRc(allocator, state, active_indices, next_epoch);
+        };
         errdefer next_shuffling_rc.unref();
 
         const fork_seq = config.forkSeqAtEpoch(current_epoch);
@@ -327,7 +332,7 @@ pub const EpochCache = struct {
                         current_proposer_seed,
                         current_epoch,
                         current_shuffling_rc.get().active_indices,
-                        effective_balance_increments,
+                        effective_balance_increments.*,
                         &proposers,
                     ),
                 }
@@ -352,7 +357,7 @@ pub const EpochCache = struct {
                         next_proposer_seed,
                         next_epoch,
                         next_shuffling_rc.get().active_indices,
-                        effective_balance_increments,
+                        effective_balance_increments.*,
                         &next_proposers.?,
                     ),
                 }
@@ -551,7 +556,7 @@ pub const EpochCache = struct {
 
     /// Utility method to return SyncCommitteeCache so that consumers don't have to deal with ".get()" call
     pub fn getEffectiveBalanceIncrements(self: *const EpochCache) EffectiveBalanceIncrements {
-        return self.effective_balance_increments.get();
+        return self.effective_balance_increments.get().*;
     }
 
     pub fn afterProcessEpoch(self: *EpochCache, state: *AnyBeaconState, epoch_transition_cache: *const EpochTransitionCache) !void {
@@ -562,12 +567,16 @@ pub const EpochCache = struct {
         const next_shuffling_active_indices = try self.allocator.alloc(ValidatorIndex, epoch_transition_cache.next_shuffling_active_indices.len);
         std.mem.copyForwards(ValidatorIndex, next_shuffling_active_indices, epoch_transition_cache.next_shuffling_active_indices);
 
-        const next_shuffling_rc = try initEpochShufflingRc(
-            self.allocator,
-            state,
-            next_shuffling_active_indices,
-            epoch_after_upcoming,
-        );
+        const next_shuffling_rc = rc: {
+            errdefer self.allocator.free(next_shuffling_active_indices);
+
+            break :rc try initEpochShufflingRc(
+                self.allocator,
+                state,
+                next_shuffling_active_indices,
+                epoch_after_upcoming,
+            );
+        };
         errdefer next_shuffling_rc.unref();
 
         const next_decision_root = try calculateShufflingDecisionRoot(state, epoch_after_upcoming);
@@ -636,7 +645,7 @@ pub const EpochCache = struct {
                         upcoming_proposer_seed,
                         self.epoch,
                         self.current_shuffling.get().active_indices,
-                        self.effective_balance_increments.get(),
+                        self.effective_balance_increments.get().*,
                         &self.proposers,
                     );
                     const next_epoch_indices = self.next_shuffling.get().active_indices;
@@ -652,7 +661,7 @@ pub const EpochCache = struct {
                                 next_proposer_seed,
                                 self.epoch + 1,
                                 next_epoch_indices,
-                                self.effective_balance_increments.get(),
+                                self.effective_balance_increments.get().*,
                                 &self.proposers_next_epoch.?,
                             ),
                         }
@@ -855,9 +864,9 @@ pub const EpochCache = struct {
     pub fn getIndexedSyncCommitteeAtEpoch(self: *const EpochCache, epoch: Epoch) !SyncCommitteeCacheAllForks {
         const sync_period = computeSyncPeriodAtEpoch(epoch);
         if (sync_period == self.sync_period) {
-            return self.current_sync_committee_indexed.get();
+            return self.current_sync_committee_indexed.get().*;
         } else if (sync_period == self.sync_period + 1) {
-            return self.next_sync_committee_indexed.get();
+            return self.next_sync_committee_indexed.get().*;
         } else {
             return error.SyncCommitteeNotFound;
         }

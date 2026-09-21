@@ -46,7 +46,7 @@ const State = struct {
 
     pub fn pool(self: *State) *Node.Pool {
         std.debug.assert(self.pool_rc != null);
-        return &self.pool_rc.?.instance;
+        return self.pool_rc.?.get();
     }
 
     pub fn poolRc(self: *State) *PoolRc {
