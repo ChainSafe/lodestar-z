@@ -587,7 +587,9 @@ test.each([63, 64])("incoming exact byte admission includes fixed metadata at %s
           reservedBytes: 10 * 1024 * 1024,
           reservedBytesHighWater: 10 * 1024 * 1024 + 64,
         });
-        expect(() => pair.right.request(pair.identity.peerId, BLOCKS, new Uint8Array(32))).toThrow("NetworkBridgeFull");
+        expect(() => pair.right.request(pair.identity.peerId, BLOCKS, new Uint8Array(32))).toThrow(
+          expect.objectContaining({code: "NetworkRequestRejected", reason: "slots_exhausted"})
+        );
         await incoming.finish();
         expect((await pending).done).toBe(true);
       }

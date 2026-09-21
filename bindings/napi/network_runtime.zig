@@ -6,6 +6,7 @@ const faults = @import("network_faults.zig");
 pub const gossip_mod = @import("network_gossip.zig");
 pub const incoming_mod = @import("network_incoming.zig");
 pub const requests_mod = @import("network_requests.zig");
+pub const publications_mod = @import("network_publications.zig");
 pub const commands = @import("network_commands.zig");
 pub const application_config = @import("network_application_config.zig");
 pub const projection = @import("network_peer_projection.zig");
@@ -76,8 +77,8 @@ pub const Diagnostics = struct {
     targetListOccupied: u8 = 0,
     targetListHighWater: u8 = 0,
     targetListRefusals: u64 = 0,
-    preparingPins: u8 = 0,
-    copyingPins: u8 = 0,
+    preparingPins: u16 = 0,
+    copyingPins: u16 = 0,
     peerLaneCapacity: u8 = 64,
     peerLaneOccupied: u8 = 0,
     peerLaneHighWater: u8 = 0,
@@ -96,6 +97,7 @@ pub const Diagnostics = struct {
     quicConnectionWindowBytes: u64 = 0,
     quicStreamWindowBytes: u64 = 0,
     resolvedCapacities: ResolvedCapacities = .{},
+    publications: publications_mod.Diagnostics = .{},
     requests: requests_mod.Diagnostics = .{},
     incoming: incoming_mod.Diagnostics = .{},
     gossip: gossip_mod.Diagnostics = .{},
@@ -145,6 +147,7 @@ pub const Runtime = struct {
     lane: ?*projection.Lane = null,
     table: commands.Table = .{},
     reports: @import("network_peer_reports.zig").Table = .{},
+    publications: ?publications_mod.Table = null,
     requests: ?requests_mod.Table = null,
     incoming: ?incoming_mod.Table = null,
     gossip: ?gossip_mod.Table = null,
@@ -189,6 +192,7 @@ pub const Runtime = struct {
     }
     pub fn retireRequestStorageLocked(self: *Runtime) void {
         if (!self.quiescent) return;
+        if (self.publications) |*table| table.trim();
         if (self.gossip) |*table| table.trim();
         if (self.incoming) |*table| {
             if (table.diag.occupied == 0) {
@@ -245,6 +249,7 @@ pub const Runtime = struct {
             self.metrics.deinit();
             if (self.stores) |stores| stores.destroy();
             if (self.lane) |lane| allocator.destroy(lane);
+            if (self.publications) |*table| table.deinit();
             if (self.requests) |*requests| requests.deinit();
             if (self.incoming) |*incoming| incoming.deinit();
             if (self.gossip) |*gossip| gossip.deinit();
@@ -329,7 +334,24 @@ pub const Runtime = struct {
         if (self.gossip) |*gossip| {
             result.gossip = gossip.snapshot(try gossip_mod.monotonic());
             for (gossip.cells) |cell| result.copyingPins += @intFromBool(cell.state == .copying);
-            result.liveBridgeRequestedBytes += gossip_mod.Table.backingBytes(gossip.cells.len, gossip.store.bytes.len) + result.gossip.publicationBytes;
+            result.liveBridgeRequestedBytes += gossip_mod.Table.backingBytes(gossip.cells.len, gossip.store.bytes.len);
+        }
+        if (self.publications) |*table| {
+            result.publications = table.snapshot();
+            result.liveBridgeRequestedBytes += table.cells.len * @sizeOf(publications_mod.Cell) + result.publications.payloadBytes;
+            for (table.cells) |cell| {
+                result.preparingPins += @intFromBool(cell.state == .preparing);
+                result.copyingPins += @intFromBool(cell.state == .copying);
+            }
+            result.gossip.publicationBytes = result.publications.reservedBytes;
+            result.gossip.publicationBytesHighWater = result.publications.reservedBytesHighWater;
+            result.gossip.publicationCopies = result.publications.copies;
+            result.gossip.publicationBytesCopied = result.publications.bytesCopied;
+            result.gossip.publicationQueued = result.publications.queued;
+            result.gossip.publicationPressured = result.publications.pressured;
+            result.gossip.publicationSelected = result.publications.selected;
+            result.gossip.publicationUnavailable = result.publications.unavailable;
+            result.gossip.publicationDuplicates = result.publications.duplicates;
         }
         return result;
     }
@@ -393,11 +415,12 @@ pub const Runtime = struct {
             std.debug.assert(!cell.native and !cell.copying and cell.closed == null and cell.pending == null and cell.permission == null);
             table.retire(.{ .index = @intCast(i), .generation = cell.generation });
         };
+        self.retireClosedPublications();
         self.retireRequestStorageLocked();
         self.disposeJsReferences();
     }
     pub fn disposeTerminalReferences(self: *Runtime) void {
-        if (self.notify_finalized and (self.requests == null or self.requests.?.diag.occupied == 0) and (self.incoming == null or self.incoming.?.diag.occupied == 0)) self.disposeJsReferences();
+        if (self.notify_finalized and (self.publications == null or self.publications.?.diag.occupied == 0) and (self.requests == null or self.requests.?.diag.occupied == 0) and (self.incoming == null or self.incoming.?.diag.occupied == 0)) self.disposeJsReferences();
     }
     pub fn disposeJsReferences(self: *Runtime) void {
         if (self.copy_error) |ref| ref.delete() catch unreachable;
@@ -413,6 +436,7 @@ pub const Runtime = struct {
     pub fn cleanup(self: *Runtime) void {
         self.hook_live = false;
         self.forceStop(true);
+        self.retireClosedPublications();
         for (0..32) |i| {
             self.lock();
             const cell = &self.table.cells[i];
@@ -444,7 +468,6 @@ pub const Runtime = struct {
         for (&self.table.cells, 0..) |*cell, i| {
             switch (cell.state) {
                 .queued, .executing, .waiting => {
-                    gossip_mod.releasePublicationLocked(self, &self.table.cells[i].input);
                     self.table.cells[i].failure = self.terminal_error orelse error.NetworkClosed;
                     cell.state = .terminal;
                 },
@@ -468,6 +491,7 @@ pub const Runtime = struct {
         incoming_mod.closeLocked(self);
         gossip_mod.closeLocked(self);
         self.cancelCommandsLocked();
+        if (self.publications) |*table| table.close(self.terminal_error orelse error.NetworkClosed);
         if (self.wake) |*wake| wake.deinit();
         self.wake = null;
         self.quiescent = true;
@@ -487,6 +511,30 @@ pub const Runtime = struct {
         defer self.unlock();
         return self.table.advance();
     }
+    pub fn reservePublication(self: *Runtime, kind: n.gossipsub.topic.Kind, bytes: usize) !publications_mod.Token {
+        self.lock();
+        defer self.unlock();
+        if (self.stop or self.quiescent) return error.NetworkClosed;
+        const token = try self.publications.?.reserve(kind, bytes);
+        self.retain();
+        return token;
+    }
+    pub fn retirePublication(self: *Runtime, token: publications_mod.Token) void {
+        self.lock();
+        self.publications.?.retire(token);
+        self.retireRequestStorageLocked();
+        self.unlock();
+        self.release();
+    }
+    fn retireClosedPublications(self: *Runtime) void {
+        for (0..publications_mod.capacity_max) |i| {
+            if (self.publications == null or i >= self.publications.?.cells.len) break;
+            const cell = &self.publications.?.cells[i];
+            if (cell.state == .free) continue;
+            std.debug.assert(cell.state == .terminal);
+            self.retirePublication(.{ .index = @intCast(i), .generation = cell.generation });
+        }
+    }
     pub fn reserveCommand(self: *Runtime, command: commands.Command) !commands.Token {
         self.lock();
         defer self.unlock();
@@ -505,7 +553,6 @@ pub const Runtime = struct {
     }
     pub fn abortCommand(self: *Runtime, token: commands.Token) void {
         self.lock();
-        gossip_mod.releasePublicationLocked(self, &self.table.cells[token.index].input);
         self.table.retire(token);
         self.retireStoresLocked();
         self.unlock();
@@ -522,6 +569,7 @@ pub const Runtime = struct {
 
 test {
     _ = commands;
+    _ = publications_mod;
     _ = projection;
     _ = @import("network_peer_reports.zig");
 }

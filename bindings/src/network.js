@@ -99,7 +99,7 @@ class NativeRuntime {
   reportGossip(handle, verdict) {
     return this.#native.reportGossip(handle, verdict);
   }
-  publishGossip(topic, data, options) {
+  async publishGossip(topic, data, options) {
     return this.#native.publishGossip(topic, data, options);
   }
   takeIncomingRequest() {

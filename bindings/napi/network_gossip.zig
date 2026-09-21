@@ -159,21 +159,6 @@ pub const Ingress = struct {
 pub fn closeLocked(runtime: *Runtime) void {
     if (runtime.gossip) |*table| table.close();
 }
-pub fn releasePublicationLocked(runtime: *Runtime, input: *@import("network_commands.zig").Input) void {
-    if (input.command != .publishGossip) return;
-    @import("network_runtime.zig").allocator.free(input.publication);
-    input.publication = &.{};
-    runtime.gossip.?.releasePublication(input.publication_reservation);
-    input.publication_reservation = 0;
-}
-pub fn published(runtime: *Runtime, result: native.Gossipsub.PublishOutcome) void {
-    const diag = &runtime.gossip.?.diag;
-    diag.publicationQueued +|= result.queued;
-    diag.publicationPressured +|= result.pressured;
-    diag.publicationSelected +|= result.selected;
-    diag.publicationUnavailable +|= result.unavailable;
-    diag.publicationDuplicates +|= @intFromBool(result.duplicate);
-}
 test {
     _ = @import("network_gossip_test.zig");
 }

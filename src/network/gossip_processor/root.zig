@@ -229,15 +229,6 @@ pub const GossipProcessor = struct {
         self.budget.release(amount);
         self.diag.reservedBytes -= amount;
     }
-    pub fn reservePublication(self: *GossipProcessor, amount: usize) !void {
-        try self.reserveBytes(amount);
-        self.diag.publicationBytes += amount;
-        self.diag.publicationBytesHighWater = @max(self.diag.publicationBytesHighWater, self.diag.publicationBytes);
-    }
-    pub fn releasePublication(self: *GossipProcessor, amount: usize) void {
-        self.releaseBytes(amount);
-        self.diag.publicationBytes -= amount;
-    }
     pub fn install(self: *GossipProcessor, token: Token, copy: []const u8) void {
         const cell = self.get(token).?;
         assert(cell.state == .capturing and cell.input.len == copy.len);

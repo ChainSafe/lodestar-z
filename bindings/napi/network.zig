@@ -9,6 +9,8 @@ const faults = @import("network_faults.zig");
 const Value = napi.Value;
 const requests = @import("network_requests.zig");
 const gossip = @import("network_gossip.zig");
+const publication_js = @import("network_publication_js.zig");
+const publications = @import("network_publications.zig");
 const gossip_js = @import("network_gossip_js.zig");
 const incoming = @import("network_incoming.zig");
 const incoming_js = @import("network_incoming_js.zig");
@@ -125,11 +127,13 @@ fn prepareApplicationStorage(runtime: *Runtime, app: *const application_cfg.Conf
     const gossip_backing = gossip.Table.backingBytes(gossip_capacity, gossip_bytes);
     const chain = &runtime.heavy.?.config.chain;
     const metrics_capacity = n.metrics.textCapacity(chain.topics[0..chain.supported_count]);
-    const bridge = 2 * metrics_capacity + gossip_backing + incoming_capacity * @sizeOf(incoming.Cell) + request_capacity * @sizeOf(requests.Cell) + @sizeOf(Runtime) + @sizeOf(r.Owner) - @sizeOf(n.NetworkCore) + r.Stores.bytes(runtime.peer_capacity) + @sizeOf(projection.Lane);
+    const publication_capacity: usize = if (runtime.heavy.?.config.profile == .small) 32 else publications.capacity_max;
+    const bridge = publication_capacity * @sizeOf(publications.Cell) + 2 * metrics_capacity + gossip_backing + incoming_capacity * @sizeOf(incoming.Cell) + request_capacity * @sizeOf(requests.Cell) + @sizeOf(Runtime) + @sizeOf(r.Owner) - @sizeOf(n.NetworkCore) + r.Stores.bytes(runtime.peer_capacity) + @sizeOf(projection.Lane);
     if (bridge > app.resources.bridgeBudgetBytes) return error.NetworkBridgeBudgetExceeded;
     runtime.metrics = try @import("network_metrics.zig").Export.init(metrics_capacity);
     runtime.requests = try requests.Table.init(r.allocator, request_capacity, &runtime.payload_budget);
     runtime.payload_budget.limit = app.resources.bridgeBudgetBytes - bridge;
+    runtime.publications = try publications.Table.init(r.allocator, publication_capacity, &runtime.payload_budget);
     try faults.check(.incoming_table);
     runtime.incoming = try incoming.Table.init(r.allocator, incoming_capacity, &runtime.payload_budget);
     try faults.check(.gossip_table);
@@ -172,11 +176,12 @@ fn onNotify(env: napi.Env, callback: Value, runtime: *Runtime, _: *void) void {
     const alive = runtime.env_alive;
     runtime.unlock();
     if (!alive) return;
+    publication_js.settle(env, runtime);
     settleOperations(env, runtime);
     request_js.settle(env, runtime);
     incoming_js.settle(env, runtime);
     runtime.lock();
-    const idle = runtime.table.occupied == 0 and !runtime.requestObligations() and runtime.notify_live and !runtime.stop;
+    const idle = runtime.table.occupied == 0 and (runtime.publications == null or !runtime.publications.?.obligated()) and !runtime.requestObligations() and runtime.notify_live and !runtime.stop;
     runtime.unlock();
     if (idle) runtime.notify.unref(env) catch {};
     settleClose(env, runtime);
@@ -196,6 +201,7 @@ fn settleClose(env: napi.Env, runtime: *Runtime) void {
     if (!done or runtime.close_settled) return;
     runtime.join();
     // The owner can quiesce after this callback's earlier result drains.
+    publication_js.settle(env, runtime);
     settleOperations(env, runtime);
     request_js.settle(env, runtime);
     incoming_js.settle(env, runtime);
@@ -288,6 +294,7 @@ pub fn diagnostics(self: *@This()) !js.Value {
     try put(object, "state", try text(@tagName(snapshot.state)));
     try put(object, "terminalErrorCode", if (snapshot.terminal_error) |err| try text(@errorName(err)) else try js.env().getNull());
     try put(object, "resolvedCapacities", try @import("network_js.zig").scalarFields(js.env(), &snapshot.resolvedCapacities));
+    try put(object, "publications", try @import("network_js.zig").scalarFields(js.env(), &snapshot.publications));
     try put(object, "requests", try request_js.diagnostics(js.env(), &snapshot.requests));
     try put(object, "gossip", try gossip_js.diagnostics(js.env(), &snapshot.gossip));
     try put(object, "incoming", try incoming_js.diagnostics(js.env(), &snapshot.incoming));
@@ -415,7 +422,7 @@ fn settleOperations(env: napi.Env, runtime: *Runtime) void {
         const operation = &runtime.table.cells[i];
         if (operation.deferred) |deferred| {
             if (operation.failure) |err| {
-                deferred.reject((if (operation.input.command == .publishGossip) gossip_js.publishError(env, err) else makeError(env, err)) catch runtime.copy_error.?.getValue() catch unreachable) catch unreachable;
+                deferred.reject(makeError(env, err) catch runtime.copy_error.?.getValue() catch unreachable) catch unreachable;
             } else {
                 const value = copyOperation(env, runtime, i) catch {
                     deferred.reject(runtime.copy_error.?.getValue() catch unreachable) catch unreachable;
@@ -434,7 +441,6 @@ fn copyOperation(env: napi.Env, runtime: *Runtime, index: usize) !Value {
     const operation = &runtime.table.cells[index];
     const store = runtime.table.cells[index].store;
     const object = switch (operation.input.command) {
-        .publishGossip => return gossip_js.publishResult(env, operation.publication),
         .getGossipDiagnostics => try @import("network_gossip_diagnostics.zig").copy(env, &runtime.stores.?.gossip_diagnostics[store.?]),
         .getIdentity => try identity(env, &operation.identity),
         .applyIntent, .getPeers, .getDirectPeers => try env.createObject(),
@@ -533,7 +539,7 @@ pub fn reportGossip(self: *@This(), handle: js.Value, verdict: js.Value) !js.Val
     return .{ .val = try gossip_js.report(try self.owner(), handle.val, verdict.val) };
 }
 pub fn publishGossip(self: *@This(), topic: js.Value, data: js.Value, options: js.Value) !js.Value {
-    return .{ .val = try gossip_js.publish(try self.owner(), topic.val, data.val, options.val) };
+    return .{ .val = try publication_js.publish(try self.owner(), topic.val, data.val, options.val) };
 }
 
 pub fn drainGossipChecks(self: *@This()) !js.Value {

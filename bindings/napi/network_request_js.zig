@@ -49,15 +49,8 @@ fn optionsFor(value: Value) !n.reqresp.RequestOptions {
     return result_options;
 }
 pub fn start(runtime: *Runtime, peer: Value, protocol: Value, data: Value, options: Value) !Value {
-    const command = runtime.reserveCommand(.request) catch |err| {
-        if (err == error.NetworkCommandFull) {
-            runtime.lock();
-            if (runtime.requests) |*table| table.diag.commandFull +|= 1;
-            runtime.unlock();
-        }
-        return err;
-    };
-    errdefer runtime.abortCommand(command);
+    runtime.retain();
+    defer runtime.release();
     var protocol_buffer: [128]u8 = undefined;
     const protocol_len = try app.text(protocol, &protocol_buffer);
     const which = n.reqresp.Protocol.fromId(protocol_buffer[0..protocol_len]) orelse return error.UnknownProtocol;
@@ -78,6 +71,7 @@ pub fn start(runtime: *Runtime, peer: Value, protocol: Value, data: Value, optio
     }
     const token = runtime.requests.?.reserve(which, len) catch |err| {
         runtime.unlock();
+        if (err == error.NetworkRequestFull or err == error.NetworkBridgeFull) return rejectAdmission(runtime.env);
         return err;
     };
     runtime.retain();
@@ -97,11 +91,16 @@ pub fn start(runtime: *Runtime, peer: Value, protocol: Value, data: Value, optio
     runtime.lock();
     defer runtime.unlock();
     if (runtime.stop or runtime.quiescent) return error.NetworkClosed;
-    runtime.table.cells[command.index].input.request = token;
+    cell.order = try runtime.table.nextOrder();
     cell.state = .queued;
-    runtime.table.get(command).state = .queued;
     runtime.signalLocked();
     return value;
+}
+fn rejectAdmission(env: napi.Env) anyerror {
+    const value = errorValue(env, "NetworkRequestRejected") catch |err| return err;
+    put(value, "reason", env.createStringUtf8("slots_exhausted") catch |err| return err) catch |err| return err;
+    env.throw(value) catch |err| return err;
+    return error.PendingException;
 }
 pub fn pull(runtime: *Runtime, handle: Value) !Value {
     const token = try tokenFor(handle);

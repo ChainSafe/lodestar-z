@@ -11,6 +11,7 @@ const commands = @import("network_commands.zig");
 const gossip_mod = @import("network_gossip.zig");
 const incoming_mod = @import("network_incoming.zig");
 const requests_mod = @import("network_requests.zig");
+const publications = @import("network_publications.zig");
 
 pub const Owner = struct {
     threaded_live: bool = false,
@@ -118,12 +119,13 @@ fn serve(self: *Runtime) !void {
         const graceful = self.graceful and self.reason == .requested;
         self.unlock();
         if (stop and !graceful) break;
-        const timestamp = now(io);
+        var timestamp = now(io);
         if (stop) {
             if (self.closing_deadline == null) {
                 std.log.scoped(.network_runtime).info("owner_stopping mode=graceful peers={d}", .{self.heavy.?.core.peerCounts().connected});
                 self.lock();
                 self.cancelCommandsLocked();
+                self.publications.?.close(self.terminal_error orelse error.NetworkClosed);
                 self.pingLocked();
                 self.unlock();
                 self.closing_deadline = timestamp.mono_ms +| 2000;
@@ -138,7 +140,7 @@ fn serve(self: *Runtime) !void {
                 const item = report orelse break;
                 _ = self.heavy.?.core.reportPeer(item.peer, item.action, timestamp);
             }
-            try commands.executeCommands(self, timestamp);
+            try executeWork(self, io);
         }
         self.lock();
         self.wake.?.drain() catch {
@@ -159,6 +161,8 @@ fn serve(self: *Runtime) !void {
         try gossip_mod.flags(self, io);
         requests_mod.flags(self);
         _ = try @import("network_incoming_phase_faults.zig").terminalBarrier(self, false);
+        // Work submissions and gossip verdicts use fresh clocks before the protocol pump.
+        timestamp = now(io);
         try incoming_mod.flags(self, timestamp);
         const terminal_accepted = try @import("network_incoming_phase_faults.zig").terminalBarrier(self, true);
         const sequence = try self.advanceSequence();
@@ -173,6 +177,73 @@ fn serve(self: *Runtime) !void {
         commands.completeConnects(self, timestamp);
 
         publishTurn(self, &result, timestamp, sequence);
+    }
+}
+fn executeWork(self: *Runtime, io: std.Io) !void {
+    var controls: usize = 0;
+    var requests: usize = 0;
+    var publishes: usize = 0;
+    var bytes: usize = 0;
+    for (0..commands.turn_max + publications.turn_max + requests_mod.turn_max) |_| {
+        self.lock();
+        if (self.stop) {
+            self.unlock();
+            break;
+        }
+        const command = self.table.nextQueued();
+        const publication = self.publications.?.oldest();
+        const request = self.requests.?.oldest();
+        const control_order = if (command) |token| self.table.get(token).order else std.math.maxInt(u64);
+        const publish_order = if (publication) |token| self.publications.?.get(token).?.order else std.math.maxInt(u64);
+        const request_order = if (request) |token| self.requests.?.get(token).?.order else std.math.maxInt(u64);
+        const order = @min(control_order, publish_order, request_order);
+        if (order == std.math.maxInt(u64)) {
+            self.unlock();
+            break;
+        }
+        if (order == control_order) {
+            if (controls == commands.turn_max) {
+                self.unlock();
+                break;
+            }
+            const cell = self.table.get(command.?);
+            cell.sequence = self.table.advance() catch |err| {
+                self.unlock();
+                return err;
+            };
+            cell.state = .executing;
+            self.unlock();
+            commands.execute(self, command.?, now(io));
+            controls += 1;
+        } else if (order == publish_order) {
+            const len = self.publications.?.get(publication.?).?.payload.len;
+            if (publishes == publications.turn_max or (publishes != 0 and len > publications.turn_bytes -| bytes)) {
+                self.unlock();
+                break;
+            }
+            _ = self.table.advance() catch |err| {
+                self.unlock();
+                return err;
+            };
+            self.unlock();
+            publications.execute(self, publication.?, now(io));
+            publishes += 1;
+            bytes += len;
+        } else {
+            if (requests == requests_mod.turn_max) {
+                self.unlock();
+                break;
+            }
+            _ = self.table.advance() catch |err| {
+                self.unlock();
+                return err;
+            };
+            self.unlock();
+            try faults.requestBarrier(self, request.?, .request_queued);
+            try requests_mod.submit(self, request.?, now(io));
+            try faults.requestBarrier(self, request.?, .request_negotiation);
+            requests += 1;
+        }
     }
 }
 fn publishTurn(self: *Runtime, result: *const n.network_core.Result, timestamp: n.Now, sequence: u64) void {

@@ -1,5 +1,6 @@
 const std = @import("std");
 const policy = @import("../gossipsub/topic_policy.zig");
+pub const histogram = @import("histogram.zig");
 pub const registry = @import("registry.zig");
 const prom = registry;
 
