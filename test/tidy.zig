@@ -221,6 +221,7 @@ const File = struct {
     /// stringified import is not mistaken for a real one.
     imports: []const Import,
     inline_tests: InlineTests,
+    error_set_names: []const []const u8,
     qualified_error_values: []const QualifiedErrorValue,
 
     fn hasTestBlock(file: File) bool {
@@ -298,10 +299,31 @@ fn analyze(gpa: Allocator, path: []const u8, text: [:0]const u8, errors: *Errors
         });
     }
 
-    // Identified by shape: an identifier ending in `Error` (`Error` itself
-    // included) followed by a TitleCase member. Error names are TitleCase where
-    // functions are camelCase, so a call on a namespace that happens to end in
-    // `Error` is not mistaken for a value.
+    // Collect error sets declared in this file. Looking up the declaration avoids
+    // treating a struct such as `HttpError` as an error set merely because its
+    // name ends in `Error`. Imported error sets retain the repository's `*Error`
+    // naming convention because their declarations are outside this file.
+    var error_set_names: std.ArrayList([]const u8) = .empty;
+    var declared_names: std.ArrayList([]const u8) = .empty;
+    for (token_tags, 0..) |tag, index| {
+        if (tag != .keyword_const) continue;
+        if (index + 2 >= token_tags.len) continue;
+        if (token_tags[index + 1] != .identifier) continue;
+        if (token_tags[index + 2] != .equal) continue;
+        try declared_names.append(gpa, try gpa.dupe(u8, tree.tokenSlice(@intCast(index + 1))));
+
+        var expression_index = index + 3;
+        while (expression_index + 1 < token_tags.len and
+            token_tags[expression_index] != .semicolon and
+            token_tags[expression_index] != .l_brace) : (expression_index += 1)
+        {
+            if (token_tags[expression_index] != .keyword_error) continue;
+            if (token_tags[expression_index + 1] != .l_brace) continue;
+            try error_set_names.append(gpa, try gpa.dupe(u8, tree.tokenSlice(@intCast(index + 1))));
+            break;
+        }
+    }
+
     var qualified_error_values: std.ArrayList(QualifiedErrorValue) = .empty;
     for (token_tags, 0..) |tag, index| {
         if (tag != .identifier) continue;
@@ -310,7 +332,24 @@ fn analyze(gpa: Allocator, path: []const u8, text: [:0]const u8, errors: *Errors
         if (token_tags[index + 2] != .identifier) continue;
 
         const set = tree.tokenSlice(@intCast(index));
-        if (!std.mem.endsWith(u8, set, "Error")) continue;
+        var is_error_set = false;
+        for (error_set_names.items) |error_set_name| {
+            if (std.mem.eql(u8, set, error_set_name)) {
+                is_error_set = true;
+                break;
+            }
+        }
+        if (!is_error_set and std.mem.endsWith(u8, set, "Error")) {
+            var declared_non_error = false;
+            for (declared_names.items) |declared_name| {
+                if (std.mem.eql(u8, set, declared_name)) {
+                    declared_non_error = true;
+                    break;
+                }
+            }
+            is_error_set = !declared_non_error;
+        }
+        if (!is_error_set) continue;
         const name = tree.tokenSlice(@intCast(index + 2));
         assert(name.len > 0);
         if (!std.ascii.isUpper(name[0])) continue;
@@ -328,6 +367,7 @@ fn analyze(gpa: Allocator, path: []const u8, text: [:0]const u8, errors: *Errors
         .basename = std.fs.path.basenamePosix(path),
         .imports = imports.items,
         .inline_tests = inline_tests,
+        .error_set_names = error_set_names.items,
         .qualified_error_values = qualified_error_values.items,
     };
 }
@@ -1056,9 +1096,19 @@ test "rule: error values named through their set" {
             "src/demo.zig",
             \\const Node = @import("Node.zig");
             \\pub const DemoError = error{Bad};
+            \\pub const Failures = error{Other};
+            \\const HttpError = struct { Bad: u8 };
             \\
             \\pub fn a() DemoError!void {
             \\    return DemoError.Bad;
+            \\}
+            \\
+            \\pub fn a2() Failures!void {
+            \\    return Failures.Other;
+            \\}
+            \\
+            \\pub fn a3() u8 {
+            \\    return HttpError.Bad;
             \\}
             \\
             \\pub fn b() Node.Error!void {
@@ -1080,8 +1130,9 @@ test "rule: error values named through their set" {
     // `Node.Error` as a return type is a type, not a value, and a lowercase
     // member is a call rather than an error name.
     try expectDiagnostics(fixture.output(),
-        \\src/demo.zig:5: error: `DemoError.Bad` names an error through its set, write `error.Bad`
-        \\src/demo.zig:9: error: `Error.InvalidNode` names an error through its set, write `error.InvalidNode`
+        \\src/demo.zig:7: error: `DemoError.Bad` names an error through its set, write `error.Bad`
+        \\src/demo.zig:11: error: `Failures.Other` names an error through its set, write `error.Other`
+        \\src/demo.zig:19: error: `Error.InvalidNode` names an error through its set, write `error.InvalidNode`
         \\
     );
 }
