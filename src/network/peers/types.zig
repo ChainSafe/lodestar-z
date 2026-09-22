@@ -16,7 +16,7 @@ pub const Metadata = struct {
     seq_number: u64 = 0,
     attnets: [8]u8 = @splat(0),
     syncnets: u8 = 0,
-    /// Accept smaller advertised counts as a lower bound on the peer's custody prefix.
+    /// A smaller count is a lower bound on the peer's custody prefix; zero advertises no custody.
     custody_group_count: ?u64 = null,
 };
 pub const ForkContext = struct {

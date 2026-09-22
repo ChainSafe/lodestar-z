@@ -79,8 +79,13 @@ pub fn validateMetadata(metadata: *const t.Metadata, fork: t.ForkContext) Error!
     try fork.validate();
     if (metadata.syncnets & 0xf0 != 0) return error.InvalidSyncnets;
     if (metadata.custody_group_count) |count| {
-        if (count == 0 or count > fork.custody_groups) return error.InvalidCustodyCount;
+        if (count > fork.custody_groups) return error.InvalidCustodyCount;
     }
+}
+
+fn validateLocalMetadata(metadata: *const t.Metadata, fork: t.ForkContext) Error!void {
+    try validateMetadata(metadata, fork);
+    if (metadata.custody_group_count == 0) return error.InvalidCustodyCount;
 }
 
 pub fn encodeMetadata(
@@ -89,7 +94,7 @@ pub fn encodeMetadata(
     fork: t.ForkContext,
     out: []u8,
 ) Error!usize {
-    try validateMetadata(metadata, fork);
+    try validateLocalMetadata(metadata, fork);
     return switch (protocol) {
         .metadata_v1 => encodeMetadataType(ct.phase0.MetaDataV1, metadata, out),
         .metadata_v2 => encodeMetadataType(ct.altair.MetaDataV2, metadata, out),
@@ -141,7 +146,7 @@ fn decodeMetadataType(comptime Schema: type, bytes: []const u8) Error!t.Metadata
 }
 
 pub fn copyLocal(out: *t.LocalState, source: *const t.LocalState) Error!void {
-    try validateMetadata(&source.metadata, source.fork);
+    try validateLocalMetadata(&source.metadata, source.fork);
     if (!std.mem.eql(u8, &source.status.fork_digest, &source.fork.digest))
         return error.InvalidForkDigest;
     if (source.fork.fork.gte(.fulu)) {

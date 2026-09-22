@@ -24,9 +24,12 @@ test "peer discovery uses the configured custody minimum only for an absent ENR 
     try std.testing.expectEqual(@as(u64, 1), q.selected_attempts[@intFromEnum(mod.Source.discovery)]);
     candidate.sequence += 1;
     candidate.custody_group_count = 0;
-    try std.testing.expectError(error.InvalidCandidate, q.enqueueDiscovered(&catalog, &candidate, &context, &wanted, 0));
+    try q.enqueueDiscovered(&catalog, &candidate, &context, &wanted, 0);
+    try std.testing.expectEqual(@as(?u64, 0), candidates[0].intent.hints.?.custody_group_count);
+    try std.testing.expect(candidates[0].custody_work == null);
     candidate.custody_group_count = context.custody_groups + 1;
     try std.testing.expectError(error.InvalidCandidate, q.enqueueDiscovered(&catalog, &candidate, &context, &wanted, 0));
+    candidate.sequence += 1;
     candidate.custody_group_count = 1;
     try q.enqueueDiscovered(&catalog, &candidate, &context, &wanted, 0);
     try std.testing.expectEqual(@as(u64, 1), candidates[0].custody_work.?.custody_count);

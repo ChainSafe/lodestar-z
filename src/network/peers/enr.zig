@@ -21,7 +21,7 @@ pub const Hints = struct {
         context.validate() catch return false;
         if (!std.mem.eql(u8, &self.fork.digest, &context.digest)) return false;
         if (self.syncnets) |bits| if (bits & 0xf0 != 0) return false;
-        if (self.custody_group_count) |count| if (count == 0 or count > context.custody_groups) return false;
+        if (self.custody_group_count) |count| if (count > context.custody_groups) return false;
         return true;
     }
 };
@@ -47,7 +47,7 @@ pub fn decode(record: *const Record, context: *const types.ForkContext) Error!Ca
     const syncnets = try fixed(record, "syncnets", 1);
     if (syncnets) |bits| if (bits[0] & 0xf0 != 0) return error.InvalidField;
     const custody = try integer(record, "cgc", 8);
-    if (custody) |count| if (count == 0 or count > context.custody_groups) return error.InvalidField;
+    if (custody) |count| if (count > context.custody_groups) return error.InvalidField;
     const public_key = try keys.PublicKey.fromBytes(&record.public_key);
     var result = Candidate{
         .peer = types.PeerId.fromPublicKey(&public_key),
@@ -110,6 +110,7 @@ pub const LocalAdvertisement = struct {
 /// The trusted caller enforces scheduling: once Fulu is scheduled, supply cgc and nfd, using
 /// zero nfd when no later fork is scheduled. ForkContext alone does not describe that schedule.
 pub fn build(key: *const d.identity.crypto.KeyPair, sequence: u64, local: *const LocalAdvertisement, context: *const types.ForkContext) Error!Record {
+    if (local.custody_group_count == 0) return error.InvalidField;
     if (local.ip6) |ip| if (types.Address.isIp4Mapped(ip)) return error.InvalidField;
     var eth2: [16]u8 = undefined;
     @memcpy(eth2[0..4], &local.fork.digest);
