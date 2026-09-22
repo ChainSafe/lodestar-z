@@ -29,6 +29,9 @@ const MIN_ACTIVATION_BALANCE = preset.MIN_ACTIVATION_BALANCE;
 const hasCompoundingWithdrawalCredential = @import("../utils/electra.zig").hasCompoundingWithdrawalCredential;
 const computeBaseRewardPerIncrement = @import("../utils/sync_committee.zig").computeBaseRewardPerIncrement;
 const processPendingAttestations = @import("../epoch/process_pending_attestations.zig").processPendingAttestations;
+const Node = @import("persistent_merkle_tree").Node;
+const EpochShufflingRc = @import("../utils/epoch_shuffling.zig").EpochShufflingRc;
+const EpochShuffling = @import("../utils/epoch_shuffling.zig").EpochShuffling;
 
 const BoolArray = std.ArrayList(bool);
 const UsizeArray = std.ArrayList(usize);
@@ -41,6 +44,32 @@ const ValidatorActivation = struct {
 };
 
 const ValidatorActivationList = std.ArrayList(ValidatorActivation);
+
+const ShufflingJob = struct {
+    io: std.Io,
+    future: std.Io.Future(anyerror!*EpochShuffling),
+
+    fn worker(allocator: Allocator, seed: [32]u8, epoch: Epoch, active_indices: []ValidatorIndex) anyerror!*EpochShuffling {
+        errdefer allocator.free(active_indices);
+        return EpochShuffling.init(allocator, seed, epoch, active_indices);
+    }
+
+    fn start(allocator: Allocator, io: std.Io, seed: [32]u8, epoch: Epoch, active_indices: []ValidatorIndex) @This() {
+        return .{
+            .io = io,
+            .future = std.Io.async(io, worker, .{ allocator, seed, epoch, active_indices }),
+        };
+    }
+
+    fn join(self: *@This()) !*EpochShuffling {
+        return self.future.await(self.io);
+    }
+
+    fn cancel(self: *@This()) void {
+        const result = self.future.cancel(self.io) catch return;
+        result.deinit();
+    }
+};
 
 /// this is a cache that's never gc'd, it is used to store data that is reused across multiple epochs
 const ReusedEpochTransitionCache = struct {
@@ -183,6 +212,8 @@ pub const EpochTransitionCache = struct {
     slashing_penalties: []u64,
     balances: ?U64Array,
     next_shuffling_active_indices: []const ValidatorIndex,
+    next_shuffling: ?*EpochShufflingRc,
+    shuffling_job: ?ShufflingJob,
     next_epoch_total_active_balance_by_increment: u64,
     // these are borrowed from ReusedEpochTransitionCache
     is_active_prev_epoch: []const bool,
@@ -509,6 +540,8 @@ pub const EpochTransitionCache = struct {
             .indices_eligible_for_activation = indices_eligible_for_activation,
             .indices_to_eject = indices_to_eject,
             .next_shuffling_active_indices = next_shuffling_active_indices,
+            .next_shuffling = null,
+            .shuffling_job = null,
             // to be updated in processEffectiveBalanceUpdates
             .next_epoch_total_active_balance_by_increment = 0,
             .is_active_prev_epoch = reused_cache.is_active_prev_epoch.items,
@@ -526,7 +559,22 @@ pub const EpochTransitionCache = struct {
         };
     }
 
+    pub fn startShuffling(self: *EpochTransitionCache, allocator: Allocator, io: std.Io, seed: [32]u8, epoch: Epoch) !void {
+        std.debug.assert(self.shuffling_job == null);
+        const active_indices = try allocator.alloc(ValidatorIndex, self.next_shuffling_active_indices.len);
+        std.mem.copyForwards(ValidatorIndex, active_indices, self.next_shuffling_active_indices);
+        self.shuffling_job = ShufflingJob.start(allocator, io, seed, epoch, active_indices);
+    }
+
+    pub fn joinShuffling(self: *EpochTransitionCache) !*EpochShuffling {
+        var job = self.shuffling_job orelse return error.ShufflingJobNotStarted;
+        self.shuffling_job = null;
+        return job.join();
+    }
+
     pub fn deinit(self: *EpochTransitionCache, allocator: Allocator) void {
+        if (self.next_shuffling) |next_shuffling| next_shuffling.unref();
+        if (self.shuffling_job) |*job| job.cancel();
         // no need to deinit proposer_indices and inclusion_delays as they are from reused_cache
         // no need to deinit below as they are from reused_cache
         // self.flags.deinit();

@@ -392,6 +392,16 @@ fn ProcessEpochBench(comptime fork: ForkSeq) type {
             ) catch unreachable;
             defer cache.deinit(allocator);
 
+            if (comptime fork.gte(.fulu)) {
+                state_transition.startProposerLookaheadShuffling(
+                    fork,
+                    allocator,
+                    self.io,
+                    BenchState.cloned_cached_state.state.castToFork(fork),
+                    &cache,
+                ) catch unreachable;
+            }
+
             state_transition.processEpoch(
                 fork,
                 allocator,
@@ -428,6 +438,16 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
             defer cache_val.deinit(allocator);
             const cache = &cache_val;
             recordSegment(.before_process_epoch, @as(u64, @intCast(time.since(io, before_start).nanoseconds)));
+
+            if (comptime fork.gte(.fulu)) {
+                state_transition.startProposerLookaheadShuffling(
+                    fork,
+                    allocator,
+                    io,
+                    BenchState.cloned_cached_state.state.castToFork(fork),
+                    cache,
+                ) catch unreachable;
+            }
 
             const fork_state = BenchState.cloned_cached_state.state.castToFork(fork);
             const epoch_cache = BenchState.cloned_cached_state.epoch_cache;
