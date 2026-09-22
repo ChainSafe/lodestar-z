@@ -333,7 +333,7 @@ pub const Runtime = struct {
         }
         if (self.gossip) |*gossip| {
             result.gossip = gossip.snapshot(try gossip_mod.monotonic());
-            for (gossip.cells) |cell| result.copyingPins += @intFromBool(cell.state == .copying);
+            result.copyingPins += @intCast(gossip.diag.copying);
             result.liveBridgeRequestedBytes += gossip_mod.Table.backingBytes(gossip.cells.len, gossip.store.bytes.len);
         }
         if (self.publications) |*table| {

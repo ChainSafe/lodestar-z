@@ -40,11 +40,11 @@ test "gossip batch bounds, rollback and expiry keep pins until full completion" 
     defer std.testing.allocator.free(data);
     @memset(data, 7);
     const first = try table.reserve(data.len);
-    table.install(first, data);
     table.get(first).?.deadline = 100;
+    table.install(first, data);
     const second = try table.reserve(7 * 1024 * 1024);
-    table.install(second, data[0 .. 7 * 1024 * 1024]);
     table.get(second).?.deadline = 100;
+    table.install(second, data[0 .. 7 * 1024 * 1024]);
     var batch = table.claim(99);
     try std.testing.expectEqual(@as(usize, 1), batch.len);
     try std.testing.expectEqual(first, batch.tokens[0]);
@@ -53,11 +53,12 @@ test "gossip batch bounds, rollback and expiry keep pins until full completion" 
     try std.testing.expectEqual(@as(usize, 20 * 1024 * 1024), budget.used);
     table.finish(&batch, true);
     try std.testing.expectEqual(@as(usize, 0), budget.used);
+    try std.testing.expect(!table.report(first, .accept, 100));
     try std.testing.expectEqual(@as(u64, 2), table.diag.queuedExpired);
     for (0..65) |_| {
         const token = try table.reserve(1);
-        table.install(token, "x");
         table.get(token).?.deadline = 200;
+        table.install(token, "x");
     }
     batch = table.claim(101);
     try std.testing.expectEqual(@as(usize, 64), batch.len);
@@ -86,8 +87,8 @@ test "gossip flags remain independent of full command capacity and reject stale 
     var handles: [64]g.Token = undefined;
     for (&handles) |*token| {
         token.* = try table.reserve(1);
-        table.install(token.*, "x");
         table.get(token.*).?.deadline = 100;
+        table.install(token.*, "x");
     }
     try std.testing.expectError(error.NetworkGossipFull, table.reserve(1));
     const batch = table.claim(1);
@@ -101,8 +102,8 @@ test "gossip flags remain independent of full command capacity and reject stale 
     table.expire(100);
     try std.testing.expectEqual(@as(u64, 100), table.waitLimit(100, 100));
     const replacement = try table.reserve(1);
-    table.install(replacement, "y");
     table.get(replacement).?.deadline = 200;
+    table.install(replacement, "y");
     try std.testing.expect(!table.report(handles[0], .accept, 101));
     table.close();
     try std.testing.expectEqual(@as(usize, 0), budget.used);

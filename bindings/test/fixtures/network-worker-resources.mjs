@@ -34,7 +34,7 @@ if (!isMainThread) {
   const pending = outgoing.next().catch(() => undefined);
   const incoming = await until(() => runtime.takeIncomingRequest());
   await until(() => {
-    for (const check of runtime.drainGossipChecks()) runtime.classifyGossip(check.handle, false);
+    runtime.classifyGossip(runtime.drainGossipChecks().map(({handle}) => ({handle, available: false})));
     return runtime.diagnostics().gossip.queued > 0;
   });
   const batch = runtime.drainGossip();

@@ -100,6 +100,8 @@ export interface NativeGossipProcessorLimit {
 export interface NativeGossipStartupPolicy {
   /** Fixed limits in NativeTopicKind declaration order. */
   processor?: readonly NativeGossipProcessorLimit[];
+  /** Outstanding decoded payloads and messages, held until host completion. Requires processor. */
+  execution?: readonly NativeGossipProcessorLimit[];
   heartbeatIntervalMs: bigint;
   iwantFollowupMs: bigint;
   idontwantMinDataSize: number;
@@ -358,14 +360,16 @@ export interface NativeNetworkApplicationRuntime {
   getMetrics(): string;
   readonly closed: Promise<NativeRuntimeCloseResult>;
   /** Copies work within host credits, up to 64 messages/16 MiB. Processor plans also apply kind and ordinary scheduling gates. */
-  drainGossip(demand?: {items: number; bytes: number; ordinary: boolean; kind?: NativeTopicKind}): NativeGossipBatch;
-  /** Returns up to 64 metadata-only dependency checks. Answer each with classifyGossip. */
+  drainGossip(demand?: {items: number; bytes: number; ordinary: boolean}): NativeGossipBatch;
+  /** Returns up to 64 metadata-only dependency checks. Answer with one bounded classifyGossip call. */
   drainGossipChecks(): NativeGossipDependencyCheck[];
-  classifyGossip(handle: NativeGossipHandle, available: boolean): boolean;
+  /** Applies up to 64 answers; stale handles are skipped individually. Returns the accepted count. */
+  classifyGossip(results: readonly NativeGossipClassification[]): number;
   notifyGossipBlock(root: Uint8Array): void;
   dropQueuedGossip(): void;
   trackGossipSearch(root: Uint8Array, peer: PeerIdStr | null): boolean;
   /** Completes host execution even when false means the protocol verdict has already expired. */
+  /** Complete only after validation settles, including after protocol timeout. A late verdict returns false. */
   reportGossip(handle: NativeGossipHandle, verdict: NativeGossipVerdict): boolean;
   /** Copies admitted input. Admission pressure rejects with admission_full before any publication. */
   publishGossip(
@@ -574,6 +578,7 @@ export interface NativeRequestDiagnostics {
   inputBytes: number;
   sinkBytes: number;
   copyingBytes: number;
+  copying: number;
   chunksCopied: bigint;
   bytesCopied: bigint;
   requestFull: bigint;
@@ -675,8 +680,19 @@ export interface NativeGossipMessage {
   data: Uint8Array;
   receivedAtUnixMs: number;
 }
-export interface NativeGossipBatch {
+export interface NativeGossipClassification {
+  handle: NativeGossipHandle;
+  available: boolean;
+}
+export interface NativeGossipJob {
+  kind: NativeTopicKind;
+  start: number;
+  length: number;
   grouped: boolean;
+}
+export interface NativeGossipBatch {
+  /** Non-attestation jobs contain one message; attestation jobs contain one compatible group. */
+  jobs: NativeGossipJob[];
   messages: NativeGossipMessage[];
   more: boolean;
 }
@@ -697,6 +713,7 @@ export interface NativeGossipDiagnostics {
   waiting: number;
   checking: number;
   executing: number;
+  executingBytes: number;
   expiredExecuting: number;
   /** Milliseconds past the earliest verdict deadline among delivered validations awaiting host completion; zero when none. */
   oldestExpiredExecutionAgeMs: bigint;
@@ -704,6 +721,8 @@ export interface NativeGossipDiagnostics {
   dependencyRefusals: bigint;
   kindRefusals: bigint;
   slotRefusals: bigint;
+  sourceRefusals: bigint;
+  freshnessReplacements: bigint;
   capacity: number;
   occupied: number;
   highWater: number;

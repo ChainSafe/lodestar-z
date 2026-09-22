@@ -19,7 +19,6 @@ const options: gossip.Options = .{
 };
 
 const Consumer = struct {
-    owner: *gossip.Gossipsub,
     table: *processor.GossipProcessor,
     fill_during_delivery: bool = false,
 
@@ -32,7 +31,7 @@ const Consumer = struct {
         return self.table.hasCapacity(kind, len);
     }
 
-    fn deliver(context: *anyopaque, message: *const messages.MessageEvent) void {
+    fn deliver(context: *anyopaque, message: *const messages.MessageEvent) bool {
         const self: *Consumer = @ptrCast(@alignCast(context));
         const table = self.table;
         const publication = if (self.fill_during_delivery) table.budget.limit - table.budget.used else 0;
@@ -40,10 +39,7 @@ const Consumer = struct {
         defer table.budget.release(publication);
         const kind = @import("topic.zig").parseCanonical(message.topic).?.name.kind;
         const token = table.reserveKind(kind, message.bytes.len) catch |err| switch (err) {
-            error.NetworkBridgeFull, error.NetworkGossipFull => {
-                table.outcome(self.owner.report(message.handle, .ignore, .{ .mono_ms = message.admitted_ms, .unix_s = 0 }));
-                return;
-            },
+            error.NetworkBridgeFull, error.NetworkGossipFull => return false,
             else => unreachable,
         };
         const cell = table.get(token).?;
@@ -57,6 +53,7 @@ const Consumer = struct {
         cell.topic_len = @intCast(message.topic.len);
         @memcpy(cell.topic[0..cell.topic_len], message.topic);
         table.install(token, message.bytes);
+        return true;
     }
 };
 
@@ -81,7 +78,7 @@ test "gossip direct processor admission drains paged RPCs while the host queue s
     var table = try processor.GossipProcessor.initPlanned(t.allocator, 2, 16384, &budget, null);
     defer table.deinit();
     defer table.close();
-    var consumer: Consumer = .{ .owner = g, .table = &table };
+    var consumer: Consumer = .{ .table = &table };
     const sink = consumer.sink();
     g.message_sink = &sink;
     defer g.message_sink = null;
@@ -138,7 +135,7 @@ test "gossip full processor preserves duplicate attribution without runtime allo
     var table = try processor.GossipProcessor.initPlanned(ledger.allocator(), 1, 4096, &budget, null);
     defer table.deinit();
     defer table.close();
-    var consumer: Consumer = .{ .owner = &g, .table = &table };
+    var consumer: Consumer = .{ .table = &table };
     const sink = consumer.sink();
     g.message_sink = &sink;
     try support.subscribe(&g, block);
@@ -169,7 +166,7 @@ test "gossip saturated attestation intake preserves block priority and storage" 
     var table = try processor.GossipProcessor.initPlanned(t.allocator, processor.limits_mod.items(&limits), processor.limits_mod.bytes(&limits), &budget, limits);
     defer table.deinit();
     defer table.close();
-    var consumer: Consumer = .{ .owner = &g, .table = &table };
+    var consumer: Consumer = .{ .table = &table };
     const sink = consumer.sink();
     g.message_sink = &sink;
     _ = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
@@ -185,14 +182,14 @@ test "gossip saturated attestation intake preserves block priority and storage" 
     table.finish(&batch, false);
 }
 
-test "gossip capacity lost after preflight ignores delivery and refunds validation" {
+test "gossip capacity lost after preflight rolls back admission and allows redelivery" {
     var g = try support.init(t.allocator, options);
     defer g.deinit();
     var budget: @import("../byte_budget.zig").Budget = .{ .limit = 100 };
     var table = try processor.GossipProcessor.initPlanned(t.allocator, 1, 4096, &budget, null);
     defer table.deinit();
     defer table.close();
-    var consumer: Consumer = .{ .owner = &g, .table = &table, .fill_during_delivery = true };
+    var consumer: Consumer = .{ .table = &table, .fill_during_delivery = true };
     const sink = consumer.sink();
     g.message_sink = &sink;
     _ = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
@@ -201,7 +198,12 @@ test "gossip capacity lost after preflight ignores delivery and refunds validati
     try t.expectEqual(@as(usize, 0), table.diag.occupied);
     try t.expectEqual(@as(usize, 0), budget.used);
     try t.expectEqual(@as(usize, 0), g.resourceSnapshot().pending_validations);
-    try t.expectEqual(@as(u64, 1), table.diag.reportsAppliedIgnore);
+    try t.expectEqual(@as(u64, 0), table.diag.reportsAppliedIgnore);
+    try t.expectEqual(@as(u64, 1), g.messages.storage_refusals[@intFromEnum(messages.StorageRefusal.processor_capacity)]);
+    consumer.fill_during_delivery = false;
+    try receive(&g, 0, block, "racing publication");
+    try t.expectEqual(@as(usize, 1), table.diag.occupied);
+    try t.expectEqual(@as(usize, 1), g.resourceSnapshot().pending_validations);
     try t.expectEqual(@as(u64, 0), g.peers.scores.penalties.invalid_message);
 }
 

@@ -49,7 +49,7 @@ test "gossip store small messages use startup inline storage and roll back alloc
 }
 
 test "gossip retained pages and inline descriptors preserve fresh capacity by kind" {
-    const limits_mod = @import("../gossip_processor/limits.zig");
+    const limits_mod = @import("../gossip_limits.zig");
     const limits: limits_mod.Limits = @splat(.{ .items = 4, .bytes = page_bytes });
     var store = try Store.init(std.testing.allocator, 2 * limits_mod.items(&limits), 2 * limits_mod.bytes(&limits));
     defer store.deinit(std.testing.allocator);
@@ -80,7 +80,7 @@ test "gossip retained pages and inline descriptors preserve fresh capacity by ki
 }
 
 test "gossip retained page allowance cannot consume pending or other kind pages" {
-    const limits_mod = @import("../gossip_processor/limits.zig");
+    const limits_mod = @import("../gossip_limits.zig");
     const limits: limits_mod.Limits = @splat(.{ .items = 4, .bytes = page_bytes });
     var store = try Store.init(std.testing.allocator, 2 * limits_mod.items(&limits), 2 * limits_mod.bytes(&limits));
     defer store.deinit(std.testing.allocator);

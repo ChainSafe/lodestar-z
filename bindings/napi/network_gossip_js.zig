@@ -15,16 +15,8 @@ const bytes = @import("network_js.zig").bytes;
 pub fn drain(runtime: *Runtime, options: Value) !Value {
     var demand: g.Table.Demand = .{};
     if (try options.typeof() != .undefined) {
-        try cfg.object(options, &.{ "items", "bytes", "ordinary", "kind" });
-        const kind_value = try cfg.get(options, "kind");
-        var kind: ?n.gossipsub.topic.Kind = null;
-        if (try kind_value.typeof() != .undefined) {
-            var text: [64]u8 = undefined;
-            const len = try app.text(kind_value, &text);
-            kind = std.meta.stringToEnum(n.gossipsub.topic.Kind, text[0..len]) orelse return error.InvalidGossipKind;
-        }
+        try cfg.completeObject(options, &.{ "items", "bytes", "ordinary" });
         demand = .{
-            .kind = kind,
             .items = @intCast(try cfg.integer(try cfg.get(options, "items"), g.batch_max)),
             .bytes = @intCast(try cfg.integer(try cfg.get(options, "bytes"), g.batch_bytes)),
             .ordinary = try cfg.boolean(try cfg.get(options, "ordinary")),
@@ -38,9 +30,9 @@ pub fn drain(runtime: *Runtime, options: Value) !Value {
         return err;
     };
     const table = &runtime.gossip.?;
-    const previous_due = table.batch_due;
+    const previous_due = table.waitLimit(mono_ms, std.math.maxInt(u64));
     const batch = if (runtime.quiescent) g.Batch{} else table.claimDemand(mono_ms, demand);
-    if (table.batch_due != previous_due) runtime.signalLocked();
+    if (table.waitLimit(mono_ms, std.math.maxInt(u64)) != previous_due) runtime.signalLocked();
     runtime.unlock();
     var success = false;
     var reported_more = false;
@@ -60,13 +52,22 @@ pub fn drain(runtime: *Runtime, options: Value) !Value {
     }
     const object = try env.createObject();
     try put(object, "messages", array);
-    try put(object, "grouped", try env.getBoolean(batch.grouped));
+    const jobs = try env.createArrayWithLength(batch.job_count);
+    for (batch.jobs[0..batch.job_count], 0..) |job, i| {
+        const value = try env.createObject();
+        try put(value, "kind", try env.createStringUtf8(@tagName(job.kind)));
+        try put(value, "start", try env.createUint32(@intCast(job.start)));
+        try put(value, "length", try env.createUint32(@intCast(job.len)));
+        try put(value, "grouped", try env.getBoolean(job.grouped));
+        try element(jobs, i, value);
+    }
+    try put(object, "jobs", jobs);
     runtime.lock();
     const finished_ms = g.monotonic() catch |err| {
         runtime.unlock();
         return err;
     };
-    table.expire(finished_ms);
+    table.maintain(finished_ms, table.slot);
     const more = table.hasWork();
     runtime.unlock();
     try put(object, "more", try env.getBoolean(more));
@@ -172,8 +173,12 @@ pub fn checks(runtime: *Runtime) !Value {
     };
     const table = &runtime.gossip.?;
     const batch = if (!runtime.quiescent and !runtime.stop) table.claimChecks(now) else g.Batch{};
-    var cells: [g.batch_max]g.Cell = undefined;
-    for (batch.tokens[0..batch.len], 0..) |token, i| cells[i] = table.get(token).?.*;
+    const CheckView = struct { root: [32]u8, slot: u64, identity: n.PeerId, topic: [g.topic_max]u8, topic_len: u16 };
+    var cells: [g.batch_max]CheckView = undefined;
+    for (batch.tokens[0..batch.len], 0..) |token, i| {
+        const cell = table.get(token).?;
+        cells[i] = .{ .root = cell.metadata.root.?, .slot = cell.metadata.slot.?, .identity = cell.identity, .topic = cell.topic, .topic_len = cell.topic_len };
+    }
     runtime.unlock();
     var success = false;
     defer if (!success) {
@@ -192,8 +197,8 @@ pub fn checks(runtime: *Runtime) !Value {
         try put(handle, "index", try env.createUint32(token.index));
         try put(handle, "generation", try env.createBigintUint64(token.generation));
         try put(object, "handle", handle);
-        try put(object, "root", try bytes(env, &cell.metadata.root.?));
-        try put(object, "slot", try env.createBigintUint64(cell.metadata.slot.?));
+        try put(object, "root", try bytes(env, &cell.root));
+        try put(object, "slot", try env.createBigintUint64(cell.slot));
         try put(object, "peerId", try @import("network_js.zig").peerIdValue(env, &cell.identity));
         try put(object, "topic", try env.createStringUtf8(cell.topic[0..cell.topic_len]));
         try element(array, i, object);
@@ -202,24 +207,30 @@ pub fn checks(runtime: *Runtime) !Value {
     return array;
 }
 
-pub fn classify(runtime: *Runtime, handle: Value, available: Value) !Value {
-    try cfg.completeObject(handle, &.{ "index", "generation" });
-    const index = try cfg.integer(try cfg.get(handle, "index"), 9007199254740991);
-    const generation = try cfg.bigint(try cfg.get(handle, "generation"));
-    const ready = try cfg.boolean(available);
-    if (generation == 0) return error.InvalidGossipHandle;
+pub fn classify(runtime: *Runtime, values: Value) !Value {
+    const count = try cfg.array(values, g.batch_max);
+    var entries: [g.batch_max]struct { token: g.Token, available: bool } = undefined;
+    for (entries[0..count], 0..) |*entry, i| {
+        const value = try values.getElement(@intCast(i));
+        try cfg.completeObject(value, &.{ "handle", "available" });
+        const handle = try cfg.get(value, "handle");
+        try cfg.completeObject(handle, &.{ "index", "generation" });
+        const index = try cfg.integer(try cfg.get(handle, "index"), n.gossip_processor.limits_mod.capacity_max);
+        const generation = try cfg.bigint(try cfg.get(handle, "generation"));
+        if (generation == 0) return error.InvalidGossipHandle;
+        entry.* = .{ .token = .{ .index = @intCast(index), .generation = generation }, .available = try cfg.boolean(try cfg.get(value, "available")) };
+    }
     runtime.lock();
     defer runtime.unlock();
-    var accepted = false;
-    if (!runtime.stop and !runtime.quiescent and index < n.gossip_processor.limits_mod.capacity_max) {
-        runtime.gossip.?.expire(try g.monotonic());
-        accepted = runtime.gossip.?.classify(.{ .index = @intCast(index), .generation = generation }, ready);
-        if (accepted) {
-            runtime.work_rearm = true;
-            runtime.signalLocked();
-        }
+    var accepted: u32 = 0;
+    if (!runtime.stop and !runtime.quiescent) {
+        const table = &runtime.gossip.?;
+        table.maintain(try g.monotonic(), table.slot);
+        for (entries[0..count]) |entry| accepted += @intFromBool(table.classify(entry.token, entry.available));
+        runtime.work_rearm = true;
+        runtime.signalLocked();
     }
-    return runtime.env.getBoolean(accepted);
+    return runtime.env.createUint32(accepted);
 }
 
 pub fn notifyBlock(runtime: *Runtime, value: Value) !Value {

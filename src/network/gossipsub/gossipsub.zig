@@ -742,9 +742,7 @@ pub const Gossipsub = struct {
                 self.counters.messages_received += 1;
                 self.topic_metrics.get(event.topic).admitted +|= 1;
                 if (msg.data.len >= self.options.idontwant_min_data_size) self.broadcastIdontwant(self.overlay.findTopic(event.topic).?, event.id, index);
-                if (turn.sink) |sink| {
-                    sink.deliver(sink.context, &event);
-                } else {
+                if (turn.sink == null) {
                     turn.events[turn.count] = .{ .message = event };
                     turn.count += 1;
                 }

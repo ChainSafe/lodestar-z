@@ -28,7 +28,7 @@ fn add(table: *p.GossipProcessor, kind: p.limits_mod.Kind, root: ?[32]u8) !p.Tok
     const token = try table.reserveKind(kind, 1);
     const cell = table.get(token).?;
     cell.id = @splat(1);
-    cell.deadline = 100;
+    cell.deadline = if (table.expiry.tail == @import("../index_list.zig").none) 100 else @max(100, table.cells[table.expiry.tail].deadline);
     cell.metadata = .{ .root = root, .slot = 1, .await_block = root != null };
     table.install(token, "x");
     return token;
@@ -106,19 +106,22 @@ test "gossip processor batches identical attestation data with a bounded wait" {
     var table = try p.GossipProcessor.initPlanned(t.allocator, p.limits_mod.items(&limits), p.limits_mod.bytes(&limits), &budget, limits);
     defer table.deinit();
     defer table.close();
-    const first = try add(&table, .beacon_attestation, null);
-    const second = try add(&table, .beacon_attestation, null);
+    const first = try table.reserveKind(.beacon_attestation, 1);
+    const second = try table.reserveKind(.beacon_attestation, 1);
     for ([_]p.Token{ first, second }) |token| {
         const cell = table.get(token).?;
         cell.metadata.group = @splat(3);
         @memset(&cell.topic, 0);
         cell.admitted_ms = 1;
+        cell.deadline = 100;
+        table.install(token, "x");
     }
     try t.expectEqual(@as(usize, 0), table.claim(49).len);
     try t.expectEqual(@as(u64, 2), table.waitLimit(49, 100));
     const batch = table.claim(51);
     try t.expectEqual(@as(usize, 2), batch.len);
-    try t.expect(batch.grouped);
+    try t.expectEqual(@as(usize, 1), batch.job_count);
+    try t.expect(batch.jobs[0].grouped);
     table.finish(&batch, false);
     try t.expectEqual(@as(usize, 2), table.snapshot(1).queued);
 }
@@ -139,6 +142,7 @@ test "gossip processor deferral leaves per-source capacity and local search dead
     try t.expectEqual(@as(usize, 2), table.snapshot(1).waiting);
     try t.expectEqual(@as(u64, 1), table.diag.dependencyRefusals);
     table.notifyBlock(root);
+    table.maintain(1, 0);
     try t.expectEqual(@as(u16, 0), table.waiting_per_peer[0][@intFromEnum(p.limits_mod.Kind.beacon_attestation)]);
     try t.expect(table.trackSearch(root, null, 1));
     try t.expect(!table.trackSearch(root, null, 2));
@@ -151,13 +155,15 @@ test "gossip processor new attestation groups cannot postpone a mature group" {
     var table = try p.GossipProcessor.initPlanned(t.allocator, p.limits_mod.items(&limits), p.limits_mod.bytes(&limits), &budget, limits);
     defer table.deinit();
     defer table.close();
-    const older = try add(&table, .beacon_attestation, null);
-    const newer = try add(&table, .beacon_attestation, null);
+    const older = try table.reserveKind(.beacon_attestation, 1);
+    const newer = try table.reserveKind(.beacon_attestation, 1);
     for ([_]p.Token{ older, newer }, 0..) |token, i| {
         const cell = table.get(token).?;
         cell.metadata.group = @splat(@intCast(i));
         @memset(&cell.topic, 0);
         cell.admitted_ms = if (i == 0) 1 else 50;
+        cell.deadline = 100 + cell.admitted_ms;
+        table.install(token, "x");
     }
     try t.expectEqual(@as(usize, 0), table.claim(50).len);
     try t.expectEqual(@as(u64, 1), table.waitLimit(50, 100));

@@ -84,8 +84,8 @@ class NativeRuntime {
   drainGossipChecks() {
     return this.#native.drainGossipChecks();
   }
-  classifyGossip(handle, available) {
-    return this.#native.classifyGossip(handle, available);
+  classifyGossip(results) {
+    return this.#native.classifyGossip(results);
   }
   notifyGossipBlock(root) {
     return this.#native.notifyGossipBlock(root);

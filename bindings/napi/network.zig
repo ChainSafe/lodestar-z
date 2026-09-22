@@ -138,6 +138,13 @@ fn prepareApplicationStorage(runtime: *Runtime, app: *const application_cfg.Conf
     runtime.incoming = try incoming.Table.init(r.allocator, incoming_capacity, &runtime.payload_budget);
     try faults.check(.gossip_table);
     runtime.gossip = try gossip.Table.initPlanned(r.allocator, gossip_capacity, gossip_bytes, &runtime.payload_budget, gossip_options.processor_limits);
+    @memset(&runtime.gossip.?.source_maximum, 0);
+    for (chain.topics[0..chain.supported_count]) |boundary| for (boundary.rules, 0..) |rule, k| {
+        runtime.gossip.?.source_maximum[k] = @max(runtime.gossip.?.source_maximum[k], rule.ssz_max);
+    };
+    if (gossip_options.execution_limits) |execution| runtime.gossip.?.execution = execution;
+    runtime.gossip.?.groups.index.seed = gossip_options.random_seed.? ^ 3;
+    runtime.gossip.?.dependencies.index.seed = gossip_options.random_seed.? ^ 4;
     runtime.stores = try r.Stores.create(r.allocator, runtime.peer_capacity);
     try faults.check(.application_lane);
     runtime.lane = try r.allocator.create(projection.Lane);
@@ -186,7 +193,7 @@ fn onNotify(env: napi.Env, callback: Value, runtime: *Runtime, _: *void) void {
     if (idle) runtime.notify.unref(env) catch {};
     settleClose(env, runtime);
     runtime.lock();
-    const work_available = !runtime.disposed and !runtime.quiescent and ((runtime.lane != null and runtime.lane.?.len > 0) or (runtime.incoming != null and runtime.incoming.?.oldest() != null) or (runtime.gossip != null and runtime.gossip.?.oldest() != null));
+    const work_available = !runtime.disposed and !runtime.quiescent and ((runtime.lane != null and runtime.lane.?.len > 0) or (runtime.incoming != null and runtime.incoming.?.oldest() != null) or (runtime.gossip != null and runtime.gossip.?.hasWork()));
     runtime.unlock();
     if (work_available) _ = env.callFunction(callback, env.getUndefined() catch return, .{}) catch return;
 }
@@ -541,8 +548,8 @@ pub fn publishGossip(self: *@This(), topic: js.Value, data: js.Value, options: j
 pub fn drainGossipChecks(self: *@This()) !js.Value {
     return .{ .val = try gossip_js.checks(try self.owner()) };
 }
-pub fn classifyGossip(self: *@This(), handle: js.Value, available: js.Value) !js.Value {
-    return .{ .val = try gossip_js.classify(try self.owner(), handle.val, available.val) };
+pub fn classifyGossip(self: *@This(), values: js.Value) !js.Value {
+    return .{ .val = try gossip_js.classify(try self.owner(), values.val) };
 }
 pub fn notifyGossipBlock(self: *@This(), root: js.Value) !js.Value {
     return .{ .val = try gossip_js.notifyBlock(try self.owner(), root.val) };

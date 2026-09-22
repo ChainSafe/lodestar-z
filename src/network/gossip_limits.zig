@@ -1,5 +1,5 @@
 const std = @import("std");
-pub const Kind = @import("../gossipsub/topic.zig").Kind;
+pub const Kind = @import("gossipsub/topic.zig").Kind;
 pub const kind_count = @typeInfo(Kind).@"enum".fields.len;
 pub const capacity_max = 65535;
 pub const Limit = struct { items: u32, bytes: u32 };
@@ -48,4 +48,12 @@ pub fn newestFirst(kind: Kind) bool {
         .beacon_attestation, .beacon_aggregate_and_proof, .sync_committee, .sync_committee_contribution_and_proof => true,
         else => false,
     };
+}
+
+pub fn sourceItems(limit: Limit) usize {
+    return @max(1, limit.items / 2);
+}
+
+pub fn sourceBytes(limit: Limit, maximum_message: usize, inline_bytes: usize) usize {
+    return @max((@as(usize, limit.bytes) + @as(usize, limit.items) * inline_bytes) / 2, maximum_message);
 }
