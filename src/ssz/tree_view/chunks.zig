@@ -37,7 +37,7 @@ pub fn BasicPackedChunks(
 
         // ChunkedLeaf-related comptime constants. Only meaningful when `use_chunked_leaf = true`.
         // The `else` placeholders keep the symbols valid in non-chunked_leaf instantiations
-        // without referencing the ChunkedLeaf module.
+        // without referencing the ChunkedLeaf file.
         const ChunkedLeaf = if (use_chunked_leaf) pmt.ChunkedLeaf else struct {};
         const chunked_leaf_depth: Depth = if (use_chunked_leaf) chunk_depth - ChunkedLeaf.k_log2 else 0;
 
