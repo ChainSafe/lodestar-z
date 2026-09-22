@@ -113,8 +113,7 @@ fn ProcessRandaoBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type {
         body: *const BeaconBlockBody(.full, fork),
         io: std.Io,
 
-        pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
-            _ = allocator;
+        pub fn run(self: *@This(), _: std.mem.Allocator) void {
 
             state_transition.processRandao(
                 fork,
