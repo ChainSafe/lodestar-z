@@ -180,6 +180,53 @@ test "managed stale metadata finishes one refresh while periodic Status and late
     }
 }
 
+test "managed control accepts zero custody metadata without retaining previous custody credit" {
+    const fork: t.ForkContext = .{ .fork = .fulu, .custody_requirement = 4, .minimum_sampling_groups = 8 };
+    var setup: Setup = .{};
+    try setup.init(&.{ .fork = fork, .metadata = .{ .custody_group_count = fork.custody_groups } });
+    defer setup.deinit();
+    for (0..80) |_| try setup.step(0);
+    var snapshots: [4]t.Snapshot = undefined;
+    try std.testing.expectEqual(@as(usize, 1), setup.client.snapshots(&snapshots));
+    const peer = snapshots[0].peer;
+    const conn = snapshots[0].connection.?;
+    try std.testing.expectEqual(@as(usize, fork.custody_groups), snapshots[0].custody_groups.?.count());
+    const row = &setup.client.control.schedules[peer.index];
+    row.metadata_due_ms = setup.pair.now.mono_ms;
+    setup.client.control.maintain(&setup.client_service, &setup.client.catalog, &setup.pair.client, &setup.client.local, setup.pair.now);
+    var response: [25]u8 = @splat(0);
+    response[0] = 1;
+    response[8] = 1;
+    response[16] = 1;
+    var served = false;
+    for (0..80) |_| {
+        try setup.pair.pump();
+        var transport: [32]Engine.Event = undefined;
+        var output: [16]rr.Event = undefined;
+        const counts = setup.server_service.process(&setup.pair.server, setup.pair.events(&setup.pair.server, &transport), &.{}, setup.pair.now, .{ .control = &output });
+        for (output[0..counts.control]) |event| switch (event) {
+            .request => |incoming| {
+                try std.testing.expectEqual(rr.Protocol.metadata_v3, incoming.protocol);
+                try setup.server_service.reqresp.respond(incoming.request, &response, null, setup.pair.now);
+            },
+            .chunk_sent => |chunk| try std.testing.expect(setup.server_service.reqresp.finish(chunk.request, setup.pair.now)),
+            .served => served = true,
+            else => return error.TestUnexpectedResult,
+        };
+        _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, setup.pair.events(&setup.pair.client, &transport), &.{conn}, setup.pair.now, 100, &.{}, &.{}, &.{});
+    }
+    try std.testing.expect(served);
+    const snapshot = setup.client.catalog.get(peer).?;
+    try std.testing.expectEqual(@as(?u64, 0), snapshot.metadata.?.custody_group_count);
+    try std.testing.expectEqual(@as(u8, 1), snapshot.metadata.?.attnets[0]);
+    try std.testing.expectEqual(@as(u8, 1), snapshot.metadata.?.syncnets);
+    try std.testing.expectEqual(conn, snapshot.connection.?);
+    try std.testing.expect(snapshot.relevant);
+    try std.testing.expect(snapshot.disconnect_reason == null);
+    try std.testing.expect(snapshot.custody_groups == null and snapshot.sampling_groups == null);
+    try std.testing.expect(row.closing == null and row.metadata_due_ms == null);
+}
+
 test "managed native stalled fork transition only wakes for eligible work" {
     var setup: Setup = .{};
     try setup.init(&.{});

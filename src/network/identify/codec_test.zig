@@ -123,31 +123,58 @@ test "identify enforces exact string and occurrence bounds including ignored add
         decoder = codec.Decoder.init(&peer);
         try std.testing.expectError(error.StringLimit, decoder.feed(fieldFrame(&frame, case.field, bytes[0 .. case.cap + 1], 1), true));
     }
-    for ([_]Cases{ .{ .field = 3, .cap = 64 }, .{ .field = 2, .cap = 32 }, .{ .field = 4, .cap = 32 } }) |case| {
+    var decoder = codec.Decoder.init(&peer);
+    try decoder.feed(fieldFrame(&frame, 3, "", 64), true);
+    decoder = codec.Decoder.init(&peer);
+    try decoder.feed(fieldFrame(&frame, 3, "", 64), false);
+    try std.testing.expectError(error.OccurrenceLimit, decoder.feed(fieldFrame(&frame, 3, "", 1), true));
+}
+
+test "identify accepts many listen addresses plus an observed address without losing identity or protocols" {
+    const peer = try identity();
+    const key = (try peer.publicKey()).encodeProtobuf();
+    const pb = @import("../wire/protobuf.zig");
+    const address = [_]u8{ 4, 127, 0, 0, 1, 0x91, 2, 0x23, 0x29, 0xcd, 3 };
+    for ([_]usize{ 32, 34 }) |listen_count| {
+        var body: [1024]u8 = undefined;
+        var writer = pb.Writer.init(&body);
+        for (0..listen_count) |_| writer.bytesField(2, &address);
+        writer.bytesField(4, &address);
+        writer.bytesField(1, &key);
+        writer.bytesField(3, "/ipfs/id/1.0.0");
+        writer.bytesField(6, "compatible-peer");
+        var frame: [1026]u8 = undefined;
+        var framed = pb.Writer.init(&frame);
+        framed.varint(writer.written().len);
+        framed.bytes(writer.written());
         var decoder = codec.Decoder.init(&peer);
-        try decoder.feed(fieldFrame(&frame, case.field, "", case.cap), true);
-        decoder = codec.Decoder.init(&peer);
-        try decoder.feed(fieldFrame(&frame, case.field, "", case.cap), false);
-        try std.testing.expectError(error.OccurrenceLimit, decoder.feed(fieldFrame(&frame, case.field, "", 1), true));
+        for (framed.written()) |byte| try decoder.feed(&.{byte}, false);
+        try std.testing.expect(decoder.result() == null);
+        try decoder.feed(&.{}, true);
+        try std.testing.expectEqualStrings("compatible-peer", decoder.result().?.agent.?.slice());
+        try std.testing.expect(decoder.result().?.protocols.contains(.identify));
+        var other = peer;
+        other.bytes[6] = 3;
+        decoder = codec.Decoder.init(&other);
+        try std.testing.expectError(error.IdentityMismatch, decoder.feed(framed.written(), true));
     }
 }
 
 test "identify bounds all field visits and accepts unknown protobuf wire forms" {
     const peer = try identity();
     var frame: [300]u8 = undefined;
-    const pb = @import("../wire/protobuf.zig");
-    var writer = pb.Writer.init(&frame);
-    writer.varint(256);
-    for (0..128) |_| writer.bytesField(9, "");
+    for ([_]u32{ 2, 4, 9 }) |field| {
+        const bytes = fieldFrame(&frame, field, "", 128);
+        var decoder = codec.Decoder.init(&peer);
+        for (0..8) |_| try decoder.feed(bytes, false);
+        try decoder.feed(&.{}, true);
+        decoder = codec.Decoder.init(&peer);
+        for (0..8) |_| try decoder.feed(bytes, false);
+        try std.testing.expectError(error.FieldLimit, decoder.feed(&.{ 2, 0x48, 0 }, true));
+        decoder = codec.Decoder.init(&peer);
+        try std.testing.expectError(error.FieldLimit, decoder.feed(fieldFrame(&frame, field, "", 129), true));
+    }
     var decoder = codec.Decoder.init(&peer);
-    for (0..8) |_| try decoder.feed(writer.written(), false);
-    try decoder.feed(&.{}, true);
-    decoder = codec.Decoder.init(&peer);
-    for (0..8) |_| try decoder.feed(writer.written(), false);
-    try std.testing.expectError(error.FieldLimit, decoder.feed(&.{ 2, 0x48, 0 }, true));
-    decoder = codec.Decoder.init(&peer);
-    try std.testing.expectError(error.FieldLimit, decoder.feed(fieldFrame(&frame, 9, "", 129), true));
-    decoder = codec.Decoder.init(&peer);
     try decoder.feed(&.{ 20, 0x48, 0, 0x49, 0, 0, 0, 0, 0, 0, 0, 0, 0x4d, 0, 0, 0, 0, 0x4a, 2, 1, 2 }, true);
 }
 

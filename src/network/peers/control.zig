@@ -681,7 +681,17 @@ pub const Control = struct {
                 );
             },
             .metadata_v1, .metadata_v2, .metadata_v3 => {
-                const metadata = wire.decodeMetadata(op.protocol, bytes, local.fork) catch {
+                const metadata = wire.decodeMetadata(op.protocol, bytes, local.fork) catch |err| {
+                    if (catalog.get(op.peer)) |snapshot| {
+                        std.log.scoped(.network_peers).debug("metadata_rejected peer={f} connection={d}:{d} method={s} reason={s} bytes={d}", .{
+                            @import("../logging.zig").peer(&snapshot.identity),
+                            op.conn.index,
+                            op.conn.generation,
+                            @tagName(op.protocol),
+                            @errorName(err),
+                            bytes.len,
+                        });
+                    }
                     _ = self.disconnect(catalog, op.peer, op.conn, .invalid_metadata, now);
                     return;
                 };

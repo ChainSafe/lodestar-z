@@ -94,7 +94,6 @@ pub const Merge = struct {
     metadata: Metadata = .{},
     fields: usize = 0,
     protocols: usize = 0,
-    addresses: usize = 0,
 
     fn visit(self: *Merge, frame_fields: *usize) Error!void {
         if (frame_fields.* == 128 or self.fields == 1024) return error.FieldLimit;
@@ -114,10 +113,6 @@ pub const Merge = struct {
                 if (self.protocols == 64) return error.OccurrenceLimit;
                 self.protocols += 1;
             }
-            if (tag.field == 2 or tag.field == 4) {
-                if (self.addresses == 32) return error.OccurrenceLimit;
-                self.addresses += 1;
-            }
             if (tag.wire != pb.wire_len) {
                 try reader.skip(tag.wire);
                 continue;
@@ -125,6 +120,7 @@ pub const Merge = struct {
             const value = try reader.lenDelimited();
             switch (tag.field) {
                 1 => try self.publicKey(value, &fields),
+                // Address hints are not retained; frame and field budgets bound skipping them.
                 2, 4 => if (value.len > 1024) {
                     return error.StringLimit;
                 },

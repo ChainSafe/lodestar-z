@@ -75,10 +75,10 @@ test "peer control wire independent exact metadata versions and hostile bounds" 
     );
     bytes[16] = 9;
     bytes[17] = 0;
-    try std.testing.expectError(
-        error.InvalidCustodyCount,
-        w.decodeMetadata(.metadata_v3, bytes[0..25], .{}),
-    );
+    var zero_custody = metadata;
+    zero_custody.custody_group_count = 0;
+    try std.testing.expectEqual(zero_custody, try w.decodeMetadata(.metadata_v3, bytes[0..25], .{}));
+    try std.testing.expectError(error.InvalidCustodyCount, w.encodeMetadata(.metadata_v3, &zero_custody, .{}, &bytes));
     bytes[17] = 129;
     try std.testing.expectError(
         error.InvalidCustodyCount,
@@ -140,6 +140,10 @@ test "peer local state validated immutable copy leaves previous value on rejecti
     source.metadata.syncnets = 16;
     try std.testing.expectError(error.InvalidSyncnets, w.copyLocal(&copied, &source));
     try std.testing.expectEqual(@as(u64, 0), copied.status.head_slot);
+    source.metadata.syncnets = 0;
+    source.metadata.custody_group_count = 0;
+    try std.testing.expectError(error.InvalidCustodyCount, w.copyLocal(&copied, &source));
+    try std.testing.expectEqual(@as(u64, 0), copied.status.head_slot);
 }
 test "peer control bounded malformed input sweep preserves fixed scratch" {
     var scratch: [93]u8 = @splat(0xff);
@@ -193,6 +197,10 @@ test "peer control serving prerequisites follow receive protocols before Fulu" {
     try std.testing.expectError(error.MissingAvailability, w.copyServingLocal(&copied, &source, receive));
     source.status.earliest_available_slot = 0;
     try w.copyServingLocal(&copied, &source, receive);
+    const valid = copied;
+    source.metadata.custody_group_count = 0;
+    try std.testing.expectError(error.InvalidCustodyCount, w.copyServingLocal(&copied, &source, receive));
+    try std.testing.expectEqualDeep(valid, copied);
     var bytes: [w.status_size_max]u8 = undefined;
     const len = try w.encodeStatus(.status_v2, &copied.status, &bytes);
     try std.testing.expectEqualDeep(source.status, try w.decodeStatus(.status_v2, bytes[0..len]));
