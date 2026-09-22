@@ -1093,6 +1093,32 @@ test "getRoot hashes both spine directions at the maximum supported depth" {
     }
 }
 
+test "Pool.unref reclaims trees deeper than the bounded traversal stack" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = max_depth + max_depth + 2,
+    });
+    defer pool.deinit();
+
+    const baseline = pool.getNodesInUse();
+    const zero: Node.Id = @enumFromInt(0);
+    var root = try pool.createLeafFromUint(1);
+    for (0..max_depth + 1) |_| {
+        root = try pool.createBranch(root, zero);
+    }
+
+    pool.unref(root);
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+
+    var reclaimed: std.ArrayList(Node.Id) = .empty;
+    defer reclaimed.deinit(allocator);
+    try fillPoolToCapacity(&pool, &reclaimed);
+    try std.testing.expectEqual(max_depth + max_depth + 2, reclaimed.items.len);
+    for (reclaimed.items) |id| pool.unref(id);
+}
+
 test "getRoot preserves shared branches and mixed cached payload roots" {
     const hashing = @import("hashing");
     const Payload = struct {
