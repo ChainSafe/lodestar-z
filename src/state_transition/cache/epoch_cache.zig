@@ -903,7 +903,7 @@ pub const EpochCache = struct {
 
     /// Append an `effective_balance`, extending the arraylist if necessary
     /// and detach it when shared.
-    /// 
+    ///
     /// We directly write to indices (without extending the arraylist) in two places:
     /// 1) process_effective_balance_updates.zig
     /// 2) upgrade_state_to_electra.zig
