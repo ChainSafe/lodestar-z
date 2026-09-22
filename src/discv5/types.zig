@@ -9,7 +9,7 @@ pub const distance_max: u16 = 256;
 pub const distance_count: usize = distance_max + 1;
 pub const findnode_result_max: usize = 16;
 pub const findnode_response_packets_max: u8 = 16;
-pub const bootstrap_max: usize = 16;
+pub const bootstrap_max: usize = 64;
 
 /// Returns the log2 XOR distance, which is 0 for equal IDs and 256 when the top bits differ.
 pub fn logDistance(left: *const NodeId, right: *const NodeId) u16 {

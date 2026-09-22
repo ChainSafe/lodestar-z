@@ -167,7 +167,7 @@ const cases: readonly [string, (config: NativeRuntimeConfig) => void, string][] 
   [
     "too many bootstraps",
     (c) => {
-      c.discovery = {...discoveryConfig().discovery, bootstrapEnrs: Array.from({length: 17}, () => Uint8Array.of(1))};
+      c.discovery = {...discoveryConfig().discovery, bootstrapEnrs: Array.from({length: 65}, () => Uint8Array.of(1))};
     },
     "InvalidNetworkConfig",
   ],
