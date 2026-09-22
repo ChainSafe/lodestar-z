@@ -141,10 +141,12 @@ pub const EpochCache = struct {
         active_indices: []ValidatorIndex,
         epoch: Epoch,
     ) !*EpochShufflingRc {
-        const epoch_shuffling = try computeEpochShuffling(allocator, state, active_indices, epoch);
-        errdefer epoch_shuffling.deinit();
+        const shuffling_rc = try allocator.create(EpochShufflingRc);
+        errdefer allocator.destroy(shuffling_rc);
 
-        return try EpochShufflingRc.init(allocator, epoch_shuffling);
+        const epoch_shuffling = try computeEpochShuffling(allocator, state, active_indices, epoch);
+        EpochShufflingRc.initIn(shuffling_rc, allocator, epoch_shuffling);
+        return shuffling_rc;
     }
 
     fn initEpochShufflingRcFromList(

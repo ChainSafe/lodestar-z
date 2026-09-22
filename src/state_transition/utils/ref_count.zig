@@ -11,12 +11,17 @@ pub fn RefCount(comptime T: type) type {
 
         pub fn init(allocator: Allocator, instance: T) !*@This() {
             const ptr = try allocator.create(@This());
-            ptr.* = .{
+            initIn(ptr, allocator, instance);
+            return ptr;
+        }
+
+        /// Initializes a caller-allocated cell without allocating.
+        pub fn initIn(cell: *@This(), allocator: Allocator, instance: T) void {
+            cell.* = .{
                 .allocator = allocator,
                 ._ref_count = std.atomic.Value(u32).init(1),
                 .instance = instance,
             };
-            return ptr;
         }
 
         /// Private deinit invoked internally only by
