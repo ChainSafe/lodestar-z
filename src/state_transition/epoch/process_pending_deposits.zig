@@ -23,6 +23,7 @@ const Node = @import("persistent_merkle_tree").Node;
 pub fn processPendingDeposits(
     comptime fork: ForkSeq,
     allocator: Allocator,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
     state: *BeaconState(fork),
@@ -32,13 +33,11 @@ pub fn processPendingDeposits(
     const deposit_balance_to_consume = try state.depositBalanceToConsume();
     const available_for_processing = deposit_balance_to_consume + getActivationExitChurnLimit(epoch_cache);
     const finalized_slot = computeStartSlotAtEpoch(try state.finalizedEpoch());
-    const eth1_deposit_index = try state.eth1DepositIndex();
-    const deposit_requests_start_index = try state.depositRequestsStartIndex();
 
     var processed_amount: u64 = 0;
     var next_deposit_index: u64 = 0;
-    var deposits_to_postpone = std.ArrayList(PendingDeposit).init(allocator);
-    defer deposits_to_postpone.deinit();
+    var deposits_to_postpone: std.ArrayList(PendingDeposit) = .empty;
+    defer deposits_to_postpone.deinit(allocator);
     var is_churn_limit_reached = false;
 
     var pending_deposits = try state.pendingDeposits();
@@ -46,15 +45,20 @@ pub fn processPendingDeposits(
     const pending_deposits_len = try pending_deposits.length();
 
     for (0..pending_deposits_len) |_| {
-        const deposit = try pending_deposits_it.nextValue(undefined);
-        // Do not process deposit requests if Eth1 bridge deposits are not yet applied.
-        if (
-        // Is deposit request
-        deposit.slot > GENESIS_SLOT and
-            // There are pending Eth1 bridge deposits
-            eth1_deposit_index < deposit_requests_start_index)
-        {
-            break;
+        const deposit = try pending_deposits_it.nextValue();
+        // Pre-fulu: do not process deposit requests if Eth1 bridge deposits are not yet applied.
+        // Fulu removes this guard along with the former (Eth1 bridge) deposit mechanism.
+        if (comptime fork.lt(.fulu)) {
+            const eth1_deposit_index = try state.eth1DepositIndex();
+            const deposit_requests_start_index = try state.depositRequestsStartIndex();
+            if (
+            // Is deposit request
+            deposit.slot > GENESIS_SLOT and
+                // There are pending Eth1 bridge deposits
+                eth1_deposit_index < deposit_requests_start_index)
+            {
+                break;
+            }
         }
 
         // Check if deposit has been finalized, otherwise, stop processing.
@@ -70,21 +74,21 @@ pub fn processPendingDeposits(
         // Read validator state
         var is_validator_exited = false;
         var is_validator_withdrawn = false;
-        const validator_index = epoch_cache.getValidatorIndex(&deposit.pubkey);
+        const validator_index = epoch_cache.pubkey_cache.get(io, deposit.pubkey);
 
         if (try isValidatorKnown(fork, state, validator_index)) {
             var validators = try state.validators();
-            var validator = try validators.get(validator_index.?);
+            var validator = try validators.getReadonly(validator_index.?);
             is_validator_exited = try validator.get("exit_epoch") < c.FAR_FUTURE_EPOCH;
             is_validator_withdrawn = try validator.get("withdrawable_epoch") < next_epoch;
         }
 
         if (is_validator_withdrawn) {
             // Deposited balance will never become active. Increase balance but do not consume churn
-            try applyPendingDeposit(fork, allocator, config, epoch_cache, state, deposit, cache);
+            try applyPendingDeposit(fork, allocator, io, config, epoch_cache, state, deposit, cache);
         } else if (is_validator_exited) {
             // Validator is exiting, postpone the deposit until after withdrawable epoch
-            try deposits_to_postpone.append(deposit);
+            try deposits_to_postpone.append(allocator, deposit);
         } else {
             // Check if deposit fits in the churn, otherwise, do no more deposit processing in this epoch.
             is_churn_limit_reached = processed_amount + deposit.amount > available_for_processing;
@@ -93,7 +97,7 @@ pub fn processPendingDeposits(
             }
             // Consume churn and apply deposit.
             processed_amount += deposit.amount;
-            try applyPendingDeposit(fork, allocator, config, epoch_cache, state, deposit, cache);
+            try applyPendingDeposit(fork, allocator, io, config, epoch_cache, state, deposit, cache);
         }
 
         // Regardless of how the deposit was handled, we move on in the queue.
@@ -121,15 +125,16 @@ pub fn processPendingDeposits(
 fn applyPendingDeposit(
     comptime fork: ForkSeq,
     allocator: Allocator,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
     state: *BeaconState(fork),
     deposit: PendingDeposit,
     cache: *EpochTransitionCache,
 ) !void {
-    const validator_index = epoch_cache.getValidatorIndex(&deposit.pubkey) orelse null;
+    const validator_index = epoch_cache.pubkey_cache.get(io, deposit.pubkey);
     const pubkey = &deposit.pubkey;
-    // TODO: is this withdrawal_credential(s) the same to spec?
+
     const withdrawal_credentials = &deposit.withdrawal_credentials;
     const amount = deposit.amount;
     const signature = deposit.signature;
@@ -138,13 +143,13 @@ fn applyPendingDeposit(
     if (!is_validator_known) {
         // Verify the deposit signature (proof of possession) which is not checked by the deposit contract
         if (validateDepositSignature(config, pubkey, withdrawal_credentials, amount, signature)) {
-            try addValidatorToRegistry(fork, allocator, epoch_cache, state, pubkey, withdrawal_credentials, amount);
-            try cache.is_compounding_validator_arr.append(hasCompoundingWithdrawalCredential(withdrawal_credentials));
+            try addValidatorToRegistry(fork, allocator, io, epoch_cache, state, pubkey, withdrawal_credentials, amount);
+            try cache.is_compounding_validator_arr.append(allocator, hasCompoundingWithdrawalCredential(withdrawal_credentials));
             // set balance, so that the next deposit of same pubkey will increase the balance correctly
             // this is to fix the double deposit issue found in mekong
             // see https://github.com/ChainSafe/lodestar/pull/7255
             if (cache.balances) |*balances| {
-                try balances.append(amount);
+                try balances.append(allocator, amount);
             }
         } else |_| {
             // invalid deposit signature, ignore the deposit
@@ -168,8 +173,8 @@ const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeacon
 
 test "processPendingDeposits - sanity" {
     const allocator = std.testing.allocator;
-    const pool_size = 10_000 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
+    const pool_size = 200_000;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 10_000);
@@ -178,6 +183,7 @@ test "processPendingDeposits - sanity" {
     try processPendingDeposits(
         .electra,
         allocator,
+        std.testing.io,
         test_state.cached_state.config,
         test_state.cached_state.epoch_cache,
         test_state.cached_state.state.castToFork(.electra),

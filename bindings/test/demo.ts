@@ -4,6 +4,7 @@ import * as era from "@lodestar/era";
 import bindings from "../src/index.js";
 import {pubkeyCache} from "../src/pubkeys.js";
 import {getEraFilePaths, getFirstEraFilePath} from "./eraFiles.ts";
+import {getPubkeyCacheCapacityForState} from "./serializedState.ts";
 
 console.log("loaded bindings");
 
@@ -31,15 +32,6 @@ const hasPkix = printDuration("check for pkix file", () => {
   }
 });
 
-if (hasPkix) {
-  printDuration("load pkix from disk", () => pubkeyCache.load(PKIX_FILE));
-} else {
-  printDuration("update bindings capacity", () => {
-    bindings.pool.ensureCapacity(10_000_000);
-    pubkeyCache.ensureCapacity(2_000_000);
-  });
-}
-
 const reader = await printDurationAsync("load era reader", () => era.era.EraReader.open(config, getFirstEraFilePath()));
 
 const nextReader = await printDurationAsync("load era reader", () =>
@@ -47,6 +39,23 @@ const nextReader = await printDurationAsync("load era reader", () =>
 );
 
 const stateBytes = await printDurationAsync("read serialized state", () => reader.readSerializedState());
+const requiredPubkeyCapacity = getPubkeyCacheCapacityForState(stateBytes);
+
+let loadedPkix = false;
+if (hasPkix) {
+  try {
+    printDuration("load pkix from disk", () => pubkeyCache.load(PKIX_FILE, requiredPubkeyCapacity));
+    loadedPkix = true;
+  } catch (error) {
+    console.warn("PKIX cache is incompatible or corrupt; rebuilding it from state", error);
+  }
+}
+
+if (!loadedPkix || pubkeyCache.capacity < requiredPubkeyCapacity) {
+  printDuration("reserve pubkey cache", () => {
+    pubkeyCache.ensureCapacity(requiredPubkeyCapacity);
+  });
+}
 
 const state = printDuration("create state view", () => bindings.BeaconStateView.createFromBytes(stateBytes));
 
@@ -54,7 +63,7 @@ const signedBlockBytes = (await printDurationAsync("read serialized block", () =
   nextReader.readSerializedBlock(state.slot + 1)
 )) as Uint8Array;
 
-printDuration("state transition", () => bindings.stateTransition.stateTransition(state, signedBlockBytes));
+printDuration("state transition", () => state.stateTransition(signedBlockBytes, false));
 
 printDuration("write pkix to disk", () => pubkeyCache.save(PKIX_FILE));
 
@@ -114,9 +123,13 @@ printDuration("pendingDeposits", () => state.pendingDeposits);
 printDuration("pendingPartialWithdrawals", () => state.pendingPartialWithdrawals);
 printDuration("pendingConsolidations", () => state.pendingConsolidations);
 printDuration("proposerLookahead", () => state.proposerLookahead);
-printDuration("getSingleProof(169)", () => state.getSingleProof(169));
-printDuration("isValidVoluntaryExit", () => state.isValidVoluntaryExit(new Uint8Array(112), false));
-printDuration("getVoluntaryExitValidity", () => state.getVoluntaryExitValidity(new Uint8Array(112), false));
+printDuration("getSingleProof(169n)", () => state.getSingleProof(169n));
+const invalidVoluntaryExit = {
+  message: {epoch: 0, validatorIndex: 0},
+  signature: new Uint8Array(96),
+};
+printDuration("isValidVoluntaryExit", () => state.isValidVoluntaryExit(invalidVoluntaryExit, false));
+printDuration("getVoluntaryExitValidity", () => state.getVoluntaryExitValidity(invalidVoluntaryExit, false));
 printDuration("createMultiProof(descriptor for gindex 42)", () =>
   state.createMultiProof(Uint8Array.from([0x25, 0xe0]))
 );

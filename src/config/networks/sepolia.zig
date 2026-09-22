@@ -1,3 +1,4 @@
+const std = @import("std");
 const ChainConfig = @import("../ChainConfig.zig");
 const BeaconConfig = @import("../BeaconConfig.zig");
 const b = @import("hex").hexToBytesComptime;
@@ -30,6 +31,8 @@ pub const chain_config = mainnet.chain_config.merge(.{
     .ELECTRA_FORK_EPOCH = 222464,
     .FULU_FORK_VERSION = b(4, "0x90000075"),
     .FULU_FORK_EPOCH = 272640,
+    .GLOAS_FORK_VERSION = b(4, "0x90000076"),
+    .GLOAS_FORK_EPOCH = std.math.maxInt(u64),
 
     // Deposit contract
     .DEPOSIT_CHAIN_ID = 11155111,

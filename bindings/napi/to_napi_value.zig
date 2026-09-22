@@ -1,6 +1,6 @@
 const std = @import("std");
 const ssz = @import("ssz");
-const napi = @import("zapi:napi");
+const napi = @import("zapi:zapi").napi;
 const constants = @import("constants");
 
 pub fn sszValueToNapiValue(env: napi.Env, comptime ST: type, value: *const ST.Type) !napi.Value {
@@ -15,7 +15,9 @@ pub fn sszValueToNapiValue(env: napi.Env, comptime ST: type, value: *const ST.Ty
             return try env.getBoolean(value.*);
         },
         .vector => {
-            if (comptime ssz.isByteVectorType(ST)) {
+            if (comptime ssz.isBitVectorType(ST)) {
+                return try bitArrayToNapiValue(env, value.data[0..], ST.length);
+            } else if (comptime ssz.isByteVectorType(ST)) {
                 var bytes: [*]u8 = undefined;
                 const buf = try env.createArrayBuffer(ST.length, &bytes);
                 @memcpy(bytes[0..ST.length], value);
@@ -30,7 +32,9 @@ pub fn sszValueToNapiValue(env: napi.Env, comptime ST: type, value: *const ST.Ty
             }
         },
         .list => {
-            if (comptime ssz.isByteListType(ST)) {
+            if (comptime ssz.isBitListType(ST)) {
+                return try bitArrayToNapiValue(env, value.data.items, value.bit_len);
+            } else if (comptime ssz.isByteListType(ST)) {
                 var bytes: [*]u8 = undefined;
                 const buf = try env.createArrayBuffer(value.items.len, &bytes);
                 @memcpy(bytes[0..value.items.len], value.items);
@@ -44,7 +48,18 @@ pub fn sszValueToNapiValue(env: napi.Env, comptime ST: type, value: *const ST.Ty
                 return arr;
             }
         },
-        .container => {
+        .progressive_list => {
+            const arr = try env.createArrayWithLength(value.items.len);
+            for (value.items, 0..) |*v, i| {
+                const napi_element = try sszValueToNapiValue(env, ST.Element, v);
+                try arr.setElement(@intCast(i), napi_element);
+            }
+            return arr;
+        },
+        .progressive_bit_list => {
+            return try bitArrayToNapiValue(env, value.data.items, value.bit_len);
+        },
+        .container, .progressive_container => {
             const obj = try env.createObject();
             inline for (ST.fields) |field| {
                 const field_value = &@field(value, field.name);
@@ -53,7 +68,37 @@ pub fn sszValueToNapiValue(env: napi.Env, comptime ST: type, value: *const ST.Ty
             }
             return obj;
         },
+        .compatible_union => {
+            const selector = ST.getSelector(value);
+            const obj = try env.createObject();
+            try obj.setNamedProperty("selector", try env.createInt64(@intCast(selector)));
+
+            inline for (ST._union_options) |option| {
+                if (selector == option.@"0") {
+                    const option_type = option.@"1";
+                    const field_name = comptime std.fmt.comptimePrint("option_{d}", .{option.@"0"});
+                    const union_value = &@field(value.*, field_name);
+                    const napi_union_value = try sszValueToNapiValue(env, option_type, union_value);
+                    try obj.setNamedProperty("value", napi_union_value);
+                    return obj;
+                }
+            }
+
+            return error.InvalidSelector;
+        },
     }
+}
+
+fn bitArrayToNapiValue(env: napi.Env, data: []const u8, bit_len: usize) !napi.Value {
+    var bytes: [*]u8 = undefined;
+    const buf = try env.createArrayBuffer(data.len, &bytes);
+    @memcpy(bytes[0..data.len], data);
+    const uint8_array = try env.createTypedarray(.uint8, data.len, buf, 0);
+
+    const obj = try env.createObject();
+    try obj.setNamedProperty("uint8Array", uint8_array);
+    try obj.setNamedProperty("bitLen", try env.createInt64(@intCast(bit_len)));
+    return obj;
 }
 
 const NumberSliceOpts = struct {

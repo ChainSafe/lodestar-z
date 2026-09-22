@@ -27,7 +27,7 @@ const test_template =
     \\        @tagName(active_preset) ++ "/tests/" ++ @tagName(active_preset) ++ "/{s}/operations/{s}/pyspec_tests/{s}",
     \\    }});
     \\    defer allocator.free(test_dir_name);
-    \\    const test_dir = std.fs.cwd().openDir(test_dir_name, .{{}}) catch return error.SkipZigTest;
+    \\    const test_dir = std.Io.Dir.openDir(.cwd(), std.testing.io, test_dir_name, .{{}}) catch return error.SkipZigTest;
     \\
     \\    try Operations.TestCase(.{s}, .{s}).execute(allocator, test_dir);
     \\}}
@@ -35,12 +35,12 @@ const test_template =
     \\
 ;
 
-pub fn writeHeader(writer: std.io.AnyWriter) !void {
+pub fn writeHeader(writer: *std.Io.Writer) !void {
     try writer.print(header, .{});
 }
 
 pub fn writeTest(
-    writer: std.io.AnyWriter,
+    writer: *std.Io.Writer,
     fork: ForkSeq,
     handler: Handler,
     test_case_name: []const u8,

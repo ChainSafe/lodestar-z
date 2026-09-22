@@ -6,7 +6,7 @@ const Node = @import("Node.zig");
 
 test "View" {
     const allocator = std.testing.allocator;
-    var node_pool = try Node.Pool.init(allocator, 10);
+    var node_pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 10 });
     defer node_pool.deinit();
 
     var pool = try View.Pool.init(allocator, 10, &node_pool);

@@ -1,6 +1,5 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const expect = std.testing.expect;
 const preset = @import("preset").preset;
 const ForkSeq = @import("config").ForkSeq;
 const Node = @import("persistent_merkle_tree").Node;
@@ -29,6 +28,7 @@ pub const AnyBeaconState = union(ForkSeq) {
     deneb: *ct.deneb.BeaconState.TreeView,
     electra: *ct.electra.BeaconState.TreeView,
     fulu: *ct.fulu.BeaconState.TreeView,
+    gloas: *ct.gloas.BeaconState.TreeView,
 
     pub fn fromValue(allocator: Allocator, pool: *Node.Pool, comptime fork_seq: ForkSeq, value: anytype) !AnyBeaconState {
         return switch (fork_seq) {
@@ -52,6 +52,9 @@ pub const AnyBeaconState = union(ForkSeq) {
             },
             .fulu => .{
                 .fulu = try ct.fulu.BeaconState.TreeView.fromValue(allocator, pool, value),
+            },
+            .gloas => .{
+                .gloas = try ct.gloas.BeaconState.TreeView.fromValue(allocator, pool, value),
             },
         };
     }
@@ -78,6 +81,9 @@ pub const AnyBeaconState = union(ForkSeq) {
             },
             .fulu => .{
                 .fulu = try ct.fulu.BeaconState.TreeView.deserialize(allocator, pool, bytes),
+            },
+            .gloas => .{
+                .gloas = try ct.gloas.BeaconState.TreeView.deserialize(allocator, pool, bytes),
             },
         };
     }
@@ -127,13 +133,19 @@ pub const AnyBeaconState = union(ForkSeq) {
                 _ = try state.serializeIntoBytes(out);
                 return out;
             },
+            .gloas => |state| {
+                const out = try allocator.alloc(u8, try state.serializedSize());
+                errdefer allocator.free(out);
+                _ = try state.serializeIntoBytes(out);
+                return out;
+            },
         }
     }
 
     pub fn format(
         self: AnyBeaconState,
         comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
+        options: std.fmt.Options,
         writer: anytype,
     ) !void {
         _ = fmt;
@@ -154,6 +166,7 @@ pub const AnyBeaconState = union(ForkSeq) {
             .deneb => |state| .{ .deneb = try state.clone(opts) },
             .electra => |state| .{ .electra = try state.clone(opts) },
             .fulu => |state| .{ .fulu = try state.clone(opts) },
+            .gloas => |state| .{ .gloas = try state.clone(opts) },
         };
     }
 
@@ -180,7 +193,7 @@ pub const AnyBeaconState = union(ForkSeq) {
     /// Get a Merkle proof for the finalized root in the beacon state.
     pub fn getFinalizedRootProof(self: *AnyBeaconState, allocator: Allocator) !SingleProof {
         const gindex_value: u64 = switch (self.*) {
-            .electra, .fulu => constants.FINALIZED_ROOT_GINDEX_ELECTRA,
+            .electra, .fulu, .gloas => constants.FINALIZED_ROOT_GINDEX_ELECTRA,
             else => constants.FINALIZED_ROOT_GINDEX,
         };
         return self.getSingleProof(allocator, gindex_value);
@@ -200,6 +213,20 @@ pub const AnyBeaconState = union(ForkSeq) {
 
     pub fn forkSeq(self: *AnyBeaconState) ForkSeq {
         return std.meta.activeTag(self.*);
+    }
+
+    /// Underlying persistent merkle tree pool, regardless of fork variant.
+    pub fn nodePool(self: *AnyBeaconState) *Node.Pool {
+        return switch (self.*) {
+            inline else => |state| state.pool,
+        };
+    }
+
+    /// Root node of the underlying tree view, regardless of fork variant.
+    pub fn root(self: *AnyBeaconState) Node.Id {
+        return switch (self.*) {
+            inline else => |state| state.root,
+        };
     }
 
     // pub fn castFromFork(comptime f: ForkSeq, )
@@ -354,6 +381,16 @@ pub const AnyBeaconState = union(ForkSeq) {
         try self.setEth1DepositIndex(try self.eth1DepositIndex() + 1);
     }
 
+    pub fn buildersLength(self: *AnyBeaconState) !usize {
+        return switch (self.*) {
+            .phase0, .altair, .bellatrix, .capella, .deneb, .electra, .fulu => error.InvalidAtFork,
+            inline else => |state| {
+                var builders_view = try state.getReadonly("builders");
+                return builders_view.length();
+            },
+        };
+    }
+
     pub fn validators(self: *AnyBeaconState) !*ct.phase0.Validators.TreeView {
         return switch (self.*) {
             inline else => |state| try state.get("validators"),
@@ -376,7 +413,29 @@ pub const AnyBeaconState = union(ForkSeq) {
         return switch (self.*) {
             inline else => |state| {
                 var validators_view = try state.getReadonly("validators");
+                try validators_view.commit();
                 return validators_view.getAllReadonlyValues(allocator);
+            },
+        };
+    }
+
+    /// Pointer-slice version of `validatorsSlice` that hands out
+    /// `*const Validator.Type` into the pool's container_struct payloads —
+    /// no clone. Pointers are valid only while the validators list is not
+    /// mutated; copy out values that must survive a `tree.set`.
+    pub fn validatorsPtrSlice(self: *AnyBeaconState, allocator: Allocator) ![]*const ct.phase0.Validator.Type {
+        return switch (self.*) {
+            inline else => |state| {
+                var validators_view = try state.getReadonly("validators");
+                try validators_view.commit();
+                const len = try validators_view.length();
+                const out = try allocator.alloc(*const ct.phase0.Validator.Type, len);
+                errdefer allocator.free(out);
+                var it = validators_view.iteratorReadonly(0);
+                for (0..len) |i| {
+                    out[i] = try it.nextValuePtr();
+                }
+                return out;
             },
         };
     }
@@ -606,25 +665,25 @@ pub const AnyBeaconState = union(ForkSeq) {
 
     pub fn latestExecutionPayloadHeader(self: *AnyBeaconState, allocator: Allocator, out: *AnyExecutionPayloadHeader) !void {
         return switch (self.*) {
-            .phase0, .altair => error.InvalidAtFork,
+            .phase0, .altair, .gloas => error.InvalidAtFork,
             .bellatrix => |state| {
-                out.* = .{ .bellatrix = undefined };
+                out.* = .{ .bellatrix = ct.bellatrix.ExecutionPayloadHeader.default_value };
                 try state.getValue(allocator, "latest_execution_payload_header", &out.bellatrix);
             },
             .capella => |state| {
-                out.* = .{ .capella = undefined };
+                out.* = .{ .capella = ct.capella.ExecutionPayloadHeader.default_value };
                 try state.getValue(allocator, "latest_execution_payload_header", &out.capella);
             },
             .deneb => |state| {
-                out.* = .{ .deneb = undefined };
+                out.* = .{ .deneb = ct.deneb.ExecutionPayloadHeader.default_value };
                 try state.getValue(allocator, "latest_execution_payload_header", &out.deneb);
             },
             .electra => |state| {
-                out.* = .{ .deneb = undefined };
+                out.* = .{ .deneb = ct.deneb.ExecutionPayloadHeader.default_value };
                 try state.getValue(allocator, "latest_execution_payload_header", &out.deneb);
             },
             .fulu => |state| {
-                out.* = .{ .deneb = undefined };
+                out.* = .{ .deneb = ct.deneb.ExecutionPayloadHeader.default_value };
                 try state.getValue(allocator, "latest_execution_payload_header", &out.deneb);
             },
         };
@@ -632,11 +691,21 @@ pub const AnyBeaconState = union(ForkSeq) {
 
     pub fn latestExecutionPayloadHeaderBlockHash(self: *AnyBeaconState) !*const [32]u8 {
         return switch (self.*) {
-            .phase0, .altair => error.InvalidAtFork,
+            .phase0, .altair, .gloas => error.InvalidAtFork,
             inline else => |state| {
                 var header = try state.get("latest_execution_payload_header");
                 return try header.getFieldRoot("block_hash");
             },
+        };
+    }
+
+    pub fn executionPayloadAvailability(self: *AnyBeaconState, index: usize) !bool {
+        return switch (self.*) {
+            .gloas => |state| {
+                var bv = try state.get("execution_payload_availability");
+                return try bv.get(index);
+            },
+            inline else => error.InvalidAtFork,
         };
     }
 
@@ -647,7 +716,7 @@ pub const AnyBeaconState = union(ForkSeq) {
             .deneb => |state| try state.setValue("latest_execution_payload_header", &header.deneb),
             .electra => |state| try state.setValue("latest_execution_payload_header", &header.deneb),
             .fulu => |state| try state.setValue("latest_execution_payload_header", &header.deneb),
-            else => return error.InvalidAtFork,
+            .phase0, .altair, .gloas => return error.InvalidAtFork,
         }
     }
 
@@ -937,120 +1006,20 @@ pub const AnyBeaconState = union(ForkSeq) {
                     state,
                 ),
             },
-            .fulu => error.InvalidAtFork,
+            .fulu => |state| .{
+                .gloas = try populateFields(
+                    ct.fulu.BeaconState,
+                    ct.gloas.BeaconState,
+                    state.allocator,
+                    state.pool,
+                    state,
+                ),
+            },
+            .gloas => error.InvalidAtFork,
         };
     }
 };
 
-test "electra - sanity" {
-    const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 500_000);
-    defer pool.deinit();
-
-    var beacon_state = try AnyBeaconState.fromValue(allocator, &pool, .electra, &ct.electra.BeaconState.default_value);
-    defer beacon_state.deinit();
-
-    try beacon_state.setSlot(12345);
-
-    try std.testing.expect((try beacon_state.genesisTime()) == 0);
-    try std.testing.expectEqualSlices(u8, &[_]u8{0} ** 32, (try beacon_state.genesisValidatorsRoot())[0..]);
-    try std.testing.expect((try beacon_state.slot()) == 12345);
-    try beacon_state.setSlot(2025);
-    try std.testing.expect((try beacon_state.slot()) == 2025);
-
-    const out: *const [32]u8 = try beacon_state.hashTreeRoot();
-    try expect(!std.mem.eql(u8, (&[_]u8{0} ** 32)[0..], out.*[0..]));
-
-    // TODO: more tests
-}
-
-test "clone - sanity" {
-    const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 500_000);
-    defer pool.deinit();
-
-    var beacon_state = try AnyBeaconState.fromValue(allocator, &pool, .electra, &ct.electra.BeaconState.default_value);
-    defer beacon_state.deinit();
-
-    try beacon_state.setSlot(12345);
-    try beacon_state.commit();
-
-    // test the clone() and deinit() works fine without memory leak
-    var cloned_state = try beacon_state.clone(.{});
-    defer cloned_state.deinit();
-
-    try expect((try cloned_state.slot()) == 12345);
-}
-
-test "clone - cases" {
-    const allocator = std.testing.allocator;
-
-    const TestCase = struct {
-        name: []const u8,
-        slot_set: u64,
-        commit_before_clone: bool,
-        expected_slot: u64,
-    };
-
-    const test_Case = [_]TestCase{
-        .{ .name = "commit before clone", .slot_set = 12345, .commit_before_clone = true, .expected_slot = 12345 },
-        .{ .name = "no commit before clone", .slot_set = 12345, .commit_before_clone = false, .expected_slot = 0 },
-    };
-
-    inline for (test_Case) |tc| {
-        var pool = try Node.Pool.init(allocator, 500_000);
-        defer pool.deinit();
-
-        var beacon_state = try AnyBeaconState.fromValue(allocator, &pool, .electra, &ct.electra.BeaconState.default_value);
-        defer beacon_state.deinit();
-
-        try beacon_state.setSlot(tc.slot_set);
-        try expect((try beacon_state.slot()) == tc.slot_set);
-
-        if (tc.commit_before_clone) {
-            try beacon_state.commit();
-        }
-
-        var cloned_state = try beacon_state.clone(.{});
-        defer cloned_state.deinit();
-
-        const got = try cloned_state.slot();
-        if (got != tc.expected_slot) {
-            std.debug.print("clone case '{s}' failed: got slot {}, expected {}\n", .{ tc.name, got, tc.expected_slot });
-            return error.TestExpectedEqual;
-        }
-    }
-}
-
-test "upgrade state - sanity" {
-    const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 500_000);
-    defer pool.deinit();
-
-    var phase0_state = try AnyBeaconState.fromValue(allocator, &pool, .phase0, &ct.phase0.BeaconState.default_value);
-    defer phase0_state.deinit();
-
-    var altair_state = try phase0_state.upgradeUnsafe();
-    defer altair_state.deinit();
-    try expect(altair_state.forkSeq() == .altair);
-
-    var bellatrix_state = try altair_state.upgradeUnsafe();
-    defer bellatrix_state.deinit();
-    try expect(bellatrix_state.forkSeq() == .bellatrix);
-
-    var capella_state = try bellatrix_state.upgradeUnsafe();
-    defer capella_state.deinit();
-    try expect(capella_state.forkSeq() == .capella);
-
-    var deneb_state = try capella_state.upgradeUnsafe();
-    defer deneb_state.deinit();
-    try expect(deneb_state.forkSeq() == .deneb);
-
-    var electra_state = try deneb_state.upgradeUnsafe();
-    defer electra_state.deinit();
-    try expect(electra_state.forkSeq() == .electra);
-
-    var fulu_state = try electra_state.upgradeUnsafe();
-    defer fulu_state.deinit();
-    try expect(fulu_state.forkSeq() == .fulu);
+test {
+    _ = @import("any_beacon_state_test.zig");
 }

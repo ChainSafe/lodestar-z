@@ -1,4 +1,5 @@
 const std = @import("std");
+const metrics = @import("../metrics.zig");
 const Allocator = std.mem.Allocator;
 const types = @import("consensus_types");
 const Epoch = types.primitive.Epoch.Type;
@@ -6,6 +7,7 @@ const preset = @import("preset").preset;
 const BeaconConfig = @import("config").BeaconConfig;
 const ForkSeq = @import("config").ForkSeq;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
+const ProposerRewards = @import("../cache/state_cache.zig").ProposerRewards;
 const ForkTypes = @import("fork_types").ForkTypes;
 const BeaconState = @import("fork_types").BeaconState;
 const SlashingsCache = @import("../cache/slashings_cache.zig").SlashingsCache;
@@ -33,9 +35,11 @@ const SLOTS_PER_EPOCH_SQRT = std.math.sqrt(preset.SLOTS_PER_EPOCH);
 pub fn processAttestationsAltair(
     comptime fork: ForkSeq,
     allocator: Allocator,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
     state: *BeaconState(fork),
+    proposer_rewards: *ProposerRewards,
     slashings_cache: *const SlashingsCache,
     attestations: []const ForkTypes(fork).Attestation.Type,
     verify_signature: bool,
@@ -49,8 +53,8 @@ pub fn processAttestationsAltair(
     defer root_cache.deinit();
 
     // Process all attestations first and then increase the balance of the proposer once
-    // let newSeenAttesters = 0;
-    // let newSeenAttestersEffectiveBalance = 0;
+    var new_seen_attesters: u64 = 0;
+    var new_seen_attesters_effective_balance: u64 = 0;
 
     var proposer_reward: u64 = 0;
     for (attestations) |*attestation| {
@@ -58,15 +62,16 @@ pub fn processAttestationsAltair(
         try validateAttestation(fork, epoch_cache, state, attestation);
 
         // Retrieve the validator indices from the attestation participation bitfield
-        const attesting_indices = try if (comptime fork.lt(.electra)) epoch_cache.getAttestingIndicesPhase0(attestation) else epoch_cache.getAttestingIndicesElectra(attestation);
-        defer attesting_indices.deinit();
+        var attesting_indices = try if (comptime fork.lt(.electra)) epoch_cache.getAttestingIndicesPhase0(attestation) else epoch_cache.getAttestingIndicesElectra(attestation);
+        defer attesting_indices.deinit(allocator);
 
         // this check is done last because its the most expensive (if signature verification is toggled on)
-        // TODO: Why should we verify an indexed attestation that we just created? If it's just for the signature
-        // we can verify only that and nothing else.
+        // Unlike phase0 which calls isValidIndexedAttestation, altair+ only verifies the signature
+        // since the other checks (sorting, bounds) are already done in validateAttestation above.
         if (verify_signature) {
             const sig_set = try getAttestationWithIndicesSignatureSet(
                 allocator,
+                io,
                 config,
                 epoch_cache,
                 &attestation.data,
@@ -98,6 +103,10 @@ pub fn processAttestationsAltair(
 
             // Returns flags that are NOT set before (~ bitwise NOT) AND are set after
             const flags_new_set = ~flags & flags_attestation;
+            if (flags_new_set != 0) {
+                new_seen_attesters += 1;
+                new_seen_attesters_effective_balance += effective_balance_increments[validator_index];
+            }
 
             // Spec:
             // baseReward = state.validators[index].effectiveBalance / EFFECTIVE_BALANCE_INCREMENT * baseRewardPerIncrement;
@@ -128,7 +137,13 @@ pub fn processAttestationsAltair(
         const proposer_reward_numerator = total_increments * epoch_cache.base_reward_per_increment;
         proposer_reward += @divFloor(proposer_reward_numerator, PROPOSER_REWARD_DOMINATOR);
     }
+
+    metrics.state_transition.new_seen_attesters_per_block.set(new_seen_attesters);
+    metrics.state_transition.new_seen_attesters_effective_balance_per_block.set(new_seen_attesters_effective_balance);
+    metrics.state_transition.attestations_per_block.set(@intCast(attestations.len));
+
     try increaseBalance(fork, state, try getBeaconProposer(fork, epoch_cache, state, state_slot), proposer_reward);
+    proposer_rewards.attestations = proposer_reward;
 }
 
 pub fn getAttestationParticipationStatus(

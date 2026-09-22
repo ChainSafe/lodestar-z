@@ -14,6 +14,7 @@ const PendingAttestation = types.phase0.PendingAttestation.Type;
 
 pub fn processAttestationPhase0(
     allocator: Allocator,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
     state: *BeaconState(.phase0),
@@ -56,6 +57,7 @@ pub fn processAttestationPhase0(
     if (!try isValidIndexedAttestation(
         .phase0,
         allocator,
+        io,
         config,
         epoch_cache,
         validators_count,

@@ -3,25 +3,26 @@ const testing = std.testing;
 
 pub const stateTransition = @import("state_transition.zig").stateTransition;
 pub const processSlots = @import("state_transition.zig").processSlots;
-pub const TransitionOpt = @import("state_transition.zig").TransitionOpt;
+pub const TransitionOpts = @import("state_transition.zig").TransitionOpts;
 
 pub const metrics = @import("metrics.zig");
+pub const ValidatorMonitor = @import("ValidatorMonitor.zig");
 
+pub const RefCount = @import("./utils/ref_count.zig").RefCount;
 pub const computeSigningRoot = @import("./utils/signing_root.zig").computeSigningRoot;
 pub const computeEpochAtSlot = @import("./utils/epoch.zig").computeEpochAtSlot;
 pub const CachedBeaconState = @import("./cache/state_cache.zig").CachedBeaconState;
 pub const EffectiveBalanceIncrements = @import("./cache/effective_balance_increments.zig").EffectiveBalanceIncrements;
+pub const EffectiveBalanceIncrementsRc = @import("./cache/effective_balance_increments.zig").EffectiveBalanceIncrementsRc;
 pub const buildSlashingsCacheFromStateIfNeeded = @import("./cache/slashings_cache.zig").buildFromStateIfNeeded;
 
 pub const EpochCacheImmutableData = @import("./cache/epoch_cache.zig").EpochCacheImmutableData;
 pub const EpochCache = @import("./cache/epoch_cache.zig").EpochCache;
 
-pub const shuffle = @import("./utils/shuffle.zig");
 pub const committee_indices = @import("./utils/committee_indices.zig");
-pub const PubkeyIndexMap = @import("./cache/pubkey_cache.zig").PubkeyIndexMap;
-pub const Index2PubkeyCache = @import("./cache/pubkey_cache.zig").Index2PubkeyCache;
-pub const syncPubkeys = @import("./cache/pubkey_cache.zig").syncPubkeys;
-pub const syncPubkeysParallel = @import("./cache/pubkey_cache.zig").syncPubkeysParallel;
+pub const PubkeyCache = @import("./cache/pubkey_cache.zig").PubkeyCache;
+pub const pkix = @import("./cache/pkix.zig");
+pub const signature_set_verifier = @import("./signature_sets/verifier.zig");
 
 pub const EpochTransitionCache = @import("./cache/epoch_transition_cache.zig").EpochTransitionCache;
 pub const processEpoch = @import("./epoch/process_epoch.zig").processEpoch;
@@ -33,6 +34,10 @@ pub const processRegistryUpdates = @import("./epoch/process_registry_updates.zig
 pub const processSlashings = @import("./epoch/process_slashings.zig").processSlashings;
 pub const processRewardsAndPenalties = @import("./epoch/process_rewards_and_penalties.zig").processRewardsAndPenalties;
 pub const getRewardsAndPenalties = @import("./epoch/process_rewards_and_penalties.zig").getRewardsAndPenalties;
+pub const ProposerRewards = @import("./cache/state_cache.zig").ProposerRewards;
+pub const computeBlockRewards = @import("./rewards/block_rewards.zig").computeBlockRewards;
+pub const computeBlockRewardsAny = @import("./rewards/block_rewards.zig").computeBlockRewardsAny;
+pub const BlockRewards = @import("./rewards/block_rewards.zig").BlockRewards;
 pub const processEth1DataReset = @import("./epoch/process_eth1_data_reset.zig").processEth1DataReset;
 pub const processPendingDeposits = @import("./epoch/process_pending_deposits.zig").processPendingDeposits;
 pub const processPendingConsolidations = @import("./epoch/process_pending_consolidations.zig").processPendingConsolidations;
@@ -82,12 +87,17 @@ pub const validator_status = @import("./utils/validator_status.zig");
 pub const ValidatorStatus = validator_status.ValidatorStatus;
 pub const getValidatorStatus = validator_status.getValidatorStatus;
 pub const getBlockRootAtSlot = @import("./utils/block_root.zig").getBlockRootAtSlot;
+pub const computeSlotsSinceEpochStart = @import("./utils/epoch.zig").computeSlotsSinceEpochStart;
 pub const computeStartSlotAtEpoch = @import("./utils/epoch.zig").computeStartSlotAtEpoch;
-pub const deinitStateTransition = @import("./state_transition.zig").deinitStateTransition;
+pub const AnchorCheckpoint = @import("./AnchorCheckpoint.zig");
+pub const deinitReusedEpochTransitionCache = @import("./state_transition.zig").deinitReusedEpochTransitionCache;
 pub const isExecutionEnabled = @import("./utils/execution.zig").isExecutionEnabled;
 pub const isMergeTransitionComplete = @import("./utils/execution.zig").isMergeTransitionComplete;
 pub const getRandaoMix = @import("./utils/seed.zig").getRandaoMix;
 pub const getEffectiveBalanceIncrementsZeroInactive = @import("./utils/balance.zig").getEffectiveBalanceIncrementsZeroInactive;
+pub const getStateSlotFromBytes = @import("ssz_bytes.zig").getStateSlotFromBytes;
+pub const getLastProcessedSlotFromStateBytes = @import("ssz_bytes.zig").getLastProcessedSlotFromStateBytes;
+pub const STATE_SLOTS_PREFIX_LEN = @import("ssz_bytes.zig").STATE_SLOTS_PREFIX_LEN;
 
 pub const WithdrawalsResult = @import("./block/process_withdrawals.zig").WithdrawalsResult;
 
@@ -97,14 +107,31 @@ pub const bls = @import("utils/bls.zig");
 const seed = @import("./utils/seed.zig");
 pub const state_transition = @import("./state_transition.zig");
 pub const BlockExternalData = state_transition.BlockExternalData;
+pub const ExecutionPayloadStatus = state_transition.ExecutionPayloadStatus;
+pub const DataAvailabilityStatus = state_transition.DataAvailabilityStatus;
 pub const preset = @import("preset").preset;
 const EpochShuffling = @import("./utils/epoch_shuffling.zig");
 pub const calculateShufflingDecisionRoot = EpochShuffling.calculateShufflingDecisionRoot;
 pub const processProposerLookahead = @import("./epoch/process_proposer_lookahead.zig").processProposerLookahead;
+
+const load_state = @import("load_state.zig");
+pub const loadState = load_state.loadState;
+pub const MigrateStateOutput = load_state.MigrateStateOutput;
+
+const sync_committees_witness = @import("./sync_committees_witness.zig");
+pub const getSyncCommitteesWitness = sync_committees_witness.getSyncCommitteesWitness;
+pub const SyncCommitteeWitness = sync_committees_witness.SyncCommitteeWitness;
+
+const weak_subjectivity = @import("weak_subjectivity.zig");
+pub const getLatestWeakSubjectivityCheckpointEpoch = weak_subjectivity.getLatestWeakSubjectivityCheckpointEpoch;
 
 test {
     testing.refAllDecls(@This());
     testing.refAllDecls(seed);
     testing.refAllDecls(state_transition);
     testing.refAllDecls(EpochShuffling);
+    testing.refAllDecls(load_state);
+    testing.refAllDecls(sync_committees_witness);
+    testing.refAllDecls(weak_subjectivity);
+    testing.refAllDecls(@import("ssz_bytes.zig"));
 }

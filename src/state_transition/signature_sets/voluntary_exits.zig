@@ -12,11 +12,13 @@ const computeSigningRoot = @import("../utils/signing_root.zig").computeSigningRo
 const verifySingleSignatureSet = @import("../utils/signature_sets.zig").verifySingleSignatureSet;
 
 pub fn verifyVoluntaryExitSignature(
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
     signed_voluntary_exit: *const SignedVoluntaryExit,
 ) !bool {
     const signature_set = try getVoluntaryExitSignatureSet(
+        io,
         config,
         epoch_cache,
         signed_voluntary_exit,
@@ -25,6 +27,7 @@ pub fn verifyVoluntaryExitSignature(
 }
 
 pub fn getVoluntaryExitSignatureSet(
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
     signed_voluntary_exit: *const SignedVoluntaryExit,
@@ -35,24 +38,28 @@ pub fn getVoluntaryExitSignatureSet(
     try computeSigningRoot(types.phase0.VoluntaryExit, &signed_voluntary_exit.message, domain, &signing_root);
 
     return .{
-        .pubkey = epoch_cache.index_to_pubkey.items[signed_voluntary_exit.message.validator_index],
+        .pubkey = epoch_cache.pubkey_cache.getPubkey(io, signed_voluntary_exit.message.validator_index) orelse
+            return error.PubkeyNotFound,
         .signing_root = signing_root,
         .signature = signed_voluntary_exit.signature,
     };
 }
 
 pub fn voluntaryExitsSignatureSets(
+    allocator: std.mem.Allocator,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
     voluntary_exits: []types.phase0.SignedVoluntaryExit.Type,
-    out: std.ArrayList(SingleSignatureSet),
+    out: *std.ArrayList(SingleSignatureSet),
 ) !void {
     for (voluntary_exits) |*signed_voluntary_exit| {
         const signature_set = try getVoluntaryExitSignatureSet(
+            io,
             config,
             epoch_cache,
             signed_voluntary_exit,
         );
-        try out.append(signature_set);
+        try out.append(allocator, signature_set);
     }
 }

@@ -7,6 +7,7 @@ const BeaconConfig = @import("config").BeaconConfig;
 const ForkTypes = @import("fork_types").ForkTypes;
 const BeaconState = @import("fork_types").BeaconState;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
+const ProposerRewards = @import("../cache/state_cache.zig").ProposerRewards;
 const SlashingsCache = @import("../cache/slashings_cache.zig").SlashingsCache;
 const buildSlashingsCacheIfNeeded = @import("../cache/slashings_cache.zig").buildFromStateIfNeeded;
 const processAttestationPhase0 = @import("./process_attestation_phase0.zig").processAttestationPhase0;
@@ -16,9 +17,11 @@ const Node = @import("persistent_merkle_tree").Node;
 pub fn processAttestations(
     comptime fork: ForkSeq,
     allocator: Allocator,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
     state: *BeaconState(fork),
+    proposer_rewards: *ProposerRewards,
     slashings_cache: *SlashingsCache,
     attestations: []const ForkTypes(fork).Attestation.Type,
     verify_signatures: bool,
@@ -28,6 +31,7 @@ pub fn processAttestations(
         for (attestations) |attestation| {
             try processAttestationPhase0(
                 allocator,
+                io,
                 config,
                 epoch_cache,
                 state,
@@ -39,9 +43,11 @@ pub fn processAttestations(
         try processAttestationsAltair(
             fork,
             allocator,
+            io,
             config,
             epoch_cache,
             state,
+            proposer_rewards,
             slashings_cache,
             attestations,
             verify_signatures,
@@ -51,8 +57,8 @@ pub fn processAttestations(
 
 test "process attestations - sanity" {
     const allocator = std.testing.allocator;
-    const pool_size = 16 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
+    const pool_size = 180_000;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
@@ -66,9 +72,11 @@ test "process attestations - sanity" {
         processAttestations(
             .electra,
             allocator,
+            std.testing.io,
             test_state.cached_state.config,
             test_state.cached_state.epoch_cache,
             test_state.cached_state.state.castToFork(.electra),
+            &test_state.cached_state.proposer_rewards,
             &test_state.cached_state.slashings_cache,
             electra.items,
             true,

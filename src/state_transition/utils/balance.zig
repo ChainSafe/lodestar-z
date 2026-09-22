@@ -25,27 +25,26 @@ pub fn decreaseBalance(comptime fork: ForkSeq, state: *BeaconState(fork), index:
 
 pub fn getEffectiveBalanceIncrementsZeroInactive(allocator: Allocator, cached_state: *CachedBeaconState) !EffectiveBalanceIncrements {
     const active_indices = cached_state.epoch_cache.getCurrentShuffling().active_indices;
-    // 5x faster than reading from state.validators, with validator Nodes as values
-    const validators = try cached_state.state.validatorsSlice(allocator);
-    defer allocator.free(validators);
-    const validator_count = validators.len;
+
+    var validators_view = try cached_state.state.validators();
+    try validators_view.commit();
+    const validator_count = try validators_view.length();
+    var validators_it = validators_view.iteratorReadonly(0);
+
     const effective_balance_increments = cached_state.epoch_cache.getEffectiveBalanceIncrements();
-    // Slice up to `validatorCount` since it won't be mutated, nor accessed beyond `validatorCount`
     var effective_balance_increments_zero_inactive = try EffectiveBalanceIncrements.initCapacity(allocator, validator_count);
-    try effective_balance_increments_zero_inactive.appendSlice(effective_balance_increments.items[0..validator_count]);
+    effective_balance_increments_zero_inactive.appendSliceAssumeCapacity(effective_balance_increments.items[0..validator_count]);
 
     var j: usize = 0;
-    for (validators, 0..) |validator, i| {
+    for (0..validator_count) |i| {
+        const validator = try validators_it.nextValuePtr();
         const slashed = validator.slashed;
         if (j < active_indices.len and i == active_indices[j]) {
-            // active validator
             j += 1;
             if (slashed) {
-                // slashed validator
                 effective_balance_increments_zero_inactive.items[i] = 0;
             }
         } else {
-            // inactive validator
             effective_balance_increments_zero_inactive.items[i] = 0;
         }
     }

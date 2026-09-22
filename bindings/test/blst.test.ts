@@ -6,9 +6,7 @@ import {
   Signature,
   aggregatePublicKeys,
   aggregateSerializedPublicKeys,
-  aggregateSignatures,
   aggregateVerify,
-  asyncAggregateWithRandomness,
   fastAggregateVerify,
   verify,
   verifyMultipleAggregateSignatures,
@@ -88,6 +86,18 @@ describe("blst", () => {
       });
     });
 
+    describe("fromHex()", () => {
+      const G2_POINT_AT_INFINITY = `c0${"00".repeat(95)}`;
+
+      it("should check infinity by default", () => {
+        expect(() => Signature.fromHex(G2_POINT_AT_INFINITY, true)).toThrow("PkIsInfinity");
+      });
+
+      it("should skip the infinity check when explicitly disabled", () => {
+        expect(Signature.fromHex(G2_POINT_AT_INFINITY, true, false)).toBeInstanceOf(Signature);
+      });
+    });
+
     it("should serialize to bytes", () => {
       const sig = Signature.fromBytes(fromHex(TEST_VECTORS.signature.compressed));
       const bytes = sig.toBytes();
@@ -109,6 +119,16 @@ describe("blst", () => {
 
     it("should throw on invalid length", () => {
       expect(() => Signature.fromBytes(new Uint8Array(95))).toThrow();
+    });
+
+    it("should reject PublicKey objects when aggregating", () => {
+      const pk = PublicKey.fromHex(TEST_VECTORS.publicKey.compressed);
+      expect(() => Signature.aggregate([pk as unknown as Signature], false)).toThrow("TypeMismatch");
+    });
+
+    it("should aggregate Signature objects", () => {
+      const signatures = getTestSets(2).map((set) => set.sig);
+      expect(Signature.aggregate(signatures, false)).toBeInstanceOf(Signature);
     });
   });
 
@@ -155,6 +175,30 @@ describe("blst", () => {
         }
       });
     });
+    describe("SecretKey.fromHex", () => {
+      for (const prefix of ["", "0x"]) {
+        it(`should round-trip a valid key with prefix '${prefix}'`, () => {
+          const hex = `${prefix}${Buffer.from(SECRET_KEY_BYTES).toString("hex")}`;
+          expectEqualHex(SecretKey.fromHex(hex).toBytes(), SECRET_KEY_BYTES);
+        });
+      }
+
+      for (const byteLength of [0, 1, 31, 33]) {
+        for (const prefix of ["", "0x"]) {
+          it(`should throw on ${byteLength}-byte input with prefix '${prefix}'`, () => {
+            expect(() => SecretKey.fromHex(`${prefix}${"00".repeat(byteLength)}`)).toThrow("InvalidSecretKeyLength");
+          });
+        }
+      }
+
+      it("should throw on an odd number of hex characters", () => {
+        expect(() => SecretKey.fromHex("0".repeat(63))).toThrow("InvalidSecretKeyLength");
+      });
+
+      it("should throw on non-hex UTF-8 input without aborting", () => {
+        expect(() => SecretKey.fromHex("é".repeat(32))).toThrow();
+      });
+    });
     describe("instance methods", () => {
       let key: SecretKey;
       describe("toBytes", () => {
@@ -188,11 +232,18 @@ describe("blst", () => {
         });
       });
       describe("sign", () => {
-        it("should create a valid Signature", () => {
-          const sig = SecretKey.fromKeygen(KEY_MATERIAL, undefined).sign(Buffer.from("some fancy message"));
+        it("should create a valid Signature for a 32-byte signing root", () => {
+          const sig = SecretKey.fromKeygen(KEY_MATERIAL, undefined).sign(new Uint8Array(32));
           expect(sig).to.be.instanceOf(Signature);
           expect(sig.validate(false)).to.be.undefined;
         });
+
+        for (const length of [31, 33]) {
+          it(`should throw InvalidMessageLength for a ${length}-byte signing root`, () => {
+            const sk = SecretKey.fromKeygen(KEY_MATERIAL, undefined);
+            expect(() => sk.sign(new Uint8Array(length))).toThrow("InvalidMessageLength");
+          });
+        }
       });
     });
   });
@@ -212,6 +263,14 @@ describe("blst", () => {
       const result = verify(wrongMessage, pk, sig, false, false);
       expect(result).toBe(false);
     });
+
+    for (const length of [31, 33]) {
+      it(`should throw InvalidMessageLength for a ${length}-byte signing root`, () => {
+        const pk = PublicKey.fromHex(TEST_VECTORS.publicKey.compressed);
+        const sig = Signature.fromHex(TEST_VECTORS.signature.compressed);
+        expect(() => verify(new Uint8Array(length), pk, sig, false, false)).toThrow("InvalidMessageLength");
+      });
+    }
   });
 
   describe("aggregateVerify", () => {
@@ -232,6 +291,14 @@ describe("blst", () => {
       const sig = Signature.fromHex(TEST_VECTORS.signature.compressed);
       expect(aggregateVerify([TEST_VECTORS.message], [pk], sig)).to.be.true;
     });
+
+    for (const length of [31, 33]) {
+      it(`should throw InvalidMessageLength for a ${length}-byte signing root`, () => {
+        const pk = PublicKey.fromHex(TEST_VECTORS.publicKey.compressed);
+        const sig = Signature.fromHex(TEST_VECTORS.signature.compressed);
+        expect(() => aggregateVerify([new Uint8Array(length)], [pk], sig)).toThrow("InvalidMessageLength");
+      });
+    }
   });
 
   describe("fastAggregateVerify", () => {
@@ -256,11 +323,13 @@ describe("blst", () => {
       expect(result).toBe(false);
     });
 
-    it("should throw on wrong message length", () => {
-      const pk = PublicKey.fromHex(TEST_VECTORS.publicKey.compressed);
-      const sig = Signature.fromHex(TEST_VECTORS.signature.compressed);
-      expect(() => fastAggregateVerify(new Uint8Array(31), [pk], sig, false)).toThrow();
-    });
+    for (const length of [31, 33]) {
+      it(`should throw InvalidMessageLength for a ${length}-byte signing root`, () => {
+        const pk = PublicKey.fromHex(TEST_VECTORS.publicKey.compressed);
+        const sig = Signature.fromHex(TEST_VECTORS.signature.compressed);
+        expect(() => fastAggregateVerify(new Uint8Array(length), [pk], sig, false)).toThrow("InvalidMessageLength");
+      });
+    }
   });
 
   describe("verifyMultipleAggregateSignatures", () => {
@@ -272,6 +341,32 @@ describe("blst", () => {
       const sets = getTestSets(6);
       sets[0].sig = sets[1].sig;
       expect(verifyMultipleAggregateSignatures(sets, false, false)).to.be.false;
+    });
+
+    it("should reject objects of the wrong class", () => {
+      const [{msg, pk, sig, sk}] = getTestSets(1);
+      expect(() =>
+        verifyMultipleAggregateSignatures([{msg, pk: sk as unknown as PublicKey, sig}], false, false)
+      ).toThrow("TypeMismatch");
+      expect(() =>
+        verifyMultipleAggregateSignatures([{msg, pk, sig: pk as unknown as Signature}], false, false)
+      ).toThrow("TypeMismatch");
+    });
+
+    for (const length of [31, 33]) {
+      it(`should throw InvalidMessageLength for a ${length}-byte signing root`, () => {
+        const [set] = getTestSets(1);
+        expect(() => verifyMultipleAggregateSignatures([{...set, msg: new Uint8Array(length)}], false, false)).toThrow(
+          "InvalidMessageLength"
+        );
+      });
+    }
+  });
+
+  describe("aggregatePublicKeys", () => {
+    it("should reject SecretKey objects", () => {
+      const sk = SecretKey.fromBytes(SECRET_KEY_BYTES);
+      expect(() => aggregatePublicKeys([sk as unknown as PublicKey])).toThrow("TypeMismatch");
     });
   });
 
@@ -318,97 +413,6 @@ describe("blst", () => {
 
     it("should throw on invalid length bytes", () => {
       expect(() => aggregateSerializedPublicKeys([new Uint8Array(32)])).toThrow();
-    });
-  });
-
-  describe("asyncAggregateWithRandomness", () => {
-    const sameMessageSets = getTestSetsSameMessage(10);
-    const msg = sameMessageSets.msg;
-    const sets = sameMessageSets.sets.map((s) => ({
-      pk: s.pk,
-      sig: s.sig.toBytes(),
-    }));
-    const randomSet = getTestSet(20);
-
-    it("should not accept an empty array argument", () => {
-      expect(() => asyncAggregateWithRandomness([])).toThrow("EmptyArray");
-    });
-
-    describe("should accept an array of {pk: PublicKey, sig: Uint8Array}", () => {
-      it("should handle valid case", () => {
-        expect(() => asyncAggregateWithRandomness([{pk: sets[0].pk, sig: sets[0].sig}])).not.toThrow();
-      });
-      it("should handle invalid publicKey property name", () => {
-        expect(() => asyncAggregateWithRandomness([{publicKey: sets[0].pk, sig: sets[0].sig} as any])).toThrow();
-      });
-      it("should handle invalid publicKey property value", () => {
-        expect(() => asyncAggregateWithRandomness([{pk: 1 as any, sig: sets[0].sig}])).toThrow();
-      });
-      it("should handle invalid signature property name", () => {
-        expect(() => asyncAggregateWithRandomness([{pk: sets[0].pk, signature: sets[0].sig} as any])).toThrow();
-      });
-      it("should handle invalid signature property value", () => {
-        expect(() => asyncAggregateWithRandomness([{pk: sets[0].pk, sig: "bar" as any}])).toThrow();
-      });
-    });
-
-    it("should throw for invalid serialized (G2 point at infinity)", () => {
-      expect(() =>
-        asyncAggregateWithRandomness(
-          sets.concat({
-            pk: sets[0].pk,
-            sig: G2_POINT_AT_INFINITY,
-          })
-        )
-      ).toThrow();
-    });
-
-    it("should return a {pk: PublicKey, sig: Signature} object", async () => {
-      const aggPromise = asyncAggregateWithRandomness(sets);
-      expect(aggPromise).toBeInstanceOf(Promise);
-      const agg = await aggPromise;
-      expect(agg).toBeDefined();
-
-      expect(agg).toHaveProperty("pk");
-      expect(agg.pk).toBeInstanceOf(PublicKey);
-      expect(() => agg.pk.validate()).not.toThrow();
-
-      expect(agg).toHaveProperty("sig");
-      expect(agg.sig).toBeInstanceOf(Signature);
-      expect(() => agg.sig.validate(false)).not.toThrow();
-    });
-
-    it("should add randomness to aggregated publicKey", async () => {
-      const withoutRandomness = aggregatePublicKeys(
-        sets.map(({pk}) => pk),
-        false
-      );
-      const withRandomness = await asyncAggregateWithRandomness(sets);
-      expectNotEqualHex(withRandomness.pk.toBytes(), withoutRandomness.toBytes());
-    });
-
-    it("should add randomness to aggregated signature", async () => {
-      const withoutRandomness = aggregateSignatures(
-        sets.map(({sig}) => Signature.fromBytes(sig)),
-        false
-      );
-      const withRandomness = await asyncAggregateWithRandomness(sets);
-      expectNotEqualHex(withRandomness.sig.toBytes(), withoutRandomness.toBytes());
-    });
-
-    it("should produce verifiable set", async () => {
-      const {pk, sig} = await asyncAggregateWithRandomness(sets);
-      expect(verify(msg, pk, sig, false, false)).toBe(true);
-    });
-
-    it("should not validate for different message", async () => {
-      const {pk, sig} = await asyncAggregateWithRandomness(sets);
-      expect(verify(randomSet.msg, pk, sig, false, false)).toBe(false);
-    });
-
-    it("should not validate included key/sig for different message", async () => {
-      const {pk, sig} = await asyncAggregateWithRandomness([...sets, {pk: randomSet.pk, sig: randomSet.sig.toBytes()}]);
-      expect(verify(msg, pk, sig, false, false)).toBe(false);
     });
   });
 });
@@ -536,40 +540,4 @@ function expectEqualHex(value: Uint8Array, expected: Uint8Array): void {
 
 function expectNotEqualHex(value: Uint8Array, expected: Uint8Array): void {
   expect(Buffer.from(value).toString("hex")).to.not.equal(Buffer.from(expected).toString("hex"));
-}
-
-const G2_POINT_AT_INFINITY = Buffer.from(
-  "c000000000000000000000000000000000000000000000000000000000000000" +
-    "0000000000000000000000000000000000000000000000000000000000000000" +
-    "0000000000000000000000000000000000000000000000000000000000000000",
-  "hex"
-);
-
-const commonMessage = crypto.randomBytes(32);
-const commonMessageSignatures = new Map<number, Signature>();
-
-function getTestSetSameMessage(i: number): TestSet {
-  const set = getTestSet(i);
-  let sig = commonMessageSignatures.get(i);
-  if (!sig) {
-    sig = set.sk.sign(commonMessage);
-    commonMessageSignatures.set(i, sig);
-  }
-  return {
-    msg: commonMessage,
-    pk: set.pk,
-    sig,
-    sk: set.sk,
-  };
-}
-
-function getTestSetsSameMessage(count: number): {
-  msg: Uint8Array;
-  sets: {sk: SecretKey; pk: PublicKey; sig: Signature}[];
-} {
-  const sets = arrayOfIndexes(0, count - 1).map(getTestSetSameMessage);
-  return {
-    msg: sets[0].msg,
-    sets: sets.map(({sk, pk, sig}) => ({pk, sig, sk})),
-  };
 }

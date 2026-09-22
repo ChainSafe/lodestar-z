@@ -21,7 +21,7 @@ pub const SlashingsCache = struct {
     pub fn initFromValidators(
         allocator: Allocator,
         latest_block_slot: Slot,
-        validators: []const Validator,
+        validators: []const *const Validator,
     ) !SlashingsCache {
         var slashed_validators = try DynamicBitSet.initEmpty(allocator, validators.len);
         errdefer slashed_validators.deinit();
@@ -91,12 +91,14 @@ pub fn buildFromStateIfNeeded(
     const latest_block_slot = try latest_block_header.get("slot");
     if (slashings_cache.isInitialized(latest_block_slot)) return;
 
-    var validators_view = try state.validators();
-    try validators_view.commit();
-    const validators = try validators_view.getAllReadonlyValues(allocator);
+    const validators = try state.validatorsPtrSlice(allocator);
     defer allocator.free(validators);
     var new_cache = try SlashingsCache.initFromValidators(allocator, latest_block_slot, validators);
     errdefer new_cache.deinit();
     slashings_cache.deinit();
     slashings_cache.* = new_cache;
+}
+
+test {
+    _ = @import("slashings_cache_test.zig");
 }

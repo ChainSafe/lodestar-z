@@ -1,14 +1,32 @@
 import {config} from "@lodestar/config/default";
 import * as era from "@lodestar/era";
 import {computeEpochAtSlot} from "@lodestar/state-transition";
-import {ssz} from "@lodestar/types";
-import {beforeAll, describe, expect, it} from "vitest";
+import {type phase0, ssz} from "@lodestar/types";
+import {afterAll, beforeAll, describe, expect, it} from "vitest";
 import bindings from "../src/index.js";
 import {getFirstEraFilePath} from "./eraFiles.ts";
+
+const MAINNET_PUBKEY_CACHE_LIMIT = 2_000_000;
+const SYNTHETIC_VALIDATOR_COUNT = 16;
+
+function expectSyncCommitteeCache(cache: {
+  validatorIndices: Uint32Array;
+  validatorIndexMap: Map<number, number[]>;
+}): void {
+  expect(cache.validatorIndices).toBeInstanceOf(Uint32Array);
+  expect(cache.validatorIndices.length).toBeGreaterThan(0);
+  expect(cache.validatorIndexMap).toBeInstanceOf(Map);
+
+  const firstValidatorIndex = cache.validatorIndices[0];
+  const firstValidatorPositions = cache.validatorIndexMap.get(firstValidatorIndex);
+  expect(Array.isArray(firstValidatorPositions)).toBe(true);
+  expect(firstValidatorPositions).toContain(0);
+}
 
 describe("BeaconStateView", () => {
   let state: InstanceType<typeof bindings.BeaconStateView>;
   let stateBytes: Uint8Array;
+  let syntheticValidators: phase0.Validator[];
   let expected: {
     slot: number;
     genesisTime: number;
@@ -53,14 +71,31 @@ describe("BeaconStateView", () => {
 
   beforeAll(async () => {
     const reader = await era.era.EraReader.open(config, getFirstEraFilePath());
-    stateBytes = await reader.readSerializedState();
+    try {
+      stateBytes = await reader.readSerializedState();
+    } finally {
+      await reader.close();
+    }
 
     // Phase 1: Build lodestar tree view and extract reference values.
     // The tree uses ~3-4GB for mainnet, so we extract what we need and free it
     // before creating the native state to avoid OOM on CI.
     {
       const lodestarState = ssz.fulu.BeaconState.deserializeToView(stateBytes);
-      const v0 = lodestarState.validators.get(0);
+      syntheticValidators = Array.from({length: SYNTHETIC_VALIDATOR_COUNT}, (_, index) => {
+        const validator = lodestarState.validators.get(index);
+        return {
+          activationEligibilityEpoch: validator.activationEligibilityEpoch,
+          activationEpoch: validator.activationEpoch,
+          effectiveBalance: validator.effectiveBalance,
+          exitEpoch: validator.exitEpoch,
+          pubkey: Uint8Array.from(validator.pubkey),
+          slashed: validator.slashed,
+          withdrawableEpoch: validator.withdrawableEpoch,
+          withdrawalCredentials: Uint8Array.from(validator.withdrawalCredentials),
+        };
+      });
+      const v0 = syntheticValidators[0];
       expected = {
         balance0: lodestarState.balances.get(0),
         balance100: lodestarState.balances.get(100),
@@ -111,16 +146,7 @@ describe("BeaconStateView", () => {
           root: Uint8Array.from(lodestarState.previousJustifiedCheckpoint.root),
         },
         slot: lodestarState.slot,
-        validator0: {
-          activationEligibilityEpoch: v0.activationEligibilityEpoch,
-          activationEpoch: v0.activationEpoch,
-          effectiveBalance: v0.effectiveBalance,
-          exitEpoch: v0.exitEpoch,
-          pubkey: Uint8Array.from(v0.pubkey),
-          slashed: v0.slashed,
-          withdrawableEpoch: v0.withdrawableEpoch,
-          withdrawalCredentials: Uint8Array.from(v0.withdrawalCredentials),
-        },
+        validator0: v0,
         validatorCount: lodestarState.validators.length,
       };
     }
@@ -128,15 +154,16 @@ describe("BeaconStateView", () => {
     global.gc?.();
 
     // Phase 2: Create native BeaconStateView
-    bindings.pool.ensureCapacity(10_000_000);
-    bindings.pubkeys.ensureCapacity(2_000_000);
     try {
-      bindings.pubkeys.load("./mainnet.pkix");
+      bindings.pubkeys.load("./mainnet.pkix", MAINNET_PUBKEY_CACHE_LIMIT);
     } catch (_e) {
-      // ignore error
+      // Rebuild incompatible or corrupt snapshots from the serialized state.
+      bindings.pubkeys.ensureCapacity(MAINNET_PUBKEY_CACHE_LIMIT);
     }
     state = bindings.BeaconStateView.createFromBytes(stateBytes);
   }, 120_000); // 2 minute timeout for loading era file
+
+  afterAll(() => state?.release());
 
   describe("basic properties", () => {
     it("slot should match lodestar", () => {
@@ -276,13 +303,65 @@ describe("BeaconStateView", () => {
     });
   });
 
+  describe("isExecutionEnabled", () => {
+    let phase0View: InstanceType<typeof bindings.BeaconStateView>;
+    let bellatrixView: InstanceType<typeof bindings.BeaconStateView>;
+
+    beforeAll(() => {
+      const syncCommittee = {
+        aggregatePubkey: syntheticValidators[0].pubkey,
+        pubkeys: Array.from({length: 512}, (_, index) => syntheticValidators[index % SYNTHETIC_VALIDATOR_COUNT].pubkey),
+      };
+      const bellatrixState = ssz.bellatrix.BeaconState.defaultValue();
+      bellatrixState.slot = 144896 * 32;
+      bellatrixState.validators = syntheticValidators;
+      bellatrixState.currentSyncCommittee = syncCommittee;
+      bellatrixState.nextSyncCommittee = syncCommittee;
+      bellatrixState.previousEpochParticipation = Array.from({length: SYNTHETIC_VALIDATOR_COUNT}, () => 0);
+      bellatrixState.currentEpochParticipation = Array.from({length: SYNTHETIC_VALIDATOR_COUNT}, () => 0);
+
+      phase0View = bindings.BeaconStateView.createFromBytes(
+        ssz.phase0.BeaconState.serialize(ssz.phase0.BeaconState.defaultValue())
+      );
+      bellatrixView = bindings.BeaconStateView.createFromBytes(ssz.bellatrix.BeaconState.serialize(bellatrixState));
+    });
+
+    afterAll(() => {
+      phase0View?.release();
+      bellatrixView?.release();
+    });
+
+    it("should true on post-merge state without reading the block", () => {
+      // body is empty — binding short-circuits before touching it.
+      expect(state.isExecutionEnabled({body: {}})).toBe(true);
+    });
+
+    it("returns false even when block carries a non-default executionPayload", () => {
+      const payload = ssz.bellatrix.ExecutionPayload.defaultValue();
+      payload.blockNumber = 1;
+      expect(phase0View.isExecutionEnabled({body: {executionPayload: payload}})).toBe(false);
+    });
+
+    it("returns true after walking block for non-default payload", () => {
+      const payload = ssz.bellatrix.ExecutionPayload.defaultValue();
+      payload.blockNumber = 1;
+      expect(bellatrixView.isExecutionEnabled({body: {executionPayload: payload}})).toBe(true);
+    });
+
+    it("returns false when block is blinded (body has executionPayloadHeader)", () => {
+      // Lodestar treats blinded pre-merge Bellatrix blocks as not-yet-merged because the
+      // state header is still default. The Zig short-circuits on the presence of the field.
+      expect(bellatrixView.isExecutionEnabled({body: {executionPayloadHeader: {}}})).toBe(false);
+    });
+  });
+
   describe("validators and balances", () => {
     it("getBalance(0) should return first validator balance", () => {
-      expect(state.getBalance(0)).toBe(BigInt(expected.balance0));
+      expect(state.getBalance(0)).toBe(expected.balance0);
     });
 
     it("getBalance(100) should return validator 100 balance", () => {
-      expect(state.getBalance(100)).toBe(BigInt(expected.balance100));
+      expect(state.getBalance(100)).toBe(expected.balance100);
     });
 
     it("getValidator(0) should return first validator data", () => {
@@ -357,9 +436,15 @@ describe("BeaconStateView", () => {
     });
   });
 
+  describe("gloas+ fields", () => {
+    it("getBuildersLength should throw on a pre-Gloas state", () => {
+      expect(() => state.getBuildersLength()).toThrow();
+    });
+  });
+
   describe("block and state roots", () => {
     it("getBlockRoot should return 32 bytes", () => {
-      const blockRoot = state.getBlockRoot(state.slot - 1);
+      const blockRoot = state.getBlockRoot(state.epoch - 1);
       expect(blockRoot.length).toBe(32);
     });
 
@@ -393,28 +478,29 @@ describe("BeaconStateView", () => {
       expect(proposer).toBeLessThan(state.validatorCount);
     });
 
-    it("decision roots should be 32 bytes each", () => {
-      expect(state.previousDecisionRoot.length).toBe(32);
-      expect(state.currentDecisionRoot.length).toBe(32);
-      expect(state.nextDecisionRoot.length).toBe(32);
+    it("decision roots should be 66 bytes each", () => {
+      expect(state.previousDecisionRoot.length).toBe(66);
+      expect(state.currentDecisionRoot.length).toBe(66);
+      expect(state.nextDecisionRoot.length).toBe(66);
     });
 
-    it("getShufflingDecisionRoot should return 32 bytes", () => {
+    it("getShufflingDecisionRoot should return 66 bytes", () => {
       const decisionRoot = state.getShufflingDecisionRoot(state.epoch);
-      expect(decisionRoot.length).toBe(32);
+      expect(decisionRoot.length).toBe(66);
     });
   });
 
   describe("sync committee cache", () => {
-    it("currentSyncCommitteeIndexed should have validatorIndices", () => {
-      const indexed = state.currentSyncCommitteeIndexed;
-      expect(Array.isArray(indexed.validatorIndices)).toBe(true);
-      expect(indexed.validatorIndices.length).toBeGreaterThan(0);
+    it("currentSyncCommitteeIndexed should return cache", () => {
+      expectSyncCommitteeCache(state.currentSyncCommitteeIndexed);
     });
 
     it("getIndexedSyncCommitteeAtEpoch should return cache", () => {
-      const indexed = state.getIndexedSyncCommitteeAtEpoch(state.epoch);
-      expect(Array.isArray(indexed.validatorIndices)).toBe(true);
+      expectSyncCommitteeCache(state.getIndexedSyncCommitteeAtEpoch(state.epoch));
+    });
+
+    it("getIndexedSyncCommittee should return cache", () => {
+      expectSyncCommitteeCache(state.getIndexedSyncCommittee(state.slot));
     });
 
     it("syncProposerReward should be a non-negative number", () => {
@@ -423,6 +509,17 @@ describe("BeaconStateView", () => {
   });
 
   describe("serialization", () => {
+    it("release should release state and be idempotent", () => {
+      const releasable = bindings.BeaconStateView.createFromBytes(
+        ssz.phase0.BeaconState.serialize(ssz.phase0.BeaconState.defaultValue())
+      );
+
+      releasable.release();
+
+      expect(() => releasable.slot).toThrow("InvalidState");
+      expect(() => releasable.release()).not.toThrow();
+    });
+
     it("serialize should produce bytes matching original", () => {
       const serialized = state.serialize();
       expect(serialized.length).toBe(stateBytes.length);
@@ -438,7 +535,8 @@ describe("BeaconStateView", () => {
     it("serializeToBytes should write correct bytes", () => {
       const size = state.serializedSize();
       const output = new Uint8Array(size);
-      const bytesWritten = state.serializeToBytes(output, 0);
+      const byteViews = {dataView: new DataView(output.buffer), uint8Array: output};
+      const bytesWritten = state.serializeToBytes(byteViews, 0);
 
       expect(bytesWritten).toBe(size);
       expect(Buffer.compare(output, stateBytes)).toBe(0);
@@ -458,7 +556,8 @@ describe("BeaconStateView", () => {
     it("serializeValidatorsToBytes should write correct bytes", () => {
       const size = state.serializedValidatorsSize();
       const output = new Uint8Array(size);
-      const bytesWritten = state.serializeValidatorsToBytes(output, 0);
+      const byteViews = {dataView: new DataView(output.buffer), uint8Array: output};
+      const bytesWritten = state.serializeValidatorsToBytes(byteViews, 0);
 
       expect(bytesWritten).toBe(size);
 
@@ -480,12 +579,21 @@ describe("BeaconStateView", () => {
   // });
 
   describe("proofs", () => {
-    it("getSingleProof should return array of 32-byte nodes", () => {
-      // gindex 169 is within the state tree
-      const proof = state.getSingleProof(169);
-      expect(Array.isArray(proof)).toBe(true);
+    it("getSingleProof accepts the SSZ bigint gindex for historical summaries", () => {
+      const {gindex} = ssz.fulu.BeaconState.getPathInfo(["historicalSummaries"]);
+      const proof = state.getSingleProof(gindex);
+      expect(proof.length).toBe(gindex.toString(2).length - 1);
       for (const node of proof) {
+        expect(node).toBeInstanceOf(Uint8Array);
         expect(node.length).toBe(32);
+      }
+      expect(state.getSingleProof(1n)).toEqual([]);
+    });
+
+    it("getSingleProof rejects invalid bigint indices without truncating them", () => {
+      expect(() => state.getSingleProof(0n)).toThrowError(expect.objectContaining({code: "STATE_ERROR"}));
+      for (const gindex of [-1n, (1n << 64n) + 1n]) {
+        expect(() => state.getSingleProof(gindex)).toThrowError(expect.objectContaining({code: "InvalidGindex"}));
       }
     });
 
@@ -510,15 +618,19 @@ describe("BeaconStateView", () => {
 
   describe("voluntary exit validation", () => {
     it("isValidVoluntaryExit should return boolean", () => {
-      // Invalid voluntary exit bytes (all zeros)
-      const invalidExit = new Uint8Array(112);
+      const invalidExit = {
+        message: {epoch: 0, validatorIndex: 0},
+        signature: new Uint8Array(96),
+      };
       const result = state.isValidVoluntaryExit(invalidExit, false);
       expect(typeof result).toBe("boolean");
     });
 
     it("getVoluntaryExitValidity should return validity reason", () => {
-      // Invalid voluntary exit bytes (all zeros)
-      const invalidExit = new Uint8Array(112);
+      const invalidExit = {
+        message: {epoch: 0, validatorIndex: 0},
+        signature: new Uint8Array(96),
+      };
       const result = state.getVoluntaryExitValidity(invalidExit, false);
 
       const validReasons = [
@@ -552,9 +664,9 @@ describe("BeaconStateView", () => {
     it("proposerRewards should have expected structure", () => {
       const rewards = state.proposerRewards;
 
-      expect(typeof rewards.attestations).toBe("bigint");
-      expect(typeof rewards.syncAggregate).toBe("bigint");
-      expect(typeof rewards.slashing).toBe("bigint");
+      expect(typeof rewards.attestations).toBe("number");
+      expect(typeof rewards.syncAggregate).toBe("number");
+      expect(typeof rewards.slashing).toBe("number");
     });
   });
 
@@ -576,16 +688,58 @@ describe("BeaconStateView", () => {
     it("processSlots should advance state by 1 slot", () => {
       const originalSlot = state.slot;
       const newState = state.processSlots(originalSlot + 1);
-
-      expect(newState.slot).toBe(originalSlot + 1);
+      try {
+        expect(newState.slot).toBe(originalSlot + 1);
+      } finally {
+        newState.release();
+      }
     });
 
-    it("processSlots with transferCache option should work", () => {
+    it("processSlots with dontTransferCache: false should still transfer cache", () => {
       const originalSlot = state.slot;
-      const newState = state.processSlots(originalSlot + 1, {transferCache: true});
+      const newState = state.processSlots(originalSlot + 1, {dontTransferCache: false});
+      try {
+        expect(newState.slot).toBe(originalSlot + 1);
+        expect(newState.createdWithTransferCache).toBe(true);
+      } finally {
+        newState.release();
+      }
+    });
+  });
 
-      expect(newState.slot).toBe(originalSlot + 1);
-      expect(newState.createdWithTransferCache).toBe(true);
+  describe("stateTransition", () => {
+    const dummyBlockBytes = new Uint8Array(0);
+
+    it("deserializes a blinded block with the selected block type", () => {
+      const signedBlock = ssz.fulu.SignedBlindedBeaconBlock.defaultValue();
+      signedBlock.message.slot = state.slot + 1;
+      signedBlock.message.proposerIndex = state.getBeaconProposer(signedBlock.message.slot);
+      const signedBlockBytes = ssz.fulu.SignedBlindedBeaconBlock.serialize(signedBlock);
+
+      expect(() =>
+        state.stateTransition(signedBlockBytes, true, {
+          verifyProposer: false,
+          verifySignatures: false,
+          verifyStateRoot: false,
+        })
+      ).toThrow("BlockParentRootMismatch");
+    });
+
+    it("rejects invalid opts", () => {
+      const invalidOpts = [
+        {executionPayloadStatus: "syncing"},
+        {dataAvailabilityStatus: "Whatever"},
+        {executionPayloadStatus: "Valid"}, // TS enum value is "valid"
+        {dataAvailabilityStatus: "available"}, // TS enum value is "Available"
+      ];
+      for (const opts of invalidOpts) {
+        expect(() => state.stateTransition(dummyBlockBytes, false, opts)).toThrow();
+      }
+    });
+
+    // TODO: remove once Zig models DataAvailabilityStatus.NotRequired
+    it("rejects gloas-only NotRequired", () => {
+      expect(() => state.stateTransition(dummyBlockBytes, false, {dataAvailabilityStatus: "NotRequired"})).toThrow();
     });
   });
 

@@ -22,12 +22,11 @@ const types = @import("consensus_types");
 const CachedBeaconState = state_transition.CachedBeaconState;
 const AnySignedBeaconBlock = @import("fork_types").AnySignedBeaconBlock;
 const active_preset = @import("preset").active_preset;
+const preset = @import("preset").preset;
 const mainnet_chain_config = @import("config").mainnet.chain_config;
 const minimal_chain_config = @import("config").minimal.chain_config;
 const BeaconConfig = @import("config").BeaconConfig;
 const ValidatorIndex = @import("consensus_types").primitive.ValidatorIndex.Type;
-const Index2PubkeyCache = state_transition.Index2PubkeyCache;
-const PubkeyIndexMap = state_transition.PubkeyIndexMap;
 const chain_config = if (active_preset == .mainnet) mainnet_chain_config else minimal_chain_config;
 
 const MetricsHandler = struct {
@@ -65,18 +64,19 @@ fn getMetrics(_: *MetricsHandler, _: *httpz.Request, res: *httpz.Response) !void
     try state_transition.metrics.write(writer);
 }
 
-fn eraReader(allocator: std.mem.Allocator, era_path: []const u8) !era.Reader {
+fn eraReader(allocator: std.mem.Allocator, io: std.Io, era_path: []const u8) !era.Reader {
     std.debug.print("Reading era file at {s}\n", .{era_path});
-    return try era.Reader.open(allocator, c.mainnet.config, era_path);
+    return try era.Reader.open(allocator, io, c.mainnet.config, era_path);
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+pub fn main(init: std.process.Init) !void {
+    var gpa: std.heap.DebugAllocator(.{}) = .{ .backing_allocator = std.heap.smp_allocator };
     const allocator = gpa.allocator();
+    const io = init.io;
 
     _ = try std.Thread.spawn(.{}, serveMetrics, .{ allocator, 8008 });
 
-    try state_transition.metrics.init(allocator, .{});
+    try state_transition.metrics.init(allocator, io, .{});
     defer state_transition.metrics.state_transition.deinit();
 
     const era_path_state = try std.fs.path.join(
@@ -90,9 +90,9 @@ pub fn main() !void {
     );
     defer allocator.free(era_path_blocks);
 
-    var reader_state = try eraReader(allocator, era_path_state);
+    var reader_state = try eraReader(allocator, io, era_path_state);
     defer reader_state.close(allocator);
-    var reader_blocks = try eraReader(allocator, era_path_blocks);
+    var reader_blocks = try eraReader(allocator, io, era_path_blocks);
     defer reader_blocks.close(allocator);
 
     std.debug.print("Reading state\n", .{});
@@ -100,28 +100,36 @@ pub fn main() !void {
     errdefer allocator.destroy(state_ptr);
     state_ptr.* = try reader_state.readState(allocator, null);
     const blocks_index = reader_blocks.group_indices[0].blocks_index orelse return error.NoBlockIndex;
-    const index_pubkey_cache = try allocator.create(Index2PubkeyCache);
-    errdefer {
-        index_pubkey_cache.deinit();
-        allocator.destroy(index_pubkey_cache);
-    }
-    index_pubkey_cache.* = Index2PubkeyCache.init(allocator);
-    var pubkey_index_map = PubkeyIndexMap.init(allocator);
-    errdefer pubkey_index_map.deinit();
+    const max_new_validators = try std.math.mul(
+        usize,
+        blocks_index.offsets.len,
+        preset.MAX_DEPOSITS,
+    );
+    const pubkey_capacity = try std.math.add(
+        usize,
+        try state_ptr.validatorsCount(),
+        max_new_validators,
+    );
+    var pubkey_cache = try state_transition.PubkeyCache.initCapacity(
+        allocator,
+        io,
+        pubkey_capacity,
+    );
+    defer pubkey_cache.deinit();
 
     const config = try allocator.create(BeaconConfig);
-    errdefer allocator.destroy(config);
+    defer allocator.destroy(config);
     config.* = BeaconConfig.init(chain_config, (try state_ptr.genesisValidatorsRoot()).*);
 
     const immutable_data = state_transition.EpochCacheImmutableData{
         .config = config,
-        .index_to_pubkey = index_pubkey_cache,
-        .pubkey_to_index = &pubkey_index_map,
+        .pubkey_cache = &pubkey_cache,
     };
 
     std.debug.print("Creating cached beacon state\n", .{});
     var cached_state = try CachedBeaconState.createCachedBeaconState(
         allocator,
+        io,
         state_ptr,
         immutable_data,
         .{
@@ -129,6 +137,10 @@ pub fn main() !void {
             .skip_sync_pubkeys = false,
         },
     );
+    defer {
+        cached_state.deinit();
+        allocator.destroy(cached_state);
+    }
     std.debug.print("Running state transition.\nYou may open up a local prometheus instance to check out metrics in action.\n", .{});
     for (blocks_index.start_slot + 1..blocks_index.start_slot + blocks_index.offsets.len) |slot| {
         const block = try reader_blocks.readBlock(allocator, slot) orelse continue;
@@ -142,6 +154,7 @@ pub fn main() !void {
 
         const next = try state_transition.stateTransition(
             allocator,
+            io,
             cached_state,
             block,
             .{

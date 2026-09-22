@@ -10,6 +10,7 @@ const Epoch = types.primitive.Epoch.Type;
 const ElectraBeaconState = types.electra.BeaconState.Type;
 const BLSPubkey = types.primitive.BLSPubkey.Type;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
+const FAR_FUTURE_EPOCH = @import("constants").FAR_FUTURE_EPOCH;
 const preset = @import("preset").preset;
 const active_preset = @import("preset").active_preset;
 const BeaconConfig = @import("config").BeaconConfig;
@@ -18,15 +19,17 @@ const Node = @import("persistent_merkle_tree").Node;
 const state_transition = @import("../root.zig");
 const CachedBeaconState = state_transition.CachedBeaconState;
 const AnyBeaconState = @import("fork_types").AnyBeaconState;
-const PubkeyIndexMap = state_transition.PubkeyIndexMap;
-const Index2PubkeyCache = state_transition.Index2PubkeyCache;
+const PubkeyCache = state_transition.PubkeyCache;
 const EffectiveBalanceIncrements = state_transition.EffectiveBalanceIncrements;
 const getNextSyncCommitteeIndices = state_transition.getNextSyncCommitteeIndices;
-const syncPubkeys = state_transition.syncPubkeys;
 const interopPubkeysCached = @import("./interop_pubkeys.zig").interopPubkeysCached;
 const EFFECTIVE_BALANCE_INCREMENT = 32;
 const EFFECTIVE_BALANCE = 32 * 1e9;
 const active_chain_config = if (active_preset == .mainnet) mainnet_chain_config else minimal_chain_config;
+
+fn scheduledEpochOrGenesis(fork_epoch: Epoch) Epoch {
+    return if (fork_epoch == FAR_FUTURE_EPOCH) 0 else fork_epoch;
+}
 
 /// generate, allocate BeaconState
 /// consumer has responsibility to deinit and destroy it
@@ -42,15 +45,16 @@ pub fn generateElectraState(allocator: Allocator, pool: *Node.Pool, chain_config
     electra_state.* = types.electra.BeaconState.default_value;
     electra_state.genesis_time = 1596546008;
     electra_state.genesis_validators_root = try hex.hexToRoot("0x8a8b3f1f1e2d3c4b5a697887766554433221100ffeeddccbbaa9988776655443");
+    const electra_fork_epoch = scheduledEpochOrGenesis(chain_config.ELECTRA_FORK_EPOCH);
     // set the slot to be ready for the next epoch transition
-    electra_state.slot = chain_config.ELECTRA_FORK_EPOCH * preset.SLOTS_PER_EPOCH + 2025 * preset.SLOTS_PER_EPOCH - 1;
+    electra_state.slot = electra_fork_epoch * preset.SLOTS_PER_EPOCH + 2025 * preset.SLOTS_PER_EPOCH - 1;
     const current_epoch = @divFloor(electra_state.slot, preset.SLOTS_PER_EPOCH);
     var version: [4]u8 = undefined;
     _ = try hex.hexToBytes(&version, "0x00000001");
     electra_state.fork = .{
         .previous_version = version,
         .current_version = version,
-        .epoch = chain_config.ELECTRA_FORK_EPOCH,
+        .epoch = electra_fork_epoch,
     };
     electra_state.latest_block_header = .{
         .slot = electra_state.slot - 1,
@@ -92,12 +96,12 @@ pub fn generateElectraState(allocator: Allocator, pool: *Node.Pool, chain_config
 
     // populate sync committee
     var active_validator_indices = try std.ArrayList(ValidatorIndex).initCapacity(allocator, validator_count);
-    defer active_validator_indices.deinit();
+    defer active_validator_indices.deinit(allocator);
     var effective_balance_increments = try EffectiveBalanceIncrements.initCapacity(allocator, validator_count);
-    defer effective_balance_increments.deinit();
+    defer effective_balance_increments.deinit(allocator);
     for (0..validator_count) |i| {
-        try active_validator_indices.append(@intCast(i));
-        try effective_balance_increments.append(EFFECTIVE_BALANCE_INCREMENT);
+        try active_validator_indices.append(allocator, @intCast(i));
+        try effective_balance_increments.append(allocator, EFFECTIVE_BALANCE_INCREMENT);
     }
 
     // no need to populate eth1_data_votes
@@ -142,8 +146,9 @@ pub fn generateElectraState(allocator: Allocator, pool: *Node.Pool, chain_config
     var validators = try beacon_state.validators();
     for (next_sync_committee_indices, 0..next_sync_committee_indices.len) |index, i| {
         var validator = try validators.get(@intCast(index));
-        var pubkey_view = try validator.get("pubkey");
-        _ = try pubkey_view.getAllInto(next_sync_committee_pubkeys[i][0..]);
+        // Validator is now a StructContainerType — `get("pubkey")` returns the
+        // value directly (a `[48]u8` array), not a child TreeView.
+        next_sync_committee_pubkeys[i] = try validator.get("pubkey");
         next_sync_committee_pubkeys_slices[i] = try bls.PublicKey.uncompress(&next_sync_committee_pubkeys[i]);
     }
 
@@ -167,8 +172,7 @@ pub const TestCachedBeaconState = struct {
     allocator: Allocator,
     pool: *Node.Pool,
     config: *BeaconConfig,
-    pubkey_index_map: *PubkeyIndexMap,
-    index_pubkey_cache: *Index2PubkeyCache,
+    pubkey_cache: *PubkeyCache,
     cached_state: *CachedBeaconState,
     epoch_transition_cache: *state_transition.EpochTransitionCache,
 
@@ -185,33 +189,29 @@ pub const TestCachedBeaconState = struct {
     }
 
     pub fn initFromState(allocator: Allocator, pool: *Node.Pool, state: *AnyBeaconState, fork: ForkSeq, fork_epoch: Epoch) !TestCachedBeaconState {
-        const pubkey_index_map = try allocator.create(PubkeyIndexMap);
-        pubkey_index_map.* = PubkeyIndexMap.init(allocator);
-        errdefer {
-            pubkey_index_map.deinit();
-            allocator.destroy(pubkey_index_map);
-        }
-        const index_pubkey_cache = try allocator.create(Index2PubkeyCache);
-        errdefer allocator.destroy(index_pubkey_cache);
-        index_pubkey_cache.* = Index2PubkeyCache.init(allocator);
-        errdefer index_pubkey_cache.deinit();
+        const pubkey_cache = try allocator.create(PubkeyCache);
+        errdefer allocator.destroy(pubkey_cache);
+        pubkey_cache.* = try PubkeyCache.initCapacity(
+            allocator,
+            std.testing.io,
+            try std.math.add(
+                usize,
+                try state.validatorsCount(),
+                preset.MAX_PENDING_DEPOSITS_PER_EPOCH,
+            ),
+        );
+        errdefer pubkey_cache.deinit();
         const chain_config = getConfig(active_chain_config, fork, fork_epoch);
         const config = try allocator.create(BeaconConfig);
         errdefer allocator.destroy(config);
         config.* = BeaconConfig.init(chain_config, (try state.genesisValidatorsRoot()).*);
 
-        const validators = try state.validatorsSlice(allocator);
-        defer allocator.free(validators);
-
-        try syncPubkeys(validators, pubkey_index_map, index_pubkey_cache);
-
         const immutable_data = state_transition.EpochCacheImmutableData{
             .config = config,
-            .index_to_pubkey = index_pubkey_cache,
-            .pubkey_to_index = pubkey_index_map,
+            .pubkey_cache = pubkey_cache,
         };
         // cached_state takes ownership of state and will deinit there
-        const cached_state = try CachedBeaconState.createCachedBeaconState(allocator, state, immutable_data, .{
+        const cached_state = try CachedBeaconState.createCachedBeaconState(allocator, std.testing.io, state, immutable_data, .{
             .skip_sync_committee_cache = state.forkSeq() == .phase0,
             .skip_sync_pubkeys = false,
         });
@@ -220,6 +220,7 @@ pub const TestCachedBeaconState = struct {
         errdefer allocator.destroy(epoch_transition_cache);
         epoch_transition_cache.* = try state_transition.EpochTransitionCache.init(
             allocator,
+            std.testing.io,
             cached_state.config,
             cached_state.epoch_cache,
             cached_state.state,
@@ -229,8 +230,7 @@ pub const TestCachedBeaconState = struct {
             .allocator = allocator,
             .pool = pool,
             .config = config,
-            .pubkey_index_map = pubkey_index_map,
-            .index_pubkey_cache = index_pubkey_cache,
+            .pubkey_cache = pubkey_cache,
             .cached_state = cached_state,
             .epoch_transition_cache = epoch_transition_cache,
         };
@@ -239,13 +239,11 @@ pub const TestCachedBeaconState = struct {
     pub fn deinit(self: *TestCachedBeaconState) void {
         self.cached_state.deinit();
         self.allocator.destroy(self.cached_state);
-        self.pubkey_index_map.deinit();
-        self.allocator.destroy(self.pubkey_index_map);
-        self.index_pubkey_cache.deinit();
-        self.epoch_transition_cache.deinit();
-        @import("../state_transition.zig").deinitStateTransition();
+        self.pubkey_cache.deinit();
+        self.allocator.destroy(self.pubkey_cache);
+        self.epoch_transition_cache.deinit(self.allocator);
+        @import("../state_transition.zig").deinitReusedEpochTransitionCache(std.testing.io);
         self.allocator.destroy(self.epoch_transition_cache);
-        self.allocator.destroy(self.index_pubkey_cache);
         self.allocator.destroy(self.config);
     }
 };
@@ -287,12 +285,21 @@ pub fn getConfig(config: ChainConfig, fork: ForkSeq, fork_epoch: Epoch) ChainCon
             .ELECTRA_FORK_EPOCH = 0,
             .FULU_FORK_EPOCH = fork_epoch,
         }),
+        .gloas => return config.merge(.{
+            .ALTAIR_FORK_EPOCH = 0,
+            .BELLATRIX_FORK_EPOCH = 0,
+            .CAPELLA_FORK_EPOCH = 0,
+            .DENEB_FORK_EPOCH = 0,
+            .ELECTRA_FORK_EPOCH = 0,
+            .FULU_FORK_EPOCH = 0,
+            .GLOAS_FORK_EPOCH = fork_epoch,
+        }),
     }
 }
 
 test TestCachedBeaconState {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 500_000);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
     defer pool.deinit();
 
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);

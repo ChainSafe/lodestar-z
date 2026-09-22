@@ -1,6 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const napi = @import("zapi:napi");
+const js = @import("zapi:zapi").js;
 const state_transition = @import("state_transition");
 
 var gpa: std.heap.DebugAllocator(.{}) = .init;
@@ -11,27 +11,46 @@ else
 
 var initialized: bool = false;
 
-pub fn Metrics_scrapeMetrics(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
-    var buf = std.ArrayList(u8).init(allocator);
-    defer buf.deinit();
-    try state_transition.metrics.write(buf.writer());
-    return env.createStringUtf8(buf.items);
+const validator_monitor = @import("./validator_monitor.zig");
+
+/// JS: metrics.init() → void
+pub fn init() !void {
+    if (initialized) return;
+    try state_transition.metrics.init(allocator, js.io(), .{});
+    initialized = true;
+}
+
+/// JS: metrics.registerLocalValidator(index) → void
+///
+/// Adds a validator index to the process-wide validator monitor so that
+/// metrics are recorded for it on every epoch transition.
+pub fn registerLocalValidator(index: js.Number) !void {
+    const value = try index.toI64();
+    if (value < 0) return error.InvalidValidatorIndex;
+    try validator_monitor.get().registerLocalValidator(@intCast(value));
+}
+
+/// JS: metrics.unregisterLocalValidator(index) → void
+///
+/// Prunes a validator index from the process-wide validator monitor.
+pub fn unregisterLocalValidator(index: js.Number) !void {
+    const value = try index.toI64();
+    if (value < 0) return error.InvalidValidatorIndex;
+    validator_monitor.get().unregisterLocalValidator(@intCast(value));
+}
+
+/// JS: metrics.scrapeMetrics() → string
+pub fn scrapeMetrics() !js.String {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+
+    try state_transition.metrics.write(&aw.writer);
+    return js.String.from(aw.written());
 }
 
 pub fn deinit() void {
     if (!initialized) return;
-    state_transition.metrics.state_transition.deinit();
+    state_transition.metrics.deinit();
+    validator_monitor.deinit();
     initialized = false;
-}
-
-pub fn register(env: napi.Env, exports: napi.Value) !void {
-    const metrics_obj = try env.createObject();
-
-    try metrics_obj.setNamedProperty("scrapeMetrics", try env.createFunction(
-        "scrapeMetrics",
-        0,
-        Metrics_scrapeMetrics,
-        null,
-    ));
-    try exports.setNamedProperty("metrics", metrics_obj);
 }

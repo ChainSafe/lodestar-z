@@ -84,21 +84,21 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
 
         const Self = @This();
 
-        pub fn execute(allocator: std.mem.Allocator, dir: std.fs.Dir) !void {
+        pub fn execute(allocator: std.mem.Allocator, dir: std.Io.Dir) !void {
             const pool_size = if (active_preset == .mainnet) 10_000_000 else 1_000_000;
-            var pool = try Node.Pool.init(allocator, pool_size);
+            var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
             defer pool.deinit();
 
             var tc = try Self.init(allocator, &pool, dir);
             defer {
                 tc.deinit();
-                state_transition.deinitStateTransition();
+                state_transition.deinitReusedEpochTransitionCache(std.testing.io);
             }
 
             try tc.runTest();
         }
 
-        pub fn init(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.fs.Dir) !Self {
+        pub fn init(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.Io.Dir) !Self {
             var tc = Self{
                 .pre = undefined,
                 .post = undefined,
@@ -138,6 +138,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
         pub fn process(self: *Self) !void {
             const verify = self.bls_setting.verify();
             const allocator = self.pre.allocator;
+            const io = std.testing.io;
             const cached_state = self.pre.cached_state;
             const state = cached_state.state.castToFork(fork);
 
@@ -149,9 +150,11 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                     try state_transition.processAttestations(
                         fork,
                         allocator,
+                        io,
                         config,
                         epoch_cache,
                         state,
+                        &cached_state.proposer_rewards,
                         &cached_state.slashings_cache,
                         attestations[0..],
                         verify,
@@ -164,9 +167,11 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                     try state_transition.processAttesterSlashing(
                         fork,
                         allocator,
+                        io,
                         config,
                         epoch_cache,
                         state,
+                        &cached_state.proposer_rewards,
                         &cached_state.slashings_cache,
                         current_epoch,
                         &self.op,
@@ -192,12 +197,12 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                 .consolidation_request => {
                     const config = cached_state.config;
                     const epoch_cache = cached_state.epoch_cache;
-                    try state_transition.processConsolidationRequest(fork, config, epoch_cache, state, &self.op);
+                    try state_transition.processConsolidationRequest(fork, io, config, epoch_cache, state, &self.op);
                 },
                 .deposit => {
                     const config = cached_state.config;
                     const epoch_cache = cached_state.epoch_cache;
-                    try state_transition.processDeposit(fork, allocator, config, epoch_cache, state, &self.op);
+                    try state_transition.processDeposit(fork, allocator, io, config, epoch_cache, state, &self.op);
                 },
                 .deposit_request => {
                     try state_transition.processDepositRequest(fork, state, &self.op);
@@ -227,9 +232,11 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                     try state_transition.processProposerSlashing(
                         fork,
                         allocator,
+                        io,
                         config,
                         epoch_cache,
                         state,
+                        &cached_state.proposer_rewards,
                         &cached_state.slashings_cache,
                         &self.op,
                         verify,
@@ -240,9 +247,11 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                     const epoch_cache = cached_state.epoch_cache;
                     try state_transition.processSyncAggregate(
                         fork,
+                        io,
                         config,
                         epoch_cache,
                         state,
+                        &cached_state.proposer_rewards,
                         &self.op,
                         verify,
                     );
@@ -252,6 +261,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                     const epoch_cache = cached_state.epoch_cache;
                     try state_transition.processVoluntaryExit(
                         fork,
+                        io,
                         config,
                         epoch_cache,
                         state,
@@ -262,15 +272,14 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                 .withdrawal_request => {
                     const config = cached_state.config;
                     const epoch_cache = cached_state.epoch_cache;
-                    try state_transition.processWithdrawalRequest(fork, config, epoch_cache, state, &self.op);
+                    try state_transition.processWithdrawalRequest(fork, io, config, epoch_cache, state, &self.op);
                 },
                 .withdrawals => {
                     const epoch_cache = cached_state.epoch_cache;
+
+                    var withdrawals_buf: [preset.MAX_WITHDRAWALS_PER_PAYLOAD]ssz.capella.Withdrawal.Type = undefined;
                     var withdrawals_result = WithdrawalsResult{
-                        .withdrawals = try Withdrawals.initCapacity(
-                            allocator,
-                            preset.MAX_WITHDRAWALS_PER_PAYLOAD,
-                        ),
+                        .withdrawals = Withdrawals.initBuffer(&withdrawals_buf),
                     };
 
                     var withdrawal_balances = std.AutoHashMap(u64, usize).init(allocator);
@@ -278,13 +287,11 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
 
                     try state_transition.getExpectedWithdrawals(
                         fork,
-                        allocator,
                         epoch_cache,
                         state,
                         &withdrawals_result,
                         &withdrawal_balances,
                     );
-                    defer withdrawals_result.withdrawals.deinit(allocator);
 
                     var payload_withdrawals_root: Root = undefined;
                     // self.op is ExecutionPayload in this case

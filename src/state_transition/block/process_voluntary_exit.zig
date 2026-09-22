@@ -14,13 +14,14 @@ const FAR_FUTURE_EPOCH = c.FAR_FUTURE_EPOCH;
 
 pub fn processVoluntaryExit(
     comptime fork: ForkSeq,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
     state: *BeaconState(fork),
     signed_voluntary_exit: *const SignedVoluntaryExit,
     verify_signature: bool,
 ) !void {
-    if (!try isValidVoluntaryExit(fork, config, epoch_cache, state, signed_voluntary_exit, verify_signature)) {
+    if (!try isValidVoluntaryExit(fork, io, config, epoch_cache, state, signed_voluntary_exit, verify_signature)) {
         return error.InvalidVoluntaryExit;
     }
 
@@ -31,13 +32,14 @@ pub fn processVoluntaryExit(
 
 pub fn isValidVoluntaryExit(
     comptime fork: ForkSeq,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
     state: *BeaconState(fork),
     signed_voluntary_exit: *const SignedVoluntaryExit,
     verify_signature: bool,
 ) !bool {
-    return try getVoluntaryExitValidity(fork, config, epoch_cache, state, signed_voluntary_exit, verify_signature) == .valid;
+    return try getVoluntaryExitValidity(fork, io, config, epoch_cache, state, signed_voluntary_exit, verify_signature) == .valid;
 }
 
 pub const VoluntaryExitValidity = enum {
@@ -52,6 +54,7 @@ pub const VoluntaryExitValidity = enum {
 
 pub fn getVoluntaryExitValidity(
     comptime fork: ForkSeq,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
     state: *BeaconState(fork),
@@ -66,7 +69,7 @@ pub fn getVoluntaryExitValidity(
         return .inactive;
     }
 
-    var validator = try validators.get(@intCast(voluntary_exit.validator_index));
+    var validator = try validators.getReadonly(@intCast(voluntary_exit.validator_index));
     const current_epoch = epoch_cache.epoch;
 
     // verify the validator is active
@@ -100,7 +103,7 @@ pub fn getVoluntaryExitValidity(
 
     // verify signature
     if (verify_signature) {
-        if (!try verifyVoluntaryExitSignature(config, epoch_cache, signed_voluntary_exit)) {
+        if (!try verifyVoluntaryExitSignature(io, config, epoch_cache, signed_voluntary_exit)) {
             return .invalid_signature;
         }
     }
@@ -108,4 +111,9 @@ pub fn getVoluntaryExitValidity(
     return .valid;
 }
 
-// TODO: unit test
+const std = @import("std");
+const preset = @import("preset").preset;
+
+test {
+    _ = @import("process_voluntary_exit_test.zig");
+}

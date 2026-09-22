@@ -13,6 +13,7 @@ pub const ForkSeq = enum(u8) {
     deneb = 4,
     electra = 5,
     fulu = 6,
+    gloas = 7,
 
     /// Total number of fork variants.
     pub const count: u8 = @intCast(@typeInfo(ForkSeq).@"enum".fields.len);
@@ -58,22 +59,6 @@ pub const ForkSeq = enum(u8) {
     }
 };
 
-test "fork - ForkSeq.name" {
-    try std.testing.expectEqualSlices(u8, "phase0", ForkSeq.phase0.name());
-    try std.testing.expectEqualSlices(u8, "altair", ForkSeq.altair.name());
-    try std.testing.expectEqualSlices(u8, "bellatrix", ForkSeq.bellatrix.name());
-    try std.testing.expectEqualSlices(u8, "capella", ForkSeq.capella.name());
-    try std.testing.expectEqualSlices(u8, "deneb", ForkSeq.deneb.name());
-    try std.testing.expectEqualSlices(u8, "electra", ForkSeq.electra.name());
-    try std.testing.expectEqualSlices(u8, "fulu", ForkSeq.fulu.name());
-}
-
-test "fork - ForkSeq.fromName" {
-    try std.testing.expectEqual(ForkSeq.phase0, ForkSeq.fromName("phase0"));
-    try std.testing.expectEqual(ForkSeq.altair, ForkSeq.fromName("altair"));
-    try std.testing.expectEqual(ForkSeq.bellatrix, ForkSeq.fromName("bellatrix"));
-    try std.testing.expectEqual(ForkSeq.capella, ForkSeq.fromName("capella"));
-    try std.testing.expectEqual(ForkSeq.deneb, ForkSeq.fromName("deneb"));
-    try std.testing.expectEqual(ForkSeq.electra, ForkSeq.fromName("electra"));
-    try std.testing.expectEqual(ForkSeq.fulu, ForkSeq.fromName("fulu"));
+test {
+    _ = @import("fork_seq_test.zig");
 }

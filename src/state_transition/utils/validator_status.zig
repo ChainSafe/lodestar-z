@@ -81,3 +81,9 @@ pub fn getValidatorStatus(validator: *const Validator.Type, current_epoch: Epoch
     // Should not reach here for valid validators
     return .pending_initialized;
 }
+
+// ──── Tests ────
+
+test {
+    _ = @import("validator_status_test.zig");
+}

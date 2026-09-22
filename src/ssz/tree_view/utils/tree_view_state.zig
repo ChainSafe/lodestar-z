@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
+const ChunkedLeaf = @import("persistent_merkle_tree").ChunkedLeaf;
 const CloneOpts = @import("clone_opts.zig").CloneOpts;
 
 /// Common state for tree views that use runtime gindex-based child caching.
@@ -37,28 +38,85 @@ pub const TreeViewState = struct {
         self.pool.unref(self.root);
     }
 
+    /// Cleanup for a partially-built view whose `init` failed after this state
+    /// took its `root` ref. Mirrors `deinit` but drops `root`'s ref WITHOUT
+    /// freeing, restoring `root` to its pre-init refcount: on the failure path
+    /// the caller still owns `root` and releases it itself (`unref` here would
+    /// free a freshly-built rc-0 root and double-free with the caller).
+    pub fn deinitAfterInitFailure(self: *TreeViewState) void {
+        self.clearChildrenNodesCache();
+        self.children_nodes.deinit(self.allocator);
+        self.changed.deinit(self.allocator);
+        self.pool.unrefUnsafe(self.root);
+    }
+
     pub fn getChildNode(self: *TreeViewState, gindex: Gindex) !Node.Id {
-        const gop = try self.children_nodes.getOrPut(self.allocator, gindex);
-        if (gop.found_existing) {
-            return gop.value_ptr.*;
+        if (self.children_nodes.get(gindex)) |child_node| {
+            return child_node;
         }
+
+        try self.children_nodes.ensureUnusedCapacity(self.allocator, 1);
         const child_node = try self.root.getNode(self.pool, gindex);
-        gop.value_ptr.* = child_node;
+        self.children_nodes.putAssumeCapacityNoClobber(gindex, child_node);
         return child_node;
     }
 
     pub fn setChildNode(self: *TreeViewState, gindex: Gindex, node: Node.Id) !void {
-        try self.changed.put(self.allocator, gindex, {});
-        const opt_old_node = try self.children_nodes.fetchPut(
-            self.allocator,
-            gindex,
-            node,
-        );
+        if (!self.changed.contains(gindex)) {
+            try self.changed.ensureUnusedCapacity(self.allocator, 1);
+        }
+        if (!self.children_nodes.contains(gindex)) {
+            try self.children_nodes.ensureUnusedCapacity(self.allocator, 1);
+        }
+
+        self.changed.putAssumeCapacity(gindex, {});
+        const opt_old_node = self.children_nodes.fetchPutAssumeCapacity(gindex, node);
         if (opt_old_node) |old_node| {
-            if (old_node.value.getState(self.pool).getRefCount() == 0) {
+            if (old_node.value.getState(self.pool).refCount() == 0) {
                 self.pool.unref(old_node.value);
             }
         }
+    }
+
+    /// Stages a packed write for the next commit, copying shared leaves and reusing pending ones.
+    /// `valid_chunks` must preserve or grow the length. `write` must not retain the chunk pointer
+    /// or access the pool.
+    pub fn editChunkedLeaf(
+        self: *TreeViewState,
+        gindex: Gindex,
+        intra_chunk: u16,
+        valid_chunks: u16,
+        comptime T: type,
+        index: usize,
+        value: *const T,
+        comptime write: fn (*[32]u8, usize, *const T) void,
+    ) !void {
+        std.debug.assert(intra_chunk < valid_chunks);
+        std.debug.assert(valid_chunks <= ChunkedLeaf.K);
+        var node = try self.getChildNode(gindex);
+        const state = node.getState(self.pool);
+
+        if (state.kind() == .chunked_leaf and state.refCount() == 0) {
+            std.debug.assert(self.changed.contains(gindex));
+        } else {
+            const replacement = switch (state.kind()) {
+                .zero => blk: {
+                    std.debug.assert(node == @as(Node.Id, @enumFromInt(ChunkedLeaf.k_log2)));
+                    break :blk try self.pool.createChunkedLeafEmpty(valid_chunks);
+                },
+                .chunked_leaf => try self.pool.createChunkedLeaf(
+                    try node.getChunkedLeafChunks(self.pool),
+                    try node.getChunkedLeafLen(self.pool),
+                ),
+                else => return error.InvalidNode,
+            };
+            errdefer self.pool.unref(replacement);
+
+            try self.setChildNode(gindex, replacement);
+            node = replacement;
+        }
+
+        try node.editChunkedLeaf(self.pool, intra_chunk, valid_chunks, T, index, value, write);
     }
 
     pub fn commitNodes(self: *TreeViewState) !void {
@@ -92,7 +150,12 @@ pub const TreeViewState = struct {
         var value_iter = self.children_nodes.valueIterator();
         while (value_iter.next()) |node_id_ptr| {
             const node_id = node_id_ptr.*;
-            if (node_id.getState(self.pool).getRefCount() == 0) {
+            const state = node_id.getState(self.pool);
+            // A cached child root can already be freed via children_data — a child
+            // view owns the same node — when a failed commit left it here. Skip it
+            // rather than re-unref (which would hit the .free slot).
+            if (state.isFree()) continue;
+            if (state.refCount() == 0) {
                 self.pool.unref(node_id);
             }
         }
@@ -114,10 +177,17 @@ pub const TreeViewState = struct {
         out.children_nodes = self.children_nodes;
 
         for (self.changed.keys()) |gindex| {
-            _ = out.children_nodes.remove(gindex);
+            if (out.children_nodes.fetchRemove(gindex)) |entry| {
+                const state = entry.value.getState(self.pool);
+                if (!state.isFree() and state.refCount() == 0) self.pool.unref(entry.value);
+            }
         }
 
         self.children_nodes = .empty;
         self.changed.clearRetainingCapacity();
     }
 };
+
+test {
+    _ = @import("tree_view_state_test.zig");
+}

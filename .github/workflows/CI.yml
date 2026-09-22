@@ -13,38 +13,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  ZIG_VERSION: "0.14.1"
+  ZIG_VERSION: "0.16.0"
   NODE_VERSION: "24"
 
 jobs:
-  zbuild:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Setup Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
-          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
-
-      - name: Install zbuild
-        run: |
-          git clone https://github.com/ChainSafe/zbuild.git
-          cd zbuild
-          zig build -Doptimize=ReleaseFast
-          sudo cp zig-out/bin/zbuild /usr/local/bin/zbuild
-
-      - name: Verify zbuild
-        run: zbuild version
-
-      - name: Check if build.zig is sync'ed with zbuild.zon
-        run: |
-          zbuild sync
-          git diff --exit-code
-
   build-test:
     name: build & test (${{ matrix.os }})
     strategy:
@@ -61,9 +33,9 @@ jobs:
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - name: Install Zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
           cache-key: ${{ matrix.os }}-${{ env.ZIG_VERSION }}
@@ -72,6 +44,13 @@ jobs:
       - name: Check formatting
         if: matrix.os == 'ubuntu-latest'
         run: zig fmt --check .
+
+      # Repo-wide lint rules that `zig fmt` cannot express. Platform independent,
+      # so it runs once rather than across the matrix.
+      - name: Run tidy lint
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          zig build test:tidy
 
       - name: Run hashing tests
         run: |
@@ -88,6 +67,15 @@ jobs:
       - name: Run hex tests
         run: |
           zig build test:hex
+      - name: Run bounded_array tests
+        run: |
+          zig build test:bounded_array
+      - name: Run bit_array tests
+        run: |
+          zig build test:bit_array
+      - name: Run cpu_count tests
+        run: |
+          zig build test:cpu_count
       - name: Run config tests
         run: |
           zig build test:config
@@ -109,29 +97,41 @@ jobs:
       - name: Run bls tests
         run: |
           zig build test:bls
+      - name: Run swap-or-not-shuffle tests
+        run: |
+          zig build test:swap_or_not_shuffle
       - name: Run state-transition tests
         run: |
           zig build test:state_transition
+      - name: Run fork-choice tests
+        run: |
+          zig build test:fork_choice
+      - name: Run clock tests
+        run: |
+          zig build test:clock
+      - name: Run beacon-node tests
+        run: |
+          zig build test:beacon_node
 
       - name: Build benchmarks
         run: |
-          zig build build-exe:bench_hashing build-exe:bench_merkle_gindex build-exe:bench_merkle_node build-exe:bench_ssz_attestation build-exe:bench_ssz_block build-exe:bench_ssz_state build-exe:bench_process_block build-exe:bench_process_epoch
+          zig build build-exe:bench_hashing build-exe:bench_merkle_gindex build-exe:bench_merkle_node build-exe:bench_ssz_attestation build-exe:bench_ssz_block build-exe:bench_ssz_state build-exe:bench_process_block build-exe:bench_process_epoch build-exe:bench_fork_choice_update_head build-exe:bench_fork_choice_compute_deltas build-exe:bench_fork_choice_on_attestation
 
   build-test-slow:
-    name: slow tests 
+    name: slow tests
     # It takes time to download and run these tests, so we only run them on ubuntu-latest
     runs-on: ubuntu-latest
     needs: build-test
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - name: Install Zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
           cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
       - name: Restore spec tests cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: fixtures/era
           key: era-files-${{ hashFiles('build.zig') }} # downloaded era files defined in build.zig
@@ -142,43 +142,138 @@ jobs:
         run: |
           zig build test:int
 
-  spec-test-ssz:
-    name: spec tests - ssz
-    # It takes time to download and run spec tests, so we only run them on ubuntu-latest
+  spec-test-prep:
+    name: spec tests - prepare
     runs-on: ubuntu-latest
-    needs: build-test
+    outputs:
+      spec-test-version: ${{ steps.spec-test-version.outputs.version }}
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - name: Install Zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
+      - name: Read spec test version
+        id: spec-test-version
+        run: |
+          version=$(awk '
+            /\.spec_test_version = \./ {in_block=1}
+            in_block && /\.default = / {
+              match($0, /"[^"]+"/)
+              print substr($0, RSTART + 1, RLENGTH - 2)
+              exit
+            }
+          ' build.zig.zon)
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Restore spec tests cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: test/spec/spec_tests
+          key: spec-test-data-${{ steps.spec-test-version.outputs.version }}
+      - name: Download spec tests
+        run: |
+          zig build run:download_spec_tests
+      - name: Write spec tests
+        run: |
+          zig build run:write_spec_tests
+      - name: Write ssz_generic spec tests
+        run: |
+          zig build run:write_ssz_generic_spec_tests
+      - name: Write ssz_static spec tests
+        run: |
+          zig build run:write_ssz_static_spec_tests
+      - name: Write BLS spec tests
+        run: |
+          zig build run:write_bls_spec_tests
+      - name: Upload generated test files
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: spec-test-generated
+          path: |
+            test/spec/root*.zig
+            test/spec/test_case/
+            test/spec/ssz/generic_tests.zig
+            test/spec/ssz/static_tests.zig
+            test/spec/bls/spec_tests.zig
+          retention-days: 1
+
+  spec-test-ssz-generic:
+    name: spec tests - ssz generic
+    runs-on: ubuntu-latest
+    needs: [build-test, spec-test-prep]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
           cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
       - name: Restore spec tests cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: test/spec/spec_tests
-          key: spec-test-data-${{ hashFiles('build.zig') }} # spec test version is defined in build.zig
-      - name: Download spec tests
-        run: |
-          zig build run:download_spec_tests
-      - name: Write ssz_generic spec tests
-        run: |
-          zig build run:write_ssz_generic_spec_tests
-
-      - name: Write ssz_static spec tests
-        run: |
-          zig build run:write_ssz_static_spec_tests
-
+          key: spec-test-data-${{ needs['spec-test-prep'].outputs['spec-test-version'] }}
+      - name: Download generated test files
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: spec-test-generated
+          path: test/spec
       - name: Run ssz_generic spec tests
         run: |
           zig build test:ssz_generic_spec_tests
 
+  spec-test-ssz-static-minimal:
+    name: spec tests - ssz static minimal
+    runs-on: ubuntu-latest
+    needs: [build-test, spec-test-prep]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
+      - name: Restore spec tests cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: test/spec/spec_tests
+          key: spec-test-data-${{ needs['spec-test-prep'].outputs['spec-test-version'] }}
+      - name: Download generated test files
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: spec-test-generated
+          path: test/spec
       - name: Run minimal ssz_static spec tests
         run: |
-          zig build test:ssz_static_spec_tests -Dpreset=minimal
+          zig build test:ssz_static_spec_tests -Dpreset=minimal -Doptimize=ReleaseSafe
 
+  spec-test-ssz-static-mainnet:
+    name: spec tests - ssz static mainnet
+    runs-on: ubuntu-latest
+    needs: [build-test, spec-test-prep]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
+      - name: Restore spec tests cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: test/spec/spec_tests
+          key: spec-test-data-${{ needs['spec-test-prep'].outputs['spec-test-version'] }}
+      - name: Download generated test files
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: spec-test-generated
+          path: test/spec
       - name: Run mainnet ssz_static spec tests
         run: |
           zig build test:ssz_static_spec_tests -Dpreset=mainnet
@@ -186,87 +281,106 @@ jobs:
   spec-test-bls:
     name: spec tests - bls
     runs-on: ubuntu-latest
-    needs: build-test
+    needs: [build-test, spec-test-prep]
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - name: Install Zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
           cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
       - name: Restore spec tests cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: test/spec/spec_tests
-          key: spec-test-data-${{ hashFiles('build.zig') }}
-      - name: Download spec tests
-        run: |
-          zig build run:download_spec_tests
-      - name: Write BLS spec tests
-        run: |
-          zig build run:write_bls_spec_tests
+          key: spec-test-data-${{ needs['spec-test-prep'].outputs['spec-test-version'] }}
+      - name: Download generated test files
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: spec-test-generated
+          path: test/spec
       - name: Run BLS spec tests
         run: |
           zig build test:bls_spec_tests
 
   spec-test-minimal:
-    name: spec tests - minimal
-    # It takes time to download and run spec tests, so we only run them on ubuntu-latest
+    name: spec tests - minimal (${{ matrix.runner }})
     runs-on: ubuntu-latest
-    needs: build-test
+    needs: [build-test, spec-test-prep]
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - operations
+          - epoch_processing
+          - sanity
+          - rewards
+          - transition
+          - random
+          - fork
+          - finality
+          - merkle_proof
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - name: Install Zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
           cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
       - name: Restore spec tests cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: test/spec/spec_tests
-          key: spec-test-data-${{ hashFiles('build.zig') }} # spec test version is defined in build.zig
-      - name: Download spec tests
+          key: spec-test-data-${{ needs['spec-test-prep'].outputs['spec-test-version'] }}
+      - name: Download generated test files
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: spec-test-generated
+          path: test/spec
+      - name: Run spec tests - minimal (${{ matrix.runner }})
         run: |
-          zig build run:download_spec_tests
-
-      - name: Write spec tests
-        run: |
-          zig build run:write_spec_tests
-
-      - name: Run spec tests - minimal
-        run: |
-          zig build test:spec_tests -Dpreset=minimal
+          zig build test:spec_tests -Dpreset=minimal -Dspec_tests.filters=${{ matrix.runner }}
 
   spec-test-mainnet:
-    name: spec tests - mainnet
-    # It takes time to download and run spec tests, so we only run them on ubuntu-latest
+    name: spec tests - mainnet (${{ matrix.runner }})
     runs-on: ubuntu-latest
-    needs: build-test
+    needs: [build-test, spec-test-prep]
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - operations
+          - epoch_processing
+          - sanity
+          - rewards
+          - transition
+          - random
+          - fork
+          - finality
+          - merkle_proof
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - name: Install Zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
           cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
       - name: Restore spec tests cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: test/spec/spec_tests
-          key: spec-test-data-${{ hashFiles('build.zig') }} # spec test version is defined in build.zig
-      - name: Download spec tests
+          key: spec-test-data-${{ needs['spec-test-prep'].outputs['spec-test-version'] }}
+      - name: Download generated test files
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: spec-test-generated
+          path: test/spec
+      - name: Run spec tests - mainnet (${{ matrix.runner }})
         run: |
-          zig build run:download_spec_tests
-      - name: Write spec tests
-        run: |
-          zig build run:write_spec_tests
-      - name: Run spec tests - mainnet
-        run: |
-          zig build test:spec_tests -Dpreset=mainnet
+          zig build test:spec_tests -Dpreset=mainnet -Doptimize=ReleaseSafe -Dspec_tests.filters=${{ matrix.runner }}
 
   build-fuzz:
     name: build fuzz harnesses
@@ -274,9 +388,9 @@ jobs:
     needs: build-test
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - name: Install Zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
           cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
@@ -293,24 +407,28 @@ jobs:
             llvm-config-18 --version
           fi
       - name: Build fuzz harnesses
+        # Build in ReleaseFast so Zig 0.16's Debug `sanitize_c = .full`
+        # doesn't emit `__ubsan_handle_*` calls into blst's C objects that
+        # `afl-cc` can't resolve without `libubsan`. Fuzzers want throughput
+        # anyway; devs can still use `zig build` in Debug locally.
         run: |
-          cd test/fuzz && zig build
+          cd test/fuzz && zig build -Doptimize=ReleaseFast
 
   bindings-test:
     name: bindings - test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
       - name: Install Zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
           cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
@@ -324,7 +442,7 @@ jobs:
         run: |
           zig build build-lib:bindings -Doptimize=ReleaseSafe
       - name: Restore era files cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: fixtures/era
           key: era-files-${{ hashFiles('build.zig') }} # downloaded era files defined in build.zig
@@ -335,17 +453,46 @@ jobs:
         run: |
           pnpm test
 
-  build-examples:
-    name: build examples
+  bindings-artifacts:
+    name: bindings - build artifacts
+    # Runs the exact multi-target build the Release workflow publishes
+    # (see publish-bindings.yml), so cross-compile breakage is caught
+    # pre-merge instead of after a release tag already exists.
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - name: Setup Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
       - name: Install Zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
           cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
-      - name: Build metrics example
+      - name: Install dependencies
         run: |
-          zig build build-exe:metrics_stf
+          pnpm install --frozen-lockfile
+      - name: Build release artifacts
+        run: |
+          pnpm zapi build-artifacts --optimize ReleaseSafe
+
+  # metrics_stf depends on httpz, which is temporarily disabled for Zig 0.16 migration
+  # build-examples:
+  #   name: build-examples
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Checkout Repository
+  #       uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+  #     - name: Install Zig
+  #       uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+  #       with:
+  #         version: ${{ env.ZIG_VERSION }}
+  #         cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
+  #     - name: Build metrics example
+  #       run: |
+  #         zig build build-exe:metrics_stf

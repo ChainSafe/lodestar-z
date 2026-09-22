@@ -6,12 +6,11 @@ const c = @import("constants");
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const BeaconState = @import("fork_types").BeaconState;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
+const ProposerRewards = @import("../cache/state_cache.zig").ProposerRewards;
 const SlashingsCache = @import("../cache/slashings_cache.zig").SlashingsCache;
 const decreaseBalance = @import("../utils/balance.zig").decreaseBalance;
 const increaseBalance = @import("../utils/balance.zig").increaseBalance;
 const initiateValidatorExit = @import("./initiate_validator_exit.zig").initiateValidatorExit;
-const computePreviousEpoch = @import("../utils/epoch.zig").computePreviousEpoch;
-const isActiveValidatorView = @import("../utils/validator.zig").isActiveValidatorView;
 const getBeaconProposer = @import("../cache/get_beacon_proposer.zig").getBeaconProposer;
 
 /// Same to https://github.com/ethereum/eth2.0-specs/blob/v1.1.0-alpha.5/specs/altair/beacon-chain.md#has_flag
@@ -22,6 +21,7 @@ pub fn slashValidator(
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
     state: *BeaconState(fork),
+    proposer_rewards: *ProposerRewards,
     slashings_cache: *SlashingsCache,
     slashed_index: ValidatorIndex,
     whistle_blower_index: ?ValidatorIndex,
@@ -59,20 +59,18 @@ pub fn slashValidator(
     try slashings.set(@intCast(slashing_index), cur_slashings + effective_balance);
     epoch_cache.total_slashings_by_increment += slashed_effective_balance_increments;
 
-    // TODO(ct): define MIN_SLASHING_PENALTY_QUOTIENT_ELECTRA
     const min_slashing_penalty_quotient: usize = switch (fork) {
         .phase0 => preset.MIN_SLASHING_PENALTY_QUOTIENT,
         .altair => preset.MIN_SLASHING_PENALTY_QUOTIENT_ALTAIR,
         .bellatrix, .capella, .deneb => preset.MIN_SLASHING_PENALTY_QUOTIENT_BELLATRIX,
-        .electra, .fulu => preset.MIN_SLASHING_PENALTY_QUOTIENT_ELECTRA,
+        .electra, .fulu, .gloas => preset.MIN_SLASHING_PENALTY_QUOTIENT_ELECTRA,
     };
 
     try decreaseBalance(fork, state, slashed_index, @divFloor(effective_balance, min_slashing_penalty_quotient));
 
     // apply proposer and whistleblower rewards
-    // TODO(ct): define WHISTLEBLOWER_REWARD_QUOTIENT_ELECTRA
     const whistleblower_reward = switch (fork) {
-        .electra, .fulu => @divFloor(effective_balance, preset.WHISTLEBLOWER_REWARD_QUOTIENT_ELECTRA),
+        .electra, .fulu, .gloas => @divFloor(effective_balance, preset.WHISTLEBLOWER_REWARD_QUOTIENT_ELECTRA),
         else => @divFloor(effective_balance, preset.WHISTLEBLOWER_REWARD_QUOTIENT),
     };
 
@@ -86,21 +84,15 @@ pub fn slashValidator(
     if (whistle_blower_index) |_whistle_blower_index| {
         try increaseBalance(fork, state, proposer_index, proposer_reward);
         try increaseBalance(fork, state, _whistle_blower_index, whistleblower_reward - proposer_reward);
-        // TODO: implement RewardCache
-        // state.proposer_rewards.slashing += proposer_reward;
+        proposer_rewards.slashing += proposer_reward;
     } else {
         try increaseBalance(fork, state, proposer_index, whistleblower_reward);
-        // TODO: implement RewardCache
-        // state.proposerRewards.slashing += whistleblowerReward;
+        proposer_rewards.slashing += whistleblower_reward;
     }
 
     if (fork.gte(.altair)) {
-        const previous_epoch = computePreviousEpoch(epoch);
-        const is_active_previous_epoch = try isActiveValidatorView(validator, previous_epoch);
-        const is_active_current_epoch = try isActiveValidatorView(validator, epoch);
-
         var previous_participation = try state.previousEpochParticipation();
-        if (is_active_previous_epoch and (try previous_participation.get(@intCast(slashed_index))) & TIMELY_TARGET == TIMELY_TARGET) {
+        if ((try previous_participation.get(@intCast(slashed_index))) & TIMELY_TARGET == TIMELY_TARGET) {
             if (epoch_cache.previous_target_unslashed_balance_increments < slashed_effective_balance_increments) {
                 return error.PreviousTargetUnslashedBalanceUnderflow;
             }
@@ -108,7 +100,7 @@ pub fn slashValidator(
         }
 
         var current_participation = try state.currentEpochParticipation();
-        if (is_active_current_epoch and (try current_participation.get(@intCast(slashed_index))) & TIMELY_TARGET == TIMELY_TARGET) {
+        if ((try current_participation.get(@intCast(slashed_index))) & TIMELY_TARGET == TIMELY_TARGET) {
             if (epoch_cache.current_target_unslashed_balance_increments < slashed_effective_balance_increments) {
                 return error.CurrentTargetUnslashedBalanceUnderflow;
             }

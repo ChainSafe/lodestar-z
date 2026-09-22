@@ -12,6 +12,7 @@ const getIndexedAttestationSignatureSet = @import("../signature_sets/indexed_att
 pub fn isValidIndexedAttestation(
     comptime fork: ForkSeq,
     allocator: std.mem.Allocator,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
     validators_count: usize,
@@ -26,6 +27,7 @@ pub fn isValidIndexedAttestation(
         const signature_set = try getIndexedAttestationSignatureSet(
             fork,
             allocator,
+            io,
             config,
             epoch_cache,
             indexed_attestation,
@@ -63,12 +65,11 @@ pub fn isValidIndexedAttestationIndices(
         prev = index;
     }
 
-    // check if indices are out of bounds, by checking the highest index (since it is sorted)
-    if (indices.len > 0) {
-        const last_index = indices[indices.len - 1];
-        if (last_index >= validators_count) {
-            return false;
-        }
+    // check if indices are out of bounds, by checking the highest index (since it is sorted).
+    // After the uniqueness loop above, prev already holds the last (highest) index.
+    // indices.len > 0 is guaranteed by the first check.
+    if (prev >= validators_count) {
+        return false;
     }
 
     return true;

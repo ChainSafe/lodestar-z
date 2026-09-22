@@ -6,14 +6,14 @@ const preset = @import("preset").preset;
 const AnyBeaconState = @import("fork_types").AnyBeaconState;
 const getSeed = @import("./seed.zig").getSeed;
 const c = @import("constants");
-const innerShuffleList = @import("./shuffle.zig").innerShuffleList;
+const innerShuffleList = @import("swap_or_not_shuffle").innerShuffleList;
 const Epoch = types.primitive.Epoch.Type;
-const ReferenceCount = @import("./reference_count.zig").ReferenceCount;
 const computeStartSlotAtEpoch = @import("./epoch.zig").computeStartSlotAtEpoch;
 const getBlockRootAtSlot = @import("./block_root.zig").getBlockRootAtSlot;
-const computeAnchorCheckpoint = @import("./anchor_checkpoint.zig").computeAnchorCheckpoint;
+const AnchorCheckpoint = @import("../AnchorCheckpoint.zig");
+const RefCount = @import("./ref_count.zig").RefCount;
 
-pub const EpochShufflingRc = ReferenceCount(*EpochShuffling);
+pub const EpochShufflingRc = RefCount(*EpochShuffling);
 
 const Committee = []const ValidatorIndex;
 const SlotCommittees = []const Committee;
@@ -21,7 +21,7 @@ const EpochCommittees = [preset.SLOTS_PER_EPOCH]SlotCommittees;
 
 /// EpochCache is the only consumer of this cache but an instance of EpochShuffling is shared across EpochCache instances
 /// no EpochCache instance takes the ownership of shuffling
-/// instead of that, we count on reference counting to deallocate the memory, see ReferenceCount() utility
+/// instead of that, we count on reference counting to deallocate the memory, see RefCount() utility
 pub const EpochShuffling = struct {
     allocator: Allocator,
 
@@ -42,9 +42,11 @@ pub const EpochShuffling = struct {
         std.mem.copyForwards(ValidatorIndex, shuffling, active_indices);
         try unshuffleList(shuffling, seed[0..], preset.SHUFFLE_ROUND_COUNT);
         const committees = try buildCommitteesFromShuffling(allocator, shuffling);
+        errdefer for (committees) |slot_committees| {
+            allocator.free(slot_committees);
+        };
 
         const epoch_shuffling_ptr = try allocator.create(EpochShuffling);
-        errdefer allocator.destroy(epoch_shuffling_ptr);
         epoch_shuffling_ptr.* = EpochShuffling{
             .allocator = allocator,
             .epoch = epoch,
@@ -74,6 +76,10 @@ pub const EpochShuffling = struct {
         const committee_count = committees_per_slot * preset.SLOTS_PER_EPOCH;
 
         var epoch_committees: [preset.SLOTS_PER_EPOCH]SlotCommittees = undefined;
+        var initialized_count: usize = 0;
+        errdefer for (epoch_committees[0..initialized_count]) |slot_committees| {
+            allocator.free(slot_committees);
+        };
         for (0..preset.SLOTS_PER_EPOCH) |slot| {
             const slot_committees = try allocator.alloc(Committee, committees_per_slot);
             for (0..committees_per_slot) |committee_index| {
@@ -83,6 +89,7 @@ pub const EpochShuffling = struct {
                 slot_committees[committee_index] = shuffling[start_offset..end_offset];
             }
             epoch_committees[slot] = slot_committees;
+            initialized_count += 1;
         }
 
         return epoch_committees;
@@ -137,7 +144,8 @@ fn computeCommitteeCount(active_validator_count: usize) usize {
 
 test computeCommitteeCount {
     const committee_count = computeCommitteeCount(2_000_000);
-    try std.testing.expectEqual(64, committee_count);
+    try std.testing.expectEqual(preset.MAX_COMMITTEES_PER_SLOT, committee_count);
+    try std.testing.expectEqual(1, computeCommitteeCount(0));
 }
 
 /// Calculate the decision root for a given epoch.
@@ -158,6 +166,10 @@ pub fn calculateShufflingDecisionRoot(state: *AnyBeaconState, epoch: Epoch) ![32
         return try calculateDecisionRoot(state, epoch);
     }
 
-    const anchor = try computeAnchorCheckpoint(state);
+    const anchor = try AnchorCheckpoint.fromState(state);
     return anchor.checkpoint.root;
+}
+
+test {
+    _ = @import("epoch_shuffling_test.zig");
 }

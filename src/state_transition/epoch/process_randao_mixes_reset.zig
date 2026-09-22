@@ -15,7 +15,8 @@ pub fn processRandaoMixesReset(
     var old = try randao_mixes.get(current_epoch % preset.EPOCHS_PER_HISTORICAL_VECTOR);
     try randao_mixes.set(
         next_epoch % preset.EPOCHS_PER_HISTORICAL_VECTOR,
-        // TODO inspect why this clone was needed
+        // Clone needed: set() at a different gindex may CoW-rebranch the
+        // tree, invalidating the node reference returned by get().
         try old.clone(.{}),
     );
 }
@@ -26,8 +27,8 @@ const Node = @import("persistent_merkle_tree").Node;
 
 test "processRandaoMixesReset - sanity" {
     const allocator = std.testing.allocator;
-    const pool_size = 10_000 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
+    const pool_size = 200_000;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 10_000);

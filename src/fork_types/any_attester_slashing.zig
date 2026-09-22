@@ -1,5 +1,26 @@
 const ct = @import("consensus_types");
 
+const ValidatorIndex = ct.primitive.ValidatorIndex.Type;
+
+pub const AnyAttesterSlashing = union(enum) {
+    phase0: *ct.phase0.AttesterSlashing.Type,
+    electra: *ct.electra.AttesterSlashing.Type,
+
+    /// Get attesting indices from attestation_1.
+    pub fn attestingIndices1(self: *const AnyAttesterSlashing) []const ValidatorIndex {
+        return switch (self.*) {
+            inline else => |s| s.attestation_1.attesting_indices.items,
+        };
+    }
+
+    /// Get attesting indices from attestation_2.
+    pub fn attestingIndices2(self: *const AnyAttesterSlashing) []const ValidatorIndex {
+        return switch (self.*) {
+            inline else => |s| s.attestation_2.attesting_indices.items,
+        };
+    }
+};
+
 pub const AnyAttesterSlashings = union(enum) {
     phase0: ct.phase0.AttesterSlashings.Type,
     electra: ct.electra.AttesterSlashings.Type,

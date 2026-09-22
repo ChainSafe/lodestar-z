@@ -57,10 +57,10 @@ test "computeProposers - sanity" {
     const allocator = std.testing.allocator;
     const epoch_seed: [32]u8 = [_]u8{0} ** 32;
     var active_indices: [5]ValidatorIndex = .{ 0, 1, 2, 3, 4 };
-    var effective_balance_increments = EffectiveBalanceIncrements.init(allocator);
-    defer effective_balance_increments.deinit();
+    var effective_balance_increments: EffectiveBalanceIncrements = .empty;
+    defer effective_balance_increments.deinit(allocator);
     for (0..active_indices.len) |_| {
-        try effective_balance_increments.append(32);
+        try effective_balance_increments.append(allocator, 32);
     }
     var out: [preset.SLOTS_PER_EPOCH]ValidatorIndex = undefined;
 

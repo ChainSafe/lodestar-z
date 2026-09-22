@@ -19,4 +19,6 @@ pub fn verifyMerkleBranch(leaf: Root, proof: *const [33]Root, depth: usize, inde
     return std.mem.eql(u8, &root, &value);
 }
 
-// TODO: unit tests
+test {
+    _ = @import("verify_merkle_branch_test.zig");
+}

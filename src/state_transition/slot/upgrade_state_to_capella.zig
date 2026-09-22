@@ -59,11 +59,14 @@ pub fn upgradeStateToCapella(
     try state.setFork(&new_fork);
 
     var new_latest_execution_payload_header = ct.capella.ExecutionPayloadHeader.default_value;
+    defer ct.capella.ExecutionPayloadHeader.deinit(allocator, &new_latest_execution_payload_header);
+
     var bellatrix_latest_execution_payload_header = ct.bellatrix.ExecutionPayloadHeader.default_value;
     try bellatrix_state.latestExecutionPayloadHeader(allocator, &bellatrix_latest_execution_payload_header);
     defer ct.bellatrix.ExecutionPayloadHeader.deinit(allocator, &bellatrix_latest_execution_payload_header);
 
-    try ct.bellatrix.ExecutionPayloadHeader.clone(
+    try ct.bellatrix.ExecutionPayloadHeader.cloneInto(
+        ct.capella.ExecutionPayloadHeader,
         allocator,
         &bellatrix_latest_execution_payload_header,
         &new_latest_execution_payload_header,

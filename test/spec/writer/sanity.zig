@@ -22,7 +22,7 @@ pub const header =
 
 const test_template =
     \\test "{s} sanity {s} {s}" {{
-    \\    var pool = try Node.Pool.init(allocator, pool_size);
+    \\    var pool = try Node.Pool.init(.{{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size }});
     \\    defer pool.deinit();
     \\    const test_dir_name = try std.fs.path.join(allocator, &[_][]const u8{{
     \\        spec_test_options.spec_test_out_dir,
@@ -30,7 +30,7 @@ const test_template =
     \\        @tagName(active_preset) ++ "/tests/" ++ @tagName(active_preset) ++ "/{s}/sanity/{s}/pyspec_tests/{s}",
     \\    }});
     \\    defer allocator.free(test_dir_name);
-    \\    const test_dir = std.fs.cwd().openDir(test_dir_name, .{{}}) catch return error.SkipZigTest;
+    \\    const test_dir = std.Io.Dir.openDir(.cwd(), std.testing.io, test_dir_name, .{{}}) catch return error.SkipZigTest;
     \\
     \\    {s}
     \\}}
@@ -38,12 +38,12 @@ const test_template =
     \\
 ;
 
-pub fn writeHeader(writer: std.io.AnyWriter) !void {
+pub fn writeHeader(writer: *std.Io.Writer) !void {
     try writer.print(header, .{});
 }
 
 pub fn writeTest(
-    writer: std.io.AnyWriter,
+    writer: *std.Io.Writer,
     fork: ForkSeq,
     handler: Handler,
     test_case_name: []const u8,

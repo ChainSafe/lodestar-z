@@ -71,6 +71,8 @@ pub fn BitArray(comptime chunk_depth: Depth) type {
             }
 
             const new_leaf = try self.state.pool.createLeaf(&leaf_bytes);
+            errdefer self.state.pool.unref(new_leaf);
+
             try self.state.setChildNode(gindex, new_leaf);
         }
 

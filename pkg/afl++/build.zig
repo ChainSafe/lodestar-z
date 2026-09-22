@@ -7,6 +7,7 @@ const std = @import("std");
 pub fn addInstrumentedExe(
     b: *std.Build,
     obj: *std.Build.Step.Compile,
+    extra_libs: []const *std.Build.Step.Compile,
 ) std.Build.LazyPath {
     // Force the build system to produce the binary artifact even though we
     // only consume the LLVM bitcode below. Without this, the dependency
@@ -27,6 +28,9 @@ pub fn addInstrumentedExe(
     const fuzz_exe = afl_cc.addOutputFileArg(obj.name);
     afl_cc.addFileArg(pkg.path("afl.c"));
     afl_cc.addFileArg(obj.getEmittedLlvmBc());
+    for (extra_libs) |lib| {
+        afl_cc.addFileArg(lib.getEmittedBin());
+    }
     return fuzz_exe;
 }
 
