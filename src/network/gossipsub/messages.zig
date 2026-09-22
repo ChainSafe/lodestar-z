@@ -118,6 +118,7 @@ pub const Messages = struct {
         var pending = try validation.Validation.init(a, layout.validations, options.validation_timeout_ms, options.validation_tombstone_ms);
         seen.index.seed = options.random_seed.?;
         history.index.seed = options.random_seed.? ^ 1;
+        history.topic_index.seed = options.random_seed.? ^ 2;
         pending.index.seed = options.random_seed.? ^ 2;
         return .{ .store = store, .history = history, .seen = seen, .validation = pending, .gossip_ids = gossip_ids, .fast = fast };
     }
@@ -178,7 +179,7 @@ pub const Messages = struct {
     }
 
     pub fn gossipIds(self: *Messages, topic: []const u8, epoch: u64) []MessageId {
-        const count = self.history.gossip(&self.store, topic, self.gossip_ids, epoch);
+        const count = self.history.gossip(topic, self.gossip_ids, epoch);
         return self.gossip_ids[0..count];
     }
 
@@ -353,11 +354,7 @@ pub const Messages = struct {
     }
 
     pub fn topicPins(self: *const Messages) @import("local_intent.zig").TopicSet {
-        var pins: @import("local_intent.zig").TopicSet = .initEmpty();
-        for (self.validation.recent) |*entry| if (entry.pinned) {
-            pins.set(entry.topic.index);
-        };
-        return pins;
+        return self.validation.topic_pins;
     }
 
     pub fn expire(self: *Messages, peers: *Peers, now: u64) void {

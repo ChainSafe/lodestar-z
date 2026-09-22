@@ -1,4 +1,7 @@
 const Options = @import("options.zig").Options;
+const std = @import("std");
+pub const Budget = enum { calls, input, output, items, fields, work, copy };
+pub const Budgets = std.EnumSet(Budget);
 
 pub const Progress = enum { done, credits, events };
 
@@ -35,6 +38,15 @@ pub const Turn = struct {
     large_used: bool = false,
     large_copy_used: bool = false,
     sink: ?*const @import("messages.zig").MessageSink = null,
+    deferred: Budgets = .initEmpty(),
+
+    pub fn exhausted(self: *const Turn) Budgets {
+        var result = self.deferred;
+        inline for (std.meta.fields(Budget)) |field| {
+            if (@field(self.budget, field.name) == 0) result.insert(@enumFromInt(field.value));
+        }
+        return result;
+    }
 
     pub fn init(options: *const Options, now: @import("../types.zig").Now, events: []@import("gossipsub.zig").Event, arena: []u8, scratch: []u8) Turn {
         return .{
@@ -64,11 +76,12 @@ pub const Turn = struct {
             self.large_copy_used = true;
             return true;
         }
+        if (bytes > self.budget.copy) self.deferred.insert(.copy);
         return false;
     }
 
     pub fn workspace(self: *Turn, peer: *Credits) Workspace {
-        return .{ .arena = self.arena, .scratch = self.scratch, .used = &self.used, .peer_work = &peer.work, .work = &self.budget.work, .large_used = &self.large_used, .event_available = self.count < self.events.len, .sink = self.sink };
+        return .{ .arena = self.arena, .scratch = self.scratch, .used = &self.used, .peer_work = &peer.work, .work = &self.budget.work, .large_used = &self.large_used, .event_available = self.count < self.events.len, .sink = self.sink, .deferred = &self.deferred };
     }
 };
 
@@ -81,6 +94,7 @@ pub const Workspace = struct {
     large_used: *bool,
     event_available: bool,
     sink: ?*const @import("messages.zig").MessageSink = null,
+    deferred: ?*Budgets = null,
 
     pub fn charge(workspace: *const Workspace, options: *const Options, compressed: usize, decoded: usize) bool {
         return workspace.chargeWork(options, compressed * 2 + decoded * 2);
@@ -96,6 +110,7 @@ pub const Workspace = struct {
             workspace.large_used.* = true;
             return true;
         }
+        if (cost > workspace.work.*) if (workspace.deferred) |deferred| deferred.insert(.work);
         return false;
     }
 };

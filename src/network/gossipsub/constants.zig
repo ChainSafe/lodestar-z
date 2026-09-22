@@ -43,6 +43,7 @@ pub const seen_ttl_epochs: u64 = 2;
 /// gossiped about for `mcache_gossip` of them.
 pub const mcache_len: usize = 6;
 pub const mcache_gossip: usize = 3;
+pub const maintenance_slice_target_ns: u64 = 1_000_000;
 
 /// Only announce IDONTWANT for messages at least this large, so small topics
 /// (attestations) are not burdened; blocks and data columns clear it.

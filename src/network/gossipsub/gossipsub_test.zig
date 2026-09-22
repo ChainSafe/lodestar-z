@@ -806,6 +806,8 @@ test "gossipsub native write credit behind cursor resumes and blocked writes qui
     const io = &setup.shared.client.gossipsub.sessions.rows[index].io;
     try std.testing.expect(io.tx.data.count > 0);
     try std.testing.expect(!io.tx.ready);
+    try std.testing.expect(io.write_would_block + io.write_zero > 0);
+    try std.testing.expect(setup.shared.client.gossipsub.io_metrics.write_would_block + setup.shared.client.gossipsub.io_metrics.write_zero > 0);
     try std.testing.expect(@import("session_io.zig").nextIoWakeup(setup.shared.client.gossipsub, setup.shared.pair.now, 16).? > setup.shared.pair.now.mono_ms);
     const before = io.tx.data.first().?.page.remaining;
     const extra = @import("test_support.zig").addPeer(setup.shared.client.gossipsub, .{ .index = 77, .generation = 1 }, .v1_2).?;

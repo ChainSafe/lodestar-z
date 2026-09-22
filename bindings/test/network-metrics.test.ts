@@ -46,11 +46,25 @@ test("metrics are available through startup and remain readable after close", as
         expect(next.get("gossipsub_heartbeat_duration_seconds_count")).toBeGreaterThan(0);
         expect(next.get("lodestar_native_gossip_maintenance_completed_timestamp_seconds")).toBeGreaterThan(0);
         expect(next.get("lodestar_native_peer_selection_seconds_count")).toBeGreaterThan(0);
+        expect(next.get("lodestar_native_network_step_seconds_count")).toBeGreaterThan(0);
       },
       {timeout: 5000}
     );
     expect(metrics.get("lodestar_native_gossip_expired_executing")).toBe(0);
     expect(metrics.get("lodestar_native_gossip_oldest_expired_execution_age_seconds")).toBe(0);
+    for (const budget of ["calls", "input", "output", "items", "fields", "work", "copy"]) {
+      expect(metrics.get(`lodestar_native_gossip_turns_exhausted_total{budget="${budget}"}`)).toBe(0);
+      expect(metrics.get(`lodestar_native_gossip_ready_deferred_total{budget="${budget}"}`)).toBe(0);
+    }
+    for (const counter of ["read_calls", "write_calls", "write_would_block", "write_zero"]) {
+      expect(metrics.get(`lodestar_native_gossip_io_${counter}_total`)).toBe(0);
+    }
+    expect(metrics.get("lodestar_native_gossip_history_entries_visited_total")).toBe(0);
+    for (const phase of ["mesh", "gossip", "retire", "history"]) {
+      expect(
+        metrics.get(`lodestar_native_gossip_maintenance_work_seconds_count{phase="${phase}"}`)
+      ).toBeGreaterThanOrEqual(0);
+    }
     for (const stage of ["challenge", "handshake", "packet", "response", "record"]) {
       for (const outcome of ["allowed", "source_limit", "global_limit", "source_capacity"]) {
         expect(metrics.get(`lodestar_native_discovery_admission_total{stage="${stage}",outcome="${outcome}"}`)).toBe(0);

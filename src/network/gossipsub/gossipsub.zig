@@ -117,6 +117,7 @@ pub const Gossipsub = struct {
     counters: Counters = .{},
     topic_metrics: @import("metrics.zig").Topics = .{},
     rpc_metrics: @import("metrics.zig").Rpc = .{},
+    io_metrics: @import("metrics.zig").Io = .{},
     validation_time: @import("metrics.zig").ValidationTime = .{},
 
     pub const Admission = session_io.Admission;
@@ -587,16 +588,30 @@ pub const Gossipsub = struct {
             if (!topic.active) continue;
             var context = self.overlayContext(now.mono_ms);
             context.snapshot = &self.cycle.scores;
+            const mesh_start = timing.now(self.metrics_io);
             if (topic.fanout.count() > 0) _ = self.overlay.maintainFanout(&context, index, false);
             self.overlay.maintain(&context, index);
             if (self.cycle.opportunistic) self.overlay.opportunistic(&context, index);
+            const gossip_start = timing.now(self.metrics_io);
+            self.maintenance.mesh.observe(gossip_start -| mesh_start);
             self.emitGossip(index, &context);
+            const retire_start = timing.now(self.metrics_io);
+            self.maintenance.gossip.observe(retire_start -| gossip_start);
             self.reclaimTopic(index);
+            const end = timing.now(self.metrics_io);
+            self.maintenance.retire.observe(end -| retire_start);
+            self.maintenance.topics_serviced +|= 1;
             serviced += 1;
+            if (end -| start >= constants.maintenance_slice_target_ns) {
+                self.maintenance.time_yields +|= 1;
+                break;
+            }
             if (serviced == self.options.topics_per_pump) break;
         }
         if (self.cycle.complete()) |epoch| {
+            const age_start = timing.now(self.metrics_io);
             self.messages.history.age(&self.messages.store, epoch);
+            self.maintenance.history.observe(timing.now(self.metrics_io) -| age_start);
             self.maintenance.completed(timing.now(self.metrics_io), std.Io.Timestamp.now(self.metrics_io, .real).toSeconds());
         }
     }
@@ -927,6 +942,7 @@ test {
     _ = @import("gossipsub_publication_test.zig");
     _ = @import("gossipsub_resource_test.zig");
     _ = @import("gossipsub_scheduled_test.zig");
+    _ = @import("gossipsub_scheduler_test.zig");
     _ = @import("gossipsub_service_test.zig");
     _ = @import("gossipsub_simulation_test.zig");
     _ = @import("gossipsub_test.zig");

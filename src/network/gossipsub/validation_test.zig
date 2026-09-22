@@ -7,6 +7,58 @@ const std = @import("std");
 const storage = @import("message_store.zig");
 const topic_mod = @import("topic.zig");
 
+test "gossip validation topic pins follow attribution ownership through replacement expiry and clear" {
+    const a = std.testing.allocator;
+    var peers = try Peers.init(a, &.{ .retained_capacity = 2, .retained_outbound_reserve = 1 });
+    defer peers.deinit(a);
+    peers.rows[0] = .{ .occupied = true, .generation = 1 };
+    const source: PeerRef = .{ .index = 0, .generation = 1 };
+    var store = try storage.Store.init(a, 3, storage.page_bytes);
+    defer store.deinit(a);
+    var v = try Validation.init(a, 2, 10, 20);
+    defer v.deinit(a, &store, &peers);
+    var handles: [2]@import("validation.zig").Handle = undefined;
+    for (&handles, 0..) |*handle, i| {
+        const m = store.put(@splat(@intCast(i)), "topic", "payload").?;
+        var r = v.reserve(store.get(m).?.id).?;
+        handle.* = r.commit(&store, &peers, m, source, .{ .index = 0, .generation = 1 }, 0);
+        store.seal(m);
+    }
+    try std.testing.expectEqual(@as(u32, 2), v.topic_pin_counts[0]);
+    v.finish(&store, handles[0], .accept, 1);
+    var cancelled = v.reserve(@splat(0)).?;
+    cancelled.cancel();
+    try std.testing.expectEqual(@as(u32, 2), v.topic_pin_counts[0]);
+    const replacement = store.put(@splat(0), "other", "payload").?;
+    var r = v.reserve(@splat(0)).?;
+    const current = r.commit(&store, &peers, replacement, source, .{ .index = 1, .generation = 1 }, 2);
+    store.seal(replacement);
+    try std.testing.expectEqual(@as(u32, 1), v.topic_pin_counts[0]);
+    try std.testing.expectEqual(@as(u32, 1), v.topic_pin_counts[1]);
+    v.expire(&store, &peers, 10);
+    try std.testing.expect(!v.topic_pins.isSet(0));
+    try std.testing.expect(v.topic_pins.isSet(1));
+    v.finish(&store, current, .ignore, 11);
+    v.expire(&store, &peers, 30);
+    try std.testing.expect(v.topic_pins.isSet(1));
+    v.expire(&store, &peers, 31);
+    try std.testing.expectEqual(@as(usize, 0), v.topic_pins.count());
+    for (0..10) |i| {
+        const m = store.put(@splat(@intCast(i + 10)), "topic", "payload").?;
+        var next = v.reserve(store.get(m).?.id).?;
+        const handle = next.commit(&store, &peers, m, source, .{ .index = @intCast(i % 2), .generation = 2 }, 32 + i);
+        store.seal(m);
+        v.finish(&store, handle, .accept, 32 + i);
+    }
+    try std.testing.expectEqual(@as(u64, 2), v.delivery_evictions);
+    try std.testing.expectEqual(@as(u32, 4), v.topic_pin_counts[0]);
+    try std.testing.expectEqual(@as(u32, 4), v.topic_pin_counts[1]);
+    v.clear(&store, &peers);
+    try std.testing.expectEqual(@as(usize, 0), v.topic_pins.count());
+    for (v.topic_pin_counts) |count| try std.testing.expectEqual(@as(u32, 0), count);
+    try std.testing.expectEqual(@as(u32, 0), peers.rows[0].pins);
+}
+
 test "gossip validation expires without pump and resolves exactly once" {
     var peers = try Peers.init(std.testing.allocator, &.{ .retained_score_ms = 100 });
     defer peers.deinit(std.testing.allocator);

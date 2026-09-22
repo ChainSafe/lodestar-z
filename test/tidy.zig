@@ -50,8 +50,6 @@ const inline_test_allowlist = [_][]const u8{
     "src/fork_choice/fork_choice.zig",
     // Private method on ProtoArray: init.
     "src/fork_choice/proto_array.zig",
-    // Private probe placement: IdIndex.hash.
-    "src/network/gossipsub/mcache.zig",
     // Private frame enqueue path: Outbox.appendControl.
     "src/network/gossipsub/outbox.zig",
     // Private mesh selection helper: Overlay.shuffle.

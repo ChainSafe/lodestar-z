@@ -164,6 +164,7 @@ pub const NetworkCore = struct {
     local_intent_workspace: *gossip.local_intent.Workspace,
     schedule: ForkSchedule,
     counters: Counters = .{},
+    step_duration: @import("metrics/timing.zig").Duration = .{},
     last_now: Now,
     initialized: bool = false,
     wait_mode: wait.Mode,
@@ -550,6 +551,8 @@ pub const NetworkCore = struct {
             self.counters.readiness_interruptions +|= @intFromBool(result.readiness.interrupted);
             self.counters.readiness_failures +|= @intFromBool(result.readiness.failure != null);
         }
+        const step_start = @import("metrics/timing.zig").now(io);
+        defer self.step_duration.observe(@import("metrics/timing.zig").now(io) -| step_start);
         const progress = self.transport.step(io, self.native_events, self.activity, .{ .wait_max_ms = receive_wait });
         result.transport = progress.progress;
         self.native_event_count = result.transport.events;

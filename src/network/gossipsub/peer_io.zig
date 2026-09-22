@@ -52,6 +52,9 @@ pub const PeerIo = struct {
     }
 
     write_first: bool = false,
+    write_would_block: u64 = 0,
+    write_zero: u64 = 0,
+    write_budget_deferred: u64 = 0,
     tx: Outbox,
     body: []u8,
     unread: []u8,

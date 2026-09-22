@@ -52,6 +52,8 @@ pub const Validation = struct {
     free_records: lists.List = .{},
     resolved_records: lists.List = .{},
     delivery_evictions: u64 = 0,
+    topic_pin_counts: [@import("constants.zig").topics_cap]u32 = @splat(0),
+    topic_pins: @import("local_intent.zig").TopicSet = .initEmpty(),
 
     timeout_ms: u64,
     tombstone_ms: u64,
@@ -102,12 +104,13 @@ pub const Validation = struct {
         }
         for (self.recent, 0..) |*record, i| {
             assert(!record.reserved);
-            releaseAttribution(record, peers);
+            self.releaseAttribution(record, peers);
             record.state = .free;
             record.link = .{};
             self.free_records.append(self.recent, "link", @intCast(i));
         }
         self.index.clear();
+        assert(self.topic_pins.count() == 0);
     }
 
     pub fn backingBytes(capacity: usize) usize {
@@ -147,7 +150,7 @@ pub const Validation = struct {
             if (record.state == .free) owner.free_records.remove(owner.recent, "link", self.record) else {
                 owner.resolved_records.remove(owner.recent, "link", self.record);
                 owner.index.remove(record.id);
-                releaseAttribution(record, peers);
+                owner.releaseAttribution(record, peers);
             }
             const handle: Handle = .{ .index = self.index, .generation = entry.generation + 1 };
             peers.retain(source);
@@ -156,6 +159,9 @@ pub const Validation = struct {
             owner.pending_per_peer_kind[source.index][@intFromEnum(store.get(message).?.kind)] += 1;
             owner.bytes_per_peer_kind[source.index][@intFromEnum(store.get(message).?.kind)] += chargedBytes(store.get(message).?.len);
             record.* = .{ .handle = handle, .state = .pending, .id = id, .source = source, .topic = topic, .admitted_ms = now, .pinned = true };
+            assert(topic.index < owner.topic_pin_counts.len and owner.topic_pin_counts[topic.index] < owner.recent.len);
+            owner.topic_pin_counts[topic.index] += 1;
+            owner.topic_pins.set(topic.index);
             owner.index.insert(id, self.record);
             entry.* = .{ .generation = handle.generation, .state = .{ .pending = .{ .message = message, .delivery = self.record, .deadline = now +| owner.timeout_ms } } };
             if (owner.pending_entries.tail != none) assert(owner.entries[owner.pending_entries.tail].state.pending.deadline <= entry.state.pending.deadline);
@@ -191,7 +197,7 @@ pub const Validation = struct {
         const record = &self.recent[index];
         if (record.state == .resolved) self.resolved_records.remove(self.recent, "link", index);
         self.index.remove(record.id);
-        releaseAttribution(record, peers);
+        self.releaseAttribution(record, peers);
         record.state = .free;
         self.free_records.append(self.recent, "link", index);
     }
@@ -302,14 +308,16 @@ pub const Validation = struct {
         if (pending == null) return resolved;
         return if (resolved) |deadline| @min(pending.?, deadline) else pending;
     }
+    fn releaseAttribution(self: *Validation, e: *Attribution, peers: *Peers) void {
+        if (!e.pinned) return;
+        assert(self.topic_pin_counts[e.topic.index] > 0 and self.topic_pins.isSet(e.topic.index));
+        self.topic_pin_counts[e.topic.index] -= 1;
+        if (self.topic_pin_counts[e.topic.index] == 0) self.topic_pins.unset(e.topic.index);
+        peers.release(e.source);
+        for (e.duplicates[0..e.duplicate_len]) |d| peers.release(d.peer);
+        e.pinned = false;
+    }
 };
-
-fn releaseAttribution(e: *Attribution, peers: *Peers) void {
-    if (!e.pinned) return;
-    peers.release(e.source);
-    for (e.duplicates[0..e.duplicate_len]) |d| peers.release(d.peer);
-    e.pinned = false;
-}
 
 test {
     _ = @import("validation_test.zig");

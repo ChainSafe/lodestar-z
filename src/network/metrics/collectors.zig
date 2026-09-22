@@ -90,6 +90,8 @@ fn writeRuntime(self: *const Context, w: *prom.Encoder) prom.Error!void {
     try w.scalar(.{ .name = "lodestar_native_network_running", .kind = .gauge, .help = "Network owner is running" }, @intFromBool(self.running));
     try w.counters("lodestar_native_network_", &self.owner.counters);
     try w.counters("lodestar_native_quic_", &self.owner.transport.engine.counters);
+    const steps = try w.histograms(.{ .name = "lodestar_native_network_step_seconds", .kind = .histogram, .help = "Network step duration after native readiness polling, covering transport, protocols and discovery", .unit = .seconds }, @import("timing.zig").Duration);
+    try steps.histogram(.{}, &self.owner.step_duration);
 }
 
 fn writeNativeCounters(self: *const Context, w: *prom.Encoder) prom.Error!void {
@@ -449,6 +451,8 @@ fn writeGossip(self: *const Context, w: *prom.Encoder) prom.Error!void {
         .labels = &.{"reason"},
     }, @import("../gossipsub/messages.zig").StorageRefusal, &self.owner.service.gossipsub.messages.storage_refusals);
     try self.owner.service.gossipsub.rpc_metrics.write(w);
+    try self.owner.service.gossipsub.io_metrics.write(w);
+    try w.scalar(.{ .name = "lodestar_native_gossip_history_entries_visited_total", .kind = .counter, .help = "History entries examined while selecting advertised message IDs" }, self.owner.service.gossipsub.messages.history.gossip_entries_visited);
     try w.scalar(.{
         .name = "gossipsub_fast_message_id_hits_total",
         .kind = .counter,
@@ -583,6 +587,9 @@ fn writeMaintenance(self: *const Context, w: *prom.Encoder) prom.Error!void {
     }
     const slices = try w.histograms(.{ .name = "lodestar_native_gossip_maintenance_slice_seconds", .kind = .histogram, .help = "Elapsed time inside uninterrupted maintenance regions, including OS preemption; excludes time between slices", .unit = .seconds, .labels = &.{"phase"} }, @import("timing.zig").Duration);
     inline for (.{ "setup", "topics" }) |phase| try slices.histogram(.{phase}, &@field(g.maintenance, phase));
+    const work = try w.histograms(.{ .name = "lodestar_native_gossip_maintenance_work_seconds", .kind = .histogram, .help = "Subphase duration within topic maintenance slices, including OS preemption", .unit = .seconds, .labels = &.{"phase"} }, @import("timing.zig").Duration);
+    inline for (.{ "mesh", "gossip", "retire", "history" }) |phase| try work.histogram(.{phase}, &@field(g.maintenance, phase));
+    try w.counters("lodestar_native_gossip_maintenance_", &.{ .topics_serviced = g.maintenance.topics_serviced, .time_yields = g.maintenance.time_yields });
     try w.scalar(.{ .name = "lodestar_native_gossip_maintenance_active", .kind = .gauge, .help = "A gossip maintenance cycle is unfinished" }, @intFromBool(self.running and g.cycle.isActive()));
     try w.scalar(.{ .name = "lodestar_native_gossip_maintenance_completed_timestamp_seconds", .kind = .gauge, .help = "Unix time of the last completed gossip maintenance cycle; zero before the first completion", .unit = .seconds }, g.maintenance.completed_unix_s);
     const selection = try w.histograms(.{ .name = "lodestar_native_peer_selection_seconds", .kind = .histogram, .help = "Elapsed time building and applying an uncached peer selection", .unit = .seconds }, @import("timing.zig").Duration);
