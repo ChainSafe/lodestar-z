@@ -62,7 +62,7 @@ test "gossip IWANT admits 5000 IDs and rejects larger envelopes before service" 
         if (count == constants.max_iwant_ids_per_rpc) {
             try std.testing.expect(try result);
         } else {
-            try std.testing.expectError(error.LengthLimit, result);
+            try std.testing.expectError(error.OccurrenceLimit, result);
         }
         try std.testing.expectEqual(@as(u64, constants.max_iwant_ids_per_rpc), g.rpc_metrics.iwant_unknown);
         try std.testing.expectEqual(@as(usize, 0), emitted);

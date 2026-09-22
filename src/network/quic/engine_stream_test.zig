@@ -358,7 +358,11 @@ test "engine bounds streams per connection" {
         const stream = try pair.client.openStream(handles.client);
         _ = try pair.client.write(stream, "x", false);
     }
-    try std.testing.expectError(error.StreamLimit, pair.client.openStream(handles.client));
+    _ = pair.client.takeHostWork();
+    for (0..8) |_| {
+        try std.testing.expectError(error.StreamLimit, pair.client.openStream(handles.client));
+        try std.testing.expect(!pair.client.hostWorkPending());
+    }
     try pair.pump();
 
     var storage: [limits.streams_per_connection]Event = undefined;

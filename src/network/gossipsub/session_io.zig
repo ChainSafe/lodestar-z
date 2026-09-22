@@ -342,8 +342,8 @@ fn readPeer(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *T
             const result = io.feedUnread(&self.sessions.receive_pool, take, now.mono_ms) catch |err| {
                 if (err == error.ReceiveCapacity) {
                     self.counters.receive_capacity_refusals += 1;
-                    self.counters.local_pressure_resets += 1;
-                    self.cancelPromises(index, true);
+                    discardInboundFrame(self, index);
+                    continue;
                 } else {
                     self.counters.malformed_rpcs += 1;
                     self.peers.penalize(logical, 1);
@@ -354,7 +354,11 @@ fn readPeer(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *T
             peer.input -= result.consumed;
             turn.budget.input -= result.consumed;
             self.rpc_metrics.received_bytes +|= result.consumed;
-            if (result.complete) self.counters.rpcs_received += 1;
+            if (result.complete) {
+                if (io.discarding) {
+                    _ = self.sessions.finishFrame(io);
+                } else self.counters.rpcs_received += 1;
+            }
             continue;
         }
         io.unread_start = 0;
@@ -579,6 +583,12 @@ pub fn nextIoWakeup(self: *Gossipsub, now: Now, event_capacity: usize) ?u64 {
     return @max(now.mono_ms, deadline);
 }
 
+fn discardInboundFrame(self: *Gossipsub, index: u16) void {
+    self.counters.local_pressure_discards += 1;
+    self.cancelPromises(index, true);
+    self.sessions.discardFrame(&self.sessions.rows[index].io);
+}
+
 fn expireIo(self: *Gossipsub, router: *routing.Router, engine: *Engine, now_ms: u64) void {
     const g = self;
     for (g.sessions.rows, 0..) |*peer, index| {
@@ -595,20 +605,24 @@ fn expireIo(self: *Gossipsub, router: *routing.Router, engine: *Engine, now_ms: 
                     break;
                 },
                 .receive_pressure => {
-                    g.counters.local_pressure_resets += 1;
                     g.counters.receive_pressure_timeouts += 1;
-                    resetInbound(self, engine, @intCast(index));
+                    discardInboundFrame(self, @intCast(index));
                 },
                 .receive_frame => {
-                    if ((io.reader.declaredLen() orelse 0) > io.body.len and io.rpc == null and io.pressure_since == null) {
-                        g.peers.penalize(peer.logical, 1);
-                        g.peers.rows[peer.logical.index].large_frame_denied_until = now_ms +| g.options.pressure_timeout_ms;
-                    }
-                    if (io.pressure_since != null or io.rpc != null) {
-                        g.counters.local_pressure_resets += 1;
-                        g.cancelPromises(@intCast(index), true);
-                    } else g.counters.large_stalled += 1;
                     g.counters.receive_frame_timeouts += 1;
+                    if (io.pressure_since != null or io.rpc != null) {
+                        discardInboundFrame(self, @intCast(index));
+                        continue;
+                    }
+                    if (io.discarding) {
+                        g.counters.local_pressure_resets += 1;
+                    } else {
+                        if ((io.reader.declaredLen() orelse 0) > io.body.len) {
+                            g.peers.penalize(peer.logical, 1);
+                            g.peers.rows[peer.logical.index].large_frame_denied_until = now_ms +| g.options.pressure_timeout_ms;
+                        }
+                        g.counters.large_stalled += 1;
+                    }
                     resetInbound(self, engine, @intCast(index));
                 },
                 .send_queue, .send_progress => {

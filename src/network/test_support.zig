@@ -17,6 +17,7 @@ pub const server_address = types.Address{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 },
 pub const now_unix: i64 = 1_700_000_000;
 
 pub const Pair = struct {
+    activity_buffer: [128]engine_mod.Handle = undefined,
     client_ctx: tls.Context = undefined,
     server_ctx: tls.Context = undefined,
     client: Engine = undefined,
@@ -140,6 +141,11 @@ pub const Pair = struct {
             }
         }
         return moved;
+    }
+
+    pub fn activity(self: *Pair, engine: *Engine) []const engine_mod.Handle {
+        const count = engine.takeActivity(&self.activity_buffer);
+        return self.activity_buffer[0..count];
     }
 
     pub fn events(_: *Pair, engine: *Engine, storage: []Event) []Event {

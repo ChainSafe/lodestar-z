@@ -50,6 +50,10 @@ pub const Router = struct {
     meshsub_candidates: [3]negotiate.Protocol = undefined,
     meshsub_count: u8 = 0,
 
+    pub fn connectionActivity(self: *Router, conn: engine_mod.Handle) void {
+        self.negotiator.connectionActivity(conn);
+    }
+
     pub fn validateOptions(options: Options) Error!void {
         if (!options.reqresp and !options.meshsub and !options.identify) return error.InvalidLimits;
         if (options.meshsub_versions.len == 0 or options.meshsub_versions.len > 3) {

@@ -555,11 +555,13 @@ fn pumpRawServer(setup: *Pair, comptime reply: RawReply) !usize {
     };
     var leftover: usize = 0;
     var outcomes: [8]negotiate.Outcome = undefined;
+    setup.forwardActivity();
     const dialed = setup.shared.client.router.pump(&setup.shared.pair.client, now, &outcomes);
     for (outcomes[0..dialed]) |outcome| {
         if (outcome.result == .ready) leftover += outcome.result.ready.leftover.len;
         try std.testing.expect(setup.shared.client.reqresp.negotiated(outcome, now));
     }
+    setup.forwardActivity();
     const listened = setup.shared.server.router.pump(&setup.shared.pair.server, now, &outcomes);
     for (outcomes[0..listened]) |outcome| switch (outcome.result) {
         .ready => try reply(setup, outcome.stream),
@@ -761,6 +763,7 @@ test "reqresp preserves pending chunk and reports connection closure without out
     for (0..30) |_| {
         _ = setup.shared.server.reqresp.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .control = &.{} }).control;
         try setup.shared.pair.pump();
+        setup.forwardActivity();
         _ = setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &.{} }).control;
         if (setup.shared.client.reqresp.outbound[handle.index].request.pendingEvent() != null) {
             held = true;
@@ -880,6 +883,7 @@ test "reqresp cancellation removes Router ownership before output delivery" {
     _ = setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &.{} }).control;
     try std.testing.expect(!setup.shared.pair.client.registry.slots[stream.conn.index].table.matches(stream.slot, stream.id));
     var outcomes: [8]negotiate.Outcome = undefined;
+    setup.forwardActivity();
     try std.testing.expectEqual(@as(usize, 0), setup.shared.client.router.pump(&setup.shared.pair.client, setup.shared.pair.now, &outcomes));
     var events: [1]Event = undefined;
     try std.testing.expectEqual(@as(usize, 1), setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &events }).control);
@@ -1059,7 +1063,9 @@ test "reqresp negotiated handoff starts a fresh progress interval" {
         var storage: [16]engine_mod.Event = undefined;
         setup.shared.server.router.transportEvents(&setup.shared.pair.server, setup.shared.pair.events(&setup.shared.pair.server, &storage), setup.shared.pair.now);
         var outcomes: [8]negotiate.Outcome = undefined;
+        setup.forwardActivity();
         _ = setup.shared.server.router.pump(&setup.shared.pair.server, setup.shared.pair.now, &outcomes);
+        setup.forwardActivity();
         const count = setup.shared.client.router.pump(&setup.shared.pair.client, setup.shared.pair.now, &outcomes);
         if (count == 0) continue;
         try std.testing.expectEqual(@as(usize, 1), count);
@@ -1187,6 +1193,7 @@ test "reqresp empty capacity does not delay buffered response chunks" {
     const length = a.len + b.len;
     try std.testing.expectEqual(length, try setup.shared.pair.server.write(stream, wire[0..length], false));
     try setup.shared.pair.pump();
+    setup.forwardActivity();
     var events: [1]Event = undefined;
     try std.testing.expectEqual(@as(usize, 1), setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .application = &events }).application);
     try std.testing.expectEqualSlices(u8, &first, events[0].chunk.bytes);
@@ -1400,8 +1407,10 @@ test "reqresp request write preserves already readable native response" {
             else => {},
         };
         var outcomes: [8]negotiate.Outcome = undefined;
+        setup.forwardActivity();
         const client_count = setup.shared.client.router.pump(&setup.shared.pair.client, setup.shared.pair.now, &outcomes);
         for (outcomes[0..client_count]) |outcome| try std.testing.expect(setup.shared.client.reqresp.negotiated(outcome, setup.shared.pair.now));
+        setup.forwardActivity();
         const server_count = setup.shared.server.router.pump(&setup.shared.pair.server, setup.shared.pair.now, &outcomes);
         for (outcomes[0..server_count]) |outcome| switch (outcome.result) {
             .ready => server_stream = outcome.stream,
@@ -1607,8 +1616,10 @@ test "reqresp absolute request phase expires under real stream backpressure" {
             else => {},
         };
         var outcomes: [8]negotiate.Outcome = undefined;
+        setup.forwardActivity();
         const listened = setup.shared.server.router.pump(&setup.shared.pair.server, setup.shared.pair.now, &outcomes);
         for (outcomes[0..listened]) |outcome| try std.testing.expect(outcome.result == .ready);
+        setup.forwardActivity();
         const dialed = setup.shared.client.router.pump(&setup.shared.pair.client, setup.shared.pair.now, &outcomes);
         for (outcomes[0..dialed]) |outcome| {
             try std.testing.expect(outcome.result == .ready);
@@ -1632,6 +1643,9 @@ test "reqresp absolute request phase expires under real stream backpressure" {
     try std.testing.expect(blocked);
     const deadline_ms = setup.shared.client.reqresp.outbound[handle.index].deadline();
     var events: [8]Event = undefined;
+    _ = setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &events });
+    _ = setup.shared.pair.client.takeHostWork();
+    setup.shared.client.reqresp.connectionActivity(.{ .index = stream.conn.index, .generation = stream.conn.generation + 1 });
     for (0..3) |_| {
         setup.shared.pair.advance(500);
         try std.testing.expectEqual(
@@ -1639,6 +1653,7 @@ test "reqresp absolute request phase expires under real stream backpressure" {
             setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &events }).control,
         );
         try std.testing.expectEqual(deadline_ms, setup.shared.client.reqresp.outbound[handle.index].deadline());
+        try std.testing.expect(!setup.shared.pair.client.hostWorkPending());
     }
     setup.shared.pair.advance(500);
     try std.testing.expectEqual(

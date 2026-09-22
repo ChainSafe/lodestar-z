@@ -162,6 +162,7 @@ pub const Service = struct {
             self.applications = .closed;
         }
         for (activity) |conn| {
+            self.router.connectionActivity(conn);
             if (self.identify) |*identify| identify.connectionActivity(conn);
             self.reqresp.connectionActivity(conn);
             if (self.applications == .active) self.gossipsub.connectionActivity(conn);

@@ -34,6 +34,7 @@ pub const MessageId = topic_mod.MessageId;
 pub const Verdict = validation_mod.Verdict;
 pub const ValidationHandle = validation_mod.Handle;
 pub const ReportOutcome = validation_mod.Outcome;
+pub const Admission = @import("messages.zig").Admission;
 pub const MessageSink = @import("messages.zig").MessageSink;
 
 pub const Event = union(enum) {
@@ -176,6 +177,7 @@ pub const Gossipsub = struct {
         tx_stalled: u64 = 0,
         subscription_timeouts: u64 = 0,
         receive_capacity_refusals: u64 = 0,
+        local_pressure_discards: u64 = 0,
         message_capacity_refusals: u64 = 0,
         receive_copy_bytes: u64 = 0,
         receive_pressure_timeouts: u64 = 0,

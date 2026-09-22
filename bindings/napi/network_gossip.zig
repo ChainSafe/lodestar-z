@@ -56,7 +56,7 @@ pub const Ingress = struct {
     failure: ?anyerror = null,
 
     pub fn sink(self: *Ingress) native.MessageSink {
-        return .{ .context = self, .has_capacity = hasCapacity, .make_room = makeRoom, .deliver = deliver };
+        return .{ .context = self, .has_capacity = hasCapacity, .admit = admit };
     }
 
     fn hasCapacity(context: *anyopaque, kind: native.topic.Kind, len: usize) bool {
@@ -70,78 +70,26 @@ pub const Ingress = struct {
         return table.hasCapacity(kind, len) or table.freshnessVictim(kind) != null;
     }
 
-    fn makeRoom(context: *anyopaque, source: processor.Source, kind: native.topic.Kind, len: usize) bool {
+    fn admit(context: *anyopaque, candidate: *native.Admission) bool {
         const self: *Ingress = @ptrCast(@alignCast(context));
+        return self.capture(candidate) catch |err| {
+            self.failure = err;
+            return false;
+        };
+    }
+
+    fn capture(self: *Ingress, candidate: *native.Admission) !bool {
         const runtime = self.runtime;
+        const clock = try sample(self.io);
+        const received_at = try projectWall(candidate.event.admitted_ms, clock);
         runtime.lock();
         defer runtime.unlock();
         if (runtime.stop or self.failure != null) return false;
         const table = &runtime.gossip.?;
-        if (!table.sourceRoom(source, kind, len)) {
-            table.diag.sourceRefusals +|= 1;
-            return false;
-        }
-        const now = monotonic() catch |err| {
-            self.failure = err;
-            return false;
-        };
-        var bytes: usize = 0;
-        for (0..batch_max) |_| {
-            if (table.hasCapacity(kind, len)) return true;
-            const token = table.freshnessVictim(kind) orelse return false;
-            const cell = table.get(token).?;
-            if (bytes > 0 and cell.input.len > batch_bytes -| bytes) return false;
-            bytes += cell.input.len;
-            table.outcome(runtime.heavy.?.core.reportValidation(cell.handle, .ignore, .{ .mono_ms = now, .unix_s = 0 }));
-            table.retire(token);
-            table.diag.freshnessReplacements +|= 1;
-        }
-        return table.hasCapacity(kind, len);
-    }
-
-    fn deliver(context: *anyopaque, message: *const native.MessageEvent) bool {
-        const self: *Ingress = @ptrCast(@alignCast(context));
-        return self.capture(message) catch |err| {
-            self.failure = err;
-            return false;
-        };
-    }
-
-    fn capture(self: *Ingress, message: *const native.MessageEvent) !bool {
-        const runtime = self.runtime;
-        const clock = try sample(self.io);
-        const now: n.Now = .{ .mono_ms = clock.mono_ms, .unix_s = @intCast(clock.unix_ms / 1000) };
-        const received_at = try projectWall(message.admitted_ms, clock);
-        runtime.lock();
-        defer runtime.unlock();
-        const table = &runtime.gossip.?;
-        if (runtime.stop or table.closed or now.mono_ms >= message.deadline) {
-            return false;
-        }
-        const parsed = native.topic.parseCanonical(message.topic).?;
-        const kind = parsed.name.kind;
-        var electra = false;
-        var deneb = false;
-        if (table.limits != null) {
-            const config = &runtime.heavy.?.config;
-            for (config.chain.forks[0..config.chain.supported_count]) |fork| if (std.mem.eql(u8, &fork.digest, &parsed.digest)) {
-                electra = @intFromEnum(fork.fork) >= @intFromEnum(@as(@TypeOf(fork.fork), .electra));
-                deneb = @intFromEnum(fork.fork) >= @intFromEnum(@as(@TypeOf(fork.fork), .deneb));
-                break;
-            };
-        }
-        const metadata: processor.metadata_mod.Metadata = if (table.limits != null) processor.metadata_mod.extract(kind, electra, message.bytes) else .{};
-        if (table.limits != null and !processor.metadata_mod.eligible(&metadata, kind, deneb, runtime.slot)) {
-            table.diag.slotRefusals +|= 1;
-            return false;
-        }
         const empty = !table.hasWork();
-        table.capture(message, &metadata, deneb, received_at) catch |err| switch (err) {
-            error.NetworkGossipFull, error.NetworkBridgeFull => return false,
-            else => return err,
-        };
+        const accepted = table.admit(runtime.heavy.?.core.service.gossipsub, candidate, clock.mono_ms, received_at, runtime.slot);
         if (empty and table.hasWork()) runtime.pingLocked();
-        return true;
+        return accepted;
     }
 };
 pub fn closeLocked(runtime: *Runtime) void {

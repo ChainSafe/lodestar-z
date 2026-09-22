@@ -66,15 +66,15 @@ export class RawGossip {
   }
 
   async command(command) {
-    if (command.kind === "invalidEnvelope") {
+    if (command.kind === "invalidEnvelope" || command.kind === "extensionEnvelope") {
       const suffix = {
         duplicateControl: [26, 0, 26, 0],
         group: [11, 12],
         noncanonicalTag: [154, 0, 0],
         unknownField: [32, 0],
         wrongWire: [8, 0],
-      }[command.variant];
-      assert(suffix, "unknown invalid envelope variant");
+      }[command.kind === "extensionEnvelope" ? "unknownField" : command.variant];
+      assert(suffix, "unknown envelope variant");
       const unsubscribe = RPC.encode({subscriptions: [{subscribe: false, topic: TOPIC}]}).subarray();
       const body = Buffer.concat([unsubscribe, Buffer.from(suffix)]);
       await sendFragments(this.outbound, Buffer.concat([prefix(body.length), body]), AbortSignal.timeout(10000));

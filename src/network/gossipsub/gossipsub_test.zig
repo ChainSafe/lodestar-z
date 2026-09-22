@@ -722,14 +722,15 @@ test "gossipsub completed frame expiry releases pages without blaming the peer" 
     g.recovery.add(&g.peers, @splat(1), peer.logical, peer.conn, 1, began + 1000);
     setup.shared.pair.advance(100);
     try setup.pumpOnce();
-    try std.testing.expectEqual(@as(u64, 1), g.counters.local_pressure_resets);
+    try std.testing.expectEqual(@as(u64, 0), g.counters.local_pressure_resets);
+    try std.testing.expectEqual(@as(u64, 1), g.counters.local_pressure_discards);
     try std.testing.expectEqual(@as(u64, 1), g.counters.promises_cancelled_pressure);
     try std.testing.expectEqual(@as(u64, 0), g.counters.large_stalled);
     try std.testing.expectEqual(@as(u64, 0), g.counters.broken_promises);
     try std.testing.expectEqual(before, g.peers.score(peer.logical, setup.shared.pair.now.mono_ms));
     try std.testing.expectEqual(@as(u64, 0), g.peers.rows[peer.logical.index].large_frame_denied_until);
     try std.testing.expectEqual(g.sessions.receive_pool.next.len, g.sessions.receive_pool.free_pages);
-    try std.testing.expect(peer.in_stream == null and peer.outStream() != null);
+    try std.testing.expect(peer.in_stream != null and peer.outStream() != null);
 }
 
 test "gossipsub pinned payload pressure drops the publication and releases receive pages" {
@@ -857,7 +858,7 @@ test "gossipsub healthy continuous frame turnover does not expire a nonempty que
     try std.testing.expect(setup.shared.client.gossipsub.sessions.outStream(index) != null);
 }
 
-test "gossipsub receive page exhaustion resets only the requesting stream without blame" {
+test "gossipsub receive page exhaustion discards only the requesting frame without blame" {
     var setup: Pair = .{};
     try setup.initOpts(.{ .random_seed = 1 }, .{ .random_seed = 1, .body_buffer_bytes = 1024 });
     defer setup.deinit();
@@ -879,17 +880,31 @@ test "gossipsub receive page exhaustion resets only the requesting stream withou
     _ = try setup.shared.client.gossipsub.publish(test_topic, &payload, setup.shared.pair.now);
     for (0..64) |_| {
         try setup.pumpOnce();
-        if (g.counters.receive_capacity_refusals != 0) break;
+        if (g.counters.receive_capacity_refusals != 0 and g.sessions.rows[peer].io.reader.declaredLen() == null) break;
     }
     try std.testing.expectEqual(@as(u64, 1), g.counters.receive_capacity_refusals);
-    try std.testing.expectEqual(@as(u64, 1), g.counters.local_pressure_resets);
+    try std.testing.expectEqual(@as(u64, 0), g.counters.local_pressure_resets);
+    try std.testing.expectEqual(@as(u64, 1), g.counters.local_pressure_discards);
     try std.testing.expectEqual(@as(u64, 0), g.counters.malformed_rpcs);
     try std.testing.expectEqual(before, g.peers.score(logical, setup.shared.pair.now.mono_ms));
     try std.testing.expectEqual(@as(u64, 0), g.peers.rows[logical.index].large_frame_denied_until);
-    try std.testing.expect(g.sessions.rows[peer].in_stream == null);
+    try std.testing.expect(g.sessions.rows[peer].in_stream != null);
     try std.testing.expect(g.sessions.rows[peer].outStream() != null);
     try std.testing.expect(g.sessions.rows[peer].io.reader.declaredLen() == null);
     try std.testing.expectEqual(@as(usize, 0), g.sessions.receive_pool.free_pages);
+    const inbound = g.sessions.rows[peer].in_stream.?;
+    _ = try setup.shared.client.gossipsub.publish(test_topic, "after discarded frame", setup.shared.pair.now);
+    var received = false;
+    for (0..32) |_| {
+        try setup.pumpOnce();
+        for (setup.serverEvents()) |event| if (event == .message) {
+            try std.testing.expectEqualStrings("after discarded frame", event.message.bytes);
+            received = true;
+        };
+        if (received) break;
+    }
+    try std.testing.expect(received);
+    try std.testing.expectEqual(inbound, g.sessions.rows[peer].in_stream.?);
 }
 
 test "gossipsub graylist refuses bulk reception and releases an idle partial frame" {
@@ -933,7 +948,7 @@ test "gossipsub malformed framing and RPCs penalize authenticated sources across
     const row = &g.sessions.rows[index];
     const source = row.logical;
     const malformed = [_][]const u8{
-        &.{ 2, 0x2a, 0 },
+        &.{ 2, 0x08, 0 },
         &.{ 0x80, 0x00 },
     };
     for (malformed, 0..) |wire, i| {
@@ -959,4 +974,43 @@ test "gossipsub malformed framing and RPCs penalize authenticated sources across
             try std.testing.expect(client.sessions.rows[client_index].outStream() != null);
         }
     }
+}
+
+test "gossipsub discarding a locally refused frame preserves its deadline without blaming the peer" {
+    var setup: Pair = .{};
+    try setup.initOpts(.{ .random_seed = 1 }, .{ .random_seed = 1, .body_buffer_bytes = 1024, .large_frame_timeout_ms = 200 });
+    defer setup.deinit();
+    try connectMesh(&setup);
+    const g = setup.shared.server.gossipsub;
+    var held: [3]@import("receive_pool.zig").Chain = @splat(.{});
+    defer for (&held) |*chain| g.sessions.receive_pool.release(chain);
+    for (0..g.sessions.receive_pool.next.len) |i| {
+        const chain = &held[i % held.len];
+        _ = g.sessions.receive_pool.writable(chain).?;
+        chain.len += @import("receive_pool.zig").page_bytes;
+    }
+    const index = g.sessions.findPeer(setup.shared.handles.server).?;
+    const peer = &g.sessions.rows[index];
+    const before = g.peers.score(peer.logical, setup.shared.pair.now.mono_ms);
+    var wire: [65540]u8 = undefined;
+    const body: [65536]u8 = @splat(0);
+    _ = @import("frame.zig").writeFrame(&wire, &body);
+    try std.testing.expectEqual(@as(usize, 2048), try setup.shared.pair.client.write(setup.clientStream(), wire[0..2048], false));
+    for (0..16) |_| {
+        try setup.pumpOnce();
+        if (peer.io.discarding) break;
+    }
+    try std.testing.expect(peer.io.discarding);
+    const began = peer.io.frame_since.?;
+    setup.shared.pair.now.mono_ms = began + 199;
+    try setup.pumpOnce();
+    try std.testing.expect(peer.in_stream != null);
+    setup.shared.pair.advance(1);
+    try setup.pumpOnce();
+    try std.testing.expect(peer.in_stream == null);
+    try std.testing.expectEqual(@as(u64, 1), g.counters.local_pressure_discards);
+    try std.testing.expectEqual(@as(u64, 1), g.counters.local_pressure_resets);
+    try std.testing.expectEqual(@as(u64, 0), g.counters.large_stalled);
+    try std.testing.expectEqual(before, g.peers.score(peer.logical, setup.shared.pair.now.mono_ms));
+    try std.testing.expectEqual(@as(u64, 0), g.peers.rows[peer.logical.index].large_frame_denied_until);
 }

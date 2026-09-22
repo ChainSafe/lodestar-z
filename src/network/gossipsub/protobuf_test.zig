@@ -184,14 +184,14 @@ test "protobuf rejects a field carrying an unexpected wire type" {
     try std.testing.expectError(error.BadWireType, reader.next());
 }
 
-test "gossip protobuf rejects unknown field floods on their first field" {
+test "gossip protobuf extension skipping remains budgeted before dispatch" {
     var bytes: [8192]u8 = undefined;
     for (0..4096) |i| @memcpy(bytes[i * 2 ..][0..2], &[_]u8{ 0x38, 0 });
     var rpc = RpcReader.init(&bytes);
     var fields: usize = 1;
-    try std.testing.expectError(error.UnsupportedField, rpc.step(&fields));
-    try std.testing.expectError(error.UnsupportedField, Message.decode(&bytes));
+    try std.testing.expectEqual(RpcReader.Step.deferred, try rpc.step(&fields));
     try std.testing.expectEqual(@as(usize, 0), rpc.top.cursor.pos);
+    try std.testing.expect((try rpc.next()) == null);
 }
 
 test "gossip protobuf prevalidation preserves a deferred dispatch cursor" {

@@ -101,7 +101,7 @@ test "router selects typed outbound protocol independently of offer indexes" {
     var accepted = false;
     for (0..16) |_| {
         var out: [16]routing.Outcome = undefined;
-        const count = client.pump(&pair.client, pair.now, &out);
+        const count = pumpRouter(&client, &pair.client, pair.now, &out);
         for (out[0..count]) |outcome| {
             try std.testing.expectEqual(stream, outcome.stream);
             try std.testing.expectEqual(@import("types.zig").Direction.outbound, outcome.direction);
@@ -112,7 +112,7 @@ test "router selects typed outbound protocol independently of offer indexes" {
         try pair.pump();
         var events: [16]engine.Event = undefined;
         server.transportEvents(&pair.server, pair.events(&pair.server, &events), pair.now);
-        _ = server.pump(&pair.server, pair.now, &out);
+        _ = pumpRouter(&server, &pair.server, pair.now, &out);
         try pair.pump();
     }
     try std.testing.expect(accepted);
@@ -141,7 +141,7 @@ test "router rejects unknown protocol and preserves one-byte fragmented handoff"
         var events: [16]engine.Event = undefined;
         router.transportEvents(&pair.server, pair.events(&pair.server, &events), pair.now);
         var out: [16]routing.Outcome = undefined;
-        const count = router.pump(&pair.server, pair.now, &out);
+        const count = pumpRouter(&router, &pair.server, pair.now, &out);
         for (out[0..count]) |outcome| {
             try std.testing.expectEqual(rr.Protocol.ping_v1, outcome.result.ready.protocol.reqresp);
             accepted = true;
@@ -174,10 +174,10 @@ test "router wakeups separate negotiation work from outcome capacity" {
     defer router.deinit();
     const stream = try router.beginOutbound(&pair.client, handles.client, .{ .reqresp = .ping_v1 }, pair.now);
     try std.testing.expectEqual(@as(?u64, pair.now.mono_ms), router.nextWakeup(pair.now, 0));
-    _ = router.pump(&pair.client, pair.now, &.{});
+    _ = pumpRouter(&router, &pair.client, pair.now, &.{});
     try std.testing.expectEqual(@as(?u64, pair.now.mono_ms + 10_000), router.nextWakeup(pair.now, 0));
     pair.advance(10_000);
-    _ = router.pump(&pair.client, pair.now, &.{});
+    _ = pumpRouter(&router, &pair.client, pair.now, &.{});
     try std.testing.expectEqual(@as(?u64, null), router.nextWakeup(pair.now, 0));
     try std.testing.expectEqual(@as(?u64, pair.now.mono_ms), router.nextWakeup(pair.now, 1));
     try std.testing.expect(!pair.client.registry.slots[stream.conn.index].table.matches(stream.slot, stream.id));
@@ -197,11 +197,11 @@ test "router accepted selection survives capability changes behind outcome press
     defer server.deinit();
     _ = try client.beginOutbound(&pair.client, handles.client, .{ .reqresp = .ping_v1 }, pair.now);
     for (0..16) |_| {
-        _ = client.pump(&pair.client, pair.now, &.{});
+        _ = pumpRouter(&client, &pair.client, pair.now, &.{});
         try pair.pump();
         var events: [16]engine.Event = undefined;
         server.transportEvents(&pair.server, pair.events(&pair.server, &events), pair.now);
-        _ = server.pump(&pair.server, pair.now, &.{});
+        _ = pumpRouter(&server, &pair.server, pair.now, &.{});
         try pair.pump();
     }
     client.setCapabilities(.{ .receive = .initEmpty(), .request = .initEmpty() });
@@ -211,11 +211,11 @@ test "router accepted selection survives capability changes behind outcome press
     try std.testing.expectEqual(@as(?u64, null), server.nextWakeup(pair.now, 0));
     try std.testing.expectEqual(@as(?u64, pair.now.mono_ms), server.nextWakeup(pair.now, 1));
     var out: [1]routing.Outcome = undefined;
-    try std.testing.expectEqual(@as(usize, 1), client.pump(&pair.client, pair.now, &out));
+    try std.testing.expectEqual(@as(usize, 1), pumpRouter(&client, &pair.client, pair.now, &out));
     try std.testing.expect(out[0].result == .ready);
     try std.testing.expectEqual(rr.Protocol.ping_v1, out[0].result.ready.protocol.reqresp);
     client.cancel(&pair.client, out[0].stream);
-    try std.testing.expectEqual(@as(usize, 1), server.pump(&pair.server, pair.now, &out));
+    try std.testing.expectEqual(@as(usize, 1), pumpRouter(&server, &pair.server, pair.now, &out));
     try std.testing.expect(out[0].result == .ready);
     try std.testing.expectEqual(rr.Protocol.ping_v1, out[0].result.ready.protocol.reqresp);
     server.cancel(&pair.server, out[0].stream);
@@ -411,8 +411,8 @@ test "router capabilities changes apply before inbound protocol selection" {
         try pair.pump();
         var events: [16]engine.Event = undefined;
         server.transportEvents(&pair.server, pair.events(&pair.server, &events), pair.now);
-        _ = server.pump(&pair.server, pair.now, &.{});
-        _ = server.pump(&pair.server, pair.now, &.{});
+        _ = pumpRouter(&server, &pair.server, pair.now, &.{});
+        _ = pumpRouter(&server, &pair.server, pair.now, &.{});
         try pair.pump();
         const greeting = try pair.client.read(stream, &bytes);
         const reply_header = (try multistream.decodeMessage(bytes[0..greeting.len])).?;
@@ -426,13 +426,13 @@ test "router capabilities changes apply before inbound protocol selection" {
         try std.testing.expectEqual(proposal.len, try pair.client.write(stream, proposal, false));
         try pair.pump();
         var out: [1]routing.Outcome = undefined;
-        const count = server.pump(&pair.server, pair.now, &out);
+        const count = pumpRouter(&server, &pair.server, pair.now, &out);
         try std.testing.expectEqual(@as(usize, if (enable) 1 else 0), count);
         if (enable) {
             try std.testing.expect(out[0].result == .ready);
             try std.testing.expectEqual(rr.Protocol.ping_v1, out[0].result.ready.protocol.reqresp);
         }
-        _ = server.pump(&pair.server, pair.now, &.{});
+        _ = pumpRouter(&server, &pair.server, pair.now, &.{});
         try pair.pump();
         const response = try pair.client.read(stream, &bytes);
         const reply = (try multistream.decodeMessage(bytes[0..response.len])).?;
@@ -461,8 +461,8 @@ test "router capabilities enable a fallback after rejecting an earlier proposal"
     var events: [16]engine.Event = undefined;
     server.transportEvents(&pair.server, pair.events(&pair.server, &events), pair.now);
     var out: [1]routing.Outcome = undefined;
-    try std.testing.expectEqual(0, server.pump(&pair.server, pair.now, &out));
-    try std.testing.expectEqual(0, server.pump(&pair.server, pair.now, &out));
+    try std.testing.expectEqual(0, pumpRouter(&server, &pair.server, pair.now, &out));
+    try std.testing.expectEqual(0, pumpRouter(&server, &pair.server, pair.now, &out));
     try pair.pump();
     const rejected = try pair.client.read(stream, &bytes);
     const header = (try multistream.decodeMessage(bytes[0..rejected.len])).?;
@@ -478,7 +478,7 @@ test "router capabilities enable a fallback after rejecting an earlier proposal"
     bytes[fallback.len] = 42;
     try std.testing.expectEqual(fallback.len + 1, try pair.client.write(stream, bytes[0 .. fallback.len + 1], true));
     try pair.pump();
-    try std.testing.expectEqual(1, server.pump(&pair.server, pair.now, &out));
+    try std.testing.expectEqual(1, pumpRouter(&server, &pair.server, pair.now, &out));
     try std.testing.expect(out[0].result == .ready);
     try std.testing.expectEqual(@import("gossipsub/protocol.zig").Version.v1_1, out[0].result.ready.protocol.meshsub);
     try std.testing.expectEqualSlices(u8, &.{42}, out[0].result.ready.leftover);
@@ -515,7 +515,7 @@ test "router accepted selection survives capability changes while ACK is flow co
     const inbound = try support.expectStreamOpened(events[0], handles.server);
     server.transportEvents(&pair.server, events, pair.now);
     var out: [1]routing.Outcome = undefined;
-    try std.testing.expectEqual(0, server.pump(&pair.server, pair.now, &out));
+    try std.testing.expectEqual(0, pumpRouter(&server, &pair.server, pair.now, &out));
     try std.testing.expect(server.negotiator.entries[0].selected != null);
     try std.testing.expectEqual(0, try pair.server.streamCapacity(inbound));
     server.setCapabilities(.{ .receive = .initEmpty(), .request = .initEmpty() });
@@ -527,7 +527,7 @@ test "router accepted selection survives capability changes while ACK is flow co
         try pair.pump();
         const read = try pair.client.read(stream, ack[ack_len..]);
         ack_len += read.len;
-        const count = server.pump(&pair.server, pair.now, &out);
+        const count = pumpRouter(&server, &pair.server, pair.now, &out);
         if (count == 1) {
             try std.testing.expect(!ready);
             try std.testing.expect(out[0].result == .ready);
@@ -605,4 +605,10 @@ test "router capabilities activation preserves negotiated response context and c
     try std.testing.expect(activated and done and served);
     try std.testing.expectEqual(2, chunks);
     try std.testing.expectError(error.ProtocolDisabled, setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .blocks_by_root_v2, &bytes, sink, .{}, setup.shared.pair.now));
+}
+
+fn pumpRouter(router: *@import("router.zig").Router, transport: *engine.Engine, now: @import("types.zig").Now, outcomes: []@import("router.zig").Outcome) usize {
+    var activity: [128]engine.Handle = undefined;
+    for (activity[0..transport.takeActivity(&activity)]) |conn| router.connectionActivity(conn);
+    return router.pump(transport, now, outcomes);
 }

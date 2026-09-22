@@ -109,6 +109,8 @@ test "identify inbound timeout closes only withheld writer and shutdown releases
     var refused = false;
     for (0..32) |_| {
         var outcomes: [8]@import("../router.zig").Outcome = undefined;
+        var activity: [128]engine_mod.Handle = undefined;
+        for (activity[0..pair.client.takeActivity(&activity)]) |conn| client.router.connectionActivity(conn);
         _ = client.router.pump(&pair.client, pair.now, &outcomes);
         try pair.pump();
         _ = step(&pair, &server, true, &.{});

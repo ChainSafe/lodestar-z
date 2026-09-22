@@ -63,3 +63,36 @@ test "gossip active RPC completion discard and reset clear frame borrows and lim
         try std.testing.expectEqual(unread, io.unread_end);
     }
 }
+
+test "gossip local discard releases pages preserves the next frame and keeps the original deadline" {
+    const receive = @import("receive_pool.zig");
+    var sessions = try @import("test_support.zig").sessions(std.testing.allocator, 1);
+    defer sessions.deinit(std.testing.allocator);
+    const io = &sessions.rows[0].io;
+    const options: @import("options.zig").Options = .{ .large_frame_timeout_ms = 200, .pressure_timeout_ms = 300 };
+    _ = sessions.receive_pool.writable(&io.overflow).?;
+    io.overflow.len = receive.page_bytes;
+    io.reader.declared = io.body.len + receive.page_bytes + 5;
+    io.reader.filled = io.body.len + receive.page_bytes;
+    io.frame_since = 100;
+    io.progress_ms = 110;
+    var body: [64]u8 = undefined;
+    var writer = protobuf.Writer.init(&body);
+    protobuf.writeSubscription(&writer, true, "next");
+    @memset(io.unread[0..5], 0xff);
+    const following = frame.writeFrame(io.unread[5..], writer.written());
+    io.unread_end = 5 + following.len;
+    sessions.discardFrame(io);
+    try std.testing.expectEqual(sessions.receive_pool.next.len, sessions.receive_pool.free_pages);
+    try std.testing.expectEqual(@as(?u64, 300), io.deadlines(&options).next());
+    try std.testing.expect(!(try io.feedUnread(&sessions.receive_pool, 3, 120)).complete);
+    try std.testing.expectEqual(@as(usize, 3), io.unread_start);
+    try std.testing.expect((try io.feedUnread(&sessions.receive_pool, io.unread_end - io.unread_start, 125)).complete);
+    try std.testing.expect(io.rpc == null and io.discarding);
+    try std.testing.expectEqual(@as(usize, 5), io.unread_start);
+    try std.testing.expectEqual(@as(?u64, 300), io.deadlines(&options).next());
+    _ = sessions.finishFrame(io);
+    try std.testing.expect((try io.feedUnread(&sessions.receive_pool, following.len, 126)).complete);
+    try std.testing.expectEqualStrings("next", (try io.rpc.?.reader.next()).?.subscription.topic);
+    _ = sessions.finishFrame(io);
+}

@@ -3,6 +3,7 @@ const n = @import("../root.zig");
 const native = n.gossipsub;
 const Budget = @import("../byte_budget.zig").Budget;
 const storage = @import("../gossipsub/message_store.zig");
+pub const Plan = @import("plan.zig").Plan;
 pub const Source = @import("../gossipsub/peer_book.zig").Ref;
 pub const limits_mod = @import("../gossip_limits.zig");
 const lists = @import("../index_list.zig");
@@ -143,6 +144,8 @@ pub const GossipProcessor = struct {
     waiting_items: [limits_mod.kind_count]usize = @splat(0),
     executing_items: [limits_mod.kind_count]usize = @splat(0),
     executing_bytes: [limits_mod.kind_count]usize = @splat(0),
+    forks: [@import("../chain.zig").boundary_max]n.reqresp.ForkEntry = undefined,
+    fork_count: usize = 0,
     source_maximum: [limits_mod.kind_count]usize = @splat(payload_max),
     sources: [@import("../gossipsub/peer_book.zig").capacity]struct {
         generation: u64 = 0,
@@ -150,10 +153,18 @@ pub const GossipProcessor = struct {
         bytes: [limits_mod.kind_count]usize = @splat(0),
     } = @splat(.{}),
 
-    pub fn init(backing: std.mem.Allocator, capacity: usize, budget: *Budget) !GossipProcessor {
-        return initPlanned(backing, capacity, 64 * 1024 * 1024, budget, null);
+    pub const admit = @import("admission.zig").admit;
+
+    pub fn fork(self: *const GossipProcessor, digest: [4]u8) ?@import("config").ForkSeq {
+        for (self.forks[0..self.fork_count]) |entry| if (std.mem.eql(u8, &entry.digest, &digest)) return entry.fork;
+        return null;
     }
-    pub fn initPlanned(backing: std.mem.Allocator, capacity: usize, bytes: usize, budget: *Budget, limits: ?limits_mod.Limits) !GossipProcessor {
+
+    pub fn init(backing: std.mem.Allocator, plan: Plan, budget: *Budget) !GossipProcessor {
+        const capacity = plan.capacity;
+        const bytes = plan.bytes;
+        const limits = plan.limits;
+        if (plan.forks.len > @import("../chain.zig").boundary_max) return error.InvalidGossipProcessorLimits;
         if (capacity == 0 or capacity > limits_mod.capacity_max) return error.InvalidGossipProcessorLimits;
         if (limits) |value| {
             try limits_mod.validate(&value);
@@ -167,9 +178,13 @@ pub const GossipProcessor = struct {
         var dependencies = try Dependencies.init(backing, capacity);
         errdefer dependencies.deinit(backing);
         const store = try storage.Store.init(backing, capacity, bytes);
-        var self: GossipProcessor = .{ .cells = cells, .backing = backing, .budget = budget, .store = store, .groups = groups, .dependencies = dependencies, .limits = limits, .execution = limits, .diag = .{ .capacity = capacity, .fixedPayloadBytes = store.bytes.len + capacity * storage.inline_bytes } };
-        if (self.execution) |*execution| for (execution) |*limit| {
-            limit.items = @max(1, limit.items / 2);
+        var self: GossipProcessor = .{ .cells = cells, .backing = backing, .budget = budget, .store = store, .groups = groups, .dependencies = dependencies, .limits = limits, .execution = plan.execution, .source_maximum = plan.source_maximum, .fork_count = plan.forks.len, .diag = .{ .capacity = capacity, .fixedPayloadBytes = store.bytes.len + capacity * storage.inline_bytes } };
+        @memcpy(self.forks[0..plan.forks.len], plan.forks);
+        self.groups.index.seed = plan.random_seed ^ 3;
+        self.dependencies.index.seed = plan.random_seed ^ 4;
+        if (self.execution == null) if (limits) |value| {
+            self.execution = value;
+            for (&self.execution.?) |*limit| limit.items = @max(1, limit.items / 2);
         };
         var k: usize = 0;
         var end: usize = if (limits) |value| value[0].items else capacity;

@@ -20,8 +20,10 @@ fn negotiate(pair: *Pair, method: protocol.Protocol, bytes: []const u8, sink: []
             else => {},
         };
         var outcomes: [8]router.Outcome = undefined;
+        pair.forwardActivity();
         const clients = pair.shared.client.router.pump(&pair.shared.pair.client, pair.shared.pair.now, &outcomes);
         for (outcomes[0..clients]) |outcome| try std.testing.expect(pair.shared.client.reqresp.negotiated(outcome, pair.shared.pair.now));
+        pair.forwardActivity();
         const servers = pair.shared.server.router.pump(&pair.shared.pair.server, pair.shared.pair.now, &outcomes);
         for (outcomes[0..servers]) |outcome| switch (outcome.result) {
             .ready => remote = outcome.stream,
