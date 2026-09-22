@@ -10,7 +10,7 @@ test "ProgressiveBitListType - sanity" {
     var b: Bits.Type = try Bits.Type.fromBitLen(allocator, 30);
     defer b.deinit(allocator);
 
-    try b.setAssumeCapacity(2, true);
+    b.setAssumeCapacity(2, true);
 
     const b_buf = try allocator.alloc(u8, Bits.serializedSize(&b));
     defer allocator.free(b_buf);
@@ -28,7 +28,7 @@ test "ProgressiveBitListType - shrinking clears truncated bits" {
     var bits = try Bits.Type.fromBitLen(allocator, 8);
     defer bits.deinit(allocator);
 
-    try bits.setAssumeCapacity(7, true);
+    bits.setAssumeCapacity(7, true);
     try bits.resize(allocator, 1);
 
     var serialized: [1]u8 = undefined;

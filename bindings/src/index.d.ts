@@ -146,6 +146,15 @@ interface ProposerRewards {
   slashing: number;
 }
 
+interface BlockRewards {
+  proposerIndex: number;
+  total: number;
+  attestations: number;
+  syncAggregate: number;
+  proposerSlashings: number;
+  attesterSlashings: number;
+}
+
 interface SyncCommitteeCache {
   validatorIndices: Uint32Array;
   validatorIndexMap: Map<number, number[]>;
@@ -310,9 +319,11 @@ export declare class BeaconStateView {
   isExecutionEnabled(block: BeaconBlockLike): boolean;
 
   proposerRewards: ProposerRewards;
-  // biome-ignore lint/suspicious/noExplicitAny: stub
-  // TODO(bing): This is stubbed and untyped until we implement the beacon node rewards endpoints
-  computeBlockRewards(block: any, proposerRewards?: any): Promise<any>;
+  computeBlockRewards(
+    signedBlockBytes: Uint8Array,
+    isBlinded: boolean,
+    proposerRewards?: ProposerRewards
+  ): BlockRewards;
   // biome-ignore lint/suspicious/noExplicitAny: stub
   // TODO(bing): This is stubbed and untyped until we implement the beacon node rewards endpoints
   computeAttestationsRewards(validatorIds?: (number | string)[]): Promise<any>;

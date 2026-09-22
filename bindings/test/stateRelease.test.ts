@@ -77,6 +77,39 @@ it.each([
     `,
   ],
   [
+    "block rewards getter",
+    `
+    const block = ssz.fulu.SignedBeaconBlock.defaultValue();
+    block.message.slot = state.slot;
+    const rewards = state.computeBlockRewards(ssz.fulu.SignedBeaconBlock.serialize(block), false, {
+      get attestations() { state.release(); return 1; },
+      syncAggregate: 2,
+      slashing: 0
+    });
+    assert.equal(rewards.attestations, 1);
+    assert.equal(rewards.syncAggregate, 2);
+    assert.equal(rewards.total, 3);
+    `,
+  ],
+  [
+    "block rewards output setter",
+    `
+    const block = ssz.fulu.SignedBeaconBlock.defaultValue();
+    block.message.slot = state.slot;
+    Object.defineProperty(Object.prototype, "total", {
+      configurable: true,
+      set(total) {
+        state.release();
+        Object.defineProperty(this, "total", {value: total, enumerable: true});
+      }
+    });
+    let rewards;
+    try { rewards = state.computeBlockRewards(ssz.fulu.SignedBeaconBlock.serialize(block), false); }
+    finally { Reflect.deleteProperty(Object.prototype, "total"); }
+    assert.equal(rewards.total, 0);
+    `,
+  ],
+  [
     "Map construction and set callbacks",
     `
     const NativeMap = Map;

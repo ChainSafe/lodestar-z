@@ -43,7 +43,7 @@
     "prepare-minimal": "zig build build-lib:bindings -Doptimize=ReleaseSafe -Dpreset=minimal",
     "lint": "biome check",
     "test": "NODE_OPTIONS='--expose-gc' vitest run bindings/test/*.test.ts",
-    "benchmark": "NODE_OPTIONS='--import tsx' benchmark 'bindings/perf/**/*.test.ts' --config .benchrc.yaml --defaultBranch main"
+    "benchmark": "NODE_OPTIONS='--import tsx' benchmark 'bindings/perf/**/*.test.ts' --isolate --config .benchrc.yaml --defaultBranch main"
   },
   "keywords": [],
   "author": "ChainSafe Systems",
@@ -70,7 +70,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.11",
-    "@chainsafe/benchmark": "^2.0.1",
+    "@chainsafe/benchmark": "2.1.0",
     "@chainsafe/biomejs-config": "^1.0.0",
     "@lodestar/config": "^1.39.1",
     "@lodestar/era": "^1.39.1",

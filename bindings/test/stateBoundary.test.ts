@@ -24,7 +24,7 @@ describe("native state transition boundaries", () => {
     ["negative block-root slot", "state.getBlockRootAtSlot(-1)", "InvalidSlot"],
     ["negative validator index", "state.getValidator(-1)", "InvalidUnsignedInteger"],
     ["fractional committee epoch", "state.getBeaconCommitteeCountPerSlot(0.5)", "InvalidUnsignedInteger"],
-    ["zero proof index", "state.getSingleProof(0)", "Failed to get single proof"],
+    ["zero proof index", "state.getSingleProof(0n)", "Failed to get single proof"],
     ["truncated loaded state", "state.loadOtherState(new Uint8Array(47))", "InvalidStateBytes"],
     [
       "Gloas loaded state",

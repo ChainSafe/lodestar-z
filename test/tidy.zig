@@ -26,9 +26,9 @@ const max_tracked_files = 4096;
 const max_file_bytes: std.Io.Limit = .limited(8 << 20);
 const max_git_output_bytes = 4 << 20;
 
-/// A module holds at most this many `test` blocks. One inline test is a usage
+/// A file holds at most this many `test` blocks. One inline test is a usage
 /// example; a second makes it a suite, and suites live in a sibling
-/// `<module>_test.zig`. The wiring block counts, so a module is either inline
+/// `<file>_test.zig`. The wiring block counts, so a file is either inline
 /// (one test) or extracted (only the wiring block), never both. Documented in
 /// AGENTS.md.
 const max_test_blocks = 1;
@@ -119,7 +119,7 @@ const Errors = struct {
 
     fn addUnpairedTestFile(errors: *Errors, path: []const u8, expected: []const u8) void {
         errors.emit(
-            "{s}: error: no sibling module to pair with, expected {s}\n",
+            "{s}: error: no sibling file to pair with, expected {s}\n",
             .{ path, expected },
         );
     }
@@ -152,7 +152,7 @@ const Errors = struct {
 
     fn addTooManyTestBlocks(errors: *Errors, path: []const u8, line: usize, count: usize) void {
         errors.emit(
-            "{s}:{d}: error: {d} test blocks, a module holds at most {d}; " ++
+            "{s}:{d}: error: {d} test blocks, a file holds at most {d}; " ++
                 "move the tests to a sibling _test.zig\n",
             .{ path, line, count, max_test_blocks },
         );
@@ -371,10 +371,10 @@ fn findFile(files: []const File, path: []const u8) ?*const File {
     return null;
 }
 
-/// The sibling module a `<stem>_test.zig` pairs with. Accepts the snake_case
+/// The sibling file a `<stem>_test.zig` pairs with. Accepts the snake_case
 /// name and the TitleCase name, since a file that is itself a type keeps its
 /// TitleCase name: `Node.zig` pairs with `node_test.zig`.
-fn pairedModule(
+fn pairedFile(
     gpa: Allocator,
     dir: []const u8,
     stem: []const u8,
@@ -404,8 +404,8 @@ fn pairedModule(
 // Rules
 // -------------------------------------------------------------------------
 
-/// Every `_test.zig` must be imported, must pair with a module of the same
-/// name, and must be wired from that module rather than from a package root.
+/// Every `_test.zig` must be imported, must pair with a file of the same
+/// name, and must be wired from that file rather than from a module root.
 fn tidyTestFileWiring(gpa: Allocator, files: []const File, errors: *Errors) !void {
     for (files) |file| {
         if (!isTestFile(file.basename)) continue;
@@ -424,8 +424,8 @@ fn tidyTestFileWiring(gpa: Allocator, files: []const File, errors: *Errors) !voi
         }
 
         const stem = file.basename[0 .. file.basename.len - "_test.zig".len];
-        const snake = try pairedModule(gpa, file.dir, stem, .snake);
-        const title = try pairedModule(gpa, file.dir, stem, .title);
+        const snake = try pairedFile(gpa, file.dir, stem, .snake);
+        const title = try pairedFile(gpa, file.dir, stem, .title);
 
         const pair = findFile(files, snake) orelse findFile(files, title) orelse {
             errors.addUnpairedTestFile(file.path, snake);
@@ -534,7 +534,7 @@ fn tidyDeadFiles(
     }
 }
 
-/// No module holds more than `max_test_blocks` test blocks.
+/// No file holds more than `max_test_blocks` test blocks.
 fn tidyInlineTests(files: []const File, scope: []const []const u8, errors: *Errors) void {
     for (files) |file| {
         if (!inScope(scope, file.path)) continue;
@@ -862,7 +862,7 @@ test "rule: unpaired test file" {
     try tidyTestFileWiring(fixture.arena(), files, errors);
 
     try expectDiagnostics(fixture.output(),
-        \\src/ghost_test.zig: error: no sibling module to pair with, expected src/ghost.zig
+        \\src/ghost_test.zig: error: no sibling file to pair with, expected src/ghost.zig
         \\
     );
 }
@@ -885,7 +885,7 @@ test "rule: test file wired from a package root instead of its module" {
     );
 }
 
-test "rule: TitleCase module pairs with a snake_case test file" {
+test "rule: TitleCase file pairs with a snake_case test file" {
     var fixture: Fixture = .init();
     defer fixture.deinit();
     const errors = fixture.start();
@@ -950,8 +950,8 @@ test "rule: a second test block means the tests belong in a _test.zig" {
     tidyInlineTests(files, &.{"src/"}, errors);
 
     try expectDiagnostics(fixture.output(),
-        \\src/suite.zig:2: error: 2 test blocks, a module holds at most 1; move the tests to a sibling _test.zig
-        \\src/mixed.zig:1: error: 2 test blocks, a module holds at most 1; move the tests to a sibling _test.zig
+        \\src/suite.zig:2: error: 2 test blocks, a file holds at most 1; move the tests to a sibling _test.zig
+        \\src/mixed.zig:1: error: 2 test blocks, a file holds at most 1; move the tests to a sibling _test.zig
         \\
     );
 }
