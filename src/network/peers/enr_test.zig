@@ -143,12 +143,13 @@ test "peer ENR canonical fingerprint rejects equal sequence changes outside dial
     const key = try signingKey();
     const original = try adapter.build(&key, 8, &advertisement(), &context);
     const candidate = try adapter.decode(&original, &context);
-    const Queue = @import("dial_queue.zig").DialQueue;
-    var queue = try Queue.init(std.testing.allocator, .{ .capacity = 1, .concurrent_max = 1, .seed = 1 });
-    defer queue.deinit(std.testing.allocator);
-    try queue.enqueueDiscovered(&candidate, &context, &.{}, 0);
-    @memset(queue.rows[0].addresses[queue.rows[0].address_count..], .unspecified);
-    const before = queue.rows[0];
+    const Queue = @import("dialing.zig").Dialing;
+    var queue = try Queue.init(.{ .capacity = 1, .concurrent_max = 1, .seed = 1 });
+    var catalog = try @import("catalog.zig").Catalog.initWithIntents(std.testing.allocator, .{}, 1, 1024, 1);
+    defer catalog.deinit(std.testing.allocator);
+    try queue.enqueueDiscovered(&catalog, &candidate, &context, &.{}, 0);
+    @memset(catalog.rows[0].intent.addresses[catalog.rows[0].intent.address_count..], .unspecified);
+    const before = catalog.rows[0];
     for ([_]struct { name: []const u8, value: d.identity.enr.Field.Value }{
         .{ .name = "udp", .value = .{ .uint = 9002 } },
         .{ .name = "x-test", .value = .{ .bytes = "extra signed content" } },
@@ -158,11 +159,11 @@ test "peer ENR canonical fingerprint rejects equal sequence changes outside dial
         try std.testing.expectEqual(candidate.sequence, conflicting.sequence);
         try std.testing.expectEqualDeep(candidate.addresses, conflicting.addresses);
         try std.testing.expect(!std.mem.eql(u8, &candidate.record_hash, &conflicting.record_hash));
-        try std.testing.expectError(error.StaleRecord, queue.enqueueDiscovered(&conflicting, &context, &.{}, 100));
-        try std.testing.expectEqualDeep(before, queue.rows[0]);
+        try std.testing.expectError(error.StaleRecord, queue.enqueueDiscovered(&catalog, &conflicting, &context, &.{}, 100));
+        try std.testing.expectEqualDeep(before, catalog.rows[0]);
     }
-    try queue.enqueueDiscovered(&candidate, &context, &.{}, 200);
-    try std.testing.expectEqual(@as(u64, 200), queue.rows[0].hints_at_ms);
+    try queue.enqueueDiscovered(&catalog, &candidate, &context, &.{}, 200);
+    try std.testing.expectEqual(@as(u64, 200), catalog.rows[0].intent.hints_at_ms);
 }
 
 test "peer ENR strict known optional field shapes integer bounds and missing mandatory field" {

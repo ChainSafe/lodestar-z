@@ -3,7 +3,7 @@ const service_mod = @import("service.zig");
 const t = @import("peers/types.zig");
 const peers = @import("peers/root.zig");
 const control_mod = @import("peers/control.zig");
-const dial_mod = @import("peers/dial_queue.zig");
+const dial_mod = @import("peers/dialing.zig");
 const custody = peers.custody;
 const engine_mod = @import("quic/engine.zig");
 const rr = @import("reqresp/root.zig");
@@ -69,7 +69,7 @@ pub fn process(
         .application = 0,
         .gossipsub = 0,
     };
-    if (!self.quiescing) self.dial_queue.expire(engine, now.mono_ms);
+    if (!self.quiescing) self.dialing.expire(&self.catalog, engine, now.mono_ms);
     for (events) |event| self.transportEvent(service, engine, event, now);
     var controls: [controls_per_turn]rr.Event = undefined;
     var identify_results: [identify_per_turn]@import("identify/root.zig").Result = undefined;
@@ -92,12 +92,9 @@ pub fn process(
     );
     self.control.maintain(service, &self.catalog, engine, &self.local, now);
     if (self.quiescing) return .{ .peers = self.catalog.pollEvents(peer_events), .application = counts.application, .gossipsub = counts.gossipsub };
-    var connected_budget: u16 = custody.hashes_per_turn / 2;
-    var candidate_budget: u16 = custody.hashes_per_turn / 2;
-    const connected_pending = self.catalog.advanceCustody(&self.local.fork, now.mono_ms, self.metadata_freshness_ms, &connected_budget);
-    const candidate_pending = self.dial_queue.advanceCustody(&self.local.fork, now.mono_ms, &candidate_budget);
-    self.custody_pending = connected_pending or candidate_pending;
-    self.counters.custody_hashes +|= custody.hashes_per_turn - connected_budget - candidate_budget;
+    var budget: u16 = custody.hashes_per_turn;
+    self.custody_pending = self.catalog.advanceCustody(&self.local.fork, now.mono_ms, self.metadata_freshness_ms, &budget);
+    self.counters.custody_hashes +|= custody.hashes_per_turn - budget;
     self.reconcile(service, now);
     self.updateNativeRoom(engine);
     return .{
@@ -127,11 +124,11 @@ pub fn nextWakeup(
     var due = service.nextWakeup(now, .{ .application = application_capacity, .control = controls_per_turn, .gossipsub = gossip_capacity, .identify = identify_per_turn });
     for ([_]?u64{
         self.control.nextWakeup(&self.catalog, now),
-        self.dial_queue.nextWakeup(now.mono_ms, @min(dial_capacity, self.dialRoom())),
+        self.dialing.nextWakeup(&self.catalog, now.mono_ms, @min(dial_capacity, self.dialRoom())),
         self.policyWakeup(service, now),
-        if (self.dial_queue.selection_dirty) now.mono_ms else null,
+        if (self.dialing.selectionNeeded(&self.catalog)) now.mono_ms else null,
         self.reconciliation_deadline,
-        self.dial_queue.selection_deadline,
+        self.dialing.selection_deadline,
         if (self.custody_pending) now.mono_ms +| 1 else null,
         self.peerWakeup(now, peer_capacity),
     }) |next| {
@@ -194,7 +191,7 @@ pub fn shutdown(self: *PeerManager, service: *service_mod.Service, engine: *engi
             now,
         );
     };
-    self.dial_queue.shutdown(engine);
+    self.dialing.shutdown(&self.catalog, engine);
 }
 
 test {

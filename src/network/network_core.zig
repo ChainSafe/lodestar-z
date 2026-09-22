@@ -314,16 +314,16 @@ pub const NetworkCore = struct {
     }
     pub fn isConnected(self: *const NetworkCore, identity: *const t.PeerId) bool {
         const peer = self.peer_manager.catalog.find(identity) orelse return false;
-        return self.peer_manager.catalog.get(peer).?.connection != null;
+        return self.peer_manager.catalog.rowFor(peer).?.connection != null;
     }
     pub fn closePeer(self: *NetworkCore, identity: *const t.PeerId, now: Now) bool {
         const peer = self.peer_manager.catalog.find(identity) orelse return false;
-        const connection = self.peer_manager.catalog.get(peer).?.connection orelse return false;
+        const connection = self.peer_manager.catalog.rowFor(peer).?.connection orelse return false;
         return self.peer_manager.closePeer(&self.service, &self.transport.engine, peer, connection, now);
     }
     pub fn reStatusPeer(self: *NetworkCore, identity: *const t.PeerId, now: Now) bool {
         const peer = self.peer_manager.catalog.find(identity) orelse return false;
-        const connection = self.peer_manager.catalog.get(peer).?.connection orelse return false;
+        const connection = self.peer_manager.catalog.rowFor(peer).?.connection orelse return false;
         return self.peer_manager.reStatusPeer(peer, connection, now);
     }
     pub fn reportPeer(self: *NetworkCore, identity: *const t.PeerId, action: t.PeerAction, now: Now) ?t.ReputationDecision {
@@ -336,7 +336,8 @@ pub const NetworkCore = struct {
     }
     pub fn sendReqRespRequest(self: *NetworkCore, identity: *const t.PeerId, protocol: rr.Protocol, request: []const u8, sink: []u8, options: rr.RequestOptions, now: Now) !rr.RequestHandle {
         const peer = self.peer_manager.catalog.find(identity) orelse return error.StalePeer;
-        const conn = self.peer_manager.catalog.get(peer).?.connection orelse return error.Disconnected;
+        const snapshot = self.peer_manager.catalog.get(peer) orelse return error.StalePeer;
+        const conn = snapshot.connection orelse return error.Disconnected;
         return managed.sendReqRespRequest(&self.peer_manager, &self.service, &self.transport.engine, conn, protocol, request, sink, options, now);
     }
     pub fn consume(self: *NetworkCore, request: rr.RequestHandle) bool {
@@ -369,7 +370,7 @@ pub const NetworkCore = struct {
         return self.native_events[0..self.native_event_count];
     }
     pub fn completeSnapshots(self: *const NetworkCore, out: []t.Snapshot) error{OutputTooSmall}!usize {
-        if (out.len < self.peer_manager.catalog.rows.len) return error.OutputTooSmall;
+        if (out.len < self.peer_manager.catalog.options.capacity) return error.OutputTooSmall;
         return self.peer_manager.snapshots(out);
     }
     pub fn beginGracefulClose(self: *NetworkCore, now: Now) void {

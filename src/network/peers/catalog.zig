@@ -2,9 +2,32 @@ const std = @import("std");
 const t = @import("types.zig");
 const custody = @import("custody.zig");
 const reputation = @import("reputation.zig");
+const lists = @import("../index_list.zig");
+const enr = @import("enr.zig");
 const identity_index = @import("identity_index.zig");
 
+pub const history_retention_ms: u64 = 600_000;
+pub const hint_freshness_ms: u64 = 300_000;
+
+pub const Intent = struct {
+    automatic: bool = false,
+    selected: bool = true,
+    priority: u2 = 0,
+    hints: ?enr.Hints = null,
+    hints_at_ms: u64 = 0,
+    addresses: [2]t.Address = undefined,
+    address_count: u8 = 0,
+    address_index: u8 = 0,
+    manual_until_ms: u64 = 0,
+    eligible_at_ms: u64 = 0,
+    history_until_ms: u64 = 0,
+    failures: u8 = 0,
+};
 pub const Row = struct {
+    free_link: lists.Link = .{},
+    established_slot: ?u16 = null,
+    intent: Intent = .{},
+    attempt: ?u8 = null,
     identify: ?@import("../identify/root.zig").Metadata = null,
     custody_work: ?custody.SamplingDerivation = null,
     custody_context: ?t.ForkContext = null,
@@ -33,14 +56,32 @@ pub const Catalog = struct {
     by_identity: identity_index.Index,
     by_connection: []?u16,
     options: t.Options,
+    intent_capacity: u16,
+    intent_count: u16 = 0,
+    intents: std.DynamicBitSetUnmanaged,
+    intent_masks: []usize,
+    established: []?u16,
+    free: lists.List = .{},
+    connected_count: u16 = 0,
+    relevant_count: u16 = 0,
+    direct_count: u16 = 0,
+    intent_revision: u64 = 0,
+    connection_backoffs: u64 = 0,
+    random: std.Random.DefaultPrng,
+    candidate_custody_cursor: usize = 0,
     revision: u64 = 0,
     event_cursor: usize = 0,
     custody_cursor: usize = 0,
 
     pub fn init(a: std.mem.Allocator, options: t.Options, connections_max: u16, seed: u64) !Catalog {
+        return initWithIntents(a, options, 0, connections_max, seed);
+    }
+
+    pub fn initWithIntents(a: std.mem.Allocator, options: t.Options, intent_capacity: u16, connections_max: u16, seed: u64) !Catalog {
         try options.validate();
+        if (intent_capacity > 4096) return error.InvalidOptions;
         if (connections_max == 0 or connections_max > @import("../quic/limits.zig").connections_max_ceiling) return error.InvalidOptions;
-        const rows = try a.alloc(Row, options.capacity);
+        const rows = try a.alloc(Row, @as(usize, options.capacity) + intent_capacity);
         errdefer a.free(rows);
 
         const slots = try a.alloc(u16, identity_index.capacity(rows.len));
@@ -49,13 +90,24 @@ pub const Catalog = struct {
         const connections = try a.alloc(?u16, connections_max);
         errdefer a.free(connections);
 
+        const established = try a.alloc(?u16, options.capacity);
+        errdefer a.free(established);
+        const intent_masks = try a.alloc(usize, try std.math.divCeil(usize, rows.len, @bitSizeOf(usize)));
+        errdefer a.free(intent_masks);
+
+        @memset(intent_masks, 0);
+        @memset(established, null);
         @memset(rows, .{});
         @memset(slots, identity_index.empty);
         @memset(connections, null);
-        return .{ .rows = rows, .options = options, .by_identity = .{ .slots = slots, .seed = seed }, .by_connection = connections };
+        var result: Catalog = .{ .rows = rows, .options = options, .intent_capacity = intent_capacity, .intents = .{ .bit_length = rows.len, .masks = intent_masks.ptr }, .intent_masks = intent_masks, .established = established, .random = .init(seed), .by_identity = .{ .slots = slots, .seed = seed }, .by_connection = connections };
+        for (0..rows.len) |index| result.free.append(rows, "free_link", @intCast(index));
+        return result;
     }
 
     pub fn deinit(self: *Catalog, a: std.mem.Allocator) void {
+        a.free(self.intent_masks);
+        a.free(self.established);
         a.free(self.by_connection);
         a.free(self.by_identity.slots);
         a.free(self.rows);
@@ -65,13 +117,103 @@ pub const Catalog = struct {
     pub fn memoryPlan(self: *const Catalog) t.MemoryPlan {
         return .{
             .inline_bytes = @sizeOf(Catalog),
-            .allocated_bytes = self.rows.len * @sizeOf(Row) + self.by_identity.slots.len * @sizeOf(u16) + self.by_connection.len * @sizeOf(?u16),
-            .rows = self.options.capacity,
+            .allocated_bytes = self.rows.len * @sizeOf(Row) + self.by_identity.slots.len * @sizeOf(u16) + self.by_connection.len * @sizeOf(?u16) + self.established.len * @sizeOf(?u16) + self.intent_masks.len * @sizeOf(usize),
+            .rows = @intCast(self.rows.len),
             .notification_slots = self.options.capacity,
         };
     }
 
+    pub fn candidateHints(self: *const Catalog, identity: *const t.PeerId, now_ms: u64) ?enr.Hints {
+        const row = self.rowFor(self.find(identity) orelse return null).?;
+        return if (now_ms < row.intent.hints_at_ms +| hint_freshness_ms) row.intent.hints else null;
+    }
+
+    pub fn isDirect(self: *const Catalog, identity: *const t.PeerId) bool {
+        const peer = self.find(identity) orelse return false;
+        return self.rowFor(peer).?.direct;
+    }
+
+    pub fn removeDirect(self: *Catalog, identity: *const t.PeerId) bool {
+        const peer = self.find(identity) orelse return false;
+        if (!self.rowFor(peer).?.direct) return false;
+        return self.setDirect(peer, false);
+    }
+
+    pub fn directPeers(self: *const Catalog, out: []t.PeerId) error{OutputTooSmall}!usize {
+        if (out.len < self.direct_count) return error.OutputTooSmall;
+        var count: usize = 0;
+        var it = self.intents.iterator(.{});
+        while (it.next()) |index| {
+            const row = &self.rows[index];
+            if (!row.direct) continue;
+            out[count] = row.identity;
+            count += 1;
+        }
+        std.debug.assert(count == self.direct_count);
+        return count;
+    }
+
+    pub fn prepareCandidateCustody(row: *Row, context: *const t.ForkContext) void {
+        if (row.connection != null) return;
+        const hints = row.intent.hints orelse return;
+        const count = hints.custody_group_count orelse context.custody_requirement;
+        if (!hints.validFor(context) or count == 0) {
+            row.custody_work = null;
+            return;
+        }
+        if (std.meta.eql(row.custody_context, context.*)) if (row.custody_work) |work| if (work.custody_count == count and work.sampling_count == count) return;
+        row.custody_context = context.*;
+        row.custody_work = custody.SamplingDerivation.init(&row.node_id.?, .{ .groups = context.custody_groups, .columns = @import("preset").NUMBER_OF_COLUMNS }, count, 0) catch null;
+    }
+
+    pub fn candidateCoverage(row: *const Row, context: *const t.ForkContext, now_ms: u64) t.Coverage {
+        const hints = row.intent.hints orelse return .{};
+        if (now_ms >= row.intent.hints_at_ms +| hint_freshness_ms or !hints.validFor(context)) return .{};
+        var result: t.Coverage = .{ .attnets = if (hints.attnets) |bits| std.mem.readInt(u64, &bits, .little) else 0, .syncnets = @intCast(hints.syncnets orelse 0) };
+        const count = hints.custody_group_count orelse context.custody_requirement;
+        if (std.meta.eql(row.custody_context, context.*)) if (row.custody_work) |*work| {
+            if (work.custody_count == count) if (work.complete()) |derived| {
+                result.groups = derived.custody;
+                result.custody_groups = derived.custody;
+            };
+        };
+        return result;
+    }
+
     pub fn advanceCustody(self: *Catalog, context: *const t.ForkContext, now_ms: u64, freshness_ms: u64, budget: *u16) bool {
+        var connected_budget: u16 = @min(budget.*, custody.hashes_per_turn / 2);
+        const reserved = connected_budget;
+        const connected_pending = self.advanceConnectedCustody(context, now_ms, freshness_ms, &connected_budget);
+        budget.* -= reserved - connected_budget;
+        var pending = connected_pending;
+        // Scan both halves of the intent index from a rotating start, including unselected hints.
+        for (0..2) |half| {
+            var it = self.intents.iterator(.{});
+            while (it.next()) |index| {
+                if ((index < self.candidate_custody_cursor) != (half == 1)) continue;
+                const row = &self.rows[index];
+                if (row.connection != null) continue;
+                const before_context = row.custody_context;
+                const had_work = row.custody_work != null;
+                prepareCandidateCustody(row, context);
+                if (!std.meta.eql(before_context, row.custody_context) or had_work != (row.custody_work != null)) self.intent_revision +|= 1;
+                if (now_ms >= row.intent.hints_at_ms +| hint_freshness_ms) continue;
+                const work = if (row.custody_work) |*value| value else continue;
+                const before = work.totalHashes();
+                const result = work.step(@min(custody.hashes_per_row, budget.*)) catch {
+                    budget.* -= work.totalHashes() - before;
+                    continue;
+                };
+                budget.* -= work.totalHashes() - before;
+                if (work.totalHashes() != before and result != null) self.intent_revision +|= 1;
+                pending = pending or result == null;
+            }
+        }
+        self.candidate_custody_cursor = (self.candidate_custody_cursor + 1) % self.rows.len;
+        return pending;
+    }
+
+    fn advanceConnectedCustody(self: *Catalog, context: *const t.ForkContext, now_ms: u64, freshness_ms: u64, budget: *u16) bool {
         var pending = false;
         for (0..self.rows.len) |_| {
             const row = &self.rows[self.custody_cursor];
@@ -123,7 +265,7 @@ pub const Catalog = struct {
         return if (row.occupied and std.meta.eql(row.connection, conn)) .{ .index = index, .generation = row.generation } else null;
     }
 
-    fn rowFor(self: *const Catalog, ref: t.PeerRef) ?*Row {
+    pub fn rowFor(self: *const Catalog, ref: t.PeerRef) ?*Row {
         if (ref.index >= self.rows.len) return null;
         const row = &self.rows[ref.index];
         return if (row.occupied and row.generation == ref.generation) row else null;
@@ -137,7 +279,8 @@ pub const Catalog = struct {
 
     pub fn get(self: *const Catalog, ref: t.PeerRef) ?t.Snapshot {
         const row = self.rowFor(ref) orelse return null;
-        const derived = if (row.custody_work) |*work| work.complete() else null;
+        if (row.established_slot == null) return null;
+        const derived = if (row.connection != null and row.custody_work != null) row.custody_work.?.complete() else null;
         return .{
             .peer = ref,
             .identity = row.identity,
@@ -167,7 +310,7 @@ pub const Catalog = struct {
         var count: usize = 0;
         for (self.rows, 0..) |row, index| {
             if (count == out.len) break;
-            if (!row.occupied) continue;
+            if (row.established_slot == null) continue;
             out[count] = self.get(.{ .index = @intCast(index), .generation = row.generation }).?;
             count += 1;
         }
@@ -202,48 +345,124 @@ pub const Catalog = struct {
                     options.direction != preferred) return .duplicate;
                 displaced = current;
             } else if (self.connectedCount() >= self.options.max_peers) return .capacity;
+            const fresh = row.established_slot == null;
+            if (fresh and !self.promote(ref, options.direction, options.now_ms)) return .capacity;
+            if (row.connection == null) self.connected_count += 1;
+            if (row.status != null) self.relevant_count -= 1;
             row.reputation = current_reputation;
             if (displaced) |old| self.by_connection[old.index] = null;
             connect(row, conn, options);
             self.by_connection[conn.index] = ref.index;
             self.revision +|= 1;
-            return .{ .admitted = .{ .peer = ref, .displaced = displaced, .fresh = false } };
+            return .{ .admitted = .{ .peer = ref, .displaced = displaced, .fresh = fresh } };
         }
         if (self.connectedCount() >= self.options.max_peers) return .capacity;
-        const index = self.reclaimable(options.direction, options.now_ms) orelse return .capacity;
-        const row = &self.rows[index];
-        if (row.occupied) self.by_identity.remove(self.rows, &row.identity);
-        row.* = .{ .occupied = true, .generation = row.generation + 1, .identity = identity.* };
-        self.by_identity.insert(self.rows, @intCast(index));
+        const slot = self.reclaimable(options.direction, options.now_ms) orelse return .capacity;
+        if (self.established[slot]) |victim| self.forget(self.reference(victim));
+        const ref = self.allocate(identity) orelse return .capacity;
+        self.established[slot] = ref.index;
+        const row = self.rowFor(ref).?;
+        row.established_slot = @intCast(slot);
         connect(row, conn, options);
-        self.by_connection[conn.index] = @intCast(index);
+        self.connected_count += 1;
+        self.by_connection[conn.index] = ref.index;
         self.revision +|= 1;
-        return .{ .admitted = .{
-            .peer = .{ .index = @intCast(index), .generation = row.generation },
-            .fresh = true,
-        } };
+        return .{ .admitted = .{ .peer = ref, .fresh = true } };
+    }
+
+    pub fn reference(self: *const Catalog, index: usize) t.PeerRef {
+        std.debug.assert(self.rows[index].occupied);
+        return .{ .index = @intCast(index), .generation = self.rows[index].generation };
+    }
+
+    fn allocate(self: *Catalog, identity: *const t.PeerId) ?t.PeerRef {
+        for (0..self.rows.len) |_| {
+            const index = self.free.pop(self.rows, "free_link") orelse return null;
+            const row = &self.rows[index];
+            if (row.generation == std.math.maxInt(u64)) continue;
+            row.* = .{ .occupied = true, .generation = row.generation + 1, .identity = identity.* };
+            self.by_identity.insert(self.rows, @intCast(index));
+            return self.reference(index);
+        }
+        return null;
+    }
+
+    pub fn retainIntent(self: *Catalog, identity: *const t.PeerId) error{Capacity}!t.PeerRef {
+        const existing = self.find(identity);
+        if (existing) |peer| if (self.intents.isSet(peer.index)) return peer;
+        if (self.intent_count == self.intent_capacity) return error.Capacity;
+        const peer = existing orelse self.allocate(identity) orelse return error.Capacity;
+        self.intents.set(peer.index);
+        self.intent_count += 1;
+        self.intent_revision +|= 1;
+        return peer;
+    }
+
+    pub fn releaseIntent(self: *Catalog, peer: t.PeerRef) void {
+        const row = self.rowFor(peer) orelse return;
+        std.debug.assert(!row.direct and row.attempt == null);
+        if (self.intents.isSet(peer.index)) {
+            self.intents.unset(peer.index);
+            self.intent_count -= 1;
+            self.intent_revision +|= 1;
+        }
+        if (row.established_slot == null) {
+            self.forget(peer);
+        } else {
+            row.intent = .{ .failures = row.intent.failures, .eligible_at_ms = row.intent.eligible_at_ms, .history_until_ms = row.intent.history_until_ms };
+            if (row.connection == null) {
+                row.custody_work = null;
+                row.custody_context = null;
+            }
+        }
+    }
+
+    fn forget(self: *Catalog, peer: t.PeerRef) void {
+        const row = self.rowFor(peer).?;
+        std.debug.assert(row.connection == null and row.attempt == null and !row.direct and row.pending_close == null and !row.pending_update);
+        self.by_identity.remove(self.rows, &row.identity);
+        if (row.established_slot) |slot| {
+            self.established[slot] = null;
+        }
+        if (self.intents.isSet(peer.index)) {
+            self.intents.unset(peer.index);
+            self.intent_count -= 1;
+            self.intent_revision +|= 1;
+        }
+        row.* = .{ .generation = row.generation };
+        self.free.prepend(self.rows, "free_link", peer.index);
+    }
+
+    fn promote(self: *Catalog, peer: t.PeerRef, direction: t.Direction, now_ms: u64) bool {
+        const slot = self.reclaimable(direction, now_ms) orelse return false;
+        if (self.established[slot]) |victim| self.forget(self.reference(victim));
+        self.established[slot] = peer.index;
+        self.rows[peer.index].established_slot = @intCast(slot);
+        return true;
     }
 
     fn reclaimable(self: *const Catalog, direction: t.Direction, now_ms: u64) ?usize {
-        const limit = self.rows.len - if (direction == .inbound)
+        const limit = self.established.len - if (direction == .inbound)
             @as(usize, self.options.outbound_reserve)
         else
             0;
         var victim: ?usize = null;
         var victim_banned = false;
         var victim_deadline: u64 = 0;
-        for (self.rows[0..limit], 0..) |*row, index| {
-            if (row.connection != null or row.direct or row.pending_close != null or
+        for (self.established[0..limit], 0..) |entry, slot| {
+            const index = entry orelse return slot;
+            const row = &self.rows[index];
+            if (row.connection != null or row.direct or row.attempt != null or row.intent.manual_until_ms > now_ms or row.pending_close != null or
                 row.pending_update or row.generation == std.math.maxInt(u64)) continue;
             var current_reputation = row.reputation;
             current_reputation.decay(now_ms);
-            if (!row.occupied or !current_reputation.retained(now_ms)) return index;
+            if (!current_reputation.retained(now_ms)) return slot;
             const banned = current_reputation.banned(now_ms);
             const deadline = current_reputation.nextDeadline(now_ms) orelse now_ms;
             if (victim == null or (victim_banned and !banned) or
                 (victim_banned == banned and deadline < victim_deadline))
             {
-                victim = index;
+                victim = slot;
                 victim_banned = banned;
                 victim_deadline = deadline;
             }
@@ -270,11 +489,7 @@ pub const Catalog = struct {
     }
 
     pub fn relevantCount(self: *const Catalog) u16 {
-        var count: u16 = 0;
-        for (self.rows) |row| if (row.connection != null and row.status != null) {
-            count += 1;
-        };
-        return count;
+        return self.relevant_count;
     }
 
     pub fn eventsPending(self: *const Catalog) bool {
@@ -283,11 +498,7 @@ pub const Catalog = struct {
     }
 
     pub fn connectedCount(self: *const Catalog) u16 {
-        var count: u16 = 0;
-        for (self.rows) |row| if (row.connection != null) {
-            count += 1;
-        };
-        return count;
+        return self.connected_count;
     }
 
     pub fn disconnect(
@@ -301,6 +512,8 @@ pub const Catalog = struct {
         std.log.scoped(.network_peers).debug("peer_disconnected peer={f} connection={d}:{d} reason={s} connected_ms={d} relevant={any} agent={f}", .{ @import("../logging.zig").peer(&row.identity), conn.index, conn.generation, @tagName(reason), now_ms -| row.connected_at_ms, row.status != null, std.json.fmt(@import("client.zig").agent(&row.identify), .{}) });
         self.revision +|= 1;
         self.by_connection[conn.index] = null;
+        self.connected_count -= 1;
+        if (row.status != null) self.relevant_count -= 1;
         row.connection = null;
         row.custody_work = null;
         row.custody_context = null;
@@ -309,7 +522,24 @@ pub const Catalog = struct {
         row.pending_update = false;
         row.pending_close = .{ .connection = conn, .reason = reason };
         row.reputation.decay(now_ms);
+        self.connectionClosed(row, reason, now_ms);
         return true;
+    }
+
+    fn connectionClosed(self: *Catalog, row: *Row, reason: t.DisconnectReason, now_ms: u64) void {
+        row.intent.history_until_ms = @max(row.intent.history_until_ms, now_ms +| history_retention_ms);
+        if (reason == .capacity or reason == .count_pruning) {
+            if (row.reputation.redial_until_ms <= now_ms)
+                row.reputation.deferRedial(now_ms, @import("goodbye.zig").cooldownMs(129));
+            return;
+        }
+        const lifetime = now_ms -| row.connected_at_ms;
+        const unhealthy = reason == .health_timeout or reason == .health_error;
+        if (lifetime >= 300_000 and !unhealthy) row.intent.failures = 0;
+        row.intent.failures = @min(row.intent.failures +| 1, 7);
+        const delay = @min(@as(u64, 5_000) << @intCast(row.intent.failures - 1), 300_000);
+        row.intent.eligible_at_ms = @max(row.intent.eligible_at_ms, now_ms +| delay +| (self.random.random().int(u16) % 1_001));
+        self.connection_backoffs +|= 1;
     }
 
     pub fn markUnavailable(
@@ -322,6 +552,7 @@ pub const Catalog = struct {
         if (row.closing_reason != null) return true;
         self.revision +|= 1;
         row.closing_reason = reason;
+        if (row.status != null) self.relevant_count -= 1;
         row.status = null;
         row.pending_update = row.published;
         return true;
@@ -332,6 +563,7 @@ pub const Catalog = struct {
         if (row.closing_reason != null) return false;
         if (row.status == null and row.custody_work == null) return true;
         self.revision +|= 1;
+        if (row.status != null) self.relevant_count -= 1;
         row.status = null;
         row.custody_work = null;
         row.pending_update = row.published;
@@ -349,7 +581,9 @@ pub const Catalog = struct {
         const row = self.connectedRow(ref, conn) orelse return false;
         if (row.closing_reason != null) return false;
         self.revision +|= 1;
+        if (row.status == null) self.relevant_count += 1;
         row.status = status.*;
+        row.intent.history_until_ms = @max(row.intent.history_until_ms, now_ms +| history_retention_ms);
         row.status_at_ms = now_ms;
         row.pending_update = true;
         return true;
@@ -400,7 +634,10 @@ pub const Catalog = struct {
 
     pub fn setDirect(self: *Catalog, ref: t.PeerRef, direct: bool) bool {
         const row = self.rowFor(ref) orelse return false;
-        if (row.direct != direct) self.revision +|= 1;
+        if (row.direct != direct) {
+            self.revision +|= 1;
+            if (direct) self.direct_count += 1 else self.direct_count -= 1;
+        }
         row.direct = direct;
         return true;
     }
@@ -412,6 +649,7 @@ pub const Catalog = struct {
         now_ms: u64,
     ) ?t.ReputationDecision {
         const row = self.rowFor(ref) orelse return null;
+        if (row.established_slot == null) return null;
         self.revision +|= 1;
         return row.reputation.apply(action, now_ms);
     }

@@ -50,12 +50,12 @@ pub fn deliveryAvailable(self: *Gossipsub, conn: Handle) bool {
     return deliveryStatus(self, conn) == .available;
 }
 
-pub fn peerConnected(self: *Gossipsub, engine: *Engine, conn: Handle, now: Now) Admission {
+pub fn peerConnected(self: *Gossipsub, engine: *Engine, conn: Handle, direct: bool, now: Now) Admission {
     if (self.sessions.findPeer(conn) != null) return .admitted;
     const identity = engine.peerId(conn) orelse return .unauthenticated;
     const address = engine.peerAddress(conn) orelse return .unauthenticated;
     const direction = engine.direction(conn) orelse return .unauthenticated;
-    const result = self.addPeer(conn, &.{ .identity = identity, .address = address, .direction = direction }, now);
+    const result = self.addPeer(conn, &.{ .identity = identity, .address = address, .direction = direction, .direct = direct }, now);
     switch (result) {
         .admitted => {},
         .duplicate => return .duplicate,
@@ -74,7 +74,7 @@ pub fn transportEvents(
     self.last_now_ms = @max(self.last_now_ms, now.mono_ms);
     for (events) |event| switch (event) {
         .connected => |connected| {
-            _ = peerConnected(self, engine, connected.conn, now);
+            _ = peerConnected(self, engine, connected.conn, false, now);
         },
         .path_changed => |changed| self.peers.migrate(changed.conn, changed.peer),
         .stream_closed => |closed| streamClosed(self, engine, closed.stream),

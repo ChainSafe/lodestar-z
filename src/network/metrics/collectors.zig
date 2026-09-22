@@ -117,7 +117,8 @@ fn writeNativeCounters(self: *const Context, w: *prom.Encoder) prom.Error!void {
     }, @field(self.owner.transport.udp.counters, metric[0]));
     try w.counters("lodestar_native_reqresp_", &self.owner.service.reqresp.counters);
     try w.counters("lodestar_native_gossipsub_", &self.owner.service.gossipsub.counters);
-    try w.counters("lodestar_native_dial_", &self.owner.peer_manager.dial_queue.counters);
+    try w.counters("lodestar_native_dial_", &self.owner.peer_manager.dialing.counters);
+    try w.counters("lodestar_native_dial_", &.{ .connection_backoffs = self.owner.peer_manager.catalog.connection_backoffs });
     const discovery_counts = if (self.owner.discovery) |d| d.coordinator.counters else discovery_metrics.Counters{};
     const rejections = if (self.owner.discovery) |d| d.coordinator.rejections else @as([discovery_metrics.rejection_count]u64, @splat(0));
     const admissions = if (self.owner.discovery) |d| d.transport.engine.channel.admission.counts else @as(@import("discv5").admission.Counts, @splat(@splat(0)));
@@ -229,7 +230,6 @@ fn writePeerProcessing(self: *const Context, w: *prom.Encoder) prom.Error!void {
     inline for (std.meta.fields(@TypeOf(self.owner.peer_manager.counters))) |field| {
         try processing.sample(.{field.name}, @field(self.owner.peer_manager.counters, field.name));
     }
-    try processing.sample(.{"dial_sync_lookup_rows"}, self.owner.peer_manager.dial_queue.counters.sync_lookup_rows);
 }
 
 fn writePeeringProgress(self: *const Context, w: *prom.Encoder) prom.Error!void {
@@ -250,7 +250,7 @@ fn writePeeringProgress(self: *const Context, w: *prom.Encoder) prom.Error!void 
         .labels = &.{"reason"},
     }, @import("../identify/root.zig").Failure, &self.owner.peer_manager.control.counters.identify_failures);
     const transport = self.owner.transport.engine.resourceSnapshot();
-    const dial = self.owner.peer_manager.dial_queue.resourceSnapshot();
+    const dial = self.owner.peer_manager.dialing.resourceSnapshot(&self.owner.peer_manager.catalog);
     inline for (.{ .{ "lodestar_native_quic_connections_", transport }, .{ "lodestar_native_dial_", dial } }) |group| {
         inline for (std.meta.fields(@TypeOf(group[1]))) |field| {
             const value = @field(group[1], field.name);
@@ -260,16 +260,16 @@ fn writePeeringProgress(self: *const Context, w: *prom.Encoder) prom.Error!void 
 }
 
 fn writeDiscoveryProgress(self: *const Context, w: *prom.Encoder) prom.Error!void {
-    try w.enums(.{ .name = "lodestar_native_peer_dial_selections_total", .kind = .counter, .help = "Selected peer connection attempts by initiating demand, including immediate errors and local start deferrals", .labels = &.{"source"} }, @import("../peers/dial_queue.zig").Source, &self.owner.peer_manager.dial_queue.selected_attempts);
+    try w.enums(.{ .name = "lodestar_native_peer_dial_selections_total", .kind = .counter, .help = "Selected peer connection attempts by initiating demand, including immediate errors and local start deferrals", .labels = &.{"source"} }, @import("../peers/dialing.zig").Source, &self.owner.peer_manager.dialing.selected_attempts);
     const dial_time = try w.histograms(.{
         .name = "lodestar_native_peer_dial_time_seconds",
         .kind = .histogram,
         .help = "Time from selecting a dial through authenticated connection or terminal failure; cancellations excluded",
         .labels = &.{"status"},
         .unit = .seconds,
-    }, @TypeOf(self.owner.peer_manager.dial_queue.durations[0]));
+    }, @TypeOf(self.owner.peer_manager.dialing.durations[0]));
     inline for (.{ "success", "error" }, 0..) |status, index|
-        try dial_time.histogram(.{status}, &self.owner.peer_manager.dial_queue.durations[index]);
+        try dial_time.histogram(.{status}, &self.owner.peer_manager.dialing.durations[index]);
     const discovery = self.owner.discovery orelse return;
     const lookup_time = try w.histograms(.{
         .name = "lodestar_discovery_find_node_query_time_seconds",

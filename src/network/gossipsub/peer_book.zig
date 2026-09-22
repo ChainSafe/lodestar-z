@@ -14,6 +14,7 @@ pub const Metadata = struct {
     identity: PeerId,
     address: types.Address,
     direction: types.Direction,
+    direct: bool = false,
 };
 pub const Row = struct {
     generation: u64 = 0,
@@ -117,6 +118,7 @@ pub const PeerBook = struct {
         row.connection = conn;
         row.address = normalize(metadata.address);
         row.direction = metadata.direction;
+        row.direct = metadata.direct;
         self.addIp(index);
     }
 

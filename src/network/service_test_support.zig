@@ -18,8 +18,8 @@ pub const ServicePair = struct {
         errdefer self.server.deinit();
         const handles = try support.connectPair(&self.pair);
         self.handles = .{ .client = handles.client, .server = handles.server };
-        if (client.automatic_gossip_admission) _ = self.client.gossipsub.peerConnected(&self.pair.client, handles.client, self.pair.now);
-        if (server.automatic_gossip_admission) _ = self.server.gossipsub.peerConnected(&self.pair.server, handles.server, self.pair.now);
+        if (client.automatic_gossip_admission) _ = self.client.gossipsub.peerConnected(&self.pair.client, handles.client, false, self.pair.now);
+        if (server.automatic_gossip_admission) _ = self.server.gossipsub.peerConnected(&self.pair.server, handles.server, false, self.pair.now);
     }
 
     pub fn deinit(self: *ServicePair) void {

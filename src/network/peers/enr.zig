@@ -8,6 +8,24 @@ const Record = d.identity.enr.Record;
 
 pub const Error = d.identity.enr.Error || keys.Error || error{ InvalidField, MissingEth2, IncompatibleFork, InvalidForkContext, SequenceExhausted, IdentityMismatch };
 pub const ForkId = struct { digest: [4]u8, next_version: [4]u8, next_epoch: u64 };
+pub const Hints = struct {
+    sequence: u64,
+    record_hash: [32]u8,
+    fork: ForkId,
+    next_fork_digest: ?[4]u8,
+    attnets: ?[8]u8,
+    syncnets: ?u8,
+    custody_group_count: ?u64,
+
+    pub fn validFor(self: *const Hints, context: *const types.ForkContext) bool {
+        context.validate() catch return false;
+        if (!std.mem.eql(u8, &self.fork.digest, &context.digest)) return false;
+        if (self.syncnets) |bits| if (bits & 0xf0 != 0) return false;
+        if (self.custody_group_count) |count| if (count == 0 or count > context.custody_groups) return false;
+        return true;
+    }
+};
+
 pub const Candidate = struct {
     peer: types.PeerId,
     node_id: d.types.NodeId,

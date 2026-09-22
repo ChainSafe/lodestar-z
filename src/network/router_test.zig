@@ -26,7 +26,7 @@ test "router composes simultaneous ping and meshsub on one connection" {
     const requests = &server.reqresp;
     const gossip = server.gossipsub;
     const handles = try support.connectPair(&pair);
-    _ = gossip.peerConnected(&pair.server, handles.server, pair.now);
+    _ = gossip.peerConnected(&pair.server, handles.server, false, pair.now);
     var topic_buf: [topic_mod.topic_max_len]u8 = undefined;
     const topic = topic_mod.build(.{ 1, 2, 3, 4 }, "beacon_block", &topic_buf);
     try gossip_test.subscribe(gossip, topic);
@@ -299,7 +299,7 @@ test "router gossip capacity refusal preserves reqresp and explicit host retry" 
         server.gossipsub.peers.scores.penalize(ref.index, 20);
         server.gossipsub.peers.disconnect(ref, pair.now.mono_ms);
     }
-    try std.testing.expectEqual(gs.Gossipsub.Admission.capacity, server.gossipsub.peerConnected(&pair.server, handles.server, pair.now));
+    try std.testing.expectEqual(gs.Gossipsub.Admission.capacity, server.gossipsub.peerConnected(&pair.server, handles.server, false, pair.now));
     try std.testing.expect(!server.gossipsub.admitted(handles.server));
     const ping = [_]u8{7} ** 8;
     var sink: [8]u8 = undefined;
@@ -330,7 +330,7 @@ test "router gossip capacity refusal preserves reqresp and explicit host retry" 
     try std.testing.expect(pong);
     try std.testing.expect(!server.gossipsub.admitted(handles.server));
     for (retained) |ref| server.gossipsub.peers.release(ref);
-    try std.testing.expectEqual(gs.Gossipsub.Admission.admitted, server.gossipsub.peerConnected(&pair.server, handles.server, pair.now));
+    try std.testing.expectEqual(gs.Gossipsub.Admission.admitted, server.gossipsub.peerConnected(&pair.server, handles.server, false, pair.now));
     try std.testing.expect(server.gossipsub.admitted(handles.server));
 }
 
