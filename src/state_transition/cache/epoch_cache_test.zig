@@ -126,19 +126,19 @@ test "memory_safety: rotateSyncCommitteeIndexed should preserve shared caches on
 
     // Fail the initial allocation and the RC allocation after the raw cache is complete.
     for ([_]usize{ 0, cache_allocations }) |fail_index| {
-        var failing_allocator = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        var failing_allocator = std.testing.FailingAllocator.init(allocator, .{});
         {
-            const candidate = try pre_cache.clone(allocator);
+            const candidate = try pre_cache.clone(failing_allocator.allocator());
             defer candidate.deinit();
+            failing_allocator.fail_index = failing_allocator.alloc_index + fail_index;
 
-            try std.testing.expectError(error.OutOfMemory, candidate.rotateSyncCommitteeIndexed(failing_allocator.allocator(), &indices));
+            try std.testing.expectError(error.OutOfMemory, candidate.rotateSyncCommitteeIndexed(&indices));
             try std.testing.expect(failing_allocator.has_induced_failure);
             try std.testing.expectEqual(old_current, candidate.current_sync_committee_indexed);
             try std.testing.expectEqual(old_next, candidate.next_sync_committee_indexed);
-            try std.testing.expectEqual(failing_allocator.allocated_bytes, failing_allocator.freed_bytes);
 
             failing_allocator.fail_index = std.math.maxInt(usize);
-            try candidate.rotateSyncCommitteeIndexed(failing_allocator.allocator(), &indices);
+            try candidate.rotateSyncCommitteeIndexed(&indices);
             try std.testing.expectEqual(old_next, candidate.current_sync_committee_indexed);
             try std.testing.expectEqualSlices(ValidatorIndex, &indices, try candidate.next_sync_committee_indexed.get().getValidatorIndices());
         }
@@ -219,14 +219,14 @@ test "effectiveBalanceIncrementsAppend grows in place only when the list is not 
 
     const shared = epoch_cache.effective_balance_increments.ref();
     defer shared.unref();
-    try epoch_cache.effectiveBalanceIncrementsAppend(allocator, 4, 32_000_000_000);
+    try epoch_cache.effectiveBalanceIncrementsAppend(4, 32_000_000_000);
     try std.testing.expect(epoch_cache.effective_balance_increments != shared);
     try std.testing.expectEqual(4, shared.get().items.len);
     try std.testing.expectEqual(5, epoch_cache.effective_balance_increments.get().items.len);
 
     const unique = epoch_cache.effective_balance_increments;
     const items_ptr = unique.get().items.ptr;
-    try epoch_cache.effectiveBalanceIncrementsAppend(allocator, 5, 1_000_000_000);
+    try epoch_cache.effectiveBalanceIncrementsAppend(5, 1_000_000_000);
     try std.testing.expectEqual(unique, epoch_cache.effective_balance_increments);
     try std.testing.expectEqual(items_ptr, unique.get().items.ptr);
     try std.testing.expectEqualSlices(u16, &.{ 0, 0, 0, 0, 32, 1 }, unique.get().items);

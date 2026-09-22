@@ -68,7 +68,7 @@ pub fn processOperations(
     try processAttestations(fork, allocator, io, config, epoch_cache, state, proposer_rewards, slashings_cache, body.inner.attestations.items, opts.verify_signature);
 
     for (body.inner.deposits.items) |*deposit| {
-        try processDeposit(fork, allocator, io, config, epoch_cache, state, deposit);
+        try processDeposit(fork, io, config, epoch_cache, state, deposit);
     }
 
     for (body.inner.voluntary_exits.items) |*voluntary_exit| {

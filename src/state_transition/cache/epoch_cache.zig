@@ -868,11 +868,11 @@ pub const EpochCache = struct {
         }
     }
 
-    pub fn rotateSyncCommitteeIndexed(self: *EpochCache, allocator: Allocator, next_sync_committee_indices: []const ValidatorIndex) !void {
-        var next_sync_committee_indexed = try SyncCommitteeCacheAllForks.initValidatorIndices(allocator, next_sync_committee_indices);
+    pub fn rotateSyncCommitteeIndexed(self: *EpochCache, next_sync_committee_indices: []const ValidatorIndex) !void {
+        var next_sync_committee_indexed = try SyncCommitteeCacheAllForks.initValidatorIndices(self.allocator, next_sync_committee_indices);
         errdefer next_sync_committee_indexed.deinit();
 
-        const next_sync_committee_indexed_rc = try SyncCommitteeCacheRc.init(allocator, next_sync_committee_indexed);
+        const next_sync_committee_indexed_rc = try SyncCommitteeCacheRc.init(self.allocator, next_sync_committee_indexed);
 
         // unref the old instance
         self.current_sync_committee_indexed.unref();
@@ -918,7 +918,6 @@ pub const EpochCache = struct {
     /// SAFETY: `index` must equal the current effective-balance-increments length.
     pub fn effectiveBalanceIncrementsAppend(
         self: *EpochCache,
-        allocator: Allocator,
         index: usize,
         effective_balance: u64,
     ) !void {
@@ -946,14 +945,14 @@ pub const EpochCache = struct {
             const new_len = index + 1;
             const capacity = 1024 * @divFloor(new_len + 1024, 1024);
 
-            var new_increments = try EffectiveBalanceIncrements.initCapacity(allocator, capacity);
-            errdefer new_increments.deinit(allocator);
+            var new_increments = try EffectiveBalanceIncrements.initCapacity(self.allocator, capacity);
+            errdefer new_increments.deinit(self.allocator);
 
-            try new_increments.resize(allocator, new_len);
+            try new_increments.resize(self.allocator, new_len);
             @memcpy(new_increments.items[0..old.items.len], old.items);
             @memset(new_increments.items[old.items.len..new_len], 0);
 
-            const new_rc = try EffectiveBalanceIncrementsRc.init(allocator, new_increments);
+            const new_rc = try EffectiveBalanceIncrementsRc.init(self.allocator, new_increments);
             self.effective_balance_increments.unref();
             self.effective_balance_increments = new_rc;
         }
