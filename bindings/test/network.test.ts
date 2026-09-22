@@ -308,6 +308,24 @@ it("initializes signed discovery without waiting for bootstrap reachability", as
   }
 }, 20000);
 
+it.each([17, 64])("accepts a bounded discovery bootstrap list of %i entries", async (count) => {
+  const source = await startPeer(discoveryConfig());
+  const enr = source.identity.localEnr;
+  await source.stop();
+  if (!enr) throw new Error("Missing ENR");
+  const config = discoveryConfig();
+  config.identitySecretKey[31] = 2;
+  config.discovery.bootstrapEnrs = Array.from({length: count}, () => enr.slice());
+  const runtime = startRuntime(config);
+  try {
+    expect(runtime.state).toBe("running");
+    expect(runtime.identity.localEnr).toBeInstanceOf(Uint8Array);
+  } finally {
+    await runtime.close();
+  }
+  expect(runtime.diagnostics().liveNativeRequestedBytes).toBe(0);
+});
+
 it("fails wildcard discovery advertisement omissions cleanly", async () => {
   const config = applicationConfig();
   if (!("address" in config.bind)) throw new Error("Expected a single bind address");

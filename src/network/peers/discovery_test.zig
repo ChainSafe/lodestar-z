@@ -9,7 +9,7 @@ test "peer discovery seeds the configured list without claiming reachability or 
     var node: Node = undefined;
     try node.init(1, 9001);
     defer node.deinit();
-    var records: [d.types.bootstrap_max]d.identity.enr.Record = undefined;
+    var records: [17]d.identity.enr.Record = undefined;
     for (&records, 2..) |*record, index| {
         const scalar: u8 = @intCast(index);
         const key = try d.identity.crypto.keyPairFromSecret(&(.{0} ** 31 ++ .{scalar}));
