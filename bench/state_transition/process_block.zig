@@ -133,9 +133,7 @@ fn ProcessEth1DataBench(comptime fork: ForkSeq) type {
     return struct {
         body: *const BeaconBlockBody(.full, fork),
 
-        pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
-            _ = allocator;
-
+        pub fn run(self: *@This(), _: std.mem.Allocator) void {
             state_transition.processEth1Data(
                 fork,
                 BenchState.cloned_cached_state.state.castToFork(fork),
