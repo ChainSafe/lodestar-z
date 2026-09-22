@@ -159,6 +159,8 @@ test "state transition - records per-block and per-epoch metrics" {
     for (0..try state.validatorsCount()) |i| {
         try current_participation.set(i, 0);
     }
+    // Exercise the progressive-balance self-heal path at the epoch boundary.
+    test_state.cached_state.epoch_cache.current_target_unslashed_balance_increments += 1;
     try test_state.cached_state.state.commit();
 
     const signed_beacon_block = AnySignedBeaconBlock{ .full_electra = &electra_block };
@@ -194,6 +196,10 @@ test "state transition - records per-block and per-epoch metrics" {
     try testing.expectEqual(@as(?u64, attestation_count), metricValue(out, "lodestar_stfn_attestations_per_block_total"));
     try testing.expect(metricValue(out, "lodestar_stfn_new_seen_attesters_per_block_total").? > 0);
     try testing.expect(metricValue(out, "lodestar_stfn_new_seen_attesters_effective_balance_per_block_total").? > 0);
+    try testing.expectEqual(
+        @as(?u64, 1),
+        metricValue(out, "lodestar_stfn_progressive_balances_mismatches_total{target=\"current\"}"),
+    );
     const proposer_rewards = post_state.getProposerRewards();
     try testing.expectEqual(
         @as(?u64, proposer_rewards.attestations),
