@@ -3,7 +3,7 @@ import {startRuntime} from "../utils/network.js";
 import assert from "node:assert/strict";
 import {setTimeout as delay} from "node:timers/promises";
 
-import {applicationConfig, localIntent} from "../utils/network.ts";
+import {applicationConfig, localIntent, peerIdFromHex} from "../utils/network.ts";
 import {Child} from "../../../test/interop/child.mjs";
 
 const mode = process.argv[2];
@@ -84,7 +84,7 @@ try {
   });
   await runtime.identity;
   await runtime.applyIntent(localIntent(config), config.initialSlot);
-  const id = Uint8Array.from(Buffer.from(info.peer, "hex"));
+  const id = peerIdFromHex(info.peer);
   await runtime.connect(
     id,
     [{family: 4, address: Uint8Array.of(127, 0, 0, 1), port: Number(info.address.split("/")[4])}],
