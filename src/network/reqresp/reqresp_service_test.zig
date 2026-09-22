@@ -163,9 +163,10 @@ test "service preserves drained native activity across a partial request sweep" 
     const active = setup.shared.pair.client.takeActivity(&activity);
     try std.testing.expect(active > 0);
     var events: [1]Event = undefined;
-    _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, activity[0..active], setup.shared.pair.now, .{ .control = &events }).control;
-    var received = false;
+    const first_count = setup.shared.client.process(&setup.shared.pair.client, &.{}, activity[0..active], setup.shared.pair.now, .{ .control = &events }).control;
+    var received = first_count == 1;
     for (0..10) |_| {
+        if (received) break;
         try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), setup.shared.client.nextWakeup(setup.shared.pair.now, .{ .control = 1 }));
         const count = setup.shared.client.process(&setup.shared.pair.client, &.{}, &.{}, setup.shared.pair.now, .{ .control = &events }).control;
         if (count == 1) {
@@ -175,4 +176,49 @@ test "service preserves drained native activity across a partial request sweep" 
         }
     }
     try std.testing.expect(received);
+    try std.testing.expectEqualSlices(u8, &bytes, events[0].chunk.bytes);
+}
+
+test "service request work remains bounded and rotates between live streams" {
+    var setup: Pair = .{};
+    try setup.init(.{ .outbound_max = 64, .inbound_max = 64 }, .{});
+    defer setup.deinit();
+    const bytes = [_]u8{9} ** 8;
+    var sinks: [2][8]u8 = undefined;
+    var handles: [2]reqresp.RequestHandle = undefined;
+    for (&sinks, &handles) |*sink, *handle| {
+        handle.* = try setup.shared.client.request(&setup.shared.pair.client, setup.shared.handles.client, .ping_v1, &bytes, sink, .{}, setup.shared.pair.now);
+    }
+    var incoming: [2]reqresp.RequestHandle = undefined;
+    var received: usize = 0;
+    for (0..30) |_| {
+        try setup.pumpOnce();
+        for (setup.serverEvents()) |event| if (event == .request) {
+            try std.testing.expect(received < incoming.len);
+            incoming[received] = event.request.request;
+            received += 1;
+        };
+        if (received == incoming.len) break;
+    }
+    try std.testing.expectEqual(incoming.len, received);
+    const codec = @import("codec.zig");
+    var wire: [codec.frame_scratch_max]u8 = undefined;
+    const encoded = try codec.encodeChunk(0, null, &bytes, &wire);
+    for (incoming) |handle| {
+        const stream = setup.shared.server.reqresp.inbound[handle.index].request.stream;
+        try std.testing.expectEqual(encoded.len, try setup.shared.pair.server.write(stream, encoded, false));
+    }
+    try setup.shared.pair.pump();
+    setup.shared.client.reqresp.connectionActivity(setup.shared.handles.client);
+    setup.shared.client.reqresp.options.work_per_pump_max = 1;
+    var events: [2]Event = undefined;
+    var delivered: [2]reqresp.RequestHandle = undefined;
+    for (&delivered) |*handle| {
+        const count = setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &events }).control;
+        try std.testing.expectEqual(@as(usize, 1), count);
+        try std.testing.expectEqualSlices(u8, &bytes, events[0].chunk.bytes);
+        handle.* = events[0].chunk.request;
+    }
+    try std.testing.expect(!std.meta.eql(delivered[0], delivered[1]));
+    for (handles) |handle| try std.testing.expect(setup.shared.client.reqresp.consume(handle));
 }
