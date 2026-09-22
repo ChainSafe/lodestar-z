@@ -29,7 +29,7 @@ for (const profile of ["small", "beaconNode"]) {
     assert.equal(before.liveBridgeRequestedBytes, before.bridgeRequestedBytes);
     await runtime.close();
     const after = await runtime.diagnostics();
-    assert.equal(after.liveBridgeRequestedBytes, after.ownerShellBytes + after.peerLaneBytes);
+    assert.equal(after.liveBridgeRequestedBytes, after.ownerShellBytes + after.peerLaneBytes + after.metricsExportBytes);
     assert.equal(after.liveNativeRequestedBytes, 0);
     assert.equal(after.gossip.occupied, 0);
     assert.equal(after.gossip.reservedBytes, 0);

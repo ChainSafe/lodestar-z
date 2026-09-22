@@ -2,7 +2,7 @@ import {startPeer} from "../utils/network-peer.js";
 import {startRuntime} from "../utils/network.js";
 import assert from "node:assert/strict";
 
-import {applicationConfig, localIntent} from "../utils/network.ts";
+import {applicationConfig, localIntent, peerIdFromHex} from "../utils/network.ts";
 const rows = [];
 for (const profile of ["small", "beaconNode"]) {
   const config = applicationConfig();
@@ -27,7 +27,7 @@ for (const profile of ["small", "beaconNode"]) {
   const before = await runtime.diagnostics();
   await runtime.close();
   const after = await runtime.diagnostics();
-  assert.equal(after.liveBridgeRequestedBytes, after.ownerShellBytes + after.peerLaneBytes);
+  assert.equal(after.liveBridgeRequestedBytes, after.ownerShellBytes + after.peerLaneBytes + after.metricsExportBytes);
   assert.equal(after.requests.reservedBytes, 0);
   rows.push({profile, before, after});
   await runtime.stop();
@@ -54,7 +54,7 @@ if (process.env.LODESTAR_Z_NETWORK_STOCK_HOST) {
     runtime = startRuntime(config, () => undefined);
     await runtime.identity;
     await runtime.applyIntent(localIntent(config), config.initialSlot);
-    const id = Uint8Array.from(Buffer.from(remote.peer, "hex"));
+    const id = peerIdFromHex(remote.peer);
     await runtime.connect(
       id,
       [{family: 4, address: Uint8Array.of(127, 0, 0, 1), port: Number(remote.address.split("/")[4])}],
@@ -85,7 +85,7 @@ if (process.env.LODESTAR_Z_NETWORK_STOCK_HOST) {
     await stream.return();
     const retired = runtime.diagnostics();
     assert.equal(retired.requests.occupied, 0);
-    assert.equal(retired.liveBridgeRequestedBytes, retired.ownerShellBytes + retired.peerLaneBytes);
+    assert.equal(retired.liveBridgeRequestedBytes, retired.ownerShellBytes + retired.peerLaneBytes + retired.metricsExportBytes);
     console.log(
       JSON.stringify(
         {payload: {admitted, pending, copied, closed, retired}},
