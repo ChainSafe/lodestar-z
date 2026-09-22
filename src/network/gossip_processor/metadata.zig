@@ -1,5 +1,5 @@
 const std = @import("std");
-const Kind = @import("limits.zig").Kind;
+const Kind = @import("../gossip_limits.zig").Kind;
 
 pub const Metadata = struct {
     slot: ?u64 = null,

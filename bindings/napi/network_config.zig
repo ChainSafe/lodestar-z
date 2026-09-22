@@ -204,7 +204,7 @@ pub fn parse(value: Value, out: *Config) !void {
 fn parseGossip(value: Value, out: *Config) !void {
     out.gossip = .{ .observe_subscriptions = false };
     const policy = try get(value, "gossipPolicy");
-    try object(policy, &.{ "iwantFollowupMs", "idontwantMinDataSize", "heartbeatIntervalMs", "validationTimeoutMs", "validationTombstoneMs", "pressureTimeoutMs", "txTimeoutMs", "largeFrameTimeoutMs", "seenTtlMs", "retainedScoreMs", "opportunisticGraftIntervalMs", "gossipFactor", "ipAllowlist", "score", "processor" });
+    try object(policy, &.{ "iwantFollowupMs", "idontwantMinDataSize", "heartbeatIntervalMs", "validationTimeoutMs", "validationTombstoneMs", "pressureTimeoutMs", "txTimeoutMs", "largeFrameTimeoutMs", "seenTtlMs", "retainedScoreMs", "opportunisticGraftIntervalMs", "gossipFactor", "ipAllowlist", "score", "processor", "execution" });
     const processor = try get(policy, "processor");
     if (try processor.typeof() != .undefined) {
         const limits_mod = n.gossip_processor.limits_mod;
@@ -223,6 +223,21 @@ fn parseGossip(value: Value, out: *Config) !void {
         out.gossip.processor_limits = limits;
         out.gossip.validation_capacity = limits_mod.items(&limits);
         out.gossip.mcache_arena_bytes = @max(2 * limits_mod.bytes(&limits), n.gossipsub.constants.maxCompressedLen(n.gossipsub.constants.MAX_PAYLOAD_SIZE) + 4096);
+    }
+    const execution = try get(policy, "execution");
+    if (try execution.typeof() != .undefined) {
+        const limits_mod = n.gossip_processor.limits_mod;
+        if (try array(execution, limits_mod.kind_count) != limits_mod.kind_count) return error.InvalidGossipExecutionLimits;
+        var limits: limits_mod.Limits = undefined;
+        for (&limits, 0..) |*limit, i| {
+            const value_limit = try execution.getElement(@intCast(i));
+            try completeObject(value_limit, &.{ "items", "bytes" });
+            limit.* = .{
+                .items = @intCast(try integer(try get(value_limit, "items"), 16384)),
+                .bytes = @intCast(try integer(try get(value_limit, "bytes"), 1024 * 1024 * 1024)),
+            };
+        }
+        out.gossip.execution_limits = limits;
     }
     out.gossip.iwant_followup_ms = try bigint(try get(policy, "iwantFollowupMs"));
     out.gossip.idontwant_min_data_size = @as(usize, @intCast(try integer(try get(policy, "idontwantMinDataSize"), n.gossipsub.constants.GOSSIP_MAX_SIZE)));

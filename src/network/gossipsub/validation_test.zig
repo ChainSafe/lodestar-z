@@ -139,7 +139,6 @@ test "gossip validation index bounds sparse lookups and follows replacement expi
     var second = first;
     second[19] = 1;
     for ([_]topic_mod.MessageId{ first, second }) |id| {
-        v.recent_cursor = 0;
         const message = store.put(id, "topic", "payload").?;
         var reservation = v.reserve(id).?;
         try std.testing.expect(v.index.find(id) == null);
@@ -149,8 +148,8 @@ test "gossip validation index bounds sparse lookups and follows replacement expi
         try std.testing.expectEqual(@as(usize, 1), v.index.probe_limit);
         try std.testing.expectEqual(Verdict.reject, v.find(id, 2).?.verdict);
     }
-    try std.testing.expect(v.find(first, 2) == null);
-    try std.testing.expectEqual(@as(u64, 1), v.delivery_evictions);
+    try std.testing.expect(v.find(first, 2) != null);
+    try std.testing.expectEqual(@as(u64, 0), v.delivery_evictions);
     try std.testing.expect(v.find(second, 21) == null);
     try std.testing.expect(v.index.find(second) != null);
     var retry = v.reserve(second).?;

@@ -37,36 +37,18 @@ pub fn flags(runtime: *Runtime, io: std.Io) !void {
     const table = if (runtime.gossip) |*table| table else return;
     const clock = try sample(io);
     const now: n.Now = .{ .mono_ms = clock.mono_ms, .unix_s = @intCast(clock.unix_ms / 1000) };
-    table.slot = runtime.slot;
-    if (table.batch_due) |due| if (now.mono_ms >= due) {
-        table.batch_due = null;
-        if (table.hasWork()) runtime.pingLocked();
-    };
-    if (table.limits != null) for (table.cells) |*cell| {
-        if (cell.state != .queued and cell.state != .waiting and cell.state != .needs_check and cell.state != .checking) continue;
-        if (!processor.metadata_mod.eligible(&cell.metadata, cell.kind, cell.deneb, table.slot)) {
-            table.ignore(cell);
-            table.diag.slotRefusals +|= 1;
-        }
-    };
-    var applied: usize = 0;
-    for (0..table.cells.len) |_| {
-        const i = table.cursor;
-        table.cursor = (i + 1) % table.cells.len;
-        const cell = &table.cells[i];
-        if (cell.state != .verdict_pending) continue;
+    table.maintain(now.mono_ms, runtime.slot);
+    var retired_bytes: usize = 0;
+    for (0..batch_max) |_| {
+        const token = table.nextVerdict() orelse break;
+        const cell = table.get(token).?;
+        if (retired_bytes > 0 and cell.input.len > batch_bytes -| retired_bytes) break;
+        retired_bytes += cell.input.len;
         const result = runtime.heavy.?.core.reportValidation(cell.handle, cell.verdict, now);
         table.outcome(result);
-        if (now.mono_ms >= cell.deadline) table.diag.deliveredExpired +|= 1;
-        table.retire(.{ .index = @intCast(i), .generation = cell.generation });
-        applied += 1;
-        if (applied == batch_max) break;
+        table.retire(token);
     }
-    table.expire(now.mono_ms);
-    if (applied > 0 and table.hasWork()) {
-        runtime.work_rearm = true;
-        runtime.signalLocked();
-    }
+    if (table.hasWork()) runtime.pingLocked();
 }
 pub const Ingress = struct {
     runtime: *Runtime,
@@ -74,7 +56,7 @@ pub const Ingress = struct {
     failure: ?anyerror = null,
 
     pub fn sink(self: *Ingress) native.MessageSink {
-        return .{ .context = self, .has_capacity = hasCapacity, .deliver = deliver };
+        return .{ .context = self, .has_capacity = hasCapacity, .make_room = makeRoom, .deliver = deliver };
     }
 
     fn hasCapacity(context: *anyopaque, kind: native.topic.Kind, len: usize) bool {
@@ -85,21 +67,47 @@ pub const Ingress = struct {
         defer runtime.unlock();
         if (runtime.stop) return false;
         const table = if (runtime.gossip) |*table| table else return false;
+        return table.hasCapacity(kind, len) or table.freshnessVictim(kind) != null;
+    }
+
+    fn makeRoom(context: *anyopaque, source: processor.Source, kind: native.topic.Kind, len: usize) bool {
+        const self: *Ingress = @ptrCast(@alignCast(context));
+        const runtime = self.runtime;
+        runtime.lock();
+        defer runtime.unlock();
+        if (runtime.stop or self.failure != null) return false;
+        const table = &runtime.gossip.?;
+        if (!table.sourceRoom(source, kind, len)) {
+            table.diag.sourceRefusals +|= 1;
+            return false;
+        }
+        const now = monotonic() catch |err| {
+            self.failure = err;
+            return false;
+        };
+        var bytes: usize = 0;
+        for (0..batch_max) |_| {
+            if (table.hasCapacity(kind, len)) return true;
+            const token = table.freshnessVictim(kind) orelse return false;
+            const cell = table.get(token).?;
+            if (bytes > 0 and cell.input.len > batch_bytes -| bytes) return false;
+            bytes += cell.input.len;
+            table.outcome(runtime.heavy.?.core.reportValidation(cell.handle, .ignore, .{ .mono_ms = now, .unix_s = 0 }));
+            table.retire(token);
+            table.diag.freshnessReplacements +|= 1;
+        }
         return table.hasCapacity(kind, len);
     }
 
-    fn deliver(context: *anyopaque, message: *const native.MessageEvent) void {
+    fn deliver(context: *anyopaque, message: *const native.MessageEvent) bool {
         const self: *Ingress = @ptrCast(@alignCast(context));
-        self.capture(message) catch |err| {
+        return self.capture(message) catch |err| {
             self.failure = err;
-            _ = self.runtime.heavy.?.core.reportValidation(message.handle, .ignore, .{
-                .mono_ms = message.admitted_ms,
-                .unix_s = 0,
-            });
+            return false;
         };
     }
 
-    fn capture(self: *Ingress, message: *const native.MessageEvent) !void {
+    fn capture(self: *Ingress, message: *const native.MessageEvent) !bool {
         const runtime = self.runtime;
         const clock = try sample(self.io);
         const now: n.Now = .{ .mono_ms = clock.mono_ms, .unix_s = @intCast(clock.unix_ms / 1000) };
@@ -108,8 +116,7 @@ pub const Ingress = struct {
         defer runtime.unlock();
         const table = &runtime.gossip.?;
         if (runtime.stop or table.closed or now.mono_ms >= message.deadline) {
-            table.outcome(runtime.heavy.?.core.reportValidation(message.handle, .ignore, now));
-            return;
+            return false;
         }
         const parsed = native.topic.parseCanonical(message.topic).?;
         const kind = parsed.name.kind;
@@ -126,34 +133,15 @@ pub const Ingress = struct {
         const metadata: processor.metadata_mod.Metadata = if (table.limits != null) processor.metadata_mod.extract(kind, electra, message.bytes) else .{};
         if (table.limits != null and !processor.metadata_mod.eligible(&metadata, kind, deneb, runtime.slot)) {
             table.diag.slotRefusals +|= 1;
-            table.outcome(runtime.heavy.?.core.reportValidation(message.handle, .ignore, now));
-            return;
+            return false;
         }
-        const token = table.reserveKind(kind, message.bytes.len) catch |err| {
-            switch (err) {
-                error.NetworkGossipFull, error.NetworkBridgeFull => {},
-                else => return err,
-            }
-            table.outcome(runtime.heavy.?.core.reportValidation(message.handle, .ignore, now));
-            return;
-        };
-        const cell = table.get(token).?;
-        cell.metadata = metadata;
-        cell.deneb = deneb;
-        cell.handle = message.handle;
-        cell.identity = message.identity;
-        cell.source = message.source;
-        cell.connection = message.peer;
-        cell.id = message.id;
-        assert(message.topic.len <= topic_max);
-        @memcpy(cell.topic[0..message.topic.len], message.topic);
-        cell.topic_len = @intCast(message.topic.len);
-        cell.deadline = message.deadline;
-        cell.received_at = received_at;
-        cell.admitted_ms = message.admitted_ms;
         const empty = !table.hasWork();
-        table.install(token, message.bytes);
+        table.capture(message, &metadata, deneb, received_at) catch |err| switch (err) {
+            error.NetworkGossipFull, error.NetworkBridgeFull => return false,
+            else => return err,
+        };
         if (empty and table.hasWork()) runtime.pingLocked();
+        return true;
     }
 };
 pub fn closeLocked(runtime: *Runtime) void {

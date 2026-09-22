@@ -16,7 +16,7 @@ test("gossip drain and stale verdict on an activated application", async () => {
   try {
     await runtime.identity;
     await runtime.applyIntent(localIntent(config), config.initialSlot);
-    expect(runtime.drainGossip()).toEqual({grouped: false, messages: [], more: false});
+    expect(runtime.drainGossip()).toEqual({jobs: [], messages: [], more: false});
     expect(runtime.reportGossip({generation: 1n, index: 0}, "ignore")).toBe(false);
   } finally {
     await runtime.close();
@@ -130,7 +130,7 @@ test("gossip lifecycle, strict representations and canonical publication refusal
   } finally {
     await runtime.close();
   }
-  expect(runtime.drainGossip()).toEqual({grouped: false, messages: [], more: false});
+  expect(runtime.drainGossip()).toEqual({jobs: [], messages: [], more: false});
   expect(runtime.reportGossip(handle, "ignore")).toBe(false);
   await expect(runtime.publishGossip(TOPIC, new Uint8Array(4000))).rejects.toThrow("NetworkClosed");
   expect(runtime.diagnostics().gossip).toMatchObject({
@@ -381,7 +381,7 @@ test("gossip byte refusal preserves both accepted request directions and real co
 test.each([
   false,
   true,
-])("native gossip expiry %s before/after delivery retires without a host report", async (delivered) => {
+])("native gossip expiry %s releases queued payloads but retains outstanding host work", async (delivered) => {
   const pair = await gossipPair(150n);
   try {
     await pair.left.publishGossip(TOPIC, new Uint8Array(4000).fill(5), {allowZeroPeers: false});
@@ -394,13 +394,14 @@ test.each([
     }
     expect(pair.right.diagnostics().gossip).toMatchObject({
       deliveredExpired: delivered ? 1n : 0n,
-      occupied: 0,
+      occupied: delivered ? 1 : 0,
       payloadBytes: 0,
       queuedExpired: delivered ? 0n : 1n,
       reservedBytes: 0,
     });
-    expect(pair.right.drainGossip()).toEqual({grouped: false, messages: [], more: false});
+    expect(pair.right.drainGossip()).toEqual({jobs: [], messages: [], more: false});
     if (message) expect(pair.right.reportGossip(message.handle, "accept")).toBe(false);
+    expect(pair.right.diagnostics().gossip.occupied).toBe(0);
   } finally {
     await Promise.all([pair.left.close(), pair.right.close()]);
   }

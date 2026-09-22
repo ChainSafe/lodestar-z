@@ -17,6 +17,7 @@ pub const Entry = struct {
     retention_charged: bool = false,
     generation: u64 = 0,
     active: bool = false,
+    free_next: u32 = none,
     provisional: bool = false,
     validation: bool = false,
     history: bool = false,
@@ -60,12 +61,12 @@ pub const Store = struct {
     free_pages: usize,
     used_entries: usize = 0,
     retired_entries: usize = 0,
-    entry_cursor: usize = 0,
-    limits: ?@import("../gossip_processor/limits.zig").Limits = null,
-    used_by_kind: [@import("../gossip_processor/limits.zig").kind_count]usize = @splat(0),
-    entries_by_kind: [@import("../gossip_processor/limits.zig").kind_count]usize = @splat(0),
-    retained_entries_by_kind: [@import("../gossip_processor/limits.zig").kind_count]usize = @splat(0),
-    retained_by_kind: [@import("../gossip_processor/limits.zig").kind_count]usize = @splat(0),
+    free_entry: u32 = 0,
+    limits: ?@import("../gossip_limits.zig").Limits = null,
+    used_by_kind: [@import("../gossip_limits.zig").kind_count]usize = @splat(0),
+    entries_by_kind: [@import("../gossip_limits.zig").kind_count]usize = @splat(0),
+    retained_entries_by_kind: [@import("../gossip_limits.zig").kind_count]usize = @splat(0),
+    retained_by_kind: [@import("../gossip_limits.zig").kind_count]usize = @splat(0),
 
     pub fn metadataBytes(capacity: usize, byte_capacity: usize) usize {
         return capacity * @sizeOf(Entry) + byte_capacity / page_bytes * @sizeOf(u32);
@@ -82,6 +83,7 @@ pub const Store = struct {
         const entries = try a.alloc(Entry, capacity);
         errdefer a.free(entries);
         @memset(entries, .{});
+        for (entries, 0..) |*entry, i| entry.free_next = if (i + 1 == capacity) none else @intCast(i + 1);
         for (next, 0..) |*n, i| n.* = if (i + 1 == pages) none else @intCast(i + 1);
         return .{ .bytes = bytes, .next = next, .entries = entries, .free_page = 0, .free_pages = pages };
     }
@@ -128,42 +130,40 @@ pub const Store = struct {
         assert(name.len <= topic.topic_max_len);
         const kind = if (topic.parseCanonical(name)) |canonical| canonical.name.kind else .beacon_block;
         if (!self.canReserve(data.len) or !self.kindRoom(kind, data.len)) return null;
-        for (0..self.entries.len) |_| {
-            const index = self.entry_cursor;
-            self.entry_cursor = (index + 1) % self.entries.len;
-            const entry = &self.entries[index];
-            if (entry.active or entry.generation == std.math.maxInt(u64)) continue;
-            entry.* = .{
-                .kind = kind,
-                .generation = entry.generation + 1,
-                .active = true,
-                .provisional = true,
-                .id = id,
-                .len = @intCast(data.len),
-                .topic_len = @intCast(name.len),
-            };
-            entry.prefix_len = @intCast(encodePrefix(&entry.prefix, &entry.trailer, data.len, name).prefix);
-            if (data.len <= inline_bytes) @memcpy(entry.inline_data[0..data.len], data);
-            var link = &entry.first;
-            var offset: usize = 0;
-            for (0..pagesFor(data.len)) |_| {
-                const page = self.free_page;
-                assert(page != none);
-                self.free_page = self.next[page];
-                self.free_pages -= 1;
-                link.* = page;
-                link = &self.next[page];
-                const take = @min(page_bytes, data.len - offset);
-                @memcpy(self.bytes[@as(usize, page) * page_bytes ..][0..take], data[offset..][0..take]);
-                offset += take;
-            }
-            link.* = none;
-            self.used_entries += 1;
-            self.used_by_kind[@intFromEnum(kind)] += pagesFor(data.len);
-            self.entries_by_kind[@intFromEnum(kind)] += 1;
-            return .{ .index = @intCast(index), .generation = entry.generation };
+        const index = self.free_entry;
+        if (index == none) return null;
+        const entry = &self.entries[index];
+        assert(!entry.active and entry.generation < std.math.maxInt(u64));
+        self.free_entry = entry.free_next;
+        entry.* = .{
+            .kind = kind,
+            .generation = entry.generation + 1,
+            .active = true,
+            .provisional = true,
+            .id = id,
+            .len = @intCast(data.len),
+            .topic_len = @intCast(name.len),
+        };
+        entry.prefix_len = @intCast(encodePrefix(&entry.prefix, &entry.trailer, data.len, name).prefix);
+        if (data.len <= inline_bytes) @memcpy(entry.inline_data[0..data.len], data);
+        var link = &entry.first;
+        var offset: usize = 0;
+        for (0..pagesFor(data.len)) |_| {
+            const page = self.free_page;
+            assert(page != none);
+            self.free_page = self.next[page];
+            self.free_pages -= 1;
+            link.* = page;
+            link = &self.next[page];
+            const take = @min(page_bytes, data.len - offset);
+            @memcpy(self.bytes[@as(usize, page) * page_bytes ..][0..take], data[offset..][0..take]);
+            offset += take;
         }
-        return null;
+        link.* = none;
+        self.used_entries += 1;
+        self.used_by_kind[@intFromEnum(kind)] += pagesFor(data.len);
+        self.entries_by_kind[@intFromEnum(kind)] += 1;
+        return .{ .index = @intCast(index), .generation = entry.generation };
     }
 
     pub fn cursor(self: *const Store, handle: Handle) Cursor {
@@ -263,7 +263,10 @@ pub const Store = struct {
         }
         e.active = false;
         self.used_entries -= 1;
-        if (e.generation == std.math.maxInt(u64)) self.retired_entries += 1;
+        if (e.generation == std.math.maxInt(u64)) self.retired_entries += 1 else {
+            e.free_next = self.free_entry;
+            self.free_entry = h.index;
+        }
     }
 };
 

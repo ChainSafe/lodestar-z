@@ -109,7 +109,7 @@ it("starts without subscriptions and accepts ordinary updates after rejecting an
   try {
     expect(runtime.state).toBe("running");
     expect((await runtime.getGossipDiagnostics()).topics.some((topic) => topic.subscribed)).toBe(false);
-    expect(runtime.drainGossip()).toEqual({grouped: false, messages: [], more: false});
+    expect(runtime.drainGossip()).toEqual({jobs: [], messages: [], more: false});
     expect(runtime.takeIncomingRequest()).toBeNull();
     const intent = localIntent(config);
     intent.subscriptions = [{digest: new Uint8Array(4).fill(255), subnets: {}}];
