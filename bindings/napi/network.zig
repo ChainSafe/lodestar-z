@@ -122,10 +122,9 @@ fn prepareApplicationStorage(runtime: *Runtime, app: *const application_cfg.Conf
     const request_capacity: usize = limits.outbound_max - limits.outbound_control_reserved;
     const incoming_capacity: usize = limits.inbound_max - limits.inbound_control_reserved;
     const gossip_options = &resolved.core.service.gossipsub;
-    const gossip_capacity = gossip_options.validation_capacity;
-    const gossip_bytes = if (gossip_options.processor_limits) |work_limits| n.gossip_processor.limits_mod.bytes(&work_limits) else gossip_options.mcache_arena_bytes;
-    const gossip_backing = gossip.Table.backingBytes(gossip_capacity, gossip_bytes);
     const chain = &runtime.heavy.?.config.chain;
+    const gossip_plan = n.gossip_processor.Plan.resolve(gossip_options, chain.forks[0..chain.supported_count]);
+    const gossip_backing = gossip.Table.backingBytes(gossip_plan.capacity, gossip_plan.bytes);
     const metrics_capacity = n.metrics.textCapacity(chain.topics[0..chain.supported_count]);
     const publication_capacity: usize = if (runtime.heavy.?.config.profile == .small) 32 else publications.capacity_max;
     const bridge = publication_capacity * @sizeOf(publications.Cell) + 2 * metrics_capacity + gossip_backing + incoming_capacity * @sizeOf(incoming.Cell) + request_capacity * @sizeOf(requests.Cell) + @sizeOf(Runtime) + @sizeOf(r.Owner) - @sizeOf(n.NetworkCore) + r.Stores.bytes(runtime.peer_capacity) + @sizeOf(projection.Lane);
@@ -137,14 +136,7 @@ fn prepareApplicationStorage(runtime: *Runtime, app: *const application_cfg.Conf
     try faults.check(.incoming_table);
     runtime.incoming = try incoming.Table.init(r.allocator, incoming_capacity, &runtime.payload_budget);
     try faults.check(.gossip_table);
-    runtime.gossip = try gossip.Table.initPlanned(r.allocator, gossip_capacity, gossip_bytes, &runtime.payload_budget, gossip_options.processor_limits);
-    @memset(&runtime.gossip.?.source_maximum, 0);
-    for (chain.topics[0..chain.supported_count]) |boundary| for (boundary.rules, 0..) |rule, k| {
-        runtime.gossip.?.source_maximum[k] = @max(runtime.gossip.?.source_maximum[k], rule.ssz_max);
-    };
-    if (gossip_options.execution_limits) |execution| runtime.gossip.?.execution = execution;
-    runtime.gossip.?.groups.index.seed = gossip_options.random_seed.? ^ 3;
-    runtime.gossip.?.dependencies.index.seed = gossip_options.random_seed.? ^ 4;
+    runtime.gossip = try gossip.Table.init(r.allocator, gossip_plan, &runtime.payload_budget);
     runtime.stores = try r.Stores.create(r.allocator, runtime.peer_capacity);
     try faults.check(.application_lane);
     runtime.lane = try r.allocator.create(projection.Lane);

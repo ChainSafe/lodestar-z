@@ -68,6 +68,18 @@ pub const Pair = struct {
         self.shared.deinit();
     }
 
+    pub fn forwardActivity(self: *Pair) void {
+        var activity: [128]engine_mod.Handle = undefined;
+        for (activity[0..self.shared.pair.client.takeActivity(&activity)]) |conn| {
+            self.shared.client.router.connectionActivity(conn);
+            self.shared.client.reqresp.connectionActivity(conn);
+        }
+        for (activity[0..self.shared.pair.server.takeActivity(&activity)]) |conn| {
+            self.shared.server.router.connectionActivity(conn);
+            self.shared.server.reqresp.connectionActivity(conn);
+        }
+    }
+
     pub fn pumpOnce(self: *Pair) !void {
         const counts = try self.shared.step(.{ .application = self.client_events[0..16], .control = self.client_events[16..] }, .{ .application = self.server_events[0..self.server_event_capacity], .control = self.server_events[16..][0..self.server_event_capacity] });
         std.mem.copyForwards(Event, self.server_events[counts.server.application..], self.server_events[16..][0..counts.server.control]);

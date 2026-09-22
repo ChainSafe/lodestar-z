@@ -222,7 +222,7 @@ pub const HeaderInfo = struct {
     token_len: usize,
 };
 
-const token_length_max = 256;
+const token_length_max = @import("../constants.zig").datagram_size_max;
 
 pub fn headerInfo(datagram: []const u8) Error!HeaderInfo {
     var version: u32 = 0;

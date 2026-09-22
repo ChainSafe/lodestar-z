@@ -212,7 +212,8 @@ pub const Handler = struct {
                 slot.* = .{};
                 continue;
             };
-            if (done) {
+            slot.ready = done == .yielded;
+            if (done == .done) {
                 engine.closeStream(stream, types.app_error_normal);
                 slot.* = .{};
             }

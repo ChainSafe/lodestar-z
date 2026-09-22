@@ -162,7 +162,7 @@ export async function exerciseRaw(Child, waitFor, binary) {
     await fresh(0x71000108);
     assert.equal(rawEvents().flatMap((event) => event.iwant).length, controlBefore);
     assert.equal((await zig.command("snapshot")).malformedRpcs, errorsBefore + 1);
-    for (const variant of ["duplicateControl", "group", "noncanonicalTag", "unknownField", "wrongWire"]) {
+    for (const variant of ["duplicateControl", "group", "noncanonicalTag", "wrongWire"]) {
       const prior = await zig.command("snapshot");
       assert.equal(prior.remoteSubscriptions, 1);
       await js.command("rawRpc", {kind: "invalidEnvelope", variant});
@@ -173,6 +173,12 @@ export async function exerciseRaw(Child, waitFor, binary) {
       assert.equal(rejected.heldFrames, 0);
       await js.command("rawOpen", {address: address.address});
     }
+    const beforeExtension = await zig.command("snapshot");
+    await js.command("rawRpc", {kind: "extensionEnvelope"});
+    await waitFor(async () => (await zig.command("snapshot")).remoteSubscriptions === 0);
+    assert.equal((await zig.command("snapshot")).malformedRpcs, beforeExtension.malformedRpcs);
+    await js.command("rawRpc", {kind: "subscribe"});
+    await waitFor(async () => (await zig.command("snapshot")).remoteSubscriptions === 1);
     await cleanStore();
     assert.equal(countId("iwant", recoveryId), 1);
     assert.equal(

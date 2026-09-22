@@ -62,6 +62,7 @@ pub const PeerIo = struct {
     unread_end: usize = 0,
     reader: frame.Reader = .{},
     rpc: ?ActiveRpc = null,
+    discarding: bool = false,
     fin_seen: bool = false,
     overflow: receive.Chain = .{},
     progress_ms: u64 = 0,
@@ -88,13 +89,16 @@ pub const PeerIo = struct {
             consumed = try self.reader.readPrefix(input);
         }
         if (self.reader.declared != null and self.reader.filled < self.reader.declared.? and consumed < input.len) {
-            const overflow = self.reader.filled >= self.body.len;
-            const target = if (overflow) pool.writable(&self.overflow) orelse return error.ReceiveCapacity else self.body[self.reader.filled..];
-            const take = @min(input.len - consumed, target.len, self.reader.declared.? - self.reader.filled);
+            var take = @min(input.len - consumed, self.reader.declared.? - self.reader.filled);
+            if (!self.discarding) {
+                const overflow = self.reader.filled >= self.body.len;
+                const target = if (overflow) pool.writable(&self.overflow) orelse return error.ReceiveCapacity else self.body[self.reader.filled..];
+                take = @min(take, target.len);
+                @memcpy(target[0..take], input[consumed..][0..take]);
+                if (overflow) self.overflow.len += take;
+            }
             assert(take > 0);
-            @memcpy(target[0..take], input[consumed..][0..take]);
             self.reader.filled += take;
-            if (overflow) self.overflow.len += take;
             consumed += take;
         }
         if (consumed > 0) {
@@ -104,7 +108,7 @@ pub const PeerIo = struct {
             self.unread_start += consumed;
         }
         const complete = self.reader.declared != null and self.reader.filled == self.reader.declared.?;
-        if (complete) self.rpc = .{ .reader = protobuf.RpcReader.initView(.{
+        if (complete and !self.discarding) self.rpc = .{ .reader = protobuf.RpcReader.initView(.{
             .prefix = self.body[0..@min(self.reader.filled, self.body.len)],
             .pool = pool,
             .first = self.overflow.first,
@@ -121,6 +125,7 @@ pub const PeerIo = struct {
     pub fn finishFrame(self: *PeerIo) void {
         assert(self.overflow.pages == 0);
         self.rpc = null;
+        self.discarding = false;
         self.reader = .{};
         self.frame_since = null;
         self.pressure_since = null;

@@ -63,6 +63,7 @@ fn listen(allocator: std.mem.Allocator, io: std.Io, host: []const u8, port: u16)
     while (true) {
         const stepped = node.step(io, &events, &activity, .{});
         const result = stepped.progress;
+        for (activity[0..result.activity]) |conn| negotiator.connectionActivity(conn);
         for (events[0..result.events]) |event| switch (event) {
             .connected => |connected| printPeer("connected", &connected.peer_id),
             .closed => |closed| {
@@ -120,7 +121,7 @@ fn freeSession(sessions: []Session) ?*Session {
 }
 
 fn serve(engine: *engine_mod.Engine, session: *Session) !void {
-    if (!try session.out.pump(engine, session.stream)) return;
+    if (try session.out.pump(engine, session.stream) != .done) return;
     if (session.closing) {
         session.active = false;
         return;
@@ -129,7 +130,7 @@ fn serve(engine: *engine_mod.Engine, session: *Session) !void {
     if (read.len == 0 and !read.fin) return;
     session.closing = read.fin;
     session.out.queue(session.buffer[0..read.len], read.fin);
-    if (try session.out.pump(engine, session.stream) and session.closing) session.active = false;
+    if (try session.out.pump(engine, session.stream) == .done and session.closing) session.active = false;
 }
 
 fn dial(allocator: std.mem.Allocator, io: std.Io, text: []const u8) !void {
@@ -160,6 +161,7 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, text: []const u8) !void {
     while (steps < dial_steps_max and state != .done) : (steps += 1) {
         const stepped = node.step(io, &events, &activity, .{});
         const result = stepped.progress;
+        for (activity[0..result.activity]) |conn| negotiator.connectionActivity(conn);
         for (events[0..result.events]) |event| switch (event) {
             .connected => |connected| {
                 printPeer("connected", &connected.peer_id);
@@ -189,7 +191,7 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, text: []const u8) !void {
             if (state == .negotiating) continue;
         }
         const active = stream orelse continue;
-        if (!try out.pump(&node.engine, active)) continue;
+        if (try out.pump(&node.engine, active) != .done) continue;
         if (state == .closing) {
             _ = node.engine.close(handle, 0);
             state = .done;

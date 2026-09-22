@@ -872,6 +872,7 @@ pub const ReqResp = struct {
             if (position < self.outbound.len) {
                 const slot = &self.outbound[position];
                 if (!slot.request.running()) continue;
+                if (!slot.request.needs_service and slot.deadline().? > now.mono_ms) continue;
                 slot.request.needs_service = false;
                 slot.advance(self, engine, @intCast(position), now);
                 serviced += 1;
@@ -884,9 +885,7 @@ pub const ReqResp = struct {
                         const local = (start + offset) % receive_plan.slots_per_peer;
                         const index = first + local;
                         const slot = &self.inbound[index];
-                        if (!slot.request.running()) continue;
-                        const due = slot.deadline(self) orelse unreachable;
-                        if (!slot.request.needs_service and due > now.mono_ms and slot.state != .withheld) continue;
+                        if (!self.inboundRunnable(slot, now)) continue;
                         self.peer_cursors[peer].receive = @intCast((local + 1) % receive_plan.slots_per_peer);
                         slot.request.needs_service = false;
                         slot.advance(self, engine, @intCast(index), now);
@@ -896,7 +895,7 @@ pub const ReqResp = struct {
                 } else {
                     const index = position - self.outbound.len;
                     const slot = &self.inbound[index];
-                    if (!slot.request.running()) continue;
+                    if (!self.inboundRunnable(slot, now)) continue;
                     slot.request.needs_service = false;
                     slot.advance(self, engine, @intCast(index), now);
                     serviced += 1;
@@ -906,6 +905,16 @@ pub const ReqResp = struct {
         self.promoteReady(now);
         // Cleanup also covers terminal transitions made during this turn.
         self.cleanupPending(engine, router);
+    }
+
+    fn inboundRunnable(self: *ReqResp, slot: *const Server, now: Now) bool {
+        if (!slot.request.running()) return false;
+        if (slot.request.needs_service or slot.deadline(self).? <= now.mono_ms) return true;
+        if (slot.state == .withheld) {
+            const eligible = self.limiter.nextToken(slot.request.conn, slot.request.protocol, now.mono_ms) orelse return true;
+            return eligible <= now.mono_ms;
+        }
+        return false;
     }
 
     fn promoteReady(self: *ReqResp, now: Now) void {

@@ -79,6 +79,8 @@ pub const Counters = struct {
     stream_errors: u64 = 0,
     version_negotiations: u64 = 0,
     retries: u64 = 0,
+    cached_token_retries: u64 = 0,
+    invalid_retry_tokens: u64 = 0,
     path_changes: u64 = 0,
     keylog_dropped: u64 = 0,
 };
@@ -413,8 +415,11 @@ pub const Engine = struct {
 
     pub fn openStream(self: *Engine, conn: Handle) StreamError!StreamHandle {
         const slot = try self.liveSlot(conn);
+        const opened = slot.openStream() catch |err| {
+            if (err != error.StreamLimit and err != error.StreamTableFull and err != error.NotEstablished) self.host_work_pending = true;
+            return self.streamError(err);
+        };
         self.host_work_pending = true;
-        const opened = slot.openStream() catch |err| return self.streamError(err);
         assert(opened.index < limits.streams_per_connection);
         assert(slot.table.matches(opened.index, opened.id));
         return .{ .conn = conn, .id = opened.id, .slot = opened.index };
@@ -461,6 +466,7 @@ pub const Engine = struct {
         assert(target.slot.conn != null);
         target.slot.shutdown(target.index, target.id, dir, code);
         self.host_work_pending = true;
+        self.registry.activity[stream.conn.index] = true;
     }
 
     pub fn closeStream(self: *Engine, stream: StreamHandle, code: u64) void {
@@ -469,6 +475,7 @@ pub const Engine = struct {
         assert(target.slot.conn != null);
         target.slot.closeStream(target.index, target.id, code);
         self.host_work_pending = true;
+        self.registry.activity[stream.conn.index] = true;
     }
 
     pub fn pollEvents(self: *Engine, events: []Event) usize {
@@ -500,7 +507,7 @@ pub const Engine = struct {
                 slot.path_changed_pending = null;
             }
             if (slot.table.pending > 0) {
-                count = pollStreamEvents(slot, conn, events, count);
+                count = pollStreamEvents(slot, conn, events, count, &self.registry.activity[index]);
                 if (count == events.len) return count;
             }
             if (slot.close_event == .pending) {
@@ -572,8 +579,13 @@ pub const Engine = struct {
         if (self.handshakingFromSource(from) >= self.limits.handshaking_per_source_max) {
             return drop(&self.counters.dropped_source_limit);
         }
-        if (header.token_len == 0) return self.sendRetry(&header, from, now, out);
-        const original = retry.validate(&self.retry_key, from, &header.dcid, header.token[0..header.token_len], now.mono_ms, self.limits.handshake_timeout_ms) orelse return drop(&self.counters.dropped_unroutable);
+        const token = header.token[0..header.token_len];
+        if (!retry.isLocal(token)) {
+            const outcome = self.sendRetry(&header, from, now, out);
+            if (token.len > 0 and outcome == .retry) self.counters.cached_token_retries +|= 1;
+            return outcome;
+        }
+        const original = retry.validate(&self.retry_key, from, &header.dcid, token, now.mono_ms, self.limits.handshake_timeout_ms) orelse return drop(&self.counters.invalid_retry_tokens);
         const scid = header.dcid.bytes[0..limits.local_cid_length].*;
         const index = self.registry.claim() orelse return drop(&self.counters.dropped_full);
 
@@ -929,6 +941,7 @@ fn pollStreamEvents(
     conn: Handle,
     events: []Event,
     start: usize,
+    activity: *bool,
 ) usize {
     assert(slot.table.pending > 0);
     assert(start <= events.len);
@@ -948,6 +961,7 @@ fn pollStreamEvents(
         if (entry.closed_pending) {
             if (count == events.len) return count;
             const closed = slot.table.takeClosed(index).?;
+            activity.* = true;
             events[count] = .{ .stream_closed = .{
                 .stream = .{ .conn = conn, .id = closed.id, .slot = index },
                 .reset_code = closed.reset_code,

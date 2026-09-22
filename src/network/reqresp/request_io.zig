@@ -17,7 +17,7 @@ pub const RequestIO = struct {
     writing: bool = false,
     outbox: stream_io.Outbox = .{},
 
-    pub const Flush = struct { done: bool };
+    pub const Flush = struct { done: bool, runnable: bool = false };
 
     pub fn flush(
         self: *RequestIO,
@@ -32,9 +32,9 @@ pub const RequestIO = struct {
             if (last) self.writing = false;
         }
         const flushed = try self.outbox.pump(engine, stream);
-        const done = flushed and !self.writing;
-        if (flushed) self.outbox = .{};
-        return .{ .done = done };
+        const done = flushed == .done and !self.writing;
+        if (flushed == .done) self.outbox = .{};
+        return .{ .done = done, .runnable = flushed == .yielded or (flushed == .done and self.writing) };
     }
 
     pub const Input = struct { bytes: []const u8, fin: bool, progressed: bool, reset: bool };

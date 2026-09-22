@@ -4,7 +4,7 @@ const Budget = @import("network_budget.zig").Budget;
 
 test "gossip exact shared 2Q admission and generation exhaustion" {
     var budget: Budget = .{ .limit = 19 };
-    var table = try g.Table.init(std.testing.allocator, 64, &budget);
+    var table = try g.Table.init(std.testing.allocator, .{ .capacity = 64, .bytes = 64 * 1024 * 1024 }, &budget);
     defer table.deinit();
     try std.testing.expectError(error.NetworkBridgeFull, table.reserve(10));
     try std.testing.expectEqual(@as(usize, 0), budget.used);
@@ -25,7 +25,7 @@ test "gossip table and payload allocation prefixes unwind shared reservation" {
 }
 fn allocationPrefix(allocator: std.mem.Allocator) !void {
     var budget: Budget = .{ .limit = 20 };
-    var table = try g.Table.init(allocator, 1024, &budget);
+    var table = try g.Table.init(allocator, .{ .capacity = 1024, .bytes = 64 * 1024 * 1024 }, &budget);
     defer table.deinit();
     const token = try table.reserve(10);
     defer table.retire(token);
@@ -34,7 +34,7 @@ fn allocationPrefix(allocator: std.mem.Allocator) !void {
 
 test "gossip batch bounds, rollback and expiry keep pins until full completion" {
     var budget: Budget = .{ .limit = 64 * 1024 * 1024 };
-    var table = try g.Table.init(std.testing.allocator, 1024, &budget);
+    var table = try g.Table.init(std.testing.allocator, .{ .capacity = 1024, .bytes = 64 * 1024 * 1024 }, &budget);
     defer table.deinit();
     const data = try std.testing.allocator.alloc(u8, 10 * 1024 * 1024);
     defer std.testing.allocator.free(data);
@@ -82,7 +82,7 @@ test "gossip flags remain independent of full command capacity and reject stale 
     var commands: @import("network_commands.zig").Table = .{};
     for (0..32) |_| _ = try commands.reserve(.getIdentity);
     var budget: Budget = .{ .limit = 128 };
-    var table = try g.Table.init(std.testing.allocator, 64, &budget);
+    var table = try g.Table.init(std.testing.allocator, .{ .capacity = 64, .bytes = 64 * 1024 * 1024 }, &budget);
     defer table.deinit();
     var handles: [64]g.Token = undefined;
     for (&handles) |*token| {

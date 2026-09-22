@@ -24,24 +24,27 @@ pub const Outbox = struct {
         return self.offset == self.bytes.len and !self.fin;
     }
 
-    pub fn pump(self: *Outbox, engine: *Engine, stream: StreamHandle) StreamError!bool {
+    pub const Progress = enum { done, blocked, yielded };
+
+    pub fn pump(self: *Outbox, engine: *Engine, stream: StreamHandle) StreamError!Progress {
         assert(self.offset <= self.bytes.len);
         var attempts: u32 = 0;
         while (attempts < pump_attempts_max) : (attempts += 1) {
-            if (self.idle()) return true;
+            if (self.idle()) return .done;
             const remaining = self.bytes[self.offset..];
             const written = engine.write(stream, remaining, self.fin) catch |err| switch (err) {
-                error.WouldBlock => return false,
+                error.WouldBlock => return .blocked,
                 else => return err,
             };
             assert(written <= remaining.len);
+            if (written == 0 and remaining.len > 0) return .blocked;
             self.offset += written;
             if (self.offset == self.bytes.len) {
                 self.fin = false;
-                return true;
+                return .done;
             }
         }
-        return false;
+        return .yielded;
     }
 };
 

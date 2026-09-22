@@ -243,7 +243,7 @@ pub const Negotiator = struct {
                 entry.state = .free;
                 continue;
             }
-            if (entry.state == .negotiating) {
+            if (entry.state == .negotiating and (entry.needs_service or now.mono_ms >= entry.started_ms +| entry.timeout_ms)) {
                 entry.needs_service = false;
                 if (self.advance(engine, entry, now, supported)) |outcome| {
                     entry.pending_result = outcome.result;
@@ -266,6 +266,12 @@ pub const Negotiator = struct {
         }
         assert(count <= outcomes.len);
         return count;
+    }
+
+    pub fn connectionActivity(self: *Negotiator, conn: Handle) void {
+        for (self.entries) |*entry| {
+            if (entry.state == .negotiating and std.meta.eql(entry.stream.conn, conn)) entry.needs_service = true;
+        }
     }
 
     pub fn connectionClosed(self: *Negotiator, engine: *Engine, conn: Handle) void {
@@ -322,13 +328,17 @@ pub const Negotiator = struct {
         if (waited_ms >= entry.timeout_ms) return fail(engine, entry, .timeout);
         const flushed = entry.outbox.pump(engine, entry.stream) catch |err|
             return failStream(engine, entry, err);
-        if (!flushed) return null;
+        if (flushed != .done) {
+            entry.needs_service = flushed == .yielded;
+            return null;
+        }
         if (entry.selected != null) return ready(entry);
         if (entry.inbox.free() == 0) return fail(engine, entry, .overflow);
         const read = entry.inbox.fill(engine, entry.stream) catch |err|
             return failStream(engine, entry, err);
         if (entry.inbox.len == 0 and !read.fin) return null;
         if (read.fin) entry.fin_seen = true;
+        if (read.len > 0) entry.needs_service = true;
         switch (entry.role) {
             .dialer => |*dialer| {
                 const outcome = dialer.feed(entry.inbox.slice()) catch
@@ -360,7 +370,8 @@ pub const Negotiator = struct {
                         entry.needs_service = false;
                         const replied = entry.outbox.pump(engine, entry.stream) catch |err|
                             return failStream(engine, entry, err);
-                        return if (replied) ready(entry) else null;
+                        entry.needs_service = replied == .yielded;
+                        return if (replied == .done) ready(entry) else null;
                     },
                     .failed => return fail(engine, entry, .exhausted),
                     .pending => {},

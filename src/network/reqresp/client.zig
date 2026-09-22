@@ -88,7 +88,7 @@ pub const Client = struct {
             return;
         };
         if (!flushed.done) {
-            if (request.io.outbox.idle()) request.needs_service = true;
+            request.needs_service = flushed.runnable;
             return;
         }
         request.io.payload = &.{};

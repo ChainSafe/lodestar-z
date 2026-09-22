@@ -29,15 +29,14 @@ pub const MessageEvent = struct {
     deadline: u64,
 };
 
-/// Callbacks run synchronously on the network owner. Capacity is a hint and delivery
-/// must recheck it and copy the borrow before returning true. False rolls admission back.
-/// The offered handle commits only after delivery succeeds. Callbacks must not report
-/// that handle, pump the network, publish, or change subscriptions.
+pub const Admission = @import("message_admission.zig").Admission;
+
+/// Admission runs synchronously on the network owner. The consumer serializes
+/// preflight, replacement and commit, and copies the payload before returning.
 pub const MessageSink = struct {
     context: *anyopaque,
     has_capacity: *const fn (*anyopaque, topic_mod.Kind, usize) bool,
-    make_room: ?*const fn (*anyopaque, PeerRef, topic_mod.Kind, usize) bool = null,
-    deliver: *const fn (*anyopaque, *const MessageEvent) bool,
+    admit: *const fn (*anyopaque, *Admission) bool,
 };
 pub const InvalidReason = enum { signed, compressed_size, ssz_size, snappy };
 pub const Received = union(enum) { ignored, invalid: InvalidReason, duplicate: topic_mod.MessageId, admitted: MessageEvent, blocked: enum { events, storage, work } };
@@ -288,35 +287,30 @@ pub const Messages = struct {
             const source_bytes = @import("../gossip_limits.zig").sourceBytes(limits[@intFromEnum(kind)], Validation.chargedBytes(maximum), storage.inline_bytes);
             if (Validation.chargedBytes(msg.data.len) > source_bytes -| self.validation.bytes_per_peer_kind[source.peer.index][@intFromEnum(kind)]) return self.refuseStorage(.peer_validations);
         }
-        if (workspace.sink) |sink| if (sink.make_room) |make_room| {
-            if (!make_room(sink.context, source.peer, kind, written)) return self.refuseStorage(.processor_capacity);
-        };
-        if (context.options.processor_limits) |limits| {
-            if (self.validation.pending_per_kind[@intFromEnum(kind)] >= limits[@intFromEnum(kind)].items) return self.refuseStorage(.kind_validations);
-        }
-        if (!self.store.kindRoom(kind, msg.data.len)) return self.refuseStorage(.kind_payload);
-        var reservation = self.validation.reserve(id) orelse return self.refuseStorage(.validation_capacity);
-        defer reservation.cancel();
-        const message = self.history.admitPayload(&self.store, id, msg.topic, msg.data) orelse return self.refuseStorage(.payload_capacity);
-        const handle: Handle = .{ .index = reservation.index, .generation = self.validation.entries[reservation.index].generation + 1 };
         const room = if (workspace.sink != null) workspace.scratch else workspace.arena[workspace.used.*..];
         const name = if (workspace.sink != null) msg.topic else room[written..][0..msg.topic.len];
-        if (workspace.sink == null) {
-            @memcpy(room[written..][0..msg.topic.len], msg.topic);
+        if (workspace.sink == null) @memcpy(room[written..][0..msg.topic.len], msg.topic);
+        assert(context.peers.matches(source.peer));
+        var candidate: Admission = .{
+            .messages = self,
+            .context = context,
+            .source = source,
+            .topic_index = topic,
+            .compressed = msg.data,
+            .event = .{ .source = source.peer, .identity = context.peers.rows[source.peer.index].identity, .admitted_ms = now, .deadline = now +| self.validation.timeout_ms, .handle = undefined, .id = id, .peer = source.connection, .topic = name, .bytes = room[0..written] },
+        };
+        if (workspace.sink) |sink| {
+            if (!sink.admit(sink.context, &candidate)) {
+                assert(!candidate.committed);
+                return self.refuseStorage(candidate.refusal);
+            }
+        } else {
+            if (!candidate.feasible(&.{})) return self.refuseStorage(candidate.refusal);
+            candidate.commit();
             workspace.used.* += written + msg.topic.len;
         }
-        assert(context.peers.matches(source.peer));
-        const event: MessageEvent = .{ .source = source.peer, .identity = context.peers.rows[source.peer.index].identity, .admitted_ms = now, .deadline = now +| self.validation.timeout_ms, .handle = handle, .id = id, .peer = source.connection, .topic = name, .bytes = room[0..written] };
-        if (workspace.sink) |sink| if (!sink.deliver(sink.context, &event)) {
-            self.store.seal(message);
-            return self.refuseStorage(.processor_capacity);
-        };
-        const committed = reservation.commit(&self.store, context.peers, message, source.peer, context.overlay.ref(topic), now);
-        assert(std.meta.eql(handle, committed));
-        self.validation.attribution(handle).source_eligible = context.overlay.inMesh(topic, source.session.index);
-        self.store.seal(message);
-        _ = self.seen.add(id, now);
-        return .{ .admitted = event };
+        assert(candidate.committed);
+        return .{ .admitted = candidate.event };
     }
 
     fn refuseStorage(self: *Messages, reason: StorageRefusal) Received {

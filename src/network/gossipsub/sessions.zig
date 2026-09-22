@@ -138,6 +138,19 @@ pub const Sessions = struct {
         return released;
     }
 
+    pub fn discardFrame(self: *Sessions, io: *PeerIo) void {
+        if (io.rpc != null) {
+            _ = self.finishFrame(io);
+        } else {
+            std.debug.assert(io.reader.declaredLen() != null);
+            self.receive_pool.release(&io.overflow);
+            io.discarding = true;
+            io.pressure_since = null;
+            io.blocked = .none;
+        }
+        io.rx_ready = true;
+    }
+
     pub fn connectionActivity(self: *Sessions, conn: Handle) void {
         const index = self.findPeer(conn) orelse return;
         self.rows[index].needs_service = true;

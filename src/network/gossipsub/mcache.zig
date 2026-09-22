@@ -256,22 +256,27 @@ pub const History = struct {
         a.free(self.entries);
         self.* = undefined;
     }
+    pub fn canAdmitPayload(self: *const History, store: *const storage.Store, len: usize, free_pages: usize, free_entries: usize) bool {
+        const required = storage.Store.pagesFor(len);
+        var pages = free_pages;
+        var entries = free_entries;
+        if (pages >= required and entries > 0) return true;
+        var slot = self.head;
+        for (0..self.count) |_| {
+            const entry = store.get(self.entries[slot].message).?;
+            slot = self.entries[slot].next;
+            if (!reclaimable(entry)) continue;
+            pages += storage.Store.pagesFor(entry.len);
+            entries += @intFromBool(entry.generation != std.math.maxInt(u64));
+            if (pages >= required and entries > 0) return true;
+        }
+        return false;
+    }
+
     pub fn admitPayload(self: *History, store: *storage.Store, id: MessageId, name: []const u8, bytes: []const u8) ?storage.Handle {
         if (!store.canReserve(bytes.len)) {
-            const required = storage.Store.pagesFor(bytes.len);
-            var pages = store.free_pages;
-            var entries = store.entries.len - store.used_entries - store.retired_entries;
+            if (!self.canAdmitPayload(store, bytes.len, store.free_pages, store.entries.len - store.used_entries - store.retired_entries)) return null;
             var slot = self.head;
-            for (0..self.count) |_| {
-                const e = store.get(self.entries[slot].message).?;
-                slot = self.entries[slot].next;
-                if (!reclaimable(e)) continue;
-                pages += storage.Store.pagesFor(e.len);
-                entries += @intFromBool(e.generation != std.math.maxInt(u64));
-                if (pages >= required and entries > 0) break;
-            }
-            if (pages < required or entries == 0) return null;
-            slot = self.head;
             const count = self.count;
             for (0..count) |_| {
                 if (store.canReserve(bytes.len)) break;

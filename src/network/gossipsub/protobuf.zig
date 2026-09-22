@@ -28,7 +28,7 @@ pub const SubOpts = struct {
             switch (t.field) {
                 1 => out.subscribe = (try reader.varint()) == 1,
                 2 => out.topic = try reader.lenDelimited(),
-                else => unreachable,
+                else => try reader.skip(t.wire),
             }
         }
         return out;
@@ -48,9 +48,13 @@ pub const Message = struct {
         while (!reader.atEnd()) {
             const t = try reader.tag();
             switch (t.field) {
+                1, 3, 5, 6 => {
+                    try reader.skip(t.wire);
+                    out.signed = true;
+                },
                 2 => out.data = try reader.lenDelimited(),
                 4 => out.topic = try reader.lenDelimited(),
-                else => unreachable,
+                else => try reader.skip(t.wire),
             }
         }
         return out;
@@ -115,7 +119,7 @@ pub const Prune = struct {
             switch (t.field) {
                 1 => out.topic = try reader.lenDelimited(),
                 3 => out.backoff = try reader.varint(),
-                else => unreachable,
+                else => try reader.skip(t.wire),
             }
         }
         return out;
@@ -177,8 +181,18 @@ pub const RpcReader = struct {
             }
             return .end;
         }
+        const start = reader.cursor.pos;
         const tag = try reader.tag(&self.view);
         const field = tag.field;
+        const known = if (nested) field >= 1 and field <= 5 else field >= 1 and field <= 3;
+        if (!known) {
+            try reader.skip(&self.view, tag.wire);
+            const cost = 21 + (reader.cursor.pos - start) / receive.page_bytes;
+            if (cost > fields.*) return .deferred;
+            fields.* -= cost;
+            if (nested) self.control = reader else self.top = reader;
+            return .skipped;
+        }
         std.debug.assert(tag.wire == wire_len);
         const len = try reader.varint(&self.view);
         if (len > reader.end - reader.cursor.pos) return error.Truncated;

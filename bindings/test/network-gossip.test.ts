@@ -30,6 +30,12 @@ import {BLOCKS, incomingPair, takeIncoming} from "./utils/network-incoming.js";
 
 const TOPIC = topicName();
 
+function blockPayload(size: number, byte = 0): Uint8Array {
+  const bytes = new Uint8Array(size).fill(byte);
+  new DataView(bytes.buffer).setBigUint64(100, 100n, true);
+  return bytes;
+}
+
 async function nextGossip(runtime: NativeNetworkApplicationRuntime): Promise<NativeGossipMessage> {
   for (let i = 0; i < 1000; i++) {
     const batch = runtime.drainGossip();
@@ -150,7 +156,7 @@ test.each([
 ] as const)("real gossip %s preserves wire identity and exact-once verdict admission", async (verdict) => {
   const pair = await gossipPair();
   try {
-    const input = new Uint8Array(4000).fill(7);
+    const input = blockPayload(4000, 7);
     const before = Date.now();
     const published = pair.left.publishGossip(TOPIC, input, {allowZeroPeers: false});
     input.fill(99);
@@ -179,11 +185,11 @@ test.each([
       {timeout: 5000}
     );
     expect(message.topic).toBe(TOPIC);
-    expect(message.data).toEqual(new Uint8Array(4000).fill(7));
+    expect(message.data).toEqual(blockPayload(4000, 7));
     expect(message.peerId).toEqual(pair.identity.peerId);
     expect(message.connection).toEqual((await pair.right.getPeers()).peers[0].connection);
     const {messageId} = await import("../../test/interop/codec.mjs");
-    expect(Buffer.from(message.id)).toEqual(messageId(TOPIC, new Uint8Array(4000).fill(7)));
+    expect(Buffer.from(message.id)).toEqual(messageId(TOPIC, blockPayload(4000, 7)));
     expect(message.receivedAtUnixMs).toBeGreaterThanOrEqual(before);
     expect(message.receivedAtUnixMs).toBeLessThan(Date.now());
     expect(Number.isSafeInteger(message.receivedAtUnixMs)).toBe(true);
@@ -253,10 +259,10 @@ test.each([
 test("gossip payload credit retires on close while descriptors remain held", async () => {
   const pair = await gossipPair();
   try {
-    await pair.left.publishGossip(TOPIC, new Uint8Array(4000).fill(2), {allowZeroPeers: false});
+    await pair.left.publishGossip(TOPIC, blockPayload(4000, 2), {allowZeroPeers: false});
     const message = await nextGossip(pair.right);
     await pair.right.close();
-    expect(message.data).toEqual(new Uint8Array(4000).fill(2));
+    expect(message.data).toEqual(blockPayload(4000, 2));
     expect(pair.right.reportGossip(message.handle, "accept")).toBe(false);
     const diagnostics = pair.right.diagnostics();
     expect(diagnostics.liveNativeRequestedBytes).toBe(0);
@@ -277,7 +283,7 @@ test.skipIf(!faultApi.networkTestFail)(
   async () => {
     const pair = await gossipPair();
     try {
-      await pair.left.publishGossip(TOPIC, new Uint8Array(4000).fill(3), {allowZeroPeers: false});
+      await pair.left.publishGossip(TOPIC, blockPayload(4000, 3), {allowZeroPeers: false});
       for (let i = 0; i < 1000 && pair.right.diagnostics().gossip.queued === 0; i++) await delay(5);
       faultApi.networkTestFail?.("gossip_copy");
       expect(() => pair.right.drainGossip()).toThrow("InjectedNetworkFailure");
@@ -304,7 +310,7 @@ test.skipIf(!faultApi.networkTestFail)(
     try {
       faultApi.networkTestFail?.("operation_copy");
       await expect(
-        pair.right.publishGossip(TOPIC, new Uint8Array(4000).fill(4), {allowZeroPeers: false})
+        pair.right.publishGossip(TOPIC, blockPayload(4000, 4), {allowZeroPeers: false})
       ).rejects.toMatchObject({code: "NetworkResultAllocationFailed"});
       await pair.right.close();
       expect(await pair.right.diagnostics()).toMatchObject({
@@ -340,7 +346,7 @@ test("gossip byte refusal preserves both accepted request directions and real co
     const serving = await takeIncoming(pair.right);
     expect(pair.right.diagnostics().requests.occupied).toBe(1);
     expect(pair.right.diagnostics().incoming.occupied).toBe(1);
-    await pair.left.publishGossip(TOPIC, new Uint8Array(10 * 1024 * 1024).fill(17), {allowZeroPeers: false});
+    await pair.left.publishGossip(TOPIC, blockPayload(10 * 1024 * 1024, 17), {allowZeroPeers: false});
     const refused = 'lodestar_native_gossipsub_storage_refusals_total{reason="processor_capacity"} 1\n';
     for (let i = 0; i < 2000 && !pair.right.getMetrics().includes(refused); i++) await delay(5);
     expect(pair.right.getMetrics()).toContain(refused);
@@ -384,7 +390,7 @@ test.each([
 ])("native gossip expiry %s releases queued payloads but retains outstanding host work", async (delivered) => {
   const pair = await gossipPair(150n);
   try {
-    await pair.left.publishGossip(TOPIC, new Uint8Array(4000).fill(5), {allowZeroPeers: false});
+    await pair.left.publishGossip(TOPIC, blockPayload(4000, 5), {allowZeroPeers: false});
     let message: NativeGossipMessage | undefined;
     if (delivered) message = await nextGossip(pair.right);
     for (let i = 0; i < 1000; i++) {
@@ -527,8 +533,8 @@ for (const scenario of [
         faultApi.networkTestScenario?.(scenario)
       );
       try {
-        await pair.left.publishGossip(TOPIC, new Uint8Array(4000).fill(21), {allowZeroPeers: false});
-        await pair.left.publishGossip(TOPIC, new Uint8Array(4000).fill(22), {allowZeroPeers: false});
+        await pair.left.publishGossip(TOPIC, blockPayload(4000, 21), {allowZeroPeers: false});
+        await pair.left.publishGossip(TOPIC, blockPayload(4000, 22), {allowZeroPeers: false});
         for (let i = 0; i < 1000 && pair.right.diagnostics().gossip.queued !== 2; i++) await delay(5);
         expect(pair.right.diagnostics().gossip.queued).toBe(2);
         if (scenario.includes("fail")) {
@@ -587,7 +593,7 @@ test("gossip operation promises and weak notifier permit facade collection", () 
 test("one maximum native gossip payload owns exactly two copy allowances until drain", async () => {
   const pair = await gossipPair();
   try {
-    const input = new Uint8Array(10 * 1024 * 1024).fill(37);
+    const input = blockPayload(10 * 1024 * 1024, 37);
     await pair.left.publishGossip(TOPIC, input, {allowZeroPeers: false});
     for (let i = 0; i < 2000 && pair.right.diagnostics().gossip.queued === 0; i++) await delay(5);
     expect(pair.right.diagnostics().gossip).toMatchObject({
@@ -674,7 +680,7 @@ test.skipIf(!faultApi.networkTestGossipRelease)(
   async () => {
     const pair = await gossipPair(30000n, undefined, () => faultApi.networkTestScenario?.("gossip_owner_hold"));
     try {
-      await pair.left.publishGossip(TOPIC, new Uint8Array(4000).fill(45), {allowZeroPeers: false});
+      await pair.left.publishGossip(TOPIC, blockPayload(4000, 45), {allowZeroPeers: false});
       const message = await nextGossip(pair.right);
       for (let i = 0; i < 1000 && faultApi.networkTestStage?.() !== "gossip_owner_held"; i++) await delay(5);
       expect(faultApi.networkTestStage?.()).toBe("gossip_owner_held");
@@ -702,7 +708,7 @@ test.skipIf(!faultApi.networkTestGossipRelease)(
 test("closed runtime rejects a retained verdict and cannot be replaced", async () => {
   const pair = await gossipPair();
   try {
-    await pair.left.publishGossip(TOPIC, new Uint8Array(4000));
+    await pair.left.publishGossip(TOPIC, blockPayload(4000));
     const old = await nextGossip(pair.right);
     await pair.right.close();
     expect(pair.right.reportGossip(old.handle, "accept")).toBe(false);

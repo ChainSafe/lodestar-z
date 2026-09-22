@@ -10,14 +10,14 @@ test "gossip processor backing bytes match allocations at page boundaries" {
             var measured = t.FailingAllocator.init(t.allocator, .{});
             var budget: Budget = .{};
             {
-                var table = try p.GossipProcessor.initPlanned(measured.allocator(), capacity, bytes, &budget, null);
+                var table = try p.GossipProcessor.init(measured.allocator(), .{ .capacity = capacity, .bytes = bytes, .limits = null }, &budget);
                 defer table.deinit();
                 try t.expectEqual(measured.allocated_bytes, p.GossipProcessor.backingBytes(capacity, bytes));
             }
             try t.expectEqual(measured.allocated_bytes, measured.freed_bytes);
             for (0..measured.alloc_index) |prefix| {
                 var failing = t.FailingAllocator.init(t.allocator, .{ .fail_index = prefix });
-                try t.expectError(error.OutOfMemory, p.GossipProcessor.initPlanned(failing.allocator(), capacity, bytes, &budget, null));
+                try t.expectError(error.OutOfMemory, p.GossipProcessor.init(failing.allocator(), .{ .capacity = capacity, .bytes = bytes, .limits = null }, &budget));
                 try t.expectEqual(failing.allocated_bytes, failing.freed_bytes);
             }
         }
@@ -37,7 +37,7 @@ fn add(table: *p.GossipProcessor, kind: p.limits_mod.Kind, root: ?[32]u8) !p.Tok
 test "gossip processor isolates kinds and bounds dependency waiting" {
     var budget: Budget = .{ .limit = 0 };
     const limits: p.limits_mod.Limits = @splat(.{ .items = 4, .bytes = 16384 });
-    var table = try p.GossipProcessor.initPlanned(t.allocator, p.limits_mod.items(&limits), p.limits_mod.bytes(&limits), &budget, limits);
+    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits }, &budget);
     defer table.deinit();
     defer table.close();
     const root: [32]u8 = @splat(7);
@@ -60,7 +60,7 @@ test "gossip processor isolates kinds and bounds dependency waiting" {
 test "gossip processor dependency notification cannot race a negative check" {
     var budget: Budget = .{};
     const limits: p.limits_mod.Limits = @splat(.{ .items = 4, .bytes = 16384 });
-    var table = try p.GossipProcessor.initPlanned(t.allocator, p.limits_mod.items(&limits), p.limits_mod.bytes(&limits), &budget, limits);
+    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits }, &budget);
     defer table.deinit();
     defer table.close();
     const root: [32]u8 = @splat(2);
@@ -83,7 +83,7 @@ test "gossip processor dependency notification cannot race a negative check" {
 test "gossip processor copy rollback preserves paged bytes" {
     const payload: [4097]u8 = @splat(9);
     var budget: Budget = .{ .limit = 2 * payload.len };
-    var table = try p.GossipProcessor.initPlanned(t.allocator, 1, 8192, &budget, null);
+    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = 1, .bytes = 8192, .limits = null }, &budget);
     defer table.deinit();
     defer table.close();
     const token = try table.reserve(payload.len);
@@ -103,7 +103,7 @@ test "gossip processor copy rollback preserves paged bytes" {
 test "gossip processor batches identical attestation data with a bounded wait" {
     var budget: Budget = .{};
     const limits: p.limits_mod.Limits = @splat(.{ .items = 64, .bytes = 4096 });
-    var table = try p.GossipProcessor.initPlanned(t.allocator, p.limits_mod.items(&limits), p.limits_mod.bytes(&limits), &budget, limits);
+    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits }, &budget);
     defer table.deinit();
     defer table.close();
     const first = try table.reserveKind(.beacon_attestation, 1);
@@ -129,7 +129,7 @@ test "gossip processor batches identical attestation data with a bounded wait" {
 test "gossip processor deferral leaves per-source capacity and local search deadlines" {
     var budget: Budget = .{};
     const limits: p.limits_mod.Limits = @splat(.{ .items = 8, .bytes = 4096 });
-    var table = try p.GossipProcessor.initPlanned(t.allocator, p.limits_mod.items(&limits), p.limits_mod.bytes(&limits), &budget, limits);
+    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits }, &budget);
     defer table.deinit();
     defer table.close();
     const root: [32]u8 = @splat(2);
@@ -152,7 +152,7 @@ test "gossip processor deferral leaves per-source capacity and local search dead
 test "gossip processor new attestation groups cannot postpone a mature group" {
     var budget: Budget = .{};
     const limits: p.limits_mod.Limits = @splat(.{ .items = 64, .bytes = 4096 });
-    var table = try p.GossipProcessor.initPlanned(t.allocator, p.limits_mod.items(&limits), p.limits_mod.bytes(&limits), &budget, limits);
+    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits }, &budget);
     defer table.deinit();
     defer table.close();
     const older = try table.reserveKind(.beacon_attestation, 1);
@@ -177,7 +177,7 @@ test "gossip processor copied host work survives native expiry but close release
     for ([_]bool{ false, true }) |close| {
         var budget: Budget = .{};
         const limits: p.limits_mod.Limits = @splat(.{ .items = 4, .bytes = 4096 });
-        var table = try p.GossipProcessor.initPlanned(t.allocator, p.limits_mod.items(&limits), p.limits_mod.bytes(&limits), &budget, limits);
+        var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits }, &budget);
         defer table.deinit();
         defer table.close();
         const token = try add(&table, .beacon_block, null);
@@ -196,7 +196,7 @@ test "gossip processor copied host work survives native expiry but close release
 test "gossip processor expired execution diagnostics track delivered work until actual completion" {
     var budget: Budget = .{};
     const limits: p.limits_mod.Limits = @splat(.{ .items = 8, .bytes = 16384 });
-    var table = try p.GossipProcessor.initPlanned(t.allocator, p.limits_mod.items(&limits), p.limits_mod.bytes(&limits), &budget, limits);
+    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits }, &budget);
     defer table.deinit();
     defer table.close();
     const first = try add(&table, .beacon_block, null);

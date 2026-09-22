@@ -338,7 +338,7 @@ pub const Server = struct {
             return;
         };
         if (!flushed.done) {
-            if (request.io.outbox.idle()) request.needs_service = true;
+            request.needs_service = flushed.runnable;
             return;
         }
         if (slot.pending_result == constants.result_success) {
@@ -379,9 +379,12 @@ pub const Server = struct {
             owner.protocol_counters[@intFromEnum(request.protocol)].response_finish_stops +|= 1;
             std.log.scoped(.network_reqresp).debug("response_finish_stopped request={d}:{d} connection={d}:{d} stream={d} method={s} chunks={d}", .{ index, request.generation, request.conn.index, request.conn.generation, request.stream.id, @tagName(request.protocol), request.chunks });
             request.io.outbox = .{};
-            break :stopped true;
+            break :stopped .done;
         };
-        if (!flushed) return;
+        if (flushed != .done) {
+            request.needs_service = flushed == .yielded;
+            return;
+        }
         slot.progress_ms = now.mono_ms;
         slot.complete(
             owner,

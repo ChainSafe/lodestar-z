@@ -6,17 +6,15 @@ const constants = @import("constants.zig");
 const receive = @import("receive_pool.zig");
 const topic = @import("topic.zig");
 
-test "gossip protobuf schema rejects ambiguous unsupported and malformed fields" {
+test "gossip protobuf schema rejects ambiguous and malformed fields" {
     const Case = struct { shape: schema.Shape, bytes: []const u8, err: schema.Error };
     const cases = [_]Case{
         .{ .shape = .rpc, .bytes = &.{ 0, 0 }, .err = error.InvalidField },
         .{ .shape = .rpc, .bytes = &.{ 0x0b, 0x0c }, .err = error.BadWireType },
-        .{ .shape = .rpc, .bytes = &.{ 0x20, 0 }, .err = error.UnsupportedField },
         .{ .shape = .rpc, .bytes = &.{ 0x08, 0 }, .err = error.BadWireType },
         .{ .shape = .rpc, .bytes = &.{ 0x1a, 0, 0x1a, 0 }, .err = error.DuplicateField },
         .{ .shape = .rpc, .bytes = &.{ 0x9a, 0, 0 }, .err = error.NonCanonical },
         .{ .shape = .rpc, .bytes = &.{ 0x1a, 0x80, 0 }, .err = error.NonCanonical },
-        .{ .shape = .rpc, .bytes = &.{ 0x1a, 2, 0x32, 0 }, .err = error.UnsupportedField },
         .{ .shape = .subscription, .bytes = &.{ 8, 2, 18, 1, 't' }, .err = error.InvalidBoolean },
         .{ .shape = .subscription, .bytes = &.{ 8, 1, 8, 0, 18, 1, 't' }, .err = error.DuplicateField },
         .{ .shape = .subscription, .bytes = &.{ 18, 1, 't', 18, 1, 'u' }, .err = error.DuplicateField },
@@ -25,16 +23,11 @@ test "gossip protobuf schema rejects ambiguous unsupported and malformed fields"
         .{ .shape = .subscription, .bytes = &.{8}, .err = error.Truncated },
         .{ .shape = .subscription, .bytes = &.{ 8, 1 }, .err = error.MissingField },
         .{ .shape = .message, .bytes = &.{ 18, 0, 34, 1, 't', 18, 0 }, .err = error.DuplicateField },
-        .{ .shape = .message, .bytes = &.{ 10, 0 }, .err = error.UnsupportedField },
-        .{ .shape = .message, .bytes = &.{ 26, 0 }, .err = error.UnsupportedField },
-        .{ .shape = .message, .bytes = &.{ 42, 0 }, .err = error.UnsupportedField },
-        .{ .shape = .message, .bytes = &.{ 50, 0 }, .err = error.UnsupportedField },
         .{ .shape = .message, .bytes = &.{ 34, 1, 't' }, .err = error.MissingField },
         .{ .shape = .ihave, .bytes = &.{ 10, 1, 't', 18, 0 }, .err = error.LengthLimit },
         .{ .shape = .iwant, .bytes = &.{ 10, 21 }, .err = error.LengthLimit },
         .{ .shape = .idontwant, .bytes = &.{ 8, 1 }, .err = error.BadWireType },
         .{ .shape = .graft, .bytes = &.{ 10, 1, 't', 8, 1 }, .err = error.BadWireType },
-        .{ .shape = .prune, .bytes = &.{ 10, 1, 't', 18, 0 }, .err = error.UnsupportedField },
         .{ .shape = .prune, .bytes = &.{ 10, 1, 't', 24, 1, 24, 2 }, .err = error.DuplicateField },
     };
     for (cases) |case| {
@@ -122,7 +115,7 @@ test "gossip protobuf schema bounds individual and aggregate ID lists" {
     try schema.validate(.iwant, writer.written());
     try paged(.iwant, writer.written(), null);
     writer.bytesField(1, &([_]u8{7} ** constants.message_id_length));
-    try std.testing.expectError(error.LengthLimit, schema.validate(.iwant, writer.written()));
+    try std.testing.expectError(error.OccurrenceLimit, schema.validate(.iwant, writer.written()));
     const list_bytes = list[0 .. list.len - 22];
     const rpc = try std.testing.allocator.alloc(u8, list_bytes.len * 4 + 64);
     defer std.testing.allocator.free(rpc);
@@ -184,4 +177,74 @@ fn paged(shape: schema.Shape, bytes: []const u8, expected: ?schema.Error) !void 
         }
         try std.testing.expect(terminal);
     }
+}
+
+test "gossip protobuf extensions preserve known fields at every nesting level" {
+    inline for (std.meta.tags(schema.Shape)) |shape| {
+        var bytes: [256]u8 = undefined;
+        var writer = pb.Writer.init(&bytes);
+        switch (shape) {
+            .subscription => writer.bytesField(2, "t"),
+            .message => {
+                writer.bytesField(2, "data");
+                writer.bytesField(4, "t");
+            },
+            .ihave, .graft, .prune => writer.bytesField(1, "t"),
+            else => {},
+        }
+        writer.varintField(31, 128);
+        writer.bytesField(32, &.{ 0xff, 0x0b, 0x80 });
+        writer.tag(33, pb.wire_i32);
+        writer.bytes(&(@as([4]u8, @splat(0xff))));
+        writer.tag(34, pb.wire_i64);
+        writer.bytes(&(@as([8]u8, @splat(0xff))));
+        try paged(shape, writer.written(), null);
+    }
+    const subscription = try pb.SubOpts.decode(&.{ 8, 1, 18, 1, 't', 24, 1 });
+    try std.testing.expect(subscription.subscribe);
+    try std.testing.expectEqualStrings("t", subscription.topic);
+    const prune = try pb.Prune.decode(&.{ 10, 1, 't', 18, 2, 0xff, 0xff, 24, 9 });
+    try std.testing.expectEqual(@as(u64, 9), prune.backoff);
+}
+
+test "gossip protobuf signed publication does not hide later unsigned publications" {
+    inline for (.{ 1, 3, 5, 6 }) |field| {
+        var body: [32]u8 = undefined;
+        var message = pb.Writer.init(&body);
+        message.bytesField(2, "bad");
+        message.bytesField(4, "t");
+        message.bytesField(field, "");
+        var bytes: [128]u8 = undefined;
+        var writer = pb.Writer.init(&bytes);
+        writer.varintField(20, 1);
+        writer.bytesField(2, message.written());
+        writer.bytesField(21, &.{0xff});
+        pb.writeMessage(&writer, "good", "t");
+        var rpc = pb.RpcReader.init(writer.written());
+        try std.testing.expect((try rpc.next()).?.message.signed);
+        const good = (try rpc.next()).?.message;
+        try std.testing.expect(!good.signed);
+        try std.testing.expectEqualStrings("good", good.data);
+        try std.testing.expect((try rpc.next()) == null);
+        try paged(.rpc, writer.written(), null);
+    }
+}
+
+test "gossip protobuf extensions retain per-item field and aggregate metadata limits" {
+    const bytes = try std.testing.allocator.alloc(u8, schema.metadata_max + 32);
+    defer std.testing.allocator.free(bytes);
+    var writer = pb.Writer.init(bytes);
+    writer.bytesField(4, "t");
+    writer.bytesField(2, "");
+    for (0..wire.Reader.field_limit - 2) |_| writer.varintField(7, 0);
+    _ = try pb.Message.decode(writer.written());
+    writer.varintField(7, 0);
+    try std.testing.expectError(error.FieldLimit, pb.Message.decode(writer.written()));
+    try paged(.message, writer.written(), error.FieldLimit);
+    writer = pb.Writer.init(bytes);
+    writer.tag(20, pb.wire_len);
+    writer.varint(schema.metadata_max);
+    @memset(bytes[writer.len..][0..schema.metadata_max], 0);
+    writer.len += schema.metadata_max;
+    try std.testing.expectError(error.MetadataLimit, schema.validate(.rpc, writer.written()));
 }
