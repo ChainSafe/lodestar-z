@@ -5,6 +5,22 @@ const topic = @import("topic.zig");
 const Item = @import("protobuf.zig").Item;
 const ItemKind = std.meta.Tag(Item);
 
+pub const Io = struct {
+    const Budget = @import("turn.zig").Budget;
+    turns_exhausted: [std.meta.fields(Budget).len]u64 = @splat(0),
+    ready_deferred: [std.meta.fields(Budget).len]u64 = @splat(0),
+    read_calls: u64 = 0,
+    write_calls: u64 = 0,
+    write_would_block: u64 = 0,
+    write_zero: u64 = 0,
+
+    pub fn write(self: *const Io, w: *prom.Encoder) prom.Error!void {
+        try w.enums(.{ .name = "lodestar_native_gossip_turns_exhausted_total", .kind = .counter, .help = "Gossip turns ending with an exhausted shared budget", .labels = &.{"budget"} }, Budget, &self.turns_exhausted);
+        try w.enums(.{ .name = "lodestar_native_gossip_ready_deferred_total", .kind = .counter, .help = "Ready peers remaining after the relevant shared budget was exhausted, including partially serviced peers", .labels = &.{"budget"} }, Budget, &self.ready_deferred);
+        try w.counters("lodestar_native_gossip_io_", &.{ .read_calls = self.read_calls, .write_calls = self.write_calls, .write_would_block = self.write_would_block, .write_zero = self.write_zero });
+    }
+};
+
 pub const ValidationTime = @import("../metrics/histogram.zig").Duration(&.{ 10, 30, 100, 300, 1000, 3000, 10000 });
 
 pub const Counters = struct {

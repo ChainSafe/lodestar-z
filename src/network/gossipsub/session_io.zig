@@ -367,6 +367,7 @@ fn readPeer(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *T
         peer.calls -= 1;
         io.write_first = true;
         turn.budget.calls -= 1;
+        self.io_metrics.read_calls +|= 1;
         const read = engine.read(stream, io.unread[0..@min(io.unread.len, peer.input, turn.budget.input)]) catch |err| {
             io.rx_ready = false;
             if (err != error.WouldBlock) resetInbound(self, engine, index);
@@ -397,9 +398,14 @@ fn flush(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *Turn
         peer.calls -= 1;
         io.write_first = false;
         turn.budget.calls -= 1;
+        self.io_metrics.write_calls +|= 1;
         if (io.tx.progress_ms == null) io.tx.progress_ms = now.mono_ms;
         const written = engine.write(stream, segment[0..take], false) catch |err| {
             io.tx.ready = false;
+            if (err == error.WouldBlock) {
+                self.io_metrics.write_would_block +|= 1;
+                io.write_would_block +|= 1;
+            }
             if (err != error.WouldBlock) {
                 std.log.scoped(.network_gossip_errors).debug("gossip_write_failed connection={d}:{d} stream={d} reason={s} queued={d} bytes={d}", .{ stream.conn.index, stream.conn.generation, stream.id, @errorName(err), io.tx.data.count, io.tx.data.bytes });
                 resetOutbound(self, engine, index);
@@ -407,6 +413,8 @@ fn flush(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *Turn
             return;
         };
         if (written == 0) {
+            self.io_metrics.write_zero +|= 1;
+            io.write_zero +|= 1;
             io.tx.ready = false;
             return;
         }
@@ -424,7 +432,7 @@ fn logSendPressure(self: *Gossipsub, index: u16, now_ms: u64) void {
     io.tx.pressure_log_due_ms = now_ms +| 1_000;
     const row = &self.sessions.rows[index];
     const identity = &self.peers.rows[row.logical.index].identity;
-    std.log.scoped(.network_gossip_errors).debug("gossip_send_pressure peer={f} connection={d}:{d} reason={s} total={d} data_queued={d}/{d} data_bytes={d}/{d} control_frames={d} control_bytes={d} oldest_ms={d}", .{ @import("../logging.zig").peer(identity), row.conn.index, row.conn.generation, @tagName(io.tx.last_drop), io.tx.drops[@intFromEnum(io.tx.last_drop)], io.tx.data.count, @import("outbox.zig").data_capacity, io.tx.data.bytes, self.options.tx_peer_bytes, io.tx.control.count, io.tx.control.used, if (io.tx.oldest()) |oldest| now_ms -| oldest else 0 });
+    std.log.scoped(.network_gossip_errors).debug("gossip_send_pressure peer={f} connection={d}:{d} reason={s} total={d} data_queued={d}/{d} data_bytes={d}/{d} control_frames={d} control_bytes={d} oldest_ms={d} write_blocked={d} write_zero={d} budget_deferred={d}", .{ @import("../logging.zig").peer(identity), row.conn.index, row.conn.generation, @tagName(io.tx.last_drop), io.tx.drops[@intFromEnum(io.tx.last_drop)], io.tx.data.count, @import("outbox.zig").data_capacity, io.tx.data.bytes, self.options.tx_peer_bytes, io.tx.control.count, io.tx.control.used, if (io.tx.oldest()) |oldest| now_ms -| oldest else 0, io.write_would_block, io.write_zero, io.write_budget_deferred });
 }
 
 fn logIoTimeout(self: *Gossipsub, index: u16, reason: []const u8, now_ms: u64) void {
@@ -470,9 +478,28 @@ pub fn runTurn(self: *Gossipsub, router: *routing.Router, engine: *Engine, turn:
         logSendPressure(self, @intCast(index), now.mono_ms);
         if (self.sessions.rows[index].outbound == .closing) retirePeer(self, router, engine, @intCast(index));
         serviced += 1;
+        if (turn.exhausted().count() > 0) break;
         if (serviced == self.options.peers_per_pump) break;
     }
-    if (serviced < self.options.peers_per_pump) {
+    const exhausted = turn.exhausted();
+    if (exhausted.count() > 0) {
+        var budgets = exhausted.iterator();
+        while (budgets.next()) |budget| {
+            self.io_metrics.turns_exhausted[@intFromEnum(budget)] +|= 1;
+            for (self.sessions.rows) |*row| {
+                if (!row.active) continue;
+                const writing = row.outStream() != null and row.io.tx.ready and row.io.tx.pending();
+                const reading = row.in_stream != null and row.io.rx_ready;
+                const ready = switch (budget) {
+                    .calls => reading or writing,
+                    .output => writing,
+                    .input, .items, .fields, .work, .copy => reading,
+                };
+                if (ready) self.io_metrics.ready_deferred[@intFromEnum(budget)] +|= 1;
+                if (writing and (budget == .calls or (budget == .output and !exhausted.contains(.calls)))) row.io.write_budget_deferred +|= 1;
+            }
+        }
+    } else if (serviced < self.options.peers_per_pump) {
         if (first_serviced) |first| self.sessions.cursor = (first + 1) % self.sessions.rows.len;
     }
     finishPump(self, now);
@@ -499,13 +526,19 @@ pub fn processRpc(self: *Gossipsub, index: u16, turn: *Turn, peer: *Credits) pro
                     rpc.item = item;
                 },
                 .end => return .done,
-                .deferred => return .credits,
+                .deferred => {
+                    if (turn.budget.fields <= peer.fields) turn.deferred.insert(.fields);
+                    return .credits;
+                },
                 .skipped => continue,
             }
         }
         if (pending) {
             const cost = rpc.item.?.fieldCost();
-            if (cost > @min(turn.budget.fields, peer.fields)) return .credits;
+            if (cost > @min(turn.budget.fields, peer.fields)) {
+                if (cost > turn.budget.fields) turn.deferred.insert(.fields);
+                return .credits;
+            }
             turn.budget.fields -= cost;
             peer.fields -= cost;
         }

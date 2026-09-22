@@ -15,6 +15,10 @@ pub fn indexCapacity(capacity: usize) usize {
 /// Remove membership before overwriting a key. Backward-shift deletion can only
 /// reduce displacement, so the insertion high-water bound also bounds misses.
 pub fn IdIndex(comptime Entry: type) type {
+    return KeyIndex(Entry, MessageId, if (Entry == MessageId) null else "id");
+}
+
+fn KeyIndex(comptime Entry: type, comptime Key: type, comptime field: ?[]const u8) type {
     return struct {
         const Self = @This();
         slots: []u32,
@@ -39,27 +43,31 @@ pub fn IdIndex(comptime Entry: type) type {
             self.probe_limit = 0;
         }
 
-        fn key(self: *const Self, entry: u32) *const MessageId {
-            if (Entry == MessageId) return &self.entries[entry];
-            return &self.entries[entry].id;
+        fn key(self: *const Self, entry: u32) *const Key {
+            if (field) |name| return &@field(self.entries[entry], name);
+            return &self.entries[entry];
         }
 
-        fn hash(self: *const Self, id: MessageId) usize {
-            return @truncate(std.hash.Wyhash.hash(self.seed, &id));
+        fn bytes(value: *const Key) []const u8 {
+            return if (Key == MessageId) value else value.*;
         }
 
-        pub fn find(self: *const Self, id: MessageId) ?u32 {
+        fn hash(self: *const Self, id: Key) usize {
+            return @truncate(std.hash.Wyhash.hash(self.seed, bytes(&id)));
+        }
+
+        pub fn find(self: *const Self, id: Key) ?u32 {
             var pos = self.hash(id) & self.mask;
             for (0..self.probe_limit) |_| {
                 if (self.slots[pos] == empty_slot) return null;
-                if (std.mem.eql(u8, self.key(self.slots[pos]), &id)) return self.slots[pos];
+                if (std.mem.eql(u8, bytes(self.key(self.slots[pos])), bytes(&id))) return self.slots[pos];
                 pos = (pos + 1) & self.mask;
             }
             return null;
         }
 
-        pub fn insert(self: *Self, id: MessageId, entry: u32) void {
-            assert(entry < self.entries.len and std.mem.eql(u8, self.key(entry), &id));
+        pub fn insert(self: *Self, id: Key, entry: u32) void {
+            assert(entry < self.entries.len and std.mem.eql(u8, bytes(self.key(entry)), bytes(&id)));
             var pos = self.hash(id) & self.mask;
             for (0..self.slots.len) |distance| {
                 if (self.slots[pos] == empty_slot) {
@@ -72,12 +80,12 @@ pub fn IdIndex(comptime Entry: type) type {
             unreachable;
         }
 
-        pub fn remove(self: *Self, id: MessageId) void {
+        pub fn remove(self: *Self, id: Key) void {
             var pos = self.hash(id) & self.mask;
             var found = false;
             for (0..self.probe_limit) |_| {
                 if (self.slots[pos] == empty_slot) return;
-                if (std.mem.eql(u8, self.key(self.slots[pos]), &id)) {
+                if (std.mem.eql(u8, bytes(self.key(self.slots[pos])), bytes(&id))) {
                     found = true;
                     break;
                 }
@@ -184,6 +192,16 @@ pub const HistoryEntry = struct {
     prev: u32 = empty_slot,
     message: storage.Handle = undefined,
     born_epoch: u64 = 0,
+    topic: u32 = empty_slot,
+    topic_prev: u32 = empty_slot,
+    topic_next: u32 = empty_slot,
+};
+const HistoryTopic = struct {
+    bytes: [@import("topic.zig").topic_max_len]u8 = undefined,
+    name: []const u8 = undefined,
+    head: u32 = empty_slot,
+    tail: u32 = empty_slot,
+    next_free: u32 = empty_slot,
 };
 pub const History = struct {
     generations: []u64,
@@ -191,6 +209,10 @@ pub const History = struct {
     entries: []HistoryEntry,
     ids: []MessageId,
     index: Index,
+    topics: []HistoryTopic,
+    topic_index: KeyIndex(HistoryTopic, []const u8, "name"),
+    free_topic: u32 = 0,
+    gossip_entries_visited: u64 = 0,
     head: u32 = empty_slot,
     tail: u32 = empty_slot,
     free: u32 = 0,
@@ -209,17 +231,24 @@ pub const History = struct {
         const counts = try a.alloc(u8, capacity * retained);
         errdefer a.free(counts);
         @memset(counts, 0);
-        const index = try Index.init(a, ids);
+        var index = try Index.init(a, ids);
+        errdefer index.deinit(a);
+        const topics = try a.alloc(HistoryTopic, capacity);
+        errdefer a.free(topics);
+        const topic_index = try KeyIndex(HistoryTopic, []const u8, "name").init(a, topics);
+        for (topics, 0..) |*t, i| t.* = .{ .next_free = if (i + 1 == capacity) empty_slot else @intCast(i + 1) };
         for (entries, 0..) |*e, i| e.* = .{ .next = if (i + 1 == capacity) empty_slot else @intCast(i + 1) };
-        return .{ .entries = entries, .ids = ids, .index = index, .generations = generations, .counts = counts };
+        return .{ .entries = entries, .ids = ids, .index = index, .generations = generations, .counts = counts, .topics = topics, .topic_index = topic_index };
     }
     pub fn backingBytes(capacity: usize, retained: usize) usize {
-        return capacity * (@sizeOf(HistoryEntry) + @sizeOf(MessageId) + retained) +
-            retained * @sizeOf(u64) + indexCapacity(capacity) * @sizeOf(u32);
+        return capacity * (@sizeOf(HistoryEntry) + @sizeOf(HistoryTopic) + @sizeOf(MessageId) + retained) +
+            retained * @sizeOf(u64) + 2 * indexCapacity(capacity) * @sizeOf(u32);
     }
 
     /// Frees backing storage during joint History/Store destruction. Live eviction uses remove.
     pub fn deinit(self: *History, a: Allocator) void {
+        self.topic_index.deinit(a);
+        a.free(self.topics);
         a.free(self.counts);
         a.free(self.generations);
         self.index.deinit(a);
@@ -264,11 +293,25 @@ pub const History = struct {
         const id = payload.id;
         if (self.index.find(id)) |old| self.remove(store, old);
         if (self.count == self.entries.len) _ = self.evictOldest(store);
+        const topic = self.topic_index.find(payload.topicString()) orelse blk: {
+            const index = self.free_topic;
+            assert(index != empty_slot);
+            const t = &self.topics[index];
+            self.free_topic = t.next_free;
+            t.* = .{};
+            @memcpy(t.bytes[0..payload.topic_len], payload.topicString());
+            t.name = t.bytes[0..payload.topic_len];
+            self.topic_index.insert(t.name, index);
+            break :blk index;
+        };
+        const topic_list = &self.topics[topic];
         const slot = self.free;
         assert(slot != empty_slot);
         self.free = self.entries[slot].next;
         @memset(self.countsRow(slot), 0);
-        self.entries[slot] = .{ .message = h, .prev = self.tail, .born_epoch = epoch };
+        self.entries[slot] = .{ .message = h, .prev = self.tail, .born_epoch = epoch, .topic = topic, .topic_prev = topic_list.tail };
+        if (topic_list.tail != empty_slot) self.entries[topic_list.tail].topic_next = slot else topic_list.head = slot;
+        topic_list.tail = slot;
         if (self.tail != empty_slot) self.entries[self.tail].next = slot else self.head = slot;
         self.tail = slot;
         self.ids[slot] = id;
@@ -317,6 +360,15 @@ pub const History = struct {
     }
     fn remove(self: *History, store: *storage.Store, slot: u32) void {
         const e = &self.entries[slot];
+        const t = &self.topics[e.topic];
+        if (e.topic_prev != empty_slot) self.entries[e.topic_prev].topic_next = e.topic_next else t.head = e.topic_next;
+        if (e.topic_next != empty_slot) self.entries[e.topic_next].topic_prev = e.topic_prev else t.tail = e.topic_prev;
+        if (t.head == empty_slot) {
+            assert(t.tail == empty_slot);
+            self.topic_index.remove(t.name);
+            t.next_free = self.free_topic;
+            self.free_topic = e.topic;
+        }
         if (e.prev != empty_slot) self.entries[e.prev].next = e.next else self.head = e.next;
         if (e.next != empty_slot) self.entries[e.next].prev = e.prev else self.tail = e.prev;
         self.index.remove(self.ids[slot]);
@@ -333,263 +385,28 @@ pub const History = struct {
             _ = self.evictOldest(store);
         }
     }
-    pub fn gossip(self: *const History, store: *const storage.Store, name: []const u8, out: []MessageId, epoch: u64) usize {
+    pub fn gossip(self: *History, name: []const u8, out: []MessageId, epoch: u64) usize {
+        const topic = self.topic_index.find(name) orelse return 0;
         var count: usize = 0;
-        var slot = self.head;
+        var slot = self.topics[topic].head;
         for (0..self.count) |_| {
-            if (count == out.len) break;
+            if (slot == empty_slot or count == out.len) break;
             const e = &self.entries[slot];
-            slot = e.next;
-            const m = store.get(e.message).?;
+            const id = self.ids[slot];
+            slot = e.topic_next;
+            self.gossip_entries_visited +|= 1;
             assert(e.born_epoch <= epoch);
             // Arrivals in this epoch receive their first advertising window in the next one.
             const windows = epoch - e.born_epoch;
-            if (windows == 0 or windows > constants.mcache_gossip or !std.mem.eql(u8, name, m.topicString())) continue;
-            out[count] = m.id;
+            if (windows == 0) break;
+            if (windows > constants.mcache_gossip) continue;
+            out[count] = id;
             count += 1;
         }
         return count;
     }
 };
 
-test "seen cache dedupes, evicts oldest when full, and expires by ttl" {
-    var cache = try SeenCache.init(std.testing.allocator, 4, 1_000);
-    defer cache.deinit(std.testing.allocator);
-    const a = [_]u8{1} ** 20;
-    const b = [_]u8{2} ** 20;
-    try std.testing.expect(cache.add(a, 0));
-    try std.testing.expect(!cache.add(a, 0));
-    try std.testing.expect(cache.contains(a, 400));
-    try std.testing.expect(cache.add(b, 100));
-    // fill past capacity: a evicts
-    try std.testing.expect(cache.add([_]u8{3} ** 20, 200));
-    try std.testing.expect(cache.add([_]u8{4} ** 20, 300));
-    try std.testing.expect(cache.add([_]u8{5} ** 20, 400));
-    try std.testing.expect(!cache.contains(a, 400));
-    try std.testing.expect(cache.contains(b, 400));
-    // ttl expiry from the tail
-    try std.testing.expect(cache.add([_]u8{6} ** 20, 1_500));
-    try std.testing.expect(!cache.contains(b, 400));
-}
-
-test "gossip seen TTL applies to duplicate only traffic" {
-    var cache = try SeenCache.init(std.testing.allocator, 4, 10);
-    defer cache.deinit(std.testing.allocator);
-    const id = [_]u8{1} ** 20;
-    try std.testing.expect(cache.add(id, 1));
-    try std.testing.expect(!cache.add(id, 10));
-    try std.testing.expect(!cache.contains(id, 11));
-    try std.testing.expect(cache.add(id, 11));
-}
-
-test "gossip history indexed replacement keeps FIFO age and independent TX retention" {
-    var store = try storage.Store.init(std.testing.allocator, 4, 16384);
-    defer store.deinit(std.testing.allocator);
-    var history = try History.init(std.testing.allocator, 2, constants.retained_peers_cap);
-    defer history.deinit(std.testing.allocator);
-    const a = [_]u8{1} ** 20;
-    const b = [_]u8{2} ** 20;
-    const first = store.put(a, "a", "old").?;
-    history.put(&store, first, 0);
-    store.seal(first);
-    store.retainTx(first);
-    const second = store.put(b, "b", "other").?;
-    history.put(&store, second, 0);
-    store.seal(second);
-    history.age(&store, 1);
-    const replacement = store.put(a, "a", "new").?;
-    history.put(&store, replacement, 1);
-    store.seal(replacement);
-    try std.testing.expectEqual(@as(usize, 2), history.count);
-    try std.testing.expectEqual(replacement, history.message(history.get(&store, a).?));
-    try std.testing.expect(!store.get(first).?.history);
-    history.age(&store, constants.mcache_len);
-    try std.testing.expect(history.get(&store, b) == null);
-    try std.testing.expect(history.get(&store, a) != null);
-    history.age(&store, constants.mcache_len + 1);
-    try std.testing.expectEqual(@as(usize, 0), history.count);
-    store.releaseTx(first);
-    try std.testing.expectEqual(@as(usize, 0), store.used_entries);
-}
-
-test "gossip ID index bounds sparse misses and repairs wrapped collision clusters" {
-    var ids: [64]MessageId = undefined;
-    var index = try Index.init(std.testing.allocator, &ids);
-    defer index.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 0), index.probe_limit);
-    try std.testing.expect(index.find(@splat(0)) == null);
-    var count: usize = 0;
-    for (0..65_536) |candidate| {
-        var id: MessageId = @splat(0);
-        std.mem.writeInt(u64, id[0..8], candidate, .little);
-        if (index.hash(id) & index.mask != index.mask) continue;
-        ids[count] = id;
-        index.insert(id, @intCast(count));
-        count += 1;
-        try std.testing.expectEqual(count, index.probe_limit);
-        if (count == ids.len) break;
-    }
-    try std.testing.expectEqual(ids.len, count);
-    var present = std.StaticBitSet(64).initFull();
-    for ([_]usize{ 0, 32, 63, 1, 31, 62 }) |removed| {
-        index.remove(ids[removed]);
-        present.unset(removed);
-        try std.testing.expectEqual(ids.len, index.probe_limit);
-        for (ids, 0..) |id, i| try std.testing.expectEqual(if (present.isSet(i)) @as(?u32, @intCast(i)) else null, index.find(id));
-    }
-    index.clear();
-    try std.testing.expectEqual(@as(usize, 0), index.probe_limit);
-    for (ids) |id| try std.testing.expect(index.find(id) == null);
-    index.insert(ids[63], 63);
-    try std.testing.expectEqual(@as(usize, 1), index.probe_limit);
-    try std.testing.expect(index.find(ids[0]) == null);
-    try std.testing.expectEqual(@as(?u32, 63), index.find(ids[63]));
-}
-
-test "gossip policy recovery permits more than sixteen distinct recipients" {
-    var history = try History.init(std.testing.allocator, 2, constants.retained_peers_cap);
-    defer history.deinit(std.testing.allocator);
-    const slot: u32 = 0;
-    for (0..32) |i| {
-        const peer: PeerRef = .{ .index = @intCast(i), .generation = 1 };
-        history.bindPeer(peer);
-        try std.testing.expect(history.iwantAllowed(slot, peer, 3));
-        for (0..3) |_| history.sent(slot, peer);
-        try std.testing.expect(!history.iwantAllowed(slot, peer, 3));
-    }
-    history.bindPeer(.{ .index = 0, .generation = 2 });
-    try std.testing.expect(history.iwantAllowed(slot, .{ .index = 0, .generation = 2 }, 3));
-}
-
-test "gossip history entries keep peer generations outside message rows" {
-    try std.testing.expect(@sizeOf(HistoryEntry) < 1024);
-}
-
-test "gossip history stale peer cannot restore retransmission allowance" {
-    var history = try History.init(std.testing.allocator, 2, constants.retained_peers_cap);
-    defer history.deinit(std.testing.allocator);
-    const slot: u32 = 0;
-    const current: PeerRef = .{ .index = 0, .generation = (@as(u64, 1) << 40) + 2 };
-    const stale: PeerRef = .{ .index = 0, .generation = current.generation - 1 };
-    history.bindPeer(current);
-    for (0..3) |_| history.sent(slot, current);
-    try std.testing.expect(!history.iwantAllowed(slot, stale, 3));
-    history.bindPeer(stale);
-    history.sent(slot, stale);
-    try std.testing.expect(!history.iwantAllowed(slot, current, 3));
-}
-
-test "gossip history replacement resets message retransmission counts" {
-    var store = try storage.Store.init(std.testing.allocator, 4, 16384);
-    defer store.deinit(std.testing.allocator);
-    var history = try History.init(std.testing.allocator, 1, constants.retained_peers_cap);
-    defer history.deinit(std.testing.allocator);
-    const id: MessageId = @splat(1);
-    const first = store.put(id, "t", "first").?;
-    history.put(&store, first, 0);
-    store.seal(first);
-    const peer: PeerRef = .{ .index = 0, .generation = 1 };
-    history.bindPeer(peer);
-    for (0..3) |_| history.sent(history.get(&store, id).?, peer);
-    const replacement = store.put(id, "t", "replacement").?;
-    history.put(&store, replacement, 0);
-    store.seal(replacement);
-    try std.testing.expect(history.iwantAllowed(history.get(&store, id).?, peer, 3));
-    try std.testing.expectEqual(@as(u8, 0), history.countsRow(history.get(&store, id).?)[peer.index]);
-    try std.testing.expectEqual(@as(usize, 1), store.used_entries);
-}
-
-test "gossip history canonical identity replacement clears only its bounded peer column" {
-    var history = try History.init(std.testing.allocator, 3, constants.retained_peers_cap);
-    defer history.deinit(std.testing.allocator);
-    const peer: PeerRef = .{ .index = 0, .generation = (@as(u64, 1) << 40) + 1 };
-    const other: PeerRef = .{ .index = 1, .generation = 1 };
-    history.bindPeer(peer);
-    history.bindPeer(other);
-    for (0..history.entries.len) |i| {
-        for (0..3) |_| history.sent(@intCast(i), peer);
-        history.sent(@intCast(i), other);
-    }
-    history.bindPeer(peer);
-    for (0..history.entries.len) |i| try std.testing.expect(!history.iwantAllowed(@intCast(i), peer, 3));
-    const replacement: PeerRef = .{ .index = 0, .generation = std.math.maxInt(u64) };
-    history.bindPeer(replacement);
-    for (0..history.entries.len) |i| {
-        try std.testing.expect(history.iwantAllowed(@intCast(i), replacement, 3));
-        try std.testing.expect(!history.iwantAllowed(@intCast(i), peer, 3));
-        try std.testing.expectEqual(@as(u8, 0), history.countsRow(@intCast(i))[0]);
-        try std.testing.expectEqual(@as(u8, 1), history.countsRow(@intCast(i))[1]);
-        for (0..3) |_| history.sent(@intCast(i), replacement);
-    }
-    history.bindPeer(peer);
-    for (0..history.entries.len) |i| {
-        history.sent(@intCast(i), peer);
-        try std.testing.expect(!history.iwantAllowed(@intCast(i), replacement, 3));
-    }
-}
-
-test "history resolved retained capacity bounds counters and stale peers" {
-    var history = try History.init(std.testing.allocator, 2, 4);
-    defer history.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 4), history.generations.len);
-    try std.testing.expectEqual(@as(usize, 8), history.counts.len);
-    try std.testing.expectEqual(@as(usize, 4), history.countsRow(0).len);
-    try std.testing.expect(!history.iwantAllowed(0, .{ .index = 4, .generation = 1 }, 3));
-    history.sent(0, .{ .index = 4, .generation = 1 });
-}
-
-test "gossip failed admission preserves history pinned by transmit queues" {
-    const a = std.testing.allocator;
-    var store = try storage.Store.init(a, 3, storage.page_bytes * 2);
-    defer store.deinit(a);
-    var history = try History.init(a, 2, 2);
-    defer history.deinit(a);
-    var handles: [2]storage.Handle = undefined;
-    for (&handles, 0..) |*handle, i| {
-        const id: MessageId = @splat(@intCast(i));
-        handle.* = history.admitPayload(&store, id, "topic", &([_]u8{1} ** (storage.inline_bytes + 1))).?;
-        history.put(&store, handle.*, 0);
-        store.seal(handle.*);
-        store.retainTx(handle.*);
-    }
-    defer for (handles) |handle| store.releaseTx(handle);
-    try std.testing.expectEqual(@as(usize, 2), history.count);
-    try std.testing.expect(history.admitPayload(&store, @splat(9), "topic", &([_]u8{1} ** (storage.inline_bytes + 1))) == null);
-    try std.testing.expectEqual(@as(usize, 2), history.count);
-    try std.testing.expectEqual(@as(usize, 0), store.free_pages);
-    store.releaseTx(handles[1]);
-    store.retainValidation(handles[1]);
-    try std.testing.expect(history.admitPayload(&store, @splat(9), "topic", &([_]u8{1} ** (storage.inline_bytes + 1))) == null);
-    store.retainTx(handles[1]);
-    store.releaseValidation(handles[1]);
-}
-
-test "gossip history emits three windows and defers arrivals during a cycle" {
-    const a = std.testing.allocator;
-    var store = try storage.Store.init(a, 3, 3 * storage.page_bytes);
-    defer store.deinit(a);
-    var history = try History.init(a, 3, 2);
-    defer history.deinit(a);
-    const first = store.put(@splat(1), "topic", "first").?;
-    history.put(&store, first, 0);
-    store.seal(first);
-    var epoch: u64 = 1;
-    const second = store.put(@splat(2), "topic", "second").?;
-    history.put(&store, second, epoch);
-    store.seal(second);
-    var ids: [3]MessageId = undefined;
-    try std.testing.expectEqual(@as(usize, 1), history.gossip(&store, "topic", &ids, epoch));
-    history.age(&store, epoch);
-    for (0..2) |_| {
-        epoch += 1;
-        try std.testing.expectEqual(@as(usize, 2), history.gossip(&store, "topic", &ids, epoch));
-        history.age(&store, epoch);
-    }
-    epoch += 1;
-    try std.testing.expectEqual(@as(usize, 1), history.gossip(&store, "topic", &ids, epoch));
-    try std.testing.expectEqual(@as(MessageId, @splat(2)), ids[0]);
-    history.age(&store, epoch);
-    epoch += 1;
-    try std.testing.expectEqual(@as(usize, 0), history.gossip(&store, "topic", &ids, epoch));
-    history.age(&store, epoch);
+test {
+    _ = @import("mcache_test.zig");
 }
