@@ -114,7 +114,6 @@ fn ProcessRandaoBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type {
         io: std.Io,
 
         pub fn run(self: *@This(), _: std.mem.Allocator) void {
-
             state_transition.processRandao(
                 fork,
                 self.io,
