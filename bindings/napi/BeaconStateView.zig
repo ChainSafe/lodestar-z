@@ -655,7 +655,7 @@ fn indexedSyncCommitteeToNapi(sync_committee: anytype) !js_types.IndexedSyncComm
             env,
             u32,
             entry.value_ptr.items,
-            .{ .typed_array = .uint32 },
+            .{},
         );
         _ = try env.callFunction(set_fn, map, .{ key, positions });
     }
