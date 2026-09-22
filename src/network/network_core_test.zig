@@ -30,7 +30,7 @@ const MaintenancePeers = struct {
         }
         const hub = &nodes[0];
         errdefer |err| std.debug.print("maintenance bootstrap failed: {t}, peers={any}, operations={any}, requests={any}\n", .{ err, hub.peerCounts(), hub.peer_manager.control.resourceSnapshot(), hub.service.reqresp.active() });
-        for (nodes[1..]) |*remote| try hub.connectUntil(&remote.peerId(), &.{remote.transport.localAddress()}, hub.last_now, hub.last_now.mono_ms +| @import("peers/dial_queue.zig").connect_timeout_ms);
+        for (nodes[1..]) |*remote| try hub.connectUntil(&remote.peerId(), &.{remote.transport.localAddress()}, hub.last_now, hub.last_now.mono_ms +| @import("peers/dialing.zig").connect_timeout_ms);
         for (0..3000) |_| {
             try step(&.{ &nodes[0], &nodes[1], &nodes[2], &nodes[3] });
             if (hub.peerCounts().relevant != 3 or hub.peer_manager.control.resourceSnapshot().operations != 0) continue;
@@ -136,7 +136,7 @@ test "managed runtime metrics copy peer processing work without advancing it" {
     defer node.deinit(std.testing.io);
     node.peer_manager.reconcile(&node.service, node.last_now);
     const peer_work = node.peer_manager.counters;
-    const dial_work = node.peer_manager.dial_queue.counters;
+    const dial_work = node.peer_manager.dialing.counters;
     try std.testing.expect(peer_work.catalog_deadline_rows > 0);
     const metrics = @import("metrics/export.zig");
     const context = metrics.Context.init(&node, node.last_now, true);
@@ -145,7 +145,7 @@ test "managed runtime metrics copy peer processing work without advancing it" {
     var writer = std.Io.Writer.fixed(bytes);
     try metrics.write(&context, &writer);
     try std.testing.expectEqualDeep(peer_work, node.peer_manager.counters);
-    try std.testing.expectEqualDeep(dial_work, node.peer_manager.dial_queue.counters);
+    try std.testing.expectEqualDeep(dial_work, node.peer_manager.dialing.counters);
 }
 
 test "managed runtime local transaction sequences no-op schedule and rollback" {
@@ -572,7 +572,7 @@ test "managed runtime unreachable destination backs off and rotates to its alter
     try node.connectUntil(&peer, &.{
         .{ .ip6 = .{ .octets = .{0} ** 15 ++ .{1}, .port = 19003 } },
         .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 19003 } },
-    }, now, now.mono_ms +| @import("peers/dial_queue.zig").connect_timeout_ms);
+    }, now, now.mono_ms +| @import("peers/dialing.zig").connect_timeout_ms);
     var faults: FaultIo = .{ .send = .{} };
     faults.init(std.testing.io);
     defer faults.deinit();
@@ -581,15 +581,15 @@ test "managed runtime unreachable destination backs off and rotates to its alter
     try std.testing.expect(refused.failure == null);
     try std.testing.expectEqual(@as(u8, 1), refused.dial_failed);
     try std.testing.expectEqual(@as(u8, 0), refused.dial_deferred);
-    const row = &node.peer_manager.dial_queue.rows[0];
-    try std.testing.expectEqual(@as(u8, 1), row.failures);
-    try std.testing.expectEqual(@as(u8, 1), row.address_index);
-    try std.testing.expect(!row.attempt);
-    try std.testing.expect(row.eligible_at_ms >= now.mono_ms + 1000);
-    const retry: @import("types.zig").Now = .{ .mono_ms = row.eligible_at_ms, .unix_s = now.unix_s };
+    const row = &node.peer_manager.catalog.rows[0];
+    try std.testing.expectEqual(@as(u8, 1), row.intent.failures);
+    try std.testing.expectEqual(@as(u8, 1), row.intent.address_index);
+    try std.testing.expect(row.attempt == null);
+    try std.testing.expect(row.intent.eligible_at_ms >= now.mono_ms + 1000);
+    const retry: @import("types.zig").Now = .{ .mono_ms = row.intent.eligible_at_ms, .unix_s = now.unix_s };
     const result = node.step(std.testing.io, retry, 0, .{}, 0);
     try std.testing.expectEqual(@as(u8, 1), result.dial_started);
-    try std.testing.expect(row.conn != null);
+    try std.testing.expect(node.peer_manager.dialing.active[row.attempt.?].connection != null);
 }
 
 test "managed runtime socket faults preserve the other owner and local dial refusal is deferred" {
@@ -629,16 +629,16 @@ test "managed runtime socket faults preserve the other owner and local dial refu
     const protocol_due = @import("managed.zig").nextWakeup(&node.peer_manager, &node.service, settled, 0, 0, 0, 4);
     try std.testing.expect(protocol_due == null or protocol_due.? > discovery_due);
     const peer = t.PeerId.fromPublicKey(&remote_key.publicKey());
-    try node.connectUntil(&peer, &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 19003 } }}, settled, settled.mono_ms +| @import("peers/dial_queue.zig").connect_timeout_ms);
+    try node.connectUntil(&peer, &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 19003 } }}, settled, settled.mono_ms +| @import("peers/dialing.zig").connect_timeout_ms);
     try std.testing.expectEqual(settled.mono_ms, node.nextWakeup(settled, .{}).?);
     faults.clock = .{};
     const refused = node.step(io, settled, 0, .{}, 0);
     try std.testing.expectEqual(@as(u8, 1), refused.dial_deferred);
     try std.testing.expectEqual(error.ClockOutOfRange, refused.failure.?);
     try std.testing.expectEqual(@as(u8, 0), refused.dial_started);
-    for (node.peer_manager.dial_queue.rows) |row| if (row.occupied) {
-        try std.testing.expectEqual(@as(u8, 0), row.failures);
-        try std.testing.expect(!row.attempt);
+    for (node.peer_manager.catalog.rows) |row| if (row.occupied) {
+        try std.testing.expectEqual(@as(u8, 0), row.intent.failures);
+        try std.testing.expect(row.attempt == null);
     };
     const calls = node.reservations.allocation_calls;
     const clean = node.step(std.testing.io, settled, 0, .{}, 0);
@@ -678,7 +678,7 @@ fn failureAndReplacement(a: *runtime.NetworkCore, b: *runtime.NetworkCore) !void
     var replacement: runtime.NetworkCore = undefined;
     try replacement.initRaw(std.testing.allocator, std.testing.io, opts);
     defer replacement.deinit(std.testing.io);
-    try replacement.connectUntil(&a.peerId(), &.{a.transport.localAddress()}, now, now.mono_ms +| @import("peers/dial_queue.zig").connect_timeout_ms);
+    try replacement.connectUntil(&a.peerId(), &.{a.transport.localAddress()}, now, now.mono_ms +| @import("peers/dialing.zig").connect_timeout_ms);
     for (0..2000) |_| {
         const tick = try @import("transport.zig").currentTime(std.testing.io);
         const added = replacement.step(std.testing.io, tick, 100, .{}, 1);
@@ -715,10 +715,10 @@ test "managed profiles measure reservations and unwind byte exhaustion" {
         const kib = 1024;
         const mib = 1024 * kib;
         const ceilings = if (profile == .small)
-            .{ .total = 96 * mib, .service = 95 * mib, .transport = 90 * kib, .scratch = 400 * kib, .catalog = 56 * kib, .control = 13 * kib, .dial = 14 * kib }
+            .{ .total = 96 * mib, .service = 95 * mib, .transport = 90 * kib, .scratch = 400 * kib, .catalog = 100 * kib, .control = 15 * kib, .dial = 0 }
         else
-            .{ .total = 384 * mib, .service = 374 * mib, .transport = 720 * kib, .scratch = 3200 * kib, .catalog = 448 * kib, .control = 100 * kib, .dial = 112 * kib };
-        std.debug.print("managed memory {s}: total={d} service={d} reqresp={d} negotiations={d}\n", .{ @tagName(profile), measured, plan.service_bytes, node.service.reqresp.memoryPlan().total_bytes, node.service.router.negotiator.entries.len });
+            .{ .total = 384 * mib, .service = 374 * mib, .transport = 720 * kib, .scratch = 3200 * kib, .catalog = 800 * kib, .control = 114 * kib, .dial = 0 };
+        std.debug.print("managed memory {s}: total={d} service={d} reqresp={d} negotiations={d} catalog={d} control={d}\n", .{ @tagName(profile), measured, plan.service_bytes, node.service.reqresp.memoryPlan().total_bytes, node.service.router.negotiator.entries.len, core_plan.catalog_bytes, core_plan.control_bytes });
         try std.testing.expectEqual(measured, plan.allocated_bytes);
         try std.testing.expect(measured <= ceilings.total);
         try std.testing.expect(plan.service_bytes <= ceilings.service);
@@ -1352,14 +1352,14 @@ fn recycledPeerOperations(a: *runtime.NetworkCore, b: *runtime.NetworkCore, c: *
             if (result.failure) |err| return err;
         }
         const ref = a.peer_manager.catalog.find(&replacement.peerId()) orelse continue;
-        const row = a.peer_manager.catalog.get(ref).?;
+        const row = a.peer_manager.catalog.get(ref) orelse continue;
         if (!row.relevant) continue;
         current = row;
         break;
     }
     const selected = current orelse return error.ReplacementNotReady;
-    try std.testing.expectEqual(previous.peer.index, selected.peer.index);
-    try std.testing.expect(previous.peer.generation != selected.peer.generation);
+    try std.testing.expect(!std.meta.eql(previous.peer, selected.peer));
+    try std.testing.expect(a.peer_manager.catalog.get(previous.peer) == null);
     try std.testing.expect(!a.closePeer(&previous.identity, a.last_now));
     try std.testing.expect(!a.reStatusPeer(&previous.identity, a.last_now));
     try std.testing.expectEqualDeep(selected, a.peer_manager.catalog.get(selected.peer).?);
@@ -1592,7 +1592,7 @@ test "managed runtime metrics aggregate subnets and count distinct mesh peers" {
     try std.testing.expect(try pair.a.applyIntent(&a_intent, pair.a.last_now));
     try std.testing.expect(try pair.b.applyIntent(&b_intent, pair.b.last_now));
     const metrics = @import("metrics/export.zig");
-    try pair.a.connectUntil(&pair.b.peerId(), &.{pair.b.transport.localAddress()}, pair.a.last_now, pair.a.last_now.mono_ms +| @import("peers/dial_queue.zig").connect_timeout_ms);
+    try pair.a.connectUntil(&pair.b.peerId(), &.{pair.b.transport.localAddress()}, pair.a.last_now, pair.a.last_now.mono_ms +| @import("peers/dialing.zig").connect_timeout_ms);
     const start = pair.a.last_now.mono_ms;
     var mesh_count: usize = 0;
     for (0..3000) |_| {
@@ -1837,7 +1837,7 @@ test "application transport borrow authenticates while remote Status remains una
     try b.initRaw(std.testing.allocator, std.testing.io, opts_b);
     defer b.deinit(std.testing.io);
     const now = try @import("transport.zig").currentTime(std.testing.io);
-    try a.connectUntil(&b.peerId(), &.{b.transport.localAddress()}, now, now.mono_ms +| @import("peers/dial_queue.zig").connect_timeout_ms);
+    try a.connectUntil(&b.peerId(), &.{b.transport.localAddress()}, now, now.mono_ms +| @import("peers/dialing.zig").connect_timeout_ms);
     var authenticated = false;
     for (0..300) |_| {
         const tick = try @import("transport.zig").currentTime(std.testing.io);
@@ -1910,4 +1910,23 @@ test "dual-stack runtime signs both bound discovery and QUIC endpoints" {
     try std.testing.expectEqual(node.discovery.?.transport.sockets.values[1].?.address.getPort(), record.udp6.?);
     try std.testing.expectEqualSlices(u8, &quic[0].?.ip4.octets, &record.ip4.?);
     try std.testing.expectEqualSlices(u8, &quic[1].?.ip6.octets, &record.ip6.?);
+}
+
+test "managed runtime candidate identities do not expose admitted APIs or enlarge snapshot capacity" {
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{31}));
+    const remote = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{32}));
+    var node: runtime.NetworkCore = undefined;
+    try node.initRaw(std.testing.allocator, std.testing.io, options(&key));
+    defer node.deinit(std.testing.io);
+    const peer = t.PeerId.fromPublicKey(&remote.publicKey());
+    const now = node.last_now;
+    try node.addDirectPeer(&peer, &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9001 } }}, now);
+    try std.testing.expect(node.peer_manager.catalog.find(&peer) != null);
+    try std.testing.expect(!node.isConnected(&peer));
+    try std.testing.expect(!node.closePeer(&peer, now));
+    try std.testing.expect(!node.reStatusPeer(&peer, now));
+    try std.testing.expect(node.reportPeer(&peer, .fatal, now) == null);
+    try std.testing.expectError(error.StalePeer, node.sendReqRespRequest(&peer, .ping_v1, &.{}, &.{}, .{}, now));
+    var snapshots: [4]t.Snapshot = undefined;
+    try std.testing.expectEqual(@as(usize, 0), try node.completeSnapshots(&snapshots));
 }

@@ -59,7 +59,7 @@ test "gossipsub service preserves coalesced negotiation subscription and FIN" {
     });
     defer server.deinit();
     const handles = try support.connectPair(&pair);
-    _ = server.gossipsub.peerConnected(&pair.server, handles.server, pair.now);
+    _ = server.gossipsub.peerConnected(&pair.server, handles.server, false, pair.now);
     var topic_buffer: [topic_mod.topic_max_len]u8 = undefined;
     const topic = topic_mod.build(digest, "beacon_block", &topic_buffer);
     try gossip_test.subscribe(server.gossipsub, topic);
@@ -223,7 +223,7 @@ test "gossipsub service negotiates with a v1.1-only peer" {
     defer setup.deinit();
     setup.shared.server.deinit();
     setup.shared.server = try Service.init(std.testing.allocator, .{ .reqresp = .{ .forks = &.{}, .peers = 4, .outbound_max = 1, .inbound_max = 1, .inbound_per_peer_max = 1 }, .gossipsub = .{ .random_seed = 1 }, .router = .{ .meshsub_versions = &.{.v1_1} } });
-    _ = setup.shared.server.gossipsub.peerConnected(&setup.shared.pair.server, setup.shared.handles.server, setup.shared.pair.now);
+    _ = setup.shared.server.gossipsub.peerConnected(&setup.shared.pair.server, setup.shared.handles.server, false, setup.shared.pair.now);
     for (0..24) |_| try setup.pumpOnce();
     const client_index = setup.shared.client.gossipsub.sessions.findPeer(setup.shared.handles.client).?;
     const server_index = setup.shared.server.gossipsub.sessions.findPeer(setup.shared.handles.server).?;
@@ -269,8 +269,8 @@ test "gossipsub service ignores stale outcomes after connection and peer slot re
     for (0..4) |_| try setup.pumpOnce();
     const handles = try support.connectPair(&setup.shared.pair);
     setup.shared.handles = .{ .client = handles.client, .server = handles.server };
-    _ = setup.shared.client.gossipsub.peerConnected(&setup.shared.pair.client, handles.client, setup.shared.pair.now);
-    _ = setup.shared.server.gossipsub.peerConnected(&setup.shared.pair.server, handles.server, setup.shared.pair.now);
+    _ = setup.shared.client.gossipsub.peerConnected(&setup.shared.pair.client, handles.client, false, setup.shared.pair.now);
+    _ = setup.shared.server.gossipsub.peerConnected(&setup.shared.pair.server, handles.server, false, setup.shared.pair.now);
     for (0..16) |_| try setup.pumpOnce();
     const index = setup.shared.client.gossipsub.sessions.findPeer(handles.client).?;
     try std.testing.expectEqual(old_index, index);

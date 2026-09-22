@@ -174,7 +174,7 @@ fn allocationCheck(a: std.mem.Allocator) !void {
     var c = try Catalog.init(a, opts, 1024, 0);
     defer c.deinit(a);
     try std.testing.expectEqual(
-        opts.capacity * @sizeOf(@import("catalog.zig").Row) + c.by_identity.slots.len * @sizeOf(u16) + c.by_connection.len * @sizeOf(?u16),
+        opts.capacity * @sizeOf(@import("catalog.zig").Row) + c.by_identity.slots.len * @sizeOf(u16) + c.by_connection.len * @sizeOf(?u16) + c.established.len * @sizeOf(?u16) + c.intent_masks.len * @sizeOf(usize),
         c.memoryPlan().allocated_bytes,
     );
 }

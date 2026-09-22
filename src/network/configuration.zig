@@ -6,7 +6,7 @@ const rr = @import("reqresp/reqresp.zig");
 const gossip = @import("gossipsub/options.zig");
 const c = @import("gossipsub/constants.zig");
 const peers = @import("peers/types.zig");
-const dial = @import("peers/dial_queue.zig");
+const dial = @import("peers/dialing.zig");
 const router = @import("router.zig");
 
 pub const Profile = enum { small, beacon_node };

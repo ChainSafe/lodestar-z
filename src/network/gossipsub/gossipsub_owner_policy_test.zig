@@ -190,7 +190,7 @@ test "gossip policy sent promise survives reconnect without token rearming" {
 test "gossip policy duplicate connections preserve one logical owner and direct deliveries" {
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
     defer g.deinit();
-    const metadata: peers_mod.Metadata = .{ .identity = .{ .bytes = [_]u8{1} ** @import("../wire/peer_id.zig").length }, .address = .unspecified, .direction = .outbound };
+    var metadata: peers_mod.Metadata = .{ .identity = .{ .bytes = [_]u8{1} ** @import("../wire/peer_id.zig").length }, .address = .unspecified, .direction = .outbound };
     const now: Now = .{ .mono_ms = 1, .unix_s = 0 };
     const conn: Handle = .{ .index = 0, .generation = 1 };
     const first = g.addPeer(conn, &metadata, now).admitted;
@@ -208,8 +208,13 @@ test "gossip policy duplicate connections preserve one logical owner and direct 
     try std.testing.expectEqual(@as(u16, 1), result.queued);
     try std.testing.expectEqual(@as(usize, 0), g.overlay.mesh(g.overlay.findTopic(topic).?).count());
     g.connectionClosed(conn);
+    metadata.direct = true;
     const next = g.addPeer(second, &metadata, now).admitted;
     try std.testing.expect(g.peers.rows[g.sessions.rows[next.index].logical.index].direct);
+    g.connectionClosed(second);
+    metadata.direct = false;
+    const indirect = g.addPeer(.{ .index = 1, .generation = 2 }, &metadata, now).admitted;
+    try std.testing.expect(!g.peers.rows[g.sessions.rows[indirect.index].logical.index].direct);
 }
 
 test "gossip policy topic reuse waits for attribution and preserves copied event window" {

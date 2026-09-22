@@ -542,7 +542,7 @@ test "managed native gossip admission precedes Status without establishing manag
         conn = event.connected.conn;
     };
     try std.testing.expect(conn != null);
-    _ = setup.client_service.gossipsub.peerConnected(&setup.pair.client, conn.?, setup.pair.now);
+    _ = setup.client_service.gossipsub.peerConnected(&setup.pair.client, conn.?, false, setup.pair.now);
     for (0..30) |_| {
         try setup.pair.pump();
         _ = managed.process(&setup.server, &setup.server_service, &setup.pair.server, setup.pair.events(

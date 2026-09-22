@@ -44,7 +44,7 @@ const Simulation = struct {
         const connected = try support.connectPair(&self.pair);
         self.connections = .{ connected.client, connected.server };
         for (&self.nodes, 0..) |*node, i| {
-            try std.testing.expectEqual(.admitted, node.gossipsub.peerConnected(self.transport(i), self.connections[i], self.pair.now));
+            try std.testing.expectEqual(.admitted, node.gossipsub.peerConnected(self.transport(i), self.connections[i], false, self.pair.now));
         }
     }
 
@@ -169,7 +169,7 @@ test "gossip scheduler converges through pressure loss stream replacement and se
         sim.nodes[0].gossipsub.shutdown(&sim.nodes[0].router, &sim.pair.client);
         try std.testing.expectEqual(@as(usize, 0), core.resourceSnapshot().held_tx_retains);
         try std.testing.expectEqual(@as(usize, 0), core.resourceSnapshot().promises);
-        try std.testing.expectEqual(.admitted, sim.nodes[0].gossipsub.peerConnected(&sim.pair.client, sim.connections[0], sim.pair.now));
+        try std.testing.expectEqual(.admitted, sim.nodes[0].gossipsub.peerConnected(&sim.pair.client, sim.connections[0], false, sim.pair.now));
         try std.testing.expect(!core.sessions.matches(prior));
         const sent = core.rpc_metrics.sent_frames;
         core.writeCompleted(prior, .{ .control = .{ .token = 1, .kind = .iwant } }, sim.pair.now.mono_ms);

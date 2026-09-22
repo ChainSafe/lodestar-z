@@ -7,8 +7,8 @@ pub const Discovery = discovery.Discovery;
 pub const enr = @import("enr.zig");
 pub const control = @import("control.zig");
 pub const Control = control.Control;
-pub const dial_queue = @import("dial_queue.zig");
-pub const DialQueue = dial_queue.DialQueue;
+pub const dialing = @import("dialing.zig");
+pub const Dialing = dialing.Dialing;
 pub const types = @import("types.zig");
 pub const catalog = @import("catalog.zig");
 pub const identity_index = @import("identity_index.zig");
@@ -36,5 +36,5 @@ test {
     _ = @import("catalog.zig");
     _ = @import("reputation.zig");
     _ = @import("control_wire.zig");
-    _ = @import("dial_queue.zig");
+    _ = @import("dialing.zig");
 }

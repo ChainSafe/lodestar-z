@@ -552,7 +552,7 @@ test "peer discovery failed initial lookup send cancels call and defers retry" {
 fn handoff(candidate: *const adapter.Candidate) !void {
     const support = @import("../test_support.zig");
     const core_mod = @import("../managed.zig");
-    const dial = @import("dial_queue.zig");
+    const dial = @import("dialing.zig");
     var pair = support.Pair{};
     try pair.init(.{ .connections_max = 4, .handshaking_max = 4, .handshaking_per_source_max = 4, .dialing_max = 2 }, .{ .connections_max = 4, .handshaking_max = 4, .handshaking_per_source_max = 4, .dialing_max = 2 });
     defer pair.deinit();
@@ -564,7 +564,7 @@ fn handoff(candidate: *const adapter.Candidate) !void {
     defer core.deinit();
     defer core_mod.shutdown(&core, &service, &pair.client, pair.now);
     try std.testing.expectEqual(@as(u16, 1), core.discoveredBatch(&service, &.{candidate.*}, pair.now).accepted);
-    try std.testing.expectEqual(candidate.sequence, core.dial_queue.rows[0].hints.?.sequence);
+    try std.testing.expectEqual(candidate.sequence, core.catalog.rows[0].intent.hints.?.sequence);
     var intents: [2]dial.DialIntent = undefined;
     try std.testing.expectEqual(@as(usize, 1), core.dialIntents(&service, &pair.client, pair.now, &intents));
     try std.testing.expect(intents[0].peer.eql(&candidate.peer));
