@@ -461,9 +461,9 @@ pub fn BeaconState(comptime f: ForkSeq) type {
             return @ptrCast(try lookahead_view.getAll(allocator));
         }
 
-        pub fn proposerLookaheadInto(self: *Self, proposer_lookahead: *[ForkTypes(.fulu).ProposerLookahead.length]u64) !void {
+        pub fn proposerLookaheadInto(self: *Self, out: *[ForkTypes(.fulu).ProposerLookahead.length]u64) !void {
             var lookahead_view = try self.proposerLookahead();
-            _ = try lookahead_view.getAllInto(proposer_lookahead[0..]);
+            _ = try lookahead_view.getAllInto(out[0..]);
         }
 
         pub fn setProposerLookahead(self: *Self, proposer_lookahead: *const [ForkTypes(.fulu).ProposerLookahead.length]u64) !void {

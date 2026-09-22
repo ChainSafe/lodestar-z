@@ -896,9 +896,9 @@ pub const AnyBeaconState = union(ForkSeq) {
         return @ptrCast(try lookahead_view.getAll(allocator));
     }
 
-    pub fn proposerLookaheadInto(self: *AnyBeaconState, proposer_lookahead: *[ct.fulu.ProposerLookahead.length]u64) !void {
+    pub fn proposerLookaheadInto(self: *AnyBeaconState, out: *[ct.fulu.ProposerLookahead.length]u64) !void {
         var lookahead_view = try self.proposerLookahead();
-        _ = try lookahead_view.getAllInto(proposer_lookahead[0..]);
+        _ = try lookahead_view.getAllInto(out[0..]);
     }
 
     pub fn setProposerLookahead(self: *AnyBeaconState, proposer_lookahead: *const [ct.fulu.ProposerLookahead.length]u64) !void {
