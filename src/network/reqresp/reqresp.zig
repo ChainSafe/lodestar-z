@@ -241,7 +241,6 @@ pub const ReqResp = struct {
     work_cursor: usize = 0,
     application_event_cursor: usize = 0,
     control_event_cursor: usize = 0,
-    scan_remaining: usize = 0,
 
     pub const Resources = struct {
         outbound_capacity: usize = 0,
@@ -864,16 +863,18 @@ pub const ReqResp = struct {
         self.cleanupPending(engine, router);
         self.recycleDelivered();
         const total = self.outbound.len + if (self.receive_plan != null) self.options.peers else self.inbound.len;
-        if (self.scan_remaining == 0) self.scan_remaining = total;
-        const steps = @min(self.scan_remaining, self.options.work_per_pump_max);
-        self.scan_remaining -= steps;
-        for (0..steps) |_| {
+        var serviced: usize = 0;
+        // Empty capacity must not add owner turns between chunks of a runnable stream.
+        for (0..total) |_| {
+            if (serviced == self.options.work_per_pump_max) break;
             const position = self.work_cursor;
             self.work_cursor = (position + 1) % total;
             if (position < self.outbound.len) {
                 const slot = &self.outbound[position];
+                if (!slot.request.running()) continue;
                 slot.request.needs_service = false;
-                if (slot.request.active()) slot.advance(self, engine, @intCast(position), now);
+                slot.advance(self, engine, @intCast(position), now);
+                serviced += 1;
             } else {
                 if (self.receive_plan != null) {
                     const peer = position - self.outbound.len;
@@ -889,13 +890,16 @@ pub const ReqResp = struct {
                         self.peer_cursors[peer].receive = @intCast((local + 1) % receive_plan.slots_per_peer);
                         slot.request.needs_service = false;
                         slot.advance(self, engine, @intCast(index), now);
+                        serviced += 1;
                         break;
                     }
                 } else {
                     const index = position - self.outbound.len;
                     const slot = &self.inbound[index];
+                    if (!slot.request.running()) continue;
                     slot.request.needs_service = false;
-                    if (slot.request.active()) slot.advance(self, engine, @intCast(index), now);
+                    slot.advance(self, engine, @intCast(index), now);
+                    serviced += 1;
                 }
             }
         }

@@ -1170,9 +1170,9 @@ test "reqresp blocked response writes expire and do not advertise ready local wo
     try std.testing.expect(!setup.shared.pair.server.registry.slots[stream.conn.index].table.matches(stream.slot, stream.id));
 }
 
-test "reqresp host consume retains buffered work behind a partial cursor" {
+test "reqresp empty capacity does not delay buffered response chunks" {
     var setup: Pair = .{};
-    try setup.init(.{ .outbound_max = 1, .inbound_max = 1 }, .{});
+    try setup.init(.{ .outbound_max = 64, .inbound_max = 64 }, .{});
     defer setup.deinit();
     const sink = try std.testing.allocator.alloc(u8, Protocol.blocks_by_root_v2.info().response_max);
     defer std.testing.allocator.free(sink);
@@ -1193,18 +1193,12 @@ test "reqresp host consume retains buffered work behind a partial cursor" {
     setup.shared.client.reqresp.options.work_per_pump_max = 1;
     _ = setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .application = &.{} }).application;
     try std.testing.expect(setup.shared.client.reqresp.consume(handle));
-    var received = false;
-    for (0..3) |_| {
-        const due = setup.shared.client.reqresp.nextWakeup(setup.shared.pair.now, .{ .application = 1 });
-        try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), due);
-        const count = setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .application = &events }).application;
-        if (count == 1) {
-            try std.testing.expectEqualSlices(u8, &second, events[0].chunk.bytes);
-            received = true;
-            break;
-        }
-    }
-    try std.testing.expect(received);
+    const due = setup.shared.client.reqresp.nextWakeup(setup.shared.pair.now, .{ .application = 1 });
+    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), due);
+    const count = setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .application = &events }).application;
+    try std.testing.expectEqual(@as(usize, 1), count);
+    try std.testing.expectEqualSlices(u8, &second, events[0].chunk.bytes);
+    try std.testing.expect(setup.shared.client.reqresp.consume(handle));
 }
 
 test "reqresp host response retains write work behind a partial cursor" {

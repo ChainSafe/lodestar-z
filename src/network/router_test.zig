@@ -221,14 +221,14 @@ test "router accepted selection survives capability changes behind outcome press
     server.cancel(&pair.server, out[0].stream);
 }
 
-test "router composed service retains native activity behind a partial reqresp sweep" {
+test "router composed service handles native activity past empty request capacity" {
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
     var client = try @import("service.zig").Service.init(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1 }, .reqresp = .{
         .forks = &.{},
-        .outbound_max = 1,
-        .inbound_max = 1,
+        .outbound_max = 64,
+        .inbound_max = 64,
         .work_per_pump_max = 1,
     } });
     defer client.deinit();
@@ -258,11 +258,6 @@ test "router composed service retains native activity behind a partial reqresp s
     }
     try std.testing.expect(incoming != null);
     try std.testing.expect(client.nextWakeup(pair.now, .{ .control = 1, .gossipsub = gossip.len }).? > pair.now.mono_ms);
-    for (0..2) |_| {
-        if (client.reqresp.work_cursor == 1) break;
-        _ = client.process(&pair.client, &.{}, &.{}, pair.now, .{ .control = &requests, .gossipsub = &gossip });
-    }
-    try std.testing.expectEqual(@as(usize, 1), client.reqresp.work_cursor);
     var wire: [rr.codec.frame_scratch_max]u8 = undefined;
     const encoded = try rr.codec.encodeChunk(0, null, &ping, &wire);
     const stream = server.reqresp.inbound[incoming.?.index].request.stream;
@@ -270,9 +265,7 @@ test "router composed service retains native activity behind a partial reqresp s
     try pair.pump();
     const active = pair.client.takeActivity(&activity);
     try std.testing.expect(active > 0);
-    _ = client.process(&pair.client, &.{}, activity[0..active], pair.now, .{ .control = &requests, .gossipsub = &gossip });
-    try std.testing.expectEqual(@as(?u64, pair.now.mono_ms), client.nextWakeup(pair.now, .{ .control = 1, .gossipsub = gossip.len }));
-    const counts = client.process(&pair.client, &.{}, &.{}, pair.now, .{ .control = &requests, .gossipsub = &gossip });
+    const counts = client.process(&pair.client, &.{}, activity[0..active], pair.now, .{ .control = &requests, .gossipsub = &gossip });
     try std.testing.expectEqual(@as(usize, 1), counts.control);
     try std.testing.expectEqualSlices(u8, &ping, requests[0].chunk.bytes);
 }
