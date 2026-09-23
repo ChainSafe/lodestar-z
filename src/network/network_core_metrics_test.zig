@@ -62,6 +62,8 @@ const contract = [_]Series{
     .{ .name = "lodestar_native_network_step_seconds", .kind = "histogram" },
     .{ .name = "lodestar_native_network_readiness_calls_total", .kind = "counter" },
     .{ .name = "lodestar_native_network_readiness_nonzero_waits_total", .kind = "counter" },
+    .{ .name = "lodestar_native_network_due_now_turns_total", .kind = "counter", .labels = &.{"source"} },
+    .{ .name = "lodestar_native_network_wait_seconds", .kind = "histogram" },
     .{ .name = "lodestar_native_quic_udp_received_datagrams_total", .kind = "counter" },
     .{ .name = "lodestar_native_quic_udp_sent_datagrams_total", .kind = "counter" },
     // Peers
@@ -287,4 +289,46 @@ test "metrics render every measurement contract series with its type and labels"
         missing += 1;
     }
     try std.testing.expectEqual(@as(usize, 0), missing);
+}
+
+test "metrics owner loop series start at zero after initialization" {
+    var f = try Fixture.init(&.{});
+    defer f.deinit();
+    const output = try f.render(true);
+    try contains(output, "lodestar_native_network_step_seconds_count 0\n");
+    try contains(output, "lodestar_native_network_wait_seconds_count 0\n");
+    try contains(output, "lodestar_native_network_due_now_turns_total{source=\"host\"} 0\n");
+}
+
+test "metrics attribute zero-wait owner turns to every due source and record the chosen wait" {
+    const key = try @import("wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{94}));
+    const node = try std.testing.allocator.create(core.NetworkCore);
+    defer std.testing.allocator.destroy(node);
+    try node.initManaged(std.testing.allocator, std.testing.io, .{
+        .host = &key,
+        .bind = .{ .ip4 = .loopback(0) },
+        .local = @import("managed_test_support.zig").localState(.{}),
+        .configuration = .{ .profile = .beacon_node, .seed = 7, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }} },
+    });
+    defer node.deinit(std.testing.io);
+    const now = try @import("transport.zig").currentTime(std.testing.io);
+    for (0..8) |_| try std.testing.expect(node.step(std.testing.io, now, 100, .{}, 0).failure == null);
+    const host = @intFromEnum(@import("wake_sources.zig").Source.host);
+    try std.testing.expectEqual(@as(u64, 8), node.due_now_turns[host]);
+    try std.testing.expectEqual(@as(u64, 8), node.wait_duration.buckets[0]);
+    try std.testing.expect(node.nextWakeup(now, .{}).? > now.mono_ms);
+    const settled = node.due_now_turns;
+    try std.testing.expect(node.step(std.testing.io, now, 100, .{}, 2).failure == null);
+    try std.testing.expectEqualDeep(settled, node.due_now_turns);
+    try std.testing.expectEqual(@as(u64, 9), node.wait_duration.count);
+    try std.testing.expectEqual(@as(u64, 8), node.wait_duration.buckets[0]);
+    const buffer = try std.testing.allocator.alloc(u8, metrics.textCapacity(&.{}));
+    defer std.testing.allocator.free(buffer);
+    var context = metrics.Context.init(node, now, true);
+    var writer = std.Io.Writer.fixed(buffer);
+    try metrics.write(&context, &writer);
+    const output = writer.buffered();
+    try contains(output, "lodestar_native_network_due_now_turns_total{source=\"host\"} 8\n");
+    try contains(output, "lodestar_native_network_wait_seconds_bucket{le=\"0\"} 8\n");
+    try contains(output, "lodestar_native_network_wait_seconds_count 9\n");
 }

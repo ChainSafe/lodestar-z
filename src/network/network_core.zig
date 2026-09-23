@@ -10,9 +10,11 @@ const peers = @import("peers/root.zig");
 const rr = @import("reqresp/root.zig");
 const gossip = @import("gossipsub/root.zig");
 const Now = @import("types.zig").Now;
+const wake_sources = @import("wake_sources.zig");
 pub const wait = @import("wait.zig");
 
 pub const poll_wait_max_ms: u32 = 5;
+const WaitTime = @import("metrics/histogram.zig").Duration(&.{ 0, 1, 2, 5, 10, 25, 50, 100 });
 pub const ForkSchedule = struct {
     fulu_scheduled: bool = false,
     next_version: [4]u8 = @splat(0),
@@ -169,6 +171,8 @@ pub const NetworkCore = struct {
     schedule: ForkSchedule,
     counters: Counters = .{},
     step_duration: @import("metrics/timing.zig").Duration = .{},
+    wait_duration: WaitTime = .{},
+    due_now_turns: [wake_sources.source_count]u64 = @splat(0),
     last_now: Now,
     initialized: bool = false,
     wait_mode: wait.Mode,
@@ -194,6 +198,9 @@ pub const NetworkCore = struct {
         self.allocator = allocator;
         self.schedule = options.schedule;
         self.counters = .{};
+        self.step_duration = .{};
+        self.wait_duration = .{};
+        self.due_now_turns = @splat(0);
         self.wait_mode = options.wait_mode;
         self.host_wake = null;
         self.native_event_count = 0;
@@ -525,12 +532,32 @@ pub const NetworkCore = struct {
     }
 
     pub fn nextWakeup(self: *NetworkCore, now: Now, outputs: Outputs) ?u64 {
-        var due = managed.nextWakeup(&self.peer_manager, &self.service, now, outputs.peers.len, outputs.application.len, outputs.gossipsub.len, 4);
-        if (self.transport.nextTimeoutMs(now)) |relative| due = earlier(due, now.mono_ms +| relative);
-        if (!self.peer_manager.quiescing) if (self.discovery) |owned| if (owned.coordinator.nextWakeup(now.mono_ms)) |deadline| {
-            due = earlier(due, deadline);
+        var wakeups: wake_sources.Wakeups = .{};
+        self.collectWakeups(now, outputs, &wakeups);
+        return wakeups.earliest();
+    }
+
+    fn collectWakeups(self: *NetworkCore, now: Now, outputs: Outputs, wakeups: *wake_sources.Wakeups) void {
+        managed.collectWakeups(&self.peer_manager, &self.service, now, outputs.peers.len, outputs.application.len, outputs.gossipsub.len, 4, wakeups);
+        const backlog = self.transport.immediate_work;
+        const host_work = self.transport.engine.hostWorkPending();
+        const activity = self.transport.engine.activityPending();
+        if (backlog) wakeups.note(.transport_backlog, now.mono_ms);
+        if (host_work) wakeups.note(.transport_host_work, now.mono_ms);
+        if (activity) wakeups.note(.transport_activity, now.mono_ms);
+        if (!backlog and !host_work and !activity) if (self.transport.nextTimeoutMs(now)) |relative| {
+            wakeups.note(.transport_timer, now.mono_ms +| relative);
         };
-        return due;
+        if (!self.peer_manager.quiescing) if (self.discovery) |owned| wakeups.note(.discovery, owned.coordinator.nextWakeup(now.mono_ms));
+    }
+
+    fn observeWait(self: *NetworkCore, wakeups: *const wake_sources.Wakeups, now_ms: u64, bounded_wait: u32) void {
+        self.wait_duration.observe(bounded_wait);
+        if (bounded_wait != 0) return;
+        for (wakeups.due, &self.due_now_turns) |deadline, *turns| {
+            const value = deadline orelse continue;
+            if (value <= now_ms) turns.* +|= 1;
+        }
     }
 
     /// One Service borrow window per turn. Returned counts remain valid even when failure is set.
@@ -538,8 +565,11 @@ pub const NetworkCore = struct {
     pub fn step(self: *NetworkCore, io: std.Io, now: Now, current_slot: u64, outputs: Outputs, max_wait_ms: u32) Result {
         self.last_now = now;
         var result: Result = .{ .transport = .{ .now = now } };
-        const due = self.nextWakeup(now, outputs);
-        const bounded_wait: u32 = if (self.peer_manager.stopped) 0 else @intCast(@min(max_wait_ms, (due orelse std.math.maxInt(u64)) -| now.mono_ms));
+        var wakeups: wake_sources.Wakeups = .{};
+        self.collectWakeups(now, outputs, &wakeups);
+        wakeups.note(.host, now.mono_ms +| max_wait_ms);
+        const bounded_wait: u32 = if (self.peer_manager.stopped) 0 else @intCast(@min(max_wait_ms, wakeups.earliest().? -| now.mono_ms));
+        if (!self.peer_manager.stopped) self.observeWait(&wakeups, now.mono_ms, bounded_wait);
         var receive_wait = @min(bounded_wait, poll_wait_max_ms);
         if (self.wait_mode == .native_poll) {
             if (comptime wait.supported) {
@@ -635,9 +665,6 @@ pub const NetworkCore = struct {
     }
 };
 
-fn earlier(current: ?u64, deadline: u64) u64 {
-    return @min(current orelse deadline, deadline);
-}
 fn validateForkTable(table: []const rr.ForkEntry, context: *const t.ForkContext) !void {
     try rr.reqresp.validateForkTable(table);
     var found = false;
