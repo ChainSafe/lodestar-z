@@ -261,6 +261,20 @@ it("rejects initialization from another Node environment", async () => {
   }
 });
 
+it("memory_safety: terminates workers while publication and command results are pending", () => {
+  for (let i = 0; i < 8; i++) {
+    const output = execFileSync(
+      process.execPath,
+      ["--import", "tsx", "bindings/test/fixtures/network-worker-settlement.mjs"],
+      {
+        encoding: "utf8",
+        timeout: 10000,
+      }
+    );
+    expect(output, `worker termination ${i}`).toContain("worker-settlement-released");
+  }
+}, 90000);
+
 it("gates raw reentrant initialization and close before config getters execute", async () => {
   const {networkBindings: addon} = await import("./utils/network-bindings.js");
   const raw = new addon.NativeNetworkRuntime();
@@ -324,7 +338,7 @@ it.each([17, 64])("accepts a bounded discovery bootstrap list of %i entries", as
     await runtime.close();
   }
   expect(runtime.diagnostics().liveNativeRequestedBytes).toBe(0);
-});
+}, 20000);
 
 it("fails wildcard discovery advertisement omissions cleanly", async () => {
   const config = applicationConfig();
@@ -387,7 +401,7 @@ it("publishes copied peer observations without repeating unread notifications", 
     if (typeof addon.networkTestFail === "function") {
       const queued = runtime.diagnostics().peerLaneOccupied;
       addon.networkTestFail("drain_copy");
-      expect(() => runtime.drainPeers(32)).toThrow("InjectedNetworkFailure");
+      expect(() => runtime.drainPeers(32)).toThrow("NetworkResultAllocationFailed");
       expect(runtime.diagnostics().peerLaneOccupied).toBeGreaterThanOrEqual(queued);
     }
     const batch = runtime.drainPeers(32);

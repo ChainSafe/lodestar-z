@@ -79,7 +79,7 @@ pub fn initialize(self: *@This(), config: js.Value, callback: js.Value) !js.Valu
     errdefer runtime.removeHook();
     try faults.check(.close_promise);
     runtime.close_deferred = try env.createPromise();
-    errdefer runtime.close_deferred.?.resolve(env.getUndefined() catch unreachable) catch unreachable;
+    errdefer @import("network_js.zig").discardPromise(env, runtime.close_deferred.?);
     try prepareCloseResults(env, runtime);
     try faults.check(.promise_holder);
     const holder = try env.createObject();
@@ -182,20 +182,29 @@ pub fn deinit(self: *@This()) void {
 }
 
 fn onNotify(env: napi.Env, callback: Value, runtime: *Runtime, _: *void) void {
+    notify(env, callback, runtime) catch |err| switch (err) {
+        // Node may disable JavaScript before running environment cleanup hooks.
+        error.Closing, error.CannotRunJS, error.PendingException => runtime.forceStop(true),
+        // Failed settlement of valid, preallocated handles cannot notify the host reliably.
+        else => env.fatalError("native network result settlement", @errorName(err)),
+    };
+}
+
+fn notify(env: napi.Env, callback: Value, runtime: *Runtime) !void {
     runtime.lock();
     runtime.notification_pending = false;
     const alive = runtime.env_alive;
     runtime.unlock();
     if (!alive) return;
-    publication_js.settle(env, runtime);
-    settleOperations(env, runtime);
-    request_js.settle(env, runtime);
-    incoming_js.settle(env, runtime);
+    try publication_js.settle(env, runtime);
+    try settleOperations(env, runtime);
+    try request_js.settle(env, runtime);
+    try incoming_js.settle(env, runtime);
     runtime.lock();
     const idle = runtime.table.occupied == 0 and (runtime.publications == null or !runtime.publications.?.obligated()) and !runtime.requestObligations() and runtime.notify_live and !runtime.stop;
     runtime.unlock();
     if (idle) runtime.notify.unref(env) catch {};
-    settleClose(env, runtime);
+    try settleClose(env, runtime);
     runtime.lock();
     const work_available = !runtime.disposed and !runtime.quiescent and ((runtime.lane != null and runtime.lane.?.len > 0) or (runtime.incoming != null and runtime.incoming.?.oldest() != null) or (runtime.gossip != null and runtime.gossip.?.hasWork()));
     runtime.unlock();
@@ -205,28 +214,24 @@ fn makeError(env: napi.Env, err: anyerror) !Value {
     const name = try env.createStringUtf8(@errorName(err));
     return env.createError(name, name);
 }
-fn settleClose(env: napi.Env, runtime: *Runtime) void {
+fn settleClose(env: napi.Env, runtime: *Runtime) !void {
     runtime.lock();
     const done = runtime.quiescent;
     runtime.unlock();
     if (!done or runtime.close_settled) return;
     runtime.join();
     // The owner can quiesce after this callback's earlier result drains.
-    publication_js.settle(env, runtime);
-    settleOperations(env, runtime);
-    request_js.settle(env, runtime);
-    incoming_js.settle(env, runtime);
+    try publication_js.settle(env, runtime);
+    try settleOperations(env, runtime);
+    try request_js.settle(env, runtime);
+    try incoming_js.settle(env, runtime);
     runtime.lock();
     const reason = runtime.reason;
     runtime.unlock();
-    runtime.removeHook();
-    const value = copyClose(runtime, reason) catch copyClose(runtime, reason) catch runtime.close_results[1].?.getValue() catch unreachable;
+    const value = try runtime.close_results[@intFromEnum(reason)].?.getValue();
+    try runtime.close_deferred.?.resolve(value);
     runtime.close_settled = true;
-    runtime.close_deferred.?.resolve(value) catch unreachable;
-}
-fn copyClose(runtime: *Runtime, reason: r.Reason) !Value {
-    try faults.check(.close_copy);
-    return runtime.close_results[@intFromEnum(reason)].?.getValue();
+    runtime.removeHook();
 }
 
 fn owner(self: *@This()) !*Runtime {
@@ -361,7 +366,7 @@ fn submit(self: *@This(), comptime command: commands.Command, args: []const Valu
     }
     const env = js.env();
     operation.deferred = try env.createPromise();
-    errdefer if (operation.deferred) |deferred| deferred.resolve(env.getUndefined() catch unreachable) catch unreachable;
+    errdefer if (operation.deferred) |deferred| @import("network_js.zig").discardPromise(env, deferred);
     const result = if (operation.deferred) |deferred| deferred.getPromise() else try env.getUndefined();
     try runtime.queueCommand(token);
     runtime.notify.ref(env) catch {};
@@ -416,7 +421,7 @@ pub fn reportPeer(self: *@This(), peer: js.Value, action: js.Value) !js.Value {
     return .{ .val = result };
 }
 
-fn settleOperations(env: napi.Env, runtime: *Runtime) void {
+fn settleOperations(env: napi.Env, runtime: *Runtime) !void {
     for (0..32) |i| {
         runtime.lock();
         const cell = &runtime.table.cells[i];
@@ -427,21 +432,19 @@ fn settleOperations(env: napi.Env, runtime: *Runtime) void {
         cell.state = .copying;
         const token: commands.Token = .{ .index = @intCast(i), .generation = cell.generation };
         runtime.unlock();
+        defer runtime.abortCommand(token);
         const operation = &runtime.table.cells[i];
         if (operation.deferred) |deferred| {
             if (operation.failure) |err| {
-                deferred.reject(makeError(env, err) catch runtime.copy_error.?.getValue() catch unreachable) catch unreachable;
+                try deferred.reject(makeError(env, err) catch try runtime.copy_error.?.getValue());
             } else {
                 const value = copyOperation(env, runtime, i) catch {
-                    deferred.reject(runtime.copy_error.?.getValue() catch unreachable) catch unreachable;
-                    runtime.failDelivery();
-                    runtime.abortCommand(token);
+                    try deferred.reject(try runtime.copy_error.?.getValue());
                     continue;
                 };
-                deferred.resolve(value) catch unreachable;
+                try deferred.resolve(value);
             }
         }
-        runtime.abortCommand(token);
     }
 }
 fn copyOperation(env: napi.Env, runtime: *Runtime, index: usize) !Value {
@@ -486,6 +489,10 @@ pub fn drainPeers(self: *@This(), limit: js.Value) !js.Value {
     const max = cfg.integer(limit.val, 64) catch return error.InvalidDrainLimit;
     if (max == 0) return error.InvalidDrainLimit;
     const runtime = try self.owner();
+    return drainPeerEvents(runtime, @intCast(max)) catch |err| return @import("network_js.zig").copyError(err);
+}
+
+fn drainPeerEvents(runtime: *Runtime, max: usize) !js.Value {
     runtime.retain();
     defer runtime.release();
     var events: [64]projection.Entry = undefined;
@@ -525,7 +532,7 @@ pub fn requestRetire(self: *@This(), handle: js.Value, abandoned: js.Value) !js.
 }
 
 pub fn takeIncomingRequest(self: *@This()) !js.Value {
-    return .{ .val = try incoming_js.take(try self.owner()) };
+    return .{ .val = incoming_js.take(try self.owner()) catch |err| return @import("network_js.zig").copyError(err) };
 }
 pub fn incomingRespond(self: *@This(), handle: js.Value, data: js.Value, context: js.Value) !js.Value {
     return .{ .val = try incoming_js.respond(try self.owner(), handle.val, data.val, context.val) };
@@ -541,7 +548,7 @@ pub fn incomingTerminal(self: *@This(), handle: js.Value, action: js.Value, stat
 }
 
 pub fn drainGossip(self: *@This(), options: js.Value) !js.Value {
-    return .{ .val = try gossip_js.drain(try self.owner(), options.val) };
+    return .{ .val = gossip_js.drain(try self.owner(), options.val) catch |err| return @import("network_js.zig").copyError(err) };
 }
 pub fn reportGossip(self: *@This(), handle: js.Value, verdict: js.Value) !js.Value {
     return .{ .val = try gossip_js.report(try self.owner(), handle.val, verdict.val) };
@@ -551,7 +558,7 @@ pub fn publishGossip(self: *@This(), topic: js.Value, data: js.Value, options: j
 }
 
 pub fn drainGossipChecks(self: *@This()) !js.Value {
-    return .{ .val = try gossip_js.checks(try self.owner()) };
+    return .{ .val = gossip_js.checks(try self.owner()) catch |err| return @import("network_js.zig").copyError(err) };
 }
 pub fn classifyGossip(self: *@This(), values: js.Value) !js.Value {
     return .{ .val = try gossip_js.classify(try self.owner(), values.val) };

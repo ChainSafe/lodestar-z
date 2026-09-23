@@ -2,6 +2,19 @@ const std = @import("std");
 const napi = @import("zapi:zapi").napi;
 const Value = napi.Value;
 
+/// The promise has not escaped to JavaScript; teardown may reclaim it without settlement.
+pub fn discardPromise(env: napi.Env, deferred: napi.Deferred) void {
+    const value = env.getUndefined() catch return;
+    deferred.resolve(value) catch {};
+}
+
+pub fn copyError(err: anyerror) anyerror {
+    return switch (err) {
+        error.OutOfMemory, error.GenericFailure, error.InjectedNetworkFailure => error.NetworkResultAllocationFailed,
+        else => err,
+    };
+}
+
 /// Copies result fields without invoking inherited setters.
 pub fn put(object: Value, name: [:0]const u8, value: Value) !void {
     try object.defineProperties(&.{.{

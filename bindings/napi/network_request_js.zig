@@ -127,7 +127,7 @@ pub fn pull(runtime: *Runtime, handle: Value) !Value {
     runtime.unlock();
     if (ref_notify) runtime.notify.ref(env) catch {};
     // Closed runtimes no longer have a live TSFN producer.
-    settle(env, runtime);
+    try settle(env, runtime);
     return deferred.getPromise();
 }
 pub fn retire(runtime: *Runtime, handle: Value, abandoned: bool) !Value {
@@ -153,7 +153,7 @@ pub fn retire(runtime: *Runtime, handle: Value, abandoned: bool) !Value {
     const ref_notify = runtime.notify_live;
     runtime.unlock();
     if (ref_notify and !abandoned) runtime.notify.ref(env) catch {};
-    settle(env, runtime);
+    try settle(env, runtime);
     return if (deferred) |value| value.getPromise() else env.getUndefined();
 }
 fn terminalError(env: napi.Env, terminal: requests.Terminal, cell: *const requests.Cell) !Value {
@@ -197,7 +197,7 @@ fn chunkResult(env: napi.Env, runtime: *Runtime, cell: *const requests.Cell) !Va
     try put(object, "protocol", try env.createStringUtf8(cell.protocol.id()));
     return result(env, object);
 }
-pub fn settle(env: napi.Env, runtime: *Runtime) void {
+pub fn settle(env: napi.Env, runtime: *Runtime) !void {
     if (runtime.requests == null) return;
     runtime.retain();
     defer runtime.release();
@@ -230,46 +230,49 @@ pub fn settle(env: napi.Env, runtime: *Runtime) void {
         const retiring = cell.retiring;
         runtime.unlock();
         var failed_copy = false;
+        defer {
+            runtime.lock();
+            cell.copying = false;
+            cell.pull = null;
+            if (deliver_chunk and !failed_copy) {
+                runtime.requests.?.diag.chunksCopied +|= 1;
+                runtime.requests.?.diag.bytesCopied +|= cell.chunk.?.len;
+                cell.delivered = true;
+                if (cell.native == null) {
+                    cell.chunk = null;
+                    cell.delivered = false;
+                }
+            }
+            if (failed_copy) {
+                cell.cancel = true;
+                cell.retiring = true;
+                cell.chunk = null;
+                runtime.signalLocked();
+            }
+            runtime.requests.?.releasePayload(cell);
+            runtime.unlock();
+            if (!deliver_chunk) runtime.retireRequest(token);
+        }
+        errdefer failed_copy = true;
         if (deferred) |pending| {
             if (deliver_chunk) {
                 const value = chunkResult(env, runtime, cell) catch blk: {
                     failed_copy = true;
-                    break :blk runtime.copy_error.?.getValue() catch unreachable;
+                    break :blk try runtime.copy_error.?.getValue();
                 };
-                if (failed_copy) pending.reject(value) catch unreachable else pending.resolve(value) catch unreachable;
+                if (failed_copy) try pending.reject(value) else try pending.resolve(value);
             } else if (terminal.? == .done and !retiring) {
                 const value = result(env, null) catch blk: {
                     failed_copy = true;
-                    break :blk runtime.copy_error.?.getValue() catch unreachable;
+                    break :blk try runtime.copy_error.?.getValue();
                 };
-                if (failed_copy) pending.reject(value) catch unreachable else pending.resolve(value) catch unreachable;
+                if (failed_copy) try pending.reject(value) else try pending.resolve(value);
             } else {
                 const selected: requests.Terminal = if (retiring and terminal.? != .closed) .{ .failed = .{ .reason = .cancelled, .phase = if (terminal.? == .failed) terminal.?.failed.phase else if (terminal.? == .done) .response else null } } else terminal.?;
-                pending.reject(terminalError(env, selected, cell) catch runtime.copy_error.?.getValue() catch unreachable) catch unreachable;
+                try pending.reject(terminalError(env, selected, cell) catch try runtime.copy_error.?.getValue());
             }
         }
-        if (!deliver_chunk) if (retirement) |pending| pending.resolve(env.getUndefined() catch unreachable) catch unreachable;
-        runtime.lock();
-        cell.copying = false;
-        cell.pull = null;
-        if (deliver_chunk and !failed_copy) {
-            runtime.requests.?.diag.chunksCopied +|= 1;
-            runtime.requests.?.diag.bytesCopied +|= cell.chunk.?.len;
-            cell.delivered = true;
-            if (cell.native == null) {
-                cell.chunk = null;
-                cell.delivered = false;
-            }
-        }
-        if (failed_copy) {
-            cell.cancel = true;
-            cell.retiring = true;
-            cell.chunk = null;
-        }
-        runtime.requests.?.releasePayload(cell);
-        runtime.unlock();
-        if (failed_copy) runtime.failDelivery();
-        if (!deliver_chunk) runtime.retireRequest(token);
+        if (!deliver_chunk) if (retirement) |pending| try pending.resolve(try env.getUndefined());
     }
     runtime.lock();
     runtime.retireRequestStorageLocked();

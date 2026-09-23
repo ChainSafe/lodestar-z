@@ -40,7 +40,7 @@ pub fn publish(runtime: *r.Runtime, topic: Value, data: Value, options: Value) !
     const copy = try r.allocator.alloc(u8, len);
     errdefer r.allocator.free(copy);
     const deferred = try runtime.env.createPromise();
-    errdefer deferred.resolve(runtime.env.getUndefined() catch unreachable) catch unreachable;
+    errdefer @import("network_js.zig").discardPromise(runtime.env, deferred);
     try cfg.bytes(data, copy);
     const queued_ms = try clock.monotonic();
     runtime.lock();
@@ -58,7 +58,7 @@ pub fn publish(runtime: *r.Runtime, topic: Value, data: Value, options: Value) !
     runtime.notify.ref(runtime.env) catch {};
     return deferred.getPromise();
 }
-pub fn settle(env: napi.Env, runtime: *r.Runtime) void {
+pub fn settle(env: napi.Env, runtime: *r.Runtime) !void {
     runtime.retain();
     defer runtime.release();
     for (0..p.capacity_max) |i| {
@@ -79,20 +79,18 @@ pub fn settle(env: napi.Env, runtime: *r.Runtime) void {
         cell.state = .copying;
         const token: p.Token = .{ .index = @intCast(i), .generation = cell.generation };
         runtime.unlock();
+        defer runtime.retirePublication(token);
         if (cell.deferred) |deferred| {
             if (cell.failure) |err| {
-                deferred.reject(g.publishError(env, err) catch runtime.copy_error.?.getValue() catch unreachable) catch unreachable;
+                try deferred.reject(g.publishError(env, err) catch try runtime.copy_error.?.getValue());
             } else {
                 const value = copyResult(env, cell) catch {
-                    deferred.reject(runtime.copy_error.?.getValue() catch unreachable) catch unreachable;
-                    runtime.failDelivery();
-                    runtime.retirePublication(token);
+                    try deferred.reject(try runtime.copy_error.?.getValue());
                     continue;
                 };
-                deferred.resolve(value) catch unreachable;
+                try deferred.resolve(value);
             }
         }
-        runtime.retirePublication(token);
     }
     runtime.disposeTerminalReferences();
 }

@@ -120,7 +120,7 @@ test("publication pressure preserves urgent, control and request admission", asy
 });
 
 test.skipIf(!networkBindings.networkTestFail)(
-  "publication result copy failure releases its cell and fails the owner",
+  "publication result copy failure retires only that publication",
   async () => {
     const config = applicationConfig();
     const runtime = startRuntime(config);
@@ -130,7 +130,10 @@ test.skipIf(!networkBindings.networkTestFail)(
       await expect(runtime.publishGossip(BLOCK, new Uint8Array(4000), {allowZeroPeers: true})).rejects.toMatchObject({
         code: "NetworkResultAllocationFailed",
       });
-      await expect(runtime.closed).resolves.toMatchObject({reason: "failed"});
+      expect(runtime.state).toBe("running");
+      await expect(
+        runtime.publishGossip(BLOCK, new Uint8Array(4000), {allowZeroPeers: true, ignoreDuplicate: true})
+      ).resolves.toBeDefined();
       expect(runtime.diagnostics()).toMatchObject({
         copyingPins: 0,
         publications: {occupied: 0, payloadBytes: 0, reservedBytes: 0},

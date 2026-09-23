@@ -26,7 +26,10 @@ including forks that are not active yet. The host applies subscriptions and peer
 ordinary runtime updates.
 An initialization failure or shutdown is terminal; a second initialization, including from another
 Node.js environment, is rejected. The owning thread coordinates shutdown and joins the network
-thread. Environment cleanup also stops the owner and retires outstanding native obligations.
+thread. Environment cleanup also stops the owner and retires outstanding native obligations, even
+when JavaScript can no longer run. An operation-local allocation or result-copy failure retires that
+operation without stopping the runtime. If the runtime cannot safely continue, the host shuts down
+the beacon node and preserves the terminal failure as an unsuccessful process exit.
 
 The assets protected here are:
 

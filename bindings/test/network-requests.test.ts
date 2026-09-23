@@ -487,7 +487,9 @@ test.skipIf(!HOST || process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")(
       bindings.networkTestFail("operation_copy");
       const stream = runtime.request(id, BLOCKS, new Uint8Array(64));
       await expect(stream.next()).rejects.toMatchObject({code: "NetworkResultAllocationFailed"});
-      await runtime.close();
+      await stream.return?.();
+      expect(runtime.state).toBe("running");
+      await expect(runtime.getIdentity()).resolves.toBeDefined();
       expect(runtime.diagnostics().requests).toMatchObject({
         copyingBytes: 0,
         inputBytes: 0,
