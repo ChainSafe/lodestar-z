@@ -50,6 +50,7 @@ const Metrics = struct {
     epoch_transition: EpochTransition,
     epoch_transition_commit: EpochTransitionCommit,
     epoch_transition_step: EpochTransitionStep,
+    epoch_shuffling_job: EpochShufflingJob,
     process_block: ProcessBlock,
     process_block_commit: ProcessBlockCommit,
     state_hash_tree_root: StateHashTreeRoot,
@@ -69,6 +70,7 @@ const Metrics = struct {
     const EpochTransition = m.Histogram(f64, &.{ 0.2, 0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3, 10 });
     const EpochTransitionCommit = m.Histogram(f64, &.{ 0.01, 0.05, 0.1, 0.2, 0.5, 0.75, 1 });
     const EpochTransitionStep = m.HistogramVec(f64, EpochTransitionStepLabel, &.{ 0.01, 0.05, 0.1, 0.2, 0.5, 0.75, 1 });
+    const EpochShufflingJob = m.Histogram(f64, &.{ 0.01, 0.05, 0.1, 0.2, 0.5, 0.75, 1 });
     const ProcessBlock = m.Histogram(f64, &.{ 0.005, 0.01, 0.02, 0.05, 0.1, 1 });
     const ProcessBlockCommit = m.Histogram(f64, &.{ 0.005, 0.01, 0.02, 0.05, 0.1, 1 });
     const StateHashTreeRoot = m.HistogramVec(f64, HashTreeRootLabel, &.{ 0.05, 0.1, 0.2, 0.5, 1, 1.5 });
@@ -143,6 +145,11 @@ pub fn init(allocator: Allocator, io: std.Io, comptime opts: m.RegistryOpts) !vo
             metric_opts,
         ),
         .epoch_transition_step = epoch_transition_step,
+        .epoch_shuffling_job = Metrics.EpochShufflingJob.init(
+            "stfn_epoch_shuffling_job_seconds",
+            .{ .help = "Time to build the next epoch shuffling in the shuffling job" },
+            metric_opts,
+        ),
         .process_block = Metrics.ProcessBlock.init(
             "stfn_process_block_seconds",
             .{ .help = "Time to process a single block in seconds" },
@@ -289,6 +296,7 @@ test "exports the expected metric names" {
         "lodestar_stfn_epoch_transition_seconds",
         "lodestar_stfn_epoch_transition_commit_seconds",
         "lodestar_stfn_epoch_transition_step_seconds",
+        "lodestar_stfn_epoch_shuffling_job_seconds",
         "lodestar_stfn_process_block_seconds",
         "lodestar_stfn_process_block_commit_seconds",
         "lodestar_stfn_hash_tree_root_seconds",

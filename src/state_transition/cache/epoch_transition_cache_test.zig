@@ -6,6 +6,35 @@ const upgradeStateToFulu = @import("../slot/upgrade_state_to_fulu.zig").upgradeS
 const Node = @import("persistent_merkle_tree").Node;
 const EpochTransitionCache = @import("epoch_transition_cache.zig").EpochTransitionCache;
 const deinitReusedEpochTransitionCache = @import("epoch_transition_cache.zig").deinitReusedEpochTransitionCache;
+const metrics = @import("../metrics.zig");
+
+test "shuffling job records completed builds" {
+    const allocator = std.testing.allocator;
+    try metrics.init(allocator, std.testing.io, .{});
+    defer metrics.deinit();
+
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 200_000 });
+    defer pool.deinit();
+
+    {
+        var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+        defer test_state.deinit();
+
+        const cache = test_state.epoch_transition_cache;
+        const seed = [_]u8{0} ** 32;
+        const epoch = cache.current_epoch + 2;
+        try cache.startShuffling(allocator, std.testing.io, seed, epoch);
+        const shuffling = try cache.joinShuffling();
+        shuffling.deinit();
+
+        try cache.startShuffling(allocator, std.testing.io, seed, epoch);
+    }
+
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try metrics.write(&aw.writer);
+    try std.testing.expect(std.mem.indexOf(u8, aw.written(), "lodestar_stfn_epoch_shuffling_job_seconds_count 2\n") != null);
+}
 
 test "EpochTransitionCache - finalProcessEpoch" {
     const allocator = std.testing.allocator;

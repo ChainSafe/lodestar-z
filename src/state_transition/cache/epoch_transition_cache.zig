@@ -1,5 +1,7 @@
 const std = @import("std");
 const types = @import("consensus_types");
+const metrics = @import("../metrics.zig");
+const time = @import("time");
 
 const Allocator = std.mem.Allocator;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
@@ -46,28 +48,41 @@ const ValidatorActivation = struct {
 const ValidatorActivationList = std.ArrayList(ValidatorActivation);
 
 const ShufflingJob = struct {
-    io: std.Io,
-    future: std.Io.Future(anyerror!*EpochShuffling),
+    const Error = Allocator.Error || @import("swap_or_not_shuffle").ShufflingError;
 
-    fn worker(allocator: Allocator, seed: [32]u8, epoch: Epoch, active_indices: []ValidatorIndex) anyerror!*EpochShuffling {
+    io: std.Io,
+    future: std.Io.Future(Error!Result),
+
+    const Result = struct {
+        shuffling: *EpochShuffling,
+        duration: std.Io.Duration,
+    };
+
+    fn worker(allocator: Allocator, io: std.Io, seed: [32]u8, epoch: Epoch, active_indices: []ValidatorIndex) Error!Result {
         errdefer allocator.free(active_indices);
-        return EpochShuffling.init(allocator, seed, epoch, active_indices);
+
+        const timer = time.start(io);
+        const shuffling = try EpochShuffling.init(allocator, seed, epoch, active_indices);
+        return .{ .shuffling = shuffling, .duration = time.since(io, timer) };
     }
 
     fn start(allocator: Allocator, io: std.Io, seed: [32]u8, epoch: Epoch, active_indices: []ValidatorIndex) @This() {
         return .{
             .io = io,
-            .future = std.Io.async(io, worker, .{ allocator, seed, epoch, active_indices }),
+            .future = std.Io.async(io, worker, .{ allocator, io, seed, epoch, active_indices }),
         };
     }
 
     fn join(self: *@This()) !*EpochShuffling {
-        return self.future.await(self.io);
+        const result = try self.future.await(self.io);
+        metrics.state_transition.epoch_shuffling_job.observe(time.durationSeconds(result.duration));
+        return result.shuffling;
     }
 
     fn cancel(self: *@This()) void {
         const result = self.future.cancel(self.io) catch return;
-        result.deinit();
+        metrics.state_transition.epoch_shuffling_job.observe(time.durationSeconds(result.duration));
+        result.shuffling.deinit();
     }
 };
 
