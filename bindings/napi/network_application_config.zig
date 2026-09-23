@@ -96,11 +96,11 @@ pub const Intent = struct {
 pub fn parseIntent(value: Value, out: *Intent, max_peers: u16) !void {
     try cfg.completeObject(value, &.{ "update", "demand", "subscriptions" });
     const update = try cfg.get(value, "update");
-    try cfg.completeObject(update, &.{ "local", "endpoints" });
+    try cfg.completeObject(update, &.{"local"});
     try cfg.parseLocal(try cfg.get(update, "local"), &out.value.update.local);
     out.value.update.schedule = .{};
     out.value.update.capabilities = .{ .receive = .initEmpty(), .request = .initEmpty() };
-    out.value.update.endpoints = try cfg.parseEndpoints(try cfg.get(update, "endpoints"));
+    out.value.update.endpoints = null;
     const demand = try cfg.get(value, "demand");
     try cfg.completeObject(demand, &.{ "attnets", "syncnets", "groupTargets", "custodyGroupTargets", "attestationTarget", "syncTarget" });
     const attnets = try cfg.fixed(8, try cfg.get(demand, "attnets"));

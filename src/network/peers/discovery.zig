@@ -30,6 +30,7 @@ pub const Options = struct {
     query_interval_ms: u64 = 1_000,
     local_retry_ms: u64 = 1_000,
     maintenance: d.Maintenance.Config = .{},
+    observations: [2]d.AddressVotes.Policy = .{ .{}, .{} },
 };
 pub const Demand = struct {
     general: bool = false,
@@ -51,6 +52,7 @@ pub const Demand = struct {
     }
 };
 pub const Result = struct {
+    learned: [2]?d.types.Address = .{ null, null },
     candidates: usize = 0,
     started: u8 = 0,
     expired: u16 = 0,
@@ -61,6 +63,7 @@ pub const Result = struct {
     failure_stage: d.Transport.FailureStage = .coordinator,
 };
 const Storage = struct {
+    observations: d.AddressVotes,
     candidates: d.Lookup.Candidates,
     expiries: [d.CallTable.capacity_max]d.CallTable.Expired,
 };
@@ -100,6 +103,8 @@ pub const Discovery = struct {
         try maintenance.init(now_ms, options.maintenance, transport.sockets.mode());
         const storage = try allocator.create(Storage);
         errdefer allocator.destroy(storage);
+        storage.observations.init(options.observations);
+        maintenance.observations = &storage.observations;
 
         for (records[0..bootstrap.len]) |*record| {
             const address = record.endpointFor(transport.sockets.mode()) orelse continue;
@@ -173,7 +178,7 @@ pub const Discovery = struct {
                 self.counters.processing_failures +|= 1;
             };
         }
-        return .{ .candidates = consumed.candidates, .started = result.started, .expired = consumed.expired, .rejected = consumed.rejected, .dropped = consumed.dropped, .unowned = consumed.unowned, .failure = result.failure orelse consumed.failure, .failure_stage = if (result.failure != null) .coordinator else consumed.failure_stage };
+        return .{ .learned = consumed.learned, .candidates = consumed.candidates, .started = result.started, .expired = consumed.expired, .rejected = consumed.rejected, .dropped = consumed.dropped, .unowned = consumed.unowned, .failure = result.failure orelse consumed.failure, .failure_stage = if (result.failure != null) .coordinator else consumed.failure_stage };
     }
 
     /// Supports hosts that drive the borrowed Transport themselves. Consume every result exactly
@@ -196,6 +201,14 @@ pub const Discovery = struct {
             } else if (self.maintenance.onFailure(&self.transport.engine, expired.handle, progress.now_ms, .expired)) {
                 result.expired += 1;
             } else result.unowned += 1;
+        }
+        if (progress.event == .response) {
+            const response = &progress.event.response;
+            if (response.matched.response == .pong) {
+                if (self.storage.observations.observe(&response.peer, &response.matched.response.pong, progress.now_ms)) |address| {
+                    result.learned[if (address == .ip4) @as(usize, 0) else 1] = address;
+                }
+            }
         }
         self.consumeEvent(progress, out, &result);
         if (self.lookup) |*lookup| if (lookup.isFinished()) {

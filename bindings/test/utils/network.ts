@@ -93,9 +93,10 @@ export function discoveryConfig(): NativeApplicationConfig & {
   return {
     ...applicationConfig(),
     discovery: {
-      advertisement: {ip4: Uint8Array.of(127, 0, 0, 1), quic: 443, udp: 40404},
+      advertisement: {ip4: Uint8Array.of(127, 0, 0, 1), udp: 40404},
       bind: {address: Uint8Array.of(127, 0, 0, 1), family: 4, port: 0},
       bootstrapEnrs: [],
+      fixed: {ip4: Uint8Array.of(127, 0, 0, 1), quic: 443, udp: 40404},
       sequenceNumber: 7n,
     },
   };
@@ -161,7 +162,6 @@ export function localIntent(config: NativeApplicationConfig): NativeLocalIntent 
     },
     subscriptions: [],
     update: {
-      endpoints: config.discovery?.advertisement ?? null,
       local: structuredClone(config.local),
     },
   };

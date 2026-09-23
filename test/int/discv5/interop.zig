@@ -13,7 +13,8 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len != 3) return error.ExpectedModeAndGethRecord;
-    const zig_first = std.mem.eql(u8, args[1], "zig-first");
+    const unadvertised = std.mem.eql(u8, args[1], "zig-unadvertised");
+    const zig_first = unadvertised or std.mem.eql(u8, args[1], "zig-first");
     if (!zig_first and !std.mem.eql(u8, args[1], "geth-first")) return error.InvalidMode;
     const remote = try discv5.identity.enr.Record.initText(args[2]);
     const address = remote.endpoint() orelse return error.MissingEndpoint;
@@ -25,7 +26,11 @@ pub fn main(init: std.process.Init) !void {
     errdefer if (sockets_owned) sockets.close(io);
     var key = try discv5.identity.crypto.keyPairFromSecret(&([_]u8{0x11} ** 32));
     defer std.crypto.secureZero(u8, std.mem.asBytes(&key));
-    const local = try discv5.identity.enr.Record.create(&key, 1, discv5.types.Address.fromNetwork(sockets.primary().address));
+    const public_key = discv5.identity.crypto.compressedPublicKey(&key);
+    const local = if (unadvertised) try discv5.identity.enr.Record.createFields(&key, 1, &.{
+        .{ .key = "id", .value = .{ .bytes = "v4" } },
+        .{ .key = "secp256k1", .value = .{ .bytes = &public_key } },
+    }) else try discv5.identity.enr.Record.create(&key, 1, discv5.types.Address.fromNetwork(sockets.primary().address));
     var driver: discv5.Transport = undefined;
     try driver.init(allocator, sockets, key, local, .{ .poll_interval_ms = 25, .engine = .{
         .session_capacity = 4,
@@ -64,7 +69,7 @@ pub fn main(init: std.process.Init) !void {
             } };
             pending = try driver.startCall(io, peer, &remote, &find_node);
             phase = .nodes;
-        } else if (phase == .done and served >= 2) {
+        } else if (phase == .done and (unadvertised or served >= 2)) {
             try std.Io.File.stdout().writeStreamingAll(io, "DONE\n");
             return;
         }
@@ -90,7 +95,7 @@ pub fn main(init: std.process.Init) !void {
                         if (response.matched.response != .pong) return error.ExpectedPong;
                         const pong = response.matched.response.pong;
                         if (pong.enr_sequence != remote.sequence or
-                            pong.recipient_port != local.endpoint().?.port() or
+                            pong.recipient_port != driver.localAddress().port() or
                             pong.recipient_ip != .ip4 or
                             !std.mem.eql(u8, &pong.recipient_ip.ip4, &.{ 127, 0, 0, 1 }))
                             return error.InvalidPong;

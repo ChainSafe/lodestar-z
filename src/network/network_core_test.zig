@@ -523,14 +523,13 @@ test "managed runtime demand persists until replacement and reaches discovery af
     try std.testing.expectEqual(@as(u8, 0), node.discovery.?.coordinator.demand.attnets[0]);
 }
 
-test "managed runtime explicit advertisement is independent atomic and required for wildcard" {
+test "managed runtime explicit advertisement is independent and atomic" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{21}));
     var opts = options(&key);
     opts.transport.bind = .{ .ip4 = .{ .bytes = @splat(0), .port = 0 } };
     opts.discovery = .{ .bind = opts.transport.bind };
     var node: runtime.NetworkCore = undefined;
-    try std.testing.expectError(error.InvalidAdvertisement, node.initRaw(std.testing.allocator, std.testing.io, opts));
-    opts.discovery.?.advertisement = .{ .ip4 = .{ 127, 0, 0, 1 }, .udp = 19000, .quic = 19001 };
+    opts.discovery.?.fixed = .{ .ip4 = .{ 127, 0, 0, 1 }, .udp = 19000, .quic = 19001 };
     try node.initRaw(std.testing.allocator, std.testing.io, opts);
     defer node.deinit(std.testing.io);
     const now = try @import("transport.zig").currentTime(std.testing.io);

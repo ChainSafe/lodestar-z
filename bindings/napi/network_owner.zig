@@ -78,7 +78,7 @@ pub fn initialize(self: *Runtime) !void {
         .bind = self.heavy.?.config.bind,
         .local = self.heavy.?.config.local,
         .schedule = self.heavy.?.config.schedule,
-        .discovery = if (self.heavy.?.config.discovery_bind) |bind| .{ .bind = bind, .sequence = self.heavy.?.config.discovery_sequence, .advertisement = self.heavy.?.config.advertisement, .bootstrap = self.heavy.?.records[0..self.heavy.?.config.bootstrap_count] } else null,
+        .discovery = if (self.heavy.?.config.discovery_bind) |bind| .{ .bind = bind, .sequence = self.heavy.?.config.discovery_sequence, .advertisement = self.heavy.?.config.advertisement, .fixed = self.heavy.?.config.fixed, .bootstrap = self.heavy.?.records[0..self.heavy.?.config.bootstrap_count] } else null,
     });
     self.heavy.?.core_live = true;
     try faults.check(.wake_attach);

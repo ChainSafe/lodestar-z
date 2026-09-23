@@ -98,12 +98,12 @@ const cases: readonly [string, (config: NativeApplicationConfig) => void, string
       c.bind = bind;
       c.discovery = {
         ...discoveryConfig().discovery,
-        advertisement: {
+        bind,
+        fixed: {
           ip6: Uint8Array.of(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 127, 0, 0, 1),
           quic6: 9001,
           udp6: 9000,
         },
-        bind,
       };
     },
     "InvalidNetworkConfig",

@@ -16,7 +16,8 @@ pub const Config = struct {
     chain: n.chain.Plan,
     discovery_bind: ?n.udp.Bindings,
     discovery_sequence: u64,
-    advertisement: ?n.network_core.AdvertisementEndpoints,
+    advertisement: ?n.network_core.AdvertisementHints,
+    fixed: n.network_core.AdvertisementEndpoints,
     bootstrap: [bootstrap_max]struct { bytes: [enr_max]u8, len: u16 },
     bootstrap_count: u8,
     slot: u64,
@@ -160,6 +161,7 @@ pub fn parse(value: Value, out: *Config) !void {
         .discovery_bind = null,
         .discovery_sequence = 0,
         .advertisement = null,
+        .fixed = .{},
         .bootstrap = undefined,
         .bootstrap_count = 0,
         .slot = 0,
@@ -183,7 +185,7 @@ pub fn parse(value: Value, out: *Config) !void {
     out.schedule = update.schedule;
     const discovery = try get(value, "discovery");
     if (try discovery.typeof() != .null) {
-        try object(discovery, &.{ "bind", "sequenceNumber", "bootstrapEnrs", "advertisement" });
+        try object(discovery, &.{ "bind", "sequenceNumber", "bootstrapEnrs", "advertisement", "fixed" });
         out.discovery_bind = try bindings(try get(discovery, "bind"));
         out.discovery_sequence = try bigint(try get(discovery, "sequenceNumber"));
         const bootstrap = try get(discovery, "bootstrapEnrs");
@@ -196,7 +198,15 @@ pub fn parse(value: Value, out: *Config) !void {
             @memcpy(out.bootstrap[i].bytes[0..info.length], info.data);
             out.bootstrap[i].len = @intCast(info.length);
         }
-        out.advertisement = try parseEndpoints(try get(discovery, "advertisement"));
+        const hints = try get(discovery, "advertisement");
+        if (try hints.typeof() != .null) {
+            try object(hints, &.{ "ip4", "ip6", "udp", "udp6" });
+            const endpoints = (try parseEndpoints(hints)).?;
+            out.advertisement = .{ .ip4 = endpoints.ip4, .ip6 = endpoints.ip6, .udp = endpoints.udp, .udp6 = endpoints.udp6 };
+        }
+        out.fixed = (try parseEndpoints(try get(discovery, "fixed"))) orelse return error.InvalidNetworkConfig;
+        if (out.fixed.ip6) |ip| if (n.Address.isIp4Mapped(ip)) return error.InvalidNetworkConfig;
+        inline for (.{ out.fixed.udp, out.fixed.udp6, out.fixed.quic, out.fixed.quic6 }) |port| if (port == 0) return error.InvalidNetworkInteger;
     }
     try parseGossip(value, out);
 }
@@ -346,11 +356,9 @@ pub fn parseEndpoints(ad: Value) !?n.network_core.AdvertisementEndpoints {
         inline for (.{ "ip4", "ip6" }) |key| {
             if (try ad.hasNamedProperty(key)) @field(result, key) = try fixed(if (std.mem.eql(u8, key, "ip4")) 4 else 16, try get(ad, key));
         }
-        if (result.ip6) |ip| if (n.Address.isIp4Mapped(ip)) return error.InvalidNetworkConfig;
         inline for (.{ "udp", "udp6", "quic", "quic6" }) |key| {
             if (try ad.hasNamedProperty(key)) {
                 const port = try integer(try get(ad, key), 65535);
-                if (port == 0) return error.InvalidNetworkInteger;
                 @field(result, key) = @intCast(port);
             }
         }

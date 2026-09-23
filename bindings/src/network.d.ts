@@ -51,7 +51,10 @@ export interface NativeDiscoveryConfig {
   bind: IpEndpoint | readonly IpEndpoint[];
   sequenceNumber: bigint;
   bootstrapEnrs: readonly Uint8Array[];
-  advertisement: AdvertisedEndpoints | null;
+  /** Initial IP/UDP hints do not disable learning. QUIC uses its fixed or bound port. */
+  advertisement: Pick<AdvertisedEndpoints, "ip4" | "ip6" | "udp" | "udp6"> | null;
+  /** Explicit operator overrides. An IP also fixes UDP to the supplied or bound port. */
+  fixed: AdvertisedEndpoints;
 }
 
 export interface NativeTopicScoreParams {
@@ -300,7 +303,6 @@ export interface NativeSubscriptionSet {
 export interface NativeLocalIntent {
   update: {
     local: NativeLocalState;
-    endpoints: AdvertisedEndpoints | null;
   };
   demand: NativeDemand;
   /** One set per configured boundary; omitted boundaries are unsubscribed. */

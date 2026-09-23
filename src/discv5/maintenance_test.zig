@@ -571,3 +571,82 @@ test "maintenance drops an unstarted ENR hint when a caller reuses the peer" {
     try std.testing.expect(core.isPeerBusy(&peer.node_id));
     try std.testing.expectEqual(@as(usize, 1), core.calls.count());
 }
+
+test "observation probes bypass fresh liveness, alternate families, and never punish a healthy endpoint" {
+    const Votes = @import("AddressVotes.zig");
+    var core = try initEngine();
+    defer core.deinit(std.testing.allocator);
+    const key = try test_support.keyPair(2);
+    const public_key = @import("identity/crypto.zig").compressedPublicKey(&key);
+    const ip4 = [_]u8{ 203, 2, 1, 1 };
+    const ip6 = [_]u8{ 0x20, 1, 0xd, 0xb8 } ++ .{0} ** 11 ++ .{1};
+    const remote = try enr.Record.createFields(&key, 1, &.{
+        .{ .key = "id", .value = .{ .bytes = "v4" } },
+        .{ .key = "ip", .value = .{ .bytes = &ip4 } },
+        .{ .key = "ip6", .value = .{ .bytes = &ip6 } },
+        .{ .key = "secp256k1", .value = .{ .bytes = &public_key } },
+        .{ .key = "udp", .value = .{ .uint = 9000 } },
+        .{ .key = "udp6", .value = .{ .uint = 9001 } },
+    });
+    const primary = test_support.endpoint(&remote);
+    _ = try core.confirmPeer(&primary, &remote, 0);
+    var votes: Votes = .{};
+    votes.init(.{ .{ .enabled = true }, .{ .enabled = true } });
+    var controller: Maintenance = undefined;
+    try controller.init(0, .{}, .dual);
+    controller.observations = &votes;
+    defer controller.cancel(&core);
+    var out: [1280]u8 = undefined;
+    const first = (try start(&controller, &core, &out, 1, 1000)).?;
+    try std.testing.expect(first.peer.address == .ip4);
+    try std.testing.expect(controller.onFailure(&core, first.call.handle, 1001, .expired));
+    _ = try core.confirmPeer(&primary, &remote, 1002);
+    try std.testing.expect((try start(&controller, &core, &out, 2, 1999)) == null);
+    const second = (try start(&controller, &core, &out, 2, 2001)).?;
+    try std.testing.expect(second.peer.address == .ip6);
+    try std.testing.expectEqual(@as(u16, 9001), second.peer.address.port());
+    try std.testing.expect(controller.onFailure(&core, second.call.handle, 2100, .expired));
+    try std.testing.expectEqual(@as(?u64, 1002), core.peerRecord(&primary.node_id).?.last_verified_ms);
+    try std.testing.expectEqual(primary, core.peerRecord(&primary.node_id).?.peer);
+    try std.testing.expect((try start(&controller, &core, &out, 3, 4000)) == null);
+    _ = try core.confirmPeer(&primary, &remote, Votes.lifetime_ms);
+    const refreshed = (try start(&controller, &core, &out, 4, Votes.lifetime_ms + 1000)).?;
+    try std.testing.expect(refreshed.peer.address == .ip4);
+    try std.testing.expect(controller.onFailure(&core, refreshed.call.handle, Votes.lifetime_ms + 1001, .local));
+    try std.testing.expect(votes.canProbe(&primary, Votes.lifetime_ms + 1001));
+}
+
+test "observation family rotation survives intervening routing probes" {
+    const Votes = @import("AddressVotes.zig");
+    var core = try initEngine();
+    defer core.deinit(std.testing.allocator);
+    const ip6 = [_]u8{ 0x20, 1, 0xd, 0xb8 } ++ .{0} ** 11 ++ .{1};
+    const key = try test_support.keyPair(2);
+    const public_key = @import("identity/crypto.zig").compressedPublicKey(&key);
+    const remote = try enr.Record.createFields(&key, 1, &.{
+        .{ .key = "id", .value = .{ .bytes = "v4" } },
+        .{ .key = "ip", .value = .{ .bytes = &.{ 203, 2, 1, 1 } } },
+        .{ .key = "ip6", .value = .{ .bytes = &ip6 } },
+        .{ .key = "secp256k1", .value = .{ .bytes = &public_key } },
+        .{ .key = "udp", .value = .{ .uint = 9000 } },
+    });
+    _ = try core.confirmPeer(&test_support.endpoint(&remote), &remote, 1000);
+    var votes: Votes = .{};
+    votes.init(.{ .{ .enabled = true }, .{ .enabled = true } });
+    var controller: Maintenance = undefined;
+    try controller.init(0, .{ .stale_after_ms = 1, .probe_interval_ms = 1, .retry_interval_ms = 1 }, .dual);
+    controller.observations = &votes;
+    defer controller.cancel(&core);
+    var out: [1280]u8 = undefined;
+    const first = (try start(&controller, &core, &out, 1, 1000)).?;
+    try std.testing.expect(first.peer.address == .ip4);
+    try std.testing.expect(controller.onFailure(&core, first.call.handle, 1001, .local));
+    for (0..3) |i| {
+        const now: u64 = 1100 + 100 * i;
+        const routing = (try start(&controller, &core, &out, @intCast(2 + i), now)).?;
+        try std.testing.expect(routing.peer.address == .ip4);
+        try std.testing.expect(controller.onFailure(&core, routing.call.handle, now + 1, .local));
+    }
+    const ipv6 = (try start(&controller, &core, &out, 5, 2000)).?;
+    try std.testing.expect(ipv6.peer.address == .ip6);
+}

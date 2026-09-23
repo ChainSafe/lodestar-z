@@ -19,14 +19,9 @@ pub const ForkSchedule = struct {
     next_epoch: u64 = std.math.maxInt(u64),
     next_digest: [4]u8 = @splat(0),
 };
-pub const AdvertisementEndpoints = struct {
-    ip4: ?[4]u8 = null,
-    ip6: ?[16]u8 = null,
-    udp: ?u16 = null,
-    udp6: ?u16 = null,
-    quic: ?u16 = null,
-    quic6: ?u16 = null,
-};
+const advertisement = @import("advertisement.zig");
+pub const AdvertisementEndpoints = advertisement.Endpoints;
+pub const AdvertisementHints = advertisement.Hints;
 pub const LocalUpdate = struct {
     local: t.LocalState,
     schedule: ForkSchedule,
@@ -40,7 +35,8 @@ pub const LocalIntent = struct {
     slot: u64 = 0,
 };
 pub const DiscoveryOptions = struct {
-    advertisement: ?AdvertisementEndpoints = null,
+    advertisement: ?AdvertisementHints = null,
+    fixed: AdvertisementEndpoints = .{},
     bind: @import("udp.zig").Bindings,
     sequence: u64 = 1,
     bootstrap: []const d.identity.enr.Record = &.{},
@@ -127,19 +123,27 @@ const DiscoveryOwners = struct {
     transport: d.Transport,
     coordinator: peers.Discovery,
     endpoints: AdvertisementEndpoints,
+    quic_ports: [2]?u16,
 
     fn init(self: *DiscoveryOwners, allocator: std.mem.Allocator, io: std.Io, options: DiscoveryOptions, host: *const @import("wire/keys.zig").KeyPair, local: *const t.LocalState, schedule: ForkSchedule, quic: [2]?t.Address, now: Now) !void {
         const sockets = try @import("udp").Sockets.bind(io, options.bind);
         errdefer sockets.close(io);
-        self.endpoints = options.advertisement orelse try defaultEndpoints(quic, &sockets);
+        var udp_addresses: [2]?d.types.Address = .{ null, null };
+        for (sockets.values, 0..) |socket, i| if (socket) |value| {
+            udp_addresses[i] = d.types.Address.fromNetwork(value.address);
+        };
+        const plan = try advertisement.resolve(if (options.advertisement) |*value| value else null, &options.fixed, &quic, &udp_addresses);
+        self.endpoints = plan.endpoints;
+        self.quic_ports = plan.quic_ports;
         try validateEndpoints(self.endpoints);
         try validateEndpointFamilies(self.endpoints, quic, &sockets);
-        const advertisement = advertisementFor(local, schedule, self.endpoints);
-        const record = try peers.enr.build(&host.inner, options.sequence, &advertisement, &local.fork);
+        const announced = advertisementFor(local, schedule, self.endpoints);
+        const record = try peers.enr.build(&host.inner, options.sequence, &announced, &local.fork);
         try peers.enr.requireIdentity(&record, &t.PeerId.fromPublicKey(&host.publicKey()));
         try self.transport.init(allocator, sockets, host.inner, record, .{ .engine = options.engine, .poll_interval_ms = poll_wait_max_ms });
         errdefer self.transport.engine.deinit(allocator);
         var coordinator_options = options.coordinator;
+        coordinator_options.observations = plan.observations;
         coordinator_options.quic_mode = if (quic[0] == null) .ip6 else if (quic[1] == null) .ip4 else .dual;
         self.coordinator = try peers.Discovery.init(allocator, &self.transport, &local.fork, options.bootstrap, now.mono_ms, coordinator_options);
     }
@@ -453,11 +457,11 @@ pub const NetworkCore = struct {
                 std.meta.eql(endpoints, self.advertisementEndpoints()) and std.meta.eql(capabilities, self.service.router.capabilities())),
         };
         if (prepared.changed) if (self.discovery) |owned| {
-            const advertisement = advertisementFor(&local, schedule, endpoints.?);
+            const announced = advertisementFor(&local, schedule, endpoints.?);
             const previous = advertisementFor(&self.peer_manager.local, self.schedule, owned.endpoints);
-            if (!std.meta.eql(advertisement, previous)) {
+            if (!std.meta.eql(announced, previous)) {
                 const sequence = try peers.enr.nextSequence(owned.transport.engine.localRecord().sequence);
-                prepared.record = try peers.enr.build(&owned.transport.engine.channel.local_key, sequence, &advertisement, &local.fork);
+                prepared.record = try peers.enr.build(&owned.transport.engine.channel.local_key, sequence, &announced, &local.fork);
             }
         };
         return prepared;
@@ -568,6 +572,25 @@ pub const NetworkCore = struct {
                 owned.coordinator.request(need.query(tick.mono_ms +| 1_000), tick.mono_ms) catch unreachable;
                 var candidates: [managed.candidates_per_turn]peers.enr.Candidate = undefined;
                 result.discovery = owned.coordinator.step(io, tick.mono_ms, tick.mono_ms, &candidates) catch |err| .{ .failure = err };
+                var endpoints = owned.endpoints;
+                for (result.discovery.learned, 0..) |learned, family| if (learned) |address| switch (address) {
+                    .ip4 => |ip| {
+                        endpoints.ip4 = ip.octets;
+                        endpoints.udp = ip.port;
+                        endpoints.quic = owned.quic_ports[family];
+                    },
+                    .ip6 => |ip| {
+                        endpoints.ip6 = ip.octets;
+                        endpoints.udp6 = ip.port;
+                        endpoints.quic6 = owned.quic_ports[family];
+                    },
+                };
+                if (!std.meta.eql(endpoints, owned.endpoints)) {
+                    _ = self.updateLocalWithEndpoints(&self.peer_manager.local, self.schedule, endpoints, tick) catch |err| {
+                        std.log.scoped(.network_discovery).warn("endpoint_update_failed reason={s}", .{@errorName(err)});
+                        self.counters.discovery_failures +|= 1;
+                    };
+                }
                 for (candidates[0..result.discovery.candidates]) |*candidate| {
                     self.counters.discovered +|= 1;
                     if (futureCompatible(candidate, self.schedule)) |compatible| {
@@ -649,53 +672,14 @@ fn advertisementFor(local: *const t.LocalState, schedule: ForkSchedule, endpoint
         .quic6 = endpoints.quic6,
     };
 }
-fn validateEndpoints(endpoints: AdvertisementEndpoints) error{InvalidAdvertisement}!void {
-    if ((endpoints.udp == null and endpoints.udp6 == null) or (endpoints.quic == null and endpoints.quic6 == null)) return error.InvalidAdvertisement;
-    if ((endpoints.udp != null or endpoints.quic != null) and endpoints.ip4 == null) return error.InvalidAdvertisement;
-    if ((endpoints.udp6 != null or endpoints.quic6 != null) and endpoints.ip6 == null) return error.InvalidAdvertisement;
-    inline for (.{ endpoints.udp, endpoints.udp6, endpoints.quic, endpoints.quic6 }) |port| if (port) |value| if (value == 0) return error.InvalidAdvertisement;
-    if (endpoints.ip4) |ip| {
-        const source: d.types.Address = .{ .ip4 = .{ .octets = ip, .port = d.Lookup.discovered_port_min } };
-        if (!peers.discovery.relayAllowed(source, .{ .ip4 = .{ .octets = ip, .port = d.Lookup.discovered_port_min } })) return error.InvalidAdvertisement;
-    }
-    if (endpoints.ip6) |ip| {
-        const source: d.types.Address = .{ .ip6 = .{ .octets = ip, .port = d.Lookup.discovered_port_min } };
-        if (!peers.discovery.relayAllowed(source, .{ .ip6 = .{ .octets = ip, .port = d.Lookup.discovered_port_min } })) return error.InvalidAdvertisement;
-    }
-}
+const validateEndpoints = advertisement.validate;
 fn validateEndpointFamilies(endpoints: AdvertisementEndpoints, quic: [2]?t.Address, udp: *const @import("udp").Sockets) error{InvalidAdvertisement}!void {
     if ((endpoints.quic != null and quic[0] == null) or (endpoints.quic6 != null and quic[1] == null) or
         (endpoints.udp != null and udp.values[0] == null) or (endpoints.ip6 != null and (endpoints.udp6 orelse endpoints.udp) != null and udp.values[1] == null)) return error.InvalidAdvertisement;
 }
 
-fn defaultEndpoints(quic: [2]?t.Address, udp: *const @import("udp").Sockets) error{InvalidAdvertisement}!AdvertisementEndpoints {
-    var endpoints: AdvertisementEndpoints = .{};
-    for (quic) |address| if (address) |value| switch (value) {
-        .ip4 => |ip| {
-            endpoints.ip4 = ip.octets;
-            endpoints.quic = ip.port;
-        },
-        .ip6 => |ip| {
-            endpoints.ip6 = ip.octets;
-            endpoints.quic6 = ip.port;
-        },
-    };
-    for (udp.values) |socket| if (socket) |value| switch (value.address) {
-        .ip4 => |ip| {
-            if (endpoints.ip4) |advertised| if (!std.mem.eql(u8, &advertised, &ip.bytes)) return error.InvalidAdvertisement;
-            endpoints.ip4 = ip.bytes;
-            endpoints.udp = ip.port;
-        },
-        .ip6 => |ip| {
-            if (endpoints.ip6) |advertised| if (!std.mem.eql(u8, &advertised, &ip.bytes)) return error.InvalidAdvertisement;
-            endpoints.ip6 = ip.bytes;
-            endpoints.udp6 = ip.port;
-        },
-    };
-    return endpoints;
-}
-
 test {
     _ = @import("network_core_test.zig");
     _ = @import("network_core_metrics_test.zig");
+    _ = @import("network_core_endpoint_test.zig");
 }
