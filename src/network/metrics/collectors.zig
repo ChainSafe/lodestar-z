@@ -84,7 +84,9 @@ fn writeRuntime(self: *const Context, w: *prom.Encoder) prom.Error!void {
     if (self.owner.discovery) |discovery| {
         try w.scalar(.{ .name = "lodestar_discv5_active_session_count", .kind = .gauge, .help = "Stored discovery sessions" }, self.live(discovery.transport.engine.channel.sessions.sessionCount()));
         try w.scalar(.{ .name = "lodestar_discv5_kad_table_size", .kind = .gauge, .help = "Discovery routing table entries" }, self.live(discovery.transport.engine.peerCount()));
-        try w.scalar(.{ .name = "lodestar_discv5_lookup_count", .kind = .gauge, .help = "Active foreground discovery lookups" }, self.live(@as(usize, @intFromBool(discovery.coordinator.lookup != null))));
+        try w.scalar(.{ .name = "lodestar_discv5_lookup_count", .kind = .gauge, .help = "Total count of discv5 lookups" }, discovery.coordinator.counters.lookups_started);
+        try w.scalar(.{ .name = "lodestar_native_discovery_lookup_active", .kind = .gauge, .help = "A foreground discovery lookup is active" }, self.live(@as(usize, @intFromBool(discovery.coordinator.lookup != null))));
+        try w.scalar(.{ .name = "lodestar_native_discovery_session_capacity", .kind = .gauge, .help = "Discovery session store capacity" }, discovery.transport.engine.channel.sessions.session_capacity);
     }
     try w.scalar(.{ .name = "lodestar_native_network_metrics_updated_timestamp_seconds", .kind = .gauge, .help = "Unix time at which the owner last collected this metrics export", .unit = .seconds }, self.now.unix_s);
     try w.scalar(.{ .name = "lodestar_native_network_running", .kind = .gauge, .help = "Network owner is running" }, @intFromBool(self.running));
@@ -127,6 +129,7 @@ fn writeNativeCounters(self: *const Context, w: *prom.Encoder) prom.Error!void {
     const discovery_counts = if (self.owner.discovery) |d| d.coordinator.counters else discovery_metrics.Counters{};
     const rejections = if (self.owner.discovery) |d| d.coordinator.rejections else @as([discovery_metrics.rejection_count]u64, @splat(0));
     const admissions = if (self.owner.discovery) |d| d.transport.engine.channel.admission.counts else @as(@import("discv5").admission.Counts, @splat(@splat(0)));
+    const datagram_rejections = if (self.owner.discovery) |d| d.coordinator.datagram_rejections else @as([discovery_metrics.datagram_rejection_count]u64, @splat(0));
     try w.counters("lodestar_native_discovery_", &discovery_counts);
     try w.enums(.{
         .name = "lodestar_native_discovery_candidate_rejections_total",
@@ -145,6 +148,15 @@ fn writeNativeCounters(self: *const Context, w: *prom.Encoder) prom.Error!void {
         inline for (std.meta.fields(admission.Outcome)) |outcome| {
             try discovery_admission.sample(.{ stage.name, outcome.name }, admissions[stage.value][outcome.value]);
         }
+    }
+    const rejected = try w.family(.{
+        .name = "lodestar_native_discovery_datagram_rejections_total",
+        .kind = .counter,
+        .help = "Received discovery datagrams rejected by processing stage and reason",
+        .labels = &.{ "stage", "reason" },
+    });
+    inline for (std.meta.fields(@import("discv5").types.RejectReason)) |field| {
+        try rejected.sample(.{ comptime rejectStage(@enumFromInt(field.value)), field.name }, datagram_rejections[field.value]);
     }
     var drops = self.owner.service.gossipsub.retired_queue_drops;
     for (self.owner.service.gossipsub.sessions.rows) |*row| for (&drops, row.io.tx.drops) |*total, value| {
@@ -562,6 +574,18 @@ fn writeConnections(self: *const Context, w: *prom.Encoder) prom.Error!void {
             try closed.sample(.{ direction.name, reason.name }, counters.closed[direction.value][index]);
         }
     }
+}
+
+fn rejectStage(reason: @import("discv5").types.RejectReason) []const u8 {
+    return switch (reason) {
+        .oversized_datagram => "receive",
+        .admission_limited => "admission",
+        .malformed_packet => "packet",
+        .unexpected_handshake, .invalid_handshake, .unexpected_challenge => "handshake",
+        .invalid_record => "record",
+        .malformed_message, .request_too_large => "message",
+        .unsolicited_response, .invalid_response, .duplicate_response => "response",
+    };
 }
 
 fn firstMethod(index: usize) bool {

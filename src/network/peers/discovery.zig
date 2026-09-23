@@ -9,6 +9,7 @@ pub const Error = d.Transport.Error || d.Maintenance.Error || d.Lookup.Error || 
 pub const queries_max = 128;
 pub const Rejection = enum { missing_eth2, incompatible_fork, invalid_enr, no_quic, endpoint_family, endpoint_scope, demand, output_capacity };
 pub const rejection_count = @typeInfo(Rejection).@"enum".fields.len;
+pub const datagram_rejection_count = @typeInfo(d.types.RejectReason).@"enum".fields.len;
 pub const Counters = struct {
     lookups_started: u64 = 0,
     lookups_completed: u64 = 0,
@@ -23,6 +24,7 @@ pub const Counters = struct {
     receive_failures: u64 = 0,
     processing_failures: u64 = 0,
     coordinator_failures: u64 = 0,
+    datagrams_accepted: u64 = 0,
 };
 pub const LookupTime = @import("../metrics/histogram.zig").Duration(&.{ 1000, 5000, 10000, 30000, 60000, 120000 });
 pub const Options = struct {
@@ -86,6 +88,7 @@ pub const Discovery = struct {
     stopped: bool = false,
     counters: Counters = .{},
     rejections: [rejection_count]u64 = @splat(0),
+    datagram_rejections: [datagram_rejection_count]u64 = @splat(0),
     lookup_started_ms: u64 = 0,
     lookup_published: u64 = 0,
     empty_lookups: u3 = 0,
@@ -188,6 +191,11 @@ pub const Discovery = struct {
         std.debug.assert(expiries.len == progress.calls_expired and expiries.len <= d.CallTable.capacity_max);
         var result = Result{ .failure = progress.failure, .failure_stage = progress.failure_stage };
         if (self.stopped) return result;
+        switch (progress.datagram) {
+            .timeout => {},
+            .accepted => self.counters.datagrams_accepted +|= 1,
+            .rejected => |reason| self.datagram_rejections[@intFromEnum(reason)] +|= 1,
+        }
         if (progress.failure != null) switch (progress.failure_stage) {
             .receive => self.counters.receive_failures +|= 1,
             .process => self.counters.processing_failures +|= 1,

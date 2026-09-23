@@ -438,6 +438,24 @@ test "peer discovery empty lookup backs off and startup allocations balance" {
     try std.testing.expectError(error.OutOfMemory, discovery.Discovery.init(failed.allocator(), &a.transport, &context, &.{}, 10, .{}));
 }
 
+test "peer discovery counts every received datagram result by reason" {
+    var node: Node = undefined;
+    try node.init(41, 9041);
+    defer node.deinit();
+    var controller = try discovery.Discovery.init(std.testing.allocator, &node.transport, &context, &.{}, 10, .{});
+    defer controller.deinit();
+    var out: [1]adapter.Candidate = undefined;
+    _ = controller.consume(&.{ .now_ms = 10, .datagram = .accepted }, &.{}, &out);
+    _ = controller.consume(&.{ .now_ms = 11, .datagram = .{ .rejected = .unsolicited_response } }, &.{}, &out);
+    _ = controller.consume(&.{ .now_ms = 12, .datagram = .{ .rejected = .unsolicited_response } }, &.{}, &out);
+    _ = controller.consume(&.{ .now_ms = 13 }, &.{}, &out);
+    try std.testing.expectEqual(@as(u64, 1), controller.counters.datagrams_accepted);
+    try std.testing.expectEqual(@as(u64, 2), controller.datagram_rejections[@intFromEnum(d.types.RejectReason.unsolicited_response)]);
+    var rejected: u64 = 0;
+    for (controller.datagram_rejections) |count| rejected += count;
+    try std.testing.expectEqual(@as(u64, 2), rejected);
+}
+
 test "peer discovery QUIC relay checks reject public to private and unscoped IPv6" {
     const public: d.types.Address = .{ .ip4 = .{ .octets = .{ 8, 8, 8, 8 }, .port = 9000 } };
     const local: d.types.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9000 } };
