@@ -81,6 +81,8 @@ const contract = [_]Series{
     .{ .name = "lodestar_native_quic_connections_closed_total", .kind = "counter", .labels = &.{ "direction", "reason" } },
     .{ .name = "lodestar_native_quic_connections_dialing", .kind = "gauge" },
     .{ .name = "lodestar_native_peer_dial_selections_total", .kind = "counter", .labels = &.{"source"} },
+    .{ .name = "lodestar_native_peer_dial_outcomes_total", .kind = "counter", .labels = &.{"outcome"} },
+    .{ .name = "lodestar_native_peer_dial_retries_total", .kind = "counter", .labels = &.{"previous"} },
     // discv5
     .{ .name = "lodestar_discv5_active_session_count", .kind = "gauge" },
     .{ .name = "lodestar_discv5_kad_table_size", .kind = "gauge" },

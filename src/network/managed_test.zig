@@ -1458,7 +1458,7 @@ test "managed native public close cancels overlapping attempts and preserves bou
     try std.testing.expect(setup.pair.client.registry.slots[attempt.index].close_reason != null);
     for (0..8) |_| try setup.step(0);
     try std.testing.expect(row.connection == null and row.attempt == null);
-    try std.testing.expect(!setup.client.dialing.dialClosed(&setup.client.catalog, attempt, setup.pair.now.mono_ms));
+    try std.testing.expect(!setup.client.dialing.dialClosed(&setup.client.catalog, attempt, .handshake_timeout, setup.pair.now.mono_ms));
     const due = setup.client.dialing.nextWakeup(&setup.client.catalog, setup.pair.now.mono_ms, 1) orelse return error.MissingRetryDeadline;
     try std.testing.expect(due >= setup.pair.now.mono_ms + 60_000);
     setup.pair.advance(due - setup.pair.now.mono_ms);

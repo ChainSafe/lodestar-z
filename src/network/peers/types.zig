@@ -2,6 +2,7 @@ pub const PeerId = @import("../wire/peer_id.zig").PeerId;
 pub const Handle = @import("../types.zig").Handle;
 pub const Direction = @import("../types.zig").Direction;
 pub const Address = @import("../types.zig").Address;
+pub const CloseReason = @import("../types.zig").CloseReason;
 pub const ForkSeq = @import("config").ForkSeq;
 pub const PeerRef = @import("../types.zig").PeerRef;
 pub const Status = struct {
@@ -61,6 +62,8 @@ pub const DisconnectReason = enum {
     gossip_unavailable,
     health_error,
 };
+pub const DialFailure = enum { handshake_timeout, peer_id_mismatch, refused, destination_unreachable, expired };
+pub const DialOutcome = enum { connected, deferred, admission_refused, cancelled, handshake_timeout, peer_id_mismatch, refused, destination_unreachable, expired };
 pub const Snapshot = struct {
     identify: ?@import("../identify/root.zig").Metadata = null,
     peer: PeerRef,

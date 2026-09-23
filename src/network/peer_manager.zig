@@ -260,7 +260,7 @@ pub const PeerManager = struct {
                 }
             },
             .closed => |closed| {
-                _ = self.dialing.dialClosed(&self.catalog, closed.conn, now.mono_ms);
+                _ = self.dialing.dialClosed(&self.catalog, closed.conn, closed.reason, now.mono_ms);
                 if (self.catalog.findConnection(closed.conn)) |peer| {
                     const goodbye = service.reqresp.closingGoodbye(engine, closed.conn, now);
                     if (goodbye) |code| self.control.receivedGoodbye(&self.catalog, peer, closed.conn, code, now, true);
