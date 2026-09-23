@@ -191,7 +191,13 @@ pub fn eth1Data(self: *const BeaconStateView) !js_types.Eth1Data {
     var eth1_data_view = try cached_state.state.eth1Data();
     var eth1_data: ct.phase0.Eth1Data.Type = undefined;
     try eth1_data_view.toValue(allocator, &eth1_data);
-    return js_types.wrap(js_types.Eth1Data, try sszValueToNapiValue(env, ct.phase0.Eth1Data, &eth1_data));
+    // Manually create 'obj' since proposers can vote in any u64 deposit count,
+    // which does not fit a JS number.
+    const obj = try env.createObject();
+    try obj.setNamedProperty("depositRoot", try sszValueToNapiValue(env, ct.primitive.Root, &eth1_data.deposit_root));
+    try obj.setNamedProperty("depositCount", try env.createBigintUint64(eth1_data.deposit_count));
+    try obj.setNamedProperty("blockHash", try sszValueToNapiValue(env, ct.primitive.Bytes32, &eth1_data.block_hash));
+    return js_types.wrap(js_types.Eth1Data, obj);
 }
 
 pub fn latestBlockHeader(self: *const BeaconStateView) !js_types.BeaconBlockHeader {
