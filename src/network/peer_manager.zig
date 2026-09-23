@@ -130,6 +130,8 @@ pub const PeerManager = struct {
 
     pub fn validateOptions(options: Options) !void {
         try options.peers.validate();
+        if (options.peers.target_peers >= options.peers.max_peers or
+            options.dial.concurrent_max > options.peers.max_peers - options.peers.target_peers) return error.InvalidOptions;
         if (options.metadata_freshness_ms == 0 or options.metadata_freshness_ms > 86_400_000) return error.InvalidOptions;
         try control_mod.Control.validateOptions(options.control);
         try dial_mod.Dialing.validateOptions(options.dial);
@@ -221,7 +223,14 @@ pub const PeerManager = struct {
                     &identity,
                     &self.local_identity,
                     connected.conn,
-                    &.{ .direction = direction, .endpoint = endpoint, .now_ms = now.mono_ms },
+                    &.{
+                        .direction = direction,
+                        .endpoint = endpoint,
+                        .now_ms = now.mono_ms,
+                        .outbound_reserved = self.dialing.options.concurrent_max,
+                        .pending_dials = self.dialing.pendingPeers(&self.catalog, &identity),
+                        .selected_dial = self.dialing.selectedPeer(&self.catalog, &identity, now.mono_ms),
+                    },
                 );
                 switch (decision) {
                     .admitted => |admission| {
@@ -245,6 +254,7 @@ pub const PeerManager = struct {
                     else => {
                         std.log.scoped(.network_peers).debug("peer_admission_refused peer={f} connection={d}:{d} reason={s}", .{ @import("logging.zig").peer(&identity), connected.conn.index, connected.conn.generation, @tagName(decision) });
                         self.counters.rejected +|= 1;
+                        _ = self.dialing.deferConnection(&self.catalog, connected.conn, now.mono_ms);
                         _ = engine.close(connected.conn, 0);
                     },
                 }
@@ -312,8 +322,7 @@ pub const PeerManager = struct {
         return null;
     }
     pub fn updateNativeRoom(self: *PeerManager, engine: *const engine_mod.Engine) void {
-        const ceiling = @min(self.catalog.options.max_peers, engine.limits.connections_max);
-        self.native_dial_room = ceiling -| engine.registry.active_len;
+        self.native_dial_room = engine.limits.connections_max -| engine.registry.active_len;
     }
 
     pub fn peerWakeup(self: *const PeerManager, now: Now, capacity: usize) ?u64 {
@@ -387,7 +396,7 @@ pub const PeerManager = struct {
                 self.selection_deadline = @min(self.selection_deadline orelse grace, grace);
             }
         }
-        self.selection = policy.selectWithReplacement(self.policy_scratch[0..input_count], &self.demand, self.catalog.options, self.policy_seed, now.mono_ms >= self.replacement_after_ms);
+        self.selection = policy.selectWithPacing(self.policy_scratch[0..input_count], &self.demand, self.catalog.options, self.policy_seed, now.mono_ms >= self.replacement_after_ms);
         self.requested_connect +|= self.selection.dial_budget;
         for (self.policy_scratch[0..input_count], 0..) |input, i| if (self.selection.reasons[i]) |reason| {
             self.requested_disconnect[@intFromEnum(reason)] +|= 1;
@@ -411,6 +420,7 @@ pub const PeerManager = struct {
             .direct = snapshot.direct,
             .outbound = snapshot.direction == .outbound,
             .relevant = snapshot.relevant,
+            .revalidating = self.control.revalidationDeadline(snapshot.peer, conn, now) != null,
             .ready = false,
             .score = peers.reputation.selectionScore(
                 snapshot.score,
@@ -428,11 +438,13 @@ pub const PeerManager = struct {
         }
         const delivery = service.gossipsub.deliveryStatus(conn);
         if (delivery == .unavailable) {
-            input.outbound = false;
+            if (!input.revalidating) input.outbound = false;
             if (snapshot.relevant and !snapshot.direct and input.reject == null)
                 input.reject = .gossip_unavailable;
         }
-        if (!snapshot.relevant or input.reject != null) return input;
+        if (self.control.revalidationDeadline(snapshot.peer, conn, now)) |deadline|
+            self.selection_deadline = @min(self.selection_deadline orelse deadline, deadline);
+        if ((!snapshot.relevant and !input.revalidating) or input.reject != null) return input;
         const subscriptions = service.gossipsub.coverageSubscriptions(conn, self.local.fork.digest, local_subscriptions, now);
         input.coverage = coverage.gossip(&subscriptions, &self.local.fork);
         const metadata = snapshot.metadata orelse return input;
@@ -451,8 +463,7 @@ pub const PeerManager = struct {
     }
     fn refreshDiscoveryNeed(self: *PeerManager) void {
         self.discovery_need = .{};
-        if (self.selection.dial_budget == 0) return;
-        self.discovery_need.general = self.catalog.relevantCount() < self.catalog.options.target_peers or
+        self.discovery_need.general = self.selection.retained_count < self.catalog.options.target_peers or
             self.selection.deficits.outbound > 0;
         std.mem.writeInt(u64, &self.discovery_need.attnets, self.selection.deficits.missing.attnets, .little);
         self.discovery_need.syncnets = self.selection.deficits.missing.syncnets;
@@ -460,8 +471,10 @@ pub const PeerManager = struct {
     }
     pub fn dialRoom(self: *const PeerManager) u16 {
         const attempts = self.dialing.attempts();
-        const budget = @min(self.catalog.options.max_peers -| self.selection.retained_count, @max(self.selection.dial_budget, self.dialing.hostDemand(&self.catalog)));
-        return @min(self.native_dial_room -| attempts.unstarted, budget -| attempts.total);
+        const pending = self.dialing.pendingPeers(&self.catalog, null);
+        const capacity = self.catalog.options.max_peers -| self.catalog.connectedCount() -| pending;
+        const wanted = @max(self.selection.dial_budget, self.dialing.hostDemand(&self.catalog)) -| pending;
+        return @min(self.native_dial_room -| attempts.unstarted, capacity, wanted);
     }
     pub fn updateStatus(self: *PeerManager, service: *const service_mod.Service, status: *const t.Status) !void {
         var local = self.local;
@@ -534,6 +547,9 @@ pub const PeerManager = struct {
     ) !void {
         if (self.stopped) return error.Stopped;
         if (identity.eql(&self.local_identity)) return error.SelfDial;
+        const already_direct = if (self.catalog.find(identity)) |peer| self.catalog.rowFor(peer).?.direct else false;
+        if (!already_direct and self.catalog.direct_count >= self.catalog.options.target_peers - self.catalog.options.min_outbound)
+            return error.DirectPeerCapacity;
         try self.dialing.enqueue(&self.catalog, identity, addresses, true, now.mono_ms);
         self.selection_revision = null;
         if (self.catalog.find(identity)) |peer| {

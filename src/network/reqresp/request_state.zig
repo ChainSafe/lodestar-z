@@ -31,6 +31,9 @@ pub const RequestState = struct {
     error_message: [codec.error_message_max]u8 = undefined,
     error_len: u16 = 0,
     failure_detail: []const u8 = "none",
+    peer_fault: ?PeerFault = null,
+
+    pub const PeerFault = enum { protocol, non_completion };
 
     pub fn occupied(self: *const RequestState) bool {
         return self.completion != .free;

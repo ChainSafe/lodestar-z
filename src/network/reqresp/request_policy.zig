@@ -141,7 +141,9 @@ pub const Policy = struct {
 
     pub fn inspect(self: *const Policy, which: Protocol, bytes: []const u8, request_fork: ForkSeq) InspectError!Inspection {
         const bounds = self.requestBounds(which, request_fork);
-        if (bytes.len < bounds.request_min or bytes.len > bounds.request_max) return error.MalformedSsz;
+        const intrinsic = which.info();
+        if (bytes.len < intrinsic.request_min or bytes.len > intrinsic.request_max) return error.MalformedSsz;
+        if (bytes.len > bounds.request_max) return error.UnsupportedBounds;
         var cost: u128 = 1;
         var ceiling: u128 = bounds.chunks_max;
         switch (which) {
@@ -178,12 +180,14 @@ pub const Policy = struct {
                 }
             },
             .blocks_by_root_v2 => {
-                if (bytes.len % 32 != 0 or bytes.len / 32 > self.blocks(request_fork)) return error.MalformedSsz;
+                if (bytes.len % 32 != 0) return error.MalformedSsz;
+                if (bytes.len / 32 > self.blocks(request_fork)) return error.UnsupportedBounds;
                 cost = bytes.len / 32;
                 ceiling = cost;
             },
             .blob_sidecars_by_root_v1 => {
-                if (bytes.len % 40 != 0 or bytes.len / 40 > self.blobs(request_fork)) return error.MalformedSsz;
+                if (bytes.len % 40 != 0) return error.MalformedSsz;
+                if (bytes.len / 40 > self.blobs(request_fork)) return error.UnsupportedBounds;
                 const count = bytes.len / 40;
                 for (0..count) |i| try self.host(scalar(bytes, i * 40 + 32));
                 cost = count;
@@ -194,7 +198,8 @@ pub const Policy = struct {
                 if (bytes.len != 0) {
                     if (bytes.len < 4) return error.MalformedSsz;
                     const first: usize = offset(bytes, 0);
-                    if (first == 0 or first % 4 != 0 or first > bytes.len or first / 4 > self.config.blocks_deneb) return error.MalformedSsz;
+                    if (first == 0 or first % 4 != 0 or first > bytes.len or first / 4 > constants.MAX_REQUEST_BLOCKS_DENEB) return error.MalformedSsz;
+                    if (first / 4 > self.config.blocks_deneb) return error.UnsupportedBounds;
                     const count = first / 4;
                     for (0..count) |i| {
                         const start: usize = offset(bytes, i * 4);

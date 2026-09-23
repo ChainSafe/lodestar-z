@@ -25,6 +25,34 @@ fn identity(comptime hex: []const u8) t.PeerId {
 }
 const first = Handle{ .index = 1, .generation = 1 };
 const replacement = Handle{ .index = 1, .generation = 2 };
+
+test "peer admission preserves dial commitments through inbound churn and goodbye" {
+    var catalog = try Catalog.initWithIntents(std.testing.allocator, .{ .capacity = 16, .max_peers = 6, .target_peers = 4, .min_outbound = 1, .outbound_reserve = 0 }, 1, 16, 1);
+    defer catalog.deinit(std.testing.allocator);
+    for (0..4) |index| {
+        const peer: t.PeerId = .{ .bytes = @splat(@as(u8, @intCast(index + 1))) };
+        const conn: t.Handle = .{ .index = @intCast(index), .generation = 1 };
+        try std.testing.expect(catalog.admit(&peer, &local, conn, &.{ .direction = .inbound, .endpoint = .unspecified, .now_ms = 0, .outbound_reserved = 2 }) == .admitted);
+    }
+    for (0..12) |index| {
+        const peer: t.PeerId = .{ .bytes = @splat(@as(u8, @intCast(index + 20))) };
+        try std.testing.expectEqual(t.Admission.capacity, catalog.admit(&peer, &local, .{ .index = 8, .generation = 1 }, &.{ .direction = .inbound, .endpoint = .unspecified, .now_ms = index, .outbound_reserved = 2 }));
+    }
+    const direct = try catalog.retainIntent(&third);
+    try std.testing.expect(catalog.setDirect(direct, true));
+    try std.testing.expectEqual(t.Admission.capacity, catalog.admit(&third, &local, .{ .index = 9, .generation = 1 }, &.{ .direction = .inbound, .endpoint = .unspecified, .now_ms = 20, .outbound_reserved = 2, .pending_dials = 2 }));
+    try std.testing.expect(catalog.admit(&third, &local, .{ .index = 9, .generation = 1 }, &.{ .direction = .inbound, .endpoint = .unspecified, .now_ms = 20, .outbound_reserved = 2, .pending_dials = 1 }) == .admitted);
+    const selected = catalog.admit(&remote, &local, .{ .index = 10, .generation = 1 }, &.{ .direction = .outbound, .endpoint = .unspecified, .now_ms = 20, .outbound_reserved = 2 }).admitted;
+    try std.testing.expectEqual(@as(u16, 6), catalog.connectedCount());
+    try std.testing.expect(catalog.markUnavailable(selected.peer, .{ .index = 10, .generation = 1 }, .count_pruning));
+    try std.testing.expectEqual(@as(u16, 6), catalog.connectedCount());
+    const other: t.PeerId = .{ .bytes = @splat(99) };
+    try std.testing.expectEqual(t.Admission.capacity, catalog.admit(&other, &local, .{ .index = 11, .generation = 1 }, &.{ .direction = .outbound, .endpoint = .unspecified, .now_ms = 21 }));
+    try std.testing.expect(catalog.deferRedial(selected.peer, .{ .index = 10, .generation = 1 }, 20, 300_000));
+    try std.testing.expect(catalog.disconnect(selected.peer, .{ .index = 10, .generation = 1 }, .count_pruning, 22));
+    try std.testing.expectEqual(t.Admission.cooldown, catalog.admit(&remote, &local, .{ .index = 10, .generation = 2 }, &.{ .direction = .inbound, .endpoint = .unspecified, .now_ms = 23 }));
+    try std.testing.expectEqual(@as(f64, 0), catalog.get(selected.peer).?.score);
+}
 fn admit(
     c: *Catalog,
     id: *const t.PeerId,
@@ -144,7 +172,7 @@ test "peer catalog cooldown churn cannot exclude a fresh inbound identity" {
     try std.testing.expect(admit(&c, &fresh, replacement, .inbound, 1) == .admitted);
 }
 
-test "peer catalog local pruning permits healthy reconnection during redial backoff" {
+test "peer catalog local pruning enforces reconnection cooldown without a score penalty" {
     var c = try Catalog.init(std.testing.allocator, opts, 1024, 0);
     defer c.deinit(std.testing.allocator);
     const ref = admit(&c, &remote, first, .inbound, 0).admitted.peer;
@@ -153,13 +181,14 @@ test "peer catalog local pruning permits healthy reconnection during redial back
     var out: [1]t.Event = undefined;
     _ = c.pollEvents(&out);
     try std.testing.expectEqual(@as(u64, 300_000), c.get(ref).?.redial_until_ms);
-    try std.testing.expect(admit(&c, &remote, replacement, .inbound, 1) == .admitted);
+    try std.testing.expectEqual(t.Admission.cooldown, admit(&c, &remote, replacement, .inbound, 1));
     try std.testing.expectEqual(@as(f64, 0), c.get(ref).?.score);
     try std.testing.expect(!c.deferRedial(ref, first, 1, 300_000));
-    try std.testing.expect(c.cooldown(ref, replacement, 1, 600_000));
-    try std.testing.expect(c.disconnect(ref, replacement, .remote_goodbye, 1));
+    try std.testing.expect(admit(&c, &remote, replacement, .inbound, 300_000) == .admitted);
+    try std.testing.expect(c.cooldown(ref, replacement, 300_000, 600_000));
+    try std.testing.expect(c.disconnect(ref, replacement, .remote_goodbye, 300_000));
     _ = c.pollEvents(&out);
-    try std.testing.expectEqual(t.Admission.cooldown, admit(&c, &remote, first, .inbound, 2));
+    try std.testing.expectEqual(t.Admission.cooldown, admit(&c, &remote, first, .inbound, 300_001));
 }
 
 test "peer catalog exhausted generations never wrap and allocator cleanup" {
@@ -564,4 +593,24 @@ test "catalog caches node ID across custody changes and reconnects and resets it
     try std.testing.expect(c.find(&remote) == null);
     try std.testing.expectEqual(reused, c.find(&third).?);
     try std.testing.expectEqual(third_id, c.rows[reused.index].node_id.?);
+}
+
+test "weak non-completion persists across reconnect and connection slot reuse" {
+    var catalog = try Catalog.init(std.testing.allocator, opts, 1024, 0);
+    defer catalog.deinit(std.testing.allocator);
+    const peer = admit(&catalog, &remote, first, .outbound, 0).admitted.peer;
+    try std.testing.expect(catalog.nonCompletion(peer, 100));
+    try std.testing.expect(catalog.disconnect(peer, first, .transport_closed, 100));
+    const other = admit(&catalog, &third, replacement, .inbound, 100).admitted.peer;
+    try std.testing.expect(catalog.nonCompletion(catalog.find(&remote).?, 100));
+    try std.testing.expectEqual(@as(f64, -1), catalog.get(peer).?.score);
+    try std.testing.expectEqual(@as(f64, 0), catalog.get(other).?.score);
+    var events: [8]t.Event = undefined;
+    _ = catalog.pollEvents(&events);
+    const reconnected = admit(&catalog, &remote, .{ .index = 0, .generation = 2 }, .outbound, 100).admitted.peer;
+    try std.testing.expectEqual(peer, reconnected);
+    try std.testing.expect(catalog.nonCompletion(reconnected, 100));
+    try std.testing.expectEqual(@as(f64, -1), catalog.get(peer).?.score);
+    try std.testing.expect(catalog.nonCompletion(reconnected, 10_100));
+    try std.testing.expect(catalog.get(peer).?.score < -1.9);
 }

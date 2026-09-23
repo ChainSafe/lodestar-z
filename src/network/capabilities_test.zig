@@ -73,6 +73,7 @@ test "capabilities fork sets match every implemented host protocol in both direc
             expected.insert(.{ .meshsub = .v1_1 });
             var receive = expected;
             var request = expected;
+            if (fork.gte(.fulu)) receive.insert(.{ .reqresp = .status_v1 });
             if (fork.gte(.altair)) for (light_client) |protocol| {
                 request.insert(.{ .reqresp = protocol });
                 if (serve) receive.insert(.{ .reqresp = protocol });
@@ -90,12 +91,13 @@ test "capabilities fork sets match every implemented host protocol in both direc
         }
     }
     const fulu = try capabilities.forFork(.fulu, true, &.{.v1_0});
-    try std.testing.expectEqual(16, fulu.receive.count());
+    try std.testing.expectEqual(17, fulu.receive.count());
     const active = try capabilities.forFork(.fulu, false, &.{ .v1_2, .v1_1 });
     try std.testing.expect(!active.receive.contains(.{ .reqresp = .light_client_bootstrap_v1 }));
     try std.testing.expect(active.request.contains(.{ .reqresp = .light_client_bootstrap_v1 }));
     try std.testing.expect(active.receive.contains(.{ .reqresp = .status_v2 }));
-    try std.testing.expect(!active.receive.contains(.{ .reqresp = .status_v1 }));
+    try std.testing.expect(active.receive.contains(.{ .reqresp = .status_v1 }));
+    try std.testing.expect(!active.request.contains(.{ .reqresp = .status_v1 }));
 }
 
 test "capabilities reject unsupported host fork and invalid meshsub preferences" {

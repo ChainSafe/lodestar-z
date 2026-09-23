@@ -1,6 +1,7 @@
 const std = @import("std");
 const config = @import("config");
 const preset = @import("preset");
+const constants = @import("constants");
 const chain = @import("chain.zig");
 const topics = @import("gossipsub/topic_policy.zig");
 const rr = @import("reqresp/reqresp.zig");
@@ -13,7 +14,7 @@ fn fixture() config.ChainConfig {
     result.DENEB_FORK_EPOCH = 0;
     result.ELECTRA_FORK_EPOCH = 2;
     result.FULU_FORK_EPOCH = 3;
-    result.GLOAS_FORK_EPOCH = 8;
+    result.GLOAS_FORK_EPOCH = constants.FAR_FUTURE_EPOCH;
     result.BLOB_SCHEDULE = &.{ .{ .EPOCH = 3, .MAX_BLOBS_PER_BLOCK = 33 }, .{ .EPOCH = 5, .MAX_BLOBS_PER_BLOCK = 40 } };
     return result;
 }
@@ -21,8 +22,7 @@ fn fixture() config.ChainConfig {
 test "network chain resolves same epoch forks BPO contexts and clock identity" {
     var cfg = config.BeaconConfig.init(fixture(), @splat(1));
     const plan = try chain.Plan.init(&cfg, false);
-    try std.testing.expectEqual(@as(u8, 5), plan.boundary_count);
-    try std.testing.expectEqual(@as(u8, 4), plan.supported_count);
+    try std.testing.expectEqual(@as(u8, 4), plan.boundary_count);
     try std.testing.expectEqual(@as(?[4]u8, null), plan.phase0_digest);
     const local: @import("peers/types.zig").LocalState = .{ .metadata = .{ .custody_group_count = 8 }, .status = .{ .head_slot = 1, .earliest_available_slot = 0 } };
     const genesis = try plan.update(local, null, 0);
@@ -50,10 +50,21 @@ test "network chain resolves same epoch forks BPO contexts and clock identity" {
     try std.testing.expectEqual(@as(u64, 3), plan.topics[2].epoch);
     try std.testing.expectEqual(.fulu, plan.topics[3].fork.?);
     try std.testing.expectEqual(@as(u64, 5), plan.topics[3].epoch);
-    try std.testing.expectEqual(@as(u64, 8), bpo.schedule.next_epoch);
-    try std.testing.expectError(error.UnsupportedNetworkFork, plan.update(local, null, 8 * preset.preset.SLOTS_PER_EPOCH));
+    try std.testing.expectEqual(constants.FAR_FUTURE_EPOCH, bpo.schedule.next_epoch);
+    try std.testing.expectEqualDeep(bpo, try plan.update(local, null, 8 * preset.preset.SLOTS_PER_EPOCH));
     cfg = config.BeaconConfig.init(fixture(), @splat(2));
     try std.testing.expectEqualDeep(fulu, try plan.update(local, null, 3 * preset.preset.SLOTS_PER_EPOCH));
+}
+
+test "network chain rejects every scheduled unsupported fork at startup" {
+    for ([_]u64{ 0, 3, 8, constants.FAR_FUTURE_EPOCH - 1 }) |epoch| {
+        var input = fixture();
+        input.ELECTRA_FORK_EPOCH = 0;
+        input.FULU_FORK_EPOCH = 0;
+        input.GLOAS_FORK_EPOCH = epoch;
+        const cfg = config.BeaconConfig.init(input, @splat(0));
+        try std.testing.expectError(error.UnsupportedNetworkFork, chain.Plan.init(&cfg, false));
+    }
 }
 
 test "network chain derives fixed request storage and historical blob limits independently of BPO" {
@@ -64,7 +75,7 @@ test "network chain derives fixed request storage and historical blob limits ind
     const maximum = 128 * (40 + 8 * preset.NUMBER_OF_COLUMNS);
     try std.testing.expectEqual(@as(usize, maximum), plan.policy.requestMax());
     const policy = plan.requestPolicy();
-    var requests = try rr.ReqResp.init(std.testing.allocator, .{ .forks = plan.forks[0..plan.supported_count], .policy = policy, .inbound_max = 8, .inbound_control_reserved = 2, .inbound_per_peer_max = 8 });
+    var requests = try rr.ReqResp.init(std.testing.allocator, .{ .forks = plan.forks[0..plan.boundary_count], .policy = policy, .inbound_max = 8, .inbound_control_reserved = 2, .inbound_per_peer_max = 8 });
     defer requests.deinit();
     const bytes = requests.memoryPlan().total_bytes;
     try std.testing.expectEqual(@as(usize, 6 * maximum + 2 * 92), requests.request_sinks.len);
@@ -117,7 +128,7 @@ test "network chain honors configured wire limits and requires complete metadata
     try std.testing.expectEqual(encoded.len, try wire.encodeMetadata(.metadata_v3, &update.local.metadata, update.local.fork, &encoded));
     try std.testing.expectEqualDeep(update.local.metadata, try wire.decodeMetadata(.metadata_v3, &encoded, update.local.fork));
     const policy = plan.requestPolicy();
-    var requests = try rr.ReqResp.init(std.testing.allocator, .{ .forks = plan.forks[0..plan.supported_count], .policy = policy });
+    var requests = try rr.ReqResp.init(std.testing.allocator, .{ .forks = plan.forks[0..plan.boundary_count], .policy = policy });
     defer requests.deinit();
     try std.testing.expectEqual(@as(usize, 8 * (40 + 8 * preset.NUMBER_OF_COLUMNS)), requests.request_sink_size);
     try std.testing.expectEqual(@as(usize, 1024 * 1024), (try requests.responseBounds(.blocks_by_root_v2, .deneb)).max);

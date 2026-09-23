@@ -118,11 +118,11 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
     const plan = try network.chain.Plan.init(options.network.config, false);
     var gossip_seed: [8]u8 = undefined;
     try io.randomSecure(&gossip_seed);
-    var service = try Service.init(allocator, .{ .gossipsub = .{ .random_seed = std.mem.readInt(u64, &gossip_seed, .little), .topic_policy = plan.topics[0..plan.supported_count], .message_id_policy = .{ .phase0_digest = plan.phase0_digest } }, .reqresp = .{
+    var service = try Service.init(allocator, .{ .gossipsub = .{ .random_seed = std.mem.readInt(u64, &gossip_seed, .little), .topic_policy = plan.topics[0..plan.boundary_count], .message_id_policy = .{ .phase0_digest = plan.phase0_digest } }, .reqresp = .{
         .outbound_max = 4,
         .inbound_max = 4,
         .inbound_per_peer_max = 4,
-        .forks = plan.forks[0..plan.supported_count],
+        .forks = plan.forks[0..plan.boundary_count],
         .policy = plan.requestPolicy(),
         .request_fork = options.network.config.forkSeqAtEpoch(currentEpoch(options.network, (try network.transport.currentTime(io)).unix_s)),
     } });

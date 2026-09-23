@@ -108,6 +108,9 @@ pub const Server = struct {
                 .quota_timeout
             else
                 .timeout;
+            if (reason == .timeout and self.state == .receiving_request and
+                !request.io.unread(engine, request.stream))
+                request.peer_fault = .non_completion;
             self.fail(ctx, index, reason, engine);
             return;
         };
@@ -152,14 +155,17 @@ pub const Server = struct {
             if (input.bytes.len == 0 and !input.fin) return;
             if (input.bytes.len > 0) {
                 if (!request.io.decoding or request.io.decoder.isDone()) {
+                    request.peer_fault = .protocol;
                     Server.rejectRequest(owner, slot, error.TooManyBytes, now);
                     return;
                 }
                 _ = request.io.feed(input.bytes) catch |err| {
+                    if (request.io.decoder.protocolFault(err)) request.peer_fault = .protocol;
                     Server.rejectRequest(owner, slot, err, now);
                     return;
                 };
                 if (request.io.buffered_start < request.io.buffered_end) {
+                    request.peer_fault = .protocol;
                     Server.rejectRequest(owner, slot, error.TooManyBytes, now);
                     return;
                 }
@@ -170,6 +176,7 @@ pub const Server = struct {
                 request.io.fin_seen = input.fin;
                 const finished = !request.io.decoding or request.io.decoder.isDone();
                 if (!finished) {
+                    request.peer_fault = .protocol;
                     Server.rejectRequest(owner, slot, error.Truncated, now);
                     return;
                 }
@@ -179,6 +186,7 @@ pub const Server = struct {
                     &.{};
                 if (owner.admission != null) owner.counters.inspected +|= 1;
                 const inspected = owner.inspectRequest(request.protocol, payload, slot.request_fork) catch |err| {
+                    if (err == error.MalformedSsz or err == error.InvalidRequest) request.peer_fault = .protocol;
                     if (err == error.PolicyRequired) {
                         reject(owner, slot, constants.result_resource_unavailable, "request policy unavailable", now);
                     } else {
@@ -471,7 +479,7 @@ pub const Server = struct {
         @memcpy(slot.request.io.read_buffer[0..ready.leftover.len], ready.leftover);
         if (bounds.request_max > 0) {
             slot.request.io.decoder = codec.Decoder.initRequest(
-                .{ .min = bounds.request_min, .max = bounds.request_max },
+                .{ .min = bounds.request_min, .max = bounds.request_max, .protocol_max = which.info().request_max },
                 request_sink,
                 slot.request.io.scratch,
             );

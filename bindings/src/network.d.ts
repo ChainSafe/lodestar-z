@@ -251,12 +251,14 @@ export interface NativeLogBatch {
 export interface NativeResources {
   /** Retained peer records, at most 512. */
   peerCapacity: number;
+  /** Steady peer target, strictly below maxPeers to admit locally selected trials. */
   targetPeers: number;
   maxPeers: number;
   minOutbound: number;
   outboundReserve: number;
   connectionCapacity: number;
   handshakingCapacity: number;
+  /** Managed concurrency resolves to min(4, dialingCapacity, maxPeers - targetPeers). */
   dialingCapacity: number;
   receiveBudgetBytes: number;
   nativeBudgetBytes: number;

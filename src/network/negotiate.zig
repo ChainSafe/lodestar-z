@@ -391,7 +391,7 @@ fn proposeNext(engine: *Engine, entry: *Entry, dialer: *multistream.Dialer) ?Out
         .header_seen = true,
     };
     const proposal = multistream.encodeMessage(dialer.protocol, &entry.out_buffer) catch
-        return fail(engine, entry, .malformed);
+        return fail(engine, entry, .transport);
     entry.outbox.queue(proposal, false);
     entry.needs_service = true;
     return null;

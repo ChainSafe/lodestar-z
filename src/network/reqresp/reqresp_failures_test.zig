@@ -180,14 +180,14 @@ test "reqresp delivers error chunks with the peer's code and message" {
         for (setup.serverEvents()) |event| switch (event) {
             .request => |incoming| {
                 const stream = setup.shared.server.reqresp.inbound[incoming.request.index].request.stream;
-                try std.testing.expectEqual(@as(usize, 1), try setup.shared.pair.server.write(stream, &.{5}, true));
+                try std.testing.expectEqual(@as(usize, 2), try setup.shared.pair.server.write(stream, &.{ 5, 0 }, true));
             },
             else => {},
         };
         if (firstFailure(setup.clientEvents())) |failure| client_failure = failure;
     }
     const reserved = client_failure orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(codec.Error.ReservedResult, reserved.invalid_response);
+    try std.testing.expectEqual(@as(u8, 5), reserved.peer_error.code);
 }
 
 test "reqresp finishes after the last allowed chunk without waiting for the peer" {
@@ -216,7 +216,7 @@ test "reqresp finishes after the last allowed chunk without waiting for the peer
             else => {},
         };
         for (setup.clientEvents()) |event| switch (event) {
-            .chunk => |chunk| try std.testing.expect(setup.shared.client.reqresp.consume(chunk.request)),
+            .chunk => |chunk| try std.testing.expect(setup.shared.client.reqresp.consume(chunk.request, setup.shared.pair.now)),
             .done => |finished| {
                 try std.testing.expectEqual(@as(u32, 1), finished.chunks);
                 done = true;
@@ -350,7 +350,7 @@ test "reqresp withholds chunks while the peer's bucket is empty" {
             else => {},
         };
         for (setup.clientEvents()) |event| switch (event) {
-            .chunk => |chunk| try std.testing.expect(setup.shared.client.reqresp.consume(chunk.request)),
+            .chunk => |chunk| try std.testing.expect(setup.shared.client.reqresp.consume(chunk.request, setup.shared.pair.now)),
             .done => completed += 1,
             .failed => return error.TestUnexpectedResult,
             else => {},
@@ -374,7 +374,7 @@ test "reqresp withholds chunks while the peer's bucket is empty" {
     while (rounds < 20 and completed < 2) : (rounds += 1) {
         try setup.pumpOnce();
         for (setup.clientEvents()) |event| switch (event) {
-            .chunk => |chunk| try std.testing.expect(setup.shared.client.reqresp.consume(chunk.request)),
+            .chunk => |chunk| try std.testing.expect(setup.shared.client.reqresp.consume(chunk.request, setup.shared.pair.now)),
             .done => completed += 1,
             .failed => return error.TestUnexpectedResult,
             else => {},
@@ -435,7 +435,7 @@ test "reqresp holds the next chunk until the host consumes the previous one" {
         try setup.pumpOnce();
         try std.testing.expectEqual(@as(usize, 0), setup.clientEvents().len);
     }
-    try std.testing.expect(setup.shared.client.reqresp.consume(held.?));
+    try std.testing.expect(setup.shared.client.reqresp.consume(held.?, setup.shared.pair.now));
     var done = false;
     rounds = 0;
     while (rounds < 20 and !done) : (rounds += 1) {
@@ -444,7 +444,7 @@ test "reqresp holds the next chunk until the host consumes the previous one" {
             .chunk => |chunk| {
                 chunks += 1;
                 try std.testing.expectEqualSlices(u8, &blocks[1], chunk.bytes);
-                try std.testing.expect(setup.shared.client.reqresp.consume(chunk.request));
+                try std.testing.expect(setup.shared.client.reqresp.consume(chunk.request, setup.shared.pair.now));
             },
             .done => |finished| {
                 try std.testing.expectEqual(@as(u32, 2), finished.chunks);
@@ -588,7 +588,7 @@ fn expectSingleChunk(setup: *Pair, comptime reply: RawReply, expected: []const u
         for (setup.clientEvents()) |event| switch (event) {
             .chunk => |chunk| {
                 try std.testing.expectEqualSlices(u8, expected, chunk.bytes);
-                try std.testing.expect(setup.shared.client.reqresp.consume(chunk.request));
+                try std.testing.expect(setup.shared.client.reqresp.consume(chunk.request, setup.shared.pair.now));
             },
             .done => |finished| {
                 try std.testing.expectEqual(@as(u32, 1), finished.chunks);
@@ -686,7 +686,7 @@ test "reqresp retires a consumed terminal stream without FIN or event space" {
         };
         for (pair.clientEvents()) |event| switch (event) {
             .chunk => |r| {
-                consumed = pair.shared.client.reqresp.consume(r.request);
+                consumed = pair.shared.client.reqresp.consume(r.request, pair.shared.pair.now);
             },
             else => {},
         };
@@ -939,7 +939,7 @@ test "reqresp narrowed chunks retire without FIN after a host pause" {
     setup.shared.pair.advance(2000);
     var events: [1]Event = undefined;
     try std.testing.expectEqual(@as(usize, 0), setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .application = &events }).application);
-    try std.testing.expect(setup.shared.client.reqresp.consume(handle));
+    try std.testing.expect(setup.shared.client.reqresp.consume(handle, setup.shared.pair.now));
     _ = setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .application = &.{} }).application;
     const stream = setup.shared.client.reqresp.outbound[handle.index].request.stream;
     try std.testing.expect(!setup.shared.pair.client.registry.slots[stream.conn.index].table.matches(stream.slot, stream.id));
@@ -965,7 +965,7 @@ test "reqresp wakeup distinguishes host and quota waits and bounds idle scans" {
     var events: [1]Event = undefined;
     try std.testing.expectEqual(@as(usize, 1), setup.shared.server.reqresp.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .control = &events }).control);
     try std.testing.expect(events[0].failed.reason == .host_timeout);
-    try std.testing.expect(setup.shared.server.reqresp.incompleteRequestTimeout(events[0]) == null);
+    try std.testing.expect(setup.shared.server.reqresp.peerFault(events[0]) == null);
 }
 
 test "reqresp validates transport capacity and copies its fork table" {
@@ -1132,7 +1132,7 @@ test "reqresp quota delay expires as local policy and not peer timeout" {
     var expired = false;
     for (events[0..count]) |event| if (event == .failed) {
         try std.testing.expect(event.failed.reason == .quota_timeout);
-        try std.testing.expect(setup.shared.server.reqresp.incompleteRequestTimeout(event) == null);
+        try std.testing.expect(setup.shared.server.reqresp.peerFault(event) == null);
         expired = true;
     };
     try std.testing.expect(expired);
@@ -1199,13 +1199,13 @@ test "reqresp empty capacity does not delay buffered response chunks" {
     try std.testing.expectEqualSlices(u8, &first, events[0].chunk.bytes);
     setup.shared.client.reqresp.options.work_per_pump_max = 1;
     _ = setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .application = &.{} }).application;
-    try std.testing.expect(setup.shared.client.reqresp.consume(handle));
+    try std.testing.expect(setup.shared.client.reqresp.consume(handle, setup.shared.pair.now));
     const due = setup.shared.client.reqresp.nextWakeup(setup.shared.pair.now, .{ .application = 1 });
     try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), due);
     const count = setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .application = &events }).application;
     try std.testing.expectEqual(@as(usize, 1), count);
     try std.testing.expectEqualSlices(u8, &second, events[0].chunk.bytes);
-    try std.testing.expect(setup.shared.client.reqresp.consume(handle));
+    try std.testing.expect(setup.shared.client.reqresp.consume(handle, setup.shared.pair.now));
 }
 
 test "reqresp host response retains write work behind a partial cursor" {
@@ -1475,7 +1475,7 @@ test "reqresp explicit BPO context validates without consuming the serving slot"
                         try std.testing.expectEqual(selected.fork, chunk.fork.?);
                         try std.testing.expectEqualSlices(u8, &block, chunk.bytes);
                         chunks += 1;
-                        try std.testing.expect(setup.shared.client.reqresp.consume(chunk.request));
+                        try std.testing.expect(setup.shared.client.reqresp.consume(chunk.request, setup.shared.pair.now));
                     },
                     .done => done = true,
                     .failed => return error.TestUnexpectedResult,
@@ -1505,7 +1505,7 @@ test "reqresp rejects competing request policies before allocating" {
     try std.testing.expectError(error.InvalidOptions, reqresp.ReqResp.init(failing.allocator(), .{
         .forks = &.{},
         .policy = policy,
-        .admission = try reqresp.AdmissionOptions.defaults(&policy, 1, 1),
+        .admission = try reqresp.AdmissionOptions.defaults(&policy, 1, 1, 1),
     }));
 }
 
@@ -1731,7 +1731,7 @@ test "reqresp absolute response includes paused host time without renewing at ch
         try std.testing.expect(held);
         const due = setup.shared.client.reqresp.outbound[handle.index].deadline().?;
         setup.shared.pair.now.mono_ms = due - 1;
-        if (consume) try std.testing.expect(setup.shared.client.reqresp.consume(handle));
+        if (consume) try std.testing.expect(setup.shared.client.reqresp.consume(handle, setup.shared.pair.now));
         try std.testing.expectEqual(@as(?u64, due), setup.shared.client.reqresp.outbound[handle.index].deadline());
         var events: [1]Event = undefined;
         try std.testing.expectEqual(@as(usize, 0), setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .application = &events }).application);

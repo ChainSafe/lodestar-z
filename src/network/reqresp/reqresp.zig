@@ -51,7 +51,8 @@ pub const AdmissionOptions = struct {
     policy: request_policy.Config,
     limits: admission_mod.Options,
 
-    pub fn defaults(configuration: *const request_policy.Config, identities: u16, inbound_max: u16) error{InvalidPolicy}!AdmissionOptions {
+    pub fn defaults(configuration: *const request_policy.Config, identities: u16, control_peers: u16, application_max: u16) error{InvalidPolicy}!AdmissionOptions {
+        if (control_peers == 0 or control_peers > identities) return error.InvalidPolicy;
         const policy = try request_policy.Policy.init(configuration);
         var quotas: admission_mod.Options = undefined;
         quotas.identities = identities;
@@ -62,9 +63,9 @@ pub const AdmissionOptions = struct {
             for (0..Protocol.count) |j| {
                 const which: Protocol = @enumFromInt(j);
                 if (which.isControl()) {
-                    quotas.global[i][j].tokens = @max(quotas.peer[i][j].tokens, inbound_max);
+                    quotas.global[i][j].tokens *= control_peers;
                 } else {
-                    quotas.global[i][j].tokens *= @max(1, @as(u32, inbound_max) / (2 * constants.MAX_CONCURRENT_REQUESTS));
+                    quotas.global[i][j].tokens *= @max(1, @as(u32, application_max) / (2 * constants.MAX_CONCURRENT_REQUESTS));
                 }
             }
         }
@@ -101,7 +102,7 @@ pub const Options = struct {
     policy: ?request_policy.Config = null,
     admission: ?AdmissionOptions = null,
     quotas: ?limiter_mod.Quotas = null,
-    /// Defaults scale per-protocol quotas to execution capacity and reserve a control wave.
+    /// Control quotas scale to the control peer reservation; application quotas scale to serving capacity.
     global_quotas: ?limiter_mod.Quotas = null,
     host_timeout_ms: u64 = 60_000,
     quota_timeout_ms: u64 = 60_000,
@@ -310,6 +311,7 @@ pub const ReqResp = struct {
 
     pub fn responseBounds(self: *const ReqResp, which: Protocol, fork: config.ForkSeq) error{InvalidResponseContext}!codec.Bounds {
         var result = try which.responseBounds(fork);
+        result.protocol_max = result.max;
         if (self.policy) |*policy| result.max = @min(result.max, policy.config.max_payload_size);
         if (result.min > result.max) return error.InvalidResponseContext;
         return result;
@@ -357,7 +359,7 @@ pub const ReqResp = struct {
             };
             for (controls) |which| {
                 const quota = &global_quotas[@intFromEnum(which)];
-                quota.tokens = @max(quota.tokens, options.inbound_max);
+                quota.tokens = std.math.mul(u32, quota.tokens, if (options.inbound_control_reserved > 0) options.inbound_control_reserved else options.peers) catch return error.InvalidQuota;
             }
             if (options.reserve_inbound_per_peer) for (std.enums.values(Protocol)) |which| {
                 if (!which.isControl()) global_quotas[@intFromEnum(which)].tokens = std.math.mul(u32, peer_quotas[@intFromEnum(which)].tokens, @max(1, (options.inbound_max - options.inbound_control_reserved) / options.serving_per_peer_max)) catch return error.InvalidQuota;
@@ -584,8 +586,9 @@ pub const ReqResp = struct {
         return slot.reserveResponse(self, now);
     }
 
-    pub fn consume(self: *ReqResp, handle: RequestHandle) bool {
-        return Client.consume(self, handle);
+    /// Supply fresh owner time so host-held chunks cannot become remote timeout evidence.
+    pub fn consume(self: *ReqResp, handle: RequestHandle, now: Now) bool {
+        return Client.consume(self, handle, now);
     }
 
     /// The returned bytes remain valid until the pump after terminal delivery.
@@ -661,14 +664,28 @@ pub const ReqResp = struct {
         }
     }
 
-    /// Valid until the pump following terminal delivery recycles the request slot.
-    pub fn incompleteRequestTimeout(self: *const ReqResp, event: Event) ?Handle {
-        if (event != .failed or event.failed.reason != .timeout) return null;
-        const handle = event.failed.request;
-        if (handle.direction != .inbound or handle.index >= self.inbound.len) return null;
-        const slot = &self.inbound[handle.index];
-        if (slot.request.generation != handle.generation or slot.state != .receiving_request) return null;
-        return slot.request.conn;
+    pub const PeerFault = struct {
+        identity: *const @import("../wire/peer_id.zig").PeerId,
+        kind: RequestState.PeerFault,
+    };
+
+    /// Read each delivered terminal once, before the next pump recycles its slot.
+    pub fn peerFault(self: *const ReqResp, event: Event) ?PeerFault {
+        const handle = switch (event) {
+            .failed => |e| e.request,
+            .served => |e| e.request,
+            else => return null,
+        };
+        if (handle.direction == .inbound) {
+            if (handle.index >= self.inbound.len) return null;
+            const slot = &self.inbound[handle.index];
+            if (slot.request.generation != handle.generation or slot.request.completion != .reported) return null;
+            return .{ .identity = &slot.identity, .kind = slot.request.peer_fault orelse return null };
+        }
+        if (handle.index >= self.outbound.len) return null;
+        const slot = &self.outbound[handle.index];
+        if (slot.request.generation != handle.generation or slot.request.completion != .reported) return null;
+        return .{ .identity = &slot.identity, .kind = slot.request.peer_fault orelse return null };
     }
 
     /// Includes reqresp-owned storage. Caller response sinks and Router storage are separate.
@@ -1071,6 +1088,7 @@ comptime {
 test {
     _ = @import("reqresp_admission_lifecycle_test.zig");
     _ = @import("reqresp_active_protocols_test.zig");
+    _ = @import("reqresp_attribution_test.zig");
     _ = @import("reqresp_control_capacity_test.zig");
     _ = @import("reqresp_control_partition_test.zig");
     _ = @import("reqresp_failures_test.zig");

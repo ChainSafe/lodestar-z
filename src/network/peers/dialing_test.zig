@@ -4,6 +4,54 @@ const t = @import("types.zig");
 const a = std.testing.allocator;
 const address: t.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 1234 } };
 
+test "peer dial preference gives automatic demand a turn with one or four attempts" {
+    for ([_]u16{ 1, 4 }) |concurrency| {
+        var q = try mod.Dialing.init(.{ .capacity = 8, .concurrent_max = concurrency, .seed = 4 });
+        var catalog = try initCatalog(a, q.options);
+        defer catalog.deinit(a);
+        const automatic = try discovered(9, 1);
+        try q.enqueueDiscovered(&catalog, &automatic, &.{}, &.{ .syncnets = 1 }, 0);
+        q.configureSelection(&catalog, &.{ .syncnets = 1 }, true, &.{}, 0);
+        for (0..7) |index| {
+            const peer: t.PeerId = .{ .bytes = @splat(@as(u8, @intCast(index + 1))) };
+            try q.enqueue(&catalog, &peer, &.{address}, index % 2 == 0, 0);
+        }
+        var out: [1]mod.DialIntent = undefined;
+        for (0..concurrency) |_| {
+            try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 0, &out));
+            try std.testing.expect(!out[0].peer.eql(&automatic.peer));
+            try std.testing.expect(q.dialDeferred(&catalog, out[0].token, 0));
+        }
+        try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 0, &out));
+        try std.testing.expect(out[0].peer.eql(&automatic.peer));
+    }
+}
+
+test "peer dial local admission refusal retires without failure or address rotation" {
+    var q = try mod.Dialing.init(.{ .capacity = 1, .concurrent_max = 1, .seed = 4 });
+    var catalog = try initCatalog(a, q.options);
+    defer catalog.deinit(a);
+    const peer: t.PeerId = .{ .bytes = @splat(1) };
+    try q.enqueue(&catalog, &peer, &.{ address, .{ .ip4 = .{ .octets = .{ 127, 0, 0, 2 }, .port = 1234 } } }, true, 0);
+    try std.testing.expect(!q.selectedPeer(&catalog, &peer, 0));
+    var out: [1]mod.DialIntent = undefined;
+    try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 0, &out));
+    try std.testing.expect(q.selectedPeer(&catalog, &peer, 0));
+    try std.testing.expect(!q.selectedPeer(&catalog, &peer, 10_000));
+    const conn: t.Handle = .{ .index = 0, .generation = 1 };
+    try std.testing.expect(q.dialStarted(out[0].token, conn));
+    try std.testing.expectEqual(@as(u16, 1), q.pendingPeers(&catalog, null));
+    try std.testing.expectEqual(@as(u16, 0), q.pendingPeers(&catalog, &peer));
+    try std.testing.expect(q.deferConnection(&catalog, conn, 100));
+    try std.testing.expect(!q.selectedPeer(&catalog, &peer, 100));
+    try std.testing.expect(!q.dialClosed(&catalog, conn, 200));
+    const row = catalog.rowFor(catalog.find(&peer).?).?;
+    try std.testing.expectEqual(@as(u8, 0), row.intent.failures);
+    try std.testing.expectEqual(@as(u8, 0), row.intent.address_index);
+    try std.testing.expectEqual(@as(u64, 1_100), row.intent.eligible_at_ms);
+    try std.testing.expectEqual(@as(u64, 0), q.durations[1].count);
+}
+
 test "peer discovery uses the configured custody minimum only for an absent ENR count" {
     var q = try mod.Dialing.init(.{ .capacity = 2, .concurrent_max = 1, .seed = 4 });
     var catalog = try initCatalog(a, q.options);

@@ -28,6 +28,32 @@ fn dialValidatedInitial(pair: *Pair, out: []u8) ![]u8 {
     return pair.sendOne(&pair.client, handle.index, out) orelse error.TestUnexpectedResult;
 }
 
+test "engine incoming handshakes and closing slots preserve selected outgoing capacity" {
+    var pair: Pair = .{};
+    try pair.init(.{ .dialing_max = 4, .outbound_max = 8 }, .{ .connections_max = 4, .handshaking_max = 4, .handshaking_per_source_max = 4, .dialing_max = 1, .outbound_reserved = 1, .outbound_max = 4 });
+    defer pair.deinit();
+    var packet: [constants.datagram_size_max]u8 = undefined;
+    var response: [constants.datagram_size_max]u8 = undefined;
+    var incoming: [3]engine_mod.Handle = undefined;
+    for (&incoming) |*handle| {
+        const received = pair.server.receive(try dialValidatedInitial(&pair, &packet), &client_address, pair.now, &response);
+        try std.testing.expect(received == .accepted);
+        handle.* = received.accepted;
+    }
+    try std.testing.expectEqual(@as(u16, 3), pair.server.registry.active_len);
+    const initial = try dialValidatedInitial(&pair, &packet);
+    try std.testing.expectEqual(engine_mod.ReceiveOutcome.dropped, pair.server.receive(initial, &client_address, pair.now, &response));
+    const selected = try pair.server.dial(&client_address, pair.client_ctx.local_peer_id, pair.now);
+    try std.testing.expectEqual(@as(u16, 4), pair.server.registry.active_len);
+    try std.testing.expect(pair.server.close(incoming[0], 0));
+    try std.testing.expectEqual(@as(u16, 4), pair.server.registry.active_len);
+    try std.testing.expectEqual(engine_mod.ReceiveOutcome.dropped, pair.server.receive(initial, &client_address, pair.now, &response));
+    try std.testing.expect(pair.server.abandon(selected));
+    try std.testing.expectEqual(@as(u16, 3), pair.server.registry.active_len);
+    try std.testing.expectEqual(engine_mod.ReceiveOutcome.dropped, pair.server.receive(initial, &client_address, pair.now, &response));
+    _ = try pair.server.dial(&client_address, pair.client_ctx.local_peer_id, pair.now);
+}
+
 test "engine routes existing streams and replayed Initials while source admission is full" {
     var pair: Pair = .{};
     try pair.init(.{}, .{ .handshaking_per_source_max = 1 });

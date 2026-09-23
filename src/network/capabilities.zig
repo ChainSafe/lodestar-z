@@ -74,6 +74,8 @@ pub fn forFork(fork: ForkSeq, serve_light_clients: bool, meshsub_versions: []con
         common.insert(.{ .reqresp = .blob_sidecars_by_root_v1 });
     }
     var active: Directional = .{ .receive = common, .request = common };
+    // Control applies the established peer's fixed revalidation deadline to old Status bytes.
+    if (fork.gte(.fulu)) active.receive.insert(.{ .reqresp = .status_v1 });
     if (fork.gte(.altair)) for ([_]reqresp.Protocol{ .light_client_bootstrap_v1, .light_client_updates_by_range_v1, .light_client_finality_update_v1, .light_client_optimistic_update_v1 }) |protocol| {
         active.request.insert(.{ .reqresp = protocol });
         if (serve_light_clients) active.receive.insert(.{ .reqresp = protocol });

@@ -10,7 +10,7 @@ const dial = @import("peers/dialing.zig");
 const router = @import("router.zig");
 
 pub const Profile = enum { small, beacon_node };
-pub const ReqRespOverrides = Overrides(rr.Options, &.{ "peers", "forks", "outbound_control_reserved", "reserve_inbound_per_peer" });
+pub const ReqRespOverrides = Overrides(rr.Options, &.{ "peers", "forks", "outbound_control_reserved", "inbound_control_reserved", "reserve_inbound_per_peer" });
 pub const GossipOverrides = Overrides(gossip.Options, &.{ "connected_capacity", "retained_capacity", "retained_outbound_reserve", "random_seed" });
 pub const IdentifyOverrides = Overrides(@import("identify/root.zig").Options, &.{});
 pub const RouterOverrides = Overrides(router.Options, &.{ "outbound_control_reserved", "inbound_connections" });
@@ -43,7 +43,7 @@ pub const Resolved = struct {
 pub fn resolve(request: Request) !Resolved {
     try request.work_limits.validate();
     const small = request.profile == .small;
-    const limits: engine.Limits = request.limits orelse .{
+    var limits: engine.Limits = request.limits orelse .{
         .connections_max = if (small) 16 else 128,
         .handshaking_max = if (small) 8 else 32,
         .dialing_max = if (small) 4 else 16,
@@ -57,20 +57,27 @@ pub fn resolve(request: Request) !Resolved {
         .min_outbound = if (small) 2 else 16,
     };
     try peer_options.validate();
-    const reserved: u16 = if (small) 2 else 8;
+    if (peer_options.target_peers >= peer_options.max_peers) return error.InvalidOptions;
+    var dial_options = request.dial orelse dial.Options{ .capacity = if (small) 32 else 256, .concurrent_max = @min(4, limits.dialing_max), .seed = request.seed };
+    try dial.Dialing.validateOptions(dial_options);
+    dial_options.concurrent_max = @min(dial_options.concurrent_max, peer_options.max_peers - peer_options.target_peers);
+    limits.dialing_max = dial_options.concurrent_max;
+    limits.outbound_reserved = dial_options.concurrent_max;
+    limits.outbound_max = limits.connections_max;
     var requests: rr.Options = .{
         .forks = request.forks,
         .peers = limits.connections_max,
         .outbound_max = peer_options.max_peers + @as(u16, if (small) 6 else 56),
-        .inbound_max = if (small) 8 else 64,
+        .inbound_max = peer_options.max_peers + @as(u16, if (small) 6 else 56),
         .reserve_inbound_per_peer = true,
         .outbound_control_reserved = peer_options.max_peers,
-        .inbound_control_reserved = reserved,
+        .inbound_control_reserved = peer_options.max_peers,
         .outbound_per_peer_max = if (small) 4 else 8,
         .inbound_per_peer_max = if (small) 8 else 16,
         .inbound_application_per_peer_max = if (small) 4 else 8,
     };
     applyOverrides(&requests, request.reqresp);
+    if (requests.inbound_max < requests.inbound_control_reserved) return error.InvalidOptions;
     if (request.application_requests_max) |maximum| {
         if (maximum == 0 or requests.inbound_max < requests.inbound_control_reserved or requests.outbound_max < requests.outbound_control_reserved) return error.InvalidOptions;
         requests.inbound_max = requests.inbound_control_reserved + @min(maximum, requests.inbound_max - requests.inbound_control_reserved);
@@ -79,7 +86,7 @@ pub fn resolve(request: Request) !Resolved {
 
     if (request.admission_policy) |policy_config| {
         if (requests.admission != null) return error.InvalidOptions;
-        requests.admission = try rr.AdmissionOptions.defaults(&policy_config, peer_options.capacity, requests.inbound_max);
+        requests.admission = try rr.AdmissionOptions.defaults(&policy_config, peer_options.capacity, peer_options.max_peers, requests.inbound_max - requests.inbound_control_reserved);
     }
     var identify: @import("identify/root.zig").Options = .{ .inbound_max = if (small) 2 else 4, .outbound_max = if (small) 2 else 4 };
     applyOverrides(&identify, request.identify);
@@ -112,7 +119,7 @@ pub fn resolve(request: Request) !Resolved {
         .byte_limit = request.byte_limit orelse if (small) 96 * 1024 * 1024 else 384 * 1024 * 1024,
         .core = .{
             .peers = peer_options,
-            .dial = request.dial orelse .{ .capacity = if (small) 32 else 256, .concurrent_max = @min(4, limits.dialing_max), .seed = request.seed },
+            .dial = dial_options,
             .control = request.control orelse .{},
             .service = .{
                 .identify = identify,
@@ -134,7 +141,10 @@ pub fn validate(limits: engine.Limits, options: core.Options) !void {
     try core.validateOptions(options);
     if (options.peers.max_peers > limits.connections_max or
         options.service.reqresp.peers < limits.connections_max or
-        options.dial.concurrent_max > limits.dialing_max or
+        options.dial.concurrent_max != limits.dialing_max or
+        options.dial.concurrent_max != limits.outbound_reserved or
+        limits.outbound_max != limits.connections_max or
+        options.service.reqresp.inbound_control_reserved < options.peers.max_peers or
         options.service.router.outbound_control_reserved < options.service.reqresp.outbound_control_reserved)
         return error.InvalidOptions;
 }

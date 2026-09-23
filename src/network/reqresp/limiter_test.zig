@@ -126,16 +126,21 @@ test "limiter peer rejection preserves aggregate credit and wide refill saturate
     try std.testing.expect(!wide.take(a, .status_v1, 1, std.math.maxInt(u64)));
 }
 
-test "reqresp default aggregate admits one control wave and keeps bulk limits" {
+test "reqresp default aggregate admits the peer population control quotas and keeps bulk limits" {
     const reqresp = @import("reqresp.zig");
     var rr = try reqresp.ReqResp.init(std.testing.allocator, .{ .forks = &.{} });
     defer rr.deinit();
     const controls = [_]Protocol{ .status_v1, .status_v2, .ping_v1, .metadata_v1, .metadata_v2, .metadata_v3, .goodbye_v1 };
-    for (0..65) |index| rr.limiter.bind(.{ .index = @intCast(index), .generation = 1 }, 0);
+    const peers = rr.options.peers;
+    for (0..peers) |index| rr.limiter.bind(.{ .index = @intCast(index), .generation = 1 }, 0);
     for (controls) |which| {
         try std.testing.expectEqual(limiter.defaultQuotas()[@intFromEnum(which)].period_ms, rr.limiter.global_quotas[@intFromEnum(which)].period_ms);
-        for (0..64) |index| try std.testing.expect(rr.limiter.take(.{ .index = @intCast(index), .generation = 1 }, which, 1, 0));
-        try std.testing.expect(!rr.limiter.take(.{ .index = 64, .generation = 1 }, which, 1, 0));
+        const tokens = limiter.defaultQuotas()[@intFromEnum(which)].tokens;
+        try std.testing.expectEqual(tokens * peers, rr.limiter.global_quotas[@intFromEnum(which)].tokens);
+        for (0..peers) |index| try std.testing.expect(rr.limiter.take(.{ .index = @intCast(index), .generation = 1 }, which, tokens, 0));
+        rr.limiter.bind(.{ .index = 0, .generation = 2 }, 0);
+        try std.testing.expect(!rr.limiter.take(.{ .index = 0, .generation = 2 }, which, 1, 0));
+        rr.limiter.bind(.{ .index = 0, .generation = 1 }, 0);
     }
     const defaults = limiter.defaultQuotas();
     const bulk = [_]Protocol{ .blocks_by_range_v2, .blocks_by_root_v2, .blob_sidecars_by_range_v1, .blob_sidecars_by_root_v1, .data_column_sidecars_by_range_v1, .data_column_sidecars_by_root_v1 };

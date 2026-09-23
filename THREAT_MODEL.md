@@ -21,7 +21,9 @@ native class instances between addon versions is unsupported.
 
 The beacon node initializes one native network runtime per process, from its owning Node.js thread.
 Initialization installs complete configuration and initial protocol state before starting network
-work. The host applies subscriptions and peer demand through ordinary runtime updates.
+work. Every configured hard fork whose activation epoch is not `FAR_FUTURE_EPOCH` must be supported,
+including forks that are not active yet. The host applies subscriptions and peer demand through
+ordinary runtime updates.
 An initialization failure or shutdown is terminal; a second initialization, including from another
 Node.js environment, is rejected. The owning thread coordinates shutdown and joins the network
 thread. Environment cleanup also stops the owner and retires outstanding native obligations.

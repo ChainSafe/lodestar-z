@@ -48,16 +48,16 @@ test "peer policy prefers stable subscribers without denying temporary duty cove
 }
 
 test "peer policy replacement cooldown preserves unmet deficits and independent count floors" {
-    const configured: t.Options = .{ .target_peers = 2, .max_peers = 2, .min_outbound = 0 };
+    const configured: t.Options = .{ .target_peers = 2, .max_peers = 3, .min_outbound = 0 };
     const inputs = [_]p.Input{ .{}, .{} };
-    const held = p.selectWithReplacement(&inputs, &.{ .attnets = 1 }, configured, 1, false);
+    const held = p.selectWithPacing(&inputs, &.{ .attnets = 1 }, configured, 1, false);
     try equal(@as(u16, 2), held.retained_count);
     try equal(@as(u16, 1), held.deficits.attestation);
     try equal(@as(u16, 0), held.dial_budget);
-    const replace = p.selectWithReplacement(&inputs, &.{ .attnets = 1 }, configured, 1, true);
-    try equal(@as(u16, 1), replace.retained_count);
+    const replace = p.selectWithPacing(&inputs, &.{ .attnets = 1 }, configured, 1, true);
+    try equal(@as(u16, 2), replace.retained_count);
     try equal(@as(u16, 1), replace.dial_budget);
-    const refill = p.selectWithReplacement(inputs[0..1], &.{}, configured, 1, false);
+    const refill = p.selectWithPacing(inputs[0..1], &.{}, configured, 1, false);
     try equal(@as(u16, 1), refill.dial_budget);
 }
 
@@ -65,15 +65,15 @@ test "peer policy does not sacrifice satisfied duties to chase broad publication
     var demand: t.Demand = .{ .attnets = 3 };
     demand.group_targets[5] = 1;
     const inputs = [_]p.Input{ .{ .coverage = .{ .attnets = 1 } }, .{ .coverage = .{ .attnets = 2 } } };
-    const configured: t.Options = .{ .target_peers = 2, .max_peers = 2, .min_outbound = 0 };
+    const configured: t.Options = .{ .target_peers = 2, .max_peers = 3, .min_outbound = 0 };
     const held = p.select(&inputs, &demand, configured, 1);
     try equal(@as(u16, 2), held.retained_count);
     try equal(@as(u16, 0), held.deficits.attestation);
     try equal(@as(u16, 1), held.deficits.groups);
-    try equal(@as(u16, 0), held.dial_budget);
+    try equal(@as(u16, 1), held.dial_budget);
     demand.attnets = 1;
     const replace = p.select(&inputs, &demand, configured, 1);
-    try equal(@as(u16, 1), replace.retained_count);
+    try equal(@as(u16, 2), replace.retained_count);
     try expect(replace.retained.isSet(0));
     try equal(@as(u16, 1), replace.dial_budget);
 }
@@ -105,20 +105,15 @@ test "peer policy poor health precedes redundant advertised breadth" {
     try equal(@as(u16, 0), result.deficits.attestation);
 }
 
-test "peer policy equal target and ceiling still permits coverage replacement" {
-    const configured: t.Options = .{ .target_peers = 2, .max_peers = 2, .min_outbound = 0 };
-    const inputs = [_]p.Input{
-        .{ .coverage = .{ .attnets = 1 } },
-        .{ .coverage = .{ .attnets = 2 } },
-    };
+test "peer policy coverage trials retain the steady target while using headroom" {
+    const configured: t.Options = .{ .target_peers = 2, .max_peers = 3, .min_outbound = 0 };
+    const inputs = [_]p.Input{ .{ .coverage = .{ .attnets = 1 } }, .{ .coverage = .{ .attnets = 2 } } };
     const demand: t.Demand = .{ .attnets = 7 };
     const result = p.select(&inputs, &demand, configured, 1);
-    try equal(@as(u16, 1), result.retained_count);
+    try equal(@as(u16, 2), result.retained_count);
     try equal(@as(u16, 1), result.dial_budget);
-    const survivor = if (result.retained.isSet(0)) inputs[0] else inputs[1];
-    const stable = p.select(&.{survivor}, &demand, configured, 1);
-    try equal(result.retained_count, stable.retained_count);
-    try equal(result.deficits, stable.deficits);
+    try equal(@as(u16, 1), result.deficits.attestation);
+    for (result.reasons[0..inputs.len]) |reason| try expect(reason == null);
 }
 
 test "peer policy evaluates newcomers in headroom before pruning established peers" {
@@ -175,6 +170,7 @@ test "peer policy overlapping coverage updates after each removal" {
 test "peer policy direct bans hard capacity deficits and outbound replacement" {
     var configured = options;
     configured.max_peers = 2;
+    configured.target_peers = 1;
     const demand: t.Demand = .{};
     const inputs = [_]p.Input{ .{ .direct = true, .reject = .banned }, .{ .direct = true, .reject = .incompatible_fork }, .{ .direct = true }, .{ .direct = true }, .{ .direct = true } };
     var result = p.select(&inputs, &demand, configured, 3);
@@ -237,7 +233,7 @@ test "peer policy retained set stays stable across health changes after actual p
         for (next.reasons[0..count]) |reason| try expect(reason == null);
     }
 
-    configured.target_peers = configured.max_peers;
+    configured.target_peers = configured.max_peers - 1;
     const inbound = [_]p.Input{ .{ .score = -10 }, .{ .score = -9 }, .{ .score = -8 }, .{ .score = -7 } };
     const replacement = p.select(&inbound, &.{}, configured, 7);
     try equal(@as(u16, 3), replacement.retained_count);
@@ -285,9 +281,9 @@ test "peer policy group targets validate boundaries and saturate exactly" {
     demand.group_targets[127] = 1;
     try std.testing.expectError(error.InvalidDemand, demand.validate(&.{ .custody_groups = 64 }, 256));
     demand = .{ .group_targets = @splat(256) };
-    const configured: t.Options = .{ .capacity = 256, .max_peers = 256, .target_peers = 256, .min_outbound = 0 };
+    const configured: t.Options = .{ .capacity = 256, .max_peers = 256, .target_peers = 255, .min_outbound = 0 };
     try equal(@as(u16, 32768), p.select(&.{}, &demand, configured, 1).deficits.groups);
-    var inputs: [256]p.Input = @splat(.{});
+    var inputs: [256]p.Input = @splat(.{ .evaluating = true });
     for (&inputs) |*input| input.coverage.groups.setRangeValue(.{ .start = 0, .end = 128 }, true);
     try equal(@as(u16, 0), p.select(&inputs, &demand, configured, 1).deficits.groups);
     try equal(@as(u16, 128), p.select(inputs[0..255], &demand, configured, 1).deficits.groups);
@@ -312,6 +308,7 @@ test "peer policy group targets yield to settled count while respecting bans" {
     try equal(@as(u16, 2), result.retained_count);
     try equal(@as(u16, 1), result.deficits.groups);
     configured.max_peers = 2;
+    configured.target_peers = 1;
     result = p.select(&inputs, &demand, configured, 1);
     try equal(@as(u16, 1), result.retained_count);
     try equal(@as(u16, 2), result.deficits.groups);

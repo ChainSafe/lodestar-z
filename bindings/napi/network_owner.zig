@@ -164,7 +164,7 @@ fn serve(self: *Runtime) !void {
         self.unlock();
         if (stopped) break;
         try gossip_mod.flags(self, io);
-        requests_mod.flags(self);
+        requests_mod.flags(self, io);
         _ = try @import("network_incoming_phase_faults.zig").terminalBarrier(self, false);
         // Work submissions and gossip verdicts use fresh clocks before the protocol pump.
         timestamp = now(io);

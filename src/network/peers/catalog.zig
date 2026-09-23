@@ -332,7 +332,8 @@ pub const Catalog = struct {
             var current_reputation = row.reputation;
             current_reputation.decay(options.now_ms);
             if (current_reputation.banned(options.now_ms)) return .banned;
-            if (options.now_ms < current_reputation.goodbye_until_ms) return .cooldown;
+            if (options.now_ms < current_reputation.goodbye_until_ms or
+                (options.direction == .inbound and !row.direct and options.now_ms < current_reputation.redial_until_ms)) return .cooldown;
             if (row.pending_close != null) return .pending;
             var displaced: ?t.Handle = null;
             if (row.connection) |current| {
@@ -344,7 +345,7 @@ pub const Catalog = struct {
                 if (std.meta.eql(current, conn) or row.direction == options.direction or
                     options.direction != preferred) return .duplicate;
                 displaced = current;
-            } else if (self.connectedCount() >= self.options.max_peers) return .capacity;
+            } else if (!self.admissionRoom(row.direct, options)) return .capacity;
             const fresh = row.established_slot == null;
             if (fresh and !self.promote(ref, options.direction, options.now_ms)) return .capacity;
             if (row.connection == null) self.connected_count += 1;
@@ -356,7 +357,7 @@ pub const Catalog = struct {
             self.revision +|= 1;
             return .{ .admitted = .{ .peer = ref, .displaced = displaced, .fresh = fresh } };
         }
-        if (self.connectedCount() >= self.options.max_peers) return .capacity;
+        if (!self.admissionRoom(false, options)) return .capacity;
         const slot = self.reclaimable(options.direction, options.now_ms) orelse return .capacity;
         if (self.established[slot]) |victim| self.forget(self.reference(victim));
         const ref = self.allocate(identity) orelse return .capacity;
@@ -368,6 +369,12 @@ pub const Catalog = struct {
         self.by_connection[conn.index] = ref.index;
         self.revision +|= 1;
         return .{ .admitted = .{ .peer = ref, .fresh = true } };
+    }
+
+    fn admissionRoom(self: *const Catalog, direct: bool, options: *const t.AdmissionOptions) bool {
+        const remaining = self.options.max_peers -| self.connectedCount();
+        if (remaining <= options.pending_dials) return false;
+        return options.direction == .outbound or direct or options.selected_dial or remaining > options.outbound_reserved;
     }
 
     pub fn reference(self: *const Catalog, index: usize) t.PeerRef {
@@ -654,6 +661,15 @@ pub const Catalog = struct {
         return row.reputation.apply(action, now_ms);
     }
 
+    pub fn nonCompletion(self: *Catalog, ref: t.PeerRef, now_ms: u64) bool {
+        const row = self.rowFor(ref) orelse return false;
+        if (row.established_slot == null) return false;
+        const before = row.reputation.score;
+        row.reputation.nonCompletion(now_ms);
+        if (before != row.reputation.score) self.revision +|= 1;
+        return true;
+    }
+
     pub fn cooldown(
         self: *Catalog,
         ref: t.PeerRef,
@@ -670,9 +686,11 @@ pub const Catalog = struct {
     pub fn refresh(self: *Catalog, now_ms: u64) void {
         for (self.rows) |*row| {
             if (!row.occupied) continue;
-            const banned = row.reputation.score <= -50;
+            const banned = row.reputation.score <= reputation.ban_score;
+            const useful = row.reputation.score >= reputation.prune_score;
             row.reputation.decay(now_ms);
-            if (banned != (row.reputation.score <= -50)) self.revision +|= 1;
+            if (banned != (row.reputation.score <= reputation.ban_score) or
+                useful != (row.reputation.score >= reputation.prune_score)) self.revision +|= 1;
         }
     }
 

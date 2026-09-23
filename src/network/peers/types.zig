@@ -106,6 +106,10 @@ pub const AdmissionOptions = struct {
     direction: Direction,
     endpoint: Address,
     now_ms: u64,
+    outbound_reserved: u16 = 0,
+    pending_dials: u16 = 0,
+    /// The authenticated identity owns a live selected dial commitment.
+    selected_dial: bool = false,
     /// Derived from the same identity in a verified discovery record.
     node_id: ?[32]u8 = null,
 };

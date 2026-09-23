@@ -15,11 +15,11 @@ pub const Config = struct {
         if (r.nativeBudgetBytes <= @sizeOf(n.NetworkCore)) return error.NetworkNativeBudgetExceeded;
         var gossip_options = common.gossip;
         gossip_options.ip_allowlist = common.allowlist[0..common.allowlist_count];
-        gossip_options.topic_policy = common.chain.topics[0..common.chain.supported_count];
+        gossip_options.topic_policy = common.chain.topics[0..common.chain.boundary_count];
         return .{
             .profile = common.profile,
             .seed = seed,
-            .forks = common.chain.forks[0..common.chain.supported_count],
+            .forks = common.chain.forks[0..common.chain.boundary_count],
             .limits = .{ .connections_max = r.connectionCapacity, .handshaking_max = r.handshakingCapacity, .dialing_max = r.dialingCapacity, .receive_budget_bytes = r.receiveBudgetBytes },
             .peers = .{ .capacity = r.peerCapacity, .target_peers = r.targetPeers, .max_peers = r.maxPeers, .min_outbound = r.minOutbound, .outbound_reserve = r.outboundReserve },
             .application_requests_max = 32,

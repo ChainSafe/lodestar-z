@@ -1,9 +1,16 @@
 import {expect, it} from "vitest";
-import type {NativeRuntimeConfig} from "../src/network.js";
+import type {NativeApplicationConfig} from "../src/network.js";
 import {applicationConfig, configureChain, discoveryConfig, startRuntime} from "./utils/network.js";
 import {networkBindings as bindings} from "./utils/network-bindings.js";
 
-const cases: readonly [string, (config: NativeRuntimeConfig) => void, string][] = [
+const cases: readonly [string, (config: NativeApplicationConfig) => void, string][] = [
+  [
+    "target without peer headroom",
+    (c) => {
+      c.resources.targetPeers = c.resources.maxPeers;
+    },
+    "InvalidOptions",
+  ],
   [
     "unknown profile",
     (c) => {
@@ -252,6 +259,19 @@ it.each([0, 129])("rejects chain custody group bound %s", (groups) => {
   const config = applicationConfig();
   configureChain({NUMBER_OF_CUSTODY_GROUPS: groups});
   expect(() => startRuntime(config, () => undefined)).toThrow("InvalidNetworkChain");
+});
+
+it.each([
+  0,
+  1,
+  1_000_000,
+  Number.MAX_SAFE_INTEGER,
+])("rejects unsupported fork at epoch %s before owner allocation", (epoch) => {
+  const config = applicationConfig();
+  configureChain({ELECTRA_FORK_EPOCH: 0, FULU_FORK_EPOCH: 0, GLOAS_FORK_EPOCH: epoch});
+  const before: unknown = typeof bindings.networkTestStats === "function" ? bindings.networkTestStats() : null;
+  expect(() => startRuntime(config)).toThrow("UnsupportedNetworkFork");
+  if (before) expect(bindings.networkTestStats()).toEqual(before);
 });
 
 it("derives the Fulu availability requirement from shared chain configuration", () => {

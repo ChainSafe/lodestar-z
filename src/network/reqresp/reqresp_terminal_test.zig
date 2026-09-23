@@ -45,7 +45,7 @@ test "reqresp complete incoming transfer deadline survives partial bytes and mis
         try setup.pumpOnce();
         try std.testing.expectEqual(@as(usize, 1), setup.serverEvents().len);
         try std.testing.expectEqual(rr.Failure.timeout, setup.serverEvents()[0].failed.reason);
-        try std.testing.expectEqual(slot.request.conn, setup.shared.server.reqresp.incompleteRequestTimeout(setup.serverEvents()[0]).?);
+        try std.testing.expectEqual(.non_completion, setup.shared.server.reqresp.peerFault(setup.serverEvents()[0]).?.kind);
         try setup.pumpOnce();
         try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.active().inbound);
     }
@@ -123,6 +123,9 @@ test "reqresp rejected wire requests retain diagnostics and count terminal outco
         setup.server_event_capacity = 16;
         try setup.pumpOnce();
         try std.testing.expect(setup.serverEvents()[0] == .served);
+        const fault = setup.shared.server.reqresp.peerFault(setup.serverEvents()[0]).?;
+        try std.testing.expectEqual(.protocol, fault.kind);
+        try std.testing.expect(fault.identity.eql(&slot.identity));
         try setup.pumpOnce();
         try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.active().inbound);
         try std.testing.expectEqual(@as(u64, 1), setup.shared.server.reqresp.counters.malformed);
@@ -158,6 +161,9 @@ test "reqresp malformed request remains visible when its error reply cannot be s
     try std.testing.expectEqual(@as(u64, 0), setup.shared.server.reqresp.counters.requests_served);
     try std.testing.expectEqual(@as(u64, 1), setup.shared.server.reqresp.protocol_counters[@intFromEnum(Protocol.ping_v1)].incoming_errors);
     try std.testing.expectEqual(@as(u64, 0), setup.shared.server.reqresp.counters.timeouts);
+    setup.server_event_capacity = 16;
+    try setup.pumpOnce();
+    try std.testing.expectEqual(.protocol, setup.shared.server.reqresp.peerFault(setup.serverEvents()[0]).?.kind);
 }
 
 test "reqresp router negotiation timeout contributes once to aggregate timeout counters" {

@@ -215,7 +215,7 @@ const Session = struct {
         switch (event) {
             .chunk => |chunk| {
                 try self.onChunk(chunk.bytes, chunk.fork);
-                _ = self.svc.reqresp.consume(chunk.request);
+                _ = self.svc.reqresp.consume(chunk.request, self.now);
             },
             .done => |done| try self.advance(done.chunks),
             .failed => |failed| try self.onFailure(failed.request, failed.reason),
@@ -350,10 +350,10 @@ fn dial(
     const plan = try network.chain.Plan.init(options.network.config, false);
     var gossip_seed: u64 = undefined;
     io.random(std.mem.asBytes(&gossip_seed));
-    var svc = try network.Service.init(allocator, .{ .automatic_gossip_admission = false, .gossipsub = .{ .random_seed = gossip_seed, .topic_policy = plan.topics[0..plan.supported_count], .message_id_policy = .{ .phase0_digest = plan.phase0_digest } }, .reqresp = .{
+    var svc = try network.Service.init(allocator, .{ .automatic_gossip_admission = false, .gossipsub = .{ .random_seed = gossip_seed, .topic_policy = plan.topics[0..plan.boundary_count], .message_id_policy = .{ .phase0_digest = plan.phase0_digest } }, .reqresp = .{
         .policy = plan.requestPolicy(),
         .request_fork = options.network.config.forkSeqAtEpoch(currentEpoch(options.network, (try network.transport.currentTime(io)).unix_s)),
-        .forks = plan.forks[0..plan.supported_count],
+        .forks = plan.forks[0..plan.boundary_count],
         .inbound_max = inbound_max,
         .inbound_per_peer_max = inbound_max,
     } });
