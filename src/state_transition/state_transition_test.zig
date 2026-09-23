@@ -274,7 +274,16 @@ test "proposer rewards should count sync positions without participant rewards" 
     }
     var balances = try state.balances();
     const before = try balances.get(proposer);
-    try processSyncAggregate(.electra, allocator, std.testing.io, cached.config, epoch_cache, state, &cached.proposer_rewards, &aggregate, false);
+    try processSyncAggregate(
+        .electra,
+        std.testing.io,
+        cached.config,
+        epoch_cache,
+        state,
+        &cached.proposer_rewards,
+        &aggregate,
+        false,
+    );
     const expected = preset.SYNC_COMMITTEE_SIZE * epoch_cache.sync_proposer_reward;
     try std.testing.expect(expected > 0);
     try std.testing.expectEqual(expected, cached.getProposerRewards().sync_aggregate);

@@ -112,7 +112,16 @@ pub fn processBlock(
     try processEth1Data(fork, state, body.eth1Data());
     try processOperations(fork, allocator, io, config, epoch_cache, state, proposer_rewards, slashings_cache, block_type, body, opts);
     if (comptime fork.gte(.altair)) {
-        try processSyncAggregate(fork, allocator, io, config, epoch_cache, state, proposer_rewards, body.syncAggregate(), opts.verify_signature);
+        try processSyncAggregate(
+            fork,
+            io,
+            config,
+            epoch_cache,
+            state,
+            proposer_rewards,
+            body.syncAggregate(),
+            opts.verify_signature,
+        );
     }
 
     if (comptime fork.gte(.deneb)) {
