@@ -684,6 +684,65 @@ test "managed native dial expiry closes authenticated attempt before connected e
     }
 }
 
+test "managed simultaneous selected dials consume one commitment and preserve duplicate tie breaking" {
+    var setup: Setup = .{};
+    var opts = options();
+    opts.peers.target_peers = 1;
+    opts.peers.max_peers = 2;
+    opts.peers.min_outbound = 0;
+    try setup.initOwnersWithOptions(&.{}, opts);
+    defer setup.deinit();
+    const owners = [_]*managed.PeerManager{ &setup.client, &setup.server };
+    const services = [_]*@import("service.zig").Service{ &setup.client_service, &setup.server_service };
+    const engines = [_]*Engine.Engine{ &setup.pair.client, &setup.pair.server };
+    const identities = [_]t.PeerId{ setup.pair.server_ctx.local_peer_id, setup.pair.client_ctx.local_peer_id };
+    const addresses = [_]t.Address{ support.server_address, support.client_address };
+    const blocker: t.PeerId = .{ .bytes = @splat(99) };
+    for (owners, services, engines, &identities, addresses) |owner, service, engine, *identity, address| {
+        try std.testing.expect(owner.catalog.admit(&blocker, &owner.local_identity, .{ .index = 3, .generation = 1 }, &.{
+            .direction = .inbound,
+            .endpoint = .unspecified,
+            .now_ms = setup.pair.now.mono_ms,
+            .outbound_reserved = 1,
+        }) == .admitted);
+        try owner.connect(identity, &.{address}, setup.pair.now);
+        var intents: [1]managed.DialIntent = undefined;
+        try std.testing.expectEqual(@as(usize, 1), owner.dialIntents(service, engine, setup.pair.now, &intents));
+        const conn = try engine.dial(&intents[0].address, intents[0].peer, setup.pair.now);
+        try std.testing.expect(owner.dialStarted(intents[0].token, conn));
+    }
+    try setup.pair.pump();
+    for (owners, services, engines, &identities) |owner, service, engine, *identity| {
+        var storage: [32]Engine.Event = undefined;
+        const events = setup.pair.events(engine, &storage);
+        for ([_]t.Direction{ .inbound, .outbound }) |direction| {
+            var delivered = false;
+            for (events) |event| if (event == .connected and event.connected.direction == direction) {
+                owner.transportEvent(service, engine, event, setup.pair.now);
+                delivered = true;
+            };
+            try std.testing.expect(delivered);
+            try std.testing.expectEqual(@as(u16, 2), owner.catalog.connectedCount());
+            try std.testing.expectEqual(@as(u16, 0), owner.dialing.pendingPeers(&owner.catalog, null));
+        }
+        const row = owner.catalog.rowFor(owner.catalog.find(identity).?).?;
+        const expected: t.Direction = if (std.mem.order(u8, &owner.local_identity.bytes, &identity.bytes) == .lt) .outbound else .inbound;
+        try std.testing.expectEqual(expected, row.direction);
+        try std.testing.expectEqual(@as(u16, 0), owner.dialing.attempts().total);
+        try std.testing.expectEqual(@as(u8, 0), row.intent.failures);
+        try std.testing.expectEqual(@as(u64, 0), owner.dialing.durations[1].count);
+    }
+    for (0..8) |_| {
+        try setup.pair.pump();
+        for (owners, services, engines) |owner, service, engine| {
+            var storage: [32]Engine.Event = undefined;
+            for (setup.pair.events(engine, &storage)) |event| owner.transportEvent(service, engine, event, setup.pair.now);
+            try std.testing.expectEqual(@as(u16, 2), owner.catalog.connectedCount());
+            try std.testing.expectEqual(@as(u64, 0), owner.dialing.durations[1].count);
+        }
+    }
+}
+
 test "managed competing one-shot attempt expires during selected peer ban cooldown" {
     var setup: Setup = .{};
     try setup.initOwners(&.{});
@@ -823,8 +882,10 @@ test "managed coverage physical closing capacity blocks new leased intents" {
     var snapshots: [4]t.Snapshot = undefined;
     _ = setup.client.snapshots(&snapshots);
     try std.testing.expect(setup.client.disconnect(snapshots[0].peer, .host, setup.pair.now));
-    for (0..2) |_| _ = try setup.pair.client.dial(&support.server_address, setup.pair.server_ctx.local_peer_id, setup.pair.now);
-    try std.testing.expectEqual(@as(u16, 3), setup.pair.client.registry.active_len);
+    setup.pair.client.limits.dialing_max = 3;
+    setup.pair.client.outbound_max = 4;
+    for (0..3) |_| _ = try setup.pair.client.dial(&support.server_address, setup.pair.server_ctx.local_peer_id, setup.pair.now);
+    try std.testing.expectEqual(@as(u16, 4), setup.pair.client.registry.active_len);
     var secret: [32]u8 = @splat(0);
     secret[31] = 17;
     const key = (try @import("wire/keys.zig").KeyPair.fromSecretKey(&secret)).publicKey();
@@ -852,6 +913,8 @@ test "managed coverage direct candidate dials at soft target and respects physic
     var out: [1]managed.DialIntent = undefined;
     try std.testing.expectEqual(@as(usize, 1), setup.client.dialIntents(&setup.client_service, &setup.pair.client, setup.pair.now, &out));
     try std.testing.expect(out[0].peer.eql(&peer));
+    try setup.client.addDirectPeer(&setup.client_service, &peer, &.{support.server_address}, setup.pair.now);
+    try std.testing.expectError(error.DirectPeerCapacity, setup.client.addDirectPeer(&setup.client_service, &setup.pair.server_ctx.local_peer_id, &.{support.server_address}, setup.pair.now));
 }
 
 fn candidateFor(peer: *const t.PeerId, count: ?u64) !@import("peers/enr.zig").Candidate {
@@ -922,8 +985,8 @@ test "managed coverage bounded custody work resumes without output and stale met
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().sync);
 }
 
-test "managed coverage outbound deficit uses hard room or retires inbound before replacement" {
-    for ([_]u16{ 1, 2 }) |maximum| {
+test "managed coverage outbound deficit uses admission headroom while retaining existing inbound" {
+    for ([_]u16{ 2, 3 }) |maximum| {
         var setup: Setup = .{};
         var opts = options();
         opts.peers.max_peers = maximum;
@@ -933,14 +996,7 @@ test "managed coverage outbound deficit uses hard room or retires inbound before
         defer setup.deinit();
         _ = try setup.pair.dial();
         for (0..60) |_| try setup.step(0);
-        if (maximum == 1) {
-            setup.pair.advance(setup.server.control.options.inbound_status_grace_ms);
-            setup.server.reconcile(&setup.server_service, setup.pair.now);
-            try std.testing.expect(setup.server.counters.policy_disconnects > 0);
-            setup.pair.advance(2000);
-            for (0..8) |_| try setup.step(0);
-            try std.testing.expectEqual(@as(u16, 0), setup.pair.server.registry.active_len);
-        } else try std.testing.expectEqual(@as(u16, 1), setup.server.peerCounts().relevant);
+        try std.testing.expectEqual(@as(u16, 1), setup.server.peerCounts().relevant);
         var secret: [32]u8 = @splat(0);
         secret[31] = 17;
         const key = (try @import("wire/keys.zig").KeyPair.fromSecretKey(&secret)).publicKey();
@@ -1195,7 +1251,7 @@ test "managed reconciliation raw mutators and deadlines invalidate once" {
 test "managed reconciliation batch counts refusal and fresh native room independently" {
     var setup: Setup = .{};
     var opts = options();
-    opts.peers.max_peers = 1;
+    opts.peers.max_peers = 2;
     opts.peers.target_peers = 1;
     opts.peers.min_outbound = 0;
     try setup.initOwnersWithOptions(&.{}, opts);
@@ -1210,6 +1266,11 @@ test "managed reconciliation batch counts refusal and fresh native room independ
     try std.testing.expectEqual(@as(u16, 2), result.accepted);
     try std.testing.expectEqual(@as(u16, 2), result.refused);
     const conn = try setup.pair.dial();
+    _ = try setup.pair.dial();
+    setup.pair.client.limits.dialing_max = 4;
+    setup.pair.client.outbound_max = 4;
+    _ = try setup.pair.dial();
+    _ = try setup.pair.dial();
     var out: [1]managed.DialIntent = undefined;
     try std.testing.expectEqual(@as(usize, 0), setup.client.dialIntents(&setup.client_service, &setup.pair.client, setup.pair.now, &out));
     try std.testing.expect(setup.pair.client.abandon(conn));

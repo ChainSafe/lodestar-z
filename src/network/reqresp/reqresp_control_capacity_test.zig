@@ -6,6 +6,42 @@ const support = @import("../test_support.zig");
 
 const reservedOptions = @import("control_fixture.zig").reservedOptions;
 
+test "reqresp blocked control writers leave other admitted identities able to serve" {
+    const resolved = try @import("../configuration.zig").resolve(.{
+        .seed = 1,
+        .forks = &.{},
+        .peers = .{ .capacity = 400, .target_peers = 190, .max_peers = 200, .min_outbound = 50 },
+        .limits = .{ .connections_max = 232 },
+        .application_requests_max = 8,
+        .admission_policy = @import("policy_fixture.zig").config(),
+    });
+    var requests = try rr.ReqResp.init(std.testing.allocator, resolved.core.service.reqresp);
+    defer requests.deinit();
+    const now: @import("../types.zig").Now = .{ .mono_ms = 1, .unix_s = 0 };
+    const metadata: [16]u8 = @splat(0);
+    for (requests.inbound[0..200], 0..) |*slot, index| {
+        const conn: engine_mod.Handle = .{ .index = @intCast(index), .generation = 1 };
+        slot.request = .{ .direction = .inbound, .completion = .active, .generation = 1, .conn = conn, .protocol = .metadata_v1 };
+        slot.identity = .{ .bytes = @splat(@as(u8, @intCast(index))) };
+        slot.state = .ready;
+        requests.limiter.bind(conn, now.mono_ms);
+        try std.testing.expect(slot.promote(&requests, @intCast(index), now));
+        const incoming = slot.deliver(true, now).?.request;
+        try requests.respond(incoming.request, &metadata, null, now);
+        try std.testing.expectEqual(@import("server.zig").State.writing_chunk, slot.state);
+        try std.testing.expect(slot.request.io.scratch.len < 1024);
+        const frame = try slot.request.io.writer.next(slot.request.io.scratch);
+        try std.testing.expect(frame.len > 0);
+    }
+    try std.testing.expectEqual(@as(u64, 200), requests.counters.admitted);
+    try std.testing.expectEqual(@as(u64, 0), requests.counters.withheld_chunks);
+    const repeated = &requests.inbound[200];
+    repeated.request = .{ .direction = .inbound, .completion = .active, .generation = 1, .conn = .{ .index = 0, .generation = 1 }, .protocol = .ping_v1 };
+    repeated.identity = requests.inbound[0].identity;
+    repeated.state = .ready;
+    try std.testing.expect(!repeated.promote(&requests, 200, now));
+}
+
 test "reqresp decoder captures configured root byte bounds before reading a body" {
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
@@ -643,7 +679,7 @@ test "reqresp control capacity retains peer and global response quotas" {
         const received = client.process(&pair.client, pair.events(&pair.client, &transport), activity[0..client_active], pair.now, .{ .application = &.{}, .control = &output });
         for (output[0..received.control]) |event| if (event == .chunk) {
             try std.testing.expectEqualSlices(u8, &ping, event.chunk.bytes);
-            try std.testing.expect(client.reqresp.consume(event.chunk.request));
+            try std.testing.expect(client.reqresp.consume(event.chunk.request, pair.now));
             chunks_received += 1;
         };
         const server_active = pair.server.takeActivity(&activity);

@@ -18,7 +18,6 @@ pub const Plan = struct {
     boundary_count: u8 = 0,
     forks: [boundary_max]@import("reqresp/root.zig").ForkEntry = undefined,
     topics: [boundary_max]topics.Boundary = undefined,
-    supported_count: u8 = 0,
     policy: policy.Policy,
     phase0_digest: ?[4]u8 = null,
     fulu_scheduled: bool,
@@ -40,6 +39,7 @@ pub const Plan = struct {
         for (cfg.forks_ascending_epoch_order, 0..) |fork, i| {
             if (i > 0 and fork.epoch < cfg.forks_ascending_epoch_order[i - 1].epoch) return error.InvalidNetworkChain;
             if (fork.epoch == constants.FAR_FUTURE_EPOCH) continue;
+            if (fork.fork_seq.gte(.gloas)) return error.UnsupportedNetworkFork;
             epochs[count] = fork.epoch;
             count += 1;
         }
@@ -68,20 +68,18 @@ pub const Plan = struct {
             const fork = cfg.forkInfoAtEpoch(epoch);
             const digest = config.fork_digest.computeForkDigest(cfg, epoch);
             result.boundaries[result.boundary_count] = .{ .epoch = epoch, .fork = fork.fork_seq, .version = fork.version, .digest = digest };
-            result.boundary_count += 1;
-            if (fork.fork_seq.gte(.gloas)) continue;
-            for (result.forks[0..result.supported_count]) |prior| {
+            for (result.forks[0..result.boundary_count]) |prior| {
                 if (std.mem.eql(u8, &prior.digest, &digest)) return error.InvalidNetworkChain;
             }
-            result.forks[result.supported_count] = .{ .fork = fork.fork_seq, .digest = digest };
-            result.topics[result.supported_count] = try topicBoundary(chain, fork.fork_seq, digest);
-            result.topics[result.supported_count].fork = fork.fork_seq;
-            result.topics[result.supported_count].epoch = epoch;
-            result.supported_count += 1;
+            result.forks[result.boundary_count] = .{ .fork = fork.fork_seq, .digest = digest };
+            result.topics[result.boundary_count] = try topicBoundary(chain, fork.fork_seq, digest);
+            result.topics[result.boundary_count].fork = fork.fork_seq;
+            result.topics[result.boundary_count].epoch = epoch;
+            result.boundary_count += 1;
             if (fork.fork_seq == .phase0) result.phase0_digest = digest;
         }
-        if (result.supported_count == 0) return error.UnsupportedNetworkFork;
-        _ = try topics.validate(result.topics[0..result.supported_count]);
+        if (result.boundary_count == 0) return error.UnsupportedNetworkFork;
+        _ = try topics.validate(result.topics[0..result.boundary_count]);
         return result;
     }
 

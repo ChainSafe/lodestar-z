@@ -153,7 +153,8 @@ test "codec decodes error chunks and rejects reserved results" {
     try std.testing.expectEqual(@as(u8, 200), decoder.result());
 
     decoder = Decoder.initResponse(.{ .min = 8, .max = 8 }, false, &sink, &scratch);
-    try std.testing.expectError(error.ReservedResult, decoder.feed(&[_]u8{5}));
+    try std.testing.expect((try decoder.feed(&.{ 5, 0 })).done);
+    try std.testing.expectEqual(@as(u8, 5), decoder.result());
 }
 
 test "codec rejects every malformed input it must" {

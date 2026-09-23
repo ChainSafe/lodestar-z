@@ -792,3 +792,28 @@ phaseTest.each([false, true])(
   },
   20000
 );
+
+stockTest(
+  "native terminal scoring does not wait for a JavaScript iterator pull",
+  async () => {
+    const {runtime, peer, id} = await connected();
+    try {
+      await peer.command("scenario", {count: 1, digest: "deadbeef", scenario: "chunks"});
+      const stream = runtime.request(id, BLOCKS, new Uint8Array(32));
+      let score = 0;
+      for (let attempt = 0; attempt < 100; attempt++) {
+        score = (await runtime.getPeers()).peers[0].score;
+        if (score < -9) break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(score).toBeGreaterThanOrEqual(-10);
+      expect(score).toBeLessThan(-9);
+      await expect(stream.next()).rejects.toMatchObject({reason: "unknown_context"});
+      expect((await runtime.getPeers()).peers[0].score).toBeGreaterThanOrEqual(score);
+    } finally {
+      await runtime.close();
+      await peer.stop();
+    }
+  },
+  20000
+);

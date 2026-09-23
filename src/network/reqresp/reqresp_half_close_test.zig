@@ -62,7 +62,7 @@ fn expectDone(pair: *Pair, request: Request, expected: []const u8) !void {
             .chunk => |chunk| {
                 try std.testing.expectEqualSlices(u8, expected, chunk.bytes);
                 chunks += 1;
-                try std.testing.expect(pair.shared.client.reqresp.consume(chunk.request));
+                try std.testing.expect(pair.shared.client.reqresp.consume(chunk.request, pair.shared.pair.now));
             },
             .done => |event_done| {
                 try std.testing.expectEqual(@as(u32, 1), event_done.chunks);
@@ -371,7 +371,7 @@ test "reqresp half close preserves context and successive response chunks" {
                     try std.testing.expectEqual(.deneb, chunk.fork.?);
                     try std.testing.expectEqualSlices(u8, &block, chunk.bytes);
                     chunks += 1;
-                    try std.testing.expect(pair.shared.client.reqresp.consume(chunk.request));
+                    try std.testing.expect(pair.shared.client.reqresp.consume(chunk.request, pair.shared.pair.now));
                 },
                 .failed => return error.TestUnexpectedResult,
                 else => {},

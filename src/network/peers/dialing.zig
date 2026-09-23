@@ -29,6 +29,7 @@ pub const Dialing = struct {
     selection_revision: ?u64 = null,
     selection_deadline: ?u64 = null,
     cursor: usize = 0,
+    preferred_starts: u16 = 0,
     random: std.Random.DefaultPrng,
     counters: Counters = .{},
     selected_attempts: [std.meta.fields(Source).len]u64 = @splat(0),
@@ -237,6 +238,34 @@ pub const Dialing = struct {
         };
         return result;
     }
+    pub fn pendingPeers(self: *const Dialing, catalog: *const Catalog, except: ?*const t.PeerId) u16 {
+        var count: u16 = 0;
+        for (self.active) |attempt| if (attempt.peer) |peer| {
+            const row = catalog.rowFor(peer).?;
+            if (row.connection != null) continue;
+            if (except) |identity| if (row.identity.eql(identity)) continue;
+            count += 1;
+        };
+        return count;
+    }
+    pub fn selectedPeer(self: *const Dialing, catalog: *const Catalog, identity: *const t.PeerId, now_ms: u64) bool {
+        const peer = catalog.find(identity) orelse return false;
+        const index = catalog.rowFor(peer).?.attempt orelse return false;
+        const attempt = &self.active[index];
+        return std.meta.eql(attempt.peer, peer) and now_ms < attempt.lease_until_ms;
+    }
+    pub fn deferConnection(self: *Dialing, catalog: *Catalog, conn: t.Handle, now_ms: u64) bool {
+        for (self.active, 0..) |attempt, index| {
+            const peer = attempt.peer orelse continue;
+            if (!std.meta.eql(attempt.connection, conn)) continue;
+            const row = catalog.rowFor(peer).?;
+            self.retire(catalog, @intCast(index));
+            row.intent.eligible_at_ms = @max(row.intent.eligible_at_ms, now_ms +| 1_000);
+            releaseUnused(catalog, peer);
+            return true;
+        }
+        return false;
+    }
     pub fn accepted(self: *Dialing, catalog: *Catalog, peer: t.PeerRef, conn: t.Handle, now_ms: u64) void {
         const row = catalog.rowFor(peer).?;
         std.debug.assert(std.meta.eql(row.connection, conn));
@@ -370,28 +399,35 @@ pub const Dialing = struct {
             if (count == out.len) break;
             const slot = self.freeAttempt() orelse break;
             var best: ?usize = null;
+            var automatic: ?usize = null;
             var it = catalog.intents.iterator(.{});
             while (it.next()) |index| {
                 const row = &catalog.rows[index];
                 if (!hasDialIntent(row, now_ms) or row.connection != null or row.attempt != null or now_ms < eligibleAt(row, now_ms)) continue;
-                if (best == null or preferred(row, &catalog.rows[best.?], now_ms) or
-                    (dialTier(row, now_ms) == dialTier(&catalog.rows[best.?], now_ms) and row.intent.priority == catalog.rows[best.?].intent.priority and
-                        (index + catalog.rows.len - self.cursor) % catalog.rows.len < (best.? + catalog.rows.len - self.cursor) % catalog.rows.len)) best = index;
+                if (self.preferred(catalog, index, best, now_ms)) best = index;
+                if (dialTier(row, now_ms) == 0 and self.preferred(catalog, index, automatic, now_ms)) automatic = index;
             }
-            const index = best orelse break;
+            const index = (if (self.preferred_starts >= self.options.concurrent_max) automatic orelse best else best) orelse break;
             self.cursor = (index + 1) % catalog.rows.len;
             const row = &catalog.rows[index];
             const attempt = &self.active[slot];
             attempt.* = .{ .generation = attempt.generation + 1, .peer = catalog.reference(index), .started_ms = now_ms, .lease_until_ms = if (row.direct or row.intent.automatic) now_ms +| 10_000 else @min(row.intent.manual_until_ms, now_ms +| 10_000) };
             row.attempt = slot;
-            self.selected_attempts[dialTier(row, now_ms)] +|= 1;
+            const tier = dialTier(row, now_ms);
+            self.preferred_starts = if (tier == 0) 0 else @min(self.preferred_starts + 1, self.options.concurrent_max);
+            self.selected_attempts[tier] +|= 1;
             out[count] = .{ .token = .{ .index = slot, .generation = attempt.generation }, .peer = row.identity, .address = row.intent.addresses[row.intent.address_index] };
             count += 1;
         }
         return count;
     }
-    fn preferred(row: *const Row, other: *const Row, now_ms: u64) bool {
-        return dialTier(row, now_ms) > dialTier(other, now_ms) or (dialTier(row, now_ms) == dialTier(other, now_ms) and row.intent.priority > other.intent.priority);
+    fn preferred(self: *const Dialing, catalog: *const Catalog, index: usize, current: ?usize, now_ms: u64) bool {
+        const best = current orelse return true;
+        const row = &catalog.rows[index];
+        const other = &catalog.rows[best];
+        if (dialTier(row, now_ms) != dialTier(other, now_ms)) return dialTier(row, now_ms) > dialTier(other, now_ms);
+        if (row.intent.priority != other.intent.priority) return row.intent.priority > other.intent.priority;
+        return (index + catalog.rows.len - self.cursor) % catalog.rows.len < (best + catalog.rows.len - self.cursor) % catalog.rows.len;
     }
     pub fn eligibleAt(row: *const Row, now_ms: u64) u64 {
         var rep = row.reputation;

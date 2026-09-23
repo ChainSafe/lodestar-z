@@ -246,10 +246,12 @@ pub const Control = struct {
     }
     pub fn forkUpdated(self: *Control, service: *Service, catalog: *Catalog, previous: t.ForkContext, now: Now) void {
         for (self.schedules) |*row| if (row.peer) |peer| {
-            if (row.closing != null or !catalog.invalidateStatus(peer, row.conn)) continue;
+            if (row.closing != null) continue;
+            const relevant = (catalog.get(peer) orelse continue).relevant;
+            if (!catalog.invalidateStatus(peer, row.conn)) continue;
             row.previous_digest = previous.digest;
             row.previous_protocol = wire.statusProtocol(previous);
-            row.transition_until_ms = now.mono_ms +| self.options.status_transition_grace_ms;
+            row.transition_until_ms = if (relevant) now.mono_ms +| self.options.status_transition_grace_ms else 0;
             row.status_due_ms = now.mono_ms;
             row.retry_ms = 0;
             row.metadata_due_ms = row.metadata_due_ms orelse now.mono_ms;
@@ -259,6 +261,12 @@ pub const Control = struct {
                 _ = service.reqresp.cancel(request);
             };
         };
+    }
+    pub fn revalidationDeadline(self: *const Control, peer: t.PeerRef, conn: t.Handle, now: Now) ?u64 {
+        if (peer.index >= self.schedules.len) return null;
+        const row = &self.schedules[peer.index];
+        if (!std.meta.eql(row.peer, peer) or !std.meta.eql(row.conn, conn) or row.closing != null or now.mono_ms >= row.transition_until_ms) return null;
+        return row.transition_until_ms;
     }
     fn active(self: *const Control, peer: t.PeerRef) bool {
         // A replacement catalog owner waits for the retired request's terminal delivery.
@@ -460,19 +468,24 @@ pub const Control = struct {
         local: *const t.LocalState,
         now: Now,
         slot: u64,
-        inbound: bool,
     ) void {
         const row = self.schedule(peer, conn) orelse return;
         if (row.closing != null) return;
-        const status = wire.decodeStatus(protocol, bytes) catch {
+        const status = wire.decodeStatus(protocol, bytes) catch |err| {
+            if (err == error.InvalidLength or err == error.InvalidEncoding)
+                _ = catalog.report(peer, .low_tolerance, now.mono_ms);
             self.counters.events.observeRelevance(.invalid_status);
             _ = self.disconnect(catalog, peer, conn, .invalid_status, now);
             return;
         };
-        // A request already in flight when the host advanced forks cannot establish new
-        // relevance. A bounded grace permits its old-context bytes without penalizing it.
-        if (inbound and now.mono_ms < row.transition_until_ms and protocol == row.previous_protocol and
-            std.mem.eql(u8, &status.fork_digest, &row.previous_digest)) return;
+        if (now.mono_ms < row.transition_until_ms and protocol == row.previous_protocol and
+            std.mem.eql(u8, &status.fork_digest, &row.previous_digest) and
+            (protocol != wire.statusProtocol(local.fork) or !std.mem.eql(u8, &status.fork_digest, &local.fork.digest)))
+        {
+            if (!(catalog.get(peer) orelse return).relevant)
+                row.retry_ms = @min(row.transition_until_ms, now.mono_ms +| self.options.local_retry_ms);
+            return;
+        }
         const relevance = wire.relevance(local, &status, slot);
         self.counters.events.observeRelevance(relevance);
         if (relevance) |reason| {
@@ -548,7 +561,6 @@ pub const Control = struct {
                     local,
                     now,
                     slot,
-                    true,
                 );
                 break :blk wire.encodeStatus(event.protocol, &local.status, &response.bytes) catch {
                     _ = service.reqresp.cancel(event.request);
@@ -635,7 +647,7 @@ pub const Control = struct {
             switch (event) {
                 .chunk => |chunk| {
                     if (matched) self.acceptChunk(catalog, op, chunk.bytes, local, now, slot);
-                    _ = service.reqresp.consume(request);
+                    _ = service.reqresp.consume(request, now);
                     op.received = true;
                 },
                 .done, .failed => {
@@ -669,7 +681,6 @@ pub const Control = struct {
                 local,
                 now,
                 slot,
-                false,
             ),
             .ping_v1 => {
                 if (bytes.len == 8) self.sequence(
@@ -682,6 +693,8 @@ pub const Control = struct {
             },
             .metadata_v1, .metadata_v2, .metadata_v3 => {
                 const metadata = wire.decodeMetadata(op.protocol, bytes, local.fork) catch |err| {
+                    if (err == error.InvalidLength or err == error.InvalidEncoding or err == error.InvalidSyncnets)
+                        _ = catalog.report(op.peer, .low_tolerance, now.mono_ms);
                     if (catalog.get(op.peer)) |snapshot| {
                         std.log.scoped(.network_peers).debug("metadata_rejected peer={f} connection={d}:{d} method={s} reason={s} bytes={d}", .{
                             @import("../logging.zig").peer(&snapshot.identity),
@@ -708,6 +721,13 @@ pub const Control = struct {
             .failed => |failed| switch (failed.reason) {
                 .cancelled, .host_timeout, .quota_timeout => {
                     row.retry_ms = now.mono_ms +| self.options.local_retry_ms;
+                },
+                .negotiation_rejected => {
+                    if ((op.protocol == .status_v1 or op.protocol == .status_v2) and now.mono_ms < row.transition_until_ms) {
+                        row.retry_ms = @min(row.transition_until_ms, now.mono_ms +| self.options.local_retry_ms);
+                    } else {
+                        _ = self.disconnect(catalog, op.peer, op.conn, .health_error, now);
+                    }
                 },
                 else => {
                     const timed_out = failed.reason == .timeout or

@@ -40,7 +40,7 @@ fn roundTrip(setup: *Pair, seed: u8) !void {
         for (setup.clientEvents()) |event| switch (event) {
             .chunk => |chunk| {
                 try std.testing.expectEqualSlices(u8, &reply, chunk.bytes);
-                try std.testing.expect(setup.shared.client.reqresp.consume(chunk.request));
+                try std.testing.expect(setup.shared.client.reqresp.consume(chunk.request, setup.shared.pair.now));
             },
             .done => done = true,
             .failed => return error.TestUnexpectedResult,
@@ -220,5 +220,5 @@ test "service request work remains bounded and rotates between live streams" {
         handle.* = events[0].chunk.request;
     }
     try std.testing.expect(!std.meta.eql(delivered[0], delivered[1]));
-    for (handles) |handle| try std.testing.expect(setup.shared.client.reqresp.consume(handle));
+    for (handles) |handle| try std.testing.expect(setup.shared.client.reqresp.consume(handle, setup.shared.pair.now));
 }

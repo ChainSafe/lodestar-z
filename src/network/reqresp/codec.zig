@@ -43,6 +43,7 @@ pub const Error = error{
 pub const Bounds = struct {
     min: usize,
     max: usize,
+    protocol_max: ?usize = null,
 };
 
 pub const error_bounds = Bounds{ .min = 0, .max = error_message_max };
@@ -57,6 +58,7 @@ const Phase = enum { result, context, awaiting_context, varint, identifier, fram
 pub const Decoder = struct {
     phase: Phase,
     bounds: Bounds,
+    length_protocol_fault: bool = false,
     expect_context: bool,
     gate_context: bool = false,
     sink: []u8,
@@ -116,6 +118,14 @@ pub const Decoder = struct {
         };
     }
 
+    pub fn protocolFault(self: *const Decoder, err: Error) bool {
+        return switch (err) {
+            error.LengthOutOfBounds => self.length_protocol_fault,
+            error.BufferTooSmall, error.ReservedResult => false,
+            error.VarintTooLong, error.BadIdentifier, error.BadFrameType, error.BadFrameLength, error.FrameTooLarge, error.BadChecksum, error.TooManyCompressedBytes, error.TooManyBytes, error.InvalidCompressed, error.Truncated => true,
+        };
+    }
+
     pub fn isDone(self: *const Decoder) bool {
         return self.phase == .done;
     }
@@ -160,8 +170,6 @@ pub const Decoder = struct {
                 self.result_byte = code;
                 if (code == constants.result_success) {
                     self.phase = if (self.expect_context) .context else .varint;
-                } else if (!constants.isErrorResult(code)) {
-                    return error.ReservedResult;
                 } else {
                     self.bounds = error_bounds;
                     self.phase = .varint;
@@ -187,6 +195,8 @@ pub const Decoder = struct {
                 const decoded = varint.decode(self.header[0..self.header_len]) catch
                     return error.VarintTooLong;
                 if (decoded.value < self.bounds.min or decoded.value > self.bounds.max) {
+                    self.length_protocol_fault = decoded.value < self.bounds.min or
+                        decoded.value > (self.bounds.protocol_max orelse self.bounds.max);
                     return error.LengthOutOfBounds;
                 }
                 self.length = @intCast(decoded.value);

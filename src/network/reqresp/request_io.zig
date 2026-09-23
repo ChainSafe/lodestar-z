@@ -69,6 +69,11 @@ pub const RequestIO = struct {
         return progress.done;
     }
 
+    pub fn unread(self: *const RequestIO, engine: *engine_mod.Engine, stream: engine_mod.StreamHandle) bool {
+        if (self.buffered_start < self.buffered_end or self.fin_seen) return true;
+        return engine.streamReadable(stream) catch true;
+    }
+
     pub fn clear(self: *RequestIO) void {
         self.payload = &.{};
         self.buffered_start = 0;

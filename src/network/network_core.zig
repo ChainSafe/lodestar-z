@@ -341,8 +341,8 @@ pub const NetworkCore = struct {
         const conn = snapshot.connection orelse return error.Disconnected;
         return managed.sendReqRespRequest(&self.peer_manager, &self.service, &self.transport.engine, conn, protocol, request, sink, options, now);
     }
-    pub fn consume(self: *NetworkCore, request: rr.RequestHandle) bool {
-        return self.service.reqresp.consume(request);
+    pub fn consume(self: *NetworkCore, request: rr.RequestHandle, now: Now) bool {
+        return self.service.reqresp.consume(request, now);
     }
     pub fn respond(self: *NetworkCore, request: rr.RequestHandle, bytes: []const u8, context: ?rr.ForkEntry, now: Now) !void {
         try self.service.reqresp.respond(request, bytes, context, now);

@@ -8,6 +8,7 @@ pub const Input = struct {
     direct: bool = false,
     outbound: bool = false,
     relevant: bool = true,
+    revalidating: bool = false,
     ready: bool = true,
     evaluating: bool = false,
     score: f64 = 0,
@@ -43,7 +44,7 @@ pub const Counts = struct {
     outbound: u16 = 0,
 
     fn change(self: *Counts, input: *const Input, add: bool) void {
-        if (input.outbound and input.relevant) adjust(&self.outbound, add);
+        if (input.outbound and (input.relevant or input.revalidating)) adjust(&self.outbound, add);
         for (0..64) |i| if (input.coverage.attnets & (@as(u64, 1) << @intCast(i)) != 0) {
             adjust(&self.attestation[i], add);
         };
@@ -161,9 +162,9 @@ fn removal(
     var best: ?Rank = null;
     for (inputs, 0..) |*input, i| {
         if (!result.retained.isSet(i)) continue;
-        const outbound_floor = input.outbound and input.relevant and
+        const outbound_floor = input.outbound and (input.relevant or input.revalidating) and
             result.coverage.outbound <= options.min_outbound;
-        if (!hard and (input.direct or input.evaluating or outbound_floor)) continue;
+        if (!hard and (input.direct or input.evaluating or input.revalidating or outbound_floor)) continue;
         const rank: Rank = .{
             .index = @intCast(i),
             .direct = input.direct,
@@ -188,18 +189,12 @@ fn removal(
     return if (best) |rank| rank.index else null;
 }
 
-fn needsReplacement(result: *const Result, demand: *const t.Demand, minimum: u16) bool {
-    const missing = result.coverage.deficits(demand, minimum);
-    return missing.outbound > 0 or missing.attestation > 0 or
-        missing.sync > 0 or missing.groups > 0 or missing.custody_groups > 0;
-}
-
 /// Inputs are stable copied values, bounded by the managed connection ceiling.
 pub fn select(inputs: []const Input, demand: *const t.Demand, options: t.Options, seed: u64) Result {
-    return selectWithReplacement(inputs, demand, options, seed, true);
+    return selectWithPacing(inputs, demand, options, seed, true);
 }
 
-pub fn selectWithReplacement(inputs: []const Input, demand: *const t.Demand, options: t.Options, seed: u64, allow_replacement: bool) Result {
+pub fn selectWithPacing(inputs: []const Input, demand: *const t.Demand, options: t.Options, seed: u64, allow_trials: bool) Result {
     std.debug.assert(inputs.len <= 256);
     std.debug.assert(options.target_peers <= options.max_peers);
     var result: Result = .{};
@@ -219,9 +214,7 @@ pub fn selectWithReplacement(inputs: []const Input, demand: *const t.Demand, opt
     }
     for (0..inputs.len) |_| {
         const hard = result.retained_count > options.max_peers;
-        const replacement = allow_replacement and result.retained_count == options.max_peers and evaluating == 0 and
-            needsReplacement(&result, demand, options.min_outbound);
-        if (!hard and result.retained_count - evaluating <= options.target_peers and !replacement)
+        if (!hard and result.retained_count - evaluating <= options.target_peers)
             break;
         const index = removal(inputs, &result, demand, options, ties[0..inputs.len]) orelse break;
         const input = &inputs[index];
@@ -234,7 +227,7 @@ pub fn selectWithReplacement(inputs: []const Input, demand: *const t.Demand, opt
     std.debug.assert(result.retained_count <= options.max_peers);
     result.deficits = result.coverage.deficits(demand, options.min_outbound);
     const coverage_missing = result.deficits.attestation > 0 or result.deficits.sync > 0 or result.deficits.groups > 0 or result.deficits.custody_groups > 0;
-    const wanted = @max(options.target_peers -| result.retained_count, @max(result.deficits.outbound, @as(u16, if (coverage_missing and allow_replacement) 1 else 0)));
+    const wanted = @max(options.target_peers -| result.retained_count, @max(result.deficits.outbound, @as(u16, if (coverage_missing and allow_trials) 1 else 0)));
     result.dial_budget = @min(wanted, options.max_peers -| result.retained_count);
     return result;
 }

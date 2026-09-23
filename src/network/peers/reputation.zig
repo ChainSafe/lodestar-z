@@ -12,6 +12,7 @@ pub fn selectionScore(rpc: f64, gossip: f64, graylist_threshold: f64) f64 {
 pub const State = struct {
     score: f64 = 0,
     decay_at_ms: u64 = 0,
+    non_completion_next_ms: u64 = 0,
     ban_until_ms: u64 = 0,
     goodbye_until_ms: u64 = 0,
     redial_until_ms: u64 = 0,
@@ -46,6 +47,15 @@ pub const State = struct {
         return if (self.score <= disconnect_score) .disconnect else .none;
     }
 
+    /// Non-completion is uncertain service evidence: concurrency shares a ten-second window,
+    /// and sustained failures cannot push reputation below -4 or directly disconnect a peer.
+    pub fn nonCompletion(self: *State, now_ms: u64) void {
+        self.decay(now_ms);
+        if (self.score <= -4 or now_ms < self.non_completion_next_ms) return;
+        self.score = @max(-4, self.score - 1);
+        self.non_completion_next_ms = now_ms +| 10_000;
+    }
+
     pub fn banned(self: *const State, now_ms: u64) bool {
         return now_ms < self.ban_until_ms or self.score <= ban_score;
     }
@@ -67,7 +77,7 @@ pub const State = struct {
         if (now_ms < current.ban_until_ms) {
             deadline = @min(deadline orelse current.ban_until_ms, current.ban_until_ms);
         } else if (current.score < 0) {
-            const threshold: f64 = if (current.score <= -50) 50 else 0.001;
+            const threshold: f64 = if (current.score <= ban_score) -ban_score else if (current.score < prune_score) -prune_score else 0.001;
             const periods = @log2(-current.score / threshold);
             const remaining: u64 = @intFromFloat(@max(0, periods * half_life_ms));
             const next = now_ms +| remaining +| 1;

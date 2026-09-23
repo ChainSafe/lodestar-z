@@ -123,9 +123,9 @@ fn prepareApplicationStorage(runtime: *Runtime, app: *const application_cfg.Conf
     const incoming_capacity: usize = limits.inbound_max - limits.inbound_control_reserved;
     const gossip_options = &resolved.core.service.gossipsub;
     const chain = &runtime.heavy.?.config.chain;
-    const gossip_plan = n.gossip_processor.Plan.resolve(gossip_options, chain.forks[0..chain.supported_count]);
+    const gossip_plan = n.gossip_processor.Plan.resolve(gossip_options, chain.forks[0..chain.boundary_count]);
     const gossip_backing = gossip.Table.backingBytes(gossip_plan.capacity, gossip_plan.bytes);
-    const metrics_capacity = n.metrics.textCapacity(chain.topics[0..chain.supported_count]);
+    const metrics_capacity = n.metrics.textCapacity(chain.topics[0..chain.boundary_count]);
     const publication_capacity: usize = if (runtime.heavy.?.config.profile == .small) 32 else publications.capacity_max;
     const bridge = publication_capacity * @sizeOf(publications.Cell) + 2 * metrics_capacity + gossip_backing + incoming_capacity * @sizeOf(incoming.Cell) + request_capacity * @sizeOf(requests.Cell) + @sizeOf(Runtime) + @sizeOf(r.Owner) - @sizeOf(n.NetworkCore) + r.Stores.bytes(runtime.peer_capacity) + @sizeOf(projection.Lane);
     if (bridge > app.resources.bridgeBudgetBytes) return error.NetworkBridgeBudgetExceeded;

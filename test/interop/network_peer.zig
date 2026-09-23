@@ -133,7 +133,7 @@ pub const Peer = struct {
                 const decoded_context = self.service.reqresp.outbound[c.request.index].request.io.decoder.context();
                 const context_hex = if (decoded_context) |digest| std.fmt.bytesToHex(digest, .lower) else null;
                 try control.emit(self.allocator, .{ .event = "chunk", .length = c.bytes.len, .sha256 = hash(c.bytes), .context = if (context_hex) |*value| @as(?[]const u8, value) else null, .result = 0 });
-                std.debug.assert(self.service.reqresp.consume(c.request));
+                std.debug.assert(self.service.reqresp.consume(c.request, self.now));
             },
             .done => {
                 self.outbound = false;

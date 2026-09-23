@@ -33,15 +33,15 @@ const Samples = struct {
 fn options(key: *const network.KeyPair, plan: *const network.chain.Plan, update: *const network.network_core.LocalUpdate) network.network_core.Options {
     return .{
         .wait_mode = .native_poll,
-        .transport = .{ .host = key, .bind = .{ .ip4 = .loopback(0) }, .limits = .{ .connections_max = 4, .handshaking_max = 4, .handshaking_per_source_max = 4, .dialing_max = 2 } },
+        .transport = .{ .host = key, .bind = .{ .ip4 = .loopback(0) }, .limits = .{ .connections_max = 4, .handshaking_max = 4, .handshaking_per_source_max = 4, .dialing_max = 1, .outbound_reserved = 1, .outbound_max = 4 } },
         .core = .{
             .peers = .{ .capacity = 4, .outbound_reserve = 1, .max_peers = 3, .target_peers = 2, .min_outbound = 1 },
-            .dial = .{ .capacity = 4, .concurrent_max = 2, .seed = 7 },
+            .dial = .{ .capacity = 4, .concurrent_max = 1, .seed = 7 },
             .service = .{
                 .identify = .{},
                 .router = .{ .capabilities = update.capabilities, .negotiations_max = 24, .outbound_control_reserved = 8 },
-                .reqresp = .{ .peers = 4, .outbound_max = 16, .inbound_max = 16, .outbound_control_reserved = 8, .inbound_control_reserved = 8, .outbound_per_peer_max = 4, .inbound_per_peer_max = 16, .inbound_application_per_peer_max = 8, .forks = plan.forks[0..plan.supported_count], .policy = plan.requestPolicy() },
-                .gossipsub = .{ .random_seed = 1, .topic_policy = plan.topics[0..plan.supported_count], .message_id_policy = .{ .phase0_digest = plan.phase0_digest } },
+                .reqresp = .{ .peers = 4, .outbound_max = 16, .inbound_max = 16, .outbound_control_reserved = 8, .inbound_control_reserved = 8, .outbound_per_peer_max = 4, .inbound_per_peer_max = 16, .inbound_application_per_peer_max = 8, .forks = plan.forks[0..plan.boundary_count], .policy = plan.requestPolicy() },
+                .gossipsub = .{ .random_seed = 1, .topic_policy = plan.topics[0..plan.boundary_count], .message_id_policy = .{ .phase0_digest = plan.phase0_digest } },
             },
         },
         .local = update.local,
@@ -122,10 +122,10 @@ fn initialize(node: *network.NetworkCore, a: std.mem.Allocator, io: std.Io, key:
             .configuration = .{
                 .profile = selected,
                 .seed = 7,
-                .forks = plan.forks[0..plan.supported_count],
+                .forks = plan.forks[0..plan.boundary_count],
                 .admission_policy = plan.requestPolicy(),
                 .router = .{ .capabilities = update.capabilities },
-                .gossip = .{ .topic_policy = plan.topics[0..plan.supported_count], .message_id_policy = .{ .phase0_digest = plan.phase0_digest } },
+                .gossip = .{ .topic_policy = plan.topics[0..plan.boundary_count], .message_id_policy = .{ .phase0_digest = plan.phase0_digest } },
             },
         });
     } else try node.initRaw(a, io, options(key, plan, &update));
@@ -268,7 +268,7 @@ fn drain(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, expected:
         for (events[0..sent.counts.application]) |event| switch (event) {
             .chunk => |value| {
                 if (value.fork != context.fork or !std.mem.eql(u8, value.bytes, payload)) return error.InvalidResponse;
-                if (!a.consume(value.request)) return error.ConsumeFailed;
+                if (!a.consume(value.request, try network.transport.currentTime(io))) return error.ConsumeFailed;
                 chunks += 1;
             },
             .done => |value| {

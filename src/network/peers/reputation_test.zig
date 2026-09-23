@@ -72,8 +72,40 @@ test "peer reputation deadlines advance from cooldown through threshold to reten
     _ = state.apply(.fatal, 0);
     try std.testing.expectEqual(@as(u64, 1_800_000), state.nextDeadline(0).?);
     try std.testing.expectEqual(@as(u64, 2_400_001), state.nextDeadline(1_800_000).?);
-    const expiry = state.nextDeadline(2_400_001).?;
+    const useful = state.nextDeadline(2_400_001).?;
+    state.decay(useful);
+    try std.testing.expect(state.score >= r.prune_score);
+    const expiry = state.nextDeadline(useful).?;
     state.decay(expiry);
     try std.testing.expect(!state.retained(expiry));
     try std.testing.expect(state.nextDeadline(expiry) == null);
+}
+
+test "weak non-completion coalesces concurrency and bounds sustained failure" {
+    var state: r.State = .{};
+    for (0..128) |_| state.nonCompletion(100);
+    try std.testing.expectEqual(@as(f64, -1), state.score);
+    state.nonCompletion(10_099);
+    try std.testing.expect(state.score > -1);
+    state.nonCompletion(10_100);
+    try std.testing.expect(state.score < -1.9);
+    for (2..12) |i| state.nonCompletion(100 + i * 10_000);
+    try std.testing.expectEqual(@as(f64, -4), state.score);
+    try std.testing.expectEqual(@as(u64, 0), state.ban_until_ms);
+    state.decay(110_100 + r.half_life_ms);
+    try std.testing.expectApproxEqAbs(@as(f64, -2), state.score, 0.000001);
+    state.nonCompletion(110_100 + r.half_life_ms);
+    try std.testing.expectApproxEqAbs(@as(f64, -3), state.score, 0.000001);
+}
+
+test "weak non-completion never raises strong negative history or gates strong reports" {
+    var state: r.State = .{};
+    state.nonCompletion(100);
+    try std.testing.expectEqual(t.ReputationDecision.none, state.apply(.low_tolerance, 100));
+    state.nonCompletion(100);
+    try std.testing.expectEqual(@as(f64, -11), state.score);
+    try std.testing.expectEqual(t.ReputationDecision.disconnect, state.apply(.low_tolerance, 100));
+    state.nonCompletion(10_100);
+    try std.testing.expect(state.score < r.disconnect_score);
+    try std.testing.expectEqual(@as(u64, 0), state.ban_until_ms);
 }

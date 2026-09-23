@@ -20,11 +20,12 @@ const MaintenancePeers = struct {
             const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{@as(u8, @intCast(80 + index))}));
             var opts = options(&key);
             opts.core.peers.target_peers = 3;
+            opts.core.peers.max_peers = 4;
             opts.core.control.starts_per_turn_max = 1;
-            opts.core.service.reqresp.outbound_max = 5;
-            opts.core.service.reqresp.outbound_control_reserved = 3;
+            opts.core.service.reqresp.outbound_max = 6;
+            opts.core.service.reqresp.outbound_control_reserved = 4;
             opts.core.service.reqresp.outbound_per_peer_max = 2;
-            opts.core.service.router = .{ .negotiations_max = 16, .outbound_control_reserved = 3, .outbound_reserved = 8 };
+            opts.core.service.router = .{ .negotiations_max = 16, .outbound_control_reserved = 4, .outbound_reserved = 8 };
             try node.initRaw(std.testing.allocator, std.testing.io, opts);
             initialized += 1;
         }
@@ -91,7 +92,7 @@ test "managed maintenance isolates slow peers and full application capacity" {
     }
     const calls = hub.reservations.allocation_calls;
     for (0..2) |index| _ = try hub.sendReqRespRequest(&fixture.nodes[1].peerId(), .blocks_by_root_v2, &([_]u8{1} ** 32), sinks[index * size ..][0..size], .{}, hub.last_now);
-    for (0..11) |_| _ = try hub.service.router.beginMeshsub(&hub.transport.engine, conn, hub.last_now);
+    for (0..10) |_| _ = try hub.service.router.beginMeshsub(&hub.transport.engine, conn, hub.last_now);
     try std.testing.expectError(error.NegotiationTableFull, hub.service.router.beginMeshsub(&hub.transport.engine, conn, hub.last_now));
     var status = healthy.localState().status;
     status.head_slot = 42;
@@ -332,7 +333,7 @@ fn applicationAndFork(a: *runtime.NetworkCore, b: *runtime.NetworkCore) !void {
             .chunk => |value| {
                 try std.testing.expectEqual(t.ForkSeq.fulu, value.fork.?);
                 try std.testing.expectEqualSlices(u8, &response, value.bytes);
-                try std.testing.expect(a.consume(value.request));
+                try std.testing.expect(a.consume(value.request, try @import("transport.zig").currentTime(std.testing.io)));
                 chunks += 1;
             },
             .done => done += 1,
@@ -715,9 +716,9 @@ test "managed profiles measure reservations and unwind byte exhaustion" {
         const kib = 1024;
         const mib = 1024 * kib;
         const ceilings = if (profile == .small)
-            .{ .total = 96 * mib, .service = 95 * mib, .transport = 90 * kib, .scratch = 400 * kib, .catalog = 100 * kib, .control = 15 * kib, .dial = 0 }
+            .{ .total = 96 * mib, .service = 95 * mib, .transport = 90 * kib, .scratch = 400 * kib, .catalog = 100 * kib, .control = 16 * kib, .dial = 0 }
         else
-            .{ .total = 384 * mib, .service = 374 * mib, .transport = 720 * kib, .scratch = 3200 * kib, .catalog = 800 * kib, .control = 114 * kib, .dial = 0 };
+            .{ .total = 384 * mib, .service = 374 * mib, .transport = 720 * kib, .scratch = 3200 * kib, .catalog = 800 * kib, .control = 128 * kib, .dial = 0 };
         std.debug.print("managed memory {s}: total={d} service={d} reqresp={d} negotiations={d} catalog={d} control={d}\n", .{ @tagName(profile), measured, plan.service_bytes, node.service.reqresp.memoryPlan().total_bytes, node.service.router.negotiator.entries.len, core_plan.catalog_bytes, core_plan.control_bytes });
         try std.testing.expectEqual(measured, plan.allocated_bytes);
         try std.testing.expect(measured <= ceilings.total);
@@ -1211,7 +1212,8 @@ test "managed runtime capabilities activation commits fork BPO and copied direct
     try std.testing.expectEqual(t.ForkSeq.fulu, node.service.reqresp.request_fork);
     const active = node.service.router.capabilities();
     try std.testing.expect(active.receive.contains(.{ .reqresp = .status_v2 }));
-    try std.testing.expect(!active.receive.contains(.{ .reqresp = .status_v1 }));
+    try std.testing.expect(active.receive.contains(.{ .reqresp = .status_v1 }));
+    try std.testing.expect(!active.request.contains(.{ .reqresp = .status_v1 }));
     try std.testing.expect(!active.receive.contains(.{ .reqresp = .metadata_v2 }));
     try std.testing.expect(active.receive.contains(.{ .reqresp = .metadata_v3 }));
     try std.testing.expect(!active.receive.contains(.{ .reqresp = .light_client_bootstrap_v1 }));
@@ -1269,6 +1271,7 @@ test "managed runtime targeted Status serves two current schedules and immediate
     var b: runtime.NetworkCore = undefined;
     var c: runtime.NetworkCore = undefined;
     var opts = options(&key_a);
+    opts.core.peers.min_outbound = 0;
     opts.core.service.identify = .{ .agent = "peer-operations" };
     try a.initRaw(std.testing.allocator, std.testing.io, opts);
     defer a.deinit(std.testing.io);

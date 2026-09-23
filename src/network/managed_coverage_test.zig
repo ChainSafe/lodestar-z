@@ -123,8 +123,8 @@ test "managed coverage coalesces subscription and score changes with operation e
 test "managed coverage gives initial subscriptions finite grace even after metadata arrives" {
     var setup: support.Setup = .{};
     var opts = support.options();
-    opts.peers.target_peers = 1;
-    opts.peers.max_peers = 1;
+    opts.peers.target_peers = 0;
+    opts.peers.max_peers = 2;
     opts.peers.min_outbound = 0;
     try setup.initOwnersWithOptions(&.{}, opts);
     defer setup.deinit();

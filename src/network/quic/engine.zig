@@ -61,6 +61,7 @@ pub const Limits = struct {
     handshaking_per_source_max: u16 = limits.handshaking_per_source_max,
     dialing_max: u16 = limits.dialing_max,
     outbound_max: ?u16 = null,
+    outbound_reserved: u16 = 0,
     receive_budget_bytes: u64 = limits.receive_budget_bytes,
     idle_timeout_ms: u64 = limits.idle_timeout_ms,
     handshake_timeout_ms: u64 = limits.handshake_timeout_ms,
@@ -164,7 +165,8 @@ pub const Engine = struct {
         if (wanted.idle_timeout_ms == 0) return error.InvalidLimits;
         if (wanted.handshake_timeout_ms == 0) return error.InvalidLimits;
         if (wanted.keep_alive_ms == 0) return error.InvalidLimits;
-        if (wanted.dialing_max == 0) return error.InvalidLimits;
+        if (wanted.dialing_max == 0 or wanted.outbound_reserved > wanted.dialing_max or
+            wanted.outbound_reserved > wanted.connections_max) return error.InvalidLimits;
         const outbound_max = wanted.outbound_max orelse
             @max(1, wanted.connections_max - wanted.connections_max / 4);
         if (outbound_max == 0 or outbound_max > wanted.connections_max) return error.InvalidLimits;
@@ -436,6 +438,11 @@ pub const Engine = struct {
         return result;
     }
 
+    pub fn streamReadable(self: *Engine, stream: StreamHandle) StreamError!bool {
+        const target = try self.readableStream(stream);
+        return binding.c.quiche_conn_stream_readable(target.slot.conn.?, target.id);
+    }
+
     pub fn write(
         self: *Engine,
         stream: StreamHandle,
@@ -587,6 +594,9 @@ pub const Engine = struct {
         }
         const original = retry.validate(&self.retry_key, from, &header.dcid, token, now.mono_ms, self.limits.handshake_timeout_ms) orelse return drop(&self.counters.invalid_retry_tokens);
         const scid = header.dcid.bytes[0..limits.local_cid_length].*;
+        const reserved = self.limits.outbound_reserved -| self.registry.dialing;
+        if (self.limits.connections_max - self.registry.active_len <= reserved)
+            return drop(&self.counters.dropped_full);
         const index = self.registry.claim() orelse return drop(&self.counters.dropped_full);
 
         const slot = &self.registry.slots[index];

@@ -105,12 +105,12 @@ test "reqresp request admission policy canonical roots offsets occurrences and c
         try std.testing.expectError(error.MalformedSsz, policy.inspect(which, bytes[0..1], .fulu));
     }
     try std.testing.expectEqual(@as(u32, 128), (try policy.inspect(.blocks_by_root_v2, bytes[0 .. 32 * 128], .fulu)).chunks_max);
-    try std.testing.expectError(error.MalformedSsz, policy.inspect(.blocks_by_root_v2, bytes[0 .. 32 * 129], .fulu));
+    try std.testing.expectError(error.UnsupportedBounds, policy.inspect(.blocks_by_root_v2, bytes[0 .. 32 * 129], .fulu));
     try std.testing.expectEqual(@as(u32, 1024), (try policy.inspect(.blocks_by_root_v2, bytes[0 .. 32 * 1024], .phase0)).chunks_max);
     try std.testing.expectError(error.MalformedSsz, policy.inspect(.blocks_by_root_v2, bytes[0 .. 32 * 1025], .phase0));
     try std.testing.expectEqual(@as(u32, 1152), (try policy.inspect(.blob_sidecars_by_root_v1, bytes[0 .. 40 * 1152], .fulu)).chunks_max);
-    try std.testing.expectError(error.MalformedSsz, policy.inspect(.blob_sidecars_by_root_v1, bytes[0 .. 40 * 1153], .fulu));
-    try std.testing.expectError(error.MalformedSsz, policy.inspect(.blob_sidecars_by_root_v1, bytes[0 .. 40 * 769], .deneb));
+    try std.testing.expectError(error.UnsupportedBounds, policy.inspect(.blob_sidecars_by_root_v1, bytes[0 .. 40 * 1153], .fulu));
+    try std.testing.expectError(error.UnsupportedBounds, policy.inspect(.blob_sidecars_by_root_v1, bytes[0 .. 40 * 769], .deneb));
     put(&bytes, 32, std.math.maxInt(u64));
     try std.testing.expectEqual(@as(u32, 1), (try policy.inspect(.blob_sidecars_by_root_v1, bytes[0..40], .fulu)).chunks_max);
     @memset(&bytes, 0);

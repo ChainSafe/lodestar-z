@@ -581,7 +581,7 @@ fn handoff(candidate: *const adapter.Candidate) !void {
     try std.testing.expectError(error.Capacity, core.connect(&types.PeerId.fromPublicKey(&key.publicKey()), candidate.addresses[0..candidate.address_count], pair.now));
     try std.testing.expectEqual(@as(u16, 1), core.discoveredBatch(&service, &.{candidate.*}, pair.now).accepted);
     const count = core.dialIntents(&service, &pair.client, pair.now, &intents);
-    try std.testing.expectEqual(@as(usize, 2), count);
+    try std.testing.expectEqual(@as(usize, opts.dial.concurrent_max), count);
     for (intents[0..count]) |intent| try std.testing.expect(!intent.peer.eql(&candidate.peer));
 }
 

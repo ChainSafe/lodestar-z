@@ -2,6 +2,8 @@ const std = @import("std");
 const PeerId = @import("../wire/peer_id.zig").PeerId;
 const RequestHandle = @import("events.zig").RequestHandle;
 const codec = @import("codec.zig");
+const protocol = @import("protocol.zig");
+const control_scratch = codec.frameLengthMax(@max(protocol.payloadMaxControl(), codec.error_message_max));
 
 const Entry = struct {
     request: ?RequestHandle = null,
@@ -18,10 +20,11 @@ pub const Pool = struct {
     per_peer_max: u8,
 
     pub fn init(allocator: std.mem.Allocator, capacity: u16, control_reserved: u16, per_peer_max: u8) !Pool {
+        std.debug.assert(control_reserved <= capacity);
         const entries = try allocator.alloc(Entry, capacity);
         errdefer allocator.free(entries);
         @memset(entries, .{});
-        const scratch = try allocator.alloc(u8, @as(usize, capacity) * codec.frame_scratch_max);
+        const scratch = try allocator.alloc(u8, @as(usize, control_reserved) * control_scratch + @as(usize, capacity - control_reserved) * codec.frame_scratch_max);
         return .{ .entries = entries, .scratch = scratch, .control_reserved = control_reserved, .per_peer_max = per_peer_max };
     }
 
@@ -40,8 +43,6 @@ pub const Pool = struct {
         for (self.entries) |*entry| {
             if (entry.request != null and entry.control == control and entry.identity.eql(identity)) occupied += 1;
         }
-        // Control replies need no asynchronous host work. One blocked writer per
-        // identity leaves the control reserve available to other peers.
         if (control and self.control_reserved > 0 and occupied > 0) return null;
         if (!control and occupied >= self.per_peer_max) return null;
         const start: usize = if (control) 0 else self.control_reserved;
@@ -53,7 +54,10 @@ pub const Pool = struct {
     pub fn acquire(self: *Pool, index: u16, request: RequestHandle, identity: *const PeerId, control: bool) []u8 {
         std.debug.assert(self.entries[index].request == null);
         self.entries[index] = .{ .request = request, .identity = identity.*, .control = control };
-        return self.scratch[@as(usize, index) * codec.frame_scratch_max ..][0..codec.frame_scratch_max];
+        const reserved = index < self.control_reserved;
+        std.debug.assert(!reserved or control);
+        const offset = if (reserved) @as(usize, index) * control_scratch else @as(usize, self.control_reserved) * control_scratch + @as(usize, index - self.control_reserved) * codec.frame_scratch_max;
+        return self.scratch[offset..][0..if (reserved) control_scratch else codec.frame_scratch_max];
     }
 
     pub fn retire(self: *Pool, index: u16) void {
@@ -84,3 +88,30 @@ pub const Pool = struct {
         return null;
     }
 };
+
+test "control writers isolate two hundred identities with small scratch and bounded retirement" {
+    var pool = try Pool.init(std.testing.allocator, 202, 200, 2);
+    defer pool.deinit(std.testing.allocator);
+    const ids = [_]PeerId{.{ .bytes = @splat(0) }} ** 201;
+    var identities = ids;
+    for (&identities, 0..) |*identity, index| std.mem.writeInt(u16, identity.bytes[0..2], @intCast(index), .little);
+    for (identities[0..200], 0..) |*identity, index| {
+        const slot = pool.available(identity, true).?;
+        const scratch = pool.acquire(slot, .{ .index = @intCast(index), .generation = 1, .direction = .inbound }, identity, true);
+        try std.testing.expect(scratch.len < 1024);
+        const status: [92]u8 = @splat(0);
+        _ = try codec.encodeChunk(0, null, &status, scratch);
+        try std.testing.expectEqual(@as(?u16, null), pool.available(identity, true));
+    }
+    try std.testing.expectEqual(@as(?u16, null), pool.available(&identities[200], true));
+    const application = pool.available(&identities[200], false).?;
+    try std.testing.expectEqual(@as(usize, codec.frame_scratch_max), pool.acquire(application, .{ .index = 200, .generation = 1, .direction = .inbound }, &identities[200], false).len);
+    const retiring: RequestHandle = .{ .index = 0, .generation = 1, .direction = .inbound };
+    try std.testing.expect(pool.retain(retiring));
+    pool.retire(0);
+    try std.testing.expectEqual(@as(?u16, null), pool.available(&identities[0], true));
+    try std.testing.expectEqual(@as(?u16, null), pool.available(&identities[200], true));
+    try std.testing.expect(pool.release(retiring));
+    try std.testing.expectEqual(@as(?u16, 0), pool.available(&identities[200], true));
+    try std.testing.expectEqual(@as(usize, 200 * control_scratch + 2 * codec.frame_scratch_max), pool.scratch.len);
+}
