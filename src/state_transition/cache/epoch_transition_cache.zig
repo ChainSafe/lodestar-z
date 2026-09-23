@@ -1,5 +1,6 @@
 const std = @import("std");
 const types = @import("consensus_types");
+const metrics = @import("../metrics.zig");
 
 const Allocator = std.mem.Allocator;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
@@ -462,10 +463,12 @@ pub const EpochTransitionCache = struct {
 
         if (fork_seq.gte(.altair)) {
             if (epoch_cache.current_target_unslashed_balance_increments != curr_target_unsl_stake) {
-                return error.InCorrectCurrentTargetUnslashedBalance;
+                try metrics.state_transition.progressive_balances_mismatches.incr(.{ .target = .current });
+                epoch_cache.current_target_unslashed_balance_increments = curr_target_unsl_stake;
             }
             if (epoch_cache.previous_target_unslashed_balance_increments != prev_target_unsl_stake) {
-                return error.InCorrectPreviousTargetUnslashedBalance;
+                try metrics.state_transition.progressive_balances_mismatches.incr(.{ .target = .previous });
+                epoch_cache.previous_target_unslashed_balance_increments = prev_target_unsl_stake;
             }
         }
 
