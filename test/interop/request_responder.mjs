@@ -175,6 +175,10 @@ for await (const line of boundedLines(process.stdin)) {
       assert(gossipMode && gossipTopics.has(command.topic));
       assert(Number.isInteger(command.length) && command.length >= 10 && command.length <= 10 * 1024 * 1024);
       const data = command.hoodi ? await readFile(process.argv[3]) : payload(command.length, command.seed ?? 71);
+      if (command.slot !== undefined) {
+        assert(Number.isSafeInteger(command.slot) && command.slot >= 0 && data.length >= 108);
+        data.writeBigUInt64LE(BigInt(command.slot), 100);
+      }
       const result = await node.services.pubsub.publish(command.topic, data);
       response = {
         ...summary(data),

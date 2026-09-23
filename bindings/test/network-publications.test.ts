@@ -10,30 +10,45 @@ const REQUEST = "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy";
 test("publication byte pressure rejects before copying and permits retry after credit returns", async () => {
   const config = applicationConfig();
   const probe = await startPeer(config);
-  const fixed = (await probe.diagnostics()).bridgeRequestedBytes;
+  const diagnostics = await probe.diagnostics();
+  const {incomingMinimumBytes, outgoingMinimumBytes, publicationMinimumBytes} = diagnostics.payloadBudget;
   await probe.stop();
-  config.resources.bridgeBudgetBytes = fixed + 7999;
+  config.resources.bridgeBudgetBytes =
+    config.resources.bridgeBudgetBytes -
+    diagnostics.payloadBudget.limitBytes +
+    incomingMinimumBytes +
+    outgoingMinimumBytes +
+    publicationMinimumBytes +
+    7999;
   const runtime = startRuntime(config);
   try {
     const options = {allowZeroPeers: true, ignoreDuplicate: true};
     let refused: Promise<unknown> | undefined;
-    await runtime.publishGossip(BLOCK, new Uint8Array(4000).fill(1), {
+    let second: Promise<unknown> | undefined;
+    const chunk = publicationMinimumBytes / 2;
+    await runtime.publishGossip(BLOCK, new Uint8Array(chunk).fill(1), {
       ...options,
       get flood() {
-        refused = runtime.publishGossip(BLOCK, new Uint8Array(4000).fill(2), options).catch((error: unknown) => error);
+        second = runtime.publishGossip(BLOCK, new Uint8Array(chunk).fill(2), {
+          ...options,
+          get flood() {
+            refused = runtime
+              .publishGossip(BLOCK, new Uint8Array(8000).fill(3), options)
+              .catch((error: unknown) => error);
+            return false;
+          },
+        });
         return false;
       },
     });
+    await second;
     expect(await refused).toMatchObject({code: "NetworkGossipPublishFailed", reason: "admission_full"});
-    expect(runtime.diagnostics().publications).toMatchObject({byteRefusals: 1n, copies: 1n, occupied: 0});
-    await expect(runtime.publishGossip(BLOCK, new Uint8Array(4000).fill(2), options)).resolves.toMatchObject({
+    expect(runtime.diagnostics().publications).toMatchObject({byteRefusals: 1n, copies: 2n, occupied: 0});
+    await expect(runtime.publishGossip(BLOCK, new Uint8Array(8000).fill(3), options)).resolves.toMatchObject({
       duplicate: false,
     });
-    await expect(runtime.publishGossip(BLOCK, new Uint8Array(8000), options)).rejects.toMatchObject({
-      code: "NetworkGossipPublishFailed",
-      reason: "resource_exhausted",
-    });
-    expect(runtime.diagnostics().publications).toMatchObject({copies: 2n, occupied: 0, reservedBytes: 0});
+    expect(runtime.diagnostics().publications).toMatchObject({copies: 3n, occupied: 0, reservedBytes: 0});
+    expect(runtime.diagnostics().payloadBudget.usedBytes).toBe(0);
   } finally {
     await runtime.close();
   }
@@ -129,7 +144,7 @@ test.skipIf(!networkBindings.networkTestFail)(
 test("beacon profile admits 200 publications without occupying control cells", async () => {
   const config = applicationConfig();
   config.profile = "beaconNode";
-  config.resources.bridgeBudgetBytes = 128 * 1024 * 1024;
+  config.resources.bridgeBudgetBytes = 512 * 1024 * 1024;
   config.resources.nativeBudgetBytes = 512 * 1024 * 1024;
   const runtime = startRuntime(config);
   try {

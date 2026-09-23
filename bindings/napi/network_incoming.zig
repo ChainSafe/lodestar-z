@@ -25,6 +25,7 @@ pub const Cell = struct {
     input: []u8 = &.{},
     response: []u8 = &.{},
     reservation: usize = 0,
+    response_reservation: usize = 0,
     context: ?rr.ForkEntry = null,
     copying: bool = false,
     exposed: bool = false,
@@ -87,7 +88,7 @@ pub const Table = struct {
     }
     pub fn reserve(self: *Table, protocol: rr.Protocol, len: usize) !Token {
         std.debug.assert(len >= protocol.info().request_min and len <= protocol.info().request_max);
-        const amount = try std.math.add(usize, try std.math.mul(usize, len, 2), protocol.info().response_max);
+        const amount = try std.math.mul(usize, len, 2);
         var selected: ?Token = null;
         for (self.cells, 0..) |*cell, i| {
             if (cell.state != .free or cell.generation == std.math.maxInt(u64)) continue;
@@ -99,7 +100,7 @@ pub const Table = struct {
             return error.NetworkIncomingFull;
         };
         if (self.sequence == std.math.maxInt(u64)) return error.IncomingSequenceExhausted;
-        self.budget.reserve(amount) catch |err| {
+        self.budget.reserve(.incoming, amount) catch |err| {
             self.diag.byteRefusals +|= 1;
             return err;
         };
@@ -117,7 +118,7 @@ pub const Table = struct {
         cell.input = try self.backing.dupe(u8, input);
     }
     fn refund(self: *Table, cell: *Cell, amount: usize) void {
-        self.budget.release(amount);
+        self.budget.release(.incoming, amount);
         self.diag.reservedBytes -= amount;
         cell.reservation -= amount;
     }
@@ -130,6 +131,22 @@ pub const Table = struct {
     pub fn releaseResponse(self: *Table, cell: *Cell) void {
         self.backing.free(cell.response);
         cell.response = &.{};
+        self.refund(cell, cell.response_reservation);
+        cell.response_reservation = 0;
+    }
+    pub fn reserveResponse(self: *Table, cell: *Cell, len: usize) !void {
+        std.debug.assert(len <= cell.protocol.info().response_max);
+        if (len <= cell.response_reservation) {
+            self.refund(cell, cell.response_reservation - len);
+            cell.response_reservation = len;
+            return;
+        }
+        const amount = len - cell.response_reservation;
+        try self.budget.reserve(.incoming, amount);
+        cell.response_reservation = len;
+        cell.reservation += amount;
+        self.diag.reservedBytes += amount;
+        self.diag.reservedBytesHighWater = @max(self.diag.reservedBytesHighWater, self.diag.reservedBytes);
     }
     pub fn releasePayload(self: *Table, cell: *Cell) void {
         if (cell.native or cell.copying or cell.state == .response_preparing) return;
@@ -231,6 +248,7 @@ pub fn flags(runtime: *Runtime, now: n.Now) !void {
             continue;
         }
         if (cell.permission != null and !cell.permission_ready and core.service.reqresp.reserveResponse(cell.handle, now)) {
+            table.reserveResponse(cell, cell.protocol.info().response_max) catch continue;
             cell.permission_ready = true;
             runtime.pingLocked();
         }
