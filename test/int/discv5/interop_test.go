@@ -62,7 +62,7 @@ func TestGethInterop(t *testing.T) {
 	if binary == "" {
 		t.Fatal("set DISCV5_INTEROP_BIN to the built discv5_interop executable")
 	}
-	for _, mode := range []string{"zig-first", "geth-first"} {
+	for _, mode := range []string{"zig-first", "geth-first", "zig-unadvertised"} {
 		t.Run(mode, func(t *testing.T) { runInterop(t, binary, mode) })
 	}
 }
@@ -158,7 +158,7 @@ func runInterop(t *testing.T, binary, mode string) {
 	if err != nil {
 		t.Fatalf("geth rejected Zig ENR signature: %v", err)
 	}
-	if !peer.IP().IsLoopback() || peer.UDP() == 0 {
+	if mode != "zig-unadvertised" && (!peer.IP().IsLoopback() || peer.UDP() == 0) {
 		t.Fatalf("invalid Zig endpoint: %v", peer)
 	}
 
@@ -170,28 +170,35 @@ func runInterop(t *testing.T, binary, mode string) {
 			}
 		}
 	}
-	if mode == "zig-first" {
+	if mode == "zig-unadvertised" {
+		if peer.IP() != nil || peer.UDP() != 0 {
+			t.Fatal("expected address-less Zig ENR")
+		}
 		checkZig()
-	}
-	pong, err := geth.Ping(peer)
-	if err != nil {
-		t.Fatalf("geth PING to Zig failed: %v", err)
-	}
-	if pong.ENRSeq != peer.Seq() {
-		t.Fatalf("PONG ENR sequence: got %d, want %d", pong.ENRSeq, peer.Seq())
-	}
-	if pong.ToPort != uint16(udp.LocalAddr().(*net.UDPAddr).Port) || !net.IP(pong.ToIP).Equal(net.IPv4(127, 0, 0, 1)) {
-		t.Fatalf("PONG observed endpoint mismatch: %v:%d", pong.ToIP, pong.ToPort)
-	}
-	returned, err := geth.RequestENR(peer)
-	if err != nil {
-		t.Fatalf("geth FINDNODE[0] to Zig failed: %v", err)
-	}
-	if returned.String() != peer.String() {
-		t.Fatalf("FINDNODE[0] returned a different signed ENR: %v", returned)
-	}
-	if mode == "geth-first" {
-		checkZig()
+	} else {
+		if mode == "zig-first" {
+			checkZig()
+		}
+		pong, err := geth.Ping(peer)
+		if err != nil {
+			t.Fatalf("geth PING to Zig failed: %v", err)
+		}
+		if pong.ENRSeq != peer.Seq() {
+			t.Fatalf("PONG ENR sequence: got %d, want %d", pong.ENRSeq, peer.Seq())
+		}
+		if pong.ToPort != uint16(udp.LocalAddr().(*net.UDPAddr).Port) || !net.IP(pong.ToIP).Equal(net.IPv4(127, 0, 0, 1)) {
+			t.Fatalf("PONG observed endpoint mismatch: %v:%d", pong.ToIP, pong.ToPort)
+		}
+		returned, err := geth.RequestENR(peer)
+		if err != nil {
+			t.Fatalf("geth FINDNODE[0] to Zig failed: %v", err)
+		}
+		if returned.String() != peer.String() {
+			t.Fatalf("FINDNODE[0] returned a different signed ENR: %v", returned)
+		}
+		if mode == "geth-first" {
+			checkZig()
+		}
 	}
 	if got := readLine(); got != "DONE" {
 		t.Fatalf("expected DONE, got %q", got)
@@ -208,5 +215,5 @@ func runInterop(t *testing.T, binary, mode string) {
 	if conn.writes.Load() > packetLimit || conn.reads.Load() > packetLimit {
 		t.Fatal(errPacketLimit)
 	}
-	t.Logf("both directions validated PING/PONG and signed self ENR; geth sent %d UDP packets", conn.writes.Load())
+	t.Logf("validated %s PING/PONG and signed self ENR; geth sent %d UDP packets", mode, conn.writes.Load())
 }

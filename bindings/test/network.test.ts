@@ -294,9 +294,10 @@ it("gates raw reentrant initialization and close before config getters execute",
 it("initializes signed discovery without waiting for bootstrap reachability", async () => {
   const config = applicationConfig();
   config.discovery = {
-    advertisement: {ip4: Uint8Array.of(127, 0, 0, 1), quic: 443, udp: 40404},
+    advertisement: {ip4: Uint8Array.of(127, 0, 0, 1), udp: 40404},
     bind: {address: Uint8Array.of(127, 0, 0, 1), family: 4, port: 0},
     bootstrapEnrs: [],
+    fixed: {ip4: Uint8Array.of(127, 0, 0, 1), quic: 443, udp: 40404},
     sequenceNumber: 7n,
   };
   const first = startRuntime(config, () => undefined);
@@ -340,7 +341,7 @@ it.each([17, 64])("accepts a bounded discovery bootstrap list of %i entries", as
   expect(runtime.diagnostics().liveNativeRequestedBytes).toBe(0);
 }, 20000);
 
-it("fails wildcard discovery advertisement omissions cleanly", async () => {
+it("starts wildcard discovery without advertised addresses", async () => {
   const config = applicationConfig();
   if (!("address" in config.bind)) throw new Error("Expected a single bind address");
   config.bind.address.fill(0);
@@ -348,9 +349,20 @@ it("fails wildcard discovery advertisement omissions cleanly", async () => {
     advertisement: null,
     bind: {address: new Uint8Array(4), family: 4, port: 0},
     bootstrapEnrs: [],
+    fixed: {},
     sequenceNumber: 1n,
   };
-  expect(() => startRuntime(config, () => undefined)).toThrow("InvalidAdvertisement");
+  const runtime = startRuntime(config);
+  try {
+    const identity = await runtime.getIdentity();
+    expect(identity.localEnr).toBeInstanceOf(Uint8Array);
+    const intent = localIntent(config);
+    intent.update.local.metadata.attnets[0] = 1;
+    await runtime.applyIntent(intent, config.initialSlot);
+    expect((await runtime.getIdentity()).localEnr).not.toEqual(identity.localEnr);
+  } finally {
+    await runtime.close();
+  }
 }, 20000);
 
 it("publishes copied peer observations without repeating unread notifications", async () => {

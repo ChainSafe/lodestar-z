@@ -4,6 +4,7 @@ import type {NativeSubscriptionSet} from "../src/network.js";
 import {
   applicationConfig,
   configureChain,
+  discoveryConfig,
   localIntent,
   requestForks,
   startRuntime,
@@ -227,6 +228,24 @@ test("three-boundary overlap refuses capacity without partially changing subscri
       before
     );
     expect(runtime.diagnostics().preparingPins).toBe(0);
+  } finally {
+    await runtime.close();
+  }
+});
+
+test("host intents preserve native advertisement and reject endpoint overrides", async () => {
+  const config = discoveryConfig();
+  const runtime = startRuntime(config);
+  try {
+    const before = (await runtime.getIdentity()).localEnr;
+    config.discovery.advertisement.ip4 = Uint8Array.of(192, 0, 2, 1);
+    config.discovery.fixed.ip4 = Uint8Array.of(192, 0, 2, 1);
+    const intent = localIntent(config);
+    await runtime.applyIntent(intent, config.initialSlot);
+    expect((await runtime.getIdentity()).localEnr).toEqual(before);
+    Reflect.set(intent.update, "endpoints", config.discovery.advertisement);
+    await expect(runtime.applyIntent(intent, config.initialSlot)).rejects.toThrow("InvalidNetworkConfig");
+    expect((await runtime.getIdentity()).localEnr).toEqual(before);
   } finally {
     await runtime.close();
   }

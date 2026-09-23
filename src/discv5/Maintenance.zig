@@ -8,6 +8,7 @@ const Lookup = @import("Lookup.zig");
 const message = @import("wire/message.zig");
 const RoutingTable = @import("RoutingTable.zig");
 const types = @import("types.zig");
+const AddressVotes = @import("AddressVotes.zig");
 
 pub const probe_attempts_max: u8 = 2;
 pub const Error = Engine.Error || error{InvalidConfig};
@@ -24,7 +25,7 @@ const Pending = struct {
     kind: enum { ping, enr } = .ping,
     attempts: u8 = 0,
     ready_ms: u64,
-    origin: enum { stale, replacement } = .stale,
+    origin: enum { stale, replacement, observation } = .stale,
 };
 
 const Maintenance = @This();
@@ -34,6 +35,11 @@ pending: ?Pending = null,
 probe_cursor: usize = 0,
 probe_due_ms: u64,
 next_start_ms: ?u64,
+observations: ?*AddressVotes = null,
+observation_cursor: [2]usize = .{ 0, 0 },
+observation_due_ms: u64 = 0,
+prefer_observation: bool = false,
+observation_family: u1 = 0,
 
 pub fn init(
     self: *Maintenance,
@@ -101,6 +107,10 @@ pub fn startNext(
             };
             pending.handle = call.handle;
             pending.attempts += 1;
+            if (pending.origin == .observation and pending.kind == .ping) {
+                self.observations.?.attempted(&pending.entry.peer, call.handle, now_ms);
+                self.observation_due_ms = now_ms +| AddressVotes.probe_interval_ms;
+            }
             self.next_start_ms = now_ms;
             return .{ .peer = pending.entry.peer, .call = call };
         }
@@ -159,6 +169,12 @@ pub fn onFailure(
         if (pending.handle) |owned| {
             if (std.meta.eql(handle, owned)) {
                 _ = core.cancelCall(handle);
+                if (pending.origin == .observation) {
+                    if (reason == .local) self.observations.?.localFailure(&pending.entry.peer, handle);
+                    self.pending = null;
+                    self.next_start_ms = now_ms +| self.config.retry_interval_ms;
+                    return true;
+                }
                 if (pending.origin == .replacement and pending.kind == .ping) {
                     if (reason == .local) {
                         if (pending.attempts >= probe_attempts_max) {
@@ -216,26 +232,60 @@ pub fn cancel(self: *Maintenance, core: *Engine) void {
 fn selectProbe(self: *Maintenance, core: *Engine, now_ms: u64) void {
     if (self.pending) |pending| {
         if (pending.handle != null) return;
-        if (!core.isPeerBusy(&pending.entry.peer.node_id)) return;
+        if (!core.isPeerBusy(&pending.entry.peer.node_id) and
+            (pending.origin != .observation or pending.kind != .ping or self.observations.?.canProbe(&pending.entry.peer, now_ms))) return;
         self.pending = null;
         self.probe_due_ms = @min(self.probe_due_ms, now_ms);
     }
-    if (core.routing.revalidationTarget()) |entry| {
-        if (self.ip_mode.supports(entry.peer.address) and !core.isPeerBusy(&entry.peer.node_id)) {
-            self.pending = .{ .entry = entry, .ready_ms = now_ms, .origin = .replacement };
-            return;
+    for (0..2) |turn| {
+        const observe = if (turn == 0) self.prefer_observation else !self.prefer_observation;
+        if (observe) {
+            for (0..2) |offset| {
+                const family = (self.observation_family + offset) % 2;
+                if (self.selectObservation(core, family, now_ms)) {
+                    self.observation_family = @intCast(1 - family);
+                    self.prefer_observation = false;
+                    return;
+                }
+            }
+            continue;
         }
+        if (core.routing.revalidationTarget()) |entry| {
+            if (self.ip_mode.supports(entry.peer.address) and !core.isPeerBusy(&entry.peer.node_id)) {
+                self.pending = .{ .entry = entry, .ready_ms = now_ms, .origin = .replacement };
+                self.prefer_observation = true;
+                return;
+            }
+        }
+        if (now_ms < self.probe_due_ms) continue;
+        self.probe_due_ms = now_ms +| self.config.probe_interval_ms;
+        const entry = core.maintenanceTarget(&self.probe_cursor, now_ms, self.config.stale_after_ms) orelse continue;
+        if (!self.ip_mode.supports(entry.peer.address) or core.isPeerBusy(&entry.peer.node_id)) continue;
+        self.pending = .{ .entry = entry, .ready_ms = now_ms };
+        self.prefer_observation = true;
+        return;
     }
-    if (now_ms < self.probe_due_ms) return;
-    self.probe_due_ms = now_ms +| self.config.probe_interval_ms;
-    const entry = core.maintenanceTarget(
-        &self.probe_cursor,
-        now_ms,
-        self.config.stale_after_ms,
-    ) orelse return;
-    if (!self.ip_mode.supports(entry.peer.address)) return;
-    if (core.isPeerBusy(&entry.peer.node_id)) return;
-    self.pending = .{ .entry = entry, .ready_ms = now_ms };
+    if (now_ms >= self.observation_due_ms) self.observation_due_ms = now_ms +| AddressVotes.probe_interval_ms;
+}
+
+fn selectObservation(self: *Maintenance, core: *Engine, family: usize, now_ms: u64) bool {
+    const observations = self.observations orelse return false;
+    if (now_ms < self.observation_due_ms or !observations.needsSample(family, now_ms)) return false;
+    const mode: types.Mode = if (family == 0) .ip4 else .ip6;
+    const cursor = &self.observation_cursor[family];
+    for (0..RoutingTable.table_capacity) |_| {
+        const offset = cursor.*;
+        cursor.* = (offset + 1) % RoutingTable.table_capacity;
+        if (offset % RoutingTable.bucket_size >= core.routing.counts[offset / RoutingTable.bucket_size]) continue;
+        var entry = core.routing.entries[offset];
+        const address = entry.record.endpointFor(mode) orelse continue;
+        if (!self.ip_mode.supports(address) or core.isPeerBusy(&entry.peer.node_id)) continue;
+        entry.peer.address = address;
+        if (!observations.canProbe(&entry.peer, now_ms)) continue;
+        self.pending = .{ .entry = entry, .ready_ms = now_ms, .origin = .observation };
+        return true;
+    }
+    return false;
 }
 
 fn onProbeResponse(
@@ -275,10 +325,11 @@ fn onProbeResponse(
 }
 
 fn scheduleNext(self: *Maintenance, now_ms: u64) void {
-    const next = if (self.pending) |pending|
+    var next = if (self.pending) |pending|
         if (pending.handle == null) @max(pending.ready_ms, now_ms +| self.config.retry_interval_ms) else std.math.maxInt(u64)
     else
         self.probe_due_ms;
+    if (self.pending == null and self.observations != null) next = @min(next, self.observation_due_ms);
     self.next_start_ms = @max(next, now_ms +| 1);
 }
 

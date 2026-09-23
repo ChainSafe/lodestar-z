@@ -11,6 +11,7 @@ pub const Transport = @import("Transport.zig");
 pub const Engine = @import("Engine.zig");
 pub const Lookup = @import("Lookup.zig");
 pub const Maintenance = @import("Maintenance.zig");
+pub const AddressVotes = @import("AddressVotes.zig");
 pub const ResponsePlan = @import("ResponsePlan.zig");
 pub const RoutingTable = @import("RoutingTable.zig");
 pub const SessionStore = @import("SessionStore.zig");
