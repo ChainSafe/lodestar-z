@@ -286,7 +286,7 @@ test.skipIf(!faultApi.networkTestFail)(
       await pair.left.publishGossip(TOPIC, blockPayload(4000, 3), {allowZeroPeers: false});
       for (let i = 0; i < 1000 && pair.right.diagnostics().gossip.queued === 0; i++) await delay(5);
       faultApi.networkTestFail?.("gossip_copy");
-      expect(() => pair.right.drainGossip()).toThrow("InjectedNetworkFailure");
+      expect(() => pair.right.drainGossip()).toThrow("NetworkResultAllocationFailed");
       expect(pair.right.diagnostics().gossip).toMatchObject({
         copyingBytes: 0,
         messagesCopied: 0n,
@@ -304,7 +304,7 @@ test.skipIf(!faultApi.networkTestFail)(
 );
 
 test.skipIf(!faultApi.networkTestFail)(
-  "gossip publication result failure preserves native queued outcome and closes",
+  "gossip publication result failure preserves the queued outcome and runtime",
   async () => {
     const pair = await gossipPair();
     try {
@@ -312,12 +312,14 @@ test.skipIf(!faultApi.networkTestFail)(
       await expect(
         pair.right.publishGossip(TOPIC, blockPayload(4000, 4), {allowZeroPeers: false})
       ).rejects.toMatchObject({code: "NetworkResultAllocationFailed"});
+      expect(pair.right.state).toBe("running");
+      await expect(pair.right.getIdentity()).resolves.toBeDefined();
       await pair.right.close();
-      expect(await pair.right.diagnostics()).toMatchObject({
+      expect(pair.right.diagnostics()).toMatchObject({
         liveNativeRequestedBytes: 0,
         operationOccupied: 0,
-        state: "failed",
-        terminalErrorCode: "NetworkResultAllocationFailed",
+        state: "closed",
+        terminalErrorCode: null,
       });
       expect((await pair.right.diagnostics()).gossip).toMatchObject({
         publicationBytes: 0,
@@ -536,7 +538,7 @@ for (const scenario of [
         for (let i = 0; i < 1000 && pair.right.diagnostics().gossip.queued !== 2; i++) await delay(5);
         expect(pair.right.diagnostics().gossip.queued).toBe(2);
         if (scenario.includes("fail")) {
-          expect(() => pair.right.drainGossip()).toThrow("InjectedNetworkFailure");
+          expect(() => pair.right.drainGossip()).toThrow("NetworkResultAllocationFailed");
           expect(pair.right.diagnostics().gossip.messagesCopied).toBe(0n);
           expect(pair.right.diagnostics().gossip.copyingBytes).toBe(0);
           expect(pair.right.diagnostics().gossip.queued).toBe(scenario === "gossip_second_copy_fail" ? 2 : 0);

@@ -342,7 +342,7 @@ instrumented.each([false, true])(
       const stream = pair.left.request(pair.remote.peerId, BLOCKS, new Uint8Array(32).fill(19));
       const pending = stream.next().catch(() => undefined);
       if (copyFault) hooks.networkTestFail("operation_copy");
-      if (copyFault) await expect(takeIncoming(pair.right)).rejects.toThrow("InjectedNetworkFailure");
+      if (copyFault) await expect(takeIncoming(pair.right)).rejects.toThrow("NetworkResultAllocationFailed");
       else {
         const incoming = await takeIncoming(pair.right);
         expect(incoming.data).toEqual(new Uint8Array(32).fill(19));
@@ -496,8 +496,7 @@ instrumented.each(["incoming_response", "operation_copy"])(
       const pending = stream.next().catch(() => undefined);
       if (stage === "operation_copy") {
         hooks.networkTestFail(stage);
-        await expect(takeIncoming(pair.right)).rejects.toThrow("InjectedNetworkFailure");
-        await pair.right.close();
+        await expect(takeIncoming(pair.right)).rejects.toThrow("NetworkResultAllocationFailed");
       } else {
         const incoming = await takeIncoming(pair.right);
         hooks.networkTestFail(stage);
@@ -513,6 +512,11 @@ instrumented.each(["incoming_response", "operation_copy"])(
         reservedBytes: 0,
         responseBytes: 0,
       });
+      expect(pair.right.state).toBe("running");
+      const retry = pair.left.request(pair.remote.peerId, BLOCKS, new Uint8Array(32)).next();
+      const replacement = await takeIncoming(pair.right);
+      await replacement.finish();
+      await expect(retry).resolves.toMatchObject({done: true});
     } finally {
       await Promise.all([pair.left.close(), pair.right.close()]);
     }
@@ -752,7 +756,7 @@ instrumented("incoming table allocation failure unwinds startup before publicati
 });
 
 instrumented(
-  "incoming input allocation failure releases reservation and closes the owner",
+  "incoming input allocation failure refuses only that request",
   async () => {
     const hooks = await faults();
     const pair = await incomingPair();
@@ -762,8 +766,14 @@ instrumented(
         .request(pair.remote.peerId, BLOCKS, new Uint8Array(32))
         .next()
         .catch(() => undefined);
-      await expect.poll(() => pair.right.diagnostics().terminalErrorCode).toBe("InjectedNetworkFailure");
-      await pair.right.close();
+      await pending;
+      expect(pair.right.state).toBe("running");
+      expect(pair.right.diagnostics().operationalFailures).toBeGreaterThan(0);
+      await expect(pair.right.getIdentity()).resolves.toBeDefined();
+      const retry = pair.left.request(pair.remote.peerId, BLOCKS, new Uint8Array(32)).next();
+      const request = await takeIncoming(pair.right);
+      await request.finish();
+      await expect(retry).resolves.toMatchObject({done: true});
       expect(pair.right.diagnostics().incoming).toMatchObject({
         occupied: 0,
         requestBytes: 0,

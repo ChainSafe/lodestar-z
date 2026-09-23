@@ -283,7 +283,15 @@ pub fn flags(runtime: *Runtime, now: n.Now) !void {
 }
 pub fn captureLocked(runtime: *Runtime, event: rr.Event, now: n.Now) !void {
     const table = if (runtime.incoming) |*table| table else return;
-    if (event == .request) return admitLocked(runtime, event.request, now);
+    if (event == .request) return admitLocked(runtime, event.request, now) catch |err| switch (@as(anyerror, err)) {
+        error.OutOfMemory, error.InjectedNetworkFailure => {
+            runtime.diag.operationalFailures +|= 1;
+            runtime.heavy.?.core.respondError(event.request.request, 2, "local serving allocation failed", now) catch {
+                _ = runtime.heavy.?.core.cancel(event.request.request);
+            };
+        },
+        else => return err,
+    };
     const handle = switch (event) {
         .chunk_sent => |e| e.request,
         .served => |e| e.request,

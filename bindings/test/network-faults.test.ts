@@ -67,13 +67,25 @@ describe.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")("test-buil
     await collected();
   });
 
-  it("retries a terminal scalar copy once after physical join", async () => {
+  it("settles close from its startup result after physical join", async () => {
     let runtime: ReturnType<typeof startRuntime> | null = startRuntime(applicationConfig(), () => undefined);
     await runtime.identity;
-    bindings.networkTestFail("close_copy");
     expect(await runtime.close()).toEqual({reason: "requested"});
     runtime = null;
     await collected();
+  });
+
+  it("a command result allocation failure leaves later commands usable", async () => {
+    const runtime = startRuntime(applicationConfig());
+    try {
+      bindings.networkTestFail("operation_copy");
+      await expect(runtime.getIdentity()).rejects.toMatchObject({code: "NetworkResultAllocationFailed"});
+      expect(runtime.state).toBe("running");
+      await expect(runtime.getIdentity()).resolves.toMatchObject({peerId: runtime.identity.peerId});
+      expect(runtime.diagnostics()).toMatchObject({copyingPins: 0, operationOccupied: 0});
+    } finally {
+      await runtime.close();
+    }
   });
 
   it("does not reopen initialization after failure", async () => {

@@ -69,11 +69,12 @@ pub fn take(runtime: *Runtime) !Value {
         cell.state = if (cell.native) .serving else .terminal;
         table.releasePayload(cell);
         if (!cell.native and !cell.serving_retained) table.retire(token) else cell.release_requested = true;
+        runtime.diag.operationalFailures +|= 1;
+        runtime.signalLocked();
         runtime.unlock();
-        runtime.failDelivery();
     }
     const deferred = try runtime.env.createPromise();
-    errdefer deferred.resolve(runtime.env.getUndefined() catch unreachable) catch unreachable;
+    errdefer @import("network_js.zig").discardPromise(runtime.env, deferred);
     const descriptor = try descriptorValue(runtime, token, cell, deferred);
     runtime.lock();
     cell.closed = deferred;
@@ -86,7 +87,6 @@ pub fn take(runtime: *Runtime) !Value {
     table.releasePayload(cell);
     runtime.unlock();
     refNotify(runtime);
-    settle(runtime.env, runtime);
     return descriptor;
 }
 fn descriptorValue(runtime: *Runtime, token: incoming.Token, cell: *const incoming.Cell, deferred: napi.Deferred) !Value {
@@ -167,7 +167,7 @@ pub fn respond(runtime: *Runtime, value: Value, data: Value, context_value: Valu
     try phases.preparing(runtime, cell, .buffer, copy, null);
     const deferred = try runtime.env.createPromise();
     errdefer {
-        deferred.resolve(runtime.env.getUndefined() catch unreachable) catch unreachable;
+        @import("network_js.zig").discardPromise(runtime.env, deferred);
         phases.released(runtime, .deferred);
     }
     try cfg.bytes(data, copy);
@@ -223,7 +223,7 @@ pub fn terminal(runtime: *Runtime, value: Value, action_value: Value, status_val
     }
     runtime.unlock();
     refNotify(runtime);
-    settle(runtime.env, runtime);
+    try settle(runtime.env, runtime);
     return runtime.env.getUndefined();
 }
 
@@ -243,7 +243,7 @@ pub fn release(runtime: *Runtime, value: Value) !Value {
 pub fn ready(runtime: *Runtime, value: Value) !Value {
     const handle = try parseHandle(value);
     const deferred = try runtime.env.createPromise();
-    errdefer deferred.resolve(runtime.env.getUndefined() catch unreachable) catch unreachable;
+    errdefer @import("network_js.zig").discardPromise(runtime.env, deferred);
     runtime.lock();
     const cell = cellFor(runtime, handle) catch |err| {
         runtime.unlock();
@@ -279,7 +279,7 @@ fn ackError(env: napi.Env, ack: incoming.Ack) !Value {
         },
     }
 }
-pub fn settle(env: napi.Env, runtime: *Runtime) void {
+pub fn settle(env: napi.Env, runtime: *Runtime) !void {
     if (runtime.incoming == null) return;
     if (@import("network_incoming_faults.zig").holdSettlement(runtime)) return;
     runtime.retain();
@@ -307,27 +307,29 @@ pub fn settle(env: napi.Env, runtime: *Runtime) void {
         const ack = cell.ack;
         const permitted = cell.native and cell.permission_ready;
         runtime.unlock();
+        defer {
+            runtime.lock();
+            cell.copying = false;
+            if (pending != null) {
+                cell.pending = null;
+                cell.ack = null;
+            }
+            if (closed != null) cell.closed = null;
+            if (permission != null) {
+                cell.permission = null;
+                cell.permission_ready = false;
+            }
+            table.releasePayload(cell);
+            if (!cell.native and !cell.serving_retained and cell.closed == null and cell.pending == null and cell.permission == null) table.retire(.{ .index = @intCast(i), .generation = cell.generation });
+            runtime.unlock();
+        }
         if (pending) |deferred| {
-            if (ack.? == .sent) deferred.resolve(env.getUndefined() catch unreachable) catch unreachable else deferred.reject(ackError(env, ack.?) catch runtime.copy_error.?.getValue() catch unreachable) catch unreachable;
+            if (ack.? == .sent) try deferred.resolve(try env.getUndefined()) else try deferred.reject(ackError(env, ack.?) catch try runtime.copy_error.?.getValue());
         }
-        if (closed) |deferred| deferred.resolve(env.getUndefined() catch unreachable) catch unreachable;
+        if (closed) |deferred| try deferred.resolve(try env.getUndefined());
         if (permission) |deferred| {
-            if (permitted) deferred.resolve(env.getUndefined() catch unreachable) catch unreachable else deferred.reject(errorValue(env, "NetworkIncomingClosed") catch runtime.copy_error.?.getValue() catch unreachable) catch unreachable;
+            if (permitted) try deferred.resolve(try env.getUndefined()) else try deferred.reject(errorValue(env, "NetworkIncomingClosed") catch try runtime.copy_error.?.getValue());
         }
-        runtime.lock();
-        cell.copying = false;
-        if (pending != null) {
-            cell.pending = null;
-            cell.ack = null;
-        }
-        if (closed != null) cell.closed = null;
-        if (permission != null) {
-            cell.permission = null;
-            cell.permission_ready = false;
-        }
-        table.releasePayload(cell);
-        if (!cell.native and !cell.serving_retained and cell.closed == null and cell.pending == null and cell.permission == null) table.retire(.{ .index = @intCast(i), .generation = cell.generation });
-        runtime.unlock();
     }
     runtime.lock();
     runtime.retireRequestStorageLocked();

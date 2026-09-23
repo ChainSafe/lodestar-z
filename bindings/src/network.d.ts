@@ -367,6 +367,7 @@ export interface NativeNetworkApplicationRuntime {
   setLogLevel(level: NativeLogLevel): void;
   /** Prometheus text rendered by the network owner once per second. Counters survive close. */
   getMetrics(): string;
+  /** A failed runtime cannot restart. The host must shut down the beacon node on terminal failure. */
   readonly closed: Promise<NativeRuntimeCloseResult>;
   /** Copies work within host credits, up to 64 messages/16 MiB. Processor plans also apply kind and ordinary scheduling gates. */
   drainGossip(demand?: {items: number; bytes: number; ordinary: boolean}): NativeGossipBatch;
