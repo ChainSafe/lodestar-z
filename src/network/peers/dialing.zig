@@ -34,6 +34,8 @@ pub const Dialing = struct {
     counters: Counters = .{},
     selected_attempts: [std.meta.fields(Source).len]u64 = @splat(0),
     durations: [2]DialTime = @splat(.{}),
+    outcomes: [std.meta.fields(t.DialOutcome).len]u64 = @splat(0),
+    retries: [std.meta.fields(t.DialFailure).len]u64 = @splat(0),
 
     pub const Counters = struct {
         manual_completed: u64 = 0,
@@ -259,7 +261,7 @@ pub const Dialing = struct {
             const peer = attempt.peer orelse continue;
             if (!std.meta.eql(attempt.connection, conn)) continue;
             const row = catalog.rowFor(peer).?;
-            self.retire(catalog, @intCast(index));
+            self.retire(catalog, @intCast(index), .admission_refused);
             row.intent.eligible_at_ms = @max(row.intent.eligible_at_ms, now_ms +| 1_000);
             releaseUnused(catalog, peer);
             return true;
@@ -269,6 +271,7 @@ pub const Dialing = struct {
     pub fn accepted(self: *Dialing, catalog: *Catalog, peer: t.PeerRef, conn: t.Handle, now_ms: u64) void {
         const row = catalog.rowFor(peer).?;
         std.debug.assert(std.meta.eql(row.connection, conn));
+        row.intent.last_failure = null;
         if (row.intent.manual_until_ms != 0) {
             row.intent.manual_until_ms = 0;
             self.counters.manual_completed +|= 1;
@@ -279,7 +282,7 @@ pub const Dialing = struct {
                 if (!std.meta.eql(current, conn)) return;
                 self.durations[0].observe(now_ms -| attempt.started_ms);
             }
-            self.retire(catalog, index);
+            self.retire(catalog, index, .connected);
         }
         row.intent.eligible_at_ms = @max(row.intent.eligible_at_ms, now_ms +| 1_000);
         releaseUnused(catalog, peer);
@@ -291,15 +294,15 @@ pub const Dialing = struct {
         row.intent.manual_until_ms = 0;
         if (row.attempt) |index| {
             if (self.active[index].connection) |conn| closeAttempt(engine, conn);
-            self.retire(catalog, index);
+            self.retire(catalog, index, .cancelled);
         }
         row.intent.eligible_at_ms = @max(row.intent.eligible_at_ms, now_ms +| 60_000);
         releaseUnused(catalog, ref);
     }
-    pub fn dialClosed(self: *Dialing, catalog: *Catalog, conn: t.Handle, now_ms: u64) bool {
+    pub fn dialClosed(self: *Dialing, catalog: *Catalog, conn: t.Handle, reason: t.CloseReason, now_ms: u64) bool {
         for (self.active, 0..) |attempt, index| {
             if (attempt.peer == null or !std.meta.eql(attempt.connection, conn)) continue;
-            self.failed(catalog, @intCast(index), now_ms);
+            self.failed(catalog, @intCast(index), now_ms, closeFailure(reason));
             return true;
         }
         return false;
@@ -321,7 +324,7 @@ pub const Dialing = struct {
     pub fn dialFailed(self: *Dialing, catalog: *Catalog, token: Token, now_ms: u64) bool {
         const attempt = self.attemptFor(token) orelse return false;
         if (attempt.connection != null) return false;
-        self.failed(catalog, @intCast(token.index), now_ms);
+        self.failed(catalog, @intCast(token.index), now_ms, .destination_unreachable);
         return true;
     }
     pub fn dialDeferred(self: *Dialing, catalog: *Catalog, token: Token, now_ms: u64) bool {
@@ -329,26 +332,28 @@ pub const Dialing = struct {
         if (attempt.connection != null) return false;
         const peer = attempt.peer.?;
         const row = catalog.rowFor(peer).?;
-        self.retire(catalog, @intCast(token.index));
+        self.retire(catalog, @intCast(token.index), .deferred);
         row.intent.eligible_at_ms = @max(row.intent.eligible_at_ms, now_ms +| 1_000);
         releaseUnused(catalog, peer);
         return true;
     }
-    fn retire(self: *Dialing, catalog: *Catalog, index: u8) void {
+    fn retire(self: *Dialing, catalog: *Catalog, index: u8, outcome: t.DialOutcome) void {
         const attempt = &self.active[index];
         const row = catalog.rowFor(attempt.peer.?).?;
         std.debug.assert(row.attempt == index);
         row.attempt = null;
         attempt.* = .{ .generation = attempt.generation };
+        self.outcomes[@intFromEnum(outcome)] +|= 1;
     }
-    fn failed(self: *Dialing, catalog: *Catalog, index: u8, now_ms: u64) void {
+    fn failed(self: *Dialing, catalog: *Catalog, index: u8, now_ms: u64, failure: t.DialFailure) void {
         const attempt = self.active[index];
         const peer = attempt.peer.?;
         const row = catalog.rowFor(peer).?;
-        self.retire(catalog, index);
+        self.retire(catalog, index, failureOutcome(failure));
         if (row.connection == null) {
             self.durations[1].observe(now_ms -| attempt.started_ms);
             row.intent.failures = @min(row.intent.failures +| 1, 7);
+            row.intent.last_failure = failure;
             const base: u64 = @min(@as(u64, 1_000) << @intCast(row.intent.failures - 1), 60_000);
             const jitter = self.random.random().int(u16) % 1_001;
             row.intent.eligible_at_ms = @max(row.intent.eligible_at_ms, now_ms +| @min(base + jitter, 60_000));
@@ -374,7 +379,7 @@ pub const Dialing = struct {
                 if (self.active[slot].connection) |conn| {
                     closeAttempt(engine orelse continue, conn);
                 }
-                self.retire(catalog, slot);
+                self.retire(catalog, slot, .cancelled);
             };
             row.intent.manual_until_ms = 0;
             self.counters.manual_expired +|= 1;
@@ -383,7 +388,7 @@ pub const Dialing = struct {
         for (self.active, 0..) |attempt, index| {
             if (attempt.peer == null or now_ms < attempt.lease_until_ms) continue;
             if (attempt.connection) |conn| closeAttempt(engine orelse continue, conn);
-            self.failed(catalog, @intCast(index), now_ms);
+            self.failed(catalog, @intCast(index), now_ms, .expired);
         }
     }
     fn freeAttempt(self: *const Dialing) ?u8 {
@@ -416,6 +421,7 @@ pub const Dialing = struct {
             const tier = dialTier(row, now_ms);
             self.preferred_starts = if (tier == 0) 0 else @min(self.preferred_starts + 1, self.options.concurrent_max);
             self.selected_attempts[tier] +|= 1;
+            if (row.intent.last_failure) |failure| self.retries[@intFromEnum(failure)] +|= 1;
             out[count] = .{ .token = .{ .index = slot, .generation = attempt.generation }, .peer = row.identity, .address = row.intent.addresses[row.intent.address_index] };
             count += 1;
         }
@@ -456,7 +462,7 @@ pub const Dialing = struct {
         for (self.active, 0..) |attempt, index| {
             if (attempt.peer == null) continue;
             if (attempt.connection) |conn| closeAttempt(engine, conn);
-            self.retire(catalog, @intCast(index));
+            self.retire(catalog, @intCast(index), .cancelled);
         }
         var it = catalog.intents.iterator(.{});
         while (it.next()) |index| {
@@ -466,6 +472,18 @@ pub const Dialing = struct {
         }
     }
 };
+fn closeFailure(reason: t.CloseReason) t.DialFailure {
+    return switch (reason) {
+        .handshake_timeout => .handshake_timeout,
+        .peer_id_mismatch => .peer_id_mismatch,
+        else => .refused,
+    };
+}
+fn failureOutcome(failure: t.DialFailure) t.DialOutcome {
+    return switch (failure) {
+        inline else => |tag| @field(t.DialOutcome, @tagName(tag)),
+    };
+}
 fn dialTier(row: *const Row, now_ms: u64) u8 {
     return if (row.direct) 2 else if (now_ms < row.intent.manual_until_ms) 1 else 0;
 }
