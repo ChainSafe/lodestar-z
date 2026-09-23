@@ -333,29 +333,24 @@ test.skipIf(!faultApi.networkTestFail)(
   15000
 );
 
-test("gossip byte refusal preserves both accepted request directions and real control progress", async () => {
-  const maxPayload = 10 * 1024 * 1024;
-  const decodedArena = 32 + maxPayload + Math.floor(maxPayload / 6) + 4096;
-  const pair = await gossipPair(30000n, 37 * 1024 * 1024 + decodedArena);
+test("gossip and both request directions retain independent payload capacity", async () => {
+  const pair = await gossipPair(30000n, 128 * 1024 * 1024);
   try {
     const outgoing = pair.right.request(pair.identity.peerId, BLOCKS, new Uint8Array(32));
     const outboundPull = outgoing.next();
+    void outboundPull.catch(() => undefined);
     const inbound = await takeIncoming(pair.left);
     const reverse = pair.left.request(pair.remote.peerId, BLOCKS, new Uint8Array(32));
     const inboundPull = reverse.next();
+    void inboundPull.catch(() => undefined);
     const serving = await takeIncoming(pair.right);
     expect(pair.right.diagnostics().requests.occupied).toBe(1);
     expect(pair.right.diagnostics().incoming.occupied).toBe(1);
     await pair.left.publishGossip(TOPIC, blockPayload(10 * 1024 * 1024, 17), {allowZeroPeers: false});
-    const refused = 'lodestar_native_gossipsub_storage_refusals_total{reason="processor_capacity"} 1\n';
-    for (let i = 0; i < 2000 && !pair.right.getMetrics().includes(refused); i++) await delay(5);
-    expect(pair.right.getMetrics()).toContain(refused);
-    expect(pair.right.diagnostics().gossip).toMatchObject({
-      occupied: 0,
-      reportsAccepted: 0n,
-      reportsAppliedIgnore: 0n,
-      reservedBytes: 0,
-    });
+    const message = await nextGossip(pair.right);
+    expect(Buffer.from(message.data).equals(blockPayload(10 * 1024 * 1024, 17))).toBe(true);
+    expect(pair.right.reportGossip(message.handle, "ignore")).toBe(true);
+    await expect.poll(() => pair.right.diagnostics().gossip.reservedBytes).toBe(0);
     await Promise.all([
       inbound.respond(new Uint8Array(4000).fill(1), requestForks[0]),
       serving.respond(new Uint8Array(4000).fill(2), requestForks[0]),
@@ -459,14 +454,17 @@ for (const hoodi of [false, true]) {
           await delay(25);
         }
         for (const [index, topic] of [firstTopic, secondTopic].entries()) {
-          const sent = await peer.command("gossipPublish", {length: 4000, seed: 71 + index, topic});
+          const sent = await peer.command("gossipPublish", {length: 4000, seed: 71 + index, slot: 100, topic});
           const message = await nextGossip(runtime);
           expect(message.topic).toBe(topic);
           expect(Buffer.from(message.id).toString("hex")).toBe(sent.messageId);
           expect(message.peerId).toEqual(remote);
-          expect(summary(message.data)).toEqual(summary(payload(4000, 71 + index)));
+          const expected = payload(4000, 71 + index);
+          expected.writeBigUInt64LE(100n, 100);
+          expect(summary(message.data)).toEqual(summary(expected));
           expect(runtime.reportGossip(message.handle, index === 0 ? "accept" : "ignore")).toBe(true);
           const data = payload(4000, 81 + index);
+          data.writeBigUInt64LE(100n, 100);
           expect(await runtime.publishGossip(topic, data, {allowZeroPeers: false})).toMatchObject({
             queued: 1,
             selected: 1,
@@ -485,7 +483,7 @@ for (const hoodi of [false, true]) {
         }
         if (!hoodi) {
           for (let i = 0; i < 64; i++)
-            await peer.command("gossipPublish", {length: 4000, seed: 900 + i, topic: firstTopic});
+            await peer.command("gossipPublish", {length: 4000, seed: 900 + i, slot: 100, topic: firstTopic});
           for (let i = 0; i < 1000 && runtime.diagnostics().gossip.queued !== 32; i++) await delay(5);
           expect(runtime.diagnostics().gossip).toMatchObject({
             occupied: 32,
@@ -545,8 +543,8 @@ for (const scenario of [
         } else {
           const batch = pair.right.drainGossip();
           expect(batch.messages.map((message) => [...message.data])).toEqual([
-            Array(4000).fill(21),
-            Array(4000).fill(22),
+            [...blockPayload(4000, 21)],
+            [...blockPayload(4000, 22)],
           ]);
           expect(batch.more).toBe(false);
           for (const message of batch.messages) expect(pair.right.reportGossip(message.handle, "accept")).toBe(false);

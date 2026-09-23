@@ -561,43 +561,29 @@ test.each([
   expect(output).toContain(`incoming-lifecycle ${mode} ok`);
 }, 25000);
 
-test.each([63, 64])("incoming exact byte admission includes fixed metadata at %s bytes", async (extra) => {
-  const probeConfig = applicationConfig();
-  probeConfig.resources.bridgeBudgetBytes = 512 * 1024 * 1024;
-  const baseline = await startPeer(probeConfig);
-  const fixed = (await baseline.diagnostics()).bridgeRequestedBytes;
-  await baseline.stop();
-  {
-    const pair = await incomingPair(undefined, fixed + 10 * 1024 * 1024 + extra);
-    try {
-      const pending = pair.left.request(pair.remote.peerId, BLOCKS, new Uint8Array(32)).next();
-      void pending.catch(() => undefined);
-      if (extra === 63) {
-        await expect(pending).rejects.toMatchObject({
-          peerMessage: new TextEncoder().encode("application capacity exhausted"),
-          peerStatus: 2,
-          reason: "peer_error",
-        });
-        expect(pair.right.diagnostics().incoming).toMatchObject({byteRefusals: 1n, occupied: 0, reservedBytes: 0});
-      } else {
-        const incoming = await takeIncoming(pair.right);
-        expect(pair.right.diagnostics().incoming).toMatchObject({
-          occupied: 1,
-          requestBytes: 0,
-          reservedBytes: 10 * 1024 * 1024,
-          reservedBytesHighWater: 10 * 1024 * 1024 + 64,
-        });
-        expect(() => pair.right.request(pair.identity.peerId, BLOCKS, new Uint8Array(32))).toThrow(
-          expect.objectContaining({code: "NetworkRequestRejected", reason: "slots_exhausted"})
-        );
-        await incoming.finish();
-        expect((await pending).done).toBe(true);
-      }
-      await pair.right.reStatusPeers([pair.identity.peerId]);
-      expect((await pair.right.getIdentity()).peerId).toEqual(pair.remote.peerId);
-    } finally {
-      await Promise.all([pair.left.close(), pair.right.close()]);
-    }
+test("incoming response bytes are acquired at readiness and released after the chunk", async () => {
+  const pair = await incomingPair();
+  try {
+    const pending = pair.left.request(pair.remote.peerId, BLOCKS, new Uint8Array(32)).next();
+    void pending.catch(() => undefined);
+    const incoming = await takeIncoming(pair.right);
+    expect(pair.right.diagnostics().incoming).toMatchObject({
+      occupied: 1,
+      requestBytes: 0,
+      reservedBytes: 0,
+      reservedBytesHighWater: 64,
+    });
+    await incoming.ready();
+    expect(pair.right.diagnostics().incoming.reservedBytes).toBe(10 * 1024 * 1024);
+    const data = new Uint8Array(4000).fill(42);
+    await incoming.respond(data, requestForks[0]);
+    expect((await pending).value?.data).toEqual(data);
+    expect(pair.right.diagnostics().incoming.reservedBytes).toBe(0);
+    await incoming.finish();
+    await pair.right.reStatusPeers([pair.identity.peerId]);
+    expect((await pair.right.getIdentity()).peerId).toEqual(pair.remote.peerId);
+  } finally {
+    await Promise.all([pair.left.close(), pair.right.close()]);
   }
 }, 20000);
 

@@ -6,7 +6,7 @@ const Table = incoming.Table;
 const Cell = incoming.Cell;
 
 test "incoming reservation shares exact aggregate credits and rolls back allocation failure" {
-    const amount = 64 + rr.Protocol.blocks_by_root_v2.info().response_max;
+    const amount: usize = 64;
     var budget: Budget = .{ .limit = amount };
     var table = try Table.init(std.testing.allocator, 1, &budget);
     defer table.deinit();
@@ -92,7 +92,7 @@ test "incoming response allocation stays borrowed through real quota withholding
 test "incoming and outbound reservations cannot each spend the aggregate remainder" {
     const protocol = rr.Protocol.blocks_by_root_v2;
     const outbound_amount = 32 + 2 * protocol.info().response_max;
-    const inbound_amount = 64 + protocol.info().response_max;
+    const inbound_amount: usize = 64;
     var budget: Budget = .{ .limit = outbound_amount + inbound_amount - 1 };
     var outgoing = try @import("network_requests.zig").Table.init(std.testing.allocator, 1, &budget);
     defer outgoing.deinit();
@@ -122,6 +122,7 @@ fn submitWithheld(pair: *rr.testing.Pair, table: *Table) !void {
                 cell.handle = request.request;
                 cell.native = true;
                 cell.state = .response_native;
+                try table.reserveResponse(cell, 4000);
                 cell.response = try std.testing.allocator.alloc(u8, 4000);
                 @memset(cell.response, 71);
                 try pair.shared.server.reqresp.respond(request.request, cell.response, .{ .digest = rr.testing.deneb_digest, .fork = .deneb }, pair.shared.pair.now);
@@ -187,4 +188,26 @@ test "incoming submission recognizes a genuine native terminal awaiting output c
         terminal = true;
     };
     try std.testing.expect(terminal);
+}
+
+test "queued requests reserve only input and response credits follow a chunk lifetime" {
+    const response_max = rr.Protocol.blocks_by_root_v2.info().response_max;
+    var budget: Budget = .{ .limit = 32 * 64 + response_max };
+    var table = try Table.init(std.testing.allocator, 32, &budget);
+    defer table.deinit();
+    var tokens: [32]incoming.Token = undefined;
+    for (&tokens) |*token| token.* = try table.reserve(.blocks_by_root_v2, 32);
+    try std.testing.expectEqual(@as(usize, 32 * 64), budget.used);
+    const first = table.get(tokens[0]).?;
+    const second = table.get(tokens[1]).?;
+    try table.reserveResponse(first, response_max);
+    try std.testing.expectError(error.NetworkBridgeFull, table.reserveResponse(second, 1));
+    try std.testing.expectEqual(@as(usize, 0), second.response_reservation);
+    try table.reserveResponse(first, 4000);
+    try std.testing.expectEqual(@as(usize, 32 * 64 + 4000), budget.used);
+    table.releaseResponse(first);
+    try table.reserveResponse(second, response_max);
+    table.releaseResponse(second);
+    for (tokens) |token| table.retire(token);
+    try std.testing.expectEqual(@as(usize, 0), budget.used);
 }

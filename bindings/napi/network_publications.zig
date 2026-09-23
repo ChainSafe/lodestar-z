@@ -90,7 +90,7 @@ pub const Table = struct {
         }
         for (self.cells, 0..) |*cell, i| {
             if (cell.state != .free or cell.generation == std.math.maxInt(u64)) continue;
-            self.budget.reserve(bytes) catch |err| {
+            self.budget.reserve(if (n.gossip_processor.limits_mod.urgent(kind)) .urgent_publication else .publication, bytes) catch |err| {
                 self.diag.byteRefusals +|= 1;
                 return err;
             };
@@ -118,7 +118,7 @@ pub const Table = struct {
     pub fn releasePayload(self: *Table, cell: *Cell) void {
         self.backing.free(cell.payload);
         cell.payload = &.{};
-        self.budget.release(cell.reservation);
+        self.budget.release(if (n.gossip_processor.limits_mod.urgent(cell.kind)) .urgent_publication else .publication, cell.reservation);
         self.diag.reservedBytes -= cell.reservation;
         cell.reservation = 0;
     }

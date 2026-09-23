@@ -139,6 +139,16 @@ pub fn respond(runtime: *Runtime, value: Value, data: Value, context_value: Valu
         runtime.unlock();
         return error.NetworkIncomingBusy;
     }
+    const len = viewLength(data, cell.protocol.info().response_max) catch |err| {
+        runtime.unlock();
+        if (err == error.ChunkTooLarge) return rejectInput(runtime.env, .chunk_too_large);
+        return err;
+    };
+    runtime.incoming.?.reserveResponse(cell, len) catch |err| {
+        runtime.incoming.?.diag.byteRefusals +|= 1;
+        runtime.unlock();
+        return err;
+    };
     cell.state = .response_preparing;
     runtime.unlock();
     errdefer {
@@ -148,10 +158,6 @@ pub fn respond(runtime: *Runtime, value: Value, data: Value, context_value: Valu
         phases.rollbackLocked(runtime, cell);
         runtime.unlock();
     }
-    const len = viewLength(data, cell.protocol.info().response_max) catch |err| {
-        if (err == error.ChunkTooLarge) return rejectInput(runtime.env, .chunk_too_large);
-        return err;
-    };
     try @import("network_faults.zig").check(.incoming_response);
     const copy = try r.allocator.alloc(u8, len);
     errdefer {

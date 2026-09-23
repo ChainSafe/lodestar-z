@@ -96,7 +96,7 @@ pub const Table = struct {
             self.diag.requestFull +|= 1;
             return error.NetworkRequestFull;
         };
-        self.budget.reserve(amount) catch |err| {
+        self.budget.reserve(.outgoing, amount) catch |err| {
             self.diag.bridgeFull +|= 1;
             return err;
         };
@@ -133,7 +133,7 @@ pub const Table = struct {
         if (cell.chunk != null) return;
         self.backing.free(cell.sink);
         cell.sink = &.{};
-        self.budget.release(cell.reservation);
+        self.budget.release(.outgoing, cell.reservation);
         self.diag.reservedBytes -= cell.reservation;
         cell.reservation = 0;
     }

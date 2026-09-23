@@ -167,6 +167,13 @@ export interface NativeIdentity {
 export type NativeRuntimeState = "running" | "stopping" | "closed" | "failed";
 
 export interface NativeRuntimeDiagnostics {
+  payloadBudget: {
+    limitBytes: number;
+    usedBytes: number;
+    incomingMinimumBytes: number;
+    outgoingMinimumBytes: number;
+    publicationMinimumBytes: number;
+  };
   publications: NativePublicationDiagnostics;
   requests: NativeRequestDiagnostics;
   incoming: NativeIncomingDiagnostics;
@@ -597,7 +604,7 @@ export interface NativeIncomingRequest {
   readonly closed: Promise<void>;
   /** Call once before serving to retain capacity until asynchronous host work actually retires. */
   retainUntil(retired: Promise<void>): void;
-  /** Wait for response quota before producing the next chunk. Reserves one chunk's quota. */
+  /** Wait for response quota and capacity for one maximum chunk before producing it. */
   ready(): Promise<void>;
   respond(data: Uint8Array, context: NativeForkEntry | null): Promise<void>;
   finish(): Promise<void>;

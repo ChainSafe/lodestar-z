@@ -125,18 +125,30 @@ fn prepareApplicationStorage(runtime: *Runtime, app: *const application_cfg.Conf
     const chain = &runtime.heavy.?.config.chain;
     const gossip_plan = n.gossip_processor.Plan.resolve(gossip_options, chain.forks[0..chain.boundary_count]);
     const gossip_backing = gossip.Table.backingBytes(gossip_plan.capacity, gossip_plan.bytes);
+    const gossip_reserve = if (gossip_plan.limits == null) 2 * gossip_backing else 0;
     const metrics_capacity = n.metrics.textCapacity(chain.topics[0..chain.boundary_count]);
     const publication_capacity: usize = if (runtime.heavy.?.config.profile == .small) 32 else publications.capacity_max;
     const bridge = publication_capacity * @sizeOf(publications.Cell) + 2 * metrics_capacity + gossip_backing + incoming_capacity * @sizeOf(incoming.Cell) + request_capacity * @sizeOf(requests.Cell) + @sizeOf(Runtime) + @sizeOf(r.Owner) - @sizeOf(n.NetworkCore) + r.Stores.bytes(runtime.peer_capacity) + @sizeOf(projection.Lane);
-    if (bridge > app.resources.bridgeBudgetBytes) return error.NetworkBridgeBudgetExceeded;
+    if (bridge + gossip_reserve > app.resources.bridgeBudgetBytes) return error.NetworkBridgeBudgetExceeded;
     runtime.metrics = try @import("network_metrics.zig").Export.init(metrics_capacity);
     runtime.requests = try requests.Table.init(r.allocator, request_capacity, &runtime.payload_budget);
-    runtime.payload_budget.limit = app.resources.bridgeBudgetBytes - bridge;
+    runtime.payload_budget.limit = app.resources.bridgeBudgetBytes - bridge - gossip_reserve;
+    runtime.gossip_budget.limit = gossip_reserve;
+    var response_max: usize = 0;
+    var request_max: usize = 0;
+    for (0..n.reqresp.Protocol.count) |i| {
+        const protocol: n.reqresp.Protocol = @enumFromInt(i);
+        if (protocol.isControl()) continue;
+        response_max = @max(response_max, protocol.info().response_max);
+        request_max = @max(request_max, protocol.info().request_max);
+    }
+    // Keep one serving response, two local RPCs, and two urgent publications independently admissible.
+    try runtime.payload_budget.protect(response_max + 2 * request_max * incoming_capacity, 2 * (request_max + 2 * response_max), 2 * gossip.payload_max);
     runtime.publications = try publications.Table.init(r.allocator, publication_capacity, &runtime.payload_budget);
     try faults.check(.incoming_table);
     runtime.incoming = try incoming.Table.init(r.allocator, incoming_capacity, &runtime.payload_budget);
     try faults.check(.gossip_table);
-    runtime.gossip = try gossip.Table.init(r.allocator, gossip_plan, &runtime.payload_budget);
+    runtime.gossip = try gossip.Table.init(r.allocator, gossip_plan, &runtime.gossip_budget);
     runtime.stores = try r.Stores.create(r.allocator, runtime.peer_capacity);
     try faults.check(.application_lane);
     runtime.lane = try r.allocator.create(projection.Lane);
@@ -293,6 +305,7 @@ pub fn diagnostics(self: *@This()) !js.Value {
     try put(object, "state", try text(@tagName(snapshot.state)));
     try put(object, "terminalErrorCode", if (snapshot.terminal_error) |err| try text(@errorName(err)) else try js.env().getNull());
     try put(object, "resolvedCapacities", try @import("network_js.zig").scalarFields(js.env(), &snapshot.resolvedCapacities));
+    try put(object, "payloadBudget", try @import("network_js.zig").scalarFields(js.env(), &snapshot.payloadBudget));
     try put(object, "publications", try @import("network_js.zig").scalarFields(js.env(), &snapshot.publications));
     try put(object, "requests", try request_js.diagnostics(js.env(), &snapshot.requests));
     try put(object, "gossip", try gossip_js.diagnostics(js.env(), &snapshot.gossip));

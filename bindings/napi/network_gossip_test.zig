@@ -1,6 +1,6 @@
 const std = @import("std");
 const g = @import("network_gossip.zig");
-const Budget = @import("network_budget.zig").Budget;
+const Budget = @import("network").byte_budget.Budget;
 
 test "gossip exact shared 2Q admission and generation exhaustion" {
     var budget: Budget = .{ .limit = 19 };

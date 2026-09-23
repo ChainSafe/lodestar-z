@@ -347,39 +347,6 @@ test.each([
   expect(output).toContain(`request-lifecycle ${mode} ok`);
 }, 25000);
 
-test("native peers refuse requests without bridge bytes while managed control remains live", async () => {
-  const leftConfig = applicationConfig();
-  const rightConfig = applicationConfig();
-  leftConfig.resources.bridgeBudgetBytes = 128 * 1024 * 1024;
-  const baseline = await startPeer(rightConfig);
-  await baseline.identity;
-  rightConfig.resources.bridgeBudgetBytes = (await baseline.diagnostics()).bridgeRequestedBytes;
-  await baseline.stop();
-  rightConfig.identitySecretKey[31] = 2;
-  const left = startRuntime(leftConfig, () => undefined);
-  const right = await startPeer(rightConfig);
-  try {
-    const [identity, remote] = await Promise.all([left.identity, right.identity]);
-    await Promise.all([
-      left.applyIntent(localIntent(leftConfig), leftConfig.initialSlot),
-      right.applyIntent(localIntent(rightConfig), rightConfig.initialSlot),
-    ]);
-    await left.connect(remote.peerId, [remote.localEndpoint], 5000n);
-    await expect(left.request(remote.peerId, BLOCKS, new Uint8Array(32)).next()).rejects.toMatchObject({
-      code: "NetworkRequestFailed",
-      peerMessage: new TextEncoder().encode("application capacity exhausted"),
-      peerStatus: 2,
-      reason: "peer_error",
-    });
-    await left.reStatusPeers([remote.peerId]);
-    expect((await left.getIdentity()).peerId).toEqual(identity.peerId);
-    expect((await right.getIdentity()).peerId).toEqual(remote.peerId);
-    expect(left.diagnostics().requests.reservedBytes).toBe(0);
-  } finally {
-    await Promise.all([left.close(), right.close()]);
-  }
-}, 15000);
-
 stockTest(
   "close discards queued payloads and frees heavy request storage with held iterators",
   async () => {
@@ -438,22 +405,26 @@ stockTest(
   20000
 );
 
-test.each([0, -1])("application request byte admission at delta %s", async (delta) => {
+test.each([0, -1])("application startup requires RPC and publication progress capacity at delta %s", async (delta) => {
   const config = applicationConfig();
   const probe = await startPeer(config);
-  const fixed = (await probe.diagnostics()).bridgeRequestedBytes;
+  const budget = (await probe.diagnostics()).payloadBudget;
   await probe.stop();
-  config.resources.bridgeBudgetBytes = fixed + 32 + 2 * 10 * 1024 * 1024 + delta;
+  config.resources.bridgeBudgetBytes +=
+    budget.incomingMinimumBytes +
+    budget.outgoingMinimumBytes +
+    budget.publicationMinimumBytes -
+    budget.limitBytes +
+    delta;
+  if (delta < 0) {
+    expect(() => startRuntime(config)).toThrow("NetworkBridgeBudgetExceeded");
+    return;
+  }
   const runtime = startRuntime(config);
   try {
-    if (delta === 0)
-      await expect(runtime.request(runtime.identity.peerId, BLOCKS, new Uint8Array(32)).next()).rejects.toMatchObject({
-        reason: "disconnected",
-      });
-    else
-      expect(() => runtime.request(runtime.identity.peerId, BLOCKS, new Uint8Array(32))).toThrow(
-        expect.objectContaining({code: "NetworkRequestRejected", reason: "slots_exhausted"})
-      );
+    await expect(runtime.request(runtime.identity.peerId, BLOCKS, new Uint8Array(32)).next()).rejects.toMatchObject({
+      reason: "disconnected",
+    });
     expect(runtime.diagnostics().requests).toMatchObject({inputBytes: 0, occupied: 0, reservedBytes: 0, sinkBytes: 0});
   } finally {
     await runtime.close();

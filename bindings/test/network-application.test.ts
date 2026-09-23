@@ -334,7 +334,7 @@ test("actual 200/210 resources resolve and publish complete capacity", async () 
   const config = applicationConfig();
   config.profile = "beaconNode";
   config.resources = {
-    bridgeBudgetBytes: 80 * 1024 * 1024,
+    bridgeBudgetBytes: 512 * 1024 * 1024,
     connectionCapacity: 256,
     dialingCapacity: 16,
     handshakingCapacity: 32,
@@ -667,8 +667,8 @@ test.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")(
       for (let i = 0; i < batch.events.length; i++) {
         expect(batch.events[i]).toMatchObject({
           connection: {generation: 4294967295 - i, index: i % 16},
+          identity: a.identity.peerId,
           ownerSequence: 0n,
-          peer: {generation: 18446744073709551615n - BigInt(i), index: i},
           type: "closed",
         });
       }
