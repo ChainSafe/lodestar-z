@@ -392,16 +392,6 @@ fn ProcessEpochBench(comptime fork: ForkSeq) type {
             ) catch unreachable;
             defer cache.deinit(allocator);
 
-            if (comptime fork.gte(.fulu)) {
-                state_transition.startProposerLookaheadShuffling(
-                    fork,
-                    allocator,
-                    self.io,
-                    BenchState.cloned_cached_state.state.castToFork(fork),
-                    &cache,
-                ) catch unreachable;
-            }
-
             state_transition.processEpoch(
                 fork,
                 allocator,

@@ -19,7 +19,6 @@ const verifyProposerSignature = @import("./signature_sets/proposer.zig").verifyP
 pub const processBlock = @import("./block/process_block.zig").processBlock;
 const EpochTransitionCache = @import("cache/epoch_transition_cache.zig").EpochTransitionCache;
 const processEpoch = @import("epoch/process_epoch.zig").processEpoch;
-const startProposerLookaheadShuffling = @import("epoch/process_proposer_lookahead.zig").startProposerLookaheadShuffling;
 const computeEpochAtSlot = @import("utils/epoch.zig").computeEpochAtSlot;
 const processSlot = @import("slot/process_slot.zig").processSlot;
 const ValidatorMonitor = @import("ValidatorMonitor.zig");
@@ -77,14 +76,6 @@ pub fn processSlots(
             );
             defer epoch_transition_cache.deinit(allocator);
             try observeEpochTransitionStep(.{ .step = .before_process_epoch }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
-
-            switch (state.forkSeq()) {
-                inline else => |f| {
-                    if (comptime f.gte(.fulu)) {
-                        try startProposerLookaheadShuffling(f, allocator, io, state.castToFork(f), &epoch_transition_cache);
-                    }
-                },
-            }
 
             switch (state.forkSeq()) {
                 inline else => |f| {
