@@ -650,14 +650,25 @@ pub const Pool = struct {
         var stack: [max_depth]Id = undefined;
         var current: ?Id = node_id;
         var sp: Depth = 0;
+        var overflow: ?Id = null;
 
         while (true) {
             const id = current orelse {
-                if (sp == 0) {
-                    break;
+                if (sp != 0) {
+                    sp -= 1;
+                    current = stack[sp];
+                    continue;
                 }
-                sp -= 1;
-                current = stack[sp];
+
+                const frame = overflow orelse break;
+                const frame_payload = self.nodes.items(.payload)[@intFromEnum(frame)];
+                const next_frame = unpackRight(frame_payload);
+                current = unpackLeft(frame_payload);
+                overflow = if (@intFromEnum(next_frame) == 0) null else next_frame;
+
+                const frame_state = self.nodes.items(.state);
+                frame_state[@intFromEnum(frame)] = State.initFree(self.next_free_node);
+                self.next_free_node = frame;
                 continue;
             };
 
@@ -693,11 +704,24 @@ pub const Pool = struct {
             }
 
             // Reached zero: traverse children before freeing the slot.
+            var retired = false;
             switch (k) {
                 .branch => {
                     const c = self.nodes.items(.payload)[@intFromEnum(id)];
-                    stack[sp] = unpackRight(c);
-                    sp += 1;
+                    if (sp < stack.len) {
+                        stack[sp] = unpackRight(c);
+                        sp += 1;
+                    } else {
+                        // Keep the continuation in this retired branch until the
+                        // bounded stack has drained. Id(0) is reserved as the
+                        // end marker because user nodes start at max_depth.
+                        self.nodes.items(.payload)[@intFromEnum(id)] = packChildren(
+                            unpackRight(c),
+                            overflow orelse @enumFromInt(0),
+                        );
+                        overflow = id;
+                        retired = true;
+                    }
                     current = unpackLeft(c);
                 },
                 .chunked_leaf => {
@@ -718,8 +742,10 @@ pub const Pool = struct {
             }
             // Return the node to the free list. Free-list link is encoded
             // in `state` (the State.initFree representation).
-            states[@intFromEnum(id)] = State.initFree(self.next_free_node);
-            self.next_free_node = id;
+            if (!retired) {
+                states[@intFromEnum(id)] = State.initFree(self.next_free_node);
+                self.next_free_node = id;
+            }
         }
     }
 };
