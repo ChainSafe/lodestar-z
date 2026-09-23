@@ -13,7 +13,7 @@ pub const Fork = js.Object(struct {
 
 pub const Eth1Data = js.Object(struct {
     depositRoot: js.Uint8Array,
-    depositCount: js.Number,
+    depositCount: js.BigInt,
     blockHash: js.Uint8Array,
 });
 

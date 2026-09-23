@@ -33,7 +33,7 @@ describe("BeaconStateView", () => {
     genesisValidatorsRoot: Uint8Array;
     validatorCount: number;
     fork: {previousVersion: Uint8Array; currentVersion: Uint8Array; epoch: number};
-    eth1Data: {depositRoot: Uint8Array; depositCount: number; blockHash: Uint8Array};
+    eth1Data: {depositRoot: Uint8Array; depositCount: bigint; blockHash: Uint8Array};
     latestBlockHeader: {
       slot: number;
       proposerIndex: number;
@@ -108,7 +108,7 @@ describe("BeaconStateView", () => {
         },
         eth1Data: {
           blockHash: Uint8Array.from(lodestarState.eth1Data.blockHash),
-          depositCount: lodestarState.eth1Data.depositCount,
+          depositCount: BigInt(lodestarState.eth1Data.depositCount),
           depositRoot: Uint8Array.from(lodestarState.eth1Data.depositRoot),
         },
         finalizedCheckpoint: {
