@@ -12,7 +12,7 @@ const Now = @import("types.zig").Now;
 pub const controls_per_turn = 32;
 pub const identify_per_turn = 8;
 pub const dials_per_turn = 4;
-pub const candidates_per_turn = 16;
+pub const candidates_per_turn = @import("discv5").types.findnode_result_max + 1;
 
 const manager = @import("peer_manager.zig");
 pub const PeerManager = manager.PeerManager;

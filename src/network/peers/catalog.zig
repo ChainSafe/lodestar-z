@@ -231,12 +231,14 @@ pub const Catalog = struct {
                 row.custody_work = null;
                 continue;
             }
+            var completed = if (row.custody_work) |*work| work.complete() != null else false;
             if (!std.meta.eql(row.custody_context, context.*) or (if (row.custody_work) |work| work.custody_count != count else true)) {
                 self.revision +|= 1;
                 row.custody_work = null;
                 row.custody_context = context.*;
                 if (row.node_id == null) row.node_id = custody.nodeId(&row.identity) catch continue;
                 row.custody_work = custody.SamplingDerivation.init(&row.node_id.?, .{ .groups = context.custody_groups, .columns = @import("preset").NUMBER_OF_COLUMNS }, count, context.minimum_sampling_groups) catch continue;
+                completed = false;
             }
             if (now_ms >= row.metadata_at_ms +| freshness_ms) continue;
             const work = &row.custody_work.?;
@@ -246,7 +248,10 @@ pub const Catalog = struct {
                 continue;
             };
             budget.* -= work.totalHashes() - before;
-            if (work.totalHashes() != before and result != null) self.revision +|= 1;
+            if (!completed and result != null) {
+                self.revision +|= 1;
+                row.pending_update = true;
+            }
             pending = pending or result == null;
         }
         // A rotating work start prevents a large configured catalog from monopolizing the budget.

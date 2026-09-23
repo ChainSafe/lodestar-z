@@ -305,8 +305,8 @@ pub const Discovery = struct {
                         result.failure = result.failure orelse err;
                         return;
                     };
-                    self.publishReferrals(response, progress.now_ms, out, result);
                     if (response.matched.terminal) self.publishResponse(response, &known, progress.now_ms, out, result);
+                    self.publishReferrals(response, progress.now_ms, out, result);
                 },
                 .failed => lookup.onFailure(&self.transport.engine, handle) catch unreachable,
                 else => unreachable,
@@ -326,9 +326,8 @@ pub const Discovery = struct {
         }
         if (progress.event == .response) {
             const response = &progress.event.response;
+            if (response.matched.terminal) if (known) |*record| self.publishResponse(response, record, progress.now_ms, out, result);
             self.publishReferrals(response, progress.now_ms, out, result);
-            if (!response.matched.terminal) return;
-            if (known) |*record| self.publishResponse(response, record, progress.now_ms, out, result);
         }
     }
 

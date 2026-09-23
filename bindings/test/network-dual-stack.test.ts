@@ -39,7 +39,6 @@ it.each(
 it("rejects advertising IPv6 through IPv4-only discovery and unwinds startup", async () => {
   const config = discoveryConfig();
   config.bind = [ip4, ip6];
-  config.discovery.advertisement.ip6 = ip6.address;
-  config.discovery.advertisement.quic6 = 9001;
+  config.discovery.fixed = {...config.discovery.fixed, ip6: ip6.address, quic6: 9001};
   expect(() => startRuntime(config, () => undefined)).toThrow("InvalidAdvertisement");
 });

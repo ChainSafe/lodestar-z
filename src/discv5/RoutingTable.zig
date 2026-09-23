@@ -298,9 +298,10 @@ pub fn findNodes(
         out[result_length] = local_record.*;
         result_length += 1;
     }
-    for (1..types.distance_count) |distance| {
+    for (distances) |distance| {
         if (result_length == limit) break;
-        if (!requested[distance]) continue;
+        if (distance == 0 or !requested[distance]) continue;
+        requested[distance] = false;
         const index = bucketIndex(@intCast(distance));
         const entries = self.bucketEntries(index);
         var position = entries.len;

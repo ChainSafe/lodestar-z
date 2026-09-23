@@ -482,6 +482,15 @@ test "routing FINDNODE selection filters exact distances and caps the aggregate"
     try std.testing.expectEqual(@as(usize, 1), sparse.len);
     try std.testing.expectEqualSlices(u8, &distance_241_id, &sparse[0].node_id);
 
+    const descending = try table.findNodes(&local_record, null, &.{ 256, 241, 256 }, &out);
+    try std.testing.expectEqual(types.findnode_result_max, descending.len);
+    for (descending) |record| try std.testing.expectEqual(@as(u16, 256), types.logDistance(&local_id, &record.node_id));
+    const self_last = try table.findNodes(&local_record, null, &.{ 256, 0, 241 }, &out);
+    try std.testing.expectEqual(types.findnode_result_max, self_last.len);
+    try std.testing.expectEqualSlices(u8, &local_id, &self_last[0].node_id);
+    for (self_last[1..]) |record| try std.testing.expectEqual(@as(u16, 256), types.logDistance(&local_id, &record.node_id));
+    try std.testing.expectError(RoutingTable.Error.InvalidDistance, table.findNodes(&local_record, null, &.{ 256, 257 }, &out));
+
     try std.testing.expectError(
         RoutingTable.Error.InvalidDistance,
         table.findNodes(&local_record, null, &.{ 0, 257 }, &out),

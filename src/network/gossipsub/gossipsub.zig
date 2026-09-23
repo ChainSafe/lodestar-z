@@ -411,6 +411,7 @@ pub const Gossipsub = struct {
 
     fn deliver(self: *Gossipsub, peers: *const sessions_mod.PeerSet, h: storage.Handle, source: ?validation_mod.PeerRef, now_ms: u64) PublishOutcome {
         const id = self.messages.store.get(h).?.id;
+        const attribution = if (source != null) self.messages.validation.find(id, now_ms) else null;
         var result: PublishOutcome = .{};
         var recipients = peers.*;
         const topic = self.overlay.findTopic(self.messages.store.get(h).?.topicString()).?;
@@ -418,11 +419,14 @@ pub const Gossipsub = struct {
             if (row.active and self.peers.rows[row.logical.index].direct and self.overlay.subscribers(topic).isSet(peer)) recipients.set(peer);
         };
         var it = recipients.iterator(.{});
-        while (it.next()) |peer| {
+        next_peer: while (it.next()) |peer| {
             const index: u16 = @intCast(peer);
             if (!self.sessions.rows[index].active or self.sessions.rows[index].outbound == .closing) continue;
             if (source) |p| {
                 if (std.meta.eql(p, self.logical(index)) or self.sessions.suppresses(index, id, now_ms)) continue;
+                if (attribution) |entry| for (entry.duplicates[0..entry.duplicate_len]) |duplicate| {
+                    if (std.meta.eql(duplicate.peer, self.logical(index))) continue :next_peer;
+                };
             }
             result.selected += 1;
             if (self.sessions.rows[index].outStream() == null) {

@@ -47,7 +47,7 @@ export interface NativeForkEntry {
 }
 
 export interface NativeDiscoveryConfig {
-  /** IPv6 socket options use OS defaults; listener addresses and ports must not overlap. */
+  /** IPv6 listeners accept only IPv6; IPv4 and IPv6 listeners may share a port. */
   bind: IpEndpoint | readonly IpEndpoint[];
   sequenceNumber: bigint;
   bootstrapEnrs: readonly Uint8Array[];
@@ -136,21 +136,10 @@ export type NativeTopicKind =
   | "blob_sidecar"
   | "data_column_sidecar";
 
-export interface NativeTopicRule {
-  count: number;
-  sszMin: number;
-  sszMax: number;
-}
-
-export interface NativeTopicBoundary {
-  digest: Uint8Array;
-  rules: Readonly<Record<NativeTopicKind, NativeTopicRule>>;
-}
-
 export interface NativeRuntimeConfig {
   profile: "small" | "beaconNode";
   identitySecretKey: Uint8Array;
-  /** IPv6 socket options use OS defaults; listener addresses and ports must not overlap. */
+  /** IPv6 listeners accept only IPv6; IPv4 and IPv6 listeners may share a port. */
   bind: IpEndpoint | readonly IpEndpoint[];
   local: NativeLocalState;
   discovery: NativeDiscoveryConfig | null;
@@ -380,7 +369,6 @@ export interface NativeNetworkApplicationRuntime {
   notifyGossipBlock(root: Uint8Array): void;
   dropQueuedGossip(): void;
   trackGossipSearch(root: Uint8Array, peer: PeerIdStr | null): boolean;
-  /** Completes host execution even when false means the protocol verdict has already expired. */
   /** Complete only after validation settles, including after protocol timeout. A late verdict returns false. */
   reportGossip(handle: NativeGossipHandle, verdict: NativeGossipVerdict): boolean;
   /** Copies admitted input. Admission pressure rejects with admission_full before any publication. */
@@ -590,7 +578,6 @@ export interface NativeRequestDiagnostics {
   inputBytes: number;
   sinkBytes: number;
   copyingBytes: number;
-  copying: number;
   chunksCopied: bigint;
   bytesCopied: bigint;
   requestFull: bigint;
@@ -726,6 +713,7 @@ export interface NativeGossipDiagnostics {
   checking: number;
   executing: number;
   executingBytes: number;
+  copying: number;
   expiredExecuting: number;
   /** Milliseconds past the earliest verdict deadline among delivered validations awaiting host completion; zero when none. */
   oldestExpiredExecutionAgeMs: bigint;
