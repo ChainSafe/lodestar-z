@@ -10,11 +10,16 @@ const Fixture = struct {
     buffer: []u8,
 
     fn init(boundaries: []const policy.Boundary) !Fixture {
+        return initWith(boundaries, null);
+    }
+
+    fn initWith(boundaries: []const policy.Boundary, discovery: ?core.DiscoveryOptions) !Fixture {
         const node = try std.testing.allocator.create(core.NetworkCore);
         errdefer std.testing.allocator.destroy(node);
         const key = try @import("wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{93}));
         var options = @import("test_support.zig").networkOptions(&key);
         options.core.service.gossipsub.topic_policy = if (boundaries.len > 0) boundaries else null;
+        options.discovery = discovery;
         try node.initRaw(std.testing.allocator, std.testing.io, options);
         errdefer node.deinit(std.testing.io);
         const buffer = try std.testing.allocator.alloc(u8, metrics.textCapacity(boundaries));
@@ -42,6 +47,93 @@ const Fixture = struct {
 
 fn contains(text: []const u8, expected: []const u8) !void {
     try std.testing.expect(std.mem.indexOf(u8, text, expected) != null);
+}
+
+const Series = struct {
+    name: []const u8,
+    kind: []const u8,
+    labels: []const []const u8 = &.{},
+};
+
+/// The measurement contract: series read by docs/superpowers/deploy-feat4/compare.py and the
+/// next review. Removing or renaming one needs the same change in that script.
+const contract = [_]Series{
+    // Owner loop
+    .{ .name = "lodestar_native_network_step_seconds", .kind = "histogram" },
+    .{ .name = "lodestar_native_network_readiness_calls_total", .kind = "counter" },
+    .{ .name = "lodestar_native_network_readiness_nonzero_waits_total", .kind = "counter" },
+    .{ .name = "lodestar_native_quic_udp_received_datagrams_total", .kind = "counter" },
+    .{ .name = "lodestar_native_quic_udp_sent_datagrams_total", .kind = "counter" },
+    // Peers
+    .{ .name = "libp2p_peers", .kind = "gauge" },
+    .{ .name = "lodestar_native_peer_below_target", .kind = "gauge" },
+    .{ .name = "lodestar_peers_by_direction_count", .kind = "gauge", .labels = &.{"direction"} },
+    .{ .name = "lodestar_peers_by_client_count", .kind = "gauge", .labels = &.{"client"} },
+    .{ .name = "lodestar_native_peers_by_client_direction", .kind = "gauge", .labels = &.{ "client", "direction" } },
+    .{ .name = "lodestar_peer_connected_total", .kind = "counter", .labels = &.{ "direction", "status" } },
+    .{ .name = "lodestar_peer_goodbye_sent_total", .kind = "counter", .labels = &.{"reason"} },
+    .{ .name = "lodestar_peer_goodbye_received_total", .kind = "counter", .labels = &.{"reason"} },
+    .{ .name = "lodestar_native_peer_closes_total", .kind = "counter", .labels = &.{"reason"} },
+    .{ .name = "lodestar_native_peer_closes_by_client_total", .kind = "counter", .labels = &.{ "client", "reason" } },
+    .{ .name = "lodestar_native_quic_connections_established_total", .kind = "counter", .labels = &.{"direction"} },
+    .{ .name = "lodestar_native_quic_connections_closed_total", .kind = "counter", .labels = &.{ "direction", "reason" } },
+    .{ .name = "lodestar_native_quic_connections_dialing", .kind = "gauge" },
+    .{ .name = "lodestar_native_peer_dial_selections_total", .kind = "counter", .labels = &.{"source"} },
+    // discv5
+    .{ .name = "lodestar_discv5_active_session_count", .kind = "gauge" },
+    .{ .name = "lodestar_discv5_kad_table_size", .kind = "gauge" },
+    .{ .name = "lodestar_discv5_lookup_count", .kind = "gauge" },
+    .{ .name = "lodestar_native_discovery_lookups_started_total", .kind = "counter" },
+    .{ .name = "lodestar_native_discovery_queries_started_total", .kind = "counter" },
+    .{ .name = "lodestar_native_discovery_query_timeouts_total", .kind = "counter" },
+    .{ .name = "lodestar_native_discovery_lookup_finishes_total", .kind = "counter", .labels = &.{"reason"} },
+    .{ .name = "lodestar_native_discovery_admission_total", .kind = "counter", .labels = &.{ "stage", "outcome" } },
+    // Gossip
+    .{ .name = "lodestar_gossip_mesh_peers_by_type_count", .kind = "gauge", .labels = &.{ "type", "boundary" } },
+    .{ .name = "lodestar_gossip_topic_peers_by_type_count", .kind = "gauge", .labels = &.{ "type", "boundary" } },
+    .{ .name = "lodestar_native_gossip_queue_drops_total", .kind = "counter", .labels = &.{"reason"} },
+    // ReqResp
+    .{ .name = "beacon_reqresp_outgoing_requests_total", .kind = "counter", .labels = &.{"method"} },
+    .{ .name = "beacon_reqresp_outgoing_requests_error_total", .kind = "counter", .labels = &.{"method"} },
+    .{ .name = "beacon_reqresp_outgoing_requests_error_reason_total", .kind = "counter", .labels = &.{"reason"} },
+    .{ .name = "beacon_reqresp_incoming_requests_total", .kind = "counter", .labels = &.{"method"} },
+    .{ .name = "beacon_reqresp_incoming_requests_error_total", .kind = "counter", .labels = &.{"method"} },
+    .{ .name = "lodestar_native_reqresp_inbound_occupied", .kind = "gauge", .labels = &.{"phase"} },
+    .{ .name = "lodestar_native_reqresp_resources_serving_occupied", .kind = "gauge" },
+    .{ .name = "lodestar_native_reqresp_resources_serving_capacity", .kind = "gauge" },
+};
+
+fn hasSeries(output: []const u8, series: Series) bool {
+    var buffer: [256]u8 = undefined;
+    const type_line = std.fmt.bufPrint(&buffer, "# TYPE {s} {s}\n", .{ series.name, series.kind }) catch return false;
+    if (std.mem.indexOf(u8, output, type_line) == null) return false;
+    const labels = sampleLabels(output, series.name, std.mem.eql(u8, series.kind, "histogram")) orelse return false;
+    for (series.labels) |label| if (!hasLabel(labels, label)) return false;
+    return true;
+}
+
+fn sampleLabels(output: []const u8, name: []const u8, histogram: bool) ?[]const u8 {
+    const suffix = if (histogram) "_bucket" else "";
+    var lines = std.mem.splitScalar(u8, output, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, name)) continue;
+        const rest = line[name.len..];
+        if (!std.mem.startsWith(u8, rest, suffix)) continue;
+        const after = rest[suffix.len..];
+        if (std.mem.startsWith(u8, after, " ")) return "";
+        if (std.mem.startsWith(u8, after, "{")) return after[0 .. std.mem.indexOfScalar(u8, after, '}') orelse after.len];
+    }
+    return null;
+}
+
+fn hasLabel(labels: []const u8, label: []const u8) bool {
+    var start: usize = 0;
+    while (std.mem.indexOfPos(u8, labels, start, label)) |at| {
+        const opens = at > 0 and (labels[at - 1] == '{' or labels[at - 1] == ',');
+        if (opens and std.mem.startsWith(u8, labels[at + label.len ..], "=\"")) return true;
+        start = at + 1;
+    }
+    return false;
 }
 
 fn boundary(digest: [4]u8, epoch: u64) policy.Boundary {
@@ -182,4 +274,17 @@ test "metrics use retained usable coverage and accepted demand until replacement
     try manager.setDemand(&.{});
     manager.selection = .{};
     try contains(try f.render(true), "lodestar_native_peers_per_active_subnet_count{type=\"attnets\"} 0\n");
+}
+
+test "metrics render every measurement contract series with its type and labels" {
+    var f = try Fixture.initWith(&.{boundary(@splat(0), 100)}, .{ .bind = .{ .ip4 = .loopback(0) } });
+    defer f.deinit();
+    const output = try f.render(true);
+    var missing: usize = 0;
+    for (contract) |series| {
+        if (hasSeries(output, series)) continue;
+        std.debug.print("measurement contract series missing or mistyped: {s} ({s})\n", .{ series.name, series.kind });
+        missing += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 0), missing);
 }
