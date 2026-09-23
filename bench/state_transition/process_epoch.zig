@@ -587,7 +587,7 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
                 recordSegment(.sync_committee_updates, @as(u64, @intCast(time.since(io, sync_updates_start).nanoseconds)));
             }
 
-            if (comptime fork == .fulu) {
+            if (comptime fork.gte(.fulu)) {
                 const lookahead_start = time.start(io);
                 state_transition.processProposerLookahead(
                     fork,
