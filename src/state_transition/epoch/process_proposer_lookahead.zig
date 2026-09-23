@@ -41,8 +41,8 @@ pub fn processProposerLookahead(
     state: *BeaconState(fork),
     epoch_transition_cache: *EpochTransitionCache,
 ) !void {
-    const proposer_lookahead: *[ssz.fulu.ProposerLookahead.length]u64 = try state.proposerLookaheadSlice(allocator);
-    defer allocator.free(@as([]u64, proposer_lookahead));
+    var proposer_lookahead: [ssz.fulu.ProposerLookahead.length]u64 = undefined;
+    try state.proposerLookaheadInto(&proposer_lookahead);
 
     const lookahead_epochs = preset.MIN_SEED_LOOKAHEAD + 1;
     const last_epoch_start = (lookahead_epochs - 1) * preset.SLOTS_PER_EPOCH;
@@ -92,7 +92,7 @@ pub fn processProposerLookahead(
         proposer_lookahead[last_epoch_start..],
     );
 
-    try state.setProposerLookahead(proposer_lookahead);
+    try state.setProposerLookahead(&proposer_lookahead);
     epoch_transition_cache.next_shuffling = next_shuffling_rc;
 }
 
