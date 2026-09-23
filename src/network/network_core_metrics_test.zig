@@ -87,11 +87,15 @@ const contract = [_]Series{
     .{ .name = "lodestar_discv5_active_session_count", .kind = "gauge" },
     .{ .name = "lodestar_discv5_kad_table_size", .kind = "gauge" },
     .{ .name = "lodestar_discv5_lookup_count", .kind = "gauge" },
+    .{ .name = "lodestar_native_discovery_lookup_active", .kind = "gauge" },
+    .{ .name = "lodestar_native_discovery_session_capacity", .kind = "gauge" },
     .{ .name = "lodestar_native_discovery_lookups_started_total", .kind = "counter" },
     .{ .name = "lodestar_native_discovery_queries_started_total", .kind = "counter" },
     .{ .name = "lodestar_native_discovery_query_timeouts_total", .kind = "counter" },
     .{ .name = "lodestar_native_discovery_lookup_finishes_total", .kind = "counter", .labels = &.{"reason"} },
     .{ .name = "lodestar_native_discovery_admission_total", .kind = "counter", .labels = &.{ "stage", "outcome" } },
+    .{ .name = "lodestar_native_discovery_datagrams_accepted_total", .kind = "counter" },
+    .{ .name = "lodestar_native_discovery_datagram_rejections_total", .kind = "counter", .labels = &.{ "stage", "reason" } },
     // Gossip
     .{ .name = "lodestar_gossip_mesh_peers_by_type_count", .kind = "gauge", .labels = &.{ "type", "boundary" } },
     .{ .name = "lodestar_gossip_topic_peers_by_type_count", .kind = "gauge", .labels = &.{ "type", "boundary" } },
@@ -333,4 +337,18 @@ test "metrics attribute zero-wait owner turns to every due source and record the
     try contains(output, "lodestar_native_network_due_now_turns_total{source=\"host\"} 8\n");
     try contains(output, "lodestar_native_network_wait_seconds_bucket{le=\"0\"} 8\n");
     try contains(output, "lodestar_native_network_wait_seconds_count 9\n");
+}
+
+test "metrics export cumulative discovery lookups, session capacity and datagram rejections" {
+    var f = try Fixture.initWith(&.{}, .{ .bind = .{ .ip4 = .loopback(0) }, .engine = .{ .session_capacity = 8, .challenge_capacity = 8, .call_capacity = 8 } });
+    defer f.deinit();
+    const coordinator = &f.node.discovery.?.coordinator;
+    coordinator.counters.lookups_started = 5;
+    coordinator.datagram_rejections[@intFromEnum(@import("discv5").types.RejectReason.invalid_handshake)] = 3;
+    const output = try f.render(true);
+    try contains(output, "# TYPE lodestar_discv5_lookup_count gauge\nlodestar_discv5_lookup_count 5\n");
+    try contains(output, "lodestar_native_discovery_lookup_active 0\n");
+    try contains(output, "lodestar_native_discovery_session_capacity 8\n");
+    try contains(output, "lodestar_native_discovery_datagram_rejections_total{stage=\"handshake\",reason=\"invalid_handshake\"} 3\n");
+    try contains(try f.render(false), "lodestar_discv5_lookup_count 5\n");
 }
