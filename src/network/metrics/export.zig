@@ -15,7 +15,7 @@ pub fn textCapacity(boundaries: []const policy.Boundary) usize {
         topics += rule.count;
     };
     std.debug.assert(topics <= policy.topic_max);
-    // Three bounded-label gauge samples per topic, including maximum integer and epoch widths.
+    // Five bounded-label gauge samples per topic, including maximum integer, epoch and topic widths.
     return fixed_text_capacity + topics * 768;
 }
 

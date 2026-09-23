@@ -97,6 +97,8 @@ const contract = [_]Series{
     .{ .name = "lodestar_native_discovery_datagrams_accepted_total", .kind = "counter" },
     .{ .name = "lodestar_native_discovery_datagram_rejections_total", .kind = "counter", .labels = &.{ "stage", "reason" } },
     // Gossip
+    .{ .name = "gossipsub_mesh_peer_count", .kind = "gauge", .labels = &.{"topicStr"} },
+    .{ .name = "gossipsub_topic_peer_count", .kind = "gauge", .labels = &.{"topicStr"} },
     .{ .name = "lodestar_gossip_mesh_peers_by_type_count", .kind = "gauge", .labels = &.{ "type", "boundary" } },
     .{ .name = "lodestar_gossip_topic_peers_by_type_count", .kind = "gauge", .labels = &.{ "type", "boundary" } },
     .{ .name = "lodestar_native_gossip_queue_drops_total", .kind = "counter", .labels = &.{"reason"} },
@@ -351,4 +353,24 @@ test "metrics export cumulative discovery lookups, session capacity and datagram
     try contains(output, "lodestar_native_discovery_session_capacity 8\n");
     try contains(output, "lodestar_native_discovery_datagram_rejections_total{stage=\"handshake\",reason=\"invalid_handshake\"} 3\n");
     try contains(try f.render(false), "lodestar_discv5_lookup_count 5\n");
+}
+
+test "metrics export stock per-topic gossipsub peer gauges under full topic strings" {
+    var f = try Fixture.init(&.{ boundary(@splat(0), 100), boundary(@splat(1), 200) });
+    defer f.deinit();
+    const g = f.node.service.gossipsub;
+    const ns = &g.overlay.namespace.?;
+    const column = "/eth2/00000000/data_column_sidecar_9/ssz_snappy";
+    ns.setSubscription(0, ns.lookup(column).?.ordinal, true);
+    var output = try f.render(true);
+    try contains(output, "# TYPE gossipsub_topic_peer_count gauge\n");
+    try contains(output, "gossipsub_topic_peer_count{topicStr=\"" ++ column ++ "\"} 1\n");
+    try contains(output, "gossipsub_mesh_peer_count{topicStr=\"" ++ column ++ "\"} 0\n");
+    try contains(output, "gossipsub_mesh_peer_count{topicStr=\"/eth2/00000000/beacon_attestation_63/ssz_snappy\"} 0\n");
+    try std.testing.expectEqual(@as(usize, 333), std.mem.count(u8, output, "gossipsub_topic_peer_count{topicStr=\"/eth2/00000000/"));
+    try std.testing.expect(std.mem.indexOf(u8, output, "/eth2/01010101/") == null);
+    const future = "/eth2/01010101/beacon_block/ssz_snappy";
+    try gossip_test.subscribe(g, future);
+    output = try f.render(true);
+    try contains(output, "gossipsub_mesh_peer_count{topicStr=\"" ++ future ++ "\"} 0\n");
 }
