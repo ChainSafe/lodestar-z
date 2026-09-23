@@ -9,6 +9,7 @@ const engine_mod = @import("quic/engine.zig");
 const rr = @import("reqresp/root.zig");
 const gossip = @import("gossipsub/root.zig");
 const Now = @import("types.zig").Now;
+const wake_sources = @import("wake_sources.zig");
 pub const controls_per_turn = 32;
 pub const identify_per_turn = 8;
 pub const dials_per_turn = 4;
@@ -120,28 +121,36 @@ pub fn nextWakeup(
     gossip_capacity: usize,
     dial_capacity: usize,
 ) ?u64 {
-    if (self.stopped) return self.peerWakeup(now, peer_capacity);
+    var wakeups: wake_sources.Wakeups = .{};
+    collectWakeups(self, service, now, peer_capacity, application_capacity, gossip_capacity, dial_capacity, &wakeups);
+    return wakeups.earliest();
+}
+
+pub fn collectWakeups(
+    self: *PeerManager,
+    service: *service_mod.Service,
+    now: Now,
+    peer_capacity: usize,
+    application_capacity: usize,
+    gossip_capacity: usize,
+    dial_capacity: usize,
+    wakeups: *wake_sources.Wakeups,
+) void {
+    wakeups.note(.peer_events, self.peerWakeup(now, peer_capacity));
+    if (self.stopped) return;
     if (self.quiescing) {
-        var due = service.nextWakeup(now, .{ .application = 0, .control = controls_per_turn, .gossipsub = 0, .identify = identify_per_turn });
-        for ([_]?u64{ self.control.nextWakeup(&self.catalog, now), self.peerWakeup(now, peer_capacity) }) |next| if (next) |deadline| {
-            due = @min(due orelse deadline, deadline);
-        };
-        return due;
+        service.collectWakeups(now, .{ .application = 0, .control = controls_per_turn, .gossipsub = 0, .identify = identify_per_turn }, wakeups);
+        wakeups.note(.control, self.control.nextWakeup(&self.catalog, now));
+        return;
     }
-    var due = service.nextWakeup(now, .{ .application = application_capacity, .control = controls_per_turn, .gossipsub = gossip_capacity, .identify = identify_per_turn });
-    for ([_]?u64{
-        self.control.nextWakeup(&self.catalog, now),
-        self.dialing.nextWakeup(&self.catalog, now.mono_ms, @min(dial_capacity, self.dialRoom())),
-        self.policyWakeup(service, now),
-        if (self.dialing.selectionNeeded(&self.catalog)) now.mono_ms else null,
-        self.reconciliation_deadline,
-        self.dialing.selection_deadline,
-        if (self.custody_pending) now.mono_ms +| 1 else null,
-        self.peerWakeup(now, peer_capacity),
-    }) |next| {
-        if (next) |value| due = @min(due orelse value, value);
-    }
-    return due;
+    service.collectWakeups(now, .{ .application = application_capacity, .control = controls_per_turn, .gossipsub = gossip_capacity, .identify = identify_per_turn }, wakeups);
+    wakeups.note(.control, self.control.nextWakeup(&self.catalog, now));
+    wakeups.note(.dial, self.dialing.nextWakeup(&self.catalog, now.mono_ms, @min(dial_capacity, self.dialRoom())));
+    wakeups.note(.dial, if (self.dialing.selectionNeeded(&self.catalog)) now.mono_ms else null);
+    wakeups.note(.dial, self.dialing.selection_deadline);
+    wakeups.note(.peer_policy, self.policyWakeup(service, now));
+    wakeups.note(.peer_policy, self.reconciliation_deadline);
+    wakeups.note(.peer_policy, if (self.custody_pending) now.mono_ms +| 1 else null);
 }
 
 pub fn sendReqRespRequest(

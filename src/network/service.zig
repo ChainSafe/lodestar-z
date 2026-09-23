@@ -6,6 +6,7 @@ const reqresp_mod = @import("reqresp/root.zig");
 const gossip_mod = @import("gossipsub/root.zig");
 
 const identify_mod = @import("identify/root.zig");
+const wake_sources = @import("wake_sources.zig");
 
 pub const Options = struct {
     identify: ?identify_mod.Options = null,
@@ -112,14 +113,16 @@ pub const Service = struct {
 
     /// Combine protocol deadlines and independent host output capacities with the transport wakeup.
     pub fn nextWakeup(self: *Service, now: types.Now, capacities: Capacities) ?u64 {
-        const request_due = self.reqresp.nextWakeup(now, .{ .application = capacities.application, .control = capacities.control });
-        const gossip = if (self.applications == .active) self.gossipsub.nextWakeup(now, capacities.gossipsub) else null;
-        const identify_due = if (self.identify) |*identify| identify.nextWakeup(now, capacities.identify) else null;
-        var due = request_due;
-        for ([_]?u64{ gossip, identify_due, self.router.nextWakeup(now, routing.outcomes_per_pump) }) |next| if (next) |value| {
-            due = @min(due orelse value, value);
-        };
-        return due;
+        var wakeups: wake_sources.Wakeups = .{};
+        self.collectWakeups(now, capacities, &wakeups);
+        return wakeups.earliest();
+    }
+
+    pub fn collectWakeups(self: *Service, now: types.Now, capacities: Capacities, wakeups: *wake_sources.Wakeups) void {
+        wakeups.note(.reqresp, self.reqresp.nextWakeup(now, .{ .application = capacities.application, .control = capacities.control }));
+        if (self.applications == .active) wakeups.note(.gossip, self.gossipsub.nextWakeup(now, capacities.gossipsub));
+        if (self.identify) |*identify| wakeups.note(.identify, identify.nextWakeup(now, capacities.identify));
+        wakeups.note(.negotiation, self.router.nextWakeup(now, routing.outcomes_per_pump));
     }
 
     /// Forward transport activity separately from lifecycle events.
