@@ -2722,8 +2722,8 @@ test "getParentPayloadStatus without FULL variant" {
     // parent_block_hash matches EMPTY's executionPayloadBlockHash (ZERO_HASH) → EMPTY.
     try testing.expectEqual(PayloadStatus.empty, try pa.getParentPayloadStatus(parent_root, ZERO_HASH));
     // parent_block_hash doesn't match any variant → error.
-    try testing.expectError(ProtoArrayError.UnknownParentBlock, pa.getParentPayloadStatus(parent_root, bid_hash));
-    try testing.expectError(ProtoArrayError.UnknownParentBlock, pa.getParentPayloadStatus(parent_root, makeRoot(0xBB)));
+    try testing.expectError(error.UnknownParentBlock, pa.getParentPayloadStatus(parent_root, bid_hash));
+    try testing.expectError(error.UnknownParentBlock, pa.getParentPayloadStatus(parent_root, makeRoot(0xBB)));
 }
 
 // Tree (Gloas):

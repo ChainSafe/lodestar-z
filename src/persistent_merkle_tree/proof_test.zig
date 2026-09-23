@@ -177,7 +177,7 @@ test "single proof invalid navigation" {
     defer pool.unref(root);
 
     const gindex = Gindex.fromDepth(3, 0);
-    try testing.expectError(Node.Error.InvalidNode, proof.createSingleProof(testing.allocator, &pool, root, gindex));
+    try testing.expectError(error.InvalidNode, proof.createSingleProof(testing.allocator, &pool, root, gindex));
 }
 
 // Zero gindex must be rejected by both proof creation and reconstruction entry points.
@@ -190,10 +190,10 @@ test "single proof invalid gindex" {
     defer pool.unref(root);
 
     const zero_gindex: Gindex = @enumFromInt(0);
-    try testing.expectError(proof.Error.InvalidGindex, proof.createSingleProof(testing.allocator, &pool, root, zero_gindex));
+    try testing.expectError(error.InvalidGindex, proof.createSingleProof(testing.allocator, &pool, root, zero_gindex));
 
     const empty_witnesses: []const [32]u8 = &[_][32]u8{};
-    try testing.expectError(proof.Error.InvalidGindex, proof.createNodeFromSingleProof(&pool, zero_gindex, leaf_hash, empty_witnesses));
+    try testing.expectError(error.InvalidGindex, proof.createNodeFromSingleProof(&pool, zero_gindex, leaf_hash, empty_witnesses));
 }
 
 test "descriptorToBitlist - should convert valid descriptor to a bitlist" {
@@ -206,7 +206,7 @@ test "descriptorToBitlist - should convert valid descriptor to a bitlist" {
 
 test "descriptorToBitlist - should throw on invalid descriptors" {
     for (descriptor_error_cases) |case| {
-        try testing.expectError(proof.Error.InvalidWitnessLength, proof.descriptorToBitlist(testing.allocator, case));
+        try testing.expectError(error.InvalidWitnessLength, proof.descriptorToBitlist(testing.allocator, case));
     }
 }
 
@@ -307,7 +307,7 @@ test "compact multiproof reconstruction should reject empty leaves" {
     const descriptor = [_]u8{0b1000_0000};
 
     try testing.expectError(
-        proof.Error.InvalidWitnessLength,
+        error.InvalidWitnessLength,
         proof.createNodeFromCompactMultiProof(&pool, &leaves, &descriptor),
     );
 }

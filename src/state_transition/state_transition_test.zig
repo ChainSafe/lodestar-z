@@ -50,7 +50,7 @@ test "state transition - electra block" {
         const signed_beacon_block = AnySignedBeaconBlock{ .full_electra = &electra_block };
 
         // this returns the error so no need to handle returned post_state
-        // TODO: if blst can publish BlstError.BadEncoding, can just use testing.expectError
+        // TODO: if blst can publish error.BadEncoding, can just use testing.expectError
         // testing.expectError(blst.c.BLST_BAD_ENCODING, stateTransition(allocator, test_state.cached_state, signed_block, .{ .verify_signatures = true }));
         const res = stateTransition(
             allocator,
