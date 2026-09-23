@@ -270,7 +270,7 @@ export declare class BeaconStateView {
   getPreviousShuffling(): EpochShuffling;
   getCurrentShuffling(): EpochShuffling;
   getNextShuffling(): EpochShuffling;
-  getBeaconCommittee(): number[];
+  getBeaconCommittee(): Uint32Array;
   getBeaconCommitteeCountPerSlot(): number;
   previousDecisionRoot: string;
   currentDecisionRoot: string;
