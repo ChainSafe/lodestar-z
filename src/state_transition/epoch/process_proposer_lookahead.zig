@@ -115,11 +115,14 @@ test "processProposerLookahead sanity" {
     );
     test_state.cached_state.state.* = .{ .fulu = fulu_state.inner };
 
-    const expected_indices = try allocator.dupe(ValidatorIndex, test_state.epoch_transition_cache.next_shuffling_active_indices);
     const current_epoch = computeEpochAtSlot(try test_state.cached_state.state.slot());
     const new_epoch = current_epoch + preset.MIN_SEED_LOOKAHEAD + 1;
     const fulu = test_state.cached_state.state.castToFork(.fulu);
-    const expected_shuffling = try computeEpochShufflingForFork(.fulu, allocator, fulu, expected_indices, new_epoch);
+    const expected_shuffling = blk: {
+        const expected_indices = try allocator.dupe(ValidatorIndex, test_state.epoch_transition_cache.next_shuffling_active_indices);
+        errdefer allocator.free(expected_indices);
+        break :blk try computeEpochShufflingForFork(.fulu, allocator, fulu, expected_indices, new_epoch);
+    };
     defer expected_shuffling.deinit();
 
     try startProposerLookaheadShuffling(.fulu, allocator, std.testing.io, fulu, test_state.epoch_transition_cache);
