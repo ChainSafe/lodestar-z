@@ -11,7 +11,7 @@ pub const serialize_size = 32;
 /// `SecretKey` on success, `BlstError` on failure.
 pub fn keyGen(ikm: []const u8, key_info: ?[]const u8) BlstError!Self {
     if (ikm.len < 32) {
-        return BlstError.BadEncoding;
+        return error.BadEncoding;
     }
 
     var sk = Self{};
@@ -30,7 +30,7 @@ pub fn keyGen(ikm: []const u8, key_info: ?[]const u8) BlstError!Self {
 /// Returns `SecretKey` on success, `BlstError` on failure
 pub fn keyGenV3(ikm: []const u8, info: ?[]const u8) BlstError!Self {
     if (ikm.len < 32) {
-        return BlstError.BadEncoding;
+        return error.BadEncoding;
     }
 
     var sk = Self{};
@@ -50,10 +50,10 @@ pub fn keyGenV3(ikm: []const u8, info: ?[]const u8) BlstError!Self {
 /// Returns `SecretKey` on success, `BlstError` on failure.
 pub fn keyGenV45(ikm: []const u8, salt: []const u8, info: ?[]const u8) BlstError!Self {
     if (ikm.len < 32) {
-        return BlstError.BadEncoding;
+        return error.BadEncoding;
     }
     if (salt.len == 0) {
-        return BlstError.BadEncoding;
+        return error.BadEncoding;
     }
 
     var sk = Self{};
@@ -75,10 +75,10 @@ pub fn keyGenV45(ikm: []const u8, salt: []const u8, info: ?[]const u8) BlstError
 /// Returns `SecretKey` on success, `BlstError` on failure.
 pub fn keyGenV5(ikm: []const u8, salt: []const u8, info: ?[]const u8) BlstError!Self {
     if (ikm.len < 32) {
-        return BlstError.BadEncoding;
+        return error.BadEncoding;
     }
     if (salt.len == 0) {
-        return BlstError.BadEncoding;
+        return error.BadEncoding;
     }
 
     var sk = Self{};
@@ -99,7 +99,7 @@ pub fn keyGenV5(ikm: []const u8, salt: []const u8, info: ?[]const u8) BlstError!
 ///   Returns the `SecretKey` on success, `BlstError` on failure.
 pub fn deriveMasterEip2333(ikm: []const u8) BlstError!Self {
     if (ikm.len < 32) {
-        return BlstError.BadEncoding;
+        return error.BadEncoding;
     }
 
     var sk = Self{};
@@ -152,7 +152,7 @@ pub fn deserialize(sk_in: *const [32]u8) BlstError!Self {
     var sk = Self{};
     c.blst_scalar_from_bendian(&sk.value, sk_in);
     if (!c.blst_sk_check(&sk.value)) {
-        return BlstError.BadEncoding;
+        return error.BadEncoding;
     }
     return sk;
 }
@@ -171,6 +171,6 @@ test "key generation rejects an empty salt" {
     const ikm = [_]u8{0x42} ** 32;
     const salt: []const u8 = &.{};
 
-    try std.testing.expectError(BlstError.BadEncoding, keyGenV45(&ikm, salt, null));
-    try std.testing.expectError(BlstError.BadEncoding, keyGenV5(&ikm, salt, null));
+    try std.testing.expectError(error.BadEncoding, keyGenV45(&ikm, salt, null));
+    try std.testing.expectError(error.BadEncoding, keyGenV5(&ikm, salt, null));
 }

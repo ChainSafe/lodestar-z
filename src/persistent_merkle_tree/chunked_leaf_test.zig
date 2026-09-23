@@ -208,7 +208,7 @@ test "Id.setChunkedLeafChunks: empty batch produces a clone with empty dirty" {
     try std.testing.expectEqualSlices(u8, a.getRoot(&pool), b.getRoot(&pool));
 }
 
-test "Id.setChunkedLeafChunk: non-chunked_leaf Id returns Error.InvalidNode" {
+test "Id.setChunkedLeafChunk: non-chunked_leaf Id returns error.InvalidNode" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 16 });
     defer pool.deinit();

@@ -24,14 +24,14 @@ pub const SyncCommitteeCache = union(enum) {
 
     pub fn getValidatorIndices(self: *const SyncCommitteeCache) Error![]ValidatorIndex {
         return switch (self.*) {
-            .phase0 => Error.SyncCommitteeNotAvailable,
+            .phase0 => error.SyncCommitteeNotAvailable,
             .altair => |sync_committee| sync_committee.validator_indices,
         };
     }
 
     pub fn getValidatorIndexMap(self: *const SyncCommitteeCache) Error!*const SyncComitteeValidatorIndexMap {
         return switch (self.*) {
-            .phase0 => Error.SyncCommitteeNotAvailable,
+            .phase0 => error.SyncCommitteeNotAvailable,
             .altair => |sync_committee| sync_committee.validator_index_map,
         };
     }
