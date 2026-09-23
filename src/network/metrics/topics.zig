@@ -67,4 +67,23 @@ pub fn write(context: *const Context, w: *prom.Encoder) prom.Error!void {
             }
         }
     }
+    inline for (.{ "mesh", "topic" }) |group| {
+        const metric = try w.family(.{
+            .name = "gossipsub_" ++ group ++ "_peer_count",
+            .kind = .gauge,
+            .help = if (comptime std.mem.eql(u8, group, "mesh")) "Mesh peers per topic in the current and locally subscribed fork boundaries" else "Subscribed peers per topic in the current and locally subscribed fork boundaries",
+            .labels = &.{"topicStr"},
+        });
+        for (ns.boundaries, ns.offsets, 0..) |*boundary, starts, index| {
+            if (!visible.isSet(index)) continue;
+            inline for (std.meta.fields(policy.Kind)) |kind| {
+                for (0..boundary.rules[kind.value].count) |subnet| {
+                    const ordinal = starts[kind.value] + subnet;
+                    var name: [gossip.topic.topic_max_len]u8 = undefined;
+                    const topic = gossip.topic.buildCanonical(.{ .digest = boundary.digest, .name = .{ .kind = @enumFromInt(kind.value), .subnet = @intCast(subnet) } }, &name);
+                    try metric.sample(.{topic}, if (comptime std.mem.eql(u8, group, "mesh")) mesh[ordinal] else ns.subscriber_counts[ordinal]);
+                }
+            }
+        }
+    }
 }
