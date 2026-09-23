@@ -303,9 +303,20 @@ fn ProcessSyncCommitteeUpdatesBench(comptime fork: ForkSeq) type {
 fn ProcessProposerLookaheadBench(comptime fork: ForkSeq) type {
     return struct {
         epoch_transition_cache: *EpochTransitionCache,
+        var cache_to_release: ?*EpochTransitionCache = null;
+
+        pub fn afterEach() void {
+            const cache = cache_to_release orelse unreachable;
+            const shuffling = cache.next_shuffling orelse unreachable;
+            cache.next_shuffling = null;
+            cache_to_release = null;
+            shuffling.unref();
+            BenchState.afterEach();
+        }
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             const cache = self.epoch_transition_cache;
+            std.debug.assert(cache.next_shuffling == null);
 
             state_transition.processProposerLookahead(
                 fork,
@@ -314,6 +325,7 @@ fn ProcessProposerLookaheadBench(comptime fork: ForkSeq) type {
                 BenchState.cloned_cached_state.state.castToFork(fork),
                 cache,
             ) catch unreachable;
+            cache_to_release = cache;
         }
     };
 }
@@ -321,6 +333,7 @@ fn ProcessProposerLookaheadBench(comptime fork: ForkSeq) type {
 const Step = enum {
     epoch_total,
     before_process_epoch,
+    start_shuffling,
     justification_finalization,
     inactivity_updates,
     rewards_and_penalties,
@@ -430,6 +443,7 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
             recordSegment(.before_process_epoch, @as(u64, @intCast(time.since(io, before_start).nanoseconds)));
 
             if (comptime fork.gte(.fulu)) {
+                const start_shuffling_timer = time.start(io);
                 state_transition.startProposerLookaheadShuffling(
                     fork,
                     allocator,
@@ -437,6 +451,7 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
                     BenchState.cloned_cached_state.state.castToFork(fork),
                     cache,
                 ) catch unreachable;
+                recordSegment(.start_shuffling, @as(u64, @intCast(time.since(io, start_shuffling_timer).nanoseconds)));
             }
 
             const fork_state = BenchState.cloned_cached_state.state.castToFork(fork);
@@ -796,9 +811,12 @@ fn runBenchmark(
     }
 
     if (comptime fork.gte(.fulu)) {
-        try bench.addParam("proposer_lookahead", &ProcessProposerLookaheadBench(fork){
+        try bench.addParam("proposer_lookahead(sync)", &ProcessProposerLookaheadBench(fork){
             .epoch_transition_cache = &epoch_transition_cache,
-        }, .{ .hooks = hooks });
+        }, .{ .hooks = .{
+            .before_each = BenchState.beforeEach,
+            .after_each = ProcessProposerLookaheadBench(fork).afterEach,
+        } });
     }
 
     // Non-segmented
