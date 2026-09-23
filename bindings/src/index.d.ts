@@ -25,7 +25,7 @@ export interface SignedVoluntaryExit {
 
 interface Eth1Data {
   depositRoot: Uint8Array;
-  depositCount: number;
+  depositCount: bigint;
   blockHash: Uint8Array;
 }
 
