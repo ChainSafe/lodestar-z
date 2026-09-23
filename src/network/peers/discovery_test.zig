@@ -250,6 +250,56 @@ fn fillResponderBucket(engine: *d.Engine, responder: *const d.identity.enr.Recor
     }
 }
 
+test "peer discovery reserves output for the responder alongside a full referral batch" {
+    var a: Node = undefined;
+    try a.init(1, 9001);
+    defer a.deinit();
+    var b: Node = undefined;
+    try b.init(2, 9002);
+    defer b.deinit();
+    const now = try d.Transport.monotonicMilliseconds(std.testing.io);
+    const peer: d.types.Endpoint = .{ .node_id = b.transport.engine.localRecord().node_id, .address = b.transport.localAddress() };
+    _ = try a.transport.engine.confirmPeer(&peer, b.transport.engine.localRecord(), now);
+    const seed = a.transport.engine.peerRecord(&peer.node_id).?;
+    var records: [d.types.findnode_result_max]d.identity.enr.Record = undefined;
+    var raw: [records.len][]const u8 = undefined;
+    for (&records, &raw, 3..) |*record, *bytes, scalar| {
+        const key = try d.identity.crypto.keyPairFromSecret(&(.{0} ** 31 ++ .{@as(u8, @intCast(scalar))}));
+        record.* = try adapter.build(&key, 1, &.{ .fork = .{ .digest = context.digest, .next_version = @splat(0), .next_epoch = std.math.maxInt(u64) }, .ip4 = .{ 127, 0, 0, 1 }, .udp = 9000, .quic = 9001 }, &context);
+        bytes.* = record.slice();
+    }
+    var output: [@import("../managed.zig").candidates_per_turn]adapter.Candidate = undefined;
+    try std.testing.expectEqual(records.len + 1, output.len);
+    for ([_]usize{ 0, 1, records.len, output.len }) |capacity| {
+        var controller = try discovery.Discovery.init(std.testing.allocator, &a.transport, &context, &.{}, now, .{});
+        defer controller.deinit();
+        try controller.request(.{ .general = true }, now);
+        var lookup: d.Lookup = undefined;
+        try lookup.init(&controller.storage.candidates, a.transport.engine.localRecord().node_id, peer.node_id, &.{seed}, .dual);
+        var packet: [1280]u8 = undefined;
+        var entropy: d.Engine.StartEntropy = undefined;
+        try std.Io.randomSecure(std.testing.io, std.mem.asBytes(&entropy));
+        const id = try d.wire.message.RequestId.init(&.{1});
+        const started = (try lookup.startNext(&a.transport.engine, &packet, id, now, &entropy)).?;
+        defer _ = a.transport.engine.cancelCall(started.call.handle);
+        controller.lookup = lookup;
+        const progress: d.Transport.StepResult = .{ .now_ms = now, .event = .{ .response = .{
+            .peer = peer,
+            .matched = .{ .handle = started.call.handle, .response = .{ .nodes = .{ .request_id = id, .total = 1, .enrs = &raw } }, .terminal = true },
+            .record = null,
+            .node_records = &records,
+        } } };
+        const result = controller.consume(&progress, &.{}, output[0..capacity]);
+        if (result.failure) |err| return err;
+        try std.testing.expectEqual(capacity, result.candidates);
+        try std.testing.expectEqual(output.len - capacity, result.dropped);
+        if (capacity > 0) try adapter.requireIdentity(b.transport.engine.localRecord(), &output[0].peer);
+        if (capacity == output.len) for (records, output[1..]) |record, candidate| {
+            try std.testing.expectEqualSlices(u8, &record.node_id, &candidate.node_id);
+        };
+    }
+}
+
 test "peer discovery clears an active foreground walk at demand expiry and can restart" {
     var a: Node = undefined;
     try a.init(61, 9061);

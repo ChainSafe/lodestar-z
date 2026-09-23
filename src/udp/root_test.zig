@@ -27,8 +27,8 @@ test "UDP rejects mapped IPv6 listeners before any provider acquisition" {
 
 test "UDP delegates both families to the supplied bind provider" {
     const Provider = struct {
-        fn bind(_: ?*anyopaque, _: *const net.IpAddress, options: net.IpAddress.BindOptions) net.IpAddress.BindError!net.Socket {
-            std.debug.assert(!options.ip6_only);
+        fn bind(_: ?*anyopaque, address: *const net.IpAddress, options: net.IpAddress.BindOptions) net.IpAddress.BindError!net.Socket {
+            std.debug.assert(options.ip6_only == (address.* == .ip6));
             std.debug.assert(options.mode == .dgram and options.protocol == .udp);
             return error.NetworkDown;
         }
@@ -38,6 +38,28 @@ test "UDP delegates both families to the supplied bind provider" {
     const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
     try std.testing.expectError(error.NetworkDown, udp.Sockets.bind(io, .{ .ip4 = .loopback(0) }));
     try std.testing.expectError(error.NetworkDown, udp.Sockets.bind(io, .{ .ip6 = .loopback(0) }));
+}
+
+test "UDP wildcard listeners share a port and keep datagrams in their address family" {
+    var sockets = try udp.Sockets.bind(std.testing.io, .{ .ip6 = .unspecified(0) });
+    defer sockets.close(std.testing.io);
+    const port = sockets.values[1].?.address.getPort();
+    sockets.values[0] = try (net.IpAddress{ .ip4 = .unspecified(port) }).bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
+    var senders = try udp.Sockets.bind(std.testing.io, loopbacks);
+    defer senders.close(std.testing.io);
+    for ([_]net.IpAddress{ .{ .ip4 = .loopback(port) }, .{ .ip6 = .loopback(port) } }, 0..) |destination, family| {
+        try senders.values[family].?.send(std.testing.io, &destination, "same port");
+        var buffer: [16]u8 = undefined;
+        const packet = try sockets.values[family].?.receiveTimeout(std.testing.io, &buffer, timeout(1000));
+        try std.testing.expectEqual(@as(usize, family), if (packet.from == .ip4) @as(usize, 0) else 1);
+        try std.testing.expectEqualStrings("same port", packet.data);
+    }
+    sockets.close(std.testing.io);
+    sockets = .{};
+    sockets = try udp.Sockets.bind(std.testing.io, .{ .dual = .{ .ip4 = .unspecified(port), .ip6 = .unspecified(port) } });
+    try std.testing.expectEqual(port, sockets.values[0].?.address.getPort());
+    try std.testing.expectEqual(port, sockets.values[1].?.address.getPort());
+    try std.testing.expectError(error.AddressInUse, udp.Sockets.bind(std.testing.io, .{ .ip6 = .unspecified(port) }));
 }
 
 test "UDP rolls back the first bind through its provider when the second fails" {

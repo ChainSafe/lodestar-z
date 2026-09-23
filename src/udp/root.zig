@@ -41,7 +41,7 @@ pub const Sockets = struct {
     values: [2]?net.Socket = .{ null, null },
     cursor: u1 = 0,
 
-    /// Uses the provider's IPv6 defaults. Overlapping wildcard binds may fail.
+    /// IPv6 sockets accept IPv6 only, including when both families share a port.
     pub fn bind(io: std.Io, addresses: Bindings) BindError!Sockets {
         const ip6 = switch (addresses) {
             .ip4 => null,
@@ -53,10 +53,10 @@ pub const Sockets = struct {
         errdefer result.close(io);
         switch (addresses) {
             .ip4 => |ip| result.values[0] = try (net.IpAddress{ .ip4 = ip }).bind(io, .{ .mode = .dgram, .protocol = .udp }),
-            .ip6 => |ip| result.values[1] = try (net.IpAddress{ .ip6 = ip }).bind(io, .{ .mode = .dgram, .protocol = .udp }),
+            .ip6 => |ip| result.values[1] = try bindIp6(io, ip),
             .dual => |ips| {
                 result.values[0] = try (net.IpAddress{ .ip4 = ips.ip4 }).bind(io, .{ .mode = .dgram, .protocol = .udp });
-                result.values[1] = try (net.IpAddress{ .ip6 = ips.ip6 }).bind(io, .{ .mode = .dgram, .protocol = .udp });
+                result.values[1] = try bindIp6(io, ips.ip6);
             },
         }
         return result;
@@ -151,6 +151,52 @@ fn waitReadable(io: std.Io, socket: net.Socket, timeout: std.Io.Timeout) Receive
     const failure, const count = socket.receiveManyTimeout(io, &message, &probe, .{ .peek = true }, timeout);
     if (failure) |err| return err;
     assert(count == 1);
+}
+
+fn bindIp6(io: std.Io, ip: net.Ip6Address) BindError!net.Socket {
+    const address: net.IpAddress = .{ .ip6 = ip };
+    const os = @import("builtin").os.tag;
+    if (std.options.networking and (os == .linux or os == .macos)) {
+        // Zig 0.16 Threaded sets IPV6_V6ONLY to zero for ip6_only. Set it before
+        // binding its native sockets; other I/O providers retain their own bind contract.
+        if (io.vtable.netBindIp == std.Io.Threaded.global_single_threaded.io().vtable.netBindIp) {
+            try io.checkCancel();
+            const p = std.posix;
+            const flags = p.SOCK.DGRAM | if (os == .linux) p.SOCK.CLOEXEC else 0;
+            const opened = p.system.socket(p.AF.INET6, flags, p.IPPROTO.UDP);
+            try checkBindError(p.errno(opened));
+            const fd: net.Socket.Handle = @intCast(opened);
+            errdefer io.vtable.netClose(io.userdata, &.{fd});
+            if (os != .linux) try checkBindError(p.errno(p.system.fcntl(fd, p.F.SETFD, @as(usize, p.FD_CLOEXEC))));
+            const enabled: c_int = 1;
+            // Darwin's IPV6_V6ONLY from netinet6/in6.h is absent in Zig 0.16.
+            const ipv6_only = if (os == .macos) 27 else p.IPV6.V6ONLY;
+            try checkBindError(p.errno(p.system.setsockopt(fd, p.IPPROTO.IPV6, ipv6_only, std.mem.asBytes(&enabled), @sizeOf(c_int))));
+            var storage: std.Io.Threaded.PosixAddress = undefined;
+            var len = std.Io.Threaded.addressToPosix(&address, &storage);
+            try checkBindError(p.errno(p.system.bind(fd, &storage.any, len)));
+            try checkBindError(p.errno(p.system.getsockname(fd, &storage.any, &len)));
+            return .{ .handle = fd, .address = std.Io.Threaded.addressFromPosix(&storage) };
+        }
+    }
+    return address.bind(io, .{ .mode = .dgram, .protocol = .udp, .ip6_only = true });
+}
+
+fn checkBindError(err: std.posix.E) BindError!void {
+    return switch (err) {
+        .SUCCESS => {},
+        .ADDRINUSE => error.AddressInUse,
+        .ADDRNOTAVAIL => error.AddressUnavailable,
+        .AFNOSUPPORT => error.AddressFamilyUnsupported,
+        .NOMEM, .NOBUFS => error.SystemResources,
+        .MFILE => error.ProcessFdQuotaExceeded,
+        .NFILE => error.SystemFdQuotaExceeded,
+        .NETDOWN => error.NetworkDown,
+        .PROTONOSUPPORT => error.ProtocolUnsupportedByAddressFamily,
+        .PROTOTYPE => error.SocketModeUnsupported,
+        .NOPROTOOPT => error.OptionUnsupported,
+        else => std.posix.unexpectedErrno(err),
+    };
 }
 
 test {

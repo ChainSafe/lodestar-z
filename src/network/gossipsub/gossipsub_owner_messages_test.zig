@@ -728,6 +728,26 @@ test "gossipsub remote forwarding honors IDONTWANT and preserves borrowed event 
     try std.testing.expectEqual(@as(u64, 1), pair.shared.server.gossipsub.counters.messages_forwarded);
 }
 
+test "gossip forwarding excludes recorded duplicate senders but reaches other mesh peers" {
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
+    defer g.deinit();
+    const name = "/eth2/01020304/beacon_block/ssz_snappy";
+    try support.subscribe(&g, name);
+    var peers: [3]u16 = undefined;
+    for (&peers, 0..) |*peer, index| {
+        peer.* = support.addPeer(&g, .{ .index = @intCast(index), .generation = 1 }, .v1_2).?.index;
+        g.overlay.rows[g.overlay.findTopic(name).?].mesh.set(peer.*);
+    }
+    var events: [1]Event = undefined;
+    try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, peers[0], "shared payload", 1, &events));
+    const handle = events[0].message.handle;
+    try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, peers[1], "shared payload", 2, &events));
+    try std.testing.expectEqual(ReportOutcome{ .applied = .accept }, g.report(handle, .accept, .{ .mono_ms = 3, .unix_s = 0 }));
+    try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[peers[0]].io.tx.data.count);
+    try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[peers[1]].io.tx.data.count);
+    try std.testing.expectEqual(@as(usize, 1), g.sessions.rows[peers[2]].io.tx.data.count);
+}
+
 test "gossip duplicate fast path ignores host capacity and malformed bodies receive penalties" {
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .validation_capacity = 1 });
     defer g.deinit();

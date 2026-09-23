@@ -368,6 +368,29 @@ test "peer catalog custody binds authenticated generations and preserves unchang
     try std.testing.expect(!c.updateMetadata(ref, first, &metadata, 65));
 }
 
+test "peer catalog custody completion emits one update with and without hashing" {
+    for ([_]u16{ 127, 128 }) |count| {
+        var c = try Catalog.init(std.testing.allocator, opts, 1024, 0);
+        defer c.deinit(std.testing.allocator);
+        const ref = admit(&c, &remote, first, .inbound, 0).admitted.peer;
+        try std.testing.expect(c.updateStatus(ref, first, &.{ .earliest_available_slot = 0 }, 0));
+        try std.testing.expect(c.updateMetadata(ref, first, &.{ .custody_group_count = count }, 0));
+        var events: [1]t.Event = undefined;
+        try std.testing.expectEqual(@as(usize, 1), c.pollEvents(&events));
+        try std.testing.expect(events[0].ready.custody_groups == null);
+        var updates: usize = 0;
+        for (0..64) |turn| {
+            var budget: u16 = if (count == 128) 0 else 64;
+            _ = c.advanceCustody(&.{ .fork = .fulu }, turn, 60_000, &budget);
+            if (c.pollEvents(&events) != 0) {
+                updates += 1;
+                try std.testing.expectEqual(@as(usize, count), events[0].updated.custody_groups.?.count());
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 1), updates);
+    }
+}
+
 test "peer catalog changed custody metadata immediately invalidates copied groups" {
     var c = try Catalog.init(std.testing.allocator, opts, 1024, 0);
     defer c.deinit(std.testing.allocator);
