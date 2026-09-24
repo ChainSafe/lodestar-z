@@ -36,6 +36,7 @@ const expectedProtocols = [
     "goodbye/1",
     "ping/1",
     "metadata/3",
+    "status/1",
     "status/2",
     "beacon_blocks_by_range/2",
     "beacon_blocks_by_root/2",
