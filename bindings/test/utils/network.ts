@@ -201,6 +201,20 @@ export function startRuntime(config: NativeApplicationConfig, onWorkAvailable: (
   return initializeNativeNetworkRuntime(config, onWorkAvailable);
 }
 
+/** Collects released runtimes until the process may initialize another one. */
+export async function runtimeReleased(): Promise<void> {
+  for (let i = 0; i < 200; i++) {
+    global.gc?.();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    try {
+      startRuntime({} as NativeApplicationConfig);
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.includes("NetworkAlreadyInitialized")) return;
+    }
+  }
+  throw Error("A native network runtime is still live");
+}
+
 export const topicKinds: readonly NativeTopicKind[] = [
   "beacon_block",
   "beacon_aggregate_and_proof",

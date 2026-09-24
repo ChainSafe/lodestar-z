@@ -10,7 +10,6 @@ import {type PeerRuntime, startPeer} from "./network-peer.js";
 export const BLOCKS = "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy";
 
 export async function incomingPair(
-  beforeServer?: () => void,
   serverBudget?: number,
   onServerWorkAvailable: () => void = () => undefined,
   configure?: (left: NativeApplicationConfig, right: NativeApplicationConfig) => void
@@ -25,7 +24,6 @@ export async function incomingPair(
   let right: NativeNetworkApplicationRuntime | undefined;
   try {
     left = await startPeer(leftConfig);
-    beforeServer?.();
     right = startRuntime(rightConfig, onServerWorkAvailable);
     const [identity, remote] = await Promise.all([left.identity, right.identity]);
     await Promise.all([

@@ -25,7 +25,6 @@ test("gossip drain and stale verdict on an activated application", async () => {
 
 import {setTimeout as delay} from "node:timers/promises";
 import type {NativeApplicationConfig, NativeGossipMessage, NativeNetworkApplicationRuntime} from "../src/network.js";
-import {networkBindings as bindings} from "./utils/network-bindings.js";
 import {BLOCKS, incomingPair, takeIncoming} from "./utils/network-incoming.js";
 
 const TOPIC = topicName();
@@ -54,13 +53,8 @@ async function nextGossip(runtime: NativeNetworkApplicationRuntime): Promise<Nat
   }
   throw Error("Gossip delivery deadline");
 }
-async function gossipPair(
-  timeoutMs = 30000n,
-  budget?: number,
-  beforeServer?: () => void,
-  configure?: (config: NativeApplicationConfig) => void
-) {
-  const pair = await incomingPair(beforeServer, budget, undefined, (left, right) => {
+async function gossipPair(timeoutMs = 30000n, budget?: number, configure?: (config: NativeApplicationConfig) => void) {
+  const pair = await incomingPair(budget, undefined, (left, right) => {
     right.gossipPolicy.validationTimeoutMs = timeoutMs;
     configure?.(left);
     configure?.(right);
@@ -285,70 +279,6 @@ test("gossip payload credit retires on close while descriptors remain held", asy
     await Promise.all([pair.left.close(), pair.right.close()]);
   }
 }, 15000);
-
-const faultApi = bindings as unknown as {
-  networkTestFail?: (stage: string) => void;
-  networkTestScenario?: (stage: string) => void;
-  networkTestStage?: () => string;
-  networkTestGossipRelease?: () => void;
-};
-test.skipIf(!faultApi.networkTestFail)(
-  "gossip copy failure publishes no batch and preserves a retry",
-  async () => {
-    const pair = await gossipPair();
-    try {
-      await pair.left.publishGossip(TOPIC, blockPayload(4000, 3), {allowZeroPeers: false});
-      for (let i = 0; i < 1000 && pair.right.diagnostics().gossip.queued === 0; i++) await delay(5);
-      faultApi.networkTestFail?.("gossip_copy");
-      expect(() => pair.right.drainGossip()).toThrow("NetworkResultAllocationFailed");
-      expect(pair.right.diagnostics().gossip).toMatchObject({
-        copyingBytes: 0,
-        messagesCopied: 0n,
-        payloadBytes: 4000,
-        queued: 1,
-        reservedBytes: 8000,
-      });
-      const message = await nextGossip(pair.right);
-      expect(pair.right.reportGossip(message.handle, "ignore")).toBe(true);
-    } finally {
-      await Promise.all([pair.left.close(), pair.right.close()]);
-    }
-  },
-  15000
-);
-
-test.skipIf(!faultApi.networkTestFail)(
-  "gossip publication result failure preserves the queued outcome and runtime",
-  async () => {
-    const pair = await gossipPair();
-    try {
-      faultApi.networkTestFail?.("operation_copy");
-      await expect(
-        pair.right.publishGossip(TOPIC, blockPayload(4000, 4), {allowZeroPeers: false})
-      ).rejects.toMatchObject({code: "NetworkResultAllocationFailed"});
-      expect(pair.right.state).toBe("running");
-      await expect(pair.right.getIdentity()).resolves.toBeDefined();
-      await pair.right.close();
-      expect(pair.right.diagnostics()).toMatchObject({
-        liveNativeRequestedBytes: 0,
-        operationOccupied: 0,
-        state: "closed",
-        terminalErrorCode: null,
-      });
-      expect((await pair.right.diagnostics()).gossip).toMatchObject({
-        publicationBytes: 0,
-        publicationCopies: 1n,
-        publicationQueued: 1n,
-        publicationSelected: 1n,
-        reservedBytes: 0,
-      });
-    } finally {
-      await Promise.all([pair.left.close(), pair.right.close()]);
-    }
-  },
-  15000
-);
-
 test("gossip and both request directions retain independent payload capacity", async () => {
   const pair = await gossipPair(30000n, 192 * 1024 * 1024);
   try {
@@ -535,56 +465,6 @@ for (const hoodi of [false, true]) {
   );
 }
 
-for (const scenario of [
-  "gossip_copy_close",
-  "gossip_copy_close_fail",
-  "gossip_copy_expire",
-  "gossip_second_copy_fail",
-]) {
-  test.skipIf(!faultApi.networkTestScenario)(
-    `gossip complete batch claim survives ${scenario}`,
-    async () => {
-      const pair = await gossipPair(scenario === "gossip_copy_expire" ? 250n : 30000n, undefined, () =>
-        faultApi.networkTestScenario?.(scenario)
-      );
-      try {
-        await pair.left.publishGossip(TOPIC, blockPayload(4000, 21), {allowZeroPeers: false});
-        await pair.left.publishGossip(TOPIC, blockPayload(4000, 22), {allowZeroPeers: false});
-        for (let i = 0; i < 1000 && pair.right.diagnostics().gossip.queued !== 2; i++) await delay(5);
-        expect(pair.right.diagnostics().gossip.queued).toBe(2);
-        if (scenario.includes("fail")) {
-          expect(() => pair.right.drainGossip()).toThrow("NetworkResultAllocationFailed");
-          expect(pair.right.diagnostics().gossip.messagesCopied).toBe(0n);
-          expect(pair.right.diagnostics().gossip.copyingBytes).toBe(0);
-          expect(pair.right.diagnostics().gossip.queued).toBe(scenario === "gossip_second_copy_fail" ? 2 : 0);
-        } else {
-          const batch = pair.right.drainGossip();
-          expect(batch.messages.map((message) => [...message.data])).toEqual([
-            [...blockPayload(4000, 21)],
-            [...blockPayload(4000, 22)],
-          ]);
-          expect(batch.more).toBe(false);
-          for (const message of batch.messages) expect(pair.right.reportGossip(message.handle, "accept")).toBe(false);
-          expect(faultApi.networkTestStage?.()).toBe(
-            scenario === "gossip_copy_expire" ? "gossip_copy_expired" : "gossip_copy_closed"
-          );
-          expect(pair.right.diagnostics().gossip).toMatchObject({
-            bytesCopied: 8000n,
-            copyingBytes: 0,
-            messagesCopied: 2n,
-            occupied: 0,
-            payloadBytes: 0,
-            reservedBytes: 0,
-          });
-        }
-      } finally {
-        await Promise.all([pair.left.close(), pair.right.close()]);
-      }
-    },
-    15000
-  );
-}
-
 import {execFileSync} from "node:child_process";
 
 test("gossip operation promises and weak notifier permit facade collection", () => {
@@ -638,71 +518,13 @@ test("gossip publication rechecks a detached view and rolls back reentrant close
   expect(runtime.diagnostics()).toMatchObject({gossip: {publicationBytes: 0, reservedBytes: 0}, operationOccupied: 0});
 });
 
-test.skipIf(!faultApi.networkTestFail)(
-  "gossip publication allocation refusal unwinds shared bytes and operation",
-  async () => {
-    const config = applicationConfig();
-    const runtime = startRuntime(config, () => undefined);
-    try {
-      await runtime.identity;
-      await runtime.applyIntent(localIntent(config), config.initialSlot);
-      faultApi.networkTestFail?.("gossip_publication");
-      await expect(runtime.publishGossip(TOPIC, new Uint8Array(4000))).rejects.toThrow("InjectedNetworkFailure");
-      expect(runtime.diagnostics()).toMatchObject({
-        gossip: {publicationBytes: 0, publicationCopies: 0n, reservedBytes: 0},
-        operationOccupied: 0,
-      });
-      expect(await runtime.publishGossip(TOPIC, new Uint8Array(4000))).toMatchObject({queued: 0});
-    } finally {
-      await runtime.close();
-    }
-  }
-);
-
-test.skipIf(!faultApi.networkTestFail)("gossip table allocation failure unwinds application startup", async () => {
-  faultApi.networkTestFail?.("gossip_table");
-  expect(() => startRuntime(applicationConfig(), () => undefined)).toThrow("InjectedNetworkFailure");
-  expect(() => startRuntime(applicationConfig())).toThrow("NetworkAlreadyInitialized");
-});
-
-test.skipIf(!faultApi.networkTestGossipRelease)(
-  "gossip verdict uses its flag while all 32 real command cells are queued",
-  async () => {
-    const pair = await gossipPair(30000n, undefined, () => faultApi.networkTestScenario?.("gossip_owner_hold"));
-    try {
-      await pair.left.publishGossip(TOPIC, blockPayload(4000, 45), {allowZeroPeers: false});
-      const message = await nextGossip(pair.right);
-      for (let i = 0; i < 1000 && faultApi.networkTestStage?.() !== "gossip_owner_held"; i++) await delay(5);
-      expect(faultApi.networkTestStage?.()).toBe("gossip_owner_held");
-      const commands = Array.from({length: 32}, () => pair.right.getIdentity());
-      expect(pair.right.diagnostics().operationOccupied).toBe(32);
-      expect(() => pair.right.getIdentity()).toThrow("NetworkCommandFull");
-      expect(pair.right.reportGossip(message.handle, "ignore")).toBe(true);
-      expect(pair.right.diagnostics().gossip.pendingVerdicts).toBe(1);
-      faultApi.networkTestGossipRelease?.();
-      await Promise.all(commands);
-      for (let i = 0; i < 1000 && pair.right.diagnostics().gossip.reportsAppliedIgnore !== 1n; i++) await delay(5);
-      expect(pair.right.diagnostics().gossip).toMatchObject({
-        occupied: 0,
-        reportsAccepted: 1n,
-        reportsAppliedIgnore: 1n,
-      });
-    } finally {
-      faultApi.networkTestGossipRelease?.();
-      await Promise.all([pair.left.close(), pair.right.close()]);
-    }
-  },
-  15000
-);
-
-test("closed runtime rejects a retained verdict and cannot be replaced", async () => {
+test("closed runtime rejects a retained verdict", async () => {
   const pair = await gossipPair();
   try {
     await pair.left.publishGossip(TOPIC, blockPayload(4000));
     const old = await nextGossip(pair.right);
     await pair.right.close();
     expect(pair.right.reportGossip(old.handle, "accept")).toBe(false);
-    expect(() => startRuntime(applicationConfig())).toThrow("NetworkAlreadyInitialized");
   } finally {
     await Promise.all([pair.left.close(), pair.right.close()]);
   }

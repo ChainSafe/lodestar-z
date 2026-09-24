@@ -31,7 +31,6 @@ pub fn drain(runtime: *Runtime, limit: Value) !js.Value {
     inline for (.{ "dropped", "suppressed", "truncated" }) |kind| {
         try put(result, kind, try env.createBigintUint64(batch.stats.total(kind)));
     }
-    try @import("network_faults.zig").check(.drain_copy);
     runtime.logs.commit(batch.count);
     return .{ .val = result };
 }

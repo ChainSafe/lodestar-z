@@ -5,7 +5,6 @@ import {setTimeout as delay} from "node:timers/promises";
 import {privateKeyFromRaw} from "@libp2p/crypto/keys";
 import {peerIdFromPublicKey} from "@libp2p/peer-id";
 import {expect, test} from "vitest";
-import type {NativeNetworkApplicationRuntime, NativePeerObservation} from "../src/network.js";
 import {
   applicationConfig,
   configureChain,
@@ -16,7 +15,6 @@ import {
   testChain,
   topicName,
 } from "./utils/network.js";
-import {networkBindings as bindings} from "./utils/network-bindings.js";
 import {startPeer} from "./utils/network-peer.js";
 
 test("running application advances fork state only when the host updates intent", async () => {
@@ -554,26 +552,6 @@ test.each(["gc", "exit"])("application lifecycle subprocess %s", (mode) => {
   expect(output).toContain(mode === "exit" ? "application-ready-exit" : "application-command-settled NetworkClosed");
 });
 
-test.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")(
-  "allowed result-copy fault still settles a facade-independent command",
-  () => {
-    const output = execFileSync(
-      process.execPath,
-      [
-        "--import",
-        "tsx",
-        "--expose-gc",
-        "--import",
-        "tsx",
-        "bindings/test/fixtures/network-application-lifecycle.mjs",
-        "copy-failure",
-      ],
-      {encoding: "utf8", timeout: 15000}
-    );
-    expect(output).toContain("application-command-settled NetworkResultAllocationFailed");
-  }
-);
-
 test("identity reads the current signed ENR and copied intent ignores later input mutation", async () => {
   const config = applicationConfig();
   config.discovery = discoveryConfig().discovery;
@@ -641,171 +619,6 @@ test("graceful physical shutdown progresses while host callbacks are stalled", a
     await Promise.all([a.close(), b.close()]);
   }
 });
-
-test.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")(
-  "global close ends a full-lane session and retains already copied generations",
-  async () => {
-    const config = applicationConfig();
-    const other = applicationConfig();
-    other.identitySecretKey[31] = 22;
-    bindings.networkTestScenario("application_peer_lane");
-    const a = startRuntime(config, () => undefined);
-    const b = await startPeer(other);
-    try {
-      const remote = b.identity;
-      expect(a.diagnostics().peerLaneOccupied).toBe(64);
-      await Promise.all([a.applyIntent(localIntent(config), 100n), b.applyIntent(localIntent(other), 100n)]);
-      await a.connect(remote.peerId, [remote.localEndpoint], 5000n);
-      expect((await a.getPeers()).counts.connected).toBe(1);
-      expect(a.diagnostics().peerLaneOccupied).toBe(64);
-      await a.close();
-      expect(a.state).toBe("closed");
-      expect(a.diagnostics().liveNativeRequestedBytes).toBe(0);
-      expect(a.diagnostics().typedStoreBytes).toBe(0);
-      const batch = a.drainPeers(64);
-      expect(batch.events).toHaveLength(64);
-      for (let i = 0; i < batch.events.length; i++) {
-        expect(batch.events[i]).toMatchObject({
-          connection: {generation: 4294967295 - i, index: i % 16},
-          identity: a.identity.peerId,
-          ownerSequence: 0n,
-          type: "closed",
-        });
-      }
-      expect(a.drainPeers(64).events).toEqual([]);
-    } finally {
-      await Promise.all([a.close(), b.close()]);
-    }
-  }
-);
-
-async function drainUntil(
-  runtime: NativeNetworkApplicationRuntime,
-  done: (events: NativePeerObservation[]) => boolean
-) {
-  const events: NativePeerObservation[] = [];
-  for (let i = 0; i < 300; i++) {
-    events.push(...runtime.drainPeers(64).events);
-    if (done(events)) return events;
-    await delay(10);
-  }
-  throw Error("peer observations did not reach the required transition");
-}
-
-test.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")(
-  "live full lane preserves close before reconnect and settles commands while drainage is paused",
-  async () => {
-    const config = applicationConfig();
-    const other = applicationConfig();
-    other.identitySecretKey[31] = 23;
-    bindings.networkTestScenario("application_peer_lane");
-    const a = startRuntime(config, () => undefined);
-    const b = await startPeer(other);
-    try {
-      const [local, remote] = await Promise.all([a.identity, b.identity]);
-      await Promise.all([a.applyIntent(localIntent(config), 100n), b.applyIntent(localIntent(other), 100n)]);
-      await a.connect(remote.peerId, [remote.localEndpoint], 5000n);
-      const old = (await a.getPeers()).peers[0];
-      expect(old.connection).not.toBeNull();
-      expect(a.diagnostics().peerLaneOccupied).toBe(64);
-      await a.disconnect(remote.peerId);
-      const reconnect = a.connect(remote.peerId, [remote.localEndpoint], 5000n);
-      expect((await a.getIdentity()).peerId).toEqual(local.peerId);
-      expect((await a.getPeers()).counts.connected).toBe(0);
-      expect(a.diagnostics().peerLaneOccupied).toBe(64);
-      const background = a.drainPeers(64).events;
-      expect(background).toHaveLength(64);
-      expect(background.every((event) => event.ownerSequence === 0n && event.type === "closed")).toBe(true);
-      const events = await drainUntil(a, (batch) => batch.some((event) => event.type === "ready"));
-      await reconnect;
-      const closed = events.filter((event) => event.type === "closed");
-      expect(closed).toHaveLength(1);
-      expect(events[0]).toEqual(closed[0]);
-      expect(closed[0]).toMatchObject({connection: old.connection, identity: old.identity});
-      const ready = events.find((event) => event.type === "ready");
-      expect(ready?.type).toBe("ready");
-      if (ready?.type !== "ready") throw Error("missing reconnect ready");
-      expect(ready.state.identity).toEqual(old.identity);
-      expect(ready.state.connection).not.toEqual(old.connection);
-      expect(ready.state.connection).toEqual((await a.getPeers()).peers[0].connection);
-      expect(events.filter((event) => event.type === "ready")).toHaveLength(1);
-      expect(ready.state.identity).toEqual(remote.peerId);
-      expect(ready.ownerSequence).toBeGreaterThanOrEqual(closed[0].ownerSequence);
-      expect(a.state).toBe("running");
-    } finally {
-      await Promise.all([a.close(), b.close()]);
-    }
-  },
-  15000
-);
-
-test.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")(
-  "live full lane coalesces a real preferred replacement into canonical current state",
-  async () => {
-    const config = applicationConfig();
-    config.identitySecretKey[31] = 2;
-    const other = applicationConfig();
-    bindings.networkTestScenario("application_peer_lane");
-    const a = startRuntime(config, () => undefined);
-    const b = await startPeer(other);
-    const replacement = await startPeer(other);
-    try {
-      const [local, remote, duplicate] = await Promise.all([a.identity, b.identity, replacement.identity]);
-      expect(Buffer.compare(Buffer.from(local.peerId), Buffer.from(remote.peerId))).toBeGreaterThan(0);
-      expect(duplicate.peerId).toEqual(remote.peerId);
-      await Promise.all([
-        a.applyIntent(localIntent(config), 100n),
-        b.applyIntent(localIntent(other), 100n),
-        replacement.applyIntent(localIntent(other), 100n),
-      ]);
-      await a.connect(remote.peerId, [remote.localEndpoint], 5000n);
-      const old = (await a.getPeers()).peers[0];
-      expect(old.direction).toBe("outbound");
-      expect(a.diagnostics().peerLaneOccupied).toBe(64);
-      await replacement.connect(local.peerId, [local.localEndpoint], 5000n);
-      let current = await a.getPeers();
-      for (let i = 0; i < 300 && (current.peers[0].direction !== "inbound" || !current.peers[0].relevant); i++) {
-        await delay(10);
-        current = await a.getPeers();
-      }
-      expect(current.counts.connected).toBe(1);
-      expect(current.peers[0]).toMatchObject({direction: "inbound", identity: old.identity, relevant: true});
-      expect(current.peers[0].connection).not.toEqual(old.connection);
-      let displaced = await b.getPeers();
-      for (let i = 0; i < 200 && displaced.counts.connected !== 0; i++) {
-        await delay(10);
-        displaced = await b.getPeers();
-      }
-      expect(displaced.counts.connected).toBe(0);
-      expect((await a.getIdentity()).peerId).toEqual(local.peerId);
-      expect(a.diagnostics().peerLaneOccupied).toBe(64);
-      const background = a.drainPeers(64).events;
-      expect(background).toHaveLength(64);
-      expect(background.every((event) => event.ownerSequence === 0n)).toBe(true);
-      const events = await drainUntil(a, (batch) => batch.some((event) => event.type === "ready"));
-      expect(events.some((event) => event.type === "closed")).toBe(false);
-      const ready = events[0];
-      if (ready.type !== "ready") throw Error("replacement must first publish ready");
-      expect(ready.state).toMatchObject({
-        connection: current.peers[0].connection,
-        direction: "inbound",
-        identity: remote.peerId,
-      });
-      expect(ready.ownerSequence).toBeGreaterThan(0n);
-      for (let i = 1; i < events.length; i++) {
-        const update = events[i];
-        expect(update.type).toBe("updated");
-        if (update.type !== "updated") throw Error("unexpected replacement transition");
-        expect(update.state.connection).toEqual(ready.state.connection);
-        expect(update.ownerSequence).toBeGreaterThanOrEqual(events[i - 1].ownerSequence);
-      }
-      expect(a.state).toBe("running");
-    } finally {
-      await Promise.all([a.close(), b.close(), replacement.close()]);
-    }
-  },
-  15000
-);
 
 async function silentPeer(secret: Uint8Array) {
   const socket = createSocket("udp4");

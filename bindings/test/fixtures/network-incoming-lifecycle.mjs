@@ -10,7 +10,7 @@ if (mode === "notifier") process.on("warning", (warning) => {
   assert.match(warning.message, /Uncaught N-API callback exception/);
   warnings++;
 });
-let pair = await incomingPair(undefined, undefined, mode === "notifier" ? () => { thrown++; throw Error("incoming-notifier"); } : () => undefined);
+let pair = await incomingPair(undefined, mode === "notifier" ? () => { thrown++; throw Error("incoming-notifier"); } : () => undefined);
 let left = pair.left;
 let right = pair.right;
 const remote = pair.remote;

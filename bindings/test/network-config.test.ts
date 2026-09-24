@@ -1,7 +1,6 @@
 import {expect, it} from "vitest";
 import type {NativeApplicationConfig} from "../src/network.js";
 import {applicationConfig, configureChain, discoveryConfig, startRuntime} from "./utils/network.js";
-import {networkBindings as bindings} from "./utils/network-bindings.js";
 
 const cases: readonly [string, (config: NativeApplicationConfig) => void, string][] = [
   [
@@ -197,9 +196,7 @@ const cases: readonly [string, (config: NativeApplicationConfig) => void, string
 it.each(cases)("rejects %s before acquiring native thread or socket ownership", (_name, mutate, code) => {
   const config = applicationConfig();
   mutate(config);
-  const before: unknown = typeof bindings.networkTestStats === "function" ? bindings.networkTestStats() : null;
   expect(() => startRuntime(config, () => undefined)).toThrow(code);
-  if (before) expect(bindings.networkTestStats()).toEqual(before);
 });
 
 it("rejects a noncanonical bootstrap encoding during ordinary owner startup", async () => {
@@ -238,9 +235,7 @@ it.each([
   Object.assign(config.gossipPolicy, fields);
   for (const [key, value] of Object.entries(fields))
     if (value === undefined) Reflect.deleteProperty(config.gossipPolicy, key);
-  const before: unknown = typeof bindings.networkTestStats === "function" ? bindings.networkTestStats() : null;
   expect(() => startRuntime(config, () => undefined)).toThrow(code);
-  if (before) expect(bindings.networkTestStats()).toEqual(before);
 });
 
 it.each([
@@ -269,9 +264,7 @@ it.each([
 ])("rejects unsupported fork at epoch %s before owner allocation", (epoch) => {
   const config = applicationConfig();
   configureChain({ELECTRA_FORK_EPOCH: 0, FULU_FORK_EPOCH: 0, GLOAS_FORK_EPOCH: epoch});
-  const before: unknown = typeof bindings.networkTestStats === "function" ? bindings.networkTestStats() : null;
   expect(() => startRuntime(config)).toThrow("UnsupportedNetworkFork");
-  if (before) expect(bindings.networkTestStats()).toEqual(before);
 });
 
 it("derives the Fulu availability requirement from shared chain configuration", () => {

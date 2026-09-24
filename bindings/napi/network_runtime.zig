@@ -2,7 +2,6 @@ const std = @import("std");
 const n = @import("network");
 const d = @import("discv5");
 const napi = @import("zapi:zapi").napi;
-const faults = @import("network_faults.zig");
 pub const gossip_mod = @import("network_gossip.zig");
 pub const incoming_mod = @import("network_incoming.zig");
 pub const requests_mod = @import("network_requests.zig");
@@ -16,11 +15,15 @@ pub const allocator = std.heap.c_allocator;
 pub const State = enum { running, stopping, closed, failed };
 pub const Reason = enum { requested, failed };
 pub const Notify = napi.ThreadSafeFunction(Runtime, void);
-var initialized = std.atomic.Value(bool).init(false);
+var runtime_live = std.atomic.Value(bool).init(false);
 
-/// The beacon node initializes once, from its owning Node environment. Teardown never resets this guard.
-pub fn beginInitialization() !void {
-    if (initialized.swap(true, .acq_rel)) return error.NetworkAlreadyInitialized;
+/// Claims the one live runtime per process. The last `Runtime.release` returns the claim, also after a failed initialization.
+pub fn create(env: napi.Env) !*Runtime {
+    if (runtime_live.swap(true, .acq_rel)) return error.NetworkAlreadyInitialized;
+    errdefer runtime_live.store(false, .release);
+    const runtime = try allocator.create(Runtime);
+    runtime.* = .{ .env = env, .diag = .{ .currentSlot = 0 } };
+    return runtime;
 }
 
 pub const Identity = struct {
@@ -113,14 +116,11 @@ pub const Stores = struct {
     direct: [2][256]n.PeerId = undefined,
     targets: [2][256]n.PeerId = undefined,
     pub fn create(backing: std.mem.Allocator, capacity: usize) !*Stores {
-        try faults.check(.application_stores);
         const self = try backing.create(Stores);
         errdefer backing.destroy(self);
         self.* = .{ .backing = backing, .snapshots = undefined };
-        try faults.check(.application_snapshot_0);
         self.snapshots[0] = try backing.alloc(n.peers.types.Snapshot, capacity);
         errdefer backing.free(self.snapshots[0]);
-        try faults.check(.application_snapshot_1);
         self.snapshots[1] = try backing.alloc(n.peers.types.Snapshot, capacity);
         return self;
     }
@@ -138,7 +138,6 @@ pub const Runtime = struct {
     metrics: @import("network_metrics.zig").Export = .{},
     metrics_due_ms: u64 = 0,
     health_log_due_ms: u64 = 0,
-    test_scenario: if (faults.enabled) faults.Scenario else void = if (faults.enabled) .none else {},
     refs: std.atomic.Value(u32) = .init(1),
     mutex: std.Io.Mutex = .init,
     heavy: ?*Owner = null,
@@ -153,9 +152,6 @@ pub const Runtime = struct {
     incoming: ?incoming_mod.Table = null,
     gossip: ?gossip_mod.Table = null,
     payload_budget: @import("network_budget.zig").Budget = .{},
-    test_incoming_deadline: if (faults.enabled) u64 else void = if (faults.enabled) 0 else {},
-    test_gossip_held: if (faults.enabled) bool else void = if (faults.enabled) false else {},
-    test_gossip_expiry: if (faults.enabled) ?gossip_mod.Token else void = if (faults.enabled) null else {},
     peer_capacity: u16 = 0,
     max_peers: u16 = 0,
 
@@ -254,9 +250,10 @@ pub const Runtime = struct {
             if (self.requests) |*requests| requests.deinit();
             if (self.incoming) |*incoming| incoming.deinit();
             if (self.gossip) |*gossip| gossip.deinit();
-            faults.count(&faults.runtimes, false);
             std.crypto.secureZero(u8, std.mem.asBytes(self));
             allocator.destroy(self);
+            const claimed = runtime_live.swap(false, .release);
+            std.debug.assert(claimed);
         }
     }
     pub fn requestStop(self: *Runtime) void {
@@ -269,15 +266,11 @@ pub const Runtime = struct {
         self.signalLocked();
     }
     pub fn signalLocked(self: *Runtime) void {
-        if (self.wake) |*wake| signal(wake) catch {
+        if (self.wake) |*wake| wake.signal() catch {
             self.stop = true;
             self.reason = .failed;
             self.terminal_error = error.NetworkWakeFailed;
         };
-    }
-    fn signal(wake: *const Wake) !void {
-        try faults.check(.wake_signal);
-        try wake.signal();
     }
     pub fn snapshot(self: *Runtime) !Diagnostics {
         self.lock();
@@ -453,7 +446,6 @@ pub const Runtime = struct {
         self.notify_finalized = true;
         self.disposeCloseReferences();
         if (self.disposed) self.retireClosedRequests() else self.disposeTerminalReferences();
-        faults.count(&faults.notifications, false);
         self.release();
     }
 
@@ -497,7 +489,6 @@ pub const Runtime = struct {
         self.notify_live = false;
         self.unlock();
         if (release_notify) self.notify.release(.release) catch unreachable;
-        faults.count(&faults.owners, false);
     }
     pub fn advanceSequence(self: *Runtime) !u64 {
         self.lock();

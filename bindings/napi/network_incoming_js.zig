@@ -4,7 +4,6 @@ const Value = napi.Value;
 const cfg = @import("network_config.zig");
 const r = @import("network_runtime.zig");
 const incoming = @import("network_incoming.zig");
-const phases = @import("network_incoming_phase_faults.zig");
 const Runtime = r.Runtime;
 
 const put = @import("network_js.zig").put;
@@ -99,10 +98,8 @@ fn descriptorValue(runtime: *Runtime, token: incoming.Token, cell: *const incomi
     var destination: [*]u8 = undefined;
     const buffer = try env.createArrayBuffer(cell.input.len, &destination);
     const data = try env.createTypedarray(.uint8, cell.input.len, buffer, 0);
-    try @import("network_incoming_faults.zig").copy(runtime, cell, destination[0..cell.input.len]);
     @memcpy(destination[0..cell.input.len], cell.input);
     try put(object, "data", data);
-    try @import("network_faults.zig").check(.operation_copy);
     try put(object, "closed", deferred.getPromise());
     return object;
 }
@@ -155,23 +152,13 @@ pub fn respond(runtime: *Runtime, value: Value, data: Value, context_value: Valu
         runtime.lock();
         cell.state = if (cell.native) .serving else .terminal;
         runtime.incoming.?.releasePayload(cell);
-        phases.rollbackLocked(runtime, cell);
         runtime.unlock();
     }
-    try @import("network_faults.zig").check(.incoming_response);
     const copy = try r.allocator.alloc(u8, len);
-    errdefer {
-        r.allocator.free(copy);
-        phases.released(runtime, .buffer);
-    }
-    try phases.preparing(runtime, cell, .buffer, copy, null);
+    errdefer r.allocator.free(copy);
     const deferred = try runtime.env.createPromise();
-    errdefer {
-        @import("network_js.zig").discardPromise(runtime.env, deferred);
-        phases.released(runtime, .deferred);
-    }
+    errdefer @import("network_js.zig").discardPromise(runtime.env, deferred);
     try cfg.bytes(data, copy);
-    try phases.preparing(runtime, cell, .deferred, copy, deferred);
     runtime.lock();
     if (runtime.stop or !cell.native) {
         runtime.unlock();
@@ -281,7 +268,6 @@ fn ackError(env: napi.Env, ack: incoming.Ack) !Value {
 }
 pub fn settle(env: napi.Env, runtime: *Runtime) !void {
     if (runtime.incoming == null) return;
-    if (@import("network_incoming_faults.zig").holdSettlement(runtime)) return;
     runtime.retain();
     defer runtime.release();
     for (0..32) |i| {

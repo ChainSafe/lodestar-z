@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import {createSocket} from "node:dgram";
 import {setTimeout as delay} from "node:timers/promises";
-import {startRuntime, applicationConfig} from "../utils/network.js";
+import {runtimeReleased, startRuntime, applicationConfig} from "../utils/network.js";
 
 const mode = process.argv[2];
 if (mode === "exit") {
@@ -26,7 +26,8 @@ if (mode === "exit") {
     socket.bind(identity.localEndpoint.port, "127.0.0.1", resolve);
   });
   socket.close();
-  assert.throws(() => startRuntime(applicationConfig()), /NetworkAlreadyInitialized/);
+  await runtimeReleased();
+  await startRuntime(applicationConfig()).close();
   console.log("gc-rebound");
 } else if (mode === "promises") {
   let runtime = startRuntime(applicationConfig());
@@ -45,7 +46,7 @@ if (mode === "exit") {
       resolve(error);
     })
   );
-  const pair = await incomingPair(undefined, undefined, () => {
+  const pair = await incomingPair(undefined, () => {
     calls++;
     throw new Error("ordinary-work-notification-failure");
   });

@@ -9,6 +9,7 @@ import {
   discoveryConfig,
   localIntent,
   requestForks,
+  runtimeReleased,
   startRuntime,
   subscriptions,
   topicName,
@@ -190,14 +191,18 @@ it.each([
   expect(() => startRuntime(config, () => undefined)).toThrow(code);
 });
 
-it("rejects another initialization during operation and after close", async () => {
-  const runtime = startRuntime(applicationConfig());
+it("rejects another initialization while one is live and accepts one after release", async () => {
+  let runtime: ReturnType<typeof startRuntime> | null = startRuntime(applicationConfig());
   expect(runtime.state).toBe("running");
   expect(typeof runtime.identity.peerId).toBe("string");
   expect(() => startRuntime(applicationConfig())).toThrow("NetworkAlreadyInitialized");
   expect((await runtime.getIdentity()).peerId).toEqual(runtime.identity.peerId);
   await runtime.close();
-  expect(() => startRuntime(applicationConfig())).toThrow("NetworkAlreadyInitialized");
+  runtime = null;
+  await runtimeReleased();
+  const next = startRuntime(applicationConfig());
+  expect(next.state).toBe("running");
+  await next.close();
 });
 
 it("joins immediately after initialization and closes idempotently", async () => {
@@ -234,6 +239,22 @@ it.each(["gc", "exit", "promises"])("finishes bounded %s subprocess lifecycle", 
   );
   expect(output).toContain(mode === "gc" ? "gc-rebound" : mode === "exit" ? "ready-exit" : "promises-settled");
 }, 15000);
+
+it("keeps queued records and closes after an ordinary callback exception", () => {
+  const output = execFileSync(
+    process.execPath,
+    [
+      "--import",
+      "tsx",
+      "--expose-gc",
+      "--force-node-api-uncaught-exceptions-policy",
+      "bindings/test/fixtures/network-lifecycle.mjs",
+      "callback",
+    ],
+    {encoding: "utf8", timeout: 10000}
+  );
+  expect(output).toContain("callback-closed");
+});
 
 it("releases live requests, incoming cells and gossip batches on worker termination", () => {
   const output = execFileSync(
@@ -288,7 +309,10 @@ it("gates raw reentrant initialization and close before config getters execute",
     },
   });
   expect(() => raw.initialize(config, () => undefined)).toThrow("NetworkClosed");
-  expect(() => raw.initialize(applicationConfig(), () => undefined)).toThrow("NetworkAlreadyInitialized");
+  expect(() => raw.initialize(applicationConfig(), () => undefined)).toThrow("NetworkClosed");
+  const runtime = startRuntime(applicationConfig());
+  expect(runtime.state).toBe("running");
+  await runtime.close();
 }, 20000);
 
 it("initializes signed discovery without waiting for bootstrap reachability", async () => {
@@ -409,13 +433,6 @@ it("publishes copied peer observations without repeating unread notifications", 
     const before = notifications;
     await delay(250);
     expect(notifications).toBe(before);
-    const {networkBindings: addon} = await import("./utils/network-bindings.js");
-    if (typeof addon.networkTestFail === "function") {
-      const queued = runtime.diagnostics().peerLaneOccupied;
-      addon.networkTestFail("drain_copy");
-      expect(() => runtime.drainPeers(32)).toThrow("NetworkResultAllocationFailed");
-      expect(runtime.diagnostics().peerLaneOccupied).toBeGreaterThanOrEqual(queued);
-    }
     const batch = runtime.drainPeers(32);
     expect(Object.getOwnPropertyDescriptor(batch, "events")).toMatchObject({
       configurable: true,

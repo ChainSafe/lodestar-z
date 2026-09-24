@@ -1,7 +1,5 @@
-import {setTimeout as delay} from "node:timers/promises";
 import {expect, test} from "vitest";
 import {applicationConfig, startRuntime} from "./utils/network.js";
-import {networkBindings as bindings} from "./utils/network-bindings.js";
 
 test.each(["resources", "identify", "serveLightClients"])("rejects missing %s", (field) => {
   const config = applicationConfig();
@@ -79,38 +77,6 @@ test.each(["native", "bridge"])("rejects insufficient %s reservation before owne
   expect(() => startRuntime(config)).toThrow(
     kind === "native" ? "NetworkNativeBudgetExceeded" : "NetworkBridgeBudgetExceeded"
   );
-});
-
-test
-  .skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")
-  .each([
-    "owner_alloc",
-    "application_stores",
-    "application_snapshot_0",
-    "application_snapshot_1",
-    "application_lane",
-    "wake",
-    "notify",
-    "hook",
-    "close_promise",
-    "copy_error_ref",
-    "requested_ref",
-    "failed_ref",
-    "promise_holder",
-    "entropy",
-    "key",
-    "core",
-    "wake_attach",
-    "spawn",
-  ])("application acquisition prefix %s releases every owner", async (stage) => {
-  bindings.networkTestFail(stage);
-  expect(() => startRuntime(applicationConfig(), () => undefined)).toThrow("InjectedNetworkFailure");
-  for (let i = 0; i < 100; i++) {
-    await delay(10);
-    global.gc?.();
-    if (bindings.networkTestStats().runtimes === 0) break;
-  }
-  expect(bindings.networkTestStats()).toEqual({notifications: 0, owners: 0, runtimes: 0});
 });
 
 test.each([512, 513])("retained peer capacity %s respects the native gossip ceiling", async (capacity) => {

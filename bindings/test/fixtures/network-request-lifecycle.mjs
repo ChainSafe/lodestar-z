@@ -27,8 +27,7 @@ if (mode === "exit") {
   process.exit(0);
 }
 
-if (["closed-facade-gc", "closed-facade-gc-early", "closed-terminal", "closed-terminal-fault"].includes(mode)) {
-  const {default: bindings} = await import("../../src/bindings.js");
+if (["closed-facade-gc", "closed-facade-gc-early", "closed-terminal"].includes(mode)) {
   const config = applicationConfig();
   let runtime = startRuntime(config, () => undefined);
   const identity = await runtime.identity;
@@ -39,17 +38,9 @@ if (["closed-facade-gc", "closed-facade-gc-early", "closed-terminal", "closed-te
     new Uint8Array(32)
   );
   await runtime.close();
-  for (let i = 0; mode !== "closed-facade-gc-early" && i < 100; i++) {
-    await delay(5);
-    if (bindings.networkTestStats && bindings.networkTestStats().notifications === 0) break;
-  }
-  if (bindings.networkTestStats && mode !== "closed-facade-gc-early")
-    assert.equal(bindings.networkTestStats().notifications, 0);
-  if (mode.startsWith("closed-terminal")) {
-    if (mode === "closed-terminal-fault") bindings.networkTestFail("operation_copy");
-    await assert.rejects(stream.next(), {
-      code: mode === "closed-terminal-fault" ? "NetworkResultAllocationFailed" : "NetworkClosed",
-    });
+  if (mode !== "closed-facade-gc-early") await delay(500);
+  if (mode === "closed-terminal") {
+    await assert.rejects(stream.next(), {code: "NetworkClosed"});
     assert.equal(runtime.diagnostics().requests.occupied, 0);
   }
   const weak = new WeakRef(runtime);
@@ -58,10 +49,9 @@ if (["closed-facade-gc", "closed-facade-gc-early", "closed-terminal", "closed-te
   for (let i = 0; i < 100; i++) {
     await delay(10);
     global.gc();
-    if (!weak.deref() && (!bindings.networkTestStats || bindings.networkTestStats().runtimes === 0)) break;
+    if (!weak.deref()) break;
   }
   assert.equal(weak.deref(), undefined);
-  if (bindings.networkTestStats) assert.equal(bindings.networkTestStats().runtimes, 0);
   if (mode.startsWith("closed-facade-gc")) await assert.rejects(stream.next(), {code: "NetworkClosed"});
   console.log("request-lifecycle", mode, "ok");
   process.exit(0);

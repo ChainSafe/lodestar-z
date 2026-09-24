@@ -7,7 +7,6 @@ const cfg = @import("network_config.zig");
 const app = @import("network_application_config.zig");
 const g = @import("network_gossip_js.zig");
 const clock = @import("network_gossip.zig");
-const faults = @import("network_faults.zig");
 
 fn rejectInput(env: napi.Env, err: anyerror) anyerror {
     const value = g.publishError(env, err) catch |failure| return failure;
@@ -36,7 +35,6 @@ pub fn publish(runtime: *r.Runtime, topic: Value, data: Value, options: Value) !
     cell.options = try g.optionsFor(options);
     const len = try payloadLength(data);
     if (len > cell.reservation) return error.PayloadTooLarge;
-    try faults.check(.gossip_publication);
     const copy = try r.allocator.alloc(u8, len);
     errdefer r.allocator.free(copy);
     const deferred = try runtime.env.createPromise();
@@ -95,6 +93,5 @@ pub fn settle(env: napi.Env, runtime: *r.Runtime) !void {
     runtime.disposeTerminalReferences();
 }
 fn copyResult(env: napi.Env, cell: *const p.Cell) !Value {
-    try faults.check(.operation_copy);
     return g.publishResult(env, cell.outcome);
 }

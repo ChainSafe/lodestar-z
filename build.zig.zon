@@ -67,13 +67,6 @@
         },
     },
     .options_modules = .{
-        .network_runtime_options = .{
-            .network_runtime_test_failures = .{
-                .type = .bool,
-                .default = false,
-                .description = "Enable test-only network acquisition failure injection. Never publish this build.",
-            },
-        },
         .build_options = .{
             .zero_hash_max_depth = .{
                 .type = .u8,
@@ -433,7 +426,6 @@
                 .imports = .{
                     .network,
                     .discv5,
-                    .network_runtime_options,
                     .bls,
                     .bls_options,
                     .cpu_count,
@@ -466,7 +458,7 @@
         .network_runtime = .{
             .root_module = .{
                 .root_source_file = "bindings/napi/network_runtime.zig",
-                .imports = .{ .network, .discv5, .network_runtime_options, "zapi:zapi" },
+                .imports = .{ .network, .discv5, "zapi:zapi" },
             },
         },
         // Per-module unit tests (mirror the old auto-generated `test:<module>` steps).

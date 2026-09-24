@@ -10,7 +10,7 @@ pub fn discardPromise(env: napi.Env, deferred: napi.Deferred) void {
 
 pub fn copyError(err: anyerror) anyerror {
     return switch (err) {
-        error.OutOfMemory, error.GenericFailure, error.InjectedNetworkFailure => error.NetworkResultAllocationFailed,
+        error.OutOfMemory, error.GenericFailure => error.NetworkResultAllocationFailed,
         else => err,
     };
 }

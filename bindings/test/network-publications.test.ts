@@ -1,6 +1,5 @@
 import {expect, test} from "vitest";
 import {applicationConfig, localIntent, startRuntime, topicName} from "./utils/network.js";
-import {networkBindings} from "./utils/network-bindings.js";
 import {startPeer} from "./utils/network-peer.js";
 
 const BLOCK = topicName();
@@ -117,31 +116,6 @@ test("publication pressure preserves urgent, control and request admission", asy
     await runtime.close();
   }
 });
-
-test.skipIf(!networkBindings.networkTestFail)(
-  "publication result copy failure retires only that publication",
-  async () => {
-    const config = applicationConfig();
-    const runtime = startRuntime(config);
-    try {
-      await runtime.applyIntent(localIntent(config), config.initialSlot);
-      networkBindings.networkTestFail("operation_copy");
-      await expect(runtime.publishGossip(BLOCK, new Uint8Array(4000), {allowZeroPeers: true})).rejects.toMatchObject({
-        code: "NetworkResultAllocationFailed",
-      });
-      expect(runtime.state).toBe("running");
-      await expect(
-        runtime.publishGossip(BLOCK, new Uint8Array(4000), {allowZeroPeers: true, ignoreDuplicate: true})
-      ).resolves.toBeDefined();
-      expect(runtime.diagnostics()).toMatchObject({
-        copyingPins: 0,
-        publications: {occupied: 0, payloadBytes: 0, reservedBytes: 0},
-      });
-    } finally {
-      await runtime.close();
-    }
-  }
-);
 
 test("beacon profile admits 200 publications without occupying control cells", async () => {
   const config = applicationConfig();

@@ -228,7 +228,6 @@ pub fn flags(runtime: *Runtime, now: n.Now) !void {
     defer runtime.unlock();
     const table = if (runtime.incoming) |*table| table else return;
     if (table.cells.len == 0) return;
-    @import("network_incoming_faults.zig").turnLocked(runtime, now);
     var submissions: usize = 0;
     for (0..table.cells.len) |offset| {
         const cell = &table.cells[(table.cursor + offset) % table.cells.len];
@@ -263,7 +262,6 @@ pub fn flags(runtime: *Runtime, now: n.Now) !void {
                 continue;
             };
             cell.state = .response_native;
-            @import("network_incoming_faults.zig").responseLocked(runtime, cell);
         }
         switch (cell.action) {
             .finish => if (core.finish(cell.handle, now)) {
@@ -284,7 +282,7 @@ pub fn flags(runtime: *Runtime, now: n.Now) !void {
 pub fn captureLocked(runtime: *Runtime, event: rr.Event, now: n.Now) !void {
     const table = if (runtime.incoming) |*table| table else return;
     if (event == .request) return admitLocked(runtime, event.request, now) catch |err| switch (@as(anyerror, err)) {
-        error.OutOfMemory, error.InjectedNetworkFailure => {
+        error.OutOfMemory => {
             runtime.diag.operationalFailures +|= 1;
             runtime.heavy.?.core.respondError(event.request.request, 2, "local serving allocation failed", now) catch {
                 _ = runtime.heavy.?.core.cancel(event.request.request);
@@ -307,7 +305,6 @@ pub fn captureLocked(runtime: *Runtime, event: rr.Event, now: n.Now) !void {
                 if (sent.chunks != cell.chunks + 1) return error.InvalidIncomingAcknowledgement;
                 cell.chunks = sent.chunks;
                 cell.ack = .sent;
-                @import("network_incoming_faults.zig").ackLocked(runtime, cell);
                 table.diag.chunksWritten +|= 1;
                 table.diag.bytesWritten +|= cell.response.len;
                 table.releaseResponse(cell);
@@ -361,7 +358,6 @@ fn admitLocked(runtime: *Runtime, request: @FieldType(rr.Event, "request"), now:
         else => return err,
     };
     errdefer table.retire(token);
-    try @import("network_faults.zig").check(.incoming_input);
     try table.allocate(token, request.bytes);
     const cell = table.get(token).?;
     cell.identity = identity;
