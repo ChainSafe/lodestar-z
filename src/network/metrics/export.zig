@@ -2,6 +2,7 @@ const std = @import("std");
 const policy = @import("../gossipsub/topic_policy.zig");
 pub const histogram = @import("histogram.zig");
 pub const registry = @import("registry.zig");
+pub const bridge = @import("bridge.zig");
 const prom = registry;
 
 pub const Context = @import("context.zig").Context;

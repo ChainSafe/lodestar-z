@@ -15,7 +15,45 @@ pub const allocator = std.heap.c_allocator;
 pub const State = enum { running, stopping, closed, failed };
 pub const Reason = enum { requested, failed };
 pub const Notify = napi.ThreadSafeFunction(Runtime, void);
+pub const bridge = n.metrics.bridge;
 var runtime_live = std.atomic.Value(bool).init(false);
+
+/// What the calling thread does at the seam: the JS thread inside an instrumented native call, or
+/// the owner inside one phase. `Runtime.lock` records JS mutex waits under the entry and owner
+/// mutex holds under the phase.
+pub const Activity = union(enum) { idle, entry: bridge.Entry, phase: bridge.Phase };
+threadlocal var activity: Activity = .idle;
+
+/// A JS-thread native call, timed from `call` to `end`.
+pub const Call = struct {
+    runtime: ?*Runtime,
+    entry: bridge.Entry,
+    started_ns: u64,
+    previous: Activity,
+
+    pub fn end(self: Call) void {
+        activity = self.previous;
+        if (self.runtime) |runtime| runtime.bridge.calls[@intFromEnum(self.entry)].observe(bridge.now() -| self.started_ns);
+    }
+};
+
+pub fn call(runtime: ?*Runtime, entry: bridge.Entry) Call {
+    const previous = activity;
+    activity = .{ .entry = entry };
+    return .{ .runtime = runtime, .entry = entry, .started_ns = bridge.now(), .previous = previous };
+}
+
+/// Owner thread: attributes runtime mutex holds to `value` until `restore`. A scope must not
+/// begin or end while the mutex is held.
+pub fn phase(value: bridge.Phase) Activity {
+    const previous = activity;
+    activity = .{ .phase = value };
+    return previous;
+}
+
+pub fn restore(previous: Activity) void {
+    activity = previous;
+}
 
 /// Claims the one live runtime per process. The last `Runtime.release` returns the claim, also after a failed initialization.
 pub fn create(env: napi.Env) !*Runtime {
@@ -111,6 +149,9 @@ pub const Stores = struct {
 pub const Runtime = struct {
     logs: n.logging.Sink = .{},
     metrics: @import("network_metrics.zig").Export = .{},
+    bridge: bridge.Recorder = .{},
+    /// Owner thread: when its current runtime mutex hold began.
+    hold_started_ns: u64 = 0,
     metrics_due_ms: u64 = 0,
     health_log_due_ms: u64 = 0,
     refs: std.atomic.Value(u32) = .init(1),
@@ -192,7 +233,9 @@ pub const Runtime = struct {
             if (heavy.core_live) {
                 heavy.core.shutdown(@import("network_owner.zig").now(heavy.threaded.io()));
                 if (self.metrics.allocatedBytes() > 0) {
-                    const context = n.metrics.Context.init(&heavy.core, @import("network_owner.zig").now(heavy.threaded.io()), false);
+                    self.captureBridgeLocked(&heavy.bridge);
+                    var context = n.metrics.Context.init(&heavy.core, @import("network_owner.zig").now(heavy.threaded.io()), false);
+                    context.bridge = &heavy.bridge;
                     if (self.metrics.render(&context)) |index| {
                         self.metrics.published = index;
                         self.metrics.failure = null;
@@ -208,14 +251,39 @@ pub const Runtime = struct {
             self.heavy = null;
         }
     }
+    /// Copies the bridge measurements and the tables' exported state for one render.
+    pub fn captureBridgeLocked(self: *const Runtime, into: *bridge.Snapshot) void {
+        self.bridge.snapshot(into);
+        if (self.gossip) |*table| into.captureProcessor(table);
+        if (self.publications) |*table| into.publication_queue = table.latency;
+    }
     pub fn lock(self: *Runtime) void {
-        std.Io.Threaded.mutexLock(&self.mutex);
+        switch (activity) {
+            .idle => std.Io.Threaded.mutexLock(&self.mutex),
+            .entry => |entry| {
+                var waited: u64 = 0;
+                if (!self.mutex.tryLock()) {
+                    const started = bridge.now();
+                    std.Io.Threaded.mutexLock(&self.mutex);
+                    waited = bridge.now() -| started;
+                }
+                self.bridge.waits[@intFromEnum(entry)].observe(waited);
+            },
+            .phase => {
+                std.Io.Threaded.mutexLock(&self.mutex);
+                self.hold_started_ns = bridge.now();
+            },
+        }
     }
     pub fn unlock(self: *Runtime) void {
         // A payload release while the owner waits for budget wakes it to retry.
         if (self.payload_budget.released) {
             self.payload_budget.released = false;
             self.signalLocked();
+        }
+        switch (activity) {
+            .phase => |value| self.bridge.holds[@intFromEnum(value)].observe(bridge.now() -| self.hold_started_ns),
+            else => {},
         }
         std.Io.Threaded.mutexUnlock(&self.mutex);
     }
@@ -313,6 +381,10 @@ pub const Runtime = struct {
     pub fn pingLocked(self: *Runtime) void {
         if (self.notification_pending or !self.notify_live or !self.env_alive) return;
         self.notification_pending = true;
+        switch (activity) {
+            .entry => |entry| self.bridge.js_pings[@intFromEnum(entry)] +|= 1,
+            else => {},
+        }
         self.notify.call(undefined, .non_blocking) catch |err| switch (err) {
             error.QueueFull => {},
             error.Closing => {

@@ -116,6 +116,19 @@ const contract = [_]Series{
     .{ .name = "lodestar_native_reqresp_inbound_occupied", .kind = "gauge", .labels = &.{"phase"} },
     .{ .name = "lodestar_native_reqresp_resources_serving_occupied", .kind = "gauge" },
     .{ .name = "lodestar_native_reqresp_resources_serving_capacity", .kind = "gauge" },
+    // Bridge
+    .{ .name = "lodestar_native_network_host_applies_total", .kind = "counter", .labels = &.{"cause"} },
+    .{ .name = "lodestar_native_gossip_processor_items", .kind = "gauge", .labels = &.{ "kind", "state" } },
+    .{ .name = "lodestar_native_gossip_processor_refusals_total", .kind = "counter", .labels = &.{ "kind", "reason" } },
+    .{ .name = "lodestar_native_gossip_admission_lag_seconds", .kind = "histogram", .labels = &.{"kind"} },
+    .{ .name = "lodestar_native_bridge_call_seconds", .kind = "histogram", .labels = &.{"entry"} },
+    .{ .name = "lodestar_native_bridge_lock_wait_seconds", .kind = "histogram", .labels = &.{"entry"} },
+    .{ .name = "lodestar_native_bridge_lock_hold_seconds", .kind = "histogram", .labels = &.{"phase"} },
+    .{ .name = "lodestar_native_bridge_notify_total", .kind = "counter" },
+    .{ .name = "lodestar_native_bridge_notify_seconds", .kind = "histogram" },
+    .{ .name = "lodestar_native_bridge_notify_chain", .kind = "histogram" },
+    .{ .name = "lodestar_native_bridge_js_pings_total", .kind = "counter", .labels = &.{"entry"} },
+    .{ .name = "lodestar_native_publication_queue_seconds", .kind = "histogram" },
 };
 
 fn hasSeries(output: []const u8, series: Series) bool {
@@ -405,4 +418,36 @@ test "metrics count a zero-wait owner turn once under each of its two due source
         const due = index == @intFromEnum(Source.dial) or index == @intFromEnum(Source.peer_policy);
         try std.testing.expectEqual(previous + @intFromBool(due), current);
     }
+}
+
+test "metrics count each host apply once under its cause" {
+    const node = try std.testing.allocator.create(core.NetworkCore);
+    defer std.testing.allocator.destroy(node);
+    try initOwner(node);
+    defer node.deinit(std.testing.io);
+    const Host = struct {
+        applies: usize = 0,
+        fn apply(context: *anyopaque, _: *core.NetworkCore, _: @import("types.zig").Now) core.HostProgress {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.applies += 1;
+            return .{ .more = self.applies == 1 };
+        }
+    };
+    var host: Host = .{};
+    const now = try @import("transport.zig").currentTime(std.testing.io);
+    try std.testing.expect(node.step(std.testing.io, now, .{}, .{ .context = &host, .apply = Host.apply, .deadline_ms = now.mono_ms }).failure == null);
+    try std.testing.expect(node.tick_ns > 0);
+    try std.testing.expect(node.step(std.testing.io, now, .{}, .{ .context = &host, .apply = Host.apply }).failure == null);
+    try std.testing.expectEqual(@as(usize, 2), host.applies);
+    const HostCause = core.HostCause;
+    try std.testing.expectEqual(@as(u64, 0), node.host_applies[@intFromEnum(HostCause.readiness)]);
+    try std.testing.expectEqual(@as(u64, 1), node.host_applies[@intFromEnum(HostCause.due)]);
+    try std.testing.expectEqual(@as(u64, 1), node.host_applies[@intFromEnum(HostCause.more)]);
+    const buffer = try std.testing.allocator.alloc(u8, metrics.textCapacity(&.{}));
+    defer std.testing.allocator.free(buffer);
+    var context = metrics.Context.init(node, now, true);
+    var writer = std.Io.Writer.fixed(buffer);
+    try metrics.write(&context, &writer);
+    try contains(writer.buffered(), "lodestar_native_network_host_applies_total{cause=\"more\"} 1\n");
+    try contains(writer.buffered(), "lodestar_native_bridge_call_seconds_count{entry=\"report_gossip\"} 0\n");
 }

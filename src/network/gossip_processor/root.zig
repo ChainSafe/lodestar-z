@@ -85,6 +85,14 @@ pub const Diagnostics = struct {
     publicationSelected: u64 = 0,
     publicationDuplicates: u64 = 0,
 };
+/// Host-visible states exported per kind: queued for the host, waiting for a dependency,
+/// awaiting a host dependency check, and executing on the host.
+pub const Occupancy = enum { queued, waiting, checking, executing };
+pub const occupancy_count = @typeInfo(Occupancy).@"enum".fields.len;
+/// Why the processor refused a message: its kind's items, bytes or cells, the shared payload
+/// store, its source's share, slot or fork eligibility, or dependency waiting room.
+pub const Refusal = enum { kind_full, store_full, source_full, ineligible, dependency_full };
+pub const refusal_count = @typeInfo(Refusal).@"enum".fields.len;
 pub const Job = struct { kind: Kind, start: usize, len: usize, grouped: bool };
 pub const Batch = struct {
     tokens: [batch_max]Token = undefined,
@@ -122,6 +130,7 @@ pub const GossipProcessor = struct {
     drop_before: u64 = 0,
     closed: bool = false,
     searches: [96]Search = @splat(.{}),
+    refusals: [limits_mod.kind_count][refusal_count]u64 = @splat(@splat(0)),
     used_items: [limits_mod.kind_count]usize = @splat(0),
     used_bytes: [limits_mod.kind_count]usize = @splat(0),
     waiting_per_peer: [@import("../gossipsub/peer_book.zig").capacity][limits_mod.kind_count]u16 = @splat(@splat(0)),
@@ -224,6 +233,24 @@ pub const GossipProcessor = struct {
         const pages = storage.Store.pagesFor(len);
         if (self.used_items[k] >= self.limits[k].items or pages * storage.page_bytes > self.limits[k].bytes - self.used_bytes[k]) return false;
         return self.queueValue(kind, .free).len > 0 and pages <= self.store.free_pages - self.staging_pages and self.store.used_entries + self.store.retired_entries + self.staging_items < self.store.entries.len;
+    }
+    pub fn refuse(self: *GossipProcessor, kind: Kind, reason: Refusal) void {
+        self.refusals[@intFromEnum(kind)][@intFromEnum(reason)] +|= 1;
+    }
+    /// Counts a capacity refusal against the kind's own limits, or the shared store when the kind has room.
+    pub fn refuseCapacity(self: *GossipProcessor, kind: Kind, len: usize) void {
+        const k = @intFromEnum(kind);
+        const pages = storage.Store.pagesFor(len);
+        const room = self.used_items[k] < self.limits[k].items and pages * storage.page_bytes <= self.limits[k].bytes - self.used_bytes[k] and self.queueValue(kind, .free).len > 0;
+        self.refuse(kind, if (room) .store_full else .kind_full);
+    }
+    pub fn occupancy(self: *const GossipProcessor, kind: Kind) [occupancy_count]u64 {
+        return .{
+            self.queueValue(kind, .queued).len,
+            self.queueValue(kind, .waiting).len,
+            self.queueValue(kind, .needs_check).len + self.queueValue(kind, .checking).len,
+            self.executing_items[@intFromEnum(kind)],
+        };
     }
     pub fn freshnessVictim(self: *const GossipProcessor, kind: Kind) ?Token {
         if (!limits_mod.newestFirst(kind)) return null;
@@ -604,6 +631,7 @@ pub const GossipProcessor = struct {
             const peer_full = if (cell.source) |source| self.waiting_per_peer[source.index][k] >= @max(1, self.limits[k].items / 4) else false;
             if (peer_full or self.waiting_items[k] >= self.limits[k].items / 2) {
                 self.ignore(cell);
+                self.refuse(cell.kind, .dependency_full);
             } else self.transition(handle.index, .waiting);
         }
         return true;

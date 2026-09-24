@@ -10,15 +10,22 @@ pub fn admit(table: *processor.GossipProcessor, owner: *gossip.Gossipsub, candid
     if (table.closed or now >= message.deadline or table.order == std.math.maxInt(u64)) return false;
     const topic = gossip.topic.parseCanonical(message.topic) orelse return false;
     const kind = topic.name.kind;
-    const fork = table.fork(topic.digest) orelse return false;
+    const fork = table.fork(topic.digest) orelse {
+        table.refuse(kind, .ineligible);
+        return false;
+    };
     const deneb = @intFromEnum(fork) >= @intFromEnum(@as(@TypeOf(fork), .deneb));
     const electra = @intFromEnum(fork) >= @intFromEnum(@as(@TypeOf(fork), .electra));
     const metadata = processor.metadata_mod.extract(kind, electra, message.bytes);
     if (!processor.metadata_mod.eligible(&metadata, kind, deneb, slot)) {
         table.diag.slotRefusals +|= 1;
+        table.refuse(kind, .ineligible);
         return false;
     }
-    if (!table.sourceRoom(message.source, kind, message.bytes.len)) return false;
+    if (!table.sourceRoom(message.source, kind, message.bytes.len)) {
+        table.refuse(kind, .source_full);
+        return false;
+    }
     var tokens: [processor.batch_max]processor.Token = undefined;
     var handles: [processor.batch_max]gossip.ValidationHandle = undefined;
     var count: usize = 0;
@@ -60,6 +67,7 @@ pub fn admit(table: *processor.GossipProcessor, owner: *gossip.Gossipsub, candid
         count += 1;
     }
     table.diag.capacityRefusals +|= 1;
+    table.refuseCapacity(kind, message.bytes.len);
     return false;
 }
 

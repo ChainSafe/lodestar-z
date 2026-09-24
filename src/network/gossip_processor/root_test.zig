@@ -46,11 +46,14 @@ test "gossip processor isolates kinds and bounds dependency waiting" {
     const checks = table.claimChecks(1);
     for (checks.tokens[0..checks.len]) |token| try t.expect(table.classify(token, false));
     try t.expectEqual(@as(usize, 2), table.snapshot(1).waiting);
+    try t.expectEqual(@as(u64, 2), table.refusals[@intFromEnum(p.limits_mod.Kind.beacon_attestation)][@intFromEnum(p.Refusal.dependency_full)]);
+    try t.expectEqual([_]u64{ 0, 2, 0, 0 }, table.occupancy(.beacon_attestation));
     const block = try add(&table, .beacon_block, null);
     const batch = table.claimDemand(1, .{ .ordinary = false });
     try t.expectEqual(@as(usize, 1), batch.len);
     try t.expectEqual(block, batch.tokens[0]);
     table.finish(&batch, true);
+    try t.expectEqual([_]u64{ 0, 0, 0, 1 }, table.occupancy(.beacon_block));
     table.notifyBlock(root);
     const retry = table.claimChecks(2);
     try t.expectEqual(@as(usize, 2), retry.len);
