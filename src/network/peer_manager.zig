@@ -131,7 +131,7 @@ pub const PeerManager = struct {
     pub fn validateOptions(options: Options) !void {
         try options.peers.validate();
         if (options.peers.target_peers >= options.peers.max_peers or
-            options.dial.concurrent_max > options.peers.max_peers - options.peers.target_peers) return error.InvalidOptions;
+            options.dial.outbound_reserved > options.peers.max_peers - options.peers.target_peers) return error.InvalidOptions;
         if (options.metadata_freshness_ms == 0 or options.metadata_freshness_ms > 86_400_000) return error.InvalidOptions;
         try control_mod.Control.validateOptions(options.control);
         try dial_mod.Dialing.validateOptions(options.dial);
@@ -219,6 +219,7 @@ pub const PeerManager = struct {
                 const identity = connected.peer_id;
                 const endpoint = engine.peerAddress(connected.conn) orelse return;
                 const direction = connected.direction;
+                self.dialing.syncAnswered(engine);
                 const decision = self.catalog.admit(
                     &identity,
                     &self.local_identity,
@@ -227,8 +228,8 @@ pub const PeerManager = struct {
                         .direction = direction,
                         .endpoint = endpoint,
                         .now_ms = now.mono_ms,
-                        .outbound_reserved = self.dialing.options.concurrent_max,
-                        .pending_dials = self.dialing.pendingPeers(&self.catalog, &identity),
+                        .outbound_reserved = self.dialing.options.outbound_reserved,
+                        .pending_dials = self.dialing.answeredPeers(&self.catalog, &identity),
                         .selected_dial = self.dialing.selectedPeer(&self.catalog, &identity, now.mono_ms),
                     },
                 );

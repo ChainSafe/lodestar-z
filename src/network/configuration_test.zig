@@ -5,21 +5,35 @@ const std = @import("std");
 const transport = @import("transport.zig");
 const validate = @import("configuration.zig").validate;
 
-test "managed configuration resolves one dial allowance and rejects a target without headroom" {
+test "managed configuration resolves dial concurrency independently of peer headroom" {
     for ([_]u16{ 1, 2, 10 }) |headroom| {
         const resolved = try resolve(.{
             .seed = 1,
             .forks = &.{},
-            .limits = .{ .connections_max = 242, .handshaking_max = 32, .dialing_max = 16 },
+            .limits = .{ .connections_max = 242, .handshaking_max = 32, .dialing_max = 32 },
             .peers = .{ .capacity = 512, .target_peers = 200, .max_peers = 200 + headroom, .min_outbound = 50 },
         });
         const reserved = @min(headroom, 4);
-        try std.testing.expectEqual(reserved, resolved.core.dial.concurrent_max);
-        try std.testing.expectEqual(reserved, resolved.limits.dialing_max);
+        try std.testing.expectEqual(@as(u16, 32), resolved.core.dial.concurrent_max);
+        try std.testing.expectEqual(@as(u16, 32), resolved.limits.dialing_max);
+        try std.testing.expectEqual(reserved, resolved.core.dial.outbound_reserved);
         try std.testing.expectEqual(reserved, resolved.limits.outbound_reserved);
         try std.testing.expectEqual(@as(?u16, 242), resolved.limits.outbound_max);
         try std.testing.expectEqual(200 + headroom, resolved.core.service.reqresp.inbound_control_reserved);
     }
+    const beacon = try resolve(.{ .seed = 1, .forks = &.{} });
+    try std.testing.expectEqual(@as(u16, 32), beacon.core.dial.concurrent_max);
+    try std.testing.expectError(error.InvalidOptions, resolve(.{
+        .seed = 1,
+        .forks = &.{},
+        .limits = .{ .dialing_max = 16 },
+        .dial = .{ .seed = 1, .concurrent_max = 8 },
+    }));
+    try std.testing.expectError(error.InvalidOptions, resolve(.{
+        .seed = 1,
+        .forks = &.{},
+        .limits = .{ .dialing_max = 65 },
+    }));
     try std.testing.expectError(error.InvalidOptions, resolve(.{
         .seed = 1,
         .forks = &.{},

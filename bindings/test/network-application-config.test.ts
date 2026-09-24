@@ -17,7 +17,7 @@ test.each([
   ["outboundReserve", 512],
   ["connectionCapacity", 256],
   ["handshakingCapacity", 256],
-  ["dialingCapacity", 256],
+  ["dialingCapacity", 64],
   ["receiveBudgetBytes", Number.MAX_SAFE_INTEGER],
   ["nativeBudgetBytes", 1024 ** 3],
   ["bridgeBudgetBytes", 1024 ** 3],

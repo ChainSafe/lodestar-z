@@ -36,7 +36,7 @@ fn options(key: *const network.KeyPair, plan: *const network.chain.Plan, update:
         .transport = .{ .host = key, .bind = .{ .ip4 = .loopback(0) }, .limits = .{ .connections_max = 4, .handshaking_max = 4, .handshaking_per_source_max = 4, .dialing_max = 1, .outbound_reserved = 1, .outbound_max = 4 } },
         .core = .{
             .peers = .{ .capacity = 4, .outbound_reserve = 1, .max_peers = 3, .target_peers = 2, .min_outbound = 1 },
-            .dial = .{ .capacity = 4, .concurrent_max = 1, .seed = 7 },
+            .dial = .{ .capacity = 4, .concurrent_max = 1, .outbound_reserved = 1, .seed = 7 },
             .service = .{
                 .identify = .{},
                 .router = .{ .capabilities = update.capabilities, .negotiations_max = 24, .outbound_control_reserved = 8 },

@@ -257,7 +257,7 @@ export interface NativeResources {
   outboundReserve: number;
   connectionCapacity: number;
   handshakingCapacity: number;
-  /** Managed concurrency resolves to min(4, dialingCapacity, maxPeers - targetPeers). */
+  /** Concurrent outbound QUIC dials, at most 64, independent of maxPeers - targetPeers. */
   dialingCapacity: number;
   receiveBudgetBytes: number;
   nativeBudgetBytes: number;

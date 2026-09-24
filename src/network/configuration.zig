@@ -40,13 +40,15 @@ pub const Resolved = struct {
     byte_limit: usize,
 };
 
+const outbound_reserved_max: u16 = 4;
+
 pub fn resolve(request: Request) !Resolved {
     try request.work_limits.validate();
     const small = request.profile == .small;
     var limits: engine.Limits = request.limits orelse .{
         .connections_max = if (small) 16 else 128,
         .handshaking_max = if (small) 8 else 32,
-        .dialing_max = if (small) 4 else 16,
+        .dialing_max = if (small) 4 else 32,
         .receive_budget_bytes = if (small) 64 * 1024 * 1024 else 512 * 1024 * 1024,
     };
     const peer_options: peers.Options = request.peers orelse .{
@@ -58,11 +60,15 @@ pub fn resolve(request: Request) !Resolved {
     };
     try peer_options.validate();
     if (peer_options.target_peers >= peer_options.max_peers) return error.InvalidOptions;
-    var dial_options = request.dial orelse dial.Options{ .capacity = if (small) 32 else 256, .concurrent_max = @min(4, limits.dialing_max), .seed = request.seed };
+    const dial_options = request.dial orelse dial.Options{
+        .capacity = if (small) 32 else 256,
+        .concurrent_max = limits.dialing_max,
+        .outbound_reserved = @min(outbound_reserved_max, limits.dialing_max, peer_options.max_peers - peer_options.target_peers),
+        .seed = request.seed,
+    };
     try dial.Dialing.validateOptions(dial_options);
-    dial_options.concurrent_max = @min(dial_options.concurrent_max, peer_options.max_peers - peer_options.target_peers);
-    limits.dialing_max = dial_options.concurrent_max;
-    limits.outbound_reserved = dial_options.concurrent_max;
+    if (dial_options.concurrent_max != limits.dialing_max) return error.InvalidOptions;
+    limits.outbound_reserved = dial_options.outbound_reserved;
     limits.outbound_max = limits.connections_max;
     var requests: rr.Options = .{
         .forks = request.forks,
@@ -142,7 +148,7 @@ pub fn validate(limits: engine.Limits, options: core.Options) !void {
     if (options.peers.max_peers > limits.connections_max or
         options.service.reqresp.peers < limits.connections_max or
         options.dial.concurrent_max != limits.dialing_max or
-        options.dial.concurrent_max != limits.outbound_reserved or
+        options.dial.outbound_reserved != limits.outbound_reserved or
         limits.outbound_max != limits.connections_max or
         options.service.reqresp.inbound_control_reserved < options.peers.max_peers or
         options.service.router.outbound_control_reserved < options.service.reqresp.outbound_control_reserved)

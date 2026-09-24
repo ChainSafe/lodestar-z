@@ -57,7 +57,7 @@ pub fn options() managed.Options {
                 .critical_bytes = 512,
             },
         },
-        .dial = .{ .capacity = 4, .concurrent_max = 1, .seed = 7 },
+        .dial = .{ .capacity = 4, .concurrent_max = 1, .outbound_reserved = 1, .seed = 7 },
     };
 }
 
