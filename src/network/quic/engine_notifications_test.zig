@@ -38,54 +38,6 @@ test "engine notifications deliver a later close during sustained earlier stream
     try std.testing.expect(pair.server.peerId(victim) == null);
 }
 
-test "engine notifications deliver later native activity during sustained earlier traffic" {
-    var pair: support.Pair = .{};
-    try pair.init(.{}, .{});
-    defer pair.deinit();
-    const handles = try support.connectPair(&pair);
-    var newcomer: support.Pair = .{};
-    try newcomer.init(.{}, .{});
-    defer newcomer.deinit();
-    newcomer.client.csprng = std.Random.DefaultCsprng.init(@splat(3));
-    const pending_dial = try newcomer.dial();
-    var bytes: [1452]u8 = undefined;
-    const source = engine.Address{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 4003 } };
-    var response: [1452]u8 = undefined;
-    const tokenless = newcomer.client.sendOne(pending_dial.index, newcomer.now, &bytes).?;
-    const retry = pair.server.receive(tokenless.bytes, &source, pair.now, &response).retry;
-    var reply: [1452]u8 = undefined;
-    _ = newcomer.client.receive(retry, &support.server_address, newcomer.now, &reply);
-    const initial = newcomer.client.sendOne(pending_dial.index, newcomer.now, &bytes).?;
-    var saved_initial: [1452]u8 = undefined;
-    @memcpy(saved_initial[0..initial.bytes.len], initial.bytes);
-    const victim = pair.server.receive(bytes[0..initial.bytes.len], &source, pair.now, &response).accepted;
-    try std.testing.expect(victim.index != handles.server.index);
-    pair.drop_to_address = source;
-    const stream = try pair.client.openStream(handles.client);
-    var activity: [1]engine.Handle = undefined;
-    var delivered = false;
-    for (0..32) |turn| {
-        _ = try pair.client.write(stream, "x", false);
-        try pair.pump();
-        try std.testing.expectEqual(@as(usize, 0), pair.server.takeActivity(&.{}));
-        try std.testing.expectEqual(@as(usize, 1), pair.server.takeActivity(&activity));
-        if (std.meta.eql(activity[0], victim)) {
-            try std.testing.expect(!delivered);
-            delivered = true;
-        } else try std.testing.expectEqual(handles.server, activity[0]);
-        if (turn >= 1) try std.testing.expect(delivered);
-    }
-    try std.testing.expect(!pair.server.registry.activity[victim.index]);
-    try std.testing.expect(pair.server.abandon(victim));
-    _ = pair.server.takeActivity(&activity);
-    try std.testing.expect(!pair.server.activityPending());
-    const replacement = pair.server.receive(saved_initial[0..initial.bytes.len], &source, pair.now, &response).accepted;
-    try std.testing.expectEqual(victim.index, replacement.index);
-    try std.testing.expect(victim.generation != replacement.generation);
-    try std.testing.expectEqual(@as(usize, 1), pair.server.takeActivity(&activity));
-    try std.testing.expectEqual(replacement, activity[0]);
-}
-
 test "engine notifications deliver higher stream slot while lower slots recycle" {
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
@@ -164,10 +116,7 @@ test "engine notifications preserve generations through active swaps retirement 
     }
     try std.testing.expectEqual(@as(u16, 1), pair.server.registry.active_len);
     try std.testing.expectEqual(@as(usize, 0), pair.server.pollEvents(&one));
-    var activity: [4]engine.Handle = undefined;
-    const count = pair.server.takeActivity(&activity);
-    for (activity[0..count]) |owner| try std.testing.expectEqual(@as(u16, 0), owner.index);
-    try std.testing.expect(!pair.server.activityPending());
+    try std.testing.expect(!pair.server.eventsPending());
 }
 
 test "engine notifications preserve lifecycle order across one-event polls" {

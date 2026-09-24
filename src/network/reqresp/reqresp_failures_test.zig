@@ -1190,7 +1190,7 @@ test "reqresp native bytes arriving behind cursor remain ready after activity dr
     try std.testing.expectEqual(encoded.len, try setup.shared.pair.server.write(stream, encoded, false));
     try setup.shared.pair.pump();
     var activity: [128]engine_mod.Handle = undefined;
-    const count = setup.shared.pair.client.takeActivity(&activity);
+    const count = setup.shared.pair.activity(&setup.shared.pair.client, &activity);
     try std.testing.expect(count > 0);
     for (activity[0..count]) |conn| setup.shared.client.reqresp.connectionActivity(conn);
     var events: [1]Event = undefined;
@@ -1246,7 +1246,7 @@ test "reqresp native write credit behind cursor resumes from activity" {
     }
     try std.testing.expect(writable);
     var activity: [128]engine_mod.Handle = undefined;
-    const count = setup.shared.pair.server.takeActivity(&activity);
+    const count = setup.shared.pair.activity(&setup.shared.pair.server, &activity);
     try std.testing.expect(count > 0);
     for (activity[0..count]) |conn| setup.shared.server.reqresp.connectionActivity(conn);
     var events: [1]Event = undefined;
@@ -1354,7 +1354,7 @@ test "reqresp request write preserves already readable native response" {
     try std.testing.expectEqual(encoded.len, try setup.shared.pair.server.write(server_stream.?, encoded, false));
     try setup.shared.pair.pump();
     var activity: [128]engine_mod.Handle = undefined;
-    const count = setup.shared.pair.client.takeActivity(&activity);
+    const count = setup.shared.pair.activity(&setup.shared.pair.client, &activity);
     try std.testing.expect(count > 0);
     for (activity[0..count]) |conn| setup.shared.client.reqresp.connectionActivity(conn);
     for (0..4) |_| {
@@ -1567,7 +1567,7 @@ test "reqresp absolute request phase expires under real stream backpressure" {
     const deadline_ms = setup.shared.client.reqresp.outbound[handle.index].deadline();
     var events: [8]Event = undefined;
     _ = setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &events });
-    _ = setup.shared.pair.client.takeHostWork();
+    try setup.shared.pair.flush(&setup.shared.pair.client);
     setup.shared.client.reqresp.connectionActivity(.{ .index = stream.conn.index, .generation = stream.conn.generation + 1 });
     for (0..3) |_| {
         setup.shared.pair.advance(500);
@@ -1576,7 +1576,7 @@ test "reqresp absolute request phase expires under real stream backpressure" {
             setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &events }).control,
         );
         try std.testing.expectEqual(deadline_ms, setup.shared.client.reqresp.outbound[handle.index].deadline());
-        try std.testing.expect(!setup.shared.pair.client.hostWorkPending());
+        try std.testing.expect(!setup.shared.pair.client.backlog());
     }
     setup.shared.pair.advance(500);
     try std.testing.expectEqual(

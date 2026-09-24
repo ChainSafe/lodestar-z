@@ -17,7 +17,6 @@ pub const server_address = types.Address{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 },
 pub const now_unix: i64 = 1_700_000_000;
 
 pub const Pair = struct {
-    activity_buffer: [128]engine_mod.Handle = undefined,
     client_ctx: tls.Context = undefined,
     server_ctx: tls.Context = undefined,
     client: Engine = undefined,
@@ -29,6 +28,8 @@ pub const Pair = struct {
     client_source: types.Address = client_address,
     drop_to_address: ?types.Address = null,
     batch: transport_mod.SendBatch = undefined,
+    client_stash: Stash = .{},
+    server_stash: Stash = .{},
 
     pub fn init(self: *Pair, client_limits: Limits, server_limits: Limits) !void {
         const client_key = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{1}));
@@ -63,6 +64,8 @@ pub const Pair = struct {
         self.drop_to_server = false;
         self.client_source = client_address;
         self.drop_to_address = null;
+        self.client_stash = .{};
+        self.server_stash = .{};
     }
 
     pub fn deinit(self: *Pair) void {
@@ -86,19 +89,35 @@ pub const Pair = struct {
         self.now.mono_ms += ms;
     }
 
+    /// Delivers datagrams both ways and runs both engines' timer and readiness phases until
+    /// neither side has output left.
     pub fn pump(self: *Pair) !void {
         var rounds: usize = 0;
         while (rounds < 64) : (rounds += 1) {
             const source = self.client_source;
             var moved = try self.transfer(&self.client, &self.server, source, self.drop_to_server);
             moved = try self.transfer(&self.server, &self.client, server_address, false) or moved;
-            self.client.tick(self.now);
-            self.server.tick(self.now);
-            if (!moved) return;
+            self.settle(&self.client);
+            self.settle(&self.server);
+            if (!moved and !self.client.backlog() and !self.server.backlog()) return;
         }
         return error.PumpDidNotSettle;
     }
 
+    /// Delivers one engine's pending output to its peer.
+    pub fn flush(self: *Pair, engine: *Engine) !void {
+        if (engine == &self.client) {
+            _ = try self.transfer(&self.client, &self.server, self.client_source, self.drop_to_server);
+        } else _ = try self.transfer(&self.server, &self.client, server_address, false);
+    }
+
+    /// Runs one engine's timer and readiness phases at the pair's clock.
+    pub fn settle(self: *Pair, engine: *Engine) void {
+        engine.expire(self.now);
+        engine.collect(self.now);
+    }
+
+    /// Flushes the sender's dirty connections into the receiver, as the transport does.
     pub fn transfer(
         self: *Pair,
         from: *Engine,
@@ -107,14 +126,16 @@ pub const Pair = struct {
         drop: bool,
     ) !bool {
         var moved = false;
-        var index: u16 = 0;
-        while (index < from.registry.slots.len) : (index += 1) {
+        var remaining = from.dirtyCount();
+        while (remaining > 0) : (remaining -= 1) {
+            const index = from.nextDirty() orelse break;
+            var retry: ?struct { bytes: [constants.datagram_size_max]u8, len: usize, from: types.Address } = null;
             var budget: u32 = 0;
+            var drained = false;
             while (budget < transport_mod.send_burst_max) {
                 const count = sendBatch(from, index, self.now, &self.batch);
-                if (count == 0) break;
                 budget += count;
-                moved = true;
+                moved = moved or count > 0;
                 for (self.batch.sent[0..count]) |sent| {
                     const datagram = sent.bytes;
                     if (from == &self.client and self.first_initial_len == 0) {
@@ -133,24 +154,76 @@ pub const Pair = struct {
                         self.first_initial_len = datagram.len;
                     }
                     if (outcome == .retry) {
-                        var reply: [constants.datagram_size_max]u8 = undefined;
-                        _ = from.receive(outcome.retry, &sent.to, self.now, &reply);
+                        std.debug.assert(retry == null);
+                        retry = .{ .bytes = undefined, .len = outcome.retry.len, .from = sent.to };
+                        @memcpy(retry.?.bytes[0..outcome.retry.len], outcome.retry);
                     }
                 }
-                if (count < constants.send_batch_max) break;
+                if (count < constants.send_batch_max) {
+                    drained = true;
+                    break;
+                }
+            }
+            from.sent(index, self.now, drained);
+            // The reply re-dirties the sender after its burst ended, as a later turn would.
+            if (retry) |*reply| {
+                var out: [constants.datagram_size_max]u8 = undefined;
+                _ = from.receive(reply.bytes[0..reply.len], &reply.from, self.now, &out);
             }
         }
+        from.finishFlush(self.now);
         return moved;
     }
 
-    pub fn activity(self: *Pair, engine: *Engine) []const engine_mod.Handle {
-        const count = engine.takeActivity(&self.activity_buffer);
-        return self.activity_buffer[0..count];
+    /// Events polled by `activity` wait here for the next `events` call.
+    fn stash(self: *Pair, engine: *const Engine) *Stash {
+        std.debug.assert(engine == &self.client or engine == &self.server);
+        return if (engine == &self.client) &self.client_stash else &self.server_stash;
     }
 
-    pub fn events(_: *Pair, engine: *Engine, storage: []Event) []Event {
-        engine.releaseReported();
-        return storage[0..engine.pollEvents(storage)];
+    pub fn events(self: *Pair, engine: *Engine, storage: []Event) []Event {
+        const held = self.stash(engine);
+        if (held.len == 0) engine.releaseReported();
+        const taken = @min(held.len, storage.len);
+        @memcpy(storage[0..taken], held.events[0..taken]);
+        std.mem.copyForwards(Event, held.events[0 .. held.len - taken], held.events[taken..held.len]);
+        held.len -= taken;
+        if (held.len > 0) return storage[0..taken];
+        const polled = engine.pollEvents(storage[taken..]);
+        held.noteActivity(storage[taken..][0..polled]);
+        return storage[0 .. taken + polled];
+    }
+
+    /// Connections with stream events since the last call, as owners that still take connection
+    /// activity see them. Events polled here stay available to `events`.
+    pub fn activity(self: *Pair, engine: *Engine, out: []engine_mod.Handle) usize {
+        const held = self.stash(engine);
+        const start = held.len;
+        held.len += engine.pollEvents(held.events[start..]);
+        held.noteActivity(held.events[start..held.len]);
+        const count = @min(held.active_len, out.len);
+        @memcpy(out[0..count], held.active[0..count]);
+        held.active_len = 0;
+        return count;
+    }
+};
+
+const Stash = struct {
+    events: [256]Event = undefined,
+    len: usize = 0,
+    active: [16]engine_mod.Handle = undefined,
+    active_len: usize = 0,
+
+    fn noteActivity(self: *Stash, polled: []const Event) void {
+        for (polled) |event| {
+            const conn = engine_mod.activityOf(event) orelse continue;
+            for (self.active[0..self.active_len]) |seen| {
+                if (std.meta.eql(seen, conn)) break;
+            } else if (self.active_len < self.active.len) {
+                self.active[self.active_len] = conn;
+                self.active_len += 1;
+            }
+        }
     }
 };
 
@@ -267,7 +340,6 @@ pub fn networkOptions(key: *const keys.KeyPair) NetworkOptions {
     return .{
         .resolved = @import("configuration.zig").resolve(request) catch unreachable,
         .startup = .{
-            .wait_mode = if (@import("network_core.zig").wait.supported) .native_poll else .portable,
             .host = key,
             .bind = .{ .ip4 = .loopback(0) },
             .local = managed_support.localState(.{}),

@@ -51,14 +51,12 @@ pub fn process(
     service: *service_mod.Service,
     engine: *engine_mod.Engine,
     events: []const engine_mod.Event,
-    activity: []const engine_mod.Handle,
     now: Now,
     slot: u64,
     peer_events: []t.Event,
     application: []rr.Event,
 ) Counts {
-    const per_connection = @import("quic/limits.zig").events_per_connection;
-    std.debug.assert(events.len <= @as(usize, engine.limits.connections_max) * per_connection);
+    std.debug.assert(events.len <= @import("quic/limits.zig").events_per_turn_max);
     if (self.stopped) return .{
         .peers = self.catalog.pollEvents(peer_events),
         .application = 0,
@@ -67,7 +65,7 @@ pub fn process(
     for (events) |event| self.transportEvent(service, engine, event, now);
     var controls: [controls_per_turn]rr.Event = undefined;
     var identify_results: [identify_per_turn]@import("identify/root.zig").Result = undefined;
-    const counts = service.process(engine, events, activity, now, .{ .application = application, .control = &controls, .identify = &identify_results });
+    const counts = service.process(engine, events, now, .{ .application = application, .control = &controls, .identify = &identify_results });
     for ([_][]const rr.Event{ application[0..counts.application], controls[0..counts.control] }) |batch| {
         for (batch) |event| {
             const fault = service.reqresp.peerFault(event) orelse continue;

@@ -1,7 +1,9 @@
 const std = @import("std");
 const binding = @import("binding.zig");
 const connection = @import("connection.zig");
+const index_list = @import("../index_list.zig");
 const route_table = @import("route_table.zig");
+const DeadlineHeap = @import("../deadline_heap.zig").DeadlineHeap;
 const tls = @import("../tls/context.zig");
 const assert = std.debug.assert;
 
@@ -16,8 +18,16 @@ pub const Registry = struct {
     route_keys: []RouteKeys,
     active: []u16,
     positions: []u16,
-    activity: []bool,
     keylog_arena: []u8,
+    /// One key per live connection: its earliest QUIC timer, handshake limit, keep-alive or
+    /// deferred close, in monotonic nanoseconds.
+    timers: DeadlineHeap,
+    /// Rows popped by one expiry pass.
+    expired: []u16,
+    collect: index_list.List = .{},
+    dirty: index_list.List = .{},
+    events: index_list.List = .{},
+    released: index_list.List = .{},
     active_len: u16 = 0,
     handshaking: u16 = 0,
     dialing: u16 = 0,
@@ -39,9 +49,10 @@ pub const Registry = struct {
         errdefer allocator.free(active);
         for (active, 0..) |*entry, index| entry.* = @intCast(index);
 
-        const activity = try allocator.alloc(bool, slots_max);
-        errdefer allocator.free(activity);
-        @memset(activity, false);
+        var timers = try DeadlineHeap.init(allocator, slots_max);
+        errdefer timers.deinit(allocator);
+        const expired = try allocator.alloc(u16, slots_max);
+        errdefer allocator.free(expired);
 
         const keylog_len: usize = if (keylog)
             tls.keylog_capacity * @as(usize, slots_max)
@@ -60,7 +71,8 @@ pub const Registry = struct {
             .slots = slots,
             .routes = routes,
             .active = active,
-            .activity = activity,
+            .timers = timers,
+            .expired = expired,
             .keylog_arena = keylog_arena,
             .positions = positions,
             .route_keys = route_keys,
@@ -72,7 +84,8 @@ pub const Registry = struct {
             slot.release();
         };
         allocator.free(self.keylog_arena);
-        allocator.free(self.activity);
+        allocator.free(self.expired);
+        self.timers.deinit(allocator);
         allocator.free(self.active);
         allocator.free(self.positions);
         allocator.free(self.route_keys);
@@ -101,7 +114,7 @@ pub const Registry = struct {
         assert(self.slots[index].state == .free);
         assert(self.route_keys[index].len == 0);
         self.active_len += 1;
-        self.activity[index] = false;
+        assert(self.timers.get(index) == null);
         return index;
     }
 
@@ -124,9 +137,21 @@ pub const Registry = struct {
         const slot = &self.slots[index];
         assert(slot.state != .free);
         self.removeRoutesFor(index);
+        self.unlink(index);
         slot.release();
         self.unclaim(index);
         assert(slot.state == .free);
+    }
+
+    /// Removes the slot from every per-turn list and the timer heap.
+    pub fn unlink(self: *Registry, index: u16) void {
+        assert(index < self.slots.len);
+        const slot = &self.slots[index];
+        if (slot.collect_link.linked) self.collect.remove(self.slots, "collect_link", index);
+        if (slot.dirty_link.linked) self.dirty.remove(self.slots, "dirty_link", index);
+        if (slot.event_link.linked) self.events.remove(self.slots, "event_link", index);
+        if (slot.release_link.linked) self.released.remove(self.slots, "release_link", index);
+        self.timers.clear(index);
     }
 
     pub fn keylogFor(self: *const Registry, index: u16) []u8 {

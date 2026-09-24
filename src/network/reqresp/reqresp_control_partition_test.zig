@@ -129,12 +129,10 @@ test "reqresp service retains request and chunk bytes through control progress" 
     );
     var got_pong = false;
     var transport: [16]engine_mod.Event = undefined;
-    var activity: [128]engine_mod.Handle = undefined;
     var output: [1]rr.Event = undefined;
     for (0..24) |_| {
         try pair.pump();
-        const client_active = pair.client.takeActivity(&activity);
-        const received = client.process(&pair.client, pair.events(&pair.client, &transport), activity[0..client_active], pair.now, .{ .application = &.{}, .control = &output });
+        const received = client.process(&pair.client, pair.events(&pair.client, &transport), pair.now, .{ .application = &.{}, .control = &output });
         for (output[0..received.control]) |event| switch (event) {
             .chunk => |chunk| {
                 try std.testing.expectEqualSlices(u8, &ping_bytes, chunk.bytes);
@@ -144,8 +142,7 @@ test "reqresp service retains request and chunk bytes through control progress" 
             .failed => return error.TestUnexpectedResult,
             else => {},
         };
-        const server_active = pair.server.takeActivity(&activity);
-        const incoming = server.process(&pair.server, pair.events(&pair.server, &transport), activity[0..server_active], pair.now, .{ .application = &.{}, .control = &output });
+        const incoming = server.process(&pair.server, pair.events(&pair.server, &transport), pair.now, .{ .application = &.{}, .control = &output });
         for (output[0..incoming.control]) |event| switch (event) {
             .request => |request| {
                 try std.testing.expectEqual(protocol.Protocol.ping_v1, request.protocol);
@@ -167,10 +164,8 @@ test "reqresp service retains request and chunk bytes through control progress" 
     try server.reqresp.respond(request.request, &block, .{ .digest = .{ 1, 2, 3, 4 }, .fork = .deneb }, pair.now);
     for (0..16) |_| {
         try pair.pump();
-        const client_active = pair.client.takeActivity(&activity);
-        _ = client.process(&pair.client, pair.events(&pair.client, &transport), activity[0..client_active], pair.now, .{ .application = &.{}, .control = &output });
-        const server_active = pair.server.takeActivity(&activity);
-        const count = server.process(&pair.server, pair.events(&pair.server, &transport), activity[0..server_active], pair.now, .{ .control = &output }).control;
+        _ = client.process(&pair.client, pair.events(&pair.client, &transport), pair.now, .{ .application = &.{}, .control = &output });
+        const count = server.process(&pair.server, pair.events(&pair.server, &transport), pair.now, .{ .control = &output }).control;
         for (output[0..count]) |event| {
             if (event == .chunk_sent) _ = server.reqresp.finish(event.chunk_sent.request, pair.now);
         }

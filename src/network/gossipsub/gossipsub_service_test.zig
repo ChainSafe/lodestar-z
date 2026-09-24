@@ -53,7 +53,7 @@ test "gossipsub service does not retry a closed outbound stream" {
     const index = setup.shared.client.gossipsub.sessions.findPeer(setup.shared.handles.client).?;
     const first = setup.shared.client.gossipsub.sessions.outStream(index).?;
     setup.shared.pair.client.closeStream(first, 0);
-    _ = setup.shared.client.process(&setup.shared.pair.client, &.{.{ .stream_closed = .{ .stream = first, .reset_code = 0 } }}, &.{}, setup.shared.pair.now, .{});
+    _ = setup.shared.client.process(&setup.shared.pair.client, &.{.{ .stream_closed = .{ .stream = first, .reset_code = 0 } }}, setup.shared.pair.now, .{});
     for (0..4) |_| try setup.pumpOnce();
     try std.testing.expect(setup.shared.client.gossipsub.sessions.outStream(index) == null);
     const started = setup.shared.client.gossipsub.counters.negotiation_started;
@@ -94,7 +94,7 @@ test "gossipsub direct send timeout retries once after a bounded delay" {
         try std.testing.expectEqual(started, g.counters.negotiation_started);
         if (recovery == .remove_direct) g.unmarkDirect(&setup.shared.pair.server_ctx.local_peer_id);
         setup.shared.pair.advance(1);
-        _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, &.{}, setup.shared.pair.now, .{});
+        _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{});
         if (recovery == .resume_stream) {
             for (0..32) |_| try setup.pumpOnce();
             try std.testing.expectEqual(started + 1, g.counters.negotiation_started);
@@ -115,13 +115,13 @@ test "gossipsub direct send timeout retries once after a bounded delay" {
             if (recovery == .negotiation_timeout) {
                 try std.testing.expectEqual(started + 1, g.counters.negotiation_started);
                 setup.shared.pair.advance(@import("../negotiate.zig").negotiate_timeout_ms + 1);
-                _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, &.{}, setup.shared.pair.now, .{});
+                _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{});
                 try std.testing.expectEqual(@as(u64, 1), g.counters.negotiation_failed);
             }
             try std.testing.expect(g.sessions.rows[index].outbound == .none);
             const final_started = g.counters.negotiation_started;
             setup.shared.pair.advance(driver.direct_retry_delay_ms * 2);
-            _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, &.{}, setup.shared.pair.now, .{});
+            _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{});
             try std.testing.expectEqual(final_started, g.counters.negotiation_started);
         }
     }
@@ -230,7 +230,7 @@ test "gossipsub service ignores stale outcomes after connection and peer slot re
         .owner = .meshsub,
         .result = .{ .ready = .{ .protocol = .{ .meshsub = .v1_1 }, .leftover = "", .fin = false } },
     }, setup.shared.pair.now);
-    _ = setup.shared.client.process(&setup.shared.pair.client, &.{.{ .stream_closed = .{ .stream = old_stream, .reset_code = 0 } }}, &.{}, setup.shared.pair.now, .{});
+    _ = setup.shared.client.process(&setup.shared.pair.client, &.{.{ .stream_closed = .{ .stream = old_stream, .reset_code = 0 } }}, setup.shared.pair.now, .{});
     try std.testing.expectEqual(live, setup.shared.client.gossipsub.sessions.outStream(index).?);
     try std.testing.expectEqual(@import("sessions.zig").Version.v1_2, setup.shared.client.gossipsub.sessions.rows[index].outbound.live.version);
     const peer = setup.shared.client.gossipsub.peers.rows[setup.shared.client.gossipsub.sessions.rows[index].logical.index];
@@ -291,10 +291,10 @@ test "gossipsub service preserves a remotely half-closed outbound stream without
     setup.shared.pair.advance(1_000);
     for (0..16) |_| try setup.pumpOnce();
     try std.testing.expectEqual(stream, setup.shared.client.gossipsub.sessions.outStream(client_index).?);
-    _ = setup.shared.pair.client.takeHostWork();
+    try setup.shared.pair.flush(&setup.shared.pair.client);
     for (0..8) |_| {
-        _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, &.{}, setup.shared.pair.now, .{});
-        try std.testing.expect(!setup.shared.pair.client.takeHostWork());
+        _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{});
+        try std.testing.expect(!setup.shared.pair.client.backlog());
     }
     try gossip_test.subscribe(setup.shared.client.gossipsub, topic);
     for (0..16) |_| try setup.pumpOnce();
@@ -341,18 +341,18 @@ test "gossipsub negotiation timeout releases resources without creating a retry 
     defer setup.deinit();
     setup.shared.client.gossipsub.markDirect(setup.shared.handles.client);
     try gossip_test.subscribe(setup.shared.client.gossipsub, "/eth2/6a95a1a9/beacon_block/ssz_snappy");
-    _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, &.{}, setup.shared.pair.now, .{});
+    _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{});
     setup.shared.pair.advance(@import("../negotiate.zig").negotiate_timeout_ms + 1);
-    _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, &.{}, setup.shared.pair.now, .{});
+    _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{});
     try std.testing.expectEqual(@as(u64, 1), setup.shared.client.gossipsub.counters.negotiation_failed);
-    _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, &.{}, setup.shared.pair.now, .{});
+    _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{});
     try std.testing.expect(setup.shared.client.router.nextWakeup(setup.shared.pair.now, 16) == null);
     const index = setup.shared.client.gossipsub.sessions.findPeer(setup.shared.handles.client).?;
     try std.testing.expect(setup.shared.client.gossipsub.sessions.rows[index].outbound == .none);
     try std.testing.expect(setup.shared.client.gossipsub.sessions.rows[index].io.deadlines(&setup.shared.client.gossipsub.options).next() == null);
     for (0..10) |_| {
         setup.shared.pair.advance(30_000);
-        _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, &.{}, setup.shared.pair.now, .{});
+        _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{});
     }
     try std.testing.expectEqual(@as(u64, 1), setup.shared.client.gossipsub.counters.negotiation_started);
 }

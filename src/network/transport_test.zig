@@ -187,8 +187,12 @@ test "transport socket refuses a batch that carries an oversized datagram" {
         .{ .bytes = &fitting, .to = to },
         .{ .bytes = &oversized, .to = to },
     };
-    try std.testing.expectError(error.DatagramTooLarge, node.udp.sendMany(std.testing.io, &batch));
-    try node.udp.sendMany(std.testing.io, batch[0..1]);
+    const refused = node.udp.sendMany(std.testing.io, &batch);
+    try std.testing.expectEqual(@as(usize, 0), refused.sent);
+    try std.testing.expectEqual(error.DatagramTooLarge, refused.failure.?);
+    const fits = node.udp.sendMany(std.testing.io, batch[0..1]);
+    try std.testing.expectEqual(@as(usize, 1), fits.sent);
+    try std.testing.expect(fits.failure == null);
 }
 
 test "transport refuses to dial a multiaddr without a peer id" {
@@ -252,8 +256,8 @@ test "transport validates socket work limits before startup allocation" {
         .{ .send_per_step_max = transport_mod.send_burst_max + 1 },
         .{ .receive_per_step_max = 0 },
         .{ .receive_per_step_max = @import("constants.zig").receive_batch_max + 1 },
-        .{ .work_per_step_max = 1 },
-        .{ .work_per_step_max = transport_mod.work_per_step_ceiling + 1 },
+        .{ .burst_per_connection = 0 },
+        .{ .send_per_step_max = 8, .burst_per_connection = 9 },
     };
     for (invalid) |work_limits| {
         var target: Transport = .{};
@@ -263,20 +267,16 @@ test "transport validates socket work limits before startup allocation" {
             .work_limits = work_limits,
         }));
     }
-    try (transport_mod.WorkLimits{ .send_per_step_max = 1, .receive_per_step_max = 1, .work_per_step_max = 2 }).validate();
-    try (transport_mod.WorkLimits{ .work_per_step_max = transport_mod.work_per_step_ceiling }).validate();
+    try (transport_mod.WorkLimits{ .send_per_step_max = 1, .receive_per_step_max = 1, .burst_per_connection = 1 }).validate();
+    try (transport_mod.WorkLimits{ .burst_per_connection = transport_mod.send_burst_max }).validate();
 }
 
-test "transport memory plan accounts for its pacing queue and send batch" {
+test "transport memory plan accounts for its send batch" {
     var node: Transport = .{};
     try initTransport(&node, 28);
     defer node.deinit(std.testing.io);
     const plan = node.memoryPlan();
     try std.testing.expectEqual(node.engine.memoryPlan(), plan.engine);
-    try std.testing.expectEqual(node.engine.limits.connections_max, plan.scheduled_datagrams);
-    try std.testing.expectEqual(@as(u64, node.pending.entries.len * @import("constants.zig").datagram_size_max), plan.scheduled_payload_bytes);
-    try std.testing.expectEqual(@as(u64, std.mem.sliceAsBytes(node.pending.entries).len), plan.scheduled_storage_bytes);
-    try std.testing.expect(plan.scheduled_storage_bytes >= plan.scheduled_payload_bytes);
     try std.testing.expectEqual(node.batch.buffers.len, plan.ready_batch_datagrams);
     try std.testing.expectEqual(@sizeOf(@TypeOf(node.batch)), plan.ready_batch_storage_bytes);
 }

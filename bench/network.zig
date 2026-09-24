@@ -9,24 +9,51 @@ const sink_size = rr.Protocol.blocks_by_range_v2.info().response_max;
 const chain_config = if (preset.active_preset == .minimal) &config.minimal.config else &config.mainnet.config;
 const warmup_turns = 64;
 
+const Source = network.wake_sources.Source;
+const source_count = network.wake_sources.source_count;
+
 const Samples = struct {
     ns: [turns]u64 = undefined,
     received: u64 = 0,
     sent: u64 = 0,
-    work: u64 = 0,
+    backlog: u64 = 0,
     immediate: usize = 0,
+    due_start: [source_count]u64 = @splat(0),
+    visits_start: network.quic.engine.Visits = .{},
+    /// Due-now turns under a transport source whose previous turn hit no per-turn cap.
+    uncapped_backlog: u64 = 0,
+    uncapped_events: u64 = 0,
+    previous_backlog: bool = false,
+    previous_events: bool = false,
 
-    fn record(self: *Samples, index: usize, elapsed: u64, result: network.network_core.Result, immediate: bool) !void {
+    fn begin(node: *const network.NetworkCore) Samples {
+        return .{ .due_start = node.due_now_turns, .visits_start = node.transport.engine.visits };
+    }
+
+    fn record(self: *Samples, node: *const network.NetworkCore, index: usize, elapsed: u64, due_before: [source_count]u64, result: network.network_core.Result, immediate: bool) !void {
         if (result.failure) |err| return err;
         self.ns[index] = elapsed;
         self.received += result.transport.datagrams_received;
         self.sent += result.transport.datagrams_sent;
-        self.work += result.transport.work_processed;
+        self.backlog += @intFromBool(result.transport.backlog);
         self.immediate += @intFromBool(immediate);
+        const backlog_due = node.due_now_turns[@intFromEnum(Source.transport_backlog)] > due_before[@intFromEnum(Source.transport_backlog)];
+        const events_due = node.due_now_turns[@intFromEnum(Source.transport_events)] > due_before[@intFromEnum(Source.transport_events)];
+        self.uncapped_backlog += @intFromBool(backlog_due and !self.previous_backlog);
+        self.uncapped_events += @intFromBool(events_due and !self.previous_events);
+        self.previous_backlog = result.transport.backlog;
+        self.previous_events = result.transport.events_pending;
     }
-    fn print(self: *Samples, name: []const u8) void {
+
+    fn print(self: *Samples, node: *const network.NetworkCore, name: []const u8) void {
         std.mem.sort(u64, &self.ns, {}, std.sort.asc(u64));
-        std.debug.print("case={s} turns={} wait_max_ms=0 p50_ns={} p95_ns={} p99_ns={} max_ns={} rx={} tx={} native_work={} immediate_deadlines={}\n", .{ name, turns, self.ns[turns / 2], self.ns[turns * 95 / 100], self.ns[turns * 99 / 100], self.ns[turns - 1], self.received, self.sent, self.work, self.immediate });
+        const visits = node.transport.engine.visits;
+        std.debug.print("case={s} turns={} wait_max_ms=0 p50_ns={} p95_ns={} p99_ns={} max_ns={} rx={} tx={} backlog_turns={} immediate_deadlines={} visits_timer={} visits_collect={} visits_flush={} uncapped_backlog_due={} uncapped_events_due={}\n", .{ name, turns, self.ns[turns / 2], self.ns[turns * 95 / 100], self.ns[turns * 99 / 100], self.ns[turns - 1], self.received, self.sent, self.backlog, self.immediate, visits.timer - self.visits_start.timer, visits.collect - self.visits_start.collect, visits.flush - self.visits_start.flush, self.uncapped_backlog, self.uncapped_events });
+        std.debug.print("case={s} due_now", .{name});
+        inline for (std.meta.fields(Source)) |field| {
+            std.debug.print(" {s}={}", .{ field.name, node.due_now_turns[field.value] - self.due_start[field.value] });
+        }
+        std.debug.print("\n", .{});
     }
 };
 
@@ -75,6 +102,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.len > 2) return error.InvalidProfile;
     const selected = if (args.len == 2) args[1] else return error.InvalidProfile;
     if (std.mem.eql(u8, selected, "idle_wait")) return idleWait(init);
+    if (std.mem.eql(u8, selected, "idle_transport")) return idleTransport(init);
     const profile: network.configuration.Profile = if (std.mem.eql(u8, selected, "small")) .small else if (std.mem.eql(u8, selected, "beacon_node")) .beacon_node else return error.InvalidProfile;
     std.debug.print("profile={s} preset={s} optimize={s} warmup_turns={} measured_turns={} payload=synthetic_transport_bytes host_consensus_validation=false\n", .{ selected, @tagName(preset.active_preset), @tagName(@import("builtin").mode), warmup_turns, turns });
     const plan = try network.chain.Plan.init(chain_config, false);
@@ -92,15 +120,16 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("gossip_metadata_bytes={}\n", .{a.service.gossipsub.memoryPlan().metadata_bytes});
     for (0..warmup_turns) |_| _ = try turn(a, io, .{});
     const idle_allocations = a.reservations.allocation_calls;
-    var samples: Samples = .{};
+    var samples: Samples = .begin(a);
     for (0..turns) |i| {
         const now = try network.transport.currentTime(io);
         const immediate = if (a.nextWakeup(now, .{})) |deadline| deadline <= now.mono_ms else false;
+        const due_before = a.due_now_turns;
         const start = timestamp(io);
         const result = try turn(a, io, .{});
-        try samples.record(i, timestamp(io) - start, result, immediate);
+        try samples.record(a, i, timestamp(io) - start, due_before, result, immediate);
     }
-    samples.print("idle");
+    samples.print(a, "idle");
     std.debug.print("case=idle turn_allocation_calls={}\n", .{a.reservations.allocation_calls - idle_allocations});
     printReconciliation(a, "idle");
     const b = try allocator.create(network.NetworkCore);
@@ -132,7 +161,6 @@ fn initialize(node: *network.NetworkCore, a: std.mem.Allocator, io: std.Io, key:
         .gossip = .{ .topic_policy = plan.topics[0..plan.boundary_count], .message_id_policy = .{ .phase0_digest = plan.phase0_digest } },
     });
     try node.init(a, io, &resolved, .{
-        .wait_mode = .native_poll,
         .host = key,
         .bind = .{ .ip4 = .loopback(0) },
         .local = update.local,
@@ -204,7 +232,7 @@ fn pressure(a: *network.NetworkCore, b: *network.NetworkCore, sinks: []u8, io: s
     status.head_slot = 42;
     try b.updateStatus(&status);
     _ = a.reStatusPeer(&b.peerId(), try network.transport.currentTime(io));
-    var samples: Samples = .{};
+    var samples: Samples = .begin(a);
     for (0..turns) |i| {
         if (i < 256) {
             std.mem.writeInt(u64, payload[0..8], i, .little);
@@ -220,11 +248,12 @@ fn pressure(a: *network.NetworkCore, b: *network.NetworkCore, sinks: []u8, io: s
         peak_validations = @max(peak_validations, receiver.pending_validations);
         const now = try network.transport.currentTime(io);
         const immediate = if (a.nextWakeup(now, .{})) |deadline| deadline <= now.mono_ms else false;
+        const due_before = a.due_now_turns;
         const start = timestamp(io);
         const result = try turn(a, io, .{});
-        try samples.record(i, timestamp(io) - start, result, immediate);
+        try samples.record(a, i, timestamp(io) - start, due_before, result, immediate);
     }
-    samples.print("connected_slow_application_control");
+    samples.print(a, "connected_slow_application_control");
     std.debug.print("gossip_attempted_bytes={} queued={} pressured={} peak_descriptors={} peak_pending_validations={}\n", .{ 256 * payload.len, gossip_queued, gossip_pressured, peak_descriptors, peak_validations });
     if (gossip_queued == 0 or gossip.count == 0 or peak_validations == 0) return error.GossipDidNotDeliver;
     var rows: [4]t.Snapshot = undefined;
@@ -308,7 +337,7 @@ fn idleWait(init: std.process.Init) !void {
     var count: u32 = 0;
     var positive_waits: u32 = 0;
     var immediate: u32 = 0;
-    var work: u64 = 0;
+    var backlog: u64 = 0;
     var elapsed_turns: u64 = 0;
     for (0..10000) |_| {
         const before = timestamp(io);
@@ -323,11 +352,110 @@ fn idleWait(init: std.process.Init) !void {
         if (result.failure) |err| return err;
         elapsed_turns += timestamp(io) - before;
         count += 1;
-        work += result.transport.work_processed;
+        backlog += @intFromBool(result.transport.backlog);
     }
     const elapsed = timestamp(io) - start;
     const readiness = node.counters;
     std.debug.print("readiness_calls={} nonzero_readiness_waits={} readiness_failures={}\n", .{ readiness.readiness_calls, readiness.readiness_nonzero_waits, readiness.readiness_failures });
     if (elapsed < 1_000_000_000) return error.TurnLimit;
-    std.debug.print("case=idle_wait profile=small requested_duration_ms=1000 host_wait_ms=100 elapsed_ns={} turns={} positive_wait_turns={} immediate_deadlines={} turn_elapsed_ns={} native_work={} turn_allocation_calls={}\n", .{ elapsed, count, positive_waits, immediate, elapsed_turns, work, node.reservations.allocation_calls - calls });
+    std.debug.print("case=idle_wait profile=small requested_duration_ms=1000 host_wait_ms=100 elapsed_ns={} turns={} positive_wait_turns={} immediate_deadlines={} turn_elapsed_ns={} backlog_turns={} turn_allocation_calls={}\n", .{ elapsed, count, positive_waits, immediate, elapsed_turns, backlog, node.reservations.allocation_calls - calls });
+}
+
+const idle_transport_spokes = 200;
+/// CI fails the case above this median turn.
+const idle_transport_p50_budget_ns = 15_000;
+
+/// A hub Transport holding established loopback connections from spoke Transports, measured over
+/// turns with no traffic. Each turn runs the transport phases of an owner turn: receive, expire,
+/// collect and flush. An idle connection must cost no visit.
+fn idleTransport(init: std.process.Init) !void {
+    const io = init.io;
+    const allocator = init.gpa;
+    const hub_key = try network.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{13}));
+    const hub = try allocator.create(network.Transport);
+    defer allocator.destroy(hub);
+    hub.* = .{};
+    try hub.init(allocator, io, .{ .host = &hub_key, .bind = .{ .ip4 = .loopback(0) }, .limits = .{
+        .connections_max = 256,
+        .handshaking_max = 256,
+        .handshaking_per_source_max = 256,
+    } });
+    defer hub.deinit(io);
+    const spokes = try allocator.alloc(network.Transport, idle_transport_spokes);
+    defer allocator.free(spokes);
+    var initialized: usize = 0;
+    defer for (spokes[0..initialized]) |*spoke| spoke.deinit(io);
+    for (spokes, 0..) |*spoke, index| {
+        var secret: [32]u8 = @splat(0);
+        std.mem.writeInt(u16, secret[30..32], @intCast(1_000 + index), .big);
+        const key = try network.KeyPair.fromSecretKey(&secret);
+        spoke.* = .{};
+        try spoke.init(allocator, io, .{ .host = &key, .bind = .{ .ip4 = .loopback(0) }, .limits = .{
+            .connections_max = 1,
+            .handshaking_max = 1,
+            .dialing_max = 1,
+            .receive_budget_bytes = 16 * 1024 * 1024,
+        } });
+        initialized += 1;
+    }
+    var events: [1024]network.Event = undefined;
+    var established: usize = 0;
+    var dialed: usize = 0;
+    for (0..20_000) |_| {
+        // A few handshakes at a time keep the hub's socket buffer from dropping Initials.
+        while (dialed < spokes.len and dialed - established < 16) : (dialed += 1) {
+            _ = try spokes[dialed].dialPeer(io, hub.localAddress(), hub.peerId());
+        }
+        for (spokes[0..dialed]) |*spoke| {
+            const stepped = spoke.step(io, &events, &.{}, .{ .wait_max_ms = 0 });
+            if (stepped.failure) |err| return err;
+        }
+        const stepped = hub.step(io, &events, &.{}, .{ .wait_max_ms = 1 });
+        if (stepped.failure) |err| return err;
+        for (events[0..stepped.progress.events]) |event| switch (event) {
+            .connected => established += 1,
+            .closed => return error.SpokeClosed,
+            else => {},
+        };
+        if (established == idle_transport_spokes) break;
+    }
+    if (established != idle_transport_spokes) return error.ConnectionDeadline;
+    // Settle until no side sends for several rounds.
+    var quiet: usize = 0;
+    for (0..2_000) |_| {
+        var sent: u64 = 0;
+        for (spokes) |*spoke| {
+            const stepped = spoke.step(io, &events, &.{}, .{ .wait_max_ms = 0 });
+            if (stepped.failure) |err| return err;
+            sent += stepped.progress.datagrams_sent;
+        }
+        const stepped = hub.step(io, &events, &.{}, .{ .wait_max_ms = 2 });
+        if (stepped.failure) |err| return err;
+        sent += stepped.progress.datagrams_sent;
+        quiet = if (sent == 0 and !stepped.progress.backlog) quiet + 1 else 0;
+        if (quiet == 8) break;
+    }
+    if (quiet < 8) return error.SettleDeadline;
+    const visits = hub.engine.visits;
+    const fired = hub.engine.counters.timeouts_fired;
+    var ns: [turns]u64 = undefined;
+    var received: u64 = 0;
+    var sent: u64 = 0;
+    for (&ns) |*elapsed| {
+        const start = timestamp(io);
+        var result: network.StepResult = .{ .now = try network.transport.currentTime(io) };
+        try hub.receive(io, &result);
+        hub.expire(result.now);
+        _ = hub.collect(result.now, &events);
+        hub.flush(io, result.now, &result);
+        elapsed.* = timestamp(io) - start;
+        received += result.datagrams_received;
+        sent += result.datagrams_sent;
+    }
+    std.mem.sort(u64, &ns, {}, std.sort.asc(u64));
+    const after = hub.engine.visits;
+    const visited = (after.timer - visits.timer) + (after.collect - visits.collect) + (after.flush - visits.flush);
+    std.debug.print("case=idle_transport connections={} turns={} p50_ns={} p95_ns={} p99_ns={} max_ns={} rx={} tx={} visits_timer={} visits_collect={} visits_flush={} timeouts_fired={} p50_budget_ns={}\n", .{ idle_transport_spokes, turns, ns[turns / 2], ns[turns * 95 / 100], ns[turns * 99 / 100], ns[turns - 1], received, sent, after.timer - visits.timer, after.collect - visits.collect, after.flush - visits.flush, hub.engine.counters.timeouts_fired - fired, idle_transport_p50_budget_ns });
+    if (visited != 0) return error.IdleConnectionVisited;
+    if (ns[turns / 2] > idle_transport_p50_budget_ns) return error.IdleTransportBudget;
 }

@@ -3,7 +3,6 @@ const builtin = @import("builtin");
 
 pub const supported = builtin.os.tag == .linux or builtin.os.tag == .macos;
 pub const native_wait_max_ms: u32 = 100;
-pub const Mode = enum { portable, native_poll };
 pub const Error = error{ UnsupportedWait, InvalidWakeSource, WaitFailed, WaitSourceClosed, Canceled };
 pub const Sources = struct { quic: [2]?i32, discovery: [2]?i32 = .{ null, null }, host: ?i32 = null };
 pub const Result = struct {

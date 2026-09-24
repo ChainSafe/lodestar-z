@@ -163,35 +163,36 @@ test "engine routes a replayed client Initial to the existing connection" {
     try std.testing.expectEqual(@as(usize, 1), pair.server.activeIndices().len);
 }
 
-test "engine activity marks the slots that received datagrams" {
+test "engine collects and flushes only the connections that received datagrams" {
     var pair: Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
     const handles = try connectPair(&pair);
-
-    var taken: [4]engine_mod.Handle = undefined;
-    var drains: usize = 0;
-    while (drains < 8 and pair.client.takeActivity(&taken) > 0) : (drains += 1) {}
-    try std.testing.expect(!pair.client.activityPending());
+    try pair.pump();
+    try std.testing.expect(!pair.client.backlog());
+    try std.testing.expectEqual(@as(usize, 0), pair.client.registry.collect.len);
 
     const stream = try pair.server.openStream(handles.server);
     _ = try pair.server.write(stream, "x", false);
-    const moved = try pair.transfer(&pair.server, &pair.client, server_address, false);
-    try std.testing.expect(moved);
+    try std.testing.expect(try pair.transfer(&pair.server, &pair.client, server_address, false));
+    const slot = &pair.client.registry.slots[handles.client.index];
+    try std.testing.expect(slot.collect_link.linked and slot.dirty_link.linked);
+    try std.testing.expectEqual(@as(usize, 1), pair.client.registry.collect.len);
+    pair.settle(&pair.client);
+    try std.testing.expectEqual(@as(usize, 0), pair.client.registry.collect.len);
 
-    try std.testing.expect(pair.client.activityPending());
-    try std.testing.expectEqual(@as(usize, 0), pair.client.takeActivity(taken[0..0]));
-    try std.testing.expectEqual(@as(usize, 1), pair.client.takeActivity(&taken));
+    var taken: [4]engine_mod.Handle = undefined;
+    try std.testing.expectEqual(@as(usize, 1), pair.activity(&pair.client, &taken));
     try std.testing.expectEqual(handles.client, taken[0]);
-    try std.testing.expectEqual(@as(usize, 0), pair.client.takeActivity(&taken));
-    try std.testing.expect(!pair.client.activityPending());
+    try std.testing.expectEqual(@as(usize, 0), pair.activity(&pair.client, &taken));
 }
 
-test "engine feeds an unrouted short header from a known peer to its slot" {
+test "engine junk short header from a live peer's address marks nothing" {
     var pair: Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
     const handles = try connectPair(&pair);
+    try pair.pump();
 
     var reset: [1 + limits.local_cid_length + 24]u8 = undefined;
     reset[0] = 0x40;
@@ -206,15 +207,12 @@ test "engine feeds an unrouted short header from a known peer to its slot" {
         pair.now,
         &response,
     );
-    switch (outcome) {
-        .accepted => |handle| try std.testing.expectEqual(handles.client, handle),
-        else => return error.TestUnexpectedResult,
-    }
-    try std.testing.expectEqual(before_unroutable, pair.client.counters.dropped_unroutable);
-    try std.testing.expectEqual(
-        before_touched + 1,
-        pair.client.counters.accepted + pair.client.counters.recv_errors,
-    );
+    try std.testing.expectEqual(engine_mod.ReceiveOutcome.dropped, outcome);
+    try std.testing.expectEqual(before_unroutable + 1, pair.client.counters.dropped_unroutable);
+    try std.testing.expectEqual(before_touched, pair.client.counters.accepted + pair.client.counters.recv_errors);
+    const slot = &pair.client.registry.slots[handles.client.index];
+    try std.testing.expect(!slot.collect_link.linked and !slot.dirty_link.linked);
+    try std.testing.expect(!pair.client.backlog());
 
     try std.testing.expect(pair.client.peerId(handles.client) != null);
     const live_before = pair.client.activeIndices().len;
@@ -228,7 +226,7 @@ test "engine feeds an unrouted short header from a known peer to its slot" {
             &response,
         ),
     );
-    try std.testing.expectEqual(before_unroutable + 1, pair.client.counters.dropped_unroutable);
+    try std.testing.expectEqual(before_unroutable + 2, pair.client.counters.dropped_unroutable);
     try std.testing.expectEqual(live_before, pair.client.activeIndices().len);
     try std.testing.expect(pair.client.peerId(handles.client) != null);
     var events: [8]engine_mod.Event = undefined;

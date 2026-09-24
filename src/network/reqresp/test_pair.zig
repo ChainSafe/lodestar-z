@@ -67,11 +67,11 @@ pub const Pair = struct {
 
     pub fn forwardActivity(self: *Pair) void {
         var activity: [128]engine_mod.Handle = undefined;
-        for (activity[0..self.shared.pair.client.takeActivity(&activity)]) |conn| {
+        for (activity[0..self.shared.pair.activity(&self.shared.pair.client, &activity)]) |conn| {
             self.shared.client.router.connectionActivity(conn);
             self.shared.client.reqresp.connectionActivity(conn);
         }
-        for (activity[0..self.shared.pair.server.takeActivity(&activity)]) |conn| {
+        for (activity[0..self.shared.pair.activity(&self.shared.pair.server, &activity)]) |conn| {
             self.shared.server.router.connectionActivity(conn);
             self.shared.server.reqresp.connectionActivity(conn);
         }

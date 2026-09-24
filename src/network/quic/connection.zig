@@ -1,5 +1,6 @@
 const std = @import("std");
 const binding = @import("binding.zig");
+const index_list = @import("../index_list.zig");
 const limits = @import("limits.zig");
 const peer_id = @import("../wire/peer_id.zig");
 const stream_table = @import("stream_table.zig");
@@ -58,6 +59,16 @@ pub const Slot = struct {
     answered: bool = false,
     close_event: enum { none, pending, reported } = .none,
     path_changed_pending: ?types.Address = null,
+    /// Largest watermark this peer's flow-control windows let a blocked stream reach.
+    write_lowat_ceiling: u32 = limits.write_lowat_max,
+    /// Accepted a datagram or had a timer fire; stream readiness is gathered this turn.
+    collect_link: index_list.Link = .{},
+    /// May have output for quiche_conn_send.
+    dirty_link: index_list.Link = .{},
+    /// Has undelivered lifecycle or stream events.
+    event_link: index_list.Link = .{},
+    /// Close event delivered; the slot is retired on the next turn.
+    release_link: index_list.Link = .{},
     table: StreamTable = .{},
 
     pub fn open(
@@ -68,6 +79,7 @@ pub const Slot = struct {
     ) Error!void {
         assert(self.state == .free);
         assert(self.conn == null);
+        assert(!self.collect_link.linked and !self.dirty_link.linked and !self.event_link.linked and !self.release_link.linked);
         assert(params.keylog.len == 0 or params.keylog.len == tls.keylog_capacity);
         self.handshake = .{ .now_unix = params.now.unix_s, .keylog = params.keylog };
         self.direction = params.direction;
@@ -85,6 +97,7 @@ pub const Slot = struct {
         self.answered = false;
         self.close_event = .none;
         self.path_changed_pending = null;
+        self.write_lowat_ceiling = limits.write_lowat_max;
         self.table = StreamTable.init(params.direction);
 
         const ssl = try ctx.newSsl(&self.handshake);
@@ -171,11 +184,35 @@ pub const Slot = struct {
         c.quiche_conn_on_timeout(self.conn.?);
     }
 
-    pub fn timeoutMs(self: *const Slot) ?u64 {
+    /// Time until quiche's next timer, or null when no timer is armed.
+    pub fn timeoutNs(self: *const Slot) ?u64 {
         assert(self.conn != null);
         assert(self.state != .free);
-        const value = c.quiche_conn_timeout_as_millis(self.conn.?);
+        const value = c.quiche_conn_timeout_as_nanos(self.conn.?);
         return if (value == std.math.maxInt(u64)) null else value;
+    }
+
+    /// QUIC packets quiche has processed on this connection.
+    pub fn receivedPackets(self: *const Slot) usize {
+        assert(self.conn != null);
+        var stats: c.quiche_stats = undefined;
+        c.quiche_conn_stats(self.conn.?, &stats);
+        return stats.recv;
+    }
+
+    /// quiche grants a blocked stream at least half of the peer's window once the peer reads, so a
+    /// watermark above that could never be reached.
+    pub fn learnPeerWindows(self: *Slot) void {
+        assert(self.conn != null);
+        var params: c.quiche_transport_params = undefined;
+        if (!c.quiche_conn_peer_transport_params(self.conn.?, &params)) return;
+        const window = @min(params.peer_initial_max_data, params.peer_initial_max_stream_data_bidi_local, params.peer_initial_max_stream_data_bidi_remote);
+        self.write_lowat_ceiling = @intCast(@max(1, @min(limits.write_lowat_max, window / 2)));
+    }
+
+    pub fn hasEvents(self: *const Slot) bool {
+        return self.connected_pending or self.path_changed_pending != null or self.table.hasPending() or
+            self.close_event == .pending;
     }
 
     pub fn keepAlive(self: *Slot) bool {
@@ -237,22 +274,6 @@ pub const Slot = struct {
         return .{ .id = id, .index = index };
     }
 
-    pub fn discoverPeerStreams(self: *Slot) void {
-        const iter = c.quiche_conn_readable(self.conn.?) orelse return;
-        defer c.quiche_stream_iter_free(iter);
-        var id: u64 = 0;
-        var seen: u16 = 0;
-        while (seen < limits.streams_per_connection) : (seen += 1) {
-            if (!c.quiche_stream_iter_next(iter, &id)) break;
-            if (!StreamTable.isPeerInitiated(self.direction, id)) continue;
-            if (self.table.find(id) != null) continue;
-            if (self.table.claimPeer(id) == null) {
-                self.shutdownRaw(id, .read, types.app_error_stream_table_full);
-                self.shutdownRaw(id, .write, types.app_error_stream_table_full);
-            }
-        }
-    }
-
     pub fn read(self: *Slot, index: u8, id: u64, buf: []u8) Error!types.Read {
         assert(self.conn != null);
         assert(self.table.matches(index, id));
@@ -277,6 +298,13 @@ pub const Slot = struct {
     pub fn write(self: *Slot, index: u8, id: u64, bytes: []const u8, fin: bool) Error!usize {
         assert(self.conn != null);
         assert(self.table.matches(index, id));
+        const entry = &self.table.entries[index];
+        if (entry.stopped) {
+            // quiche may already have freed the stream; report the stop it delivered.
+            self.table.markFinSent(index);
+            if (entry.fin_received) self.finishStream(index, entry.reset_code);
+            return error.StreamStopped;
+        }
         var code: u64 = 0;
         const rc = c.quiche_conn_stream_send(self.conn.?, id, bytes.ptr, bytes.len, fin, &code);
         if (rc == c.QUICHE_ERR_STREAM_STOPPED) {
@@ -303,6 +331,7 @@ pub const Slot = struct {
     pub fn capacity(self: *Slot, index: u8, id: u64) Error!usize {
         assert(self.conn != null);
         assert(self.table.matches(index, id));
+        if (self.table.entries[index].stopped) return error.StreamStopped;
         const rc = c.quiche_conn_stream_capacity(self.conn.?, id);
         const available = binding.check(rc) catch |err| switch (err) {
             error.InvalidStreamState => {
@@ -312,6 +341,15 @@ pub const Slot = struct {
             else => return err,
         };
         return available orelse error.WouldBlock;
+    }
+
+    /// The peer's STOP_SENDING code when it stopped the stream. quiche frees a stopped stream
+    /// once its reset is acknowledged, so the code is read while the stream still exists.
+    pub fn stopCode(self: *Slot, id: u64) ?u64 {
+        assert(self.conn != null);
+        var code: u64 = 0;
+        const rc = c.quiche_conn_stream_send(self.conn.?, id, "", 0, false, &code);
+        return if (rc == c.QUICHE_ERR_STREAM_STOPPED) code else null;
     }
 
     pub fn shutdown(
@@ -353,7 +391,7 @@ pub const Slot = struct {
         }
     }
 
-    fn shutdownRaw(self: *Slot, id: u64, direction: types.ShutdownDirection, code: u64) void {
+    pub fn shutdownRaw(self: *Slot, id: u64, direction: types.ShutdownDirection, code: u64) void {
         const which: c_int = if (direction == .read)
             c.QUICHE_SHUTDOWN_READ
         else
@@ -363,5 +401,5 @@ pub const Slot = struct {
 };
 
 comptime {
-    assert(@sizeOf(Slot) <= 4 * 1_024);
+    assert(@sizeOf(Slot) <= 5 * 1_024);
 }

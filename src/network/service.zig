@@ -107,11 +107,11 @@ pub const Service = struct {
         wakeups.note(.negotiation, self.router.nextWakeup(now, routing.outcomes_per_pump));
     }
 
-    /// Forward transport activity separately from lifecycle events.
-    /// The activity batch must not exceed the Engine connection capacity.
-    /// Handles retain full transport generations, including connections without a gossip owner.
-    pub fn process(self: *Service, engine: *engine_mod.Engine, events: []const engine_mod.Event, activity: []const engine_mod.Handle, now: types.Now, outputs: Outputs) OutputCounts {
-        self.prepare(engine, events, activity, now);
+    /// Delivers one turn of engine events. Each connection with stream events counts as activity
+    /// for the owners that still scan by connection; handles retain full transport generations,
+    /// including connections without a gossip owner.
+    pub fn process(self: *Service, engine: *engine_mod.Engine, events: []const engine_mod.Event, now: types.Now, outputs: Outputs) OutputCounts {
+        self.prepare(engine, events, now);
         const counts = self.reqresp.pump(engine, &self.router, now, .{ .application = outputs.application, .control = outputs.control });
         if (self.applications == .active) self.gossipsub.pump(&self.router, engine, now);
         return .{ .application = counts.application, .control = counts.control, .identify = self.identify.pump(&self.router, engine, now, outputs.identify) };
@@ -138,16 +138,19 @@ pub const Service = struct {
         self: *Service,
         engine: *engine_mod.Engine,
         events: []const engine_mod.Event,
-        activity: []const engine_mod.Handle,
         now: types.Now,
     ) void {
-        std.debug.assert(activity.len <= engine.limits.connections_max);
         if (self.applications == .quiescing) {
             self.reqresp.cancelApplications(engine, &self.router);
             self.gossipsub.shutdown(&self.router, engine);
             self.applications = .closed;
         }
-        for (activity) |conn| {
+        // A connection's events are contiguous in one engine batch, so this visits each once.
+        var previous: ?engine_mod.Handle = null;
+        for (events) |event| {
+            const conn = engine_mod.activityOf(event) orelse continue;
+            if (previous != null and std.meta.eql(previous.?, conn)) continue;
+            previous = conn;
             self.router.connectionActivity(conn);
             self.identify.connectionActivity(conn);
             self.reqresp.connectionActivity(conn);

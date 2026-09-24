@@ -127,13 +127,13 @@ test "service control wakeup includes negotiation after application quiescence" 
     const bytes = [_]u8{0} ** 8;
     var sink: [8]u8 = undefined;
     const handle = try setup.shared.client.request(&setup.shared.pair.client, setup.shared.handles.client, .ping_v1, &bytes, &sink, .{ .absolute_timeouts = .{ .response_ms = 60_000 } }, setup.shared.pair.now);
-    _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, &.{}, setup.shared.pair.now, .{ .control = &.{} }).control;
+    _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{ .control = &.{} }).control;
     try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms + 5_000), setup.shared.client.nextWakeup(setup.shared.pair.now, .{ .control = 0 }));
     try std.testing.expect(setup.shared.client.reqresp.cancel(handle));
-    _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, &.{}, setup.shared.pair.now, .{ .control = &.{} }).control;
+    _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{ .control = &.{} }).control;
     try std.testing.expectEqual(@as(?u64, null), setup.shared.client.nextWakeup(setup.shared.pair.now, .{ .control = 0 }));
     var events: [1]Event = undefined;
-    try std.testing.expectEqual(@as(usize, 1), setup.shared.client.process(&setup.shared.pair.client, &.{}, &.{}, setup.shared.pair.now, .{ .control = &events }).control);
+    try std.testing.expectEqual(@as(usize, 1), setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{ .control = &events }).control);
     try std.testing.expect(events[0].failed.reason == .cancelled);
 }
 
@@ -155,22 +155,23 @@ test "service preserves drained native activity across a partial request sweep" 
     try std.testing.expect(incoming != null);
     const stream = setup.shared.server.reqresp.inbound[incoming.?.index].request.stream;
     setup.shared.client.reqresp.options.work_per_pump_max = 1;
-    _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, &.{}, setup.shared.pair.now, .{ .control = &.{} }).control;
+    _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{ .control = &.{} }).control;
     const codec = @import("codec.zig");
     var wire: [codec.frame_scratch_max]u8 = undefined;
     const encoded = try codec.encodeChunk(0, null, &bytes, &wire);
     try std.testing.expectEqual(encoded.len, try setup.shared.pair.server.write(stream, encoded, false));
     try setup.shared.pair.pump();
     var activity: [128]engine_mod.Handle = undefined;
-    const active = setup.shared.pair.client.takeActivity(&activity);
+    const active = setup.shared.pair.activity(&setup.shared.pair.client, &activity);
     try std.testing.expect(active > 0);
     var events: [1]Event = undefined;
-    const first_count = setup.shared.client.process(&setup.shared.pair.client, &.{}, activity[0..active], setup.shared.pair.now, .{ .control = &events }).control;
+    var transport: [16]engine_mod.Event = undefined;
+    const first_count = setup.shared.client.process(&setup.shared.pair.client, setup.shared.pair.events(&setup.shared.pair.client, &transport), setup.shared.pair.now, .{ .control = &events }).control;
     var received = first_count == 1;
     for (0..10) |_| {
         if (received) break;
         try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), setup.shared.client.nextWakeup(setup.shared.pair.now, .{ .control = 1 }));
-        const count = setup.shared.client.process(&setup.shared.pair.client, &.{}, &.{}, setup.shared.pair.now, .{ .control = &events }).control;
+        const count = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{ .control = &events }).control;
         if (count == 1) {
             try std.testing.expectEqualSlices(u8, &bytes, events[0].chunk.bytes);
             received = true;

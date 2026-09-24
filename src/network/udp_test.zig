@@ -95,10 +95,12 @@ test "UDP metrics count successful batch prefixes when a later send fails" {
     const destination = socket.localAddress();
     var first = "first".*;
     var unsent = "unsent".*;
-    try std.testing.expectError(error.NetworkUnreachable, socket.sendMany(io, &.{
+    const outcome = socket.sendMany(io, &.{
         .{ .to = destination, .bytes = &first },
         .{ .to = destination, .bytes = &unsent },
-    }));
+    });
+    try std.testing.expectEqual(@as(usize, 1), outcome.sent);
+    try std.testing.expectEqual(error.NetworkUnreachable, outcome.failure.?);
     try std.testing.expectEqual(@as(u64, 1), socket.counters.sent_datagrams);
     try std.testing.expectEqual(@as(u64, 5), socket.counters.sent_bytes);
 }
@@ -115,7 +117,9 @@ test "dual-stack UDP services both families fairly" {
         .{ .to = local[1].?, .bytes = payload[1..2] },
         .{ .to = local[0].?, .bytes = payload[2..3] },
     };
-    try target.sendMany(std.testing.io, &batch);
+    const outcome = target.sendMany(std.testing.io, &batch);
+    try std.testing.expectEqual(batch.len, outcome.sent);
+    try std.testing.expect(outcome.failure == null);
     for ([_]u8{ 1, 2, 3 }, 0..) |expected, i| {
         const message = try target.receiveTimeout(std.testing.io, &buffer, oneSecond());
         try std.testing.expectEqualSlices(u8, &.{expected}, message.bytes);

@@ -402,7 +402,7 @@ fn dial(
             },
             else => {},
         };
-        const count = svc.process(&node.engine, events[0..result.events], activity[0..result.activity], result.now, .{ .application = &rr_events, .control = &control_events });
+        const count = svc.process(&node.engine, events[0..result.events], result.now, .{ .application = &rr_events, .control = &control_events });
         for (rr_events[0..count.application]) |event| try session.handle(event);
         for (control_events[0..count.control]) |event| try session.handle(event);
         if (stepped.failure) |err| return err;
