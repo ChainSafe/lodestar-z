@@ -282,6 +282,61 @@ test "service reqresp slot is serviced only after a stream event or its deadline
     try std.testing.expect(server.visits > waiting);
 }
 
+test "service reqresp deadline fires on time while more slots than the pump budget stay ready" {
+    // One client identity opens every stream, so its request starts need a larger burst.
+    var admission = try reqresp.AdmissionOptions.defaults(&@import("policy_fixture.zig").config(), 128, 128, 8);
+    admission.limits.starts.tokens = 64;
+    var setup: Pair = .{};
+    try setup.init(.{}, .{ .progress_timeout_ms = 1_000, .admission = admission });
+    defer setup.deinit();
+    const server = &setup.shared.server.reqresp;
+    // An accepted ping stream whose request never arrives.
+    const stream = try setup.openRaw(.ping_v1);
+    try setup.awaitRawSelection(stream, .ping_v1);
+    var waiting: ?u16 = null;
+    for (server.inbound, 0..) |*slot, index| if (slot.request.running()) {
+        try std.testing.expect(waiting == null);
+        waiting = @intCast(index);
+    };
+    const deadline = server.inbound[waiting.?].request.started_ms + 1_000;
+
+    // Busy slots on other connections, accepted later so their deadlines fall after it.
+    setup.shared.pair.advance(500);
+    var connections: [9]engine_mod.Handle = undefined;
+    var dialed: usize = 0;
+    // The server admits a bounded number of handshakes per source address.
+    while (dialed < connections.len) {
+        const batch = @min(4, connections.len - dialed);
+        for (connections[dialed..][0..batch]) |*conn| conn.* = try setup.shared.pair.dial();
+        dialed += batch;
+        for (0..2) |_| try setup.pumpOnce();
+    }
+    for (connections) |conn| for ([_]Protocol{ .ping_v1, .ping_v1, .status_v1, .status_v1 }) |which| {
+        const opened = try setup.openRawOn(conn, which);
+        try setup.awaitRawSelection(opened, which);
+    };
+    var busy: [4 * connections.len]u16 = undefined;
+    var count: usize = 0;
+    for (server.inbound, 0..) |*slot, index| if (slot.request.running() and index != waiting.?) {
+        busy[count] = @intCast(index);
+        count += 1;
+    };
+    try std.testing.expectEqual(busy.len, count);
+
+    setup.shared.pair.advance(500);
+    try std.testing.expectEqual(deadline, setup.shared.pair.now.mono_ms);
+    for (busy) |index| server.markReady(.inbound, index);
+    try std.testing.expect(server.ready.len > server.options.work_per_pump_max);
+    try setup.pumpOnce();
+    var timed_out = false;
+    for (setup.serverEvents()) |event| if (event == .failed) {
+        try std.testing.expectEqual(waiting.?, event.failed.request.index);
+        try std.testing.expectEqual(reqresp.Failure.timeout, event.failed.reason);
+        timed_out = true;
+    };
+    try std.testing.expect(timed_out);
+}
+
 test "service reqresp slots stay indexed by connection across a reconnect at the same index" {
     var setup: Pair = .{};
     try setup.init(.{}, .{});

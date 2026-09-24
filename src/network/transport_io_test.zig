@@ -529,6 +529,56 @@ test "transport restarts a completed quiet scan after host writes and reads" {
     try quietConnectedNodes(&client, &server);
 }
 
+test "transport keys quiche's timer from a clock read after the flush so it never pops early" {
+    const io = std.testing.io;
+    var client: Node = .{};
+    try client.init(71);
+    defer client.deinit();
+    var server: Node = .{};
+    try server.init(72);
+    defer server.deinit();
+    const handle = try client.transport.dialPeer(io, server.transport.localAddress(), server.transport.peerId());
+    var client_events: [8]engine_mod.Event = undefined;
+    var server_events: [8]engine_mod.Event = undefined;
+    var connected = false;
+    for (0..100) |_| {
+        const counts = try stepBoth(&client, &server, &client_events, &server_events);
+        for (client_events[0..counts.a]) |event| {
+            if (event == .connected) connected = true;
+        }
+        if (connected) break;
+    }
+    try std.testing.expect(connected);
+    try quietConnectedNodes(&client, &server);
+    const transport = &client.transport;
+    // A slow turn: the host writes, then the turn runs 20 ms before its flush. The server never
+    // answers, so the connection's earliest timer is quiche's loss probe.
+    const stream = try transport.engine.openStream(handle);
+    const tick = try transport_mod.currentTime(io);
+    try std.testing.expectEqual(@as(usize, 4), try transport.engine.write(stream, "slow", false));
+    try std.Io.sleep(io, .fromMilliseconds(20), .awake);
+    var result: transport_mod.StepResult = .{ .now = tick };
+    transport.flush(io, tick, &result);
+    try std.testing.expect(result.datagrams_sent > 0);
+    // Each turn waits for the timer key as the owner loop does, and each popped key finds
+    // quiche's timer expired.
+    const pops = transport.engine.visits.timer;
+    const fired = transport.engine.counters.timeouts_fired;
+    for (0..2) |_| {
+        const now = try transport_mod.currentTime(io);
+        const deadline_ms = (transport.nextDeadlineNs().? + std.time.ns_per_ms - 1) / std.time.ns_per_ms;
+        try std.testing.expect(deadline_ms > now.mono_ms);
+        try std.Io.sleep(io, .fromMilliseconds(@intCast(deadline_ms - now.mono_ms)), .awake);
+        const turn = try transport_mod.currentTime(io);
+        transport.expire(turn);
+        transport.engine.collect(turn);
+        var flushed: transport_mod.StepResult = .{ .now = turn };
+        transport.flush(io, turn, &flushed);
+    }
+    try std.testing.expectEqual(pops + 2, transport.engine.visits.timer);
+    try std.testing.expectEqual(fired + 2, transport.engine.counters.timeouts_fired);
+}
+
 test "transport progress failure retains real send receive work and exactly one lifecycle batch" {
     var node: Node = .{};
     try node.init(36);

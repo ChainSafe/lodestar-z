@@ -80,7 +80,11 @@ pub const Pair = struct {
     }
 
     pub fn openRaw(self: *Pair, which: protocol.Protocol) !engine_mod.StreamHandle {
-        const stream = try self.shared.pair.client.openStream(self.shared.handles.client);
+        return self.openRawOn(self.shared.handles.client, which);
+    }
+
+    pub fn openRawOn(self: *Pair, conn: engine_mod.Handle, which: protocol.Protocol) !engine_mod.StreamHandle {
+        const stream = try self.shared.pair.client.openStream(conn);
         var dialer = try multistream.Dialer.init(which.id());
         var bytes: [2 * multistream.message_length_max]u8 = undefined;
         const proposal = try dialer.initialWrite(&bytes);
