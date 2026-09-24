@@ -203,7 +203,7 @@ pub const Transport = struct {
         var turn = schedule.Turn.init(self.work_limits.send_per_step_max);
         const drained = self.burst(io, handle.index, handle, now, &turn, &result);
         const failure = self.submit(io, &result);
-        self.engine.sent(handle.index, now, drained);
+        self.engine.sent(handle.index, keyClock(io, now), drained);
         if (failure) |err| {
             _ = self.engine.abandon(handle);
             return mapSendError(err);
@@ -266,21 +266,34 @@ pub const Transport = struct {
     pub fn flush(self: *Transport, io: std.Io, now: engine_mod.Now, result: *StepResult) void {
         assert(self.batch_len == 0);
         var turn = schedule.Turn.init(self.work_limits.send_per_step_max);
+        // The latest clock read that keyed a timer.
+        var keyed = now;
         // Each visit either drains its connection or sends at least one datagram.
         const visits_max = self.engine.dirtyCount() + turn.send_max;
         for (0..visits_max) |_| {
             if (!turn.canSend()) break;
             const index = self.engine.nextDirty() orelse break;
             const owner = self.engine.sendOwner(index) orelse {
-                self.engine.sent(index, now, true);
+                self.engine.sent(index, keyed, true);
                 continue;
             };
             const drained = self.burst(io, index, owner, now, &turn, result);
-            self.engine.sent(index, now, drained);
+            keyed = keyClock(io, keyed);
+            self.engine.sent(index, keyed, drained);
         }
         _ = self.submit(io, result);
         result.backlog = self.engine.backlog();
-        self.engine.finishFlush(now);
+        self.engine.finishFlush(keyed);
+    }
+
+    /// quiche reports the time left on its timer from its own clock read, so a timer key built on
+    /// a clock read earlier in the turn lands early by the time the turn has run since. A clock
+    /// supplied without nanoseconds is not the one quiche reads and is kept.
+    fn keyClock(io: std.Io, after: engine_mod.Now) engine_mod.Now {
+        const previous = after.mono_ns orelse return after;
+        const read = std.math.cast(u64, std.Io.Clock.awake.now(io).nanoseconds) orelse return after;
+        if (read <= previous) return after;
+        return .{ .mono_ms = read / std.time.ns_per_ms, .mono_ns = read, .unix_s = after.unix_s };
     }
 
     /// Sends up to burst_per_connection datagrams of one connection into the shared batch.

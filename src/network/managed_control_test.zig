@@ -1672,3 +1672,30 @@ test "managed control starts a due ping or Status on the turn its deadline passe
         try std.testing.expectEqual(visits + 1, setup.client.control.visits);
     }
 }
+
+test "managed control retries a start refused for want of a request slot after the local retry delay" {
+    var opts = @import("managed_test_support.zig").options();
+    opts.peers.max_peers = 2;
+    opts.peers.target_peers = 1;
+    opts.peers.min_outbound = 0;
+    opts.service.reqresp.outbound_control_reserved = 2;
+    var setup: Setup = .{};
+    try setup.initOwnersWithOptions(&.{}, opts);
+    defer setup.deinit();
+    _ = try setup.pair.dial();
+    for (0..80) |_| try setup.step(0);
+    const peer = setup.client.catalog.find(&setup.pair.server_ctx.local_peer_id).?;
+    const row = &setup.client.control.schedules[peer.index];
+    try std.testing.expectEqual(row.ping_due_ms, setup.client.control.nextWakeup(&setup.client.catalog, setup.pair.now).?);
+    // Requests the control does not own hold both control slots.
+    var sinks: [2][wire.status_size_max]u8 = undefined;
+    const ping = [_]u8{0} ** 8;
+    _ = try setup.client_service.request(&setup.pair.client, row.conn, .ping_v1, &ping, &sinks[0], .{}, setup.pair.now);
+    _ = try setup.client_service.request(&setup.pair.client, row.conn, wire.metadataProtocol(setup.client.local.fork), &.{}, &sinks[1], .{}, setup.pair.now);
+    setup.pair.now.mono_ms = row.ping_due_ms;
+    const deferred = setup.client.control.counters.deferred;
+    setup.client.control.maintain(&setup.client_service, &setup.client.catalog, &setup.pair.client, &setup.client.local, setup.pair.now);
+    try std.testing.expectEqual(deferred + 1, setup.client.control.counters.deferred);
+    try std.testing.expectEqual(setup.pair.now.mono_ms + opts.control.local_retry_ms, row.retry_ms);
+    try std.testing.expectEqual(row.retry_ms, setup.client.control.nextWakeup(&setup.client.catalog, setup.pair.now).?);
+}

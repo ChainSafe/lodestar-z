@@ -937,37 +937,40 @@ pub const ReqResp = struct {
     }
 
     pub fn pump(self: *ReqResp, engine: *Engine, router: *routing.Router, now: Now, outputs: Outputs) OutputCounts {
-        self.advance(engine, router, now);
+        const exhausted = self.advance(engine, router, now);
         const counts: OutputCounts = .{
             .application = self.drain(now, outputs.application, false),
             .control = self.drain(now, outputs.control, true),
         };
-        if (@import("builtin").is_test) self.checkInvariants(engine);
+        if (@import("builtin").is_test) self.checkInvariants(engine, now, exhausted);
         return counts;
     }
 
-    /// Closes, recycles, then services the ready slots and the due keys up to
-    /// `work_per_pump_max`, then admits `.ready` slots. A slot re-marked while serviced waits
-    /// for the next pump, behind the slots marked before it.
-    fn advance(self: *ReqResp, engine: *Engine, router: *routing.Router, now: Now) void {
+    /// Closes, recycles, then services the due keys and the ready slots up to
+    /// `work_per_pump_max`, then admits `.ready` slots. Returns whether the budget ran out.
+    /// A due key goes first, so runnable slots cannot hold a deadline past its time; servicing
+    /// one retires its slot or moves its key into the future. A slot re-marked while serviced
+    /// waits for the next pump, behind the slots marked before it.
+    fn advance(self: *ReqResp, engine: *Engine, router: *routing.Router, now: Now) bool {
         assert(now.mono_ms >= self.last_now_ms or self.last_now_ms == 0);
         self.last_now_ms = now.mono_ms;
         self.cleanupPending(engine, router);
         self.recycleDelivered();
-        const marked = self.ready.len;
+        // The slots marked before this pump that are still on `ready`.
+        var marked = self.ready.len;
         const keyed: usize = self.deadlines.len;
-        var taken: usize = 0;
         var serviced: usize = 0;
         // A due key comes back at most once more, when its token wait ended before its deadline.
         for (0..marked + 2 * keyed + 1) |_| {
             if (serviced == self.options.work_per_pump_max) break;
-            const keyed_due = taken == marked;
-            const id: u32 = if (!keyed_due) marked: {
-                taken += 1;
-                break :marked self.ready.pop(self.links, "ready").?;
-            } else self.deadlines.popDue(now.mono_ms) orelse break;
+            const due = self.deadlines.popDue(now.mono_ms);
+            const id: u32 = due orelse ready: {
+                if (marked == 0) break;
+                marked -= 1;
+                break :ready self.ready.pop(self.links, "ready").?;
+            };
             self.visits +|= 1;
-            if (keyed_due and id >= self.outbound.len) {
+            if (due != null and id >= self.outbound.len) {
                 const slot = &self.inbound[id - self.outbound.len];
                 if (slot.request.running() and slot.state == .ready and now.mono_ms < slot.deadline(self).?) {
                     // Only its token wait ended.
@@ -977,16 +980,24 @@ pub const ReqResp = struct {
                     continue;
                 }
             }
-            if (self.links[id].ready.linked) self.ready.remove(self.links, "ready", id);
+            if (self.links[id].ready.linked) {
+                // A serviced slot's key lies in the future, so a due slot was not serviced
+                // earlier in this pump and is on `ready` from a mark made before it.
+                assert(marked > 0);
+                marked -= 1;
+                self.ready.remove(self.links, "ready", id);
+            }
             if (id < self.outbound.len) {
                 self.outbound[id].advance(self, engine, @intCast(id), now);
             } else self.inbound[id - self.outbound.len].advance(self, engine, @intCast(id - self.outbound.len), now);
             serviced += 1;
             self.settle(id);
         }
+        const exhausted = serviced == self.options.work_per_pump_max;
         self.promoteReady(now);
         // Cleanup also covers terminal transitions made during this turn.
         self.cleanupPending(engine, router);
+        return exhausted;
     }
 
     /// One admission attempt per connection per class, control first. A connection that was
@@ -1094,9 +1105,10 @@ pub const ReqResp = struct {
     }
 
     /// Test builds check, after every pump, that the lists, the heap and the admission masks
-    /// match the slot states, that no slot with stream work is off `ready`, and that each live
-    /// stream a slot holds routes to it and back.
-    fn checkInvariants(self: *const ReqResp, engine: *const Engine) void {
+    /// match the slot states, that no slot with stream work is off `ready`, that a pump with
+    /// budget to spare left no due key, and that each live stream a slot holds routes to it and
+    /// back.
+    fn checkInvariants(self: *const ReqResp, engine: *const Engine, now: Now, exhausted: bool) void {
         var lengths: struct { ready: usize = 0, closing: usize = 0, events: [4]usize = @splat(0) } = .{};
         for (self.links, 0..) |*links, position| {
             const id: u32 = @intCast(position);
@@ -1112,6 +1124,13 @@ pub const ReqResp = struct {
             } else if (!links.ready.linked) assert(self.deadlines.get(id).? == self.deadlineOf(id).?);
             const direction: types.Direction = if (id < self.outbound.len) .outbound else .inbound;
             const index: u16 = @intCast(if (direction == .outbound) id else id - self.outbound.len);
+            // Admission, which runs after servicing, alone keys a slot due now: a token wait
+            // that ends within this millisecond.
+            if (!exhausted) if (self.deadlines.get(id)) |key| if (key <= now.mono_ms) {
+                assert(direction == .inbound);
+                const slot = &self.inbound[index];
+                assert(slot.state == .ready and slot.admission_wait == .tokens and slot.eligible_ms == now.mono_ms);
+            };
             if (direction == .inbound) {
                 const slot = &self.inbound[index];
                 const bit = @as(u64, 1) << @intCast(index % receive_plan.slots_per_peer);

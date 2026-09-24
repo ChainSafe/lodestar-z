@@ -445,8 +445,7 @@ pub const Control = struct {
                         self.counters.events.observeGoodbye(goodbyeReason(row.closing.?.reason), true, current.connected_at_ms, now.mono_ms);
                     }
                 },
-                .retiring => self.counters.deferred +|= 1,
-                .deferred => {
+                .retiring, .deferred => {
                     self.counters.deferred +|= 1;
                     row.retry_ms = now.mono_ms +| self.options.local_retry_ms;
                 },

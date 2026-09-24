@@ -937,7 +937,8 @@ pub const Engine = struct {
     }
 
     /// Ends one burst of sendOne calls: refreshes the timer key, then removes a drained
-    /// connection from dirty or moves an undrained one to its tail.
+    /// connection from dirty or moves an undrained one to its tail. The key adds quiche's
+    /// remaining time to `now`, so a live clock is read after the burst.
     pub fn sent(self: *Engine, index: u16, now: Now, drained: bool) void {
         assert(index < self.registry.slots.len);
         self.visits.flush +|= 1;
