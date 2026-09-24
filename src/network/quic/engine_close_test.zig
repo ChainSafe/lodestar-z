@@ -118,7 +118,7 @@ test "engine closes on peer id mismatch" {
     try std.testing.expectEqual(@as(u16, 0), pair.client.registry.handshaking);
 }
 
-test "engine closes on handshake timeout when the server never answers" {
+test "engine closes a dial the server never answers no later than the handshake timeout" {
     var pair: Pair = .{};
     try pair.init(.{ .handshake_timeout_ms = 100 }, .{});
     defer pair.deinit();
@@ -133,13 +133,12 @@ test "engine closes on handshake timeout when the server never answers" {
     const client_events = pair.events(&pair.client, &storage);
     try std.testing.expectEqual(@as(usize, 1), client_events.len);
     try std.testing.expectEqual(
-        engine_mod.CloseReason.handshake_timeout,
+        engine_mod.CloseReason.dial_unanswered,
         try expectClosed(client_events[0], handle, .outbound, null),
     );
-    try std.testing.expectEqual(@as(u64, 1), pair.client.connection_metrics.closed[1][@intFromEnum(engine_mod.CloseReason.handshake_timeout)]);
+    try std.testing.expectEqual(@as(u64, 1), pair.client.connection_metrics.closed[1][@intFromEnum(engine_mod.CloseReason.dial_unanswered)]);
     try std.testing.expectEqual(@as(u64, 0), pair.client.connection_metrics.established[1]);
     try std.testing.expectEqual(@as(usize, 0), pair.events(&pair.client, &storage).len);
-    try std.testing.expectEqual(@as(u64, 1), pair.client.connection_metrics.closed[1][@intFromEnum(engine_mod.CloseReason.handshake_timeout)]);
     try std.testing.expectEqual(@as(u16, 0), pair.client.registry.handshaking);
 }
 
@@ -334,4 +333,53 @@ test "engine abandon frees a dialing slot without an event" {
     try std.testing.expectEqual(@as(usize, 0), pair.client.pollEvents(&storage));
     try std.testing.expect(!pair.client.eventsPending());
     try std.testing.expectError(error.StaleHandle, pair.client.openStream(handle));
+}
+
+test "engine abandons an unanswered dial at the unanswered timeout" {
+    var pair: Pair = .{};
+    try pair.init(.{ .unanswered_dial_timeout_ms = 100, .handshake_timeout_ms = 1_000 }, .{});
+    defer pair.deinit();
+    pair.drop_to_server = true;
+
+    const handle = try pair.dial();
+    try pair.pump();
+    try std.testing.expect(!pair.client.dialAnswered(handle));
+    try std.testing.expect(pair.client.nextTimeoutMs(pair.now).? <= 100);
+    pair.advance(99);
+    try pair.pump();
+    var storage: [8]Event = undefined;
+    try std.testing.expectEqual(@as(usize, 0), pair.events(&pair.client, &storage).len);
+    pair.advance(1);
+    try pair.pump();
+    const client_events = pair.events(&pair.client, &storage);
+    try std.testing.expectEqual(@as(usize, 1), client_events.len);
+    try std.testing.expectEqual(
+        engine_mod.CloseReason.dial_unanswered,
+        try expectClosed(client_events[0], handle, .outbound, null),
+    );
+    try std.testing.expectEqual(@as(u64, 1), pair.client.connection_metrics.closed[1][@intFromEnum(engine_mod.CloseReason.dial_unanswered)]);
+    try std.testing.expectEqual(@as(u16, 0), pair.client.registry.dialing);
+}
+
+test "engine keeps an answered dial until the handshake timeout" {
+    var pair: Pair = .{};
+    try pair.init(.{ .unanswered_dial_timeout_ms = 100, .handshake_timeout_ms = 1_000 }, .{});
+    defer pair.deinit();
+
+    const handle = try pair.dial();
+    try std.testing.expect(try pair.transfer(&pair.client, &pair.server, client_address, false));
+    try std.testing.expect(pair.client.dialAnswered(handle));
+    pair.drop_to_server = true;
+    pair.advance(100);
+    try pair.pump();
+    var storage: [8]Event = undefined;
+    try std.testing.expectEqual(@as(usize, 0), pair.events(&pair.client, &storage).len);
+    pair.advance(900);
+    try pair.pump();
+    const client_events = pair.events(&pair.client, &storage);
+    try std.testing.expectEqual(@as(usize, 1), client_events.len);
+    try std.testing.expectEqual(
+        engine_mod.CloseReason.handshake_timeout,
+        try expectClosed(client_events[0], handle, .outbound, null),
+    );
 }

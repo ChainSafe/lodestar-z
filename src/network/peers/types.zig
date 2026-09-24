@@ -62,8 +62,8 @@ pub const DisconnectReason = enum {
     gossip_unavailable,
     health_error,
 };
-pub const DialFailure = enum { handshake_timeout, peer_id_mismatch, refused, destination_unreachable, expired };
-pub const DialOutcome = enum { connected, deferred, admission_refused, cancelled, handshake_timeout, peer_id_mismatch, refused, destination_unreachable, expired };
+pub const DialFailure = enum { unanswered, handshake_timeout, peer_id_mismatch, refused, destination_unreachable, expired };
+pub const DialOutcome = enum { connected, deferred, admission_refused, cancelled, unanswered, handshake_timeout, peer_id_mismatch, refused, destination_unreachable, expired };
 pub const Snapshot = struct {
     identify: ?@import("../identify/root.zig").Metadata = null,
     peer: PeerRef,

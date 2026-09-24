@@ -200,6 +200,7 @@ fn standaloneEngine(seed: u8, engine_limits: engine_mod.Limits) !Engine {
 test "engine rejects invalid limits" {
     try std.testing.expectError(error.InvalidLimits, standaloneEngine(3, .{ .connections_max = 0 }));
     try std.testing.expectError(error.InvalidLimits, standaloneEngine(3, .{ .connections_max = 2_000 }));
+    try std.testing.expectError(error.InvalidLimits, standaloneEngine(3, .{ .unanswered_dial_timeout_ms = 0 }));
     try std.testing.expectError(
         error.InvalidLimits,
         standaloneEngine(3, .{ .connections_max = 4, .handshaking_max = 8 }),

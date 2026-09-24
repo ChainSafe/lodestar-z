@@ -134,6 +134,8 @@ test "peer dial outcomes count every retired attempt once and retries count each
     try std.testing.expectEqual(@as(?t.DialFailure, null), row.intent.last_failure);
     try std.testing.expect(q.dialStarted(try selectNext(&q, &catalog, &now), conn));
     try std.testing.expect(q.dialClosed(&catalog, conn, .handshake_timeout, now));
+    try std.testing.expect(q.dialStarted(try selectNext(&q, &catalog, &now), conn));
+    try std.testing.expect(q.dialClosed(&catalog, conn, .dial_unanswered, now));
     _ = try selectNext(&q, &catalog, &now);
     now += 10_000;
     q.expire(&catalog, null, now);
