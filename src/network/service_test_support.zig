@@ -16,13 +16,9 @@ pub const ServicePair = struct {
     pub fn init(self: *ServicePair, client: service.Options, server: service.Options) !void {
         try self.pair.init(.{}, .{});
         errdefer self.pair.deinit();
-        var client_options = client;
-        client_options.automatic_gossip_admission = false;
-        self.client = try service.Service.init(std.testing.allocator, client_options);
+        self.client = try service.Service.init(std.testing.allocator, client);
         errdefer self.client.deinit();
-        var server_options = server;
-        server_options.automatic_gossip_admission = false;
-        self.server = try service.Service.init(std.testing.allocator, server_options);
+        self.server = try service.Service.init(std.testing.allocator, server);
         errdefer self.server.deinit();
         self.client_inbox.attach(self.client.gossipsub);
         self.server_inbox.attach(self.server.gossipsub);
@@ -40,12 +36,6 @@ pub const ServicePair = struct {
         self.server_inbox.deinit();
         self.client_inbox.deinit();
         self.pair.deinit();
-    }
-
-    /// Deliver gossip messages as events in the step outputs instead of the inboxes.
-    pub fn useEventDelivery(self: *ServicePair) void {
-        self.client.gossipsub.message_sink = null;
-        self.server.gossipsub.message_sink = null;
     }
 
     pub const Counts = struct { client: service.OutputCounts, server: service.OutputCounts };

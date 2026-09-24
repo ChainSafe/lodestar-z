@@ -32,9 +32,6 @@ pub const Options = struct {
     outbound_reserved: ?u16 = null,
     inbound_per_connection_max: u16 = 16,
     inbound_connections: u16 = 0,
-    identify: bool = false,
-    reqresp: bool = true,
-    meshsub: bool = true,
     meshsub_versions: []const Version = &.{ .v1_2, .v1_1, .v1_0 },
 };
 
@@ -55,7 +52,6 @@ pub const Router = struct {
     }
 
     pub fn validateOptions(options: Options) Error!void {
-        if (!options.reqresp and !options.meshsub and !options.identify) return error.InvalidLimits;
         if (options.meshsub_versions.len == 0 or options.meshsub_versions.len > 3) {
             return error.InvalidLimits;
         }
@@ -101,13 +97,9 @@ pub const Router = struct {
 
     fn availableFor(options: Options) capability.Set {
         var available: capability.Set = .initEmpty();
-        if (options.identify) available.insert(.identify);
-        if (options.reqresp) for (std.enums.values(reqresp.Protocol)) |which| {
-            available.insert(.{ .reqresp = which });
-        };
-        if (options.meshsub) for (options.meshsub_versions) |version| {
-            available.insert(.{ .meshsub = version });
-        };
+        available.insert(.identify);
+        for (std.enums.values(reqresp.Protocol)) |which| available.insert(.{ .reqresp = which });
+        for (options.meshsub_versions) |version| available.insert(.{ .meshsub = version });
         return available;
     }
 

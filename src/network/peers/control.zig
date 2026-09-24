@@ -41,7 +41,6 @@ const Response = struct {
 };
 const Schedule = struct {
     direction: t.Direction = .inbound,
-    identify_enabled: bool = false,
     identify_state: enum { pending, started, done } = .pending,
     identify_retry_ms: u64 = 0,
     previous_digest: [4]u8 = @splat(0),
@@ -375,8 +374,7 @@ pub const Control = struct {
                 self.close(service, catalog, engine, peer, row.conn, row.closing.?.reason, now);
                 continue;
             }
-            row.identify_enabled = service.identify != null;
-            if (starts_remaining > 0 and snapshot.relevant and row.closing == null and row.identify_enabled and row.identify_state == .pending and now.mono_ms >= row.identify_retry_ms) {
+            if (starts_remaining > 0 and snapshot.relevant and row.closing == null and row.identify_state == .pending and now.mono_ms >= row.identify_retry_ms) {
                 starts_remaining -= 1;
                 self.cursor = (index + 1) % self.schedules.len;
                 self.startIdentify(service, engine, row, now);
@@ -408,7 +406,7 @@ pub const Control = struct {
         }
     }
     fn startIdentify(self: *Control, service: *Service, engine: *Engine, row: *Schedule, now: Now) void {
-        service.identify.?.start(&service.router, engine, row.peer.?, row.conn, now) catch {
+        service.identify.start(&service.router, engine, row.peer.?, row.conn, now) catch {
             row.identify_retry_ms = now.mono_ms +| 1_000;
             self.counters.identify_deferred +|= 1;
             return;
@@ -807,7 +805,7 @@ fn decide(row: *const Schedule, relevant: bool, active_request: bool, now: u64) 
         return decision;
     }
     if (relevant) {
-        if (row.identify_enabled and row.identify_state == .pending) decision.wake(row.identify_retry_ms, now);
+        if (row.identify_state == .pending) decision.wake(row.identify_retry_ms, now);
     }
     if (active_request) return decision;
     const metadata_due = if (relevant) row.metadata_due_ms else null;

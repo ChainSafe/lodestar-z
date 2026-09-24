@@ -153,7 +153,6 @@ pub const Runtime = struct {
     incoming: ?incoming_mod.Table = null,
     gossip: ?gossip_mod.Table = null,
     payload_budget: @import("network_budget.zig").Budget = .{},
-    gossip_budget: n.byte_budget.Budget = .{},
     test_incoming_deadline: if (faults.enabled) u64 else void = if (faults.enabled) 0 else {},
     test_gossip_held: if (faults.enabled) bool else void = if (faults.enabled) false else {},
     test_gossip_expiry: if (faults.enabled) ?gossip_mod.Token else void = if (faults.enabled) null else {},

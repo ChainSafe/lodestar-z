@@ -17,7 +17,6 @@ const StreamHandle = engine_mod.StreamHandle;
 const TransportEvent = engine_mod.Event;
 const Now = types.Now;
 const Gossipsub = gossipsub_mod.Gossipsub;
-const Event = gossipsub_mod.Event;
 const Turn = @import("turn.zig").Turn;
 const Credits = @import("turn.zig").Credits;
 const Progress = @import("turn.zig").Progress;
@@ -157,8 +156,8 @@ pub fn connectionActivity(self: *Gossipsub, conn: Handle) void {
     self.sessions.connectionActivity(conn);
 }
 
-pub fn nextWakeup(self: *Gossipsub, now: Now, event_capacity: usize) ?u64 {
-    const next = nextIoWakeup(self, now, event_capacity);
+pub fn nextWakeup(self: *Gossipsub, now: Now) ?u64 {
+    const next = nextIoWakeup(self, now);
     for (self.sessions.rows) |*session| {
         if (!session.active) continue;
         if (session.needs_service or session.outbound == .pending or session.outbound == .closing) return now.mono_ms;
@@ -171,8 +170,7 @@ pub fn pump(
     router: *routing.Router,
     engine: *Engine,
     now: Now,
-    out: []Event,
-) usize {
+) void {
     self.last_now_ms = @max(self.last_now_ms, now.mono_ms);
     var openings: usize = 0;
     var examined: usize = 0;
@@ -204,7 +202,7 @@ pub fn pump(
             .none, .retry_at, .negotiating => {},
         }
     }
-    return pumpReady(self, router, engine, now, out);
+    pumpReady(self, router, engine, now);
 }
 
 fn openOutbound(
@@ -241,7 +239,7 @@ fn streamClosed(self: *Gossipsub, engine: *Engine, stream: StreamHandle) void {
 
 pub fn resetInbound(self: *Gossipsub, engine: *Engine, index: u16) void {
     if (self.sessions.rows[index].in_stream) |stream| {
-        std.log.scoped(.network_gossip).debug("gossip_stream_reset direction=inbound connection={d}:{d} stream={d} blocked={s}", .{ stream.conn.index, stream.conn.generation, stream.id, @tagName(self.sessions.rows[index].io.blocked) });
+        std.log.scoped(.network_gossip).debug("gossip_stream_reset direction=inbound connection={d}:{d} stream={d}", .{ stream.conn.index, stream.conn.generation, stream.id });
         engine.closeStream(stream, 0);
     }
     self.sessions.rows[index].in_stream = null;
@@ -310,7 +308,6 @@ fn readPeer(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *T
     const now = turn.now;
     const stream = self.sessions.rows[index].in_stream orelse return;
     io.rx_ready = true;
-    io.blocked = .none;
     // A turn consumes at least one item, byte, or transport-call credit per iteration.
     for (0..self.options.items_per_peer + self.options.calls_per_peer + self.options.input_per_peer + 1) |_| {
         if (io.rpc != null) {
@@ -443,13 +440,12 @@ fn logIoTimeout(self: *Gossipsub, index: u16, reason: []const u8, now_ms: u64) v
     const row = &self.sessions.rows[index];
     const io = &self.sessions.rows[index].io;
     const identity = &self.peers.rows[row.logical.index].identity;
-    std.log.scoped(.network_gossip_errors).debug("gossip_io_timeout peer={f} connection={d}:{d} reason={s} inbound={any} outbound={any} blocked={s} subscriptions={d} data_queued={d} data_bytes={d} control_bytes={d} critical_bytes={d} oldest_ms={d}", .{ @import("../logging.zig").peer(identity), row.conn.index, row.conn.generation, reason, row.in_stream != null, row.outStream() != null, @tagName(io.blocked), io.tx.subscription_dirty.count(), io.tx.data.count, io.tx.data.bytes, io.tx.control.used, io.tx.critical.used, if (io.tx.oldest()) |oldest| now_ms -| oldest else 0 });
+    std.log.scoped(.network_gossip_errors).debug("gossip_io_timeout peer={f} connection={d}:{d} reason={s} inbound={any} outbound={any} subscriptions={d} data_queued={d} data_bytes={d} control_bytes={d} critical_bytes={d} oldest_ms={d}", .{ @import("../logging.zig").peer(identity), row.conn.index, row.conn.generation, reason, row.in_stream != null, row.outStream() != null, io.tx.subscription_dirty.count(), io.tx.data.count, io.tx.data.bytes, io.tx.control.used, io.tx.critical.used, if (io.tx.oldest()) |oldest| now_ms -| oldest else 0 });
 }
 
-fn pumpReady(self: *Gossipsub, router: *routing.Router, engine: *Engine, now: Now, events: []Event) usize {
-    var turn = beginPump(self, now, events);
+fn pumpReady(self: *Gossipsub, router: *routing.Router, engine: *Engine, now: Now) void {
+    var turn = beginPump(self, now);
     runTurn(self, router, engine, &turn);
-    return turn.count;
 }
 
 pub fn runTurn(self: *Gossipsub, router: *routing.Router, engine: *Engine, turn: *Turn) void {
@@ -475,9 +471,7 @@ pub fn runTurn(self: *Gossipsub, router: *routing.Router, engine: *Engine, turn:
         var peer = Credits.peer(&self.options);
         const write_first = io.write_first;
         if (write_first and io.tx.ready) flush(self, engine, @intCast(index), io, turn, &peer);
-        if (io.rx_ready or (io.blocked == .events and turn.count < turn.events.len)) {
-            readPeer(self, engine, @intCast(index), io, turn, &peer);
-        }
+        if (io.rx_ready) readPeer(self, engine, @intCast(index), io, turn, &peer);
         if (!write_first and io.tx.ready) flush(self, engine, @intCast(index), io, turn, &peer);
         logSendPressure(self, @intCast(index), now.mono_ms);
         if (self.sessions.rows[index].outbound == .closing) retirePeer(self, router, engine, @intCast(index));
@@ -556,26 +550,20 @@ pub fn processRpc(self: *Gossipsub, index: u16, turn: *Turn, peer: *Credits) pro
             rpc.item_observed = true;
         }
         const result = self.receiveItem(self.sessions.ref(index), item, turn, peer);
-        switch (result) {
-            .events => self.pressure(index, .events, now.mono_ms),
-            .done, .credits => {},
-        }
         if (result != .done) return result;
         rpc.consumeItem();
-        io.pressure_since = null;
     }
     return .credits;
 }
 
-pub fn nextIoWakeup(self: *Gossipsub, now: Now, event_capacity: usize) ?u64 {
+pub fn nextIoWakeup(self: *Gossipsub, now: Now) ?u64 {
     var deadline = nextMaintenance(self, now);
     for (self.sessions.rows, 0..) |*peer, i| {
         const io = &peer.io;
         if (!self.sessions.rows[i].active) continue;
         if (peer.outbound == .closing) return now.mono_ms;
         if (peer.outbound == .retry_at) deadline = @min(deadline, peer.outbound.retry_at);
-        if (self.sessions.rows[i].in_stream != null and
-            ((io.rx_ready and io.blocked != .events) or (io.blocked == .events and event_capacity > 0))) return now.mono_ms;
+        if (self.sessions.rows[i].in_stream != null and io.rx_ready) return now.mono_ms;
         if (self.sessions.rows[i].outStream() != null and io.tx.ready and
             (io.tx.pending() or io.tx.subscription_dirty.count() > 0)) return now.mono_ms;
         if (io.deadlines(&self.options).next()) |due| deadline = @min(deadline, due);
@@ -604,13 +592,9 @@ fn expireIo(self: *Gossipsub, router: *routing.Router, engine: *Engine, now_ms: 
                     retirePeer(self, router, engine, @intCast(index));
                     break;
                 },
-                .receive_pressure => {
-                    g.counters.receive_pressure_timeouts += 1;
-                    discardInboundFrame(self, @intCast(index));
-                },
                 .receive_frame => {
                     g.counters.receive_frame_timeouts += 1;
-                    if (io.pressure_since != null or io.rpc != null) {
+                    if (io.rpc != null) {
                         discardInboundFrame(self, @intCast(index));
                         continue;
                     }
@@ -639,10 +623,10 @@ fn expireIo(self: *Gossipsub, router: *routing.Router, engine: *Engine, now_ms: 
 
 pub const Admission = enum { admitted, duplicate, capacity, unauthenticated };
 
-pub fn beginPump(self: *Gossipsub, now: Now, events: []Event) Turn {
+pub fn beginPump(self: *Gossipsub, now: Now) Turn {
     self.last_now_ms = now.mono_ms;
     self.messages.expire(&self.peers, now.mono_ms);
-    var turn = Turn.init(&self.options, now, events, self.decompressed, self.msg_scratch);
+    var turn = Turn.init(&self.options, now, self.msg_scratch);
     turn.sink = self.message_sink;
     return turn;
 }

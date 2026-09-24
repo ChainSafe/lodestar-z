@@ -29,11 +29,12 @@ pub fn main(init: std.process.Init) !void {
     };
     var seed: [8]u8 = undefined;
     try init.io.randomSecure(&seed);
+    var blob_schedule: [network.reqresp.request_policy.schedule_max]network.reqresp.request_policy.BlobLimit = undefined;
     try node.initManaged(a, init.io, .{
         .wait_mode = .native_poll,
         .host = &key,
         .bind = .{ .ip4 = .loopback(0) },
-        .configuration = .{ .seed = std.mem.readInt(u64, &seed, .little), .forks = &.{.{ .digest = local.fork.digest, .fork = local.fork.fork }} },
+        .configuration = .{ .seed = std.mem.readInt(u64, &seed, .little), .forks = &.{.{ .digest = local.fork.digest, .fork = local.fork.fork }}, .admission_policy = try network.reqresp.request_policy.Config.fromBeaconConfig(&@import("config").mainnet.config, &blob_schedule) },
         .local = local,
         .schedule = .{ .fulu_scheduled = true },
         .discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .bootstrap = bootstrap[0..count] },

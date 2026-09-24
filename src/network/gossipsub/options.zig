@@ -4,7 +4,6 @@ const score_mod = @import("score.zig");
 const storage = @import("message_store.zig");
 
 pub const Options = struct {
-    observe_subscriptions: bool = true,
     topic_policy: ?[]const @import("topic_policy.zig").Boundary = null,
     connected_capacity: u16 = constants.peers_cap,
     retained_capacity: u16 = @import("peer_book.zig").capacity,
@@ -41,9 +40,6 @@ pub const Options = struct {
     work_per_pump: usize = 8 * 1024 * 1024,
     calls_per_peer: usize = 64,
     calls_per_pump: usize = 256,
-    /// Decompressed bytes surfaced in one pump; the host consumes them before
-    /// the next pump. Full means new messages wait, applying backpressure.
-    decompressed_arena_bytes: usize = 16 * 1024 * 1024,
     /// Ordinary per-peer compressed-copy/decode/hash byte credits; one legal oversized item may use the shared allowance.
     decompress_per_peer_bytes: usize = 4 * 1024 * 1024,
     /// Absolute large-frame transfer timeout and receive/transmit progress timeout.
@@ -100,7 +96,6 @@ pub fn validate(o: *const Options) (error{InvalidLimits} || @import("topic_polic
     try range(o.seen_capacity, 1, 1_048_576);
     try range(o.mcache_capacity, 1, 65536);
     try range(o.mcache_arena_bytes, compressed + storage.page_bytes, 1024 * 1024 * 1024);
-    try range(o.decompressed_arena_bytes, constants.MAX_PAYLOAD_SIZE + topic_mod.topic_max_len, 1024 * 1024 * 1024);
     const page = @import("receive_pool.zig").page_bytes;
     const receive_min = @max(page, @import("std").mem.alignForward(usize, constants.GOSSIP_MAX_SIZE - @min(o.body_buffer_bytes, constants.GOSSIP_MAX_SIZE), page));
     try range(o.receive_arena_bytes, receive_min, 1024 * 1024 * 1024);

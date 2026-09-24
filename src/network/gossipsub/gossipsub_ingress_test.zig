@@ -14,7 +14,6 @@ const options: gossip.Options = .{
     .connected_capacity = 4,
     .retained_capacity = 8,
     .retained_outbound_reserve = 1,
-    .observe_subscriptions = false,
     .body_buffer_bytes = 64,
 };
 
@@ -22,7 +21,6 @@ const Consumer = struct {
     table: *processor.GossipProcessor,
     owner: *gossip.Gossipsub,
     slot: u64 = 1,
-    fill_during_delivery: bool = false,
 
     fn sink(self: *Consumer) gossip.MessageSink {
         return .{ .context = self, .has_capacity = hasCapacity, .admit = admit };
@@ -35,22 +33,16 @@ const Consumer = struct {
 
     fn admit(context: *anyopaque, candidate: *gossip.Admission) bool {
         const self: *Consumer = @ptrCast(@alignCast(context));
-        const table = self.table;
-        const publication = if (self.fill_during_delivery) table.budget.limit - table.budget.used else 0;
-        table.budget.reserve(publication) catch unreachable;
-        defer table.budget.release(publication);
-        return table.admit(self.owner, candidate, candidate.event.admitted_ms, 1, self.slot);
+        return self.table.admit(self.owner, candidate, candidate.event.admitted_ms, 1, self.slot);
     }
 };
 
 fn receive(g: *gossip.Gossipsub, source: u16, topic: []const u8, payload: []const u8) !void {
     var compressed: [8192]u8 = undefined;
     const len = try snappy.raw.compress(payload, &compressed);
-    var turn = @import("session_io.zig").beginPump(g, .{ .mono_ms = 1, .unix_s = 0 }, &.{});
+    var turn = @import("session_io.zig").beginPump(g, .{ .mono_ms = 1, .unix_s = 0 });
     var credit = @import("turn.zig").Credits.peer(&g.options);
     try t.expectEqual(.done, g.receiveItem(g.sessions.ref(source), .{ .message = .{ .topic = topic, .data = compressed[0..len] } }, &turn, &credit));
-    try t.expectEqual(@as(usize, 0), turn.count);
-    try t.expectEqual(@as(usize, 0), turn.used);
 }
 
 test "gossip direct processor admission drains paged RPCs while the host queue stays full" {
@@ -59,9 +51,8 @@ test "gossip direct processor admission drains paged RPCs while the host queue s
     defer pair.deinit();
     const g = pair.shared.server.gossipsub;
     try support.subscribe(g, block);
-    pair.server_event_capacity = 0;
-    var budget: @import("../byte_budget.zig").Budget = .{ .limit = 65536 };
-    var table = try processor.GossipProcessor.init(t.allocator, .{ .capacity = 2, .bytes = 16384, .limits = null, .forks = &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }} }, &budget);
+    const limits: processor.limits_mod.Limits = @splat(.{ .items = 4, .bytes = 16384 });
+    var table = try processor.GossipProcessor.init(t.allocator, .{ .capacity = processor.limits_mod.items(&limits), .bytes = processor.limits_mod.bytes(&limits), .limits = limits, .forks = &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }} });
     defer table.deinit();
     defer table.close();
     var consumer: Consumer = .{ .table = &table, .owner = g };
@@ -108,7 +99,7 @@ test "gossip direct processor admission drains paged RPCs while the host queue s
     @memset(g.sessions.decode_scratch, 0xa5);
     @memset(row.io.body, 0xa5);
     var actual: [6000]u8 = undefined;
-    for (table.cells, 0..) |*cell, i| {
+    for (table.cells[0..2], 0..) |*cell, i| {
         table.copyPayload(cell, &actual);
         try t.expectEqualSlices(u8, &payloads[i], &actual);
     }
@@ -118,8 +109,8 @@ test "gossip full processor preserves duplicate attribution without runtime allo
     var ledger: @import("../reservations.zig").Reservations = .{ .backing = t.allocator };
     var g = try support.init(ledger.allocator(), options);
     defer g.deinit();
-    var budget: @import("../byte_budget.zig").Budget = .{ .limit = 65536 };
-    var table = try processor.GossipProcessor.init(ledger.allocator(), .{ .capacity = 1, .bytes = 4096, .limits = null, .forks = &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }} }, &budget);
+    const limits: processor.limits_mod.Limits = @splat(.{ .items = 2, .bytes = 4096 });
+    var table = try processor.GossipProcessor.init(ledger.allocator(), .{ .capacity = processor.limits_mod.items(&limits), .bytes = processor.limits_mod.bytes(&limits), .limits = limits, .forks = &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }} });
     defer table.deinit();
     defer table.close();
     var consumer: Consumer = .{ .table = &table, .owner = &g };
@@ -129,15 +120,16 @@ test "gossip full processor preserves duplicate attribution without runtime allo
     for (0..2) |i| _ = support.addPeer(&g, .{ .index = @intCast(i), .generation = 1 }, .v1_2).?;
     const allocations = ledger.allocation_calls;
     ledger.byte_limit = ledger.bytes;
+    try receive(&g, 1, block, "filler");
     try receive(&g, 0, block, "pending");
-    const handle = table.cells[0].handle;
+    const handle = table.cells[1].handle;
     try receive(&g, 1, block, "pending");
     try receive(&g, 1, block, "unexamined");
-    var turn = @import("session_io.zig").beginPump(&g, .{ .mono_ms = 1, .unix_s = 0 }, &.{});
+    var turn = @import("session_io.zig").beginPump(&g, .{ .mono_ms = 1, .unix_s = 0 });
     var credit = @import("turn.zig").Credits.peer(&g.options);
     try t.expectEqual(.done, g.receiveItem(g.sessions.ref(1), .{ .message = .{ .topic = block, .data = &.{7} } }, &turn, &credit));
     try t.expectEqual(@as(u64, 1), g.messages.fast_hits);
-    try t.expectEqual(@as(u64, 1), g.messages.decoded_messages);
+    try t.expectEqual(@as(u64, 2), g.messages.decoded_messages);
     try t.expectEqual(@as(u64, 0), g.peers.scores.penalties.invalid_message);
     try t.expectEqual(gossip.ReportOutcome{ .applied = .reject }, g.report(handle, .reject, .{ .mono_ms = 2, .unix_s = 0 }));
     try t.expectEqual(@as(u64, 2), g.peers.scores.penalties.invalid_message);
@@ -148,9 +140,8 @@ test "gossip full processor preserves duplicate attribution without runtime allo
 test "gossip saturated attestation intake preserves block priority and storage" {
     var g = try support.init(t.allocator, options);
     defer g.deinit();
-    var budget: @import("../byte_budget.zig").Budget = .{};
     const limits: processor.limits_mod.Limits = @splat(.{ .items = 2, .bytes = 8192 });
-    var table = try processor.GossipProcessor.init(t.allocator, .{ .capacity = processor.limits_mod.items(&limits), .bytes = processor.limits_mod.bytes(&limits), .limits = limits, .forks = &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }} }, &budget);
+    var table = try processor.GossipProcessor.init(t.allocator, .{ .capacity = processor.limits_mod.items(&limits), .bytes = processor.limits_mod.bytes(&limits), .limits = limits, .forks = &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }} });
     defer table.deinit();
     defer table.close();
     var consumer: Consumer = .{ .table = &table, .owner = &g };
@@ -172,31 +163,6 @@ test "gossip saturated attestation intake preserves block priority and storage" 
     table.finish(&batch, false);
 }
 
-test "gossip capacity lost after preflight rolls back admission and allows redelivery" {
-    var g = try support.init(t.allocator, options);
-    defer g.deinit();
-    var budget: @import("../byte_budget.zig").Budget = .{ .limit = 100 };
-    var table = try processor.GossipProcessor.init(t.allocator, .{ .capacity = 1, .bytes = 4096, .limits = null, .forks = &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }} }, &budget);
-    defer table.deinit();
-    defer table.close();
-    var consumer: Consumer = .{ .table = &table, .owner = &g, .fill_during_delivery = true };
-    const sink = consumer.sink();
-    g.message_sink = &sink;
-    _ = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
-    try support.subscribe(&g, block);
-    try receive(&g, 0, block, "racing publication");
-    try t.expectEqual(@as(usize, 0), table.diag.occupied);
-    try t.expectEqual(@as(usize, 0), budget.used);
-    try t.expectEqual(@as(usize, 0), g.resourceSnapshot().pending_validations);
-    try t.expectEqual(@as(u64, 0), table.diag.reportsAppliedIgnore);
-    try t.expectEqual(@as(u64, 1), g.messages.storage_refusals[@intFromEnum(messages.StorageRefusal.processor_capacity)]);
-    consumer.fill_during_delivery = false;
-    try receive(&g, 0, block, "racing publication");
-    try t.expectEqual(@as(usize, 1), table.diag.occupied);
-    try t.expectEqual(@as(usize, 1), g.resourceSnapshot().pending_validations);
-    try t.expectEqual(@as(u64, 0), g.peers.scores.penalties.invalid_message);
-}
-
 test "gossip invalid verdict stops remaining publications in the same RPC" {
     var opts = options;
     opts.score_params.gossip_threshold = -20;
@@ -206,12 +172,15 @@ test "gossip invalid verdict stops remaining publications in the same RPC" {
     defer g.deinit();
     const source = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     try support.subscribe(&g, block);
+    var inbox: support.Inbox = .{};
+    defer inbox.deinit();
+    inbox.attach(&g);
     var body: [1024]u8 = undefined;
     var writer = protobuf.Writer.init(&body);
     for (0..3) |_| protobuf.writeMessage(&writer, &.{5}, block);
     const io = &g.sessions.rows[source.index].io;
     io.startRpc(writer.written());
-    var turn = @import("session_io.zig").beginPump(&g, .{ .mono_ms = 1, .unix_s = 0 }, &.{});
+    var turn = @import("session_io.zig").beginPump(&g, .{ .mono_ms = 1, .unix_s = 0 });
     var credit = @import("turn.zig").Credits.peer(&g.options);
     try t.expectEqual(.done, try @import("session_io.zig").processRpc(&g, source.index, &turn, &credit));
     try t.expectEqual(@as(u64, 1), g.peers.scores.penalties.invalid_message);
@@ -234,8 +203,7 @@ test "gossip admission rejects ineligible candidates without replacing work and 
     opts.validation_capacity = processor.limits_mod.items(&limits);
     var g = try support.init(t.allocator, opts);
     defer g.deinit();
-    var budget: @import("../byte_budget.zig").Budget = .{};
-    var table = try processor.GossipProcessor.init(t.allocator, processor.Plan.resolve(&opts, &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }}), &budget);
+    var table = try processor.GossipProcessor.init(t.allocator, processor.Plan.resolve(&opts, &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }}));
     defer table.deinit();
     defer table.close();
     var consumer: Consumer = .{ .table = &table, .owner = &g };
@@ -279,8 +247,7 @@ test "gossip admission leaves queued work intact when a host copy pins the requi
     opts.validation_capacity = processor.limits_mod.items(&limits);
     var g = try support.init(t.allocator, opts);
     defer g.deinit();
-    var budget: @import("../byte_budget.zig").Budget = .{};
-    var table = try processor.GossipProcessor.init(t.allocator, processor.Plan.resolve(&opts, &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }}), &budget);
+    var table = try processor.GossipProcessor.init(t.allocator, processor.Plan.resolve(&opts, &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }}));
     defer table.deinit();
     defer table.close();
     var consumer: Consumer = .{ .table = &table, .owner = &g };

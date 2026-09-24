@@ -70,14 +70,7 @@ test("metrics are available through startup and remain readable after close", as
         expect(metrics.get(`lodestar_native_discovery_admission_total{stage="${stage}",outcome="${outcome}"}`)).toBe(0);
       }
     }
-    for (const reason of [
-      "server_capacity",
-      "peer_capacity",
-      "protocol_concurrency",
-      "peer_quota",
-      "global_quota",
-      "identity_capacity",
-    ]) {
+    for (const reason of ["peer_capacity", "protocol_concurrency", "peer_quota", "global_quota", "identity_capacity"]) {
       expect(metrics.get(`lodestar_native_reqresp_admission_refusals_total{method="status",reason="${reason}"}`)).toBe(
         0
       );

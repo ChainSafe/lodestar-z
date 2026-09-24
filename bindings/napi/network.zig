@@ -113,7 +113,7 @@ fn prepareApplicationStorage(runtime: *Runtime, app: *const application_cfg.Conf
         .handshakingCapacity = resolved.limits.handshaking_max,
         .dialingCapacity = resolved.limits.dialing_max,
         .requestPeerCapacity = resolved.core.service.reqresp.peers,
-        .admissionIdentityCapacity = resolved.core.service.reqresp.admission.?.limits.identities,
+        .admissionIdentityCapacity = resolved.core.service.reqresp.admission.limits.identities,
         .gossipConnectedCapacity = resolved.core.service.gossipsub.connected_capacity,
         .gossipRetainedCapacity = resolved.core.service.gossipsub.retained_capacity,
         .dialEngineCapacity = resolved.limits.dialing_max,
@@ -125,15 +125,13 @@ fn prepareApplicationStorage(runtime: *Runtime, app: *const application_cfg.Conf
     const chain = &runtime.heavy.?.config.chain;
     const gossip_plan = n.gossip_processor.Plan.resolve(gossip_options, chain.forks[0..chain.boundary_count]);
     const gossip_backing = gossip.Table.backingBytes(gossip_plan.capacity, gossip_plan.bytes);
-    const gossip_reserve = if (gossip_plan.limits == null) 2 * gossip_backing else 0;
     const metrics_capacity = n.metrics.textCapacity(chain.topics[0..chain.boundary_count]);
     const publication_capacity: usize = if (runtime.heavy.?.config.profile == .small) 32 else publications.capacity_max;
     const bridge = publication_capacity * @sizeOf(publications.Cell) + 2 * metrics_capacity + gossip_backing + incoming_capacity * @sizeOf(incoming.Cell) + request_capacity * @sizeOf(requests.Cell) + @sizeOf(Runtime) + @sizeOf(r.Owner) - @sizeOf(n.NetworkCore) + r.Stores.bytes(runtime.peer_capacity) + @sizeOf(projection.Lane);
-    if (bridge + gossip_reserve > app.resources.bridgeBudgetBytes) return error.NetworkBridgeBudgetExceeded;
+    if (bridge > app.resources.bridgeBudgetBytes) return error.NetworkBridgeBudgetExceeded;
     runtime.metrics = try @import("network_metrics.zig").Export.init(metrics_capacity);
     runtime.requests = try requests.Table.init(r.allocator, request_capacity, &runtime.payload_budget);
-    runtime.payload_budget.limit = app.resources.bridgeBudgetBytes - bridge - gossip_reserve;
-    runtime.gossip_budget.limit = gossip_reserve;
+    runtime.payload_budget.limit = app.resources.bridgeBudgetBytes - bridge;
     var response_max: usize = 0;
     var request_max: usize = 0;
     for (0..n.reqresp.Protocol.count) |i| {
@@ -148,7 +146,7 @@ fn prepareApplicationStorage(runtime: *Runtime, app: *const application_cfg.Conf
     try faults.check(.incoming_table);
     runtime.incoming = try incoming.Table.init(r.allocator, incoming_capacity, &runtime.payload_budget);
     try faults.check(.gossip_table);
-    runtime.gossip = try gossip.Table.init(r.allocator, gossip_plan, &runtime.gossip_budget);
+    runtime.gossip = try gossip.Table.init(r.allocator, gossip_plan);
     runtime.stores = try r.Stores.create(r.allocator, runtime.peer_capacity);
     try faults.check(.application_lane);
     runtime.lane = try r.allocator.create(projection.Lane);

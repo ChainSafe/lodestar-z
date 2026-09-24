@@ -1,7 +1,6 @@
 const std = @import("std");
 const gossip = @import("gossipsub.zig");
 const Gossipsub = gossip.Gossipsub;
-const Event = gossip.Event;
 const ValidationHandle = gossip.ValidationHandle;
 const Allocator = std.mem.Allocator;
 const constants = @import("constants.zig");
@@ -17,7 +16,6 @@ const testMessage = support.message;
 test "gossipsub rejects incompatible memory plans and cleans partial startup allocations" {
     const a = std.testing.allocator;
     try std.testing.expectError(error.InvalidLimits, support.init(a, .{ .random_seed = 1, .receive_arena_bytes = 65536 }));
-    try std.testing.expectError(error.InvalidLimits, support.init(a, .{ .random_seed = 1, .decompressed_arena_bytes = 4096 }));
     try std.testing.expectError(error.InvalidLimits, support.init(a, .{ .random_seed = 1, .receive_arena_bytes = 1024 * 1024 * 1024 + 4096 }));
     try std.testing.expectError(error.InvalidLimits, support.init(a, .{ .random_seed = 1, .fields_per_pump = 1 }));
     try std.testing.checkAllAllocationFailures(a, testStartup, .{});
@@ -28,7 +26,7 @@ fn testStartup(a: Allocator) !void {
     const plan = g.memoryPlan();
     try std.testing.expectEqual(@as(usize, 4096), plan.page_bytes);
     try std.testing.expectEqual(g.messages.store.bytes.len, plan.retained_bytes);
-    try std.testing.expectEqual(plan.total_bytes, plan.retained_bytes + plan.frame_bytes + plan.event_bytes + plan.compression_bytes + plan.peer_buffer_bytes + plan.metadata_bytes);
+    try std.testing.expectEqual(plan.total_bytes, plan.retained_bytes + plan.frame_bytes + plan.compression_bytes + plan.peer_buffer_bytes + plan.metadata_bytes);
 }
 
 test "gossipsub resource snapshot starts empty" {
@@ -121,8 +119,7 @@ test "gossip lifecycle sequence preserves ownership under pressure reconnect and
         const payload = [_]u8{'a' + value};
         switch (rng.random().uintLessThan(u8, 9)) {
             0, 1 => {
-                var events: [1]Event = undefined;
-                if (try testMessage(&g, source.index, &payload, now.mono_ms, &events)) |count| {
+                if (try testMessage(&g, source.index, &payload, now.mono_ms)) |count| {
                     if (count == 1) handles[value] = inbox.last().handle;
                     inbox.clear();
                 }

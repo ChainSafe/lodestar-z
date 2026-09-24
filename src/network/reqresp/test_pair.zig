@@ -12,7 +12,6 @@ pub const Overrides = struct {
     outbound_max: u16 = 8,
     inbound_max: u16 = 8,
     inbound_per_peer_max: u8 = 8,
-    reserve_inbound_per_peer: bool = true,
     inbound_control_reserved: u16 = 0,
     serving_per_peer_max: u8 = 4,
     progress_timeout_ms: u64 = 10_000,
@@ -41,7 +40,7 @@ pub const Pair = struct {
     }
 
     fn serviceOptions(overrides: Overrides, forks: []const reqresp.ForkEntry) !@import("../service.zig").Options {
-        return .{ .reqresp = try options(overrides, forks), .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1, .seen_capacity = 128, .mcache_capacity = 16, .validation_capacity = 8 }, .automatic_gossip_admission = false };
+        return .{ .reqresp = try options(overrides, forks), .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1, .seen_capacity = 128, .mcache_capacity = 16, .validation_capacity = 8 } };
     }
 
     /// Admission defaults over the fixture policy unless the caller supplies admission.
@@ -52,7 +51,6 @@ pub const Pair = struct {
             .outbound_max = overrides.outbound_max,
             .inbound_max = overrides.inbound_max,
             .inbound_per_peer_max = overrides.inbound_per_peer_max,
-            .reserve_inbound_per_peer = overrides.reserve_inbound_per_peer,
             .inbound_control_reserved = overrides.inbound_control_reserved,
             .serving_per_peer_max = overrides.serving_per_peer_max,
             .progress_timeout_ms = overrides.progress_timeout_ms,

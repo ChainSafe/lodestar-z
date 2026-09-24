@@ -9,7 +9,6 @@ const topic_mod = @import("topic.zig");
 const storage = @import("message_store.zig");
 const validation_mod = @import("validation.zig");
 const Recovery = @import("recovery.zig").Recovery;
-const peer_io_mod = @import("peer_io.zig");
 const score_mod = @import("score.zig");
 const overlay_mod = @import("overlay.zig");
 const peers_mod = @import("peer_book.zig");
@@ -37,15 +36,6 @@ pub const ReportOutcome = validation_mod.Outcome;
 pub const Admission = @import("messages.zig").Admission;
 pub const MessageSink = @import("messages.zig").MessageSink;
 
-pub const Event = union(enum) {
-    /// A new message the host must validate and then close out with
-    /// `report(handle, verdict, now)`. `bytes` is the decompressed payload, valid
-    /// until the next pump; the host copies what it needs.
-    message: @import("messages.zig").MessageEvent,
-    subscription_change: struct { peer: Handle, topic: []const u8, subscribed: bool },
-};
-
-const PeerIo = peer_io_mod.PeerIo;
 const Turn = @import("turn.zig").Turn;
 const Credits = @import("turn.zig").Credits;
 const Progress = @import("turn.zig").Progress;
@@ -113,7 +103,6 @@ pub const Gossipsub = struct {
     opportunistic_at: u64 = 0,
     last_now_ms: u64 = 0,
     msg_scratch: []u8,
-    decompressed: []u8,
     recovery: Recovery,
     counters: Counters = .{},
     topic_metrics: @import("metrics.zig").Topics = .{},
@@ -180,7 +169,6 @@ pub const Gossipsub = struct {
         local_pressure_discards: u64 = 0,
         message_capacity_refusals: u64 = 0,
         receive_copy_bytes: u64 = 0,
-        receive_pressure_timeouts: u64 = 0,
         receive_frame_timeouts: u64 = 0,
         send_queue_timeouts: u64 = 0,
         send_progress_timeouts: u64 = 0,
@@ -218,8 +206,6 @@ pub const Gossipsub = struct {
         errdefer messages.deinit(allocator, &peers);
         const msg_scratch = try allocator.alloc(u8, constants.GOSSIP_MAX_SIZE);
         errdefer allocator.free(msg_scratch);
-        const decompressed = try allocator.alloc(u8, layout.output_bytes);
-        errdefer allocator.free(decompressed);
         var recovery = try Recovery.init(allocator);
         errdefer recovery.deinit(allocator, &peers);
 
@@ -231,7 +217,6 @@ pub const Gossipsub = struct {
             .peers = peers,
             .messages = messages,
             .msg_scratch = msg_scratch,
-            .decompressed = decompressed,
             .recovery = recovery,
             .overlay = overlay,
         };
@@ -244,7 +229,6 @@ pub const Gossipsub = struct {
     pub fn deinit(self: *Gossipsub) void {
         for (self.sessions.rows) |*peer| if (peer.active) self.connectionClosed(peer.conn);
         self.recovery.deinit(self.allocator, &self.peers);
-        self.allocator.free(self.decompressed);
         self.allocator.free(self.msg_scratch);
         self.messages.deinit(self.allocator, &self.peers);
         self.peers.deinit(self.allocator);
@@ -469,12 +453,7 @@ pub const Gossipsub = struct {
         const index = session.index;
         if (self.sessions.rows[index].outbound == .closing) return .done;
         switch (item) {
-            .subscription => |sub| {
-                if (self.options.observe_subscriptions and self.validTopic(sub.topic) and self.overlay.findTopic(sub.topic) != null and (turn.count == turn.events.len or turn.arena.len - turn.used < sub.topic.len)) {
-                    return .events;
-                }
-                self.onSubscription(index, sub, turn);
-            },
+            .subscription => |sub| self.onSubscription(index, sub),
             .message => |msg| {
                 const result = self.onMessage(index, msg, turn, peer);
                 if (result != .done) return result;
@@ -709,18 +688,6 @@ pub const Gossipsub = struct {
         }
     }
 
-    pub fn pressure(self: *Gossipsub, index: u16, reason: @TypeOf(@as(PeerIo, undefined).blocked), now_ms: u64) void {
-        const io = &self.sessions.rows[index].io;
-        if (io.pressure_since == null) {
-            const conn = self.sessions.rows[index].conn;
-            std.log.scoped(.network_gossip).debug("gossip_pressure_started connection={d}:{d} reason={s}", .{ conn.index, conn.generation, @tagName(reason) });
-            io.pressure_since = now_ms;
-        }
-        io.blocked = reason;
-        io.rx_ready = false;
-        self.cancelPromises(index, true);
-    }
-
     fn onMessage(self: *Gossipsub, index: u16, msg: protobuf.Message, turn: *Turn, peer: *Credits) Progress {
         const now = turn.now;
         const context = self.messageContext();
@@ -749,7 +716,6 @@ pub const Gossipsub = struct {
             .blocked => |reason| {
                 if (reason == .work) self.counters.decompress_throttled += 1;
                 return switch (reason) {
-                    .events => .events,
                     .storage => blk: {
                         self.counters.message_capacity_refusals += 1;
                         self.cancelPromises(index, true);
@@ -763,10 +729,6 @@ pub const Gossipsub = struct {
                 self.counters.messages_received += 1;
                 self.topic_metrics.get(event.topic).admitted +|= 1;
                 if (msg.data.len >= self.options.idontwant_min_data_size) self.broadcastIdontwant(self.overlay.findTopic(event.topic).?, event.id, index);
-                if (turn.sink == null) {
-                    turn.events[turn.count] = .{ .message = event };
-                    turn.count += 1;
-                }
                 return .done;
             },
         }
@@ -922,21 +884,9 @@ pub const Gossipsub = struct {
         self: *Gossipsub,
         index: u16,
         sub: protobuf.SubOpts,
-        turn: *Turn,
     ) void {
         const context = self.overlayContext(self.last_now_ms);
         _ = self.overlay.peerSubscription(&context, index, sub.topic, sub.subscribe) orelse return;
-        if (!self.options.observe_subscriptions) return;
-        assert(turn.count < turn.events.len);
-        const name = turn.arena[turn.used..][0..sub.topic.len];
-        @memcpy(name, sub.topic);
-        turn.used += name.len;
-        turn.events[turn.count] = .{ .subscription_change = .{
-            .peer = self.sessions.rows[index].conn,
-            .topic = name,
-            .subscribed = sub.subscribe,
-        } };
-        turn.count += 1;
     }
 };
 
@@ -947,7 +897,6 @@ test {
     _ = @import("gossipsub_owner_resources_test.zig");
     _ = @import("gossipsub_publication_test.zig");
     _ = @import("gossipsub_resource_test.zig");
-    _ = @import("gossipsub_scheduled_test.zig");
     _ = @import("gossipsub_scheduler_test.zig");
     _ = @import("gossipsub_service_test.zig");
     _ = @import("gossipsub_simulation_test.zig");

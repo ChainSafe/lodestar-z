@@ -53,7 +53,7 @@ const expectedProtocols = [
 ].sort();
 
 async function exercise(nativeDials) {
-  const zig = new Child("identify-zig", binary, ["--identify"]);
+  const zig = new Child("identify-zig", binary, []);
   let node;
   const log = [];
   try {

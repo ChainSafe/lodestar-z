@@ -158,7 +158,7 @@ pub const PeerManager = struct {
             options.control,
             @intCast(catalog.rows.len),
             options.peers.max_peers,
-            if (service.reqresp.serving.control_reserved > 0) service.reqresp.serving.control_reserved else @intCast(service.reqresp.serving.entries.len),
+            service.reqresp.serving.control_reserved,
         );
         errdefer control.deinit(a);
         const dialing = try dial_mod.Dialing.init(options.dial);

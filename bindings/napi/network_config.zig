@@ -212,11 +212,11 @@ pub fn parse(value: Value, out: *Config) !void {
 }
 
 fn parseGossip(value: Value, out: *Config) !void {
-    out.gossip = .{ .observe_subscriptions = false };
+    out.gossip = .{};
     const policy = try get(value, "gossipPolicy");
     try object(policy, &.{ "iwantFollowupMs", "idontwantMinDataSize", "heartbeatIntervalMs", "validationTimeoutMs", "validationTombstoneMs", "pressureTimeoutMs", "txTimeoutMs", "largeFrameTimeoutMs", "seenTtlMs", "retainedScoreMs", "opportunisticGraftIntervalMs", "gossipFactor", "ipAllowlist", "score", "processor", "execution" });
     const processor = try get(policy, "processor");
-    if (try processor.typeof() != .undefined) {
+    {
         const limits_mod = n.gossip_processor.limits_mod;
         const count = try array(processor, limits_mod.kind_count);
         if (count != limits_mod.kind_count) return error.InvalidGossipProcessorLimits;

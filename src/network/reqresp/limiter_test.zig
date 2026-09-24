@@ -128,7 +128,7 @@ test "limiter peer rejection preserves aggregate credit and wide refill saturate
 
 test "reqresp default aggregate admits the peer population control quotas and keeps bulk limits" {
     const reqresp = @import("reqresp.zig");
-    var rr = try reqresp.ReqResp.init(std.testing.allocator, .{ .forks = &.{} });
+    var rr = try reqresp.ReqResp.init(std.testing.allocator, .{ .forks = &.{}, .admission = try reqresp.AdmissionOptions.defaults(&@import("policy_fixture.zig").config(), 128, 128, 64) });
     defer rr.deinit();
     const controls = [_]Protocol{ .status_v1, .status_v2, .ping_v1, .metadata_v1, .metadata_v2, .metadata_v3, .goodbye_v1 };
     const peers = rr.options.peers;
@@ -142,12 +142,9 @@ test "reqresp default aggregate admits the peer population control quotas and ke
         try std.testing.expect(!rr.limiter.take(.{ .index = 0, .generation = 2 }, which, 1, 0));
         rr.limiter.bind(.{ .index = 0, .generation = 1 }, 0);
     }
-    const defaults = limiter.defaultQuotas();
-    const bulk = [_]Protocol{ .blocks_by_range_v2, .blocks_by_root_v2, .blob_sidecars_by_range_v1, .blob_sidecars_by_root_v1, .data_column_sidecars_by_range_v1, .data_column_sidecars_by_root_v1 };
-    for (bulk) |which| try std.testing.expectEqual(defaults[@intFromEnum(which)], rr.limiter.global_quotas[@intFromEnum(which)]);
-    var explicit = defaults;
+    var explicit = limiter.defaultQuotas();
     explicit[@intFromEnum(Protocol.ping_v1)].tokens = 3;
-    var overridden = try reqresp.ReqResp.init(std.testing.allocator, .{ .forks = &.{}, .global_quotas = explicit });
+    var overridden = try reqresp.ReqResp.init(std.testing.allocator, .{ .forks = &.{}, .global_quotas = explicit, .admission = try reqresp.AdmissionOptions.defaults(&@import("policy_fixture.zig").config(), 128, 128, 64) });
     defer overridden.deinit();
     try std.testing.expectEqual(explicit, overridden.limiter.global_quotas);
 }

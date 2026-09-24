@@ -290,7 +290,7 @@ test "reqresp active light client traffic preserves control reserve and cancella
     const handles = try support.connectPair(&pair);
     var router = try routing.Router.init(std.testing.allocator, .{});
     defer router.deinit();
-    var owner = try reqresp.ReqResp.init(std.testing.allocator, @import("control_fixture.zig").reservedOptions());
+    var owner = try reqresp.ReqResp.init(std.testing.allocator, try @import("control_fixture.zig").reservedOptions());
     defer owner.deinit();
     const which = protocol.Protocol.light_client_finality_update_v1;
     const capacity = protocol.Protocol.light_client_updates_by_range_v1.info().response_max;
@@ -545,7 +545,7 @@ fn admissionAllocation(allocator: std.mem.Allocator) !void {
         .admission = .{ .policy = policy_fixture(), .limits = .{ .identities = 2, .peer = admission_quotas(2, 1000), .global = admission_quotas(100, 1000) } },
     });
     defer owner.deinit();
-    try std.testing.expectEqual(owner.admission.?.limiter.memoryPlan().allocated_bytes, owner.memoryPlan().admission_bytes);
+    try std.testing.expectEqual(owner.admission.limiter.memoryPlan().allocated_bytes, owner.memoryPlan().admission_bytes);
 }
 
 test "reqresp request admission owner allocation failure prefixes" {

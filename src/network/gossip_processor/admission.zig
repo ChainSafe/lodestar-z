@@ -29,7 +29,7 @@ pub fn admit(table: *processor.GossipProcessor, owner: *gossip.Gossipsub, candid
     const states = [_]processor.State{ .queued, .needs_check, .checking, .waiting };
     var cursors: [states.len]u32 = undefined;
     const k = @intFromEnum(kind);
-    for (states, &cursors) |state, *cursor| cursor.* = table.queues[if (table.limits == null) 0 else k][@intFromEnum(state)].head;
+    for (states, &cursors) |state, *cursor| cursor.* = table.queues[k][@intFromEnum(state)].head;
     while (count <= tokens.len) {
         if (capacityAfter(table, kind, message.bytes.len, tokens[0..count]) and candidate.feasible(handles[0..count])) {
             for (tokens[0..count], handles[0..count]) |token, handle| {
@@ -41,7 +41,7 @@ pub fn admit(table: *processor.GossipProcessor, owner: *gossip.Gossipsub, candid
             table.diag.freshnessReplacements +|= count;
             return true;
         }
-        if (count == tokens.len or table.limits == null or !processor.limits_mod.newestFirst(kind)) break;
+        if (count == tokens.len or !processor.limits_mod.newestFirst(kind)) break;
         var selected: ?usize = null;
         for (cursors, 0..) |index, i| {
             if (index != none and (selected == null or table.cells[index].order < table.cells[cursors[selected.?]].order)) selected = i;
@@ -85,7 +85,7 @@ fn capacityAfter(table: *const processor.GossipProcessor, kind: processor.limits
         free_cells += @intFromBool(cell.generation < std.math.maxInt(u64));
         entries += @intFromBool(payload.generation < std.math.maxInt(u64));
     }
-    const limits = table.limits.?[k];
+    const limits = table.limits[k];
     const required = storage.Store.pagesFor(len);
     return free_cells > 0 and entries > 0 and required <= pages and table.used_items[k] - victims.len < limits.items and required * storage.page_bytes <= limits.bytes -| used;
 }

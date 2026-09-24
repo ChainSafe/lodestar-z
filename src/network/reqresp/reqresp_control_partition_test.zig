@@ -14,7 +14,7 @@ test "reqresp drain retains blocked terminals across control and application par
     const handles = try support.connectPair(&pair);
     var router = try routing.Router.init(std.testing.allocator, .{});
     defer router.deinit();
-    var requests = try rr.ReqResp.init(std.testing.allocator, reservedOptions());
+    var requests = try rr.ReqResp.init(std.testing.allocator, try reservedOptions());
     defer requests.deinit();
     const size = protocol.Protocol.blocks_by_root_v2.info().response_max;
     const sink = try std.testing.allocator.alloc(u8, 2 * size);
@@ -91,11 +91,11 @@ test "reqresp service retains request and chunk bytes through control progress" 
     try pair.init(.{}, .{});
     defer pair.deinit();
     const handles = try support.connectPair(&pair);
-    var options = reservedOptions();
+    var options = try reservedOptions();
     options.forks = &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .deneb }};
-    var client = try service_mod.Service.init(std.testing.allocator, .{ .reqresp = options, .automatic_gossip_admission = false, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } });
+    var client = try service_mod.Service.init(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } });
     defer client.deinit();
-    var server = try service_mod.Service.init(std.testing.allocator, .{ .reqresp = options, .automatic_gossip_admission = false, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } });
+    var server = try service_mod.Service.init(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } });
     defer server.deinit();
     defer server.reqresp.shutdown(&pair.server, &server.router);
     const sink = try std.testing.allocator.alloc(

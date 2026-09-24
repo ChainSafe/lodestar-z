@@ -30,25 +30,6 @@ const Samples = struct {
     }
 };
 
-fn options(key: *const network.KeyPair, plan: *const network.chain.Plan, update: *const network.network_core.LocalUpdate) network.network_core.Options {
-    return .{
-        .wait_mode = .native_poll,
-        .transport = .{ .host = key, .bind = .{ .ip4 = .loopback(0) }, .limits = .{ .connections_max = 4, .handshaking_max = 4, .handshaking_per_source_max = 4, .dialing_max = 1, .outbound_reserved = 1, .outbound_max = 4 } },
-        .core = .{
-            .peers = .{ .capacity = 4, .outbound_reserve = 1, .max_peers = 3, .target_peers = 2, .min_outbound = 1 },
-            .dial = .{ .capacity = 4, .concurrent_max = 1, .outbound_reserved = 1, .seed = 7 },
-            .service = .{
-                .identify = .{},
-                .router = .{ .capabilities = update.capabilities, .negotiations_max = 24, .outbound_control_reserved = 8 },
-                .reqresp = .{ .peers = 4, .outbound_max = 16, .inbound_max = 16, .outbound_control_reserved = 8, .inbound_control_reserved = 8, .outbound_per_peer_max = 4, .inbound_per_peer_max = 16, .inbound_application_per_peer_max = 8, .forks = plan.forks[0..plan.boundary_count], .policy = plan.requestPolicy() },
-                .gossipsub = .{ .random_seed = 1, .topic_policy = plan.topics[0..plan.boundary_count], .message_id_policy = .{ .phase0_digest = plan.phase0_digest } },
-            },
-        },
-        .local = update.local,
-        .schedule = update.schedule,
-    };
-}
-
 /// Admits gossip as the gossip processor does and keeps each validation handle.
 const GossipSink = struct {
     handles: [256]network.gossipsub.ValidationHandle = undefined,
@@ -92,9 +73,9 @@ fn turn(node: *network.NetworkCore, io: std.Io, outputs: network.network_core.Ou
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len > 2) return error.InvalidProfile;
-    const selected = if (args.len == 2) args[1] else "baseline";
+    const selected = if (args.len == 2) args[1] else return error.InvalidProfile;
     if (std.mem.eql(u8, selected, "idle_wait")) return idleWait(init);
-    const profile: ?network.configuration.Profile = if (std.mem.eql(u8, selected, "baseline")) null else if (std.mem.eql(u8, selected, "small")) .small else if (std.mem.eql(u8, selected, "beacon_node")) .beacon_node else return error.InvalidProfile;
+    const profile: network.configuration.Profile = if (std.mem.eql(u8, selected, "small")) .small else if (std.mem.eql(u8, selected, "beacon_node")) .beacon_node else return error.InvalidProfile;
     std.debug.print("profile={s} preset={s} optimize={s} warmup_turns={} measured_turns={} payload=synthetic_transport_bytes host_consensus_validation=false\n", .{ selected, @tagName(preset.active_preset), @tagName(@import("builtin").mode), warmup_turns, turns });
     const plan = try network.chain.Plan.init(chain_config, false);
     const io = init.io;
@@ -140,25 +121,23 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("turn_allocation_calls_a={} turn_allocation_calls_b={} process_rss=external_time_maximum_resident_set_kbytes\n", .{ a.reservations.allocation_calls - allocations_a, b.reservations.allocation_calls - allocations_b });
 }
 
-fn initialize(node: *network.NetworkCore, a: std.mem.Allocator, io: std.Io, key: *const network.KeyPair, profile: ?network.configuration.Profile, plan: *const network.chain.Plan) !void {
+fn initialize(node: *network.NetworkCore, a: std.mem.Allocator, io: std.Io, key: *const network.KeyPair, profile: network.configuration.Profile, plan: *const network.chain.Plan) !void {
     const update = try plan.update(.{ .metadata = .{ .custody_group_count = chain_config.chain.CUSTODY_REQUIREMENT } }, null, 0);
-    if (profile) |selected| {
-        try node.initManaged(a, io, .{
-            .wait_mode = .native_poll,
-            .host = key,
-            .bind = .{ .ip4 = .loopback(0) },
-            .local = update.local,
-            .schedule = update.schedule,
-            .configuration = .{
-                .profile = selected,
-                .seed = 7,
-                .forks = plan.forks[0..plan.boundary_count],
-                .admission_policy = plan.requestPolicy(),
-                .router = .{ .capabilities = update.capabilities },
-                .gossip = .{ .topic_policy = plan.topics[0..plan.boundary_count], .message_id_policy = .{ .phase0_digest = plan.phase0_digest } },
-            },
-        });
-    } else try node.initRaw(a, io, options(key, plan, &update));
+    try node.initManaged(a, io, .{
+        .wait_mode = .native_poll,
+        .host = key,
+        .bind = .{ .ip4 = .loopback(0) },
+        .local = update.local,
+        .schedule = update.schedule,
+        .configuration = .{
+            .profile = profile,
+            .seed = 7,
+            .forks = plan.forks[0..plan.boundary_count],
+            .admission_policy = plan.requestPolicy(),
+            .router = .{ .capabilities = update.capabilities },
+            .gossip = .{ .topic_policy = plan.topics[0..plan.boundary_count], .message_id_policy = .{ .phase0_digest = plan.phase0_digest } },
+        },
+    });
 }
 
 fn connectPair(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, topic: []const u8) !void {
@@ -176,7 +155,6 @@ fn connectPair(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, top
     if (peer == null) return error.ConnectionDeadline;
     try b.addDirectPeer(&a.peerId(), &.{a.transport.localAddress()}, try network.transport.currentTime(io));
     var peer_events: [4]t.Event = undefined;
-    var gossip_events: [1]network.gossipsub.Event = undefined;
     var subscription: network.gossipsub.local_intent.Boundary = .{ .digest = network.gossipsub.topic.parseCanonical(topic).?.digest };
     subscription.mask(.beacon_block)[0] = 1;
     subscription.lengths[@intFromEnum(network.gossipsub.topic.Kind.beacon_block)] = 1;
@@ -190,9 +168,9 @@ fn connectPair(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, top
         _ = try node.applyIntent(&intent, try network.transport.currentTime(io));
     }
     for (0..4000) |_| {
-        const result_a = a.step(io, try network.transport.currentTime(io), 100, .{ .peers = &peer_events, .gossipsub = &gossip_events }, 1);
+        const result_a = a.step(io, try network.transport.currentTime(io), 100, .{ .peers = &peer_events }, 1);
         if (result_a.failure) |err| return err;
-        const result_b = b.step(io, try network.transport.currentTime(io), 100, .{ .peers = &peer_events, .gossipsub = &gossip_events }, 1);
+        const result_b = b.step(io, try network.transport.currentTime(io), 100, .{ .peers = &peer_events }, 1);
         if (result_b.failure) |err| return err;
         if (a.service.gossipsub.resourceSnapshot().remote_subscriptions > 0 and a.service.gossipsub.peers.rows[0].direct) break;
         try io.sleep(.fromMilliseconds(1), .awake);
@@ -214,7 +192,6 @@ fn pressure(a: *network.NetworkCore, b: *network.NetworkCore, sinks: []u8, io: s
     var gossip: GossipSink = .{};
     gossip.attach(b);
     defer b.service.gossipsub.message_sink = null;
-    var gossip_events: [16]network.gossipsub.Event = undefined;
     var request: [32]u8 = @splat(0);
     request[8] = 1;
     request[16] = 1;
@@ -235,7 +212,7 @@ fn pressure(a: *network.NetworkCore, b: *network.NetworkCore, sinks: []u8, io: s
             gossip_queued += published.queued;
             gossip_pressured += published.pressured;
         }
-        _ = try turn(b, io, .{ .gossipsub = &gossip_events });
+        _ = try turn(b, io, .{});
         if (gossip.excess) return error.ExcessGossip;
         const sender = a.service.gossipsub.resourceSnapshot();
         const receiver = b.service.gossipsub.resourceSnapshot();
@@ -270,14 +247,13 @@ fn pressure(a: *network.NetworkCore, b: *network.NetworkCore, sinks: []u8, io: s
 
 fn drain(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, expected: usize, payload: []const u8, context: rr.ForkEntry, gossip: *GossipSink, delivered_gossip: usize) !void {
     var events: [8]rr.Event = undefined;
-    var gossip_events: [16]network.gossipsub.Event = undefined;
     var received: usize = 0;
     var chunks: usize = 0;
     var terminals: usize = 0;
     var served: usize = 0;
     var messages = delivered_gossip;
     for (0..turns) |_| {
-        const result = try turn(b, io, .{ .application = &events, .gossipsub = &gossip_events });
+        const result = try turn(b, io, .{ .application = &events });
         for (gossip.handles[0..gossip.count]) |handle| {
             messages += 1;
             _ = b.reportValidation(handle, .ignore, try network.transport.currentTime(io));

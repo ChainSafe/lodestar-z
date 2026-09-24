@@ -103,36 +103,6 @@ export async function exerciseRaw(Child, waitFor, binary) {
     );
     await cleanStore();
 
-    await zig.command("setEventCapacity", {capacity: 0});
-    await zig.command("pause", {paused: true});
-    const before = await zig.command("snapshot");
-    const first = summary(payload(64, 0x71000103));
-    const second = summary(payload(64, 0x71000104));
-    await js.command("rawRpc", {kind: "two", seed: 0x71000103, size: 64});
-    await zig.command("pump", {turns: 8});
-    const pressured = await zig.command("snapshot");
-    assert.equal(pressured.steps - before.steps, 8);
-    assert.equal(pressured.emitted, before.emitted);
-    assert.equal(pressured.heldFrames, 1);
-    await zig.command("setEventCapacity", {capacity: 1});
-    for (let turn = 0; turn < 32; turn++) {
-      await zig.command("pump", {turns: 1});
-      if (deliveries().length === before.emitted + 2) break;
-    }
-    assert.deepEqual(
-      deliveries()
-        .slice(before.emitted)
-        .map(({length, sha256}) => ({length, sha256})),
-      [first, second]
-    );
-    await zig.command("pump", {turns: 8});
-    const resumed = await zig.command("snapshot");
-    assert.equal(resumed.emitted, before.emitted + 2);
-    assert.equal(resumed.rpcsReceived, before.rpcsReceived + 1);
-    assert.equal(resumed.duplicates, before.duplicates);
-    await zig.command("pause", {paused: false});
-    await cleanStore();
-
     await js.command("partialStart", {address: address.address});
     await waitFor(async () => (await zig.command("snapshot")).reqrespInbound === 1);
     await zig.command("advance", {ms: 5001});
@@ -187,8 +157,8 @@ export async function exerciseRaw(Child, waitFor, binary) {
         .filter((message) => message.messageId === cachedId).length,
       1
     );
-    assert.equal(deliveries().length, 7);
-    return {malformed: true, pressureTurns: 8, recovery: true, timeout: true};
+    assert.equal(deliveries().length, 5);
+    return {malformed: true, recovery: true, timeout: true};
   } catch (error) {
     throw Error(
       `raw scenarios: ${String(error)} ${JSON.stringify({js: js.events.slice(-12), snapshot: await zig.command("snapshot").catch(() => null), zig: zig.events.slice(-12)})}`

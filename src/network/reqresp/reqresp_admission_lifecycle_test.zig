@@ -23,7 +23,7 @@ fn receive(setup: *harness.Pair) !@FieldType(rr.Event, "request") {
 
 test "reqresp admission lifecycle incomplete requests cannot consume another connection's receive reservation" {
     var setup: harness.Pair = .{};
-    try setup.init(.{}, .{ .reserve_inbound_per_peer = true, .inbound_max = 2, .inbound_control_reserved = 1 });
+    try setup.init(.{}, .{ .inbound_max = 2, .inbound_control_reserved = 1 });
     defer setup.deinit();
     for (0..2) |_| {
         const stream = try setup.openRaw(.blocks_by_root_v2);
@@ -46,7 +46,7 @@ test "reqresp admission lifecycle incomplete requests cannot consume another con
 
 test "reqresp admission lifecycle cancellation retains execution until host retirement" {
     var setup: harness.Pair = .{};
-    try setup.init(.{}, .{ .reserve_inbound_per_peer = true, .inbound_max = 2, .inbound_control_reserved = 1, .serving_per_peer_max = 1 });
+    try setup.init(.{}, .{ .inbound_max = 2, .inbound_control_reserved = 1, .serving_per_peer_max = 1 });
     defer setup.deinit();
     const sink = try std.testing.allocator.alloc(u8, Protocol.blocks_by_root_v2.info().response_max);
     defer std.testing.allocator.free(sink);
@@ -107,7 +107,7 @@ test "reqresp admission lifecycle response permission waits without retaining a 
 
 test "reqresp admission lifecycle fair dispatch advances to the next peer before another request from a busy peer" {
     var setup: harness.Pair = .{};
-    try setup.init(.{}, .{ .reserve_inbound_per_peer = true, .inbound_max = 2 });
+    try setup.init(.{}, .{ .inbound_max = 2 });
     defer setup.deinit();
     const owner = &setup.shared.server.reqresp;
     for ([_]u16{ 0, 0, 1, 2 }, 0..) |peer, ordinal| {
@@ -141,8 +141,7 @@ fn allocation(allocator: std.mem.Allocator) !void {
     var owner = try rr.ReqResp.init(allocator, .{
         .peers = 2,
         .forks = &.{},
-        .policy = policy(),
-        .reserve_inbound_per_peer = true,
+        .admission = try rr.AdmissionOptions.defaults(&policy(), 2, 1, 1),
         .outbound_max = 2,
         .inbound_max = 2,
         .inbound_control_reserved = 1,
@@ -150,7 +149,7 @@ fn allocation(allocator: std.mem.Allocator) !void {
     defer owner.deinit();
     for (0..2) |peer| for (std.enums.values(Protocol)) |which| {
         const first = Plan.first(@intCast(peer), which);
-        const bounds = owner.policy.?.requestMaxFor(which);
+        const bounds = owner.policy.requestMaxFor(which);
         try std.testing.expectEqual(bounds, owner.inboundSink(@intCast(first)).len);
         try std.testing.expectEqual(bounds, owner.inboundSink(@intCast(first + 1)).len);
     };
@@ -160,7 +159,6 @@ test "reqresp admission lifecycle control traffic preserves application quota fa
     const quotas = @import("admission_fixture.zig").quotas(4, 1000);
     var setup: harness.Pair = .{};
     try setup.init(.{}, .{
-        .reserve_inbound_per_peer = true,
         .inbound_max = 3,
         .inbound_control_reserved = 1,
         .admission = .{ .policy = policy(), .limits = .{ .identities = 3, .peer = quotas, .global = quotas } },
@@ -184,7 +182,7 @@ test "reqresp admission lifecycle control traffic preserves application quota fa
         };
     }
     const heavy = &owner.inbound[Plan.first(0, .blocks_by_root_v2)];
-    try std.testing.expectEqual(.allowed, owner.admission.?.limiter.take(&heavy.identity, .blocks_by_root_v2, 4, .fulu, setup.shared.pair.now.mono_ms));
+    try std.testing.expectEqual(.allowed, owner.admission.limiter.take(&heavy.identity, .blocks_by_root_v2, 4, .fulu, setup.shared.pair.now.mono_ms));
     var application_events: [4]rr.Event = undefined;
     var control_events: [4]rr.Event = undefined;
     setup.shared.pair.advance(250);
@@ -206,7 +204,6 @@ test "reqresp admission lifecycle protocol buffers and all startup allocation fa
 test "reqresp admission lifecycle a fresh burst starts full requests before splitting residual quota" {
     var setup: harness.Pair = .{};
     try setup.init(.{}, .{
-        .reserve_inbound_per_peer = true,
         .inbound_max = 3,
         .inbound_control_reserved = 1,
         .admission = .{ .policy = policy(), .limits = .{

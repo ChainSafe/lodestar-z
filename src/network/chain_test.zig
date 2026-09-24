@@ -75,14 +75,12 @@ test "network chain derives fixed request storage and historical blob limits ind
     const maximum = 128 * (40 + 8 * preset.NUMBER_OF_COLUMNS);
     try std.testing.expectEqual(@as(usize, maximum), plan.policy.requestMax());
     const policy = plan.requestPolicy();
-    var requests = try rr.ReqResp.init(std.testing.allocator, .{ .forks = plan.forks[0..plan.boundary_count], .policy = policy, .inbound_max = 8, .inbound_control_reserved = 2, .inbound_per_peer_max = 8 });
+    var requests = try rr.ReqResp.init(std.testing.allocator, .{ .forks = plan.forks[0..plan.boundary_count], .admission = try rr.AdmissionOptions.defaults(&policy, 8, 2, 6), .inbound_max = 8, .inbound_control_reserved = 2, .inbound_per_peer_max = 8 });
     defer requests.deinit();
     const bytes = requests.memoryPlan().total_bytes;
-    try std.testing.expectEqual(@as(usize, 6 * maximum + 2 * 92), requests.request_sinks.len);
     for ([_]config.ForkSeq{ .deneb, .electra, .fulu }) |fork| {
         requests.setRequestFork(fork);
         try std.testing.expectEqual(bytes, requests.memoryPlan().total_bytes);
-        try std.testing.expectEqual(@as(usize, maximum), requests.inboundSink(2).len);
     }
     var range = [_]u8{0} ** 16;
     std.mem.writeInt(u64, range[0..8], 3 * preset.preset.SLOTS_PER_EPOCH, .little);
@@ -128,9 +126,8 @@ test "network chain honors configured wire limits and requires complete metadata
     try std.testing.expectEqual(encoded.len, try wire.encodeMetadata(.metadata_v3, &update.local.metadata, update.local.fork, &encoded));
     try std.testing.expectEqualDeep(update.local.metadata, try wire.decodeMetadata(.metadata_v3, &encoded, update.local.fork));
     const policy = plan.requestPolicy();
-    var requests = try rr.ReqResp.init(std.testing.allocator, .{ .forks = plan.forks[0..plan.boundary_count], .policy = policy });
+    var requests = try rr.ReqResp.init(std.testing.allocator, .{ .forks = plan.forks[0..plan.boundary_count], .admission = try rr.AdmissionOptions.defaults(&policy, 8, 2, 64) });
     defer requests.deinit();
-    try std.testing.expectEqual(@as(usize, 8 * (40 + 8 * preset.NUMBER_OF_COLUMNS)), requests.request_sink_size);
     try std.testing.expectEqual(@as(usize, 1024 * 1024), (try requests.responseBounds(.blocks_by_root_v2, .deneb)).max);
     requests.setRequestFork(.deneb);
     try std.testing.expectEqual(@as(usize, 80), requests.requestBounds(.blob_sidecars_by_root_v1).request_max);

@@ -1,18 +1,18 @@
 const std = @import("std");
 const g = @import("network_gossip.zig");
-const Budget = @import("network").byte_budget.Budget;
+const limits_mod = @import("network").gossip_processor.limits_mod;
+
+fn plan(block: limits_mod.Limit) @import("network").gossip_processor.Plan {
+    var limits: limits_mod.Limits = @splat(.{ .items = 2, .bytes = 4096 });
+    limits[@intFromEnum(limits_mod.Kind.beacon_block)] = block;
+    return .{ .capacity = limits_mod.items(&limits), .bytes = limits_mod.bytes(&limits), .limits = limits, .execution = limits };
+}
 
 test "gossip exact shared 2Q admission and generation exhaustion" {
-    var budget: Budget = .{ .limit = 19 };
-    var table = try g.Table.init(std.testing.allocator, .{ .capacity = 64, .bytes = 64 * 1024 * 1024 }, &budget);
+    var table = try g.Table.init(std.testing.allocator, plan(.{ .items = 64, .bytes = 64 * 4096 }));
     defer table.deinit();
-    try std.testing.expectError(error.NetworkBridgeFull, table.reserve(10));
-    try std.testing.expectEqual(@as(usize, 0), budget.used);
-    budget.limit = 20;
     const token = try table.reserve(10);
-    try std.testing.expectEqual(@as(usize, 20), budget.used);
     table.retire(token);
-    try std.testing.expectEqual(@as(usize, 0), budget.used);
     table.cells[0].generation = std.math.maxInt(u64);
     const next = try table.reserve(10);
     try std.testing.expectEqual(@as(u16, 1), next.index);
@@ -24,8 +24,7 @@ test "gossip table and payload allocation prefixes unwind shared reservation" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationPrefix, .{});
 }
 fn allocationPrefix(allocator: std.mem.Allocator) !void {
-    var budget: Budget = .{ .limit = 20 };
-    var table = try g.Table.init(allocator, .{ .capacity = 1024, .bytes = 64 * 1024 * 1024 }, &budget);
+    var table = try g.Table.init(allocator, plan(.{ .items = 1024, .bytes = 64 * 1024 * 1024 }));
     defer table.deinit();
     const token = try table.reserve(10);
     defer table.retire(token);
@@ -33,8 +32,7 @@ fn allocationPrefix(allocator: std.mem.Allocator) !void {
 }
 
 test "gossip batch bounds, rollback and expiry keep pins until full completion" {
-    var budget: Budget = .{ .limit = 64 * 1024 * 1024 };
-    var table = try g.Table.init(std.testing.allocator, .{ .capacity = 1024, .bytes = 64 * 1024 * 1024 }, &budget);
+    var table = try g.Table.init(std.testing.allocator, plan(.{ .items = 1024, .bytes = 64 * 1024 * 1024 }));
     defer table.deinit();
     const data = try std.testing.allocator.alloc(u8, 10 * 1024 * 1024);
     defer std.testing.allocator.free(data);
@@ -50,9 +48,7 @@ test "gossip batch bounds, rollback and expiry keep pins until full completion" 
     try std.testing.expectEqual(first, batch.tokens[0]);
     table.expire(100);
     try std.testing.expectEqual(@as(usize, 1), table.diag.occupied);
-    try std.testing.expectEqual(@as(usize, 20 * 1024 * 1024), budget.used);
     table.finish(&batch, true);
-    try std.testing.expectEqual(@as(usize, 0), budget.used);
     try std.testing.expect(!table.report(first, .accept, 100));
     try std.testing.expectEqual(@as(u64, 2), table.diag.queuedExpired);
     for (0..65) |_| {
@@ -69,7 +65,6 @@ test "gossip batch bounds, rollback and expiry keep pins until full completion" 
     try std.testing.expect(table.oldest() != null);
     try std.testing.expectEqual(@as(usize, 1), table.snapshot(1).queued);
     table.close();
-    try std.testing.expectEqual(@as(usize, 0), budget.used);
 }
 
 test "gossip original admission wall projection is precise and independent of drain" {
@@ -81,8 +76,7 @@ test "gossip original admission wall projection is precise and independent of dr
 test "gossip flags remain independent of full command capacity and reject stale generations" {
     var commands: @import("network_commands.zig").Table = .{};
     for (0..32) |_| _ = try commands.reserve(.getIdentity);
-    var budget: Budget = .{ .limit = 128 };
-    var table = try g.Table.init(std.testing.allocator, .{ .capacity = 64, .bytes = 64 * 1024 * 1024 }, &budget);
+    var table = try g.Table.init(std.testing.allocator, plan(.{ .items = 64, .bytes = 64 * 4096 }));
     defer table.deinit();
     var handles: [64]g.Token = undefined;
     for (&handles) |*token| {
@@ -106,5 +100,4 @@ test "gossip flags remain independent of full command capacity and reject stale 
     table.install(replacement, "y");
     try std.testing.expect(!table.report(handles[0], .accept, 101));
     table.close();
-    try std.testing.expectEqual(@as(usize, 0), budget.used);
 }

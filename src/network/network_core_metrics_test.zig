@@ -317,7 +317,7 @@ fn initOwner(node: *core.NetworkCore) !void {
         .host = &key,
         .bind = .{ .ip4 = .loopback(0) },
         .local = @import("managed_test_support.zig").localState(.{}),
-        .configuration = .{ .profile = .beacon_node, .seed = 7, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }} },
+        .configuration = .{ .profile = .beacon_node, .seed = 7, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }}, .admission_policy = @import("reqresp/policy_fixture.zig").config() },
     });
 }
 
