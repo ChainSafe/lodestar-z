@@ -69,6 +69,8 @@ test {
     _ = @import("managed.zig");
     _ = @import("network_core.zig");
     _ = @import("reservations.zig");
+    _ = @import("deadline_heap.zig");
+    _ = @import("index_list.zig");
     _ = configuration;
     _ = @import("capabilities.zig");
     _ = identify;

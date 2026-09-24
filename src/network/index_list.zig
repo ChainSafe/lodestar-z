@@ -42,6 +42,17 @@ pub const List = struct {
         link.* = .{};
     }
 
+    /// Appends when the row is not linked. Returns whether it appended. Ready-list marks are idempotent.
+    pub fn insert(self: *List, rows: anytype, comptime field: []const u8, index: u32) bool {
+        if (@field(rows[index], field).linked) return false;
+        self.append(rows, field, index);
+        return true;
+    }
+
+    pub fn contains(rows: anytype, comptime field: []const u8, index: u32) bool {
+        return @field(rows[index], field).linked;
+    }
+
     pub fn pop(self: *List, rows: anytype, comptime field: []const u8) ?u32 {
         if (self.head == none) return null;
         const index = self.head;
