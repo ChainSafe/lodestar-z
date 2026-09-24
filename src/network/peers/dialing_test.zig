@@ -1350,3 +1350,47 @@ test "peer dial landed connections clear the dialed endpoint after a mid-dial re
         try std.testing.expectEqual(@as(u8, 0), catalog.history.strikesFor(dialed, 1, due));
     }
 }
+
+test "peer dial lease expiry and backoff fire from the intent heaps" {
+    var q = try mod.Dialing.init(.{ .capacity = 2, .concurrent_max = 1, .seed = 4 });
+    var catalog = try initCatalog(a, q.options);
+    defer catalog.deinit(a);
+    const peer: t.PeerId = .{ .bytes = @splat(1) };
+    try q.enqueue(&catalog, &peer, &.{address}, false, 0);
+    const row = catalog.rowFor(catalog.find(&peer).?).?;
+    var out: [1]mod.DialIntent = undefined;
+    try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 0, &out));
+    // An unstarted attempt holds its lease; nothing else is due before it.
+    try std.testing.expectEqual(@as(?u64, 10_000), q.nextWakeup(&catalog, 0, 1));
+    var visits = q.visits;
+    for ([_]u64{ 1, 5_000, 9_999 }) |now| {
+        q.expire(&catalog, null, now);
+        try std.testing.expectEqual(@as(usize, 0), q.poll(&catalog, now, &out));
+        try std.testing.expectEqual(@as(?u64, 10_000), q.nextWakeup(&catalog, now, 1));
+    }
+    try std.testing.expectEqual(visits, q.visits);
+    q.expire(&catalog, null, 10_000);
+    try std.testing.expect(q.visits > visits);
+    try std.testing.expectEqual(@as(u64, 1), q.outcomes[@intFromEnum(t.DialOutcome.expired)]);
+    try std.testing.expectEqual(@as(?u8, null), row.attempt);
+    // The expired lease backs the intent off; its eligibility is the next deadline on the heap.
+    const eligible = row.intent.eligible_at_ms;
+    try std.testing.expect(eligible > 10_000 and eligible < mod.connect_timeout_ms);
+    try std.testing.expectEqual(@as(?u64, eligible), q.nextWakeup(&catalog, 10_000, 1));
+    // Without dial room only the manual expiry remains.
+    try std.testing.expectEqual(@as(?u64, mod.connect_timeout_ms), q.nextWakeup(&catalog, 10_000, 0));
+    visits = q.visits;
+    try std.testing.expectEqual(@as(usize, 0), q.poll(&catalog, eligible - 1, &out));
+    try std.testing.expectEqual(visits, q.visits);
+    try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, eligible, &out));
+    try std.testing.expect(out[0].peer.eql(&peer));
+    // The second lease ends at the manual deadline, which releases the intent.
+    try std.testing.expectEqual(@as(?u64, eligible + 10_000), q.nextWakeup(&catalog, eligible, 1));
+    q.expire(&catalog, null, eligible + 10_000);
+    try std.testing.expectEqual(@as(u64, 2), q.outcomes[@intFromEnum(t.DialOutcome.expired)]);
+    try std.testing.expectEqual(@as(?u64, mod.connect_timeout_ms), q.nextWakeup(&catalog, eligible + 10_000, 0));
+    q.expire(&catalog, null, mod.connect_timeout_ms);
+    try std.testing.expectEqual(@as(u64, 1), q.counters.manual_expired);
+    try std.testing.expect(catalog.find(&peer) == null);
+    try std.testing.expectEqual(@as(?u64, null), q.nextWakeup(&catalog, mod.connect_timeout_ms, 1));
+}

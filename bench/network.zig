@@ -23,6 +23,8 @@ const Samples = struct {
     reqresp_visits_start: u64 = 0,
     negotiation_visits_start: u64 = 0,
     gossip_visits_start: u64 = 0,
+    control_visits_start: u64 = 0,
+    dial_visits_start: u64 = 0,
     /// Due-now turns under a transport source whose previous turn hit no per-turn cap.
     uncapped_backlog: u64 = 0,
     uncapped_events: u64 = 0,
@@ -36,6 +38,8 @@ const Samples = struct {
             .reqresp_visits_start = node.service.reqresp.visits,
             .negotiation_visits_start = node.service.router.negotiator.visits,
             .gossip_visits_start = node.service.gossipsub.sessions.visits,
+            .control_visits_start = node.peer_manager.control.visits,
+            .dial_visits_start = node.peer_manager.dialing.visits,
         };
     }
 
@@ -58,12 +62,21 @@ const Samples = struct {
         std.mem.sort(u64, &self.ns, {}, std.sort.asc(u64));
         const visits = node.transport.engine.visits;
         std.debug.print("case={s} turns={} wait_max_ms=0 p50_ns={} p95_ns={} p99_ns={} max_ns={} rx={} tx={} backlog_turns={} immediate_deadlines={} visits_timer={} visits_collect={} visits_flush={} uncapped_backlog_due={} uncapped_events_due={}\n", .{ name, turns, self.ns[turns / 2], self.ns[turns * 95 / 100], self.ns[turns * 99 / 100], self.ns[turns - 1], self.received, self.sent, self.backlog, self.immediate, visits.timer - self.visits_start.timer, visits.collect - self.visits_start.collect, visits.flush - self.visits_start.flush, self.uncapped_backlog, self.uncapped_events });
-        std.debug.print("case={s} visits_reqresp={} visits_negotiation={} visits_gossip={}\n", .{ name, node.service.reqresp.visits - self.reqresp_visits_start, node.service.router.negotiator.visits - self.negotiation_visits_start, node.service.gossipsub.sessions.visits - self.gossip_visits_start });
+        std.debug.print("case={s} visits_reqresp={} visits_negotiation={} visits_gossip={} visits_control={} visits_dial={}\n", .{ name, node.service.reqresp.visits - self.reqresp_visits_start, node.service.router.negotiator.visits - self.negotiation_visits_start, node.service.gossipsub.sessions.visits - self.gossip_visits_start, node.peer_manager.control.visits - self.control_visits_start, node.peer_manager.dialing.visits - self.dial_visits_start });
         std.debug.print("case={s} due_now", .{name});
         inline for (std.meta.fields(Source)) |field| {
             std.debug.print(" {s}={}", .{ field.name, node.due_now_turns[field.value] - self.due_start[field.value] });
         }
         std.debug.print("\n", .{});
+    }
+
+    /// Connection, slot, session and row visits by the engine and every owner since begin.
+    fn visited(self: *const Samples, node: *const network.NetworkCore) u64 {
+        const visits = node.transport.engine.visits;
+        return (visits.timer - self.visits_start.timer) + (visits.collect - self.visits_start.collect) + (visits.flush - self.visits_start.flush) +
+            (node.service.reqresp.visits - self.reqresp_visits_start) + (node.service.router.negotiator.visits - self.negotiation_visits_start) +
+            (node.service.gossipsub.sessions.visits - self.gossip_visits_start) + (node.peer_manager.control.visits - self.control_visits_start) +
+            (node.peer_manager.dialing.visits - self.dial_visits_start);
     }
 };
 
@@ -113,6 +126,7 @@ pub fn main(init: std.process.Init) !void {
     const selected = if (args.len == 2) args[1] else return error.InvalidProfile;
     if (std.mem.eql(u8, selected, "idle_wait")) return idleWait(init);
     if (std.mem.eql(u8, selected, "idle_transport")) return idleTransport(init);
+    if (std.mem.eql(u8, selected, "idle_connections")) return idleConnections(init);
     const profile: network.configuration.Profile = if (std.mem.eql(u8, selected, "small")) .small else if (std.mem.eql(u8, selected, "beacon_node")) .beacon_node else return error.InvalidProfile;
     std.debug.print("profile={s} preset={s} optimize={s} warmup_turns={} measured_turns={} payload=synthetic_transport_bytes host_consensus_validation=false\n", .{ selected, @tagName(preset.active_preset), @tagName(@import("builtin").mode), warmup_turns, turns });
     const plan = try network.chain.Plan.init(chain_config, false);
@@ -468,4 +482,107 @@ fn idleTransport(init: std.process.Init) !void {
     std.debug.print("case=idle_transport connections={} turns={} p50_ns={} p95_ns={} p99_ns={} max_ns={} rx={} tx={} visits_timer={} visits_collect={} visits_flush={} timeouts_fired={} p50_budget_ns={}\n", .{ idle_transport_spokes, turns, ns[turns / 2], ns[turns * 95 / 100], ns[turns * 99 / 100], ns[turns - 1], received, sent, after.timer - visits.timer, after.collect - visits.collect, after.flush - visits.flush, hub.engine.counters.timeouts_fired - fired, idle_transport_p50_budget_ns });
     if (visited != 0) return error.IdleConnectionVisited;
     if (ns[turns / 2] > idle_transport_p50_budget_ns) return error.IdleTransportBudget;
+}
+
+const idle_connections_spokes = 200;
+/// CI fails the case above this median turn.
+const idle_connections_p50_budget_ns = 40_000;
+
+/// A hub NetworkCore (beacon_node profile, 256 connections, 210 max peers, 200 target peers)
+/// holding 200 admitted inbound connections from spoke Transports that speak only QUIC, so the
+/// hub's negotiations and its inbound Status grace wait on future deadlines. The measured turns
+/// start within 1 s of the last admission. An idle connection must cost no visit in the engine or
+/// in any owner.
+fn idleConnections(init: std.process.Init) !void {
+    const io = init.io;
+    const allocator = init.gpa;
+    const plan = try network.chain.Plan.init(chain_config, false);
+    const update = try plan.update(.{ .metadata = .{ .custody_group_count = chain_config.chain.CUSTODY_REQUIREMENT } }, null, 0);
+    const resolved = try network.configuration.resolve(.{
+        .profile = .beacon_node,
+        .seed = 7,
+        .forks = plan.forks[0..plan.boundary_count],
+        .admission_policy = plan.requestPolicy(),
+        .limits = .{ .connections_max = 256, .handshaking_max = 256, .handshaking_per_source_max = 256, .dialing_max = 32, .receive_budget_bytes = 512 * 1024 * 1024 },
+        .peers = .{ .capacity = 512, .outbound_reserve = 32, .target_peers = 200, .max_peers = 210, .min_outbound = 16 },
+        .byte_limit = 1024 * 1024 * 1024,
+        .router = .{ .capabilities = update.capabilities },
+        .gossip = .{ .topic_policy = plan.topics[0..plan.boundary_count], .message_id_policy = .{ .phase0_digest = plan.phase0_digest } },
+    });
+    const hub_key = try network.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{14}));
+    const hub = try allocator.create(network.NetworkCore);
+    defer allocator.destroy(hub);
+    try hub.init(allocator, io, &resolved, .{ .host = &hub_key, .bind = .{ .ip4 = .loopback(0) }, .local = update.local, .schedule = update.schedule });
+    defer hub.deinit(io);
+    const spokes = try allocator.alloc(network.Transport, idle_connections_spokes);
+    defer allocator.free(spokes);
+    var initialized: usize = 0;
+    defer for (spokes[0..initialized]) |*spoke| spoke.deinit(io);
+    for (spokes, 0..) |*spoke, index| {
+        var secret: [32]u8 = @splat(0);
+        std.mem.writeInt(u16, secret[30..32], @intCast(2_000 + index), .big);
+        const key = try network.KeyPair.fromSecretKey(&secret);
+        spoke.* = .{};
+        try spoke.init(allocator, io, .{ .host = &key, .bind = .{ .ip4 = .loopback(0) }, .limits = .{
+            .connections_max = 1,
+            .handshaking_max = 1,
+            .dialing_max = 1,
+            .receive_budget_bytes = 16 * 1024 * 1024,
+        } });
+        initialized += 1;
+    }
+    var events: [1024]network.Event = undefined;
+    var peer_events: [64]t.Event = undefined;
+    const outputs: network.network_core.Outputs = .{ .peers = &peer_events };
+    var dialed: usize = 0;
+    var admitted_at: u64 = 0;
+    for (0..20_000) |_| {
+        // A few handshakes at a time keep the hub's socket buffer from dropping Initials.
+        const connected = hub.peerCounts().connected;
+        while (dialed < spokes.len and dialed - connected < 16) : (dialed += 1) {
+            _ = try spokes[dialed].dialPeer(io, hub.transport.localAddress(), hub.peerId());
+        }
+        for (spokes[0..dialed]) |*spoke| {
+            const stepped = spoke.step(io, &events, .{ .wait_max_ms = 0 });
+            if (stepped.failure) |err| return err;
+        }
+        _ = try turn(hub, io, outputs);
+        if (hub.peerCounts().connected == idle_connections_spokes) {
+            admitted_at = timestamp(io);
+            break;
+        }
+    }
+    if (hub.peerCounts().connected != idle_connections_spokes) return error.ConnectionDeadline;
+    // Settle until no side sends for several rounds.
+    var quiet: usize = 0;
+    for (0..2_000) |_| {
+        var sent: u64 = 0;
+        for (spokes) |*spoke| {
+            const stepped = spoke.step(io, &events, .{ .wait_max_ms = 0 });
+            if (stepped.failure) |err| return err;
+            sent += stepped.progress.datagrams_sent;
+        }
+        const result = try turn(hub, io, outputs);
+        sent += result.transport.datagrams_sent;
+        quiet = if (sent == 0 and !result.transport.backlog) quiet + 1 else 0;
+        if (quiet == 8) break;
+    }
+    if (quiet < 8) return error.SettleDeadline;
+    if (hub.peerCounts().connected != idle_connections_spokes) return error.SpokeClosed;
+    const settled_ms = (timestamp(io) - admitted_at) / std.time.ns_per_ms;
+    var samples: Samples = .begin(hub);
+    for (0..turns) |i| {
+        const now = try network.transport.currentTime(io);
+        const immediate = if (hub.nextWakeup(now, outputs)) |deadline| deadline <= now.mono_ms else false;
+        const due_before = hub.due_now_turns;
+        const start = timestamp(io);
+        const result = try turn(hub, io, outputs);
+        try samples.record(hub, i, timestamp(io) - start, due_before, result, immediate);
+    }
+    const window_ms = (timestamp(io) - admitted_at) / std.time.ns_per_ms;
+    samples.print(hub, "idle_connections");
+    std.debug.print("case=idle_connections connections={} settled_ms={} window_ms={} p50_budget_ns={}\n", .{ hub.peerCounts().connected, settled_ms, window_ms, idle_connections_p50_budget_ns });
+    if (window_ms >= 1_000) return error.WindowDeadline;
+    if (samples.visited(hub) != 0) return error.IdleConnectionVisited;
+    if (samples.ns[turns / 2] > idle_connections_p50_budget_ns) return error.IdleConnectionsBudget;
 }

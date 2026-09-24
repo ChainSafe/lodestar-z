@@ -184,7 +184,7 @@ pub const PeerManager = struct {
                             service.gossipsub.retireConnection(&service.router, engine, old, now);
                             _ = engine.close(old, 0);
                         }
-                        self.control.connected(admission.peer, connected.conn, direction, now);
+                        self.control.connected(&self.catalog, admission.peer, connected.conn, direction, now);
                         const direct = self.catalog.rowFor(admission.peer).?.direct;
                         const admission_result = service.gossipsub.peerConnected(engine, connected.conn, direct, now);
                         if (admission_result != .admitted) self.counters.gossip_refused +|= 1;
@@ -408,11 +408,11 @@ pub const PeerManager = struct {
         self.discovery_need.syncnets = self.selection.deficits.missing.syncnets;
         self.discovery_need.custody = self.selection.deficits.groups > 0 or self.selection.deficits.custody_groups > 0;
     }
-    pub fn dialRoom(self: *const PeerManager) u16 {
+    pub fn dialRoom(self: *PeerManager) u16 {
         const attempts = self.dialing.attempts();
-        const pending = self.dialing.pendingPeers(&self.catalog, null);
-        const capacity = self.catalog.options.max_peers -| self.catalog.connectedCount() -| pending;
-        const wanted = @max(self.selection.dial_budget, self.dialing.hostDemand(&self.catalog)) -| pending;
+        const demand = self.dialing.demandCounts(&self.catalog);
+        const capacity = self.catalog.options.max_peers -| self.catalog.connectedCount() -| demand.pending;
+        const wanted = @max(self.selection.dial_budget, demand.host) -| demand.pending;
         return @min(self.native_dial_room -| attempts.unstarted, capacity, wanted);
     }
     pub fn updateStatus(self: *PeerManager, service: *const service_mod.Service, status: *const t.Status) !void {
@@ -439,10 +439,10 @@ pub const PeerManager = struct {
     }
     pub fn reStatusPeer(self: *PeerManager, peer: t.PeerRef, connection: t.Handle, now: Now) bool {
         if (self.stopped) return false;
-        return self.control.reStatusPeer(peer, connection, now);
+        return self.control.reStatusPeer(&self.catalog, peer, connection, now);
     }
     pub fn reStatusPeers(self: *PeerManager, now: Now) void {
-        self.control.reStatusPeers(now);
+        self.control.reStatusPeers(&self.catalog, now);
     }
     pub fn reportPeer(
         self: *PeerManager,
@@ -503,6 +503,7 @@ pub const PeerManager = struct {
         const peer = self.catalog.find(identity) orelse return false;
         if (!self.catalog.rowFor(peer).?.direct) return false;
         _ = self.catalog.setDirect(peer, false);
+        dial_mod.Dialing.releaseIfUnused(&self.catalog, peer);
         self.selection_revision = null;
         service.gossipsub.unmarkDirect(identity);
         return true;

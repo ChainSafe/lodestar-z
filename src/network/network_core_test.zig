@@ -1364,6 +1364,7 @@ test "managed runtime targeted Status serves two current schedules and immediate
     const other = rows[1];
     const now = try @import("transport.zig").currentTime(std.testing.io);
     a.peer_manager.control.schedules[other.peer.index].status_due_ms = now.mono_ms;
+    a.peer_manager.control.reschedule(&a.peer_manager.catalog, other.peer);
     const unselected = a.peer_manager.control.schedules[other.peer.index];
     const before = a.peer_manager.control.schedules[selected.peer.index];
     try std.testing.expect(a.reStatusPeer(&selected.identity, now));
