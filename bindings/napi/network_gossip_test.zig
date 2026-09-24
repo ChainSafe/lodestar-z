@@ -92,9 +92,9 @@ test "gossip flags remain independent of full command capacity and reject stale 
         try std.testing.expect(!table.report(token, .reject, 2));
     }
     try std.testing.expectEqual(@as(usize, 64), table.snapshot(1).pendingVerdicts);
-    try std.testing.expectEqual(@as(u64, 0), table.waitLimit(2, 100));
+    try std.testing.expect(table.pending());
     table.expire(100);
-    try std.testing.expectEqual(@as(u64, 100), table.waitLimit(100, 100));
+    try std.testing.expect(!table.pending() and table.deadline() == null);
     const replacement = try table.reserve(1);
     table.get(replacement).?.deadline = 200;
     table.install(replacement, "y");

@@ -17,7 +17,7 @@ const Peer = struct {
     pub fn pump(self: *Peer) !void {
         self.now = try network.transport.currentTime(self.io);
         var events: [1]t.Event = undefined;
-        const result = self.node.step(self.io, self.now, 0x08070605, .{ .peers = events[0..self.capacity] }, 1);
+        const result = self.node.step(self.io, self.now, .{ .peers = events[0..self.capacity] }, .deadlineOnly(self.now.mono_ms +| 1));
         if (result.failure) |err| return err;
         for (events[0..result.counts.peers]) |event| {
             if (self.emitted == 512) return error.EventBound;
@@ -126,6 +126,7 @@ pub fn main(init: std.process.Init) !void {
         .bind = .{ .ip4 = .loopback(0) },
         .local = local,
         .schedule = .{ .fulu_scheduled = fork.gte(.fulu) },
+        .slot = 0x08070605,
     });
     defer peer.node.deinit(init.io);
     try control.run(peer);

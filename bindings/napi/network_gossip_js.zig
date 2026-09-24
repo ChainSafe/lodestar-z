@@ -29,9 +29,10 @@ pub fn drain(runtime: *Runtime, options: Value) !Value {
         return err;
     };
     const table = &runtime.gossip.?;
-    const previous_due = table.waitLimit(mono_ms, std.math.maxInt(u64));
+    const previous = .{ table.pending(), table.deadline() };
     const batch = if (runtime.quiescent) g.Batch{} else table.claimDemand(mono_ms, demand);
-    if (table.waitLimit(mono_ms, std.math.maxInt(u64)) != previous_due) runtime.signalLocked();
+    // The owner's wait reads these; a change wakes it to recompute.
+    if (!std.meta.eql(previous, .{ table.pending(), table.deadline() })) runtime.signalLocked();
     runtime.unlock();
     var success = false;
     var reported_more = false;

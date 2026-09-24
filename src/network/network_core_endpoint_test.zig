@@ -39,7 +39,7 @@ const Peers = struct {
                 const now = try @import("transport.zig").currentTime(std.testing.io);
                 const response = try remote.stepUntil(std.testing.io, &expired, now.mono_ms);
                 if (response.failure) |err| return err;
-                const result = node.step(std.testing.io, now, 1, .{}, 0);
+                const result = node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms));
                 if (result.failure) |err| return err;
                 if (owner.transport.engine.calls.count() == 0) {
                     completed = true;

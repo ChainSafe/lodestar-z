@@ -304,7 +304,9 @@ pub fn settle(env: napi.Env, runtime: *Runtime) !void {
                 cell.permission_ready = false;
             }
             table.releasePayload(cell);
-            if (!cell.native and !cell.serving_retained and cell.closed == null and cell.pending == null and cell.permission == null) table.retire(.{ .index = @intCast(i), .generation = cell.generation });
+            if (!cell.native and !cell.serving_retained and cell.closed == null and cell.pending == null and cell.permission == null) {
+                table.retire(.{ .index = @intCast(i), .generation = cell.generation });
+            } else if (incoming.releasable(cell)) runtime.signalLocked();
             runtime.unlock();
         }
         if (pending) |deferred| {

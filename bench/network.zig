@@ -115,7 +115,8 @@ fn timestamp(io: std.Io) u64 {
 }
 
 fn turn(node: *network.NetworkCore, io: std.Io, outputs: network.network_core.Outputs) !network.network_core.Result {
-    const result = node.step(io, try network.transport.currentTime(io), 100, outputs, 0);
+    const now = try network.transport.currentTime(io);
+    const result = node.step(io, now, outputs, .deadlineOnly(now.mono_ms));
     if (result.failure) |err| return err;
     return result;
 }
@@ -189,6 +190,7 @@ fn initialize(node: *network.NetworkCore, a: std.mem.Allocator, io: std.Io, key:
         .bind = .{ .ip4 = .loopback(0) },
         .local = update.local,
         .schedule = update.schedule,
+        .slot = 100,
     });
 }
 
@@ -220,9 +222,11 @@ fn connectPair(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, top
         _ = try node.applyIntent(&intent, try network.transport.currentTime(io));
     }
     for (0..4000) |_| {
-        const result_a = a.step(io, try network.transport.currentTime(io), 100, .{ .peers = &peer_events }, 1);
+        const now_a = try network.transport.currentTime(io);
+        const result_a = a.step(io, now_a, .{ .peers = &peer_events }, .deadlineOnly(now_a.mono_ms +| 1));
         if (result_a.failure) |err| return err;
-        const result_b = b.step(io, try network.transport.currentTime(io), 100, .{ .peers = &peer_events }, 1);
+        const now_b = try network.transport.currentTime(io);
+        const result_b = b.step(io, now_b, .{ .peers = &peer_events }, .deadlineOnly(now_b.mono_ms +| 1));
         if (result_b.failure) |err| return err;
         if (a.service.gossipsub.resourceSnapshot().remote_subscriptions > 0 and a.service.gossipsub.peers.rows[0].direct) break;
         try io.sleep(.fromMilliseconds(1), .awake);
@@ -348,6 +352,25 @@ fn printReconciliation(node: *network.NetworkCore, name: []const u8) void {
     std.debug.print("case={s} selections={} selection_rows={} candidate_selections={} score_calculations={} score_topic_visits={}\n", .{ name, c.selections, c.selection_rows, c.candidate_selections, score.calculations, score.topic_visits });
 }
 
+/// CI fails the idle_wait case above this many turns in its 1 s window.
+const idle_wait_turns_max = 8;
+
+/// A host with no queued work: it drains its nonblocking wake pipe when applied and counts the calls.
+const IdleHost = struct {
+    pipe: [2]std.c.fd_t,
+    applies: u32 = 0,
+
+    fn apply(context: *anyopaque, _: *network.NetworkCore, _: network.Now) network.network_core.HostProgress {
+        const self: *IdleHost = @ptrCast(@alignCast(context));
+        self.applies += 1;
+        var buffer: [64]u8 = undefined;
+        _ = std.c.read(self.pipe[0], &buffer, buffer.len);
+        return .{};
+    }
+};
+
+/// A fully idle small-profile node with a host attached through its wake pipe and a host
+/// deadline at the end of a 1 s window. Every wait comes from a deadline.
 fn idleWait(init: std.process.Init) !void {
     const io = init.io;
     const key = try network.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{11}));
@@ -356,33 +379,40 @@ fn idleWait(init: std.process.Init) !void {
     const plan = try network.chain.Plan.init(chain_config, false);
     try initialize(node, init.gpa, io, &key, .small, &plan);
     defer node.deinit(io);
+    var host: IdleHost = .{ .pipe = undefined };
+    if (std.c.pipe(&host.pipe) != 0) return error.PipeFailed;
+    defer for (host.pipe) |fd| {
+        _ = std.c.close(fd);
+    };
+    const flags = std.c.fcntl(host.pipe[0], std.c.F.GETFL);
+    const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
+    if (flags < 0 or std.c.fcntl(host.pipe[0], std.c.F.SETFL, flags | nonblock) < 0) return error.PipeFailed;
+    try node.setHostWake(host.pipe[0]);
     const calls = node.reservations.allocation_calls;
+    const readiness_before = node.counters;
     const start = timestamp(io);
+    const window_end_ms = (try network.transport.currentTime(io)).mono_ms + 1_000;
     var count: u32 = 0;
-    var positive_waits: u32 = 0;
     var immediate: u32 = 0;
-    var backlog: u64 = 0;
     var elapsed_turns: u64 = 0;
-    for (0..10000) |_| {
+    for (0..10_000) |_| {
         const before = timestamp(io);
         if (before - start >= 1_000_000_000) break;
         const now = try network.transport.currentTime(io);
-        const due = node.nextWakeup(now, .{});
-        const ready = if (due) |value| value <= now.mono_ms else false;
-        immediate += @intFromBool(ready);
-        positive_waits += @intFromBool(!ready);
-        const remaining_ms: u32 = @intCast((1_000_000_000 - (before - start) + 999_999) / 1_000_000);
-        const result = node.step(io, now, 0, .{}, @min(100, remaining_ms));
+        immediate += @intFromBool(if (node.nextWakeup(now, .{})) |due| due <= now.mono_ms else false);
+        const result = node.step(io, now, .{}, .{ .context = &host, .apply = IdleHost.apply, .deadline_ms = window_end_ms });
         if (result.failure) |err| return err;
         elapsed_turns += timestamp(io) - before;
         count += 1;
-        backlog += @intFromBool(result.transport.backlog);
     }
     const elapsed = timestamp(io) - start;
     const readiness = node.counters;
-    std.debug.print("readiness_calls={} nonzero_readiness_waits={} readiness_failures={}\n", .{ readiness.readiness_calls, readiness.readiness_nonzero_waits, readiness.readiness_failures });
     if (elapsed < 1_000_000_000) return error.TurnLimit;
-    std.debug.print("case=idle_wait profile=small requested_duration_ms=1000 host_wait_ms=100 elapsed_ns={} turns={} positive_wait_turns={} immediate_deadlines={} turn_elapsed_ns={} backlog_turns={} turn_allocation_calls={}\n", .{ elapsed, count, positive_waits, immediate, elapsed_turns, backlog, node.reservations.allocation_calls - calls });
+    std.debug.print("case=idle_wait profile=small window_ms=1000 elapsed_ns={} turns={} host_applies={} immediate_deadlines={} nonzero_readiness_waits={} turn_elapsed_ns={} turn_allocation_calls={} turns_max={}\n", .{ elapsed, count, host.applies, immediate, readiness.readiness_nonzero_waits - readiness_before.readiness_nonzero_waits, elapsed_turns, node.reservations.allocation_calls - calls, idle_wait_turns_max });
+    std.debug.print("case=idle_wait due_now", .{});
+    inline for (std.meta.fields(Source)) |field| std.debug.print(" {s}={}", .{ field.name, node.due_now_turns[field.value] });
+    std.debug.print("\n", .{});
+    if (count > idle_wait_turns_max) return error.IdleWaitTurns;
 }
 
 const idle_transport_spokes = 200;
@@ -512,7 +542,7 @@ fn idleConnections(init: std.process.Init) !void {
     const hub_key = try network.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{14}));
     const hub = try allocator.create(network.NetworkCore);
     defer allocator.destroy(hub);
-    try hub.init(allocator, io, &resolved, .{ .host = &hub_key, .bind = .{ .ip4 = .loopback(0) }, .local = update.local, .schedule = update.schedule });
+    try hub.init(allocator, io, &resolved, .{ .host = &hub_key, .bind = .{ .ip4 = .loopback(0) }, .local = update.local, .schedule = update.schedule, .slot = 100 });
     defer hub.deinit(io);
     const spokes = try allocator.alloc(network.Transport, idle_connections_spokes);
     defer allocator.free(spokes);

@@ -94,7 +94,7 @@ fn writeRuntime(self: *const Context, w: *prom.Encoder) prom.Error!void {
     try w.counters("lodestar_native_quic_", &self.owner.transport.engine.counters);
     const steps = try w.histograms(.{ .name = "lodestar_native_network_step_seconds", .kind = .histogram, .help = "Network step duration after native readiness polling, covering transport, protocols and discovery", .unit = .seconds }, @import("timing.zig").Duration);
     try steps.histogram(.{}, &self.owner.step_duration);
-    const waits = try w.histograms(.{ .name = "lodestar_native_network_wait_seconds", .kind = .histogram, .help = "Wait chosen by each owner turn from its earliest wakeup source and the host limit, before the readiness poll cap", .unit = .seconds }, @TypeOf(self.owner.wait_duration));
+    const waits = try w.histograms(.{ .name = "lodestar_native_network_wait_seconds", .kind = .histogram, .help = "Wait chosen by each owner turn from its earliest wakeup source, host deadlines included, bounded by the readiness backstop", .unit = .seconds }, @TypeOf(self.owner.wait_duration));
     try waits.histogram(.{}, &self.owner.wait_duration);
     try w.enums(.{ .name = "lodestar_native_network_due_now_turns_total", .kind = .counter, .help = "Owner turns that chose a zero wait, counted under every wakeup source already due", .labels = &.{"source"} }, @import("../wake_sources.zig").Source, &self.owner.due_now_turns);
     const visits = try w.family(.{ .name = "lodestar_native_quic_connection_visits_total", .kind = .counter, .help = "QUIC connections visited by the owner loop: timer keys popped, connections collected for stream readiness, and dirty connections flushed", .labels = &.{"phase"} });

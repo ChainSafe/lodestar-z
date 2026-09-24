@@ -15,6 +15,10 @@ pub const Budget = struct {
     used: usize = 0,
     minimum: [count]usize = @splat(0),
     owned: [count]usize = @splat(0),
+    /// The owner is waiting for a release to retry a reservation.
+    waiting: bool = false,
+    /// A release happened while the owner waited; the runtime wakes the owner.
+    released: bool = false,
 
     pub fn snapshot(self: *const Budget) Diagnostics {
         return .{
@@ -48,6 +52,10 @@ pub const Budget = struct {
         std.debug.assert(amount <= self.used and amount <= self.owned[@intFromEnum(owner)]);
         self.used -= amount;
         self.owned[@intFromEnum(owner)] -= amount;
+        if (self.waiting and amount > 0) {
+            self.waiting = false;
+            self.released = true;
+        }
     }
 };
 

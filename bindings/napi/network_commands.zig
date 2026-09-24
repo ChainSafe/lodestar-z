@@ -241,18 +241,12 @@ pub fn latchConnects(table: *Table, events: []const n.Event, timestamp: n.Now) b
     }
     return terminal;
 }
-pub fn waitLimit(self: *Runtime, timestamp: n.Now) u32 {
-    self.lock();
-    defer self.unlock();
-    if (self.reports.pending != 0) return 0;
-    if (self.publications) |*table| if (table.oldest() != null) return 0;
-    if (self.requests) |*table| if (table.oldest() != null) return 0;
-    var limit: u64 = 100;
-    for (&self.table.cells, 0..) |*cell, i| {
-        if (cell.state == .queued) return 0;
-        if (cell.state == .waiting) limit = @min(limit, self.table.cells[i].deadline -| timestamp.mono_ms);
+/// The earliest deadline of a connect waiting for its peer. Scans only while a connect is held.
+pub fn connectDeadline(table: *const Table) ?u64 {
+    if (table.connects == 0) return null;
+    var deadline: ?u64 = null;
+    for (&table.cells) |*cell| {
+        if (cell.state == .waiting) deadline = @min(deadline orelse cell.deadline, cell.deadline);
     }
-    if (self.gossip) |*gossip| limit = gossip.waitLimit(timestamp.mono_ms, limit);
-    if (self.closing_deadline) |deadline| limit = @min(limit, deadline -| timestamp.mono_ms);
-    return @intCast(limit);
+    return deadline;
 }

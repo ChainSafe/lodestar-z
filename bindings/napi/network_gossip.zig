@@ -31,10 +31,12 @@ pub fn projectWall(admitted: u64, clock: Clock) !u64 {
     if (elapsed > clock.unix_ms or clock.unix_ms > 9007199254740991) return error.InvalidNetworkClock;
     return clock.unix_ms - elapsed;
 }
-pub fn flags(runtime: *Runtime, io: std.Io) !void {
+/// Runs processor maintenance and applies queued verdicts. Returns whether bounded carry-over
+/// work remains for the next turn.
+pub fn flags(runtime: *Runtime, io: std.Io) !bool {
     runtime.lock();
     defer runtime.unlock();
-    const table = if (runtime.gossip) |*table| table else return;
+    const table = if (runtime.gossip) |*table| table else return false;
     const clock = try sample(io);
     const now: n.Now = .{ .mono_ms = clock.mono_ms, .unix_s = @intCast(clock.unix_ms / 1000) };
     table.maintain(now.mono_ms, runtime.slot);
@@ -49,6 +51,7 @@ pub fn flags(runtime: *Runtime, io: std.Io) !void {
         table.retire(token);
     }
     if (table.hasWork()) runtime.pingLocked();
+    return table.pending();
 }
 pub const Ingress = struct {
     runtime: *Runtime,

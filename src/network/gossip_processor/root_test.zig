@@ -114,7 +114,7 @@ test "gossip processor batches identical attestation data with a bounded wait" {
         table.install(token, "x");
     }
     try t.expectEqual(@as(usize, 0), table.claim(49).len);
-    try t.expectEqual(@as(u64, 2), table.waitLimit(49, 100));
+    try t.expectEqual(@as(?u64, 51), table.deadline());
     const batch = table.claim(51);
     try t.expectEqual(@as(usize, 2), batch.len);
     try t.expectEqual(@as(usize, 1), batch.job_count);
@@ -160,7 +160,7 @@ test "gossip processor new attestation groups cannot postpone a mature group" {
         table.install(token, "x");
     }
     try t.expectEqual(@as(usize, 0), table.claim(50).len);
-    try t.expectEqual(@as(u64, 1), table.waitLimit(50, 100));
+    try t.expectEqual(@as(?u64, 51), table.deadline());
     const batch = table.claim(51);
     try t.expectEqual(@as(usize, 1), batch.len);
     try t.expectEqual(older, batch.tokens[0]);

@@ -114,11 +114,12 @@ test "native wait signal interruption returns without retrying" {
     defer std.posix.sigaction(.USR1, &old, null);
     const sender = try std.Thread.spawn(.{}, sendSignal, .{std.c.pthread_self()});
     defer sender.join();
-    const result = wait.poll(std.testing.io, .{ .quic = .{ target.handle, null } }, 1000);
+    // A longer wait is bounded by the 1 s backstop.
+    const result = wait.poll(std.testing.io, .{ .quic = .{ target.handle, null } }, 5_000);
     try std.testing.expect(result.failure == null);
     try std.testing.expect(result.interrupted);
     try std.testing.expect(!result.quic);
-    try std.testing.expectEqual(@as(u32, 100), result.timeout_ms);
+    try std.testing.expectEqual(@as(u32, 1_000), result.timeout_ms);
 }
 
 fn signalHandler(_: std.posix.SIG) callconv(.c) void {}

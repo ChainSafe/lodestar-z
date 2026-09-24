@@ -221,17 +221,28 @@ pub fn awaitingTerminal(owner: *rr.ReqResp, handle: rr.RequestHandle, err: anyer
     const slot = owner.inboundSlot(handle) orelse return false;
     return slot.request.terminalEvent() != null;
 }
-pub fn flags(runtime: *Runtime, now: n.Now) !void {
+/// A retained serving slot whose host released it and holds no promise, so the owner returns it.
+pub fn releasable(cell: *const Cell) bool {
+    return cell.serving_retained and cell.release_requested and !cell.native and !cell.copying and
+        cell.closed == null and cell.pending == null and cell.permission == null;
+}
+/// Work the owner does for a cell at its next host apply: a release or a response permission.
+fn ownerWork(cell: *const Cell) bool {
+    if (cell.state == .free) return false;
+    return releasable(cell) or (cell.native and cell.permission != null and !cell.permission_ready);
+}
+/// Applies releases, cancels, response permissions, queued responses and terminal actions.
+/// Returns whether the per-turn response cap left queued responses for the next turn.
+pub fn flags(runtime: *Runtime, now: n.Now) !bool {
     runtime.lock();
     defer runtime.unlock();
-    const table = if (runtime.incoming) |*table| table else return;
-    if (table.cells.len == 0) return;
+    const table = if (runtime.incoming) |*table| table else return false;
+    if (table.cells.len == 0) return false;
     var submissions: usize = 0;
+    var more = false;
     for (0..table.cells.len) |offset| {
         const cell = &table.cells[(table.cursor + offset) % table.cells.len];
-        if (cell.serving_retained and cell.release_requested and !cell.native and !cell.copying and
-            cell.closed == null and cell.pending == null and cell.permission == null)
-        {
+        if (releasable(cell)) {
             const released = runtime.heavy.?.core.service.reqresp.releaseServing(cell.handle);
             std.debug.assert(released);
             cell.serving_retained = false;
@@ -245,10 +256,15 @@ pub fn flags(runtime: *Runtime, now: n.Now) !void {
             continue;
         }
         if (cell.permission != null and !cell.permission_ready and core.service.reqresp.reserveResponse(cell.handle)) {
-            table.reserveResponse(cell, cell.protocol.info().response_max) catch continue;
+            table.reserveResponse(cell, cell.protocol.info().response_max) catch {
+                // A payload release wakes the owner to retry.
+                table.budget.waiting = true;
+                continue;
+            };
             cell.permission_ready = true;
             runtime.pingLocked();
         }
+        if (cell.state == .response_queued and submissions == 4) more = true;
         if (cell.state == .response_queued and submissions < 4) {
             submissions += 1;
             core.respond(cell.handle, cell.response, cell.context, now) catch |err| {
@@ -276,6 +292,7 @@ pub fn flags(runtime: *Runtime, now: n.Now) !void {
         }
     }
     table.cursor = (table.cursor + 4) % table.cells.len;
+    return more;
 }
 pub fn captureLocked(runtime: *Runtime, event: rr.Event, now: n.Now) !void {
     const table = if (runtime.incoming) |*table| table else return;
@@ -336,6 +353,7 @@ pub fn captureLocked(runtime: *Runtime, event: rr.Event, now: n.Now) !void {
             }
         }
         runtime.pingLocked();
+        if (ownerWork(cell)) runtime.host_due = true;
         break;
     }
 }

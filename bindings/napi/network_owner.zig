@@ -72,6 +72,7 @@ pub fn initialize(self: *Runtime) !void {
         .bind = self.heavy.?.config.bind,
         .local = self.heavy.?.config.local,
         .schedule = self.heavy.?.config.schedule,
+        .slot = self.heavy.?.config.slot,
         .discovery = if (self.heavy.?.config.discovery_bind) |bind| .{ .bind = bind, .sequence = self.heavy.?.config.discovery_sequence, .advertisement = self.heavy.?.config.advertisement, .fixed = self.heavy.?.config.fixed, .bootstrap = self.heavy.?.records[0..self.heavy.?.config.bootstrap_count] } else null,
     });
     self.heavy.?.core_live = true;
@@ -104,70 +105,131 @@ fn serve(self: *Runtime) !void {
     const sink = ingress.sink();
     self.heavy.?.core.service.gossipsub.message_sink = &sink;
     defer self.heavy.?.core.service.gossipsub.message_sink = null;
-    while (true) {
-        self.lock();
-        const stop = self.stop;
-        const graceful = self.graceful and self.reason == .requested;
-        self.unlock();
-        if (stop and !graceful) break;
-        var timestamp = now(io);
-        if (stop) {
-            if (self.closing_deadline == null) {
-                std.log.scoped(.network_runtime).info("owner_stopping mode=graceful peers={d}", .{self.heavy.?.core.peerCounts().connected});
-                self.lock();
-                self.cancelCommandsLocked();
-                self.publications.?.close(self.terminal_error orelse error.NetworkClosed);
-                self.pingLocked();
-                self.unlock();
-                self.closing_deadline = timestamp.mono_ms +| 2000;
-                self.heavy.?.core.beginGracefulClose(timestamp);
-            }
-            if (timestamp.mono_ms >= self.closing_deadline.? or self.heavy.?.core.peerCounts().connected == 0) break;
-        } else {
-            for (0..32) |_| {
-                self.lock();
-                const report = self.reports.next();
-                self.unlock();
-                const item = report orelse break;
-                if (self.heavy.?.core.reportPeer(&item.identity, item.action, timestamp) == null) {
-                    self.lock();
-                    self.reports.ignored +|= 1;
-                    self.unlock();
-                }
-            }
-            try executeWork(self, io);
-        }
-        self.lock();
-        self.wake.?.drain() catch {
-            self.stop = true;
-            self.reason = .failed;
-            self.terminal_error = error.NetworkWakeFailed;
-        };
-        if (self.work_rearm) {
-            self.work_rearm = false;
-            if (!self.stop and ((self.lane != null and self.lane.?.len > 0) or (self.incoming != null and self.incoming.?.oldest() != null) or (self.gossip != null and self.gossip.?.hasWork()))) self.pingLocked();
-        }
-        const slot = self.slot;
-        self.diag.currentSlot = slot;
-        const stopped = self.stop and !(self.graceful and self.reason == .requested);
-        const peer_room: usize = if (self.lane) |lane| 64 - @as(usize, lane.len) else self.heavy.?.outputs.len;
-        self.unlock();
-        if (stopped) break;
-        try gossip_mod.flags(self, io);
-        requests_mod.flags(self, io);
-        // Work submissions and gossip verdicts use fresh clocks before the protocol pump.
-        timestamp = now(io);
-        try incoming_mod.flags(self, timestamp);
-        const sequence = try self.advanceSequence();
-        const result = self.heavy.?.core.step(io, timestamp, slot, .{ .peers = self.heavy.?.outputs[0..@min(peer_room, self.heavy.?.outputs.len)], .application = &self.heavy.?.application_outputs }, commands.waitLimit(self, timestamp));
-        if (ingress.failure) |err| return err;
-        try requests_mod.capture(self, self.heavy.?.application_outputs[0..result.counts.application], timestamp);
-        commands.completeConnects(self, timestamp);
-
-        publishTurn(self, &result, timestamp, sequence);
-    }
+    var host: Host = .{ .runtime = self, .io = io };
+    while (try turn(self, io, &host, &ingress)) |_| {}
 }
-fn executeWork(self: *Runtime, io: std.Io) !void {
+
+/// One owner turn: the stop check, then one core step that applies host work after its readiness
+/// poll, then the turn's application events, connect completions and publication. Returns null
+/// once the owner stops.
+fn turn(self: *Runtime, io: std.Io, host: *Host, ingress: *const gossip_mod.Ingress) !?n.network_core.Result {
+    self.lock();
+    const stop = self.stop;
+    const graceful = self.graceful and self.reason == .requested;
+    self.unlock();
+    if (stop and !graceful) return null;
+    const timestamp = now(io);
+    if (stop) {
+        if (self.closing_deadline == null) {
+            std.log.scoped(.network_runtime).info("owner_stopping mode=graceful peers={d}", .{self.heavy.?.core.peerCounts().connected});
+            self.lock();
+            self.cancelCommandsLocked();
+            self.publications.?.close(self.terminal_error orelse error.NetworkClosed);
+            self.pingLocked();
+            self.unlock();
+            self.closing_deadline = timestamp.mono_ms +| 2000;
+            self.heavy.?.core.beginGracefulClose(timestamp);
+        }
+        if (timestamp.mono_ms >= self.closing_deadline.? or self.heavy.?.core.peerCounts().connected == 0) return null;
+    }
+    self.lock();
+    const peer_room: usize = if (self.lane) |lane| 64 - @as(usize, lane.len) else self.heavy.?.outputs.len;
+    const deadline = hostDeadline(self, timestamp);
+    self.unlock();
+    const sequence = try self.advanceSequence();
+    const result = self.heavy.?.core.step(io, timestamp, .{ .peers = self.heavy.?.outputs[0..@min(peer_room, self.heavy.?.outputs.len)], .application = &self.heavy.?.application_outputs }, .{ .context = host, .apply = Host.apply, .deadline_ms = deadline });
+    if (host.failure) |err| return err;
+    if (ingress.failure) |err| return err;
+    // The step's clock was read after its poll, so deadlines that ended the wait are due.
+    const tick = result.transport.now;
+    try requests_mod.capture(self, self.heavy.?.application_outputs[0..result.counts.application], tick);
+    commands.completeConnects(self, tick);
+    publishTurn(self, &result, tick, sequence);
+    return result;
+}
+
+/// The earliest host-owned deadline, read under the lock: metrics rendering, the health log,
+/// connect timeouts, the graceful close and the gossip processor's groups and expiry. Host work
+/// found by the previous turn's event capture is due now.
+fn hostDeadline(self: *Runtime, timestamp: n.Now) u64 {
+    if (self.host_due) return timestamp.mono_ms;
+    var deadline = @min(self.metrics_due_ms, self.health_log_due_ms);
+    if (commands.connectDeadline(&self.table)) |value| deadline = @min(deadline, value);
+    if (self.closing_deadline) |value| deadline = @min(deadline, value);
+    if (self.gossip) |*table| if (table.deadline()) |value| {
+        deadline = @min(deadline, value);
+    };
+    return deadline;
+}
+
+/// The core's host seam for this owner.
+const Host = struct {
+    runtime: *Runtime,
+    io: std.Io,
+    failure: ?anyerror = null,
+
+    fn apply(context: *anyopaque, core: *n.NetworkCore, tick: n.Now) n.network_core.HostProgress {
+        const self: *Host = @ptrCast(@alignCast(context));
+        std.debug.assert(core == &self.runtime.heavy.?.core);
+        if (self.failure != null) return .{};
+        return applyWork(self.runtime, self.io, tick) catch |err| {
+            self.failure = err;
+            return .{};
+        };
+    }
+};
+
+/// Drains the wake pipe before reading any queue, so a submission that lands after the drain
+/// wakes the next poll. Then applies reports, commands, publications and requests in admission
+/// order, gossip verdicts and processor maintenance, and request and response flags.
+fn applyWork(self: *Runtime, io: std.Io, tick: n.Now) !n.network_core.HostProgress {
+    self.lock();
+    self.wake.?.drain() catch {
+        self.stop = true;
+        self.reason = .failed;
+        self.terminal_error = error.NetworkWakeFailed;
+    };
+    self.host_due = false;
+    if (self.work_rearm) {
+        self.work_rearm = false;
+        if (!self.stop and ((self.lane != null and self.lane.?.len > 0) or (self.incoming != null and self.incoming.?.oldest() != null) or (self.gossip != null and self.gossip.?.hasWork()))) self.pingLocked();
+    }
+    const stop = self.stop;
+    const stopped = self.stop and !(self.graceful and self.reason == .requested);
+    self.unlock();
+    if (stopped) return .{};
+    var more = false;
+    if (!stop) {
+        more = applyReports(self, tick) or more;
+        more = try executeWork(self, io) or more;
+    }
+    more = try gossip_mod.flags(self, io) or more;
+    requests_mod.flags(self, io);
+    more = try incoming_mod.flags(self, tick) or more;
+    return .{ .more = more };
+}
+
+/// Applies up to 32 queued peer reports. Returns whether more remain.
+fn applyReports(self: *Runtime, tick: n.Now) bool {
+    for (0..32) |_| {
+        self.lock();
+        const report = self.reports.next();
+        self.unlock();
+        const item = report orelse return false;
+        if (self.heavy.?.core.reportPeer(&item.identity, item.action, tick) == null) {
+            self.lock();
+            self.reports.ignored +|= 1;
+            self.unlock();
+        }
+    }
+    self.lock();
+    defer self.unlock();
+    return self.reports.pending != 0;
+}
+
+/// Executes queued commands, publications and requests in admission order under their per-turn
+/// caps. Returns whether a cap stopped it with work left.
+fn executeWork(self: *Runtime, io: std.Io) !bool {
     var controls: usize = 0;
     var requests: usize = 0;
     var publishes: usize = 0;
@@ -176,7 +238,7 @@ fn executeWork(self: *Runtime, io: std.Io) !void {
         self.lock();
         if (self.stop) {
             self.unlock();
-            break;
+            return false;
         }
         const command = self.table.nextQueued();
         const publication = self.publications.?.oldest();
@@ -187,12 +249,12 @@ fn executeWork(self: *Runtime, io: std.Io) !void {
         const order = @min(control_order, publish_order, request_order);
         if (order == std.math.maxInt(u64)) {
             self.unlock();
-            break;
+            return false;
         }
         if (order == control_order) {
             if (controls == commands.turn_max) {
                 self.unlock();
-                break;
+                return true;
             }
             const cell = self.table.get(command.?);
             cell.sequence = self.table.advance() catch |err| {
@@ -207,7 +269,7 @@ fn executeWork(self: *Runtime, io: std.Io) !void {
             const len = self.publications.?.get(publication.?).?.payload.len;
             if (publishes == publications.turn_max or (publishes != 0 and len > publications.turn_bytes -| bytes)) {
                 self.unlock();
-                break;
+                return true;
             }
             _ = self.table.advance() catch |err| {
                 self.unlock();
@@ -220,7 +282,7 @@ fn executeWork(self: *Runtime, io: std.Io) !void {
         } else {
             if (requests == requests_mod.turn_max) {
                 self.unlock();
-                break;
+                return true;
             }
             _ = self.table.advance() catch |err| {
                 self.unlock();
@@ -231,6 +293,7 @@ fn executeWork(self: *Runtime, io: std.Io) !void {
             requests += 1;
         }
     }
+    return true;
 }
 fn publishTurn(self: *Runtime, result: *const n.network_core.Result, timestamp: n.Now, sequence: u64) void {
     const counts = self.heavy.?.core.peerCounts();
@@ -284,4 +347,90 @@ fn publishMetrics(self: *Runtime, timestamp: n.Now) n.metrics.registry.Error!voi
     self.metrics.published = index;
     self.metrics.failure = null;
     self.unlock();
+}
+
+test "a command queued while the owner waits executes in the turn whose poll saw the wake" {
+    if (!n.network_core.wait.supported) return error.SkipZigTest;
+    const testing = std.testing.allocator;
+    var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 }, .notify_live = false, .env_alive = false };
+    const owner = try testing.create(Owner);
+    defer testing.destroy(owner);
+    owner.* = .{};
+    owner.threaded = std.Io.Threaded.init(testing, .{ .async_limit = .nothing, .concurrent_limit = .nothing });
+    defer owner.threaded.deinit();
+    const io = owner.threaded.io();
+    runtime.heavy = owner;
+    const key = try n.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{71}));
+    const resolved = try n.configuration.resolve(.{
+        .profile = .small,
+        .seed = 1,
+        .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }},
+        .admission_policy = .{ .deneb_start_slot = 0, .blocks_pre_deneb = 1024, .blocks_deneb = 128, .blob_identifiers_deneb = 768, .blob_identifiers_electra = 1152, .number_of_columns = 128, .column_chunks = 16384, .blob_schedule = &.{.{ .start_slot = 0, .max_blobs = 6 }} },
+    });
+    try owner.core.init(testing, io, &resolved, .{
+        .host = &key,
+        .bind = .{ .ip4 = .loopback(0) },
+        .local = .{ .metadata = .{ .custody_group_count = 1 }, .status = .{ .earliest_available_slot = 0 } },
+    });
+    defer owner.core.deinit(io);
+    runtime.wake = try @import("network_wake.zig").Wake.init();
+    defer runtime.wake.?.deinit();
+    try owner.core.setHostWake(runtime.wake.?.read_fd);
+    runtime.payload_budget.limit = 1 << 20;
+    runtime.publications = try publications.Table.init(testing, 1, &runtime.payload_budget);
+    defer runtime.publications.?.deinit();
+    runtime.requests = try requests_mod.Table.init(testing, 1, &runtime.payload_budget);
+    defer runtime.requests.?.deinit();
+    var host: Host = .{ .runtime = &runtime, .io = io };
+    const ingress: gossip_mod.Ingress = .{ .runtime = &runtime, .io = io };
+    // The first turns render metrics and write the health log, then only deadlines remain.
+    for (0..4) |_| _ = (try turn(&runtime, io, &host, &ingress)).?;
+
+    const Submitter = struct {
+        token: ?commands.Token = null,
+        written_ns: u64 = 0,
+        failure: ?anyerror = null,
+        fn run(self: *@This(), target: *Runtime, clock: std.Io) void {
+            clock.sleep(.fromMilliseconds(30), .awake) catch unreachable;
+            self.written_ns = @intCast(std.Io.Clock.awake.now(clock).nanoseconds);
+            const token = target.reserveCommand(.getIdentity) catch |err| {
+                self.failure = err;
+                return;
+            };
+            self.token = token;
+            target.queueCommand(token) catch |err| {
+                self.failure = err;
+            };
+        }
+    };
+    var submitter: Submitter = .{};
+    const thread = try std.Thread.spawn(.{}, Submitter.run, .{ &submitter, &runtime, io });
+    var woke = false;
+    var returned_ns: u64 = 0;
+    var turns: usize = 0;
+    var executed_before_wake = false;
+    for (0..64) |_| {
+        const result = (try turn(&runtime, io, &host, &ingress)).?;
+        returned_ns = @intCast(std.Io.Clock.awake.now(io).nanoseconds);
+        turns += 1;
+        runtime.lock();
+        var terminal = false;
+        for (&runtime.table.cells) |*cell| terminal = terminal or cell.state == .terminal;
+        runtime.unlock();
+        if (result.readiness.host) {
+            try std.testing.expect(terminal);
+            woke = true;
+            break;
+        }
+        executed_before_wake = executed_before_wake or terminal;
+    }
+    thread.join();
+    try std.testing.expect(submitter.failure == null);
+    try std.testing.expect(woke and !executed_before_wake);
+    const latency_ns = returned_ns - submitter.written_ns;
+    std.debug.print("owner command wake_to_execution_us={d} turns={d}\n", .{ latency_ns / std.time.ns_per_us, turns });
+    try std.testing.expect(latency_ns < 100 * std.time.ns_per_ms);
+    try std.testing.expect(runtime.table.get(submitter.token.?).failure == null);
+    runtime.abortCommand(submitter.token.?);
+    runtime.heavy = null;
 }

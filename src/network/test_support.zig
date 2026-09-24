@@ -371,6 +371,7 @@ pub fn networkOptions(key: *const keys.KeyPair) NetworkOptions {
             .host = key,
             .bind = .{ .ip4 = .loopback(0) },
             .local = managed_support.localState(.{}),
+            .slot = 100,
         },
     };
 }
