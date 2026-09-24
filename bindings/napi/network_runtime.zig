@@ -137,6 +137,8 @@ pub const Runtime = struct {
     notify_finalized: bool = false,
     notification_pending: bool = false,
     work_rearm: bool = false,
+    /// Owner thread: an event capture left host work for the next apply, so the next turn is due now.
+    host_due: bool = false,
     env_alive: bool = true,
     disposed: bool = false,
     close_deferred: ?napi.Deferred = null,
@@ -210,6 +212,11 @@ pub const Runtime = struct {
         std.Io.Threaded.mutexLock(&self.mutex);
     }
     pub fn unlock(self: *Runtime) void {
+        // A payload release while the owner waits for budget wakes it to retry.
+        if (self.payload_budget.released) {
+            self.payload_budget.released = false;
+            self.signalLocked();
+        }
         std.Io.Threaded.mutexUnlock(&self.mutex);
     }
     pub fn retain(self: *Runtime) void {

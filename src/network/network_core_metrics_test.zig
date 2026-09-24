@@ -65,6 +65,7 @@ const contract = [_]Series{
     .{ .name = "lodestar_native_network_due_now_turns_total", .kind = "counter", .labels = &.{"source"} },
     .{ .name = "lodestar_native_network_wait_seconds", .kind = "histogram" },
     .{ .name = "lodestar_native_quic_connection_visits_total", .kind = "counter", .labels = &.{"phase"} },
+    .{ .name = "lodestar_native_network_discovery_only_turns_total", .kind = "counter" },
     .{ .name = "lodestar_native_quic_udp_received_datagrams_total", .kind = "counter" },
     .{ .name = "lodestar_native_quic_udp_sent_datagrams_total", .kind = "counter" },
     // Peers
@@ -317,6 +318,7 @@ fn initOwner(node: *core.NetworkCore) !void {
         .host = &key,
         .bind = .{ .ip4 = .loopback(0) },
         .local = @import("managed_test_support.zig").localState(.{}),
+        .slot = 100,
     });
 }
 
@@ -326,13 +328,13 @@ test "metrics attribute zero-wait owner turns to every due source and record the
     try initOwner(node);
     defer node.deinit(std.testing.io);
     const now = try @import("transport.zig").currentTime(std.testing.io);
-    for (0..8) |_| try std.testing.expect(node.step(std.testing.io, now, 100, .{}, 0).failure == null);
+    for (0..8) |_| try std.testing.expect(node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms)).failure == null);
     const host = @intFromEnum(@import("wake_sources.zig").Source.host);
     try std.testing.expectEqual(@as(u64, 8), node.due_now_turns[host]);
     try std.testing.expectEqual(@as(u64, 8), node.wait_duration.buckets[0]);
     try std.testing.expect(node.nextWakeup(now, .{}).? > now.mono_ms);
     const settled = node.due_now_turns;
-    try std.testing.expect(node.step(std.testing.io, now, 100, .{}, 2).failure == null);
+    try std.testing.expect(node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| 2)).failure == null);
     try std.testing.expectEqualDeep(settled, node.due_now_turns);
     try std.testing.expectEqual(@as(u64, 9), node.wait_duration.count);
     try std.testing.expectEqual(@as(u64, 8), node.wait_duration.buckets[0]);
@@ -387,7 +389,7 @@ test "metrics count a zero-wait owner turn once under each of its two due source
     try initOwner(node);
     defer node.deinit(std.testing.io);
     const now = try @import("transport.zig").currentTime(std.testing.io);
-    for (0..8) |_| try std.testing.expect(node.step(std.testing.io, now, 100, .{}, 0).failure == null);
+    for (0..8) |_| try std.testing.expect(node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms)).failure == null);
     try std.testing.expect(node.nextWakeup(now, .{}).? > now.mono_ms);
     const remote = try @import("wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{95}));
     const remote_key = remote.publicKey();
@@ -396,7 +398,7 @@ test "metrics count a zero-wait owner turn once under each of its two due source
     try node.connectUntil(&peer, &.{.{ .ip6 = .{ .octets = .{0} ** 15 ++ .{1}, .port = 9000 } }}, now, now.mono_ms + 60_000);
     const before = node.due_now_turns;
     const waits = node.wait_duration.buckets[0];
-    try std.testing.expect(node.step(std.testing.io, now, 100, .{}, 100).failure == null);
+    try std.testing.expect(node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| 100)).failure == null);
     try std.testing.expectEqual(waits + 1, node.wait_duration.buckets[0]);
     const Source = @import("wake_sources.zig").Source;
     for (before, node.due_now_turns, 0..) |previous, current, index| {

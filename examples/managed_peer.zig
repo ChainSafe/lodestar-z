@@ -43,7 +43,7 @@ pub fn main(init: std.process.Init) !void {
     var events: [1]network.peers.types.Event = undefined;
     for (0..if (count == 0) 1 else turns_max) |_| {
         const now = try network.transport.currentTime(init.io);
-        const result = node.step(init.io, now, 100, .{ .peers = &events }, 5);
+        const result = node.step(init.io, now, .{ .peers = &events }, .deadlineOnly(now.mono_ms +| 5));
         if (result.failure) |err| return err;
         for (events[0..result.counts.peers]) |event| std.debug.print("peer={s}\n", .{@tagName(event)});
         if (node.peerCounts().relevant > 0) break;
@@ -51,7 +51,8 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("counters={any}\n", .{node.counters});
     node.shutdown(try network.transport.currentTime(init.io));
     for (0..100) |_| {
-        _ = node.step(init.io, try network.transport.currentTime(init.io), 100, .{}, 0);
+        const now = try network.transport.currentTime(init.io);
+        _ = node.step(init.io, now, .{}, .deadlineOnly(now.mono_ms));
         if (node.isClosed()) break;
     }
     if (!node.isClosed()) return error.ShutdownIncomplete;

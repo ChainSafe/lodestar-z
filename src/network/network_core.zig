@@ -14,8 +14,11 @@ const wake_sources = @import("wake_sources.zig");
 pub const wait = @import("wait.zig");
 
 const WaitTime = @import("metrics/histogram.zig").Duration(&.{ 0, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000 });
-/// discv5's standalone receive wait. NetworkCore polls the discovery sockets itself.
+/// discv5's standalone receive wait. NetworkCore polls the discovery sockets itself and steps
+/// discovery with a wake time of now, so this value never sets a wait.
 const discovery_poll_interval_ms: u32 = 5;
+/// Discovery datagrams drained per turn, matching the QUIC receive batch.
+pub const discovery_batch_max: u32 = @import("constants.zig").receive_batch_max;
 pub const ForkSchedule = struct {
     fulu_scheduled: bool = false,
     next_version: [4]u8 = @splat(0),
@@ -57,6 +60,28 @@ pub const Startup = struct {
     local: t.LocalState,
     schedule: ForkSchedule = .{},
     discovery: ?DiscoveryOptions = null,
+    /// The host's wall-clock slot until its first intent.
+    slot: u64 = 0,
+};
+pub const HostProgress = struct {
+    /// A per-turn cap stopped the host with work left, so the next turn is due now.
+    more: bool = false,
+};
+/// The owner host seam. `step` calls `apply` after receive, timers and collect and before the
+/// protocols run, when the host wake descriptor was readable, the previous call returned
+/// `more`, or `deadline_ms` has passed, so the host's work is flushed in the same step.
+pub const Host = struct {
+    context: ?*anyopaque = null,
+    /// Drains the host wake descriptor before reading any host queue, so a submission that
+    /// lands after the drain wakes the next poll. Must not read `transportEvents()`.
+    apply: ?*const fn (context: *anyopaque, core: *NetworkCore, now: Now) HostProgress = null,
+    /// Earliest host-owned deadline, kept by the host without scanning its queues.
+    deadline_ms: ?u64 = null,
+
+    /// A host with no queued work that only bounds the wait.
+    pub fn deadlineOnly(deadline_ms: ?u64) Host {
+        return .{ .deadline_ms = deadline_ms };
+    }
 };
 pub const Outputs = struct {
     peers: []t.Event = &.{},
@@ -67,7 +92,10 @@ pub const Result = struct {
     counts: managed.Counts = .{ .peers = 0, .application = 0 },
     transport: transport_mod.StepResult,
     readiness: wait.Result = .{},
+    /// Discovery progress summed over the turn's datagram batch.
     discovery: peers.discovery.Result = .{},
+    /// Only the discovery sockets had work, so the transport and protocols did not run.
+    discovery_only: bool = false,
     failure: ?OperationalError = null,
     dial_started: u8 = 0,
     dial_deferred: u8 = 0,
@@ -87,6 +115,7 @@ pub const Counters = struct {
     readiness_nonzero_waits: u64 = 0,
     readiness_interruptions: u64 = 0,
     readiness_failures: u64 = 0,
+    discovery_only_turns: u64 = 0,
 };
 
 const DiscoveryOwners = struct {
@@ -142,6 +171,10 @@ pub const NetworkCore = struct {
     last_now: Now,
     initialized: bool = false,
     host_wake: ?i32 = null,
+    /// The host's wall-clock slot for status validation. Intents only advance it.
+    current_slot: u64 = 0,
+    /// The last host apply stopped at a per-turn cap.
+    host_more: bool = false,
 
     pub fn init(self: *NetworkCore, backing: std.mem.Allocator, io: std.Io, resolved: *const @import("configuration.zig").Resolved, startup: Startup) !void {
         try @import("configuration.zig").validate(resolved.limits, resolved.core);
@@ -161,6 +194,8 @@ pub const NetworkCore = struct {
         self.wait_duration = .{};
         self.due_now_turns = @splat(0);
         self.host_wake = null;
+        self.current_slot = startup.slot;
+        self.host_more = false;
         self.native_event_count = 0;
         self.discovery = null;
         self.last_now = try transport_mod.currentTime(io);
@@ -424,6 +459,7 @@ pub const NetworkCore = struct {
     }
 
     /// Applies a complete copied subscription union in this serialized call without ending event borrows.
+    /// Records the intent's slot as the current slot unless it would move backwards.
     pub fn applyIntent(self: *NetworkCore, intent: *const LocalIntent, now: Now) !bool {
         const prepared = try self.prepareLocal(&intent.update);
         const demand = intent.demand;
@@ -435,6 +471,7 @@ pub const NetworkCore = struct {
         if (prepared.changed) self.commitLocal(&prepared, now);
         self.service.gossipsub.commitSubscriptions(self.local_intent_workspace);
         if (demand_changed) self.peer_manager.commitDemand(&demand);
+        self.current_slot = @max(self.current_slot, intent.slot);
         if (changed) std.log.scoped(.network_core).debug("intent_applied local_changed={any} topics_changed={any} demand_changed={any} subscriptions={d} fork={s} digest={x}", .{ prepared.changed, topics_changed, demand_changed, intent.subscriptions.len, @tagName(prepared.local.fork.fork), prepared.local.fork.digest });
         return changed;
     }
@@ -455,6 +492,7 @@ pub const NetworkCore = struct {
         self.host_wake = descriptor;
     }
 
+    /// The earliest wakeup of every source except host-owned deadlines, which only the host knows.
     pub fn nextWakeup(self: *NetworkCore, now: Now, outputs: Outputs) ?u64 {
         var wakeups: wake_sources.Wakeups = .{};
         self.collectWakeups(now, outputs, &wakeups);
@@ -468,11 +506,12 @@ pub const NetworkCore = struct {
         if (quic.eventsPending()) wakeups.note(.transport_events, now.mono_ms);
         if (quic.nextDeadlineNs()) |deadline| wakeups.note(.transport_timer, ceilMs(deadline));
         if (!self.peer_manager.quiescing) if (self.discovery) |owned| wakeups.note(.discovery, owned.coordinator.nextWakeup(now.mono_ms));
+        if (self.host_more) wakeups.note(.host, now.mono_ms);
     }
 
-    fn observeWait(self: *NetworkCore, wakeups: *const wake_sources.Wakeups, now_ms: u64, bounded_wait: u32) void {
-        self.wait_duration.observe(bounded_wait);
-        if (bounded_wait != 0) return;
+    fn observeWait(self: *NetworkCore, wakeups: *const wake_sources.Wakeups, now_ms: u64, chosen_wait: u32) void {
+        self.wait_duration.observe(chosen_wait);
+        if (chosen_wait != 0) return;
         for (wakeups.due, &self.due_now_turns) |deadline, *turns| {
             const value = deadline orelse continue;
             if (value <= now_ms) turns.* +|= 1;
@@ -480,23 +519,27 @@ pub const NetworkCore = struct {
     }
 
     /// One Service borrow window per turn. Returned counts remain valid even when failure is set.
-    /// The host bounds max_wait_ms by its next required slot update; no slot clock is inferred.
-    /// A turn polls, receives, expires timers, collects engine events, runs the protocols,
-    /// discovery and dials, and flushes, so its own output leaves in the same turn.
-    pub fn step(self: *NetworkCore, io: std.Io, now: Now, current_slot: u64, outputs: Outputs, max_wait_ms: u32) Result {
+    /// A turn waits for the earliest wakeup of any source, host deadlines included, bounded by
+    /// the readiness backstop. It then receives, expires timers, collects engine events, applies
+    /// host work, runs the protocols, discovery and dials, and flushes, so its own output and the
+    /// host's leave in the same turn. When only discovery has work, the turn drains discovery alone.
+    pub fn step(self: *NetworkCore, io: std.Io, now: Now, outputs: Outputs, host: Host) Result {
         self.last_now = now;
         var result: Result = .{ .transport = .{ .now = now } };
         var wakeups: wake_sources.Wakeups = .{};
         self.collectWakeups(now, outputs, &wakeups);
-        wakeups.note(.host, now.mono_ms +| max_wait_ms);
-        const bounded_wait: u32 = if (self.peer_manager.stopped) 0 else @intCast(@min(max_wait_ms, wakeups.earliest().? -| now.mono_ms));
-        if (!self.peer_manager.stopped) self.observeWait(&wakeups, now.mono_ms, bounded_wait);
+        wakeups.note(.host, host.deadline_ms);
+        const chosen_wait: u32 = if (self.peer_manager.stopped) 0 else if (wakeups.earliest()) |earliest|
+            @intCast(@min(earliest -| now.mono_ms, wait.native_wait_max_ms))
+        else
+            wait.native_wait_max_ms;
+        if (!self.peer_manager.stopped) self.observeWait(&wakeups, now.mono_ms, chosen_wait);
         if (comptime wait.supported) {
             result.readiness = wait.poll(io, .{
                 .quic = self.transport.udp.sockets.handles(),
                 .discovery = if (!self.peer_manager.quiescing and self.discovery != null) self.discovery.?.transport.sockets.handles() else .{ null, null },
                 .host = self.host_wake,
-            }, bounded_wait);
+            }, chosen_wait);
         } else result.readiness.failure = error.UnsupportedWait;
         self.counters.readiness_calls +|= 1;
         self.counters.readiness_nonzero_waits +|= @intFromBool(result.readiness.timeout_ms > 0);
@@ -513,6 +556,14 @@ pub const NetworkCore = struct {
         const tick: Now = if (read.mono_ms >= now.mono_ms) read else now;
         self.last_now = tick;
         result.transport.now = tick;
+        if (self.discoveryOnly(&result.readiness, tick, outputs, host)) {
+            result.discovery_only = true;
+            self.counters.discovery_only_turns +|= 1;
+            // The previous turn's events were consumed by its caller; this turn reports none.
+            self.native_event_count = 0;
+            self.discover(io, tick, &result);
+            return result;
+        }
         self.transport.engine.releaseReported();
         // A failed poll reports no readiness, so the socket is drained anyway.
         if (result.readiness.quic or result.readiness.failure != null) {
@@ -525,48 +576,16 @@ pub const NetworkCore = struct {
         result.transport.events = self.transport.collect(tick, self.native_events);
         result.transport.events_pending = self.transport.engine.eventsPending();
         self.native_event_count = result.transport.events;
-        result.counts = managed.process(&self.peer_manager, &self.service, &self.transport.engine, self.native_events[0..result.transport.events], tick, current_slot, outputs.peers, outputs.application);
+        if (host.apply) |apply| {
+            const due = if (host.deadline_ms) |deadline| deadline <= tick.mono_ms else false;
+            if (result.readiness.host or result.readiness.failure != null or self.host_more or due) {
+                self.host_more = apply(host.context.?, self, tick).more;
+            }
+        } else self.host_more = false;
+        result.counts = managed.process(&self.peer_manager, &self.service, &self.transport.engine, self.native_events[0..result.transport.events], tick, self.current_slot, outputs.peers, outputs.application);
         if (!self.peer_manager.stopped and !self.peer_manager.quiescing) {
             // This turn's coverage selection already ran, without a second protocol pump.
-            if (self.discovery) |owned| {
-                const need = self.peer_manager.discoveryNeed();
-                owned.coordinator.request(need.query(tick.mono_ms +| 1_000), tick.mono_ms) catch unreachable;
-                var candidates: [managed.candidates_per_turn]peers.enr.Candidate = undefined;
-                result.discovery = owned.coordinator.step(io, tick.mono_ms, tick.mono_ms, &candidates) catch |err| .{ .failure = err };
-                var endpoints = owned.endpoints;
-                for (result.discovery.learned, 0..) |learned, family| if (learned) |address| switch (address) {
-                    .ip4 => |ip| {
-                        endpoints.ip4 = ip.octets;
-                        endpoints.udp = ip.port;
-                        endpoints.quic = owned.quic_ports[family];
-                    },
-                    .ip6 => |ip| {
-                        endpoints.ip6 = ip.octets;
-                        endpoints.udp6 = ip.port;
-                        endpoints.quic6 = owned.quic_ports[family];
-                    },
-                };
-                if (!std.meta.eql(endpoints, owned.endpoints)) {
-                    _ = self.updateLocalWithEndpoints(&self.peer_manager.local, self.schedule, endpoints, tick) catch |err| {
-                        std.log.scoped(.network_discovery).warn("endpoint_update_failed reason={s}", .{@errorName(err)});
-                        self.counters.discovery_failures +|= 1;
-                    };
-                }
-                for (candidates[0..result.discovery.candidates]) |*candidate| {
-                    self.counters.discovered +|= 1;
-                    if (futureCompatible(candidate, self.schedule)) |compatible| {
-                        if (!compatible) self.counters.future_fork_mismatches +|= 1;
-                    } else self.counters.future_fork_unknown +|= 1;
-                }
-                const intake = self.peer_manager.discoveredBatch(&self.service, candidates[0..result.discovery.candidates], tick);
-                self.counters.candidates_refused +|= intake.refused;
-                if (result.discovery.candidates > 0) std.log.scoped(.network_discovery).debug("candidates_received count={d} refused={d}", .{ result.discovery.candidates, intake.refused });
-                if (result.discovery.failure) |err| {
-                    std.log.scoped(.network_discovery).debug("discovery_failed stage={s} reason={s}", .{ @tagName(result.discovery.failure_stage), @errorName(err) });
-                    self.counters.discovery_failures +|= 1;
-                    result.failure = result.failure orelse err;
-                }
-            }
+            if (self.discovery != null) self.discover(io, tick, &result);
             var intents: [managed.dials_per_turn]managed.DialIntent = undefined;
             const room = self.transport.engine.limits.dialing_max -| self.transport.engine.registry.dialing;
             const count = self.peer_manager.dialIntents(&self.service, &self.transport.engine, tick, intents[0..@min(room, intents.len)]);
@@ -594,6 +613,69 @@ pub const NetworkCore = struct {
         }
         self.transport.flush(io, tick, &result.transport);
         return result;
+    }
+
+    /// A turn drains discovery alone when discovery is readable or due, the QUIC sockets and the
+    /// host are not readable, and every other source, re-read at the post-poll time, is in the future.
+    fn discoveryOnly(self: *NetworkCore, readiness: *const wait.Result, tick: Now, outputs: Outputs, host: Host) bool {
+        if (readiness.quic or readiness.host or readiness.failure != null) return false;
+        if (self.discovery == null or self.peer_manager.stopped or self.peer_manager.quiescing) return false;
+        var wakeups: wake_sources.Wakeups = .{};
+        self.collectWakeups(tick, outputs, &wakeups);
+        wakeups.note(.host, host.deadline_ms);
+        const discovery_slot = &wakeups.due[@intFromEnum(wake_sources.Source.discovery)];
+        const discovery_due = if (discovery_slot.*) |deadline| deadline <= tick.mono_ms else false;
+        if (!readiness.discovery and !discovery_due) return false;
+        discovery_slot.* = null;
+        const earliest = wakeups.earliest() orelse return true;
+        return earliest > tick.mono_ms;
+    }
+
+    /// Steps discovery once per datagram, up to discovery_batch_max, handling each step's
+    /// candidates and learned endpoints before the next. Admission runs before decode as always.
+    fn discover(self: *NetworkCore, io: std.Io, tick: Now, result: *Result) void {
+        const owned = self.discovery.?;
+        const need = self.peer_manager.discoveryNeed();
+        owned.coordinator.request(need.query(tick.mono_ms +| 1_000), tick.mono_ms) catch unreachable;
+        for (0..discovery_batch_max) |_| {
+            var candidates: [managed.candidates_per_turn]peers.enr.Candidate = undefined;
+            const progress = owned.coordinator.step(io, tick.mono_ms, tick.mono_ms, &candidates) catch |err| peers.discovery.Result{ .failure = err };
+            result.discovery.add(&progress);
+            var endpoints = owned.endpoints;
+            for (progress.learned, 0..) |learned, family| if (learned) |address| switch (address) {
+                .ip4 => |ip| {
+                    endpoints.ip4 = ip.octets;
+                    endpoints.udp = ip.port;
+                    endpoints.quic = owned.quic_ports[family];
+                },
+                .ip6 => |ip| {
+                    endpoints.ip6 = ip.octets;
+                    endpoints.udp6 = ip.port;
+                    endpoints.quic6 = owned.quic_ports[family];
+                },
+            };
+            if (!std.meta.eql(endpoints, owned.endpoints)) {
+                _ = self.updateLocalWithEndpoints(&self.peer_manager.local, self.schedule, endpoints, tick) catch |err| {
+                    std.log.scoped(.network_discovery).warn("endpoint_update_failed reason={s}", .{@errorName(err)});
+                    self.counters.discovery_failures +|= 1;
+                };
+            }
+            for (candidates[0..progress.candidates]) |*candidate| {
+                self.counters.discovered +|= 1;
+                if (futureCompatible(candidate, self.schedule)) |compatible| {
+                    if (!compatible) self.counters.future_fork_mismatches +|= 1;
+                } else self.counters.future_fork_unknown +|= 1;
+            }
+            const intake = self.peer_manager.discoveredBatch(&self.service, candidates[0..progress.candidates], tick);
+            self.counters.candidates_refused +|= intake.refused;
+            if (progress.candidates > 0) std.log.scoped(.network_discovery).debug("candidates_received count={d} refused={d}", .{ progress.candidates, intake.refused });
+            if (progress.failure) |err| {
+                std.log.scoped(.network_discovery).debug("discovery_failed stage={s} reason={s}", .{ @tagName(progress.failure_stage), @errorName(err) });
+                self.counters.discovery_failures +|= 1;
+                result.failure = result.failure orelse err;
+            }
+            if (progress.datagrams == 0) break;
+        }
     }
 };
 
@@ -646,4 +728,5 @@ test {
     _ = @import("network_core_test.zig");
     _ = @import("network_core_metrics_test.zig");
     _ = @import("network_core_endpoint_test.zig");
+    _ = @import("network_core_turn_test.zig");
 }

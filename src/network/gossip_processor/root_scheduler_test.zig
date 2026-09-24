@@ -119,14 +119,14 @@ test "gossip scheduler budgets mass expiry and root promotion without releasing 
     try t.expectEqual(@as(usize, 130), table.diag.waiting);
     table.maintain(1, 0);
     try t.expectEqual(@as(usize, 66), table.diag.waiting);
-    try t.expectEqual(@as(u64, 0), table.waitLimit(1, 1000));
+    try t.expect(table.pending() or table.deadline().? <= 1);
     table.maintain(1, 0);
     try t.expectEqual(@as(usize, 2), table.diag.waiting);
     table.maintain(1, 0);
     try t.expectEqual(@as(usize, 0), table.diag.waiting);
     table.expire(101);
     try t.expectEqual(@as(usize, 66), table.diag.occupied);
-    try t.expectEqual(@as(u64, 0), table.waitLimit(101, 1000));
+    try t.expect(table.pending() or table.deadline().? <= 101);
     table.expire(101);
     table.expire(101);
     try t.expectEqual(@as(usize, 0), table.diag.occupied);

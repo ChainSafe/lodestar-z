@@ -194,6 +194,7 @@ jobs:
           zig build run:bench_network -Doptimize=ReleaseSafe -Dpreset=${{ matrix.preset }} -- small
           zig build run:bench_network -Doptimize=ReleaseSafe -Dpreset=${{ matrix.preset }} -- idle_transport
           zig build run:bench_network -Doptimize=ReleaseSafe -Dpreset=${{ matrix.preset }} -- idle_connections
+          zig build run:bench_network -Doptimize=ReleaseSafe -Dpreset=${{ matrix.preset }} -- idle_wait
           zig build test:reqresp_peer_bounds -Doptimize=ReleaseSafe -Dpreset=${{ matrix.preset }}
           zig build test:network_runtime -Doptimize=ReleaseSafe -Dpreset=${{ matrix.preset }}
           zig build build-lib:bindings -Doptimize=ReleaseSafe -Dpreset=${{ matrix.preset }}

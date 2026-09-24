@@ -696,11 +696,19 @@ pub const GossipProcessor = struct {
         }
     }
 
-    pub fn waitLimit(self: *const GossipProcessor, now: u64, limit: u64) u64 {
-        if (self.prune_remaining > 0 or self.dependencies.promoting.len > 0 or self.diag.pendingVerdicts > 0) return 0;
-        var result = limit;
-        if (self.groups.deadline()) |due| result = @min(result, due -| now);
-        if (self.expiry.head != none) result = @min(result, self.cells[self.expiry.head].deadline -| now);
+    /// Work the owner carries over turns in bounded batches: a slot prune, dependency promotion
+    /// or queued verdicts.
+    pub fn pending(self: *const GossipProcessor) bool {
+        if (self.closed) return false;
+        return self.prune_remaining > 0 or self.dependencies.promoting.len > 0 or self.diag.pendingVerdicts > 0;
+    }
+    /// Earliest attestation group or expiry deadline. O(1).
+    pub fn deadline(self: *const GossipProcessor) ?u64 {
+        var result = self.groups.deadline();
+        if (self.expiry.head != none) {
+            const expiry = self.cells[self.expiry.head].deadline;
+            result = @min(result orelse expiry, expiry);
+        }
         return result;
     }
     pub fn snapshot(self: *const GossipProcessor, now: u64) Diagnostics {

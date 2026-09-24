@@ -9,11 +9,21 @@ const publications_mod = r.publications_mod;
 const requests_mod = r.requests_mod;
 const projection = r.projection;
 
+/// The test executable links no Node runtime. Owner tests disable notification, so this stub
+/// only satisfies the linker for the owner's notify path.
+fn napiCallThreadsafeFunction(_: ?*anyopaque, _: ?*anyopaque, _: c_uint) callconv(.c) c_uint {
+    @panic("napi_call_threadsafe_function without a Node runtime");
+}
+comptime {
+    @export(&napiCallThreadsafeFunction, .{ .name = "napi_call_threadsafe_function" });
+}
+
 test {
     _ = commands;
     _ = publications_mod;
     _ = projection;
     _ = @import("network_peer_reports.zig");
+    _ = @import("network_owner.zig");
 }
 
 test "application typed store allocation prefixes release all requested bytes" {
@@ -112,4 +122,22 @@ test "one runtime is live per process until its last release" {
     first.release();
     const second = try r.create(undefined);
     second.release();
+}
+
+test "a payload release while the owner waits for budget wakes the owner once" {
+    var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 }, .notify_live = false, .env_alive = false };
+    runtime.wake = try @import("network_wake.zig").Wake.init();
+    defer runtime.wake.?.deinit();
+    runtime.payload_budget.limit = 64;
+    var readable = [_]std.c.pollfd{.{ .fd = runtime.wake.?.read_fd, .events = std.c.POLL.IN, .revents = 0 }};
+    for ([_]bool{ false, true }) |waiting| {
+        try runtime.payload_budget.reserve(.incoming, 32);
+        runtime.lock();
+        runtime.payload_budget.waiting = waiting;
+        runtime.payload_budget.release(.incoming, 32);
+        runtime.unlock();
+        try std.testing.expectEqual(@as(c_int, @intFromBool(waiting)), std.c.poll(&readable, 1, 0));
+        try std.testing.expect(!runtime.payload_budget.waiting and !runtime.payload_budget.released);
+    }
+    try runtime.wake.?.drain();
 }

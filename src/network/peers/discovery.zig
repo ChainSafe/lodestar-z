@@ -61,8 +61,29 @@ pub const Result = struct {
     rejected: u16 = 0,
     dropped: u16 = 0,
     unowned: u16 = 0,
+    /// Datagrams dequeued from the sockets, admitted or not. One step dequeues at most one.
+    datagrams: u16 = 0,
     failure: ?Error = null,
     failure_stage: d.Transport.FailureStage = .coordinator,
+
+    /// Sums the progress of consecutive steps. The latest learned address of each family and
+    /// the first failure are kept.
+    pub fn add(self: *Result, next: *const Result) void {
+        for (&self.learned, next.learned) |*kept, learned| {
+            if (learned) |address| kept.* = address;
+        }
+        self.candidates +|= next.candidates;
+        self.started +|= next.started;
+        self.expired +|= next.expired;
+        self.rejected +|= next.rejected;
+        self.dropped +|= next.dropped;
+        self.unowned +|= next.unowned;
+        self.datagrams +|= next.datagrams;
+        if (self.failure == null and next.failure != null) {
+            self.failure = next.failure;
+            self.failure_stage = next.failure_stage;
+        }
+    }
 };
 const Storage = struct {
     observations: d.AddressVotes,
@@ -177,7 +198,7 @@ pub const Discovery = struct {
                 self.counters.processing_failures +|= 1;
             };
         }
-        return .{ .learned = consumed.learned, .candidates = consumed.candidates, .started = result.started, .expired = consumed.expired, .rejected = consumed.rejected, .dropped = consumed.dropped, .unowned = consumed.unowned, .failure = result.failure orelse consumed.failure, .failure_stage = if (result.failure != null) .coordinator else consumed.failure_stage };
+        return .{ .learned = consumed.learned, .candidates = consumed.candidates, .started = result.started, .expired = consumed.expired, .rejected = consumed.rejected, .dropped = consumed.dropped, .unowned = consumed.unowned, .datagrams = consumed.datagrams, .failure = result.failure orelse consumed.failure, .failure_stage = if (result.failure != null) .coordinator else consumed.failure_stage };
     }
 
     /// Supports hosts that drive the borrowed Transport themselves. Consume every result exactly
@@ -185,7 +206,7 @@ pub const Discovery = struct {
     /// TALK requests itself; step supplies the unsupported-protocol response. No slice escapes.
     pub fn consume(self: *Discovery, progress: *const d.Transport.StepResult, expiries: []const d.CallTable.Expired, out: []adapter.Candidate) Result {
         std.debug.assert(expiries.len == progress.calls_expired and expiries.len <= d.CallTable.capacity_max);
-        var result = Result{ .failure = progress.failure, .failure_stage = progress.failure_stage };
+        var result = Result{ .datagrams = @intFromBool(progress.datagram != .timeout), .failure = progress.failure, .failure_stage = progress.failure_stage };
         if (self.stopped) return result;
         switch (progress.datagram) {
             .timeout => {},

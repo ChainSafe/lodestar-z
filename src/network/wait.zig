@@ -2,7 +2,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 pub const supported = builtin.os.tag == .linux or builtin.os.tag == .macos;
-pub const native_wait_max_ms: u32 = 100;
+/// A backstop only: an owner computes its wait from its deadlines and wakes on readiness.
+pub const native_wait_max_ms: u32 = 1_000;
 pub const Error = error{ UnsupportedWait, InvalidWakeSource, WaitFailed, WaitSourceClosed, Canceled };
 pub const Sources = struct { quic: [2]?i32, discovery: [2]?i32 = .{ null, null }, host: ?i32 = null };
 pub const Result = struct {
@@ -15,7 +16,7 @@ pub const Result = struct {
 };
 
 /// Requires real OS descriptors from an Io provider with the OS awake clock.
-/// Cancellation is checked around one poll, bounded to 100ms. Host readiness and
+/// Cancellation is checked around one poll, bounded to 1 s. Host readiness and
 /// signals can wake it sooner; arbitrary Io cancellation cannot interrupt libc.
 /// Only observes readiness. Descriptor owners retain all bytes and close duties.
 pub fn poll(io: std.Io, sources: Sources, timeout_ms: u32) Result {
