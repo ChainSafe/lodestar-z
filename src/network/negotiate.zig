@@ -1,8 +1,10 @@
 const std = @import("std");
 const engine_mod = @import("quic/engine.zig");
+const index_list = @import("index_list.zig");
 const multistream = @import("wire/multistream.zig");
 const stream_io = @import("stream_io.zig");
 const types = @import("types.zig");
+const DeadlineHeap = @import("deadline_heap.zig").DeadlineHeap;
 
 const assert = std.debug.assert;
 const Engine = engine_mod.Engine;
@@ -57,7 +59,6 @@ const Entry = struct {
     timeout_ms: u64 = negotiate_timeout_ms,
     role: Role = undefined,
     selected: ?u8 = null,
-    needs_service: bool = false,
     candidates: [candidates_max]Protocol = undefined,
     candidates_len: u8 = 0,
     candidate: u8 = 0,
@@ -66,6 +67,10 @@ const Entry = struct {
     outbox: stream_io.Outbox = .{},
     out_buffer: [outbox_capacity]u8 = undefined,
     inbox: stream_io.Inbox(inbox_capacity) = .{},
+    /// On `ready` while negotiating and able to progress without a new stream event.
+    ready_link: index_list.Link = .{},
+    /// On `pending` or `reported`, matching the state.
+    outcome_link: index_list.Link = .{},
 };
 
 pub const Options = struct {
@@ -83,7 +88,16 @@ pub const Negotiator = struct {
     outbound_reserved: u16,
     inbound_per_connection_max: u16,
     shared_capacity: u16,
-    delivery_cursor: usize = 0,
+    /// Negotiating entries that can progress now: new, handed a stream event, or cut short.
+    ready: index_list.List = .{},
+    /// Outcomes waiting for output capacity, in completion order.
+    pending: index_list.List = .{},
+    /// Delivered outcomes whose leftover bytes stay borrowed until `releaseReported`.
+    reported: index_list.List = .{},
+    /// Negotiating entries keyed on started_ms + timeout_ms.
+    timeouts: DeadlineHeap,
+    /// Entries serviced by pump. An idle negotiator visits none.
+    visits: u64 = 0,
 
     pub fn validateOptions(options: Options) Error!void {
         const negotiations_max = options.negotiations_max;
@@ -102,10 +116,13 @@ pub const Negotiator = struct {
         try validateOptions(options);
         const negotiations_max = options.negotiations_max;
         const entries = try allocator.alloc(Entry, @as(usize, negotiations_max) + @as(usize, options.inbound_connections) * options.inbound_per_connection_max);
+        errdefer allocator.free(entries);
         @memset(entries, .{});
+        const timeouts = try DeadlineHeap.init(allocator, @intCast(entries.len));
         return .{
             .allocator = allocator,
             .entries = entries,
+            .timeouts = timeouts,
             .shared_capacity = negotiations_max,
             .outbound_control_reserved = options.outbound_control_reserved,
             .outbound_reserved = options.outbound_reserved orelse @min(negotiations_max, options.outbound_control_reserved + negotiations_max / 4),
@@ -114,6 +131,7 @@ pub const Negotiator = struct {
     }
 
     pub fn deinit(self: *Negotiator) void {
+        self.timeouts.deinit(self.allocator);
         self.allocator.free(self.entries);
         self.* = undefined;
     }
@@ -141,7 +159,8 @@ pub const Negotiator = struct {
         if (timeout_ms == 0) return error.InvalidLimits;
         if (protocols.len == 0 or protocols.len > candidates_max) return error.InvalidLimits;
         for (protocols) |protocol| _ = try multistream.Dialer.init(protocol.id);
-        const entry = self.claim(control) orelse return error.NegotiationTableFull;
+        const index = self.claim(control) orelse return error.NegotiationTableFull;
+        const entry = &self.entries[index];
         assert(entry.state == .free);
         const dialer = try multistream.Dialer.init(protocols[0].id);
         @memcpy(entry.candidates[0..protocols.len], protocols);
@@ -149,6 +168,7 @@ pub const Negotiator = struct {
         entry.candidate = 0;
         const hello = try dialer.initialWrite(&entry.out_buffer);
         const stream = try engine.openStream(conn);
+        engine.bindStream(stream, routeOf(index)) catch unreachable;
         entry.control = control;
         entry.stream = stream;
         entry.started_ms = now.mono_ms;
@@ -159,23 +179,23 @@ pub const Negotiator = struct {
         entry.inbox = .{};
         entry.outbox = .{};
         entry.outbox.queue(hello, false);
-        entry.state = .negotiating;
-        entry.needs_service = true;
+        self.begin(index);
         assert(entry.outbox.bytes.len == hello.len);
         return stream;
     }
 
     pub fn acceptInbound(
         self: *Negotiator,
+        engine: *Engine,
         stream: StreamHandle,
         now: types.Now,
     ) Error!void {
         if (self.entries.len > self.shared_capacity) {
             const first = @as(usize, self.shared_capacity) + @as(usize, stream.conn.index) * self.inbound_per_connection_max;
             if (first >= self.entries.len) return error.InvalidLimits;
-            for (self.entries[first..][0..self.inbound_per_connection_max]) |*entry| {
-                if (entry.state != .free) continue;
-                initInbound(entry, stream, now);
+            for (first..first + self.inbound_per_connection_max) |index| {
+                if (self.entries[index].state != .free) continue;
+                self.initInbound(engine, index, stream, now);
                 return;
             }
             return error.NegotiationTableFull;
@@ -189,12 +209,15 @@ pub const Negotiator = struct {
         }
         if (inbound >= self.entries.len - self.outbound_reserved or connection_inbound >= self.inbound_per_connection_max)
             return error.NegotiationTableFull;
-        const entry = self.claim(false) orelse return error.NegotiationTableFull;
-        initInbound(entry, stream, now);
+        const index = self.claim(false) orelse return error.NegotiationTableFull;
+        self.initInbound(engine, index, stream, now);
     }
 
-    fn initInbound(entry: *Entry, stream: StreamHandle, now: types.Now) void {
+    fn initInbound(self: *Negotiator, engine: *Engine, index: usize, stream: StreamHandle, now: types.Now) void {
+        const entry = &self.entries[index];
         assert(entry.state == .free);
+        // A stale handle has no events to route; its entry fails on the first read.
+        engine.bindStream(stream, routeOf(index)) catch {};
         entry.stream = stream;
         entry.started_ms = now.mono_ms;
         entry.timeout_ms = negotiate_timeout_ms;
@@ -204,26 +227,70 @@ pub const Negotiator = struct {
         entry.fin_seen = false;
         entry.inbox = .{};
         entry.outbox = .{};
-        entry.state = .negotiating;
-        entry.needs_service = true;
+        self.begin(index);
     }
 
-    /// Output pressure alone is ready only when the host supplies outcome capacity.
+    fn begin(self: *Negotiator, index: usize) void {
+        const entry = &self.entries[index];
+        assert(!entry.ready_link.linked and !entry.outcome_link.linked);
+        entry.state = .negotiating;
+        self.timeouts.set(@intCast(index), entry.started_ms +| entry.timeout_ms);
+        self.markReady(index);
+    }
+
+    fn markReady(self: *Negotiator, index: usize) void {
+        assert(self.entries[index].state == .negotiating);
+        _ = self.ready.insert(self.entries, "ready_link", @intCast(index));
+    }
+
+    /// Records an outcome for delivery. A pending outcome may be replaced by a later failure.
+    fn settle(self: *Negotiator, index: usize, result: Outcome.Result) void {
+        const entry = &self.entries[index];
+        assert(entry.state == .negotiating or entry.state == .pending);
+        if (entry.ready_link.linked) self.ready.remove(self.entries, "ready_link", @intCast(index));
+        self.timeouts.clear(@intCast(index));
+        entry.pending_result = result;
+        if (entry.state == .negotiating) self.pending.append(self.entries, "outcome_link", @intCast(index));
+        entry.state = .pending;
+    }
+
+    fn release(self: *Negotiator, index: usize) void {
+        const entry = &self.entries[index];
+        if (entry.ready_link.linked) self.ready.remove(self.entries, "ready_link", @intCast(index));
+        switch (entry.state) {
+            .pending => self.pending.remove(self.entries, "outcome_link", @intCast(index)),
+            .reported => self.reported.remove(self.entries, "outcome_link", @intCast(index)),
+            .negotiating, .free => {},
+        }
+        self.timeouts.clear(@intCast(index));
+        entry.state = .free;
+    }
+
+    /// A routed stream event for the entry at `row`. An event for a stream the entry no longer
+    /// holds is dropped.
+    pub fn streamReady(self: *Negotiator, row: u24, stream: StreamHandle) void {
+        if (row >= self.entries.len) return;
+        const entry = &self.entries[row];
+        if (entry.state != .negotiating or !std.meta.eql(entry.stream, stream)) return;
+        self.markReady(row);
+    }
+
+    /// Output pressure alone is ready only when the host supplies outcome capacity. O(1).
     pub fn nextWakeup(self: *const Negotiator, now: types.Now, outcome_capacity: usize) ?u64 {
-        var deadline: ?u64 = null;
-        for (self.entries) |*entry| switch (entry.state) {
-            .free => {},
-            .reported => return now.mono_ms,
-            .pending => if (outcome_capacity > 0) {
-                return now.mono_ms;
-            },
-            .negotiating => {
-                if (entry.needs_service) return now.mono_ms;
-                const due = @max(now.mono_ms, entry.started_ms +| entry.timeout_ms);
-                deadline = if (deadline) |prior| @min(prior, due) else due;
-            },
-        };
-        return deadline;
+        if (self.ready.len > 0) return now.mono_ms;
+        if (self.pending.len > 0 and outcome_capacity > 0) return now.mono_ms;
+        const top = self.timeouts.peek() orelse return null;
+        return @max(now.mono_ms, top.deadline);
+    }
+
+    /// Ends the leftover borrows of every delivered outcome, freeing their entries.
+    pub fn releaseReported(self: *Negotiator) void {
+        var released: usize = 0;
+        while (self.reported.pop(self.entries, "outcome_link")) |row| : (released += 1) {
+            assert(released < self.entries.len);
+            assert(self.entries[row].state == .reported);
+            self.entries[row].state = .free;
+        }
     }
 
     pub fn pump(
@@ -234,23 +301,25 @@ pub const Negotiator = struct {
         outcomes: []Outcome,
     ) usize {
         assert(supported.len <= supported_max);
+        self.releaseReported();
+        // An expired entry fails on its next advance.
+        var expired: usize = 0;
+        while (self.timeouts.popDue(now.mono_ms)) |row| : (expired += 1) {
+            assert(expired < self.entries.len);
+            self.markReady(row);
+        }
+        // Entries re-marked while serviced wait for the next pump.
+        const serviced = self.ready.len;
+        for (0..serviced) |_| {
+            const index = self.ready.pop(self.entries, "ready_link").?;
+            self.visits +|= 1;
+            if (self.advance(engine, index, now, supported)) |outcome| self.settle(index, outcome.result);
+        }
         var count: usize = 0;
-        const start = self.delivery_cursor;
-        for (0..self.entries.len) |offset| {
-            const index = (start + offset) % self.entries.len;
+        while (count < outcomes.len) : (count += 1) {
+            const index = self.pending.pop(self.entries, "outcome_link") orelse break;
             const entry = &self.entries[index];
-            if (entry.state == .reported) {
-                entry.state = .free;
-                continue;
-            }
-            if (entry.state == .negotiating and (entry.needs_service or now.mono_ms >= entry.started_ms +| entry.timeout_ms)) {
-                entry.needs_service = false;
-                if (self.advance(engine, entry, now, supported)) |outcome| {
-                    entry.pending_result = outcome.result;
-                    entry.state = .pending;
-                }
-            }
-            if (entry.state != .pending or count == outcomes.len) continue;
+            assert(entry.state == .pending);
             outcomes[count] = .{
                 .stream = entry.stream,
                 .direction = direction(entry),
@@ -260,55 +329,54 @@ pub const Negotiator = struct {
                 },
                 .result = entry.pending_result,
             };
-            count += 1;
             entry.state = .reported;
-            self.delivery_cursor = (index + 1) % self.entries.len;
+            self.reported.append(self.entries, "outcome_link", index);
         }
         assert(count <= outcomes.len);
+        if (@import("builtin").is_test) self.checkInvariants(engine, now);
         return count;
     }
 
-    pub fn connectionActivity(self: *Negotiator, conn: Handle) void {
-        for (self.entries) |*entry| {
-            if (entry.state == .negotiating and std.meta.eql(entry.stream.conn, conn)) entry.needs_service = true;
-        }
-    }
-
     pub fn connectionClosed(self: *Negotiator, engine: *Engine, conn: Handle) void {
-        for (self.entries) |*entry| {
+        for (self.entries, 0..) |*entry, index| {
             if (entry.state != .negotiating and entry.state != .pending) continue;
             if (!std.meta.eql(entry.stream.conn, conn)) continue;
-            entry.pending_result = fail(engine, entry, .stream_closed).result;
-            entry.state = .pending;
+            self.settle(index, fail(engine, entry, .stream_closed).result);
         }
     }
 
-    pub fn streamClosed(self: *Negotiator, engine: *Engine, stream: StreamHandle) void {
-        for (self.entries) |*entry| {
-            if (entry.state != .negotiating and entry.state != .pending) continue;
-            if (!std.meta.eql(entry.stream, stream)) continue;
-            entry.pending_result = fail(engine, entry, .stream_closed).result;
-            entry.state = .pending;
-        }
+    /// A routed close. A reset fails the entry; any other close is observed by its next read.
+    pub fn streamClosed(self: *Negotiator, engine: *Engine, row: u24, stream: StreamHandle, reset: bool) void {
+        if (row >= self.entries.len) return;
+        const entry = &self.entries[row];
+        if (entry.state != .negotiating and entry.state != .pending) return;
+        if (!std.meta.eql(entry.stream, stream)) return;
+        if (reset) {
+            self.settle(row, fail(engine, entry, .stream_closed).result);
+        } else if (entry.state == .negotiating) self.markReady(row);
     }
 
     pub fn cancel(self: *Negotiator, engine: *Engine, stream: StreamHandle) void {
-        for (self.entries) |*entry| {
+        const bound = engine.route(stream);
+        if (bound != null and bound.?.owner == .negotiation) {
+            const row = bound.?.row;
+            if (row < self.entries.len and self.entries[row].state != .free and std.meta.eql(self.entries[row].stream, stream)) self.release(row);
+        } else for (self.entries, 0..) |*entry, index| {
             if (entry.state == .free or !std.meta.eql(entry.stream, stream)) continue;
-            entry.state = .free;
+            self.release(index);
         }
         engine.closeStream(stream, types.app_error_negotiation_failed);
     }
 
     pub fn shutdown(self: *Negotiator, engine: *Engine) void {
-        for (self.entries) |*entry| {
+        for (self.entries, 0..) |*entry, index| {
             if (entry.state == .free) continue;
             engine.closeStream(entry.stream, types.app_error_negotiation_failed);
-            entry.state = .free;
+            self.release(index);
         }
     }
 
-    fn claim(self: *Negotiator, control: bool) ?*Entry {
+    fn claim(self: *Negotiator, control: bool) ?usize {
         if (!control and self.outbound_control_reserved > 0) {
             var ordinary: usize = 0;
             for (self.entries[0..self.shared_capacity]) |*entry| {
@@ -316,20 +384,23 @@ pub const Negotiator = struct {
             }
             if (ordinary >= self.shared_capacity - self.outbound_control_reserved) return null;
         }
-        for (self.entries[0..self.shared_capacity]) |*entry| {
-            if (entry.state == .free) return entry;
+        for (self.entries[0..self.shared_capacity], 0..) |*entry, index| {
+            if (entry.state == .free) return index;
         }
         return null;
     }
 
-    fn advance(_: *Negotiator, engine: *Engine, entry: *Entry, now: types.Now, supported: []const Protocol) ?Outcome {
+    /// Returns an outcome when negotiation ended. An entry that can progress without a new
+    /// stream event goes back on `ready`.
+    fn advance(self: *Negotiator, engine: *Engine, index: usize, now: types.Now, supported: []const Protocol) ?Outcome {
+        const entry = &self.entries[index];
         assert(entry.state == .negotiating);
         const waited_ms = now.mono_ms -| entry.started_ms;
         if (waited_ms >= entry.timeout_ms) return fail(engine, entry, .timeout);
         const flushed = entry.outbox.pump(engine, entry.stream) catch |err|
             return failStream(engine, entry, err);
         if (flushed != .done) {
-            entry.needs_service = flushed == .yielded;
+            if (flushed == .yielded) self.markReady(index);
             return null;
         }
         if (entry.selected != null) return ready(entry);
@@ -338,7 +409,7 @@ pub const Negotiator = struct {
             return failStream(engine, entry, err);
         if (entry.inbox.len == 0 and !read.fin) return null;
         if (read.fin) entry.fin_seen = true;
-        if (read.len > 0) entry.needs_service = true;
+        var again = read.len > 0;
         switch (entry.role) {
             .dialer => |*dialer| {
                 const outcome = dialer.feed(entry.inbox.slice()) catch
@@ -348,7 +419,9 @@ pub const Negotiator = struct {
                     .accepted => return ready(entry),
                     .rejected => {
                         if (!entry.fin_seen and entry.candidate + 1 < entry.candidates_len) {
-                            return proposeNext(engine, entry, dialer);
+                            if (proposeNext(engine, entry, dialer)) |failed| return failed;
+                            self.markReady(index);
+                            return null;
                         }
                         engine.closeStream(entry.stream, types.app_error_negotiation_failed);
                         return .{ .stream = entry.stream, .result = .rejected };
@@ -362,15 +435,14 @@ pub const Negotiator = struct {
                 entry.inbox.drop(outcome.consumed);
                 if (outcome.write.len > 0) {
                     entry.outbox.queue(outcome.write, false);
-                    entry.needs_service = true;
+                    again = true;
                 }
                 switch (outcome.status) {
-                    .selected => |index| {
-                        entry.selected = index;
-                        entry.needs_service = false;
+                    .selected => |selected| {
+                        entry.selected = selected;
                         const replied = entry.outbox.pump(engine, entry.stream) catch |err|
                             return failStream(engine, entry, err);
-                        entry.needs_service = replied == .yielded;
+                        if (replied == .yielded) self.markReady(index);
                         return if (replied == .done) ready(entry) else null;
                     },
                     .failed => return fail(engine, entry, .exhausted),
@@ -379,10 +451,46 @@ pub const Negotiator = struct {
             },
         }
         if (read.fin) return fail(engine, entry, .stream_closed);
+        if (again) self.markReady(index);
         return null;
+    }
+
+    /// Test builds check, after every pump, that the lists and the heap match the entry states,
+    /// that no entry with work is off `ready`, and that each live stream routes to its entry.
+    fn checkInvariants(self: *const Negotiator, engine: *const Engine, now: types.Now) void {
+        var marked: usize = 0;
+        var outcomes: usize = 0;
+        for (self.entries, 0..) |*entry, index| {
+            marked += @intFromBool(entry.ready_link.linked);
+            outcomes += @intFromBool(entry.outcome_link.linked);
+            assert(!entry.ready_link.linked or entry.state == .negotiating);
+            assert(entry.outcome_link.linked == (entry.state == .pending or entry.state == .reported));
+            const key = self.timeouts.get(@intCast(index));
+            if (entry.state != .negotiating) {
+                assert(key == null);
+                continue;
+            }
+            assert(key.? == entry.started_ms +| entry.timeout_ms);
+            // An expired entry is serviced by the pump that sees its key due.
+            assert(key.? > now.mono_ms or entry.ready_link.linked);
+            const bound = engine.route(entry.stream) orelse continue;
+            assert(bound.owner == .negotiation and bound.row == index);
+            if (entry.ready_link.linked) continue;
+            const stream = engine.streamWaits(entry.stream) orelse continue;
+            if (!entry.outbox.idle()) {
+                assert(stream.write_waiting);
+            } else if (entry.selected == null) assert(!stream.read_open);
+        }
+        assert(marked == self.ready.len);
+        assert(outcomes == self.pending.len + self.reported.len);
     }
 };
 
+fn routeOf(index: usize) types.Route {
+    return .{ .owner = .negotiation, .row = @intCast(index) };
+}
+
+/// Returns a failure when the next proposal cannot be encoded.
 fn proposeNext(engine: *Engine, entry: *Entry, dialer: *multistream.Dialer) ?Outcome {
     assert(entry.candidate + 1 < entry.candidates_len);
     entry.candidate += 1;
@@ -393,7 +501,6 @@ fn proposeNext(engine: *Engine, entry: *Entry, dialer: *multistream.Dialer) ?Out
     const proposal = multistream.encodeMessage(dialer.protocol, &entry.out_buffer) catch
         return fail(engine, entry, .transport);
     entry.outbox.queue(proposal, false);
-    entry.needs_service = true;
     return null;
 }
 

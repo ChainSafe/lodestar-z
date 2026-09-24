@@ -73,15 +73,16 @@ test "reqresp drain retains blocked terminals across control and application par
         requests.pump(&pair.client, &router, pair.now, .{ .application = &.{}, .control = &.{} }),
     );
     try std.testing.expectEqual(0, router.negotiator.active());
+    // Each partition delivers its terminals in the order they were latched.
     var output: [1]rr.Event = undefined;
     try std.testing.expectEqual(1, requests.pump(&pair.client, &router, pair.now, .{ .application = &.{}, .control = &output }).control);
-    try std.testing.expectEqual(control, output[0].failed.request);
-    try std.testing.expectEqual(1, requests.pump(&pair.client, &router, pair.now, .{ .application = &.{}, .control = &output }).control);
     try std.testing.expectEqual(control_second, output[0].failed.request);
-    try std.testing.expectEqual(1, requests.pump(&pair.client, &router, pair.now, .{ .application = &output, .control = &.{} }).application);
-    try std.testing.expectEqual(application, output[0].failed.request);
+    try std.testing.expectEqual(1, requests.pump(&pair.client, &router, pair.now, .{ .application = &.{}, .control = &output }).control);
+    try std.testing.expectEqual(control, output[0].failed.request);
     try std.testing.expectEqual(1, requests.pump(&pair.client, &router, pair.now, .{ .application = &output, .control = &.{} }).application);
     try std.testing.expectEqual(application_second, output[0].failed.request);
+    try std.testing.expectEqual(1, requests.pump(&pair.client, &router, pair.now, .{ .application = &output, .control = &.{} }).application);
+    try std.testing.expectEqual(application, output[0].failed.request);
     _ = requests.pump(&pair.client, &router, pair.now, .{ .application = &.{}, .control = &.{} });
     try std.testing.expectEqual(0, requests.active().outbound);
 }

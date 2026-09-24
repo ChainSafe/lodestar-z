@@ -115,23 +115,34 @@ pub const Handler = struct {
         self.bind(engine);
     }
 
-    pub fn connectionActivity(self: *Handler, conn: engine_mod.Handle) void {
-        for (self.inbound) |*slot| if (slot.stream) |stream| {
-            if (std.meta.eql(stream.conn, conn)) slot.ready = true;
-        };
-        for (self.outbound) |*slot| if (slot.stream) |stream| {
-            if (std.meta.eql(stream.conn, conn)) slot.ready = true;
-        };
+    /// A routed stream event. Inbound slot `i` is row `i`; outbound slot `j` is row
+    /// `inbound.len + j`. An event for a stream the slot no longer holds is dropped.
+    pub fn streamReady(self: *Handler, row: u24, stream: engine_mod.StreamHandle) void {
+        if (row < self.inbound.len) {
+            const slot = &self.inbound[row];
+            if (slot.stream != null and std.meta.eql(slot.stream.?, stream)) slot.ready = true;
+            return;
+        }
+        if (row - self.inbound.len >= self.outbound.len) return;
+        const slot = &self.outbound[row - self.inbound.len];
+        if (slot.stream != null and std.meta.eql(slot.stream.?, stream) and slot.phase == .reading) slot.ready = true;
     }
 
     pub fn transportEvents(self: *Handler, engine: *engine_mod.Engine, events: []const engine_mod.Event) void {
         for (events) |event| switch (event) {
             .closed => |closed| self.closeMatching(engine, closed.conn, null, .transport),
-            .stream_closed => |closed| if (closed.reset_code != null) {
-                self.closeMatching(engine, closed.stream.conn, closed.stream, .reset);
+            .stream_closed => |closed| if (closed.route.owner == .identify) {
+                if (closed.reset_code != null) {
+                    self.closeMatching(engine, closed.stream.conn, closed.stream, .reset);
+                } else self.streamReady(closed.route.row, closed.stream);
             },
             else => {},
         };
+    }
+
+    fn bindRow(engine: *engine_mod.Engine, stream: engine_mod.StreamHandle, row: usize) void {
+        // A stream that is already gone has no events to route.
+        engine.bindStream(stream, .{ .owner = .identify, .row = @intCast(row) }) catch {};
     }
 
     fn closeMatching(self: *Handler, engine: *engine_mod.Engine, conn: engine_mod.Handle, which: ?engine_mod.StreamHandle, failure: Failure) void {
@@ -148,9 +159,10 @@ pub const Handler = struct {
 
     pub fn negotiationResult(self: *Handler, router: *const routing.Router, engine: *engine_mod.Engine, outcome: routing.Outcome, now: types.Now) void {
         if (outcome.direction == .outbound) {
-            for (self.outbound) |*slot| if (std.meta.eql(slot.stream, outcome.stream) and slot.phase == .negotiating) {
+            for (self.outbound, 0..) |*slot, index| if (std.meta.eql(slot.stream, outcome.stream) and slot.phase == .negotiating) {
                 switch (outcome.result) {
                     .ready => |selected| {
+                        bindRow(engine, outcome.stream, self.inbound.len + index);
                         slot.phase = .reading;
                         slot.ready = true;
                         slot.decoder.feed(selected.leftover, selected.fin) catch {
@@ -177,7 +189,8 @@ pub const Handler = struct {
             }
         };
         self.bind(engine);
-        for (self.inbound) |*slot| if (slot.stream == null) {
+        for (self.inbound, 0..) |*slot, index| if (slot.stream == null) {
+            bindRow(engine, outcome.stream, index);
             slot.* = .{ .stream = outcome.stream, .deadline = now.mono_ms +| deadline_ms, .ready = true };
             const bytes = self.local.?.encode(router.capabilities().receive, engine.peerAddress(outcome.stream.conn), &slot.bytes) catch {
                 engine.closeStream(outcome.stream, types.app_error_normal);

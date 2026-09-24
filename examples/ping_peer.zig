@@ -45,6 +45,12 @@ const Session = struct {
     active: bool = false,
 };
 
+/// Streams still negotiating take their readiness by route.
+fn routeReady(engine: *const engine_mod.Engine, negotiator: *negotiate.Negotiator, stream: engine_mod.StreamHandle) void {
+    const route = engine.route(stream) orelse return;
+    if (route.owner == .negotiation) negotiator.streamReady(route.row, stream);
+}
+
 fn listen(allocator: std.mem.Allocator, io: std.Io, host: []const u8, port: u16) !void {
     var node: network.Transport = .{};
     try initNode(&node, allocator, io, try std.Io.net.IpAddress.parseIp4(host, port));
@@ -63,7 +69,6 @@ fn listen(allocator: std.mem.Allocator, io: std.Io, host: []const u8, port: u16)
     while (true) {
         const stepped = node.step(io, &events, &activity, .{});
         const result = stepped.progress;
-        for (activity[0..result.activity]) |conn| negotiator.connectionActivity(conn);
         for (events[0..result.events]) |event| switch (event) {
             .connected => |connected| printPeer("connected", &connected.peer_id),
             .closed => |closed| {
@@ -72,11 +77,11 @@ fn listen(allocator: std.mem.Allocator, io: std.Io, host: []const u8, port: u16)
                     if (session.active and std.meta.eql(session.stream.conn, closed.conn)) session.active = false;
                 }
             },
-            .stream_opened => |stream| negotiator.acceptInbound(stream, result.now) catch {
+            .stream_opened => |stream| negotiator.acceptInbound(&node.engine, stream, result.now) catch {
                 node.engine.closeStream(stream, 0);
             },
             .path_changed => |changed| std.debug.print("path changed port={d}\n", .{changed.peer.port()}),
-            .stream_ready => {},
+            .stream_ready => |ready| routeReady(&node.engine, &negotiator, ready.stream),
             .stream_closed => |closed| {
                 for (&sessions) |*session| {
                     if (session.active and std.meta.eql(session.stream, closed.stream)) session.active = false;
@@ -162,7 +167,6 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, text: []const u8) !void {
     while (steps < dial_steps_max and state != .done) : (steps += 1) {
         const stepped = node.step(io, &events, &activity, .{});
         const result = stepped.progress;
-        for (activity[0..result.activity]) |conn| negotiator.connectionActivity(conn);
         for (events[0..result.events]) |event| switch (event) {
             .connected => |connected| {
                 printPeer("connected", &connected.peer_id);
@@ -175,7 +179,7 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, text: []const u8) !void {
             },
             .stream_opened => |opened| node.engine.closeStream(opened, 0),
             .path_changed => |changed| std.debug.print("path changed port={d}\n", .{changed.peer.port()}),
-            .stream_ready => {},
+            .stream_ready => |ready| routeReady(&node.engine, &negotiator, ready.stream),
             .stream_closed => {},
         };
         if (stepped.failure) |err| return err;

@@ -152,8 +152,8 @@ test "reqresp router negotiation timeout contributes once to aggregate timeout c
     var outcomes: [1]@import("../router.zig").Outcome = undefined;
     try std.testing.expectEqual(@as(usize, 1), setup.shared.client.router.pump(&setup.shared.pair.client, setup.shared.pair.now, &outcomes));
     try std.testing.expectEqual(.timeout, outcomes[0].result.failed);
-    try std.testing.expect(setup.shared.client.reqresp.negotiated(outcomes[0], setup.shared.pair.now));
-    try std.testing.expect(!setup.shared.client.reqresp.negotiated(outcomes[0], setup.shared.pair.now));
+    try std.testing.expect(setup.shared.client.reqresp.negotiated(&setup.shared.pair.client, outcomes[0], setup.shared.pair.now));
+    try std.testing.expect(!setup.shared.client.reqresp.negotiated(&setup.shared.pair.client, outcomes[0], setup.shared.pair.now));
     var events: [1]rr.Event = undefined;
     try std.testing.expectEqual(@as(usize, 1), setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &events }).control);
     try std.testing.expectEqual(handle, events[0].failed.request);

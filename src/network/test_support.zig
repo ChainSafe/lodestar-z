@@ -194,8 +194,19 @@ pub const Pair = struct {
         return storage[0 .. taken + polled];
     }
 
-    /// Connections with stream events since the last call, as owners that still take connection
-    /// activity see them. Events polled here stay available to `events`.
+    /// Routes the stream events polled since the last call, here or by `events`, to the owners
+    /// their routes name, as Service.dispatch does. Events polled here stay available to `events`.
+    pub fn forward(self: *Pair, engine: *Engine, owners: Owners) void {
+        const held = self.stash(engine);
+        const start = held.len;
+        held.len += engine.pollEvents(held.events[start..]);
+        held.noteActivity(held.events[start..held.len]);
+        owners.route(engine, held.unrouted[0..held.unrouted_len]);
+        held.unrouted_len = 0;
+    }
+
+    /// Connections with stream events since the last call, as gossip's connection activity sees
+    /// them. Events polled here stay available to `events`.
     pub fn activity(self: *Pair, engine: *Engine, out: []engine_mod.Handle) usize {
         const held = self.stash(engine);
         const start = held.len;
@@ -213,15 +224,52 @@ const Stash = struct {
     len: usize = 0,
     active: [16]engine_mod.Handle = undefined,
     active_len: usize = 0,
+    /// Stream events not yet routed by `forward`.
+    unrouted: [256]Event = undefined,
+    unrouted_len: usize = 0,
 
     fn noteActivity(self: *Stash, polled: []const Event) void {
         for (polled) |event| {
+            if (event == .stream_ready or event == .stream_closed) {
+                // Harnesses that never forward keep only the newest events.
+                if (self.unrouted_len == self.unrouted.len) {
+                    const kept = self.unrouted.len / 2;
+                    std.mem.copyForwards(Event, self.unrouted[0..kept], self.unrouted[self.unrouted.len - kept ..]);
+                    self.unrouted_len = kept;
+                }
+                self.unrouted[self.unrouted_len] = event;
+                self.unrouted_len += 1;
+            }
             const conn = engine_mod.activityOf(event) orelse continue;
             for (self.active[0..self.active_len]) |seen| {
                 if (std.meta.eql(seen, conn)) break;
             } else if (self.active_len < self.active.len) {
                 self.active[self.active_len] = conn;
                 self.active_len += 1;
+            }
+        }
+    }
+};
+
+/// The owners a test drives directly, reached by stream route. A readable, writable or close event
+/// marks the owner's row ready; lifecycle handling stays with the test.
+pub const Owners = struct {
+    negotiator: ?*@import("negotiate.zig").Negotiator = null,
+    identify: ?*@import("identify/handler.zig").Handler = null,
+    reqresp: ?*@import("reqresp/reqresp.zig").ReqResp = null,
+
+    pub fn route(self: Owners, engine: *const Engine, events: []const Event) void {
+        for (events) |event| {
+            const stream, const bound = switch (event) {
+                .stream_ready => |ready| .{ ready.stream, engine.route(ready.stream) orelse continue },
+                .stream_closed => |closed| .{ closed.stream, closed.route },
+                else => continue,
+            };
+            switch (bound.owner) {
+                .negotiation => if (self.negotiator) |owner| owner.streamReady(bound.row, stream),
+                .identify => if (self.identify) |owner| owner.streamReady(bound.row, stream),
+                .reqresp_outbound, .reqresp_inbound => if (self.reqresp) |owner| owner.streamReady(bound, stream),
+                .none, .gossip_inbound, .gossip_outbound => {},
             }
         }
     }

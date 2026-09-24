@@ -24,7 +24,6 @@ pub const RequestState = struct {
     stream: engine_mod.StreamHandle = undefined,
     protocol: @import("protocol.zig").Protocol = .status_v1,
     started_ms: u64 = 0,
-    needs_service: bool = false,
     chunks: u32 = 0,
     chunks_max: u32 = 1,
     io: RequestIO = .{},
@@ -106,16 +105,15 @@ pub const RequestState = struct {
     }
 
     pub fn recycleDelivered(self: *RequestState) void {
-        if (self.completion == .reported) {
-            assert(self.stream_owner == .closed and self.notification == .none);
-            self.completion = .free;
-            self.io.sink = &.{};
-        }
+        assert(self.completion == .reported);
+        assert(self.stream_owner == .closed and self.notification == .none);
+        self.completion = .free;
+        self.io.sink = &.{};
     }
 
-    pub fn wakeup(self: *const RequestState, capacity: usize) bool {
-        return self.needs_service or self.close_code != null or self.completion == .reported or
-            (capacity > 0 and (self.notification == .pending or self.completion == .terminal));
+    /// A pending notification or an undelivered terminal event.
+    pub fn deliverable(self: *const RequestState) bool {
+        return self.notification == .pending or self.completion == .terminal;
     }
 
     pub fn terminate(self: *RequestState, event: Event) bool {
@@ -123,7 +121,6 @@ pub const RequestState = struct {
         assert(event == .done or event == .served or event == .failed);
         self.completion = .{ .terminal = event };
         self.io.clear();
-        self.needs_service = false;
         if (self.pendingEvent()) |pending| if (pending == .request) {
             self.notification = .none;
         };

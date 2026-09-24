@@ -47,10 +47,6 @@ pub const Router = struct {
     meshsub_candidates: [3]negotiate.Protocol = undefined,
     meshsub_count: u8 = 0,
 
-    pub fn connectionActivity(self: *Router, conn: engine_mod.Handle) void {
-        self.negotiator.connectionActivity(conn);
-    }
-
     pub fn validateOptions(options: Options) Error!void {
         if (options.meshsub_versions.len == 0 or options.meshsub_versions.len > 3) {
             return error.InvalidLimits;
@@ -197,17 +193,22 @@ pub const Router = struct {
     ) void {
         for (events) |event| switch (event) {
             .stream_opened => |stream| {
-                self.negotiator.acceptInbound(stream, now) catch {
+                self.negotiator.acceptInbound(engine, stream, now) catch {
                     self.counters.refused +|= 1;
                     engine.closeStream(stream, types.app_error_negotiation_failed);
                 };
             },
             .closed => |closed| self.negotiator.connectionClosed(engine, closed.conn),
-            .stream_closed => |closed| if (closed.reset_code != null) {
-                self.negotiator.streamClosed(engine, closed.stream);
+            .stream_closed => |closed| if (closed.route.owner == .negotiation) {
+                self.negotiator.streamClosed(engine, closed.route.row, closed.stream, closed.reset_code != null);
             },
             else => {},
         };
+    }
+
+    /// Ends the leftover borrows of the outcomes the last pump returned.
+    pub fn releaseOutcomes(self: *Router) void {
+        self.negotiator.releaseReported();
     }
 
     pub fn nextWakeup(self: *const Router, now: types.Now, outcome_capacity: usize) ?u64 {

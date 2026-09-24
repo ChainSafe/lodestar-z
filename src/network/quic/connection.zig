@@ -69,6 +69,8 @@ pub const Slot = struct {
     event_link: index_list.Link = .{},
     /// Close event delivered; the slot is retired on the next turn.
     release_link: index_list.Link = .{},
+    /// Has deferred stream close events, made deliverable by the next poll.
+    deferred_link: index_list.Link = .{},
     table: StreamTable = .{},
 
     pub fn open(
@@ -80,6 +82,7 @@ pub const Slot = struct {
         assert(self.state == .free);
         assert(self.conn == null);
         assert(!self.collect_link.linked and !self.dirty_link.linked and !self.event_link.linked and !self.release_link.linked);
+        assert(!self.deferred_link.linked);
         assert(params.keylog.len == 0 or params.keylog.len == tls.keylog_capacity);
         self.handshake = .{ .now_unix = params.now.unix_s, .keylog = params.keylog };
         self.direction = params.direction;

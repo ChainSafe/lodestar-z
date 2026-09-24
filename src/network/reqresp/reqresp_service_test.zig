@@ -212,7 +212,7 @@ test "service request work remains bounded and rotates between live streams" {
         try std.testing.expectEqual(encoded.len, try setup.shared.pair.server.write(stream, encoded, false));
     }
     try setup.shared.pair.pump();
-    setup.shared.client.reqresp.connectionActivity(setup.shared.handles.client);
+    setup.shared.pair.forward(&setup.shared.pair.client, .{ .reqresp = &setup.shared.client.reqresp });
     setup.shared.client.reqresp.options.work_per_pump_max = 1;
     var events: [2]Event = undefined;
     var delivered: [2]reqresp.RequestHandle = undefined;
@@ -224,4 +224,197 @@ test "service request work remains bounded and rotates between live streams" {
     }
     try std.testing.expect(!std.meta.eql(delivered[0], delivered[1]));
     for (handles) |handle| try std.testing.expect(setup.shared.client.reqresp.consume(handle, setup.shared.pair.now));
+}
+
+test "service reqresp slot is serviced only after a stream event or its deadline" {
+    var setup: Pair = .{};
+    try setup.init(.{}, .{ .progress_timeout_ms = 1_000 });
+    defer setup.deinit();
+    const server = &setup.shared.server.reqresp;
+    const codec = @import("codec.zig");
+    // Two accepted ping streams whose request bytes have not arrived.
+    const fed = try setup.openRaw(.ping_v1);
+    try setup.awaitRawSelection(fed, .ping_v1);
+    const starved = try setup.openRaw(.ping_v1);
+    try setup.awaitRawSelection(starved, .ping_v1);
+    try std.testing.expectEqual(@as(u8, 2), server.inboundCount(setup.shared.handles.server, .ping_v1));
+    for (0..2) |_| try setup.pumpOnce();
+    const idle = server.visits;
+    for (0..8) |_| {
+        try setup.pumpOnce();
+        try std.testing.expectEqual(idle, server.visits);
+        try std.testing.expect(server.nextWakeup(setup.shared.pair.now, .{ .control = 1 }).? > setup.shared.pair.now.mono_ms);
+    }
+
+    const ping = [_]u8{3} ** 8;
+    var wire: [codec.frame_scratch_max]u8 = undefined;
+    const encoded = try codec.encodeRequest(&ping, &wire);
+    try std.testing.expectEqual(encoded.len, try setup.shared.pair.client.write(fed, encoded, true));
+    var request: ?reqresp.RequestHandle = null;
+    for (0..8) |_| {
+        try setup.pumpOnce();
+        for (setup.serverEvents()) |event| if (event == .request) {
+            try std.testing.expectEqualSlices(u8, &ping, event.request.bytes);
+            request = event.request.request;
+        };
+        if (request != null) break;
+    }
+    try std.testing.expect(request != null);
+    try std.testing.expect(server.visits > idle);
+
+    // The starved slot is next visited when its progress deadline passes.
+    const waiting = server.visits;
+    for (0..4) |_| {
+        try setup.pumpOnce();
+        try std.testing.expectEqual(waiting, server.visits);
+    }
+    setup.shared.pair.advance(1_000);
+    var timed_out = false;
+    for (0..4) |_| {
+        try setup.pumpOnce();
+        for (setup.serverEvents()) |event| if (event == .failed) {
+            try std.testing.expect(!std.meta.eql(request.?, event.failed.request));
+            try std.testing.expectEqual(reqresp.Failure.timeout, event.failed.reason);
+            timed_out = true;
+        };
+        if (timed_out) break;
+    }
+    try std.testing.expect(timed_out);
+    try std.testing.expect(server.visits > waiting);
+}
+
+test "service reqresp slots stay indexed by connection across a reconnect at the same index" {
+    var setup: Pair = .{};
+    try setup.init(.{}, .{});
+    defer setup.deinit();
+    const server = &setup.shared.server.reqresp;
+    const client = &setup.shared.client.reqresp;
+    const old = setup.shared.handles;
+    const bytes = [_]u8{4} ** 8;
+    var sinks: [2][8]u8 = undefined;
+    _ = try setup.shared.client.request(&setup.shared.pair.client, old.client, .ping_v1, &bytes, &sinks[0], .{}, setup.shared.pair.now);
+    const stale = try awaitRequest(&setup);
+    const slots_per_peer = @import("receive_plan.zig").slots_per_peer;
+    try std.testing.expectEqual(@as(usize, old.server.index), stale.index / slots_per_peer);
+
+    // The server holds its host events while the connection closes and a new one takes its index.
+    setup.server_event_capacity = 0;
+    try std.testing.expect(setup.shared.pair.client.close(old.client, 0));
+    for (0..8) |_| try setup.pumpOnce();
+    try std.testing.expectEqual(@as(usize, 0), setup.shared.pair.server.registry.active_len);
+    const fresh_client = try setup.shared.pair.dial();
+    for (0..8) |_| try setup.pumpOnce();
+    try std.testing.expectEqual(@as(usize, 1), setup.shared.pair.server.registry.active_len);
+    const fresh_server = setup.shared.pair.server.sendOwner(setup.shared.pair.server.activeIndices()[0]).?;
+    try std.testing.expectEqual(old.server.index, fresh_server.index);
+    try std.testing.expect(old.server.generation != fresh_server.generation);
+
+    _ = try setup.shared.client.request(&setup.shared.pair.client, fresh_client, .ping_v1, &bytes, &sinks[1], .{}, setup.shared.pair.now);
+    for (0..8) |_| try setup.pumpOnce();
+    try std.testing.expectEqual(@as(u8, 1), server.inboundCount(fresh_server, .ping_v1));
+    try std.testing.expectEqual(@as(u8, 1), server.inboundCount(old.server, null));
+    try std.testing.expectEqual(@as(u8, 1), client.outboundCount(fresh_client, .ping_v1));
+    try std.testing.expectEqual(@as(u8, 0), client.outboundCount(old.client, .ping_v1));
+    // A repeated close of the old connection leaves the new one's slot running.
+    server.connectionClosed(old.server);
+    try std.testing.expectEqual(@as(u8, 1), server.inboundCount(fresh_server, .ping_v1));
+
+    setup.server_event_capacity = 16;
+    var fresh: ?reqresp.RequestHandle = null;
+    var stale_failed = false;
+    for (0..8) |_| {
+        try setup.pumpOnce();
+        for (setup.serverEvents()) |event| switch (event) {
+            .request => |incoming| {
+                try std.testing.expectEqual(fresh_server, incoming.peer);
+                try std.testing.expectEqual(stale.index / slots_per_peer, incoming.request.index / slots_per_peer);
+                try std.testing.expect(incoming.request.index != stale.index);
+                fresh = incoming.request;
+            },
+            .failed => |failed| {
+                try std.testing.expectEqual(stale, failed.request);
+                try std.testing.expectEqual(reqresp.Failure.connection_closed, failed.reason);
+                stale_failed = true;
+            },
+            else => {},
+        };
+        if (fresh != null and stale_failed) break;
+    }
+    try std.testing.expect(fresh != null and stale_failed);
+    try std.testing.expectError(error.StaleHandle, server.respond(stale, &bytes, null, setup.shared.pair.now));
+    try server.respond(fresh.?, &bytes, null, setup.shared.pair.now);
+    var done = false;
+    for (0..16) |_| {
+        try setup.pumpOnce();
+        for (setup.serverEvents()) |event| if (event == .chunk_sent) {
+            try std.testing.expect(server.finish(event.chunk_sent.request, setup.shared.pair.now));
+        };
+        for (setup.clientEvents()) |event| switch (event) {
+            .chunk => |chunk| try std.testing.expect(client.consume(chunk.request, setup.shared.pair.now)),
+            .done => done = true,
+            .failed => return error.TestUnexpectedResult,
+            else => {},
+        };
+        if (done) break;
+    }
+    try std.testing.expect(done);
+}
+
+fn awaitRequest(setup: *Pair) !reqresp.RequestHandle {
+    for (0..16) |_| {
+        try setup.pumpOnce();
+        for (setup.serverEvents()) |event| if (event == .request) return event.request.request;
+    }
+    return error.TestUnexpectedResult;
+}
+
+test "service reqresp request on one connection among 64 visits only its own slots" {
+    var setup: Pair = .{};
+    try setup.init(.{}, .{});
+    defer setup.deinit();
+    const server = &setup.shared.server.reqresp;
+    const client = &setup.shared.client.reqresp;
+    var connections: [64]engine_mod.Handle = undefined;
+    connections[0] = setup.shared.handles.client;
+    var dialed: usize = 1;
+    // The server admits a bounded number of handshakes per source address.
+    while (dialed < connections.len) {
+        const batch = @min(4, connections.len - dialed);
+        for (connections[dialed..][0..batch]) |*conn| conn.* = try setup.shared.pair.dial();
+        dialed += batch;
+        for (0..2) |_| try setup.pumpOnce();
+    }
+    try std.testing.expectEqual(@as(usize, connections.len), setup.shared.pair.server.registry.active_len);
+    for (0..2) |_| try setup.pumpOnce();
+    const idle = .{ client.visits, server.visits };
+    for (0..4) |_| try setup.pumpOnce();
+    try std.testing.expectEqual(idle[0], client.visits);
+    try std.testing.expectEqual(idle[1], server.visits);
+
+    const bytes = [_]u8{6} ** 8;
+    var sink: [8]u8 = undefined;
+    _ = try setup.shared.client.request(&setup.shared.pair.client, connections[41], .ping_v1, &bytes, &sink, .{}, setup.shared.pair.now);
+    const incoming = try awaitRequest(&setup);
+    try server.respond(incoming, &bytes, null, setup.shared.pair.now);
+    var done = false;
+    for (0..16) |_| {
+        try setup.pumpOnce();
+        for (setup.serverEvents()) |event| if (event == .chunk_sent) {
+            try std.testing.expect(server.finish(event.chunk_sent.request, setup.shared.pair.now));
+        };
+        for (setup.clientEvents()) |event| switch (event) {
+            .chunk => |chunk| try std.testing.expect(client.consume(chunk.request, setup.shared.pair.now)),
+            .done => done = true,
+            else => {},
+        };
+        if (done) break;
+    }
+    try std.testing.expect(done);
+    for (0..2) |_| try setup.pumpOnce();
+    // One slot per side, each taken from a list a handful of times over its lifetime; a scan
+    // would visit every slot of every connection.
+    try std.testing.expect(client.visits - idle[0] <= 16);
+    try std.testing.expect(server.visits - idle[1] <= 16);
+    try std.testing.expectEqual(@as(?u64, null), server.nextWakeup(setup.shared.pair.now, .{ .control = 1 }));
+    try std.testing.expectEqual(@as(?u64, null), client.nextWakeup(setup.shared.pair.now, .{ .control = 1 }));
 }

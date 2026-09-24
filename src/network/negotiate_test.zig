@@ -36,14 +36,15 @@ const Setup = struct {
         self.pair.deinit();
     }
 
-    /// Delivers one side's engine events: stream activity to its negotiator and, on the listener,
-    /// new streams to acceptInbound.
+    /// Delivers one side's engine events: stream events to its negotiator by route and, on the
+    /// listener, new streams to acceptInbound.
     fn deliver(self: *Setup, engine: *engine_mod.Engine, negotiator: *Negotiator) !void {
         var storage: [64]engine_mod.Event = undefined;
-        for (self.pair.events(engine, &storage)) |event| {
-            if (event == .stream_opened and negotiator == &self.listener) try negotiator.acceptInbound(event.stream_opened, self.pair.now);
-            if (engine_mod.activityOf(event)) |conn| negotiator.connectionActivity(conn);
+        const events = self.pair.events(engine, &storage);
+        for (events) |event| {
+            if (event == .stream_opened and negotiator == &self.listener) try negotiator.acceptInbound(engine, event.stream_opened, self.pair.now);
         }
+        (support.Owners{ .negotiator = negotiator }).route(engine, events);
     }
 
     fn pumpDialer(self: *Setup, protocols: []const negotiate.Protocol, outcomes: []Outcome) usize {
@@ -280,10 +281,10 @@ test "negotiator bounds each inbound connection and reserves outbound applicatio
     defer owner.deinit();
     for (0..5) |index| {
         const stream: engine_mod.StreamHandle = .{ .conn = .{ .index = @intCast(index / 2), .generation = 1 }, .slot = 0, .id = index * 4 };
-        try owner.acceptInbound(stream, setup.pair.now);
-        if (index == 1) try std.testing.expectError(error.NegotiationTableFull, owner.acceptInbound(.{ .conn = stream.conn, .slot = 0, .id = 100 }, setup.pair.now));
+        try owner.acceptInbound(&setup.pair.server, stream, setup.pair.now);
+        if (index == 1) try std.testing.expectError(error.NegotiationTableFull, owner.acceptInbound(&setup.pair.server, .{ .conn = stream.conn, .slot = 0, .id = 100 }, setup.pair.now));
     }
-    try std.testing.expectError(error.NegotiationTableFull, owner.acceptInbound(.{ .conn = .{ .index = 7, .generation = 1 }, .slot = 0, .id = 0 }, setup.pair.now));
+    try std.testing.expectError(error.NegotiationTableFull, owner.acceptInbound(&setup.pair.server, .{ .conn = .{ .index = 7, .generation = 1 }, .slot = 0, .id = 0 }, setup.pair.now));
     for (0..2) |_| _ = try owner.beginOutbound(&setup.pair.client, setup.handles.client, &.{ping_protocol}, setup.pair.now, .{});
     try std.testing.expectError(error.NegotiationTableFull, owner.beginOutbound(&setup.pair.client, setup.handles.client, &.{ping_protocol}, setup.pair.now, .{}));
     _ = try owner.beginOutbound(&setup.pair.client, setup.handles.client, &.{ping_protocol}, setup.pair.now, .{ .control = true });
@@ -302,16 +303,16 @@ test "negotiator per connection reservations survive saturation and isolate outb
     defer owner.deinit();
     for (0..3) |peer| {
         const conn: engine_mod.Handle = .{ .index = @intCast(peer), .generation = 1 };
-        for (0..2) |i| try owner.acceptInbound(.{ .conn = conn, .slot = @intCast(i), .id = i * 4 }, setup.pair.now);
-        try std.testing.expectError(error.NegotiationTableFull, owner.acceptInbound(.{ .conn = conn, .slot = 2, .id = 8 }, setup.pair.now));
+        for (0..2) |i| try owner.acceptInbound(&setup.pair.server, .{ .conn = conn, .slot = @intCast(i), .id = i * 4 }, setup.pair.now);
+        try std.testing.expectError(error.NegotiationTableFull, owner.acceptInbound(&setup.pair.server, .{ .conn = conn, .slot = 2, .id = 8 }, setup.pair.now));
     }
     _ = try owner.beginOutbound(&setup.pair.client, setup.handles.client, &.{ping_protocol}, setup.pair.now, .{});
     _ = try owner.beginOutbound(&setup.pair.client, setup.handles.client, &.{ping_protocol}, setup.pair.now, .{ .control = true });
     try std.testing.expectError(error.NegotiationTableFull, owner.beginOutbound(&setup.pair.client, setup.handles.client, &.{ping_protocol}, setup.pair.now, .{}));
     try std.testing.expectEqual(@as(usize, 8), owner.active());
     for (0..2) |i| owner.cancel(&setup.pair.server, .{ .conn = .{ .index = 2, .generation = 1 }, .slot = @intCast(i), .id = i * 4 });
-    try owner.acceptInbound(.{ .conn = .{ .index = 2, .generation = 2 }, .slot = 0, .id = 0 }, setup.pair.now);
-    try std.testing.expectError(error.InvalidLimits, owner.acceptInbound(.{ .conn = .{ .index = 3, .generation = 1 }, .slot = 0, .id = 0 }, setup.pair.now));
+    try owner.acceptInbound(&setup.pair.server, .{ .conn = .{ .index = 2, .generation = 2 }, .slot = 0, .id = 0 }, setup.pair.now);
+    try std.testing.expectError(error.InvalidLimits, owner.acceptInbound(&setup.pair.server, .{ .conn = .{ .index = 3, .generation = 1 }, .slot = 0, .id = 0 }, setup.pair.now));
 }
 
 test "negotiator expires with no outcome capacity and reports later" {
@@ -339,7 +340,7 @@ test "negotiator delivers retained outcomes before recycled lower slots" {
     for (initial, 0..) |stream, index| {
         if (index >= 2) {
             const replacement = try setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, &.{ping_protocol}, setup.pair.now, .{});
-            setup.dialer.streamClosed(&setup.pair.client, replacement);
+            setup.dialer.streamClosed(&setup.pair.client, setup.pair.client.route(replacement).?.row, replacement, true);
         }
         try std.testing.expectEqual(@as(usize, 1), setup.pumpDialer(&supported, &out));
         try std.testing.expectEqual(stream, out[0].stream);
@@ -481,7 +482,7 @@ test "negotiator retains an accepted tag across blocked acknowledgement and dela
     try setup.pair.pump();
     var events: [8]engine_mod.Event = undefined;
     const inbound = try support.expectStreamOpened(setup.pair.events(&setup.pair.server, &events)[0], setup.handles.server);
-    try setup.listener.acceptInbound(inbound, setup.pair.now);
+    try setup.listener.acceptInbound(&setup.pair.server, inbound, setup.pair.now);
 
     const padding = [_]u8{0x55} ** 4096;
     var sent: usize = 0;
@@ -498,13 +499,14 @@ test "negotiator retains an accepted tag across blocked acknowledgement and dela
     try std.testing.expectEqual(@as(usize, 1), setup.listener.active());
 
     try setup.pair.flush(&setup.pair.server);
-    setup.listener.connectionActivity(.{ .index = inbound.conn.index, .generation = inbound.conn.generation + 1 });
+    const row = setup.pair.server.route(inbound).?.row;
+    setup.listener.streamReady(row, .{ .conn = .{ .index = inbound.conn.index, .generation = inbound.conn.generation + 1 }, .id = inbound.id, .slot = inbound.slot });
     for (0..8) |_| {
         try std.testing.expectEqual(@as(usize, 0), setup.listener.pump(&setup.pair.server, setup.pair.now, &supported, &outcomes));
         try std.testing.expect(!setup.pair.server.backlog());
     }
     // A retry that blocks again at the armed watermark queues nothing.
-    setup.listener.connectionActivity(inbound.conn);
+    setup.listener.streamReady(row, inbound);
     _ = setup.listener.pump(&setup.pair.server, setup.pair.now, &supported, &outcomes);
     try std.testing.expect(!setup.pair.server.backlog());
     try setup.pair.pump();

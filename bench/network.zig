@@ -20,6 +20,8 @@ const Samples = struct {
     immediate: usize = 0,
     due_start: [source_count]u64 = @splat(0),
     visits_start: network.quic.engine.Visits = .{},
+    reqresp_visits_start: u64 = 0,
+    negotiation_visits_start: u64 = 0,
     /// Due-now turns under a transport source whose previous turn hit no per-turn cap.
     uncapped_backlog: u64 = 0,
     uncapped_events: u64 = 0,
@@ -27,7 +29,12 @@ const Samples = struct {
     previous_events: bool = false,
 
     fn begin(node: *const network.NetworkCore) Samples {
-        return .{ .due_start = node.due_now_turns, .visits_start = node.transport.engine.visits };
+        return .{
+            .due_start = node.due_now_turns,
+            .visits_start = node.transport.engine.visits,
+            .reqresp_visits_start = node.service.reqresp.visits,
+            .negotiation_visits_start = node.service.router.negotiator.visits,
+        };
     }
 
     fn record(self: *Samples, node: *const network.NetworkCore, index: usize, elapsed: u64, due_before: [source_count]u64, result: network.network_core.Result, immediate: bool) !void {
@@ -49,6 +56,7 @@ const Samples = struct {
         std.mem.sort(u64, &self.ns, {}, std.sort.asc(u64));
         const visits = node.transport.engine.visits;
         std.debug.print("case={s} turns={} wait_max_ms=0 p50_ns={} p95_ns={} p99_ns={} max_ns={} rx={} tx={} backlog_turns={} immediate_deadlines={} visits_timer={} visits_collect={} visits_flush={} uncapped_backlog_due={} uncapped_events_due={}\n", .{ name, turns, self.ns[turns / 2], self.ns[turns * 95 / 100], self.ns[turns * 99 / 100], self.ns[turns - 1], self.received, self.sent, self.backlog, self.immediate, visits.timer - self.visits_start.timer, visits.collect - self.visits_start.collect, visits.flush - self.visits_start.flush, self.uncapped_backlog, self.uncapped_events });
+        std.debug.print("case={s} visits_reqresp={} visits_negotiation={}\n", .{ name, node.service.reqresp.visits - self.reqresp_visits_start, node.service.router.negotiator.visits - self.negotiation_visits_start });
         std.debug.print("case={s} due_now", .{name});
         inline for (std.meta.fields(Source)) |field| {
             std.debug.print(" {s}={}", .{ field.name, node.due_now_turns[field.value] - self.due_start[field.value] });
