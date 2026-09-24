@@ -33,6 +33,7 @@ pub const registry = prom.Registry(Context, .{
     writeDiscoveryProgress,
     writeGossipTopics,
     writeMaintenance,
+    writeBridge,
 });
 
 fn writePeers(self: *const Context, w: *prom.Encoder) prom.Error!void {
@@ -97,6 +98,7 @@ fn writeRuntime(self: *const Context, w: *prom.Encoder) prom.Error!void {
     const waits = try w.histograms(.{ .name = "lodestar_native_network_wait_seconds", .kind = .histogram, .help = "Wait chosen by each owner turn from its earliest wakeup source, host deadlines included, bounded by the readiness backstop", .unit = .seconds }, @TypeOf(self.owner.wait_duration));
     try waits.histogram(.{}, &self.owner.wait_duration);
     try w.enums(.{ .name = "lodestar_native_network_due_now_turns_total", .kind = .counter, .help = "Owner turns that chose a zero wait, counted under every wakeup source already due", .labels = &.{"source"} }, @import("../wake_sources.zig").Source, &self.owner.due_now_turns);
+    try w.enums(.{ .name = "lodestar_native_network_host_applies_total", .kind = .counter, .help = "Host applies by cause: a readable host wake, a due host deadline, or work left by the previous apply", .labels = &.{"cause"} }, @import("../network_core.zig").HostCause, &self.owner.host_applies);
     const visits = try w.family(.{ .name = "lodestar_native_quic_connection_visits_total", .kind = .counter, .help = "QUIC connections visited by the owner loop: timer keys popped, connections collected for stream readiness, and dirty connections flushed", .labels = &.{"phase"} });
     const engine_visits = &self.owner.transport.engine.visits;
     try visits.sample(.{"timer"}, engine_visits.timer);
@@ -454,6 +456,11 @@ fn writeScores(self: *const Context, w: *prom.Encoder) prom.Error!void {
     inline for (.{ "graylist", "publish", "gossip", "mesh" }) |threshold| {
         try thresholds.sample(.{threshold}, @field(self.scores, threshold));
     }
+}
+
+fn writeBridge(self: *const Context, w: *prom.Encoder) prom.Error!void {
+    const bridge = @import("bridge.zig");
+    try bridge.write(self.bridge orelse &bridge.empty, self.running, w);
 }
 
 fn writeGossipExecution(self: *const Context, w: *prom.Encoder) prom.Error!void {

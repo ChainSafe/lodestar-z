@@ -155,8 +155,11 @@ fn onNotify(env: napi.Env, callback: Value, runtime: *Runtime, _: *void) void {
 }
 
 fn notify(env: napi.Env, callback: Value, runtime: *Runtime) !void {
+    const started = r.bridge.now();
+    defer runtime.bridge.notify.observe(r.bridge.now() -| started);
     runtime.lock();
     runtime.notification_pending = false;
+    runtime.bridge.notified();
     const alive = runtime.env_alive;
     runtime.unlock();
     if (!alive) return;
@@ -248,6 +251,8 @@ fn identity(env: napi.Env, value: *const r.Identity) !Value {
 }
 
 pub fn getMetrics(self: *@This()) !js.String {
+    const call = r.call(self.runtime, .get_metrics);
+    defer call.end();
     const runtime = try self.owner();
     runtime.lock();
     defer runtime.unlock();
@@ -448,6 +453,8 @@ fn copyOperation(env: napi.Env, runtime: *Runtime, index: usize) !Value {
     return object;
 }
 pub fn drainPeers(self: *@This(), limit: js.Value) !js.Value {
+    const call = r.call(self.runtime, .drain_peers);
+    defer call.end();
     const max = cfg.integer(limit.val, 64) catch return error.InvalidDrainLimit;
     if (max == 0) return error.InvalidDrainLimit;
     const runtime = try self.owner();
@@ -459,6 +466,8 @@ fn drainPeerEvents(runtime: *Runtime, max: usize) !js.Value {
     defer runtime.release();
     var events: [64]projection.Entry = undefined;
     runtime.lock();
+    // A peer drain bounds a notification chain.
+    runtime.bridge.boundary();
     const lane = runtime.lane;
     const count = if (lane) |storage| storage.peek(events[0..@intCast(max)]) else 0;
     const sequence = runtime.table.sequence;
@@ -483,45 +492,71 @@ fn drainPeerEvents(runtime: *Runtime, max: usize) !js.Value {
 }
 
 pub fn requestStart(self: *@This(), peer: js.Value, protocol: js.Value, data: js.Value, options: js.Value) !js.Value {
+    const call = r.call(self.runtime, .request_start);
+    defer call.end();
     return .{ .val = try request_js.start(try self.owner(), peer.val, protocol.val, data.val, options.val) };
 }
 pub fn requestPull(self: *@This(), handle: js.Value) !js.Value {
+    const call = r.call(self.runtime, .request_pull);
+    defer call.end();
     return .{ .val = try request_js.pull(try self.owner(), handle.val) };
 }
 pub fn requestRetire(self: *@This(), handle: js.Value, abandoned: js.Value) !js.Value {
+    const call = r.call(self.runtime, .request_retire);
+    defer call.end();
     return .{ .val = try request_js.retire(try self.owner(), handle.val, try cfg.boolean(abandoned.val)) };
 }
 
 pub fn takeIncomingRequest(self: *@This()) !js.Value {
+    const call = r.call(self.runtime, .incoming_take);
+    defer call.end();
     return .{ .val = incoming_js.take(try self.owner()) catch |err| return @import("network_js.zig").copyError(err) };
 }
 pub fn incomingRespond(self: *@This(), handle: js.Value, data: js.Value, context: js.Value) !js.Value {
+    const call = r.call(self.runtime, .incoming_respond);
+    defer call.end();
     return .{ .val = try incoming_js.respond(try self.owner(), handle.val, data.val, context.val) };
 }
 pub fn incomingRelease(self: *@This(), handle: js.Value) !js.Value {
+    const call = r.call(self.runtime, .incoming_release);
+    defer call.end();
     return .{ .val = try incoming_js.release(try self.owner(), handle.val) };
 }
 pub fn incomingReady(self: *@This(), handle: js.Value) !js.Value {
+    const call = r.call(self.runtime, .incoming_ready);
+    defer call.end();
     return .{ .val = try incoming_js.ready(try self.owner(), handle.val) };
 }
 pub fn incomingTerminal(self: *@This(), handle: js.Value, action: js.Value, status: js.Value, message: js.Value) !js.Value {
+    const call = r.call(self.runtime, .incoming_terminal);
+    defer call.end();
     return .{ .val = try incoming_js.terminal(try self.owner(), handle.val, action.val, status.val, message.val) };
 }
 
 pub fn drainGossip(self: *@This(), options: js.Value) !js.Value {
+    const call = r.call(self.runtime, .drain_gossip);
+    defer call.end();
     return .{ .val = gossip_js.drain(try self.owner(), options.val) catch |err| return @import("network_js.zig").copyError(err) };
 }
 pub fn reportGossip(self: *@This(), handle: js.Value, verdict: js.Value) !js.Value {
+    const call = r.call(self.runtime, .report_gossip);
+    defer call.end();
     return .{ .val = try gossip_js.report(try self.owner(), handle.val, verdict.val) };
 }
 pub fn publishGossip(self: *@This(), topic: js.Value, data: js.Value, options: js.Value) !js.Value {
+    const call = r.call(self.runtime, .publish_gossip);
+    defer call.end();
     return .{ .val = try publication_js.publish(try self.owner(), topic.val, data.val, options.val) };
 }
 
 pub fn drainGossipChecks(self: *@This()) !js.Value {
+    const call = r.call(self.runtime, .drain_gossip_checks);
+    defer call.end();
     return .{ .val = gossip_js.checks(try self.owner()) catch |err| return @import("network_js.zig").copyError(err) };
 }
 pub fn classifyGossip(self: *@This(), values: js.Value) !js.Value {
+    const call = r.call(self.runtime, .classify_gossip);
+    defer call.end();
     return .{ .val = try gossip_js.classify(try self.owner(), values.val) };
 }
 pub fn notifyGossipBlock(self: *@This(), root: js.Value) !js.Value {

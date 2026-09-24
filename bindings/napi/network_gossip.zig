@@ -1,7 +1,8 @@
 const std = @import("std");
 const n = @import("network");
 const native = n.gossipsub;
-const Runtime = @import("network_runtime.zig").Runtime;
+const r = @import("network_runtime.zig");
+const Runtime = r.Runtime;
 const assert = std.debug.assert;
 const processor = n.gossip_processor;
 pub const batch_max = processor.batch_max;
@@ -65,12 +66,16 @@ pub const Ingress = struct {
     fn hasCapacity(context: *anyopaque, kind: native.topic.Kind, len: usize) bool {
         const self: *Ingress = @ptrCast(@alignCast(context));
         if (self.failure != null) return false;
+        const previous = r.phase(.gossip_ingress);
+        defer r.restore(previous);
         const runtime = self.runtime;
         runtime.lock();
         defer runtime.unlock();
         if (runtime.stop) return false;
         const table = if (runtime.gossip) |*table| table else return false;
-        return table.hasCapacity(kind, len) or table.freshnessVictim(kind) != null;
+        if (table.hasCapacity(kind, len) or table.freshnessVictim(kind) != null) return true;
+        if (!table.closed) table.refuseCapacity(kind, len);
+        return false;
     }
 
     fn admit(context: *anyopaque, candidate: *native.Admission) bool {
@@ -82,15 +87,22 @@ pub const Ingress = struct {
     }
 
     fn capture(self: *Ingress, candidate: *native.Admission) !bool {
+        const previous = r.phase(.gossip_ingress);
+        defer r.restore(previous);
         const runtime = self.runtime;
         const clock = try sample(self.io);
         const received_at = try projectWall(candidate.event.admitted_ms, clock);
         runtime.lock();
         defer runtime.unlock();
+        const admitted_ns = r.bridge.now();
         if (runtime.stop or self.failure != null) return false;
         const table = &runtime.gossip.?;
         const empty = !table.hasWork();
         const accepted = table.admit(runtime.heavy.?.core.service.gossipsub, candidate, clock.mono_ms, received_at, runtime.slot);
+        if (accepted) {
+            const kind = native.topic.parseCanonical(candidate.event.topic).?.name.kind;
+            runtime.bridge.admission_lag[@intFromEnum(r.bridge.admissionKind(kind))].observe(admitted_ns -| runtime.heavy.?.core.tick_ns);
+        }
         if (empty and table.hasWork()) runtime.pingLocked();
         return accepted;
     }

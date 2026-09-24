@@ -222,6 +222,7 @@ test "gossip admission rejects ineligible candidates without replacing work and 
     vote(&bytes, 9, 1000);
     try receive(&g, 2, attestation, &bytes);
     try t.expectEqual(@as(u64, 1), table.diag.slotRefusals);
+    try t.expectEqual(@as(u64, 1), table.refusals[@intFromEnum(processor.limits_mod.Kind.beacon_attestation)][@intFromEnum(processor.Refusal.ineligible)]);
     try t.expect(table.get(victim) != null);
     try t.expectEqual(@as(usize, 4), g.resourceSnapshot().pending_validations);
     try t.expectEqual(free_pages, g.messages.store.free_pages);

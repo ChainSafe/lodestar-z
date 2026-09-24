@@ -52,7 +52,7 @@ pub const Table = struct {
     budget: *Budget,
     ordinary: usize = 0,
     diag: Diagnostics,
-    latency: n.metrics.histogram.Duration(&.{ 0, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 5000 }) = .{},
+    latency: n.metrics.bridge.PublicationLatency = .{},
 
     pub fn init(backing: std.mem.Allocator, capacity: usize, budget: *Budget) !Table {
         std.debug.assert(capacity > 0 and capacity <= capacity_max);

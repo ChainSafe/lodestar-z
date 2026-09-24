@@ -63,6 +63,9 @@ pub const Startup = struct {
     /// The host's wall-clock slot until its first intent.
     slot: u64 = 0,
 };
+/// Why a step applied host work: a readable host wake, a due host deadline, or work the
+/// previous apply left.
+pub const HostCause = enum { readiness, due, more };
 pub const HostProgress = struct {
     /// A per-turn cap stopped the host with work left, so the next turn is due now.
     more: bool = false,
@@ -168,6 +171,9 @@ pub const NetworkCore = struct {
     step_duration: @import("metrics/timing.zig").Duration = .{},
     wait_duration: WaitTime = .{},
     due_now_turns: [wake_sources.source_count]u64 = @splat(0),
+    host_applies: [@typeInfo(HostCause).@"enum".fields.len]u64 = @splat(0),
+    /// Monotonic nanoseconds at the current step's tick.
+    tick_ns: u64 = 0,
     last_now: Now,
     initialized: bool = false,
     host_wake: ?i32 = null,
@@ -193,6 +199,8 @@ pub const NetworkCore = struct {
         self.step_duration = .{};
         self.wait_duration = .{};
         self.due_now_turns = @splat(0);
+        self.host_applies = @splat(0);
+        self.tick_ns = 0;
         self.host_wake = null;
         self.current_slot = startup.slot;
         self.host_more = false;
@@ -555,6 +563,7 @@ pub const NetworkCore = struct {
         };
         const tick: Now = if (read.mono_ms >= now.mono_ms) read else now;
         self.last_now = tick;
+        self.tick_ns = step_start;
         result.transport.now = tick;
         if (self.discoveryOnly(&result.readiness, tick, outputs, host)) {
             result.discovery_only = true;
@@ -578,7 +587,9 @@ pub const NetworkCore = struct {
         self.native_event_count = result.transport.events;
         if (host.apply) |apply| {
             const due = if (host.deadline_ms) |deadline| deadline <= tick.mono_ms else false;
-            if (result.readiness.host or result.readiness.failure != null or self.host_more or due) {
+            const cause: ?HostCause = if (result.readiness.host or result.readiness.failure != null) .readiness else if (self.host_more) .more else if (due) .due else null;
+            if (cause) |value| {
+                self.host_applies[@intFromEnum(value)] +|= 1;
                 self.host_more = apply(host.context.?, self, tick).more;
             }
         } else self.host_more = false;
