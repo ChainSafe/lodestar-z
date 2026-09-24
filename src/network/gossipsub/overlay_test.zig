@@ -169,7 +169,9 @@ test "gossip partial peer turn queues subscription before outgoing GRAFT" {
     try std.testing.expect(target.subscription_dirty.isSet(f.topic));
     f.g.heartbeat_at = 1;
     _ = @import("test_support.zig").pump(&f.g, &pair.client, .{ .mono_ms = 1, .unix_s = 0 });
-    try std.testing.expectEqual(@as(usize, 1), f.g.sessions.cursor);
+    // The turn took only the first ready session; the second stays ready for the next one.
+    try std.testing.expect(!f.g.sessions.rows[0].ready_link.linked);
+    try std.testing.expectEqual(@as(u32, 1), f.g.sessions.ready.head);
     try std.testing.expect(f.g.overlay.inMesh(f.topic, 1));
     try std.testing.expectEqual(@as(usize, 2), target.critical.count);
     for (0..2) |i| {

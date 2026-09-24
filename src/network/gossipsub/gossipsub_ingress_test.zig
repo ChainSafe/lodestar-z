@@ -74,7 +74,7 @@ test "gossip direct processor admission drains paged RPCs while the host queue s
     }
     var framed: [32776]u8 = undefined;
     const wire = @import("frame.zig").writeFrame(&framed, writer.written());
-    const source = g.sessions.findPeer(pair.shared.handles.server).?;
+    const source = g.sessions.find(pair.shared.handles.server).?;
     const row = &g.sessions.rows[source];
     const score = g.peers.score(row.logical, pair.shared.pair.now.mono_ms);
     var sent: usize = 0;

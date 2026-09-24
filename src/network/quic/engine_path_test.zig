@@ -181,10 +181,18 @@ test "engine collects and flushes only the connections that received datagrams" 
     pair.settle(&pair.client);
     try std.testing.expectEqual(@as(usize, 0), pair.client.registry.collect.len);
 
-    var taken: [4]engine_mod.Handle = undefined;
-    try std.testing.expectEqual(@as(usize, 1), pair.activity(&pair.client, &taken));
-    try std.testing.expectEqual(handles.client, taken[0]);
-    try std.testing.expectEqual(@as(usize, 0), pair.activity(&pair.client, &taken));
+    var storage: [8]engine_mod.Event = undefined;
+    const polled = pair.events(&pair.client, &storage);
+    try std.testing.expect(polled.len > 0);
+    for (polled) |event| {
+        const conn = switch (event) {
+            .stream_opened => |opened| opened.conn,
+            .stream_ready => |ready| ready.stream.conn,
+            else => return error.TestUnexpectedResult,
+        };
+        try std.testing.expectEqual(handles.client, conn);
+    }
+    try std.testing.expectEqual(@as(usize, 0), pair.events(&pair.client, &storage).len);
 }
 
 test "engine junk short header from a live peer's address marks nothing" {

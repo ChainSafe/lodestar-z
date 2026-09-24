@@ -943,14 +943,14 @@ test "managed runtime flushes a protocol reply in the turn that wrote it" {
     var events: [32]@import("quic/engine.zig").Event = undefined;
     var connected = false;
     for (0..400) |_| {
-        const stepped = try core_test.step(&spoke, std.testing.io, &events, &.{}, .{ .wait_max_ms = 1 });
+        const stepped = try core_test.step(&spoke, std.testing.io, &events, .{ .wait_max_ms = 1 });
         for (events[0..stepped.events]) |event| connected = connected or event == .connected;
         _ = node.step(std.testing.io, try @import("transport.zig").currentTime(std.testing.io), 0, .{}, 1);
         if (connected) break;
     }
     try std.testing.expect(connected);
     for (0..20) |_| {
-        _ = try core_test.step(&spoke, std.testing.io, &events, &.{}, .{ .wait_max_ms = 1 });
+        _ = try core_test.step(&spoke, std.testing.io, &events, .{ .wait_max_ms = 1 });
         _ = node.step(std.testing.io, try @import("transport.zig").currentTime(std.testing.io), 0, .{}, 1);
     }
 
@@ -959,7 +959,7 @@ test "managed runtime flushes a protocol reply in the turn that wrote it" {
     var proposal: [256]u8 = undefined;
     const hello = try dialer.initialWrite(&proposal);
     try std.testing.expectEqual(hello.len, try spoke.engine.write(stream, hello, false));
-    const flushed = try core_test.step(&spoke, std.testing.io, &events, &.{}, .{ .wait_max_ms = 0 });
+    const flushed = try core_test.step(&spoke, std.testing.io, &events, .{ .wait_max_ms = 0 });
     try std.testing.expect(flushed.datagrams_sent > 0);
 
     const turn = node.step(std.testing.io, try @import("transport.zig").currentTime(std.testing.io), 0, .{}, 100);
@@ -974,7 +974,7 @@ test "managed runtime flushes a protocol reply in the turn that wrote it" {
     var reply: [256]u8 = undefined;
     var received: usize = 0;
     for (0..20) |_| {
-        _ = try core_test.step(&spoke, std.testing.io, &events, &.{}, .{ .wait_max_ms = 10 });
+        _ = try core_test.step(&spoke, std.testing.io, &events, .{ .wait_max_ms = 10 });
         received += (try spoke.engine.read(stream, reply[received..])).len;
         if (received >= hello.len) break;
     }
@@ -1056,7 +1056,7 @@ test "managed idle turns with pending negotiations are never due for reqresp or 
     _ = try spoke.dialPeer(std.testing.io, node.transport.localAddress(), node.peerId());
     var events: [32]@import("quic/engine.zig").Event = undefined;
     for (0..40) |_| {
-        _ = try core_test.step(&spoke, std.testing.io, &events, &.{}, .{ .wait_max_ms = 1 });
+        _ = try core_test.step(&spoke, std.testing.io, &events, .{ .wait_max_ms = 1 });
         _ = node.step(std.testing.io, try @import("transport.zig").currentTime(std.testing.io), 100, .{}, 1);
     }
     try std.testing.expect(node.service.router.negotiator.active() > 0);

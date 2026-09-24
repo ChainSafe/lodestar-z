@@ -65,7 +65,7 @@ pub fn capture(g: *const Gossipsub, cursor: u16, now: @import("../types.zig").No
         position += 1;
         const row = &g.peers.rows[index];
         if (!row.occupied) continue;
-        const session = if (row.connection) |conn| g.sessions.findPeer(conn) else null;
+        const session = if (row.connection) |conn| g.sessions.find(conn) else null;
         var weights: score.Breakdown = undefined;
         const total = g.peers.snapshotWeights(.{ .index = @intCast(index), .generation = row.generation }, now.mono_ms, &weights);
         const peer = &out.peers[out.peer_count];

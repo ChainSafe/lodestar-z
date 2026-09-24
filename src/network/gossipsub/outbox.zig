@@ -145,7 +145,11 @@ pub const Outbox = struct {
     control_burst: u8 = 0,
     sequence: u64 = 0,
     progress_ms: ?u64 = null,
+    /// The out stream takes writes: a new stream or a writable event sets it, and a write that
+    /// blocks clears it. Queueing never sets it, so a blocked stream waits for its writable event.
     ready: bool = true,
+    /// When the last write blocked, until a writable event.
+    blocked_since: ?u64 = null,
     subscription_since: ?u64 = null,
     subscription_dirty: std.StaticBitSet(constants.topics_cap) = .initEmpty(),
     subscription_cursor: usize = 0,
@@ -157,13 +161,26 @@ pub const Outbox = struct {
     pub fn subscriptionChanged(self: *Outbox, index: usize, now: u64) void {
         self.subscription_dirty.set(index);
         self.subscription_since = self.subscription_since orelse now;
-        self.ready = true;
     }
 
+    /// Starts a new out stream, which takes writes, with a full subscription snapshot.
     pub fn synchronize(self: *Outbox, subscribed: *const std.StaticBitSet(constants.topics_cap), now: u64) void {
         self.subscription_dirty = subscribed.*;
         self.subscription_since = if (subscribed.count() == 0) null else self.subscription_since orelse now;
         self.ready = true;
+        self.blocked_since = null;
+    }
+
+    /// A write took fewer bytes than offered; the engine armed write interest.
+    pub fn blocked(self: *Outbox, now: u64) void {
+        self.ready = false;
+        self.blocked_since = self.blocked_since orelse now;
+    }
+
+    /// A writable event: the stream's send capacity reached the armed watermark.
+    pub fn writable(self: *Outbox) void {
+        self.ready = true;
+        self.blocked_since = null;
     }
 
     pub fn nextSubscription(self: *Outbox) ?u16 {
@@ -222,7 +239,6 @@ pub const Outbox = struct {
             return null;
         }
         self.sequence = token;
-        self.ready = true;
         return token;
     }
 
@@ -235,7 +251,6 @@ pub const Outbox = struct {
             });
             return .full;
         };
-        self.ready = true;
         return .queued;
     }
     fn dropped(self: *Outbox, reason: DropReason) void {
@@ -325,6 +340,7 @@ pub const Outbox = struct {
         self.critical.reset();
         self.progress_ms = null;
         self.ready = false;
+        self.blocked_since = null;
     }
 };
 

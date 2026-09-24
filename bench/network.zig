@@ -22,6 +22,7 @@ const Samples = struct {
     visits_start: network.quic.engine.Visits = .{},
     reqresp_visits_start: u64 = 0,
     negotiation_visits_start: u64 = 0,
+    gossip_visits_start: u64 = 0,
     /// Due-now turns under a transport source whose previous turn hit no per-turn cap.
     uncapped_backlog: u64 = 0,
     uncapped_events: u64 = 0,
@@ -34,6 +35,7 @@ const Samples = struct {
             .visits_start = node.transport.engine.visits,
             .reqresp_visits_start = node.service.reqresp.visits,
             .negotiation_visits_start = node.service.router.negotiator.visits,
+            .gossip_visits_start = node.service.gossipsub.sessions.visits,
         };
     }
 
@@ -56,7 +58,7 @@ const Samples = struct {
         std.mem.sort(u64, &self.ns, {}, std.sort.asc(u64));
         const visits = node.transport.engine.visits;
         std.debug.print("case={s} turns={} wait_max_ms=0 p50_ns={} p95_ns={} p99_ns={} max_ns={} rx={} tx={} backlog_turns={} immediate_deadlines={} visits_timer={} visits_collect={} visits_flush={} uncapped_backlog_due={} uncapped_events_due={}\n", .{ name, turns, self.ns[turns / 2], self.ns[turns * 95 / 100], self.ns[turns * 99 / 100], self.ns[turns - 1], self.received, self.sent, self.backlog, self.immediate, visits.timer - self.visits_start.timer, visits.collect - self.visits_start.collect, visits.flush - self.visits_start.flush, self.uncapped_backlog, self.uncapped_events });
-        std.debug.print("case={s} visits_reqresp={} visits_negotiation={}\n", .{ name, node.service.reqresp.visits - self.reqresp_visits_start, node.service.router.negotiator.visits - self.negotiation_visits_start });
+        std.debug.print("case={s} visits_reqresp={} visits_negotiation={} visits_gossip={}\n", .{ name, node.service.reqresp.visits - self.reqresp_visits_start, node.service.router.negotiator.visits - self.negotiation_visits_start, node.service.gossipsub.sessions.visits - self.gossip_visits_start });
         std.debug.print("case={s} due_now", .{name});
         inline for (std.meta.fields(Source)) |field| {
             std.debug.print(" {s}={}", .{ field.name, node.due_now_turns[field.value] - self.due_start[field.value] });
@@ -415,10 +417,10 @@ fn idleTransport(init: std.process.Init) !void {
             _ = try spokes[dialed].dialPeer(io, hub.localAddress(), hub.peerId());
         }
         for (spokes[0..dialed]) |*spoke| {
-            const stepped = spoke.step(io, &events, &.{}, .{ .wait_max_ms = 0 });
+            const stepped = spoke.step(io, &events, .{ .wait_max_ms = 0 });
             if (stepped.failure) |err| return err;
         }
-        const stepped = hub.step(io, &events, &.{}, .{ .wait_max_ms = 1 });
+        const stepped = hub.step(io, &events, .{ .wait_max_ms = 1 });
         if (stepped.failure) |err| return err;
         for (events[0..stepped.progress.events]) |event| switch (event) {
             .connected => established += 1,
@@ -433,11 +435,11 @@ fn idleTransport(init: std.process.Init) !void {
     for (0..2_000) |_| {
         var sent: u64 = 0;
         for (spokes) |*spoke| {
-            const stepped = spoke.step(io, &events, &.{}, .{ .wait_max_ms = 0 });
+            const stepped = spoke.step(io, &events, .{ .wait_max_ms = 0 });
             if (stepped.failure) |err| return err;
             sent += stepped.progress.datagrams_sent;
         }
-        const stepped = hub.step(io, &events, &.{}, .{ .wait_max_ms = 2 });
+        const stepped = hub.step(io, &events, .{ .wait_max_ms = 2 });
         if (stepped.failure) |err| return err;
         sent += stepped.progress.datagrams_sent;
         quiet = if (sent == 0 and !stepped.progress.backlog) quiet + 1 else 0;

@@ -23,6 +23,7 @@ pub const Plan = struct {
 /// charge logical obligations; they do not multiply the shared payload budget.
 pub const Layout = struct {
     sessions: u16,
+    connection_slots: u16,
     retained: u16,
     history: usize,
     seen: usize,
@@ -38,6 +39,7 @@ pub const Layout = struct {
     pub fn init(options: *const Options) Layout {
         return .{
             .sessions = options.connected_capacity,
+            .connection_slots = options.connection_slots,
             .retained = options.retained_capacity,
             .history = options.mcache_capacity,
             .seen = options.seen_capacity,

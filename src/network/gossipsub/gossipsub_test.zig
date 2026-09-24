@@ -121,7 +121,7 @@ test "gossipsub prunes a peer whose messages are rejected" {
     try std.testing.expect(rejected);
 
     // the server's score for the client is now negative and the heartbeat prunes it
-    const client_index = setup.shared.server.gossipsub.sessions.findPeer(setup.shared.handles.server).?;
+    const client_index = setup.shared.server.gossipsub.sessions.find(setup.shared.handles.server).?;
     try std.testing.expect(setup.shared.server.gossipsub.peers.score(.{ .index = client_index, .generation = setup.shared.server.gossipsub.peers.rows[client_index].generation }, setup.shared.pair.now.mono_ms) < 0);
     setup.shared.pair.advance(constants_heartbeat + 100);
     rounds = 0;
@@ -156,7 +156,7 @@ test "gossipsub credits first delivery only after the host accepts" {
     try std.testing.expect(handle != null);
 
     // receiving the message must not credit the sender; only the host's accept does
-    const client_index = setup.shared.server.gossipsub.sessions.findPeer(setup.shared.handles.server).?;
+    const client_index = setup.shared.server.gossipsub.sessions.find(setup.shared.handles.server).?;
     const before = setup.shared.server.gossipsub.peers.score(.{ .index = client_index, .generation = setup.shared.server.gossipsub.peers.rows[client_index].generation }, setup.shared.pair.now.mono_ms);
     _ = setup.shared.server.gossipsub.report(handle.?, .accept, setup.shared.pair.now);
     const after = setup.shared.server.gossipsub.peers.score(.{ .index = client_index, .generation = setup.shared.server.gossipsub.peers.rows[client_index].generation }, setup.shared.pair.now.mono_ms);
@@ -210,7 +210,7 @@ fn expectControlFloodBounded(control_tag: u8) !void {
     }, .{ .random_seed = 1, .items_per_peer = 4096, .items_per_pump = 8192 });
     defer setup.deinit();
     for (0..20) |_| try setup.pumpOnce();
-    const peer = setup.shared.server.gossipsub.sessions.findPeer(setup.shared.handles.server).?;
+    const peer = setup.shared.server.gossipsub.sessions.find(setup.shared.handles.server).?;
     const before = setup.shared.server.gossipsub.counters.rpcs_received;
     const item: std.meta.Tag(@import("protobuf.zig").Item) = if (control_tag == 0x0a) .ihave else .idontwant;
     const items_before = setup.shared.server.gossipsub.rpc_metrics.items[@intFromEnum(item)];
@@ -461,7 +461,7 @@ test "gossipsub legal maximum IWANT response uses actual IO without mesh publish
     defer std.testing.allocator.free(payload);
     var rng = std.Random.DefaultPrng.init(73);
     rng.random().bytes(payload);
-    const destination = setup.shared.client.gossipsub.sessions.findPeer(setup.shared.handles.client).?;
+    const destination = setup.shared.client.gossipsub.sessions.find(setup.shared.handles.client).?;
     _ = setup.shared.client.gossipsub.overlay.peerSubscription(&setup.shared.client.gossipsub.overlayContext(setup.shared.client.gossipsub.last_now_ms), destination, test_topic, false);
     const result = try setup.shared.client.gossipsub.publish(test_topic, payload, setup.shared.pair.now);
     try std.testing.expectEqual(@as(u16, 0), result.queued);
@@ -501,27 +501,29 @@ test "gossipsub subscription cursors synchronize all topics through small critic
         try gossip_test.subscribe(setup.shared.server.gossipsub, topic);
     }
     for (0..128) |_| try setup.pumpOnce();
-    const peer = setup.shared.client.gossipsub.sessions.findPeer(setup.shared.handles.client).?;
+    const peer = setup.shared.client.gossipsub.sessions.find(setup.shared.handles.client).?;
     @import("session_io.zig").resetOutbound(setup.shared.client.gossipsub, &setup.shared.pair.client, peer);
     setup.shared.client.gossipsub.sessions.setOutbound(peer, .pending);
     for (0..128) |_| try setup.pumpOnce();
     for (0..8) |_| try setup.pumpOnce();
-    try std.testing.expect(@import("session_io.zig").nextIoWakeup(setup.shared.client.gossipsub, setup.shared.pair.now).? > setup.shared.pair.now.mono_ms);
+    try std.testing.expect(gossip_test.sessionWakeup(setup.shared.client.gossipsub, setup.shared.pair.now) > setup.shared.pair.now.mono_ms);
 }
 
-test "gossipsub activity behind partial peer cursor remains ready and generation checked" {
+test "gossipsub readiness behind a partial turn stays queued and is generation checked" {
     var setup: Pair = .{};
     try setup.initOpts(.{
         .random_seed = 1,
     }, .{ .random_seed = 1, .peers_per_pump = 1 });
     defer setup.deinit();
     try connectMesh(&setup);
-    const real_peer = setup.shared.server.gossipsub.sessions.findPeer(setup.shared.handles.server).?;
-    const extra = @import("test_support.zig").addPeer(setup.shared.server.gossipsub, .{ .index = 77, .generation = 9 }, .v1_2).?;
-    setup.shared.server.gossipsub.sessions.cursor = extra.index;
+    const g = setup.shared.server.gossipsub;
+    const real_peer = g.sessions.find(setup.shared.handles.server).?;
+    try std.testing.expect(!g.sessions.rows[real_peer].ready_link.linked);
+    // A session added now is ready before the real peer's readable edge arrives.
+    _ = gossip_test.addPeer(g, .{ .index = 77, .generation = 9 }, .v1_2).?;
     const pb = @import("protobuf.zig");
-    var compressed: [64]u8 = undefined;
-    const n = try @import("snappy").raw.compress("arrived behind cursor", &compressed);
+    var compressed: [128]u8 = undefined;
+    const n = try @import("snappy").raw.compress("arrived behind a ready session", &compressed);
     var body: [256]u8 = undefined;
     var w = pb.Writer.init(&body);
     pb.writeMessage(&w, compressed[0..n], test_topic);
@@ -529,22 +531,23 @@ test "gossipsub activity behind partial peer cursor remains ready and generation
     const wire = @import("frame.zig").writeFrame(&frame, w.written());
     try std.testing.expectEqual(wire.len, try setup.shared.pair.client.write(setup.clientStream(), wire, false));
     try setup.shared.pair.pump();
-    var activity: [128]engine_mod.Handle = undefined;
-    const active = setup.shared.pair.activity(&setup.shared.pair.server, &activity);
-    try std.testing.expect(active > 0);
-    for (activity[0..active]) |conn| setup.shared.server.gossipsub.sessions.connectionActivity(conn);
-    try std.testing.expectEqual(@as(usize, 0), @import("test_support.zig").pump(setup.shared.server.gossipsub, &setup.shared.pair.server, setup.shared.pair.now));
-    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), @import("session_io.zig").nextIoWakeup(setup.shared.server.gossipsub, setup.shared.pair.now));
-    try std.testing.expectEqual(@as(usize, 1), @import("test_support.zig").pump(setup.shared.server.gossipsub, &setup.shared.pair.server, setup.shared.pair.now));
-    try std.testing.expectEqualStrings("arrived behind cursor", setup.serverMessages()[0].bytes);
+    setup.forwardServer();
+    try std.testing.expect(g.sessions.rows[real_peer].ready_link.linked);
+    try std.testing.expectEqual(@as(usize, 0), gossip_test.pump(g, &setup.shared.pair.server, setup.shared.pair.now));
+    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), g.nextWakeup(setup.shared.pair.now));
+    try std.testing.expectEqual(@as(usize, 1), gossip_test.pump(g, &setup.shared.pair.server, setup.shared.pair.now));
+    try std.testing.expectEqualStrings("arrived behind a ready session", setup.serverMessages()[0].bytes);
     for (0..8) |_| {
-        if (@import("session_io.zig").nextIoWakeup(setup.shared.server.gossipsub, setup.shared.pair.now).? > setup.shared.pair.now.mono_ms) break;
-        _ = @import("test_support.zig").pump(setup.shared.server.gossipsub, &setup.shared.pair.server, setup.shared.pair.now);
+        if (gossip_test.sessionWakeup(g, setup.shared.pair.now) > setup.shared.pair.now.mono_ms) break;
+        _ = gossip_test.pump(g, &setup.shared.pair.server, setup.shared.pair.now);
     }
-    try std.testing.expect(!setup.shared.server.gossipsub.sessions.rows[real_peer].io.rx_ready);
-    setup.shared.server.gossipsub.sessions.connectionActivity(.{ .index = setup.shared.handles.server.index, .generation = setup.shared.handles.server.generation + 1 });
-    try std.testing.expect(!setup.shared.server.gossipsub.sessions.rows[real_peer].io.rx_ready);
-    try std.testing.expect(@import("session_io.zig").nextIoWakeup(setup.shared.server.gossipsub, setup.shared.pair.now).? > setup.shared.pair.now.mono_ms);
+    try std.testing.expect(!g.sessions.rows[real_peer].io.rx_ready);
+    // An event for the same stream id on a previous connection generation is dropped.
+    var stale = g.sessions.rows[real_peer].in_stream.?;
+    stale.conn.generation += 1;
+    g.streamReady(&setup.shared.pair.server, .{ .owner = .gossip_inbound, .row = real_peer }, stale, .{ .readable = true });
+    try std.testing.expect(!g.sessions.rows[real_peer].io.rx_ready);
+    try std.testing.expect(gossip_test.sessionWakeup(g, setup.shared.pair.now) > setup.shared.pair.now.mono_ms);
 }
 
 test "gossipsub large frame deadline releases receive pages despite byte progress" {
@@ -552,8 +555,8 @@ test "gossipsub large frame deadline releases receive pages despite byte progres
     try setup.initOpts(.{ .random_seed = 1, .output_per_peer = 1, .tx_timeout_ms = 500 }, .{ .random_seed = 1, .body_buffer_bytes = 64, .large_frame_timeout_ms = 150, .pressure_timeout_ms = 500 });
     defer setup.deinit();
     for (0..16) |_| try setup.pumpOnce();
-    const server_peer = setup.shared.server.gossipsub.sessions.findPeer(setup.shared.handles.server).?;
-    const client_peer = setup.shared.client.gossipsub.sessions.findPeer(setup.shared.handles.client).?;
+    const server_peer = setup.shared.server.gossipsub.sessions.find(setup.shared.handles.server).?;
+    const client_peer = setup.shared.client.gossipsub.sessions.find(setup.shared.handles.client).?;
     var prefix: [128]u8 = undefined;
     var w = @import("protobuf.zig").Writer.init(&prefix);
     w.varint(65536);
@@ -598,7 +601,7 @@ test "gossipsub completed frame expiry releases pages without blaming the peer" 
     defer setup.deinit();
     try connectMesh(&setup);
     const g = setup.shared.server.gossipsub;
-    const index = g.sessions.findPeer(setup.shared.handles.server).?;
+    const index = g.sessions.find(setup.shared.handles.server).?;
     const peer = &g.sessions.rows[index];
     const before = g.peers.score(peer.logical, setup.shared.pair.now.mono_ms);
     var body: [256]u8 = undefined;
@@ -653,7 +656,7 @@ test "gossipsub pinned payload pressure drops the publication and releases recei
     const refused_id = @import("topic.zig").validMessageId(test_topic, payload[0 .. 3 * 1024 * 1024], .{});
     _ = try setup.shared.client.gossipsub.publish(test_topic, payload[0 .. 3 * 1024 * 1024], setup.shared.pair.now);
     const g = setup.shared.server.gossipsub;
-    const peer = g.sessions.findPeer(setup.shared.handles.server).?;
+    const peer = g.sessions.find(setup.shared.handles.server).?;
     for (0..2000) |_| {
         try setup.pumpOnce();
         if (g.counters.message_capacity_refusals != 0) break;
@@ -679,51 +682,49 @@ test "gossipsub pinned payload pressure drops the publication and releases recei
     try std.testing.expect(received);
 }
 
-test "gossipsub native write credit behind cursor resumes and blocked writes quiesce" {
+test "gossipsub native write credit behind a ready session resumes and blocked writes quiesce" {
     var setup: Pair = .{};
     try setup.initOpts(.{ .random_seed = 1, .peers_per_pump = 1 }, .{
         .random_seed = 1,
     });
     defer setup.deinit();
     try connectMesh(&setup);
-    const index = setup.shared.client.gossipsub.sessions.findPeer(setup.shared.handles.client).?;
+    const g = setup.shared.client.gossipsub;
+    const index = g.sessions.find(setup.shared.handles.client).?;
     const payload = try std.testing.allocator.alloc(u8, @import("constants.zig").MAX_PAYLOAD_SIZE);
     defer std.testing.allocator.free(payload);
     var rng = std.Random.DefaultPrng.init(112);
     rng.random().bytes(payload);
-    _ = try setup.shared.client.gossipsub.publish(test_topic, payload, setup.shared.pair.now);
-    var activity: [128]engine_mod.Handle = undefined;
+    _ = try g.publish(test_topic, payload, setup.shared.pair.now);
     for (0..512) |_| {
-        const active = setup.shared.pair.activity(&setup.shared.pair.client, &activity);
-        for (activity[0..active]) |conn| setup.shared.client.gossipsub.sessions.connectionActivity(conn);
-        if (@import("session_io.zig").nextIoWakeup(setup.shared.client.gossipsub, setup.shared.pair.now).? > setup.shared.pair.now.mono_ms) break;
-        _ = @import("test_support.zig").pump(setup.shared.client.gossipsub, &setup.shared.pair.client, setup.shared.pair.now);
+        setup.forwardClient();
+        if (gossip_test.sessionWakeup(g, setup.shared.pair.now) > setup.shared.pair.now.mono_ms) break;
+        _ = gossip_test.pump(g, &setup.shared.pair.client, setup.shared.pair.now);
         try setup.shared.pair.pump();
     }
-    const io = &setup.shared.client.gossipsub.sessions.rows[index].io;
+    const io = &g.sessions.rows[index].io;
     try std.testing.expect(io.tx.data.count > 0);
     try std.testing.expect(!io.tx.ready);
-    try std.testing.expect(io.write_would_block + io.write_zero > 0);
-    try std.testing.expect(setup.shared.client.gossipsub.io_metrics.write_would_block + setup.shared.client.gossipsub.io_metrics.write_zero > 0);
-    try std.testing.expect(@import("session_io.zig").nextIoWakeup(setup.shared.client.gossipsub, setup.shared.pair.now).? > setup.shared.pair.now.mono_ms);
+    try std.testing.expect(io.tx.blocked_since != null);
+    try std.testing.expect(g.io_metrics.write_would_block + g.io_metrics.write_zero > 0);
+    try std.testing.expect(gossip_test.sessionWakeup(g, setup.shared.pair.now) > setup.shared.pair.now.mono_ms);
     const before = io.tx.data.first().?.page.remaining;
-    const extra = @import("test_support.zig").addPeer(setup.shared.client.gossipsub, .{ .index = 77, .generation = 1 }, .v1_2).?;
-    setup.shared.client.gossipsub.sessions.cursor = extra.index;
-    setup.shared.server.gossipsub.sessions.connectionActivity(setup.shared.handles.server);
+    // A session added now is ready ahead of the writable edge the server's reads will grant.
+    _ = gossip_test.addPeer(g, .{ .index = 77, .generation = 1 }, .v1_2).?;
     for (0..32) |_| {
-        _ = @import("test_support.zig").pump(setup.shared.server.gossipsub, &setup.shared.pair.server, setup.shared.pair.now);
+        setup.forwardServer();
+        _ = gossip_test.pump(setup.shared.server.gossipsub, &setup.shared.pair.server, setup.shared.pair.now);
         try setup.shared.pair.pump();
     }
-    const active = setup.shared.pair.activity(&setup.shared.pair.client, &activity);
-    try std.testing.expect(active > 0);
-    for (activity[0..active]) |conn| setup.shared.client.gossipsub.sessions.connectionActivity(conn);
-    _ = @import("test_support.zig").pump(setup.shared.client.gossipsub, &setup.shared.pair.client, setup.shared.pair.now);
-    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), @import("session_io.zig").nextIoWakeup(setup.shared.client.gossipsub, setup.shared.pair.now));
-    _ = @import("test_support.zig").pump(setup.shared.client.gossipsub, &setup.shared.pair.client, setup.shared.pair.now);
+    setup.forwardClient();
+    try std.testing.expect(io.tx.ready and g.sessions.rows[index].ready_link.linked);
+    _ = gossip_test.pump(g, &setup.shared.pair.client, setup.shared.pair.now);
+    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), g.nextWakeup(setup.shared.pair.now));
+    _ = gossip_test.pump(g, &setup.shared.pair.client, setup.shared.pair.now);
     try std.testing.expect(io.tx.data.first().?.page.remaining < before);
-    setup.shared.client.gossipsub.connectionClosed(setup.shared.handles.client);
+    g.connectionClosed(setup.shared.handles.client);
     try std.testing.expectEqual(@as(usize, 0), io.tx.data.count);
-    for (setup.shared.client.gossipsub.messages.store.entries) |entry| if (entry.active) try std.testing.expectEqual(@as(u32, 0), entry.tx);
+    for (g.messages.store.entries) |entry| if (entry.active) try std.testing.expectEqual(@as(u32, 0), entry.tx);
 }
 
 test "gossipsub healthy continuous frame turnover does not expire a nonempty queue" {
@@ -733,7 +734,7 @@ test "gossipsub healthy continuous frame turnover does not expire a nonempty que
     });
     defer setup.deinit();
     try connectMesh(&setup);
-    const index = setup.shared.client.gossipsub.sessions.findPeer(setup.shared.handles.client).?;
+    const index = setup.shared.client.gossipsub.sessions.find(setup.shared.handles.client).?;
     var bytes: [8]u8 = undefined;
     std.mem.writeInt(u64, &bytes, 0, .little);
     _ = try setup.shared.client.gossipsub.publish(test_topic, &bytes, setup.shared.pair.now);
@@ -767,7 +768,7 @@ test "gossipsub receive page exhaustion discards only the requesting frame witho
         _ = g.sessions.receive_pool.writable(chain).?;
         chain.len += @import("receive_pool.zig").page_bytes;
     }
-    const peer = g.sessions.findPeer(setup.shared.handles.server).?;
+    const peer = g.sessions.find(setup.shared.handles.server).?;
     const logical = g.sessions.rows[peer].logical;
     const before = g.peers.score(logical, setup.shared.pair.now.mono_ms);
     var payload: [65536]u8 = undefined;
@@ -810,7 +811,7 @@ test "gossipsub graylist refuses bulk reception and releases an idle partial fra
         defer setup.deinit();
         for (0..16) |_| try setup.pumpOnce();
         const g = setup.shared.server.gossipsub;
-        const index = g.sessions.findPeer(setup.shared.handles.server).?;
+        const index = g.sessions.find(setup.shared.handles.server).?;
         const row = &g.sessions.rows[index];
         var wire: [1024]u8 = undefined;
         var writer = @import("protobuf.zig").Writer.init(&wire);
@@ -824,6 +825,8 @@ test "gossipsub graylist refuses bulk reception and releases an idle partial fra
             try std.testing.expect(row.io.overflow.pages > 0);
             try std.testing.expect(!row.io.rx_ready);
             @import("test_support.zig").penalize(g, row.conn, 50);
+            // The next heartbeat finds the graylisted session holding a frame.
+            setup.shared.pair.advance(constants_heartbeat);
             try setup.pumpOnce();
         } else try std.testing.expectEqual(before, g.rpc_metrics.received_bytes);
         try std.testing.expect(row.in_stream == null and row.io.rpc == null);
@@ -840,7 +843,7 @@ test "gossipsub malformed framing and RPCs penalize authenticated sources across
     defer setup.deinit();
     for (0..16) |_| try setup.pumpOnce();
     const g = setup.shared.server.gossipsub;
-    const index = g.sessions.findPeer(setup.shared.handles.server).?;
+    const index = g.sessions.find(setup.shared.handles.server).?;
     const row = &g.sessions.rows[index];
     const source = row.logical;
     const malformed = [_][]const u8{
@@ -863,7 +866,7 @@ test "gossipsub malformed framing and RPCs penalize authenticated sources across
         for (0..16) |_| try setup.pumpOnce();
         if (i + 1 < malformed.len) {
             const client = setup.shared.client.gossipsub;
-            const client_index = client.sessions.findPeer(setup.shared.handles.client).?;
+            const client_index = client.sessions.find(setup.shared.handles.client).?;
             try std.testing.expectEqual(.none, client.sessions.rows[client_index].outbound);
             client.sessions.setOutbound(client_index, .pending);
             for (0..16) |_| try setup.pumpOnce();
@@ -885,7 +888,7 @@ test "gossipsub discarding a locally refused frame preserves its deadline withou
         _ = g.sessions.receive_pool.writable(chain).?;
         chain.len += @import("receive_pool.zig").page_bytes;
     }
-    const index = g.sessions.findPeer(setup.shared.handles.server).?;
+    const index = g.sessions.find(setup.shared.handles.server).?;
     const peer = &g.sessions.rows[index];
     const before = g.peers.score(peer.logical, setup.shared.pair.now.mono_ms);
     var wire: [65540]u8 = undefined;

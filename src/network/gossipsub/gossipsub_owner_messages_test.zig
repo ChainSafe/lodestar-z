@@ -320,8 +320,9 @@ test "gossipsub legal maximum host acceptance forwards retained pages through ac
     try support.subscribe(setup.shared.client.gossipsub, topic);
     try support.subscribe(setup.shared.server.gossipsub, topic);
     for (0..20) |_| try setup.pumpOnce();
-    const destination = setup.shared.server.gossipsub.sessions.findPeer(setup.shared.handles.server).?;
-    const source = @import("test_support.zig").addPeer(setup.shared.server.gossipsub, .{ .index = 77, .generation = 1 }, .v1_2).?;
+    const destination = setup.shared.server.gossipsub.sessions.find(setup.shared.handles.server).?;
+    // The small profile finds sessions among 16 connection slots.
+    const source = @import("test_support.zig").addPeer(setup.shared.server.gossipsub, .{ .index = 7, .generation = 1 }, .v1_2).?;
     setup.shared.server.gossipsub.overlay.rows[setup.shared.server.gossipsub.overlay.findTopic(topic).?].mesh.set(destination);
     const payload = try std.testing.allocator.alloc(u8, constants.MAX_PAYLOAD_SIZE);
     defer std.testing.allocator.free(payload);
@@ -382,12 +383,15 @@ test "gossipsub rotates the legal atomic allowance past a duplicate flood" {
     g.sessions.rows[second.index].io.rx_ready = true;
     g.sessions.rows[first.index].io.startRpc(w1.written());
     g.sessions.rows[second.index].io.startRpc(w2.written());
+    g.settle(first.index);
+    g.settle(second.index);
     try std.testing.expectEqual(@as(usize, 1), @import("test_support.zig").pump(&g, &pair.server, pair.now));
     try std.testing.expectEqualStrings("one", inbox.last().bytes);
     g.sessions.rows[first.index].in_stream = stream1;
     g.sessions.rows[first.index].io.rx_ready = true;
     g.sessions.rows[first.index].io.startRpc(w1.written());
-    try std.testing.expectEqual(@as(?u64, pair.now.mono_ms), @import("session_io.zig").nextIoWakeup(&g, pair.now));
+    g.settle(first.index);
+    try std.testing.expectEqual(@as(?u64, pair.now.mono_ms), g.nextWakeup(pair.now));
     try std.testing.expectEqual(@as(usize, 1), @import("test_support.zig").pump(&g, &pair.server, pair.now));
     try std.testing.expectEqualStrings("two", inbox.last().bytes);
 }
@@ -624,7 +628,7 @@ test "gossipsub remote forwarding honors IDONTWANT and preserves borrowed event 
     try support.subscribe(pair.shared.client.gossipsub, name);
     try support.subscribe(pair.shared.server.gossipsub, name);
     for (0..20) |_| try pair.pumpOnce();
-    const destination = pair.shared.server.gossipsub.sessions.findPeer(pair.shared.handles.server).?;
+    const destination = pair.shared.server.gossipsub.sessions.find(pair.shared.handles.server).?;
     const source = @import("test_support.zig").addPeer(pair.shared.server.gossipsub, .{ .index = 77, .generation = 1 }, .v1_2).?;
     pair.shared.server.gossipsub.overlay.rows[pair.shared.server.gossipsub.overlay.findTopic(name).?].mesh.set(destination);
     const suppressed_id = topic_mod.validMessageId(name, "remote suppressed", .{});

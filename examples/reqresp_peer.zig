@@ -376,7 +376,6 @@ fn dial(
     defer peer_status.* = session.peer_status;
 
     var events: [16]engine_mod.Event = undefined;
-    var activity: [8]engine_mod.Handle = undefined;
     var rr_events: [8]reqresp.Event = undefined;
     var control_events: [8]reqresp.Event = undefined;
     var steps: u32 = 0;
@@ -384,7 +383,7 @@ fn dial(
         const now = try network.transport.currentTime(io);
         const due = svc.nextWakeup(now, .{ .application = rr_events.len, .control = control_events.len });
         const wait_ms: u32 = @intCast(@min(network.constants.poll_interval_ms, if (due) |deadline| deadline -| now.mono_ms else network.constants.poll_interval_ms));
-        const stepped = node.step(io, &events, &activity, .{ .wait_max_ms = wait_ms });
+        const stepped = node.step(io, &events, .{ .wait_max_ms = wait_ms });
         const result = stepped.progress;
         session.now = result.now;
         for (events[0..result.events]) |event| switch (event) {
@@ -409,5 +408,5 @@ fn dial(
     }
     if (!session.finished) return error.Timeout;
     _ = node.engine.close(session.conn, 0);
-    if (node.step(io, &events, &activity, .{}).failure) |err| return err;
+    if (node.step(io, &events, .{}).failure) |err| return err;
 }

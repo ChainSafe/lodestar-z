@@ -158,14 +158,14 @@ test "topic policy physical close clears bits while same connection stream repla
     defer pair.deinit();
     try support.subscribe(pair.shared.client.gossipsub, name);
     for (0..20) |_| try pair.pumpOnce();
-    const index = pair.shared.server.gossipsub.sessions.findPeer(pair.shared.handles.server).?;
+    const index = pair.shared.server.gossipsub.sessions.find(pair.shared.handles.server).?;
     const ns = &pair.shared.server.gossipsub.overlay.namespace.?;
     try std.testing.expect(ns.subscribed(index, 0));
     @import("session_io.zig").resetInbound(pair.shared.server.gossipsub, &pair.shared.pair.server, index);
     @import("session_io.zig").resetOutbound(pair.shared.server.gossipsub, &pair.shared.pair.server, index);
     try std.testing.expect(ns.subscribed(index, 0));
     for (0..20) |_| try pair.pumpOnce();
-    const client_index = pair.shared.client.gossipsub.sessions.findPeer(pair.shared.handles.client).?;
+    const client_index = pair.shared.client.gossipsub.sessions.find(pair.shared.handles.client).?;
     const replacement_stream = try pair.shared.client.router.beginOutbound(&pair.shared.pair.client, pair.shared.handles.client, .{ .meshsub = .v1_1 }, pair.shared.pair.now);
     pair.shared.client.gossipsub.sessions.setOutbound(client_index, .{ .negotiating = replacement_stream });
     for (0..20) |_| try pair.pumpOnce();

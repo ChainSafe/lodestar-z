@@ -80,7 +80,7 @@ test "managed coverage coalesces subscription and score changes with operation e
     var snapshots: [4]t.Snapshot = undefined;
     _ = setup.client.snapshots(&snapshots);
     const conn = snapshots[0].connection.?;
-    const index = g.sessions.findPeer(conn).?;
+    const index = g.sessions.find(conn).?;
     const baseline = setup.client.counters.selections;
     gossip_test.control(g, index, .{ .subscription = .{ .topic = attestation, .subscribe = true } }, setup.pair.now);
     setup.client.reconcile(&setup.client_service, setup.pair.now);

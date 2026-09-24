@@ -175,7 +175,7 @@ pub const Pair = struct {
         return moved;
     }
 
-    /// Events polled by `activity` wait here for the next `events` call.
+    /// Events polled by `forward` wait here for the next `events` call.
     fn stash(self: *Pair, engine: *const Engine) *Stash {
         std.debug.assert(engine == &self.client or engine == &self.server);
         return if (engine == &self.client) &self.client_stash else &self.server_stash;
@@ -190,7 +190,7 @@ pub const Pair = struct {
         held.len -= taken;
         if (held.len > 0) return storage[0..taken];
         const polled = engine.pollEvents(storage[taken..]);
-        held.noteActivity(storage[taken..][0..polled]);
+        held.noteStreams(storage[taken..][0..polled]);
         return storage[0 .. taken + polled];
     }
 
@@ -200,65 +200,44 @@ pub const Pair = struct {
         const held = self.stash(engine);
         const start = held.len;
         held.len += engine.pollEvents(held.events[start..]);
-        held.noteActivity(held.events[start..held.len]);
+        held.noteStreams(held.events[start..held.len]);
         owners.route(engine, held.unrouted[0..held.unrouted_len]);
         held.unrouted_len = 0;
-    }
-
-    /// Connections with stream events since the last call, as gossip's connection activity sees
-    /// them. Events polled here stay available to `events`.
-    pub fn activity(self: *Pair, engine: *Engine, out: []engine_mod.Handle) usize {
-        const held = self.stash(engine);
-        const start = held.len;
-        held.len += engine.pollEvents(held.events[start..]);
-        held.noteActivity(held.events[start..held.len]);
-        const count = @min(held.active_len, out.len);
-        @memcpy(out[0..count], held.active[0..count]);
-        held.active_len = 0;
-        return count;
     }
 };
 
 const Stash = struct {
     events: [256]Event = undefined,
     len: usize = 0,
-    active: [16]engine_mod.Handle = undefined,
-    active_len: usize = 0,
     /// Stream events not yet routed by `forward`.
     unrouted: [256]Event = undefined,
     unrouted_len: usize = 0,
 
-    fn noteActivity(self: *Stash, polled: []const Event) void {
+    fn noteStreams(self: *Stash, polled: []const Event) void {
         for (polled) |event| {
-            if (event == .stream_ready or event == .stream_closed) {
-                // Harnesses that never forward keep only the newest events.
-                if (self.unrouted_len == self.unrouted.len) {
-                    const kept = self.unrouted.len / 2;
-                    std.mem.copyForwards(Event, self.unrouted[0..kept], self.unrouted[self.unrouted.len - kept ..]);
-                    self.unrouted_len = kept;
-                }
-                self.unrouted[self.unrouted_len] = event;
-                self.unrouted_len += 1;
+            if (event != .stream_ready and event != .stream_closed) continue;
+            // Harnesses that never forward keep only the newest events.
+            if (self.unrouted_len == self.unrouted.len) {
+                const kept = self.unrouted.len / 2;
+                std.mem.copyForwards(Event, self.unrouted[0..kept], self.unrouted[self.unrouted.len - kept ..]);
+                self.unrouted_len = kept;
             }
-            const conn = engine_mod.activityOf(event) orelse continue;
-            for (self.active[0..self.active_len]) |seen| {
-                if (std.meta.eql(seen, conn)) break;
-            } else if (self.active_len < self.active.len) {
-                self.active[self.active_len] = conn;
-                self.active_len += 1;
-            }
+            self.unrouted[self.unrouted_len] = event;
+            self.unrouted_len += 1;
         }
     }
 };
 
 /// The owners a test drives directly, reached by stream route. A readable, writable or close event
-/// marks the owner's row ready; lifecycle handling stays with the test.
+/// marks the owner's row ready; gossip takes readiness events only. Lifecycle handling stays with
+/// the test.
 pub const Owners = struct {
     negotiator: ?*@import("negotiate.zig").Negotiator = null,
     identify: ?*@import("identify/handler.zig").Handler = null,
     reqresp: ?*@import("reqresp/reqresp.zig").ReqResp = null,
+    gossip: ?*@import("gossipsub/gossipsub.zig").Gossipsub = null,
 
-    pub fn route(self: Owners, engine: *const Engine, events: []const Event) void {
+    pub fn route(self: Owners, engine: *Engine, events: []const Event) void {
         for (events) |event| {
             const stream, const bound = switch (event) {
                 .stream_ready => |ready| .{ ready.stream, engine.route(ready.stream) orelse continue },
@@ -269,7 +248,8 @@ pub const Owners = struct {
                 .negotiation => if (self.negotiator) |owner| owner.streamReady(bound.row, stream),
                 .identify => if (self.identify) |owner| owner.streamReady(bound.row, stream),
                 .reqresp_outbound, .reqresp_inbound => if (self.reqresp) |owner| owner.streamReady(bound, stream),
-                .none, .gossip_inbound, .gossip_outbound => {},
+                .gossip_inbound, .gossip_outbound => if (self.gossip) |owner| if (event == .stream_ready) owner.streamReady(engine, bound, stream, event.stream_ready.ready),
+                .none => {},
             }
         }
     }
@@ -361,8 +341,8 @@ pub fn sendBatch(engine: *Engine, index: u16, now: Now, batch: *transport_mod.Se
     return count;
 }
 
-pub fn step(transport: *transport_mod.Transport, io: std.Io, events: []Event, activity: []engine_mod.Handle, options: transport_mod.StepOptions) transport_mod.StepError!transport_mod.StepResult {
-    const result = transport.step(io, events, activity, options);
+pub fn step(transport: *transport_mod.Transport, io: std.Io, events: []Event, options: transport_mod.StepOptions) transport_mod.StepError!transport_mod.StepResult {
+    const result = transport.step(io, events, options);
     if (result.failure) |err| return err;
     return result.progress;
 }

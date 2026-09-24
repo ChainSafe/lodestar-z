@@ -127,7 +127,7 @@ pub fn addPeer(g: *gossip.Gossipsub, conn: engine.Handle, version: sessions_mod.
 }
 
 pub fn penalize(g: *gossip.Gossipsub, conn: engine.Handle, count: f64) void {
-    const index = g.sessions.findPeer(conn).?;
+    const index = g.sessions.find(conn).?;
     g.peers.penalize(g.sessions.rows[index].logical, count);
 }
 
@@ -144,6 +144,14 @@ pub fn pumpTurn(g: *gossip.Gossipsub, transport: *engine.Engine, now: @import(".
     var turn = @import("session_io.zig").beginPump(g, now);
     @import("session_io.zig").runTurn(g, &router, transport, &turn);
     return turn;
+}
+
+/// Now while a session is ready, else the earliest session deadline; heartbeat and
+/// maintenance deadlines are left out.
+pub fn sessionWakeup(g: *const gossip.Gossipsub, now: @import("../types.zig").Now) u64 {
+    if (g.sessions.ready.len > 0) return now.mono_ms;
+    const top = g.sessions.deadlines.peek() orelse return std.math.maxInt(u64);
+    return @max(now.mono_ms, top.deadline);
 }
 
 pub fn processRpc(g: *gossip.Gossipsub, index: u16, now: @import("../types.zig").Now, count: *usize, items: *usize) !bool {

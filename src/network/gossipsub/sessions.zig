@@ -2,6 +2,9 @@ const std = @import("std");
 const constants = @import("constants.zig");
 const topic_mod = @import("topic.zig");
 const engine_mod = @import("../quic/engine.zig");
+const index_list = @import("../index_list.zig");
+const DeadlineHeap = @import("../deadline_heap.zig").DeadlineHeap;
+const Options = @import("options.zig").Options;
 
 const assert = std.debug.assert;
 const Handle = engine_mod.Handle;
@@ -19,19 +22,31 @@ const PeerIo = @import("peer_io.zig").PeerIo;
 
 const Session = @import("peer_session.zig").Session;
 
+/// A `by_connection` entry with no session.
+const no_session = std.math.maxInt(u16);
+
 pub const Sessions = struct {
     rows: []Session,
-    cursor: usize = 0,
+    /// Sessions that can make progress now (see `Session.wants`), in the order they became ready.
+    ready: index_list.List = .{},
+    /// Active sessions keyed on their earliest IO deadline or outbound retry, in ms.
+    deadlines: DeadlineHeap,
+    /// Per engine connection index, the session on that connection or `no_session`.
+    by_connection: []u16,
+    /// Sessions taken from the ready list or the deadline heap. An idle mesh visits none.
+    visits: u64 = 0,
     delivery_revision: u64 = 0,
     io_arena: []u8,
     receive_pool: ReceivePool,
     decode_scratch: []u8,
     deliveries: *DeliveryPool,
 
+    /// An opening or a close is ready work. Callers settle any other change.
     pub fn setOutbound(self: *Sessions, index: u16, outbound: @import("peer_session.zig").Outbound) void {
         assert(self.rows[index].active);
         self.rows[index].outbound = outbound;
         self.delivery_revision +|= 1;
+        if (outbound == .pending or outbound == .closing) self.markReady(index);
     }
 
     pub fn init(a: std.mem.Allocator, options: *const @import("options.zig").Options, layout: *const @import("layout.zig").Layout) !Sessions {
@@ -47,20 +62,28 @@ pub const Sessions = struct {
         }
         const decode_scratch = try a.alloc(u8, constants.GOSSIP_MAX_SIZE);
         errdefer a.free(decode_scratch);
+        const by_connection = try a.alloc(u16, layout.connection_slots);
+        errdefer a.free(by_connection);
+        @memset(by_connection, no_session);
+        var deadlines = try DeadlineHeap.init(a, @intCast(rows.len));
+        errdefer deadlines.deinit(a);
         const deliveries = try a.create(DeliveryPool);
         errdefer a.destroy(deliveries);
         deliveries.* = try DeliveryPool.init(a, rows.len, layout.deliveries);
         for (rows, 0..) |*row, i| row.* = .{ .io = PeerIo.init(arena[i * per_peer ..][0..per_peer], options, deliveries) };
-        return .{ .rows = rows, .io_arena = arena, .receive_pool = receive_pool, .decode_scratch = decode_scratch, .deliveries = deliveries };
+        return .{ .rows = rows, .deadlines = deadlines, .by_connection = by_connection, .io_arena = arena, .receive_pool = receive_pool, .decode_scratch = decode_scratch, .deliveries = deliveries };
     }
 
     pub fn metadataBytes(layout: *const @import("layout.zig").Layout) usize {
-        return @as(usize, layout.sessions) * @sizeOf(Session) + @sizeOf(DeliveryPool) +
+        return @as(usize, layout.sessions) * (@sizeOf(Session) + @sizeOf(DeadlineHeap.Entry) + @sizeOf(u32)) + @sizeOf(DeliveryPool) +
+            @as(usize, layout.connection_slots) * @sizeOf(u16) +
             DeliveryPool.backingBytes(layout.deliveries) + layout.receive_arena_bytes / @import("receive_pool.zig").page_bytes * @sizeOf(u32);
     }
 
     pub fn deinit(self: *Sessions, a: std.mem.Allocator) void {
         self.deliveries.deinit(a);
+        self.deadlines.deinit(a);
+        a.free(self.by_connection);
         a.destroy(self.deliveries);
         self.receive_pool.deinit(a);
         a.free(self.decode_scratch);
@@ -70,28 +93,67 @@ pub const Sessions = struct {
 
     // Peers ------------------------------------------------------------------
 
+    /// A connection index past `by_connection`, or one whose previous session was not yet
+    /// retired, is refused like a full table.
     pub fn addPeer(self: *Sessions, conn: Handle) ?SessionRef {
+        if (conn.index >= self.by_connection.len or self.by_connection[conn.index] != no_session) return null;
         const index = self.freePeer() orelse return null;
         const peer = &self.rows[index];
         peer.start(conn);
+        self.by_connection[conn.index] = @intCast(index);
         self.delivery_revision +|= 1;
+        self.markReady(@intCast(index));
         return .{ .index = @intCast(index), .generation = peer.generation };
     }
 
     pub fn removePeer(self: *Sessions, index: u16) void {
         assert(index < self.rows.len);
-        if (!self.rows[index].active) return;
-        assert(self.rows[index].io.overflow.pages == 0 and self.rows[index].io.rpc == null and !self.rows[index].io.tx.pending());
+        const row = &self.rows[index];
+        if (!row.active) return;
+        assert(row.io.overflow.pages == 0 and row.io.rpc == null and !row.io.tx.pending());
         self.setOutbound(index, .none);
-        self.rows[index].active = false;
-        self.rows[index].in_stream = null;
+        row.active = false;
+        row.in_stream = null;
+        assert(self.by_connection[row.conn.index] == index);
+        self.by_connection[row.conn.index] = no_session;
+        if (row.ready_link.linked) self.ready.remove(self.rows, "ready_link", index);
+        self.deadlines.clear(index);
     }
 
-    pub fn findPeer(self: *Sessions, conn: Handle) ?u16 {
-        for (self.rows, 0..) |*peer, index| {
-            if (peer.active and std.meta.eql(peer.conn, conn)) return @intCast(index);
-        }
-        return null;
+    /// The session on the connection. O(1).
+    pub fn find(self: *const Sessions, conn: Handle) ?u16 {
+        if (conn.index >= self.by_connection.len) return null;
+        const index = self.by_connection[conn.index];
+        if (index == no_session) return null;
+        const row = &self.rows[index];
+        if (!row.active or !std.meta.eql(row.conn, conn)) return null;
+        return index;
+    }
+
+    /// Queues the session for service. Idempotent.
+    pub fn markReady(self: *Sessions, index: u16) void {
+        assert(self.rows[index].active);
+        _ = self.ready.insert(self.rows, "ready_link", index);
+    }
+
+    /// Brings the session's scheduling in line with its state: it joins the ready list when it
+    /// wants service, and its heap key is its earliest deadline. Only servicing takes a session
+    /// off the ready list. Every change to a session's streams, queues or timers ends here.
+    pub fn settle(self: *Sessions, index: u16, options: *const Options) void {
+        const row = &self.rows[index];
+        if (!row.active) return;
+        if (row.wants()) self.markReady(index);
+        if (row.deadline(options)) |key| self.deadlines.set(index, key) else self.deadlines.clear(index);
+    }
+
+    /// Ends a session's service: it stays on the ready list, at the tail, only while it still
+    /// wants service. A mark made during its own service by work that the service then finished
+    /// is dropped.
+    pub fn serviced(self: *Sessions, index: u16, options: *const Options) void {
+        const row = &self.rows[index];
+        if (!row.active) return;
+        if (row.ready_link.linked and !row.wants()) self.ready.remove(self.rows, "ready_link", index);
+        self.settle(index, options);
     }
 
     pub fn peerGeneration(self: *const Sessions, index: u16) u64 {
@@ -147,13 +209,6 @@ pub const Sessions = struct {
             io.discarding = true;
         }
         io.rx_ready = true;
-    }
-
-    pub fn connectionActivity(self: *Sessions, conn: Handle) void {
-        const index = self.findPeer(conn) orelse return;
-        self.rows[index].needs_service = true;
-        self.rows[index].io.rx_ready = true;
-        self.rows[index].io.tx.ready = true;
     }
 
     pub fn resetRx(self: *Sessions, index: u16) bool {

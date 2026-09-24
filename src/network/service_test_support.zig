@@ -14,8 +14,15 @@ pub const ServicePair = struct {
     handles: struct { client: engine.Handle, server: engine.Handle } = undefined,
 
     pub fn init(self: *ServicePair, client: service.Options, server: service.Options) !void {
+        try self.initWindow(client, server, null);
+    }
+
+    /// As `init`, with the server granting `stream_window` bytes of credit on each stream the
+    /// client opens until it reads them.
+    pub fn initWindow(self: *ServicePair, client: service.Options, server: service.Options, stream_window: ?u64) !void {
         try self.pair.init(.{}, .{});
         errdefer self.pair.deinit();
+        if (stream_window) |window| @import("quic/binding.zig").c.quiche_config_set_initial_max_stream_data_bidi_remote(self.pair.server.config.ptr, window);
         self.client = try service.Service.init(std.testing.allocator, client);
         errdefer self.client.deinit();
         self.server = try service.Service.init(std.testing.allocator, server);
