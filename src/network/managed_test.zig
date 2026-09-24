@@ -453,7 +453,7 @@ test "managed retains explicit direct connections without periodically resurrect
     _ = setup.server.snapshots(&remote);
     try std.testing.expect(setup.server.catalog.setDirect(remote[0].peer, true));
     const driver = setup.client_service.gossipsub;
-    @import("gossipsub/session_io.zig").retirePeer(driver, &setup.client_service.router, &setup.pair.client, driver.sessions.findPeer(conn).?);
+    @import("gossipsub/session_io.zig").retirePeer(driver, &setup.client_service.router, &setup.pair.client, driver.sessions.find(conn).?);
     const started = driver.counters.negotiation_started;
     for (0..4) |_| {
         setup.pair.advance(1_000);
@@ -872,7 +872,7 @@ test "managed coverage authenticated custody differs from gossip delivery and in
     _ = setup.client.snapshots(&snapshots);
     try std.testing.expect(setup.client.catalog.setDirect(snapshots[0].peer, true));
     const connection = snapshots[0].connection.?;
-    const index = setup.client_service.gossipsub.sessions.findPeer(connection).?;
+    const index = setup.client_service.gossipsub.sessions.find(connection).?;
     @import("gossipsub/session_io.zig").resetOutbound(setup.client_service.gossipsub, &setup.pair.client, index);
     try std.testing.expect(!setup.client_service.gossipsub.deliveryAvailable(connection));
     setup.client.reconcile(&setup.client_service, setup.pair.now);
@@ -1526,7 +1526,7 @@ test "managed sampling delivery follows real outbound stream retirement replacem
     setup.client.reconcile(&setup.client_service, setup.pair.now);
     try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().groups);
     const handler = setup.client_service.gossipsub;
-    const index = handler.sessions.findPeer(snapshot.connection.?).?;
+    const index = handler.sessions.find(snapshot.connection.?).?;
     const old_stream = handler.sessions.rows[index].outbound.live.stream;
     setup.pair.client.closeStream(old_stream, 0);
     handler.transportEvents(&setup.client_service.router, &setup.pair.client, &.{.{ .stream_closed = .{ .stream = old_stream, .reset_code = 0 } }}, setup.pair.now);
@@ -1548,7 +1548,7 @@ test "managed sampling delivery follows real outbound stream retirement replacem
     }
     setup.client.reconcile(&setup.client_service, setup.pair.now);
     try std.testing.expect(!std.meta.eql(snapshot.connection, replacement.connection));
-    const replacement_index = handler.sessions.findPeer(replacement.connection.?).?;
+    const replacement_index = handler.sessions.find(replacement.connection.?).?;
     const replacement_stream = handler.sessions.rows[replacement_index].outbound.live.stream;
     try std.testing.expect(!std.meta.eql(old_stream, replacement_stream));
     try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().groups);
@@ -1609,7 +1609,7 @@ test "managed replaces failed gossip below target without a reputation penalty o
     const snapshot = snapshots[0];
     const conn = snapshot.connection.?;
     const driver = setup.client_service.gossipsub;
-    const index = driver.sessions.findPeer(conn).?;
+    const index = driver.sessions.find(conn).?;
     const started = driver.counters.negotiation_started;
     try std.testing.expect(driver.deliveryAvailable(conn));
     try std.testing.expectEqual(@as(u16, 1), setup.client.selection.retained_count);

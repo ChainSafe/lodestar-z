@@ -1174,7 +1174,7 @@ test "reqresp host response retains write work behind a partial cursor" {
     try std.testing.expect(done);
 }
 
-test "reqresp native bytes arriving behind cursor remain ready after activity drain" {
+test "reqresp native bytes arriving behind cursor remain ready after a routed readable event" {
     var setup: Pair = .{};
     try setup.init(.{ .outbound_max = 1, .inbound_max = 1 }, .{});
     defer setup.deinit();
@@ -1204,7 +1204,7 @@ test "reqresp native bytes arriving behind cursor remain ready after activity dr
     try std.testing.expect(received);
 }
 
-test "reqresp native write credit behind cursor resumes from activity" {
+test "reqresp native write credit behind cursor resumes from a routed writable event" {
     var setup: Pair = .{};
     try setup.init(.{}, .{ .outbound_max = 1, .inbound_max = 2 });
     defer setup.deinit();

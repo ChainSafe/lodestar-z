@@ -12,10 +12,10 @@ test "session slots track connection generations" {
     defer sessions.deinit(std.testing.allocator);
     const conn = Handle{ .index = 3, .generation = 1 };
     const peer = sessions.addPeer(conn).?;
-    try std.testing.expectEqual(@as(?u16, peer.index), sessions.findPeer(conn));
+    try std.testing.expectEqual(@as(?u16, peer.index), sessions.find(conn));
 
     sessions.removePeer(peer.index);
-    try std.testing.expectEqual(@as(?u16, null), sessions.findPeer(conn));
+    try std.testing.expectEqual(@as(?u16, null), sessions.find(conn));
 }
 
 test "sessions suppresses ids per peer until monotonic expiry" {

@@ -65,13 +65,13 @@ fn saturatedPeers(peers: u16, budget: Budget) !void {
         g.options.calls_per_pump = 4096;
         g.options.output_per_pump = 256;
     }
-    g.sessions.cursor = 0;
     var progressed = std.StaticBitSet(128).initEmpty();
     const exhausted_before = g.io_metrics.turns_exhausted[@intFromEnum(budget)];
     const rounds = @divExact(peers, 4);
     for (0..rounds) |_| {
-        for (g.sessions.rows) |*row| {
+        for (g.sessions.rows, 0..) |*row, index| {
             for (row.io.tx.control.count..64) |_| try std.testing.expect(row.io.tx.inject(&.{0}, setup.shared.pair.now.mono_ms));
+            g.settle(@intCast(index));
         }
         const turn = support.pumpTurn(g, &setup.shared.pair.client, setup.shared.pair.now);
         try std.testing.expect(turn.exhausted().contains(budget));

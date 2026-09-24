@@ -16,6 +16,7 @@ const Handle = engine_mod.Handle;
 const StreamHandle = engine_mod.StreamHandle;
 const TransportEvent = engine_mod.Event;
 const Now = types.Now;
+const index_list = @import("../index_list.zig");
 const Gossipsub = gossipsub_mod.Gossipsub;
 const Turn = @import("turn.zig").Turn;
 const Credits = @import("turn.zig").Credits;
@@ -31,13 +32,13 @@ pub fn shutdown(self: *Gossipsub, router: *routing.Router, engine: *Engine) void
 }
 
 pub fn admitted(self: *Gossipsub, conn: Handle) bool {
-    return self.sessions.findPeer(conn) != null;
+    return self.sessions.find(conn) != null;
 }
 
 pub const Delivery = enum { unavailable, pending, available };
 
 pub fn deliveryStatus(self: *Gossipsub, conn: Handle) Delivery {
-    const index = self.sessions.findPeer(conn) orelse return .unavailable;
+    const index = self.sessions.find(conn) orelse return .unavailable;
     return switch (self.sessions.rows[index].outbound) {
         .none, .closing => .unavailable,
         .pending, .retry_at, .negotiating => .pending,
@@ -50,7 +51,7 @@ pub fn deliveryAvailable(self: *Gossipsub, conn: Handle) bool {
 }
 
 pub fn peerConnected(self: *Gossipsub, engine: *Engine, conn: Handle, direct: bool, now: Now) Admission {
-    if (self.sessions.findPeer(conn) != null) return .admitted;
+    if (self.sessions.find(conn) != null) return .admitted;
     const identity = engine.peerId(conn) orelse return .unauthenticated;
     const address = engine.peerAddress(conn) orelse return .unauthenticated;
     const direction = engine.direction(conn) orelse return .unauthenticated;
@@ -84,7 +85,7 @@ pub fn transportEvents(
 
 pub fn retireConnection(self: *Gossipsub, router: *routing.Router, engine: *Engine, conn: Handle, now: Now) void {
     self.last_now_ms = @max(self.last_now_ms, now.mono_ms);
-    const index = self.sessions.findPeer(conn) orelse return;
+    const index = self.sessions.find(conn) orelse return;
     retirePeer(self, router, engine, index);
 }
 
@@ -95,10 +96,15 @@ pub fn negotiationResult(
     now: Now,
 ) void {
     self.last_now_ms = @max(self.last_now_ms, now.mono_ms);
-    const index = self.sessions.findPeer(outcome.stream.conn) orelse {
+    const index = self.sessions.find(outcome.stream.conn) orelse {
         engine.closeStream(outcome.stream, 0);
         return;
     };
+    takeNegotiated(self, engine, index, outcome);
+    self.settle(index);
+}
+
+fn takeNegotiated(self: *Gossipsub, engine: *Engine, index: u16, outcome: routing.Outcome) void {
     const session = &self.sessions.rows[index];
     if (session.outbound == .closing) {
         engine.closeStream(outcome.stream, 0);
@@ -152,17 +158,41 @@ pub fn negotiationResult(
     }
 }
 
-pub fn connectionActivity(self: *Gossipsub, conn: Handle) void {
-    self.sessions.connectionActivity(conn);
+/// A routed stream event. A readable edge on the inbound stream or a writable edge on the out
+/// stream marks the session ready; an event for a stream the session no longer holds is dropped.
+pub fn streamReady(self: *Gossipsub, engine: *Engine, route: types.Route, stream: StreamHandle, ready: types.Readiness) void {
+    if (route.row >= self.sessions.rows.len) return;
+    const index: u16 = @intCast(route.row);
+    const session = &self.sessions.rows[index];
+    if (!session.active) return;
+    switch (route.owner) {
+        .gossip_inbound => {
+            const held = session.in_stream orelse return;
+            if (!std.meta.eql(held, stream) or !ready.readable) return;
+            session.io.rx_ready = true;
+        },
+        .gossip_outbound => {
+            const held = session.outStream() orelse return;
+            if (!std.meta.eql(held, stream) or !ready.writable) return;
+            const tx = &session.io.tx;
+            tx.writable();
+            // With nothing queued, no write armed the edge: the peer stopped the stream.
+            if (!tx.pending() and tx.subscription_dirty.count() == 0) {
+                _ = engine.streamCapacity(stream) catch resetOutbound(self, engine, index);
+            }
+        },
+        else => return,
+    }
+    self.settle(index);
 }
 
-pub fn nextWakeup(self: *Gossipsub, now: Now) ?u64 {
-    const next = nextIoWakeup(self, now);
-    for (self.sessions.rows) |*session| {
-        if (!session.active) continue;
-        if (session.needs_service or session.outbound == .pending or session.outbound == .closing) return now.mono_ms;
-    }
-    return next;
+/// Now when a session is ready; otherwise the earliest session deadline, heartbeat or
+/// maintenance deadline. Reads the list length and heap top only.
+pub fn nextWakeup(self: *const Gossipsub, now: Now) ?u64 {
+    if (self.sessions.ready.len > 0) return now.mono_ms;
+    var deadline = nextMaintenance(self, now);
+    if (self.sessions.deadlines.peek()) |top| deadline = @min(deadline, top.deadline);
+    return @max(now.mono_ms, deadline);
 }
 
 pub fn pump(
@@ -172,37 +202,9 @@ pub fn pump(
     now: Now,
 ) void {
     self.last_now_ms = @max(self.last_now_ms, now.mono_ms);
-    var openings: usize = 0;
-    var examined: usize = 0;
-    for (0..self.sessions.rows.len) |_| {
-        if (examined == 32) break;
-        const index: u16 = @intCast(self.open_cursor);
-        self.open_cursor = (self.open_cursor + 1) % self.sessions.rows.len;
-        const session = &self.sessions.rows[index];
-        if (!session.active) continue;
-        session.needs_service = false;
-        examined += 1;
-        if (session.outbound == .retry_at and now.mono_ms >= session.outbound.retry_at) {
-            self.sessions.setOutbound(index, if (self.peers.rows[session.logical.index].direct) .pending else .none);
-        }
-        switch (session.outbound) {
-            .live => |live| {
-                // Observe idle STOP_SENDING without a write or a host-work hint.
-                _ = engine.streamCapacity(live.stream) catch {
-                    resetOutbound(self, engine, index);
-                    continue;
-                };
-            },
-            .pending => {
-                openOutbound(self, router, engine, index, now);
-                openings += 1;
-                if (openings == openings_per_pump) break;
-            },
-            .closing => retirePeer(self, router, engine, index),
-            .none, .retry_at, .negotiating => {},
-        }
-    }
-    pumpReady(self, router, engine, now);
+    var turn = beginPump(self, now);
+    runTurn(self, router, engine, &turn);
+    if (@import("builtin").is_test) checkRoutes(self, engine);
 }
 
 fn openOutbound(
@@ -224,7 +226,7 @@ fn openOutbound(
 }
 
 fn streamClosed(self: *Gossipsub, engine: *Engine, stream: StreamHandle) void {
-    const index = self.sessions.findPeer(stream.conn) orelse return;
+    const index = self.sessions.find(stream.conn) orelse return;
     const session = &self.sessions.rows[index];
     switch (session.outbound) {
         .live => |live| if (std.meta.eql(live.stream, stream)) {
@@ -244,6 +246,7 @@ pub fn resetInbound(self: *Gossipsub, engine: *Engine, index: u16) void {
     }
     self.sessions.rows[index].in_stream = null;
     _ = self.sessions.resetRx(index);
+    self.settle(index);
 }
 
 pub fn resetOutbound(self: *Gossipsub, engine: *Engine, index: u16) void {
@@ -253,8 +256,11 @@ pub fn resetOutbound(self: *Gossipsub, engine: *Engine, index: u16) void {
     }
     self.sessions.setOutbound(index, .none);
     self.cancelWrites(self.sessions.ref(index));
+    self.settle(index);
 }
 
+/// Takes a negotiated inbound stream. quiche does not announce again the bytes the negotiator
+/// left unread, so the session reads it at once.
 fn replaceInbound(
     self: *Gossipsub,
     engine: *Engine,
@@ -265,11 +271,13 @@ fn replaceInbound(
         if (std.meta.eql(prior, stream)) return;
     }
     resetInbound(self, engine, index);
+    engine.bindStream(stream, .{ .owner = .gossip_inbound, .row = index }) catch {};
     self.sessions.rows[index].in_stream = stream;
     self.sessions.rows[index].io.rx_ready = true;
     if (self.sessions.rows[index].outbound == .none) self.sessions.setOutbound(index, .pending);
 }
 
+/// Takes a negotiated out stream, which takes writes until one blocks.
 fn replaceOutbound(
     self: *Gossipsub,
     engine: *Engine,
@@ -282,6 +290,7 @@ fn replaceOutbound(
     }
     if (self.sessions.rows[index].outStream()) |prior| engine.closeStream(prior, 0);
     self.cancelWrites(self.sessions.ref(index));
+    engine.bindStream(stream, .{ .owner = .gossip_outbound, .row = index }) catch {};
     self.sessions.setOutbound(index, .{ .live = .{ .stream = stream, .version = version } });
     self.sendSubscriptions(index);
 }
@@ -307,7 +316,6 @@ pub fn retirePeer(self: *Gossipsub, router: *routing.Router, engine: *Engine, in
 fn readPeer(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *Turn, peer: *Credits) void {
     const now = turn.now;
     const stream = self.sessions.rows[index].in_stream orelse return;
-    io.rx_ready = true;
     // A turn consumes at least one item, byte, or transport-call credit per iteration.
     for (0..self.options.items_per_peer + self.options.calls_per_peer + self.options.input_per_peer + 1) |_| {
         if (io.rpc != null) {
@@ -384,13 +392,15 @@ fn readPeer(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *T
     return;
 }
 
+/// Writes queued frames until the queue drains, a budget runs out or a write blocks. A short
+/// write blocks too: the engine armed write interest for the rest, and the session waits for
+/// its writable event instead of retrying.
 fn flush(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *Turn, peer: *Credits) void {
     const now = turn.now;
     const stream = self.sessions.rows[index].outStream() orelse return;
     for (0..self.options.calls_per_peer) |_| {
         const segment = self.writeSegment(self.sessions.ref(index));
         if (segment.len == 0) {
-            io.tx.ready = false;
             io.tx.progress_ms = null;
             return;
         }
@@ -402,12 +412,10 @@ fn flush(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *Turn
         self.io_metrics.write_calls +|= 1;
         if (io.tx.progress_ms == null) io.tx.progress_ms = now.mono_ms;
         const written = engine.write(stream, segment[0..take], false) catch |err| {
-            io.tx.ready = false;
             if (err == error.WouldBlock) {
                 self.io_metrics.write_would_block +|= 1;
-                io.write_would_block +|= 1;
-            }
-            if (err != error.WouldBlock) {
+                io.tx.blocked(now.mono_ms);
+            } else {
                 std.log.scoped(.network_gossip_errors).debug("gossip_write_failed connection={d}:{d} stream={d} reason={s} queued={d} bytes={d}", .{ stream.conn.index, stream.conn.generation, stream.id, @errorName(err), io.tx.data.count, io.tx.data.bytes });
                 resetOutbound(self, engine, index);
             }
@@ -416,13 +424,18 @@ fn flush(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *Turn
         if (written == 0) {
             self.io_metrics.write_zero +|= 1;
             io.write_zero +|= 1;
-            io.tx.ready = false;
+            io.tx.blocked(now.mono_ms);
             return;
         }
         peer.output -= written;
         turn.budget.output -= written;
         io.tx.progress_ms = now.mono_ms;
         self.advanceWrite(self.sessions.ref(index), written, now.mono_ms);
+        if (written < take) {
+            self.io_metrics.write_would_block +|= 1;
+            io.tx.blocked(now.mono_ms);
+            return;
+        }
     }
 }
 
@@ -433,7 +446,7 @@ fn logSendPressure(self: *Gossipsub, index: u16, now_ms: u64) void {
     io.tx.pressure_log_due_ms = now_ms +| 1_000;
     const row = &self.sessions.rows[index];
     const identity = &self.peers.rows[row.logical.index].identity;
-    std.log.scoped(.network_gossip_errors).debug("gossip_send_pressure peer={f} connection={d}:{d} reason={s} total={d} data_queued={d}/{d} data_bytes={d}/{d} control_frames={d} control_bytes={d} oldest_ms={d} write_blocked={d} write_zero={d} budget_deferred={d}", .{ @import("../logging.zig").peer(identity), row.conn.index, row.conn.generation, @tagName(io.tx.last_drop), io.tx.drops[@intFromEnum(io.tx.last_drop)], io.tx.data.count, @import("outbox.zig").data_capacity, io.tx.data.bytes, self.options.tx_peer_bytes, io.tx.control.count, io.tx.control.used, if (io.tx.oldest()) |oldest| now_ms -| oldest else 0, io.write_would_block, io.write_zero, io.write_budget_deferred });
+    std.log.scoped(.network_gossip_errors).debug("gossip_send_pressure peer={f} connection={d}:{d} reason={s} total={d} data_queued={d}/{d} data_bytes={d}/{d} control_frames={d} control_bytes={d} oldest_ms={d} write_blocked_ms={d} write_zero={d} budget_deferred={d}", .{ @import("../logging.zig").peer(identity), row.conn.index, row.conn.generation, @tagName(io.tx.last_drop), io.tx.drops[@intFromEnum(io.tx.last_drop)], io.tx.data.count, @import("outbox.zig").data_capacity, io.tx.data.bytes, self.options.tx_peer_bytes, io.tx.control.count, io.tx.control.used, if (io.tx.oldest()) |oldest| now_ms -| oldest else 0, if (io.tx.blocked_since) |since| now_ms -| since else 0, io.write_zero, io.write_budget_deferred });
 }
 
 fn logIoTimeout(self: *Gossipsub, index: u16, reason: []const u8, now_ms: u64) void {
@@ -443,64 +456,72 @@ fn logIoTimeout(self: *Gossipsub, index: u16, reason: []const u8, now_ms: u64) v
     std.log.scoped(.network_gossip_errors).debug("gossip_io_timeout peer={f} connection={d}:{d} reason={s} inbound={any} outbound={any} subscriptions={d} data_queued={d} data_bytes={d} control_bytes={d} critical_bytes={d} oldest_ms={d}", .{ @import("../logging.zig").peer(identity), row.conn.index, row.conn.generation, reason, row.in_stream != null, row.outStream() != null, io.tx.subscription_dirty.count(), io.tx.data.count, io.tx.data.bytes, io.tx.control.used, io.tx.critical.used, if (io.tx.oldest()) |oldest| now_ms -| oldest else 0 });
 }
 
-fn pumpReady(self: *Gossipsub, router: *routing.Router, engine: *Engine, now: Now) void {
-    var turn = beginPump(self, now);
-    runTurn(self, router, engine, &turn);
-}
-
+/// Expires the due session deadlines, runs the heartbeat, then services up to `peers_per_pump`
+/// of the sessions that were ready when the turn began, in the order they became ready. A
+/// session that still wants service after its turn goes back to the tail; sessions marked
+/// during the turn wait for the next one.
 pub fn runTurn(self: *Gossipsub, router: *routing.Router, engine: *Engine, turn: *Turn) void {
     const now = turn.now;
-    expireIo(self, router, engine, now.mono_ms);
+    expireDue(self, router, engine, now.mono_ms);
     self.tick(now);
-    var serviced: usize = 0;
-    var first_serviced: ?usize = null;
-    for (0..self.sessions.rows.len) |_| {
-        const index = self.sessions.cursor;
-        self.sessions.cursor = (index + 1) % self.sessions.rows.len;
-        if (!self.sessions.rows[index].active) continue;
-        if (self.sessions.rows[index].outbound == .closing) {
-            logSendPressure(self, @intCast(index), now.mono_ms);
-            retirePeer(self, router, engine, @intCast(index));
-            continue;
-        }
-        if (first_serviced == null) first_serviced = index;
-        if (self.sessions.rows[index].in_stream != null and self.ignoreRpc(@intCast(index), now)) {
-            resetInbound(self, engine, @intCast(index));
-        }
-        const io = &self.sessions.rows[index].io;
-        var peer = Credits.peer(&self.options);
-        const write_first = io.write_first;
-        if (write_first and io.tx.ready) flush(self, engine, @intCast(index), io, turn, &peer);
-        if (io.rx_ready) readPeer(self, engine, @intCast(index), io, turn, &peer);
-        if (!write_first and io.tx.ready) flush(self, engine, @intCast(index), io, turn, &peer);
-        logSendPressure(self, @intCast(index), now.mono_ms);
-        if (self.sessions.rows[index].outbound == .closing) retirePeer(self, router, engine, @intCast(index));
-        serviced += 1;
+    const marked = @min(self.sessions.ready.len, self.options.peers_per_pump);
+    var openings: usize = 0;
+    for (0..marked) |_| {
+        const index: u16 = @intCast(self.sessions.ready.pop(self.sessions.rows, "ready_link") orelse break);
+        self.sessions.visits +|= 1;
+        serviceSession(self, router, engine, index, turn, &openings);
+        self.sessions.serviced(index, &self.options);
         if (turn.exhausted().count() > 0) break;
-        if (serviced == self.options.peers_per_pump) break;
     }
     const exhausted = turn.exhausted();
-    if (exhausted.count() > 0) {
-        var budgets = exhausted.iterator();
-        while (budgets.next()) |budget| {
-            self.io_metrics.turns_exhausted[@intFromEnum(budget)] +|= 1;
-            for (self.sessions.rows) |*row| {
-                if (!row.active) continue;
-                const writing = row.outStream() != null and row.io.tx.ready and row.io.tx.pending();
-                const reading = row.in_stream != null and row.io.rx_ready;
-                const ready = switch (budget) {
-                    .calls => reading or writing,
-                    .output => writing,
-                    .input, .items, .fields, .work, .copy => reading,
-                };
-                if (ready) self.io_metrics.ready_deferred[@intFromEnum(budget)] +|= 1;
-                if (writing and (budget == .calls or (budget == .output and !exhausted.contains(.calls)))) row.io.write_budget_deferred +|= 1;
-            }
+    var budgets = exhausted.iterator();
+    while (budgets.next()) |budget| {
+        self.io_metrics.turns_exhausted[@intFromEnum(budget)] +|= 1;
+        var next = self.sessions.ready.head;
+        for (0..self.sessions.ready.len) |_| {
+            if (next == index_list.none) break;
+            const row = &self.sessions.rows[next];
+            next = row.ready_link.next;
+            const writing = row.outStream() != null and row.io.tx.ready and row.io.tx.pending();
+            const reading = row.in_stream != null and row.io.rx_ready;
+            const ready = switch (budget) {
+                .calls => reading or writing,
+                .output => writing,
+                .input, .items, .fields, .work, .copy => reading,
+            };
+            if (ready) self.io_metrics.ready_deferred[@intFromEnum(budget)] +|= 1;
+            if (writing and (budget == .calls or (budget == .output and !exhausted.contains(.calls)))) row.io.write_budget_deferred +|= 1;
         }
-    } else if (serviced < self.options.peers_per_pump) {
-        if (first_serviced) |first| self.sessions.cursor = (first + 1) % self.sessions.rows.len;
     }
     finishPump(self, now);
+    if (@import("builtin").is_test) checkSessions(self);
+}
+
+fn serviceSession(self: *Gossipsub, router: *routing.Router, engine: *Engine, index: u16, turn: *Turn, openings: *usize) void {
+    const now = turn.now;
+    const session = &self.sessions.rows[index];
+    assert(session.active);
+    switch (session.outbound) {
+        .closing => {
+            logSendPressure(self, index, now.mono_ms);
+            retirePeer(self, router, engine, index);
+            return;
+        },
+        .pending => if (openings.* < openings_per_pump) {
+            openOutbound(self, router, engine, index, now);
+            openings.* += 1;
+        },
+        .none, .retry_at, .negotiating, .live => {},
+    }
+    if (session.in_stream != null and self.ignoreRpc(index, now)) resetInbound(self, engine, index);
+    const io = &session.io;
+    var peer = Credits.peer(&self.options);
+    const write_first = io.write_first;
+    if (write_first and io.tx.ready) flush(self, engine, index, io, turn, &peer);
+    if (session.in_stream != null and io.rx_ready) readPeer(self, engine, index, io, turn, &peer);
+    if (!write_first and io.tx.ready) flush(self, engine, index, io, turn, &peer);
+    logSendPressure(self, index, now.mono_ms);
+    if (session.active and session.outbound == .closing) retirePeer(self, router, engine, index);
 }
 
 pub fn processRpc(self: *Gossipsub, index: u16, turn: *Turn, peer: *Credits) protobuf.Error!Progress {
@@ -556,68 +577,105 @@ pub fn processRpc(self: *Gossipsub, index: u16, turn: *Turn, peer: *Credits) pro
     return .credits;
 }
 
-pub fn nextIoWakeup(self: *Gossipsub, now: Now) ?u64 {
-    var deadline = nextMaintenance(self, now);
-    for (self.sessions.rows, 0..) |*peer, i| {
-        const io = &peer.io;
-        if (!self.sessions.rows[i].active) continue;
-        if (peer.outbound == .closing) return now.mono_ms;
-        if (peer.outbound == .retry_at) deadline = @min(deadline, peer.outbound.retry_at);
-        if (self.sessions.rows[i].in_stream != null and io.rx_ready) return now.mono_ms;
-        if (self.sessions.rows[i].outStream() != null and io.tx.ready and
-            (io.tx.pending() or io.tx.subscription_dirty.count() > 0)) return now.mono_ms;
-        if (io.deadlines(&self.options).next()) |due| deadline = @min(deadline, due);
-    }
-    return @max(now.mono_ms, deadline);
-}
-
 fn discardInboundFrame(self: *Gossipsub, index: u16) void {
     self.counters.local_pressure_discards += 1;
     self.cancelPromises(index, true);
     self.sessions.discardFrame(&self.sessions.rows[index].io);
 }
 
-fn expireIo(self: *Gossipsub, router: *routing.Router, engine: *Engine, now_ms: u64) void {
+/// Pops the sessions whose earliest deadline passed. Handling an expiry clears it or retires the
+/// session, so a key set here lies in the future and each session is popped at most once.
+fn expireDue(self: *Gossipsub, router: *routing.Router, engine: *Engine, now_ms: u64) void {
+    for (0..self.sessions.deadlines.len) |_| {
+        const index: u16 = @intCast(self.sessions.deadlines.popDue(now_ms) orelse break);
+        self.sessions.visits +|= 1;
+        expireSession(self, router, engine, index, now_ms);
+        self.settle(index);
+    }
+}
+
+fn expireSession(self: *Gossipsub, router: *routing.Router, engine: *Engine, index: u16, now_ms: u64) void {
     const g = self;
-    for (g.sessions.rows, 0..) |*peer, index| {
-        if (!peer.active) continue;
-        const io = &peer.io;
-        for (0..3) |_| {
-            const reason = io.deadlines(&g.options).expired(now_ms) orelse break;
-            logIoTimeout(self, @intCast(index), @tagName(reason), now_ms);
-            switch (reason) {
-                .subscriptions => {
+    const peer = &g.sessions.rows[index];
+    assert(peer.active);
+    if (peer.outbound == .retry_at and now_ms >= peer.outbound.retry_at) {
+        g.sessions.setOutbound(index, if (g.peers.rows[peer.logical.index].direct) .pending else .none);
+    }
+    const io = &peer.io;
+    for (0..3) |_| {
+        const reason = io.deadlines(&g.options).expired(now_ms) orelse break;
+        logIoTimeout(self, index, @tagName(reason), now_ms);
+        switch (reason) {
+            .subscriptions => {
+                g.counters.local_pressure_resets += 1;
+                g.counters.subscription_timeouts += 1;
+                retirePeer(self, router, engine, index);
+                break;
+            },
+            .receive_frame => {
+                g.counters.receive_frame_timeouts += 1;
+                if (io.rpc != null) {
+                    discardInboundFrame(self, index);
+                    continue;
+                }
+                if (io.discarding) {
                     g.counters.local_pressure_resets += 1;
-                    g.counters.subscription_timeouts += 1;
-                    retirePeer(self, router, engine, @intCast(index));
-                    break;
-                },
-                .receive_frame => {
-                    g.counters.receive_frame_timeouts += 1;
-                    if (io.rpc != null) {
-                        discardInboundFrame(self, @intCast(index));
-                        continue;
+                } else {
+                    if ((io.reader.declaredLen() orelse 0) > io.body.len) {
+                        g.peers.penalize(peer.logical, 1);
+                        g.peers.rows[peer.logical.index].large_frame_denied_until = now_ms +| g.options.pressure_timeout_ms;
                     }
-                    if (io.discarding) {
-                        g.counters.local_pressure_resets += 1;
-                    } else {
-                        if ((io.reader.declaredLen() orelse 0) > io.body.len) {
-                            g.peers.penalize(peer.logical, 1);
-                            g.peers.rows[peer.logical.index].large_frame_denied_until = now_ms +| g.options.pressure_timeout_ms;
-                        }
-                        g.counters.large_stalled += 1;
-                    }
-                    resetInbound(self, engine, @intCast(index));
-                },
-                .send_queue, .send_progress => {
-                    g.counters.tx_stalled += 1;
-                    if (reason == .send_queue) g.counters.send_queue_timeouts += 1 else g.counters.send_progress_timeouts += 1;
-                    const retry_direct = peer.outbound == .live and g.peers.rows[peer.logical.index].direct;
-                    resetOutbound(self, engine, @intCast(index));
-                    if (retry_direct) g.sessions.setOutbound(@intCast(index), .{ .retry_at = now_ms +| direct_retry_delay_ms });
-                },
-            }
+                    g.counters.large_stalled += 1;
+                }
+                resetInbound(self, engine, index);
+            },
+            .send_queue, .send_progress => {
+                g.counters.tx_stalled += 1;
+                if (reason == .send_queue) g.counters.send_queue_timeouts += 1 else g.counters.send_progress_timeouts += 1;
+                const retry_direct = peer.outbound == .live and g.peers.rows[peer.logical.index].direct;
+                resetOutbound(self, engine, index);
+                if (retry_direct) g.sessions.setOutbound(index, .{ .retry_at = now_ms +| direct_retry_delay_ms });
+            },
         }
+    }
+}
+
+/// Test builds check after every turn that the ready list holds every session that wants
+/// service, that each session off the list is keyed on its recomputed deadline, and that the
+/// connection index finds each active session.
+fn checkSessions(self: *const Gossipsub) void {
+    const sessions = self.sessions;
+    var linked: usize = 0;
+    for (sessions.rows, 0..) |*row, position| {
+        const index: u16 = @intCast(position);
+        linked += @intFromBool(row.ready_link.linked);
+        if (!row.active) {
+            assert(!row.ready_link.linked and sessions.deadlines.get(index) == null);
+            continue;
+        }
+        assert(sessions.find(row.conn).? == index);
+        if (row.wants()) assert(row.ready_link.linked);
+        if (!row.ready_link.linked) assert(sessions.deadlines.get(index) == row.deadline(&self.options));
+    }
+    assert(linked == sessions.ready.len);
+}
+
+/// Test builds check after every pump that each stream a session holds routes to it, that a
+/// session off the ready list holds no inbound stream with an unread readable edge, and that a
+/// blocked out stream with queued output waits on armed write interest.
+fn checkRoutes(self: *const Gossipsub, engine: *const Engine) void {
+    for (self.sessions.rows, 0..) |*row, position| {
+        if (!row.active) continue;
+        const index: u24 = @intCast(position);
+        if (row.in_stream) |stream| if (engine.route(stream)) |bound| {
+            assert(bound.owner == .gossip_inbound and bound.row == index);
+            if (!row.ready_link.linked) if (engine.streamWaits(stream)) |waits| assert(!waits.read_open);
+        };
+        if (row.outStream()) |stream| if (engine.route(stream)) |bound| {
+            assert(bound.owner == .gossip_outbound and bound.row == index);
+            const tx = &row.io.tx;
+            if (!tx.ready and (tx.pending() or tx.subscription_dirty.count() > 0)) if (engine.streamWaits(stream)) |waits| assert(waits.write_waiting);
+        };
     }
 }
 

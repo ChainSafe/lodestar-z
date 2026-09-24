@@ -137,7 +137,7 @@ test "service control wakeup includes negotiation after application quiescence" 
     try std.testing.expect(events[0].failed.reason == .cancelled);
 }
 
-test "service preserves drained native activity across a partial request sweep" {
+test "service preserves drained native stream events across a partial request sweep" {
     var setup: Pair = .{};
     try setup.init(.{ .outbound_max = 4, .inbound_max = 4 }, .{ .outbound_max = 4, .inbound_max = 4 });
     defer setup.deinit();
@@ -161,12 +161,11 @@ test "service preserves drained native activity across a partial request sweep" 
     const encoded = try codec.encodeChunk(0, null, &bytes, &wire);
     try std.testing.expectEqual(encoded.len, try setup.shared.pair.server.write(stream, encoded, false));
     try setup.shared.pair.pump();
-    var activity: [128]engine_mod.Handle = undefined;
-    const active = setup.shared.pair.activity(&setup.shared.pair.client, &activity);
-    try std.testing.expect(active > 0);
     var events: [1]Event = undefined;
     var transport: [16]engine_mod.Event = undefined;
-    const first_count = setup.shared.client.process(&setup.shared.pair.client, setup.shared.pair.events(&setup.shared.pair.client, &transport), setup.shared.pair.now, .{ .control = &events }).control;
+    const polled = setup.shared.pair.events(&setup.shared.pair.client, &transport);
+    try std.testing.expect(polled.len > 0);
+    const first_count = setup.shared.client.process(&setup.shared.pair.client, polled, setup.shared.pair.now, .{ .control = &events }).control;
     var received = first_count == 1;
     for (0..10) |_| {
         if (received) break;

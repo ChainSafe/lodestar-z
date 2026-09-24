@@ -152,7 +152,7 @@ test "publication local IDONTWANT cannot suppress exact bytes over QUIC" {
     try support.subscribe(pair.shared.client.gossipsub, topic);
     try support.subscribe(pair.shared.server.gossipsub, topic);
     for (0..20) |_| try pair.pumpOnce();
-    const destination = pair.shared.client.gossipsub.sessions.findPeer(pair.shared.handles.client).?;
+    const destination = pair.shared.client.gossipsub.sessions.find(pair.shared.handles.client).?;
     const id = topic_mod.validMessageId(topic, "originated wire bytes", .{});
     pair.shared.client.gossipsub.sessions.suppress(destination, id, pair.shared.pair.now.mono_ms, 60_000);
     const outcome = try pair.shared.client.gossipsub.publishWithOptions(topic, "originated wire bytes", .{ .allow_zero_peers = false }, pair.shared.pair.now);

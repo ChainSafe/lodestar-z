@@ -1,9 +1,11 @@
 const std = @import("std");
 const constants = @import("constants.zig");
+const index_list = @import("../index_list.zig");
 const Handle = @import("../quic/engine.zig").Handle;
 const StreamHandle = @import("../quic/engine.zig").StreamHandle;
 const MessageId = @import("topic.zig").MessageId;
 const Version = @import("protocol.zig").Version;
+const Options = @import("options.zig").Options;
 pub const Outbound = union(enum) {
     /// No scheduled opening. New inbound stream evidence may return this to pending.
     none,
@@ -17,7 +19,8 @@ pub const Outbound = union(enum) {
 pub const Session = struct {
     io: @import("peer_io.zig").PeerIo,
     outbound: Outbound = .none,
-    needs_service: bool = false,
+    /// Membership of `Sessions.ready`.
+    ready_link: index_list.Link = .{},
     logical: @import("peer_book.zig").Ref = undefined,
     active: bool = false,
     generation: u64 = 0,
@@ -30,8 +33,25 @@ pub const Session = struct {
 
     pub fn start(self: *Session, conn: Handle) void {
         std.debug.assert(!self.active and self.generation < std.math.maxInt(u64));
+        std.debug.assert(!self.ready_link.linked);
         self.io.startSession();
         self.* = .{ .io = self.io, .generation = self.generation + 1, .conn = conn, .active = true, .outbound = .pending };
+    }
+
+    /// The session can make progress now: an outbound opening or close to run, an inbound stream
+    /// with unread bytes, or output queued on an out stream whose last write did not block.
+    pub fn wants(self: *const Session) bool {
+        if (self.outbound == .pending or self.outbound == .closing) return true;
+        if (self.in_stream != null and self.io.rx_ready) return true;
+        const tx = &self.io.tx;
+        return self.outStream() != null and tx.ready and (tx.pending() or tx.subscription_dirty.count() > 0);
+    }
+
+    /// The earliest IO deadline or outbound retry.
+    pub fn deadline(self: *const Session, options: *const Options) ?u64 {
+        var next = self.io.deadlines(options).next();
+        if (self.outbound == .retry_at) next = @min(next orelse self.outbound.retry_at, self.outbound.retry_at);
+        return next;
     }
 
     pub fn suppresses(self: *const Session, id: MessageId, now: u64) bool {

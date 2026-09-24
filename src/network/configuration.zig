@@ -11,7 +11,7 @@ const router = @import("router.zig");
 
 pub const Profile = enum { small, beacon_node };
 pub const ReqRespOverrides = Overrides(rr.Options, &.{ "peers", "forks", "outbound_control_reserved", "inbound_control_reserved", "admission" });
-pub const GossipOverrides = Overrides(gossip.Options, &.{ "connected_capacity", "retained_capacity", "retained_outbound_reserve", "random_seed" });
+pub const GossipOverrides = Overrides(gossip.Options, &.{ "connected_capacity", "connection_slots", "retained_capacity", "retained_outbound_reserve", "random_seed" });
 pub const IdentifyOverrides = Overrides(@import("identify/root.zig").Options, &.{});
 pub const RouterOverrides = Overrides(router.Options, &.{ "outbound_control_reserved", "inbound_connections" });
 
@@ -104,6 +104,7 @@ pub fn resolve(request: Request) !Resolved {
     var gossip_options: gossip.Options = .{
         .random_seed = request.seed,
         .connected_capacity = peer_options.max_peers,
+        .connection_slots = limits.connections_max,
         .retained_capacity = peer_options.capacity,
         .retained_outbound_reserve = peer_options.outbound_reserve,
     };
@@ -143,6 +144,7 @@ pub fn validate(limits: engine.Limits, options: core.Options) !void {
     try core.validateOptions(options);
     if (options.peers.max_peers > limits.connections_max or
         options.service.reqresp.peers < limits.connections_max or
+        options.service.gossipsub.connection_slots < limits.connections_max or
         options.dial.concurrent_max != limits.dialing_max or
         options.dial.outbound_reserved != limits.outbound_reserved or
         limits.outbound_max != limits.connections_max or

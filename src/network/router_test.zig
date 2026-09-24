@@ -210,7 +210,7 @@ test "router accepted selection survives capability changes behind outcome press
     server.cancel(&pair.server, out[0].stream);
 }
 
-test "router composed service handles native activity past empty request capacity" {
+test "router composed service handles native stream events past empty request capacity" {
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
@@ -232,7 +232,6 @@ test "router composed service handles native activity past empty request capacit
     _ = try client.request(&pair.client, handles.client, .ping_v1, &ping, &sink, .{}, pair.now);
     var incoming: ?rr.RequestHandle = null;
     var transport: [16]engine.Event = undefined;
-    var activity: [128]engine.Handle = undefined;
     var requests: [8]rr.Event = undefined;
     for (0..64) |_| {
         try pair.pump();
@@ -250,9 +249,9 @@ test "router composed service handles native activity past empty request capacit
     const stream = server.reqresp.inbound[incoming.?.index].request.stream;
     try std.testing.expectEqual(encoded.len, try pair.server.write(stream, encoded, false));
     try pair.pump();
-    const active = pair.activity(&pair.client, &activity);
-    try std.testing.expect(active > 0);
-    const counts = client.process(&pair.client, pair.events(&pair.client, &transport), pair.now, .{ .control = &requests });
+    const polled = pair.events(&pair.client, &transport);
+    try std.testing.expect(polled.len > 0);
+    const counts = client.process(&pair.client, polled, pair.now, .{ .control = &requests });
     try std.testing.expectEqual(@as(usize, 1), counts.control);
     try std.testing.expectEqualSlices(u8, &ping, requests[0].chunk.bytes);
 }

@@ -22,9 +22,8 @@ fn writeSome(engine: *engine_mod.Engine, stream: engine_mod.StreamHandle, bytes:
 }
 
 fn stepBoth(a: *Node, b: *Node, events_a: []engine_mod.Event, events_b: []engine_mod.Event) !struct { a: usize, b: usize } {
-    var activity: [4]engine_mod.Handle = undefined;
-    const ra = try support.step(&a.transport, std.testing.io, events_a, &activity, step_options);
-    const rb = try support.step(&b.transport, std.testing.io, events_b, &activity, step_options);
+    const ra = try support.step(&a.transport, std.testing.io, events_a, step_options);
+    const rb = try support.step(&b.transport, std.testing.io, events_b, step_options);
     try std.testing.expectEqual(@as(u32, 0), ra.send_failures);
     try std.testing.expectEqual(@as(u32, 0), rb.send_failures);
     return .{ .a = ra.events, .b = rb.events };
@@ -36,21 +35,19 @@ test "transport bounds an idle step by the requested wait" {
     defer node.deinit();
 
     var events: [4]engine_mod.Event = undefined;
-    var activity: [4]engine_mod.Handle = undefined;
     const started = std.Io.Clock.awake.now(std.testing.io).toMilliseconds();
-    const result = try support.step(&node.transport, std.testing.io, &events, &activity, .{ .wait_max_ms = 5 });
+    const result = try support.step(&node.transport, std.testing.io, &events, .{ .wait_max_ms = 5 });
     const elapsed = std.Io.Clock.awake.now(std.testing.io).toMilliseconds() - started;
     try std.testing.expect(elapsed < 200);
     try std.testing.expectEqual(@as(usize, 0), result.events);
-    try std.testing.expectEqual(@as(usize, 0), result.activity);
     try std.testing.expect(!result.backlog);
     try std.testing.expect(node.transport.nextDeadlineNs() == null);
 
-    const floored = try support.step(&node.transport, std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
+    const floored = try support.step(&node.transport, std.testing.io, &events, .{ .wait_max_ms = 0 });
     try std.testing.expectEqual(@as(u32, 0), floored.datagrams_received);
 }
 
-test "transport reports activity for the connections with stream events" {
+test "transport reports stream events for the connections with stream data" {
     var client: Node = .{};
     try client.init(7);
     defer client.deinit();
@@ -80,23 +77,27 @@ test "transport reports activity for the connections with stream events" {
     try std.testing.expect(client_connected and server_handle != null);
 
     const stream = try client.transport.engine.openStream(handle);
-    var activity: [4]engine_mod.Handle = undefined;
-    var none: [0]engine_mod.Handle = undefined;
     var reported: usize = 0;
     var deferred: usize = 0;
     var rounds: usize = 0;
     while (rounds < 50 and (reported == 0 or deferred == 0)) : (rounds += 1) {
         _ = try writeSome(&client.transport.engine, stream, "ping", false);
-        _ = try support.step(&client.transport, std.testing.io, &client_events, &activity, step_options);
+        _ = try support.step(&client.transport, std.testing.io, &client_events, step_options);
         const narrow =
-            try support.step(&server.transport, std.testing.io, server_events[0..0], none[0..0], step_options);
-        try std.testing.expectEqual(@as(usize, 0), narrow.activity);
+            try support.step(&server.transport, std.testing.io, server_events[0..0], step_options);
+        try std.testing.expectEqual(@as(usize, 0), narrow.events);
         if (narrow.events_pending) deferred += 1;
         const wide =
-            try support.step(&server.transport, std.testing.io, &server_events, &activity, step_options);
-        for (activity[0..wide.activity]) |seen| try std.testing.expectEqual(server_handle.?, seen);
-        try std.testing.expect(wide.activity <= 1);
-        reported += wide.activity;
+            try support.step(&server.transport, std.testing.io, &server_events, step_options);
+        for (server_events[0..wide.events]) |event| {
+            const conn = switch (event) {
+                .stream_opened => |opened| opened.conn,
+                .stream_ready => |ready| ready.stream.conn,
+                else => continue,
+            };
+            try std.testing.expectEqual(server_handle.?, conn);
+            reported += 1;
+        }
     }
     try std.testing.expect(reported > 0);
     try std.testing.expect(deferred > 0);
@@ -104,10 +105,10 @@ test "transport reports activity for the connections with stream events" {
     var quiet = false;
     var idle: usize = 0;
     while (idle < 50 and !quiet) : (idle += 1) {
-        _ = try support.step(&client.transport, std.testing.io, &client_events, &activity, step_options);
+        _ = try support.step(&client.transport, std.testing.io, &client_events, step_options);
         const result =
-            try support.step(&server.transport, std.testing.io, &server_events, &activity, step_options);
-        if (result.datagrams_accepted > 0 or result.activity > 0) continue;
+            try support.step(&server.transport, std.testing.io, &server_events, step_options);
+        if (result.datagrams_accepted > 0 or result.events > 0) continue;
         try std.testing.expect(!result.events_pending);
         quiet = true;
     }
@@ -128,11 +129,10 @@ test "transport counts a hostile oversized datagram and keeps stepping" {
     try stranger.send(std.testing.io, &destination, &oversized);
 
     var events: [4]engine_mod.Event = undefined;
-    var activity: [4]engine_mod.Handle = undefined;
     var errors: u32 = 0;
     var rounds: usize = 0;
     while (rounds < 50 and errors == 0) : (rounds += 1) {
-        const result = try support.step(&node.transport, std.testing.io, &events, &activity, step_options);
+        const result = try support.step(&node.transport, std.testing.io, &events, step_options);
         try std.testing.expectEqual(@as(u32, 0), result.datagrams_accepted);
         try std.testing.expectEqual(@as(u32, 0), result.datagrams_received);
         try std.testing.expectEqual(@as(usize, 0), result.events);
@@ -140,7 +140,7 @@ test "transport counts a hostile oversized datagram and keeps stepping" {
     }
     try std.testing.expectEqual(@as(u32, 1), errors);
 
-    const after = try support.step(&node.transport, std.testing.io, &events, &activity, step_options);
+    const after = try support.step(&node.transport, std.testing.io, &events, step_options);
     try std.testing.expectEqual(@as(u32, 0), after.receive_errors);
     try std.testing.expectEqual(@as(u32, 0), after.datagrams_accepted);
 }
@@ -160,8 +160,7 @@ test "transport keeps batching past a counted receive error" {
     while (sent < 3) : (sent += 1) try stranger.send(std.testing.io, &destination, &oversized);
 
     var events: [4]engine_mod.Event = undefined;
-    var activity: [4]engine_mod.Handle = undefined;
-    const result = try support.step(&node.transport, std.testing.io, &events, &activity, step_options);
+    const result = try support.step(&node.transport, std.testing.io, &events, step_options);
     try std.testing.expect(result.receive_errors >= 2);
     try std.testing.expectEqual(@as(u32, 0), result.datagrams_received);
     try std.testing.expectEqual(@as(u32, 0), result.datagrams_accepted);
@@ -184,8 +183,7 @@ test "transport surfaces a send failure to an unreachable destination" {
     );
 
     var events: [4]engine_mod.Event = undefined;
-    var activity: [4]engine_mod.Handle = undefined;
-    const result = try support.step(&node.transport, std.testing.io, &events, &activity, step_options);
+    const result = try support.step(&node.transport, std.testing.io, &events, step_options);
     try std.testing.expectEqual(@as(u32, 1), result.send_failures);
     try std.testing.expectEqual(@as(u32, 0), result.datagrams_sent);
     try std.testing.expectEqual(@as(usize, 1), result.events);
@@ -312,17 +310,16 @@ test "transport rotates dirty connections under one aggregate send allowance" {
         _ = try node.transport.engine.dial(&destination, node.transport.peerId(), now);
     }
     var events: [8]engine_mod.Event = undefined;
-    var activity: [8]engine_mod.Handle = undefined;
     var served: [3]u16 = undefined;
     for (&served) |*index| {
         index.* = node.transport.engine.nextDirty().?;
-        const result = try support.step(&node.transport, std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
+        const result = try support.step(&node.transport, std.testing.io, &events, .{ .wait_max_ms = 0 });
         try std.testing.expectEqual(@as(u32, 1), result.datagrams_sent);
         try std.testing.expect(result.backlog);
         _ = try sink.receiveTimeout(std.testing.io, &receive_buffer, .{ .duration = .{ .raw = .fromMilliseconds(10), .clock = .awake } });
     }
     try std.testing.expect(served[0] != served[1] and served[1] != served[2] and served[0] != served[2]);
-    const drained = try support.step(&node.transport, std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
+    const drained = try support.step(&node.transport, std.testing.io, &events, .{ .wait_max_ms = 0 });
     try std.testing.expectEqual(@as(u32, 0), drained.datagrams_sent);
     try std.testing.expect(!drained.backlog);
 }
@@ -365,14 +362,14 @@ test "transport requires startup seed entropy but no entropy for later dial and 
     _ = try node.transport.dialPeer(io, remote.transport.localAddress(), remote.transport.peerId());
     _ = try remote.transport.dialPeer(io, node.transport.localAddress(), node.transport.peerId());
     var events: [4]engine_mod.Event = undefined;
-    const received = try support.step(&node.transport, io, &events, &.{}, .{ .wait_max_ms = 10 });
+    const received = try support.step(&node.transport, io, &events, .{ .wait_max_ms = 10 });
     try std.testing.expect(received.datagrams_received > 0);
     try std.testing.expectEqual(@as(u32, 0), received.datagrams_accepted);
     try std.testing.expectEqual(@as(u64, 1), node.transport.engine.counters.retries);
     var accepted: u32 = 0;
     for (0..8) |_| {
-        _ = try support.step(&remote.transport, io, &events, &.{}, .{ .wait_max_ms = 10 });
-        accepted += (try support.step(&node.transport, io, &events, &.{}, .{ .wait_max_ms = 10 })).datagrams_accepted;
+        _ = try support.step(&remote.transport, io, &events, .{ .wait_max_ms = 10 });
+        accepted += (try support.step(&node.transport, io, &events, .{ .wait_max_ms = 10 })).datagrams_accepted;
         if (node.transport.engine.registry.active_len == 2) break;
     }
     try std.testing.expect(accepted > 0);
@@ -404,8 +401,7 @@ test "transport isolates a failing destination in a mixed-owner batch" {
         now,
     );
     var events: [4]engine_mod.Event = undefined;
-    var activity: [4]engine_mod.Handle = undefined;
-    const result = try support.step(&node.transport, std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
+    const result = try support.step(&node.transport, std.testing.io, &events, .{ .wait_max_ms = 0 });
     try std.testing.expectEqual(@as(?engine_mod.Handle, healthy), node.transport.engine.sendOwner(healthy.index));
     try std.testing.expectEqual(@as(u32, 1), result.send_failures);
     try std.testing.expectEqual(@as(u32, 1), result.datagrams_sent);
@@ -432,14 +428,13 @@ test "transport bounds each turn's receive drain without active connections" {
     const destination = node.transport.localAddress();
     for (0..3) |_| try source.send(std.testing.io, &destination, &.{0});
     var events: [4]engine_mod.Event = undefined;
-    var activity: [4]engine_mod.Handle = undefined;
-    const result = try support.step(&node.transport, std.testing.io, &events, &activity, .{ .wait_max_ms = 10 });
+    const result = try support.step(&node.transport, std.testing.io, &events, .{ .wait_max_ms = 10 });
     try std.testing.expectEqual(@as(u32, 2), result.datagrams_received);
     try std.testing.expectEqual(@as(u32, 2), result.datagrams_dropped);
     try std.testing.expectEqual(@as(usize, 0), node.transport.engine.activeIndices().len);
     try std.testing.expect(!result.backlog);
     try std.testing.expect(node.transport.nextDeadlineNs() == null);
-    const drained = try support.step(&node.transport, std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
+    const drained = try support.step(&node.transport, std.testing.io, &events, .{ .wait_max_ms = 0 });
     try std.testing.expectEqual(@as(u32, 1), drained.datagrams_received);
     try std.testing.expectEqual(@as(u32, 1), drained.datagrams_dropped);
 }
@@ -462,11 +457,10 @@ test "transport drains dirty connections across small send budgets" {
         );
     }
     var events: [4]engine_mod.Event = undefined;
-    var activity: [4]engine_mod.Handle = undefined;
     var sent: u32 = 0;
     var quiescent = false;
     for (0..16) |_| {
-        const result = try support.step(&node.transport, std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
+        const result = try support.step(&node.transport, std.testing.io, &events, .{ .wait_max_ms = 0 });
         try std.testing.expect(result.datagrams_sent <= 2);
         sent += result.datagrams_sent;
         if (!result.backlog) {
@@ -482,10 +476,9 @@ test "transport drains dirty connections across small send budgets" {
 
 fn quietConnectedNodes(client: *Node, server: *Node) !void {
     var events: [8]engine_mod.Event = undefined;
-    var activity: [8]engine_mod.Handle = undefined;
     for (0..128) |_| {
-        const a = try support.step(&client.transport, std.testing.io, &events, &activity, .{ .wait_max_ms = 1 });
-        const b = try support.step(&server.transport, std.testing.io, &events, &activity, .{ .wait_max_ms = 1 });
+        const a = try support.step(&client.transport, std.testing.io, &events, .{ .wait_max_ms = 1 });
+        const b = try support.step(&server.transport, std.testing.io, &events, .{ .wait_max_ms = 1 });
         const a_due = client.transport.nextDeadlineNs();
         const b_due = server.transport.nextDeadlineNs();
         if (!a.backlog and !b.backlog and a.datagrams_sent == 0 and b.datagrams_sent == 0 and
@@ -553,15 +546,14 @@ test "transport progress failure retains real send receive work and exactly one 
     defer faults.deinit();
     const io = faults.io();
     var events: [4]engine_mod.Event = undefined;
-    var activity: [4]engine_mod.Handle = undefined;
-    const result = node.transport.step(io, &events, &activity, .{ .wait_max_ms = 0 });
+    const result = node.transport.step(io, &events, .{ .wait_max_ms = 0 });
     try std.testing.expectEqual(error.Canceled, result.failure.?);
     try std.testing.expectEqual(@as(u32, 1), result.progress.datagrams_received);
     try std.testing.expect(result.progress.datagrams_sent > 0);
     try std.testing.expectEqual(@as(usize, 1), result.progress.events);
     try std.testing.expectEqual(failed, events[0].closed.conn);
     try std.testing.expectEqual(@as(u8, 0), node.transport.batch_len);
-    const next = try support.step(&node.transport, std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
+    const next = try support.step(&node.transport, std.testing.io, &events, .{ .wait_max_ms = 0 });
     try std.testing.expectEqual(@as(usize, 0), next.events);
 }
 
@@ -577,13 +569,13 @@ test "transport progress early clock failure does not begin or publish a turn" {
     defer faults.deinit();
     const io = faults.io();
     var events: [4]engine_mod.Event = undefined;
-    const result = node.transport.step(io, &events, &.{}, .{ .wait_max_ms = 0 });
+    const result = node.transport.step(io, &events, .{ .wait_max_ms = 0 });
     try std.testing.expectEqual(error.ClockOutOfRange, result.failure.?);
     try std.testing.expectEqual(@as(u64, 0), result.progress.now.mono_ms);
     try std.testing.expectEqual(@as(usize, 0), result.progress.events);
     try std.testing.expectEqual(@as(u32, 0), result.progress.datagrams_sent);
     try std.testing.expect(node.transport.engine.eventsPending());
-    const next = node.transport.step(std.testing.io, &events, &.{}, .{ .wait_max_ms = 0 });
+    const next = node.transport.step(std.testing.io, &events, .{ .wait_max_ms = 0 });
     try std.testing.expectEqual(@as(usize, 1), next.progress.events);
     try std.testing.expectEqual(failed, events[0].closed.conn);
 }
@@ -598,7 +590,7 @@ test "transport progress keeps a received datagram when the post-wait clock read
     const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
     ReceiveClockFault.udp = &node.transport.udp;
     defer ReceiveClockFault.udp = null;
-    const result = node.transport.step(io, &.{}, &.{}, .{ .wait_max_ms = 0 });
+    const result = node.transport.step(io, &.{}, .{ .wait_max_ms = 0 });
     try std.testing.expectEqual(error.ClockOutOfRange, result.failure.?);
     try std.testing.expectEqual(@as(u32, 1), result.progress.datagrams_received);
     try std.testing.expectEqual(@as(u32, 1), result.progress.datagrams_dropped);
@@ -639,16 +631,16 @@ test "transport bursts one busy connection among many idle ones in one flush vis
         while (dialed < connections and spoke.engine.registry.dialing < limits.dialing_max) : (dialed += 1) {
             handles[dialed] = try spoke.dialPeer(std.testing.io, hub.localAddress(), hub.peerId());
         }
-        const spoke_step = try support.step(&spoke, std.testing.io, &events, &.{}, .{ .wait_max_ms = 1 });
+        const spoke_step = try support.step(&spoke, std.testing.io, &events, .{ .wait_max_ms = 1 });
         for (events[0..spoke_step.events]) |event| established += @intFromBool(event == .connected);
-        _ = try support.step(&hub, std.testing.io, &events, &.{}, .{ .wait_max_ms = 1 });
+        _ = try support.step(&hub, std.testing.io, &events, .{ .wait_max_ms = 1 });
         if (established == connections) break;
     }
     try std.testing.expectEqual(@as(usize, connections), established);
     // Settle until neither side sends.
     for (0..200) |_| {
-        const a = try support.step(&spoke, std.testing.io, &events, &.{}, .{ .wait_max_ms = 2 });
-        const b = try support.step(&hub, std.testing.io, &events, &.{}, .{ .wait_max_ms = 2 });
+        const a = try support.step(&spoke, std.testing.io, &events, .{ .wait_max_ms = 2 });
+        const b = try support.step(&hub, std.testing.io, &events, .{ .wait_max_ms = 2 });
         if (a.datagrams_sent == 0 and b.datagrams_sent == 0 and !a.backlog and !b.backlog) break;
     }
     try std.testing.expect(!spoke.engine.backlog());

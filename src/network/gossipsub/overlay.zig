@@ -67,10 +67,11 @@ pub const Overlay = struct {
         }
         row.subscribed = on;
         self.subscription_revision +|= 1;
-        for (context.sessions.rows) |*peer| {
+        for (context.sessions.rows, 0..) |*peer, position| {
             const io = &peer.io;
             if (!peer.active or peer.outStream() == null) continue;
             io.tx.subscriptionChanged(index, context.now);
+            context.sessions.settle(@intCast(position), context.options);
         }
     }
 
@@ -450,6 +451,7 @@ pub const Overlay = struct {
         const name = self.topicString(topic);
         // A peer can reach mesh maintenance before its next I/O turn announces our subscription.
         if (outbox.subscription_dirty.isSet(topic) and !outbox.announce(topic, name, true, context.now)) return false;
+        defer context.sessions.settle(peer, context.options);
         if (outbox.submit(&.{ .graft = name }, context.now) == null) return false;
         members.set(peer);
         self.metrics.added(name, reason);
@@ -470,6 +472,7 @@ pub const Overlay = struct {
         if (row.io.tx.submit(&.{ .prune = .{ .topic = self.topicString(topic), .backoff_s = backoff_ms / 1000 } }, context.now) == null) {
             context.sessions.setOutbound(peer, .{ .closing = stream });
         }
+        context.sessions.settle(peer, context.options);
     }
 
     pub fn onGraft(self: *Overlay, context: *const Context, topic: u16, peer: u16) void {

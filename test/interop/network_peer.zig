@@ -83,9 +83,8 @@ pub const Peer = struct {
         if (self.steps >= 10_000_000) return error.StepBound;
         self.steps += 1;
         var events: [32]Engine.Event = undefined;
-        var activity: [4]Engine.Handle = undefined;
         var requests: [16]network.reqresp.Event = undefined;
-        const stepped = self.transport.step(self.io, &events, &activity, .{ .wait_max_ms = 1 });
+        const stepped = self.transport.step(self.io, &events, .{ .wait_max_ms = 1 });
         const result = stepped.progress;
         self.now = result.now;
         self.now.mono_ms += self.clock_offset;

@@ -85,7 +85,6 @@ pub const ResourceSnapshot = struct {
 };
 
 pub const Gossipsub = struct {
-    open_cursor: usize = 0,
     allocator: Allocator,
     options: Options,
     memory: MemoryPlan,
@@ -120,9 +119,15 @@ pub const Gossipsub = struct {
     pub const transportEvents = session_io.transportEvents;
     pub const retireConnection = session_io.retireConnection;
     pub const negotiationResult = session_io.negotiationResult;
-    pub const connectionActivity = session_io.connectionActivity;
+    pub const streamReady = session_io.streamReady;
     pub const nextWakeup = session_io.nextWakeup;
     pub const pump = session_io.pump;
+
+    /// Brings the session's ready membership and deadline key in line with its state after a
+    /// change to its streams, queues or timers.
+    pub fn settle(self: *Gossipsub, index: u16) void {
+        self.sessions.settle(index, &self.options);
+    }
 
     pub fn deliveryRevision(self: *const Gossipsub) u64 {
         return self.sessions.delivery_revision;
@@ -133,7 +138,7 @@ pub const Gossipsub = struct {
     }
 
     pub fn coverageSubscriptions(self: *Gossipsub, conn: Handle, digest: [4]u8, local: *const @import("topic_policy.zig").Subnets, now: Now) @import("topic_policy.zig").Subnets {
-        const index = self.sessions.findPeer(conn) orelse return .{};
+        const index = self.sessions.find(conn) orelse return .{};
         if (self.sessions.rows[index].outStream() == null) return .{};
         var result = self.overlay.subnetSubscriptions(index, digest);
         if (self.peers.rows[self.logical(index).index].direct) return result;
@@ -276,7 +281,7 @@ pub const Gossipsub = struct {
     /// Metadata must come from an authenticated transport connection. Refusal leaves transport usable.
     pub fn addPeer(self: *Gossipsub, conn: Handle, metadata: *const peers_mod.Metadata, now: Now) PeerAdmission {
         self.last_now_ms = @max(self.last_now_ms, now.mono_ms);
-        if (self.sessions.findPeer(conn)) |index| return .{ .admitted = .{ .index = index, .generation = self.sessions.peerGeneration(index) } };
+        if (self.sessions.find(conn)) |index| return .{ .admitted = .{ .index = index, .generation = self.sessions.peerGeneration(index) } };
         if (self.peers.find(&metadata.identity)) |ref| {
             if (self.peers.rows[ref.index].connection != null) return .duplicate;
         }
@@ -299,7 +304,7 @@ pub const Gossipsub = struct {
     }
 
     pub fn connectionClosed(self: *Gossipsub, conn: Handle) void {
-        const index = self.sessions.findPeer(conn) orelse return;
+        const index = self.sessions.find(conn) orelse return;
         _ = self.sessions.resetRx(index);
         self.cancelWrites(self.sessions.ref(index));
         const context = self.overlayContext(self.last_now_ms);
@@ -319,6 +324,7 @@ pub const Gossipsub = struct {
 
     pub fn sendSubscriptions(self: *Gossipsub, index: u16) void {
         self.overlay.synchronize(&self.sessions.rows[index].io.tx, self.last_now_ms);
+        self.settle(index);
     }
 
     pub const PublishOptions = struct { allow_zero_peers: bool = true, ignore_duplicate: bool = false, flood: bool = false };
@@ -419,6 +425,7 @@ pub const Gossipsub = struct {
             }
             if (self.sessions.rows[index].io.tx.queueData(&self.messages.store, h, self.options.tx_peer_bytes, now_ms) == .queued) {
                 result.queued += 1;
+                self.settle(index);
             } else {
                 result.pressured += 1;
                 self.counters.send_dropped += 1;
@@ -553,6 +560,12 @@ pub const Gossipsub = struct {
     fn heartbeat(self: *Gossipsub, now: Now) void {
         for (self.sessions.rows) |*peer| peer.io.resetHeartbeat();
         self.peers.refresh(now.mono_ms);
+        // A frame held for a peer whose score fell below the graylist is released by its next
+        // service, which resets the inbound stream.
+        for (self.sessions.rows, 0..) |*peer, index| {
+            if (!peer.active or peer.in_stream == null or peer.io.frame_since == null) continue;
+            if (!self.acceptsRpc(@intCast(index), now)) self.sessions.markReady(@intCast(index));
+        }
         if (self.cycle.isActive()) {
             self.counters.heartbeats_skipped +|= 1;
             return;
@@ -614,7 +627,9 @@ pub const Gossipsub = struct {
                 const j = self.overlay.rng.random().uintLessThan(usize, count - i) + i;
                 std.mem.swap(MessageId, &ids[i], &ids[j]);
             }
-            if (self.sessions.rows[peer].io.tx.submit(&.{ .ihave = .{ .topic = topic_str, .ids = ids[0..n] } }, self.last_now_ms) == null) self.counters.send_dropped += 1;
+            if (self.sessions.rows[peer].io.tx.submit(&.{ .ihave = .{ .topic = topic_str, .ids = ids[0..n] } }, self.last_now_ms) == null) {
+                self.counters.send_dropped += 1;
+            } else self.settle(@intCast(peer));
         }
     }
 
@@ -668,7 +683,7 @@ pub const Gossipsub = struct {
     }
 
     pub fn scoreSnapshot(self: *Gossipsub, conn: Handle, now: Now) ?f64 {
-        const index = self.sessions.findPeer(conn) orelse return null;
+        const index = self.sessions.find(conn) orelse return null;
         return self.peerScore(index, now.mono_ms);
     }
 
@@ -679,7 +694,7 @@ pub const Gossipsub = struct {
 
     /// Direct peers receive subscribed publications outside mesh and fanout score gates.
     pub fn markDirect(self: *Gossipsub, conn: Handle) void {
-        const index = self.sessions.findPeer(conn) orelse return;
+        const index = self.sessions.find(conn) orelse return;
         self.peers.rows[self.logical(index).index].direct = true;
         const context = self.overlayContext(self.last_now_ms);
         for (&self.overlay.rows, 0..) |*topic, t| {
@@ -813,10 +828,12 @@ pub const Gossipsub = struct {
         };
         io.iwant_ids_sent += @intCast(requested);
         self.counters.iwant_sent += 1;
+        self.settle(index);
     }
 
     fn onIwant(self: *Gossipsub, index: u16, iwant: protobuf.IdList) void {
         if (self.belowGossip(index, self.last_now_ms)) return;
+        defer self.settle(index);
         var examined: usize = 0;
         var it = iwant.ids();
         while (it.next() catch return) |id_bytes| {
@@ -848,7 +865,9 @@ pub const Gossipsub = struct {
             if (peer_index == source) continue;
             const outbound = self.sessions.rows[peer_index].outbound;
             if (outbound != .live or outbound.live.version != .v1_2) continue;
-            if (self.sessions.rows[peer_index].io.tx.submit(&.{ .idontwant = &.{id} }, self.last_now_ms) == null) self.counters.send_dropped += 1;
+            if (self.sessions.rows[peer_index].io.tx.submit(&.{ .idontwant = &.{id} }, self.last_now_ms) == null) {
+                self.counters.send_dropped += 1;
+            } else self.settle(peer_index);
         }
     }
 
@@ -896,6 +915,7 @@ test {
     _ = @import("gossipsub_owner_policy_test.zig");
     _ = @import("gossipsub_owner_resources_test.zig");
     _ = @import("gossipsub_publication_test.zig");
+    _ = @import("gossipsub_readiness_test.zig");
     _ = @import("gossipsub_resource_test.zig");
     _ = @import("gossipsub_scheduler_test.zig");
     _ = @import("gossipsub_service_test.zig");

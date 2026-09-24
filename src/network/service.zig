@@ -132,9 +132,9 @@ pub const Service = struct {
         };
     }
 
-    /// Lifecycle events go to the router, reqresp, identify and gossip. Each stream event goes to
-    /// the owner its route names, read from the engine at dispatch time. Gossip, which binds no
-    /// routes yet, takes connection activity from the events of unrouted streams.
+    /// Lifecycle events go to the router, reqresp, identify and gossip. Each stream readiness
+    /// event goes to the owner its route names, read from the engine at dispatch time; an
+    /// unrouted one advances nothing.
     fn dispatch(
         self: *Service,
         engine: *engine_mod.Engine,
@@ -146,32 +146,19 @@ pub const Service = struct {
             self.gossipsub.shutdown(&self.router, engine);
             self.applications = .closed;
         }
-        // A connection's events are contiguous in one engine batch, so this visits each once.
-        var previous: ?engine_mod.Handle = null;
         for (events) |event| {
-            const route: types.Route = switch (event) {
-                .stream_ready => |ready| engine.route(ready.stream) orelse continue,
-                .stream_closed => |closed| closed.route,
-                .stream_opened => .{},
-                .connected, .closed, .path_changed => continue,
-            };
-            if (event == .stream_ready) {
-                const stream = event.stream_ready.stream;
-                switch (route.owner) {
-                    .negotiation => self.router.negotiator.streamReady(route.row, stream),
-                    .identify => self.identify.streamReady(route.row, stream),
-                    .reqresp_outbound, .reqresp_inbound => self.reqresp.streamReady(route, stream),
-                    .none, .gossip_inbound, .gossip_outbound => {},
-                }
-            }
-            switch (route.owner) {
-                .none, .gossip_inbound, .gossip_outbound => {},
+            const ready = switch (event) {
+                .stream_ready => |ready| ready,
                 else => continue,
+            };
+            const route = engine.route(ready.stream) orelse continue;
+            switch (route.owner) {
+                .negotiation => self.router.negotiator.streamReady(route.row, ready.stream),
+                .identify => self.identify.streamReady(route.row, ready.stream),
+                .reqresp_outbound, .reqresp_inbound => self.reqresp.streamReady(route, ready.stream),
+                .gossip_inbound, .gossip_outbound => if (self.applications == .active) self.gossipsub.streamReady(engine, route, ready.stream, ready.ready),
+                .none => {},
             }
-            const conn = engine_mod.activityOf(event).?;
-            if (previous != null and std.meta.eql(previous.?, conn)) continue;
-            previous = conn;
-            if (self.applications == .active) self.gossipsub.connectionActivity(conn);
         }
         self.reqresp.cleanupPending(engine, &self.router);
         self.router.transportEvents(engine, events, now);

@@ -84,8 +84,6 @@ pub const StepResult = struct {
     send_failures: u32 = 0,
     events: usize = 0,
     events_pending: bool = false,
-    /// Connections with stream events, derived by the standalone `step`.
-    activity: usize = 0,
     /// A flush stopped at a burst or turn budget, so connections still have output.
     backlog: bool = false,
 };
@@ -221,7 +219,6 @@ pub const Transport = struct {
         self: *Transport,
         io: std.Io,
         events: []engine_mod.Event,
-        activity: []engine_mod.Handle,
         options: StepOptions,
     ) ProgressResult {
         var result = StepResult{ .now = currentTime(io) catch |err| return .{
@@ -242,7 +239,6 @@ pub const Transport = struct {
         // published with the rest.
         result.events = self.engine.pollEvents(events);
         result.events_pending = self.engine.eventsPending();
-        result.activity = deriveActivity(events[0..result.events], activity);
         if (failure) |err| return .{ .progress = result, .failure = err };
         self.drainKeylog(io) catch |err| return .{ .progress = result, .failure = err };
         return .{ .progress = result };
@@ -397,20 +393,6 @@ pub const Transport = struct {
         }
     }
 };
-
-/// One activity entry per connection with stream events; a connection's events are contiguous
-/// in one pollEvents batch.
-fn deriveActivity(events: []const engine_mod.Event, out: []engine_mod.Handle) usize {
-    var count: usize = 0;
-    for (events) |event| {
-        const conn = engine_mod.activityOf(event) orelse continue;
-        if (count > 0 and std.meta.eql(out[count - 1], conn)) continue;
-        if (count == out.len) break;
-        out[count] = conn;
-        count += 1;
-    }
-    return count;
-}
 
 /// quiche 0.28 under CUBIC releases every datagram at its send time. A controller that paces
 /// would need held datagrams, which this transport does not keep.

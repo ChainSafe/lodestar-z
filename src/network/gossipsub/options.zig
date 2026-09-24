@@ -6,6 +6,8 @@ const storage = @import("message_store.zig");
 pub const Options = struct {
     topic_policy: ?[]const @import("topic_policy.zig").Boundary = null,
     connected_capacity: u16 = constants.peers_cap,
+    /// Engine connection slots; a session is found by its connection's index.
+    connection_slots: u16 = @import("../quic/limits.zig").connections_max_ceiling,
     retained_capacity: u16 = @import("peer_book.zig").capacity,
     retained_outbound_reserve: u16 = @import("peer_book.zig").outbound_reserve,
     message_id_policy: topic_mod.MessageIdPolicy = .{},
@@ -68,6 +70,7 @@ pub fn validate(o: *const Options) (error{InvalidLimits} || @import("topic_polic
     if (o.random_seed == null or o.ip_allowlist.len > 32 or o.retained_score_ms == 0 or o.retained_score_ms > 86_400_000) return error.InvalidLimits;
     if (!@import("std").math.isFinite(o.gossip_factor) or o.gossip_factor < 0 or o.gossip_factor > 1) return error.InvalidLimits;
     try range(o.connected_capacity, 1, constants.peers_cap);
+    try range(o.connection_slots, 1, @import("../quic/limits.zig").connections_max_ceiling);
     try range(o.retained_capacity, o.connected_capacity, @import("peer_book.zig").capacity);
     try range(o.retained_outbound_reserve, 1, o.retained_capacity - 1);
     const compressed = constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE);

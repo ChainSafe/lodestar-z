@@ -127,16 +127,21 @@ test "gossip policy combined transport calls respect one shared peer allowance" 
     try setup.init();
     defer setup.deinit();
     for (0..20) |_| try setup.pumpOnce();
-    const peer = setup.shared.client.gossipsub.sessions.findPeer(setup.shared.handles.client).?;
-    setup.shared.client.gossipsub.options.calls_per_peer = 1;
+    const g = setup.shared.client.gossipsub;
+    const peer = g.sessions.find(setup.shared.handles.client).?;
+    g.options.calls_per_peer = 1;
     for ([_]usize{ 8, 1 }) |global| {
-        setup.shared.client.gossipsub.options.calls_per_pump = global;
+        g.options.calls_per_pump = global;
         var read_turns: usize = 0;
         var write_turns: usize = 0;
         for (0..8) |_| {
-            try std.testing.expect(setup.shared.client.gossipsub.sessions.rows[peer].io.tx.inject(&.{0}, setup.shared.pair.now.mono_ms));
-            setup.shared.client.gossipsub.sessions.connectionActivity(setup.shared.handles.client);
-            const turn = @import("test_support.zig").pumpTurn(setup.shared.client.gossipsub, &setup.shared.pair.client, setup.shared.pair.now);
+            // One empty frame each way: queued output and a readable edge on the same session.
+            try std.testing.expect(g.sessions.rows[peer].io.tx.inject(&.{0}, setup.shared.pair.now.mono_ms));
+            g.settle(peer);
+            try std.testing.expectEqual(@as(usize, 1), try setup.shared.pair.server.write(setup.serverStream(), &.{0}, false));
+            try setup.shared.pair.pump();
+            setup.forwardClient();
+            const turn = @import("test_support.zig").pumpTurn(g, &setup.shared.pair.client, setup.shared.pair.now);
             const calls = global - turn.budget.calls;
             try std.testing.expect(calls <= 1);
             if (calls > 0) {
@@ -145,12 +150,12 @@ test "gossip policy combined transport calls respect one shared peer allowance" 
         }
         try std.testing.expect(read_turns > 0 and write_turns > 0);
         for (0..32) |_| {
-            if (@import("session_io.zig").nextIoWakeup(setup.shared.client.gossipsub, setup.shared.pair.now).? > setup.shared.pair.now.mono_ms) break;
-            const turn = @import("test_support.zig").pumpTurn(setup.shared.client.gossipsub, &setup.shared.pair.client, setup.shared.pair.now);
+            if (support.sessionWakeup(g, setup.shared.pair.now) > setup.shared.pair.now.mono_ms) break;
+            const turn = @import("test_support.zig").pumpTurn(g, &setup.shared.pair.client, setup.shared.pair.now);
             try std.testing.expect(global - turn.budget.calls <= 1);
         }
-        try std.testing.expect(!setup.shared.client.gossipsub.sessions.rows[peer].io.tx.pending());
-        try std.testing.expect(@import("session_io.zig").nextIoWakeup(setup.shared.client.gossipsub, setup.shared.pair.now).? > setup.shared.pair.now.mono_ms);
+        try std.testing.expect(!g.sessions.rows[peer].io.tx.pending());
+        try std.testing.expect(support.sessionWakeup(g, setup.shared.pair.now) > setup.shared.pair.now.mono_ms);
     }
 }
 
@@ -184,7 +189,7 @@ test "gossip policy duplicate connections preserve one logical owner and direct 
     const second: Handle = .{ .index = 1, .generation = 1 };
     try std.testing.expectEqual(Gossipsub.PeerAdmission.duplicate, g.addPeer(second, &metadata, now));
     g.connectionClosed(second);
-    try std.testing.expectEqual(@as(?u16, first.index), g.sessions.findPeer(conn));
+    try std.testing.expectEqual(@as(?u16, first.index), g.sessions.find(conn));
     const topic = "/eth2/01020304/beacon_block/ssz_snappy";
     try support.subscribe(&g, topic);
     _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), first.index, topic, true);
@@ -270,7 +275,7 @@ test "gossip policy unsent subscriptions cannot pin retired topics indefinitely"
     try support.subscribe(&g, name);
     try support.unsubscribe(&g, name);
     _ = @import("test_support.zig").pump(&g, &pair.server, .{ .mono_ms = 11, .unix_s = 0 });
-    try std.testing.expect(g.sessions.findPeer(conn) == null);
+    try std.testing.expect(g.sessions.find(conn) == null);
     try std.testing.expectEqual(@as(u64, 1), g.counters.subscription_timeouts);
     try std.testing.expectEqual(@as(u64, 1), g.counters.local_pressure_resets);
     const topic = g.overlay.findTopic(name).?;

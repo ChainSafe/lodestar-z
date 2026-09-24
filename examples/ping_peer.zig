@@ -64,10 +64,9 @@ fn listen(allocator: std.mem.Allocator, io: std.Io, host: []const u8, port: u16)
 
     var sessions = [_]Session{.{}} ** sessions_max;
     var events: [16]engine_mod.Event = undefined;
-    var activity: [8]engine_mod.Handle = undefined;
     var outcomes: [8]negotiate.Outcome = undefined;
     while (true) {
-        const stepped = node.step(io, &events, &activity, .{});
+        const stepped = node.step(io, &events, .{});
         const result = stepped.progress;
         for (events[0..result.events]) |event| switch (event) {
             .connected => |connected| printPeer("connected", &connected.peer_id),
@@ -161,11 +160,10 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, text: []const u8) !void {
     var stream: ?engine_mod.StreamHandle = null;
     var state: enum { connecting, negotiating, pinging, closing, done } = .connecting;
     var events: [16]engine_mod.Event = undefined;
-    var activity: [8]engine_mod.Handle = undefined;
     var outcomes: [1]negotiate.Outcome = undefined;
     var steps: u32 = 0;
     while (steps < dial_steps_max and state != .done) : (steps += 1) {
-        const stepped = node.step(io, &events, &activity, .{});
+        const stepped = node.step(io, &events, .{});
         const result = stepped.progress;
         for (events[0..result.events]) |event| switch (event) {
             .connected => |connected| {
@@ -218,7 +216,7 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, text: []const u8) !void {
         }
     }
     if (state != .done) return error.Timeout;
-    if (node.step(io, &events, &activity, .{}).failure) |err| return err;
+    if (node.step(io, &events, .{}).failure) |err| return err;
 }
 
 fn printPeer(label: []const u8, id: *const peer_id.PeerId) void {

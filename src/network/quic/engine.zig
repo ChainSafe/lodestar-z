@@ -71,17 +71,6 @@ pub const Event = union(enum) {
     path_changed: struct { conn: Handle, peer: Address },
 };
 
-/// The connection whose protocol owners an event can advance, for owners that still take
-/// connection activity. Lifecycle and path events advance none.
-pub fn activityOf(event: Event) ?Handle {
-    return switch (event) {
-        .stream_opened => |stream| stream.conn,
-        .stream_ready => |ready| ready.stream.conn,
-        .stream_closed => |closed| closed.stream.conn,
-        .connected, .closed, .path_changed => null,
-    };
-}
-
 pub const Limits = struct {
     connections_max: u16 = limits.connections_max_default,
     handshaking_max: u16 = limits.handshaking_max,
