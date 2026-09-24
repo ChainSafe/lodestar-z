@@ -126,10 +126,6 @@ pub const Discovery = struct {
         self.* = undefined;
     }
 
-    pub fn memoryPlan(_: *const Discovery) struct { inline_bytes: usize, allocated_bytes: usize } {
-        return .{ .inline_bytes = @sizeOf(Discovery), .allocated_bytes = @sizeOf(Storage) };
-    }
-
     pub fn request(self: *Discovery, demand: Demand, now_ms: u64) Error!void {
         if (self.stopped) return error.Stopped;
         if (demand.syncnets & 0xf0 != 0 or demand.expires_ms < now_ms) return error.InvalidDemand;

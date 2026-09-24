@@ -46,7 +46,7 @@ test "managed configuration resolves dial concurrency independently of peer head
     }));
 }
 
-test "managed control admission and response quotas permit the full two hundred peer workload" {
+test "managed control admission quotas permit the full two hundred peer workload" {
     const resolved = try resolve(.{
         .seed = 1,
         .forks = &.{},
@@ -56,26 +56,19 @@ test "managed control admission and response quotas permit the full two hundred 
         .admission_policy = @import("reqresp/policy_fixture.zig").config(),
     });
     const requests = resolved.core.service.reqresp;
-    const quotas = try rr.ReqResp.validateOptions(requests);
-    const limiter = @import("reqresp/limiter.zig");
-    var responses = try limiter.Limiter.init(std.testing.allocator, 200, quotas.peer, quotas.global);
-    defer responses.deinit(std.testing.allocator);
+    const quotas = requests.admission.limits;
     const admission = @import("reqresp/admission.zig");
     var starts = try admission.Limiter.init(std.testing.allocator, requests.admission.limits);
     defer starts.deinit(std.testing.allocator);
     for (std.enums.values(@import("reqresp/protocol.zig").Protocol)) |which| {
         if (!which.isControl()) continue;
-        const quota = quotas.peer[@intFromEnum(which)];
-        try std.testing.expectEqual(quota.tokens * 200, quotas.global[@intFromEnum(which)].tokens);
+        const quota = quotas.peer[@intFromEnum(@import("config").ForkSeq.fulu)][@intFromEnum(which)];
+        try std.testing.expectEqual(quota.tokens * 200, quotas.global[@intFromEnum(@import("config").ForkSeq.fulu)][@intFromEnum(which)].tokens);
         for (0..200) |index| {
             var identity: @import("wire/peer_id.zig").PeerId = .{ .bytes = @splat(0) };
             std.mem.writeInt(u16, identity.bytes[0..2], @intCast(index), .little);
-            const conn: @import("types.zig").Handle = .{ .index = @intCast(index), .generation = 1 };
-            responses.bind(conn, 0);
             try std.testing.expectEqual(admission.Decision.allowed, starts.take(&identity, which, quota.tokens, .fulu, 0));
-            try std.testing.expect(responses.take(conn, which, quota.tokens, 0));
             try std.testing.expectEqual(admission.Decision.peer_quota, starts.take(&identity, which, 1, .fulu, 0));
-            try std.testing.expect(!responses.take(conn, which, 1, 0));
         }
     }
 }
@@ -192,7 +185,7 @@ test "managed runtime request admission memory plan measures both retained profi
         defer handler.deinit();
         const plan = handler.memoryPlan();
         try std.testing.expectEqual(allocator.allocated_bytes, plan.total_bytes - plan.facade_bytes);
-        std.debug.print("request admission memory {s}: retained={d} admission={d} facade={d} slots={d} io={d} output_limiter={d} sinks={d} total={d}\n", .{ @tagName(profile), resolved.core.peers.capacity, plan.admission_bytes, plan.facade_bytes, plan.slot_bytes, plan.io_bytes, plan.limiter_bytes, plan.request_sink_bytes, plan.total_bytes });
+        std.debug.print("request admission memory {s}: retained={d} admission={d} facade={d} slots={d} io={d} sinks={d} total={d}\n", .{ @tagName(profile), resolved.core.peers.capacity, plan.admission_bytes, plan.facade_bytes, plan.slot_bytes, plan.io_bytes, plan.request_sink_bytes, plan.total_bytes });
     }
 }
 

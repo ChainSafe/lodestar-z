@@ -102,8 +102,7 @@ pub const Limiter = struct {
         return @max(now_ms, std.math.cast(u64, (due + ns_per_ms - 1) / ns_per_ms) orelse std.math.maxInt(u64));
     }
 
-    /// Legal requests can exceed a configured burst. Response production separately
-    /// charges every chunk, so admission reserves at most one full burst.
+    /// Legal requests can exceed a configured burst; admission reserves at most one full burst.
     pub fn requestCost(self: *const Limiter, which: Protocol, cost: u128, fork: ForkSeq) u128 {
         const index = @intFromEnum(which);
         return @min(cost, self.options.peer[@intFromEnum(fork)][index].tokens, self.options.global[@intFromEnum(fork)][index].tokens);

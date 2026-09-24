@@ -59,7 +59,6 @@ pub const Diagnostics = struct {
     chunksCopied: u64 = 0,
     bytesCopied: u64 = 0,
     requestFull: u64 = 0,
-    bridgeFull: u64 = 0,
     busyPulls: u64 = 0,
 };
 pub const Table = struct {
@@ -96,10 +95,7 @@ pub const Table = struct {
             self.diag.requestFull +|= 1;
             return error.NetworkRequestFull;
         };
-        self.budget.reserve(.outgoing, amount) catch |err| {
-            self.diag.bridgeFull +|= 1;
-            return err;
-        };
+        try self.budget.reserve(.outgoing, amount);
         self.cells[token.index] = .{ .state = .preparing, .generation = token.generation, .protocol = which, .reservation = amount };
         self.diag.occupied += 1;
         self.diag.highWater = @max(self.diag.highWater, self.diag.occupied);

@@ -8,14 +8,12 @@ pub const Lane = struct {
     entries: [64]Entry = undefined,
     head: u8 = 0,
     len: u8 = 0,
-    high_water: u8 = 0,
     pub fn publish(self: *Lane, events: []const t.Event, sequence: u64) void {
         std.debug.assert(events.len <= 64 - @as(usize, self.len));
         for (events) |event| {
             self.entries[(@as(usize, self.head) + self.len) % 64] = .{ .event = event, .sequence = sequence };
             self.len += 1;
         }
-        self.high_water = @max(self.high_water, self.len);
     }
     pub fn peek(self: *const Lane, out: []Entry) usize {
         const count = @min(out.len, self.len);

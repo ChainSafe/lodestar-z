@@ -145,24 +145,6 @@ pub const Control = struct {
         a.free(self.operations);
         self.* = undefined;
     }
-    pub fn memoryPlan(self: *const Control) struct {
-        inline_bytes: usize,
-        allocated_bytes: usize,
-        outbound_bytes: usize,
-        inbound_bytes: usize,
-        schedule_bytes: usize,
-    } {
-        const outbound = self.operations.len * @sizeOf(Operation);
-        const inbound = self.responses.len * @sizeOf(Response);
-        const schedules = self.schedules.len * @sizeOf(Schedule);
-        return .{
-            .inline_bytes = @sizeOf(Control),
-            .allocated_bytes = outbound + inbound + schedules,
-            .outbound_bytes = outbound,
-            .inbound_bytes = inbound,
-            .schedule_bytes = schedules,
-        };
-    }
     fn schedule(self: *Control, peer: t.PeerRef, conn: t.Handle) ?*Schedule {
         if (peer.index >= self.schedules.len) return null;
         const row = &self.schedules[peer.index];

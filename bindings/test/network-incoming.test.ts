@@ -13,13 +13,11 @@ test("incoming request take is empty on an active application", async () => {
     const diagnostics = runtime.diagnostics().incoming;
     for (const field of [
       "requestsTaken",
-      "requestBytesCopied",
       "responseBytesCopied",
       "chunksWritten",
       "bytesWritten",
       "capacityRefusals",
       "byteRefusals",
-      "busyResponses",
     ] as const) {
       expect(typeof diagnostics[field]).toBe("bigint");
     }

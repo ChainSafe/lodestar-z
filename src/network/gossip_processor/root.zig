@@ -63,39 +63,26 @@ pub const Diagnostics = struct {
     copyingBytes: usize = 0,
     copying: usize = 0,
     publicationBytes: usize = 0,
-    publicationBytesHighWater: usize = 0,
     messagesCopied: u64 = 0,
     bytesCopied: u64 = 0,
     capacityRefusals: u64 = 0,
     byteRefusals: u64 = 0,
     queuedExpired: u64 = 0,
     deliveredExpired: u64 = 0,
-    staleReports: u64 = 0,
     reportsAccepted: u64 = 0,
     reportsAppliedAccept: u64 = 0,
     reportsAppliedReject: u64 = 0,
     reportsAppliedIgnore: u64 = 0,
-    reportsAlreadyResolved: u64 = 0,
-    reportsExpired: u64 = 0,
-    reportsStale: u64 = 0,
     waiting: usize = 0,
     checking: usize = 0,
     executing: usize = 0,
     executingBytes: usize = 0,
     expiredExecuting: usize = 0,
     oldestExpiredExecutionAgeMs: u64 = 0,
-    dependencyRefusals: u64 = 0,
-    kindRefusals: u64 = 0,
     slotRefusals: u64 = 0,
-    sourceRefusals: u64 = 0,
-    freshnessReplacements: u64 = 0,
-    fixedPayloadBytes: usize = 0,
     publicationCopies: u64 = 0,
-    publicationBytesCopied: u64 = 0,
     publicationQueued: u64 = 0,
-    publicationPressured: u64 = 0,
     publicationSelected: u64 = 0,
-    publicationUnavailable: u64 = 0,
     publicationDuplicates: u64 = 0,
 };
 pub const Job = struct { kind: Kind, start: usize, len: usize, grouped: bool };
@@ -173,7 +160,7 @@ pub const GossipProcessor = struct {
         var dependencies = try Dependencies.init(backing, capacity);
         errdefer dependencies.deinit(backing);
         const store = try storage.Store.init(backing, capacity, bytes);
-        var self: GossipProcessor = .{ .cells = cells, .backing = backing, .store = store, .groups = groups, .dependencies = dependencies, .limits = limits, .execution = plan.execution, .source_maximum = plan.source_maximum, .fork_count = plan.forks.len, .diag = .{ .capacity = capacity, .fixedPayloadBytes = store.bytes.len + capacity * storage.inline_bytes } };
+        var self: GossipProcessor = .{ .cells = cells, .backing = backing, .store = store, .groups = groups, .dependencies = dependencies, .limits = limits, .execution = plan.execution, .source_maximum = plan.source_maximum, .fork_count = plan.forks.len, .diag = .{ .capacity = capacity } };
         @memcpy(self.forks[0..plan.forks.len], plan.forks);
         self.groups.index.seed = plan.random_seed ^ 3;
         self.dependencies.index.seed = plan.random_seed ^ 4;
@@ -209,7 +196,6 @@ pub const GossipProcessor = struct {
         if (self.diag.occupied != 0 or self.cells.len == 0) return;
         self.deinit();
         self.cells = &.{};
-        self.diag.fixedPayloadBytes = 0;
     }
     fn queue(self: *GossipProcessor, kind: Kind, state: State) *lists.List {
         return &self.queues[@intFromEnum(kind)][@intFromEnum(state)];
@@ -250,10 +236,7 @@ pub const GossipProcessor = struct {
     }
     pub fn capture(self: *GossipProcessor, message: *const native.MessageEvent, metadata: *const metadata_mod.Metadata, deneb: bool, received_at: u64) !void {
         const kind = native.topic.parseCanonical(message.topic).?.name.kind;
-        if (!self.sourceRoom(message.source, kind, message.bytes.len)) {
-            self.diag.sourceRefusals +|= 1;
-            return error.NetworkGossipFull;
-        }
+        if (!self.sourceRoom(message.source, kind, message.bytes.len)) return error.NetworkGossipFull;
         const handle = try self.reserveKind(kind, message.bytes.len);
         const cell = self.get(handle).?;
         cell.metadata = metadata.*;
@@ -296,10 +279,7 @@ pub const GossipProcessor = struct {
         if (self.closed) return error.NetworkGossipFull;
         const k = @intFromEnum(kind);
         const pages = storage.Store.pagesFor(len);
-        if (self.used_items[k] >= self.limits[k].items or pages * storage.page_bytes > self.limits[k].bytes - self.used_bytes[k]) {
-            self.diag.kindRefusals +|= 1;
-            return error.NetworkGossipFull;
-        }
+        if (self.used_items[k] >= self.limits[k].items or pages * storage.page_bytes > self.limits[k].bytes - self.used_bytes[k]) return error.NetworkGossipFull;
         const index = self.queueValue(kind, .free).head;
         if (index == none) {
             self.diag.capacityRefusals +|= 1;
@@ -624,7 +604,6 @@ pub const GossipProcessor = struct {
             const peer_full = if (cell.source) |source| self.waiting_per_peer[source.index][k] >= @max(1, self.limits[k].items / 4) else false;
             if (peer_full or self.waiting_items[k] >= self.limits[k].items / 2) {
                 self.ignore(cell);
-                self.diag.dependencyRefusals +|= 1;
             } else self.transition(handle.index, .waiting);
         }
         return true;
@@ -704,7 +683,6 @@ pub const GossipProcessor = struct {
             self.diag.reportsAccepted +|= 1;
             return true;
         };
-        self.diag.staleReports +|= 1;
         return false;
     }
     pub fn outcome(self: *GossipProcessor, result: native.ReportOutcome) void {
@@ -714,9 +692,7 @@ pub const GossipProcessor = struct {
                 .reject => self.diag.reportsAppliedReject +|= 1,
                 .ignore => self.diag.reportsAppliedIgnore +|= 1,
             },
-            .already_resolved => self.diag.reportsAlreadyResolved +|= 1,
-            .expired => self.diag.reportsExpired +|= 1,
-            .stale_handle => self.diag.reportsStale +|= 1,
+            .already_resolved, .expired, .stale_handle => {},
         }
     }
 

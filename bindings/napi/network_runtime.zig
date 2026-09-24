@@ -55,45 +55,20 @@ pub const Diagnostics = struct {
     terminal_error: ?anyerror = null,
     currentSlot: u64,
     ownerTurns: u64 = 0,
-    lastMonotonicMs: u64 = 0,
-    peerCount: u16 = 0,
-    readyPeerCount: u16 = 0,
     operationalFailures: u64 = 0,
-    operationCapacity: u8 = 32,
     operationOccupied: u8 = 0,
-    operationHighWater: u8 = 0,
-    operationRefusals: u64 = 0,
     peerReportsIgnored: u64 = 0,
-    connectCapacity: u8 = 16,
     connectOccupied: u8 = 0,
-    connectHighWater: u8 = 0,
-    connectRefusals: u64 = 0,
-    intentCapacity: u8 = 2,
-    intentOccupied: u8 = 0,
-    intentHighWater: u8 = 0,
-    intentRefusals: u64 = 0,
-    snapshotCapacity: u8 = 2,
-    snapshotOccupied: u8 = 0,
-    snapshotHighWater: u8 = 0,
-    snapshotRefusals: u64 = 0,
-    targetListCapacity: u8 = 2,
-    targetListOccupied: u8 = 0,
-    targetListHighWater: u8 = 0,
-    targetListRefusals: u64 = 0,
     preparingPins: u16 = 0,
     copyingPins: u16 = 0,
-    peerLaneCapacity: u8 = 64,
     peerLaneOccupied: u8 = 0,
-    peerLaneHighWater: u8 = 0,
     ownerSequence: u64 = 0,
     liveNativeRequestedBytes: usize = 0,
     liveBridgeRequestedBytes: usize = 0,
-    operationBytes: usize = @sizeOf(commands.Table),
     typedStoreBytes: usize = 0,
     metricsExportBytes: usize = 0,
     peerLaneBytes: usize = 0,
     ownerShellBytes: usize = @sizeOf(Runtime),
-    ownerAllocationBytes: usize = @sizeOf(Owner),
     nativeRequestedBytes: usize = 0,
     nativeAllocationCount: usize = 0,
     quicReceiveWindowBytes: u64 = 0,
@@ -278,33 +253,15 @@ pub const Runtime = struct {
         var result = self.diag;
         result.terminal_error = if (self.reason == .failed) self.terminal_error else null;
         result.operationOccupied = self.table.occupied;
-        result.operationHighWater = self.table.high_water;
-        result.operationRefusals = self.table.refusals;
         result.peerReportsIgnored = self.reports.ignored;
-        result.connectHighWater = self.table.kind_high_water[@intFromEnum(commands.Kind.connect)];
-        result.connectRefusals = self.table.kind_refusals[@intFromEnum(commands.Kind.connect)];
-        result.intentHighWater = self.table.kind_high_water[@intFromEnum(commands.Kind.intent)];
-        result.intentRefusals = self.table.kind_refusals[@intFromEnum(commands.Kind.intent)];
-        result.snapshotHighWater = self.table.kind_high_water[@intFromEnum(commands.Kind.snapshot)];
-        result.snapshotRefusals = self.table.kind_refusals[@intFromEnum(commands.Kind.snapshot)];
-        result.targetListHighWater = self.table.kind_high_water[@intFromEnum(commands.Kind.targets)];
-        result.targetListRefusals = self.table.kind_refusals[@intFromEnum(commands.Kind.targets)];
         result.connectOccupied = self.table.connects;
         result.ownerSequence = self.table.sequence;
         for (&self.table.cells) |*cell| {
             result.preparingPins += @intFromBool(cell.state == .preparing);
             result.copyingPins += @intFromBool(cell.state == .copying);
-            if (cell.state == .free) continue;
-            switch (cell.kind) {
-                .intent => result.intentOccupied += 1,
-                .snapshot => result.snapshotOccupied += 1,
-                .targets => result.targetListOccupied += 1,
-                else => {},
-            }
         }
         if (self.lane) |lane| {
             result.peerLaneOccupied = lane.len;
-            result.peerLaneHighWater = lane.high_water;
             result.peerLaneBytes = @sizeOf(projection.Lane);
         }
         if (self.stores != null) result.typedStoreBytes = Stores.bytes(self.peer_capacity);
@@ -339,13 +296,9 @@ pub const Runtime = struct {
                 result.copyingPins += @intFromBool(cell.state == .copying);
             }
             result.gossip.publicationBytes = result.publications.reservedBytes;
-            result.gossip.publicationBytesHighWater = result.publications.reservedBytesHighWater;
             result.gossip.publicationCopies = result.publications.copies;
-            result.gossip.publicationBytesCopied = result.publications.bytesCopied;
             result.gossip.publicationQueued = result.publications.queued;
-            result.gossip.publicationPressured = result.publications.pressured;
             result.gossip.publicationSelected = result.publications.selected;
-            result.gossip.publicationUnavailable = result.publications.unavailable;
             result.gossip.publicationDuplicates = result.publications.duplicates;
         }
         return result;

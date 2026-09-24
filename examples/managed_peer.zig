@@ -30,17 +30,17 @@ pub fn main(init: std.process.Init) !void {
     var seed: [8]u8 = undefined;
     try init.io.randomSecure(&seed);
     var blob_schedule: [network.reqresp.request_policy.schedule_max]network.reqresp.request_policy.BlobLimit = undefined;
-    try node.initManaged(a, init.io, .{
+    const resolved = try network.configuration.resolve(.{ .seed = std.mem.readInt(u64, &seed, .little), .forks = &.{.{ .digest = local.fork.digest, .fork = local.fork.fork }}, .admission_policy = try network.reqresp.request_policy.Config.fromBeaconConfig(&@import("config").mainnet.config, &blob_schedule) });
+    try node.init(a, init.io, &resolved, .{
         .wait_mode = .native_poll,
         .host = &key,
         .bind = .{ .ip4 = .loopback(0) },
-        .configuration = .{ .seed = std.mem.readInt(u64, &seed, .little), .forks = &.{.{ .digest = local.fork.digest, .fork = local.fork.fork }}, .admission_policy = try network.reqresp.request_policy.Config.fromBeaconConfig(&@import("config").mainnet.config, &blob_schedule) },
         .local = local,
         .schedule = .{ .fulu_scheduled = true },
         .discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .bootstrap = bootstrap[0..count] },
     });
     defer node.deinit(init.io);
-    std.debug.print("memory={any}\n", .{node.memoryPlan()});
+    std.debug.print("reserved_bytes={d}\n", .{node.reservations.bytes});
     var events: [1]network.peers.types.Event = undefined;
     for (0..if (count == 0) 1 else turns_max) |_| {
         const now = try network.transport.currentTime(init.io);
@@ -49,7 +49,7 @@ pub fn main(init: std.process.Init) !void {
         for (events[0..result.counts.peers]) |event| std.debug.print("peer={s}\n", .{@tagName(event)});
         if (node.peerCounts().relevant > 0) break;
     }
-    std.debug.print("diagnostics={any}\n", .{node.diagnostics()});
+    std.debug.print("counters={any}\n", .{node.counters});
     node.shutdown(try network.transport.currentTime(init.io));
     for (0..100) |_| {
         _ = node.step(init.io, try network.transport.currentTime(init.io), 100, .{}, 0);

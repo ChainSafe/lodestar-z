@@ -167,7 +167,6 @@ test "metrics read owner counters exactly and preserve totals and capacities aft
     node.service.reqresp.protocol_counters[@intFromEnum(protocol.status_v2)].outgoing = 5;
     node.service.reqresp.protocol_counters[@intFromEnum(protocol.status_v1)].outgoing_time.observe(100);
     node.service.reqresp.protocol_counters[@intFromEnum(protocol.status_v2)].outgoing_time.observe(200);
-    node.service.reqresp.counters.withheld_ms_total = 1500;
     node.service.gossipsub.messages.storage_refusals[0] = 11;
     node.peer_manager.selection.dial_budget = 7;
     const original = node.peer_manager.counters;
@@ -178,7 +177,6 @@ test "metrics read owner counters exactly and preserve totals and capacities aft
     try contains(output, "lodestar_native_peer_dials_requested 7\n");
     try contains(output, "beacon_reqresp_outgoing_requests_total{method=\"status\"} 9\n");
     try contains(output, "beacon_reqresp_outgoing_request_roundtrip_time_seconds_count{method=\"status\"} 2\n");
-    try contains(output, "lodestar_native_reqresp_withheld_seconds_total 1.5\n");
     try contains(output, "lodestar_native_gossip_expired_executing 3\n");
     try contains(output, "lodestar_native_gossip_oldest_expired_execution_age_seconds 1.5\n");
     try contains(output, "lodestar_native_network_metrics_updated_timestamp_seconds 123456\n");
@@ -313,11 +311,11 @@ test "metrics owner loop series start at zero after initialization" {
 
 fn initOwner(node: *core.NetworkCore) !void {
     const key = try @import("wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{94}));
-    try node.initManaged(std.testing.allocator, std.testing.io, .{
+    const resolved = try @import("configuration.zig").resolve(.{ .profile = .beacon_node, .seed = 7, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }}, .admission_policy = @import("reqresp/policy_fixture.zig").config() });
+    try node.init(std.testing.allocator, std.testing.io, &resolved, .{
         .host = &key,
         .bind = .{ .ip4 = .loopback(0) },
         .local = @import("managed_test_support.zig").localState(.{}),
-        .configuration = .{ .profile = .beacon_node, .seed = 7, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }}, .admission_policy = @import("reqresp/policy_fixture.zig").config() },
     });
 }
 

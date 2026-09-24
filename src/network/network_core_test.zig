@@ -252,9 +252,9 @@ test "managed runtime signed bootstrap reaches relevant peer with zero and one o
     try std.testing.expect(ready);
     try std.testing.expectEqual(@as(u16, 1), a.peerCounts().relevant);
     try std.testing.expectEqual(@as(u16, 1), b.peerCounts().relevant);
-    try std.testing.expect(a.diagnostics().runtime.discovered > 0);
-    try std.testing.expect(a.diagnostics().runtime.future_fork_unknown > 0);
-    try std.testing.expectEqual(@as(u64, 0), a.diagnostics().runtime.future_fork_mismatches);
+    try std.testing.expect(a.counters.discovered > 0);
+    try std.testing.expect(a.counters.future_fork_unknown > 0);
+    try std.testing.expectEqual(@as(u64, 0), a.counters.future_fork_mismatches);
     const hint_now = try @import("transport.zig").currentTime(std.testing.io);
     const hints = a.peer_manager.candidateHints(&b.peerId(), hint_now).?;
     const candidate = try @import("peers/enr.zig").decode(b.localRecord().?, &a.localState().fork);
@@ -408,7 +408,7 @@ fn applicationAndFork(a: *runtime.NetworkCore, b: *runtime.NetworkCore, b_inbox:
     _ = b.removeDirectPeer(&a.peerId());
 }
 
-test "managed runtime every allocation prefix cleans up and memory plan counts owned storage" {
+test "managed runtime every allocation prefix cleans up and reservations count owned storage" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{21}));
     var opts = options(&key);
     opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .engine = .{
@@ -425,17 +425,14 @@ test "managed runtime every allocation prefix cleans up and memory plan counts o
     var allocation = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     var node: runtime.NetworkCore = undefined;
     try node.init(allocation.allocator(), std.testing.io, &opts.resolved, opts.startup);
-    const plan = node.memoryPlan();
-    try std.testing.expectEqual(@sizeOf(@import("gossipsub/local_intent.zig").Workspace), plan.local_intent_bytes);
-    try std.testing.expectEqual(@sizeOf(runtime.NetworkCore), plan.inline_bytes);
-    try std.testing.expectEqual(plan.allocated_bytes, plan.transport_bytes + plan.peer_bytes + plan.service_bytes + plan.scratch_bytes + plan.local_intent_bytes + plan.discovery_bytes);
-    std.debug.print("local intent memory: allocated={} inline={} workspace={} prefixes={} core={} transport={} scratch={} discovery={}\n", .{ plan.allocated_bytes, plan.inline_bytes, plan.local_intent_bytes, allocation.alloc_index, plan.peer_bytes + plan.service_bytes, plan.transport_bytes, plan.scratch_bytes, plan.discovery_bytes });
-    try std.testing.expectEqual(allocation.allocated_bytes, plan.allocated_bytes);
+    const allocated = node.reservations.bytes;
+    std.debug.print("local intent memory: allocated={} inline={} workspace={} prefixes={}\n", .{ allocated, @sizeOf(runtime.NetworkCore), @sizeOf(@import("gossipsub/local_intent.zig").Workspace), allocation.alloc_index });
+    try std.testing.expectEqual(allocation.allocated_bytes, allocated);
     const allocations = allocation.alloc_index;
     const runtime_calls = node.reservations.allocation_calls;
     const now = try @import("transport.zig").currentTime(std.testing.io);
     for (0..4) |_| _ = node.step(std.testing.io, now, 0, .{}, 0);
-    try std.testing.expectEqual(allocation.allocated_bytes, plan.allocated_bytes);
+    try std.testing.expectEqual(allocation.allocated_bytes, allocated);
     try std.testing.expectEqual(runtime_calls, node.reservations.allocation_calls);
     node.deinit(std.testing.io);
     node.deinit(std.testing.io);
@@ -718,7 +715,7 @@ fn failureAndReplacement(a: *runtime.NetworkCore, b: *runtime.NetworkCore) !void
     }
     try std.testing.expectEqual(@as(u16, 1), a.peerCounts().relevant);
     try std.testing.expectEqual(@as(u16, 1), replacement.peerCounts().relevant);
-    try std.testing.expect(replacement.diagnostics().runtime.dial_started > 0);
+    try std.testing.expect(replacement.counters.dial_started > 0);
     replacement.shutdown(now);
 }
 
@@ -726,44 +723,30 @@ test "managed profiles measure reservations and unwind byte exhaustion" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{21}));
     inline for (.{ @import("configuration.zig").Profile.small, .beacon_node }) |profile| {
         var ledger: @import("reservations.zig").Reservations = .{ .backing = std.testing.allocator };
-        var opts: runtime.ManagedOptions = .{
-            .host = &key,
-            .bind = .{ .ip4 = .loopback(0) },
-            .local = @import("managed_test_support.zig").localState(.{}),
-            .configuration = .{ .profile = profile, .seed = 1, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }}, .admission_policy = @import("reqresp/policy_fixture.zig").config() },
-        };
+        var request: @import("configuration.zig").Request = .{ .profile = profile, .seed = 1, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }}, .admission_policy = @import("reqresp/policy_fixture.zig").config() };
+        const startup: runtime.Startup = .{ .host = &key, .bind = .{ .ip4 = .loopback(0) }, .local = @import("managed_test_support.zig").localState(.{}) };
+        var resolved = try @import("configuration.zig").resolve(request);
         var node: runtime.NetworkCore = undefined;
-        try node.initManaged(ledger.allocator(), std.testing.io, opts);
+        try node.init(ledger.allocator(), std.testing.io, &resolved, startup);
         var initialized = true;
         defer if (initialized) node.deinit(std.testing.io);
         const measured = ledger.bytes;
-        const plan = node.memoryPlan();
-        const core_plan = node.peer_manager.memoryPlan();
-        const kib = 1024;
-        const mib = 1024 * kib;
-        const ceilings = if (profile == .small)
-            .{ .total = 96 * mib, .service = 95 * mib, .transport = 90 * kib, .scratch = 400 * kib, .catalog = 108 * kib, .control = 17 * kib, .dial = 0 }
-        else
-            .{ .total = 384 * mib, .service = 374 * mib, .transport = 720 * kib, .scratch = 3200 * kib, .catalog = 848 * kib, .control = 132 * kib, .dial = 0 };
-        std.debug.print("managed memory {s}: total={d} service={d} reqresp={d} negotiations={d} catalog={d} control={d}\n", .{ @tagName(profile), measured, plan.service_bytes, node.service.reqresp.memoryPlan().total_bytes, node.service.router.negotiator.entries.len, core_plan.catalog_bytes, core_plan.control_bytes });
-        try std.testing.expectEqual(measured, plan.allocated_bytes);
-        try std.testing.expect(measured <= ceilings.total);
-        try std.testing.expect(plan.service_bytes <= ceilings.service);
-        try std.testing.expect(plan.transport_bytes <= ceilings.transport);
-        try std.testing.expect(plan.scratch_bytes <= ceilings.scratch);
-        try std.testing.expect(core_plan.catalog_bytes <= ceilings.catalog);
-        try std.testing.expect(core_plan.control_bytes <= ceilings.control);
-        try std.testing.expect(core_plan.dial_bytes <= ceilings.dial);
-        try std.testing.expectEqual(@as(u64, if (profile == .small) 64 * mib else 512 * mib), plan.transport.engine.receive_window_bytes);
+        const mib = 1024 * 1024;
+        const total: usize = if (profile == .small) 96 * mib else 384 * mib;
+        std.debug.print("managed memory {s}: total={d} reqresp={d} negotiations={d}\n", .{ @tagName(profile), measured, node.service.reqresp.memoryPlan().total_bytes, node.service.router.negotiator.entries.len });
+        try std.testing.expect(measured <= total);
+        try std.testing.expectEqual(@as(u64, if (profile == .small) 64 * mib else 512 * mib), node.transport.engine.memoryPlan().receive_window_bytes);
         try std.testing.expect(measured <= node.reservations.byte_limit.?);
         node.deinit(std.testing.io);
         initialized = false;
         try std.testing.expectEqual(@as(usize, 0), ledger.bytes);
-        opts.configuration.byte_limit = measured - 1;
-        try std.testing.expectError(error.OutOfMemory, node.initManaged(ledger.allocator(), std.testing.io, opts));
+        request.byte_limit = measured - 1;
+        resolved = try @import("configuration.zig").resolve(request);
+        try std.testing.expectError(error.OutOfMemory, node.init(ledger.allocator(), std.testing.io, &resolved, startup));
         try std.testing.expectEqual(@as(usize, 0), ledger.bytes);
-        opts.configuration.byte_limit = measured;
-        try node.initManaged(ledger.allocator(), std.testing.io, opts);
+        request.byte_limit = measured;
+        resolved = try @import("configuration.zig").resolve(request);
+        try node.init(ledger.allocator(), std.testing.io, &resolved, startup);
         initialized = true;
         node.deinit(std.testing.io);
         initialized = false;
@@ -777,40 +760,26 @@ test "managed small profile cleans every failed allocation prefix" {
 
 fn profileAllocationFailures(a: std.mem.Allocator) !void {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{22}));
+    const resolved = try @import("configuration.zig").resolve(.{ .profile = .small, .seed = 1, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }}, .admission_policy = @import("reqresp/policy_fixture.zig").config() });
     var node: runtime.NetworkCore = undefined;
-    try node.initManaged(a, std.testing.io, .{
-        .host = &key,
-        .bind = .{ .ip4 = .loopback(0) },
-        .local = @import("managed_test_support.zig").localState(.{}),
-        .configuration = .{ .profile = .small, .seed = 1, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }}, .admission_policy = @import("reqresp/policy_fixture.zig").config() },
-    });
+    try node.init(a, std.testing.io, &resolved, .{ .host = &key, .bind = .{ .ip4 = .loopback(0) }, .local = @import("managed_test_support.zig").localState(.{}) });
     node.deinit(std.testing.io);
 }
 
 test "managed invalid complete sections reject before allocation" {
-    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{23}));
     const forks: []const @import("reqresp/reqresp.zig").ForkEntry = &.{.{ .digest = @splat(0), .fork = .phase0 }};
-    inline for (.{ error.InvalidOptions, error.InvalidOptions, error.InvalidQuota, error.InvalidOptions, error.InvalidLimits, error.InvalidLimits, error.InvalidOptions }, 0..) |expected, section| {
+    inline for (.{ error.InvalidOptions, error.InvalidOptions, error.InvalidOptions, error.InvalidLimits, error.InvalidLimits, error.InvalidOptions }, 0..) |expected, section| {
         var request: @import("configuration.zig").Request = .{ .profile = .small, .seed = 1, .forks = forks, .admission_policy = @import("reqresp/policy_fixture.zig").config() };
         switch (section) {
             0 => request.reqresp.work_per_pump_max = 0,
             1 => request.control = .{ .ping_inbound_ms = 0 },
-            2 => {
-                var quotas = @import("reqresp/limiter.zig").defaultQuotas();
-                quotas[0].period_ms = 0;
-                request.reqresp.global_quotas = quotas;
-            },
-            3 => request.dial = .{ .seed = 1, .concurrent_max = 0 },
-            4 => request.gossip.score_params = .{ .decay_interval_ms = 0 },
-            5 => request.limits = .{ .handshaking_max = 0 },
-            6 => request.peers = .{ .capacity = 0 },
+            2 => request.dial = .{ .seed = 1, .concurrent_max = 0 },
+            3 => request.gossip.score_params = .{ .decay_interval_ms = 0 },
+            4 => request.limits = .{ .handshaking_max = 0 },
+            5 => request.peers = .{ .capacity = 0 },
             else => unreachable,
         }
-        var ledger: @import("reservations.zig").Reservations = .{ .backing = std.testing.allocator };
-        var node: runtime.NetworkCore = undefined;
-        try std.testing.expectError(expected, node.initManaged(ledger.allocator(), std.testing.io, .{ .host = &key, .bind = .{ .ip4 = .loopback(0) }, .local = @import("managed_test_support.zig").localState(.{}), .configuration = request }));
-        try std.testing.expectEqual(@as(usize, 0), ledger.bytes);
-        try std.testing.expectEqual(@as(usize, 0), ledger.allocation_calls);
+        try std.testing.expectError(expected, @import("configuration.zig").resolve(request));
     }
 }
 
@@ -898,7 +867,7 @@ test "managed runtime portable fallback rejects enabled host source" {
     try node.setHostWake(null);
     const result = node.step(std.testing.io, try @import("transport.zig").currentTime(std.testing.io), 0, .{}, 0);
     try std.testing.expect(result.failure == null);
-    try std.testing.expectEqual(@as(u64, 0), node.diagnostics().runtime.readiness_calls);
+    try std.testing.expectEqual(@as(u64, 0), node.counters.readiness_calls);
 }
 
 test "managed runtime native wait source failure retains completed protocol progress" {
@@ -927,7 +896,7 @@ test "managed runtime native wait source failure retains completed protocol prog
     try node.setHostWake(null);
     const clean = node.step(std.testing.io, node.last_now, 0, .{}, 0);
     try std.testing.expect(clean.failure == null);
-    try std.testing.expectEqual(@as(u64, 1), node.diagnostics().runtime.readiness_failures);
+    try std.testing.expectEqual(@as(u64, 1), node.counters.readiness_failures);
 }
 
 test "managed runtime native wait honors pacing native timers and pending lifecycle work" {
@@ -985,14 +954,11 @@ test "managed runtime subscriptions use copied startup policy and reject atomica
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const calls = node.reservations.allocation_calls;
-    const initial = node.diagnostics();
-    try std.testing.expectEqual(@as(usize, 4), initial.transport_resources.capacity);
-    try std.testing.expectEqual(@as(usize, 0), initial.transport_resources.active);
-    try std.testing.expectEqual(@as(usize, 0), initial.core.dialing.custody_incomplete);
+    const initial = node.transport.engine.resourceSnapshot();
+    try std.testing.expectEqual(@as(usize, 4), initial.capacity);
+    try std.testing.expectEqual(@as(usize, 0), initial.active);
+    try std.testing.expectEqual(@as(usize, 0), node.peer_manager.dialing.resourceSnapshot(&node.peer_manager.catalog).custody_incomplete);
     const owner = node.service.gossipsub;
-    const revision_before_read = owner.peers.scores.revision;
-    try std.testing.expectEqualDeep(initial, node.diagnostics());
-    try std.testing.expectEqual(revision_before_read, owner.peers.scores.revision);
     opts.resolved.core.service.gossipsub.topic_params.?[0].params.weight = 3;
     var text = "/eth2/01020304/beacon_block/ssz_snappy".*;
     try core_test.subscribe(&node, &text);
@@ -1020,12 +986,12 @@ test "managed runtime subscriptions use copied startup policy and reject atomica
 
 test "managed beacon idle scans do not manufacture immediate deadlines" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{11}));
+    const resolved = try @import("configuration.zig").resolve(.{ .profile = .beacon_node, .seed = 7, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }}, .admission_policy = @import("reqresp/policy_fixture.zig").config() });
     var node: runtime.NetworkCore = undefined;
-    try node.initManaged(std.testing.allocator, std.testing.io, .{
+    try node.init(std.testing.allocator, std.testing.io, &resolved, .{
         .host = &key,
         .bind = .{ .ip4 = .loopback(0) },
         .local = @import("managed_test_support.zig").localState(.{}),
-        .configuration = .{ .profile = .beacon_node, .seed = 7, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }}, .admission_policy = @import("reqresp/policy_fixture.zig").config() },
     });
     defer node.deinit(std.testing.io);
     const now = try @import("transport.zig").currentTime(std.testing.io);
@@ -1044,11 +1010,11 @@ test "managed runtime BPO same-fork digest transition updates status and adverti
     const first: rr.ForkEntry = .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu };
     const second: rr.ForkEntry = .{ .digest = .{ 5, 6, 7, 8 }, .fork = .fulu };
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{1}));
+    const resolved = try @import("configuration.zig").resolve(.{ .profile = .small, .seed = 1, .forks = &.{ first, second }, .admission_policy = @import("reqresp/policy_fixture.zig").config() });
     var node: runtime.NetworkCore = undefined;
-    try node.initManaged(std.testing.allocator, std.testing.io, .{
+    try node.init(std.testing.allocator, std.testing.io, &resolved, .{
         .host = &key,
         .bind = .{ .ip4 = .loopback(0) },
-        .configuration = .{ .profile = .small, .seed = 1, .forks = &.{ first, second }, .admission_policy = @import("reqresp/policy_fixture.zig").config() },
         .local = .{
             .fork = .{ .digest = first.digest, .fork = first.fork },
             .status = .{ .fork_digest = first.digest, .earliest_available_slot = 0 },
@@ -1210,11 +1176,6 @@ test "managed runtime capabilities activation commits fork BPO and copied direct
     var node: runtime.NetworkCore = undefined;
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
-    const limiter = &node.service.reqresp.limiter;
-    const peer: t.Handle = .{ .index = 0, .generation = 1 };
-    limiter.bind(peer, node.last_now.mono_ms);
-    try std.testing.expect(limiter.take(peer, .blocks_by_root_v2, 1, node.last_now.mono_ms));
-    const debt = limiter.global;
     const admission = &node.service.reqresp.admission.limiter;
     const identity = node.peerId();
     try std.testing.expectEqual(.allowed, admission.take(&identity, .blocks_by_root_v2, 1, .phase0, node.last_now.mono_ms));
@@ -1248,7 +1209,6 @@ test "managed runtime capabilities activation commits fork BPO and copied direct
     try std.testing.expectEqualDeep(active, node.service.router.capabilities());
     try std.testing.expectEqual(before.record.sequence + 2, node.localRecord().?.sequence);
     try std.testing.expectEqual(before.local.metadata.seq_number, node.localState().metadata.seq_number);
-    try std.testing.expectEqualDeep(debt, limiter.global);
     try std.testing.expectEqualDeep(admitted_debt, admission.global);
     try std.testing.expectEqualDeep(admitted_row, admission.rows[0]);
     try std.testing.expectEqual(allocations, node.reservations.allocation_calls);

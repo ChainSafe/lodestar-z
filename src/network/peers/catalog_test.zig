@@ -202,10 +202,6 @@ test "peer catalog exhausted generations never wrap and allocator cleanup" {
 fn allocationCheck(a: std.mem.Allocator) !void {
     var c = try Catalog.init(a, opts, 1024, 0);
     defer c.deinit(a);
-    try std.testing.expectEqual(
-        opts.capacity * @sizeOf(@import("catalog.zig").Row) + c.by_identity.slots.len * @sizeOf(u16) + c.by_connection.len * @sizeOf(?u16) + c.established.len * @sizeOf(?u16) + c.intent_masks.len * @sizeOf(usize) + c.history.entries.len * @sizeOf(@import("dial_history.zig").Entry),
-        c.memoryPlan().allocated_bytes,
-    );
 }
 test "peer catalog published replacement updates availability and rejects stale completions" {
     var c = try Catalog.init(std.testing.allocator, opts, 1024, 0);
@@ -317,16 +313,6 @@ test "peer catalog rejected banned reconnect does not mutate retained reputation
     );
     try std.testing.expect(c.get(ref).?.score > -50);
 }
-test "peer catalog memory plan equals actual allocation reservation" {
-    var a = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    var c = try Catalog.init(a.allocator(), .{}, 1024, 0);
-    const plan = c.memoryPlan();
-    try std.testing.expectEqual(a.allocated_bytes, plan.allocated_bytes);
-    c.deinit(a.allocator());
-    try std.testing.expectEqual(a.allocated_bytes, a.freed_bytes);
-    std.debug.print("sampling layout Row={d} Snapshot={d}\n", .{ @sizeOf(@import("catalog.zig").Row), @sizeOf(t.Snapshot) });
-}
-
 test "peer catalog accepts native generation zero and still rejects another full handle" {
     var c = try Catalog.init(std.testing.allocator, opts, 1024, 0);
     defer c.deinit(std.testing.allocator);

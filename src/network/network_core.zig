@@ -49,15 +49,6 @@ pub const DiscoveryOptions = struct {
     engine: d.Engine.Config = .{ .session_capacity = discovery_session_capacity, .session_idle_timeout_ms = discovery_session_idle_timeout_ms },
     coordinator: peers.discovery.Options = .{},
 };
-pub const ManagedOptions = struct {
-    wait_mode: wait.Mode = .portable,
-    host: *const @import("wire/keys.zig").KeyPair,
-    bind: @import("udp.zig").Bindings,
-    configuration: @import("configuration.zig").Request,
-    local: t.LocalState,
-    schedule: ForkSchedule = .{},
-    discovery: ?DiscoveryOptions = null,
-};
 pub const Startup = struct {
     wait_mode: wait.Mode = .portable,
     keylog_path: ?[]const u8 = null,
@@ -97,23 +88,6 @@ pub const Counters = struct {
     readiness_interruptions: u64 = 0,
     readiness_failures: u64 = 0,
 };
-pub const Diagnostics = struct {
-    runtime: Counters,
-    transport: engine.Counters,
-    transport_resources: engine.Engine.Resources,
-    core: manager.PeerManager.Diagnostics,
-};
-pub const MemoryPlan = struct {
-    inline_bytes: usize = @sizeOf(NetworkCore),
-    allocated_bytes: usize = 0,
-    transport_bytes: usize = 0,
-    peer_bytes: usize = 0,
-    service_bytes: usize = 0,
-    scratch_bytes: usize = 0,
-    local_intent_bytes: usize = 0,
-    discovery_bytes: usize = 0,
-    transport: transport_mod.MemoryPlan,
-};
 
 const DiscoveryOwners = struct {
     transport: d.Transport,
@@ -152,7 +126,6 @@ const DiscoveryOwners = struct {
 /// Initialize at its final address. Serialize every call, including reads and teardown.
 pub const NetworkCore = struct {
     reservations: @import("reservations.zig").Reservations,
-    memory: MemoryPlan,
     allocator: std.mem.Allocator,
     transport: transport_mod.Transport,
     peer_manager: manager.PeerManager,
@@ -196,7 +169,6 @@ pub const NetworkCore = struct {
         self.last_now = try transport_mod.currentTime(io);
         try self.transport.init(allocator, io, .{ .host = startup.host, .bind = startup.bind, .limits = resolved.limits, .work_limits = resolved.work_limits, .keylog_path = startup.keylog_path });
         errdefer self.transport.deinit(io);
-        self.memory = .{ .transport_bytes = self.reservations.bytes, .transport = self.transport.memoryPlan() };
         self.service = try service_mod.Service.init(allocator, managed.serviceOptions(resolved.core, &local));
         errdefer self.service.deinit();
         self.peer_manager = try manager.PeerManager.init(allocator, &self.transport.peerId(), &local, managed.peerOptions(resolved.core), &self.service, self.transport.engine.limits.connections_max);
@@ -204,20 +176,15 @@ pub const NetworkCore = struct {
         self.service.identify.bind(&self.transport.engine);
         self.peer_manager.metrics_io = io;
         self.service.gossipsub.metrics_io = io;
-        self.memory.peer_bytes = self.peer_manager.memoryPlan().allocated_bytes;
-        self.memory.service_bytes = self.service.allocatedBytes();
         const event_capacity = @as(usize, resolved.limits.connections_max) *
             @import("quic/limits.zig").events_per_connection;
         self.native_events = try allocator.alloc(engine.Event, event_capacity);
         errdefer allocator.free(self.native_events);
         self.activity = try allocator.alloc(engine.Handle, resolved.limits.connections_max);
         errdefer allocator.free(self.activity);
-        self.memory.scratch_bytes = self.native_events.len * @sizeOf(engine.Event) + self.activity.len * @sizeOf(engine.Handle);
         self.local_intent_workspace = try allocator.create(gossip.local_intent.Workspace);
         errdefer allocator.destroy(self.local_intent_workspace);
         self.local_intent_workspace.* = .{};
-        self.memory.local_intent_bytes = @sizeOf(gossip.local_intent.Workspace);
-        const before_discovery = self.reservations.bytes;
         if (startup.discovery) |discovery_options| {
             const owned = try allocator.create(DiscoveryOwners);
             errdefer allocator.destroy(owned);
@@ -229,15 +196,7 @@ pub const NetworkCore = struct {
             allocator.destroy(owned);
         };
         self.service.identify.local = try self.prepareIdentifyLocal(self.advertisementEndpoints(), self.service.router.capabilities());
-        self.memory.discovery_bytes = self.reservations.bytes - before_discovery;
-        self.memory.allocated_bytes = self.reservations.bytes;
-        std.debug.assert(self.memory.allocated_bytes == self.memory.transport_bytes + self.memory.peer_bytes + self.memory.service_bytes + self.memory.scratch_bytes + self.memory.local_intent_bytes + self.memory.discovery_bytes);
         self.initialized = true;
-    }
-
-    pub fn initManaged(self: *NetworkCore, backing: std.mem.Allocator, io: std.Io, options: ManagedOptions) !void {
-        const resolved = try @import("configuration.zig").resolve(options.configuration);
-        try self.init(backing, io, &resolved, .{ .host = options.host, .bind = options.bind, .local = options.local, .schedule = options.schedule, .discovery = options.discovery, .wait_mode = options.wait_mode });
     }
 
     pub fn deinit(self: *NetworkCore, io: std.Io) void {
@@ -284,14 +243,6 @@ pub const NetworkCore = struct {
     }
     pub fn localState(self: *const NetworkCore) t.LocalState {
         return self.peer_manager.local;
-    }
-    /// Copied bounded observations. Does not advance time, policy, scores or event borrows.
-    pub fn diagnostics(self: *const NetworkCore) Diagnostics {
-        return .{ .runtime = self.counters, .transport = self.transport.engine.counters, .transport_resources = self.transport.engine.resourceSnapshot(), .core = self.peer_manager.diagnostics(&self.service) };
-    }
-    pub fn memoryPlan(self: *const NetworkCore) MemoryPlan {
-        std.debug.assert(self.reservations.bytes == self.memory.allocated_bytes);
-        return self.memory;
     }
     pub fn peerCounts(self: *const NetworkCore) manager.PeerManager.PeerCounts {
         return self.peer_manager.peerCounts();

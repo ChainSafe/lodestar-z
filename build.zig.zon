@@ -233,10 +233,6 @@
             .root_source_file = "src/discv5/root.zig",
             .imports = .{.udp},
         },
-        .network_wire = .{
-            .root_source_file = "src/network/wire/root.zig",
-            .imports = .{.udp},
-        },
         .network = .{
             .root_source_file = "src/network/root.zig",
             .imports = .{ "quiche_zig:quiche", .consensus_types, .config, .constants, .preset, .ssz, .snappy, .discv5, .udp },
@@ -483,7 +479,6 @@
         .beacon_node = .{ .root_module = .beacon_node },
         .udp = .{ .root_module = .udp },
         .discv5 = .{ .root_module = .discv5 },
-        .network_wire = .{ .root_module = .network_wire },
         .network = .{ .root_module = .network },
 
         .tidy = .{

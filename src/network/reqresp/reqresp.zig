@@ -3,7 +3,6 @@ const codec = @import("codec.zig");
 const constants = @import("constants.zig");
 const request_policy = @import("request_policy.zig");
 const admission_mod = @import("admission.zig");
-const limiter_mod = @import("limiter.zig");
 const protocol_mod = @import("protocol.zig");
 const config = @import("config");
 const engine_mod = @import("../quic/engine.zig");
@@ -97,9 +96,6 @@ pub const Options = struct {
     forks: []const ForkEntry,
     request_fork: config.ForkSeq = .phase0,
     admission: AdmissionOptions,
-    quotas: ?limiter_mod.Quotas = null,
-    /// Control quotas scale to the control peer reservation; application quotas scale to serving capacity.
-    global_quotas: ?limiter_mod.Quotas = null,
     host_timeout_ms: u64 = 60_000,
     quota_timeout_ms: u64 = 60_000,
     work_per_pump_max: u16 = 32,
@@ -138,7 +134,7 @@ pub const Outputs = struct { application: []Event = &.{}, control: []Event = &.{
 pub const OutputCounts = struct { application: usize, control: usize };
 pub const Capacities = struct { application: usize = 0, control: usize = 0 };
 
-pub const InitError = limiter_mod.InitError || error{InvalidPolicy};
+pub const InitError = admission_mod.InitError || error{InvalidPolicy};
 
 pub const RequestError = error{
     ProtocolDisabled,
@@ -189,8 +185,6 @@ pub const Counters = struct {
     error_responses_sent: u64 = 0,
     chunks_received: u64 = 0,
     chunks_sent: u64 = 0,
-    withheld_chunks: u64 = 0,
-    withheld_ms_total: u64 = 0,
     failures: u64 = 0,
     timeouts: u64 = 0,
     goodbyes_recovered_on_close: u64 = 0,
@@ -204,7 +198,6 @@ pub const MemoryPlan = struct {
     facade_bytes: usize,
     slot_bytes: usize,
     io_bytes: usize,
-    limiter_bytes: usize,
     admission_bytes: usize = 0,
     request_sink_bytes: usize = 0,
     serving_bytes: usize = 0,
@@ -224,7 +217,6 @@ pub const ReqResp = struct {
     peer_cursors: []PeerCursor,
     admission_cursor: [2]u16 = @splat(0),
     admission_class: u1 = 0,
-    limiter: limiter_mod.Limiter,
     policy: request_policy.Policy,
     admission: Admission,
     request_fork: config.ForkSeq,
@@ -249,8 +241,6 @@ pub const ReqResp = struct {
         pending_events: usize = 0,
         pending_terminals: usize = 0,
         held_chunks: usize = 0,
-        withheld_chunks: usize = 0,
-        oldest_withheld_age_ms: ?u64 = null,
         serving_capacity: usize = 0,
         serving_occupied: usize = 0,
         retiring: usize = 0,
@@ -281,10 +271,6 @@ pub const ReqResp = struct {
             }
             if (slot.request.pendingEvent() != null) result.pending_events += 1;
             if (slot.request.terminalEvent() != null) result.pending_terminals += 1;
-            if (slot.request.running()) if (slot.withheld_since_ms) |since| {
-                result.withheld_chunks += 1;
-                result.oldest_withheld_age_ms = @max(result.oldest_withheld_age_ms orelse 0, self.last_now_ms -| since);
-            };
         }
         return result;
     }
@@ -316,7 +302,7 @@ pub const ReqResp = struct {
         return self.policy.inspect(which, bytes, fork);
     }
 
-    pub fn validateOptions(options: Options) InitError!struct { peer: limiter_mod.Quotas, global: limiter_mod.Quotas } {
+    pub fn validateOptions(options: Options) InitError!void {
         _ = try request_policy.Policy.init(&options.admission.policy);
         try admission_mod.Limiter.validate(&options.admission.limits);
         if (options.outbound_max == 0 or options.outbound_max > constants.slots_ceiling) {
@@ -336,30 +322,11 @@ pub const ReqResp = struct {
         if (options.progress_timeout_ms == 0 or options.host_timeout_ms == 0 or
             options.quota_timeout_ms == 0 or options.work_per_pump_max == 0 or
             options.work_per_pump_max > 2 * constants.slots_ceiling) return error.InvalidOptions;
-        const peer_quotas = options.quotas orelse limiter_mod.defaultQuotas();
-        var global_quotas = options.global_quotas orelse peer_quotas;
-        if (options.global_quotas == null) {
-            const controls = [_]Protocol{
-                .status_v1,   .status_v2,   .ping_v1,    .metadata_v1,
-                .metadata_v2, .metadata_v3, .goodbye_v1,
-            };
-            for (controls) |which| {
-                const quota = &global_quotas[@intFromEnum(which)];
-                quota.tokens = std.math.mul(u32, quota.tokens, if (options.inbound_control_reserved > 0) options.inbound_control_reserved else options.peers) catch return error.InvalidQuota;
-            }
-            for (std.enums.values(Protocol)) |which| {
-                if (!which.isControl()) global_quotas[@intFromEnum(which)].tokens = std.math.mul(u32, peer_quotas[@intFromEnum(which)].tokens, @max(1, (options.inbound_max - options.inbound_control_reserved) / options.serving_per_peer_max)) catch return error.InvalidQuota;
-            }
-        }
-        try limiter_mod.Limiter.validate(peer_quotas);
-        try limiter_mod.Limiter.validate(global_quotas);
         try validateForkTable(options.forks);
-
-        return .{ .peer = peer_quotas, .global = global_quotas };
     }
 
     pub fn init(allocator: std.mem.Allocator, options: Options) InitError!ReqResp {
-        const quotas = try validateOptions(options);
+        try validateOptions(options);
         const policy = try request_policy.Policy.init(&options.admission.policy);
         var admission: Admission = .{ .limiter = try admission_mod.Limiter.init(allocator, options.admission.limits) };
         errdefer admission.limiter.deinit(allocator);
@@ -395,14 +362,6 @@ pub const ReqResp = struct {
         errdefer allocator.free(peer_cursors);
         @memset(peer_cursors, .{});
 
-        var buckets = try limiter_mod.Limiter.init(
-            allocator,
-            options.peers,
-            quotas.peer,
-            quotas.global,
-        );
-        errdefer buckets.deinit(allocator);
-
         var result: ReqResp = .{
             .allocator = allocator,
             .options = .{
@@ -424,7 +383,6 @@ pub const ReqResp = struct {
             .receive_plan = receive,
             .serving = serving,
             .peer_cursors = peer_cursors,
-            .limiter = buckets,
             .policy = policy,
             .admission = admission,
             .request_fork = options.request_fork,
@@ -437,7 +395,6 @@ pub const ReqResp = struct {
     /// Call shutdown first, or destroy the attached transport and Router before deinit.
     pub fn deinit(self: *ReqResp) void {
         self.admission.limiter.deinit(self.allocator);
-        self.limiter.deinit(self.allocator);
         self.serving.deinit(self.allocator);
         self.allocator.free(self.peer_cursors);
         self.allocator.free(self.request_sinks);
@@ -543,10 +500,10 @@ pub const ReqResp = struct {
     }
 
     /// Reserve one response turn before the host produces its next chunk.
-    pub fn reserveResponse(self: *ReqResp, handle: RequestHandle, now: Now) bool {
+    pub fn reserveResponse(self: *ReqResp, handle: RequestHandle) bool {
         if (handle.direction != .inbound) return false;
         const slot = self.inboundSlot(handle) orelse return false;
-        return slot.reserveResponse(self, now);
+        return slot.reserveResponse();
     }
 
     /// Supply fresh owner time so host-held chunks cannot become remote timeout evidence.
@@ -654,19 +611,16 @@ pub const ReqResp = struct {
     /// Includes reqresp-owned storage. Caller response sinks and Router storage are separate.
     pub fn memoryPlan(self: *const ReqResp) MemoryPlan {
         const slot_bytes = self.outbound.len * @sizeOf(Client) + self.inbound.len * @sizeOf(Server);
-        const limiter_bytes = self.limiter.buckets.len * @sizeOf(limiter_mod.Bucket) +
-            self.limiter.generations.len * @sizeOf(?u32);
         const admission_bytes = self.admission.limiter.memoryPlan().allocated_bytes;
         return .{
             .facade_bytes = @sizeOf(ReqResp),
             .slot_bytes = slot_bytes,
             .io_bytes = self.arena.len,
-            .limiter_bytes = limiter_bytes,
             .admission_bytes = admission_bytes,
             .request_sink_bytes = self.request_sinks.len,
             .serving_bytes = self.serving.memoryBytes(),
             .scheduler_bytes = self.peer_cursors.len * @sizeOf(PeerCursor),
-            .total_bytes = @sizeOf(ReqResp) + slot_bytes + self.arena.len + limiter_bytes + admission_bytes + self.request_sinks.len + self.serving.memoryBytes() + self.peer_cursors.len * @sizeOf(PeerCursor),
+            .total_bytes = @sizeOf(ReqResp) + slot_bytes + self.arena.len + admission_bytes + self.request_sinks.len + self.serving.memoryBytes() + self.peer_cursors.len * @sizeOf(PeerCursor),
         };
     }
 
@@ -692,11 +646,6 @@ pub const ReqResp = struct {
             if (slot.request.running() and slot.state == .ready and
                 self.serving.available(&slot.identity, slot.request.protocol.isControl()) != null)
                 due = earlier(due, slot.eligible_ms);
-            if (slot.request.running() and (slot.state == .withheld or slot.state == .waiting_capacity)) {
-                if (self.limiter.nextToken(slot.request.conn, slot.request.protocol, now.mono_ms)) |eligible| {
-                    due = earlier(due, eligible);
-                } else return now.mono_ms;
-            }
         }
         return if (due) |deadline| @max(deadline, now.mono_ms) else null;
     }
@@ -872,10 +821,6 @@ pub const ReqResp = struct {
     fn inboundRunnable(self: *ReqResp, slot: *const Server, now: Now) bool {
         if (!slot.request.running()) return false;
         if (slot.request.needs_service or slot.deadline(self).? <= now.mono_ms) return true;
-        if (slot.state == .withheld) {
-            const eligible = self.limiter.nextToken(slot.request.conn, slot.request.protocol, now.mono_ms) orelse return true;
-            return eligible <= now.mono_ms;
-        }
         return false;
     }
 

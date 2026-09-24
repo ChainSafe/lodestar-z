@@ -123,7 +123,6 @@ jobs:
           cargo --version
           cmake --version
           zig build test:udp
-          zig build test:network_wire
           zig build test:network
           zig build test:network_runtime
           zig build check:network-tools

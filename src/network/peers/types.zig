@@ -131,13 +131,6 @@ pub const Options = struct {
             self.min_outbound > self.target_peers) return error.InvalidOptions;
     }
 };
-pub const MemoryPlan = struct {
-    inline_bytes: usize,
-    allocated_bytes: usize,
-    rows: u16,
-    notification_slots: u16,
-};
-
 pub const Coverage = struct {
     attnets: u64 = 0,
     syncnets: u4 = 0,

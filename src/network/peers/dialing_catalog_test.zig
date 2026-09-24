@@ -130,7 +130,6 @@ test "peer fold connected custody makes progress independently of candidate work
         try std.testing.expect(c.updateMetadata(peer, conn, &.{ .custody_group_count = groups - 1 }, 0));
         try std.testing.expect(c.get(peer).?.custody_groups == null);
     }
-    const bytes = c.memoryPlan().allocated_bytes;
     for (0..64) |_| {
         var budget: u16 = custody.hashes_per_turn;
         const pending = c.advanceCustody(&context, 0, 60_000, &budget);
@@ -147,7 +146,6 @@ test "peer fold connected custody makes progress independently of candidate work
         try std.testing.expectEqual(@as(usize, groups - 1), snapshot.custody_groups.?.count());
         try std.testing.expectEqual(@as(usize, groups), snapshot.sampling_groups.?.count());
     }
-    try std.testing.expectEqual(bytes, c.memoryPlan().allocated_bytes);
 }
 
 test "peer fold canonical disconnect backs off once even without a dial intent" {

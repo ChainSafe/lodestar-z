@@ -78,12 +78,12 @@ pub fn initialize(self: *Runtime) !void {
     self.heavy.?.core_live = true;
     try self.heavy.?.core.setHostWake(self.wake.?.read_fd);
 
-    const plan = self.heavy.?.core.memoryPlan();
-    self.diag.nativeRequestedBytes = plan.inline_bytes + plan.allocated_bytes;
+    self.diag.nativeRequestedBytes = @sizeOf(n.NetworkCore) + self.heavy.?.core.reservations.bytes;
     self.diag.nativeAllocationCount = self.heavy.?.core.reservations.allocation_calls;
-    self.diag.quicReceiveWindowBytes = plan.transport.engine.receive_window_bytes;
-    self.diag.quicConnectionWindowBytes = plan.transport.engine.connection_window_bytes;
-    self.diag.quicStreamWindowBytes = plan.transport.engine.stream_window_bytes;
+    const plan = self.heavy.?.core.transport.engine.memoryPlan();
+    self.diag.quicReceiveWindowBytes = plan.receive_window_bytes;
+    self.diag.quicConnectionWindowBytes = plan.connection_window_bytes;
+    self.diag.quicStreamWindowBytes = plan.stream_window_bytes;
     try publishMetrics(self, now(io));
     std.log.scoped(.network_runtime).info("owner_initialized target_peers={d} max_peers={d}", .{ self.diag.resolvedCapacities.targetPeers, self.diag.resolvedCapacities.maxPeers });
 }
@@ -264,9 +264,6 @@ fn publishTurn(self: *Runtime, result: *const n.network_core.Result, timestamp: 
         }
     }
     self.diag.ownerTurns +|= 1;
-    self.diag.lastMonotonicMs = timestamp.mono_ms;
-    self.diag.peerCount = counts.connected;
-    self.diag.readyPeerCount = counts.relevant;
     self.unlock();
 }
 pub fn now(io: std.Io) n.Now {

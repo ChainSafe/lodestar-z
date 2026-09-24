@@ -21,15 +21,6 @@ pub const Options = struct {
     metadata_freshness_ms: u64 = 60_000,
 };
 pub const DialIntent = dial_mod.DialIntent;
-pub const MemoryPlan = struct {
-    inline_bytes: usize,
-    allocated_bytes: usize,
-    catalog_bytes: usize,
-    control_bytes: usize,
-    dial_bytes: usize,
-    scratch_bytes: usize,
-    policy_bytes: usize,
-};
 pub const DiscoveryNeed = struct {
     general: bool = false,
     attnets: [8]u8 = @splat(0),
@@ -94,40 +85,6 @@ pub const PeerManager = struct {
     };
     pub const PeerCounts = struct { connected: u16, relevant: u16, outbound_relevant: u16 };
 
-    pub const Diagnostics = struct {
-        policy: Counters,
-        connected: u16,
-        relevant: u16,
-        control: control_mod.Control.Counters,
-        control_resources: control_mod.Control.Resources,
-        dialing: dial_mod.Dialing.Resources,
-        reqresp: rr.Counters,
-        reqresp_resources: rr.ReqResp.Resources,
-        gossip: gossip.Gossipsub.Counters,
-        gossip_resources: gossip.ResourceSnapshot,
-        score_calculations: u64,
-        score_topic_visits: u64,
-    };
-
-    /// Returns copied observations without reconciliation, score refresh or event publication.
-    pub fn diagnostics(self: *const PeerManager, service: *const service_mod.Service) Diagnostics {
-        const g = service.gossipsub;
-        return .{
-            .policy = self.counters,
-            .connected = self.catalog.connectedCount(),
-            .relevant = self.catalog.relevantCount(),
-            .control = self.control.counters,
-            .control_resources = self.control.resourceSnapshot(),
-            .dialing = self.dialing.resourceSnapshot(&self.catalog),
-            .reqresp = service.reqresp.counters,
-            .reqresp_resources = service.reqresp.resourceSnapshot(),
-            .gossip = g.counters,
-            .gossip_resources = g.resourceSnapshot(),
-            .score_calculations = g.peers.scores.calculations,
-            .score_topic_visits = g.peers.scores.topic_visits,
-        };
-    }
-
     pub fn validateOptions(options: Options) !void {
         try options.peers.validate();
         if (options.peers.target_peers >= options.peers.max_peers or
@@ -148,9 +105,6 @@ pub const PeerManager = struct {
         var copied: t.LocalState = undefined;
         try peers.control_wire.copyServingLocal(&copied, local, service.router.capabilities().receive);
         try validateOptions(options);
-        if (service.reqresp.options.outbound_control_reserved < options.peers.max_peers or
-            service.router.negotiator.outbound_control_reserved < options.peers.max_peers)
-            return error.InvalidOptions;
         var catalog = try peers.Catalog.initWithIntents(a, options.peers, options.dial.capacity, connections_max, options.dial.seed);
         errdefer catalog.deinit(a);
         var control = try control_mod.Control.init(
@@ -186,22 +140,6 @@ pub const PeerManager = struct {
         self.control.deinit(self.allocator);
         self.catalog.deinit(self.allocator);
         self.* = undefined;
-    }
-    pub fn memoryPlan(self: *const PeerManager) MemoryPlan {
-        const catalog = self.catalog.memoryPlan().allocated_bytes;
-        const control = self.control.memoryPlan().allocated_bytes;
-        const dial = 0;
-        const scratch = self.snapshot_scratch.len * @sizeOf(t.Snapshot);
-        const policy_bytes = self.policy_scratch.len * @sizeOf(policy.Input);
-        return .{
-            .inline_bytes = @sizeOf(PeerManager),
-            .allocated_bytes = catalog + control + dial + scratch + policy_bytes,
-            .catalog_bytes = catalog,
-            .control_bytes = control,
-            .dial_bytes = dial,
-            .scratch_bytes = scratch,
-            .policy_bytes = policy_bytes,
-        };
     }
     pub fn transportEvent(
         self: *PeerManager,

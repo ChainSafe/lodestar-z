@@ -147,6 +147,7 @@ pub fn validate(limits: engine.Limits, options: core.Options) !void {
         options.dial.outbound_reserved != limits.outbound_reserved or
         limits.outbound_max != limits.connections_max or
         options.service.reqresp.inbound_control_reserved < options.peers.max_peers or
+        options.service.reqresp.outbound_control_reserved < options.peers.max_peers or
         options.service.router.outbound_control_reserved < options.service.reqresp.outbound_control_reserved)
         return error.InvalidOptions;
 }

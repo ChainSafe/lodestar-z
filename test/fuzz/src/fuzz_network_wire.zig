@@ -1,5 +1,5 @@
 const std = @import("std");
-const wire = @import("network_wire");
+const wire = @import("network").wire;
 
 pub export fn zig_fuzz_init() callconv(.c) void {}
 

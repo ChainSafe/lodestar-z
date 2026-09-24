@@ -46,7 +46,6 @@ test "gossip processor isolates kinds and bounds dependency waiting" {
     const checks = table.claimChecks(1);
     for (checks.tokens[0..checks.len]) |token| try t.expect(table.classify(token, false));
     try t.expectEqual(@as(usize, 2), table.snapshot(1).waiting);
-    try t.expectEqual(@as(u64, 2), table.diag.dependencyRefusals);
     const block = try add(&table, .beacon_block, null);
     const batch = table.claimDemand(1, .{ .ordinary = false });
     try t.expectEqual(@as(usize, 1), batch.len);
@@ -137,7 +136,6 @@ test "gossip processor deferral leaves per-source capacity and local search dead
     const checks = table.claimChecks(1);
     for (checks.tokens[0..checks.len]) |token| try t.expect(table.classify(token, false));
     try t.expectEqual(@as(usize, 2), table.snapshot(1).waiting);
-    try t.expectEqual(@as(u64, 1), table.diag.dependencyRefusals);
     table.notifyBlock(root);
     table.maintain(1, 0);
     try t.expectEqual(@as(u16, 0), table.waiting_per_peer[0][@intFromEnum(p.limits_mod.Kind.beacon_attestation)]);
