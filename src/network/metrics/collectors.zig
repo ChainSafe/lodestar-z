@@ -285,7 +285,7 @@ fn writePeeringProgress(self: *const Context, w: *prom.Encoder) prom.Error!void 
 fn writeDiscoveryProgress(self: *const Context, w: *prom.Encoder) prom.Error!void {
     try w.enums(.{ .name = "lodestar_native_peer_dial_selections_total", .kind = .counter, .help = "Selected peer connection attempts by initiating demand, including immediate errors and local start deferrals", .labels = &.{"source"} }, @import("../peers/dialing.zig").Source, &self.owner.peer_manager.dialing.selected_attempts);
     try w.enums(.{ .name = "lodestar_native_peer_dial_outcomes_total", .kind = .counter, .help = "Finished connection attempts by outcome; closes before admission map the transport close reason", .labels = &.{"outcome"} }, peer_types.DialOutcome, &self.owner.peer_manager.dialing.outcomes);
-    try w.enums(.{ .name = "lodestar_native_peer_dial_retries_total", .kind = .counter, .help = "Connection attempts selected for an intent whose previous attempt failed, by that failure", .labels = &.{"previous"} }, peer_types.DialFailure, &self.owner.peer_manager.dialing.retries);
+    try w.enums(.{ .name = "lodestar_native_peer_dial_retries_total", .kind = .counter, .help = "Redials of an endpoint by its previous failure", .labels = &.{"previous"} }, peer_types.DialFailure, &self.owner.peer_manager.dialing.retries);
     const dial_time = try w.histograms(.{
         .name = "lodestar_native_peer_dial_time_seconds",
         .kind = .histogram,

@@ -23,8 +23,6 @@ pub const Intent = struct {
     eligible_at_ms: u64 = 0,
     history_until_ms: u64 = 0,
     failures: u8 = 0,
-    /// Failure of the previous attempt, kept until the next attempt is selected or the peer connects.
-    last_failure: ?t.DialFailure = null,
 };
 pub const Row = struct {
     free_link: lists.Link = .{},
@@ -429,7 +427,7 @@ pub const Catalog = struct {
         if (row.established_slot == null) {
             self.forget(peer);
         } else {
-            row.intent = .{ .failures = row.intent.failures, .last_failure = row.intent.last_failure, .eligible_at_ms = row.intent.eligible_at_ms, .history_until_ms = row.intent.history_until_ms };
+            row.intent = .{ .failures = row.intent.failures, .eligible_at_ms = row.intent.eligible_at_ms, .history_until_ms = row.intent.history_until_ms };
             if (row.connection == null) {
                 row.custody_work = null;
                 row.custody_context = null;
