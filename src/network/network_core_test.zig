@@ -1932,3 +1932,17 @@ test "managed runtime candidate identities do not expose admitted APIs or enlarg
     var snapshots: [4]t.Snapshot = undefined;
     try std.testing.expectEqual(@as(usize, 0), try node.completeSnapshots(&snapshots));
 }
+
+test "managed runtime discovery sessions expire idle lookup contacts" {
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{41}));
+    var opts = options(&key);
+    opts.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
+    var node: runtime.NetworkCore = undefined;
+    try node.initRaw(std.testing.allocator, std.testing.io, opts);
+    defer node.deinit(std.testing.io);
+    const config = node.discovery.?.transport.engine.config;
+    try std.testing.expectEqual(runtime.discovery_session_capacity, config.session_capacity);
+    try std.testing.expectEqual(runtime.discovery_session_idle_timeout_ms, config.session_idle_timeout_ms);
+    try std.testing.expectEqual(@as(usize, 2_048), config.session_capacity);
+    try std.testing.expectEqual(@as(u64, 600_000), config.session_idle_timeout_ms);
+}
