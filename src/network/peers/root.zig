@@ -37,4 +37,8 @@ test {
     _ = @import("reputation.zig");
     _ = @import("control_wire.zig");
     _ = @import("dialing.zig");
+    _ = @import("control.zig");
+    _ = @import("control_metrics.zig");
+    _ = @import("identity_index.zig");
+    _ = @import("coverage.zig");
 }
