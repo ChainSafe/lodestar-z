@@ -61,10 +61,7 @@ pub const ServicePair = struct {
     }
 
     fn process(self: *ServicePair, owner: *service.Service, transport: *engine.Engine, outputs: service.Outputs) service.OutputCounts {
-        var events: [128 * @import("quic/limits.zig").events_per_connection]engine.Event = undefined;
-        var activity: [128]engine.Handle = undefined;
-        std.debug.assert(transport.limits.connections_max <= activity.len);
-        const count = transport.takeActivity(&activity);
-        return owner.process(transport, self.pair.events(transport, &events), activity[0..count], self.pair.now, outputs);
+        var events: [@import("quic/limits.zig").events_per_turn_max]engine.Event = undefined;
+        return owner.process(transport, self.pair.events(transport, &events), self.pair.now, outputs);
     }
 };

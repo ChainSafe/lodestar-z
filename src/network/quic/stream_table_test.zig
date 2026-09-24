@@ -18,7 +18,7 @@ test "stream table keeps local and peer claims in disjoint halves" {
 
     const peer = table.claimPeer(1) orelse return error.TestUnexpectedResult;
     try std.testing.expect(peer >= half);
-    try std.testing.expectEqual(@as(u16, 1), table.pending);
+    try std.testing.expectEqual(@as(u16, 1), table.pendingCount());
     try std.testing.expectEqual(peer, table.find(1).?);
 }
 
@@ -30,7 +30,7 @@ test "stream table fills the peer half before refusing a claim" {
         const index = table.claimPeer(claimed * 4) orelse return error.TestUnexpectedResult;
         try std.testing.expect(index >= half);
     }
-    try std.testing.expectEqual(@as(u16, half), table.pending);
+    try std.testing.expectEqual(@as(u16, half), table.pendingCount());
     try std.testing.expect(table.claimPeer(claimed * 4) == null);
     try std.testing.expect(table.freeLocal() != null);
 }
@@ -84,10 +84,10 @@ test "stream table discard drops the pending events of an entry" {
 
     const peer = table.claimPeer(1) orelse return error.TestUnexpectedResult;
     table.clear(peer, 3);
-    try std.testing.expectEqual(@as(u16, 2), table.pending);
+    try std.testing.expectEqual(@as(u16, 1), table.pendingCount());
 
     table.discard(peer);
-    try std.testing.expectEqual(@as(u16, 0), table.pending);
+    try std.testing.expectEqual(@as(u16, 0), table.pendingCount());
     try std.testing.expect(table.find(1) == null);
     try std.testing.expect(table.takeClosed(peer) == null);
 }
@@ -96,23 +96,23 @@ test "stream table pending never underflows across repeated clears" {
     var table = StreamTable.init(.outbound);
 
     const peer = table.claimPeer(1) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(u16, 1), table.pending);
+    try std.testing.expectEqual(@as(u16, 1), table.pendingCount());
     table.takeOpened(peer);
-    try std.testing.expectEqual(@as(u16, 0), table.pending);
+    try std.testing.expectEqual(@as(u16, 0), table.pendingCount());
     table.clear(peer, 7);
-    try std.testing.expectEqual(@as(u16, 1), table.pending);
+    try std.testing.expectEqual(@as(u16, 1), table.pendingCount());
     table.clear(peer, 9);
-    try std.testing.expectEqual(@as(u16, 1), table.pending);
+    try std.testing.expectEqual(@as(u16, 1), table.pendingCount());
     const closed = table.takeClosed(peer) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u64, 7), closed.reset_code.?);
-    try std.testing.expectEqual(@as(u16, 0), table.pending);
+    try std.testing.expectEqual(@as(u16, 0), table.pendingCount());
 
     const local = table.freeLocal() orelse return error.TestUnexpectedResult;
     table.claimLocal(local, 0);
     table.clear(local, null);
-    try std.testing.expectEqual(@as(u16, 1), table.pending);
+    try std.testing.expectEqual(@as(u16, 1), table.pendingCount());
     _ = table.takeClosed(local) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(u16, 0), table.pending);
+    try std.testing.expectEqual(@as(u16, 0), table.pendingCount());
 }
 
 test "stream table parity follows the connection direction" {
@@ -141,4 +141,47 @@ test "stream table local ids advance by four from the direction parity" {
     try std.testing.expectEqual(@as(u64, 5), inbound.next_local_id);
     inbound.claimLocal(inbound.freeLocal().?, 5);
     try std.testing.expectEqual(@as(u64, 9), inbound.next_local_id);
+}
+
+test "stream table reports readiness once and folds it into an undelivered open" {
+    var table = StreamTable.init(.outbound);
+    const local = table.freeLocal() orelse return error.TestUnexpectedResult;
+    table.claimLocal(local, 0);
+    table.arm(local, 16);
+    try std.testing.expectEqual(stream_table.bit(local), table.armed);
+    table.markReady(local, .{ .readable = true, .writable = true });
+    try std.testing.expectEqual(@as(stream_table.Mask, 0), table.armed);
+    try std.testing.expectEqual(@as(u32, 0), table.entries[local].write_lowat);
+    try std.testing.expectEqual(local, table.nextPending().?);
+    const ready = table.takeReady(local);
+    try std.testing.expect(ready.readable and ready.writable);
+    try std.testing.expect(table.readOpen(local));
+    try std.testing.expect(!table.hasPending());
+
+    const peer = table.claimPeer(1) orelse return error.TestUnexpectedResult;
+    table.markReady(peer, .{ .readable = true });
+    table.takeOpened(peer);
+    try std.testing.expect(!table.hasPending());
+    try std.testing.expect(table.readOpen(peer));
+    table.markReady(peer, .{ .readable = true });
+    table.clear(peer, null);
+    try std.testing.expect(!table.entries[peer].ready.readable);
+    table.markReady(peer, .{ .writable = true });
+    try std.testing.expect(!table.entries[peer].ready.writable);
+    try std.testing.expect(table.takeClosed(peer) != null);
+    try std.testing.expect(!table.hasPending());
+}
+
+test "stream table delivery resumes after the last delivered entry" {
+    var table = StreamTable.init(.inbound);
+    const first = table.claimPeer(0) orelse return error.TestUnexpectedResult;
+    const second = table.claimPeer(4) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(first, table.nextPending().?);
+    table.takeOpened(first);
+    table.advanceCursor(first);
+    table.clear(first, null);
+    try std.testing.expectEqual(second, table.nextPending().?);
+    table.takeOpened(second);
+    table.advanceCursor(second);
+    try std.testing.expectEqual(first, table.nextPending().?);
 }

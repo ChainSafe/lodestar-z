@@ -122,7 +122,6 @@ pub fn main(init: std.process.Init) !void {
         .admission_policy = try network.reqresp.request_policy.Config.fromBeaconConfig(&@import("config").mainnet.config, &blob_schedule),
     });
     try peer.node.init(a, init.io, &resolved, .{
-        .wait_mode = .native_poll,
         .host = &key,
         .bind = .{ .ip4 = .loopback(0) },
         .local = local,

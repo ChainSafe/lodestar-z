@@ -122,7 +122,10 @@ pub fn Family(comptime descriptor: Descriptor) type {
             var cumulative: u64 = 0;
             inline for (descriptor.bounds, 0..) |bound, index| {
                 cumulative +|= value.buckets[index];
-                const boundary = std.fmt.comptimePrint("{d}", .{bound});
+                const boundary = comptime blk: {
+                    @setEvalBranchQuota(10_000);
+                    break :blk std.fmt.comptimePrint("{d}", .{bound});
+                };
                 try self.writer.writeAll(descriptor.name ++ "_bucket");
                 try self.labelsWrite(labels, boundary);
                 try self.writer.print(" {d}\n", .{cumulative});

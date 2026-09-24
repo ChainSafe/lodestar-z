@@ -32,7 +32,6 @@ pub fn main(init: std.process.Init) !void {
     var blob_schedule: [network.reqresp.request_policy.schedule_max]network.reqresp.request_policy.BlobLimit = undefined;
     const resolved = try network.configuration.resolve(.{ .seed = std.mem.readInt(u64, &seed, .little), .forks = &.{.{ .digest = local.fork.digest, .fork = local.fork.fork }}, .admission_policy = try network.reqresp.request_policy.Config.fromBeaconConfig(&@import("config").mainnet.config, &blob_schedule) });
     try node.init(a, init.io, &resolved, .{
-        .wait_mode = .native_poll,
         .host = &key,
         .bind = .{ .ip4 = .loopback(0) },
         .local = local,

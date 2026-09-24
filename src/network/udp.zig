@@ -10,6 +10,8 @@ pub const Datagram = sockets_mod.Datagram;
 pub const ReceiveTimeoutError = sockets_mod.DatagramError;
 pub const SendError = sockets_mod.SendError;
 
+pub const SendOutcome = struct { sent: usize, failure: ?SendError };
+
 pub const Counters = struct {
     received_bytes: u64 = 0,
     sent_bytes: u64 = 0,
@@ -72,13 +74,15 @@ pub const Udp = struct {
         self.counters.sent_datagrams +|= 1;
     }
 
-    pub fn sendMany(self: *Udp, io: std.Io, batch: []const types.Sent) SendError!void {
+    /// Sends the batch in order, one sendmmsg call per run of one address family. It stops at
+    /// the first datagram that fails: `sent` datagrams went out and `failure` is that datagram's error.
+    pub fn sendMany(self: *Udp, io: std.Io, batch: []const types.Sent) SendOutcome {
         std.debug.assert(batch.len <= constants.send_batch_max);
         std.debug.assert(batch.len > 0);
         var addresses: [constants.send_batch_max]net.IpAddress = undefined;
         var messages: [constants.send_batch_max]net.OutgoingMessage = undefined;
         for (batch, 0..) |sent, position| {
-            if (sent.bytes.len > constants.datagram_size_max) return error.DatagramTooLarge;
+            if (sent.bytes.len > constants.datagram_size_max) return .{ .sent = 0, .failure = error.DatagramTooLarge };
             addresses[position] = toNetwork(sent.to);
             messages[position] = .{
                 .address = &addresses[position],
@@ -88,21 +92,20 @@ pub const Udp = struct {
         }
         var begin: usize = 0;
         while (begin < batch.len) {
-            const socket = self.sockets.get(addresses[begin]) orelse return error.AddressFamilyUnsupported;
+            const socket = self.sockets.get(addresses[begin]) orelse return .{ .sent = begin, .failure = error.AddressFamilyUnsupported };
             var end = begin + 1;
             while (end < batch.len and std.meta.activeTag(addresses[end]) == std.meta.activeTag(addresses[begin])) : (end += 1) {}
             const failure, const count = io.vtable.netSend(io.userdata, socket.handle, messages[begin..end], .{});
             std.debug.assert(count <= end - begin);
-            for (messages[begin..][0..count]) |message| {
+            for (messages[begin..][0..count], batch[begin..][0..count], 0..) |message, sent, offset| {
+                if (message.data_len != sent.bytes.len) return .{ .sent = begin + offset, .failure = error.MessageOversize };
                 self.counters.sent_bytes +|= message.data_len;
                 self.counters.sent_datagrams +|= 1;
             }
-            if (count != end - begin) return failure.?;
-            for (messages[begin..end], batch[begin..end]) |message, sent| {
-                if (message.data_len != sent.bytes.len) return error.MessageOversize;
-            }
+            if (count != end - begin) return .{ .sent = begin + count, .failure = failure.? };
             begin = end;
         }
+        return .{ .sent = batch.len, .failure = null };
     }
 };
 

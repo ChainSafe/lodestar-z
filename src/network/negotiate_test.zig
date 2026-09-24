@@ -36,24 +36,28 @@ const Setup = struct {
         self.pair.deinit();
     }
 
+    /// Delivers one side's engine events: stream activity to its negotiator and, on the listener,
+    /// new streams to acceptInbound.
+    fn deliver(self: *Setup, engine: *engine_mod.Engine, negotiator: *Negotiator) !void {
+        var storage: [64]engine_mod.Event = undefined;
+        for (self.pair.events(engine, &storage)) |event| {
+            if (event == .stream_opened and negotiator == &self.listener) try negotiator.acceptInbound(event.stream_opened, self.pair.now);
+            if (engine_mod.activityOf(event)) |conn| negotiator.connectionActivity(conn);
+        }
+    }
+
     fn pumpDialer(self: *Setup, protocols: []const negotiate.Protocol, outcomes: []Outcome) usize {
-        var activity: [128]engine_mod.Handle = undefined;
-        for (activity[0..self.pair.client.takeActivity(&activity)]) |conn| self.dialer.connectionActivity(conn);
+        self.deliver(&self.pair.client, &self.dialer) catch unreachable;
         return self.dialer.pump(&self.pair.client, self.pair.now, protocols, outcomes);
     }
 
     fn pumpListener(self: *Setup, protocols: []const negotiate.Protocol, outcomes: []Outcome) usize {
-        var activity: [128]engine_mod.Handle = undefined;
-        for (activity[0..self.pair.server.takeActivity(&activity)]) |conn| self.listener.connectionActivity(conn);
+        self.deliver(&self.pair.server, &self.listener) catch unreachable;
         return self.listener.pump(&self.pair.server, self.pair.now, protocols, outcomes);
     }
 
     fn acceptOpened(self: *Setup) !void {
-        var storage: [8]engine_mod.Event = undefined;
-        for (self.pair.events(&self.pair.server, &storage)) |event| {
-            if (event != .stream_opened) continue;
-            try self.listener.acceptInbound(event.stream_opened, self.pair.now);
-        }
+        try self.deliver(&self.pair.server, &self.listener);
     }
 
     fn run(self: *Setup, rounds_max: usize) !struct { dialer: ?Outcome, listener: ?Outcome } {
@@ -62,14 +66,10 @@ const Setup = struct {
         var rounds: usize = 0;
         while (rounds < rounds_max and (dialer_outcome == null or listener_outcome == null)) : (rounds += 1) {
             var outcomes: [4]Outcome = undefined;
-            var activity: [128]engine_mod.Handle = undefined;
-            for (activity[0..self.pair.client.takeActivity(&activity)]) |conn| self.dialer.connectionActivity(conn);
-            const dialed = self.dialer.pump(&self.pair.client, self.pair.now, &supported, &outcomes);
+            const dialed = self.pumpDialer(&supported, &outcomes);
             if (dialed > 0) dialer_outcome = outcomes[0];
             try self.pair.pump();
-            try self.acceptOpened();
-            for (activity[0..self.pair.server.takeActivity(&activity)]) |conn| self.listener.connectionActivity(conn);
-            const listened = self.listener.pump(&self.pair.server, self.pair.now, &supported, &outcomes);
+            const listened = self.pumpListener(&supported, &outcomes);
             if (listened > 0) listener_outcome = outcomes[0];
             try self.pair.pump();
         }
@@ -205,10 +205,7 @@ test "negotiator copies outbound preference and falls back on the same stream to
             accepted = true;
         }
         try setup.pair.pump();
-        var events: [8]engine_mod.Event = undefined;
-        for (setup.pair.events(&setup.pair.server, &events)) |event| {
-            if (event == .stream_opened) try setup.listener.acceptInbound(event.stream_opened, setup.pair.now);
-        }
+        try setup.acceptOpened();
         const listened = setup.pumpListener(&.{.{ .id = "/meshsub/1.1.0", .index = 99 }}, &out);
         for (out[0..listened]) |result| {
             try std.testing.expect(result.result == .ready);
@@ -500,15 +497,16 @@ test "negotiator retains an accepted tag across blocked acknowledgement and dela
     try std.testing.expectEqual(@as(usize, 0), setup.pumpListener(&supported, &outcomes));
     try std.testing.expectEqual(@as(usize, 1), setup.listener.active());
 
-    _ = setup.pair.server.takeHostWork();
+    try setup.pair.flush(&setup.pair.server);
     setup.listener.connectionActivity(.{ .index = inbound.conn.index, .generation = inbound.conn.generation + 1 });
     for (0..8) |_| {
         try std.testing.expectEqual(@as(usize, 0), setup.listener.pump(&setup.pair.server, setup.pair.now, &supported, &outcomes));
-        try std.testing.expect(!setup.pair.server.hostWorkPending());
+        try std.testing.expect(!setup.pair.server.backlog());
     }
+    // A retry that blocks again at the armed watermark queues nothing.
     setup.listener.connectionActivity(inbound.conn);
     _ = setup.listener.pump(&setup.pair.server, setup.pair.now, &supported, &outcomes);
-    try std.testing.expect(setup.pair.server.takeHostWork());
+    try std.testing.expect(!setup.pair.server.backlog());
     try setup.pair.pump();
     var received: usize = 0;
     var buffer: [4096]u8 = undefined;

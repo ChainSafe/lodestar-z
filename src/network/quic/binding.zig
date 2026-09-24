@@ -259,8 +259,9 @@ pub fn headerInfo(datagram: []const u8) Error!HeaderInfo {
     };
 }
 
+/// quiche's release time for a datagram. Under CUBIC it is the send time, so a datagram is
+/// never held; the transport asserts that in debug builds.
 pub fn transmitDeadline(info: *const c.quiche_send_info) u64 {
-    if (!native_pacing_supported) return 0;
     std.debug.assert(info.at.tv_sec >= 0);
     std.debug.assert(info.at.tv_nsec >= 0 and info.at.tv_nsec < std.time.ns_per_s);
     const seconds: u64 = @intCast(info.at.tv_sec);

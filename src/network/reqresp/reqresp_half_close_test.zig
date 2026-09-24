@@ -40,7 +40,7 @@ fn pump(pair: *Pair) ![]const rr.Event {
     try pair.shared.pair.pump();
     pair.shared.client.reqresp.cleanupPending(&pair.shared.pair.client, &pair.shared.client.router);
     var activity: [128]engine.Handle = undefined;
-    const count = pair.shared.pair.client.takeActivity(&activity);
+    const count = pair.shared.pair.activity(&pair.shared.pair.client, &activity);
     for (activity[0..count]) |conn| pair.shared.client.reqresp.connectionActivity(conn);
     const counts = pair.shared.client.reqresp.pump(&pair.shared.pair.client, &pair.shared.client.router, pair.shared.pair.now, .{ .application = pair.client_events[0..16], .control = pair.client_events[16..] });
     std.mem.copyForwards(rr.Event, pair.client_events[counts.application..], pair.client_events[16..][0..counts.control]);

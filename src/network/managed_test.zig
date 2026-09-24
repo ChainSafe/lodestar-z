@@ -304,7 +304,6 @@ test "managed native deterministic replacement cancels old control and ignores s
             .direction = old.direction,
             .reason = .host,
         } }},
-        &.{},
         setup.pair.now,
         100,
         &.{},
@@ -396,7 +395,6 @@ test "managed native saturated app requests retain partitioned borrows while con
             &setup.server_service,
             &setup.pair.server,
             &.{},
-            &.{},
             setup.pair.now,
             100,
             &.{},
@@ -432,7 +430,7 @@ test "managed native local control capacity defers with future wakeup and no pee
     }
     try std.testing.expect(streams > 0);
     setup.client.reStatusPeers(setup.pair.now);
-    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{});
+    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, setup.pair.now, 100, &.{}, &.{});
     _ = setup.client.snapshots(&snapshots);
     try std.testing.expectEqual(@as(f64, 0), snapshots[0].score);
     try std.testing.expect(snapshots[0].relevant);
@@ -520,11 +518,11 @@ test "managed native preserves gossip events under one output and caller validat
         _ = managed.process(&setup.server, &setup.server_service, &setup.pair.server, setup.pair.events(
             &setup.pair.server,
             &transport,
-        ), &.{}, setup.pair.now, 100, &.{}, &.{});
+        ), setup.pair.now, 100, &.{}, &.{});
         _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, setup.pair.events(
             &setup.pair.client,
             &transport,
-        ), &.{}, setup.pair.now, 100, &.{}, &.{});
+        ), setup.pair.now, 100, &.{}, &.{});
     }
     setup.pair.advance(1_001);
     for (0..10) |_| try setup.step(0);
@@ -536,12 +534,10 @@ test "managed native preserves gossip events under one output and caller validat
     for (0..50) |_| {
         try setup.pair.pump();
         var transport: [32]Engine.Event = undefined;
-        var activity: [4]Engine.Handle = undefined;
-        const active = setup.pair.server.takeActivity(&activity);
         _ = managed.process(&setup.server, &setup.server_service, &setup.pair.server, setup.pair.events(
             &setup.pair.server,
             &transport,
-        ), activity[0..active], setup.pair.now, 100, &.{}, &.{});
+        ), setup.pair.now, 100, &.{}, &.{});
         for (setup.server_inbox.messages()) |message| {
             try std.testing.expectEqualStrings(payload, message.bytes);
             try std.testing.expectEqual(
@@ -555,7 +551,7 @@ test "managed native preserves gossip events under one output and caller validat
         _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, setup.pair.events(
             &setup.pair.client,
             &transport,
-        ), &.{}, setup.pair.now, 100, &.{}, &.{});
+        ), setup.pair.now, 100, &.{}, &.{});
     }
     try std.testing.expectEqual(@as(usize, 1), received);
     try gossip_test.unsubscribe(setup.client_service.gossipsub, topic);
@@ -657,7 +653,7 @@ test "managed native leased dial retires uncompleted handshake and rejects late 
     );
     try std.testing.expect(setup.client.dialStarted(intent.token, conn));
     setup.pair.advance(10_000);
-    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 0, &.{}, &.{});
+    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, setup.pair.now, 0, &.{}, &.{});
     try std.testing.expectEqual(@as(u16, 0), setup.pair.client.registry.dialing);
     try std.testing.expectEqual(@as(u16, 0), setup.pair.client.registry.active_len);
     try std.testing.expect(setup.pair.client.registry.slots[conn.index].conn == null);
@@ -784,12 +780,12 @@ test "managed competing one-shot attempt expires during selected peer ban cooldo
     };
     try std.testing.expect(selected != null);
     // Deliver the inbound authentication first, retaining the competing connected event at the host.
-    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{selected.?}, &.{}, setup.pair.now, 100, &.{}, &.{});
+    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{selected.?}, setup.pair.now, 100, &.{}, &.{});
     var snapshots: [4]t.Snapshot = undefined;
     _ = setup.client.snapshots(&snapshots);
     try std.testing.expect(!std.meta.eql(attempt, snapshots[0].connection.?));
     try std.testing.expectEqual(t.ReputationDecision.ban, setup.client.reportPeer(snapshots[0].peer, .fatal, setup.pair.now).?);
-    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{});
+    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, setup.pair.now, 100, &.{}, &.{});
     setup.pair.advance(10_000);
     _ = setup.client.dialIntents(&setup.client_service, &setup.pair.client, setup.pair.now, &intents);
     for (0..8) |_| try setup.step(0);
@@ -837,7 +833,7 @@ test "managed coverage demand copies persists across slots and keeps general dis
     var demand: t.Demand = .{ .syncnets = 1 };
     try setup.client.setDemand(&demand);
     demand.syncnets = 2;
-    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{});
+    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, setup.pair.now, 100, &.{}, &.{});
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().sync);
     try std.testing.expectEqual(@as(u8, 1), setup.client.discoveryNeed().syncnets);
     try std.testing.expect(setup.client.discoveryNeed().general);
@@ -845,11 +841,11 @@ test "managed coverage demand copies persists across slots and keeps general dis
     setup.client.reconcile(&setup.client_service, setup.pair.now);
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().sync);
     try std.testing.expectEqual(@as(u8, 1), setup.client.discoveryNeed().syncnets);
-    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 10_000, &.{}, &.{});
+    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, setup.pair.now, 10_000, &.{}, &.{});
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().sync);
     try std.testing.expectEqual(@as(u8, 1), setup.client.discoveryNeed().syncnets);
     try setup.client.setDemand(&.{});
-    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 10_000, &.{}, &.{});
+    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, setup.pair.now, 10_000, &.{}, &.{});
     try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().sync);
     try std.testing.expectEqual(@as(u8, 0), setup.client.discoveryNeed().syncnets);
     try std.testing.expect(setup.client.discoveryNeed().general);
@@ -882,13 +878,13 @@ test "managed coverage authenticated custody differs from gossip delivery and in
     setup.client.reconcile(&setup.client_service, setup.pair.now);
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().groups);
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().sync);
-    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{});
+    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, setup.pair.now, 100, &.{}, &.{});
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().sync);
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().groups);
     local.fork.custody_groups = 64;
     local.metadata.custody_group_count = 64;
     try @import("managed_test_support.zig").updateLocal(&setup.client, &setup.client_service, &local, setup.pair.now);
-    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{});
+    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, setup.pair.now, 100, &.{}, &.{});
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().groups);
     _ = setup.client.snapshots(&snapshots);
     try std.testing.expect(snapshots[0].custody_groups == null);
@@ -1000,7 +996,7 @@ test "managed coverage bounded custody work resumes without output and stale met
     _ = setup.client.snapshots(&snapshots);
     try std.testing.expectEqual(@as(usize, 127), snapshots[0].custody_groups.?.count());
     setup.pair.advance(60_000);
-    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{});
+    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, setup.pair.now, 100, &.{}, &.{});
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().groups);
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().sync);
 }
@@ -1038,7 +1034,7 @@ test "managed coverage review same-digest group update disables cached automatic
     candidate.syncnets = 1;
     try setup.client.setDemand(&.{ .syncnets = 1 });
     try std.testing.expectEqual(@as(u16, 1), setup.client.discoveredBatch(&setup.client_service, &.{candidate}, setup.pair.now).accepted);
-    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{});
+    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, setup.pair.now, 100, &.{}, &.{});
     local.fork.custody_groups = 64;
     local.metadata.custody_group_count = 64;
     try @import("managed_test_support.zig").updateLocal(&setup.client, &setup.client_service, &local, setup.pair.now);
@@ -1088,7 +1084,7 @@ test "managed reconciliation reads preserve completed demand and catalog evaluat
     var demand: t.Demand = .{ .attnets = 0x81, .syncnets = 1 };
     demand.group_targets[0] = 1;
     try setup.client.setDemand(&demand);
-    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{});
+    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, setup.pair.now, 100, &.{}, &.{});
     const deficits = view.coverageDeficits();
     const need = view.discoveryNeed();
     try std.testing.expectEqual(@as(u16, 2), deficits.attestation);
@@ -1167,7 +1163,7 @@ test "managed reconciliation clears policy observations at quiescence and shutdo
         try setup.initOwners(&.{});
         defer setup.deinit();
         try setup.client.setDemand(&.{ .syncnets = 1 });
-        _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{});
+        _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, setup.pair.now, 100, &.{}, &.{});
         try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().sync);
         try std.testing.expect(setup.client.discoveryNeed().general);
         if (graceful) {
@@ -1180,7 +1176,7 @@ test "managed reconciliation clears policy observations at quiescence and shutdo
         try std.testing.expectEqualDeep(@import("peers/policy.zig").Deficits{}, view.coverageDeficits());
         try std.testing.expectEqualDeep(managed.DiscoveryNeed{}, view.discoveryNeed());
         try std.testing.expectEqualDeep(counters, view.counters);
-        _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 200, &.{}, &.{});
+        _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, setup.pair.now, 200, &.{}, &.{});
         try std.testing.expectEqualDeep(@import("peers/policy.zig").Deficits{}, view.coverageDeficits());
         try std.testing.expectEqualDeep(managed.DiscoveryNeed{}, view.discoveryNeed());
     }
@@ -1405,7 +1401,7 @@ test "managed native immediate close preserves direct membership and rejects sta
             .peer_id = captured.identity,
             .direction = captured.direction,
             .reason = .host,
-        } }}, &.{}, setup.pair.now, 100, &.{}, &.{});
+        } }}, setup.pair.now, 100, &.{}, &.{});
         try std.testing.expectEqualDeep(current, setup.client.catalog.get(captured.peer).?);
         managed.shutdown(&setup.client, &setup.client_service, &setup.pair.client, setup.pair.now);
         try std.testing.expect(!setup.client.closePeer(&setup.client_service, &setup.pair.client, current.peer, current.connection.?, setup.pair.now));
@@ -1463,7 +1459,7 @@ test "managed native public close cancels overlapping attempts and preserves bou
         if (event == .connected and event.connected.direction == .inbound) selected = event;
     }
     try std.testing.expect(selected != null);
-    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{selected.?}, &.{}, setup.pair.now, 100, &.{}, &.{});
+    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{selected.?}, setup.pair.now, 100, &.{}, &.{});
     var snapshots: [4]t.Snapshot = undefined;
     try std.testing.expectEqual(@as(usize, 1), setup.client.snapshots(&snapshots));
     const accepted = snapshots[0];
@@ -1562,7 +1558,7 @@ test "managed sampling delivery follows real outbound stream retirement replacem
     try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().groups);
     try std.testing.expectEqual(snapshot.custody_groups, setup.client.catalog.get(snapshot.peer).?.custody_groups);
     managed.shutdown(&setup.client, &setup.client_service, &setup.pair.client, setup.pair.now);
-    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{.{ .stream_closed = .{ .stream = replacement_stream, .reset_code = 0 } }}, &.{}, setup.pair.now, 100, &.{}, &.{});
+    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{.{ .stream_closed = .{ .stream = replacement_stream, .reset_code = 0 } }}, setup.pair.now, 100, &.{}, &.{});
     try std.testing.expectEqual(@as(u16, 0), setup.client.peerCounts().connected);
     try std.testing.expect(!handler.deliveryAvailable(snapshot.connection.?));
 }
@@ -1589,14 +1585,14 @@ test "managed sampling demand rejects atomically trims fork bound and persists u
     try std.testing.expectEqual(@as(u16, 4), setup.client.coverageDeficits().groups);
     setup.client.reconcile(&setup.client_service, setup.pair.now);
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().groups);
-    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{});
+    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, setup.pair.now, 100, &.{}, &.{});
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().groups);
-    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 10_000, &.{}, &.{});
+    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, setup.pair.now, 10_000, &.{}, &.{});
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().groups);
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().custody_groups);
     try std.testing.expect(setup.client.discoveryNeed().custody);
     try setup.client.setDemand(&.{});
-    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 10_000, &.{}, &.{});
+    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, setup.pair.now, 10_000, &.{}, &.{});
     try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().groups);
     try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().custody_groups);
     try std.testing.expect(!setup.client.discoveryNeed().custody);

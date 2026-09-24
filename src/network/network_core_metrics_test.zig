@@ -64,6 +64,7 @@ const contract = [_]Series{
     .{ .name = "lodestar_native_network_readiness_nonzero_waits_total", .kind = "counter" },
     .{ .name = "lodestar_native_network_due_now_turns_total", .kind = "counter", .labels = &.{"source"} },
     .{ .name = "lodestar_native_network_wait_seconds", .kind = "histogram" },
+    .{ .name = "lodestar_native_quic_connection_visits_total", .kind = "counter", .labels = &.{"phase"} },
     .{ .name = "lodestar_native_quic_udp_received_datagrams_total", .kind = "counter" },
     .{ .name = "lodestar_native_quic_udp_sent_datagrams_total", .kind = "counter" },
     // Peers

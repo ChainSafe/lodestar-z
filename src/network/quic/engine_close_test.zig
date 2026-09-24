@@ -344,7 +344,7 @@ test "engine abandons an unanswered dial at the unanswered timeout" {
     const handle = try pair.dial();
     try pair.pump();
     try std.testing.expect(!pair.client.dialAnswered(handle));
-    try std.testing.expect(pair.client.nextTimeoutMs(pair.now).? <= 100);
+    try std.testing.expect(pair.client.nextDeadlineNs().? <= pair.now.nanos() + 100 * std.time.ns_per_ms);
     pair.advance(99);
     try pair.pump();
     var storage: [8]Event = undefined;

@@ -190,7 +190,7 @@ test "managed runtime request admission memory plan measures both retained profi
 }
 
 test "managed configuration preserves independent transport work limits" {
-    const limits: transport.WorkLimits = .{ .send_per_step_max = 3, .receive_per_step_max = 2, .work_per_step_max = 7 };
+    const limits: transport.WorkLimits = .{ .send_per_step_max = 3, .receive_per_step_max = 2, .burst_per_connection = 2 };
     const resolved = try resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .work_limits = limits, .admission_policy = policy_fixture.config() });
     try std.testing.expectEqual(limits, resolved.work_limits);
     try std.testing.expectError(error.InvalidLimits, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .work_limits = .{ .send_per_step_max = 0 }, .admission_policy = policy_fixture.config() }));

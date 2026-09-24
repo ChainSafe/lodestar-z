@@ -4,10 +4,7 @@ const std = @import("std");
 /// lodestar_native_network_due_now_turns_total.
 pub const Source = enum {
     transport_backlog,
-    transport_host_work,
-    transport_activity,
     transport_events,
-    transport_closing,
     transport_timer,
     gossip,
     reqresp,

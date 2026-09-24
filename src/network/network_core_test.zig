@@ -627,19 +627,23 @@ test "managed runtime socket faults preserve the other owner and local dial refu
     faults.init(std.testing.io);
     defer faults.deinit();
     const io = faults.io();
-    for ([_]std.Io.net.Socket.Handle{ node.transport.udp.sockets.primary().handle, node.discovery.?.transport.sockets.primary().handle }) |socket| {
-        faults.receive = .{ .socket = socket };
+    const sender = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
+    defer sender.close(std.testing.io);
+    for ([_]std.Io.net.Socket{ node.transport.udp.sockets.primary(), node.discovery.?.transport.sockets.primary() }) |socket| {
+        // The owner receives only from a socket its poll reported readable.
+        try sender.send(std.testing.io, &socket.address, "invalid");
+        faults.receive = .{ .socket = socket.handle };
         faults.receive_calls = 0;
-        faults.longest_wait_ms = 0;
         const result = node.step(io, now, 0, .{}, 1000);
         try std.testing.expectEqual(error.Canceled, result.failure.?);
-        if (socket == node.discovery.?.transport.sockets.primary().handle) {
+        if (socket.handle == node.discovery.?.transport.sockets.primary().handle) {
             try std.testing.expectEqual(@import("discv5").Transport.FailureStage.receive, result.discovery.failure_stage);
             try std.testing.expectEqual(@as(u64, 1), node.discovery.?.coordinator.counters.receive_failures);
         }
-        try std.testing.expect(faults.receive_calls >= 2);
-        try std.testing.expect(faults.longest_wait_ms <= runtime.poll_wait_max_ms);
+        try std.testing.expect(faults.receive_calls >= 1);
         try std.testing.expect(node.last_now.mono_ms >= now.mono_ms);
+        faults.receive = null;
+        _ = node.step(io, node.last_now, 0, .{}, 0);
     }
     faults.receive = null;
     const idle = node.step(std.testing.io, now, 0, .{}, 0);
@@ -787,7 +791,6 @@ test "managed runtime native readiness wakes for either delayed protocol socket"
     if (!runtime.wait.supported) return error.SkipZigTest;
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{31}));
     var opts = options(&key);
-    opts.startup.wait_mode = .native_poll;
     opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
     var node: runtime.NetworkCore = undefined;
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
@@ -823,7 +826,6 @@ test "managed runtime native host wake validates rollback detaches and preserves
     if (!runtime.wait.supported) return error.SkipZigTest;
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{32}));
     var opts = options(&key);
-    opts.startup.wait_mode = .native_poll;
     opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
     var node: runtime.NetworkCore = undefined;
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
@@ -856,25 +858,10 @@ test "managed runtime native host wake validates rollback detaches and preserves
     try std.testing.expectEqualStrings("invalid", message.data);
 }
 
-test "managed runtime portable fallback rejects enabled host source" {
-    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{33}));
-    var node: runtime.NetworkCore = undefined;
-    var opts = options(&key);
-    opts.startup.wait_mode = .portable;
-    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
-    defer node.deinit(std.testing.io);
-    try std.testing.expectError(error.UnsupportedWait, node.setHostWake(1));
-    try node.setHostWake(null);
-    const result = node.step(std.testing.io, try @import("transport.zig").currentTime(std.testing.io), 0, .{}, 0);
-    try std.testing.expect(result.failure == null);
-    try std.testing.expectEqual(@as(u64, 0), node.counters.readiness_calls);
-}
-
 test "managed runtime native wait source failure retains completed protocol progress" {
     if (!runtime.wait.supported) return error.SkipZigTest;
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{34}));
     var opts = options(&key);
-    opts.startup.wait_mode = .native_poll;
     opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
     var node: runtime.NetworkCore = undefined;
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
@@ -899,11 +886,10 @@ test "managed runtime native wait source failure retains completed protocol prog
     try std.testing.expectEqual(@as(u64, 1), node.counters.readiness_failures);
 }
 
-test "managed runtime native wait honors pacing native timers and pending lifecycle work" {
+test "managed runtime native wait honors engine timers and pending lifecycle work" {
     if (!runtime.wait.supported) return error.SkipZigTest;
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{35}));
     var opts = options(&key);
-    opts.startup.wait_mode = .native_poll;
     opts.resolved.limits.handshake_timeout_ms = 80;
     var node: runtime.NetworkCore = undefined;
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
@@ -912,30 +898,27 @@ test "managed runtime native wait honors pacing native timers and pending lifecy
     defer remote.close(std.testing.io);
     const destination = @import("udp.zig").fromNetwork(remote.address);
     const now = try @import("transport.zig").currentTime(std.testing.io);
-    const handle = try node.transport.engine.dial(&destination, node.peerId(), now);
+    _ = try node.transport.engine.dial(&destination, node.peerId(), now);
+    try std.testing.expect(node.transport.engine.backlog());
     const first = node.step(std.testing.io, now, 0, .{}, 100);
     try std.testing.expect(first.failure == null);
     try std.testing.expectEqual(@as(u32, 0), first.readiness.timeout_ms);
     try std.testing.expect(first.transport.datagrams_sent > 0);
+    try std.testing.expect(!first.transport.backlog);
     const current = node.last_now;
-    var paced_bytes = "paced".*;
-    try node.transport.pending.put(handle, .{
-        .bytes = &paced_bytes,
-        .to = destination,
-        .transmit_at_ns = current.nanos() + 10 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(current.mono_ms + 10, node.nextWakeup(current, .{}).?);
-    const paced = node.step(std.testing.io, current, 0, .{}, 100);
-    try std.testing.expect(paced.failure == null);
-    try std.testing.expectEqual(@as(u32, 10), paced.readiness.timeout_ms);
-    const remaining = (now.mono_ms + 80) -| node.last_now.mono_ms;
-    try std.testing.expect(node.nextWakeup(node.last_now, .{}).? <= node.last_now.mono_ms + remaining);
-    const timer = node.step(std.testing.io, node.last_now, 0, .{}, 100);
+    const deadline = node.transport.nextDeadlineNs().?;
+    const deadline_ms = deadline / std.time.ns_per_ms + @intFromBool(deadline % std.time.ns_per_ms != 0);
+    try std.testing.expect(deadline_ms <= now.mono_ms + 80);
+    var protocol_wakeups: @import("wake_sources.zig").Wakeups = .{};
+    @import("managed.zig").collectWakeups(&node.peer_manager, &node.service, current, 0, 0, 4, &protocol_wakeups);
+    if (protocol_wakeups.earliest() == null or protocol_wakeups.earliest().? > deadline_ms) {
+        try std.testing.expectEqual(deadline_ms, node.nextWakeup(current, .{}).?);
+    }
+    const timer = node.step(std.testing.io, current, 0, .{}, 100);
     try std.testing.expect(timer.failure == null);
-    try std.testing.expect(timer.readiness.timeout_ms <= remaining);
+    try std.testing.expect(timer.readiness.timeout_ms <= deadline_ms -| current.mono_ms);
     const failed = try node.transport.engine.dial(&destination, node.peerId(), node.last_now);
     node.transport.engine.failSend(failed.index);
-    _ = node.transport.engine.takeHostWork();
     try std.testing.expect(node.transport.engine.eventsPending());
     const lifecycle = node.step(std.testing.io, node.last_now, 0, .{}, 100);
     try std.testing.expect(lifecycle.failure == null);
@@ -943,6 +926,59 @@ test "managed runtime native wait honors pacing native timers and pending lifecy
     try std.testing.expect(lifecycle.transport.events > 0);
     const repeated = node.step(std.testing.io, node.last_now, 0, .{}, 0);
     try std.testing.expectEqual(@as(usize, 0), repeated.transport.events);
+}
+
+test "managed runtime flushes a protocol reply in the turn that wrote it" {
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{36}));
+    const spoke_key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{37}));
+    var opts = options(&key);
+    var node: runtime.NetworkCore = undefined;
+    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
+    defer node.deinit(std.testing.io);
+    // A bare QUIC peer: it speaks multistream by hand and runs no protocol of its own.
+    var spoke: @import("transport.zig").Transport = .{};
+    try spoke.init(std.testing.allocator, std.testing.io, .{ .host = &spoke_key, .bind = .{ .ip4 = .loopback(0) } });
+    defer spoke.deinit(std.testing.io);
+    const conn = try spoke.dialPeer(std.testing.io, node.transport.localAddress(), node.peerId());
+    var events: [32]@import("quic/engine.zig").Event = undefined;
+    var connected = false;
+    for (0..400) |_| {
+        const stepped = try core_test.step(&spoke, std.testing.io, &events, &.{}, .{ .wait_max_ms = 1 });
+        for (events[0..stepped.events]) |event| connected = connected or event == .connected;
+        _ = node.step(std.testing.io, try @import("transport.zig").currentTime(std.testing.io), 0, .{}, 1);
+        if (connected) break;
+    }
+    try std.testing.expect(connected);
+    for (0..20) |_| {
+        _ = try core_test.step(&spoke, std.testing.io, &events, &.{}, .{ .wait_max_ms = 1 });
+        _ = node.step(std.testing.io, try @import("transport.zig").currentTime(std.testing.io), 0, .{}, 1);
+    }
+
+    const stream = try spoke.engine.openStream(conn);
+    const dialer = try @import("wire/multistream.zig").Dialer.init(@import("reqresp/root.zig").Protocol.ping_v1.id());
+    var proposal: [256]u8 = undefined;
+    const hello = try dialer.initialWrite(&proposal);
+    try std.testing.expectEqual(hello.len, try spoke.engine.write(stream, hello, false));
+    const flushed = try core_test.step(&spoke, std.testing.io, &events, &.{}, .{ .wait_max_ms = 0 });
+    try std.testing.expect(flushed.datagrams_sent > 0);
+
+    const turn = node.step(std.testing.io, try @import("transport.zig").currentTime(std.testing.io), 0, .{}, 100);
+    try std.testing.expect(turn.failure == null);
+    try std.testing.expect(turn.transport.datagrams_received > 0);
+    try std.testing.expect(turn.transport.datagrams_sent > 0);
+    try std.testing.expect(!turn.transport.backlog);
+    try std.testing.expect(!turn.transport.events_pending);
+    try std.testing.expect(node.transport.nextDeadlineNs().? > node.last_now.nanos());
+
+    // The spoke reads the reply without the node taking another turn.
+    var reply: [256]u8 = undefined;
+    var received: usize = 0;
+    for (0..20) |_| {
+        _ = try core_test.step(&spoke, std.testing.io, &events, &.{}, .{ .wait_max_ms = 10 });
+        received += (try spoke.engine.read(stream, reply[received..])).len;
+        if (received >= hello.len) break;
+    }
+    try std.testing.expectEqualSlices(u8, hello, reply[0..hello.len]);
 }
 
 test "managed runtime subscriptions use copied startup policy and reject atomically" {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const constants = @import("constants.zig");
 const schedule = @import("quic/schedule.zig");
 const engine_mod = @import("quic/engine.zig");
@@ -24,44 +25,43 @@ pub const InitError = tls.Error || engine_mod.Error || std.Io.net.IpAddress.Bind
     error{ClockOutOfRange};
 
 pub const send_burst_max: u16 = 256;
-pub const work_per_step_ceiling: u16 = 4096;
 
 pub const WorkLimits = struct {
+    /// Datagrams sent per turn.
     send_per_step_max: u16 = send_burst_max,
     receive_per_step_max: u16 = constants.receive_batch_max,
-    work_per_step_max: u16 = 1024,
+    /// Datagrams sent per dirty-connection visit.
+    burst_per_connection: u16 = constants.send_batch_max,
 
     pub fn validate(self: WorkLimits) error{InvalidLimits}!void {
         if (self.send_per_step_max == 0 or self.send_per_step_max > send_burst_max) return error.InvalidLimits;
         if (self.receive_per_step_max == 0 or self.receive_per_step_max > constants.receive_batch_max) return error.InvalidLimits;
-        if (self.work_per_step_max < 2 or self.work_per_step_max > work_per_step_ceiling) return error.InvalidLimits;
+        if (self.burst_per_connection == 0 or self.burst_per_connection > self.send_per_step_max) return error.InvalidLimits;
     }
 };
 
+/// One sendmmsg batch. quiche writes each datagram straight into `buffers`, and datagrams of
+/// different connections share a batch.
 pub const SendBatch = struct {
     buffers: [constants.send_batch_max][constants.datagram_size_max]u8 = undefined,
     sent: [constants.send_batch_max]types.Sent = undefined,
-    owner: types.Handle = undefined,
+    owners: [constants.send_batch_max]types.Handle = undefined,
 };
 
-/// Host-owned pacing storage and configured QUIC windows, excluding native overhead.
+/// Configured QUIC windows and the send batch, excluding native overhead.
 pub const MemoryPlan = struct {
     engine: engine_mod.MemoryPlan,
-    scheduled_datagrams: u16,
-    scheduled_payload_bytes: u64,
-    scheduled_storage_bytes: u64,
     ready_batch_datagrams: u8 = constants.send_batch_max,
     ready_batch_storage_bytes: u64 = @sizeOf(SendBatch),
 };
 
-const IoError = udp_mod.ReceiveTimeoutError || udp_mod.SendError || error{
-    ClockOutOfRange,
-    DestinationUnreachable,
-};
+const IoError = udp_mod.ReceiveTimeoutError || error{ClockOutOfRange};
 
 pub const StepError = IoError || error{KeylogWriteFailed};
-pub const DialError = IoError || engine_mod.DialError || error{MissingPeerId};
+pub const DialError = udp_mod.SendError || engine_mod.DialError || error{ ClockOutOfRange, DestinationUnreachable, MissingPeerId };
 
+/// Options of the standalone `step`, which also waits for the socket. NetworkCore polls its
+/// sockets itself and drives the phases directly.
 pub const StepOptions = struct {
     wait_max_ms: u32 = constants.poll_interval_ms,
 };
@@ -84,11 +84,10 @@ pub const StepResult = struct {
     send_failures: u32 = 0,
     events: usize = 0,
     events_pending: bool = false,
+    /// Connections with stream events, derived by the standalone `step`.
     activity: usize = 0,
-    activity_pending: bool = false,
-    work_processed: u32 = 0,
-    work_pending: bool = false,
-    scheduled_datagrams: usize = 0,
+    /// A flush stopped at a burst or turn budget, so connections still have output.
+    backlog: bool = false,
 };
 
 pub const ProgressResult = struct {
@@ -100,14 +99,8 @@ pub const Transport = struct {
     engine: engine_mod.Engine = undefined,
     udp: udp_mod.Udp = undefined,
     work_limits: WorkLimits = .{},
-    pending: schedule.Queue = undefined,
-    cursor: schedule.Cursor = .{},
-    immediate_work: bool = false,
-    idle_connections: usize = 0,
-    scan_connections: usize = 0,
     batch: SendBatch = .{},
     batch_len: u8 = 0,
-    output: [constants.datagram_size_max]u8 = undefined,
     receive_buffer: [constants.datagram_size_max]u8 = undefined,
     keylog: ?std.Io.File = null,
     keylog_offset: u64 = 0,
@@ -149,20 +142,13 @@ pub const Transport = struct {
             .seed = &seed_bytes,
         });
         context_owned = false;
-        errdefer target.engine.deinit();
-        target.pending = try schedule.Queue.init(allocator, options.limits.connections_max);
         target.work_limits = options.work_limits;
-        target.cursor = .{};
-        target.immediate_work = false;
-        target.idle_connections = 0;
-        target.scan_connections = 0;
         target.batch_len = 0;
         assert(target.engine.registry.slots.len == options.limits.connections_max);
         assert(target.keylog != null or options.keylog_path == null);
     }
 
     pub fn deinit(self: *Transport, io: std.Io) void {
-        self.pending.deinit(self.engine.allocator);
         self.engine.deinit();
         self.udp.close(io);
         if (self.keylog) |file| file.close(io);
@@ -185,12 +171,7 @@ pub const Transport = struct {
     }
 
     pub fn memoryPlan(self: *const Transport) MemoryPlan {
-        return .{
-            .engine = self.engine.memoryPlan(),
-            .scheduled_datagrams = @intCast(self.pending.entries.len),
-            .scheduled_payload_bytes = self.pending.entries.len * constants.datagram_size_max,
-            .scheduled_storage_bytes = self.pending.entries.len * @sizeOf(schedule.Entry),
-        };
+        return .{ .engine = self.engine.memoryPlan() };
     }
 
     pub fn dial(
@@ -202,17 +183,12 @@ pub const Transport = struct {
         return self.dialPeer(io, target.address, expected);
     }
 
-    pub fn nextTimeoutMs(self: *const Transport, now: engine_mod.Now) ?u64 {
-        if (self.immediate_work) return 0;
-        if (self.engine.hostWorkPending() or self.engine.activityPending()) return 0;
-        var next = self.engine.nextTimeoutMs(now);
-        if (self.pending.nextDeadline()) |deadline| {
-            const remaining = schedule.remainingMs(deadline, now.nanos());
-            next = @min(next orelse remaining, remaining);
-        }
-        return next;
+    /// Earliest engine timer key in monotonic nanoseconds. O(1).
+    pub fn nextDeadlineNs(self: *const Transport) ?u64 {
+        return self.engine.nextDeadlineNs();
     }
 
+    /// Sends the first flight before returning, so a local send failure is a dial error.
     pub fn dialPeer(
         self: *Transport,
         io: std.Io,
@@ -224,25 +200,23 @@ pub const Transport = struct {
             error.AddressFamilyUnsupported => return error.DestinationUnreachable,
             else => return err,
         };
-        errdefer {
-            self.pending.remove(handle.index);
-            _ = self.engine.abandon(handle);
-        }
+        assert(self.batch_len == 0);
         var result = StepResult{ .now = now };
-        errdefer _ = self.flush(io, &result);
-        var turn = schedule.Turn.init(self.work_limits.send_per_step_max, self.work_limits.work_per_step_max);
-        while (turn.canSend() and turn.takeWork()) {
-            if (!try self.serviceConnection(io, handle.index, false, &turn, &result)) break;
-            if (self.flush(io, &result)) |err| return err;
-            if (self.pending.owner(handle.index) != null) break;
+        var turn = schedule.Turn.init(self.work_limits.send_per_step_max);
+        const drained = self.burst(io, handle.index, handle, now, &turn, &result);
+        const failure = self.submit(io, &result);
+        self.engine.sent(handle.index, now, drained);
+        if (failure) |err| {
+            _ = self.engine.abandon(handle);
+            return mapSendError(err);
         }
-        if (self.flush(io, &result)) |err| return err;
-        self.immediate_work = !turn.canSend() or turn.work == turn.work_max;
         return handle;
     }
 
-    /// Publishes completed work on failure, after pending sends unwind.
-    /// A failure to read the initial clock leaves the turn and pending events untouched.
+    /// Standalone turn for programs that own only a Transport: waits up to `wait_max_ms` for a
+    /// datagram when nothing is due, then receives, expires timers, collects events and flushes.
+    /// Publishes completed work on failure. A failure to read the initial clock leaves the turn
+    /// and pending events untouched.
     pub fn step(
         self: *Transport,
         io: std.Io,
@@ -254,187 +228,145 @@ pub const Transport = struct {
             .progress = .{ .now = .{ .mono_ms = 0, .unix_s = 0 } },
             .failure = err,
         } };
-        const failure: ?StepError = if (self.run(io, &result, options)) |_| null else |err| err;
-        self.publish(events, activity, &result);
+        self.engine.releaseReported();
+        const wait_ms = self.idleWaitMs(result.now, options.wait_max_ms);
+        var failure: ?StepError = if (self.receiveBatch(io, &result, wait_ms)) |_| null else |err| err;
+        // The wait may have slept; timers use a fresh clock when one can be read.
+        if (currentTime(io)) |fresh| {
+            if (fresh.mono_ms >= result.now.mono_ms) result.now = fresh;
+        } else |err| failure = failure orelse err;
+        self.expire(result.now);
+        self.engine.collect(result.now);
+        self.flush(io, result.now, &result);
+        // Events from this turn's sends, such as a close reached by sending CONNECTION_CLOSE, are
+        // published with the rest.
+        result.events = self.engine.pollEvents(events);
+        result.events_pending = self.engine.eventsPending();
+        result.activity = deriveActivity(events[0..result.events], activity);
         if (failure) |err| return .{ .progress = result, .failure = err };
         self.drainKeylog(io) catch |err| return .{ .progress = result, .failure = err };
         return .{ .progress = result };
     }
 
-    fn run(
-        self: *Transport,
-        io: std.Io,
-        result: *StepResult,
-        options: StepOptions,
-    ) IoError!void {
+    /// Non-blocking drain of the QUIC socket into the engine, up to the receive budget.
+    pub fn receive(self: *Transport, io: std.Io, result: *StepResult) IoError!void {
+        return self.receiveBatch(io, result, 0);
+    }
+
+    pub fn expire(self: *Transport, now: engine_mod.Now) void {
+        self.engine.expire(now);
+    }
+
+    /// Gathers stream readiness for the connections touched this turn and drains their events.
+    pub fn collect(self: *Transport, now: engine_mod.Now, events: []engine_mod.Event) usize {
+        self.engine.collect(now);
+        return self.engine.pollEvents(events);
+    }
+
+    /// Drains the dirty connections in bursts of burst_per_connection datagrams until each
+    /// reports Done or the turn's send budget runs out. A connection its burst did not finish
+    /// moves to the dirty tail, so busy connections share the budget round-robin. A failed
+    /// datagram fails only its own connection; the rest of its batch is resubmitted.
+    pub fn flush(self: *Transport, io: std.Io, now: engine_mod.Now, result: *StepResult) void {
         assert(self.batch_len == 0);
-        errdefer {
-            _ = self.flush(io, result);
-            self.immediate_work = true;
+        var turn = schedule.Turn.init(self.work_limits.send_per_step_max);
+        // Each visit either drains its connection or sends at least one datagram.
+        const visits_max = self.engine.dirtyCount() + turn.send_max;
+        for (0..visits_max) |_| {
+            if (!turn.canSend()) break;
+            const index = self.engine.nextDirty() orelse break;
+            const owner = self.engine.sendOwner(index) orelse {
+                self.engine.sent(index, now, true);
+                continue;
+            };
+            const drained = self.burst(io, index, owner, now, &turn, result);
+            self.engine.sent(index, now, drained);
         }
-        self.engine.releaseReported();
-        const active_count = self.engine.activeIndices().len;
-        const host_work = self.engine.takeHostWork();
-        if (host_work or self.idle_connections >= active_count) self.idle_connections = 0;
-        for (self.pending.entries, 0..) |*entry, index| {
-            if (entry.handle) |owner| {
-                const current = self.engine.sendOwner(owner.index);
-                if (current == null or !std.meta.eql(current.?, owner)) self.pending.remove(@intCast(index));
-            }
+        _ = self.submit(io, result);
+        result.backlog = self.engine.backlog();
+        self.engine.finishFlush(now);
+    }
+
+    /// Sends up to burst_per_connection datagrams of one connection into the shared batch.
+    /// Returns whether quiche reported nothing left to send.
+    fn burst(self: *Transport, io: std.Io, index: u16, owner: types.Handle, now: engine_mod.Now, turn: *schedule.Turn, result: *StepResult) bool {
+        var count: u16 = 0;
+        while (count < self.work_limits.burst_per_connection and turn.canSend()) : (count += 1) {
+            if (self.batch_len == constants.send_batch_max) _ = self.submit(io, result);
+            const at = self.batch_len;
+            const sent = self.engine.sendOne(index, now, &self.batch.buffers[at]) orelse return true;
+            self.batch.sent[at] = sent;
+            self.batch.owners[at] = owner;
+            self.batch_len += 1;
+            turn.recordSend();
         }
-        self.immediate_work = false;
-        var turn = schedule.Turn.init(self.work_limits.send_per_step_max, self.work_limits.work_per_step_max);
-        defer result.work_processed = turn.work;
-        var visits: u32 = 0;
-        try self.service(io, &turn, result, &visits, turn.work_max / 2);
-        _ = self.flush(io, result);
-        var received_count: u32 = 0;
-        while (received_count < self.work_limits.receive_per_step_max and turn.work < turn.work_max) : (received_count += 1) {
-            result.now = try currentTime(io);
-            const wait_ms: ?u32 = if (received_count == 0) options.wait_max_ms else null;
-            const received = try self.receiveDatagram(io, result, wait_ms);
-            if (received == .timeout) break;
-            assert(turn.takeWork());
-            const admitted = switch (received) {
-                .timeout => unreachable,
+        return false;
+    }
+
+    /// Returns the first send failure, after failing the connection that owned the datagram.
+    fn submit(self: *Transport, io: std.Io, result: *StepResult) ?udp_mod.SendError {
+        const count = self.batch_len;
+        if (count == 0) return null;
+        defer self.batch_len = 0;
+        if (builtin.mode == .Debug) assertReleased(io, self.batch.sent[0..count]);
+        var first: ?udp_mod.SendError = null;
+        var begin: usize = 0;
+        while (begin < count) {
+            result.send_calls += 1;
+            const outcome = self.udp.sendMany(io, self.batch.sent[begin..count]);
+            assert(begin + outcome.sent <= count);
+            result.datagrams_sent += @intCast(outcome.sent);
+            begin += outcome.sent;
+            const err = outcome.failure orelse break;
+            first = first orelse err;
+            const owner = self.batch.owners[begin];
+            if (self.engine.sendOwner(owner.index)) |current| if (std.meta.eql(current, owner)) {
+                self.engine.failSend(owner.index);
+                result.send_failures += 1;
+            };
+            begin += 1;
+        }
+        return first;
+    }
+
+    fn idleWaitMs(self: *const Transport, now: engine_mod.Now, wait_max_ms: u32) u32 {
+        if (wait_max_ms == 0 or self.engine.backlog() or self.engine.eventsPending()) return 0;
+        const deadline = self.engine.nextDeadlineNs() orelse return wait_max_ms;
+        const remaining = deadline -| now.nanos();
+        const ceiling = remaining / std.time.ns_per_ms + @intFromBool(remaining % std.time.ns_per_ms != 0);
+        return @intCast(@min(wait_max_ms, ceiling));
+    }
+
+    fn receiveBatch(self: *Transport, io: std.Io, result: *StepResult, first_wait_ms: u32) IoError!void {
+        var count: u32 = 0;
+        while (count < self.work_limits.receive_per_step_max) : (count += 1) {
+            const wait_ms: u32 = if (count == 0) first_wait_ms else 0;
+            const admitted = switch (try self.receiveDatagram(io, result, wait_ms)) {
+                .timeout => break,
                 .dropped => continue,
                 .datagram => |datagram| datagram,
             };
             result.datagrams_received += 1;
-            result.now = try currentTime(io);
-            const outcome = self.engine.receive(admitted.bytes, &admitted.from, result.now, &self.output);
+            // Version negotiation and retry replies use the idle batch buffer.
+            const outcome = self.engine.receive(admitted.bytes, &admitted.from, result.now, &self.batch.buffers[0]);
             switch (outcome) {
-                .accepted => {
-                    result.datagrams_accepted += 1;
-                    self.idle_connections = 0;
-                },
+                .accepted => result.datagrams_accepted += 1,
                 .version_negotiation, .retry => |bytes| {
-                    if (turn.canSend()) {
-                        turn.recordSend();
-                        self.udp.send(io, &admitted.from, bytes) catch {};
-                        if (outcome == .version_negotiation) result.version_negotiations += 1;
-                    }
+                    self.udp.send(io, &admitted.from, bytes) catch {};
+                    if (outcome == .version_negotiation) result.version_negotiations += 1;
                 },
                 .dropped => result.datagrams_dropped += 1,
             }
         }
-        const receive_work_exhausted = turn.work == turn.work_max;
-        result.now = try currentTime(io);
-        try self.service(io, &turn, result, &visits, turn.work_max);
-        _ = self.flush(io, result);
-        if (receive_work_exhausted or received_count == self.work_limits.receive_per_step_max) {
-            self.immediate_work = true;
-        }
-        assert(turn.work <= self.work_limits.work_per_step_max);
-        assert(turn.sent <= self.work_limits.send_per_step_max);
-    }
-
-    fn publish(self: *Transport, events: []engine_mod.Event, activity: []engine_mod.Handle, result: *StepResult) void {
-        result.events = self.engine.pollEvents(events);
-        result.events_pending = self.engine.eventsPending();
-        result.activity = self.engine.takeActivity(activity);
-        result.activity_pending = self.engine.activityPending();
-        result.work_pending = self.immediate_work;
-        result.scheduled_datagrams = self.pending.count;
-        assert(result.events <= events.len);
-        assert(result.activity <= activity.len);
-    }
-
-    fn service(
-        self: *Transport,
-        io: std.Io,
-        turn: *schedule.Turn,
-        result: *StepResult,
-        visits: *u32,
-        work_stop: u32,
-    ) IoError!void {
-        const active = self.engine.activeIndices();
-        if (active.len == 0) return;
-        if (self.scan_connections != active.len) {
-            self.scan_connections = active.len;
-            self.idle_connections = 0;
-        }
-        while (turn.canSend() and turn.work < work_stop and self.idle_connections < active.len) {
-            assert(turn.takeWork());
-            const index = self.cursor.next(active).?;
-            const progressed = try self.serviceConnection(io, index, visits.* < active.len, turn, result);
-            visits.* += 1;
-            self.idle_connections = if (progressed) 0 else self.idle_connections + 1;
-        }
-        if (self.idle_connections < active.len and (!turn.canSend() or turn.work == work_stop)) self.immediate_work = true;
-        if (self.idle_connections == active.len) self.immediate_work = false;
-    }
-
-    fn serviceConnection(
-        self: *Transport,
-        io: std.Io,
-        index: u16,
-        tick: bool,
-        turn: *schedule.Turn,
-        result: *StepResult,
-    ) IoError!bool {
-        if (tick) self.engine.tickOne(index, result.now);
-        const owner = self.engine.sendOwner(index) orelse {
-            self.pending.remove(index);
-            return false;
-        };
-        if (self.pending.owner(index)) |stored| {
-            if (!std.meta.eql(stored, owner)) self.pending.remove(index);
-        }
-        var generated = false;
-        if (self.pending.owner(index) == null) {
-            const sent = self.engine.sendOne(index, result.now, &self.output) orelse return false;
-            self.pending.put(owner, sent) catch unreachable;
-            generated = true;
-            result.now = try currentTime(io);
-        }
-        const ready = self.pending.ready(index, result.now.nanos()) orelse return generated;
-        assert(turn.canSend());
-        // The socket reports only batch-level failure, so a batch must have one owner.
-        if (self.batch_len > 0 and !std.meta.eql(self.batch.owner, owner)) {
-            _ = self.flush(io, result);
-        }
-        const at = self.batch_len;
-        @memcpy(self.batch.buffers[at][0..ready.bytes.len], ready.bytes);
-        self.batch.sent[at] = ready;
-        self.batch.sent[at].bytes = self.batch.buffers[at][0..ready.bytes.len];
-        self.batch.owner = owner;
-        self.batch_len += 1;
-        self.pending.remove(index);
-        turn.recordSend();
-        if (self.batch_len == constants.send_batch_max) _ = self.flush(io, result);
-        return true;
-    }
-
-    fn flush(self: *Transport, io: std.Io, result: *StepResult) ?IoError {
-        const count = self.batch_len;
-        if (count == 0) return null;
-        defer self.batch_len = 0;
-        const owner = self.batch.owner;
-        result.send_calls += 1;
-        self.udp.sendMany(io, self.batch.sent[0..count]) catch |err| {
-            if (self.engine.sendOwner(owner.index)) |current| {
-                if (std.meta.eql(current, owner)) {
-                    self.engine.failSend(owner.index);
-                    self.pending.remove(owner.index);
-                    result.send_failures += 1;
-                }
-            }
-            return mapSendError(err);
-        };
-        result.datagrams_sent += count;
-        return null;
     }
 
     fn receiveDatagram(
         self: *Transport,
         io: std.Io,
         result: *StepResult,
-        wait_ms: ?u32,
+        wait_ms: u32,
     ) IoError!Received {
-        const earliest = if ((wait_ms orelse 0) > 0) self.nextTimeoutMs(result.now) else null;
-        const timeout = receiveTimeout(wait_ms, earliest);
-        const datagram = self.udp.receiveTimeout(io, &self.receive_buffer, timeout) catch |err| switch (err) {
+        const datagram = self.udp.receiveTimeout(io, &self.receive_buffer, receiveTimeout(wait_ms)) catch |err| switch (err) {
             error.Timeout => return .timeout,
             error.DatagramTooLarge,
             error.PortUnreachable,
@@ -466,18 +398,35 @@ pub const Transport = struct {
     }
 };
 
-fn receiveTimeout(wait_ms: ?u32, earliest_ms: ?u64) std.Io.Timeout {
-    return if (wait_ms) |bound| blk: {
-        var wait: u64 = bound;
-        if (earliest_ms) |earliest| wait = @min(wait, earliest);
-        break :blk .{ .duration = .{
-            .raw = .fromMilliseconds(@intCast(wait)),
-            .clock = .awake,
-        } };
-    } else .{ .duration = .{ .raw = .zero, .clock = .awake } };
+/// One activity entry per connection with stream events; a connection's events are contiguous
+/// in one pollEvents batch.
+fn deriveActivity(events: []const engine_mod.Event, out: []engine_mod.Handle) usize {
+    var count: usize = 0;
+    for (events) |event| {
+        const conn = engine_mod.activityOf(event) orelse continue;
+        if (count > 0 and std.meta.eql(out[count - 1], conn)) continue;
+        if (count == out.len) break;
+        out[count] = conn;
+        count += 1;
+    }
+    return count;
 }
 
-fn mapSendError(err: udp_mod.SendError) IoError {
+/// quiche 0.28 under CUBIC releases every datagram at its send time. A controller that paces
+/// would need held datagrams, which this transport does not keep.
+fn assertReleased(io: std.Io, batch: []const types.Sent) void {
+    const now = currentTime(io) catch return;
+    for (batch) |sent| assert(sent.transmit_at_ns <= now.nanos());
+}
+
+fn receiveTimeout(wait_ms: u32) std.Io.Timeout {
+    return .{ .duration = .{
+        .raw = .fromMilliseconds(wait_ms),
+        .clock = .awake,
+    } };
+}
+
+fn mapSendError(err: udp_mod.SendError) DialError {
     return switch (err) {
         error.AccessDenied,
         error.AddressFamilyUnsupported,
@@ -503,9 +452,8 @@ comptime {
 }
 
 test "transport zero wait remains an actual nonblocking timeout" {
-    const timeout = receiveTimeout(0, null);
-    try std.testing.expectEqual(@as(i96, 0), timeout.duration.raw.nanoseconds);
-    try std.testing.expectEqual(@as(i96, 0), receiveTimeout(5, 0).duration.raw.nanoseconds);
+    try std.testing.expectEqual(@as(i96, 0), receiveTimeout(0).duration.raw.nanoseconds);
+    try std.testing.expectEqual(@as(i96, 5 * std.time.ns_per_ms), receiveTimeout(5).duration.raw.nanoseconds);
 }
 
 test {

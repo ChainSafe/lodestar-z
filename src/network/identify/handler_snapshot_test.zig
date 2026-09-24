@@ -7,9 +7,7 @@ const identify = @import("root.zig");
 fn step(pair: *support.Pair, service: *service_mod.Service, server: bool, results: []identify.Result) usize {
     const engine = if (server) &pair.server else &pair.client;
     var events: [64]engine_mod.Event = undefined;
-    var activity: [128]engine_mod.Handle = undefined;
-    const count = engine.takeActivity(&activity);
-    return service.process(engine, pair.events(engine, &events), activity[0..count], pair.now, .{ .identify = results }).identify;
+    return service.process(engine, pair.events(engine, &events), pair.now, .{ .identify = results }).identify;
 }
 
 fn options(agent: []const u8) !service_mod.Options {
@@ -110,7 +108,7 @@ test "identify inbound timeout closes only withheld writer and shutdown releases
     for (0..32) |_| {
         var outcomes: [8]@import("../router.zig").Outcome = undefined;
         var activity: [128]engine_mod.Handle = undefined;
-        for (activity[0..pair.client.takeActivity(&activity)]) |conn| client.router.connectionActivity(conn);
+        for (activity[0..pair.activity(&pair.client, &activity)]) |conn| client.router.connectionActivity(conn);
         _ = client.router.pump(&pair.client, pair.now, &outcomes);
         try pair.pump();
         _ = step(&pair, &server, true, &.{});

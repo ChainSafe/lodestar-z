@@ -2,11 +2,13 @@ const std = @import("std");
 const binding = @import("binding.zig");
 const connection = @import("connection.zig");
 const constants = @import("../constants.zig");
+const index_list = @import("../index_list.zig");
 const limits = @import("limits.zig");
 const retry = @import("retry.zig");
 const peer_id = @import("../wire/peer_id.zig");
 const tls = @import("../tls/context.zig");
 const types = @import("../types.zig");
+const StreamTable = @import("stream_table.zig").StreamTable;
 
 const assert = std.debug.assert;
 const c = binding.c;
@@ -18,6 +20,7 @@ pub const CloseReason = types.CloseReason;
 pub const Read = types.Read;
 pub const Address = types.Address;
 pub const Sent = types.Sent;
+pub const Readiness = types.Readiness;
 
 pub const Error = std.mem.Allocator.Error || error{InvalidLimits};
 
@@ -42,6 +45,10 @@ pub const DialError = error{
 pub const Handle = types.Handle;
 pub const StreamHandle = types.StreamHandle;
 
+/// How long a turn may run after its clock read before a timer key checked against quiche's own
+/// clock is treated as late.
+const invariant_clock_slack_ns: u64 = 250 * std.time.ns_per_ms;
+
 pub const Event = union(enum) {
     connected: struct { conn: Handle, peer_id: peer_id.PeerId, direction: Direction },
     closed: struct {
@@ -50,10 +57,26 @@ pub const Event = union(enum) {
         direction: Direction,
         reason: CloseReason,
     },
+    /// A newly claimed peer stream. It implies readiness for read and write.
     stream_opened: StreamHandle,
+    /// Edge-triggered: a readable stream is reported again only after a read returned Done, and
+    /// a writable one only after a blocked write armed it and send capacity reached the armed
+    /// watermark, or the peer stopped the stream.
+    stream_ready: struct { stream: StreamHandle, ready: Readiness },
     stream_closed: struct { stream: StreamHandle, reset_code: ?u64 },
     path_changed: struct { conn: Handle, peer: Address },
 };
+
+/// The connection whose protocol owners an event can advance, for owners that still take
+/// connection activity. Lifecycle and path events advance none.
+pub fn activityOf(event: Event) ?Handle {
+    return switch (event) {
+        .stream_opened => |stream| stream.conn,
+        .stream_ready => |ready| ready.stream.conn,
+        .stream_closed => |closed| closed.stream.conn,
+        .connected, .closed, .path_changed => null,
+    };
+}
 
 pub const Limits = struct {
     connections_max: u16 = limits.connections_max_default,
@@ -85,6 +108,18 @@ pub const Counters = struct {
     invalid_retry_tokens: u64 = 0,
     path_changes: u64 = 0,
     keylog_dropped: u64 = 0,
+    /// quiche_conn_on_timeout calls, made only when a popped key found quiche's timer expired.
+    timeouts_fired: u64 = 0,
+};
+
+/// Per-connection visits by phase. An idle connection is visited in none of them.
+pub const Visits = struct {
+    /// Timer keys popped by expire.
+    timer: u64 = 0,
+    /// Connections whose stream readiness collect gathered.
+    collect: u64 = 0,
+    /// Dirty connections a flush pass drained.
+    flush: u64 = 0,
 };
 
 pub const ReceiveOutcome = union(enum) {
@@ -135,11 +170,8 @@ pub const Engine = struct {
     csprng: std.Random.DefaultCsprng,
     retry_key: [32]u8,
     counters: Counters = .{},
+    visits: Visits = .{},
     connection_metrics: ConnectionCounters = .{},
-    host_work_pending: bool = false,
-    // Physical slot positions preserve continuation through active-list swap removal.
-    event_cursor: u16 = 0,
-    activity_cursor: u16 = 0,
 
     pub const Resources = struct {
         capacity: usize,
@@ -231,16 +263,6 @@ pub const Engine = struct {
         self.* = undefined;
     }
 
-    pub fn hostWorkPending(self: *const Engine) bool {
-        return self.host_work_pending;
-    }
-
-    pub fn takeHostWork(self: *Engine) bool {
-        const pending = self.host_work_pending;
-        self.host_work_pending = false;
-        return pending;
-    }
-
     pub fn sendOwner(self: *const Engine, index: u16) ?Handle {
         if (index >= self.registry.slots.len) return null;
         const slot = &self.registry.slots[index];
@@ -284,34 +306,6 @@ pub const Engine = struct {
         return self.registry.active[0..self.registry.active_len];
     }
 
-    pub fn takeActivity(self: *Engine, out: []Handle) usize {
-        assert(self.registry.activity.len == self.registry.slots.len);
-        assert(self.registry.active_len <= self.registry.active.len);
-        assert(self.activity_cursor < self.registry.slots.len);
-        var count: usize = 0;
-        for (0..self.registry.slots.len) |_| {
-            if (count == out.len) break;
-            const index = self.activity_cursor;
-            self.activity_cursor = @intCast((@as(usize, index) + 1) % self.registry.slots.len);
-            const slot = &self.registry.slots[index];
-            if (slot.state == .free or !self.registry.activity[index]) continue;
-            out[count] = .{ .index = index, .generation = slot.generation };
-            self.registry.activity[index] = false;
-            count += 1;
-        }
-        assert(count <= out.len);
-        return count;
-    }
-
-    pub fn activityPending(self: *const Engine) bool {
-        assert(self.registry.activity.len == self.registry.slots.len);
-        assert(self.registry.active_len <= self.registry.active.len);
-        for (self.registry.active[0..self.registry.active_len]) |index| {
-            if (self.registry.activity[index]) return true;
-        }
-        return false;
-    }
-
     pub fn memoryPlan(self: *const Engine) MemoryPlan {
         const count = self.limits.connections_max;
         return .{
@@ -335,7 +329,6 @@ pub const Engine = struct {
         if (self.registry.outbound >= self.outbound_max) return error.DialLimit;
         const local = self.localFor(peer.*) orelse return error.AddressFamilyUnsupported;
         const index = self.registry.claim() orelse return error.TableFull;
-        self.host_work_pending = true;
         assert(index < self.registry.slots.len);
         const slot = &self.registry.slots[index];
         slot.open(&self.tls, &self.config, .{
@@ -358,6 +351,8 @@ pub const Engine = struct {
         self.registry.outbound += 1;
         assert(self.registry.dialing <= self.limits.dialing_max);
         assert(self.registry.outbound <= self.outbound_max);
+        self.markDirty(index);
+        self.rekey(index, now);
         return .{ .index = index, .generation = slot.generation };
     }
 
@@ -372,7 +367,7 @@ pub const Engine = struct {
         assert(slot.conn != null);
         assert(slot.close_reason == null);
         slot.close(.host, code);
-        self.host_work_pending = true;
+        self.markDirty(conn.index);
         return true;
     }
 
@@ -392,7 +387,6 @@ pub const Engine = struct {
         assert(conn.index < self.registry.slots.len);
         assert(self.registry.active_len > 0);
         self.retire(conn.index);
-        self.host_work_pending = true;
         return true;
     }
 
@@ -429,26 +423,32 @@ pub const Engine = struct {
         return slot.direction;
     }
 
+    /// Opening a stream queues no frame, so it marks nothing.
     pub fn openStream(self: *Engine, conn: Handle) StreamError!StreamHandle {
         const slot = try self.liveSlot(conn);
         const opened = slot.openStream() catch |err| {
-            if (err != error.StreamLimit and err != error.StreamTableFull and err != error.NotEstablished) self.host_work_pending = true;
+            if (err != error.StreamLimit and err != error.StreamTableFull and err != error.NotEstablished) self.markDirty(conn.index);
             return self.streamError(err);
         };
-        self.host_work_pending = true;
         assert(opened.index < limits.streams_per_connection);
         assert(slot.table.matches(opened.index, opened.id));
         return .{ .conn = conn, .id = opened.id, .slot = opened.index };
     }
 
+    /// Marks the connection dirty only when bytes were consumed or a FIN or reset was read.
+    /// A read that reaches Done ends the delivered readable edge.
     pub fn read(self: *Engine, stream: StreamHandle, buf: []u8) StreamError!Read {
         const target = try self.readableStream(stream);
         assert(target.slot.table.matches(target.index, target.id));
+        defer self.noteEvents(stream.conn.index);
         const result = target.slot.read(target.index, target.id, buf) catch |err|
             return self.streamError(err);
         assert(result.len <= buf.len);
         if (result.len > 0) assert(result.reset_code == null);
-        if (result.len > 0 or result.fin or result.reset_code != null) self.host_work_pending = true;
+        if (result.len > 0 or result.fin or result.reset_code != null) self.markLiveDirty(stream.conn.index);
+        if ((result.len == 0 or result.fin) and target.slot.table.matches(target.index, target.id)) {
+            target.slot.table.readDone(target.index);
+        }
         return result;
     }
 
@@ -457,6 +457,11 @@ pub const Engine = struct {
         return binding.c.quiche_conn_stream_readable(target.slot.conn.?, target.id);
     }
 
+    /// Marks the connection dirty only when bytes were accepted or a FIN was queued. A WouldBlock
+    /// or short write arms write interest at min(unwritten bytes, the connection's watermark
+    /// ceiling); a writable event follows once the stream's send capacity reaches it. Arming may
+    /// queue a blocked frame, so it marks the connection dirty; a repeated WouldBlock at the same
+    /// watermark marks nothing.
     pub fn write(
         self: *Engine,
         stream: StreamHandle,
@@ -465,16 +470,42 @@ pub const Engine = struct {
     ) StreamError!usize {
         const target = try self.liveStream(stream);
         assert(target.slot.table.matches(target.index, target.id));
-        self.host_work_pending = true;
-        const written = target.slot.write(target.index, target.id, bytes, fin) catch |err|
+        const index = stream.conn.index;
+        defer self.noteEvents(index);
+        const written = target.slot.write(target.index, target.id, bytes, fin) catch |err| {
+            if (err == error.WouldBlock) {
+                self.armWrite(index, target, bytes.len);
+            } else if (target.slot.table.matches(target.index, target.id)) {
+                target.slot.table.disarm(target.index);
+            }
             return self.streamError(err);
+        };
         assert(written <= bytes.len);
+        if (written > 0 or (fin and written == bytes.len)) self.markDirty(index);
+        if (!target.slot.table.matches(target.index, target.id)) return written;
+        if (written < bytes.len) {
+            self.armWrite(index, target, bytes.len - written);
+        } else target.slot.table.disarm(target.index);
         return written;
+    }
+
+    fn armWrite(self: *Engine, index: u16, target: Stream, wanted: usize) void {
+        assert(target.slot.table.matches(target.index, target.id));
+        const lowat: u32 = @intCast(@min(wanted, target.slot.write_lowat_ceiling));
+        if (lowat == 0) return;
+        const entry = &target.slot.table.entries[target.index];
+        if (entry.write_lowat == lowat) return;
+        target.slot.table.arm(target.index, lowat);
+        self.markDirty(index);
+        const rc = c.quiche_conn_stream_writable(target.slot.conn.?, target.id, lowat);
+        // Already writable, stopped or finished: the owner learns which on its next write.
+        if (rc != 0) target.slot.table.markReady(target.index, .{ .writable = true });
     }
 
     pub fn streamCapacity(self: *Engine, stream: StreamHandle) StreamError!usize {
         const target = try self.readableStream(stream);
         assert(target.slot.table.matches(target.index, target.id));
+        defer self.noteEvents(stream.conn.index);
         const available = target.slot.capacity(target.index, target.id) catch |err|
             return self.streamError(err);
         assert(target.index < limits.streams_per_connection);
@@ -485,9 +516,11 @@ pub const Engine = struct {
         const target = self.liveStream(stream) catch return;
         assert(target.index < limits.streams_per_connection);
         assert(target.slot.conn != null);
+        if (dir == .write) target.slot.table.disarm(target.index);
         target.slot.shutdown(target.index, target.id, dir, code);
-        self.host_work_pending = true;
-        self.registry.activity[stream.conn.index] = true;
+        self.markDirty(stream.conn.index);
+        self.recheckWriters(stream.conn.index);
+        self.noteEvents(stream.conn.index);
     }
 
     pub fn closeStream(self: *Engine, stream: StreamHandle, code: u64) void {
@@ -495,80 +528,128 @@ pub const Engine = struct {
         assert(target.index < limits.streams_per_connection);
         assert(target.slot.conn != null);
         target.slot.closeStream(target.index, target.id, code);
-        self.host_work_pending = true;
-        self.registry.activity[stream.conn.index] = true;
+        self.markDirty(stream.conn.index);
+        self.recheckWriters(stream.conn.index);
+        self.noteEvents(stream.conn.index);
     }
 
+    /// A local reset recomputes quiche's connection send capacity, so blocked writers on the
+    /// connection are checked again at the next collect.
+    fn recheckWriters(self: *Engine, index: u16) void {
+        if (self.registry.slots[index].table.armed != 0) self.markCollect(index);
+    }
+
+    /// Drains connections with undelivered events in FIFO order. A connection whose events do
+    /// not fit stays at the head. Per connection: connected, path_changed, stream events, closed.
     pub fn pollEvents(self: *Engine, events: []Event) usize {
-        assert(self.registry.active_len <= self.registry.active.len);
-        assert(self.event_cursor < self.registry.slots.len);
+        const slots = self.registry.slots;
         var count: usize = 0;
-        for (0..self.registry.slots.len) |_| {
-            if (count == events.len) return count;
-            const index = self.event_cursor;
-            self.event_cursor = @intCast((@as(usize, index) + 1) % self.registry.slots.len);
-            assert(index < self.registry.slots.len);
-            const slot = &self.registry.slots[index];
-            if (slot.state == .free) continue;
-            const conn = Handle{ .index = index, .generation = slot.generation };
-            if (slot.connected_pending) {
-                if (count == events.len) return count;
-                events[count] = .{ .connected = .{
-                    .conn = conn,
-                    .peer_id = slot.peer_id.?,
-                    .direction = slot.direction,
-                } };
-                count += 1;
-                slot.connected_pending = false;
-            }
-            if (slot.path_changed_pending) |peer| {
-                if (count == events.len) return count;
-                events[count] = .{ .path_changed = .{ .conn = conn, .peer = peer } };
-                count += 1;
-                slot.path_changed_pending = null;
-            }
-            if (slot.table.pending > 0) {
-                count = pollStreamEvents(slot, conn, events, count, &self.registry.activity[index]);
-                if (count == events.len) return count;
-            }
-            if (slot.close_event == .pending) {
-                if (count == events.len) return count;
-                events[count] = .{ .closed = .{
-                    .conn = conn,
-                    .peer_id = slot.peer_id,
-                    .direction = slot.direction,
-                    .reason = slot.close_reason.?,
-                } };
-                count += 1;
-                slot.close_event = .reported;
-            }
+        var visited: usize = 0;
+        while (count < events.len) : (visited += 1) {
+            assert(visited <= slots.len);
+            const head = self.registry.events.head;
+            if (head == index_list.none) break;
+            const index: u16 = @intCast(head);
+            const slot = &slots[index];
+            assert(slot.state != .free);
+            count = self.drainEvents(index, events, count);
+            if (slot.hasEvents()) break;
+            self.registry.events.remove(slots, "event_link", index);
+            if (slot.close_event == .reported) _ = self.registry.released.insert(slots, "release_link", index);
         }
         assert(count <= events.len);
         return count;
     }
 
-    pub fn eventsPending(self: *const Engine) bool {
-        assert(self.registry.active_len <= self.registry.active.len);
-        for (self.registry.active[0..self.registry.active_len]) |index| {
-            assert(index < self.registry.slots.len);
-            const slot = &self.registry.slots[index];
-            if (slot.connected_pending) return true;
-            if (slot.path_changed_pending != null) return true;
-            if (slot.table.pending > 0) return true;
-            if (slot.close_event == .pending) return true;
+    fn drainEvents(self: *Engine, index: u16, events: []Event, start: usize) usize {
+        const slot = &self.registry.slots[index];
+        const conn = self.toHandle(index);
+        var count = start;
+        if (slot.connected_pending) {
+            if (count == events.len) return count;
+            events[count] = .{ .connected = .{
+                .conn = conn,
+                .peer_id = slot.peer_id.?,
+                .direction = slot.direction,
+            } };
+            count += 1;
+            slot.connected_pending = false;
         }
-        return false;
+        if (slot.path_changed_pending) |peer| {
+            if (count == events.len) return count;
+            events[count] = .{ .path_changed = .{ .conn = conn, .peer = peer } };
+            count += 1;
+            slot.path_changed_pending = null;
+        }
+        const table = &slot.table;
+        for (0..limits.streams_per_connection) |_| {
+            const entry_index = table.nextPending() orelse break;
+            const entry = &table.entries[entry_index];
+            const stream: StreamHandle = .{ .conn = conn, .id = entry.id, .slot = entry_index };
+            if (entry.opened_pending) {
+                if (count == events.len) return count;
+                events[count] = .{ .stream_opened = stream };
+                count += 1;
+                table.takeOpened(entry_index);
+            }
+            const ready: u2 = @bitCast(entry.ready);
+            if (ready != 0) {
+                assert(!entry.closed_pending);
+                if (count == events.len) return count;
+                events[count] = .{ .stream_ready = .{ .stream = stream, .ready = table.takeReady(entry_index) } };
+                count += 1;
+            }
+            if (entry.closed_pending) {
+                if (count == events.len) return count;
+                const closed = table.takeClosed(entry_index).?;
+                events[count] = .{ .stream_closed = .{
+                    .stream = .{ .conn = conn, .id = closed.id, .slot = entry_index },
+                    .reset_code = closed.reset_code,
+                } };
+                count += 1;
+            }
+            assert(table.pending & @import("stream_table.zig").bit(entry_index) == 0);
+            table.advanceCursor(entry_index);
+        }
+        if (table.hasPending()) return count;
+        if (slot.close_event == .pending) {
+            if (count == events.len) return count;
+            events[count] = .{ .closed = .{
+                .conn = conn,
+                .peer_id = slot.peer_id,
+                .direction = slot.direction,
+                .reason = slot.close_reason.?,
+            } };
+            count += 1;
+            slot.close_event = .reported;
+        }
+        return count;
     }
 
-    /// A connection is closed and not yet released, or has a close armed for its next tick.
-    pub fn closingPending(self: *const Engine) bool {
-        assert(self.registry.active_len <= self.registry.active.len);
-        for (self.registry.active[0..self.registry.active_len]) |index| {
-            const slot = &self.registry.slots[index];
-            assert(slot.state != .free);
-            if (slot.state == .closed or slot.pending_close != null) return true;
-        }
-        return false;
+    /// O(1).
+    pub fn eventsPending(self: *const Engine) bool {
+        return self.registry.events.len > 0;
+    }
+
+    /// First connection that may have output. O(1).
+    pub fn nextDirty(self: *const Engine) ?u16 {
+        const head = self.registry.dirty.head;
+        return if (head == index_list.none) null else @intCast(head);
+    }
+
+    pub fn dirtyCount(self: *const Engine) usize {
+        return self.registry.dirty.len;
+    }
+
+    /// A flush left connections with output. O(1).
+    pub fn backlog(self: *const Engine) bool {
+        return self.registry.dirty.len > 0;
+    }
+
+    /// Earliest timer key in monotonic nanoseconds. O(1).
+    pub fn nextDeadlineNs(self: *const Engine) ?u64 {
+        const top = self.registry.timers.peek() orelse return null;
+        return top.deadline;
     }
 
     pub fn receive(
@@ -584,13 +665,15 @@ pub const Engine = struct {
         const header = binding.headerInfo(datagram) catch
             return drop(&self.counters.dropped_unroutable);
         if (self.registry.findRoute(&header.dcid)) |index| {
-            self.feed(index, datagram, from);
+            _ = self.feed(index, datagram, from, now, false);
             return .{ .accepted = self.toHandle(index) };
         }
         if (header.packet_type == .short) {
+            // A peer that changed its connection ID after a rebinding is found by address. Junk
+            // from a live peer's address marks nothing.
             const index = self.slotForPeer(from) orelse
                 return drop(&self.counters.dropped_unroutable);
-            self.feed(index, datagram, from);
+            if (!self.feed(index, datagram, from, now, true)) return drop(&self.counters.dropped_unroutable);
             return .{ .accepted = self.toHandle(index) };
         }
         if (datagram.len < limits.client_initial_min) {
@@ -645,7 +728,7 @@ pub const Engine = struct {
         assert(slot.scid.eql(&header.dcid));
         self.registry.handshaking += 1;
         assert(self.registry.handshaking <= self.limits.handshaking_max);
-        self.feed(index, datagram, from);
+        _ = self.feed(index, datagram, from, now, false);
         return .{ .accepted = self.toHandle(index) };
     }
 
@@ -678,17 +761,28 @@ pub const Engine = struct {
         return .{ .version_negotiation = out[0..length] };
     }
 
-    pub fn tick(self: *Engine, now: Now) void {
-        for (self.registry.active[0..self.registry.active_len]) |index| self.tickOne(index, now);
+    /// Pops due timer keys. Applies the handshake limit, keep-alive and an armed deferred close,
+    /// and calls on_timeout only when quiche's own timer has expired. Each popped connection
+    /// joins collect and dirty. A connection re-keyed during this call is not popped again in it.
+    pub fn expire(self: *Engine, now: Now) void {
+        const registry = &self.registry;
+        const now_ns = now.nanos();
+        var count: usize = 0;
+        while (count < registry.expired.len) : (count += 1) {
+            const row = registry.timers.popDue(now_ns) orelse break;
+            registry.expired[count] = @intCast(row);
+        }
+        self.visits.timer +|= count;
+        for (registry.expired[0..count]) |index| self.fire(index, now);
     }
 
-    pub fn tickOne(self: *Engine, index: u16, now: Now) void {
+    fn fire(self: *Engine, index: u16, now: Now) void {
         const slot = &self.registry.slots[index];
-        assert(slot.state != .free);
-        if (slot.state == .closed) return;
-        const expired = if (slot.timeoutMs()) |remaining| remaining == 0 else false;
-        slot.onTimeout();
-        if (expired) self.registry.activity[index] = true;
+        assert(slot.state == .handshaking or slot.state == .established);
+        if (slot.timeoutNs()) |remaining| if (remaining == 0) {
+            slot.onTimeout();
+            self.counters.timeouts_fired +|= 1;
+        };
         if (slot.state == .handshaking and slot.close_reason == null and
             now.mono_ms -| slot.created_ms >= self.handshakeLimitMs(slot))
         {
@@ -700,7 +794,6 @@ pub const Engine = struct {
             slot.keepAlive())
         {
             slot.last_send_ms = now.mono_ms;
-            self.registry.activity[index] = true;
         }
         if (slot.pending_close) |pending| {
             if (pending.stage == .armed) {
@@ -712,59 +805,261 @@ pub const Engine = struct {
         }
         self.refresh(index);
         self.observePath(index);
+        self.touched(index, now);
     }
 
-    pub fn nextTimeoutMs(self: *const Engine, now: Now) ?u64 {
-        assert(self.registry.active_len <= self.registry.active.len);
-        if (self.eventsPending() or self.closingPending()) return 0;
-        var earliest: ?u64 = null;
-        for (self.registry.active[0..self.registry.active_len]) |index| {
-            const slot = &self.registry.slots[index];
-            assert(slot.state != .free);
-            var timeout = slot.timeoutMs();
-            if (slot.close_reason == null) {
-                const deadline = if (slot.state == .handshaking)
-                    slot.created_ms +| self.handshakeLimitMs(slot)
-                else
-                    slot.last_send_ms +| self.limits.keep_alive_ms;
-                const host_timeout = deadline -| now.mono_ms;
-                timeout = @min(timeout orelse host_timeout, host_timeout);
+    /// Gathers stream readiness for the connections that received datagrams or had a timer fire,
+    /// claiming new peer streams, and refreshes their timer keys.
+    pub fn collect(self: *Engine, now: Now) void {
+        const slots = self.registry.slots;
+        var visited: usize = 0;
+        while (self.registry.collect.pop(slots, "collect_link")) |row| : (visited += 1) {
+            assert(visited < slots.len);
+            const index: u16 = @intCast(row);
+            self.visits.collect +|= 1;
+            const slot = &slots[index];
+            if (slot.state != .handshaking and slot.state != .established) continue;
+            self.refresh(index);
+            if (slot.state == .established and slot.pending_close == null) {
+                self.gatherReadable(index);
+                self.gatherWritable(index);
             }
-            if (timeout) |remaining| earliest = @min(earliest orelse remaining, remaining);
+            self.observePath(index);
+            self.rekey(index, now);
+            self.noteEvents(index);
         }
-        return earliest;
     }
 
+    /// Drains quiche's readable edges and claims new peer streams.
+    fn gatherReadable(self: *Engine, index: u16) void {
+        const slot = &self.registry.slots[index];
+        const conn = slot.conn.?;
+        for (0..limits.streams_per_connection) |_| {
+            const next = c.quiche_conn_stream_readable_next(conn);
+            if (next < 0) break;
+            const id: u64 = @intCast(next);
+            if (slot.table.find(id)) |entry_index| {
+                slot.table.markReady(entry_index, .{ .readable = true });
+                continue;
+            }
+            if (!StreamTable.isPeerInitiated(slot.direction, id)) continue;
+            if (slot.table.claimPeer(id) == null) {
+                slot.shutdownRaw(id, .read, types.app_error_stream_table_full);
+                slot.shutdownRaw(id, .write, types.app_error_stream_table_full);
+            }
+        }
+    }
+
+    /// Drains quiche's writable edges. A stream with write interest is reported, and so is one
+    /// the peer stopped: quiche frees a stopped stream once it leaves the writable set and its
+    /// reset is acknowledged, so the stop code is taken here for the owner's next write. Other
+    /// edges (a new stream, credit for a stream that was not blocked) concern no owner. quiche
+    /// does not re-arm a stream whose credit exactly equals its watermark, so armed streams are
+    /// also checked against it.
+    fn gatherWritable(self: *Engine, index: u16) void {
+        const slot = &self.registry.slots[index];
+        const conn = slot.conn.?;
+        for (0..limits.streams_per_connection) |_| {
+            const next = c.quiche_conn_stream_writable_next(conn);
+            if (next < 0) break;
+            const id: u64 = @intCast(next);
+            const entry_index = slot.table.find(id) orelse continue;
+            if (!slot.table.matches(entry_index, id)) continue;
+            const entry = &slot.table.entries[entry_index];
+            if (!entry.stopped and !entry.fin_sent) if (slot.stopCode(id)) |code| {
+                entry.stopped = true;
+                entry.reset_code = code;
+                slot.table.markReady(entry_index, .{ .writable = true });
+                continue;
+            };
+            if (entry.write_lowat > 0) slot.table.markReady(entry_index, .{ .writable = true });
+        }
+        var armed = slot.table.armed;
+        for (0..limits.streams_per_connection) |_| {
+            if (armed == 0) break;
+            const entry_index: u8 = @intCast(@ctz(armed));
+            armed &= armed - 1;
+            const entry = &slot.table.entries[entry_index];
+            const available = c.quiche_conn_stream_capacity(conn, entry.id);
+            if (available < 0 or available >= entry.write_lowat) slot.table.markReady(entry_index, .{ .writable = true });
+        }
+    }
+
+    /// Sends one datagram from the connection, or returns null when quiche has nothing to send.
     pub fn sendOne(self: *Engine, index: u16, now: Now, out: []u8) ?Sent {
         if (index >= self.registry.slots.len) return null;
         const slot = &self.registry.slots[index];
         if (slot.state == .free or slot.state == .closed) return null;
-        const sent = slot.send(now.mono_ms, out) catch {
+        const datagram = slot.send(now.mono_ms, out) catch {
             self.counters.send_errors += 1;
             self.refresh(index);
             return null;
         };
-        if (sent == null) self.refresh(index);
-        return sent;
+        if (datagram == null) self.refresh(index);
+        return datagram;
     }
 
-    pub fn releaseReported(self: *Engine) void {
-        assert(self.registry.active_len <= self.registry.active.len);
-        var cursor: u16 = 0;
-        while (cursor < self.registry.active_len) {
-            const index = self.registry.active[cursor];
-            assert(index < self.registry.slots.len);
-            const slot = &self.registry.slots[index];
-            if (slot.state == .closed and slot.close_event == .reported) {
-                assert(!slot.connected_pending);
-                assert(slot.path_changed_pending == null);
-                assert(slot.close_event != .pending);
-                assert(slot.table.pending == 0);
-                self.retire(index);
+    /// Ends one burst of sendOne calls: refreshes the timer key, then removes a drained
+    /// connection from dirty or moves an undrained one to its tail.
+    pub fn sent(self: *Engine, index: u16, now: Now, drained: bool) void {
+        assert(index < self.registry.slots.len);
+        self.visits.flush +|= 1;
+        const slots = self.registry.slots;
+        const slot = &slots[index];
+        if (slot.dirty_link.linked) {
+            self.registry.dirty.remove(slots, "dirty_link", index);
+            const live = slot.state == .handshaking or slot.state == .established;
+            if (!drained and live) self.registry.dirty.append(slots, "dirty_link", index);
+        }
+        self.rekey(index, now);
+        self.noteEvents(index);
+    }
+
+    /// Ends a turn's flush pass. Test builds check the engine invariants here.
+    pub fn finishFlush(self: *Engine, now: Now) void {
+        if (@import("builtin").is_test) self.checkInvariants(now);
+    }
+
+    /// E1 to E5. Runs after the turn's last send, before any time passes.
+    fn checkInvariants(self: *Engine, now: Now) void {
+        const slots = self.registry.slots;
+        var scratch: [constants.datagram_size_max]u8 = undefined;
+        for (slots, 0..) |*slot, position| {
+            const index: u16 = @intCast(position);
+            if (slot.state == .free) {
+                assert(!slot.collect_link.linked and !slot.dirty_link.linked and !slot.event_link.linked and !slot.release_link.linked);
+                assert(self.registry.timers.get(index) == null);
                 continue;
             }
-            cursor += 1;
+            // E3: undelivered events if and only if the slot is on the events list.
+            assert(slot.event_link.linked == slot.hasEvents());
+            if (slot.state == .closed) {
+                assert(!slot.collect_link.linked and !slot.dirty_link.linked);
+                assert(self.registry.timers.get(index) == null);
+                continue;
+            }
+            // E1: one key per live slot, no later than any of its sources.
+            const key = self.registry.timers.get(index);
+            assert((key == null) == (self.deadlineNs(index, now) == null));
+            if (key) |deadline| {
+                if (slot.close_reason == null) {
+                    const due_ms = if (slot.state == .handshaking)
+                        slot.created_ms +| self.handshakeLimitMs(slot)
+                    else
+                        slot.last_send_ms +| self.limits.keep_alive_ms;
+                    assert(deadline <= due_ms *| std.time.ns_per_ms);
+                }
+                if (slot.pending_close != null) assert(deadline <= now.nanos());
+                // quiche reads its own clock, so its timer is comparable only with a real clock,
+                // and only up to the time this turn has run since its clock read.
+                if (now.mono_ns != null) if (slot.timeoutNs()) |remaining| {
+                    assert(deadline <= now.nanos() +| remaining +| invariant_clock_slack_ns);
+                };
+            }
+            // E2: a slot off the dirty list has no output.
+            if (!slot.dirty_link.linked) {
+                var info: c.quiche_send_info = undefined;
+                const rc = c.quiche_conn_send(slot.conn.?, &scratch, scratch.len, &info);
+                assert(rc == c.QUICHE_ERR_DONE);
+            }
+            if (slot.collect_link.linked or slot.state != .established or slot.pending_close != null) continue;
+            const table = &slot.table;
+            // E4: an armed writer is below its watermark or has an undelivered writable edge.
+            var armed = table.armed;
+            for (0..limits.streams_per_connection) |_| {
+                if (armed == 0) break;
+                const entry_index: u8 = @intCast(@ctz(armed));
+                armed &= armed - 1;
+                const entry = &table.entries[entry_index];
+                assert(entry.write_lowat > 0);
+                const available = c.quiche_conn_stream_capacity(slot.conn.?, entry.id);
+                assert(entry.ready.writable or (available >= 0 and available < entry.write_lowat));
+            }
+            // E5: every readable stream has an undelivered readable edge or an open delivered one.
+            const iter = c.quiche_conn_readable(slot.conn.?) orelse continue;
+            defer c.quiche_stream_iter_free(iter);
+            var id: u64 = 0;
+            for (0..2 * limits.streams_per_connection) |_| {
+                if (!c.quiche_stream_iter_next(iter, &id)) break;
+                const entry_index = table.find(id) orelse {
+                    assert(!StreamTable.isPeerInitiated(slot.direction, id));
+                    continue;
+                };
+                const entry = &table.entries[entry_index];
+                assert(entry.ready.readable or table.readOpen(entry_index) or entry.opened_pending or entry.closed_pending);
+            }
         }
+    }
+
+    /// Retires the connections whose close event was delivered by an earlier pollEvents call.
+    pub fn releaseReported(self: *Engine) void {
+        const slots = self.registry.slots;
+        var released: usize = 0;
+        while (self.registry.released.pop(slots, "release_link")) |row| : (released += 1) {
+            assert(released < slots.len);
+            const index: u16 = @intCast(row);
+            const slot = &slots[index];
+            assert(slot.state == .closed and slot.close_event == .reported);
+            assert(!slot.hasEvents());
+            self.retire(index);
+        }
+    }
+
+    /// The earliest deadline among quiche's timers, the handshake limit, keep-alive and a
+    /// deferred close, or null when none is armed.
+    fn deadlineNs(self: *const Engine, index: u16, now: Now) ?u64 {
+        const slot = &self.registry.slots[index];
+        if (slot.state != .handshaking and slot.state != .established) return null;
+        var deadline: ?u64 = null;
+        if (slot.timeoutNs()) |remaining| deadline = now.nanos() +| remaining;
+        if (slot.close_reason == null) {
+            const due_ms = if (slot.state == .handshaking)
+                slot.created_ms +| self.handshakeLimitMs(slot)
+            else
+                slot.last_send_ms +| self.limits.keep_alive_ms;
+            const due = due_ms *| std.time.ns_per_ms;
+            deadline = @min(deadline orelse due, due);
+        }
+        if (slot.pending_close != null) deadline = @min(deadline orelse now.nanos(), now.nanos());
+        return deadline;
+    }
+
+    fn rekey(self: *Engine, index: u16, now: Now) void {
+        if (self.deadlineNs(index, now)) |deadline| {
+            self.registry.timers.set(index, deadline);
+        } else self.registry.timers.clear(index);
+    }
+
+    /// A datagram was processed or a timer fired: gather readiness and flush this turn.
+    fn touched(self: *Engine, index: u16, now: Now) void {
+        const slot = &self.registry.slots[index];
+        if (slot.state == .handshaking or slot.state == .established) {
+            self.markCollect(index);
+            self.markDirty(index);
+        }
+        self.rekey(index, now);
+        self.noteEvents(index);
+    }
+
+    fn markCollect(self: *Engine, index: u16) void {
+        _ = self.registry.collect.insert(self.registry.slots, "collect_link", index);
+    }
+
+    fn markDirty(self: *Engine, index: u16) void {
+        const slot = &self.registry.slots[index];
+        assert(slot.state == .handshaking or slot.state == .established);
+        _ = self.registry.dirty.insert(self.registry.slots, "dirty_link", index);
+    }
+
+    fn markLiveDirty(self: *Engine, index: u16) void {
+        const slot = &self.registry.slots[index];
+        if (slot.state == .handshaking or slot.state == .established) self.markDirty(index);
+    }
+
+    fn noteEvents(self: *Engine, index: u16) void {
+        const slot = &self.registry.slots[index];
+        if (slot.state == .free or !slot.hasEvents()) return;
+        _ = self.registry.events.insert(self.registry.slots, "event_link", index);
     }
 
     fn streamError(self: *Engine, err: connection.Error) StreamError {
@@ -841,30 +1136,27 @@ pub const Engine = struct {
         ];
     }
 
-    fn feed(self: *Engine, index: u16, datagram: []u8, from: *const Address) void {
+    /// Returns false only when progress was required and quiche neither processed a packet nor
+    /// started closing.
+    fn feed(self: *Engine, index: u16, datagram: []u8, from: *const Address, now: Now, require_progress: bool) bool {
         assert(index < self.registry.slots.len);
         assert(datagram.len > 0);
         const slot = &self.registry.slots[index];
         assert(slot.state != .free);
-        if (slot.state == .closed) return;
-        const was_established = slot.state == .established;
+        if (slot.state == .closed) return !require_progress;
+        const received_before = if (require_progress) slot.receivedPackets() else 0;
         const source = binding.SockAddr.fromAddress(from.*);
-        var received = true;
         const destination = binding.SockAddr.fromAddress(self.localFor(from.*).?);
-        if (slot.recv(datagram, &source, &destination)) |_| {
+        const received = if (slot.recv(datagram, &source, &destination)) |_| true else |_| false;
+        if (require_progress and slot.receivedPackets() == received_before and !slot.isFinished()) return false;
+        if (received) {
             self.counters.accepted += 1;
-            self.registry.activity[index] = true;
             slot.answered = true;
-        } else |_| {
-            self.counters.recv_errors += 1;
-            received = false;
-        }
+        } else self.counters.recv_errors += 1;
         self.refresh(index);
-        const still_live = slot.state == .established and slot.pending_close == null;
-        if (received and was_established and still_live) {
-            slot.discoverPeerStreams();
-        }
         self.observePath(index);
+        self.touched(index, now);
+        return true;
     }
 
     fn observePath(self: *Engine, index: u16) void {
@@ -878,7 +1170,7 @@ pub const Engine = struct {
         slot.peer_sockaddr = binding.SockAddr.fromAddress(peer);
         slot.path_changed_pending = peer;
         self.counters.path_changes += 1;
-        self.registry.activity[index] = true;
+        self.noteEvents(index);
     }
 
     fn leaveHandshaking(self: *Engine, slot: *const connection.Slot) void {
@@ -897,6 +1189,7 @@ pub const Engine = struct {
         if (slot.state == .handshaking and slot.isEstablished()) {
             self.leaveHandshaking(slot);
             slot.state = .established;
+            slot.learnPeerWindows();
             if (slot.handshake.peer_id) |id| {
                 assert(slot.peer_id == null);
                 slot.peer_id = id;
@@ -910,13 +1203,12 @@ pub const Engine = struct {
             } else {
                 slot.close(.tls_failed, types.app_error_normal);
             }
-            if (slot.state == .established and slot.pending_close == null) {
-                slot.discoverPeerStreams();
-            }
+            if (slot.state == .established and slot.pending_close == null) self.markCollect(index);
         }
         if (slot.state != .closed and slot.isFinished()) {
             self.markClosed(index, slot.closeReason());
         }
+        self.noteEvents(index);
     }
 
     fn markClosed(self: *Engine, index: u16, reason: CloseReason) void {
@@ -929,9 +1221,7 @@ pub const Engine = struct {
             else => 0,
         };
         std.log.scoped(.network_quic).debug("connection_closed connection={d}:{d} direction={s} state={s} reason={s} code={d}", .{ index, slot.generation, @tagName(slot.direction), @tagName(slot.state), @tagName(reason), code });
-        if (slot.state == .established and slot.pending_close == null) {
-            slot.discoverPeerStreams();
-        }
+        if (slot.state == .established and slot.pending_close == null) self.gatherReadable(index);
         if (slot.state == .handshaking) {
             self.leaveHandshaking(slot);
         }
@@ -943,6 +1233,11 @@ pub const Engine = struct {
         slot.close_reason = reason;
         slot.close_event = .pending;
         self.registry.removeRoutesFor(index);
+        const slots = self.registry.slots;
+        if (slot.collect_link.linked) self.registry.collect.remove(slots, "collect_link", index);
+        if (slot.dirty_link.linked) self.registry.dirty.remove(slots, "dirty_link", index);
+        self.registry.timers.clear(index);
+        self.noteEvents(index);
         assert(self.registry.dialing <= self.registry.outbound);
     }
 
@@ -972,43 +1267,6 @@ pub const Engine = struct {
     }
 };
 
-fn pollStreamEvents(
-    slot: *connection.Slot,
-    conn: Handle,
-    events: []Event,
-    start: usize,
-    activity: *bool,
-) usize {
-    assert(slot.table.pending > 0);
-    assert(start <= events.len);
-    assert(slot.table.event_cursor < limits.streams_per_connection);
-    var count = start;
-    for (0..limits.streams_per_connection) |_| {
-        if (count == events.len) return count;
-        const index = slot.table.event_cursor;
-        slot.table.event_cursor = @intCast((@as(u16, index) + 1) % limits.streams_per_connection);
-        const entry = &slot.table.entries[index];
-        if (entry.opened_pending) {
-            if (count == events.len) return count;
-            events[count] = .{ .stream_opened = .{ .conn = conn, .id = entry.id, .slot = index } };
-            count += 1;
-            slot.table.takeOpened(index);
-        }
-        if (entry.closed_pending) {
-            if (count == events.len) return count;
-            const closed = slot.table.takeClosed(index).?;
-            activity.* = true;
-            events[count] = .{ .stream_closed = .{
-                .stream = .{ .conn = conn, .id = closed.id, .slot = index },
-                .reset_code = closed.reset_code,
-            } };
-            count += 1;
-        }
-    }
-    assert(count <= events.len);
-    return count;
-}
-
 comptime {
     assert(limits.streams_per_connection <= std.math.maxInt(u8) + 1);
 }
@@ -1019,5 +1277,6 @@ test {
     _ = @import("engine_handshake_test.zig");
     _ = @import("engine_notifications_test.zig");
     _ = @import("engine_path_test.zig");
+    _ = @import("engine_readiness_test.zig");
     _ = @import("engine_stream_test.zig");
 }

@@ -9,6 +9,7 @@ pub const managed = @import("managed.zig");
 pub const peer_manager = @import("peer_manager.zig");
 pub const PeerManager = peer_manager.PeerManager;
 pub const network_core = @import("network_core.zig");
+pub const wake_sources = @import("wake_sources.zig");
 pub const NetworkCore = network_core.NetworkCore;
 pub const peers = @import("peers/root.zig");
 pub const constants = @import("constants.zig");

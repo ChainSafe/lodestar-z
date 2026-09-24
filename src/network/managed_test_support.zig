@@ -150,26 +150,21 @@ pub const Setup = struct {
         self.server_inbox.clear();
         try self.pair.pump();
         var events: [32]Engine.Event = undefined;
-        var activity: [4]Engine.Handle = undefined;
-        var count = self.pair.server.takeActivity(&activity);
         _ = managed.process(
             &self.server,
             &self.server_service,
             &self.pair.server,
             self.pair.events(&self.pair.server, &events),
-            activity[0..count],
             self.pair.now,
             100,
             self.server_events[0..capacity],
             &.{},
         );
-        count = self.pair.client.takeActivity(&activity);
         _ = managed.process(
             &self.client,
             &self.client_service,
             &self.pair.client,
             self.pair.events(&self.pair.client, &events),
-            activity[0..count],
             self.pair.now,
             100,
             self.client_events[0..capacity],

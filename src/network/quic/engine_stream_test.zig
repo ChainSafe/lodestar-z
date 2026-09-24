@@ -47,11 +47,35 @@ test "engine reports a stopped write as a stream close carrying the peer's code"
 
     pair.client.shutdown(stream, .read, 7);
     try pair.pump();
+    const stopped = pair.events(&pair.server, &storage);
+    try std.testing.expectEqual(@as(usize, 1), stopped.len);
+    try std.testing.expect(stopped[0].stream_ready.ready.writable);
     try std.testing.expectError(error.StreamStopped, pair.server.write(inbound, "y", false));
     const events = pair.events(&pair.server, &storage);
     try std.testing.expectEqual(@as(usize, 1), events.len);
     try std.testing.expectEqual(@as(?u64, 7), try support.expectStreamClosed(events[0], inbound));
     try std.testing.expectError(error.UnknownStream, pair.server.write(inbound, "z", false));
+}
+
+test "engine reports a stopped write on a stream that is still readable" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+
+    const stream = try pair.client.openStream(handles.client);
+    try std.testing.expectEqual(@as(usize, 1), try pair.client.write(stream, "x", false));
+    try pair.pump();
+    var storage: [8]@import("engine.zig").Event = undefined;
+    const inbound = try support.expectStreamOpened(pair.events(&pair.server, &storage)[0], handles.server);
+    pair.client.shutdown(stream, .read, 7);
+    try pair.pump();
+    const events = pair.events(&pair.server, &storage);
+    try std.testing.expectEqual(@as(usize, 1), events.len);
+    try std.testing.expect(events[0].stream_ready.ready.writable);
+    try std.testing.expectError(error.StreamStopped, pair.server.write(inbound, "y", false));
+    var buffer: [8]u8 = undefined;
+    try std.testing.expectEqualStrings("x", buffer[0..(try pair.server.read(inbound, &buffer)).len]);
 }
 
 test "engine streams echo data with fin in both directions" {
@@ -358,10 +382,10 @@ test "engine bounds streams per connection" {
         const stream = try pair.client.openStream(handles.client);
         _ = try pair.client.write(stream, "x", false);
     }
-    _ = pair.client.takeHostWork();
+    try pair.flush(&pair.client);
     for (0..8) |_| {
         try std.testing.expectError(error.StreamLimit, pair.client.openStream(handles.client));
-        try std.testing.expect(!pair.client.hostWorkPending());
+        try std.testing.expect(!pair.client.backlog());
     }
     try pair.pump();
 

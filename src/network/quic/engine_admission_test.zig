@@ -99,7 +99,7 @@ test "engine routes existing streams and replayed Initials while source admissio
     const stream = try pair.client.openStream(handles.client);
     try std.testing.expectEqual(@as(usize, 5), try pair.client.write(stream, "hello", false));
     try std.testing.expect(try pair.transfer(&pair.client, &pair.server, client_address, false));
-    pair.server.tick(pair.now);
+    pair.settle(&pair.server);
     var storage: [8]Event = undefined;
     const inbound = try support.expectStreamOpened(pair.events(&pair.server, &storage)[0], handles.server);
     var buffer: [8]u8 = undefined;
@@ -321,9 +321,9 @@ test "engine wakeup includes host handshake deadline before native timeout" {
     try pair.init(.{ .handshake_timeout_ms = 1 }, .{});
     defer pair.deinit();
     _ = try pair.dial();
-    const deadline = pair.client.nextTimeoutMs(pair.now);
+    const deadline = pair.client.nextDeadlineNs();
     try std.testing.expect(deadline != null);
-    try std.testing.expect(deadline.? <= 1);
+    try std.testing.expect(deadline.? <= pair.now.nanos() + std.time.ns_per_ms);
 }
 
 test "engine rejects zero requested receive window budget" {
@@ -392,10 +392,10 @@ test "engine wakeup includes keepalive and uses the supplied current time" {
     try pair.init(.{ .keep_alive_ms = 7 }, .{});
     defer pair.deinit();
     _ = try connectPair(&pair);
-    const before = pair.client.nextTimeoutMs(pair.now).?;
-    try std.testing.expect(before <= 7);
+    const before = pair.client.nextDeadlineNs().?;
+    try std.testing.expect(before <= pair.now.nanos() + 7 * std.time.ns_per_ms);
     pair.advance(7);
-    try std.testing.expectEqual(@as(?u64, 0), pair.client.nextTimeoutMs(pair.now));
+    try std.testing.expect(pair.client.nextDeadlineNs().? <= pair.now.nanos());
 }
 
 test "engine outgoing descriptor preserves native monotonic pacing timestamp" {

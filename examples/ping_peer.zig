@@ -76,6 +76,7 @@ fn listen(allocator: std.mem.Allocator, io: std.Io, host: []const u8, port: u16)
                 node.engine.closeStream(stream, 0);
             },
             .path_changed => |changed| std.debug.print("path changed port={d}\n", .{changed.peer.port()}),
+            .stream_ready => {},
             .stream_closed => |closed| {
                 for (&sessions) |*session| {
                     if (session.active and std.meta.eql(session.stream, closed.stream)) session.active = false;
@@ -174,6 +175,7 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, text: []const u8) !void {
             },
             .stream_opened => |opened| node.engine.closeStream(opened, 0),
             .path_changed => |changed| std.debug.print("path changed port={d}\n", .{changed.peer.port()}),
+            .stream_ready => {},
             .stream_closed => {},
         };
         if (stepped.failure) |err| return err;

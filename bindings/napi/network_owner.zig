@@ -68,7 +68,6 @@ pub fn initialize(self: *Runtime) !void {
         self.heavy.?.records[i] = try d.identity.enr.Record.init(self.heavy.?.config.bootstrap[i].bytes[0..self.heavy.?.config.bootstrap[i].len]);
     }
     try self.heavy.?.core.init(allocator, io, &self.heavy.?.resolved, .{
-        .wait_mode = .native_poll,
         .host = &self.heavy.?.key,
         .bind = self.heavy.?.config.bind,
         .local = self.heavy.?.config.local,

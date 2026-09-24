@@ -530,7 +530,7 @@ test "gossipsub activity behind partial peer cursor remains ready and generation
     try std.testing.expectEqual(wire.len, try setup.shared.pair.client.write(setup.clientStream(), wire, false));
     try setup.shared.pair.pump();
     var activity: [128]engine_mod.Handle = undefined;
-    const active = setup.shared.pair.server.takeActivity(&activity);
+    const active = setup.shared.pair.activity(&setup.shared.pair.server, &activity);
     try std.testing.expect(active > 0);
     for (activity[0..active]) |conn| setup.shared.server.gossipsub.sessions.connectionActivity(conn);
     try std.testing.expectEqual(@as(usize, 0), @import("test_support.zig").pump(setup.shared.server.gossipsub, &setup.shared.pair.server, setup.shared.pair.now));
@@ -694,7 +694,7 @@ test "gossipsub native write credit behind cursor resumes and blocked writes qui
     _ = try setup.shared.client.gossipsub.publish(test_topic, payload, setup.shared.pair.now);
     var activity: [128]engine_mod.Handle = undefined;
     for (0..512) |_| {
-        const active = setup.shared.pair.client.takeActivity(&activity);
+        const active = setup.shared.pair.activity(&setup.shared.pair.client, &activity);
         for (activity[0..active]) |conn| setup.shared.client.gossipsub.sessions.connectionActivity(conn);
         if (@import("session_io.zig").nextIoWakeup(setup.shared.client.gossipsub, setup.shared.pair.now).? > setup.shared.pair.now.mono_ms) break;
         _ = @import("test_support.zig").pump(setup.shared.client.gossipsub, &setup.shared.pair.client, setup.shared.pair.now);
@@ -714,7 +714,7 @@ test "gossipsub native write credit behind cursor resumes and blocked writes qui
         _ = @import("test_support.zig").pump(setup.shared.server.gossipsub, &setup.shared.pair.server, setup.shared.pair.now);
         try setup.shared.pair.pump();
     }
-    const active = setup.shared.pair.client.takeActivity(&activity);
+    const active = setup.shared.pair.activity(&setup.shared.pair.client, &activity);
     try std.testing.expect(active > 0);
     for (activity[0..active]) |conn| setup.shared.client.gossipsub.sessions.connectionActivity(conn);
     _ = @import("test_support.zig").pump(setup.shared.client.gossipsub, &setup.shared.pair.client, setup.shared.pair.now);

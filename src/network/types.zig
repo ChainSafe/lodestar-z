@@ -10,6 +10,10 @@ pub const StreamHandle = struct {
     slot: u8,
 };
 
+/// Stream readiness reported by the engine. Each bit is an edge: it is set again only after the
+/// stream's state changes in QUIC.
+pub const Readiness = packed struct(u2) { readable: bool = false, writable: bool = false };
+
 pub const PeerRef = struct { index: u16, generation: u64 };
 
 pub const Direction = enum { inbound, outbound };

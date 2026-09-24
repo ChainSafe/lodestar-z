@@ -47,4 +47,8 @@ comptime {
     std.debug.assert(receive_budget_bytes / connections_max_default <= connection_window_max);
 }
 
-pub const events_per_connection: usize = 2 * streams_per_connection + 3;
+/// Engine events delivered per turn. A connection whose events do not fit keeps the rest for the next turn.
+pub const events_per_turn_max: usize = 1_024;
+/// Largest send watermark armed after a blocked write: quiche's minimum congestion window of two
+/// datagrams. A blocked stream with nothing in flight never sees more send capacity than that.
+pub const write_lowat_max: u32 = 2 * send_udp_payload_max;
