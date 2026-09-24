@@ -56,7 +56,7 @@ describe("BeaconStateView proposerRewards", () => {
       value.genesisValidatorsRoot
     );
     value.fork.currentVersion = config.ALTAIR_FORK_VERSION;
-    bindings.config.set(config, value.genesisValidatorsRoot);
+    const nativeConfig = new bindings.BeaconConfig(config, value.genesisValidatorsRoot);
     pubkeyCache.ensureCapacity(validatorCount);
     pubkeyCache.syncPubkeys(value.validators);
 
@@ -64,7 +64,7 @@ describe("BeaconStateView proposerRewards", () => {
       ssz.altair.BeaconState.toViewDU(value),
       createEmptyEpochCacheImmutableData(config, value)
     );
-    const native = bindings.BeaconStateView.createFromBytes(ssz.altair.BeaconState.serialize(value));
+    const native = bindings.BeaconStateView.createFromBytes(ssz.altair.BeaconState.serialize(value), nativeConfig);
     const prepared = processSlots(reference, 2);
     const block = ssz.altair.SignedBeaconBlock.defaultValue();
     block.message.slot = 2;

@@ -10,10 +10,10 @@ const bindingsPath = new URL("../src/index.js", import.meta.url).href;
 const fixturePath = new URL("./stfFixture.ts", import.meta.url).href;
 
 function createState() {
-  bindings.config.set(stfConfig, new Uint8Array(32));
+  const config = new bindings.BeaconConfig(stfConfig, new Uint8Array(32));
   bindings.pubkeys.ensureCapacity(16);
   const bytes = ssz.fulu.BeaconState.serialize(createStfState());
-  return {bytes, state: bindings.BeaconStateView.createFromBytes(bytes)};
+  return {bytes, config, state: bindings.BeaconStateView.createFromBytes(bytes, config)};
 }
 
 function signedExit() {
@@ -29,22 +29,34 @@ function signedExit() {
 }
 
 describe("state environment ownership", () => {
-  it("binds setup handles to their configuration independently of later setup", () => {
-    const first = new bindings.StateTransition(stfConfig, new Uint8Array(32));
-    const second = new bindings.StateTransition(stfConfig, new Uint8Array(32).fill(1));
+  it("keeps distinct configurations independent", () => {
+    const first = new bindings.BeaconConfig(stfConfig, new Uint8Array(32));
+    const second = new bindings.BeaconConfig(stfConfig, new Uint8Array(32).fill(1));
     bindings.pubkeys.ensureCapacity(16);
     const bytes = ssz.fulu.BeaconState.serialize(createStfState());
-    expect(second.createFromBytes(bytes).getVoluntaryExitValidity(signedExit(), true)).toBe("invalid_signature");
-    expect(first.createFromBytes(bytes).getVoluntaryExitValidity(signedExit(), true)).toBe("valid");
+    expect(bindings.BeaconStateView.createFromBytes(bytes, second).getVoluntaryExitValidity(signedExit(), true)).toBe(
+      "invalid_signature"
+    );
+    expect(bindings.BeaconStateView.createFromBytes(bytes, first).getVoluntaryExitValidity(signedExit(), true)).toBe(
+      "valid"
+    );
   });
 
-  it("retains the original config for existing states and descendants after reconfiguration", () => {
-    const {bytes, state} = createState();
+  it("copies configuration inputs for states and their descendants", () => {
+    const chainConfig = {...stfConfig, CAPELLA_FORK_VERSION: stfConfig.CAPELLA_FORK_VERSION.slice()};
+    const genesisRoot = new Uint8Array(32);
+    const config = new bindings.BeaconConfig(chainConfig, genesisRoot);
+    bindings.pubkeys.ensureCapacity(16);
+    const bytes = ssz.fulu.BeaconState.serialize(createStfState());
+    const state = bindings.BeaconStateView.createFromBytes(bytes, config);
     const exit = signedExit();
     expect(state.getVoluntaryExitValidity(exit, true)).toBe("valid");
-    bindings.config.set({...stfConfig, FULU_FORK_EPOCH: Infinity}, new Uint8Array(32).fill(1));
+    chainConfig.FULU_FORK_EPOCH = Infinity;
+    chainConfig.CAPELLA_FORK_VERSION.fill(255);
+    genesisRoot.fill(1);
 
     expect(state.getVoluntaryExitValidity(exit, true)).toBe("valid");
+    expect(bindings.BeaconStateView.createFromBytes(bytes, config).getVoluntaryExitValidity(exit, true)).toBe("valid");
     const loaded = state.loadOtherState(bytes);
     const advanced = state.processSlots(state.slot + 1);
     expect(loaded.forkSeq).toBe(6);
@@ -53,10 +65,28 @@ describe("state environment ownership", () => {
     expect(advanced.getVoluntaryExitValidity(exit, true)).toBe("valid");
   });
 
-  it("keeps state configuration alive after its setup handle is collected", async () => {
+  it("copies the genesis root before configuration getters can detach it", () => {
+    const genesisRoot = new Uint8Array(32);
+    const config = new bindings.BeaconConfig(
+      Object.defineProperty({...stfConfig}, "CONFIG_NAME", {
+        get() {
+          structuredClone(genesisRoot, {transfer: [genesisRoot.buffer]});
+          return "detached-root";
+        },
+      }),
+      genesisRoot
+    );
+    expect(genesisRoot.byteLength).toBe(0);
     bindings.pubkeys.ensureCapacity(16);
-    const state = new bindings.StateTransition(stfConfig, new Uint8Array(32)).createFromBytes(
-      ssz.fulu.BeaconState.serialize(createStfState())
+    const state = bindings.BeaconStateView.createFromBytes(ssz.fulu.BeaconState.serialize(createStfState()), config);
+    expect(state.getVoluntaryExitValidity(signedExit(), true)).toBe("valid");
+  });
+
+  it("keeps state configuration alive after its configuration wrapper is collected", async () => {
+    bindings.pubkeys.ensureCapacity(16);
+    const state = bindings.BeaconStateView.createFromBytes(
+      ssz.fulu.BeaconState.serialize(createStfState()),
+      new bindings.BeaconConfig(stfConfig, new Uint8Array(32))
     );
     global.gc?.();
     await new Promise<void>((resolve) => setImmediate(resolve));
@@ -64,22 +94,24 @@ describe("state environment ownership", () => {
     expect(state.processSlots(state.slot + 1).getVoluntaryExitValidity(signedExit(), true)).toBe("valid");
   });
 
-  it("keeps the current config intact when parsing fails", () => {
-    const {bytes} = createState();
-    expect(() => bindings.config.set({...stfConfig, BLOB_SCHEDULE: [{}]}, new Uint8Array(32))).toThrow();
-    const state = bindings.BeaconStateView.createFromBytes(bytes);
+  it("keeps existing configurations usable when another constructor fails", () => {
+    const {bytes, config} = createState();
+    expect(() => new bindings.BeaconConfig({...stfConfig, BLOB_SCHEDULE: [{}]}, new Uint8Array(32))).toThrow(
+      "NumberExpected"
+    );
+    const state = bindings.BeaconStateView.createFromBytes(bytes, config);
     expect(state.getVoluntaryExitValidity(signedExit(), true)).toBe("valid");
   });
 
   it("rejects a runtime preset that differs from the compiled preset", () => {
-    expect(() => bindings.config.set({...stfConfig, PRESET_BASE: "minimal"}, new Uint8Array(32))).toThrow(
+    expect(() => new bindings.BeaconConfig({...stfConfig, PRESET_BASE: "minimal"}, new Uint8Array(32))).toThrow(
       "PresetMismatch"
     );
   });
 
   it.each([0, 6001])("rejects unrepresentable slot duration %s", (duration) => {
     const config = {...stfConfig, SECONDS_PER_SLOT: 12, SLOT_DURATION_MS: duration};
-    expect(() => new bindings.StateTransition(config, new Uint8Array(32))).toThrow("InvalidSlotDuration");
+    expect(() => new bindings.BeaconConfig(config, new Uint8Array(32))).toThrow("InvalidSlotDuration");
   });
 
   it("isolates worker configuration and metrics from the main environment", {timeout: 20_000}, async () => {
@@ -91,13 +123,12 @@ describe("state environment ownership", () => {
     const beforeWorker = bindings.metrics.scrapeMetrics();
     expect(beforeWorker).toMatch(/validator_monitor_prev_epoch_on_chain_balance [1-9]\d*/);
     const root = await runWorker<Uint8Array>(`
-      bindings.config.set(stfConfig, new Uint8Array(32));
+      const config = new bindings.BeaconConfig(stfConfig, new Uint8Array(32));
       bindings.metrics.init();
       bindings.metrics.registerLocalValidator(2);
       bindings.metrics.registerLocalValidator(3);
-      const state = bindings.BeaconStateView.createFromBytes(ssz.fulu.BeaconState.serialize(createStfState()));
+      const state = bindings.BeaconStateView.createFromBytes(ssz.fulu.BeaconState.serialize(createStfState()), config);
       const root = state.processSlots(state.slot + 33).hashTreeRoot();
-      bindings.config.set({...stfConfig, FULU_FORK_EPOCH: Infinity}, new Uint8Array(32).fill(1));
       parentPort.postMessage(root);
     `);
     expect(root).toEqual(expectedRoot);
@@ -114,8 +145,8 @@ describe("state environment ownership", () => {
     const roots = await Promise.all(
       Array.from({length: 3}, () =>
         runWorker<Uint8Array>(`
-      bindings.config.set(stfConfig, new Uint8Array(32));
-      const state = bindings.BeaconStateView.createFromBytes(ssz.fulu.BeaconState.serialize(createStfState()));
+      const config = new bindings.BeaconConfig(stfConfig, new Uint8Array(32));
+      const state = bindings.BeaconStateView.createFromBytes(ssz.fulu.BeaconState.serialize(createStfState()), config);
       let root;
       for (let i = 0; i < 8; i++) root = state.processSlots(state.slot + 1).hashTreeRoot();
       parentPort.postMessage(root);
@@ -133,9 +164,9 @@ describe("state environment ownership", () => {
     process.env.LODESTAR_Z_NODE_POOL_CAPACITY = "0";
     try {
       const code = await runWorker<string>(`
-        bindings.config.set(stfConfig, new Uint8Array(32));
+        const config = new bindings.BeaconConfig(stfConfig, new Uint8Array(32));
         try {
-          bindings.BeaconStateView.createFromBytes(ssz.fulu.BeaconState.serialize(createStfState()));
+          bindings.BeaconStateView.createFromBytes(ssz.fulu.BeaconState.serialize(createStfState()), config);
           parentPort.postMessage("created");
         } catch (error) {
           parentPort.postMessage(error.code);

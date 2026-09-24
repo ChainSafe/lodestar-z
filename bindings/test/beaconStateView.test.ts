@@ -24,6 +24,7 @@ function expectSyncCommitteeCache(cache: {
 }
 
 describe("BeaconStateView", () => {
+  let nativeConfig: InstanceType<typeof bindings.BeaconConfig>;
   let state: InstanceType<typeof bindings.BeaconStateView>;
   let stateBytes: Uint8Array;
   let syntheticValidators: phase0.Validator[];
@@ -160,7 +161,8 @@ describe("BeaconStateView", () => {
       // Rebuild incompatible or corrupt snapshots from the serialized state.
       bindings.pubkeys.ensureCapacity(MAINNET_PUBKEY_CACHE_LIMIT);
     }
-    state = bindings.BeaconStateView.createFromBytes(stateBytes);
+    nativeConfig = new bindings.BeaconConfig(config, expected.genesisValidatorsRoot);
+    state = bindings.BeaconStateView.createFromBytes(stateBytes, nativeConfig);
   }, 120_000); // 2 minute timeout for loading era file
 
   afterAll(() => state?.release());
@@ -321,9 +323,13 @@ describe("BeaconStateView", () => {
       bellatrixState.currentEpochParticipation = Array.from({length: SYNTHETIC_VALIDATOR_COUNT}, () => 0);
 
       phase0View = bindings.BeaconStateView.createFromBytes(
-        ssz.phase0.BeaconState.serialize(ssz.phase0.BeaconState.defaultValue())
+        ssz.phase0.BeaconState.serialize(ssz.phase0.BeaconState.defaultValue()),
+        nativeConfig
       );
-      bellatrixView = bindings.BeaconStateView.createFromBytes(ssz.bellatrix.BeaconState.serialize(bellatrixState));
+      bellatrixView = bindings.BeaconStateView.createFromBytes(
+        ssz.bellatrix.BeaconState.serialize(bellatrixState),
+        nativeConfig
+      );
     });
 
     afterAll(() => {
@@ -511,7 +517,8 @@ describe("BeaconStateView", () => {
   describe("serialization", () => {
     it("release should release state and be idempotent", () => {
       const releasable = bindings.BeaconStateView.createFromBytes(
-        ssz.phase0.BeaconState.serialize(ssz.phase0.BeaconState.defaultValue())
+        ssz.phase0.BeaconState.serialize(ssz.phase0.BeaconState.defaultValue()),
+        nativeConfig
       );
 
       releasable.release();

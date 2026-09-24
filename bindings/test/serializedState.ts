@@ -27,3 +27,9 @@ export function getPubkeyCacheCapacityForState(
 ): number {
   return getSerializedFuluValidatorCount(stateBytes) + headroom;
 }
+
+/** Genesis time (8 bytes) precedes the genesis validators root in every BeaconState fork. */
+export function getSerializedGenesisValidatorsRoot(stateBytes: Uint8Array): Uint8Array {
+  if (stateBytes.length < 40) throw new Error("Truncated BeaconState genesis validators root");
+  return stateBytes.subarray(8, 40);
+}

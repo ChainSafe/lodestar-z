@@ -12,9 +12,8 @@ const BlockType = fork_types.BlockType;
 const preset = @import("preset").preset;
 const ct = @import("consensus_types");
 const pool = @import("./pool.zig");
-const config = @import("./config.zig");
-const StateTransition = @import("./state_transition_context.zig");
-const OwnedConfigRc = @import("./owned_config.zig").OwnedConfigRc;
+const BeaconConfig = @import("./BeaconConfig.zig");
+const OwnedConfigRc = BeaconConfig.OwnedConfigRc;
 const pubkey = @import("./pubkeys.zig");
 const js_types = @import("./js_types.zig");
 const sszValueToNapiValue = @import("./to_napi_value.zig").sszValueToNapiValue;
@@ -147,8 +146,8 @@ fn stateBytesFork(beacon_config: *const c.BeaconConfig, bytes: []const u8) !c.Fo
 // Class Methods
 // -------------------------
 /// Requires state bytes with trusted provenance; SSZ decoding does not authenticate them.
-pub fn createFromBytes(bytes: js.Uint8Array, setup: ?*const StateTransition) !BeaconStateView {
-    const config_rc = if (setup) |value| value.config_rc else config.state.current orelse return error.ConfigNotInitialized;
+pub fn createFromBytes(bytes: js.Uint8Array, config: *const BeaconConfig) !BeaconStateView {
+    const config_rc = config.config_rc;
     const byte_slice = try bytes.toSlice();
     const fork_seq = try stateBytesFork(&config_rc.instance.config, byte_slice);
     const pool_rc = try pool.state.poolRc();

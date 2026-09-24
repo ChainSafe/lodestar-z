@@ -4,11 +4,11 @@ import {expect, it} from "vitest";
 it("reclaims released states while their wrappers remain reachable without GC", {timeout: 40_000}, () => {
   runProcess(`
     assert.equal(typeof global.gc, "undefined");
-    const setup = new bindings.StateTransition(stfConfig, new Uint8Array(32));
+    const config = new bindings.BeaconConfig(stfConfig, new Uint8Array(32));
     const retained = [];
     const expectedRoot = ssz.fulu.BeaconState.hashTreeRoot(value);
     for (let i = 0; i < 100; i++) {
-      const state = setup.createFromBytes(bytes);
+      const state = bindings.BeaconStateView.createFromBytes(bytes, config);
       const clone = state.processSlots(state.slot);
       state.release();
       assert.throws(() => state.slot, {code: "InvalidState"}, "released state " + i);
@@ -26,11 +26,11 @@ it("reclaims released states while their wrappers remain reachable without GC", 
 it("keeps descendants usable after release and finalization of their owners", {timeout: 40_000}, () => {
   runProcess(
     `
-    let setup = new bindings.StateTransition(stfConfig, new Uint8Array(32));
-    let state = setup.createFromBytes(bytes);
+    let config = new bindings.BeaconConfig(stfConfig, new Uint8Array(32));
+    let state = bindings.BeaconStateView.createFromBytes(bytes, config);
     const descendant = state.processSlots(state.slot);
     const expectedRoot = descendant.hashTreeRoot();
-    setup = undefined;
+    config = undefined;
     state.release();
     state = undefined;
     global.gc();
@@ -187,7 +187,7 @@ it.each([
   ],
 ])("retains the active state through release in a %s", {timeout: 40_000}, (_name, source) => {
   runProcess(`
-    const state = new bindings.StateTransition(stfConfig, new Uint8Array(32)).createFromBytes(bytes);
+    const state = bindings.BeaconStateView.createFromBytes(bytes, new bindings.BeaconConfig(stfConfig, new Uint8Array(32)));
     ${source}
     assert.throws(() => state.slot, {code: "InvalidState"});
     state.release();

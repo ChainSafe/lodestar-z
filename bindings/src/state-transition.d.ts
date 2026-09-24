@@ -1,4 +1,4 @@
-export {BeaconStateView, StateTransition} from "./index.js";
+export {BeaconStateView, BeaconConfig} from "./index.js";
 export type {
   ProcessSlotsOpts,
   SignedVoluntaryExit,

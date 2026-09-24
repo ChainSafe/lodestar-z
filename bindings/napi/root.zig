@@ -5,10 +5,9 @@ const builtin = @import("builtin");
 const js = @import("zapi:zapi").js;
 const pool = @import("./pool.zig");
 pub const shuffle = @import("./shuffle.zig");
-pub const config = @import("./config.zig");
 pub const metrics = @import("./metrics.zig");
 pub const stateTransition = @import("./stateTransition.zig");
-pub const StateTransition = @import("./state_transition_context.zig");
+pub const BeaconConfig = @import("./BeaconConfig.zig");
 pub const BeaconStateView = @import("./BeaconStateView.zig");
 pub const blst = @import("./blst.zig");
 pub const blsVerifier = @import("./bls_verifier.zig");
@@ -20,9 +19,6 @@ var gpa: std.heap.DebugAllocator(.{}) = .init;
 const allocator = if (builtin.mode == .Debug) gpa.allocator() else std.heap.c_allocator;
 
 fn init(old_ref_count: u32) !void {
-    try config.state.init();
-    errdefer config.state.deinit();
-
     if (old_ref_count == 0) {
         // First environment — initialize shared state in your threadpool init.
         var cpu_count: u64 = options.thread_count;
@@ -62,7 +58,6 @@ fn detectCpuCount() !usize {
 fn cleanup(new_ref_count: u32) void {
     stateTransition.deinitReusedEpochTransitionCache();
     metrics.deinit();
-    config.state.deinit();
     pool.state.deinit();
 
     if (new_ref_count == 0) {

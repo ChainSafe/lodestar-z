@@ -4,12 +4,12 @@ import bindings from "../src/index.js";
 import {createStfState, stfConfig} from "./stfFixture.js";
 
 describe("serialized state transition", () => {
+  const config = new bindings.BeaconConfig(stfConfig, new Uint8Array(32));
   let state: InstanceType<typeof bindings.BeaconStateView>;
 
   beforeAll(() => {
-    bindings.config.set(stfConfig, new Uint8Array(32));
     bindings.pubkeys.ensureCapacity(16);
-    state = bindings.BeaconStateView.createFromBytes(ssz.fulu.BeaconState.serialize(createStfState()));
+    state = bindings.BeaconStateView.createFromBytes(ssz.fulu.BeaconState.serialize(createStfState()), config);
   });
 
   it.each([false, true])("decodes a block with isBlinded=%s before checking its parent", (isBlinded) => {
@@ -41,7 +41,7 @@ describe("serialized state transition", () => {
     value.latestExecutionPayloadHeader.excessBlobGas = 3n;
     value.pendingPartialWithdrawals = [{amount: 1n, validatorIndex: 0, withdrawableEpoch: Infinity}];
     const bytes = ssz.fulu.BeaconState.serialize(value);
-    const native = bindings.BeaconStateView.createFromBytes(bytes);
+    const native = bindings.BeaconStateView.createFromBytes(bytes, config);
     expect(native.latestExecutionPayloadHeader).toEqual(value.latestExecutionPayloadHeader);
     expect(ssz.fulu.BeaconState.serialize(native.toValue())).toEqual(bytes);
   }, 30_000);
@@ -50,7 +50,7 @@ describe("serialized state transition", () => {
     const value = createStfState();
     value.validators[0].withdrawalCredentials[0] = 1;
     value.balances[0] = 33_000_000_000;
-    const native = bindings.BeaconStateView.createFromBytes(ssz.fulu.BeaconState.serialize(value));
+    const native = bindings.BeaconStateView.createFromBytes(ssz.fulu.BeaconState.serialize(value), config);
     expect(native.getExpectedWithdrawals().expectedWithdrawals[0].amount).toBe(1_000_000_000n);
   });
 
@@ -63,9 +63,8 @@ describe("serialized state transition", () => {
       const chainConfig = {...stfConfig, SECONDS_PER_SLOT, SLOT_DURATION_MS};
       const value = createStfState();
       value.latestExecutionPayloadHeader.blockHash.fill(1);
-      const native = new bindings.StateTransition(chainConfig, new Uint8Array(32)).createFromBytes(
-        ssz.fulu.BeaconState.serialize(value)
-      );
+      const nativeConfig = new bindings.BeaconConfig(chainConfig, new Uint8Array(32));
+      const native = bindings.BeaconStateView.createFromBytes(ssz.fulu.BeaconState.serialize(value), nativeConfig);
       const slot = native.slot + 1;
       const advanced = native.processSlots(slot);
       const block = ssz.fulu.SignedBeaconBlock.defaultValue();

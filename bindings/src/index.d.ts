@@ -207,7 +207,7 @@ export type VoluntaryExitValidity =
 
 export declare class BeaconStateView {
   /** Requires state bytes with trusted provenance; SSZ decoding does not authenticate them. */
-  static createFromBytes(bytes: Uint8Array, setup?: StateTransition): BeaconStateView;
+  static createFromBytes(bytes: Uint8Array, config: BeaconConfig): BeaconStateView;
 
   /**
    * Idempotently release this view. Subsequent state access throws InvalidState.
@@ -402,15 +402,13 @@ export declare class BeaconStateView {
   stateTransition(signedBlockBytes: Uint8Array, isBlinded: boolean, options?: TransitionOpts): BeaconStateView;
 }
 
-export declare class StateTransition {
+/** Owns a copy of the configuration inputs; states retain it for their lifetime. */
+export declare class BeaconConfig {
+  private readonly _brand: void;
   constructor(chainConfig: object, genesisValidatorsRoot: Uint8Array);
-  createFromBytes(bytes: Uint8Array): BeaconStateView;
 }
 
 declare const bindings: {
-  config: {
-    set: (chainConfig: object, genesisValidatorsRoot: Uint8Array) => void;
-  };
   stateTransition: {
     /** Callers must exclude STF operations in this thread until teardown returns. */
     deinitReusedEpochTransitionCache: () => void;
@@ -422,7 +420,7 @@ declare const bindings: {
     unregisterLocalValidator: (index: number) => void;
   };
   BeaconStateView: typeof BeaconStateView;
-  StateTransition: typeof StateTransition;
+  BeaconConfig: typeof BeaconConfig;
 };
 
 export default bindings;

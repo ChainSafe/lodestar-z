@@ -1,16 +1,32 @@
+//! Configurations share one application-wide validator-index to pubkey mapping.
+
 const std = @import("std");
 const napi = @import("zapi:zapi").napi;
 const js = @import("zapi:zapi").js;
 const active_preset = @import("preset").active_preset;
 const c = @import("config");
-const BeaconConfig = @import("config").BeaconConfig;
+const NativeBeaconConfig = c.BeaconConfig;
 const ChainConfig = @import("config").ChainConfig;
 const Preset = @import("preset").Preset;
 
+pub const js_meta = js.class(.{});
+
+config_rc: *OwnedConfigRc,
+const BeaconConfig = @This();
+
+/// Copies configuration inputs into storage retained by every state created with it.
+pub fn init(chain_config: js.Value, genesis_validators_root: js.Uint8Array) !BeaconConfig {
+    return .{ .config_rc = try create(std.heap.c_allocator, chain_config, genesis_validators_root) };
+}
+
+pub fn deinit(self: *BeaconConfig) void {
+    self.config_rc.unref();
+}
+
 const max_blob_schedule_entries = 16;
 
-pub const OwnedConfig = struct {
-    config: BeaconConfig = undefined,
+const OwnedConfig = struct {
+    config: NativeBeaconConfig = undefined,
     config_name: [64]u8 = undefined,
     blob_schedule: [max_blob_schedule_entries]ChainConfig.BlobScheduleEntry = undefined,
 
@@ -19,21 +35,19 @@ pub const OwnedConfig = struct {
 
 pub const OwnedConfigRc = @import("state_transition").RefCount(OwnedConfig);
 
-pub fn defaultConfig() BeaconConfig {
+fn defaultChainConfig() ChainConfig {
     return switch (active_preset) {
-        .mainnet => c.mainnet.config,
-        .minimal => c.minimal.config,
-        .gnosis => c.chiado.config,
+        .mainnet => c.mainnet.config.chain,
+        .minimal => c.minimal.config.chain,
+        .gnosis => c.chiado.config.chain,
     };
 }
 
-pub fn createDefault(allocator: std.mem.Allocator) !*OwnedConfigRc {
-    return OwnedConfigRc.init(allocator, .{ .config = defaultConfig() });
-}
-
-pub fn create(allocator: std.mem.Allocator, object: js.Value, genesis_root: js.Uint8Array) !*OwnedConfigRc {
+fn create(allocator: std.mem.Allocator, object: js.Value, genesis_root: js.Uint8Array) !*OwnedConfigRc {
     const root_slice = try genesis_root.toSlice();
     if (root_slice.len != 32) return error.InvalidGenesisValidatorsRootLength;
+    // Configuration getters may detach the input buffer.
+    const root = root_slice[0..32].*;
 
     const owned = try OwnedConfigRc.init(allocator, .{});
     errdefer owned.unref();
@@ -54,7 +68,7 @@ pub fn create(allocator: std.mem.Allocator, object: js.Value, genesis_root: js.U
         return error.InvalidSlotDuration;
     }
     chain_config.SECONDS_PER_SLOT = @divExact(chain_config.SLOT_DURATION_MS, 1000);
-    owned.instance.config = BeaconConfig.init(chain_config, root_slice[0..32].*);
+    owned.instance.config = NativeBeaconConfig.init(chain_config, root);
     return owned;
 }
 
@@ -70,7 +84,7 @@ fn valueToU64(value: napi.Value) !u64 {
 }
 
 fn chainConfigFromObject(owned: *OwnedConfig, env: napi.Env, obj: napi.Value) !ChainConfig {
-    var chain_config = defaultConfig().chain;
+    var chain_config = defaultChainConfig();
 
     inline for (std.meta.fields(ChainConfig)) |field| {
         const field_value: napi.Value = obj.getNamedProperty(field.name) catch |err| {

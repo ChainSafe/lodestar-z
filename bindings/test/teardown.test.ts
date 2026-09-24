@@ -17,7 +17,7 @@ import {config} from "@lodestar/config/default";
 import * as era from "@lodestar/era";
 import bindings from "../src/index.js";
 import {getFirstEraFilePath} from "./eraFiles.ts";
-import {getSerializedFuluValidatorCount} from "./serializedState.ts";
+import {getSerializedFuluValidatorCount, getSerializedGenesisValidatorsRoot} from "./serializedState.ts";
 
 const reader = await era.era.EraReader.open(config, getFirstEraFilePath());
 const stateBytes = await reader.readSerializedState();
@@ -25,7 +25,8 @@ await reader.close();
 
 bindings.pubkeys.ensureCapacity(getSerializedFuluValidatorCount(stateBytes));
 
-const seedState = bindings.BeaconStateView.createFromBytes(stateBytes);
+const nativeConfig = new bindings.BeaconConfig(config, getSerializedGenesisValidatorsRoot(stateBytes));
+const seedState = bindings.BeaconStateView.createFromBytes(stateBytes, nativeConfig);
 console.log("slot=" + seedState.slot);
 `
     );

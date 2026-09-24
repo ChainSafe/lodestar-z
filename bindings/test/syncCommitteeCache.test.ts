@@ -21,9 +21,8 @@ beforeAll(() => {
   value.nextSyncCommittee.pubkeys.fill(value.validators[2].pubkey);
   for (const position of nextPositions) value.nextSyncCommittee.pubkeys[position] = value.validators[3].pubkey;
   pubkeyCache.ensureCapacity(value.validators.length);
-  state = new bindings.StateTransition(stfConfig, new Uint8Array(32)).createFromBytes(
-    ssz.fulu.BeaconState.serialize(value)
-  );
+  const config = new bindings.BeaconConfig(stfConfig, new Uint8Array(32));
+  state = bindings.BeaconStateView.createFromBytes(ssz.fulu.BeaconState.serialize(value), config);
 });
 
 describe("sync committee cache bindings", () => {

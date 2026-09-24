@@ -13,13 +13,13 @@ it("reclaims discarded native states under memory pressure without explicit GC",
       import bindings from "./bindings/src/index.js";
       import {createStfState, stfConfig} from "./bindings/test/stfFixture.ts";
       assert.equal(typeof global.gc, "undefined");
-      const setup = new bindings.StateTransition(stfConfig, new Uint8Array(32));
+      const config = new bindings.BeaconConfig(stfConfig, new Uint8Array(32));
       bindings.pubkeys.ensureCapacity(16);
       const bytes = ssz.fulu.BeaconState.serialize(createStfState());
-      const seed = setup.createFromBytes(bytes);
+      const seed = bindings.BeaconStateView.createFromBytes(bytes, config);
       const seedRoot = seed.hashTreeRoot();
       for (let i = 0; i < 500; i++) {
-        assert.equal(setup.createFromBytes(bytes).forkSeq, 6, "iteration " + i);
+        assert.equal(bindings.BeaconStateView.createFromBytes(bytes, config).forkSeq, 6, "iteration " + i);
         assert.equal(seed.processSlots(seed.slot).slot, seed.slot, "clone " + i);
         await new Promise((resolve) => setImmediate(resolve));
       }

@@ -6,7 +6,19 @@ const fixturePath = new URL("./stfFixture.ts", import.meta.url).href;
 
 describe("native state transition boundaries", () => {
   it.each([
-    ["truncated state", "bindings.BeaconStateView.createFromBytes(new Uint8Array(47))", "InvalidStateBytes"],
+    [
+      "missing config",
+      "bindings.BeaconStateView.createFromBytes(new Uint8Array(47))",
+      "Method expects at least 2 arguments",
+    ],
+    ...["undefined", "null", "{}", "Object.create(bindings.BeaconConfig.prototype)", "state"].map((config) => [
+      `invalid config ${config}`,
+      `bindings.BeaconStateView.createFromBytes(new Uint8Array(47), ${config})`,
+      config === "undefined" || config === "null"
+        ? "Cannot convert undefined or null to object"
+        : "Argument 2 must be an instance of BeaconConfig",
+    ]),
+    ["truncated state", "bindings.BeaconStateView.createFromBytes(new Uint8Array(47), config)", "InvalidStateBytes"],
     ["truncated block", "state.stateTransition(new Uint8Array(107), false)", "InvalidSignedBlockBytes"],
     [
       "invalid signed block offset",
@@ -43,7 +55,7 @@ describe("native state transition boundaries", () => {
       "Gloas state",
       `bindings.BeaconStateView.createFromBytes(ssz.fulu.BeaconState.serialize({
         ...createStfState(), slot: state.slot + 1
-      }))`,
+      }), config)`,
       "UnsupportedFork",
     ],
   ])("rejects %s without aborting", (_name, operation, error) => {
@@ -57,9 +69,9 @@ describe("native state transition boundaries", () => {
       import {ssz} from "@lodestar/types";
       import bindings from ${JSON.stringify(bindingsPath)};
       import {createStfState, stfConfig} from ${JSON.stringify(fixturePath)};
-      bindings.config.set({...stfConfig, GLOAS_FORK_EPOCH: stfConfig.FULU_FORK_EPOCH + 1}, new Uint8Array(32));
+      const config = new bindings.BeaconConfig({...stfConfig, GLOAS_FORK_EPOCH: stfConfig.FULU_FORK_EPOCH + 1}, new Uint8Array(32));
       bindings.pubkeys.ensureCapacity(16);
-      const state = bindings.BeaconStateView.createFromBytes(ssz.fulu.BeaconState.serialize(createStfState()));
+      const state = bindings.BeaconStateView.createFromBytes(ssz.fulu.BeaconState.serialize(createStfState()), config);
       assert.throws(() => { ${operation}; }, {message: ${JSON.stringify(error)}});
     `,
       ],
