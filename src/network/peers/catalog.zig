@@ -5,6 +5,7 @@ const reputation = @import("reputation.zig");
 const lists = @import("../index_list.zig");
 const enr = @import("enr.zig");
 const identity_index = @import("identity_index.zig");
+const dial_history = @import("dial_history.zig");
 
 pub const history_retention_ms: u64 = 600_000;
 pub const hint_freshness_ms: u64 = 300_000;
@@ -62,6 +63,7 @@ pub const Catalog = struct {
     intent_count: u16 = 0,
     intents: std.DynamicBitSetUnmanaged,
     intent_masks: []usize,
+    history: dial_history.History,
     established: []?u16,
     free: lists.List = .{},
     connected_count: u16 = 0,
@@ -96,18 +98,22 @@ pub const Catalog = struct {
         errdefer a.free(established);
         const intent_masks = try a.alloc(usize, try std.math.divCeil(usize, rows.len, @bitSizeOf(usize)));
         errdefer a.free(intent_masks);
+        const history = try a.alloc(dial_history.Entry, dial_history.History.capacityFor(intent_capacity));
+        errdefer a.free(history);
 
+        @memset(history, .{});
         @memset(intent_masks, 0);
         @memset(established, null);
         @memset(rows, .{});
         @memset(slots, identity_index.empty);
         @memset(connections, null);
-        var result: Catalog = .{ .rows = rows, .options = options, .intent_capacity = intent_capacity, .intents = .{ .bit_length = rows.len, .masks = intent_masks.ptr }, .intent_masks = intent_masks, .established = established, .random = .init(seed), .by_identity = .{ .slots = slots, .seed = seed }, .by_connection = connections };
+        var result: Catalog = .{ .rows = rows, .options = options, .intent_capacity = intent_capacity, .intents = .{ .bit_length = rows.len, .masks = intent_masks.ptr }, .intent_masks = intent_masks, .history = .{ .entries = history, .seed = seed }, .established = established, .random = .init(seed), .by_identity = .{ .slots = slots, .seed = seed }, .by_connection = connections };
         for (0..rows.len) |index| result.free.append(rows, "free_link", @intCast(index));
         return result;
     }
 
     pub fn deinit(self: *Catalog, a: std.mem.Allocator) void {
+        a.free(self.history.entries);
         a.free(self.intent_masks);
         a.free(self.established);
         a.free(self.by_connection);
@@ -119,7 +125,7 @@ pub const Catalog = struct {
     pub fn memoryPlan(self: *const Catalog) t.MemoryPlan {
         return .{
             .inline_bytes = @sizeOf(Catalog),
-            .allocated_bytes = self.rows.len * @sizeOf(Row) + self.by_identity.slots.len * @sizeOf(u16) + self.by_connection.len * @sizeOf(?u16) + self.established.len * @sizeOf(?u16) + self.intent_masks.len * @sizeOf(usize),
+            .allocated_bytes = self.rows.len * @sizeOf(Row) + self.by_identity.slots.len * @sizeOf(u16) + self.by_connection.len * @sizeOf(?u16) + self.established.len * @sizeOf(?u16) + self.intent_masks.len * @sizeOf(usize) + self.history.entries.len * @sizeOf(dial_history.Entry),
             .rows = @intCast(self.rows.len),
             .notification_slots = self.options.capacity,
         };

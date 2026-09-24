@@ -41,4 +41,5 @@ test {
     _ = @import("control_metrics.zig");
     _ = @import("identity_index.zig");
     _ = @import("coverage.zig");
+    _ = @import("dial_history.zig");
 }

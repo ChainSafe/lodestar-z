@@ -1676,3 +1676,24 @@ test "managed inbound admission is not blocked by unanswered dials in flight" {
     try std.testing.expect(setup.client.catalog.rowFor(inbound).?.connection != null);
     try std.testing.expectEqual(@as(u16, 1), setup.client.peerCounts().connected);
 }
+
+test "managed peer id mismatch releases the discovered endpoint and refuses its rediscovery" {
+    var setup: Setup = .{};
+    try setup.initOwners(&.{});
+    defer setup.deinit();
+    const stranger = try discoveredAt(9, support.server_address);
+    try std.testing.expectEqual(@as(u16, 1), setup.client.discoveredBatch(&setup.client_service, &.{stranger}, setup.pair.now).accepted);
+    var intents: [1]managed.DialIntent = undefined;
+    try std.testing.expectEqual(@as(usize, 1), setup.client.dialIntents(&setup.client_service, &setup.pair.client, setup.pair.now, &intents));
+    const handle = try setup.pair.client.dial(&intents[0].address, intents[0].peer, setup.pair.now);
+    try std.testing.expect(setup.client.dialStarted(intents[0].token, handle));
+    for (0..20) |_| try setup.step(0);
+    try std.testing.expect(setup.client.catalog.find(&stranger.peer) == null);
+    try std.testing.expectEqual(@as(u64, 1), setup.client.dialing.counters.failed_intents_released);
+    try std.testing.expectEqual(@as(u64, 1), setup.client.dialing.outcomes[@intFromEnum(t.DialOutcome.peer_id_mismatch)]);
+    var newer = stranger;
+    newer.sequence = 2;
+    try std.testing.expectEqual(@as(u16, 1), setup.client.discoveredBatch(&setup.client_service, &.{newer}, setup.pair.now).refused);
+    try std.testing.expectEqual(@as(usize, 0), setup.client.dialIntents(&setup.client_service, &setup.pair.client, setup.pair.now, &intents));
+    try std.testing.expectEqual(@as(u64, 0), setup.client.dialing.retries[@intFromEnum(t.DialFailure.peer_id_mismatch)]);
+}
