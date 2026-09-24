@@ -1648,3 +1648,31 @@ test "managed dial admission reserve counts only answered dials" {
     try std.testing.expectEqual(@as(u16, 1), setup.client.dialing.answeredPeers(&setup.client.catalog, null));
     try std.testing.expectEqual(@as(u16, 0), setup.client.dialing.answeredPeers(&setup.client.catalog, &answering.peer));
 }
+
+test "managed inbound admission is not blocked by unanswered dials in flight" {
+    var setup: Setup = .{};
+    var opts = @import("managed_test_support.zig").options();
+    opts.dial.concurrent_max = 3;
+    try setup.initOwnersWithOptions(&.{}, opts);
+    defer setup.deinit();
+    setup.pair.client.limits.dialing_max = 3;
+    const dead: t.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 4_999 } };
+    setup.pair.drop_to_address = dead;
+    for (0..3) |index| {
+        const silent = try discoveredAt(@intCast(20 + index), dead);
+        try setup.client.connect(&silent.peer, &.{dead}, setup.pair.now);
+    }
+    var intents: [3]managed.DialIntent = undefined;
+    try std.testing.expectEqual(@as(usize, 3), setup.client.dialIntents(&setup.client_service, &setup.pair.client, setup.pair.now, &intents));
+    for (intents) |intent| {
+        const handle = try setup.pair.client.dial(&intent.address, intent.peer, setup.pair.now);
+        try std.testing.expect(setup.client.dialStarted(intent.token, handle));
+    }
+    _ = try setup.pair.server.dial(&support.client_address, setup.pair.client_ctx.local_peer_id, setup.pair.now);
+    for (0..60) |_| try setup.step(0);
+    try std.testing.expectEqual(@as(u16, 3), setup.client.dialing.pendingPeers(&setup.client.catalog, null));
+    try std.testing.expectEqual(@as(u16, 0), setup.client.dialing.answeredPeers(&setup.client.catalog, null));
+    const inbound = setup.client.catalog.find(&setup.pair.server_ctx.local_peer_id) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(setup.client.catalog.rowFor(inbound).?.connection != null);
+    try std.testing.expectEqual(@as(u16, 1), setup.client.peerCounts().connected);
+}
