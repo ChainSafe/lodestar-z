@@ -176,7 +176,11 @@ pub const Runtime = struct {
     notify: Notify = undefined,
     notify_live: bool = true,
     notify_finalized: bool = false,
+    /// The notification latch: set by a ping and held until the host's drain ends with nothing
+    /// left, so at most one notification is outstanding.
     notification_pending: bool = false,
+    /// A ping arrived while the latch was held; the current drain must run again.
+    notify_missed: bool = false,
     work_rearm: bool = false,
     /// Owner thread: an event capture left host work for the next apply, so the next turn is due now.
     host_due: bool = false,
@@ -379,7 +383,11 @@ pub const Runtime = struct {
         return result;
     }
     pub fn pingLocked(self: *Runtime) void {
-        if (self.notification_pending or !self.notify_live or !self.env_alive) return;
+        if (!self.notify_live or !self.env_alive) return;
+        if (self.notification_pending) {
+            self.notify_missed = true;
+            return;
+        }
         self.notification_pending = true;
         switch (activity) {
             .entry => |entry| self.bridge.js_pings[@intFromEnum(entry)] +|= 1,
@@ -398,6 +406,37 @@ pub const Runtime = struct {
                 self.terminal_error = err;
             },
         };
+    }
+    /// JS thread, in the notification callback: records it and reports whether to call the host.
+    /// The latch stays set; the host's drain releases it.
+    pub fn noticeLocked(self: *Runtime) bool {
+        self.bridge.notified();
+        return self.env_alive;
+    }
+    /// JS thread: the host did not take the notification, so the callback settles inline and a
+    /// later ping notifies again.
+    pub fn declineLocked(self: *Runtime) void {
+        self.notification_pending = false;
+        self.notify_missed = false;
+    }
+    /// JS thread: ends one host drain. Keeps the latch and returns true when a ping arrived during
+    /// the drain, a completion awaits settlement or the close result is pending. Otherwise releases
+    /// the latch, so the owner's next ping notifies again; both happen under the runtime mutex, so
+    /// owner work between this check and that ping is never lost.
+    pub fn endDrainLocked(self: *Runtime) bool {
+        self.bridge.boundary();
+        const more = self.notify_missed or self.settleableLocked() or (self.quiescent and !self.close_settled);
+        self.notify_missed = false;
+        if (!more) self.notification_pending = false;
+        return more;
+    }
+    /// A publication, command, request or incoming completion that `settle` would deliver now.
+    pub fn settleableLocked(self: *const Runtime) bool {
+        for (&self.table.cells) |*cell| if (cell.state == .terminal) return true;
+        if (self.publications) |*table| for (table.cells) |*cell| if (cell.state == .terminal) return true;
+        if (self.requests) |*table| for (table.cells) |*cell| if (requests_mod.settleable(cell, self.stop, self.disposed)) return true;
+        if (self.incoming) |*table| for (table.cells) |*cell| if (incoming_mod.settleable(cell)) return true;
+        return false;
     }
     pub fn join(self: *Runtime) void {
         if (self.thread) |thread| {
@@ -437,15 +476,20 @@ pub const Runtime = struct {
         self.retireRequestStorageLocked();
         self.disposeJsReferences();
     }
+    /// The host's drain can settle the close result after the notifier finalizes, so its
+    /// references outlive the notifier until close settles or the runtime is disposed.
     pub fn disposeTerminalReferences(self: *Runtime) void {
-        if (self.notify_finalized and (self.publications == null or self.publications.?.diag.occupied == 0) and (self.requests == null or self.requests.?.diag.occupied == 0) and (self.incoming == null or self.incoming.?.diag.occupied == 0)) self.disposeJsReferences();
+        if (!self.notify_finalized or self.table.occupied != 0 or (self.publications != null and self.publications.?.diag.occupied != 0) or (self.requests != null and self.requests.?.diag.occupied != 0) or (self.incoming != null and self.incoming.?.diag.occupied != 0)) return;
+        if (self.copy_error) |ref| ref.delete() catch unreachable;
+        self.copy_error = null;
+        if (self.close_settled) self.disposeCloseReferences();
     }
     pub fn disposeJsReferences(self: *Runtime) void {
         if (self.copy_error) |ref| ref.delete() catch unreachable;
         self.copy_error = null;
         self.disposeCloseReferences();
     }
-    fn disposeCloseReferences(self: *Runtime) void {
+    pub fn disposeCloseReferences(self: *Runtime) void {
         for (&self.close_results) |*entry| {
             if (entry.*) |ref| ref.delete() catch unreachable;
             entry.* = null;
@@ -476,7 +520,6 @@ pub const Runtime = struct {
     }
     pub fn finalize(_: napi.Env, self: *Runtime) void {
         self.notify_finalized = true;
-        self.disposeCloseReferences();
         if (self.disposed) self.retireClosedRequests() else self.disposeTerminalReferences();
         self.release();
     }

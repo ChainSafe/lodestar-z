@@ -56,9 +56,12 @@ pub fn publish(runtime: *r.Runtime, topic: Value, data: Value, options: Value) !
     runtime.notify.ref(runtime.env) catch {};
     return deferred.getPromise();
 }
-pub fn settle(env: napi.Env, runtime: *r.Runtime) !void {
+/// Settles up to `limit` terminal publications. Returns whether more remain.
+pub fn settle(env: napi.Env, runtime: *r.Runtime, limit: usize) !bool {
     runtime.retain();
     defer runtime.release();
+    var settled: usize = 0;
+    var more = false;
     for (0..p.capacity_max) |i| {
         runtime.lock();
         const table = if (runtime.publications) |*table| table else {
@@ -74,6 +77,12 @@ pub fn settle(env: napi.Env, runtime: *r.Runtime) !void {
             runtime.unlock();
             continue;
         }
+        if (settled == limit) {
+            runtime.unlock();
+            more = true;
+            break;
+        }
+        settled += 1;
         cell.state = .copying;
         const token: p.Token = .{ .index = @intCast(i), .generation = cell.generation };
         runtime.unlock();
@@ -91,6 +100,7 @@ pub fn settle(env: napi.Env, runtime: *r.Runtime) !void {
         }
     }
     runtime.disposeTerminalReferences();
+    return more;
 }
 fn copyResult(env: napi.Env, cell: *const p.Cell) !Value {
     return g.publishResult(env, cell.outcome);

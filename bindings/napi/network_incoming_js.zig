@@ -36,11 +36,11 @@ fn cellFor(runtime: *Runtime, token: incoming.Token) !*incoming.Cell {
     const table = if (runtime.incoming) |*table| table else return error.InvalidIncomingHandle;
     return table.get(token) orelse error.NetworkIncomingClosed;
 }
+/// Wakes the owner for the host's change and keeps the event loop alive for the promises it awaits.
 fn refNotify(runtime: *Runtime) void {
     runtime.lock();
     const live = runtime.notify_live;
     runtime.signalLocked();
-    runtime.pingLocked();
     runtime.unlock();
     if (live) runtime.notify.ref(runtime.env) catch {};
 }
@@ -208,7 +208,6 @@ pub fn terminal(runtime: *Runtime, value: Value, action_value: Value, status_val
     }
     runtime.unlock();
     refNotify(runtime);
-    try settle(runtime.env, runtime);
     return runtime.env.getUndefined();
 }
 
@@ -264,10 +263,13 @@ fn ackError(env: napi.Env, ack: incoming.Ack) !Value {
         },
     }
 }
-pub fn settle(env: napi.Env, runtime: *Runtime) !void {
-    if (runtime.incoming == null) return;
+/// Settles up to `limit` incoming acknowledgements, closes and permissions. Returns whether more remain.
+pub fn settle(env: napi.Env, runtime: *Runtime, limit: usize) !bool {
+    if (runtime.incoming == null) return false;
     runtime.retain();
     defer runtime.release();
+    var settled: usize = 0;
+    var more = false;
     for (0..32) |i| {
         runtime.lock();
         const table = &runtime.incoming.?;
@@ -276,17 +278,19 @@ pub fn settle(env: napi.Env, runtime: *Runtime) !void {
             break;
         }
         const cell = &table.cells[i];
-        if (cell.state == .free or cell.copying or cell.state == .response_preparing) {
+        if (!incoming.settleable(cell)) {
             runtime.unlock();
             continue;
         }
+        if (settled == limit) {
+            runtime.unlock();
+            more = true;
+            break;
+        }
+        settled += 1;
         const pending = if (cell.ack != null) cell.pending else null;
         const closed = if (!cell.native) cell.closed else null;
         const permission = if (cell.permission_ready or !cell.native) cell.permission else null;
-        if (pending == null and closed == null and permission == null) {
-            runtime.unlock();
-            continue;
-        }
         cell.copying = true;
         const ack = cell.ack;
         const permitted = cell.native and cell.permission_ready;
@@ -321,6 +325,7 @@ pub fn settle(env: napi.Env, runtime: *Runtime) !void {
     runtime.retireRequestStorageLocked();
     runtime.unlock();
     runtime.disposeTerminalReferences();
+    return more;
 }
 pub fn diagnostics(env: napi.Env, value: *const incoming.Diagnostics) !Value {
     return @import("network_js.zig").scalarFields(env, value);

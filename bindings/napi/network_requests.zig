@@ -164,6 +164,34 @@ pub const Table = struct {
     }
 };
 
+/// A received chunk and a pull waiting for it.
+pub fn deliverable(cell: *const Cell, stop: bool) bool {
+    return cell.pull != null and cell.chunk != null and !cell.delivered and !cell.retiring and !stop;
+}
+/// A chunk or terminal outcome the host's settlement delivers now: to a pending pull, to a
+/// retirement, or unobserved once the runtime is disposed.
+pub fn settleable(cell: *const Cell, stop: bool, disposed: bool) bool {
+    if (cell.state == .free or cell.state == .preparing or cell.copying) return false;
+    if (deliverable(cell, stop)) return true;
+    const terminal = cell.terminal != null and cell.native == null and (cell.chunk == null or cell.retiring or stop);
+    return terminal and (cell.pull != null or cell.retiring or disposed);
+}
+/// JS thread: arms a pull. The owner consumes a delivered chunk first; settlement happens only in
+/// the host's drain.
+pub fn armPull(runtime: *Runtime, cell: *Cell, deferred: napi.Deferred) void {
+    cell.pull = deferred;
+    if (cell.delivered) cell.consume = true;
+    runtime.signalLocked();
+}
+/// JS thread: asks the owner to cancel and retire the request; settlement happens only in the
+/// host's drain.
+pub fn armRetirement(runtime: *Runtime, cell: *Cell, deferred: ?napi.Deferred) void {
+    cell.retirement = deferred;
+    cell.retiring = true;
+    cell.cancel = true;
+    runtime.signalLocked();
+}
+
 pub fn rejection(err: anyerror) !Rejection {
     return switch (err) {
         error.StalePeer, error.StaleHandle, error.Disconnected => .disconnected,

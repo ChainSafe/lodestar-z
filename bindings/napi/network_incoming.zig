@@ -221,6 +221,12 @@ pub fn awaitingTerminal(owner: *rr.ReqResp, handle: rr.RequestHandle, err: anyer
     const slot = owner.inboundSlot(handle) orelse return false;
     return slot.request.terminalEvent() != null;
 }
+/// A promise the host's settlement resolves now: a write acknowledgement, the close of a finished
+/// stream, or a response permission.
+pub fn settleable(cell: *const Cell) bool {
+    if (cell.state == .free or cell.copying or cell.state == .response_preparing) return false;
+    return (cell.ack != null and cell.pending != null) or (!cell.native and cell.closed != null) or ((cell.permission_ready or !cell.native) and cell.permission != null);
+}
 /// A retained serving slot whose host released it and holds no promise, so the owner returns it.
 pub fn releasable(cell: *const Cell) bool {
     return cell.serving_retained and cell.release_requested and !cell.native and !cell.copying and

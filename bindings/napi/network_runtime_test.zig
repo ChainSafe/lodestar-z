@@ -9,10 +9,11 @@ const publications_mod = r.publications_mod;
 const requests_mod = r.requests_mod;
 const projection = r.projection;
 
-/// The test executable links no Node runtime. Owner tests disable notification, so this stub
-/// only satisfies the linker for the owner's notify path.
+/// The test executable links no Node runtime, so a notification only counts here.
+var notifications = std.atomic.Value(u32).init(0);
 fn napiCallThreadsafeFunction(_: ?*anyopaque, _: ?*anyopaque, _: c_uint) callconv(.c) c_uint {
-    @panic("napi_call_threadsafe_function without a Node runtime");
+    _ = notifications.fetchAdd(1, .acq_rel);
+    return 0;
 }
 comptime {
     @export(&napiCallThreadsafeFunction, .{ .name = "napi_call_threadsafe_function" });
@@ -183,4 +184,145 @@ test "runtime mutex records JS waits under the calling entry and owner holds und
     for (snapshot.waits) |value| waited += value.count;
     try std.testing.expectEqual(@as(u64, 1), holds);
     try std.testing.expectEqual(@as(u64, 1), waited);
+}
+
+test "a notification keeps the latch and leaves every completion for the host drain" {
+    var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 } };
+    const before = notifications.load(.acquire);
+    const token = try runtime.table.reserve(.getIdentity);
+    runtime.table.get(token).state = .terminal;
+    runtime.lock();
+    runtime.pingLocked();
+    runtime.pingLocked();
+    try std.testing.expect(runtime.noticeLocked());
+    runtime.unlock();
+    try std.testing.expectEqual(before + 1, notifications.load(.acquire));
+    try std.testing.expect(runtime.notification_pending);
+    try std.testing.expectEqual(commands.State.terminal, runtime.table.get(token).state);
+    runtime.lock();
+    try std.testing.expect(runtime.endDrainLocked());
+    runtime.unlock();
+    try std.testing.expect(runtime.notification_pending);
+    runtime.table.retire(token);
+    runtime.lock();
+    try std.testing.expect(!runtime.endDrainLocked());
+    try std.testing.expect(!runtime.notification_pending);
+    runtime.pingLocked();
+    runtime.unlock();
+    try std.testing.expectEqual(before + 2, notifications.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 0), runtime.bridge.js_pings[@intFromEnum(r.bridge.Entry.settle)]);
+}
+
+test "owner work around the end of a host drain is never lost" {
+    var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 } };
+    const before = notifications.load(.acquire);
+    runtime.lock();
+    runtime.pingLocked();
+    _ = runtime.noticeLocked();
+    runtime.unlock();
+    // Owner work between the drain's last read and its end: the latch suppresses the ping.
+    runtime.lock();
+    runtime.pingLocked();
+    runtime.unlock();
+    try std.testing.expectEqual(before + 1, notifications.load(.acquire));
+    runtime.lock();
+    try std.testing.expect(runtime.endDrainLocked());
+    try std.testing.expect(!runtime.endDrainLocked());
+    runtime.unlock();
+    // Owner work after the end released the latch: the ping notifies again.
+    runtime.lock();
+    runtime.pingLocked();
+    runtime.unlock();
+    try std.testing.expectEqual(before + 2, notifications.load(.acquire));
+    try std.testing.expect(runtime.notification_pending);
+}
+
+test "owner work that races the end of a host drain always reaches a later drain" {
+    var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 } };
+    const Producer = struct {
+        produced: u32 = 0,
+        done: std.atomic.Value(bool) = .init(false),
+        fn run(self: *@This(), target: *Runtime) void {
+            for (0..5_000) |_| {
+                target.lock();
+                self.produced += 1;
+                target.pingLocked();
+                target.unlock();
+                std.Thread.yield() catch {};
+            }
+            self.done.store(true, .release);
+        }
+    };
+    var producer: Producer = .{};
+    var delivered = notifications.load(.acquire);
+    const thread = try std.Thread.spawn(.{}, Producer.run, .{ &producer, &runtime });
+    var consumed: u32 = 0;
+    var again = false;
+    var drains: usize = 0;
+    for (0..10_000_000) |_| {
+        const done = producer.done.load(.acquire);
+        const notified = notifications.load(.acquire) != delivered;
+        if (notified) delivered += 1;
+        if (notified or again) {
+            // A drain reads its lanes and ends in separate critical sections.
+            runtime.lock();
+            if (notified) _ = runtime.noticeLocked();
+            consumed = producer.produced;
+            runtime.unlock();
+            std.Thread.yield() catch {};
+            runtime.lock();
+            again = runtime.endDrainLocked();
+            runtime.unlock();
+            drains += 1;
+        } else if (done) break;
+        std.Thread.yield() catch {};
+    }
+    thread.join();
+    try std.testing.expectEqual(@as(u32, 5_000), producer.produced);
+    try std.testing.expectEqual(producer.produced, consumed);
+    try std.testing.expect(!runtime.notification_pending and !runtime.notify_missed);
+    try std.testing.expect(drains > 0);
+}
+
+test "pulls and retirements neither notify from the JS thread nor settle before the host drain" {
+    var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 } };
+    runtime.payload_budget.limit = 32 + 2 * n.reqresp.Protocol.blocks_by_root_v2.info().response_max;
+    runtime.requests = try requests_mod.Table.init(std.testing.allocator, 1, &runtime.payload_budget);
+    defer runtime.requests.?.deinit();
+    const token = try runtime.requests.?.reserve(.blocks_by_root_v2, 32);
+    try runtime.requests.?.allocate(token, 32);
+    const cell = runtime.requests.?.get(token).?;
+    cell.state = .native;
+    cell.native = .{ .index = 0, .generation = 1, .direction = .outbound };
+    cell.chunk = .{ .len = 4, .fork = null };
+    const before = notifications.load(.acquire);
+    const deferred: @import("zapi:zapi").napi.Deferred = undefined;
+    const pull = r.call(&runtime, .request_pull);
+    runtime.lock();
+    try std.testing.expect(!runtime.settleableLocked());
+    requests_mod.armPull(&runtime, cell, deferred);
+    try std.testing.expect(runtime.settleableLocked());
+    runtime.unlock();
+    pull.end();
+    try std.testing.expect(cell.pull != null and cell.chunk != null and !cell.delivered);
+    const retire = r.call(&runtime, .request_retire);
+    runtime.lock();
+    requests_mod.armRetirement(&runtime, cell, deferred);
+    runtime.unlock();
+    retire.end();
+    try std.testing.expect(cell.retiring and cell.cancel and cell.retirement != null);
+    try std.testing.expectEqual(before, notifications.load(.acquire));
+    try std.testing.expect(!runtime.notification_pending);
+    for (runtime.bridge.js_pings) |count| try std.testing.expectEqual(@as(u64, 0), count);
+    const ping = r.call(&runtime, .request_pull);
+    runtime.lock();
+    runtime.pingLocked();
+    runtime.unlock();
+    ping.end();
+    try std.testing.expectEqual(@as(u64, 1), runtime.bridge.js_pings[@intFromEnum(r.bridge.Entry.request_pull)]);
+    cell.native = null;
+    cell.chunk = null;
+    cell.pull = null;
+    cell.retirement = null;
+    runtime.requests.?.retire(token);
 }
