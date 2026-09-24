@@ -11,6 +11,7 @@ import type {
   NativeDiscoveryConfig,
   NativeGossipProcessorLimit,
   NativeLocalIntent,
+  NativeNetworkApplicationRuntime,
   NativeRuntimeConfig,
   NativeSubscriptionSet,
   NativeTopicKind,
@@ -197,8 +198,38 @@ export function localIntent(config: NativeApplicationConfig): NativeLocalIntent 
   };
 }
 
+/**
+ * The least a host drain does: each notification schedules settlement passes in later macrotasks until endDrain
+ * releases the latch. Peer, incoming and gossip lanes stay with the test.
+ */
+function settlingHost(onWorkAvailable: () => void = () => undefined) {
+  let runtime: Pick<NativeNetworkApplicationRuntime, "settle" | "endDrain"> | undefined;
+  let scheduled = false;
+  const drain = () => {
+    scheduled = false;
+    if (runtime && (runtime.settle(32) || runtime.endDrain())) schedule();
+  };
+  const schedule = () => {
+    if (scheduled) return;
+    scheduled = true;
+    setImmediate(drain);
+  };
+  return {
+    attach(value: Pick<NativeNetworkApplicationRuntime, "settle" | "endDrain">) {
+      runtime = value;
+    },
+    onWorkAvailable() {
+      schedule();
+      onWorkAvailable();
+    },
+  };
+}
+
 export function startRuntime(config: NativeApplicationConfig, onWorkAvailable: () => void = () => undefined) {
-  return initializeNativeNetworkRuntime(config, onWorkAvailable);
+  const host = settlingHost(onWorkAvailable);
+  const runtime = initializeNativeNetworkRuntime(config, host.onWorkAvailable);
+  host.attach(runtime);
+  return runtime;
 }
 
 /** Collects released runtimes until the process may initialize another one. */

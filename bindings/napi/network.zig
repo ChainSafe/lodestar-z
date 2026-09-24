@@ -64,9 +64,6 @@ pub fn initialize(self: *@This(), config: js.Value, callback: js.Value) !js.Valu
     errdefer runtime.release();
     runtime.thread = try std.Thread.spawn(.{ .stack_size = std.Thread.SpawnConfig.default_stack_size }, @import("network_owner.zig").run, .{runtime});
     self.runtime = runtime;
-    runtime.lock();
-    runtime.pingLocked();
-    runtime.unlock();
     return .{ .val = holder };
 }
 
@@ -146,59 +143,97 @@ pub fn deinit(self: *@This()) void {
 }
 
 fn onNotify(env: napi.Env, callback: Value, runtime: *Runtime, _: *void) void {
-    notify(env, callback, runtime) catch |err| switch (err) {
+    notify(env, callback, runtime) catch |err| settlementFailed(env, runtime, err);
+}
+
+fn settlementFailed(env: napi.Env, runtime: *Runtime, err: anyerror) void {
+    switch (err) {
         // Node may disable JavaScript before running environment cleanup hooks.
         error.Closing, error.CannotRunJS, error.PendingException => runtime.forceStop(true),
         // Failed settlement of valid, preallocated handles cannot notify the host reliably.
         else => env.fatalError("native network result settlement", @errorName(err)),
-    };
+    }
 }
 
+/// The notification callback only schedules: a host that returns true drains through `settle`
+/// and ends with `endDrain`, which releases the latch this callback leaves set. A callback that
+/// returns anything else, such as a wrapper already collected, leaves no host drain, so the
+/// results settle inline and the latch is released.
 fn notify(env: napi.Env, callback: Value, runtime: *Runtime) !void {
     const started = r.bridge.now();
     defer runtime.bridge.notify.observe(r.bridge.now() -| started);
     runtime.lock();
-    runtime.notification_pending = false;
-    runtime.bridge.notified();
-    const alive = runtime.env_alive;
+    const alive = runtime.noticeLocked();
     runtime.unlock();
     if (!alive) return;
-    try publication_js.settle(env, runtime);
-    try settleOperations(env, runtime);
-    try request_js.settle(env, runtime);
-    try incoming_js.settle(env, runtime);
+    const result = env.callFunction(callback, try env.getUndefined(), .{}) catch {
+        // A throwing host may not have scheduled its drain, so a later ping notifies again. No
+        // settlement can run until the exception propagates.
+        runtime.lock();
+        runtime.declineLocked();
+        runtime.unlock();
+        return;
+    };
+    if (try result.typeof() == .boolean and try result.getValueBool()) return;
     runtime.lock();
-    const idle = runtime.table.occupied == 0 and (runtime.publications == null or !runtime.publications.?.obligated()) and !runtime.requestObligations() and runtime.notify_live and !runtime.stop;
+    runtime.declineLocked();
     runtime.unlock();
-    if (idle) runtime.notify.unref(env) catch {};
-    try settleClose(env, runtime);
-    runtime.lock();
-    const work_available = !runtime.disposed and !runtime.quiescent and ((runtime.lane != null and runtime.lane.?.len > 0) or (runtime.incoming != null and runtime.incoming.?.oldest() != null) or (runtime.gossip != null and runtime.gossip.?.hasWork()));
-    runtime.unlock();
-    if (work_available) _ = env.callFunction(callback, env.getUndefined() catch return, .{}) catch return;
+    for (0..2) |_| if (!try settleWithin(env, runtime, publications.capacity_max)) break;
 }
 fn makeError(env: napi.Env, err: anyerror) !Value {
     const name = try env.createStringUtf8(@errorName(err));
     return env.createError(name, name);
 }
-fn settleClose(env: napi.Env, runtime: *Runtime) !void {
+
+/// Settles up to `limit` completions per table, then the close result once the owner has
+/// quiesced and nothing else awaits settlement. Returns whether more remain.
+fn settleWithin(env: napi.Env, runtime: *Runtime, limit: usize) !bool {
+    var more = try publication_js.settle(env, runtime, limit);
+    more = try settleOperations(env, runtime, limit) or more;
+    more = try request_js.settle(env, runtime, limit) or more;
+    more = try incoming_js.settle(env, runtime, limit) or more;
     runtime.lock();
-    const done = runtime.quiescent;
-    runtime.unlock();
-    if (!done or runtime.close_settled) return;
-    runtime.join();
-    // The owner can quiesce after this callback's earlier result drains.
-    try publication_js.settle(env, runtime);
-    try settleOperations(env, runtime);
-    try request_js.settle(env, runtime);
-    try incoming_js.settle(env, runtime);
-    runtime.lock();
+    const idle = runtime.table.occupied == 0 and (runtime.publications == null or !runtime.publications.?.obligated()) and !runtime.requestObligations() and runtime.notify_live and !runtime.stop;
+    const closing = runtime.quiescent and !runtime.close_settled;
+    // Owner quiescence is final, so completions it left before quiescing are all settleable now.
+    more = more or runtime.settleableLocked();
     const reason = runtime.reason;
     runtime.unlock();
+    if (idle) runtime.notify.unref(env) catch {};
+    if (!closing or more) return more or closing;
+    runtime.join();
     const value = try runtime.close_results[@intFromEnum(reason)].?.getValue();
     try runtime.close_deferred.?.resolve(value);
     runtime.close_settled = true;
+    runtime.disposeCloseReferences();
     runtime.removeHook();
+    return false;
+}
+
+/// The host drain's settlement pass: up to `limit` completions per table. Returns whether more remain.
+pub fn settle(self: *@This(), limit: js.Value) !js.Value {
+    const call = r.call(self.runtime, .settle);
+    defer call.end();
+    const max = cfg.integer(limit.val, publications.capacity_max) catch return error.InvalidSettleLimit;
+    if (max == 0) return error.InvalidSettleLimit;
+    const runtime = try self.owner();
+    const env = js.env();
+    const more = settleWithin(env, runtime, @intCast(max)) catch |err| {
+        settlementFailed(env, runtime, err);
+        return err;
+    };
+    return .{ .val = try env.getBoolean(more) };
+}
+
+/// Ends one host drain. True keeps the notification latch and asks for another drain.
+pub fn endDrain(self: *@This()) !js.Value {
+    const call = r.call(self.runtime, .end_drain);
+    defer call.end();
+    const runtime = try self.owner();
+    runtime.lock();
+    const more = runtime.endDrainLocked();
+    runtime.unlock();
+    return .{ .val = try js.env().getBoolean(more) };
 }
 
 fn owner(self: *@This()) !*Runtime {
@@ -389,7 +424,8 @@ pub fn reportPeer(self: *@This(), peer: js.Value, action: js.Value) !js.Value {
     return .{ .val = result };
 }
 
-fn settleOperations(env: napi.Env, runtime: *Runtime) !void {
+fn settleOperations(env: napi.Env, runtime: *Runtime, limit: usize) !bool {
+    var settled: usize = 0;
     for (0..32) |i| {
         runtime.lock();
         const cell = &runtime.table.cells[i];
@@ -397,6 +433,11 @@ fn settleOperations(env: napi.Env, runtime: *Runtime) !void {
             runtime.unlock();
             continue;
         }
+        if (settled == limit) {
+            runtime.unlock();
+            return true;
+        }
+        settled += 1;
         cell.state = .copying;
         const token: commands.Token = .{ .index = @intCast(i), .generation = cell.generation };
         runtime.unlock();
@@ -414,6 +455,7 @@ fn settleOperations(env: napi.Env, runtime: *Runtime) !void {
             }
         }
     }
+    return false;
 }
 fn copyOperation(env: napi.Env, runtime: *Runtime, index: usize) !Value {
     const operation = &runtime.table.cells[index];
@@ -466,8 +508,6 @@ fn drainPeerEvents(runtime: *Runtime, max: usize) !js.Value {
     defer runtime.release();
     var events: [64]projection.Entry = undefined;
     runtime.lock();
-    // A peer drain bounds a notification chain.
-    runtime.bridge.boundary();
     const lane = runtime.lane;
     const count = if (lane) |storage| storage.peek(events[0..@intCast(max)]) else 0;
     const sequence = runtime.table.sequence;
@@ -484,8 +524,11 @@ fn drainPeerEvents(runtime: *Runtime, max: usize) !js.Value {
     runtime.lock();
     if (lane) |storage| {
         storage.commit(count);
-        if (!more and storage.len > 0 and !runtime.quiescent) runtime.work_rearm = true;
-        if (!runtime.quiescent) runtime.signalLocked();
+        // Events published during the copy were not reported, so the owner notifies again.
+        const rearm = !more and storage.len > 0 and !runtime.quiescent;
+        if (rearm) runtime.work_rearm = true;
+        // Committed events free lane room the owner publishes into.
+        if (!runtime.quiescent and (count > 0 or rearm)) runtime.signalLocked();
     }
     runtime.unlock();
     return .{ .val = object };

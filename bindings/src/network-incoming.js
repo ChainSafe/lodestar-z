@@ -14,15 +14,18 @@ function failure(code) {
 export class NativeIncoming {
   #route;
   #handle;
+  #wake;
   #done = false;
   #terminal = false;
   #retentionRegistered = false;
   #retained = false;
   #released = false;
 
-  constructor(native, descriptor) {
+  /** `wake` schedules the host drain, which settles terminal closes. */
+  constructor(native, descriptor, wake) {
     this.#route = new WeakRef(native);
     this.#handle = descriptor.handle;
+    this.#wake = wake;
     this.peerId = descriptor.peerId;
     this.connection = descriptor.connection;
     this.protocol = descriptor.protocol;
@@ -89,6 +92,7 @@ export class NativeIncoming {
     try {
       this.#route.deref()?.incomingTerminal(this.#handle, action, status, message);
       this.#terminal = true;
+      this.#wake();
       return this.closed;
     } catch (error) {
       if (error.code === "NetworkIncomingClosed") return this.closed;

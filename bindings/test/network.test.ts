@@ -1,7 +1,8 @@
 import {execFileSync} from "node:child_process";
+import {setTimeout as delay} from "node:timers/promises";
 import {privateKeyFromRaw} from "@libp2p/crypto/keys";
 import {peerIdFromPublicKey} from "@libp2p/peer-id";
-import {expect, it} from "vitest";
+import {expect, it, vi} from "vitest";
 import {initializeNativeNetworkRuntime} from "../src/network.js";
 import {
   applicationConfig,
@@ -14,6 +15,7 @@ import {
   subscriptions,
   topicName,
 } from "./utils/network.js";
+import {BLOCKS} from "./utils/network-incoming.js";
 import {startPeer} from "./utils/network-peer.js";
 
 it("owns a real native socket and releases it on idempotent close", async () => {
@@ -80,7 +82,7 @@ it("copies inputs before returning and advances the clock only through intents",
   const config = applicationConfig();
   const expected = peerIdFromPublicKey(privateKeyFromRaw(config.identitySecretKey).publicKey).toString();
   config.local.metadata.syncnets = 2;
-  const runtime = initializeNativeNetworkRuntime(config, () => undefined);
+  const runtime = startRuntime(config);
   expect(runtime.identity.metadata.syncnets).toBe(2);
   config.local.metadata.syncnets = 4;
   expect(runtime.identity.metadata.syncnets).toBe(2);
@@ -106,7 +108,7 @@ it("copies inputs before returning and advances the clock only through intents",
 
 it("starts without subscriptions and accepts ordinary updates after rejecting an invalid intent", async () => {
   const config = applicationConfig();
-  const runtime = initializeNativeNetworkRuntime(config, () => undefined);
+  const runtime = startRuntime(config);
   try {
     expect(runtime.state).toBe("running");
     expect((await runtime.getGossipDiagnostics()).topics.some((topic) => topic.subscribed)).toBe(false);
@@ -223,6 +225,8 @@ it("rejects every invalid drain limit", async () => {
     }
     expect(runtime.drainPeers(1)).toMatchObject({events: [], more: false});
     expect(runtime.drainPeers(32)).toMatchObject({events: [], more: false});
+    for (const limit of [0, -1, 0.5, 257, Number.NaN])
+      expect(() => runtime.settle(limit)).toThrow("InvalidSettleLimit");
   } finally {
     await runtime.close();
   }
@@ -466,3 +470,56 @@ it("rejects a bootstrap with an invalid signature before starting", async () => 
   config.discovery.bootstrapEnrs = [corrupt];
   expect(() => startRuntime(config)).toThrow("InvalidSignature");
 });
+
+it("settles results only in the host drain and notifies once until a drain ends", async () => {
+  const config = applicationConfig();
+  let notifications = 0;
+  const runtime = initializeNativeNetworkRuntime(config, () => {
+    notifications++;
+  });
+  const drain = () => {
+    for (let pass = 0; pass < 8; pass++) if (!runtime.settle(32)) return runtime.endDrain();
+    return true;
+  };
+  const watch = (promise: Promise<unknown>) => {
+    let settled = false;
+    promise.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      }
+    );
+    return () => settled;
+  };
+  const closing = watch(runtime.closed);
+  try {
+    const intent = runtime.applyIntent(localIntent(config), config.initialSlot);
+    const intentSettled = watch(intent);
+    await vi.waitFor(() => expect(notifications).toBe(1));
+    const identity = runtime.getIdentity();
+    await delay(100);
+    expect(notifications).toBe(1);
+    expect(intentSettled()).toBe(false);
+    expect(drain()).toBe(true);
+    expect(drain()).toBe(false);
+    expect((await intent).slot).toBe(config.initialSlot);
+    expect((await identity).peerId).toBe(runtime.identity.peerId);
+    const pull = runtime.request(runtime.identity.peerId, BLOCKS, new Uint8Array(32)).next();
+    const pullSettled = watch(pull);
+    await vi.waitFor(() => expect(notifications).toBe(3));
+    await delay(20);
+    expect(pullSettled()).toBe(false);
+    for (let pass = 0; pass < 8 && drain(); pass++);
+    await expect(pull).rejects.toMatchObject({reason: "disconnected"});
+  } finally {
+    runtime.close();
+    for (let i = 0; i < 400 && !closing(); i++) {
+      await delay(5);
+      drain();
+    }
+  }
+  expect(await runtime.closed).toEqual({reason: "requested"});
+  expect(drain()).toBe(false);
+}, 20000);

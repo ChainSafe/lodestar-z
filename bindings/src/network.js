@@ -6,19 +6,38 @@ class NativeRuntime {
   #native;
   #closed;
   #onWorkAvailable;
+  #wake;
 
   constructor(config, onWorkAvailable) {
     this.#native = new bindings.NativeNetworkRuntime();
     this.#onWorkAvailable = onWorkAvailable;
-    const callback =
-      typeof onWorkAvailable === "function" ? NativeRuntime.#notifier(new WeakRef(this)) : onWorkAvailable;
+    const weak = new WeakRef(this);
+    this.#wake = NativeRuntime.#waker(weak);
+    const callback = typeof onWorkAvailable === "function" ? NativeRuntime.#notifier(weak) : onWorkAvailable;
     const initialized = this.#native.initialize(config, callback);
     this.identity = initialized.identity;
     this.#closed = initialized.closed;
   }
 
+  /** Reports whether a host took the notification; a collected wrapper leaves settlement to native. */
   static #notifier(weak) {
-    return () => weak.deref()?.#onWorkAvailable();
+    return () => {
+      const runtime = weak.deref();
+      if (runtime === undefined) return false;
+      runtime.#onWorkAvailable();
+      return true;
+    };
+  }
+
+  /** Schedules the host drain after a call that leaves results to settle. */
+  static #waker(weak) {
+    return () => {
+      try {
+        weak.deref()?.#onWorkAvailable();
+      } catch {
+        // The owner's notifications report a throwing host; the caller's operation stands.
+      }
+    };
   }
 
   get closed() {
@@ -75,6 +94,19 @@ class NativeRuntime {
   reportPeer(peerId, action) {
     return this.#native.reportPeer(peerId, action);
   }
+  settle(limit) {
+    // Settled errors describe native outcomes. A captured drain frame would only keep this wrapper alive.
+    const stackTraceLimit = Error.stackTraceLimit;
+    Error.stackTraceLimit = 0;
+    try {
+      return this.#native.settle(limit);
+    } finally {
+      Error.stackTraceLimit = stackTraceLimit;
+    }
+  }
+  endDrain() {
+    return this.#native.endDrain();
+  }
   drainPeers(maxEvents) {
     return this.#native.drainPeers(maxEvents);
   }
@@ -106,14 +138,14 @@ class NativeRuntime {
     const descriptor = this.#native.takeIncomingRequest();
     if (descriptor === null) return null;
     try {
-      return new NativeIncoming(this.#native, descriptor);
+      return new NativeIncoming(this.#native, descriptor, this.#wake);
     } catch (error) {
       this.#native.incomingTerminal(descriptor.handle, 2, undefined, undefined);
       throw error;
     }
   }
   request(peerId, protocol, data, options) {
-    return new NativeRequest(this.#native, this.#native.requestStart(peerId, protocol, data, options));
+    return new NativeRequest(this.#native, this.#native.requestStart(peerId, protocol, data, options), this.#wake);
   }
   close() {
     this.#native.close();

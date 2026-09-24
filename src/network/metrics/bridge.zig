@@ -8,7 +8,7 @@ const gossip_limits = @import("../gossip_limits.zig");
 const Kind = gossip_limits.Kind;
 
 /// Native calls timed on the JS thread, with the runtime mutex waits they incur.
-pub const Entry = enum { drain_peers, drain_gossip, drain_gossip_checks, classify_gossip, report_gossip, publish_gossip, get_metrics, request_start, request_pull, request_retire, incoming_take, incoming_ready, incoming_respond, incoming_terminal, incoming_release };
+pub const Entry = enum { drain_peers, drain_gossip, drain_gossip_checks, classify_gossip, report_gossip, publish_gossip, get_metrics, request_start, request_pull, request_retire, incoming_take, incoming_ready, incoming_respond, incoming_terminal, incoming_release, settle, end_drain };
 /// Owner sections that hold the runtime mutex, named after the owner steps that take it.
 pub const Phase = enum { turn, reports, commands, publications, requests, gossip_flags, request_flags, incoming_flags, capture, gossip_ingress, peer_lane, metrics };
 pub const AdmissionKind = enum { block, column, aggregate, attestation, other };

@@ -13,13 +13,16 @@ function failure(code) {
 export class NativeRequest {
   #route;
   #handle;
+  #wake;
   #busy = false;
   #done = false;
   #retirement;
 
-  constructor(native, handle) {
+  /** `wake` schedules the host drain, which settles pulls and retirements. */
+  constructor(native, handle, wake) {
     this.#route = new WeakRef(native);
     this.#handle = handle;
+    this.#wake = wake;
     finalizers.register(this, {handle, route: this.#route}, this);
   }
 
@@ -39,6 +42,7 @@ export class NativeRequest {
     let pending;
     try {
       pending = native.requestPull(this.#handle);
+      this.#wake();
     } catch (error) {
       pending = Promise.reject(error);
     }
@@ -69,6 +73,7 @@ export class NativeRequest {
       this.#complete();
       try {
         pending = Promise.resolve(this.#route.deref()?.requestRetire(this.#handle, false));
+        this.#wake();
       } catch (error) {
         pending = Promise.reject(error);
       }

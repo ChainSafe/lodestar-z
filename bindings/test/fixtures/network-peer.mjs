@@ -1,5 +1,5 @@
 import bindings from "../../src/bindings.js";
-import {initializeNativeNetworkRuntime} from "../../src/network.js";
+import {startRuntime} from "../utils/network.js";
 
 let runtime;
 let sequence = 0;
@@ -41,7 +41,7 @@ const methods = new Set([
 async function execute(method, args) {
   if (method === "initialize") {
     bindings.config.set(args[1], args[1].genesisValidatorsRoot);
-    runtime = initializeNativeNetworkRuntime(args[0], () => undefined);
+    runtime = startRuntime(args[0]);
     return runtime.identity;
   }
   if (!runtime) throw new Error("Network peer uninitialized");

@@ -119,15 +119,10 @@ pub fn pull(runtime: *Runtime, handle: Value) !Value {
     runtime.unlock();
     const deferred = try env.createPromise();
     runtime.lock();
-    cell.pull = deferred;
-    if (cell.delivered) cell.consume = true;
-    runtime.signalLocked();
-    runtime.pingLocked();
+    requests.armPull(runtime, cell, deferred);
     const ref_notify = runtime.notify_live;
     runtime.unlock();
     if (ref_notify) runtime.notify.ref(env) catch {};
-    // Closed runtimes no longer have a live TSFN producer.
-    try settle(env, runtime);
     return deferred.getPromise();
 }
 pub fn retire(runtime: *Runtime, handle: Value, abandoned: bool) !Value {
@@ -145,15 +140,10 @@ pub fn retire(runtime: *Runtime, handle: Value, abandoned: bool) !Value {
     runtime.unlock();
     const deferred = if (abandoned) null else try env.createPromise();
     runtime.lock();
-    cell.retirement = deferred;
-    cell.retiring = true;
-    cell.cancel = true;
-    runtime.signalLocked();
-    runtime.pingLocked();
+    requests.armRetirement(runtime, cell, deferred);
     const ref_notify = runtime.notify_live;
     runtime.unlock();
     if (ref_notify and !abandoned) runtime.notify.ref(env) catch {};
-    try settle(env, runtime);
     return if (deferred) |value| value.getPromise() else env.getUndefined();
 }
 fn terminalError(env: napi.Env, terminal: requests.Terminal, cell: *const requests.Cell) !Value {
@@ -194,10 +184,13 @@ fn chunkResult(env: napi.Env, cell: *const requests.Cell) !Value {
     try put(object, "protocol", try env.createStringUtf8(cell.protocol.id()));
     return result(env, object);
 }
-pub fn settle(env: napi.Env, runtime: *Runtime) !void {
-    if (runtime.requests == null) return;
+/// Settles up to `limit` request chunks and terminal outcomes. Returns whether more remain.
+pub fn settle(env: napi.Env, runtime: *Runtime, limit: usize) !bool {
+    if (runtime.requests == null) return false;
     runtime.retain();
     defer runtime.release();
+    var settled: usize = 0;
+    var more = false;
     for (0..32) |i| {
         runtime.lock();
         if (i >= runtime.requests.?.cells.len) {
@@ -205,20 +198,17 @@ pub fn settle(env: napi.Env, runtime: *Runtime) !void {
             break;
         }
         const cell = &runtime.requests.?.cells[i];
-        if (cell.state == .free or cell.state == .preparing or cell.copying) {
+        if (!requests.settleable(cell, runtime.stop, runtime.disposed)) {
             runtime.unlock();
             continue;
         }
-        const deliver_chunk = cell.pull != null and cell.chunk != null and !cell.delivered and !cell.retiring and !runtime.stop;
-        const terminal_ready = cell.terminal != null and cell.native == null and (cell.chunk == null or cell.retiring or runtime.stop);
-        if (!deliver_chunk and !terminal_ready) {
+        if (settled == limit) {
             runtime.unlock();
-            continue;
+            more = true;
+            break;
         }
-        if (!deliver_chunk and cell.pull == null and !cell.retiring and !runtime.disposed) {
-            runtime.unlock();
-            continue;
-        }
+        settled += 1;
+        const deliver_chunk = requests.deliverable(cell, runtime.stop);
         const token: requests.Token = .{ .index = @intCast(i), .generation = cell.generation };
         cell.copying = true;
         const deferred = cell.pull;
@@ -275,6 +265,7 @@ pub fn settle(env: napi.Env, runtime: *Runtime) !void {
     runtime.retireRequestStorageLocked();
     runtime.unlock();
     runtime.disposeTerminalReferences();
+    return more;
 }
 pub fn diagnostics(env: napi.Env, value: *const requests.Diagnostics) !Value {
     return @import("network_js.zig").scalarFields(env, value);

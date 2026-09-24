@@ -381,6 +381,17 @@ export interface NativeNetworkApplicationRuntime {
    */
   reportPeer(peerId: PeerIdStr, action: NativePeerAction): void;
   drainPeers(maxEvents: number): NativePeerBatch;
+  /**
+   * Settles up to `limit` completed publications, commands, request pulls and retirements, and incoming
+   * acknowledgements per table, then the close result once nothing else awaits settlement. Returns whether
+   * more remain. Only the host drain settles results; promise continuations run after it returns.
+   */
+  settle(limit: number): boolean;
+  /**
+   * Ends one host drain. True means work arrived or remains and the host must drain again in a later
+   * macrotask; false releases the notification latch, so the next owner notification calls onWorkAvailable.
+   */
+  endDrain(): boolean;
   close(): Promise<NativeRuntimeCloseResult>;
 }
 
@@ -388,7 +399,12 @@ export interface NativeNetworkApplicationRuntime {
  * Initialize from the owning thread, after configuring BeaconConfig. One runtime is live per process;
  * another initializes only after the previous one is garbage collected.
  * Copies configuration and returns a running runtime; failure is terminal.
- * Calls onWorkAvailable on that thread when peer events, incoming requests, or gossip work can be drained.
+ * Calls onWorkAvailable on that thread when results, peer events, incoming requests, or gossip work can be
+ * drained, including from request and incoming calls that leave results to settle. onWorkAvailable must only
+ * schedule a drain in a later macrotask, one at a time. That drain calls settle and the drains it wants, and
+ * ends with endDrain; while endDrain returns true, the host drains again. No further notification arrives
+ * until a drain ends with endDrain returning false, so a scheduled drain must not be cancelled, also after
+ * the runtime closes.
  */
 export function initializeNativeNetworkRuntime(
   config: NativeApplicationConfig,
