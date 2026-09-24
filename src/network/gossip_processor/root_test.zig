@@ -1,23 +1,24 @@
 const std = @import("std");
 const p = @import("root.zig");
-const Budget = @import("../byte_budget.zig").Budget;
 const t = std.testing;
 
 test "gossip processor backing bytes match allocations at page boundaries" {
     const page = @import("../gossipsub/message_store.zig").page_bytes;
-    for ([_]usize{ 1, 64 }) |capacity| {
-        for ([_]usize{ page, page + 1, 2 * page - 1, 2 * page }) |bytes| {
+    for ([_]u32{ 2, 64 }) |items| {
+        for ([_]u32{ page, 2 * page }) |kind_bytes| {
+            const limits: p.limits_mod.Limits = @splat(.{ .items = items, .bytes = kind_bytes });
+            const capacity = p.limits_mod.items(&limits);
+            const bytes = p.limits_mod.bytes(&limits);
             var measured = t.FailingAllocator.init(t.allocator, .{});
-            var budget: Budget = .{};
             {
-                var table = try p.GossipProcessor.init(measured.allocator(), .{ .capacity = capacity, .bytes = bytes, .limits = null }, &budget);
+                var table = try p.GossipProcessor.init(measured.allocator(), .{ .capacity = capacity, .bytes = bytes, .limits = limits });
                 defer table.deinit();
                 try t.expectEqual(measured.allocated_bytes, p.GossipProcessor.backingBytes(capacity, bytes));
             }
             try t.expectEqual(measured.allocated_bytes, measured.freed_bytes);
             for (0..measured.alloc_index) |prefix| {
                 var failing = t.FailingAllocator.init(t.allocator, .{ .fail_index = prefix });
-                try t.expectError(error.OutOfMemory, p.GossipProcessor.init(failing.allocator(), .{ .capacity = capacity, .bytes = bytes, .limits = null }, &budget));
+                try t.expectError(error.OutOfMemory, p.GossipProcessor.init(failing.allocator(), .{ .capacity = capacity, .bytes = bytes, .limits = limits }));
                 try t.expectEqual(failing.allocated_bytes, failing.freed_bytes);
             }
         }
@@ -35,9 +36,8 @@ fn add(table: *p.GossipProcessor, kind: p.limits_mod.Kind, root: ?[32]u8) !p.Tok
 }
 
 test "gossip processor isolates kinds and bounds dependency waiting" {
-    var budget: Budget = .{ .limit = 0 };
     const limits: p.limits_mod.Limits = @splat(.{ .items = 4, .bytes = 16384 });
-    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits }, &budget);
+    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits });
     defer table.deinit();
     defer table.close();
     const root: [32]u8 = @splat(7);
@@ -58,9 +58,8 @@ test "gossip processor isolates kinds and bounds dependency waiting" {
 }
 
 test "gossip processor dependency notification cannot race a negative check" {
-    var budget: Budget = .{};
     const limits: p.limits_mod.Limits = @splat(.{ .items = 4, .bytes = 16384 });
-    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits }, &budget);
+    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits });
     defer table.deinit();
     defer table.close();
     const root: [32]u8 = @splat(2);
@@ -82,8 +81,8 @@ test "gossip processor dependency notification cannot race a negative check" {
 
 test "gossip processor copy rollback preserves paged bytes" {
     const payload: [4097]u8 = @splat(9);
-    var budget: Budget = .{ .limit = 2 * payload.len };
-    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = 1, .bytes = 8192, .limits = null }, &budget);
+    const limits: p.limits_mod.Limits = @splat(.{ .items = 2, .bytes = 8192 });
+    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits });
     defer table.deinit();
     defer table.close();
     const token = try table.reserve(payload.len);
@@ -97,13 +96,12 @@ test "gossip processor copy rollback preserves paged bytes" {
     table.finish(&batch, false);
     try t.expectEqual(@as(usize, 0), table.snapshot(1).executing);
     try t.expectEqual(p.State.queued, table.get(token).?.state);
-    try t.expectEqual(@as(usize, 0), table.store.free_pages);
+    try t.expectEqual(p.limits_mod.bytes(&limits) / 4096 - 2, table.store.free_pages);
 }
 
 test "gossip processor batches identical attestation data with a bounded wait" {
-    var budget: Budget = .{};
     const limits: p.limits_mod.Limits = @splat(.{ .items = 64, .bytes = 4096 });
-    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits }, &budget);
+    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits });
     defer table.deinit();
     defer table.close();
     const first = try table.reserveKind(.beacon_attestation, 1);
@@ -127,9 +125,8 @@ test "gossip processor batches identical attestation data with a bounded wait" {
 }
 
 test "gossip processor deferral leaves per-source capacity and local search deadlines" {
-    var budget: Budget = .{};
     const limits: p.limits_mod.Limits = @splat(.{ .items = 8, .bytes = 4096 });
-    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits }, &budget);
+    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits });
     defer table.deinit();
     defer table.close();
     const root: [32]u8 = @splat(2);
@@ -150,9 +147,8 @@ test "gossip processor deferral leaves per-source capacity and local search dead
 }
 
 test "gossip processor new attestation groups cannot postpone a mature group" {
-    var budget: Budget = .{};
     const limits: p.limits_mod.Limits = @splat(.{ .items = 64, .bytes = 4096 });
-    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits }, &budget);
+    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits });
     defer table.deinit();
     defer table.close();
     const older = try table.reserveKind(.beacon_attestation, 1);
@@ -175,9 +171,8 @@ test "gossip processor new attestation groups cannot postpone a mature group" {
 
 test "gossip processor copied host work survives native expiry but close releases native ownership" {
     for ([_]bool{ false, true }) |close| {
-        var budget: Budget = .{};
         const limits: p.limits_mod.Limits = @splat(.{ .items = 4, .bytes = 4096 });
-        var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits }, &budget);
+        var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits });
         defer table.deinit();
         defer table.close();
         const token = try add(&table, .beacon_block, null);
@@ -194,9 +189,8 @@ test "gossip processor copied host work survives native expiry but close release
 }
 
 test "gossip processor expired execution diagnostics track delivered work until actual completion" {
-    var budget: Budget = .{};
     const limits: p.limits_mod.Limits = @splat(.{ .items = 8, .bytes = 16384 });
-    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits }, &budget);
+    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits });
     defer table.deinit();
     defer table.close();
     const first = try add(&table, .beacon_block, null);

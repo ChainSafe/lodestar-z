@@ -1,7 +1,6 @@
 const std = @import("std");
 const n = @import("../root.zig");
 const native = n.gossipsub;
-const Budget = @import("../byte_budget.zig").Budget;
 const storage = @import("../gossipsub/message_store.zig");
 pub const Plan = @import("plan.zig").Plan;
 pub const Source = @import("../gossipsub/peer_book.zig").Ref;
@@ -48,7 +47,6 @@ pub const Cell = struct {
     deneb: bool = false,
     executing: bool = false,
     execution_bytes: usize = 0,
-    reservation: usize = 0,
     source_charge: usize = 0,
     retired: bool = false,
     verdict: native.Verdict = .ignore,
@@ -117,7 +115,6 @@ const Search = struct {
 pub const GossipProcessor = struct {
     cells: []Cell,
     backing: std.mem.Allocator,
-    budget: *Budget,
     diag: Diagnostics = .{},
     order: u64 = 0,
     queues: [limits_mod.kind_count][state_count]lists.List = @splat(@splat(.{})),
@@ -128,7 +125,7 @@ pub const GossipProcessor = struct {
     store: storage.Store,
     staging_pages: usize = 0,
     staging_items: usize = 0,
-    limits: ?limits_mod.Limits = null,
+    limits: limits_mod.Limits,
     execution: ?limits_mod.Limits = null,
     ordinary_enabled: bool = true,
     slot: u64 = 0,
@@ -160,16 +157,14 @@ pub const GossipProcessor = struct {
         return null;
     }
 
-    pub fn init(backing: std.mem.Allocator, plan: Plan, budget: *Budget) !GossipProcessor {
+    pub fn init(backing: std.mem.Allocator, plan: Plan) !GossipProcessor {
         const capacity = plan.capacity;
         const bytes = plan.bytes;
         const limits = plan.limits;
         if (plan.forks.len > @import("../chain.zig").boundary_max) return error.InvalidGossipProcessorLimits;
         if (capacity == 0 or capacity > limits_mod.capacity_max) return error.InvalidGossipProcessorLimits;
-        if (limits) |value| {
-            try limits_mod.validate(&value);
-            if (capacity != limits_mod.items(&value) or bytes != limits_mod.bytes(&value)) return error.InvalidGossipProcessorLimits;
-        }
+        try limits_mod.validate(&limits);
+        if (capacity != limits_mod.items(&limits) or bytes != limits_mod.bytes(&limits)) return error.InvalidGossipProcessorLimits;
         const cells = try backing.alloc(Cell, capacity);
         errdefer backing.free(cells);
         @memset(cells, .{});
@@ -178,20 +173,20 @@ pub const GossipProcessor = struct {
         var dependencies = try Dependencies.init(backing, capacity);
         errdefer dependencies.deinit(backing);
         const store = try storage.Store.init(backing, capacity, bytes);
-        var self: GossipProcessor = .{ .cells = cells, .backing = backing, .budget = budget, .store = store, .groups = groups, .dependencies = dependencies, .limits = limits, .execution = plan.execution, .source_maximum = plan.source_maximum, .fork_count = plan.forks.len, .diag = .{ .capacity = capacity, .fixedPayloadBytes = store.bytes.len + capacity * storage.inline_bytes } };
+        var self: GossipProcessor = .{ .cells = cells, .backing = backing, .store = store, .groups = groups, .dependencies = dependencies, .limits = limits, .execution = plan.execution, .source_maximum = plan.source_maximum, .fork_count = plan.forks.len, .diag = .{ .capacity = capacity, .fixedPayloadBytes = store.bytes.len + capacity * storage.inline_bytes } };
         @memcpy(self.forks[0..plan.forks.len], plan.forks);
         self.groups.index.seed = plan.random_seed ^ 3;
         self.dependencies.index.seed = plan.random_seed ^ 4;
-        if (self.execution == null) if (limits) |value| {
-            self.execution = value;
+        if (self.execution == null) {
+            self.execution = limits;
             for (&self.execution.?) |*limit| limit.items = @max(1, limit.items / 2);
-        };
+        }
         var k: usize = 0;
-        var end: usize = if (limits) |value| value[0].items else capacity;
+        var end: usize = limits[0].items;
         for (cells, 0..) |*cell, i| {
             if (i == end) {
                 k += 1;
-                end += limits.?[k].items;
+                end += limits[k].items;
             }
             cell.kind = @enumFromInt(k);
             self.queues[k][@intFromEnum(State.free)].append(cells, "state_link", @intCast(i));
@@ -217,10 +212,10 @@ pub const GossipProcessor = struct {
         self.diag.fixedPayloadBytes = 0;
     }
     fn queue(self: *GossipProcessor, kind: Kind, state: State) *lists.List {
-        return &self.queues[if (self.limits == null) 0 else @intFromEnum(kind)][@intFromEnum(state)];
+        return &self.queues[@intFromEnum(kind)][@intFromEnum(state)];
     }
     fn queueValue(self: *const GossipProcessor, kind: Kind, state: State) lists.List {
-        return self.queues[if (self.limits == null) 0 else @intFromEnum(kind)][@intFromEnum(state)];
+        return self.queues[@intFromEnum(kind)][@intFromEnum(state)];
     }
     fn token(self: *const GossipProcessor, index: u32) Token {
         return .{ .index = @intCast(index), .generation = self.cells[index].generation };
@@ -241,13 +236,11 @@ pub const GossipProcessor = struct {
         if (self.closed or self.order == std.math.maxInt(u64)) return false;
         const k = @intFromEnum(kind);
         const pages = storage.Store.pagesFor(len);
-        if (self.limits) |limits| {
-            if (self.used_items[k] >= limits[k].items or pages * storage.page_bytes > limits[k].bytes - self.used_bytes[k]) return false;
-        } else if (len * 2 > self.budget.limit - self.budget.used) return false;
+        if (self.used_items[k] >= self.limits[k].items or pages * storage.page_bytes > self.limits[k].bytes - self.used_bytes[k]) return false;
         return self.queueValue(kind, .free).len > 0 and pages <= self.store.free_pages - self.staging_pages and self.store.used_entries + self.store.retired_entries + self.staging_items < self.store.entries.len;
     }
     pub fn freshnessVictim(self: *const GossipProcessor, kind: Kind) ?Token {
-        if (self.limits == null or !limits_mod.newestFirst(kind)) return null;
+        if (!limits_mod.newestFirst(kind)) return null;
         var selected: u32 = none;
         for ([_]State{ .queued, .needs_check, .checking, .waiting }) |state| {
             const index = self.queueValue(kind, state).head;
@@ -268,13 +261,13 @@ pub const GossipProcessor = struct {
         cell.handle = message.handle;
         cell.identity = message.identity;
         cell.source = message.source;
-        if (self.limits != null) if (message.source) |source| {
+        if (message.source) |source| {
             const usage = &self.sources[source.index];
             if (usage.generation != source.generation) usage.* = .{ .generation = source.generation };
             cell.source_charge = chargedBytes(message.bytes.len);
             usage.items[@intFromEnum(kind)] += 1;
             usage.bytes[@intFromEnum(kind)] += cell.source_charge;
-        };
+        }
         cell.connection = message.peer;
         cell.id = message.id;
         assert(message.topic.len <= topic_max);
@@ -289,7 +282,7 @@ pub const GossipProcessor = struct {
         return @max(storage.inline_bytes, storage.Store.pagesFor(len) * storage.page_bytes);
     }
     pub fn sourceRoom(self: *const GossipProcessor, source: ?Source, kind: Kind, len: usize) bool {
-        const limits = self.limits orelse return true;
+        const limits = self.limits;
         const peer = source orelse return true;
         const usage = &self.sources[peer.index];
         const k = @intFromEnum(kind);
@@ -303,11 +296,9 @@ pub const GossipProcessor = struct {
         if (self.closed) return error.NetworkGossipFull;
         const k = @intFromEnum(kind);
         const pages = storage.Store.pagesFor(len);
-        if (self.limits) |limits| {
-            if (self.used_items[k] >= limits[k].items or pages * storage.page_bytes > limits[k].bytes - self.used_bytes[k]) {
-                self.diag.kindRefusals +|= 1;
-                return error.NetworkGossipFull;
-            }
+        if (self.used_items[k] >= self.limits[k].items or pages * storage.page_bytes > self.limits[k].bytes - self.used_bytes[k]) {
+            self.diag.kindRefusals +|= 1;
+            return error.NetworkGossipFull;
         }
         const index = self.queueValue(kind, .free).head;
         if (index == none) {
@@ -319,15 +310,10 @@ pub const GossipProcessor = struct {
             return error.NetworkBridgeFull;
         }
         const order = try std.math.add(u64, self.order, 1);
-        const amount = len * 2;
-        if (self.limits == null) self.reserveBytes(amount) catch |err| {
-            self.diag.byteRefusals +|= 1;
-            return err;
-        };
         self.queue(kind, .free).remove(self.cells, "state_link", index);
         const generation = self.cells[index].generation;
         assert(generation < std.math.maxInt(u64));
-        self.cells[index] = .{ .state = .capturing, .generation = generation + 1, .order = order, .reservation = if (self.limits == null) amount else 0, .kind = kind, .input = .{ .len = len } };
+        self.cells[index] = .{ .state = .capturing, .generation = generation + 1, .order = order, .kind = kind, .input = .{ .len = len } };
         self.queue(kind, .capturing).append(self.cells, "state_link", index);
         self.order = order;
         self.staging_pages += pages;
@@ -338,15 +324,6 @@ pub const GossipProcessor = struct {
         self.diag.occupied += 1;
         self.diag.highWater = @max(self.diag.highWater, self.diag.occupied);
         return self.token(index);
-    }
-    fn reserveBytes(self: *GossipProcessor, amount: usize) !void {
-        try self.budget.reserve(amount);
-        self.diag.reservedBytes += amount;
-        self.diag.reservedBytesHighWater = @max(self.diag.reservedBytesHighWater, self.diag.reservedBytes);
-    }
-    fn releaseBytes(self: *GossipProcessor, amount: usize) void {
-        self.budget.release(amount);
-        self.diag.reservedBytes -= amount;
     }
     pub fn install(self: *GossipProcessor, handle: Token, copy: []const u8) void {
         const cell = self.get(handle).?;
@@ -361,7 +338,7 @@ pub const GossipProcessor = struct {
         // All deadlines use the startup timeout and serialized admission clock.
         if (self.expiry.tail != none) assert(self.cells[self.expiry.tail].deadline <= cell.deadline);
         self.expiry.append(self.cells, "expiry_link", handle.index);
-        self.transition(handle.index, if (self.limits != null and cell.metadata.root != null) .needs_check else .queued);
+        self.transition(handle.index, if (cell.metadata.root != null) .needs_check else .queued);
     }
     fn transition(self: *GossipProcessor, index: u32, state: State) void {
         const cell = &self.cells[index];
@@ -381,7 +358,7 @@ pub const GossipProcessor = struct {
         self.queue(cell.kind, state).append(self.cells, "state_link", index);
         self.countState(state, true, cell.input.len);
         if (state == .queued) {
-            if (self.limits != null and cell.kind == .beacon_attestation and cell.metadata.group != null) self.groups.join(self.cells, index, self.last_now) else self.ready[k].append(self.cells, "ready_link", index);
+            if (cell.kind == .beacon_attestation and cell.metadata.group != null) self.groups.join(self.cells, index, self.last_now) else self.ready[k].append(self.cells, "ready_link", index);
         }
         if (state == .waiting) {
             self.dependencies.join(self.cells, index);
@@ -427,8 +404,6 @@ pub const GossipProcessor = struct {
         self.used_bytes[@intFromEnum(cell.kind)] -= storage.Store.pagesFor(cell.input.len) * storage.page_bytes;
         self.diag.payloadBytes -= cell.input.len;
         cell.input = .{};
-        self.releaseBytes(cell.reservation);
-        cell.reservation = 0;
     }
     fn releaseExecution(self: *GossipProcessor, cell: *Cell) void {
         if (!cell.executing) return;
@@ -520,7 +495,7 @@ pub const GossipProcessor = struct {
         }
     }
     fn eligible(self: *const GossipProcessor, cell: *const Cell) bool {
-        return cell.order > self.drop_before and (self.limits == null or metadata_mod.eligible(&cell.metadata, cell.kind, cell.deneb, self.slot));
+        return cell.order > self.drop_before and metadata_mod.eligible(&cell.metadata, cell.kind, cell.deneb, self.slot);
     }
     pub fn close(self: *GossipProcessor) void {
         self.closed = true;
@@ -532,7 +507,6 @@ pub const GossipProcessor = struct {
     }
     pub const Demand = struct { items: usize = batch_max, bytes: usize = batch_bytes, ordinary: bool = true };
     fn dispatchable(self: *const GossipProcessor, cell: *const Cell) bool {
-        if (self.execution == null and (self.diag.executing >= self.cells.len or cell.input.len > self.budget.limit / 2 -| self.diag.executingBytes)) return false;
         if (self.execution) |execution| {
             const k = @intFromEnum(cell.kind);
             if (!self.ordinary_enabled and !limits_mod.urgent(cell.kind)) return false;
@@ -647,8 +621,8 @@ pub const GossipProcessor = struct {
             self.transition(handle.index, .needs_check);
         } else {
             const k = @intFromEnum(cell.kind);
-            const peer_full = if (cell.source) |source| self.waiting_per_peer[source.index][k] >= @max(1, self.limits.?[k].items / 4) else false;
-            if (peer_full or self.waiting_items[k] >= self.limits.?[k].items / 2) {
+            const peer_full = if (cell.source) |source| self.waiting_per_peer[source.index][k] >= @max(1, self.limits[k].items / 4) else false;
+            if (peer_full or self.waiting_items[k] >= self.limits[k].items / 2) {
                 self.ignore(cell);
                 self.diag.dependencyRefusals +|= 1;
             } else self.transition(handle.index, .waiting);
@@ -755,8 +729,7 @@ pub const GossipProcessor = struct {
     }
     pub fn snapshot(self: *const GossipProcessor, now: u64) Diagnostics {
         var result = self.diag;
-        for (limits_mod.priority, 0..) |kind, k| {
-            if (self.limits == null and k > 0) break;
+        for (limits_mod.priority) |kind| {
             var index = self.queueValue(kind, .delivered).head;
             for (0..self.queueValue(kind, .delivered).len) |_| {
                 const cell = &self.cells[index];

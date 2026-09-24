@@ -2,7 +2,6 @@ const std = @import("std");
 const t = std.testing;
 const p = @import("root.zig");
 const lists = @import("../index_list.zig");
-const Budget = @import("../byte_budget.zig").Budget;
 const Kind = p.limits_mod.Kind;
 
 fn add(table: *p.GossipProcessor, kind: Kind, now: u64, metadata: p.metadata_mod.Metadata) !p.Token {
@@ -60,9 +59,8 @@ fn verify(table: *const p.GossipProcessor) !void {
 }
 
 test "gossip scheduler batches kinds as separate validator jobs in native priority order" {
-    var budget: Budget = .{};
     const limits: p.limits_mod.Limits = @splat(.{ .items = 64, .bytes = 4096 });
-    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits }, &budget);
+    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits });
     defer table.deinit();
     defer table.close();
     _ = try add(&table, .voluntary_exit, 1, .{});
@@ -85,9 +83,8 @@ test "gossip scheduler batches kinds as separate validator jobs in native priori
 }
 
 test "gossip scheduler keeps execution charged across timeout until real completion" {
-    var budget: Budget = .{};
     const limits: p.limits_mod.Limits = @splat(.{ .items = 8, .bytes = 4096 });
-    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits }, &budget);
+    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits });
     defer table.deinit();
     defer table.close();
     table.execution.?[0].items = 1;
@@ -108,9 +105,8 @@ test "gossip scheduler keeps execution charged across timeout until real complet
 }
 
 test "gossip scheduler budgets mass expiry and root promotion without releasing detached waiters early" {
-    var budget: Budget = .{};
     const limits: p.limits_mod.Limits = @splat(.{ .items = 512, .bytes = 4096 });
-    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits }, &budget);
+    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits });
     defer table.deinit();
     defer table.close();
     const root: [32]u8 = @splat(3);
@@ -138,9 +134,8 @@ test "gossip scheduler budgets mass expiry and root promotion without releasing 
 }
 
 test "gossip scheduler indexes survive bounded randomized lifecycle interleavings" {
-    var budget: Budget = .{};
     const limits: p.limits_mod.Limits = @splat(.{ .items = 16, .bytes = 4096 });
-    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits }, &budget);
+    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits });
     defer table.deinit();
     defer table.close();
     var random = std.Random.DefaultPrng.init(19);
@@ -169,9 +164,8 @@ test "gossip scheduler indexes survive bounded randomized lifecycle interleaving
 }
 
 test "gossip scheduler source limits cover unfinished execution and survive peer slot reuse" {
-    var budget: Budget = .{};
     const limits: p.limits_mod.Limits = @splat(.{ .items = 4, .bytes = 4096 });
-    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits }, &budget);
+    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits });
     defer table.deinit();
     defer table.close();
     const source: p.Source = .{ .index = 0, .generation = 1 };
@@ -207,9 +201,8 @@ test "gossip scheduler source limits cover unfinished execution and survive peer
 }
 
 test "gossip scheduler freshness replacement never selects copying or executing jobs" {
-    var budget: Budget = .{};
     const limits: p.limits_mod.Limits = @splat(.{ .items = 4, .bytes = 4096 });
-    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits }, &budget);
+    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits });
     defer table.deinit();
     defer table.close();
     const oldest = try add(&table, .beacon_attestation, 1, .{});

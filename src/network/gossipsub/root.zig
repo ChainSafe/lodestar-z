@@ -17,7 +17,6 @@ pub const gossipsub = @import("gossipsub.zig");
 
 pub const Gossipsub = gossipsub.Gossipsub;
 pub const Options = gossipsub.Options;
-pub const Event = gossipsub.Event;
 pub const Admission = gossipsub.Admission;
 pub const MessageSink = gossipsub.MessageSink;
 pub const MessageEvent = @import("messages.zig").MessageEvent;

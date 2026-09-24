@@ -1,7 +1,6 @@
 const std = @import("std");
 const support = @import("test_support.zig");
 const Pair = @import("test_pair.zig").Pair;
-const Event = @import("gossipsub.zig").Event;
 const Budget = @import("turn.zig").Budget;
 
 test "gossip maintenance yields between bounded topics and resumes without repeating them" {
@@ -74,8 +73,7 @@ fn saturatedPeers(peers: u16, budget: Budget) !void {
         for (g.sessions.rows) |*row| {
             for (row.io.tx.control.count..64) |_| try std.testing.expect(row.io.tx.inject(&.{0}, setup.shared.pair.now.mono_ms));
         }
-        var events: [1]Event = undefined;
-        const turn = support.pumpTurn(g, &setup.shared.pair.client, setup.shared.pair.now, &events);
+        const turn = support.pumpTurn(g, &setup.shared.pair.client, setup.shared.pair.now);
         try std.testing.expect(turn.exhausted().contains(budget));
         for (g.sessions.rows, 0..) |row, i| {
             if (row.io.tx.control.count < 64) progressed.set(i);

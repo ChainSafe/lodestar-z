@@ -3,7 +3,7 @@ const std = @import("std");
 pub const Budget = enum { calls, input, output, items, fields, work, copy };
 pub const Budgets = std.EnumSet(Budget);
 
-pub const Progress = enum { done, credits, events };
+pub const Progress = enum { done, credits };
 
 pub const Credits = struct {
     input: usize,
@@ -30,10 +30,6 @@ pub const Credits = struct {
 pub const Turn = struct {
     now: @import("../types.zig").Now,
     budget: Credits,
-    events: []@import("gossipsub.zig").Event,
-    count: usize = 0,
-    arena: []u8,
-    used: usize = 0,
     scratch: []u8,
     large_used: bool = false,
     large_copy_used: bool = false,
@@ -48,7 +44,7 @@ pub const Turn = struct {
         return result;
     }
 
-    pub fn init(options: *const Options, now: @import("../types.zig").Now, events: []@import("gossipsub.zig").Event, arena: []u8, scratch: []u8) Turn {
+    pub fn init(options: *const Options, now: @import("../types.zig").Now, scratch: []u8) Turn {
         return .{
             .now = now,
             .budget = .{
@@ -60,8 +56,6 @@ pub const Turn = struct {
                 .copy = options.work_per_pump,
                 .fields = options.fields_per_pump,
             },
-            .events = events,
-            .arena = arena,
             .scratch = scratch,
         };
     }
@@ -81,18 +75,15 @@ pub const Turn = struct {
     }
 
     pub fn workspace(self: *Turn, peer: *Credits) Workspace {
-        return .{ .arena = self.arena, .scratch = self.scratch, .used = &self.used, .peer_work = &peer.work, .work = &self.budget.work, .large_used = &self.large_used, .event_available = self.count < self.events.len, .sink = self.sink, .deferred = &self.deferred };
+        return .{ .scratch = self.scratch, .peer_work = &peer.work, .work = &self.budget.work, .large_used = &self.large_used, .sink = self.sink, .deferred = &self.deferred };
     }
 };
 
 pub const Workspace = struct {
-    arena: []u8,
     scratch: []u8,
-    used: *usize,
     peer_work: *usize,
     work: *usize,
     large_used: *bool,
-    event_available: bool,
     sink: ?*const @import("messages.zig").MessageSink = null,
     deferred: ?*Budgets = null,
 

@@ -192,7 +192,6 @@ jobs:
       - name: Build and test the native network and bindings
         run: |
           zig build test:network -Doptimize=ReleaseSafe -Dpreset=${{ matrix.preset }}
-          zig build run:bench_network -Doptimize=ReleaseSafe -Dpreset=${{ matrix.preset }} -- baseline
           zig build run:bench_network -Doptimize=ReleaseSafe -Dpreset=${{ matrix.preset }} -- small
           zig build test:reqresp_peer_bounds -Doptimize=ReleaseSafe -Dpreset=${{ matrix.preset }}
           zig build test:network_runtime -Doptimize=ReleaseSafe -Dpreset=${{ matrix.preset }}

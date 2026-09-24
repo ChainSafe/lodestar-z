@@ -39,7 +39,6 @@ pub const ErrorReason = enum {
 pub const error_reason_count = @typeInfo(ErrorReason).@"enum".fields.len;
 
 pub const AdmissionRefusal = enum {
-    server_capacity,
     peer_capacity,
     protocol_concurrency,
     peer_quota,

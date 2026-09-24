@@ -42,12 +42,6 @@ function answerChecks(runtime: NativeNetworkApplicationRuntime): void {
   if (checks.length) runtime.classifyGossip(checks.map(({handle}) => ({available: true, handle})));
 }
 
-/** Runs the processor without a plan, which reserves payload copies from the bridge budget. */
-function withoutProcessorPlan(config: NativeApplicationConfig): void {
-  config.gossipPolicy.processor = undefined;
-  config.gossipPolicy.execution = undefined;
-}
-
 async function nextGossip(runtime: NativeNetworkApplicationRuntime): Promise<NativeGossipMessage> {
   for (let i = 0; i < 1000; i++) {
     answerChecks(runtime);
@@ -609,31 +603,6 @@ test("gossip operation promises and weak notifier permit facade collection", () 
   expect(result).toMatchObject({collected: true});
   expect(result.accepted).toBeGreaterThan(0);
   expect(result.accepted).toBe(result.settled);
-}, 20000);
-
-test("one maximum native gossip payload owns exactly two copy allowances until drain", async () => {
-  const pair = await gossipPair(30000n, undefined, undefined, withoutProcessorPlan);
-  try {
-    const input = blockPayload(10 * 1024 * 1024, 37);
-    await pair.left.publishGossip(TOPIC, input, {allowZeroPeers: false});
-    for (let i = 0; i < 2000 && pair.right.diagnostics().gossip.queued === 0; i++) await delay(5);
-    expect(pair.right.diagnostics().gossip).toMatchObject({
-      payloadBytes: input.length,
-      queued: 1,
-      reservedBytes: input.length * 2,
-    });
-    const message = await nextGossip(pair.right);
-    expect(Buffer.from(message.data).equals(Buffer.from(input))).toBe(true);
-    expect(pair.right.diagnostics().gossip).toMatchObject({
-      bytesCopied: BigInt(input.length),
-      messagesCopied: 1n,
-      payloadBytes: 0,
-      reservedBytes: 0,
-    });
-    expect(pair.right.reportGossip(message.handle, "ignore")).toBe(true);
-  } finally {
-    await Promise.all([pair.left.close(), pair.right.close()]);
-  }
 }, 20000);
 
 test("gossip publication rechecks a detached view and rolls back reentrant close", async () => {

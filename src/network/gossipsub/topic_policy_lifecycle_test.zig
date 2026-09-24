@@ -30,18 +30,15 @@ test "topic policy remembers real inactive subscriptions without event pressure 
     var pair: Pair = .{};
     try pair.initOpts(.{ .random_seed = 1 }, options(&.{boundary()}));
     defer pair.deinit();
-    pair.server_event_capacity = 0;
     try support.subscribe(pair.shared.client.gossipsub, name);
     try support.subscribe(pair.shared.client.gossipsub, unknown);
     for (0..20) |_| try pair.pumpOnce();
     try std.testing.expectEqual(@as(usize, 0), live(pair.shared.server.gossipsub));
-    try std.testing.expectEqual(@as(usize, 0), pair.server_count);
     try std.testing.expectEqual(@as(u64, 0), pair.shared.server.gossipsub.counters.local_pressure_resets);
     _ = support.intern(pair.shared.server.gossipsub, name).?;
     const t = pair.shared.server.gossipsub.overlay.findTopic(name).?;
     try std.testing.expectEqual(@as(usize, 1), pair.shared.server.gossipsub.overlay.subscribers(t).count());
     try support.subscribe(pair.shared.server.gossipsub, name);
-    pair.server_event_capacity = 16;
     const result = try pair.shared.server.gossipsub.publishWithOptions(name, "0123456789", .{ .allow_zero_peers = false }, pair.shared.pair.now);
     try std.testing.expectEqual(@as(usize, 1), result.queued);
     var delivered = false;
@@ -60,8 +57,7 @@ test "topic policy remembers real inactive subscriptions without event pressure 
 }
 
 test "gossip accepted mesh membership does not invent a declared subscription across retirement" {
-    var config = options(&.{boundary()});
-    config.observe_subscriptions = false;
+    const config = options(&.{boundary()});
     var g = try support.init(std.testing.allocator, config);
     defer g.deinit();
     try support.subscribe(&g, name);
@@ -111,27 +107,25 @@ test "topic policy incoming lengths precede decode work arena store and validati
     try support.subscribe(&g, name);
     const context: @import("messages.zig").Context = .{ .overlay = g.overlay, .peers = &g.peers, .options = &g.options, .epoch = g.cycle.epoch };
     const source: @import("messages.zig").Source = .{ .peer = g.sessions.rows[peer.index].logical, .session = g.sessions.ref(peer.index), .connection = g.sessions.rows[peer.index].conn };
-    var used: usize = 0;
     var peer_work: usize = g.options.decompress_per_peer_bytes;
     var work: usize = 10000;
     var large_used = false;
-    var arena: [1024]u8 = @splat(0xaa);
-    var workspace: @import("turn.zig").Workspace = .{ .arena = &arena, .scratch = g.msg_scratch, .used = &used, .peer_work = &peer_work, .work = &work, .large_used = &large_used, .event_available = false };
+    var inbox: support.Inbox = .{};
+    defer inbox.deinit();
+    inbox.attach(&g);
+    const workspace: @import("turn.zig").Workspace = .{ .scratch = g.msg_scratch, .peer_work = &peer_work, .work = &work, .large_used = &large_used, .sink = g.message_sink };
     var compressed: [100]u8 = undefined;
     const payload: [21]u8 = @splat('x');
     for ([_]usize{ 9, 21 }) |size| {
         const len = try @import("snappy").raw.compress(payload[0..size], &compressed);
         try std.testing.expectEqual(@import("messages.zig").Received{ .invalid = .ssz_size }, g.messages.receive(&context, &workspace, &source, .{ .topic = name, .data = compressed[0..len] }, 1));
         try std.testing.expectEqual(@import("messages.zig").Received{ .invalid = .ssz_size }, g.messages.receive(&context, &workspace, &source, .{ .topic = name, .data = &.{@intCast(size)} }, 1));
-        try std.testing.expectEqual(@as(usize, 0), used);
         try std.testing.expectEqual(g.options.decompress_per_peer_bytes, peer_work);
         try std.testing.expectEqual(@as(usize, 10000), work);
         try std.testing.expect(!large_used);
         try std.testing.expectEqual(@as(usize, 0), g.messages.store.used_entries);
         for (g.messages.validation.entries) |entry| try std.testing.expect(entry.state == .free);
-        try std.testing.expectEqualSlices(u8, &(@as([1024]u8, @splat(0xaa))), &arena);
     }
-    workspace.event_available = true;
     for ([_]usize{ 10, 20 }) |size| {
         const len = try @import("snappy").raw.compress(payload[0..size], &compressed);
         const received = g.messages.receive(&context, &workspace, &source, .{ .topic = name, .data = compressed[0..len] }, 1);
@@ -307,8 +301,10 @@ test "topic policy remembered ordinals remain independent of retained validation
     var work: usize = 10000;
     var peer_work: usize = g.options.decompress_per_peer_bytes;
     var large_used = false;
-    var used: usize = 0;
-    const workspace: @import("turn.zig").Workspace = .{ .arena = g.decompressed, .scratch = g.msg_scratch, .used = &used, .peer_work = &peer_work, .work = &work, .large_used = &large_used, .event_available = true };
+    var inbox: support.Inbox = .{};
+    defer inbox.deinit();
+    inbox.attach(&g);
+    const workspace: @import("turn.zig").Workspace = .{ .scratch = g.msg_scratch, .peer_work = &peer_work, .work = &work, .large_used = &large_used, .sink = g.message_sink };
     var compressed: [64]u8 = undefined;
     const len = try @import("snappy").raw.compress("0123456789", &compressed);
     const received = g.messages.receive(&context, &workspace, &source, .{ .topic = name, .data = compressed[0..len] }, 1).admitted;

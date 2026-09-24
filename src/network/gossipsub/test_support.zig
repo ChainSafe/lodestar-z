@@ -131,30 +131,29 @@ pub fn penalize(g: *gossip.Gossipsub, conn: engine.Handle, count: f64) void {
     g.peers.penalize(g.sessions.rows[index].logical, count);
 }
 
-/// Returns the events emitted plus the messages delivered to an attached sink.
-pub fn pump(g: *gossip.Gossipsub, transport: *engine.Engine, now: @import("../types.zig").Now, events: []gossip.Event) usize {
+/// Returns the messages delivered to the attached sink.
+pub fn pump(g: *gossip.Gossipsub, transport: *engine.Engine, now: @import("../types.zig").Now) usize {
     const received = g.counters.messages_received;
-    const turn = pumpTurn(g, transport, now, events);
-    return turn.count + if (turn.sink != null) g.counters.messages_received - received else 0;
+    _ = pumpTurn(g, transport, now);
+    return g.counters.messages_received - received;
 }
 
-pub fn pumpTurn(g: *gossip.Gossipsub, transport: *engine.Engine, now: @import("../types.zig").Now, events: []gossip.Event) @import("turn.zig").Turn {
-    var router = @import("../router.zig").Router.init(std.testing.allocator, .{ .negotiations_max = 1, .reqresp = false }) catch @panic("test router allocation failed");
+pub fn pumpTurn(g: *gossip.Gossipsub, transport: *engine.Engine, now: @import("../types.zig").Now) @import("turn.zig").Turn {
+    var router = @import("../router.zig").Router.init(std.testing.allocator, .{ .negotiations_max = 1 }) catch @panic("test router allocation failed");
     defer router.deinit();
-    var turn = @import("session_io.zig").beginPump(g, now, events);
+    var turn = @import("session_io.zig").beginPump(g, now);
     @import("session_io.zig").runTurn(g, &router, transport, &turn);
     return turn;
 }
 
-pub fn processRpc(g: *gossip.Gossipsub, index: u16, now: @import("../types.zig").Now, events: []gossip.Event, count: *usize, items: *usize) !bool {
-    var turn = @import("turn.zig").Turn.init(&g.options, now, events, g.decompressed, g.msg_scratch);
+pub fn processRpc(g: *gossip.Gossipsub, index: u16, now: @import("../types.zig").Now, count: *usize, items: *usize) !bool {
+    var turn = @import("turn.zig").Turn.init(&g.options, now, g.msg_scratch);
     turn.sink = g.message_sink;
-    turn.count = count.*;
     var peer = @import("turn.zig").Credits.peer(&g.options);
     peer.items = items.*;
     const received = g.counters.messages_received;
     const result = try @import("session_io.zig").processRpc(g, index, &turn, &peer);
-    count.* = turn.count + if (turn.sink != null) g.counters.messages_received - received else 0;
+    count.* += g.counters.messages_received - received;
     items.* = peer.items;
     return result == .done;
 }
@@ -171,37 +170,30 @@ pub fn sessions(a: std.mem.Allocator, capacity: u16) !sessions_mod.Sessions {
 }
 
 const Gossipsub = gossip.Gossipsub;
-const Event = gossip.Event;
 const Now = @import("../types.zig").Now;
 const protobuf = @import("protobuf.zig");
 const Turn = @import("turn.zig").Turn;
 const Credits = @import("turn.zig").Credits;
 const snappy = @import("snappy");
-pub fn receiveMessage(g: *Gossipsub, index: u16, msg: protobuf.Message, now: Now, events: []Event, start: usize) ?usize {
-    var turn = Turn.init(&g.options, now, events, g.decompressed, g.msg_scratch);
+/// Returns the messages delivered to the attached sink, or null when the item needs more credits.
+pub fn receiveMessage(g: *Gossipsub, index: u16, msg: protobuf.Message, now: Now) ?usize {
+    var turn = Turn.init(&g.options, now, g.msg_scratch);
     turn.sink = g.message_sink;
-    turn.count = start;
-    if (events.len == 0) turn.used = turn.arena.len;
     var peer = Credits.peer(&g.options);
     const received = g.counters.messages_received;
     const result = g.receiveItem(g.sessions.ref(index), .{ .message = msg }, &turn, &peer);
-    switch (result) {
-        .events => g.pressure(index, .events, now.mono_ms),
-        .done, .credits => {},
-    }
-    const delivered = if (turn.sink != null) g.counters.messages_received - received else 0;
-    return if (result == .done) turn.count + delivered else null;
+    return if (result == .done) g.counters.messages_received - received else null;
 }
 
-pub fn message(g: *Gossipsub, peer: u16, text: []const u8, now_ms: u64, events: []Event) !?usize {
+pub fn message(g: *Gossipsub, peer: u16, text: []const u8, now_ms: u64) !?usize {
     const topic = "/eth2/01020304/beacon_block/ssz_snappy";
     var compressed: [256]u8 = undefined;
     const n = try snappy.raw.compress(text, &compressed);
-    return receiveMessage(g, peer, .{ .data = compressed[0..n], .topic = topic }, .{ .mono_ms = now_ms, .unix_s = 1 }, events, 0);
+    return receiveMessage(g, peer, .{ .data = compressed[0..n], .topic = topic }, .{ .mono_ms = now_ms, .unix_s = 1 });
 }
 
 pub fn control(g: *Gossipsub, index: u16, item: protobuf.Item, now: Now) void {
-    var turn = Turn.init(&g.options, now, &.{}, g.decompressed, g.msg_scratch);
+    var turn = Turn.init(&g.options, now, g.msg_scratch);
     var peer = Credits.peer(&g.options);
     std.debug.assert(g.receiveItem(g.sessions.ref(index), item, &turn, &peer) == .done);
 }

@@ -9,40 +9,33 @@ const identify_mod = @import("identify/root.zig");
 const wake_sources = @import("wake_sources.zig");
 
 pub const Options = struct {
-    identify: ?identify_mod.Options = null,
-    automatic_gossip_admission: bool = true,
+    identify: identify_mod.Options = .{},
     router: routing.Options = .{},
     reqresp: reqresp_mod.reqresp.Options,
     gossipsub: gossip_mod.Options = .{},
 };
-pub const Outputs = struct { application: []reqresp_mod.Event = &.{}, control: []reqresp_mod.Event = &.{}, gossipsub: []gossip_mod.Event = &.{}, identify: []identify_mod.Result = &.{} };
-pub const OutputCounts = struct { application: usize, control: usize, gossipsub: usize, identify: usize };
-pub const Capacities = struct { application: usize = 0, control: usize = 0, gossipsub: usize = 0, identify: usize = 0 };
+pub const Outputs = struct { application: []reqresp_mod.Event = &.{}, control: []reqresp_mod.Event = &.{}, identify: []identify_mod.Result = &.{} };
+pub const OutputCounts = struct { application: usize, control: usize, identify: usize };
+pub const Capacities = struct { application: usize = 0, control: usize = 0, identify: usize = 0 };
 pub const InitError = routing.Error || reqresp_mod.reqresp.InitError || gossip_mod.gossipsub.InitError || identify_mod.handler.InitError;
 
 pub const Service = struct {
-    identify: ?identify_mod.Handler,
-    automatic_gossip_admission: bool,
+    identify: identify_mod.Handler,
     applications: enum { active, quiescing, closed } = .active,
     router: routing.Router,
     reqresp: reqresp_mod.ReqResp,
     gossipsub: *gossip_mod.Gossipsub,
 
     pub fn validateOptions(options: Options) InitError!void {
-        if (!options.router.reqresp or !options.router.meshsub) return error.InvalidLimits;
-        var router_options = options.router;
-        router_options.identify = options.identify != null;
-        try routing.Router.validateOptions(router_options);
-        if (options.identify) |identify| try identify_mod.Handler.validate(identify);
+        try routing.Router.validateOptions(options.router);
+        try identify_mod.Handler.validate(options.identify);
         _ = try reqresp_mod.ReqResp.validateOptions(options.reqresp);
         try @import("gossipsub/options.zig").validate(&options.gossipsub);
     }
 
     pub fn init(allocator: std.mem.Allocator, options: Options) InitError!Service {
         try validateOptions(options);
-        var router_options = options.router;
-        router_options.identify = options.identify != null;
-        var router = try routing.Router.init(allocator, router_options);
+        var router = try routing.Router.init(allocator, options.router);
         errdefer router.deinit();
         var reqresp = try reqresp_mod.ReqResp.init(allocator, options.reqresp);
         errdefer reqresp.deinit();
@@ -50,18 +43,17 @@ pub const Service = struct {
         errdefer allocator.destroy(gossipsub);
         gossipsub.* = try gossip_mod.Gossipsub.init(allocator, options.gossipsub);
         errdefer gossipsub.deinit();
-        const identify = if (options.identify) |value| try identify_mod.Handler.init(allocator, value) else null;
+        const identify = try identify_mod.Handler.init(allocator, options.identify);
         return .{
             .identify = identify,
             .router = router,
             .reqresp = reqresp,
             .gossipsub = gossipsub,
-            .automatic_gossip_admission = options.automatic_gossip_admission,
         };
     }
 
     pub fn shutdown(self: *Service, engine: *engine_mod.Engine) void {
-        if (self.identify) |*identify| identify.shutdown(&self.router, engine);
+        self.identify.shutdown(&self.router, engine);
         self.reqresp.shutdown(engine, &self.router);
         self.gossipsub.shutdown(&self.router, engine);
         self.router.negotiator.shutdown(engine);
@@ -69,7 +61,7 @@ pub const Service = struct {
     }
 
     pub fn deinit(self: *Service) void {
-        if (self.identify) |*identify| identify.deinit();
+        self.identify.deinit();
         const allocator = self.gossipsub.allocator;
         self.gossipsub.deinit();
         allocator.destroy(self.gossipsub);
@@ -85,7 +77,7 @@ pub const Service = struct {
         return request_memory.total_bytes - request_memory.facade_bytes +
             gossip_plan.total_bytes +
             self.router.negotiator.entries.len * @sizeOf(negotiation) +
-            if (self.identify) |*identify| identify.allocatedBytes() else @as(usize, 0);
+            self.identify.allocatedBytes();
     }
 
     pub fn request(
@@ -120,8 +112,8 @@ pub const Service = struct {
 
     pub fn collectWakeups(self: *Service, now: types.Now, capacities: Capacities, wakeups: *wake_sources.Wakeups) void {
         wakeups.note(.reqresp, self.reqresp.nextWakeup(now, .{ .application = capacities.application, .control = capacities.control }));
-        if (self.applications == .active) wakeups.note(.gossip, self.gossipsub.nextWakeup(now, capacities.gossipsub));
-        if (self.identify) |*identify| wakeups.note(.identify, identify.nextWakeup(now, capacities.identify));
+        if (self.applications == .active) wakeups.note(.gossip, self.gossipsub.nextWakeup(now));
+        wakeups.note(.identify, self.identify.nextWakeup(now, capacities.identify));
         wakeups.note(.negotiation, self.router.nextWakeup(now, routing.outcomes_per_pump));
     }
 
@@ -131,7 +123,8 @@ pub const Service = struct {
     pub fn process(self: *Service, engine: *engine_mod.Engine, events: []const engine_mod.Event, activity: []const engine_mod.Handle, now: types.Now, outputs: Outputs) OutputCounts {
         self.prepare(engine, events, activity, now);
         const counts = self.reqresp.pump(engine, &self.router, now, .{ .application = outputs.application, .control = outputs.control });
-        return .{ .application = counts.application, .control = counts.control, .gossipsub = if (self.applications == .active) self.gossipsub.pump(&self.router, engine, now, outputs.gossipsub) else 0, .identify = if (self.identify) |*identify| identify.pump(&self.router, engine, now, outputs.identify) else 0 };
+        if (self.applications == .active) self.gossipsub.pump(&self.router, engine, now);
+        return .{ .application = counts.application, .control = counts.control, .identify = self.identify.pump(&self.router, engine, now, outputs.identify) };
     }
 
     /// Defer stream cleanup until the next process call, preserving the current event borrows.
@@ -166,7 +159,7 @@ pub const Service = struct {
         }
         for (activity) |conn| {
             self.router.connectionActivity(conn);
-            if (self.identify) |*identify| identify.connectionActivity(conn);
+            self.identify.connectionActivity(conn);
             self.reqresp.connectionActivity(conn);
             if (self.applications == .active) self.gossipsub.connectionActivity(conn);
         }
@@ -177,9 +170,9 @@ pub const Service = struct {
             .stream_closed => |closed| if (closed.reset_code != null) self.reqresp.streamReset(closed.stream),
             else => {},
         };
-        if (self.identify) |*identify| identify.transportEvents(engine, events);
+        self.identify.transportEvents(engine, events);
         for (events) |event| {
-            if (self.applications != .active or (!self.automatic_gossip_admission and event == .connected)) continue;
+            if (self.applications != .active or event == .connected) continue;
             self.gossipsub.transportEvents(&self.router, engine, &.{event}, now);
         }
         var outcomes: [routing.outcomes_per_pump]routing.Outcome = undefined;
@@ -191,7 +184,7 @@ pub const Service = struct {
                 continue;
             }
             switch (owner) {
-                .identify => if (self.identify) |*identify| identify.negotiationResult(&self.router, engine, outcome, now),
+                .identify => self.identify.negotiationResult(&self.router, engine, outcome, now),
                 .reqresp => {
                     if (outcome.direction == .outbound) {
                         if (!self.reqresp.negotiated(outcome, now)) engine.closeStream(outcome.stream, 0);

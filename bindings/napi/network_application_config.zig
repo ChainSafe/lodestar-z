@@ -25,7 +25,7 @@ pub const Config = struct {
             .application_requests_max = 32,
             .admission_policy = common.chain.requestPolicy(),
             .gossip = gossip_options,
-            .router = .{ .identify = true, .capabilities = (try common.chain.update(common.local, null, common.slot)).capabilities },
+            .router = .{ .capabilities = (try common.chain.update(common.local, null, common.slot)).capabilities },
             .identify = .{ .agent = self.agent[0..self.agent_len], .protocol_version = self.version[0..self.version_len] },
             .byte_limit = r.nativeBudgetBytes - @sizeOf(n.NetworkCore),
         };

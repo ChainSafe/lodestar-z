@@ -68,7 +68,7 @@ pub const Inspection = struct {
     charged_cost: u128,
     chunks_max: u32,
 };
-pub const InspectError = error{ PolicyRequired, MalformedSsz, InvalidRequest, HostIntegerRange, UnsupportedBounds };
+pub const InspectError = error{ MalformedSsz, InvalidRequest, HostIntegerRange, UnsupportedBounds };
 pub const schedule_max = 64;
 
 pub const Policy = struct {

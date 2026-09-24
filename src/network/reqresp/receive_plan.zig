@@ -30,10 +30,10 @@ pub const Plan = struct {
     sink_bytes: usize = 0,
     io_bytes: usize = 0,
 
-    pub fn init(policy: ?*const Policy) Plan {
+    pub fn init(policy: *const Policy) Plan {
         var plan: Plan = .{ .entries = undefined };
         for (std.enums.values(Protocol)) |which| {
-            const size = if (policy) |value| value.requestMaxFor(which) else which.info().request_max;
+            const size = policy.requestMaxFor(which);
             const scratch = codec.frameLengthMax(@min(constants.frame_uncompressed_max, @max(size, codec.error_message_max, if (which.isControl()) which.info().response_max else 0)));
             const read = @max(handoff_max, @min(read_max, codec.header_max + codec.frameLengthMax(@min(size, constants.frame_uncompressed_max))));
             plan.entries[@intFromEnum(which)] = .{

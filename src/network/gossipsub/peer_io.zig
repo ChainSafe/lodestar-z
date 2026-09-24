@@ -6,7 +6,7 @@ const assert = std.debug.assert;
 const receive = @import("receive_pool.zig");
 const Outbox = @import("outbox.zig").Outbox;
 
-pub const TimeoutReason = enum { subscriptions, receive_pressure, receive_frame, send_queue, send_progress };
+pub const TimeoutReason = enum { subscriptions, receive_frame, send_queue, send_progress };
 
 pub const ActiveRpc = struct {
     reader: protobuf.RpcReader,
@@ -67,9 +67,7 @@ pub const PeerIo = struct {
     overflow: receive.Chain = .{},
     progress_ms: u64 = 0,
     frame_since: ?u64 = null,
-    pressure_since: ?u64 = null,
     rx_ready: bool = true,
-    blocked: enum { none, events } = .none,
     ihave_recv: u16 = 0,
     iwant_ids_sent: u16 = 0,
     idontwant_recv: u16 = 0,
@@ -104,7 +102,6 @@ pub const PeerIo = struct {
         if (consumed > 0) {
             if (self.frame_since == null) self.frame_since = now_ms;
             self.progress_ms = now_ms;
-            self.pressure_since = null;
             self.unread_start += consumed;
         }
         const complete = self.reader.declared != null and self.reader.filled == self.reader.declared.?;
@@ -128,8 +125,6 @@ pub const PeerIo = struct {
         self.discarding = false;
         self.reader = .{};
         self.frame_since = null;
-        self.pressure_since = null;
-        self.blocked = .none;
     }
 
     pub fn resetHeartbeat(self: *PeerIo) void {
@@ -140,9 +135,8 @@ pub const PeerIo = struct {
     pub fn deadlines(self: *const PeerIo, options: *const @import("options.zig").Options) Deadlines {
         var result: Deadlines = .{};
         if (self.tx.subscription_since) |since| result.values[@intFromEnum(TimeoutReason.subscriptions)] = since +| options.pressure_timeout_ms;
-        if (self.pressure_since) |since| result.values[@intFromEnum(TimeoutReason.receive_pressure)] = since +| options.pressure_timeout_ms;
         if (self.frame_since) |since| {
-            result.values[@intFromEnum(TimeoutReason.receive_frame)] = if (self.pressure_since == null and self.rpc == null)
+            result.values[@intFromEnum(TimeoutReason.receive_frame)] = if (self.rpc == null)
                 @min(since +| (if ((self.reader.declaredLen() orelse 0) > self.body.len) options.large_frame_timeout_ms else options.pressure_timeout_ms), self.progress_ms +| options.large_frame_timeout_ms)
             else
                 since +| options.pressure_timeout_ms;

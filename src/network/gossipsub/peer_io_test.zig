@@ -11,9 +11,6 @@ test "gossip deadlines track pressure and progress through partial frame reset" 
     io.frame_since = 0;
     io.progress_ms = 20;
     try std.testing.expectEqual(@as(?u64, 70), io.deadlines(&options).next());
-    io.pressure_since = 30;
-    try std.testing.expect(io.deadlines(&options).expired(70) == null);
-    try std.testing.expectEqual(@as(?u64, 100), io.deadlines(&options).next());
     try std.testing.expectEqual(TimeoutReason.receive_frame, io.deadlines(&options).expired(100).?);
     try std.testing.expect(!pool.resetRx(0));
     try std.testing.expect(io.deadlines(&options).next() == null);
@@ -52,12 +49,9 @@ test "gossip active RPC completion discard and reset clear frame borrows and lim
             try std.testing.expect(try rpc.reader.next() == null);
         }
         rpc.had_control = true;
-        io.pressure_since = 1;
-        io.blocked = .events;
         try std.testing.expect(!if (finish == .reset) sessions.resetRx(0) else sessions.finishFrame(io));
         try std.testing.expect(io.rpc == null and io.reader.declaredLen() == null);
-        try std.testing.expect(io.frame_since == null and io.pressure_since == null);
-        try std.testing.expectEqual(.none, io.blocked);
+        try std.testing.expect(io.frame_since == null);
         const unread = if (finish == .reset) 0 else wire.len;
         try std.testing.expectEqual(unread, io.unread_start);
         try std.testing.expectEqual(unread, io.unread_end);

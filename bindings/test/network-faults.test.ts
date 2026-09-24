@@ -133,6 +133,7 @@ describe.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")("test-buil
       largeFrameTimeoutMs: 35000n,
       opportunisticGraftIntervalMs: 61000n,
       pressureTimeoutMs: 33000n,
+      processor: config.gossipPolicy.processor,
       retainedScoreMs: 19200000n,
       score: {
         behaviourDecay: 0.8,

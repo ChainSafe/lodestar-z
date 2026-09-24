@@ -13,7 +13,6 @@ pub const Plan = struct {
     data_descriptors_reserved_per_peer: usize,
     page_bytes: usize,
     frame_bytes: usize,
-    event_bytes: usize,
     compression_bytes: usize,
     peer_buffer_bytes: usize,
     metadata_bytes: usize,
@@ -34,7 +33,6 @@ pub const Layout = struct {
     deliveries: usize,
     receive_arena_bytes: usize,
     session_buffer_bytes: usize,
-    output_bytes: usize,
     namespace_bytes: usize,
 
     pub fn init(options: *const Options) Layout {
@@ -50,7 +48,6 @@ pub const Layout = struct {
             .deliveries = delivery.Pool.capacity(options.connected_capacity, options.validation_capacity),
             .receive_arena_bytes = options.receive_arena_bytes,
             .session_buffer_bytes = @import("peer_io.zig").PeerIo.bufferBytes(options),
-            .output_bytes = options.decompressed_arena_bytes,
             .namespace_bytes = if (options.topic_policy) |boundaries| policy.Namespace.backingBytes(boundaries, options.connected_capacity) else 0,
         };
     }
@@ -74,11 +71,10 @@ pub const Layout = struct {
             .data_descriptors_reserved_per_peer = delivery.per_peer_reserve,
             .page_bytes = storage.page_bytes,
             .frame_bytes = frames,
-            .event_bytes = self.output_bytes,
             .compression_bytes = constants.GOSSIP_MAX_SIZE,
             .peer_buffer_bytes = buffers,
             .metadata_bytes = metadata,
-            .total_bytes = metadata + self.payload_bytes + frames + self.output_bytes + constants.GOSSIP_MAX_SIZE + buffers,
+            .total_bytes = metadata + self.payload_bytes + frames + constants.GOSSIP_MAX_SIZE + buffers,
         };
     }
 };

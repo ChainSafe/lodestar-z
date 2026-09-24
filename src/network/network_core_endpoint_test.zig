@@ -75,7 +75,7 @@ test "address-less discovery learns from ten authenticated prefixes and updates 
     try std.testing.expectEqual(node.discovery.?.transport.localAddress().port(), learned.udp.?);
     try std.testing.expectEqual(node.transport.localAddress().port(), learned.quic.?);
     try std.testing.expectEqual(initial + 1, node.localRecord().?.sequence);
-    const identify = node.service.identify.?.local.?;
+    const identify = node.service.identify.local.?;
     try std.testing.expect(identify.address_count > 0);
     try peers.observe(&node, 10, 3);
     try std.testing.expectEqual(initial + 1, node.localRecord().?.sequence);
@@ -83,7 +83,7 @@ test "address-less discovery learns from ten authenticated prefixes and updates 
     intent.update.local.metadata.attnets[0] = 1;
     _ = try node.applyIntent(&intent, node.last_now);
     try std.testing.expectEqualDeep(learned, node.advertisementEndpoints().?);
-    try std.testing.expectEqualDeep(identify, node.service.identify.?.local.?);
+    try std.testing.expectEqualDeep(identify, node.service.identify.local.?);
 }
 
 test "failed learned endpoint publication preserves the previous ENR and Identify" {
@@ -100,10 +100,10 @@ test "failed learned endpoint publication preserves the previous ENR and Identif
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const before = node.localRecord().?.*;
-    const identify = node.service.identify.?.local.?;
+    const identify = node.service.identify.local.?;
     try peers.observe(&node, 10, 1);
     try std.testing.expectEqualSlices(u8, before.slice(), node.localRecord().?.slice());
-    try std.testing.expectEqualDeep(identify, node.service.identify.?.local.?);
+    try std.testing.expectEqualDeep(identify, node.service.identify.local.?);
     try std.testing.expect(node.advertisementEndpoints().?.ip4 == null);
     try std.testing.expect(node.counters.discovery_failures > 0);
 }

@@ -4,19 +4,13 @@ const MessageEvent = @import("messages.zig").MessageEvent;
 
 pub const Pair = struct {
     shared: @import("../service_test_support.zig").ServicePair = .{},
-    client_events: [16]gossip.Event = undefined,
-    server_events: [16]gossip.Event = undefined,
-    client_count: usize = 0,
-    server_count: usize = 0,
-    client_event_capacity: usize = 16,
-    server_event_capacity: usize = 16,
 
     pub fn init(self: *Pair) !void {
         try self.initOpts(.{ .random_seed = 1 }, .{ .random_seed = 1 });
     }
 
     pub fn initOpts(self: *Pair, client: gossip.Options, server: gossip.Options) !void {
-        const reqresp: @import("../reqresp/reqresp.zig").Options = .{ .forks = &.{}, .peers = 128, .outbound_max = 1, .inbound_max = 1, .inbound_per_peer_max = 1 };
+        const reqresp: @import("../reqresp/reqresp.zig").Options = .{ .forks = &.{}, .peers = 128, .outbound_max = 1, .inbound_max = 1, .inbound_per_peer_max = 1, .admission = try @import("../reqresp/reqresp.zig").AdmissionOptions.defaults(&@import("../reqresp/policy_fixture.zig").config(), 128, 128, 1) };
         const topics = &.{ @import("topic_fixture.zig").bytes(.{ 1, 2, 3, 4 }), @import("topic_fixture.zig").bytes(.{ 0x6a, 0x95, 0xa1, 0xa9 }) };
         var client_options = client;
         client_options.topic_policy = client.topic_policy orelse topics;
@@ -30,9 +24,7 @@ pub const Pair = struct {
     }
 
     pub fn pumpOnce(self: *Pair) !void {
-        const counts = try self.shared.step(.{ .gossipsub = self.client_events[0..self.client_event_capacity] }, .{ .gossipsub = self.server_events[0..self.server_event_capacity] });
-        self.client_count = counts.client.gossipsub;
-        self.server_count = counts.server.gossipsub;
+        _ = try self.shared.step(.{}, .{});
     }
 
     pub fn clientStream(self: *const Pair) engine.StreamHandle {
@@ -53,13 +45,5 @@ pub const Pair = struct {
     /// Messages the server admitted in the last step.
     pub fn serverMessages(self: *const Pair) []const MessageEvent {
         return self.shared.server_inbox.messages();
-    }
-
-    pub fn clientEvents(self: *const Pair) []const gossip.Event {
-        return self.client_events[0..self.client_count];
-    }
-
-    pub fn serverEvents(self: *const Pair) []const gossip.Event {
-        return self.server_events[0..self.server_count];
     }
 };

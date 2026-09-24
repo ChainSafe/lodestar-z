@@ -29,8 +29,7 @@ test "gossip validation finishes without allocation while shared deliveries are 
     var inbox: support.Inbox = .{};
     defer inbox.deinit();
     inbox.attach(&g);
-    var events: [1]gossip.Event = undefined;
-    var turn = @import("session_io.zig").beginPump(&g, now, &events);
+    var turn = @import("session_io.zig").beginPump(&g, now);
     var credits = @import("turn.zig").Credits.peer(&g.options);
     try std.testing.expectEqual(.done, g.receiveItem(g.sessions.ref(0), .{ .message = .{ .topic = name, .data = compressed[0..len] } }, &turn, &credits));
     try std.testing.expectEqual(@as(usize, 1), inbox.count);
@@ -71,21 +70,4 @@ test "gossip recovery refusal restores promise slots and identity pins before re
     g.cancelWrites(peer);
     try std.testing.expectEqual(available, g.recovery.available());
     try std.testing.expectEqual(@as(u32, 0), g.peers.rows[row.logical.index].pins);
-}
-
-test "gossip optional subscription observations do not consume validation event capacity" {
-    var config = options;
-    config.observe_subscriptions = false;
-    var g = try support.init(std.testing.allocator, config);
-    defer g.deinit();
-    try support.subscribe(&g, name);
-    const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
-    var turn = @import("session_io.zig").beginPump(&g, .{ .mono_ms = 1, .unix_s = 0 }, &.{});
-    var credits = @import("turn.zig").Credits.peer(&g.options);
-    try std.testing.expectEqual(.done, g.receiveItem(peer, .{ .subscription = .{ .topic = name, .subscribe = true } }, &turn, &credits));
-    try std.testing.expectEqual(@as(usize, 0), turn.used);
-    try std.testing.expect(g.overlay.subscribers(g.overlay.findTopic(name).?).isSet(peer.index));
-    g.options.observe_subscriptions = true;
-    try std.testing.expectEqual(.events, g.receiveItem(peer, .{ .subscription = .{ .topic = name, .subscribe = false } }, &turn, &credits));
-    try std.testing.expect(g.overlay.subscribers(g.overlay.findTopic(name).?).isSet(peer.index));
 }

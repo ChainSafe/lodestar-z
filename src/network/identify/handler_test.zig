@@ -4,15 +4,15 @@ const service = @import("../service.zig");
 const engine = @import("../quic/engine.zig");
 const identify = @import("root.zig");
 
-fn options(agent: []const u8) service.Options {
-    return .{ .automatic_gossip_admission = false, .reqresp = .{ .forks = &.{} }, .gossipsub = .{ .random_seed = 1 }, .identify = .{ .agent = agent, .inbound_max = 1, .outbound_max = 1 } };
+fn options(agent: []const u8) !service.Options {
+    return .{ .reqresp = .{ .forks = &.{}, .admission = try @import("../reqresp/reqresp.zig").AdmissionOptions.defaults(&@import("../reqresp/policy_fixture.zig").config(), 128, 128, 64) }, .gossipsub = .{ .random_seed = 1 }, .identify = .{ .agent = agent, .inbound_max = 1, .outbound_max = 1 } };
 }
 
 test "identify delivers retained completions before recycled lower slots" {
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
-    var router = try @import("../router.zig").Router.init(std.testing.allocator, .{ .identify = true });
+    var router = try @import("../router.zig").Router.init(std.testing.allocator, .{});
     defer router.deinit();
     var handler = try identify.Handler.init(std.testing.allocator, .{ .outbound_max = 4 });
     defer handler.deinit();
@@ -45,13 +45,13 @@ test "identify service completes both directions with zero application output an
     try pair.init(.{}, .{});
     defer pair.deinit();
     const handles = try support.connectPair(&pair);
-    var client = try service.Service.init(std.testing.allocator, options("client"));
+    var client = try service.Service.init(std.testing.allocator, try options("client"));
     defer client.deinit();
-    var server = try service.Service.init(std.testing.allocator, options("server"));
+    var server = try service.Service.init(std.testing.allocator, try options("server"));
     defer server.deinit();
-    try client.identify.?.start(&client.router, &pair.client, .{ .index = 0, .generation = 1 }, handles.client, pair.now);
-    try server.identify.?.start(&server.router, &pair.server, .{ .index = 0, .generation = 1 }, handles.server, pair.now);
-    try std.testing.expectError(error.PeerLimit, client.identify.?.start(&client.router, &pair.client, .{ .index = 0, .generation = 1 }, handles.client, pair.now));
+    try client.identify.start(&client.router, &pair.client, .{ .index = 0, .generation = 1 }, handles.client, pair.now);
+    try server.identify.start(&server.router, &pair.server, .{ .index = 0, .generation = 1 }, handles.server, pair.now);
+    try std.testing.expectError(error.PeerLimit, client.identify.start(&client.router, &pair.client, .{ .index = 0, .generation = 1 }, handles.client, pair.now));
     for (0..32) |_| {
         var events: [64]engine.Event = undefined;
         var activity: [128]engine.Handle = undefined;
@@ -62,9 +62,9 @@ test "identify service completes both directions with zero application output an
         _ = server.process(&pair.server, pair.events(&pair.server, &events), activity[0..sa], pair.now, .{});
         try pair.pump();
     }
-    try std.testing.expect(client.identify.?.nextWakeup(pair.now, 0) == null);
+    try std.testing.expect(client.identify.nextWakeup(pair.now, 0) == null);
     if (client.nextWakeup(pair.now, .{})) |due| try std.testing.expect(due > pair.now.mono_ms);
-    try std.testing.expectEqual(pair.now.mono_ms, client.identify.?.nextWakeup(pair.now, 1).?);
+    try std.testing.expectEqual(pair.now.mono_ms, client.identify.nextWakeup(pair.now, 1).?);
     var results: [1]identify.Result = undefined;
     var counts = client.process(&pair.client, &.{}, &.{}, pair.now, .{ .identify = &results });
     try std.testing.expectEqual(@as(usize, 1), counts.identify);
@@ -75,17 +75,14 @@ test "identify service completes both directions with zero application output an
     try std.testing.expectEqualStrings("client", results[0].outcome.success.agent.?.slice());
     counts = client.process(&pair.client, &.{}, &.{}, pair.now, .{ .identify = &results });
     try std.testing.expectEqual(@as(usize, 0), counts.identify);
-    try client.identify.?.start(&client.router, &pair.client, .{ .index = 0, .generation = 1 }, handles.client, pair.now);
-    client.identify.?.shutdown(&client.router, &pair.client);
-    try std.testing.expectEqual(@as(usize, 1), client.identify.?.pump(&client.router, &pair.client, pair.now, &results));
+    try client.identify.start(&client.router, &pair.client, .{ .index = 0, .generation = 1 }, handles.client, pair.now);
+    client.identify.shutdown(&client.router, &pair.client);
+    try std.testing.expectEqual(@as(usize, 1), client.identify.pump(&client.router, &pair.client, pair.now, &results));
     try std.testing.expectEqual(identify.Failure.shutdown, results[0].outcome.failed);
 }
 
 test "identify configured handler controls default and explicit directional capabilities" {
-    var raw = try service.Service.init(std.testing.allocator, .{ .automatic_gossip_admission = false, .reqresp = .{ .forks = &.{} }, .gossipsub = .{ .random_seed = 1 } });
-    defer raw.deinit();
-    try std.testing.expect(!raw.router.capabilities().receive.contains(.identify));
-    var opts = options("");
+    var opts = try options("");
     var enabled = try service.Service.init(std.testing.allocator, opts);
     defer enabled.deinit();
     try std.testing.expect(enabled.router.capabilities().receive.contains(.identify));
@@ -126,27 +123,27 @@ test "identify deadline includes stalled negotiation and retained completion doe
     try pair.init(.{}, .{});
     defer pair.deinit();
     const handles = try support.connectPair(&pair);
-    var client = try service.Service.init(std.testing.allocator, options("client"));
+    var client = try service.Service.init(std.testing.allocator, try options("client"));
     defer client.deinit();
     const start = pair.now.mono_ms;
-    try client.identify.?.start(&client.router, &pair.client, .{ .index = 0, .generation = 1 }, handles.client, pair.now);
+    try client.identify.start(&client.router, &pair.client, .{ .index = 0, .generation = 1 }, handles.client, pair.now);
     pair.now.mono_ms = start + 4999;
     var results: [1]identify.Result = undefined;
-    try std.testing.expectEqual(@as(usize, 0), client.identify.?.pump(&client.router, &pair.client, pair.now, &results));
-    try std.testing.expectEqual(start + 5000, client.identify.?.nextWakeup(pair.now, 1).?);
+    try std.testing.expectEqual(@as(usize, 0), client.identify.pump(&client.router, &pair.client, pair.now, &results));
+    try std.testing.expectEqual(start + 5000, client.identify.nextWakeup(pair.now, 1).?);
     pair.now.mono_ms += 1;
-    try std.testing.expectEqual(@as(usize, 0), client.identify.?.pump(&client.router, &pair.client, pair.now, &.{}));
-    try std.testing.expect(client.identify.?.nextWakeup(pair.now, 0) == null);
-    try std.testing.expectEqual(@as(usize, 1), client.identify.?.pump(&client.router, &pair.client, pair.now, &results));
+    try std.testing.expectEqual(@as(usize, 0), client.identify.pump(&client.router, &pair.client, pair.now, &.{}));
+    try std.testing.expect(client.identify.nextWakeup(pair.now, 0) == null);
+    try std.testing.expectEqual(@as(usize, 1), client.identify.pump(&client.router, &pair.client, pair.now, &results));
     try std.testing.expectEqual(identify.Failure.timeout, results[0].outcome.failed);
-    try std.testing.expectEqual(@as(usize, 0), client.identify.?.pump(&client.router, &pair.client, pair.now, &results));
-    try client.identify.?.start(&client.router, &pair.client, .{ .index = 0, .generation = 1 }, handles.client, pair.now);
+    try std.testing.expectEqual(@as(usize, 0), client.identify.pump(&client.router, &pair.client, pair.now, &results));
+    try client.identify.start(&client.router, &pair.client, .{ .index = 0, .generation = 1 }, handles.client, pair.now);
     _ = pair.client.close(handles.client, 0);
     var events: [64]engine.Event = undefined;
     _ = client.process(&pair.client, pair.events(&pair.client, &events), &.{}, pair.now, .{ .identify = &results });
     // Engine emits close on its next service turn; shutdown also releases a negotiating stream.
-    client.identify.?.shutdown(&client.router, &pair.client);
-    _ = client.identify.?.pump(&client.router, &pair.client, pair.now, &results);
+    client.identify.shutdown(&client.router, &pair.client);
+    _ = client.identify.pump(&client.router, &pair.client, pair.now, &results);
 }
 
 test "identify saturation leaves reserved Ping negotiation usable" {
@@ -155,7 +152,7 @@ test "identify saturation leaves reserved Ping negotiation usable" {
     try pair.init(.{}, .{});
     defer pair.deinit();
     const handles = try support.connectPair(&pair);
-    var opts = options("small");
+    var opts = try options("small");
     opts.router = .{ .negotiations_max = 2, .outbound_control_reserved = 1 };
     opts.reqresp.outbound_max = 2;
     opts.reqresp.outbound_control_reserved = 1;
@@ -164,7 +161,7 @@ test "identify saturation leaves reserved Ping negotiation usable" {
     opts.router.negotiations_max = 4;
     var server = try service.Service.init(std.testing.allocator, opts);
     defer server.deinit();
-    try client.identify.?.start(&client.router, &pair.client, .{ .index = 0, .generation = 1 }, handles.client, pair.now);
+    try client.identify.start(&client.router, &pair.client, .{ .index = 0, .generation = 1 }, handles.client, pair.now);
     const ping = [_]u8{1} ++ [_]u8{0} ** 7;
     var sink: [8]u8 = undefined;
     _ = try client.request(&pair.client, handles.client, .ping_v1, &ping, &sink, .{}, pair.now);
@@ -191,8 +188,8 @@ test "identify saturation leaves reserved Ping negotiation usable" {
         try pair.pump();
     }
     try std.testing.expect(received);
-    try std.testing.expect(client.identify.?.nextWakeup(pair.now, 0) == null);
-    try std.testing.expectEqual(pair.now.mono_ms, client.identify.?.nextWakeup(pair.now, 1).?);
+    try std.testing.expect(client.identify.nextWakeup(pair.now, 0) == null);
+    try std.testing.expectEqual(pair.now.mono_ms, client.identify.nextWakeup(pair.now, 1).?);
 }
 
 test "identify advertises each usable bound address despite another wildcard family" {

@@ -31,7 +31,6 @@ pub fn peerOptions(options: Options) manager.Options {
 
 pub fn serviceOptions(options: Options, local: *const t.LocalState) service_mod.Options {
     var result = options.service;
-    result.automatic_gossip_admission = false;
     result.reqresp.request_fork = local.fork.fork;
     return result;
 }
@@ -47,7 +46,7 @@ pub fn validateOptions(options: Options) !void {
 
 pub const DialIntent = manager.DialIntent;
 pub const DiscoveryNeed = manager.DiscoveryNeed;
-pub const Counts = struct { peers: usize, application: usize, gossipsub: usize };
+pub const Counts = struct { peers: usize, application: usize };
 
 /// Public protocol borrows retain their Service lifetime until the next process call.
 /// Internal closes after publication perform cleanup without a second owner recycling pass.
@@ -61,20 +60,18 @@ pub fn process(
     slot: u64,
     peer_events: []t.Event,
     application: []rr.Event,
-    gossip_events: []gossip.Event,
 ) Counts {
     const per_connection = @import("quic/limits.zig").events_per_connection;
     std.debug.assert(events.len <= @as(usize, engine.limits.connections_max) * per_connection);
     if (self.stopped) return .{
         .peers = self.catalog.pollEvents(peer_events),
         .application = 0,
-        .gossipsub = 0,
     };
     if (!self.quiescing) self.dialing.expire(&self.catalog, engine, now.mono_ms);
     for (events) |event| self.transportEvent(service, engine, event, now);
     var controls: [controls_per_turn]rr.Event = undefined;
     var identify_results: [identify_per_turn]@import("identify/root.zig").Result = undefined;
-    const counts = service.process(engine, events, activity, now, .{ .application = application, .control = &controls, .gossipsub = gossip_events, .identify = &identify_results });
+    const counts = service.process(engine, events, activity, now, .{ .application = application, .control = &controls, .identify = &identify_results });
     for ([_][]const rr.Event{ application[0..counts.application], controls[0..counts.control] }) |batch| {
         for (batch) |event| {
             const fault = service.reqresp.peerFault(event) orelse continue;
@@ -99,7 +96,7 @@ pub fn process(
         controls[0..counts.control],
     );
     self.control.maintain(service, &self.catalog, engine, &self.local, now);
-    if (self.quiescing) return .{ .peers = self.catalog.pollEvents(peer_events), .application = counts.application, .gossipsub = counts.gossipsub };
+    if (self.quiescing) return .{ .peers = self.catalog.pollEvents(peer_events), .application = counts.application };
     var budget: u16 = custody.hashes_per_turn;
     self.custody_pending = self.catalog.advanceCustody(&self.local.fork, now.mono_ms, self.metadata_freshness_ms, &budget);
     self.counters.custody_hashes +|= custody.hashes_per_turn - budget;
@@ -108,22 +105,7 @@ pub fn process(
     return .{
         .peers = self.catalog.pollEvents(peer_events),
         .application = counts.application,
-        .gossipsub = counts.gossipsub,
     };
-}
-
-pub fn nextWakeup(
-    self: *PeerManager,
-    service: *service_mod.Service,
-    now: Now,
-    peer_capacity: usize,
-    application_capacity: usize,
-    gossip_capacity: usize,
-    dial_capacity: usize,
-) ?u64 {
-    var wakeups: wake_sources.Wakeups = .{};
-    collectWakeups(self, service, now, peer_capacity, application_capacity, gossip_capacity, dial_capacity, &wakeups);
-    return wakeups.earliest();
 }
 
 pub fn collectWakeups(
@@ -132,18 +114,17 @@ pub fn collectWakeups(
     now: Now,
     peer_capacity: usize,
     application_capacity: usize,
-    gossip_capacity: usize,
     dial_capacity: usize,
     wakeups: *wake_sources.Wakeups,
 ) void {
     wakeups.note(.peer_events, self.peerWakeup(now, peer_capacity));
     if (self.stopped) return;
     if (self.quiescing) {
-        service.collectWakeups(now, .{ .application = 0, .control = controls_per_turn, .gossipsub = 0, .identify = identify_per_turn }, wakeups);
+        service.collectWakeups(now, .{ .application = 0, .control = controls_per_turn, .identify = identify_per_turn }, wakeups);
         wakeups.note(.control, self.control.nextWakeup(&self.catalog, now));
         return;
     }
-    service.collectWakeups(now, .{ .application = application_capacity, .control = controls_per_turn, .gossipsub = gossip_capacity, .identify = identify_per_turn }, wakeups);
+    service.collectWakeups(now, .{ .application = application_capacity, .control = controls_per_turn, .identify = identify_per_turn }, wakeups);
     wakeups.note(.control, self.control.nextWakeup(&self.catalog, now));
     wakeups.note(.dial, self.dialing.nextWakeup(&self.catalog, now.mono_ms, @min(dial_capacity, self.dialRoom())));
     wakeups.note(.dial, if (self.dialing.selectionNeeded(&self.catalog)) now.mono_ms else null);

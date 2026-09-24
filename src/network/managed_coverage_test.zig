@@ -13,7 +13,6 @@ fn init(setup: *support.Setup, local: *const t.LocalState) !void {
     const full = @import("gossipsub/topic_fixture.zig").full;
     opts.service.gossipsub.topic_policy = &.{ full(@splat(0)), full(@splat(1)) };
     opts.service.gossipsub.score_params.topic.weight = 0;
-    opts.service.gossipsub.observe_subscriptions = false;
     try setup.initOwnersWithOptions(local, opts);
     errdefer setup.deinit();
     _ = try setup.pair.dial();

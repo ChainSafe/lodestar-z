@@ -970,7 +970,7 @@ test "reqresp wakeup distinguishes host and quota waits and bounds idle scans" {
 
 test "reqresp validates transport capacity and copies its fork table" {
     var forks = [_]reqresp.ForkEntry{.{ .digest = deneb_digest, .fork = .deneb }};
-    var rr = try reqresp.ReqResp.init(std.testing.allocator, .{ .peers = 1, .forks = &forks });
+    var rr = try reqresp.ReqResp.init(std.testing.allocator, .{ .peers = 1, .forks = &forks, .admission = try reqresp.AdmissionOptions.defaults(&@import("policy_fixture.zig").config(), 1, 1, 64) });
     defer rr.deinit();
     forks[0].digest = fulu_digest;
     try std.testing.expectEqual(@as(?@import("config").ForkSeq, .deneb), rr.forkFor(deneb_digest));
@@ -979,9 +979,9 @@ test "reqresp validates transport capacity and copies its fork table" {
     try setup.init(.{}, .{});
     defer setup.deinit();
     try std.testing.expectError(error.InvalidCapacity, rr.attach(&setup.shared.pair.client));
-    try std.testing.expectError(error.InvalidOptions, reqresp.ReqResp.init(std.testing.allocator, .{ .peers = 1025, .forks = &.{} }));
+    try std.testing.expectError(error.InvalidOptions, reqresp.ReqResp.init(std.testing.allocator, .{ .peers = 1025, .forks = &.{}, .admission = try reqresp.AdmissionOptions.defaults(&@import("policy_fixture.zig").config(), 1, 1, 64) }));
     const plan = rr.memoryPlan();
-    try std.testing.expectEqual(plan.total_bytes, plan.facade_bytes + plan.slot_bytes + plan.io_bytes + plan.limiter_bytes + plan.request_sink_bytes + plan.serving_bytes + plan.scheduler_bytes);
+    try std.testing.expectEqual(plan.total_bytes, plan.facade_bytes + plan.slot_bytes + plan.io_bytes + plan.limiter_bytes + plan.admission_bytes + plan.request_sink_bytes + plan.serving_bytes + plan.scheduler_bytes);
     try std.testing.expect(plan.io_bytes > 0 and plan.slot_bytes > 0 and plan.limiter_bytes > 0);
 }
 
@@ -1495,18 +1495,9 @@ test "reqresp rejects duplicate digests before allocating" {
     for ([_]@import("config").ForkSeq{ .fulu, .deneb }) |fork| {
         try std.testing.expectError(error.InvalidOptions, reqresp.ReqResp.init(failing.allocator(), .{
             .forks = &.{ first, .{ .digest = first.digest, .fork = fork } },
+            .admission = try reqresp.AdmissionOptions.defaults(&@import("policy_fixture.zig").config(), 1, 1, 1),
         }));
     }
-}
-
-test "reqresp rejects competing request policies before allocating" {
-    const policy = @import("policy_fixture.zig").config();
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
-    try std.testing.expectError(error.InvalidOptions, reqresp.ReqResp.init(failing.allocator(), .{
-        .forks = &.{},
-        .policy = policy,
-        .admission = try reqresp.AdmissionOptions.defaults(&policy, 1, 1, 1),
-    }));
 }
 
 test "reqresp request admission host capacity cancellation and queued cancellation retain debt" {

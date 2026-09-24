@@ -39,7 +39,7 @@ pub const MessageSink = struct {
     admit: *const fn (*anyopaque, *Admission) bool,
 };
 pub const InvalidReason = enum { signed, compressed_size, ssz_size, snappy };
-pub const Received = union(enum) { ignored, invalid: InvalidReason, duplicate: topic_mod.MessageId, admitted: MessageEvent, blocked: enum { events, storage, work } };
+pub const Received = union(enum) { ignored, invalid: InvalidReason, duplicate: topic_mod.MessageId, admitted: MessageEvent, blocked: enum { storage, work } };
 pub const StorageRefusal = enum { kind_validations, kind_payload, peer_validations, validation_capacity, payload_capacity, processor_capacity };
 pub const StorageRefusals = [std.meta.fields(StorageRefusal).len]u64;
 pub const Applied = struct {
@@ -224,7 +224,7 @@ pub const Messages = struct {
         const size = header.payload;
         if (rule) |bounds| if (size < bounds.ssz_min or size > bounds.ssz_max) return invalid(context, source, topic, .ssz_size);
         const kind = if (topic_mod.parseCanonical(msg.topic)) |canonical| canonical.name.kind else .beacon_block;
-        const refusal: ?StorageRefusal = if (workspace.sink) |sink| (if (!sink.has_capacity(sink.context, kind, size)) .processor_capacity else null) else null;
+        const refusal: ?StorageRefusal = if (workspace.sink) |sink| (if (!sink.has_capacity(sink.context, kind, size)) .processor_capacity else null) else .processor_capacity;
         const cost = if (refusal != null) msg.data.len else msg.data.len * 2 + size * 2;
         if (!workspace.chargeWork(context.options, cost)) return .{ .blocked = .work };
         var hash = std.crypto.hash.sha2.Sha256.init(.{});
@@ -247,8 +247,7 @@ pub const Messages = struct {
         };
         // Known duplicates retain attribution even when new work has no capacity.
         if (refusal) |reason| return self.refuseStorage(reason);
-        const room = workspace.arena[workspace.used.*..];
-        const output = if (workspace.sink == null and room.len >= size) room[0..size] else workspace.scratch[0..size];
+        const output = workspace.scratch[0..size];
         const decoded = admission.decode(&msg, output, context.options.message_id_policy);
         self.decoded_messages +|= 1;
         cached.* = .{ .fingerprint = fingerprint, .result = if (decoded == .invalid) .{ .invalid = decoded.invalid } else .{ .valid = decoded.valid.id } };
@@ -258,7 +257,6 @@ pub const Messages = struct {
         }
         const id = decoded.valid.id;
         if (self.duplicateId(context, source, topic, id, now)) return .{ .duplicate = id };
-        if (workspace.sink == null and (!workspace.event_available or size + msg.topic.len > room.len)) return .{ .blocked = .events };
         return self.admitReceived(context, workspace, source, topic, msg, id, size, now);
     }
 
@@ -287,9 +285,6 @@ pub const Messages = struct {
             const source_bytes = @import("../gossip_limits.zig").sourceBytes(limits[@intFromEnum(kind)], Validation.chargedBytes(maximum), storage.inline_bytes);
             if (Validation.chargedBytes(msg.data.len) > source_bytes -| self.validation.bytes_per_peer_kind[source.peer.index][@intFromEnum(kind)]) return self.refuseStorage(.peer_validations);
         }
-        const room = if (workspace.sink != null) workspace.scratch else workspace.arena[workspace.used.*..];
-        const name = if (workspace.sink != null) msg.topic else room[written..][0..msg.topic.len];
-        if (workspace.sink == null) @memcpy(room[written..][0..msg.topic.len], msg.topic);
         assert(context.peers.matches(source.peer));
         var candidate: Admission = .{
             .messages = self,
@@ -297,17 +292,12 @@ pub const Messages = struct {
             .source = source,
             .topic_index = topic,
             .compressed = msg.data,
-            .event = .{ .source = source.peer, .identity = context.peers.rows[source.peer.index].identity, .admitted_ms = now, .deadline = now +| self.validation.timeout_ms, .handle = undefined, .id = id, .peer = source.connection, .topic = name, .bytes = room[0..written] },
+            .event = .{ .source = source.peer, .identity = context.peers.rows[source.peer.index].identity, .admitted_ms = now, .deadline = now +| self.validation.timeout_ms, .handle = undefined, .id = id, .peer = source.connection, .topic = msg.topic, .bytes = workspace.scratch[0..written] },
         };
-        if (workspace.sink) |sink| {
-            if (!sink.admit(sink.context, &candidate)) {
-                assert(!candidate.committed);
-                return self.refuseStorage(candidate.refusal);
-            }
-        } else {
-            if (!candidate.feasible(&.{})) return self.refuseStorage(candidate.refusal);
-            candidate.commit();
-            workspace.used.* += written + msg.topic.len;
+        const sink = workspace.sink.?;
+        if (!sink.admit(sink.context, &candidate)) {
+            assert(!candidate.committed);
+            return self.refuseStorage(candidate.refusal);
         }
         assert(candidate.committed);
         return .{ .admitted = candidate.event };

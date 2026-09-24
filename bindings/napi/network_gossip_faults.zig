@@ -15,7 +15,6 @@ pub fn copy(runtime: *Runtime, token: g.Token, ordinal: usize) !void {
         std.debug.assert(runtime.heavy == null and runtime.quiescent);
         const cell = runtime.gossip.?.get(token).?;
         std.debug.assert(cell.state == .copying and cell.retired and cell.input.len > 0);
-        std.debug.assert(cell.reservation == 2 * cell.input.len);
         faults.reached.store(.gossip_copy_closed, .release);
         runtime.unlock();
         if (runtime.test_scenario == .gossip_copy_close_fail) return error.InjectedNetworkFailure;
@@ -71,7 +70,7 @@ pub fn afterStep(runtime: *Runtime) void {
     const cell = runtime.gossip.?.get(token).?;
     const entry = &runtime.heavy.?.core.service.gossipsub.messages.validation.entries[cell.handle.index];
     if (entry.generation != cell.handle.generation or entry.state != .expired or !cell.retired) return;
-    std.debug.assert(cell.state == .copying and cell.input.len > 0 and cell.reservation == 2 * cell.input.len);
+    std.debug.assert(cell.state == .copying and cell.input.len > 0);
     runtime.test_gossip_expiry = null;
     faults.reached.store(.gossip_copy_expired, .release);
 }

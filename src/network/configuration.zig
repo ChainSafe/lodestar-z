@@ -10,7 +10,7 @@ const dial = @import("peers/dialing.zig");
 const router = @import("router.zig");
 
 pub const Profile = enum { small, beacon_node };
-pub const ReqRespOverrides = Overrides(rr.Options, &.{ "peers", "forks", "outbound_control_reserved", "inbound_control_reserved", "reserve_inbound_per_peer" });
+pub const ReqRespOverrides = Overrides(rr.Options, &.{ "peers", "forks", "outbound_control_reserved", "inbound_control_reserved", "admission" });
 pub const GossipOverrides = Overrides(gossip.Options, &.{ "connected_capacity", "retained_capacity", "retained_outbound_reserve", "random_seed" });
 pub const IdentifyOverrides = Overrides(@import("identify/root.zig").Options, &.{});
 pub const RouterOverrides = Overrides(router.Options, &.{ "outbound_control_reserved", "inbound_connections" });
@@ -29,7 +29,7 @@ pub const Request = struct {
     router: RouterOverrides = .{},
     identify: IdentifyOverrides = .{},
     application_requests_max: ?u16 = null,
-    admission_policy: ?@import("reqresp/request_policy.zig").Config = null,
+    admission_policy: @import("reqresp/request_policy.zig").Config,
     control: ?@import("peers/control.zig").Options = null,
     byte_limit: ?usize = null,
 };
@@ -75,12 +75,12 @@ pub fn resolve(request: Request) !Resolved {
         .peers = limits.connections_max,
         .outbound_max = peer_options.max_peers + @as(u16, if (small) 6 else 56),
         .inbound_max = peer_options.max_peers + @as(u16, if (small) 6 else 56),
-        .reserve_inbound_per_peer = true,
         .outbound_control_reserved = peer_options.max_peers,
         .inbound_control_reserved = peer_options.max_peers,
         .outbound_per_peer_max = if (small) 4 else 8,
         .inbound_per_peer_max = if (small) 8 else 16,
         .inbound_application_per_peer_max = if (small) 4 else 8,
+        .admission = undefined,
     };
     applyOverrides(&requests, request.reqresp);
     if (requests.inbound_max < requests.inbound_control_reserved) return error.InvalidOptions;
@@ -90,10 +90,7 @@ pub fn resolve(request: Request) !Resolved {
         requests.outbound_max = requests.outbound_control_reserved + @min(maximum, requests.outbound_max - requests.outbound_control_reserved);
     }
 
-    if (request.admission_policy) |policy_config| {
-        if (requests.admission != null) return error.InvalidOptions;
-        requests.admission = try rr.AdmissionOptions.defaults(&policy_config, peer_options.capacity, peer_options.max_peers, requests.inbound_max - requests.inbound_control_reserved);
-    }
+    requests.admission = try rr.AdmissionOptions.defaults(&request.admission_policy, peer_options.capacity, peer_options.max_peers, requests.inbound_max - requests.inbound_control_reserved);
     var identify: @import("identify/root.zig").Options = .{ .inbound_max = if (small) 2 else 4, .outbound_max = if (small) 2 else 4 };
     applyOverrides(&identify, request.identify);
     var protocols: router.Options = .{
@@ -115,7 +112,6 @@ pub fn resolve(request: Request) !Resolved {
         gossip_options.mcache_capacity = 256;
         gossip_options.validation_capacity = 64;
         gossip_options.mcache_arena_bytes = c.maxCompressedLen(c.MAX_PAYLOAD_SIZE) + @import("gossipsub/message_store.zig").page_bytes;
-        gossip_options.decompressed_arena_bytes = c.MAX_PAYLOAD_SIZE + @import("gossipsub/topic.zig").topic_max_len;
         gossip_options.receive_arena_bytes = std.mem.alignForward(usize, c.GOSSIP_MAX_SIZE, @import("gossipsub/receive_pool.zig").page_bytes);
     }
     applyOverrides(&gossip_options, request.gossip);

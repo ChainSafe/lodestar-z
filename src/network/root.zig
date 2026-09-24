@@ -1,5 +1,4 @@
 pub const gossip_processor = @import("gossip_processor/root.zig");
-pub const byte_budget = @import("byte_budget.zig");
 pub const chain = @import("chain.zig");
 pub const configuration = @import("configuration.zig");
 pub const metrics = @import("metrics/export.zig");

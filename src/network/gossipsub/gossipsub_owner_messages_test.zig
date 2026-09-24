@@ -1,7 +1,6 @@
 const std = @import("std");
 const gossip = @import("gossipsub.zig");
 const Gossipsub = gossip.Gossipsub;
-const Event = gossip.Event;
 const MessageId = gossip.MessageId;
 const ReportOutcome = gossip.ReportOutcome;
 const constants = @import("constants.zig");
@@ -33,10 +32,9 @@ test "gossip graylist drops an RPC before decoding or admitting messages" {
     var writer = protobuf.Writer.init(&encoded);
     protobuf.writeMessage(&writer, compressed[0..len], name);
     g.sessions.rows[session.index].io.startRpc(writer.written());
-    var events: [1]Event = undefined;
     var count: usize = 0;
     var items = g.options.items_per_peer;
-    try std.testing.expect(try support.processRpc(&g, session.index, .{ .mono_ms = 1, .unix_s = 0 }, &events, &count, &items));
+    try std.testing.expect(try support.processRpc(&g, session.index, .{ .mono_ms = 1, .unix_s = 0 }, &count, &items));
     try std.testing.expectEqual(@as(usize, 0), count);
     try std.testing.expectEqual(@as(u64, 1), g.rpc_metrics.graylist_dropped);
     try std.testing.expectEqual(@as(u64, 0), g.counters.messages_received);
@@ -58,7 +56,7 @@ test "gossip IWANT admits 5000 IDs and rejects larger envelopes before service" 
         io.startRpc(writer.written());
         var emitted: usize = 0;
         var items = g.options.items_per_peer;
-        const result = support.processRpc(&g, session.index, .{ .mono_ms = 1, .unix_s = 0 }, &.{}, &emitted, &items);
+        const result = support.processRpc(&g, session.index, .{ .mono_ms = 1, .unix_s = 0 }, &emitted, &items);
         if (count == constants.max_iwant_ids_per_rpc) {
             try std.testing.expect(try result);
         } else {
@@ -86,72 +84,10 @@ test "gossip turn separates credit exhaustion from host pressure and preserves e
     const io = &g.sessions.rows[session.index].io;
     io.startRpc(writer.written());
     const driver = @import("session_io.zig");
-    var events: [2]Event = undefined;
-    var turn = @import("session_io.zig").beginPump(&g, .{ .mono_ms = 1, .unix_s = 0 }, &events);
+    var turn = @import("session_io.zig").beginPump(&g, .{ .mono_ms = 1, .unix_s = 0 });
     var peer = Credits.peer(&g.options);
     try std.testing.expectEqual(Progress.credits, try driver.processRpc(&g, session.index, &turn, &peer));
-    try std.testing.expectEqual(@as(usize, 1), turn.count);
-    try std.testing.expectEqual(.none, io.blocked);
-    const first = events[0].message;
-    try std.testing.expectEqual(ReportOutcome{ .applied = .accept }, g.report(first.handle, .accept, turn.now));
-    _ = try g.publish(name, "local", turn.now);
-    try std.testing.expectEqualStrings("first", first.bytes);
-    try std.testing.expectEqualStrings(name, first.topic);
-
-    turn = @import("session_io.zig").beginPump(&g, .{ .mono_ms = 2, .unix_s = 0 }, &.{});
-    peer = Credits.peer(&g.options);
-    try std.testing.expectEqual(Progress.events, try driver.processRpc(&g, session.index, &turn, &peer));
-    try std.testing.expectEqual(.events, io.blocked);
-    try std.testing.expectEqual(@as(usize, 0), turn.count);
-    turn = @import("session_io.zig").beginPump(&g, .{ .mono_ms = 3, .unix_s = 0 }, &events);
-    peer = Credits.peer(&g.options);
-    try std.testing.expectEqual(Progress.done, try driver.processRpc(&g, session.index, &turn, &peer));
-    try std.testing.expectEqual(@as(usize, 1), turn.count);
-    try std.testing.expectEqualStrings("second", events[0].message.bytes);
     try std.testing.expectEqual(@as(u64, 2), g.rpc_metrics.items[@intFromEnum(std.meta.Tag(protobuf.Item).message)]);
-}
-
-test "gossipsub preserves admission after zero event capacity" {
-    var g = try support.init(std.testing.allocator, .{
-        .random_seed = 1,
-    });
-    defer g.deinit();
-    const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
-    const topic = "/eth2/01020304/beacon_block/ssz_snappy";
-    try support.subscribe(&g, topic);
-    var compressed: [128]u8 = undefined;
-    const n = try snappy.raw.compress("payload", &compressed);
-    const msg = protobuf.Message{ .data = compressed[0..n], .topic = topic };
-    var empty: [0]Event = .{};
-    var events: [1]Event = undefined;
-    _ = receiveForTest(&g, peer.index, msg, .{ .mono_ms = 1, .unix_s = 1 }, &empty, 0);
-    const delivered = receiveForTest(&g, peer.index, msg, .{ .mono_ms = 2, .unix_s = 1 }, &events, 0);
-    try std.testing.expectEqual(@as(?usize, 1), delivered);
-}
-
-test "gossipsub metrics count a deferred RPC item only once" {
-    var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
-    defer g.deinit();
-    const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
-    const name = "/eth2/01020304/beacon_block/ssz_snappy";
-    try support.subscribe(&g, name);
-    var compressed: [128]u8 = undefined;
-    const n = try snappy.raw.compress("payload", &compressed);
-    var bytes: [256]u8 = undefined;
-    var writer = protobuf.Writer.init(&bytes);
-    protobuf.writeMessage(&writer, compressed[0..n], name);
-    g.sessions.rows[peer.index].io.startRpc(writer.written());
-    var count: usize = 0;
-    var items: usize = 128;
-    for (0..2) |_| try std.testing.expect(!try @import("test_support.zig").processRpc(&g, peer.index, .{ .mono_ms = 1, .unix_s = 1 }, &.{}, &count, &items));
-    try std.testing.expectEqual(@as(u64, 1), g.rpc_metrics.items[@intFromEnum(std.meta.Tag(protobuf.Item).message)]);
-    try std.testing.expectEqual(@as(u64, 1), g.topic_metrics.get(name).prevalidation);
-    try std.testing.expectEqual(@as(u64, 0), g.counters.messages_received);
-    var events: [1]Event = undefined;
-    try std.testing.expect(try @import("test_support.zig").processRpc(&g, peer.index, .{ .mono_ms = 2, .unix_s = 1 }, &events, &count, &items));
-    try std.testing.expectEqual(@as(usize, 1), count);
-    try std.testing.expectEqual(@as(u64, 1), g.topic_metrics.get(name).prevalidation);
-    try std.testing.expectEqual(@as(u64, 1), g.counters.messages_received);
 }
 
 test "gossipsub metrics distinguish partial writes from complete publication RPCs" {
@@ -209,8 +145,7 @@ test "gossipsub pending validation survives history churn and report publish eve
     var inbox: support.Inbox = .{};
     defer inbox.deinit();
     inbox.attach(&g);
-    var events: [1]Event = undefined;
-    try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, peer.index, "pending", 1, &events));
+    try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, peer.index, "pending", 1));
     const event = inbox.last();
     for (0..20) |i| {
         var bytes: [8]u8 = undefined;
@@ -218,13 +153,13 @@ test "gossipsub pending validation survives history churn and report publish eve
         _ = try g.publish(topic, &bytes, .{ .mono_ms = 2, .unix_s = 1 });
         @import("test_support.zig").ageHistory(&g);
     }
-    try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, peer.index, "pending", 3, &events));
+    try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, peer.index, "pending", 3));
     try std.testing.expectEqual(ReportOutcome{ .applied = .ignore }, g.report(event.handle, .ignore, .{ .mono_ms = 4, .unix_s = 1 }));
     _ = try g.publish("/eth2/01020304/voluntary_exit/ssz_snappy", "reuse", .{ .mono_ms = 5, .unix_s = 1 });
     try std.testing.expectEqualStrings("pending", event.bytes);
     try std.testing.expectEqualStrings(topic, event.topic);
     try std.testing.expectEqual(ReportOutcome.already_resolved, g.report(event.handle, .accept, .{ .mono_ms = 6, .unix_s = 1 }));
-    try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, peer.index, "expires", 7, &events));
+    try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, peer.index, "expires", 7));
     const expires = inbox.last().handle;
     try std.testing.expectEqual(ReportOutcome.expired, g.report(expires, .accept, .{ .mono_ms = 30_007, .unix_s = 1 }));
     try std.testing.expectEqual(ReportOutcome.stale_handle, g.report(expires, .accept, .{ .mono_ms = 60_007, .unix_s = 1 }));
@@ -239,10 +174,9 @@ test "gossipsub duplicate invalid bytes do not evict useful history" {
     _ = try g.publish(topic, "useful", .{ .mono_ms = 1, .unix_s = 1 });
     const useful = topic_mod.validMessageId(topic, "useful", .{});
     const retained = g.messages.history.message(g.messages.history.get(&g.messages.store, useful).?);
-    var events: [1]Event = undefined;
     for (0..20) |_| {
-        try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, peer.index, "useful", 2, &events));
-        _ = receiveForTest(&g, peer.index, .{ .topic = topic, .data = &.{ 5, 0 } }, .{ .mono_ms = 2, .unix_s = 1 }, &events, 0);
+        try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, peer.index, "useful", 2));
+        _ = receiveForTest(&g, peer.index, .{ .topic = topic, .data = &.{ 5, 0 } }, .{ .mono_ms = 2, .unix_s = 1 });
         try std.testing.expectEqual(retained, g.messages.history.message(g.messages.history.get(&g.messages.store, useful).?));
     }
 }
@@ -272,19 +206,6 @@ test "gossipsub IWANT promises commit on queue and start at completed control tr
     const token = io.tx.advance(&g.messages.store, first.len - 1).?.control.token;
     g.recovery.controlSent(g.sessions.rows[peer.index].conn, token, g.options.iwant_followup_ms, 1_000);
     try std.testing.expectEqual(@as(u64, 4_000), g.recovery.batches[0].expiry);
-    var empty: [0]Event = .{};
-    try std.testing.expectEqual(@as(?usize, null), try testMessage(&g, peer.index, "held behind host pressure", 11_000, &empty));
-    @import("session_io.zig").finishPump(&g, .{ .mono_ms = 14_000, .unix_s = 0 });
-    try std.testing.expectEqual(@as(u64, 0), g.counters.broken_promises);
-    try std.testing.expectEqual(@as(u64, 1), g.counters.promises_cancelled_pressure);
-    g.sessions.rows[peer.index].io.resetHeartbeat();
-    support.control(&g, peer.index, .{ .ihave = .{ .topic = topic, .body = w.written() } }, .{ .mono_ms = 14_000, .unix_s = 1 });
-    try std.testing.expectEqual(@as(usize, 1), g.recovery.len);
-    g.connectionClosed(.{ .index = 0, .generation = 1 });
-    _ = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 2 }, .v1_2).?;
-    @import("session_io.zig").finishPump(&g, .{ .mono_ms = 20_000, .unix_s = 0 });
-    try std.testing.expectEqual(@as(usize, 0), g.recovery.len);
-    try std.testing.expectEqual(@as(u64, 0), g.counters.broken_promises);
 }
 
 test "gossipsub IHAVE pending and duplicate prefixes do not hide new tail IDs" {
@@ -392,7 +313,7 @@ test "gossipsub IHAVE security bounds one identity and deduplicates queued reque
 
 test "gossipsub legal maximum host acceptance forwards retained pages through actual IO" {
     var setup: @import("test_pair.zig").Pair = .{};
-    const small = try @import("../configuration.zig").resolve(.{ .profile = .small, .seed = 1, .forks = &.{} });
+    const small = try @import("../configuration.zig").resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .admission_policy = @import("../reqresp/policy_fixture.zig").config() });
     try setup.initOpts(small.core.service.gossipsub, small.core.service.gossipsub);
     defer setup.deinit();
     const topic = "/eth2/01020304/beacon_block/ssz_snappy";
@@ -406,13 +327,12 @@ test "gossipsub legal maximum host acceptance forwards retained pages through ac
     defer std.testing.allocator.free(payload);
     var rng = std.Random.DefaultPrng.init(91);
     rng.random().bytes(payload);
-    _ = @import("test_support.zig").pump(setup.shared.server.gossipsub, &setup.shared.pair.server, setup.shared.pair.now, &.{});
+    _ = @import("test_support.zig").pump(setup.shared.server.gossipsub, &setup.shared.pair.server, setup.shared.pair.now);
     // The sink path decodes into msg_scratch, so the wire bytes live elsewhere.
     const compressed = try std.testing.allocator.alloc(u8, constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE));
     defer std.testing.allocator.free(compressed);
     const len = try snappy.raw.compress(payload, compressed);
-    var events: [1]Event = undefined;
-    try std.testing.expectEqual(@as(?usize, 1), receiveForTest(setup.shared.server.gossipsub, source.index, .{ .topic = topic, .data = compressed[0..len] }, setup.shared.pair.now, &events, 0));
+    try std.testing.expectEqual(@as(?usize, 1), receiveForTest(setup.shared.server.gossipsub, source.index, .{ .topic = topic, .data = compressed[0..len] }, setup.shared.pair.now));
     const handle = setup.shared.server_inbox.last().handle;
     const message = setup.shared.server.gossipsub.messages.validation.entries[handle.index].state.pending.message;
     try std.testing.expectEqual(ReportOutcome{ .applied = .accept }, setup.shared.server.gossipsub.report(handle, .accept, setup.shared.pair.now));
@@ -462,14 +382,13 @@ test "gossipsub rotates the legal atomic allowance past a duplicate flood" {
     g.sessions.rows[second.index].io.rx_ready = true;
     g.sessions.rows[first.index].io.startRpc(w1.written());
     g.sessions.rows[second.index].io.startRpc(w2.written());
-    var events: [2]Event = undefined;
-    try std.testing.expectEqual(@as(usize, 1), @import("test_support.zig").pump(&g, &pair.server, pair.now, &events));
+    try std.testing.expectEqual(@as(usize, 1), @import("test_support.zig").pump(&g, &pair.server, pair.now));
     try std.testing.expectEqualStrings("one", inbox.last().bytes);
     g.sessions.rows[first.index].in_stream = stream1;
     g.sessions.rows[first.index].io.rx_ready = true;
     g.sessions.rows[first.index].io.startRpc(w1.written());
-    try std.testing.expectEqual(@as(?u64, pair.now.mono_ms), @import("session_io.zig").nextIoWakeup(&g, pair.now, 2));
-    try std.testing.expectEqual(@as(usize, 1), @import("test_support.zig").pump(&g, &pair.server, pair.now, &events));
+    try std.testing.expectEqual(@as(?u64, pair.now.mono_ms), @import("session_io.zig").nextIoWakeup(&g, pair.now));
+    try std.testing.expectEqual(@as(usize, 1), @import("test_support.zig").pump(&g, &pair.server, pair.now));
     try std.testing.expectEqualStrings("two", inbox.last().bytes);
 }
 
@@ -487,10 +406,9 @@ test "gossipsub validation attribution cannot penalize reused source or duplicat
     var inbox: support.Inbox = .{};
     defer inbox.deinit();
     inbox.attach(&g);
-    var events: [1]Event = undefined;
-    try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, source.index, "invalid", 1, &events));
+    try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, source.index, "invalid", 1));
     const handle = inbox.last().handle;
-    try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, duplicate.index, "invalid", 2, &events));
+    try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, duplicate.index, "invalid", 2));
     g.connectionClosed(source_conn);
     g.connectionClosed(duplicate_conn);
     const replacement1 = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 2 }, .v1_2).?;
@@ -532,7 +450,6 @@ test "gossip independent RPC enumerates every receive split through admission" {
         g.messages.validation.expire(&g.messages.store, &g.peers, now.mono_ms);
         const io = &g.sessions.rows[peer.index].io;
         try std.testing.expect(!g.sessions.resetRx(peer.index));
-        var events: [2]Event = undefined;
         var count: usize = 0;
         var consumed: usize = 0;
         var items: usize = 128;
@@ -544,8 +461,8 @@ test "gossip independent RPC enumerates every receive split through admission" {
                 try std.testing.expect(result.consumed > 0);
                 consumed += result.consumed;
                 if (result.complete) {
-                    try std.testing.expect(try @import("test_support.zig").processRpc(&g, peer.index, now, &events, &count, &items));
-                    try std.testing.expect(try @import("test_support.zig").processRpc(&g, peer.index, now, &events, &count, &items));
+                    try std.testing.expect(try @import("test_support.zig").processRpc(&g, peer.index, now, &count, &items));
+                    try std.testing.expect(try @import("test_support.zig").processRpc(&g, peer.index, now, &count, &items));
                     try std.testing.expect(g.sessions.finishFrame(io));
                 }
             }
@@ -673,30 +590,29 @@ test "gossipsub configured IDONTWANT uses admitted compressed wire bytes" {
     var payload: [126]u8 = undefined;
     for (&payload, 0..) |*byte, index| byte.* = @intCast(index);
     var compressed: [constants.maxCompressedLen(256)]u8 = undefined;
-    var events: [1]Event = undefined;
     for ([_]usize{ 124, 125, 126 }, [_]usize{ 127, 128, 129 }) |size, wire_size| {
         g.sessions.rows[destination.index].io.tx.cancelStream(&g.messages.store);
         const len = try snappy.raw.compress(payload[0..size], &compressed);
         try std.testing.expectEqual(wire_size, len);
-        try std.testing.expectEqual(@as(?usize, 1), receiveForTest(&g, source.index, .{ .topic = name, .data = compressed[0..len] }, .{ .mono_ms = 1, .unix_s = 0 }, &events, 0));
+        try std.testing.expectEqual(@as(?usize, 1), receiveForTest(&g, source.index, .{ .topic = name, .data = compressed[0..len] }, .{ .mono_ms = 1, .unix_s = 0 }));
         try std.testing.expectEqual(wire_size >= 128, g.sessions.rows[destination.index].io.tx.control.used > 0);
         g.sessions.rows[destination.index].io.tx.cancelStream(&g.messages.store);
-        try std.testing.expectEqual(@as(?usize, 0), receiveForTest(&g, source.index, .{ .topic = name, .data = compressed[0..len] }, .{ .mono_ms = 1, .unix_s = 0 }, &events, 0));
+        try std.testing.expectEqual(@as(?usize, 0), receiveForTest(&g, source.index, .{ .topic = name, .data = compressed[0..len] }, .{ .mono_ms = 1, .unix_s = 0 }));
         try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[destination.index].io.tx.control.used);
     }
     const len = try snappy.raw.compress(&([_]u8{0} ** 256), &compressed);
     try std.testing.expect(len < 128);
-    try std.testing.expectEqual(@as(?usize, 1), receiveForTest(&g, source.index, .{ .topic = name, .data = compressed[0..len] }, .{ .mono_ms = 1, .unix_s = 0 }, &events, 0));
+    try std.testing.expectEqual(@as(?usize, 1), receiveForTest(&g, source.index, .{ .topic = name, .data = compressed[0..len] }, .{ .mono_ms = 1, .unix_s = 0 }));
     try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[destination.index].io.tx.control.used);
-    _ = receiveForTest(&g, source.index, .{ .topic = name, .data = &.{ 5, 0 } }, .{ .mono_ms = 1, .unix_s = 0 }, &events, 0);
+    _ = receiveForTest(&g, source.index, .{ .topic = name, .data = &.{ 5, 0 } }, .{ .mono_ms = 1, .unix_s = 0 });
     try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[destination.index].io.tx.control.used);
     const fresh_len = try snappy.raw.compress("nonadmitted", &compressed);
     g.options.idontwant_min_data_size = 0;
     inbox.full = true;
-    try std.testing.expectEqual(@as(?usize, 0), receiveForTest(&g, source.index, .{ .topic = name, .data = compressed[0..fresh_len] }, .{ .mono_ms = 1, .unix_s = 0 }, &events, 0));
+    try std.testing.expectEqual(@as(?usize, 0), receiveForTest(&g, source.index, .{ .topic = name, .data = compressed[0..fresh_len] }, .{ .mono_ms = 1, .unix_s = 0 }));
     try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[destination.index].io.tx.control.used);
     inbox.full = false;
-    try std.testing.expectEqual(@as(?usize, 1), receiveForTest(&g, source.index, .{ .topic = name, .data = compressed[0..fresh_len] }, .{ .mono_ms = 1, .unix_s = 0 }, &events, 0));
+    try std.testing.expectEqual(@as(?usize, 1), receiveForTest(&g, source.index, .{ .topic = name, .data = compressed[0..fresh_len] }, .{ .mono_ms = 1, .unix_s = 0 }));
     try std.testing.expect(g.sessions.rows[destination.index].io.tx.control.used > 0);
 }
 
@@ -713,8 +629,7 @@ test "gossipsub remote forwarding honors IDONTWANT and preserves borrowed event 
     pair.shared.server.gossipsub.overlay.rows[pair.shared.server.gossipsub.overlay.findTopic(name).?].mesh.set(destination);
     const suppressed_id = topic_mod.validMessageId(name, "remote suppressed", .{});
     pair.shared.server.gossipsub.sessions.suppress(destination, suppressed_id, pair.shared.pair.now.mono_ms, 60_000);
-    var events: [1]Event = undefined;
-    try std.testing.expectEqual(@as(?usize, 1), try testMessage(pair.shared.server.gossipsub, source.index, "remote suppressed", pair.shared.pair.now.mono_ms, &events));
+    try std.testing.expectEqual(@as(?usize, 1), try testMessage(pair.shared.server.gossipsub, source.index, "remote suppressed", pair.shared.pair.now.mono_ms));
     const borrowed = pair.shared.server_inbox.last();
     try std.testing.expectEqual(ReportOutcome{ .applied = .accept }, pair.shared.server.gossipsub.report(borrowed.handle, .accept, pair.shared.pair.now));
     try std.testing.expectEqual(@as(usize, 0), pair.shared.server.gossipsub.sessions.rows[destination].io.tx.data.count);
@@ -734,7 +649,7 @@ test "gossipsub remote forwarding honors IDONTWANT and preserves borrowed event 
     }
     try std.testing.expectEqual(@as(usize, 1), received);
     try std.testing.expectEqual(@as(u64, 0), pair.shared.server.gossipsub.counters.messages_forwarded);
-    try std.testing.expectEqual(@as(?usize, 1), try testMessage(pair.shared.server.gossipsub, source.index, "remote forwarded", pair.shared.pair.now.mono_ms, &events));
+    try std.testing.expectEqual(@as(?usize, 1), try testMessage(pair.shared.server.gossipsub, source.index, "remote forwarded", pair.shared.pair.now.mono_ms));
     try std.testing.expectEqual(ReportOutcome{ .applied = .accept }, pair.shared.server.gossipsub.report(pair.shared.server_inbox.last().handle, .accept, pair.shared.pair.now));
     try std.testing.expectEqual(@as(usize, 1), pair.shared.server.gossipsub.sessions.rows[destination].io.tx.data.count);
     received = 0;
@@ -762,10 +677,9 @@ test "gossip forwarding excludes recorded duplicate senders but reaches other me
     var inbox: support.Inbox = .{};
     defer inbox.deinit();
     inbox.attach(&g);
-    var events: [1]Event = undefined;
-    try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, peers[0], "shared payload", 1, &events));
+    try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, peers[0], "shared payload", 1));
     const handle = inbox.last().handle;
-    try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, peers[1], "shared payload", 2, &events));
+    try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, peers[1], "shared payload", 2));
     try std.testing.expectEqual(ReportOutcome{ .applied = .accept }, g.report(handle, .accept, .{ .mono_ms = 3, .unix_s = 0 }));
     try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[peers[0]].io.tx.data.count);
     try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[peers[1]].io.tx.data.count);
@@ -781,18 +695,17 @@ test "gossip duplicate fast path ignores host capacity and malformed bodies rece
     var inbox: support.Inbox = .{};
     defer inbox.deinit();
     inbox.attach(&g);
-    var events: [1]Event = undefined;
-    try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, peer.index, "pending", 1, &events));
+    try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, peer.index, "pending", 1));
     const handle = inbox.last().handle;
     inbox.full = true;
-    try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, peer.index, "pending", 2, &events));
+    try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, peer.index, "pending", 2));
     inbox.full = false;
     try std.testing.expectEqual(@as(u64, 1), g.messages.decoded_messages);
     try std.testing.expectEqual(@as(u64, 1), g.messages.fast_hits);
     _ = g.report(handle, .ignore, .{ .mono_ms = 3, .unix_s = 1 });
-    try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, peer.index, "pending", 4, &events));
+    try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, peer.index, "pending", 4));
     for (0..20) |_| {
-        _ = receiveForTest(&g, peer.index, .{ .topic = name, .data = &.{5} }, .{ .mono_ms = 5, .unix_s = 1 }, &events, 0);
+        _ = receiveForTest(&g, peer.index, .{ .topic = name, .data = &.{5} }, .{ .mono_ms = 5, .unix_s = 1 });
     }
     try std.testing.expectEqual(@as(u64, 20), g.peers.scores.penalties.invalid_message);
     try std.testing.expectEqual(@as(u64, 2), g.messages.decoded_messages);
@@ -808,21 +721,20 @@ test "gossip recent attribution survives validation slot reuse and duplicate pre
     var inbox: support.Inbox = .{};
     defer inbox.deinit();
     inbox.attach(&g);
-    var events: [1]Event = undefined;
-    try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, source.index, "rejected", 1, &events));
+    try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, source.index, "rejected", 1));
     const old = inbox.last().handle;
     _ = g.report(old, .reject, .{ .mono_ms = 2, .unix_s = 0 });
-    try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, source.index, "pending", 3, &events));
+    try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, source.index, "pending", 3));
     const current = inbox.last();
     try std.testing.expectEqual(old.index, current.handle.index);
     try std.testing.expect(old.generation != current.handle.generation);
-    try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, duplicate.index, "rejected", 4, &.{}));
+    try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, duplicate.index, "rejected", 4));
     try std.testing.expectEqual(@as(u64, 2), g.peers.scores.penalties.invalid_message);
-    try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, duplicate.index, "rejected", 5, &.{}));
+    try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, duplicate.index, "rejected", 5));
     try std.testing.expectEqual(@as(u64, 2), g.peers.scores.penalties.invalid_message);
     try std.testing.expectEqual(ReportOutcome.stale_handle, g.report(old, .accept, .{ .mono_ms = 6, .unix_s = 0 }));
     @memset(g.messages.fast, .{});
-    try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, source.index, "pending", 7, &.{}));
+    try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, source.index, "pending", 7));
     try std.testing.expectEqualStrings("pending", current.bytes);
     try std.testing.expectEqualStrings(name, current.topic);
     try std.testing.expectEqual(ReportOutcome{ .applied = .ignore }, g.report(current.handle, .ignore, .{ .mono_ms = 8, .unix_s = 0 }));
@@ -845,7 +757,7 @@ test "gossipsub IHAVE work preflight defers without consuming the advertisement"
     const io = &g.sessions.rows[session.index].io;
     io.startRpc(writer.written());
     const driver = @import("session_io.zig");
-    var turn = @import("turn.zig").Turn.init(&g.options, .{ .mono_ms = 1, .unix_s = 0 }, &.{}, &.{}, &.{});
+    var turn = @import("turn.zig").Turn.init(&g.options, .{ .mono_ms = 1, .unix_s = 0 }, &.{});
     var peer = Credits.peer(&g.options);
     turn.budget.work = 0;
     for (0..2) |_| {
@@ -875,7 +787,7 @@ test "gossipsub IHAVE work preflight defers without consuming the advertisement"
     try std.testing.expectEqual(@as(u64, 1), g.topic_metrics.get(name).ihave_unseen);
     try std.testing.expect(!g.sessions.finishFrame(io));
     io.startRpc(writer.written());
-    turn = @import("turn.zig").Turn.init(&g.options, turn.now, &.{}, &.{}, &.{});
+    turn = @import("turn.zig").Turn.init(&g.options, turn.now, &.{});
     peer = Credits.peer(&g.options);
     try std.testing.expectEqual(Progress.done, try driver.processRpc(&g, session.index, &turn, &peer));
     try std.testing.expectEqual(@as(usize, 1), g.recovery.len);
@@ -884,7 +796,7 @@ test "gossipsub IHAVE work preflight defers without consuming the advertisement"
 }
 
 test "gossipsub IHAVE maximum advertisement shares oversized allowance with data and makes progress" {
-    const small = try @import("../configuration.zig").resolve(.{ .profile = .small, .seed = 1, .forks = &.{} });
+    const small = try @import("../configuration.zig").resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .admission_policy = @import("../reqresp/policy_fixture.zig").config() });
     var options = small.core.service.gossipsub;
     options.work_per_pump = 1;
     options.decompress_per_peer_bytes = 1;
@@ -919,9 +831,8 @@ test "gossipsub IHAVE maximum advertisement shares oversized allowance with data
     var inbox: support.Inbox = .{};
     defer inbox.deinit();
     inbox.attach(&g);
-    var events: [1]Event = undefined;
     var scratch: [64]u8 = undefined;
-    var turn = @import("turn.zig").Turn.init(&g.options, .{ .mono_ms = 1, .unix_s = 0 }, &events, g.decompressed, &scratch);
+    var turn = @import("turn.zig").Turn.init(&g.options, .{ .mono_ms = 1, .unix_s = 0 }, &scratch);
     turn.sink = g.message_sink;
     var peer = Credits.peer(&g.options);
     try std.testing.expectEqual(Progress.credits, try driver.processRpc(&g, session.index, &turn, &peer));
@@ -930,15 +841,13 @@ test "gossipsub IHAVE maximum advertisement shares oversized allowance with data
     try std.testing.expectEqual(@as(u16, 1), io.ihave_recv);
     try std.testing.expectEqual(@as(u64, 5000), g.topic_metrics.get(name).ihave_ids);
     try std.testing.expectEqual(@as(u64, 1), g.topic_metrics.get(name).ihave_unseen);
-    try std.testing.expectEqual(@as(usize, 0), turn.count);
-    turn = @import("turn.zig").Turn.init(&g.options, .{ .mono_ms = 2, .unix_s = 0 }, &events, g.decompressed, &scratch);
+    turn = @import("turn.zig").Turn.init(&g.options, .{ .mono_ms = 2, .unix_s = 0 }, &scratch);
     turn.sink = g.message_sink;
     peer = Credits.peer(&g.options);
     try std.testing.expectEqual(Progress.credits, try driver.processRpc(&g, session.index, &turn, &peer));
-    try std.testing.expectEqual(@as(usize, 0), turn.count);
     try std.testing.expect(turn.large_used);
     try std.testing.expectEqual(@as(u16, 2), io.ihave_recv);
-    turn = @import("turn.zig").Turn.init(&g.options, .{ .mono_ms = 3, .unix_s = 0 }, &events, g.decompressed, &scratch);
+    turn = @import("turn.zig").Turn.init(&g.options, .{ .mono_ms = 3, .unix_s = 0 }, &scratch);
     turn.sink = g.message_sink;
     peer = Credits.peer(&g.options);
     try std.testing.expectEqual(Progress.done, try driver.processRpc(&g, session.index, &turn, &peer));
@@ -961,17 +870,16 @@ test "gossip pending validation quota preserves room for another peer and refund
         var inbox: support.Inbox = .{};
         defer inbox.deinit();
         inbox.attach(&g);
-        var events: [1]Event = undefined;
-        try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, first.index, "first", 1, &events));
+        try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, first.index, "first", 1));
         const held = inbox.last().handle;
-        try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, first.index, "second", 2, &events));
-        try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, first.index, "third", 3, &events));
+        try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, first.index, "second", 2));
+        try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, first.index, "third", 3));
         try std.testing.expectEqual(@as(u64, 1), g.counters.message_capacity_refusals);
         try std.testing.expectEqual(@as(u64, 1), g.messages.storage_refusals[@intFromEnum(@import("messages.zig").StorageRefusal.peer_validations)]);
         try std.testing.expectEqual(@as(f64, 0), g.peers.score(g.sessions.rows[first.index].logical, 3));
-        try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, second.index, "other peer", 4, &events));
+        try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, second.index, "other peer", 4));
         try std.testing.expectEqual(ReportOutcome{ .applied = .ignore }, g.report(held, .ignore, .{ .mono_ms = 5, .unix_s = 0 }));
-        try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, first.index, "third", 6, &events));
+        try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, first.index, "third", 6));
     }
 }
 
@@ -1037,14 +945,13 @@ test "gossip paged RPC cursors survive shared workspace reuse without runtime al
     var inbox: support.Inbox = .{};
     defer inbox.deinit();
     inbox.attach(&g);
-    var events: [1]Event = undefined;
     const now: Now = .{ .mono_ms = 2, .unix_s = 1 };
     for (0..2) |round| {
         for (0..2) |i| {
             var count: usize = 0;
             // One item credit pauses each RPC after its first message; two finish it.
             var items: usize = 1 + round;
-            const done = try support.processRpc(&g, @intCast(i + 2), now, &events, &count, &items);
+            const done = try support.processRpc(&g, @intCast(i + 2), now, &count, &items);
             try std.testing.expectEqual(round == 1, done);
             try std.testing.expectEqual(@as(usize, 1), count);
             try std.testing.expectEqualSlices(u8, &payloads[i * 2 + round], inbox.last().bytes);

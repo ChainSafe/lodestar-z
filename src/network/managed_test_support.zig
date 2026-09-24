@@ -55,7 +55,6 @@ pub fn request() @import("configuration.zig").Request {
             .mcache_capacity = 8,
             .validation_capacity = 2,
             .mcache_arena_bytes = gc.maxCompressedLen(gc.MAX_PAYLOAD_SIZE) + 4096,
-            .decompressed_arena_bytes = gc.MAX_PAYLOAD_SIZE + 256,
             .receive_arena_bytes = std.mem.alignForward(usize, gc.GOSSIP_MAX_SIZE, 4096),
             .body_buffer_bytes = 256,
             .control_bytes = 512,
@@ -163,7 +162,6 @@ pub const Setup = struct {
             100,
             self.server_events[0..capacity],
             &.{},
-            &.{},
         );
         count = self.pair.client.takeActivity(&activity);
         _ = managed.process(
@@ -175,7 +173,6 @@ pub const Setup = struct {
             self.pair.now,
             100,
             self.client_events[0..capacity],
-            &.{},
             &.{},
         );
     }

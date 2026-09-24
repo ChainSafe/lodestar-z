@@ -28,7 +28,6 @@ pub const Peer = struct {
     conn: ?Engine.Handle = null,
     now: network.Now = .{ .mono_ms = 0, .unix_s = 0 },
     clock_offset: u64 = 0,
-    event_capacity: usize = 16,
     emitted: usize = 0,
     steps: usize = 0,
     sink: []u8,
@@ -85,7 +84,6 @@ pub const Peer = struct {
         var events: [32]Engine.Event = undefined;
         var activity: [4]Engine.Handle = undefined;
         var requests: [16]network.reqresp.Event = undefined;
-        var messages: [16]Gossip.Event = undefined;
         const stepped = self.transport.step(self.io, &events, &activity, .{ .wait_max_ms = 1 });
         const result = stepped.progress;
         self.now = result.now;
@@ -94,6 +92,7 @@ pub const Peer = struct {
         for (events[0..result.events]) |event| switch (event) {
             .connected => |c| {
                 self.conn = c.conn;
+                _ = self.service.gossipsub.peerConnected(&self.transport.engine, c.conn, false, self.now);
                 var text: [network.wire.peer_id.text_length_max]u8 = undefined;
                 try control.emit(self.allocator, .{ .event = "connected", .peer = c.peer_id.toText(&text), .generation = c.conn.generation });
             },
@@ -108,7 +107,7 @@ pub const Peer = struct {
         };
         var controls: [16]network.reqresp.Event = undefined;
         var identified: [4]network.identify.Result = undefined;
-        const counts = self.service.process(&self.transport.engine, events[0..result.events], activity[0..result.activity], self.now, .{ .application = &requests, .control = &controls, .gossipsub = messages[0..self.event_capacity], .identify = &identified });
+        const counts = self.service.process(&self.transport.engine, events[0..result.events], activity[0..result.activity], self.now, .{ .application = &requests, .control = &controls, .identify = &identified });
         for (requests[0..counts.application]) |event| try self.requestEvent(event);
         for (controls[0..counts.control]) |event| try self.requestEvent(event);
         for (identified[0..counts.identify]) |*completion| switch (completion.outcome) {
@@ -118,10 +117,6 @@ pub const Peer = struct {
         const delivered = self.delivery_count;
         self.delivery_count = 0;
         for (self.deliveries[0..delivered]) |*delivery| try self.deliver(delivery.topic[0..delivery.topic_len], delivery.length, delivery.sha256, delivery.id, delivery.handle);
-        for (messages[0..counts.gossipsub]) |event| switch (event) {
-            .message => |m| try self.deliver(m.topic, m.bytes.len, hash(m.bytes), m.id, m.handle),
-            .subscription_change => |s| try control.emit(self.allocator, .{ .event = "subscription", .topic = s.topic, .subscribed = s.subscribed }),
-        };
         if (stepped.failure) |err| return err;
     }
 
@@ -151,7 +146,7 @@ pub const Peer = struct {
                     try self.service.reqresp.respond(r.request, out[0..len], null, self.now);
                     return;
                 }
-                if (r.protocol == .status_v2 and self.service.identify != null) {
+                if (r.protocol == .status_v2) {
                     const remote = try network.peers.control_wire.decodeStatus(.status_v2, r.bytes);
                     const local = try network.peers.control_wire.decodeStatus(.status_v2, &identify_status);
                     if (!std.meta.eql(remote, local)) return error.InvalidStatus;
@@ -212,7 +207,6 @@ pub const Peer = struct {
             }
             self.conn = try self.transport.dial(self.io, &target);
         } else if (std.mem.eql(u8, c.op, "identifyMode") or std.mem.eql(u8, c.op, "enableGossipRequest")) {
-            if (self.service.identify == null) return error.IdentifyDisabled;
             var active = network.capabilities.withIdentify(try network.capabilities.forFork(.fulu, true, &.{ .v1_2, .v1_1 }));
             if (std.mem.eql(u8, c.op, "identifyMode")) {
                 active.request = .initEmpty();
@@ -233,8 +227,7 @@ pub const Peer = struct {
         } else if (std.mem.eql(u8, c.op, "identify")) {
             if (!self.status_accepted) return error.StatusRequired;
             const conn = self.conn orelse return error.NoConnection;
-            const identify = if (self.service.identify) |*value| value else return error.IdentifyDisabled;
-            try identify.start(&self.service.router, &self.transport.engine, .{ .index = 0, .generation = conn.generation }, conn, self.now);
+            try self.service.identify.start(&self.service.router, &self.transport.engine, .{ .index = 0, .generation = conn.generation }, conn, self.now);
         } else if (std.mem.eql(u8, c.op, "subscribe")) {
             const parsed = Gossip.topic.parseCanonical(c.topic orelse topic) orelse return error.InvalidTopic;
             if (parsed.name.kind != .beacon_block) return error.InvalidTopic;
@@ -271,12 +264,6 @@ pub const Peer = struct {
             self.held_finish = null;
             self.held_since = null;
             self.hold_fin = false;
-        } else if (std.mem.eql(u8, c.op, "setEventCapacity")) {
-            const capacity = c.capacity orelse return error.MissingCapacity;
-            if (capacity > 16) return error.CapacityBound;
-            // Bounded event capacity applies only to event delivery.
-            self.service.gossipsub.message_sink = null;
-            self.event_capacity = capacity;
         } else if (std.mem.eql(u8, c.op, "pause")) {
             self.paused = c.paused orelse return error.MissingPause;
         } else if (std.mem.eql(u8, c.op, "advance")) {
@@ -328,14 +315,13 @@ pub fn main(init: std.process.Init) !void {
     quotas[@intFromEnum(network.reqresp.Protocol.ping_v1)] = .{ .tokens = 16, .period_ms = 30_000 };
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     const application = args.len == 2 and std.mem.eql(u8, args[1], "--application");
-    const identify_enabled = application or (args.len == 2 and std.mem.eql(u8, args[1], "--identify"));
     var blob_schedule: [network.reqresp.request_policy.schedule_max]network.reqresp.request_policy.BlobLimit = undefined;
     const policy = try network.reqresp.request_policy.Config.fromBeaconConfig(&@import("config").mainnet.config, &blob_schedule);
     var gossip_topics: [1]Gossip.topic_policy.Boundary = .{.{ .digest = if (application) applicationDigest() else .{ 1, 0, 0, 0 } }};
     gossip_topics[0].rules[@intFromEnum(Gossip.topic.Kind.beacon_block)] = .{ .count = 1, .ssz_min = 0, .ssz_max = max_payload };
     const peer = try a.create(Peer);
     defer a.destroy(peer);
-    peer.* = .{ .application = application, .allocator = a, .io = init.io, .service = try network.Service.init(a, .{ .identify = if (identify_enabled) .{ .agent = "lodestar-z-identify" } else null, .reqresp = .{ .policy = policy, .peers = 4, .outbound_max = 1, .inbound_max = if (application) 8 else 1, .inbound_per_peer_max = if (application) 8 else 1, .inbound_control_reserved = if (application) 2 else 0, .forks = &.{.{ .digest = if (application) applicationDigest() else .{ 1, 0, 0, 0 }, .fork = .deneb }}, .progress_timeout_ms = 5000, .quotas = quotas }, .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .topic_policy = &gossip_topics, .message_id_policy = .{ .phase0_digest = .{ 1, 0, 0, 0 } }, .random_seed = 0x6d2b79f5 } }), .sink = undefined, .response = undefined };
+    peer.* = .{ .application = application, .allocator = a, .io = init.io, .service = try network.Service.init(a, .{ .identify = .{ .agent = "lodestar-z-identify" }, .reqresp = .{ .admission = try network.reqresp.reqresp.AdmissionOptions.defaults(&policy, 4, 4, if (application) 6 else 1), .peers = 4, .outbound_max = 1, .inbound_max = if (application) 8 else 1, .inbound_per_peer_max = if (application) 8 else 1, .inbound_control_reserved = if (application) 2 else 0, .forks = &.{.{ .digest = if (application) applicationDigest() else .{ 1, 0, 0, 0 }, .fork = .deneb }}, .progress_timeout_ms = 5000, .quotas = quotas }, .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .topic_policy = &gossip_topics, .message_id_policy = .{ .phase0_digest = .{ 1, 0, 0, 0 } }, .random_seed = 0x6d2b79f5 } }), .sink = undefined, .response = undefined };
     defer peer.service.deinit();
     peer.attachSink();
     peer.sink = try a.alloc(u8, max_payload);
@@ -345,7 +331,7 @@ pub fn main(init: std.process.Init) !void {
     const key = try network.wire.keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ .{31}));
     try peer.transport.init(a, init.io, .{ .host = &key, .bind = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } }, .limits = .{ .connections_max = 4, .handshaking_max = 4, .dialing_max = 2, .outbound_max = 3 } });
     defer peer.transport.deinit(init.io);
-    defer if (peer.service.identify) |*identify| identify.shutdown(&peer.service.router, &peer.transport.engine);
+    defer peer.service.identify.shutdown(&peer.service.router, &peer.transport.engine);
     defer peer.service.reqresp.shutdown(&peer.transport.engine, &peer.service.router);
     try control.run(peer);
 }

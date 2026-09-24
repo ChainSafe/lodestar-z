@@ -8,6 +8,23 @@ const d = @import("discv5");
 
 const options = @import("test_support.zig").networkOptions;
 const Inbox = @import("gossipsub/test_support.zig").Inbox;
+const Now = @import("types.zig").Now;
+
+/// Applies a local update through the host intent path with the current subscriptions and demand.
+fn applyLocal(node: *runtime.NetworkCore, update: *const runtime.LocalUpdate, now: Now) !bool {
+    var boundaries: [@import("gossipsub/topic_policy.zig").boundary_max]@import("gossipsub/local_intent.zig").Boundary = undefined;
+    var desired = core_test.intent(node, try @import("gossipsub/test_support.zig").subscriptionUpdate(node.service.gossipsub, null, false, &boundaries));
+    desired.update = update.*;
+    return node.applyIntent(&desired, now);
+}
+
+fn updateLocalWithEndpoints(node: *runtime.NetworkCore, local: *const t.LocalState, schedule: runtime.ForkSchedule, endpoints: ?runtime.AdvertisementEndpoints, now: Now) !bool {
+    return applyLocal(node, &.{ .local = local.*, .schedule = schedule, .endpoints = endpoints, .capabilities = node.service.router.capabilities() }, now);
+}
+
+fn updateLocal(node: *runtime.NetworkCore, local: *const t.LocalState, schedule: runtime.ForkSchedule, now: Now) !bool {
+    return updateLocalWithEndpoints(node, local, schedule, node.advertisementEndpoints(), now);
+}
 
 const MaintenancePeers = struct {
     nodes: []runtime.NetworkCore,
@@ -167,29 +184,29 @@ test "managed runtime local transaction sequences no-op schedule and rollback" {
     const initial = node.localRecord().?.*;
     try @import("peers/enr.zig").requireIdentity(&initial, &node.peerId());
     var local = node.localState();
-    try std.testing.expect(!try node.updateLocal(&local, .{}, now));
+    try std.testing.expect(!try updateLocal(&node, &local, .{}, now));
     try std.testing.expectEqual(initial.sequence, node.localRecord().?.sequence);
     local.metadata.attnets[0] = 0x81;
-    try std.testing.expect(try node.updateLocal(&local, .{}, now));
+    try std.testing.expect(try updateLocal(&node, &local, .{}, now));
     try std.testing.expectEqual(@as(u64, 1), node.localState().metadata.seq_number);
     try std.testing.expectEqual(initial.sequence + 1, node.localRecord().?.sequence);
     local = node.localState();
     local.status.head_slot = 42;
-    try std.testing.expect(try node.updateLocal(&local, .{}, now));
+    try std.testing.expect(try updateLocal(&node, &local, .{}, now));
     try std.testing.expectEqual(@as(u64, 1), node.localState().metadata.seq_number);
     try std.testing.expectEqual(initial.sequence + 1, node.localRecord().?.sequence);
     const before = node.localRecord().?.*;
     const scheduled: runtime.ForkSchedule = .{ .fulu_scheduled = true };
     local.metadata.custody_group_count = null;
-    try std.testing.expectError(error.MissingCustodyAdvertisement, node.updateLocal(&local, scheduled, now));
+    try std.testing.expectError(error.MissingCustodyAdvertisement, updateLocal(&node, &local, scheduled, now));
     try std.testing.expectEqualSlices(u8, before.slice(), node.localRecord().?.slice());
     local.metadata.custody_group_count = 1;
-    try std.testing.expect(try node.updateLocal(&local, scheduled, now));
+    try std.testing.expect(try updateLocal(&node, &local, scheduled, now));
     const candidate = try @import("peers/enr.zig").decode(node.localRecord().?, &local.fork);
     try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, candidate.next_fork_digest.?);
     try std.testing.expectEqual(@as(u64, 1), candidate.custody_group_count.?);
     const invalid: runtime.ForkSchedule = .{ .fulu_scheduled = true, .next_digest = .{ 1, 2, 3, 4 } };
-    try std.testing.expectError(error.InvalidSchedule, node.updateLocal(&local, invalid, now));
+    try std.testing.expectError(error.InvalidSchedule, updateLocal(&node, &local, invalid, now));
 }
 
 test "managed runtime signed bootstrap reaches relevant peer with zero and one outputs" {
@@ -245,10 +262,10 @@ test "managed runtime signed bootstrap reaches relevant peer with zero and one o
     try std.testing.expectEqualDeep(candidate.next_fork_digest, hints.next_fork_digest);
     try std.testing.expectEqual(@as(?bool, null), runtime.futureCompatible(&candidate, a.schedule));
     const local = a.localState();
-    _ = try a.updateLocal(&local, .{ .next_version = .{ 1, 1, 1, 1 }, .next_epoch = 123, .next_digest = .{ 1, 2, 3, 4 } }, hint_now);
+    _ = try updateLocal(&a, &local, .{ .next_version = .{ 1, 1, 1, 1 }, .next_epoch = 123, .next_digest = .{ 1, 2, 3, 4 } }, hint_now);
     try std.testing.expectEqual(@as(?bool, false), runtime.futureCompatible(&candidate, a.schedule));
     try std.testing.expectEqual(@as(u16, 1), a.peerCounts().relevant);
-    _ = try a.updateLocal(&local, .{}, hint_now);
+    _ = try updateLocal(&a, &local, .{}, hint_now);
     try applicationAndFork(&a, &b, &b_inbox);
     try failureAndReplacement(&a, &b);
     try std.testing.expectEqual(calls_a, a.reservations.allocation_calls);
@@ -272,7 +289,6 @@ fn applicationAndFork(a: *runtime.NetworkCore, b: *runtime.NetworkCore, b_inbox:
     const begun = try @import("transport.zig").currentTime(std.testing.io);
     errdefer std.debug.print("managed stage={s} elapsed={}ms a={any} b={any}\n", .{ @tagName(stage), a.last_now.mono_ms -| begun.mono_ms, a.peerCounts(), b.peerCounts() });
     const rr = @import("reqresp/root.zig");
-    const gossip = @import("gossipsub/root.zig");
     var rows: [4]t.Snapshot = undefined;
     const now = try @import("transport.zig").currentTime(std.testing.io);
     for ([_]*runtime.NetworkCore{ a, b }) |node| {
@@ -283,7 +299,7 @@ fn applicationAndFork(a: *runtime.NetworkCore, b: *runtime.NetworkCore, b_inbox:
         local.status.earliest_available_slot = 0;
         local.metadata.custody_group_count = local.fork.custody_groups;
         local.metadata.attnets[0] = 0x81;
-        _ = try node.updateLocal(&local, .{ .fulu_scheduled = true }, now);
+        _ = try updateLocal(node, &local, .{ .fulu_scheduled = true }, now);
         node.peer_manager.reStatusPeers(now);
     }
     var peer_a: ?t.PeerRef = null;
@@ -359,12 +375,11 @@ fn applicationAndFork(a: *runtime.NetworkCore, b: *runtime.NetworkCore, b_inbox:
     const topic = "/eth2/01020304/beacon_block/ssz_snappy";
     try core_test.subscribe(a, topic);
     try core_test.subscribe(b, topic);
-    var messages: [1]gossip.Event = undefined;
     var got = false;
     var published = false;
     for (0..3000) |turn| {
         const tick = try @import("transport.zig").currentTime(std.testing.io);
-        _ = a.step(std.testing.io, tick, 100, .{ .gossipsub = &messages }, 1);
+        _ = a.step(std.testing.io, tick, 100, .{}, 1);
         if (!published and turn > 20 and a.service.gossipsub.resourceSnapshot().remote_subscriptions > 0 and
             a.service.gossipsub.peers.rows[0].direct)
         {
@@ -374,7 +389,7 @@ fn applicationAndFork(a: *runtime.NetworkCore, b: *runtime.NetworkCore, b_inbox:
             published = sent.queued > 0;
         }
         b_inbox.clear();
-        _ = b.step(std.testing.io, tick, 100, .{ .gossipsub = if (turn > 30) &messages else &.{} }, 1);
+        _ = b.step(std.testing.io, tick, 100, .{}, 1);
         for (b_inbox.messages()) |message| {
             try std.testing.expectEqualSlices(u8, &response, message.bytes);
             try std.testing.expect(b.reportValidation(message.handle, .accept, tick) == .applied);
@@ -402,7 +417,6 @@ test "managed runtime every allocation prefix cleans up and memory plan counts o
         .call_capacity = 8,
     } };
 
-    opts.resolved.core.service.reqresp.policy = null;
     opts.resolved.core.service.reqresp.admission = .{ .policy = @import("reqresp/policy_fixture.zig").config(), .limits = .{
         .identities = opts.resolved.core.peers.capacity,
         .peer = @import("reqresp/admission_fixture.zig").quotas(100, 1000),
@@ -467,11 +481,11 @@ test "managed runtime sequence exhaustion rolls back and future fork hints stay 
     const record = node.localRecord().?.*;
     var desired = before;
     desired.metadata.attnets[0] = 1;
-    try std.testing.expectError(error.SequenceExhausted, node.updateLocal(&desired, .{}, now));
+    try std.testing.expectError(error.SequenceExhausted, updateLocal(&node, &desired, .{}, now));
     try std.testing.expectEqualDeep(before, node.localState());
     try std.testing.expectEqual(before.fork.fork, node.service.reqresp.request_fork);
     var schedule: runtime.ForkSchedule = .{ .next_epoch = 100, .next_version = .{ 1, 2, 3, 4 } };
-    try std.testing.expectError(error.SequenceExhausted, node.updateLocal(&before, schedule, now));
+    try std.testing.expectError(error.SequenceExhausted, updateLocal(&node, &before, schedule, now));
     try std.testing.expectEqualSlices(u8, record.slice(), node.localRecord().?.slice());
     var candidate = try @import("peers/enr.zig").decode(&record, &before.fork);
     try std.testing.expectEqual(@as(?bool, false), runtime.futureCompatible(&candidate, schedule));
@@ -485,7 +499,7 @@ test "managed runtime sequence exhaustion rolls back and future fork hints stay 
     try std.testing.expectEqual(@as(?bool, false), runtime.futureCompatible(&candidate, schedule));
     desired = before;
     desired.status.head_slot = 2;
-    try std.testing.expect(try node.updateLocal(&desired, .{}, now));
+    try std.testing.expect(try updateLocal(&node, &desired, .{}, now));
     try std.testing.expectEqualSlices(u8, record.slice(), node.localRecord().?.slice());
 }
 
@@ -547,27 +561,27 @@ test "managed runtime explicit advertisement is independent and atomic" {
     var local = node.localState();
     var endpoints = node.advertisementEndpoints().?;
     endpoints.quic = 19002;
-    try std.testing.expect(try node.updateLocalWithEndpoints(&local, .{}, endpoints, now));
+    try std.testing.expect(try updateLocalWithEndpoints(&node, &local, .{}, endpoints, now));
     try std.testing.expectEqual(before.sequence + 1, node.localRecord().?.sequence);
     try std.testing.expectEqual(@as(u64, 0), node.localState().metadata.seq_number);
     try std.testing.expectEqual(@as(u16, 19002), node.advertisementEndpoints().?.quic.?);
-    try std.testing.expect(!try node.updateLocalWithEndpoints(&local, .{}, endpoints, now));
+    try std.testing.expect(!try updateLocalWithEndpoints(&node, &local, .{}, endpoints, now));
     const committed = node.localRecord().?.*;
     local.metadata.attnets[0] = 1;
     endpoints.ip4 = @splat(0);
-    try std.testing.expectError(error.InvalidAdvertisement, node.updateLocalWithEndpoints(&local, .{}, endpoints, now));
+    try std.testing.expectError(error.InvalidAdvertisement, updateLocalWithEndpoints(&node, &local, .{}, endpoints, now));
     try std.testing.expectEqualSlices(u8, committed.slice(), node.localRecord().?.slice());
     try std.testing.expectEqual(@as(u64, 0), node.localState().metadata.seq_number);
     for ([_]runtime.AdvertisementEndpoints{
         .{ .ip4 = .{ 0, 1, 2, 3 }, .udp = 19000, .quic = 19001 },
         .{ .ip6 = .{ 0xfe, 0x80 } ++ .{0} ** 13 ++ .{1}, .udp6 = 19000, .quic6 = 19001 },
-    }) |invalid| try std.testing.expectError(error.InvalidAdvertisement, node.updateLocalWithEndpoints(&local, .{}, invalid, now));
+    }) |invalid| try std.testing.expectError(error.InvalidAdvertisement, updateLocalWithEndpoints(&node, &local, .{}, invalid, now));
     const privileged: runtime.AdvertisementEndpoints = .{ .ip4 = .{ 127, 0, 0, 1 }, .udp = 443, .quic = 443 };
-    try std.testing.expect(try node.updateLocalWithEndpoints(&local, .{}, privileged, now));
+    try std.testing.expect(try updateLocalWithEndpoints(&node, &local, .{}, privileged, now));
     try std.testing.expectEqual(@as(u16, 443), node.advertisementEndpoints().?.quic.?);
     const ipv6: runtime.AdvertisementEndpoints = .{ .ip6 = .{0} ** 15 ++ .{1}, .udp6 = 19000, .quic6 = 19001 };
     const previous = node.localRecord().?.*;
-    try std.testing.expectError(error.InvalidAdvertisement, node.updateLocalWithEndpoints(&local, .{}, ipv6, now));
+    try std.testing.expectError(error.InvalidAdvertisement, updateLocalWithEndpoints(&node, &local, .{}, ipv6, now));
     try std.testing.expectEqualSlices(u8, previous.slice(), node.localRecord().?.slice());
 }
 
@@ -637,7 +651,9 @@ test "managed runtime socket faults preserve the other owner and local dial refu
     const discovery_due = node.discovery.?.coordinator.nextWakeup(settled.mono_ms).?;
     try std.testing.expect(discovery_due > settled.mono_ms);
     try std.testing.expectEqual(discovery_due, node.nextWakeup(settled, .{}).?);
-    const protocol_due = @import("managed.zig").nextWakeup(&node.peer_manager, &node.service, settled, 0, 0, 0, 4);
+    var protocol_wakeups: @import("wake_sources.zig").Wakeups = .{};
+    @import("managed.zig").collectWakeups(&node.peer_manager, &node.service, settled, 0, 0, 4, &protocol_wakeups);
+    const protocol_due = protocol_wakeups.earliest();
     try std.testing.expect(protocol_due == null or protocol_due.? > discovery_due);
     const peer = t.PeerId.fromPublicKey(&remote_key.publicKey());
     try node.connectUntil(&peer, &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 19003 } }}, settled, settled.mono_ms +| @import("peers/dialing.zig").connect_timeout_ms);
@@ -714,7 +730,7 @@ test "managed profiles measure reservations and unwind byte exhaustion" {
             .host = &key,
             .bind = .{ .ip4 = .loopback(0) },
             .local = @import("managed_test_support.zig").localState(.{}),
-            .configuration = .{ .profile = profile, .seed = 1, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }} },
+            .configuration = .{ .profile = profile, .seed = 1, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }}, .admission_policy = @import("reqresp/policy_fixture.zig").config() },
         };
         var node: runtime.NetworkCore = undefined;
         try node.initManaged(ledger.allocator(), std.testing.io, opts);
@@ -766,7 +782,7 @@ fn profileAllocationFailures(a: std.mem.Allocator) !void {
         .host = &key,
         .bind = .{ .ip4 = .loopback(0) },
         .local = @import("managed_test_support.zig").localState(.{}),
-        .configuration = .{ .profile = .small, .seed = 1, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }} },
+        .configuration = .{ .profile = .small, .seed = 1, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }}, .admission_policy = @import("reqresp/policy_fixture.zig").config() },
     });
     node.deinit(std.testing.io);
 }
@@ -774,8 +790,8 @@ fn profileAllocationFailures(a: std.mem.Allocator) !void {
 test "managed invalid complete sections reject before allocation" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{23}));
     const forks: []const @import("reqresp/reqresp.zig").ForkEntry = &.{.{ .digest = @splat(0), .fork = .phase0 }};
-    inline for (.{ error.InvalidOptions, error.InvalidOptions, error.InvalidQuota, error.InvalidOptions, error.InvalidLimits, error.InvalidLimits, error.InvalidLimits, error.InvalidOptions }, 0..) |expected, section| {
-        var request: @import("configuration.zig").Request = .{ .profile = .small, .seed = 1, .forks = forks };
+    inline for (.{ error.InvalidOptions, error.InvalidOptions, error.InvalidQuota, error.InvalidOptions, error.InvalidLimits, error.InvalidLimits, error.InvalidOptions }, 0..) |expected, section| {
+        var request: @import("configuration.zig").Request = .{ .profile = .small, .seed = 1, .forks = forks, .admission_policy = @import("reqresp/policy_fixture.zig").config() };
         switch (section) {
             0 => request.reqresp.work_per_pump_max = 0,
             1 => request.control = .{ .ping_inbound_ms = 0 },
@@ -785,10 +801,9 @@ test "managed invalid complete sections reject before allocation" {
                 request.reqresp.global_quotas = quotas;
             },
             3 => request.dial = .{ .seed = 1, .concurrent_max = 0 },
-            4 => request.router = .{ .meshsub = false },
-            5 => request.gossip.score_params = .{ .decay_interval_ms = 0 },
-            6 => request.limits = .{ .handshaking_max = 0 },
-            7 => request.peers = .{ .capacity = 0 },
+            4 => request.gossip.score_params = .{ .decay_interval_ms = 0 },
+            5 => request.limits = .{ .handshaking_max = 0 },
+            6 => request.peers = .{ .capacity = 0 },
             else => unreachable,
         }
         var ledger: @import("reservations.zig").Reservations = .{ .backing = std.testing.allocator };
@@ -1010,7 +1025,7 @@ test "managed beacon idle scans do not manufacture immediate deadlines" {
         .host = &key,
         .bind = .{ .ip4 = .loopback(0) },
         .local = @import("managed_test_support.zig").localState(.{}),
-        .configuration = .{ .profile = .beacon_node, .seed = 7, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }} },
+        .configuration = .{ .profile = .beacon_node, .seed = 7, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }}, .admission_policy = @import("reqresp/policy_fixture.zig").config() },
     });
     defer node.deinit(std.testing.io);
     const now = try @import("transport.zig").currentTime(std.testing.io);
@@ -1033,7 +1048,7 @@ test "managed runtime BPO same-fork digest transition updates status and adverti
     try node.initManaged(std.testing.allocator, std.testing.io, .{
         .host = &key,
         .bind = .{ .ip4 = .loopback(0) },
-        .configuration = .{ .profile = .small, .seed = 1, .forks = &.{ first, second } },
+        .configuration = .{ .profile = .small, .seed = 1, .forks = &.{ first, second }, .admission_policy = @import("reqresp/policy_fixture.zig").config() },
         .local = .{
             .fork = .{ .digest = first.digest, .fork = first.fork },
             .status = .{ .fork_digest = first.digest, .earliest_available_slot = 0 },
@@ -1048,7 +1063,7 @@ test "managed runtime BPO same-fork digest transition updates status and adverti
     try std.testing.expectEqual(first.fork, node.service.reqresp.request_fork);
     local.fork.digest = second.digest;
     local.status.fork_digest = second.digest;
-    try std.testing.expect(try node.updateLocal(&local, .{}, try @import("transport.zig").currentTime(std.testing.io)));
+    try std.testing.expect(try updateLocal(&node, &local, .{}, try @import("transport.zig").currentTime(std.testing.io)));
     try std.testing.expectEqual(second.digest, node.localState().status.fork_digest);
     try std.testing.expectEqual(second.digest, node.localState().fork.digest);
     try std.testing.expectEqual(second.fork, node.localState().fork.fork);
@@ -1062,7 +1077,7 @@ test "managed runtime BPO same-fork digest transition updates status and adverti
     }) |invalid| {
         local.fork = .{ .digest = invalid.digest, .fork = invalid.fork };
         local.status.fork_digest = invalid.digest;
-        try std.testing.expectError(error.UnknownFork, node.updateLocal(&local, .{}, node.last_now));
+        try std.testing.expectError(error.UnknownFork, updateLocal(&node, &local, .{}, node.last_now));
         try std.testing.expectEqual(second.digest, node.localState().status.fork_digest);
         try std.testing.expectEqual(second.fork, node.localState().fork.fork);
         try std.testing.expectEqual(second.fork, node.service.reqresp.request_fork);
@@ -1096,10 +1111,10 @@ test "managed runtime request admission selector commits with validated local fo
     local.status.earliest_available_slot = 0;
     local.metadata.custody_group_count = 1;
     const now = try @import("transport.zig").currentTime(std.testing.io);
-    try std.testing.expect(try node.updateLocal(&local, .{}, now));
+    try std.testing.expect(try updateLocal(&node, &local, .{}, now));
     try std.testing.expectEqual(t.ForkSeq.fulu, node.service.reqresp.request_fork);
     local.fork.fork = .gloas;
-    try std.testing.expectError(error.UnknownFork, node.updateLocal(&local, .{}, now));
+    try std.testing.expectError(error.UnknownFork, updateLocal(&node, &local, .{}, now));
     try std.testing.expectEqual(t.ForkSeq.fulu, node.service.reqresp.request_fork);
 }
 
@@ -1146,34 +1161,34 @@ test "managed runtime capabilities activation rolls back all owners on rejected 
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const before = ActivationSnapshot.capture(&node);
-    const identify = node.service.identify.?.local;
+    const identify = node.service.identify.local;
     const now = node.last_now;
     var update: runtime.LocalUpdate = .{ .local = before.local, .schedule = before.schedule, .endpoints = before.endpoints, .capabilities = before.capabilities };
     update.local.metadata.custody_group_count = null;
-    try std.testing.expectError(error.MissingCustodyAdvertisement, node.applyLocal(&update, now));
+    try std.testing.expectError(error.MissingCustodyAdvertisement, applyLocal(&node, &update, now));
     try before.expectUnchanged(&node);
-    try std.testing.expectEqualDeep(identify, node.service.identify.?.local);
+    try std.testing.expectEqualDeep(identify, node.service.identify.local);
     update.local = before.local;
     update.local.status.earliest_available_slot = null;
     update.capabilities.receive.insert(.{ .reqresp = .status_v2 });
-    try std.testing.expectError(error.MissingAvailability, node.applyLocal(&update, now));
+    try std.testing.expectError(error.MissingAvailability, applyLocal(&node, &update, now));
     try before.expectUnchanged(&node);
-    try std.testing.expectEqualDeep(identify, node.service.identify.?.local);
+    try std.testing.expectEqualDeep(identify, node.service.identify.local);
     update.local = before.local;
     update.capabilities = before.capabilities;
     update.local.status.head_slot = 10;
     update.endpoints.?.quic = 443;
     update.capabilities.request.insert(.{ .meshsub = .v1_0 });
-    try std.testing.expectError(error.InvalidCapabilities, node.applyLocal(&update, now));
+    try std.testing.expectError(error.InvalidCapabilities, applyLocal(&node, &update, now));
     try before.expectUnchanged(&node);
     update.capabilities = try caps.forFork(.fulu, false, &.{.v1_2});
     update.local.fork.fork = .fulu;
     update.local.status.earliest_available_slot = 0;
-    try std.testing.expectError(error.UnknownFork, node.applyLocal(&update, now));
+    try std.testing.expectError(error.UnknownFork, applyLocal(&node, &update, now));
     try before.expectUnchanged(&node);
     update.local.fork.digest = .{ 1, 2, 3, 4 };
     update.local.status.fork_digest = update.local.fork.digest;
-    try std.testing.expectError(error.SequenceExhausted, node.applyLocal(&update, now));
+    try std.testing.expectError(error.SequenceExhausted, applyLocal(&node, &update, now));
     try before.expectUnchanged(&node);
 }
 
@@ -1184,7 +1199,6 @@ test "managed runtime capabilities activation commits fork BPO and copied direct
     opts.startup.local.metadata.custody_group_count = 1;
     const quotas = @import("reqresp/admission_fixture.zig").quotas(2048, 1000);
 
-    opts.resolved.core.service.reqresp.policy = null;
     opts.resolved.core.service.reqresp.admission = .{ .policy = @import("reqresp/policy_fixture.zig").config(), .limits = .{ .identities = 2, .peer = quotas, .global = quotas } };
     opts.resolved.core.service.router.capabilities = try caps.forFork(.phase0, true, &.{ .v1_2, .v1_1 });
     opts.resolved.core.service.reqresp.forks = &.{
@@ -1201,7 +1215,7 @@ test "managed runtime capabilities activation commits fork BPO and copied direct
     limiter.bind(peer, node.last_now.mono_ms);
     try std.testing.expect(limiter.take(peer, .blocks_by_root_v2, 1, node.last_now.mono_ms));
     const debt = limiter.global;
-    const admission = &node.service.reqresp.admission.?.limiter;
+    const admission = &node.service.reqresp.admission.limiter;
     const identity = node.peerId();
     try std.testing.expectEqual(.allowed, admission.take(&identity, .blocks_by_root_v2, 1, .phase0, node.last_now.mono_ms));
     const admitted_debt = admission.global;
@@ -1210,15 +1224,15 @@ test "managed runtime capabilities activation commits fork BPO and copied direct
     const before = ActivationSnapshot.capture(&node);
     var update: runtime.LocalUpdate = .{ .local = before.local, .schedule = before.schedule, .endpoints = before.endpoints, .capabilities = before.capabilities };
     update.capabilities.request = .initEmpty();
-    try std.testing.expect(try node.applyLocal(&update, node.last_now));
+    try std.testing.expect(try applyLocal(&node, &update, node.last_now));
     try std.testing.expectEqualDeep(before.local, node.localState());
     try std.testing.expectEqual(before.record.sequence, node.localRecord().?.sequence);
-    try std.testing.expect(!try node.applyLocal(&update, node.last_now));
+    try std.testing.expect(!try applyLocal(&node, &update, node.last_now));
     update.local.fork = .{ .fork = .fulu, .digest = .{ 1, 2, 3, 4 } };
     update.local.status.fork_digest = update.local.fork.digest;
     update.local.status.earliest_available_slot = 0;
     update.capabilities = try caps.forFork(.fulu, false, &.{ .v1_2, .v1_1 });
-    try std.testing.expect(try node.applyLocal(&update, node.last_now));
+    try std.testing.expect(try applyLocal(&node, &update, node.last_now));
     try std.testing.expectEqual(t.ForkSeq.fulu, node.service.reqresp.request_fork);
     const active = node.service.router.capabilities();
     try std.testing.expect(active.receive.contains(.{ .reqresp = .status_v2 }));
@@ -1230,7 +1244,7 @@ test "managed runtime capabilities activation commits fork BPO and copied direct
     try std.testing.expect(active.request.contains(.{ .reqresp = .light_client_bootstrap_v1 }));
     update.local.fork.digest = .{ 5, 6, 7, 8 };
     update.local.status.fork_digest = update.local.fork.digest;
-    try std.testing.expect(try node.applyLocal(&update, node.last_now));
+    try std.testing.expect(try applyLocal(&node, &update, node.last_now));
     try std.testing.expectEqualDeep(active, node.service.router.capabilities());
     try std.testing.expectEqual(before.record.sequence + 2, node.localRecord().?.sequence);
     try std.testing.expectEqual(before.local.metadata.seq_number, node.localState().metadata.seq_number);
@@ -1239,13 +1253,13 @@ test "managed runtime capabilities activation commits fork BPO and copied direct
     try std.testing.expectEqualDeep(admitted_row, admission.rows[0]);
     try std.testing.expectEqual(allocations, node.reservations.allocation_calls);
     const committed = ActivationSnapshot.capture(&node);
-    try std.testing.expect(!try node.applyLocal(&update, node.last_now));
+    try std.testing.expect(!try applyLocal(&node, &update, node.last_now));
     update.local.metadata.attnets[0] = 1;
     update.capabilities.receive = .initEmpty();
     update.endpoints.?.quic = 443;
     update.schedule.next_epoch = 5;
     try committed.expectUnchanged(&node);
-    try std.testing.expect(try node.updateLocal(&update.local, .{}, node.last_now));
+    try std.testing.expect(try updateLocal(&node, &update.local, .{}, node.last_now));
     try std.testing.expectEqualDeep(active, node.service.router.capabilities());
     try std.testing.expectEqual(before.local.metadata.seq_number + 1, node.localState().metadata.seq_number);
 }
@@ -1258,19 +1272,19 @@ test "identify managed advertisement follows committed endpoints and rejected up
     var node: runtime.NetworkCore = undefined;
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
-    const initial = node.service.identify.?.local.?;
+    const initial = node.service.identify.local.?;
     const address = try @import("wire/multiaddr.zig").Multiaddr.decode(initial.addresses[0].bytes[0..initial.addresses[0].len]);
     try std.testing.expectEqual(node.transport.localAddress(), address.address);
     var endpoints = node.advertisementEndpoints().?;
     endpoints.quic = 443;
     const now = node.last_now;
-    try std.testing.expect(try node.updateLocalWithEndpoints(&node.peer_manager.local, node.schedule, endpoints, now));
-    const updated = node.service.identify.?.local.?;
+    try std.testing.expect(try updateLocalWithEndpoints(&node, &node.peer_manager.local, node.schedule, endpoints, now));
+    const updated = node.service.identify.local.?;
     const next = try @import("wire/multiaddr.zig").Multiaddr.decode(updated.addresses[0].bytes[0..updated.addresses[0].len]);
     try std.testing.expectEqual(@as(u16, 443), next.address.port());
     endpoints.quic = 0;
-    try std.testing.expectError(error.InvalidAdvertisement, node.updateLocalWithEndpoints(&node.peer_manager.local, node.schedule, endpoints, now));
-    try std.testing.expectEqualDeep(updated, node.service.identify.?.local.?);
+    try std.testing.expectError(error.InvalidAdvertisement, updateLocalWithEndpoints(&node, &node.peer_manager.local, node.schedule, endpoints, now));
+    try std.testing.expectEqualDeep(updated, node.service.identify.local.?);
 }
 
 test "managed runtime targeted Status serves two current schedules and immediate close is local" {
@@ -1396,7 +1410,7 @@ test "managed runtime complete local intent rejects invalid last topic atomicall
     try std.testing.expect(try node.applyIntent(&desired, now));
     try std.testing.expect(!(try node.applyIntent(&desired, now)));
     const before = ActivationSnapshot.capture(&node);
-    const identify = node.service.identify.?.local;
+    const identify = node.service.identify.local;
     const demand = node.peer_manager.demand;
     const g = node.service.gossipsub;
     const topic = g.overlay.findTopic(block_topic).?;
@@ -1405,7 +1419,7 @@ test "managed runtime complete local intent rejects invalid last topic atomicall
     desired.subscriptions = &.{ desired.subscriptions[0], .{ .digest = @splat(255) } };
     try std.testing.expectError(error.InvalidTopic, node.applyIntent(&desired, now));
     try before.expectUnchanged(&node);
-    try std.testing.expectEqualDeep(identify, node.service.identify.?.local);
+    try std.testing.expectEqualDeep(identify, node.service.identify.local);
     try std.testing.expectEqualDeep(demand, node.peer_manager.demand);
     try std.testing.expectEqualDeep(params, g.peers.scores.topic_params[topic]);
     try std.testing.expect(g.overlay.subscribed(topic));
@@ -1436,7 +1450,7 @@ test "managed runtime Status-only update preserves local owners and permits a re
     desired.demand = .{ .attnets = 7, .syncnets = 3 };
     try std.testing.expect(try node.applyIntent(&desired, node.last_now));
     var expected = ActivationSnapshot.capture(&node);
-    const identify = node.service.identify.?.local;
+    const identify = node.service.identify.local;
     const now = node.last_now;
     const allocations = node.reservations.allocation_calls;
     const gossip = node.service.gossipsub;
@@ -1452,7 +1466,7 @@ test "managed runtime Status-only update preserves local owners and permits a re
         status.head_root[0] = 0;
         try expected.expectUnchanged(&node);
         try std.testing.expectEqualDeep(desired.demand, node.peer_manager.demand);
-        try std.testing.expectEqualDeep(identify, node.service.identify.?.local);
+        try std.testing.expectEqualDeep(identify, node.service.identify.local);
         try std.testing.expectEqualDeep(now, node.last_now);
         try std.testing.expectEqualDeep(params, gossip.peers.scores.topic_params[topic]);
         try std.testing.expectEqual(revision, gossip.peers.scores.revision);
@@ -1500,7 +1514,7 @@ test "managed runtime local intent demand candidate sequence and stopped refusal
         try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
         defer node.deinit(std.testing.io);
         const before = ActivationSnapshot.capture(&node);
-        const identify = node.service.identify.?.local;
+        const identify = node.service.identify.local;
         const g = node.service.gossipsub;
         const revision = g.peers.scores.revision;
         var desired = intentFor(&node);
@@ -1516,7 +1530,7 @@ test "managed runtime local intent demand candidate sequence and stopped refusal
         desired.update.local.metadata.attnets[0] = 1;
         try std.testing.expectError(error.SequenceExhausted, node.applyIntent(&desired, node.last_now));
         try before.expectUnchanged(&node);
-        try std.testing.expectEqualDeep(identify, node.service.identify.?.local);
+        try std.testing.expectEqualDeep(identify, node.service.identify.local);
         try std.testing.expectEqualDeep(t.Demand{}, node.peer_manager.demand);
         try std.testing.expectEqual(revision, g.peers.scores.revision);
         try std.testing.expect(g.overlay.findTopic("/eth2/01020304/beacon_block/ssz_snappy") == null);
@@ -1574,8 +1588,6 @@ const IntentPair = struct {
     b: runtime.NetworkCore = undefined,
     a_inbox: Inbox = .{},
     b_inbox: Inbox = .{},
-    a_gossip: [16]@import("gossipsub/root.zig").Event = undefined,
-    b_gossip: [16]@import("gossipsub/root.zig").Event = undefined,
     b_app: [4]@import("reqresp/root.zig").Event = undefined,
 
     fn attachInboxes(self: *IntentPair) void {
@@ -1593,9 +1605,9 @@ const IntentPair = struct {
         self.a_inbox.clear();
         self.b_inbox.clear();
         const now = try @import("transport.zig").currentTime(std.testing.io);
-        const a = self.a.step(std.testing.io, now, 100, .{ .gossipsub = &self.a_gossip }, 1);
+        const a = self.a.step(std.testing.io, now, 100, .{}, 1);
         if (a.failure) |err| return err;
-        const b = self.b.step(std.testing.io, now, 100, .{ .gossipsub = &self.b_gossip, .application = &self.b_app }, 1);
+        const b = self.b.step(std.testing.io, now, 100, .{ .application = &self.b_app }, 1);
         if (b.failure) |err| return err;
         return .{ .a = a, .b = b };
     }
@@ -1703,25 +1715,18 @@ test "managed runtime local intent fork BPO announcements remembered peer and ev
     try std.testing.expectEqual(@as(usize, 1), gb.overlay.subscribers(activated).count());
     const publication = try pair.b.publishGossipWithOptions(active, "0123456789", .{ .allow_zero_peers = false }, pair.b.last_now);
     try std.testing.expectEqual(@as(usize, 1), publication.queued);
-    var announced = false;
-    var withdrawn = false;
     var delivered = false;
     for (0..3000) |_| {
-        const result = try pair.pump();
-        for (pair.a_gossip[0..result.a.counts.gossipsub]) |event| if (event == .subscription_change) {
-            const value = event.subscription_change;
-            if (std.mem.eql(u8, value.topic, active) and value.subscribed) announced = true;
-            if (std.mem.eql(u8, value.topic, old) and !value.subscribed) withdrawn = true;
-        };
+        _ = try pair.pump();
         for (pair.a_inbox.messages()) |value| {
             try std.testing.expectEqualStrings(active, value.topic);
             try std.testing.expectEqualStrings("0123456789", value.bytes);
             delivered = true;
             _ = pair.a.reportValidation(value.handle, .accept, pair.a.last_now);
         }
-        if (announced and withdrawn and delivered and pair.a.peerCounts().relevant == 1 and pair.b.peerCounts().relevant == 1) break;
+        if (delivered and pair.a.peerCounts().relevant == 1 and pair.b.peerCounts().relevant == 1) break;
     }
-    try std.testing.expect(announced and withdrawn and delivered);
+    try std.testing.expect(delivered);
     for ([_]*runtime.LocalIntent{ &a_intent, &b_intent }) |intent| {
         intent.update.local.fork.digest = .{ 5, 6, 7, 8 };
         intent.update.local.status.fork_digest = intent.update.local.fork.digest;
@@ -1729,18 +1734,10 @@ test "managed runtime local intent fork BPO announcements remembered peer and ev
     b_intent.subscriptions = @import("gossipsub/topic_fixture.zig").subscriptions(&.{bpo});
     try std.testing.expect(try pair.a.applyIntent(&a_intent, pair.a.last_now));
     try std.testing.expect(try pair.b.applyIntent(&b_intent, pair.b.last_now));
-    announced = false;
-    withdrawn = false;
     for (0..3000) |_| {
-        const result = try pair.pump();
-        for (pair.a_gossip[0..result.a.counts.gossipsub]) |event| if (event == .subscription_change) {
-            const value = event.subscription_change;
-            if (std.mem.eql(u8, value.topic, bpo) and value.subscribed) announced = true;
-            if (std.mem.eql(u8, value.topic, active) and !value.subscribed) withdrawn = true;
-        };
-        if (announced and withdrawn and pair.a.peerCounts().relevant == 1 and pair.b.peerCounts().relevant == 1) break;
+        _ = try pair.pump();
+        if (pair.a.peerCounts().relevant == 1 and pair.b.peerCounts().relevant == 1) break;
     }
-    try std.testing.expect(announced and withdrawn);
     const borrowed_topic = gb.overlay.findTopic(bpo).?;
     try std.testing.expectEqual(@as(f64, 7), gb.peers.scores.topic_params[borrowed_topic].weight);
     var request: [24]u8 = @splat(0);

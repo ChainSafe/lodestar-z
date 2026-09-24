@@ -1,4 +1,5 @@
 const Profile = @import("configuration.zig").Profile;
+const policy_fixture = @import("reqresp/policy_fixture.zig");
 const resolve = @import("configuration.zig").resolve;
 const rr = @import("reqresp/reqresp.zig");
 const std = @import("std");
@@ -12,6 +13,7 @@ test "managed configuration resolves dial concurrency independently of peer head
             .forks = &.{},
             .limits = .{ .connections_max = 242, .handshaking_max = 32, .dialing_max = 32 },
             .peers = .{ .capacity = 512, .target_peers = 200, .max_peers = 200 + headroom, .min_outbound = 50 },
+            .admission_policy = policy_fixture.config(),
         });
         const reserved = @min(headroom, 4);
         try std.testing.expectEqual(@as(u16, 32), resolved.core.dial.concurrent_max);
@@ -21,23 +23,26 @@ test "managed configuration resolves dial concurrency independently of peer head
         try std.testing.expectEqual(@as(?u16, 242), resolved.limits.outbound_max);
         try std.testing.expectEqual(200 + headroom, resolved.core.service.reqresp.inbound_control_reserved);
     }
-    const beacon = try resolve(.{ .seed = 1, .forks = &.{} });
+    const beacon = try resolve(.{ .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
     try std.testing.expectEqual(@as(u16, 32), beacon.core.dial.concurrent_max);
     try std.testing.expectError(error.InvalidOptions, resolve(.{
         .seed = 1,
         .forks = &.{},
         .limits = .{ .dialing_max = 16 },
         .dial = .{ .seed = 1, .concurrent_max = 8 },
+        .admission_policy = policy_fixture.config(),
     }));
     try std.testing.expectError(error.InvalidOptions, resolve(.{
         .seed = 1,
         .forks = &.{},
         .limits = .{ .dialing_max = 65 },
+        .admission_policy = policy_fixture.config(),
     }));
     try std.testing.expectError(error.InvalidOptions, resolve(.{
         .seed = 1,
         .forks = &.{},
         .peers = .{ .target_peers = 96, .max_peers = 96 },
+        .admission_policy = policy_fixture.config(),
     }));
 }
 
@@ -56,7 +61,7 @@ test "managed control admission and response quotas permit the full two hundred 
     var responses = try limiter.Limiter.init(std.testing.allocator, 200, quotas.peer, quotas.global);
     defer responses.deinit(std.testing.allocator);
     const admission = @import("reqresp/admission.zig");
-    var starts = try admission.Limiter.init(std.testing.allocator, requests.admission.?.limits);
+    var starts = try admission.Limiter.init(std.testing.allocator, requests.admission.limits);
     defer starts.deinit(std.testing.allocator);
     for (std.enums.values(@import("reqresp/protocol.zig").Protocol)) |which| {
         if (!which.isControl()) continue;
@@ -76,13 +81,13 @@ test "managed control admission and response quotas permit the full two hundred 
 }
 
 test "managed configuration resolves shared capacities from their owners" {
-    const small = try resolve(.{ .profile = .small, .seed = 1, .forks = &.{} });
+    const small = try resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
     try std.testing.expectEqual(small.limits.connections_max, small.core.service.reqresp.peers);
     try std.testing.expectEqual(small.core.peers.max_peers, small.core.service.gossipsub.connected_capacity);
     try std.testing.expectEqual(small.core.peers.max_peers, small.core.service.reqresp.outbound_control_reserved);
     try std.testing.expectEqual(@as(u16, 18), small.core.service.reqresp.outbound_max);
-    try std.testing.expectError(error.InvalidOptions, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .peers = .{} }));
-    const beacon = try resolve(.{ .seed = 1, .forks = &.{} });
+    try std.testing.expectError(error.InvalidOptions, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .peers = .{}, .admission_policy = policy_fixture.config() }));
+    const beacon = try resolve(.{ .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
     try std.testing.expectEqual(@as(u16, 64), beacon.core.peers.target_peers);
     try std.testing.expectEqual(@as(u16, 96), beacon.core.peers.max_peers);
     try std.testing.expectEqual(@as(u16, 96), beacon.core.service.router.outbound_control_reserved);
@@ -101,6 +106,7 @@ test "managed configuration overrides preserve profile defaults and derive share
         .reqresp = .{ .work_per_pump_max = 7 },
         .gossip = .{ .validation_capacity = 16 },
         .router = .{ .negotiations_max = 20 },
+        .admission_policy = policy_fixture.config(),
     });
     const service = &resolved.core.service;
     try std.testing.expectEqual(@as(u16, 8), service.reqresp.peers);
@@ -120,7 +126,7 @@ test "managed configuration overrides preserve profile defaults and derive share
 }
 
 test "managed configuration rejects inconsistent capacity sections before owners" {
-    const resolved = try resolve(.{ .profile = .small, .seed = 1, .forks = &.{} });
+    const resolved = try resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
     var options = resolved.core;
     options.service.router.outbound_control_reserved += 1;
     try validate(resolved.limits, options);
@@ -154,40 +160,33 @@ test "managed configuration rejects inconsistent capacity sections before owners
 }
 
 test "managed configuration rejects zero request work override" {
-    try std.testing.expectError(error.InvalidOptions, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .reqresp = .{ .work_per_pump_max = 0 } }));
+    try std.testing.expectError(error.InvalidOptions, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .reqresp = .{ .work_per_pump_max = 0 }, .admission_policy = policy_fixture.config() }));
 }
 
 test "managed configuration rejects zero control timer from complete section" {
-    try std.testing.expectError(error.InvalidOptions, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .control = .{ .ping_inbound_ms = 0 } }));
+    try std.testing.expectError(error.InvalidOptions, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .control = .{ .ping_inbound_ms = 0 }, .admission_policy = policy_fixture.config() }));
 }
 
 test "managed configuration validates router and score overrides" {
-    try std.testing.expectError(error.InvalidLimits, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .router = .{ .meshsub = false } }));
-    try std.testing.expectError(error.InvalidLimits, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .gossip = .{ .score_params = .{ .decay_interval_ms = 0 } } }));
-    try std.testing.expectError(error.InvalidOptions, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .reqresp = .{ .outbound_max = 12 } }));
-    try std.testing.expectError(error.InvalidLimits, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .router = .{ .negotiations_max = 2 } }));
+    try std.testing.expectError(error.InvalidLimits, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .gossip = .{ .score_params = .{ .decay_interval_ms = 0 } }, .admission_policy = policy_fixture.config() }));
+    try std.testing.expectError(error.InvalidOptions, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .reqresp = .{ .outbound_max = 12 }, .admission_policy = policy_fixture.config() }));
+    try std.testing.expectError(error.InvalidLimits, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .router = .{ .negotiations_max = 2 }, .admission_policy = policy_fixture.config() }));
 }
 
 test "managed runtime request admission derives retained capacity quotas and control reservation" {
-    const base = try resolve(.{ .profile = .small, .seed = 1, .forks = &.{} });
-    var admission_options = try rr.AdmissionOptions.defaults(&@import("reqresp/policy_fixture.zig").config(), base.core.peers.capacity, base.core.peers.max_peers, base.core.service.reqresp.inbound_max - base.core.service.reqresp.inbound_control_reserved);
-    const resolved = try resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .reqresp = .{ .admission = admission_options } });
-    const admission = resolved.core.service.reqresp.admission.?.limits;
+    const resolved = try resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
+    const admission = resolved.core.service.reqresp.admission.limits;
     try std.testing.expectEqual(resolved.core.peers.capacity, admission.identities);
     const ForkSeq = @import("config").ForkSeq;
     const Protocol = @import("reqresp/protocol.zig").Protocol;
     try std.testing.expectEqual(@as(u32, 128), admission.peer[@intFromEnum(ForkSeq.fulu)][@intFromEnum(Protocol.blocks_by_root_v2)].tokens);
     try std.testing.expectEqual(@as(u32, 1024), admission.peer[@intFromEnum(ForkSeq.phase0)][@intFromEnum(Protocol.blocks_by_root_v2)].tokens);
     try std.testing.expectEqual(@as(u32, resolved.core.peers.max_peers) * admission.peer[@intFromEnum(ForkSeq.fulu)][@intFromEnum(Protocol.ping_v1)].tokens, admission.global[@intFromEnum(ForkSeq.fulu)][@intFromEnum(Protocol.ping_v1)].tokens);
-    admission_options.limits.global[0][0].tokens = 0;
-    try std.testing.expectError(error.InvalidQuota, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .reqresp = .{ .admission = admission_options } }));
 }
 
 test "managed runtime request admission memory plan measures both retained profiles" {
     for ([_]Profile{ .small, .beacon_node }) |profile| {
-        const base = try resolve(.{ .profile = profile, .seed = 1, .forks = &.{} });
-        const admission = try rr.AdmissionOptions.defaults(&@import("reqresp/policy_fixture.zig").config(), base.core.peers.capacity, base.core.peers.max_peers, base.core.service.reqresp.inbound_max - base.core.service.reqresp.inbound_control_reserved);
-        const resolved = try resolve(.{ .profile = profile, .seed = 1, .forks = &.{}, .reqresp = .{ .admission = admission } });
+        const resolved = try resolve(.{ .profile = profile, .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
         var allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
         var handler = try @import("reqresp/reqresp.zig").ReqResp.init(allocator.allocator(), resolved.core.service.reqresp);
         defer handler.deinit();
@@ -199,9 +198,9 @@ test "managed runtime request admission memory plan measures both retained profi
 
 test "managed configuration preserves independent transport work limits" {
     const limits: transport.WorkLimits = .{ .send_per_step_max = 3, .receive_per_step_max = 2, .work_per_step_max = 7 };
-    const resolved = try resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .work_limits = limits });
+    const resolved = try resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .work_limits = limits, .admission_policy = policy_fixture.config() });
     try std.testing.expectEqual(limits, resolved.work_limits);
-    try std.testing.expectError(error.InvalidLimits, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .work_limits = .{ .send_per_step_max = 0 } }));
+    try std.testing.expectError(error.InvalidLimits, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .work_limits = .{ .send_per_step_max = 0 }, .admission_policy = policy_fixture.config() }));
 }
 
 test "resolved admission and Identify overrides use final profile capacities" {
@@ -214,10 +213,10 @@ test "resolved admission and Identify overrides use final profile capacities" {
         .identify = .{ .agent = "resolved-agent", .protocol_version = "resolved-version" },
     });
     const requests = resolved.core.service.reqresp;
-    const quotas = requests.admission.?.limits;
+    const quotas = requests.admission.limits;
     try std.testing.expectEqual(resolved.core.peers.capacity, quotas.identities);
     try std.testing.expectEqual(@as(u32, resolved.core.peers.max_peers) * quotas.peer[@intFromEnum(@import("config").ForkSeq.fulu)][@intFromEnum(@import("reqresp/protocol.zig").Protocol.ping_v1)].tokens, quotas.global[@intFromEnum(@import("config").ForkSeq.fulu)][@intFromEnum(@import("reqresp/protocol.zig").Protocol.ping_v1)].tokens);
-    const identify = resolved.core.service.identify.?;
+    const identify = resolved.core.service.identify;
     try std.testing.expectEqual(@as(u16, 2), identify.inbound_max);
     try std.testing.expectEqualStrings("resolved-agent", identify.agent);
     try std.testing.expectEqualStrings("resolved-version", identify.protocol_version);
@@ -237,9 +236,9 @@ test "application request limits preserve control capacity and size admission fr
         try std.testing.expectEqual(application_max, requests.inbound_max - requests.inbound_control_reserved);
         try std.testing.expectEqual(application_max, requests.outbound_max - requests.outbound_control_reserved);
         try std.testing.expectEqual(resolved.core.peers.max_peers, requests.outbound_control_reserved);
-        const ping = requests.admission.?.limits.global[@intFromEnum(@import("config").ForkSeq.fulu)][@intFromEnum(@import("reqresp/protocol.zig").Protocol.ping_v1)];
-        try std.testing.expectEqual(@as(u32, resolved.core.peers.max_peers) * requests.admission.?.limits.peer[@intFromEnum(@import("config").ForkSeq.fulu)][@intFromEnum(@import("reqresp/protocol.zig").Protocol.ping_v1)].tokens, ping.tokens);
+        const ping = requests.admission.limits.global[@intFromEnum(@import("config").ForkSeq.fulu)][@intFromEnum(@import("reqresp/protocol.zig").Protocol.ping_v1)];
+        try std.testing.expectEqual(@as(u32, resolved.core.peers.max_peers) * requests.admission.limits.peer[@intFromEnum(@import("config").ForkSeq.fulu)][@intFromEnum(@import("reqresp/protocol.zig").Protocol.ping_v1)].tokens, ping.tokens);
     }
-    try std.testing.expectError(error.InvalidOptions, resolve(.{ .seed = 1, .forks = &.{}, .application_requests_max = 0 }));
-    try std.testing.expectError(error.InvalidOptions, resolve(.{ .seed = 1, .forks = &.{}, .application_requests_max = 32, .reqresp = .{ .inbound_max = 1 } }));
+    try std.testing.expectError(error.InvalidOptions, resolve(.{ .seed = 1, .forks = &.{}, .application_requests_max = 0, .admission_policy = policy_fixture.config() }));
+    try std.testing.expectError(error.InvalidOptions, resolve(.{ .seed = 1, .forks = &.{}, .application_requests_max = 32, .reqresp = .{ .inbound_max = 1 }, .admission_policy = policy_fixture.config() }));
 }

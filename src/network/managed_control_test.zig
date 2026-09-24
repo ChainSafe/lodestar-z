@@ -213,7 +213,7 @@ test "managed records a buffered Goodbye before transport cancellation and prese
         try std.testing.expect(setup.pair.client.close(conn, 0));
         try setup.pair.pump();
         var events: [32]Engine.Event = undefined;
-        _ = managed.process(&setup.server, &setup.server_service, &setup.pair.server, setup.pair.events(&setup.pair.server, &events), setup.pair.activity(&setup.pair.server), setup.pair.now, 100, &.{}, &.{}, &.{});
+        _ = managed.process(&setup.server, &setup.server_service, &setup.pair.server, setup.pair.events(&setup.pair.server, &events), setup.pair.activity(&setup.pair.server), setup.pair.now, 100, &.{}, &.{});
         const snapshot = setup.server.catalog.get(peer).?;
         try std.testing.expect(snapshot.connection == null);
         var closed: [1]t.Event = undefined;
@@ -333,7 +333,7 @@ test "managed control accepts zero custody metadata without retaining previous c
             .served => served = true,
             else => return error.TestUnexpectedResult,
         };
-        _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, setup.pair.events(&setup.pair.client, &transport), &.{conn}, setup.pair.now, 100, &.{}, &.{}, &.{});
+        _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, setup.pair.events(&setup.pair.client, &transport), &.{conn}, setup.pair.now, 100, &.{}, &.{});
     }
     try std.testing.expect(served);
     const snapshot = setup.client.catalog.get(peer).?;
@@ -366,7 +366,7 @@ test "managed native stalled fork transition only wakes for eligible work" {
     try @import("managed_test_support.zig").updateLocal(&setup.client, &setup.client_service, &updated, setup.pair.now);
     setup.pair.advance(1500);
     for (0..8) |_| {
-        _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
+        _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{});
     }
     try std.testing.expect(!setup.client.catalog.get(peer).?.relevant);
     try std.testing.expect(setup.client_service.gossipsub.admitted(conn));
@@ -375,10 +375,12 @@ test "managed native stalled fork transition only wakes for eligible work" {
         active += 1;
     };
     try std.testing.expect(active > 0);
-    const service_due = setup.client_service.nextWakeup(setup.pair.now, .{ .application = 0, .control = 32, .gossipsub = 0 }).?;
+    const service_due = setup.client_service.nextWakeup(setup.pair.now, .{ .application = 0, .control = 32 }).?;
     try std.testing.expect(service_due > setup.pair.now.mono_ms);
     try std.testing.expect(setup.client.control.nextWakeup(&setup.client.catalog, setup.pair.now) == null);
-    const core_due = managed.nextWakeup(&setup.client, &setup.client_service, setup.pair.now, 0, 0, 0, 0).?;
+    var wakeups: @import("wake_sources.zig").Wakeups = .{};
+    managed.collectWakeups(&setup.client, &setup.client_service, setup.pair.now, 0, 0, 0, &wakeups);
+    const core_due = wakeups.earliest().?;
     try std.testing.expect(core_due > setup.pair.now.mono_ms and core_due <= service_due);
     try @import("managed_test_support.zig").updateLocal(&setup.server, &setup.server_service, &updated, setup.pair.now);
     for (0..80) |_| try setup.step(0);
@@ -473,9 +475,9 @@ fn previousStatus(setup: *Setup) !void {
     for (0..80) |_| {
         try setup.pair.pump();
         var events: [32]Engine.Event = undefined;
-        _ = managed.process(&setup.server, &setup.server_service, &setup.pair.server, setup.pair.events(&setup.pair.server, &events), setup.pair.activity(&setup.pair.server), setup.pair.now, 100, &.{}, &.{}, &.{});
+        _ = managed.process(&setup.server, &setup.server_service, &setup.pair.server, setup.pair.events(&setup.pair.server, &events), setup.pair.activity(&setup.pair.server), setup.pair.now, 100, &.{}, &.{});
         var out: [1]rr.Event = undefined;
-        const count = setup.client_service.process(&setup.pair.client, setup.pair.events(&setup.pair.client, &events), setup.pair.activity(&setup.pair.client), setup.pair.now, .{ .application = &.{}, .control = &out, .gossipsub = &.{} });
+        const count = setup.client_service.process(&setup.pair.client, setup.pair.events(&setup.pair.client, &events), setup.pair.activity(&setup.pair.client), setup.pair.now, .{ .application = &.{}, .control = &out });
         for (out[0..count.control]) |event| switch (event) {
             .chunk => |chunk| {
                 try std.testing.expectEqualDeep(handle, chunk.request);
@@ -550,7 +552,7 @@ test "managed control native Fulu serves older schemas but old Status cannot est
             _ = managed.process(&setup.server, &setup.server_service, &setup.pair.server, setup.pair.events(
                 &setup.pair.server,
                 &transport,
-            ), setup.pair.activity(&setup.pair.server), setup.pair.now, 100, &.{}, &.{}, &.{});
+            ), setup.pair.activity(&setup.pair.server), setup.pair.now, 100, &.{}, &.{});
             if (protocol == .goodbye_v1) {
                 for (setup.server.control.responses) |response| if (response.request) |inbound| {
                     const owner = setup.server_service.reqresp.inboundSlot(inbound).?;
@@ -563,7 +565,7 @@ test "managed control native Fulu serves older schemas but old Status cannot est
             const counts = setup.client_service.process(&setup.pair.client, setup.pair.events(
                 &setup.pair.client,
                 &transport,
-            ), setup.pair.activity(&setup.pair.client), setup.pair.now, .{ .application = &.{}, .control = &output, .gossipsub = &.{} });
+            ), setup.pair.activity(&setup.pair.client), setup.pair.now, .{ .application = &.{}, .control = &output });
             if (counts.control == 0) continue;
             switch (output[0]) {
                 .chunk => |chunk| {
@@ -600,7 +602,6 @@ test "managed control native Fulu serves older schemas but old Status cannot est
                 &.{},
                 setup.pair.now,
                 100,
-                &.{},
                 &.{},
                 &.{},
             );
@@ -647,7 +648,7 @@ test "managed native application response borrows survive same turn hard close" 
         const server = managed.process(&setup.server, &setup.server_service, &setup.pair.server, setup.pair.events(
             &setup.pair.server,
             &transport,
-        ), setup.pair.activity(&setup.pair.server), setup.pair.now, 100, &.{}, &output, &.{});
+        ), setup.pair.activity(&setup.pair.server), setup.pair.now, 100, &.{}, &output);
         if (server.application == 1) switch (output[0]) {
             .request => |incoming| {
                 try setup.server_service.reqresp.respond(incoming.request, &response, .{ .digest = @splat(0), .fork = .phase0 }, setup.pair.now);
@@ -667,7 +668,7 @@ test "managed native application response borrows survive same turn hard close" 
         const client = managed.process(&setup.client, &setup.client_service, &setup.pair.client, setup.pair.events(
             &setup.pair.client,
             &transport,
-        ), setup.pair.activity(&setup.pair.client), setup.pair.now, 100, &.{}, &output, &.{});
+        ), setup.pair.activity(&setup.pair.client), setup.pair.now, 100, &.{}, &output);
         if (client.application == 1 and output[0] == .chunk) {
             try std.testing.expectEqualDeep(request, output[0].chunk.request);
             try std.testing.expectEqualSlices(u8, &response, output[0].chunk.bytes);
@@ -715,11 +716,11 @@ test "managed native gossip admission precedes Status without establishing manag
         _ = managed.process(&setup.server, &setup.server_service, &setup.pair.server, setup.pair.events(
             &setup.pair.server,
             &transport,
-        ), setup.pair.activity(&setup.pair.server), setup.pair.now, 100, &.{}, &.{}, &.{});
+        ), setup.pair.activity(&setup.pair.server), setup.pair.now, 100, &.{}, &.{});
         _ = setup.client_service.process(&setup.pair.client, setup.pair.events(
             &setup.pair.client,
             &transport,
-        ), setup.pair.activity(&setup.pair.client), setup.pair.now, .{ .application = &.{}, .control = &.{}, .gossipsub = &.{} });
+        ), setup.pair.activity(&setup.pair.client), setup.pair.now, .{ .application = &.{}, .control = &.{} });
     }
     var snapshots: [4]t.Snapshot = undefined;
     try std.testing.expectEqual(@as(usize, 1), setup.server.snapshots(&snapshots));
@@ -803,7 +804,6 @@ test "managed native inbound application per peer cap protects control from extr
             100,
             &.{},
             &output,
-            &.{},
         );
         if (result.application == 1 and output[0] == .request) {
             count += 1;
@@ -899,9 +899,9 @@ test "managed control native Goodbye maps shutdown incompatibility and fault wir
         for (0..40) |_| {
             try setup.pair.pump();
             var transport: [32]Engine.Event = undefined;
-            _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, setup.pair.events(&setup.pair.client, &transport), setup.pair.activity(&setup.pair.client), setup.pair.now, 100, &.{}, &.{}, &.{});
+            _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, setup.pair.events(&setup.pair.client, &transport), setup.pair.activity(&setup.pair.client), setup.pair.now, 100, &.{}, &.{});
             var control: [1]rr.Event = undefined;
-            const counts = setup.server_service.process(&setup.pair.server, setup.pair.events(&setup.pair.server, &transport), setup.pair.activity(&setup.pair.server), setup.pair.now, .{ .application = &.{}, .control = &control, .gossipsub = &.{} });
+            const counts = setup.server_service.process(&setup.pair.server, setup.pair.events(&setup.pair.server, &transport), setup.pair.activity(&setup.pair.server), setup.pair.now, .{ .application = &.{}, .control = &control });
             if (counts.control == 0) continue;
             try std.testing.expectEqual(rr.Protocol.goodbye_v1, control[0].request.protocol);
             try std.testing.expectEqual(@as(usize, 8), control[0].request.bytes.len);
@@ -932,7 +932,7 @@ test "managed control irrelevant metadata cannot create an ineligible wakeup" {
     try std.testing.expectEqual(started, setup.client.control.counters.started);
     try std.testing.expectEqual(setup.pair.now.mono_ms + 100, setup.client.control.nextWakeup(&setup.client.catalog, setup.pair.now).?);
     setup.pair.advance(100);
-    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
+    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{});
     try std.testing.expectEqual(started + 1, setup.client.control.counters.started);
 }
 
@@ -955,7 +955,7 @@ test "managed control does not schedule gossip admission alongside active reques
     const deadline = row.closing.?.deadline_ms;
     try std.testing.expectEqual(deadline, setup.client.control.nextWakeup(&setup.client.catalog, setup.pair.now).?);
     setup.pair.advance(2000);
-    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
+    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{});
     try std.testing.expect(setup.client.catalog.get(peer).?.connection == null);
 }
 
@@ -994,7 +994,7 @@ test "managed control cancelled canonical requests retain buffers until local re
     try std.testing.expectEqual(deferred, setup.client.control.counters.deferred);
     try std.testing.expectEqual(@as(?u64, null), setup.client.control.nextWakeup(&setup.client.catalog, setup.pair.now));
     const grace = setup.client.control.schedules[peer.index].transition_until_ms;
-    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
+    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{});
     try std.testing.expect(op.request != null);
     try std.testing.expect(!std.meta.eql(request, op.request.?));
     try std.testing.expect(!op.cancelled);
@@ -1019,9 +1019,9 @@ test "managed control capabilities pre-Fulu Metadata3 serves configured custody 
     for (0..50) |_| {
         try setup.pair.pump();
         var events: [32]Engine.Event = undefined;
-        _ = managed.process(&setup.server, &setup.server_service, &setup.pair.server, setup.pair.events(&setup.pair.server, &events), setup.pair.activity(&setup.pair.server), setup.pair.now, 100, &.{}, &.{}, &.{});
+        _ = managed.process(&setup.server, &setup.server_service, &setup.pair.server, setup.pair.events(&setup.pair.server, &events), setup.pair.activity(&setup.pair.server), setup.pair.now, 100, &.{}, &.{});
         var out: [1]rr.Event = undefined;
-        const counts = setup.client_service.process(&setup.pair.client, setup.pair.events(&setup.pair.client, &events), setup.pair.activity(&setup.pair.client), setup.pair.now, .{ .application = &.{}, .control = &out, .gossipsub = &.{} });
+        const counts = setup.client_service.process(&setup.pair.client, setup.pair.events(&setup.pair.client, &events), setup.pair.activity(&setup.pair.client), setup.pair.now, .{ .application = &.{}, .control = &out });
         for (out[0..counts.control]) |event| switch (event) {
             .chunk => |chunk| {
                 try std.testing.expectEqualDeep(request, chunk.request);
@@ -1094,7 +1094,7 @@ test "identify replacement generation starts a fresh query and rejects stale com
     _ = setup.client.snapshots(&snapshots);
     const old = snapshots[0];
     try std.testing.expectEqualStrings("first", old.identify.?.agent.?.slice());
-    setup.server_service.identify.?.local.?.agent = try .init("replacement");
+    setup.server_service.identify.local.?.agent = try .init("replacement");
     _ = try setup.pair.dial();
     for (0..100) |_| try setup.step(1);
     _ = setup.client.snapshots(&snapshots);
@@ -1122,7 +1122,7 @@ test "identify local refusal retries after one second without resetting accepted
     const peer = snapshots[0].peer;
     const conn = snapshots[0].connection.?;
     try std.testing.expect(!snapshots[0].relevant);
-    try setup.client_service.identify.?.start(&setup.client_service.router, &setup.pair.client, .{ .index = 3, .generation = 99 }, conn, setup.pair.now);
+    try setup.client_service.identify.start(&setup.client_service.router, &setup.pair.client, .{ .index = 3, .generation = 99 }, conn, setup.pair.now);
     try std.testing.expect(setup.client.catalog.updateStatus(peer, conn, &.{}, setup.pair.now.mono_ms));
     setup.client.control.maintain(&setup.client_service, &setup.client.catalog, &setup.pair.client, &setup.client.local, setup.pair.now);
     const retry = setup.pair.now.mono_ms + 1000;
@@ -1164,7 +1164,7 @@ test "managed native targeted Status only schedules the full current nonclosing 
     expected.status_due_ms = setup.pair.now.mono_ms;
     try std.testing.expectEqualDeep(expected, setup.client.control.schedules[selected.peer.index]);
     try std.testing.expectEqualDeep(other_before, setup.client.control.schedules[3]);
-    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
+    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{});
     var selected_started = false;
     for (setup.client.control.operations) |op| {
         if (op.request != null and op.protocol == .status_v1 and std.meta.eql(op.peer, selected.peer)) selected_started = true;
@@ -1208,7 +1208,7 @@ test "managed native application response borrows survive immediate public close
         const server = managed.process(&setup.server, &setup.server_service, &setup.pair.server, setup.pair.events(
             &setup.pair.server,
             &transport,
-        ), setup.pair.activity(&setup.pair.server), setup.pair.now, 100, &.{}, &output, &.{});
+        ), setup.pair.activity(&setup.pair.server), setup.pair.now, 100, &.{}, &output);
         if (server.application == 1) switch (output[0]) {
             .request => |incoming| {
                 try setup.server_service.reqresp.respond(incoming.request, &response, .{ .digest = @splat(0), .fork = .phase0 }, setup.pair.now);
@@ -1221,7 +1221,7 @@ test "managed native application response borrows survive immediate public close
         const client = managed.process(&setup.client, &setup.client_service, &setup.pair.client, setup.pair.events(
             &setup.pair.client,
             &transport,
-        ), setup.pair.activity(&setup.pair.client), setup.pair.now, 100, &.{}, &output, &.{});
+        ), setup.pair.activity(&setup.pair.client), setup.pair.now, 100, &.{}, &output);
         if (client.application == 1 and output[0] == .chunk) {
             try std.testing.expectEqualDeep(request, output[0].chunk.request);
             try std.testing.expectEqualSlices(u8, &response, output[0].chunk.bytes);
@@ -1248,9 +1248,9 @@ test "application graceful quiescence sends shutdown Goodbye and suppresses admi
     for (0..80) |_| {
         try setup.pair.pump();
         var transport: [32]Engine.Event = undefined;
-        _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, setup.pair.events(&setup.pair.client, &transport), setup.pair.activity(&setup.pair.client), setup.pair.now, 100, &.{}, &.{}, &.{});
+        _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, setup.pair.events(&setup.pair.client, &transport), setup.pair.activity(&setup.pair.client), setup.pair.now, 100, &.{}, &.{});
         var control: [1]rr.Event = undefined;
-        const counts = setup.server_service.process(&setup.pair.server, setup.pair.events(&setup.pair.server, &transport), setup.pair.activity(&setup.pair.server), setup.pair.now, .{ .application = &.{}, .control = &control, .gossipsub = &.{} });
+        const counts = setup.server_service.process(&setup.pair.server, setup.pair.events(&setup.pair.server, &transport), setup.pair.activity(&setup.pair.server), setup.pair.now, .{ .application = &.{}, .control = &control });
         if (counts.control == 0) continue;
         try std.testing.expectEqual(rr.Protocol.goodbye_v1, control[0].request.protocol);
         try std.testing.expectEqual(@as(u64, 1), std.mem.readInt(u64, control[0].request.bytes[0..8], .little));
@@ -1265,8 +1265,7 @@ fn expectQuiescentGoodbye(setup: *Setup, admitted: u64) !void {
     for (0..80) |_| {
         try setup.pair.pump();
         var transport: [32]Engine.Event = undefined;
-        var gossip: [8]@import("gossipsub/root.zig").Event = undefined;
-        _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, setup.pair.events(&setup.pair.client, &transport), setup.pair.activity(&setup.pair.client), setup.pair.now, 100, &.{}, &.{}, &gossip);
+        _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, setup.pair.events(&setup.pair.client, &transport), setup.pair.activity(&setup.pair.client), setup.pair.now, 100, &.{}, &.{});
         try std.testing.expectEqual(@as(usize, 0), setup.client_inbox.messages().len);
         try std.testing.expectEqual(@as(u64, 0), setup.client_service.gossipsub.counters.messages_received);
         try std.testing.expectEqual(admitted, setup.client_service.reqresp.counters.admitted);
@@ -1274,7 +1273,7 @@ fn expectQuiescentGoodbye(setup: *Setup, admitted: u64) !void {
             if (slot.request.occupied() and !slot.request.protocol.isControl()) try std.testing.expect(slot.request.pendingEvent() == null);
         }
         var control: [8]rr.Event = undefined;
-        const counts = setup.server_service.process(&setup.pair.server, setup.pair.events(&setup.pair.server, &transport), setup.pair.activity(&setup.pair.server), setup.pair.now, .{ .application = &.{}, .control = &control, .gossipsub = &.{} });
+        const counts = setup.server_service.process(&setup.pair.server, setup.pair.events(&setup.pair.server, &transport), setup.pair.activity(&setup.pair.server), setup.pair.now, .{ .application = &.{}, .control = &control });
         for (control[0..counts.control]) |event| {
             if (event != .request or event.request.protocol != .goodbye_v1) continue;
             try std.testing.expectEqual(@as(u64, 1), std.mem.readInt(u64, event.request.bytes[0..8], .little));
@@ -1291,7 +1290,6 @@ fn quiescenceRequest(mode: enum { fin, selection, borrowed }) !void {
     var opts = @import("managed_test_support.zig").options();
 
     const quotas = @import("reqresp/admission_fixture.zig").quotas(1000, 1000);
-    opts.service.reqresp.policy = null;
     opts.service.reqresp.admission = .{ .policy = @import("reqresp/policy_fixture.zig").config(), .limits = .{ .identities = 4, .peer = quotas, .global = quotas } };
     try setup.initOwnersWithOptions(&.{}, opts);
     defer setup.deinit();
@@ -1322,7 +1320,7 @@ fn quiescenceRequest(mode: enum { fin, selection, borrowed }) !void {
     var borrowed: []const u8 = &.{};
     if (mode == .borrowed) {
         var application: [1]rr.Event = undefined;
-        const counts = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &application, &.{});
+        const counts = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &application);
         try std.testing.expectEqual(@as(usize, 1), counts.application);
         borrowed = application[0].request.bytes;
         try std.testing.expectEqualSlices(u8, &([_]u8{7} ** 32), borrowed);
@@ -1457,7 +1455,7 @@ test "managed control response deadline survives continuous peer progress" {
             remote_stream = setup.server_service.reqresp.inbound[event.request.request.index].request.stream;
         };
         const client_activity = setup.pair.client.takeActivity(&activity);
-        _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, setup.pair.events(&setup.pair.client, &transport), activity[0..client_activity], setup.pair.now, 100, &.{}, &.{}, &.{});
+        _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, setup.pair.events(&setup.pair.client, &transport), activity[0..client_activity], setup.pair.now, 100, &.{}, &.{});
         if (remote_stream != null) break;
     }
     const stream = remote_stream orelse return error.TestUnexpectedResult;
@@ -1476,12 +1474,12 @@ test "managed control response deadline survives continuous peer progress" {
         try std.testing.expectEqual(@as(usize, 1), try setup.pair.server.write(stream, encoded[i .. i + 1], false));
         try setup.pair.pump();
         var transport: [32]Engine.Event = undefined;
-        _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, setup.pair.events(&setup.pair.client, &transport), &.{conn}, setup.pair.now, 100, &.{}, &.{}, &.{});
+        _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, setup.pair.events(&setup.pair.client, &transport), &.{conn}, setup.pair.now, 100, &.{}, &.{});
         try std.testing.expectEqual(@as(?u64, due), client.deadline());
         try std.testing.expectEqual(timeouts, setup.client_service.reqresp.counters.timeouts);
     }
     setup.pair.now.mono_ms = due;
-    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
+    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{});
     try std.testing.expectEqual(timeouts + 1, setup.client_service.reqresp.counters.timeouts);
     for (setup.client.control.operations) |op| if (op.request) |active| {
         try std.testing.expect(!std.meta.eql(handle, active));
@@ -1510,7 +1508,7 @@ test "managed coalesces silent inbound request owners before host request delive
     // The per-peer receive layout services one slot of a peer per turn.
     for (0..2) |_| {
         var events: [2]rr.Event = undefined;
-        const result = managed.process(&setup.server, &setup.server_service, &setup.pair.server, &.{}, &.{}, setup.pair.now, 100, &.{}, &events, &.{});
+        const result = managed.process(&setup.server, &setup.server_service, &setup.pair.server, &.{}, &.{}, setup.pair.now, 100, &.{}, &events);
         try std.testing.expectEqual(@as(usize, 1), result.application);
         try std.testing.expect(events[0] == .failed and events[0].failed.reason == .timeout);
     }
@@ -1563,7 +1561,7 @@ test "managed control scores intrinsic decoding once and keeps custody schema li
                 .chunk_sent => |chunk| _ = setup.server_service.reqresp.finish(chunk.request, setup.pair.now),
                 else => {},
             };
-            _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, setup.pair.events(&setup.pair.client, &transport), &.{conn}, setup.pair.now, 100, &.{}, &.{}, &.{});
+            _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, setup.pair.events(&setup.pair.client, &transport), &.{conn}, setup.pair.now, 100, &.{}, &.{});
         }
         try std.testing.expect(sent);
         const snapshot = setup.client.catalog.get(peer).?;
@@ -1597,7 +1595,7 @@ test "managed request terminal scores captured identity without a JavaScript con
             sent = true;
         };
         var output: [32]rr.Event = undefined;
-        const received = managed.process(&setup.client, &setup.client_service, &setup.pair.client, setup.pair.events(&setup.pair.client, &transport), setup.pair.activity(&setup.pair.client), setup.pair.now, 100, &.{}, &output, &.{});
+        const received = managed.process(&setup.client, &setup.client_service, &setup.pair.client, setup.pair.events(&setup.pair.client, &transport), setup.pair.activity(&setup.pair.client), setup.pair.now, 100, &.{}, &output);
         for (output[0..received.application]) |event| if (event == .failed) {
             try std.testing.expect(!terminal);
             terminal = true;

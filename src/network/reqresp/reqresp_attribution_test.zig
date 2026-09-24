@@ -105,7 +105,7 @@ test "reqresp attribution distinguishes local response caps intrinsic bounds and
         const which = Protocol.blocks_by_root_v2;
         const sink = try std.testing.allocator.alloc(u8, which.info().response_max);
         defer std.testing.allocator.free(sink);
-        if (case == .local_payload) pair.shared.client.reqresp.policy.?.config.max_payload_size = 4000;
+        if (case == .local_payload) pair.shared.client.reqresp.policy.config.max_payload_size = 4000;
         const empty: []const u8 = &.{};
         const roots: []const u8 = &(@as([32]u8, @splat(0)));
         const handle = try pair.shared.client.reqresp.request(&pair.shared.pair.client, &pair.shared.client.router, pair.shared.handles.client, which, if (case == .protocol_chunks) empty else roots, sink, .{ .expected_chunks = if (case == .caller_chunks) 0 else null }, pair.shared.pair.now);
@@ -149,8 +149,8 @@ test "reqresp attribution keeps local request bounds neutral and malformed SSZ s
         var pair: Pair = .{};
         try pair.init(.{}, .{});
         defer pair.deinit();
-        pair.shared.server.reqresp.policy.?.config.host_integer_max = 10;
-        pair.shared.server.reqresp.policy.?.config.max_payload_size = 128;
+        pair.shared.server.reqresp.policy.config.host_integer_max = 10;
+        pair.shared.server.reqresp.policy.config.max_payload_size = 128;
         const which: Protocol = if (case == .host_integer) .ping_v1 else .blocks_by_root_v2;
         const stream = try pair.openRaw(which);
         try pair.awaitRawSelection(stream, which);

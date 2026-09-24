@@ -102,7 +102,7 @@ export interface NativeGossipProcessorLimit {
 
 export interface NativeGossipStartupPolicy {
   /** Fixed limits in NativeTopicKind declaration order. */
-  processor?: readonly NativeGossipProcessorLimit[];
+  processor: readonly NativeGossipProcessorLimit[];
   /** Outstanding decoded payloads and messages, held until host completion. Requires processor. */
   execution?: readonly NativeGossipProcessorLimit[];
   heartbeatIntervalMs: bigint;

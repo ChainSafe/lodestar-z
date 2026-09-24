@@ -1,7 +1,6 @@
 const std = @import("std");
 const gossip = @import("gossipsub.zig");
 const Gossipsub = gossip.Gossipsub;
-const Event = gossip.Event;
 const constants = @import("constants.zig");
 const local_intent = @import("local_intent.zig");
 const protobuf = @import("protobuf.zig");
@@ -18,10 +17,8 @@ const testMessage = support.message;
 test "gossip accepts a full namespace subscription transition in one RPC" {
     const policy = @import("topic_policy.zig");
     var boundary: policy.Boundary = .{ .digest = .{ 1, 2, 3, 4 } };
-    var topic_count: usize = 0;
     for (std.enums.values(topic_mod.Kind)) |kind| {
         boundary.rules[@intFromEnum(kind)] = .{ .count = kind.countMax(), .ssz_min = 1, .ssz_max = 1024 };
-        topic_count += kind.countMax();
     }
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .topic_policy = &.{boundary} });
     defer g.deinit();
@@ -42,20 +39,11 @@ test "gossip accepts a full namespace subscription transition in one RPC" {
     }
     const io = &g.sessions.rows[peer.index].io;
     io.startRpc(writer.written());
-    var received: usize = 0;
     for (0..128) |_| {
-        var events: [16]Event = undefined;
         var count: usize = 0;
         var items: usize = 16;
-        const done = try support.processRpc(&g, peer.index, .{ .mono_ms = 1, .unix_s = 1 }, &events, &count, &items);
-        for (events[0..count]) |event| {
-            try std.testing.expect(event == .subscription_change);
-            try std.testing.expectEqual(received < topic_count, event.subscription_change.subscribed);
-            received += 1;
-        }
-        if (done) break;
+        if (try support.processRpc(&g, peer.index, .{ .mono_ms = 1, .unix_s = 1 }, &count, &items)) break;
     }
-    try std.testing.expectEqual(2 * topic_count, received);
     try std.testing.expectEqual(@as(usize, 0), g.resourceSnapshot().remote_subscriptions);
     _ = g.sessions.finishFrame(io);
 }
@@ -78,7 +66,7 @@ test "gossipsub IHAVE security ignores unknown and unsubscribed topics through R
         io.startRpc(writer.written());
         var items: usize = 128;
         var count: usize = 0;
-        try std.testing.expect(try @import("test_support.zig").processRpc(&g, peer.index, .{ .mono_ms = 1, .unix_s = 1 }, &.{}, &count, &items));
+        try std.testing.expect(try @import("test_support.zig").processRpc(&g, peer.index, .{ .mono_ms = 1, .unix_s = 1 }, &count, &items));
         try std.testing.expectEqual(@as(usize, @intFromBool(std.mem.eql(u8, name, subscribed))), g.recovery.len);
         try std.testing.expect(!g.sessions.finishFrame(io));
     }
@@ -141,7 +129,6 @@ test "gossip policy combined transport calls respect one shared peer allowance" 
     for (0..20) |_| try setup.pumpOnce();
     const peer = setup.shared.client.gossipsub.sessions.findPeer(setup.shared.handles.client).?;
     setup.shared.client.gossipsub.options.calls_per_peer = 1;
-    var events: [1]Event = undefined;
     for ([_]usize{ 8, 1 }) |global| {
         setup.shared.client.gossipsub.options.calls_per_pump = global;
         var read_turns: usize = 0;
@@ -149,7 +136,7 @@ test "gossip policy combined transport calls respect one shared peer allowance" 
         for (0..8) |_| {
             try std.testing.expect(setup.shared.client.gossipsub.sessions.rows[peer].io.tx.inject(&.{0}, setup.shared.pair.now.mono_ms));
             setup.shared.client.gossipsub.sessions.connectionActivity(setup.shared.handles.client);
-            const turn = @import("test_support.zig").pumpTurn(setup.shared.client.gossipsub, &setup.shared.pair.client, setup.shared.pair.now, &events);
+            const turn = @import("test_support.zig").pumpTurn(setup.shared.client.gossipsub, &setup.shared.pair.client, setup.shared.pair.now);
             const calls = global - turn.budget.calls;
             try std.testing.expect(calls <= 1);
             if (calls > 0) {
@@ -158,12 +145,12 @@ test "gossip policy combined transport calls respect one shared peer allowance" 
         }
         try std.testing.expect(read_turns > 0 and write_turns > 0);
         for (0..32) |_| {
-            if (@import("session_io.zig").nextIoWakeup(setup.shared.client.gossipsub, setup.shared.pair.now, events.len).? > setup.shared.pair.now.mono_ms) break;
-            const turn = @import("test_support.zig").pumpTurn(setup.shared.client.gossipsub, &setup.shared.pair.client, setup.shared.pair.now, &events);
+            if (@import("session_io.zig").nextIoWakeup(setup.shared.client.gossipsub, setup.shared.pair.now).? > setup.shared.pair.now.mono_ms) break;
+            const turn = @import("test_support.zig").pumpTurn(setup.shared.client.gossipsub, &setup.shared.pair.client, setup.shared.pair.now);
             try std.testing.expect(global - turn.budget.calls <= 1);
         }
         try std.testing.expect(!setup.shared.client.gossipsub.sessions.rows[peer].io.tx.pending());
-        try std.testing.expect(@import("session_io.zig").nextIoWakeup(setup.shared.client.gossipsub, setup.shared.pair.now, events.len).? > setup.shared.pair.now.mono_ms);
+        try std.testing.expect(@import("session_io.zig").nextIoWakeup(setup.shared.client.gossipsub, setup.shared.pair.now).? > setup.shared.pair.now.mono_ms);
     }
 }
 
@@ -229,8 +216,7 @@ test "gossip policy topic reuse waits for attribution and preserves copied event
     var inbox: support.Inbox = .{};
     defer inbox.deinit();
     inbox.attach(&g);
-    var events: [1]Event = undefined;
-    try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, peer.index, "retained", 1, &events));
+    try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, peer.index, "retained", 1));
     const event = inbox.last();
     const copied = g.resourceSnapshot();
     try support.subscribe(&g, name);
@@ -283,8 +269,7 @@ test "gossip policy unsent subscriptions cannot pin retired topics indefinitely"
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
     try support.subscribe(&g, name);
     try support.unsubscribe(&g, name);
-    var events: [0]Event = .{};
-    _ = @import("test_support.zig").pump(&g, &pair.server, .{ .mono_ms = 11, .unix_s = 0 }, &events);
+    _ = @import("test_support.zig").pump(&g, &pair.server, .{ .mono_ms = 11, .unix_s = 0 });
     try std.testing.expect(g.sessions.findPeer(conn) == null);
     try std.testing.expectEqual(@as(u64, 1), g.counters.subscription_timeouts);
     try std.testing.expectEqual(@as(u64, 1), g.counters.local_pressure_resets);

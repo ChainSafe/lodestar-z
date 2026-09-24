@@ -145,8 +145,6 @@ pub const Sessions = struct {
             std.debug.assert(io.reader.declaredLen() != null);
             self.receive_pool.release(&io.overflow);
             io.discarding = true;
-            io.pressure_since = null;
-            io.blocked = .none;
         }
         io.rx_ready = true;
     }
