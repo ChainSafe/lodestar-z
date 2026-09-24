@@ -17,3 +17,15 @@ test "index lists unlink ends and middle and reuse independent memberships" {
     first.append(&rows, "a", 1);
     try std.testing.expectEqual(@as(u32, 1), first.pop(&rows, "a").?);
 }
+
+test "index list inserts are idempotent and report membership" {
+    var rows: [2]struct { a: l.Link = .{} } = @splat(.{});
+    var list: l.List = .{};
+    try std.testing.expect(!l.List.contains(&rows, "a", 1));
+    try std.testing.expect(list.insert(&rows, "a", 1));
+    try std.testing.expect(!list.insert(&rows, "a", 1));
+    try std.testing.expect(l.List.contains(&rows, "a", 1));
+    try std.testing.expectEqual(@as(usize, 1), list.len);
+    try std.testing.expectEqual(@as(u32, 1), list.pop(&rows, "a").?);
+    try std.testing.expect(!l.List.contains(&rows, "a", 1));
+}
