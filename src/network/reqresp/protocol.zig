@@ -55,6 +55,11 @@ pub const Protocol = enum(u8) {
         };
     }
 
+    /// Single-response methods must answer with one chunk; Goodbye may close without one.
+    pub fn requiresResponse(self: Protocol) bool {
+        return self.info().chunks_max == 1 and self != .goodbye_v1;
+    }
+
     fn responseFamily(self: Protocol) ?response_bounds.Family {
         return switch (self) {
             .blocks_by_range_v2, .blocks_by_root_v2, .blocks_by_head_v1 => .block,

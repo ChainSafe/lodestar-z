@@ -14,6 +14,7 @@ pub const ErrorReason = enum {
     RESOURCE_UNAVAILABLE_ERROR,
     REQUEST_ERROR_UNKNOWN_ERROR_STATUS,
     REQUEST_ERROR_REQUEST_ERROR,
+    REQUEST_ERROR_EMPTY_RESPONSE,
 
     pub fn fromFailure(reason: rr.Failure, phase: rr.RequestPhase) ErrorReason {
         return switch (reason) {
@@ -24,6 +25,7 @@ pub const ErrorReason = enum {
             },
             .negotiation_failed => |failure| if (failure == .timeout) .REQUEST_ERROR_DIAL_TIMEOUT else .REQUEST_ERROR_REQUEST_ERROR,
             .invalid_response, .too_many_chunks, .unknown_context => .REQUEST_ERROR_INVALID_RESPONSE_SSZ,
+            .empty_response => .REQUEST_ERROR_EMPTY_RESPONSE,
             .peer_error => |err| switch (err.code) {
                 1 => .REQUEST_ERROR_INVALID_REQUEST,
                 2 => .REQUEST_ERROR_SERVER_ERROR,
@@ -72,4 +74,5 @@ test "request error labels match host timeout phases and response status mapping
     try std.testing.expectEqual(ErrorReason.REQUEST_ERROR_RESP_TIMEOUT, ErrorReason.fromFailure(.timeout, .response));
     try std.testing.expectEqual(ErrorReason.REQUEST_ERROR_SERVER_ERROR, ErrorReason.fromFailure(.{ .peer_error = .{ .code = 2, .message_len = 0 } }, .response));
     try std.testing.expectEqual(ErrorReason.REQUEST_ERROR_UNKNOWN_ERROR_STATUS, ErrorReason.fromFailure(.{ .peer_error = .{ .code = 255, .message_len = 0 } }, .response));
+    try std.testing.expectEqual(ErrorReason.REQUEST_ERROR_EMPTY_RESPONSE, ErrorReason.fromFailure(.empty_response, .response));
 }
