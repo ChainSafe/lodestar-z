@@ -546,6 +546,17 @@ pub const Engine = struct {
         return false;
     }
 
+    /// A connection is closed and not yet released, or has a close armed for its next tick.
+    pub fn closingPending(self: *const Engine) bool {
+        assert(self.registry.active_len <= self.registry.active.len);
+        for (self.registry.active[0..self.registry.active_len]) |index| {
+            const slot = &self.registry.slots[index];
+            assert(slot.state != .free);
+            if (slot.state == .closed or slot.pending_close != null) return true;
+        }
+        return false;
+    }
+
     pub fn receive(
         self: *Engine,
         datagram: []u8,
@@ -690,12 +701,11 @@ pub const Engine = struct {
 
     pub fn nextTimeoutMs(self: *const Engine, now: Now) ?u64 {
         assert(self.registry.active_len <= self.registry.active.len);
-        if (self.eventsPending()) return 0;
+        if (self.eventsPending() or self.closingPending()) return 0;
         var earliest: ?u64 = null;
         for (self.registry.active[0..self.registry.active_len]) |index| {
             const slot = &self.registry.slots[index];
             assert(slot.state != .free);
-            if (slot.state == .closed or slot.pending_close != null) return 0;
             var timeout = slot.timeoutMs();
             if (slot.close_reason == null) {
                 const deadline = if (slot.state == .handshaking)

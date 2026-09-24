@@ -55,8 +55,8 @@ const Series = struct {
     labels: []const []const u8 = &.{},
 };
 
-/// The measurement contract: series read by docs/superpowers/deploy-feat4/compare.py and the
-/// next review. Removing or renaming one needs the same change in that script.
+/// The measurement contract: series read by the feat4-vs-stable comparison and the next
+/// production review. Removing or renaming one needs the same change in that comparison.
 const contract = [_]Series{
     // Owner loop
     .{ .name = "lodestar_native_network_step_seconds", .kind = "histogram" },
@@ -308,16 +308,20 @@ test "metrics owner loop series start at zero after initialization" {
     try contains(output, "lodestar_native_network_due_now_turns_total{source=\"host\"} 0\n");
 }
 
-test "metrics attribute zero-wait owner turns to every due source and record the chosen wait" {
+fn initOwner(node: *core.NetworkCore) !void {
     const key = try @import("wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{94}));
-    const node = try std.testing.allocator.create(core.NetworkCore);
-    defer std.testing.allocator.destroy(node);
     try node.initManaged(std.testing.allocator, std.testing.io, .{
         .host = &key,
         .bind = .{ .ip4 = .loopback(0) },
         .local = @import("managed_test_support.zig").localState(.{}),
         .configuration = .{ .profile = .beacon_node, .seed = 7, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }} },
     });
+}
+
+test "metrics attribute zero-wait owner turns to every due source and record the chosen wait" {
+    const node = try std.testing.allocator.create(core.NetworkCore);
+    defer std.testing.allocator.destroy(node);
+    try initOwner(node);
     defer node.deinit(std.testing.io);
     const now = try @import("transport.zig").currentTime(std.testing.io);
     for (0..8) |_| try std.testing.expect(node.step(std.testing.io, now, 100, .{}, 0).failure == null);
@@ -373,4 +377,28 @@ test "metrics export stock per-topic gossipsub peer gauges under full topic stri
     try gossip_test.subscribe(g, future);
     output = try f.render(true);
     try contains(output, "gossipsub_mesh_peer_count{topicStr=\"" ++ future ++ "\"} 0\n");
+}
+
+test "metrics count a zero-wait owner turn once under each of its two due sources" {
+    const node = try std.testing.allocator.create(core.NetworkCore);
+    defer std.testing.allocator.destroy(node);
+    try initOwner(node);
+    defer node.deinit(std.testing.io);
+    const now = try @import("transport.zig").currentTime(std.testing.io);
+    for (0..8) |_| try std.testing.expect(node.step(std.testing.io, now, 100, .{}, 0).failure == null);
+    try std.testing.expect(node.nextWakeup(now, .{}).? > now.mono_ms);
+    const remote = try @import("wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{95}));
+    const remote_key = remote.publicKey();
+    const peer = @import("wire/peer_id.zig").PeerId.fromPublicKey(&remote_key);
+    // The node binds IPv4 only, so this dial fails before sending a datagram.
+    try node.connectUntil(&peer, &.{.{ .ip6 = .{ .octets = .{0} ** 15 ++ .{1}, .port = 9000 } }}, now, now.mono_ms + 60_000);
+    const before = node.due_now_turns;
+    const waits = node.wait_duration.buckets[0];
+    try std.testing.expect(node.step(std.testing.io, now, 100, .{}, 100).failure == null);
+    try std.testing.expectEqual(waits + 1, node.wait_duration.buckets[0]);
+    const Source = @import("wake_sources.zig").Source;
+    for (before, node.due_now_turns, 0..) |previous, current, index| {
+        const due = index == @intFromEnum(Source.dial) or index == @intFromEnum(Source.peer_policy);
+        try std.testing.expectEqual(previous + @intFromBool(due), current);
+    }
 }

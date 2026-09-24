@@ -542,10 +542,15 @@ pub const NetworkCore = struct {
         const backlog = self.transport.immediate_work;
         const host_work = self.transport.engine.hostWorkPending();
         const activity = self.transport.engine.activityPending();
+        const events = self.transport.engine.eventsPending();
+        const closing = self.transport.engine.closingPending();
         if (backlog) wakeups.note(.transport_backlog, now.mono_ms);
         if (host_work) wakeups.note(.transport_host_work, now.mono_ms);
         if (activity) wakeups.note(.transport_activity, now.mono_ms);
-        if (!backlog and !host_work and !activity) if (self.transport.nextTimeoutMs(now)) |relative| {
+        if (events) wakeups.note(.transport_events, now.mono_ms);
+        if (closing) wakeups.note(.transport_closing, now.mono_ms);
+        // nextTimeoutMs returns 0 while any source above is due, so the timer is read only when none is.
+        if (!backlog and !host_work and !activity and !events and !closing) if (self.transport.nextTimeoutMs(now)) |relative| {
             wakeups.note(.transport_timer, now.mono_ms +| relative);
         };
         if (!self.peer_manager.quiescing) if (self.discovery) |owned| wakeups.note(.discovery, owned.coordinator.nextWakeup(now.mono_ms));

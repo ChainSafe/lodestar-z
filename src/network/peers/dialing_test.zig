@@ -114,43 +114,45 @@ test "peer dial metrics count each completed attempt once and exclude local defe
     try std.testing.expectEqual(@as(u64, 0), q.selected_attempts[@intFromEnum(mod.Source.manual)]);
 }
 
-test "peer dial outcomes count every retired attempt once and retries remember the previous failure" {
+test "peer dial outcomes count every retired attempt once and retries count each failure once" {
     var q = try mod.Dialing.init(.{ .capacity = 1, .concurrent_max = 1, .seed = 4 });
     var catalog = try initCatalog(a, q.options);
     defer catalog.deinit(a);
     const peer: t.PeerId = .{ .bytes = @splat(1) };
-    try q.enqueue(&catalog, &peer, &.{address}, true, 0);
+    try q.enqueueUntil(&catalog, &peer, &.{address}, true, 0, 3_600_000);
+    const row = catalog.rowFor(catalog.find(&peer).?).?;
     const conn: t.Handle = .{ .index = 0, .generation = 1 };
-    var out: [1]mod.DialIntent = undefined;
     var now: u64 = 0;
-    try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, now, &out));
-    try std.testing.expect(q.dialDeferred(&catalog, out[0].token, now));
-    const closes = [_]t.CloseReason{ .peer_id_mismatch, .{ .peer_closed = .{ .app = false, .code = 2 } }, .handshake_timeout };
-    for (closes) |reason| {
-        now = q.nextWakeup(&catalog, now, 1).?;
-        try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, now, &out));
-        try std.testing.expect(q.dialStarted(out[0].token, conn));
-        try std.testing.expect(q.dialClosed(&catalog, conn, reason, now));
-    }
-    now = q.nextWakeup(&catalog, now, 1).?;
-    try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, now, &out));
-    try std.testing.expect(q.dialFailed(&catalog, out[0].token, now));
-    now = q.nextWakeup(&catalog, now, 1).?;
-    try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, now, &out));
-    try std.testing.expect(q.dialStarted(out[0].token, conn));
+    try std.testing.expect(q.dialStarted(try selectNext(&q, &catalog, &now), conn));
+    try std.testing.expect(q.dialClosed(&catalog, conn, .peer_id_mismatch, now));
+    // A retry that ends in a local start deferral or admission refusal leaves no failure to retry again.
+    try std.testing.expect(q.dialDeferred(&catalog, try selectNext(&q, &catalog, &now), now));
+    try std.testing.expect(q.dialStarted(try selectNext(&q, &catalog, &now), conn));
+    try std.testing.expect(q.dialClosed(&catalog, conn, .{ .peer_closed = .{ .app = false, .code = 2 } }, now));
+    try std.testing.expect(q.dialStarted(try selectNext(&q, &catalog, &now), conn));
+    try std.testing.expect(q.deferConnection(&catalog, conn, now));
+    try std.testing.expectEqual(@as(?t.DialFailure, null), row.intent.last_failure);
+    try std.testing.expect(q.dialStarted(try selectNext(&q, &catalog, &now), conn));
+    try std.testing.expect(q.dialClosed(&catalog, conn, .handshake_timeout, now));
+    _ = try selectNext(&q, &catalog, &now);
+    now += 10_000;
+    q.expire(&catalog, null, now);
+    try std.testing.expect(q.dialFailed(&catalog, try selectNext(&q, &catalog, &now), now));
+    // An outbound attempt made redundant by an inbound connection is cancelled, not failed.
+    try std.testing.expect(q.dialStarted(try selectNext(&q, &catalog, &now), conn));
+    accept(&q, &catalog, &peer, .{ .index = 1, .generation = 1 }, now);
+    try std.testing.expect(q.dialClosed(&catalog, conn, .handshake_timeout, now));
+    try std.testing.expectEqual(@as(?t.DialFailure, null), row.intent.last_failure);
+    disconnect(&catalog, &peer, now, .transport_closed, now + 100);
+    now += 100;
+    try std.testing.expect(q.dialStarted(try selectNext(&q, &catalog, &now), conn));
     accept(&q, &catalog, &peer, conn, now + 100);
-    for ([_]t.DialOutcome{ .deferred, .peer_id_mismatch, .refused, .handshake_timeout, .destination_unreachable, .connected }) |outcome|
-        try std.testing.expectEqual(@as(u64, 1), q.outcomes[@intFromEnum(outcome)]);
-    var finished: u64 = 0;
-    for (q.outcomes) |count| finished += count;
+    for (q.outcomes) |count| try std.testing.expectEqual(@as(u64, 1), count);
     var selected: u64 = 0;
     for (q.selected_attempts) |count| selected += count;
-    try std.testing.expectEqual(@as(u64, 6), finished);
-    try std.testing.expectEqual(selected, finished);
-    for ([_]t.DialFailure{ .peer_id_mismatch, .refused, .handshake_timeout, .destination_unreachable }) |failure|
-        try std.testing.expectEqual(@as(u64, 1), q.retries[@intFromEnum(failure)]);
-    try std.testing.expectEqual(@as(u64, 0), q.retries[@intFromEnum(t.DialFailure.expired)]);
-    try std.testing.expectEqual(@as(?t.DialFailure, null), catalog.rowFor(catalog.find(&peer).?).?.intent.last_failure);
+    try std.testing.expectEqual(@as(u64, q.outcomes.len), selected);
+    for (q.retries) |count| try std.testing.expectEqual(@as(u64, 1), count);
+    try std.testing.expectEqual(@as(?t.DialFailure, null), row.intent.last_failure);
 }
 
 test "peer dial custody diagnostics count unfinished derivations without mutating retained coverage" {
@@ -990,6 +992,12 @@ test "peer failed discovery candidate yields its slot after retry backoff" {
 
 fn initCatalog(allocator: std.mem.Allocator, options: mod.Options) !@import("catalog.zig").Catalog {
     return @import("catalog.zig").Catalog.initWithIntents(allocator, .{ .capacity = 8, .max_peers = 8, .target_peers = 8, .min_outbound = 0, .outbound_reserve = 0 }, options.capacity, 1024, options.seed);
+}
+fn selectNext(q: *mod.Dialing, catalog: *@import("catalog.zig").Catalog, now: *u64) !mod.Token {
+    var out: [1]mod.DialIntent = undefined;
+    now.* = q.nextWakeup(catalog, now.*, 1).?;
+    try std.testing.expectEqual(@as(usize, 1), q.poll(catalog, now.*, &out));
+    return out[0].token;
 }
 fn accept(q: *mod.Dialing, catalog: *@import("catalog.zig").Catalog, peer: *const t.PeerId, conn: t.Handle, now_ms: u64) void {
     var events: [8]t.Event = undefined;

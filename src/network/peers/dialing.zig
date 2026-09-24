@@ -349,8 +349,10 @@ pub const Dialing = struct {
         const attempt = self.active[index];
         const peer = attempt.peer.?;
         const row = catalog.rowFor(peer).?;
-        self.retire(catalog, index, failureOutcome(failure));
-        if (row.connection == null) {
+        // Another connection to the peer already won, so this attempt is redundant, not failed.
+        const redundant = row.connection != null;
+        self.retire(catalog, index, if (redundant) .cancelled else failureOutcome(failure));
+        if (!redundant) {
             self.durations[1].observe(now_ms -| attempt.started_ms);
             row.intent.failures = @min(row.intent.failures +| 1, 7);
             row.intent.last_failure = failure;
@@ -422,6 +424,7 @@ pub const Dialing = struct {
             self.preferred_starts = if (tier == 0) 0 else @min(self.preferred_starts + 1, self.options.concurrent_max);
             self.selected_attempts[tier] +|= 1;
             if (row.intent.last_failure) |failure| self.retries[@intFromEnum(failure)] +|= 1;
+            row.intent.last_failure = null;
             out[count] = .{ .token = .{ .index = slot, .generation = attempt.generation }, .peer = row.identity, .address = row.intent.addresses[row.intent.address_index] };
             count += 1;
         }
