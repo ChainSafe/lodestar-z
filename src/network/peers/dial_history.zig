@@ -58,12 +58,13 @@ pub const History = struct {
         return hasher.final() | 1;
     }
 
-    /// Records a failed dial of a discovery intent's endpoint.
-    pub fn recordEndpoint(self: *History, key: u64, failure: t.DialFailure, sequence: u64, now_ms: u64) void {
+    /// Records a failed dial of a discovery intent's endpoint. Only a `retry` record marks the
+    /// endpoint's next dial as a retry of `failure`.
+    pub fn recordEndpoint(self: *History, key: u64, failure: t.DialFailure, sequence: u64, now_ms: u64, retry: bool) void {
         const entry = self.claim(key, now_ms);
         entry.strikes +|= 1;
         entry.sequence = @max(entry.sequence, sequence);
-        entry.retry_pending = true;
+        entry.retry_pending = entry.retry_pending or retry;
         if (failure == .peer_id_mismatch) {
             entry.failure = .peer_id_mismatch;
             entry.strikes = @max(entry.strikes, strikes_to_block);

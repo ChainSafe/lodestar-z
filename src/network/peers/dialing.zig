@@ -25,6 +25,8 @@ const Attempt = struct {
     answered: bool = false,
     started_ms: u64 = 0,
     lease_until_ms: u64 = 0,
+    /// The dialed endpoint, which a discovery refresh may drop from the row's addresses mid-flight.
+    address: t.Address = .unspecified,
 };
 
 pub const Dialing = struct {
@@ -288,7 +290,7 @@ pub const Dialing = struct {
             if (!std.meta.eql(attempt.connection, conn)) continue;
             const row = catalog.rowFor(peer).?;
             self.retire(catalog, @intCast(index), .admission_refused);
-            catalog.history.clear(catalog.history.endpointKey(&row.identity, row.intent.addresses[row.intent.address_index]));
+            catalog.history.clear(dialedKey(catalog, row, &attempt));
             row.intent.eligible_at_ms = @max(row.intent.eligible_at_ms, now_ms +| 1_000);
             releaseUnused(catalog, peer);
             return true;
@@ -308,7 +310,7 @@ pub const Dialing = struct {
             if (attempt.connection) |current| {
                 if (!std.meta.eql(current, conn)) return;
                 self.durations[0].observe(now_ms -| attempt.started_ms);
-                catalog.history.clear(catalog.history.endpointKey(&row.identity, row.intent.addresses[row.intent.address_index]));
+                catalog.history.clear(dialedKey(catalog, row, attempt));
             }
             self.retire(catalog, index, .connected);
         }
@@ -387,36 +389,46 @@ pub const Dialing = struct {
             const base: u64 = @min(@as(u64, 1_000) << @intCast(row.intent.failures - 1), 60_000);
             const jitter = self.random.random().int(u16) % 1_001;
             row.intent.eligible_at_ms = @max(row.intent.eligible_at_ms, now_ms +| @min(base + jitter, 60_000));
-            if (evidence and remember(catalog, row, failure, now_ms)) {
-                self.counters.failed_intents_released +|= 1;
-                row.intent.automatic = false;
-                releaseUnused(catalog, peer);
-                return;
-            }
-            rotate(catalog, row, now_ms);
+        }
+        // A redundant attempt leaves the backoff alone but still records its endpoint evidence.
+        const learned = evidence and discoveryOnly(row);
+        if (learned and remember(catalog, row, &attempt, failure, !redundant, now_ms)) {
+            self.counters.failed_intents_released +|= 1;
+            row.intent.automatic = false;
+        } else if (learned or !redundant) {
+            rotate(catalog, row, &attempt, now_ms);
         }
         releaseUnused(catalog, peer);
     }
-    /// Records discovery-only evidence and reports whether every endpoint of the intent is blocked.
-    fn remember(catalog: *Catalog, row: *const Row, failure: t.DialFailure, now_ms: u64) bool {
-        if (!row.intent.automatic or row.direct or row.intent.manual_until_ms != 0) return false;
+    /// Records the dialed endpoint's evidence and reports whether every endpoint of the intent is blocked.
+    fn remember(catalog: *Catalog, row: *const Row, attempt: *const Attempt, failure: t.DialFailure, retry: bool, now_ms: u64) bool {
+        std.debug.assert(discoveryOnly(row));
         const sequence = if (row.intent.hints) |hints| hints.sequence else 0;
-        const address = row.intent.addresses[row.intent.address_index];
-        catalog.history.recordEndpoint(catalog.history.endpointKey(&row.identity, address), failure, sequence, now_ms);
+        catalog.history.recordEndpoint(dialedKey(catalog, row, attempt), failure, sequence, now_ms, retry);
         for (row.intent.addresses[0..row.intent.address_count]) |endpoint| {
             if (!catalog.history.blocked(catalog.history.endpointKey(&row.identity, endpoint), sequence, now_ms)) return false;
         }
         return true;
     }
-    /// Moves to the next endpoint. A discovery intent skips endpoints its history blocks, so it
-    /// never returns to a peer-id-mismatched endpoint while another remains.
-    fn rotate(catalog: *const Catalog, row: *Row, now_ms: u64) void {
-        const sequence = if (row.intent.hints) |hints| hints.sequence else 0;
-        for (0..row.intent.address_count) |_| {
-            row.intent.address_index = (row.intent.address_index + 1) % row.intent.address_count;
-            if (!row.intent.automatic or row.direct or row.intent.manual_until_ms != 0) return;
-            const address = row.intent.addresses[row.intent.address_index];
-            if (!catalog.history.blocked(catalog.history.endpointKey(&row.identity, address), sequence, now_ms)) return;
+    /// Moves past the dialed endpoint, or stays on the current one when a refresh replaced the dialed
+    /// one. A discovery intent skips endpoints its history blocks, so it never returns to a
+    /// peer-id-mismatched endpoint while another remains.
+    fn rotate(catalog: *const Catalog, row: *Row, attempt: *const Attempt, now_ms: u64) void {
+        const intent = &row.intent;
+        std.debug.assert(intent.address_index < intent.address_count);
+        var start = intent.address_index;
+        for (intent.addresses[0..intent.address_count], 0..) |address, position| {
+            if (address.eql(attempt.address)) start = @intCast((position + 1) % intent.address_count);
+        }
+        intent.address_index = start;
+        if (!discoveryOnly(row)) return;
+        const sequence = if (intent.hints) |hints| hints.sequence else 0;
+        for (0..intent.address_count) |offset| {
+            const position: u8 = @intCast((start + offset) % intent.address_count);
+            if (!catalog.history.blocked(catalog.history.endpointKey(&row.identity, intent.addresses[position]), sequence, now_ms)) {
+                intent.address_index = position;
+                return;
+            }
         }
     }
     fn releaseUnused(catalog: *Catalog, peer: t.PeerRef) void {
@@ -474,14 +486,14 @@ pub const Dialing = struct {
             self.cursor = (index + 1) % catalog.rows.len;
             const row = &catalog.rows[index];
             const attempt = &self.active[slot];
-            attempt.* = .{ .generation = attempt.generation + 1, .peer = catalog.reference(index), .started_ms = now_ms, .lease_until_ms = if (row.direct or row.intent.automatic) now_ms +| 10_000 else @min(row.intent.manual_until_ms, now_ms +| 10_000) };
+            attempt.* = .{ .generation = attempt.generation + 1, .peer = catalog.reference(index), .started_ms = now_ms, .lease_until_ms = if (row.direct or row.intent.automatic) now_ms +| 10_000 else @min(row.intent.manual_until_ms, now_ms +| 10_000), .address = row.intent.addresses[row.intent.address_index] };
             row.attempt = slot;
             const tier = dialTier(row, now_ms);
             self.preferred_starts = if (tier == 0) 0 else @min(self.preferred_starts + 1, self.options.concurrent_max);
             self.selected_attempts[tier] +|= 1;
             if (retryCause(catalog, row, now_ms)) |failure| self.retries[@intFromEnum(failure)] +|= 1;
             row.intent.last_failure = null;
-            out[count] = .{ .token = .{ .index = slot, .generation = attempt.generation }, .peer = row.identity, .address = row.intent.addresses[row.intent.address_index] };
+            out[count] = .{ .token = .{ .index = slot, .generation = attempt.generation }, .peer = row.identity, .address = attempt.address };
             count += 1;
         }
         return count;
@@ -550,6 +562,13 @@ fn dialTier(row: *const Row, now_ms: u64) u8 {
 }
 fn hasDialIntent(row: *const Row, now_ms: u64) bool {
     return row.direct or now_ms < row.intent.manual_until_ms or (row.intent.automatic and row.intent.selected);
+}
+/// Only discovery-only intents record and consult endpoint history.
+fn discoveryOnly(row: *const Row) bool {
+    return row.intent.automatic and !row.direct and row.intent.manual_until_ms == 0;
+}
+fn dialedKey(catalog: *const Catalog, row: *const Row, attempt: *const Attempt) u64 {
+    return catalog.history.endpointKey(&row.identity, attempt.address);
 }
 
 const Admitted = struct { addresses: [2]t.Address = undefined, count: u8 = 0, strikes: u8 = 0 };
