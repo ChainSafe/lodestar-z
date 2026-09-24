@@ -174,51 +174,26 @@ export interface NativeRuntimeDiagnostics {
   terminalErrorCode: string | null;
   currentSlot: bigint;
   ownerTurns: bigint;
-  lastMonotonicMs: bigint;
-  peerCount: number;
-  readyPeerCount: number;
   operationalFailures: bigint;
-  operationCapacity: number;
   operationOccupied: number;
-  operationHighWater: number;
-  operationRefusals: bigint;
   peerReportsIgnored: bigint;
-  connectCapacity: number;
   connectOccupied: number;
-  intentCapacity: number;
-  intentOccupied: number;
-  snapshotCapacity: number;
-  snapshotOccupied: number;
-  targetListCapacity: number;
-  targetListOccupied: number;
   preparingPins: number;
   copyingPins: number;
-  peerLaneCapacity: number;
   peerLaneOccupied: number;
-  peerLaneHighWater: number;
   ownerSequence: bigint;
   liveNativeRequestedBytes: number;
   liveBridgeRequestedBytes: number;
-  operationBytes: number;
   typedStoreBytes: number;
   metricsExportBytes: number;
   peerLaneBytes: number;
   ownerShellBytes: number;
-  ownerAllocationBytes: number;
   nativeAllocationCount: number;
   /** Configured QUIC flow-control ceilings, separate from the native allocation ledger. */
   quicReceiveWindowBytes: bigint;
   quicConnectionWindowBytes: bigint;
   quicStreamWindowBytes: bigint;
   resolvedCapacities: NativeResolvedCapacities;
-  connectHighWater: number;
-  connectRefusals: bigint;
-  intentHighWater: number;
-  intentRefusals: bigint;
-  snapshotHighWater: number;
-  snapshotRefusals: bigint;
-  targetListHighWater: number;
-  targetListRefusals: bigint;
   nativeRequestedBytes: number;
   bridgeRequestedBytes: number;
 }
@@ -346,8 +321,6 @@ export interface NativePublicationDiagnostics {
   unavailable: bigint;
   duplicates: bigint;
   latencyCount: bigint;
-  latencyMsTotal: bigint;
-  latencyMsMax: bigint;
   /** Upper histogram bucket bounds, in milliseconds. */
   latencyMsP50: bigint;
   latencyMsP99: bigint;
@@ -583,7 +556,6 @@ export interface NativeRequestDiagnostics {
   chunksCopied: bigint;
   bytesCopied: bigint;
   requestFull: bigint;
-  bridgeFull: bigint;
   busyPulls: bigint;
 }
 
@@ -649,13 +621,11 @@ export interface NativeIncomingDiagnostics {
   responseBytes: number;
   copyingBytes: number;
   requestsTaken: bigint;
-  requestBytesCopied: bigint;
   responseBytesCopied: bigint;
   chunksWritten: bigint;
   bytesWritten: bigint;
   capacityRefusals: bigint;
   byteRefusals: bigint;
-  busyResponses: bigint;
 }
 
 export interface NativeGossipHandle {
@@ -719,12 +689,7 @@ export interface NativeGossipDiagnostics {
   expiredExecuting: number;
   /** Milliseconds past the earliest verdict deadline among delivered validations awaiting host completion; zero when none. */
   oldestExpiredExecutionAgeMs: bigint;
-  fixedPayloadBytes: number;
-  dependencyRefusals: bigint;
-  kindRefusals: bigint;
   slotRefusals: bigint;
-  sourceRefusals: bigint;
-  freshnessReplacements: bigint;
   capacity: number;
   occupied: number;
   highWater: number;
@@ -735,27 +700,19 @@ export interface NativeGossipDiagnostics {
   payloadBytes: number;
   copyingBytes: number;
   publicationBytes: number;
-  publicationBytesHighWater: number;
   messagesCopied: bigint;
   bytesCopied: bigint;
   capacityRefusals: bigint;
   byteRefusals: bigint;
   queuedExpired: bigint;
   deliveredExpired: bigint;
-  staleReports: bigint;
   reportsAccepted: bigint;
   reportsAppliedAccept: bigint;
   reportsAppliedReject: bigint;
   reportsAppliedIgnore: bigint;
-  reportsAlreadyResolved: bigint;
-  reportsExpired: bigint;
-  reportsStale: bigint;
   publicationCopies: bigint;
-  publicationBytesCopied: bigint;
   publicationQueued: bigint;
-  publicationPressured: bigint;
   publicationSelected: bigint;
-  publicationUnavailable: bigint;
   publicationDuplicates: bigint;
 }
 

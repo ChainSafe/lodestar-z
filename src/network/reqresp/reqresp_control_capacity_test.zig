@@ -24,7 +24,6 @@ test "reqresp blocked control writers leave other admitted identities able to se
         slot.request = .{ .direction = .inbound, .completion = .active, .generation = 1, .conn = conn, .protocol = .metadata_v1 };
         slot.identity = .{ .bytes = @splat(@as(u8, @intCast(index))) };
         slot.state = .ready;
-        requests.limiter.bind(conn, now.mono_ms);
         try std.testing.expect(slot.promote(&requests, @intCast(index), now));
         const incoming = slot.deliver(true, now).?.request;
         try requests.respond(incoming.request, &metadata, null, now);
@@ -34,7 +33,6 @@ test "reqresp blocked control writers leave other admitted identities able to se
         try std.testing.expect(frame.len > 0);
     }
     try std.testing.expectEqual(@as(u64, 200), requests.counters.admitted);
-    try std.testing.expectEqual(@as(u64, 0), requests.counters.withheld_chunks);
     const repeated = &requests.inbound[200];
     repeated.request = .{ .direction = .inbound, .completion = .active, .generation = 1, .conn = .{ .index = 0, .generation = 1 }, .protocol = .ping_v1 };
     repeated.identity = requests.inbound[0].identity;
@@ -630,61 +628,6 @@ test "router control capacity counts pending and reported negotiations until rec
     defer router.cancel(&pair.client, ordinary);
 }
 
-test "reqresp control capacity retains peer and global response quotas" {
-    var pair: support.Pair = .{};
-    try pair.init(.{}, .{});
-    defer pair.deinit();
-    const handles = try support.connectPair(&pair);
-    var options = try reservedOptions();
-    var quotas = @import("limiter.zig").defaultQuotas();
-    quotas[@intFromEnum(protocol.Protocol.ping_v1)] = .{ .tokens = 1, .period_ms = 5_000 };
-    options.quotas = quotas;
-    options.global_quotas = quotas;
-    var client = try service_mod.Service.init(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } });
-    defer client.deinit();
-    defer client.reqresp.shutdown(&pair.client, &client.router);
-    var server = try service_mod.Service.init(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } });
-    defer server.deinit();
-    defer server.reqresp.shutdown(&pair.server, &server.router);
-    const ping = [_]u8{42} ++ [_]u8{0} ** 7;
-    var pongs: [2][8]u8 = undefined;
-    for (&pongs) |*pong| {
-        _ = try client.request(&pair.client, handles.client, .ping_v1, &ping, pong, .{}, pair.now);
-    }
-    var requests_received: usize = 0;
-    var chunks_received: usize = 0;
-    for (0..32) |_| {
-        try pair.pump();
-        var transport: [16]engine_mod.Event = undefined;
-        var activity: [128]engine_mod.Handle = undefined;
-        var output: [1]rr.Event = undefined;
-        const client_active = pair.client.takeActivity(&activity);
-        const received = client.process(&pair.client, pair.events(&pair.client, &transport), activity[0..client_active], pair.now, .{ .application = &.{}, .control = &output });
-        for (output[0..received.control]) |event| if (event == .chunk) {
-            try std.testing.expectEqualSlices(u8, &ping, event.chunk.bytes);
-            try std.testing.expect(client.reqresp.consume(event.chunk.request, pair.now));
-            chunks_received += 1;
-        };
-        const server_active = pair.server.takeActivity(&activity);
-        const incoming = server.process(&pair.server, pair.events(&pair.server, &transport), activity[0..server_active], pair.now, .{ .application = &.{}, .control = &output });
-        for (output[0..incoming.control]) |event| switch (event) {
-            .request => |request| {
-                try server.reqresp.respond(request.request, &ping, null, pair.now);
-                requests_received += 1;
-            },
-            .chunk_sent => |sent| _ = server.reqresp.finish(sent.request, pair.now),
-            else => {},
-        };
-    }
-    try std.testing.expectEqual(2, requests_received);
-    try std.testing.expectEqual(1, chunks_received);
-    try std.testing.expectEqual(1, server.reqresp.counters.withheld_chunks);
-    try std.testing.expectEqual(
-        pair.now.mono_ms + 5_000,
-        server.reqresp.nextWakeup(pair.now, .{ .application = 0, .control = 0 }),
-    );
-}
-
 fn allocationFailures(allocator: std.mem.Allocator) !void {
     var options = try reservedOptions();
     options.outbound_per_peer_max = 2;
@@ -696,7 +639,7 @@ fn allocationFailures(allocator: std.mem.Allocator) !void {
     defer service.deinit();
     const plan = service.reqresp.memoryPlan();
     try std.testing.expectEqual(plan.facade_bytes + plan.slot_bytes + plan.io_bytes +
-        plan.limiter_bytes + plan.admission_bytes + plan.request_sink_bytes + plan.serving_bytes + plan.scheduler_bytes, plan.total_bytes);
+        plan.admission_bytes + plan.request_sink_bytes + plan.serving_bytes + plan.scheduler_bytes, plan.total_bytes);
 }
 
 test "reqresp reserved physical sinks admit full native control wave and recycle by generation" {

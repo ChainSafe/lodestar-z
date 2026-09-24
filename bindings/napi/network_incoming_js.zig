@@ -80,7 +80,6 @@ pub fn take(runtime: *Runtime) !Value {
     cell.copying = false;
     cell.exposed = true;
     table.diag.requestsTaken +|= 1;
-    table.diag.requestBytesCopied +|= cell.input.len;
     table.releaseInput(cell);
     cell.state = if (cell.native) .serving else .terminal;
     table.releasePayload(cell);
@@ -132,7 +131,6 @@ pub fn respond(runtime: *Runtime, value: Value, data: Value, context_value: Valu
         return error.NetworkIncomingClosed;
     }
     if (cell.pending != null or cell.permission != null or cell.state != .serving) {
-        runtime.incoming.?.diag.busyResponses +|= 1;
         runtime.unlock();
         return error.NetworkIncomingBusy;
     }

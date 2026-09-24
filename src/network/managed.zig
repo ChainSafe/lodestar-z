@@ -37,10 +37,6 @@ pub fn serviceOptions(options: Options, local: *const t.LocalState) service_mod.
 
 pub fn validateOptions(options: Options) !void {
     try PeerManager.validateOptions(peerOptions(options));
-    if (options.service.reqresp.peers < options.peers.max_peers or
-        options.service.reqresp.outbound_control_reserved < options.peers.max_peers or
-        options.service.router.outbound_control_reserved < options.peers.max_peers)
-        return error.InvalidOptions;
     try service_mod.Service.validateOptions(options.service);
 }
 

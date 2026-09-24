@@ -54,14 +54,12 @@ pub const Diagnostics = struct {
     responseBytes: usize = 0,
     copyingBytes: usize = 0,
     requestsTaken: u64 = 0,
-    requestBytesCopied: u64 = 0,
     responseBytesCopied: u64 = 0,
     chunksWritten: u64 = 0,
     bytesWritten: u64 = 0,
     retiring: usize = 0,
     capacityRefusals: u64 = 0,
     byteRefusals: u64 = 0,
-    busyResponses: u64 = 0,
 };
 pub const Table = struct {
     cells: []Cell,
@@ -246,7 +244,7 @@ pub fn flags(runtime: *Runtime, now: n.Now) !void {
             _ = core.cancel(cell.handle);
             continue;
         }
-        if (cell.permission != null and !cell.permission_ready and core.service.reqresp.reserveResponse(cell.handle, now)) {
+        if (cell.permission != null and !cell.permission_ready and core.service.reqresp.reserveResponse(cell.handle)) {
             table.reserveResponse(cell, cell.protocol.info().response_max) catch continue;
             cell.permission_ready = true;
             runtime.pingLocked();

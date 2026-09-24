@@ -256,22 +256,10 @@ fn allocationCheck(a: std.mem.Allocator) !void {
     defer service.deinit();
     var core = try managed.PeerManager.init(a, &identity, &localState(.{}), managed.peerOptions(options()), &service, 4);
     defer core.deinit();
-    try std.testing.expect(core.memoryPlan().allocated_bytes > core.memoryPlan().control_bytes);
 }
 
-test "managed startup allocation failure cleans every prefix and memory accounts exact reservations" {
+test "managed startup allocation failure cleans every prefix" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationCheck, .{});
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    const identity: t.PeerId = .{ .bytes = @splat(1) };
-    var service = try @import("service.zig").Service.init(failing.allocator(), managed.serviceOptions(options(), &.{}));
-    defer service.deinit();
-    var core = try managed.PeerManager.init(failing.allocator(), &identity, &localState(.{}), managed.peerOptions(options()), &service, 4);
-    const expected = core.memoryPlan().allocated_bytes + service.allocatedBytes();
-    std.debug.print("sampling core allocation={d} prefixes={d} inline={d}\n", .{ expected, failing.alloc_index, @sizeOf(managed.PeerManager) });
-    try std.testing.expectEqual(expected, failing.allocated_bytes);
-    const core_bytes = core.memoryPlan().allocated_bytes;
-    core.deinit();
-    try std.testing.expectEqual(core_bytes, failing.freed_bytes);
 }
 
 test "managed native deterministic replacement cancels old control and ignores stale physical close" {
@@ -1112,12 +1100,12 @@ test "managed reconciliation reads preserve completed demand and catalog evaluat
 
     try setup.client.setDemand(&.{});
     try std.testing.expectEqual(setup.pair.now.mono_ms, clientWakeup(&setup).?);
-    const dirty = view.diagnostics(&setup.client_service);
+    const dirty = view.counters;
     for (0..8) |_| {
         try std.testing.expectEqualDeep(deficits, view.coverageDeficits());
         try std.testing.expectEqualDeep(need, view.discoveryNeed());
     }
-    try std.testing.expectEqualDeep(dirty, view.diagnostics(&setup.client_service));
+    try std.testing.expectEqualDeep(dirty, view.counters);
     setup.client.reconcile(&setup.client_service, setup.pair.now);
     try std.testing.expectEqualDeep(@import("peers/policy.zig").Deficits{}, view.coverageDeficits());
     try std.testing.expectEqualDeep(managed.DiscoveryNeed{ .general = true }, view.discoveryNeed());
@@ -1154,14 +1142,14 @@ test "managed reconciliation reads do not decay reputation or schedule peer remo
     var events: [4]t.Event = undefined;
     try std.testing.expectEqual(@as(usize, 1), setup.client.catalog.pollEvents(&events));
     const dirty = view.catalog.get(snapshot.peer).?;
-    const diagnostics = view.diagnostics(&setup.client_service);
+    const counters = view.counters;
     const dial_counters = view.dialing.counters;
     for (0..8) |_| {
         try std.testing.expectEqualDeep(deficits, view.coverageDeficits());
         try std.testing.expectEqualDeep(need, view.discoveryNeed());
     }
     try std.testing.expectEqualDeep(dirty, view.catalog.get(snapshot.peer).?);
-    try std.testing.expectEqualDeep(diagnostics, view.diagnostics(&setup.client_service));
+    try std.testing.expectEqualDeep(counters, view.counters);
     try std.testing.expectEqualDeep(dial_counters, view.dialing.counters);
     try std.testing.expect(!view.catalog.eventsPending());
     setup.client.reconcile(&setup.client_service, setup.pair.now);
@@ -1186,12 +1174,12 @@ test "managed reconciliation clears policy observations at quiescence and shutdo
             managed.beginGracefulClose(&setup.client, &setup.client_service, setup.pair.now);
         } else managed.shutdown(&setup.client, &setup.client_service, &setup.pair.client, setup.pair.now);
         const view: *const managed.PeerManager = &setup.client;
-        const diagnostics = view.diagnostics(&setup.client_service);
+        const counters = view.counters;
         setup.pair.advance(60_000);
         setup.client.reconcile(&setup.client_service, setup.pair.now);
         try std.testing.expectEqualDeep(@import("peers/policy.zig").Deficits{}, view.coverageDeficits());
         try std.testing.expectEqualDeep(managed.DiscoveryNeed{}, view.discoveryNeed());
-        try std.testing.expectEqualDeep(diagnostics, view.diagnostics(&setup.client_service));
+        try std.testing.expectEqualDeep(counters, view.counters);
         _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 200, &.{}, &.{});
         try std.testing.expectEqualDeep(@import("peers/policy.zig").Deficits{}, view.coverageDeficits());
         try std.testing.expectEqualDeep(managed.DiscoveryNeed{}, view.discoveryNeed());

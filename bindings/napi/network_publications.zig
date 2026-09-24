@@ -43,8 +43,6 @@ pub const Diagnostics = struct {
     unavailable: u64 = 0,
     duplicates: u64 = 0,
     latencyCount: u64 = 0,
-    latencyMsTotal: u64 = 0,
-    latencyMsMax: u64 = 0,
     latencyMsP50: u64 = 0,
     latencyMsP99: u64 = 0,
 };
@@ -149,7 +147,6 @@ pub const Table = struct {
             if (cell.state != .preparing) result.payloadBytes += cell.payload.len;
         }
         result.latencyCount = self.latency.count;
-        result.latencyMsTotal = @intCast(@min(self.latency.sum, std.math.maxInt(u64)));
         result.latencyMsP50 = self.percentile(50);
         result.latencyMsP99 = self.percentile(99);
         return result;
@@ -160,7 +157,7 @@ pub const Table = struct {
         var count: u64 = 0;
         for (self.latency.buckets, 0..) |value, i| {
             count += value;
-            if (count >= target) return if (i < @TypeOf(self.latency).bounds.len) @TypeOf(self.latency).bounds[i] else self.diag.latencyMsMax;
+            if (count >= target) return @TypeOf(self.latency).bounds[@min(i, @TypeOf(self.latency).bounds.len - 1)];
         }
         unreachable;
     }
@@ -175,7 +172,6 @@ pub fn execute(runtime: *Runtime, token: Token, now: n.Now) void {
     std.debug.assert(now.mono_ms >= cell.queued_ms);
     const latency = now.mono_ms - cell.queued_ms;
     table.latency.observe(latency);
-    table.diag.latencyMsMax = @max(table.diag.latencyMsMax, latency);
     runtime.unlock();
 
     const outcome = runtime.heavy.?.core.publishGossipWithOptions(cell.topic[0..cell.topic_len], cell.payload, cell.options, now);

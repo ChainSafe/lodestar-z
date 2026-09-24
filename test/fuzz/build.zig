@@ -157,7 +157,6 @@ pub fn build(b: *std.Build) void {
             "persistent_merkle_tree",
             lodestar_z.module("persistent_merkle_tree"),
         );
-        lib_mod.addImport("network_wire", lodestar_z.module("network_wire"));
         lib_mod.addImport("network", lodestar_z.module("network"));
         lib_mod.addImport("network_fixture", network_fixture);
 

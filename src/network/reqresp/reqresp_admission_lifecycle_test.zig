@@ -82,29 +82,6 @@ test "reqresp admission lifecycle cancellation retains execution until host reti
     try std.testing.expectEqual(@as(usize, 0), owner.resourceSnapshot().retiring);
 }
 
-test "reqresp admission lifecycle response permission waits without retaining a generated payload" {
-    var setup: harness.Pair = .{};
-    try setup.init(.{}, .{});
-    defer setup.deinit();
-    var sink: [8]u8 = undefined;
-    const bytes = [_]u8{1} ** 8;
-    _ = try application(&setup, .ping_v1, &bytes, &sink);
-    const incoming = try receive(&setup);
-    const owner = &setup.shared.server.reqresp;
-    const method = @intFromEnum(Protocol.ping_v1);
-    owner.limiter.global[method] = .{ .tokens = 0, .refilled_ms = setup.shared.pair.now.mono_ms };
-    try std.testing.expect(!owner.reserveResponse(incoming.request, setup.shared.pair.now));
-    try std.testing.expectEqual(@as(usize, 0), owner.inbound[incoming.request.index].request.io.payload.len);
-    try std.testing.expectEqual(.waiting_capacity, owner.inbound[incoming.request.index].state);
-    const due = owner.nextWakeup(setup.shared.pair.now, .{ .control = 1 }).?;
-    try std.testing.expect(due > setup.shared.pair.now.mono_ms);
-    setup.shared.pair.advance(due - setup.shared.pair.now.mono_ms);
-    try std.testing.expect(owner.reserveResponse(incoming.request, setup.shared.pair.now));
-    try owner.respond(incoming.request, &bytes, null, setup.shared.pair.now);
-    try std.testing.expectEqual(.writing_chunk, owner.inbound[incoming.request.index].state);
-    try std.testing.expect(!owner.inbound[incoming.request.index].response_reserved);
-}
-
 test "reqresp admission lifecycle fair dispatch advances to the next peer before another request from a busy peer" {
     var setup: harness.Pair = .{};
     try setup.init(.{}, .{ .inbound_max = 2 });

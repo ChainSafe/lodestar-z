@@ -688,7 +688,6 @@ test "peer dial review custody-only full table recovers at fixed horizon with bo
     wanted.groups.setRangeValue(.{ .start = 0, .end = 128 }, true);
     try q.enqueueDiscovered(&catalog, &first_candidate, &.{}, &wanted, 0);
     try q.enqueueDiscovered(&catalog, &second_candidate, &.{}, &wanted, 0);
-    const reservation = catalog.memoryPlan().allocated_bytes;
     for (0..10) |i| {
         const now = i * 60_000;
         try q.enqueueDiscovered(&catalog, &first_candidate, &.{}, &wanted, now);
@@ -719,7 +718,6 @@ test "peer dial review custody-only full table recovers at fixed horizon with bo
     try std.testing.expectEqual(@as(u16, 1), candidates[0].intent.priority);
     try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 600_000, &out));
     try std.testing.expect(out[0].peer.eql(&scarce.peer));
-    try std.testing.expectEqual(reservation, catalog.memoryPlan().allocated_bytes);
 }
 
 test "peer direct membership enumeration is complete atomic and read only" {

@@ -29,7 +29,7 @@ pub const Service = struct {
     pub fn validateOptions(options: Options) InitError!void {
         try routing.Router.validateOptions(options.router);
         try identify_mod.Handler.validate(options.identify);
-        _ = try reqresp_mod.ReqResp.validateOptions(options.reqresp);
+        try reqresp_mod.ReqResp.validateOptions(options.reqresp);
         try @import("gossipsub/options.zig").validate(&options.gossipsub);
     }
 
@@ -68,16 +68,6 @@ pub const Service = struct {
         self.reqresp.deinit();
         self.router.deinit();
         self.* = undefined;
-    }
-
-    pub fn allocatedBytes(self: *const Service) usize {
-        const request_memory = self.reqresp.memoryPlan();
-        const gossip_plan = self.gossipsub.memoryPlan();
-        const negotiation = @TypeOf(self.router.negotiator.entries[0]);
-        return request_memory.total_bytes - request_memory.facade_bytes +
-            gossip_plan.total_bytes +
-            self.router.negotiator.entries.len * @sizeOf(negotiation) +
-            self.identify.allocatedBytes();
     }
 
     pub fn request(

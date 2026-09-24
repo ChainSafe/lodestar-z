@@ -30,65 +30,6 @@ test "incoming reservation shares exact aggregate credits and rolls back allocat
     try std.testing.expectError(error.NetworkIncomingFull, table.reserve(.blocks_by_root_v2, 32));
 }
 
-test "incoming response allocation stays borrowed through real quota withholding and exact expiry" {
-    const harness = rr.testing;
-    var quotas = rr.limiter.defaultQuotas();
-    quotas[@intFromEnum(rr.Protocol.blocks_by_root_v2)] = .{ .tokens = 1, .period_ms = 3000 };
-    var pair: harness.Pair = .{};
-    try pair.init(.{}, .{ .quotas = quotas, .quota_timeout_ms = 1000 });
-    defer pair.deinit();
-    var budget: Budget = .{ .limit = 2 * (64 + rr.Protocol.blocks_by_root_v2.info().response_max) };
-    var table = try Table.init(std.testing.allocator, 2, &budget);
-    defer {
-        pair.shared.server.reqresp.shutdown(&pair.shared.pair.server, &pair.shared.server.router);
-        for (table.cells, 0..) |*cell, i| {
-            if (cell.state == .free) continue;
-            cell.native = false;
-            table.retire(.{ .index = @intCast(i), .generation = cell.generation });
-        }
-        table.deinit();
-    }
-    const query = [_]u8{0} ** 32;
-    const response_max = rr.Protocol.blocks_by_root_v2.info().response_max;
-    const sinks = try std.testing.allocator.alloc(u8, 2 * response_max);
-    defer {
-        pair.shared.client.reqresp.shutdown(&pair.shared.pair.client, &pair.shared.client.router);
-        std.testing.allocator.free(sinks);
-    }
-    for (0..2) |i| _ = try pair.shared.client.reqresp.request(&pair.shared.pair.client, &pair.shared.client.router, pair.shared.handles.client, .blocks_by_root_v2, &query, sinks[i * response_max ..][0..response_max], .{}, pair.shared.pair.now);
-    try submitWithheld(&pair, &table);
-    try std.testing.expectEqual(@as(usize, 1), pair.shared.server.reqresp.resourceSnapshot().withheld_chunks);
-    var withheld: ?*Cell = null;
-    for (table.cells) |*cell| if (cell.response.len > 0) {
-        withheld = cell;
-    };
-    const cell = withheld.?;
-    const native = &pair.shared.server.reqresp.inbound[cell.handle.index];
-    try std.testing.expectEqual(native.request.io.payload.ptr, cell.response.ptr);
-    try std.testing.expectEqual(@as(usize, 4000), table.snapshot().responseBytes);
-    const deadline = native.withheld_since_ms.? + 1000;
-    pair.shared.pair.advance(deadline - pair.shared.pair.now.mono_ms - 1);
-    try pair.pumpOnce();
-    try std.testing.expectEqual(@as(usize, 1), pair.shared.server.reqresp.resourceSnapshot().withheld_chunks);
-    try std.testing.expectEqual(native.request.io.payload.ptr, cell.response.ptr);
-    pair.shared.pair.advance(1);
-    var terminal_seen = false;
-    for (0..10) |_| {
-        try pair.pumpOnce();
-        for (pair.serverEvents()) |event| {
-            if (event != .failed or !std.meta.eql(event.failed.request, cell.handle)) continue;
-            try std.testing.expect(event.failed.reason == .quota_timeout);
-            cell.native = false;
-            cell.state = .terminal;
-            table.releasePayload(cell);
-            terminal_seen = true;
-        }
-        if (terminal_seen) break;
-    }
-    try std.testing.expect(terminal_seen);
-    try std.testing.expectEqual(@as(usize, 0), table.snapshot().responseBytes);
-}
-
 test "incoming and outbound reservations cannot each spend the aggregate remainder" {
     const protocol = rr.Protocol.blocks_by_root_v2;
     const outbound_amount = 32 + 2 * protocol.info().response_max;
@@ -107,42 +48,6 @@ test "incoming and outbound reservations cannot each spend the aggregate remaind
     try std.testing.expectError(error.NetworkBridgeFull, outgoing.reserve(protocol, 32));
     inbound.retire(second);
     try std.testing.expectEqual(@as(usize, 0), budget.used);
-}
-
-fn submitWithheld(pair: *rr.testing.Pair, table: *Table) !void {
-    var admitted: usize = 0;
-    var acknowledged: usize = 0;
-    for (0..30) |_| {
-        try pair.pumpOnce();
-        for (pair.serverEvents()) |event| switch (event) {
-            .request => |request| {
-                const token = try table.reserve(request.protocol, request.bytes.len);
-                try table.allocate(token, request.bytes);
-                const cell = table.get(token).?;
-                cell.handle = request.request;
-                cell.native = true;
-                cell.state = .response_native;
-                try table.reserveResponse(cell, 4000);
-                cell.response = try std.testing.allocator.alloc(u8, 4000);
-                @memset(cell.response, 71);
-                try pair.shared.server.reqresp.respond(request.request, cell.response, .{ .digest = rr.testing.deneb_digest, .fork = .deneb }, pair.shared.pair.now);
-                admitted += 1;
-            },
-            .chunk_sent => |sent| {
-                for (table.cells) |*cell| {
-                    if (!cell.native or !std.meta.eql(cell.handle, sent.request)) continue;
-                    table.releaseResponse(cell);
-                    cell.state = .serving;
-                    acknowledged += 1;
-                }
-            },
-            .failed => return error.TestUnexpectedResult,
-            else => {},
-        };
-        if (admitted == 2 and acknowledged == 1) break;
-    }
-    try std.testing.expectEqual(@as(usize, 2), admitted);
-    try std.testing.expectEqual(@as(usize, 1), acknowledged);
 }
 
 test "incoming submission recognizes a genuine native terminal awaiting output capacity" {

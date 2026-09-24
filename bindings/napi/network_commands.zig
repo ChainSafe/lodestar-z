@@ -35,12 +35,8 @@ pub const Table = struct {
     stores: [3][2]bool = @splat(@splat(false)),
     connects: u8 = 0,
     occupied: u8 = 0,
-    high_water: u8 = 0,
-    refusals: u64 = 0,
     sequence: u64 = 0,
     admission_sequence: u64 = 0,
-    kind_high_water: [5]u8 = @splat(0),
-    kind_refusals: [5]u64 = @splat(0),
 
     pub fn advance(self: *Table) !u64 {
         self.sequence = std.math.add(u64, self.sequence, 1) catch return error.NetworkSequenceExhausted;
@@ -61,14 +57,6 @@ pub const Table = struct {
     }
     pub fn reserve(self: *Table, command: Command) !Token {
         const kind = storageKind(command);
-        return self.reserveInner(command) catch |err| {
-            self.refusals +|= 1;
-            self.kind_refusals[@intFromEnum(kind)] +|= 1;
-            return err;
-        };
-    }
-    fn reserveInner(self: *Table, command: Command) !Token {
-        const kind = storageKind(command);
         if (kind == .connect and self.connects == connect_max) return error.NetworkCommandFull;
         var store: ?u8 = null;
         if (storeKind(kind)) |which| {
@@ -86,12 +74,6 @@ pub const Table = struct {
             if (storeKind(kind)) |which| self.stores[which][store.?] = true;
             self.connects += @intFromBool(kind == .connect);
             self.occupied += 1;
-            self.high_water = @max(self.high_water, self.occupied);
-            var count: u8 = 0;
-            for (&self.cells) |*entry| if (entry.state != .free and entry.kind == kind) {
-                count += 1;
-            };
-            self.kind_high_water[@intFromEnum(kind)] = @max(self.kind_high_water[@intFromEnum(kind)], count);
             return .{ .index = @intCast(i), .generation = generation };
         }
         return error.NetworkCommandFull;

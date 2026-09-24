@@ -88,7 +88,7 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.destroy(a);
     try initialize(a, allocator, io, &key_a, profile, &plan);
     defer a.deinit(io);
-    std.debug.print("history_entry_bytes={} history_owner_bytes={} startup_requested_zig_bytes={} inline_bytes={} gossip_bytes={} allocation_calls={} native_allocator_os_excluded=true\n", .{ @sizeOf(network.gossipsub.mcache.HistoryEntry), @sizeOf(network.gossipsub.mcache.History), a.memoryPlan().allocated_bytes, a.memoryPlan().inline_bytes, a.service.gossipsub.memoryPlan().total_bytes, a.reservations.allocation_calls });
+    std.debug.print("history_entry_bytes={} history_owner_bytes={} startup_requested_zig_bytes={} inline_bytes={} gossip_bytes={} allocation_calls={} native_allocator_os_excluded=true\n", .{ @sizeOf(network.gossipsub.mcache.HistoryEntry), @sizeOf(network.gossipsub.mcache.History), a.reservations.bytes, @sizeOf(network.NetworkCore), a.service.gossipsub.memoryPlan().total_bytes, a.reservations.allocation_calls });
     std.debug.print("gossip_metadata_bytes={}\n", .{a.service.gossipsub.memoryPlan().metadata_bytes});
     for (0..warmup_turns) |_| _ = try turn(a, io, .{});
     const idle_allocations = a.reservations.allocation_calls;
@@ -123,20 +123,20 @@ pub fn main(init: std.process.Init) !void {
 
 fn initialize(node: *network.NetworkCore, a: std.mem.Allocator, io: std.Io, key: *const network.KeyPair, profile: network.configuration.Profile, plan: *const network.chain.Plan) !void {
     const update = try plan.update(.{ .metadata = .{ .custody_group_count = chain_config.chain.CUSTODY_REQUIREMENT } }, null, 0);
-    try node.initManaged(a, io, .{
+    const resolved = try network.configuration.resolve(.{
+        .profile = profile,
+        .seed = 7,
+        .forks = plan.forks[0..plan.boundary_count],
+        .admission_policy = plan.requestPolicy(),
+        .router = .{ .capabilities = update.capabilities },
+        .gossip = .{ .topic_policy = plan.topics[0..plan.boundary_count], .message_id_policy = .{ .phase0_digest = plan.phase0_digest } },
+    });
+    try node.init(a, io, &resolved, .{
         .wait_mode = .native_poll,
         .host = key,
         .bind = .{ .ip4 = .loopback(0) },
         .local = update.local,
         .schedule = update.schedule,
-        .configuration = .{
-            .profile = profile,
-            .seed = 7,
-            .forks = plan.forks[0..plan.boundary_count],
-            .admission_policy = plan.requestPolicy(),
-            .router = .{ .capabilities = update.capabilities },
-            .gossip = .{ .topic_policy = plan.topics[0..plan.boundary_count], .message_id_policy = .{ .phase0_digest = plan.phase0_digest } },
-        },
     });
 }
 
@@ -326,7 +326,7 @@ fn idleWait(init: std.process.Init) !void {
         work += result.transport.work_processed;
     }
     const elapsed = timestamp(io) - start;
-    const readiness = node.diagnostics().runtime;
+    const readiness = node.counters;
     std.debug.print("readiness_calls={} nonzero_readiness_waits={} readiness_failures={}\n", .{ readiness.readiness_calls, readiness.readiness_nonzero_waits, readiness.readiness_failures });
     if (elapsed < 1_000_000_000) return error.TurnLimit;
     std.debug.print("case=idle_wait profile=small requested_duration_ms=1000 host_wait_ms=100 elapsed_ns={} turns={} positive_wait_turns={} immediate_deadlines={} turn_elapsed_ns={} native_work={} turn_allocation_calls={}\n", .{ elapsed, count, positive_waits, immediate, elapsed_turns, work, node.reservations.allocation_calls - calls });

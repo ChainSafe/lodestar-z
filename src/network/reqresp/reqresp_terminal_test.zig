@@ -141,39 +141,6 @@ test "reqresp rejected wire requests retain diagnostics and count terminal outco
     }
 }
 
-test "reqresp malformed request remains visible when its error reply cannot be sent" {
-    var quotas = @import("limiter.zig").defaultQuotas();
-    quotas[@intFromEnum(Protocol.ping_v1)] = .{ .tokens = 1, .period_ms = 5000 };
-    var setup: Pair = .{};
-    try setup.init(.{}, .{ .quotas = quotas, .quota_timeout_ms = 100 });
-    defer setup.deinit();
-    const stream = try setup.openRaw(.ping_v1);
-    try setup.awaitRawSelection(stream, .ping_v1);
-    setup.server_event_capacity = 0;
-    const slot = incoming(&setup);
-    try std.testing.expect(setup.shared.server.reqresp.limiter.take(slot.request.conn, .ping_v1, 1, setup.shared.pair.now.mono_ms));
-    const bytes = [_]u8{0x80} ** 11;
-    try std.testing.expectEqual(bytes.len, try setup.shared.pair.client.write(stream, &bytes, true));
-    for (0..20) |_| {
-        try setup.pumpOnce();
-        if (slot.state == .withheld) break;
-    }
-    try std.testing.expectEqual(.withheld, slot.state);
-    try std.testing.expectEqual(error.VarintTooLong, slot.rejection.?);
-    try std.testing.expectEqual(@as(u64, 0), setup.shared.server.reqresp.counters.malformed);
-    setup.shared.pair.advance(100);
-    for (0..4) |_| try setup.pumpOnce();
-    try std.testing.expectEqual(rr.Failure.quota_timeout, slot.request.terminalEvent().?.failed.reason);
-    try std.testing.expectEqual(@as(u64, 1), setup.shared.server.reqresp.counters.malformed);
-    try std.testing.expectEqual(@as(u64, 0), setup.shared.server.reqresp.counters.error_responses_sent);
-    try std.testing.expectEqual(@as(u64, 0), setup.shared.server.reqresp.counters.requests_served);
-    try std.testing.expectEqual(@as(u64, 1), setup.shared.server.reqresp.protocol_counters[@intFromEnum(Protocol.ping_v1)].incoming_errors);
-    try std.testing.expectEqual(@as(u64, 0), setup.shared.server.reqresp.counters.timeouts);
-    setup.server_event_capacity = 16;
-    try setup.pumpOnce();
-    try std.testing.expectEqual(.protocol, setup.shared.server.reqresp.peerFault(setup.serverEvents()[0]).?.kind);
-}
-
 test "reqresp router negotiation timeout contributes once to aggregate timeout counters" {
     var setup: Pair = .{};
     try setup.init(.{}, .{});

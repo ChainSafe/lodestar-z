@@ -68,7 +68,7 @@ const Peer = struct {
                 if (row.disconnect_reason) |value| reason = @tagName(value);
                 if (self.node.peer_manager.control.schedules[row.peer.index].closing) |closing| deadline = closing.deadline_ms;
             };
-            return control.emit(self.allocator, .{ .id = instruction.id, .ok = true, .connected = self.node.peerCounts().connected, .relevant = self.node.peerCounts().relevant, .generation = native_generation, .sequence = metadata_sequence, .custody = custody, .sampling = sampling, .closed = self.node.isClosed(), .memory = self.node.memoryPlan().allocated_bytes, .reason = reason, .deadline = deadline, .now = self.now.mono_ms });
+            return control.emit(self.allocator, .{ .id = instruction.id, .ok = true, .connected = self.node.peerCounts().connected, .relevant = self.node.peerCounts().relevant, .generation = native_generation, .sequence = metadata_sequence, .custody = custody, .sampling = sampling, .closed = self.node.isClosed(), .reason = reason, .deadline = deadline, .now = self.now.mono_ms });
         } else if (std.mem.eql(u8, instruction.op, "disconnect")) {
             if (!self.node.peer_manager.disconnect(self.peer orelse return error.NoPeer, .host, self.now)) return error.NoPeer;
         } else if (std.mem.eql(u8, instruction.op, "shutdown")) {
@@ -112,19 +112,19 @@ pub fn main(init: std.process.Init) !void {
         local.status.head_root[i] = @intCast(255 - i);
     }
     var blob_schedule: [network.reqresp.request_policy.schedule_max]network.reqresp.request_policy.BlobLimit = undefined;
-    try peer.node.initManaged(a, init.io, .{
+    const resolved = try network.configuration.resolve(.{
+        .profile = .small,
+        .seed = 17,
+        .forks = &.{.{ .digest = local.fork.digest, .fork = fork }},
+        .limits = .{ .connections_max = 4, .handshaking_max = 4, .dialing_max = 2 },
+        .peers = .{ .capacity = 4, .outbound_reserve = 1, .target_peers = 1, .max_peers = 3, .min_outbound = 0 },
+        .control = .{ .inbound_status_grace_ms = 20, .ping_inbound_ms = 1_000, .ping_outbound_ms = 1_000 },
+        .admission_policy = try network.reqresp.request_policy.Config.fromBeaconConfig(&@import("config").mainnet.config, &blob_schedule),
+    });
+    try peer.node.init(a, init.io, &resolved, .{
         .wait_mode = .native_poll,
         .host = &key,
         .bind = .{ .ip4 = .loopback(0) },
-        .configuration = .{
-            .profile = .small,
-            .seed = 17,
-            .forks = &.{.{ .digest = local.fork.digest, .fork = fork }},
-            .limits = .{ .connections_max = 4, .handshaking_max = 4, .dialing_max = 2 },
-            .peers = .{ .capacity = 4, .outbound_reserve = 1, .target_peers = 1, .max_peers = 3, .min_outbound = 0 },
-            .control = .{ .inbound_status_grace_ms = 20, .ping_inbound_ms = 1_000, .ping_outbound_ms = 1_000 },
-            .admission_policy = try network.reqresp.request_policy.Config.fromBeaconConfig(&@import("config").mainnet.config, &blob_schedule),
-        },
         .local = local,
         .schedule = .{ .fulu_scheduled = fork.gte(.fulu) },
     });

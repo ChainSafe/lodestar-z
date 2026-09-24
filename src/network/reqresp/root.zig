@@ -10,8 +10,6 @@ pub const reqresp = @import("reqresp.zig");
 
 pub const Protocol = protocol.Protocol;
 pub const Info = protocol.Info;
-pub const Limiter = limiter.Limiter;
-pub const Quota = limiter.Quota;
 pub const ReqResp = reqresp.ReqResp;
 pub const Options = reqresp.Options;
 pub const RequestOptions = reqresp.RequestOptions;

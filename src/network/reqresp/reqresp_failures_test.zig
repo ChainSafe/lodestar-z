@@ -1,7 +1,6 @@
 const std = @import("std");
 const ct = @import("consensus_types");
 const codec = @import("codec.zig");
-const limiter = @import("limiter.zig");
 const protocol = @import("protocol.zig");
 const reqresp = @import("reqresp.zig");
 const harness = @import("test_pair.zig");
@@ -315,76 +314,6 @@ test "reqresp bounds concurrent requests per protocol on both sides" {
     try setup.pumpOnce();
     var request_storage_9: [24]u8 = undefined;
     _ = try requestBlocks(&setup, &request_storage_9, 1, sinks[2 * size ..]);
-}
-
-test "reqresp withholds chunks while the peer's bucket is empty" {
-    var quotas = limiter.defaultQuotas();
-    quotas[@intFromEnum(Protocol.ping_v1)] = .{ .tokens = 1, .period_ms = 3_000 };
-    var setup: Pair = .{};
-    try setup.init(.{ .quotas = quotas }, .{ .quotas = quotas });
-    defer setup.deinit();
-
-    var sinks: [2][8]u8 = undefined;
-    const ping = [_]u8{9} ** 8;
-    for (&sinks) |*sink| {
-        _ = try setup.shared.client.reqresp.request(
-            &setup.shared.pair.client,
-            &setup.shared.client.router,
-            setup.shared.handles.client,
-            .ping_v1,
-            &ping,
-            sink,
-            .{},
-            setup.shared.pair.now,
-        );
-    }
-    var completed: u32 = 0;
-    var rounds: usize = 0;
-    while (rounds < 20) : (rounds += 1) {
-        try setup.pumpOnce();
-        for (setup.serverEvents()) |event| switch (event) {
-            .request => |incoming| {
-                try setup.shared.server.reqresp.respond(incoming.request, &ping, null, setup.shared.pair.now);
-                try std.testing.expect(setup.shared.server.reqresp.finish(incoming.request, setup.shared.pair.now));
-            },
-            else => {},
-        };
-        for (setup.clientEvents()) |event| switch (event) {
-            .chunk => |chunk| try std.testing.expect(setup.shared.client.reqresp.consume(chunk.request, setup.shared.pair.now)),
-            .done => completed += 1,
-            .failed => return error.TestUnexpectedResult,
-            else => {},
-        };
-    }
-    try std.testing.expectEqual(@as(u32, 1), completed);
-    try std.testing.expectEqual(@as(u64, 1), setup.shared.server.reqresp.counters.withheld_chunks);
-
-    const waiting = setup.shared.server.reqresp.resourceSnapshot();
-    setup.shared.server.reqresp.options.work_per_pump_max = 1;
-    _ = setup.shared.server.reqresp.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .control = &.{} }).control;
-    const eligible = setup.shared.server.reqresp.limiter.nextToken(setup.shared.handles.server, .ping_v1, setup.shared.pair.now.mono_ms);
-    try std.testing.expect(eligible.? > setup.shared.pair.now.mono_ms);
-    try std.testing.expectEqual(eligible, setup.shared.server.reqresp.nextWakeup(setup.shared.pair.now, .{ .control = 1 }));
-    try std.testing.expectEqual(@as(usize, 1), waiting.withheld_chunks);
-    try std.testing.expect(waiting.oldest_withheld_age_ms != null);
-    setup.shared.pair.advance(3_000);
-    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), setup.shared.server.reqresp.nextWakeup(setup.shared.pair.now, .{ .control = 1 }));
-    setup.shared.server.reqresp.options.work_per_pump_max = 32;
-    rounds = 0;
-    while (rounds < 20 and completed < 2) : (rounds += 1) {
-        try setup.pumpOnce();
-        for (setup.clientEvents()) |event| switch (event) {
-            .chunk => |chunk| try std.testing.expect(setup.shared.client.reqresp.consume(chunk.request, setup.shared.pair.now)),
-            .done => completed += 1,
-            .failed => return error.TestUnexpectedResult,
-            else => {},
-        };
-    }
-    try std.testing.expectEqual(@as(u32, 2), completed);
-    try std.testing.expect(setup.shared.server.reqresp.counters.withheld_ms_total >= 3_000);
-    try std.testing.expectEqual(@as(usize, 0), setup.shared.server.reqresp.resourceSnapshot().withheld_chunks);
-    try std.testing.expectEqual(@as(?u64, null), setup.shared.server.reqresp.resourceSnapshot().oldest_withheld_age_ms);
-    try std.testing.expectEqual(@as(usize, 1), waiting.withheld_chunks);
 }
 
 test "reqresp holds the next chunk until the host consumes the previous one" {
@@ -981,8 +910,8 @@ test "reqresp validates transport capacity and copies its fork table" {
     try std.testing.expectError(error.InvalidCapacity, rr.attach(&setup.shared.pair.client));
     try std.testing.expectError(error.InvalidOptions, reqresp.ReqResp.init(std.testing.allocator, .{ .peers = 1025, .forks = &.{}, .admission = try reqresp.AdmissionOptions.defaults(&@import("policy_fixture.zig").config(), 1, 1, 64) }));
     const plan = rr.memoryPlan();
-    try std.testing.expectEqual(plan.total_bytes, plan.facade_bytes + plan.slot_bytes + plan.io_bytes + plan.limiter_bytes + plan.admission_bytes + plan.request_sink_bytes + plan.serving_bytes + plan.scheduler_bytes);
-    try std.testing.expect(plan.io_bytes > 0 and plan.slot_bytes > 0 and plan.limiter_bytes > 0);
+    try std.testing.expectEqual(plan.total_bytes, plan.facade_bytes + plan.slot_bytes + plan.io_bytes + plan.admission_bytes + plan.request_sink_bytes + plan.serving_bytes + plan.scheduler_bytes);
+    try std.testing.expect(plan.io_bytes > 0 and plan.slot_bytes > 0);
 }
 
 test "reqresp cancellation releases read held chunk and response write states once" {
@@ -1101,11 +1030,11 @@ test "reqresp terminal pressure quiesces without capacity and wakes when host un
     try std.testing.expectEqual(@as(?u64, null), setup.shared.client.reqresp.nextWakeup(setup.shared.pair.now, .{ .control = 0 }));
 }
 
-test "reqresp quota delay expires as local policy and not peer timeout" {
-    var quotas = limiter.defaultQuotas();
-    quotas[@intFromEnum(Protocol.ping_v1)] = .{ .tokens = 1, .period_ms = 5000 };
+test "reqresp admission wait expires as local policy and not peer timeout" {
+    var admission = try reqresp.AdmissionOptions.defaults(&@import("policy_fixture.zig").config(), 128, 128, 8);
+    for (&admission.limits.peer) |*quotas| quotas[@intFromEnum(Protocol.ping_v1)] = .{ .tokens = 1, .period_ms = 5000 };
     var setup: Pair = .{};
-    try setup.init(.{}, .{ .quotas = quotas, .quota_timeout_ms = 1000 });
+    try setup.init(.{}, .{ .quota_timeout_ms = 1000, .admission = admission });
     defer setup.deinit();
     const bytes = [_]u8{0} ** 8;
     var sinks: [2][8]u8 = undefined;
@@ -1120,11 +1049,11 @@ test "reqresp quota delay expires as local policy and not peer timeout" {
             },
             else => {},
         };
-        if (requested == 2) break;
     }
-    try std.testing.expectEqual(@as(u32, 2), requested);
-    _ = setup.shared.server.reqresp.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .control = &.{} }).control;
-    for (0..4) |_| _ = setup.shared.server.reqresp.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .control = &.{} }).control;
+    try std.testing.expectEqual(@as(u32, 1), requested);
+    var ready: usize = 0;
+    for (setup.shared.server.reqresp.inbound) |*slot| ready += @intFromBool(slot.request.running() and slot.state == .ready);
+    try std.testing.expectEqual(@as(usize, 1), ready);
     try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms + 1000), setup.shared.server.reqresp.nextWakeup(setup.shared.pair.now, .{ .control = 0 }));
     setup.shared.pair.advance(1000);
     var events: [4]Event = undefined;

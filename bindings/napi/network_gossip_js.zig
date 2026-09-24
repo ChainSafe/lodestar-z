@@ -119,7 +119,7 @@ pub fn report(runtime: *Runtime, value: Value, verdict_value: Value) !Value {
         accepted = runtime.gossip.?.report(.{ .index = @intCast(index), .generation = generation }, verdict, mono_ms);
         runtime.work_rearm = true;
         runtime.signalLocked();
-    } else runtime.gossip.?.diag.staleReports +|= 1;
+    }
     runtime.unlock();
     return runtime.env.getBoolean(accepted);
 }

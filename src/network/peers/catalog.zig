@@ -120,15 +120,6 @@ pub const Catalog = struct {
         self.* = undefined;
     }
 
-    pub fn memoryPlan(self: *const Catalog) t.MemoryPlan {
-        return .{
-            .inline_bytes = @sizeOf(Catalog),
-            .allocated_bytes = self.rows.len * @sizeOf(Row) + self.by_identity.slots.len * @sizeOf(u16) + self.by_connection.len * @sizeOf(?u16) + self.established.len * @sizeOf(?u16) + self.intent_masks.len * @sizeOf(usize) + self.history.entries.len * @sizeOf(dial_history.Entry),
-            .rows = @intCast(self.rows.len),
-            .notification_slots = self.options.capacity,
-        };
-    }
-
     pub fn candidateHints(self: *const Catalog, identity: *const t.PeerId, now_ms: u64) ?enr.Hints {
         const row = self.rowFor(self.find(identity) orelse return null).?;
         return if (now_ms < row.intent.hints_at_ms +| hint_freshness_ms) row.intent.hints else null;

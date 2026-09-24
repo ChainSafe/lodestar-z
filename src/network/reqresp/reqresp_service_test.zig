@@ -1,6 +1,5 @@
 const std = @import("std");
 const ct = @import("consensus_types");
-const limiter = @import("limiter.zig");
 const protocol = @import("protocol.zig");
 const reqresp = @import("reqresp.zig");
 const engine_mod = @import("../quic/engine.zig");
@@ -61,15 +60,13 @@ test "service round trips a status request through the collapsed host loop" {
 }
 
 test "service reclaims inbound sinks across more requests than it has slots" {
-    var quotas = limiter.defaultQuotas();
-    quotas[@intFromEnum(Protocol.status_v1)] = .{ .tokens = 1_000, .period_ms = 1_000 };
     const admission: reqresp.AdmissionOptions = .{ .policy = @import("policy_fixture.zig").config(), .limits = .{
         .identities = 2,
         .peer = @import("admission_fixture.zig").quotas(1_000, 1_000),
         .global = @import("admission_fixture.zig").quotas(1_000, 1_000),
     } };
     var setup: Pair = .{};
-    try setup.init(.{ .outbound_max = 4, .inbound_max = 4, .quotas = quotas }, .{ .outbound_max = 4, .inbound_max = 4, .quotas = quotas, .admission = admission });
+    try setup.init(.{ .outbound_max = 4, .inbound_max = 4 }, .{ .outbound_max = 4, .inbound_max = 4, .admission = admission });
     defer setup.deinit();
 
     var seed: u8 = 0;

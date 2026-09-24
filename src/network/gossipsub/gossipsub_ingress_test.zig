@@ -222,14 +222,12 @@ test "gossip admission rejects ineligible candidates without replacing work and 
     vote(&bytes, 9, 1000);
     try receive(&g, 2, attestation, &bytes);
     try t.expectEqual(@as(u64, 1), table.diag.slotRefusals);
-    try t.expectEqual(@as(u64, 0), table.diag.freshnessReplacements);
     try t.expect(table.get(victim) != null);
     try t.expectEqual(@as(usize, 4), g.resourceSnapshot().pending_validations);
     try t.expectEqual(free_pages, g.messages.store.free_pages);
     vote(&bytes, 10, 1);
     try receive(&g, 2, attestation, &bytes);
     try t.expect(table.get(victim) == null);
-    try t.expectEqual(@as(u64, 1), table.diag.freshnessReplacements);
     try t.expectEqual(@as(u64, 1), table.diag.reportsAppliedIgnore);
     try t.expectEqual(@as(usize, 4), table.diag.occupied);
     try t.expectEqual(@as(usize, 4), g.resourceSnapshot().pending_validations);
@@ -273,7 +271,6 @@ test "gossip admission leaves queued work intact when a host copy pins the requi
     var candidate: [1000]u8 = undefined;
     vote(&candidate, 4, 1);
     try receive(&g, 2, attestation, &candidate);
-    try t.expectEqual(@as(u64, 0), table.diag.freshnessReplacements);
     try t.expectEqual(@as(u64, 0), table.diag.reportsAppliedIgnore);
     try t.expectEqual(@as(usize, 3), table.diag.occupied);
     try t.expectEqual(@as(usize, 3), g.resourceSnapshot().pending_validations);

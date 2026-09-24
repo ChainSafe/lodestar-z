@@ -417,8 +417,7 @@ test "peer discovery empty lookup backs off and startup allocations balance" {
     defer a.deinit();
     var allocation = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     var controller = try discovery.Discovery.init(allocation.allocator(), &a.transport, &context, &.{}, 10, .{});
-    const plan = controller.memoryPlan();
-    try std.testing.expectEqual(allocation.allocated_bytes, plan.allocated_bytes);
+    const allocated = allocation.allocated_bytes;
     try controller.request(.{ .general = true }, 10);
     var out: [1]adapter.Candidate = undefined;
     const result = try controller.step(std.testing.io, 10, 10, &out);
@@ -431,7 +430,7 @@ test "peer discovery empty lookup backs off and startup allocations balance" {
     _ = controller.consume(&progress, &.{}, &out);
     try std.testing.expectEqualDeep(completed, controller.lookup_time);
     try std.testing.expect(controller.last_candidate_ms == null);
-    try std.testing.expectEqual(allocation.allocated_bytes, plan.allocated_bytes);
+    try std.testing.expectEqual(allocated, allocation.allocated_bytes);
     controller.deinit();
     try std.testing.expectEqual(allocation.allocated_bytes, allocation.freed_bytes);
     var failed = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });

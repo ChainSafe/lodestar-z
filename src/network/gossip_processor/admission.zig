@@ -18,10 +18,7 @@ pub fn admit(table: *processor.GossipProcessor, owner: *gossip.Gossipsub, candid
         table.diag.slotRefusals +|= 1;
         return false;
     }
-    if (!table.sourceRoom(message.source, kind, message.bytes.len)) {
-        table.diag.sourceRefusals +|= 1;
-        return false;
-    }
+    if (!table.sourceRoom(message.source, kind, message.bytes.len)) return false;
     var tokens: [processor.batch_max]processor.Token = undefined;
     var handles: [processor.batch_max]gossip.ValidationHandle = undefined;
     var count: usize = 0;
@@ -38,7 +35,6 @@ pub fn admit(table: *processor.GossipProcessor, owner: *gossip.Gossipsub, candid
             }
             candidate.commit();
             table.capture(message, &metadata, deneb, received_at) catch unreachable;
-            table.diag.freshnessReplacements +|= count;
             return true;
         }
         if (count == tokens.len or !processor.limits_mod.newestFirst(kind)) break;

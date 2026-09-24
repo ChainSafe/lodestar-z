@@ -48,7 +48,7 @@ pub const AdmissionRefusal = enum {
 };
 pub const admission_refusal_count = @typeInfo(AdmissionRefusal).@"enum".fields.len;
 
-pub const InboundPhase = enum { receiving_request, ready, waiting_host, writing_response, withheld, terminal };
+pub const InboundPhase = enum { receiving_request, ready, waiting_host, writing_response, terminal };
 pub const inbound_phase_count = @typeInfo(InboundPhase).@"enum".fields.len;
 
 pub const ProtocolCounters = struct {
