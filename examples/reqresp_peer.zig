@@ -181,7 +181,8 @@ const Session = struct {
     peer_status: ?StatusV2.Type = null,
     finished: bool = false,
     request_ssz: [StatusV2.fixed_size]u8 = undefined,
-    response_ssz: [inbound_max][StatusV2.fixed_size]u8 = undefined,
+    /// One response per inbound request slot, since chunks borrow their bytes until sent.
+    response_ssz: [][StatusV2.fixed_size]u8 = &.{},
 
     fn send(self: *Session, which: Protocol) !void {
         const body = self.encode(which, &self.request_ssz);
@@ -358,6 +359,8 @@ fn dial(
         .inbound_per_peer_max = inbound_max,
     } });
     defer svc.deinit();
+    const response_ssz = try allocator.alloc([StatusV2.fixed_size]u8, svc.reqresp.inbound.len);
+    defer allocator.free(response_ssz);
     defer svc.reqresp.shutdown(&node.engine, &svc.router);
 
     var session = Session{
@@ -368,6 +371,7 @@ fn dial(
         .conn = try node.dial(io, &target),
         .sink = sink,
         .peer_status = peer_status.*,
+        .response_ssz = response_ssz,
     };
     defer peer_status.* = session.peer_status;
 
