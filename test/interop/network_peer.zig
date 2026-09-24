@@ -43,7 +43,8 @@ pub const Peer = struct {
     quit: bool = false,
     status_accepted: bool = false,
     application: bool = false,
-    control_responses: [8][92]u8 = undefined,
+    /// One response per inbound request slot, since chunks borrow their bytes until sent.
+    control_responses: [][92]u8 = &.{},
     gossip_sink: Gossip.MessageSink = undefined,
     deliveries: [16]Delivery = undefined,
     delivery_count: usize = 0,
@@ -323,6 +324,8 @@ pub fn main(init: std.process.Init) !void {
     defer a.destroy(peer);
     peer.* = .{ .application = application, .allocator = a, .io = init.io, .service = try network.Service.init(a, .{ .identify = .{ .agent = "lodestar-z-identify" }, .reqresp = .{ .admission = try network.reqresp.reqresp.AdmissionOptions.defaults(&policy, 4, 4, if (application) 6 else 1), .peers = 4, .outbound_max = 1, .inbound_max = if (application) 8 else 1, .inbound_per_peer_max = if (application) 8 else 1, .inbound_control_reserved = if (application) 2 else 0, .forks = &.{.{ .digest = if (application) applicationDigest() else .{ 1, 0, 0, 0 }, .fork = .deneb }}, .progress_timeout_ms = 5000, .quotas = quotas }, .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .topic_policy = &gossip_topics, .message_id_policy = .{ .phase0_digest = .{ 1, 0, 0, 0 } }, .random_seed = 0x6d2b79f5 } }), .sink = undefined, .response = undefined };
     defer peer.service.deinit();
+    peer.control_responses = try a.alloc([92]u8, peer.service.reqresp.inbound.len);
+    defer a.free(peer.control_responses);
     peer.attachSink();
     peer.sink = try a.alloc(u8, max_payload);
     defer a.free(peer.sink);

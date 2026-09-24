@@ -517,6 +517,10 @@ test.skipIf(!NATIVE_PEER)(
       const parts = remote.address.split("/");
       const id = peerIdFromHex(remote.peer);
       await runtime.connect(id, [{address: Uint8Array.of(127, 0, 0, 1), family: 4, port: Number(parts[4])}], 5000n);
+      // The peer must serve the control exchange, not only the request below.
+      for (let i = 0; i < 500 && !(await runtime.getPeers()).peers[0]?.metadata; i++)
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      expect((await runtime.getPeers()).peers[0]?.metadata).not.toBeNull();
       const stream = runtime.request(id, "/eth2/beacon_chain/req/beacon_blocks_by_range/2/ssz_snappy", rangeRequest());
       const first = await stream.next();
       expect(first.value.fork).toBe("deneb");
