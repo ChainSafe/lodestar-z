@@ -62,7 +62,8 @@ pub const DisconnectReason = enum {
     gossip_unavailable,
     health_error,
 };
-pub const DialFailure = enum { unanswered, handshake_timeout, peer_id_mismatch, refused, destination_unreachable, expired };
+/// `health` is a peer-charged health close of a connection to the endpoint; no dial attempt ends with it.
+pub const DialFailure = enum { unanswered, handshake_timeout, peer_id_mismatch, refused, destination_unreachable, expired, health };
 pub const DialOutcome = enum { connected, deferred, admission_refused, cancelled, unanswered, handshake_timeout, peer_id_mismatch, refused, destination_unreachable, expired };
 pub const Snapshot = struct {
     identify: ?@import("../identify/root.zig").Metadata = null,

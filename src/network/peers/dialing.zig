@@ -316,7 +316,6 @@ pub const Dialing = struct {
             if (!std.meta.eql(attempt.connection, conn)) continue;
             const row = catalog.rowFor(peer).?;
             self.retire(catalog, @intCast(index), .admission_refused);
-            catalog.history.clear(dialedKey(catalog, row, &attempt));
             row.intent.eligible_at_ms = @max(row.intent.eligible_at_ms, now_ms +| 1_000);
             catalog.markDial(peer.index);
             releaseUnused(catalog, peer);
@@ -338,7 +337,7 @@ pub const Dialing = struct {
             if (attempt.connection) |current| {
                 if (!std.meta.eql(current, conn)) return;
                 self.durations[0].observe(now_ms -| attempt.started_ms);
-                catalog.history.clear(dialedKey(catalog, row, attempt));
+                row.dialed = attempt.address;
             }
             self.retire(catalog, index, .connected);
         }
@@ -688,6 +687,8 @@ fn closeFailure(reason: t.CloseReason) t.DialFailure {
 }
 fn failureOutcome(failure: t.DialFailure) t.DialOutcome {
     return switch (failure) {
+        // A health close follows an admitted connection, whose attempt already retired as connected.
+        .health => unreachable,
         inline else => |tag| @field(t.DialOutcome, @tagName(tag)),
     };
 }

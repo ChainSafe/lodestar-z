@@ -59,9 +59,52 @@ test "dial history clear forgets a proven endpoint" {
     h.recordEndpoint(key, .refused, 1, 0);
     h.recordEndpoint(key, .refused, 1, 1);
     try std.testing.expect(h.blocked(key, 1, 2));
-    h.clear(key);
+    h.clearFailures(key);
     try std.testing.expect(!h.blocked(key, 1, 2));
     try std.testing.expectEqual(@as(u8, 0), h.strikesFor(key, 1, 2));
+}
+
+test "dial history health strikes outlast cleared dial failures and a newer sequence" {
+    var storage: [64]history.Entry = undefined;
+    var h = fixture(&storage);
+    const key = h.endpointKey(&peer, endpoint);
+    h.recordEndpoint(key, .unanswered, 5, 0);
+    h.recordEndpoint(key, .health, 5, 1);
+    try std.testing.expect(h.blocked(key, 5, 2));
+    h.clearFailures(key);
+    try std.testing.expect(!h.blocked(key, 5, 2));
+    try std.testing.expectEqual(@as(u8, 1), h.strikesFor(key, 5, 2));
+    try std.testing.expectEqual(@as(u8, 1), h.strikesFor(key, 6, 2));
+    h.recordEndpoint(key, .health, 5, 3);
+    try std.testing.expect(h.blocked(key, 5, 4));
+    try std.testing.expect(h.blocked(key, 99, 4));
+    try std.testing.expectEqual(@as(u8, 2), h.strikesFor(key, 99, 4));
+    h.clearFailures(key);
+    try std.testing.expect(h.blocked(key, 99, 4));
+    try std.testing.expect(!h.blocked(key, 99, 3 + history.endpoint_memory_ms));
+    try std.testing.expectEqual(@as(u8, 0), h.strikesFor(key, 5, 3 + history.endpoint_memory_ms));
+}
+
+test "dial history clearing health keeps dial failures and a mismatch block" {
+    var storage: [64]history.Entry = undefined;
+    var h = fixture(&storage);
+    const key = h.endpointKey(&peer, endpoint);
+    h.recordEndpoint(key, .health, 1, 0);
+    h.markRetry(key, .health, 0);
+    h.clearHealth(key);
+    try std.testing.expectEqual(@as(u8, 0), h.strikesFor(key, 1, 1));
+    try std.testing.expectEqual(@as(?t.DialFailure, null), h.takeRetry(key, 1));
+    h.recordEndpoint(key, .health, 1, 1);
+    h.recordEndpoint(key, .unanswered, 1, 2);
+    try std.testing.expect(h.blocked(key, 1, 3));
+    h.clearHealth(key);
+    try std.testing.expect(!h.blocked(key, 1, 3));
+    try std.testing.expectEqual(@as(u8, 1), h.strikesFor(key, 1, 3));
+    h.recordEndpoint(key, .health, 1, 3);
+    h.recordEndpoint(key, .peer_id_mismatch, 1, 4);
+    h.clearHealth(key);
+    try std.testing.expect(h.blocked(key, 99, 5));
+    try std.testing.expectEqual(history.strikes_to_block, h.strikesFor(key, 1, 5));
 }
 
 test "dial history escalates remote full cooldowns and forgets them after the memory window" {

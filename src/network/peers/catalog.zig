@@ -42,6 +42,9 @@ pub const Row = struct {
     closing_reason: ?t.DisconnectReason = null,
     direction: t.Direction = .inbound,
     endpoint: t.Address = .unspecified,
+    /// The endpoint the connection was dialed to, kept after its attempt retires; null for an
+    /// inbound connection.
+    dialed: ?t.Address = null,
     status: ?t.Status = null,
     metadata: ?t.Metadata = null,
     status_at_ms: u64 = 0,
@@ -567,6 +570,7 @@ pub const Catalog = struct {
         row.closing_reason = null;
         row.direction = options.direction;
         row.endpoint = options.endpoint;
+        row.dialed = null;
         row.connected_at_ms = options.now_ms;
         row.status = null;
         row.metadata = null;
@@ -647,14 +651,15 @@ pub const Catalog = struct {
         row.pending_update = false;
         row.pending_close = .{ .connection = conn, .reason = reason };
         row.reputation.decay(now_ms);
-        self.connectionClosed(row, reason, now_ms);
+        self.connectionClosed(ref.index, reason, now_ms);
         self.syncEvent(ref.index);
         self.markDial(ref.index);
         self.noteReputation(row, now_ms);
         return true;
     }
 
-    fn connectionClosed(self: *Catalog, row: *Row, reason: t.DisconnectReason, now_ms: u64) void {
+    fn connectionClosed(self: *Catalog, index: usize, reason: t.DisconnectReason, now_ms: u64) void {
+        const row = &self.rows[index];
         row.intent.history_until_ms = @max(row.intent.history_until_ms, now_ms +| history_retention_ms);
         if (reason == .capacity or reason == .count_pruning) {
             if (row.reputation.redial_until_ms <= now_ms)
@@ -667,6 +672,58 @@ pub const Catalog = struct {
         const delay = @min(@as(u64, 5_000) << @intCast(row.intent.failures - 1), 300_000);
         row.intent.eligible_at_ms = @max(row.intent.eligible_at_ms, now_ms +| delay +| (self.random.random().int(u16) % 1_001));
         self.connection_backoffs +|= 1;
+        if (reason == .health_timeout or reason == .health_error) self.recordHealth(index, now_ms);
+    }
+
+    /// Charges a health close to the connection's endpoint. The row's own backoff is lost when a
+    /// later admission reclaims the row, so only this history entry carries the escalation to a
+    /// rediscovered intent. A discovery-only intent then moves off the endpoints its history blocks,
+    /// and drops once every one is blocked, as after a failed dial.
+    fn recordHealth(self: *Catalog, index: usize, now_ms: u64) void {
+        const row = &self.rows[index];
+        const key = self.healthKey(index) orelse return;
+        const intent = &row.intent;
+        const sequence = if (intent.hints) |hints| hints.sequence else 0;
+        self.history.recordEndpoint(key, .health, sequence, now_ms);
+        self.history.markRetry(key, .health, now_ms);
+        if (!intent.automatic or row.direct or intent.manual_until_ms != 0) return;
+        for (0..intent.address_count) |offset| {
+            const position: u8 = @intCast((intent.address_index + offset) % intent.address_count);
+            if (!self.history.blocked(self.history.endpointKey(&row.identity, intent.addresses[position]), sequence, now_ms)) {
+                intent.address_index = position;
+                return;
+            }
+        }
+        intent.automatic = false;
+        if (row.attempt == null) self.releaseIntent(self.reference(index));
+    }
+
+    /// The endpoint the row's connection answers for: the one it was dialed to or, for an inbound
+    /// connection, the intent's current endpoint.
+    fn healthKey(self: *const Catalog, index: usize) ?u64 {
+        const row = &self.rows[index];
+        const endpoint = row.dialed orelse if (self.intents.isSet(index) and row.intent.address_count != 0)
+            row.intent.addresses[row.intent.address_index]
+        else
+            return null;
+        return self.history.endpointKey(&row.identity, endpoint);
+    }
+
+    /// Clears the connection-failure evidence of the endpoint the connection was dialed to. Control
+    /// calls it once the connection completed a valid relevant Status and a valid Metadata exchange:
+    /// a QUIC handshake alone does not show the endpoint serves the peer.
+    pub fn clearDialFailures(self: *Catalog, ref: t.PeerRef, conn: t.Handle) void {
+        const row = self.connectedRow(ref, conn) orelse return;
+        const endpoint = row.dialed orelse return;
+        self.history.clearFailures(self.history.endpointKey(&row.identity, endpoint));
+    }
+
+    /// Clears the health evidence of the connection's endpoint. Control calls it once a probe started
+    /// after the Status and Metadata exchange succeeded, so a peer that answers that exchange and
+    /// then stops answering keeps its strikes across reconnects.
+    pub fn clearHealthStrikes(self: *Catalog, ref: t.PeerRef, conn: t.Handle) void {
+        _ = self.connectedRow(ref, conn) orelse return;
+        self.history.clearHealth(self.healthKey(ref.index) orelse return);
     }
 
     pub fn markUnavailable(

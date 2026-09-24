@@ -174,3 +174,56 @@ test "peer fold long-lived health disconnect restarts redial backoff" {
     try std.testing.expect(c.disconnect(peer, conn, .health_timeout, 300_000));
     try std.testing.expectEqual(@as(u8, 1), c.rowFor(peer).?.intent.failures);
 }
+
+/// A QUIC-admitted connection whose probes never answer: Control cools the peer down and closes it
+/// for health after about 25 s.
+fn zombieRound(c: *Catalog, d: *dialing.Dialing, identity: *const t.PeerId, conn: t.Handle, now: *u64) !t.PeerRef {
+    now.* = d.nextWakeup(c, now.*, 1).?;
+    var out: [1]dialing.DialIntent = undefined;
+    try std.testing.expectEqual(@as(usize, 1), d.poll(c, now.*, &out));
+    try std.testing.expect(out[0].peer.eql(identity));
+    try std.testing.expect(d.dialStarted(out[0].token, conn));
+    const peer = admit(c, identity, conn.index, .outbound, now.*).admitted.peer;
+    d.accepted(c, peer, conn, now.*);
+    now.* += 25_000;
+    try std.testing.expect(c.cooldown(peer, conn, now.*, 60_000));
+    now.* += 2_000;
+    try std.testing.expect(c.disconnect(peer, conn, .health_timeout, now.*));
+    var events: [4]t.Event = undefined;
+    _ = c.pollEvents(&events);
+    return peer;
+}
+
+test "peer fold zombie endpoint is blocked after two health closes across rediscovery and row replacement" {
+    var c = try Catalog.initWithIntents(a, opts, 2, 8, 1);
+    defer c.deinit(a);
+    var d = try dialing.Dialing.init(.{ .capacity = 2, .concurrent_max = 1, .seed = 1 });
+    var zombie = try candidate(1, 0);
+    const key = c.history.endpointKey(&zombie.peer, address);
+    try d.enqueueDiscovered(&c, &zombie, &.{}, &.{}, 0);
+    var now: u64 = 0;
+    _ = try zombieRound(&c, &d, &zombie.peer, .{ .index = 0, .generation = 1 }, &now);
+    try std.testing.expectEqual(@as(u8, 1), c.history.strikesFor(key, zombie.sequence, now));
+    // Once the cooldown lapses, a fresh admission reclaims the row and its backoff with it.
+    now += 60_000;
+    const first: t.PeerId = .{ .bytes = @splat(9) };
+    _ = admit(&c, &first, 4, .inbound, now).admitted;
+    try std.testing.expect(c.find(&zombie.peer) == null);
+    zombie.sequence = 2;
+    try d.enqueueDiscovered(&c, &zombie, &.{}, &.{}, now);
+    try std.testing.expectEqual(@as(u8, 1), c.rowFor(c.find(&zombie.peer).?).?.intent.failures);
+    const peer = try zombieRound(&c, &d, &zombie.peer, .{ .index = 1, .generation = 1 }, &now);
+    try std.testing.expectEqual(@as(u64, 1), d.retries[@intFromEnum(t.DialFailure.health)]);
+    try std.testing.expect(c.history.blocked(key, zombie.sequence, now));
+    try std.testing.expect(!c.intents.isSet(peer.index));
+    try std.testing.expectEqual(@as(?u64, null), d.nextWakeup(&c, now, 1));
+    zombie.sequence = 3;
+    try std.testing.expectError(error.RecentlyFailed, d.enqueueDiscovered(&c, &zombie, &.{}, &.{}, now));
+    now += 60_000;
+    const second: t.PeerId = .{ .bytes = @splat(10) };
+    _ = admit(&c, &second, 5, .inbound, now).admitted;
+    try std.testing.expect(c.find(&zombie.peer) == null);
+    zombie.sequence = 4;
+    try std.testing.expectError(error.RecentlyFailed, d.enqueueDiscovered(&c, &zombie, &.{}, &.{}, now));
+    try d.enqueueDiscovered(&c, &zombie, &.{}, &.{}, now - 60_000 + @import("dial_history.zig").endpoint_memory_ms);
+}
