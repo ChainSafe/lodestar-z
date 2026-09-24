@@ -79,7 +79,6 @@ test("request capacity refusal is typed while control and publication admission 
 
 test("publication pressure preserves urgent, control and request admission", async () => {
   const config = applicationConfig();
-  config.resources.bridgeBudgetBytes = 128 * 1024 * 1024;
   const runtime = startRuntime(config);
   try {
     await runtime.applyIntent(localIntent(config), config.initialSlot);

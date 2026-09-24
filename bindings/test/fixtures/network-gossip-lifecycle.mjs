@@ -38,7 +38,10 @@ for (let i = 0; i < 100; i++) {
 }
 const outcomes = await results;
 assert(outcomes.length > 0);
-for (const outcome of outcomes) if (outcome.status === "rejected") assert.equal(outcome.reason.code, "NetworkClosed");
+// The beacon block plan retains eight publications; later ones are refused until close.
+for (const outcome of outcomes)
+  if (outcome.status === "rejected" && outcome.reason.code !== "NetworkClosed")
+    assert.equal(outcome.reason.reason, "resource_exhausted");
 assert.equal(weak.deref(), undefined);
 await remote.close();
 console.log(JSON.stringify({accepted: outcomes.length, settled: outcomes.length, collected: true, notifierErrors}));

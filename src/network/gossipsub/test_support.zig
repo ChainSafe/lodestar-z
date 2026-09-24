@@ -7,6 +7,65 @@ const local_intent = @import("local_intent.zig");
 const topic_policy = @import("topic_policy.zig");
 const topic_fixture = @import("topic_fixture.zig");
 
+/// A MessageSink that admits as the gossip processor does: it commits each feasible
+/// candidate and copies the message, which stays readable until `clear`.
+pub const Inbox = struct {
+    pub const capacity = 64;
+    sink: gossip.MessageSink = undefined,
+    events: [capacity]@import("messages.zig").MessageEvent = undefined,
+    count: usize = 0,
+    /// Report no capacity, as a full processor does.
+    full: bool = false,
+
+    /// The inbox must not move while the owner holds the sink.
+    pub fn attach(self: *Inbox, g: *gossip.Gossipsub) void {
+        self.sink = .{ .context = self, .has_capacity = hasCapacity, .admit = admit };
+        g.message_sink = &self.sink;
+    }
+
+    pub fn messages(self: *const Inbox) []const @import("messages.zig").MessageEvent {
+        return self.events[0..self.count];
+    }
+
+    pub fn last(self: *const Inbox) @import("messages.zig").MessageEvent {
+        std.debug.assert(self.count > 0);
+        return self.events[self.count - 1];
+    }
+
+    pub fn clear(self: *Inbox) void {
+        for (self.events[0..self.count]) |event| {
+            std.testing.allocator.free(event.topic);
+            std.testing.allocator.free(event.bytes);
+        }
+        self.count = 0;
+    }
+
+    pub fn deinit(self: *Inbox) void {
+        self.clear();
+    }
+
+    fn hasCapacity(context: *anyopaque, _: @import("topic.zig").Kind, _: usize) bool {
+        const self: *Inbox = @ptrCast(@alignCast(context));
+        return !self.full and self.count < capacity;
+    }
+
+    fn admit(context: *anyopaque, candidate: *gossip.Admission) bool {
+        const self: *Inbox = @ptrCast(@alignCast(context));
+        if (self.full or self.count == capacity or !candidate.feasible(&.{})) return false;
+        const topic = std.testing.allocator.dupe(u8, candidate.event.topic) catch return false;
+        const bytes = std.testing.allocator.dupe(u8, candidate.event.bytes) catch {
+            std.testing.allocator.free(topic);
+            return false;
+        };
+        candidate.commit();
+        self.events[self.count] = candidate.event;
+        self.events[self.count].topic = topic;
+        self.events[self.count].bytes = bytes;
+        self.count += 1;
+        return true;
+    }
+};
+
 pub fn init(allocator: std.mem.Allocator, options: gossip.Options) !gossip.Gossipsub {
     var configured = options;
     configured.topic_policy = options.topic_policy orelse &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })};
@@ -72,8 +131,11 @@ pub fn penalize(g: *gossip.Gossipsub, conn: engine.Handle, count: f64) void {
     g.peers.penalize(g.sessions.rows[index].logical, count);
 }
 
+/// Returns the events emitted plus the messages delivered to an attached sink.
 pub fn pump(g: *gossip.Gossipsub, transport: *engine.Engine, now: @import("../types.zig").Now, events: []gossip.Event) usize {
-    return pumpTurn(g, transport, now, events).count;
+    const received = g.counters.messages_received;
+    const turn = pumpTurn(g, transport, now, events);
+    return turn.count + if (turn.sink != null) g.counters.messages_received - received else 0;
 }
 
 pub fn pumpTurn(g: *gossip.Gossipsub, transport: *engine.Engine, now: @import("../types.zig").Now, events: []gossip.Event) @import("turn.zig").Turn {
@@ -86,11 +148,13 @@ pub fn pumpTurn(g: *gossip.Gossipsub, transport: *engine.Engine, now: @import(".
 
 pub fn processRpc(g: *gossip.Gossipsub, index: u16, now: @import("../types.zig").Now, events: []gossip.Event, count: *usize, items: *usize) !bool {
     var turn = @import("turn.zig").Turn.init(&g.options, now, events, g.decompressed, g.msg_scratch);
+    turn.sink = g.message_sink;
     turn.count = count.*;
     var peer = @import("turn.zig").Credits.peer(&g.options);
     peer.items = items.*;
+    const received = g.counters.messages_received;
     const result = try @import("session_io.zig").processRpc(g, index, &turn, &peer);
-    count.* = turn.count;
+    count.* = turn.count + if (turn.sink != null) g.counters.messages_received - received else 0;
     items.* = peer.items;
     return result == .done;
 }
@@ -115,15 +179,18 @@ const Credits = @import("turn.zig").Credits;
 const snappy = @import("snappy");
 pub fn receiveMessage(g: *Gossipsub, index: u16, msg: protobuf.Message, now: Now, events: []Event, start: usize) ?usize {
     var turn = Turn.init(&g.options, now, events, g.decompressed, g.msg_scratch);
+    turn.sink = g.message_sink;
     turn.count = start;
     if (events.len == 0) turn.used = turn.arena.len;
     var peer = Credits.peer(&g.options);
+    const received = g.counters.messages_received;
     const result = g.receiveItem(g.sessions.ref(index), .{ .message = msg }, &turn, &peer);
     switch (result) {
         .events => g.pressure(index, .events, now.mono_ms),
         .done, .credits => {},
     }
-    return if (result == .done) turn.count else null;
+    const delivered = if (turn.sink != null) g.counters.messages_received - received else 0;
+    return if (result == .done) turn.count + delivered else null;
 }
 
 pub fn message(g: *Gossipsub, peer: u16, text: []const u8, now_ms: u64, events: []Event) !?usize {

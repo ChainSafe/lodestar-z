@@ -10,6 +10,16 @@ const ping = [_]u8{ 1, 0, 0, 0, 0, 0, 0, 0 };
 const identify_status = [_]u8{1} ++ [_]u8{0} ** 91;
 const range = [_]u8{0} ** 8 ++ ping ++ ping;
 
+/// A gossip message admitted through the sink, reported after the service turn.
+const Delivery = struct {
+    handle: Gossip.ValidationHandle,
+    id: Gossip.MessageId,
+    topic: [Gossip.topic.topic_max_len]u8,
+    topic_len: usize,
+    length: usize,
+    sha256: [64]u8,
+};
+
 pub const Peer = struct {
     transport: network.Transport = .{},
     service: network.Service,
@@ -35,6 +45,39 @@ pub const Peer = struct {
     status_accepted: bool = false,
     application: bool = false,
     control_responses: [8][92]u8 = undefined,
+    gossip_sink: Gossip.MessageSink = undefined,
+    deliveries: [16]Delivery = undefined,
+    delivery_count: usize = 0,
+
+    /// The peer must not move while the service holds the sink.
+    fn attachSink(self: *Peer) void {
+        self.gossip_sink = .{ .context = self, .has_capacity = hasCapacity, .admit = admit };
+        self.service.gossipsub.message_sink = &self.gossip_sink;
+    }
+
+    fn hasCapacity(context: *anyopaque, _: Gossip.topic.Kind, _: usize) bool {
+        const self: *Peer = @ptrCast(@alignCast(context));
+        return self.delivery_count < self.deliveries.len;
+    }
+
+    fn admit(context: *anyopaque, candidate: *Gossip.Admission) bool {
+        const self: *Peer = @ptrCast(@alignCast(context));
+        if (self.delivery_count == self.deliveries.len or !candidate.feasible(&.{})) return false;
+        candidate.commit();
+        const event = &candidate.event;
+        const delivery = &self.deliveries[self.delivery_count];
+        delivery.* = .{ .handle = event.handle, .id = event.id, .topic = undefined, .topic_len = event.topic.len, .length = event.bytes.len, .sha256 = hash(event.bytes) };
+        @memcpy(delivery.topic[0..event.topic.len], event.topic);
+        self.delivery_count += 1;
+        return true;
+    }
+
+    fn deliver(self: *Peer, name: []const u8, length: usize, sha256: [64]u8, id: Gossip.MessageId, handle: Gossip.ValidationHandle) !void {
+        self.emitted += 1;
+        try control.emit(self.allocator, .{ .event = "message", .topic = name, .length = length, .sha256 = sha256, .messageId = std.fmt.bytesToHex(id, .lower) });
+        const report = self.service.gossipsub.report(handle, .accept, self.now);
+        std.debug.assert(report == .applied);
+    }
 
     pub fn pump(self: *Peer) !void {
         if (self.steps >= 10_000_000) return error.StepBound;
@@ -72,13 +115,11 @@ pub const Peer = struct {
             .success => |*metadata| try control.emit(self.allocator, .{ .event = "identified", .agent = if (metadata.agent) |*agent| agent.slice() else null, .identify = metadata.protocols.contains(.identify), .meshsub = metadata.protocols.contains(.{ .meshsub = .v1_2 }), .status2 = metadata.protocols.contains(.{ .reqresp = .status_v2 }) }),
             .failed => |failure| try control.emit(self.allocator, .{ .event = "identifyFailed", .reason = @tagName(failure) }),
         };
+        const delivered = self.delivery_count;
+        self.delivery_count = 0;
+        for (self.deliveries[0..delivered]) |*delivery| try self.deliver(delivery.topic[0..delivery.topic_len], delivery.length, delivery.sha256, delivery.id, delivery.handle);
         for (messages[0..counts.gossipsub]) |event| switch (event) {
-            .message => |m| {
-                self.emitted += 1;
-                try control.emit(self.allocator, .{ .event = "message", .topic = m.topic, .length = m.bytes.len, .sha256 = hash(m.bytes), .messageId = std.fmt.bytesToHex(m.id, .lower) });
-                const report = self.service.gossipsub.report(m.handle, .accept, self.now);
-                std.debug.assert(report == .applied);
-            },
+            .message => |m| try self.deliver(m.topic, m.bytes.len, hash(m.bytes), m.id, m.handle),
             .subscription_change => |s| try control.emit(self.allocator, .{ .event = "subscription", .topic = s.topic, .subscribed = s.subscribed }),
         };
         if (stepped.failure) |err| return err;
@@ -233,6 +274,8 @@ pub const Peer = struct {
         } else if (std.mem.eql(u8, c.op, "setEventCapacity")) {
             const capacity = c.capacity orelse return error.MissingCapacity;
             if (capacity > 16) return error.CapacityBound;
+            // Bounded event capacity applies only to event delivery.
+            self.service.gossipsub.message_sink = null;
             self.event_capacity = capacity;
         } else if (std.mem.eql(u8, c.op, "pause")) {
             self.paused = c.paused orelse return error.MissingPause;
@@ -294,6 +337,7 @@ pub fn main(init: std.process.Init) !void {
     defer a.destroy(peer);
     peer.* = .{ .application = application, .allocator = a, .io = init.io, .service = try network.Service.init(a, .{ .identify = if (identify_enabled) .{ .agent = "lodestar-z-identify" } else null, .reqresp = .{ .policy = policy, .peers = 4, .outbound_max = 1, .inbound_max = if (application) 8 else 1, .inbound_per_peer_max = if (application) 8 else 1, .inbound_control_reserved = if (application) 2 else 0, .forks = &.{.{ .digest = if (application) applicationDigest() else .{ 1, 0, 0, 0 }, .fork = .deneb }}, .progress_timeout_ms = 5000, .quotas = quotas }, .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .topic_policy = &gossip_topics, .message_id_policy = .{ .phase0_digest = .{ 1, 0, 0, 0 } }, .random_seed = 0x6d2b79f5 } }), .sink = undefined, .response = undefined };
     defer peer.service.deinit();
+    peer.attachSink();
     peer.sink = try a.alloc(u8, max_payload);
     defer a.free(peer.sink);
     peer.response = try a.alloc(u8, max_payload);

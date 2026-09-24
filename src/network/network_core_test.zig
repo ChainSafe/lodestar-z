@@ -7,6 +7,7 @@ const keys = @import("wire/keys.zig");
 const d = @import("discv5");
 
 const options = @import("test_support.zig").networkOptions;
+const Inbox = @import("gossipsub/test_support.zig").Inbox;
 
 const MaintenancePeers = struct {
     nodes: []runtime.NetworkCore,
@@ -19,14 +20,15 @@ const MaintenancePeers = struct {
         for (nodes, 0..) |*node, index| {
             const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{@as(u8, @intCast(80 + index))}));
             var opts = options(&key);
-            opts.core.peers.target_peers = 3;
-            opts.core.peers.max_peers = 4;
-            opts.core.control.starts_per_turn_max = 1;
-            opts.core.service.reqresp.outbound_max = 6;
-            opts.core.service.reqresp.outbound_control_reserved = 4;
-            opts.core.service.reqresp.outbound_per_peer_max = 2;
-            opts.core.service.router = .{ .negotiations_max = 16, .outbound_control_reserved = 4, .outbound_reserved = 8 };
-            try node.initRaw(std.testing.allocator, std.testing.io, opts);
+            opts.resolved.core.peers.target_peers = 3;
+            opts.resolved.core.peers.max_peers = 4;
+            opts.resolved.core.control.starts_per_turn_max = 1;
+            opts.resolved.core.service.reqresp.outbound_max = 6;
+            opts.resolved.core.service.reqresp.outbound_control_reserved = 4;
+            opts.resolved.core.service.reqresp.inbound_control_reserved = 4;
+            opts.resolved.core.service.reqresp.outbound_per_peer_max = 2;
+            opts.resolved.core.service.router = .{ .negotiations_max = 16, .outbound_control_reserved = 4, .outbound_reserved = 8 };
+            try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
             initialized += 1;
         }
         const hub = &nodes[0];
@@ -66,11 +68,11 @@ test "managed runtime rejects incomplete serving state before startup allocation
     var opts = options(&key);
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     var node: runtime.NetworkCore = undefined;
-    opts.local.metadata.custody_group_count = null;
-    try std.testing.expectError(error.MissingCustodyAdvertisement, node.initRaw(failing.allocator(), std.testing.io, opts));
-    opts.local.metadata.custody_group_count = 1;
-    opts.local.status.earliest_available_slot = null;
-    try std.testing.expectError(error.MissingAvailability, node.initRaw(failing.allocator(), std.testing.io, opts));
+    opts.startup.local.metadata.custody_group_count = null;
+    try std.testing.expectError(error.MissingCustodyAdvertisement, node.init(failing.allocator(), std.testing.io, &opts.resolved, opts.startup));
+    opts.startup.local.metadata.custody_group_count = 1;
+    opts.startup.local.status.earliest_available_slot = null;
+    try std.testing.expectError(error.MissingAvailability, node.init(failing.allocator(), std.testing.io, &opts.resolved, opts.startup));
     try std.testing.expectEqual(@as(usize, 0), failing.alloc_index);
 }
 
@@ -120,20 +122,21 @@ test "managed runtime validates capacities and current application fork before a
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{1}));
     var node: runtime.NetworkCore = undefined;
     var opts = options(&key);
-    opts.core.peers.capacity = 5;
-    opts.core.peers.max_peers = 5;
-    opts.core.service.reqresp.peers = 5;
+    opts.resolved.core.peers.capacity = 5;
+    opts.resolved.core.peers.max_peers = 5;
+    opts.resolved.core.service.reqresp.peers = 5;
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
-    try std.testing.expectError(error.InvalidOptions, node.initRaw(failing.allocator(), std.testing.io, opts));
+    try std.testing.expectError(error.InvalidOptions, node.init(failing.allocator(), std.testing.io, &opts.resolved, opts.startup));
     opts = options(&key);
-    opts.core.service.reqresp.forks = &.{};
-    try std.testing.expectError(error.UnknownFork, node.initRaw(failing.allocator(), std.testing.io, opts));
+    opts.resolved.core.service.reqresp.forks = &.{};
+    try std.testing.expectError(error.UnknownFork, node.init(failing.allocator(), std.testing.io, &opts.resolved, opts.startup));
 }
 
 test "managed runtime metrics copy peer processing work without advancing it" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{1}));
     var node: runtime.NetworkCore = undefined;
-    try node.initRaw(std.testing.allocator, std.testing.io, options(&key));
+    const opts = options(&key);
+    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     node.peer_manager.reconcile(&node.service, node.last_now);
     const peer_work = node.peer_manager.counters;
@@ -152,13 +155,13 @@ test "managed runtime metrics copy peer processing work without advancing it" {
 test "managed runtime local transaction sequences no-op schedule and rollback" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{1}));
     var opts = options(&key);
-    opts.discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .engine = .{
+    opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .engine = .{
         .session_capacity = 8,
         .challenge_capacity = 8,
         .call_capacity = 8,
     } };
     var node: runtime.NetworkCore = undefined;
-    try node.initRaw(std.testing.allocator, std.testing.io, opts);
+    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const now = try @import("transport.zig").currentTime(std.testing.io);
     const initial = node.localRecord().?.*;
@@ -193,20 +196,26 @@ test "managed runtime signed bootstrap reaches relevant peer with zero and one o
     const key_a = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{11}));
     const key_b = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{12}));
     var opts_b = options(&key_b);
-    opts_b.discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .engine = .{
+    opts_b.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .engine = .{
         .session_capacity = 8,
         .challenge_capacity = 8,
         .call_capacity = 8,
     } };
     var b: runtime.NetworkCore = undefined;
-    try b.initRaw(std.testing.allocator, std.testing.io, opts_b);
+    try b.init(std.testing.allocator, std.testing.io, &opts_b.resolved, opts_b.startup);
     defer b.deinit(std.testing.io);
     var opts_a = options(&key_a);
-    opts_a.discovery = opts_b.discovery;
-    opts_a.discovery.?.bootstrap = &.{b.localRecord().?.*};
+    opts_a.startup.discovery = opts_b.startup.discovery;
+    opts_a.startup.discovery.?.bootstrap = &.{b.localRecord().?.*};
     var a: runtime.NetworkCore = undefined;
-    try a.initRaw(std.testing.allocator, std.testing.io, opts_a);
+    try a.init(std.testing.allocator, std.testing.io, &opts_a.resolved, opts_a.startup);
     defer a.deinit(std.testing.io);
+    var a_inbox: Inbox = .{};
+    defer a_inbox.deinit();
+    a_inbox.attach(a.service.gossipsub);
+    var b_inbox: Inbox = .{};
+    defer b_inbox.deinit();
+    b_inbox.attach(b.service.gossipsub);
     const calls_a = a.reservations.allocation_calls;
     const calls_b = b.reservations.allocation_calls;
     var events: [1]t.Event = undefined;
@@ -240,7 +249,7 @@ test "managed runtime signed bootstrap reaches relevant peer with zero and one o
     try std.testing.expectEqual(@as(?bool, false), runtime.futureCompatible(&candidate, a.schedule));
     try std.testing.expectEqual(@as(u16, 1), a.peerCounts().relevant);
     _ = try a.updateLocal(&local, .{}, hint_now);
-    try applicationAndFork(&a, &b);
+    try applicationAndFork(&a, &b, &b_inbox);
     try failureAndReplacement(&a, &b);
     try std.testing.expectEqual(calls_a, a.reservations.allocation_calls);
     try std.testing.expectEqual(calls_b, b.reservations.allocation_calls);
@@ -258,7 +267,7 @@ test "managed runtime signed bootstrap reaches relevant peer with zero and one o
     _ = d;
 }
 
-fn applicationAndFork(a: *runtime.NetworkCore, b: *runtime.NetworkCore) !void {
+fn applicationAndFork(a: *runtime.NetworkCore, b: *runtime.NetworkCore, b_inbox: *Inbox) !void {
     var stage: enum { transition, application, gossip } = .transition;
     const begun = try @import("transport.zig").currentTime(std.testing.io);
     errdefer std.debug.print("managed stage={s} elapsed={}ms a={any} b={any}\n", .{ @tagName(stage), a.last_now.mono_ms -| begun.mono_ms, a.peerCounts(), b.peerCounts() });
@@ -364,12 +373,13 @@ fn applicationAndFork(a: *runtime.NetworkCore, b: *runtime.NetworkCore) !void {
             try std.testing.expect((try a.publishGossipWithOptions(topic, &response, .{ .ignore_duplicate = true }, tick)).duplicate);
             published = sent.queued > 0;
         }
-        const received = b.step(std.testing.io, tick, 100, .{ .gossipsub = if (turn > 30) &messages else &.{} }, 1);
-        for (messages[0..received.counts.gossipsub]) |event| if (event == .message) {
-            try std.testing.expectEqualSlices(u8, &response, event.message.bytes);
-            try std.testing.expect(b.reportValidation(event.message.handle, .accept, tick) == .applied);
+        b_inbox.clear();
+        _ = b.step(std.testing.io, tick, 100, .{ .gossipsub = if (turn > 30) &messages else &.{} }, 1);
+        for (b_inbox.messages()) |message| {
+            try std.testing.expectEqualSlices(u8, &response, message.bytes);
+            try std.testing.expect(b.reportValidation(message.handle, .accept, tick) == .applied);
             got = true;
-        };
+        }
         if (got) break;
         // QUIC retransmission requires elapsed time.
         try std.testing.io.sleep(.fromMilliseconds(1), .awake);
@@ -386,21 +396,21 @@ fn applicationAndFork(a: *runtime.NetworkCore, b: *runtime.NetworkCore) !void {
 test "managed runtime every allocation prefix cleans up and memory plan counts owned storage" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{21}));
     var opts = options(&key);
-    opts.discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .engine = .{
+    opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .engine = .{
         .session_capacity = 8,
         .challenge_capacity = 8,
         .call_capacity = 8,
     } };
 
-    opts.core.service.reqresp.policy = null;
-    opts.core.service.reqresp.admission = .{ .policy = @import("reqresp/policy_fixture.zig").config(), .limits = .{
-        .identities = opts.core.peers.capacity,
+    opts.resolved.core.service.reqresp.policy = null;
+    opts.resolved.core.service.reqresp.admission = .{ .policy = @import("reqresp/policy_fixture.zig").config(), .limits = .{
+        .identities = opts.resolved.core.peers.capacity,
         .peer = @import("reqresp/admission_fixture.zig").quotas(100, 1000),
         .global = @import("reqresp/admission_fixture.zig").quotas(1000, 1000),
     } };
     var allocation = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     var node: runtime.NetworkCore = undefined;
-    try node.initRaw(allocation.allocator(), std.testing.io, opts);
+    try node.init(allocation.allocator(), std.testing.io, &opts.resolved, opts.startup);
     const plan = node.memoryPlan();
     try std.testing.expectEqual(@sizeOf(@import("gossipsub/local_intent.zig").Workspace), plan.local_intent_bytes);
     try std.testing.expectEqual(@sizeOf(runtime.NetworkCore), plan.inline_bytes);
@@ -419,7 +429,7 @@ test "managed runtime every allocation prefix cleans up and memory plan counts o
     try std.testing.expect(allocations < 128);
     for (0..allocations) |index| {
         var failed = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = index });
-        try std.testing.expectError(error.OutOfMemory, node.initRaw(failed.allocator(), std.testing.io, opts));
+        try std.testing.expectError(error.OutOfMemory, node.init(failed.allocator(), std.testing.io, &opts.resolved, opts.startup));
         try std.testing.expectEqual(failed.allocated_bytes, failed.freed_bytes);
     }
 }
@@ -447,10 +457,10 @@ test "managed runtime reservation forwarding tracks resize remap and failure wit
 test "managed runtime sequence exhaustion rolls back and future fork hints stay advisory" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{22}));
     var opts = options(&key);
-    opts.local.metadata.seq_number = std.math.maxInt(u64);
-    opts.discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .sequence = std.math.maxInt(u64) };
+    opts.startup.local.metadata.seq_number = std.math.maxInt(u64);
+    opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .sequence = std.math.maxInt(u64) };
     var node: runtime.NetworkCore = undefined;
-    try node.initRaw(std.testing.allocator, std.testing.io, opts);
+    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const now = try @import("transport.zig").currentTime(std.testing.io);
     const before = node.localState();
@@ -482,11 +492,11 @@ test "managed runtime sequence exhaustion rolls back and future fork hints stay 
 test "managed runtime demand persists until replacement and reaches discovery after selection" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{23}));
     var opts = options(&key);
-    opts.core.peers.target_peers = 0;
-    opts.core.peers.min_outbound = 0;
-    opts.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
+    opts.resolved.core.peers.target_peers = 0;
+    opts.resolved.core.peers.min_outbound = 0;
+    opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
     var node: runtime.NetworkCore = undefined;
-    try node.initRaw(std.testing.allocator, std.testing.io, opts);
+    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     var desired = core_test.intent(&node, &.{});
     desired.demand = .{ .attnets = 1 };
@@ -526,11 +536,11 @@ test "managed runtime demand persists until replacement and reaches discovery af
 test "managed runtime explicit advertisement is independent and atomic" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{21}));
     var opts = options(&key);
-    opts.transport.bind = .{ .ip4 = .{ .bytes = @splat(0), .port = 0 } };
-    opts.discovery = .{ .bind = opts.transport.bind };
+    opts.startup.bind = .{ .ip4 = .{ .bytes = @splat(0), .port = 0 } };
+    opts.startup.discovery = .{ .bind = opts.startup.bind };
     var node: runtime.NetworkCore = undefined;
-    opts.discovery.?.fixed = .{ .ip4 = .{ 127, 0, 0, 1 }, .udp = 19000, .quic = 19001 };
-    try node.initRaw(std.testing.allocator, std.testing.io, opts);
+    opts.startup.discovery.?.fixed = .{ .ip4 = .{ 127, 0, 0, 1 }, .udp = 19000, .quic = 19001 };
+    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const now = try @import("transport.zig").currentTime(std.testing.io);
     const before = node.localRecord().?.*;
@@ -565,7 +575,8 @@ test "managed runtime unreachable destination backs off and rotates to its alter
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{22}));
     const remote = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{23}));
     var node: runtime.NetworkCore = undefined;
-    try node.initRaw(std.testing.allocator, std.testing.io, options(&key));
+    const opts = options(&key);
+    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const now = try @import("transport.zig").currentTime(std.testing.io);
     const peer = t.PeerId.fromPublicKey(&remote.publicKey());
@@ -596,9 +607,9 @@ test "managed runtime socket faults preserve the other owner and local dial refu
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{22}));
     const remote_key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{23}));
     var opts = options(&key);
-    opts.discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .coordinator = .{ .query_interval_ms = 100 } };
+    opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .coordinator = .{ .query_interval_ms = 100 } };
     var node: runtime.NetworkCore = undefined;
-    try node.initRaw(std.testing.allocator, std.testing.io, opts);
+    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const now = try @import("transport.zig").currentTime(std.testing.io);
     var faults: FaultIo = .{};
@@ -673,10 +684,10 @@ fn failureAndReplacement(a: *runtime.NetworkCore, b: *runtime.NetworkCore) !void
     }
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{24}));
     var opts = options(&key);
-    opts.local = a.localState();
-    opts.schedule = a.schedule;
+    opts.startup.local = a.localState();
+    opts.startup.schedule = a.schedule;
     var replacement: runtime.NetworkCore = undefined;
-    try replacement.initRaw(std.testing.allocator, std.testing.io, opts);
+    try replacement.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer replacement.deinit(std.testing.io);
     try replacement.connectUntil(&a.peerId(), &.{a.transport.localAddress()}, now, now.mono_ms +| @import("peers/dialing.zig").connect_timeout_ms);
     for (0..2000) |_| {
@@ -792,10 +803,10 @@ test "managed runtime native readiness wakes for either delayed protocol socket"
     if (!runtime.wait.supported) return error.SkipZigTest;
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{31}));
     var opts = options(&key);
-    opts.wait_mode = .native_poll;
-    opts.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
+    opts.startup.wait_mode = .native_poll;
+    opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
     var node: runtime.NetworkCore = undefined;
-    try node.initRaw(std.testing.allocator, std.testing.io, opts);
+    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const sender = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
     defer sender.close(std.testing.io);
@@ -828,10 +839,10 @@ test "managed runtime native host wake validates rollback detaches and preserves
     if (!runtime.wait.supported) return error.SkipZigTest;
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{32}));
     var opts = options(&key);
-    opts.wait_mode = .native_poll;
-    opts.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
+    opts.startup.wait_mode = .native_poll;
+    opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
     var node: runtime.NetworkCore = undefined;
-    try node.initRaw(std.testing.allocator, std.testing.io, opts);
+    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const host = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
     defer host.close(std.testing.io);
@@ -865,8 +876,8 @@ test "managed runtime portable fallback rejects enabled host source" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{33}));
     var node: runtime.NetworkCore = undefined;
     var opts = options(&key);
-    opts.wait_mode = .portable;
-    try node.initRaw(std.testing.allocator, std.testing.io, opts);
+    opts.startup.wait_mode = .portable;
+    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     try std.testing.expectError(error.UnsupportedWait, node.setHostWake(1));
     try node.setHostWake(null);
@@ -879,10 +890,10 @@ test "managed runtime native wait source failure retains completed protocol prog
     if (!runtime.wait.supported) return error.SkipZigTest;
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{34}));
     var opts = options(&key);
-    opts.wait_mode = .native_poll;
-    opts.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
+    opts.startup.wait_mode = .native_poll;
+    opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
     var node: runtime.NetworkCore = undefined;
-    try node.initRaw(std.testing.allocator, std.testing.io, opts);
+    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     var pipe: [2]std.c.fd_t = undefined;
     try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&pipe));
@@ -908,10 +919,10 @@ test "managed runtime native wait honors pacing native timers and pending lifecy
     if (!runtime.wait.supported) return error.SkipZigTest;
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{35}));
     var opts = options(&key);
-    opts.wait_mode = .native_poll;
-    opts.transport.limits.handshake_timeout_ms = 80;
+    opts.startup.wait_mode = .native_poll;
+    opts.resolved.limits.handshake_timeout_ms = 80;
     var node: runtime.NetworkCore = undefined;
-    try node.initRaw(std.testing.allocator, std.testing.io, opts);
+    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const remote = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
     defer remote.close(std.testing.io);
@@ -953,10 +964,10 @@ test "managed runtime native wait honors pacing native timers and pending lifecy
 test "managed runtime subscriptions use copied startup policy and reject atomically" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{1}));
     var opts = options(&key);
-    opts.core.service.gossipsub.topic_policy = &@import("gossipsub/topic_fixture.zig").churn;
-    opts.core.service.gossipsub.topic_params = @splat(.{ .params = .{ .weight = 2 } });
+    opts.resolved.core.service.gossipsub.topic_policy = &@import("gossipsub/topic_fixture.zig").churn;
+    opts.resolved.core.service.gossipsub.topic_params = @splat(.{ .params = .{ .weight = 2 } });
     var node: runtime.NetworkCore = undefined;
-    try node.initRaw(std.testing.allocator, std.testing.io, opts);
+    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const calls = node.reservations.allocation_calls;
     const initial = node.diagnostics();
@@ -967,7 +978,7 @@ test "managed runtime subscriptions use copied startup policy and reject atomica
     const revision_before_read = owner.peers.scores.revision;
     try std.testing.expectEqualDeep(initial, node.diagnostics());
     try std.testing.expectEqual(revision_before_read, owner.peers.scores.revision);
-    opts.core.service.gossipsub.topic_params.?[0].params.weight = 3;
+    opts.resolved.core.service.gossipsub.topic_params.?[0].params.weight = 3;
     var text = "/eth2/01020304/beacon_block/ssz_snappy".*;
     try core_test.subscribe(&node, &text);
     text[6] = 'f';
@@ -1063,20 +1074,20 @@ test "managed runtime BPO duplicate digest validation precedes allocation" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{1}));
     var node: runtime.NetworkCore = undefined;
     var opts = options(&key);
-    opts.core.service.reqresp.forks = &.{
+    opts.resolved.core.service.reqresp.forks = &.{
         .{ .digest = @splat(0), .fork = .phase0 },
         .{ .digest = @splat(0), .fork = .fulu },
     };
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
-    try std.testing.expectError(error.InvalidOptions, node.initRaw(failing.allocator(), std.testing.io, opts));
+    try std.testing.expectError(error.InvalidOptions, node.init(failing.allocator(), std.testing.io, &opts.resolved, opts.startup));
 }
 
 test "managed runtime request admission selector commits with validated local fork" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{23}));
     var opts = options(&key);
-    opts.core.service.reqresp.request_fork = .gloas;
+    opts.resolved.core.service.reqresp.request_fork = .gloas;
     var node: runtime.NetworkCore = undefined;
-    try node.initRaw(std.testing.allocator, std.testing.io, opts);
+    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     try std.testing.expectEqual(t.ForkSeq.phase0, node.service.reqresp.request_fork);
     var local = node.localState();
@@ -1126,13 +1137,13 @@ test "managed runtime capabilities activation rolls back all owners on rejected 
     const caps = @import("capabilities.zig");
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{24}));
     var opts = options(&key);
-    opts.core.service.router.meshsub_versions = &.{.v1_2};
-    opts.core.service.identify = .{ .agent = "capability-rollback" };
-    opts.core.service.router.capabilities = caps.withIdentify(try caps.forFork(.phase0, false, &.{.v1_2}));
-    opts.local.metadata.custody_group_count = 1;
-    opts.discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .sequence = std.math.maxInt(u64) };
+    opts.resolved.core.service.router.meshsub_versions = &.{.v1_2};
+    opts.resolved.core.service.identify = .{ .agent = "capability-rollback" };
+    opts.resolved.core.service.router.capabilities = caps.withIdentify(try caps.forFork(.phase0, false, &.{.v1_2}));
+    opts.startup.local.metadata.custody_group_count = 1;
+    opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .sequence = std.math.maxInt(u64) };
     var node: runtime.NetworkCore = undefined;
-    try node.initRaw(std.testing.allocator, std.testing.io, opts);
+    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const before = ActivationSnapshot.capture(&node);
     const identify = node.service.identify.?.local;
@@ -1170,20 +1181,20 @@ test "managed runtime capabilities activation commits fork BPO and copied direct
     const caps = @import("capabilities.zig");
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{25}));
     var opts = options(&key);
-    opts.local.metadata.custody_group_count = 1;
+    opts.startup.local.metadata.custody_group_count = 1;
     const quotas = @import("reqresp/admission_fixture.zig").quotas(2048, 1000);
 
-    opts.core.service.reqresp.policy = null;
-    opts.core.service.reqresp.admission = .{ .policy = @import("reqresp/policy_fixture.zig").config(), .limits = .{ .identities = 2, .peer = quotas, .global = quotas } };
-    opts.core.service.router.capabilities = try caps.forFork(.phase0, true, &.{ .v1_2, .v1_1 });
-    opts.core.service.reqresp.forks = &.{
+    opts.resolved.core.service.reqresp.policy = null;
+    opts.resolved.core.service.reqresp.admission = .{ .policy = @import("reqresp/policy_fixture.zig").config(), .limits = .{ .identities = 2, .peer = quotas, .global = quotas } };
+    opts.resolved.core.service.router.capabilities = try caps.forFork(.phase0, true, &.{ .v1_2, .v1_1 });
+    opts.resolved.core.service.reqresp.forks = &.{
         .{ .digest = @splat(0), .fork = .phase0 },
         .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu },
         .{ .digest = .{ 5, 6, 7, 8 }, .fork = .fulu },
     };
-    opts.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
+    opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
     var node: runtime.NetworkCore = undefined;
-    try node.initRaw(std.testing.allocator, std.testing.io, opts);
+    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const limiter = &node.service.reqresp.limiter;
     const peer: t.Handle = .{ .index = 0, .generation = 1 };
@@ -1242,10 +1253,10 @@ test "managed runtime capabilities activation commits fork BPO and copied direct
 test "identify managed advertisement follows committed endpoints and rejected updates preserve it" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{24}));
     var opts = options(&key);
-    opts.core.service.identify = .{ .agent = "managed", .addresses = &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 19009 } }} };
-    opts.discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .engine = .{ .session_capacity = 8, .challenge_capacity = 8, .call_capacity = 8 } };
+    opts.resolved.core.service.identify = .{ .agent = "managed", .addresses = &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 19009 } }} };
+    opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .engine = .{ .session_capacity = 8, .challenge_capacity = 8, .call_capacity = 8 } };
     var node: runtime.NetworkCore = undefined;
-    try node.initRaw(std.testing.allocator, std.testing.io, opts);
+    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const initial = node.service.identify.?.local.?;
     const address = try @import("wire/multiaddr.zig").Multiaddr.decode(initial.addresses[0].bytes[0..initial.addresses[0].len]);
@@ -1270,17 +1281,17 @@ test "managed runtime targeted Status serves two current schedules and immediate
     var b: runtime.NetworkCore = undefined;
     var c: runtime.NetworkCore = undefined;
     var opts = options(&key_a);
-    opts.core.peers.min_outbound = 0;
-    opts.core.service.identify = .{ .agent = "peer-operations" };
-    try a.initRaw(std.testing.allocator, std.testing.io, opts);
+    opts.resolved.core.peers.min_outbound = 0;
+    opts.resolved.core.service.identify = .{ .agent = "peer-operations" };
+    try a.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer a.deinit(std.testing.io);
     opts = options(&key_b);
-    opts.core.service.identify = .{ .agent = "peer-operations" };
-    try b.initRaw(std.testing.allocator, std.testing.io, opts);
+    opts.resolved.core.service.identify = .{ .agent = "peer-operations" };
+    try b.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer b.deinit(std.testing.io);
     opts = options(&key_c);
-    opts.core.service.identify = .{ .agent = "peer-operations" };
-    try c.initRaw(std.testing.allocator, std.testing.io, opts);
+    opts.resolved.core.service.identify = .{ .agent = "peer-operations" };
+    try c.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer c.deinit(std.testing.io);
     const start = try @import("transport.zig").currentTime(std.testing.io);
     try a.addDirectPeer(&b.peerId(), &.{b.transport.localAddress()}, start);
@@ -1339,7 +1350,8 @@ test "managed runtime targeted Status serves two current schedules and immediate
 fn recycledPeerOperations(a: *runtime.NetworkCore, b: *runtime.NetworkCore, c: *runtime.NetworkCore, previous: *const t.Snapshot) !void {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{34}));
     var replacement: runtime.NetworkCore = undefined;
-    try replacement.initRaw(std.testing.allocator, std.testing.io, options(&key));
+    const opts = options(&key);
+    try replacement.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer replacement.deinit(std.testing.io);
     var events: [4]t.Event = undefined;
     _ = a.peer_manager.catalog.pollEvents(&events);
@@ -1371,11 +1383,11 @@ fn recycledPeerOperations(a: *runtime.NetworkCore, b: *runtime.NetworkCore, c: *
 test "managed runtime complete local intent rejects invalid last topic atomically" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{41}));
     var opts = options(&key);
-    opts.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
-    opts.core.service.identify = .{ .agent = "local-intent" };
-    opts.core.service.gossipsub.topic_policy = &.{@import("gossipsub/topic_fixture.zig").full(.{ 1, 2, 3, 4 })};
+    opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
+    opts.resolved.core.service.identify = .{ .agent = "local-intent" };
+    opts.resolved.core.service.gossipsub.topic_policy = &.{@import("gossipsub/topic_fixture.zig").full(.{ 1, 2, 3, 4 })};
     var node: runtime.NetworkCore = undefined;
-    try node.initRaw(std.testing.allocator, std.testing.io, opts);
+    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const block_topic = "/eth2/01020304/beacon_block/ssz_snappy";
     const update: runtime.LocalUpdate = .{ .local = node.localState(), .schedule = node.schedule, .endpoints = node.advertisementEndpoints(), .capabilities = node.service.router.capabilities() };
@@ -1411,12 +1423,12 @@ fn intentFor(node: *const runtime.NetworkCore) runtime.LocalIntent {
 test "managed runtime Status-only update preserves local owners and permits a regressing head" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{44}));
     var opts = options(&key);
-    opts.discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .sequence = std.math.maxInt(u64) };
-    opts.local.metadata.seq_number = std.math.maxInt(u64);
-    opts.core.service.identify = .{ .agent = "status-only" };
-    opts.core.service.gossipsub.topic_policy = &.{@import("gossipsub/topic_fixture.zig").full(.{ 1, 2, 3, 4 })};
+    opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .sequence = std.math.maxInt(u64) };
+    opts.startup.local.metadata.seq_number = std.math.maxInt(u64);
+    opts.resolved.core.service.identify = .{ .agent = "status-only" };
+    opts.resolved.core.service.gossipsub.topic_policy = &.{@import("gossipsub/topic_fixture.zig").full(.{ 1, 2, 3, 4 })};
     var node: runtime.NetworkCore = undefined;
-    try node.initRaw(std.testing.allocator, std.testing.io, opts);
+    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     var desired = intentFor(&node);
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
@@ -1454,13 +1466,13 @@ test "managed runtime Status-only update preserves local owners and permits a re
 test "managed runtime Status-only validation preserves accepted local state" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{45}));
     var opts = options(&key);
-    opts.local.fork = .{ .fork = .fulu, .digest = .{ 1, 2, 3, 4 } };
-    opts.local.status.fork_digest = opts.local.fork.digest;
-    opts.local.status.earliest_available_slot = 0;
-    opts.local.metadata.custody_group_count = 1;
-    opts.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
+    opts.startup.local.fork = .{ .fork = .fulu, .digest = .{ 1, 2, 3, 4 } };
+    opts.startup.local.status.fork_digest = opts.startup.local.fork.digest;
+    opts.startup.local.status.earliest_available_slot = 0;
+    opts.startup.local.metadata.custody_group_count = 1;
+    opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
     var node: runtime.NetworkCore = undefined;
-    try node.initRaw(std.testing.allocator, std.testing.io, opts);
+    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const before = ActivationSnapshot.capture(&node);
     var status = before.local.status;
@@ -1480,12 +1492,12 @@ test "managed runtime local intent demand candidate sequence and stopped refusal
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{42}));
     for (0..2) |exhausted| {
         var opts = options(&key);
-        opts.discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .sequence = if (exhausted == 0) std.math.maxInt(u64) else 1 };
-        if (exhausted == 1) opts.local.metadata.seq_number = std.math.maxInt(u64);
-        opts.core.service.identify = .{ .agent = "local-intent" };
-        opts.core.service.gossipsub.topic_policy = &.{@import("gossipsub/topic_fixture.zig").full(.{ 1, 2, 3, 4 })};
+        opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .sequence = if (exhausted == 0) std.math.maxInt(u64) else 1 };
+        if (exhausted == 1) opts.startup.local.metadata.seq_number = std.math.maxInt(u64);
+        opts.resolved.core.service.identify = .{ .agent = "local-intent" };
+        opts.resolved.core.service.gossipsub.topic_policy = &.{@import("gossipsub/topic_fixture.zig").full(.{ 1, 2, 3, 4 })};
         var node: runtime.NetworkCore = undefined;
-        try node.initRaw(std.testing.allocator, std.testing.io, opts);
+        try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
         defer node.deinit(std.testing.io);
         const before = ActivationSnapshot.capture(&node);
         const identify = node.service.identify.?.local;
@@ -1517,10 +1529,10 @@ test "managed runtime local intent demand candidate sequence and stopped refusal
 test "managed runtime local intent topic demand no-op preserves Status scheduling and counters" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{43}));
     var opts = options(&key);
-    opts.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
-    opts.core.service.gossipsub.topic_policy = &.{@import("gossipsub/topic_fixture.zig").full(.{ 1, 2, 3, 4 })};
+    opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
+    opts.resolved.core.service.gossipsub.topic_policy = &.{@import("gossipsub/topic_fixture.zig").full(.{ 1, 2, 3, 4 })};
     var node: runtime.NetworkCore = undefined;
-    try node.initRaw(std.testing.allocator, std.testing.io, opts);
+    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const g = node.service.gossipsub;
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
@@ -1560,11 +1572,26 @@ test "managed runtime local intent topic demand no-op preserves Status schedulin
 const IntentPair = struct {
     a: runtime.NetworkCore = undefined,
     b: runtime.NetworkCore = undefined,
+    a_inbox: Inbox = .{},
+    b_inbox: Inbox = .{},
     a_gossip: [16]@import("gossipsub/root.zig").Event = undefined,
     b_gossip: [16]@import("gossipsub/root.zig").Event = undefined,
     b_app: [4]@import("reqresp/root.zig").Event = undefined,
 
+    fn attachInboxes(self: *IntentPair) void {
+        self.a_inbox.attach(self.a.service.gossipsub);
+        self.b_inbox.attach(self.b.service.gossipsub);
+    }
+
+    fn deinitInboxes(self: *IntentPair) void {
+        self.b_inbox.deinit();
+        self.a_inbox.deinit();
+    }
+
+    /// Gossip delivered in earlier steps is cleared first.
     fn pump(self: *IntentPair) !struct { a: runtime.Result, b: runtime.Result } {
+        self.a_inbox.clear();
+        self.b_inbox.clear();
         const now = try @import("transport.zig").currentTime(std.testing.io);
         const a = self.a.step(std.testing.io, now, 100, .{ .gossipsub = &self.a_gossip }, 1);
         if (a.failure) |err| return err;
@@ -1580,13 +1607,16 @@ test "managed runtime metrics aggregate subnets and count distinct mesh peers" {
     const key_b = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{52}));
     const pair = try std.testing.allocator.create(IntentPair);
     defer std.testing.allocator.destroy(pair);
+    pair.* = .{};
+    defer pair.deinitInboxes();
     var opts = options(&key_a);
-    opts.core.service.gossipsub.topic_policy = &.{full(@splat(0))};
-    try pair.a.initRaw(std.testing.allocator, std.testing.io, opts);
+    opts.resolved.core.service.gossipsub.topic_policy = &.{full(@splat(0))};
+    try pair.a.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer pair.a.deinit(std.testing.io);
-    opts.transport.host = &key_b;
-    try pair.b.initRaw(std.testing.allocator, std.testing.io, opts);
+    opts.startup.host = &key_b;
+    try pair.b.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer pair.b.deinit(std.testing.io);
+    pair.attachInboxes();
     var a_intent = intentFor(&pair.a);
     a_intent.subscriptions = @import("gossipsub/topic_fixture.zig").subscriptions(&.{ "/eth2/00000000/beacon_block/ssz_snappy", "/eth2/00000000/blob_sidecar_0/ssz_snappy", "/eth2/00000000/blob_sidecar_1/ssz_snappy" });
     var b_intent = intentFor(&pair.b);
@@ -1621,18 +1651,21 @@ test "managed runtime local intent fork BPO announcements remembered peer and ev
     const key_b = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{45}));
     const pair = try std.testing.allocator.create(IntentPair);
     defer std.testing.allocator.destroy(pair);
+    pair.* = .{};
+    defer pair.deinitInboxes();
     var opts = options(&key_a);
-    opts.core.service.gossipsub.topic_policy = &.{ full(@splat(0)), full(.{ 1, 2, 3, 4 }), full(.{ 5, 6, 7, 8 }) };
-    opts.core.service.gossipsub.topic_params = @splat(.{ .params = .{ .weight = 7 } });
-    opts.core.service.reqresp.forks = &.{ .{ .digest = @splat(0), .fork = .phase0 }, .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }, .{ .digest = .{ 5, 6, 7, 8 }, .fork = .fulu } };
-    opts.local.metadata.custody_group_count = 4;
-    opts.local.fork.minimum_sampling_groups = @min(8, opts.local.fork.custody_groups);
-    opts.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
-    try pair.a.initRaw(std.testing.allocator, std.testing.io, opts);
+    opts.resolved.core.service.gossipsub.topic_policy = &.{ full(@splat(0)), full(.{ 1, 2, 3, 4 }), full(.{ 5, 6, 7, 8 }) };
+    opts.resolved.core.service.gossipsub.topic_params = @splat(.{ .params = .{ .weight = 7 } });
+    opts.resolved.core.service.reqresp.forks = &.{ .{ .digest = @splat(0), .fork = .phase0 }, .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }, .{ .digest = .{ 5, 6, 7, 8 }, .fork = .fulu } };
+    opts.startup.local.metadata.custody_group_count = 4;
+    opts.startup.local.fork.minimum_sampling_groups = @min(8, opts.startup.local.fork.custody_groups);
+    opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
+    try pair.a.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer pair.a.deinit(std.testing.io);
-    opts.transport.host = &key_b;
-    try pair.b.initRaw(std.testing.allocator, std.testing.io, opts);
+    opts.startup.host = &key_b;
+    try pair.b.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer pair.b.deinit(std.testing.io);
+    pair.attachInboxes();
     var a_intent = intentFor(&pair.a);
     a_intent.subscriptions = @import("gossipsub/topic_fixture.zig").subscriptions(&.{ old, active, bpo });
     var b_intent = intentFor(&pair.b);
@@ -1675,18 +1708,17 @@ test "managed runtime local intent fork BPO announcements remembered peer and ev
     var delivered = false;
     for (0..3000) |_| {
         const result = try pair.pump();
-        for (pair.a_gossip[0..result.a.counts.gossipsub]) |event| switch (event) {
-            .subscription_change => |value| {
-                if (std.mem.eql(u8, value.topic, active) and value.subscribed) announced = true;
-                if (std.mem.eql(u8, value.topic, old) and !value.subscribed) withdrawn = true;
-            },
-            .message => |value| {
-                try std.testing.expectEqualStrings(active, value.topic);
-                try std.testing.expectEqualStrings("0123456789", value.bytes);
-                delivered = true;
-                _ = pair.a.reportValidation(value.handle, .accept, pair.a.last_now);
-            },
+        for (pair.a_gossip[0..result.a.counts.gossipsub]) |event| if (event == .subscription_change) {
+            const value = event.subscription_change;
+            if (std.mem.eql(u8, value.topic, active) and value.subscribed) announced = true;
+            if (std.mem.eql(u8, value.topic, old) and !value.subscribed) withdrawn = true;
         };
+        for (pair.a_inbox.messages()) |value| {
+            try std.testing.expectEqualStrings(active, value.topic);
+            try std.testing.expectEqualStrings("0123456789", value.bytes);
+            delivered = true;
+            _ = pair.a.reportValidation(value.handle, .accept, pair.a.last_now);
+        }
         if (announced and withdrawn and delivered and pair.a.peerCounts().relevant == 1 and pair.b.peerCounts().relevant == 1) break;
     }
     try std.testing.expect(announced and withdrawn and delivered);
@@ -1730,15 +1762,15 @@ test "managed runtime local intent fork BPO announcements remembered peer and ev
             try std.testing.expect(pair.b.finish(event.request.request, pair.b.last_now));
             got_request = true;
         };
-        for (pair.b_gossip[0..result.b.counts.gossipsub]) |event| if (event == .message) {
+        for (pair.b_inbox.messages()) |message| {
             try std.testing.expectEqual(@as(f64, 7), gb.peers.scores.topic_params[borrowed_topic].weight);
             try intentBorrowUpdate(&pair.b, &b_intent);
-            try std.testing.expectEqualStrings(bpo, event.message.topic);
-            try std.testing.expectEqualStrings("borrowed gossip", event.message.bytes);
-            _ = pair.b.reportValidation(event.message.handle, .reject, pair.b.last_now);
+            try std.testing.expectEqualStrings(bpo, message.topic);
+            try std.testing.expectEqualStrings("borrowed gossip", message.bytes);
+            _ = pair.b.reportValidation(message.handle, .reject, pair.b.last_now);
             try std.testing.expect(gb.peers.scores.retainsTopic(borrowed_topic));
             got_message = true;
-        };
+        }
         if (got_request and got_message) break;
     }
     try std.testing.expect(got_request and got_message);
@@ -1785,10 +1817,10 @@ test "managed runtime local intent three boundaries fit and all-column overlap r
     const full = @import("gossipsub/topic_fixture.zig").full;
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{46}));
     var opts = options(&key);
-    opts.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
-    opts.core.service.gossipsub.topic_policy = &.{ full(@splat(0)), full(.{ 1, 2, 3, 4 }), full(.{ 5, 6, 7, 8 }) };
+    opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
+    opts.resolved.core.service.gossipsub.topic_policy = &.{ full(@splat(0)), full(.{ 1, 2, 3, 4 }), full(.{ 5, 6, 7, 8 }) };
     var node: runtime.NetworkCore = undefined;
-    try node.initRaw(std.testing.allocator, std.testing.io, opts);
+    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const union_topics = try std.testing.allocator.create(BoundaryUnion);
     defer std.testing.allocator.destroy(union_topics);
@@ -1831,12 +1863,13 @@ test "application transport borrow authenticates while remote Status remains una
         if (protocol == .status_v1 or protocol == .status_v2) continue;
         active.insert(.{ .reqresp = protocol });
     }
-    opts_b.core.service.router.capabilities = .{ .receive = active, .request = active };
+    opts_b.resolved.core.service.router.capabilities = .{ .receive = active, .request = active };
     var a: runtime.NetworkCore = undefined;
-    try a.initRaw(std.testing.allocator, std.testing.io, options(&key_a));
+    const opts_a = options(&key_a);
+    try a.init(std.testing.allocator, std.testing.io, &opts_a.resolved, opts_a.startup);
     defer a.deinit(std.testing.io);
     var b: runtime.NetworkCore = undefined;
-    try b.initRaw(std.testing.allocator, std.testing.io, opts_b);
+    try b.init(std.testing.allocator, std.testing.io, &opts_b.resolved, opts_b.startup);
     defer b.deinit(std.testing.io);
     const now = try @import("transport.zig").currentTime(std.testing.io);
     try a.connectUntil(&b.peerId(), &.{b.transport.localAddress()}, now, now.mono_ms +| @import("peers/dialing.zig").connect_timeout_ms);
@@ -1864,10 +1897,10 @@ test "application transport borrow authenticates while remote Status remains una
 test "application complete snapshot includes all 512 occupied disconnected rows" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{1}));
     var opts = options(&key);
-    opts.core.peers.capacity = 512;
-    opts.core.service.gossipsub.retained_capacity = 512;
+    opts.resolved.core.peers.capacity = 512;
+    opts.resolved.core.service.gossipsub.retained_capacity = 512;
     var node: runtime.NetworkCore = undefined;
-    try node.initRaw(std.testing.allocator, std.testing.io, opts);
+    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const local = node.peerId();
     var events: [2]t.Event = undefined;
@@ -1897,14 +1930,14 @@ test "application complete snapshot includes all 512 occupied disconnected rows"
 test "dual-stack runtime signs both bound discovery and QUIC endpoints" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{25}));
     var opts = options(&key);
-    opts.transport.bind = .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } };
-    opts.discovery = .{ .bind = opts.transport.bind };
+    opts.startup.bind = .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } };
+    opts.startup.discovery = .{ .bind = opts.startup.bind };
     var node: runtime.NetworkCore = undefined;
-    try node.initRaw(std.testing.allocator, std.testing.io, opts);
+    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const record = node.localRecord().?;
     const quic = node.transport.udp.localAddresses();
-    const decoded = try @import("peers/enr.zig").decode(record, &opts.local.fork);
+    const decoded = try @import("peers/enr.zig").decode(record, &opts.startup.local.fork);
     try std.testing.expectEqual(@as(u8, 2), decoded.address_count);
     try std.testing.expectEqualDeep(quic[0].?, decoded.addresses[0]);
     try std.testing.expectEqualDeep(quic[1].?, decoded.addresses[1]);
@@ -1918,7 +1951,8 @@ test "managed runtime candidate identities do not expose admitted APIs or enlarg
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{31}));
     const remote = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{32}));
     var node: runtime.NetworkCore = undefined;
-    try node.initRaw(std.testing.allocator, std.testing.io, options(&key));
+    const opts = options(&key);
+    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const peer = t.PeerId.fromPublicKey(&remote.publicKey());
     const now = node.last_now;
@@ -1936,9 +1970,9 @@ test "managed runtime candidate identities do not expose admitted APIs or enlarg
 test "managed runtime discovery sessions expire idle lookup contacts" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{41}));
     var opts = options(&key);
-    opts.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
+    opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
     var node: runtime.NetworkCore = undefined;
-    try node.initRaw(std.testing.allocator, std.testing.io, opts);
+    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const config = node.discovery.?.transport.engine.config;
     try std.testing.expectEqual(runtime.discovery_session_capacity, config.session_capacity);

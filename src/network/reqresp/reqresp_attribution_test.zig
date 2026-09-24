@@ -82,7 +82,9 @@ test "reqresp attribution ignores locally unread incoming bodies at absolute exp
     defer pair.deinit();
     const stream = try pair.openRaw(.ping_v1);
     try pair.awaitRawSelection(stream, .ping_v1);
-    const incoming = &pair.shared.server.reqresp.inbound[0];
+    const incoming = for (pair.shared.server.reqresp.inbound) |*slot| {
+        if (slot.request.occupied()) break slot;
+    } else return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), try pair.shared.pair.client.write(stream, &.{8}, false));
     try pair.shared.pair.pump();
     try std.testing.expect(try pair.shared.pair.server.streamReadable(incoming.request.stream));

@@ -246,31 +246,33 @@ pub fn step(transport: *transport_mod.Transport, io: std.Io, events: []Event, ac
     return result.progress;
 }
 
-pub fn networkOptions(key: *const keys.KeyPair) @import("network_core.zig").Options {
-    var result: @import("network_core.zig").Options = .{
-        .wait_mode = if (@import("network_core.zig").wait.supported) .native_poll else .portable,
-        .transport = .{ .host = key, .bind = .{ .ip4 = .loopback(0) }, .limits = .{
-            .connections_max = 4,
-            .handshaking_max = 4,
-            .handshaking_per_source_max = 4,
-            .dialing_max = 1,
-            .outbound_reserved = 1,
-            .outbound_max = 4,
-        } },
-        .core = @import("managed_test_support.zig").options(),
-        .local = @import("managed_test_support.zig").localState(.{}),
-        .schedule = .{},
-    };
-    result.core.service.reqresp.outbound_per_peer_max = 4;
-    result.core.service.reqresp.forks = &.{
+pub const NetworkOptions = struct {
+    resolved: @import("configuration.zig").Resolved,
+    startup: @import("network_core.zig").Startup,
+};
+
+/// The managed harness request resolved for a NetworkCore on loopback.
+pub fn networkOptions(key: *const keys.KeyPair) NetworkOptions {
+    const managed_support = @import("managed_test_support.zig");
+    var request = managed_support.request();
+    request.forks = &.{
         .{ .digest = @splat(0), .fork = .phase0 },
         .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu },
     };
-    result.core.service.gossipsub.topic_policy = comptime &.{
+    request.reqresp.outbound_per_peer_max = 4;
+    request.gossip.topic_policy = comptime &.{
         @import("gossipsub/topic_fixture.zig").bytes(@splat(0)),
         @import("gossipsub/topic_fixture.zig").bytes(.{ 1, 2, 3, 4 }),
     };
-    return result;
+    return .{
+        .resolved = @import("configuration.zig").resolve(request) catch unreachable,
+        .startup = .{
+            .wait_mode = if (@import("network_core.zig").wait.supported) .native_poll else .portable,
+            .host = key,
+            .bind = .{ .ip4 = .loopback(0) },
+            .local = managed_support.localState(.{}),
+        },
+    };
 }
 
 const core = @import("network_core.zig");

@@ -160,12 +160,12 @@ test "publication local IDONTWANT cannot suppress exact bytes over QUIC" {
     var received: usize = 0;
     for (0..30) |_| {
         try pair.pumpOnce();
-        for (pair.serverEvents()) |event| if (event == .message) {
-            try std.testing.expectEqual(id, event.message.id);
-            try std.testing.expectEqualStrings(topic, event.message.topic);
-            try std.testing.expectEqualStrings("originated wire bytes", event.message.bytes);
+        for (pair.serverMessages()) |message| {
+            try std.testing.expectEqual(id, message.id);
+            try std.testing.expectEqualStrings(topic, message.topic);
+            try std.testing.expectEqualStrings("originated wire bytes", message.bytes);
             received += 1;
-        };
+        }
     }
     try std.testing.expectEqual(@as(usize, 1), received);
 }

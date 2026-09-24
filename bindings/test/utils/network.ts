@@ -9,6 +9,7 @@ import bindings from "../../src/index.js";
 import type {
   NativeApplicationConfig,
   NativeDiscoveryConfig,
+  NativeGossipProcessorLimit,
   NativeLocalIntent,
   NativeRuntimeConfig,
   NativeSubscriptionSet,
@@ -16,13 +17,41 @@ import type {
   NativeTopicScoreParams,
 } from "../../src/network.js";
 
+const MIB = 1024 * 1024;
+
+/**
+ * Lodestar's processor plan for a small validator set, in topicKinds order. Each kind's byte weight exceeds its
+ * largest compressed message on the test chain, so the weight sets the bytes.
+ */
+function gossipProcessor(): NativeGossipProcessorLimit[] {
+  const items = [8, 2048, 128, 32, 32, 128, 128, 1024, 8, 8, 128, 256, 256];
+  const byteWeights = [24, 8, 8, 1, 4, 1, 2, 2, 2, 2, 1, 8, 16];
+  return topicKinds.map((_, i) => ({bytes: byteWeights[i] * MIB, items: items[i]}));
+}
+
+/** Lodestar's default host execution limits, capped by the processor items. */
+function gossipExecution(processor: readonly NativeGossipProcessorLimit[]): NativeGossipProcessorLimit[] {
+  const byteWeights = [32, 4, 8, 1, 4, 1, 2, 2, 2, 2, 1, 8, 24];
+  const itemWeights = [1, 8, 32, 1, 1, 1, 2, 4, 1, 1, 1, 4, 8];
+  const byteTotal = byteWeights.reduce((sum, weight) => sum + weight, 0);
+  const itemTotal = itemWeights.reduce((sum, weight) => sum + weight, 0);
+  const itemBudget = 4096;
+  const byteBudget = 64 * MIB;
+  return topicKinds.map((_, i) => ({
+    bytes: Math.floor((byteBudget * byteWeights[i]) / byteTotal),
+    items: Math.min(Math.floor((itemBudget * itemWeights[i]) / itemTotal), processor[i].items),
+  }));
+}
+
 export function networkConfig(): NativeRuntimeConfig {
   const key = new Uint8Array(32);
   key[31] = 1;
+  const processor = gossipProcessor();
   return {
     bind: {address: Uint8Array.of(127, 0, 0, 1), family: 4, port: 0},
     discovery: null,
     gossipPolicy: {
+      execution: gossipExecution(processor),
       gossipFactor: 0.25,
       heartbeatIntervalMs: 1000n,
       idontwantMinDataSize: 16829,
@@ -31,6 +60,7 @@ export function networkConfig(): NativeRuntimeConfig {
       largeFrameTimeoutMs: 30000n,
       opportunisticGraftIntervalMs: 60000n,
       pressureTimeoutMs: 30000n,
+      processor,
       retainedScoreMs: 38400000n,
       score: {
         behaviourDecay: 0.9,
@@ -134,13 +164,13 @@ export function applicationConfig(): NativeApplicationConfig {
     ...config,
     identify: {agentVersion: "lodestar-z/application-test", protocolVersion: "eth2/1.0.0"},
     resources: {
-      bridgeBudgetBytes: 128 * 1024 * 1024,
+      bridgeBudgetBytes: 512 * MIB,
       connectionCapacity: 16,
       dialingCapacity: 4,
       handshakingCapacity: 8,
       maxPeers: 12,
       minOutbound: 2,
-      nativeBudgetBytes: 96 * 1024 * 1024,
+      nativeBudgetBytes: 512 * MIB,
       outboundReserve: 4,
       peerCapacity: 64,
       receiveBudgetBytes: 64 * 1024 * 1024,

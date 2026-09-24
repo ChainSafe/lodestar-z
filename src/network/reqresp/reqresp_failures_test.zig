@@ -1525,8 +1525,11 @@ test "reqresp request admission host capacity cancellation and queued cancellati
     }
     try std.testing.expectEqual(@as(u64, 1), setup.shared.server.reqresp.counters.admitted);
     try std.testing.expectEqual(@as(usize, 0), setup.server_count);
-    const first = &setup.shared.server.reqresp.inbound[0];
-    const incoming = first.request.handle(0);
+    const slot = for (setup.shared.server.reqresp.inbound, 0..) |*candidate, index| {
+        if (candidate.request.occupied()) break index;
+    } else return error.TestUnexpectedResult;
+    const first = &setup.shared.server.reqresp.inbound[slot];
+    const incoming = first.request.handle(@intCast(slot));
     try std.testing.expect(first.request.pendingEvent().? == .request);
     try std.testing.expectEqual(@as(usize, 1), setup.shared.server.reqresp.resourceSnapshot().inbound_phases[@intFromEnum(reqresp.metrics.InboundPhase.waiting_host)]);
     try std.testing.expect(setup.shared.server.reqresp.cancel(incoming));
@@ -1540,14 +1543,14 @@ test "reqresp request admission host capacity cancellation and queued cancellati
     for (0..50) |_| {
         try setup.pumpOnce();
         for (setup.serverEvents()) |event| try std.testing.expect(event != .request);
-        if (setup.shared.server.reqresp.inbound[0].request.running() and setup.shared.server.reqresp.inbound[0].state == .ready) {
+        if (setup.shared.server.reqresp.inbound[slot].request.running() and setup.shared.server.reqresp.inbound[slot].state == .ready) {
             waiting = true;
             break;
         }
     }
     try std.testing.expect(waiting);
     try std.testing.expectEqual(@as(u64, 0), setup.shared.server.reqresp.protocol_counters[@intFromEnum(Protocol.blocks_by_root_v2)].admission_refusals[@intFromEnum(reqresp.metrics.AdmissionRefusal.peer_quota)]);
-    const replacement = &setup.shared.server.reqresp.inbound[0];
+    const replacement = &setup.shared.server.reqresp.inbound[slot];
     try std.testing.expect(replacement.request.generation > incoming.generation);
     try std.testing.expectEqual(@as(usize, 0), replacement.request.io.payload.len);
     try std.testing.expect(setup.shared.client.reqresp.cancel(queued));

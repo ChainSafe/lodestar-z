@@ -116,7 +116,6 @@ test
 test.each([512, 513])("retained peer capacity %s respects the native gossip ceiling", async (capacity) => {
   const config = applicationConfig();
   config.resources.peerCapacity = capacity;
-  config.resources.nativeBudgetBytes = 128 * 1024 * 1024;
   if (capacity === 513) {
     expect(() => startRuntime(config)).toThrow("InvalidNetworkInteger");
     return;

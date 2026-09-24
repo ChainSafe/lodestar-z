@@ -84,6 +84,7 @@ test("native processor retains dependencies, protects blocks, batches ready work
           bytes: (kind === 0 || kind === 12 ? 16 : kind === 4 ? 4 : 1) * 1024 * 1024,
           items: 8,
         }));
+        config.gossipPolicy.execution = undefined;
         config.resources.nativeBudgetBytes = 256 * 1024 * 1024;
       }
     }
@@ -183,6 +184,7 @@ test("expired validation execution remains visible until late host completion", 
         bytes: (kind === 0 || kind === 12 ? 16 : kind === 4 ? 4 : 1) * 1024 * 1024,
         items: 8,
       }));
+      config.gossipPolicy.execution = undefined;
       config.gossipPolicy.validationTimeoutMs = 2000n;
       config.resources.nativeBudgetBytes = 256 * 1024 * 1024;
     }

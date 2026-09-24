@@ -36,14 +36,11 @@ test "gossipsub service composes the mesh and delivers a message" {
     rounds = 0;
     while (rounds < 20 and !received) : (rounds += 1) {
         try setup.pumpOnce();
-        for (setup.serverEvents()) |event| switch (event) {
-            .message => |m| {
-                try std.testing.expectEqualStrings(payload, m.bytes);
-                _ = setup.shared.server.gossipsub.report(m.handle, .accept, setup.shared.pair.now);
-                received = true;
-            },
-            else => {},
-        };
+        for (setup.serverMessages()) |m| {
+            try std.testing.expectEqualStrings(payload, m.bytes);
+            _ = setup.shared.server.gossipsub.report(m.handle, .accept, setup.shared.pair.now);
+            received = true;
+        }
     }
     try std.testing.expect(received);
     try std.testing.expectEqual(@as(u64, 1), setup.shared.server.gossipsub.counters.messages_received);
@@ -54,6 +51,7 @@ test "gossipsub service preserves coalesced negotiation subscription and FIN" {
     try pair.init(.{}, .{});
     defer pair.deinit();
     var server = try Service.init(std.testing.allocator, .{
+        .automatic_gossip_admission = false,
         .reqresp = .{ .forks = &.{}, .peers = 4, .outbound_max = 1, .inbound_max = 1, .inbound_per_peer_max = 1 },
         .gossipsub = .{ .random_seed = 1, .topic_policy = &.{@import("topic_fixture.zig").bytes(digest)} },
     });
@@ -151,11 +149,11 @@ test "gossipsub direct send timeout retries once after a bounded delay" {
             var received = false;
             for (0..32) |_| {
                 try setup.pumpOnce();
-                for (setup.serverEvents()) |event| if (event == .message) {
-                    try std.testing.expectEqualStrings("resumed", event.message.bytes);
-                    _ = setup.shared.server.gossipsub.report(event.message.handle, .accept, setup.shared.pair.now);
+                for (setup.serverMessages()) |message| {
+                    try std.testing.expectEqualStrings("resumed", message.bytes);
+                    _ = setup.shared.server.gossipsub.report(message.handle, .accept, setup.shared.pair.now);
                     received = true;
-                };
+                }
                 if (received) break;
             }
             try std.testing.expect(received);
@@ -222,7 +220,8 @@ test "gossipsub service negotiates with a v1.1-only peer" {
     try setup.init();
     defer setup.deinit();
     setup.shared.server.deinit();
-    setup.shared.server = try Service.init(std.testing.allocator, .{ .reqresp = .{ .forks = &.{}, .peers = 4, .outbound_max = 1, .inbound_max = 1, .inbound_per_peer_max = 1 }, .gossipsub = .{ .random_seed = 1 }, .router = .{ .meshsub_versions = &.{.v1_1} } });
+    setup.shared.server = try Service.init(std.testing.allocator, .{ .automatic_gossip_admission = false, .reqresp = .{ .forks = &.{}, .peers = 4, .outbound_max = 1, .inbound_max = 1, .inbound_per_peer_max = 1 }, .gossipsub = .{ .random_seed = 1 }, .router = .{ .meshsub_versions = &.{.v1_1} } });
+    setup.shared.server_inbox.attach(setup.shared.server.gossipsub);
     _ = setup.shared.server.gossipsub.peerConnected(&setup.shared.pair.server, setup.shared.handles.server, false, setup.shared.pair.now);
     for (0..24) |_| try setup.pumpOnce();
     const client_index = setup.shared.client.gossipsub.sessions.findPeer(setup.shared.handles.client).?;
@@ -376,7 +375,7 @@ test "gossipsub service preserves a remotely half-closed outbound stream without
 
 fn compositionAllocationPrefix(allocator: std.mem.Allocator) !void {
     const resolved = try @import("../configuration.zig").resolve(.{ .profile = .small, .seed = 1, .forks = &.{} });
-    var service = try Service.init(allocator, .{ .reqresp = resolved.core.service.reqresp, .gossipsub = resolved.core.service.gossipsub, .router = .{ .negotiations_max = 2 } });
+    var service = try Service.init(allocator, .{ .automatic_gossip_admission = false, .reqresp = resolved.core.service.reqresp, .gossipsub = resolved.core.service.gossipsub, .router = .{ .negotiations_max = 2 } });
     defer service.deinit();
     try std.testing.expectEqual(@as(usize, 12), service.gossipsub.sessions.rows.len);
     try std.testing.expectEqual(@as(usize, 2), service.router.negotiator.entries.len);

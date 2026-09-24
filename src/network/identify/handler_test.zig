@@ -82,7 +82,7 @@ test "identify service completes both directions with zero application output an
 }
 
 test "identify configured handler controls default and explicit directional capabilities" {
-    var raw = try service.Service.init(std.testing.allocator, .{ .reqresp = .{ .forks = &.{} }, .gossipsub = .{ .random_seed = 1 } });
+    var raw = try service.Service.init(std.testing.allocator, .{ .automatic_gossip_admission = false, .reqresp = .{ .forks = &.{} }, .gossipsub = .{ .random_seed = 1 } });
     defer raw.deinit();
     try std.testing.expect(!raw.router.capabilities().receive.contains(.identify));
     var opts = options("");
