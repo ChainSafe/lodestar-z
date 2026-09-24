@@ -6,6 +6,8 @@ const lists = @import("../index_list.zig");
 const enr = @import("enr.zig");
 const identity_index = @import("identity_index.zig");
 const dial_history = @import("dial_history.zig");
+const DeadlineHeap = @import("../deadline_heap.zig").DeadlineHeap;
+const assert = std.debug.assert;
 
 pub const history_retention_ms: u64 = 600_000;
 pub const hint_freshness_ms: u64 = 300_000;
@@ -74,6 +76,32 @@ pub const Catalog = struct {
     revision: u64 = 0,
     event_cursor: usize = 0,
     custody_cursor: usize = 0,
+    /// Rows with a pending close or update; pollEvents visits only these.
+    events: std.DynamicBitSetUnmanaged,
+    event_masks: []usize,
+    event_count: u16 = 0,
+    /// The owner clock at the last refresh. Snapshots report reputation decayed to it.
+    clock_ms: u64 = 0,
+    /// No stored reputation crosses the ban or prune score, and no other reputation deadline
+    /// passes, before this time, so refresh decays the rows only once it has passed.
+    refresh_due_ms: u64 = 0,
+    /// Rows visited by refresh passes.
+    refresh_visits: u64 = 0,
+    dial: DialIndex,
+
+    /// Intent deadlines, in ms. Dialing owns the keys; the catalog marks a row in `dirty` when an
+    /// input of its keys changes, and Dialing rekeys marked rows before reading the heaps.
+    pub const DialIndex = struct {
+        /// Manual intent expiry and attempt lease, per row.
+        expiries: DeadlineHeap,
+        /// When a dialable row may next be dialed: its backoff, cooldowns and ban.
+        eligible: DeadlineHeap,
+        dirty: std.DynamicBitSetUnmanaged,
+        dirty_masks: []usize,
+        dirty_count: u32 = 0,
+        /// Rows one expire or poll takes from a heap.
+        scratch: []u32,
+    };
 
     pub fn init(a: std.mem.Allocator, options: t.Options, connections_max: u16, seed: u64) !Catalog {
         return initWithIntents(a, options, 0, connections_max, seed);
@@ -98,19 +126,56 @@ pub const Catalog = struct {
         errdefer a.free(intent_masks);
         const history = try a.alloc(dial_history.Entry, dial_history.History.capacityFor(intent_capacity));
         errdefer a.free(history);
+        const event_masks = try a.alloc(usize, intent_masks.len);
+        errdefer a.free(event_masks);
+        const dirty_masks = try a.alloc(usize, intent_masks.len);
+        errdefer a.free(dirty_masks);
+        var expiries = try DeadlineHeap.init(a, @intCast(rows.len));
+        errdefer expiries.deinit(a);
+        var eligible = try DeadlineHeap.init(a, @intCast(rows.len));
+        errdefer eligible.deinit(a);
+        const scratch = try a.alloc(u32, rows.len);
+        errdefer a.free(scratch);
 
         @memset(history, .{});
         @memset(intent_masks, 0);
+        @memset(event_masks, 0);
+        @memset(dirty_masks, 0);
         @memset(established, null);
         @memset(rows, .{});
         @memset(slots, identity_index.empty);
         @memset(connections, null);
-        var result: Catalog = .{ .rows = rows, .options = options, .intent_capacity = intent_capacity, .intents = .{ .bit_length = rows.len, .masks = intent_masks.ptr }, .intent_masks = intent_masks, .history = .{ .entries = history, .seed = seed }, .established = established, .random = .init(seed), .by_identity = .{ .slots = slots, .seed = seed }, .by_connection = connections };
+        var result: Catalog = .{
+            .rows = rows,
+            .options = options,
+            .intent_capacity = intent_capacity,
+            .intents = .{ .bit_length = rows.len, .masks = intent_masks.ptr },
+            .intent_masks = intent_masks,
+            .history = .{ .entries = history, .seed = seed },
+            .established = established,
+            .random = .init(seed),
+            .by_identity = .{ .slots = slots, .seed = seed },
+            .by_connection = connections,
+            .events = .{ .bit_length = rows.len, .masks = event_masks.ptr },
+            .event_masks = event_masks,
+            .dial = .{
+                .expiries = expiries,
+                .eligible = eligible,
+                .dirty = .{ .bit_length = rows.len, .masks = dirty_masks.ptr },
+                .dirty_masks = dirty_masks,
+                .scratch = scratch,
+            },
+        };
         for (0..rows.len) |index| result.free.append(rows, "free_link", @intCast(index));
         return result;
     }
 
     pub fn deinit(self: *Catalog, a: std.mem.Allocator) void {
+        a.free(self.dial.scratch);
+        self.dial.eligible.deinit(a);
+        self.dial.expiries.deinit(a);
+        a.free(self.dial.dirty_masks);
+        a.free(self.event_masks);
         a.free(self.history.entries);
         a.free(self.intent_masks);
         a.free(self.established);
@@ -213,7 +278,8 @@ pub const Catalog = struct {
     fn advanceConnectedCustody(self: *Catalog, context: *const t.ForkContext, now_ms: u64, freshness_ms: u64, budget: *u16) bool {
         var pending = false;
         for (0..self.rows.len) |_| {
-            const row = &self.rows[self.custody_cursor];
+            const index = self.custody_cursor;
+            const row = &self.rows[index];
             self.custody_cursor = (self.custody_cursor + 1) % self.rows.len;
             if (!row.occupied or row.connection == null or row.closing_reason != null) continue;
             const metadata = row.metadata orelse continue;
@@ -248,6 +314,7 @@ pub const Catalog = struct {
             if (!completed and result != null) {
                 self.revision +|= 1;
                 row.pending_update = true;
+                self.syncEvent(index);
             }
             pending = pending or result == null;
         }
@@ -283,6 +350,8 @@ pub const Catalog = struct {
         const row = self.rowFor(ref) orelse return null;
         if (row.established_slot == null) return null;
         const derived = if (row.connection != null and row.custody_work != null) row.custody_work.?.complete() else null;
+        var current = row.reputation;
+        current.decay(self.clock_ms);
         return .{
             .peer = ref,
             .identity = row.identity,
@@ -300,8 +369,8 @@ pub const Catalog = struct {
             .sampling_groups = if (derived) |value| value.sampling else null,
             .connected_at_ms = row.connected_at_ms,
             .direct = row.direct,
-            .score = row.reputation.score,
-            .score_at_ms = row.reputation.decay_at_ms,
+            .score = current.score,
+            .score_at_ms = current.decay_at_ms,
             .ban_until_ms = row.reputation.ban_until_ms,
             .goodbye_until_ms = row.reputation.goodbye_until_ms,
             .redial_until_ms = row.reputation.redial_until_ms,
@@ -357,6 +426,9 @@ pub const Catalog = struct {
             connect(row, conn, options);
             self.by_connection[conn.index] = ref.index;
             self.revision +|= 1;
+            self.syncEvent(ref.index);
+            self.markDial(ref.index);
+            self.noteReputation(row, options.now_ms);
             return .{ .admitted = .{ .peer = ref, .displaced = displaced, .fresh = fresh } };
         }
         if (!self.admissionRoom(false, options)) return .capacity;
@@ -370,6 +442,8 @@ pub const Catalog = struct {
         self.connected_count += 1;
         self.by_connection[conn.index] = ref.index;
         self.revision +|= 1;
+        self.syncEvent(ref.index);
+        self.markDial(ref.index);
         return .{ .admitted = .{ .peer = ref, .fresh = true } };
     }
 
@@ -404,6 +478,7 @@ pub const Catalog = struct {
         self.intents.set(peer.index);
         self.intent_count += 1;
         self.intent_revision +|= 1;
+        self.markDial(peer.index);
         return peer;
     }
 
@@ -415,6 +490,7 @@ pub const Catalog = struct {
             self.intent_count -= 1;
             self.intent_revision +|= 1;
         }
+        self.markDial(peer.index);
         if (row.established_slot == null) {
             self.forget(peer);
         } else {
@@ -438,6 +514,8 @@ pub const Catalog = struct {
             self.intent_count -= 1;
             self.intent_revision +|= 1;
         }
+        assert(!self.events.isSet(peer.index));
+        self.markDial(peer.index);
         row.* = .{ .generation = row.generation };
         self.free.prepend(self.rows, "free_link", peer.index);
     }
@@ -502,8 +580,46 @@ pub const Catalog = struct {
     }
 
     pub fn eventsPending(self: *const Catalog) bool {
-        for (self.rows) |row| if (row.pending_close != null or row.pending_update) return true;
-        return false;
+        if (@import("builtin").is_test) self.checkEvents();
+        return self.event_count != 0;
+    }
+
+    /// Keeps `events` equal to the rows holding a pending close or update.
+    fn syncEvent(self: *Catalog, index: usize) void {
+        const row = &self.rows[index];
+        const pending = row.pending_close != null or row.pending_update;
+        if (pending == self.events.isSet(index)) return;
+        if (pending) {
+            self.events.set(index);
+            self.event_count += 1;
+        } else {
+            self.events.unset(index);
+            self.event_count -= 1;
+        }
+    }
+
+    /// Test builds check that `events` holds exactly the rows with a pending close or update.
+    fn checkEvents(self: *const Catalog) void {
+        var count: usize = 0;
+        for (self.rows, 0..) |*row, index| {
+            const pending = row.pending_close != null or row.pending_update;
+            assert(pending == self.events.isSet(index));
+            count += @intFromBool(pending);
+        }
+        assert(count == self.event_count);
+    }
+
+    /// Marks the row for Dialing to rekey its intent deadlines.
+    pub fn markDial(self: *Catalog, index: usize) void {
+        if (self.dial.dirty.isSet(index)) return;
+        self.dial.dirty.set(index);
+        self.dial.dirty_count += 1;
+    }
+
+    /// Pulls the refresh deadline forward to the row's next reputation deadline.
+    fn noteReputation(self: *Catalog, row: *const Row, now_ms: u64) void {
+        const next = row.reputation.nextDeadline(now_ms) orelse return;
+        self.refresh_due_ms = @min(self.refresh_due_ms, next);
     }
 
     pub fn connectedCount(self: *const Catalog) u16 {
@@ -532,6 +648,9 @@ pub const Catalog = struct {
         row.pending_close = .{ .connection = conn, .reason = reason };
         row.reputation.decay(now_ms);
         self.connectionClosed(row, reason, now_ms);
+        self.syncEvent(ref.index);
+        self.markDial(ref.index);
+        self.noteReputation(row, now_ms);
         return true;
     }
 
@@ -563,6 +682,7 @@ pub const Catalog = struct {
         if (row.status != null) self.relevant_count -= 1;
         row.status = null;
         row.pending_update = row.published;
+        self.syncEvent(ref.index);
         return true;
     }
 
@@ -575,6 +695,7 @@ pub const Catalog = struct {
         row.status = null;
         row.custody_work = null;
         row.pending_update = row.published;
+        self.syncEvent(ref.index);
         return true;
     }
 
@@ -594,6 +715,7 @@ pub const Catalog = struct {
         row.intent.history_until_ms = @max(row.intent.history_until_ms, now_ms +| history_retention_ms);
         row.status_at_ms = now_ms;
         row.pending_update = true;
+        self.syncEvent(ref.index);
         return true;
     }
 
@@ -603,6 +725,7 @@ pub const Catalog = struct {
         row.identify = metadata.*;
         self.revision +|= 1;
         if (row.published or row.status != null) row.pending_update = true;
+        self.syncEvent(ref.index);
         return true;
     }
 
@@ -613,6 +736,7 @@ pub const Catalog = struct {
         row.endpoint = endpoint.*;
         self.revision +|= 1;
         if (row.published) row.pending_update = true;
+        self.syncEvent(ref.index);
         return true;
     }
 
@@ -637,6 +761,7 @@ pub const Catalog = struct {
         row.metadata = metadata.*;
         row.metadata_at_ms = now_ms;
         if (row.published or row.status != null) row.pending_update = true;
+        self.syncEvent(ref.index);
         return true;
     }
 
@@ -647,6 +772,7 @@ pub const Catalog = struct {
             if (direct) self.direct_count += 1 else self.direct_count -= 1;
         }
         row.direct = direct;
+        self.markDial(ref.index);
         return true;
     }
 
@@ -659,6 +785,10 @@ pub const Catalog = struct {
         const row = self.rowFor(ref) orelse return null;
         if (row.established_slot == null) return null;
         self.revision +|= 1;
+        defer {
+            self.noteReputation(row, now_ms);
+            self.markDial(ref.index);
+        }
         return row.reputation.apply(action, now_ms);
     }
 
@@ -668,6 +798,8 @@ pub const Catalog = struct {
         const before = row.reputation.score;
         row.reputation.nonCompletion(now_ms);
         if (before != row.reputation.score) self.revision +|= 1;
+        self.noteReputation(row, now_ms);
+        self.markDial(ref.index);
         return true;
     }
 
@@ -681,10 +813,20 @@ pub const Catalog = struct {
         const row = self.connectedRow(ref, conn) orelse return false;
         self.revision +|= 1;
         row.reputation.cooldown(now_ms, duration_ms);
+        self.noteReputation(row, now_ms);
+        self.markDial(ref.index);
         return true;
     }
 
+    /// Advances the snapshot clock, and decays every row once a stored score may have crossed the
+    /// ban or prune score, so the revision moves on the crossing. It visits no row before then.
     pub fn refresh(self: *Catalog, now_ms: u64) void {
+        self.clock_ms = @max(self.clock_ms, now_ms);
+        if (now_ms < self.refresh_due_ms) {
+            if (@import("builtin").is_test) self.checkReputation(now_ms);
+            return;
+        }
+        var due: u64 = std.math.maxInt(u64);
         for (self.rows) |*row| {
             if (!row.occupied) continue;
             const banned = row.reputation.score <= reputation.ban_score;
@@ -692,6 +834,20 @@ pub const Catalog = struct {
             row.reputation.decay(now_ms);
             if (banned != (row.reputation.score <= reputation.ban_score) or
                 useful != (row.reputation.score >= reputation.prune_score)) self.revision +|= 1;
+            if (row.reputation.nextDeadline(now_ms)) |next| due = @min(due, next);
+        }
+        self.refresh_visits +|= self.rows.len;
+        self.refresh_due_ms = due;
+    }
+
+    /// Test builds check that no stored score crossed the ban or prune score since the last pass.
+    fn checkReputation(self: *const Catalog, now_ms: u64) void {
+        for (self.rows) |*row| {
+            if (!row.occupied) continue;
+            var current = row.reputation;
+            current.decay(now_ms);
+            assert((row.reputation.score <= reputation.ban_score) == (current.score <= reputation.ban_score));
+            assert((row.reputation.score >= reputation.prune_score) == (current.score >= reputation.prune_score));
         }
     }
 
@@ -705,6 +861,8 @@ pub const Catalog = struct {
         const row = self.connectedRow(ref, conn) orelse return false;
         self.revision +|= 1;
         row.reputation.deferRedial(now_ms, duration_ms);
+        self.noteReputation(row, now_ms);
+        self.markDial(ref.index);
         return true;
     }
 
@@ -719,36 +877,52 @@ pub const Catalog = struct {
         return deadline;
     }
 
+    /// Emits pending closes and updates in row order from the cursor, visiting only rows with one.
     pub fn pollEvents(self: *Catalog, out: []t.Event) usize {
+        if (@import("builtin").is_test) self.checkEvents();
+        if (out.len == 0 or self.event_count == 0) return 0;
+        const start = self.event_cursor;
         var count: usize = 0;
-        for (0..self.rows.len) |_| {
-            if (count == out.len) break;
-            const index = self.event_cursor;
-            self.event_cursor = (index + 1) % self.rows.len;
-            const row = &self.rows[index];
-            if (!row.occupied) continue;
-            const ref: t.PeerRef = .{ .index = @intCast(index), .generation = row.generation };
-            if (row.pending_close) |closed| {
-                out[count] = .{ .closed = .{
-                    .peer = ref,
-                    .identity = row.identity,
-                    .connection = closed.connection,
-                    .reason = closed.reason,
-                } };
-                row.pending_close = null;
-                row.published = false;
-            } else if (row.pending_update) {
-                const snapshot = self.get(ref).?;
-                out[count] = if (row.published)
-                    .{ .updated = snapshot }
-                else
-                    .{ .ready = snapshot };
-                row.pending_update = false;
-                row.published = true;
-            } else continue;
-            count += 1;
+        // The first half visits rows from the cursor to the end, the second the rows before it.
+        outer: for (0..2) |half| {
+            var it = self.events.iterator(.{});
+            while (it.next()) |index| {
+                if ((index < start) != (half == 1)) continue;
+                if (count == out.len) break :outer;
+                self.emitEvent(index, &out[count]);
+                self.syncEvent(index);
+                count += 1;
+                self.event_cursor = (index + 1) % self.rows.len;
+            }
         }
+        // A pass that does not fill the output visits every row and ends where it started.
+        if (count < out.len) self.event_cursor = start;
         return count;
+    }
+
+    fn emitEvent(self: *Catalog, index: usize, out: *t.Event) void {
+        const row = &self.rows[index];
+        assert(row.occupied);
+        const ref: t.PeerRef = .{ .index = @intCast(index), .generation = row.generation };
+        if (row.pending_close) |closed| {
+            out.* = .{ .closed = .{
+                .peer = ref,
+                .identity = row.identity,
+                .connection = closed.connection,
+                .reason = closed.reason,
+            } };
+            row.pending_close = null;
+            row.published = false;
+            return;
+        }
+        assert(row.pending_update);
+        const snapshot = self.get(ref).?;
+        out.* = if (row.published)
+            .{ .updated = snapshot }
+        else
+            .{ .ready = snapshot };
+        row.pending_update = false;
+        row.published = true;
     }
 };
 

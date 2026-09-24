@@ -8,6 +8,10 @@ const rr = @import("../reqresp/root.zig");
 const Now = @import("../types.zig").Now;
 const client = @import("client.zig");
 const goodbye = @import("goodbye.zig");
+const DeadlineHeap = @import("../deadline_heap.zig").DeadlineHeap;
+const assert = std.debug.assert;
+/// An `operation_by_peer` entry with no request in flight.
+const no_operation = std.math.maxInt(u16);
 pub const Options = struct {
     starts_per_turn_max: u16 = 8,
     inbound_status_grace_ms: u64 = 15_000,
@@ -59,8 +63,17 @@ pub const Control = struct {
     operations: []Operation,
     responses: []Response,
     schedules: []Schedule,
+    /// Connected schedules keyed on the earliest time `decide` acts on them, in ms.
+    deadlines: DeadlineHeap,
+    /// Per schedule row, the operation whose request is in flight for that catalog index, or
+    /// `no_operation`. A replacement owner of the index waits for that request's terminal event.
+    operation_by_peer: []u16,
+    /// The rows one maintain turn takes from the heap.
+    due: []u32,
     options: Options,
     cursor: usize = 0,
+    /// Schedules taken from the deadline heap. An idle peer set visits none.
+    visits: u64 = 0,
     counters: Counters = .{},
 
     pub const Counters = struct {
@@ -129,17 +142,30 @@ pub const Control = struct {
         const responses = try a.alloc(Response, inbound_capacity);
         errdefer a.free(responses);
         const schedules = try a.alloc(Schedule, peer_capacity);
+        errdefer a.free(schedules);
+        var deadlines = try DeadlineHeap.init(a, peer_capacity);
+        errdefer deadlines.deinit(a);
+        const operation_by_peer = try a.alloc(u16, peer_capacity);
+        errdefer a.free(operation_by_peer);
+        const due = try a.alloc(u32, peer_capacity);
         @memset(operations, .{});
         @memset(responses, .{});
         @memset(schedules, .{});
+        @memset(operation_by_peer, no_operation);
         return .{
             .operations = operations,
             .responses = responses,
             .schedules = schedules,
+            .deadlines = deadlines,
+            .operation_by_peer = operation_by_peer,
+            .due = due,
             .options = options,
         };
     }
     pub fn deinit(self: *Control, a: std.mem.Allocator) void {
+        a.free(self.due);
+        a.free(self.operation_by_peer);
+        self.deadlines.deinit(a);
         a.free(self.schedules);
         a.free(self.responses);
         a.free(self.operations);
@@ -152,6 +178,7 @@ pub const Control = struct {
     }
     pub fn connected(
         self: *Control,
+        catalog: *const Catalog,
         peer: t.PeerRef,
         conn: t.Handle,
         direction: t.Direction,
@@ -169,6 +196,30 @@ pub const Control = struct {
                 0,
             .ping_due_ms = now.mono_ms +| self.pingInterval(direction),
         };
+        self.touch(catalog, peer.index);
+    }
+    /// Rekeys one schedule from its row, the peer's catalog row and its in-flight operation.
+    /// Every change to any of them calls this before the next maintain or wakeup.
+    fn touch(self: *Control, catalog: *const Catalog, index: usize) void {
+        const row: u32 = @intCast(index);
+        if (self.keyOf(catalog, index)) |key| self.deadlines.set(row, key) else self.deadlines.clear(row);
+    }
+    fn keyOf(self: *const Control, catalog: *const Catalog, index: usize) ?u64 {
+        const row = &self.schedules[index];
+        const peer = row.peer orelse return null;
+        const current = connectedRow(catalog, peer, row.conn) orelse return null;
+        return dueAt(row, current.status != null, self.operation_by_peer[index] != no_operation);
+    }
+    /// The catalog row a schedule acts for, when the catalog still holds it on that connection.
+    fn connectedRow(catalog: *const Catalog, peer: t.PeerRef, conn: t.Handle) ?*const @import("catalog.zig").Row {
+        const current = catalog.rowFor(peer) orelse return null;
+        if (current.established_slot == null or !std.meta.eql(current.connection, conn)) return null;
+        return current;
+    }
+    /// Rekeys a schedule after a test edited its row or the peer's catalog row directly.
+    pub fn reschedule(self: *Control, catalog: *const Catalog, peer: t.PeerRef) void {
+        comptime assert(@import("builtin").is_test);
+        self.touch(catalog, peer.index);
     }
     fn pingInterval(self: *const Control, direction: t.Direction) u64 {
         return if (direction == .inbound)
@@ -183,12 +234,7 @@ pub const Control = struct {
         peer: t.PeerRef,
         conn: t.Handle,
     ) void {
-        for (self.operations) |*op| if (op.request) |request| {
-            if (std.meta.eql(op.peer, peer) and std.meta.eql(op.conn, conn)) {
-                op.cancelled = true;
-                _ = service.reqresp.cancel(request);
-            }
-        };
+        self.cancelOperation(service, peer, conn);
         for (self.responses) |*response| if (response.request) |request| {
             if (std.meta.eql(response.peer, peer) and std.meta.eql(response.conn, conn)) {
                 _ = service.reqresp.cancel(request);
@@ -198,7 +244,19 @@ pub const Control = struct {
         if (self.schedule(peer, conn)) |row| {
             self.counters.events.disconnected[@intFromEnum(row.direction)] +|= 1;
             row.peer = null;
+            self.deadlines.clear(peer.index);
         }
+    }
+    /// Cancels the peer's in-flight request on this connection. Its operation stays held until
+    /// the request's terminal event.
+    fn cancelOperation(self: *Control, service: *Service, peer: t.PeerRef, conn: t.Handle) void {
+        if (peer.index >= self.operation_by_peer.len) return;
+        const index = self.operation_by_peer[peer.index];
+        if (index == no_operation) return;
+        const op = &self.operations[index];
+        if (!std.meta.eql(op.peer, peer) or !std.meta.eql(op.conn, conn)) return;
+        op.cancelled = true;
+        _ = service.reqresp.cancel(op.request.?);
     }
     pub fn disconnect(
         self: *Control,
@@ -221,21 +279,24 @@ pub const Control = struct {
             std.log.scoped(.network_peers).debug("peer_disconnect_scheduled peer={f} connection={d}:{d} reason={s} grace_ms=2000 agent={f}", .{ @import("../logging.zig").peer(&snapshot.identity), conn.index, conn.generation, @tagName(reason), std.json.fmt(agent, .{}) });
             row.closing = .{ .reason = reason, .deadline_ms = now.mono_ms +| 2_000 };
         }
+        self.touch(catalog, peer.index);
         return true;
     }
-    pub fn reStatusPeer(self: *Control, peer: t.PeerRef, conn: t.Handle, now: Now) bool {
+    pub fn reStatusPeer(self: *Control, catalog: *const Catalog, peer: t.PeerRef, conn: t.Handle, now: Now) bool {
         const row = self.schedule(peer, conn) orelse return false;
         if (row.closing != null) return false;
         row.status_due_ms = @min(row.status_due_ms, now.mono_ms);
+        self.touch(catalog, peer.index);
         return true;
     }
-    pub fn reStatusPeers(self: *Control, now: Now) void {
-        for (self.schedules) |*row| if (row.peer != null) {
+    pub fn reStatusPeers(self: *Control, catalog: *const Catalog, now: Now) void {
+        for (self.schedules, 0..) |*row, index| if (row.peer != null) {
             row.status_due_ms = @min(row.status_due_ms, now.mono_ms);
+            self.touch(catalog, index);
         };
     }
     pub fn forkUpdated(self: *Control, service: *Service, catalog: *Catalog, previous: t.ForkContext, now: Now) void {
-        for (self.schedules) |*row| if (row.peer) |peer| {
+        for (self.schedules, 0..) |*row, index| if (row.peer) |peer| {
             if (row.closing != null) continue;
             const relevant = (catalog.get(peer) orelse continue).relevant;
             if (!catalog.invalidateStatus(peer, row.conn)) continue;
@@ -245,11 +306,8 @@ pub const Control = struct {
             row.status_due_ms = now.mono_ms;
             row.retry_ms = 0;
             row.metadata_due_ms = row.metadata_due_ms orelse now.mono_ms;
-            for (self.operations) |*op| if (op.request) |request| {
-                if (!std.meta.eql(op.peer, peer) or !std.meta.eql(op.conn, row.conn)) continue;
-                op.cancelled = true;
-                _ = service.reqresp.cancel(request);
-            };
+            self.cancelOperation(service, peer, row.conn);
+            self.touch(catalog, index);
         };
     }
     pub fn revalidationDeadline(self: *const Control, peer: t.PeerRef, conn: t.Handle, now: Now) ?u64 {
@@ -257,11 +315,6 @@ pub const Control = struct {
         const row = &self.schedules[peer.index];
         if (!std.meta.eql(row.peer, peer) or !std.meta.eql(row.conn, conn) or row.closing != null or now.mono_ms >= row.transition_until_ms) return null;
         return row.transition_until_ms;
-    }
-    fn active(self: *const Control, peer: t.PeerRef) bool {
-        // A replacement catalog owner waits for the retired request's terminal delivery.
-        for (self.operations) |op| if (op.request != null and op.peer.index == peer.index) return true;
-        return false;
     }
     fn goodbyeReason(reason: t.DisconnectReason) u64 {
         return switch (reason) {
@@ -289,7 +342,9 @@ pub const Control = struct {
         local: *const t.LocalState,
         now: Now,
     ) Start {
-        for (self.operations) |*op| {
+        const peer = row.peer.?;
+        assert(self.operation_by_peer[peer.index] == no_operation);
+        for (self.operations, 0..) |*op, index| {
             if (op.request != null) continue;
             const len = switch (protocol) {
                 .status_v1, .status_v2 => wire.encodeStatus(
@@ -324,17 +379,20 @@ pub const Control = struct {
                 error.SlotsExhausted, error.NegotiationTableFull => .retiring,
                 else => .deferred,
             };
-            op.peer = row.peer.?;
+            op.peer = peer;
             op.conn = row.conn;
             op.protocol = protocol;
             op.cancelled = false;
             op.received = false;
             op.request = request;
+            self.operation_by_peer[peer.index] = @intCast(index);
             self.counters.started +|= 1;
             return .started;
         }
         return .retiring;
     }
+    /// Acts on the schedules whose deadline passed, in the order a scan of every row from the
+    /// cursor would reach them, and rekeys each one afterwards.
     pub fn maintain(
         self: *Control,
         service: *Service,
@@ -343,20 +401,28 @@ pub const Control = struct {
         local: *const t.LocalState,
         now: Now,
     ) void {
-        const start_index = self.cursor;
+        var count: usize = 0;
+        // Each row holds at most one key, so the heap empties within schedules.len pops.
+        while (self.deadlines.popDue(now.mono_ms)) |index| {
+            self.due[count] = index;
+            count += 1;
+        }
+        self.visits +|= count;
+        const due = self.due[0..count];
+        std.sort.pdq(u32, due, Rotation{ .start = self.cursor, .len = self.schedules.len }, Rotation.lessThan);
         var starts_remaining = self.options.starts_per_turn_max;
-        for (0..self.schedules.len) |offset| {
-            const index = (start_index + offset) % self.schedules.len;
+        for (due) |index| {
+            defer self.touch(catalog, index);
             const row = &self.schedules[index];
             const peer = row.peer orelse continue;
-            const snapshot = catalog.get(peer) orelse continue;
-            if (!std.meta.eql(snapshot.connection, row.conn)) continue;
-            const decision = decide(row, snapshot.relevant, self.active(peer), now.mono_ms);
+            const current = connectedRow(catalog, peer, row.conn) orelse continue;
+            const relevant = current.status != null;
+            const decision = decide(row, relevant, self.operation_by_peer[index] != no_operation, now.mono_ms);
             if (decision.close) {
                 self.close(service, catalog, engine, peer, row.conn, row.closing.?.reason, now);
                 continue;
             }
-            if (starts_remaining > 0 and snapshot.relevant and row.closing == null and row.identify_state == .pending and now.mono_ms >= row.identify_retry_ms) {
+            if (starts_remaining > 0 and relevant and row.closing == null and row.identify_state == .pending and now.mono_ms >= row.identify_retry_ms) {
                 starts_remaining -= 1;
                 self.cursor = (index + 1) % self.schedules.len;
                 self.startIdentify(service, engine, row, now);
@@ -376,7 +442,7 @@ pub const Control = struct {
                     row.retry_ms = 0;
                     if (action == .goodbye) {
                         row.closing.?.sent = true;
-                        self.counters.events.observeGoodbye(goodbyeReason(row.closing.?.reason), true, snapshot.connected_at_ms, now.mono_ms);
+                        self.counters.events.observeGoodbye(goodbyeReason(row.closing.?.reason), true, current.connected_at_ms, now.mono_ms);
                     }
                 },
                 .retiring => self.counters.deferred +|= 1,
@@ -386,7 +452,16 @@ pub const Control = struct {
                 },
             }
         }
+        if (@import("builtin").is_test) self.checkSchedules(catalog, now.mono_ms);
     }
+    /// Orders row indices by their distance from `start`, wrapping at `len`.
+    const Rotation = struct {
+        start: usize,
+        len: usize,
+        fn lessThan(self: Rotation, a: u32, b: u32) bool {
+            return (a + self.len - self.start) % self.len < (b + self.len - self.start) % self.len;
+        }
+    };
     fn startIdentify(self: *Control, service: *Service, engine: *Engine, row: *Schedule, now: Now) void {
         service.identify.start(&service.router, engine, row.peer.?, row.conn, now) catch {
             row.identify_retry_ms = now.mono_ms +| 1_000;
@@ -403,6 +478,7 @@ pub const Control = struct {
             const row = self.schedule(completion.peer, completion.conn) orelse continue;
             if (row.identify_state != .started) continue;
             row.identify_state = .done;
+            defer self.touch(catalog, completion.peer.index);
             switch (completion.outcome) {
                 .success => |*metadata| {
                     if (catalog.updateIdentify(completion.peer, completion.conn, metadata)) {
@@ -533,6 +609,7 @@ pub const Control = struct {
             _ = service.reqresp.cancel(event.request);
             return;
         };
+        defer self.touch(catalog, peer.index);
         const response = available: {
             for (self.responses) |*candidate| if (candidate.request == null) break :available candidate;
             unreachable;
@@ -629,10 +706,11 @@ pub const Control = struct {
             }
             return;
         }
-        for (self.operations) |*op| {
+        for (self.operations, 0..) |*op, index| {
             if (!std.meta.eql(op.request, request)) continue;
             const row = self.schedule(op.peer, op.conn);
             const matched = row != null and !op.cancelled;
+            defer self.touch(catalog, op.peer.index);
             switch (event) {
                 .chunk => |chunk| {
                     if (matched) self.acceptChunk(catalog, op, chunk.bytes, local, now, slot);
@@ -643,6 +721,8 @@ pub const Control = struct {
                     if (matched) self.complete(catalog, op, event, now);
                     service.reqresp.cleanupPending(engine, &service.router);
                     op.request = null;
+                    assert(self.operation_by_peer[op.peer.index] == index);
+                    self.operation_by_peer[op.peer.index] = no_operation;
                 },
                 else => {},
             }
@@ -750,16 +830,46 @@ pub const Control = struct {
         }
         row.retry_ms = now.mono_ms +| self.options.failure_retry_ms;
     }
+    /// The earliest schedule deadline, bounded below by now. O(1).
     pub fn nextWakeup(self: *const Control, catalog: *const Catalog, now: Now) ?u64 {
-        var due: ?u64 = null;
-        for (self.schedules) |*row| {
-            const peer = row.peer orelse continue;
-            const snapshot = catalog.get(peer) orelse continue;
-            if (!std.meta.eql(snapshot.connection, row.conn)) continue;
-            const decision = decide(row, snapshot.relevant, self.active(peer), now.mono_ms);
-            if (decision.deadline_ms) |next| due = @min(due orelse next, next);
+        if (@import("builtin").is_test) self.checkSchedules(catalog, now.mono_ms);
+        const top = self.deadlines.peek() orelse return null;
+        return @max(top.deadline, now.mono_ms);
+    }
+
+    /// Test builds check that each schedule's key is the deadline a scan of every row computes
+    /// with `decide`, so no due schedule waits off the heap, and that the operation index matches
+    /// the operation table.
+    fn checkSchedules(self: *const Control, catalog: *const Catalog, now_ms: u64) void {
+        var in_flight: usize = 0;
+        for (self.operations, 0..) |*op, index| if (op.request != null) {
+            in_flight += 1;
+            assert(self.operation_by_peer[op.peer.index] == index);
+        };
+        var indexed: usize = 0;
+        for (self.schedules, 0..) |*row, index| {
+            // With the counts equal below, the index names exactly the in-flight operations.
+            const active_request = self.operation_by_peer[index] != no_operation;
+            indexed += @intFromBool(active_request);
+            const key = self.deadlines.get(@intCast(index));
+            const peer = row.peer orelse {
+                assert(key == null);
+                continue;
+            };
+            const snapshot = catalog.get(peer) orelse {
+                assert(key == null);
+                continue;
+            };
+            if (!std.meta.eql(snapshot.connection, row.conn)) {
+                assert(key == null);
+                continue;
+            }
+            const expected = dueAt(row, snapshot.relevant, active_request);
+            assert(key == expected);
+            const bounded: ?u64 = if (expected) |value| @max(value, now_ms) else null;
+            assert(decide(row, snapshot.relevant, active_request, now_ms).deadline_ms == bounded);
         }
-        return due;
+        assert(in_flight == indexed);
     }
 };
 
@@ -773,6 +883,21 @@ const Decision = struct {
         self.deadline_ms = @min(self.deadline_ms orelse bounded, bounded);
     }
 };
+
+/// The earliest time `decide` acts on the row. It does not depend on the clock, so a row needs a
+/// new key only when its state changes; `decide` bounds the value by now.
+fn dueAt(row: *const Schedule, relevant: bool, active_request: bool) ?u64 {
+    if (row.closing) |closing| {
+        if (closing.sent or active_request) return closing.deadline_ms;
+        return @min(closing.deadline_ms, row.retry_ms);
+    }
+    const identify: ?u64 = if (relevant and row.identify_state == .pending) row.identify_retry_ms else null;
+    if (active_request) return identify;
+    const metadata_due = if (relevant) row.metadata_due_ms else null;
+    const refresh_due = metadata_due orelse row.ping_due_ms;
+    const request_due = @max(@min(row.status_due_ms, refresh_due), row.retry_ms);
+    return @min(identify orelse request_due, request_due);
+}
 
 fn decide(row: *const Schedule, relevant: bool, active_request: bool, now: u64) Decision {
     var decision: Decision = .{};
@@ -816,15 +941,17 @@ fn healthProbe(protocol: rr.Protocol) ?HealthProbe {
 test "control repeated Status intent preserves the first due time" {
     var control = try Control.init(std.testing.allocator, .{}, 2, 2, 1);
     defer control.deinit(std.testing.allocator);
+    var catalog = try Catalog.init(std.testing.allocator, .{ .capacity = 2, .outbound_reserve = 0, .target_peers = 2, .max_peers = 2, .min_outbound = 0 }, 2, 0);
+    defer catalog.deinit(std.testing.allocator);
     const first: t.PeerRef = .{ .index = 0, .generation = 1 };
     const second: t.PeerRef = .{ .index = 1, .generation = 1 };
     const first_conn: t.Handle = .{ .index = 0, .generation = 1 };
     const second_conn: t.Handle = .{ .index = 1, .generation = 1 };
-    control.connected(first, first_conn, .outbound, .{ .mono_ms = 10, .unix_s = 0 });
-    control.connected(second, second_conn, .inbound, .{ .mono_ms = 10, .unix_s = 0 });
+    control.connected(&catalog, first, first_conn, .outbound, .{ .mono_ms = 10, .unix_s = 0 });
+    control.connected(&catalog, second, second_conn, .inbound, .{ .mono_ms = 10, .unix_s = 0 });
     for ([_]u64{ 20, 30, 40 }) |now| {
-        control.reStatusPeers(.{ .mono_ms = now, .unix_s = 0 });
-        try std.testing.expect(control.reStatusPeer(second, second_conn, .{ .mono_ms = now, .unix_s = 0 }));
+        control.reStatusPeers(&catalog, .{ .mono_ms = now, .unix_s = 0 });
+        try std.testing.expect(control.reStatusPeer(&catalog, second, second_conn, .{ .mono_ms = now, .unix_s = 0 }));
         try std.testing.expectEqual(@as(u64, 10), control.schedules[0].status_due_ms);
         try std.testing.expectEqual(@as(u64, 20), control.schedules[1].status_due_ms);
     }

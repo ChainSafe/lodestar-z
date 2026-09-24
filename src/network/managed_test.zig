@@ -229,6 +229,33 @@ test "managed native control disconnects only after consecutive health failures"
     }
 }
 
+test "managed native control retries a failed probe on the turn its retry deadline passes" {
+    var setup: Setup = .{};
+    try setup.init(&.{});
+    defer setup.deinit();
+    for (0..50) |_| try setup.step(0);
+    const peer = setup.client.catalog.find(&setup.pair.server_ctx.local_peer_id).?;
+    const row = &setup.client.control.schedules[peer.index];
+    const status = @intFromEnum(@import("peers/control.zig").HealthProbe.status);
+    try failStatusRound(&setup, .timeout);
+    try std.testing.expectEqual(@as(u8, 1), row.health_failures[status]);
+    const retry = row.retry_ms;
+    try std.testing.expectEqual(setup.pair.now.mono_ms + setup.client.control.options.failure_retry_ms, retry);
+    try std.testing.expectEqual(retry, setup.client.control.nextWakeup(&setup.client.catalog, setup.pair.now).?);
+    const counter = &setup.client_service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing;
+    const started = counter.*;
+    const visits = setup.client.control.visits;
+    setup.pair.now.mono_ms = retry - 1;
+    try setup.step(0);
+    try std.testing.expectEqual(started, counter.*);
+    try std.testing.expectEqual(visits, setup.client.control.visits);
+    setup.pair.now.mono_ms = retry;
+    try setup.step(0);
+    try std.testing.expectEqual(started + 1, counter.*);
+    try std.testing.expectEqual(visits + 1, setup.client.control.visits);
+    try std.testing.expectEqual(@as(u8, 1), row.health_failures[status]);
+}
+
 test "managed native control success clears a health failure streak" {
     var setup: Setup = .{};
     try setup.init(&.{});
