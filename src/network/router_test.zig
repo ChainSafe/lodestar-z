@@ -589,7 +589,6 @@ test "router capabilities activation preserves negotiated response context and c
 }
 
 fn pumpRouter(router: *@import("router.zig").Router, pair: *support.Pair, transport: *engine.Engine, now: @import("types.zig").Now, outcomes: []@import("router.zig").Outcome) usize {
-    var activity: [128]engine.Handle = undefined;
-    for (activity[0..pair.activity(transport, &activity)]) |conn| router.connectionActivity(conn);
+    pair.forward(transport, .{ .negotiator = &router.negotiator });
     return router.pump(transport, now, outcomes);
 }

@@ -65,16 +65,10 @@ pub const Pair = struct {
         self.shared.deinit();
     }
 
-    pub fn forwardActivity(self: *Pair) void {
-        var activity: [128]engine_mod.Handle = undefined;
-        for (activity[0..self.shared.pair.activity(&self.shared.pair.client, &activity)]) |conn| {
-            self.shared.client.router.connectionActivity(conn);
-            self.shared.client.reqresp.connectionActivity(conn);
-        }
-        for (activity[0..self.shared.pair.activity(&self.shared.pair.server, &activity)]) |conn| {
-            self.shared.server.router.connectionActivity(conn);
-            self.shared.server.reqresp.connectionActivity(conn);
-        }
+    /// Routes both sides' stream events to their negotiators and reqresp owners.
+    pub fn forwardEvents(self: *Pair) void {
+        self.shared.pair.forward(&self.shared.pair.client, .{ .negotiator = &self.shared.client.router.negotiator, .reqresp = &self.shared.client.reqresp });
+        self.shared.pair.forward(&self.shared.pair.server, .{ .negotiator = &self.shared.server.router.negotiator, .reqresp = &self.shared.server.reqresp });
     }
 
     pub fn pumpOnce(self: *Pair) !void {

@@ -37,10 +37,13 @@ pub const Server = struct {
     charged_cost: u128 = 1,
     admission_paid: u128 = 0,
     eligible_ms: u64 = 0,
+    /// Why a `.ready` slot was not admitted at its last attempt. `none` means it is due one.
+    admission_wait: enum { none, tokens, serving } = .none,
 
     pub fn complete(self: *Server, owner: *ReqResp, index: u16, event: Event, engine: ?*Engine) void {
         owner.complete(&self.request, index, event, .{ .phase_name = @tagName(self.state), .rejection = self.rejection, .result_code = self.pending_result });
         if (engine) |live| self.request.closeProtocol(live);
+        owner.settleSlot(.inbound, index);
     }
 
     pub fn fail(self: *Server, owner: *ReqResp, index: u16, reason: Failure, engine: ?*Engine) void {
@@ -55,13 +58,11 @@ pub const Server = struct {
         }, engine);
     }
 
+    /// A finishing slot resumes its FIN once the host has taken its last event.
     pub fn deliver(self: *Server, control: bool, now: Now) ?Event {
         const request = &self.request;
         const event = request.deliver(control) orelse return null;
-        if (request.running() and self.state == .finishing) {
-            self.progress_ms = now.mono_ms;
-            request.needs_service = true;
-        }
+        if (request.running() and self.state == .finishing) self.progress_ms = now.mono_ms;
         return event;
     }
 
@@ -109,7 +110,9 @@ pub const Server = struct {
             self.fail(ctx, index, reason, engine);
             return;
         };
-        if (self.state == .ready or self.state == .serving) {
+        // A peer stop surfaces here while the host holds the slot. With an event still queued
+        // for the host, its next call on the slot observes the stop instead.
+        if (self.state == .ready or (self.state == .serving and !request.waitingHost())) {
             _ = engine.streamCapacity(request.stream) catch |err| switch (err) {
                 error.WouldBlock => 0,
                 else => {
@@ -144,17 +147,17 @@ pub const Server = struct {
             if (input.bytes.len > 0) {
                 if (!request.io.decoding or request.io.decoder.isDone()) {
                     request.peer_fault = .protocol;
-                    Server.rejectRequest(slot, error.TooManyBytes, now);
+                    Server.rejectRequest(owner, slot, index, error.TooManyBytes, now);
                     return;
                 }
                 _ = request.io.feed(input.bytes) catch |err| {
                     if (request.io.decoder.protocolFault(err)) request.peer_fault = .protocol;
-                    Server.rejectRequest(slot, err, now);
+                    Server.rejectRequest(owner, slot, index, err, now);
                     return;
                 };
                 if (request.io.buffered_start < request.io.buffered_end) {
                     request.peer_fault = .protocol;
-                    Server.rejectRequest(slot, error.TooManyBytes, now);
+                    Server.rejectRequest(owner, slot, index, error.TooManyBytes, now);
                     return;
                 }
             }
@@ -165,7 +168,7 @@ pub const Server = struct {
                 const finished = !request.io.decoding or request.io.decoder.isDone();
                 if (!finished) {
                     request.peer_fault = .protocol;
-                    Server.rejectRequest(slot, error.Truncated, now);
+                    Server.rejectRequest(owner, slot, index, error.Truncated, now);
                     return;
                 }
                 const payload: []const u8 = if (request.io.decoding)
@@ -176,7 +179,7 @@ pub const Server = struct {
                 const inspected = owner.inspectRequest(request.protocol, payload, slot.request_fork) catch |err| {
                     if (err == error.MalformedSsz or err == error.InvalidRequest) request.peer_fault = .protocol;
                     _ = takeAdmission(owner, engine, slot, 1, now);
-                    Server.rejectRequest(slot, err, now);
+                    Server.rejectRequest(owner, slot, index, err, now);
                     return;
                 };
                 request.chunks_max = inspected.chunks_max;
@@ -187,13 +190,16 @@ pub const Server = struct {
                 return;
             }
         }
-        request.needs_service = true;
+        owner.markReady(.inbound, index);
     }
 
     pub fn promote(self: *Server, owner: *ReqResp, index: u16, now: Now) bool {
         const request = &self.request;
         if (!request.running() or self.state != .ready or now.mono_ms < self.eligible_ms) return false;
-        const execution = owner.serving.available(&self.identity, request.protocol.isControl()) orelse return false;
+        const execution = owner.serving.available(&self.identity, request.protocol.isControl()) orelse {
+            self.admission_wait = .serving;
+            return false;
+        };
         const admission = &owner.admission;
         const cost = admission.limiter.requestCost(request.protocol, self.charged_cost, self.request_fork);
         if (self.admission_paid < cost) {
@@ -202,9 +208,11 @@ pub const Server = struct {
             owner.counters.charged_work +|= granted;
             if (self.admission_paid < cost) {
                 self.eligible_ms = admission.limiter.eligibleAt(&self.identity, request.protocol, 1, self.request_fork, now.mono_ms).?;
+                self.admission_wait = .tokens;
                 return false;
             }
         }
+        self.admission_wait = .none;
         owner.counters.admitted +|= 1;
         const payload: []const u8 = if (request.io.decoding) request.io.decoder.payload() else &.{};
         request.io.decoding = false;
@@ -221,10 +229,11 @@ pub const Server = struct {
         return true;
     }
 
-    fn rejectRequest(slot: *Server, reason: Rejection, now: Now) void {
+    fn rejectRequest(owner: *ReqResp, slot: *Server, index: u16, reason: Rejection, now: Now) void {
         assert(slot.rejection == null);
         slot.rejection = reason;
         reject(slot, constants.result_invalid_request, "invalid request", now);
+        owner.markReady(.inbound, index);
     }
 
     fn takeAdmission(owner: *ReqResp, engine: *Engine, slot: *Server, cost: u128, now: Now) bool {
@@ -285,9 +294,9 @@ pub const Server = struct {
         Server.beginWrite(slot);
     }
 
+    /// The caller marks the slot ready.
     fn beginWrite(slot: *Server) void {
         const request = &slot.request;
-        request.needs_service = true;
         request.io.writer = codec.ChunkWriter.initChunk(
             slot.pending_result,
             slot.pending_context,
@@ -309,7 +318,7 @@ pub const Server = struct {
             return;
         };
         if (!flushed.done) {
-            request.needs_service = flushed.runnable;
+            if (flushed.runnable) owner.markReady(.inbound, index);
             return;
         }
         if (slot.pending_result == constants.result_success) {
@@ -321,7 +330,7 @@ pub const Server = struct {
         if (slot.close_after_write) {
             request.io.outbox.queue("", true);
             slot.state = .finishing;
-            request.needs_service = true;
+            owner.markReady(.inbound, index);
             slot.progress_ms = now.mono_ms;
             return;
         }
@@ -353,7 +362,7 @@ pub const Server = struct {
             break :stopped .done;
         };
         if (flushed != .done) {
-            request.needs_service = flushed == .yielded;
+            if (flushed == .yielded) owner.markReady(.inbound, index);
             return;
         }
         slot.progress_ms = now.mono_ms;
@@ -444,7 +453,9 @@ pub const Server = struct {
         }
         owner.protocol_counters[@intFromEnum(which)].incoming +|= 1;
         std.log.scoped(.network_reqresp).debug("request_started direction=inbound request={d}:{d} connection={d}:{d} stream={d} method={s}", .{ index, slot.request.generation, stream.conn.index, stream.conn.generation, stream.id, @tagName(which) });
-        slot.request.needs_service = true;
+        // A stream that is already gone fails on the slot's first read.
+        engine.bindStream(stream, .{ .owner = .reqresp_inbound, .row = index }) catch {};
+        owner.markReady(.inbound, index);
         assert(slot.request.active());
         return slot.request.handle(index);
     }
@@ -508,7 +519,7 @@ pub const Server = struct {
             .serving => {
                 if (!request.io.outbox.idle()) return false;
                 request.io.outbox.queue("", true);
-                request.needs_service = true;
+                owner.markReady(.inbound, request_handle.index);
                 slot.state = .finishing;
                 slot.progress_ms = now.mono_ms;
             },

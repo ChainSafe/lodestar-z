@@ -31,10 +31,13 @@ pub const Client = struct {
     protocol_chunks_max: u32 = 1,
     host_hold_started_ms: ?u64 = null,
     host_held_ms: u64 = 0,
+    /// On the owner's list for this slot's connection index while occupied.
+    conn_link: @import("../index_list.zig").Link = .{},
 
     pub fn complete(self: *Client, owner: *ReqResp, index: u16, event: Event, engine: ?*Engine) void {
         owner.complete(&self.request, index, event, .{ .phase_name = @tagName(self.phase) });
         if (engine) |live| self.request.closeProtocol(live);
+        owner.settleSlot(.outbound, index);
     }
 
     pub fn fail(self: *Client, owner: *ReqResp, index: u16, reason: Failure, engine: ?*Engine) void {
@@ -95,7 +98,7 @@ pub const Client = struct {
             return;
         };
         if (!flushed.done) {
-            request.needs_service = flushed.runnable;
+            if (flushed.runnable) owner.markReady(.outbound, index);
             return;
         }
         request.io.payload = &.{};
@@ -103,8 +106,8 @@ pub const Client = struct {
         slot.phase = .response;
         slot.phase_deadline_ms = now.mono_ms +| slot.absolute_timeouts.response_ms;
         slot.resetResponseDecoder(owner);
-        // Native response bytes may already be readable after this turn consumed activity.
-        request.needs_service = true;
+        // Response bytes may have arrived while the request was still being written.
+        owner.markReady(.outbound, index);
     }
 
     fn readResponse(
@@ -177,7 +180,7 @@ pub const Client = struct {
                 return;
             }
         }
-        request.needs_service = true;
+        owner.markReady(.outbound, index);
     }
 
     fn completeChunk(
@@ -266,6 +269,7 @@ pub const Client = struct {
             return error.TooManyRequests;
         const index = owner.availableOutboundFor(which) orelse return error.SlotsExhausted;
         const slot = &owner.outbound[index];
+        assert(!slot.conn_link.linked);
         const stream = router.beginReqRespTimed(engine, conn, which, now, request_options.absolute_timeouts.negotiation_ms) catch |err| {
             return switch (err) {
                 error.NegotiationTableFull => error.NegotiationTableFull,
@@ -291,6 +295,7 @@ pub const Client = struct {
                 .chunks_max = chunks_max,
             },
         };
+        owner.outbound_by_connection[conn.index].append(owner.outbound, "conn_link", index);
         owner.counters.requests_sent += 1;
         owner.protocol_counters[@intFromEnum(which)].outgoing +|= 1;
         std.log.scoped(.network_reqresp).debug("request_started direction=outbound request={d}:{d} connection={d}:{d} stream={d} method={s} bytes={d} max_chunks={d}", .{ index, slot.request.generation, conn.index, conn.generation, stream.id, @tagName(which), request_ssz.len, chunks_max });
@@ -298,7 +303,8 @@ pub const Client = struct {
         return slot.request.handle(index);
     }
 
-    pub fn negotiated(owner: *ReqResp, outcome: routing.Outcome, now: Now) bool {
+    /// Returns the slot that took the outcome, or null when no slot was waiting for it.
+    pub fn negotiated(owner: *ReqResp, engine: *Engine, outcome: routing.Outcome, now: Now) ?u16 {
         for (owner.outbound, 0..) |*slot, position| {
             const request = &slot.request;
             if (!request.running() or slot.phase != .negotiation) continue;
@@ -311,8 +317,10 @@ pub const Client = struct {
                         ready.leftover.len > request.io.read_buffer.len)
                     {
                         slot.fail(owner, index, .transport, null);
-                        return true;
+                        return index;
                     }
+                    // A stream that is already gone fails on the slot's first write.
+                    engine.bindStream(outcome.stream, .{ .owner = .reqresp_outbound, .row = index }) catch {};
                     assert(ready.leftover.len <= request.io.read_buffer.len);
                     @memcpy(request.io.read_buffer[0..ready.leftover.len], ready.leftover);
                     request.io.buffered_start = 0;
@@ -320,7 +328,7 @@ pub const Client = struct {
                     request.io.fin_seen = ready.fin;
                     slot.phase = .request;
                     slot.phase_deadline_ms = now.mono_ms +| slot.absolute_timeouts.request_ms;
-                    request.needs_service = true;
+                    owner.markReady(.outbound, index);
                     request.io.writer = codec.ChunkWriter.initRequest(request.io.payload);
                     request.io.writing = request.protocol.info().request_max > 0;
                     if (!request.io.writing) request.io.outbox.queue("", true);
@@ -331,9 +339,9 @@ pub const Client = struct {
                     slot.fail(owner, index, if (failure == .timeout) .timeout else .{ .negotiation_failed = failure }, null);
                 },
             }
-            return true;
+            return index;
         }
-        return false;
+        return null;
     }
 
     pub fn consume(owner: *ReqResp, request_handle: RequestHandle, now: Now) bool {
@@ -353,7 +361,7 @@ pub const Client = struct {
             slot.complete(owner, request_handle.index, done, null);
             return true;
         }
-        request.needs_service = true;
+        owner.markReady(.outbound, request_handle.index);
         slot.resetResponseDecoder(owner);
         return true;
     }

@@ -107,11 +107,9 @@ pub const Service = struct {
         wakeups.note(.negotiation, self.router.nextWakeup(now, routing.outcomes_per_pump));
     }
 
-    /// Delivers one turn of engine events. Each connection with stream events counts as activity
-    /// for the owners that still scan by connection; handles retain full transport generations,
-    /// including connections without a gossip owner.
+    /// Delivers one turn of engine events, then pumps each owner's ready work and due deadlines.
     pub fn process(self: *Service, engine: *engine_mod.Engine, events: []const engine_mod.Event, now: types.Now, outputs: Outputs) OutputCounts {
-        self.prepare(engine, events, now);
+        self.dispatch(engine, events, now);
         const counts = self.reqresp.pump(engine, &self.router, now, .{ .application = outputs.application, .control = outputs.control });
         if (self.applications == .active) self.gossipsub.pump(&self.router, engine, now);
         return .{ .application = counts.application, .control = counts.control, .identify = self.identify.pump(&self.router, engine, now, outputs.identify) };
@@ -134,7 +132,10 @@ pub const Service = struct {
         };
     }
 
-    fn prepare(
+    /// Lifecycle events go to the router, reqresp, identify and gossip. Each stream event goes to
+    /// the owner its route names, read from the engine at dispatch time. Gossip, which binds no
+    /// routes yet, takes connection activity from the events of unrouted streams.
+    fn dispatch(
         self: *Service,
         engine: *engine_mod.Engine,
         events: []const engine_mod.Event,
@@ -148,19 +149,35 @@ pub const Service = struct {
         // A connection's events are contiguous in one engine batch, so this visits each once.
         var previous: ?engine_mod.Handle = null;
         for (events) |event| {
-            const conn = engine_mod.activityOf(event) orelse continue;
+            const route: types.Route = switch (event) {
+                .stream_ready => |ready| engine.route(ready.stream) orelse continue,
+                .stream_closed => |closed| closed.route,
+                .stream_opened => .{},
+                .connected, .closed, .path_changed => continue,
+            };
+            if (event == .stream_ready) {
+                const stream = event.stream_ready.stream;
+                switch (route.owner) {
+                    .negotiation => self.router.negotiator.streamReady(route.row, stream),
+                    .identify => self.identify.streamReady(route.row, stream),
+                    .reqresp_outbound, .reqresp_inbound => self.reqresp.streamReady(route, stream),
+                    .none, .gossip_inbound, .gossip_outbound => {},
+                }
+            }
+            switch (route.owner) {
+                .none, .gossip_inbound, .gossip_outbound => {},
+                else => continue,
+            }
+            const conn = engine_mod.activityOf(event).?;
             if (previous != null and std.meta.eql(previous.?, conn)) continue;
             previous = conn;
-            self.router.connectionActivity(conn);
-            self.identify.connectionActivity(conn);
-            self.reqresp.connectionActivity(conn);
             if (self.applications == .active) self.gossipsub.connectionActivity(conn);
         }
         self.reqresp.cleanupPending(engine, &self.router);
         self.router.transportEvents(engine, events, now);
         for (events) |event| switch (event) {
             .closed => |closed| self.reqresp.connectionClosed(closed.conn),
-            .stream_closed => |closed| if (closed.reset_code != null) self.reqresp.streamReset(closed.stream),
+            .stream_closed => |closed| self.reqresp.streamClosed(closed.route, closed.stream, closed.reset_code),
             else => {},
         };
         self.identify.transportEvents(engine, events);
@@ -170,17 +187,20 @@ pub const Service = struct {
         }
         var outcomes: [routing.outcomes_per_pump]routing.Outcome = undefined;
         const count = self.router.pump(engine, now, &outcomes);
+        defer self.router.releaseOutcomes();
         for (outcomes[0..count]) |outcome| {
             const owner = outcome.owner orelse continue;
             if (self.rejectApplication(&outcome)) {
                 engine.closeStream(outcome.stream, 0);
                 continue;
             }
+            // The negotiator lets go of the stream; the new owner binds its own route.
+            if (outcome.result == .ready) engine.bindStream(outcome.stream, .{}) catch {};
             switch (owner) {
                 .identify => self.identify.negotiationResult(&self.router, engine, outcome, now),
                 .reqresp => {
                     if (outcome.direction == .outbound) {
-                        if (!self.reqresp.negotiated(outcome, now)) engine.closeStream(outcome.stream, 0);
+                        if (!self.reqresp.negotiated(engine, outcome, now)) engine.closeStream(outcome.stream, 0);
                     } else switch (outcome.result) {
                         .ready => |selection| _ = self.reqresp.accept(engine, outcome.stream, selection, now) catch |err| {
                             engine.closeStream(outcome.stream, if (err == error.TooManyRequests) @import("reqresp/constants.zig").app_error_over_limit else 0);

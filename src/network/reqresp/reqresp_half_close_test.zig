@@ -16,14 +16,14 @@ fn negotiate(pair: *Pair, method: protocol.Protocol, bytes: []const u8, sink: []
         try pair.shared.pair.pump();
         var events: [16]engine.Event = undefined;
         for (pair.shared.pair.events(&pair.shared.pair.server, &events)) |event| switch (event) {
-            .stream_opened => |stream| try pair.shared.server.router.negotiator.acceptInbound(stream, pair.shared.pair.now),
+            .stream_opened => |stream| try pair.shared.server.router.negotiator.acceptInbound(&pair.shared.pair.server, stream, pair.shared.pair.now),
             else => {},
         };
         var outcomes: [8]router.Outcome = undefined;
-        pair.forwardActivity();
+        pair.forwardEvents();
         const clients = pair.shared.client.router.pump(&pair.shared.pair.client, pair.shared.pair.now, &outcomes);
-        for (outcomes[0..clients]) |outcome| try std.testing.expect(pair.shared.client.reqresp.negotiated(outcome, pair.shared.pair.now));
-        pair.forwardActivity();
+        for (outcomes[0..clients]) |outcome| try std.testing.expect(pair.shared.client.reqresp.negotiated(&pair.shared.pair.client, outcome, pair.shared.pair.now));
+        pair.forwardEvents();
         const servers = pair.shared.server.router.pump(&pair.shared.pair.server, pair.shared.pair.now, &outcomes);
         for (outcomes[0..servers]) |outcome| switch (outcome.result) {
             .ready => remote = outcome.stream,
@@ -39,9 +39,7 @@ fn negotiate(pair: *Pair, method: protocol.Protocol, bytes: []const u8, sink: []
 fn pump(pair: *Pair) ![]const rr.Event {
     try pair.shared.pair.pump();
     pair.shared.client.reqresp.cleanupPending(&pair.shared.pair.client, &pair.shared.client.router);
-    var activity: [128]engine.Handle = undefined;
-    const count = pair.shared.pair.activity(&pair.shared.pair.client, &activity);
-    for (activity[0..count]) |conn| pair.shared.client.reqresp.connectionActivity(conn);
+    pair.shared.pair.forward(&pair.shared.pair.client, .{ .reqresp = &pair.shared.client.reqresp });
     const counts = pair.shared.client.reqresp.pump(&pair.shared.pair.client, &pair.shared.client.router, pair.shared.pair.now, .{ .application = pair.client_events[0..16], .control = pair.client_events[16..] });
     std.mem.copyForwards(rr.Event, pair.client_events[counts.application..], pair.client_events[16..][0..counts.control]);
     pair.client_count = counts.application + counts.control;
@@ -205,7 +203,7 @@ test "reqresp dispatches a complete Goodbye before FIN and keeps other request f
         var requests: usize = 0;
         for (0..8) |_| {
             try pair.shared.pair.pump();
-            pair.shared.server.reqresp.connectionActivity(pair.shared.handles.server);
+            pair.shared.pair.forward(&pair.shared.pair.server, .{ .reqresp = &pair.shared.server.reqresp });
             const count = pair.shared.server.reqresp.pump(&pair.shared.pair.server, &pair.shared.server.router, pair.shared.pair.now, .{ .control = &pair.server_events }).control;
             for (pair.server_events[0..count]) |event| if (event == .request) {
                 try std.testing.expectEqualSlices(u8, &payload, event.request.bytes);
@@ -220,7 +218,7 @@ test "reqresp dispatches a complete Goodbye before FIN and keeps other request f
         }
         for (0..8) |_| {
             try pair.shared.pair.pump();
-            pair.shared.server.reqresp.connectionActivity(pair.shared.handles.server);
+            pair.shared.pair.forward(&pair.shared.pair.server, .{ .reqresp = &pair.shared.server.reqresp });
             const count = pair.shared.server.reqresp.pump(&pair.shared.pair.server, &pair.shared.server.router, pair.shared.pair.now, .{ .control = &pair.server_events }).control;
             for (pair.server_events[0..count]) |event| if (event == .request) {
                 try std.testing.expectEqualSlices(u8, &payload, event.request.bytes);

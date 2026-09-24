@@ -1500,13 +1500,11 @@ test "managed coalesces silent inbound request owners before host request delive
     for (0..30) |_| try setup.step(0);
     try std.testing.expectEqual(@as(u16, 2), setup.server_service.reqresp.active().inbound);
     setup.pair.advance(10_000);
-    // The per-peer receive layout services one slot of a peer per turn.
-    for (0..2) |_| {
-        var events: [2]rr.Event = undefined;
-        const result = managed.process(&setup.server, &setup.server_service, &setup.pair.server, &.{}, setup.pair.now, 100, &.{}, &events);
-        try std.testing.expectEqual(@as(usize, 1), result.application);
-        try std.testing.expect(events[0] == .failed and events[0].failed.reason == .timeout);
-    }
+    // Both expired slots are serviced from the deadline heap in one turn.
+    var events: [2]rr.Event = undefined;
+    const result = managed.process(&setup.server, &setup.server_service, &setup.pair.server, &.{}, setup.pair.now, 100, &.{}, &events);
+    try std.testing.expectEqual(@as(usize, 2), result.application);
+    for (events) |event| try std.testing.expect(event == .failed and event.failed.reason == .timeout);
     _ = setup.server.snapshots(&peers);
     try std.testing.expectEqual(@as(f64, -1), peers[0].score);
     try std.testing.expect(setup.server.catalog.rows[peers[0].peer.index].closing_reason == null);

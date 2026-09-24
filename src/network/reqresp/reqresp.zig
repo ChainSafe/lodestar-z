@@ -16,6 +16,8 @@ const routing = @import("../router.zig");
 const types = @import("../types.zig");
 const receive_plan = @import("receive_plan.zig");
 const serving_pool = @import("serving_pool.zig");
+const index_list = @import("../index_list.zig");
+const DeadlineHeap = @import("../deadline_heap.zig").DeadlineHeap;
 
 const assert = std.debug.assert;
 const Engine = engine_mod.Engine;
@@ -214,9 +216,32 @@ pub const ReqResp = struct {
     request_sinks: []u8,
     receive_plan: receive_plan.Plan,
     serving: serving_pool.Pool,
+    /// Per connection index: the admission lists' links and the `.ready` inbound slots per class.
     peer_cursors: []PeerCursor,
-    admission_cursor: [2]u16 = @splat(0),
-    admission_class: u1 = 0,
+    /// Indexed by slot id: outbound slots are `[0, outbound.len)`, and inbound slot `i` is
+    /// `outbound.len + i`, which belongs to connection index `i / slots_per_peer`.
+    links: []SlotLinks,
+    /// Running slots whose next advance can progress without a new stream event.
+    ready: index_list.List = .{},
+    /// Slots with a stream close still to issue.
+    closing: index_list.List = .{},
+    /// Slots with a pending notification or an undelivered terminal, per class
+    /// (application, control).
+    deliver: [2]index_list.List = .{ .{}, .{} },
+    /// Slots whose terminal was delivered; recycled by the next pump.
+    reported: index_list.List = .{},
+    /// Running slots keyed on their deadline, or on their admission eligibility while waiting
+    /// for tokens.
+    deadlines: DeadlineHeap,
+    /// Per class, the connections with a `.ready` inbound slot.
+    admission_ready: [2]index_list.List = .{ .{}, .{} },
+    /// A `.ready` slot is due an admission attempt: it just became ready, its token wait ended,
+    /// or serving capacity was released.
+    admission_pending: bool = false,
+    /// Per connection index, its occupied outbound slots.
+    outbound_by_connection: []index_list.List,
+    /// Slots taken from a list or the heap by pump. An idle owner visits none.
+    visits: u64 = 0,
     policy: request_policy.Policy,
     admission: Admission,
     request_fork: config.ForkSeq,
@@ -226,9 +251,6 @@ pub const ReqResp = struct {
     outgoing_error_reasons: [metrics.error_reason_count]u64 = @splat(0),
     forks: [64]ForkEntry = undefined,
     fork_count: u8 = 0,
-    work_cursor: usize = 0,
-    application_event_cursor: usize = 0,
-    control_event_cursor: usize = 0,
 
     pub const Resources = struct {
         outbound_capacity: usize = 0,
@@ -361,6 +383,14 @@ pub const ReqResp = struct {
         const peer_cursors = try allocator.alloc(PeerCursor, options.peers);
         errdefer allocator.free(peer_cursors);
         @memset(peer_cursors, .{});
+        const links = try allocator.alloc(SlotLinks, outbound.len + inbound.len);
+        errdefer allocator.free(links);
+        @memset(links, .{});
+        var deadlines = try DeadlineHeap.init(allocator, @intCast(links.len));
+        errdefer deadlines.deinit(allocator);
+        const outbound_by_connection = try allocator.alloc(index_list.List, options.peers);
+        errdefer allocator.free(outbound_by_connection);
+        @memset(outbound_by_connection, .{});
 
         var result: ReqResp = .{
             .allocator = allocator,
@@ -383,6 +413,9 @@ pub const ReqResp = struct {
             .receive_plan = receive,
             .serving = serving,
             .peer_cursors = peer_cursors,
+            .links = links,
+            .deadlines = deadlines,
+            .outbound_by_connection = outbound_by_connection,
             .policy = policy,
             .admission = admission,
             .request_fork = options.request_fork,
@@ -396,6 +429,9 @@ pub const ReqResp = struct {
     pub fn deinit(self: *ReqResp) void {
         self.admission.limiter.deinit(self.allocator);
         self.serving.deinit(self.allocator);
+        self.allocator.free(self.outbound_by_connection);
+        self.deadlines.deinit(self.allocator);
+        self.allocator.free(self.links);
         self.allocator.free(self.peer_cursors);
         self.allocator.free(self.request_sinks);
         self.allocator.free(self.arena);
@@ -436,7 +472,7 @@ pub const ReqResp = struct {
         now: Now,
     ) RequestError!RequestHandle {
         if (!router.capabilities().request.contains(.{ .reqresp = which })) return error.ProtocolDisabled;
-        return Client.start(
+        const handle = try Client.start(
             self,
             engine,
             router,
@@ -447,10 +483,15 @@ pub const ReqResp = struct {
             request_options,
             now,
         );
+        self.settle(handle.index);
+        return handle;
     }
 
-    pub fn negotiated(self: *ReqResp, outcome: routing.Outcome, now: Now) bool {
-        return Client.negotiated(self, outcome, now);
+    /// Hands a negotiated stream to the outbound slot waiting for it. Returns false when none is.
+    pub fn negotiated(self: *ReqResp, engine: *Engine, outcome: routing.Outcome, now: Now) bool {
+        const index = Client.negotiated(self, engine, outcome, now) orelse return false;
+        self.settle(index);
+        return true;
     }
 
     /// Borrows request bytes from the owned inbound slot through served/failed delivery.
@@ -461,7 +502,9 @@ pub const ReqResp = struct {
         ready: routing.Selection,
         now: Now,
     ) AcceptError!RequestHandle {
-        return Server.accept(self, engine, stream, ready, now);
+        const handle = try Server.accept(self, engine, stream, ready, now);
+        self.settle(self.inboundId(handle.index));
+        return handle;
     }
 
     /// Response bytes stay immutable through chunk_sent or terminal delivery.
@@ -472,7 +515,9 @@ pub const ReqResp = struct {
         context: ?ForkEntry,
         now: Now,
     ) RespondError!void {
-        return Server.respond(self, handle, ssz, context, now);
+        try Server.respond(self, handle, ssz, context, now);
+        self.markReady(.inbound, handle.index);
+        self.settle(self.inboundId(handle.index));
     }
 
     /// Copies the message; the caller may release it immediately.
@@ -483,11 +528,15 @@ pub const ReqResp = struct {
         message: []const u8,
         now: Now,
     ) RespondError!void {
-        return Server.respondError(self, handle, code, message, now);
+        try Server.respondError(self, handle, code, message, now);
+        self.markReady(.inbound, handle.index);
+        self.settle(self.inboundId(handle.index));
     }
 
     pub fn finish(self: *ReqResp, handle: RequestHandle, now: Now) bool {
-        return Server.finish(self, handle, now);
+        if (!Server.finish(self, handle, now)) return false;
+        self.settle(self.inboundId(handle.index));
+        return true;
     }
 
     /// Hold execution capacity until asynchronous host work actually retires.
@@ -495,8 +544,11 @@ pub const ReqResp = struct {
         return self.serving.retain(handle);
     }
 
+    /// A release may free serving capacity for a `.ready` slot.
     pub fn releaseServing(self: *ReqResp, handle: RequestHandle) bool {
-        return self.serving.release(handle);
+        if (!self.serving.release(handle)) return false;
+        self.admission_pending = true;
+        return true;
     }
 
     /// Reserve one response turn before the host produces its next chunk.
@@ -508,7 +560,9 @@ pub const ReqResp = struct {
 
     /// Supply fresh owner time so host-held chunks cannot become remote timeout evidence.
     pub fn consume(self: *ReqResp, handle: RequestHandle, now: Now) bool {
-        return Client.consume(self, handle, now);
+        if (!Client.consume(self, handle, now)) return false;
+        self.settle(handle.index);
+        return true;
     }
 
     /// The returned bytes remain valid until the pump after terminal delivery.
@@ -522,28 +576,19 @@ pub const ReqResp = struct {
         return record.error_message[0..record.error_len];
     }
 
-    /// Forward each full-generation handle drained from transport activity before querying wakeups.
-    pub fn connectionActivity(self: *ReqResp, conn: Handle) void {
-        for (self.outbound) |*slot| {
-            if (slot.request.running() and std.meta.eql(slot.request.conn, conn)) {
-                slot.request.needs_service = true;
-            }
-        }
-        for (self.inbound) |*slot| {
-            if (slot.request.running() and std.meta.eql(slot.request.conn, conn)) {
-                slot.request.needs_service = true;
-            }
-        }
-    }
-
     /// Read retained Goodbye bytes before the close event cancels streams and releases their sinks.
     pub fn closingGoodbye(self: *ReqResp, engine: *Engine, conn: Handle, now: Now) ?u64 {
         assert(now.mono_ms >= self.last_now_ms);
         self.last_now_ms = now.mono_ms;
-        for (self.inbound, 0..) |*slot, index| {
+        if (conn.index >= self.options.peers) return null;
+        const first = receive_plan.Plan.first(conn.index, .goodbye_v1);
+        for (first..first + constants.MAX_CONCURRENT_REQUESTS) |position| {
+            const index: u16 = @intCast(position);
+            const slot = &self.inbound[index];
             if (!slot.request.running() or slot.request.protocol != .goodbye_v1 or !std.meta.eql(slot.request.conn, conn)) continue;
+            defer self.settle(self.inboundId(index));
             if (slot.state != .receiving_request and slot.state != .ready and (slot.request.pendingEvent() == null or slot.request.pendingEvent().? != .request)) continue;
-            if (slot.state == .receiving_request and slot.request.pendingEvent() == null) Server.readRequest(self, engine, slot, @intCast(index), now);
+            if (slot.state == .receiving_request and slot.request.pendingEvent() == null) Server.readRequest(self, engine, slot, index, now);
             if (slot.request.running() and slot.state == .ready) {
                 const bytes = slot.request.io.decoder.payload();
                 assert(bytes.len == @import("consensus_types").phase0.Goodbye.fixed_size);
@@ -564,24 +609,61 @@ pub const ReqResp = struct {
         return null;
     }
 
+    /// Fails the connection's slots: its outbound list and its inbound block of the receive plan.
     pub fn connectionClosed(self: *ReqResp, conn: Handle) void {
-        for (self.outbound, 0..) |*slot, position| {
+        if (conn.index >= self.options.peers) return;
+        const list = &self.outbound_by_connection[conn.index];
+        var cursor = list.head;
+        for (0..self.outbound.len) |_| {
+            if (cursor == index_list.none) break;
+            const index: u16 = @intCast(cursor);
+            cursor = self.outbound[index].conn_link.next;
+            const slot = &self.outbound[index];
             if (!slot.request.active() or !std.meta.eql(slot.request.conn, conn)) continue;
-            slot.fail(self, @intCast(position), .connection_closed, null);
+            slot.fail(self, index, .connection_closed, null);
+            self.settle(index);
         }
-        for (self.inbound, 0..) |*slot, position| {
+        const first = receive_plan.Plan.first(conn.index, @enumFromInt(0));
+        for (first..first + receive_plan.slots_per_peer) |position| {
+            const index: u16 = @intCast(position);
+            const slot = &self.inbound[index];
             if (!slot.request.active() or !std.meta.eql(slot.request.conn, conn)) continue;
-            slot.fail(self, @intCast(position), .connection_closed, null);
+            slot.fail(self, index, .connection_closed, null);
+            self.settle(self.inboundId(index));
         }
     }
 
-    pub fn streamReset(self: *ReqResp, stream: StreamHandle) void {
-        for (self.inbound, 0..) |*slot, index| {
-            if (!slot.request.running() or !std.meta.eql(slot.request.stream, stream)) continue;
-            if (slot.state == .writing_chunk or slot.state == .finishing) return;
-            slot.fail(self, @intCast(index), .stream_closed, null);
-            return;
+    /// A routed stream event. An event for a stream the slot no longer holds is dropped.
+    pub fn streamReady(self: *ReqResp, route: types.Route, stream: StreamHandle) void {
+        const id = self.routedSlot(route, stream) orelse return;
+        self.markId(id);
+    }
+
+    /// A routed stream close. A reset fails an inbound slot that is not writing its response;
+    /// any other close is observed by the slot's next stream call.
+    pub fn streamClosed(self: *ReqResp, route: types.Route, stream: StreamHandle, reset_code: ?u64) void {
+        const id = self.routedSlot(route, stream) orelse return;
+        if (reset_code != null and route.owner == .reqresp_inbound) {
+            const index: u16 = @intCast(route.row);
+            const slot = &self.inbound[index];
+            if (slot.state != .writing_chunk and slot.state != .finishing) {
+                slot.fail(self, index, .stream_closed, null);
+                self.settle(id);
+                return;
+            }
         }
+        self.markId(id);
+    }
+
+    fn routedSlot(self: *const ReqResp, route: types.Route, stream: StreamHandle) ?u32 {
+        const id: u32 = switch (route.owner) {
+            .reqresp_outbound => if (route.row < self.outbound.len) route.row else return null,
+            .reqresp_inbound => if (route.row < self.inbound.len) self.inboundId(@intCast(route.row)) else return null,
+            else => return null,
+        };
+        const record = self.recordOf(id);
+        if (!record.running() or !std.meta.eql(record.stream, stream)) return null;
+        return id;
     }
 
     pub const PeerFault = struct {
@@ -619,39 +701,25 @@ pub const ReqResp = struct {
             .admission_bytes = admission_bytes,
             .request_sink_bytes = self.request_sinks.len,
             .serving_bytes = self.serving.memoryBytes(),
-            .scheduler_bytes = self.peer_cursors.len * @sizeOf(PeerCursor),
-            .total_bytes = @sizeOf(ReqResp) + slot_bytes + self.arena.len + admission_bytes + self.request_sinks.len + self.serving.memoryBytes() + self.peer_cursors.len * @sizeOf(PeerCursor),
+            .scheduler_bytes = self.schedulerBytes(),
+            .total_bytes = @sizeOf(ReqResp) + slot_bytes + self.arena.len + admission_bytes + self.request_sinks.len + self.serving.memoryBytes() + self.schedulerBytes(),
         };
     }
 
-    /// Monotonic milliseconds; zero capacity suppresses event-only wakeups.
-    /// Router negotiation and transport deadlines remain separate.
-    pub fn nextWakeup(self: *ReqResp, now: Now, capacities: Capacities) ?u64 {
-        var due: ?u64 = null;
-        for (self.outbound) |*slot| {
-            const capacity = if (slot.request.protocol.isControl())
-                capacities.control
-            else
-                capacities.application;
-            if (slot.request.wakeup(capacity)) return now.mono_ms;
-            if (slot.deadline()) |deadline| due = earlier(due, deadline);
-        }
-        for (self.inbound) |*slot| {
-            const capacity = if (slot.request.protocol.isControl())
-                capacities.control
-            else
-                capacities.application;
-            if (slot.request.wakeup(capacity)) return now.mono_ms;
-            if (slot.deadline(self)) |deadline| due = earlier(due, deadline);
-            if (slot.request.running() and slot.state == .ready and
-                self.serving.available(&slot.identity, slot.request.protocol.isControl()) != null)
-                due = earlier(due, slot.eligible_ms);
-        }
-        return if (due) |deadline| @max(deadline, now.mono_ms) else null;
+    fn schedulerBytes(self: *const ReqResp) usize {
+        return self.peer_cursors.len * @sizeOf(PeerCursor) + self.links.len * @sizeOf(SlotLinks) +
+            self.deadlines.entries.len * (@sizeOf(DeadlineHeap.Entry) + @sizeOf(u32)) + self.outbound_by_connection.len * @sizeOf(index_list.List);
     }
 
-    fn earlier(current: ?u64, next: u64) u64 {
-        return if (current) |value| @min(value, next) else next;
+    /// Monotonic milliseconds; zero capacity suppresses event-only wakeups. Reads list lengths and
+    /// the heap top only. Router negotiation and transport deadlines remain separate.
+    pub fn nextWakeup(self: *const ReqResp, now: Now, capacities: Capacities) ?u64 {
+        if (self.ready.len > 0 or self.closing.len > 0 or self.reported.len > 0) return now.mono_ms;
+        if (capacities.application > 0 and self.deliver[0].len > 0) return now.mono_ms;
+        if (capacities.control > 0 and self.deliver[1].len > 0) return now.mono_ms;
+        if (self.admission_pending and self.admission_ready[0].len + self.admission_ready[1].len > 0) return now.mono_ms;
+        const top = self.deadlines.peek() orelse return null;
+        return @max(top.deadline, now.mono_ms);
     }
 
     /// Validate every raw admission against the attached transport capacity.
@@ -662,6 +730,97 @@ pub const ReqResp = struct {
     pub fn inboundSink(self: *ReqResp, index: u16) []u8 {
         assert(index < self.inbound.len);
         return self.inbound[index].receive.sink;
+    }
+
+    fn inboundId(self: *const ReqResp, index: u16) u32 {
+        assert(index < self.inbound.len);
+        return @intCast(self.outbound.len + index);
+    }
+
+    pub fn markReady(self: *ReqResp, direction: types.Direction, index: u16) void {
+        self.markId(switch (direction) {
+            .outbound => index,
+            .inbound => self.inboundId(index),
+        });
+    }
+
+    fn markId(self: *ReqResp, id: u32) void {
+        assert(self.recordOf(id).running());
+        _ = self.ready.insert(self.links, "ready", id);
+    }
+
+    fn recordOf(self: *const ReqResp, id: u32) *RequestState {
+        if (id < self.outbound.len) return &self.outbound[id].request;
+        return &self.inbound[id - self.outbound.len].request;
+    }
+
+    fn eventList(self: *ReqResp, which: EventList) *index_list.List {
+        return switch (which) {
+            .none => unreachable,
+            .application => &self.deliver[0],
+            .control => &self.deliver[1],
+            .reported => &self.reported,
+        };
+    }
+
+    fn wantedEvent(record: *const RequestState) EventList {
+        if (record.completion == .reported) return .reported;
+        if (!record.deliverable()) return .none;
+        return if (record.protocol.isControl()) .control else .application;
+    }
+
+    fn deadlineOf(self: *const ReqResp, id: u32) ?u64 {
+        if (id < self.outbound.len) return self.outbound[id].deadline();
+        const slot = &self.inbound[id - self.outbound.len];
+        const due = slot.deadline(self) orelse return null;
+        if (slot.state == .ready and slot.admission_wait == .tokens) return @min(due, slot.eligible_ms);
+        return due;
+    }
+
+    /// Brings the slot's scheduling in line with its state after a change made by its own module.
+    pub fn settleSlot(self: *ReqResp, direction: types.Direction, index: u16) void {
+        self.settle(switch (direction) {
+            .outbound => index,
+            .inbound => self.inboundId(index),
+        });
+    }
+
+    /// Brings the slot's closing, delivery and admission memberships and its heap key in line
+    /// with its state. Every change to a slot outside `advance` ends here.
+    fn settle(self: *ReqResp, id: u32) void {
+        const links = &self.links[id];
+        const record = self.recordOf(id);
+        const closing = record.close_code != null;
+        if (closing and !links.close.linked) self.closing.append(self.links, "close", id);
+        if (!closing and links.close.linked) self.closing.remove(self.links, "close", id);
+        const wanted = wantedEvent(record);
+        if (wanted != links.event_list) {
+            if (links.event_list != .none) self.eventList(links.event_list).remove(self.links, "event", id);
+            if (wanted != .none) self.eventList(wanted).append(self.links, "event", id);
+            links.event_list = wanted;
+        }
+        if (!record.running() and links.ready.linked) self.ready.remove(self.links, "ready", id);
+        if (self.deadlineOf(id)) |key| self.deadlines.set(id, key) else self.deadlines.clear(id);
+        if (id >= self.outbound.len) self.settleAdmission(@intCast(id - self.outbound.len));
+    }
+
+    fn settleAdmission(self: *ReqResp, index: u16) void {
+        const slot = &self.inbound[index];
+        const peer = index / receive_plan.slots_per_peer;
+        const bit = @as(u64, 1) << @intCast(index % receive_plan.slots_per_peer);
+        const class: u1 = @intFromBool(slot.request.protocol.isControl());
+        const cursor = &self.peer_cursors[peer];
+        const waiting = slot.request.running() and slot.state == .ready;
+        if (waiting and cursor.ready_mask[class] & bit == 0 and slot.admission_wait == .none) self.admission_pending = true;
+        if (waiting) cursor.ready_mask[class] |= bit else cursor.ready_mask[class] &= ~bit;
+        switch (class) {
+            inline else => |which| {
+                const field = PeerCursor.link_fields[which];
+                const linked = @field(cursor, field).linked;
+                if (cursor.ready_mask[which] != 0 and !linked) self.admission_ready[which].append(self.peer_cursors, field, peer);
+                if (cursor.ready_mask[which] == 0 and linked) self.admission_ready[which].remove(self.peer_cursors, field, peer);
+            },
+        }
     }
 
     pub fn availableInbound(self: *ReqResp, peer: Handle, which: Protocol) ?u16 {
@@ -736,17 +895,25 @@ pub const ReqResp = struct {
             const slot = self.outboundSlot(handle) orelse return false;
             if (slot.request.terminalEvent() != null) return false;
             slot.fail(self, handle.index, .cancelled, null);
+            self.settle(handle.index);
         } else {
             const slot = self.inboundSlot(handle) orelse return false;
             if (slot.request.terminalEvent() != null) return false;
             slot.fail(self, handle.index, .cancelled, null);
+            self.settle(self.inboundId(handle.index));
         }
         return true;
     }
 
+    /// Issues the stream closes of the slots on `closing`.
     pub fn cleanupPending(self: *ReqResp, engine: *Engine, router: *routing.Router) void {
-        for (self.outbound) |*slot| slot.request.closePending(engine, router);
-        for (self.inbound) |*slot| slot.request.closePending(engine, router);
+        var closed: usize = 0;
+        while (self.closing.pop(self.links, "close")) |id| : (closed += 1) {
+            assert(closed < self.links.len);
+            self.visits +|= 1;
+            self.recordOf(id).closePending(engine, router);
+            self.settle(id);
+        }
     }
 
     pub fn cancelApplications(self: *ReqResp, engine: *Engine, router: *routing.Router) void {
@@ -771,118 +938,242 @@ pub const ReqResp = struct {
 
     pub fn pump(self: *ReqResp, engine: *Engine, router: *routing.Router, now: Now, outputs: Outputs) OutputCounts {
         self.advance(engine, router, now);
-        return .{
-            .application = self.drain(now, outputs.application, false, &self.application_event_cursor),
-            .control = self.drain(now, outputs.control, true, &self.control_event_cursor),
+        const counts: OutputCounts = .{
+            .application = self.drain(now, outputs.application, false),
+            .control = self.drain(now, outputs.control, true),
         };
+        if (@import("builtin").is_test) self.checkInvariants(engine);
+        return counts;
     }
 
+    /// Closes, recycles, then services the ready slots and the due keys up to
+    /// `work_per_pump_max`, then admits `.ready` slots. A slot re-marked while serviced waits
+    /// for the next pump, behind the slots marked before it.
     fn advance(self: *ReqResp, engine: *Engine, router: *routing.Router, now: Now) void {
         assert(now.mono_ms >= self.last_now_ms or self.last_now_ms == 0);
         self.last_now_ms = now.mono_ms;
         self.cleanupPending(engine, router);
         self.recycleDelivered();
-        const total = self.outbound.len + self.options.peers;
+        const marked = self.ready.len;
+        const keyed: usize = self.deadlines.len;
+        var taken: usize = 0;
         var serviced: usize = 0;
-        // Empty capacity must not add owner turns between chunks of a runnable stream.
-        for (0..total) |_| {
+        // A due key comes back at most once more, when its token wait ended before its deadline.
+        for (0..marked + 2 * keyed + 1) |_| {
             if (serviced == self.options.work_per_pump_max) break;
-            const position = self.work_cursor;
-            self.work_cursor = (position + 1) % total;
-            if (position < self.outbound.len) {
-                const slot = &self.outbound[position];
-                if (!slot.request.running()) continue;
-                if (!slot.request.needs_service and slot.deadline().? > now.mono_ms) continue;
-                slot.request.needs_service = false;
-                slot.advance(self, engine, @intCast(position), now);
-                serviced += 1;
-            } else {
-                const peer = position - self.outbound.len;
-                const first = peer * receive_plan.slots_per_peer;
-                const start = self.peer_cursors[peer].receive;
-                for (0..receive_plan.slots_per_peer) |offset| {
-                    const local = (start + offset) % receive_plan.slots_per_peer;
-                    const index = first + local;
-                    const slot = &self.inbound[index];
-                    if (!self.inboundRunnable(slot, now)) continue;
-                    self.peer_cursors[peer].receive = @intCast((local + 1) % receive_plan.slots_per_peer);
-                    slot.request.needs_service = false;
-                    slot.advance(self, engine, @intCast(index), now);
-                    serviced += 1;
-                    break;
+            const keyed_due = taken == marked;
+            const id: u32 = if (!keyed_due) marked: {
+                taken += 1;
+                break :marked self.ready.pop(self.links, "ready").?;
+            } else self.deadlines.popDue(now.mono_ms) orelse break;
+            self.visits +|= 1;
+            if (keyed_due and id >= self.outbound.len) {
+                const slot = &self.inbound[id - self.outbound.len];
+                if (slot.request.running() and slot.state == .ready and now.mono_ms < slot.deadline(self).?) {
+                    // Only its token wait ended.
+                    slot.admission_wait = .none;
+                    self.admission_pending = true;
+                    self.settle(id);
+                    continue;
                 }
             }
+            if (self.links[id].ready.linked) self.ready.remove(self.links, "ready", id);
+            if (id < self.outbound.len) {
+                self.outbound[id].advance(self, engine, @intCast(id), now);
+            } else self.inbound[id - self.outbound.len].advance(self, engine, @intCast(id - self.outbound.len), now);
+            serviced += 1;
+            self.settle(id);
         }
         self.promoteReady(now);
         // Cleanup also covers terminal transitions made during this turn.
         self.cleanupPending(engine, router);
     }
 
-    fn inboundRunnable(self: *ReqResp, slot: *const Server, now: Now) bool {
-        if (!slot.request.running()) return false;
-        if (slot.request.needs_service or slot.deadline(self).? <= now.mono_ms) return true;
-        return false;
-    }
-
+    /// One admission attempt per connection per class, control first. A connection that was
+    /// admitted moves to the tail; one that was not keeps its place ahead of it.
     fn promoteReady(self: *ReqResp, now: Now) void {
-        const start = self.admission_cursor;
-        const first_class = self.admission_class;
+        if (!self.admission_pending) return;
+        self.admission_pending = false;
         var promoted: usize = 0;
-        for (0..self.options.peers) |offset| {
-            for (0..2) |class_offset| {
-                const class: u1 = @intCast((@as(usize, first_class) + class_offset) % 2);
-                const peer: u16 = @intCast((start[class] + offset) % self.options.peers);
-                const first = @as(usize, peer) * receive_plan.slots_per_peer;
-                const end = first + receive_plan.slots_per_peer;
-                const local_start = self.peer_cursors[peer].admission[class];
-                for (0..end - first) |local_offset| {
-                    const local = (local_start + local_offset) % (end - first);
-                    const index = first + local;
-                    const slot = &self.inbound[index];
-                    if (!slot.request.running() or slot.request.conn.index != peer or slot.state != .ready or @intFromBool(slot.request.protocol.isControl()) != class) continue;
-                    const paid = slot.admission_paid;
-                    const admitted = slot.promote(self, @intCast(index), now);
-                    if (admitted or slot.admission_paid > paid) {
-                        promoted += 1;
-                        self.peer_cursors[peer].admission[class] = @intCast((local + 1) % (end - first));
-                        self.admission_cursor[class] = (peer + 1) % self.options.peers;
-                        self.admission_class = 1 - class;
-                        break;
+        inline for (.{ 1, 0 }) |class| {
+            const field = PeerCursor.link_fields[class];
+            const list = &self.admission_ready[class];
+            var next = list.head;
+            // Each visited connection is behind every unvisited one once moved, so each
+            // connection on the list is visited once.
+            for (0..list.len) |_| {
+                if (next == index_list.none) break;
+                if (promoted == self.options.work_per_pump_max) {
+                    self.admission_pending = true;
+                    return;
+                }
+                const peer: u16 = @intCast(next);
+                const cursor = &self.peer_cursors[peer];
+                next = @field(cursor, field).next;
+                if (self.promotePeer(peer, class, now)) {
+                    promoted += 1;
+                    // The connection's other `.ready` slots wait for the next round.
+                    if (cursor.ready_mask[class] != 0) {
+                        self.admission_pending = true;
+                        list.remove(self.peer_cursors, field, peer);
+                        list.append(self.peer_cursors, field, peer);
                     }
                 }
-                if (promoted == self.options.work_per_pump_max) return;
             }
         }
     }
 
-    fn drain(self: *ReqResp, now: Now, events: []Event, control: bool, cursor: *usize) usize {
-        const total = self.outbound.len + self.inbound.len;
-        var count: usize = 0;
-        for (0..total) |_| {
-            if (count == events.len) break;
-            const position = cursor.*;
-            cursor.* = (position + 1) % total;
-            const event = if (position < self.outbound.len)
-                self.outbound[position].request.deliver(control)
-            else
-                self.inbound[position - self.outbound.len].deliver(control, now);
-            if (event) |ready| {
-                events[count] = ready;
-                count += 1;
+    /// Tries the connection's `.ready` slots of the class in turn until one is admitted or
+    /// pays toward its cost.
+    fn promotePeer(self: *ReqResp, peer: u16, comptime class: u1, now: Now) bool {
+        const cursor = &self.peer_cursors[peer];
+        const first = @as(usize, peer) * receive_plan.slots_per_peer;
+        const start = cursor.admission[class];
+        for (0..receive_plan.slots_per_peer) |offset| {
+            const local: u8 = @intCast((start + offset) % receive_plan.slots_per_peer);
+            if (cursor.ready_mask[class] & (@as(u64, 1) << @intCast(local)) == 0) continue;
+            const index: u16 = @intCast(first + local);
+            const slot = &self.inbound[index];
+            self.visits +|= 1;
+            const paid = slot.admission_paid;
+            const admitted = slot.promote(self, index, now);
+            self.settle(self.inboundId(index));
+            if (admitted or slot.admission_paid > paid) {
+                cursor.admission[class] = @intCast((local + 1) % receive_plan.slots_per_peer);
+                return true;
             }
+        }
+        return false;
+    }
+
+    /// Delivers at most one event per queued slot, in queue order.
+    fn drain(self: *ReqResp, now: Now, events: []Event, control: bool) usize {
+        const class: EventList = if (control) .control else .application;
+        const list = self.eventList(class);
+        const queued = list.len;
+        var count: usize = 0;
+        for (0..queued) |_| {
+            if (count == events.len) break;
+            const id = list.pop(self.links, "event").?;
+            self.links[id].event_list = .none;
+            self.visits +|= 1;
+            if (id < self.outbound.len) {
+                events[count] = self.outbound[id].request.deliver(control).?;
+            } else {
+                const slot = &self.inbound[id - self.outbound.len];
+                events[count] = slot.deliver(control, now).?;
+                if (slot.request.running() and slot.state == .finishing) self.markId(id);
+            }
+            count += 1;
+            self.settle(id);
         }
         return count;
     }
 
     fn recycleDelivered(self: *ReqResp) void {
-        for (self.outbound) |*slot| slot.request.recycleDelivered();
-        for (self.inbound) |*slot| {
-            if (slot.request.completion == .reported) {
-                if (slot.execution) |index| self.serving.retire(index);
+        var recycled: usize = 0;
+        while (self.reported.pop(self.links, "event")) |id| : (recycled += 1) {
+            assert(recycled < self.links.len);
+            self.links[id].event_list = .none;
+            self.visits +|= 1;
+            if (id < self.outbound.len) {
+                const slot = &self.outbound[id];
+                slot.request.recycleDelivered();
+                self.outbound_by_connection[slot.request.conn.index].remove(self.outbound, "conn_link", id);
+            } else {
+                const slot = &self.inbound[id - self.outbound.len];
+                if (slot.execution) |index| {
+                    self.serving.retire(index);
+                    self.admission_pending = true;
+                }
                 slot.execution = null;
+                slot.request.recycleDelivered();
             }
-            slot.request.recycleDelivered();
+            self.settle(id);
         }
+    }
+
+    /// Test builds check, after every pump, that the lists, the heap and the admission masks
+    /// match the slot states, that no slot with stream work is off `ready`, and that each live
+    /// stream a slot holds routes to it and back.
+    fn checkInvariants(self: *const ReqResp, engine: *const Engine) void {
+        var lengths: struct { ready: usize = 0, closing: usize = 0, events: [4]usize = @splat(0) } = .{};
+        for (self.links, 0..) |*links, position| {
+            const id: u32 = @intCast(position);
+            const record = self.recordOf(id);
+            lengths.ready += @intFromBool(links.ready.linked);
+            lengths.closing += @intFromBool(links.close.linked);
+            lengths.events[@intFromEnum(links.event_list)] += 1;
+            assert(links.close.linked == (record.close_code != null));
+            assert(links.event_list == wantedEvent(record));
+            assert(!links.ready.linked or record.running());
+            if (!record.running()) {
+                assert(self.deadlines.get(id) == null);
+            } else if (!links.ready.linked) assert(self.deadlines.get(id).? == self.deadlineOf(id).?);
+            const direction: types.Direction = if (id < self.outbound.len) .outbound else .inbound;
+            const index: u16 = @intCast(if (direction == .outbound) id else id - self.outbound.len);
+            if (direction == .inbound) {
+                const slot = &self.inbound[index];
+                const bit = @as(u64, 1) << @intCast(index % receive_plan.slots_per_peer);
+                const class: u1 = @intFromBool(record.protocol.isControl());
+                const waiting = record.running() and slot.state == .ready;
+                const cursor = &self.peer_cursors[index / receive_plan.slots_per_peer];
+                assert((cursor.ready_mask[class] & bit != 0) == waiting);
+                if (waiting) assert(PeerCursor.linked(self.peer_cursors, class, index / receive_plan.slots_per_peer));
+                if (waiting and slot.admission_wait == .none) assert(self.admission_pending);
+            }
+            if (!record.active() or record.stream_owner != .protocol) continue;
+            const bound = engine.route(record.stream) orelse continue;
+            assert(bound.owner == (if (direction == .outbound) types.StreamOwner.reqresp_outbound else .reqresp_inbound) and bound.row == index);
+            if (!record.running() or links.ready.linked) continue;
+            const waits = engine.streamWaits(record.stream) orelse continue;
+            switch (direction) {
+                .outbound => {
+                    const slot = &self.outbound[index];
+                    if (record.waitingHost()) continue;
+                    switch (slot.phase) {
+                        .negotiation => {},
+                        .request => if (record.io.writing or !record.io.outbox.idle()) assert(waits.write_waiting),
+                        .response => assertDrained(record, waits),
+                    }
+                },
+                .inbound => {
+                    const slot = &self.inbound[index];
+                    if (record.waitingHost() or slot.state == .serving) continue;
+                    switch (slot.state) {
+                        .ready, .serving => {},
+                        .receiving_request => assertDrained(record, waits),
+                        .writing_chunk, .finishing => assert(waits.write_waiting),
+                    }
+                },
+            }
+        }
+        assert(lengths.ready == self.ready.len and lengths.closing == self.closing.len);
+        assert(lengths.events[@intFromEnum(EventList.application)] == self.deliver[0].len);
+        assert(lengths.events[@intFromEnum(EventList.control)] == self.deliver[1].len);
+        assert(lengths.events[@intFromEnum(EventList.reported)] == self.reported.len);
+        for (engine.registry.slots, 0..) |*connection, conn_index| {
+            // A closing connection keeps its streams until retired, and closes nothing more.
+            if (connection.state != .established or connection.pending_close != null or connection.close_reason != null) continue;
+            for (&connection.table.entries, 0..) |*entry, entry_index| {
+                if (!entry.claimed or entry.closed_pending) continue;
+                const direction: types.Direction = switch (entry.route.owner) {
+                    .reqresp_outbound => .outbound,
+                    .reqresp_inbound => .inbound,
+                    else => continue,
+                };
+                const record: *const RequestState = if (direction == .outbound) &self.outbound[entry.route.row].request else &self.inbound[entry.route.row].request;
+                assert(record.active() and record.stream_owner == .protocol);
+                assert(std.meta.eql(record.stream, StreamHandle{ .conn = .{ .index = @intCast(conn_index), .generation = connection.generation }, .id = entry.id, .slot = @intCast(entry_index) }));
+            }
+        }
+    }
+
+    /// A reading slot off `ready` has consumed its buffered input and read its last delivered
+    /// readable edge to Done.
+    fn assertDrained(record: *const RequestState, waits: Engine.StreamWaits) void {
+        assert(record.io.buffered_start == record.io.buffered_end and !record.io.fin_seen);
+        assert(!waits.read_open);
     }
 
     pub fn servingSlot(self: *ReqResp, handle: RequestHandle) RespondError!*Server {
@@ -909,7 +1200,11 @@ pub const ReqResp = struct {
 
     pub fn outboundCount(self: *const ReqResp, conn: Handle, which: Protocol) u8 {
         var count: u8 = 0;
-        for (self.outbound) |*slot| {
+        var cursor = if (conn.index < self.options.peers) self.outbound_by_connection[conn.index].head else index_list.none;
+        for (0..self.outbound.len) |_| {
+            if (cursor == index_list.none) break;
+            const slot = &self.outbound[cursor];
+            cursor = slot.conn_link.next;
             if (!slot.request.active() or slot.request.protocol != which) continue;
             if (!std.meta.eql(slot.request.conn, conn)) continue;
             count +|= 1;
@@ -919,16 +1214,26 @@ pub const ReqResp = struct {
 
     pub fn outboundApplicationCount(self: *const ReqResp, conn: Handle) u16 {
         var count: u16 = 0;
-        for (self.outbound) |*slot| {
+        var cursor = if (conn.index < self.options.peers) self.outbound_by_connection[conn.index].head else index_list.none;
+        for (0..self.outbound.len) |_| {
+            if (cursor == index_list.none) break;
+            const slot = &self.outbound[cursor];
+            cursor = slot.conn_link.next;
             if (!slot.request.occupied() or slot.request.protocol.isControl()) continue;
             if (std.meta.eql(slot.request.conn, conn)) count += 1;
         }
         return count;
     }
 
+    /// The connection's block of the receive plan.
+    fn inboundOf(self: *const ReqResp, conn: Handle) []const Server {
+        if (conn.index >= self.options.peers) return &.{};
+        return self.inbound[receive_plan.Plan.first(conn.index, @enumFromInt(0))..][0..receive_plan.slots_per_peer];
+    }
+
     pub fn inboundApplicationCount(self: *const ReqResp, conn: Handle) u16 {
         var count: u16 = 0;
-        for (self.inbound) |*slot| {
+        for (self.inboundOf(conn)) |*slot| {
             if (!slot.request.occupied() or slot.request.protocol.isControl()) continue;
             if (std.meta.eql(slot.request.conn, conn)) count += 1;
         }
@@ -937,7 +1242,7 @@ pub const ReqResp = struct {
 
     pub fn inboundCount(self: *const ReqResp, conn: Handle, which: ?Protocol) u8 {
         var count: u8 = 0;
-        for (self.inbound) |*slot| {
+        for (self.inboundOf(conn)) |*slot| {
             if (!slot.request.active() or !std.meta.eql(slot.request.conn, conn)) continue;
             if (which) |wanted| if (!slot.request.running() or slot.request.protocol != wanted) continue;
             count +|= 1;
@@ -956,7 +1261,34 @@ pub const ReqResp = struct {
     }
 };
 
-const PeerCursor = struct { receive: u8 = 0, admission: [2]u16 = @splat(0) };
+/// Per connection index: where the next admission attempt starts, the `.ready` inbound slots and
+/// the admission list links, per class (application, control).
+const PeerCursor = struct {
+    admission: [2]u8 = @splat(0),
+    ready_mask: [2]u64 = @splat(0),
+    application_link: index_list.Link = .{},
+    control_link: index_list.Link = .{},
+
+    const link_fields = [2][]const u8{ "application_link", "control_link" };
+
+    fn linked(rows: []const PeerCursor, class: u1, peer: u32) bool {
+        return if (class == 0) rows[peer].application_link.linked else rows[peer].control_link.linked;
+    }
+};
+
+const EventList = enum(u2) { none, application, control, reported };
+
+const SlotLinks = struct {
+    ready: index_list.Link = .{},
+    close: index_list.Link = .{},
+    /// On `deliver[class]` or `reported`, as `event_list` names.
+    event: index_list.Link = .{},
+    event_list: EventList = .none,
+};
+
+comptime {
+    assert(receive_plan.slots_per_peer <= 64);
+}
 
 fn assignBuffers(io: *RequestIO, arena: []u8, cursor: usize, control: bool) usize {
     const scratch = if (control) control_scratch_length else scratch_length;

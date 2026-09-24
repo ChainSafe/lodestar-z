@@ -244,7 +244,7 @@ test "router control capacity protects outbound negotiations from unknown inboun
     );
     try std.testing.expectError(
         error.NegotiationTableFull,
-        router.negotiator.acceptInbound(first, pair.now),
+        router.negotiator.acceptInbound(&pair.client, first, pair.now),
     );
     const ping = try router.beginOutbound(
         &pair.client,

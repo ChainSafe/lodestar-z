@@ -1041,6 +1041,41 @@ test "managed beacon idle scans do not manufacture immediate deadlines" {
     try std.testing.expectEqual(calls, node.reservations.allocation_calls);
 }
 
+test "managed idle turns with pending negotiations are never due for reqresp or negotiation" {
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{38}));
+    const spoke_key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{39}));
+    var opts = options(&key);
+    var node: runtime.NetworkCore = undefined;
+    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
+    defer node.deinit(std.testing.io);
+    // A bare QUIC peer never answers the node's identify, meshsub and status proposals, so
+    // their negotiations stay pending on future deadlines.
+    var spoke: @import("transport.zig").Transport = .{};
+    try spoke.init(std.testing.allocator, std.testing.io, .{ .host = &spoke_key, .bind = .{ .ip4 = .loopback(0) } });
+    defer spoke.deinit(std.testing.io);
+    _ = try spoke.dialPeer(std.testing.io, node.transport.localAddress(), node.peerId());
+    var events: [32]@import("quic/engine.zig").Event = undefined;
+    for (0..40) |_| {
+        _ = try core_test.step(&spoke, std.testing.io, &events, &.{}, .{ .wait_max_ms = 1 });
+        _ = node.step(std.testing.io, try @import("transport.zig").currentTime(std.testing.io), 100, .{}, 1);
+    }
+    try std.testing.expect(node.service.router.negotiator.active() > 0);
+    const Source = @import("wake_sources.zig").Source;
+    const due = node.due_now_turns;
+    const visits = .{ node.service.reqresp.visits, node.service.router.negotiator.visits };
+    for (0..64) |_| {
+        const now = try @import("transport.zig").currentTime(std.testing.io);
+        if (node.service.reqresp.nextWakeup(now, .{ .application = 1, .control = 1 })) |wakeup| try std.testing.expect(wakeup > now.mono_ms);
+        try std.testing.expect(node.service.router.nextWakeup(now, 1).? > now.mono_ms);
+        try std.testing.expect(node.step(std.testing.io, now, 100, .{}, 0).failure == null);
+    }
+    try std.testing.expectEqual(due[@intFromEnum(Source.reqresp)], node.due_now_turns[@intFromEnum(Source.reqresp)]);
+    try std.testing.expectEqual(due[@intFromEnum(Source.negotiation)], node.due_now_turns[@intFromEnum(Source.negotiation)]);
+    try std.testing.expectEqual(visits[0], node.service.reqresp.visits);
+    try std.testing.expectEqual(visits[1], node.service.router.negotiator.visits);
+    try std.testing.expect(node.service.router.negotiator.active() > 0);
+}
+
 test "managed runtime BPO same-fork digest transition updates status and advertisement" {
     const rr = @import("reqresp/reqresp.zig");
     const first: rr.ForkEntry = .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu };

@@ -21,6 +21,7 @@ pub const Read = types.Read;
 pub const Address = types.Address;
 pub const Sent = types.Sent;
 pub const Readiness = types.Readiness;
+pub const Route = types.Route;
 
 pub const Error = std.mem.Allocator.Error || error{InvalidLimits};
 
@@ -63,7 +64,10 @@ pub const Event = union(enum) {
     /// a writable one only after a blocked write armed it and send capacity reached the armed
     /// watermark, or the peer stopped the stream.
     stream_ready: struct { stream: StreamHandle, ready: Readiness },
-    stream_closed: struct { stream: StreamHandle, reset_code: ?u64 },
+    /// `route` is the stream's owner, captured before its table entry cleared. The owner of a
+    /// routed stream caused its close in one of its own stream calls, so that close is reported
+    /// by the next poll and does not make events pending.
+    stream_closed: struct { stream: StreamHandle, reset_code: ?u64, route: Route = .{} },
     path_changed: struct { conn: Handle, peer: Address },
 };
 
@@ -452,6 +456,43 @@ pub const Engine = struct {
         return result;
     }
 
+    /// Names the owner that now holds the stream. The engine never interprets the route; it
+    /// returns it from `route` and in the stream's close event.
+    pub fn bindStream(self: *Engine, stream: StreamHandle, owner: Route) StreamError!void {
+        const target = try self.readableStream(stream);
+        assert(target.slot.table.matches(target.index, target.id));
+        target.slot.table.entries[target.index].route = owner;
+    }
+
+    /// The owner bound to a live stream, or null when the handle is stale. O(1).
+    pub fn route(self: *const Engine, stream: StreamHandle) ?Route {
+        if (stream.conn.index >= self.registry.slots.len) return null;
+        const slot = &self.registry.slots[stream.conn.index];
+        if (slot.generation != stream.conn.generation or slot.state == .free) return null;
+        if (!slot.table.matches(stream.slot, stream.id)) return null;
+        return slot.table.entries[stream.slot].route;
+    }
+
+    pub const StreamWaits = struct {
+        /// A readable edge was delivered and the stream has not been read to Done since.
+        read_open: bool,
+        /// A blocked write waits on armed write interest, an undelivered writable edge or a stop.
+        write_waiting: bool,
+    };
+
+    /// What an owner of a live stream on an established connection is waiting for, or null
+    /// otherwise. Owners check their ready lists against it.
+    pub fn streamWaits(self: *const Engine, stream: StreamHandle) ?StreamWaits {
+        if (self.route(stream) == null) return null;
+        const slot = &self.registry.slots[stream.conn.index];
+        if (slot.state != .established or slot.pending_close != null or slot.close_reason != null) return null;
+        const entry = &slot.table.entries[stream.slot];
+        return .{
+            .read_open = slot.table.readOpen(stream.slot),
+            .write_waiting = entry.write_lowat > 0 or entry.ready.writable or entry.stopped,
+        };
+    }
+
     pub fn streamReadable(self: *Engine, stream: StreamHandle) StreamError!bool {
         const target = try self.readableStream(stream);
         return binding.c.quiche_conn_stream_readable(target.slot.conn.?, target.id);
@@ -543,6 +584,12 @@ pub const Engine = struct {
     /// not fit stays at the head. Per connection: connected, path_changed, stream events, closed.
     pub fn pollEvents(self: *Engine, events: []Event) usize {
         const slots = self.registry.slots;
+        var promoted: usize = 0;
+        while (self.registry.deferred.pop(slots, "deferred_link")) |row| : (promoted += 1) {
+            assert(promoted < slots.len);
+            slots[row].table.promoteDeferred();
+            self.noteEvents(@intCast(row));
+        }
         var count: usize = 0;
         var visited: usize = 0;
         while (count < events.len) : (visited += 1) {
@@ -605,6 +652,7 @@ pub const Engine = struct {
                 events[count] = .{ .stream_closed = .{
                     .stream = .{ .conn = conn, .id = closed.id, .slot = entry_index },
                     .reset_code = closed.reset_code,
+                    .route = closed.route,
                 } };
                 count += 1;
             }
@@ -926,6 +974,8 @@ pub const Engine = struct {
         var scratch: [constants.datagram_size_max]u8 = undefined;
         for (slots, 0..) |*slot, position| {
             const index: u16 = @intCast(position);
+            // Deferred close events wait on the deferred list.
+            assert(slot.deferred_link.linked == (slot.table.deferred != 0));
             if (slot.state == .free) {
                 assert(!slot.collect_link.linked and !slot.dirty_link.linked and !slot.event_link.linked and !slot.release_link.linked);
                 assert(self.registry.timers.get(index) == null);
@@ -1058,8 +1108,14 @@ pub const Engine = struct {
 
     fn noteEvents(self: *Engine, index: u16) void {
         const slot = &self.registry.slots[index];
-        if (slot.state == .free or !slot.hasEvents()) return;
-        _ = self.registry.events.insert(self.registry.slots, "event_link", index);
+        if (slot.state == .free) return;
+        if (slot.table.deferred != 0) _ = self.registry.deferred.insert(self.registry.slots, "deferred_link", index);
+        if (slot.hasEvents()) {
+            _ = self.registry.events.insert(self.registry.slots, "event_link", index);
+        } else if (slot.event_link.linked) {
+            // A deferred close replaced the entry's only undelivered event.
+            self.registry.events.remove(self.registry.slots, "event_link", index);
+        }
     }
 
     fn streamError(self: *Engine, err: connection.Error) StreamError {
@@ -1234,6 +1290,9 @@ pub const Engine = struct {
         slot.close_event = .pending;
         self.registry.removeRoutesFor(index);
         const slots = self.registry.slots;
+        // Stream events precede the connection's close event.
+        slot.table.promoteDeferred();
+        if (slot.deferred_link.linked) self.registry.deferred.remove(slots, "deferred_link", index);
         if (slot.collect_link.linked) self.registry.collect.remove(slots, "collect_link", index);
         if (slot.dirty_link.linked) self.registry.dirty.remove(slots, "dirty_link", index);
         self.registry.timers.clear(index);

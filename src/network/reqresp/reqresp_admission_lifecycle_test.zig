@@ -101,6 +101,7 @@ test "reqresp admission lifecycle fair dispatch advances to the next peer before
             .conn = .{ .index = peer, .generation = std.math.maxInt(u32) },
             .stream = .{ .conn = .{ .index = peer, .generation = std.math.maxInt(u32) }, .slot = 0, .id = ordinal * 4 },
         };
+        owner.settleSlot(.inbound, @intCast(index));
     }
     var events: [4]rr.Event = undefined;
     const first = owner.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .application = &events });
@@ -143,7 +144,9 @@ test "reqresp admission lifecycle control traffic preserves application quota fa
     defer setup.deinit();
     const owner = &setup.shared.server.reqresp;
     for ([_]Protocol{ .blocks_by_root_v2, .blocks_by_root_v2, .ping_v1 }, 0..) |which, peer| {
-        const slot = &owner.inbound[Plan.first(@intCast(peer), which)];
+        const index = Plan.first(@intCast(peer), which);
+        const slot = &owner.inbound[index];
+        defer owner.settleSlot(.inbound, @intCast(index));
         slot.identity = .{ .bytes = @splat(@as(u8, @intCast(peer + 1))) };
         slot.state = .ready;
         slot.charged_cost = if (peer == 0) 4 else 1;
@@ -192,7 +195,9 @@ test "reqresp admission lifecycle a fresh burst starts full requests before spli
     defer setup.deinit();
     const owner = &setup.shared.server.reqresp;
     for (0..4) |peer| {
-        const slot = &owner.inbound[Plan.first(@intCast(peer), .blocks_by_root_v2)];
+        const index = Plan.first(@intCast(peer), .blocks_by_root_v2);
+        const slot = &owner.inbound[index];
+        defer owner.settleSlot(.inbound, @intCast(index));
         slot.identity = .{ .bytes = @splat(@as(u8, @intCast(peer + 1))) };
         slot.state = .ready;
         slot.charged_cost = 4;

@@ -14,6 +14,11 @@ pub const StreamHandle = struct {
 /// stream's state changes in QUIC.
 pub const Readiness = packed struct(u2) { readable: bool = false, writable: bool = false };
 
+/// The protocol owner that holds a stream. The engine stores it and never interprets it.
+pub const StreamOwner = enum(u8) { none, negotiation, identify, reqresp_outbound, reqresp_inbound, gossip_inbound, gossip_outbound };
+/// Where a stream's events go: the owner and the row in the owner's own table.
+pub const Route = packed struct(u32) { owner: StreamOwner = .none, row: u24 = 0 };
+
 pub const PeerRef = struct { index: u16, generation: u64 };
 
 pub const Direction = enum { inbound, outbound };
