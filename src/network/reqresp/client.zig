@@ -160,12 +160,16 @@ pub const Client = struct {
             }
             if (request.io.fin_seen and request.io.buffered_start == request.io.buffered_end) {
                 if (request.io.decoder.phase == .result) {
-                    slot.complete(
-                        owner,
-                        index,
-                        .{ .done = .{ .request = request.handle(index), .chunks = request.chunks } },
-                        engine,
-                    );
+                    if (request.chunks == 0 and request.chunks_max > 0 and request.protocol.requiresResponse()) {
+                        slot.fail(owner, index, .empty_response, engine);
+                    } else {
+                        slot.complete(
+                            owner,
+                            index,
+                            .{ .done = .{ .request = request.handle(index), .chunks = request.chunks } },
+                            engine,
+                        );
+                    }
                 } else {
                     request.peer_fault = .protocol;
                     slot.fail(owner, index, .{ .invalid_response = error.Truncated }, engine);

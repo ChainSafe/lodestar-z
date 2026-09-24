@@ -24,6 +24,7 @@ pub const Failure = union(enum) {
     invalid_response: (codec.Error || error{InvalidResponseContext}),
     invalid_request: codec.Error,
     too_many_chunks,
+    empty_response,
     unknown_context: [constants.context_bytes_length]u8,
     peer_error: struct { code: u8, message_len: u16 },
     connection_closed,

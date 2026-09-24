@@ -376,12 +376,17 @@ fn emptyExchange(setup: *harness.Pair, which: protocol.Protocol, bytes: []const 
         };
         for (setup.clientEvents()) |event| switch (event) {
             .done => |done| {
-                try std.testing.expect(allowed);
+                try std.testing.expect(allowed and !which.requiresResponse());
                 try std.testing.expectEqual(@as(u32, 0), done.chunks);
                 terminal = true;
             },
             .failed => |failed| {
-                try std.testing.expect(!allowed);
+                if (allowed) {
+                    try std.testing.expect(which.requiresResponse());
+                    try std.testing.expectEqual(reqresp.Failure.empty_response, failed.reason);
+                    terminal = true;
+                    continue;
+                }
                 try std.testing.expectEqual(code, failed.reason.peer_error.code);
                 const message = if (code == 139) "rate limited" else "invalid request";
                 try std.testing.expectEqualSlices(u8, message, setup.shared.client.reqresp.errorMessage(failed.request));

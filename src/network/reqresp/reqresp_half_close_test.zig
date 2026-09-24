@@ -405,3 +405,41 @@ test "reqresp half close does not hide a retired stream without response EOF" {
     try expectFailure(&pair, .stream_closed);
     try std.testing.expectEqual(@as(u64, 0), pair.shared.client.reqresp.protocol_counters[@intFromEnum(protocol.Protocol.metadata_v3)].request_write_stops);
 }
+
+test "reqresp FIN before the first chunk fails single-response methods with empty_response" {
+    for ([_]protocol.Protocol{ .ping_v1, .metadata_v2 }) |method| {
+        var pair: Pair = .{};
+        try pair.init(.{ .outbound_max = 1, .inbound_max = 1 }, .{});
+        defer pair.deinit();
+        const bytes = [_]u8{7} ** 25;
+        var sink: [25]u8 = undefined;
+        const request = try negotiate(&pair, method, bytes[0..method.info().request_min], &sink, .{});
+        _ = try pair.shared.pair.server.write(request.remote, &.{}, true);
+        try expectFailure(&pair, .empty_response);
+        try std.testing.expectEqual(@as(u64, 1), pair.shared.client.reqresp.outgoing_error_reasons[@intFromEnum(@import("metrics.zig").ErrorReason.REQUEST_ERROR_EMPTY_RESPONSE)]);
+    }
+}
+
+test "reqresp FIN before the first chunk still completes Goodbye" {
+    var pair: Pair = .{};
+    try pair.init(.{ .outbound_max = 1, .inbound_max = 1 }, .{});
+    defer pair.deinit();
+    var payload: [8]u8 = undefined;
+    std.mem.writeInt(u64, &payload, 1, .little);
+    var sink: [8]u8 = undefined;
+    const request = try negotiate(&pair, .goodbye_v1, &payload, &sink, .{});
+    _ = try pair.shared.pair.server.write(request.remote, &.{}, true);
+    var done = false;
+    for (0..8) |_| {
+        for (try pump(&pair)) |event| switch (event) {
+            .done => |value| {
+                try std.testing.expectEqual(@as(u32, 0), value.chunks);
+                done = true;
+            },
+            .chunk, .failed => return error.TestUnexpectedResult,
+            else => {},
+        };
+        if (done) break;
+    }
+    try std.testing.expect(done);
+}

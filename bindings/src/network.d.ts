@@ -547,6 +547,7 @@ export type NativeRequestFailure =
   | "negotiation_failed"
   | "invalid_response"
   | "too_many_chunks"
+  | "empty_response"
   | "unknown_context"
   | "peer_error"
   | "connection_closed"
