@@ -118,13 +118,12 @@ test EpochShuffling {
 pub fn computeEpochShuffling(allocator: Allocator, state: *AnyBeaconState, active_indices: []ValidatorIndex, epoch: Epoch) !*EpochShuffling {
     errdefer allocator.free(active_indices);
 
-    var seed = [_]u8{0} ** 32;
-    switch (state.forkSeq()) {
-        inline else => |f| try getSeed(f, state.castToFork(f), epoch, c.DOMAIN_BEACON_ATTESTER, &seed),
-    }
-    return EpochShuffling.init(allocator, seed, epoch, active_indices);
+    return switch (state.forkSeq()) {
+        inline else => |f| computeEpochShufflingForFork(f, allocator, state.castToFork(f), active_indices, epoch),
+    };
 }
 
+/// Takes ownership of `active_indices` on success; the caller retains ownership on failure.
 pub fn computeEpochShufflingForFork(
     comptime fork: ForkSeq,
     allocator: Allocator,
