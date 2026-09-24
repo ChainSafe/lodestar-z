@@ -235,6 +235,12 @@ fn writePeerCloses(self: *const Context, w: *prom.Encoder) prom.Error!void {
         .help = "Received Ethereum Goodbye reasons; unknown wire codes share one label",
         .labels = &.{"reason"},
     }, goodbye.Reason, &self.owner.peer_manager.control.counters.events.goodbyes);
+    try w.enums(.{
+        .name = "lodestar_native_peer_health_failures_total",
+        .kind = .counter,
+        .help = "Failed Status, Metadata and Ping probes counted toward a health disconnect",
+        .labels = &.{"probe"},
+    }, @import("../peers/control.zig").HealthProbe, &self.owner.peer_manager.control.counters.health_failures);
 }
 
 fn writePeerProcessing(self: *const Context, w: *prom.Encoder) prom.Error!void {

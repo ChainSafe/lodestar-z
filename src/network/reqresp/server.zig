@@ -108,7 +108,7 @@ pub const Server = struct {
                 .quota_timeout
             else
                 .timeout;
-            if (reason == .timeout and self.state == .receiving_request and
+            if (reason == .timeout and self.state == .receiving_request and !request.protocol.isControl() and
                 !request.io.unread(engine, request.stream))
                 request.peer_fault = .non_completion;
             self.fail(ctx, index, reason, engine);

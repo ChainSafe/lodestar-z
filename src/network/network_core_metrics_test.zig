@@ -77,6 +77,7 @@ const contract = [_]Series{
     .{ .name = "lodestar_peer_goodbye_received_total", .kind = "counter", .labels = &.{"reason"} },
     .{ .name = "lodestar_native_peer_closes_total", .kind = "counter", .labels = &.{"reason"} },
     .{ .name = "lodestar_native_peer_closes_by_client_total", .kind = "counter", .labels = &.{ "client", "reason" } },
+    .{ .name = "lodestar_native_peer_health_failures_total", .kind = "counter", .labels = &.{"probe"} },
     .{ .name = "lodestar_native_quic_connections_established_total", .kind = "counter", .labels = &.{"direction"} },
     .{ .name = "lodestar_native_quic_connections_closed_total", .kind = "counter", .labels = &.{ "direction", "reason" } },
     .{ .name = "lodestar_native_quic_connections_dialing", .kind = "gauge" },

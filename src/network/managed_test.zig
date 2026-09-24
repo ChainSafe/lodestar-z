@@ -151,6 +151,7 @@ test "managed native control timeout releases owners independent of public outpu
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
+    setup.client.control.options.health_failures_max = 1;
     for (0..50) |_| try setup.step(0);
     setup.client.reStatusPeers(setup.pair.now);
     try setup.step(0);
@@ -165,12 +166,33 @@ test "managed native control timeout releases owners independent of public outpu
     try std.testing.expectEqual(t.DisconnectReason.health_timeout, events[0].closed.reason);
 }
 
-test "managed native control distinguishes RPC errors timeouts and local retries" {
+fn failStatus(setup: *Setup, failure: rr.Failure) !void {
+    for (setup.client.control.operations) |operation| if (operation.request) |request| {
+        if (operation.protocol != .status_v1) continue;
+        const service = &setup.client_service.reqresp;
+        const slot = service.outboundSlot(request).?;
+        slot.fail(service, request.index, failure, &setup.pair.client);
+        return;
+    };
+    return error.TestUnexpectedResult;
+}
+
+fn failStatusRound(setup: *Setup, failure: rr.Failure) !void {
+    setup.client.reStatusPeers(setup.pair.now);
+    try setup.step(0);
+    try failStatus(setup, failure);
+    for (0..4) |_| try setup.step(0);
+}
+
+test "managed native control disconnects only after consecutive health failures" {
+    const status = @intFromEnum(@import("peers/control.zig").HealthProbe.status);
     const Case = struct { failure: rr.Failure, reason: ?t.DisconnectReason };
     for ([_]Case{
         .{ .failure = .stream_closed, .reason = .health_error },
         .{ .failure = .{ .invalid_response = error.Truncated }, .reason = .health_error },
+        .{ .failure = .empty_response, .reason = .health_error },
         .{ .failure = .{ .negotiation_failed = .timeout }, .reason = .health_timeout },
+        .{ .failure = .timeout, .reason = .health_timeout },
         .{ .failure = .host_timeout, .reason = null },
         .{ .failure = .quota_timeout, .reason = null },
         .{ .failure = .cancelled, .reason = null },
@@ -180,30 +202,48 @@ test "managed native control distinguishes RPC errors timeouts and local retries
         defer setup.deinit();
         for (0..50) |_| try setup.step(0);
         try std.testing.expectEqual(@as(u16, 1), setup.client.peerCounts().relevant);
-        setup.client.reStatusPeers(setup.pair.now);
-        try setup.step(0);
-        var injected = false;
-        for (setup.client.control.operations) |operation| if (operation.request) |request| {
-            if (operation.protocol != .status_v1) continue;
-            const service = &setup.client_service.reqresp;
-            const slot = service.outboundSlot(request).?;
-            slot.fail(service, request.index, case.failure, &setup.pair.client);
-            injected = true;
-            break;
-        };
-        try std.testing.expect(injected);
-        for (0..4) |_| try setup.step(0);
-        setup.pair.advance(2_001);
-        for (0..12) |_| try setup.step(0);
+        const limit = setup.client.control.options.health_failures_max;
+        for (0..limit) |round| {
+            try failStatusRound(&setup, case.failure);
+            if (case.reason != null and round + 1 == limit) break;
+            try std.testing.expectEqual(@as(u16, 1), setup.client.peerCounts().relevant);
+            try std.testing.expectEqual(@as(u16, 1), setup.client.catalog.connectedCount());
+            setup.pair.advance(setup.client.control.options.failure_retry_ms);
+        }
         if (case.reason) |reason| {
+            try std.testing.expectEqual(@as(u64, limit), setup.client.control.counters.health_failures[status]);
+            setup.pair.advance(2_001);
+            for (0..12) |_| try setup.step(0);
             try std.testing.expectEqual(@as(u16, 0), setup.client.catalog.connectedCount());
             var events: [1]t.Event = undefined;
             try std.testing.expectEqual(@as(usize, 1), setup.client.catalog.pollEvents(&events));
             try std.testing.expectEqual(reason, events[0].closed.reason);
         } else {
+            try std.testing.expectEqual(@as(u64, 0), setup.client.control.counters.health_failures[status]);
             try std.testing.expectEqual(@as(u16, 1), setup.client.peerCounts().relevant);
         }
     }
+}
+
+test "managed native control success clears a health failure streak" {
+    var setup: Setup = .{};
+    try setup.init(&.{});
+    defer setup.deinit();
+    for (0..50) |_| try setup.step(0);
+    const peer = setup.client.catalog.find(&setup.pair.server_ctx.local_peer_id).?;
+    const status = @intFromEnum(@import("peers/control.zig").HealthProbe.status);
+    const limit = setup.client.control.options.health_failures_max;
+    for (0..2) |_| {
+        for (0..limit - 1) |_| {
+            try failStatusRound(&setup, .timeout);
+            setup.pair.advance(setup.client.control.options.failure_retry_ms);
+        }
+        try std.testing.expectEqual(limit - 1, setup.client.control.schedules[peer.index].health_failures[status]);
+        setup.client.reStatusPeers(setup.pair.now);
+        for (0..20) |_| try setup.step(0);
+        try std.testing.expectEqual(@as(u8, 0), setup.client.control.schedules[peer.index].health_failures[status]);
+    }
+    try std.testing.expectEqual(@as(u16, 1), setup.client.peerCounts().relevant);
 }
 
 fn allocationCheck(a: std.mem.Allocator) !void {
