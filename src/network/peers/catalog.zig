@@ -22,6 +22,7 @@ pub const Intent = struct {
     eligible_at_ms: u64 = 0,
     history_until_ms: u64 = 0,
     failures: u8 = 0,
+    /// Failure of the previous attempt, kept until the next attempt is selected or the peer connects.
     last_failure: ?t.DialFailure = null,
 };
 pub const Row = struct {

@@ -96,7 +96,7 @@ fn writeRuntime(self: *const Context, w: *prom.Encoder) prom.Error!void {
     try steps.histogram(.{}, &self.owner.step_duration);
     const waits = try w.histograms(.{ .name = "lodestar_native_network_wait_seconds", .kind = .histogram, .help = "Wait chosen by each owner turn from its earliest wakeup source and the host limit, before the readiness poll cap", .unit = .seconds }, @TypeOf(self.owner.wait_duration));
     try waits.histogram(.{}, &self.owner.wait_duration);
-    try w.enums(.{ .name = "lodestar_native_network_due_now_turns_total", .kind = .counter, .help = "Owner turns that chose a zero wait, counted under every wakeup source already due", .labels = &.{"source"} }, @import("../wake_sources.zig").Source, &self.owner.due_now_turns);
+    try w.enums(.{ .name = "lodestar_native_network_due_now_turns_total", .kind = .counter, .help = "Owner turns that chose a zero wait, counted under every wakeup source already due; transport_timer is read only when no other transport source is due", .labels = &.{"source"} }, @import("../wake_sources.zig").Source, &self.owner.due_now_turns);
 }
 
 fn writeNativeCounters(self: *const Context, w: *prom.Encoder) prom.Error!void {

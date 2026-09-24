@@ -6,6 +6,8 @@ pub const Source = enum {
     transport_backlog,
     transport_host_work,
     transport_activity,
+    transport_events,
+    transport_closing,
     transport_timer,
     gossip,
     reqresp,
