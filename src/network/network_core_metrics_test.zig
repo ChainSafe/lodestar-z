@@ -315,6 +315,13 @@ test "metrics render every measurement contract series with its type and labels"
     try std.testing.expectEqual(@as(usize, 0), missing);
 }
 
+test "metrics label redials after a health close in the dial retries contract series" {
+    var f = try Fixture.init(&.{});
+    defer f.deinit();
+    f.node.peer_manager.dialing.retries[@intFromEnum(@import("peers/types.zig").DialFailure.health)] = 2;
+    try contains(try f.render(true), "lodestar_native_peer_dial_retries_total{previous=\"health\"} 2\n");
+}
+
 test "metrics owner loop series start at zero after initialization" {
     var f = try Fixture.init(&.{});
     defer f.deinit();

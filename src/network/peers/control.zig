@@ -34,6 +34,8 @@ const Operation = struct {
     protocol: rr.Protocol = .ping_v1,
     cancelled: bool = false,
     received: bool = false,
+    /// Started after the connection's Status and Metadata exchange, so its success proves health.
+    after_ready: bool = false,
     bytes: [wire.status_size_max]u8 = undefined,
     sink: [wire.status_size_max]u8 = undefined,
 };
@@ -57,6 +59,10 @@ const Schedule = struct {
     retry_ms: u64 = 0,
     metadata_due_ms: ?u64 = null,
     health_failures: [health_probe_count]u8 = @splat(0),
+    /// `ready` once the connection completed a Status and Metadata exchange, which clears the dialed
+    /// endpoint's connection failures; `proven` once a probe started after that succeeded, which
+    /// clears the endpoint's health strikes.
+    evidence: enum { pending, ready, proven } = .pending,
     closing: ?struct { reason: t.DisconnectReason, deadline_ms: u64, sent: bool = false } = null,
 };
 pub const Control = struct {
@@ -384,6 +390,7 @@ pub const Control = struct {
             op.protocol = protocol;
             op.cancelled = false;
             op.received = false;
+            op.after_ready = row.evidence == .ready;
             op.request = request;
             self.operation_by_peer[peer.index] = @intCast(index);
             self.counters.started +|= 1;
@@ -559,6 +566,15 @@ pub const Control = struct {
         if (!catalog.updateStatus(peer, conn, &status, now.mono_ms)) return;
         row.status_due_ms = now.mono_ms +| self.options.status_interval_ms;
         if (catalog.get(peer).?.metadata == null) row.metadata_due_ms = row.metadata_due_ms orelse now.mono_ms;
+        applicationReady(catalog, row, peer, conn);
+    }
+    /// Marks the connection ready once it holds a valid relevant Status and a valid Metadata.
+    fn applicationReady(catalog: *Catalog, row: *Schedule, peer: t.PeerRef, conn: t.Handle) void {
+        if (row.evidence != .pending) return;
+        const current = connectedRow(catalog, peer, conn) orelse return;
+        if (current.status == null or current.metadata == null) return;
+        row.evidence = .ready;
+        catalog.clearDialFailures(peer, conn);
     }
     fn sequence(
         self: *Control,
@@ -778,6 +794,7 @@ pub const Control = struct {
                 };
                 _ = catalog.updateMetadata(op.peer, op.conn, &metadata, now.mono_ms);
                 row.metadata_due_ms = null;
+                applicationReady(catalog, row, op.peer, op.conn);
             },
             else => {},
         }
@@ -811,6 +828,10 @@ pub const Control = struct {
                     return;
                 }
                 row.health_failures[@intFromEnum(probe)] = 0;
+                if (op.after_ready and probe != .metadata) {
+                    row.evidence = .proven;
+                    catalog.clearHealthStrikes(op.peer, op.conn);
+                }
                 const snapshot = catalog.get(op.peer) orelse return;
                 if (probe != .status) row.ping_due_ms = now.mono_ms +| self.pingInterval(snapshot.direction);
             },

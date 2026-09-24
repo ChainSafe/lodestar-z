@@ -277,6 +277,100 @@ test "managed native control success clears a health failure streak" {
     try std.testing.expectEqual(@as(u16, 1), setup.client.peerCounts().relevant);
 }
 
+/// Dials the discovered server, so the client's connection has a dialed endpoint.
+fn dialServer(setup: *Setup) !void {
+    var intents: [1]managed.DialIntent = undefined;
+    try std.testing.expectEqual(@as(usize, 1), setup.client.dialIntents(&setup.client_service, &setup.pair.client, setup.pair.now, &intents));
+    const handle = try setup.pair.client.dial(&intents[0].address, intents[0].peer, setup.pair.now);
+    try std.testing.expect(setup.client.dialStarted(intents[0].token, handle));
+}
+
+fn serverStrikes(setup: *Setup, server: *const @import("peers/enr.zig").Candidate) u8 {
+    const history = &setup.client.catalog.history;
+    return history.strikesFor(history.endpointKey(&server.peer, support.server_address), server.sequence, setup.pair.now.mono_ms);
+}
+
+fn discoverServer(setup: *Setup) !@import("peers/enr.zig").Candidate {
+    const server = try discoveredAt(2, support.server_address);
+    try std.testing.expect(server.peer.eql(&setup.pair.server_ctx.local_peer_id));
+    try std.testing.expectEqual(@as(u16, 1), setup.client.discoveredBatch(&setup.client_service, &.{server}, setup.pair.now).accepted);
+    return server;
+}
+
+test "managed Status and Metadata clear dial failures that QUIC admission keeps" {
+    var setup: Setup = .{};
+    try setup.initOwners(&.{});
+    defer setup.deinit();
+    const server = try discoverServer(&setup);
+    const history = &setup.client.catalog.history;
+    history.recordEndpoint(history.endpointKey(&server.peer, support.server_address), .unanswered, server.sequence, setup.pair.now.mono_ms);
+    try dialServer(&setup);
+    for (0..20) |_| {
+        try setup.step(1);
+        if (setup.client.catalog.connectedCount() == 1) break;
+    }
+    try std.testing.expectEqual(@as(u16, 1), setup.client.catalog.connectedCount());
+    try std.testing.expectEqual(@as(u16, 0), setup.client.peerCounts().relevant);
+    try std.testing.expectEqual(@as(u8, 1), serverStrikes(&setup, &server));
+    for (0..50) |_| try setup.step(1);
+    try std.testing.expectEqual(@as(u16, 1), setup.client.peerCounts().relevant);
+    try std.testing.expectEqual(@as(u8, 0), serverStrikes(&setup, &server));
+    const peer = setup.client.catalog.find(&server.peer).?;
+    try std.testing.expect(setup.client.control.schedules[peer.index].evidence == .ready);
+    setup.pair.advance(21_000);
+    for (0..50) |_| try setup.step(1);
+    try std.testing.expect(setup.client.control.schedules[peer.index].evidence == .proven);
+    try std.testing.expectEqual(@as(u8, 0), serverStrikes(&setup, &server));
+    try std.testing.expectEqual(@as(u16, 1), setup.client.peerCounts().relevant);
+}
+
+test "managed health strikes survive an answered reconnect until a later probe succeeds" {
+    var setup: Setup = .{};
+    try setup.initOwners(&.{});
+    defer setup.deinit();
+    const server = try discoverServer(&setup);
+    try dialServer(&setup);
+    for (0..50) |_| try setup.step(1);
+    try std.testing.expectEqual(@as(u16, 1), setup.client.peerCounts().relevant);
+    const limit = setup.client.control.options.health_failures_max;
+    for (0..limit) |round| {
+        try failStatusRound(&setup, .timeout);
+        if (round + 1 < limit) setup.pair.advance(setup.client.control.options.failure_retry_ms);
+    }
+    setup.pair.advance(2_001);
+    for (0..12) |_| try setup.step(1);
+    try std.testing.expectEqual(@as(u16, 0), setup.client.catalog.connectedCount());
+    try std.testing.expectEqual(@as(u8, 1), serverStrikes(&setup, &server));
+    // Both sides hold a Goodbye cooldown after the health close.
+    setup.pair.advance(60_000);
+    try dialServer(&setup);
+    for (0..50) |_| try setup.step(1);
+    try std.testing.expectEqual(@as(u16, 1), setup.client.peerCounts().relevant);
+    try std.testing.expectEqual(@as(u64, 1), setup.client.dialing.retries[@intFromEnum(t.DialFailure.health)]);
+    try std.testing.expectEqual(@as(u8, 1), serverStrikes(&setup, &server));
+    setup.pair.advance(21_000);
+    for (0..50) |_| try setup.step(1);
+    try std.testing.expectEqual(@as(u8, 0), serverStrikes(&setup, &server));
+}
+
+test "managed local probe stalls add no health strike" {
+    var setup: Setup = .{};
+    try setup.initOwners(&.{});
+    defer setup.deinit();
+    const server = try discoverServer(&setup);
+    try dialServer(&setup);
+    for (0..50) |_| try setup.step(1);
+    try std.testing.expectEqual(@as(u16, 1), setup.client.peerCounts().relevant);
+    for (0..setup.client.control.options.health_failures_max + 1) |_| {
+        try failStatusRound(&setup, .host_timeout);
+        setup.pair.advance(setup.client.control.options.local_retry_ms);
+    }
+    setup.pair.advance(2_001);
+    for (0..12) |_| try setup.step(1);
+    try std.testing.expectEqual(@as(u16, 1), setup.client.catalog.connectedCount());
+    try std.testing.expectEqual(@as(u8, 0), serverStrikes(&setup, &server));
+}
+
 fn allocationCheck(a: std.mem.Allocator) !void {
     const identity: t.PeerId = .{ .bytes = @splat(1) };
     var service = try @import("service.zig").Service.init(a, managed.serviceOptions(options(), &.{}));

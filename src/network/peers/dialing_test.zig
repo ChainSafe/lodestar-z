@@ -142,7 +142,8 @@ test "peer dial outcomes count every retired attempt once and retries count each
     try std.testing.expect(q.dialStarted(try selectNext(&q, &catalog, &now), conn));
     accept(&q, &catalog, &peer, .{ .index = 1, .generation = 1 }, now);
     try std.testing.expect(q.dialClosed(&catalog, conn, .handshake_timeout, now));
-    disconnect(&catalog, &peer, now, .transport_closed, now + 100);
+    // A health close marks the endpoint, so the next dial is a redial after a health close.
+    disconnect(&catalog, &peer, now, .health_timeout, now + 100);
     now += 100;
     try std.testing.expect(q.dialStarted(try selectNext(&q, &catalog, &now), conn));
     accept(&q, &catalog, &peer, conn, now + 100);
@@ -1322,7 +1323,7 @@ test "peer dial redundant mismatch blocks its endpoint without failing the inten
     }
 }
 
-test "peer dial landed connections clear the dialed endpoint after a mid-dial refresh" {
+test "peer dial landed connections keep dial failures until the application exchange clears the dialed endpoint" {
     for ([_]bool{ false, true }) |deferred| {
         var q = try mod.Dialing.init(.{ .capacity = 1, .concurrent_max = 1, .seed = 4 });
         var catalog = try initCatalog(a, q.options);
@@ -1344,9 +1345,15 @@ test "peer dial landed connections clear the dialed endpoint after a mid-dial re
         try std.testing.expectEqual(@as(u8, 1), catalog.history.strikesFor(dialed, 1, due));
         if (deferred) {
             try std.testing.expect(q.deferConnection(&catalog, conn, due));
-        } else {
-            accept(&q, &catalog, &candidate.peer, conn, due);
+            try std.testing.expectEqual(@as(u8, 1), catalog.history.strikesFor(dialed, 1, due));
+            continue;
         }
+        accept(&q, &catalog, &candidate.peer, conn, due);
+        try std.testing.expectEqual(@as(u8, 1), catalog.history.strikesFor(dialed, 1, due));
+        const peer = catalog.find(&candidate.peer).?;
+        try std.testing.expect(catalog.updateStatus(peer, conn, &.{}, due));
+        try std.testing.expect(catalog.updateMetadata(peer, conn, &.{}, due));
+        catalog.clearDialFailures(peer, conn);
         try std.testing.expectEqual(@as(u8, 0), catalog.history.strikesFor(dialed, 1, due));
     }
 }

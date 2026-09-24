@@ -17,6 +17,9 @@ pub const Entry = struct {
     block_until_ms: u64 = 0,
     sequence: u64 = 0,
     strikes: u8 = 0,
+    /// The strikes from health closes, at most `strikes`. They outlive the connection-failure
+    /// evidence an application exchange clears, and a newer ENR sequence neither lifts nor hides them.
+    health: u8 = 0,
     /// Latest failure of an endpoint entry; null for a redial mark alone or an identity's "too many
     /// peers" entry.
     failure: ?t.DialFailure = null,
@@ -59,10 +62,12 @@ pub const History = struct {
         return hasher.final() | 1;
     }
 
-    /// Records a failed dial of a discovery intent's endpoint.
+    /// Records a failed dial of a discovery intent's endpoint, or a health close of a connection to it.
     pub fn recordEndpoint(self: *History, key: u64, failure: t.DialFailure, sequence: u64, now_ms: u64) void {
         const entry = self.claim(key, now_ms);
         entry.strikes +|= 1;
+        if (failure == .health) entry.health +|= 1;
+        std.debug.assert(entry.health <= entry.strikes);
         entry.sequence = @max(entry.sequence, sequence);
         if (failure == .peer_id_mismatch) {
             entry.failure = .peer_id_mismatch;
@@ -75,16 +80,17 @@ pub const History = struct {
         if (entry.strikes >= strikes_to_block) entry.block_until_ms = entry.until_ms;
     }
 
-    /// A strictly newer ENR sequence lifts a block, except after a peer-id mismatch.
+    /// A strictly newer ENR sequence lifts a block, except after a peer-id mismatch or a health close:
+    /// the peer authenticated on that endpoint, so a new record does not make it answer.
     pub fn blocked(self: *const History, key: u64, sequence: u64, now_ms: u64) bool {
         const entry = self.find(key, now_ms) orelse return false;
         if (now_ms >= entry.block_until_ms) return false;
-        return entry.failure == .peer_id_mismatch or sequence <= entry.sequence;
+        return entry.failure == .peer_id_mismatch or entry.health != 0 or sequence <= entry.sequence;
     }
 
     pub fn strikesFor(self: *const History, key: u64, sequence: u64, now_ms: u64) u8 {
         const entry = self.find(key, now_ms) orelse return 0;
-        return if (sequence <= entry.sequence) entry.strikes else 0;
+        return if (sequence <= entry.sequence) entry.strikes else entry.health;
     }
 
     /// Marks the endpoint's next dial, by any intent, as a redial of `failure`. A live entry keeps
@@ -108,11 +114,33 @@ pub const History = struct {
         return null;
     }
 
-    pub fn clear(self: *History, key: u64) void {
-        const mask: u64 = self.entries.len - 1;
-        for (0..probe_max) |offset| {
-            const entry = &self.entries[@intCast((key +% @as(u64, offset)) & mask)];
-            if (entry.key == key) entry.* = .{};
+    /// Forgets the endpoint's connection-failure evidence, including a peer-id mismatch, and keeps
+    /// its health evidence.
+    pub fn clearFailures(self: *History, key: u64) void {
+        const entry = self.lookup(key) orelse return;
+        if (entry.health == 0) {
+            entry.* = .{};
+            return;
+        }
+        entry.strikes = entry.health;
+        entry.failure = .health;
+        if (entry.strikes < strikes_to_block) entry.block_until_ms = 0;
+    }
+
+    /// Forgets the endpoint's health evidence and keeps any connection-failure evidence.
+    pub fn clearHealth(self: *History, key: u64) void {
+        const entry = self.lookup(key) orelse return;
+        if (entry.health == 0) return;
+        entry.strikes -= entry.health;
+        entry.health = 0;
+        if (entry.strikes == 0) {
+            entry.* = .{};
+            return;
+        }
+        if (entry.failure == .peer_id_mismatch) {
+            entry.strikes = @max(entry.strikes, strikes_to_block);
+        } else if (entry.strikes < strikes_to_block) {
+            entry.block_until_ms = 0;
         }
     }
 
@@ -125,6 +153,16 @@ pub const History = struct {
         entry.until_ms = now_ms +| remote_full_memory_ms;
         entry.block_until_ms = now_ms +| cooldown;
         return cooldown;
+    }
+
+    /// The key's entry, live or expired.
+    fn lookup(self: *History, key: u64) ?*Entry {
+        const mask: u64 = self.entries.len - 1;
+        for (0..probe_max) |offset| {
+            const entry = &self.entries[@intCast((key +% @as(u64, offset)) & mask)];
+            if (entry.key == key) return entry;
+        }
+        return null;
     }
 
     fn find(self: *const History, key: u64, now_ms: u64) ?*const Entry {
