@@ -247,14 +247,7 @@ pub const Dialing = struct {
         return result;
     }
     pub fn pendingPeers(self: *const Dialing, catalog: *const Catalog, except: ?*const t.PeerId) u16 {
-        var count: u16 = 0;
-        for (self.active) |attempt| if (attempt.peer) |peer| {
-            const row = catalog.rowFor(peer).?;
-            if (row.connection != null) continue;
-            if (except) |identity| if (row.identity.eql(identity)) continue;
-            count += 1;
-        };
-        return count;
+        return self.countPeers(catalog, except, false);
     }
     pub fn syncAnswered(self: *Dialing, engine: *const Engine) void {
         for (&self.active) |*attempt| {
@@ -266,9 +259,12 @@ pub const Dialing = struct {
 
     /// Dials the server answered are likely to land, so only they hold peer slots.
     pub fn answeredPeers(self: *const Dialing, catalog: *const Catalog, except: ?*const t.PeerId) u16 {
+        return self.countPeers(catalog, except, true);
+    }
+    fn countPeers(self: *const Dialing, catalog: *const Catalog, except: ?*const t.PeerId, answered_only: bool) u16 {
         var count: u16 = 0;
         for (self.active) |attempt| if (attempt.peer) |peer| {
-            if (!attempt.answered) continue;
+            if (answered_only and !attempt.answered) continue;
             const row = catalog.rowFor(peer).?;
             if (row.connection != null) continue;
             if (except) |identity| if (row.identity.eql(identity)) continue;
