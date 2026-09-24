@@ -477,6 +477,7 @@ pub const Dialing = struct {
 };
 fn closeFailure(reason: t.CloseReason) t.DialFailure {
     return switch (reason) {
+        .dial_unanswered => .unanswered,
         .handshake_timeout => .handshake_timeout,
         .peer_id_mismatch => .peer_id_mismatch,
         else => .refused,

@@ -65,6 +65,7 @@ pub const Limits = struct {
     receive_budget_bytes: u64 = limits.receive_budget_bytes,
     idle_timeout_ms: u64 = limits.idle_timeout_ms,
     handshake_timeout_ms: u64 = limits.handshake_timeout_ms,
+    unanswered_dial_timeout_ms: u64 = limits.unanswered_dial_timeout_ms,
     keep_alive_ms: u64 = limits.keep_alive_ms,
     keylog: bool = false,
 };
@@ -161,9 +162,10 @@ pub const Engine = struct {
         if (wanted.handshaking_per_source_max == 0) return error.InvalidLimits;
         const minimum_receive_budget = @as(u64, wanted.connections_max) * limits.connection_window_min;
         if (wanted.receive_budget_bytes < minimum_receive_budget) return error.InvalidLimits;
-        if (wanted.idle_timeout_ms > limits.timeout_ms_max or wanted.handshake_timeout_ms > limits.timeout_ms_max or wanted.keep_alive_ms > limits.timeout_ms_max) return error.InvalidLimits;
+        if (wanted.idle_timeout_ms > limits.timeout_ms_max or wanted.handshake_timeout_ms > limits.timeout_ms_max or
+            wanted.unanswered_dial_timeout_ms > limits.timeout_ms_max or wanted.keep_alive_ms > limits.timeout_ms_max) return error.InvalidLimits;
         if (wanted.idle_timeout_ms == 0) return error.InvalidLimits;
-        if (wanted.handshake_timeout_ms == 0) return error.InvalidLimits;
+        if (wanted.handshake_timeout_ms == 0 or wanted.unanswered_dial_timeout_ms == 0) return error.InvalidLimits;
         if (wanted.keep_alive_ms == 0) return error.InvalidLimits;
         if (wanted.dialing_max == 0 or wanted.outbound_reserved > wanted.dialing_max or
             wanted.outbound_reserved > wanted.connections_max) return error.InvalidLimits;
@@ -399,6 +401,18 @@ pub const Engine = struct {
         assert(slot.state != .free);
         assert(slot.generation == conn.generation);
         return slot.peer_id;
+    }
+
+    /// True once an outbound handshake processed any packet from the server, including a Retry.
+    pub fn dialAnswered(self: *const Engine, conn: Handle) bool {
+        const slot = self.liveView(conn) orelse return false;
+        return slot.direction == .outbound and slot.answered;
+    }
+
+    fn handshakeLimitMs(self: *const Engine, slot: *const connection.Slot) u64 {
+        if (slot.direction == .outbound and !slot.answered)
+            return @min(self.limits.unanswered_dial_timeout_ms, self.limits.handshake_timeout_ms);
+        return self.limits.handshake_timeout_ms;
     }
 
     pub fn peerAddress(self: *const Engine, conn: Handle) ?Address {
@@ -676,9 +690,10 @@ pub const Engine = struct {
         slot.onTimeout();
         if (expired) self.registry.activity[index] = true;
         if (slot.state == .handshaking and slot.close_reason == null and
-            now.mono_ms -| slot.created_ms >= self.limits.handshake_timeout_ms)
+            now.mono_ms -| slot.created_ms >= self.handshakeLimitMs(slot))
         {
-            slot.close(.handshake_timeout, types.app_error_handshake_timeout);
+            const unanswered = slot.direction == .outbound and !slot.answered;
+            slot.close(if (unanswered) .dial_unanswered else .handshake_timeout, types.app_error_handshake_timeout);
         }
         if (slot.state == .established and slot.close_reason == null and
             now.mono_ms -| slot.last_send_ms >= self.limits.keep_alive_ms and
@@ -709,7 +724,7 @@ pub const Engine = struct {
             var timeout = slot.timeoutMs();
             if (slot.close_reason == null) {
                 const deadline = if (slot.state == .handshaking)
-                    slot.created_ms +| self.limits.handshake_timeout_ms
+                    slot.created_ms +| self.handshakeLimitMs(slot)
                 else
                     slot.last_send_ms +| self.limits.keep_alive_ms;
                 const host_timeout = deadline -| now.mono_ms;
@@ -839,6 +854,7 @@ pub const Engine = struct {
         if (slot.recv(datagram, &source, &destination)) |_| {
             self.counters.accepted += 1;
             self.registry.activity[index] = true;
+            slot.answered = true;
         } else |_| {
             self.counters.recv_errors += 1;
             received = false;

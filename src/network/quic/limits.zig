@@ -5,12 +5,15 @@ pub const connections_max_default: u16 = 128;
 pub const connections_max_ceiling: u16 = 1_024;
 pub const handshaking_max: u16 = 32;
 pub const handshaking_per_source_max: u16 = 4;
-pub const dialing_max: u16 = 16;
+pub const dialing_max: u16 = 32;
 pub const peer_streams_bidi: u64 = 64;
 pub const streams_per_connection: u16 = 128;
 pub const idle_timeout_ms: u64 = 10_000;
 pub const keep_alive_ms: u64 = 5_000;
 pub const handshake_timeout_ms: u64 = 5_000;
+/// A dial that has received nothing after quiche's second probe timeout (initial RTT 333 ms,
+/// PTO about 1 s, backoff to about 3 s) is treated as an unreachable endpoint.
+pub const unanswered_dial_timeout_ms: u64 = 3_000;
 pub const recv_udp_payload_max: u64 = 1_452;
 pub const send_udp_payload_max: u64 = 1_200;
 pub const amplification_factor_max: usize = 3;
@@ -35,6 +38,7 @@ comptime {
     std.debug.assert(send_udp_payload_max <= recv_udp_payload_max);
     std.debug.assert(recv_udp_payload_max <= constants.datagram_size_max);
     std.debug.assert(connection_window_min <= connection_window_max);
+    std.debug.assert(unanswered_dial_timeout_ms <= handshake_timeout_ms);
     std.debug.assert(handshaking_max <= connections_max_default);
     std.debug.assert(dialing_max <= connections_max_default - handshaking_max);
     std.debug.assert(connections_max_default <= connections_max_ceiling);

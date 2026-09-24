@@ -29,6 +29,7 @@ pub const CloseReason = union(enum) {
     host,
     idle_timeout,
     handshake_timeout,
+    dial_unanswered,
     peer_id_mismatch,
     tls_failed,
     peer_closed: struct { app: bool, code: u64 },
