@@ -354,8 +354,8 @@ test("actual 200/210 resources resolve and publish complete capacity", async () 
     expect(runtime.diagnostics().resolvedCapacities).toEqual({
       admissionIdentityCapacity: 512,
       connectionCapacity: 256,
-      dialEngineCapacity: 4,
-      dialingCapacity: 4,
+      dialEngineCapacity: 16,
+      dialingCapacity: 16,
       gossipConnectedCapacity: 210,
       gossipRetainedCapacity: 512,
       handshakingCapacity: 32,

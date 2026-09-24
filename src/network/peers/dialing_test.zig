@@ -992,6 +992,41 @@ test "peer failed discovery candidate yields its slot after retry backoff" {
     try std.testing.expectEqualDeep(replacement.peer, out[0].peer);
 }
 
+test "peer dial attempt table admits the configured concurrency up to its ceiling" {
+    try std.testing.expectError(error.InvalidOptions, mod.Dialing.init(.{ .capacity = 128, .concurrent_max = mod.attempts_max + 1, .seed = 1 }));
+    try std.testing.expectError(error.InvalidOptions, mod.Dialing.init(.{ .capacity = 8, .concurrent_max = 2, .outbound_reserved = 3, .seed = 1 }));
+    var q = try mod.Dialing.init(.{ .capacity = mod.attempts_max, .concurrent_max = mod.attempts_max, .seed = 1 });
+    var catalog = try initCatalog(a, q.options);
+    defer catalog.deinit(a);
+    for (0..mod.attempts_max) |index| {
+        var peer: t.PeerId = .{ .bytes = @splat(0) };
+        std.mem.writeInt(u16, peer.bytes[0..2], @intCast(index + 1), .little);
+        try q.enqueue(&catalog, &peer, &.{address}, false, 0);
+    }
+    var out: [mod.attempts_max]mod.DialIntent = undefined;
+    try std.testing.expectEqual(@as(usize, mod.attempts_max), q.poll(&catalog, 0, &out));
+    try std.testing.expectEqual(@as(u16, mod.attempts_max), q.attempts().total);
+    try std.testing.expectEqual(@as(usize, 0), q.poll(&catalog, 0, &out));
+}
+
+test "peer dial admission reserve counts only answered attempts" {
+    var q = try mod.Dialing.init(.{ .capacity = 4, .concurrent_max = 4, .seed = 1 });
+    var catalog = try initCatalog(a, q.options);
+    defer catalog.deinit(a);
+    for (0..4) |index| {
+        const peer: t.PeerId = .{ .bytes = @splat(@as(u8, @intCast(index + 1))) };
+        try q.enqueue(&catalog, &peer, &.{address}, false, 0);
+    }
+    var out: [4]mod.DialIntent = undefined;
+    try std.testing.expectEqual(@as(usize, 4), q.poll(&catalog, 0, &out));
+    for (out, 0..) |intent, index| try std.testing.expect(q.dialStarted(intent.token, .{ .index = @intCast(index), .generation = 1 }));
+    try std.testing.expectEqual(@as(u16, 4), q.pendingPeers(&catalog, null));
+    try std.testing.expectEqual(@as(u16, 0), q.answeredPeers(&catalog, null));
+    q.active[out[0].token.index].answered = true;
+    try std.testing.expectEqual(@as(u16, 1), q.answeredPeers(&catalog, null));
+    try std.testing.expectEqual(@as(u16, 0), q.answeredPeers(&catalog, &out[0].peer));
+}
+
 fn initCatalog(allocator: std.mem.Allocator, options: mod.Options) !@import("catalog.zig").Catalog {
     return @import("catalog.zig").Catalog.initWithIntents(allocator, .{ .capacity = 8, .max_peers = 8, .target_peers = 8, .min_outbound = 0, .outbound_reserve = 0 }, options.capacity, 1024, options.seed);
 }

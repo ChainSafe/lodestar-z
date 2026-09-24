@@ -1616,3 +1616,35 @@ fn metadataUpdate(manager: *const managed.PeerManager, metadata: *const t.Metada
     local.metadata = metadata.*;
     return local;
 }
+
+fn discoveredAt(tag: u8, endpoint: t.Address) !@import("peers/enr.zig").Candidate {
+    var secret: [32]u8 = @splat(0);
+    secret[31] = tag;
+    const key = try @import("wire/keys.zig").KeyPair.fromSecretKey(&secret);
+    const peer = t.PeerId.fromPublicKey(&key.publicKey());
+    return .{ .peer = peer, .node_id = try @import("peers/custody.zig").nodeId(&peer), .sequence = 1, .record_hash = @splat(0), .addresses = .{ endpoint, .unspecified }, .address_count = 1, .fork = .{ .digest = @splat(0), .next_version = @splat(0), .next_epoch = 0 }, .next_fork_digest = null, .attnets = null, .syncnets = 0, .custody_group_count = null };
+}
+
+test "managed dial admission reserve counts only answered dials" {
+    var setup: Setup = .{};
+    var opts = @import("managed_test_support.zig").options();
+    opts.dial.concurrent_max = 2;
+    try setup.initOwnersWithOptions(&.{}, opts);
+    defer setup.deinit();
+    const dead: t.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 4_999 } };
+    setup.pair.drop_to_address = dead;
+    const answering = try discoveredAt(9, support.server_address);
+    const silent = try discoveredAt(10, dead);
+    try std.testing.expectEqual(@as(u16, 2), setup.client.discoveredBatch(&setup.client_service, &.{ answering, silent }, setup.pair.now).accepted);
+    var intents: [2]managed.DialIntent = undefined;
+    try std.testing.expectEqual(@as(usize, 2), setup.client.dialIntents(&setup.client_service, &setup.pair.client, setup.pair.now, &intents));
+    for (intents) |intent| {
+        const handle = try setup.pair.client.dial(&intent.address, intent.peer, setup.pair.now);
+        try std.testing.expect(setup.client.dialStarted(intent.token, handle));
+    }
+    _ = try setup.pair.transfer(&setup.pair.client, &setup.pair.server, support.client_address, false);
+    setup.client.dialing.syncAnswered(&setup.pair.client);
+    try std.testing.expectEqual(@as(u16, 2), setup.client.dialing.pendingPeers(&setup.client.catalog, null));
+    try std.testing.expectEqual(@as(u16, 1), setup.client.dialing.answeredPeers(&setup.client.catalog, null));
+    try std.testing.expectEqual(@as(u16, 0), setup.client.dialing.answeredPeers(&setup.client.catalog, &answering.peer));
+}

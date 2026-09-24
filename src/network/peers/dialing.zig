@@ -8,7 +8,11 @@ const t = @import("types.zig");
 const Engine = @import("../quic/engine.zig").Engine;
 pub const Token = struct { index: u16, generation: u64 };
 pub const DialIntent = struct { token: Token, peer: t.PeerId, address: t.Address };
-pub const Options = struct { capacity: u16 = 256, concurrent_max: u16 = 4, seed: u64 };
+/// `outbound_reserved` peer slots stay closed to unselected inbound admission so dials can land.
+pub const Options = struct { capacity: u16 = 256, concurrent_max: u16 = 4, outbound_reserved: u16 = 0, seed: u64 };
+/// Unanswered QUIC dials cost one handshake slot each, so the table is sized for dead endpoints,
+/// not for peer headroom.
+pub const attempts_max = 64;
 pub const history_retention_ms = catalog_mod.history_retention_ms;
 pub const hint_freshness_ms = catalog_mod.hint_freshness_ms;
 pub const connect_timeout_ms: u64 = 30_000;
@@ -18,13 +22,14 @@ const Attempt = struct {
     generation: u64 = 0,
     peer: ?t.PeerRef = null,
     connection: ?t.Handle = null,
+    answered: bool = false,
     started_ms: u64 = 0,
     lease_until_ms: u64 = 0,
 };
 
 pub const Dialing = struct {
     options: Options,
-    active: [4]Attempt = @splat(.{}),
+    active: [attempts_max]Attempt = @splat(.{}),
     selection_dirty: bool = true,
     selection_revision: ?u64 = null,
     selection_deadline: ?u64 = null,
@@ -65,7 +70,8 @@ pub const Dialing = struct {
     }
     pub fn validateOptions(options: Options) error{InvalidOptions}!void {
         if (options.capacity == 0 or options.capacity > 4096 or options.concurrent_max == 0 or
-            options.concurrent_max > 4 or options.concurrent_max > options.capacity) return error.InvalidOptions;
+            options.concurrent_max > attempts_max or options.concurrent_max > options.capacity or
+            options.outbound_reserved > options.concurrent_max) return error.InvalidOptions;
     }
     pub fn init(options: Options) !Dialing {
         try validateOptions(options);
@@ -243,6 +249,26 @@ pub const Dialing = struct {
     pub fn pendingPeers(self: *const Dialing, catalog: *const Catalog, except: ?*const t.PeerId) u16 {
         var count: u16 = 0;
         for (self.active) |attempt| if (attempt.peer) |peer| {
+            const row = catalog.rowFor(peer).?;
+            if (row.connection != null) continue;
+            if (except) |identity| if (row.identity.eql(identity)) continue;
+            count += 1;
+        };
+        return count;
+    }
+    pub fn syncAnswered(self: *Dialing, engine: *const Engine) void {
+        for (&self.active) |*attempt| {
+            if (attempt.peer == null or attempt.answered) continue;
+            const conn = attempt.connection orelse continue;
+            attempt.answered = engine.dialAnswered(conn);
+        }
+    }
+
+    /// Dials the server answered are likely to land, so only they hold peer slots.
+    pub fn answeredPeers(self: *const Dialing, catalog: *const Catalog, except: ?*const t.PeerId) u16 {
+        var count: u16 = 0;
+        for (self.active) |attempt| if (attempt.peer) |peer| {
+            if (!attempt.answered) continue;
             const row = catalog.rowFor(peer).?;
             if (row.connection != null) continue;
             if (except) |identity| if (row.identity.eql(identity)) continue;
@@ -493,6 +519,10 @@ fn dialTier(row: *const Row, now_ms: u64) u8 {
 }
 fn hasDialIntent(row: *const Row, now_ms: u64) bool {
     return row.direct or now_ms < row.intent.manual_until_ms or (row.intent.automatic and row.intent.selected);
+}
+
+comptime {
+    std.debug.assert(attempts_max <= std.math.maxInt(u8));
 }
 
 test {
