@@ -36,13 +36,17 @@ pub const LocalIntent = struct {
     subscriptions: []const gossip.local_intent.Boundary,
     slot: u64 = 0,
 };
+/// Lookup queries touch many one-off nodes. Idle expiry keeps the discv5 session store at recent
+/// contacts instead of pinning it at capacity; routing-table peers are revalidated every 300 s.
+pub const discovery_session_capacity: usize = 2_048;
+pub const discovery_session_idle_timeout_ms: u64 = 10 * 60_000;
 pub const DiscoveryOptions = struct {
     advertisement: ?AdvertisementHints = null,
     fixed: AdvertisementEndpoints = .{},
     bind: @import("udp.zig").Bindings,
     sequence: u64 = 1,
     bootstrap: []const d.identity.enr.Record = &.{},
-    engine: d.Engine.Config = .{},
+    engine: d.Engine.Config = .{ .session_capacity = discovery_session_capacity, .session_idle_timeout_ms = discovery_session_idle_timeout_ms },
     coordinator: peers.discovery.Options = .{},
 };
 pub const Options = struct {
