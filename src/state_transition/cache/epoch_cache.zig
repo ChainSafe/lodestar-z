@@ -559,15 +559,19 @@ pub const EpochCache = struct {
         const epoch_after_upcoming = upcoming_epoch + 1;
         const slot = try state.slot();
 
-        const next_shuffling_active_indices = try self.allocator.alloc(ValidatorIndex, epoch_transition_cache.next_shuffling_active_indices.len);
-        std.mem.copyForwards(ValidatorIndex, next_shuffling_active_indices, epoch_transition_cache.next_shuffling_active_indices);
+        const next_shuffling_rc = if (epoch_transition_cache.next_shuffling) |next_shuffling| blk: {
+            break :blk next_shuffling.ref();
+        } else blk: {
+            const next_shuffling_active_indices = try self.allocator.alloc(ValidatorIndex, epoch_transition_cache.next_shuffling_active_indices.len);
+            std.mem.copyForwards(ValidatorIndex, next_shuffling_active_indices, epoch_transition_cache.next_shuffling_active_indices);
 
-        const next_shuffling_rc = try initEpochShufflingRc(
-            self.allocator,
-            state,
-            next_shuffling_active_indices,
-            epoch_after_upcoming,
-        );
+            break :blk try initEpochShufflingRc(
+                self.allocator,
+                state,
+                next_shuffling_active_indices,
+                epoch_after_upcoming,
+            );
+        };
         errdefer next_shuffling_rc.unref();
 
         const next_decision_root = try calculateShufflingDecisionRoot(state, epoch_after_upcoming);
