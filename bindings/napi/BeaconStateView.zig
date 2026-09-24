@@ -1560,12 +1560,193 @@ fn optionalU64(obj: napi.Value, name: [:0]const u8) !u64 {
     return if (raw < 0) 0 else @intCast(raw);
 }
 
-pub fn computeAttestationsRewards(_: *const BeaconStateView, _: ?js.Value) !js.Value {
-    return throwNotImpl(js.Value, "computeAttestationsRewards not implemented");
+/// Serialize with other STF operations and cache teardown across workers while borrowing epoch scratch.
+pub fn computeAttestationsRewards(self: *const BeaconStateView, validator_ids: ?js.Value) !js.Value {
+    const promise = try js.createPromise(js.Value);
+    const result = self.attestationsRewardsValue(validator_ids) catch |err| {
+        try rejectRewardsPromise(promise, err);
+        return .{ .val = promise.val };
+    };
+    try promise.resolve(.{ .val = result });
+    return .{ .val = promise.val };
 }
 
-pub fn computeSyncCommitteeRewards(_: *const BeaconStateView, _: js.Value, _: js.Value) !js.Value {
-    return throwNotImpl(js.Value, "computeSyncCommitteeRewards not implemented");
+fn attestationsRewardsValue(self: *const BeaconStateView, validator_ids: ?js.Value) !napi.Value {
+    if ((try self.requireState()).state.forkSeq() == .phase0) return error.AttestationsRewardsUnsupportedFork;
+    const filters = try parseAttestationRewardFilters(validator_ids);
+    defer if (filters) |indices| allocator.free(indices);
+    const cached_state = try self.requireState();
+    const rewards = try st.computeAttestationsRewards(allocator, js.io(), cached_state, filters);
+    defer rewards.deinit(allocator);
+
+    const env = js.env();
+    const ideal = try env.createArrayWithLength(rewards.ideal_rewards.len);
+    for (rewards.ideal_rewards, 0..) |reward, i| {
+        const row = try env.createObject();
+        try row.setNamedProperty("effectiveBalance", try env.createDouble(@floatFromInt(reward.effective_balance)));
+        try row.setNamedProperty("head", try env.createDouble(reward.head));
+        try row.setNamedProperty("target", try env.createDouble(reward.target));
+        try row.setNamedProperty("source", try env.createDouble(reward.source));
+        try row.setNamedProperty("inclusionDelay", try env.createDouble(reward.inclusion_delay));
+        try row.setNamedProperty("inactivity", try env.createDouble(reward.inactivity));
+        try ideal.setElement(@intCast(i), row);
+    }
+    const total = try env.createArrayWithLength(rewards.total_rewards.len);
+    for (rewards.total_rewards, 0..) |reward, i| {
+        const row = try env.createObject();
+        try row.setNamedProperty("validatorIndex", try env.createDouble(@floatFromInt(reward.validator_index)));
+        try row.setNamedProperty("head", try env.createDouble(reward.head));
+        try row.setNamedProperty("target", try env.createDouble(reward.target));
+        try row.setNamedProperty("source", try env.createDouble(reward.source));
+        try row.setNamedProperty("inclusionDelay", try env.createDouble(reward.inclusion_delay));
+        try row.setNamedProperty("inactivity", try env.createDouble(reward.inactivity));
+        try total.setElement(@intCast(i), row);
+    }
+    const result = try env.createObject();
+    try result.setNamedProperty("idealRewards", ideal);
+    try result.setNamedProperty("totalRewards", total);
+    return result;
+}
+
+fn parseAttestationRewardFilters(value: ?js.Value) !?[]u64 {
+    const raw = (value orelse return null).val;
+    if (try raw.typeof() == .undefined) return null;
+    const count = try raw.getArrayLength();
+    if (count == 0) return null;
+    var indices: std.ArrayList(u64) = .empty;
+    errdefer indices.deinit(allocator);
+    for (0..count) |i| {
+        const id = try raw.getElement(@intCast(i));
+        if (try id.typeof() == .number) {
+            const number = try id.getValueDouble();
+            if (std.math.isFinite(number) and number >= 0 and number <= 9007199254740991 and @trunc(number) == number)
+                try indices.append(allocator, @intFromFloat(number));
+        } else {
+            const string = js.String{ .val = id };
+            const text = try string.toOwnedSlice(allocator);
+            defer allocator.free(text);
+            const hex = if (std.mem.startsWith(u8, text, "0x")) text[2..] else text;
+            if (hex.len % 2 != 0) {
+                var buffer: [96]u8 = undefined;
+                const message = try std.fmt.bufPrintZ(&buffer, "hex string length {d} must be multiple of 2", .{hex.len});
+                try js.env().throwError("INVALID_ARGUMENT", message);
+                return error.InvalidPubkeyHex;
+            }
+            for (hex) |char| {
+                if (!std.ascii.isHex(char)) {
+                    try js.env().throwError("INVALID_ARGUMENT", "hex string contains invalid characters");
+                    return error.InvalidPubkeyHex;
+                }
+            }
+            if (hex.len != 96) return error.InvalidPubkeyLength;
+            var key: [48]u8 = undefined;
+            _ = try std.fmt.hexToBytes(&key, hex);
+            if (pubkey.state.cache.get(js.io(), key)) |index| try indices.append(allocator, index);
+        }
+    }
+    std.mem.sort(u64, indices.items, {}, std.sort.asc(u64));
+    return try indices.toOwnedSlice(allocator);
+}
+
+pub fn computeSyncCommitteeRewards(self: *const BeaconStateView, block: js.Value, validator_ids: ?js.Value) !js.Value {
+    const promise = try js.createPromise(js.Value);
+    const result = self.syncCommitteeRewardsValue(block, validator_ids) catch |err| {
+        try rejectRewardsPromise(promise, err);
+        return .{ .val = promise.val };
+    };
+    try promise.resolve(.{ .val = result });
+    return .{ .val = promise.val };
+}
+
+fn rejectRewardsPromise(promise: js.Promise(js.Value), err: anyerror) !void {
+    const env = js.env();
+    if (try env.isExceptionPending()) {
+        try promise.reject(try env.getAndClearLastException());
+    } else {
+        const message = if (err == error.SyncCommitteeRewardsUnsupportedFork)
+            "Cannot get sync rewards as phase0 block does not have sync committee"
+        else if (err == error.AttestationsRewardsUnsupportedFork)
+            "Unsupported fork. Attestations rewards calculation is not available in phase0"
+        else
+            @errorName(err);
+        try promise.rejectWithMessage(js.String.from(message));
+    }
+}
+
+fn syncCommitteeRewardsValue(self: *const BeaconStateView, block: js.Value, validator_ids: ?js.Value) !napi.Value {
+    const env = js.env();
+    const slot_value = try (try block.val.getNamedProperty("slot")).getValueDouble();
+    if (!std.math.isFinite(slot_value) or slot_value < 0 or slot_value > 9007199254740991 or @trunc(slot_value) != slot_value)
+        return error.InvalidSlot;
+    const block_slot: u64 = @intFromFloat(slot_value);
+    if ((try self.requireState()).config.forkSeq(block_slot) == .phase0) return error.SyncCommitteeRewardsUnsupportedFork;
+    const body = try block.val.getNamedProperty("body");
+    const aggregate = try body.getNamedProperty("syncAggregate");
+    const bits = try aggregate.getNamedProperty("syncCommitteeBits");
+    const bit_len = try (try bits.getNamedProperty("bitLen")).getValueDouble();
+    if (bit_len != preset.SYNC_COMMITTEE_SIZE) return error.InvalidSyncCommitteeBitsLength;
+    var sync_aggregate: ct.altair.SyncAggregate.Type = undefined;
+    // Copy before subsequent JS getters can detach or resize the backing buffer.
+    try readByteArrayInto(bits, "uint8Array", &sync_aggregate.sync_committee_bits.data);
+    const filters = try parseSyncRewardFilters(validator_ids);
+    defer if (filters) |indices| allocator.free(indices);
+
+    const cached_state = try self.requireState();
+    const rewards = try st.computeSyncCommitteeRewards(allocator, cached_state, &sync_aggregate);
+    defer allocator.free(rewards);
+
+    const result = try env.createArray();
+    var output_index: u32 = 0;
+    for (rewards) |reward| {
+        if (filters) |indices| {
+            if (std.mem.indexOfScalar(u64, indices, reward.validator_index) == null) continue;
+        }
+        const row = try env.createObject();
+        try row.setNamedProperty("validatorIndex", try env.createInt64(@intCast(reward.validator_index)));
+        try row.setNamedProperty("reward", try env.createInt64(reward.reward));
+        try result.setElement(output_index, row);
+        output_index += 1;
+    }
+    return result;
+}
+
+fn parseSyncRewardFilters(value: ?js.Value) !?[]u64 {
+    const raw = (value orelse return null).val;
+    if (try raw.typeof() == .undefined) return null;
+    const count = try raw.getArrayLength();
+    if (count == 0) return null;
+    var indices: std.ArrayList(u64) = .empty;
+    errdefer indices.deinit(allocator);
+    for (0..count) |i| {
+        const id = try raw.getElement(@intCast(i));
+        switch (try id.typeof()) {
+            .number => {
+                const number = try id.getValueDouble();
+                if (std.math.isFinite(number) and number >= 0 and number <= 9007199254740991 and @trunc(number) == number)
+                    try indices.append(allocator, @intFromFloat(number));
+            },
+            .string => {
+                const string = js.String{ .val = id };
+                if (try string.len() != 98) continue;
+                var buffer: [99]u8 = undefined;
+                const hex = try string.toSlice(&buffer);
+                if (!std.mem.startsWith(u8, hex, "0x")) continue;
+                var canonical = true;
+                for (hex[2..]) |char| {
+                    if (!std.ascii.isDigit(char) and !(char >= 'a' and char <= 'f')) {
+                        canonical = false;
+                        break;
+                    }
+                }
+                if (!canonical) continue;
+                var key: [48]u8 = undefined;
+                _ = try std.fmt.hexToBytes(&key, hex[2..]);
+                if (pubkey.state.cache.get(js.io(), key)) |index| try indices.append(allocator, index);
+            },
+            else => {},
+        }
+    }
+    return try indices.toOwnedSlice(allocator);
 }
 
 // --- Misc not-yet-implemented ---
