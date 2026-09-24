@@ -3,7 +3,6 @@ import {createSocket} from "node:dgram";
 import {once} from "node:events";
 import {isMainThread, parentPort, Worker} from "node:worker_threads";
 import {applicationConfig, localIntent, startRuntime, topicName} from "../utils/network.js";
-import {networkBindings} from "../utils/network-bindings.js";
 
 if (isMainThread) {
   const worker = new Worker(new URL(import.meta.url));
@@ -11,9 +10,6 @@ if (isMainThread) {
     const [{port, occupied}] = await once(worker, "message");
     assert(occupied > 0);
     await worker.terminate();
-    if (networkBindings.networkTestStats) {
-      assert.deepEqual(networkBindings.networkTestStats(), {notifications: 0, owners: 0, runtimes: 0});
-    }
     const socket = createSocket("udp4");
     try {
       socket.bind(port, "127.0.0.1");

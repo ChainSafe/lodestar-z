@@ -4,6 +4,6 @@ export default defineConfig({
   test: {
     pool: "forks",
     maxWorkers: 2,
-    runner: "./bindings/test/utils/network-runner.mjs",
+    setupFiles: ["./bindings/test/utils/network-setup.ts"],
   },
 });

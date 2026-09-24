@@ -31,12 +31,6 @@ interface NativeBridge extends Pick<NativeNetworkApplicationRuntime, "applyInten
 
 interface NetworkTestBindings {
   NativeNetworkRuntime: new () => NativeBridge;
-  networkTestFail(stage: string): void;
-  networkTestGossip(): unknown;
-  networkTestRequest(): unknown;
-  networkTestScenario(scenario: string): void;
-  networkTestStage(): string;
-  networkTestStats(): {notifications: number; owners: number; runtimes: number};
 }
 
 export const networkBindings = bindings as NetworkTestBindings;

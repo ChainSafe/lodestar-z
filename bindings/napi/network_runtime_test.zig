@@ -105,3 +105,11 @@ test "request table storage retires only after physical quiescence and final pin
 test {
     _ = @import("network_gossip.zig");
 }
+
+test "one runtime is live per process until its last release" {
+    const first = try r.create(undefined);
+    try std.testing.expectError(error.NetworkAlreadyInitialized, r.create(undefined));
+    first.release();
+    const second = try r.create(undefined);
+    second.release();
+}

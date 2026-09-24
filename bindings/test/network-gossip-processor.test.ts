@@ -76,7 +76,6 @@ test("native processor retains dependencies, protects blocks, batches ready work
   let ready: (() => void) | undefined;
   const pair = await incomingPair(
     undefined,
-    undefined,
     () => ready?.(),
     (left, right) => {
       for (const config of [left, right]) {
@@ -178,7 +177,7 @@ test("native processor retains dependencies, protects blocks, batches ready work
 }, 30000);
 
 test("expired validation execution remains visible until late host completion", async () => {
-  const pair = await incomingPair(undefined, undefined, undefined, (left, right) => {
+  const pair = await incomingPair(undefined, undefined, (left, right) => {
     for (const config of [left, right]) {
       config.gossipPolicy.processor = Array.from({length: 13}, (_, kind) => ({
         bytes: (kind === 0 || kind === 12 ? 16 : kind === 4 ? 4 : 1) * 1024 * 1024,

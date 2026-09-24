@@ -81,7 +81,6 @@ comptime {
         .identity = @import("zapi_addon_identity"),
         .init = init,
         .cleanup = cleanup,
-        .register = @import("network_faults.zig").register,
     });
 }
 

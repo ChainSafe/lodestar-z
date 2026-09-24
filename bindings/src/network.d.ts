@@ -412,7 +412,8 @@ export interface NativeNetworkApplicationRuntime {
 }
 
 /**
- * Initialize once per process from the owning thread, after configuring BeaconConfig.
+ * Initialize from the owning thread, after configuring BeaconConfig. One runtime is live per process;
+ * another initializes only after the previous one is garbage collected.
  * Copies configuration and returns a running runtime; failure is terminal.
  * Calls onWorkAvailable on that thread when peer events, incoming requests, or gossip work can be drained.
  */

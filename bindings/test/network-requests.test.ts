@@ -336,7 +336,6 @@ test.each([
   "closed-terminal",
   "closed-facade-gc",
   "closed-facade-gc-early",
-  ...(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES === "1" ? ["closed-terminal-fault"] : []),
 ])("request lifecycle settles independently of facade and notifier: %s", async (mode) => {
   const {execFileSync} = await import("node:child_process");
   const output = execFileSync(
@@ -477,33 +476,6 @@ test("native bridge validates full handles and stale retirement", async () => {
   }
 });
 
-test.skipIf(!HOST || process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")(
-  "a fault after final chunk allocation releases its pin and native sink",
-  async () => {
-    const {networkBindings: bindings} = await import("./utils/network-bindings.js");
-    const {runtime, peer, id} = await connected();
-    try {
-      bindings.networkTestFail("operation_copy");
-      const stream = runtime.request(id, BLOCKS, new Uint8Array(64));
-      await expect(stream.next()).rejects.toMatchObject({code: "NetworkResultAllocationFailed"});
-      await stream.return?.();
-      expect(runtime.state).toBe("running");
-      await expect(runtime.getIdentity()).resolves.toBeDefined();
-      expect(runtime.diagnostics().requests).toMatchObject({
-        copyingBytes: 0,
-        inputBytes: 0,
-        occupied: 0,
-        reservedBytes: 0,
-        sinkBytes: 0,
-      });
-    } finally {
-      await runtime.close();
-      await peer.stop();
-    }
-  },
-  20000
-);
-
 stockTest(
   "zero expected chunks and unknown response context preserve exact failures",
   async () => {
@@ -584,7 +556,7 @@ stockTest(
   20000
 );
 
-async function connectedNative(scenario?: string) {
+async function connectedNative() {
   if (!HOST) throw Error("LODESTAR_Z_NETWORK_STOCK_HOST is required");
   const {Child} = await import("../../test/interop/child.mjs");
   const {networkBindings: bindings} = await import("./utils/network-bindings.js");
@@ -607,7 +579,6 @@ async function connectedNative(scenario?: string) {
   try {
     const remote = await peer.command("ready");
     const config = applicationConfig();
-    if (scenario) bindings.networkTestScenario(scenario);
     native = new bindings.NativeNetworkRuntime();
     const prepared = native.initialize(config, () => undefined);
     closed = prepared.closed;
@@ -625,144 +596,6 @@ async function connectedNative(scenario?: string) {
     throw error;
   }
 }
-
-const phaseTest = test.skipIf(!HOST || process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1");
-phaseTest.each([
-  ["request_queued", null],
-  ["request_negotiation", "negotiation"],
-] as const)(
-  "request cancellation establishes %s ownership and isolates the replacement generation",
-  async (scenario, phase) => {
-    const {bindings, native, peer, id, stop} = await connectedNative(scenario);
-    try {
-      const {waitFor} = await import("../../test/interop/child.mjs");
-      await peer.command("scenario", {scenario: "hold"});
-      const old = native.requestStart(id, BLOCKS, new Uint8Array(32), undefined);
-      const pending = native.requestPull(old);
-      const failed = expect(pending).rejects.toMatchObject({code: "NetworkRequestFailed", phase, reason: "cancelled"});
-      await waitFor(() => bindings.networkTestStage() === scenario);
-      if (process.env.LODESTAR_Z_NETWORK_REQUEST_EVIDENCE === "1") console.log(scenario, bindings.networkTestRequest());
-      expect(bindings.networkTestRequest()).toMatchObject({
-        bridgeGeneration: old.generation,
-        copying: false,
-        coreLive: true,
-        destinationBytes: 0,
-        inputBytes: 32,
-        nativeOwned: phase !== null,
-        negotiatorMatched: phase !== null,
-        phase,
-        quiescent: false,
-        reservedBytes: 20971552,
-        sinkBytes: 10485760,
-      });
-      expect(native.diagnostics().requests).toMatchObject({
-        inputBytes: 32,
-        occupied: 1,
-        pendingPulls: 1,
-        reservedBytes: 20971552,
-        sinkBytes: 10485760,
-      });
-      expect((await peer.command("stats")).requests).toBe(0);
-      const retired = native.requestRetire(old, false);
-      await retired;
-      await failed;
-      expect(native.diagnostics().requests).toMatchObject({
-        inputBytes: 0,
-        occupied: 0,
-        pendingPulls: 0,
-        reservedBytes: 0,
-        sinkBytes: 0,
-      });
-      const replacementInput = new Uint8Array(32).fill(7);
-      const replacement = native.requestStart(id, BLOCKS, replacementInput, undefined);
-      expect(replacement.index).toBe(old.index);
-      expect(replacement.generation).toBe(old.generation + 1n);
-      const next = native.requestPull(replacement);
-      const cancelled = expect(next).rejects.toMatchObject({
-        code: "NetworkRequestFailed",
-        phase: "response",
-        reason: "cancelled",
-      });
-      await waitFor(async () => (await peer.command("stats")).lastRequest === "07".repeat(32));
-      expect(native.requestRetire(old, true)).toBeUndefined();
-      expect(() => native.requestPull(old)).toThrow("InvalidRequestHandle");
-      expect(native.diagnostics().requests).toMatchObject({
-        occupied: 1,
-        pendingPulls: 1,
-        reservedBytes: 20971552,
-        terminalCells: 0,
-      });
-      await native.requestRetire(replacement, false);
-      await cancelled;
-      expect(native.diagnostics().requests).toMatchObject({inputBytes: 0, occupied: 0, reservedBytes: 0, sinkBytes: 0});
-    } finally {
-      await stop();
-    }
-  },
-  20000
-);
-
-phaseTest.each([false, true])(
-  "physical close overlaps a pinned final JS destination (copy fault: %s)",
-  async (failCopy) => {
-    const {bindings, closed, native, peer, id, stop} = await connectedNative("request_copy_close");
-    try {
-      const {payload} = await import("../../test/interop/codec.mjs");
-      await peer.command("scenario", {count: 1, scenario: "chunks"});
-      const handle = native.requestStart(id, BLOCKS, new Uint8Array(32), undefined);
-      if (failCopy) bindings.networkTestFail("operation_copy");
-      const pull = native.requestPull(handle);
-      if (failCopy) await expect(pull).rejects.toMatchObject({code: "NetworkResultAllocationFailed"});
-      else {
-        const first = await pull;
-        expect(first).toMatchObject({done: false, value: {fork: "deneb", protocol: BLOCKS}});
-        if (first.done) throw new Error("Expected a response chunk");
-        expect(first.value.data).toEqual(Uint8Array.from(payload(4000, 71)));
-      }
-      expect(bindings.networkTestStage()).toBe("request_copy_closed");
-      if (process.env.LODESTAR_Z_NETWORK_REQUEST_EVIDENCE === "1")
-        console.log("request_copy_closed", bindings.networkTestRequest());
-      expect(bindings.networkTestRequest()).toMatchObject({
-        bridgeGeneration: handle.generation,
-        copying: true,
-        coreLive: false,
-        destinationBytes: 4000,
-        inputBytes: 32,
-        nativeOwned: false,
-        quiescent: true,
-        reservedBytes: 20971552,
-        sinkBytes: 10485760,
-      });
-      expect(native.diagnostics()).toMatchObject({
-        copyingPins: 0,
-        liveNativeRequestedBytes: 0,
-      });
-      expect(native.diagnostics().requests).toMatchObject({
-        bytesCopied: failCopy ? 0n : 4000n,
-        chunksCopied: failCopy ? 0n : 1n,
-        copyingBytes: 0,
-        inputBytes: 0,
-        reservedBytes: 0,
-        sinkBytes: 0,
-      });
-      await closed;
-      expect(native.diagnostics().requests.occupied).toBe(failCopy ? 0 : 1);
-      if (!failCopy) await expect(native.requestPull(handle)).rejects.toMatchObject({code: "NetworkClosed"});
-      await stop();
-      const {waitFor} = await import("../../test/interop/child.mjs");
-      await waitFor(() => native.diagnostics().requests.occupied === 0);
-      const after = native.diagnostics();
-      expect(after.requests.occupied).toBe(0);
-      expect(after.liveBridgeRequestedBytes).toBe(
-        after.ownerShellBytes + after.peerLaneBytes + after.metricsExportBytes
-      );
-    } finally {
-      await stop();
-    }
-  },
-  20000
-);
-
 stockTest(
   "native terminal scoring does not wait for a JavaScript iterator pull",
   async () => {

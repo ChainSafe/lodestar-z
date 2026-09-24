@@ -5,7 +5,6 @@ const napi = zapi.napi;
 const cfg = @import("network_config.zig");
 const r = @import("network_runtime.zig");
 const Runtime = r.Runtime;
-const faults = @import("network_faults.zig");
 const Value = napi.Value;
 const requests = @import("network_requests.zig");
 const gossip = @import("network_gossip.zig");
@@ -26,17 +25,11 @@ pub fn init() @This() {
 }
 
 pub fn initialize(self: *@This(), config: js.Value, callback: js.Value) !js.Value {
-    try r.beginInitialization();
     if (self.stopped) return error.NetworkClosed;
     if (try callback.val.typeof() != .function) return error.InvalidNetworkConfig;
-    try faults.check(.runtime_alloc);
-    const runtime = try r.allocator.create(Runtime);
-    faults.count(&faults.runtimes, true);
-    runtime.* = .{ .env = js.env(), .diag = .{ .currentSlot = 0 } };
-    if (comptime faults.enabled) runtime.test_scenario = faults.takeScenario();
+    const runtime = try r.create(js.env());
     errdefer runtime.release();
     errdefer runtime.disposeJsReferences();
-    try faults.check(.owner_alloc);
     runtime.heavy = try r.allocator.create(r.Owner);
     runtime.heavy.?.* = .{};
     try application_cfg.parse(config.val, &runtime.heavy.?.config, &runtime.heavy.?.application);
@@ -45,52 +38,30 @@ pub fn initialize(self: *@This(), config: js.Value, callback: js.Value) !js.Valu
     try prepareApplicationStorage(runtime, &runtime.heavy.?.application);
     runtime.slot = runtime.heavy.?.config.slot;
     runtime.diag.currentSlot = runtime.slot;
-    try faults.check(.wake);
     runtime.wake = try @import("network_wake.zig").Wake.init();
     errdefer if (runtime.wake) |*wake| wake.deinit();
     try @import("network_owner.zig").initialize(runtime);
     runtime.identity = try runtime.heavy.?.readIdentity();
-    if (comptime faults.enabled) {
-        if (runtime.test_scenario == .application_peer_lane) {
-            for (0..64) |i| {
-                const event: n.peers.Event = .{ .closed = .{
-                    .peer = .{ .index = @intCast(i), .generation = std.math.maxInt(u64) - i },
-                    .connection = .{ .index = @intCast(i % 16), .generation = std.math.maxInt(u32) - @as(u32, @intCast(i)) },
-                    .identity = runtime.identity.peer,
-                    .reason = .host,
-                } };
-                runtime.lane.?.publish(&.{event}, 0);
-            }
-        }
-    }
 
     const env = js.env();
     const name = try env.createStringUtf8("NativeNetworkRuntime");
-    try faults.check(.notify);
     runtime.notify = try r.Notify.create(env, callback.val, null, name, 1, 1, runtime, Runtime.finalize, onNotify);
-    faults.count(&faults.notifications, true);
     runtime.retain();
     errdefer runtime.notify.release(.abort) catch unreachable;
     try runtime.notify.unref(env);
-    try faults.check(.hook);
     try env.addEnvCleanupHook(Runtime, runtime, Runtime.cleanup);
     runtime.hook_live = true;
     runtime.retain();
     errdefer runtime.removeHook();
-    try faults.check(.close_promise);
     runtime.close_deferred = try env.createPromise();
     errdefer @import("network_js.zig").discardPromise(env, runtime.close_deferred.?);
     try prepareCloseResults(env, runtime);
-    try faults.check(.promise_holder);
     const holder = try env.createObject();
     try put(holder, "identity", try identity(env, &runtime.identity));
     try put(holder, "closed", runtime.close_deferred.?.getPromise());
     if (self.stopped) return error.NetworkClosed;
     runtime.retain();
     errdefer runtime.release();
-    try faults.check(.spawn);
-    faults.count(&faults.owners, true);
-    errdefer faults.count(&faults.owners, false);
     runtime.thread = try std.Thread.spawn(.{ .stack_size = std.Thread.SpawnConfig.default_stack_size }, @import("network_owner.zig").run, .{runtime});
     self.runtime = runtime;
     runtime.lock();
@@ -143,12 +114,9 @@ fn prepareApplicationStorage(runtime: *Runtime, app: *const application_cfg.Conf
     // Keep one serving response, two local RPCs, and two urgent publications independently admissible.
     try runtime.payload_budget.protect(response_max + 2 * request_max * incoming_capacity, 2 * (request_max + 2 * response_max), 2 * gossip.payload_max);
     runtime.publications = try publications.Table.init(r.allocator, publication_capacity, &runtime.payload_budget);
-    try faults.check(.incoming_table);
     runtime.incoming = try incoming.Table.init(r.allocator, incoming_capacity, &runtime.payload_budget);
-    try faults.check(.gossip_table);
     runtime.gossip = try gossip.Table.init(r.allocator, gossip_plan);
     runtime.stores = try r.Stores.create(r.allocator, runtime.peer_capacity);
-    try faults.check(.application_lane);
     runtime.lane = try r.allocator.create(projection.Lane);
     runtime.lane.?.* = .{};
     runtime.diag.bridgeRequestedBytes = bridge;
@@ -159,12 +127,10 @@ fn prepareCloseResults(env: napi.Env, runtime: *Runtime) !void {
     try put(fallback, "name", try env.createStringUtf8("Error"));
     try put(fallback, "code", try env.createStringUtf8("NetworkResultAllocationFailed"));
     try put(fallback, "message", try env.createStringUtf8("NetworkResultAllocationFailed"));
-    try faults.check(.copy_error_ref);
     runtime.copy_error = try napi.Ref.create(env.env, fallback, 1);
     inline for (.{ "requested", "failed" }, 0..) |reason, i| {
         const result = try env.createObject();
         try put(result, "reason", try env.createStringUtf8(reason));
-        try faults.check(([_]faults.Stage{ .requested_ref, .failed_ref })[i]);
         runtime.close_results[i] = try napi.Ref.create(env.env, result, 1);
     }
 }
@@ -265,7 +231,6 @@ fn text(value: []const u8) !Value {
     return js.env().createStringUtf8(value);
 }
 fn identity(env: napi.Env, value: *const r.Identity) !Value {
-    try faults.check(.identity_copy);
     const object = try env.createObject();
     try put(object, "peerId", try @import("network_js.zig").peerIdValue(env, &value.peer));
     try put(object, "metadata", try projection.metadata(env, &value.metadata));
@@ -446,7 +411,6 @@ fn settleOperations(env: napi.Env, runtime: *Runtime) !void {
     }
 }
 fn copyOperation(env: napi.Env, runtime: *Runtime, index: usize) !Value {
-    try faults.check(.operation_copy);
     const operation = &runtime.table.cells[index];
     const store = runtime.table.cells[index].store;
     const object = switch (operation.input.command) {
@@ -508,7 +472,6 @@ fn drainPeerEvents(runtime: *Runtime, max: usize) !js.Value {
     try put(object, "ownerSequence", try env.createBigintUint64(sequence));
     try put(object, "more", try env.getBoolean(more));
     try put(object, "updatesReplaceState", try env.getBoolean(true));
-    try faults.check(.drain_copy);
     runtime.lock();
     if (lane) |storage| {
         storage.commit(count);

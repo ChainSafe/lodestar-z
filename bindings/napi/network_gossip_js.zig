@@ -6,7 +6,6 @@ const cfg = @import("network_config.zig");
 const app = @import("network_application_config.zig");
 const r = @import("network_runtime.zig");
 const g = @import("network_gossip.zig");
-const faults = @import("network_faults.zig");
 const element = @import("network_js.zig").element;
 const Runtime = r.Runtime;
 
@@ -48,7 +47,7 @@ pub fn drain(runtime: *Runtime, options: Value) !Value {
     const env = runtime.env;
     const array = try env.createArrayWithLength(batch.len);
     for (batch.tokens[0..batch.len], 0..) |token, i| {
-        try element(array, i, try descriptor(runtime, token, &table.cells[token.index], i));
+        try element(array, i, try descriptor(runtime, token, &table.cells[token.index]));
     }
     const object = try env.createObject();
     try put(object, "messages", array);
@@ -75,7 +74,7 @@ pub fn drain(runtime: *Runtime, options: Value) !Value {
     success = true;
     return object;
 }
-fn descriptor(runtime: *Runtime, token: g.Token, cell: *const g.Cell, ordinal: usize) !Value {
+fn descriptor(runtime: *Runtime, token: g.Token, cell: *const g.Cell) !Value {
     const env = runtime.env;
     const object = try env.createObject();
     const handle = try env.createObject();
@@ -92,8 +91,6 @@ fn descriptor(runtime: *Runtime, token: g.Token, cell: *const g.Cell, ordinal: u
     var destination: [*]u8 = undefined;
     const buffer = try env.createArrayBuffer(cell.input.len, &destination);
     const data = try env.createTypedarray(.uint8, cell.input.len, buffer, 0);
-    try @import("network_gossip_faults.zig").copy(runtime, token, ordinal);
-    try faults.check(.gossip_copy);
     runtime.gossip.?.copyPayload(cell, destination[0..cell.input.len]);
     try put(object, "data", data);
     var encoded: [172]u8 = undefined;

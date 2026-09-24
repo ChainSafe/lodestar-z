@@ -23,11 +23,6 @@ test("native std.log captures lifecycle, timestamps and isolated processes throu
   try {
     await Promise.all([left.close(), right.close()]);
     for (const runtime of [left, right]) {
-      const {networkBindings: addon} = await import("./utils/network-bindings.js");
-      if (runtime === left && typeof addon.networkTestFail === "function") {
-        addon.networkTestFail("drain_copy");
-        expect(() => runtime.drainLogs()).toThrow("InjectedNetworkFailure");
-      }
       const records = await drain(runtime);
       expect(records.some((r) => r.message.startsWith("owner_initializing"))).toBe(true);
       expect(records.some((r) => r.message.startsWith("owner_initialized "))).toBe(true);

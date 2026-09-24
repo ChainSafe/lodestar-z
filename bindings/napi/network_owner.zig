@@ -6,7 +6,6 @@ const Runtime = r.Runtime;
 const allocator = r.allocator;
 const Config = @import("network_config.zig").Config;
 const application_config = @import("network_application_config.zig");
-const faults = @import("network_faults.zig");
 const commands = @import("network_commands.zig");
 const gossip_mod = @import("network_gossip.zig");
 const incoming_mod = @import("network_incoming.zig");
@@ -47,7 +46,6 @@ pub fn prepareConfiguration(self: *Runtime) !void {
     self.heavy.?.threaded_live = true;
     const io = self.heavy.?.threaded.io();
     var seed: u64 = undefined;
-    try faults.check(.entropy);
     try io.randomSecure(std.mem.asBytes(&seed));
     self.reports.seed = seed;
     const request = try self.heavy.?.application.buildRequest(&self.heavy.?.config, seed);
@@ -63,15 +61,12 @@ pub fn initialize(self: *Runtime) !void {
     defer _ = n.logging.bind(previous_log);
     std.log.scoped(.network_runtime).info("owner_initializing", .{});
     const io = self.heavy.?.threaded.io();
-    try faults.check(.key);
     self.heavy.?.key = try n.KeyPair.fromSecretKey(&self.heavy.?.config.secret);
 
     self.heavy.?.config.wipe();
     for (0..self.heavy.?.config.bootstrap_count) |i| {
-        try faults.check(.enr);
         self.heavy.?.records[i] = try d.identity.enr.Record.init(self.heavy.?.config.bootstrap[i].bytes[0..self.heavy.?.config.bootstrap[i].len]);
     }
-    try faults.check(.core);
     try self.heavy.?.core.init(allocator, io, &self.heavy.?.resolved, .{
         .wait_mode = .native_poll,
         .host = &self.heavy.?.key,
@@ -81,11 +76,7 @@ pub fn initialize(self: *Runtime) !void {
         .discovery = if (self.heavy.?.config.discovery_bind) |bind| .{ .bind = bind, .sequence = self.heavy.?.config.discovery_sequence, .advertisement = self.heavy.?.config.advertisement, .fixed = self.heavy.?.config.fixed, .bootstrap = self.heavy.?.records[0..self.heavy.?.config.bootstrap_count] } else null,
     });
     self.heavy.?.core_live = true;
-    try faults.check(.wake_attach);
     try self.heavy.?.core.setHostWake(self.wake.?.read_fd);
-    if (comptime faults.enabled) {
-        if (self.test_scenario == .gossip) faults.captureGossip(self.heavy.?.core.service.gossipsub, &self.heavy.?.core.peer_manager.local.fork);
-    }
 
     const plan = self.heavy.?.core.memoryPlan();
     self.diag.nativeRequestedBytes = plan.inline_bytes + plan.allocated_bytes;
@@ -165,16 +156,12 @@ fn serve(self: *Runtime) !void {
         if (stopped) break;
         try gossip_mod.flags(self, io);
         requests_mod.flags(self, io);
-        _ = try @import("network_incoming_phase_faults.zig").terminalBarrier(self, false);
         // Work submissions and gossip verdicts use fresh clocks before the protocol pump.
         timestamp = now(io);
         try incoming_mod.flags(self, timestamp);
-        const terminal_accepted = try @import("network_incoming_phase_faults.zig").terminalBarrier(self, true);
         const sequence = try self.advanceSequence();
         const result = self.heavy.?.core.step(io, timestamp, slot, .{ .peers = self.heavy.?.outputs[0..@min(peer_room, self.heavy.?.outputs.len)], .application = &self.heavy.?.application_outputs }, commands.waitLimit(self, timestamp));
         if (ingress.failure) |err| return err;
-        @import("network_gossip_faults.zig").afterStep(self);
-        if (terminal_accepted) |proof| @import("network_incoming_phase_faults.zig").afterStep(self, &proof, self.heavy.?.application_outputs[0..result.counts.application]);
         try requests_mod.capture(self, self.heavy.?.application_outputs[0..result.counts.application], timestamp);
         commands.completeConnects(self, timestamp);
 
@@ -241,9 +228,7 @@ fn executeWork(self: *Runtime, io: std.Io) !void {
                 return err;
             };
             self.unlock();
-            try faults.requestBarrier(self, request.?, .request_queued);
             try requests_mod.submit(self, request.?, now(io));
-            try faults.requestBarrier(self, request.?, .request_negotiation);
             requests += 1;
         }
     }
