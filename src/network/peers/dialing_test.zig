@@ -465,32 +465,22 @@ test "peer dial discovered refresh replaces addresses preserves lease history an
     try std.testing.expectEqual(@as(u16, 1234), out[0].address.port());
 }
 
-test "peer dial scarce pressure reclaims fixed expired automatic history despite rapid failures" {
+test "peer dial scarce candidate replaces failing automatic rows during their backoff" {
     var q = try mod.Dialing.init(.{ .capacity = 2, .concurrent_max = 2, .seed = 4 });
     var catalog = try initCatalog(a, q.options);
     defer catalog.deinit(a);
     const wanted: t.Coverage = .{ .syncnets = 1 };
-    var first_candidate = try discovered(1, 0);
-    var second_candidate = try discovered(2, 0);
+    const first_candidate = try discovered(1, 0);
+    const second_candidate = try discovered(2, 0);
     const scarce = try discovered(3, 1);
     try q.enqueueDiscovered(&catalog, &first_candidate, &.{}, &wanted, 0);
     try q.enqueueDiscovered(&catalog, &second_candidate, &.{}, &wanted, 0);
     var out: [2]mod.DialIntent = undefined;
-    var now: u64 = 0;
-    for (0..12) |_| {
-        const count = q.poll(&catalog, now, &out);
-        try std.testing.expectEqual(@as(usize, 2), count);
-        for (out[0..count]) |intent| try std.testing.expect(q.dialFailed(&catalog, intent.token, now));
-        first_candidate.sequence += 1;
-        second_candidate.sequence += 1;
-        try q.enqueueDiscovered(&catalog, &first_candidate, &.{}, &wanted, now);
-        try q.enqueueDiscovered(&catalog, &second_candidate, &.{}, &wanted, now);
-        try std.testing.expectError(error.Capacity, q.enqueueDiscovered(&catalog, &scarce, &.{}, &wanted, now));
-        now += 60_000;
-    }
-    try q.enqueueDiscovered(&catalog, &scarce, &.{}, &wanted, now);
-    q.configureSelection(&catalog, &wanted, false, &.{}, now);
-    try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, now, &out));
+    try std.testing.expectEqual(@as(usize, 2), q.poll(&catalog, 0, &out));
+    for (out) |intent| try std.testing.expect(q.dialFailed(&catalog, intent.token, 0));
+    try q.enqueueDiscovered(&catalog, &scarce, &.{}, &wanted, 1);
+    q.configureSelection(&catalog, &wanted, false, &.{}, 1);
+    try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 1, &out));
     try std.testing.expect(out[0].peer.eql(&scarce.peer));
 }
 
@@ -1050,4 +1040,171 @@ fn disconnect(catalog: *@import("catalog.zig").Catalog, peer: *const t.PeerId, c
     const row = catalog.rowFor(ref).?;
     std.debug.assert(row.connected_at_ms == connected_at_ms);
     if (row.connection) |conn| std.debug.assert(catalog.disconnect(ref, conn, reason, now_ms));
+}
+
+test "peer dial dead discovery endpoints do not return as untried candidates" {
+    var q = try mod.Dialing.init(.{ .capacity = 2, .concurrent_max = 1, .seed = 4 });
+    var catalog = try initCatalog(a, q.options);
+    defer catalog.deinit(a);
+    const candidate = try discovered(1, 0);
+    try q.enqueueDiscovered(&catalog, &candidate, &.{}, &.{}, 0);
+    var out: [1]mod.DialIntent = undefined;
+    var now: u64 = 0;
+    for (0..2) |i| {
+        const due = q.nextWakeup(&catalog, now, 1).?;
+        try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, due, &out));
+        const conn: t.Handle = .{ .index = 0, .generation = @intCast(i + 1) };
+        try std.testing.expect(q.dialStarted(out[0].token, conn));
+        now = due + 3_000;
+        try std.testing.expect(q.dialClosed(&catalog, conn, .dial_unanswered, now));
+    }
+    try std.testing.expect(catalog.find(&candidate.peer) == null);
+    try std.testing.expectEqual(@as(u64, 1), q.counters.failed_intents_released);
+    try std.testing.expectEqual(@as(u64, 2), q.outcomes[@intFromEnum(t.DialOutcome.unanswered)]);
+    try std.testing.expectEqual(@as(u64, 1), q.retries[@intFromEnum(t.DialFailure.unanswered)]);
+    try std.testing.expectError(error.RecentlyFailed, q.enqueueDiscovered(&catalog, &candidate, &.{}, &.{}, now));
+    try std.testing.expectEqual(@as(u64, 1), q.counters.recent_failures_refused);
+    try q.enqueueDiscovered(&catalog, &candidate, &.{}, &.{}, now + @import("dial_history.zig").endpoint_memory_ms);
+    const row = catalog.rowFor(catalog.find(&candidate.peer).?).?;
+    try std.testing.expectEqual(@as(u8, 0), row.intent.failures);
+    try std.testing.expectEqual(@as(?t.DialFailure, null), row.intent.last_failure);
+}
+
+test "peer dial failure strikes survive intent replacement" {
+    var q = try mod.Dialing.init(.{ .capacity = 1, .concurrent_max = 1, .seed = 4 });
+    var catalog = try initCatalog(a, q.options);
+    defer catalog.deinit(a);
+    const first_candidate = try discovered(1, 0);
+    const second_candidate = try discovered(2, 0);
+    try q.enqueueDiscovered(&catalog, &first_candidate, &.{}, &.{}, 0);
+    var out: [1]mod.DialIntent = undefined;
+    try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 0, &out));
+    try std.testing.expect(q.dialFailed(&catalog, out[0].token, 0));
+    try q.enqueueDiscovered(&catalog, &second_candidate, &.{}, &.{}, 1);
+    try std.testing.expect(catalog.find(&first_candidate.peer) == null);
+    try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 1, &out));
+    try std.testing.expect(q.dialFailed(&catalog, out[0].token, 1));
+    const retry_at = q.nextWakeup(&catalog, 1, 1).?;
+    try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, retry_at, &out));
+    try std.testing.expect(q.dialFailed(&catalog, out[0].token, retry_at));
+    try std.testing.expect(catalog.find(&second_candidate.peer) == null);
+    try q.enqueueDiscovered(&catalog, &first_candidate, &.{}, &.{}, retry_at);
+    try std.testing.expectEqual(@as(u8, 1), catalog.rowFor(catalog.find(&first_candidate.peer).?).?.intent.failures);
+}
+
+test "peer dial retries follow the endpoint history across row eviction" {
+    var q = try mod.Dialing.init(.{ .capacity = 1, .concurrent_max = 1, .seed = 4 });
+    var catalog = try initCatalog(a, q.options);
+    defer catalog.deinit(a);
+    const mismatched = try discovered(1, 0);
+    const silent = try discovered(2, 0);
+    const other = try discovered(3, 0);
+    var out: [1]mod.DialIntent = undefined;
+    try q.enqueueDiscovered(&catalog, &mismatched, &.{}, &.{}, 0);
+    try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 0, &out));
+    try std.testing.expect(q.dialStarted(out[0].token, .{ .index = 0, .generation = 1 }));
+    try std.testing.expect(q.dialClosed(&catalog, .{ .index = 0, .generation = 1 }, .peer_id_mismatch, 100));
+    try std.testing.expect(catalog.find(&mismatched.peer) == null);
+    try std.testing.expectError(error.RecentlyFailed, q.enqueueDiscovered(&catalog, &mismatched, &.{}, &.{}, 200));
+    try std.testing.expectEqual(@as(usize, 0), q.poll(&catalog, 200, &out));
+    try q.enqueueDiscovered(&catalog, &silent, &.{}, &.{}, 200);
+    try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 200, &out));
+    try std.testing.expect(q.dialStarted(out[0].token, .{ .index = 0, .generation = 2 }));
+    try std.testing.expect(q.dialClosed(&catalog, .{ .index = 0, .generation = 2 }, .dial_unanswered, 3_200));
+    try q.enqueueDiscovered(&catalog, &other, &.{}, &.{}, 3_300);
+    try std.testing.expect(catalog.find(&silent.peer) == null);
+    try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 3_300, &out));
+    try std.testing.expect(out[0].peer.eql(&other.peer));
+    try std.testing.expect(q.dialFailed(&catalog, out[0].token, 3_300));
+    try q.enqueueDiscovered(&catalog, &silent, &.{}, &.{}, 3_400);
+    try std.testing.expectEqual(@as(?t.DialFailure, null), catalog.rowFor(catalog.find(&silent.peer).?).?.intent.last_failure);
+    try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 3_400, &out));
+    try std.testing.expect(out[0].peer.eql(&silent.peer));
+    try std.testing.expectEqual(@as(u64, 1), q.retries[@intFromEnum(t.DialFailure.unanswered)]);
+    try std.testing.expect(q.dialDeferred(&catalog, out[0].token, 3_400));
+    try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 4_400, &out));
+    try std.testing.expect(out[0].peer.eql(&silent.peer));
+    var retried: u64 = 0;
+    for (q.retries) |count| retried += count;
+    try std.testing.expectEqual(@as(u64, 1), retried);
+}
+
+test "peer dial ranks untried discovery candidates above retried ones" {
+    var q = try mod.Dialing.init(.{ .capacity = 2, .concurrent_max = 1, .seed = 4 });
+    var catalog = try initCatalog(a, q.options);
+    defer catalog.deinit(a);
+    const retried = try discovered(1, 0);
+    const untried = try discovered(2, 0);
+    try q.enqueueDiscovered(&catalog, &retried, &.{}, &.{}, 0);
+    try q.enqueueDiscovered(&catalog, &untried, &.{}, &.{}, 0);
+    var out: [1]mod.DialIntent = undefined;
+    try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 0, &out));
+    try std.testing.expect(out[0].peer.eql(&retried.peer));
+    try std.testing.expect(q.dialFailed(&catalog, out[0].token, 0));
+    try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 0, &out));
+    try std.testing.expect(out[0].peer.eql(&untried.peer));
+    try std.testing.expect(q.dialDeferred(&catalog, out[0].token, 0));
+    try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 5_000, &out));
+    try std.testing.expect(out[0].peer.eql(&untried.peer));
+}
+
+test "peer dial peer id mismatch blocks the endpoint even for a newer record" {
+    var q = try mod.Dialing.init(.{ .capacity = 1, .concurrent_max = 1, .seed = 4 });
+    var catalog = try initCatalog(a, q.options);
+    defer catalog.deinit(a);
+    var candidate = try discovered(1, 0);
+    try q.enqueueDiscovered(&catalog, &candidate, &.{}, &.{}, 0);
+    var out: [1]mod.DialIntent = undefined;
+    try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 0, &out));
+    const conn: t.Handle = .{ .index = 0, .generation = 1 };
+    try std.testing.expect(q.dialStarted(out[0].token, conn));
+    try std.testing.expect(q.dialClosed(&catalog, conn, .peer_id_mismatch, 100));
+    try std.testing.expect(catalog.find(&candidate.peer) == null);
+    try std.testing.expectEqual(@as(u64, 1), q.outcomes[@intFromEnum(t.DialOutcome.peer_id_mismatch)]);
+    candidate.sequence = 2;
+    try std.testing.expectError(error.RecentlyFailed, q.enqueueDiscovered(&catalog, &candidate, &.{}, &.{}, 100));
+    try q.enqueueDiscovered(&catalog, &candidate, &.{}, &.{}, 100 + @import("dial_history.zig").mismatch_memory_ms);
+}
+
+test "peer dial local transport closes leave no endpoint strike" {
+    var q = try mod.Dialing.init(.{ .capacity = 1, .concurrent_max = 1, .seed = 4 });
+    var catalog = try initCatalog(a, q.options);
+    defer catalog.deinit(a);
+    const candidate = try discovered(1, 0);
+    try q.enqueueDiscovered(&catalog, &candidate, &.{}, &.{}, 0);
+    var out: [1]mod.DialIntent = undefined;
+    var now: u64 = 0;
+    for (0..3) |i| {
+        try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, now, &out));
+        const conn: t.Handle = .{ .index = 0, .generation = @intCast(i + 1) };
+        try std.testing.expect(q.dialStarted(out[0].token, conn));
+        try std.testing.expect(q.dialClosed(&catalog, conn, .host, now));
+        now = q.nextWakeup(&catalog, now, 1).?;
+    }
+    try std.testing.expect(catalog.find(&candidate.peer) != null);
+    try std.testing.expectEqual(@as(u64, 3), q.outcomes[@intFromEnum(t.DialOutcome.refused)]);
+    try std.testing.expectEqual(@as(u8, 0), catalog.history.strikesFor(catalog.history.endpointKey(&candidate.peer, candidate.addresses[0]), candidate.sequence, now));
+}
+
+test "peer dial never returns to the mismatched endpoint of a two-address candidate" {
+    var q = try mod.Dialing.init(.{ .capacity = 1, .concurrent_max = 1, .seed = 4 });
+    var catalog = try initCatalog(a, q.options);
+    defer catalog.deinit(a);
+    const alternate: t.Address = .{ .ip6 = .{ .octets = .{ 0x20, 0x01, 0x0d, 0xb8 } ++ .{0} ** 11 ++ .{1}, .port = 2222 } };
+    var candidate = try discovered(1, 0);
+    candidate.addresses[1] = alternate;
+    candidate.address_count = 2;
+    try q.enqueueDiscovered(&catalog, &candidate, &.{}, &.{}, 0);
+    var out: [1]mod.DialIntent = undefined;
+    var now: u64 = 0;
+    for ([_]t.CloseReason{ .peer_id_mismatch, .host, .dial_unanswered, .dial_unanswered }, 0..) |reason, i| {
+        try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, now, &out));
+        try std.testing.expect(out[0].address.eql(if (i == 0) address else alternate));
+        const conn: t.Handle = .{ .index = 0, .generation = @intCast(i + 1) };
+        try std.testing.expect(q.dialStarted(out[0].token, conn));
+        try std.testing.expect(q.dialClosed(&catalog, conn, reason, now));
+        if (i < 3) now = q.nextWakeup(&catalog, now, 1).?;
+    }
+    try std.testing.expect(catalog.find(&candidate.peer) == null);
+    try std.testing.expectEqual(@as(u64, 1), q.counters.failed_intents_released);
 }
