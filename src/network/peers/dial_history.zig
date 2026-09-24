@@ -17,10 +17,11 @@ pub const Entry = struct {
     block_until_ms: u64 = 0,
     sequence: u64 = 0,
     strikes: u8 = 0,
-    /// Latest failure of an endpoint entry; null for an identity's "too many peers" entry.
+    /// Latest failure of an endpoint entry; null for a redial mark alone or an identity's "too many
+    /// peers" entry.
     failure: ?t.DialFailure = null,
-    /// The next dial of the endpoint retries `failure` and has not been counted yet.
-    retry_pending: bool = false,
+    /// The endpoint's latest failed dial, which its next dial redials; cleared once counted.
+    retry: ?t.DialFailure = null,
 };
 
 pub const History = struct {
@@ -58,13 +59,11 @@ pub const History = struct {
         return hasher.final() | 1;
     }
 
-    /// Records a failed dial of a discovery intent's endpoint. Only a `retry` record marks the
-    /// endpoint's next dial as a retry of `failure`.
-    pub fn recordEndpoint(self: *History, key: u64, failure: t.DialFailure, sequence: u64, now_ms: u64, retry: bool) void {
+    /// Records a failed dial of a discovery intent's endpoint.
+    pub fn recordEndpoint(self: *History, key: u64, failure: t.DialFailure, sequence: u64, now_ms: u64) void {
         const entry = self.claim(key, now_ms);
         entry.strikes +|= 1;
         entry.sequence = @max(entry.sequence, sequence);
-        entry.retry_pending = entry.retry_pending or retry;
         if (failure == .peer_id_mismatch) {
             entry.failure = .peer_id_mismatch;
             entry.strikes = @max(entry.strikes, strikes_to_block);
@@ -88,15 +87,23 @@ pub const History = struct {
         return if (sequence <= entry.sequence) entry.strikes else 0;
     }
 
-    /// Returns the endpoint's latest failure once per recorded failure, whatever the ENR sequence.
+    /// Marks the endpoint's next dial, by any intent, as a redial of `failure`. A live entry keeps
+    /// its evidence and memory window; a new one lives for `endpoint_memory_ms`.
+    pub fn markRetry(self: *History, key: u64, failure: t.DialFailure, now_ms: u64) void {
+        const entry = self.claim(key, now_ms);
+        if (now_ms >= entry.until_ms) entry.until_ms = now_ms +| endpoint_memory_ms;
+        entry.retry = failure;
+    }
+
+    /// Returns the endpoint's marked failure once, whatever the ENR sequence.
     pub fn takeRetry(self: *History, key: u64, now_ms: u64) ?t.DialFailure {
         const mask: u64 = self.entries.len - 1;
         for (0..probe_max) |offset| {
             const entry = &self.entries[@intCast((key +% @as(u64, offset)) & mask)];
             if (entry.key != key) continue;
-            if (now_ms >= entry.until_ms or !entry.retry_pending) return null;
-            entry.retry_pending = false;
-            return entry.failure;
+            if (now_ms >= entry.until_ms) return null;
+            defer entry.retry = null;
+            return entry.retry;
         }
         return null;
     }

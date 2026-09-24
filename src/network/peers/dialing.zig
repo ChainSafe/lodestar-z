@@ -42,6 +42,7 @@ pub const Dialing = struct {
     selected_attempts: [std.meta.fields(Source).len]u64 = @splat(0),
     durations: [2]DialTime = @splat(.{}),
     outcomes: [std.meta.fields(t.DialOutcome).len]u64 = @splat(0),
+    /// Redials of an endpoint by its previous failure, each counted when the redial is selected.
     retries: [std.meta.fields(t.DialFailure).len]u64 = @splat(0),
 
     pub const Counters = struct {
@@ -300,7 +301,6 @@ pub const Dialing = struct {
     pub fn accepted(self: *Dialing, catalog: *Catalog, peer: t.PeerRef, conn: t.Handle, now_ms: u64) void {
         const row = catalog.rowFor(peer).?;
         std.debug.assert(std.meta.eql(row.connection, conn));
-        row.intent.last_failure = null;
         if (row.intent.manual_until_ms != 0) {
             row.intent.manual_until_ms = 0;
             self.counters.manual_completed +|= 1;
@@ -385,14 +385,14 @@ pub const Dialing = struct {
         if (!redundant) {
             self.durations[1].observe(now_ms -| attempt.started_ms);
             row.intent.failures = @min(row.intent.failures +| 1, 7);
-            row.intent.last_failure = failure;
+            catalog.history.markRetry(dialedKey(catalog, row, &attempt), failure, now_ms);
             const base: u64 = @min(@as(u64, 1_000) << @intCast(row.intent.failures - 1), 60_000);
             const jitter = self.random.random().int(u16) % 1_001;
             row.intent.eligible_at_ms = @max(row.intent.eligible_at_ms, now_ms +| @min(base + jitter, 60_000));
         }
         // A redundant attempt leaves the backoff alone but still records its endpoint evidence.
         const learned = evidence and discoveryOnly(row);
-        if (learned and remember(catalog, row, &attempt, failure, !redundant, now_ms)) {
+        if (learned and remember(catalog, row, &attempt, failure, now_ms)) {
             self.counters.failed_intents_released +|= 1;
             row.intent.automatic = false;
         } else if (learned or !redundant) {
@@ -401,10 +401,10 @@ pub const Dialing = struct {
         releaseUnused(catalog, peer);
     }
     /// Records the dialed endpoint's evidence and reports whether every endpoint of the intent is blocked.
-    fn remember(catalog: *Catalog, row: *const Row, attempt: *const Attempt, failure: t.DialFailure, retry: bool, now_ms: u64) bool {
+    fn remember(catalog: *Catalog, row: *const Row, attempt: *const Attempt, failure: t.DialFailure, now_ms: u64) bool {
         std.debug.assert(discoveryOnly(row));
         const sequence = if (row.intent.hints) |hints| hints.sequence else 0;
-        catalog.history.recordEndpoint(dialedKey(catalog, row, attempt), failure, sequence, now_ms, retry);
+        catalog.history.recordEndpoint(dialedKey(catalog, row, attempt), failure, sequence, now_ms);
         for (row.intent.addresses[0..row.intent.address_count]) |endpoint| {
             if (!catalog.history.blocked(catalog.history.endpointKey(&row.identity, endpoint), sequence, now_ms)) return false;
         }
@@ -491,8 +491,7 @@ pub const Dialing = struct {
             const tier = dialTier(row, now_ms);
             self.preferred_starts = if (tier == 0) 0 else @min(self.preferred_starts + 1, self.options.concurrent_max);
             self.selected_attempts[tier] +|= 1;
-            if (retryCause(catalog, row, now_ms)) |failure| self.retries[@intFromEnum(failure)] +|= 1;
-            row.intent.last_failure = null;
+            if (catalog.history.takeRetry(dialedKey(catalog, row, attempt), now_ms)) |failure| self.retries[@intFromEnum(failure)] +|= 1;
             out[count] = .{ .token = .{ .index = slot, .generation = attempt.generation }, .peer = row.identity, .address = attempt.address };
             count += 1;
         }
@@ -599,18 +598,6 @@ fn endpointEvidence(reason: t.CloseReason) bool {
         .host, .send_failed => false,
         .idle_timeout, .handshake_timeout, .dial_unanswered, .peer_id_mismatch, .tls_failed, .peer_closed, .transport_error => true,
     };
-}
-
-/// The failure a selected attempt retries, counted once: the intent's own last failure, else the
-/// dialed endpoint's remembered one, which outlives an evicted row. Takes every endpoint's pending
-/// failure so none is counted again later.
-fn retryCause(catalog: *Catalog, row: *const Row, now_ms: u64) ?t.DialFailure {
-    var cause = row.intent.last_failure;
-    for (row.intent.addresses[0..row.intent.address_count], 0..) |address, index| {
-        const remembered = catalog.history.takeRetry(catalog.history.endpointKey(&row.identity, address), now_ms);
-        if (cause == null and index == row.intent.address_index) cause = remembered;
-    }
-    return cause;
 }
 
 comptime {
