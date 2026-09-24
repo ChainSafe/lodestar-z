@@ -6,6 +6,7 @@ import {
   requestForks,
   startRuntime,
   subscriptions,
+  topicKinds,
   topicName,
 } from "./utils/network.js";
 import {startPeer} from "./utils/network-peer.js";
@@ -377,7 +378,6 @@ for (const hoodi of [false, true]) {
       try {
         const info = await peer.command("ready");
         const config = applicationConfig();
-        config.resources.bridgeBudgetBytes = 128 * 1024 * 1024;
         const firstTopic = topicName("beacon_block", 2);
         const secondTopic = topicName("beacon_block", 3);
         runtime = startRuntime(config, () => undefined);
@@ -428,23 +428,28 @@ for (const hoodi of [false, true]) {
             topic,
           });
         }
+        // One peer holds at most half of a kind's processor items pending validation.
+        const held = config.gossipPolicy.processor[topicKinds.indexOf("beacon_block")].items / 2;
         if (!hoodi) {
           for (let i = 0; i < 64; i++)
             await peer.command("gossipPublish", {length: 4000, seed: 900 + i, slot: 100, topic: firstTopic});
-          for (let i = 0; i < 1000 && runtime.diagnostics().gossip.queued !== 32; i++) await delay(5);
+          for (let i = 0; i < 1000 && runtime.diagnostics().gossip.checking !== held; i++) await delay(5);
           expect(runtime.diagnostics().gossip).toMatchObject({
-            occupied: 32,
-            payloadBytes: 128000,
-            queued: 32,
-            reservedBytes: 256000,
+            checking: held,
+            occupied: held,
+            payloadBytes: held * 4000,
+            queued: 0,
+            reservedBytes: 0,
           });
         }
         expect(
           await peer.command("ping", {addressBytes: Buffer.from(identity.localMultiaddr).toString("hex")})
         ).toMatchObject({length: 8});
         if (!hoodi) {
+          answerChecks(runtime);
+          for (let i = 0; i < 1000 && runtime.diagnostics().gossip.queued !== held; i++) await delay(5);
           const batch = runtime.drainGossip();
-          expect(batch.messages).toHaveLength(32);
+          expect(batch.messages).toHaveLength(held);
           expect(batch.more).toBe(false);
           for (const message of batch.messages) expect(runtime.reportGossip(message.handle, "ignore")).toBe(true);
         }
