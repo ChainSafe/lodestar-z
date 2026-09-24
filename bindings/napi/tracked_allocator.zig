@@ -1,3 +1,5 @@
+//! Tracks live allocation bytes for V8 memory accounting.
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Alignment = std.mem.Alignment;
@@ -7,7 +9,12 @@ backing: Allocator,
 bytes_in_use: usize = 0,
 
 pub fn allocator(self: *TrackedAllocator) Allocator {
-    return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    return .{ .ptr = self, .vtable = &.{
+        .alloc = alloc,
+        .resize = resize,
+        .remap = remap,
+        .free = free,
+    } };
 }
 
 fn alloc(ctx: *anyopaque, len: usize, alignment: Alignment, return_address: usize) ?[*]u8 {

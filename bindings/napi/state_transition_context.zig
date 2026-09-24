@@ -1,16 +1,17 @@
 //! Configuration snapshots share one application-wide validator-index to pubkey mapping.
 
+const std = @import("std");
 const js = @import("zapi:zapi").js;
-const snapshot = @import("./config_snapshot.zig");
+const owned_config = @import("./owned_config.zig");
 const BeaconStateView = @import("./BeaconStateView.zig");
 
 pub const js_meta = js.class(.{});
 
-config_rc: *snapshot.SnapshotRc,
+config_rc: *owned_config.OwnedConfigRc,
 const StateTransition = @This();
 
 pub fn init(chain_config: js.Value, genesis_validators_root: js.Uint8Array) !StateTransition {
-    return .{ .config_rc = try snapshot.create(chain_config, genesis_validators_root) };
+    return .{ .config_rc = try owned_config.create(std.heap.c_allocator, chain_config, genesis_validators_root) };
 }
 
 pub fn deinit(self: *StateTransition) void {

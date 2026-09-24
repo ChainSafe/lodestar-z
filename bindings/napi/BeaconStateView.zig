@@ -14,7 +14,7 @@ const ct = @import("consensus_types");
 const pool = @import("./pool.zig");
 const config = @import("./config.zig");
 const StateTransition = @import("./state_transition_context.zig");
-const SnapshotRc = @import("./config_snapshot.zig").SnapshotRc;
+const OwnedConfigRc = @import("./owned_config.zig").OwnedConfigRc;
 const pubkey = @import("./pubkeys.zig");
 const js_types = @import("./js_types.zig");
 const sszValueToNapiValue = @import("./to_napi_value.zig").sszValueToNapiValue;
@@ -73,7 +73,7 @@ pub const js_meta = js.class(.{ .properties = .{
 
 cached_state: ?*CachedBeaconState = null,
 pool_rc: @TypeOf(pool.state.pool_rc) = null,
-config_rc: ?*SnapshotRc = null,
+config_rc: ?*OwnedConfigRc = null,
 active_calls: u32 = 0,
 release_requested: bool = false,
 const BeaconStateView = @This();
@@ -189,7 +189,6 @@ pub fn fork(self: *BeaconStateView) !js_types.Fork {
     const cached_state = try self.acquireState();
     defer self.finishState();
     const allocator = cached_state.allocator;
-    defer self.pool_rc.?.instance.reportMemory();
     var fork_view = try cached_state.state.fork();
     var fork_value: ct.phase0.Fork.Type = undefined;
     try fork_view.toValue(allocator, &fork_value);
@@ -233,7 +232,6 @@ pub fn eth1Data(self: *BeaconStateView) !js_types.Eth1Data {
     const cached_state = try self.acquireState();
     defer self.finishState();
     const allocator = cached_state.allocator;
-    defer self.pool_rc.?.instance.reportMemory();
     var eth1_data_view = try cached_state.state.eth1Data();
     var eth1_data: ct.phase0.Eth1Data.Type = undefined;
     try eth1_data_view.toValue(allocator, &eth1_data);
@@ -245,7 +243,6 @@ pub fn latestBlockHeader(self: *BeaconStateView) !js_types.BeaconBlockHeader {
     const cached_state = try self.acquireState();
     defer self.finishState();
     const allocator = cached_state.allocator;
-    defer self.pool_rc.?.instance.reportMemory();
     var header_view = try cached_state.state.latestBlockHeader();
     var header: ct.phase0.BeaconBlockHeader.Type = undefined;
     try header_view.toValue(allocator, &header);
@@ -328,7 +325,6 @@ pub fn latestExecutionPayloadHeader(self: *BeaconStateView) !js.Value {
     const cached_state = try self.acquireState();
     defer self.finishState();
     const allocator = cached_state.allocator;
-    defer self.pool_rc.?.instance.reportMemory();
     var header: AnyExecutionPayloadHeader = undefined;
     try cached_state.state.latestExecutionPayloadHeader(allocator, &header);
     defer header.deinit(allocator);
@@ -345,7 +341,6 @@ pub fn payloadBlockNumber(self: *BeaconStateView) !js.Number {
     const cached_state = try self.acquireState();
     defer self.finishState();
     const allocator = cached_state.allocator;
-    defer self.pool_rc.?.instance.reportMemory();
     var header: AnyExecutionPayloadHeader = undefined;
     try cached_state.state.latestExecutionPayloadHeader(allocator, &header);
     defer header.deinit(allocator);
@@ -461,7 +456,6 @@ pub fn historicalSummaries(self: *BeaconStateView) !js.Array {
     const cached_state = try self.acquireState();
     defer self.finishState();
     const allocator = cached_state.allocator;
-    defer self.pool_rc.?.instance.reportMemory();
     var historical_summaries_view = try cached_state.state.historicalSummaries();
     var historical_summaries = ct.capella.HistoricalSummaries.default_value;
     defer historical_summaries.deinit(allocator);
@@ -558,7 +552,6 @@ pub fn proposerLookahead(self: *BeaconStateView) !js.Uint32Array {
     const cached_state = try self.acquireState();
     defer self.finishState();
     const allocator = cached_state.allocator;
-    defer self.pool_rc.?.instance.reportMemory();
 
     var proposer_lookahead = cached_state.state.proposerLookahead() catch {
         return throwNullAs(js.Uint32Array, "STATE_ERROR", "Failed to get proposerLookahead");
@@ -664,7 +657,6 @@ pub fn currentSyncCommittee(self: *BeaconStateView) !js_types.SyncCommittee {
     const cached_state = try self.acquireState();
     defer self.finishState();
     const allocator = cached_state.allocator;
-    defer self.pool_rc.?.instance.reportMemory();
     var current_sync_committee = try cached_state.state.currentSyncCommittee();
     var result: ct.altair.SyncCommittee.Type = undefined;
     try current_sync_committee.toValue(allocator, &result);
@@ -676,7 +668,6 @@ pub fn nextSyncCommittee(self: *BeaconStateView) !js_types.SyncCommittee {
     const cached_state = try self.acquireState();
     defer self.finishState();
     const allocator = cached_state.allocator;
-    defer self.pool_rc.?.instance.reportMemory();
     var next_sync_committee = try cached_state.state.nextSyncCommittee();
     var result: ct.altair.SyncCommittee.Type = undefined;
     try next_sync_committee.toValue(allocator, &result);
@@ -781,7 +772,6 @@ pub fn getEffectiveBalanceIncrementsZeroInactive(self: *BeaconStateView) !js.Uin
     const cached_state = try self.acquireState();
     defer self.finishState();
     const allocator = cached_state.allocator;
-    defer self.pool_rc.?.instance.reportMemory();
     var result = try st.getEffectiveBalanceIncrementsZeroInactive(allocator, cached_state);
     defer result.deinit(allocator);
     return .{ .val = try numberSliceToNapiValue(env, u16, result.items, .{ .typed_array = .uint16 }) };
@@ -802,7 +792,6 @@ pub fn getValidator(self: *BeaconStateView, index_arg: js.Number) !js_types.Vali
     const cached_state = try self.acquireState();
     defer self.finishState();
     const allocator = cached_state.allocator;
-    defer self.pool_rc.?.instance.reportMemory();
     const index_value: u64 = try unsignedInteger(index_arg);
 
     var validators = try cached_state.state.validators();
@@ -819,7 +808,6 @@ pub fn getValidatorStatus(self: *BeaconStateView, index_arg: js.Number) !js.Stri
     const cached_state = try self.acquireState();
     defer self.finishState();
     const allocator = cached_state.allocator;
-    defer self.pool_rc.?.instance.reportMemory();
     const index_value: u64 = try unsignedInteger(index_arg);
     const current_epoch = cached_state.epoch_cache.epoch;
 
@@ -838,7 +826,6 @@ pub fn getAllValidators(self: *BeaconStateView) !js.Array {
     const cached_state = try self.acquireState();
     defer self.finishState();
     const allocator = cached_state.allocator;
-    defer self.pool_rc.?.instance.reportMemory();
 
     const validators = try cached_state.state.validatorsSlice(allocator);
     defer allocator.free(validators);
@@ -865,7 +852,6 @@ pub fn getAllBalances(self: *BeaconStateView) !js.Array {
     const cached_state = try self.acquireState();
     defer self.finishState();
     const allocator = cached_state.allocator;
-    defer self.pool_rc.?.instance.reportMemory();
 
     const balances = try cached_state.state.balancesSlice(allocator);
     defer allocator.free(balances);
@@ -882,7 +868,6 @@ pub fn getValidatorsByStatus(self: *BeaconStateView, statuses_set: js.Value, cur
     const cached_state = try self.acquireState();
     defer self.finishState();
     const allocator = cached_state.allocator;
-    defer self.pool_rc.?.instance.reportMemory();
     const current_epoch: u64 = try unsignedInteger(current_epoch_arg);
 
     const set_value = statuses_set.toValue();
@@ -939,7 +924,6 @@ pub fn isExecutionEnabled(self: *BeaconStateView, block: js.Value) !js.Boolean {
     const cached_state = try self.acquireState();
     defer self.finishState();
     const allocator = cached_state.allocator;
-    defer self.pool_rc.?.instance.reportMemory();
     const fork_seq = cached_state.state.forkSeq();
     if (fork_seq.lt(.bellatrix)) return js.Boolean.from(false);
 
@@ -1074,7 +1058,6 @@ pub fn getFinalizedRootProof(self: *BeaconStateView) !js.Array {
     const cached_state = try self.acquireState();
     defer self.finishState();
     const allocator = cached_state.allocator;
-    defer self.pool_rc.?.instance.reportMemory();
     var proof = try cached_state.state.getFinalizedRootProof(allocator);
     defer proof.deinit(allocator);
 
@@ -1129,7 +1112,6 @@ pub fn getSingleProof(self: *BeaconStateView, gindex_arg: js.BigInt) !js.Array {
     const cached_state = try self.acquireState();
     defer self.finishState();
     const allocator = cached_state.allocator;
-    defer self.pool_rc.?.instance.reportMemory();
     var lossless = false;
     const gindex = try gindex_arg.toU64(&lossless);
     if (!lossless) return error.InvalidGindex;
@@ -1155,7 +1137,6 @@ pub fn createMultiProof(self: *BeaconStateView, descriptor: js.Uint8Array) !js_t
     const cached_state = try self.acquireState();
     defer self.finishState();
     const allocator = cached_state.allocator;
-    defer self.pool_rc.?.instance.reportMemory();
     const descriptor_bytes = try descriptor.toSlice();
 
     try cached_state.state.commit();
@@ -1205,7 +1186,6 @@ pub fn computeUnrealizedCheckpoints(self: *BeaconStateView) !js_types.Unrealized
     const cached_state = try self.acquireState();
     defer self.finishState();
     const allocator = cached_state.allocator;
-    defer self.pool_rc.?.instance.reportMemory();
     const result = try st.computeUnrealizedCheckpoints(allocator, js.io(), cached_state);
 
     const obj = try env.createObject();
@@ -1249,7 +1229,6 @@ pub fn loadOtherStateBench(
     const cached_state = try self.acquireState();
     defer self.finishState();
     const allocator = cached_state.allocator;
-    defer self.pool_rc.?.instance.reportMemory();
     const state_bytes_slice = try state_bytes.toSlice();
     _ = try stateBytesFork(cached_state.config, state_bytes_slice);
     const seed_validators_bytes_slice: ?[]const u8 =
@@ -1275,7 +1254,6 @@ pub fn loadOtherState(
     const old_cached_state = try self.acquireState();
     defer self.finishState();
     const allocator = old_cached_state.allocator;
-    defer self.pool_rc.?.instance.reportMemory();
     const state_bytes_slice = try state_bytes.toSlice();
     _ = try stateBytesFork(old_cached_state.config, state_bytes_slice);
     const seed_validators_bytes_slice: ?[]const u8 =
@@ -1349,7 +1327,6 @@ pub fn serialize(self: *BeaconStateView) !js.Uint8Array {
     const cached_state = try self.acquireState();
     defer self.finishState();
     const allocator = cached_state.allocator;
-    defer self.pool_rc.?.instance.reportMemory();
     const result = try cached_state.state.serialize(allocator);
     defer allocator.free(result);
     return .{ .val = try numberSliceToNapiValue(env, u8, result, .{ .typed_array = .uint8 }) };
@@ -1444,7 +1421,6 @@ pub fn processSlots(self: *BeaconStateView, slot_arg: js.Number, options: ?js.Va
     const cached_state = try self.acquireState();
     defer self.finishState();
     const allocator = cached_state.allocator;
-    defer self.pool_rc.?.instance.reportMemory();
     const slot_value = unsignedInteger(slot_arg) catch return error.InvalidSlot;
     if (cached_state.config.forkSeq(slot_value).gte(.gloas)) return error.UnsupportedFork;
 
@@ -1500,7 +1476,6 @@ pub fn stateTransition(
     const cached_state = try self.acquireState();
     defer self.finishState();
     const allocator = cached_state.allocator;
-    defer self.pool_rc.?.instance.reportMemory();
     const opts = try @import("./transition_opts.zig").parseOptions(options);
 
     const bytes = try signed_block_bytes.toSlice();
@@ -1696,7 +1671,6 @@ pub fn computeBlockRewards(
     const cached_state = try self.acquireState();
     defer self.finishState();
     const allocator = cached_state.allocator;
-    defer self.pool_rc.?.instance.reportMemory();
     const bytes = try signed_block_bytes.toSlice();
 
     const block_type: BlockType = if (try is_blinded.toBool()) .blinded else .full;
@@ -1772,7 +1746,6 @@ pub fn toValue(self: *BeaconStateView) !js.Value {
     const cached_state = try self.acquireState();
     defer self.finishState();
     const allocator = cached_state.allocator;
-    defer self.pool_rc.?.instance.reportMemory();
     switch (cached_state.state.forkSeq()) {
         inline else => |f| {
             const ForkBeaconState = fork_types.ForkTypes(f).BeaconState;
@@ -1795,7 +1768,6 @@ pub fn getExpectedWithdrawals(self: *BeaconStateView) !js.Value {
     const cached_state = try self.acquireState();
     defer self.finishState();
     const allocator = cached_state.allocator;
-    defer self.pool_rc.?.instance.reportMemory();
     const fork_seq = cached_state.state.forkSeq();
 
     // We also check this within the native fn itself but this lets us avoid allocating an `AutoHashMap` early.
@@ -1852,6 +1824,8 @@ fn acquireState(self: *BeaconStateView) !*CachedBeaconState {
 
 fn finishState(self: *BeaconStateView) void {
     std.debug.assert(self.active_calls > 0);
+    // Getters can allocate cached views; report while the active-call guard still holds.
+    self.pool_rc.?.instance.reportMemory();
     self.active_calls -= 1;
     if (self.active_calls == 0 and self.release_requested) self.deinit();
 }

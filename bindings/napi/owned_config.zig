@@ -9,17 +9,15 @@ const Preset = @import("preset").Preset;
 
 const max_blob_schedule_entries = 16;
 
-const allocator = std.heap.c_allocator;
-
-pub const ConfigSnapshot = struct {
+pub const OwnedConfig = struct {
     config: BeaconConfig = undefined,
     config_name: [64]u8 = undefined,
     blob_schedule: [max_blob_schedule_entries]ChainConfig.BlobScheduleEntry = undefined,
 
-    pub fn deinit(_: *ConfigSnapshot) void {}
+    pub fn deinit(_: *OwnedConfig) void {}
 };
 
-pub const SnapshotRc = @import("state_transition").RefCount(ConfigSnapshot);
+pub const OwnedConfigRc = @import("state_transition").RefCount(OwnedConfig);
 
 pub fn defaultConfig() BeaconConfig {
     return switch (active_preset) {
@@ -29,20 +27,20 @@ pub fn defaultConfig() BeaconConfig {
     };
 }
 
-pub fn createDefault() !*SnapshotRc {
-    return SnapshotRc.init(allocator, .{ .config = defaultConfig() });
+pub fn createDefault(allocator: std.mem.Allocator) !*OwnedConfigRc {
+    return OwnedConfigRc.init(allocator, .{ .config = defaultConfig() });
 }
 
-pub fn create(object: js.Value, genesis_root: js.Uint8Array) !*SnapshotRc {
+pub fn create(allocator: std.mem.Allocator, object: js.Value, genesis_root: js.Uint8Array) !*OwnedConfigRc {
     const root_slice = try genesis_root.toSlice();
     if (root_slice.len != 32) return error.InvalidGenesisValidatorsRootLength;
 
-    const snapshot = try SnapshotRc.init(allocator, .{});
-    errdefer snapshot.unref();
+    const owned = try OwnedConfigRc.init(allocator, .{});
+    errdefer owned.unref();
 
     const object_value = try object.toValue().coerceToObject();
     var chain_config = try chainConfigFromObject(
-        &snapshot.instance,
+        &owned.instance,
         js.env(),
         object_value,
     );
@@ -56,8 +54,8 @@ pub fn create(object: js.Value, genesis_root: js.Uint8Array) !*SnapshotRc {
         return error.InvalidSlotDuration;
     }
     chain_config.SECONDS_PER_SLOT = @divExact(chain_config.SLOT_DURATION_MS, 1000);
-    snapshot.instance.config = BeaconConfig.init(chain_config, root_slice[0..32].*);
-    return snapshot;
+    owned.instance.config = BeaconConfig.init(chain_config, root_slice[0..32].*);
+    return owned;
 }
 
 fn valueToU64(value: napi.Value) !u64 {
@@ -71,7 +69,7 @@ fn valueToU64(value: napi.Value) !u64 {
     return @intFromFloat(num);
 }
 
-fn chainConfigFromObject(snapshot: *ConfigSnapshot, env: napi.Env, obj: napi.Value) !ChainConfig {
+fn chainConfigFromObject(owned: *OwnedConfig, env: napi.Env, obj: napi.Value) !ChainConfig {
     var chain_config = defaultConfig().chain;
 
     inline for (std.meta.fields(ChainConfig)) |field| {
@@ -133,7 +131,7 @@ fn chainConfigFromObject(snapshot: *ConfigSnapshot, env: napi.Env, obj: napi.Val
                     @field(chain_config, field.name) = root;
                 },
                 []const u8 => {
-                    const config_name = try field_value.getValueStringUtf8(&snapshot.config_name);
+                    const config_name = try field_value.getValueStringUtf8(&owned.config_name);
                     if (comptime std.mem.eql(u8, field.name, "CONFIG_NAME")) {
                         @field(chain_config, field.name) = config_name;
                     } else {
@@ -155,9 +153,9 @@ fn chainConfigFromObject(snapshot: *ConfigSnapshot, env: napi.Env, obj: napi.Val
                             .EPOCH = try valueToU64(epoch_value),
                             .MAX_BLOBS_PER_BLOCK = try valueToU64(max_blobs_value),
                         };
-                        snapshot.blob_schedule[i] = blob_schedule_entry;
+                        owned.blob_schedule[i] = blob_schedule_entry;
                     }
-                    @field(chain_config, field.name) = snapshot.blob_schedule[0..array_length];
+                    @field(chain_config, field.name) = owned.blob_schedule[0..array_length];
                 },
                 else => return error.UnsupportedChainConfigFieldType,
             }

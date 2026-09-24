@@ -18,6 +18,7 @@
 //! `left`+`right`+`cache` collapse into one u64 (`payload`). Branch
 //! navigation reads exactly two columns per visit (state + payload).
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
 const hashOne = @import("hashing").hashOne;
@@ -350,6 +351,13 @@ pub const Pool = struct {
 
     /// Returns the number of nodes currently in use (not free).
     pub fn getNodesInUse(self: *const Pool) usize {
+        if (builtin.is_test) {
+            var actual: usize = 0;
+            for (self.nodes.items(.state)) |state| {
+                if (!state.isFree()) actual += 1;
+            }
+            std.debug.assert(actual == self.nodes_in_use);
+        }
         return self.nodes_in_use;
     }
 

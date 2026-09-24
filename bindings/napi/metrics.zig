@@ -10,27 +10,27 @@ const allocator = if (builtin.mode == .Debug)
 else
     std.heap.c_allocator;
 
-threadlocal var historical: ?bool = null;
+threadlocal var initialized_historical: ?bool = null;
 
 /// JS: metrics.init({historical?: boolean}) → void
 pub fn init(options: ?js.Value) !void {
-    var use_historical_prefix = false;
+    var historical = false;
     if (options) |value| {
         const raw = value.toValue();
         if (try raw.hasNamedProperty("historical")) {
-            use_historical_prefix = try (try raw.getNamedProperty("historical")).getValueBool();
+            historical = try (try raw.getNamedProperty("historical")).getValueBool();
         }
     }
-    if (historical) |previous| {
-        if (previous != use_historical_prefix) return error.MetricsAlreadyInitialized;
+    if (initialized_historical) |previous| {
+        if (previous != historical) return error.MetricsAlreadyInitialized;
         return;
     }
-    if (use_historical_prefix) {
+    if (historical) {
         try state_transition.metrics.init(allocator, js.io(), .{ .prefix = "lodestar_historical_state_" });
     } else {
         try state_transition.metrics.init(allocator, js.io(), .{});
     }
-    historical = use_historical_prefix;
+    initialized_historical = historical;
 }
 
 /// JS: metrics.registerLocalValidator(index) → void
@@ -63,7 +63,7 @@ pub fn scrapeMetrics() !js.String {
 
 pub fn deinit() void {
     validator_monitor.deinit();
-    if (historical == null) return;
+    if (initialized_historical == null) return;
     state_transition.metrics.deinit();
-    historical = null;
+    initialized_historical = null;
 }
