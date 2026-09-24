@@ -16,7 +16,13 @@ pub const Options = struct {
     ping_outbound_ms: u64 = 20_000,
     status_transition_grace_ms: u64 = 10_000,
     local_retry_ms: u64 = 1_000,
+    /// Consecutive failures of one probe that disconnect the peer.
+    health_failures_max: u8 = 3,
+    failure_retry_ms: u64 = 5_000,
 };
+/// Control probes whose failures count toward a health disconnect.
+pub const HealthProbe = enum { status, metadata, ping };
+const health_probe_count = @typeInfo(HealthProbe).@"enum".fields.len;
 const Operation = struct {
     request: ?rr.RequestHandle = null,
     peer: t.PeerRef = undefined,
@@ -47,6 +53,7 @@ const Schedule = struct {
     ping_due_ms: u64 = 0,
     retry_ms: u64 = 0,
     metadata_due_ms: ?u64 = null,
+    health_failures: [health_probe_count]u8 = @splat(0),
     closing: ?struct { reason: t.DisconnectReason, deadline_ms: u64, sent: bool = false } = null,
 };
 pub const Control = struct {
@@ -65,6 +72,7 @@ pub const Control = struct {
         deferred: u64 = 0,
         closed: [@typeInfo(t.DisconnectReason).@"enum".fields.len]u64 = @splat(0),
         closed_by_client: [client.count][@typeInfo(t.DisconnectReason).@"enum".fields.len]u64 = @splat(@splat(0)),
+        health_failures: [health_probe_count]u64 = @splat(0),
         events: @import("control_metrics.zig").Counters = .{},
     };
 
@@ -93,7 +101,7 @@ pub const Control = struct {
     }
 
     pub fn validateOptions(options: Options) error{InvalidOptions}!void {
-        if (options.starts_per_turn_max == 0 or options.starts_per_turn_max > 256)
+        if (options.starts_per_turn_max == 0 or options.starts_per_turn_max > 256 or options.health_failures_max == 0)
             return error.InvalidOptions;
         const timers = [_]u64{
             options.inbound_status_grace_ms,
@@ -102,6 +110,7 @@ pub const Control = struct {
             options.ping_outbound_ms,
             options.status_transition_grace_ms,
             options.local_retry_ms,
+            options.failure_retry_ms,
         };
         for (timers) |timer| if (timer == 0 or timer > 86_400_000) return error.InvalidOptions;
     }
@@ -730,22 +739,36 @@ pub const Control = struct {
                     }
                 },
                 else => {
+                    const probe = healthProbe(op.protocol) orelse return;
                     const timed_out = failed.reason == .timeout or
                         (failed.reason == .negotiation_failed and failed.reason.negotiation_failed == .timeout);
-                    _ = self.disconnect(catalog, op.peer, op.conn, if (timed_out) .health_timeout else .health_error, now);
+                    self.healthFailure(catalog, row, op, probe, if (timed_out) .health_timeout else .health_error, now);
                 },
             },
             .done => {
-                if (!op.received and op.protocol != .goodbye_v1) {
-                    _ = self.disconnect(catalog, op.peer, op.conn, .health_error, now);
+                const probe = healthProbe(op.protocol) orelse return;
+                if (!op.received) {
+                    self.healthFailure(catalog, row, op, probe, .health_error, now);
+                    return;
                 }
+                row.health_failures[@intFromEnum(probe)] = 0;
                 const snapshot = catalog.get(op.peer) orelse return;
-                if (op.protocol == .ping_v1 or op.protocol == .metadata_v1 or
-                    op.protocol == .metadata_v2 or op.protocol == .metadata_v3)
-                    row.ping_due_ms = now.mono_ms +| self.pingInterval(snapshot.direction);
+                if (probe != .status) row.ping_due_ms = now.mono_ms +| self.pingInterval(snapshot.direction);
             },
             else => unreachable,
         }
+    }
+
+    fn healthFailure(self: *Control, catalog: *Catalog, row: *Schedule, op: *const Operation, probe: HealthProbe, reason: t.DisconnectReason, now: Now) void {
+        const failures = &row.health_failures[@intFromEnum(probe)];
+        failures.* +|= 1;
+        self.counters.health_failures[@intFromEnum(probe)] +|= 1;
+        std.log.scoped(.network_peers).debug("peer_health_failure connection={d}:{d} probe={s} failures={d} limit={d}", .{ op.conn.index, op.conn.generation, @tagName(probe), failures.*, self.options.health_failures_max });
+        if (failures.* >= self.options.health_failures_max) {
+            _ = self.disconnect(catalog, op.peer, op.conn, reason, now);
+            return;
+        }
+        row.retry_ms = now.mono_ms +| self.options.failure_retry_ms;
     }
     pub fn nextWakeup(self: *const Control, catalog: *const Catalog, now: Now) ?u64 {
         var due: ?u64 = null;
@@ -799,6 +822,15 @@ fn decide(row: *const Schedule, relevant: bool, active_request: bool, now: u64) 
     else
         .ping;
     return decision;
+}
+
+fn healthProbe(protocol: rr.Protocol) ?HealthProbe {
+    return switch (protocol) {
+        .status_v1, .status_v2 => .status,
+        .metadata_v1, .metadata_v2, .metadata_v3 => .metadata,
+        .ping_v1 => .ping,
+        else => null,
+    };
 }
 
 test "control repeated Status intent preserves the first due time" {

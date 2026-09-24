@@ -165,3 +165,14 @@ test "peer fold canonical disconnect backs off once even without a dial intent" 
     try std.testing.expectEqual(before.failures, c.rowFor(peer).?.intent.failures);
     try std.testing.expectEqual(before.eligible_at_ms, d.nextWakeup(&c, 2, 1).?);
 }
+
+test "peer fold long-lived health disconnect restarts redial backoff" {
+    var c = try Catalog.initWithIntents(a, opts, 1, 8, 1);
+    defer c.deinit(a);
+    const hint = try candidate(1, 1);
+    const conn: t.Handle = .{ .index = 0, .generation = 1 };
+    const peer = admit(&c, &hint.peer, 0, .inbound, 0).admitted.peer;
+    c.rowFor(peer).?.intent.failures = 4;
+    try std.testing.expect(c.disconnect(peer, conn, .health_timeout, 300_000));
+    try std.testing.expectEqual(@as(u8, 1), c.rowFor(peer).?.intent.failures);
+}

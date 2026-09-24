@@ -11,43 +11,51 @@ fn incoming(setup: *Pair) *Server {
 }
 
 test "reqresp complete incoming transfer deadline survives partial bytes and missing FIN" {
-    for ([_]bool{ false, true }) |complete_body| {
-        var setup: Pair = .{};
-        try setup.init(.{}, .{ .progress_timeout_ms = 100, .host_timeout_ms = 1000 });
-        defer setup.deinit();
-        const stream = try setup.openRaw(.ping_v1);
-        try setup.awaitRawSelection(stream, .ping_v1);
-        setup.server_event_capacity = 0;
-        const slot = incoming(&setup);
-        const started = slot.request.started_ms;
-        const deadline = started + 100;
-        var storage: [codec.encodedLengthMax(8) + 1]u8 = undefined;
-        const encoded = try codec.encodeRequest(&(@as([8]u8, @splat(0))), &storage);
-        var sent: usize = 0;
-        for ([_]u64{ 25, 50, 75, 99 }) |elapsed| {
-            setup.shared.pair.now.mono_ms = started + elapsed;
-            const end = if (complete_body) encoded.len else sent + 1;
-            if (end > sent) try std.testing.expectEqual(end - sent, try setup.shared.pair.client.write(stream, encoded[sent..end], false));
-            sent = end;
+    for ([_]Protocol{ .ping_v1, .blocks_by_root_v2 }) |which| {
+        for ([_]bool{ false, true }) |complete_body| {
+            var setup: Pair = .{};
+            try setup.init(.{}, .{ .progress_timeout_ms = 100, .host_timeout_ms = 1000 });
+            defer setup.deinit();
+            const stream = try setup.openRaw(which);
+            try setup.awaitRawSelection(stream, which);
+            setup.server_event_capacity = 0;
+            const slot = incoming(&setup);
+            const started = slot.request.started_ms;
+            const deadline = started + 100;
+            var storage: [codec.encodedLengthMax(32) + 1]u8 = undefined;
+            const body = [_]u8{0} ** 32;
+            const encoded = try codec.encodeRequest(body[0..if (which == .ping_v1) 8 else 32], &storage);
+            var sent: usize = 0;
+            for ([_]u64{ 25, 50, 75, 99 }) |elapsed| {
+                setup.shared.pair.now.mono_ms = started + elapsed;
+                const end = if (complete_body) encoded.len else sent + 1;
+                if (end > sent) try std.testing.expectEqual(end - sent, try setup.shared.pair.client.write(stream, encoded[sent..end], false));
+                sent = end;
+                try setup.pumpOnce();
+                try std.testing.expect(slot.request.running());
+                try std.testing.expectEqual(@as(?u64, deadline), slot.deadline(&setup.shared.server.reqresp));
+            }
+            try std.testing.expect(slot.progress_ms > started);
+            setup.shared.pair.now.mono_ms = deadline;
             try setup.pumpOnce();
-            try std.testing.expect(slot.request.running());
-            try std.testing.expectEqual(@as(?u64, deadline), slot.deadline(&setup.shared.server.reqresp));
+            try std.testing.expectEqual(rr.Failure.timeout, slot.request.terminalEvent().?.failed.reason);
+            try std.testing.expectEqual(@as(u64, 1), setup.shared.server.reqresp.counters.timeouts);
+            try std.testing.expectEqual(@as(u64, 0), setup.shared.server.reqresp.counters.requests_served);
+            for (0..3) |_| try setup.pumpOnce();
+            try std.testing.expectEqual(@as(u64, 1), setup.shared.server.reqresp.counters.timeouts);
+            setup.server_event_capacity = 16;
+            try setup.pumpOnce();
+            try std.testing.expectEqual(@as(usize, 1), setup.serverEvents().len);
+            try std.testing.expectEqual(rr.Failure.timeout, setup.serverEvents()[0].failed.reason);
+            const fault = setup.shared.server.reqresp.peerFault(setup.serverEvents()[0]);
+            if (which.isControl()) {
+                try std.testing.expect(fault == null);
+            } else {
+                try std.testing.expectEqual(.non_completion, fault.?.kind);
+            }
+            try setup.pumpOnce();
+            try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.active().inbound);
         }
-        try std.testing.expect(slot.progress_ms > started);
-        setup.shared.pair.now.mono_ms = deadline;
-        try setup.pumpOnce();
-        try std.testing.expectEqual(rr.Failure.timeout, slot.request.terminalEvent().?.failed.reason);
-        try std.testing.expectEqual(@as(u64, 1), setup.shared.server.reqresp.counters.timeouts);
-        try std.testing.expectEqual(@as(u64, 0), setup.shared.server.reqresp.counters.requests_served);
-        for (0..3) |_| try setup.pumpOnce();
-        try std.testing.expectEqual(@as(u64, 1), setup.shared.server.reqresp.counters.timeouts);
-        setup.server_event_capacity = 16;
-        try setup.pumpOnce();
-        try std.testing.expectEqual(@as(usize, 1), setup.serverEvents().len);
-        try std.testing.expectEqual(rr.Failure.timeout, setup.serverEvents()[0].failed.reason);
-        try std.testing.expectEqual(.non_completion, setup.shared.server.reqresp.peerFault(setup.serverEvents()[0]).?.kind);
-        try setup.pumpOnce();
-        try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.active().inbound);
     }
 }
 

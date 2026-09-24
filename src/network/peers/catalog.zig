@@ -554,8 +554,7 @@ pub const Catalog = struct {
             return;
         }
         const lifetime = now_ms -| row.connected_at_ms;
-        const unhealthy = reason == .health_timeout or reason == .health_error;
-        if (lifetime >= 300_000 and !unhealthy) row.intent.failures = 0;
+        if (lifetime >= 300_000) row.intent.failures = 0;
         row.intent.failures = @min(row.intent.failures +| 1, 7);
         const delay = @min(@as(u64, 5_000) << @intCast(row.intent.failures - 1), 300_000);
         row.intent.eligible_at_ms = @max(row.intent.eligible_at_ms, now_ms +| delay +| (self.random.random().int(u16) % 1_001));
