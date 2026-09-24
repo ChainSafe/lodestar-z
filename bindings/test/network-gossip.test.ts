@@ -24,7 +24,7 @@ test("gossip drain and stale verdict on an activated application", async () => {
 });
 
 import {setTimeout as delay} from "node:timers/promises";
-import type {NativeGossipMessage, NativeNetworkApplicationRuntime} from "../src/network.js";
+import type {NativeApplicationConfig, NativeGossipMessage, NativeNetworkApplicationRuntime} from "../src/network.js";
 import {networkBindings as bindings} from "./utils/network-bindings.js";
 import {BLOCKS, incomingPair, takeIncoming} from "./utils/network-incoming.js";
 
@@ -36,8 +36,21 @@ function blockPayload(size: number, byte = 0): Uint8Array {
   return bytes;
 }
 
+/** Classifies every dependency as available, as a host that already holds each parent block does. */
+function answerChecks(runtime: NativeNetworkApplicationRuntime): void {
+  const checks = runtime.drainGossipChecks();
+  if (checks.length) runtime.classifyGossip(checks.map(({handle}) => ({available: true, handle})));
+}
+
+/** Runs the processor without a plan, which reserves payload copies from the bridge budget. */
+function withoutProcessorPlan(config: NativeApplicationConfig): void {
+  config.gossipPolicy.processor = undefined;
+  config.gossipPolicy.execution = undefined;
+}
+
 async function nextGossip(runtime: NativeNetworkApplicationRuntime): Promise<NativeGossipMessage> {
   for (let i = 0; i < 1000; i++) {
+    answerChecks(runtime);
     const batch = runtime.drainGossip();
     if (batch.messages.length) {
       expect(batch.messages).toHaveLength(1);
@@ -47,9 +60,16 @@ async function nextGossip(runtime: NativeNetworkApplicationRuntime): Promise<Nat
   }
   throw Error("Gossip delivery deadline");
 }
-async function gossipPair(timeoutMs = 30000n, budget?: number, beforeServer?: () => void) {
-  const pair = await incomingPair(beforeServer, budget, undefined, (_left, right) => {
+async function gossipPair(
+  timeoutMs = 30000n,
+  budget?: number,
+  beforeServer?: () => void,
+  configure?: (config: NativeApplicationConfig) => void
+) {
+  const pair = await incomingPair(beforeServer, budget, undefined, (left, right) => {
     right.gossipPolicy.validationTimeoutMs = timeoutMs;
+    configure?.(left);
+    configure?.(right);
   });
   try {
     for (const [runtime, config] of [
@@ -140,7 +160,7 @@ test("gossip lifecycle, strict representations and canonical publication refusal
   expect(runtime.reportGossip(handle, "ignore")).toBe(false);
   await expect(runtime.publishGossip(TOPIC, new Uint8Array(4000))).rejects.toThrow("NetworkClosed");
   expect(runtime.diagnostics().gossip).toMatchObject({
-    capacity: 64,
+    capacity: config.gossipPolicy.processor?.reduce((sum, limit) => sum + limit.items, 0),
     occupied: 0,
     payloadBytes: 0,
     publicationBytes: 0,
@@ -336,7 +356,7 @@ test.skipIf(!faultApi.networkTestFail)(
 );
 
 test("gossip and both request directions retain independent payload capacity", async () => {
-  const pair = await gossipPair(30000n, 128 * 1024 * 1024);
+  const pair = await gossipPair(30000n, 192 * 1024 * 1024);
   try {
     const outgoing = pair.right.request(pair.identity.peerId, BLOCKS, new Uint8Array(32));
     const outboundPull = outgoing.next();
@@ -391,6 +411,7 @@ test.each([
     let message: NativeGossipMessage | undefined;
     if (delivered) message = await nextGossip(pair.right);
     for (let i = 0; i < 1000; i++) {
+      answerChecks(pair.right);
       const diag = pair.right.diagnostics().gossip;
       if (diag.queuedExpired + diag.deliveredExpired > 0n) break;
       await delay(5);
@@ -591,7 +612,7 @@ test("gossip operation promises and weak notifier permit facade collection", () 
 }, 20000);
 
 test("one maximum native gossip payload owns exactly two copy allowances until drain", async () => {
-  const pair = await gossipPair();
+  const pair = await gossipPair(30000n, undefined, undefined, withoutProcessorPlan);
   try {
     const input = blockPayload(10 * 1024 * 1024, 37);
     await pair.left.publishGossip(TOPIC, input, {allowZeroPeers: false});

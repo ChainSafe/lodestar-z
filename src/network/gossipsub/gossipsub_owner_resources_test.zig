@@ -110,6 +110,9 @@ test "gossip lifecycle sequence preserves ownership under pressure reconnect and
     g.markDirect(conn);
     g.sessions.rows[source.index].outbound = .{ .live = .{ .stream = .{ .conn = conn, .id = 2, .slot = 0 }, .version = .v1_2 } };
     _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), source.index, name, true);
+    var inbox: support.Inbox = .{};
+    defer inbox.deinit();
+    inbox.attach(&g);
     var handles: [8]?ValidationHandle = @splat(null);
     for (0..512) |step| {
         const now: Now = .{ .mono_ms = step * 17 + 1, .unix_s = 0 };
@@ -120,7 +123,8 @@ test "gossip lifecycle sequence preserves ownership under pressure reconnect and
             0, 1 => {
                 var events: [1]Event = undefined;
                 if (try testMessage(&g, source.index, &payload, now.mono_ms, &events)) |count| {
-                    if (count == 1) handles[value] = events[0].message.handle;
+                    if (count == 1) handles[value] = inbox.last().handle;
+                    inbox.clear();
                 }
             },
             2 => if (handles[value]) |handle| {

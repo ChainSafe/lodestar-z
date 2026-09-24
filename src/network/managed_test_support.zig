@@ -5,6 +5,7 @@ const t = @import("peers/types.zig");
 const Engine = @import("quic/engine.zig");
 const rr = @import("reqresp/root.zig");
 const gossip = @import("gossipsub/root.zig");
+const Inbox = @import("gossipsub/test_support.zig").Inbox;
 
 pub fn localState(overrides: t.LocalState) t.LocalState {
     var local = overrides;
@@ -19,9 +20,19 @@ pub fn updateLocal(manager: *managed.PeerManager, service: *@import("service.zig
     manager.commitLocal(service, &copied, now);
 }
 
-pub fn options() managed.Options {
+/// The small resolved profile with the harness's peer, dial, request and gossip values.
+pub fn request() @import("configuration.zig").Request {
     const gc = @import("gossipsub/constants.zig");
     return .{
+        .profile = .small,
+        .seed = 1,
+        .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }},
+        .limits = .{
+            .connections_max = 4,
+            .handshaking_max = 4,
+            .handshaking_per_source_max = 4,
+            .dialing_max = 1,
+        },
         .peers = .{
             .capacity = 4,
             .outbound_reserve = 1,
@@ -29,36 +40,33 @@ pub fn options() managed.Options {
             .target_peers = 2,
             .min_outbound = 1,
         },
-        .service = .{
-            .router = .{ .negotiations_max = 24, .outbound_control_reserved = 8 },
-            .reqresp = .{
-                .policy = @import("reqresp/policy_fixture.zig").config(),
-                .peers = 4,
-                .outbound_max = 16,
-                .inbound_max = 16,
-                .outbound_control_reserved = 8,
-                .inbound_control_reserved = 8,
-                .outbound_per_peer_max = 8,
-                .inbound_per_peer_max = 16,
-                .inbound_application_per_peer_max = 8,
-                .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }},
-            },
-            .gossipsub = .{
-                .topic_policy = comptime &.{@import("gossipsub/topic_fixture.zig").bytes(@splat(0))},
-                .random_seed = 1,
-                .seen_capacity = 16,
-                .mcache_capacity = 8,
-                .validation_capacity = 2,
-                .mcache_arena_bytes = gc.maxCompressedLen(gc.MAX_PAYLOAD_SIZE) + 4096,
-                .decompressed_arena_bytes = gc.MAX_PAYLOAD_SIZE + 256,
-                .receive_arena_bytes = std.mem.alignForward(usize, gc.GOSSIP_MAX_SIZE, 4096),
-                .body_buffer_bytes = 256,
-                .control_bytes = 512,
-                .critical_bytes = 512,
-            },
-        },
         .dial = .{ .capacity = 4, .concurrent_max = 1, .outbound_reserved = 1, .seed = 7 },
+        .router = .{ .negotiations_max = 24 },
+        .reqresp = .{
+            .outbound_max = 16,
+            .inbound_max = 16,
+            .outbound_per_peer_max = 8,
+            .inbound_per_peer_max = 16,
+            .inbound_application_per_peer_max = 8,
+        },
+        .gossip = .{
+            .topic_policy = comptime &.{@import("gossipsub/topic_fixture.zig").bytes(@splat(0))},
+            .seen_capacity = 16,
+            .mcache_capacity = 8,
+            .validation_capacity = 2,
+            .mcache_arena_bytes = gc.maxCompressedLen(gc.MAX_PAYLOAD_SIZE) + 4096,
+            .decompressed_arena_bytes = gc.MAX_PAYLOAD_SIZE + 256,
+            .receive_arena_bytes = std.mem.alignForward(usize, gc.GOSSIP_MAX_SIZE, 4096),
+            .body_buffer_bytes = 256,
+            .control_bytes = 512,
+            .critical_bytes = 512,
+        },
+        .admission_policy = @import("reqresp/policy_fixture.zig").config(),
     };
+}
+
+pub fn options() managed.Options {
+    return (@import("configuration.zig").resolve(request()) catch unreachable).core;
 }
 
 pub const Setup = struct {
@@ -67,6 +75,8 @@ pub const Setup = struct {
     client_service: @import("service.zig").Service = undefined,
     server: managed.PeerManager = undefined,
     server_service: @import("service.zig").Service = undefined,
+    client_inbox: Inbox = .{},
+    server_inbox: Inbox = .{},
     client_events: [1]t.Event = undefined,
     server_events: [1]t.Event = undefined,
     pub fn init(self: *Setup, local: *const t.LocalState) !void {
@@ -102,6 +112,7 @@ pub const Setup = struct {
         errdefer self.pair.deinit();
         self.client_service = try @import("service.zig").Service.init(std.testing.allocator, managed.serviceOptions(opts, local));
         errdefer self.client_service.deinit();
+        self.client_inbox.attach(self.client_service.gossipsub);
         self.client = try managed.PeerManager.init(
             std.testing.allocator,
             &self.pair.client_ctx.local_peer_id,
@@ -113,6 +124,7 @@ pub const Setup = struct {
         errdefer self.client.deinit();
         self.server_service = try @import("service.zig").Service.init(std.testing.allocator, managed.serviceOptions(opts, local));
         errdefer self.server_service.deinit();
+        self.server_inbox.attach(self.server_service.gossipsub);
         self.server = try managed.PeerManager.init(
             std.testing.allocator,
             &self.pair.server_ctx.local_peer_id,
@@ -129,9 +141,14 @@ pub const Setup = struct {
         self.server.deinit();
         self.client_service.deinit();
         self.client.deinit();
+        self.server_inbox.deinit();
+        self.client_inbox.deinit();
         self.pair.deinit();
     }
+    /// Gossip delivered in earlier steps is cleared first.
     pub fn step(self: *Setup, capacity: usize) !void {
+        self.client_inbox.clear();
+        self.server_inbox.clear();
         try self.pair.pump();
         var events: [32]Engine.Event = undefined;
         var activity: [4]Engine.Handle = undefined;

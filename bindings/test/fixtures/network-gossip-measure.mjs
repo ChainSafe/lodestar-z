@@ -8,13 +8,13 @@ for (const profile of ["small", "beaconNode"]) {
   config.profile = profile;
   if (profile === "beaconNode")
     config.resources = {
-      bridgeBudgetBytes: 128 * 1024 * 1024,
+      bridgeBudgetBytes: 512 * 1024 * 1024,
       connectionCapacity: 256,
       dialingCapacity: 16,
       handshakingCapacity: 32,
       maxPeers: 210,
       minOutbound: 16,
-      nativeBudgetBytes: 512 * 1024 * 1024,
+      nativeBudgetBytes: 768 * 1024 * 1024,
       outboundReserve: 32,
       peerCapacity: 512,
       receiveBudgetBytes: 512 * 1024 * 1024,
@@ -25,7 +25,10 @@ for (const profile of ["small", "beaconNode"]) {
     await runtime.identity;
     await runtime.applyIntent(localIntent(config), config.initialSlot);
     const before = await runtime.diagnostics();
-    assert.equal(before.gossip.capacity, profile === "small" ? 64 : 1024);
+    assert.equal(
+      before.gossip.capacity,
+      config.gossipPolicy.processor.reduce((sum, limit) => sum + limit.items, 0)
+    );
     assert.equal(before.liveBridgeRequestedBytes, before.bridgeRequestedBytes);
     await runtime.close();
     const after = await runtime.diagnostics();

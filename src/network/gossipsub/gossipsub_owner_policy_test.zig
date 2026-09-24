@@ -226,9 +226,12 @@ test "gossip policy topic reuse waits for attribution and preserves copied event
     try support.subscribe(&g, name);
     const topic = g.overlay.findTopic(name).?;
     const generation = g.overlay.rows[topic].generation;
+    var inbox: support.Inbox = .{};
+    defer inbox.deinit();
+    inbox.attach(&g);
     var events: [1]Event = undefined;
     try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, peer.index, "retained", 1, &events));
-    const event = events[0].message;
+    const event = inbox.last();
     const copied = g.resourceSnapshot();
     try support.subscribe(&g, name);
     try std.testing.expectEqualStrings("retained", event.bytes);

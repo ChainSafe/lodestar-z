@@ -550,12 +550,11 @@ test "managed native preserves gossip events under one output and caller validat
         var activity: [4]Engine.Handle = undefined;
         var messages: [1]gossip.Event = undefined;
         const active = setup.pair.server.takeActivity(&activity);
-        const counts = managed.process(&setup.server, &setup.server_service, &setup.pair.server, setup.pair.events(
+        _ = managed.process(&setup.server, &setup.server_service, &setup.pair.server, setup.pair.events(
             &setup.pair.server,
             &transport,
         ), activity[0..active], setup.pair.now, 100, &.{}, &.{}, &messages);
-        if (counts.gossipsub == 1 and messages[0] == .message) {
-            const message = messages[0].message;
+        for (setup.server_inbox.messages()) |message| {
             try std.testing.expectEqualStrings(payload, message.bytes);
             try std.testing.expectEqual(
                 gossip.ReportOutcome{ .applied = .accept },
@@ -564,6 +563,7 @@ test "managed native preserves gossip events under one output and caller validat
             try std.testing.expectEqualStrings(payload, message.bytes);
             received += 1;
         }
+        setup.server_inbox.clear();
         _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, setup.pair.events(
             &setup.pair.client,
             &transport,

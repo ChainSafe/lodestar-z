@@ -12,7 +12,7 @@ pub const Overrides = struct {
     outbound_max: u16 = 8,
     inbound_max: u16 = 8,
     inbound_per_peer_max: u8 = 8,
-    reserve_inbound_per_peer: bool = false,
+    reserve_inbound_per_peer: bool = true,
     inbound_control_reserved: u16 = 0,
     serving_per_peer_max: u8 = 4,
     progress_timeout_ms: u64 = 10_000,
@@ -37,16 +37,18 @@ pub const Pair = struct {
     server_event_capacity: usize = 16,
 
     pub fn init(self: *Pair, client: Overrides, server: Overrides) !void {
-        try self.shared.init(serviceOptions(client, &self.forks), serviceOptions(server, &self.forks));
+        try self.shared.init(try serviceOptions(client, &self.forks), try serviceOptions(server, &self.forks));
     }
 
-    fn serviceOptions(overrides: Overrides, forks: []const reqresp.ForkEntry) @import("../service.zig").Options {
-        return .{ .reqresp = options(overrides, forks), .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1, .seen_capacity = 128, .mcache_capacity = 16, .validation_capacity = 8 }, .automatic_gossip_admission = false };
+    fn serviceOptions(overrides: Overrides, forks: []const reqresp.ForkEntry) !@import("../service.zig").Options {
+        return .{ .reqresp = try options(overrides, forks), .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1, .seen_capacity = 128, .mcache_capacity = 16, .validation_capacity = 8 }, .automatic_gossip_admission = false };
     }
 
-    fn options(overrides: Overrides, forks: []const reqresp.ForkEntry) reqresp.Options {
+    /// Admission defaults over the fixture policy unless the caller supplies admission.
+    fn options(overrides: Overrides, forks: []const reqresp.ForkEntry) !reqresp.Options {
+        const peers = 128;
         return .{
-            .peers = 128,
+            .peers = peers,
             .outbound_max = overrides.outbound_max,
             .inbound_max = overrides.inbound_max,
             .inbound_per_peer_max = overrides.inbound_per_peer_max,
@@ -57,8 +59,7 @@ pub const Pair = struct {
             .forks = overrides.forks orelse forks,
             .quotas = overrides.quotas,
             .request_fork = overrides.request_fork,
-            .policy = if (overrides.admission == null) @import("policy_fixture.zig").config() else null,
-            .admission = overrides.admission,
+            .admission = overrides.admission orelse try reqresp.AdmissionOptions.defaults(&@import("policy_fixture.zig").config(), peers, peers, overrides.inbound_max -| overrides.inbound_control_reserved),
             .host_timeout_ms = overrides.host_timeout_ms,
             .quota_timeout_ms = overrides.quota_timeout_ms,
         };

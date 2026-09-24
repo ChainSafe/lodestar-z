@@ -21,7 +21,7 @@ test "router composes simultaneous ping and meshsub on one connection" {
     defer pair.deinit();
     var client = try @import("service.zig").Service.init(std.testing.allocator, rr_options);
     defer client.deinit();
-    var server = try @import("service.zig").Service.init(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1, .topic_policy = &.{@import("gossipsub/topic_fixture.zig").bytes(.{ 1, 2, 3, 4 })} }, .reqresp = rr_options.reqresp });
+    var server = try @import("service.zig").Service.init(std.testing.allocator, .{ .automatic_gossip_admission = false, .gossipsub = .{ .random_seed = 1, .topic_policy = &.{@import("gossipsub/topic_fixture.zig").bytes(.{ 1, 2, 3, 4 })} }, .reqresp = rr_options.reqresp });
     defer server.deinit();
     const requests = &server.reqresp;
     const gossip = server.gossipsub;
@@ -225,7 +225,7 @@ test "router composed service handles native activity past empty request capacit
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
-    var client = try @import("service.zig").Service.init(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1 }, .reqresp = .{
+    var client = try @import("service.zig").Service.init(std.testing.allocator, .{ .automatic_gossip_admission = false, .gossipsub = .{ .random_seed = 1 }, .reqresp = .{
         .forks = &.{},
         .outbound_max = 64,
         .inbound_max = 64,
@@ -277,7 +277,7 @@ test "router gossip capacity refusal preserves reqresp and explicit host retry" 
     var client = try @import("service.zig").Service.init(std.testing.allocator, rr_options);
     defer client.deinit();
     defer client.reqresp.shutdown(&pair.client, &client.router);
-    var server = try @import("service.zig").Service.init(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1 }, .reqresp = rr_options.reqresp });
+    var server = try @import("service.zig").Service.init(std.testing.allocator, .{ .automatic_gossip_admission = false, .gossipsub = .{ .random_seed = 1 }, .reqresp = rr_options.reqresp });
     defer server.deinit();
     defer server.reqresp.shutdown(&pair.server, &server.router);
     const handles = try support.connectPair(&pair);
@@ -375,6 +375,7 @@ test "router capabilities disabled outbound preserves stream and request owners"
     defer pair.deinit();
     const handles = try support.connectPair(&pair);
     var service = try @import("service.zig").Service.init(std.testing.allocator, .{
+        .automatic_gossip_admission = false,
         .reqresp = rr_options.reqresp,
         .gossipsub = .{ .random_seed = 1 },
         .router = .{ .capabilities = caps.Directional{ .receive = .initEmpty(), .request = .initEmpty() } },

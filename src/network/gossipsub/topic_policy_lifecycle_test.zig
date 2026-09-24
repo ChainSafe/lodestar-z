@@ -47,10 +47,10 @@ test "topic policy remembers real inactive subscriptions without event pressure 
     var delivered = false;
     for (0..20) |_| {
         try pair.pumpOnce();
-        for (pair.clientEvents()) |event| if (event == .message) {
-            try std.testing.expectEqualStrings("0123456789", event.message.bytes);
+        for (pair.clientMessages()) |message| {
+            try std.testing.expectEqualStrings("0123456789", message.bytes);
             delivered = true;
-        };
+        }
     }
     try std.testing.expect(delivered);
     try support.unsubscribe(pair.shared.client.gossipsub, name);
@@ -210,22 +210,22 @@ test "topic policy real wire receives only bounded SSZ and keeps borrowed payloa
         try std.testing.expectEqual(@as(usize, 1), result.queued);
         for (0..20) |_| {
             try pair.pumpOnce();
-            for (pair.serverEvents()) |event| if (event == .message) {
+            for (pair.serverMessages()) |message| {
                 try std.testing.expect(size == 10 or size == 20);
                 seen += 1;
-                const entry = pair.shared.server.gossipsub.messages.validation.attribution(event.message.handle);
-                try std.testing.expectEqual(entry.admitted_ms, event.message.admitted_ms);
-                try std.testing.expectEqual(pair.shared.server.gossipsub.messages.validation.entries[event.message.handle.index].state.pending.deadline, event.message.deadline);
-                try std.testing.expect(event.message.identity.eql(&pair.shared.server.gossipsub.peers.rows[entry.source.index].identity));
-                try std.testing.expectEqualSlices(u8, payload[0..size], event.message.bytes);
-                try support.subscribe(pair.shared.server.gossipsub, event.message.topic);
+                const entry = pair.shared.server.gossipsub.messages.validation.attribution(message.handle);
+                try std.testing.expectEqual(entry.admitted_ms, message.admitted_ms);
+                try std.testing.expectEqual(pair.shared.server.gossipsub.messages.validation.entries[message.handle.index].state.pending.deadline, message.deadline);
+                try std.testing.expect(message.identity.eql(&pair.shared.server.gossipsub.peers.rows[entry.source.index].identity));
+                try std.testing.expectEqualSlices(u8, payload[0..size], message.bytes);
+                try support.subscribe(pair.shared.server.gossipsub, message.topic);
                 var local: [10]u8 = @splat('x');
                 local[0] = @intCast(size);
-                _ = try pair.shared.server.gossipsub.publish(event.message.topic, &local, pair.shared.pair.now);
-                try std.testing.expectEqualStrings(name, event.message.topic);
-                try std.testing.expectEqualSlices(u8, payload[0..size], event.message.bytes);
-                try std.testing.expectEqual(gossip.ReportOutcome{ .applied = .ignore }, pair.shared.server.gossipsub.report(event.message.handle, .ignore, pair.shared.pair.now));
-            };
+                _ = try pair.shared.server.gossipsub.publish(message.topic, &local, pair.shared.pair.now);
+                try std.testing.expectEqualStrings(name, message.topic);
+                try std.testing.expectEqualSlices(u8, payload[0..size], message.bytes);
+                try std.testing.expectEqual(gossip.ReportOutcome{ .applied = .ignore }, pair.shared.server.gossipsub.report(message.handle, .ignore, pair.shared.pair.now));
+            }
         }
     }
     try std.testing.expectEqual(@as(usize, 2), seen);

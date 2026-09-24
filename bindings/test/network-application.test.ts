@@ -340,7 +340,7 @@ test("actual 200/210 resources resolve and publish complete capacity", async () 
     handshakingCapacity: 32,
     maxPeers: 210,
     minOutbound: 16,
-    nativeBudgetBytes: 512 * 1024 * 1024,
+    nativeBudgetBytes: 768 * 1024 * 1024,
     outboundReserve: 32,
     peerCapacity: 512,
     receiveBudgetBytes: 512 * 1024 * 1024,

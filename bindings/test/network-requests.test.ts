@@ -459,7 +459,6 @@ test.skipIf(!HOST || !HOODI)(
 test("native bridge validates full handles and stale retirement", async () => {
   const {networkBindings: bindings} = await import("./utils/network-bindings.js");
   const config = applicationConfig();
-  config.resources.bridgeBudgetBytes = 128 * 1024 * 1024;
   const native = new bindings.NativeNetworkRuntime();
   const lifecycle = native.initialize(config, () => undefined);
   try {
@@ -537,7 +536,6 @@ test.skipIf(!NATIVE_PEER)(
     const {payload, rangeRequest} = await import("../../test/interop/codec.mjs");
     const peer = new Child("request-native", NATIVE_PEER ?? "", ["--application"]);
     const config = applicationConfig();
-    config.resources.bridgeBudgetBytes = 128 * 1024 * 1024;
     const runtime = startRuntime(config, () => undefined);
     try {
       const remote = await peer.command("listen");
@@ -609,7 +607,6 @@ async function connectedNative(scenario?: string) {
   try {
     const remote = await peer.command("ready");
     const config = applicationConfig();
-    config.resources.bridgeBudgetBytes = 128 * 1024 * 1024;
     if (scenario) bindings.networkTestScenario(scenario);
     native = new bindings.NativeNetworkRuntime();
     const prepared = native.initialize(config, () => undefined);

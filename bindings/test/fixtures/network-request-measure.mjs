@@ -9,13 +9,13 @@ for (const profile of ["small", "beaconNode"]) {
   config.profile = profile;
   if (profile === "beaconNode")
     config.resources = {
-      bridgeBudgetBytes: 128 * 1024 * 1024,
+      bridgeBudgetBytes: 512 * 1024 * 1024,
       connectionCapacity: 256,
       dialingCapacity: 16,
       handshakingCapacity: 32,
       maxPeers: 210,
       minOutbound: 16,
-      nativeBudgetBytes: 512 * 1024 * 1024,
+      nativeBudgetBytes: 768 * 1024 * 1024,
       outboundReserve: 32,
       peerCapacity: 512,
       receiveBudgetBytes: 512 * 1024 * 1024,
@@ -50,7 +50,6 @@ if (process.env.LODESTAR_Z_NETWORK_STOCK_HOST) {
   try {
     const remote = await peer.command("ready");
     const config = applicationConfig();
-    config.resources.bridgeBudgetBytes = 128 * 1024 * 1024;
     runtime = startRuntime(config, () => undefined);
     await runtime.identity;
     await runtime.applyIntent(localIntent(config), config.initialSlot);

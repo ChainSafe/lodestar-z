@@ -99,15 +99,12 @@ test "gossipsub delivers a published message to a mesh peer" {
     rounds = 0;
     while (rounds < 20 and !received) : (rounds += 1) {
         try setup.pumpOnce();
-        for (setup.serverEvents()) |event| switch (event) {
-            .message => |m| {
-                try std.testing.expectEqualStrings(beacon_block, m.topic);
-                try std.testing.expectEqualStrings(payload, m.bytes);
-                _ = setup.shared.server.gossipsub.report(m.handle, .accept, setup.shared.pair.now);
-                received = true;
-            },
-            else => {},
-        };
+        for (setup.serverMessages()) |m| {
+            try std.testing.expectEqualStrings(beacon_block, m.topic);
+            try std.testing.expectEqualStrings(payload, m.bytes);
+            _ = setup.shared.server.gossipsub.report(m.handle, .accept, setup.shared.pair.now);
+            received = true;
+        }
     }
     try std.testing.expect(received);
     try std.testing.expectEqual(@as(u64, 1), setup.shared.server.gossipsub.counters.messages_received);
@@ -136,13 +133,10 @@ test "gossipsub prunes a peer whose messages are rejected" {
     var rejected = false;
     while (rounds < 20 and !rejected) : (rounds += 1) {
         try setup.pumpOnce();
-        for (setup.serverEvents()) |event| switch (event) {
-            .message => |m| {
-                _ = setup.shared.server.gossipsub.report(m.handle, .reject, setup.shared.pair.now);
-                rejected = true;
-            },
-            else => {},
-        };
+        for (setup.serverMessages()) |m| {
+            _ = setup.shared.server.gossipsub.report(m.handle, .reject, setup.shared.pair.now);
+            rejected = true;
+        }
     }
     try std.testing.expect(rejected);
 
@@ -177,10 +171,7 @@ test "gossipsub credits first delivery only after the host accepts" {
     rounds = 0;
     while (rounds < 20 and handle == null) : (rounds += 1) {
         try setup.pumpOnce();
-        for (setup.serverEvents()) |event| switch (event) {
-            .message => |m| handle = m.handle,
-            else => {},
-        };
+        for (setup.serverMessages()) |m| handle = m.handle;
     }
     try std.testing.expect(handle != null);
 
@@ -221,14 +212,11 @@ test "gossipsub receives a message larger than the per-peer body buffer" {
     rounds = 0;
     while (rounds < 20 and !received) : (rounds += 1) {
         try setup.pumpOnce();
-        for (setup.serverEvents()) |event| switch (event) {
-            .message => |m| {
-                try std.testing.expectEqualSlices(u8, &payload, m.bytes);
-                _ = setup.shared.server.gossipsub.report(m.handle, .accept, setup.shared.pair.now);
-                received = true;
-            },
-            else => {},
-        };
+        for (setup.serverMessages()) |m| {
+            try std.testing.expectEqualSlices(u8, &payload, m.bytes);
+            _ = setup.shared.server.gossipsub.report(m.handle, .accept, setup.shared.pair.now);
+            received = true;
+        }
     }
     try std.testing.expect(received);
 }
@@ -336,13 +324,10 @@ test "gossipsub uses configured message IDs on publish and wire receive" {
         var received = false;
         for (0..20) |_| {
             try setup.pumpOnce();
-            for (setup.serverEvents()) |event| switch (event) {
-                .message => |message| {
-                    try std.testing.expectEqual(valid, message.id);
-                    received = true;
-                },
-                else => {},
-            };
+            for (setup.serverMessages()) |message| {
+                try std.testing.expectEqual(valid, message.id);
+                received = true;
+            }
             if (received) break;
         }
         try std.testing.expect(received);
@@ -399,11 +384,11 @@ fn publishAdmissionA(setup: *Pair) !struct { count: usize, handle: ?gossipsub.Va
     var handle: ?gossipsub.ValidationHandle = null;
     for (0..20) |_| {
         try setup.pumpOnce();
-        for (setup.serverEvents()) |event| if (event == .message) {
-            try std.testing.expectEqualStrings("A", event.message.bytes);
+        for (setup.serverMessages()) |message| {
+            try std.testing.expectEqualStrings("A", message.bytes);
             count += 1;
-            handle = event.message.handle;
-        };
+            handle = message.handle;
+        }
     }
     return .{ .count = count, .handle = handle };
 }
@@ -472,11 +457,11 @@ test "gossipsub legal maximum and above two MiB publish use actual resumable IO"
         var received = false;
         for (0..2000) |_| {
             try setup.pumpOnce();
-            for (setup.serverEvents()) |event| if (event == .message) {
-                try std.testing.expectEqualSlices(u8, payload, event.message.bytes);
-                try std.testing.expectEqual(gossipsub.ReportOutcome{ .applied = .accept }, setup.shared.server.gossipsub.report(event.message.handle, .accept, setup.shared.pair.now));
+            for (setup.serverMessages()) |message| {
+                try std.testing.expectEqualSlices(u8, payload, message.bytes);
+                try std.testing.expectEqual(gossipsub.ReportOutcome{ .applied = .accept }, setup.shared.server.gossipsub.report(message.handle, .accept, setup.shared.pair.now));
                 received = true;
-            };
+            }
             if (received) break;
         }
         try std.testing.expect(received);
@@ -512,10 +497,10 @@ test "gossipsub legal maximum IWANT response uses actual IO without mesh publish
     var received = false;
     for (0..2000) |_| {
         try setup.pumpOnce();
-        for (setup.serverEvents()) |event| if (event == .message) {
-            try std.testing.expectEqualSlices(u8, payload, event.message.bytes);
+        for (setup.serverMessages()) |message| {
+            try std.testing.expectEqualSlices(u8, payload, message.bytes);
             received = true;
-        };
+        }
         if (received) break;
     }
     try std.testing.expect(received);
@@ -527,6 +512,7 @@ test "gossipsub holds multiple messages and unread RPCs under zero event pressur
     var setup: Pair = .{};
     try setup.init();
     defer setup.deinit();
+    setup.shared.useEventDelivery();
     try connectMesh(&setup);
     setup.server_event_capacity = 0;
     const pb = @import("protobuf.zig");
@@ -639,7 +625,7 @@ test "gossipsub activity behind partial peer cursor remains ready and generation
     try std.testing.expectEqual(@as(usize, 0), @import("test_support.zig").pump(setup.shared.server.gossipsub, &setup.shared.pair.server, setup.shared.pair.now, &events));
     try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), @import("session_io.zig").nextIoWakeup(setup.shared.server.gossipsub, setup.shared.pair.now, 1));
     try std.testing.expectEqual(@as(usize, 1), @import("test_support.zig").pump(setup.shared.server.gossipsub, &setup.shared.pair.server, setup.shared.pair.now, &events));
-    try std.testing.expectEqualStrings("arrived behind cursor", events[0].message.bytes);
+    try std.testing.expectEqualStrings("arrived behind cursor", setup.serverMessages()[0].bytes);
     for (0..8) |_| {
         if (@import("session_io.zig").nextIoWakeup(setup.shared.server.gossipsub, setup.shared.pair.now, 1).? > setup.shared.pair.now.mono_ms) break;
         _ = @import("test_support.zig").pump(setup.shared.server.gossipsub, &setup.shared.pair.server, setup.shared.pair.now, &events);
@@ -747,9 +733,9 @@ test "gossipsub pinned payload pressure drops the publication and releases recei
     var handle: ?gossipsub.ValidationHandle = null;
     for (0..2000) |_| {
         try setup.pumpOnce();
-        for (setup.serverEvents()) |event| if (event == .message) {
-            handle = event.message.handle;
-        };
+        for (setup.serverMessages()) |message| {
+            handle = message.handle;
+        }
         if (handle != null) break;
     }
     try std.testing.expect(handle != null);
@@ -773,10 +759,10 @@ test "gossipsub pinned payload pressure drops the publication and releases recei
     var received = false;
     for (0..2000) |_| {
         try setup.pumpOnce();
-        for (setup.serverEvents()) |event| if (event == .message) {
-            try std.testing.expectEqualSlices(u8, payload[0 .. 3 * 1024 * 1024], event.message.bytes);
+        for (setup.serverMessages()) |message| {
+            try std.testing.expectEqualSlices(u8, payload[0 .. 3 * 1024 * 1024], message.bytes);
             received = true;
-        };
+        }
         if (received) break;
     }
     try std.testing.expect(received);
@@ -897,10 +883,10 @@ test "gossipsub receive page exhaustion discards only the requesting frame witho
     var received = false;
     for (0..32) |_| {
         try setup.pumpOnce();
-        for (setup.serverEvents()) |event| if (event == .message) {
-            try std.testing.expectEqualStrings("after discarded frame", event.message.bytes);
+        for (setup.serverMessages()) |message| {
+            try std.testing.expectEqualStrings("after discarded frame", message.bytes);
             received = true;
-        };
+        }
         if (received) break;
     }
     try std.testing.expect(received);

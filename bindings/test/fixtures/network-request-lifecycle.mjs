@@ -9,7 +9,6 @@ import {Child} from "../../../test/interop/child.mjs";
 const mode = process.argv[2];
 if (mode === "exit") {
   const leftConfig = applicationConfig();
-  leftConfig.resources.bridgeBudgetBytes = 128 * 1024 * 1024;
   const rightConfig = applicationConfig();
   rightConfig.identitySecretKey[31] = 63;
   const left = startRuntime(leftConfig, () => undefined);
@@ -31,7 +30,6 @@ if (mode === "exit") {
 if (["closed-facade-gc", "closed-facade-gc-early", "closed-terminal", "closed-terminal-fault"].includes(mode)) {
   const {default: bindings} = await import("../../src/bindings.js");
   const config = applicationConfig();
-  config.resources.bridgeBudgetBytes = 128 * 1024 * 1024;
   let runtime = startRuntime(config, () => undefined);
   const identity = await runtime.identity;
   await runtime.applyIntent(localIntent(config), config.initialSlot);
@@ -78,7 +76,6 @@ try {
   const info = await peer.command("ready");
   await peer.command("scenario", {scenario: "hold"});
   const config = applicationConfig();
-  config.resources.bridgeBudgetBytes = 128 * 1024 * 1024;
   runtime = startRuntime(config, () => {
     throw Error("request-notifier");
   });

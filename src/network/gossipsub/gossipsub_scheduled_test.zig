@@ -24,7 +24,7 @@ const Simulation = struct {
         var initialized: usize = 0;
         errdefer for (self.nodes[0..initialized]) |*node| node.deinit();
         for (&self.nodes, 0..) |*node, i| {
-            node.* = try Service.init(std.testing.allocator, .{ .reqresp = .{ .forks = &.{}, .peers = 4, .outbound_max = 1, .inbound_max = 1, .inbound_per_peer_max = 1 }, .router = .{ .negotiations_max = 4 }, .gossipsub = .{
+            node.* = try Service.init(std.testing.allocator, .{ .automatic_gossip_admission = false, .reqresp = .{ .forks = &.{}, .peers = 4, .outbound_max = 1, .inbound_max = 1, .inbound_per_peer_max = 1 }, .router = .{ .negotiations_max = 4 }, .gossipsub = .{
                 .topic_policy = &.{@import("topic_fixture.zig").bytes(.{ 1, 2, 3, 4 })},
                 .random_seed = seed + i,
                 .connected_capacity = 2,

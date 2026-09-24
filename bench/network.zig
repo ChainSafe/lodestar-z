@@ -49,6 +49,36 @@ fn options(key: *const network.KeyPair, plan: *const network.chain.Plan, update:
     };
 }
 
+/// Admits gossip as the gossip processor does and keeps each validation handle.
+const GossipSink = struct {
+    handles: [256]network.gossipsub.ValidationHandle = undefined,
+    count: usize = 0,
+    excess: bool = false,
+    sink: network.gossipsub.MessageSink = undefined,
+
+    /// The sink must not move while the node holds it.
+    fn attach(self: *GossipSink, node: *network.NetworkCore) void {
+        self.sink = .{ .context = self, .has_capacity = hasCapacity, .admit = admit };
+        node.service.gossipsub.message_sink = &self.sink;
+    }
+
+    fn hasCapacity(context: *anyopaque, _: network.gossipsub.topic.Kind, _: usize) bool {
+        const self: *GossipSink = @ptrCast(@alignCast(context));
+        if (self.count < self.handles.len) return true;
+        self.excess = true;
+        return false;
+    }
+
+    fn admit(context: *anyopaque, candidate: *network.gossipsub.Admission) bool {
+        const self: *GossipSink = @ptrCast(@alignCast(context));
+        if (self.count == self.handles.len or !candidate.feasible(&.{})) return false;
+        candidate.commit();
+        self.handles[self.count] = candidate.event.handle;
+        self.count += 1;
+        return true;
+    }
+};
+
 fn timestamp(io: std.Io) u64 {
     return @intCast(std.Io.Clock.awake.now(io).nanoseconds);
 }
@@ -181,8 +211,9 @@ fn pressure(a: *network.NetworkCore, b: *network.NetworkCore, sinks: []u8, io: s
     var gossip_pressured: usize = 0;
     var peak_descriptors: usize = 0;
     var peak_validations: usize = 0;
-    var handles: [256]network.gossipsub.ValidationHandle = undefined;
-    var handle_count: usize = 0;
+    var gossip: GossipSink = .{};
+    gossip.attach(b);
+    defer b.service.gossipsub.message_sink = null;
     var gossip_events: [16]network.gossipsub.Event = undefined;
     var request: [32]u8 = @splat(0);
     request[8] = 1;
@@ -204,12 +235,8 @@ fn pressure(a: *network.NetworkCore, b: *network.NetworkCore, sinks: []u8, io: s
             gossip_queued += published.queued;
             gossip_pressured += published.pressured;
         }
-        const delivered = try turn(b, io, .{ .gossipsub = &gossip_events });
-        for (gossip_events[0..delivered.counts.gossipsub]) |event| if (event == .message) {
-            if (handle_count == handles.len) return error.ExcessGossip;
-            handles[handle_count] = event.message.handle;
-            handle_count += 1;
-        };
+        _ = try turn(b, io, .{ .gossipsub = &gossip_events });
+        if (gossip.excess) return error.ExcessGossip;
         const sender = a.service.gossipsub.resourceSnapshot();
         const receiver = b.service.gossipsub.resourceSnapshot();
         peak_descriptors = @max(peak_descriptors, sender.queued_descriptors);
@@ -222,7 +249,7 @@ fn pressure(a: *network.NetworkCore, b: *network.NetworkCore, sinks: []u8, io: s
     }
     samples.print("connected_slow_application_control");
     std.debug.print("gossip_attempted_bytes={} queued={} pressured={} peak_descriptors={} peak_pending_validations={}\n", .{ 256 * payload.len, gossip_queued, gossip_pressured, peak_descriptors, peak_validations });
-    if (gossip_queued == 0 or handle_count == 0 or peak_validations == 0) return error.GossipDidNotDeliver;
+    if (gossip_queued == 0 or gossip.count == 0 or peak_validations == 0) return error.GossipDidNotDeliver;
     var rows: [4]t.Snapshot = undefined;
     var control_progress = false;
     for (rows[0..a.peer_manager.snapshots(&rows)]) |row| {
@@ -232,14 +259,16 @@ fn pressure(a: *network.NetworkCore, b: *network.NetworkCore, sinks: []u8, io: s
     }
     if (!control_progress) return error.ControlDidNotProgress;
     std.debug.print("control_status_head_slot=42 progress=true request_count=4 caller_sink_bytes={} gossip_resources={any}\n", .{ sinks.len, b.service.gossipsub.resourceSnapshot() });
-    for (handles[0..handle_count]) |handle| {
+    for (gossip.handles[0..gossip.count]) |handle| {
         const verdict = b.reportValidation(handle, .ignore, try network.transport.currentTime(io));
         if (verdict != .applied) return error.GossipVerdictFailed;
     }
-    try drain(a, b, io, requests.len, &payload, context, handle_count);
+    const delivered_gossip = gossip.count;
+    gossip.count = 0;
+    try drain(a, b, io, requests.len, &payload, context, &gossip, delivered_gossip);
 }
 
-fn drain(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, expected: usize, payload: []const u8, context: rr.ForkEntry, delivered_gossip: usize) !void {
+fn drain(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, expected: usize, payload: []const u8, context: rr.ForkEntry, gossip: *GossipSink, delivered_gossip: usize) !void {
     var events: [8]rr.Event = undefined;
     var gossip_events: [16]network.gossipsub.Event = undefined;
     var received: usize = 0;
@@ -249,10 +278,11 @@ fn drain(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, expected:
     var messages = delivered_gossip;
     for (0..turns) |_| {
         const result = try turn(b, io, .{ .application = &events, .gossipsub = &gossip_events });
-        for (gossip_events[0..result.counts.gossipsub]) |event| if (event == .message) {
+        for (gossip.handles[0..gossip.count]) |handle| {
             messages += 1;
-            _ = b.reportValidation(event.message.handle, .ignore, try network.transport.currentTime(io));
-        };
+            _ = b.reportValidation(handle, .ignore, try network.transport.currentTime(io));
+        }
+        gossip.count = 0;
         for (events[0..result.counts.application]) |event| switch (event) {
             .request => |value| {
                 received += 1;

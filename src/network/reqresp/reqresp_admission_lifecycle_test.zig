@@ -31,6 +31,8 @@ test "reqresp admission lifecycle incomplete requests cannot consume another con
     }
     try std.testing.expectEqual(@as(u16, 2), setup.shared.server.reqresp.active().inbound);
     try std.testing.expectEqual(@as(usize, 0), setup.shared.server.reqresp.resourceSnapshot().serving_occupied);
+    // Let gossip on the first connection settle so the dial reports only the new connection.
+    for (0..8) |_| try setup.pumpOnce();
     const second = try support.connectPair(&setup.shared.pair);
     setup.shared.handles = .{ .client = second.client, .server = second.server };
     const sink = try std.testing.allocator.alloc(u8, Protocol.blocks_by_root_v2.info().response_max);

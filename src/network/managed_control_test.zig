@@ -1266,8 +1266,8 @@ fn expectQuiescentGoodbye(setup: *Setup, admitted: u64) !void {
         try setup.pair.pump();
         var transport: [32]Engine.Event = undefined;
         var gossip: [8]@import("gossipsub/root.zig").Event = undefined;
-        const counts_local = managed.process(&setup.client, &setup.client_service, &setup.pair.client, setup.pair.events(&setup.pair.client, &transport), setup.pair.activity(&setup.pair.client), setup.pair.now, 100, &.{}, &.{}, &gossip);
-        for (gossip[0..counts_local.gossipsub]) |event| try std.testing.expect(event != .message);
+        _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, setup.pair.events(&setup.pair.client, &transport), setup.pair.activity(&setup.pair.client), setup.pair.now, 100, &.{}, &.{}, &gossip);
+        try std.testing.expectEqual(@as(usize, 0), setup.client_inbox.messages().len);
         try std.testing.expectEqual(@as(u64, 0), setup.client_service.gossipsub.counters.messages_received);
         try std.testing.expectEqual(admitted, setup.client_service.reqresp.counters.admitted);
         for (setup.client_service.reqresp.inbound) |slot| {
@@ -1381,6 +1381,7 @@ fn quiescenceGossip(hold_selection: bool) !void {
     if (!hold_selection) try std.testing.expectEqual(frame.len - 1, try setup.pair.server.write(stream, frame[0 .. frame.len - 1], false));
     for (0..10) |_| try setup.step(0);
     try std.testing.expectEqual(@as(usize, 0), setup.client_service.gossipsub.resourceSnapshot().pending_validations);
+    const admitted = setup.client_service.reqresp.counters.admitted;
     managed.beginGracefulClose(&setup.client, &setup.client_service, setup.pair.now);
     if (hold_selection) {
         var proposal_bytes: [64]u8 = undefined;
@@ -1389,7 +1390,7 @@ fn quiescenceGossip(hold_selection: bool) !void {
     }
     const remaining = if (hold_selection) frame else frame[frame.len - 1 ..];
     try std.testing.expectEqual(remaining.len, try setup.pair.server.write(stream, remaining, false));
-    try expectQuiescentGoodbye(&setup, 0);
+    try expectQuiescentGoodbye(&setup, admitted);
     try std.testing.expectEqual(@as(usize, 0), setup.client_service.gossipsub.resourceSnapshot().pending_validations);
 }
 
@@ -1506,10 +1507,13 @@ test "managed coalesces silent inbound request owners before host request delive
     for (0..30) |_| try setup.step(0);
     try std.testing.expectEqual(@as(u16, 2), setup.server_service.reqresp.active().inbound);
     setup.pair.advance(10_000);
-    var events: [2]rr.Event = undefined;
-    const result = managed.process(&setup.server, &setup.server_service, &setup.pair.server, &.{}, &.{}, setup.pair.now, 100, &.{}, &events, &.{});
-    try std.testing.expectEqual(@as(usize, 2), result.application);
-    for (events) |event| try std.testing.expect(event == .failed and event.failed.reason == .timeout);
+    // The per-peer receive layout services one slot of a peer per turn.
+    for (0..2) |_| {
+        var events: [2]rr.Event = undefined;
+        const result = managed.process(&setup.server, &setup.server_service, &setup.pair.server, &.{}, &.{}, setup.pair.now, 100, &.{}, &events, &.{});
+        try std.testing.expectEqual(@as(usize, 1), result.application);
+        try std.testing.expect(events[0] == .failed and events[0].failed.reason == .timeout);
+    }
     _ = setup.server.snapshots(&peers);
     try std.testing.expectEqual(@as(f64, -1), peers[0].score);
     try std.testing.expect(setup.server.catalog.rows[peers[0].peer.index].closing_reason == null);
