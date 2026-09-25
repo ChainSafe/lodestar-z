@@ -322,7 +322,7 @@ test "metrics report the kernel's buffer sizes and drops for every UDP socket" {
     var f = try Fixture.initWith(&.{}, .{ .bind = .{ .ip4 = .loopback(0) } });
     defer f.deinit();
     const output = try f.render(true);
-    const roles = [_]struct { []const u8, *const @import("udp").Sockets }{
+    const roles = [_]struct { []const u8, *@import("udp").Sockets }{
         .{ "quic", &f.node.transport.udp.sockets },
         .{ "discovery", &f.node.discovery.?.transport.sockets },
     };
@@ -332,7 +332,8 @@ test "metrics report the kernel's buffer sizes and drops for every UDP socket" {
         try std.testing.expect(reported.receive.? > 0 and reported.send.? > 0);
         try contains(output, try std.fmt.bufPrint(&line, "lodestar_native_udp_socket_buffer_bytes{{role=\"{s}\",family=\"ip4\",direction=\"receive\"}} {d}\n", .{ role[0], reported.receive.? }));
         try contains(output, try std.fmt.bufPrint(&line, "lodestar_native_udp_socket_buffer_bytes{{role=\"{s}\",family=\"ip4\",direction=\"send\"}} {d}\n", .{ role[0], reported.send.? }));
-        if (@import("builtin").os.tag == .linux) try contains(output, try std.fmt.bufPrint(&line, "lodestar_native_udp_socket_drops_total{{role=\"{s}\",family=\"ip4\"}} 0\n", .{role[0]}));
+        // Linux kernels without SO_MEMINFO report no drop count.
+        if (role[1].drops()[0] != null) try contains(output, try std.fmt.bufPrint(&line, "lodestar_native_udp_socket_drops_total{{role=\"{s}\",family=\"ip4\"}} 0\n", .{role[0]}));
     }
     try std.testing.expect(std.mem.indexOf(u8, output, "family=\"ip6\"") == null);
     f.node.discovery.?.transport.sockets.buffers[0].?.receive = null;

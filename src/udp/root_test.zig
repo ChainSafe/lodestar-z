@@ -203,7 +203,10 @@ test "UDP records the kernel's socket buffer sizes and receive drops after a req
     const smallest: udp.Buffers = .{ .receive = udp.Buffers.bytes_min, .send = udp.Buffers.bytes_min };
     try std.testing.expectEqual([2]bool{ false, false }, sockets.requestBuffers(std.testing.io, smallest));
     if (os != .linux) return;
-    try std.testing.expectEqual([2]?u64{ 0, 0 }, sockets.drops());
+    // Kernels without SO_MEMINFO report no drop count, and production exports none.
+    const initial = sockets.drops();
+    if (initial[0] == null) return;
+    try std.testing.expectEqual([2]?u64{ 0, 0 }, initial);
     const sent = 256;
     var payload: [1200]u8 = @splat(0);
     for (0..sent) |_| try plain.values[0].?.send(std.testing.io, &sockets.values[0].?.address, &payload);
