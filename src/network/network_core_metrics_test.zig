@@ -329,12 +329,16 @@ test "metrics report the kernel's buffer sizes and drops for every UDP socket" {
     var line: [160]u8 = undefined;
     for (roles) |role| {
         const reported = role[1].buffers[0].?;
-        try std.testing.expect(reported.receive > 0 and reported.send > 0);
-        try contains(output, try std.fmt.bufPrint(&line, "lodestar_native_udp_socket_buffer_bytes{{role=\"{s}\",family=\"ip4\",direction=\"receive\"}} {d}\n", .{ role[0], reported.receive }));
-        try contains(output, try std.fmt.bufPrint(&line, "lodestar_native_udp_socket_buffer_bytes{{role=\"{s}\",family=\"ip4\",direction=\"send\"}} {d}\n", .{ role[0], reported.send }));
+        try std.testing.expect(reported.receive.? > 0 and reported.send.? > 0);
+        try contains(output, try std.fmt.bufPrint(&line, "lodestar_native_udp_socket_buffer_bytes{{role=\"{s}\",family=\"ip4\",direction=\"receive\"}} {d}\n", .{ role[0], reported.receive.? }));
+        try contains(output, try std.fmt.bufPrint(&line, "lodestar_native_udp_socket_buffer_bytes{{role=\"{s}\",family=\"ip4\",direction=\"send\"}} {d}\n", .{ role[0], reported.send.? }));
         if (@import("builtin").os.tag == .linux) try contains(output, try std.fmt.bufPrint(&line, "lodestar_native_udp_socket_drops_total{{role=\"{s}\",family=\"ip4\"}} 0\n", .{role[0]}));
     }
     try std.testing.expect(std.mem.indexOf(u8, output, "family=\"ip6\"") == null);
+    f.node.discovery.?.transport.sockets.buffers[0].?.receive = null;
+    const unknown = try f.render(true);
+    try std.testing.expect(std.mem.indexOf(u8, unknown, "role=\"discovery\",family=\"ip4\",direction=\"receive\"") == null);
+    try contains(unknown, "role=\"discovery\",family=\"ip4\",direction=\"send\"");
 }
 
 test "metrics label redials after a health close in the dial retries contract series" {

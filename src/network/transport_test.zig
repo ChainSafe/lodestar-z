@@ -285,7 +285,7 @@ test "transport requests configured socket buffers and records the kernel's size
     var unsized: Transport = .{};
     try initTransport(&unsized, 32);
     defer unsized.deinit(std.testing.io);
-    try std.testing.expectEqual([2]?Buffers{ null, null }, unsized.udp.sockets.buffers);
+    try std.testing.expectEqual([2]?Buffers.Reported{ null, null }, unsized.udp.sockets.buffers);
     var sized: Transport = .{};
     try sized.init(std.testing.allocator, std.testing.io, .{
         .host = &key,
@@ -296,7 +296,7 @@ test "transport requests configured socket buffers and records the kernel's size
     const os = @import("builtin").os.tag;
     if (os != .linux and os != .macos) return;
     const reported = sized.udp.sockets.buffers[0].?;
-    try std.testing.expect(reported.receive >= Buffers.bytes_min and reported.send >= Buffers.bytes_min);
+    try std.testing.expect(reported.receive.? >= Buffers.bytes_min and reported.send.? >= Buffers.bytes_min);
     try std.testing.expectEqual(null, sized.udp.sockets.buffers[1]);
 }
 

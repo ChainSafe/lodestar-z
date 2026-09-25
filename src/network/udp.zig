@@ -31,7 +31,7 @@ pub fn requestBuffers(sockets: *sockets_mod.Sockets, io: std.Io, request: Buffer
     const short = sockets.requestBuffers(io, request);
     for (short, sockets.buffers, [_][]const u8{ "ip4", "ip6" }) |below, reported, family| {
         if (!below) continue;
-        std.log.scoped(scope).warn("socket_buffers_below_request family={s} receive_bytes={d} receive_requested={d} send_bytes={d} send_requested={d}", .{ family, reported.?.receive, request.receive, reported.?.send, request.send });
+        std.log.scoped(scope).warn("socket_buffers_below_request family={s} receive_bytes={?d} receive_requested={d} send_bytes={?d} send_requested={d}", .{ family, reported.?.receive, request.receive, reported.?.send, request.send });
     }
 }
 

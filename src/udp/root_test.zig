@@ -194,11 +194,11 @@ test "UDP records the kernel's socket buffer sizes and receive drops after a req
     const short = sockets.requestBuffers(std.testing.io, largest);
     const full: u64 = if (os == .linux) 2 * @as(u64, udp.Buffers.bytes_max) else udp.Buffers.bytes_max;
     for (plain.values, sockets.buffers, short) |socket, reported, below| {
-        try std.testing.expect(reported.?.receive >= try kernelSize(socket.?.handle, std.posix.SO.RCVBUF));
-        try std.testing.expect(reported.?.send >= try kernelSize(socket.?.handle, std.posix.SO.SNDBUF));
-        try std.testing.expectEqual(reported.?.receive < full or reported.?.send < full, below);
+        try std.testing.expect(reported.?.receive.? >= try kernelSize(socket.?.handle, std.posix.SO.RCVBUF));
+        try std.testing.expect(reported.?.send.? >= try kernelSize(socket.?.handle, std.posix.SO.SNDBUF));
+        try std.testing.expectEqual(reported.?.receive.? < full or reported.?.send.? < full, below);
     }
-    try std.testing.expectEqual([2]?udp.Buffers{ null, null }, plain.buffers);
+    try std.testing.expectEqual([2]?udp.Buffers.Reported{ null, null }, plain.buffers);
     try std.testing.expectEqual([2]?u32{ null, null }, plain.drops());
     const smallest: udp.Buffers = .{ .receive = udp.Buffers.bytes_min, .send = udp.Buffers.bytes_min };
     try std.testing.expectEqual([2]bool{ false, false }, sockets.requestBuffers(std.testing.io, smallest));
@@ -216,4 +216,15 @@ test "UDP records the kernel's socket buffer sizes and receive drops after a req
     try std.testing.expect(received > 0 and received < sent);
     try std.testing.expectEqual(sent, received + sockets.drops()[0].?);
     try std.testing.expectEqual(@as(?u32, 0), sockets.drops()[1]);
+}
+
+test "UDP records a failed size readback as unknown and not below the request" {
+    const os = @import("builtin").os.tag;
+    if (os != .linux and os != .macos) return error.SkipZigTest;
+    // getsockopt fails on a descriptor that is not open.
+    var sockets: udp.Sockets = .{ .values = .{ .{ .handle = -1, .address = .{ .ip4 = .loopback(0) } }, null } };
+    const largest: udp.Buffers = .{ .receive = udp.Buffers.bytes_max, .send = udp.Buffers.bytes_max };
+    try std.testing.expectEqual([2]bool{ false, false }, sockets.requestBuffers(std.testing.io, largest));
+    try std.testing.expectEqual([2]?udp.Buffers.Reported{ .{ .receive = null, .send = null }, null }, sockets.buffers);
+    try std.testing.expectEqual([2]?u32{ null, null }, sockets.drops());
 }
