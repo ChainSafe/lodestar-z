@@ -103,6 +103,26 @@ test "slot phase follows wall time from genesis in basis points of the slot" {
     try std.testing.expect(clock.split(1_000, 1_000 + 12_000 + 1_500, &spans));
     for (spans, 0..) |span, index| try std.testing.expectEqual(@as(u64, if (index == 4 or index == 5) 1_500 else 750), span);
     try std.testing.expect(!early.split(0, 1_000, &spans));
+    // A later read moves the offset; earlier monotonic times map through the new one too.
+    clock.observe(.{ .mono_ms = 2_000, .unix_s = 0, .unix_ms = genesis + 10 * 12_000 + 4_250 });
+    try std.testing.expectEqual(@as(?u16, 3_541), clock.phaseBps(2_000));
+    try std.testing.expectEqual(@as(?u16, 2_708), clock.phaseBps(1_000));
+    // A 5 s slot has buckets of 313 and 312 ms that agree with the phase of each millisecond.
+    var short: SlotClock = .{ .genesis_unix_ms = genesis, .slot_duration_ms = 5_000 };
+    try short.validate();
+    short.observe(.{ .mono_ms = 0, .unix_s = 0, .unix_ms = genesis + 2 * 5_000 });
+    try std.testing.expectEqual(@as(?u16, 624), short.phaseBps(312));
+    try std.testing.expectEqual(@as(usize, 0), SlotClock.bucket(short.phaseBps(312).?));
+    try std.testing.expectEqual(@as(usize, 1), SlotClock.bucket(short.phaseBps(313).?));
+    try std.testing.expectEqual(@as(usize, 15), SlotClock.bucket(short.phaseBps(4_999).?));
+    spans = @splat(0);
+    try std.testing.expect(short.split(0, 5_000, &spans));
+    var total: u64 = 0;
+    for (spans, 0..) |span, index| {
+        try std.testing.expectEqual(@as(u64, if (index % 2 == 0) 313 else 312), span);
+        total += span;
+    }
+    try std.testing.expectEqual(@as(u64, 5_000), total);
     clock.slot_duration_ms = 0;
     try std.testing.expectError(error.InvalidOptions, clock.validate());
 }
