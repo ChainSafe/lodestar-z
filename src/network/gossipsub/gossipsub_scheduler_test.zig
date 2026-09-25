@@ -86,20 +86,16 @@ fn saturatedPeers(peers: u16, budget: Budget) !void {
     for (g.sessions.rows) |row| try std.testing.expect(row.io.write_budget_deferred > 0);
 }
 
-test "gossip turn stopped by the receive item budget leaves its writable sessions waiting until their next visit" {
-    var setup: Pair = .{};
-    try setup.initOpts(.{ .random_seed = 1, .connected_capacity = 4 }, .{ .random_seed = 2 });
-    defer setup.deinit();
-    for (0..20) |_| try setup.pumpOnce();
+/// Leaves the client's session at the head of the ready list with a frame of three items, one more
+/// than a turn's item budget, and three more sessions behind it with output on one writable QUIC
+/// stream. Returns the reader.
+fn readerAhead(setup: *Pair, writers: *[3]u16) !u16 {
     const g = setup.shared.client.gossipsub;
     const reader = g.sessions.find(setup.shared.handles.client).?;
     const stream = setup.clientStream();
-    var writers: [3]u16 = undefined;
-    for (&writers, 1..) |*writer, i| writer.* = support.addPeer(g, .{ .index = @intCast(300 + i), .generation = 1 }, .v1_2).?.index;
+    for (writers, 1..) |*writer, i| writer.* = support.addPeer(g, .{ .index = @intCast(300 + i), .generation = 1 }, .v1_2).?.index;
     for (0..3) |_| _ = support.pumpTurn(g, &setup.shared.pair.client, setup.shared.pair.now);
     try std.testing.expectEqual(@as(usize, 0), g.sessions.ready.len);
-    // The reader leads the ready list with a frame of three items, one more than a turn's item
-    // budget. The writers follow it with output on one writable QUIC stream.
     g.options.items_per_pump = 2;
     const protobuf = @import("protobuf.zig");
     var body: [256]u8 = undefined;
@@ -115,6 +111,17 @@ test "gossip turn stopped by the receive item budget leaves its writable session
         g.settle(index);
     }
     try std.testing.expectEqual(reader, g.sessions.ready.head);
+    return reader;
+}
+
+test "gossip turn stopped by the receive item budget leaves its writable sessions waiting until their next visit" {
+    var setup: Pair = .{};
+    try setup.initOpts(.{ .random_seed = 1, .connected_capacity = 4 }, .{ .random_seed = 2 });
+    defer setup.deinit();
+    for (0..20) |_| try setup.pumpOnce();
+    const g = setup.shared.client.gossipsub;
+    var writers: [3]u16 = undefined;
+    _ = try readerAhead(&setup, &writers);
     // The turn starts 2 ms before the second phase bucket of a 12 s slot.
     var clock: @import("../slot_clock.zig").SlotClock = .{ .genesis_unix_ms = 1_000_000, .slot_duration_ms = 12_000 };
     clock.observe(.{ .mono_ms = setup.shared.pair.now.mono_ms, .unix_s = 0, .unix_ms = 1_000_000 + 12_000 + 748 });
@@ -137,4 +144,54 @@ test "gossip turn stopped by the receive item budget leaves its writable session
     try std.testing.expectEqual(@as(u64, 2 * 3), unserved[1]);
     for (writers[0..2]) |index| try std.testing.expect(!g.sessions.rows[index].io.tx.pending());
     g.slot_clock = null;
+}
+
+test "gossip waiting sessions keep one mark across stops, take the latest stop's budget and drop it with the session" {
+    var setup: Pair = .{};
+    try setup.initOpts(.{ .random_seed = 1, .connected_capacity = 4 }, .{ .random_seed = 2 });
+    defer setup.deinit();
+    for (0..20) |_| try setup.pumpOnce();
+    const g = setup.shared.client.gossipsub;
+    var writers: [3]u16 = undefined;
+    const reader = try readerAhead(&setup, &writers);
+    const items = @intFromEnum(Budget.items);
+    const calls = @intFromEnum(Budget.calls);
+    const waited = struct {
+        fn total(spans: []const u64) u64 {
+            var sum: u64 = 0;
+            for (spans) |ms| sum += ms;
+            return sum;
+        }
+    }.total;
+    // An item stop marks all three writers.
+    _ = support.pumpTurn(g, &setup.shared.pair.client, setup.shared.pair.now);
+    try std.testing.expectEqual(@as(usize, 3), g.sessions.unserved[items]);
+    // With one call per turn, the next turn writes for the first writer and stops on calls: the
+    // other two move to calls after their 3 ms under items, and the reader is skipped unmarked.
+    g.options.calls_per_pump = 1;
+    setup.shared.pair.advance(3);
+    _ = support.pumpTurn(g, &setup.shared.pair.client, setup.shared.pair.now);
+    try std.testing.expectEqual(@as(u64, 3 * 3), waited(&g.occupancy.unserved_ms[items]));
+    try std.testing.expectEqualSlices(usize, &.{ 2, 0, 0, 0, 0, 0, 0 }, &g.sessions.unserved);
+    try std.testing.expectEqual(@as(?Budget, null), g.sessions.rows[writers[0]].unserved);
+    for (writers[1..]) |index| try std.testing.expectEqual(@as(?Budget, .calls), g.sessions.rows[index].unserved);
+    try std.testing.expectEqual(@as(?Budget, null), g.sessions.rows[reader].unserved);
+    try std.testing.expectEqualSlices(u64, &.{ 1, 2 }, &g.io_metrics.skipped[calls]);
+    // A second call stop skips the last writer again: its one mark keeps counting once.
+    setup.shared.pair.advance(4);
+    _ = support.pumpTurn(g, &setup.shared.pair.client, setup.shared.pair.now);
+    try std.testing.expectEqual(@as(u64, 2 * 4), waited(&g.occupancy.unserved_ms[calls]));
+    try std.testing.expectEqual(@as(usize, 1), g.sessions.unserved[calls]);
+    try std.testing.expectEqual(@as(u64, 2), g.io_metrics.stops[calls]);
+    try std.testing.expectEqualSlices(u64, &.{ 2, 3 }, &g.io_metrics.skipped[calls]);
+    // Its connection closes 5 ms later, as `retireConnection` sees it, and its wait ends there.
+    setup.shared.pair.advance(5);
+    g.last_now_ms = setup.shared.pair.now.mono_ms;
+    g.connectionClosed(g.sessions.rows[writers[2]].conn);
+    try std.testing.expectEqual(@as(usize, 0), g.sessions.unserved[calls]);
+    try std.testing.expectEqual(@as(u64, 2 * 4 + 5), waited(&g.occupancy.unserved_ms[calls]));
+    setup.shared.pair.advance(5);
+    _ = support.pumpTurn(g, &setup.shared.pair.client, setup.shared.pair.now);
+    try std.testing.expectEqual(@as(u64, 2 * 4 + 5), waited(&g.occupancy.unserved_ms[calls]));
+    try std.testing.expectEqual(@as(u64, 3 * 3), waited(&g.occupancy.unserved_ms[items]));
 }

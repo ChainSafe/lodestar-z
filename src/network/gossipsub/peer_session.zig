@@ -51,7 +51,8 @@ pub const Session = struct {
         return self.writable();
     }
 
-    /// Output queued on an out stream whose last write did not block.
+    /// Output queued on an out stream that takes writes, which a blocked write stops until the next
+    /// writable event.
     pub fn writable(self: *const Session) bool {
         const tx = &self.io.tx;
         return self.outStream() != null and tx.ready and (tx.pending() or tx.subscription_dirty.count() > 0);
