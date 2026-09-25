@@ -9,6 +9,7 @@ import {
   applicationConfig,
   configureChain,
   discoveryConfig,
+  exchange,
   localIntent,
   settleOnly,
   startRuntime,
@@ -268,7 +269,7 @@ test("complete getters, membership and command results survive a throwing notifi
     expect(await runtime.removeDirectPeer(ready.peerId)).toBe(false);
     await runtime.disconnect(ready.peerId);
     await runtime.reStatusPeers([]);
-    expect(runtime.exchange({...settleOnly, peers: 64}).peers).toEqual([]);
+    expect(exchange(runtime, {...settleOnly, peers: 64}).peers).toEqual([]);
     const remoteIdentity = await remote.identity;
     await remote.applyIntent(localIntent(other), 100n);
     const connected = runtime.connect(remoteIdentity.peerId, [remoteIdentity.localEndpoint], 5000n);
@@ -394,7 +395,7 @@ test("real authenticated connect, direct membership and generation-preserving im
     expect((await a.getDirectPeers()).identities).toEqual([identityB.peerId]);
     expect(await a.removeDirectPeer(identityB.peerId)).toBe(true);
     expect(await a.removeDirectPeer(identityB.peerId)).toBe(false);
-    const events = a.exchange({...settleOnly, peers: 64}).peers;
+    const events = exchange(a, {...settleOnly, peers: 64}).peers;
     const closed = events.filter((event) => event.type === "closed");
     expect(closed).toHaveLength(1);
     expect(closed[0].connection).toEqual(before.peers[0].connection);
@@ -436,7 +437,8 @@ test("peer penalties accumulate while the command lane is full", async () => {
     await a.connect(remote.peerId, [remote.localEndpoint], 5000n);
     const pending = Array.from({length: 32}, () => a.getIdentity());
     expect(() => a.getIdentity()).toThrow("NetworkCommandFull");
-    for (let i = 0; i < 3; i++) a.reportPeer(remote.peerId, "high_tolerance");
+    // Reports coalesce per identity and action, as the host's ledger batches them into one action.
+    exchange(a, settleOnly, [{action: "high_tolerance", count: 3, peerId: remote.peerId, type: "reportPeer"}]);
     await Promise.all(pending);
     let score = 0;
     for (let i = 0; i < 100; i++) {
@@ -446,11 +448,11 @@ test("peer penalties accumulate while the command lane is full", async () => {
     }
     expect(score).toBeLessThan(-2.9);
     expect(score).toBeGreaterThanOrEqual(-3);
-    a.reportPeer((await a.getIdentity()).peerId, "fatal");
+    exchange(a, settleOnly, [{action: "fatal", count: 1, peerId: (await a.getIdentity()).peerId, type: "reportPeer"}]);
     for (let i = 0; i < 100 && a.diagnostics().peerReportsIgnored === 0n; i++) await delay(10);
     expect(a.diagnostics().peerReportsIgnored).toBe(1n);
     await a.disconnect(remote.peerId);
-    a.reportPeer(remote.peerId, "low_tolerance");
+    exchange(a, settleOnly, [{action: "low_tolerance", count: 1, peerId: remote.peerId, type: "reportPeer"}]);
     for (let i = 0; i < 100; i++) {
       const retained = (await a.getPeers()).peers.find((peer) => peer.identity === remote.peerId);
       if (retained && retained.score < -12.9) break;

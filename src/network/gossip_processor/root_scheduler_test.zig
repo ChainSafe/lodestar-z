@@ -69,6 +69,7 @@ test "gossip scheduler batches kinds as separate validator jobs in native priori
     _ = try add(&table, .beacon_attestation, 1, .{ .group = @splat(7) });
     _ = try add(&table, .beacon_block, 1, .{});
     try t.expect(!table.groups.rows[table.get(first_attestation).?.group_index].ready);
+    table.maintain(51, 0);
     const batch = table.claim(51);
     try t.expectEqual(@as(usize, 5), batch.len);
     try t.expectEqual(@as(usize, 4), batch.job_count);
@@ -112,7 +113,7 @@ test "gossip scheduler budgets mass expiry and root promotion without releasing 
     const root: [32]u8 = @splat(3);
     for (0..130) |_| _ = try add(&table, .beacon_attestation, 1, .{ .slot = 1, .root = root, .await_block = true });
     for (0..3) |_| {
-        const checks = table.claimChecks(1);
+        const checks = table.claimChecks(1, p.batch_max);
         for (checks.tokens[0..checks.len]) |token| try t.expect(table.classify(token, false));
     }
     table.notifyBlock(root);
@@ -148,7 +149,8 @@ test "gossip scheduler indexes survive bounded randomized lifecycle interleaving
             const group: ?[128]u8 = if (kind == .beacon_attestation) @splat(@intCast(step % 5)) else null;
             _ = try add(&table, kind, now, .{ .root = root, .group = group, .await_block = root != null, .slot = 1 });
         }
-        const checks = table.claimChecks(now);
+        table.maintain(now, 0);
+        const checks = table.claimChecks(now, p.batch_max);
         if (step % 7 == 0) table.notifyBlock(@splat(7));
         for (checks.tokens[0..checks.len]) |token| _ = table.classify(token, step % 2 == 0);
         const batch = table.claimDemand(now, .{ .items = 3, .ordinary = step % 4 != 0 });
@@ -218,33 +220,32 @@ test "gossip scheduler freshness replacement never selects copying or executing 
     try verify(&table);
 }
 
-test "gossip host work reports checks and claimable urgent and ordinary jobs past the ordinary gate" {
+test "gossip readiness reports checks and executable urgent and ordinary jobs" {
     const limits: p.limits_mod.Limits = @splat(.{ .items = 8, .bytes = 4096 });
     var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits });
     defer table.deinit();
     defer table.close();
-    const Work = p.GossipProcessor.HostWork;
+    const Work = p.GossipProcessor.Work;
     table.execution.?[@intFromEnum(Kind.data_column_sidecar)].items = 1;
-    try t.expectEqual(Work{}, table.hostWork());
+    try t.expectEqual(Work{}, table.readiness());
     _ = try add(&table, .voluntary_exit, 1, .{});
-    try t.expectEqual(Work{ .ordinary = true }, table.hostWork());
-    // A claim that disables ordinary work leaves it reported, while the owner sees no work.
+    try t.expectEqual(Work{ .ordinary = true }, table.readiness());
+    // A claim of urgent kinds only leaves ordinary work reported.
     try t.expectEqual(@as(usize, 0), table.claimDemand(1, .{ .ordinary = false }).len);
-    try t.expect(!table.hasWork());
-    try t.expectEqual(Work{ .ordinary = true }, table.hostWork());
+    try t.expectEqual(Work{ .ordinary = true }, table.readiness());
     _ = try add(&table, .data_column_sidecar, 1, .{});
     _ = try add(&table, .data_column_sidecar, 1, .{});
     _ = try add(&table, .beacon_attestation, 1, .{ .slot = 1, .root = @splat(4), .await_block = true });
-    try t.expectEqual(Work{ .checks = true, .urgent = true, .ordinary = true }, table.hostWork());
+    try t.expectEqual(Work{ .checks = true, .urgent = true, .ordinary = true }, table.readiness());
     // The column kind at its execution limit reports its second job as not claimable.
     const batch = table.claimDemand(1, .{ .ordinary = false });
     try t.expectEqual(@as(usize, 1), batch.len);
-    try t.expectEqual(Work{ .checks = true, .ordinary = true }, table.hostWork());
+    try t.expectEqual(Work{ .checks = true, .ordinary = true }, table.readiness());
     table.finish(&batch, true);
-    const checks = table.claimChecks(1);
+    const checks = table.claimChecks(1, p.batch_max);
     try t.expectEqual(@as(usize, 1), checks.len);
-    try t.expectEqual(Work{ .ordinary = true }, table.hostWork());
+    try t.expectEqual(Work{ .ordinary = true }, table.readiness());
     try t.expect(table.report(batch.tokens[0], .accept, 1));
-    try t.expectEqual(Work{ .urgent = true, .ordinary = true }, table.hostWork());
+    try t.expectEqual(Work{ .urgent = true, .ordinary = true }, table.readiness());
     try verify(&table);
 }

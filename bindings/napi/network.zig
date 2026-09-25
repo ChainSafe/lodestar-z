@@ -57,6 +57,7 @@ pub fn initialize(self: *@This(), config: js.Value, callback: js.Value) !js.Valu
     runtime.close_deferred = try env.createPromise();
     errdefer @import("network_js.zig").discardPromise(env, runtime.close_deferred.?);
     try prepareCloseResults(env, runtime);
+    try runtime.results.prepare(env);
     const holder = try env.createObject();
     try put(holder, "identity", try identity(env, &runtime.identity));
     try put(holder, "closed", runtime.close_deferred.?.getPromise());
@@ -158,30 +159,31 @@ fn jsStopped(err: anyerror) bool {
     return err == error.Closing or err == error.CannotRunJS or err == error.PendingException;
 }
 
-/// The notification callback only schedules: a host that returns true drains through `exchange`,
-/// which releases the latch this callback leaves set once native has nothing more. A callback that
-/// returns anything else, such as a wrapper already collected, leaves no host drain, so the
-/// results settle inline and the latch is released.
+/// The notification callback only schedules: a host that returns true runs an exchange, which arms again once
+/// nothing is queued. A callback that returns anything else, such as a wrapper already collected, leaves no host
+/// exchange, so legacy results settle here; payload waits for a host.
 fn notify(env: napi.Env, callback: Value, runtime: *Runtime) !void {
     const started = r.bridge.now();
     defer runtime.bridge.notify.observe(r.bridge.now() -| started);
     runtime.lock();
-    const alive = runtime.noticeLocked();
+    runtime.bridge.notified();
+    const alive = runtime.env_alive;
     runtime.unlock();
     if (!alive) return;
     const result = env.callFunction(callback, try env.getUndefined(), .{}) catch {
-        // A throwing host may not have scheduled its drain, so a later ping notifies again. No
-        // settlement can run until the exception propagates.
+        // A throwing host may not have scheduled an exchange, so the next move notifies again. No settlement
+        // can run until the exception propagates.
         runtime.lock();
-        runtime.declineLocked();
+        runtime.readiness.armed = true;
         runtime.unlock();
         return;
     };
     if (try result.typeof() == .boolean and try result.getValueBool()) return;
-    runtime.lock();
-    runtime.declineLocked();
-    runtime.unlock();
     for (0..2) |_| if (!try settleWithin(env, runtime, publications.capacity_max)) break;
+    runtime.lock();
+    defer runtime.unlock();
+    runtime.refreshLocked();
+    if (runtime.readiness.control.len > 0) runtime.notifyLocked() else runtime.readiness.armed = true;
 }
 fn makeError(env: napi.Env, err: anyerror) !Value {
     return @import("network_js.zig").errorValue(env, @errorName(err));
@@ -212,61 +214,95 @@ fn settleWithin(env: napi.Env, runtime: *Runtime, limit: usize) !bool {
     return false;
 }
 
-/// One host drain turn: legacy settlement, then the payload `demand` asks for, delivered in one result.
-pub fn exchange(self: *@This(), demand: js.Value) !js.Value {
+/// One host exchange (network_exchange.zig): the host's actions, then legacy settlement and the payload `demand`
+/// asks for, delivered in one result.
+pub fn exchange(self: *@This(), actions_value: js.Value, demand_value: js.Value) !js.Value {
     const call = r.call(self.runtime, .exchange);
     defer call.end();
     const runtime = try self.owner();
     runtime.retain();
     defer runtime.release();
-    const parsed = exchange_mod.Demand.parse(demand.val) catch |err| return failExchange(runtime, err);
+    if (runtime.in_exchange) return error.NetworkExchangeReentered;
+    runtime.in_exchange = true;
+    defer runtime.in_exchange = false;
+    var actions: [exchange_mod.action_max]exchange_mod.Action = undefined;
+    const count = try exchange_mod.parseActions(actions_value.val, &actions);
+    const demand = try exchange_mod.Demand.parse(demand_value.val);
     var host: Exchange = .{ .env = js.env(), .runtime = runtime };
-    const result = exchange_mod.run(runtime, &parsed, &host) catch |err| {
+    const settled = try host.settle(demand.settle);
+    const now = try gossip.monotonic();
+    const result = exchange_mod.run(runtime, actions[0..count], &demand, settled, now, &host) catch |err| {
         if (jsStopped(err)) runtime.forceStop(true);
-        return failExchange(runtime, @import("network_js.zig").copyError(err));
+        return err;
     };
     return .{ .val = result };
 }
 
-fn failExchange(runtime: *Runtime, err: anyerror) anyerror {
-    runtime.lock();
-    exchange_mod.failLocked(runtime);
-    runtime.unlock();
-    return err;
+/// Terminates the process for a bridge contract failure the host escalates: 1, an exchange refused a batch the
+/// host generated; 3, the host's demand failed on three consecutive turns; 4, three consecutive deliveries rolled
+/// back and retired nothing.
+pub fn fail(_: *@This(), trigger_value: js.Value, reason_value: js.Value) !void {
+    const trigger = try cfg.integer(trigger_value.val, 4);
+    if (trigger != 1 and trigger != 3 and trigger != 4) return error.InvalidNetworkInteger;
+    var reason: [64]u8 = undefined;
+    const len = try application_cfg.text(reason_value.val, &reason);
+    var message: [96]u8 = undefined;
+    js.env().fatalError("native network bridge", std.fmt.bufPrint(&message, "escalation trigger {d}: {s}", .{ trigger, reason[0..len] }) catch unreachable);
 }
 
-/// The N-API side of an exchange: legacy settlement, the clock, and the result's JS values.
+/// The N-API side of an exchange: legacy settlement and the result's JS values.
 const Exchange = struct {
     env: napi.Env,
     runtime: *Runtime,
 
-    pub const Output = Value;
+    pub const Result = Value;
 
-    pub fn settle(self: *Exchange, limit: usize) !exchange_mod.Settled {
+    /// Settles up to `limit` completions per legacy table. Returns how many.
+    pub fn settle(self: *Exchange, limit: usize) !usize {
         const runtime = self.runtime;
         runtime.lock();
         const due = runtime.settleableLocked() or (runtime.quiescent and !runtime.close_settled);
         runtime.unlock();
-        if (!due) return .{};
+        if (!due) return 0;
         const completions = &runtime.bridge.delivered[@intFromEnum(r.bridge.Delivery.completion)];
         const before = completions.*;
-        const more = settleWithin(self.env, runtime, limit) catch |err| {
+        _ = settleWithin(self.env, runtime, limit) catch |err| {
             settlementFailed(self.env, runtime, err);
             return err;
         };
-        return .{ .count = completions.* - before, .more = more };
+        return completions.* - before;
     }
-    pub fn now(_: *Exchange) !u64 {
-        return gossip.monotonic();
+    /// A fresh result, or null when there is nothing to deliver and a prepared one serves.
+    pub fn build(self: *Exchange, selection: *exchange_mod.Selection) !?Value {
+        if (!selection.delivers() and selection.settled == 0 and selection.retired == 0) return null;
+        return try exchange_mod.build(self.env, self.runtime, selection);
     }
-    pub fn build(self: *Exchange, selection: *exchange_mod.Selection, settled: usize) !Value {
-        return exchange_mod.build(self.env, self.runtime, selection, settled);
+    pub fn finish(self: *Exchange, output: ?Value, _: *const exchange_mod.Selection, outcome: exchange_mod.Outcome) !Value {
+        return exchange_mod.finish(self.env, self.runtime, output, outcome);
+    }
+    pub fn rolledBack(self: *Exchange, retired: bool) !Value {
+        return self.runtime.results.rolled_back[@intFromBool(retired)].?.getValue();
     }
     pub fn discard(self: *Exchange, selection: *const exchange_mod.Selection) void {
         for (selection.closed[0..selection.closed_count]) |deferred| @import("network_js.zig").discardPromise(self.env, deferred);
     }
     pub fn keepAlive(self: *Exchange) void {
         self.runtime.notify.ref(self.env) catch {};
+    }
+    /// Our own allocator's OutOfMemory is the only operation-local allocation failure: an N-API payload buffer
+    /// allocation that fails terminates the process (bindings/test/network-allocation.test.ts). An exception that
+    /// clears means the bridge broke its contract. One that will not clear means JavaScript cannot run, as does a
+    /// pending-exception status with none pending, which N-API returns for cannot_run_js to this module version.
+    pub fn classify(self: *Exchange, err: anyerror) exchange_mod.Failure {
+        if (err == error.OutOfMemory) return .allocation;
+        if (err == error.Closing or err == error.CannotRunJS) return .stopped;
+        const pending = self.env.isExceptionPending() catch return .stopped;
+        if (!pending) return if (err == error.PendingException) .stopped else .contract;
+        _ = self.env.getAndClearLastException() catch return .stopped;
+        return .contract;
+    }
+    pub fn fatal(self: *Exchange, err: anyerror) noreturn {
+        self.env.fatalError("native network exchange", @errorName(err));
     }
 };
 
@@ -445,22 +481,6 @@ pub fn getDirectPeers(self: *@This()) !js.Value {
 pub fn getRememberedPeers(self: *@This()) !js.Value {
     return self.submit(.getRememberedPeers, &.{});
 }
-pub fn reportPeer(self: *@This(), peer: js.Value, action: js.Value) !js.Value {
-    const runtime = try self.owner();
-    const reported_peer = try cfg.peerIdFrom(peer.val);
-    var buffer: [32]u8 = undefined;
-    const length = try application_cfg.text(action.val, &buffer);
-    const parsed = std.meta.stringToEnum(n.peers.types.PeerAction, buffer[0..length]) orelse return error.InvalidNetworkConfig;
-    const result = try js.env().getUndefined();
-    runtime.lock();
-    defer runtime.unlock();
-    if (!runtime.stop and !runtime.quiescent) {
-        runtime.reports.add(&reported_peer, parsed);
-        runtime.signalLocked();
-    }
-    return .{ .val = result };
-}
-
 fn settleOperations(env: napi.Env, runtime: *Runtime, limit: usize) !bool {
     var settled: usize = 0;
     for (0..commands.capacity) |_| {
@@ -583,29 +603,8 @@ pub fn incomingTerminal(self: *@This(), handle: js.Value, action: js.Value, stat
     return .{ .val = try incoming_js.terminal(try self.owner(), handle.val, action.val, status.val, message.val) };
 }
 
-pub fn reportGossip(self: *@This(), handle: js.Value, verdict: js.Value) !js.Value {
-    const call = r.call(self.runtime, .report_gossip);
-    defer call.end();
-    return .{ .val = try gossip_js.report(try self.owner(), handle.val, verdict.val) };
-}
 pub fn publishGossip(self: *@This(), topic: js.Value, data: js.Value, options: js.Value) !js.Value {
     const call = r.call(self.runtime, .publish_gossip);
     defer call.end();
     return .{ .val = try publication_js.publish(try self.owner(), topic.val, data.val, options.val) };
-}
-
-pub fn classifyGossip(self: *@This(), values: js.Value) !js.Value {
-    const call = r.call(self.runtime, .classify_gossip);
-    defer call.end();
-    return .{ .val = try gossip_js.classify(try self.owner(), values.val) };
-}
-pub fn notifyGossipBlock(self: *@This(), root: js.Value) !js.Value {
-    return .{ .val = try gossip_js.notifyBlock(try self.owner(), root.val) };
-}
-pub fn dropQueuedGossip(self: *@This()) !js.Value {
-    return .{ .val = try gossip_js.dropQueued(try self.owner()) };
-}
-
-pub fn trackGossipSearch(self: *@This(), root: js.Value, peer: js.Value) !js.Value {
-    return .{ .val = try gossip_js.trackSearch(try self.owner(), root.val, peer.val) };
 }

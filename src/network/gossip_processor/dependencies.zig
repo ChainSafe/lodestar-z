@@ -14,6 +14,10 @@ pub const Dependencies = struct {
     free: lists.List = .{},
     promoting: lists.List = .{},
     notification: u64 = 0,
+    /// The next row a recheck pass promotes, while one is active.
+    recheck_cursor: ?usize = null,
+    /// A recheck arrived during the active pass, so another pass follows it.
+    recheck_again: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, capacity: usize) !Dependencies {
         const rows = try allocator.alloc(Row, capacity);
@@ -62,6 +66,31 @@ pub const Dependencies = struct {
         if (self.rows[index].promoting) return;
         self.rows[index].promoting = true;
         self.promoting.append(self.rows, "link", index);
+    }
+    /// Promotes every waiting root once. A negative check in flight retries, as after any import. A recheck
+    /// during an active pass lets that pass finish and runs one more.
+    pub fn recheck(self: *Dependencies) void {
+        self.notification +|= 1;
+        if (self.recheck_cursor == null) self.recheck_cursor = 0 else self.recheck_again = true;
+    }
+    pub fn rechecking(self: *const Dependencies) bool {
+        return self.recheck_cursor != null;
+    }
+    /// Walks up to `limit` rows of the active recheck pass, promoting each root that has waiting members.
+    pub fn advanceRecheck(self: *Dependencies, limit: usize) void {
+        for (0..limit) |_| {
+            const cursor = self.recheck_cursor orelse return;
+            if (cursor == self.rows.len) {
+                self.recheck_cursor = if (self.recheck_again) 0 else null;
+                self.recheck_again = false;
+                continue;
+            }
+            self.recheck_cursor = cursor + 1;
+            const row = &self.rows[cursor];
+            if (row.members.len == 0 or row.promoting) continue;
+            row.promoting = true;
+            self.promoting.append(self.rows, "link", @intCast(cursor));
+        }
     }
     pub fn next(self: *const Dependencies) ?u32 {
         return if (self.promoting.head == none) null else self.rows[self.promoting.head].members.head;

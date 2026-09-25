@@ -322,38 +322,66 @@ export interface NativePeerSnapshot {
 }
 
 /**
- * Per exchange: completions settled per table (1..256), peer observations (0..64), serving starts (0..8, and a
- * full 8 asks for another exchange), and up to 64 dependency checks plus one job batch of `items` (0..64) and
- * `bytes` (0..16 MiB, a larger first message comes alone). `ordinary` requires `ready`, the executor taking work.
+ * One exchange's quotas, where zero disables a service, and the host's standing capacities. Completions settle per
+ * table (1..256); up to `peers` (0..64), `checks` (0..64) and `servingStarts` (0..8) are delivered, and one job batch
+ * of `messages` (0..64) and `bytes` (0..16 MiB, a larger first message comes alone), with ordinary jobs only under
+ * `claimOrdinary` and ordinary capacity.
  */
 export interface NativeExchangeDemand {
-  settle: number;
+  settleCells: number;
   peers: number;
-  serving: number;
-  gossip: {items: number; bytes: number; ordinary: boolean; ready: boolean} | null;
+  checks: number;
+  servingStarts: number;
+  messages: number;
+  bytes: number;
+  claimOrdinary: boolean;
+  /** Serving starts the host can take (0..32), counted down by delivered starts, and ordinary execution. Null keeps them. */
+  capacity: {serving: number; ordinary: boolean} | null;
 }
 
-/** One host drain turn's delivery; the host owns every item in it. */
-export interface NativeExchange {
-  settled: number;
-  /** Updates replace the previous state of the same peer. */
-  peers: NativePeerObservation[];
-  serving: NativeIncomingRequest[];
-  /** Incoming requests remain queued after this exchange. */
-  servingQueued: boolean;
-  /** Answer with one bounded classifyGossip call. */
-  checks: NativeGossipDependencyCheck[];
-  /**
-   * Null when nothing was claimed. Urgent work is claimed whenever present; ordinary work, or reopening the
-   * ordinary gate, only with `ordinary`; a host not `ready` closes the gate while ordinary work waits. A claim sets
-   * the gate to `ordinary`.
-   */
-  gossip: NativeGossipBatch | null;
-  /** Native holds more, or the drain keeps the notification latch; false released it. */
-  more: boolean;
-  /** Null, or why a serving start could not be handed over; it was cancelled and released, and `more` is true. */
-  failure: unknown;
+/**
+ * Applied before the exchange selects its delivery: one verdict per delivered message, one classification per
+ * delivered check, imported blocks, a recheck of every waiting message, and coalesced peer penalties (1..100).
+ */
+export type NativeAction =
+  | {type: "verdict"; handle: NativeGossipHandle; verdict: NativeGossipVerdict}
+  | {type: "classify"; handle: NativeGossipHandle; available: boolean}
+  | {type: "block"; root: Uint8Array}
+  | {type: "recheck"}
+  | {type: "dropQueued"}
+  | {type: "reportPeer"; peerId: PeerIdStr; action: NativePeerAction; count: number};
+
+/** A delivery that rolled back after an operation-local allocation failure. `retired` reports a retired item. */
+export interface NativeExchangeRollback {
+  readonly rolledBack: true;
+  readonly more: true;
+  readonly retired: boolean;
 }
+
+/** One exchange's delivery, which the host owns; frozen when it delivers nothing. */
+export interface NativeExchangeDelivery {
+  readonly rolledBack: false;
+  readonly settled: number;
+  /** Updates replace the previous state of the same peer. */
+  readonly peers: readonly NativePeerObservation[];
+  readonly serving: readonly NativeIncomingRequest[];
+  readonly checks: readonly NativeGossipDependencyCheck[];
+  readonly gossip: NativeGossipBatch | null;
+  /** It retired an item whose deliveries kept rolling back. */
+  readonly retired: boolean;
+  /** Another exchange with the same enablement would make progress. */
+  readonly more: boolean;
+  /** Work waits for capacity the host reported as zero, or for a service this demand disabled. */
+  readonly parked: {readonly serving: boolean; readonly ordinary: boolean};
+  readonly disabledWaiting: boolean;
+  /** Null, or why a serving start could not be handed over; it was cancelled and released, and `more` is true. */
+  readonly failure: unknown;
+}
+
+export type NativeExchange = NativeExchangeRollback | NativeExchangeDelivery;
+
+/** An escalation trigger: 1, an exchange refused a generated batch; 3, demand failed; 4, deliveries rolled back. */
+export type NativeEscalation = 1 | 3 | 4;
 
 export interface NativePublicationDiagnostics {
   capacity: number;
@@ -385,13 +413,6 @@ export interface NativeNetworkApplicationRuntime {
   getMetrics(): string;
   /** A failed runtime cannot restart. The host must shut down the beacon node on terminal failure. */
   readonly closed: Promise<NativeRuntimeCloseResult>;
-  /** Applies up to 64 answers; stale handles are skipped individually. Returns the accepted count. */
-  classifyGossip(results: readonly NativeGossipClassification[]): number;
-  notifyGossipBlock(root: Uint8Array): void;
-  dropQueuedGossip(): void;
-  trackGossipSearch(root: Uint8Array, peer: PeerIdStr | null): boolean;
-  /** Complete only after validation settles, including after protocol timeout. A late verdict returns false. */
-  reportGossip(handle: NativeGossipHandle, verdict: NativeGossipVerdict): boolean;
   /** Copies admitted input. Admission pressure rejects with admission_full before any publication. */
   publishGossip(
     topic: string,
@@ -427,19 +448,15 @@ export interface NativeNetworkApplicationRuntime {
    */
   getRememberedPeers(): Promise<NativeRememberedPeersSnapshot>;
   /**
-   * Accumulates penalties independently of command capacity, including for disconnected retained identities.
-   * Counts unknown identities at execution and full pending-table refusals in peerReportsIgnored.
-   * Ignores reports after runtime close.
+   * One host turn: applies up to 256 `actions`, settles up to `demand.settleCells` completed publications, commands,
+   * request pulls and retirements, and incoming acknowledgements per table, then the close result once nothing else
+   * awaits settlement, and delivers the payload `demand` asks for. It throws only for invalid input or a nested call,
+   * before applying anything. Actions after close are ignored; unknown penalized identities count in
+   * peerReportsIgnored.
    */
-  reportPeer(peerId: PeerIdStr, action: NativePeerAction): void;
-  /**
-   * One host drain turn: settles up to `demand.settle` completed publications, commands, request pulls and
-   * retirements, and incoming acknowledgements per table, then the close result once nothing else awaits
-   * settlement; then delivers the payload `demand` asks for in one result. Promise continuations run after it
-   * returns. Throws NetworkResultAllocationFailed when the result cannot be built: settled promises stay settled and
-   * the undelivered payload is delivered by a later exchange. A throwing exchange ends the drain.
-   */
-  exchange(demand: NativeExchangeDemand): NativeExchange;
+  exchange(actions: readonly NativeAction[], demand: NativeExchangeDemand): NativeExchange;
+  /** Terminates the process for an escalated bridge contract failure. */
+  fail(trigger: NativeEscalation, reason: string): never;
   close(): Promise<NativeRuntimeCloseResult>;
 }
 
@@ -447,11 +464,12 @@ export interface NativeNetworkApplicationRuntime {
  * Initialize from the owning thread, after configuring BeaconConfig. One runtime is live per process;
  * another initializes only after the previous one is garbage collected.
  * Copies configuration and returns a running runtime; failure is terminal.
- * Calls onWorkAvailable on that thread when results, peer events, incoming requests, or gossip work can be
- * drained, including from request and incoming calls that leave results to settle. onWorkAvailable must only
- * schedule a drain in a later macrotask, one at a time. Each drain calls exchange once; while it returns `more`,
- * the host drains again. No further notification arrives until an exchange returns `more: false`, so a scheduled
- * drain must not be cancelled, also after the runtime closes.
+ * Calls onWorkAvailable on that thread when results, peer events, incoming requests, or gossip work arrive after
+ * an exchange found nothing queued, and from request and incoming calls that leave results to settle.
+ * onWorkAvailable must only schedule an exchange in a later macrotask. No further notification arrives while work
+ * stays queued, so the host exchanges again while one returns `more`, retries on a timer while it returns
+ * `disabledWaiting` or `parked` work it can take later, and never cancels a scheduled exchange, also after the
+ * runtime closes.
  */
 export function initializeNativeNetworkRuntime(
   config: NativeApplicationConfig,
@@ -713,10 +731,6 @@ export interface NativeGossipMessage {
   id: Uint8Array;
   data: Uint8Array;
   receivedAtUnixMs: number;
-}
-export interface NativeGossipClassification {
-  handle: NativeGossipHandle;
-  available: boolean;
 }
 export interface NativeGossipJob {
   kind: NativeTopicKind;

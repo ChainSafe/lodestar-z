@@ -8,6 +8,7 @@ const processor = n.gossip_processor;
 pub const batch_max = processor.batch_max;
 pub const batch_bytes = processor.batch_bytes;
 pub const payload_max = processor.payload_max;
+pub const rollbacks_max = processor.rollbacks_max;
 pub const topic_max = processor.topic_max;
 pub const Token = processor.Token;
 pub const Cell = processor.Cell;
@@ -51,7 +52,8 @@ pub fn flags(runtime: *Runtime, io: std.Io) !bool {
         table.outcome(result);
         table.retire(token);
     }
-    if (table.hasWork()) runtime.pingLocked();
+    runtime.recomputeLocked(.checks);
+    runtime.recomputeLocked(.gossip);
     return table.pending();
 }
 pub const Ingress = struct {
@@ -97,13 +99,13 @@ pub const Ingress = struct {
         const admitted_ns = r.bridge.now();
         if (runtime.stop or self.failure != null) return false;
         const table = &runtime.gossip.?;
-        const empty = !table.hasWork();
         const accepted = table.admit(runtime.heavy.?.core.service.gossipsub, candidate, clock.mono_ms, received_at, runtime.slot);
         if (accepted) {
             const kind = native.topic.parseCanonical(candidate.event.topic).?.name.kind;
             runtime.bridge.admission_lag[@intFromEnum(r.bridge.admissionKind(kind))].observe(admitted_ns -| runtime.heavy.?.core.tick_ns);
         }
-        if (empty and table.hasWork()) runtime.pingLocked();
+        runtime.recomputeLocked(.checks);
+        runtime.recomputeLocked(.gossip);
         return accepted;
     }
 };

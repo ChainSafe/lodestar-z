@@ -20,6 +20,8 @@ comptime {
     assert(payload_max <= batch_bytes);
 }
 pub const topic_max = native.topic.topic_max_len;
+/// A message whose delivery to the host rolled back this often is ignored the next time a claim reaches it.
+pub const rollbacks_max = 2;
 pub const Token = struct { index: u16, generation: u64 };
 pub const State = enum { free, capturing, needs_check, checking, waiting, queued, copying, delivered, verdict_pending };
 pub const Cell = struct {
@@ -52,6 +54,8 @@ pub const Cell = struct {
     execution_bytes: usize = 0,
     source_charge: usize = 0,
     retired: bool = false,
+    /// Deliveries of this message that rolled back.
+    rollbacks: u8 = 0,
     verdict: native.Verdict = .ignore,
 };
 pub const Diagnostics = struct {
@@ -102,13 +106,8 @@ pub const Batch = struct {
     len: usize = 0,
     jobs: [batch_max]Job = undefined,
     job_count: usize = 0,
-};
-const Search = struct {
-    until: u64 = 0,
-    root: [32]u8 = undefined,
-    peers: [8]n.PeerId = undefined,
-    count: u8 = 0,
-    anonymous: bool = false,
+    /// Messages the claim ignored because their deliveries kept rolling back.
+    retired: usize = 0,
 };
 pub const GossipProcessor = struct {
     cells: []Cell,
@@ -125,14 +124,12 @@ pub const GossipProcessor = struct {
     staging_items: usize = 0,
     limits: limits_mod.Limits,
     execution: ?limits_mod.Limits = null,
-    ordinary_enabled: bool = true,
     slot: u64 = 0,
     last_now: u64 = 0,
     prune_cursor: usize = 0,
     prune_remaining: usize = 0,
     drop_before: u64 = 0,
     closed: bool = false,
-    searches: [96]Search = @splat(.{}),
     refusals: [limits_mod.kind_count][refusal_count]u64 = @splat(@splat(0)),
     used_items: [limits_mod.kind_count]usize = @splat(0),
     used_bytes: [limits_mod.kind_count]usize = @splat(0),
@@ -455,21 +452,11 @@ pub const GossipProcessor = struct {
         }
         return if (selected == none) null else self.token(selected);
     }
-    pub fn hasWork(self: *const GossipProcessor) bool {
-        if (self.closed) return false;
-        for (limits_mod.priority) |kind| {
-            if (self.queueValue(kind, .needs_check).len > 0) return true;
-            const index = self.nextKind(kind);
-            if (index != none and self.dispatchable(&self.cells[index])) return true;
-        }
-        return false;
-    }
-    /// Work a host drain can take now: dependency checks, and claimable urgent and ordinary jobs.
-    pub const HostWork = struct { checks: bool = false, urgent: bool = false, ordinary: bool = false };
-    /// Ordinary work counts also while the host's last claim disabled it, so a host able to
-    /// execute again knows to claim it. O(kinds).
-    pub fn hostWork(self: *const GossipProcessor) HostWork {
-        var result: HostWork = .{};
+    /// Work an exchange can take now: dependency checks, and executable urgent and ordinary jobs.
+    pub const Work = struct { checks: bool = false, urgent: bool = false, ordinary: bool = false };
+    /// O(kinds).
+    pub fn readiness(self: *const GossipProcessor) Work {
+        var result: Work = .{};
         if (self.closed) return result;
         for (limits_mod.priority) |kind| {
             if (self.queueValue(kind, .needs_check).len > 0) result.checks = true;
@@ -499,6 +486,7 @@ pub const GossipProcessor = struct {
         if (self.closed) return;
         self.expire(now);
         self.groups.advance(now, batch_max);
+        self.dependencies.advanceRecheck(batch_max);
         if (self.slot != slot) {
             self.slot = slot;
             self.prune_cursor = 0;
@@ -530,12 +518,18 @@ pub const GossipProcessor = struct {
             if (cell.state != .copying and cell.state != .capturing) self.retire(self.token(@intCast(i)));
         }
     }
-    pub const Demand = struct { items: usize = batch_max, bytes: usize = batch_bytes, ordinary: bool = true };
-    fn dispatchable(self: *const GossipProcessor, cell: *const Cell) bool {
-        if (self.execution != null and !self.ordinary_enabled and !limits_mod.urgent(cell.kind)) return false;
-        return self.executable(cell);
+    /// One claim's bounds; `ordinary` admits ordinary kinds besides the urgent ones.
+    pub const Claim = struct { items: usize = batch_max, bytes: usize = batch_bytes, ordinary: bool = true };
+    /// Whether a claim ignores `cell` instead of delivering it: expired, ineligible, or rolled back too often.
+    fn stale(self: *const GossipProcessor, cell: *const Cell, now: u64) bool {
+        return now >= cell.deadline or !self.eligible(cell) or cell.rollbacks >= rollbacks_max;
     }
-    /// Whether the kind's execution limits admit `cell`, whatever the host's ordinary gate.
+    /// Ignores a stale `cell`, counting a retirement for repeated rollbacks.
+    fn drop(self: *GossipProcessor, batch: *Batch, cell: *Cell) void {
+        batch.retired += @intFromBool(cell.rollbacks >= rollbacks_max);
+        self.ignore(cell);
+    }
+    /// Whether the kind's execution limits admit `cell`.
     fn executable(self: *const GossipProcessor, cell: *const Cell) bool {
         const execution = self.execution orelse return true;
         const k = @intFromEnum(cell.kind);
@@ -551,37 +545,36 @@ pub const GossipProcessor = struct {
     pub fn claim(self: *GossipProcessor, now: u64) Batch {
         return self.claimDemand(now, .{});
     }
-    pub fn claimDemand(self: *GossipProcessor, now: u64, demand: Demand) Batch {
-        self.maintain(now, self.slot);
-        self.ordinary_enabled = demand.ordinary;
+    pub fn claimDemand(self: *GossipProcessor, now: u64, demand: Claim) Batch {
         var batch: Batch = .{};
         if (self.closed) return batch;
         var size: usize = 0;
         var work: usize = 0;
         for (limits_mod.priority) |kind| {
+            if (!demand.ordinary and !limits_mod.urgent(kind)) continue;
             for (0..batch_max) |_| {
                 if (batch.len >= @min(batch_max, demand.items) or work == batch_max) return batch;
                 const index = self.nextKind(kind);
                 if (index == none) break;
                 const cell = &self.cells[index];
-                if (now >= cell.deadline or !self.eligible(cell)) {
+                if (self.stale(cell, now)) {
                     work += 1;
-                    self.ignore(cell);
+                    self.drop(&batch, cell);
                     continue;
                 }
-                if (!self.dispatchable(cell)) break;
+                if (!self.executable(cell)) break;
                 const group = cell.group_index;
                 const start = batch.len;
                 const group_count = if (group == none) 1 else self.groups.rows[group].members.len;
                 for (0..@min(batch_max - work, group_count)) |_| {
                     if (batch.len >= @min(batch_max, demand.items)) break;
                     const member = if (group == none) index else self.groups.rows[group].members.tail;
-                    if (now >= self.cells[member].deadline or !self.eligible(&self.cells[member])) {
-                        self.ignore(&self.cells[member]);
+                    if (self.stale(&self.cells[member], now)) {
+                        self.drop(&batch, &self.cells[member]);
                         work += 1;
                         continue;
                     }
-                    if (!self.dispatchable(&self.cells[member])) break;
+                    if (!self.executable(&self.cells[member])) break;
                     if (!self.append(&batch, member, &size, demand.bytes)) break;
                     work += 1;
                 }
@@ -609,14 +602,13 @@ pub const GossipProcessor = struct {
         batch.len += 1;
         return true;
     }
-    pub fn claimChecks(self: *GossipProcessor, now: u64) Batch {
-        self.maintain(now, self.slot);
+    pub fn claimChecks(self: *GossipProcessor, now: u64, limit: usize) Batch {
         var batch: Batch = .{};
         if (self.closed) return batch;
         var work: usize = 0;
         for (limits_mod.priority) |kind| {
             for (0..batch_max) |_| {
-                if (work == batch_max) return batch;
+                if (work == @min(batch_max, limit)) return batch;
                 const index = self.queueValue(kind, .needs_check).head;
                 if (index == none) break;
                 work += 1;
@@ -657,35 +649,12 @@ pub const GossipProcessor = struct {
         }
         return true;
     }
-    pub fn trackSearch(self: *GossipProcessor, root: [32]u8, peer: ?n.PeerId, now: u64) bool {
-        var free: ?*Search = null;
-        var found: ?*Search = null;
-        for (&self.searches) |*search| {
-            if (now >= search.until) {
-                if (free == null) free = search;
-                continue;
-            }
-            if (std.mem.eql(u8, &search.root, &root)) {
-                found = search;
-                break;
-            }
-        }
-        const search = found orelse free orelse return false;
-        if (found == null) search.* = .{ .root = root, .until = now +| 30000 };
-        if (peer) |identity| {
-            for (search.peers[0..search.count]) |prior| if (identity.eql(&prior)) return false;
-            if (search.count == search.peers.len) return false;
-            search.peers[search.count] = identity;
-            search.count += 1;
-        } else {
-            if (search.anonymous) return false;
-            search.anonymous = true;
-        }
-        return true;
-    }
-
     pub fn notifyBlock(self: *GossipProcessor, root: [32]u8) void {
         self.dependencies.notify(&root);
+    }
+    /// Retries every waiting message once the owner has walked the dependency rows.
+    pub fn recheck(self: *GossipProcessor) void {
+        self.dependencies.recheck();
     }
     pub fn ignore(self: *GossipProcessor, cell: *Cell) void {
         assert(!cell.executing);
@@ -719,8 +688,8 @@ pub const GossipProcessor = struct {
             if (cell.retired and (!success or self.closed)) self.retire(handle);
         }
     }
+    /// Records the host's verdict. A late verdict, or one for a message expiry already retired, retires it here.
     pub fn report(self: *GossipProcessor, handle: Token, verdict: native.Verdict, now: u64) bool {
-        self.expire(now);
         if (self.get(handle)) |cell| if (cell.state == .delivered) {
             self.releaseExecution(cell);
             if (cell.retired or now >= cell.deadline) {
@@ -745,11 +714,11 @@ pub const GossipProcessor = struct {
         }
     }
 
-    /// Work the owner carries over turns in bounded batches: a slot prune, dependency promotion
-    /// or queued verdicts.
+    /// Work the owner carries over turns in bounded batches: a slot prune, a dependency recheck,
+    /// dependency promotion or queued verdicts.
     pub fn pending(self: *const GossipProcessor) bool {
         if (self.closed) return false;
-        return self.prune_remaining > 0 or self.dependencies.promoting.len > 0 or self.diag.pendingVerdicts > 0;
+        return self.prune_remaining > 0 or self.dependencies.rechecking() or self.dependencies.promoting.len > 0 or self.diag.pendingVerdicts > 0;
     }
     /// Earliest attestation group or expiry deadline. O(1).
     pub fn deadline(self: *const GossipProcessor) ?u64 {

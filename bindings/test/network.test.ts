@@ -3,11 +3,15 @@ import {setTimeout as delay} from "node:timers/promises";
 import {privateKeyFromRaw} from "@libp2p/crypto/keys";
 import {peerIdFromPublicKey} from "@libp2p/peer-id";
 import {expect, it, vi} from "vitest";
-import {initializeNativeNetworkRuntime} from "../src/network.js";
+import bindings from "../src/bindings.js";
+import {type NativeAction, type NativeExchangeDemand, initializeNativeNetworkRuntime} from "../src/network.js";
 import {
   applicationConfig,
+  capacity,
   configureChain,
   discoveryConfig,
+  exchange,
+  gossipAll,
   localIntent,
   requestForks,
   runtimeReleased,
@@ -18,6 +22,10 @@ import {
 } from "./utils/network.js";
 import {BLOCKS} from "./utils/network-incoming.js";
 import {startPeer} from "./utils/network-peer.js";
+
+function report(peerId: string): NativeAction {
+  return {action: "fatal", count: 1, peerId, type: "reportPeer"};
+}
 
 it("owns a real native socket and releases it on idempotent close", async () => {
   const config = applicationConfig();
@@ -37,16 +45,17 @@ it("owns a real native socket and releases it on idempotent close", async () => 
       `${identity.peerId}\0`,
       `${identity.peerId}é`,
     ]) {
-      expect(() => runtime.reportPeer(invalid, "fatal")).toThrow("InvalidNetworkPeerId");
+      expect(() => runtime.exchange([report(invalid)], settleOnly)).toThrow("InvalidNetworkPeerId");
       expect(() => runtime.connect(invalid, [identity.localEndpoint], 1000n)).toThrow("InvalidNetworkPeerId");
       expect(() => runtime.reStatusPeers([invalid])).toThrow("InvalidNetworkPeerId");
-      expect(() => runtime.trackGossipSearch(new Uint8Array(32), invalid)).toThrow("InvalidNetworkPeerId");
       expect(() =>
         runtime.request(invalid, "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy", new Uint8Array(0))
       ).toThrow("InvalidNetworkPeerId");
     }
     for (const invalid of [null, 1, new Uint8Array(39), {toString: () => identity.peerId}]) {
-      expect(() => Reflect.apply(runtime.reportPeer, runtime, [invalid, "fatal"])).toThrow("InvalidNetworkPeerId");
+      expect(() => runtime.exchange([report(invalid as unknown as string)], settleOnly)).toThrow(
+        "InvalidNetworkPeerId"
+      );
     }
     expect(identity.localEndpoint.port).toBeGreaterThan(0);
     expect(runtime.state).toBe("running");
@@ -113,8 +122,7 @@ it("starts without subscriptions and accepts ordinary updates after rejecting an
   try {
     expect(runtime.state).toBe("running");
     expect((await runtime.getGossipDiagnostics()).topics.some((topic) => topic.subscribed)).toBe(false);
-    const gossip = {bytes: 8 * 1024 * 1024, items: 64, ordinary: true, ready: true};
-    expect(runtime.exchange({...settleOnly, gossip, serving: 8})).toMatchObject({
+    expect(exchange(runtime, {...gossipAll, servingStarts: 8})).toMatchObject({
       checks: [],
       gossip: null,
       serving: [],
@@ -221,28 +229,122 @@ it("joins immediately after initialization and closes idempotently", async () =>
   expect(runtime.diagnostics().liveNativeRequestedBytes).toBe(0);
 });
 
-it("rejects every invalid exchange demand", async () => {
+it("rejects every invalid exchange demand, oversized batch and nested exchange before applying anything", async () => {
   const runtime = startRuntime(applicationConfig(), () => undefined);
   try {
     await runtime.identity;
-    const gossip = {bytes: 0, items: 0, ordinary: false, ready: true};
-    for (const invalid of [
-      ...[-1, 0.5, 65, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1].map((peers) => ({peers})),
-      ...[0, -1, 0.5, 257, Number.NaN].map((settle) => ({settle})),
-      {serving: 9},
-      {gossip: {...gossip, items: 65}},
-      {gossip: {...gossip, bytes: 16 * 1024 * 1024 + 1}},
-    ])
-      expect(() => runtime.exchange({...settleOnly, ...invalid})).toThrow("InvalidNetworkInteger");
-    expect(() => runtime.exchange({...settleOnly, gossip: {...gossip, ordinary: true, ready: false}})).toThrow(
-      "InvalidNetworkConfig"
-    );
-    expect(runtime.exchange({...settleOnly, peers: 1}).peers).toEqual([]);
-    expect(runtime.exchange({...settleOnly, peers: 64}).peers).toEqual([]);
+    const invalid: [Partial<Record<keyof NativeExchangeDemand, unknown>>, string][] = [
+      ...[-1, 0.5, 65, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1].map(
+        (peers): [Partial<Record<keyof NativeExchangeDemand, unknown>>, string] => [{peers}, "InvalidNetworkInteger"]
+      ),
+      ...[0, -1, 0.5, 257, Number.NaN].map(
+        (settleCells): [Partial<Record<keyof NativeExchangeDemand, unknown>>, string] => [
+          {settleCells},
+          "InvalidNetworkInteger",
+        ]
+      ),
+      [{servingStarts: 9}, "InvalidNetworkInteger"],
+      [{checks: 65}, "InvalidNetworkInteger"],
+      [{messages: 65}, "InvalidNetworkInteger"],
+      [{bytes: 16 * 1024 * 1024 + 1}, "InvalidNetworkInteger"],
+      [{claimOrdinary: 1}, "InvalidNetworkConfig"],
+      [{capacity: {ordinary: true, serving: 33}}, "InvalidNetworkInteger"],
+      [{capacity: {ordinary: "yes", serving: 1}}, "InvalidNetworkConfig"],
+      [{capacity: []}, "InvalidNetworkConfig"],
+    ];
+    for (const [fields, code] of invalid)
+      expect(() => runtime.exchange([], {...settleOnly, ...fields} as NativeExchangeDemand)).toThrow(code);
+    const recheck: NativeAction = {type: "recheck"};
+    expect(() =>
+      runtime.exchange(
+        Array.from({length: 257}, () => recheck),
+        settleOnly
+      )
+    ).toThrow("InvalidNetworkActions");
+    expect(() => runtime.exchange({} as NativeAction[], settleOnly)).toThrow("InvalidNetworkActions");
+    const nested = {
+      ...settleOnly,
+      get peers() {
+        runtime.exchange([], settleOnly);
+        return 0;
+      },
+    };
+    expect(() => runtime.exchange([], nested)).toThrow("NetworkExchangeReentered");
+    // A full batch applies, and the caller stays usable after every rejection.
+    expect(
+      exchange(
+        runtime,
+        {...settleOnly, capacity, peers: 64},
+        Array.from({length: 256}, () => recheck)
+      )
+    ).toMatchObject({
+      more: false,
+      peers: [],
+      rolledBack: false,
+    });
+    expect(Object.isFrozen(exchange(runtime, settleOnly))).toBe(true);
   } finally {
     await runtime.close();
   }
 }, 20000);
+
+it("hands a rolled-back exchange to the host before touching its payload, then recovers and retries", async () => {
+  const native = (bindings as {NativeNetworkRuntime: {prototype: {exchange(...args: unknown[]): unknown}}})
+    .NativeNetworkRuntime.prototype;
+  const original = native.exchange;
+  const rolledBack = Object.freeze(
+    Object.defineProperties(
+      {more: true, retired: false, rolledBack: true},
+      Object.fromEntries(
+        ["serving", "peers", "checks", "gossip", "failure"].map((field) => [
+          field,
+          {
+            get() {
+              throw Error(`read ${field}`);
+            },
+          },
+        ])
+      )
+    )
+  );
+  let calls = 0;
+  native.exchange = function (this: unknown, ...args: unknown[]) {
+    return ++calls === 1 ? rolledBack : Reflect.apply(original, this, args);
+  };
+  const config = applicationConfig();
+  const runtime = startRuntime(config, () => undefined);
+  try {
+    await runtime.identity;
+    expect(runtime.exchange([], gossipAll)).toBe(rolledBack);
+    // The recovery pass is control-only; the normal attempt that follows carries the payload again.
+    expect(exchange(runtime, settleOnly)).toMatchObject({more: false, rolledBack: false});
+    expect(exchange(runtime, gossipAll)).toMatchObject({gossip: null, rolledBack: false, serving: []});
+  } finally {
+    native.exchange = original;
+    await runtime.close();
+  }
+});
+
+it.each([1, 3, 4] as const)("escalation trigger %i terminates the process through fatalError", (trigger) => {
+  const script = `import {initializeNativeNetworkRuntime} from "./bindings/src/network.js";
+    import {applicationConfig} from "./bindings/test/utils/network.ts";
+    const runtime = initializeNativeNetworkRuntime(applicationConfig(), () => undefined);
+    runtime.fail(${trigger}, "test");
+    console.log("survived");`;
+  let failure: {status: number | null; signal: string | null; stdout: string; stderr: string} | undefined;
+  try {
+    execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+      encoding: "utf8",
+      stdio: "pipe",
+      timeout: 20000,
+    });
+  } catch (error) {
+    failure = error as typeof failure;
+  }
+  expect(failure?.signal).toBe("SIGABRT");
+  expect(failure?.stdout).not.toContain("survived");
+  expect(failure?.stderr).toContain(`native network bridge escalation trigger ${trigger}: test`);
+}, 30000);
 
 it.each([
   ["gc", "gc-rebound"],
@@ -458,7 +560,7 @@ it("publishes copied peer observations without repeating unread notifications", 
     const before = notifications;
     await delay(250);
     expect(notifications).toBe(before);
-    const result = runtime.exchange({...settleOnly, peers: 32});
+    const result = exchange(runtime, {...settleOnly, peers: 32});
     expect(Object.getOwnPropertyDescriptor(result, "peers")).toMatchObject({
       configurable: true,
       enumerable: true,
@@ -492,13 +594,13 @@ it("rejects a bootstrap with an invalid signature before starting", async () => 
   expect(() => startRuntime(config)).toThrow("InvalidSignature");
 });
 
-it("settles results only in the host drain and notifies once until a drain ends", async () => {
+it("settles results only in an exchange and notifies once until an exchange finds nothing queued", async () => {
   const config = applicationConfig();
   let notifications = 0;
   const runtime = initializeNativeNetworkRuntime(config, () => {
     notifications++;
   });
-  const drain = () => runtime.exchange(settleOnly).more;
+  const drain = () => runtime.exchange([], settleOnly).more;
   const watch = (promise: Promise<unknown>) => {
     let settled = false;
     promise.then(
@@ -520,8 +622,8 @@ it("settles results only in the host drain and notifies once until a drain ends"
     await delay(100);
     expect(notifications).toBe(1);
     expect(intentSettled()).toBe(false);
-    expect(runtime.exchange(settleOnly)).toMatchObject({more: true, settled: 2});
-    expect(runtime.exchange(settleOnly)).toMatchObject({more: false, settled: 0});
+    expect(runtime.exchange([], settleOnly)).toMatchObject({more: false, settled: 2});
+    expect(runtime.exchange([], settleOnly)).toMatchObject({more: false, settled: 0});
     expect((await intent).slot).toBe(config.initialSlot);
     expect((await identity).peerId).toBe(runtime.identity.peerId);
     const pull = runtime.request(runtime.identity.peerId, BLOCKS, new Uint8Array(32)).next();
@@ -539,5 +641,5 @@ it("settles results only in the host drain and notifies once until a drain ends"
     }
   }
   expect(await runtime.closed).toEqual({reason: "requested"});
-  expect(runtime.exchange(settleOnly)).toMatchObject({more: false, settled: 0});
+  expect(runtime.exchange([], settleOnly)).toMatchObject({more: false, settled: 0});
 }, 20000);

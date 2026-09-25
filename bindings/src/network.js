@@ -94,15 +94,15 @@ class NativeRuntime {
   getRememberedPeers() {
     return this.#native.getRememberedPeers();
   }
-  reportPeer(peerId, action) {
-    return this.#native.reportPeer(peerId, action);
-  }
-  exchange(demand) {
-    const result = this.#native.exchange(demand);
+  exchange(actions, demand) {
+    const result = this.#native.exchange(actions, demand);
+    // A rollback carries no payload, and an exchange that delivered nothing is frozen with no serving starts.
+    if (result.rolledBack) return result;
+    const serving = result.serving;
+    if (serving.length === 0) return result;
     // Native has committed every item, so nothing may throw from here. Only own properties native created are read
     // or written. A start without a facade is cancelled, released and reported with `more` set, so the host still
-    // takes the rest and drains again.
-    const serving = result.serving;
+    // takes the rest and exchanges again.
     let taken = 0;
     for (let i = 0; i < serving.length; i++) {
       const descriptor = serving[i];
@@ -123,20 +123,8 @@ class NativeRuntime {
     serving.length = taken;
     return result;
   }
-  classifyGossip(results) {
-    return this.#native.classifyGossip(results);
-  }
-  notifyGossipBlock(root) {
-    return this.#native.notifyGossipBlock(root);
-  }
-  trackGossipSearch(root, peer) {
-    return this.#native.trackGossipSearch(root, peer);
-  }
-  dropQueuedGossip() {
-    return this.#native.dropQueuedGossip();
-  }
-  reportGossip(handle, verdict) {
-    return this.#native.reportGossip(handle, verdict);
+  fail(trigger, reason) {
+    return this.#native.fail(trigger, reason);
   }
   async publishGossip(topic, data, options) {
     return this.#native.publishGossip(topic, data, options);

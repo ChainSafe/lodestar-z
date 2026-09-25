@@ -2,6 +2,8 @@ import {expect, test} from "vitest";
 import {type NativeIncomingRequest, initializeNativeNetworkRuntime} from "../src/network.js";
 import {
   applicationConfig,
+  capacity,
+  delivered,
   localIntent,
   nextIncoming,
   requestForks,
@@ -389,12 +391,13 @@ test("a serving start the binding cannot wrap is cancelled alone while the drain
     scheduled = true;
     setImmediate(() => {
       scheduled = false;
-      const exchange = () => right.exchange({...settleOnly, serving});
-      const {more, failure, serving: starts} = hostile ? trapped(exchange) : exchange();
+      const exchange = () => delivered(right.exchange([], {...settleOnly, capacity, servingStarts: serving}));
+      const {more, failure, serving: starts, disabledWaiting} = hostile ? trapped(exchange) : exchange();
       hostile = false;
       turns.push({failure, more});
       served.push(...starts);
       if (more) schedule();
+      else if (disabledWaiting) setTimeout(schedule, 25).unref();
     });
   };
   const right = initializeNativeNetworkRuntime(rightConfig, schedule);
@@ -473,7 +476,7 @@ test("settlement leaves Error to the host and drops each settled error's stack",
     });
     let result: ReturnType<typeof runtime.exchange> | undefined;
     try {
-      result = runtime.exchange(settleOnly);
+      result = runtime.exchange([], settleOnly);
     } finally {
       Reflect.deleteProperty(Object.prototype, "then");
       Object.defineProperty(globalThis, "Error", {configurable: true, value: original});
@@ -487,7 +490,7 @@ test("settlement leaves Error to the host and drops each settled error's stack",
     void runtime.close();
     for (let i = 0; i < 400 && !closed; i++) {
       await new Promise((resolve) => setTimeout(resolve, 5));
-      runtime.exchange(settleOnly);
+      runtime.exchange([], settleOnly);
     }
   }
   expect(closed).toBe(true);
@@ -512,13 +515,13 @@ async function settleUnderCodeSetter(setters: unknown[]) {
   });
   let settled = 0;
   try {
-    settled = runtime.exchange(settleOnly).settled;
+    settled = delivered(runtime.exchange([], settleOnly)).settled;
   } finally {
     Reflect.deleteProperty(Error.prototype, "code");
   }
   for (let i = 0; i < 400 && !closed; i++) {
     await new Promise((resolve) => setTimeout(resolve, 5));
-    runtime.exchange(settleOnly);
+    runtime.exchange([], settleOnly);
   }
   return {error: await connect, facade: new WeakRef(runtime), settled};
 }
@@ -605,7 +608,10 @@ interface DirectIncomingBridge {
     onWorkAvailable: () => void
   ): {identity: import("../src/network.js").NativeIdentity; closed: Promise<unknown>};
   applyIntent(intent: ReturnType<typeof localIntent>, slot: bigint): Promise<unknown>;
-  exchange(demand: import("../src/network.js").NativeExchangeDemand): {serving: IncomingDescriptor[]};
+  exchange(
+    actions: readonly import("../src/network.js").NativeAction[],
+    demand: import("../src/network.js").NativeExchangeDemand
+  ): {rolledBack: false; serving: IncomingDescriptor[]};
   incomingTerminal(handle: IncomingHandle, action: number, status?: number, message?: Uint8Array): void;
   incomingRelease(handle: IncomingHandle): void;
   incomingRespond(
@@ -646,7 +652,8 @@ test("incoming tokens reject malformed handles and stale slot generations", asyn
       await expect
         .poll(
           () => {
-            incoming = nextIncoming(native);
+            // Peer events are taken too, so nothing waits and the declining notifier settles completions.
+            incoming = native.exchange([], {...settleOnly, capacity, peers: 64, servingStarts: 1}).serving[0] ?? null;
             return incoming !== null;
           },
           {timeout: 5000}

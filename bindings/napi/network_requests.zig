@@ -263,7 +263,7 @@ pub fn submit(runtime: *Runtime, token: Token, now: n.Now) !void {
     }
     table.releasePayload(cell);
     table.refresh(cell);
-    runtime.pingLocked();
+    runtime.recomputeLocked(.legacy);
 }
 pub fn flags(runtime: *Runtime, io: std.Io) void {
     runtime.lock();
@@ -281,7 +281,7 @@ pub fn flags(runtime: *Runtime, io: std.Io) void {
         }
         table.releasePayload(cell);
         table.refresh(cell);
-        if (cell.terminal != null and (cell.pull != null or cell.retiring)) runtime.pingLocked();
+        if (cell.terminal != null and (cell.pull != null or cell.retiring)) runtime.recomputeLocked(.legacy);
     };
 }
 pub fn capture(runtime: *Runtime, events: []const rr.Event, now: n.Now) !void {
@@ -340,7 +340,7 @@ pub fn capture(runtime: *Runtime, events: []const rr.Event, now: n.Now) !void {
             }
             table.releasePayload(cell);
             table.refresh(cell);
-            runtime.pingLocked();
+            runtime.recomputeLocked(.legacy);
             break;
         }
     }

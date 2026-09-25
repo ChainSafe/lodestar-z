@@ -257,9 +257,10 @@ test "gossip admission leaves queued work intact when a host copy pins the requi
     var large: [6000]u8 = undefined;
     vote(&large, 1, 1);
     try receive(&g, 0, attestation, &large);
-    const checks = table.claimChecks(1);
+    const checks = table.claimChecks(1, processor.batch_max);
     try t.expectEqual(@as(usize, 1), checks.len);
     try t.expect(table.classify(checks.tokens[0], true));
+    table.maintain(60, table.slot);
     const copying = table.claim(60);
     try t.expectEqual(@as(usize, 1), copying.len);
     defer table.finish(&copying, false);
