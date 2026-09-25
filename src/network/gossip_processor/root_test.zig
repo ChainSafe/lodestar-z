@@ -43,7 +43,7 @@ test "gossip processor isolates kinds and bounds dependency waiting" {
     const root: [32]u8 = @splat(7);
     for (0..4) |_| _ = try add(&table, .beacon_attestation, root);
     try t.expectError(error.NetworkGossipFull, add(&table, .beacon_attestation, root));
-    const checks = table.claimChecks(1);
+    const checks = table.claimChecks(1, p.batch_max);
     for (checks.tokens[0..checks.len]) |token| try t.expect(table.classify(token, false));
     try t.expectEqual(@as(usize, 2), table.snapshot(1).waiting);
     try t.expectEqual(@as(u64, 2), table.refusals[@intFromEnum(p.limits_mod.Kind.beacon_attestation)][@intFromEnum(p.Refusal.dependency_full)]);
@@ -55,7 +55,8 @@ test "gossip processor isolates kinds and bounds dependency waiting" {
     table.finish(&batch, true);
     try t.expectEqual([_]u64{ 0, 0, 0, 1 }, table.occupancy(.beacon_block));
     table.notifyBlock(root);
-    const retry = table.claimChecks(2);
+    table.maintain(2, 0);
+    const retry = table.claimChecks(2, p.batch_max);
     try t.expectEqual(@as(usize, 2), retry.len);
 }
 
@@ -66,11 +67,11 @@ test "gossip processor dependency notification cannot race a negative check" {
     defer table.close();
     const root: [32]u8 = @splat(2);
     const token = try add(&table, .beacon_attestation, root);
-    _ = table.claimChecks(1);
+    _ = table.claimChecks(1, p.batch_max);
     table.notifyBlock(root);
     try t.expect(table.classify(token, false));
     try t.expectEqual(p.State.needs_check, table.get(token).?.state);
-    _ = table.claimChecks(2);
+    _ = table.claimChecks(2, p.batch_max);
     try t.expect(table.classify(token, true));
     const batch = table.claim(2);
     table.finish(&batch, true);
@@ -144,6 +145,7 @@ test "gossip processor batches identical attestation data with a bounded wait" {
     }
     try t.expectEqual(@as(usize, 0), table.claim(49).len);
     try t.expectEqual(@as(?u64, 51), table.deadline());
+    table.maintain(51, 0);
     const batch = table.claim(51);
     try t.expectEqual(@as(usize, 2), batch.len);
     try t.expectEqual(@as(usize, 1), batch.job_count);
@@ -152,7 +154,7 @@ test "gossip processor batches identical attestation data with a bounded wait" {
     try t.expectEqual(@as(usize, 2), table.snapshot(1).queued);
 }
 
-test "gossip processor deferral leaves per-source capacity and local search deadlines" {
+test "gossip processor deferral leaves per-source capacity" {
     const limits: p.limits_mod.Limits = @splat(.{ .items = 8, .bytes = 4096 });
     var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits });
     defer table.deinit();
@@ -162,15 +164,12 @@ test "gossip processor deferral leaves per-source capacity and local search dead
         const token = try add(&table, .beacon_attestation, root);
         table.get(token).?.source = .{ .index = 0, .generation = 1 };
     }
-    const checks = table.claimChecks(1);
+    const checks = table.claimChecks(1, p.batch_max);
     for (checks.tokens[0..checks.len]) |token| try t.expect(table.classify(token, false));
     try t.expectEqual(@as(usize, 2), table.snapshot(1).waiting);
     table.notifyBlock(root);
     table.maintain(1, 0);
     try t.expectEqual(@as(u16, 0), table.waiting_per_peer[0][@intFromEnum(p.limits_mod.Kind.beacon_attestation)]);
-    try t.expect(table.trackSearch(root, null, 1));
-    try t.expect(!table.trackSearch(root, null, 2));
-    try t.expect(table.trackSearch(root, null, 30001));
 }
 
 test "gossip processor new attestation groups cannot postpone a mature group" {
@@ -190,6 +189,7 @@ test "gossip processor new attestation groups cannot postpone a mature group" {
     }
     try t.expectEqual(@as(usize, 0), table.claim(50).len);
     try t.expectEqual(@as(?u64, 51), table.deadline());
+    table.maintain(51, 0);
     const batch = table.claim(51);
     try t.expectEqual(@as(usize, 1), batch.len);
     try t.expectEqual(older, batch.tokens[0]);
@@ -252,4 +252,55 @@ test "gossip processor expired execution diagnostics track delivered work until 
     try t.expectEqual(@as(usize, 0), table.snapshot(150).expiredExecuting);
     try t.expectEqual(@as(u64, 0), table.snapshot(150).oldestExpiredExecutionAgeMs);
     try t.expectEqual(@as(usize, 0), table.snapshot(150).occupied);
+}
+
+test "gossip processor rechecks every waiting root in bounded passes and runs one more after an overlap" {
+    const limits: p.limits_mod.Limits = @splat(.{ .items = 128, .bytes = 1 << 20 });
+    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits });
+    defer table.deinit();
+    defer table.close();
+    const rows = table.dependencies.rows.len;
+    for (0..40) |i| _ = try add(&table, .beacon_attestation, @splat(@intCast(i)));
+    const checks = table.claimChecks(1, p.batch_max);
+    for (checks.tokens[0..checks.len]) |token| try t.expect(table.classify(token, false));
+    try t.expectEqual(@as(usize, 40), table.snapshot(1).waiting);
+    // A negative check in flight when the recheck lands retries instead of waiting.
+    const late = try add(&table, .beacon_attestation, @splat(99));
+    _ = table.claimChecks(1, p.batch_max);
+    table.recheck();
+    try t.expect(table.classify(late, false));
+    try t.expectEqual(p.State.needs_check, table.get(late).?.state);
+    // A second recheck during the pass lets it finish, then walks every row once more.
+    table.recheck();
+    var turns: usize = 0;
+    for (0..2 * rows) |_| {
+        if (!table.dependencies.rechecking()) break;
+        table.maintain(1, 0);
+        turns += 1;
+    }
+    try t.expect(!table.pending());
+    try t.expectEqual(@as(usize, 0), table.snapshot(1).waiting);
+    // Each pass walks every row and spends one step ending.
+    try t.expectEqual((2 * (rows + 1) + p.batch_max - 1) / p.batch_max, turns);
+}
+
+test "gossip processor ignores a message the next time a claim reaches it after two rolled-back deliveries" {
+    const limits: p.limits_mod.Limits = @splat(.{ .items = 4, .bytes = 16384 });
+    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits });
+    defer table.deinit();
+    defer table.close();
+    const failing = try add(&table, .voluntary_exit, null);
+    const neighbour = try add(&table, .voluntary_exit, null);
+    for (0..p.rollbacks_max) |_| {
+        const batch = table.claim(1);
+        try t.expectEqual(@as(usize, 2), batch.len);
+        table.finish(&batch, false);
+        table.get(failing).?.rollbacks += 1;
+    }
+    const batch = table.claim(1);
+    try t.expectEqualSlices(p.Token, &.{neighbour}, batch.tokens[0..batch.len]);
+    try t.expectEqual(@as(usize, 1), batch.retired);
+    try t.expectEqual(p.State.verdict_pending, table.get(failing).?.state);
+    try t.expectEqual(@import("../gossipsub/root.zig").Verdict.ignore, table.get(failing).?.verdict);
+    table.finish(&batch, true);
 }

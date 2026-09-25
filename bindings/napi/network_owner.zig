@@ -131,7 +131,7 @@ fn turn(self: *Runtime, io: std.Io, host: *Host, ingress: *const gossip_mod.Ingr
             self.lock();
             self.cancelCommandsLocked();
             self.publications.?.close(self.terminal_error orelse error.NetworkClosed);
-            self.pingLocked();
+            self.refreshLocked();
             self.unlock();
             self.closing_deadline = timestamp.mono_ms +| 2000;
             self.heavy.?.core.beginGracefulClose(timestamp);
@@ -203,10 +203,6 @@ fn applyWork(self: *Runtime, io: std.Io, tick: n.Now) !n.network_core.HostProgre
         self.terminal_error = error.NetworkWakeFailed;
     };
     self.host_due = false;
-    if (self.work_rearm) {
-        self.work_rearm = false;
-        if (!self.stop and ((self.lane != null and self.lane.?.len > 0) or (self.incoming != null and self.incoming.?.oldest() != null) or (self.gossip != null and self.gossip.?.hasWork()))) self.pingLocked();
-    }
     const stop = self.stop;
     const stopped = self.stop and !(self.graceful and self.reason == .requested);
     self.unlock();
@@ -324,11 +320,8 @@ fn publishTurn(self: *Runtime, result: *const n.network_core.Result, timestamp: 
         std.log.scoped(.network_runtime).info("network_health peers={d} relevant={d} target={d} requests_outbound={d} requests_inbound={d} dial_started={d} dial_deferred={d} discovery_peers={d} gossip_pressure_resets={d} received_bytes={d} sent_bytes={d}", .{ counts.connected, counts.relevant, self.heavy.?.resolved.core.peers.target_peers, active_requests.outbound, active_requests.inbound, self.heavy.?.core.counters.dial_started, self.heavy.?.core.counters.dial_deferred, if (self.heavy.?.core.discovery) |discovery| discovery.transport.engine.peerCount() else 0, self.heavy.?.core.service.gossipsub.counters.local_pressure_resets, self.heavy.?.core.transport.udp.counters.received_bytes, self.heavy.?.core.transport.udp.counters.sent_bytes });
         self.health_log_due_ms = timestamp.mono_ms +| 30000;
     }
-    if (self.lane) |lane| {
-        const empty = lane.len == 0;
-        lane.publish(self.heavy.?.outputs[0..result.counts.peers], sequence);
-        if (empty and lane.len > 0) self.pingLocked();
-    }
+    if (self.lane) |lane| lane.publish(self.heavy.?.outputs[0..result.counts.peers], sequence);
+    self.recomputeLocked(.peers);
     if (result.failure) |err| {
         std.log.scoped(.network_runtime).debug("owner_turn_failed reason={s} fatal={any}", .{ @errorName(err), result.readiness.failure != null });
         self.diag.operationalFailures +|= 1;

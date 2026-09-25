@@ -10,6 +10,9 @@ pub const commands = @import("network_commands.zig");
 pub const application_config = @import("network_application_config.zig");
 pub const projection = @import("network_peer_projection.zig");
 const Wake = @import("network_wake.zig").Wake;
+const readiness_mod = @import("network_readiness.zig");
+pub const Row = readiness_mod.Row;
+pub const Place = readiness_mod.Place;
 pub const Owner = @import("network_owner.zig").Owner;
 pub const allocator = std.heap.c_allocator;
 pub const State = enum { running, stopping, closed, failed };
@@ -127,6 +130,9 @@ pub const RememberedPage = struct {
     records: [n.peers.remembered.capacity]n.peers.remembered.Record,
 };
 
+/// The host's standing capacities: serving starts it can take now, and whether it executes ordinary gossip.
+pub const Capacity = struct { serving: u32 = 0, ordinary: bool = false };
+
 pub const Stores = struct {
     backing: std.mem.Allocator,
     intents: [2]application_config.Intent = undefined,
@@ -183,12 +189,12 @@ pub const Runtime = struct {
     notify: Notify = undefined,
     notify_live: bool = true,
     notify_finalized: bool = false,
-    /// The notification latch: set by a ping and held until the host's drain ends with nothing
-    /// left, so at most one notification is outstanding.
-    notification_pending: bool = false,
-    /// A ping arrived while the latch was held; the current drain must run again.
-    notify_missed: bool = false,
-    work_rearm: bool = false,
+    readiness: readiness_mod.Readiness = .{},
+    capacity: Capacity = .{},
+    /// JS thread: an exchange is running, so a nested one is refused.
+    in_exchange: bool = false,
+    /// The exchange results created at initialize, which idle exchanges and rollbacks return.
+    results: @import("network_exchange.zig").Results = .{},
     /// Owner thread: an event capture left host work for the next apply, so the next turn is due now.
     host_due: bool = false,
     env_alive: bool = true,
@@ -331,6 +337,7 @@ pub const Runtime = struct {
         self.reason = .requested;
         self.diag.state = .stopping;
         self.signalLocked();
+        self.refreshLocked();
     }
     pub fn signalLocked(self: *Runtime) void {
         if (self.wake) |*wake| wake.signal() catch {
@@ -395,54 +402,56 @@ pub const Runtime = struct {
         }
         return result;
     }
-    pub fn pingLocked(self: *Runtime) void {
-        if (!self.notify_live or !self.env_alive) return;
-        if (self.notification_pending) {
-            self.notify_missed = true;
-            return;
+    /// Where `row` belongs now. Neither checks nor serving starts are served after a stop, no claim after
+    /// quiescence, and nothing once the close result settled, so a host may stop exchanging.
+    pub fn wantLocked(self: *Runtime, row: Row) Place {
+        switch (row) {
+            .legacy => return if (self.settleableLocked() or (self.quiescent and !self.close_settled)) .control else .none,
+            .peers => return if (!self.close_settled and self.lane != null and self.lane.?.len > 0) .payload else .none,
+            .checks => {
+                const table = if (self.gossip) |*table| table else return .none;
+                return if (!self.stop and !self.quiescent and table.readiness().checks) .payload else .none;
+            },
+            .serving => {
+                const table = if (self.incoming) |*table| table else return .none;
+                if (self.stop or self.quiescent or table.oldest() == null) return .none;
+                return if (self.capacity.serving > 0) .payload else .parked;
+            },
+            .gossip => {
+                const table = if (self.gossip) |*table| table else return .none;
+                if (self.quiescent) return .none;
+                const work = table.readiness();
+                if (work.urgent or (work.ordinary and self.capacity.ordinary)) return .payload;
+                return if (work.ordinary) .parked else .none;
+            },
         }
-        self.notification_pending = true;
+    }
+    /// Moves `row` to where it belongs, notifying the host when the move disarms.
+    pub fn recomputeLocked(self: *Runtime, row: Row) void {
+        if (self.readiness.recompute(row, self.wantLocked(row))) self.notifyLocked();
+    }
+    pub fn refreshLocked(self: *Runtime) void {
+        inline for (@typeInfo(Row).@"enum".fields) |field| self.recomputeLocked(@enumFromInt(field.value));
+    }
+    pub fn notifyLocked(self: *Runtime) void {
+        if (!self.notify_live or !self.env_alive) return;
         switch (activity) {
             .entry => |entry| self.bridge.js_pings[@intFromEnum(entry)] +|= 1,
             else => {},
         }
         self.notify.call(undefined, .non_blocking) catch |err| switch (err) {
+            // An undequeued notification remains, and its exchange sees this work.
             error.QueueFull => {},
             error.Closing => {
                 self.notify_live = false;
                 self.stop = true;
             },
             else => {
-                self.notification_pending = false;
                 self.stop = true;
                 self.reason = .failed;
                 self.terminal_error = err;
             },
         };
-    }
-    /// JS thread, in the notification callback: records it and reports whether to call the host.
-    /// The latch stays set; the host's drain releases it.
-    pub fn noticeLocked(self: *Runtime) bool {
-        self.bridge.notified();
-        return self.env_alive;
-    }
-    /// JS thread: the host did not take the notification, so the callback settles inline and a
-    /// later ping notifies again.
-    pub fn declineLocked(self: *Runtime) void {
-        self.notification_pending = false;
-        self.notify_missed = false;
-    }
-    /// JS thread, inside an exchange with nothing more to deliver: ends one host drain. Keeps the
-    /// latch and returns true when a ping arrived during the drain, a completion awaits settlement
-    /// or the close result is pending. Otherwise releases the latch, so the owner's next ping
-    /// notifies again; both happen under the runtime mutex, so owner work between this check and
-    /// that ping is never lost.
-    pub fn endDrainLocked(self: *Runtime) bool {
-        self.bridge.boundary();
-        const more = self.notify_missed or self.settleableLocked() or (self.quiescent and !self.close_settled);
-        self.notify_missed = false;
-        if (!more) self.notification_pending = false;
-        return more;
     }
     /// A publication, command, request or incoming completion that an exchange would settle now. O(1).
     pub fn settleableLocked(self: *const Runtime) bool {
@@ -501,6 +510,7 @@ pub const Runtime = struct {
         if (self.copy_error) |ref| ref.delete() catch unreachable;
         self.copy_error = null;
         self.disposeCloseReferences();
+        self.results.dispose();
     }
     pub fn disposeCloseReferences(self: *Runtime) void {
         for (&self.close_results) |*entry| {
@@ -572,7 +582,10 @@ pub const Runtime = struct {
         self.retireRequestStorageLocked();
         self.diag.state = if (self.reason == .failed) .failed else .closed;
         std.log.scoped(.network_runtime).info("owner_stopped reason={s} turns={d} operational_failures={d}", .{ @tagName(self.reason), self.diag.ownerTurns, self.diag.operationalFailures });
-        self.pingLocked();
+        // Every host sees quiescence, also one whose waiting payload left it disarmed or one already collected.
+        self.refreshLocked();
+        self.readiness.armed = false;
+        self.notifyLocked();
         const release_notify = self.notify_live;
         self.notify_live = false;
         self.unlock();

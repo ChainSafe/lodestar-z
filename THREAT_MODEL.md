@@ -29,9 +29,11 @@ another initialization, including from another Node.js environment, is rejected;
 released, a new runtime may initialize. The owning thread coordinates shutdown and joins the network
 thread. Environment cleanup also stops the owner and retires outstanding native obligations, even
 when JavaScript can no longer run. An operation-local allocation or result-copy failure retires that
-operation, or leaves an exchange's undelivered payload for a later exchange, without stopping the
-runtime. If the runtime cannot safely continue, the host shuts down the beacon node and preserves
-the terminal failure as an unsuccessful process exit.
+operation without stopping the runtime; an exchange rolls its undelivered payload back for a later
+exchange and retires an item whose deliveries keep failing. A bridge contract failure terminates the
+process unsuccessfully through a native fatal error. If the runtime otherwise cannot safely continue,
+the host shuts down the beacon node and preserves the terminal failure as an unsuccessful process
+exit.
 
 The assets protected here are:
 

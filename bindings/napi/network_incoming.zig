@@ -30,6 +30,8 @@ pub const Cell = struct {
     context: ?rr.ForkEntry = null,
     copying: bool = false,
     exposed: bool = false,
+    /// Deliveries of this start that rolled back.
+    rollbacks: u8 = 0,
     closed: ?napi.Deferred = null,
     pending: ?napi.Deferred = null,
     permission: ?napi.Deferred = null,
@@ -271,6 +273,8 @@ pub fn flags(runtime: *Runtime, now: n.Now) !bool {
     if (table.cells.len == 0) return false;
     var submissions: usize = 0;
     var more = false;
+    // Cells refresh their settlement at the end of each iteration, so the legacy row is recomputed after the loop.
+    defer runtime.recomputeLocked(.legacy);
     for (0..table.cells.len) |offset| {
         const cell = &table.cells[(table.cursor + offset) % table.cells.len];
         defer table.refresh(cell);
@@ -294,7 +298,6 @@ pub fn flags(runtime: *Runtime, now: n.Now) !bool {
                 continue;
             };
             cell.permission_ready = true;
-            runtime.pingLocked();
         }
         if (cell.state == .response_queued and submissions == 4) more = true;
         if (cell.state == .response_queued and submissions < 4) {
@@ -304,7 +307,6 @@ pub fn flags(runtime: *Runtime, now: n.Now) !bool {
                 cell.ack = .{ .rejected = try rejection(err) };
                 table.releaseResponse(cell);
                 cell.state = .serving;
-                runtime.pingLocked();
                 continue;
             };
             cell.state = .response_native;
@@ -385,7 +387,8 @@ pub fn captureLocked(runtime: *Runtime, event: rr.Event, now: n.Now) !void {
             }
         }
         table.refresh(cell);
-        runtime.pingLocked();
+        runtime.recomputeLocked(.legacy);
+        runtime.recomputeLocked(.serving);
         if (ownerWork(cell)) runtime.host_due = true;
         break;
     }
@@ -417,7 +420,7 @@ fn admitLocked(runtime: *Runtime, request: @FieldType(rr.Event, "request"), now:
     std.debug.assert(retained);
     cell.serving_retained = true;
     table.refresh(cell);
-    runtime.pingLocked();
+    runtime.recomputeLocked(.serving);
 }
 pub fn closeLocked(runtime: *Runtime) void {
     if (runtime.incoming) |*table| for (table.cells, 0..) |*cell, i| {

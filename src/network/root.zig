@@ -1,4 +1,5 @@
 pub const gossip_processor = @import("gossip_processor/root.zig");
+pub const index_list = @import("index_list.zig");
 pub const chain = @import("chain.zig");
 pub const configuration = @import("configuration.zig");
 pub const metrics = @import("metrics/export.zig");
@@ -71,7 +72,7 @@ test {
     _ = @import("network_core.zig");
     _ = @import("reservations.zig");
     _ = @import("deadline_heap.zig");
-    _ = @import("index_list.zig");
+    _ = index_list;
     _ = configuration;
     _ = @import("capabilities.zig");
     _ = identify;

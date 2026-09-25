@@ -8,10 +8,14 @@ import {type ChainConfig, createBeaconConfig} from "@lodestar/config";
 import bindings from "../../src/index.js";
 import type {
   IpEndpoint,
+  NativeAction,
   NativeApplicationConfig,
   NativeDiscoveryConfig,
+  NativeExchange,
+  NativeExchangeDelivery,
   NativeExchangeDemand,
   NativeGossipProcessorLimit,
+  NativeIncomingRequest,
   NativeLocalIntent,
   NativeNetworkApplicationRuntime,
   NativeRuntimeConfig,
@@ -22,22 +26,55 @@ import type {
 
 const MIB = 1024 * 1024;
 
-/** An exchange that only settles results, as a closed host's drain does; tests add the payload they take. */
-export const settleOnly: NativeExchangeDemand = {gossip: null, peers: 0, serving: 0, settle: 32};
+/** An exchange that only settles results, as a closed host's does; tests add the payload they take. */
+export const settleOnly: NativeExchangeDemand = {
+  bytes: 0,
+  capacity: null,
+  checks: 0,
+  claimOrdinary: false,
+  messages: 0,
+  peers: 0,
+  servingStarts: 0,
+  settleCells: 32,
+};
+/** A host that serves every start and executes ordinary gossip. */
+export const capacity = {ordinary: true, serving: 32};
 /** Dependency checks and every claimable gossip job, as one exchange takes them. */
 export const gossipAll: NativeExchangeDemand = {
   ...settleOnly,
-  gossip: {bytes: 16 * MIB, items: 64, ordinary: true, ready: true},
+  bytes: 16 * MIB,
+  capacity,
+  checks: 64,
+  claimOrdinary: true,
+  messages: 64,
 };
 /** Dependency checks without a gossip claim. */
-export const checksOnly: NativeExchangeDemand = {
-  ...settleOnly,
-  gossip: {bytes: 0, items: 0, ordinary: false, ready: true},
-};
+export const checksOnly: NativeExchangeDemand = {...settleOnly, capacity, checks: 64};
+
+/** One exchange's delivery; a test fails on a rollback, which it never injects. */
+export function exchange(
+  runtime: Pick<NativeNetworkApplicationRuntime, "exchange">,
+  demand: NativeExchangeDemand,
+  actions: readonly NativeAction[] = []
+): NativeExchangeDelivery {
+  return delivered(runtime.exchange(actions, demand));
+}
+
+export function delivered(result: NativeExchange): NativeExchangeDelivery {
+  if (result.rolledBack) throw Error("Unexpected exchange rollback");
+  return result;
+}
 
 /** The oldest queued incoming request, as one serving start of an exchange. */
-export function nextIncoming<T>(runtime: {exchange(demand: NativeExchangeDemand): {serving: T[]}}): T | null {
-  return runtime.exchange({...settleOnly, serving: 1}).serving[0] ?? null;
+export function nextIncoming<T = NativeIncomingRequest>(runtime: {
+  exchange(
+    actions: readonly NativeAction[],
+    demand: NativeExchangeDemand
+  ): {rolledBack: false; serving: readonly T[]} | {rolledBack: true};
+}): T | null {
+  const result = runtime.exchange([], {...settleOnly, capacity, servingStarts: 1});
+  if (result.rolledBack) throw Error("Unexpected exchange rollback");
+  return result.serving[0] ?? null;
 }
 
 /**
@@ -219,15 +256,26 @@ export function localIntent(config: NativeApplicationConfig): NativeLocalIntent 
 }
 
 /**
- * The least a host drain does: each notification schedules settle-only exchanges in later macrotasks until one
- * releases the latch. Peers, serving starts and gossip stay with the test.
+ * The least a host does: each notification schedules settle-only exchanges in later macrotasks while they report
+ * more, and retries on a timer while payload waits for a service it disables. Peers, serving starts and gossip stay
+ * with the test.
  */
 function settlingHost(onWorkAvailable: () => void = () => undefined) {
-  let runtime: Pick<NativeNetworkApplicationRuntime, "exchange"> | undefined;
+  // Weak, so a pending retry never keeps the facade alive.
+  let runtime: WeakRef<Pick<NativeNetworkApplicationRuntime, "exchange">> | undefined;
   let scheduled = false;
+  let timer: NodeJS.Timeout | undefined;
   const drain = () => {
     scheduled = false;
-    if (runtime?.exchange(settleOnly).more) schedule();
+    const result = runtime?.deref()?.exchange([], settleOnly);
+    if (result?.more) schedule();
+    else if (result?.rolledBack === false && result.disabledWaiting && !timer) {
+      timer = setTimeout(() => {
+        timer = undefined;
+        schedule();
+      }, 25);
+      timer.unref();
+    }
   };
   const schedule = () => {
     if (scheduled) return;
@@ -236,7 +284,7 @@ function settlingHost(onWorkAvailable: () => void = () => undefined) {
   };
   return {
     attach(value: Pick<NativeNetworkApplicationRuntime, "exchange">) {
-      runtime = value;
+      runtime = new WeakRef(value);
     },
     onWorkAvailable() {
       schedule();

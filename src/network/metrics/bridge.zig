@@ -8,7 +8,7 @@ const gossip_limits = @import("../gossip_limits.zig");
 const Kind = gossip_limits.Kind;
 
 /// Native calls timed on the JS thread, with the runtime mutex waits they incur.
-pub const Entry = enum { exchange, classify_gossip, report_gossip, publish_gossip, get_metrics, request_start, request_pull, request_retire, incoming_ready, incoming_respond, incoming_terminal, incoming_release };
+pub const Entry = enum { exchange, publish_gossip, get_metrics, request_start, request_pull, request_retire, incoming_ready, incoming_respond, incoming_terminal, incoming_release };
 /// Owner sections that hold the runtime mutex, named after the owner steps that take it.
 pub const Phase = enum { turn, reports, commands, publications, requests, gossip_flags, request_flags, incoming_flags, capture, gossip_ingress, peer_lane, metrics };
 pub const AdmissionKind = enum { block, column, aggregate, attestation, other };
@@ -174,8 +174,8 @@ pub fn write(snapshot: *const Snapshot, running: bool, w: *prom.Encoder) prom.Er
 
 test "bridge snapshot renders recorded calls, waits, holds, deliveries, notifications and processor state" {
     var recorder: Recorder = .{};
-    recorder.calls[@intFromEnum(Entry.report_gossip)].observe(3_000);
-    recorder.calls[@intFromEnum(Entry.report_gossip)].observe(2_000_000);
+    recorder.calls[@intFromEnum(Entry.exchange)].observe(3_000);
+    recorder.calls[@intFromEnum(Entry.exchange)].observe(2_000_000);
     recorder.holds[@intFromEnum(Phase.gossip_flags)].observe(750_000);
     recorder.owner_waits[@intFromEnum(Phase.capture)].observe(0);
     recorder.owner_waits[@intFromEnum(Phase.capture)].observe(300_000);
@@ -196,9 +196,9 @@ test "bridge snapshot renders recorded calls, waits, holds, deliveries, notifica
     try write(&snapshot, true, &encoder);
     const output = writer.buffered();
     for ([_][]const u8{
-        "lodestar_native_bridge_call_seconds_bucket{entry=\"report_gossip\",le=\"0.0001\"} 1\n",
-        "lodestar_native_bridge_call_seconds_bucket{entry=\"report_gossip\",le=\"0.0025\"} 2\n",
-        "lodestar_native_bridge_call_seconds_count{entry=\"report_gossip\"} 2\n",
+        "lodestar_native_bridge_call_seconds_bucket{entry=\"exchange\",le=\"0.0001\"} 1\n",
+        "lodestar_native_bridge_call_seconds_bucket{entry=\"exchange\",le=\"0.0025\"} 2\n",
+        "lodestar_native_bridge_call_seconds_count{entry=\"exchange\"} 2\n",
         "lodestar_native_bridge_lock_hold_seconds_bucket{phase=\"gossip_flags\",le=\"0.001\"} 1\n",
         "lodestar_native_bridge_owner_lock_wait_seconds_bucket{phase=\"capture\",le=\"0.0001\"} 1\n",
         "lodestar_native_bridge_owner_lock_wait_seconds_bucket{phase=\"capture\",le=\"0.0005\"} 2\n",

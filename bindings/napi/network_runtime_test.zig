@@ -12,11 +12,12 @@ const projection = r.projection;
 const napi = @import("zapi:zapi").napi;
 const exchange = @import("network_exchange.zig");
 
-/// The test executable links no Node runtime, so a notification only counts here.
-var notifications = std.atomic.Value(u32).init(0);
+/// The test executable links no Node runtime, so a notification only counts here, and returns `status`.
+pub var notifications = std.atomic.Value(u32).init(0);
+pub var status: c_uint = 0;
 fn napiCallThreadsafeFunction(_: ?*anyopaque, _: ?*anyopaque, _: c_uint) callconv(.c) c_uint {
     _ = notifications.fetchAdd(1, .acq_rel);
-    return 0;
+    return status;
 }
 comptime {
     @export(&napiCallThreadsafeFunction, .{ .name = "napi_call_threadsafe_function" });
@@ -169,10 +170,10 @@ test "runtime mutex records JS waits under the calling entry and owner waits and
             thread.join();
         }
     };
-    const call = r.call(&runtime, .report_gossip);
+    const call = r.call(&runtime, .exchange);
     try Holder.contend(&runtime);
     call.end();
-    const waits = &runtime.bridge.waits[@intFromEnum(r.bridge.Entry.report_gossip)];
+    const waits = &runtime.bridge.waits[@intFromEnum(r.bridge.Entry.exchange)];
     try std.testing.expectEqual(@as(u64, 1), waits.count);
     try std.testing.expectEqual(@as(u64, 0), waits.buckets[0]);
     const previous = r.phase(.gossip_flags);
@@ -184,7 +185,7 @@ test "runtime mutex records JS waits under the calling entry and owner waits and
     runtime.unlock();
     var snapshot: r.bridge.Snapshot = .{};
     runtime.bridge.snapshot(&snapshot);
-    try std.testing.expectEqual(@as(u64, 1), snapshot.calls[@intFromEnum(r.bridge.Entry.report_gossip)].count);
+    try std.testing.expectEqual(@as(u64, 1), snapshot.calls[@intFromEnum(r.bridge.Entry.exchange)].count);
     try std.testing.expectEqual(@as(u64, 2), snapshot.holds[@intFromEnum(r.bridge.Phase.gossip_flags)].count);
     const owner_waits = &snapshot.owner_waits[@intFromEnum(r.bridge.Phase.gossip_flags)];
     try std.testing.expectEqual(@as(u64, 2), owner_waits.count);
@@ -199,74 +200,57 @@ test "runtime mutex records JS waits under the calling entry and owner waits and
     try std.testing.expectEqual(@as(u64, 3), waited);
 }
 
-test "a notification keeps the latch and leaves every completion for the host drain" {
+test "an owner completion notifies once while armed and leaves settlement to the exchange" {
     var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 } };
     const before = notifications.load(.acquire);
     const token = try runtime.table.reserve(.getIdentity);
     runtime.table.transition(runtime.table.get(token), .terminal);
     runtime.lock();
-    runtime.pingLocked();
-    runtime.pingLocked();
-    try std.testing.expect(runtime.noticeLocked());
+    runtime.recomputeLocked(.legacy);
+    runtime.recomputeLocked(.legacy);
     runtime.unlock();
     try std.testing.expectEqual(before + 1, notifications.load(.acquire));
-    try std.testing.expect(runtime.notification_pending);
+    try std.testing.expect(!runtime.readiness.armed);
     try std.testing.expectEqual(commands.State.terminal, runtime.table.get(token).state);
+    // Disarmed, a second completion adds to the queued row without another notification.
+    const second = try runtime.table.reserve(.getIdentity);
     runtime.lock();
-    try std.testing.expect(runtime.endDrainLocked());
+    runtime.table.transition(runtime.table.get(second), .terminal);
+    runtime.recomputeLocked(.legacy);
+    try std.testing.expect(!runtime.readiness.arm());
     runtime.unlock();
-    try std.testing.expect(runtime.notification_pending);
-    runtime.table.retire(token);
+    for ([_]commands.Token{ token, second }) |settled| runtime.table.retire(settled);
     runtime.lock();
-    try std.testing.expect(!runtime.endDrainLocked());
-    try std.testing.expect(!runtime.notification_pending);
-    runtime.pingLocked();
+    runtime.refreshLocked();
+    try std.testing.expect(runtime.readiness.arm());
     runtime.unlock();
-    try std.testing.expectEqual(before + 2, notifications.load(.acquire));
+    try std.testing.expectEqual(before + 1, notifications.load(.acquire));
     try std.testing.expectEqual(@as(u64, 0), runtime.bridge.js_pings[@intFromEnum(r.bridge.Entry.exchange)]);
 }
 
-test "owner work around the end of a host drain is never lost" {
-    var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 } };
-    const before = notifications.load(.acquire);
-    runtime.lock();
-    runtime.pingLocked();
-    _ = runtime.noticeLocked();
-    runtime.unlock();
-    // Owner work between the drain's last read and its end: the latch suppresses the ping.
-    runtime.lock();
-    runtime.pingLocked();
-    runtime.unlock();
-    try std.testing.expectEqual(before + 1, notifications.load(.acquire));
-    runtime.lock();
-    try std.testing.expect(runtime.endDrainLocked());
-    try std.testing.expect(!runtime.endDrainLocked());
-    runtime.unlock();
-    // Owner work after the end released the latch: the ping notifies again.
-    runtime.lock();
-    runtime.pingLocked();
-    runtime.unlock();
-    try std.testing.expectEqual(before + 2, notifications.load(.acquire));
-    try std.testing.expect(runtime.notification_pending);
-}
-
-/// An exchange host that settles nothing and builds only the peer count.
+/// An exchange host that builds only the peer count.
 const PeerHost = struct {
-    pub const Output = struct { peers: usize, more: bool };
-    pub fn settle(_: *PeerHost, _: usize) !exchange.Settled {
-        return .{};
+    pub const Result = struct { peers: usize, more: bool };
+    pub fn build(_: *PeerHost, selection: *exchange.Selection) !usize {
+        return selection.peer_count;
     }
-    pub fn now(_: *PeerHost) !u64 {
-        return 0;
+    pub fn finish(_: *PeerHost, peers: usize, _: *const exchange.Selection, outcome: exchange.Outcome) !Result {
+        return .{ .peers = peers, .more = outcome.more };
     }
-    pub fn build(_: *PeerHost, selection: *exchange.Selection, _: usize) !Output {
-        return .{ .peers = selection.peer_count, .more = selection.more };
+    pub fn rolledBack(_: *PeerHost, _: bool) !Result {
+        unreachable;
     }
     pub fn discard(_: *PeerHost, _: *const exchange.Selection) void {}
     pub fn keepAlive(_: *PeerHost) void {}
+    pub fn classify(_: *PeerHost, _: anyerror) exchange.Failure {
+        unreachable;
+    }
+    pub fn fatal(_: *PeerHost, err: anyerror) anyerror {
+        return err;
+    }
 };
 
-test "owner work that races the end of a host drain always reaches a later exchange" {
+test "owner work that races an exchange's check and arm always reaches a later exchange" {
     var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 } };
     var lane: projection.Lane = .{};
     runtime.lane = &lane;
@@ -274,21 +258,15 @@ test "owner work that races the end of a host drain always reaches a later excha
         produced: u32 = 0,
         done: std.atomic.Value(bool) = .init(false),
         stop: std.atomic.Value(bool) = .init(false),
-        /// Publishes into the peer lane as the owner does, and answers a commit's re-arm as the
-        /// owner's next host apply does, until told to stop.
+        /// Publishes into the peer lane as the owner does, until told to stop.
         fn run(self: *@This(), target: *Runtime) void {
             for (0..100_000_000) |_| {
                 if (self.stop.load(.acquire)) break;
                 target.lock();
-                if (target.work_rearm) {
-                    target.work_rearm = false;
-                    if (target.lane.?.len > 0) target.pingLocked();
-                }
                 if (self.produced < 5_000 and target.lane.?.len < 64) {
-                    const empty = target.lane.?.len == 0;
                     target.lane.?.publish(&.{.{ .closed = undefined }}, self.produced);
                     self.produced += 1;
-                    if (empty) target.pingLocked();
+                    target.recomputeLocked(.peers);
                     if (self.produced == 5_000) self.done.store(true, .release);
                 }
                 target.unlock();
@@ -301,30 +279,25 @@ test "owner work that races the end of a host drain always reaches a later excha
     const thread = try std.Thread.spawn(.{}, Producer.run, .{ &producer, &runtime });
     defer thread.join();
     defer producer.stop.store(true, .release);
-    const demand: exchange.Demand = .{ .settle = 32, .peers = 64, .serving = 0, .gossip = null };
+    const demand: exchange.Demand = .{ .settle = 32, .peers = 64, .checks = 0, .serving = 0, .messages = 0, .bytes = 0, .claim_ordinary = false, .capacity = null };
     var host: PeerHost = .{};
     var consumed: usize = 0;
     var again = false;
-    var drains: usize = 0;
+    var exchanges: usize = 0;
     for (0..10_000_000) |_| {
         const notified = notifications.load(.acquire) != delivered;
         if (notified) delivered += 1;
         if (notified or again) {
-            if (notified) {
-                runtime.lock();
-                _ = runtime.noticeLocked();
-                runtime.unlock();
-            }
-            const output = try exchange.run(&runtime, &demand, &host);
+            const output = try exchange.run(&runtime, &.{}, &demand, 0, 0, &host);
             consumed += output.peers;
             again = output.more;
-            drains += 1;
+            exchanges += 1;
         } else if (producer.done.load(.acquire) and consumed == 5_000) break;
         std.Thread.yield() catch {};
     }
     try std.testing.expectEqual(@as(usize, 5_000), consumed);
-    try std.testing.expect(!runtime.notification_pending and !runtime.notify_missed);
-    try std.testing.expect(drains > 0);
+    try std.testing.expect(runtime.readiness.armed);
+    try std.testing.expect(exchanges > 0);
 }
 
 test "pulls and retirements neither notify from the JS thread nor settle before the host drain" {
@@ -355,13 +328,17 @@ test "pulls and retirements neither notify from the JS thread nor settle before 
     retire.end();
     try std.testing.expect(cell.retiring and cell.cancel and cell.retirement != null);
     try std.testing.expectEqual(before, notifications.load(.acquire));
-    try std.testing.expect(!runtime.notification_pending);
+    try std.testing.expect(runtime.readiness.armed);
     for (runtime.bridge.js_pings) |count| try std.testing.expectEqual(@as(u64, 0), count);
+    // An owner-side move that a JS-thread call makes notifies from that call.
     const ping = r.call(&runtime, .request_pull);
+    const command = try runtime.table.reserve(.getIdentity);
     runtime.lock();
-    runtime.pingLocked();
+    runtime.table.transition(runtime.table.get(command), .terminal);
+    runtime.recomputeLocked(.legacy);
     runtime.unlock();
     ping.end();
+    runtime.table.retire(command);
     try std.testing.expectEqual(@as(u64, 1), runtime.bridge.js_pings[@intFromEnum(r.bridge.Entry.request_pull)]);
     cell.native = null;
     cell.chunk = null;

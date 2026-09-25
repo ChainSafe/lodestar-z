@@ -490,5 +490,5 @@ test "metrics count each host apply once under its cause" {
     var writer = std.Io.Writer.fixed(buffer);
     try metrics.write(&context, &writer);
     try contains(writer.buffered(), "lodestar_native_network_host_applies_total{cause=\"more\"} 1\n");
-    try contains(writer.buffered(), "lodestar_native_bridge_call_seconds_count{entry=\"report_gossip\"} 0\n");
+    try contains(writer.buffered(), "lodestar_native_bridge_call_seconds_count{entry=\"publish_gossip\"} 0\n");
 }

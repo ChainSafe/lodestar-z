@@ -204,7 +204,7 @@ test("limited settlement reaches a terminal publication above refilled lower cel
     // Each pass settles one cell; the lowest cell then refills and completes before the next pass.
     for (let pass = 0; pass < 2; pass++) {
       await executed();
-      runtime.exchange({...settleOnly, settle: 1});
+      runtime.exchange([], {...settleOnly, settleCells: 1});
       publications.push(publish(3 + pass));
     }
     await executed();
@@ -213,7 +213,7 @@ test("limited settlement reaches a terminal publication above refilled lower cel
     runtime.close();
     for (let i = 0; i < 400 && !closed; i++) {
       await delay(5);
-      for (let pass = 0; pass < 8 && runtime.exchange(settleOnly).more; pass++);
+      for (let pass = 0; pass < 8 && runtime.exchange([], settleOnly).more; pass++);
     }
   }
   await Promise.all(publications);

@@ -8,13 +8,6 @@ pub fn discardPromise(env: napi.Env, deferred: napi.Deferred) void {
     deferred.resolve(value) catch {};
 }
 
-pub fn copyError(err: anyerror) anyerror {
-    return switch (err) {
-        error.OutOfMemory, error.GenericFailure => error.NetworkResultAllocationFailed,
-        else => err,
-    };
-}
-
 /// An error whose `message` and own `code` are `code`, created without running host code: N-API assigns a code
 /// argument through inherited setters, so the code is defined as an own property instead.
 pub fn errorValue(env: napi.Env, code: []const u8) !Value {

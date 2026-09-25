@@ -1,162 +1,260 @@
-//! One host drain turn. Legacy settlement runs first and commits per promise. The payload the host
-//! asked for is then pinned under one mutex hold, built into a complete result without the mutex,
-//! and committed as a whole, or restored so the next exchange delivers it again.
+//! One host exchange. Phase A decodes the actions and demand, and throws with nothing applied. Phase 0 settles
+//! legacy results. Phase B, under the mutex, disarms, applies the actions, takes the capacities and pins the rows it
+//! serves. Phase C builds the result; no user code runs from here on. Phase D, under the mutex, commits or rolls back,
+//! unpins, wakes the owner once and arms when nothing is queued.
 const std = @import("std");
 const n = @import("network");
 const napi = @import("zapi:zapi").napi;
 const Value = napi.Value;
 const cfg = @import("network_config.zig");
+const app = @import("network_application_config.zig");
 const r = @import("network_runtime.zig");
 const g = @import("network_gossip.zig");
 const incoming = @import("network_incoming.zig");
 const projection = @import("network_peer_projection.zig");
+const readiness = @import("network_readiness.zig");
 const Runtime = r.Runtime;
+const Row = readiness.Row;
+const Place = readiness.Place;
+const none = n.index_list.none;
 
 const put = @import("network_js.zig").put;
 const element = @import("network_js.zig").element;
 const bytes = @import("network_js.zig").bytes;
 
+/// Actions one exchange applies; a longer batch is refused before any is applied.
+pub const action_max = 256;
 pub const peers_max = 64;
-/// Serving starts per exchange. An exchange that delivers all of them asks for another.
 pub const serving_max = 8;
 const settle_max = @import("network_publications.zig").capacity_max;
 
-/// The payload one exchange may deliver, read in full before any state changes.
+/// One exchange's quotas, where zero disables a service, and the host's standing capacities, null to keep them.
 pub const Demand = struct {
-    /// Completions settled per native table.
     settle: usize,
     peers: usize,
+    checks: usize,
     serving: usize,
-    /// Dependency checks and one job batch, or null to leave gossip queued.
-    gossip: ?Gossip,
-
-    pub const Gossip = struct {
-        items: usize,
-        bytes: usize,
-        /// The ordinary gate a claim sets: the host takes ordinary jobs now. Implies `ready`.
-        ordinary: bool,
-        /// The host executor can take work, whatever its held jobs and time budget.
-        ready: bool,
-    };
+    messages: usize,
+    bytes: usize,
+    claim_ordinary: bool,
+    capacity: ?r.Capacity,
 
     pub fn parse(value: Value) !Demand {
-        try cfg.completeObject(value, &.{ "settle", "peers", "serving", "gossip" });
-        var demand: Demand = .{
-            .settle = @intCast(try cfg.integer(try cfg.get(value, "settle"), settle_max)),
+        _ = try object(value);
+        const capacity = try cfg.get(value, "capacity");
+        const demand: Demand = .{
+            .settle = @intCast(try cfg.integer(try cfg.get(value, "settleCells"), settle_max)),
             .peers = @intCast(try cfg.integer(try cfg.get(value, "peers"), peers_max)),
-            .serving = @intCast(try cfg.integer(try cfg.get(value, "serving"), serving_max)),
-            .gossip = null,
+            .checks = @intCast(try cfg.integer(try cfg.get(value, "checks"), g.batch_max)),
+            .serving = @intCast(try cfg.integer(try cfg.get(value, "servingStarts"), serving_max)),
+            .messages = @intCast(try cfg.integer(try cfg.get(value, "messages"), g.batch_max)),
+            .bytes = @intCast(try cfg.integer(try cfg.get(value, "bytes"), g.batch_bytes)),
+            .claim_ordinary = try cfg.boolean(try cfg.get(value, "claimOrdinary")),
+            .capacity = if (try capacity.typeof() == .null) null else .{
+                .serving = @intCast(try cfg.integer(try cfg.get(try object(capacity), "serving"), incoming.capacity_max)),
+                .ordinary = try cfg.boolean(try cfg.get(capacity, "ordinary")),
+            },
         };
         if (demand.settle == 0) return error.InvalidNetworkInteger;
-        const gossip = try cfg.get(value, "gossip");
-        if (try gossip.typeof() == .null) return demand;
-        try cfg.completeObject(gossip, &.{ "items", "bytes", "ordinary", "ready" });
-        demand.gossip = .{
-            .items = @intCast(try cfg.integer(try cfg.get(gossip, "items"), g.batch_max)),
-            .bytes = @intCast(try cfg.integer(try cfg.get(gossip, "bytes"), g.batch_bytes)),
-            .ordinary = try cfg.boolean(try cfg.get(gossip, "ordinary")),
-            .ready = try cfg.boolean(try cfg.get(gossip, "ready")),
-        };
-        if (demand.gossip.?.ordinary and !demand.gossip.?.ready) return error.InvalidNetworkConfig;
         return demand;
     }
 };
 
-pub const Settled = struct { count: usize = 0, more: bool = false };
+fn object(value: Value) !Value {
+    if (try value.typeof() != .object or try value.isArray()) return error.InvalidNetworkConfig;
+    return value;
+}
+
+/// A host obligation or request, applied in O(1) under the mutex.
+pub const Action = union(enum) {
+    verdict: struct { token: g.Token, verdict: n.gossipsub.Verdict },
+    classify: struct { token: g.Token, available: bool },
+    block: [32]u8,
+    recheck,
+    drop_queued,
+    report_peer: struct { identity: n.PeerId, action: n.peers.types.PeerAction, count: u8 },
+};
+const ActionType = enum { verdict, classify, block, recheck, dropQueued, reportPeer };
+
+pub fn parseActions(value: Value, into: *[action_max]Action) !usize {
+    if (!try value.isArray()) return error.InvalidNetworkActions;
+    const count = try value.getArrayLength();
+    if (count > action_max) return error.InvalidNetworkActions;
+    for (into[0..count], 0..) |*action, i| action.* = try parseAction(try value.getElement(@intCast(i)));
+    return count;
+}
+
+fn parseAction(value: Value) !Action {
+    _ = object(value) catch return error.InvalidNetworkAction;
+    return switch (try name(ActionType, try cfg.get(value, "type"), error.InvalidNetworkAction)) {
+        .verdict => .{ .verdict = .{
+            .token = try handle(try cfg.get(value, "handle")),
+            .verdict = try name(n.gossipsub.Verdict, try cfg.get(value, "verdict"), error.InvalidGossipVerdict),
+        } },
+        .classify => .{ .classify = .{ .token = try handle(try cfg.get(value, "handle")), .available = try cfg.boolean(try cfg.get(value, "available")) } },
+        .block => .{ .block = try cfg.fixed(32, try cfg.get(value, "root")) },
+        .recheck => .recheck,
+        .dropQueued => .drop_queued,
+        .reportPeer => .{ .report_peer = .{
+            .identity = try cfg.peerIdFrom(try cfg.get(value, "peerId")),
+            .action = try name(n.peers.types.PeerAction, try cfg.get(value, "action"), error.InvalidNetworkAction),
+            .count = try reportCount(try cfg.get(value, "count")),
+        } },
+    };
+}
+
+fn name(comptime T: type, value: Value, invalid: anyerror) !T {
+    var text: [16]u8 = undefined;
+    const len = app.text(value, &text) catch return invalid;
+    return std.meta.stringToEnum(T, text[0..len]) orelse invalid;
+}
+
+fn handle(value: Value) !g.Token {
+    if (try value.typeof() != .object) return error.InvalidGossipHandle;
+    const index = try cfg.integer(try cfg.get(value, "index"), n.gossip_processor.limits_mod.capacity_max - 1);
+    const generation = try cfg.bigint(try cfg.get(value, "generation"));
+    if (generation == 0) return error.InvalidGossipHandle;
+    return .{ .index = @intCast(index), .generation = generation };
+}
+
+fn reportCount(value: Value) !u8 {
+    const result = try cfg.integer(value, @import("network_peer_reports.zig").report_max);
+    if (result == 0) return error.InvalidNetworkInteger;
+    return @intCast(result);
+}
 
 const CheckView = struct { root: [32]u8, slot: u64, identity: n.PeerId, topic: [g.topic_max]u8, topic_len: u16 };
+const Pinned = struct { row: Row, from: Place };
 
-/// Payload one exchange pinned. Pinned cells stay in place: the owner never retires a copying cell.
+/// What one exchange pinned. Pinned cells stay in place: the owner never retires a copying cell.
 pub const Selection = struct {
+    settled: usize = 0,
+    /// In selection order, with the lists they came from.
+    pinned: [readiness.row_count]Pinned = undefined,
+    pinned_count: usize = 0,
     peers: [peers_max]projection.Entry = undefined,
     peer_count: usize = 0,
-    /// The host asked for peers, so the commit consumes the lane's head.
-    peers_taken: bool = false,
-    peers_more: bool = false,
     serving: [serving_max]incoming.Token = undefined,
     serving_count: usize = 0,
     /// Each serving start's closed promise; the build creates the first `closed_count`.
     closed: [serving_max]napi.Deferred = undefined,
     closed_count: usize = 0,
-    serving_queued: bool = false,
     checks: g.Batch = .{},
     views: [g.batch_max]CheckView = undefined,
     gossip: ?g.Batch = null,
-    /// The ordinary gate before the claim set it.
-    gate: bool = true,
-    /// Claimable gossip remained after the claim.
-    gossip_more: bool = false,
-    /// Monotonic milliseconds when the build ended, for the maintenance the commit runs.
-    finished: u64 = 0,
-    /// Native holds work for another exchange, or the drain keeps the notification latch.
-    more: bool = false,
+    /// Items retired instead of delivered because their deliveries kept rolling back.
+    retired: usize = 0,
+    /// The item whose build failed, charged with the rollback.
+    failed: ?union(enum) { gossip: g.Token, serving: incoming.Token } = null,
+    /// The owner has work from this exchange.
+    wake: bool = false,
+
+    pub fn delivers(self: *const Selection) bool {
+        return self.peer_count > 0 or self.serving_count > 0 or self.checks.len > 0 or self.gossip != null;
+    }
 };
 
-/// The host's claim rule: urgent work whenever present; ordinary work, or reopening the gate, only
-/// when the host takes ordinary jobs; and closing the gate while the executor cannot run them.
-fn claimWanted(work: g.Table.HostWork, gate: bool, wanted: *const Demand.Gossip) bool {
-    if (work.urgent) return true;
-    if (wanted.ordinary and (work.ordinary or !gate)) return true;
-    return !wanted.ready and gate and work.ordinary;
+/// The result's scheduling fields, read in phase D.
+pub const Outcome = packed struct(u4) {
+    /// A fresh exchange with the same enablement would make progress.
+    more: bool = false,
+    /// Payload waits for a service this exchange disabled.
+    disabled: bool = false,
+    parked_serving: bool = false,
+    parked_ordinary: bool = false,
+};
+
+/// How a failed build ends: an operation-local allocation failure rolls back for a retry, JavaScript that cannot
+/// run rolls back and stops, and anything else breaks the bridge contract and terminates the process.
+pub const Failure = enum { allocation, stopped, contract };
+
+fn enabled(runtime: *Runtime, demand: *const Demand, row: Row) bool {
+    return switch (row) {
+        .legacy => true,
+        .peers => demand.peers > 0,
+        .checks => demand.checks > 0,
+        .serving => demand.serving > 0,
+        .gossip => demand.messages > 0 and (demand.claim_ordinary or runtime.gossip.?.readiness().urgent),
+    };
 }
 
-/// Pins the payload `demand` asks for. The caller holds the runtime mutex.
-pub fn selectLocked(runtime: *Runtime, demand: *const Demand, now: u64, selection: *Selection) void {
-    if (demand.peers > 0) if (runtime.lane) |lane| {
-        selection.peers_taken = true;
-        selection.peer_count = lane.peek(selection.peers[0..demand.peers]);
-        selection.peers_more = lane.len > selection.peer_count;
+fn applyLocked(runtime: *Runtime, actions: []const Action, now: u64) void {
+    if (runtime.stop or runtime.quiescent) return;
+    for (actions) |action| switch (action) {
+        .report_peer => |report| runtime.reports.addCount(&report.identity, report.action, report.count),
+        else => if (runtime.gossip) |*table| switch (action) {
+            .verdict => |verdict| _ = table.report(verdict.token, verdict.verdict, now),
+            .classify => |check| _ = table.classify(check.token, check.available),
+            .block => |root| table.notifyBlock(root),
+            .recheck => table.recheck(),
+            .drop_queued => table.dropQueued(),
+            .report_peer => unreachable,
+        },
     };
-    if (!runtime.stop and !runtime.quiescent) if (runtime.incoming) |*table| {
-        for (0..demand.serving) |_| {
-            const token = table.oldest() orelse break;
-            const cell = table.get(token).?;
-            cell.copying = true;
-            cell.state = .copying;
+}
+
+fn selectLocked(runtime: *Runtime, demand: *const Demand, now: u64, selection: *Selection) void {
+    const ready = &runtime.readiness;
+    var next = ready.payload.head;
+    for (0..readiness.row_count) |_| {
+        if (next == none) break;
+        const row: Row = @enumFromInt(next);
+        next = ready.rows[next].link.next;
+        if (!enabled(runtime, demand, row)) continue;
+        selection.pinned[selection.pinned_count] = .{ .row = row, .from = ready.pin(row) };
+        selection.pinned_count += 1;
+        switch (row) {
+            .legacy => unreachable,
+            .peers => selection.peer_count = runtime.lane.?.peek(selection.peers[0..demand.peers]),
+            .serving => selectServing(runtime, demand, selection),
+            .checks => {
+                const table = &runtime.gossip.?;
+                selection.checks = table.claimChecks(now, demand.checks);
+                for (selection.checks.tokens[0..selection.checks.len], selection.views[0..selection.checks.len]) |token, *view| {
+                    const cell = table.get(token).?;
+                    view.* = .{ .root = cell.metadata.root.?, .slot = cell.metadata.slot.?, .identity = cell.identity, .topic = cell.topic, .topic_len = cell.topic_len };
+                }
+            },
+            .gossip => {
+                const claim = runtime.gossip.?.claimDemand(now, .{ .items = demand.messages, .bytes = demand.bytes, .ordinary = demand.claim_ordinary and runtime.capacity.ordinary });
+                selection.retired += claim.retired;
+                if (claim.len > 0) selection.gossip = claim;
+            },
+        }
+    }
+}
+
+fn selectServing(runtime: *Runtime, demand: *const Demand, selection: *Selection) void {
+    const table = &runtime.incoming.?;
+    const limit = @min(demand.serving, runtime.capacity.serving);
+    for (0..incoming.capacity_max) |_| {
+        if (selection.serving_count == limit) break;
+        const token = table.oldest() orelse break;
+        const cell = table.get(token).?;
+        if (cell.rollbacks >= g.rollbacks_max) {
+            // Retired unexposed: the owner cancels the stream, and the stream's end frees the cell.
+            cell.action = .cancel;
+            cell.state = .terminal;
             table.refresh(cell);
-            selection.serving[selection.serving_count] = token;
-            selection.serving_count += 1;
+            selection.retired += 1;
+            continue;
         }
-        selection.serving_queued = table.oldest() != null;
-    };
-    var held = false;
-    if (demand.gossip) |*wanted| if (!runtime.quiescent) if (runtime.gossip) |*table| {
-        // Read before this exchange changes the table, as the host's lanes were at a turn's start.
-        const work = table.hostWork();
-        if (work.checks and !runtime.stop) {
-            selection.checks = table.claimChecks(now);
-            for (selection.checks.tokens[0..selection.checks.len], selection.views[0..selection.checks.len]) |token, *view| {
-                const cell = table.get(token).?;
-                view.* = .{ .root = cell.metadata.root.?, .slot = cell.metadata.slot.?, .identity = cell.identity, .topic = cell.topic, .topic_len = cell.topic_len };
-            }
-        }
-        selection.gate = table.ordinary_enabled;
-        if (claimWanted(work, selection.gate, wanted)) {
-            const previous = .{ table.pending(), table.deadline() };
-            selection.gossip = table.claimDemand(now, .{ .items = wanted.items, .bytes = wanted.bytes, .ordinary = wanted.ordinary });
-            // The owner's wait reads these; a change wakes it to recompute.
-            if (!std.meta.eql(previous, .{ table.pending(), table.deadline() })) runtime.signalLocked();
-            selection.gossip_more = table.hasWork();
-        }
-        // Ordinary work the host holds back while it could execute needs another exchange.
-        held = wanted.ready and !wanted.ordinary and (work.ordinary or !table.ordinary_enabled);
-    };
-    // Classified checks can make work claimable, which the next exchange claims.
-    selection.more = selection.peers_more or selection.serving_count == serving_max or selection.checks.len > 0 or selection.gossip_more or held;
+        cell.copying = true;
+        cell.state = .copying;
+        table.refresh(cell);
+        selection.serving[selection.serving_count] = token;
+        selection.serving_count += 1;
+    }
 }
 
-/// Hands the pinned payload to the host, which holds its complete result. Returns whether serving
-/// starts now hold promises that keep the event loop alive. The caller holds the runtime mutex.
-pub fn commitLocked(runtime: *Runtime, selection: *const Selection) bool {
-    if (selection.peers_taken) if (runtime.lane) |lane| {
+/// Returns whether serving starts now hold promises that keep the event loop alive.
+fn commitLocked(runtime: *Runtime, selection: *Selection) bool {
+    if (selection.peer_count > 0) {
         runtime.bridge.deliver(.peer_event, selection.peer_count);
-        lane.commit(selection.peer_count);
-        // Events published during the copy were not reported, so the owner notifies again.
-        const rearm = !selection.peers_more and lane.len > 0 and !runtime.quiescent;
-        if (rearm) runtime.work_rearm = true;
+        runtime.lane.?.commit(selection.peer_count);
         // Committed events free lane room the owner publishes into.
-        if (!runtime.quiescent and (selection.peer_count > 0 or rearm)) runtime.signalLocked();
-    };
+        selection.wake = true;
+    }
     if (selection.serving_count > 0) {
         const table = &runtime.incoming.?;
         for (selection.serving[0..selection.serving_count], selection.closed[0..selection.serving_count]) |token, deferred| {
@@ -171,25 +269,20 @@ pub fn commitLocked(runtime: *Runtime, selection: *const Selection) bool {
             table.refresh(cell);
         }
         runtime.bridge.deliver(.serving_start, selection.serving_count);
-        runtime.signalLocked();
+        runtime.capacity.serving -|= @intCast(selection.serving_count);
+        selection.wake = true;
     }
     runtime.bridge.deliver(.dependency_check, selection.checks.len);
     if (selection.gossip) |*batch| {
-        const table = &runtime.gossip.?;
         runtime.bridge.deliver(.gossip_message, batch.len);
-        table.maintain(selection.finished, table.slot);
-        table.finish(batch, true);
-        if (runtime.quiescent) table.trim() else if (!selection.gossip_more and table.hasWork()) {
-            runtime.work_rearm = true;
-            runtime.signalLocked();
-        }
+        runtime.gossip.?.finish(batch, true);
     }
+    if (runtime.quiescent) if (runtime.gossip) |*table| table.trim();
     return selection.serving_count > 0 and runtime.notify_live;
 }
 
-/// Returns every pinned item to where it was, so the next exchange delivers it again. The caller
-/// holds the runtime mutex.
-pub fn restoreLocked(runtime: *Runtime, selection: *const Selection) void {
+/// Returns every pinned item to where it was and charges the item whose build failed.
+fn restoreLocked(runtime: *Runtime, selection: *const Selection) void {
     if (selection.serving_count > 0) {
         const table = &runtime.incoming.?;
         for (selection.serving[0..selection.serving_count]) |token| {
@@ -206,111 +299,200 @@ pub fn restoreLocked(runtime: *Runtime, selection: *const Selection) void {
             table.refresh(cell);
             if (cell.serving_retained) cell.release_requested = true else table.retire(token);
         }
-        runtime.signalLocked();
     }
-    if (selection.checks.len > 0) {
-        runtime.gossip.?.retryChecks(&selection.checks);
-        runtime.work_rearm = true;
-        runtime.signalLocked();
-    }
-    if (selection.gossip) |*batch| {
-        const table = &runtime.gossip.?;
-        table.finish(batch, false);
-        table.ordinary_enabled = selection.gate;
-        if (runtime.quiescent) table.trim() else if (table.hasWork()) {
-            runtime.work_rearm = true;
-            runtime.signalLocked();
-        }
-    }
+    if (selection.checks.len > 0) runtime.gossip.?.retryChecks(&selection.checks);
+    if (selection.gossip) |*batch| runtime.gossip.?.finish(batch, false);
+    if (selection.failed) |failed| switch (failed) {
+        .gossip => |token| if (runtime.gossip.?.get(token)) |cell| {
+            cell.rollbacks +|= 1;
+        },
+        .serving => |token| if (runtime.incoming.?.get(token)) |cell| {
+            cell.rollbacks +|= 1;
+        },
+    };
+    if (runtime.quiescent) if (runtime.gossip) |*table| table.trim();
 }
 
-/// Ends a drain whose exchange failed: releases the notification latch, or notifies again while
-/// legacy results remain, and has the owner notify again for payload the host did not take.
-pub fn failLocked(runtime: *Runtime) void {
-    const more = runtime.endDrainLocked();
-    runtime.work_rearm = true;
-    runtime.signalLocked();
-    if (!more) return;
-    runtime.notification_pending = false;
-    runtime.pingLocked();
+/// Unpins in reverse selection order, wakes the owner once and arms when nothing is queued.
+fn endLocked(runtime: *Runtime, demand: *const Demand, selection: *const Selection, rollback: bool) Outcome {
+    const ready = &runtime.readiness;
+    for (0..selection.pinned_count) |i| {
+        const pinned = selection.pinned[selection.pinned_count - 1 - i];
+        ready.unpin(pinned.row, pinned.from, runtime.wantLocked(pinned.row), rollback);
+    }
+    if (selection.wake) runtime.signalLocked();
+    runtime.refreshLocked();
+    var outcome: Outcome = .{
+        .more = ready.control.len > 0,
+        .parked_serving = ready.place(.serving) == .parked,
+        .parked_ordinary = ready.place(.gossip) == .parked,
+    };
+    var next = ready.payload.head;
+    for (0..readiness.row_count) |_| {
+        if (next == none) break;
+        if (enabled(runtime, demand, @enumFromInt(next))) outcome.more = true else outcome.disabled = true;
+        next = ready.rows[next].link.next;
+    }
+    if (ready.arm()) runtime.bridge.boundary();
+    return outcome;
 }
 
-/// Runs one exchange for a parsed demand. `host` settles legacy results, reads the clock, builds
-/// the result from a selection, discards what a failed build created, and keeps the event loop
-/// alive for serving starts.
-pub fn run(runtime: *Runtime, demand: *const Demand, host: anytype) !@TypeOf(host.*).Output {
-    const legacy = try host.settle(demand.settle);
-    const now = if (demand.gossip != null) try host.now() else 0;
-    var selection: Selection = .{};
+fn gossipMarks(runtime: *Runtime) struct { bool, ?u64 } {
+    const table = if (runtime.gossip) |*table| table else return .{ false, null };
+    return .{ table.pending(), table.deadline() };
+}
+
+/// Runs phases B to D. `host` builds and finishes the result, discards what a failed build created, classifies
+/// a build failure and keeps the event loop alive for serving starts.
+pub fn run(runtime: *Runtime, actions: []const Action, demand: *const Demand, settled: usize, now: u64, host: anytype) !@TypeOf(host.*).Result {
+    var selection: Selection = .{ .settled = settled, .wake = actions.len > 0 };
     runtime.lock();
+    runtime.readiness.armed = false;
+    const marks = gossipMarks(runtime);
+    applyLocked(runtime, actions, now);
+    if (demand.capacity) |capacity| runtime.capacity = capacity;
+    runtime.refreshLocked();
     selectLocked(runtime, demand, now, &selection);
-    selection.more = selection.more or legacy.more;
-    // Owner work after this check pings again, so releasing the latch here loses none.
-    if (!selection.more) selection.more = runtime.endDrainLocked();
+    // Ignored claims leave verdicts to apply, and a classification can move the owner's deadline.
+    if (selection.retired > 0 or !std.meta.eql(marks, gossipMarks(runtime))) selection.wake = true;
     runtime.unlock();
-    const output = host.build(&selection, legacy.count) catch |err| return abandon(runtime, &selection, host, err);
-    if (selection.gossip != null) selection.finished = host.now() catch |err| return abandon(runtime, &selection, host, err);
+    const output = host.build(&selection) catch |err| return rollBack(runtime, demand, &selection, host, err);
     runtime.lock();
     const keep_alive = commitLocked(runtime, &selection);
+    const outcome = endLocked(runtime, demand, &selection, false);
     runtime.unlock();
     if (keep_alive) host.keepAlive();
-    return output;
+    return host.finish(output, &selection, outcome) catch |err| return host.fatal(err);
 }
 
-fn abandon(runtime: *Runtime, selection: *const Selection, host: anytype, err: anyerror) anyerror {
+fn rollBack(runtime: *Runtime, demand: *const Demand, selection: *Selection, host: anytype, err: anyerror) !@TypeOf(host.*).Result {
+    const failure = host.classify(err);
     host.discard(selection);
     runtime.lock();
     restoreLocked(runtime, selection);
+    _ = endLocked(runtime, demand, selection, true);
     runtime.unlock();
-    return err;
+    switch (failure) {
+        .allocation => return host.rolledBack(selection.retired > 0) catch |fatal| return host.fatal(fatal),
+        .stopped => return err,
+        .contract => return host.fatal(err),
+    }
 }
 
-/// Builds the complete result for a selection. Creates the serving starts' closed promises, which
-/// the caller discards if any later step fails.
-pub fn build(env: napi.Env, runtime: *Runtime, selection: *Selection, settled: usize) !Value {
-    const object = try env.createObject();
-    try put(object, "settled", try env.createUint32(@intCast(settled)));
+/// Results created once, so an exchange that delivers nothing allocates nothing: one per combination of the
+/// scheduling fields, and the two rollbacks.
+pub const Results = struct {
+    idle: [16]?napi.Ref = @splat(null),
+    rolled_back: [2]?napi.Ref = @splat(null),
+
+    pub fn prepare(self: *Results, env: napi.Env) !void {
+        const empty = try env.createArrayWithLength(0);
+        try empty.objectFreeze();
+        for (&self.idle, 0..) |*slot, i| {
+            const result = try env.createObject();
+            try put(result, "rolledBack", try env.getBoolean(false));
+            try put(result, "settled", try env.createUint32(0));
+            inline for (.{ "peers", "serving", "checks" }) |field| try put(result, field, empty);
+            try put(result, "gossip", try env.getNull());
+            try put(result, "retired", try env.getBoolean(false));
+            try put(result, "failure", try env.getNull());
+            try schedule(env, result, @bitCast(@as(u4, @intCast(i))));
+            try (try result.getNamedProperty("parked")).objectFreeze();
+            slot.* = try frozen(env, result);
+        }
+        for (&self.rolled_back, 0..) |*slot, i| {
+            const result = try env.createObject();
+            try put(result, "rolledBack", try env.getBoolean(true));
+            try put(result, "more", try env.getBoolean(true));
+            try put(result, "retired", try env.getBoolean(i == 1));
+            slot.* = try frozen(env, result);
+        }
+    }
+
+    fn frozen(env: napi.Env, value: Value) !napi.Ref {
+        try value.objectFreeze();
+        return napi.Ref.create(env.env, value, 1);
+    }
+
+    pub fn dispose(self: *Results) void {
+        inline for (.{ &self.idle, &self.rolled_back }) |slots| for (slots) |*slot| {
+            if (slot.*) |ref| ref.delete() catch unreachable;
+            slot.* = null;
+        };
+    }
+};
+
+fn schedule(env: napi.Env, result: Value, outcome: Outcome) !void {
+    try put(result, "more", try env.getBoolean(outcome.more));
+    try put(result, "disabledWaiting", try env.getBoolean(outcome.disabled));
+    const parked = try env.createObject();
+    try put(parked, "serving", try env.getBoolean(outcome.parked_serving));
+    try put(parked, "ordinary", try env.getBoolean(outcome.parked_ordinary));
+    try put(result, "parked", parked);
+}
+
+/// Builds a fresh result for a selection that delivers, settled or retired something. Creates the serving
+/// starts' closed promises, which the caller discards if a later step fails, and records the item whose build
+/// failed.
+pub fn build(env: napi.Env, runtime: *Runtime, selection: *Selection) !Value {
+    const result = try env.createObject();
+    try put(result, "rolledBack", try env.getBoolean(false));
+    try put(result, "settled", try env.createUint32(@intCast(selection.settled)));
     const peers = try env.createArrayWithLength(selection.peer_count);
     for (selection.peers[0..selection.peer_count], 0..) |*entry, i| try element(peers, i, try projection.observation(env, entry));
-    try put(object, "peers", peers);
+    try put(result, "peers", peers);
     const serving = try env.createArrayWithLength(selection.serving_count);
     for (selection.serving[0..selection.serving_count], 0..) |token, i| {
         selection.closed[i] = try env.createPromise();
         selection.closed_count = i + 1;
         const cell = &runtime.incoming.?.cells[token.index];
-        try element(serving, i, try @import("network_incoming_js.zig").descriptorValue(runtime, token, cell, selection.closed[i]));
+        const start = @import("network_incoming_js.zig").descriptorValue(runtime, token, cell, selection.closed[i]) catch |err| {
+            selection.failed = .{ .serving = token };
+            return err;
+        };
+        try element(serving, i, start);
     }
-    try put(object, "serving", serving);
-    try put(object, "servingQueued", try env.getBoolean(selection.serving_queued));
+    try put(result, "serving", serving);
     const checks = try env.createArrayWithLength(selection.checks.len);
     for (selection.checks.tokens[0..selection.checks.len], selection.views[0..selection.checks.len], 0..) |token, *view, i| {
         const check = try env.createObject();
-        const handle = try env.createObject();
-        try put(handle, "index", try env.createUint32(token.index));
-        try put(handle, "generation", try env.createBigintUint64(token.generation));
-        try put(check, "handle", handle);
+        const reference = try env.createObject();
+        try put(reference, "index", try env.createUint32(token.index));
+        try put(reference, "generation", try env.createBigintUint64(token.generation));
+        try put(check, "handle", reference);
         try put(check, "root", try bytes(env, &view.root));
         try put(check, "slot", try env.createBigintUint64(view.slot));
         try put(check, "peerId", try @import("network_js.zig").peerIdValue(env, &view.identity));
         try put(check, "topic", try env.createStringUtf8(view.topic[0..view.topic_len]));
         try element(checks, i, check);
     }
-    try put(object, "checks", checks);
-    try put(object, "gossip", if (selection.gossip) |*batch| try jobs(env, runtime, batch) else try env.getNull());
-    try put(object, "more", try env.getBoolean(selection.more));
+    try put(result, "checks", checks);
+    try put(result, "gossip", if (selection.gossip) |*batch| try jobs(env, runtime, batch, selection) else try env.getNull());
+    try put(result, "retired", try env.getBoolean(selection.retired > 0));
     // Own, so the binding records a start it could not hand over without reaching inherited accessors.
-    try put(object, "failure", try env.getNull());
-    return object;
+    try put(result, "failure", try env.getNull());
+    return result;
 }
 
-fn jobs(env: napi.Env, runtime: *Runtime, batch: *const g.Batch) !Value {
+/// Sets a fresh result's scheduling fields, or returns the prepared result when nothing was built.
+pub fn finish(env: napi.Env, runtime: *Runtime, output: ?Value, outcome: Outcome) !Value {
+    const result = output orelse return runtime.results.idle[@as(u4, @bitCast(outcome))].?.getValue();
+    try schedule(env, result, outcome);
+    return result;
+}
+
+fn jobs(env: napi.Env, runtime: *Runtime, batch: *const g.Batch, selection: *Selection) !Value {
     const table = &runtime.gossip.?;
     const messages = try env.createArrayWithLength(batch.len);
     for (batch.tokens[0..batch.len], 0..) |token, i| {
-        try element(messages, i, try @import("network_gossip_js.zig").descriptor(runtime, token, &table.cells[token.index]));
+        const message = @import("network_gossip_js.zig").descriptor(runtime, token, &table.cells[token.index]) catch |err| {
+            selection.failed = .{ .gossip = token };
+            return err;
+        };
+        try element(messages, i, message);
     }
-    const object = try env.createObject();
-    try put(object, "messages", messages);
+    const result = try env.createObject();
+    try put(result, "messages", messages);
     const list = try env.createArrayWithLength(batch.job_count);
     for (batch.jobs[0..batch.job_count], 0..) |job, i| {
         const value = try env.createObject();
@@ -321,8 +503,8 @@ fn jobs(env: napi.Env, runtime: *Runtime, batch: *const g.Batch) !Value {
         try put(value, "urgent", try env.getBoolean(n.gossip_processor.limits_mod.urgent(job.kind)));
         try element(list, i, value);
     }
-    try put(object, "jobs", list);
-    return object;
+    try put(result, "jobs", list);
+    return result;
 }
 
 test {

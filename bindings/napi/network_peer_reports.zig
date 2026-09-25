@@ -3,6 +3,8 @@ const n = @import("network");
 const t = n.peers.types;
 const identity_index = n.peers.identity_index;
 const capacity = 512;
+/// Reports of one action per identity beyond this add nothing.
+pub const report_max = 100;
 const Row = struct {
     occupied: bool = false,
     identity: n.PeerId = undefined,
@@ -22,7 +24,8 @@ pub const Table = struct {
         return .{ .slots = &self.by_identity, .seed = self.seed };
     }
 
-    pub fn add(self: *Table, identity: *const n.PeerId, action: t.PeerAction) void {
+    /// Adds `count` reports of one action, saturating at `report_max` per identity and action.
+    pub fn addCount(self: *Table, identity: *const n.PeerId, action: t.PeerAction, count: u8) void {
         const lookup = self.index();
         const row_index = lookup.find(&self.rows, identity) orelse vacant: {
             for (&self.rows, 0..) |*row, i| {
@@ -34,12 +37,11 @@ pub const Table = struct {
             self.ignored +|= 1;
             return;
         };
-        const count = &self.rows[row_index].counts[@intFromEnum(action)];
+        const counted = &self.rows[row_index].counts[@intFromEnum(action)];
         // A hundred of the smallest penalty already reaches the score floor.
-        if (count.* < 100) {
-            count.* += 1;
-            self.pending += 1;
-        }
+        const added = @min(count, report_max - counted.*);
+        counted.* += added;
+        self.pending += added;
     }
 
     pub fn next(self: *Table) ?Report {

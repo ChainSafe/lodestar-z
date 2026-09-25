@@ -6,6 +6,7 @@ const g = @import("network_gossip.zig");
 const incoming = @import("network_incoming.zig");
 const projection = @import("network_peer_projection.zig");
 const commands = @import("network_commands.zig");
+const tsfn = @import("network_runtime_test.zig");
 const Runtime = r.Runtime;
 const Kind = n.gossip_processor.limits_mod.Kind;
 const limits_mod = n.gossip_processor.limits_mod;
@@ -13,57 +14,61 @@ const State = n.gossip_processor.State;
 
 const Part = enum { peers, serving, checks, gossip };
 
-/// Builds a summary instead of JS values and fails at one part when asked. Settlement retires
-/// terminal commands at once, as the N-API host's does after settling each promise.
+/// Builds a summary instead of JS values, fails at one part when asked, and records a contract failure instead
+/// of terminating. `during` runs where the build runs, as owner work racing phase C.
 const Host = struct {
     runtime: *Runtime,
     clock: u64 = 1,
     fail: ?Part = null,
+    failure: exchange.Failure = .allocation,
+    builds: usize = 0,
     discarded: usize = 0,
     kept_alive: usize = 0,
+    fatals: usize = 0,
+    during: ?*const fn (*Runtime) void = null,
 
-    pub const Output = struct {
-        settled: usize,
-        peers: usize,
-        serving: [exchange.serving_max]incoming.Token,
-        serving_count: usize,
-        checks: g.Batch,
-        gossip: ?g.Batch,
-        more: bool,
+    pub const Result = struct {
+        rolled_back: bool = false,
+        retired: bool = false,
+        settled: usize = 0,
+        peers: usize = 0,
+        serving: [exchange.serving_max]incoming.Token = undefined,
+        serving_count: usize = 0,
+        checks: g.Batch = .{},
+        gossip: ?g.Batch = null,
+        outcome: exchange.Outcome = .{},
     };
 
-    pub fn settle(self: *Host, limit: usize) !exchange.Settled {
-        var result: exchange.Settled = .{};
-        const runtime = self.runtime;
-        for (0..commands.capacity) |_| {
-            runtime.lock();
-            defer runtime.unlock();
-            const i = runtime.table.nextTerminal(0) orelse break;
-            if (result.count == limit) {
-                result.more = true;
-                break;
-            }
-            runtime.table.retire(.{ .index = @intCast(i), .generation = runtime.table.cells[i].generation });
-            result.count += 1;
-        }
-        return result;
-    }
-    pub fn now(self: *Host) !u64 {
-        return self.clock;
-    }
     fn failing(self: *const Host, part: Part) bool {
         return if (self.fail) |value| value == part else false;
     }
-    pub fn build(self: *Host, selection: *exchange.Selection, settled: usize) !Output {
-        if (self.failing(.peers) and selection.peer_count > 0) return error.GenericFailure;
+    pub fn build(self: *Host, selection: *exchange.Selection) !Result {
+        self.builds += 1;
+        if (self.during) |during| during(self.runtime);
+        const err = if (self.failure == .allocation) error.OutOfMemory else error.InvalidArg;
+        if (self.failing(.peers) and selection.peer_count > 0) return err;
         for (0..selection.serving_count) |i| {
             selection.closed[i] = undefined;
             selection.closed_count = i + 1;
-            if (self.failing(.serving)) return error.GenericFailure;
+            if (self.failing(.serving)) {
+                selection.failed = .{ .serving = selection.serving[i] };
+                return err;
+            }
         }
-        if (self.failing(.checks) and selection.checks.len > 0) return error.GenericFailure;
-        if (self.failing(.gossip) and selection.gossip != null) return error.GenericFailure;
-        return .{ .settled = settled, .peers = selection.peer_count, .serving = selection.serving, .serving_count = selection.serving_count, .checks = selection.checks, .gossip = selection.gossip, .more = selection.more };
+        if (self.failing(.checks) and selection.checks.len > 0) return err;
+        if (self.failing(.gossip)) if (selection.gossip) |batch| {
+            selection.failed = .{ .gossip = batch.tokens[0] };
+            return err;
+        };
+        return .{ .retired = selection.retired > 0, .settled = selection.settled, .peers = selection.peer_count, .serving = selection.serving, .serving_count = selection.serving_count, .checks = selection.checks, .gossip = selection.gossip };
+    }
+    pub fn finish(_: *Host, output: Result, _: *const exchange.Selection, outcome: exchange.Outcome) !Result {
+        var result = output;
+        result.outcome = outcome;
+        return result;
+    }
+    pub fn rolledBack(_: *Host, retired: bool) !Result {
+        return .{ .rolled_back = true, .retired = retired, .outcome = .{ .more = true } };
     }
     pub fn discard(self: *Host, selection: *const exchange.Selection) void {
         self.discarded += selection.closed_count;
@@ -71,11 +76,34 @@ const Host = struct {
     pub fn keepAlive(self: *Host) void {
         self.kept_alive += 1;
     }
+    pub fn classify(self: *Host, _: anyerror) exchange.Failure {
+        return self.failure;
+    }
+    pub fn fatal(self: *Host, err: anyerror) anyerror {
+        self.fatals += 1;
+        return err;
+    }
+
+    /// Settles as the N-API host does, retiring terminal commands at once, then runs phases B to D.
+    fn turn(self: *Host, actions: []const exchange.Action, demand: exchange.Demand) !Result {
+        var settled: usize = 0;
+        for (0..commands.capacity) |_| {
+            self.runtime.lock();
+            defer self.runtime.unlock();
+            const i = self.runtime.table.nextTerminal(0) orelse break;
+            if (settled == demand.settle) break;
+            self.runtime.table.retire(.{ .index = @intCast(i), .generation = self.runtime.table.cells[i].generation });
+            settled += 1;
+        }
+        return exchange.run(self.runtime, actions, &demand, settled, self.clock, self);
+    }
 };
 
-const deployed: exchange.Demand = .{ .settle = 32, .peers = 32, .serving = 8, .gossip = .{ .items = 64, .bytes = 8 * 1024 * 1024, .ordinary = true, .ready = true } };
+const deployed: exchange.Demand = .{ .settle = 32, .peers = 32, .checks = 64, .serving = 8, .messages = 64, .bytes = 8 * 1024 * 1024, .claim_ordinary = true, .capacity = .{ .serving = 32, .ordinary = true } };
+const control: exchange.Demand = .{ .settle = 32, .peers = 0, .checks = 0, .serving = 0, .messages = 0, .bytes = 0, .claim_ordinary = false, .capacity = null };
 
-fn admit(table: *g.Table, kind: Kind, root: ?[32]u8, payload: []const u8) !g.Token {
+fn admit(runtime: *Runtime, kind: Kind, root: ?[32]u8, payload: []const u8) !g.Token {
+    const table = &runtime.gossip.?;
     const token = try table.reserveKind(kind, payload.len);
     const cell = table.get(token).?;
     cell.id = @splat(1);
@@ -83,16 +111,31 @@ fn admit(table: *g.Table, kind: Kind, root: ?[32]u8, payload: []const u8) !g.Tok
     cell.metadata = .{ .slot = 1, .root = root, .await_block = root != null };
     @memset(&cell.topic, 0);
     table.install(token, payload);
+    runtime.lock();
+    runtime.recomputeLocked(.checks);
+    runtime.recomputeLocked(.gossip);
+    runtime.unlock();
     return token;
 }
 
-fn queueRequest(table: *incoming.Table) !incoming.Token {
+fn queueRequest(runtime: *Runtime) !incoming.Token {
+    const table = &runtime.incoming.?;
     const token = try table.reserve(.blocks_by_root_v2, 32);
     try table.allocate(token, &(.{7} ** 32));
     const cell = table.get(token).?;
     cell.native = true;
     table.refresh(cell);
+    runtime.lock();
+    runtime.recomputeLocked(.serving);
+    runtime.unlock();
     return token;
+}
+
+fn publishPeer(runtime: *Runtime) void {
+    runtime.lock();
+    defer runtime.unlock();
+    runtime.lane.?.publish(&.{.{ .closed = undefined }}, 1);
+    runtime.recomputeLocked(.peers);
 }
 
 /// Ends a served stream the host was handed, as its close settlement and release would.
@@ -103,40 +146,60 @@ fn retireServed(table: *incoming.Table, token: incoming.Token) void {
     table.retire(token);
 }
 
+fn retireQueued(runtime: *Runtime) void {
+    for (runtime.incoming.?.cells, 0..) |*cell, i| if (cell.state != .free) {
+        cell.native = false;
+        runtime.incoming.?.retire(.{ .index = @intCast(i), .generation = cell.generation });
+    };
+}
+
+const Fixture = struct {
+    runtime: Runtime,
+    lane: projection.Lane = .{},
+
+    /// A runtime with a lane, two serving cells and a small gossip table. `notified` makes its notifications
+    /// reach the counting test notifier.
+    fn init(self: *Fixture, notified: bool, serving: usize) !void {
+        self.* = .{ .runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 }, .env_alive = notified } };
+        self.runtime.payload_budget.limit = 64 << 20;
+        self.runtime.lane = &self.lane;
+        self.runtime.incoming = try incoming.Table.init(std.testing.allocator, serving, &self.runtime.payload_budget);
+        const limits: limits_mod.Limits = @splat(.{ .items = 4, .bytes = 4096 });
+        self.runtime.gossip = try g.Table.init(std.testing.allocator, .{ .capacity = limits_mod.items(&limits), .bytes = limits_mod.bytes(&limits), .limits = limits });
+    }
+    fn deinit(self: *Fixture) void {
+        retireQueued(&self.runtime);
+        self.runtime.incoming.?.deinit();
+        self.runtime.gossip.?.close();
+        self.runtime.gossip.?.deinit();
+    }
+};
+
 fn failAt(part: Part) !void {
-    // A live notifier lets the commit keep the loop alive; a dead environment keeps pings local.
-    var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 }, .env_alive = false };
-    runtime.payload_budget.limit = 1 << 20;
-    var lane: projection.Lane = .{};
-    runtime.lane = &lane;
-    lane.publish(&.{ .{ .closed = undefined }, .{ .closed = undefined } }, 1);
-    runtime.incoming = try incoming.Table.init(std.testing.allocator, 2, &runtime.payload_budget);
-    defer runtime.incoming.?.deinit();
-    const requests = [_]incoming.Token{ try queueRequest(&runtime.incoming.?), try queueRequest(&runtime.incoming.?) };
-    const limits: limits_mod.Limits = @splat(.{ .items = 4, .bytes = 4096 });
-    runtime.gossip = try g.Table.init(std.testing.allocator, .{ .capacity = limits_mod.items(&limits), .bytes = limits_mod.bytes(&limits), .limits = limits });
-    defer runtime.gossip.?.deinit();
-    const table = &runtime.gossip.?;
-    const checked = try admit(table, .beacon_attestation, @splat(3), "data");
-    const column = try admit(table, .data_column_sidecar, null, "data");
-    const exit = try admit(table, .voluntary_exit, null, "data");
+    var fixture: Fixture = undefined;
+    try fixture.init(false, 2);
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    for (0..2) |_| publishPeer(runtime);
+    const requests = [_]incoming.Token{ try queueRequest(runtime), try queueRequest(runtime) };
+    const checked = try admit(runtime, .beacon_attestation, @splat(3), "data");
+    const column = try admit(runtime, .data_column_sidecar, null, "data");
+    const exit = try admit(runtime, .voluntary_exit, null, "data");
     for (0..2) |_| runtime.table.transition(runtime.table.get(try runtime.table.reserve(.getIdentity)), .terminal);
 
-    var host: Host = .{ .runtime = &runtime, .fail = part };
-    try std.testing.expectError(error.GenericFailure, exchange.run(&runtime, &deployed, &host));
-    runtime.lock();
-    exchange.failLocked(&runtime);
-    runtime.unlock();
-    // Settled promises stay settled; every pinned item is back where it was.
+    var host: Host = .{ .runtime = runtime, .fail = part };
+    const rolled = try host.turn(&.{}, deployed);
+    try std.testing.expect(rolled.rolled_back and rolled.outcome.more and !rolled.retired);
+    // Settled promises stay settled; every pinned item is back where it was, and the rows stay queued.
     try std.testing.expectEqual(@as(u8, 0), runtime.table.occupied);
-    try std.testing.expectEqual(@as(u8, 2), lane.len);
+    try std.testing.expectEqual(@as(u8, 2), fixture.lane.len);
     for (requests) |token| {
         const cell = runtime.incoming.?.get(token).?;
         try std.testing.expect(cell.state == .queued and !cell.copying and cell.native and cell.input.len == 32);
     }
+    const table = &runtime.gossip.?;
     try std.testing.expectEqual(State.needs_check, table.get(checked).?.state);
     for ([_]g.Token{ column, exit }) |token| try std.testing.expectEqual(State.queued, table.get(token).?.state);
-    try std.testing.expect(table.ordinary_enabled);
     try std.testing.expectEqual(@as(usize, 0), table.diag.executing);
     try std.testing.expectEqual(@as(usize, 0), table.diag.copying);
     try std.testing.expectEqual(@as(usize, switch (part) {
@@ -144,105 +207,271 @@ fn failAt(part: Part) !void {
         .serving => 1,
         .checks, .gossip => 2,
     }), host.discarded);
-    try std.testing.expect(!runtime.notification_pending and runtime.work_rearm);
+    try std.testing.expect(!runtime.readiness.armed);
+    try std.testing.expectEqual(@as(usize, 4), runtime.readiness.payload.len);
+    // Only the item whose build failed is charged.
+    try std.testing.expectEqual(@as(u8, @intFromBool(part == .serving)), runtime.incoming.?.get(requests[0]).?.rollbacks);
+    try std.testing.expectEqual(@as(u8, @intFromBool(part == .gossip)), table.get(column).?.rollbacks);
+    try std.testing.expectEqual(@as(u8, 0), table.get(exit).?.rollbacks);
 
     // The next exchange delivers the same items and settles nothing again.
     host.fail = null;
-    const delivered = try exchange.run(&runtime, &deployed, &host);
+    const delivered = try host.turn(&.{}, deployed);
     try std.testing.expectEqual(@as(usize, 0), delivered.settled);
     try std.testing.expectEqual(@as(usize, 2), delivered.peers);
-    try std.testing.expectEqual(@as(u8, 0), lane.len);
+    try std.testing.expectEqual(@as(u8, 0), fixture.lane.len);
     try std.testing.expectEqualSlices(incoming.Token, &requests, delivered.serving[0..delivered.serving_count]);
     try std.testing.expectEqual(@as(usize, 1), host.kept_alive);
     try std.testing.expectEqualSlices(g.Token, &.{checked}, delivered.checks.tokens[0..delivered.checks.len]);
     try std.testing.expectEqualSlices(g.Token, &.{ column, exit }, delivered.gossip.?.tokens[0..delivered.gossip.?.len]);
-    try std.testing.expect(delivered.more);
     for (requests) |token| retireServed(&runtime.incoming.?, token);
-    table.close();
 }
 
-test "a build failure at any payload part restores it for the next exchange and never replays settled promises" {
+test "a build failure at any payload part rolls it back for the next exchange and never replays settled promises" {
     inline for (@typeInfo(Part).@"enum".fields) |field| try failAt(@field(Part, field.name));
 }
 
-test "exchanges pin only the payload the host asks for and end the drain when nothing is left" {
-    var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 }, .notify_live = false, .env_alive = false };
-    runtime.payload_budget.limit = 1 << 20;
-    var lane: projection.Lane = .{};
-    runtime.lane = &lane;
-    runtime.incoming = try incoming.Table.init(std.testing.allocator, 2, &runtime.payload_budget);
-    defer runtime.incoming.?.deinit();
-    const limits: limits_mod.Limits = @splat(.{ .items = 4, .bytes = 4096 });
-    runtime.gossip = try g.Table.init(std.testing.allocator, .{ .capacity = limits_mod.items(&limits), .bytes = limits_mod.bytes(&limits), .limits = limits });
-    defer runtime.gossip.?.deinit();
-    const table = &runtime.gossip.?;
-    var host: Host = .{ .runtime = &runtime };
-    const idle: exchange.Demand = .{ .settle = 32, .peers = 0, .serving = 0, .gossip = null };
-
-    runtime.notification_pending = true;
-    try std.testing.expect(!(try exchange.run(&runtime, &deployed, &host)).more);
-    try std.testing.expect(!runtime.notification_pending);
-
-    // A host that takes no payload leaves it queued and still ends its drain.
-    lane.publish(&.{.{ .closed = undefined }}, 1);
-    const request = try queueRequest(&runtime.incoming.?);
-    _ = try admit(table, .voluntary_exit, null, "data");
-    runtime.notification_pending = true;
-    const settled = try exchange.run(&runtime, &idle, &host);
-    try std.testing.expect(settled.peers == 0 and settled.serving_count == 0 and settled.gossip == null and !settled.more);
-    try std.testing.expect(!runtime.notification_pending);
-    try std.testing.expectEqual(@as(u8, 1), lane.len);
-    try std.testing.expectEqual(incoming.State.queued, runtime.incoming.?.get(request).?.state);
-
-    // Stopping ends serving starts and checks; claims end once the owner quiesces.
-    runtime.stop = true;
-    const checked = try admit(table, .beacon_attestation, @splat(3), "data");
-    const stopped = try exchange.run(&runtime, &deployed, &host);
-    try std.testing.expect(stopped.peers == 1 and stopped.serving_count == 0 and stopped.checks.len == 0);
-    try std.testing.expectEqual(@as(usize, 1), stopped.gossip.?.len);
-    try std.testing.expectEqual(State.needs_check, table.get(checked).?.state);
-    runtime.quiescent = true;
-    lane.publish(&.{.{ .closed = undefined }}, 2);
-    const quiescent = try exchange.run(&runtime, &deployed, &host);
-    try std.testing.expect(quiescent.peers == 1 and quiescent.gossip == null);
-    runtime.incoming.?.get(request).?.native = false;
-    runtime.incoming.?.retire(request);
-    table.close();
+test "a contract failure is not retried: the exchange terminates after one build" {
+    var fixture: Fixture = undefined;
+    try fixture.init(false, 2);
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    _ = try admit(runtime, .voluntary_exit, null, "data");
+    var host: Host = .{ .runtime = runtime, .fail = .gossip, .failure = .contract };
+    try std.testing.expectError(error.InvalidArg, host.turn(&.{}, deployed));
+    try std.testing.expectEqual(@as(usize, 1), host.builds);
+    try std.testing.expectEqual(@as(usize, 1), host.fatals);
+    try std.testing.expectEqual(@as(usize, 0), runtime.gossip.?.diag.copying);
 }
 
-test "claims follow the host's lane rule for urgent work, ordinary work and the ordinary gate" {
-    var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 }, .notify_live = false, .env_alive = false };
-    runtime.payload_budget.limit = 1 << 20;
-    const limits: limits_mod.Limits = @splat(.{ .items = 4, .bytes = 4096 });
-    runtime.gossip = try g.Table.init(std.testing.allocator, .{ .capacity = limits_mod.items(&limits), .bytes = limits_mod.bytes(&limits), .limits = limits });
-    defer runtime.gossip.?.deinit();
-    const table = &runtime.gossip.?;
-    const Wanted = struct { ordinary: bool, ready: bool };
-    const wants = [_]Wanted{ .{ .ordinary = false, .ready = false }, .{ .ordinary = false, .ready = true }, .{ .ordinary = true, .ready = true } };
-    for ([_]bool{ false, true }) |urgent| for ([_]bool{ false, true }) |ordinary| for ([_]bool{ false, true }) |gate| for (wants) |want| {
-        const column: ?g.Token = if (urgent) try admit(table, .data_column_sidecar, null, "data") else null;
-        const exit: ?g.Token = if (ordinary) try admit(table, .voluntary_exit, null, "data") else null;
-        table.ordinary_enabled = gate;
-        const demand: exchange.Demand = .{ .settle = 32, .peers = 0, .serving = 0, .gossip = .{ .items = 64, .bytes = 4096, .ordinary = want.ordinary, .ready = want.ready } };
-        var selection: exchange.Selection = .{};
+test "an item that rolls back twice is retired the next time it is selected while its neighbours are delivered" {
+    var fixture: Fixture = undefined;
+    try fixture.init(false, 4);
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    var host: Host = .{ .runtime = runtime, .fail = .gossip };
+    const failing = try admit(runtime, .voluntary_exit, null, "data");
+    const neighbour = try admit(runtime, .voluntary_exit, null, "data");
+    for (0..g.rollbacks_max) |_| try std.testing.expect((try host.turn(&.{}, deployed)).rolled_back);
+    host.fail = null;
+    const gossip = try host.turn(&.{}, deployed);
+    try std.testing.expect(gossip.retired and !gossip.rolled_back);
+    try std.testing.expectEqualSlices(g.Token, &.{neighbour}, gossip.gossip.?.tokens[0..gossip.gossip.?.len]);
+    // The owner applies the retired message's ignore verdict.
+    try std.testing.expectEqual(State.verdict_pending, runtime.gossip.?.get(failing).?.state);
+    try std.testing.expectEqual(n.gossipsub.Verdict.ignore, runtime.gossip.?.get(failing).?.verdict);
+
+    host.fail = .serving;
+    const start = try queueRequest(runtime);
+    const next = try queueRequest(runtime);
+    for (0..g.rollbacks_max) |_| try std.testing.expect((try host.turn(&.{}, deployed)).rolled_back);
+    host.fail = null;
+    const serving = try host.turn(&.{}, deployed);
+    try std.testing.expect(serving.retired);
+    try std.testing.expectEqualSlices(incoming.Token, &.{next}, serving.serving[0..serving.serving_count]);
+    // The owner cancels the retired start, which stays unexposed until its stream ends.
+    const retired = runtime.incoming.?.get(start).?;
+    try std.testing.expect(retired.action == .cancel and retired.state == .terminal and !retired.exposed and retired.native);
+    retireServed(&runtime.incoming.?, next);
+    runtime.gossip.?.retire(failing);
+}
+
+test "a pending control completion settles while payload builds keep failing" {
+    var fixture: Fixture = undefined;
+    try fixture.init(false, 2);
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    publishPeer(runtime);
+    var host: Host = .{ .runtime = runtime, .fail = .peers };
+    for (0..3) |_| {
+        const token = try runtime.table.reserve(.getIdentity);
         runtime.lock();
-        exchange.selectLocked(&runtime, &demand, 1, &selection);
+        runtime.table.transition(runtime.table.get(token), .terminal);
+        runtime.recomputeLocked(.legacy);
         runtime.unlock();
-        // The lane-driven rule the host ran before the exchange.
-        const lanes = urgent or ordinary or !gate;
-        const claimed = lanes and (urgent or (want.ordinary and (ordinary or !gate)) or (!want.ready and gate and ordinary));
-        const after = if (claimed) want.ordinary else gate;
-        const held = lanes and want.ready and !want.ordinary and (ordinary or !after);
-        try std.testing.expectEqual(claimed, selection.gossip != null);
-        try std.testing.expectEqual(after, table.ordinary_enabled);
-        try std.testing.expectEqual(selection.gossip_more or held, selection.more);
-        if (selection.gossip) |batch| try std.testing.expectEqual(@as(usize, @intFromBool(urgent)) + @intFromBool(ordinary and want.ordinary), batch.len);
-        runtime.lock();
-        exchange.restoreLocked(&runtime, &selection);
-        runtime.unlock();
-        try std.testing.expectEqual(gate, table.ordinary_enabled);
-        for ([_]?g.Token{ column, exit }) |token| if (token) |value| table.retire(value);
-    };
+        const result = try host.turn(&.{}, deployed);
+        try std.testing.expect(result.rolled_back);
+        try std.testing.expectEqual(@as(u8, 0), runtime.table.occupied);
+        try std.testing.expectEqual(@as(u8, 1), fixture.lane.len);
+    }
+}
+
+test "a rollback's control-only recovery exchange keeps the payload in place, and the retry delivers it without a notification" {
+    var fixture: Fixture = undefined;
+    try fixture.init(true, 2);
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    const exit = try admit(runtime, .voluntary_exit, null, "data");
+    const before = tsfn.notifications.load(.acquire);
+    var host: Host = .{ .runtime = runtime, .fail = .gossip };
+    try std.testing.expect((try host.turn(&.{}, deployed)).rolled_back);
+    host.fail = null;
+    const recovery = try host.turn(&.{}, control);
+    try std.testing.expect(!recovery.outcome.more and recovery.outcome.disabled and recovery.gossip == null);
+    try std.testing.expectEqual(@as(usize, 1), runtime.readiness.payload.len);
+    const retry = try host.turn(&.{}, deployed);
+    try std.testing.expectEqualSlices(g.Token, &.{exit}, retry.gossip.?.tokens[0..retry.gossip.?.len]);
+    try std.testing.expect(!retry.outcome.more and runtime.readiness.armed);
+    // The admission notified once; the rollback, the recovery and the retry notified nothing.
+    try std.testing.expectEqual(before, tsfn.notifications.load(.acquire));
+    runtime.gossip.?.retire(exit);
+}
+
+test "control-only exchanges settle in batches immediately while queued payload keeps its place for the timer" {
+    var fixture: Fixture = undefined;
+    try fixture.init(false, 2);
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    publishPeer(runtime);
+    const exit = try admit(runtime, .voluntary_exit, null, "data");
+    for (0..commands.capacity) |_| runtime.table.transition(runtime.table.get(try runtime.table.reserve(.getIdentity)), .terminal);
+    var host: Host = .{ .runtime = runtime };
+    var batches: usize = 0;
+    var demand = control;
+    demand.settle = 8;
+    for (0..8) |_| {
+        const result = try host.turn(&.{}, demand);
+        batches += 1;
+        try std.testing.expect(result.outcome.disabled and result.peers == 0 and result.gossip == null);
+        try std.testing.expectEqual(runtime.table.occupied > 0, result.outcome.more);
+        if (!result.outcome.more) break;
+    }
+    try std.testing.expectEqual(@as(usize, 4), batches);
+    try std.testing.expectEqual(@as(u8, 1), fixture.lane.len);
+    try std.testing.expect(!runtime.readiness.armed);
+    const result = try host.turn(&.{}, deployed);
+    try std.testing.expect(result.peers == 1 and result.gossip != null and runtime.readiness.armed);
+    runtime.gossip.?.retire(exit);
+}
+
+test "the first arrival into an idle source without capacity notifies once and parks until capacity returns" {
+    var fixture: Fixture = undefined;
+    try fixture.init(true, 2);
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    var host: Host = .{ .runtime = runtime };
+    var demand = deployed;
+    demand.capacity = .{ .serving = 0, .ordinary = false };
+    try std.testing.expect(!(try host.turn(&.{}, demand)).outcome.more);
+    try std.testing.expect(runtime.readiness.armed);
+    const before = tsfn.notifications.load(.acquire);
+    const request = try queueRequest(runtime);
+    const exit = try admit(runtime, .voluntary_exit, null, "data");
+    try std.testing.expectEqual(before + 1, tsfn.notifications.load(.acquire));
+    const parked = try host.turn(&.{}, demand);
+    try std.testing.expect(parked.outcome.parked_serving and parked.outcome.parked_ordinary and !parked.outcome.more);
+    try std.testing.expect(parked.serving_count == 0 and parked.gossip == null and runtime.readiness.armed);
+    // An executable urgent admission beside parked ordinary work queues the gossip row and notifies once.
+    const column = try admit(runtime, .data_column_sidecar, null, "data");
+    try std.testing.expectEqual(before + 2, tsfn.notifications.load(.acquire));
+    const urgent = try host.turn(&.{}, demand);
+    try std.testing.expectEqualSlices(g.Token, &.{column}, urgent.gossip.?.tokens[0..urgent.gossip.?.len]);
+    try std.testing.expect(urgent.outcome.parked_ordinary);
+    // Returning capacity delivers the parked work.
+    demand.capacity = .{ .serving = 1, .ordinary = true };
+    const delivered = try host.turn(&.{}, demand);
+    try std.testing.expectEqualSlices(incoming.Token, &.{request}, delivered.serving[0..delivered.serving_count]);
+    try std.testing.expectEqualSlices(g.Token, &.{exit}, delivered.gossip.?.tokens[0..delivered.gossip.?.len]);
+    try std.testing.expect(!delivered.outcome.parked_serving and !delivered.outcome.parked_ordinary);
+    try std.testing.expectEqual(before + 2, tsfn.notifications.load(.acquire));
+    retireServed(&runtime.incoming.?, request);
+    for ([_]g.Token{ exit, column }) |token| runtime.gossip.?.retire(token);
+}
+
+test "a serving capacity of 32 under a quota of 8 takes four immediate exchanges and never parks" {
+    var fixture: Fixture = undefined;
+    try fixture.init(false, incoming.capacity_max);
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    for (0..incoming.capacity_max) |_| _ = try queueRequest(runtime);
+    var host: Host = .{ .runtime = runtime };
+    var demand = deployed;
+    for (0..4) |i| {
+        const result = try host.turn(&.{}, demand);
+        demand.capacity = null;
+        try std.testing.expectEqual(@as(usize, exchange.serving_max), result.serving_count);
+        try std.testing.expectEqual(i < 3, result.outcome.more);
+        try std.testing.expect(!result.outcome.parked_serving and !result.outcome.disabled);
+        for (result.serving[0..result.serving_count]) |token| retireServed(&runtime.incoming.?, token);
+    }
+    try std.testing.expectEqual(@as(u32, 0), runtime.capacity.serving);
+}
+
+test "publications before phase B, during phase C and after phase D each reach an exchange" {
+    var fixture: Fixture = undefined;
+    try fixture.init(true, 2);
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    var host: Host = .{ .runtime = runtime };
+    const before = tsfn.notifications.load(.acquire);
+    // Before phase B: armed, so the arrival notifies.
+    publishPeer(runtime);
+    try std.testing.expectEqual(before + 1, tsfn.notifications.load(.acquire));
+    // During phase C the row is pinned, so the arrival waits for the unpin, which keeps it queued.
+    host.during = publishPeer;
+    const racing = try host.turn(&.{}, deployed);
+    try std.testing.expect(racing.peers == 1 and racing.outcome.more and !runtime.readiness.armed);
+    try std.testing.expectEqual(@as(u8, 1), fixture.lane.len);
+    host.during = null;
+    try std.testing.expect(!(try host.turn(&.{}, deployed)).outcome.more and runtime.readiness.armed);
+    // After phase D armed, the next arrival notifies; a full queue still leaves its undequeued notification.
+    tsfn.status = napi_queue_full;
+    publishPeer(runtime);
+    tsfn.status = 0;
+    try std.testing.expect(!runtime.readiness.armed and runtime.notify_live and !runtime.stop);
+    publishPeer(runtime);
+    try std.testing.expectEqual(before + 2, tsfn.notifications.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 2), (try host.turn(&.{}, deployed)).peers);
+}
+const napi_queue_full = @import("zapi:zapi").napi.c.napi_queue_full;
+
+test "a stop ends checks and serving starts, and quiescence ends claims" {
+    var fixture: Fixture = undefined;
+    try fixture.init(false, 2);
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    const request = try queueRequest(runtime);
+    const checked = try admit(runtime, .beacon_attestation, @splat(3), "data");
+    const exit = try admit(runtime, .voluntary_exit, null, "data");
+    runtime.stop = true;
+    var host: Host = .{ .runtime = runtime };
+    const stopped = try host.turn(&.{}, deployed);
+    try std.testing.expect(stopped.serving_count == 0 and stopped.checks.len == 0);
+    try std.testing.expectEqualSlices(g.Token, &.{exit}, stopped.gossip.?.tokens[0..stopped.gossip.?.len]);
+    try std.testing.expectEqual(r.Place.none, runtime.readiness.place(.serving));
+    try std.testing.expectEqual(r.Place.none, runtime.readiness.place(.checks));
+    try std.testing.expectEqual(State.needs_check, runtime.gossip.?.get(checked).?.state);
+    runtime.quiescent = true;
+    publishPeer(runtime);
+    const quiescent = try host.turn(&.{}, deployed);
+    try std.testing.expect(quiescent.peers == 1 and quiescent.gossip == null);
+    _ = request;
+}
+
+test "actions apply before selection, so a check classified in an exchange is claimed by it, and wake the owner once" {
+    var fixture: Fixture = undefined;
+    try fixture.init(false, 2);
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    runtime.wake = try @import("network_wake.zig").Wake.init();
+    defer runtime.wake.?.deinit();
+    var readable = [_]std.c.pollfd{.{ .fd = runtime.wake.?.read_fd, .events = std.c.POLL.IN, .revents = 0 }};
+    const checked = try admit(runtime, .beacon_attestation, @splat(3), "data");
+    var host: Host = .{ .runtime = runtime };
+    const checks = try host.turn(&.{}, deployed);
+    try std.testing.expectEqualSlices(g.Token, &.{checked}, checks.checks.tokens[0..checks.checks.len]);
+    try runtime.wake.?.drain();
+    const answered = try host.turn(&.{.{ .classify = .{ .token = checked, .available = true } }}, deployed);
+    try std.testing.expectEqualSlices(g.Token, &.{checked}, answered.gossip.?.tokens[0..answered.gossip.?.len]);
+    try std.testing.expectEqual(@as(c_int, 1), std.c.poll(&readable, 1, 0));
+    try runtime.wake.?.drain();
+    // An obligation-only batch wakes the owner for the verdict it leaves.
+    const verdict = try host.turn(&.{.{ .verdict = .{ .token = checked, .verdict = .accept } }}, control);
+    try std.testing.expect(!verdict.outcome.more);
+    try std.testing.expectEqual(State.verdict_pending, runtime.gossip.?.get(checked).?.state);
+    try std.testing.expectEqual(@as(c_int, 1), std.c.poll(&readable, 1, 0));
+    try runtime.wake.?.drain();
+    runtime.gossip.?.retire(checked);
 }
 
 test "a 128-column burst reaches the host within two exchanges under saturated ordinary gossip and serving" {
@@ -256,25 +485,27 @@ test "a 128-column burst reaches the host within two exchanges under saturated o
     runtime.gossip = try g.Table.init(std.testing.allocator, .{ .capacity = limits_mod.items(&limits), .bytes = limits_mod.bytes(&limits), .limits = limits, .execution = limits });
     defer runtime.gossip.?.deinit();
     const table = &runtime.gossip.?;
-    for (0..incoming.capacity_max) |_| _ = try queueRequest(&runtime.incoming.?);
-    for (0..512) |_| _ = try admit(table, .voluntary_exit, null, "exit");
+    for (0..incoming.capacity_max) |_| _ = try queueRequest(&runtime);
+    for (0..512) |_| _ = try admit(&runtime, .voluntary_exit, null, "exit");
     const column: [16 * 1024]u8 = @splat(5);
-    for (0..128) |_| _ = try admit(table, .data_column_sidecar, null, &column);
+    for (0..128) |_| _ = try admit(&runtime, .data_column_sidecar, null, &column);
 
     var host: Host = .{ .runtime = &runtime };
     var columns: usize = 0;
     var turns: usize = 0;
+    var demand = deployed;
     for (0..16) |_| {
         if (columns == 128) break;
-        const delivered = try exchange.run(&runtime, &deployed, &host);
+        const delivered = try host.turn(&.{}, demand);
         turns += 1;
-        try std.testing.expect(delivered.more);
+        try std.testing.expect(delivered.outcome.more);
         try std.testing.expectEqual(@as(usize, exchange.serving_max), delivered.serving_count);
         // The host takes each delivery, and both kinds of traffic refill to saturation.
         for (delivered.serving[0..delivered.serving_count]) |token| {
             retireServed(&runtime.incoming.?, token);
-            _ = try queueRequest(&runtime.incoming.?);
+            _ = try queueRequest(&runtime);
         }
+        demand.capacity = .{ .serving = 32, .ordinary = true };
         const batch = delivered.gossip.?;
         try std.testing.expectEqual(@as(usize, g.batch_max), batch.len);
         for (batch.tokens[0..batch.len]) |token| {
@@ -282,15 +513,12 @@ test "a 128-column burst reaches the host within two exchanges under saturated o
             columns += @intFromBool(kind == .data_column_sidecar);
             try std.testing.expect(table.report(token, .accept, host.clock));
             table.retire(token);
-            if (kind == .voluntary_exit) _ = try admit(table, .voluntary_exit, null, "exit");
+            if (kind == .voluntary_exit) _ = try admit(&runtime, .voluntary_exit, null, "exit");
         }
     }
     std.debug.print("exchange column_burst columns={d} turns={d}\n", .{ columns, turns });
     try std.testing.expectEqual(@as(usize, 128), columns);
     try std.testing.expectEqual(@as(usize, 2), turns);
-    for (runtime.incoming.?.cells, 0..) |*cell, i| if (cell.state != .free) {
-        cell.native = false;
-        runtime.incoming.?.retire(.{ .index = @intCast(i), .generation = cell.generation });
-    };
+    retireQueued(&runtime);
     table.close();
 }

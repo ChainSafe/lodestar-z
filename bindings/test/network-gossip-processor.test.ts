@@ -1,13 +1,18 @@
 import {setTimeout as delay} from "node:timers/promises";
 import {expect, test} from "vitest";
 import type {
+  NativeAction,
   NativeGossipDependencyCheck,
+  NativeGossipHandle,
   NativeGossipMessage,
+  NativeGossipVerdict,
   NativeNetworkApplicationRuntime,
 } from "../src/network.js";
 import {
   applicationConfig,
+  capacity,
   checksOnly,
+  exchange,
   localIntent,
   settleOnly,
   startRuntime,
@@ -18,6 +23,13 @@ import {incomingPair} from "./utils/network-incoming.js";
 
 const BLOCK = topicName();
 const ATTESTATION = topicName("beacon_attestation_0");
+
+function classify(handle: NativeGossipHandle, available: boolean): NativeAction {
+  return {available, handle, type: "classify"};
+}
+function verdict(handle: NativeGossipHandle, value: NativeGossipVerdict): NativeAction {
+  return {handle, type: "verdict", verdict: value};
+}
 
 test.each([
   {bytes: 4096, items: 8, length: 12},
@@ -43,24 +55,27 @@ test.each([
   expect(() => startRuntime(config, () => undefined)).toThrow();
 });
 
-test("processor commands validate credits, roots and generation-bound handles", async () => {
+test("exchange actions validate roots, handles and verdicts, and stale handles apply as no-ops", async () => {
   const config = applicationConfig();
   const runtime = startRuntime(config, () => undefined);
   try {
     await runtime.identity;
     await runtime.applyIntent(localIntent(config), config.initialSlot);
-    expect(runtime.exchange(checksOnly)).toMatchObject({checks: [], gossip: null});
-    expect(() => runtime.notifyGossipBlock(new Uint8Array(31))).toThrow();
-    expect(() => runtime.trackGossipSearch(new Uint8Array(33), null)).toThrow();
-    expect(() => runtime.trackGossipSearch(new Uint8Array(32), "not-a-peer")).toThrow();
+    expect(exchange(runtime, checksOnly)).toMatchObject({checks: [], gossip: null});
     const handle = {generation: 1n, index: 0};
-    expect(runtime.classifyGossip([{available: true, handle}])).toBe(0);
-    expect(runtime.classifyGossip([{available: false, handle: {...handle}}])).toBe(0);
-    expect(() => runtime.classifyGossip([{available: true, handle: {...handle, generation: 0n}}])).toThrow(
-      "InvalidGossipHandle"
-    );
-    expect(runtime.trackGossipSearch(new Uint8Array(32), null)).toBe(true);
-    expect(runtime.trackGossipSearch(new Uint8Array(32), null)).toBe(false);
+    for (const [invalid, code] of [
+      [{root: new Uint8Array(31), type: "block"}, "InvalidNetworkBytes"],
+      [classify({...handle, generation: 0n}, true), "InvalidGossipHandle"],
+      [classify({...handle, index: 65535}, true), "InvalidNetworkInteger"],
+      [{...verdict(handle, "accept"), verdict: "ACCEPT"}, "InvalidGossipVerdict"],
+      [{type: "unknown"}, "InvalidNetworkAction"],
+      [{action: "fatal", count: 0, peerId: runtime.identity.peerId, type: "reportPeer"}, "InvalidNetworkInteger"],
+      [{action: "fatal", count: 101, peerId: runtime.identity.peerId, type: "reportPeer"}, "InvalidNetworkInteger"],
+      [{action: "bad", count: 1, peerId: runtime.identity.peerId, type: "reportPeer"}, "InvalidNetworkAction"],
+    ] as const)
+      expect(() => runtime.exchange([classify(handle, true), invalid as NativeAction], settleOnly)).toThrow(code);
+    expect(exchange(runtime, settleOnly, [classify(handle, true), verdict(handle, "ignore")]).more).toBe(false);
+    expect(runtime.diagnostics().gossip).toMatchObject({checking: 0, reportsAccepted: 0n, waiting: 0});
   } finally {
     await runtime.close();
   }
@@ -69,7 +84,7 @@ test("processor commands validate credits, roots and generation-bound handles", 
 async function checks(runtime: NativeNetworkApplicationRuntime, count: number) {
   const result: NativeGossipDependencyCheck[] = [];
   for (let i = 0; i < 1000 && result.length < count; i++) {
-    result.push(...runtime.exchange(checksOnly).checks);
+    result.push(...exchange(runtime, checksOnly).checks);
     if (result.length < count) await delay(5);
   }
   expect(result).toHaveLength(count);
@@ -113,11 +128,11 @@ test("native processor retains dependencies, protects blocks, batches ready work
     data.fill(7, 20, 52);
     data[228] = 1;
     const root = data.slice(20, 52);
-    pair.right.exchange({...settleOnly, peers: 64});
+    exchange(pair.right, {...settleOnly, peers: 64});
     const pendingChecks: NativeGossipDependencyCheck[] = [];
     const deadline = performance.now() + 5000;
     ready = () => {
-      pendingChecks.push(...pair.right.exchange(checksOnly).checks);
+      pendingChecks.push(...exchange(pair.right, checksOnly).checks);
     };
     for (const signature of [1, 2]) {
       data[132] = signature;
@@ -128,30 +143,33 @@ test("native processor retains dependencies, protects blocks, batches ready work
     ready = undefined;
     const waiting = pendingChecks;
     for (const check of waiting) expect(check.root).toEqual(root);
+    // A batch with an invalid action applies none of it.
     expect(() =>
-      pair.right.classifyGossip([
-        {available: false, handle: waiting[0].handle},
-        {available: false, handle: {...waiting[1].handle, generation: 0n}},
-      ])
+      pair.right.exchange(
+        [classify(waiting[0].handle, false), classify({...waiting[1].handle, generation: 0n}, false)],
+        settleOnly
+      )
     ).toThrow("InvalidGossipHandle");
     expect(pair.right.diagnostics().gossip).toMatchObject({checking: 2, waiting: 0});
-    expect(
-      pair.right.classifyGossip([
-        {available: false, handle: {generation: 1n, index: 65535}},
-        ...waiting.map(({handle}) => ({available: false, handle})),
-      ])
-    ).toBe(2);
+    exchange(pair.right, settleOnly, [
+      classify({generation: 1n, index: 65534}, false),
+      ...waiting.map(({handle}) => classify(handle, false)),
+    ]);
     expect(pair.right.diagnostics().gossip).toMatchObject({messagesCopied: 0n, payloadBytes: 458, waiting: 2});
     const blockBytes = new Uint8Array(4000);
     new DataView(blockBytes.buffer).setBigUint64(100, pair.rightConfig.initialSlot, true);
     await pair.left.publishGossip(BLOCK, blockBytes);
-    for (const check of await checks(pair.right, 1))
-      expect(pair.right.classifyGossip([{available: false, handle: check.handle}])).toBe(1);
-    const urgent = {...settleOnly, gossip: {bytes: 4096, items: 1, ordinary: false, ready: true}};
+    const [blockCheck] = await checks(pair.right, 1);
+    const urgent = {...settleOnly, bytes: 4096, capacity, checks: 64, messages: 1};
     let block;
     for (let i = 0; i < 1000 && !block; i++) {
-      // Waiting attestations are neither checkable nor claimable; only the urgent block is.
-      const {checks: pending, gossip} = pair.right.exchange(urgent);
+      // Waiting attestations are neither checkable nor claimable; only the urgent block is, and its negative check
+      // applies before the claim in the same exchange.
+      const {checks: pending, gossip} = exchange(
+        pair.right,
+        urgent,
+        i === 0 ? [classify(blockCheck.handle, false)] : []
+      );
       expect(pending).toEqual([]);
       if (!gossip) await delay(5);
       else {
@@ -161,17 +179,20 @@ test("native processor retains dependencies, protects blocks, batches ready work
     }
     expect(block?.topic).toBe(BLOCK);
     if (!block) throw Error("Block dispatch deadline");
-    expect(pair.right.exchange(urgent).gossip).toBeNull();
-    expect(pair.right.reportGossip(block.handle, "accept")).toBe(true);
-    pair.right.notifyGossipBlock(root);
-    for (const check of await checks(pair.right, 2))
-      expect(pair.right.classifyGossip([{available: true, handle: check.handle}])).toBe(1);
-    // The owner readies the attestation group at its deadline; claims before it reopen the gate and find none.
-    const ordinary = {...settleOnly, gossip: {bytes: 1024, items: 64, ordinary: true, ready: true}};
-    let batch = pair.right.exchange(ordinary).gossip;
+    expect(exchange(pair.right, urgent).gossip).toBeNull();
+    exchange(pair.right, settleOnly, [verdict(block.handle, "accept"), {root, type: "block"}]);
+    expect(pair.right.diagnostics().gossip.reportsAccepted).toBe(1n);
+    exchange(
+      pair.right,
+      settleOnly,
+      (await checks(pair.right, 2)).map(({handle}) => classify(handle, true))
+    );
+    // The owner readies the attestation group at its deadline; claims before it find none.
+    const ordinary = {...settleOnly, bytes: 1024, capacity, checks: 64, claimOrdinary: true, messages: 64};
+    let batch = exchange(pair.right, ordinary).gossip;
     for (let i = 0; i < 200 && !batch?.messages.length; i++) {
       await delay(5);
-      const result = pair.right.exchange(ordinary);
+      const result = exchange(pair.right, ordinary);
       expect(result.checks).toEqual([]);
       batch = result.gossip;
     }
@@ -179,13 +200,18 @@ test("native processor retains dependencies, protects blocks, batches ready work
     expect(batch.jobs).toEqual([
       {grouped: true, kind: "beacon_attestation", length: batch.messages.length, start: 0, urgent: false},
     ]);
-    expect(pair.right.exchange(ordinary).gossip).toBeNull();
+    expect(exchange(pair.right, ordinary).gossip).toBeNull();
     expect(batch.messages).toHaveLength(2);
     expect(batch.messages.map((message) => message.attestationData)).toEqual([
       Buffer.from(data.subarray(4, 132)).toString("base64"),
       Buffer.from(data.subarray(4, 132)).toString("base64"),
     ]);
-    for (const message of batch.messages) expect(pair.right.reportGossip(message.handle, "ignore")).toBe(true);
+    exchange(
+      pair.right,
+      settleOnly,
+      batch.messages.map(({handle}) => verdict(handle, "ignore"))
+    );
+    expect(pair.right.diagnostics().gossip.reportsAccepted).toBe(3n);
     view.setBigUint64(4, 999999999n, true);
     await pair.left.publishGossip(ATTESTATION, data);
     for (let i = 0; i < 1000 && pair.right.diagnostics().gossip.slotRefusals === 0n; i++) await delay(5);
@@ -224,12 +250,15 @@ test("expired validation execution remains visible until late host completion", 
     const block = new Uint8Array(4000);
     new DataView(block.buffer).setBigUint64(100, pair.rightConfig.initialSlot, true);
     await pair.left.publishGossip(BLOCK, block);
-    for (const check of await checks(pair.right, 1))
-      expect(pair.right.classifyGossip([{available: true, handle: check.handle}])).toBe(1);
+    exchange(
+      pair.right,
+      settleOnly,
+      (await checks(pair.right, 1)).map(({handle}) => classify(handle, true))
+    );
     let message: NativeGossipMessage | undefined;
     for (let i = 0; i < 1000 && !message; i++) {
-      message = pair.right.exchange({...settleOnly, gossip: {bytes: 4096, items: 1, ordinary: true, ready: true}})
-        .gossip?.messages[0];
+      message = exchange(pair.right, {...settleOnly, bytes: 4096, capacity, claimOrdinary: true, messages: 1}).gossip
+        ?.messages[0];
       if (!message) await delay(5);
     }
     if (!message) throw Error("Block dispatch deadline");
@@ -244,13 +273,14 @@ test("expired validation execution remains visible until late host completion", 
     expect(pair.right.diagnostics().gossip.oldestExpiredExecutionAgeMs).toBeGreaterThan(
       expired.oldestExpiredExecutionAgeMs
     );
-    expect(pair.right.reportGossip(message.handle, "accept")).toBe(false);
-    expect(pair.right.reportGossip(message.handle, "reject")).toBe(false);
+    // A late verdict retires the message without applying it.
+    exchange(pair.right, settleOnly, [verdict(message.handle, "accept"), verdict(message.handle, "reject")]);
     expect(pair.right.diagnostics().gossip).toMatchObject({
       executing: 0,
       expiredExecuting: 0,
       occupied: 0,
       oldestExpiredExecutionAgeMs: 0n,
+      reportsAccepted: 0n,
       reportsAppliedAccept: 0n,
       reportsAppliedReject: 0n,
     });
