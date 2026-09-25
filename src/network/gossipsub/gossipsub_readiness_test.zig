@@ -245,7 +245,7 @@ test "gossip resumes a small frame cut by a short write once the stream is writa
     try std.testing.expectEqual(blocked + 1, g.io_metrics.write_would_block);
     try std.testing.expect(!io.tx.ready and io.tx.pending());
     try std.testing.expectEqual(payloads.len - whole, io.tx.data.count);
-    try std.testing.expectEqual(offset, io.tx.data.first().?.cursor.sent);
+    try std.testing.expectEqual(offset, io.tx.data.next(&g.messages.store).?.cursor.sent);
 
     // The server reads, the writable event resumes the cut frame, and every frame arrives intact.
     for (0..256) |_| {
@@ -261,4 +261,38 @@ test "gossip resumes a small frame cut by a short write once the stream is writa
     for (setup.serverMessages(), &payloads) |message, *payload| try std.testing.expectEqualSlices(u8, payload, message.bytes);
     try std.testing.expect(g.io_metrics.write_calls - calls <= payloads.len + (g.io_metrics.write_would_block - blocked));
     try std.testing.expectEqual(@as(u64, payloads.len), g.delivery_metrics.write_time[@intFromEnum(@import("delivery.zig").Origin.publication)].count);
+}
+
+test "gossip local publications lead each turn for a bounded run and cannot starve forwards or IWANT responses" {
+    const Origin = @import("delivery.zig").Origin;
+    var setup: Pair = .{};
+    try setup.initOpts(.{ .random_seed = 1, .calls_per_peer = 1 }, .{ .random_seed = 1 });
+    defer setup.deinit();
+    try connectMesh(&setup);
+    const g = setup.shared.client.gossipsub;
+    const index = g.sessions.find(setup.shared.handles.client).?;
+    const io = &g.sessions.rows[index].io;
+    _ = try g.publish(topic, "retained", setup.shared.pair.now);
+    for (0..8) |_| _ = gossip_test.pumpTurn(g, &setup.shared.pair.client, setup.shared.pair.now);
+    try std.testing.expect(!io.tx.pending());
+    const retained = g.messages.history.message(g.messages.history.get(&g.messages.store, @import("topic.zig").validMessageId(topic, "retained", g.options.message_id_policy)).?);
+    const ordinary = [_]Origin{ .forward, .forward, .forward, .iwant, .forward, .forward };
+    for (ordinary) |origin| try std.testing.expectEqual(.queued, io.tx.queueData(&g.messages.store, retained, origin, .{ .bytes = g.options.tx_peer_bytes }, setup.shared.pair.now.mono_ms));
+    for (0..8) |i| {
+        var payload: [8]u8 = undefined;
+        std.mem.writeInt(u64, &payload, i, .little);
+        try std.testing.expectEqual(@as(u16, 1), (try g.publish(topic, &payload, setup.shared.pair.now)).queued);
+    }
+    // One write call per turn: each turn completes one frame, and the run carries across turns.
+    const expected = [_]Origin{ .publication, .publication, .publication, .publication, .forward, .publication, .publication, .publication, .publication, .forward, .forward, .iwant, .forward, .forward };
+    for (expected) |origin| {
+        var before: [3]u64 = undefined;
+        for (&before, g.delivery_metrics.recipients) |*count, outcomes| count.* = outcomes[@intFromEnum(@import("metrics.zig").Delivery.Outcome.completed)];
+        _ = gossip_test.pumpTurn(g, &setup.shared.pair.client, setup.shared.pair.now);
+        for (before, g.delivery_metrics.recipients, 0..) |count, outcomes, o| {
+            const completed = outcomes[@intFromEnum(@import("metrics.zig").Delivery.Outcome.completed)] - count;
+            try std.testing.expectEqual(@as(u64, @intFromBool(o == @intFromEnum(origin))), completed);
+        }
+    }
+    try std.testing.expect(!io.tx.pending());
 }

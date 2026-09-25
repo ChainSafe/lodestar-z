@@ -75,6 +75,7 @@ pub const ResourceSnapshot = struct {
     remote_subscriptions: usize,
     mesh_members: usize,
     queued_descriptors: usize,
+    queued_local_descriptors: usize = 0,
     queued_bytes: usize,
     held_frames: usize,
     held_tx_retains: usize,
@@ -321,7 +322,9 @@ pub const Gossipsub = struct {
 
     pub fn cancelWrites(self: *Gossipsub, session: sessions_mod.SessionRef) void {
         if (!self.sessions.matches(session)) return;
-        self.sessions.rows[session.index].io.tx.cancelStream(&self.messages.store);
+        const tx = &self.sessions.rows[session.index].io.tx;
+        self.delivery_metrics.cancelled(&tx.data.origins);
+        tx.cancelStream(&self.messages.store);
         self.cancelPromises(session.index, false);
     }
 
@@ -427,10 +430,12 @@ pub const Gossipsub = struct {
             result.selected += 1;
             if (self.sessions.rows[index].outStream() == null) {
                 result.unavailable += 1;
+                self.delivery_metrics.recipient(origin, .unavailable);
                 continue;
             }
-            if (self.sessions.rows[index].io.tx.queueData(&self.messages.store, h, origin, self.options.tx_peer_bytes, now_ms) == .queued) {
+            if (self.sessions.rows[index].io.tx.queueData(&self.messages.store, h, origin, self.deliveryLimits(), now_ms) == .queued) {
                 result.queued += 1;
+                self.delivery_metrics.recipient(origin, .queued);
                 self.settle(index);
             } else {
                 result.pressured += 1;
@@ -536,6 +541,7 @@ pub const Gossipsub = struct {
             result.outbound_streams += @intFromBool(peer.outStream() != null);
             result.subscription_pending_peers += @intFromBool(io.tx.subscription_since != null);
             result.queued_descriptors += io.tx.data.count;
+            result.queued_local_descriptors += io.tx.data.classCount(.local);
             result.queued_bytes += io.tx.data.bytes;
             result.control_frames += io.tx.control.count;
             result.control_bytes += io.tx.control.used;
@@ -671,9 +677,14 @@ pub const Gossipsub = struct {
         }
     }
 
+    fn deliveryLimits(self: *const Gossipsub) @import("delivery.zig").Limits {
+        return .{ .bytes = self.options.tx_peer_bytes, .local_descriptors = self.options.tx_local_descriptors, .local_bytes = self.options.tx_local_bytes };
+    }
+
     fn dataRefused(self: *Gossipsub, index: u16, origin: @import("delivery.zig").Origin) void {
         const row = &self.sessions.rows[index];
         self.counters.send_dropped += 1;
+        self.delivery_metrics.recipient(origin, .pressured);
         self.delivery_metrics.dropped(origin, row.io.tx.last_drop, row.client, self.last_unix_s);
     }
 
@@ -864,11 +875,15 @@ pub const Gossipsub = struct {
                 continue;
             }
             if (self.sessions.suppresses(index, id, self.last_now_ms)) continue;
-            switch (self.messages.serve(&self.sessions.rows[index].io.tx, self.logical(index), id, self.options.tx_peer_bytes, self.last_now_ms)) {
+            switch (self.messages.serve(&self.sessions.rows[index].io.tx, self.logical(index), id, self.deliveryLimits(), self.last_now_ms)) {
                 .unknown => self.rpc_metrics.iwant_unknown +|= 1,
                 .known => |known| {
                     self.topic_metrics.get(known.topic).iwant_ids +|= 1;
-                    if (known.result == .pressured) self.dataRefused(index, .iwant);
+                    switch (known.result) {
+                        .queued => self.delivery_metrics.recipient(.iwant, .queued),
+                        .pressured => self.dataRefused(index, .iwant),
+                        .limited => {},
+                    }
                 },
             }
         }

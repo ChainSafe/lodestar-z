@@ -31,3 +31,16 @@ test "gossip policy wire limits validate inclusive boundaries" {
     o.idontwant_min_data_size = constants.GOSSIP_MAX_SIZE + 1;
     try std.testing.expectError(error.InvalidLimits, validate(&o));
 }
+
+test "gossip local publication reserve leaves ordinary frames a maximal message and one descriptor" {
+    const std = @import("std");
+    const compressed = constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE);
+    var o: Options = .{ .random_seed = 1, .tx_local_descriptors = @import("delivery.zig").per_peer_limit - 1 };
+    o.tx_local_bytes = o.tx_peer_bytes - compressed;
+    try validate(&o);
+    o.tx_local_bytes += 1;
+    try std.testing.expectError(error.InvalidLimits, validate(&o));
+    o.tx_local_bytes = 0;
+    o.tx_local_descriptors += 1;
+    try std.testing.expectError(error.InvalidLimits, validate(&o));
+}

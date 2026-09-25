@@ -187,12 +187,12 @@ pub const Messages = struct {
         known: struct { topic: []const u8, result: enum { queued, limited, pressured } },
     };
 
-    pub fn serve(self: *Messages, outbox: *@import("outbox.zig").Outbox, peer: PeerRef, id: MessageId, byte_limit: usize, now: u64) ServeOutcome {
+    pub fn serve(self: *Messages, outbox: *@import("outbox.zig").Outbox, peer: PeerRef, id: MessageId, limits: @import("delivery.zig").Limits, now: u64) ServeOutcome {
         const slot = self.history.get(&self.store, id) orelse return .unknown;
         const topic = self.store.get(self.history.message(slot)).?.topicString();
         self.history.bindPeer(peer);
         if (!self.history.iwantAllowed(slot, peer, @import("constants.zig").gossip_retransmission)) return .{ .known = .{ .topic = topic, .result = .limited } };
-        const queued = outbox.queueData(&self.store, self.history.message(slot), .iwant, byte_limit, now) == .queued;
+        const queued = outbox.queueData(&self.store, self.history.message(slot), .iwant, limits, now) == .queued;
         if (queued) self.history.sent(slot, peer);
         return .{ .known = .{ .topic = topic, .result = if (queued) .queued else .pressured } };
     }

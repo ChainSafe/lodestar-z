@@ -81,70 +81,151 @@ pub const Pool = struct {
     }
 };
 
+/// Local publications queue apart from ordinary frames, which are forwards and IWANT responses.
+/// Both classes share the peer's descriptor and byte limits and the pool's per-peer protected
+/// share, which follows the combined count.
+pub const Class = enum { local, ordinary };
+
+/// Per-peer admission limits. Ordinary frames leave the unused part of the local reserve free;
+/// local publications may use the reserve and any other room.
+pub const Limits = struct { bytes: usize, local_descriptors: usize = 0, local_bytes: usize = 0 };
+
+/// Local frames chosen in a row while an ordinary frame waits, by count or bytes, before the
+/// ordinary frame goes next.
+const local_run_frames = 4;
+const local_run_bytes = 64 * 1024;
+
+const Fifo = struct { head: u32 = none, tail: u32 = none };
+
 pub const Queue = struct {
     pool: *Pool,
-    head: u32 = none,
-    tail: u32 = none,
+    fifos: [2]Fifo = @splat(.{}),
+    origins: [origin_count]usize = @splat(0),
     count: usize = 0,
     bytes: usize = 0,
+    local_bytes: usize = 0,
+    /// The class of the frame being written. It stays chosen until the frame completes, so
+    /// frames never interleave.
+    current: ?Class = null,
+    /// Local frames and their bytes chosen in a row while an ordinary frame waited.
+    run_frames: usize = 0,
+    run_bytes: usize = 0,
     bytes_high_water: usize = 0,
     descriptors_high_water: usize = 0,
 
-    pub fn append(self: *Queue, store: *storage.Store, message: storage.Handle, origin: Origin, byte_limit: usize, now: u64) error{ Descriptors, PoolFull, Bytes }!void {
+    pub fn classOf(origin: Origin) Class {
+        return if (origin == .publication) .local else .ordinary;
+    }
+
+    pub fn classCount(self: *const Queue, class: Class) usize {
+        const local = self.origins[@intFromEnum(Origin.publication)];
+        return if (class == .local) local else self.count - local;
+    }
+
+    pub fn append(self: *Queue, store: *storage.Store, message: storage.Handle, origin: Origin, limits: Limits, now: u64) error{ Descriptors, PoolFull, Bytes }!void {
         const entry = store.get(message).?;
-        assert(!entry.provisional and self.bytes <= byte_limit);
-        if (self.count == per_peer_limit) return error.Descriptors;
-        if (entry.len > byte_limit - self.bytes) return error.Bytes;
+        assert(!entry.provisional and self.bytes <= limits.bytes);
+        assert(limits.local_descriptors < per_peer_limit and limits.local_bytes <= limits.bytes);
+        const class = classOf(origin);
+        const reserved_descriptors = if (class == .local) 0 else limits.local_descriptors -| self.classCount(.local);
+        const reserved_bytes = if (class == .local) 0 else limits.local_bytes -| self.local_bytes;
+        if (self.count + reserved_descriptors >= per_peer_limit) return error.Descriptors;
+        if (entry.len + reserved_bytes > limits.bytes - self.bytes) return error.Bytes;
         const slot = self.pool.acquire(self.count) orelse return error.PoolFull;
         self.pool.slots[slot].tx = .{ .message = message, .enqueued_ms = now, .origin = origin, .cursor = store.frameCursor(message) };
-        if (self.tail == none) self.head = slot else self.pool.slots[self.tail].next = slot;
-        self.tail = slot;
+        const fifo = &self.fifos[@intFromEnum(class)];
+        if (fifo.tail == none) fifo.head = slot else self.pool.slots[fifo.tail].next = slot;
+        fifo.tail = slot;
         self.count += 1;
+        self.origins[@intFromEnum(origin)] += 1;
         self.bytes += entry.len;
+        if (class == .local) self.local_bytes += entry.len;
         self.bytes_high_water = @max(self.bytes_high_water, self.bytes);
         self.descriptors_high_water = @max(self.descriptors_high_water, self.count);
         store.retainTx(message);
     }
 
-    pub fn first(self: *const Queue) ?*const Transmission {
-        return if (self.head == none) null else &self.pool.slots[self.head].tx;
+    /// The frame to write next. A frame in progress continues. At a frame boundary a local frame
+    /// goes first, unless a full run of them already went while an ordinary frame waited.
+    pub fn next(self: *Queue, store: *const storage.Store) ?*const Transmission {
+        if (self.count == 0) return null;
+        const class = self.current orelse self.choose(store);
+        self.current = class;
+        return &self.pool.slots[self.fifos[@intFromEnum(class)].head].tx;
     }
 
-    /// Moves the head frame past `len` sent bytes, and removes it once QUIC holds all of it.
+    fn choose(self: *Queue, store: *const storage.Store) Class {
+        const waiting = self.classCount(.ordinary) > 0;
+        if (self.classCount(.local) > 0 and (!waiting or (self.run_frames < local_run_frames and self.run_bytes < local_run_bytes))) {
+            if (waiting) {
+                self.run_frames += 1;
+                self.run_bytes += store.get(self.pool.slots[self.fifos[@intFromEnum(Class.local)].head].tx.message).?.frameLen();
+            } else self.endRun();
+            return .local;
+        }
+        self.endRun();
+        return .ordinary;
+    }
+
+    fn endRun(self: *Queue) void {
+        self.run_frames = 0;
+        self.run_bytes = 0;
+    }
+
+    pub fn oldest(self: *const Queue) ?u64 {
+        var result: ?u64 = null;
+        for (self.fifos) |fifo| if (fifo.head != none) {
+            const since = self.pool.slots[fifo.head].tx.enqueued_ms;
+            result = @min(result orelse since, since);
+        };
+        return result;
+    }
+
+    /// Moves the chosen frame past `len` sent bytes, and removes it once QUIC holds all of it.
     pub fn advance(self: *Queue, store: *storage.Store, len: usize) ?Receipt {
-        assert(self.count > 0);
-        const tx = &self.pool.slots[self.head].tx;
+        const class = self.current.?;
+        const tx = &self.pool.slots[self.fifos[@intFromEnum(class)].head].tx;
         if (!store.advanceFrame(tx.message, &tx.cursor, len)) return null;
         const receipt: Receipt = .{ .origin = tx.origin, .enqueued_ms = tx.enqueued_ms };
-        self.remove(store);
+        self.remove(store, class);
+        self.current = null;
         return receipt;
     }
 
-    fn remove(self: *Queue, store: *storage.Store) void {
-        const slot = self.head;
-        const message = self.pool.slots[slot].tx.message;
-        self.head = self.pool.slots[slot].next;
-        if (self.head == none) self.tail = none;
-        self.bytes -= store.get(message).?.len;
-        store.releaseTx(message);
+    fn remove(self: *Queue, store: *storage.Store, class: Class) void {
+        const fifo = &self.fifos[@intFromEnum(class)];
+        const slot = fifo.head;
+        const tx = &self.pool.slots[slot].tx;
+        const len = store.get(tx.message).?.len;
+        fifo.head = self.pool.slots[slot].next;
+        if (fifo.head == none) fifo.tail = none;
+        self.origins[@intFromEnum(tx.origin)] -= 1;
+        self.bytes -= len;
+        if (class == .local) self.local_bytes -= len;
+        store.releaseTx(tx.message);
         self.pool.release(slot, self.count);
         self.count -= 1;
     }
 
     pub fn reset(self: *Queue, store: *storage.Store) void {
-        for (0..self.count) |_| self.remove(store);
-        assert(self.head == none and self.tail == none and self.bytes == 0);
+        for (0..self.count) |_| self.remove(store, if (self.classCount(.local) > 0) .local else .ordinary);
+        assert(self.count == 0 and self.bytes == 0 and self.local_bytes == 0);
+        assert(self.fifos[0].head == none and self.fifos[1].head == none);
+        self.current = null;
+        self.endRun();
     }
 
     pub fn retains(self: *const Queue, message: storage.Handle) usize {
         var count: usize = 0;
-        var slot = self.head;
-        for (0..self.count) |_| {
-            const entry = &self.pool.slots[slot];
-            count += @intFromBool(std.meta.eql(entry.tx.message, message));
-            slot = entry.next;
+        for (self.fifos) |fifo| {
+            var slot = fifo.head;
+            for (0..self.count) |_| {
+                if (slot == none) break;
+                count += @intFromBool(std.meta.eql(self.pool.slots[slot].tx.message, message));
+                slot = self.pool.slots[slot].next;
+            }
+            assert(slot == none);
         }
-        assert(slot == none);
         return count;
     }
 };

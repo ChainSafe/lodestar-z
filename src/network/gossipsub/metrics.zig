@@ -23,19 +23,33 @@ pub const Io = struct {
 
 pub const ValidationTime = @import("../metrics/histogram.zig").Duration(&.{ 10, 30, 100, 300, 1000, 3000, 10000 });
 
-/// Data frame outcomes by delivery origin: refused admissions with their queue limit and the peer's
-/// client, refusals by slot second, and the residence of each frame QUIC accepted in full.
+/// Data frame outcomes by delivery origin: selected recipients and their admission, the later
+/// completion or cancellation of queued frames, refused admissions with their queue limit and the
+/// peer's client, refusals by slot second, and the residence of each frame QUIC accepted in full.
 pub const Delivery = struct {
     const delivery = @import("delivery.zig");
     const Client = @import("../peers/client.zig").Client;
     const DataDrop = enum { data_descriptors, data_pool, data_bytes };
+    /// A selected recipient is queued, pressured or unavailable. A queued frame later completes
+    /// when QUIC accepts its last byte, which is not delivery, or is cancelled by a stream reset.
+    pub const Outcome = enum { selected, queued, pressured, unavailable, completed, cancelled };
     const WriteTime = @import("../metrics/histogram.zig").Duration(&.{ 1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000 });
     /// Refusals are bucketed by Unix second modulo the slot duration, which scrape timing cannot alias.
     const slot_seconds = 12;
 
+    recipients: [delivery.origin_count][@typeInfo(Outcome).@"enum".fields.len]u64 = @splat(@splat(0)),
     drops: [@typeInfo(Client).@"enum".fields.len][delivery.origin_count][@typeInfo(DataDrop).@"enum".fields.len]u64 = @splat(@splat(@splat(0))),
     drops_by_second: [slot_seconds]u64 = @splat(0),
     write_time: [delivery.origin_count]WriteTime = @splat(.{}),
+
+    pub fn recipient(self: *Delivery, origin: delivery.Origin, outcome: Outcome) void {
+        if (outcome != .completed and outcome != .cancelled) self.recipients[@intFromEnum(origin)][@intFromEnum(Outcome.selected)] +|= 1;
+        self.recipients[@intFromEnum(origin)][@intFromEnum(outcome)] +|= 1;
+    }
+
+    pub fn cancelled(self: *Delivery, queued: *const [delivery.origin_count]usize) void {
+        for (&self.recipients, queued) |*outcomes, count| outcomes[@intFromEnum(Outcome.cancelled)] +|= count;
+    }
 
     pub fn dropped(self: *Delivery, origin: delivery.Origin, reason: @import("outbox.zig").DropReason, client: Client, unix_s: i64) void {
         const data: DataDrop = switch (reason) {
@@ -49,10 +63,15 @@ pub const Delivery = struct {
     }
 
     pub fn written(self: *Delivery, receipt: delivery.Receipt, now_ms: u64) void {
+        self.recipient(receipt.origin, .completed);
         self.write_time[@intFromEnum(receipt.origin)].observe(now_ms -| receipt.enqueued_ms);
     }
 
     pub fn write(self: *const Delivery, w: *prom.Encoder) prom.Error!void {
+        const recipients = try w.family(.{ .name = "lodestar_native_gossip_data_recipients_total", .kind = .counter, .help = "Data frame recipients by delivery origin: selected, then queued, pressured or unavailable; queued frames later complete when QUIC accepts their last byte, which is not delivery, or are cancelled by a stream reset", .labels = &.{ "origin", "outcome" } });
+        inline for (@typeInfo(delivery.Origin).@"enum".fields) |origin| {
+            inline for (@typeInfo(Outcome).@"enum".fields) |outcome| try recipients.sample(.{ origin.name, outcome.name }, self.recipients[origin.value][outcome.value]);
+        }
         const drops = try w.family(.{ .name = "lodestar_native_gossip_data_drops_total", .kind = .counter, .help = "Refused data frame admissions by delivery origin, the queue limit that refused them and the peer's client", .labels = &.{ "origin", "reason", "client" } });
         inline for (@typeInfo(delivery.Origin).@"enum".fields) |origin| {
             inline for (@typeInfo(DataDrop).@"enum".fields) |reason| {
