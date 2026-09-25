@@ -1894,7 +1894,10 @@ test "managed remembers a served dial, keeps it through close, and replays it af
     try setup.initOwners(&.{});
     defer setup.deinit();
     setup.client.loadRemembered(records[0..count], setup.pair.now);
+    // The first turn queues the remembered candidate, and its due first attempt wakes the next.
     var intents: [1]managed.DialIntent = undefined;
+    try std.testing.expectEqual(@as(usize, 0), setup.client.dialIntents(&setup.client_service, &setup.pair.client, setup.pair.now, &intents));
+    try std.testing.expectEqual(setup.pair.now.mono_ms, clientWakeup(&setup).?);
     try std.testing.expectEqual(@as(usize, 1), setup.client.dialIntents(&setup.client_service, &setup.pair.client, setup.pair.now, &intents));
     try std.testing.expect(intents[0].peer.eql(&records[0].peer));
     try std.testing.expect(intents[0].address.eql(support.server_address));
@@ -1905,5 +1908,5 @@ test "managed remembers a served dial, keeps it through close, and replays it af
     const funnel = setup.client.catalog.remembered.counters.funnel;
     try std.testing.expectEqual([3]u64{ 1, 1, 0 }, funnel[@intFromEnum(remembered.Origin.remembered)]);
     try std.testing.expectEqual([3]u64{ 0, 0, 0 }, funnel[@intFromEnum(remembered.Origin.fresh)]);
-    try std.testing.expectEqual(@as(?u64, null), setup.client.replayWakeup(setup.pair.now, 1));
+    try std.testing.expect(setup.client.catalog.remembered.nextReplay(support.now_unix) == null);
 }
