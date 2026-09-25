@@ -1,0 +1,84 @@
+--- a/include/quiche.h
++++ b/include/quiche.h
+@@ -435,6 +435,31 @@
+ // Returns the stream's send capacity in bytes.
+ ssize_t quiche_conn_stream_capacity(quiche_conn *conn, uint64_t stream_id);
+ 
++typedef struct {
++    // The active path's congestion window less its bytes in flight, or SIZE_MAX
++    // while probes are due.
++    size_t cwnd_available;
++
++    // The connection's send capacity: the lesser of the congestion window
++    // available and the connection credit when last updated, less stream data
++    // buffered since.
++    size_t tx_cap;
++
++    // The peer's connection flow control limit less the stream data buffered.
++    uint64_t connection_credit;
++
++    // The peer's flow control limit for the stream less the data buffered on it.
++    uint64_t stream_credit;
++
++    // Bytes buffered on the stream awaiting transmission, retransmissions
++    // included.
++    uint64_t stream_unsent;
++} quiche_send_capacity;
++
++// Reads the parts of a stream's send capacity without changing any state.
++int quiche_conn_send_capacity(const quiche_conn *conn, uint64_t stream_id,
++                              quiche_send_capacity *out);
++
+ // Returns true if the stream has data that can be read.
+ bool quiche_conn_stream_readable(const quiche_conn *conn, uint64_t stream_id);
+ 
+--- a/src/ffi.rs
++++ b/src/ffi.rs
+@@ -1001,6 +1001,47 @@
+     }
+ }
+ 
++#[repr(C)]
++pub struct SendCapacity {
++    cwnd_available: size_t,
++    tx_cap: size_t,
++    connection_credit: u64,
++    stream_credit: u64,
++    stream_unsent: u64,
++}
++
++#[no_mangle]
++pub extern "C" fn quiche_conn_send_capacity(
++    conn: &Connection, stream_id: u64, out: &mut SendCapacity,
++) -> c_int {
++    use crate::recovery::RecoveryOps;
++
++    let stream = match conn.streams.get(stream_id) {
++        Some(v) => v,
++
++        None => return Error::InvalidStreamState(stream_id).to_c() as c_int,
++    };
++
++    let stream_credit = match stream.send.cap() {
++        Ok(v) => v as u64,
++
++        Err(e) => return e.to_c() as c_int,
++    };
++
++    out.cwnd_available = match conn.paths.get_active() {
++        Ok(p) => p.recovery.cwnd_available(),
++
++        Err(_) => 0,
++    };
++    out.tx_cap = conn.tx_cap;
++    out.connection_credit = conn.max_tx_data.saturating_sub(conn.tx_data);
++    out.stream_credit = stream_credit;
++    out.stream_unsent =
++        stream.send.off_back().saturating_sub(stream.send.off_front());
++
++    0
++}
++
+ #[no_mangle]
+ pub extern "C" fn quiche_conn_stream_readable(
+     conn: &Connection, stream_id: u64,
