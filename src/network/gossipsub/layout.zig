@@ -41,17 +41,26 @@ pub const Layout = struct {
             .sessions = options.connected_capacity,
             .connection_slots = options.connection_slots,
             .retained = options.retained_capacity,
-            .history = options.mcache_capacity,
+            .history = historyCapacity(options),
             .seen = options.seen_capacity,
             .validations = options.validation_capacity,
             .fingerprints = 4 * options.validation_capacity,
-            .payload_entries = @max(options.mcache_capacity, if (options.processor_limits != null) options.validation_capacity else 0) + options.validation_capacity,
+            .payload_entries = historyCapacity(options) + options.validation_capacity,
             .payload_bytes = options.mcache_arena_bytes / storage.page_bytes * storage.page_bytes,
             .deliveries = delivery.Pool.capacity(options.connected_capacity, options.validation_capacity),
             .receive_arena_bytes = options.receive_arena_bytes,
             .session_buffer_bytes = @import("peer_io.zig").PeerIo.bufferBytes(options),
             .namespace_bytes = if (options.topic_policy) |boundaries| policy.Namespace.backingBytes(boundaries, options.connected_capacity) else 0,
         };
+    }
+
+    /// The history must hold every message retained in its six windows, publications included,
+    /// or it evicts messages peers can still request. With processor limits, their per-kind
+    /// allowances bound what it can retain, so it covers their total, which validation capacity
+    /// equals and which stays below the history's ceiling. A node on every attestation subnet can
+    /// retain a whole slot of attestations within six windows.
+    fn historyCapacity(options: *const Options) usize {
+        return if (options.processor_limits != null) @max(options.mcache_capacity, options.validation_capacity) else options.mcache_capacity;
     }
 
     pub fn plan(self: *const Layout) Plan {

@@ -575,6 +575,18 @@ fn writeGossip(self: *const Context, w: *prom.Encoder) prom.Error!void {
         .help = "Gossip storage admission attempts refused by bounded resource reason",
         .labels = &.{"reason"},
     }, @import("../gossipsub/messages.zig").StorageRefusal, &self.owner.service.gossipsub.messages.storage_refusals);
+    try w.enums(.{
+        .name = "lodestar_native_gossip_retention_refusals_total",
+        .kind = .counter,
+        .help = "Accepted or published messages neither cached nor forwarded because their kind's retention allowance stayed full",
+        .labels = &.{"kind"},
+    }, gossip.topic.Kind, &self.owner.service.gossipsub.messages.retention_refusals);
+    try w.enums(.{
+        .name = "lodestar_native_gossip_history_evictions_total",
+        .kind = .counter,
+        .help = "Message history evictions: six windows passed, the history was full, the kind's retention allowance was full, or the store needed the room",
+        .labels = &.{"reason"},
+    }, gossip.mcache.Eviction, &self.owner.service.gossipsub.messages.history.evictions);
     try self.owner.service.gossipsub.rpc_metrics.write(w);
     try self.owner.service.gossipsub.io_metrics.write(w);
     try self.owner.service.gossipsub.delivery_metrics.write(w);

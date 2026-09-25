@@ -203,7 +203,16 @@ const HistoryTopic = struct {
     tail: u32 = empty_slot,
     next_free: u32 = empty_slot,
 };
+/// Why a history entry left: its six windows passed, or earlier because the history was full,
+/// its kind's retention allowance was full, or the store needed its room.
+pub const Eviction = enum { age, capacity, retention, storage };
+
 pub const History = struct {
+    /// The hard ceiling on entries: retransmission counts cost `capacity × retained` bytes.
+    pub const capacity_max = 65536;
+    /// History entries a refused retention examines, oldest first, for one of its kind to evict.
+    const reclaim_scan = 64;
+
     generations: []u64,
     counts: []u8,
     entries: []HistoryEntry,
@@ -213,6 +222,7 @@ pub const History = struct {
     topic_index: KeyIndex(HistoryTopic, []const u8, "name"),
     free_topic: u32 = 0,
     gossip_entries_visited: u64 = 0,
+    evictions: [@typeInfo(Eviction).@"enum".fields.len]u64 = @splat(0),
     head: u32 = empty_slot,
     tail: u32 = empty_slot,
     free: u32 = 0,
@@ -220,7 +230,7 @@ pub const History = struct {
 
     pub fn init(a: Allocator, capacity: usize, retained: u16) !History {
         if (retained == 0 or retained > @import("peer_book.zig").capacity) return error.InvalidLimits;
-        if (capacity == 0 or capacity > 65536) return error.InvalidLimits;
+        if (capacity == 0 or capacity > capacity_max) return error.InvalidLimits;
         const entries = try a.alloc(HistoryEntry, capacity);
         errdefer a.free(entries);
         const ids = try a.alloc(MessageId, capacity);
@@ -282,7 +292,7 @@ pub const History = struct {
                 if (store.canReserve(bytes.len)) break;
                 const candidate = slot;
                 slot = self.entries[slot].next;
-                if (reclaimable(store.get(self.entries[candidate].message).?)) self.remove(store, candidate);
+                if (reclaimable(store.get(self.entries[candidate].message).?)) self.evict(store, candidate, .storage);
             }
             assert(store.canReserve(bytes.len));
         }
@@ -297,7 +307,7 @@ pub const History = struct {
         if (payload.history) return;
         const id = payload.id;
         if (self.index.find(id)) |old| self.remove(store, old);
-        if (self.count == self.entries.len) _ = self.evictOldest(store);
+        if (self.count == self.entries.len) self.evict(store, self.head, .capacity);
         const topic = self.topic_index.find(payload.topicString()) orelse blk: {
             const index = self.free_topic;
             assert(index != empty_slot);
@@ -358,10 +368,25 @@ pub const History = struct {
         assert(self.countsRow(slot)[peer.index] < 255);
         self.countsRow(slot)[peer.index] += 1;
     }
-    pub fn evictOldest(self: *History, store: *storage.Store) bool {
-        if (self.count == 0) return false;
-        self.remove(store, self.head);
-        return true;
+    /// Whether `message` fits its kind's retention allowance, after evicting the oldest
+    /// reclaimable entries of its kind among the first `reclaim_scan` entries. A new message is
+    /// worth more than an old copy, and a message the history cannot retain is not forwarded.
+    pub fn makeRoom(self: *History, store: *storage.Store, handle: storage.Handle) bool {
+        const kind = store.get(handle).?.kind;
+        var slot = self.head;
+        for (0..@min(reclaim_scan, self.count)) |_| {
+            if (store.canRetain(handle)) return true;
+            const candidate = slot;
+            slot = self.entries[candidate].next;
+            const entry = store.get(self.entries[candidate].message).?;
+            if (entry.kind == kind and reclaimable(entry)) self.evict(store, candidate, .retention);
+        }
+        return store.canRetain(handle);
+    }
+
+    fn evict(self: *History, store: *storage.Store, slot: u32, reason: Eviction) void {
+        self.evictions[@intFromEnum(reason)] +|= 1;
+        self.remove(store, slot);
     }
     fn remove(self: *History, store: *storage.Store, slot: u32) void {
         const e = &self.entries[slot];
@@ -387,7 +412,7 @@ pub const History = struct {
             if (self.count == 0) break;
             assert(self.entries[self.head].born_epoch <= epoch);
             if (epoch - self.entries[self.head].born_epoch < constants.mcache_len) break;
-            _ = self.evictOldest(store);
+            self.evict(store, self.head, .age);
         }
     }
     pub fn gossip(self: *History, name: []const u8, out: []MessageId, epoch: u64) usize {

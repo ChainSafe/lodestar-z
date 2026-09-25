@@ -191,3 +191,93 @@ test "gossip lifecycle sequence preserves ownership under pressure reconnect and
         for (g.peers.rows, pins) |*peer, expected| try std.testing.expectEqual(expected, peer.pins);
     }
 }
+
+fn requestOne(g: *Gossipsub, peer: u16, id: *const @import("topic.zig").MessageId) void {
+    var body: [32]u8 = undefined;
+    var writer = @import("protobuf.zig").Writer.init(&body);
+    writer.bytesField(1, id);
+    support.control(g, peer, .{ .iwant = .{ .body = writer.written() } }, .{ .mono_ms = g.last_now_ms, .unix_s = 0 });
+}
+
+test "gossip history covers the processor retention allowance and the memory plan accounts for it" {
+    const limits: @import("../gossip_limits.zig").Limits = @splat(.{ .items = 4, .bytes = 4096 });
+    const total = @import("../gossip_limits.zig").items(&limits);
+    var boundary: @import("topic_policy.zig").Boundary = .{ .digest = .{ 1, 2, 3, 4 } };
+    boundary.rules[@intFromEnum(topic_mod.Kind.beacon_block)] = .{ .count = 1, .ssz_max = 1024 };
+    for ([_]usize{ 16, total + 1 }, [_]usize{ total, total + 1 }) |floor, expected| {
+        var ledger: @import("../reservations.zig").Reservations = .{ .backing = std.testing.allocator };
+        var g = try support.init(ledger.allocator(), .{ .random_seed = 1, .topic_policy = &.{boundary}, .mcache_capacity = floor, .validation_capacity = total, .processor_limits = limits });
+        try std.testing.expectEqual(expected, g.messages.history.entries.len);
+        try std.testing.expectEqual(expected, g.resourceSnapshot().history_capacity);
+        try std.testing.expectEqual(expected + total, g.messages.store.entries.len);
+        try std.testing.expectEqual(ledger.bytes, g.memoryPlan().total_bytes - @sizeOf(Gossipsub));
+        g.deinit();
+    }
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .mcache_capacity = 16, .validation_capacity = total });
+    defer g.deinit();
+    try std.testing.expectEqual(@as(usize, 16), g.messages.history.entries.len);
+}
+
+test "gossip history at capacity serves IWANT until each message's sixth heartbeat boundary" {
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .mcache_capacity = 2 * constants.mcache_len });
+    defer g.deinit();
+    const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const name = "/eth2/01020304/beacon_block/ssz_snappy";
+    const history = &g.messages.history;
+    var ids: [constants.mcache_len][2]@import("topic.zig").MessageId = undefined;
+    for (&ids, 0..) |*window, epoch| {
+        if (epoch > 0) support.ageHistory(&g);
+        for (window, 0..) |*id, i| {
+            var payload: [2]u8 = .{ @intCast(epoch), @intCast(i) };
+            _ = try g.publish(name, &payload, .{ .mono_ms = 1 + epoch, .unix_s = 0 });
+            id.* = topic_mod.validMessageId(name, &payload, .{});
+        }
+    }
+    try std.testing.expectEqual(history.entries.len, history.count);
+    // A full history evicts its oldest message while that message still has a window left.
+    _ = try g.publish(name, "one more", .{ .mono_ms = 10, .unix_s = 0 });
+    try std.testing.expectEqual(@as(u64, 1), history.evictions[@intFromEnum(@import("mcache.zig").Eviction.capacity)]);
+    const unknown = g.rpc_metrics.iwant_unknown;
+    requestOne(&g, peer.index, &ids[0][0]);
+    try std.testing.expectEqual(unknown + 1, g.rpc_metrics.iwant_unknown);
+    requestOne(&g, peer.index, &ids[0][1]);
+    try std.testing.expectEqual(unknown + 1, g.rpc_metrics.iwant_unknown);
+    // Each heartbeat boundary retires exactly the window that reached six; the next stays servable.
+    for (1..constants.mcache_len) |window| {
+        support.ageHistory(&g);
+        // The first window lost one message to capacity.
+        try std.testing.expectEqual(@as(u64, 2 * window - 1), history.evictions[@intFromEnum(@import("mcache.zig").Eviction.age)]);
+        requestOne(&g, peer.index, &ids[window - 1][1]);
+        try std.testing.expectEqual(unknown + window + 1, g.rpc_metrics.iwant_unknown);
+        requestOne(&g, peer.index, &ids[window][0]);
+        requestOne(&g, peer.index, &ids[window][1]);
+        try std.testing.expectEqual(unknown + window + 1, g.rpc_metrics.iwant_unknown);
+    }
+    g.cancelWrites(g.sessions.ref(peer.index));
+}
+
+test "gossip retention makes room from its own kind's oldest copy and refuses when queues hold it" {
+    const limits: @import("../gossip_limits.zig").Limits = @splat(.{ .items = 4, .bytes = 4096 });
+    var boundary: @import("topic_policy.zig").Boundary = .{ .digest = .{ 1, 2, 3, 4 } };
+    boundary.rules[@intFromEnum(topic_mod.Kind.beacon_block)] = .{ .count = 1, .ssz_max = 1024 };
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .topic_policy = &.{boundary}, .validation_capacity = @import("../gossip_limits.zig").items(&limits), .processor_limits = limits });
+    defer g.deinit();
+    const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const name = "/eth2/01020304/beacon_block/ssz_snappy";
+    const kind = @intFromEnum(topic_mod.Kind.beacon_block);
+    for (0..4) |i| _ = try g.publish(name, &[_]u8{@intCast(i)}, .{ .mono_ms = 1, .unix_s = 0 });
+    try std.testing.expectEqual(@as(usize, 4), g.messages.store.retained_entries_by_kind[kind]);
+    _ = try g.publish(name, "fifth", .{ .mono_ms = 2, .unix_s = 0 });
+    try std.testing.expectEqual(@as(u64, 1), g.messages.history.evictions[@intFromEnum(@import("mcache.zig").Eviction.retention)]);
+    try std.testing.expectEqual(@as(usize, 4), g.messages.history.count);
+    // Copies queued to a peer stay retained, so a full allowance refuses the next message.
+    var slot = g.messages.history.head;
+    for (0..g.messages.history.count) |_| {
+        try std.testing.expectEqual(.queued, g.sessions.rows[peer.index].io.tx.queueData(&g.messages.store, g.messages.history.message(slot), .forward, .{ .bytes = g.options.tx_peer_bytes }, 2));
+        slot = g.messages.history.entries[slot].next;
+    }
+    try std.testing.expectError(error.ResourceExhausted, g.publish(name, "sixth", .{ .mono_ms = 3, .unix_s = 0 }));
+    try std.testing.expectEqual(@as(u64, 1), g.messages.retention_refusals[kind]);
+    try std.testing.expectEqual(@as(u64, 1), g.messages.history.evictions[@intFromEnum(@import("mcache.zig").Eviction.retention)]);
+    g.cancelWrites(g.sessions.ref(peer.index));
+}
