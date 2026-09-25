@@ -478,8 +478,14 @@
         .clock = .{ .root_module = .clock },
         .beacon_node = .{ .root_module = .beacon_node },
         .udp = .{ .root_module = .udp },
-        .discv5 = .{ .root_module = .discv5 },
-        .network = .{ .root_module = .network },
+        .discv5 = .{
+            .root_module = .discv5,
+            .test_runner = .{ .path = "test/test_runner.zig", .mode = .server },
+        },
+        .network = .{
+            .root_module = .network,
+            .test_runner = .{ .path = "test/test_runner.zig", .mode = .server },
+        },
 
         .tidy = .{
             .root_module = .{
