@@ -55,7 +55,7 @@ test "a pinned row ignores publications until its unpin moves it where it belong
     ready.unpin(.gossip, .parked);
     try std.testing.expectEqual(readiness.Place.parked, ready.place(.gossip));
     try std.testing.expect(!ready.arm());
-    // A declined notification forgets every row, so the next publication into any of them notifies.
+    // A declined notification forgets every row, so recomputing any of them with work notifies again.
     ready.forget();
     try std.testing.expect(ready.armed and ready.payload.len == 0);
     try std.testing.expect(ready.recompute(.peers, .payload));

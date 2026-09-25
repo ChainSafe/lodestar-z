@@ -64,10 +64,12 @@ pub const Readiness = struct {
         _ = self.recompute(row, want);
     }
 
-    /// Takes every row out of the lists and arms, so the next publication into any row notifies. For a host that
-    /// declined or threw on a notification; the next exchange refreshes every row.
+    /// Takes every row out of the lists and arms, so owner activity that recomputes a row with work can notify
+    /// again. For a host that declined or threw on a notification, outside any exchange; the next exchange refreshes
+    /// every row.
     pub fn forget(self: *Readiness) void {
         for (&self.rows, 0..) |*entry, i| {
+            std.debug.assert(!entry.pinned);
             if (self.list(entry.place)) |from| from.remove(&self.rows, "link", @intCast(i));
             entry.place = .none;
         }

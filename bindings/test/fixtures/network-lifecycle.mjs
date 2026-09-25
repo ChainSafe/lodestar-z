@@ -104,7 +104,7 @@ if (mode === "exit") {
   });
   const intent = runtime.applyIntent(localIntent(config), config.initialSlot);
   for (let i = 0; i < 200 && notifications === 0; i++) await delay(10);
-  // Each publication while the owner starts notifies again; an idle owner publishes nothing.
+  // Owner activity while it starts can notify again; an idle owner has none.
   await delay(100);
   const idle = notifications;
   assert(idle > 0);
