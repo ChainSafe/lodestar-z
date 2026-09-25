@@ -203,6 +203,7 @@ pub const PeerManager = struct {
                 if (self.catalog.findConnection(closed.conn)) |peer| {
                     const goodbye = service.reqresp.closingGoodbye(engine, closed.conn, now);
                     if (goodbye) |code| self.control.receivedGoodbye(&self.catalog, peer, closed.conn, code, now, true);
+                    if (closed.reason == .peer_closed) self.control.remoteClosed(peer, closed.conn);
                     const snapshot = self.catalog.get(peer).?;
                     const reason = snapshot.disconnect_reason orelse if (goodbye != null) t.DisconnectReason.remote_goodbye else .transport_closed;
                     self.control.close(

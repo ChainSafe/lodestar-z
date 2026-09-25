@@ -107,16 +107,39 @@ test "dial history clearing health keeps dial failures and a mismatch block" {
     try std.testing.expectEqual(history.strikes_to_block, h.strikesFor(key, 1, 5));
 }
 
-test "dial history escalates remote full cooldowns and forgets them after the memory window" {
+test "dial history escalates too many peers blocks and forgets them after the memory window" {
     var storage: [64]history.Entry = undefined;
     var h = fixture(&storage);
     const key = h.identityKey(&peer);
-    try std.testing.expectEqual(@as(u64, 300_000), h.remoteFull(key, 0));
+    try std.testing.expectEqual(@as(u64, 300_000), h.reject(key, .too_many_peers, 0));
     try std.testing.expectEqual(@as(?t.DialFailure, null), h.takeRetry(key, 0));
-    try std.testing.expectEqual(@as(u64, 900_000), h.remoteFull(key, 300_000));
-    try std.testing.expectEqual(@as(u64, 3_600_000), h.remoteFull(key, 1_200_000));
-    try std.testing.expectEqual(@as(u64, 3_600_000), h.remoteFull(key, 4_800_000));
-    try std.testing.expectEqual(@as(u64, 300_000), h.remoteFull(key, 4_800_000 + history.remote_full_memory_ms));
+    try std.testing.expectEqual(@as(?t.Rejection, .too_many_peers), h.rejection(key, 299_999));
+    try std.testing.expectEqual(@as(?t.Rejection, null), h.rejection(key, 300_000));
+    try std.testing.expectEqual(@as(u64, 900_000), h.reject(key, .too_many_peers, 300_000));
+    try std.testing.expectEqual(@as(?t.Rejection, .too_many_peers), h.rejection(key, 1_199_999));
+    try std.testing.expectEqual(@as(u64, 3_600_000), h.reject(key, .too_many_peers, 1_200_000));
+    try std.testing.expectEqual(@as(?t.Rejection, .too_many_peers), h.rejection(key, 4_799_999));
+    try std.testing.expectEqual(@as(u64, 3_600_000), h.reject(key, .too_many_peers, 4_800_000));
+    const forgotten = 4_800_000 + history.rejection_memory_ms;
+    try std.testing.expectEqual(@as(?t.Rejection, null), h.rejection(key, forgotten));
+    try std.testing.expectEqual(@as(u64, 300_000), h.reject(key, .too_many_peers, forgotten));
+}
+
+test "dial history starts each rejection at its first block and adds no strike for a shutdown" {
+    var storage: [64]history.Entry = undefined;
+    var h = fixture(&storage);
+    const key = h.identityKey(&peer);
+    try std.testing.expectEqual(@as(u64, 60_000), h.reject(key, .shutdown, 0));
+    try std.testing.expectEqual(@as(?t.Rejection, .shutdown), h.rejection(key, 59_999));
+    try std.testing.expectEqual(@as(u64, 600_000), h.reject(key, .banned, 60_000));
+    try std.testing.expectEqual(@as(u64, 900_000), h.reject(key, .early_close, 660_000));
+    try std.testing.expectEqual(@as(u64, 60_000), h.reject(key, .shutdown, 700_000));
+    try std.testing.expectEqual(@as(?t.Rejection, .early_close), h.rejection(key, 1_559_999));
+    try std.testing.expectEqual(@as(u64, 60_000), h.reject(key, .shutdown, 1_560_000));
+    try std.testing.expectEqual(@as(u64, 3_600_000), h.reject(key, .fault, 1_620_000));
+    h.clearRejections(key);
+    try std.testing.expectEqual(@as(?t.Rejection, null), h.rejection(key, 1_620_000));
+    try std.testing.expectEqual(@as(u64, 60_000), h.reject(key, .early_close, 1_620_000));
 }
 
 test "dial history stays within its table and keeps the newest entry" {
@@ -131,8 +154,29 @@ test "dial history stays within its table and keeps the newest entry" {
     std.mem.writeInt(u32, newest.bytes[0..4], 999, .little);
     try std.testing.expectEqual(@as(u8, 1), h.strikesFor(h.endpointKey(&newest, endpoint), 1, 1_000));
     try std.testing.expectEqual(@as(usize, 64), history.History.capacityFor(0));
-    try std.testing.expectEqual(@as(usize, 1_024), history.History.capacityFor(256));
-    try std.testing.expectEqual(@as(usize, 4_096), history.History.capacityFor(4_096));
+    try std.testing.expectEqual(@as(usize, 2_048), history.History.capacityFor(256));
+    try std.testing.expectEqual(@as(usize, 8_192), history.History.capacityFor(4_096));
+}
+
+test "dial history holds a flood of distinct rejecting identities within its table" {
+    var storage: [64]history.Entry = undefined;
+    var h = fixture(&storage);
+    const flood = 1_000;
+    for (0..flood) |index| {
+        var identity = peer;
+        std.mem.writeInt(u32, identity.bytes[0..4], @intCast(index), .little);
+        _ = h.reject(h.identityKey(&identity), .too_many_peers, index);
+    }
+    var blocked: usize = 0;
+    for (0..flood) |index| {
+        var identity = peer;
+        std.mem.writeInt(u32, identity.bytes[0..4], @intCast(index), .little);
+        if (h.rejection(h.identityKey(&identity), flood) != null) blocked += 1;
+    }
+    try std.testing.expect(blocked <= storage.len);
+    var newest = peer;
+    std.mem.writeInt(u32, newest.bytes[0..4], flood - 1, .little);
+    try std.testing.expectEqual(@as(?t.Rejection, .too_many_peers), h.rejection(h.identityKey(&newest), flood));
 }
 
 test "dial history marks a redial per endpoint without adding evidence" {
