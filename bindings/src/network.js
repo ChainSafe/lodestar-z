@@ -94,30 +94,34 @@ class NativeRuntime {
   reportPeer(peerId, action) {
     return this.#native.reportPeer(peerId, action);
   }
-  settle(limit) {
+  exchange(demand) {
     // Settled errors describe native outcomes. A captured drain frame would only keep this wrapper alive.
     const stackTraceLimit = Error.stackTraceLimit;
     Error.stackTraceLimit = 0;
+    let result;
     try {
-      return this.#native.settle(limit);
+      result = this.#native.exchange(demand);
     } finally {
       Error.stackTraceLimit = stackTraceLimit;
     }
-  }
-  endDrain() {
-    return this.#native.endDrain();
-  }
-  pendingLanes() {
-    return this.#native.pendingLanes();
-  }
-  drainPeers(maxEvents) {
-    return this.#native.drainPeers(maxEvents);
-  }
-  drainGossip(options) {
-    return this.#native.drainGossip(options);
-  }
-  drainGossipChecks() {
-    return this.#native.drainGossipChecks();
+    const serving = result.serving;
+    for (let i = 0; i < serving.length; i++) {
+      try {
+        serving[i] = new NativeIncoming(this.#native, serving[i], this.#wake);
+      } catch (error) {
+        // Streams no facade owns are cancelled and released, so none holds serving capacity.
+        for (const {handle} of serving.slice(i)) {
+          try {
+            this.#native.incomingTerminal(handle, 2, undefined, undefined);
+            this.#native.incomingRelease(handle);
+          } catch {
+            // Runtime teardown also releases native serving capacity.
+          }
+        }
+        throw error;
+      }
+    }
+    return result;
   }
   classifyGossip(results) {
     return this.#native.classifyGossip(results);
@@ -136,16 +140,6 @@ class NativeRuntime {
   }
   async publishGossip(topic, data, options) {
     return this.#native.publishGossip(topic, data, options);
-  }
-  takeIncomingRequest() {
-    const descriptor = this.#native.takeIncomingRequest();
-    if (descriptor === null) return null;
-    try {
-      return new NativeIncoming(this.#native, descriptor, this.#wake);
-    } catch (error) {
-      this.#native.incomingTerminal(descriptor.handle, 2, undefined, undefined);
-      throw error;
-    }
   }
   request(peerId, protocol, data, options) {
     return new NativeRequest(this.#native, this.#native.requestStart(peerId, protocol, data, options), this.#wake);

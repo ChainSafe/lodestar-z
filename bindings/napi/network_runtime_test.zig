@@ -8,9 +8,9 @@ const commands = r.commands;
 const publications_mod = r.publications_mod;
 const requests_mod = r.requests_mod;
 const incoming_mod = r.incoming_mod;
-const gossip_mod = r.gossip_mod;
 const projection = r.projection;
 const napi = @import("zapi:zapi").napi;
+const exchange = @import("network_exchange.zig");
 
 /// The test executable links no Node runtime, so a notification only counts here.
 var notifications = std.atomic.Value(u32).init(0);
@@ -118,6 +118,7 @@ test "request table storage retires only after physical quiescence and final pin
 
 test {
     _ = @import("network_gossip.zig");
+    _ = exchange;
 }
 
 test "one runtime is live per process until its last release" {
@@ -222,7 +223,7 @@ test "a notification keeps the latch and leaves every completion for the host dr
     runtime.pingLocked();
     runtime.unlock();
     try std.testing.expectEqual(before + 2, notifications.load(.acquire));
-    try std.testing.expectEqual(@as(u64, 0), runtime.bridge.js_pings[@intFromEnum(r.bridge.Entry.settle)]);
+    try std.testing.expectEqual(@as(u64, 0), runtime.bridge.js_pings[@intFromEnum(r.bridge.Entry.exchange)]);
 }
 
 test "owner work around the end of a host drain is never lost" {
@@ -249,49 +250,79 @@ test "owner work around the end of a host drain is never lost" {
     try std.testing.expect(runtime.notification_pending);
 }
 
-test "owner work that races the end of a host drain always reaches a later drain" {
+/// An exchange host that settles nothing and builds only the peer count.
+const PeerHost = struct {
+    pub const Output = struct { peers: usize, more: bool };
+    pub fn settle(_: *PeerHost, _: usize) !exchange.Settled {
+        return .{};
+    }
+    pub fn now(_: *PeerHost) !u64 {
+        return 0;
+    }
+    pub fn build(_: *PeerHost, selection: *exchange.Selection, _: usize) !Output {
+        return .{ .peers = selection.peer_count, .more = selection.more };
+    }
+    pub fn discard(_: *PeerHost, _: *const exchange.Selection) void {}
+    pub fn keepAlive(_: *PeerHost) void {}
+};
+
+test "owner work that races the end of a host drain always reaches a later exchange" {
     var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 } };
+    var lane: projection.Lane = .{};
+    runtime.lane = &lane;
     const Producer = struct {
         produced: u32 = 0,
         done: std.atomic.Value(bool) = .init(false),
+        stop: std.atomic.Value(bool) = .init(false),
+        /// Publishes into the peer lane as the owner does, and answers a commit's re-arm as the
+        /// owner's next host apply does, until told to stop.
         fn run(self: *@This(), target: *Runtime) void {
-            for (0..5_000) |_| {
+            for (0..100_000_000) |_| {
+                if (self.stop.load(.acquire)) break;
                 target.lock();
-                self.produced += 1;
-                target.pingLocked();
+                if (target.work_rearm) {
+                    target.work_rearm = false;
+                    if (target.lane.?.len > 0) target.pingLocked();
+                }
+                if (self.produced < 5_000 and target.lane.?.len < 64) {
+                    const empty = target.lane.?.len == 0;
+                    target.lane.?.publish(&.{.{ .closed = undefined }}, self.produced);
+                    self.produced += 1;
+                    if (empty) target.pingLocked();
+                    if (self.produced == 5_000) self.done.store(true, .release);
+                }
                 target.unlock();
                 std.Thread.yield() catch {};
             }
-            self.done.store(true, .release);
         }
     };
     var producer: Producer = .{};
     var delivered = notifications.load(.acquire);
     const thread = try std.Thread.spawn(.{}, Producer.run, .{ &producer, &runtime });
-    var consumed: u32 = 0;
+    defer thread.join();
+    defer producer.stop.store(true, .release);
+    const demand: exchange.Demand = .{ .settle = 32, .peers = 64, .serving = 0, .gossip = null };
+    var host: PeerHost = .{};
+    var consumed: usize = 0;
     var again = false;
     var drains: usize = 0;
     for (0..10_000_000) |_| {
-        const done = producer.done.load(.acquire);
         const notified = notifications.load(.acquire) != delivered;
         if (notified) delivered += 1;
         if (notified or again) {
-            // A drain reads its lanes and ends in separate critical sections.
-            runtime.lock();
-            if (notified) _ = runtime.noticeLocked();
-            consumed = producer.produced;
-            runtime.unlock();
-            std.Thread.yield() catch {};
-            runtime.lock();
-            again = runtime.endDrainLocked();
-            runtime.unlock();
+            if (notified) {
+                runtime.lock();
+                _ = runtime.noticeLocked();
+                runtime.unlock();
+            }
+            const output = try exchange.run(&runtime, &demand, &host);
+            consumed += output.peers;
+            again = output.more;
             drains += 1;
-        } else if (done) break;
+        } else if (producer.done.load(.acquire) and consumed == 5_000) break;
         std.Thread.yield() catch {};
     }
-    thread.join();
-    try std.testing.expectEqual(@as(u32, 5_000), producer.produced);
-    try std.testing.expectEqual(producer.produced, consumed);
+    try std.testing.expectEqual(@as(usize, 5_000), consumed);
     try std.testing.expect(!runtime.notification_pending and !runtime.notify_missed);
     try std.testing.expect(drains > 0);
 }
@@ -337,75 +368,6 @@ test "pulls and retirements neither notify from the JS thread nor settle before 
     cell.pull = null;
     cell.retirement = null;
     runtime.requests.?.retire(token);
-}
-
-fn expectLanes(runtime: *Runtime, expected: []const r.Lane) !void {
-    var bits: u32 = 0;
-    for (expected) |lane| bits |= lane.bit();
-    runtime.lock();
-    defer runtime.unlock();
-    try std.testing.expectEqual(bits, runtime.lanesLocked());
-}
-
-fn admitGossip(table: *gossip_mod.Table, kind: n.gossip_processor.limits_mod.Kind, root: ?[32]u8) !void {
-    const token = try table.reserveKind(kind, 4);
-    const cell = table.get(token).?;
-    cell.id = @splat(1);
-    cell.deadline = 100;
-    cell.metadata = .{ .slot = 1, .root = root, .await_block = root != null };
-    @memset(&cell.topic, 0);
-    table.install(token, "data");
-}
-
-test "host drain lanes report exactly the tables that hold work" {
-    var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 }, .notify_live = false, .env_alive = false };
-    runtime.payload_budget.limit = 1 << 20;
-    runtime.incoming = try incoming_mod.Table.init(std.testing.allocator, 2, &runtime.payload_budget);
-    defer runtime.incoming.?.deinit();
-    const limits: n.gossip_processor.limits_mod.Limits = @splat(.{ .items = 4, .bytes = 4096 });
-    runtime.gossip = try gossip_mod.Table.init(std.testing.allocator, .{ .capacity = n.gossip_processor.limits_mod.items(&limits), .bytes = n.gossip_processor.limits_mod.bytes(&limits), .limits = limits });
-    defer runtime.gossip.?.deinit();
-    var lane: projection.Lane = .{};
-    runtime.lane = &lane;
-    try expectLanes(&runtime, &.{});
-
-    const command = try runtime.table.reserve(.getIdentity);
-    runtime.table.transition(runtime.table.get(command), .terminal);
-    try expectLanes(&runtime, &.{.settle});
-    runtime.table.retire(command);
-    lane.publish(&.{.{ .closed = undefined }}, 1);
-    try expectLanes(&runtime, &.{.peers});
-    lane.commit(1);
-    const request = try runtime.incoming.?.reserve(.blocks_by_root_v2, 32);
-    try expectLanes(&runtime, &.{});
-    runtime.incoming.?.get(request).?.native = true;
-    try expectLanes(&runtime, &.{.incoming});
-
-    const table = &runtime.gossip.?;
-    try admitGossip(table, .voluntary_exit, null);
-    try expectLanes(&runtime, &.{ .incoming, .gossip_ordinary });
-    try admitGossip(table, .data_column_sidecar, null);
-    try admitGossip(table, .beacon_attestation, @splat(3));
-    try expectLanes(&runtime, &.{ .incoming, .gossip_checks, .gossip_urgent, .gossip_ordinary });
-    const batch = table.claimDemand(1, .{ .ordinary = false });
-    try std.testing.expectEqual(@as(usize, 1), batch.len);
-    try expectLanes(&runtime, &.{ .incoming, .gossip_checks, .gossip_ordinary });
-    table.finish(&batch, true);
-
-    // Stopping ends takes and checks as their calls do; claims end once the owner quiesces.
-    runtime.stop = true;
-    try expectLanes(&runtime, &.{.gossip_ordinary});
-    runtime.quiescent = true;
-    lane.publish(&.{.{ .closed = undefined }}, 2);
-    try expectLanes(&runtime, &.{ .settle, .peers });
-    runtime.close_settled = true;
-    try expectLanes(&runtime, &.{.peers});
-    lane.commit(1);
-    try expectLanes(&runtime, &.{});
-
-    runtime.incoming.?.get(request).?.native = false;
-    runtime.incoming.?.retire(request);
-    table.close();
 }
 
 /// Checks each table's settle-able set against a scan of its cells, and the O(1) check against

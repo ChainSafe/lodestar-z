@@ -296,11 +296,36 @@ export interface NativePeerSnapshot {
   ownerSequence: bigint;
 }
 
-export interface NativePeerBatch {
-  events: NativePeerObservation[];
+/**
+ * Per exchange: completions settled per table (1..256), peer observations (0..64), serving starts (0..8, and a
+ * full 8 asks for another exchange), and up to 64 dependency checks plus one job batch of `items` (0..64) and
+ * `bytes` (0..16 MiB, a larger first message comes alone). `ordinary` requires `ready`, the executor taking work.
+ */
+export interface NativeExchangeDemand {
+  settle: number;
+  peers: number;
+  serving: number;
+  gossip: {items: number; bytes: number; ordinary: boolean; ready: boolean} | null;
+}
+
+/** One host drain turn's delivery; the host owns every item in it. */
+export interface NativeExchange {
+  settled: number;
+  /** Updates replace the previous state of the same peer. */
+  peers: NativePeerObservation[];
+  serving: NativeIncomingRequest[];
+  /** Incoming requests remain queued after this exchange. */
+  servingQueued: boolean;
+  /** Answer with one bounded classifyGossip call. */
+  checks: NativeGossipDependencyCheck[];
+  /**
+   * Null when nothing was claimed. Urgent work is claimed whenever present; ordinary work, or reopening the
+   * ordinary gate, only with `ordinary`; a host not `ready` closes the gate while ordinary work waits. A claim sets
+   * the gate to `ordinary`.
+   */
+  gossip: NativeGossipBatch | null;
+  /** Native holds more, or the drain keeps the notification latch; false released it. */
   more: boolean;
-  ownerSequence: bigint;
-  updatesReplaceState: true;
 }
 
 export interface NativePublicationDiagnostics {
@@ -333,10 +358,6 @@ export interface NativeNetworkApplicationRuntime {
   getMetrics(): string;
   /** A failed runtime cannot restart. The host must shut down the beacon node on terminal failure. */
   readonly closed: Promise<NativeRuntimeCloseResult>;
-  /** Copies work within host credits, up to 64 messages/16 MiB. A first message larger than `bytes` comes alone. Processor plans also apply kind and ordinary scheduling gates. */
-  drainGossip(demand?: {items: number; bytes: number; ordinary: boolean}): NativeGossipBatch;
-  /** Returns up to 64 metadata-only dependency checks. Answer with one bounded classifyGossip call. */
-  drainGossipChecks(): NativeGossipDependencyCheck[];
   /** Applies up to 64 answers; stale handles are skipped individually. Returns the accepted count. */
   classifyGossip(results: readonly NativeGossipClassification[]): number;
   notifyGossipBlock(root: Uint8Array): void;
@@ -350,7 +371,6 @@ export interface NativeNetworkApplicationRuntime {
     data: Uint8Array,
     options?: NativeGossipPublishOptions
   ): Promise<NativeGossipPublishResult>;
-  takeIncomingRequest(): NativeIncomingRequest | null;
   request(
     peerId: PeerIdStr,
     protocol: string,
@@ -380,36 +400,15 @@ export interface NativeNetworkApplicationRuntime {
    * Ignores reports after runtime close.
    */
   reportPeer(peerId: PeerIdStr, action: NativePeerAction): void;
-  drainPeers(maxEvents: number): NativePeerBatch;
   /**
-   * Settles up to `limit` completed publications, commands, request pulls and retirements, and incoming
-   * acknowledgements per table, then the close result once nothing else awaits settlement. Returns whether
-   * more remain. Only the host drain settles results; promise continuations run after it returns.
+   * One host drain turn: settles up to `demand.settle` completed publications, commands, request pulls and
+   * retirements, and incoming acknowledgements per table, then the close result once nothing else awaits
+   * settlement; then delivers the payload `demand` asks for in one result. Promise continuations run after it
+   * returns. Throws NetworkResultAllocationFailed when the result cannot be built: settled promises stay settled and
+   * the undelivered payload is delivered by a later exchange. A throwing exchange ends the drain.
    */
-  settle(limit: number): boolean;
-  /**
-   * Ends one host drain. True means work arrived or remains and the host must drain again in a later
-   * macrotask; false releases the notification latch, so the next owner notification calls onWorkAvailable.
-   */
-  endDrain(): boolean;
-  /**
-   * The host drain calls that have work now, as NativeLanes bits, read under one mutex acquisition: settle,
-   * drainPeers, takeIncomingRequest, drainGossipChecks, and drainGossip for urgent or ordinary kinds. Ordinary
-   * gossip counts also while the last drainGossip disabled it. Work that arrives after this read keeps endDrain
-   * true, so a drain may skip every call whose lane is clear.
-   */
-  pendingLanes(): number;
+  exchange(demand: NativeExchangeDemand): NativeExchange;
   close(): Promise<NativeRuntimeCloseResult>;
-}
-
-/** The bits of NativeNetworkApplicationRuntime.pendingLanes, one per host drain call that has work. */
-export interface NativeLanes {
-  settle: 1;
-  peers: 2;
-  incoming: 4;
-  gossipChecks: 8;
-  gossipUrgent: 16;
-  gossipOrdinary: 32;
 }
 
 /**
@@ -418,10 +417,9 @@ export interface NativeLanes {
  * Copies configuration and returns a running runtime; failure is terminal.
  * Calls onWorkAvailable on that thread when results, peer events, incoming requests, or gossip work can be
  * drained, including from request and incoming calls that leave results to settle. onWorkAvailable must only
- * schedule a drain in a later macrotask, one at a time. That drain calls settle and the drains it wants,
- * skipping those pendingLanes reports idle, and ends with endDrain; while endDrain returns true, the host drains
- * again. No further notification arrives until a drain ends with endDrain returning false, so a scheduled drain
- * must not be cancelled, also after the runtime closes.
+ * schedule a drain in a later macrotask, one at a time. Each drain calls exchange once; while it returns `more`,
+ * the host drains again. No further notification arrives until an exchange returns `more: false`, so a scheduled
+ * drain must not be cancelled, also after the runtime closes.
  */
 export function initializeNativeNetworkRuntime(
   config: NativeApplicationConfig,
@@ -700,7 +698,6 @@ export interface NativeGossipBatch {
   /** Non-attestation jobs contain one message; attestation jobs contain one compatible group. */
   jobs: NativeGossipJob[];
   messages: NativeGossipMessage[];
-  more: boolean;
 }
 export interface NativeGossipPublishOptions {
   allowZeroPeers?: boolean;

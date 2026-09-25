@@ -1,9 +1,12 @@
 import {expect, test, vi} from "vitest";
 import {
   applicationConfig,
+  checksOnly,
+  gossipAll,
   localIntent,
   peerIdFromHex,
   requestForks,
+  settleOnly,
   startRuntime,
   subscriptions,
   topicKinds,
@@ -17,7 +20,7 @@ test("gossip drain and stale verdict on an activated application", async () => {
   try {
     await runtime.identity;
     await runtime.applyIntent(localIntent(config), config.initialSlot);
-    expect(runtime.drainGossip()).toEqual({jobs: [], messages: [], more: false});
+    expect(runtime.exchange(gossipAll).gossip).toBeNull();
     expect(runtime.reportGossip({generation: 1n, index: 0}, "ignore")).toBe(false);
   } finally {
     await runtime.close();
@@ -37,18 +40,18 @@ function blockPayload(size: number, byte = 0): Uint8Array {
 }
 
 /** Classifies every dependency as available, as a host that already holds each parent block does. */
-function answerChecks(runtime: NativeNetworkApplicationRuntime): void {
-  const checks = runtime.drainGossipChecks();
+function answerChecks(runtime: NativeNetworkApplicationRuntime, demand = checksOnly) {
+  const {checks, gossip} = runtime.exchange(demand);
   if (checks.length) runtime.classifyGossip(checks.map(({handle}) => ({available: true, handle})));
+  return gossip;
 }
 
 async function nextGossip(runtime: NativeNetworkApplicationRuntime): Promise<NativeGossipMessage> {
   for (let i = 0; i < 1000; i++) {
-    answerChecks(runtime);
-    const batch = runtime.drainGossip();
-    if (batch.messages.length) {
-      expect(batch.messages).toHaveLength(1);
-      return batch.messages[0];
+    const gossip = answerChecks(runtime, gossipAll);
+    if (gossip?.messages.length) {
+      expect(gossip.messages).toHaveLength(1);
+      return gossip.messages[0];
     }
     await delay(5);
   }
@@ -87,7 +90,7 @@ test("gossip lifecycle, strict representations and canonical publication refusal
   const handle = {generation: 1n, index: 0};
   try {
     await runtime.identity;
-    expect(runtime.drainGossip().messages).toEqual([]);
+    expect(runtime.exchange(gossipAll).gossip).toBeNull();
     await runtime.applyIntent(localIntent(config), config.initialSlot);
     for (const malformed of [
       {...handle, extra: 1},
@@ -145,7 +148,7 @@ test("gossip lifecycle, strict representations and canonical publication refusal
   } finally {
     await runtime.close();
   }
-  expect(runtime.drainGossip()).toEqual({jobs: [], messages: [], more: false});
+  expect(runtime.exchange(gossipAll).gossip).toBeNull();
   expect(runtime.reportGossip(handle, "ignore")).toBe(false);
   await expect(runtime.publishGossip(TOPIC, new Uint8Array(4000))).rejects.toThrow("NetworkClosed");
   expect(runtime.diagnostics().gossip).toMatchObject({
@@ -348,7 +351,7 @@ test.each([
       queuedExpired: delivered ? 0n : 1n,
       reservedBytes: 0,
     });
-    expect(pair.right.drainGossip()).toEqual({jobs: [], messages: [], more: false});
+    expect(pair.right.exchange(gossipAll).gossip?.messages ?? []).toEqual([]);
     if (message) expect(pair.right.reportGossip(message.handle, "accept")).toBe(false);
     expect(pair.right.diagnostics().gossip.occupied).toBe(0);
   } finally {
@@ -448,10 +451,9 @@ for (const hoodi of [false, true]) {
         if (!hoodi) {
           answerChecks(runtime);
           for (let i = 0; i < 1000 && runtime.diagnostics().gossip.queued !== held; i++) await delay(5);
-          const batch = runtime.drainGossip();
-          expect(batch.messages).toHaveLength(held);
-          expect(batch.more).toBe(false);
-          for (const message of batch.messages) expect(runtime.reportGossip(message.handle, "ignore")).toBe(true);
+          const messages = runtime.exchange(gossipAll).gossip?.messages ?? [];
+          expect(messages).toHaveLength(held);
+          for (const message of messages) expect(runtime.reportGossip(message.handle, "ignore")).toBe(true);
         }
         if (hoodi && HOODI) {
           const data = await readFile(HOODI);
@@ -594,15 +596,12 @@ test("gossip diagnostics paginate retained peers and peer drains expose remainin
     expect(second.ownerSequence).toBeGreaterThanOrEqual(first.ownerSequence);
     expect(new Set([...first.peers, ...second.peers].map((peer) => peer.identity))).toEqual(identities);
     expect([...first.peers, ...second.peers].every((peer) => !peer.connected)).toBe(true);
-    const batch = runtime.drainPeers(1);
-    expect(batch.events).toHaveLength(1);
-    expect(batch.more).toBe(true);
-    const remaining = runtime.drainPeers(64);
-    expect(remaining.events.length).toBeGreaterThan(0);
-    expect(remaining.more).toBe(false);
-    expect(remaining.events.filter((event) => event.type === "closed").every((event) => event.reason === "host")).toBe(
-      true
-    );
+    const head = runtime.exchange({...settleOnly, peers: 1});
+    expect(head.peers).toHaveLength(1);
+    expect(head.more).toBe(true);
+    const remaining = runtime.exchange({...settleOnly, peers: 64}).peers;
+    expect(remaining.length).toBeGreaterThan(0);
+    expect(remaining.filter((event) => event.type === "closed").every((event) => event.reason === "host")).toBe(true);
   } finally {
     await runtime.close();
   }

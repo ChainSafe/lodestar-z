@@ -64,20 +64,6 @@ pub fn create(env: napi.Env) !*Runtime {
     return runtime;
 }
 
-/// The host drain's lanes, as bit positions of `pendingLanes`. `NativeLanes` in network.d.ts declares them.
-pub const Lane = enum(u5) {
-    settle,
-    peers,
-    incoming,
-    gossip_checks,
-    gossip_urgent,
-    gossip_ordinary,
-
-    pub fn bit(lane: Lane) u32 {
-        return @as(u32, 1) << @intFromEnum(lane);
-    }
-};
-
 pub const Identity = struct {
     peer: n.PeerId,
     metadata: n.peers.types.Metadata,
@@ -439,10 +425,11 @@ pub const Runtime = struct {
         self.notification_pending = false;
         self.notify_missed = false;
     }
-    /// JS thread: ends one host drain. Keeps the latch and returns true when a ping arrived during
-    /// the drain, a completion awaits settlement or the close result is pending. Otherwise releases
-    /// the latch, so the owner's next ping notifies again; both happen under the runtime mutex, so
-    /// owner work between this check and that ping is never lost.
+    /// JS thread, inside an exchange with nothing more to deliver: ends one host drain. Keeps the
+    /// latch and returns true when a ping arrived during the drain, a completion awaits settlement
+    /// or the close result is pending. Otherwise releases the latch, so the owner's next ping
+    /// notifies again; both happen under the runtime mutex, so owner work between this check and
+    /// that ping is never lost.
     pub fn endDrainLocked(self: *Runtime) bool {
         self.bridge.boundary();
         const more = self.notify_missed or self.settleableLocked() or (self.quiescent and !self.close_settled);
@@ -450,32 +437,12 @@ pub const Runtime = struct {
         if (!more) self.notification_pending = false;
         return more;
     }
-    /// A publication, command, request or incoming completion that `settle` would deliver now. O(1).
+    /// A publication, command, request or incoming completion that an exchange would settle now. O(1).
     pub fn settleableLocked(self: *const Runtime) bool {
         return self.table.anyTerminal() or
             (if (self.publications) |*table| table.anyTerminal() else false) or
             (if (self.requests) |*table| table.anyDue(self.stop, self.disposed) else false) or
             (if (self.incoming) |*table| table.anyDue() else false);
-    }
-    /// JS thread: the host drain's lanes that hold work, as `Lane` bits. Each bit mirrors what
-    /// its drain call would return now; owner work after this read pings, which keeps the latch.
-    pub fn lanesLocked(self: *Runtime) u32 {
-        var lanes: u32 = 0;
-        if (self.settleableLocked() or (self.quiescent and !self.close_settled)) lanes |= Lane.bit(.settle);
-        if (self.lane) |lane| {
-            if (lane.len > 0) lanes |= Lane.bit(.peers);
-        }
-        if (self.quiescent) return lanes;
-        if (self.incoming) |*table| {
-            if (!self.stop and table.oldest() != null) lanes |= Lane.bit(.incoming);
-        }
-        if (self.gossip) |*table| {
-            const work = table.hostWork();
-            if (work.checks and !self.stop) lanes |= Lane.bit(.gossip_checks);
-            if (work.urgent) lanes |= Lane.bit(.gossip_urgent);
-            if (work.ordinary) lanes |= Lane.bit(.gossip_ordinary);
-        }
-        return lanes;
     }
     pub fn join(self: *Runtime) void {
         if (self.thread) |thread| {
