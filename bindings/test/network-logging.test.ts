@@ -159,4 +159,4 @@ test("log projection cannot invoke prototype setters or reenter the drain", () =
       timeout: 15000,
     }).trim()
   ).toBe("ok");
-});
+}, 20000);

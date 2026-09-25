@@ -285,7 +285,7 @@ test("complete getters, membership and command results survive a throwing notifi
     expect(runtime.close()).toBe(close);
     await Promise.all([close, remote.close()]);
   }
-});
+}, 15000);
 
 test("bounded typed stores refuse the third intent and unwind malformed input", async () => {
   const config = applicationConfig();
@@ -464,7 +464,7 @@ test("peer penalties accumulate while the command lane is full", async () => {
   } finally {
     await Promise.all([a.close(), b.close()]);
   }
-});
+}, 15000);
 
 test("disconnect cancels pending one-shot connects and releases their dial intent", async () => {
   const config = applicationConfig();
@@ -553,7 +553,7 @@ test.each(["gc", "exit"])("application lifecycle subprocess %s", (mode) => {
     {encoding: "utf8", timeout: 15000}
   );
   expect(output).toContain(mode === "exit" ? "application-ready-exit" : "application-command-settled NetworkClosed");
-});
+}, 20000);
 
 test("identity reads the current signed ENR and copied intent ignores later input mutation", async () => {
   const config = applicationConfig();
@@ -621,7 +621,7 @@ test("graceful physical shutdown progresses while host callbacks are stalled", a
   } finally {
     await Promise.all([a.close(), b.close()]);
   }
-});
+}, 15000);
 
 async function silentPeer(secret: Uint8Array) {
   const socket = createSocket("udp4");

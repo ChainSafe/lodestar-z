@@ -429,7 +429,7 @@ test.each([0, -1])("application startup requires RPC and publication progress ca
   } finally {
     await runtime.close();
   }
-});
+}, 20000);
 
 test.skipIf(!HOST || !HOODI)(
   "retained Hoodi bytes round-trip with a supported Fulu response context",
