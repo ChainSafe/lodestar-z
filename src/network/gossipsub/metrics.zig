@@ -34,12 +34,12 @@ pub const Delivery = struct {
     /// when QUIC accepts its last byte, which is not delivery, or is cancelled by a stream reset.
     pub const Outcome = enum { selected, queued, pressured, unavailable, completed, cancelled };
     const WriteTime = @import("../metrics/histogram.zig").Duration(&.{ 1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000 });
-    /// Refusals are bucketed by Unix second modulo the slot duration, which scrape timing cannot alias.
-    const slot_seconds = 12;
+    const slots = @import("../slot_clock.zig");
 
     recipients: [delivery.origin_count][@typeInfo(Outcome).@"enum".fields.len]u64 = @splat(@splat(0)),
     drops: [@typeInfo(Client).@"enum".fields.len][delivery.origin_count][@typeInfo(DataDrop).@"enum".fields.len]u64 = @splat(@splat(@splat(0))),
-    drops_by_second: [slot_seconds]u64 = @splat(0),
+    /// Cumulative by slot phase, which scrape timing cannot alias.
+    drops_by_phase: [slots.phase_buckets]u64 = @splat(0),
     write_time: [delivery.origin_count]WriteTime = @splat(.{}),
 
     pub fn recipient(self: *Delivery, origin: delivery.Origin, outcome: Outcome) void {
@@ -51,7 +51,7 @@ pub const Delivery = struct {
         for (&self.recipients, queued) |*outcomes, count| outcomes[@intFromEnum(Outcome.cancelled)] +|= count;
     }
 
-    pub fn dropped(self: *Delivery, origin: delivery.Origin, reason: @import("outbox.zig").DropReason, client: Client, unix_s: i64) void {
+    pub fn dropped(self: *Delivery, origin: delivery.Origin, reason: @import("outbox.zig").DropReason, client: Client, phase_bps: ?u16) void {
         const data: DataDrop = switch (reason) {
             .data_descriptors => .data_descriptors,
             .data_pool => .data_pool,
@@ -59,7 +59,7 @@ pub const Delivery = struct {
             else => unreachable,
         };
         self.drops[@intFromEnum(client)][@intFromEnum(origin)][@intFromEnum(data)] +|= 1;
-        self.drops_by_second[@intCast(@mod(unix_s, slot_seconds))] +|= 1;
+        if (phase_bps) |bps| self.drops_by_phase[slots.SlotClock.bucket(bps)] +|= 1;
     }
 
     pub fn written(self: *Delivery, receipt: delivery.Receipt, now_ms: u64) void {
@@ -78,8 +78,8 @@ pub const Delivery = struct {
                 inline for (@typeInfo(Client).@"enum".fields) |client| try drops.sample(.{ origin.name, reason.name, client.name }, self.drops[client.value][origin.value][reason.value]);
             }
         }
-        const seconds = try w.family(.{ .name = "lodestar_native_gossip_data_drops_by_slot_second_total", .kind = .counter, .help = "Refused data frame admissions by Unix second modulo 12; subtract genesis time modulo 12 for the second of the slot", .labels = &.{"second"} });
-        inline for (0..slot_seconds) |second| try seconds.sample(.{std.fmt.comptimePrint("{d}", .{second})}, self.drops_by_second[second]);
+        const phases = try w.family(.{ .name = "lodestar_native_gossip_data_drops_by_slot_phase_total", .kind = .counter, .help = "Refused data frame admissions by slot phase, in 16 equal buckets labeled by their first basis point of the slot duration; counted only with the chain's genesis time and slot duration", .labels = &.{"phase_bps"} });
+        for (slots.bucket_labels, self.drops_by_phase) |label, count| try phases.sample(.{label}, count);
         const times = try w.histograms(.{ .name = "lodestar_native_gossip_data_write_seconds", .kind = .histogram, .help = "Data frame residence from queue admission until QUIC accepted its last byte, by delivery origin", .labels = &.{"origin"}, .unit = .seconds }, WriteTime);
         inline for (@typeInfo(delivery.Origin).@"enum".fields) |origin| try times.histogram(.{origin.name}, &self.write_time[origin.value]);
     }

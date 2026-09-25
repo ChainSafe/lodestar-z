@@ -182,9 +182,14 @@ test "publication distinguishes topic capacity from unknown wire names" {
     try std.testing.expectError(error.UnknownTopic, g.publish("invalid", "body", .{ .mono_ms = 1, .unix_s = 0 }));
 }
 
-test "delivery metrics attribute refused frames by origin, limit, client and slot second" {
+test "delivery metrics attribute refused frames by origin, limit, client and slot phase" {
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
     defer g.deinit();
+    // Monotonic 2 ms is 6 s into a 12 s slot: phase 5,000 basis points.
+    const slots = @import("../slot_clock.zig");
+    var clock: slots.SlotClock = .{ .genesis_unix_ms = 1_742_213_400_000, .slot_duration_ms = 12_000 };
+    clock.observe(.{ .mono_ms = 2, .unix_s = 0, .unix_ms = clock.genesis_unix_ms + 7 * 12_000 + 6_000 });
+    g.slot_clock = &clock;
     const conn: @import("../quic/engine.zig").Handle = .{ .index = 0, .generation = 1 };
     const peer = support.addPeer(&g, conn, .v1_2).?;
     _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), peer.index, topic, true);
@@ -196,18 +201,18 @@ test "delivery metrics attribute refused frames by origin, limit, client and slo
     const filler = g.messages.history.message(g.messages.history.get(&g.messages.store, id).?);
     const io = &g.sessions.rows[peer.index].io;
     for (1..@import("outbox.zig").data_capacity) |_| try std.testing.expectEqual(.queued, io.tx.queueData(&g.messages.store, filler, .forward, .{ .bytes = g.options.tx_peer_bytes }, 1));
-    try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 1, .pressured = 1 }, try g.publish(topic, "refused", .{ .mono_ms = 2, .unix_s = 25 }));
+    try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 1, .pressured = 1 }, try g.publish(topic, "refused", .{ .mono_ms = 2, .unix_s = 0 }));
     var body: [32]u8 = undefined;
     var writer = @import("protobuf.zig").Writer.init(&body);
     writer.bytesField(1, &id);
-    support.control(&g, peer.index, .{ .iwant = .{ .body = writer.written() } }, .{ .mono_ms = 3, .unix_s = 25 });
+    support.control(&g, peer.index, .{ .iwant = .{ .body = writer.written() } }, .{ .mono_ms = 3, .unix_s = 0 });
     const metrics = &g.delivery_metrics;
     const nimbus = @intFromEnum(@import("../peers/client.zig").Client.Nimbus);
     for (metrics.drops, 0..) |origins, client| for (origins, 0..) |reasons, origin| for (reasons, 0..) |count, reason| {
         const expected = client == nimbus and reason == 0 and (origin == @intFromEnum(@import("delivery.zig").Origin.publication) or origin == @intFromEnum(@import("delivery.zig").Origin.iwant));
         try std.testing.expectEqual(@as(u64, @intFromBool(expected)), count);
     };
-    for (metrics.drops_by_second, 0..) |count, second| try std.testing.expectEqual(@as(u64, if (second == 25 % 12) 2 else 0), count);
+    for (metrics.drops_by_phase, slots.bucket_labels) |count, label| try std.testing.expectEqual(@as(u64, if (std.mem.eql(u8, label, "5000")) 2 else 0), count);
     try std.testing.expectEqual(@as(u64, 2), g.counters.send_dropped);
     // The first queued frame was the publication; its write completes 39 ms after admission.
     for (0..16) |_| {

@@ -103,8 +103,8 @@ pub const Gossipsub = struct {
     heartbeat_at: u64 = 0,
     opportunistic_at: u64 = 0,
     last_now_ms: u64 = 0,
-    /// Wall time of the latest owner entry, for slot-phase attribution only.
-    last_unix_s: i64 = 0,
+    /// The owner's slot clock, which outlives this; null leaves slot phases unknown.
+    slot_clock: ?*const @import("../slot_clock.zig").SlotClock = null,
     msg_scratch: []u8,
     recovery: Recovery,
     counters: Counters = .{},
@@ -345,7 +345,6 @@ pub const Gossipsub = struct {
     /// Admits one shared history payload; queued counts live stream queue admissions.
     pub fn publishWithOptions(self: *Gossipsub, topic_str: []const u8, ssz: []const u8, options: PublishOptions, now: Now) PublishError!PublishOutcome {
         self.last_now_ms = @max(self.last_now_ms, now.mono_ms);
-        self.last_unix_s = now.unix_s;
         const now_ms = self.last_now_ms;
         if (ssz.len > constants.MAX_PAYLOAD_SIZE) return error.PayloadTooLarge;
         if (self.overlay.namespace) |*ns| {
@@ -381,7 +380,6 @@ pub const Gossipsub = struct {
     /// Event slices remain valid until the next pump, including after report or publish.
     pub fn report(self: *Gossipsub, handle: ValidationHandle, verdict: Verdict, now: Now) ReportOutcome {
         self.last_now_ms = @max(self.last_now_ms, now.mono_ms);
-        self.last_unix_s = now.unix_s;
         const context = self.messageContext();
         const result = self.messages.report(&context, handle, verdict, now.mono_ms);
         if (result == .applied) {
@@ -687,7 +685,8 @@ pub const Gossipsub = struct {
         const row = &self.sessions.rows[index];
         self.counters.send_dropped += 1;
         self.delivery_metrics.recipient(origin, .pressured);
-        self.delivery_metrics.dropped(origin, row.io.tx.last_drop, row.client, self.last_unix_s);
+        const phase = if (self.slot_clock) |clock| clock.phaseBps(self.last_now_ms) else null;
+        self.delivery_metrics.dropped(origin, row.io.tx.last_drop, row.client, phase);
     }
 
     fn controlSent(self: *Gossipsub, peer: u16, token: u64, now_ms: u64) void {

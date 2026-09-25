@@ -117,7 +117,7 @@ const contract = [_]Series{
     .{ .name = "lodestar_native_gossip_queue_drops_total", .kind = "counter", .labels = &.{"reason"} },
     .{ .name = "lodestar_native_gossip_data_recipients_total", .kind = "counter", .labels = &.{ "origin", "outcome" } },
     .{ .name = "lodestar_native_gossip_data_drops_total", .kind = "counter", .labels = &.{ "origin", "reason", "client" } },
-    .{ .name = "lodestar_native_gossip_data_drops_by_slot_second_total", .kind = "counter", .labels = &.{"second"} },
+    .{ .name = "lodestar_native_gossip_data_drops_by_slot_phase_total", .kind = "counter", .labels = &.{"phase_bps"} },
     .{ .name = "lodestar_native_gossip_data_write_seconds", .kind = "histogram", .labels = &.{"origin"} },
     .{ .name = "lodestar_native_gossipsub_queued_local_descriptors", .kind = "gauge" },
     .{ .name = "lodestar_native_gossipsub_history_capacity", .kind = "gauge" },
@@ -499,4 +499,19 @@ test "metrics count each host apply once under its cause" {
     try metrics.write(&context, &writer);
     try contains(writer.buffered(), "lodestar_native_network_host_applies_total{cause=\"more\"} 1\n");
     try contains(writer.buffered(), "lodestar_native_bridge_call_seconds_count{entry=\"publish_gossip\"} 0\n");
+}
+
+test "metrics phases come from the owner's slot clock, which each clock read updates" {
+    const key = try @import("wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{94}));
+    var options = @import("test_support.zig").networkOptions(&key);
+    const node = try std.testing.allocator.create(core.NetworkCore);
+    defer std.testing.allocator.destroy(node);
+    options.startup.slot_clock = .{ .genesis_unix_ms = 0, .slot_duration_ms = 0 };
+    try std.testing.expectError(error.InvalidOptions, node.init(std.testing.allocator, std.testing.io, &options.resolved, options.startup));
+    options.startup.slot_clock = .{ .genesis_unix_ms = 0, .slot_duration_ms = 12_000 };
+    try node.init(std.testing.allocator, std.testing.io, &options.resolved, options.startup);
+    defer node.deinit(std.testing.io);
+    try std.testing.expectEqual(&node.slot_clock.?, node.service.gossipsub.slot_clock.?);
+    const wall = node.last_now.unix_ms.?;
+    try std.testing.expectEqual(@as(?u16, @intCast(wall % 12_000 * 10_000 / 12_000)), node.slot_clock.?.phaseBps(node.last_now.mono_ms));
 }
