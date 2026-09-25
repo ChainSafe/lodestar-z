@@ -35,10 +35,27 @@ pub const DatagramError = ReceiveError || error{DatagramTooLarge};
 pub const SendError = net.Socket.SendError || error{DatagramTooLarge};
 pub const Datagram = struct { from: Address, bytes: []u8 };
 
+/// Kernel socket buffer sizes in bytes.
+pub const Buffers = struct {
+    receive: u32,
+    send: u32,
+
+    pub const bytes_min: u32 = 64 * 1024;
+    pub const bytes_max: u32 = 64 * 1024 * 1024;
+
+    pub fn valid(self: Buffers) bool {
+        return self.receive >= bytes_min and self.receive <= bytes_max and
+            self.send >= bytes_min and self.send <= bytes_max;
+    }
+};
+
 /// Owns at most one socket per configured address family. The caller serializes
 /// receives and close, and does not receive directly from the owned sockets.
 pub const Sockets = struct {
     values: [2]?net.Socket = .{ null, null },
+    /// Buffer sizes per family as getsockopt reported them after `requestBuffers`. Linux reports
+    /// double the size it grants. Zero where the kernel reported no size.
+    buffers: [2]?Buffers = .{ null, null },
     cursor: u1 = 0,
 
     /// IPv6 sockets accept IPv6 only, including when both families share a port.
@@ -58,6 +75,40 @@ pub const Sockets = struct {
                 result.values[0] = try (net.IpAddress{ .ip4 = ips.ip4 }).bind(io, .{ .mode = .dgram, .protocol = .udp });
                 result.values[1] = try bindIp6(io, ips.ip6);
             },
+        }
+        return result;
+    }
+
+    /// Requests `request` on each socket and records what the kernel reports. The kernel caps a
+    /// request at its limit (net.core.rmem_max and wmem_max on Linux), so a smaller size is not
+    /// an error. Returns the families whose sockets the kernel granted less than the request.
+    /// Sockets of other I/O providers and platforms keep their sizes and record nothing.
+    pub fn requestBuffers(self: *Sockets, io: std.Io, request: Buffers) [2]bool {
+        assert(request.valid());
+        var short: [2]bool = .{ false, false };
+        if (native_sockets) {
+            if (!threaded(io)) return short;
+            const p = std.posix;
+            for (self.values, &self.buffers, &short) |socket, *reported, *below| {
+                const handle = (socket orelse continue).handle;
+                setBuffer(handle, p.SO.RCVBUF, request.receive);
+                setBuffer(handle, p.SO.SNDBUF, request.send);
+                const sizes: Buffers = .{ .receive = readBuffer(handle, p.SO.RCVBUF), .send = readBuffer(handle, p.SO.SNDBUF) };
+                reported.* = sizes;
+                below.* = !grants(sizes.receive, request.receive) or !grants(sizes.send, request.send);
+            }
+        }
+        return short;
+    }
+
+    /// Datagrams the kernel dropped at each socket, mostly on a full receive buffer. Linux keeps
+    /// a 32-bit count that wraps. Null off Linux and for sockets without recorded buffers.
+    pub fn drops(self: *const Sockets) [2]?u32 {
+        var result: [2]?u32 = .{ null, null };
+        if (comptime os != .linux) return result;
+        for (self.values, self.buffers, &result) |socket, reported, *count| {
+            if (reported == null) continue;
+            count.* = readDrops(socket.?.handle);
         }
         return result;
     }
@@ -136,6 +187,49 @@ pub const Sockets = struct {
     }
 };
 
+const os = @import("builtin").os.tag;
+const native_sockets = std.options.networking and (os == .linux or os == .macos);
+
+/// Zig 0.16 Threaded hands out native descriptors; other I/O providers keep their own contract.
+fn threaded(io: std.Io) bool {
+    return io.vtable.netBindIp == std.Io.Threaded.global_single_threaded.io().vtable.netBindIp;
+}
+
+/// Linux doubles a granted size for bookkeeping and reports the doubled value.
+fn grants(reported: u32, requested: u32) bool {
+    const full: u64 = if (os == .linux) @as(u64, requested) * 2 else requested;
+    return reported >= full;
+}
+
+fn setBuffer(handle: net.Socket.Handle, option: u32, bytes: u32) void {
+    const p = std.posix;
+    const value: c_int = @intCast(bytes);
+    // The kernel caps the size silently on Linux and refuses it elsewhere. Reading the size back
+    // decides the outcome, so the result is ignored.
+    _ = p.system.setsockopt(handle, p.SOL.SOCKET, option, std.mem.asBytes(&value), @sizeOf(c_int));
+}
+
+fn readBuffer(handle: net.Socket.Handle, option: u32) u32 {
+    const p = std.posix;
+    var value: c_int = 0;
+    var len: p.socklen_t = @sizeOf(c_int);
+    if (p.errno(p.system.getsockopt(handle, p.SOL.SOCKET, option, std.mem.asBytes(&value), &len)) != .SUCCESS) return 0;
+    if (len != @sizeOf(c_int)) return 0;
+    return std.math.cast(u32, value) orelse 0;
+}
+
+fn readDrops(handle: net.Socket.Handle) ?u32 {
+    const p = std.posix;
+    // SK_MEMINFO_DROPS in linux/sock_diag.h. SO_MEMINFO reads the counter SO_RXQ_OVFL reports,
+    // without ancillary data on every receive.
+    const drops_index = 8;
+    var meminfo: [drops_index + 1]u32 = @splat(0);
+    var len: p.socklen_t = @sizeOf(@TypeOf(meminfo));
+    if (p.errno(p.system.getsockopt(handle, p.SOL.SOCKET, p.SO.MEMINFO, std.mem.asBytes(&meminfo), &len)) != .SUCCESS) return null;
+    if (len < @sizeOf(@TypeOf(meminfo))) return null;
+    return meminfo[drops_index];
+}
+
 fn index(address: net.IpAddress) u1 {
     return switch (address) {
         .ip4 => 0,
@@ -155,11 +249,10 @@ fn waitReadable(io: std.Io, socket: net.Socket, timeout: std.Io.Timeout) Receive
 
 fn bindIp6(io: std.Io, ip: net.Ip6Address) BindError!net.Socket {
     const address: net.IpAddress = .{ .ip6 = ip };
-    const os = @import("builtin").os.tag;
-    if (std.options.networking and (os == .linux or os == .macos)) {
+    if (native_sockets) {
         // Zig 0.16 Threaded sets IPV6_V6ONLY to zero for ip6_only. Set it before
         // binding its native sockets; other I/O providers retain their own bind contract.
-        if (io.vtable.netBindIp == std.Io.Threaded.global_single_threaded.io().vtable.netBindIp) {
+        if (threaded(io)) {
             try io.checkCancel();
             const p = std.posix;
             const flags = p.SOCK.DGRAM | if (os == .linux) p.SOCK.CLOEXEC else 0;

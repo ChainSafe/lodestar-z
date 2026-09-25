@@ -174,3 +174,46 @@ test "UDP dual-stack timeout joins waits and ready reads need no concurrency" {
     try std.testing.expectError(error.Timeout, concurrent_sockets.receiveTimeout(std.testing.io, &buffer, timeout(10)));
     try std.testing.expectEqual(null, try concurrent_sockets.receiveReady(std.testing.io, &buffer));
 }
+
+fn kernelSize(handle: net.Socket.Handle, option: u32) !u32 {
+    const p = std.posix;
+    var value: c_int = 0;
+    var len: p.socklen_t = @sizeOf(c_int);
+    try std.testing.expectEqual(p.E.SUCCESS, p.errno(p.system.getsockopt(handle, p.SOL.SOCKET, option, std.mem.asBytes(&value), &len)));
+    return @intCast(value);
+}
+
+test "UDP records the kernel's socket buffer sizes and receive drops after a request" {
+    const os = @import("builtin").os.tag;
+    if (os != .linux and os != .macos) return error.SkipZigTest;
+    var plain = try udp.Sockets.bind(std.testing.io, loopbacks);
+    defer plain.close(std.testing.io);
+    var sockets = try udp.Sockets.bind(std.testing.io, loopbacks);
+    defer sockets.close(std.testing.io);
+    const largest: udp.Buffers = .{ .receive = udp.Buffers.bytes_max, .send = udp.Buffers.bytes_max };
+    const short = sockets.requestBuffers(std.testing.io, largest);
+    const full: u64 = if (os == .linux) 2 * @as(u64, udp.Buffers.bytes_max) else udp.Buffers.bytes_max;
+    for (plain.values, sockets.buffers, short) |socket, reported, below| {
+        try std.testing.expect(reported.?.receive >= try kernelSize(socket.?.handle, std.posix.SO.RCVBUF));
+        try std.testing.expect(reported.?.send >= try kernelSize(socket.?.handle, std.posix.SO.SNDBUF));
+        try std.testing.expectEqual(reported.?.receive < full or reported.?.send < full, below);
+    }
+    try std.testing.expectEqual([2]?udp.Buffers{ null, null }, plain.buffers);
+    try std.testing.expectEqual([2]?u32{ null, null }, plain.drops());
+    const smallest: udp.Buffers = .{ .receive = udp.Buffers.bytes_min, .send = udp.Buffers.bytes_min };
+    try std.testing.expectEqual([2]bool{ false, false }, sockets.requestBuffers(std.testing.io, smallest));
+    if (os != .linux) return;
+    try std.testing.expectEqual([2]?u32{ 0, 0 }, sockets.drops());
+    const sent = 256;
+    var payload: [1200]u8 = @splat(0);
+    for (0..sent) |_| try plain.values[0].?.send(std.testing.io, &sockets.values[0].?.address, &payload);
+    var received: usize = 0;
+    for (0..1000) |_| {
+        while (try sockets.receiveReady(std.testing.io, &payload)) |_| received += 1;
+        if (received + sockets.drops()[0].? == sent) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(received > 0 and received < sent);
+    try std.testing.expectEqual(sent, received + sockets.drops()[0].?);
+    try std.testing.expectEqual(@as(?u32, 0), sockets.drops()[1]);
+}
