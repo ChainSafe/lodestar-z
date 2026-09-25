@@ -261,6 +261,11 @@ pub const PeerManager = struct {
             return @max(now.mono_ms, self.coverage_reconcile_after_ms);
         return null;
     }
+    /// When replay may next queue a remembered candidate under general demand.
+    pub fn replayWakeup(self: *PeerManager, now: Now, capacity: usize) ?u64 {
+        if (!self.discovery_need.general) return null;
+        return self.dialing.replayWakeup(&self.catalog, now.mono_ms, @min(capacity, self.dialRoom()));
+    }
     pub fn updateNativeRoom(self: *PeerManager, engine: *const engine_mod.Engine) void {
         self.native_dial_room = engine.limits.connections_max -| engine.registry.active_len;
     }
@@ -539,7 +544,9 @@ pub const PeerManager = struct {
         self.dialing.expire(&self.catalog, engine, now.mono_ms);
         self.reconcile(service, now);
         self.updateNativeRoom(engine);
-        const count = self.dialing.poll(&self.catalog, now.mono_ms, out[0..@min(out.len, self.dialRoom())]);
+        const room = @min(out.len, self.dialRoom());
+        if (self.discovery_need.general) _ = self.dialing.replayRemembered(&self.catalog, &self.local.fork, &self.selection.deficits.missing, room, now);
+        const count = self.dialing.poll(&self.catalog, now.mono_ms, out[0..room]);
         if (count > 0 and self.selection.retained_count >= self.catalog.options.target_peers and self.selection.deficits.outbound == 0) {
             self.replacement_after_ms = now.mono_ms +| replacement_interval_ms;
             self.selection_revision = null;
@@ -557,6 +564,19 @@ pub const PeerManager = struct {
     }
     pub fn snapshots(self: *const PeerManager, out: []t.Snapshot) usize {
         return self.catalog.snapshots(out);
+    }
+    /// Loads the host's remembered peers once at startup, for replay under general demand.
+    pub fn loadRemembered(self: *PeerManager, records: []const peers.remembered.Record, now: Now) void {
+        const memory = &self.catalog.remembered;
+        memory.load(records, &self.local_identity, peers.remembered.seconds(now), self.catalog.random.random());
+        const seeds = &memory.counters.seeds;
+        const Seed = peers.remembered.Seed;
+        std.log.scoped(.network_peers).info("remembered_peers_loaded loaded={d} expired={d} duplicate={d} invalid={d}", .{ seeds[@intFromEnum(Seed.loaded)], seeds[@intFromEnum(Seed.expired)], seeds[@intFromEnum(Seed.duplicate)], seeds[@intFromEnum(Seed.invalid)] });
+    }
+    /// Refreshes the records of connections that qualify now, then copies every unexpired record.
+    pub fn rememberedPeers(self: *PeerManager, now: Now, out: []peers.remembered.Record) usize {
+        self.catalog.rememberConnected(now);
+        return self.catalog.remembered.snapshot(peers.remembered.seconds(now), out);
     }
     pub fn peerCounts(self: *const PeerManager) PeerCounts {
         var result: PeerCounts = .{ .connected = 0, .relevant = 0, .outbound_relevant = 0 };

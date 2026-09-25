@@ -536,6 +536,7 @@ pub const Control = struct {
         const snapshot = catalog.get(peer).?;
         const kind = client.fromIdentify(&snapshot.identify);
         catalog.settleRejections(peer, conn, row.evidence != .pending, row.rejection, now.mono_ms);
+        catalog.rememberClosed(peer, conn, row.evidence != .pending, reason, row.rejection, now);
         self.cancelConnection(service, engine, peer, conn);
         service.gossipsub.retireConnection(&service.router, engine, conn, now);
         _ = catalog.disconnect(peer, conn, reason, now.mono_ms);

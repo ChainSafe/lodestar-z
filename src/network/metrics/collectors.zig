@@ -31,6 +31,7 @@ pub const registry = prom.Registry(Context, .{
     writeGossipResources,
     writeRequestResources,
     writePeerCloses,
+    writeRememberedPeers,
     writeDiscoveryProgress,
     writeGossipTopics,
     writeMaintenance,
@@ -293,6 +294,50 @@ fn writePeerCloses(self: *const Context, w: *prom.Encoder) prom.Error!void {
         .help = "Failed Status, Metadata and Ping probes counted toward a health disconnect",
         .labels = &.{"probe"},
     }, @import("../peers/control.zig").HealthProbe, &self.owner.peer_manager.control.counters.health_failures);
+}
+
+fn writeRememberedPeers(self: *const Context, w: *prom.Encoder) prom.Error!void {
+    const remembered = @import("../peers/remembered.zig");
+    const memory = &self.owner.peer_manager.catalog.remembered;
+    try w.scalar(.{
+        .name = "lodestar_native_remembered_peers",
+        .kind = .gauge,
+        .help = "Remembered peers held for the host to persist",
+    }, memory.count);
+    try w.enums(.{
+        .name = "lodestar_native_remembered_peer_seeds_total",
+        .kind = .counter,
+        .help = "Remembered peers passed at startup: loaded, or dropped as expired, duplicate or invalid",
+        .labels = &.{"outcome"},
+    }, remembered.Seed, &memory.counters.seeds);
+    try w.enums(.{
+        .name = "lodestar_native_remembered_peer_replays_total",
+        .kind = .counter,
+        .help = "Loaded remembered peers visited by replay: queued as a candidate, already connected or a candidate, refused by the identity's rejection memory or the endpoint's failure history, or without candidate room",
+        .labels = &.{"outcome"},
+    }, remembered.Replay, &memory.counters.replays);
+    try w.enums(.{
+        .name = "lodestar_native_remembered_peer_removals_total",
+        .kind = .counter,
+        .help = "Remembered peers dropped by reason",
+        .labels = &.{"reason"},
+    }, remembered.Removal, &memory.counters.removals);
+    try w.scalar(.{
+        .name = "lodestar_native_remembered_peer_snapshot_records_total",
+        .kind = .counter,
+        .help = "Remembered peer records copied to the host for persistence",
+    }, memory.counters.snapshot_records);
+    const funnel = try w.family(.{
+        .name = "lodestar_native_peer_dial_funnel_total",
+        .kind = .counter,
+        .help = "Automatic dials by candidate origin, remembered or fresh from discovery, and stage: started, connected, and kept five minutes with a completed Status and Metadata exchange",
+        .labels = &.{ "origin", "stage" },
+    });
+    inline for (std.meta.fields(remembered.Origin)) |origin| {
+        inline for (std.meta.fields(remembered.Stage)) |stage| {
+            try funnel.sample(.{ origin.name, stage.name }, memory.counters.funnel[origin.value][stage.value]);
+        }
+    }
 }
 
 fn writePeerProcessing(self: *const Context, w: *prom.Encoder) prom.Error!void {

@@ -1857,3 +1857,53 @@ test "managed peer id mismatch releases the discovered endpoint and refuses its 
     try std.testing.expectEqual(@as(usize, 0), setup.client.dialIntents(&setup.client_service, &setup.pair.client, setup.pair.now, &intents));
     try std.testing.expectEqual(@as(u64, 0), setup.client.dialing.retries[@intFromEnum(t.DialFailure.peer_id_mismatch)]);
 }
+
+test "managed remembers a served dial, keeps it through close, and replays it after a restart" {
+    const remembered = @import("peers/remembered.zig");
+    var records: [remembered.capacity]remembered.Record = undefined;
+    var count: usize = 0;
+    {
+        var setup: Setup = .{};
+        try setup.initOwners(&.{});
+        defer setup.deinit();
+        const server = try discoverServer(&setup);
+        try dialServer(&setup);
+        for (0..60) |_| try setup.step(1);
+        try std.testing.expectEqual(@as(u16, 1), setup.client.peerCounts().relevant);
+        // Pings keep the connection serving while five minutes pass.
+        for (0..20) |_| {
+            setup.pair.advance(15_000);
+            for (0..10) |_| try setup.step(1);
+        }
+        try std.testing.expectEqual(@as(u16, 1), setup.client.peerCounts().relevant);
+        count = setup.client.rememberedPeers(setup.pair.now, &records);
+        try std.testing.expectEqual(@as(usize, 1), count);
+        try std.testing.expect(records[0].peer.eql(&server.peer));
+        try std.testing.expect(records[0].address.eql(support.server_address));
+        try std.testing.expectEqual(@as(u64, support.now_unix), records[0].qualified_at_s);
+        var inbound: [remembered.capacity]remembered.Record = undefined;
+        try std.testing.expectEqual(@as(usize, 0), setup.server.rememberedPeers(setup.pair.now, &inbound));
+        // Close clears the peer state but keeps the records a final snapshot reads.
+        managed.shutdown(&setup.client, &setup.client_service, &setup.pair.client, setup.pair.now);
+        try std.testing.expectEqual(@as(u16, 0), setup.client.catalog.connectedCount());
+        try std.testing.expectEqual(@as(u16, 0), setup.client.catalog.intent_count);
+        try std.testing.expectEqual(@as(usize, 1), setup.client.rememberedPeers(setup.pair.now, &inbound));
+        try std.testing.expectEqualDeep(records[0], inbound[0]);
+    }
+    var setup: Setup = .{};
+    try setup.initOwners(&.{});
+    defer setup.deinit();
+    setup.client.loadRemembered(records[0..count], setup.pair.now);
+    var intents: [1]managed.DialIntent = undefined;
+    try std.testing.expectEqual(@as(usize, 1), setup.client.dialIntents(&setup.client_service, &setup.pair.client, setup.pair.now, &intents));
+    try std.testing.expect(intents[0].peer.eql(&records[0].peer));
+    try std.testing.expect(intents[0].address.eql(support.server_address));
+    const handle = try setup.pair.client.dial(&intents[0].address, intents[0].peer, setup.pair.now);
+    try std.testing.expect(setup.client.dialStarted(intents[0].token, handle));
+    for (0..60) |_| try setup.step(1);
+    try std.testing.expectEqual(@as(u16, 1), setup.client.peerCounts().relevant);
+    const funnel = setup.client.catalog.remembered.counters.funnel;
+    try std.testing.expectEqual([3]u64{ 1, 1, 0 }, funnel[@intFromEnum(remembered.Origin.remembered)]);
+    try std.testing.expectEqual([3]u64{ 0, 0, 0 }, funnel[@intFromEnum(remembered.Origin.fresh)]);
+    try std.testing.expectEqual(@as(?u64, null), setup.client.replayWakeup(setup.pair.now, 1));
+}

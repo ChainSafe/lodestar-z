@@ -155,6 +155,29 @@ test "managed runtime validates capacities and current application fork before a
     try std.testing.expectError(error.UnknownFork, node.init(failing.allocator(), std.testing.io, &opts.resolved, opts.startup));
 }
 
+test "managed runtime loads at most 256 remembered peers and snapshots them" {
+    const remembered = @import("peers/remembered.zig");
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{1}));
+    var node: runtime.NetworkCore = undefined;
+    var opts = options(&key);
+    const now = try @import("transport.zig").currentTime(std.testing.io);
+    var records: [remembered.capacity + 1]remembered.Record = undefined;
+    for (&records, 0..) |*record, i| record.* = .{
+        .peer = .{ .bytes = @splat(@truncate(i + 2)) },
+        .address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = @intCast(9 + i) } },
+        .qualified_at_s = remembered.seconds(now) - 60,
+    };
+    opts.startup.remembered = &records;
+    try std.testing.expectError(error.InvalidOptions, node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup));
+    opts.startup.remembered = records[0..2];
+    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
+    defer node.deinit(std.testing.io);
+    var out: [remembered.capacity]remembered.Record = undefined;
+    try std.testing.expectError(error.OutputTooSmall, node.rememberedPeers(node.last_now, out[0 .. remembered.capacity - 1]));
+    try std.testing.expectEqual(@as(usize, 2), try node.rememberedPeers(node.last_now, &out));
+    try std.testing.expectEqual(@as(u64, 2), node.peer_manager.catalog.remembered.counters.seeds[@intFromEnum(remembered.Seed.loaded)]);
+}
+
 test "managed runtime metrics copy peer processing work without advancing it" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{1}));
     var node: runtime.NetworkCore = undefined;
