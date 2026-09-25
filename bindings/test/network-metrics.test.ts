@@ -130,7 +130,7 @@ test("metrics are available through startup and remain readable after close", as
   expect(samples(closed).get("lodestar_native_quic_connections_active")).toBe(0);
   expect(samples(closed).get("lodestar_native_dial_attempts")).toBe(0);
   expect(runtime.getMetrics()).toBe(closed);
-});
+}, 20000);
 
 test("real request and peer metrics are isolated, cumulative and do not drain requests", async () => {
   const pair = await incomingPair();

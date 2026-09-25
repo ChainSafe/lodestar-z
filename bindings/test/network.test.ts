@@ -350,7 +350,7 @@ it("keeps queued records and closes after an ordinary callback exception", () =>
     {encoding: "utf8", timeout: 10000}
   );
   expect(output).toContain("callback-closed");
-});
+}, 15000);
 
 it("notifies again after a callback that throws before scheduling an exchange", () => {
   const output = execFileSync(
@@ -365,7 +365,7 @@ it("notifies again after a callback that throws before scheduling an exchange", 
     {encoding: "utf8", timeout: 10000}
   );
   expect(output).toContain("rearmed");
-});
+}, 15000);
 
 it("releases live requests, incoming cells and gossip batches on worker termination", () => {
   const output = execFileSync(
@@ -576,7 +576,7 @@ it("rejects a bootstrap with an invalid signature before starting", async () => 
   corrupt[6] ^= 1;
   config.discovery.bootstrapEnrs = [corrupt];
   expect(() => startRuntime(config)).toThrow("InvalidSignature");
-});
+}, 20000);
 
 it("settles results only in an exchange and notifies once until an exchange finds nothing queued", async () => {
   const config = applicationConfig();

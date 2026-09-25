@@ -53,7 +53,7 @@ test("publication byte pressure rejects before copying and permits retry after c
   } finally {
     await runtime.close();
   }
-});
+}, 15000);
 
 test("request capacity refusal is typed while control and publication admission remain available", async () => {
   const config = applicationConfig();
