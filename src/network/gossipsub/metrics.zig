@@ -34,6 +34,7 @@ pub const Delivery = struct {
     /// when QUIC accepts its last byte, which is not delivery, or is cancelled by a stream reset.
     pub const Outcome = enum { selected, queued, pressured, unavailable, completed, cancelled };
     const WriteTime = @import("../metrics/histogram.zig").Duration(&.{ 1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000 });
+    const Queued = @import("../metrics/histogram.zig").Histogram(u64, &.{ 0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 448, 480, 511 }, .{});
     const slots = @import("../slot_clock.zig");
 
     recipients: [delivery.origin_count][@typeInfo(Outcome).@"enum".fields.len]u64 = @splat(@splat(0)),
@@ -41,6 +42,17 @@ pub const Delivery = struct {
     /// Cumulative by slot phase, which scrape timing cannot alias.
     drops_by_phase: [slots.phase_buckets]u64 = @splat(0),
     write_time: [delivery.origin_count]WriteTime = @splat(.{}),
+    /// The recipient's queued data frames when each admission is attempted, and the age of the
+    /// oldest one when there is one.
+    queued: Queued = .{},
+    oldest_age: WriteTime = .{},
+
+    /// Samples the recipient's queue as it was before an admission attempt.
+    pub fn admitted(self: *Delivery, queue: *const delivery.Queue, now_ms: u64, queued: bool) void {
+        const before = queue.count - @intFromBool(queued);
+        self.queued.observe(before);
+        if (before > 0) self.oldest_age.observe(now_ms -| queue.oldest().?);
+    }
 
     pub fn recipient(self: *Delivery, origin: delivery.Origin, outcome: Outcome) void {
         if (outcome != .completed and outcome != .cancelled) self.recipients[@intFromEnum(origin)][@intFromEnum(Outcome.selected)] +|= 1;
@@ -82,6 +94,125 @@ pub const Delivery = struct {
         for (slots.bucket_labels, self.drops_by_phase) |label, count| try phases.sample(.{label}, count);
         const times = try w.histograms(.{ .name = "lodestar_native_gossip_data_write_seconds", .kind = .histogram, .help = "Data frame residence from queue admission until QUIC accepted its last byte, by delivery origin", .labels = &.{"origin"}, .unit = .seconds }, WriteTime);
         inline for (@typeInfo(delivery.Origin).@"enum".fields) |origin| try times.histogram(.{origin.name}, &self.write_time[origin.value]);
+        const queued = try w.histograms(.{ .name = "lodestar_native_gossip_data_admission_queued", .kind = .histogram, .help = "The recipient's queued data frames when a data frame admission is attempted" }, Queued);
+        try queued.histogram(.{}, &self.queued);
+        const oldest = try w.histograms(.{ .name = "lodestar_native_gossip_data_admission_oldest_seconds", .kind = .histogram, .help = "Age of the recipient's oldest queued data frame when a data frame admission is attempted behind it", .unit = .seconds }, WriteTime);
+        try oldest.histogram(.{}, &self.oldest_age);
+    }
+};
+
+/// Verdict application by the owner. An apply is the verdicts reported between two pumps, which
+/// is the host apply of one owner turn.
+pub const Apply = struct {
+    const H = @import("../metrics/histogram.zig");
+    const Count = H.Histogram(u64, &.{ 0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 4096, 16384 }, .{});
+    const Bytes = H.Histogram(u64, &.{ 1 << 10, 1 << 13, 1 << 16, 1 << 18, 1 << 20, 1 << 22, 1 << 24, 1 << 26 }, .{});
+    const Elapsed = H.Histogram(u64, &.{ 10_000, 50_000, 100_000, 250_000, 500_000, 1_000_000, 2_500_000, 5_000_000, 10_000_000, 50_000_000 }, .{ .unit = .nanoseconds });
+    const Spacing = H.Duration(&.{ 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 5000 });
+    pub const Recipient = enum { selected, queued, refused };
+    const Open = struct { verdicts: u64 = 0, recipients: [3]u64 = @splat(0), bytes: u64 = 0, elapsed_ns: u64 = 0 };
+
+    verdicts: Count = .{},
+    elapsed: Elapsed = .{},
+    spacing: Spacing = .{},
+    recipients: [3]Count = @splat(.{}),
+    bytes: Bytes = .{},
+    /// Data frames QUIC accepted in full since the previous apply.
+    service: Count = .{},
+    open: ?Open = null,
+    last_start_ms: ?u64 = null,
+    frames: u64 = 0,
+
+    /// One reported verdict, the recipients its forward selected and the bytes it queued.
+    pub fn verdict(self: *Apply, now_ms: u64, elapsed_ns: u64, forward: ?@import("gossipsub.zig").Gossipsub.PublishOutcome, bytes: u64) void {
+        if (self.open == null) {
+            if (self.last_start_ms) |last| self.spacing.observe(now_ms -| last);
+            self.last_start_ms = now_ms;
+            self.open = .{};
+        }
+        const open = &self.open.?;
+        open.verdicts += 1;
+        open.elapsed_ns +|= elapsed_ns;
+        if (forward) |outcome| {
+            open.recipients[@intFromEnum(Recipient.selected)] += outcome.selected;
+            open.recipients[@intFromEnum(Recipient.queued)] += outcome.queued;
+            open.recipients[@intFromEnum(Recipient.refused)] += outcome.pressured;
+            open.bytes +|= bytes;
+        }
+    }
+
+    pub fn frameCompleted(self: *Apply) void {
+        self.frames +|= 1;
+    }
+
+    pub fn close(self: *Apply) void {
+        const open = self.open orelse return;
+        self.verdicts.observe(open.verdicts);
+        self.elapsed.observe(open.elapsed_ns);
+        for (&self.recipients, open.recipients) |*histogram, count| histogram.observe(count);
+        self.bytes.observe(open.bytes);
+        self.service.observe(self.frames);
+        self.frames = 0;
+        self.open = null;
+    }
+
+    pub fn write(self: *const Apply, w: *prom.Encoder) prom.Error!void {
+        const verdicts = try w.histograms(.{ .name = "lodestar_native_gossip_apply_verdicts", .kind = .histogram, .help = "Verdicts the owner reported in one host apply" }, Count);
+        try verdicts.histogram(.{}, &self.verdicts);
+        const elapsed = try w.histograms(.{ .name = "lodestar_native_gossip_apply_seconds", .kind = .histogram, .help = "Time the owner spent reporting one host apply's verdicts, forwarding included", .unit = .seconds }, Elapsed);
+        try elapsed.histogram(.{}, &self.elapsed);
+        const spacing = try w.histograms(.{ .name = "lodestar_native_gossip_apply_spacing_seconds", .kind = .histogram, .help = "Time between the starts of consecutive host applies that reported verdicts", .unit = .seconds }, Spacing);
+        try spacing.histogram(.{}, &self.spacing);
+        const recipients = try w.histograms(.{ .name = "lodestar_native_gossip_apply_forward_recipients", .kind = .histogram, .help = "Forward recipients one host apply selected, queued, or refused for queue pressure", .labels = &.{"outcome"} }, Count);
+        inline for (@typeInfo(Recipient).@"enum".fields) |field| try recipients.histogram(.{field.name}, &self.recipients[field.value]);
+        const bytes = try w.histograms(.{ .name = "lodestar_native_gossip_apply_forward_bytes", .kind = .histogram, .help = "Compressed payload bytes one host apply queued for forwarding, summed over recipients" }, Bytes);
+        try bytes.histogram(.{}, &self.bytes);
+        const service = try w.histograms(.{ .name = "lodestar_native_gossip_apply_service_frames", .kind = .histogram, .help = "Data frames QUIC accepted in full between one host apply and the previous one" }, Count);
+        try service.histogram(.{}, &self.service);
+    }
+};
+
+/// Queued data frames across peers and peers with a full ordinary allowance, integrated over
+/// time by slot phase. The owner integrates before every change and at every pump, so intervals
+/// without changes count too.
+pub const Occupancy = struct {
+    const slots = @import("../slot_clock.zig");
+    /// Phase buckets, then time without a known phase.
+    const spans = slots.phase_buckets + 1;
+
+    last_ms: ?u64 = null,
+    observed_ms: [spans]u64 = @splat(0),
+    descriptor_ms: [spans]u64 = @splat(0),
+    full_ms: [spans]u64 = @splat(0),
+
+    pub fn integrate(self: *Occupancy, clock: ?*const slots.SlotClock, now_ms: u64, descriptors: usize, full: usize) void {
+        const last = self.last_ms orelse now_ms;
+        self.last_ms = @max(last, now_ms);
+        if (now_ms <= last) return;
+        var phases: [slots.phase_buckets]u64 = @splat(0);
+        const known = if (clock) |value| value.split(last, now_ms, &phases) else false;
+        if (!known) {
+            self.add(slots.phase_buckets, now_ms - last, descriptors, full);
+            return;
+        }
+        for (phases, 0..) |ms, index| if (ms > 0) self.add(index, ms, descriptors, full);
+    }
+
+    fn add(self: *Occupancy, index: usize, ms: u64, descriptors: usize, full: usize) void {
+        self.observed_ms[index] +|= ms;
+        self.descriptor_ms[index] +|= ms * descriptors;
+        self.full_ms[index] +|= ms * full;
+    }
+
+    pub fn write(self: *const Occupancy, w: *prom.Encoder) prom.Error!void {
+        inline for (.{
+            .{ "lodestar_native_gossip_outbox_observed_seconds_total", "observed_ms", "Time over which data queue occupancy was integrated, by slot phase bucket labeled by its first basis point of the slot, or unknown without the chain's genesis time" },
+            .{ "lodestar_native_gossip_outbox_descriptor_seconds_total", "descriptor_ms", "Queued data frames across all peers, integrated over time, by slot phase bucket; divide by observed seconds for the mean" },
+            .{ "lodestar_native_gossip_outbox_full_peer_seconds_total", "full_ms", "Peers whose queue refused ordinary data frames for want of a descriptor, integrated over time, by slot phase bucket" },
+        }) |metric| {
+            const family = try w.family(.{ .name = metric[0], .kind = .counter, .help = metric[2], .labels = &.{"phase_bps"}, .unit = .seconds });
+            for (@field(self, metric[1]), 0..) |ms, index| try family.sample(.{if (index < slots.phase_buckets) slots.bucket_labels[index] else "unknown"}, @as(f64, @floatFromInt(ms)) / 1000);
+        }
     }
 };
 
@@ -114,6 +245,9 @@ pub const Topics = struct {
 };
 
 pub const IhaveIgnore = enum { low_score, limit, capacity, unsubscribed, no_new_ids, peer_capacity };
+/// An IWANT ID absent from history, or present and then suppressed by IDONTWANT, over its
+/// retransmission limit, queued or refused for queue pressure.
+pub const IwantOutcome = enum { miss, suppressed, limited, queued, refused };
 
 pub const Rpc = struct {
     invalid_messages: [std.meta.fields(@import("messages.zig").InvalidReason).len]u64 = @splat(0),
@@ -127,6 +261,7 @@ pub const Rpc = struct {
     items: [std.meta.fields(ItemKind).len]u64 = @splat(0),
     ihave_ignored: [std.meta.fields(IhaveIgnore).len]u64 = @splat(0),
     iwant_unknown: u64 = 0,
+    iwant: [std.meta.fields(IwantOutcome).len]u64 = @splat(0),
     idontwant_ids: u64 = 0,
     idontwant_unknown: u64 = 0,
 
@@ -190,6 +325,12 @@ pub const Rpc = struct {
             .help = "Subscribed publications rejected before host validation",
             .labels = &.{"reason"},
         }, @import("messages.zig").InvalidReason, &self.invalid_messages);
+        try w.enums(.{
+            .name = "lodestar_native_gossip_iwant_ids_total",
+            .kind = .counter,
+            .help = "Examined valid IWANT IDs by outcome: absent from history, or present and then suppressed by IDONTWANT, over the retransmission limit, queued, or refused for queue pressure",
+            .labels = &.{"outcome"},
+        }, IwantOutcome, &self.iwant);
         try w.enums(.{
             .name = "gossipsub_ihave_rcv_ignored_total",
             .kind = .counter,

@@ -18,7 +18,11 @@ test "gossip validation finishes without allocation while shared deliveries are 
         g.sessions.rows[session.index].outbound = .{ .live = .{ .stream = .{ .conn = conn, .id = 2, .slot = 0 }, .version = .v1_2 } };
         g.overlay.rows[topic].mesh.set(i);
         const count: usize = if (i == 0) delivery.per_peer_limit else delivery.per_peer_reserve;
-        for (0..count) |_| try std.testing.expectEqual(.queued, g.sessions.rows[i].io.tx.queueData(&g.messages.store, message, .forward, .{ .bytes = g.options.tx_peer_bytes }, 0));
+        const tx = &g.sessions.rows[i].io.tx;
+        for (0..count) |_| {
+            const origin: delivery.Origin = if (tx.data.full()) .publication else .forward;
+            try std.testing.expectEqual(.queued, tx.queueData(&g.messages.store, message, origin, .{ .bytes = g.options.tx_peer_bytes }, 0));
+        }
     }
     const occupied = g.resourceSnapshot();
     try std.testing.expectEqual(occupied.delivery_descriptors_capacity, occupied.queued_descriptors);

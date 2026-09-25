@@ -32,6 +32,7 @@ pub const Options = struct {
     tx_peer_bytes: usize = 16 * 1024 * 1024,
     /// Per-peer data descriptors and bytes that only local publications may use: forwards and
     /// IWANT responses leave them free, so our own messages still queue behind a forward burst.
+    /// The delivery pool holds the descriptor count.
     tx_local_descriptors: usize = 32,
     tx_local_bytes: usize = 1024 * 1024,
     peers_per_pump: usize = 32,

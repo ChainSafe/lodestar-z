@@ -35,6 +35,7 @@ pub const ValidationHandle = validation_mod.Handle;
 pub const ReportOutcome = validation_mod.Outcome;
 pub const Admission = @import("messages.zig").Admission;
 pub const MessageSink = @import("messages.zig").MessageSink;
+const IwantOutcome = @import("metrics.zig").IwantOutcome;
 
 const Turn = @import("turn.zig").Turn;
 const Credits = @import("turn.zig").Credits;
@@ -112,6 +113,8 @@ pub const Gossipsub = struct {
     rpc_metrics: @import("metrics.zig").Rpc = .{},
     io_metrics: @import("metrics.zig").Io = .{},
     delivery_metrics: @import("metrics.zig").Delivery = .{},
+    apply_metrics: @import("metrics.zig").Apply = .{},
+    occupancy: @import("metrics.zig").Occupancy = .{},
     validation_time: @import("metrics.zig").ValidationTime = .{},
 
     pub const Admission = session_io.Admission;
@@ -324,6 +327,7 @@ pub const Gossipsub = struct {
     pub fn cancelWrites(self: *Gossipsub, session: sessions_mod.SessionRef) void {
         if (!self.sessions.matches(session)) return;
         const tx = &self.sessions.rows[session.index].io.tx;
+        self.integrateOccupancy();
         self.delivery_metrics.cancelled(&tx.data.origins);
         tx.cancelStream(&self.messages.store);
         self.cancelPromises(session.index, false);
@@ -380,6 +384,10 @@ pub const Gossipsub = struct {
     /// Event slices remain valid until the next pump, including after report or publish.
     pub fn report(self: *Gossipsub, handle: ValidationHandle, verdict: Verdict, now: Now) ReportOutcome {
         self.last_now_ms = @max(self.last_now_ms, now.mono_ms);
+        const start_ns = timing.now(self.metrics_io);
+        var forwarded: ?PublishOutcome = null;
+        var forwarded_bytes: u64 = 0;
+        defer self.apply_metrics.verdict(self.last_now_ms, timing.now(self.metrics_io) -| start_ns, forwarded, forwarded_bytes);
         const context = self.messageContext();
         const result = self.messages.report(&context, handle, verdict, now.mono_ms);
         if (result == .applied) {
@@ -394,6 +402,8 @@ pub const Gossipsub = struct {
             if (verdict != .accept) std.log.scoped(.network_gossip).debug("validation_verdict validation={d}:{d} message_id={x} verdict={s} topic={s} peer={f} elapsed_ms={d}", .{ handle.index, handle.generation, applied.id, @tagName(verdict), applied.topicString(), @import("../logging.zig").peer(&applied.source), now.mono_ms -| applied.admitted_ms });
             if (applied.forward) |forward| {
                 const delivered = self.deliver(self.overlay.mesh(forward.topic.index), forward.message, forward.source, now.mono_ms);
+                forwarded = delivered;
+                forwarded_bytes = @as(u64, self.messages.store.get(forward.message).?.len) * delivered.queued;
                 if (delivered.queued > 0) {
                     self.counters.messages_forwarded += 1;
                     counts.forwarded +|= 1;
@@ -416,6 +426,7 @@ pub const Gossipsub = struct {
         if (source != null) for (self.sessions.rows, 0..) |*row, peer| {
             if (row.active and self.peers.rows[row.logical.index].direct and self.overlay.subscribers(topic).isSet(peer)) recipients.set(peer);
         };
+        self.integrateOccupancy();
         var it = recipients.iterator(.{});
         next_peer: while (it.next()) |peer| {
             const index: u16 = @intCast(peer);
@@ -432,7 +443,9 @@ pub const Gossipsub = struct {
                 self.delivery_metrics.recipient(origin, .unavailable);
                 continue;
             }
-            if (self.sessions.rows[index].io.tx.queueData(&self.messages.store, h, origin, self.deliveryLimits(), now_ms) == .queued) {
+            const queued = self.sessions.rows[index].io.tx.queueData(&self.messages.store, h, origin, self.deliveryLimits(), now_ms) == .queued;
+            self.delivery_metrics.admitted(&self.sessions.rows[index].io.tx.data, now_ms, queued);
+            if (queued) {
                 result.queued += 1;
                 self.delivery_metrics.recipient(origin, .queued);
                 self.settle(index);
@@ -570,6 +583,7 @@ pub const Gossipsub = struct {
     }
 
     fn heartbeat(self: *Gossipsub, now: Now) void {
+        self.overlay.metrics.sampleMesh(&self.overlay.rows, now.mono_ms);
         for (self.sessions.rows) |*peer| peer.io.resetHeartbeat();
         self.peers.refresh(now.mono_ms);
         // A frame held for a peer whose score fell below the graylist is released by its next
@@ -664,6 +678,7 @@ pub const Gossipsub = struct {
     pub fn advanceWrite(self: *Gossipsub, session: sessions_mod.SessionRef, written: usize, now_ms: u64) void {
         assert(self.sessions.matches(session));
         self.rpc_metrics.sent_bytes +|= written;
+        self.integrateOccupancy();
         if (self.sessions.rows[session.index].io.tx.advance(&self.messages.store, written)) |completion| self.writeCompleted(session, completion, now_ms);
     }
 
@@ -673,12 +688,21 @@ pub const Gossipsub = struct {
         self.rpc_metrics.observeSent(completion.itemKind());
         switch (completion) {
             .control => |receipt| self.controlSent(peer, receipt.token, now_ms),
-            .data => |receipt| self.delivery_metrics.written(receipt, now_ms),
+            .data => |receipt| {
+                self.delivery_metrics.written(receipt, now_ms);
+                self.apply_metrics.frameCompleted();
+            },
         }
     }
 
+    /// Integrates data queue occupancy up to now. Call before any change to the data queues.
+    pub fn integrateOccupancy(self: *Gossipsub) void {
+        const pool = self.sessions.deliveries;
+        self.occupancy.integrate(self.slot_clock, self.last_now_ms, pool.slots.len - pool.available, pool.full_queues);
+    }
+
     fn deliveryLimits(self: *const Gossipsub) @import("delivery.zig").Limits {
-        return .{ .bytes = self.options.tx_peer_bytes, .local_descriptors = self.options.tx_local_descriptors, .local_bytes = self.options.tx_local_bytes };
+        return .{ .bytes = self.options.tx_peer_bytes, .local_bytes = self.options.tx_local_bytes };
     }
 
     fn dataRefused(self: *Gossipsub, index: u16, origin: @import("delivery.zig").Origin) void {
@@ -873,20 +897,35 @@ pub const Gossipsub = struct {
             const id: MessageId = id_bytes[0..constants.message_id_length].*;
             if (!self.messages.hasPayload(id)) {
                 self.rpc_metrics.iwant_unknown +|= 1;
+                self.rpc_metrics.iwant[@intFromEnum(IwantOutcome.miss)] +|= 1;
                 continue;
             }
-            if (self.sessions.suppresses(index, id, self.last_now_ms)) continue;
-            switch (self.messages.serve(&self.sessions.rows[index].io.tx, self.logical(index), id, self.deliveryLimits(), self.last_now_ms)) {
-                .unknown => self.rpc_metrics.iwant_unknown +|= 1,
-                .known => |known| {
+            if (self.sessions.suppresses(index, id, self.last_now_ms)) {
+                self.rpc_metrics.iwant[@intFromEnum(IwantOutcome.suppressed)] +|= 1;
+                continue;
+            }
+            self.integrateOccupancy();
+            const outcome: IwantOutcome = switch (self.messages.serve(&self.sessions.rows[index].io.tx, self.logical(index), id, self.deliveryLimits(), self.last_now_ms)) {
+                .unknown => blk: {
+                    self.rpc_metrics.iwant_unknown +|= 1;
+                    break :blk .miss;
+                },
+                .known => |known| blk: {
                     self.topic_metrics.get(known.topic).iwant_ids +|= 1;
+                    if (known.result != .limited) self.delivery_metrics.admitted(&self.sessions.rows[index].io.tx.data, self.last_now_ms, known.result == .queued);
                     switch (known.result) {
                         .queued => self.delivery_metrics.recipient(.iwant, .queued),
                         .pressured => self.dataRefused(index, .iwant),
                         .limited => {},
                     }
+                    break :blk switch (known.result) {
+                        .queued => .queued,
+                        .pressured => .refused,
+                        .limited => .limited,
+                    };
                 },
-            }
+            };
+            self.rpc_metrics.iwant[@intFromEnum(outcome)] +|= 1;
         }
     }
 
@@ -922,7 +961,10 @@ pub const Gossipsub = struct {
     }
 
     fn onGraft(self: *Gossipsub, index: u16, topic_str: []const u8, now: Now) void {
-        const topic = self.overlay.findTopic(topic_str) orelse return;
+        const topic = self.overlay.findTopic(topic_str) orelse {
+            self.overlay.metrics.graftReceived(.unknown_topic);
+            return;
+        };
         const context = self.overlayContext(now.mono_ms);
         self.overlay.onGraft(&context, topic, index);
     }
@@ -944,6 +986,7 @@ pub const Gossipsub = struct {
 };
 
 test {
+    _ = @import("gossipsub_accounting_test.zig");
     _ = @import("gossipsub_ingress_test.zig");
     _ = @import("gossipsub_owner_messages_test.zig");
     _ = @import("gossipsub_owner_policy_test.zig");

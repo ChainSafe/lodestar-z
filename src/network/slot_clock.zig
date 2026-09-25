@@ -42,6 +42,38 @@ pub const SlotClock = struct {
         std.debug.assert(bps < bps_per_slot);
         return bps / bucket_bps;
     }
+
+    /// Adds to each phase bucket the milliseconds of `[from_ms, to_ms)` in monotonic time that
+    /// fell in it. Returns false, adding nothing, when the interval has no known phase.
+    pub fn split(self: *const SlotClock, from_ms: u64, to_ms: u64, out: *[phase_buckets]u64) bool {
+        std.debug.assert(from_ms <= to_ms);
+        const offset = self.wall_offset_ms orelse return false;
+        const from = @as(i64, @intCast(from_ms)) + offset - @as(i64, @intCast(self.genesis_unix_ms));
+        if (from < 0) return false;
+        const slot = self.slot_duration_ms;
+        var at: u64 = @intCast(from);
+        const end = at + (to_ms - from_ms);
+        const whole = (end - at) / slot;
+        if (whole > 0) for (out, 0..) |*total, index| {
+            total.* += whole * (bucketStart(slot, index + 1) - bucketStart(slot, index));
+        };
+        at += whole * slot;
+        for (0..phase_buckets + 1) |_| {
+            if (at == end) break;
+            const into = at % slot;
+            const index: usize = @intCast(into * phase_buckets / slot);
+            const step = @min(end - at, bucketStart(slot, index + 1) - into);
+            out[index] += step;
+            at += step;
+        }
+        std.debug.assert(at == end);
+        return true;
+    }
+
+    /// The first millisecond of the slot in bucket `index`, whose phase is `index * bucket_bps`.
+    fn bucketStart(slot: u64, index: usize) u64 {
+        return (index * slot + phase_buckets - 1) / phase_buckets;
+    }
 };
 
 test "slot phase follows wall time from genesis in basis points of the slot" {
@@ -66,6 +98,11 @@ test "slot phase follows wall time from genesis in basis points of the slot" {
     early.observe(.{ .mono_ms = 1_000, .unix_s = 0, .unix_ms = genesis - 1 });
     try std.testing.expectEqual(@as(?u16, null), early.phaseBps(1_000));
     try std.testing.expectEqual(@as(?u16, 0), early.phaseBps(1_001));
+    // An interval splits across the buckets it crosses, whole slots included.
+    var spans: [phase_buckets]u64 = @splat(0);
+    try std.testing.expect(clock.split(1_000, 1_000 + 12_000 + 1_500, &spans));
+    for (spans, 0..) |span, index| try std.testing.expectEqual(@as(u64, if (index == 4 or index == 5) 1_500 else 750), span);
+    try std.testing.expect(!early.split(0, 1_000, &spans));
     clock.slot_duration_ms = 0;
     try std.testing.expectError(error.InvalidOptions, clock.validate());
 }
