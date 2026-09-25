@@ -16,6 +16,9 @@ const assert = std.debug.assert;
 pub const batch_max = 64;
 pub const batch_bytes = 16 * 1024 * 1024;
 pub const payload_max = 10 * 1024 * 1024;
+comptime {
+    assert(payload_max <= batch_bytes);
+}
 pub const topic_max = native.topic.topic_max_len;
 pub const Token = struct { index: u16, generation: u64 };
 pub const State = enum { free, capturing, needs_check, checking, waiting, queued, copying, delivered, verdict_pending };
@@ -591,7 +594,9 @@ pub const GossipProcessor = struct {
     }
     fn append(self: *GossipProcessor, batch: *Batch, index: u32, size: *usize, limit: usize) bool {
         const cell = &self.cells[index];
-        if (cell.input.len > @min(batch_bytes, limit) - size.*) return false;
+        assert(cell.input.len <= batch_bytes);
+        // An empty batch takes its first item whatever the host's byte cap, so no item blocks its lane.
+        if (batch.len > 0 and cell.input.len > @min(batch_bytes, limit) -| size.*) return false;
         size.* += cell.input.len;
         self.transition(index, .copying);
         cell.executing = true;
