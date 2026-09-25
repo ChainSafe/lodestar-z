@@ -4,6 +4,7 @@ const resolve = @import("configuration.zig").resolve;
 const rr = @import("reqresp/reqresp.zig");
 const std = @import("std");
 const transport = @import("transport.zig");
+const udp = @import("udp.zig");
 const validate = @import("configuration.zig").validate;
 
 test "managed configuration resolves dial concurrency independently of peer headroom" {
@@ -194,6 +195,27 @@ test "managed configuration preserves independent transport work limits" {
     const resolved = try resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .work_limits = limits, .admission_policy = policy_fixture.config() });
     try std.testing.expectEqual(limits, resolved.work_limits);
     try std.testing.expectError(error.InvalidLimits, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .work_limits = .{ .send_per_step_max = 0 }, .admission_policy = policy_fixture.config() }));
+}
+
+test "managed configuration carries bounded UDP socket buffer requests" {
+    const resolved = try resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
+    const mib = 1024 * 1024;
+    try std.testing.expectEqual(udp.Buffers{ .receive = 8 * mib, .send = 4 * mib }, resolved.socket_buffers.quic);
+    try std.testing.expectEqual(udp.Buffers{ .receive = 2 * mib, .send = 1 * mib }, resolved.socket_buffers.discovery);
+    const bounds: udp.SocketBuffers = .{
+        .quic = .{ .receive = udp.Buffers.bytes_max, .send = udp.Buffers.bytes_min },
+        .discovery = .{ .receive = udp.Buffers.bytes_min, .send = udp.Buffers.bytes_max },
+    };
+    try std.testing.expectEqual(bounds, (try resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .socket_buffers = bounds, .admission_policy = policy_fixture.config() })).socket_buffers);
+    const invalid = [_]udp.SocketBuffers{
+        .{ .quic = .{ .receive = udp.Buffers.bytes_min - 1, .send = udp.Buffers.bytes_min } },
+        .{ .quic = .{ .receive = udp.Buffers.bytes_min, .send = udp.Buffers.bytes_max + 1 } },
+        .{ .discovery = .{ .receive = udp.Buffers.bytes_max + 1, .send = udp.Buffers.bytes_min } },
+        .{ .discovery = .{ .receive = udp.Buffers.bytes_min, .send = udp.Buffers.bytes_min - 1 } },
+    };
+    for (invalid) |socket_buffers| {
+        try std.testing.expectError(error.InvalidLimits, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .socket_buffers = socket_buffers, .admission_policy = policy_fixture.config() }));
+    }
 }
 
 test "resolved admission and Identify overrides use final profile capacities" {

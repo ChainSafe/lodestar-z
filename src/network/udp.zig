@@ -11,6 +11,29 @@ pub const ReceiveTimeoutError = sockets_mod.DatagramError;
 pub const SendError = sockets_mod.SendError;
 
 pub const SendOutcome = struct { sent: usize, failure: ?SendError };
+pub const Buffers = sockets_mod.Buffers;
+
+const mib = 1024 * 1024;
+
+/// Kernel buffer sizes requested for each UDP socket role. The kernel default of 208 KiB holds
+/// about 20 ms of traffic at 8,000 datagrams/s, so a longer owner pause drops datagrams.
+pub const SocketBuffers = struct {
+    quic: Buffers = .{ .receive = 8 * mib, .send = 4 * mib },
+    discovery: Buffers = .{ .receive = 2 * mib, .send = 1 * mib },
+
+    pub fn validate(self: SocketBuffers) error{InvalidLimits}!void {
+        if (!self.quic.valid() or !self.discovery.valid()) return error.InvalidLimits;
+    }
+};
+
+/// Requests `request` on every socket and logs one warning per socket the kernel caps below it.
+pub fn requestBuffers(sockets: *sockets_mod.Sockets, io: std.Io, request: Buffers, comptime scope: @EnumLiteral()) void {
+    const short = sockets.requestBuffers(io, request);
+    for (short, sockets.buffers, [_][]const u8{ "ip4", "ip6" }) |below, reported, family| {
+        if (!below) continue;
+        std.log.scoped(scope).warn("socket_buffers_below_request family={s} receive_bytes={d} receive_requested={d} send_bytes={d} send_requested={d}", .{ family, reported.?.receive, request.receive, reported.?.send, request.send });
+    }
+}
 
 pub const Counters = struct {
     received_bytes: u64 = 0,

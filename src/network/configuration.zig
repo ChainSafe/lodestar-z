@@ -2,6 +2,7 @@ const std = @import("std");
 const core = @import("managed.zig");
 const engine = @import("quic/engine.zig");
 const transport = @import("transport.zig");
+const udp = @import("udp.zig");
 const rr = @import("reqresp/reqresp.zig");
 const gossip = @import("gossipsub/options.zig");
 const c = @import("gossipsub/constants.zig");
@@ -22,6 +23,7 @@ pub const Request = struct {
     forks: []const rr.ForkEntry,
     limits: ?engine.Limits = null,
     work_limits: transport.WorkLimits = .{},
+    socket_buffers: udp.SocketBuffers = .{},
     peers: ?peers.Options = null,
     dial: ?dial.Options = null,
     reqresp: ReqRespOverrides = .{},
@@ -36,6 +38,7 @@ pub const Request = struct {
 pub const Resolved = struct {
     limits: engine.Limits,
     work_limits: transport.WorkLimits,
+    socket_buffers: udp.SocketBuffers,
     core: core.Options,
     byte_limit: usize,
 };
@@ -44,6 +47,7 @@ const outbound_reserved_max: u16 = 4;
 
 pub fn resolve(request: Request) !Resolved {
     try request.work_limits.validate();
+    try request.socket_buffers.validate();
     const small = request.profile == .small;
     var limits: engine.Limits = request.limits orelse .{
         .connections_max = if (small) 16 else 128,
@@ -119,6 +123,7 @@ pub fn resolve(request: Request) !Resolved {
     const result: Resolved = .{
         .limits = limits,
         .work_limits = request.work_limits,
+        .socket_buffers = request.socket_buffers,
         .byte_limit = request.byte_limit orelse if (small) 96 * 1024 * 1024 else 384 * 1024 * 1024,
         .core = .{
             .peers = peer_options,

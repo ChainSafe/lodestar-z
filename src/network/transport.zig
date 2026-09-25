@@ -17,6 +17,8 @@ pub const Options = struct {
     bind: udp_mod.Bindings,
     limits: engine_mod.Limits = .{},
     work_limits: WorkLimits = .{},
+    /// Null keeps the system's default socket buffer sizes.
+    socket_buffers: ?udp_mod.Buffers = null,
     keylog_path: ?[]const u8 = null,
 };
 
@@ -111,6 +113,7 @@ pub const Transport = struct {
         options: Options,
     ) InitError!void {
         try options.work_limits.validate();
+        if (options.socket_buffers) |request| if (!request.valid()) return error.InvalidLimits;
         var serial: [8]u8 = undefined;
         try std.Io.randomSecure(io, &serial);
         var seed_bytes: [std.Random.DefaultCsprng.secret_seed_length]u8 = undefined;
@@ -131,6 +134,7 @@ pub const Transport = struct {
         errdefer if (context_owned) context.deinit();
         target.udp = try udp_mod.Udp.bind(io, options.bind);
         errdefer target.udp.close(io);
+        if (options.socket_buffers) |request| udp_mod.requestBuffers(&target.udp.sockets, io, request, .network_quic);
         var engine_limits = options.limits;
         engine_limits.keylog = options.keylog_path != null;
         target.engine = try engine_mod.Engine.init(allocator, .{

@@ -267,6 +267,39 @@ test "transport validates socket work limits before startup allocation" {
     try (transport_mod.WorkLimits{ .burst_per_connection = transport_mod.send_burst_max }).validate();
 }
 
+test "transport requests configured socket buffers and records the kernel's sizes" {
+    const Buffers = @import("udp.zig").Buffers;
+    const key = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{31}));
+    const invalid = [_]Buffers{
+        .{ .receive = Buffers.bytes_min - 1, .send = Buffers.bytes_min },
+        .{ .receive = Buffers.bytes_min, .send = Buffers.bytes_max + 1 },
+    };
+    for (invalid) |socket_buffers| {
+        var target: Transport = .{};
+        try std.testing.expectError(error.InvalidLimits, target.init(std.testing.failing_allocator, std.testing.io, .{
+            .host = &key,
+            .bind = .{ .ip4 = .loopback(0) },
+            .socket_buffers = socket_buffers,
+        }));
+    }
+    var unsized: Transport = .{};
+    try initTransport(&unsized, 32);
+    defer unsized.deinit(std.testing.io);
+    try std.testing.expectEqual([2]?Buffers{ null, null }, unsized.udp.sockets.buffers);
+    var sized: Transport = .{};
+    try sized.init(std.testing.allocator, std.testing.io, .{
+        .host = &key,
+        .bind = .{ .ip4 = .loopback(0) },
+        .socket_buffers = .{ .receive = Buffers.bytes_min, .send = Buffers.bytes_min },
+    });
+    defer sized.deinit(std.testing.io);
+    const os = @import("builtin").os.tag;
+    if (os != .linux and os != .macos) return;
+    const reported = sized.udp.sockets.buffers[0].?;
+    try std.testing.expect(reported.receive >= Buffers.bytes_min and reported.send >= Buffers.bytes_min);
+    try std.testing.expectEqual(null, sized.udp.sockets.buffers[1]);
+}
+
 test "transport memory plan accounts for its send batch" {
     var node: Transport = .{};
     try initTransport(&node, 28);

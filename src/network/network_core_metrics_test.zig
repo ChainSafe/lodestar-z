@@ -68,6 +68,7 @@ const contract = [_]Series{
     .{ .name = "lodestar_native_network_discovery_only_turns_total", .kind = "counter" },
     .{ .name = "lodestar_native_quic_udp_received_datagrams_total", .kind = "counter" },
     .{ .name = "lodestar_native_quic_udp_sent_datagrams_total", .kind = "counter" },
+    .{ .name = "lodestar_native_udp_socket_buffer_bytes", .kind = "gauge", .labels = &.{ "role", "family", "direction" } },
     // Peers
     .{ .name = "libp2p_peers", .kind = "gauge" },
     .{ .name = "lodestar_native_peer_below_target", .kind = "gauge" },
@@ -313,6 +314,25 @@ test "metrics render every measurement contract series with its type and labels"
         missing += 1;
     }
     try std.testing.expectEqual(@as(usize, 0), missing);
+}
+
+test "metrics report the kernel's buffer sizes and drops for every UDP socket" {
+    var f = try Fixture.initWith(&.{}, .{ .bind = .{ .ip4 = .loopback(0) } });
+    defer f.deinit();
+    const output = try f.render(true);
+    const roles = [_]struct { []const u8, *const @import("udp").Sockets }{
+        .{ "quic", &f.node.transport.udp.sockets },
+        .{ "discovery", &f.node.discovery.?.transport.sockets },
+    };
+    var line: [160]u8 = undefined;
+    for (roles) |role| {
+        const reported = role[1].buffers[0].?;
+        try std.testing.expect(reported.receive > 0 and reported.send > 0);
+        try contains(output, try std.fmt.bufPrint(&line, "lodestar_native_udp_socket_buffer_bytes{{role=\"{s}\",family=\"ip4\",direction=\"receive\"}} {d}\n", .{ role[0], reported.receive }));
+        try contains(output, try std.fmt.bufPrint(&line, "lodestar_native_udp_socket_buffer_bytes{{role=\"{s}\",family=\"ip4\",direction=\"send\"}} {d}\n", .{ role[0], reported.send }));
+        if (@import("builtin").os.tag == .linux) try contains(output, try std.fmt.bufPrint(&line, "lodestar_native_udp_socket_drops_total{{role=\"{s}\",family=\"ip4\"}} 0\n", .{role[0]}));
+    }
+    try std.testing.expect(std.mem.indexOf(u8, output, "family=\"ip6\"") == null);
 }
 
 test "metrics label redials after a health close in the dial retries contract series" {

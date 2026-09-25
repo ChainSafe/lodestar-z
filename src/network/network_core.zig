@@ -127,9 +127,10 @@ const DiscoveryOwners = struct {
     endpoints: AdvertisementEndpoints,
     quic_ports: [2]?u16,
 
-    fn init(self: *DiscoveryOwners, allocator: std.mem.Allocator, io: std.Io, options: DiscoveryOptions, host: *const @import("wire/keys.zig").KeyPair, local: *const t.LocalState, schedule: ForkSchedule, quic: [2]?t.Address, now: Now) !void {
-        const sockets = try @import("udp").Sockets.bind(io, options.bind);
+    fn init(self: *DiscoveryOwners, allocator: std.mem.Allocator, io: std.Io, options: DiscoveryOptions, buffers: @import("udp.zig").Buffers, host: *const @import("wire/keys.zig").KeyPair, local: *const t.LocalState, schedule: ForkSchedule, quic: [2]?t.Address, now: Now) !void {
+        var sockets = try @import("udp").Sockets.bind(io, options.bind);
         errdefer sockets.close(io);
+        @import("udp.zig").requestBuffers(&sockets, io, buffers, .network_discovery);
         var udp_addresses: [2]?d.types.Address = .{ null, null };
         for (sockets.values, 0..) |socket, i| if (socket) |value| {
             udp_addresses[i] = d.types.Address.fromNetwork(value.address);
@@ -184,6 +185,7 @@ pub const NetworkCore = struct {
 
     pub fn init(self: *NetworkCore, backing: std.mem.Allocator, io: std.Io, resolved: *const @import("configuration.zig").Resolved, startup: Startup) !void {
         try @import("configuration.zig").validate(resolved.limits, resolved.core);
+        try resolved.socket_buffers.validate();
         if (!wait.supported) return error.UnsupportedWait;
         var local: t.LocalState = undefined;
         try peers.control_wire.copyServingLocal(&local, &startup.local, @import("router.zig").Router.initialCapabilities(resolved.core.service.router).receive);
@@ -207,7 +209,7 @@ pub const NetworkCore = struct {
         self.native_event_count = 0;
         self.discovery = null;
         self.last_now = try transport_mod.currentTime(io);
-        try self.transport.init(allocator, io, .{ .host = startup.host, .bind = startup.bind, .limits = resolved.limits, .work_limits = resolved.work_limits, .keylog_path = startup.keylog_path });
+        try self.transport.init(allocator, io, .{ .host = startup.host, .bind = startup.bind, .limits = resolved.limits, .work_limits = resolved.work_limits, .socket_buffers = resolved.socket_buffers.quic, .keylog_path = startup.keylog_path });
         errdefer self.transport.deinit(io);
         self.service = try service_mod.Service.init(allocator, managed.serviceOptions(resolved.core, &local));
         errdefer self.service.deinit();
@@ -224,7 +226,7 @@ pub const NetworkCore = struct {
         if (startup.discovery) |discovery_options| {
             const owned = try allocator.create(DiscoveryOwners);
             errdefer allocator.destroy(owned);
-            try owned.init(allocator, io, discovery_options, startup.host, &local, startup.schedule, self.transport.udp.localAddresses(), self.last_now);
+            try owned.init(allocator, io, discovery_options, resolved.socket_buffers.discovery, startup.host, &local, startup.schedule, self.transport.udp.localAddresses(), self.last_now);
             self.discovery = owned;
         }
         errdefer if (self.discovery) |owned| {
