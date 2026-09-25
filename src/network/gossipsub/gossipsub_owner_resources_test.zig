@@ -281,3 +281,47 @@ test "gossip retention makes room from its own kind's oldest copy and refuses wh
     try std.testing.expectEqual(@as(u64, 1), g.messages.history.evictions[@intFromEnum(@import("mcache.zig").Eviction.retention)]);
     g.cancelWrites(g.sessions.ref(peer.index));
 }
+
+test "gossip refused retention leaves the history unchanged" {
+    const limits_mod = @import("../gossip_limits.zig");
+    const block = topic_mod.Kind.beacon_block;
+    const exit = topic_mod.Kind.voluntary_exit;
+    var limits: limits_mod.Limits = @splat(.{ .items = 4, .bytes = storage.page_bytes });
+    limits[@intFromEnum(block)].bytes = 2 * storage.page_bytes;
+    var boundary: @import("topic_policy.zig").Boundary = .{ .digest = .{ 1, 2, 3, 4 } };
+    boundary.rules[@intFromEnum(block)] = .{ .count = 1, .ssz_max = 6000 };
+    boundary.rules[@intFromEnum(exit)] = .{ .count = 1, .ssz_max = 3000 };
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .topic_policy = &.{boundary}, .validation_capacity = limits_mod.items(&limits), .processor_limits = limits });
+    defer g.deinit();
+    const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const history = &g.messages.history;
+    var random = std.Random.DefaultPrng.init(3);
+    var payloads: [3][5000]u8 = undefined;
+    for (&payloads) |*payload| random.random().bytes(payload);
+    const cases = [_]struct { name: []const u8, kept: [3][]const u8, queued: usize, refused: []const u8 }{
+        // Two one-page blocks fill the two-page allowance; the queued one cannot be reclaimed,
+        // so a two-page block must not evict the other.
+        .{ .name = "/eth2/01020304/beacon_block/ssz_snappy", .kept = .{ payloads[0][0..1000], payloads[1][0..1000], "" }, .queued = 1, .refused = &payloads[2] },
+        // A queued one-page exit fills the one-page allowance; inline exits free no page.
+        .{ .name = "/eth2/01020304/voluntary_exit/ssz_snappy", .kept = .{ "inline one", "inline two", payloads[0][1000..2000] }, .queued = 2, .refused = payloads[1][1000..2000] },
+    };
+    for (cases) |case| {
+        var handles: [3]storage.Handle = undefined;
+        var kept: usize = 0;
+        for (case.kept) |payload| {
+            if (payload.len == 0) continue;
+            _ = try g.publish(case.name, payload, .{ .mono_ms = 1, .unix_s = 0 });
+            handles[kept] = history.message(history.get(&g.messages.store, topic_mod.validMessageId(case.name, payload, .{})).?);
+            kept += 1;
+        }
+        try std.testing.expectEqual(.queued, g.sessions.rows[peer.index].io.tx.queueData(&g.messages.store, handles[case.queued], .forward, .{ .bytes = g.options.tx_peer_bytes }, 1));
+        const count = history.count;
+        try std.testing.expectError(error.ResourceExhausted, g.publish(case.name, case.refused, .{ .mono_ms = 2, .unix_s = 0 }));
+        try std.testing.expectEqual(count, history.count);
+        for (handles[0..kept]) |h| try std.testing.expect(history.get(&g.messages.store, g.messages.store.get(h).?.id) != null);
+    }
+    try std.testing.expectEqual(@as(u64, 0), history.evictions[@intFromEnum(@import("mcache.zig").Eviction.retention)]);
+    try std.testing.expectEqual(@as(u64, 1), g.messages.retention_refusals[@intFromEnum(block)]);
+    try std.testing.expectEqual(@as(u64, 1), g.messages.retention_refusals[@intFromEnum(exit)]);
+    g.cancelWrites(g.sessions.ref(peer.index));
+}

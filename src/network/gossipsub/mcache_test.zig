@@ -333,3 +333,42 @@ test "gossip history emits three windows and defers arrivals during a cycle" {
     try std.testing.expectEqual(@as(usize, 0), history.gossip("topic", &ids, epoch));
     history.age(&store, epoch);
 }
+
+fn retainNext(history: *History, store: *storage.Store, index: u32, name: []const u8) bool {
+    var id: MessageId = @splat(0);
+    std.mem.writeInt(u32, id[0..4], index, .little);
+    const h = store.put(id, name, "x").?;
+    defer store.seal(h);
+    if (!history.makeRoom(store, h)) return false;
+    history.put(store, h, 0);
+    return true;
+}
+
+test "gossip retention reclaims its own kind's old copies however many other messages follow them" {
+    const a = std.testing.allocator;
+    const limits_mod = @import("../gossip_limits.zig");
+    const attestation = "/eth2/01020304/beacon_attestation_1/ssz_snappy";
+    const exit = "/eth2/01020304/voluntary_exit/ssz_snappy";
+    var limits: limits_mod.Limits = @splat(.{ .items = 2, .bytes = storage.page_bytes });
+    limits[@intFromEnum(@import("topic.zig").Kind.beacon_attestation)].items = 9000;
+    limits[@intFromEnum(@import("topic.zig").Kind.voluntary_exit)].items = 8;
+    // The old 8,192-entry history and one holding the whole retention window admit the same exits.
+    for ([_]usize{ 8192, 8300 }, [_]u64{ 73, 0 }, [_]u64{ 0, 1 }) |capacity, capacity_evictions, retention_evictions| {
+        var store = try storage.Store.init(a, capacity + 2, storage.page_bytes);
+        defer store.deinit(a);
+        store.limits = limits;
+        var history = try History.init(a, capacity, 1);
+        defer history.deinit(a);
+        var index: u32 = 0;
+        for ([_]struct { []const u8, usize }{ .{ attestation, 64 }, .{ exit, 8 }, .{ attestation, 8192 }, .{ exit, 1 } }) |run| {
+            for (0..run[1]) |_| {
+                try std.testing.expect(retainNext(&history, &store, index, run[0]));
+                index += 1;
+            }
+        }
+        try std.testing.expectEqual(capacity_evictions, history.evictions[@intFromEnum(mcache.Eviction.capacity)]);
+        try std.testing.expectEqual(retention_evictions, history.evictions[@intFromEnum(mcache.Eviction.retention)]);
+        history.age(&store, constants.mcache_len);
+        try std.testing.expectEqual(@as(usize, 0), store.used_entries);
+    }
+}
