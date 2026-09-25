@@ -78,6 +78,7 @@ pub fn settle(env: napi.Env, runtime: *r.Runtime, limit: usize) !bool {
             break;
         }
         settled += 1;
+        runtime.bridge.deliver(.completion, 1);
         table.settle_cursor = i + 1;
         const cell = &table.cells[i];
         table.transition(cell, .copying);
