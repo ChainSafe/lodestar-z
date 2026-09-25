@@ -20,8 +20,6 @@ comptime {
     assert(payload_max <= batch_bytes);
 }
 pub const topic_max = native.topic.topic_max_len;
-/// A message whose delivery to the host rolled back this often is ignored the next time a claim reaches it.
-pub const rollbacks_max = 2;
 pub const Token = struct { index: u16, generation: u64 };
 pub const State = enum { free, capturing, needs_check, checking, waiting, queued, copying, delivered, verdict_pending };
 pub const Cell = struct {
@@ -54,8 +52,6 @@ pub const Cell = struct {
     execution_bytes: usize = 0,
     source_charge: usize = 0,
     retired: bool = false,
-    /// Deliveries of this message that rolled back.
-    rollbacks: u8 = 0,
     verdict: native.Verdict = .ignore,
 };
 pub const Diagnostics = struct {
@@ -106,8 +102,6 @@ pub const Batch = struct {
     len: usize = 0,
     jobs: [batch_max]Job = undefined,
     job_count: usize = 0,
-    /// Messages the claim ignored because their deliveries kept rolling back.
-    retired: usize = 0,
 };
 pub const GossipProcessor = struct {
     cells: []Cell,
@@ -520,15 +514,6 @@ pub const GossipProcessor = struct {
     }
     /// One claim's bounds; `ordinary` admits ordinary kinds besides the urgent ones.
     pub const Claim = struct { items: usize = batch_max, bytes: usize = batch_bytes, ordinary: bool = true };
-    /// Whether a claim ignores `cell` instead of delivering it: expired, ineligible, or rolled back too often.
-    fn stale(self: *const GossipProcessor, cell: *const Cell, now: u64) bool {
-        return now >= cell.deadline or !self.eligible(cell) or cell.rollbacks >= rollbacks_max;
-    }
-    /// Ignores a stale `cell`, counting a retirement for repeated rollbacks.
-    fn drop(self: *GossipProcessor, batch: *Batch, cell: *Cell) void {
-        batch.retired += @intFromBool(cell.rollbacks >= rollbacks_max);
-        self.ignore(cell);
-    }
     /// Whether the kind's execution limits admit `cell`.
     fn executable(self: *const GossipProcessor, cell: *const Cell) bool {
         const execution = self.execution orelse return true;
@@ -557,9 +542,9 @@ pub const GossipProcessor = struct {
                 const index = self.nextKind(kind);
                 if (index == none) break;
                 const cell = &self.cells[index];
-                if (self.stale(cell, now)) {
+                if (now >= cell.deadline or !self.eligible(cell)) {
                     work += 1;
-                    self.drop(&batch, cell);
+                    self.ignore(cell);
                     continue;
                 }
                 if (!self.executable(cell)) break;
@@ -569,8 +554,8 @@ pub const GossipProcessor = struct {
                 for (0..@min(batch_max - work, group_count)) |_| {
                     if (batch.len >= @min(batch_max, demand.items)) break;
                     const member = if (group == none) index else self.groups.rows[group].members.tail;
-                    if (self.stale(&self.cells[member], now)) {
-                        self.drop(&batch, &self.cells[member]);
+                    if (now >= self.cells[member].deadline or !self.eligible(&self.cells[member])) {
+                        self.ignore(&self.cells[member]);
                         work += 1;
                         continue;
                     }

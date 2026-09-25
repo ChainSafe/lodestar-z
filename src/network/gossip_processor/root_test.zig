@@ -283,24 +283,3 @@ test "gossip processor rechecks every waiting root in bounded passes and runs on
     // Each pass walks every row and spends one step ending.
     try t.expectEqual((2 * (rows + 1) + p.batch_max - 1) / p.batch_max, turns);
 }
-
-test "gossip processor ignores a message the next time a claim reaches it after two rolled-back deliveries" {
-    const limits: p.limits_mod.Limits = @splat(.{ .items = 4, .bytes = 16384 });
-    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits });
-    defer table.deinit();
-    defer table.close();
-    const failing = try add(&table, .voluntary_exit, null);
-    const neighbour = try add(&table, .voluntary_exit, null);
-    for (0..p.rollbacks_max) |_| {
-        const batch = table.claim(1);
-        try t.expectEqual(@as(usize, 2), batch.len);
-        table.finish(&batch, false);
-        table.get(failing).?.rollbacks += 1;
-    }
-    const batch = table.claim(1);
-    try t.expectEqualSlices(p.Token, &.{neighbour}, batch.tokens[0..batch.len]);
-    try t.expectEqual(@as(usize, 1), batch.retired);
-    try t.expectEqual(p.State.verdict_pending, table.get(failing).?.state);
-    try t.expectEqual(@import("../gossipsub/root.zig").Verdict.ignore, table.get(failing).?.verdict);
-    table.finish(&batch, true);
-}

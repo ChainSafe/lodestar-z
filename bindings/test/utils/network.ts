@@ -12,7 +12,6 @@ import type {
   NativeApplicationConfig,
   NativeDiscoveryConfig,
   NativeExchange,
-  NativeExchangeDelivery,
   NativeExchangeDemand,
   NativeGossipProcessorLimit,
   NativeIncomingRequest,
@@ -51,30 +50,19 @@ export const gossipAll: NativeExchangeDemand = {
 /** Dependency checks without a gossip claim. */
 export const checksOnly: NativeExchangeDemand = {...settleOnly, capacity, checks: 64};
 
-/** One exchange's delivery; a test fails on a rollback, which it never injects. */
 export function exchange(
   runtime: Pick<NativeNetworkApplicationRuntime, "exchange">,
   demand: NativeExchangeDemand,
   actions: readonly NativeAction[] = []
-): NativeExchangeDelivery {
-  return delivered(runtime.exchange(actions, demand));
-}
-
-export function delivered(result: NativeExchange): NativeExchangeDelivery {
-  if (result.rolledBack) throw Error("Unexpected exchange rollback");
-  return result;
+): NativeExchange {
+  return runtime.exchange(actions, demand);
 }
 
 /** The oldest queued incoming request, as one serving start of an exchange. */
 export function nextIncoming<T = NativeIncomingRequest>(runtime: {
-  exchange(
-    actions: readonly NativeAction[],
-    demand: NativeExchangeDemand
-  ): {rolledBack: false; serving: readonly T[]} | {rolledBack: true};
+  exchange(actions: readonly NativeAction[], demand: NativeExchangeDemand): {serving: readonly T[]};
 }): T | null {
-  const result = runtime.exchange([], {...settleOnly, capacity, servingStarts: 1});
-  if (result.rolledBack) throw Error("Unexpected exchange rollback");
-  return result.serving[0] ?? null;
+  return runtime.exchange([], {...settleOnly, capacity, servingStarts: 1}).serving[0] ?? null;
 }
 
 /**
@@ -269,7 +257,7 @@ function settlingHost(onWorkAvailable: () => void = () => undefined) {
     scheduled = false;
     const result = runtime?.deref()?.exchange([], settleOnly);
     if (result?.more) schedule();
-    else if (result?.rolledBack === false && result.disabledWaiting && !timer) {
+    else if (result?.disabledWaiting && !timer) {
       timer = setTimeout(() => {
         timer = undefined;
         schedule();

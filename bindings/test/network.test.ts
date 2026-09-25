@@ -3,7 +3,6 @@ import {setTimeout as delay} from "node:timers/promises";
 import {privateKeyFromRaw} from "@libp2p/crypto/keys";
 import {peerIdFromPublicKey} from "@libp2p/peer-id";
 import {expect, it, vi} from "vitest";
-import bindings from "../src/bindings.js";
 import {type NativeAction, type NativeExchangeDemand, initializeNativeNetworkRuntime} from "../src/network.js";
 import {
   applicationConfig,
@@ -288,7 +287,6 @@ it("rejects every invalid exchange demand, oversized batch and nested exchange b
     ).toMatchObject({
       more: false,
       peers: [],
-      rolledBack: false,
     });
     expect(Object.isFrozen(exchange(runtime, settleOnly))).toBe(true);
   } finally {
@@ -296,44 +294,7 @@ it("rejects every invalid exchange demand, oversized batch and nested exchange b
   }
 }, 20000);
 
-it("hands a rolled-back exchange to the host before touching its payload, then recovers and retries", async () => {
-  const native = (bindings as {NativeNetworkRuntime: {prototype: {exchange(...args: unknown[]): unknown}}})
-    .NativeNetworkRuntime.prototype;
-  const original = native.exchange;
-  const rolledBack = Object.freeze(
-    Object.defineProperties(
-      {more: true, retired: false, rolledBack: true},
-      Object.fromEntries(
-        ["serving", "peers", "checks", "gossip", "failure"].map((field) => [
-          field,
-          {
-            get() {
-              throw Error(`read ${field}`);
-            },
-          },
-        ])
-      )
-    )
-  );
-  let calls = 0;
-  native.exchange = function (this: unknown, ...args: unknown[]) {
-    return ++calls === 1 ? rolledBack : Reflect.apply(original, this, args);
-  };
-  const config = applicationConfig();
-  const runtime = startRuntime(config, () => undefined);
-  try {
-    await runtime.identity;
-    expect(runtime.exchange([], gossipAll)).toBe(rolledBack);
-    // The recovery pass is control-only; the normal attempt that follows carries the payload again.
-    expect(exchange(runtime, settleOnly)).toMatchObject({more: false, rolledBack: false});
-    expect(exchange(runtime, gossipAll)).toMatchObject({gossip: null, rolledBack: false, serving: []});
-  } finally {
-    native.exchange = original;
-    await runtime.close();
-  }
-});
-
-it.each([1, 3, 4] as const)("escalation trigger %i terminates the process through fatalError", (trigger) => {
+it.each([1, 3] as const)("escalation trigger %i terminates the process through fatalError", (trigger) => {
   const script = `import {initializeNativeNetworkRuntime} from "./bindings/src/network.js";
     import {applicationConfig} from "./bindings/test/utils/network.ts";
     const runtime = initializeNativeNetworkRuntime(applicationConfig(), () => undefined);
@@ -630,8 +591,11 @@ it("settles results only in an exchange and notifies once until an exchange find
     await delay(100);
     expect(notifications).toBe(1);
     expect(intentSettled()).toBe(false);
-    expect(runtime.exchange([], settleOnly)).toMatchObject({more: false, settled: 2});
-    expect(runtime.exchange([], settleOnly)).toMatchObject({more: false, settled: 0});
+    const identitySettled = watch(identity);
+    expect(runtime.exchange([], settleOnly).more).toBe(false);
+    await delay(0);
+    expect([intentSettled(), identitySettled()]).toEqual([true, true]);
+    expect(Object.isFrozen(runtime.exchange([], settleOnly))).toBe(true);
     expect((await intent).slot).toBe(config.initialSlot);
     expect((await identity).peerId).toBe(runtime.identity.peerId);
     const pull = runtime.request(runtime.identity.peerId, BLOCKS, new Uint8Array(32)).next();
@@ -649,5 +613,5 @@ it("settles results only in an exchange and notifies once until an exchange find
     }
   }
   expect(await runtime.closed).toEqual({reason: "requested"});
-  expect(runtime.exchange([], settleOnly)).toMatchObject({more: false, settled: 0});
+  expect(runtime.exchange([], settleOnly)).toMatchObject({more: false});
 }, 20000);

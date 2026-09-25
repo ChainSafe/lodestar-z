@@ -8,7 +8,6 @@ const processor = n.gossip_processor;
 pub const batch_max = processor.batch_max;
 pub const batch_bytes = processor.batch_bytes;
 pub const payload_max = processor.payload_max;
-pub const rollbacks_max = processor.rollbacks_max;
 pub const topic_max = processor.topic_max;
 pub const Token = processor.Token;
 pub const Cell = processor.Cell;

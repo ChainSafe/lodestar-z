@@ -229,9 +229,9 @@ pub fn exchange(self: *@This(), actions_value: js.Value, demand_value: js.Value)
     const count = try exchange_mod.parseActions(actions_value.val, &actions);
     const demand = try exchange_mod.Demand.parse(demand_value.val);
     var host: Exchange = .{ .env = js.env(), .runtime = runtime };
-    const settled = try host.settle(demand.settle);
+    try host.settle(demand.settle);
     const now = try gossip.monotonic();
-    const result = exchange_mod.run(runtime, actions[0..count], &demand, settled, now, &host) catch |err| {
+    const result = exchange_mod.run(runtime, actions[0..count], &demand, now, &host) catch |err| {
         if (jsStopped(err)) runtime.forceStop(true);
         return err;
     };
@@ -239,11 +239,10 @@ pub fn exchange(self: *@This(), actions_value: js.Value, demand_value: js.Value)
 }
 
 /// Terminates the process for a bridge contract failure the host escalates: 1, an exchange refused a batch the
-/// host generated; 3, the host's demand failed on three consecutive turns; 4, three consecutive deliveries rolled
-/// back and retired nothing.
+/// host generated; 3, the host's demand failed on three consecutive turns.
 pub fn fail(_: *@This(), trigger_value: js.Value, reason_value: js.Value) !void {
-    const trigger = try cfg.integer(trigger_value.val, 4);
-    if (trigger != 1 and trigger != 3 and trigger != 4) return error.InvalidNetworkInteger;
+    const trigger = try cfg.integer(trigger_value.val, 3);
+    if (trigger != 1 and trigger != 3) return error.InvalidNetworkInteger;
     var reason: [64]u8 = undefined;
     const len = try application_cfg.text(reason_value.val, &reason);
     var message: [96]u8 = undefined;
@@ -257,31 +256,25 @@ const Exchange = struct {
 
     pub const Result = Value;
 
-    /// Settles up to `limit` completions per legacy table. Returns how many.
-    pub fn settle(self: *Exchange, limit: usize) !usize {
+    /// Settles up to `limit` completions per legacy table.
+    pub fn settle(self: *Exchange, limit: usize) !void {
         const runtime = self.runtime;
         runtime.lock();
         const due = runtime.settleableLocked() or (runtime.quiescent and !runtime.close_settled);
         runtime.unlock();
-        if (!due) return 0;
-        const completions = &runtime.bridge.delivered[@intFromEnum(r.bridge.Delivery.completion)];
-        const before = completions.*;
+        if (!due) return;
         _ = settleWithin(self.env, runtime, limit) catch |err| {
             settlementFailed(self.env, runtime, err);
             return err;
         };
-        return completions.* - before;
     }
     /// A fresh result, or null when there is nothing to deliver and a prepared one serves.
     pub fn build(self: *Exchange, selection: *exchange_mod.Selection) !?Value {
-        if (!selection.delivers() and selection.settled == 0 and selection.retired == 0) return null;
+        if (!selection.delivers()) return null;
         return try exchange_mod.build(self.env, self.runtime, selection);
     }
-    pub fn finish(self: *Exchange, output: ?Value, _: *const exchange_mod.Selection, outcome: exchange_mod.Outcome) !Value {
+    pub fn finish(self: *Exchange, output: ?Value, outcome: exchange_mod.Outcome) !Value {
         return exchange_mod.finish(self.env, self.runtime, output, outcome);
-    }
-    pub fn rolledBack(self: *Exchange, retired: bool) !Value {
-        return self.runtime.results.rolled_back[@intFromBool(retired)].?.getValue();
     }
     pub fn discard(self: *Exchange, selection: *const exchange_mod.Selection) void {
         for (selection.closed[0..selection.closed_count]) |deferred| @import("network_js.zig").discardPromise(self.env, deferred);
@@ -289,12 +282,10 @@ const Exchange = struct {
     pub fn keepAlive(self: *Exchange) void {
         self.runtime.notify.ref(self.env) catch {};
     }
-    /// Our own allocator's OutOfMemory is the only operation-local allocation failure: an N-API payload buffer
-    /// allocation that fails terminates the process (bindings/test/network-allocation.test.ts). An exception that
-    /// clears means the bridge broke its contract. One that will not clear means JavaScript cannot run, as does a
-    /// pending-exception status with none pending, which N-API returns for cannot_run_js to this module version.
+    /// An exception that clears means the bridge broke its contract. One that will not clear means JavaScript cannot
+    /// run, as does a pending-exception status with none pending, which N-API returns for cannot_run_js to this
+    /// module version.
     pub fn classify(self: *Exchange, err: anyerror) exchange_mod.Failure {
-        if (err == error.OutOfMemory) return .allocation;
         if (err == error.Closing or err == error.CannotRunJS) return .stopped;
         const pending = self.env.isExceptionPending() catch return .stopped;
         if (!pending) return if (err == error.PendingException) .stopped else .contract;

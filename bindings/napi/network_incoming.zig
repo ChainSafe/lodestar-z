@@ -30,8 +30,6 @@ pub const Cell = struct {
     context: ?rr.ForkEntry = null,
     copying: bool = false,
     exposed: bool = false,
-    /// Deliveries of this start that rolled back.
-    rollbacks: u8 = 0,
     closed: ?napi.Deferred = null,
     pending: ?napi.Deferred = null,
     permission: ?napi.Deferred = null,

@@ -351,24 +351,13 @@ export type NativeAction =
   | {type: "dropQueued"}
   | {type: "reportPeer"; peerId: PeerIdStr; action: NativePeerAction; count: number};
 
-/** A delivery that rolled back after an operation-local allocation failure. `retired` reports a retired item. */
-export interface NativeExchangeRollback {
-  readonly rolledBack: true;
-  readonly more: true;
-  readonly retired: boolean;
-}
-
 /** One exchange's delivery, which the host owns; frozen when it delivers nothing. */
-export interface NativeExchangeDelivery {
-  readonly rolledBack: false;
-  readonly settled: number;
+export interface NativeExchange {
   /** Updates replace the previous state of the same peer. */
   readonly peers: readonly NativePeerObservation[];
   readonly serving: readonly NativeIncomingRequest[];
   readonly checks: readonly NativeGossipDependencyCheck[];
   readonly gossip: NativeGossipBatch | null;
-  /** It retired an item whose deliveries kept rolling back. */
-  readonly retired: boolean;
   /** Another exchange with the same enablement would make progress. */
   readonly more: boolean;
   /** Work waits for capacity the host reported as zero, or for a service this demand disabled. */
@@ -378,10 +367,8 @@ export interface NativeExchangeDelivery {
   readonly failure: unknown;
 }
 
-export type NativeExchange = NativeExchangeRollback | NativeExchangeDelivery;
-
-/** An escalation trigger: 1, an exchange refused a generated batch; 3, demand failed; 4, deliveries rolled back. */
-export type NativeEscalation = 1 | 3 | 4;
+/** An escalation trigger: 1, an exchange refused a generated batch; 3, the host's demand kept failing. */
+export type NativeEscalation = 1 | 3;
 
 export interface NativePublicationDiagnostics {
   capacity: number;

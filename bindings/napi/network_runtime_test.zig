@@ -234,11 +234,8 @@ const PeerHost = struct {
     pub fn build(_: *PeerHost, selection: *exchange.Selection) !usize {
         return selection.peer_count;
     }
-    pub fn finish(_: *PeerHost, peers: usize, _: *const exchange.Selection, outcome: exchange.Outcome) !Result {
+    pub fn finish(_: *PeerHost, peers: usize, outcome: exchange.Outcome) !Result {
         return .{ .peers = peers, .more = outcome.more };
-    }
-    pub fn rolledBack(_: *PeerHost, _: bool) !Result {
-        unreachable;
     }
     pub fn discard(_: *PeerHost, _: *const exchange.Selection) void {}
     pub fn keepAlive(_: *PeerHost) void {}
@@ -288,7 +285,7 @@ test "owner work that races an exchange's check and arm always reaches a later e
         const notified = notifications.load(.acquire) != delivered;
         if (notified) delivered += 1;
         if (notified or again) {
-            const output = try exchange.run(&runtime, &.{}, &demand, 0, 0, &host);
+            const output = try exchange.run(&runtime, &.{}, &demand, 0, &host);
             consumed += output.peers;
             again = output.more;
             exchanges += 1;

@@ -40,26 +40,19 @@ test "recomputing a queued row keeps its position" {
     try std.testing.expectEqual([_]?Row{ .peers, .checks, .gossip, null, null }, order(&ready));
 }
 
-test "a pinned row ignores publications until its unpin, which rolls back to the head or moves it" {
+test "a pinned row ignores publications until its unpin moves it where it belongs" {
     var ready: Readiness = .{ .armed = false };
     for ([_]Row{ .peers, .checks, .gossip }) |row| _ = ready.recompute(row, .payload);
-    // Rows pinned in list order and unpinned in reverse keep their order on a rollback.
-    const first = ready.pin(.peers);
-    const second = ready.pin(.checks);
+    ready.pin(.peers);
+    ready.pin(.checks);
     try std.testing.expect(!ready.recompute(.checks, .none));
     try std.testing.expectEqual(readiness.Place.none, ready.place(.checks));
-    ready.unpin(.checks, second, .payload, true);
-    ready.unpin(.peers, first, .payload, true);
-    try std.testing.expectEqual([_]?Row{ .peers, .checks, .gossip, null, null }, order(&ready));
-    // A commit, or a rollback whose row wants another place, moves the row as a recompute does.
-    const committed = ready.pin(.peers);
-    ready.unpin(.peers, committed, .payload, false);
-    try std.testing.expectEqual([_]?Row{ .checks, .gossip, .peers, null, null }, order(&ready));
-    const rolled = ready.pin(.checks);
-    ready.unpin(.checks, rolled, .none, true);
-    const changed = ready.pin(.gossip);
-    ready.unpin(.gossip, changed, .parked, true);
-    try std.testing.expectEqual([_]?Row{ .peers, null, null, null, null }, order(&ready));
+    try std.testing.expectEqual([_]?Row{ .gossip, null, null, null, null }, order(&ready));
+    ready.unpin(.checks, .none);
+    ready.unpin(.peers, .payload);
+    try std.testing.expectEqual([_]?Row{ .gossip, .peers, null, null, null }, order(&ready));
+    ready.pin(.gossip);
+    ready.unpin(.gossip, .parked);
     try std.testing.expectEqual(readiness.Place.parked, ready.place(.gossip));
     try std.testing.expect(!ready.arm());
 }
