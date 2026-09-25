@@ -947,6 +947,30 @@ test "managed review early native close preserves selected reason and counts it 
     }
 }
 
+test "managed records a remote close of its dial before Status as an early close and none once ready" {
+    for ([_]bool{ false, true }) |ready| {
+        var setup: Setup = .{};
+        try setup.init(&.{});
+        defer setup.deinit();
+        for (0..if (ready) 50 else 1) |_| try setup.step(0);
+        var snapshots: [4]t.Snapshot = undefined;
+        try std.testing.expectEqual(@as(usize, 1), setup.server.snapshots(&snapshots));
+        const remote_conn = snapshots[0].connection.?;
+        const server_view = setup.server.catalog.history.identityKey(&snapshots[0].identity);
+        try std.testing.expectEqual(@as(usize, 1), setup.client.snapshots(&snapshots));
+        try std.testing.expectEqual(ready, snapshots[0].relevant);
+        const client_view = setup.client.catalog.history.identityKey(&snapshots[0].identity);
+        const gate: u64 = 0x47415445;
+        try std.testing.expect(setup.pair.server.close(remote_conn, gate));
+        for (0..8) |_| try setup.step(0);
+        try std.testing.expectEqual(@as(u16, 0), setup.client.catalog.connectedCount());
+        const expected: ?t.Rejection = if (ready) null else .early_close;
+        try std.testing.expectEqual(expected, setup.client.catalog.history.rejection(client_view, setup.pair.now.mono_ms));
+        try std.testing.expectEqual(@as(u64, @intFromBool(!ready)), setup.client.catalog.rejections[@intFromEnum(t.Rejection.early_close)]);
+        try std.testing.expectEqual(@as(?t.Rejection, null), setup.server.catalog.history.rejection(server_view, setup.pair.now.mono_ms));
+    }
+}
+
 test "managed coverage demand copies persists across slots and keeps general discovery independent" {
     var setup: Setup = .{};
     try setup.initOwners(&.{});

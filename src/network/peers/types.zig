@@ -65,6 +65,10 @@ pub const DisconnectReason = enum {
 /// `health` is a peer-charged health close of a connection to the endpoint; no dial attempt ends with it.
 pub const DialFailure = enum { unanswered, handshake_timeout, peer_id_mismatch, refused, destination_unreachable, expired, health };
 pub const DialOutcome = enum { connected, deferred, admission_refused, cancelled, unanswered, handshake_timeout, peer_id_mismatch, refused, destination_unreachable, expired };
+/// How a remote refused us, recorded against its identity. `banned` covers every lasting exclusion:
+/// a bad score, a ban, or an irrelevant network. `early_close` is a remote close of our dial before
+/// the Status and Metadata exchange completed.
+pub const Rejection = enum { shutdown, fault, early_close, too_many_peers, banned };
 pub const Snapshot = struct {
     identify: ?@import("../identify/root.zig").Metadata = null,
     peer: PeerRef,

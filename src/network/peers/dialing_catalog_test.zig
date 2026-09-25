@@ -4,6 +4,7 @@ const enr = @import("enr.zig");
 const custody = @import("custody.zig");
 const Catalog = @import("catalog.zig").Catalog;
 const dialing = @import("dialing.zig");
+const history = @import("dial_history.zig");
 const a = std.testing.allocator;
 const address: t.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9001 } };
 const local: t.PeerId = .{ .bytes = @splat(0) };
@@ -244,4 +245,82 @@ test "peer fold zombie endpoint is blocked after two health closes across redisc
     zombie.sequence = 4;
     try std.testing.expectError(error.RecentlyFailed, d.enqueueDiscovered(&c, &zombie, &.{}, &.{}, now));
     try d.enqueueDiscovered(&c, &zombie, &.{}, &.{}, now - 60_000 + @import("dial_history.zig").endpoint_memory_ms);
+}
+
+/// Dials the discovered peer, lands the connection, and has the remote end it with `rejection`.
+fn rejectedRound(c: *Catalog, d: *dialing.Dialing, identity: *const t.PeerId, index: u16, rejection: t.Rejection, now_ms: u64) !void {
+    var out: [1]dialing.DialIntent = undefined;
+    try std.testing.expectEqual(@as(usize, 1), d.poll(c, now_ms, &out));
+    try std.testing.expect(out[0].peer.eql(identity));
+    const conn: t.Handle = .{ .index = index, .generation = 1 };
+    try std.testing.expect(d.dialStarted(out[0].token, conn));
+    const peer = admit(c, identity, conn.index, .outbound, now_ms).admitted.peer;
+    d.accepted(c, peer, conn, now_ms);
+    c.settleRejections(peer, conn, false, rejection, now_ms);
+    try std.testing.expect(c.disconnect(peer, conn, .remote_goodbye, now_ms));
+    var events: [4]t.Event = undefined;
+    _ = c.pollEvents(&events);
+}
+
+test "peer fold a full peer waits 5, 15 then 60 minutes across row reclamation and fresh records" {
+    var c = try Catalog.initWithIntents(a, opts, 2, 8, 1);
+    defer c.deinit(a);
+    var d = try dialing.Dialing.init(.{ .capacity = 2, .concurrent_max = 1, .seed = 1 });
+    var full = try candidate(1, 0);
+    var now: u64 = 0;
+    for ([_]u64{ 5, 15, 60, 5 }, 0..) |minutes, round| {
+        // Once its memory lapses, the full peer's next rejection starts over.
+        if (round == 3) now += history.rejection_memory_ms - 60 * 60_000;
+        try d.enqueueDiscovered(&c, &full, &.{}, &.{}, now);
+        try rejectedRound(&c, &d, &full.peer, @intCast(round), .too_many_peers, now);
+        if (round == 0) {
+            for (0..3) |i| {
+                const other: t.PeerId = .{ .bytes = @splat(@intCast(20 + i)) };
+                try std.testing.expect(admit(&c, &other, @intCast(4 + i), .inbound, now) == .admitted);
+            }
+            try std.testing.expect(c.find(&full.peer) == null);
+        }
+        full.sequence += 1;
+        const until = now + minutes * 60_000;
+        try std.testing.expectError(error.RecentlyRejected, d.enqueueDiscovered(&c, &full, &.{}, &.{}, until - 1));
+        now = until;
+    }
+    try std.testing.expectEqual(@as(u64, 4), d.refused.identity[@intFromEnum(t.Rejection.too_many_peers)]);
+    try std.testing.expectEqual(@as(u64, 4), c.rejections[@intFromEnum(t.Rejection.too_many_peers)]);
+}
+
+test "peer fold early closes escalate while manual and inbound connections bypass them until a kept connection clears them" {
+    var c = try Catalog.initWithIntents(a, opts, 2, 8, 1);
+    defer c.deinit(a);
+    var d = try dialing.Dialing.init(.{ .capacity = 2, .concurrent_max = 1, .seed = 1 });
+    var gated = try candidate(1, 0);
+    var now: u64 = 0;
+    var block_end: u64 = 0;
+    for ([_]u64{ 1, 15, 60 }, 0..) |minutes, round| {
+        now = block_end;
+        try d.enqueueDiscovered(&c, &gated, &.{}, &.{}, now);
+        try rejectedRound(&c, &d, &gated.peer, @intCast(round), .early_close, now);
+        gated.sequence += 1;
+        block_end = now + minutes * 60_000;
+        try std.testing.expectError(error.RecentlyRejected, d.enqueueDiscovered(&c, &gated, &.{}, &.{}, block_end - 1));
+    }
+    try d.enqueue(&c, &gated.peer, &.{address}, false, now);
+    const due = d.nextWakeup(&c, now, 1).?;
+    try std.testing.expect(due < block_end);
+    var out: [1]dialing.DialIntent = undefined;
+    try std.testing.expectEqual(@as(usize, 1), d.poll(&c, due, &out));
+    try std.testing.expect(out[0].peer.eql(&gated.peer));
+    try std.testing.expect(d.dialDeferred(&c, out[0].token, due));
+    const conn: t.Handle = .{ .index = 7, .generation = 1 };
+    const admission = admit(&c, &gated.peer, conn.index, .inbound, due);
+    try std.testing.expect(admission == .admitted);
+    d.accepted(&c, admission.admitted.peer, conn, due);
+    const kept = due + history.kept_connection_ms;
+    c.settleRejections(admission.admitted.peer, conn, true, null, kept - 1);
+    try std.testing.expectError(error.RecentlyRejected, d.enqueueDiscovered(&c, &gated, &.{}, &.{}, kept - 1));
+    c.settleRejections(admission.admitted.peer, conn, false, null, kept);
+    try std.testing.expectError(error.RecentlyRejected, d.enqueueDiscovered(&c, &gated, &.{}, &.{}, kept));
+    c.settleRejections(admission.admitted.peer, conn, true, null, kept);
+    try d.enqueueDiscovered(&c, &gated, &.{}, &.{}, kept);
+    try std.testing.expectEqual(@as(u64, 3), c.rejections[@intFromEnum(t.Rejection.early_close)]);
 }

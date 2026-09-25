@@ -1067,7 +1067,7 @@ test "peer dial dead discovery endpoints do not return as untried candidates" {
     try std.testing.expectEqual(@as(u64, 2), q.outcomes[@intFromEnum(t.DialOutcome.unanswered)]);
     try std.testing.expectEqual(@as(u64, 1), q.retries[@intFromEnum(t.DialFailure.unanswered)]);
     try std.testing.expectError(error.RecentlyFailed, q.enqueueDiscovered(&catalog, &candidate, &.{}, &.{}, now));
-    try std.testing.expectEqual(@as(u64, 1), q.counters.recent_failures_refused);
+    try std.testing.expectEqual(@as(u64, 1), q.refused.endpoint);
     try q.enqueueDiscovered(&catalog, &candidate, &.{}, &.{}, now + @import("dial_history.zig").endpoint_memory_ms);
     const row = catalog.rowFor(catalog.find(&candidate.peer).?).?;
     try std.testing.expectEqual(@as(u8, 0), row.intent.failures);

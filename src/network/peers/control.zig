@@ -64,6 +64,10 @@ const Schedule = struct {
     /// clears the endpoint's health strikes.
     evidence: enum { pending, ready, proven } = .pending,
     closing: ?struct { reason: t.DisconnectReason, deadline_ms: u64, sent: bool = false } = null,
+    /// How the remote refused us on this connection, recorded against its identity at close: its
+    /// Goodbye, or for our dial a close before the Status and Metadata exchange completed. Neither
+    /// counts once a local close began.
+    rejection: ?t.Rejection = null,
 };
 pub const Control = struct {
     operations: []Operation,
@@ -505,8 +509,17 @@ pub const Control = struct {
         const reason = goodbye.reason(code);
         const snapshot = catalog.get(peer).?;
         self.counters.events.observeGoodbye(code, false, snapshot.connected_at_ms, now.mono_ms);
-        std.log.scoped(.network_peers).debug("peer_goodbye_received peer={f} connection={d}:{d} code={d} reason={s} cooldown_ms={d} during_close={any} agent={f}", .{ @import("../logging.zig").peer(&snapshot.identity), conn.index, conn.generation, code, @tagName(reason), goodbye.cooldownMs(code), during_close, std.json.fmt(client.agent(&snapshot.identify), .{}) });
-        _ = catalog.cooldown(peer, conn, now.mono_ms, goodbye.cooldownMs(code));
+        std.log.scoped(.network_peers).debug("peer_goodbye_received peer={f} connection={d}:{d} code={d} reason={s} during_close={any} agent={f}", .{ @import("../logging.zig").peer(&snapshot.identity), conn.index, conn.generation, code, @tagName(reason), during_close, std.json.fmt(client.agent(&snapshot.identify), .{}) });
+        const row = self.schedule(peer, conn) orelse return;
+        if (row.closing == null and row.rejection == null) row.rejection = goodbye.rejection(code);
+    }
+
+    /// Notes a close the remote initiated. On our dial before the Status and Metadata exchange
+    /// completed, it is an early close.
+    pub fn remoteClosed(self: *Control, peer: t.PeerRef, conn: t.Handle) void {
+        const row = self.schedule(peer, conn) orelse return;
+        if (row.closing == null and row.rejection == null and row.direction == .outbound and row.evidence == .pending)
+            row.rejection = .early_close;
     }
 
     pub fn close(
@@ -519,9 +532,10 @@ pub const Control = struct {
         reason: t.DisconnectReason,
         now: Now,
     ) void {
-        if (self.schedule(peer, conn) == null) return;
+        const row = self.schedule(peer, conn) orelse return;
         const snapshot = catalog.get(peer).?;
         const kind = client.fromIdentify(&snapshot.identify);
+        catalog.settleRejections(peer, conn, row.evidence != .pending, row.rejection, now.mono_ms);
         self.cancelConnection(service, engine, peer, conn);
         service.gossipsub.retireConnection(&service.router, engine, conn, now);
         _ = catalog.disconnect(peer, conn, reason, now.mono_ms);

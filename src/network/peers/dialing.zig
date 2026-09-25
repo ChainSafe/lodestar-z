@@ -46,6 +46,9 @@ pub const Dialing = struct {
     outcomes: [std.meta.fields(t.DialOutcome).len]u64 = @splat(0),
     /// Redials of an endpoint by its previous failure, each counted when the redial is selected.
     retries: [std.meta.fields(t.DialFailure).len]u64 = @splat(0),
+    /// Discovered candidates refused because every endpoint recently failed, or because the
+    /// identity recently rejected us, by that rejection.
+    refused: struct { endpoint: u64 = 0, identity: [std.meta.fields(t.Rejection).len]u64 = @splat(0) } = .{},
     /// Attempts held, and those not yet started on a connection.
     held: Attempts = .{},
     /// Moves on every change to the attempt table or to a manual intent.
@@ -62,7 +65,6 @@ pub const Dialing = struct {
         manual_expired: u64 = 0,
         manual_cancelled: u64 = 0,
         failed_intents_released: u64 = 0,
-        recent_failures_refused: u64 = 0,
     };
     pub const Resources = struct {
         capacity: usize = 0,
@@ -153,10 +155,7 @@ pub const Dialing = struct {
             }
             const retained = catalog.intents.isSet(ref.index);
             const admitted = admittedAddresses(catalog, candidate, now_ms);
-            if ((!retained or row.intent.automatic) and admitted.count == 0) {
-                self.counters.recent_failures_refused +|= 1;
-                return error.RecentlyFailed;
-            }
+            if ((!retained or row.intent.automatic) and admitted.count == 0) return self.refuse(&admitted);
             _ = try catalog.retainIntent(&candidate.peer);
             if (!retained) row.intent.automatic = true;
             row.node_id = candidate.node_id;
@@ -169,10 +168,7 @@ pub const Dialing = struct {
             return;
         }
         const admitted = admittedAddresses(catalog, candidate, now_ms);
-        if (admitted.count == 0) {
-            self.counters.recent_failures_refused +|= 1;
-            return error.RecentlyFailed;
-        }
+        if (admitted.count == 0) return self.refuse(&admitted);
         var incoming: Row = .{ .identity = candidate.peer, .node_id = candidate.node_id, .intent = .{ .automatic = true, .eligible_at_ms = now_ms, .history_until_ms = now_ms +| history_retention_ms, .hints = hints, .hints_at_ms = now_ms } };
         applyAddresses(&incoming.intent, &admitted);
         Catalog.prepareCandidateCustody(&incoming, context);
@@ -190,6 +186,14 @@ pub const Dialing = struct {
         row.custody_context = incoming.custody_context;
         self.selection_dirty = true;
         catalog.markDial(ref.index);
+    }
+    fn refuse(self: *Dialing, admitted: *const Admitted) error{ RecentlyFailed, RecentlyRejected } {
+        const kind = admitted.rejection orelse {
+            self.refused.endpoint +|= 1;
+            return error.RecentlyFailed;
+        };
+        self.refused.identity[@intFromEnum(kind)] +|= 1;
+        return error.RecentlyRejected;
     }
     fn replacement(catalog: *const Catalog, incoming: *const Row, context: *const t.ForkContext, wanted: *const t.Coverage, now_ms: u64) ?usize {
         const incoming_utility = matchesDemand(incoming, context, wanted, now_ms);
@@ -710,10 +714,13 @@ fn dialedKey(catalog: *const Catalog, row: *const Row, attempt: *const Attempt) 
     return catalog.history.endpointKey(&row.identity, attempt.address);
 }
 
-const Admitted = struct { addresses: [2]t.Address = undefined, count: u8 = 0, strikes: u8 = 0 };
+const Admitted = struct { addresses: [2]t.Address = undefined, count: u8 = 0, strikes: u8 = 0, rejection: ?t.Rejection = null };
 
+/// The candidate's endpoints its dial history admits: none while the identity's rejection blocks
+/// it, else those without a blocking failure.
 fn admittedAddresses(catalog: *const Catalog, candidate: *const enr.Candidate, now_ms: u64) Admitted {
-    var result: Admitted = .{};
+    var result: Admitted = .{ .rejection = catalog.history.rejection(catalog.history.identityKey(&candidate.peer), now_ms) };
+    if (result.rejection != null) return result;
     for (candidate.addresses[0..candidate.address_count]) |address| {
         if (result.count != 0 and result.addresses[0].eql(address)) continue;
         const key = catalog.history.endpointKey(&candidate.peer, address);

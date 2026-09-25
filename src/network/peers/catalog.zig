@@ -74,6 +74,8 @@ pub const Catalog = struct {
     direct_count: u16 = 0,
     intent_revision: u64 = 0,
     connection_backoffs: u64 = 0,
+    /// Rejections recorded against identities, by kind.
+    rejections: [@typeInfo(t.Rejection).@"enum".fields.len]u64 = @splat(0),
     random: std.Random.DefaultPrng,
     candidate_custody_cursor: usize = 0,
     revision: u64 = 0,
@@ -706,6 +708,25 @@ pub const Catalog = struct {
         const row = self.connectedRow(ref, conn) orelse return;
         const endpoint = row.dialed orelse return;
         self.history.clearFailures(self.history.endpointKey(&row.identity, endpoint));
+    }
+
+    /// Settles the identity's rejection memory as its connection ends. Control calls it with whether
+    /// the connection completed the Status and Metadata exchange, and with the rejection the remote
+    /// ended it with. A ready connection kept `kept_connection_ms` first clears the identity's
+    /// earlier rejections. A rejection then adds one and releases the discovery intent, so only a
+    /// rediscovery once the block passed dials the peer again.
+    pub fn settleRejections(self: *Catalog, ref: t.PeerRef, conn: t.Handle, ready: bool, rejection: ?t.Rejection, now_ms: u64) void {
+        const row = self.connectedRow(ref, conn) orelse return;
+        const key = self.history.identityKey(&row.identity);
+        if (ready and now_ms -| row.connected_at_ms >= dial_history.kept_connection_ms) self.history.clearRejections(key);
+        const kind = rejection orelse return;
+        const block_ms = self.history.reject(key, kind, now_ms);
+        self.rejections[@intFromEnum(kind)] +|= 1;
+        std.log.scoped(.network_peers).debug("peer_rejection_recorded peer={f} connection={d}:{d} kind={s} block_ms={d}", .{ @import("../logging.zig").peer(&row.identity), conn.index, conn.generation, @tagName(kind), block_ms });
+        if (!row.intent.automatic) return;
+        row.intent.automatic = false;
+        self.markDial(ref.index);
+        if (!row.direct and row.intent.manual_until_ms == 0 and row.attempt == null) self.releaseIntent(ref);
     }
 
     /// Clears the health evidence of the endpoint the connection was dialed to. Control calls it once

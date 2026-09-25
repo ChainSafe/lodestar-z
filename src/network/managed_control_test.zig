@@ -221,7 +221,11 @@ test "managed records a buffered Goodbye before transport cancellation and prese
         var closed: [1]t.Event = undefined;
         try std.testing.expectEqual(@as(usize, 1), setup.server.catalog.pollEvents(&closed));
         try std.testing.expectEqual(if (local_ban) t.DisconnectReason.banned else .remote_goodbye, closed[0].closed.reason);
-        try std.testing.expect(snapshot.goodbye_until_ms >= setup.pair.now.mono_ms + 300_000);
+        const identity = setup.server.catalog.history.identityKey(&snapshot.identity);
+        const blocked_until = setup.pair.now.mono_ms + if (local_ban) @as(u64, 600_000) else 300_000;
+        try std.testing.expectEqual(if (local_ban) blocked_until else 0, snapshot.goodbye_until_ms);
+        try std.testing.expectEqual(if (local_ban) null else @as(?t.Rejection, .too_many_peers), setup.server.catalog.history.rejection(identity, blocked_until - 1));
+        try std.testing.expectEqual(@as(?t.Rejection, null), setup.server.catalog.history.rejection(identity, blocked_until));
         try std.testing.expectEqual(@as(u64, 1), setup.server.control.counters.events.goodbyes[@intFromEnum(@import("peers/goodbye.zig").Reason.too_many_peers)]);
         try std.testing.expectEqual(@as(u64, 1), setup.server_service.reqresp.counters.goodbyes_recovered_on_close);
     }

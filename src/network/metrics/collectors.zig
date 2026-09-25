@@ -134,6 +134,15 @@ fn writeNativeCounters(self: *const Context, w: *prom.Encoder) prom.Error!void {
     try w.counters("lodestar_native_gossipsub_", &self.owner.service.gossipsub.counters);
     try w.counters("lodestar_native_dial_", &self.owner.peer_manager.dialing.counters);
     try w.counters("lodestar_native_dial_", &.{ .connection_backoffs = self.owner.peer_manager.catalog.connection_backoffs });
+    const refused = try w.family(.{
+        .name = "lodestar_native_dial_recent_failures_refused_total",
+        .kind = .counter,
+        .help = "Discovered candidates refused because every endpoint recently failed, or because the identity recently rejected us, by that rejection",
+        .labels = &.{"reason"},
+    });
+    const refusals = &self.owner.peer_manager.dialing.refused;
+    try refused.sample(.{"endpoint"}, refusals.endpoint);
+    inline for (std.meta.fields(peer_types.Rejection)) |field| try refused.sample(.{field.name}, refusals.identity[field.value]);
     const discovery_counts = if (self.owner.discovery) |d| d.coordinator.counters else discovery_metrics.Counters{};
     const rejections = if (self.owner.discovery) |d| d.coordinator.rejections else @as([discovery_metrics.rejection_count]u64, @splat(0));
     const admissions = if (self.owner.discovery) |d| d.transport.engine.channel.admission.counts else @as(@import("discv5").admission.Counts, @splat(@splat(0)));
@@ -272,6 +281,12 @@ fn writePeerCloses(self: *const Context, w: *prom.Encoder) prom.Error!void {
         .help = "Received Ethereum Goodbye reasons; unknown wire codes share one label",
         .labels = &.{"reason"},
     }, goodbye.Reason, &self.owner.peer_manager.control.counters.events.goodbyes);
+    try w.enums(.{
+        .name = "lodestar_native_peer_rejections_total",
+        .kind = .counter,
+        .help = "Remote rejections recorded against peer identities by kind: a received Goodbye, or a remote close of our dial before Status",
+        .labels = &.{"kind"},
+    }, peer_types.Rejection, &self.owner.peer_manager.catalog.rejections);
     try w.enums(.{
         .name = "lodestar_native_peer_health_failures_total",
         .kind = .counter,

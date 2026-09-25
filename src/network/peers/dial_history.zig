@@ -1,15 +1,31 @@
-//! Bounded dial failure memory keyed by (peer, endpoint) or by peer. It outlives catalog rows, so
-//! a replaced discovery intent cannot come back as an untried candidate. Keys are seeded hashes;
-//! a collision only suppresses or escalates one candidate.
+//! Bounded dial failure memory keyed by (peer, endpoint), and remote rejection memory keyed by
+//! peer. It outlives catalog rows, so a replaced discovery intent cannot come back as an untried
+//! candidate and a rejecting peer cannot come back as a fresh one. Keys are seeded hashes; a
+//! collision only suppresses or escalates one candidate.
 const std = @import("std");
 const t = @import("types.zig");
 
 pub const strikes_to_block: u8 = 2;
 pub const endpoint_memory_ms: u64 = 30 * 60_000;
 pub const mismatch_memory_ms: u64 = 6 * 60 * 60_000;
-pub const remote_full_memory_ms: u64 = 2 * 60 * 60_000;
-pub const remote_full_cooldowns_ms = [_]u64{ 5 * 60_000, 15 * 60_000, 60 * 60_000 };
+/// A rejection's strikes last this long after the latest one.
+pub const rejection_memory_ms: u64 = 2 * 60 * 60_000;
+/// The blocks of a second and of every later rejection strike inside the memory window.
+const rejection_escalation_ms = [_]u64{ 15 * 60_000, 60 * 60_000 };
+/// A connection that completed the Status and Metadata exchange and stayed up this long clears its
+/// identity's rejections. Full peers commonly prune a new connection within its first 10 minutes,
+/// and a peer that kept us longer served us for longer than any first block.
+pub const kept_connection_ms: u64 = 10 * 60_000;
 pub const probe_max: usize = 8;
+
+/// The block of a first rejection, which is also the cooldown after a Goodbye we send.
+pub fn firstBlockMs(kind: t.Rejection) u64 {
+    return switch (kind) {
+        .shutdown, .fault, .early_close => 60_000,
+        .too_many_peers => 5 * 60_000,
+        .banned => 10 * 60_000,
+    };
+}
 
 pub const Entry = struct {
     key: u64 = 0,
@@ -20,19 +36,22 @@ pub const Entry = struct {
     /// The strikes from health closes, at most `strikes`. They outlive the connection-failure
     /// evidence an application exchange clears, and a newer ENR sequence neither lifts nor hides them.
     health: u8 = 0,
-    /// Latest failure of an endpoint entry; null for a redial mark alone or an identity's "too many
-    /// peers" entry.
+    /// Latest failure of an endpoint entry; null for a redial mark alone or an identity entry.
     failure: ?t.DialFailure = null,
     /// The endpoint's latest failed dial, which its next dial redials; cleared once counted.
     retry: ?t.DialFailure = null,
+    /// The rejection that set an identity entry's block.
+    rejection: ?t.Rejection = null,
 };
 
 pub const History = struct {
     entries: []Entry,
     seed: u64,
 
+    /// Endpoint entries of failed dials live 30 minutes and identity entries of rejections 2 hours.
+    /// Eight per intent keeps the load under one half at the rates of a busy mainnet node.
     pub fn capacityFor(intent_capacity: u16) usize {
-        return std.math.ceilPowerOfTwoAssert(usize, std.math.clamp(@as(usize, intent_capacity) * 4, 64, 4096));
+        return std.math.ceilPowerOfTwoAssert(usize, std.math.clamp(@as(usize, intent_capacity) * 8, 64, 8192));
     }
 
     pub fn endpointKey(self: *const History, peer: *const t.PeerId, address: t.Address) u64 {
@@ -144,15 +163,35 @@ pub const History = struct {
         }
     }
 
-    /// Returns the cooldown for another "too many peers" Goodbye from this identity.
-    pub fn remoteFull(self: *History, key: u64, now_ms: u64) u64 {
+    /// Records a rejection against an identity and returns how long it blocks the identity's
+    /// discovery dials. A shutdown blocks once and adds no strike. Every other kind adds one: the
+    /// first blocks for the kind's first block, and later ones inside the memory window escalate.
+    pub fn reject(self: *History, key: u64, kind: t.Rejection, now_ms: u64) u64 {
         const entry = self.claim(key, now_ms);
-        entry.strikes = if (entry.failure == null) entry.strikes +| 1 else 1;
-        entry.failure = null;
-        const cooldown = remote_full_cooldowns_ms[@min(entry.strikes, remote_full_cooldowns_ms.len) - 1];
-        entry.until_ms = now_ms +| remote_full_memory_ms;
-        entry.block_until_ms = now_ms +| cooldown;
-        return cooldown;
+        var block = firstBlockMs(kind);
+        if (kind != .shutdown) {
+            entry.strikes +|= 1;
+            if (entry.strikes > 1) block = @max(block, rejection_escalation_ms[@min(entry.strikes - 2, rejection_escalation_ms.len - 1)]);
+            entry.until_ms = now_ms +| rejection_memory_ms;
+        }
+        if (now_ms +| block >= entry.block_until_ms) {
+            entry.block_until_ms = now_ms +| block;
+            entry.rejection = kind;
+        }
+        entry.until_ms = @max(entry.until_ms, entry.block_until_ms);
+        return block;
+    }
+
+    /// The rejection that set an identity's block, while the block has not passed.
+    pub fn rejection(self: *const History, key: u64, now_ms: u64) ?t.Rejection {
+        const entry = self.find(key, now_ms) orelse return null;
+        return if (now_ms < entry.block_until_ms) entry.rejection else null;
+    }
+
+    /// Forgets an identity's rejections.
+    pub fn clearRejections(self: *History, key: u64) void {
+        const entry = self.lookup(key) orelse return;
+        entry.* = .{};
     }
 
     /// The key's entry, live or expired.
