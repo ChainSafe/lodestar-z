@@ -43,8 +43,11 @@ pub const Dialing = struct {
     cursor: usize = 0,
     preferred_starts: u16 = 0,
     /// The last automatic start was a remembered candidate's first attempt, so the next one
-    /// prefers none: replay interleaves with fresh discovery.
+    /// prefers another candidate: replay interleaves with fresh discovery.
     after_replay: bool = false,
+    /// Rows replay queued whose first attempt has not started. Replay keeps at most a burst of
+    /// them waiting, and the replay pacer sets when each starts.
+    replay_waiting: [remembered.replay_burst]?t.PeerRef = @splat(null),
     random: std.Random.DefaultPrng,
     counters: Counters = .{},
     selected_attempts: [std.meta.fields(Source).len]u64 = @splat(0),
@@ -202,35 +205,36 @@ pub const Dialing = struct {
         self.refused.identity[@intFromEnum(kind)] +|= 1;
         return error.RecentlyRejected;
     }
-    /// Queues loaded remembered records as automatic candidates, at most `limit` and as the replay
-    /// pacer allows, and returns how many it queued. Visiting a record the rejection memory or the
-    /// endpoint history refuses, or one already connected or a candidate, spends no pacing.
-    pub fn replayRemembered(self: *Dialing, catalog: *Catalog, context: *const t.ForkContext, wanted: *const t.Coverage, limit: usize, now: Now) usize {
+    /// Queues loaded remembered records as automatic candidates until a burst of them waits for a
+    /// first attempt, and returns how many it queued. Poll starts those attempts as the replay
+    /// pacer allows, and the eligibility heap wakes it for them.
+    pub fn replayRemembered(self: *Dialing, catalog: *Catalog, context: *const t.ForkContext, wanted: *const t.Coverage, now: Now) usize {
         const memory = &catalog.remembered;
         var queued: usize = 0;
-        // Each pass takes one loaded record, so a call visits every record at most once.
-        for (0..remembered.capacity) |_| {
-            if (queued == limit or now.mono_ms < memory.replayDue()) break;
-            const record = memory.nextReplay(remembered.seconds(now)) orelse break;
-            const outcome = self.queueRemembered(catalog, &record, context, wanted, now.mono_ms);
-            memory.counters.replays[@intFromEnum(outcome)] +|= 1;
-            if (outcome != .queued) continue;
-            memory.takeReplay(now.mono_ms);
-            queued += 1;
+        for (&self.replay_waiting) |*waiting| {
+            if (waiting.*) |peer| if (catalog.rowFor(peer)) |row| if (row.intent.replay == .untried) continue;
+            waiting.* = null;
+            // Each pass takes one loaded record, so a call visits every record at most once.
+            for (0..remembered.capacity) |_| {
+                const record = memory.nextReplay(remembered.seconds(now)) orelse return queued;
+                const outcome = self.queueRemembered(catalog, &record, context, wanted, now.mono_ms);
+                memory.counters.replays[@intFromEnum(outcome)] +|= 1;
+                if (outcome != .queued) continue;
+                waiting.* = catalog.find(&record.peer).?;
+                queued += 1;
+                break;
+            }
         }
         return queued;
     }
-    /// When replay may next queue a candidate, while loaded records remain and an attempt is free.
-    pub fn replayWakeup(self: *const Dialing, catalog: *const Catalog, now_ms: u64, output_capacity: usize) ?u64 {
-        if (output_capacity == 0 or self.freeAttempt() == null or !catalog.remembered.replayPending()) return null;
-        return @max(now_ms, catalog.remembered.replayDue());
-    }
     /// A remembered candidate keeps its proven endpoint and has no ENR hints, so selection admits
     /// it only under general demand. It meets the identity's rejection memory, the endpoint's
-    /// history and candidate replacement as a discovered one does.
+    /// history, the peer's own dial deadlines and candidate replacement.
     fn queueRemembered(self: *Dialing, catalog: *Catalog, record: *const remembered.Record, context: *const t.ForkContext, wanted: *const t.Coverage, now_ms: u64) remembered.Replay {
         if (catalog.find(&record.peer)) |ref| {
-            if (catalog.rowFor(ref).?.connection != null or catalog.intents.isSet(ref.index)) return .known;
+            const row = catalog.rowFor(ref).?;
+            if (row.connection != null or catalog.intents.isSet(ref.index)) return .known;
+            if (eligibleAt(catalog, row, now_ms) > now_ms) return .failed;
         }
         const admitted = admittedAddresses(catalog, &record.peer, &.{record.address}, 0, now_ms);
         if (admitted.rejection != null) return .rejected;
@@ -390,6 +394,8 @@ pub const Dialing = struct {
         const row = catalog.rowFor(peer).?;
         std.debug.assert(std.meta.eql(row.connection, conn));
         catalog.markDial(peer.index);
+        // Any connection to a remembered candidate ends its turn for a paced first attempt.
+        if (row.intent.replay == .untried) row.intent.replay = .tried;
         if (row.intent.manual_until_ms != 0) {
             row.intent.manual_until_ms = 0;
             self.version +|= 1;
@@ -649,9 +655,11 @@ pub const Dialing = struct {
             var best: ?usize = null;
             var automatic: ?usize = null;
             const favor_replay = !self.after_replay;
+            // A remembered first attempt starts only as the replay pacer allows, and spends it.
+            const replay_ready = now_ms >= catalog.remembered.replayDue();
             for (pool) |index| {
                 const row = &catalog.rows[index];
-                if (row.attempt != null) continue;
+                if (row.attempt != null or (row.intent.replay == .untried and !replay_ready)) continue;
                 if (self.preferred(catalog, index, best, now_ms, favor_replay)) best = index;
                 if (dialTier(row, now_ms) == 0 and self.preferred(catalog, index, automatic, now_ms, favor_replay)) automatic = index;
             }
@@ -668,7 +676,10 @@ pub const Dialing = struct {
             self.preferred_starts = if (tier == 0) 0 else @min(self.preferred_starts + 1, self.options.concurrent_max);
             self.selected_attempts[tier] +|= 1;
             if (tier == 0) self.after_replay = row.intent.replay == .untried;
-            if (row.intent.replay == .untried) row.intent.replay = .tried;
+            if (row.intent.replay == .untried) {
+                catalog.remembered.takeReplay(now_ms);
+                row.intent.replay = .tried;
+            }
             if (discoveryOnly(row)) catalog.remembered.note(origin(row), .dialed);
             if (catalog.history.takeRetry(dialedKey(catalog, row, attempt), now_ms)) |failure| self.retries[@intFromEnum(failure)] +|= 1;
             out[count] = .{ .token = .{ .index = slot, .generation = attempt.generation }, .peer = row.identity, .address = attempt.address };
@@ -677,23 +688,25 @@ pub const Dialing = struct {
         self.sync(catalog, now_ms);
         return count;
     }
-    /// Orders by dial tier, then, when `favor_replay`, a remembered candidate's first attempt, then
-    /// demand priority, fewer failures and the rotating cursor. A remembered peer served us before
-    /// but has no ENR to rank its coverage by, so its first attempt goes ahead of coverage priority.
+    /// Orders by dial tier, then remembered first attempts ahead of other candidates when
+    /// `favor_replay` and behind them otherwise, then demand priority, fewer failures and the
+    /// rotating cursor. A remembered peer served us before but has no ENR to rank its coverage by,
+    /// so its first attempt goes ahead of coverage priority on its turn.
     fn preferred(self: *const Dialing, catalog: *const Catalog, index: usize, current: ?usize, now_ms: u64, favor_replay: bool) bool {
         const best = current orelse return true;
         const row = &catalog.rows[index];
         const other = &catalog.rows[best];
         if (dialTier(row, now_ms) != dialTier(other, now_ms)) return dialTier(row, now_ms) > dialTier(other, now_ms);
         const untried = row.intent.replay == .untried;
-        if (favor_replay and untried != (other.intent.replay == .untried)) return untried;
+        if (untried != (other.intent.replay == .untried)) return untried == favor_replay;
         if (row.intent.priority != other.intent.priority) return row.intent.priority > other.intent.priority;
         if (row.intent.failures != other.intent.failures) return row.intent.failures < other.intent.failures;
         return (index + catalog.rows.len - self.cursor) % catalog.rows.len < (best + catalog.rows.len - self.cursor) % catalog.rows.len;
     }
     /// Only a live manual intent dials through the identity's rejection block; discovery and direct
     /// retries wait for it. A key computed from a block the history later forgets keeps the row
-    /// waiting until that block's end.
+    /// waiting until that block's end. A remembered first attempt also waits for the replay pacer,
+    /// whose due time only moves later.
     pub fn eligibleAt(catalog: *const Catalog, row: *const Row, now_ms: u64) u64 {
         var rep = row.reputation;
         rep.decay(now_ms);
@@ -701,6 +714,7 @@ pub const Dialing = struct {
         if (rep.banned(now_ms)) due = @max(due, rep.nextDeadline(now_ms) orelse std.math.maxInt(u64));
         if (dialTier(row, now_ms) == 0) due = @max(due, rep.redial_until_ms);
         if (now_ms >= row.intent.manual_until_ms) due = @max(due, catalog.history.rejectedUntil(catalog.history.identityKey(&row.identity), now_ms));
+        if (row.intent.replay == .untried) due = @max(due, catalog.remembered.replayDue());
         return due;
     }
     /// The earliest manual expiry or lease, and with dial room the earliest eligible intent,

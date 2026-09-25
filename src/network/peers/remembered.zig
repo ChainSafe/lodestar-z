@@ -14,8 +14,8 @@ pub const capacity = 256;
 const expiry_s: u64 = 24 * 60 * 60;
 /// A dialed connection qualifies once it has served this long since its admission.
 pub const qualify_ms: u64 = 5 * 60_000;
-/// Replay queues four candidates at once, then one every 250 ms.
-const replay_burst: u64 = 4;
+/// Remembered first attempts start four at once, then one every 250 ms.
+pub const replay_burst = 4;
 const replay_interval_ms: u64 = 250;
 
 pub const Record = struct {
@@ -32,8 +32,8 @@ pub const Stage = enum { dialed, connected, kept };
 /// Outcomes of loading a seed record.
 pub const Seed = enum { loaded, expired, duplicate, invalid };
 /// Outcomes of replaying a loaded record: queued as a candidate, already connected or a
-/// candidate, refused by the identity's rejection memory or by the endpoint's failure history,
-/// or no candidate room.
+/// candidate, refused by the identity's rejection memory, held back by the endpoint's failure
+/// history or the peer's own dial deadlines, or no candidate room.
 pub const Replay = enum { queued, known, rejected, failed, capacity };
 pub const Removal = enum { expired, evicted, health, rejection, peer_id_mismatch, banned };
 
@@ -60,8 +60,8 @@ pub const Memory = struct {
     order: [capacity]u8 = undefined,
     order_len: u16 = 0,
     cursor: u16 = 0,
-    /// The pacer's theoretical arrival time: replay may queue while it is at most
-    /// `replay_burst - 1` intervals ahead of now.
+    /// The pacer's theoretical arrival time: a remembered first attempt may start while it is at
+    /// most `replay_burst - 1` intervals ahead of now.
     replay_at_ms: u64 = 0,
     counters: Counters = .{},
 
@@ -151,11 +151,6 @@ pub const Memory = struct {
         if (self.slots[index].?.record.address.eql(address)) self.remove(index, .peer_id_mismatch);
     }
 
-    /// Whether replay has loaded records it has not visited.
-    pub fn replayPending(self: *const Memory) bool {
-        return self.cursor < self.order_len;
-    }
-
     /// The next loaded record to replay, each at most once, dropping records that expired
     /// meanwhile; null once replay visited every one.
     pub fn nextReplay(self: *Memory, now_s: u64) ?Record {
@@ -174,12 +169,12 @@ pub const Memory = struct {
         return null;
     }
 
-    /// When the pacer next lets replay queue a candidate.
+    /// When the pacer next lets a remembered first attempt start.
     pub fn replayDue(self: *const Memory) u64 {
         return self.replay_at_ms -| (replay_burst - 1) * replay_interval_ms;
     }
 
-    /// Spends the pacer on one queued candidate.
+    /// Spends the pacer on one remembered first attempt.
     pub fn takeReplay(self: *Memory, now_ms: u64) void {
         std.debug.assert(now_ms >= self.replayDue());
         self.replay_at_ms = @max(self.replay_at_ms, now_ms) +| replay_interval_ms;

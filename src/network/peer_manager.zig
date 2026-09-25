@@ -261,11 +261,6 @@ pub const PeerManager = struct {
             return @max(now.mono_ms, self.coverage_reconcile_after_ms);
         return null;
     }
-    /// When replay may next queue a remembered candidate under general demand.
-    pub fn replayWakeup(self: *PeerManager, now: Now, capacity: usize) ?u64 {
-        if (!self.discovery_need.general) return null;
-        return self.dialing.replayWakeup(&self.catalog, now.mono_ms, @min(capacity, self.dialRoom()));
-    }
     pub fn updateNativeRoom(self: *PeerManager, engine: *const engine_mod.Engine) void {
         self.native_dial_room = engine.limits.connections_max -| engine.registry.active_len;
     }
@@ -544,9 +539,10 @@ pub const PeerManager = struct {
         self.dialing.expire(&self.catalog, engine, now.mono_ms);
         self.reconcile(service, now);
         self.updateNativeRoom(engine);
-        const room = @min(out.len, self.dialRoom());
-        if (self.discovery_need.general) _ = self.dialing.replayRemembered(&self.catalog, &self.local.fork, &self.selection.deficits.missing, room, now);
-        const count = self.dialing.poll(&self.catalog, now.mono_ms, out[0..room]);
+        const count = self.dialing.poll(&self.catalog, now.mono_ms, out[0..@min(out.len, self.dialRoom())]);
+        // Replay refills the remembered candidates waiting for a paced first attempt after poll
+        // started some, so their eligibility keys wake the owner for the next.
+        if (self.discovery_need.general) _ = self.dialing.replayRemembered(&self.catalog, &self.local.fork, &self.selection.deficits.missing, now);
         if (count > 0 and self.selection.retained_count >= self.catalog.options.target_peers and self.selection.deficits.outbound == 0) {
             self.replacement_after_ms = now.mono_ms +| replacement_interval_ms;
             self.selection_revision = null;

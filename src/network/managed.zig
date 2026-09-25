@@ -121,7 +121,6 @@ pub fn collectWakeups(
     service.collectWakeups(now, .{ .application = application_capacity, .control = controls_per_turn, .identify = identify_per_turn }, wakeups);
     wakeups.note(.control, self.control.nextWakeup(&self.catalog, now));
     wakeups.note(.dial, self.dialing.nextWakeup(&self.catalog, now.mono_ms, @min(dial_capacity, self.dialRoom())));
-    wakeups.note(.dial, self.replayWakeup(now, dial_capacity));
     wakeups.note(.dial, if (self.dialing.selectionNeeded(&self.catalog)) now.mono_ms else null);
     wakeups.note(.dial, self.dialing.selection_deadline);
     wakeups.note(.peer_policy, self.policyWakeup(service, now));

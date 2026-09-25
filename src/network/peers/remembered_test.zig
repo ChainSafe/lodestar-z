@@ -97,7 +97,6 @@ test "remembered replay visits each loaded record once in shuffled prefix rounds
             seen[tag.*] = true;
         }
         try std.testing.expect(memory.nextReplay(now_s) == null);
-        try std.testing.expect(!memory.replayPending());
         // The first round takes one record from each prefix, the second one from each of the two
         // prefixes left, and the rest come from 10.1/16.
         var round: [3]u8 = @splat(0);
