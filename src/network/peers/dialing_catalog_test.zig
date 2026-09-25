@@ -324,3 +324,27 @@ test "peer fold early closes escalate while manual and inbound connections bypas
     try d.enqueueDiscovered(&c, &gated, &.{}, &.{}, kept);
     try std.testing.expectEqual(@as(u64, 3), c.rejections[@intFromEnum(t.Rejection.early_close)]);
 }
+
+test "peer fold a full direct peer waits 5, 15 then 60 minutes while a manual connect dials through" {
+    var c = try Catalog.initWithIntents(a, opts, 2, 8, 1);
+    defer c.deinit(a);
+    var d = try dialing.Dialing.init(.{ .capacity = 2, .concurrent_max = 1, .seed = 1 });
+    const direct = try candidate(1, 0);
+    try d.enqueue(&c, &direct.peer, &.{address}, true, 0);
+    var now: u64 = 0;
+    var until: u64 = 0;
+    for ([_]u64{ 5, 15, 60 }, 0..) |minutes, round| {
+        now = d.nextWakeup(&c, until, 1).?;
+        try std.testing.expectEqual(until, now);
+        try rejectedRound(&c, &d, &direct.peer, @intCast(round), .too_many_peers, now);
+        try std.testing.expect(c.isDirect(&direct.peer));
+        until = now + minutes * 60_000;
+    }
+    try std.testing.expectEqual(until, d.nextWakeup(&c, now, 1).?);
+    try d.enqueue(&c, &direct.peer, &.{address}, false, now);
+    const due = d.nextWakeup(&c, now, 1).?;
+    try std.testing.expect(due < now + dialing.connect_timeout_ms);
+    var out: [1]dialing.DialIntent = undefined;
+    try std.testing.expectEqual(@as(usize, 1), d.poll(&c, due, &out));
+    try std.testing.expect(out[0].peer.eql(&direct.peer));
+}

@@ -710,11 +710,11 @@ pub const Catalog = struct {
         self.history.clearFailures(self.history.endpointKey(&row.identity, endpoint));
     }
 
-    /// Settles the identity's rejection memory as its connection ends. Control calls it with whether
+    /// Settles the identity's rejection memory as its connection closes. Control calls it with whether
     /// the connection completed the Status and Metadata exchange, and with the rejection the remote
-    /// ended it with. A ready connection kept `kept_connection_ms` first clears the identity's
-    /// earlier rejections. A rejection then adds one and releases the discovery intent, so only a
-    /// rediscovery once the block passed dials the peer again.
+    /// ended it with. A ready connection closing `kept_connection_ms` or more after its admission
+    /// first clears the identity's earlier rejections. A rejection then adds one and releases the
+    /// discovery intent, so only a rediscovery once the block passed dials the peer again.
     pub fn settleRejections(self: *Catalog, ref: t.PeerRef, conn: t.Handle, ready: bool, rejection: ?t.Rejection, now_ms: u64) void {
         const row = self.connectedRow(ref, conn) orelse return;
         const key = self.history.identityKey(&row.identity);

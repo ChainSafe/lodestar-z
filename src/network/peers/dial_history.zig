@@ -1,7 +1,9 @@
 //! Bounded dial failure memory keyed by (peer, endpoint), and remote rejection memory keyed by
 //! peer. It outlives catalog rows, so a replaced discovery intent cannot come back as an untried
-//! candidate and a rejecting peer cannot come back as a fresh one. Keys are seeded hashes; a
-//! collision only suppresses or escalates one candidate.
+//! candidate and a rejecting peer cannot come back as a fresh one. Retention is best effort: a
+//! claim that finds no free slot among its probes replaces the entry expiring soonest there,
+//! whatever its kind. Keys are seeded hashes; a full collision shares one entry, so it can
+//! suppress, escalate or clear another candidate's evidence.
 const std = @import("std");
 const t = @import("types.zig");
 
@@ -12,9 +14,10 @@ pub const mismatch_memory_ms: u64 = 6 * 60 * 60_000;
 pub const rejection_memory_ms: u64 = 2 * 60 * 60_000;
 /// The blocks of a second and of every later rejection strike inside the memory window.
 const rejection_escalation_ms = [_]u64{ 15 * 60_000, 60 * 60_000 };
-/// A connection that completed the Status and Metadata exchange and stayed up this long clears its
-/// identity's rejections. Full peers commonly prune a new connection within its first 10 minutes,
-/// and a peer that kept us longer served us for longer than any first block.
+/// A connection that completed the Status and Metadata exchange and closes at least this long after
+/// its admission clears its identity's rejections at the close. Full peers commonly prune a new
+/// connection within its first 10 minutes, and a peer that kept us longer served us for longer than
+/// any first block.
 pub const kept_connection_ms: u64 = 10 * 60_000;
 pub const probe_max: usize = 8;
 
@@ -180,6 +183,12 @@ pub const History = struct {
         }
         entry.until_ms = @max(entry.until_ms, entry.block_until_ms);
         return block;
+    }
+
+    /// When an identity's rejection block ends; 0 when none holds.
+    pub fn rejectedUntil(self: *const History, key: u64, now_ms: u64) u64 {
+        const entry = self.find(key, now_ms) orelse return 0;
+        return if (entry.rejection != null) entry.block_until_ms else 0;
     }
 
     /// The rejection that set an identity's block, while the block has not passed.

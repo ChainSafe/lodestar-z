@@ -544,7 +544,7 @@ pub const Dialing = struct {
         const key: u32 = @intCast(index);
         if (self.expiryOf(catalog, index)) |at| catalog.dial.expiries.set(key, at) else catalog.dial.expiries.clear(key);
         if (catalog.intents.isSet(index) and dialable(row, now_ms))
-            catalog.dial.eligible.set(key, eligibleAt(row, now_ms))
+            catalog.dial.eligible.set(key, eligibleAt(catalog, row, now_ms))
         else
             catalog.dial.eligible.clear(key);
     }
@@ -573,7 +573,7 @@ pub const Dialing = struct {
         var candidates: usize = 0;
         for (due) |index| {
             const row = &catalog.rows[index];
-            if (!catalog.intents.isSet(index) or !dialable(row, now_ms) or now_ms < eligibleAt(row, now_ms)) continue;
+            if (!catalog.intents.isSet(index) or !dialable(row, now_ms) or now_ms < eligibleAt(catalog, row, now_ms)) continue;
             due[candidates] = index;
             candidates += 1;
         }
@@ -618,12 +618,15 @@ pub const Dialing = struct {
         if (row.intent.failures != other.intent.failures) return row.intent.failures < other.intent.failures;
         return (index + catalog.rows.len - self.cursor) % catalog.rows.len < (best + catalog.rows.len - self.cursor) % catalog.rows.len;
     }
-    pub fn eligibleAt(row: *const Row, now_ms: u64) u64 {
+    /// Only a live manual intent dials through the identity's rejection block; discovery and direct
+    /// retries wait for it.
+    pub fn eligibleAt(catalog: *const Catalog, row: *const Row, now_ms: u64) u64 {
         var rep = row.reputation;
         rep.decay(now_ms);
         var due = @max(row.intent.eligible_at_ms, rep.goodbye_until_ms);
         if (rep.banned(now_ms)) due = @max(due, rep.nextDeadline(now_ms) orelse std.math.maxInt(u64));
         if (dialTier(row, now_ms) == 0) due = @max(due, rep.redial_until_ms);
+        if (now_ms >= row.intent.manual_until_ms) due = @max(due, catalog.history.rejectedUntil(catalog.history.identityKey(&row.identity), now_ms));
         return due;
     }
     /// The earliest manual expiry or lease, and with dial room the earliest eligible intent,
@@ -656,7 +659,7 @@ pub const Dialing = struct {
             const key = catalog.dial.eligible.get(@intCast(index));
             if (retained and dialable(row, now_ms)) {
                 // A key computed earlier may stand before a fresh one; it never stands after a due one.
-                assert(key != null and key.? <= @max(now_ms, eligibleAt(row, now_ms)) +| 1);
+                assert(key != null and key.? <= @max(now_ms, eligibleAt(catalog, row, now_ms)) +| 1);
             } else {
                 // A lapsed manual intent keeps its key until expire clears it.
                 assert(key == null or (row.intent.manual_until_ms != 0 and now_ms >= row.intent.manual_until_ms));
