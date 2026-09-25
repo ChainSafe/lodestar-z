@@ -120,6 +120,9 @@ const contract = [_]Series{
     .{ .name = "lodestar_native_gossip_data_drops_by_slot_second_total", .kind = "counter", .labels = &.{"second"} },
     .{ .name = "lodestar_native_gossip_data_write_seconds", .kind = "histogram", .labels = &.{"origin"} },
     .{ .name = "lodestar_native_gossipsub_queued_local_descriptors", .kind = "gauge" },
+    .{ .name = "lodestar_native_gossipsub_history_capacity", .kind = "gauge" },
+    .{ .name = "lodestar_native_gossip_history_evictions_total", .kind = "counter", .labels = &.{"reason"} },
+    .{ .name = "lodestar_native_gossip_retention_refusals_total", .kind = "counter", .labels = &.{"kind"} },
     // ReqResp
     .{ .name = "beacon_reqresp_outgoing_requests_total", .kind = "counter", .labels = &.{"method"} },
     .{ .name = "beacon_reqresp_outgoing_requests_error_total", .kind = "counter", .labels = &.{"method"} },

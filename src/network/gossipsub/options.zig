@@ -15,6 +15,7 @@ pub const Options = struct {
     idontwant_min_data_size: usize = constants.default_idontwant_min_data_size,
     heartbeat_interval_ms: u64 = constants.heartbeat_interval_ms,
     seen_capacity: usize = 65_536,
+    /// The smallest message history; processor limits can raise it (see `Layout.historyCapacity`).
     mcache_capacity: usize = 8_192,
     mcache_arena_bytes: usize = 64 * 1024 * 1024,
     execution_limits: ?@import("../gossip_limits.zig").Limits = null,
@@ -101,7 +102,7 @@ pub fn validate(o: *const Options) (error{InvalidLimits} || @import("topic_polic
         };
     }
     try range(o.seen_capacity, 1, 1_048_576);
-    try range(o.mcache_capacity, 1, 65536);
+    try range(o.mcache_capacity, 1, @import("mcache.zig").History.capacity_max);
     try range(o.mcache_arena_bytes, compressed + storage.page_bytes, 1024 * 1024 * 1024);
     const page = @import("receive_pool.zig").page_bytes;
     const receive_min = @max(page, @import("std").mem.alignForward(usize, constants.GOSSIP_MAX_SIZE - @min(o.body_buffer_bytes, constants.GOSSIP_MAX_SIZE), page));

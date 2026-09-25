@@ -99,6 +99,9 @@ pub const Messages = struct {
     decoded_messages: u64 = 0,
     fast_hits: u64 = 0,
     storage_refusals: StorageRefusals = @splat(0),
+    /// Accepted or published messages whose kind's retention allowance stayed full: they are
+    /// neither cached nor forwarded.
+    retention_refusals: [@import("../gossip_limits.zig").kind_count]u64 = @splat(0),
     fast: []FastEntry,
 
     pub fn init(a: std.mem.Allocator, options: *const Options, layout: *const @import("layout.zig").Layout) !Messages {
@@ -199,7 +202,7 @@ pub const Messages = struct {
 
     pub fn publish(self: *Messages, id: MessageId, name: []const u8, compressed: []const u8, now: u64, epoch: u64) ?storage.Handle {
         const handle = self.history.admitPayload(&self.store, id, name, compressed) orelse return null;
-        if (!self.store.canRetain(handle)) {
+        if (!self.retain(handle)) {
             self.store.seal(handle);
             return null;
         }
@@ -303,6 +306,12 @@ pub const Messages = struct {
         return .{ .admitted = candidate.event };
     }
 
+    fn retain(self: *Messages, message: storage.Handle) bool {
+        if (self.history.makeRoom(&self.store, message)) return true;
+        self.retention_refusals[@intFromEnum(self.store.get(message).?.kind)] +|= 1;
+        return false;
+    }
+
     fn refuseStorage(self: *Messages, reason: StorageRefusal) Received {
         self.storage_refusals[@intFromEnum(reason)] +|= 1;
         return .{ .blocked = .storage };
@@ -321,7 +330,7 @@ pub const Messages = struct {
         const name = context.overlay.topicString(entry.topic.index);
         var result: Applied = .{ .verdict = verdict, .id = entry.id, .source = context.peers.rows[entry.source.index].identity, .admitted_ms = entry.admitted_ms, .topic_bytes = undefined, .topic_len = @intCast(name.len) };
         @memcpy(result.topic_bytes[0..name.len], name);
-        if (verdict == .accept and self.store.canRetain(message)) {
+        if (verdict == .accept and self.retain(message)) {
             self.history.put(&self.store, message, context.epoch);
             if (context.overlay.subscribed(entry.topic.index)) result.forward = .{ .message = message, .source = entry.source, .topic = entry.topic };
         }
