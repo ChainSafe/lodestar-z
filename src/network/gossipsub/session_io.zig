@@ -21,6 +21,8 @@ const Gossipsub = gossipsub_mod.Gossipsub;
 const Turn = @import("turn.zig").Turn;
 const Credits = @import("turn.zig").Credits;
 const Progress = @import("turn.zig").Progress;
+const Budget = @import("turn.zig").Budget;
+const Budgets = @import("turn.zig").Budgets;
 
 pub const openings_per_pump: usize = 16;
 pub const direct_retry_delay_ms: u64 = 30_000;
@@ -436,6 +438,7 @@ fn flush(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *Turn
             io.tx.blocked(now.mono_ms);
             return;
         }
+        io.tx.last_write_blocked = false;
     }
 }
 
@@ -466,14 +469,18 @@ pub fn runTurn(self: *Gossipsub, router: *routing.Router, engine: *Engine, turn:
     self.tick(now);
     const marked = @min(self.sessions.ready.len, self.options.peers_per_pump);
     var openings: usize = 0;
+    var visited: usize = 0;
     for (0..marked) |_| {
         const index: u16 = @intCast(self.sessions.ready.pop(self.sessions.rows, "ready_link") orelse break);
+        visited += 1;
         self.sessions.visits +|= 1;
+        self.setUnserved(index, null, now.mono_ms);
         serviceSession(self, router, engine, index, turn, &openings);
         self.sessions.serviced(index, &self.options);
         if (turn.exhausted().count() > 0) break;
     }
     const exhausted = turn.exhausted();
+    if (exhausted.count() > 0 and visited < marked) stopped(self, stoppingBudget(exhausted), marked - visited, now.mono_ms);
     var budgets = exhausted.iterator();
     while (budgets.next()) |budget| {
         self.io_metrics.turns_exhausted[@intFromEnum(budget)] +|= 1;
@@ -495,6 +502,30 @@ pub fn runTurn(self: *Gossipsub, router: *routing.Router, engine: *Engine, turn:
     }
     finishPump(self, now);
     if (@import("builtin").is_test) checkSessions(self);
+}
+
+/// The budget a stopped turn is attributed to: calls or output, which writes spend too, before
+/// any receive budget, so a receive budget names only stops that left writes unspent.
+fn stoppingBudget(exhausted: Budgets) Budget {
+    if (exhausted.contains(.calls)) return .calls;
+    if (exhausted.contains(.output)) return .output;
+    var budgets = exhausted.iterator();
+    return budgets.next().?;
+}
+
+/// Counts a turn that stopped on `budget` with `skipped` of the sessions it took unvisited, which
+/// lead the ready list. The writable ones wait on the stop until their next visit.
+fn stopped(self: *Gossipsub, budget: Budget, skipped: usize, now_ms: u64) void {
+    self.io_metrics.stops[@intFromEnum(budget)] +|= 1;
+    var next = self.sessions.ready.head;
+    for (0..skipped) |_| {
+        if (next == index_list.none) break;
+        const index: u16 = @intCast(next);
+        next = self.sessions.rows[index].ready_link.next;
+        const writable = self.sessions.rows[index].writable();
+        self.io_metrics.skipped[@intFromEnum(budget)][@intFromBool(writable)] +|= 1;
+        if (writable) self.setUnserved(index, budget, now_ms);
+    }
 }
 
 fn serviceSession(self: *Gossipsub, router: *routing.Router, engine: *Engine, index: u16, turn: *Turn, openings: *usize) void {
@@ -641,14 +672,20 @@ fn expireSession(self: *Gossipsub, router: *routing.Router, engine: *Engine, ind
 }
 
 /// Test builds check after every turn that the ready list holds every session that wants
-/// service, that each session off the list is keyed on its recomputed deadline, and that the
-/// connection index finds each active session.
+/// service, that each session off the list is keyed on its recomputed deadline, that the
+/// connection index finds each active session, and that unserved sessions wait on the ready list
+/// and match their counts.
 fn checkSessions(self: *const Gossipsub) void {
     const sessions = self.sessions;
     var linked: usize = 0;
+    var unserved: [@import("turn.zig").budget_count]usize = @splat(0);
     for (sessions.rows, 0..) |*row, position| {
         const index: u16 = @intCast(position);
         linked += @intFromBool(row.ready_link.linked);
+        if (row.unserved) |budget| {
+            assert(row.active and row.ready_link.linked);
+            unserved[@intFromEnum(budget)] += 1;
+        }
         if (!row.active) {
             assert(!row.ready_link.linked and sessions.deadlines.get(index) == null);
             continue;
@@ -658,6 +695,7 @@ fn checkSessions(self: *const Gossipsub) void {
         if (!row.ready_link.linked) assert(sessions.deadlines.get(index) == row.deadline(&self.options));
     }
     assert(linked == sessions.ready.len);
+    assert(std.mem.eql(usize, &unserved, &sessions.unserved));
 }
 
 /// Test builds check after every pump that each stream a session holds routes to it, that a

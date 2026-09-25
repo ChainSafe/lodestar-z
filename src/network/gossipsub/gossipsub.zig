@@ -331,6 +331,7 @@ pub const Gossipsub = struct {
         if (!self.sessions.matches(session)) return;
         const tx = &self.sessions.rows[session.index].io.tx;
         self.integrateOccupancy(self.last_now_ms);
+        self.setUnserved(session.index, null, self.last_now_ms);
         self.delivery_metrics.cancelled(&tx.data.origins);
         tx.cancelStream(&self.messages.store);
         self.cancelPromises(session.index, false);
@@ -454,10 +455,11 @@ pub const Gossipsub = struct {
                 self.settle(index);
             } else {
                 result.pressured += 1;
-                self.dataRefused(index, origin);
+                self.dataRefused(index, origin, now_ms);
             }
         }
         assert(result.selected == result.queued + result.pressured + result.unavailable);
+        self.delivery_metrics.selectedByKind(self.overlay.rows[topic].kind, self.phaseBps(), result.selected, result.pressured);
         return result;
     }
 
@@ -699,23 +701,39 @@ pub const Gossipsub = struct {
     }
 
     /// Integrates data queue occupancy up to `now_ms`, or a newer time already observed. Call
-    /// with the change's own time before any change to the data queues.
+    /// with the change's own time before any change to the data queues or unserved sessions.
     pub fn integrateOccupancy(self: *Gossipsub, now_ms: u64) void {
         self.observed_ms = @max(self.observed_ms, self.last_now_ms, now_ms);
         const pool = self.sessions.deliveries;
-        self.occupancy.integrate(self.slot_clock, self.observed_ms, pool.slots.len - pool.available, pool.full_queues);
+        self.occupancy.integrate(self.slot_clock, self.observed_ms, .{ .descriptors = pool.slots.len - pool.available, .full = pool.full_queues, .unserved = &self.sessions.unserved });
+    }
+
+    /// Marks the session writable and left unvisited by a turn that stopped on `budget`, or clears
+    /// the mark with null, after integrating the time it already waited.
+    pub fn setUnserved(self: *Gossipsub, index: u16, budget: ?@import("turn.zig").Budget, now_ms: u64) void {
+        const row = &self.sessions.rows[index];
+        if (row.unserved == budget) return;
+        self.integrateOccupancy(now_ms);
+        if (row.unserved) |previous| self.sessions.unserved[@intFromEnum(previous)] -= 1;
+        if (budget) |next| self.sessions.unserved[@intFromEnum(next)] += 1;
+        row.unserved = budget;
+    }
+
+    /// The slot phase on the accounting clock, which never moves backwards.
+    fn phaseBps(self: *const Gossipsub) ?u16 {
+        const clock = self.slot_clock orelse return null;
+        return clock.phaseBps(@max(self.observed_ms, self.last_now_ms));
     }
 
     fn deliveryLimits(self: *const Gossipsub) @import("delivery.zig").Limits {
         return .{ .bytes = self.options.tx_peer_bytes, .local_bytes = self.options.tx_local_bytes };
     }
 
-    fn dataRefused(self: *Gossipsub, index: u16, origin: @import("delivery.zig").Origin) void {
+    fn dataRefused(self: *Gossipsub, index: u16, origin: @import("delivery.zig").Origin, now_ms: u64) void {
         const row = &self.sessions.rows[index];
         self.counters.send_dropped += 1;
         self.delivery_metrics.recipient(origin, .pressured);
-        const phase = if (self.slot_clock) |clock| clock.phaseBps(@max(self.observed_ms, self.last_now_ms)) else null;
-        self.delivery_metrics.dropped(origin, row.io.tx.last_drop, row.client, phase);
+        self.delivery_metrics.dropped(origin, &row.io.tx, row.client, self.phaseBps(), now_ms);
     }
 
     fn controlSent(self: *Gossipsub, peer: u16, token: u64, now_ms: u64) void {
@@ -920,7 +938,7 @@ pub const Gossipsub = struct {
                     if (known.result != .limited) self.delivery_metrics.admitted(&self.sessions.rows[index].io.tx.data, self.last_now_ms, known.result == .queued);
                     switch (known.result) {
                         .queued => self.delivery_metrics.recipient(.iwant, .queued),
-                        .pressured => self.dataRefused(index, .iwant),
+                        .pressured => self.dataRefused(index, .iwant, self.last_now_ms),
                         .limited => {},
                     }
                     break :blk switch (known.result) {

@@ -252,3 +252,122 @@ test "a verdict that forwards nothing still keeps its newer time for drop phases
     for (g.delivery_metrics.drops_by_phase, 0..) |count, bucket| try std.testing.expectEqual(@as(u64, @intFromBool(bucket == 2)), count);
     g.cancelWrites(g.sessions.ref(peer.index));
 }
+
+test "forward and publication recipients count by message kind and the slot phase of their selection" {
+    const Outcome = @import("metrics.zig").Delivery.Outcome;
+    const selected = @intFromEnum(@import("metrics.zig").Delivery.KindOutcome.selected);
+    const pressured = @intFromEnum(@import("metrics.zig").Delivery.KindOutcome.pressured);
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
+    defer g.deinit();
+    const source = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    var destinations: [2]u16 = undefined;
+    try support.subscribe(&g, name);
+    for (&destinations, 1..) |*destination, index| {
+        destination.* = support.addPeer(&g, .{ .index = @intCast(index), .generation = 1 }, .v1_2).?.index;
+        g.overlay.rows[g.overlay.findTopic(name).?].mesh.set(destination.*);
+        g.sessions.rows[destination.*].io.tx.cancelStream(&g.messages.store);
+    }
+    var inbox: support.Inbox = .{};
+    defer inbox.deinit();
+    inbox.attach(&g);
+    var handles: [2]@import("validation.zig").Handle = undefined;
+    for (&handles, 0..) |*handle, i| {
+        var text: [16]u8 = undefined;
+        try std.testing.expectEqual(@as(?usize, 1), try support.message(&g, source.index, try std.fmt.bufPrint(&text, "forward {d}", .{i}), 1));
+        handle.* = inbox.last().handle;
+    }
+    // Monotonic zero starts a 12 s slot: each phase bucket lasts 750 ms.
+    var clock: slots.SlotClock = .{ .genesis_unix_ms = 1_000_000, .slot_duration_ms = 12_000 };
+    clock.observe(.{ .mono_ms = 0, .unix_s = 0, .unix_ms = 1_000_000 + 12_000 });
+    g.slot_clock = &clock;
+    const by_kind = &g.delivery_metrics.by_kind;
+    const block = @intFromEnum(topic_mod.Kind.beacon_block);
+    // A publication at 100 ms and a forward at 1,600 ms each select both mesh peers.
+    try std.testing.expectEqual(@as(u16, 2), (try g.publish(name, "filler", .{ .mono_ms = 100, .unix_s = 0 })).queued);
+    _ = g.report(handles[0], .accept, .{ .mono_ms = 1_600, .unix_s = 0 });
+    try std.testing.expectEqualSlices(u64, &.{ 2, 0 }, &by_kind[block][0]);
+    try std.testing.expectEqualSlices(u64, &.{ 2, 0 }, &by_kind[block][2]);
+    // With the first peer's ordinary allowance full, a forward at 3,100 ms is refused there.
+    const tx = &g.sessions.rows[destinations[0]].io.tx;
+    const filler = g.messages.history.message(g.messages.history.get(&g.messages.store, topic_mod.validMessageId(name, "filler", .{})).?);
+    for (0..@import("delivery.zig").per_peer_limit) |_| {
+        if (tx.data.full()) break;
+        try std.testing.expectEqual(.queued, tx.queueData(&g.messages.store, filler, .forward, .{ .bytes = g.options.tx_peer_bytes }, 1_600));
+    }
+    _ = g.report(handles[1], .accept, .{ .mono_ms = 3_100, .unix_s = 0 });
+    try std.testing.expectEqualSlices(u64, &.{ 2, 1 }, &by_kind[block][4]);
+    // Without a slot clock the phase is unknown.
+    g.slot_clock = null;
+    try std.testing.expectEqual(@as(u16, 2), (try g.publish(name, "no clock", .{ .mono_ms = 3_200, .unix_s = 0 })).selected);
+    try std.testing.expectEqualSlices(u64, &.{ 2, 0 }, &by_kind[block][slots.phase_buckets]);
+    // Every cell sums to the forward and publication totals; IWANT responses stay out.
+    var totals: [2]u64 = @splat(0);
+    for (by_kind) |phases| for (phases) |outcomes| {
+        totals[selected] += outcomes[selected];
+        totals[pressured] += outcomes[pressured];
+    };
+    const recipients = g.delivery_metrics.recipients;
+    const Origin = @import("delivery.zig").Origin;
+    for ([_]Outcome{ .selected, .pressured }, totals) |outcome, total| {
+        try std.testing.expectEqual(recipients[@intFromEnum(Origin.forward)][@intFromEnum(outcome)] + recipients[@intFromEnum(Origin.publication)][@intFromEnum(outcome)], total);
+    }
+    try std.testing.expectEqual(@as(u64, 8), totals[selected]);
+    // Only a node without a topic policy admits a topic of no known kind.
+    var bare = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1 });
+    defer bare.deinit();
+    const other = "/eth2/01020304/unknown_kind/ssz_snappy";
+    const subscriber = support.addPeer(&bare, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    try std.testing.expectEqual(@as(u16, 0), (try bare.publish(other, "interned", .{ .mono_ms = 1, .unix_s = 0 })).selected);
+    _ = bare.overlay.peerSubscription(&bare.overlayContext(bare.last_now_ms), subscriber.index, other, true);
+    try std.testing.expectEqual(@as(u16, 1), (try bare.publishWithOptions(other, "unknown", .{ .flood = true }, .{ .mono_ms = 1, .unix_s = 0 })).selected);
+    try std.testing.expectEqualSlices(u64, &.{ 1, 0 }, &bare.delivery_metrics.by_kind[by_kind.len - 1][slots.phase_buckets]);
+}
+
+test "descriptor refusals sample the refusing peer's queued bytes, oldest frame age and last write" {
+    const Delivery = @import("metrics.zig").Delivery;
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
+    defer g.deinit();
+    const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const tx = &g.sessions.rows[peer.index].io.tx;
+    tx.cancelStream(&g.messages.store);
+    var known: [3]MessageId = undefined;
+    for (&known, 0..) |*id, i| {
+        var text: [8]u8 = undefined;
+        const payload = try std.fmt.bufPrint(&text, "full {d}", .{i});
+        _ = try g.publish(name, payload, .{ .mono_ms = 1, .unix_s = 0 });
+        id.* = topic_mod.validMessageId(name, payload, .{});
+    }
+    const h = g.messages.history.message(g.messages.history.get(&g.messages.store, known[0]).?);
+    for (0..@import("delivery.zig").per_peer_limit) |_| {
+        if (tx.data.full()) break;
+        try std.testing.expectEqual(.queued, tx.queueData(&g.messages.store, h, .forward, .{ .bytes = g.options.tx_peer_bytes }, 100));
+    }
+    const metrics = &g.delivery_metrics;
+    const accepted = &metrics.refusals[@intFromEnum(Delivery.LastWrite.accepted)];
+    const would_block = &metrics.refusals[@intFromEnum(Delivery.LastWrite.would_block)];
+    var body: [32]u8 = undefined;
+    // The last write went through: the peer is writable and its oldest frame waited 200 ms.
+    _ = session_io.beginPump(&g, .{ .mono_ms = 300, .unix_s = 0 });
+    support.control(&g, peer.index, .{ .iwant = .{ .body = ids(&body, 1, &.{known[1]}) } }, .{ .mono_ms = 300, .unix_s = 0 });
+    try std.testing.expectEqual(@as(u64, 1), accepted.bytes.count);
+    try std.testing.expectEqual(@as(u128, tx.data.bytes), accepted.bytes.sum);
+    try std.testing.expectEqual(@as(u128, 200), accepted.oldest.sum);
+    try std.testing.expectEqual(@as(u64, 0), metrics.refusal_blocked.count);
+    // A write blocked at 400 ms: at 700 ms the stream has been blocked for 300 ms.
+    tx.blocked(400);
+    _ = session_io.beginPump(&g, .{ .mono_ms = 700, .unix_s = 0 });
+    support.control(&g, peer.index, .{ .iwant = .{ .body = ids(&body, 1, &.{known[2]}) } }, .{ .mono_ms = 700, .unix_s = 0 });
+    try std.testing.expectEqual(@as(u64, 1), would_block.bytes.count);
+    try std.testing.expectEqual(@as(u128, 600), would_block.oldest.sum);
+    try std.testing.expectEqual(@as(u64, 1), metrics.refusal_blocked.count);
+    try std.testing.expectEqual(@as(u128, 300), metrics.refusal_blocked.sum);
+    // A writable event without a write since: the last write still blocked, the stream no longer.
+    tx.writable();
+    _ = session_io.beginPump(&g, .{ .mono_ms = 800, .unix_s = 0 });
+    support.control(&g, peer.index, .{ .iwant = .{ .body = ids(&body, 1, &.{known[1]}) } }, .{ .mono_ms = 800, .unix_s = 0 });
+    try std.testing.expectEqual(@as(u64, 2), would_block.bytes.count);
+    try std.testing.expectEqual(@as(u64, 1), metrics.refusal_blocked.count);
+    try std.testing.expectEqual(@as(u64, 3), g.rpc_metrics.iwant[@intFromEnum(IwantOutcome.refused)]);
+    for (metrics.by_kind) |phases| for (phases) |outcomes| try std.testing.expectEqualSlices(u64, &.{ 0, 0 }, &outcomes);
+    g.cancelWrites(g.sessions.ref(peer.index));
+}

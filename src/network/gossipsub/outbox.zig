@@ -150,6 +150,9 @@ pub const Outbox = struct {
     ready: bool = true,
     /// When the last write blocked, until a writable event.
     blocked_since: ?u64 = null,
+    /// The last write on this stream blocked. A writable event leaves it set; a write QUIC takes
+    /// in full clears it.
+    last_write_blocked: bool = false,
     subscription_since: ?u64 = null,
     subscription_dirty: std.StaticBitSet(constants.topics_cap) = .initEmpty(),
     subscription_cursor: usize = 0,
@@ -169,11 +172,13 @@ pub const Outbox = struct {
         self.subscription_since = if (subscribed.count() == 0) null else self.subscription_since orelse now;
         self.ready = true;
         self.blocked_since = null;
+        self.last_write_blocked = false;
     }
 
     /// A write took fewer bytes than offered; the engine armed write interest.
     pub fn blocked(self: *Outbox, now: u64) void {
         self.ready = false;
+        self.last_write_blocked = true;
         self.blocked_since = self.blocked_since orelse now;
     }
 
@@ -341,6 +346,7 @@ pub const Outbox = struct {
         self.progress_ms = null;
         self.ready = false;
         self.blocked_since = null;
+        self.last_write_blocked = false;
     }
 };
 
