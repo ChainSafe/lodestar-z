@@ -67,12 +67,12 @@ test "publication recipient policy tops up without graft and accounts unique sha
         try std.testing.expectEqual(@as(usize, 0), io.tx.critical.used);
         if (index == 0 or (index >= 2 and index <= 8)) {
             try std.testing.expectEqual(@as(usize, 1), io.tx.data.count);
-            try std.testing.expectEqual(h, io.tx.data.first().?.message);
+            try std.testing.expectEqual(h, io.tx.data.next(&g.messages.store).?.message);
         } else try std.testing.expectEqual(@as(usize, 0), io.tx.data.count);
         io.tx.cancelStream(&g.messages.store);
     }
     g.sessions.rows[2].outbound = .none;
-    for (0..@import("outbox.zig").data_capacity) |_| try std.testing.expectEqual(.queued, g.sessions.rows[3].io.tx.queueData(&g.messages.store, h, .forward, g.options.tx_peer_bytes, 2));
+    for (0..@import("outbox.zig").data_capacity) |_| try std.testing.expectEqual(.queued, g.sessions.rows[3].io.tx.queueData(&g.messages.store, h, .forward, .{ .bytes = g.options.tx_peer_bytes }, 2));
     const flood = try g.publishWithOptions(topic, "flood", .{ .flood = true }, .{ .mono_ms = 2, .unix_s = 0 });
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 7, .queued = 6, .pressured = 1 }, flood);
 }
@@ -86,7 +86,7 @@ test "publication failed history admission retains payloads and recovery attribu
     for ([_][]const u8{ "retained zero", "retained one" }, &retained) |payload, *h| {
         _ = try g.publish(topic, payload, .{ .mono_ms = 1, .unix_s = 0 });
         h.* = g.messages.history.message(g.messages.history.get(&g.messages.store, topic_mod.validMessageId(topic, payload, .{})).?);
-        try std.testing.expectEqual(.queued, g.sessions.rows[peer.index].io.tx.queueData(&g.messages.store, h.*, .forward, g.options.tx_peer_bytes, 1));
+        try std.testing.expectEqual(.queued, g.sessions.rows[peer.index].io.tx.queueData(&g.messages.store, h.*, .forward, .{ .bytes = g.options.tx_peer_bytes }, 1));
     }
     const id = topic_mod.validMessageId(topic, "retry", .{});
     const logical = g.sessions.rows[peer.index].logical;
@@ -195,7 +195,7 @@ test "delivery metrics attribute refused frames by origin, limit, client and slo
     const id = topic_mod.validMessageId(topic, "filler", .{});
     const filler = g.messages.history.message(g.messages.history.get(&g.messages.store, id).?);
     const io = &g.sessions.rows[peer.index].io;
-    for (1..@import("outbox.zig").data_capacity) |_| try std.testing.expectEqual(.queued, io.tx.queueData(&g.messages.store, filler, .forward, g.options.tx_peer_bytes, 1));
+    for (1..@import("outbox.zig").data_capacity) |_| try std.testing.expectEqual(.queued, io.tx.queueData(&g.messages.store, filler, .forward, .{ .bytes = g.options.tx_peer_bytes }, 1));
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 1, .pressured = 1 }, try g.publish(topic, "refused", .{ .mono_ms = 2, .unix_s = 25 }));
     var body: [32]u8 = undefined;
     var writer = @import("protobuf.zig").Writer.init(&body);
@@ -220,4 +220,41 @@ test "delivery metrics attribute refused frames by origin, limit, client and slo
     try std.testing.expectEqual(@as(u128, 39), written.sum);
     try std.testing.expectEqual(@as(u64, 0), metrics.write_time[@intFromEnum(@import("delivery.zig").Origin.forward)].count);
     io.tx.cancelStream(&g.messages.store);
+}
+
+test "publication priority belongs to each attempt: an IWANT for our publication is ordinary" {
+    const Origin = @import("delivery.zig").Origin;
+    const Outcome = @import("metrics.zig").Delivery.Outcome;
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
+    defer g.deinit();
+    const conn: @import("../quic/engine.zig").Handle = .{ .index = 0, .generation = 1 };
+    const peer = support.addPeer(&g, conn, .v1_2).?;
+    _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), peer.index, topic, true);
+    g.markDirect(conn);
+    const io = &g.sessions.rows[peer.index].io;
+    try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 1, .queued = 1 }, try g.publish(topic, "mine", .{ .mono_ms = 1, .unix_s = 0 }));
+    const id = topic_mod.validMessageId(topic, "mine", .{});
+    var body: [32]u8 = undefined;
+    var writer = @import("protobuf.zig").Writer.init(&body);
+    writer.bytesField(1, &id);
+    support.control(&g, peer.index, .{ .iwant = .{ .body = writer.written() } }, .{ .mono_ms = 2, .unix_s = 0 });
+    try std.testing.expectEqual(@as(usize, 1), io.tx.data.classCount(.local));
+    try std.testing.expectEqual(@as(usize, 1), io.tx.data.classCount(.ordinary));
+    try std.testing.expectEqual(@as(usize, 1), io.tx.data.origins[@intFromEnum(Origin.iwant)]);
+    // Both frames complete, the local one first; a later publication is cancelled by a reset.
+    for (0..16) |_| {
+        const segment = io.tx.segment(&g.messages.store);
+        if (segment.len == 0) break;
+        g.advanceWrite(g.sessions.ref(peer.index), segment.len, 3);
+    }
+    _ = try g.publish(topic, "cancelled", .{ .mono_ms = 4, .unix_s = 0 });
+    g.cancelWrites(g.sessions.ref(peer.index));
+    const recipients = &g.delivery_metrics.recipients;
+    const publication = recipients[@intFromEnum(Origin.publication)];
+    const iwant = recipients[@intFromEnum(Origin.iwant)];
+    for ([_]Outcome{ .selected, .queued, .completed, .cancelled, .pressured, .unavailable }, [_]u64{ 2, 2, 1, 1, 0, 0 }, [_]u64{ 1, 1, 1, 0, 0, 0 }) |outcome, local, ordinary| {
+        try std.testing.expectEqual(local, publication[@intFromEnum(outcome)]);
+        try std.testing.expectEqual(ordinary, iwant[@intFromEnum(outcome)]);
+    }
+    try std.testing.expectEqual(@as(u64, 2), g.delivery_metrics.write_time[@intFromEnum(Origin.publication)].count + g.delivery_metrics.write_time[@intFromEnum(Origin.iwant)].count);
 }

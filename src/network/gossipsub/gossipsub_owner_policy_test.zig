@@ -496,7 +496,7 @@ test "publication subscribed fanout expires through owner maintenance" {
     try std.testing.expectEqual(@as(usize, 1), g.overlay.fanoutMembers(t).count());
     try std.testing.expect(g.overlay.fanoutMembers(t).isSet(next.index));
     try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[p.index].io.tx.data.count);
-    const queued = g.sessions.rows[next.index].io.tx.data.first().?.message;
+    const queued = g.sessions.rows[next.index].io.tx.data.next(&g.messages.store).?.message;
     try std.testing.expectEqual(topic_mod.validMessageId(name, "fresh fanout", .{}), g.messages.store.get(queued).?.id);
 }
 
@@ -530,7 +530,7 @@ test "local intent reclaimed history answers actual IWANT with original wire top
     support.control(&g, peer.index, .{ .iwant = (try reader.next()).?.iwant }, .{ .mono_ms = g.last_now_ms, .unix_s = 0 });
     const io = &g.sessions.rows[peer.index].io;
     try std.testing.expectEqual(@as(usize, 1), io.tx.data.count);
-    try std.testing.expectEqual(message, io.tx.data.first().?.message);
+    try std.testing.expectEqual(message, io.tx.data.next(&g.messages.store).?.message);
     try std.testing.expectEqual(@as(u8, 1), g.messages.history.countsRow(g.messages.history.get(&g.messages.store, id).?)[g.sessions.rows[peer.index].logical.index]);
     var wire: [512]u8 = undefined;
     var used: usize = 0;

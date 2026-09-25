@@ -75,7 +75,7 @@ test "gossip diagnostics tracks queued age and preserves peaks after owner relea
     const message = g.messages.store.put([_]u8{1} ** 20, "t", "abc").?;
     g.messages.store.retainHistory(message);
     g.messages.store.seal(message);
-    try std.testing.expectEqual(@import("outbox.zig").QueueResult.queued, io.tx.queueData(&g.messages.store, message, .forward, 10, 7));
+    try std.testing.expectEqual(@import("outbox.zig").QueueResult.queued, io.tx.queueData(&g.messages.store, message, .forward, .{ .bytes = 10 }, 7));
     try std.testing.expect(io.tx.injectFrame("ctrl", true, null, 9) != null);
     g.last_now_ms = 20;
     const snapshot = g.resourceSnapshot();
