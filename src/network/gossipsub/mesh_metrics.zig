@@ -60,7 +60,7 @@ pub const Metrics = struct {
         }
         try w.enums(.{ .name = "lodestar_native_gossip_graft_received_total", .kind = .counter, .help = "Received GRAFTs by outcome", .labels = &.{"outcome"} }, GraftOutcome, &self.graft_received);
         try w.enums(.{ .name = "lodestar_native_gossip_prune_sent_total", .kind = .counter, .help = "PRUNEs queued to peers by reason, including refusals of peers outside the mesh", .labels = &.{"reason"} }, Removal, &self.prune_sent);
-        const time = try w.family(.{ .name = "lodestar_native_gossip_mesh_peer_seconds_total", .kind = .counter, .help = "Mesh members integrated over time by topic kind, sampled at each heartbeat", .labels = &.{"kind"}, .unit = .seconds });
+        const time = try w.family(.{ .name = "lodestar_native_gossip_mesh_peer_seconds_total", .kind = .counter, .help = "Mesh members integrated over time by topic kind; an estimate sampled at each heartbeat, which credits the mesh a heartbeat sees to the whole interval before it", .labels = &.{"kind"}, .unit = .seconds });
         for (self.peer_ms, 0..) |ms, index| try time.sample(.{@tagName(@as(policy.Kind, @enumFromInt(index)))}, @as(f64, @floatFromInt(ms)) / 1000);
     }
 };

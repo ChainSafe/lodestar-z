@@ -104,6 +104,9 @@ pub const Gossipsub = struct {
     heartbeat_at: u64 = 0,
     opportunistic_at: u64 = 0,
     last_now_ms: u64 = 0,
+    /// The newest monotonic time any caller supplied. Occupancy and slot phases are accounted on
+    /// it, so it never moves backwards; protocol timing keeps `last_now_ms`.
+    observed_ms: u64 = 0,
     /// The owner's slot clock, which outlives this; null leaves slot phases unknown.
     slot_clock: ?*const @import("../slot_clock.zig").SlotClock = null,
     msg_scratch: []u8,
@@ -327,7 +330,7 @@ pub const Gossipsub = struct {
     pub fn cancelWrites(self: *Gossipsub, session: sessions_mod.SessionRef) void {
         if (!self.sessions.matches(session)) return;
         const tx = &self.sessions.rows[session.index].io.tx;
-        self.integrateOccupancy();
+        self.integrateOccupancy(self.last_now_ms);
         self.delivery_metrics.cancelled(&tx.data.origins);
         tx.cancelStream(&self.messages.store);
         self.cancelPromises(session.index, false);
@@ -426,7 +429,7 @@ pub const Gossipsub = struct {
         if (source != null) for (self.sessions.rows, 0..) |*row, peer| {
             if (row.active and self.peers.rows[row.logical.index].direct and self.overlay.subscribers(topic).isSet(peer)) recipients.set(peer);
         };
-        self.integrateOccupancy();
+        self.integrateOccupancy(now_ms);
         var it = recipients.iterator(.{});
         next_peer: while (it.next()) |peer| {
             const index: u16 = @intCast(peer);
@@ -678,7 +681,7 @@ pub const Gossipsub = struct {
     pub fn advanceWrite(self: *Gossipsub, session: sessions_mod.SessionRef, written: usize, now_ms: u64) void {
         assert(self.sessions.matches(session));
         self.rpc_metrics.sent_bytes +|= written;
-        self.integrateOccupancy();
+        self.integrateOccupancy(now_ms);
         if (self.sessions.rows[session.index].io.tx.advance(&self.messages.store, written)) |completion| self.writeCompleted(session, completion, now_ms);
     }
 
@@ -695,10 +698,12 @@ pub const Gossipsub = struct {
         }
     }
 
-    /// Integrates data queue occupancy up to now. Call before any change to the data queues.
-    pub fn integrateOccupancy(self: *Gossipsub) void {
+    /// Integrates data queue occupancy up to `now_ms`, or a newer time already observed. Call
+    /// with the change's own time before any change to the data queues.
+    pub fn integrateOccupancy(self: *Gossipsub, now_ms: u64) void {
+        self.observed_ms = @max(self.observed_ms, self.last_now_ms, now_ms);
         const pool = self.sessions.deliveries;
-        self.occupancy.integrate(self.slot_clock, self.last_now_ms, pool.slots.len - pool.available, pool.full_queues);
+        self.occupancy.integrate(self.slot_clock, self.observed_ms, pool.slots.len - pool.available, pool.full_queues);
     }
 
     fn deliveryLimits(self: *const Gossipsub) @import("delivery.zig").Limits {
@@ -709,7 +714,7 @@ pub const Gossipsub = struct {
         const row = &self.sessions.rows[index];
         self.counters.send_dropped += 1;
         self.delivery_metrics.recipient(origin, .pressured);
-        const phase = if (self.slot_clock) |clock| clock.phaseBps(self.last_now_ms) else null;
+        const phase = if (self.slot_clock) |clock| clock.phaseBps(@max(self.observed_ms, self.last_now_ms)) else null;
         self.delivery_metrics.dropped(origin, row.io.tx.last_drop, row.client, phase);
     }
 
@@ -904,7 +909,7 @@ pub const Gossipsub = struct {
                 self.rpc_metrics.iwant[@intFromEnum(IwantOutcome.suppressed)] +|= 1;
                 continue;
             }
-            self.integrateOccupancy();
+            self.integrateOccupancy(self.last_now_ms);
             const outcome: IwantOutcome = switch (self.messages.serve(&self.sessions.rows[index].io.tx, self.logical(index), id, self.deliveryLimits(), self.last_now_ms)) {
                 .unknown => blk: {
                     self.rpc_metrics.iwant_unknown +|= 1;
