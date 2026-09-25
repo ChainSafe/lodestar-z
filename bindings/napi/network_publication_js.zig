@@ -87,7 +87,7 @@ pub fn settle(env: napi.Env, runtime: *r.Runtime, limit: usize) !bool {
         defer runtime.retirePublication(token);
         if (cell.deferred) |deferred| {
             if (cell.failure) |err| {
-                try deferred.reject(g.publishError(env, err) catch try runtime.copy_error.?.getValue());
+                try deferred.reject(@import("network_js.zig").settled(env, g.publishError(env, err)) catch try runtime.copy_error.?.getValue());
             } else {
                 const value = copyResult(env, cell) catch {
                     try deferred.reject(try runtime.copy_error.?.getValue());

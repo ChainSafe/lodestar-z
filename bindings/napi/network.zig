@@ -249,12 +249,6 @@ const Exchange = struct {
         const due = runtime.settleableLocked() or (runtime.quiescent and !runtime.close_settled);
         runtime.unlock();
         if (!due) return .{};
-        // Settled errors describe native outcomes. A captured stack would retain the drain's frames, and through
-        // them the runtime facade, while the host holds the error.
-        const stack_limit = swapStackLimit(self.env, null);
-        defer if (stack_limit) |previous| {
-            _ = swapStackLimit(self.env, previous);
-        };
         const completions = &runtime.bridge.delivered[@intFromEnum(r.bridge.Delivery.completion)];
         const before = completions.*;
         const more = settleWithin(self.env, runtime, limit) catch |err| {
@@ -276,20 +270,6 @@ const Exchange = struct {
         self.runtime.notify.ref(self.env) catch {};
     }
 };
-
-/// Sets `Error.stackTraceLimit` to `value`, or to zero, and returns the previous value. Runs before any payload is
-/// pinned and never throws: a host whose `Error` rejects the change keeps its stacks.
-fn swapStackLimit(env: napi.Env, value: ?Value) ?Value {
-    const swapped = swap: {
-        const constructor = (env.getGlobal() catch break :swap null).getNamedProperty("Error") catch break :swap null;
-        const previous = constructor.getNamedProperty("stackTraceLimit") catch break :swap null;
-        const next = value orelse (env.createUint32(0) catch break :swap null);
-        constructor.setNamedProperty("stackTraceLimit", next) catch break :swap null;
-        break :swap previous;
-    };
-    if (swapped == null and (env.isExceptionPending() catch false)) _ = env.getAndClearLastException() catch {};
-    return swapped;
-}
 
 fn owner(self: *@This()) !*Runtime {
     return self.runtime orelse error.NetworkClosed;
@@ -502,7 +482,7 @@ fn settleOperations(env: napi.Env, runtime: *Runtime, limit: usize) !bool {
         const operation = &runtime.table.cells[i];
         if (operation.deferred) |deferred| {
             if (operation.failure) |err| {
-                try deferred.reject(makeError(env, err) catch try runtime.copy_error.?.getValue());
+                try deferred.reject(@import("network_js.zig").settled(env, makeError(env, err)) catch try runtime.copy_error.?.getValue());
             } else {
                 const value = copyOperation(env, runtime, i) catch {
                     try deferred.reject(try runtime.copy_error.?.getValue());

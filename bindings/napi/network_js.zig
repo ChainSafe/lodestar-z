@@ -15,6 +15,19 @@ pub fn copyError(err: anyerror) anyerror {
     };
 }
 
+/// Drops the stack V8 captured for a settled error, whose frames would retain the settling drain, and through it
+/// the runtime facade, while the host holds the error. `created` comes fresh from `createError`, so its own
+/// `message` and `stack` properties are V8's, and reading or assigning them runs no host code.
+pub fn settled(env: napi.Env, created: anyerror!Value) !Value {
+    const value = try created;
+    var buffer: [128]u8 = undefined;
+    const prefix = "Error: ";
+    @memcpy(buffer[0..prefix.len], prefix);
+    const message = try (try value.getNamedProperty("message")).getValueStringUtf8(buffer[prefix.len..]);
+    try value.setNamedProperty("stack", try env.createStringUtf8(buffer[0 .. prefix.len + message.len]));
+    return value;
+}
+
 /// Copies result fields without invoking inherited setters.
 pub fn put(object: Value, name: [:0]const u8, value: Value) !void {
     try object.defineProperties(&.{.{

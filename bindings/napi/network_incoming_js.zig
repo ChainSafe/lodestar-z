@@ -276,11 +276,11 @@ pub fn settle(env: napi.Env, runtime: *Runtime, limit: usize) !bool {
             runtime.unlock();
         }
         if (pending) |deferred| {
-            if (ack.? == .sent) try deferred.resolve(try env.getUndefined()) else try deferred.reject(ackError(env, ack.?) catch try runtime.copy_error.?.getValue());
+            if (ack.? == .sent) try deferred.resolve(try env.getUndefined()) else try deferred.reject(@import("network_js.zig").settled(env, ackError(env, ack.?)) catch try runtime.copy_error.?.getValue());
         }
         if (closed) |deferred| try deferred.resolve(try env.getUndefined());
         if (permission) |deferred| {
-            if (permitted) try deferred.resolve(try env.getUndefined()) else try deferred.reject(errorValue(env, "NetworkIncomingClosed") catch try runtime.copy_error.?.getValue());
+            if (permitted) try deferred.resolve(try env.getUndefined()) else try deferred.reject(@import("network_js.zig").settled(env, errorValue(env, "NetworkIncomingClosed")) catch try runtime.copy_error.?.getValue());
         }
     }
     runtime.lock();
