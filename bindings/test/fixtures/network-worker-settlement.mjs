@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import {createSocket} from "node:dgram";
 import {once} from "node:events";
 import {isMainThread, parentPort, Worker} from "node:worker_threads";
-import {applicationConfig, localIntent, startRuntime, topicName} from "../utils/network.js";
+import {applicationConfig, localIntent, runtimeReleased, startRuntime, topicName} from "../utils/network.js";
 
 if (isMainThread) {
   const worker = new Worker(new URL(import.meta.url));
@@ -17,6 +17,9 @@ if (isMainThread) {
     } finally {
       socket.close();
     }
+    // Teardown with pending results returned the worker runtime's process claim.
+    await runtimeReleased();
+    await startRuntime(applicationConfig()).close();
     console.log("worker-settlement-released");
   } finally {
     await worker.terminate();

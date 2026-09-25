@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import {createSocket} from "node:dgram";
 import {setTimeout as delay} from "node:timers/promises";
-import {runtimeReleased, startRuntime, applicationConfig} from "../utils/network.js";
+import {
+  applicationConfig,
+  localIntent,
+  runtimeReleased,
+  Settlements,
+  startRuntime,
+  topicName,
+  unreachableConnect,
+} from "../utils/network.js";
 
 const mode = process.argv[2];
 if (mode === "exit") {
@@ -30,13 +38,34 @@ if (mode === "exit") {
   await startRuntime(applicationConfig()).close();
   console.log("gc-rebound");
 } else if (mode === "promises") {
-  let runtime = startRuntime(applicationConfig());
+  const config = applicationConfig();
+  let runtime = startRuntime(config);
+  const settlements = new Settlements();
+  const unsettled = settlements.unsettledAtClose(runtime.closed);
+  await runtime.applyIntent(localIntent(config), config.initialSlot);
+  settlements.watch(() => runtime.connect(...unreachableConnect()));
+  settlements.watch(() => runtime.getIdentity());
+  for (let i = 0; i < 4; i++)
+    settlements.watch(() =>
+      runtime.publishGossip(topicName(), new Uint8Array(4000).fill(i), {allowZeroPeers: true, ignoreDuplicate: true})
+    );
   const closing = runtime.close();
   runtime = null;
   await delay(1);
   global.gc();
   assert.equal((await closing).reason, "requested");
+  await settlements.settled();
+  assert.deepEqual(await unsettled, []);
+  assert.deepEqual(settlements.counts, [1, 1, 1, 1, 1, 1]);
+  assert.equal(settlements.outcomes[0], "NetworkClosed");
   console.log("promises-settled");
+} else if (mode === "await-close") {
+  // Only the notifier ref, taken by close, keeps the loop alive until closed settles.
+  const config = applicationConfig();
+  const runtime = startRuntime(config);
+  await runtime.applyIntent(localIntent(config), config.initialSlot);
+  assert.deepEqual(await runtime.close(), {reason: "requested"});
+  console.log("close-awaited");
 } else if (mode === "callback") {
   const {incomingPair, takeIncoming, BLOCKS} = await import("../utils/network-incoming.js");
   let calls = 0;

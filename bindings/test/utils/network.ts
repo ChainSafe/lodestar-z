@@ -7,6 +7,7 @@ export {testChain};
 import {type ChainConfig, createBeaconConfig} from "@lodestar/config";
 import bindings from "../../src/index.js";
 import type {
+  IpEndpoint,
   NativeApplicationConfig,
   NativeDiscoveryConfig,
   NativeGossipProcessorLimit,
@@ -306,4 +307,63 @@ export function subscriptions(...names: string[]): NativeSubscriptionSet[] {
 
 export function peerIdFromHex(hex: string): string {
   return peerIdFromPublicKey(publicKeyFromProtobuf(Buffer.from(hex, "hex").subarray(2))).toString();
+}
+
+/** A connect target that never answers, so the command stays pending until close. */
+export function unreachableConnect(): [string, IpEndpoint[], bigint] {
+  return [
+    peerIdFromHex("00250802122102c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"),
+    [{address: Uint8Array.of(127, 0, 0, 1), family: 4, port: 9}],
+    60000n,
+  ];
+}
+
+/** Counts each watched operation's settlements and records its outcome; a synchronous throw is its settlement. */
+export class Settlements {
+  readonly counts: number[] = [];
+  readonly outcomes: string[] = [];
+  private readonly pending: Promise<void>[] = [];
+
+  watch(start: () => Promise<unknown>): void {
+    const index = this.counts.push(0) - 1;
+    const record = (outcome: string) => {
+      this.counts[index]++;
+      this.outcomes[index] = outcome;
+    };
+    const failed = (error: unknown) => record(String((error as {code?: unknown}).code ?? error));
+    try {
+      this.pending.push(start().then(() => record("resolved"), failed));
+    } catch (error) {
+      failed(error);
+    }
+  }
+
+  /** Rejects if a watched operation is still pending after `timeoutMs`. */
+  async settled(timeoutMs = 10000): Promise<void> {
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(Error(`Unsettled operations: ${this.unsettled(this.counts.length)}`)), timeoutMs);
+    });
+    try {
+      await Promise.race([Promise.all(this.pending), deadline]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * The operations started before `closed` settled that are still pending once the microtasks its settlement
+   * enabled have run. Call before starting any operation.
+   */
+  unsettledAtClose(closed: Promise<unknown>): Promise<number[]> {
+    return closed.then(async () => {
+      const started = this.counts.length;
+      for (let i = 0; i < 8; i++) await undefined;
+      return this.unsettled(started);
+    });
+  }
+
+  private unsettled(started: number): number[] {
+    return this.counts.slice(0, started).flatMap((count, index) => (count === 0 ? [index] : []));
+  }
 }

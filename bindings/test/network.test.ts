@@ -233,17 +233,26 @@ it("rejects every invalid drain limit", async () => {
   }
 }, 20000);
 
-it.each(["gc", "exit", "promises"])("finishes bounded %s subprocess lifecycle", (mode) => {
-  const output = execFileSync(
-    process.execPath,
-    ["--import", "tsx", "--expose-gc", "bindings/test/fixtures/network-lifecycle.mjs", mode],
-    {
-      encoding: "utf8",
-      timeout: 10000,
-    }
-  );
-  expect(output).toContain(mode === "gc" ? "gc-rebound" : mode === "exit" ? "ready-exit" : "promises-settled");
-}, 15000);
+it.each([
+  ["gc", "gc-rebound"],
+  ["exit", "ready-exit"],
+  ["promises", "promises-settled"],
+  ["await-close", "close-awaited"],
+])(
+  "finishes bounded %s subprocess lifecycle",
+  (mode, expected) => {
+    const output = execFileSync(
+      process.execPath,
+      ["--import", "tsx", "--expose-gc", "bindings/test/fixtures/network-lifecycle.mjs", mode],
+      {
+        encoding: "utf8",
+        timeout: 10000,
+      }
+    );
+    expect(output).toContain(expected);
+  },
+  15000
+);
 
 it("keeps queued records and closes after an ordinary callback exception", () => {
   const output = execFileSync(
