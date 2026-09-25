@@ -53,6 +53,8 @@ pub const DiscoveryOptions = struct {
     engine: d.Engine.Config = .{ .session_capacity = discovery_session_capacity, .session_idle_timeout_ms = discovery_session_idle_timeout_ms },
     coordinator: peers.discovery.Options = .{},
 };
+pub const SlotClock = @import("slot_clock.zig").SlotClock;
+
 pub const Startup = struct {
     keylog_path: ?[]const u8 = null,
     host: *const @import("wire/keys.zig").KeyPair,
@@ -63,7 +65,7 @@ pub const Startup = struct {
     /// The host's wall-clock slot until its first intent.
     slot: u64 = 0,
     /// The chain's genesis time and slot duration. Without them slot phases are unknown.
-    slot_clock: ?@import("slot_clock.zig").SlotClock = null,
+    slot_clock: ?SlotClock = null,
     /// Peers an earlier run remembered, at most `peers.remembered.capacity`, replayed as paced
     /// automatic candidates. Native drops expired, unusable and duplicate records.
     remembered: []const peers.remembered.Record = &.{},
@@ -185,8 +187,10 @@ pub const NetworkCore = struct {
     host_wake: ?i32 = null,
     /// The host's wall-clock slot for status validation. Intents only advance it.
     current_slot: u64 = 0,
-    /// Every clock read the owner takes updates it; gossip borrows it for slot phases.
-    slot_clock: ?@import("slot_clock.zig").SlotClock = null,
+    /// Its wall offset is refreshed at initialization and at each step's clock read; any monotonic
+    /// time, including one a host clock read supplies, maps to a phase through the latest offset.
+    /// Gossip borrows it for slot phases.
+    slot_clock: ?SlotClock = null,
     /// The last host apply stopped at a per-turn cap.
     host_more: bool = false,
 

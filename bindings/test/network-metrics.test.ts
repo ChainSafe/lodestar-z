@@ -23,6 +23,35 @@ function samples(text: string): Map<string, number> {
   return result;
 }
 
+const PHASE_BUCKETS = Array.from({length: 16}, (_, index) => String(index * 625).padStart(4, "0"));
+
+function phasedSeconds(metrics: Map<string, number>): number {
+  let total = 0;
+  for (const phase of PHASE_BUCKETS) {
+    total += metrics.get(`lodestar_native_gossip_outbox_observed_seconds_total{phase_bps="${phase}"}`) ?? 0;
+  }
+  return total;
+}
+
+test("a genesis time gives slot phases to outbox occupancy", async () => {
+  const config = {...applicationConfig(), genesisTime: BigInt(Math.floor(Date.now() / 1000) - 3600)};
+  const runtime = startRuntime(config, () => undefined);
+  try {
+    await runtime.identity;
+    await runtime.applyIntent(localIntent(config), config.initialSlot);
+    await vi.waitFor(
+      () => {
+        const metrics = samples(runtime.getMetrics());
+        expect(phasedSeconds(metrics)).toBeGreaterThan(0);
+        expect(metrics.get('lodestar_native_gossip_outbox_observed_seconds_total{phase_bps="unknown"}')).toBe(0);
+      },
+      {timeout: 5000}
+    );
+  } finally {
+    await runtime.close();
+  }
+});
+
 test("metrics are available through startup and remain readable after close", async () => {
   const config = applicationConfig();
   const runtime = startRuntime(config, () => undefined);
@@ -62,6 +91,7 @@ test("metrics are available through startup and remain readable after close", as
       expect(metrics.get(`lodestar_native_gossip_io_${counter}_total`)).toBe(0);
     }
     expect(metrics.get("lodestar_native_gossip_history_entries_visited_total")).toBe(0);
+    expect(phasedSeconds(metrics)).toBe(0);
     for (const phase of ["mesh", "gossip", "retire", "history"]) {
       expect(
         metrics.get(`lodestar_native_gossip_maintenance_work_seconds_count{phase="${phase}"}`)

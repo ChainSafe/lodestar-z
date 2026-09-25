@@ -14,12 +14,17 @@ const Fixture = struct {
     }
 
     fn initWith(boundaries: []const policy.Boundary, discovery: ?core.DiscoveryOptions) !Fixture {
+        return initClock(boundaries, discovery, null);
+    }
+
+    fn initClock(boundaries: []const policy.Boundary, discovery: ?core.DiscoveryOptions, slot_clock: ?core.SlotClock) !Fixture {
         const node = try std.testing.allocator.create(core.NetworkCore);
         errdefer std.testing.allocator.destroy(node);
         const key = try @import("wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{93}));
         var options = @import("test_support.zig").networkOptions(&key);
         options.resolved.core.service.gossipsub.topic_policy = if (boundaries.len > 0) boundaries else null;
         options.startup.discovery = discovery;
+        options.startup.slot_clock = slot_clock;
         try node.init(std.testing.allocator, std.testing.io, &options.resolved, options.startup);
         errdefer node.deinit(std.testing.io);
         const buffer = try std.testing.allocator.alloc(u8, metrics.textCapacity(boundaries));
@@ -529,4 +534,33 @@ test "metrics phases come from the owner's slot clock, which each clock read upd
     try std.testing.expectEqual(&node.slot_clock.?, node.service.gossipsub.slot_clock.?);
     const wall = node.last_now.unix_ms.?;
     try std.testing.expectEqual(@as(?u16, @intCast(wall % 12_000 * 10_000 / 12_000)), node.slot_clock.?.phaseBps(node.last_now.mono_ms));
+}
+
+test "metrics bucket a pressured publication by the phase of the owner's slot clock" {
+    var f = try Fixture.initClock(&.{}, null, .{ .genesis_unix_ms = 1_606_824_023_000, .slot_duration_ms = 12_000 });
+    defer f.deinit();
+    const node = f.node;
+    const g = node.service.gossipsub;
+    const topic = "/eth2/00000000/beacon_block/ssz_snappy";
+    const conn: @import("types.zig").Handle = .{ .index = 0, .generation = 1 };
+    const now = node.last_now;
+    _ = try node.publishGossipWithOptions(topic, "filler", .{}, now);
+    const peer = gossip_test.addPeer(g, conn, .v1_2).?;
+    _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), peer.index, topic, true);
+    g.markDirect(conn);
+    const filler = g.messages.history.message(g.messages.history.get(&g.messages.store, @import("gossipsub/topic.zig").validMessageId(topic, "filler", g.options.message_id_policy)).?);
+    const tx = &g.sessions.rows[peer.index].io.tx;
+    for (0..@import("gossipsub/delivery.zig").per_peer_limit) |_| {
+        const origin: @import("gossipsub/delivery.zig").Origin = if (tx.data.full()) .publication else .forward;
+        try std.testing.expectEqual(.queued, tx.queueData(&g.messages.store, filler, origin, .{ .bytes = g.options.tx_peer_bytes }, now.mono_ms));
+    }
+    const outcome = try node.publishGossipWithOptions(topic, "pressured", .{}, now);
+    try std.testing.expectEqual(@as(u16, 1), outcome.pressured);
+    const bucket = core.SlotClock.bucket(node.slot_clock.?.phaseBps(now.mono_ms).?);
+    const output = try f.render(true);
+    var line: [128]u8 = undefined;
+    for (@import("slot_clock.zig").bucket_labels, 0..) |label, index| {
+        try contains(output, try std.fmt.bufPrint(&line, "lodestar_native_gossip_data_drops_by_slot_phase_total{{phase_bps=\"{s}\"}} {d}\n", .{ label, @intFromBool(index == bucket) }));
+    }
+    g.connectionClosed(conn);
 }
