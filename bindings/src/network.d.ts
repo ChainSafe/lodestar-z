@@ -392,7 +392,24 @@ export interface NativeNetworkApplicationRuntime {
    * macrotask; false releases the notification latch, so the next owner notification calls onWorkAvailable.
    */
   endDrain(): boolean;
+  /**
+   * The host drain calls that have work now, as NativeLanes bits, read under one mutex acquisition: settle,
+   * drainPeers, takeIncomingRequest, drainGossipChecks, and drainGossip for urgent or ordinary kinds. Ordinary
+   * gossip counts also while the last drainGossip disabled it. Work that arrives after this read keeps endDrain
+   * true, so a drain may skip every call whose lane is clear.
+   */
+  pendingLanes(): number;
   close(): Promise<NativeRuntimeCloseResult>;
+}
+
+/** The bits of NativeNetworkApplicationRuntime.pendingLanes, one per host drain call that has work. */
+export interface NativeLanes {
+  settle: 1;
+  peers: 2;
+  incoming: 4;
+  gossipChecks: 8;
+  gossipUrgent: 16;
+  gossipOrdinary: 32;
 }
 
 /**
@@ -401,10 +418,10 @@ export interface NativeNetworkApplicationRuntime {
  * Copies configuration and returns a running runtime; failure is terminal.
  * Calls onWorkAvailable on that thread when results, peer events, incoming requests, or gossip work can be
  * drained, including from request and incoming calls that leave results to settle. onWorkAvailable must only
- * schedule a drain in a later macrotask, one at a time. That drain calls settle and the drains it wants, and
- * ends with endDrain; while endDrain returns true, the host drains again. No further notification arrives
- * until a drain ends with endDrain returning false, so a scheduled drain must not be cancelled, also after
- * the runtime closes.
+ * schedule a drain in a later macrotask, one at a time. That drain calls settle and the drains it wants,
+ * skipping those pendingLanes reports idle, and ends with endDrain; while endDrain returns true, the host drains
+ * again. No further notification arrives until a drain ends with endDrain returning false, so a scheduled drain
+ * must not be cancelled, also after the runtime closes.
  */
 export function initializeNativeNetworkRuntime(
   config: NativeApplicationConfig,
@@ -676,6 +693,8 @@ export interface NativeGossipJob {
   start: number;
   length: number;
   grouped: boolean;
+  /** A block, blob sidecar or data column job, which ordinary gating never withholds. */
+  urgent: boolean;
 }
 export interface NativeGossipBatch {
   /** Non-attestation jobs contain one message; attestation jobs contain one compatible group. */

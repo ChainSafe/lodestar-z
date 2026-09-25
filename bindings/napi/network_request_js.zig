@@ -92,6 +92,7 @@ pub fn start(runtime: *Runtime, peer: Value, protocol: Value, data: Value, optio
     if (runtime.stop or runtime.quiescent) return error.NetworkClosed;
     cell.order = try runtime.table.nextOrder();
     cell.state = .queued;
+    runtime.requests.?.refresh(cell);
     runtime.signalLocked();
     return value;
 }
@@ -191,26 +192,26 @@ pub fn settle(env: napi.Env, runtime: *Runtime, limit: usize) !bool {
     defer runtime.release();
     var settled: usize = 0;
     var more = false;
-    for (0..32) |i| {
+    var next: usize = 0;
+    for (0..requests.capacity_max) |_| {
         runtime.lock();
-        if (i >= runtime.requests.?.cells.len) {
+        const i = runtime.requests.?.nextDue(next, runtime.stop, runtime.disposed) orelse {
             runtime.unlock();
             break;
-        }
-        const cell = &runtime.requests.?.cells[i];
-        if (!requests.settleable(cell, runtime.stop, runtime.disposed)) {
-            runtime.unlock();
-            continue;
-        }
+        };
         if (settled == limit) {
             runtime.unlock();
             more = true;
             break;
         }
         settled += 1;
+        next = i + 1;
+        const cell = &runtime.requests.?.cells[i];
+        std.debug.assert(requests.settleable(cell, runtime.stop, runtime.disposed));
         const deliver_chunk = requests.deliverable(cell, runtime.stop);
         const token: requests.Token = .{ .index = @intCast(i), .generation = cell.generation };
         cell.copying = true;
+        runtime.requests.?.refresh(cell);
         const deferred = cell.pull;
         const retirement = cell.retirement;
         const terminal = cell.terminal;
@@ -237,6 +238,7 @@ pub fn settle(env: napi.Env, runtime: *Runtime, limit: usize) !bool {
                 runtime.signalLocked();
             }
             runtime.requests.?.releasePayload(cell);
+            runtime.requests.?.refresh(cell);
             runtime.unlock();
             if (!deliver_chunk) runtime.retireRequest(token);
         }

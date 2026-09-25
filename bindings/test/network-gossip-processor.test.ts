@@ -5,7 +5,7 @@ import type {
   NativeGossipMessage,
   NativeNetworkApplicationRuntime,
 } from "../src/network.js";
-import {applicationConfig, localIntent, startRuntime, subscriptions, topicName} from "./utils/network.js";
+import {applicationConfig, lanes, localIntent, startRuntime, subscriptions, topicName} from "./utils/network.js";
 import {incomingPair} from "./utils/network-incoming.js";
 
 const BLOCK = topicName();
@@ -145,8 +145,12 @@ test("native processor retains dependencies, protects blocks, batches ready work
       expect(pair.right.classifyGossip([{available: false, handle: check.handle}])).toBe(1);
     let block;
     for (let i = 0; i < 1000; i++) {
-      const batch = pair.right.drainGossip({bytes: 4096, items: 1, ordinary: false});
-      if (batch.messages.length) {
+      // Waiting attestations are neither checkable nor claimable; only the urgent block is.
+      const pending = pair.right.pendingLanes() & (lanes.gossipChecks | lanes.gossipUrgent | lanes.gossipOrdinary);
+      if (pending !== 0) {
+        expect(pending).toBe(lanes.gossipUrgent);
+        const batch = pair.right.drainGossip({bytes: 4096, items: 1, ordinary: false});
+        expect(batch.jobs).toEqual([{grouped: false, kind: "beacon_block", length: 1, start: 0, urgent: true}]);
         block = batch.messages[0];
         break;
       }
@@ -154,13 +158,21 @@ test("native processor retains dependencies, protects blocks, batches ready work
     }
     expect(block?.topic).toBe(BLOCK);
     if (!block) throw Error("Block dispatch deadline");
+    expect(pair.right.pendingLanes() & lanes.gossipUrgent).toBe(0);
     expect(pair.right.reportGossip(block.handle, "accept")).toBe(true);
     pair.right.notifyGossipBlock(root);
     for (const check of await checks(pair.right, 2))
       expect(pair.right.classifyGossip([{available: true, handle: check.handle}])).toBe(1);
-    await delay(50);
+    // The owner readies the attestation group at its deadline.
+    for (let i = 0; i < 200 && !(pair.right.pendingLanes() & lanes.gossipOrdinary); i++) await delay(5);
+    expect(pair.right.pendingLanes() & (lanes.gossipChecks | lanes.gossipUrgent | lanes.gossipOrdinary)).toBe(
+      lanes.gossipOrdinary
+    );
     const batch = pair.right.drainGossip({bytes: 1024, items: 64, ordinary: true});
-    expect(batch.jobs).toEqual([{grouped: true, kind: "beacon_attestation", length: batch.messages.length, start: 0}]);
+    expect(batch.jobs).toEqual([
+      {grouped: true, kind: "beacon_attestation", length: batch.messages.length, start: 0, urgent: false},
+    ]);
+    expect(pair.right.pendingLanes() & lanes.gossipOrdinary).toBe(0);
     expect(batch.messages).toHaveLength(2);
     expect(batch.messages.map((message) => message.attestationData)).toEqual([
       Buffer.from(data.subarray(4, 132)).toString("base64"),

@@ -10,6 +10,7 @@ import type {
   NativeApplicationConfig,
   NativeDiscoveryConfig,
   NativeGossipProcessorLimit,
+  NativeLanes,
   NativeLocalIntent,
   NativeNetworkApplicationRuntime,
   NativeRuntimeConfig,
@@ -19,6 +20,16 @@ import type {
 } from "../../src/network.js";
 
 const MIB = 1024 * 1024;
+
+/** The bits of pendingLanes. */
+export const lanes: NativeLanes = {
+  gossipChecks: 8,
+  gossipOrdinary: 32,
+  gossipUrgent: 16,
+  incoming: 4,
+  peers: 2,
+  settle: 1,
+};
 
 /**
  * Lodestar's processor plan for a small validator set, in topicKinds order. Each kind's byte weight exceeds its

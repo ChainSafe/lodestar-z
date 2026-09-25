@@ -107,6 +107,9 @@ class NativeRuntime {
   endDrain() {
     return this.#native.endDrain();
   }
+  pendingLanes() {
+    return this.#native.pendingLanes();
+  }
   drainPeers(maxEvents) {
     return this.#native.drainPeers(maxEvents);
   }

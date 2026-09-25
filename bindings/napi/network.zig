@@ -225,6 +225,17 @@ pub fn settle(self: *@This(), limit: js.Value) !js.Value {
     return .{ .val = try env.getBoolean(more) };
 }
 
+/// The host drain's lanes that hold work, as `Lane` bits, read under one mutex acquisition.
+pub fn pendingLanes(self: *@This()) !js.Value {
+    const call = r.call(self.runtime, .pending_lanes);
+    defer call.end();
+    const runtime = try self.owner();
+    runtime.lock();
+    const lanes = runtime.lanesLocked();
+    runtime.unlock();
+    return .{ .val = try js.env().createUint32(lanes) };
+}
+
 /// Ends one host drain. True keeps the notification latch and asks for another drain.
 pub fn endDrain(self: *@This()) !js.Value {
     const call = r.call(self.runtime, .end_drain);
@@ -426,19 +437,21 @@ pub fn reportPeer(self: *@This(), peer: js.Value, action: js.Value) !js.Value {
 
 fn settleOperations(env: napi.Env, runtime: *Runtime, limit: usize) !bool {
     var settled: usize = 0;
-    for (0..32) |i| {
+    var next: usize = 0;
+    for (0..commands.capacity) |_| {
         runtime.lock();
-        const cell = &runtime.table.cells[i];
-        if (cell.state != .terminal) {
+        const i = runtime.table.nextTerminal(next) orelse {
             runtime.unlock();
-            continue;
-        }
+            return false;
+        };
         if (settled == limit) {
             runtime.unlock();
             return true;
         }
         settled += 1;
-        cell.state = .copying;
+        next = i + 1;
+        const cell = &runtime.table.cells[i];
+        runtime.table.transition(cell, .copying);
         const token: commands.Token = .{ .index = @intCast(i), .generation = cell.generation };
         runtime.unlock();
         defer runtime.abortCommand(token);
