@@ -146,11 +146,21 @@ pub const Store = struct {
         return pending <= capacity and pages <= capacity - pending and self.entries_by_kind[k] - self.retained_entries_by_kind[k] < limits[k].items;
     }
     pub fn canRetain(self: *const Store, handle: Handle) bool {
-        const limits = self.limits orelse return true;
+        const lacking = self.retentionShortfall(handle);
+        return lacking.pages == 0 and lacking.entries == 0;
+    }
+
+    /// The pages and entries of its kind's retention allowance that retained messages must
+    /// release before `handle` fits.
+    pub fn retentionShortfall(self: *const Store, handle: Handle) struct { pages: usize, entries: usize } {
+        const limits = self.limits orelse return .{ .pages = 0, .entries = 0 };
         const entry = self.get(handle).?;
-        if (entry.retention_charged) return true;
+        if (entry.retention_charged) return .{ .pages = 0, .entries = 0 };
         const k = @intFromEnum(entry.kind);
-        return pagesFor(entry.len) <= limits[k].bytes / page_bytes - self.retained_by_kind[k] and self.retained_entries_by_kind[k] < limits[k].items;
+        return .{
+            .pages = (self.retained_by_kind[k] + pagesFor(entry.len)) -| limits[k].bytes / page_bytes,
+            .entries = (self.retained_entries_by_kind[k] + 1) -| limits[k].items,
+        };
     }
     pub fn put(self: *Store, id: topic.MessageId, name: []const u8, data: []const u8) ?Handle {
         assert(name.len <= topic.topic_max_len);

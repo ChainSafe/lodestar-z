@@ -195,7 +195,10 @@ pub const HistoryEntry = struct {
     topic: u32 = empty_slot,
     topic_prev: u32 = empty_slot,
     topic_next: u32 = empty_slot,
+    kind_prev: u32 = empty_slot,
+    kind_next: u32 = empty_slot,
 };
+const KindList = struct { head: u32 = empty_slot, tail: u32 = empty_slot };
 const HistoryTopic = struct {
     bytes: [@import("topic.zig").topic_max_len]u8 = undefined,
     name: []const u8 = undefined,
@@ -210,7 +213,7 @@ pub const Eviction = enum { age, capacity, retention, storage };
 pub const History = struct {
     /// The hard ceiling on entries: retransmission counts cost `capacity × retained` bytes.
     pub const capacity_max = 65536;
-    /// History entries a refused retention examines, oldest first, for one of its kind to evict.
+    /// Entries of its kind a refused retention examines, oldest first, for copies to evict.
     const reclaim_scan = 64;
 
     generations: []u64,
@@ -220,6 +223,8 @@ pub const History = struct {
     index: Index,
     topics: []HistoryTopic,
     topic_index: KeyIndex(HistoryTopic, []const u8, "name"),
+    /// Each kind's entries, oldest first.
+    kinds: [@typeInfo(@import("topic.zig").Kind).@"enum".fields.len]KindList = @splat(.{}),
     free_topic: u32 = 0,
     gossip_entries_visited: u64 = 0,
     evictions: [@typeInfo(Eviction).@"enum".fields.len]u64 = @splat(0),
@@ -320,13 +325,16 @@ pub const History = struct {
             break :blk index;
         };
         const topic_list = &self.topics[topic];
+        const kind_list = &self.kinds[@intFromEnum(payload.kind)];
         const slot = self.free;
         assert(slot != empty_slot);
         self.free = self.entries[slot].next;
         @memset(self.countsRow(slot), 0);
-        self.entries[slot] = .{ .message = h, .prev = self.tail, .born_epoch = epoch, .topic = topic, .topic_prev = topic_list.tail };
+        self.entries[slot] = .{ .message = h, .prev = self.tail, .born_epoch = epoch, .topic = topic, .topic_prev = topic_list.tail, .kind_prev = kind_list.tail };
         if (topic_list.tail != empty_slot) self.entries[topic_list.tail].topic_next = slot else topic_list.head = slot;
         topic_list.tail = slot;
+        if (kind_list.tail != empty_slot) self.entries[kind_list.tail].kind_next = slot else kind_list.head = slot;
+        kind_list.tail = slot;
         if (self.tail != empty_slot) self.entries[self.tail].next = slot else self.head = slot;
         self.tail = slot;
         self.ids[slot] = id;
@@ -368,20 +376,33 @@ pub const History = struct {
         assert(self.countsRow(slot)[peer.index] < 255);
         self.countsRow(slot)[peer.index] += 1;
     }
-    /// Whether `message` fits its kind's retention allowance, after evicting the oldest
-    /// reclaimable entries of its kind among the first `reclaim_scan` entries. A new message is
-    /// worth more than an old copy, and a message the history cannot retain is not forwarded.
+    /// Whether `handle` fits its kind's retention allowance, evicting old copies of its kind to
+    /// make room: a new message is worth more than an old copy, and a message the history cannot
+    /// retain is not forwarded. Victims are chosen among the kind's `reclaim_scan` oldest entries,
+    /// from those whose eviction frees retention the message lacks, and are evicted only when
+    /// together they free enough; otherwise the history is unchanged.
     pub fn makeRoom(self: *History, store: *storage.Store, handle: storage.Handle) bool {
-        const kind = store.get(handle).?.kind;
-        var slot = self.head;
-        for (0..@min(reclaim_scan, self.count)) |_| {
-            if (store.canRetain(handle)) return true;
-            const candidate = slot;
-            slot = self.entries[candidate].next;
-            const entry = store.get(self.entries[candidate].message).?;
-            if (entry.kind == kind and reclaimable(entry)) self.evict(store, candidate, .retention);
+        const lacking = store.retentionShortfall(handle);
+        if (lacking.pages == 0 and lacking.entries == 0) return true;
+        var victims: [reclaim_scan]u32 = undefined;
+        var chosen: usize = 0;
+        var pages: usize = 0;
+        var slot = self.kinds[@intFromEnum(store.get(handle).?.kind)].head;
+        for (0..reclaim_scan) |_| {
+            if (slot == empty_slot or (pages >= lacking.pages and chosen >= lacking.entries)) break;
+            const entry = store.get(self.entries[slot].message).?;
+            const freed = storage.Store.pagesFor(entry.len);
+            if (reclaimable(entry) and (chosen < lacking.entries or (freed > 0 and pages < lacking.pages))) {
+                victims[chosen] = slot;
+                chosen += 1;
+                pages += freed;
+            }
+            slot = self.entries[slot].kind_next;
         }
-        return store.canRetain(handle);
+        if (pages < lacking.pages or chosen < lacking.entries) return false;
+        for (victims[0..chosen]) |victim| self.evict(store, victim, .retention);
+        assert(store.canRetain(handle));
+        return true;
     }
 
     fn evict(self: *History, store: *storage.Store, slot: u32, reason: Eviction) void {
@@ -393,6 +414,9 @@ pub const History = struct {
         const t = &self.topics[e.topic];
         if (e.topic_prev != empty_slot) self.entries[e.topic_prev].topic_next = e.topic_next else t.head = e.topic_next;
         if (e.topic_next != empty_slot) self.entries[e.topic_next].topic_prev = e.topic_prev else t.tail = e.topic_prev;
+        const kind_list = &self.kinds[@intFromEnum(store.get(e.message).?.kind)];
+        if (e.kind_prev != empty_slot) self.entries[e.kind_prev].kind_next = e.kind_next else kind_list.head = e.kind_next;
+        if (e.kind_next != empty_slot) self.entries[e.kind_next].kind_prev = e.kind_prev else kind_list.tail = e.kind_prev;
         if (t.head == empty_slot) {
             assert(t.tail == empty_slot);
             self.topic_index.remove(t.name);
