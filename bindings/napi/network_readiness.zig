@@ -46,28 +46,20 @@ pub const Readiness = struct {
         return true;
     }
 
-    /// Takes a queued `row` out of its list for one delivery. Returns the list it came from.
-    pub fn pin(self: *Readiness, row: Row) Place {
+    /// Takes a queued `row` out of its list for one delivery.
+    pub fn pin(self: *Readiness, row: Row) void {
         const entry = &self.rows[@intFromEnum(row)];
         std.debug.assert(!entry.pinned and queued(entry.place));
-        const from = entry.place;
-        self.list(from).?.remove(&self.rows, "link", @intFromEnum(row));
+        self.list(entry.place).?.remove(&self.rows, "link", @intFromEnum(row));
         entry.* = .{ .pinned = true };
-        return from;
     }
 
-    /// Ends a delivery while disarmed. A rolled-back row that still wants its list returns to the head, so unpinning
-    /// in reverse selection order keeps the order; otherwise it moves to `want`.
-    pub fn unpin(self: *Readiness, row: Row, from: Place, want: Place, rollback: bool) void {
+    /// Ends a delivery while disarmed: the row moves to `want`, at the back of a list.
+    pub fn unpin(self: *Readiness, row: Row, want: Place) void {
         std.debug.assert(!self.armed);
         const entry = &self.rows[@intFromEnum(row)];
         std.debug.assert(entry.pinned);
         entry.pinned = false;
-        if (rollback and want == from) {
-            self.list(from).?.prepend(&self.rows, "link", @intFromEnum(row));
-            entry.place = from;
-            return;
-        }
         _ = self.recompute(row, want);
     }
 

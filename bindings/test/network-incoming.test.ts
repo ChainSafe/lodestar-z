@@ -3,7 +3,6 @@ import {type NativeIncomingRequest, initializeNativeNetworkRuntime} from "../src
 import {
   applicationConfig,
   capacity,
-  delivered,
   localIntent,
   nextIncoming,
   requestForks,
@@ -391,7 +390,7 @@ test("a serving start the binding cannot wrap is cancelled alone while the drain
     scheduled = true;
     setImmediate(() => {
       scheduled = false;
-      const exchange = () => delivered(right.exchange([], {...settleOnly, capacity, servingStarts: serving}));
+      const exchange = () => right.exchange([], {...settleOnly, capacity, servingStarts: serving});
       const {more, failure, serving: starts, disabledWaiting} = hostile ? trapped(exchange) : exchange();
       hostile = false;
       turns.push({failure, more});
@@ -481,7 +480,7 @@ test("settlement leaves Error to the host and drops each settled error's stack",
       Reflect.deleteProperty(Object.prototype, "then");
       Object.defineProperty(globalThis, "Error", {configurable: true, value: original});
     }
-    expect(result).toMatchObject({failure: null, settled: 1});
+    expect(result).toMatchObject({failure: null, more: false});
     expect(seen).toEqual([limit?.value]);
     expect(original.stackTraceLimit).toBe(7);
     expect((await identity).peerId).toBe(runtime.identity.peerId);
@@ -513,12 +512,17 @@ async function settleUnderCodeSetter(setters: unknown[]) {
       Object.defineProperty(this, "stack", {configurable: true, set: () => setters.push("stack")});
     },
   });
-  let settled = 0;
+  let settled = false;
+  void connect.then(() => {
+    settled = true;
+  });
   try {
-    settled = delivered(runtime.exchange([], settleOnly)).settled;
+    runtime.exchange([], settleOnly);
   } finally {
     Reflect.deleteProperty(Error.prototype, "code");
   }
+  // Nothing else settles here, so the connect settled in that exchange.
+  await new Promise(setImmediate);
   for (let i = 0; i < 400 && !closed; i++) {
     await new Promise((resolve) => setTimeout(resolve, 5));
     runtime.exchange([], settleOnly);
@@ -529,7 +533,7 @@ async function settleUnderCodeSetter(setters: unknown[]) {
 test("settled errors run no inherited code setter and keep no frames that retain the facade", async () => {
   const setters: unknown[] = [];
   const {facade, error, settled} = await settleUnderCodeSetter(setters);
-  expect(settled).toBe(1);
+  expect(settled).toBe(true);
   expect(setters).toEqual([]);
   expect(error).toBeInstanceOf(Error);
   expect(Object.getOwnPropertyDescriptor(error, "code")?.value).toBe("NetworkClosed");
@@ -611,7 +615,7 @@ interface DirectIncomingBridge {
   exchange(
     actions: readonly import("../src/network.js").NativeAction[],
     demand: import("../src/network.js").NativeExchangeDemand
-  ): {rolledBack: false; serving: IncomingDescriptor[]};
+  ): {serving: IncomingDescriptor[]};
   incomingTerminal(handle: IncomingHandle, action: number, status?: number, message?: Uint8Array): void;
   incomingRelease(handle: IncomingHandle): void;
   incomingRespond(

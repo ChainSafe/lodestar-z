@@ -96,8 +96,7 @@ class NativeRuntime {
   }
   exchange(actions, demand) {
     const result = this.#native.exchange(actions, demand);
-    // A rollback carries no payload, and an exchange that delivered nothing is frozen with no serving starts.
-    if (result.rolledBack) return result;
+    // An exchange that delivered nothing is frozen with no serving starts.
     const serving = result.serving;
     if (serving.length === 0) return result;
     // Native has committed every item, so nothing may throw from here. Only own properties native created are read

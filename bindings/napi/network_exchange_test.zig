@@ -14,13 +14,14 @@ const State = n.gossip_processor.State;
 
 const Part = enum { peers, serving, checks, gossip };
 
-/// Builds a summary instead of JS values, fails at one part when asked, and records a contract failure instead
-/// of terminating. `during` runs where the build runs, as owner work racing phase C.
+/// Builds a summary instead of JS values, fails at one part or while finishing when asked, and records a
+/// contract failure instead of terminating. `during` runs where the build runs, as owner work racing phase C.
 const Host = struct {
     runtime: *Runtime,
     clock: u64 = 1,
     fail: ?Part = null,
-    failure: exchange.Failure = .allocation,
+    fail_finish: bool = false,
+    failure: exchange.Failure = .stopped,
     builds: usize = 0,
     discarded: usize = 0,
     kept_alive: usize = 0,
@@ -30,9 +31,6 @@ const Host = struct {
     during: ?*const fn (*Runtime) void = null,
 
     pub const Result = struct {
-        rolled_back: bool = false,
-        retired: bool = false,
-        settled: usize = 0,
         peers: usize = 0,
         serving: [exchange.serving_max]incoming.Token = undefined,
         serving_count: usize = 0,
@@ -44,33 +42,27 @@ const Host = struct {
     fn failing(self: *const Host, part: Part) bool {
         return if (self.fail) |value| value == part else false;
     }
+    fn failure_error(self: *const Host) anyerror {
+        return if (self.failure == .stopped) error.PendingException else error.InvalidArg;
+    }
     pub fn build(self: *Host, selection: *exchange.Selection) !Result {
         self.builds += 1;
         if (self.during) |during| during(self.runtime);
-        const err = if (self.failure == .allocation) error.OutOfMemory else error.InvalidArg;
-        if (self.failing(.peers) and selection.peer_count > 0) return err;
+        if (self.failing(.peers) and selection.peer_count > 0) return self.failure_error();
         for (0..selection.serving_count) |i| {
             selection.closed[i] = undefined;
             selection.closed_count = i + 1;
-            if (self.failing(.serving)) {
-                selection.failed = .{ .serving = selection.serving[i] };
-                return err;
-            }
+            if (self.failing(.serving)) return self.failure_error();
         }
-        if (self.failing(.checks) and selection.checks.len > 0) return err;
-        if (self.failing(.gossip)) if (selection.gossip) |batch| {
-            selection.failed = .{ .gossip = batch.tokens[0] };
-            return err;
-        };
-        return .{ .retired = selection.retired > 0, .settled = selection.settled, .peers = selection.peer_count, .serving = selection.serving, .serving_count = selection.serving_count, .checks = selection.checks, .gossip = selection.gossip };
+        if (self.failing(.checks) and selection.checks.len > 0) return self.failure_error();
+        if (self.failing(.gossip) and selection.gossip != null) return self.failure_error();
+        return .{ .peers = selection.peer_count, .serving = selection.serving, .serving_count = selection.serving_count, .checks = selection.checks, .gossip = selection.gossip };
     }
-    pub fn finish(_: *Host, output: Result, _: *const exchange.Selection, outcome: exchange.Outcome) !Result {
+    pub fn finish(self: *Host, output: Result, outcome: exchange.Outcome) !Result {
+        if (self.fail_finish) return self.failure_error();
         var result = output;
         result.outcome = outcome;
         return result;
-    }
-    pub fn rolledBack(_: *Host, retired: bool) !Result {
-        return .{ .rolled_back = true, .retired = retired, .outcome = .{ .more = true } };
     }
     pub fn discard(self: *Host, selection: *const exchange.Selection) void {
         self.discarded += selection.closed_count;
@@ -89,16 +81,13 @@ const Host = struct {
 
     /// Settles as the N-API host does, retiring terminal commands at once, then runs phases B to D.
     fn turn(self: *Host, actions: []const exchange.Action, demand: exchange.Demand) !Result {
-        var settled: usize = 0;
-        for (0..commands.capacity) |_| {
+        for (0..demand.settle) |_| {
             self.runtime.lock();
             defer self.runtime.unlock();
             const i = self.runtime.table.nextTerminal(0) orelse break;
-            if (settled == demand.settle) break;
             self.runtime.table.retire(.{ .index = @intCast(i), .generation = self.runtime.table.cells[i].generation });
-            settled += 1;
         }
-        return exchange.run(self.runtime, actions, &demand, settled, self.clock, self);
+        return exchange.run(self.runtime, actions, &demand, self.clock, self);
     }
 };
 
@@ -178,7 +167,7 @@ const Fixture = struct {
     }
 };
 
-fn failAt(part: Part) !void {
+fn stopAt(part: Part) !void {
     var fixture: Fixture = undefined;
     try fixture.init(false, 2);
     defer fixture.deinit();
@@ -191,8 +180,8 @@ fn failAt(part: Part) !void {
     for (0..2) |_| runtime.table.transition(runtime.table.get(try runtime.table.reserve(.getIdentity)), .terminal);
 
     var host: Host = .{ .runtime = runtime, .fail = part };
-    const rolled = try host.turn(&.{}, deployed);
-    try std.testing.expect(rolled.rolled_back and rolled.outcome.more and !rolled.retired);
+    try std.testing.expectError(error.PendingException, host.turn(&.{}, deployed));
+    try std.testing.expectEqual(@as(usize, 0), host.fatals);
     // Settled promises stay settled; every pinned item is back where it was, and the rows stay queued.
     try std.testing.expectEqual(@as(u8, 0), runtime.table.occupied);
     try std.testing.expectEqual(@as(u8, 2), fixture.lane.len);
@@ -212,15 +201,10 @@ fn failAt(part: Part) !void {
     }), host.discarded);
     try std.testing.expect(!runtime.readiness.armed);
     try std.testing.expectEqual(@as(usize, 4), runtime.readiness.payload.len);
-    // Only the item whose build failed is charged.
-    try std.testing.expectEqual(@as(u8, @intFromBool(part == .serving)), runtime.incoming.?.get(requests[0]).?.rollbacks);
-    try std.testing.expectEqual(@as(u8, @intFromBool(part == .gossip)), table.get(column).?.rollbacks);
-    try std.testing.expectEqual(@as(u8, 0), table.get(exit).?.rollbacks);
 
-    // The next exchange delivers the same items and settles nothing again.
+    // Were the environment still running, the next exchange would deliver the same items.
     host.fail = null;
     const delivered = try host.turn(&.{}, deployed);
-    try std.testing.expectEqual(@as(usize, 0), delivered.settled);
     try std.testing.expectEqual(@as(usize, 2), delivered.peers);
     try std.testing.expectEqual(@as(u8, 0), fixture.lane.len);
     try std.testing.expectEqualSlices(incoming.Token, &requests, delivered.serving[0..delivered.serving_count]);
@@ -230,8 +214,26 @@ fn failAt(part: Part) !void {
     for (requests) |token| retireServed(&runtime.incoming.?, token);
 }
 
-test "a build failure at any payload part rolls it back for the next exchange and never replays settled promises" {
-    inline for (@typeInfo(Part).@"enum".fields) |field| try failAt(@field(Part, field.name));
+test "a stopped environment during the build at any payload part restores the pins and never replays settlement" {
+    inline for (@typeInfo(Part).@"enum".fields) |field| try stopAt(@field(Part, field.name));
+}
+
+test "a stopped environment while finishing a built result shuts down locally, and a contract failure there is fatal" {
+    inline for ([_]exchange.Failure{ .stopped, .contract }) |failure| {
+        var fixture: Fixture = undefined;
+        try fixture.init(false, 2);
+        defer fixture.deinit();
+        const runtime = &fixture.runtime;
+        publishPeer(runtime);
+        const exit = try admit(runtime, .voluntary_exit, null, "data");
+        var host: Host = .{ .runtime = runtime, .fail_finish = true, .failure = failure };
+        try std.testing.expectError(if (failure == .stopped) error.PendingException else error.InvalidArg, host.turn(&.{}, deployed));
+        try std.testing.expectEqual(@as(usize, @intFromBool(failure == .contract)), host.fatals);
+        // The delivery committed before finishing: its items belong to the host, and teardown reclaims them.
+        try std.testing.expectEqual(@as(u8, 0), fixture.lane.len);
+        try std.testing.expectEqual(State.delivered, runtime.gossip.?.get(exit).?.state);
+        try std.testing.expect(runtime.readiness.armed);
+    }
 }
 
 test "a contract failure is not retried: the exchange terminates after one build" {
@@ -263,79 +265,6 @@ test "a contract failure terminates the process without a retry (child process)"
     const code: u32 = @bitCast(status);
     try std.testing.expect(std.c.W.IFSIGNALED(code));
     try std.testing.expectEqual(std.c.SIG.ABRT, std.c.W.TERMSIG(code));
-}
-
-test "an item that rolls back twice is retired the next time it is selected while its neighbours are delivered" {
-    var fixture: Fixture = undefined;
-    try fixture.init(false, 4);
-    defer fixture.deinit();
-    const runtime = &fixture.runtime;
-    var host: Host = .{ .runtime = runtime, .fail = .gossip };
-    const failing = try admit(runtime, .voluntary_exit, null, "data");
-    const neighbour = try admit(runtime, .voluntary_exit, null, "data");
-    for (0..g.rollbacks_max) |_| try std.testing.expect((try host.turn(&.{}, deployed)).rolled_back);
-    host.fail = null;
-    const gossip = try host.turn(&.{}, deployed);
-    try std.testing.expect(gossip.retired and !gossip.rolled_back);
-    try std.testing.expectEqualSlices(g.Token, &.{neighbour}, gossip.gossip.?.tokens[0..gossip.gossip.?.len]);
-    // The owner applies the retired message's ignore verdict.
-    try std.testing.expectEqual(State.verdict_pending, runtime.gossip.?.get(failing).?.state);
-    try std.testing.expectEqual(n.gossipsub.Verdict.ignore, runtime.gossip.?.get(failing).?.verdict);
-
-    host.fail = .serving;
-    const start = try queueRequest(runtime);
-    const next = try queueRequest(runtime);
-    for (0..g.rollbacks_max) |_| try std.testing.expect((try host.turn(&.{}, deployed)).rolled_back);
-    host.fail = null;
-    const serving = try host.turn(&.{}, deployed);
-    try std.testing.expect(serving.retired);
-    try std.testing.expectEqualSlices(incoming.Token, &.{next}, serving.serving[0..serving.serving_count]);
-    // The owner cancels the retired start, which stays unexposed until its stream ends.
-    const retired = runtime.incoming.?.get(start).?;
-    try std.testing.expect(retired.action == .cancel and retired.state == .terminal and !retired.exposed and retired.native);
-    retireServed(&runtime.incoming.?, next);
-    runtime.gossip.?.retire(failing);
-}
-
-test "a pending control completion settles while payload builds keep failing" {
-    var fixture: Fixture = undefined;
-    try fixture.init(false, 2);
-    defer fixture.deinit();
-    const runtime = &fixture.runtime;
-    publishPeer(runtime);
-    var host: Host = .{ .runtime = runtime, .fail = .peers };
-    for (0..3) |_| {
-        const token = try runtime.table.reserve(.getIdentity);
-        runtime.lock();
-        runtime.table.transition(runtime.table.get(token), .terminal);
-        runtime.recomputeLocked(.legacy);
-        runtime.unlock();
-        const result = try host.turn(&.{}, deployed);
-        try std.testing.expect(result.rolled_back);
-        try std.testing.expectEqual(@as(u8, 0), runtime.table.occupied);
-        try std.testing.expectEqual(@as(u8, 1), fixture.lane.len);
-    }
-}
-
-test "a rollback's control-only recovery exchange keeps the payload in place, and the retry delivers it without a notification" {
-    var fixture: Fixture = undefined;
-    try fixture.init(true, 2);
-    defer fixture.deinit();
-    const runtime = &fixture.runtime;
-    const exit = try admit(runtime, .voluntary_exit, null, "data");
-    const before = tsfn.notifications.load(.acquire);
-    var host: Host = .{ .runtime = runtime, .fail = .gossip };
-    try std.testing.expect((try host.turn(&.{}, deployed)).rolled_back);
-    host.fail = null;
-    const recovery = try host.turn(&.{}, control);
-    try std.testing.expect(!recovery.outcome.more and recovery.outcome.disabled and recovery.gossip == null);
-    try std.testing.expectEqual(@as(usize, 1), runtime.readiness.payload.len);
-    const retry = try host.turn(&.{}, deployed);
-    try std.testing.expectEqualSlices(g.Token, &.{exit}, retry.gossip.?.tokens[0..retry.gossip.?.len]);
-    try std.testing.expect(!retry.outcome.more and runtime.readiness.armed);
-    // The admission notified once; the rollback, the recovery and the retry notified nothing.
-    try std.testing.expectEqual(before, tsfn.notifications.load(.acquire));
-    runtime.gossip.?.retire(exit);
 }
 
 test "control-only exchanges settle in batches immediately while queued payload keeps its place for the timer" {
