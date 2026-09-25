@@ -18,7 +18,9 @@ function expectSyncCommitteeCache(cache: {
   expect(cache.validatorIndexMap).toBeInstanceOf(Map);
 
   const firstValidatorIndex = cache.validatorIndices[0];
-  expect(cache.validatorIndexMap.get(firstValidatorIndex)).toContain(0);
+  const firstValidatorPositions = cache.validatorIndexMap.get(firstValidatorIndex);
+  expect(Array.isArray(firstValidatorPositions)).toBe(true);
+  expect(firstValidatorPositions).toContain(0);
 }
 
 describe("BeaconStateView", () => {
@@ -31,7 +33,7 @@ describe("BeaconStateView", () => {
     genesisValidatorsRoot: Uint8Array;
     validatorCount: number;
     fork: {previousVersion: Uint8Array; currentVersion: Uint8Array; epoch: number};
-    eth1Data: {depositRoot: Uint8Array; depositCount: number; blockHash: Uint8Array};
+    eth1Data: {depositRoot: Uint8Array; depositCount: bigint; blockHash: Uint8Array};
     latestBlockHeader: {
       slot: number;
       proposerIndex: number;
@@ -106,7 +108,7 @@ describe("BeaconStateView", () => {
         },
         eth1Data: {
           blockHash: Uint8Array.from(lodestarState.eth1Data.blockHash),
-          depositCount: lodestarState.eth1Data.depositCount,
+          depositCount: BigInt(lodestarState.eth1Data.depositCount),
           depositRoot: Uint8Array.from(lodestarState.eth1Data.depositRoot),
         },
         finalizedCheckpoint: {
@@ -577,12 +579,21 @@ describe("BeaconStateView", () => {
   // });
 
   describe("proofs", () => {
-    it("getSingleProof should return array of 32-byte nodes", () => {
-      // gindex 169 is within the state tree
-      const proof = state.getSingleProof(169);
-      expect(Array.isArray(proof)).toBe(true);
+    it("getSingleProof accepts the SSZ bigint gindex for historical summaries", () => {
+      const {gindex} = ssz.fulu.BeaconState.getPathInfo(["historicalSummaries"]);
+      const proof = state.getSingleProof(gindex);
+      expect(proof.length).toBe(gindex.toString(2).length - 1);
       for (const node of proof) {
+        expect(node).toBeInstanceOf(Uint8Array);
         expect(node.length).toBe(32);
+      }
+      expect(state.getSingleProof(1n)).toEqual([]);
+    });
+
+    it("getSingleProof rejects invalid bigint indices without truncating them", () => {
+      expect(() => state.getSingleProof(0n)).toThrowError(expect.objectContaining({code: "STATE_ERROR"}));
+      for (const gindex of [-1n, (1n << 64n) + 1n]) {
+        expect(() => state.getSingleProof(gindex)).toThrowError(expect.objectContaining({code: "InvalidGindex"}));
       }
     });
 

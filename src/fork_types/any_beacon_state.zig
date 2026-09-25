@@ -896,6 +896,11 @@ pub const AnyBeaconState = union(ForkSeq) {
         return @ptrCast(try lookahead_view.getAll(allocator));
     }
 
+    pub fn proposerLookaheadInto(self: *AnyBeaconState, out: *[ct.fulu.ProposerLookahead.length]u64) !void {
+        var lookahead_view = try self.proposerLookahead();
+        _ = try lookahead_view.getAllInto(out[0..]);
+    }
+
     pub fn setProposerLookahead(self: *AnyBeaconState, proposer_lookahead: *const [ct.fulu.ProposerLookahead.length]u64) !void {
         return switch (self.*) {
             .phase0, .altair, .bellatrix, .capella, .deneb, .electra => error.InvalidAtFork,

@@ -25,7 +25,7 @@ export interface SignedVoluntaryExit {
 
 interface Eth1Data {
   depositRoot: Uint8Array;
-  depositCount: number;
+  depositCount: bigint;
   blockHash: Uint8Array;
 }
 
@@ -145,6 +145,15 @@ interface ProposerRewards {
   slashing: number;
 }
 
+interface BlockRewards {
+  proposerIndex: number;
+  total: number;
+  attestations: number;
+  syncAggregate: number;
+  proposerSlashings: number;
+  attesterSlashings: number;
+}
+
 interface SyncCommitteeCache {
   validatorIndices: Uint32Array;
   validatorIndexMap: Map<number, number[]>;
@@ -261,7 +270,7 @@ export declare class BeaconStateView {
   getPreviousShuffling(): EpochShuffling;
   getCurrentShuffling(): EpochShuffling;
   getNextShuffling(): EpochShuffling;
-  getBeaconCommittee(): number[];
+  getBeaconCommittee(): Uint32Array;
   getBeaconCommitteeCountPerSlot(): number;
   previousDecisionRoot: string;
   currentDecisionRoot: string;
@@ -307,7 +316,11 @@ export declare class BeaconStateView {
   proposerRewards: ProposerRewards;
   // biome-ignore lint/suspicious/noExplicitAny: stub
   // TODO(bing): This is stubbed and untyped until we implement the beacon node rewards endpoints
-  computeBlockRewards(block: any, proposerRewards?: any): Promise<any>;
+  computeBlockRewards(
+    signedBlockBytes: Uint8Array,
+    isBlinded: boolean,
+    proposerRewards?: ProposerRewards
+  ): BlockRewards;
   // biome-ignore lint/suspicious/noExplicitAny: stub
   // TODO(bing): This is stubbed and untyped until we implement the beacon node rewards endpoints
   computeAttestationsRewards(validatorIds?: (number | string)[]): Promise<any>;

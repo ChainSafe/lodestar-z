@@ -559,15 +559,19 @@ pub const EpochCache = struct {
         const epoch_after_upcoming = upcoming_epoch + 1;
         const slot = try state.slot();
 
-        const next_shuffling_active_indices = try self.allocator.alloc(ValidatorIndex, epoch_transition_cache.next_shuffling_active_indices.len);
-        std.mem.copyForwards(ValidatorIndex, next_shuffling_active_indices, epoch_transition_cache.next_shuffling_active_indices);
+        const next_shuffling_rc = if (epoch_transition_cache.next_shuffling) |next_shuffling| blk: {
+            break :blk next_shuffling.ref();
+        } else blk: {
+            const next_shuffling_active_indices = try self.allocator.alloc(ValidatorIndex, epoch_transition_cache.next_shuffling_active_indices.len);
+            std.mem.copyForwards(ValidatorIndex, next_shuffling_active_indices, epoch_transition_cache.next_shuffling_active_indices);
 
-        const next_shuffling_rc = try initEpochShufflingRc(
-            self.allocator,
-            state,
-            next_shuffling_active_indices,
-            epoch_after_upcoming,
-        );
+            break :blk try initEpochShufflingRc(
+                self.allocator,
+                state,
+                next_shuffling_active_indices,
+                epoch_after_upcoming,
+            );
+        };
         errdefer next_shuffling_rc.unref();
 
         const next_decision_root = try calculateShufflingDecisionRoot(state, epoch_after_upcoming);
@@ -901,10 +905,43 @@ pub const EpochCache = struct {
         self.current_sync_committee_indexed = current_sync_committee_indexed_rc;
     }
 
-    /// This is different from typescript version: only allocate new EffectiveBalanceIncrements if needed
-    pub fn effectiveBalanceIncrementsSet(self: *EpochCache, allocator: Allocator, index: usize, effective_balance: u64) !void {
-        if (index >= self.effective_balance_increments.get().items.len) {
-            const old = self.effective_balance_increments.get();
+    /// Append an `effective_balance`, extending the arraylist if necessary
+    /// and detach it when shared.
+    ///
+    /// We directly write to indices (without extending the arraylist) in two places:
+    /// 1) process_effective_balance_updates.zig
+    /// 2) upgrade_state_to_electra.zig
+    ///
+    /// These calls never grow the arraylist, which makes direct writes safe.
+    ///
+    /// SAFETY: `index` must equal the current effective-balance-increments length.
+    pub fn effectiveBalanceIncrementsAppend(
+        self: *EpochCache,
+        allocator: Allocator,
+        index: usize,
+        effective_balance: u64,
+    ) !void {
+        const old = self.effective_balance_increments.get();
+        std.debug.assert(index == old.items.len);
+
+        grow: {
+            if (index < old.capacity) {
+                // Fast path: allow `self.effective_balance_increments` to grow
+                // in-place while this is the only reference.
+                // Avoids up to `preset.MAX_PENDING_DEPOSITS_PER_EPOCH`
+                // full-array copies of `effective_balance_increments`
+                // (which is a function of validator count) every epoch.
+                //
+                // NOTE: We run `beforeEpochTransition()` before this,
+                // which guarantees a ref count of 1 since we init a new
+                // rc prior to processing pending deposits.
+                if (self.effective_balance_increments.getMutIfUnique()) |increments| {
+                    increments.items.len = index + 1;
+                    @memset(increments.items[old.items.len..], 0);
+                    break :grow;
+                }
+            }
+
             const new_len = index + 1;
             const capacity = 1024 * @divFloor(new_len + 1024, 1024);
 

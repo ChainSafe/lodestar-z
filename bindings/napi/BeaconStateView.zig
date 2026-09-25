@@ -191,7 +191,13 @@ pub fn eth1Data(self: *const BeaconStateView) !js_types.Eth1Data {
     var eth1_data_view = try cached_state.state.eth1Data();
     var eth1_data: ct.phase0.Eth1Data.Type = undefined;
     try eth1_data_view.toValue(allocator, &eth1_data);
-    return js_types.wrap(js_types.Eth1Data, try sszValueToNapiValue(env, ct.phase0.Eth1Data, &eth1_data));
+    // Manually create 'obj' since proposers can vote in any u64 deposit count,
+    // which does not fit a JS number.
+    const obj = try env.createObject();
+    try obj.setNamedProperty("depositRoot", try sszValueToNapiValue(env, ct.primitive.Root, &eth1_data.deposit_root));
+    try obj.setNamedProperty("depositCount", try env.createBigintUint64(eth1_data.deposit_count));
+    try obj.setNamedProperty("blockHash", try sszValueToNapiValue(env, ct.primitive.Bytes32, &eth1_data.block_hash));
+    return js_types.wrap(js_types.Eth1Data, obj);
 }
 
 pub fn latestBlockHeader(self: *const BeaconStateView) !js_types.BeaconBlockHeader {
@@ -625,13 +631,20 @@ pub fn getIndexedSyncCommittee(self: *const BeaconStateView, slot_arg: js.Number
 
 fn indexedSyncCommitteeToNapi(sync_committee: anytype) !js_types.IndexedSyncCommittee {
     const env = js.env();
+    const validator_indices = sync_committee.getValidatorIndices() catch {
+        return throwNullAs(js_types.IndexedSyncCommittee, "NO_SYNC_COMMITTEE", "Sync committee not available for pre-Altair state");
+    };
+    const validator_index_map = sync_committee.getValidatorIndexMap() catch {
+        return throwNullAs(js_types.IndexedSyncCommittee, "NO_SYNC_COMMITTEE", "Sync committee not available for pre-Altair state");
+    };
+
     const obj = try env.createObject();
     try obj.setNamedProperty(
         "validatorIndices",
         try numberSliceToNapiValue(
             env,
             u64,
-            sync_committee.getValidatorIndices(),
+            validator_indices,
             .{ .typed_array = .uint32 },
         ),
     );
@@ -641,14 +654,14 @@ fn indexedSyncCommitteeToNapi(sync_committee: anytype) !js_types.IndexedSyncComm
     const map = try env.newInstance(map_ctor, .{});
     const set_fn = try map.getNamedProperty("set");
 
-    var iterator = sync_committee.getValidatorIndexMap().iterator();
+    var iterator = validator_index_map.iterator();
     while (iterator.next()) |entry| {
         const key = try env.createInt64(@intCast(entry.key_ptr.*));
         const positions = try numberSliceToNapiValue(
             env,
             u32,
             entry.value_ptr.items,
-            .{ .typed_array = .uint32 },
+            .{},
         );
         _ = try env.callFunction(set_fn, map, .{ key, positions });
     }
@@ -978,10 +991,12 @@ pub fn getSyncCommitteesWitness(self: *const BeaconStateView) !js_types.SyncComm
 }
 
 /// Get a single Merkle proof  for a node at the given generalized index.
-pub fn getSingleProof(self: *const BeaconStateView, gindex_arg: js.Number) !js.Array {
+pub fn getSingleProof(self: *const BeaconStateView, gindex_arg: js.BigInt) !js.Array {
     const env = js.env();
     const cached_state = try self.requireState();
-    const gindex: u64 = @intCast(try gindex_arg.toI64());
+    var lossless = false;
+    const gindex = try gindex_arg.toU64(&lossless);
+    if (!lossless) return error.InvalidGindex;
 
     var proof = cached_state.state.getSingleProof(allocator, gindex) catch {
         return throwNullAs(js.Array, "STATE_ERROR", "Failed to get single proof");
@@ -1409,14 +1424,14 @@ pub fn getNextShuffling(self: *const BeaconStateView) !js.Value {
     return js_types.wrap(js.Value, try shufflingToNapi(shuffling));
 }
 
-pub fn getBeaconCommittee(self: *const BeaconStateView, slot_arg: js.Number, index: js.Number) !js.Array {
+pub fn getBeaconCommittee(self: *const BeaconStateView, slot_arg: js.Number, index: js.Number) !js.Uint32Array {
     const env = js.env();
     const cached_state = try self.requireState();
     const slot_: u64 = @intCast(try slot_arg.toI64());
     const index_: u64 = @intCast(try index.toI64());
 
     const committee = try cached_state.epoch_cache.getBeaconCommittee(slot_, index_);
-    return .{ .val = try numberSliceToNapiValue(env, u64, committee, .{}) };
+    return .{ .val = try numberSliceToNapiValue(env, u64, committee, .{ .typed_array = .uint32 }) };
 }
 
 pub fn getBeaconCommitteeCountPerSlot(self: *const BeaconStateView, epoch_arg: js.Number) !js.Number {
@@ -1489,8 +1504,60 @@ pub fn withParentPayloadApplied(_: *const BeaconStateView, _: js.Value) !BeaconS
 
 // --- API-only methods (used by beacon-node rewards endpoints) ---
 
-pub fn computeBlockRewards(_: *const BeaconStateView, _: js.Value, _: ?js.Value) !js.Value {
-    return throwNotImpl(js.Value, "computeBlockRewards not implemented");
+pub fn computeBlockRewards(
+    self: *const BeaconStateView,
+    signed_block_bytes: js.Uint8Array,
+    is_blinded: js.Boolean,
+    proposer_rewards: ?js.Value,
+) !js_types.BlockRewards {
+    const env = js.env();
+    const cached_state = try self.requireState();
+    const bytes = try signed_block_bytes.toSlice();
+
+    const block_type: BlockType = if (try is_blinded.toBool()) .blinded else .full;
+    const signed_block = try AnySignedBeaconBlock.deserialize(
+        allocator,
+        block_type,
+        cached_state.state.forkSeq(),
+        bytes,
+    );
+    defer signed_block.deinit(allocator);
+
+    const cached = try parseProposerRewards(proposer_rewards);
+    const rewards = try st.computeBlockRewardsAny(
+        allocator,
+        js.io(),
+        cached_state,
+        signed_block.beaconBlock(),
+        cached,
+    );
+
+    const result = js_types.BlockRewards{ .val = try env.createObject() };
+    try result.set(.{
+        .proposerIndex = js.Number.from(rewards.proposer_index),
+        .total = js.Number.from(rewards.total),
+        .attestations = js.Number.from(rewards.attestations),
+        .syncAggregate = js.Number.from(rewards.sync_aggregate),
+        .proposerSlashings = js.Number.from(rewards.proposer_slashings),
+        .attesterSlashings = js.Number.from(rewards.attester_slashings),
+    });
+    return result;
+}
+
+fn parseProposerRewards(value: ?js.Value) !?st.ProposerRewards {
+    const raw = (value orelse return null).toValue();
+    if (try raw.typeof() != .object) return null;
+    return st.ProposerRewards{
+        .attestations = try optionalU64(raw, "attestations"),
+        .sync_aggregate = try optionalU64(raw, "syncAggregate"),
+        .slashing = try optionalU64(raw, "slashing"),
+    };
+}
+
+fn optionalU64(obj: napi.Value, name: [:0]const u8) !u64 {
+    if (!try obj.hasNamedProperty(name)) return 0;
+    const raw = try (try obj.getNamedProperty(name)).getValueInt64();
+    return if (raw < 0) 0 else @intCast(raw);
 }
 
 pub fn computeAttestationsRewards(_: *const BeaconStateView, _: ?js.Value) !js.Value {
