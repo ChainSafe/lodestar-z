@@ -1,6 +1,7 @@
 //! Which host work an exchange would deliver now, and when the host must hear of it. Each row sits in none, the
 //! control list, the payload list, or parked (work whose host capacity is zero); a row an exchange pinned sits in
-//! none until it is unpinned. Only `pin`, `unpin` and `recompute` change membership, under the runtime mutex.
+//! none until it is unpinned. Only `pin`, `unpin`, `recompute` and `forget` change membership, under the runtime
+//! mutex.
 //!
 //! An exchange arms when both lists are empty. The next move of a row into a list from outside them, or from none
 //! to parked, disarms and notifies, so while disarmed another exchange is guaranteed: scheduled, queued or running.
@@ -61,6 +62,16 @@ pub const Readiness = struct {
         std.debug.assert(entry.pinned);
         entry.pinned = false;
         _ = self.recompute(row, want);
+    }
+
+    /// Takes every row out of the lists and arms, so the next publication into any row notifies. For a host that
+    /// declined or threw on a notification; the next exchange refreshes every row.
+    pub fn forget(self: *Readiness) void {
+        for (&self.rows, 0..) |*entry, i| {
+            if (self.list(entry.place)) |from| from.remove(&self.rows, "link", @intCast(i));
+            entry.place = .none;
+        }
+        self.armed = true;
     }
 
     pub fn arm(self: *Readiness) bool {

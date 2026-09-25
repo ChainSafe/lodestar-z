@@ -24,7 +24,8 @@ pub const Table = struct {
         return .{ .slots = &self.by_identity, .seed = self.seed };
     }
 
-    /// Adds `count` reports of one action, saturating at `report_max` per identity and action.
+    /// Adds `count` reports of one action, saturating at `report_max` per identity and action. O(1) for a known
+    /// identity; a new one scans for a vacant row, O(entries).
     pub fn addCount(self: *Table, identity: *const n.PeerId, action: t.PeerAction, count: u8) void {
         const lookup = self.index();
         const row_index = lookup.find(&self.rows, identity) orelse vacant: {
