@@ -15,9 +15,19 @@ pub fn copyError(err: anyerror) anyerror {
     };
 }
 
+/// An error whose `message` and own `code` are `code`, created without running host code: N-API assigns a code
+/// argument through inherited setters, so the code is defined as an own property instead.
+pub fn errorValue(env: napi.Env, code: []const u8) !Value {
+    const message = try env.createStringUtf8(code);
+    const value = try env.createError(.{ .env = env.env, .value = null }, message);
+    try put(value, "code", message);
+    return value;
+}
+
 /// Drops the stack V8 captured for a settled error, whose frames would retain the settling drain, and through it
-/// the runtime facade, while the host holds the error. `created` comes fresh from `createError`, so its own
-/// `message` and `stack` properties are V8's, and reading or assigning them runs no host code.
+/// the runtime facade, while the host holds the error. `created` comes from `errorValue` and was not yet exposed
+/// to host code, so its own `message` and `stack` properties are V8's, and reading or assigning them runs no host
+/// code.
 pub fn settled(env: napi.Env, created: anyerror!Value) !Value {
     const value = try created;
     var buffer: [128]u8 = undefined;
