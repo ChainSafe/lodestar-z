@@ -770,7 +770,7 @@ test "managed small profile cleans every failed allocation prefix" {
 
 fn profileAllocationFailures(a: std.mem.Allocator) !void {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{22}));
-    const resolved = try @import("configuration.zig").resolve(.{ .profile = .small, .seed = 1, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }}, .admission_policy = @import("reqresp/policy_fixture.zig").config() });
+    const resolved = try @import("configuration.zig").resolve(.{ .profile = .small, .seed = 1, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }}, .socket_buffers = @import("managed_test_support.zig").socket_buffers, .admission_policy = @import("reqresp/policy_fixture.zig").config() });
     var node: runtime.NetworkCore = undefined;
     try node.init(a, std.testing.io, &resolved, .{ .host = &key, .bind = .{ .ip4 = .loopback(0) }, .local = @import("managed_test_support.zig").localState(.{}) });
     node.deinit(std.testing.io);

@@ -27,6 +27,7 @@ pub const registry = prom.Registry(Context, .{
     writePeeringProgress,
     writeRuntime,
     writeNativeCounters,
+    writeSockets,
     writeGossipResources,
     writeRequestResources,
     writePeerCloses,
@@ -175,6 +176,35 @@ fn writeNativeCounters(self: *const Context, w: *prom.Encoder) prom.Error!void {
         .help = "Gossip queue admissions refused by resource limit, including mesh control",
         .labels = &.{"reason"},
     }, outbox.DropReason, &drops);
+}
+
+fn writeSockets(self: *const Context, w: *prom.Encoder) prom.Error!void {
+    const Sockets = @import("udp").Sockets;
+    const roles = [_]struct { []const u8, ?*const Sockets }{
+        .{ "quic", &self.owner.transport.udp.sockets },
+        .{ "discovery", if (self.owner.discovery) |d| &d.transport.sockets else null },
+    };
+    const families = [_][]const u8{ "ip4", "ip6" };
+    const buffers = try w.family(.{
+        .name = "lodestar_native_udp_socket_buffer_bytes",
+        .kind = .gauge,
+        .help = "UDP socket buffer size as the kernel reports it; Linux reports double the size it grants",
+        .labels = &.{ "role", "family", "direction" },
+    });
+    for (roles) |role| for ((role[1] orelse continue).buffers, families) |reported, family| {
+        const sizes = reported orelse continue;
+        try buffers.sample(.{ role[0], family, "receive" }, sizes.receive);
+        try buffers.sample(.{ role[0], family, "send" }, sizes.send);
+    };
+    const drops = try w.family(.{
+        .name = "lodestar_native_udp_socket_drops_total",
+        .kind = .counter,
+        .help = "Datagrams the kernel dropped at the socket, mostly on a full receive buffer; Linux only, wraps at 2^32",
+        .labels = &.{ "role", "family" },
+    });
+    for (roles) |role| for ((role[1] orelse continue).drops(), families) |count, family| {
+        try drops.sample(.{ role[0], family }, count orelse continue);
+    };
 }
 
 fn writeGossipResources(self: *const Context, w: *prom.Encoder) prom.Error!void {

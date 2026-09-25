@@ -20,6 +20,12 @@ pub fn updateLocal(manager: *managed.PeerManager, service: *@import("service.zig
     manager.commitLocal(service, &copied, now);
 }
 
+/// Linux's default limit for both roles, so harness sockets never log a capped request.
+pub const socket_buffers: @import("udp.zig").SocketBuffers = .{
+    .quic = .{ .receive = 208 * 1024, .send = 208 * 1024 },
+    .discovery = .{ .receive = 208 * 1024, .send = 208 * 1024 },
+};
+
 /// The small resolved profile with the harness's peer, dial, request and gossip values.
 pub fn request() @import("configuration.zig").Request {
     const gc = @import("gossipsub/constants.zig");
@@ -33,6 +39,7 @@ pub fn request() @import("configuration.zig").Request {
             .handshaking_per_source_max = 4,
             .dialing_max = 1,
         },
+        .socket_buffers = socket_buffers,
         .peers = .{
             .capacity = 4,
             .outbound_reserve = 1,
