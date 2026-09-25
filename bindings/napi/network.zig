@@ -171,8 +171,8 @@ fn notify(env: napi.Env, callback: Value, runtime: *Runtime) !void {
     runtime.unlock();
     if (!alive) return;
     const result = env.callFunction(callback, try env.getUndefined(), .{}) catch {
-        // A throwing host may not have scheduled an exchange, so any later publication notifies again. No
-        // settlement can run until the exception propagates.
+        // A throwing host may not have scheduled an exchange, so owner activity can notify again. No settlement
+        // can run until the exception propagates.
         runtime.lock();
         runtime.readiness.forget();
         runtime.unlock();
