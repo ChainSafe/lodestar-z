@@ -138,15 +138,15 @@ test "peer dial outcomes count every retired attempt once and retries count each
     now += 10_000;
     q.expire(&catalog, null, now);
     try std.testing.expect(q.dialFailed(&catalog, try selectNext(&q, &catalog, &now), now));
+    // A health close of a dialed connection marks its endpoint, so the next dial is a redial after a health close.
+    try std.testing.expect(q.dialStarted(try selectNext(&q, &catalog, &now), conn));
+    accept(&q, &catalog, &peer, conn, now);
+    disconnect(&catalog, &peer, now, .health_timeout, now + 100);
+    now += 100;
     // An outbound attempt made redundant by an inbound connection is cancelled, not failed.
     try std.testing.expect(q.dialStarted(try selectNext(&q, &catalog, &now), conn));
     accept(&q, &catalog, &peer, .{ .index = 1, .generation = 1 }, now);
     try std.testing.expect(q.dialClosed(&catalog, conn, .handshake_timeout, now));
-    // A health close marks the endpoint, so the next dial is a redial after a health close.
-    disconnect(&catalog, &peer, now, .health_timeout, now + 100);
-    now += 100;
-    try std.testing.expect(q.dialStarted(try selectNext(&q, &catalog, &now), conn));
-    accept(&q, &catalog, &peer, conn, now + 100);
     for (q.outcomes) |count| try std.testing.expectEqual(@as(u64, 1), count);
     var selected: u64 = 0;
     for (q.selected_attempts) |count| selected += count;

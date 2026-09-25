@@ -164,6 +164,24 @@ test "peer fold canonical disconnect backs off once even without a dial intent" 
     try std.testing.expectEqual(before.eligible_at_ms, d.nextWakeup(&c, 2, 1).?);
 }
 
+test "peer fold inbound health close leaves the discovered endpoint history untouched" {
+    var c = try Catalog.initWithIntents(a, opts, 1, 8, 1);
+    defer c.deinit(a);
+    var d = try dialing.Dialing.init(.{ .capacity = 1, .concurrent_max = 1, .seed = 1 });
+    const hint = try candidate(1, 0);
+    try d.enqueueDiscovered(&c, &hint, &.{}, &.{}, 0);
+    const key = c.history.endpointKey(&hint.peer, address);
+    c.history.recordEndpoint(key, .health, hint.sequence, 0);
+    const conn: t.Handle = .{ .index = 0, .generation = 1 };
+    const peer = admit(&c, &hint.peer, 0, .inbound, 0).admitted.peer;
+    c.clearHealthStrikes(peer, conn);
+    try std.testing.expectEqual(@as(u8, 1), c.history.strikesFor(key, hint.sequence, 1));
+    try std.testing.expect(c.disconnect(peer, conn, .health_timeout, 1));
+    try std.testing.expectEqual(@as(u8, 1), c.history.strikesFor(key, hint.sequence, 1));
+    try std.testing.expectEqual(@as(u8, 1), c.rowFor(peer).?.intent.failures);
+    try std.testing.expectEqual(@as(u64, 1), c.connection_backoffs);
+}
+
 test "peer fold long-lived health disconnect restarts redial backoff" {
     var c = try Catalog.initWithIntents(a, opts, 1, 8, 1);
     defer c.deinit(a);
