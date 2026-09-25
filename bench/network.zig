@@ -8,6 +8,8 @@ const turns = 512;
 const sink_size = rr.Protocol.blocks_by_range_v2.info().response_max;
 const chain_config = if (preset.active_preset == .minimal) &config.minimal.config else &config.mainnet.config;
 const warmup_turns = 64;
+/// The gossip_burst case runs dozens of nodes; their startup info lines would bury its report.
+pub const std_options: std.Options = .{ .log_level = .warn };
 
 const Source = network.wake_sources.Source;
 const source_count = network.wake_sources.source_count;
@@ -123,8 +125,10 @@ fn turn(node: *network.NetworkCore, io: std.Io, outputs: network.network_core.Ou
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len > 2 and std.mem.eql(u8, args[1], "gossip_burst")) return @import("network_gossip_burst.zig").run(init, args[2..]);
     if (args.len > 2) return error.InvalidProfile;
     const selected = if (args.len == 2) args[1] else return error.InvalidProfile;
+    if (std.mem.eql(u8, selected, "gossip_burst")) return @import("network_gossip_burst.zig").run(init, &.{});
     if (std.mem.eql(u8, selected, "idle_wait")) return idleWait(init);
     if (std.mem.eql(u8, selected, "idle_transport")) return idleTransport(init);
     if (std.mem.eql(u8, selected, "idle_connections")) return idleConnections(init);

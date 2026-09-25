@@ -194,6 +194,7 @@ zig build run:bench_merkle_node -Doptimize=ReleaseSafe
 zig build run:bench_merkle_gindex -Doptimize=ReleaseSafe
 zig build run:bench_process_block -Doptimize=ReleaseSafe
 zig build run:bench_process_epoch -Doptimize=ReleaseSafe
+zig build run:bench_network -Doptimize=ReleaseSafe -- gossip_burst [sas_burst|slow_peer] [field=value ...]
 ```
 
 ## Code style
