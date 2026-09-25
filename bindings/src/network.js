@@ -95,20 +95,14 @@ class NativeRuntime {
     return this.#native.reportPeer(peerId, action);
   }
   exchange(demand) {
-    // Settled errors describe native outcomes. A captured drain frame would only keep this wrapper alive.
-    const stackTraceLimit = Error.stackTraceLimit;
-    Error.stackTraceLimit = 0;
-    let result;
-    try {
-      result = this.#native.exchange(demand);
-    } finally {
-      Error.stackTraceLimit = stackTraceLimit;
-    }
-    // Native has committed every item, so nothing may throw from here: a start without a facade is cancelled and
-    // released, and the result reports it with `more` set, so the host still takes the rest and drains again.
+    const result = this.#native.exchange(demand);
+    // Native has committed every item, so nothing may throw from here. Only own properties native created are read
+    // or written. A start without a facade is cancelled, released and reported with `more` set, so the host still
+    // takes the rest and drains again.
     const serving = result.serving;
     let taken = 0;
-    for (const descriptor of serving) {
+    for (let i = 0; i < serving.length; i++) {
+      const descriptor = serving[i];
       try {
         serving[taken] = new NativeIncoming(this.#native, descriptor, this.#wake);
         taken++;

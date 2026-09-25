@@ -326,8 +326,8 @@ export interface NativeExchange {
   gossip: NativeGossipBatch | null;
   /** Native holds more, or the drain keeps the notification latch; false released it. */
   more: boolean;
-  /** Set when a serving start could not be handed over; it was cancelled and released, and `more` is true. */
-  failure?: unknown;
+  /** Null, or why a serving start could not be handed over; it was cancelled and released, and `more` is true. */
+  failure: unknown;
 }
 
 export interface NativePublicationDiagnostics {

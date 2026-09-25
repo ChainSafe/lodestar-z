@@ -298,6 +298,8 @@ pub fn build(env: napi.Env, runtime: *Runtime, selection: *Selection, settled: u
     try put(object, "checks", checks);
     try put(object, "gossip", if (selection.gossip) |*batch| try jobs(env, runtime, batch) else try env.getNull());
     try put(object, "more", try env.getBoolean(selection.more));
+    // Own, so the binding records a start it could not hand over without reaching inherited accessors.
+    try put(object, "failure", try env.getNull());
     return object;
 }
 
