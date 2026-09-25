@@ -109,6 +109,9 @@ pub const Gossipsub = struct {
     observed_ms: u64 = 0,
     /// The owner's slot clock, which outlives this; null leaves slot phases unknown.
     slot_clock: ?*const @import("../slot_clock.zig").SlotClock = null,
+    /// The engine carrying the sessions' streams, bound by the network core. A data refusal reads
+    /// the refusing session's QUIC send state through it.
+    engine: ?*const engine_mod.Engine = null,
     msg_scratch: []u8,
     recovery: Recovery,
     counters: Counters = .{},
@@ -734,6 +737,7 @@ pub const Gossipsub = struct {
         self.counters.send_dropped += 1;
         self.delivery_metrics.recipient(origin, .pressured);
         self.delivery_metrics.dropped(origin, &row.io.tx, row.client, self.phaseBps(), now_ms);
+        session_io.refused(self, index, now_ms);
     }
 
     fn controlSent(self: *Gossipsub, peer: u16, token: u64, now_ms: u64) void {

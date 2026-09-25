@@ -235,6 +235,7 @@ pub const NetworkCore = struct {
         self.peer_manager.metrics_io = io;
         self.service.gossipsub.metrics_io = io;
         self.service.gossipsub.slot_clock = if (self.slot_clock) |*clock| clock else null;
+        self.service.gossipsub.engine = &self.transport.engine;
         self.native_events = try allocator.alloc(engine.Event, @import("quic/limits.zig").events_per_turn_max);
         errdefer allocator.free(self.native_events);
         self.local_intent_workspace = try allocator.create(gossip.local_intent.Workspace);

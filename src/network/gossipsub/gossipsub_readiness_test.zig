@@ -297,3 +297,73 @@ test "gossip local publications lead each turn for a bounded run and cannot star
     }
     try std.testing.expect(!io.tx.pending());
 }
+
+test "gossip samples its out stream's send state when a write blocks, a frame is refused while blocked and a write recovers" {
+    const Transport = @import("metrics.zig").Transport;
+    const SendLimit = engine_mod.SendLimit;
+    var setup: Pair = .{};
+    try setup.initWindow(.{ .random_seed = 1 }, .{ .random_seed = 1 }, 4096);
+    defer setup.deinit();
+    try connectMesh(&setup);
+    const g = setup.shared.client.gossipsub;
+    g.engine = &setup.shared.pair.client;
+    const index = g.sessions.find(setup.shared.handles.client).?;
+    const io = &g.sessions.rows[index].io;
+    const transitions = &g.io_metrics.transport.transitions;
+    const blocked = @intFromEnum(Transport.Transition.blocked);
+    const refused = @intFromEnum(Transport.Transition.refused);
+    const recovered = @intFromEnum(Transport.Transition.recovered);
+    const stream_credit = @intFromEnum(SendLimit.stream_credit);
+    var random = std.Random.DefaultPrng.init(11);
+    var payload: [200]u8 = undefined;
+    var published: [24]@import("topic.zig").MessageId = undefined;
+    for (&published) |*id| {
+        random.random().bytes(&payload);
+        try std.testing.expectEqual(@as(u16, 1), (try g.publish(topic, &payload, setup.shared.pair.now)).queued);
+        id.* = @import("topic.zig").validMessageId(topic, &payload, g.options.message_id_policy);
+    }
+    // Snappy leaves random payloads whole, so the frames exceed the server's 4096 bytes of credit.
+    _ = processClient(&setup);
+    try std.testing.expect(io.tx.blocked_since != null);
+    try std.testing.expectEqual(@as(u64, 1), transitions[blocked][stream_credit][0]);
+
+    // Only the first refusal before a writable event samples the stream.
+    const retained = g.messages.history.message(g.messages.history.get(&g.messages.store, published[0]).?);
+    for (0..@import("delivery.zig").per_peer_limit) |_| {
+        if (io.tx.data.full()) break;
+        try std.testing.expectEqual(.queued, io.tx.queueData(&g.messages.store, retained, .forward, .{ .bytes = g.options.tx_peer_bytes }, setup.shared.pair.now.mono_ms));
+    }
+    const iwant = &g.rpc_metrics.iwant[@intFromEnum(@import("metrics.zig").IwantOutcome.refused)];
+    const refusals = iwant.*;
+    for (published[1..3]) |*id| {
+        var body: [64]u8 = undefined;
+        var writer = @import("protobuf.zig").Writer.init(&body);
+        writer.bytesField(1, id);
+        gossip_test.control(g, index, .{ .iwant = .{ .body = writer.written() } }, setup.shared.pair.now);
+    }
+    try std.testing.expectEqual(refusals + 2, iwant.*);
+    try std.testing.expectEqual(@as(u64, 1), transitions[refused][stream_credit][0]);
+
+    // The server reads until the queue drains. Each block admits nothing more, and the first
+    // write after each writable event is taken in full.
+    for (0..1024) |_| {
+        if (io.tx.data.count == 0) break;
+        _ = setup.shared.processServer(.{});
+        try setup.shared.pair.pump();
+        _ = processClient(&setup);
+        try setup.shared.pair.pump();
+    }
+    try std.testing.expectEqual(@as(usize, 0), io.tx.data.count);
+    var totals: [3]u64 = @splat(0);
+    for (transitions, &totals) |limits, *total| for (limits) |pending| {
+        total.* += pending[0] + pending[1];
+    };
+    try std.testing.expect(totals[blocked] > 1);
+    // Granted credit can outgrow the congestion window available, which a block then waits on.
+    try std.testing.expectEqual(totals[blocked], transitions[blocked][stream_credit][0] + transitions[blocked][@intFromEnum(SendLimit.cwnd)][0]);
+    try std.testing.expectEqual(totals[blocked], totals[recovered]);
+    try std.testing.expectEqual(totals[recovered], transitions[recovered][@intFromEnum(SendLimit.none)][0]);
+    try std.testing.expectEqual(@as(u64, 1), totals[refused]);
+    const capacity = &g.io_metrics.transport.bytes[blocked][@intFromEnum(Transport.Quantity.capacity)];
+    try std.testing.expectEqual(capacity.count, capacity.buckets[0]);
+}

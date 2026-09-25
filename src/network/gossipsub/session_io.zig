@@ -23,6 +23,7 @@ const Credits = @import("turn.zig").Credits;
 const Progress = @import("turn.zig").Progress;
 const Budget = @import("turn.zig").Budget;
 const Budgets = @import("turn.zig").Budgets;
+const Transition = @import("metrics.zig").Transport.Transition;
 
 pub const openings_per_pump: usize = 16;
 pub const direct_retry_delay_ms: u64 = 30_000;
@@ -416,7 +417,7 @@ fn flush(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *Turn
         const written = engine.write(stream, segment[0..take], false) catch |err| {
             if (err == error.WouldBlock) {
                 self.io_metrics.write_would_block +|= 1;
-                io.tx.blocked(now.mono_ms);
+                writeBlocked(self, engine, index, now.mono_ms);
             } else {
                 std.log.scoped(.network_gossip_errors).debug("gossip_write_failed connection={d}:{d} stream={d} reason={s} queued={d} bytes={d}", .{ stream.conn.index, stream.conn.generation, stream.id, @errorName(err), io.tx.data.count, io.tx.data.bytes });
                 resetOutbound(self, engine, index);
@@ -426,7 +427,7 @@ fn flush(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *Turn
         if (written == 0) {
             self.io_metrics.write_zero +|= 1;
             io.write_zero +|= 1;
-            io.tx.blocked(now.mono_ms);
+            writeBlocked(self, engine, index, now.mono_ms);
             return;
         }
         peer.output -= written;
@@ -435,11 +436,43 @@ fn flush(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *Turn
         self.advanceWrite(self.sessions.ref(index), written, now.mono_ms);
         if (written < take) {
             self.io_metrics.write_would_block +|= 1;
-            io.tx.blocked(now.mono_ms);
+            writeBlocked(self, engine, index, now.mono_ms);
             return;
         }
+        if (io.tx.last_write_blocked) observeTransport(self, engine, index, .recovered, now.mono_ms);
         io.tx.last_write_blocked = false;
     }
+}
+
+fn writeBlocked(self: *Gossipsub, engine: *const Engine, index: u16, now_ms: u64) void {
+    self.sessions.rows[index].io.tx.blocked(now_ms);
+    observeTransport(self, engine, index, .blocked, now_ms);
+}
+
+/// Samples the out stream's send state at the first data refusal since a write blocked, before
+/// the next writable event.
+pub fn refused(self: *Gossipsub, index: u16, now_ms: u64) void {
+    const engine = self.engine orelse return;
+    const tx = &self.sessions.rows[index].io.tx;
+    if (tx.blocked_since == null or tx.refused_while_blocked) return;
+    tx.refused_while_blocked = true;
+    observeTransport(self, engine, index, .refused, now_ms);
+}
+
+/// Records the out stream's QUIC send state at a change of its write state, and logs a sample.
+fn observeTransport(self: *Gossipsub, engine: *const Engine, index: u16, transition: Transition, now_ms: u64) void {
+    const row = &self.sessions.rows[index];
+    const stream = row.outStream() orelse return;
+    const state = engine.sendState(stream) orelse return;
+    const io = &row.io;
+    const counts = state.transport.counts;
+    const since = counts.since(&io.transport_seen);
+    io.transport_seen = counts;
+    const queued = io.tx.data.bytes + io.tx.control.used + io.tx.critical.used;
+    self.io_metrics.transport.observe(transition, &state, queued, &since);
+    if (!self.io_metrics.transport.logDue(transition, now_ms)) return;
+    const parts = state.capacity;
+    std.log.scoped(.network_gossip).debug("gossip_stream_transition transition={s} limit={s} peer={f} connection={d}:{d} client={s} watermark={d} writable_pending={any} capacity={?d} tx_cap={?d} stream_credit={?d} connection_credit={?d} cwnd_available={?d} cwnd={d} stream_unsent={?d} queued={d} blocked_ms={?d} rtt_us={d} rttvar_us={d} delivery_rate={d} lost={d} retransmitted={d} pto={d} data_blocked={d} stream_data_blocked={d}", .{ @tagName(transition), @tagName(state.limit()), @import("../logging.zig").peer(&self.peers.rows[row.logical.index].identity), row.conn.index, row.conn.generation, @tagName(row.client), state.watermark, state.writable_pending, state.available(), if (parts) |p| p.tx_cap else null, if (parts) |p| p.stream_credit else null, if (parts) |p| p.connection_credit else null, if (parts) |p| p.cwnd_available else null, state.transport.cwnd, if (parts) |p| p.stream_unsent else null, queued, if (io.tx.blocked_since) |since_ms| now_ms -| since_ms else null, state.transport.rtt_ns / std.time.ns_per_us, state.transport.rttvar_ns / std.time.ns_per_us, state.transport.delivery_rate, since.lost, since.retransmitted, since.pto, since.data_blocked, since.stream_data_blocked });
 }
 
 fn logSendPressure(self: *Gossipsub, index: u16, now_ms: u64) void {
