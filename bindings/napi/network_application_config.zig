@@ -9,6 +9,10 @@ pub const Config = struct {
     agent_len: u16,
     version: [64]u8,
     version_len: u8,
+    /// The network identity remembered peers are checked against, and snapshots carry.
+    genesis_root: [32]u8,
+    remembered: [n.peers.remembered.capacity]n.peers.remembered.Record,
+    remembered_count: u16,
 
     pub fn buildRequest(self: *const Config, common: *const cfg.Config, seed: u64) !n.configuration.Request {
         const r = &self.resources;
@@ -72,8 +76,11 @@ pub fn text(value: Value, out: []u8) !usize {
     @memcpy(out[0..len], copied);
     return len;
 }
+const required = .{ "profile", "identitySecretKey", "bind", "local", "discovery", "initialSlot", "gossipPolicy", "resources", "identify", "serveLightClients" };
+
 pub fn parse(value: Value, common: *cfg.Config, out: *Config) !void {
-    try cfg.completeObject(value, &.{ "profile", "identitySecretKey", "bind", "local", "discovery", "initialSlot", "gossipPolicy", "resources", "identify", "serveLightClients" });
+    const remembered = try value.hasNamedProperty("rememberedPeers");
+    if (remembered) try cfg.completeObject(value, &(required ++ .{"rememberedPeers"})) else try cfg.completeObject(value, &required);
     try cfg.parse(value, common);
     errdefer common.wipe();
     const resources = try cfg.get(value, "resources");
@@ -87,6 +94,37 @@ pub fn parse(value: Value, common: *cfg.Config, out: *Config) !void {
     try cfg.completeObject(identify, &.{ "agentVersion", "protocolVersion" });
     out.agent_len = @intCast(try text(try cfg.get(identify, "agentVersion"), &out.agent));
     out.version_len = @intCast(try text(try cfg.get(identify, "protocolVersion"), &out.version));
+    out.genesis_root = @import("config.zig").state.config.genesis_validator_root;
+    out.remembered_count = 0;
+    if (remembered) try parseRemembered(try cfg.get(value, "rememberedPeers"), out);
+}
+
+/// Copies the host's remembered peers. Null or undefined means none. A container from another
+/// network, more than `capacity` peers, or a malformed peer rejects the configuration; the network
+/// owner drops expired and duplicate peers.
+fn parseRemembered(value: Value, out: *Config) !void {
+    const kind = try value.typeof();
+    if (kind == .null or kind == .undefined) return;
+    try cfg.completeObject(value, &.{ "genesisValidatorsRoot", "peers" });
+    const root = try cfg.fixed(32, try cfg.get(value, "genesisValidatorsRoot"));
+    if (!std.mem.eql(u8, &root, &out.genesis_root)) return error.InvalidRememberedPeersNetwork;
+    const peers = try cfg.get(value, "peers");
+    const count = try cfg.array(peers, n.peers.remembered.capacity);
+    for (out.remembered[0..count], 0..) |*record, i| {
+        const entry = try peers.getElement(@intCast(i));
+        try cfg.completeObject(entry, &.{ "peerId", "endpoint", "qualifiedAtUnixS" });
+        const address: n.Address = switch (try cfg.endpoint(try cfg.get(entry, "endpoint"))) {
+            .ip4 => |ip| .{ .ip4 = .{ .octets = ip.bytes, .port = ip.port } },
+            .ip6 => |ip| .{ .ip6 = .{ .octets = ip.bytes, .port = ip.port } },
+        };
+        if (!address.isUsable()) return error.InvalidNetworkConfig;
+        record.* = .{
+            .peer = try cfg.peerIdFrom(try cfg.get(entry, "peerId")),
+            .address = address,
+            .qualified_at_s = try cfg.integer(try cfg.get(entry, "qualifiedAtUnixS"), 9007199254740991),
+        };
+    }
+    out.remembered_count = @intCast(count);
 }
 
 pub const Intent = struct {
