@@ -94,13 +94,24 @@ test "gossip delivery keeps the local reserve from ordinary frames and pressures
     store.retainHistory(message);
     store.seal(message);
     var queue: Queue = .{ .pool = &pool };
-    const descriptors: Limits = .{ .bytes = 1 << 20, .local_descriptors = 4 };
-    for (0..per_peer_limit - 4) |_| try queue.append(&store, message, .forward, descriptors, 1);
+    pool.local_descriptors = 4;
+    const descriptors: Limits = .{ .bytes = 1 << 20 };
+    for (0..per_peer_limit - 5) |_| try queue.append(&store, message, .forward, descriptors, 1);
+    try std.testing.expectEqual(@as(usize, 0), pool.full_queues);
+    try queue.append(&store, message, .forward, descriptors, 1);
+    try std.testing.expectEqual(@as(usize, 1), pool.full_queues);
     try std.testing.expectError(error.Descriptors, queue.append(&store, message, .iwant, descriptors, 1));
     for (0..4) |_| try queue.append(&store, message, .publication, descriptors, 2);
     try std.testing.expectError(error.Descriptors, queue.append(&store, message, .publication, descriptors, 3));
     try std.testing.expectEqual(@as(usize, 4), queue.classCount(.local));
+    // Sending a local frame frees no ordinary room; sending an ordinary one does.
+    try std.testing.expectEqual(Origin.publication, queue.advance(&store, queue.next(&store).?.segment(&store).len).?.origin);
+    try std.testing.expectEqual(@as(usize, 1), pool.full_queues);
+    queue.current = .ordinary;
+    try std.testing.expectEqual(Origin.forward, queue.advance(&store, queue.next(&store).?.segment(&store).len).?.origin);
+    try std.testing.expectEqual(@as(usize, 0), pool.full_queues);
     queue.reset(&store);
+    pool.local_descriptors = 0;
 
     // Seven-byte frames: ordinary ones stop 14 bytes short of the limit, which two local ones fill.
     const bytes: Limits = .{ .bytes = 70, .local_bytes = 14 };
@@ -181,7 +192,8 @@ test "gossip pool protects each peer's first descriptors by the combined count o
     store.retainHistory(message);
     store.seal(message);
     var queues: [2]Queue = @splat(.{ .pool = &pool });
-    const limits: Limits = .{ .bytes = 1 << 20, .local_descriptors = 8 };
+    pool.local_descriptors = 8;
+    const limits: Limits = .{ .bytes = 1 << 20 };
     for (0..40) |_| try queues[0].append(&store, message, .publication, limits, 1);
     for (0..30) |_| try queues[0].append(&store, message, .forward, limits, 1);
     try std.testing.expectEqual(@as(usize, per_peer_reserve), pool.protected);

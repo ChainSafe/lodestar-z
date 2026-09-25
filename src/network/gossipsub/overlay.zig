@@ -471,7 +471,7 @@ pub const Overlay = struct {
         const stream = row.outStream() orelse return;
         if (row.io.tx.submit(&.{ .prune = .{ .topic = self.topicString(topic), .backoff_s = backoff_ms / 1000 } }, context.now) == null) {
             context.sessions.setOutbound(peer, .{ .closing = stream });
-        }
+        } else self.metrics.pruneSent(reason);
         context.sessions.settle(peer, context.options);
     }
 
@@ -487,13 +487,18 @@ pub const Overlay = struct {
                 context.peers.scores.penalties.graft_backoff +|= 1;
             }
         }
-        if (row.outStream() == null) return;
+        if (row.outStream() == null) return self.metrics.graftReceived(.no_stream);
         const rejection: ?mesh_metrics.Removal = if (!self.subscribed(topic)) .local_unsubscribe else if (context.peers.rows[row.logical.index].direct) .direct else if (blocked) .backoff else if (context.peers.score(row.logical, context.now) < 0) .bad_score else if (!self.mesh(topic).isSet(peer) and self.mesh(topic).count() >= c.mesh_d_high and !outbound(context, peer)) .excess else null;
         if (rejection) |reason| {
+            self.metrics.graftReceived(switch (reason) {
+                inline .local_unsubscribe, .direct, .backoff, .bad_score, .excess => |tag| @field(mesh_metrics.GraftOutcome, @tagName(tag)),
+                else => unreachable,
+            });
             self.prune(context, topic, peer, c.prune_backoff_ms, reason);
             return;
         }
-        if (self.mesh(topic).isSet(peer)) return;
+        if (self.mesh(topic).isSet(peer)) return self.metrics.graftReceived(.member);
+        self.metrics.graftReceived(.accepted);
         self.rows[topic].mesh.set(peer);
         self.metrics.added(self.topicString(topic), .remote_graft);
         context.peers.scores.graft(row.logical.index, topic, context.now);

@@ -510,8 +510,11 @@ test "gossipsub history queue refusal and authenticated reconnect preserve retra
     protobuf.writeIwantId(&writer, &id);
     var reader = protobuf.RpcReader.init(writer.written());
     const iwant = (try reader.next()).?.iwant;
+    // Forwards fill the ordinary allowance and publications the local reserve.
+    const tx = &g.sessions.rows[first.index].io.tx;
     for (0..@import("outbox.zig").data_capacity) |_| {
-        try std.testing.expectEqual(@import("outbox.zig").QueueResult.queued, g.sessions.rows[first.index].io.tx.queueData(&g.messages.store, message, .forward, .{ .bytes = g.options.tx_peer_bytes }, 1));
+        const origin: @import("delivery.zig").Origin = if (tx.data.full()) .publication else .forward;
+        try std.testing.expectEqual(@import("outbox.zig").QueueResult.queued, tx.queueData(&g.messages.store, message, origin, .{ .bytes = g.options.tx_peer_bytes }, 1));
     }
     support.control(&g, first.index, .{ .iwant = iwant }, .{ .mono_ms = g.last_now_ms, .unix_s = 0 });
     try std.testing.expectEqual(@as(u8, 0), g.messages.history.countsRow(g.messages.history.get(&g.messages.store, id).?)[logical_peer.index]);

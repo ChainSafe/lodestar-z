@@ -72,7 +72,11 @@ test "publication recipient policy tops up without graft and accounts unique sha
         io.tx.cancelStream(&g.messages.store);
     }
     g.sessions.rows[2].outbound = .none;
-    for (0..@import("outbox.zig").data_capacity) |_| try std.testing.expectEqual(.queued, g.sessions.rows[3].io.tx.queueData(&g.messages.store, h, .forward, .{ .bytes = g.options.tx_peer_bytes }, 2));
+    const full = &g.sessions.rows[3].io.tx;
+    for (0..@import("outbox.zig").data_capacity) |_| {
+        const origin: @import("delivery.zig").Origin = if (full.data.full()) .publication else .forward;
+        try std.testing.expectEqual(.queued, full.queueData(&g.messages.store, h, origin, .{ .bytes = g.options.tx_peer_bytes }, 2));
+    }
     const flood = try g.publishWithOptions(topic, "flood", .{ .flood = true }, .{ .mono_ms = 2, .unix_s = 0 });
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 7, .queued = 6, .pressured = 1 }, flood);
 }
@@ -200,7 +204,11 @@ test "delivery metrics attribute refused frames by origin, limit, client and slo
     const id = topic_mod.validMessageId(topic, "filler", .{});
     const filler = g.messages.history.message(g.messages.history.get(&g.messages.store, id).?);
     const io = &g.sessions.rows[peer.index].io;
-    for (1..@import("outbox.zig").data_capacity) |_| try std.testing.expectEqual(.queued, io.tx.queueData(&g.messages.store, filler, .forward, .{ .bytes = g.options.tx_peer_bytes }, 1));
+    // Forwards fill the ordinary allowance and publications the local reserve.
+    for (1..@import("outbox.zig").data_capacity) |_| {
+        const origin: @import("delivery.zig").Origin = if (io.tx.data.full()) .publication else .forward;
+        try std.testing.expectEqual(.queued, io.tx.queueData(&g.messages.store, filler, origin, .{ .bytes = g.options.tx_peer_bytes }, 1));
+    }
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 1, .pressured = 1 }, try g.publish(topic, "refused", .{ .mono_ms = 2, .unix_s = 0 }));
     var body: [32]u8 = undefined;
     var writer = @import("protobuf.zig").Writer.init(&body);
