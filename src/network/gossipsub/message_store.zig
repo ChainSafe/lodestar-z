@@ -5,13 +5,25 @@ const constants = @import("constants.zig");
 const assert = std.debug.assert;
 
 pub const page_bytes: usize = 4096;
+/// Payloads up to this length live in their entry rather than in pages.
 pub const inline_bytes: usize = 512;
+/// The longest topic trailer: the field tag, a one-byte length and the topic.
+const trailer_max = topic.topic_max_len + 2;
+/// An entry's frame bytes. They hold the complete RPC frame of an inline payload with the longest
+/// topic, so every inline frame is one contiguous write; a paged payload keeps only its prefix
+/// and trailer here.
+const frame_capacity = prefixLen(inline_bytes, trailer_max) + inline_bytes + trailer_max;
 comptime {
     assert(topic.topic_max_len < 128);
+    assert(prefixLen(constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE), trailer_max) + trailer_max <= frame_capacity);
 }
 pub const none: u32 = std.math.maxInt(u32);
 pub const Handle = struct { index: u32, generation: u64 };
+/// A position in an entry's payload.
 pub const Cursor = struct { page: u32, offset: u32 = 0, remaining: u32 };
+/// A position in an entry's RPC frame: `sent` frame bytes precede it, and `page` holds the next
+/// payload byte of a paged payload.
+pub const FrameCursor = struct { sent: u32 = 0, page: u32 };
 pub const Entry = struct {
     kind: topic.Kind = .beacon_block,
     retention_charged: bool = false,
@@ -22,19 +34,32 @@ pub const Entry = struct {
     validation: bool = false,
     history: bool = false,
     tx: u32 = 0,
-    inline_data: [inline_bytes]u8 = undefined,
     first: u32 = none,
     len: u32 = 0,
     id: topic.MessageId = undefined,
-    prefix: [32]u8 = undefined,
+    /// The length prefix and RPC headers, the payload when it is inline, then the topic trailer.
+    frame: [frame_capacity]u8 = undefined,
     prefix_len: u8 = 0,
-    trailer: [topic.topic_max_len + 2]u8 = undefined,
     topic_len: u8 = 0,
 
     pub fn topicString(self: *const Entry) []const u8 {
-        return self.trailer[2..][0..self.topic_len];
+        return self.frame[self.trailerStart() + 2 ..][0..self.topic_len];
+    }
+
+    pub fn frameLen(self: *const Entry) usize {
+        return self.prefix_len + self.len + self.topic_len + 2;
+    }
+
+    fn trailerStart(self: *const Entry) usize {
+        return self.prefix_len + if (self.len <= inline_bytes) self.len else 0;
     }
 };
+
+fn prefixLen(len: usize, trailer_len: usize) usize {
+    const message_len = 1 + protobuf.varintLen(len) + len + trailer_len;
+    const rpc_len = 1 + protobuf.varintLen(message_len) + message_len;
+    return protobuf.varintLen(rpc_len) + 1 + protobuf.varintLen(message_len) + 1 + protobuf.varintLen(len);
+}
 
 pub fn encodePrefix(prefix: []u8, trailer: []u8, len: usize, name: []const u8) struct { prefix: usize, trailer: usize } {
     assert(len <= constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE));
@@ -50,6 +75,7 @@ pub fn encodePrefix(prefix: []u8, trailer: []u8, len: usize, name: []const u8) s
     head.varint(message_len);
     head.tag(2, protobuf.wire_len);
     head.varint(len);
+    assert(head.len == prefixLen(len, tail.len));
     return .{ .prefix = head.len, .trailer = tail.len };
 }
 
@@ -144,8 +170,13 @@ pub const Store = struct {
             .len = @intCast(data.len),
             .topic_len = @intCast(name.len),
         };
-        entry.prefix_len = @intCast(encodePrefix(&entry.prefix, &entry.trailer, data.len, name).prefix);
-        if (data.len <= inline_bytes) @memcpy(entry.inline_data[0..data.len], data);
+        var prefix: [32]u8 = undefined;
+        var trailer: [trailer_max]u8 = undefined;
+        const lens = encodePrefix(&prefix, &trailer, data.len, name);
+        entry.prefix_len = @intCast(lens.prefix);
+        @memcpy(entry.frame[0..lens.prefix], prefix[0..lens.prefix]);
+        if (data.len <= inline_bytes) @memcpy(entry.frame[lens.prefix..][0..data.len], data);
+        @memcpy(entry.frame[entry.trailerStart()..][0..lens.trailer], trailer[0..lens.trailer]);
         var link = &entry.first;
         var offset: usize = 0;
         for (0..pagesFor(data.len)) |_| {
@@ -177,7 +208,7 @@ pub const Store = struct {
         if (at.remaining == 0) return &.{};
         if (entry.len <= inline_bytes) {
             assert(at.page == none and at.offset <= entry.len and at.remaining <= entry.len - at.offset);
-            return entry.inline_data[at.offset..][0..at.remaining];
+            return entry.frame[entry.prefix_len + at.offset ..][0..at.remaining];
         }
         assert(at.page < self.next.len and at.offset < page_bytes);
         const len = @min(at.remaining, page_bytes - at.offset);
@@ -192,6 +223,36 @@ pub const Store = struct {
             at.page = self.next[at.page];
             at.offset = 0;
         }
+    }
+
+    pub fn frameCursor(self: *const Store, handle: Handle) FrameCursor {
+        return .{ .page = self.get(handle).?.first };
+    }
+
+    /// The unsent frame bytes that are contiguous from `at`: the whole rest of an inline frame, or
+    /// for a paged payload the rest of the prefix, of the current page, or of the trailer.
+    pub fn frameSegment(self: *const Store, handle: Handle, at: FrameCursor) []const u8 {
+        const entry = self.get(handle).?;
+        assert(!entry.provisional and at.sent <= entry.frameLen());
+        if (entry.len <= inline_bytes) return entry.frame[at.sent..entry.frameLen()];
+        const body_end = entry.prefix_len + entry.len;
+        if (at.sent < entry.prefix_len) return entry.frame[at.sent..entry.prefix_len];
+        if (at.sent < body_end) {
+            assert(at.page < self.next.len);
+            const offset = (at.sent - entry.prefix_len) % page_bytes;
+            return self.bytes[@as(usize, at.page) * page_bytes + offset ..][0..@min(page_bytes - offset, body_end - at.sent)];
+        }
+        return entry.frame[at.sent - entry.len .. entry.prefix_len + entry.topic_len + 2];
+    }
+
+    /// Moves `at` past `len` bytes of its current segment. Returns true once the frame is sent.
+    pub fn advanceFrame(self: *const Store, handle: Handle, at: *FrameCursor, len: usize) bool {
+        const entry = self.get(handle).?;
+        assert(len > 0 and len <= self.frameSegment(handle, at.*).len);
+        const in_body = entry.len > inline_bytes and at.sent >= entry.prefix_len and at.sent < entry.prefix_len + entry.len;
+        at.sent += @intCast(len);
+        if (in_body and (at.sent - entry.prefix_len) % page_bytes == 0) at.page = self.next[at.page];
+        return at.sent == entry.frameLen();
     }
 
     pub fn seal(self: *Store, h: Handle) void {

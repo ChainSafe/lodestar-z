@@ -7,46 +7,24 @@ const none = std.math.maxInt(u32);
 pub const per_peer_limit = 512;
 pub const per_peer_reserve = 64;
 
+/// What produced a queued frame. Each delivery attempt has its own origin, so an IWANT response
+/// for a message we published is `iwant`.
+pub const Origin = enum { forward, publication, iwant };
+pub const origin_count = @typeInfo(Origin).@"enum".fields.len;
+
 pub const Transmission = struct {
     message: storage.Handle,
     enqueued_ms: u64,
-    page: storage.Cursor,
-    stage: enum { prefix, data, trailer, done } = .prefix,
-    offset: usize = 0,
-
-    fn init(store: *const storage.Store, message: storage.Handle, now: u64) Transmission {
-        return .{ .message = message, .enqueued_ms = now, .page = store.cursor(message) };
-    }
+    origin: Origin,
+    cursor: storage.FrameCursor,
 
     pub fn segment(self: *const Transmission, store: *const storage.Store) []const u8 {
-        const entry = store.get(self.message).?;
-        return switch (self.stage) {
-            .prefix => entry.prefix[0..entry.prefix_len][self.offset..],
-            .data => store.segment(self.message, self.page),
-            .trailer => entry.trailer[0 .. entry.topic_len + 2][self.offset..],
-            .done => &.{},
-        };
-    }
-
-    fn advance(self: *Transmission, store: *const storage.Store, len: usize) void {
-        const segment_len = self.segment(store).len;
-        assert(len > 0 and len <= segment_len);
-        switch (self.stage) {
-            .prefix, .trailer => {
-                self.offset += len;
-                if (len == segment_len) {
-                    self.stage = if (self.stage == .trailer) .done else if (self.page.remaining == 0) .trailer else .data;
-                    self.offset = 0;
-                }
-            },
-            .data => {
-                store.advance(&self.page, len);
-                if (self.page.remaining == 0) self.stage = .trailer;
-            },
-            .done => unreachable,
-        }
+        return store.frameSegment(self.message, self.cursor);
     }
 };
+
+/// A frame that QUIC accepted in full.
+pub const Receipt = struct { origin: Origin, enqueued_ms: u64 };
 
 const Slot = struct { tx: Transmission = undefined, next: u32 = none };
 
@@ -112,13 +90,13 @@ pub const Queue = struct {
     bytes_high_water: usize = 0,
     descriptors_high_water: usize = 0,
 
-    pub fn append(self: *Queue, store: *storage.Store, message: storage.Handle, byte_limit: usize, now: u64) error{ Descriptors, PoolFull, Bytes }!void {
+    pub fn append(self: *Queue, store: *storage.Store, message: storage.Handle, origin: Origin, byte_limit: usize, now: u64) error{ Descriptors, PoolFull, Bytes }!void {
         const entry = store.get(message).?;
         assert(!entry.provisional and self.bytes <= byte_limit);
         if (self.count == per_peer_limit) return error.Descriptors;
         if (entry.len > byte_limit - self.bytes) return error.Bytes;
         const slot = self.pool.acquire(self.count) orelse return error.PoolFull;
-        self.pool.slots[slot].tx = Transmission.init(store, message, now);
+        self.pool.slots[slot].tx = .{ .message = message, .enqueued_ms = now, .origin = origin, .cursor = store.frameCursor(message) };
         if (self.tail == none) self.head = slot else self.pool.slots[self.tail].next = slot;
         self.tail = slot;
         self.count += 1;
@@ -132,13 +110,14 @@ pub const Queue = struct {
         return if (self.head == none) null else &self.pool.slots[self.head].tx;
     }
 
-    pub fn advance(self: *Queue, store: *storage.Store, len: usize) bool {
+    /// Moves the head frame past `len` sent bytes, and removes it once QUIC holds all of it.
+    pub fn advance(self: *Queue, store: *storage.Store, len: usize) ?Receipt {
         assert(self.count > 0);
         const tx = &self.pool.slots[self.head].tx;
-        tx.advance(store, len);
-        if (tx.stage != .done) return false;
+        if (!store.advanceFrame(tx.message, &tx.cursor, len)) return null;
+        const receipt: Receipt = .{ .origin = tx.origin, .enqueued_ms = tx.enqueued_ms };
         self.remove(store);
-        return true;
+        return receipt;
     }
 
     fn remove(self: *Queue, store: *storage.Store) void {

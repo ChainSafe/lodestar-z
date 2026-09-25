@@ -66,7 +66,7 @@ pub const Control = union(enum) {
 pub const ControlReceipt = struct { token: u64, kind: ?ItemKind };
 pub const Completion = union(enum) {
     control: ControlReceipt,
-    data,
+    data: delivery.Receipt,
 
     pub fn itemKind(self: Completion) ?ItemKind {
         return switch (self) {
@@ -242,8 +242,9 @@ pub const Outbox = struct {
         return token;
     }
 
-    pub fn queueData(self: *Outbox, store: *storage.Store, h: storage.Handle, byte_limit: usize, now_ms: u64) QueueResult {
-        self.data.append(store, h, byte_limit, now_ms) catch |err| {
+    /// A refusal leaves its reason in `last_drop`.
+    pub fn queueData(self: *Outbox, store: *storage.Store, h: storage.Handle, origin: delivery.Origin, byte_limit: usize, now_ms: u64) QueueResult {
+        self.data.append(store, h, origin, byte_limit, now_ms) catch |err| {
             self.dropped(switch (err) {
                 error.Descriptors => .data_descriptors,
                 error.PoolFull => .data_pool,
@@ -293,11 +294,11 @@ pub const Outbox = struct {
                 }
             },
             .data => {
-                if (self.data.advance(store, len)) {
+                if (self.data.advance(store, len)) |receipt| {
                     self.active = .none;
                     self.progress_ms = null;
                     self.control_burst = 0;
-                    return .data;
+                    return .{ .data = receipt };
                 }
             },
         }
@@ -374,7 +375,7 @@ test "gossip transmit retains pages and never interleaves control into partial d
     const h = store.put([_]u8{1} ** 20, "topic", "payload").?;
     store.retainHistory(h);
     store.seal(h);
-    try std.testing.expectEqual(QueueResult.queued, io.queueData(&store, h, 8192, 0));
+    try std.testing.expectEqual(QueueResult.queued, io.queueData(&store, h, .forward, 8192, 0));
     store.releaseHistory(h);
     var out: [128]u8 = undefined;
     var n: usize = 0;
@@ -413,8 +414,8 @@ test "gossip critical capacity and data queue pressure are independent and relea
     const h = store.put([_]u8{1} ** 20, "t", "x").?;
     store.retainHistory(h);
     store.seal(h);
-    for (0..data_capacity) |_| try std.testing.expectEqual(QueueResult.queued, io.queueData(&store, h, 8192, 0));
-    try std.testing.expectEqual(QueueResult.full, io.queueData(&store, h, 8192, 0));
+    for (0..data_capacity) |_| try std.testing.expectEqual(QueueResult.queued, io.queueData(&store, h, .forward, 8192, 0));
+    try std.testing.expectEqual(QueueResult.full, io.queueData(&store, h, .forward, 8192, 0));
     try std.testing.expectEqual(@as(usize, data_capacity), io.data.bytes_high_water);
     try std.testing.expectEqual(@as(usize, data_capacity), io.data.descriptors_high_water);
     try std.testing.expect(io.inject("12345678", 0));
@@ -446,10 +447,10 @@ test "gossip queues a full validation burst in order and preserves byte bounds" 
         const h = store.put([_]u8{@intCast(i)} ** 20, "topic", &payload).?;
         store.retainHistory(h);
         store.seal(h);
-        try std.testing.expectEqual(QueueResult.queued, io.queueData(&store, h, burst, 0));
+        try std.testing.expectEqual(QueueResult.queued, io.queueData(&store, h, .forward, burst, 0));
         writer.varint(protobuf.messageSize(&payload, "topic"));
         protobuf.writeMessage(&writer, &payload, "topic");
-        if (i == burst - 1) try std.testing.expectEqual(QueueResult.full, io.queueData(&store, h, burst, 0));
+        if (i == burst - 1) try std.testing.expectEqual(QueueResult.full, io.queueData(&store, h, .forward, burst, 0));
         store.releaseHistory(h);
     }
     var actual: [4096]u8 = undefined;

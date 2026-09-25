@@ -101,12 +101,15 @@ pub const Gossipsub = struct {
     heartbeat_at: u64 = 0,
     opportunistic_at: u64 = 0,
     last_now_ms: u64 = 0,
+    /// Wall time of the latest owner entry, for slot-phase attribution only.
+    last_unix_s: i64 = 0,
     msg_scratch: []u8,
     recovery: Recovery,
     counters: Counters = .{},
     topic_metrics: @import("metrics.zig").Topics = .{},
     rpc_metrics: @import("metrics.zig").Rpc = .{},
     io_metrics: @import("metrics.zig").Io = .{},
+    delivery_metrics: @import("metrics.zig").Delivery = .{},
     validation_time: @import("metrics.zig").ValidationTime = .{},
 
     pub const Admission = session_io.Admission;
@@ -338,6 +341,7 @@ pub const Gossipsub = struct {
     /// Admits one shared history payload; queued counts live stream queue admissions.
     pub fn publishWithOptions(self: *Gossipsub, topic_str: []const u8, ssz: []const u8, options: PublishOptions, now: Now) PublishError!PublishOutcome {
         self.last_now_ms = @max(self.last_now_ms, now.mono_ms);
+        self.last_unix_s = now.unix_s;
         const now_ms = self.last_now_ms;
         if (ssz.len > constants.MAX_PAYLOAD_SIZE) return error.PayloadTooLarge;
         if (self.overlay.namespace) |*ns| {
@@ -373,6 +377,7 @@ pub const Gossipsub = struct {
     /// Event slices remain valid until the next pump, including after report or publish.
     pub fn report(self: *Gossipsub, handle: ValidationHandle, verdict: Verdict, now: Now) ReportOutcome {
         self.last_now_ms = @max(self.last_now_ms, now.mono_ms);
+        self.last_unix_s = now.unix_s;
         const context = self.messageContext();
         const result = self.messages.report(&context, handle, verdict, now.mono_ms);
         if (result == .applied) {
@@ -403,6 +408,7 @@ pub const Gossipsub = struct {
         const id = self.messages.store.get(h).?.id;
         const attribution = if (source != null) self.messages.validation.find(id, now_ms) else null;
         var result: PublishOutcome = .{};
+        const origin: @import("delivery.zig").Origin = if (source == null) .publication else .forward;
         var recipients = peers.*;
         const topic = self.overlay.findTopic(self.messages.store.get(h).?.topicString()).?;
         if (source != null) for (self.sessions.rows, 0..) |*row, peer| {
@@ -423,12 +429,12 @@ pub const Gossipsub = struct {
                 result.unavailable += 1;
                 continue;
             }
-            if (self.sessions.rows[index].io.tx.queueData(&self.messages.store, h, self.options.tx_peer_bytes, now_ms) == .queued) {
+            if (self.sessions.rows[index].io.tx.queueData(&self.messages.store, h, origin, self.options.tx_peer_bytes, now_ms) == .queued) {
                 result.queued += 1;
                 self.settle(index);
             } else {
                 result.pressured += 1;
-                self.counters.send_dropped += 1;
+                self.dataRefused(index, origin);
             }
         }
         assert(result.selected == result.queued + result.pressured + result.unavailable);
@@ -661,8 +667,14 @@ pub const Gossipsub = struct {
         self.rpc_metrics.observeSent(completion.itemKind());
         switch (completion) {
             .control => |receipt| self.controlSent(peer, receipt.token, now_ms),
-            .data => {},
+            .data => |receipt| self.delivery_metrics.written(receipt, now_ms),
         }
+    }
+
+    fn dataRefused(self: *Gossipsub, index: u16, origin: @import("delivery.zig").Origin) void {
+        const row = &self.sessions.rows[index];
+        self.counters.send_dropped += 1;
+        self.delivery_metrics.dropped(origin, row.io.tx.last_drop, row.client, self.last_unix_s);
     }
 
     fn controlSent(self: *Gossipsub, peer: u16, token: u64, now_ms: u64) void {
@@ -685,6 +697,12 @@ pub const Gossipsub = struct {
     pub fn scoreSnapshot(self: *Gossipsub, conn: Handle, now: Now) ?f64 {
         const index = self.sessions.find(conn) orelse return null;
         return self.peerScore(index, now.mono_ms);
+    }
+
+    /// The client the connection's identify exchange named, for attributing its outgoing pressure.
+    pub fn identified(self: *Gossipsub, conn: Handle, client: @import("../peers/client.zig").Client) void {
+        const index = self.sessions.find(conn) orelse return;
+        self.sessions.rows[index].client = client;
     }
 
     pub fn unmarkDirect(self: *Gossipsub, identity: *const @import("../wire/peer_id.zig").PeerId) void {
@@ -850,7 +868,7 @@ pub const Gossipsub = struct {
                 .unknown => self.rpc_metrics.iwant_unknown +|= 1,
                 .known => |known| {
                     self.topic_metrics.get(known.topic).iwant_ids +|= 1;
-                    if (known.result == .pressured) self.counters.send_dropped += 1;
+                    if (known.result == .pressured) self.dataRefused(index, .iwant);
                 },
             }
         }

@@ -80,6 +80,10 @@ pub fn process(
         }
     }
     self.control.identifyResults(&self.catalog, identify_results[0..counts.identify]);
+    for (identify_results[0..counts.identify]) |*result| switch (result.outcome) {
+        .success => |*metadata| service.gossipsub.identified(result.conn, @import("peers/client.zig").kind(if (metadata.agent) |*agent| agent.slice() else "")),
+        .failed => {},
+    };
     self.control.events(
         service,
         &self.catalog,

@@ -207,3 +207,58 @@ test "gossip publish reaches a mesh peer in the turn after it and leaves no read
     try std.testing.expectEqual(@as(usize, 1), setup.serverMessages().len);
     try std.testing.expectEqualStrings("same turn", setup.serverMessages()[0].bytes);
 }
+
+test "gossip resumes a small frame cut by a short write once the stream is writable" {
+    var setup: Pair = .{};
+    try setup.initWindow(.{ .random_seed = 1 }, .{ .random_seed = 1 }, 4096);
+    defer setup.deinit();
+    try connectMesh(&setup);
+    const g = setup.shared.client.gossipsub;
+    const index = g.sessions.find(setup.shared.handles.client).?;
+    const io = &g.sessions.rows[index].io;
+    const credit = try setup.shared.pair.client.streamCapacity(setup.clientStream());
+    var payloads: [24][200]u8 = undefined;
+    var random = std.Random.DefaultPrng.init(11);
+    var frames: [payloads.len]usize = undefined;
+    var total: usize = 0;
+    for (&payloads, &frames) |*payload, *frame| {
+        random.random().bytes(payload);
+        try std.testing.expectEqual(@as(u16, 1), (try g.publish(topic, payload, setup.shared.pair.now)).queued);
+        const id = @import("topic.zig").validMessageId(topic, payload, g.options.message_id_policy);
+        frame.* = g.messages.store.get(g.messages.history.message(g.messages.history.get(&g.messages.store, id).?)).?.frameLen();
+        total += frame.*;
+    }
+    try std.testing.expect(credit < total);
+    var whole: usize = 0;
+    var offset = credit;
+    for (frames) |frame| {
+        if (offset < frame) break;
+        offset -= frame;
+        whole += 1;
+    }
+    const calls = g.io_metrics.write_calls;
+    const blocked = g.io_metrics.write_would_block;
+    _ = processClient(&setup);
+    // QUIC took every whole frame the credit covers in one write each, then a prefix of the next.
+    try std.testing.expect(offset > 0);
+    try std.testing.expectEqual(@as(u64, whole + 1), g.io_metrics.write_calls - calls);
+    try std.testing.expectEqual(blocked + 1, g.io_metrics.write_would_block);
+    try std.testing.expect(!io.tx.ready and io.tx.pending());
+    try std.testing.expectEqual(payloads.len - whole, io.tx.data.count);
+    try std.testing.expectEqual(offset, io.tx.data.first().?.cursor.sent);
+
+    // The server reads, the writable event resumes the cut frame, and every frame arrives intact.
+    for (0..256) |_| {
+        if (io.tx.data.count == 0) break;
+        _ = setup.shared.processServer(.{});
+        try setup.shared.pair.pump();
+        _ = processClient(&setup);
+        try setup.shared.pair.pump();
+    }
+    _ = setup.shared.processServer(.{});
+    try std.testing.expectEqual(@as(usize, 0), io.tx.data.count);
+    try std.testing.expectEqual(payloads.len, setup.serverMessages().len);
+    for (setup.serverMessages(), &payloads) |message, *payload| try std.testing.expectEqualSlices(u8, payload, message.bytes);
+    try std.testing.expect(g.io_metrics.write_calls - calls <= payloads.len + (g.io_metrics.write_would_block - blocked));
+    try std.testing.expectEqual(@as(u64, payloads.len), g.delivery_metrics.write_time[@intFromEnum(@import("delivery.zig").Origin.publication)].count);
+}
