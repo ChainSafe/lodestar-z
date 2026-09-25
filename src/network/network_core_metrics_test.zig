@@ -90,6 +90,12 @@ const contract = [_]Series{
     .{ .name = "lodestar_native_dial_failed_intents_released_total", .kind = "counter" },
     .{ .name = "lodestar_native_dial_recent_failures_refused_total", .kind = "counter", .labels = &.{"reason"} },
     .{ .name = "lodestar_native_peer_rejections_total", .kind = "counter", .labels = &.{"kind"} },
+    .{ .name = "lodestar_native_peer_dial_funnel_total", .kind = "counter", .labels = &.{ "origin", "stage" } },
+    .{ .name = "lodestar_native_remembered_peers", .kind = "gauge" },
+    .{ .name = "lodestar_native_remembered_peer_seeds_total", .kind = "counter", .labels = &.{"outcome"} },
+    .{ .name = "lodestar_native_remembered_peer_replays_total", .kind = "counter", .labels = &.{"outcome"} },
+    .{ .name = "lodestar_native_remembered_peer_removals_total", .kind = "counter", .labels = &.{"reason"} },
+    .{ .name = "lodestar_native_remembered_peer_snapshot_records_total", .kind = "counter" },
     // discv5
     .{ .name = "lodestar_discv5_active_session_count", .kind = "gauge" },
     .{ .name = "lodestar_discv5_kad_table_size", .kind = "gauge" },

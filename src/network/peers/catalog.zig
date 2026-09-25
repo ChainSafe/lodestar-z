@@ -6,6 +6,8 @@ const lists = @import("../index_list.zig");
 const enr = @import("enr.zig");
 const identity_index = @import("identity_index.zig");
 const dial_history = @import("dial_history.zig");
+const remembered = @import("remembered.zig");
+const Now = @import("../types.zig").Now;
 const DeadlineHeap = @import("../deadline_heap.zig").DeadlineHeap;
 const assert = std.debug.assert;
 
@@ -25,6 +27,8 @@ pub const Intent = struct {
     eligible_at_ms: u64 = 0,
     history_until_ms: u64 = 0,
     failures: u8 = 0,
+    /// Replay queued this automatic intent from a remembered record; its first attempt is preferred.
+    replay: enum { none, untried, tried } = .none,
 };
 pub const Row = struct {
     free_link: lists.Link = .{},
@@ -45,6 +49,8 @@ pub const Row = struct {
     /// The endpoint the connection was dialed to, kept after its attempt retires; null for an
     /// inbound connection.
     dialed: ?t.Address = null,
+    /// Where an automatic dial's candidate came from, until the connection is counted as kept.
+    origin: ?remembered.Origin = null,
     status: ?t.Status = null,
     metadata: ?t.Metadata = null,
     status_at_ms: u64 = 0,
@@ -67,6 +73,7 @@ pub const Catalog = struct {
     intents: std.DynamicBitSetUnmanaged,
     intent_masks: []usize,
     history: dial_history.History,
+    remembered: remembered.Memory,
     established: []?u16,
     free: lists.List = .{},
     connected_count: u16 = 0,
@@ -141,6 +148,8 @@ pub const Catalog = struct {
         errdefer eligible.deinit(a);
         const scratch = try a.alloc(u32, rows.len);
         errdefer a.free(scratch);
+        var memory = try remembered.Memory.init(a);
+        errdefer memory.deinit(a);
 
         @memset(history, .{});
         @memset(intent_masks, 0);
@@ -157,6 +166,7 @@ pub const Catalog = struct {
             .intents = .{ .bit_length = rows.len, .masks = intent_masks.ptr },
             .intent_masks = intent_masks,
             .history = .{ .entries = history, .seed = seed },
+            .remembered = memory,
             .established = established,
             .random = .init(seed),
             .by_identity = .{ .slots = slots, .seed = seed },
@@ -176,6 +186,7 @@ pub const Catalog = struct {
     }
 
     pub fn deinit(self: *Catalog, a: std.mem.Allocator) void {
+        self.remembered.deinit(a);
         a.free(self.dial.scratch);
         self.dial.eligible.deinit(a);
         self.dial.expiries.deinit(a);
@@ -573,6 +584,7 @@ pub const Catalog = struct {
         row.direction = options.direction;
         row.endpoint = options.endpoint;
         row.dialed = null;
+        row.origin = null;
         row.connected_at_ms = options.now_ms;
         row.status = null;
         row.metadata = null;
@@ -674,7 +686,14 @@ pub const Catalog = struct {
         const delay = @min(@as(u64, 5_000) << @intCast(row.intent.failures - 1), 300_000);
         row.intent.eligible_at_ms = @max(row.intent.eligible_at_ms, now_ms +| delay +| (self.random.random().int(u16) % 1_001));
         self.connection_backoffs +|= 1;
-        if (reason == .health_timeout or reason == .health_error) self.recordHealth(index, now_ms);
+        switch (reason) {
+            .health_timeout, .health_error => {
+                self.remembered.forget(&row.identity, .health);
+                self.recordHealth(index, now_ms);
+            },
+            .banned => self.remembered.forget(&row.identity, .banned),
+            else => {},
+        }
     }
 
     /// Charges a health close to the endpoint the connection was dialed to; an inbound connection
@@ -722,11 +741,47 @@ pub const Catalog = struct {
         const kind = rejection orelse return;
         const block_ms = self.history.reject(key, kind, now_ms);
         self.rejections[@intFromEnum(kind)] +|= 1;
+        if (kind != .shutdown) self.remembered.forget(&row.identity, .rejection);
         std.log.scoped(.network_peers).debug("peer_rejection_recorded peer={f} connection={d}:{d} kind={s} block_ms={d}", .{ @import("../logging.zig").peer(&row.identity), conn.index, conn.generation, @tagName(kind), block_ms });
         if (!row.intent.automatic) return;
         row.intent.automatic = false;
         self.markDial(ref.index);
         if (!row.direct and row.intent.manual_until_ms == 0 and row.attempt == null) self.releaseIntent(ref);
+    }
+
+    /// Counts an automatic dial's connection as kept, and refreshes the peer's remembered record,
+    /// once it has served `qualify_ms`. Control calls it as the connection closes, with whether it
+    /// completed the Status and Metadata exchange and how it ended: a remote rejection or a close
+    /// that shows the peer ineligible leaves the record as it was.
+    pub fn rememberClosed(self: *Catalog, ref: t.PeerRef, conn: t.Handle, ready: bool, reason: t.DisconnectReason, rejection: ?t.Rejection, now: Now) void {
+        const row = self.connectedRow(ref, conn) orelse return;
+        if (!ready) return;
+        self.serve(row, servedUntil(reason) and (rejection == null or rejection == .shutdown), now);
+    }
+
+    /// Refreshes the remembered record of every connection that qualifies now: our dial, admitted
+    /// `qualify_ms` ago, holding a relevant Status and a Metadata, and not closing.
+    pub fn rememberConnected(self: *Catalog, now: Now) void {
+        for (self.established) |entry| {
+            const row = &self.rows[entry orelse continue];
+            if (row.connection == null or row.closing_reason != null or row.status == null or row.metadata == null) continue;
+            self.serve(row, true, now);
+        }
+    }
+
+    /// A ready connection that served `qualify_ms` counts once as kept, and refreshes the record of
+    /// its dialed endpoint while the peer stays eligible. Inbound connections prove no endpoint.
+    fn serve(self: *Catalog, row: *Row, eligible: bool, now: Now) void {
+        if (now.mono_ms -| row.connected_at_ms < remembered.qualify_ms) return;
+        if (row.origin) |origin| {
+            self.remembered.note(origin, .kept);
+            row.origin = null;
+        }
+        const endpoint = row.dialed orelse return;
+        var current = row.reputation;
+        current.decay(now.mono_ms);
+        if (!eligible or current.banned(now.mono_ms) or !endpoint.isUsable()) return;
+        self.remembered.qualify(&row.identity, endpoint, remembered.seconds(now));
     }
 
     /// Clears the health evidence of the endpoint the connection was dialed to. Control calls it once
@@ -993,6 +1048,15 @@ pub const Catalog = struct {
         row.published = true;
     }
 };
+
+/// Whether a connection closing for `reason` served us until then. Closes for an incompatible or
+/// failing peer do not.
+fn servedUntil(reason: t.DisconnectReason) bool {
+    return switch (reason) {
+        .host, .shutdown, .transport_closed, .duplicate, .capacity, .remote_goodbye, .count_pruning => true,
+        .incompatible_fork, .future_head, .finalized_mismatch, .missing_availability, .invalid_status, .invalid_metadata, .health_timeout, .reputation, .banned, .gossip_unavailable, .health_error => false,
+    };
+}
 
 test {
     _ = @import("catalog_test.zig");

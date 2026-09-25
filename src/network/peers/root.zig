@@ -11,6 +11,7 @@ pub const dialing = @import("dialing.zig");
 pub const Dialing = dialing.Dialing;
 pub const types = @import("types.zig");
 pub const catalog = @import("catalog.zig");
+pub const remembered = @import("remembered.zig");
 pub const identity_index = @import("identity_index.zig");
 pub const reputation = @import("reputation.zig");
 pub const control_wire = @import("control_wire.zig");
@@ -42,4 +43,5 @@ test {
     _ = @import("identity_index.zig");
     _ = @import("coverage.zig");
     _ = @import("dial_history.zig");
+    _ = @import("remembered.zig");
 }

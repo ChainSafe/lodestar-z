@@ -62,6 +62,9 @@ pub const Startup = struct {
     discovery: ?DiscoveryOptions = null,
     /// The host's wall-clock slot until its first intent.
     slot: u64 = 0,
+    /// Peers an earlier run remembered, at most `peers.remembered.capacity`, replayed as paced
+    /// automatic candidates. Native drops expired, unusable and duplicate records.
+    remembered: []const peers.remembered.Record = &.{},
 };
 /// Why a step applied host work: a readable host wake, a due host deadline, or work the
 /// previous apply left.
@@ -187,6 +190,7 @@ pub const NetworkCore = struct {
         try @import("configuration.zig").validate(resolved.limits, resolved.core);
         try resolved.socket_buffers.validate();
         if (!wait.supported) return error.UnsupportedWait;
+        if (startup.remembered.len > peers.remembered.capacity) return error.InvalidOptions;
         var local: t.LocalState = undefined;
         try peers.control_wire.copyServingLocal(&local, &startup.local, @import("router.zig").Router.initialCapabilities(resolved.core.service.router).receive);
         try validateSchedule(&local, startup.schedule);
@@ -215,6 +219,7 @@ pub const NetworkCore = struct {
         errdefer self.service.deinit();
         self.peer_manager = try manager.PeerManager.init(allocator, &self.transport.peerId(), &local, managed.peerOptions(resolved.core), &self.service, self.transport.engine.limits.connections_max);
         errdefer self.peer_manager.deinit();
+        self.peer_manager.loadRemembered(startup.remembered, self.last_now);
         self.service.identify.bind(&self.transport.engine);
         self.peer_manager.metrics_io = io;
         self.service.gossipsub.metrics_io = io;
@@ -359,6 +364,12 @@ pub const NetworkCore = struct {
     pub fn completeSnapshots(self: *const NetworkCore, out: []t.Snapshot) error{OutputTooSmall}!usize {
         if (out.len < self.peer_manager.catalog.options.capacity) return error.OutputTooSmall;
         return self.peer_manager.snapshots(out);
+    }
+    /// Refreshes the remembered records of connections that qualify now and copies every
+    /// unexpired record. The host persists them for the next start.
+    pub fn rememberedPeers(self: *NetworkCore, now: Now, out: []peers.remembered.Record) error{OutputTooSmall}!usize {
+        if (out.len < peers.remembered.capacity) return error.OutputTooSmall;
+        return self.peer_manager.rememberedPeers(now, out);
     }
     pub fn beginGracefulClose(self: *NetworkCore, now: Now) void {
         managed.beginGracefulClose(&self.peer_manager, &self.service, now);
