@@ -383,7 +383,7 @@ fn submit(self: *@This(), comptime command: commands.Command, args: []const Valu
             try application_cfg.parseIntent(args[0], &runtime.stores.?.intents[store.?], runtime.max_peers);
         },
         .updateStatus => try cfg.parseStatus(args[0], &operation.input.status),
-        .getIdentity, .getPeers, .getDirectPeers => {},
+        .getIdentity, .getPeers, .getDirectPeers, .getRememberedPeers => {},
         .getGossipDiagnostics => operation.input.diagnostics_cursor = @intCast(try cfg.integer(args[0], 512)),
         .reStatusPeers => {
             operation.input.target_count = @intCast(try cfg.array(args[0], 256));
@@ -442,6 +442,9 @@ pub fn removeDirectPeer(self: *@This(), peer: js.Value) !js.Value {
 pub fn getDirectPeers(self: *@This()) !js.Value {
     return self.submit(.getDirectPeers, &.{});
 }
+pub fn getRememberedPeers(self: *@This()) !js.Value {
+    return self.submit(.getRememberedPeers, &.{});
+}
 pub fn reportPeer(self: *@This(), peer: js.Value, action: js.Value) !js.Value {
     const runtime = try self.owner();
     const reported_peer = try cfg.peerIdFrom(peer.val);
@@ -499,7 +502,7 @@ fn copyOperation(env: napi.Env, runtime: *Runtime, index: usize) !Value {
     const object = switch (operation.input.command) {
         .getGossipDiagnostics => try @import("network_gossip_diagnostics.zig").copy(env, &runtime.stores.?.gossip_diagnostics[store.?]),
         .getIdentity => try identity(env, &operation.identity),
-        .applyIntent, .getPeers, .getDirectPeers => try env.createObject(),
+        .applyIntent, .getPeers, .getDirectPeers, .getRememberedPeers => try env.createObject(),
         .removeDirectPeer => return env.getBoolean(operation.boolean),
         else => return env.getUndefined(),
     };
@@ -525,6 +528,19 @@ fn copyOperation(env: napi.Env, runtime: *Runtime, index: usize) !Value {
             const identities = try env.createArrayWithLength(operation.count);
             for (runtime.stores.?.direct[store.?][0..operation.count], 0..) |*peer, i| try element(identities, i, try @import("network_js.zig").peerIdValue(env, peer));
             try put(object, "identities", identities);
+        },
+        .getRememberedPeers => {
+            const page = &runtime.stores.?.remembered[store.?];
+            try put(object, "genesisValidatorsRoot", try @import("network_js.zig").bytes(env, &page.genesis_root));
+            const peers = try env.createArrayWithLength(operation.count);
+            for (page.records[0..operation.count], 0..) |*record, i| {
+                const entry = try env.createObject();
+                try put(entry, "peerId", try @import("network_js.zig").peerIdValue(env, &record.peer));
+                try put(entry, "endpoint", try @import("network_js.zig").endpoint(env, record.address));
+                try put(entry, "qualifiedAtUnixS", try env.createDouble(@floatFromInt(record.qualified_at_s)));
+                try element(peers, i, entry);
+            }
+            try put(object, "peers", peers);
         },
         else => {},
     }

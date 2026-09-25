@@ -121,6 +121,12 @@ pub const Diagnostics = struct {
     bridgeRequestedBytes: usize = @sizeOf(Runtime) + @sizeOf(Owner) - @sizeOf(n.NetworkCore),
 };
 
+/// A remembered peers snapshot and the network it belongs to.
+pub const RememberedPage = struct {
+    genesis_root: [32]u8,
+    records: [n.peers.remembered.capacity]n.peers.remembered.Record,
+};
+
 pub const Stores = struct {
     backing: std.mem.Allocator,
     intents: [2]application_config.Intent = undefined,
@@ -128,6 +134,7 @@ pub const Stores = struct {
     gossip_diagnostics: [2]n.gossipsub.diagnostics.Page = undefined,
     direct: [2][256]n.PeerId = undefined,
     targets: [2][256]n.PeerId = undefined,
+    remembered: [2]RememberedPage = undefined,
     pub fn create(backing: std.mem.Allocator, capacity: usize) !*Stores {
         const self = try backing.create(Stores);
         errdefer backing.destroy(self);

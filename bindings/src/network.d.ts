@@ -239,11 +239,36 @@ export interface NativeResources {
   bridgeBudgetBytes: number;
 }
 
+/** A peer that served a connection native dialed, remembered so a restart can redial it. */
+export interface NativeRememberedPeer {
+  peerId: PeerIdStr;
+  /** The QUIC endpoint native dialed, never an inbound source. */
+  endpoint: IpEndpoint;
+  /** Unix time in seconds at which the peer last qualified. */
+  qualifiedAtUnixS: number;
+}
+
+/** At most 256 peers of the network with `genesisValidatorsRoot`. */
+export interface NativeRememberedPeers {
+  genesisValidatorsRoot: Uint8Array;
+  peers: readonly NativeRememberedPeer[];
+}
+
+export interface NativeRememberedPeersSnapshot extends NativeRememberedPeers {
+  peers: NativeRememberedPeer[];
+  ownerSequence: bigint;
+}
+
 /** Configure the shared BeaconConfig before constructing a network runtime. */
 export interface NativeApplicationConfig extends NativeRuntimeConfig {
   resources: NativeResources;
   identify: {agentVersion: string; protocolVersion: string};
   serveLightClients: boolean;
+  /**
+   * Peers an earlier run remembered, replayed as paced automatic candidates. Another network's root, more than 256
+   * peers or a malformed peer rejects the configuration; native drops expired and duplicate peers.
+   */
+  rememberedPeers?: NativeRememberedPeers | null;
 }
 
 /** Desired coverage persists until replacement; the host owns validator duty expiry. */
@@ -396,6 +421,11 @@ export interface NativeNetworkApplicationRuntime {
   addDirectPeer(peerId: PeerIdStr, addresses: readonly IpEndpoint[]): Promise<void>;
   removeDirectPeer(peerId: PeerIdStr): Promise<boolean>;
   getDirectPeers(): Promise<NativeDirectSnapshot>;
+  /**
+   * Remembered peers for the host to persist: every unexpired record, refreshed for connections that qualify now.
+   * Take the final snapshot before close, which refuses it.
+   */
+  getRememberedPeers(): Promise<NativeRememberedPeersSnapshot>;
   /**
    * Accumulates penalties independently of command capacity, including for disconnected retained identities.
    * Counts unknown identities at execution and full pending-table refusals in peerReportsIgnored.

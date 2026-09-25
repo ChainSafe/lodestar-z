@@ -91,6 +91,9 @@ class NativeRuntime {
   getDirectPeers() {
     return this.#native.getDirectPeers();
   }
+  getRememberedPeers() {
+    return this.#native.getRememberedPeers();
+  }
   reportPeer(peerId, action) {
     return this.#native.reportPeer(peerId, action);
   }

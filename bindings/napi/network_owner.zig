@@ -76,6 +76,7 @@ pub fn initialize(self: *Runtime) !void {
         .local = self.heavy.?.config.local,
         .schedule = self.heavy.?.config.schedule,
         .slot = self.heavy.?.config.slot,
+        .remembered = self.heavy.?.application.remembered[0..self.heavy.?.application.remembered_count],
         .discovery = if (self.heavy.?.config.discovery_bind) |bind| .{ .bind = bind, .sequence = self.heavy.?.config.discovery_sequence, .advertisement = self.heavy.?.config.advertisement, .fixed = self.heavy.?.config.fixed, .bootstrap = self.heavy.?.records[0..self.heavy.?.config.bootstrap_count] } else null,
     });
     self.heavy.?.core_live = true;

@@ -1,5 +1,8 @@
+import {privateKeyFromRaw} from "@libp2p/crypto/keys";
+import {peerIdFromPublicKey} from "@libp2p/peer-id";
 import {expect, test} from "vitest";
-import {applicationConfig, startRuntime} from "./utils/network.js";
+import type {NativeRememberedPeer} from "../src/network.js";
+import {applicationConfig, startRuntime, testChain} from "./utils/network.js";
 
 test.each(["resources", "identify", "serveLightClients"])("rejects missing %s", (field) => {
   const config = applicationConfig();
@@ -92,4 +95,115 @@ test.each([512, 513])("retained peer capacity %s respects the native gossip ceil
   } finally {
     await runtime.close();
   }
+});
+
+/** Replay dials the remembered endpoint, a closed loopback port. */
+function rememberedPeer(tag: number, ageS: number, last = tag): NativeRememberedPeer {
+  const secret = new Uint8Array(32);
+  secret[31] = tag;
+  return {
+    endpoint: {address: Uint8Array.of(127, 0, 0, last), family: 4, port: 9},
+    peerId: peerIdFromPublicKey(privateKeyFromRaw(secret).publicKey).toString(),
+    qualifiedAtUnixS: Math.floor(Date.now() / 1000) - ageS,
+  };
+}
+
+test("remembered peers return in the snapshot without expired or duplicate peers, until close", async () => {
+  const config = applicationConfig();
+  const kept = rememberedPeer(40, 60);
+  const newer = rememberedPeer(41, 600, 1);
+  config.rememberedPeers = {
+    genesisValidatorsRoot: testChain.genesisValidatorsRoot,
+    peers: [kept, rememberedPeer(41, 3600, 2), newer, rememberedPeer(42, 24 * 3600 + 60)],
+  };
+  const runtime = startRuntime(config);
+  try {
+    const snapshot = await runtime.getRememberedPeers();
+    expect(snapshot.genesisValidatorsRoot).toEqual(testChain.genesisValidatorsRoot);
+    expect(snapshot.ownerSequence).toBeTypeOf("bigint");
+    const peers = new Map(snapshot.peers.map((peer) => [peer.peerId, peer]));
+    expect(peers.size).toBe(2);
+    expect(peers.get(kept.peerId)).toEqual(kept);
+    expect(peers.get(newer.peerId)).toEqual(newer);
+    const metrics = runtime.getMetrics();
+    for (const [outcome, count] of [
+      ["loaded", 2],
+      ["expired", 1],
+      ["duplicate", 1],
+      ["invalid", 0],
+    ] as const) {
+      expect(metrics).toContain(`lodestar_native_remembered_peer_seeds_total{outcome="${outcome}"} ${count}\n`);
+    }
+  } finally {
+    await runtime.close();
+  }
+  // The host takes its final snapshot before close, which refuses it.
+  expect(() => runtime.getRememberedPeers()).toThrow("NetworkClosed");
+});
+
+test.each([null, undefined])("remembered peers may be %s", async (value) => {
+  const config = applicationConfig();
+  config.rememberedPeers = value;
+  const runtime = startRuntime(config);
+  try {
+    expect(await runtime.getRememberedPeers()).toMatchObject({peers: []});
+  } finally {
+    await runtime.close();
+  }
+});
+
+test.each([
+  [
+    "another network",
+    "InvalidRememberedPeersNetwork",
+    () => ({genesisValidatorsRoot: new Uint8Array(32).fill(1), peers: []}),
+  ],
+  [
+    "257 peers",
+    "InvalidNetworkConfig",
+    () => ({
+      genesisValidatorsRoot: testChain.genesisValidatorsRoot,
+      peers: Array.from({length: 257}, () => rememberedPeer(1, 60)),
+    }),
+  ],
+  [
+    "a malformed identity",
+    "InvalidNetworkPeerId",
+    () => ({genesisValidatorsRoot: testChain.genesisValidatorsRoot, peers: [{...rememberedPeer(1, 60), peerId: "x"}]}),
+  ],
+  [
+    "a zero port",
+    "InvalidNetworkConfig",
+    () => ({
+      genesisValidatorsRoot: testChain.genesisValidatorsRoot,
+      peers: [
+        {...rememberedPeer(1, 60), endpoint: {address: Uint8Array.of(127, 0, 0, 1), family: 4 as const, port: 0}},
+      ],
+    }),
+  ],
+  [
+    "an unspecified address",
+    "InvalidNetworkConfig",
+    () => ({
+      genesisValidatorsRoot: testChain.genesisValidatorsRoot,
+      peers: [{...rememberedPeer(1, 60), endpoint: {address: new Uint8Array(4), family: 4 as const, port: 9}}],
+    }),
+  ],
+  [
+    "a negative time",
+    "InvalidNetworkInteger",
+    () => ({
+      genesisValidatorsRoot: testChain.genesisValidatorsRoot,
+      peers: [{...rememberedPeer(1, 60), qualifiedAtUnixS: -1}],
+    }),
+  ],
+  [
+    "an extra field",
+    "InvalidNetworkConfig",
+    () => ({genesisValidatorsRoot: testChain.genesisValidatorsRoot, peers: [{...rememberedPeer(1, 60), enr: null}]}),
+  ],
+] as const)("rejects remembered peers with %s", (_, code, peers) => {
+  const config = applicationConfig();
+  Reflect.set(config, "rememberedPeers", peers());
+  expect(() => startRuntime(config)).toThrow(code);
 });
