@@ -104,14 +104,27 @@ zig build test:ssz
 zig build test:bls
 zig build test:state_transition
 
-# Filter a module test
-zig build test:ssz -Dtest:ssz.filters="test name"
+# Filter a module test at compile time
+zig build test:ssz -Dssz.filters="test name"
 
-# Filter the aggregate test step
-zig build test -- --test-filter "test name"
+# Compile every network test without running them (about 13 s)
+zig build build-test:network
+
+# Compile, then run the network tests as parallel shards (about 40 s)
+scripts/test-shards.sh network
+
+# Compile, then run only the network tests whose name contains either substring
+scripts/test-shards.sh network --filter="reqresp" --filter="gossip"
 ```
 
 Prefer a targeted module test while iterating, do not run `zig build test` unless necessary.
+`-D<step>.filters` compiles only the selected tests, so it misses compile errors elsewhere and drops
+suites reachable only through named tests. `zig build test -- --test-filter` is silently ignored.
+
+The `network` and `discv5` steps use `test/test_runner.zig`, which selects tests at run time. While
+iterating, compile everything with `zig build build-test:<step>`, then run the relevant subset with
+the runner's `--filter`; `scripts/test-shards.sh <step> --filter=...` does both. Before commit,
+run all shards with `scripts/test-shards.sh <step>`.
 
 ### Spec tests
 
@@ -132,7 +145,7 @@ zig build test:ssz_static_spec_tests -Dpreset=minimal
 zig build test:bls_spec_tests -Dpreset=minimal
 
 # Filter a suite
-zig build test:spec_tests -Dtest:spec_tests.filters="pattern" -Dpreset=minimal
+zig build test:spec_tests -Dspec_tests.filters="pattern" -Dpreset=minimal
 ```
 
 Use the minimal preset for faster iteration, but run mainnet when behavior depends on preset values.
@@ -144,9 +157,11 @@ Do not assume minimal and mainnet constants are interchangeable.
 # Install dependencies
 pnpm install
 
-# Build bindings
+# Build a Debug addon to iterate on binding changes
 zig build build-lib:bindings
-zig build build-lib:bindings -Doptimize=ReleaseSafe
+
+# Final gate: the ReleaseSafe addon with the release flags, which the release build reuses
+zig build build-lib:bindings -Doptimize=ReleaseSafe -Dpreset=mainnet -Dtarget=x86_64-linux-gnu.2.35 -Dcpu=znver1
 
 # Build for a specific preset through package scripts
 pnpm prepare-mainnet
@@ -404,10 +419,12 @@ implementation was primarily AI-authored or whether AI was used only for codebas
 
 1. `zig fmt --check .`
 2. `zig build test:tidy`
-3. Run relevant tests, never run slow `zig build test` unless changes touch spec logic
+3. Run relevant tests, all shards for network changes, never run slow `zig build test` unless
+   changes touch spec logic
 4. Relevant spec tests for consensus, SSZ, or BLS changes
 5. `pnpm lint` for binding source changes
-6. Rebuild bindings and run `pnpm test` for binding or NAPI changes
+6. Rebuild the ReleaseSafe addon with the release flags and run `pnpm test` for binding or NAPI
+   changes
 7. Confirm no generated test source or build output was edited manually
 8. Confirm both ownership cleanup and error paths are covered
 
@@ -436,7 +453,7 @@ implementation was primarily AI-authored or whether AI was used only for codebas
 3. Add or update the wrapper and declaration under `bindings/src/`.
 4. Validate all JavaScript-controlled inputs at the native boundary.
 5. Add tests under `bindings/test/`.
-6. Build ReleaseSafe bindings and run `pnpm test` and `pnpm lint`.
+6. Build the ReleaseSafe addon with the release flags and run `pnpm test` and `pnpm lint`.
 
 ### Changing SSZ behavior
 
