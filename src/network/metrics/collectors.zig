@@ -284,7 +284,7 @@ fn writePeerCloses(self: *const Context, w: *prom.Encoder) prom.Error!void {
     try w.enums(.{
         .name = "lodestar_native_peer_rejections_total",
         .kind = .counter,
-        .help = "Remote rejections recorded against peer identities by kind: a received Goodbye, or a remote close of our dial before Status",
+        .help = "Remote rejections recorded against peer identities by kind: a received Goodbye, or a remote close of our dial before the Status and Metadata exchange completed",
         .labels = &.{"kind"},
     }, peer_types.Rejection, &self.owner.peer_manager.catalog.rejections);
     try w.enums(.{
