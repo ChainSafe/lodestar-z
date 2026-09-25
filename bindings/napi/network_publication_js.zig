@@ -62,14 +62,13 @@ pub fn settle(env: napi.Env, runtime: *r.Runtime, limit: usize) !bool {
     defer runtime.release();
     var settled: usize = 0;
     var more = false;
-    var next: usize = 0;
     for (0..p.capacity_max) |_| {
         runtime.lock();
         const table = if (runtime.publications) |*table| table else {
             runtime.unlock();
             break;
         };
-        const i = table.nextTerminal(next) orelse {
+        const i = table.nextTerminal(table.settle_cursor) orelse table.nextTerminal(0) orelse {
             runtime.unlock();
             break;
         };
@@ -79,7 +78,7 @@ pub fn settle(env: napi.Env, runtime: *r.Runtime, limit: usize) !bool {
             break;
         }
         settled += 1;
-        next = i + 1;
+        table.settle_cursor = i + 1;
         const cell = &table.cells[i];
         table.transition(cell, .copying);
         const token: p.Token = .{ .index = @intCast(i), .generation = cell.generation };

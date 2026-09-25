@@ -437,10 +437,9 @@ pub fn reportPeer(self: *@This(), peer: js.Value, action: js.Value) !js.Value {
 
 fn settleOperations(env: napi.Env, runtime: *Runtime, limit: usize) !bool {
     var settled: usize = 0;
-    var next: usize = 0;
     for (0..commands.capacity) |_| {
         runtime.lock();
-        const i = runtime.table.nextTerminal(next) orelse {
+        const i = runtime.table.nextTerminal(runtime.table.settle_cursor) orelse runtime.table.nextTerminal(0) orelse {
             runtime.unlock();
             return false;
         };
@@ -449,7 +448,7 @@ fn settleOperations(env: napi.Env, runtime: *Runtime, limit: usize) !bool {
             return true;
         }
         settled += 1;
-        next = i + 1;
+        runtime.table.settle_cursor = i + 1;
         const cell = &runtime.table.cells[i];
         runtime.table.transition(cell, .copying);
         const token: commands.Token = .{ .index = @intCast(i), .generation = cell.generation };

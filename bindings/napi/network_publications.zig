@@ -51,6 +51,8 @@ pub const Table = struct {
     cells: []Cell,
     /// The terminal cells, which the host's settlement delivers. `transition` keeps it current.
     terminal: std.StaticBitSet(capacity_max) = .initEmpty(),
+    /// Past the last settled cell, where settlement resumes, so refilled low cells cannot starve higher ones.
+    settle_cursor: usize = 0,
     backing: std.mem.Allocator,
     budget: *Budget,
     ordinary: usize = 0,
