@@ -90,7 +90,7 @@ const releaseCallbacks = {
       Reflect.deleteProperty(Object.prototype, "depositRoot");
     }
     assert.deepEqual(result.depositRoot, value.eth1Data.depositRoot);
-    assert.equal(result.depositCount, value.eth1Data.depositCount);
+    assert.equal(result.depositCount, BigInt(value.eth1Data.depositCount));
   },
   "nested output setter": (state: BeaconStateView): void => {
     let nested = false;
@@ -101,7 +101,7 @@ const releaseCallbacks = {
           state.release();
         } else {
           nested = true;
-          assert.equal(state.eth1Data.depositCount, value.eth1Data.depositCount);
+          assert.equal(state.eth1Data.depositCount, BigInt(value.eth1Data.depositCount));
         }
         Object.defineProperty(this, "depositRoot", {enumerable: true, value: root});
       },
@@ -113,7 +113,7 @@ const releaseCallbacks = {
       Reflect.deleteProperty(Object.prototype, "depositRoot");
     }
     assert.deepEqual(result.depositRoot, value.eth1Data.depositRoot);
-    assert.equal(result.depositCount, value.eth1Data.depositCount);
+    assert.equal(result.depositCount, BigInt(value.eth1Data.depositCount));
   },
   "slot options getter": (state: BeaconStateView): void => {
     const slot = state.slot;
