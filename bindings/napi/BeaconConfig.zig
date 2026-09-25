@@ -72,15 +72,14 @@ fn create(allocator: std.mem.Allocator, object: js.Value, genesis_root: js.Uint8
     return owned;
 }
 
-fn valueToU64(value: napi.Value) !u64 {
-    const num = try value.getValueDouble();
-    if (std.math.isPositiveInf(num)) {
-        return std.math.maxInt(u64);
-    }
-    if (!std.math.isFinite(num) or num != @floor(num) or num < 0 or num >= @as(f64, @floatFromInt(std.math.maxInt(u64)))) {
-        return error.InvalidChainConfigFieldValue;
-    }
-    return @intFromFloat(num);
+fn chainConfigU64(value: napi.Value) !u64 {
+    const number: js.Number = .{ .val = value };
+    // Lodestar uses Infinity for disabled fork epochs.
+    if (std.math.isPositiveInf(try number.toF64())) return std.math.maxInt(u64);
+    return number.toU64Exact() catch |err| switch (err) {
+        error.InvalidUnsignedInteger => error.InvalidChainConfigFieldValue,
+        else => err,
+    };
 }
 
 fn chainConfigFromObject(owned: *OwnedConfig, env: napi.Env, obj: napi.Value) !ChainConfig {
@@ -109,7 +108,7 @@ fn chainConfigFromObject(owned: *OwnedConfig, env: napi.Env, obj: napi.Value) !C
                         else
                             return error.InvalidPreset;
                 },
-                u64 => @field(chain_config, field.name) = try valueToU64(field_value),
+                u64 => @field(chain_config, field.name) = try chainConfigU64(field_value),
                 u256 => {
                     var str_buf: [128]u8 = undefined;
                     const str = try (try field_value.coerceToString()).getValueStringUtf8(&str_buf);
@@ -164,8 +163,8 @@ fn chainConfigFromObject(owned: *OwnedConfig, env: napi.Env, obj: napi.Value) !C
                         const max_blobs_value = try entry_value.getNamedProperty("MAX_BLOBS_PER_BLOCK");
 
                         const blob_schedule_entry = ChainConfig.BlobScheduleEntry{
-                            .EPOCH = try valueToU64(epoch_value),
-                            .MAX_BLOBS_PER_BLOCK = try valueToU64(max_blobs_value),
+                            .EPOCH = try chainConfigU64(epoch_value),
+                            .MAX_BLOBS_PER_BLOCK = try chainConfigU64(max_blobs_value),
                         };
                         owned.blob_schedule[i] = blob_schedule_entry;
                     }

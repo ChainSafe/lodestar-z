@@ -31,8 +31,10 @@ const operations = {
       }),
       config
     ),
+  "NaN validator index": () => state.getValidator(NaN),
   "fractional committee epoch": () => state.getBeaconCommitteeCountPerSlot(0.5),
   "fractional slot": () => state.processSlots(1.5),
+  "infinite validator index": () => state.getValidator(Infinity),
   "invalid config Object.create(bindings.BeaconConfig.prototype)": () =>
     Reflect.apply(bindings.BeaconStateView.createFromBytes, bindings.BeaconStateView, [
       new Uint8Array(47),
@@ -56,6 +58,7 @@ const operations = {
   "truncated block": () => state.stateTransition(new Uint8Array(107), false),
   "truncated loaded state": () => state.loadOtherState(new Uint8Array(47)),
   "truncated state": () => bindings.BeaconStateView.createFromBytes(new Uint8Array(47), config),
+  "unsafe validator index": () => state.getValidator(Number.MAX_SAFE_INTEGER + 1),
   "zero proof index": () => state.getSingleProof(0n),
 };
 

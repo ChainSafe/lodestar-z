@@ -402,7 +402,10 @@ export declare class BeaconStateView {
   stateTransition(signedBlockBytes: Uint8Array, isBlinded: boolean, options?: TransitionOpts): BeaconStateView;
 }
 
-/** Owns a copy of the configuration inputs; states retain it for their lifetime. */
+/**
+ * Owns a copy of the configuration inputs; states retain it for their lifetime.
+ * Numeric u64 fields accept safe unsigned integers or Infinity as the maximum u64 sentinel.
+ */
 export declare class BeaconConfig {
   private readonly _brand: void;
   constructor(chainConfig: object, genesisValidatorsRoot: Uint8Array);
