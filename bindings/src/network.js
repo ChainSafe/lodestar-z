@@ -104,23 +104,26 @@ class NativeRuntime {
     } finally {
       Error.stackTraceLimit = stackTraceLimit;
     }
+    // Native has committed every item, so nothing may throw from here: a start without a facade is cancelled and
+    // released, and the result reports it with `more` set, so the host still takes the rest and drains again.
     const serving = result.serving;
-    for (let i = 0; i < serving.length; i++) {
+    let taken = 0;
+    for (const descriptor of serving) {
       try {
-        serving[i] = new NativeIncoming(this.#native, serving[i], this.#wake);
+        serving[taken] = new NativeIncoming(this.#native, descriptor, this.#wake);
+        taken++;
       } catch (error) {
-        // Streams no facade owns are cancelled and released, so none holds serving capacity.
-        for (const {handle} of serving.slice(i)) {
-          try {
-            this.#native.incomingTerminal(handle, 2, undefined, undefined);
-            this.#native.incomingRelease(handle);
-          } catch {
-            // Runtime teardown also releases native serving capacity.
-          }
+        try {
+          this.#native.incomingTerminal(descriptor.handle, 2, undefined, undefined);
+          this.#native.incomingRelease(descriptor.handle);
+        } catch {
+          // Runtime teardown also releases native serving capacity.
         }
-        throw error;
+        result.failure ??= error;
+        result.more = true;
       }
     }
+    serving.length = taken;
     return result;
   }
   classifyGossip(results) {

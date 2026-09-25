@@ -1,5 +1,6 @@
 import {expect, test} from "vitest";
-import {applicationConfig, localIntent, nextIncoming, requestForks, startRuntime} from "./utils/network.js";
+import {type NativeIncomingRequest, initializeNativeNetworkRuntime} from "../src/network.js";
+import {applicationConfig, localIntent, nextIncoming, requestForks, settleOnly, startRuntime} from "./utils/network.js";
 import {startPeer} from "./utils/network-peer.js";
 
 test("incoming request take is empty on an active application", async () => {
@@ -349,6 +350,70 @@ test("terminal before take never exposes a retired request", async () => {
     await Promise.all([pair.left.close(), pair.right.close()]);
   }
 }, 15000);
+
+test("a serving start the binding cannot wrap is cancelled alone while the drain continues and close settles", async () => {
+  const [leftConfig, rightConfig] = [applicationConfig(), applicationConfig()];
+  rightConfig.identitySecretKey[31] = 2;
+  const left = await startPeer(leftConfig);
+  const served: NativeIncomingRequest[] = [];
+  const turns: {more: boolean; failure?: unknown}[] = [];
+  let serving = 0;
+  let scheduled = false;
+  const schedule = () => {
+    if (scheduled) return;
+    scheduled = true;
+    setImmediate(() => {
+      scheduled = false;
+      const {more, failure, serving: starts} = right.exchange({...settleOnly, serving});
+      turns.push({failure, more});
+      served.push(...starts);
+      if (more) schedule();
+    });
+  };
+  const right = initializeNativeNetworkRuntime(rightConfig, schedule);
+  // The binding registers each serving facade for finalization; the first registration fails.
+  const registry = FinalizationRegistry.prototype as {register(...args: unknown[]): void};
+  const register = registry.register;
+  const injected = new Error("facade construction failed");
+  try {
+    const identity = await right.identity;
+    await Promise.all([
+      left.applyIntent(localIntent(leftConfig), leftConfig.initialSlot),
+      right.applyIntent(localIntent(rightConfig), rightConfig.initialSlot),
+    ]);
+    await left.connect(identity.peerId, [identity.localEndpoint], 5000n);
+    const outcomes = [0, 1].map(() =>
+      left
+        .request(identity.peerId, BLOCKS, new Uint8Array(32))
+        .next()
+        .then(
+          () => "served",
+          () => "cancelled"
+        )
+    );
+    await expect.poll(() => right.diagnostics().incoming.queued).toBe(2);
+    registry.register = function (this: unknown, ...args: unknown[]) {
+      if (!(args[1] instanceof Object && "route" in args[1])) return register.apply(this, args);
+      registry.register = register;
+      throw injected;
+    };
+    serving = 8;
+    schedule();
+    await expect.poll(() => served.length + turns.filter(({failure}) => failure).length).toBe(2);
+    registry.register = register;
+    const failed = turns.findIndex(({failure}) => failure === injected);
+    expect(turns[failed].more).toBe(true);
+    await expect.poll(() => turns.length).toBeGreaterThan(failed + 1);
+    expect(served).toHaveLength(1);
+    await served[0].finish();
+    expect((await Promise.all(outcomes)).sort()).toEqual(["cancelled", "served"]);
+    expect(await right.close()).toEqual({reason: "requested"});
+    expect(right.diagnostics().incoming.occupied).toBe(0);
+  } finally {
+    registry.register = register;
+    await Promise.allSettled([left.close(), right.close()]);
+  }
+}, 20000);
 
 test.each([
   "exit",
