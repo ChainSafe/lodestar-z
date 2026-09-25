@@ -536,6 +536,8 @@ const Spoke = struct {
 const Gossipsub = gossip.Gossipsub;
 const Delivery = @FieldType(Gossipsub, "delivery_metrics");
 const Outcome = Delivery.Outcome;
+const KindOutcome = Delivery.KindOutcome;
+const LastWrite = Delivery.LastWrite;
 const WriteTime = @typeInfo(@FieldType(Delivery, "write_time")).array.child;
 const Session = @typeInfo(@FieldType(gossip.sessions.Sessions, "rows")).pointer.child;
 const DropReason = @FieldType(@FieldType(@FieldType(Session, "io"), "tx"), "last_drop");
@@ -548,6 +550,8 @@ const origin_count = @typeInfo(Origin).@"enum".fields.len;
 const outcome_count = @typeInfo(Outcome).@"enum".fields.len;
 /// Slot phase buckets, then time without a known phase.
 const phase_spans = @typeInfo(@FieldType(Occupancy, "observed_ms")).array.len;
+/// Message kinds, then unknown.
+const kind_spans = @typeInfo(@FieldType(Delivery, "by_kind")).array.len;
 
 comptime {
     std.debug.assert(budget_names.len == @typeInfo(@FieldType(Io, "turns_exhausted")).array.len);
@@ -574,6 +578,16 @@ const Totals = struct {
     sent_bytes: u64 = 0,
     exhausted: [budget_names.len]u64 = @splat(0),
     deferred: [budget_names.len]u64 = @splat(0),
+    /// Stopped turns, the sessions each left unvisited (writable ones second) and the time the
+    /// writable ones then waited, by the stopping budget.
+    stops: [budget_names.len]u64 = @splat(0),
+    skipped: [budget_names.len][2]u64 = @splat(@splat(0)),
+    unserved_ms: [budget_names.len][phase_spans]u64 = @splat(@splat(0)),
+    /// Forward and publication recipients by kind.
+    by_kind: [kind_spans][@typeInfo(KindOutcome).@"enum".fields.len]u64 = @splat(@splat(0)),
+    /// Descriptor refusals by the peer's last write, and those while its stream was blocked.
+    refusals: [@typeInfo(LastWrite).@"enum".fields.len]u64 = @splat(0),
+    refusals_blocked: u64 = 0,
     steps: u64 = 0,
     step_ns: u64 = 0,
     observed_ms: [phase_spans]u64 = @splat(0),
@@ -603,6 +617,10 @@ const Totals = struct {
             .sent_bytes = g.rpc_metrics.sent_bytes,
             .exhausted = g.io_metrics.turns_exhausted,
             .deferred = g.io_metrics.ready_deferred,
+            .stops = g.io_metrics.stops,
+            .skipped = g.io_metrics.skipped,
+            .unserved_ms = g.occupancy.unserved_ms,
+            .refusals_blocked = g.delivery_metrics.refusal_blocked.count,
             .steps = steps,
             .step_ns = @intCast(hub.step_duration.sum),
             .observed_ms = g.occupancy.observed_ms,
@@ -618,6 +636,10 @@ const Totals = struct {
             total.* += value;
         };
         for (&result.write_time, &g.delivery_metrics.write_time) |*buckets, *histogram| buckets.* = histogram.buckets;
+        for (&result.by_kind, &g.delivery_metrics.by_kind) |*total, *phases| for (phases) |outcomes| {
+            for (total, outcomes) |*value, addition| value.* += addition;
+        };
+        for (&result.refusals, &g.delivery_metrics.refusals) |*count, *refusal| count.* = refusal.bytes.count;
         return result;
     }
 
@@ -880,6 +902,22 @@ fn printWindow(name: []const u8, delta: *const Totals, steps: []u32) void {
     std.debug.print(" ready_deferred", .{});
     for (budget_names, delta.deferred) |budget, count| std.debug.print(" {s}={d}", .{ budget, count });
     std.debug.print(" deferred_per_calls_exhausted={d:.1}\n", .{ratio(delta.deferred[calls_budget], delta.exhausted[calls_budget])});
+    std.debug.print("case=gossip_burst window={s} turn_stops", .{name});
+    for (budget_names, delta.stops) |budget, count| std.debug.print(" {s}={d}", .{ budget, count });
+    std.debug.print(" skipped", .{});
+    for (budget_names, delta.skipped) |budget, skipped| std.debug.print(" {s}={d}", .{ budget, skipped[0] + skipped[1] });
+    std.debug.print(" skipped_writable", .{});
+    for (budget_names, delta.skipped) |budget, skipped| std.debug.print(" {s}={d}", .{ budget, skipped[1] });
+    std.debug.print(" unserved_ms", .{});
+    for (budget_names, delta.unserved_ms) |budget, spans| std.debug.print(" {s}={d}", .{ budget, sum(&spans) });
+    std.debug.print("\ncase=gossip_burst window={s} descriptor_refusals last_write_accepted={d} last_write_would_block={d} stream_blocked={d}\n", .{ name, delta.refusals[@intFromEnum(LastWrite.accepted)], delta.refusals[@intFromEnum(LastWrite.would_block)], delta.refusals_blocked });
+    for (delta.by_kind, 0..) |outcomes, index| {
+        const selected = outcomes[@intFromEnum(KindOutcome.selected)];
+        const pressured = outcomes[@intFromEnum(KindOutcome.pressured)];
+        if (selected == 0) continue;
+        const kind = if (index < kind_spans - 1) @tagName(@as(Kind, @enumFromInt(index))) else "unknown";
+        std.debug.print("case=gossip_burst window={s} kind={s} selected={d} pressured={d} pressured_share={d:.3}\n", .{ name, kind, selected, pressured, ratio(pressured, selected) });
+    }
     const observed = sum(&delta.observed_ms);
     std.debug.print("case=gossip_burst window={s} outbox_observed_s={d:.2} queued_frames_mean={d:.1} full_peers_mean={d:.2}\n", .{ name, @as(f64, @floatFromInt(observed)) / 1000, ratio(sum(&delta.descriptor_ms), observed), ratio(sum(&delta.full_ms), observed) });
     std.mem.sort(u32, steps, {}, std.sort.asc(u32));
@@ -925,12 +963,15 @@ fn histogramQuantile(bounds: []const u64, buckets: []const u64, q: f64) f64 {
 }
 
 /// The native slot-phase series over the run: time observed, mean queued frames, mean peers at the
-/// limit and data drops, by phase bucket labeled with its first basis point.
+/// limit, data drops and time writable sessions waited on stopped turns, by phase bucket labeled
+/// with its first basis point.
 fn printPhases(delta: *const Totals) void {
     const buckets = phase_spans - 1;
     for (0..buckets) |index| {
         const observed = delta.observed_ms[index];
         if (observed == 0 and delta.drops_by_phase[index] == 0) continue;
-        std.debug.print("case=gossip_burst phase_bps={d:0>4} observed_s={d:.2} queued_frames_mean={d:.1} full_peers_mean={d:.2} data_drops={d}\n", .{ index * 10_000 / buckets, @as(f64, @floatFromInt(observed)) / 1000, ratio(delta.descriptor_ms[index], observed), ratio(delta.full_ms[index], observed), delta.drops_by_phase[index] });
+        var unserved: u64 = 0;
+        for (delta.unserved_ms) |spans| unserved += spans[index];
+        std.debug.print("case=gossip_burst phase_bps={d:0>4} observed_s={d:.2} queued_frames_mean={d:.1} full_peers_mean={d:.2} data_drops={d} unserved_ms={d}\n", .{ index * 10_000 / buckets, @as(f64, @floatFromInt(observed)) / 1000, ratio(delta.descriptor_ms[index], observed), ratio(delta.full_ms[index], observed), delta.drops_by_phase[index], unserved });
     }
 }
