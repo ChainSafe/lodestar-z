@@ -1,4 +1,6 @@
-import {expect, test} from "vitest";
+import {setTimeout as delay} from "node:timers/promises";
+import {expect, test, vi} from "vitest";
+import {initializeNativeNetworkRuntime} from "../src/network.js";
 import {applicationConfig, localIntent, startRuntime, topicName} from "./utils/network.js";
 import {startPeer} from "./utils/network-peer.js";
 
@@ -180,4 +182,41 @@ test("close settles every publication and releases its payload and result cells"
     preparingPins: 0,
     publications: {occupied: 0, payloadBytes: 0, reservedBytes: 0},
   });
+});
+
+test("limited settlement reaches a terminal publication above refilled lower cells", async () => {
+  const runtime = initializeNativeNetworkRuntime(applicationConfig(), () => undefined);
+  const publish = (fill: number) =>
+    runtime.publishGossip(BLOCK, new Uint8Array(4000).fill(fill), {allowZeroPeers: true, ignoreDuplicate: true});
+  const executed = () => vi.waitFor(() => expect(runtime.diagnostics().publications.payloadBytes).toBe(0));
+  let closed = false;
+  void runtime.closed.then(() => {
+    closed = true;
+  });
+  let high = false;
+  const publications = [
+    publish(1),
+    publish(2).then(() => {
+      high = true;
+    }),
+  ];
+  try {
+    // Each pass settles one cell; the lowest cell then refills and completes before the next pass.
+    for (let pass = 0; pass < 2; pass++) {
+      await executed();
+      runtime.settle(1);
+      publications.push(publish(3 + pass));
+    }
+    await executed();
+    expect(high).toBe(true);
+  } finally {
+    runtime.close();
+    for (let i = 0; i < 400 && !closed; i++) {
+      await delay(5);
+      for (let pass = 0; pass < 8 && runtime.settle(32); pass++);
+      runtime.endDrain();
+    }
+  }
+  await Promise.all(publications);
+  expect(await runtime.closed).toEqual({reason: "requested"});
 });

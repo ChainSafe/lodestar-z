@@ -192,10 +192,10 @@ pub fn settle(env: napi.Env, runtime: *Runtime, limit: usize) !bool {
     defer runtime.release();
     var settled: usize = 0;
     var more = false;
-    var next: usize = 0;
     for (0..requests.capacity_max) |_| {
         runtime.lock();
-        const i = runtime.requests.?.nextDue(next, runtime.stop, runtime.disposed) orelse {
+        const table = &runtime.requests.?;
+        const i = table.nextDue(table.settle_cursor, runtime.stop, runtime.disposed) orelse table.nextDue(0, runtime.stop, runtime.disposed) orelse {
             runtime.unlock();
             break;
         };
@@ -205,7 +205,7 @@ pub fn settle(env: napi.Env, runtime: *Runtime, limit: usize) !bool {
             break;
         }
         settled += 1;
-        next = i + 1;
+        table.settle_cursor = i + 1;
         const cell = &runtime.requests.?.cells[i];
         std.debug.assert(requests.settleable(cell, runtime.stop, runtime.disposed));
         const deliver_chunk = requests.deliverable(cell, runtime.stop);

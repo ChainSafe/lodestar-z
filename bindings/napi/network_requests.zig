@@ -68,6 +68,8 @@ pub const Table = struct {
     /// The cells whose settlement is due now, one set per combination of the runtime's stop and
     /// dispose flags. `refresh` keeps them current after each change to a cell.
     due: [4]std.StaticBitSet(capacity_max) = @splat(.initEmpty()),
+    /// Past the last settled cell, where settlement resumes, so refilled low cells cannot starve higher ones.
+    settle_cursor: usize = 0,
     backing: std.mem.Allocator,
     budget: *Budget,
     diag: Diagnostics = .{},
