@@ -331,7 +331,8 @@ stockTest(
 );
 
 test.each([
-  ...(HOST ? ["iterator-gc", "facade-gc"] : []),
+  "iterator-gc",
+  "facade-gc",
   "exit",
   "closed-terminal",
   "closed-facade-gc",

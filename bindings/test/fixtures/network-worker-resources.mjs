@@ -1,5 +1,5 @@
 import {startPeer} from "../utils/network-peer.js";
-import {startRuntime} from "../utils/network.js";
+import {runtimeReleased, startRuntime} from "../utils/network.js";
 import assert from "node:assert/strict";
 import {createSocket} from "node:dgram";
 import {once} from "node:events";
@@ -78,6 +78,9 @@ if (!isMainThread) {
       socket.close();
     }
     assert.equal(incoming.peerId, remote.peerId);
+    // Teardown with outstanding requests and pinned storage returned the worker runtime's process claim.
+    await runtimeReleased();
+    await startRuntime(applicationConfig()).close();
     await runtime.close();
     await pending;
     console.log("live-worker-resources-released");
