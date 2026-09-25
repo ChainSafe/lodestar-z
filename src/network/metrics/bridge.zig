@@ -4,6 +4,7 @@ const std = @import("std");
 const histogram = @import("histogram.zig");
 const prom = @import("registry.zig");
 const processor = @import("../gossip_processor/root.zig");
+const stages = processor.stages_mod;
 const gossip_limits = @import("../gossip_limits.zig");
 const Kind = gossip_limits.Kind;
 
@@ -129,11 +130,22 @@ pub const Snapshot = struct {
     publication_queue: PublicationLatency = .{},
     items: [gossip_limits.kind_count][processor.occupancy_count]u64 = @splat(@splat(0)),
     refusals: [gossip_limits.kind_count][processor.refusal_count]u64 = @splat(@splat(0)),
+    /// Stage timing with the open credit waits and credits in use accounted up to the capture.
+    stages: stages.Stages = .{},
+    execution: gossip_limits.Limits = @splat(.{ .items = 0, .bytes = 0 }),
 
     /// The caller holds the runtime mutex that guards `table`.
-    pub fn captureProcessor(self: *Snapshot, table: *const processor.GossipProcessor) void {
+    pub fn captureProcessor(self: *Snapshot, table: *const processor.GossipProcessor, now_ns: u64) void {
         for (&self.items, 0..) |*items, k| items.* = table.occupancy(@enumFromInt(k));
         self.refusals = table.refusals;
+        self.stages = table.stages;
+        self.stages.tick(now_ns);
+        for (0..gossip_limits.kind_count) |k| {
+            const kind: Kind = @enumFromInt(k);
+            self.stages.credit(kind, false);
+            self.stages.integrate(kind, table.executing_items[k], table.executing_bytes[k]);
+        }
+        self.execution = table.execution.?;
     }
 };
 
@@ -149,6 +161,26 @@ pub fn write(snapshot: *const Snapshot, running: bool, w: *prom.Encoder) prom.Er
     for (snapshot.refusals, 0..) |reasons, k| for (reasons, 0..) |count, reason| {
         try refusals.sample(.{ @tagName(@as(Kind, @enumFromInt(k))), @tagName(@as(processor.Refusal, @enumFromInt(reason))) }, count);
     };
+    const stage = try w.histograms(.{ .name = "lodestar_native_gossip_processor_stage_seconds", .kind = .histogram, .help = "Processor stages of each claimed message per kind: receipt (gossipsub admission) to dependency-ready, ready to credit-eligible (time the kind's execution credits refused its next ready item), eligible to the exchange claim, and claim to the host verdict that frees its credit", .labels = &.{ "kind", "interval" }, .unit = .seconds }, stages.Duration);
+    for (&snapshot.stages.intervals, 0..) |*intervals, k| for (intervals, 0..) |*value, i| {
+        try stage.histogram(.{ @tagName(@as(Kind, @enumFromInt(k))), @tagName(@as(stages.Interval, @enumFromInt(i))) }, value);
+    };
+    const stops = try w.family(.{ .name = "lodestar_native_gossip_processor_claim_stops_total", .kind = .counter, .help = "Exchange claims that left a kind's next ready item, by why: the kind's execution items or bytes, the claim's item, work or byte bound, the ordinary gate, or other", .labels = &.{ "kind", "reason" } });
+    for (snapshot.stages.stops, 0..) |reasons, k| for (reasons, 0..) |count, reason| {
+        try stops.sample(.{ @tagName(@as(Kind, @enumFromInt(k))), @tagName(@as(stages.Stop, @enumFromInt(reason))) }, count);
+    };
+    const blocked = try w.family(.{ .name = "lodestar_native_gossip_processor_credit_blocked_seconds_total", .kind = .counter, .help = "Time each kind's execution credits refused its next ready item", .labels = &.{"kind"}, .unit = .seconds });
+    for (snapshot.stages.blocked_ns, 0..) |ns, k| try blocked.sample(.{@tagName(@as(Kind, @enumFromInt(k)))}, seconds(ns));
+    const in_use = try w.family(.{ .name = "lodestar_native_gossip_processor_execution_credit_seconds_total", .kind = .counter, .help = "Execution credits in use per kind integrated over time, in item-seconds and byte-seconds; the rate is the mean in use", .labels = &.{ "kind", "credit" } });
+    for (snapshot.stages.item_ns, snapshot.stages.byte_ns, 0..) |item_ns, byte_ns, k| {
+        try in_use.sample(.{ @tagName(@as(Kind, @enumFromInt(k))), "items" }, seconds(item_ns));
+        try in_use.sample(.{ @tagName(@as(Kind, @enumFromInt(k))), "bytes" }, seconds(byte_ns));
+    }
+    const limit = try w.family(.{ .name = "lodestar_native_gossip_processor_execution_credit_limit", .kind = .gauge, .help = "Execution credits per kind, in items and bytes", .labels = &.{ "kind", "credit" } });
+    for (snapshot.execution, 0..) |value, k| {
+        try limit.sample(.{ @tagName(@as(Kind, @enumFromInt(k))), "items" }, value.items);
+        try limit.sample(.{ @tagName(@as(Kind, @enumFromInt(k))), "bytes" }, value.bytes);
+    }
     const lag = try w.histograms(.{ .name = "lodestar_native_gossip_admission_lag_seconds", .kind = .histogram, .help = "Processor admission time, runtime mutex acquisition included, after the owner turn's tick", .labels = &.{"kind"}, .unit = .seconds }, Duration);
     for (&snapshot.admission_lag, 0..) |*value, k| try lag.histogram(.{@tagName(@as(AdmissionKind, @enumFromInt(k)))}, value);
     const calls = try w.histograms(.{ .name = "lodestar_native_bridge_call_seconds", .kind = .histogram, .help = "Wall duration of native calls on the JS thread", .labels = &.{"entry"}, .unit = .seconds }, Duration);
@@ -172,7 +204,24 @@ pub fn write(snapshot: *const Snapshot, running: bool, w: *prom.Encoder) prom.Er
     try queue.histogram(.{}, &snapshot.publication_queue);
 }
 
+fn seconds(ns: anytype) f64 {
+    return @as(f64, @floatFromInt(ns)) / std.time.ns_per_s;
+}
+
 test "bridge snapshot renders recorded calls, waits, holds, deliveries, notifications and processor state" {
+    const limits: gossip_limits.Limits = @splat(.{ .items = 4, .bytes = 4096 });
+    var table = try processor.GossipProcessor.init(std.testing.allocator, .{ .capacity = gossip_limits.items(&limits), .bytes = gossip_limits.bytes(&limits), .limits = limits });
+    defer table.deinit();
+    const column = @intFromEnum(Kind.data_column_sidecar);
+    table.stages.tick(1_000_000_000);
+    table.stages.integrate(.data_column_sidecar, 0, 0);
+    table.executing_items[column] = 2;
+    table.executing_bytes[column] = 4096;
+    defer table.executing_items[column] = 0;
+    defer table.executing_bytes[column] = 0;
+    table.stages.credit(.data_column_sidecar, true);
+    table.stages.observe(.data_column_sidecar, .ready_to_eligible, 7_000_000);
+    table.stages.stop(.data_column_sidecar, .item_credit);
     var recorder: Recorder = .{};
     recorder.calls[@intFromEnum(Entry.exchange)].observe(3_000);
     recorder.calls[@intFromEnum(Entry.exchange)].observe(2_000_000);
@@ -188,6 +237,10 @@ test "bridge snapshot renders recorded calls, waits, holds, deliveries, notifica
     recorder.boundary();
     var snapshot: Snapshot = .{};
     recorder.snapshot(&snapshot);
+    // The capture accounts the open credit wait and the credits in use up to its time, leaving the table's own.
+    snapshot.captureProcessor(&table, 1_500_000_000);
+    try std.testing.expect(table.stages.blocked_since[column] != null);
+    try std.testing.expectEqual(@as(u128, 0), table.stages.item_ns[column]);
     snapshot.items[@intFromEnum(Kind.beacon_attestation)][@intFromEnum(processor.Occupancy.waiting)] = 5;
     snapshot.refusals[@intFromEnum(Kind.data_column_sidecar)][@intFromEnum(processor.Refusal.source_full)] = 2;
     var buffer: [256 * 1024]u8 = undefined;
@@ -211,6 +264,15 @@ test "bridge snapshot renders recorded calls, waits, holds, deliveries, notifica
         "lodestar_native_bridge_notify_chain_bucket{le=\"2\"} 2\n",
         "lodestar_native_gossip_processor_items{kind=\"beacon_attestation\",state=\"waiting\"} 5\n",
         "lodestar_native_gossip_processor_refusals_total{kind=\"data_column_sidecar\",reason=\"source_full\"} 2\n",
+        "lodestar_native_gossip_processor_stage_seconds_bucket{kind=\"data_column_sidecar\",interval=\"ready_to_eligible\",le=\"0.005\"} 0\n",
+        "lodestar_native_gossip_processor_stage_seconds_bucket{kind=\"data_column_sidecar\",interval=\"ready_to_eligible\",le=\"0.01\"} 1\n",
+        "lodestar_native_gossip_processor_stage_seconds_count{kind=\"data_column_sidecar\",interval=\"claimed_to_applied\"} 0\n",
+        "lodestar_native_gossip_processor_claim_stops_total{kind=\"data_column_sidecar\",reason=\"item_credit\"} 1\n",
+        "lodestar_native_gossip_processor_credit_blocked_seconds_total{kind=\"data_column_sidecar\"} 0.5\n",
+        "lodestar_native_gossip_processor_execution_credit_seconds_total{kind=\"data_column_sidecar\",credit=\"items\"} 1\n",
+        "lodestar_native_gossip_processor_execution_credit_seconds_total{kind=\"data_column_sidecar\",credit=\"bytes\"} 2048\n",
+        "lodestar_native_gossip_processor_execution_credit_limit{kind=\"data_column_sidecar\",credit=\"items\"} 2\n",
+        "lodestar_native_gossip_processor_execution_credit_limit{kind=\"data_column_sidecar\",credit=\"bytes\"} 4096\n",
     }) |expected| try std.testing.expect(std.mem.indexOf(u8, output, expected) != null);
     writer = std.Io.Writer.fixed(&buffer);
     encoder = .{ .writer = &writer };

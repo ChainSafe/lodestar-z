@@ -38,6 +38,7 @@ pub fn flags(runtime: *Runtime, io: std.Io) !bool {
     runtime.lock();
     defer runtime.unlock();
     const table = if (runtime.gossip) |*table| table else return false;
+    table.stages.tick(r.bridge.now());
     const clock = try sample(io);
     const now: n.Now = .{ .mono_ms = clock.mono_ms, .unix_s = @intCast(clock.unix_ms / 1000) };
     table.maintain(now.mono_ms, runtime.slot);
@@ -98,6 +99,7 @@ pub const Ingress = struct {
         const admitted_ns = r.bridge.now();
         if (runtime.stop or self.failure != null) return false;
         const table = &runtime.gossip.?;
+        table.stages.tick(admitted_ns);
         const accepted = table.admit(runtime.heavy.?.core.service.gossipsub, candidate, clock.mono_ms, received_at, runtime.slot);
         if (accepted) {
             const kind = native.topic.parseCanonical(candidate.event.topic).?.name.kind;

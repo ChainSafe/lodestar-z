@@ -321,6 +321,7 @@ fn gossipMarks(runtime: *Runtime) struct { bool, ?u64 } {
 pub fn run(runtime: *Runtime, actions: []const Action, demand: *const Demand, now: u64, host: anytype) !@TypeOf(host.*).Result {
     var selection: Selection = .{ .wake = actions.len > 0 };
     runtime.lock();
+    if (runtime.gossip) |*table| table.stages.tick(r.bridge.now());
     runtime.readiness.armed = false;
     const marks = gossipMarks(runtime);
     applyLocked(runtime, actions, now);

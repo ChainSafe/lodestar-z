@@ -419,6 +419,10 @@ test "actions apply before selection, so a check classified in an exchange is cl
     const verdict = try host.turn(&.{.{ .verdict = .{ .token = checked, .verdict = .accept } }}, control);
     try std.testing.expect(!verdict.outcome.more);
     try std.testing.expectEqual(State.verdict_pending, runtime.gossip.?.get(checked).?.state);
+    // Each exchange advances the stage clock: the claim timed the way to it, and the verdict the credit's hold.
+    const stages = &runtime.gossip.?.stages;
+    try std.testing.expect(stages.now_ns > 0);
+    for (stages.intervals[@intFromEnum(Kind.beacon_attestation)]) |interval| try std.testing.expectEqual(@as(u64, 1), interval.count);
     try std.testing.expectEqual(@as(c_int, 1), std.c.poll(&readable, 1, 0));
     try runtime.wake.?.drain();
     runtime.gossip.?.retire(checked);
