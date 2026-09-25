@@ -271,7 +271,7 @@ pub const Runtime = struct {
     /// Copies the bridge measurements and the tables' exported state for one render.
     pub fn captureBridgeLocked(self: *const Runtime, into: *bridge.Snapshot) void {
         self.bridge.snapshot(into);
-        if (self.gossip) |*table| into.captureProcessor(table);
+        if (self.gossip) |*table| into.captureProcessor(table, bridge.now());
         if (self.publications) |*table| into.publication_queue = table.latency;
     }
     pub fn lock(self: *Runtime) void {

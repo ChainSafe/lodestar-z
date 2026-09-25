@@ -11,6 +11,7 @@ const Dependencies = @import("dependencies.zig").Dependencies;
 const none = lists.none;
 const state_count = @typeInfo(State).@"enum".fields.len;
 pub const metadata_mod = @import("metadata.zig");
+pub const stages_mod = @import("stages.zig");
 const Kind = limits_mod.Kind;
 const assert = std.debug.assert;
 pub const batch_max = 64;
@@ -53,6 +54,10 @@ pub const Cell = struct {
     source_charge: usize = 0,
     retired: bool = false,
     verdict: native.Verdict = .ignore,
+    /// When it first queued past its dependency check, the kind's credit wait then, and when it was claimed.
+    ready_ns: ?u64 = null,
+    credit_ns: u64 = 0,
+    claimed_ns: u64 = 0,
 };
 pub const Diagnostics = struct {
     capacity: usize = 0,
@@ -107,6 +112,7 @@ pub const GossipProcessor = struct {
     cells: []Cell,
     backing: std.mem.Allocator,
     diag: Diagnostics = .{},
+    stages: stages_mod.Stages = .{},
     order: u64 = 0,
     queues: [limits_mod.kind_count][state_count]lists.List = @splat(@splat(.{})),
     ready: [limits_mod.kind_count]lists.List = @splat(.{}),
@@ -366,6 +372,16 @@ pub const GossipProcessor = struct {
             self.waiting_items[k] += 1;
             if (cell.source) |source| self.waiting_per_peer[source.index][k] += 1;
         }
+        if (state == .queued and cell.ready_ns == null) {
+            cell.ready_ns = self.stages.now_ns;
+            cell.credit_ns = self.stages.blocked(cell.kind);
+        }
+        if (previous == .queued or state == .queued) self.refreshCredit(cell.kind);
+    }
+    /// Records whether the kind's execution credits refuse its next ready item. O(1).
+    fn refreshCredit(self: *GossipProcessor, kind: Kind) void {
+        const index = self.nextKind(kind);
+        self.stages.credit(kind, index != none and !self.executable(&self.cells[index]));
     }
     fn countState(self: *GossipProcessor, state: State, add: bool, bytes: usize) void {
         const count: ?*usize = switch (state) {
@@ -409,11 +425,13 @@ pub const GossipProcessor = struct {
     fn releaseExecution(self: *GossipProcessor, cell: *Cell) void {
         if (!cell.executing) return;
         const k = @intFromEnum(cell.kind);
+        self.stages.integrate(cell.kind, self.executing_items[k], self.executing_bytes[k]);
         self.executing_items[k] -= 1;
         self.executing_bytes[k] -= cell.execution_bytes;
         self.diag.executing -= 1;
         self.diag.executingBytes -= cell.execution_bytes;
         cell.executing = false;
+        self.refreshCredit(cell.kind);
     }
     pub fn retire(self: *GossipProcessor, handle: Token) void {
         const cell = self.get(handle).?;
@@ -480,6 +498,7 @@ pub const GossipProcessor = struct {
         if (self.closed) return;
         self.expire(now);
         self.groups.advance(now, batch_max);
+        self.refreshCredit(.beacon_attestation);
         self.dependencies.advanceRecheck(batch_max);
         if (self.slot != slot) {
             self.slot = slot;
@@ -535,10 +554,11 @@ pub const GossipProcessor = struct {
         if (self.closed) return batch;
         var size: usize = 0;
         var work: usize = 0;
-        for (limits_mod.priority) |kind| {
+        var bytes_bound = false;
+        kinds: for (limits_mod.priority) |kind| {
             if (!demand.ordinary and !limits_mod.urgent(kind)) continue;
             for (0..batch_max) |_| {
-                if (batch.len >= @min(batch_max, demand.items) or work == batch_max) return batch;
+                if (batch.len >= @min(batch_max, demand.items) or work == batch_max) break :kinds;
                 const index = self.nextKind(kind);
                 if (index == none) break;
                 const cell = &self.cells[index];
@@ -560,7 +580,10 @@ pub const GossipProcessor = struct {
                         continue;
                     }
                     if (!self.executable(&self.cells[member])) break;
-                    if (!self.append(&batch, member, &size, demand.bytes)) break;
+                    if (!self.append(&batch, member, &size, demand.bytes)) {
+                        bytes_bound = true;
+                        break;
+                    }
                     work += 1;
                 }
                 if (batch.len == start) break;
@@ -568,7 +591,22 @@ pub const GossipProcessor = struct {
                 batch.job_count += 1;
             }
         }
+        self.countStops(demand, bytes_bound or batch.len >= @min(batch_max, demand.items) or work >= batch_max);
         return batch;
+    }
+    /// Counts why the claim left each kind's next ready item. O(kinds).
+    fn countStops(self: *GossipProcessor, demand: Claim, bound: bool) void {
+        for (limits_mod.priority) |kind| {
+            const index = self.nextKind(kind);
+            if (index == none) continue;
+            const k = @intFromEnum(kind);
+            const reason: stages_mod.Stop = if (!demand.ordinary and !limits_mod.urgent(kind))
+                .ordinary_gate
+            else if (!self.executable(&self.cells[index]))
+                if (self.executing_items[k] >= self.execution.?[k].items) .item_credit else .byte_credit
+            else if (bound) .claim_bound else .other;
+            self.stages.stop(kind, reason);
+        }
     }
     fn append(self: *GossipProcessor, batch: *Batch, index: u32, size: *usize, limit: usize) bool {
         const cell = &self.cells[index];
@@ -576,13 +614,23 @@ pub const GossipProcessor = struct {
         // An empty batch takes its first item whatever the host's byte cap, so no item blocks its lane.
         if (batch.len > 0 and cell.input.len > @min(batch_bytes, limit) -| size.*) return false;
         size.* += cell.input.len;
+        const ready = cell.ready_ns.?;
+        const now = self.stages.now_ns;
+        const credit = self.stages.blocked(cell.kind) -| cell.credit_ns;
+        self.stages.observe(cell.kind, .receipt_to_ready, ready -| cell.admitted_ms *| std.time.ns_per_ms);
+        self.stages.observe(cell.kind, .ready_to_eligible, credit);
+        self.stages.observe(cell.kind, .eligible_to_claimed, (now -| ready) -| credit);
+        cell.claimed_ns = now;
         self.transition(index, .copying);
+        const k = @intFromEnum(cell.kind);
+        self.stages.integrate(cell.kind, self.executing_items[k], self.executing_bytes[k]);
         cell.executing = true;
         cell.execution_bytes = cell.input.len;
-        self.executing_items[@intFromEnum(cell.kind)] += 1;
-        self.executing_bytes[@intFromEnum(cell.kind)] += cell.input.len;
+        self.executing_items[k] += 1;
+        self.executing_bytes[k] += cell.input.len;
         self.diag.executing += 1;
         self.diag.executingBytes += cell.input.len;
+        self.refreshCredit(cell.kind);
         batch.tokens[batch.len] = self.token(index);
         batch.len += 1;
         return true;
@@ -676,6 +724,7 @@ pub const GossipProcessor = struct {
     /// Records the host's verdict. A late verdict, or one for a message expiry already retired, retires it here.
     pub fn report(self: *GossipProcessor, handle: Token, verdict: native.Verdict, now: u64) bool {
         if (self.get(handle)) |cell| if (cell.state == .delivered) {
+            self.stages.observe(cell.kind, .claimed_to_applied, self.stages.now_ns -| cell.claimed_ns);
             self.releaseExecution(cell);
             if (cell.retired or now >= cell.deadline) {
                 self.retire(handle);
