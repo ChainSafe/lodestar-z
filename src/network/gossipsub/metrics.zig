@@ -24,6 +24,7 @@ pub const Io = struct {
     write_calls: u64 = 0,
     write_would_block: u64 = 0,
     write_zero: u64 = 0,
+    transport: Transport = .{},
 
     pub fn write(self: *const Io, w: *prom.Encoder) prom.Error!void {
         try w.enums(.{ .name = "lodestar_native_gossip_turns_exhausted_total", .kind = .counter, .help = "Gossip turns ending with an exhausted shared budget", .labels = &.{"budget"} }, Budget, &self.turns_exhausted);
@@ -34,6 +35,87 @@ pub const Io = struct {
             inline for (.{ "not_writable", "writable" }, 0..) |output, index| try skipped.sample(.{ budget.name, output }, self.skipped[budget.value][index]);
         }
         try w.counters("lodestar_native_gossip_io_", &.{ .read_calls = self.read_calls, .write_calls = self.write_calls, .write_would_block = self.write_would_block, .write_zero = self.write_zero });
+        try self.transport.write(w);
+    }
+};
+
+/// The QUIC send state of gossip out streams when their write state changes: a write that blocks,
+/// the first data refusal before the next writable event, and the first write QUIC takes in full
+/// after a block. Nothing is labeled by peer.
+pub const Transport = struct {
+    const H = @import("../metrics/histogram.zig");
+    const quic = @import("../quic/engine.zig");
+    const Counts = @import("../quic/connection.zig").Transport.Counts;
+    pub const Transition = enum { blocked, refused, recovered };
+    /// quiche's stream capacity and its parts, the armed watermark, the congestion window, and the
+    /// outbox's queued bytes.
+    pub const Quantity = enum { capacity, watermark, cwnd, cwnd_available, tx_cap, connection_credit, stream_credit, stream_unsent, queued };
+    const transition_count = @typeInfo(Transition).@"enum".fields.len;
+    const limit_count = @typeInfo(quic.SendLimit).@"enum".fields.len;
+    const signal_count = @typeInfo(Counts).@"struct".fields.len;
+    const Bytes = H.Histogram(u64, &.{ 0, 1024, @import("../quic/limits.zig").write_lowat_max, 4096, 1 << 14, 1 << 16, 1 << 18, 1 << 20, 1 << 22, 1 << 24, 1 << 26 }, .{});
+    const Rtt = H.Histogram(u64, &.{ 100_000, 250_000, 500_000, 1_000_000, 2_500_000, 5_000_000, 10_000_000, 25_000_000, 50_000_000, 100_000_000, 250_000_000, 500_000_000, 1_000_000_000 }, .{ .unit = .nanoseconds });
+    const Rate = H.Histogram(u64, &.{ 1 << 14, 1 << 16, 1 << 18, 1 << 20, 1 << 22, 1 << 24, 1 << 26, 1 << 28, 1 << 30 }, .{});
+    const Signal = H.Histogram(u64, &.{ 0, 1, 2, 4, 8, 16, 64, 256 }, .{});
+    const log_interval_ms = 1_000;
+
+    /// By the limit below what the stream waits for, and whether a writable edge was undelivered.
+    transitions: [transition_count][limit_count][2]u64 = @splat(@splat(@splat(0))),
+    bytes: [transition_count][@typeInfo(Quantity).@"enum".fields.len]Bytes = @splat(@splat(.{})),
+    rtt: [transition_count]Rtt = @splat(.{}),
+    delivery_rate: [transition_count]Rate = @splat(.{}),
+    /// Counts since the session's previous snapshot, or since its connection opened.
+    signals: [transition_count][signal_count]Signal = @splat(@splat(.{})),
+    log_due_ms: [transition_count]u64 = @splat(0),
+
+    pub fn observe(self: *Transport, transition: Transition, state: *const quic.SendState, queued: u64, since: *const Counts) void {
+        const index = @intFromEnum(transition);
+        self.transitions[index][@intFromEnum(state.limit())][@intFromBool(state.writable_pending)] +|= 1;
+        const bytes = &self.bytes[index];
+        bytes[@intFromEnum(Quantity.watermark)].observe(state.watermark);
+        bytes[@intFromEnum(Quantity.cwnd)].observe(state.transport.cwnd);
+        bytes[@intFromEnum(Quantity.queued)].observe(queued);
+        if (state.capacity) |parts| {
+            bytes[@intFromEnum(Quantity.capacity)].observe(state.available().?);
+            // quiche ignores the congestion window while probes are due.
+            bytes[@intFromEnum(Quantity.cwnd_available)].observe(if (parts.cwnd_available == std.math.maxInt(usize)) state.transport.cwnd else parts.cwnd_available);
+            bytes[@intFromEnum(Quantity.tx_cap)].observe(parts.tx_cap);
+            bytes[@intFromEnum(Quantity.connection_credit)].observe(parts.connection_credit);
+            bytes[@intFromEnum(Quantity.stream_credit)].observe(parts.stream_credit);
+            bytes[@intFromEnum(Quantity.stream_unsent)].observe(parts.stream_unsent);
+        }
+        self.rtt[index].observe(state.transport.rtt_ns);
+        self.delivery_rate[index].observe(state.transport.delivery_rate);
+        inline for (@typeInfo(Counts).@"struct".fields, 0..) |field, signal| self.signals[index][signal].observe(@field(since, field.name));
+    }
+
+    /// True at most once per interval for each transition.
+    pub fn logDue(self: *Transport, transition: Transition, now_ms: u64) bool {
+        const due = &self.log_due_ms[@intFromEnum(transition)];
+        if (now_ms < due.*) return false;
+        due.* = now_ms +| log_interval_ms;
+        return true;
+    }
+
+    pub fn write(self: *const Transport, w: *prom.Encoder) prom.Error!void {
+        const transitions = try w.family(.{ .name = "lodestar_native_gossip_stream_transitions_total", .kind = .counter, .help = "Gossip out stream write-state transitions: a write that blocked, the first data refusal before the next writable event, and the first write QUIC took in full after a block. Limit names what held quiche's stream capacity below the armed watermark, or below one byte with none armed: stream credit, then connection credit, then the congestion window; none when capacity reached it, unknown when quiche had stopped or freed the stream. Writable_pending says whether the engine held an undelivered writable edge", .labels = &.{ "transition", "limit", "writable_pending" } });
+        inline for (@typeInfo(Transition).@"enum".fields) |transition| {
+            inline for (@typeInfo(quic.SendLimit).@"enum".fields) |limit| {
+                inline for (.{ "false", "true" }, 0..) |pending, flag| try transitions.sample(.{ transition.name, limit.name, pending }, self.transitions[transition.value][limit.value][flag]);
+            }
+        }
+        const bytes = try w.histograms(.{ .name = "lodestar_native_gossip_stream_transition_bytes", .kind = .histogram, .help = "Byte quantities at gossip out stream transitions: capacity is the lesser of tx_cap, quiche's connection send capacity, and stream_credit; connection_credit and stream_credit are the peer's flow-control limits less the data buffered; cwnd_available is the congestion window less bytes in flight; stream_unsent is data buffered in quiche awaiting transmission; watermark is the armed write threshold; queued is the outbox's frame bytes. The parts of capacity are absent once quiche stopped or freed the stream", .labels = &.{ "transition", "quantity" } }, Bytes);
+        inline for (@typeInfo(Transition).@"enum".fields) |transition| {
+            inline for (@typeInfo(Quantity).@"enum".fields) |quantity| try bytes.histogram(.{ transition.name, quantity.name }, &self.bytes[transition.value][quantity.value]);
+        }
+        const rtt = try w.histograms(.{ .name = "lodestar_native_gossip_stream_transition_rtt_seconds", .kind = .histogram, .help = "Smoothed RTT of the connection's active path at gossip out stream transitions", .labels = &.{"transition"}, .unit = .seconds }, Rtt);
+        inline for (@typeInfo(Transition).@"enum".fields) |transition| try rtt.histogram(.{transition.name}, &self.rtt[transition.value]);
+        const rate = try w.histograms(.{ .name = "lodestar_native_gossip_stream_transition_delivery_rate_bytes_per_second", .kind = .histogram, .help = "quiche's delivery rate estimate for the connection's active path at gossip out stream transitions", .labels = &.{"transition"} }, Rate);
+        inline for (@typeInfo(Transition).@"enum".fields) |transition| try rate.histogram(.{transition.name}, &self.delivery_rate[transition.value]);
+        const signals = try w.histograms(.{ .name = "lodestar_native_gossip_stream_transition_quic_events", .kind = .histogram, .help = "QUIC events on the connection since the session's previous transition, or since the connection opened: packets lost and retransmitted, probe timeouts on the active path, and DATA_BLOCKED and STREAM_DATA_BLOCKED frames sent", .labels = &.{ "transition", "event" } }, Signal);
+        inline for (@typeInfo(Transition).@"enum".fields) |transition| {
+            inline for (@typeInfo(Counts).@"struct".fields, 0..) |event, signal| try signals.histogram(.{ transition.name, event.name }, &self.signals[transition.value][signal]);
+        }
     }
 };
 

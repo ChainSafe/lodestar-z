@@ -29,6 +29,8 @@ pub const local_cid_length: usize = 16;
 pub const initial_dcid_length_min: usize = 8;
 pub const cid_length_max: usize = 20;
 pub const path_events_per_call_max: u8 = 8;
+/// Connection IDs a peer may keep active; quiche keeps at most one path per active connection ID.
+pub const active_connection_ids_max: u64 = 2;
 
 comptime {
     std.debug.assert(initial_dcid_length_min <= local_cid_length);

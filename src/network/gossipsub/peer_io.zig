@@ -54,6 +54,8 @@ pub const PeerIo = struct {
     write_first: bool = false,
     write_zero: u64 = 0,
     write_budget_deferred: u64 = 0,
+    /// The connection's QUIC counts at the out stream's previous transition snapshot.
+    transport_seen: @import("../quic/connection.zig").Transport.Counts = .{},
     tx: Outbox,
     body: []u8,
     unread: []u8,

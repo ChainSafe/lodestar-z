@@ -120,6 +120,71 @@ test "engine writable event re-arms only when send capacity grows" {
     try std.testing.expect(pair.client.backlog());
 }
 
+test "engine send state names the limit a blocked write waits on and arms nothing" {
+    const Window = enum { stream, connection, congestion };
+    for ([_]Window{ .stream, .connection, .congestion }) |window| {
+        var pair: Pair = .{};
+        try pair.init(.{}, .{});
+        defer pair.deinit();
+        switch (window) {
+            .stream => binding.c.quiche_config_set_initial_max_stream_data_bidi_remote(pair.server.config.ptr, 4096),
+            .connection => binding.c.quiche_config_set_initial_max_data(pair.server.config.ptr, 4096),
+            .congestion => {},
+        }
+        const handles = try support.connectPair(&pair);
+        const stream = try pair.client.openStream(handles.client);
+        var payload: [65536]u8 = @splat(0x61);
+        const accepted = try pair.client.write(stream, &payload, false);
+        try std.testing.expect(accepted > 0 and accepted < payload.len);
+        const slot = &pair.client.registry.slots[handles.client.index];
+        const armed = slot.table.entries[stream.slot].write_lowat;
+        const dirty = pair.client.dirtyCount();
+        const state = pair.client.sendState(stream).?;
+        try std.testing.expectEqual(armed, state.watermark);
+        try std.testing.expect(state.watermark > 0 and !state.writable_pending);
+        try std.testing.expectEqual(@as(?u64, 0), state.available());
+        // Nothing is sent before the flush.
+        try std.testing.expectEqual(@as(u64, accepted), state.capacity.?.stream_unsent);
+        try std.testing.expectEqual(switch (window) {
+            .stream => engine_mod.SendLimit.stream_credit,
+            .connection => .connection_credit,
+            .congestion => .cwnd,
+        }, state.limit());
+        try std.testing.expectEqual(armed, slot.table.entries[stream.slot].write_lowat);
+        try std.testing.expectEqual(dirty, pair.client.dirtyCount());
+        try pair.pump();
+        const flushed = pair.client.sendState(stream).?;
+        try std.testing.expect(flushed.transport.cwnd > 0 and flushed.transport.rtt_ns > 0);
+        try std.testing.expectEqual(@as(u64, @intFromBool(window == .connection)), flushed.transport.counts.data_blocked);
+        try std.testing.expectEqual(@as(u64, @intFromBool(window == .stream)), flushed.transport.counts.stream_data_blocked);
+        if (window != .stream) continue;
+        try std.testing.expectEqual(@as(u64, 0), flushed.capacity.?.stream_unsent);
+
+        // The server reads: credit reaches the watermark and the edge waits undelivered.
+        var events: [16]Event = undefined;
+        var inbound: ?engine_mod.StreamHandle = null;
+        for (pair.events(&pair.server, &events)) |event| if (event == .stream_opened) {
+            inbound = event.stream_opened;
+        };
+        var sink: [4096]u8 = undefined;
+        var consumed: usize = 0;
+        for (0..8) |_| {
+            const read = try pair.server.read(inbound.?, sink[consumed..]);
+            consumed += read.len;
+            if (read.len == 0 or consumed == sink.len) break;
+        }
+        try pair.pump();
+        const credited = pair.client.sendState(stream).?;
+        try std.testing.expect(credited.writable_pending);
+        try std.testing.expectEqual(engine_mod.SendLimit.none, credited.limit());
+
+        // A stream the peer stopped has no capacity to decompose.
+        pair.server.shutdown(inbound.?, .read, 7);
+        try pair.pump();
+        try std.testing.expectEqual(engine_mod.SendLimit.unknown, pair.client.sendState(stream).?.limit());
+    }
+}
+
 fn countWritable(pair: *Pair, stream: engine_mod.StreamHandle) usize {
     var storage: [32]Event = undefined;
     var count: usize = 0;
