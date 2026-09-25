@@ -59,6 +59,8 @@ pub const Sockets = struct {
     /// Buffer sizes per family as getsockopt reported them after `requestBuffers`. Linux reports
     /// double the size it grants.
     buffers: [2]?Buffers.Reported = .{ null, null },
+    /// Kernel drop counts per family, extended past their 32-bit wrap by `drops`.
+    drop_counts: [2]DropCount = @splat(.{}),
     cursor: u1 = 0,
 
     /// IPv6 sockets accept IPv6 only, including when both families share a port.
@@ -105,14 +107,15 @@ pub const Sockets = struct {
         return short;
     }
 
-    /// Datagrams the kernel dropped at each socket, mostly on a full receive buffer. Linux keeps
-    /// a 32-bit count that wraps. Null off Linux and for sockets without recorded buffers.
-    pub fn drops(self: *const Sockets) [2]?u32 {
-        var result: [2]?u32 = .{ null, null };
+    /// Datagrams the kernel dropped at each socket over its lifetime, mostly on a full receive
+    /// buffer. Each call extends Linux's wrapping 32-bit count. Null off Linux, for sockets without
+    /// recorded buffers and where the kernel reports no count.
+    pub fn drops(self: *Sockets) [2]?u64 {
+        var result: [2]?u64 = .{ null, null };
         if (comptime os != .linux) return result;
-        for (self.values, self.buffers, &result) |socket, reported, *count| {
+        for (self.values, self.buffers, &self.drop_counts, &result) |socket, reported, *count, *total| {
             if (reported == null) continue;
-            count.* = readDrops(socket.?.handle);
+            total.* = count.add(readDrops(socket.?.handle) orelse continue);
         }
         return result;
     }
@@ -235,6 +238,20 @@ fn readDrops(handle: net.Socket.Handle) ?u32 {
     return meminfo[drops_index];
 }
 
+/// The kernel's 32-bit drop count extended to a socket-lifetime total. The kernel count starts at
+/// zero with the socket.
+const DropCount = struct {
+    last: u32 = 0,
+    total: u64 = 0,
+
+    fn add(self: *DropCount, raw: u32) u64 {
+        // Exact while fewer than 2^32 drops happen between two reads; every metrics scrape reads.
+        self.total += raw -% self.last;
+        self.last = raw;
+        return self.total;
+    }
+};
+
 fn index(address: net.IpAddress) u1 {
     return switch (address) {
         .ip4 => 0,
@@ -297,6 +314,13 @@ fn checkBindError(err: std.posix.E) BindError!void {
     };
 }
 
-test {
+test "UDP drop totals keep counting across the kernel count's 32-bit wrap" {
     _ = @import("root_test.zig");
+    const max = std.math.maxInt(u32);
+    var count: DropCount = .{};
+    try std.testing.expectEqual(@as(u64, 5), count.add(5));
+    try std.testing.expectEqual(@as(u64, 5), count.add(5));
+    try std.testing.expectEqual(@as(u64, max), count.add(max));
+    try std.testing.expectEqual(@as(u64, max) + 4, count.add(3));
+    try std.testing.expectEqual(@as(u64, max) + 4 + max, count.add(2));
 }

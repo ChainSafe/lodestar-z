@@ -199,11 +199,11 @@ test "UDP records the kernel's socket buffer sizes and receive drops after a req
         try std.testing.expectEqual(reported.?.receive.? < full or reported.?.send.? < full, below);
     }
     try std.testing.expectEqual([2]?udp.Buffers.Reported{ null, null }, plain.buffers);
-    try std.testing.expectEqual([2]?u32{ null, null }, plain.drops());
+    try std.testing.expectEqual([2]?u64{ null, null }, plain.drops());
     const smallest: udp.Buffers = .{ .receive = udp.Buffers.bytes_min, .send = udp.Buffers.bytes_min };
     try std.testing.expectEqual([2]bool{ false, false }, sockets.requestBuffers(std.testing.io, smallest));
     if (os != .linux) return;
-    try std.testing.expectEqual([2]?u32{ 0, 0 }, sockets.drops());
+    try std.testing.expectEqual([2]?u64{ 0, 0 }, sockets.drops());
     const sent = 256;
     var payload: [1200]u8 = @splat(0);
     for (0..sent) |_| try plain.values[0].?.send(std.testing.io, &sockets.values[0].?.address, &payload);
@@ -215,7 +215,7 @@ test "UDP records the kernel's socket buffer sizes and receive drops after a req
     }
     try std.testing.expect(received > 0 and received < sent);
     try std.testing.expectEqual(sent, received + sockets.drops()[0].?);
-    try std.testing.expectEqual(@as(?u32, 0), sockets.drops()[1]);
+    try std.testing.expectEqual(@as(?u64, 0), sockets.drops()[1]);
 }
 
 test "UDP records a failed size readback as unknown and not below the request" {
@@ -226,5 +226,5 @@ test "UDP records a failed size readback as unknown and not below the request" {
     const largest: udp.Buffers = .{ .receive = udp.Buffers.bytes_max, .send = udp.Buffers.bytes_max };
     try std.testing.expectEqual([2]bool{ false, false }, sockets.requestBuffers(std.testing.io, largest));
     try std.testing.expectEqual([2]?udp.Buffers.Reported{ .{ .receive = null, .send = null }, null }, sockets.buffers);
-    try std.testing.expectEqual([2]?u32{ null, null }, sockets.drops());
+    try std.testing.expectEqual([2]?u64{ null, null }, sockets.drops());
 }
