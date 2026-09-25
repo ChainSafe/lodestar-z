@@ -192,7 +192,7 @@ pub const Messages = struct {
         const topic = self.store.get(self.history.message(slot)).?.topicString();
         self.history.bindPeer(peer);
         if (!self.history.iwantAllowed(slot, peer, @import("constants.zig").gossip_retransmission)) return .{ .known = .{ .topic = topic, .result = .limited } };
-        const queued = outbox.queueData(&self.store, self.history.message(slot), byte_limit, now) == .queued;
+        const queued = outbox.queueData(&self.store, self.history.message(slot), .iwant, byte_limit, now) == .queued;
         if (queued) self.history.sent(slot, peer);
         return .{ .known = .{ .topic = topic, .result = if (queued) .queued else .pressured } };
     }

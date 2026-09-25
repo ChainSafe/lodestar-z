@@ -28,6 +28,10 @@ pub const ResourceSnapshot = gossipsub.ResourceSnapshot;
 
 test {
     _ = @import("gossipsub.zig");
+    _ = delivery;
+    _ = @import("metrics.zig");
+    _ = @import("options.zig");
+    _ = @import("protobuf_schema.zig");
     _ = diagnostics;
     _ = @import("local_intent.zig");
     _ = @import("topic_policy.zig");

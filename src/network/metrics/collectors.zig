@@ -577,6 +577,7 @@ fn writeGossip(self: *const Context, w: *prom.Encoder) prom.Error!void {
     }, @import("../gossipsub/messages.zig").StorageRefusal, &self.owner.service.gossipsub.messages.storage_refusals);
     try self.owner.service.gossipsub.rpc_metrics.write(w);
     try self.owner.service.gossipsub.io_metrics.write(w);
+    try self.owner.service.gossipsub.delivery_metrics.write(w);
     try w.scalar(.{ .name = "lodestar_native_gossip_history_entries_visited_total", .kind = .counter, .help = "History entries examined while selecting advertised message IDs" }, self.owner.service.gossipsub.messages.history.gossip_entries_visited);
     try w.scalar(.{
         .name = "gossipsub_fast_message_id_hits_total",

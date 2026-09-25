@@ -511,7 +511,7 @@ test "gossipsub history queue refusal and authenticated reconnect preserve retra
     var reader = protobuf.RpcReader.init(writer.written());
     const iwant = (try reader.next()).?.iwant;
     for (0..@import("outbox.zig").data_capacity) |_| {
-        try std.testing.expectEqual(@import("outbox.zig").QueueResult.queued, g.sessions.rows[first.index].io.tx.queueData(&g.messages.store, message, g.options.tx_peer_bytes, 1));
+        try std.testing.expectEqual(@import("outbox.zig").QueueResult.queued, g.sessions.rows[first.index].io.tx.queueData(&g.messages.store, message, .forward, g.options.tx_peer_bytes, 1));
     }
     support.control(&g, first.index, .{ .iwant = iwant }, .{ .mono_ms = g.last_now_ms, .unix_s = 0 });
     try std.testing.expectEqual(@as(u8, 0), g.messages.history.countsRow(g.messages.history.get(&g.messages.store, id).?)[logical_peer.index]);

@@ -104,3 +104,76 @@ test "gossip retained page allowance cannot consume pending or other kind pages"
     store.releaseValidation(pending);
     try std.testing.expectEqual(store.next.len, store.free_pages);
 }
+
+fn expectedFrame(out: []u8, payload: []const u8, name: []const u8) []const u8 {
+    const protobuf = @import("protobuf.zig");
+    var writer = protobuf.Writer.init(out);
+    writer.varint(protobuf.messageSize(payload, name));
+    protobuf.writeMessage(&writer, payload, name);
+    return writer.written();
+}
+
+/// Sends the entry's frame in writes of at most `write` bytes and returns the bytes sent and
+/// the writes used.
+fn sendFrame(store: *const Store, h: Handle, write: usize, out: []u8) struct { bytes: []const u8, writes: usize } {
+    var at = store.frameCursor(h);
+    var sent: usize = 0;
+    for (0..out.len) |writes| {
+        const segment = store.frameSegment(h, at);
+        const take = @min(segment.len, write);
+        @memcpy(out[sent..][0..take], segment[0..take]);
+        sent += take;
+        if (store.advanceFrame(h, &at, take)) return .{ .bytes = out[0..sent], .writes = writes + 1 };
+    }
+    unreachable;
+}
+
+test "gossip store keeps a whole inline frame contiguous and resumes it after a short write" {
+    var store = try Store.init(std.testing.allocator, 1, page_bytes);
+    defer store.deinit(std.testing.allocator);
+    const name = "/eth2/01020304/sync_committee_contribution_and_proof/ssz_snappy";
+    try std.testing.expectEqual(@import("topic.zig").topic_max_len, name.len);
+    const payload: [inline_bytes]u8 = @splat(7);
+    const h = store.put(@splat(1), name, &payload).?;
+    store.retainHistory(h);
+    store.seal(h);
+    var buffer: [1024]u8 = undefined;
+    const expected = expectedFrame(&buffer, &payload, name);
+    try std.testing.expectEqual(expected.len, store.get(h).?.frameLen());
+    var at = store.frameCursor(h);
+    try std.testing.expectEqualSlices(u8, expected, store.frameSegment(h, at));
+    try std.testing.expect(!store.advanceFrame(h, &at, 100));
+    try std.testing.expectEqualSlices(u8, expected[100..], store.frameSegment(h, at));
+    try std.testing.expect(store.advanceFrame(h, &at, expected.len - 100));
+    try std.testing.expectEqual(@as(usize, 0), store.frameSegment(h, at).len);
+    try std.testing.expectEqualSlices(u8, &payload, store.segment(h, store.cursor(h)));
+    try std.testing.expectEqualStrings(name, store.get(h).?.topicString());
+    store.releaseHistory(h);
+    try std.testing.expectEqual(@as(usize, 0), store.used_entries);
+}
+
+test "gossip store sends a paged payload as prefix pages and trailer across short writes" {
+    var store = try Store.init(std.testing.allocator, 2, 4 * page_bytes);
+    defer store.deinit(std.testing.allocator);
+    const name = "/eth2/01020304/beacon_block/ssz_snappy";
+    var payload: [2 * page_bytes + 100]u8 = undefined;
+    for (&payload, 0..) |*byte, i| byte.* = @truncate(i *% 31);
+    var expected_buffer: [3 * page_bytes]u8 = undefined;
+    var sent_buffer: [3 * page_bytes]u8 = undefined;
+    for ([_]usize{ inline_bytes + 1, payload.len }, [_]usize{ 3, 5 }) |len, segments| {
+        const h = store.put(@splat(@truncate(len)), name, payload[0..len]).?;
+        store.retainHistory(h);
+        store.seal(h);
+        try std.testing.expectEqual(Store.pagesFor(len), store.next.len - store.free_pages);
+        const expected = expectedFrame(&expected_buffer, payload[0..len], name);
+        const whole = sendFrame(&store, h, expected.len, &sent_buffer);
+        try std.testing.expectEqualSlices(u8, expected, whole.bytes);
+        try std.testing.expectEqual(segments, whole.writes);
+        // Writes of 1000 bytes end inside the prefix-page, page-page and page-trailer boundaries.
+        try std.testing.expectEqualSlices(u8, expected, sendFrame(&store, h, 1000, &sent_buffer).bytes);
+        try std.testing.expectEqualSlices(u8, expected, sendFrame(&store, h, 1, &sent_buffer).bytes);
+        try std.testing.expectEqualSlices(u8, payload[0..@min(len, page_bytes)], store.segment(h, store.cursor(h)));
+        store.releaseHistory(h);
+        try std.testing.expectEqual(store.next.len, store.free_pages);
+    }
+}

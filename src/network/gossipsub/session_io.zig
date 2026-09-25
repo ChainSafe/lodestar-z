@@ -683,6 +683,7 @@ pub const Admission = enum { admitted, duplicate, capacity, unauthenticated };
 
 pub fn beginPump(self: *Gossipsub, now: Now) Turn {
     self.last_now_ms = now.mono_ms;
+    self.last_unix_s = now.unix_s;
     self.messages.expire(&self.peers, now.mono_ms);
     var turn = Turn.init(&self.options, now, self.msg_scratch);
     turn.sink = self.message_sink;
