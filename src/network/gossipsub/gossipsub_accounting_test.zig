@@ -177,3 +177,45 @@ test "GRAFT outcomes, PRUNE reasons and mesh peer-time" {
     try std.testing.expectEqual(@as(u64, 700), metrics.peer_ms[@intFromEnum(topic_mod.Kind.beacon_block)]);
     for (g.sessions.rows) |*row| if (row.active) row.io.tx.cancelStream(&g.messages.store);
 }
+
+test "occupancy and drop phases use each change's own time and never run backwards" {
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
+    defer g.deinit();
+    const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), peer.index, name, true);
+    g.markDirect(g.sessions.rows[peer.index].conn);
+    const tx = &g.sessions.rows[peer.index].io.tx;
+    tx.cancelStream(&g.messages.store);
+    const occupancy = &g.occupancy;
+    // A frame queued at 100 ms and completed by a write at 800 ms held a descriptor for 700 ms,
+    // though the next pump comes only at 900 ms.
+    _ = session_io.beginPump(&g, .{ .mono_ms = 100, .unix_s = 0 });
+    try std.testing.expectEqual(@as(u16, 1), (try g.publish(name, "written", .{ .mono_ms = 100, .unix_s = 0 })).queued);
+    g.advanceWrite(g.sessions.ref(peer.index), tx.segment(&g.messages.store).len, 800);
+    try std.testing.expectEqual(@as(usize, 0), tx.data.count);
+    _ = session_io.beginPump(&g, .{ .mono_ms = 900, .unix_s = 0 });
+    try std.testing.expectEqual(@as(u64, 700), occupancy.descriptor_ms[slots.phase_buckets]);
+    try std.testing.expectEqual(@as(u64, 800), occupancy.observed_ms[slots.phase_buckets]);
+
+    // Monotonic zero starts a 12 s slot, so 1,500 ms starts the third 750 ms phase bucket.
+    var clock: slots.SlotClock = .{ .genesis_unix_ms = 1_000_000, .slot_duration_ms = 12_000 };
+    clock.observe(.{ .mono_ms = 0, .unix_s = 0, .unix_ms = 1_000_000 + 12_000 });
+    g.slot_clock = &clock;
+    _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), peer.index, name, false);
+    const h = g.messages.history.message(g.messages.history.get(&g.messages.store, topic_mod.validMessageId(name, "written", .{})).?);
+    for (0..@import("delivery.zig").per_peer_limit) |_| {
+        if (tx.data.full()) break;
+        try std.testing.expectEqual(.queued, tx.queueData(&g.messages.store, h, .forward, .{ .bytes = g.options.tx_peer_bytes }, 900));
+    }
+    // A host publication at 1,600 ms, then a pump whose tick was read earlier, at 1,400 ms: the
+    // refused IWANT response is attributed to 1,600 ms and occupancy is not rewound.
+    try std.testing.expectEqual(@as(u16, 0), (try g.publish(name, "newer", .{ .mono_ms = 1_600, .unix_s = 0 })).selected);
+    _ = session_io.beginPump(&g, .{ .mono_ms = 1_400, .unix_s = 0 });
+    try std.testing.expectEqual(@as(u64, 1_600), g.observed_ms);
+    var body: [32]u8 = undefined;
+    support.control(&g, peer.index, .{ .iwant = .{ .body = ids(&body, 1, &.{topic_mod.validMessageId(name, "written", .{})}) } }, .{ .mono_ms = 1_400, .unix_s = 0 });
+    try std.testing.expectEqual(@as(u64, 1), g.rpc_metrics.iwant[@intFromEnum(IwantOutcome.refused)]);
+    for (g.delivery_metrics.drops_by_phase, 0..) |count, bucket| try std.testing.expectEqual(@as(u64, @intFromBool(bucket == 2)), count);
+    try std.testing.expectEqual(@as(?u64, 1_600), occupancy.last_ms);
+    g.cancelWrites(g.sessions.ref(peer.index));
+}

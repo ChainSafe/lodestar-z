@@ -208,7 +208,7 @@ pub const Occupancy = struct {
         inline for (.{
             .{ "lodestar_native_gossip_outbox_observed_seconds_total", "observed_ms", "Time over which data queue occupancy was integrated, by slot phase bucket labeled by its first basis point of the slot, or unknown without the chain's genesis time" },
             .{ "lodestar_native_gossip_outbox_descriptor_seconds_total", "descriptor_ms", "Queued data frames across all peers, integrated over time, by slot phase bucket; divide by observed seconds for the mean" },
-            .{ "lodestar_native_gossip_outbox_full_peer_seconds_total", "full_ms", "Peers whose queue refused ordinary data frames for want of a descriptor, integrated over time, by slot phase bucket" },
+            .{ "lodestar_native_gossip_outbox_full_peer_seconds_total", "full_ms", "Peers whose per-peer descriptor allowance refused ordinary data frames, integrated over time, by slot phase bucket; the byte limit and the shared pool are not counted" },
         }) |metric| {
             const family = try w.family(.{ .name = metric[0], .kind = .counter, .help = metric[2], .labels = &.{"phase_bps"}, .unit = .seconds });
             for (@field(self, metric[1]), 0..) |ms, index| try family.sample(.{if (index < slots.phase_buckets) slots.bucket_labels[index] else "unknown"}, @as(f64, @floatFromInt(ms)) / 1000);
