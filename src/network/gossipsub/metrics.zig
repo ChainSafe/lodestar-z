@@ -29,7 +29,7 @@ pub const Io = struct {
         try w.enums(.{ .name = "lodestar_native_gossip_turns_exhausted_total", .kind = .counter, .help = "Gossip turns ending with an exhausted shared budget", .labels = &.{"budget"} }, Budget, &self.turns_exhausted);
         try w.enums(.{ .name = "lodestar_native_gossip_ready_deferred_total", .kind = .counter, .help = "Ready peers remaining after the relevant shared budget was exhausted, including partially serviced peers", .labels = &.{"budget"} }, Budget, &self.ready_deferred);
         try w.enums(.{ .name = "lodestar_native_gossip_turn_stops_total", .kind = .counter, .help = "Gossip turns that stopped on an exhausted shared budget before visiting every ready session they took, by that budget: calls, else output, else the first exhausted receive budget", .labels = &.{"budget"} }, Budget, &self.stops);
-        const skipped = try w.family(.{ .name = "lodestar_native_gossip_turn_stop_skipped_peers_total", .kind = .counter, .help = "Ready sessions a stopped gossip turn took but did not visit, by the budget that stopped it and whether each had output queued on a stream whose last write did not block", .labels = &.{ "budget", "output" } });
+        const skipped = try w.family(.{ .name = "lodestar_native_gossip_turn_stop_skipped_peers_total", .kind = .counter, .help = "Ready sessions a stopped gossip turn took but did not visit, by the budget that stopped it and whether each was writable: output queued on a stream that takes writes, which a blocked write stops until the next writable event", .labels = &.{ "budget", "output" } });
         inline for (@typeInfo(Budget).@"enum".fields) |budget| {
             inline for (.{ "not_writable", "writable" }, 0..) |output, index| try skipped.sample(.{ budget.name, output }, self.skipped[budget.value][index]);
         }
@@ -53,9 +53,12 @@ pub const Delivery = struct {
     /// A selected recipient is queued, pressured or unavailable. A queued frame later completes
     /// when QUIC accepts its last byte, which is not delivery, or is cancelled by a stream reset.
     pub const Outcome = enum { selected, queued, pressured, unavailable, completed, cancelled };
-    /// The outcomes counted by kind and phase: pressured over selected is the refused share.
+    /// The outcomes counted by kind and phase. Selected includes recipients without an out
+    /// stream, and pressured counts refusals by any queue limit.
     pub const KindOutcome = enum { selected, pressured };
-    /// Whether the refusing peer's last write blocked; a stream without writes counts as accepted.
+    /// The refusing peer's write history: would_block from a write that blocked until a write QUIC
+    /// takes in full, even after a writable event; accepted otherwise, including a stream without
+    /// writes. It is not by itself a split of owner service from transport.
     pub const LastWrite = enum { accepted, would_block };
     const WriteTime = @import("../metrics/histogram.zig").Duration(&.{ 1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000 });
     const Queued = @import("../metrics/histogram.zig").Histogram(u64, &.{ 0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 448, 480, 511 }, .{});
@@ -132,7 +135,7 @@ pub const Delivery = struct {
         inline for (@typeInfo(delivery.Origin).@"enum".fields) |origin| {
             inline for (@typeInfo(Outcome).@"enum".fields) |outcome| try recipients.sample(.{ origin.name, outcome.name }, self.recipients[origin.value][outcome.value]);
         }
-        const kinds = try w.family(.{ .name = "lodestar_native_gossip_data_recipients_by_kind_total", .kind = .counter, .help = "Forward and publication data frame recipients by message kind and the slot phase bucket of their selection: selected, and refused for queue pressure. Phase buckets are labeled by their first basis point of the slot, or unknown without the chain's genesis time", .labels = &.{ "kind", "phase_bps", "outcome" } });
+        const kinds = try w.family(.{ .name = "lodestar_native_gossip_data_recipients_by_kind_total", .kind = .counter, .help = "Forward and publication data frame recipients by message kind and the slot phase bucket of their selection: selected, including recipients without an out stream, and pressured, refused by any queue limit. Phase buckets are labeled by their first basis point of the slot, or unknown without the chain's genesis time", .labels = &.{ "kind", "phase_bps", "outcome" } });
         for (&self.by_kind, 0..) |*phases, index| {
             const kind = if (index < kind_count) @tagName(@as(Kind, @enumFromInt(index))) else "unknown";
             for (phases, 0..) |outcomes, span| {
@@ -153,9 +156,9 @@ pub const Delivery = struct {
         try queued.histogram(.{}, &self.queued);
         const oldest = try w.histograms(.{ .name = "lodestar_native_gossip_data_admission_oldest_seconds", .kind = .histogram, .help = "Age of the recipient's oldest queued data frame when a data frame admission is attempted behind it", .unit = .seconds }, WriteTime);
         try oldest.histogram(.{}, &self.oldest_age);
-        const refused_bytes = try w.histograms(.{ .name = "lodestar_native_gossip_descriptor_refusal_queued_bytes", .kind = .histogram, .help = "The refusing peer's queued data bytes at each data frame refusal for want of a descriptor, by whether its last write blocked or QUIC took it in full", .labels = &.{"last_write"} }, QueuedBytes);
+        const refused_bytes = try w.histograms(.{ .name = "lodestar_native_gossip_descriptor_refusal_queued_bytes", .kind = .histogram, .help = "The refusing peer's queued data bytes at each data frame refusal for want of a descriptor, by write history: would_block after a write that blocked, even once the stream is writable again, and accepted after a write QUIC took in full or before any write", .labels = &.{"last_write"} }, QueuedBytes);
         inline for (@typeInfo(LastWrite).@"enum".fields) |field| try refused_bytes.histogram(.{field.name}, &self.refusals[field.value].bytes);
-        const refused_oldest = try w.histograms(.{ .name = "lodestar_native_gossip_descriptor_refusal_oldest_seconds", .kind = .histogram, .help = "Age of the refusing peer's oldest queued data frame at each data frame refusal for want of a descriptor, by whether its last write blocked or QUIC took it in full", .labels = &.{"last_write"}, .unit = .seconds }, WriteTime);
+        const refused_oldest = try w.histograms(.{ .name = "lodestar_native_gossip_descriptor_refusal_oldest_seconds", .kind = .histogram, .help = "Age of the refusing peer's oldest queued data frame at each data frame refusal for want of a descriptor, by write history: would_block after a write that blocked, even once the stream is writable again, and accepted after a write QUIC took in full or before any write", .labels = &.{"last_write"}, .unit = .seconds }, WriteTime);
         inline for (@typeInfo(LastWrite).@"enum".fields) |field| try refused_oldest.histogram(.{field.name}, &self.refusals[field.value].oldest);
         const blocked = try w.histograms(.{ .name = "lodestar_native_gossip_descriptor_refusal_blocked_seconds", .kind = .histogram, .help = "How long the refusing peer's stream has been blocked, from the write that took fewer bytes than offered, at each data frame refusal for want of a descriptor before a writable event", .unit = .seconds }, WriteTime);
         try blocked.histogram(.{}, &self.refusal_blocked);
