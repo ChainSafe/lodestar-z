@@ -85,3 +85,56 @@ fn saturatedPeers(peers: u16, budget: Budget) !void {
     try std.testing.expectEqual(@as(u64, 0), g.io_metrics.write_would_block);
     for (g.sessions.rows) |row| try std.testing.expect(row.io.write_budget_deferred > 0);
 }
+
+test "gossip turn stopped by the receive item budget leaves its writable sessions waiting until their next visit" {
+    var setup: Pair = .{};
+    try setup.initOpts(.{ .random_seed = 1, .connected_capacity = 4 }, .{ .random_seed = 2 });
+    defer setup.deinit();
+    for (0..20) |_| try setup.pumpOnce();
+    const g = setup.shared.client.gossipsub;
+    const reader = g.sessions.find(setup.shared.handles.client).?;
+    const stream = setup.clientStream();
+    var writers: [3]u16 = undefined;
+    for (&writers, 1..) |*writer, i| writer.* = support.addPeer(g, .{ .index = @intCast(300 + i), .generation = 1 }, .v1_2).?.index;
+    for (0..3) |_| _ = support.pumpTurn(g, &setup.shared.pair.client, setup.shared.pair.now);
+    try std.testing.expectEqual(@as(usize, 0), g.sessions.ready.len);
+    // The reader leads the ready list with a frame of three items, one more than a turn's item
+    // budget. The writers follow it with output on one writable QUIC stream.
+    g.options.items_per_pump = 2;
+    const protobuf = @import("protobuf.zig");
+    var body: [256]u8 = undefined;
+    var rpc = protobuf.Writer.init(&body);
+    for (0..3) |_| protobuf.writeSubscription(&rpc, true, "/eth2/01020304/beacon_block/ssz_snappy");
+    var frame: [260]u8 = undefined;
+    try std.testing.expect(g.sessions.receiveHandoff(reader, @import("frame.zig").writeFrame(&frame, rpc.written()), false));
+    g.settle(reader);
+    for (writers) |index| {
+        g.sessions.setOutbound(index, .{ .live = .{ .stream = stream, .version = .v1_2 } });
+        g.sendSubscriptions(index);
+        try std.testing.expect(g.sessions.rows[index].io.tx.inject(&.{0}, setup.shared.pair.now.mono_ms));
+        g.settle(index);
+    }
+    try std.testing.expectEqual(reader, g.sessions.ready.head);
+    // The turn starts 2 ms before the second phase bucket of a 12 s slot.
+    var clock: @import("../slot_clock.zig").SlotClock = .{ .genesis_unix_ms = 1_000_000, .slot_duration_ms = 12_000 };
+    clock.observe(.{ .mono_ms = setup.shared.pair.now.mono_ms, .unix_s = 0, .unix_ms = 1_000_000 + 12_000 + 748 });
+    g.slot_clock = &clock;
+    const items = @intFromEnum(Budget.items);
+    _ = support.pumpTurn(g, &setup.shared.pair.client, setup.shared.pair.now);
+    try std.testing.expectEqual(@as(u64, 1), g.io_metrics.stops[items]);
+    try std.testing.expectEqualSlices(u64, &.{ 0, 3 }, &g.io_metrics.skipped[items]);
+    try std.testing.expectEqual(@as(usize, 3), g.sessions.unserved[items]);
+    for (writers) |index| try std.testing.expectEqual(@as(?Budget, .items), g.sessions.rows[index].unserved);
+    // Cancelled output stops the wait at once; the others wait 5 ms, until the next turn visits them.
+    g.cancelWrites(g.sessions.ref(writers[2]));
+    try std.testing.expectEqual(@as(usize, 2), g.sessions.unserved[items]);
+    setup.shared.pair.advance(5);
+    _ = support.pumpTurn(g, &setup.shared.pair.client, setup.shared.pair.now);
+    try std.testing.expectEqual(@as(usize, 0), g.sessions.unserved[items]);
+    try std.testing.expectEqual(@as(u64, 1), g.io_metrics.stops[items]);
+    const unserved = &g.occupancy.unserved_ms[items];
+    try std.testing.expectEqual(@as(u64, 2 * 2), unserved[0]);
+    try std.testing.expectEqual(@as(u64, 2 * 3), unserved[1]);
+    for (writers[0..2]) |index| try std.testing.expect(!g.sessions.rows[index].io.tx.pending());
+    g.slot_clock = null;
+}

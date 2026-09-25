@@ -27,6 +27,9 @@ pub const Session = struct {
     conn: Handle = undefined,
     /// Named by the connection's identify exchange; unknown until it completes.
     client: @import("../peers/client.zig").Client = .Unknown,
+    /// The budget of the turn that stopped before visiting this session while it was writable. It
+    /// clears at the session's next visit or when its output is cancelled.
+    unserved: ?@import("turn.zig").Budget = null,
     in_stream: ?StreamHandle = null,
     dont_send: [constants.dont_send_cap]MessageId = undefined,
     dont_send_until: [constants.dont_send_cap]u64 = undefined,
@@ -41,10 +44,15 @@ pub const Session = struct {
     }
 
     /// The session can make progress now: an outbound opening or close to run, an inbound stream
-    /// with unread bytes, or output queued on an out stream whose last write did not block.
+    /// with unread bytes, or writable output.
     pub fn wants(self: *const Session) bool {
         if (self.outbound == .pending or self.outbound == .closing) return true;
         if (self.in_stream != null and self.io.rx_ready) return true;
+        return self.writable();
+    }
+
+    /// Output queued on an out stream whose last write did not block.
+    pub fn writable(self: *const Session) bool {
         const tx = &self.io.tx;
         return self.outStream() != null and tx.ready and (tx.pending() or tx.subscription_dirty.count() > 0);
     }

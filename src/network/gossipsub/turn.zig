@@ -1,6 +1,7 @@
 const Options = @import("options.zig").Options;
 const std = @import("std");
 pub const Budget = enum { calls, input, output, items, fields, work, copy };
+pub const budget_count = @typeInfo(Budget).@"enum".fields.len;
 pub const Budgets = std.EnumSet(Budget);
 
 pub const Progress = enum { done, credits };

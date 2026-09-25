@@ -243,7 +243,7 @@ test "gossip resumes a small frame cut by a short write once the stream is writa
     try std.testing.expect(offset > 0);
     try std.testing.expectEqual(@as(u64, whole + 1), g.io_metrics.write_calls - calls);
     try std.testing.expectEqual(blocked + 1, g.io_metrics.write_would_block);
-    try std.testing.expect(!io.tx.ready and io.tx.pending());
+    try std.testing.expect(!io.tx.ready and io.tx.pending() and io.tx.last_write_blocked);
     try std.testing.expectEqual(payloads.len - whole, io.tx.data.count);
     try std.testing.expectEqual(offset, io.tx.data.next(&g.messages.store).?.cursor.sent);
 
@@ -257,6 +257,7 @@ test "gossip resumes a small frame cut by a short write once the stream is writa
     }
     _ = setup.shared.processServer(.{});
     try std.testing.expectEqual(@as(usize, 0), io.tx.data.count);
+    try std.testing.expect(!io.tx.last_write_blocked);
     try std.testing.expectEqual(payloads.len, setup.serverMessages().len);
     for (setup.serverMessages(), &payloads) |message, *payload| try std.testing.expectEqualSlices(u8, payload, message.bytes);
     try std.testing.expect(g.io_metrics.write_calls - calls <= payloads.len + (g.io_metrics.write_would_block - blocked));
