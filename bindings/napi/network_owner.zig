@@ -273,7 +273,7 @@ fn executeWork(self: *Runtime, io: std.Io) !bool {
                 self.unlock();
                 return err;
             };
-            cell.state = .executing;
+            self.table.transition(cell, .executing);
             self.unlock();
             within(.commands, commands.execute, .{ self, command.?, now(io) });
             controls += 1;

@@ -60,6 +60,7 @@ pub fn take(runtime: *Runtime) !Value {
     const cell = table.get(token).?;
     cell.copying = true;
     cell.state = .copying;
+    table.refresh(cell);
     runtime.unlock();
     errdefer {
         runtime.lock();
@@ -67,6 +68,7 @@ pub fn take(runtime: *Runtime) !Value {
         cell.action = .cancel;
         cell.state = if (cell.native) .serving else .terminal;
         table.releasePayload(cell);
+        table.refresh(cell);
         if (!cell.native and !cell.serving_retained) table.retire(token) else cell.release_requested = true;
         runtime.diag.operationalFailures +|= 1;
         runtime.signalLocked();
@@ -83,6 +85,7 @@ pub fn take(runtime: *Runtime) !Value {
     table.releaseInput(cell);
     cell.state = if (cell.native) .serving else .terminal;
     table.releasePayload(cell);
+    table.refresh(cell);
     runtime.unlock();
     refNotify(runtime);
     return descriptor;
@@ -145,11 +148,13 @@ pub fn respond(runtime: *Runtime, value: Value, data: Value, context_value: Valu
         return err;
     };
     cell.state = .response_preparing;
+    runtime.incoming.?.refresh(cell);
     runtime.unlock();
     errdefer {
         runtime.lock();
         cell.state = if (cell.native) .serving else .terminal;
         runtime.incoming.?.releasePayload(cell);
+        runtime.incoming.?.refresh(cell);
         runtime.unlock();
     }
     const copy = try r.allocator.alloc(u8, len);
@@ -167,6 +172,7 @@ pub fn respond(runtime: *Runtime, value: Value, data: Value, context_value: Valu
     cell.pending = deferred;
     cell.ack = null;
     cell.state = .response_queued;
+    runtime.incoming.?.refresh(cell);
     runtime.incoming.?.diag.responseBytesCopied +|= len;
     runtime.unlock();
     refNotify(runtime);
@@ -243,6 +249,7 @@ pub fn ready(runtime: *Runtime, value: Value) !Value {
     }
     cell.permission = deferred;
     cell.permission_ready = false;
+    runtime.incoming.?.refresh(cell);
     runtime.unlock();
     refNotify(runtime);
     return deferred.getPromise();
@@ -270,28 +277,28 @@ pub fn settle(env: napi.Env, runtime: *Runtime, limit: usize) !bool {
     defer runtime.release();
     var settled: usize = 0;
     var more = false;
-    for (0..32) |i| {
+    var next: usize = 0;
+    for (0..incoming.capacity_max) |_| {
         runtime.lock();
         const table = &runtime.incoming.?;
-        if (i >= table.cells.len) {
+        const i = table.nextDue(next) orelse {
             runtime.unlock();
             break;
-        }
-        const cell = &table.cells[i];
-        if (!incoming.settleable(cell)) {
-            runtime.unlock();
-            continue;
-        }
+        };
         if (settled == limit) {
             runtime.unlock();
             more = true;
             break;
         }
         settled += 1;
+        next = i + 1;
+        const cell = &table.cells[i];
+        std.debug.assert(incoming.settleable(cell));
         const pending = if (cell.ack != null) cell.pending else null;
         const closed = if (!cell.native) cell.closed else null;
         const permission = if (cell.permission_ready or !cell.native) cell.permission else null;
         cell.copying = true;
+        table.refresh(cell);
         const ack = cell.ack;
         const permitted = cell.native and cell.permission_ready;
         runtime.unlock();
@@ -308,6 +315,7 @@ pub fn settle(env: napi.Env, runtime: *Runtime, limit: usize) !bool {
                 cell.permission_ready = false;
             }
             table.releasePayload(cell);
+            table.refresh(cell);
             if (!cell.native and !cell.serving_retained and cell.closed == null and cell.pending == null and cell.permission == null) {
                 table.retire(.{ .index = @intCast(i), .generation = cell.generation });
             } else if (incoming.releasable(cell)) runtime.signalLocked();

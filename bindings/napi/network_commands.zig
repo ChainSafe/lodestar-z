@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 test "application admission reserves 32 commands and at most 16 connects" {
     var table: Table = .{};
@@ -32,6 +33,8 @@ pub const Cell = struct {
 };
 pub const Table = struct {
     cells: [capacity]Cell = @splat(.{}),
+    /// The terminal cells, which the host's settlement delivers. `transition` keeps it current.
+    terminal: std.StaticBitSet(capacity) = .initEmpty(),
     stores: [3][2]bool = @splat(@splat(false)),
     connects: u8 = 0,
     occupied: u8 = 0,
@@ -99,7 +102,25 @@ pub const Table = struct {
         if (storeKind(cell.kind)) |which| self.stores[which][cell.store.?] = false;
         self.connects -= @intFromBool(cell.kind == .connect);
         self.occupied -= 1;
-        cell.state = .free;
+        self.transition(cell, .free);
+    }
+    /// Moves `cell` to `state`, keeping the terminal set current.
+    pub fn transition(self: *Table, cell: *Cell, state: State) void {
+        const index = (@intFromPtr(cell) - @intFromPtr(&self.cells)) / @sizeOf(Cell);
+        std.debug.assert(&self.cells[index] == cell);
+        cell.state = state;
+        self.terminal.setValue(index, state == .terminal);
+    }
+    /// The first terminal cell at or after `from`. O(1).
+    pub fn nextTerminal(self: *const Table, from: usize) ?usize {
+        var rest = self.terminal;
+        rest.setRangeValue(.{ .start = 0, .end = @min(from, capacity) }, false);
+        return rest.findFirstSet();
+    }
+    /// Whether any completion awaits settlement. O(1); debug builds check it against a scan.
+    pub fn anyTerminal(self: *const Table) bool {
+        if (builtin.mode == .Debug) for (&self.cells, 0..) |*cell, i| std.debug.assert(self.terminal.isSet(i) == (cell.state == .terminal));
+        return self.terminal.findFirstSet() != null;
     }
 };
 
@@ -156,7 +177,7 @@ pub fn execute(self: *Runtime, token: Token, timestamp: n.Now) void {
     defer self.unlock();
     if (cell.state == .executing) {
         if (self.stop) cell.failure = self.terminal_error orelse error.NetworkClosed;
-        cell.state = .terminal;
+        self.table.transition(cell, .terminal);
     }
     if (cell.state == .terminal) self.pingLocked();
 }
@@ -197,7 +218,7 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
             operation.deadline = timestamp.mono_ms +| input.timeout_ms;
             try core.connectUntil(&input.peer, input.addresses[0..input.address_count], timestamp, operation.deadline);
             self.lock();
-            self.table.cells[index].state = .waiting;
+            self.table.transition(operation, .waiting);
             self.unlock();
         },
         .disconnect => {
@@ -206,7 +227,7 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
             for (&self.table.cells, 0..) |*cell, i| {
                 if (cell.state != .waiting or !self.table.cells[i].input.peer.eql(&input.peer)) continue;
                 self.table.cells[i].failure = error.NetworkConnectCancelled;
-                cell.state = .terminal;
+                self.table.transition(cell, .terminal);
             }
             self.unlock();
             _ = core.closePeer(&input.peer, timestamp);
@@ -236,7 +257,7 @@ pub fn latchConnects(table: *Table, events: []const n.Event, timestamp: n.Now) b
         };
         if (!connected and timestamp.mono_ms < operation.deadline) continue;
         operation.failure = if (connected) null else error.NetworkConnectTimeout;
-        cell.state = .terminal;
+        table.transition(cell, .terminal);
         terminal = true;
     }
     return terminal;

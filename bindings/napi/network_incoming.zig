@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const n = @import("network");
 const napi = @import("zapi:zapi").napi;
 const rr = n.reqresp;
@@ -61,8 +62,11 @@ pub const Diagnostics = struct {
     capacityRefusals: u64 = 0,
     byteRefusals: u64 = 0,
 };
+pub const capacity_max = 32;
 pub const Table = struct {
     cells: []Cell,
+    /// The cells whose settlement is due now. `refresh` keeps it current after each change to a cell.
+    due: std.StaticBitSet(capacity_max) = .initEmpty(),
     backing: std.mem.Allocator,
     budget: *Budget,
     diag: Diagnostics = .{},
@@ -70,7 +74,7 @@ pub const Table = struct {
     cursor: usize = 0,
 
     pub fn init(backing: std.mem.Allocator, capacity: usize, budget: *Budget) !Table {
-        std.debug.assert(capacity <= 32);
+        std.debug.assert(capacity <= capacity_max);
         const cells = try backing.alloc(Cell, capacity);
         @memset(cells, .{});
         return .{ .cells = cells, .backing = backing, .budget = budget, .diag = .{ .capacity = capacity } };
@@ -104,6 +108,7 @@ pub const Table = struct {
         };
         self.sequence += 1;
         self.cells[token.index] = .{ .state = .queued, .generation = token.generation, .sequence = self.sequence, .protocol = protocol, .reservation = amount };
+        self.refresh(&self.cells[token.index]);
         self.diag.occupied += 1;
         self.diag.highWater = @max(self.diag.highWater, self.diag.occupied);
         self.diag.reservedBytes += amount;
@@ -158,7 +163,25 @@ pub const Table = struct {
         cell.state = .terminal;
         self.releasePayload(cell);
         cell.* = .{ .generation = cell.generation };
+        self.refresh(cell);
         self.diag.occupied -= 1;
+    }
+    /// Recomputes whether settlement of `cell` is due.
+    pub fn refresh(self: *Table, cell: *const Cell) void {
+        const index = (@intFromPtr(cell) - @intFromPtr(self.cells.ptr)) / @sizeOf(Cell);
+        std.debug.assert(&self.cells[index] == cell);
+        self.due.setValue(index, settleable(cell));
+    }
+    /// The first cell at or after `from` whose settlement is due. O(1).
+    pub fn nextDue(self: *const Table, from: usize) ?usize {
+        var rest = self.due;
+        rest.setRangeValue(.{ .start = 0, .end = @min(from, capacity_max) }, false);
+        return rest.findFirstSet();
+    }
+    /// Whether settlement of any cell is due. O(1); debug builds check it against a scan.
+    pub fn anyDue(self: *const Table) bool {
+        if (builtin.mode == .Debug) for (0..capacity_max) |i| std.debug.assert(self.due.isSet(i) == (i < self.cells.len and settleable(&self.cells[i])));
+        return self.due.findFirstSet() != null;
     }
     pub fn oldest(self: *Table) ?Token {
         var selected: ?Token = null;
@@ -248,6 +271,7 @@ pub fn flags(runtime: *Runtime, now: n.Now) !bool {
     var more = false;
     for (0..table.cells.len) |offset| {
         const cell = &table.cells[(table.cursor + offset) % table.cells.len];
+        defer table.refresh(cell);
         if (releasable(cell)) {
             const released = runtime.heavy.?.core.service.reqresp.releaseServing(cell.handle);
             std.debug.assert(released);
@@ -358,6 +382,7 @@ pub fn captureLocked(runtime: *Runtime, event: rr.Event, now: n.Now) !void {
                 table.retire(.{ .index = @intCast(i), .generation = cell.generation });
             }
         }
+        table.refresh(cell);
         runtime.pingLocked();
         if (ownerWork(cell)) runtime.host_due = true;
         break;
@@ -389,6 +414,7 @@ fn admitLocked(runtime: *Runtime, request: @FieldType(rr.Event, "request"), now:
     const retained = core.service.reqresp.retainServing(request.request);
     std.debug.assert(retained);
     cell.serving_retained = true;
+    table.refresh(cell);
     runtime.pingLocked();
 }
 pub fn closeLocked(runtime: *Runtime) void {
@@ -399,6 +425,7 @@ pub fn closeLocked(runtime: *Runtime) void {
         if (cell.pending != null and cell.ack == null) cell.ack = .closed;
         if (cell.state != .response_preparing) cell.state = .terminal;
         table.releasePayload(cell);
+        table.refresh(cell);
         if (!cell.exposed and !cell.copying) table.retire(.{ .index = @intCast(i), .generation = cell.generation });
     };
 }

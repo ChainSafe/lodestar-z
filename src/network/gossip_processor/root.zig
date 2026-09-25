@@ -461,6 +461,21 @@ pub const GossipProcessor = struct {
         }
         return false;
     }
+    /// Work a host drain can take now: dependency checks, and claimable urgent and ordinary jobs.
+    pub const HostWork = struct { checks: bool = false, urgent: bool = false, ordinary: bool = false };
+    /// Ordinary work counts also while the host's last claim disabled it, so a host able to
+    /// execute again knows to claim it. O(kinds).
+    pub fn hostWork(self: *const GossipProcessor) HostWork {
+        var result: HostWork = .{};
+        if (self.closed) return result;
+        for (limits_mod.priority) |kind| {
+            if (self.queueValue(kind, .needs_check).len > 0) result.checks = true;
+            const index = self.nextKind(kind);
+            if (index == none or !self.executable(&self.cells[index])) continue;
+            if (limits_mod.urgent(kind)) result.urgent = true else result.ordinary = true;
+        }
+        return result;
+    }
     pub fn expire(self: *GossipProcessor, now: u64) void {
         self.last_now = @max(self.last_now, now);
         var bytes: usize = 0;
@@ -514,13 +529,14 @@ pub const GossipProcessor = struct {
     }
     pub const Demand = struct { items: usize = batch_max, bytes: usize = batch_bytes, ordinary: bool = true };
     fn dispatchable(self: *const GossipProcessor, cell: *const Cell) bool {
-        if (self.execution) |execution| {
-            const k = @intFromEnum(cell.kind);
-            if (!self.ordinary_enabled and !limits_mod.urgent(cell.kind)) return false;
-            if (self.executing_items[k] >= execution[k].items) return false;
-            if (cell.input.len > execution[k].bytes - self.executing_bytes[k]) return false;
-        }
-        return true;
+        if (self.execution != null and !self.ordinary_enabled and !limits_mod.urgent(cell.kind)) return false;
+        return self.executable(cell);
+    }
+    /// Whether the kind's execution limits admit `cell`, whatever the host's ordinary gate.
+    fn executable(self: *const GossipProcessor, cell: *const Cell) bool {
+        const execution = self.execution orelse return true;
+        const k = @intFromEnum(cell.kind);
+        return self.executing_items[k] < execution[k].items and cell.input.len <= execution[k].bytes - self.executing_bytes[k];
     }
     fn nextKind(self: *const GossipProcessor, kind: Kind) u32 {
         const ready = self.ready[@intFromEnum(kind)];

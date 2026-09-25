@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const n = @import("network");
 const napi = @import("zapi:zapi").napi;
 const Runtime = @import("network_runtime.zig").Runtime;
@@ -48,6 +49,8 @@ pub const Diagnostics = struct {
 };
 pub const Table = struct {
     cells: []Cell,
+    /// The terminal cells, which the host's settlement delivers. `transition` keeps it current.
+    terminal: std.StaticBitSet(capacity_max) = .initEmpty(),
     backing: std.mem.Allocator,
     budget: *Budget,
     ordinary: usize = 0,
@@ -69,6 +72,7 @@ pub const Table = struct {
     }
     pub fn trim(self: *Table) void {
         if (self.diag.occupied != 0) return;
+        std.debug.assert(self.terminal.findFirstSet() == null);
         self.backing.free(self.cells);
         self.cells = &.{};
     }
@@ -126,7 +130,26 @@ pub const Table = struct {
         self.releasePayload(cell);
         self.ordinary -= @intFromBool(!n.gossip_processor.limits_mod.urgent(cell.kind));
         self.diag.occupied -= 1;
+        self.transition(cell, .free);
         cell.* = .{ .generation = cell.generation };
+    }
+    /// Moves `cell` to `state`, keeping the terminal set current.
+    pub fn transition(self: *Table, cell: *Cell, state: State) void {
+        const index = (@intFromPtr(cell) - @intFromPtr(self.cells.ptr)) / @sizeOf(Cell);
+        std.debug.assert(&self.cells[index] == cell);
+        cell.state = state;
+        self.terminal.setValue(index, state == .terminal);
+    }
+    /// The first terminal cell at or after `from`. O(1).
+    pub fn nextTerminal(self: *const Table, from: usize) ?usize {
+        var rest = self.terminal;
+        rest.setRangeValue(.{ .start = 0, .end = @min(from, capacity_max) }, false);
+        return rest.findFirstSet();
+    }
+    /// Whether any completion awaits settlement. O(1); debug builds check it against a scan.
+    pub fn anyTerminal(self: *const Table) bool {
+        if (builtin.mode == .Debug) for (0..capacity_max) |i| std.debug.assert(self.terminal.isSet(i) == (i < self.cells.len and self.cells[i].state == .terminal));
+        return self.terminal.findFirstSet() != null;
     }
     pub fn close(self: *Table, failure: anyerror) void {
         for (self.cells) |*cell| {
@@ -134,7 +157,7 @@ pub const Table = struct {
             if (cell.state != .queued) continue;
             self.releasePayload(cell);
             cell.failure = failure;
-            cell.state = .terminal;
+            self.transition(cell, .terminal);
         }
     }
     pub fn obligated(self: *const Table) bool {
@@ -168,7 +191,7 @@ pub fn execute(runtime: *Runtime, token: Token, now: n.Now) void {
     const table = &runtime.publications.?;
     const cell = table.get(token).?;
     std.debug.assert(cell.state == .queued);
-    cell.state = .executing;
+    table.transition(cell, .executing);
     std.debug.assert(now.mono_ms >= cell.queued_ms);
     const latency = now.mono_ms - cell.queued_ms;
     table.latency.observe(latency);
@@ -186,7 +209,7 @@ pub fn execute(runtime: *Runtime, token: Token, now: n.Now) void {
         table.diag.duplicates +|= @intFromBool(result.duplicate);
     } else |err| cell.failure = err;
     table.releasePayload(cell);
-    cell.state = .terminal;
+    table.transition(cell, .terminal);
     runtime.pingLocked();
 }
 

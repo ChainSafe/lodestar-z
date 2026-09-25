@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const n = @import("network");
 const napi = @import("zapi:zapi").napi;
 const rr = n.reqresp;
@@ -61,14 +62,18 @@ pub const Diagnostics = struct {
     requestFull: u64 = 0,
     busyPulls: u64 = 0,
 };
+pub const capacity_max = 32;
 pub const Table = struct {
     cells: []Cell = &.{},
+    /// The cells whose settlement is due now, one set per combination of the runtime's stop and
+    /// dispose flags. `refresh` keeps them current after each change to a cell.
+    due: [4]std.StaticBitSet(capacity_max) = @splat(.initEmpty()),
     backing: std.mem.Allocator,
     budget: *Budget,
     diag: Diagnostics = .{},
 
     pub fn init(backing: std.mem.Allocator, capacity: usize, budget: *Budget) !Table {
-        std.debug.assert(capacity <= 32);
+        std.debug.assert(capacity <= capacity_max);
         const cells = try backing.alloc(Cell, capacity);
         @memset(cells, .{});
         return .{ .cells = cells, .backing = backing, .budget = budget, .diag = .{ .capacity = capacity } };
@@ -97,6 +102,7 @@ pub const Table = struct {
         };
         try self.budget.reserve(.outgoing, amount);
         self.cells[token.index] = .{ .state = .preparing, .generation = token.generation, .protocol = which, .reservation = amount };
+        self.refresh(&self.cells[token.index]);
         self.diag.occupied += 1;
         self.diag.highWater = @max(self.diag.highWater, self.diag.occupied);
         self.diag.reservedBytes += amount;
@@ -142,7 +148,30 @@ pub const Table = struct {
         cell.state = .free;
         cell.pull = null;
         cell.retirement = null;
+        self.refresh(cell);
         self.diag.occupied -= 1;
+    }
+    /// Recomputes whether settlement of `cell` is due, under each stop and dispose flag.
+    pub fn refresh(self: *Table, cell: *const Cell) void {
+        const index = (@intFromPtr(cell) - @intFromPtr(self.cells.ptr)) / @sizeOf(Cell);
+        std.debug.assert(&self.cells[index] == cell);
+        for (&self.due, 0..) |*set, flags_index| set.setValue(index, settleable(cell, flags_index & 1 != 0, flags_index & 2 != 0));
+    }
+    /// The first cell at or after `from` whose settlement is due. O(1).
+    pub fn nextDue(self: *const Table, from: usize, stop: bool, disposed: bool) ?usize {
+        var rest = self.due[dueIndex(stop, disposed)];
+        rest.setRangeValue(.{ .start = 0, .end = @min(from, capacity_max) }, false);
+        return rest.findFirstSet();
+    }
+    /// Whether settlement of any cell is due. O(1); debug builds check it against a scan.
+    pub fn anyDue(self: *const Table, stop: bool, disposed: bool) bool {
+        if (builtin.mode == .Debug) for (&self.due, 0..) |*set, flags_index| for (0..capacity_max) |i| {
+            std.debug.assert(set.isSet(i) == (i < self.cells.len and settleable(&self.cells[i], flags_index & 1 != 0, flags_index & 2 != 0)));
+        };
+        return self.due[dueIndex(stop, disposed)].findFirstSet() != null;
+    }
+    fn dueIndex(stop: bool, disposed: bool) usize {
+        return @as(usize, @intFromBool(stop)) | @as(usize, @intFromBool(disposed)) << 1;
     }
     pub fn snapshot(self: *const Table) Diagnostics {
         var result = self.diag;
@@ -181,6 +210,7 @@ pub fn settleable(cell: *const Cell, stop: bool, disposed: bool) bool {
 pub fn armPull(runtime: *Runtime, cell: *Cell, deferred: napi.Deferred) void {
     cell.pull = deferred;
     if (cell.delivered) cell.consume = true;
+    runtime.requests.?.refresh(cell);
     runtime.signalLocked();
 }
 /// JS thread: asks the owner to cancel and retire the request; settlement happens only in the
@@ -189,6 +219,7 @@ pub fn armRetirement(runtime: *Runtime, cell: *Cell, deferred: ?napi.Deferred) v
     cell.retirement = deferred;
     cell.retiring = true;
     cell.cancel = true;
+    runtime.requests.?.refresh(cell);
     runtime.signalLocked();
 }
 
@@ -229,6 +260,7 @@ pub fn submit(runtime: *Runtime, token: Token, now: n.Now) !void {
         std.log.scoped(.network_bridge).debug("host_request_refused host_request={d}:{d} method={s} peer={f} reason={s}", .{ token.index, token.generation, @tagName(cell.protocol), n.logging.peer(&cell.peer), if (terminal == .rejected) @tagName(terminal.rejected) else @tagName(terminal) });
     }
     table.releasePayload(cell);
+    table.refresh(cell);
     runtime.pingLocked();
 }
 pub fn flags(runtime: *Runtime, io: std.Io) void {
@@ -246,6 +278,7 @@ pub fn flags(runtime: *Runtime, io: std.Io) void {
             if (cell.native) |handle| _ = runtime.heavy.?.core.consume(handle, @import("network_owner.zig").now(io));
         }
         table.releasePayload(cell);
+        table.refresh(cell);
         if (cell.terminal != null and (cell.pull != null or cell.retiring)) runtime.pingLocked();
     };
 }
@@ -303,7 +336,8 @@ pub fn capture(runtime: *Runtime, events: []const rr.Event, now: n.Now) !void {
                     cell.delivered = false;
                 }
             }
-            runtime.requests.?.releasePayload(cell);
+            table.releasePayload(cell);
+            table.refresh(cell);
             runtime.pingLocked();
             break;
         }
@@ -317,6 +351,7 @@ pub fn closeLocked(runtime: *Runtime) void {
         cell.state = .terminal;
         if (!cell.copying) cell.chunk = null;
         table.releasePayload(cell);
+        table.refresh(cell);
     };
 }
 

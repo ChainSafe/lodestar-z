@@ -48,7 +48,7 @@ pub fn publish(runtime: *r.Runtime, topic: Value, data: Value, options: Value) !
     cell.queued_ms = queued_ms;
     cell.payload = copy;
     cell.deferred = deferred;
-    cell.state = .queued;
+    runtime.publications.?.transition(cell, .queued);
     runtime.publications.?.diag.copies +|= 1;
     runtime.publications.?.diag.bytesCopied +|= len;
     runtime.signalLocked();
@@ -62,28 +62,26 @@ pub fn settle(env: napi.Env, runtime: *r.Runtime, limit: usize) !bool {
     defer runtime.release();
     var settled: usize = 0;
     var more = false;
-    for (0..p.capacity_max) |i| {
+    var next: usize = 0;
+    for (0..p.capacity_max) |_| {
         runtime.lock();
         const table = if (runtime.publications) |*table| table else {
             runtime.unlock();
             break;
         };
-        if (i >= table.cells.len) {
+        const i = table.nextTerminal(next) orelse {
             runtime.unlock();
             break;
-        }
-        const cell = &table.cells[i];
-        if (cell.state != .terminal) {
-            runtime.unlock();
-            continue;
-        }
+        };
         if (settled == limit) {
             runtime.unlock();
             more = true;
             break;
         }
         settled += 1;
-        cell.state = .copying;
+        next = i + 1;
+        const cell = &table.cells[i];
+        table.transition(cell, .copying);
         const token: p.Token = .{ .index = @intCast(i), .generation = cell.generation };
         runtime.unlock();
         defer runtime.retirePublication(token);

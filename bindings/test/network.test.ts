@@ -8,6 +8,7 @@ import {
   applicationConfig,
   configureChain,
   discoveryConfig,
+  lanes,
   localIntent,
   requestForks,
   runtimeReleased,
@@ -502,8 +503,10 @@ it("settles results only in the host drain and notifies once until a drain ends"
     await delay(100);
     expect(notifications).toBe(1);
     expect(intentSettled()).toBe(false);
+    expect(runtime.pendingLanes() & lanes.settle).toBe(lanes.settle);
     expect(drain()).toBe(true);
     expect(drain()).toBe(false);
+    expect(runtime.pendingLanes() & lanes.settle).toBe(0);
     expect((await intent).slot).toBe(config.initialSlot);
     expect((await identity).peerId).toBe(runtime.identity.peerId);
     const pull = runtime.request(runtime.identity.peerId, BLOCKS, new Uint8Array(32)).next();
@@ -522,4 +525,5 @@ it("settles results only in the host drain and notifies once until a drain ends"
   }
   expect(await runtime.closed).toEqual({reason: "requested"});
   expect(drain()).toBe(false);
+  expect(runtime.pendingLanes()).toBe(0);
 }, 20000);

@@ -59,6 +59,7 @@ pub fn drain(runtime: *Runtime, options: Value) !Value {
         try put(value, "start", try env.createUint32(@intCast(job.start)));
         try put(value, "length", try env.createUint32(@intCast(job.len)));
         try put(value, "grouped", try env.getBoolean(job.grouped));
+        try put(value, "urgent", try env.getBoolean(n.gossip_processor.limits_mod.urgent(job.kind)));
         try element(jobs, i, value);
     }
     try put(object, "jobs", jobs);
