@@ -25,7 +25,7 @@ export interface SignedVoluntaryExit {
 
 interface Eth1Data {
   depositRoot: Uint8Array;
-  depositCount: number;
+  depositCount: bigint;
   blockHash: Uint8Array;
 }
 
@@ -275,7 +275,7 @@ export declare class BeaconStateView {
   getPreviousShuffling(): EpochShuffling;
   getCurrentShuffling(): EpochShuffling;
   getNextShuffling(): EpochShuffling;
-  getBeaconCommittee(slot: number, index: number): number[];
+  getBeaconCommittee(slot: number, index: number): Uint32Array;
   getBeaconCommitteeCountPerSlot(epoch: number): number;
   previousDecisionRoot: string;
   currentDecisionRoot: string;

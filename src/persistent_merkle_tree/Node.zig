@@ -140,7 +140,7 @@ pub const State = enum(u32) {
     pub inline fn incRefCount(s: *State) Error!u32 {
         std.debug.assert(!s.isFree());
         const rc = s.refCount();
-        if (rc == rc_mask) return Error.RefCountOverflow;
+        if (rc == rc_mask) return error.RefCountOverflow;
         s.* = @enumFromInt(@intFromEnum(s.*) + 1);
         return rc + 1;
     }
@@ -509,12 +509,12 @@ pub const Pool = struct {
     }
 
     /// Returns a read-only pointer to the wrapped struct held by a
-    /// `.container_struct` Node. Returns `Error.InvalidNode` if the slot is not
+    /// `.container_struct` Node. Returns `error.InvalidNode` if the slot is not
     /// a branch-struct variant.
     pub fn getStructPtr(self: *Pool, node_id: Id, comptime T: type) Error!*const T {
         const idx = @intFromEnum(node_id);
         if (self.nodes.items(.state)[idx].kind() != .container_struct) {
-            return Error.InvalidNode;
+            return error.InvalidNode;
         }
         const ref_ptr = containerStructRef(self.nodes.items(.payload), idx);
         return @ptrCast(@alignCast(ref_ptr.ptr));
@@ -524,12 +524,12 @@ pub const Pool = struct {
     /// `.container_struct` slot's wrapped struct. The returned Id has refcount
     /// matching the underlying field-tree constructors (typically 0 — caller
     /// is responsible for `unref`'ing it once the temporary tree is no longer
-    /// needed). Returns `Error.InvalidNode` if the slot is not a branch-struct
+    /// needed). Returns `error.InvalidNode` if the slot is not a branch-struct
     /// variant.
     pub fn materializeContainerStruct(self: *Pool, node_id: Id) Error!Id {
         const idx = @intFromEnum(node_id);
         if (self.nodes.items(.state)[idx].kind() != .container_struct) {
-            return Error.InvalidNode;
+            return error.InvalidNode;
         }
         const ref_ptr = containerStructRef(self.nodes.items(.payload), idx);
         return try ref_ptr.to_tree(ref_ptr.ptr, self);
@@ -540,11 +540,11 @@ pub const Pool = struct {
     /// subtree of leaves; this builds it explicitly so that proof traversal
     /// can walk into individual chunks. Trailing zero subtrees fill the chunked_leaf
     /// to full K. The returned Id has refcount=0; caller is responsible for
-    /// `unref`'ing it. Returns `Error.InvalidNode` if the slot is not a chunked_leaf.
+    /// `unref`'ing it. Returns `error.InvalidNode` if the slot is not a chunked_leaf.
     pub fn materializeChunkedLeaf(self: *Pool, node_id: Id) Error!Id {
         const idx = @intFromEnum(node_id);
         if (self.nodes.items(.state)[idx].kind() != .chunked_leaf) {
-            return Error.InvalidNode;
+            return error.InvalidNode;
         }
         const storage = chunkedLeafPtr(self.nodes.items(.payload), idx);
 
@@ -827,32 +827,32 @@ pub const Id = enum(u32) {
     pub fn getLeft(node_id: Id, pool: *Pool) Error!Id {
         const idx = @intFromEnum(node_id);
         const kind = pool.nodes.items(.state)[idx].kind();
-        if (noChildKind(node_id, kind)) return Error.InvalidNode;
+        if (noChildKind(node_id, kind)) return error.InvalidNode;
         return childrenOf(node_id, kind, pool.nodes.items(.payload)).left;
     }
 
     pub fn getRight(node_id: Id, pool: *Pool) Error!Id {
         const idx = @intFromEnum(node_id);
         const kind = pool.nodes.items(.state)[idx].kind();
-        if (noChildKind(node_id, kind)) return Error.InvalidNode;
+        if (noChildKind(node_id, kind)) return error.InvalidNode;
         return childrenOf(node_id, kind, pool.nodes.items(.payload)).right;
     }
 
     pub fn getChunkedLeafChunks(node_id: Id, pool: *Pool) Error!*align(64) const [ChunkedLeaf.K][32]u8 {
         const idx = @intFromEnum(node_id);
-        if (pool.nodes.items(.state)[idx].kind() != .chunked_leaf) return Error.InvalidNode;
+        if (pool.nodes.items(.state)[idx].kind() != .chunked_leaf) return error.InvalidNode;
         return &chunkedLeafPtr(pool.nodes.items(.payload), idx).chunks;
     }
 
     pub fn getChunkedLeafLen(node_id: Id, pool: *Pool) Error!u16 {
         const idx = @intFromEnum(node_id);
-        if (pool.nodes.items(.state)[idx].kind() != .chunked_leaf) return Error.InvalidNode;
+        if (pool.nodes.items(.state)[idx].kind() != .chunked_leaf) return error.InvalidNode;
         return chunkedLeafPtr(pool.nodes.items(.payload), idx).len;
     }
 
     pub fn getChunkedLeafPtr(node_id: Id, pool: *Pool) Error!*ChunkedLeaf {
         const idx = @intFromEnum(node_id);
-        if (pool.nodes.items(.state)[idx].kind() != .chunked_leaf) return Error.InvalidNode;
+        if (pool.nodes.items(.state)[idx].kind() != .chunked_leaf) return error.InvalidNode;
         std.debug.assert(pool.nodes.items(.state)[idx].refCount() == 0);
         return chunkedLeafPtr(pool.nodes.items(.payload), idx);
     }
@@ -884,7 +884,7 @@ pub const Id = enum(u32) {
         std.debug.assert(intra_index < ChunkedLeaf.K);
 
         const idx = @intFromEnum(node_id);
-        if (pool.nodes.items(.state)[idx].kind() != .chunked_leaf) return Error.InvalidNode;
+        if (pool.nodes.items(.state)[idx].kind() != .chunked_leaf) return error.InvalidNode;
         const old_storage = chunkedLeafPtr(pool.nodes.items(.payload), idx);
 
         const new_storage = try pool.allocator.create(ChunkedLeaf);
@@ -904,7 +904,7 @@ pub const Id = enum(u32) {
 
     /// Returns a new chunked_leaf `Id` with each `intra_indices[i]` chunk replaced by
     /// `new_chunks[i]`. Heap blob cloned once; all updates applied in-place
-    /// in the new blob. Returns `Error.InvalidNode` if the receiver is not
+    /// in the new blob. Returns `error.InvalidNode` if the receiver is not
     /// a chunked_leaf variant. `intra_indices` and `new_chunks` must have equal length.
     pub fn setChunkedLeafChunks(
         node_id: Id,
@@ -915,7 +915,7 @@ pub const Id = enum(u32) {
         std.debug.assert(intra_indices.len == new_chunks.len);
 
         const idx = @intFromEnum(node_id);
-        if (pool.nodes.items(.state)[idx].kind() != .chunked_leaf) return Error.InvalidNode;
+        if (pool.nodes.items(.state)[idx].kind() != .chunked_leaf) return error.InvalidNode;
         const old_storage = chunkedLeafPtr(pool.nodes.items(.payload), idx);
 
         const new_storage = try pool.allocator.create(ChunkedLeaf);
@@ -973,7 +973,7 @@ pub const Id = enum(u32) {
             const idx = @intFromEnum(node_id);
             const k = states[idx].kind();
             if (noChildKind(node_id, k)) {
-                return Error.InvalidNode;
+                return error.InvalidNode;
             }
             const c = childrenOf(node_id, k, payloads);
             if (path.left()) {
@@ -1022,7 +1022,7 @@ pub const Id = enum(u32) {
             const idx = @intFromEnum(id);
             const k = states[idx].kind();
             if (noChildKind(id, k)) {
-                return Error.InvalidNode;
+                return error.InvalidNode;
             }
             const c = childrenOf(id, k, payloads);
             if (path.left()) {
@@ -1042,7 +1042,7 @@ pub const Id = enum(u32) {
             const idx = @intFromEnum(id);
             const k = states[idx].kind();
             if (noChildKind(id, k)) {
-                return Error.InvalidNode;
+                return error.InvalidNode;
             }
             const c = childrenOf(id, k, payloads);
             if (path.left()) {
@@ -1108,7 +1108,7 @@ pub const Id = enum(u32) {
                 const idx = @intFromEnum(node_id);
                 const k = states[idx].kind();
                 if (noChildKind(node_id, k)) {
-                    return Error.InvalidNode;
+                    return error.InvalidNode;
                 }
                 const c = childrenOf(node_id, k, payloads);
                 parents_buf[bit_i] = node_id;
@@ -1240,7 +1240,7 @@ pub const Id = enum(u32) {
                 const idx = @intFromEnum(node_id);
                 const k = states[idx].kind();
                 if (noChildKind(node_id, k)) {
-                    return Error.InvalidNode;
+                    return error.InvalidNode;
                 }
                 const c = childrenOf(node_id, k, payloads);
 
@@ -1263,7 +1263,7 @@ pub const Id = enum(u32) {
                 const idx = @intFromEnum(node_id);
                 const k = states[idx].kind();
                 if (noChildKind(node_id, k)) {
-                    return Error.InvalidNode;
+                    return error.InvalidNode;
                 }
                 const c = childrenOf(node_id, k, payloads);
                 if (path.left()) {
@@ -1323,7 +1323,7 @@ pub const Id = enum(u32) {
         const max_length = @as(Gindex.Uint, 1) << depth;
         if (index >= max_length - 1) {
             if (index >= max_length) {
-                return Error.InvalidLength;
+                return error.InvalidLength;
             }
             return root_node;
         }
@@ -1350,7 +1350,7 @@ pub const Id = enum(u32) {
             const idx = @intFromEnum(node_id);
             const k = states[idx].kind();
             if (noChildKind(node_id, k)) {
-                return Error.InvalidNode;
+                return error.InvalidNode;
             }
             const c = childrenOf(node_id, k, payloads);
 
@@ -1372,7 +1372,7 @@ pub const Id = enum(u32) {
             const idx = @intFromEnum(node_id);
             const k = states[idx].kind();
             if (noChildKind(node_id, k)) {
-                return Error.InvalidNode;
+                return error.InvalidNode;
             }
             const c = childrenOf(node_id, k, payloads);
 
@@ -1489,7 +1489,7 @@ pub const Id = enum(u32) {
                 const idx = @intFromEnum(node_id);
                 const k = states[idx].kind();
                 if (noChildKind(node_id, k)) {
-                    return Error.InvalidNode;
+                    return error.InvalidNode;
                 }
                 const c = childrenOf(node_id, k, payloads);
 
@@ -1512,7 +1512,7 @@ pub const Id = enum(u32) {
                 const idx = @intFromEnum(node_id);
                 const k = states[idx].kind();
                 if (noChildKind(node_id, k)) {
-                    return Error.InvalidNode;
+                    return error.InvalidNode;
                 }
                 const c = childrenOf(node_id, k, payloads);
                 if (path.left()) {
@@ -1629,7 +1629,7 @@ pub fn fillWithContents(pool: *Pool, contents: []Id, depth: Depth) !Id {
     }
     const max_length = @as(Gindex.Uint, 1) << depth;
     if (contents.len > max_length) {
-        return Error.InvalidLength;
+        return error.InvalidLength;
     }
 
     var d = depth;
@@ -1694,13 +1694,13 @@ pub const DepthIterator = struct {
         const path_len = self.base_gindex.pathLen();
         // Depth 0: only the root exists; yield once then finish.
         if (@intFromEnum(self.base_gindex) <= 1) {
-            if (self.index != 0) return Error.InvalidLength;
+            if (self.index != 0) return error.InvalidLength;
             self.index = 1;
             return self.node_id;
         }
 
         const max_length: Gindex.Uint = @intFromEnum(self.base_gindex);
-        if (self.index >= max_length) return Error.InvalidLength;
+        if (self.index >= max_length) return error.InvalidLength;
 
         const states = self.pool.nodes.items(.state);
         const payloads = self.pool.nodes.items(.payload);
@@ -1721,7 +1721,7 @@ pub const DepthIterator = struct {
             const idx = @intFromEnum(node_id);
             const k = states[idx].kind();
             if (noChildKind(node_id, k)) {
-                return Error.InvalidNode;
+                return error.InvalidNode;
             }
             const c = childrenOf(node_id, k, payloads);
             self.parents_buf[bit_i] = node_id;
@@ -1797,7 +1797,7 @@ pub const FillWithContentsIterator = struct {
     pub fn append(self: *FillWithContentsIterator, node_id: Id) Error!void {
         // Bounds check
         if (self.lefts[self.depth] != null) {
-            return Error.InvalidLength;
+            return error.InvalidLength;
         }
 
         var carry = node_id;

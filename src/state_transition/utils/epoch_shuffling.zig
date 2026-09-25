@@ -4,6 +4,8 @@ const types = @import("consensus_types");
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const preset = @import("preset").preset;
 const AnyBeaconState = @import("fork_types").AnyBeaconState;
+const BeaconState = @import("fork_types").BeaconState;
+const ForkSeq = @import("config").ForkSeq;
 const getSeed = @import("./seed.zig").getSeed;
 const c = @import("constants");
 const innerShuffleList = @import("swap_or_not_shuffle").innerShuffleList;
@@ -116,10 +118,21 @@ test EpochShuffling {
 pub fn computeEpochShuffling(allocator: Allocator, state: *AnyBeaconState, active_indices: []ValidatorIndex, epoch: Epoch) !*EpochShuffling {
     errdefer allocator.free(active_indices);
 
+    return switch (state.forkSeq()) {
+        inline else => |f| computeEpochShufflingForFork(f, allocator, state.castToFork(f), active_indices, epoch),
+    };
+}
+
+/// Takes ownership of `active_indices` on success; the caller retains ownership on failure.
+pub fn computeEpochShufflingForFork(
+    comptime fork: ForkSeq,
+    allocator: Allocator,
+    state: *BeaconState(fork),
+    active_indices: []ValidatorIndex,
+    epoch: Epoch,
+) !*EpochShuffling {
     var seed = [_]u8{0} ** 32;
-    switch (state.forkSeq()) {
-        inline else => |f| try getSeed(f, state.castToFork(f), epoch, c.DOMAIN_BEACON_ATTESTER, &seed),
-    }
+    try getSeed(fork, state, epoch, c.DOMAIN_BEACON_ATTESTER, &seed);
     return EpochShuffling.init(allocator, seed, epoch, active_indices);
 }
 

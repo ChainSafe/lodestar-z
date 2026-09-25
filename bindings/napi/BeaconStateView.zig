@@ -234,7 +234,13 @@ pub fn eth1Data(self: *BeaconStateView) !js_types.Eth1Data {
     var eth1_data_view = try cached_state.state.eth1Data();
     var eth1_data: ct.phase0.Eth1Data.Type = undefined;
     try eth1_data_view.toValue(allocator, &eth1_data);
-    return js_types.wrap(js_types.Eth1Data, try sszValueToNapiValue(env, ct.phase0.Eth1Data, &eth1_data));
+    // Manually create 'obj' since proposers can vote in any u64 deposit count,
+    // which does not fit a JS number.
+    const obj = try env.createObject();
+    try obj.setNamedProperty("depositRoot", try sszValueToNapiValue(env, ct.primitive.Root, &eth1_data.deposit_root));
+    try obj.setNamedProperty("depositCount", try env.createBigintUint64(eth1_data.deposit_count));
+    try obj.setNamedProperty("blockHash", try sszValueToNapiValue(env, ct.primitive.Bytes32, &eth1_data.block_hash));
+    return js_types.wrap(js_types.Eth1Data, obj);
 }
 
 pub fn latestBlockHeader(self: *BeaconStateView) !js_types.BeaconBlockHeader {
@@ -1577,7 +1583,7 @@ pub fn getNextShuffling(self: *BeaconStateView) !js.Value {
     return js_types.wrap(js.Value, try shufflingToNapi(shuffling));
 }
 
-pub fn getBeaconCommittee(self: *BeaconStateView, slot_arg: js.Number, index: js.Number) !js.Array {
+pub fn getBeaconCommittee(self: *BeaconStateView, slot_arg: js.Number, index: js.Number) !js.Uint32Array {
     const env = js.env();
     const cached_state = try self.acquireState();
     defer self.finishState();
@@ -1585,7 +1591,7 @@ pub fn getBeaconCommittee(self: *BeaconStateView, slot_arg: js.Number, index: js
     const index_: u64 = try unsignedInteger(index);
 
     const committee = try cached_state.epoch_cache.getBeaconCommittee(slot_, index_);
-    return .{ .val = try numberSliceToNapiValue(env, u64, committee, .{}) };
+    return .{ .val = try numberSliceToNapiValue(env, u64, committee, .{ .typed_array = .uint32 }) };
 }
 
 pub fn getBeaconCommitteeCountPerSlot(self: *BeaconStateView, epoch_arg: js.Number) !js.Number {

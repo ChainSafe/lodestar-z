@@ -3,7 +3,6 @@ const assert = std.debug.assert;
 const bls = @import("bls");
 
 const PublicKey = bls.PublicKey;
-const blstError = bls.BlstError;
 
 pub export fn zig_fuzz_init() callconv(.c) void {}
 
@@ -17,14 +16,14 @@ pub export fn zig_fuzz_test(
 
     const pk = PublicKey.deserialize(input) catch |err| {
         switch (err) {
-            blstError.BadEncoding, blstError.PointNotOnCurve, blstError.PointNotInGroup, blstError.PkIsInfinity => return,
+            error.BadEncoding, error.PointNotOnCurve, error.PointNotInGroup, error.PkIsInfinity => return,
             else => @panic("unexpected public key decode error"),
         }
     };
 
     pk.validate() catch |err| {
         switch (err) {
-            blstError.PointNotInGroup, blstError.PkIsInfinity => return,
+            error.PointNotInGroup, error.PkIsInfinity => return,
             else => @panic("unexpected public key validation error"),
         }
     };
@@ -32,13 +31,13 @@ pub export fn zig_fuzz_test(
     const encoded = pk.serialize();
     const pk2 = PublicKey.deserialize(&encoded) catch |err| {
         switch (err) {
-            blstError.BadEncoding, blstError.PointNotOnCurve, blstError.PointNotInGroup, blstError.PkIsInfinity => return,
+            error.BadEncoding, error.PointNotOnCurve, error.PointNotInGroup, error.PkIsInfinity => return,
             else => @panic("unexpected public key roundtrip error"),
         }
     };
     pk2.validate() catch |err| {
         switch (err) {
-            blstError.PointNotInGroup, blstError.PkIsInfinity => return,
+            error.PointNotInGroup, error.PkIsInfinity => return,
             else => @panic("unexpected public key validation error"),
         }
     };

@@ -25,7 +25,7 @@ const Owner = struct {
         const env = self.env orelse return;
         const node_bytes = @sizeOf(@FieldType(Node, "payload")) +
             @sizeOf(@FieldType(Node, "root")) + @sizeOf(@FieldType(Node, "state"));
-        const bytes: i64 = @intCast(self.pool.getNodesInUse() * node_bytes + self.memory.bytes_in_use);
+        const bytes: i64 = @intCast(self.pool.getNodesInUse() * node_bytes + self.memory.bytesInUse());
         const delta = bytes - self.reported_bytes;
         if (delta == 0) return;
 
@@ -40,7 +40,7 @@ const Owner = struct {
     pub fn deinit(self: *Owner) void {
         std.debug.assert(self.env == null);
         self.pool.deinit();
-        std.debug.assert(self.memory.bytes_in_use == 0);
+        std.debug.assert(self.memory.bytesInUse() == 0);
     }
 };
 

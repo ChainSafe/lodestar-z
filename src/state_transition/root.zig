@@ -114,6 +114,7 @@ pub const preset = @import("preset").preset;
 const EpochShuffling = @import("./utils/epoch_shuffling.zig");
 pub const calculateShufflingDecisionRoot = EpochShuffling.calculateShufflingDecisionRoot;
 pub const processProposerLookahead = @import("./epoch/process_proposer_lookahead.zig").processProposerLookahead;
+pub const startProposerLookaheadShuffling = @import("./epoch/process_proposer_lookahead.zig").startProposerLookaheadShuffling;
 
 const load_state = @import("load_state.zig");
 pub const loadState = load_state.loadState;

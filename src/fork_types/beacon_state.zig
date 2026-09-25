@@ -461,6 +461,11 @@ pub fn BeaconState(comptime f: ForkSeq) type {
             return @ptrCast(try lookahead_view.getAll(allocator));
         }
 
+        pub fn proposerLookaheadInto(self: *Self, out: *[ForkTypes(.fulu).ProposerLookahead.length]u64) !void {
+            var lookahead_view = try self.proposerLookahead();
+            _ = try lookahead_view.getAllInto(out[0..]);
+        }
+
         pub fn setProposerLookahead(self: *Self, proposer_lookahead: *const [ForkTypes(.fulu).ProposerLookahead.length]u64) !void {
             if (comptime (f == .phase0 or f == .altair or f == .bellatrix or f == .capella or f == .deneb or f == .electra)) return error.InvalidAtFork;
             try self.inner.setValue("proposer_lookahead", proposer_lookahead);
