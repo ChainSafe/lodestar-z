@@ -440,10 +440,11 @@ test "remembered qualification takes our dialed endpoint once a ready connection
     try std.testing.expectEqual(unix_s + 360, rememberedAt(&c, remembered.qualify_ms + 60_000)[0].qualified_at_s);
     try std.testing.expectEqual([3]u64{ 1, 1, 1 }, funnel(&c, .fresh));
     try std.testing.expectEqual([3]u64{ 0, 0, 0 }, funnel(&c, .remembered));
-    // A peer we banned is no longer eligible, so service stops refreshing its record.
-    _ = c.report(peer, .fatal, remembered.qualify_ms + 60_000);
+    // A local ban forgets the peer at once, and service no longer requalifies it.
+    try std.testing.expectEqual(t.ReputationDecision.ban, c.report(peer, .fatal, remembered.qualify_ms + 60_000).?);
+    try std.testing.expectEqual(@as(usize, 0), rememberedAt(&c, remembered.qualify_ms + 60_000).len);
     c.rememberConnected(at(remembered.qualify_ms + 120_000));
-    try std.testing.expectEqual(unix_s + 360, rememberedAt(&c, remembered.qualify_ms + 120_000)[0].qualified_at_s);
+    try std.testing.expectEqual(@as(usize, 0), rememberedAt(&c, remembered.qualify_ms + 120_000).len);
 }
 
 test "remembered records refresh at a served close and drop on rejection, health, ban and identity mismatch" {
@@ -451,16 +452,17 @@ test "remembered records refresh at a served close and drop on rejection, health
     var c = try Catalog.initWithIntents(a, wide, 8, 16, 1);
     defer c.deinit(a);
     var d = try dialing.Dialing.init(.{ .capacity = 8, .concurrent_max = 8, .seed = 1 });
-    var candidates: [6]enr.Candidate = undefined;
-    var seeds: [6]remembered.Record = undefined;
+    var candidates: [7]enr.Candidate = undefined;
+    var seeds: [7]remembered.Record = undefined;
     for (&candidates, &seeds, 0..) |*value, *seed, i| {
         value.* = try candidate(@intCast(i + 1), 0);
         seed.* = .{ .peer = value.peer, .address = address, .qualified_at_s = unix_s - 60 };
     }
     c.remembered.load(&seeds, &local, unix_s, c.random.random());
-    const peers = try dialAll(&c, &d, candidates[0..5], 0);
+    const peers = try dialAll(&c, &d, candidates[0..6], 0);
     const now = at(remembered.qualify_ms);
-    const conns = [_]t.Handle{ .{ .index = 0, .generation = 1 }, .{ .index = 1, .generation = 1 }, .{ .index = 2, .generation = 1 }, .{ .index = 3, .generation = 1 }, .{ .index = 4, .generation = 1 } };
+    var conns: [6]t.Handle = undefined;
+    for (&conns, 0..) |*conn, i| conn.* = .{ .index = @intCast(i), .generation = 1 };
     // A remote shutdown ends service without rejecting us, so it refreshes the record.
     c.settleRejections(peers[0], conns[0], true, .shutdown, now.mono_ms);
     c.rememberClosed(peers[0], conns[0], true, .remote_goodbye, .shutdown, now);
@@ -470,13 +472,21 @@ test "remembered records refresh at a served close and drop on rejection, health
     c.rememberClosed(peers[2], conns[2], true, .remote_goodbye, .too_many_peers, now);
     c.rememberClosed(peers[3], conns[3], true, .health_timeout, null, now);
     try std.testing.expect(c.disconnect(peers[3], conns[3], .health_timeout, now.mono_ms));
-    c.rememberClosed(peers[4], conns[4], true, .banned, null, now);
-    try std.testing.expect(c.disconnect(peers[4], conns[4], .banned, now.mono_ms));
-    // Another identity answered at the sixth peer's endpoint.
-    try d.enqueueDiscovered(&c, &candidates[5], &.{}, &.{}, 0);
+    // A ban during an already scheduled close forgets the peer, and the close does not restore it.
+    try std.testing.expect(c.markUnavailable(peers[4], conns[4], .count_pruning));
+    _ = c.report(peers[4], .fatal, now.mono_ms);
+    c.rememberClosed(peers[4], conns[4], true, .count_pruning, null, now);
+    try std.testing.expect(c.disconnect(peers[4], conns[4], .count_pruning, now.mono_ms));
+    // A host verdict can ban a peer after its connection closed.
+    c.rememberClosed(peers[5], conns[5], true, .transport_closed, null, now);
+    try std.testing.expect(c.disconnect(peers[5], conns[5], .transport_closed, now.mono_ms));
+    try std.testing.expectEqual(@as(usize, 4), rememberedAt(&c, remembered.qualify_ms).len);
+    try std.testing.expectEqual(t.ReputationDecision.ban, c.report(peers[5], .fatal, now.mono_ms).?);
+    // Another identity answered at the seventh peer's endpoint.
+    try d.enqueueDiscovered(&c, &candidates[6], &.{}, &.{}, 0);
     var out: [1]dialing.DialIntent = undefined;
     try std.testing.expectEqual(@as(usize, 1), d.poll(&c, 0, &out));
-    const handle: t.Handle = .{ .index = 5, .generation = 1 };
+    const handle: t.Handle = .{ .index = 6, .generation = 1 };
     try std.testing.expect(d.dialStarted(out[0].token, handle));
     try std.testing.expect(d.dialClosed(&c, handle, .peer_id_mismatch, 1));
     const records = rememberedAt(&c, remembered.qualify_ms);
@@ -486,10 +496,10 @@ test "remembered records refresh at a served close and drop on rejection, health
         try std.testing.expect(value.peer.eql(&candidates[0].peer) or value.peer.eql(&candidates[1].peer));
         try std.testing.expectEqual(expected, value.qualified_at_s);
     }
-    inline for (.{ .rejection, .health, .banned, .peer_id_mismatch }) |reason| {
-        try std.testing.expectEqual(@as(u64, 1), c.remembered.counters.removals[@intFromEnum(@as(remembered.Removal, reason))]);
+    inline for (.{ .{ .rejection, 1 }, .{ .health, 1 }, .{ .banned, 2 }, .{ .peer_id_mismatch, 1 } }) |removal| {
+        try std.testing.expectEqual(@as(u64, removal[1]), c.remembered.counters.removals[@intFromEnum(@as(remembered.Removal, removal[0]))]);
     }
-    try std.testing.expectEqual([3]u64{ 6, 5, 5 }, funnel(&c, .fresh));
+    try std.testing.expectEqual([3]u64{ 7, 6, 6 }, funnel(&c, .fresh));
 }
 
 test "replayed remembered candidates meet the rejection memory, the endpoint history and general demand" {
