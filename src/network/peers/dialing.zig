@@ -5,6 +5,7 @@ const Row = catalog_mod.Row;
 const policy = @import("policy.zig");
 const enr = @import("enr.zig");
 const t = @import("types.zig");
+const dial_history = @import("dial_history.zig");
 const Engine = @import("../quic/engine.zig").Engine;
 const DeadlineHeap = @import("../deadline_heap.zig").DeadlineHeap;
 const assert = std.debug.assert;
@@ -619,7 +620,8 @@ pub const Dialing = struct {
         return (index + catalog.rows.len - self.cursor) % catalog.rows.len < (best + catalog.rows.len - self.cursor) % catalog.rows.len;
     }
     /// Only a live manual intent dials through the identity's rejection block; discovery and direct
-    /// retries wait for it.
+    /// retries wait for it. A key computed from a block the history later forgets keeps the row
+    /// waiting until that block's end.
     pub fn eligibleAt(catalog: *const Catalog, row: *const Row, now_ms: u64) u64 {
         var rep = row.reputation;
         rep.decay(now_ms);
@@ -642,7 +644,8 @@ pub const Dialing = struct {
         return due;
     }
     /// Test builds check that the heaps hold every key a scan of every intent and attempt would
-    /// compute, that a dialable row due now is due on the heap, and that the counts match the table.
+    /// compute, that a dialable row due now is due on the heap unless it waits out a forgotten
+    /// rejection block, and that the counts match the table.
     fn checkIntents(self: *const Dialing, catalog: *const Catalog, now_ms: u64) void {
         assert(catalog.dial.dirty_count == 0);
         var held: Attempts = .{};
@@ -658,8 +661,12 @@ pub const Dialing = struct {
             assert(catalog.dial.expiries.get(@intCast(index)) == self.expiryOf(catalog, index));
             const key = catalog.dial.eligible.get(@intCast(index));
             if (retained and dialable(row, now_ms)) {
-                // A key computed earlier may stand before a fresh one; it never stands after a due one.
-                assert(key != null and key.? <= @max(now_ms, eligibleAt(catalog, row, now_ms)) +| 1);
+                // A key computed earlier may stand before a fresh one, which costs a wake. It stands
+                // after a due one only when the history forgot the rejection block it waits for, an
+                // eviction or a colliding clear, and then no longer than that block could run.
+                const due = @max(now_ms, eligibleAt(catalog, row, now_ms)) +| 1;
+                const forgotten = catalog.history.rejectedUntil(catalog.history.identityKey(&row.identity), now_ms) == 0;
+                assert(key != null and (key.? <= due or (forgotten and key.? <= now_ms +| dial_history.rejection_block_max_ms)));
             } else {
                 // A lapsed manual intent keeps its key until expire clears it.
                 assert(key == null or (row.intent.manual_until_ms != 0 and now_ms >= row.intent.manual_until_ms));

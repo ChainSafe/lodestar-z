@@ -14,6 +14,8 @@ pub const mismatch_memory_ms: u64 = 6 * 60 * 60_000;
 pub const rejection_memory_ms: u64 = 2 * 60 * 60_000;
 /// The blocks of a second and of every later rejection strike inside the memory window.
 const rejection_escalation_ms = [_]u64{ 15 * 60_000, 60 * 60_000 };
+/// The longest block any rejection sets.
+pub const rejection_block_max_ms: u64 = rejection_escalation_ms[rejection_escalation_ms.len - 1];
 /// A connection that completed the Status and Metadata exchange and closes at least this long after
 /// its admission clears its identity's rejections at the close. Full peers commonly prune a new
 /// connection within its first 10 minutes, and a peer that kept us longer served us for longer than

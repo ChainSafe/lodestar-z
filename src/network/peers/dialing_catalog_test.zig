@@ -348,3 +348,26 @@ test "peer fold a full direct peer waits 5, 15 then 60 minutes while a manual co
     try std.testing.expectEqual(@as(usize, 1), d.poll(&c, due, &out));
     try std.testing.expect(out[0].peer.eql(&direct.peer));
 }
+
+test "peer fold a direct peer whose rejection the history evicts mid-block waits out the old block" {
+    var c = try Catalog.initWithIntents(a, opts, 2, 8, 1);
+    defer c.deinit(a);
+    var d = try dialing.Dialing.init(.{ .capacity = 2, .concurrent_max = 1, .seed = 1 });
+    const direct = try candidate(1, 0);
+    try d.enqueue(&c, &direct.peer, &.{address}, true, 0);
+    try rejectedRound(&c, &d, &direct.peer, 0, .too_many_peers, 0);
+    const block_end = 5 * 60_000;
+    try std.testing.expectEqual(@as(u64, block_end), d.nextWakeup(&c, 0, 1).?);
+    // Longer-lived entries fill the rest of the identity's probe window, so the next claim homed
+    // on its slot evicts it.
+    const key = c.history.identityKey(&direct.peer);
+    for (1..history.probe_max) |offset| c.history.recordEndpoint(key +% offset, .peer_id_mismatch, 0, 1);
+    _ = c.history.reject(key +% c.history.entries.len, .fault, 1);
+    try std.testing.expectEqual(@as(u64, 0), c.history.rejectedUntil(key, 1));
+    try std.testing.expectEqual(@as(u64, block_end), d.nextWakeup(&c, 1, 1).?);
+    var out: [1]dialing.DialIntent = undefined;
+    try std.testing.expectEqual(@as(usize, 0), d.poll(&c, block_end - 1, &out));
+    try std.testing.expectEqual(@as(u64, block_end), d.nextWakeup(&c, block_end - 1, 1).?);
+    try std.testing.expectEqual(@as(usize, 1), d.poll(&c, block_end, &out));
+    try std.testing.expect(out[0].peer.eql(&direct.peer));
+}
