@@ -41,13 +41,13 @@ The assets protected here are:
 - integrity of shared native state across calls and Node.js environments; and
 - integrity of source dependencies and published native artifacts.
 
-The relevant attackers are remote peers or API users whose values reach Lodestar-z, and
-same-process JavaScript callers that can supply malformed values. Attackers may also target
-dependencies, build workflows, release credentials, or the package registry. The operator and host
-application are trusted to select configuration, verification policy, initial state, local files,
-wall-clock time, and execution or data-availability status. Same-process Zig code is trusted to
-honor native API preconditions. Host compromise and malicious replacement of trusted local storage
-are out of scope.
+The relevant attackers are remote peers or API users whose values reach Lodestar-z. Attackers may
+also target dependencies, build workflows, release credentials, or the package registry. The
+operator and host application are trusted to select configuration, verification policy, initial
+state, local files, wall-clock time, and execution or data-availability status. Lodestar is the only
+JavaScript consumer of the bindings and, like same-process Zig code, is trusted to honor native API
+preconditions. Host compromise, hostile host code, and malicious replacement of trusted local
+storage are out of scope.
 
 ## Security objectives
 
@@ -72,7 +72,7 @@ are out of scope.
 | Peer coverage | Connected gossip coverage requires an eligible route on the requested fork and topic. Subscription announcements do not establish custody service or prove delivery. Custody coverage uses separate assignments and fresh compatible metadata; request consumers still check slot availability. Coverage maintenance uses bounded storage, finite newcomer grace, and paced replacement when demand remains unmet. |
 | Network owner to host | The owner copies or explicitly lends bounded data across documented lifetimes. Host backpressure and teardown must release borrows and terminate pending work without blaming peers for local resource refusal. Retryable publication admission refusal must precede publication side effects and retaining caller payloads. A locally refused gossip admission leaves retained messages and history intact; any replacement commits with candidate admission. Gossip validation retains execution capacity until the host task retires, including after its protocol deadline. Host request handlers retain serving capacity until their asynchronous operations retire, including after stream cancellation; a stream terminal event alone does not acknowledge host retirement. The transport obtains cryptographically secure startup entropy through its I/O provider. The host supplies consensus verdicts, configuration, and clock policy. Local state must supply all fields required by advertised receive protocols, including custody for early Metadata v3 support. Invalid state or capability updates must fail before publishing ENR, Identify, or serving state. |
 | Remote input through Lodestar | Values remain hostile until the validation required by the consuming operation has completed. Reports must trace the supported or planned path into Lodestar-z. |
-| JavaScript to N-API | Runtime types, lengths, indexes, encodings, and buffer ranges are untrusted. TypeScript declarations and debug assertions are not runtime validation. |
+| JavaScript to N-API | The caller is Lodestar, trusted to follow the documented API contract; hostile host code such as prototype pollution, hostile accessors, or replaced globals is out of scope. Bindings still check runtime types, lengths, indexes, encodings, and buffer ranges where a mistake would violate memory safety or native state, and report violations as programming errors. TypeScript declarations are not runtime checks. |
 | Serialized input to SSZ | Decoders must enforce canonical encoding, bounds, offsets, and safe ownership. Beacon-state construction is the exception described below: its bytes have trusted provenance, but still require structural SSZ validation. |
 | State transition | The pre-state is an eligible trusted state. The signed block is hostile. Processing must not mutate the pre-state, and the result becomes trusted only after the required checks succeed. |
 | Fork choice | Blocks have passed full state transition, attestations have passed their applicable validation, external statuses are accurate, and local time is trusted. Fork choice still owns its specified ancestry, timing, vote, invalidation, and bound checks. |
