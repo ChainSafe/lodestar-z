@@ -352,6 +352,21 @@ it("keeps queued records and closes after an ordinary callback exception", () =>
   expect(output).toContain("callback-closed");
 });
 
+it("notifies again after a callback that throws before scheduling an exchange", () => {
+  const output = execFileSync(
+    process.execPath,
+    [
+      "--import",
+      "tsx",
+      "--force-node-api-uncaught-exceptions-policy",
+      "bindings/test/fixtures/network-lifecycle.mjs",
+      "rearm",
+    ],
+    {encoding: "utf8", timeout: 10000}
+  );
+  expect(output).toContain("rearmed");
+});
+
 it("releases live requests, incoming cells and gossip batches on worker termination", () => {
   const output = execFileSync(
     process.execPath,

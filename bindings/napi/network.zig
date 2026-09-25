@@ -171,10 +171,10 @@ fn notify(env: napi.Env, callback: Value, runtime: *Runtime) !void {
     runtime.unlock();
     if (!alive) return;
     const result = env.callFunction(callback, try env.getUndefined(), .{}) catch {
-        // A throwing host may not have scheduled an exchange, so the next move notifies again. No settlement
-        // can run until the exception propagates.
+        // A throwing host may not have scheduled an exchange, so any later publication notifies again. No
+        // settlement can run until the exception propagates.
         runtime.lock();
-        runtime.readiness.armed = true;
+        runtime.readiness.forget();
         runtime.unlock();
         return;
     };
@@ -183,7 +183,7 @@ fn notify(env: napi.Env, callback: Value, runtime: *Runtime) !void {
     runtime.lock();
     defer runtime.unlock();
     runtime.refreshLocked();
-    if (runtime.readiness.control.len > 0) runtime.notifyLocked() else runtime.readiness.armed = true;
+    if (runtime.readiness.control.len > 0) runtime.notifyLocked() else runtime.readiness.forget();
 }
 fn makeError(env: napi.Env, err: anyerror) !Value {
     return @import("network_js.zig").errorValue(env, @errorName(err));

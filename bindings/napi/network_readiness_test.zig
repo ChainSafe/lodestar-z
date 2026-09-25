@@ -40,7 +40,7 @@ test "recomputing a queued row keeps its position" {
     try std.testing.expectEqual([_]?Row{ .peers, .checks, .gossip, null, null }, order(&ready));
 }
 
-test "a pinned row ignores publications until its unpin moves it where it belongs" {
+test "a pinned row ignores publications until its unpin moves it where it belongs, and forget re-arms" {
     var ready: Readiness = .{ .armed = false };
     for ([_]Row{ .peers, .checks, .gossip }) |row| _ = ready.recompute(row, .payload);
     ready.pin(.peers);
@@ -55,4 +55,8 @@ test "a pinned row ignores publications until its unpin moves it where it belong
     ready.unpin(.gossip, .parked);
     try std.testing.expectEqual(readiness.Place.parked, ready.place(.gossip));
     try std.testing.expect(!ready.arm());
+    // A declined notification forgets every row, so the next publication into any of them notifies.
+    ready.forget();
+    try std.testing.expect(ready.armed and ready.payload.len == 0);
+    try std.testing.expect(ready.recompute(.peers, .payload));
 }

@@ -583,8 +583,8 @@ pub const Runtime = struct {
         self.diag.state = if (self.reason == .failed) .failed else .closed;
         std.log.scoped(.network_runtime).info("owner_stopped reason={s} turns={d} operational_failures={d}", .{ @tagName(self.reason), self.diag.ownerTurns, self.diag.operationalFailures });
         // Every host sees quiescence, also one whose waiting payload left it disarmed or one already collected.
-        self.refreshLocked();
         self.readiness.armed = false;
+        self.refreshLocked();
         self.notifyLocked();
         const release_notify = self.notify_live;
         self.notify_live = false;

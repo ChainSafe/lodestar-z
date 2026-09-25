@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import {createSocket} from "node:dgram";
 import {setTimeout as delay} from "node:timers/promises";
+import {initializeNativeNetworkRuntime} from "../../src/network.js";
 import {
   applicationConfig,
   localIntent,
   runtimeReleased,
   Settlements,
+  settleOnly,
   startRuntime,
   topicName,
   unreachableConnect,
@@ -91,4 +93,33 @@ if (mode === "exit") {
   } finally {
     await Promise.all([pair.left.close(), pair.right.close()]);
   }
+} else if (mode === "rearm") {
+  // A notifier that throws before scheduling an exchange leaves nothing queued, so a later completion notifies again.
+  process.on("uncaughtException", (error) => assert.equal(error.message, "notifier"));
+  let notifications = 0;
+  const config = applicationConfig();
+  const runtime = initializeNativeNetworkRuntime(config, () => {
+    notifications++;
+    throw new Error("notifier");
+  });
+  const intent = runtime.applyIntent(localIntent(config), config.initialSlot);
+  for (let i = 0; i < 200 && notifications === 0; i++) await delay(10);
+  // Each publication while the owner starts notifies again; an idle owner publishes nothing.
+  await delay(100);
+  const idle = notifications;
+  assert(idle > 0);
+  const identity = runtime.getIdentity();
+  for (let i = 0; i < 200 && notifications === idle; i++) await delay(10);
+  assert(notifications > idle);
+  let closed = false;
+  void runtime.close().then(() => {
+    closed = true;
+  });
+  for (let i = 0; i < 400 && !closed; i++) {
+    runtime.exchange([], settleOnly);
+    await delay(5);
+  }
+  assert.equal((await intent).slot, config.initialSlot);
+  assert.equal((await identity).peerId, runtime.identity.peerId);
+  console.log("rearmed");
 } else throw new Error("Unknown lifecycle scenario");
