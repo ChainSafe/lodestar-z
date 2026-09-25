@@ -87,8 +87,7 @@ pub fn publishError(env: napi.Env, err: anyerror) !Value {
         error.NoPeersSubscribedToTopic => "no_peers_subscribed_to_topic",
         else => null,
     };
-    const code = try env.createStringUtf8(if (reason != null) "NetworkGossipPublishFailed" else @errorName(err));
-    const object = try env.createError(code, code);
+    const object = try @import("network_js.zig").errorValue(env, if (reason != null) "NetworkGossipPublishFailed" else @errorName(err));
     if (reason) |text| try put(object, "reason", try env.createStringUtf8(text));
     return object;
 }

@@ -494,6 +494,52 @@ test("settlement leaves Error to the host and drops each settled error's stack",
   expect(await connect).toMatchObject({code: "NetworkClosed", stack: "Error: NetworkClosed"});
 });
 
+/** Closes a runtime and settles its pending connect under an inherited `code` setter that installs a stack setter. */
+async function settleUnderCodeSetter(setters: unknown[]) {
+  const runtime = initializeNativeNetworkRuntime(applicationConfig(), () => undefined);
+  const connect = runtime.connect(...unreachableConnect()).catch((error: unknown) => error);
+  let closed = false;
+  void runtime.close().then(() => {
+    closed = true;
+  });
+  for (let i = 0; i < 400 && runtime.state !== "closed"; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  Object.defineProperty(Error.prototype, "code", {
+    configurable: true,
+    set(this: object, value: unknown) {
+      setters.push(value);
+      Object.defineProperty(this, "stack", {configurable: true, set: () => setters.push("stack")});
+    },
+  });
+  let settled = 0;
+  try {
+    settled = runtime.exchange(settleOnly).settled;
+  } finally {
+    Reflect.deleteProperty(Error.prototype, "code");
+  }
+  for (let i = 0; i < 400 && !closed; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    runtime.exchange(settleOnly);
+  }
+  return {error: await connect, facade: new WeakRef(runtime), settled};
+}
+
+test("settled errors run no inherited code setter and keep no frames that retain the facade", async () => {
+  const setters: unknown[] = [];
+  const {facade, error, settled} = await settleUnderCodeSetter(setters);
+  expect(settled).toBe(1);
+  expect(setters).toEqual([]);
+  expect(error).toBeInstanceOf(Error);
+  expect(Object.getOwnPropertyDescriptor(error, "code")?.value).toBe("NetworkClosed");
+  expect(error).toMatchObject({message: "NetworkClosed", name: "Error", stack: "Error: NetworkClosed"});
+  // Dereferencing keeps the target alive for the rest of the job, so each collection runs in a later one.
+  for (let i = 0; i < 100; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    global.gc?.();
+    if (!facade.deref()) break;
+  }
+  expect(facade.deref()).toBeUndefined();
+});
+
 test.each([
   "exit",
   "facade-gc",

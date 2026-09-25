@@ -184,8 +184,7 @@ fn notify(env: napi.Env, callback: Value, runtime: *Runtime) !void {
     for (0..2) |_| if (!try settleWithin(env, runtime, publications.capacity_max)) break;
 }
 fn makeError(env: napi.Env, err: anyerror) !Value {
-    const name = try env.createStringUtf8(@errorName(err));
-    return env.createError(name, name);
+    return @import("network_js.zig").errorValue(env, @errorName(err));
 }
 
 /// Settles up to `limit` completions per table, then the close result once the owner has
