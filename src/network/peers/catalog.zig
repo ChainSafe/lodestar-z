@@ -686,13 +686,9 @@ pub const Catalog = struct {
         const delay = @min(@as(u64, 5_000) << @intCast(row.intent.failures - 1), 300_000);
         row.intent.eligible_at_ms = @max(row.intent.eligible_at_ms, now_ms +| delay +| (self.random.random().int(u16) % 1_001));
         self.connection_backoffs +|= 1;
-        switch (reason) {
-            .health_timeout, .health_error => {
-                self.remembered.forget(&row.identity, .health);
-                self.recordHealth(index, now_ms);
-            },
-            .banned => self.remembered.forget(&row.identity, .banned),
-            else => {},
+        if (reason == .health_timeout or reason == .health_error) {
+            self.remembered.forget(&row.identity, .health);
+            self.recordHealth(index, now_ms);
         }
     }
 
@@ -912,7 +908,10 @@ pub const Catalog = struct {
             self.noteReputation(row, now_ms);
             self.markDial(ref.index);
         }
-        return row.reputation.apply(action, now_ms);
+        const decision = row.reputation.apply(action, now_ms);
+        // A local ban forgets the peer whether or not a connection is left to close.
+        if (decision == .ban) self.remembered.forget(&row.identity, .banned);
+        return decision;
     }
 
     pub fn nonCompletion(self: *Catalog, ref: t.PeerRef, now_ms: u64) bool {
