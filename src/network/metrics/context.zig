@@ -19,9 +19,14 @@ pub const Context = struct {
     mesh_clients: [std.meta.fields(client.Client).len]usize = @splat(0),
     peer_count: usize = 0,
     relevant: usize = 0,
+    /// Kernel drop totals per family of the QUIC and discovery UDP sockets. Reading them extends
+    /// each socket's 32-bit kernel count, so `init` takes the owner mutably.
+    socket_drops: [2][2]?u64 = @splat(@splat(null)),
 
-    pub fn init(owner: *const network.NetworkCore, now: @import("../types.zig").Now, running: bool) Context {
+    pub fn init(owner: *network.NetworkCore, now: @import("../types.zig").Now, running: bool) Context {
         var result: Context = .{ .owner = owner, .now = now, .running = running };
+        result.socket_drops[0] = owner.transport.udp.sockets.drops();
+        if (owner.discovery) |discovery| result.socket_drops[1] = discovery.transport.sockets.drops();
         if (!running) return result;
         var clients: peers.ConnectionClients = .{};
         for (owner.peer_manager.catalog.rows) |*row| {

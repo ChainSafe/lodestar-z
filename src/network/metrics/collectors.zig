@@ -199,10 +199,10 @@ fn writeSockets(self: *const Context, w: *prom.Encoder) prom.Error!void {
     const drops = try w.family(.{
         .name = "lodestar_native_udp_socket_drops_total",
         .kind = .counter,
-        .help = "Datagrams the kernel dropped at the socket, mostly on a full receive buffer; Linux only, wraps at 2^32",
+        .help = "Datagrams the kernel dropped at the socket, mostly on a full receive buffer; Linux only",
         .labels = &.{ "role", "family" },
     });
-    for (roles) |role| for ((role[1] orelse continue).drops(), families) |count, family| {
+    for (roles, self.socket_drops) |role, counts| for (counts, families) |count, family| {
         try drops.sample(.{ role[0], family }, count orelse continue);
     };
 }
