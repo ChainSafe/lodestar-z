@@ -1,5 +1,5 @@
 import {startPeer} from "../utils/network-peer.js";
-import {runtimeReleased, startRuntime} from "../utils/network.js";
+import {checksOnly, gossipAll, nextIncoming, runtimeReleased, startRuntime} from "../utils/network.js";
 import assert from "node:assert/strict";
 import {createSocket} from "node:dgram";
 import {once} from "node:events";
@@ -32,12 +32,12 @@ if (!isMainThread) {
   const [remote] = await once(parentPort, "message");
   const outgoing = runtime.request(remote.peerId, blocks, new Uint8Array(32));
   const pending = outgoing.next().catch(() => undefined);
-  const incoming = await until(() => runtime.takeIncomingRequest());
+  const incoming = await until(() => nextIncoming(runtime));
   await until(() => {
-    runtime.classifyGossip(runtime.drainGossipChecks().map(({handle}) => ({handle, available: false})));
+    runtime.classifyGossip(runtime.exchange(checksOnly).checks.map(({handle}) => ({handle, available: false})));
     return runtime.diagnostics().gossip.queued > 0;
   });
-  const batch = runtime.drainGossip();
+  const batch = runtime.exchange(gossipAll).gossip;
   assert.equal(batch.messages.length, 1);
   parentPort.postMessage({port: identity.localEndpoint.port, diagnostics: runtime.diagnostics()});
   parentPort.on("message", () => void [incoming, outgoing, pending, batch]);

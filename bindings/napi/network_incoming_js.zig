@@ -44,54 +44,7 @@ fn refNotify(runtime: *Runtime) void {
     runtime.unlock();
     if (live) runtime.notify.ref(runtime.env) catch {};
 }
-pub fn take(runtime: *Runtime) !Value {
-    runtime.retain();
-    defer runtime.release();
-    runtime.lock();
-    if (runtime.stop or runtime.quiescent) {
-        runtime.unlock();
-        return runtime.env.getNull();
-    }
-    const table = &runtime.incoming.?;
-    const token = table.oldest() orelse {
-        runtime.unlock();
-        return runtime.env.getNull();
-    };
-    const cell = table.get(token).?;
-    cell.copying = true;
-    cell.state = .copying;
-    table.refresh(cell);
-    runtime.unlock();
-    errdefer {
-        runtime.lock();
-        cell.copying = false;
-        cell.action = .cancel;
-        cell.state = if (cell.native) .serving else .terminal;
-        table.releasePayload(cell);
-        table.refresh(cell);
-        if (!cell.native and !cell.serving_retained) table.retire(token) else cell.release_requested = true;
-        runtime.diag.operationalFailures +|= 1;
-        runtime.signalLocked();
-        runtime.unlock();
-    }
-    const deferred = try runtime.env.createPromise();
-    errdefer @import("network_js.zig").discardPromise(runtime.env, deferred);
-    const descriptor = try descriptorValue(runtime, token, cell, deferred);
-    runtime.lock();
-    cell.closed = deferred;
-    cell.copying = false;
-    cell.exposed = true;
-    table.diag.requestsTaken +|= 1;
-    runtime.bridge.deliver(.serving_start, 1);
-    table.releaseInput(cell);
-    cell.state = if (cell.native) .serving else .terminal;
-    table.releasePayload(cell);
-    table.refresh(cell);
-    runtime.unlock();
-    refNotify(runtime);
-    return descriptor;
-}
-fn descriptorValue(runtime: *Runtime, token: incoming.Token, cell: *const incoming.Cell, deferred: napi.Deferred) !Value {
+pub fn descriptorValue(runtime: *Runtime, token: incoming.Token, cell: *const incoming.Cell, deferred: napi.Deferred) !Value {
     const env = runtime.env;
     const object = try env.createObject();
     try put(object, "handle", try tokenValue(runtime, token));

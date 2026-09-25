@@ -14,6 +14,7 @@ const gossip_js = @import("network_gossip_js.zig");
 const incoming = @import("network_incoming.zig");
 const incoming_js = @import("network_incoming_js.zig");
 const request_js = @import("network_request_js.zig");
+const exchange_mod = @import("network_exchange.zig");
 
 pub const js_meta = js.class(.{});
 
@@ -147,16 +148,18 @@ fn onNotify(env: napi.Env, callback: Value, runtime: *Runtime, _: *void) void {
 }
 
 fn settlementFailed(env: napi.Env, runtime: *Runtime, err: anyerror) void {
-    switch (err) {
-        // Node may disable JavaScript before running environment cleanup hooks.
-        error.Closing, error.CannotRunJS, error.PendingException => runtime.forceStop(true),
-        // Failed settlement of valid, preallocated handles cannot notify the host reliably.
-        else => env.fatalError("native network result settlement", @errorName(err)),
-    }
+    if (jsStopped(err)) return runtime.forceStop(true);
+    // Failed settlement of valid, preallocated handles cannot notify the host reliably.
+    env.fatalError("native network result settlement", @errorName(err));
 }
 
-/// The notification callback only schedules: a host that returns true drains through `settle`
-/// and ends with `endDrain`, which releases the latch this callback leaves set. A callback that
+/// Node may disable JavaScript before running environment cleanup hooks.
+fn jsStopped(err: anyerror) bool {
+    return err == error.Closing or err == error.CannotRunJS or err == error.PendingException;
+}
+
+/// The notification callback only schedules: a host that returns true drains through `exchange`,
+/// which releases the latch this callback leaves set once native has nothing more. A callback that
 /// returns anything else, such as a wrapper already collected, leaves no host drain, so the
 /// results settle inline and the latch is released.
 fn notify(env: napi.Env, callback: Value, runtime: *Runtime) !void {
@@ -210,42 +213,63 @@ fn settleWithin(env: napi.Env, runtime: *Runtime, limit: usize) !bool {
     return false;
 }
 
-/// The host drain's settlement pass: up to `limit` completions per table. Returns whether more remain.
-pub fn settle(self: *@This(), limit: js.Value) !js.Value {
-    const call = r.call(self.runtime, .settle);
+/// One host drain turn: legacy settlement, then the payload `demand` asks for, delivered in one result.
+pub fn exchange(self: *@This(), demand: js.Value) !js.Value {
+    const call = r.call(self.runtime, .exchange);
     defer call.end();
-    const max = cfg.integer(limit.val, publications.capacity_max) catch return error.InvalidSettleLimit;
-    if (max == 0) return error.InvalidSettleLimit;
     const runtime = try self.owner();
-    const env = js.env();
-    const more = settleWithin(env, runtime, @intCast(max)) catch |err| {
-        settlementFailed(env, runtime, err);
-        return err;
+    runtime.retain();
+    defer runtime.release();
+    const parsed = exchange_mod.Demand.parse(demand.val) catch |err| return failExchange(runtime, err);
+    var host: Exchange = .{ .env = js.env(), .runtime = runtime };
+    const result = exchange_mod.run(runtime, &parsed, &host) catch |err| {
+        if (jsStopped(err)) runtime.forceStop(true);
+        return failExchange(runtime, @import("network_js.zig").copyError(err));
     };
-    return .{ .val = try env.getBoolean(more) };
+    return .{ .val = result };
 }
 
-/// The host drain's lanes that hold work, as `Lane` bits, read under one mutex acquisition.
-pub fn pendingLanes(self: *@This()) !js.Value {
-    const call = r.call(self.runtime, .pending_lanes);
-    defer call.end();
-    const runtime = try self.owner();
+fn failExchange(runtime: *Runtime, err: anyerror) anyerror {
     runtime.lock();
-    const lanes = runtime.lanesLocked();
+    exchange_mod.failLocked(runtime);
     runtime.unlock();
-    return .{ .val = try js.env().createUint32(lanes) };
+    return err;
 }
 
-/// Ends one host drain. True keeps the notification latch and asks for another drain.
-pub fn endDrain(self: *@This()) !js.Value {
-    const call = r.call(self.runtime, .end_drain);
-    defer call.end();
-    const runtime = try self.owner();
-    runtime.lock();
-    const more = runtime.endDrainLocked();
-    runtime.unlock();
-    return .{ .val = try js.env().getBoolean(more) };
-}
+/// The N-API side of an exchange: legacy settlement, the clock, and the result's JS values.
+const Exchange = struct {
+    env: napi.Env,
+    runtime: *Runtime,
+
+    pub const Output = Value;
+
+    pub fn settle(self: *Exchange, limit: usize) !exchange_mod.Settled {
+        const runtime = self.runtime;
+        runtime.lock();
+        const due = runtime.settleableLocked() or (runtime.quiescent and !runtime.close_settled);
+        runtime.unlock();
+        if (!due) return .{};
+        const completions = &runtime.bridge.delivered[@intFromEnum(r.bridge.Delivery.completion)];
+        const before = completions.*;
+        const more = settleWithin(self.env, runtime, limit) catch |err| {
+            settlementFailed(self.env, runtime, err);
+            return err;
+        };
+        return .{ .count = completions.* - before, .more = more };
+    }
+    pub fn now(_: *Exchange) !u64 {
+        return gossip.monotonic();
+    }
+    pub fn build(self: *Exchange, selection: *exchange_mod.Selection, settled: usize) !Value {
+        return exchange_mod.build(self.env, self.runtime, selection, settled);
+    }
+    pub fn discard(self: *Exchange, selection: *const exchange_mod.Selection) void {
+        for (selection.closed[0..selection.closed_count]) |deferred| @import("network_js.zig").discardPromise(self.env, deferred);
+    }
+    pub fn keepAlive(self: *Exchange) void {
+        self.runtime.notify.ref(self.env) catch {};
+    }
+};
 
 fn owner(self: *@This()) !*Runtime {
     return self.runtime orelse error.NetworkClosed;
@@ -507,47 +531,6 @@ fn copyOperation(env: napi.Env, runtime: *Runtime, index: usize) !Value {
     }
     return object;
 }
-pub fn drainPeers(self: *@This(), limit: js.Value) !js.Value {
-    const call = r.call(self.runtime, .drain_peers);
-    defer call.end();
-    const max = cfg.integer(limit.val, 64) catch return error.InvalidDrainLimit;
-    if (max == 0) return error.InvalidDrainLimit;
-    const runtime = try self.owner();
-    return drainPeerEvents(runtime, @intCast(max)) catch |err| return @import("network_js.zig").copyError(err);
-}
-
-fn drainPeerEvents(runtime: *Runtime, max: usize) !js.Value {
-    runtime.retain();
-    defer runtime.release();
-    var events: [64]projection.Entry = undefined;
-    runtime.lock();
-    const lane = runtime.lane;
-    const count = if (lane) |storage| storage.peek(events[0..@intCast(max)]) else 0;
-    const sequence = runtime.table.sequence;
-    const more = if (lane) |storage| storage.len > count else false;
-    runtime.unlock();
-    const env = js.env();
-    const array = try env.createArrayWithLength(count);
-    for (events[0..count], 0..) |*event, i| try element(array, i, try projection.observation(env, event));
-    const object = try env.createObject();
-    try put(object, "events", array);
-    try put(object, "ownerSequence", try env.createBigintUint64(sequence));
-    try put(object, "more", try env.getBoolean(more));
-    try put(object, "updatesReplaceState", try env.getBoolean(true));
-    runtime.lock();
-    runtime.bridge.deliver(.peer_event, count);
-    if (lane) |storage| {
-        storage.commit(count);
-        // Events published during the copy were not reported, so the owner notifies again.
-        const rearm = !more and storage.len > 0 and !runtime.quiescent;
-        if (rearm) runtime.work_rearm = true;
-        // Committed events free lane room the owner publishes into.
-        if (!runtime.quiescent and (count > 0 or rearm)) runtime.signalLocked();
-    }
-    runtime.unlock();
-    return .{ .val = object };
-}
-
 pub fn requestStart(self: *@This(), peer: js.Value, protocol: js.Value, data: js.Value, options: js.Value) !js.Value {
     const call = r.call(self.runtime, .request_start);
     defer call.end();
@@ -564,11 +547,6 @@ pub fn requestRetire(self: *@This(), handle: js.Value, abandoned: js.Value) !js.
     return .{ .val = try request_js.retire(try self.owner(), handle.val, try cfg.boolean(abandoned.val)) };
 }
 
-pub fn takeIncomingRequest(self: *@This()) !js.Value {
-    const call = r.call(self.runtime, .incoming_take);
-    defer call.end();
-    return .{ .val = incoming_js.take(try self.owner()) catch |err| return @import("network_js.zig").copyError(err) };
-}
 pub fn incomingRespond(self: *@This(), handle: js.Value, data: js.Value, context: js.Value) !js.Value {
     const call = r.call(self.runtime, .incoming_respond);
     defer call.end();
@@ -590,11 +568,6 @@ pub fn incomingTerminal(self: *@This(), handle: js.Value, action: js.Value, stat
     return .{ .val = try incoming_js.terminal(try self.owner(), handle.val, action.val, status.val, message.val) };
 }
 
-pub fn drainGossip(self: *@This(), options: js.Value) !js.Value {
-    const call = r.call(self.runtime, .drain_gossip);
-    defer call.end();
-    return .{ .val = gossip_js.drain(try self.owner(), options.val) catch |err| return @import("network_js.zig").copyError(err) };
-}
 pub fn reportGossip(self: *@This(), handle: js.Value, verdict: js.Value) !js.Value {
     const call = r.call(self.runtime, .report_gossip);
     defer call.end();
@@ -606,11 +579,6 @@ pub fn publishGossip(self: *@This(), topic: js.Value, data: js.Value, options: j
     return .{ .val = try publication_js.publish(try self.owner(), topic.val, data.val, options.val) };
 }
 
-pub fn drainGossipChecks(self: *@This()) !js.Value {
-    const call = r.call(self.runtime, .drain_gossip_checks);
-    defer call.end();
-    return .{ .val = gossip_js.checks(try self.owner()) catch |err| return @import("network_js.zig").copyError(err) };
-}
 pub fn classifyGossip(self: *@This(), values: js.Value) !js.Value {
     const call = r.call(self.runtime, .classify_gossip);
     defer call.end();

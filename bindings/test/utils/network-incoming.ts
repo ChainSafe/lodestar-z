@@ -4,7 +4,7 @@ import type {
   NativeIncomingRequest,
   NativeNetworkApplicationRuntime,
 } from "../../src/network.js";
-import {applicationConfig, localIntent, startRuntime} from "./network.js";
+import {applicationConfig, localIntent, nextIncoming, startRuntime} from "./network.js";
 import {type PeerRuntime, startPeer} from "./network-peer.js";
 
 export const BLOCKS = "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy";
@@ -42,7 +42,7 @@ export async function takeIncoming(
   runtime: NativeNetworkApplicationRuntime | PeerRuntime
 ): Promise<NativeIncomingRequest> {
   for (let i = 0; i < 1000; i++) {
-    const incoming = await runtime.takeIncomingRequest();
+    const incoming = "takeIncomingRequest" in runtime ? await runtime.takeIncomingRequest() : nextIncoming(runtime);
     if (incoming) return incoming;
     await delay(5);
   }

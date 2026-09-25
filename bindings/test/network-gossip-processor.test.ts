@@ -5,7 +5,15 @@ import type {
   NativeGossipMessage,
   NativeNetworkApplicationRuntime,
 } from "../src/network.js";
-import {applicationConfig, lanes, localIntent, startRuntime, subscriptions, topicName} from "./utils/network.js";
+import {
+  applicationConfig,
+  checksOnly,
+  localIntent,
+  settleOnly,
+  startRuntime,
+  subscriptions,
+  topicName,
+} from "./utils/network.js";
 import {incomingPair} from "./utils/network-incoming.js";
 
 const BLOCK = topicName();
@@ -41,11 +49,7 @@ test("processor commands validate credits, roots and generation-bound handles", 
   try {
     await runtime.identity;
     await runtime.applyIntent(localIntent(config), config.initialSlot);
-    expect(() => runtime.drainGossip({bytes: 1, items: 65, ordinary: true})).toThrow("InvalidNetworkInteger");
-    expect(() => runtime.drainGossip({bytes: 16 * 1024 * 1024 + 1, items: 1, ordinary: true})).toThrow(
-      "InvalidNetworkInteger"
-    );
-    expect(runtime.drainGossip({bytes: 0, items: 0, ordinary: false}).messages).toEqual([]);
+    expect(runtime.exchange(checksOnly)).toMatchObject({checks: [], gossip: null});
     expect(() => runtime.notifyGossipBlock(new Uint8Array(31))).toThrow();
     expect(() => runtime.trackGossipSearch(new Uint8Array(33), null)).toThrow();
     expect(() => runtime.trackGossipSearch(new Uint8Array(32), "not-a-peer")).toThrow();
@@ -65,7 +69,7 @@ test("processor commands validate credits, roots and generation-bound handles", 
 async function checks(runtime: NativeNetworkApplicationRuntime, count: number) {
   const result: NativeGossipDependencyCheck[] = [];
   for (let i = 0; i < 1000 && result.length < count; i++) {
-    result.push(...runtime.drainGossipChecks());
+    result.push(...runtime.exchange(checksOnly).checks);
     if (result.length < count) await delay(5);
   }
   expect(result).toHaveLength(count);
@@ -109,11 +113,11 @@ test("native processor retains dependencies, protects blocks, batches ready work
     data.fill(7, 20, 52);
     data[228] = 1;
     const root = data.slice(20, 52);
-    pair.right.drainPeers(64);
+    pair.right.exchange({...settleOnly, peers: 64});
     const pendingChecks: NativeGossipDependencyCheck[] = [];
     const deadline = performance.now() + 5000;
     ready = () => {
-      pendingChecks.push(...pair.right.drainGossipChecks());
+      pendingChecks.push(...pair.right.exchange(checksOnly).checks);
     };
     for (const signature of [1, 2]) {
       data[132] = signature;
@@ -143,36 +147,39 @@ test("native processor retains dependencies, protects blocks, batches ready work
     await pair.left.publishGossip(BLOCK, blockBytes);
     for (const check of await checks(pair.right, 1))
       expect(pair.right.classifyGossip([{available: false, handle: check.handle}])).toBe(1);
+    const urgent = {...settleOnly, gossip: {bytes: 4096, items: 1, ordinary: false, ready: true}};
     let block;
-    for (let i = 0; i < 1000; i++) {
+    for (let i = 0; i < 1000 && !block; i++) {
       // Waiting attestations are neither checkable nor claimable; only the urgent block is.
-      const pending = pair.right.pendingLanes() & (lanes.gossipChecks | lanes.gossipUrgent | lanes.gossipOrdinary);
-      if (pending !== 0) {
-        expect(pending).toBe(lanes.gossipUrgent);
-        const batch = pair.right.drainGossip({bytes: 4096, items: 1, ordinary: false});
-        expect(batch.jobs).toEqual([{grouped: false, kind: "beacon_block", length: 1, start: 0, urgent: true}]);
-        block = batch.messages[0];
-        break;
+      const {checks: pending, gossip} = pair.right.exchange(urgent);
+      expect(pending).toEqual([]);
+      if (!gossip) await delay(5);
+      else {
+        expect(gossip.jobs).toEqual([{grouped: false, kind: "beacon_block", length: 1, start: 0, urgent: true}]);
+        block = gossip.messages[0];
       }
-      await delay(5);
     }
     expect(block?.topic).toBe(BLOCK);
     if (!block) throw Error("Block dispatch deadline");
-    expect(pair.right.pendingLanes() & lanes.gossipUrgent).toBe(0);
+    expect(pair.right.exchange(urgent).gossip).toBeNull();
     expect(pair.right.reportGossip(block.handle, "accept")).toBe(true);
     pair.right.notifyGossipBlock(root);
     for (const check of await checks(pair.right, 2))
       expect(pair.right.classifyGossip([{available: true, handle: check.handle}])).toBe(1);
-    // The owner readies the attestation group at its deadline.
-    for (let i = 0; i < 200 && !(pair.right.pendingLanes() & lanes.gossipOrdinary); i++) await delay(5);
-    expect(pair.right.pendingLanes() & (lanes.gossipChecks | lanes.gossipUrgent | lanes.gossipOrdinary)).toBe(
-      lanes.gossipOrdinary
-    );
-    const batch = pair.right.drainGossip({bytes: 1024, items: 64, ordinary: true});
+    // The owner readies the attestation group at its deadline; claims before it reopen the gate and find none.
+    const ordinary = {...settleOnly, gossip: {bytes: 1024, items: 64, ordinary: true, ready: true}};
+    let batch = pair.right.exchange(ordinary).gossip;
+    for (let i = 0; i < 200 && !batch?.messages.length; i++) {
+      await delay(5);
+      const result = pair.right.exchange(ordinary);
+      expect(result.checks).toEqual([]);
+      batch = result.gossip;
+    }
+    if (!batch) throw Error("Attestation group deadline");
     expect(batch.jobs).toEqual([
       {grouped: true, kind: "beacon_attestation", length: batch.messages.length, start: 0, urgent: false},
     ]);
-    expect(pair.right.pendingLanes() & lanes.gossipOrdinary).toBe(0);
+    expect(pair.right.exchange(ordinary).gossip).toBeNull();
     expect(batch.messages).toHaveLength(2);
     expect(batch.messages.map((message) => message.attestationData)).toEqual([
       Buffer.from(data.subarray(4, 132)).toString("base64"),
@@ -221,7 +228,8 @@ test("expired validation execution remains visible until late host completion", 
       expect(pair.right.classifyGossip([{available: true, handle: check.handle}])).toBe(1);
     let message: NativeGossipMessage | undefined;
     for (let i = 0; i < 1000 && !message; i++) {
-      message = pair.right.drainGossip({bytes: 4096, items: 1, ordinary: true}).messages[0];
+      message = pair.right.exchange({...settleOnly, gossip: {bytes: 4096, items: 1, ordinary: true, ready: true}})
+        .gossip?.messages[0];
       if (!message) await delay(5);
     }
     if (!message) throw Error("Block dispatch deadline");

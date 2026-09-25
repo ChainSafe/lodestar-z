@@ -8,10 +8,10 @@ import {
   applicationConfig,
   configureChain,
   discoveryConfig,
-  lanes,
   localIntent,
   requestForks,
   runtimeReleased,
+  settleOnly,
   startRuntime,
   subscriptions,
   topicName,
@@ -113,8 +113,12 @@ it("starts without subscriptions and accepts ordinary updates after rejecting an
   try {
     expect(runtime.state).toBe("running");
     expect((await runtime.getGossipDiagnostics()).topics.some((topic) => topic.subscribed)).toBe(false);
-    expect(runtime.drainGossip()).toEqual({jobs: [], messages: [], more: false});
-    expect(runtime.takeIncomingRequest()).toBeNull();
+    const gossip = {bytes: 8 * 1024 * 1024, items: 64, ordinary: true, ready: true};
+    expect(runtime.exchange({...settleOnly, gossip, serving: 8})).toMatchObject({
+      checks: [],
+      gossip: null,
+      serving: [],
+    });
     const intent = localIntent(config);
     intent.subscriptions = [{digest: new Uint8Array(4).fill(255), subnets: {}}];
     await expect(runtime.applyIntent(intent, config.initialSlot)).rejects.toThrow("InvalidTopic");
@@ -217,17 +221,24 @@ it("joins immediately after initialization and closes idempotently", async () =>
   expect(runtime.diagnostics().liveNativeRequestedBytes).toBe(0);
 });
 
-it("rejects every invalid drain limit", async () => {
+it("rejects every invalid exchange demand", async () => {
   const runtime = startRuntime(applicationConfig(), () => undefined);
   try {
     await runtime.identity;
-    for (const limit of [0, -1, 0.5, 65, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1]) {
-      expect(() => runtime.drainPeers(limit)).toThrow("InvalidDrainLimit");
-    }
-    expect(runtime.drainPeers(1)).toMatchObject({events: [], more: false});
-    expect(runtime.drainPeers(32)).toMatchObject({events: [], more: false});
-    for (const limit of [0, -1, 0.5, 257, Number.NaN])
-      expect(() => runtime.settle(limit)).toThrow("InvalidSettleLimit");
+    const gossip = {bytes: 0, items: 0, ordinary: false, ready: true};
+    for (const invalid of [
+      ...[-1, 0.5, 65, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1].map((peers) => ({peers})),
+      ...[0, -1, 0.5, 257, Number.NaN].map((settle) => ({settle})),
+      {serving: 9},
+      {gossip: {...gossip, items: 65}},
+      {gossip: {...gossip, bytes: 16 * 1024 * 1024 + 1}},
+    ])
+      expect(() => runtime.exchange({...settleOnly, ...invalid})).toThrow("InvalidNetworkInteger");
+    expect(() => runtime.exchange({...settleOnly, gossip: {...gossip, ordinary: true, ready: false}})).toThrow(
+      "InvalidNetworkConfig"
+    );
+    expect(runtime.exchange({...settleOnly, peers: 1}).peers).toEqual([]);
+    expect(runtime.exchange({...settleOnly, peers: 64}).peers).toEqual([]);
   } finally {
     await runtime.close();
   }
@@ -447,16 +458,16 @@ it("publishes copied peer observations without repeating unread notifications", 
     const before = notifications;
     await delay(250);
     expect(notifications).toBe(before);
-    const batch = runtime.drainPeers(32);
-    expect(Object.getOwnPropertyDescriptor(batch, "events")).toMatchObject({
+    const result = runtime.exchange({...settleOnly, peers: 32});
+    expect(Object.getOwnPropertyDescriptor(result, "peers")).toMatchObject({
       configurable: true,
       enumerable: true,
-      value: batch.events,
+      value: result.peers,
       writable: true,
     });
-    expect(Object.getOwnPropertyDescriptor(batch.events, "0")?.value).toBe(batch.events[0]);
-    expect(Object.getOwnPropertyDescriptor(batch.events[0], "type")?.value).toBe(batch.events[0].type);
-    const ready = batch.events.find((event) => event.type === "ready");
+    expect(Object.getOwnPropertyDescriptor(result.peers, "0")?.value).toBe(result.peers[0]);
+    expect(Object.getOwnPropertyDescriptor(result.peers[0], "type")?.value).toBe(result.peers[0].type);
+    const ready = result.peers.find((event) => event.type === "ready");
     expect(ready).toBeDefined();
     if (!ready || ready.type !== "ready") throw new Error("Missing peerReady");
     expect(ready.state).not.toHaveProperty("peer");
@@ -487,10 +498,7 @@ it("settles results only in the host drain and notifies once until a drain ends"
   const runtime = initializeNativeNetworkRuntime(config, () => {
     notifications++;
   });
-  const drain = () => {
-    for (let pass = 0; pass < 8; pass++) if (!runtime.settle(32)) return runtime.endDrain();
-    return true;
-  };
+  const drain = () => runtime.exchange(settleOnly).more;
   const watch = (promise: Promise<unknown>) => {
     let settled = false;
     promise.then(
@@ -512,10 +520,8 @@ it("settles results only in the host drain and notifies once until a drain ends"
     await delay(100);
     expect(notifications).toBe(1);
     expect(intentSettled()).toBe(false);
-    expect(runtime.pendingLanes() & lanes.settle).toBe(lanes.settle);
-    expect(drain()).toBe(true);
-    expect(drain()).toBe(false);
-    expect(runtime.pendingLanes() & lanes.settle).toBe(0);
+    expect(runtime.exchange(settleOnly)).toMatchObject({more: true, settled: 2});
+    expect(runtime.exchange(settleOnly)).toMatchObject({more: false, settled: 0});
     expect((await intent).slot).toBe(config.initialSlot);
     expect((await identity).peerId).toBe(runtime.identity.peerId);
     const pull = runtime.request(runtime.identity.peerId, BLOCKS, new Uint8Array(32)).next();
@@ -533,6 +539,5 @@ it("settles results only in the host drain and notifies once until a drain ends"
     }
   }
   expect(await runtime.closed).toEqual({reason: "requested"});
-  expect(drain()).toBe(false);
-  expect(runtime.pendingLanes()).toBe(0);
+  expect(runtime.exchange(settleOnly)).toMatchObject({more: false, settled: 0});
 }, 20000);

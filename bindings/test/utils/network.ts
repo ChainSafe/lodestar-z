@@ -10,8 +10,8 @@ import type {
   IpEndpoint,
   NativeApplicationConfig,
   NativeDiscoveryConfig,
+  NativeExchangeDemand,
   NativeGossipProcessorLimit,
-  NativeLanes,
   NativeLocalIntent,
   NativeNetworkApplicationRuntime,
   NativeRuntimeConfig,
@@ -22,15 +22,23 @@ import type {
 
 const MIB = 1024 * 1024;
 
-/** The bits of pendingLanes. */
-export const lanes: NativeLanes = {
-  gossipChecks: 8,
-  gossipOrdinary: 32,
-  gossipUrgent: 16,
-  incoming: 4,
-  peers: 2,
-  settle: 1,
+/** An exchange that only settles results, as a closed host's drain does; tests add the payload they take. */
+export const settleOnly: NativeExchangeDemand = {gossip: null, peers: 0, serving: 0, settle: 32};
+/** Dependency checks and every claimable gossip job, as one exchange takes them. */
+export const gossipAll: NativeExchangeDemand = {
+  ...settleOnly,
+  gossip: {bytes: 16 * MIB, items: 64, ordinary: true, ready: true},
 };
+/** Dependency checks without a gossip claim. */
+export const checksOnly: NativeExchangeDemand = {
+  ...settleOnly,
+  gossip: {bytes: 0, items: 0, ordinary: false, ready: true},
+};
+
+/** The oldest queued incoming request, as one serving start of an exchange. */
+export function nextIncoming<T>(runtime: {exchange(demand: NativeExchangeDemand): {serving: T[]}}): T | null {
+  return runtime.exchange({...settleOnly, serving: 1}).serving[0] ?? null;
+}
 
 /**
  * Lodestar's processor plan for a small validator set, in topicKinds order. Each kind's byte weight exceeds its
@@ -211,15 +219,15 @@ export function localIntent(config: NativeApplicationConfig): NativeLocalIntent 
 }
 
 /**
- * The least a host drain does: each notification schedules settlement passes in later macrotasks until endDrain
- * releases the latch. Peer, incoming and gossip lanes stay with the test.
+ * The least a host drain does: each notification schedules settle-only exchanges in later macrotasks until one
+ * releases the latch. Peers, serving starts and gossip stay with the test.
  */
 function settlingHost(onWorkAvailable: () => void = () => undefined) {
-  let runtime: Pick<NativeNetworkApplicationRuntime, "settle" | "endDrain"> | undefined;
+  let runtime: Pick<NativeNetworkApplicationRuntime, "exchange"> | undefined;
   let scheduled = false;
   const drain = () => {
     scheduled = false;
-    if (runtime && (runtime.settle(32) || runtime.endDrain())) schedule();
+    if (runtime?.exchange(settleOnly).more) schedule();
   };
   const schedule = () => {
     if (scheduled) return;
@@ -227,7 +235,7 @@ function settlingHost(onWorkAvailable: () => void = () => undefined) {
     setImmediate(drain);
   };
   return {
-    attach(value: Pick<NativeNetworkApplicationRuntime, "settle" | "endDrain">) {
+    attach(value: Pick<NativeNetworkApplicationRuntime, "exchange">) {
       runtime = value;
     },
     onWorkAvailable() {

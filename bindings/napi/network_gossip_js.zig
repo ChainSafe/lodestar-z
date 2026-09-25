@@ -6,78 +6,11 @@ const cfg = @import("network_config.zig");
 const app = @import("network_application_config.zig");
 const r = @import("network_runtime.zig");
 const g = @import("network_gossip.zig");
-const element = @import("network_js.zig").element;
 const Runtime = r.Runtime;
 
 const put = @import("network_js.zig").put;
 const bytes = @import("network_js.zig").bytes;
-pub fn drain(runtime: *Runtime, options: Value) !Value {
-    var demand: g.Table.Demand = .{};
-    if (try options.typeof() != .undefined) {
-        try cfg.completeObject(options, &.{ "items", "bytes", "ordinary" });
-        demand = .{
-            .items = @intCast(try cfg.integer(try cfg.get(options, "items"), g.batch_max)),
-            .bytes = @intCast(try cfg.integer(try cfg.get(options, "bytes"), g.batch_bytes)),
-            .ordinary = try cfg.boolean(try cfg.get(options, "ordinary")),
-        };
-    }
-    runtime.retain();
-    defer runtime.release();
-    runtime.lock();
-    const mono_ms = g.monotonic() catch |err| {
-        runtime.unlock();
-        return err;
-    };
-    const table = &runtime.gossip.?;
-    const previous = .{ table.pending(), table.deadline() };
-    const batch = if (runtime.quiescent) g.Batch{} else table.claimDemand(mono_ms, demand);
-    runtime.bridge.deliver(.gossip_message, batch.len);
-    // The owner's wait reads these; a change wakes it to recompute.
-    if (!std.meta.eql(previous, .{ table.pending(), table.deadline() })) runtime.signalLocked();
-    runtime.unlock();
-    var success = false;
-    var reported_more = false;
-    defer {
-        runtime.lock();
-        table.finish(&batch, success);
-        if (runtime.quiescent) table.trim() else if (!reported_more and table.hasWork()) {
-            runtime.work_rearm = true;
-            runtime.signalLocked();
-        }
-        runtime.unlock();
-    }
-    const env = runtime.env;
-    const array = try env.createArrayWithLength(batch.len);
-    for (batch.tokens[0..batch.len], 0..) |token, i| {
-        try element(array, i, try descriptor(runtime, token, &table.cells[token.index]));
-    }
-    const object = try env.createObject();
-    try put(object, "messages", array);
-    const jobs = try env.createArrayWithLength(batch.job_count);
-    for (batch.jobs[0..batch.job_count], 0..) |job, i| {
-        const value = try env.createObject();
-        try put(value, "kind", try env.createStringUtf8(@tagName(job.kind)));
-        try put(value, "start", try env.createUint32(@intCast(job.start)));
-        try put(value, "length", try env.createUint32(@intCast(job.len)));
-        try put(value, "grouped", try env.getBoolean(job.grouped));
-        try put(value, "urgent", try env.getBoolean(n.gossip_processor.limits_mod.urgent(job.kind)));
-        try element(jobs, i, value);
-    }
-    try put(object, "jobs", jobs);
-    runtime.lock();
-    const finished_ms = g.monotonic() catch |err| {
-        runtime.unlock();
-        return err;
-    };
-    table.maintain(finished_ms, table.slot);
-    const more = table.hasWork();
-    runtime.unlock();
-    try put(object, "more", try env.getBoolean(more));
-    reported_more = more;
-    success = true;
-    return object;
-}
-fn descriptor(runtime: *Runtime, token: g.Token, cell: *const g.Cell) !Value {
+pub fn descriptor(runtime: *Runtime, token: g.Token, cell: *const g.Cell) !Value {
     const env = runtime.env;
     const object = try env.createObject();
     const handle = try env.createObject();
@@ -161,51 +94,6 @@ pub fn publishError(env: napi.Env, err: anyerror) !Value {
 }
 pub fn diagnostics(env: napi.Env, value: *const g.Diagnostics) !Value {
     return @import("network_js.zig").scalarFields(env, value);
-}
-
-pub fn checks(runtime: *Runtime) !Value {
-    runtime.retain();
-    defer runtime.release();
-    runtime.lock();
-    const now = g.monotonic() catch |err| {
-        runtime.unlock();
-        return err;
-    };
-    const table = &runtime.gossip.?;
-    const batch = if (!runtime.quiescent and !runtime.stop) table.claimChecks(now) else g.Batch{};
-    runtime.bridge.deliver(.dependency_check, batch.len);
-    const CheckView = struct { root: [32]u8, slot: u64, identity: n.PeerId, topic: [g.topic_max]u8, topic_len: u16 };
-    var cells: [g.batch_max]CheckView = undefined;
-    for (batch.tokens[0..batch.len], 0..) |token, i| {
-        const cell = table.get(token).?;
-        cells[i] = .{ .root = cell.metadata.root.?, .slot = cell.metadata.slot.?, .identity = cell.identity, .topic = cell.topic, .topic_len = cell.topic_len };
-    }
-    runtime.unlock();
-    var success = false;
-    defer if (!success) {
-        runtime.lock();
-        table.retryChecks(&batch);
-        runtime.work_rearm = true;
-        runtime.signalLocked();
-        runtime.unlock();
-    };
-    const env = runtime.env;
-    const array = try env.createArrayWithLength(batch.len);
-    for (batch.tokens[0..batch.len], 0..) |token, i| {
-        const cell = &cells[i];
-        const object = try env.createObject();
-        const handle = try env.createObject();
-        try put(handle, "index", try env.createUint32(token.index));
-        try put(handle, "generation", try env.createBigintUint64(token.generation));
-        try put(object, "handle", handle);
-        try put(object, "root", try bytes(env, &cell.root));
-        try put(object, "slot", try env.createBigintUint64(cell.slot));
-        try put(object, "peerId", try @import("network_js.zig").peerIdValue(env, &cell.identity));
-        try put(object, "topic", try env.createStringUtf8(cell.topic[0..cell.topic_len]));
-        try element(array, i, object);
-    }
-    success = true;
-    return array;
 }
 
 pub fn classify(runtime: *Runtime, values: Value) !Value {

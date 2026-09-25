@@ -1,5 +1,5 @@
 import {expect, test} from "vitest";
-import {applicationConfig, localIntent, requestForks, startRuntime} from "./utils/network.js";
+import {applicationConfig, localIntent, nextIncoming, requestForks, startRuntime} from "./utils/network.js";
 import {startPeer} from "./utils/network-peer.js";
 
 test("incoming request take is empty on an active application", async () => {
@@ -9,7 +9,7 @@ test("incoming request take is empty on an active application", async () => {
   try {
     await runtime.identity;
     await runtime.applyIntent(localIntent(config), config.initialSlot);
-    expect(runtime.takeIncomingRequest()).toBeNull();
+    expect(nextIncoming(runtime)).toBeNull();
     const diagnostics = runtime.diagnostics().incoming;
     for (const field of [
       "requestsTaken",
@@ -344,7 +344,7 @@ test("terminal before take never exposes a retired request", async () => {
     await pair.left.disconnect(pair.remote.peerId);
     await pending;
     await expect.poll(() => pair.right.diagnostics().incoming.occupied, {timeout: 5000}).toBe(0);
-    expect(pair.right.takeIncomingRequest()).toBeNull();
+    expect(nextIncoming(pair.right)).toBeNull();
   } finally {
     await Promise.all([pair.left.close(), pair.right.close()]);
   }
@@ -415,7 +415,7 @@ interface DirectIncomingBridge {
     onWorkAvailable: () => void
   ): {identity: import("../src/network.js").NativeIdentity; closed: Promise<unknown>};
   applyIntent(intent: ReturnType<typeof localIntent>, slot: bigint): Promise<unknown>;
-  takeIncomingRequest(): IncomingDescriptor | null;
+  exchange(demand: import("../src/network.js").NativeExchangeDemand): {serving: IncomingDescriptor[]};
   incomingTerminal(handle: IncomingHandle, action: number, status?: number, message?: Uint8Array): void;
   incomingRelease(handle: IncomingHandle): void;
   incomingRespond(
@@ -456,7 +456,7 @@ test("incoming tokens reject malformed handles and stale slot generations", asyn
       await expect
         .poll(
           () => {
-            incoming = native.takeIncomingRequest();
+            incoming = nextIncoming(native);
             return incoming !== null;
           },
           {timeout: 5000}

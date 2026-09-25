@@ -1,5 +1,5 @@
 import bindings from "../../src/bindings.js";
-import {startRuntime} from "../utils/network.js";
+import {nextIncoming, startRuntime} from "../utils/network.js";
 
 let runtime;
 let sequence = 0;
@@ -23,9 +23,6 @@ const methods = new Set([
   "removeDirectPeer",
   "getDirectPeers",
   "reportPeer",
-  "drainPeers",
-  "drainGossip",
-  "drainGossipChecks",
   "classifyGossip",
   "notifyGossipBlock",
   "trackGossipSearch",
@@ -68,7 +65,7 @@ async function execute(method, args) {
   }
   if (method === "takeIncomingRequest") {
     if (incoming.size >= 64) throw new Error("Network peer incoming capacity");
-    const request = runtime.takeIncomingRequest();
+    const request = nextIncoming(runtime);
     if (!request) return null;
     const id = ++sequence;
     incoming.set(id, request);
