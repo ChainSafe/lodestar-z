@@ -219,3 +219,36 @@ test "occupancy and drop phases use each change's own time and never run backwar
     try std.testing.expectEqual(@as(?u64, 1_600), occupancy.last_ms);
     g.cancelWrites(g.sessions.ref(peer.index));
 }
+
+test "a verdict that forwards nothing still keeps its newer time for drop phases" {
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
+    defer g.deinit();
+    const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    try support.subscribe(&g, name);
+    const tx = &g.sessions.rows[peer.index].io.tx;
+    tx.cancelStream(&g.messages.store);
+    // Monotonic zero starts a 12 s slot, so 1,500 ms starts the third 750 ms phase bucket.
+    var clock: slots.SlotClock = .{ .genesis_unix_ms = 1_000_000, .slot_duration_ms = 12_000 };
+    clock.observe(.{ .mono_ms = 0, .unix_s = 0, .unix_ms = 1_000_000 + 12_000 });
+    g.slot_clock = &clock;
+    _ = session_io.beginPump(&g, .{ .mono_ms = 900, .unix_s = 0 });
+    _ = try g.publish(name, "stored", .{ .mono_ms = 900, .unix_s = 0 });
+    const id = topic_mod.validMessageId(name, "stored", .{});
+    const h = g.messages.history.message(g.messages.history.get(&g.messages.store, id).?);
+    for (0..@import("delivery.zig").per_peer_limit) |_| {
+        if (tx.data.full()) break;
+        try std.testing.expectEqual(.queued, tx.queueData(&g.messages.store, h, .forward, .{ .bytes = g.options.tx_peer_bytes }, 900));
+    }
+    var inbox: support.Inbox = .{};
+    defer inbox.deinit();
+    inbox.attach(&g);
+    try std.testing.expectEqual(@as(?usize, 1), try support.message(&g, peer.index, "ignored", 900));
+    // The host ignores it at 1,600 ms; the next pump's tick was read earlier, at 1,400 ms.
+    try std.testing.expectEqualDeep(@import("gossipsub.zig").ReportOutcome{ .applied = .ignore }, g.report(inbox.last().handle, .ignore, .{ .mono_ms = 1_600, .unix_s = 0 }));
+    _ = session_io.beginPump(&g, .{ .mono_ms = 1_400, .unix_s = 0 });
+    var body: [32]u8 = undefined;
+    support.control(&g, peer.index, .{ .iwant = .{ .body = ids(&body, 1, &.{id}) } }, .{ .mono_ms = 1_400, .unix_s = 0 });
+    try std.testing.expectEqual(@as(u64, 1), g.rpc_metrics.iwant[@intFromEnum(IwantOutcome.refused)]);
+    for (g.delivery_metrics.drops_by_phase, 0..) |count, bucket| try std.testing.expectEqual(@as(u64, @intFromBool(bucket == 2)), count);
+    g.cancelWrites(g.sessions.ref(peer.index));
+}

@@ -682,6 +682,8 @@ fn checkRoutes(self: *const Gossipsub, engine: *const Engine) void {
 pub const Admission = enum { admitted, duplicate, capacity, unauthenticated };
 
 pub fn beginPump(self: *Gossipsub, now: Now) Turn {
+    // A host call since the last pump may have supplied a newer time than this tick.
+    self.observed_ms = @max(self.observed_ms, self.last_now_ms);
     self.last_now_ms = now.mono_ms;
     self.apply_metrics.close();
     self.integrateOccupancy(now.mono_ms);
