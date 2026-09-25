@@ -319,6 +319,7 @@ jobs:
           - transition
           - random
           - fork
+          - fork_choice
           - finality
           - merkle_proof
     steps:
@@ -358,6 +359,7 @@ jobs:
           - transition
           - random
           - fork
+          - fork_choice
           - finality
           - merkle_proof
     steps:
