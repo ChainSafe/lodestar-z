@@ -351,20 +351,39 @@ test("terminal before take never exposes a retired request", async () => {
   }
 }, 15000);
 
+/** Runs `run` while inherited `failure` accessors and array iteration throw, as a hostile realm could arrange. */
+function trapped<T>(run: () => T): T {
+  const iterator = Array.prototype[Symbol.iterator];
+  const trap = () => {
+    throw Error("inherited trap");
+  };
+  Object.defineProperty(Object.prototype, "failure", {configurable: true, get: trap, set: trap});
+  Array.prototype[Symbol.iterator] = trap;
+  try {
+    return run();
+  } finally {
+    Array.prototype[Symbol.iterator] = iterator;
+    delete (Object.prototype as {failure?: unknown}).failure;
+  }
+}
+
 test("a serving start the binding cannot wrap is cancelled alone while the drain continues and close settles", async () => {
   const [leftConfig, rightConfig] = [applicationConfig(), applicationConfig()];
   rightConfig.identitySecretKey[31] = 2;
   const left = await startPeer(leftConfig);
   const served: NativeIncomingRequest[] = [];
-  const turns: {more: boolean; failure?: unknown}[] = [];
+  const turns: {more: boolean; failure: unknown}[] = [];
   let serving = 0;
+  let hostile = false;
   let scheduled = false;
   const schedule = () => {
     if (scheduled) return;
     scheduled = true;
     setImmediate(() => {
       scheduled = false;
-      const {more, failure, serving: starts} = right.exchange({...settleOnly, serving});
+      const exchange = () => right.exchange({...settleOnly, serving});
+      const {more, failure, serving: starts} = hostile ? trapped(exchange) : exchange();
+      hostile = false;
       turns.push({failure, more});
       served.push(...starts);
       if (more) schedule();
@@ -398,6 +417,7 @@ test("a serving start the binding cannot wrap is cancelled alone while the drain
       throw injected;
     };
     serving = 8;
+    hostile = true;
     schedule();
     await expect.poll(() => served.length + turns.filter(({failure}) => failure).length).toBe(2);
     registry.register = register;
@@ -414,6 +434,40 @@ test("a serving start the binding cannot wrap is cancelled alone while the drain
     await Promise.allSettled([left.close(), right.close()]);
   }
 }, 20000);
+
+test("an exchange settles and returns its result whatever the demand's getters make of Error.stackTraceLimit", async () => {
+  // Notifications schedule nothing, so completions wait for the test's exchanges.
+  let notified = 0;
+  const runtime = initializeNativeNetworkRuntime(applicationConfig(), () => {
+    notified++;
+  });
+  const limit = Object.getOwnPropertyDescriptor(Error, "stackTraceLimit");
+  let closed = false;
+  void runtime.closed.then(() => {
+    closed = true;
+  });
+  try {
+    const identity = runtime.getIdentity();
+    await expect.poll(() => notified).toBe(1);
+    const demand = {
+      ...settleOnly,
+      get peers() {
+        Object.defineProperty(Error, "stackTraceLimit", {configurable: true, value: 10, writable: false});
+        return 64;
+      },
+    };
+    expect(runtime.exchange(demand)).toMatchObject({failure: null, peers: [], serving: [], settled: 1});
+    expect((await identity).peerId).toBe(runtime.identity.peerId);
+  } finally {
+    if (limit) Object.defineProperty(Error, "stackTraceLimit", limit);
+    void runtime.close();
+    for (let i = 0; i < 400 && !closed; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      runtime.exchange(settleOnly);
+    }
+  }
+  expect(closed).toBe(true);
+});
 
 test.each([
   "exit",
