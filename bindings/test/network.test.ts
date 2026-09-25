@@ -230,9 +230,13 @@ it("joins immediately after initialization and closes idempotently", async () =>
 });
 
 it("rejects every invalid exchange demand, oversized batch and nested exchange before applying anything", async () => {
-  const runtime = startRuntime(applicationConfig(), () => undefined);
+  let notifications = 0;
+  const runtime = startRuntime(applicationConfig(), () => {
+    notifications++;
+  });
   try {
     await runtime.identity;
+    expect(exchange(runtime, settleOnly).more).toBe(false);
     const invalid: [Partial<Record<keyof NativeExchangeDemand, unknown>>, string][] = [
       ...[-1, 0.5, 65, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1].map(
         (peers): [Partial<Record<keyof NativeExchangeDemand, unknown>>, string] => [{peers}, "InvalidNetworkInteger"]
@@ -270,6 +274,10 @@ it("rejects every invalid exchange demand, oversized batch and nested exchange b
       },
     };
     expect(() => runtime.exchange([], nested)).toThrow("NetworkExchangeReentered");
+    // The rejections left native armed, so the next completion notifies.
+    const before = notifications;
+    await runtime.getIdentity();
+    expect(notifications).toBe(before + 1);
     // A full batch applies, and the caller stays usable after every rejection.
     expect(
       exchange(

@@ -25,6 +25,8 @@ const Host = struct {
     discarded: usize = 0,
     kept_alive: usize = 0,
     fatals: usize = 0,
+    /// Terminate on a contract failure, as the N-API host's fatal error does.
+    aborts: bool = false,
     during: ?*const fn (*Runtime) void = null,
 
     pub const Result = struct {
@@ -80,6 +82,7 @@ const Host = struct {
         return self.failure;
     }
     pub fn fatal(self: *Host, err: anyerror) anyerror {
+        if (self.aborts) std.process.abort();
         self.fatals += 1;
         return err;
     }
@@ -242,6 +245,24 @@ test "a contract failure is not retried: the exchange terminates after one build
     try std.testing.expectEqual(@as(usize, 1), host.builds);
     try std.testing.expectEqual(@as(usize, 1), host.fatals);
     try std.testing.expectEqual(@as(usize, 0), runtime.gossip.?.diag.copying);
+}
+
+test "a contract failure terminates the process without a retry (child process)" {
+    const pid = std.c.fork();
+    try std.testing.expect(pid >= 0);
+    if (pid == 0) {
+        var fixture: Fixture = undefined;
+        fixture.init(false, 2) catch std.c._exit(2);
+        _ = admit(&fixture.runtime, .voluntary_exit, null, "data") catch std.c._exit(2);
+        var host: Host = .{ .runtime = &fixture.runtime, .fail = .gossip, .failure = .contract, .aborts = true };
+        _ = host.turn(&.{}, deployed) catch {};
+        std.c._exit(3);
+    }
+    var status: c_int = 0;
+    try std.testing.expectEqual(pid, std.c.waitpid(pid, &status, 0));
+    const code: u32 = @bitCast(status);
+    try std.testing.expect(std.c.W.IFSIGNALED(code));
+    try std.testing.expectEqual(std.c.SIG.ABRT, std.c.W.TERMSIG(code));
 }
 
 test "an item that rolls back twice is retired the next time it is selected while its neighbours are delivered" {
