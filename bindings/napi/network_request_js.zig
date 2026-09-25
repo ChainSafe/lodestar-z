@@ -259,7 +259,7 @@ pub fn settle(env: napi.Env, runtime: *Runtime, limit: usize) !bool {
                 if (failed_copy) try pending.reject(value) else try pending.resolve(value);
             } else {
                 const selected: requests.Terminal = if (retiring and terminal.? != .closed) .{ .failed = .{ .reason = .cancelled, .phase = if (terminal.? == .failed) terminal.?.failed.phase else if (terminal.? == .done) .response else null } } else terminal.?;
-                try pending.reject(terminalError(env, selected, cell) catch try runtime.copy_error.?.getValue());
+                try pending.reject(@import("network_js.zig").settled(env, terminalError(env, selected, cell)) catch try runtime.copy_error.?.getValue());
             }
         }
         if (!deliver_chunk) if (retirement) |pending| try pending.resolve(try env.getUndefined());
