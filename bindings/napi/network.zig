@@ -448,6 +448,7 @@ fn settleOperations(env: napi.Env, runtime: *Runtime, limit: usize) !bool {
             return true;
         }
         settled += 1;
+        runtime.bridge.deliver(.completion, 1);
         runtime.table.settle_cursor = i + 1;
         const cell = &runtime.table.cells[i];
         runtime.table.transition(cell, .copying);
@@ -534,6 +535,7 @@ fn drainPeerEvents(runtime: *Runtime, max: usize) !js.Value {
     try put(object, "more", try env.getBoolean(more));
     try put(object, "updatesReplaceState", try env.getBoolean(true));
     runtime.lock();
+    runtime.bridge.deliver(.peer_event, count);
     if (lane) |storage| {
         storage.commit(count);
         // Events published during the copy were not reported, so the owner notifies again.

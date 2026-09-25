@@ -82,6 +82,7 @@ pub fn take(runtime: *Runtime) !Value {
     cell.copying = false;
     cell.exposed = true;
     table.diag.requestsTaken +|= 1;
+    runtime.bridge.deliver(.serving_start, 1);
     table.releaseInput(cell);
     cell.state = if (cell.native) .serving else .terminal;
     table.releasePayload(cell);
@@ -290,6 +291,7 @@ pub fn settle(env: napi.Env, runtime: *Runtime, limit: usize) !bool {
             break;
         }
         settled += 1;
+        runtime.bridge.deliver(.completion, 1);
         table.settle_cursor = i + 1;
         const cell = &table.cells[i];
         std.debug.assert(incoming.settleable(cell));

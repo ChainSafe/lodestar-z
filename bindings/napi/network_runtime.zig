@@ -20,7 +20,7 @@ var runtime_live = std.atomic.Value(bool).init(false);
 
 /// What the calling thread does at the seam: the JS thread inside an instrumented native call, or
 /// the owner inside one phase. `Runtime.lock` records JS mutex waits under the entry and owner
-/// mutex holds under the phase.
+/// mutex waits and holds under the phase.
 pub const Activity = union(enum) { idle, entry: bridge.Entry, phase: bridge.Phase };
 threadlocal var activity: Activity = .idle;
 
@@ -43,7 +43,7 @@ pub fn call(runtime: ?*Runtime, entry: bridge.Entry) Call {
     return .{ .runtime = runtime, .entry = entry, .started_ns = bridge.now(), .previous = previous };
 }
 
-/// Owner thread: attributes runtime mutex holds to `value` until `restore`. A scope must not
+/// Owner thread: attributes runtime mutex waits and holds to `value` until `restore`. A scope must not
 /// begin or end while the mutex is held.
 pub fn phase(value: bridge.Phase) Activity {
     const previous = activity;
@@ -287,8 +287,14 @@ pub const Runtime = struct {
                 }
                 self.bridge.waits[@intFromEnum(entry)].observe(waited);
             },
-            .phase => {
-                std.Io.Threaded.mutexLock(&self.mutex);
+            .phase => |value| {
+                var waited: u64 = 0;
+                if (!self.mutex.tryLock()) {
+                    const started = bridge.now();
+                    std.Io.Threaded.mutexLock(&self.mutex);
+                    waited = bridge.now() -| started;
+                }
+                self.bridge.owner_waits[@intFromEnum(value)].observe(waited);
                 self.hold_started_ns = bridge.now();
             },
         }

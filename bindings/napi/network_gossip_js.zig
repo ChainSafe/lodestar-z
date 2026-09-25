@@ -31,6 +31,7 @@ pub fn drain(runtime: *Runtime, options: Value) !Value {
     const table = &runtime.gossip.?;
     const previous = .{ table.pending(), table.deadline() };
     const batch = if (runtime.quiescent) g.Batch{} else table.claimDemand(mono_ms, demand);
+    runtime.bridge.deliver(.gossip_message, batch.len);
     // The owner's wait reads these; a change wakes it to recompute.
     if (!std.meta.eql(previous, .{ table.pending(), table.deadline() })) runtime.signalLocked();
     runtime.unlock();
@@ -172,6 +173,7 @@ pub fn checks(runtime: *Runtime) !Value {
     };
     const table = &runtime.gossip.?;
     const batch = if (!runtime.quiescent and !runtime.stop) table.claimChecks(now) else g.Batch{};
+    runtime.bridge.deliver(.dependency_check, batch.len);
     const CheckView = struct { root: [32]u8, slot: u64, identity: n.PeerId, topic: [g.topic_max]u8, topic_len: u16 };
     var cells: [g.batch_max]CheckView = undefined;
     for (batch.tokens[0..batch.len], 0..) |token, i| {

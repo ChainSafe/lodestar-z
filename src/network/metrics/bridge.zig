@@ -12,9 +12,13 @@ pub const Entry = enum { drain_peers, drain_gossip, drain_gossip_checks, classif
 /// Owner sections that hold the runtime mutex, named after the owner steps that take it.
 pub const Phase = enum { turn, reports, commands, publications, requests, gossip_flags, request_flags, incoming_flags, capture, gossip_ingress, peer_lane, metrics };
 pub const AdmissionKind = enum { block, column, aggregate, attestation, other };
+/// Items the JS thread's native calls deliver to the host: settled table cells, peer events,
+/// serving starts, and gossip messages and dependency checks claimed.
+pub const Delivery = enum { completion, peer_event, serving_start, gossip_message, dependency_check };
 const entry_count = @typeInfo(Entry).@"enum".fields.len;
 const phase_count = @typeInfo(Phase).@"enum".fields.len;
 const admission_kind_count = @typeInfo(AdmissionKind).@"enum".fields.len;
+const delivery_count = @typeInfo(Delivery).@"enum".fields.len;
 
 pub fn admissionKind(kind: Kind) AdmissionKind {
     return switch (kind) {
@@ -65,7 +69,8 @@ pub const SharedDuration = struct {
 };
 
 /// Runtime-owned measurements. The JS thread writes `calls` and `notify` without the runtime
-/// mutex and the other JS-thread fields under it; only the owner writes `holds` and `admission_lag`.
+/// mutex and the other JS-thread fields under it; only the owner writes `owner_waits`, `holds` and
+/// `admission_lag`.
 pub const Recorder = struct {
     calls: [entry_count]SharedDuration = @splat(.{}),
     notify: SharedDuration = .{},
@@ -74,8 +79,15 @@ pub const Recorder = struct {
     notifies: u64 = 0,
     chain: Chain = .{},
     chained: u64 = 0,
+    delivered: [delivery_count]u64 = @splat(0),
+    owner_waits: [phase_count]Duration = @splat(.{}),
     holds: [phase_count]Duration = @splat(.{}),
     admission_lag: [admission_kind_count]Duration = @splat(.{}),
+
+    /// The JS thread holds the runtime mutex.
+    pub fn deliver(self: *Recorder, kind: Delivery, count: usize) void {
+        self.delivered[@intFromEnum(kind)] +|= count;
+    }
 
     pub fn notified(self: *Recorder) void {
         self.notifies +|= 1;
@@ -96,6 +108,8 @@ pub const Recorder = struct {
         into.js_pings = self.js_pings;
         into.notifies = self.notifies;
         into.chain = self.chain;
+        into.delivered = self.delivered;
+        into.owner_waits = self.owner_waits;
         into.holds = self.holds;
         into.admission_lag = self.admission_lag;
     }
@@ -108,6 +122,8 @@ pub const Snapshot = struct {
     js_pings: [entry_count]u64 = @splat(0),
     notifies: u64 = 0,
     chain: Chain = .{},
+    delivered: [delivery_count]u64 = @splat(0),
+    owner_waits: [phase_count]Duration = @splat(.{}),
     holds: [phase_count]Duration = @splat(.{}),
     admission_lag: [admission_kind_count]Duration = @splat(.{}),
     publication_queue: PublicationLatency = .{},
@@ -139,6 +155,8 @@ pub fn write(snapshot: *const Snapshot, running: bool, w: *prom.Encoder) prom.Er
     for (&snapshot.calls, 0..) |*value, e| try calls.histogram(.{@tagName(@as(Entry, @enumFromInt(e)))}, value);
     const waits = try w.histograms(.{ .name = "lodestar_native_bridge_lock_wait_seconds", .kind = .histogram, .help = "JS thread waits to acquire the runtime mutex, one sample per acquisition", .labels = &.{"entry"}, .unit = .seconds }, Duration);
     for (&snapshot.waits, 0..) |*value, e| try waits.histogram(.{@tagName(@as(Entry, @enumFromInt(e)))}, value);
+    const owner_waits = try w.histograms(.{ .name = "lodestar_native_bridge_owner_lock_wait_seconds", .kind = .histogram, .help = "Owner waits to acquire the runtime mutex, one sample per acquisition", .labels = &.{"phase"}, .unit = .seconds }, Duration);
+    for (&snapshot.owner_waits, 0..) |*value, p| try owner_waits.histogram(.{@tagName(@as(Phase, @enumFromInt(p)))}, value);
     const holds = try w.histograms(.{ .name = "lodestar_native_bridge_lock_hold_seconds", .kind = .histogram, .help = "Owner holds of the runtime mutex, one sample per acquisition", .labels = &.{"phase"}, .unit = .seconds }, Duration);
     for (&snapshot.holds, 0..) |*value, p| try holds.histogram(.{@tagName(@as(Phase, @enumFromInt(p)))}, value);
     try w.scalar(.{ .name = "lodestar_native_bridge_notify_total", .kind = .counter, .help = "Owner notification callbacks run on the JS thread" }, snapshot.notifies);
@@ -148,15 +166,22 @@ pub fn write(snapshot: *const Snapshot, running: bool, w: *prom.Encoder) prom.Er
     try chain.histogram(.{}, &snapshot.chain);
     const pings = try w.family(.{ .name = "lodestar_native_bridge_js_pings_total", .kind = .counter, .help = "Owner notifications queued from the JS thread", .labels = &.{"entry"} });
     for (snapshot.js_pings, 0..) |count, e| try pings.sample(.{@tagName(@as(Entry, @enumFromInt(e)))}, count);
+    const delivered = try w.family(.{ .name = "lodestar_native_bridge_delivered_items_total", .kind = .counter, .help = "Items native calls on the JS thread delivered to the host: settled table cells, peer events, serving starts, and claimed gossip messages and dependency checks", .labels = &.{"kind"} });
+    for (snapshot.delivered, 0..) |count, k| try delivered.sample(.{@tagName(@as(Delivery, @enumFromInt(k)))}, count);
     const queue = try w.histograms(.{ .name = "lodestar_native_publication_queue_seconds", .kind = .histogram, .help = "Gossip publication wait from host submission to owner execution", .unit = .seconds }, PublicationLatency);
     try queue.histogram(.{}, &snapshot.publication_queue);
 }
 
-test "bridge snapshot renders recorded calls, holds, notifications and processor state" {
+test "bridge snapshot renders recorded calls, waits, holds, deliveries, notifications and processor state" {
     var recorder: Recorder = .{};
     recorder.calls[@intFromEnum(Entry.report_gossip)].observe(3_000);
     recorder.calls[@intFromEnum(Entry.report_gossip)].observe(2_000_000);
     recorder.holds[@intFromEnum(Phase.gossip_flags)].observe(750_000);
+    recorder.owner_waits[@intFromEnum(Phase.capture)].observe(0);
+    recorder.owner_waits[@intFromEnum(Phase.capture)].observe(300_000);
+    recorder.deliver(.gossip_message, 64);
+    recorder.deliver(.gossip_message, 3);
+    recorder.deliver(.completion, 1);
     recorder.notified();
     recorder.notified();
     recorder.boundary();
@@ -175,6 +200,12 @@ test "bridge snapshot renders recorded calls, holds, notifications and processor
         "lodestar_native_bridge_call_seconds_bucket{entry=\"report_gossip\",le=\"0.0025\"} 2\n",
         "lodestar_native_bridge_call_seconds_count{entry=\"report_gossip\"} 2\n",
         "lodestar_native_bridge_lock_hold_seconds_bucket{phase=\"gossip_flags\",le=\"0.001\"} 1\n",
+        "lodestar_native_bridge_owner_lock_wait_seconds_bucket{phase=\"capture\",le=\"0.0001\"} 1\n",
+        "lodestar_native_bridge_owner_lock_wait_seconds_bucket{phase=\"capture\",le=\"0.0005\"} 2\n",
+        "lodestar_native_bridge_owner_lock_wait_seconds_count{phase=\"turn\"} 0\n",
+        "lodestar_native_bridge_delivered_items_total{kind=\"gossip_message\"} 67\n",
+        "lodestar_native_bridge_delivered_items_total{kind=\"completion\"} 1\n",
+        "lodestar_native_bridge_delivered_items_total{kind=\"peer_event\"} 0\n",
         "lodestar_native_bridge_notify_total 2\n",
         "lodestar_native_bridge_notify_chain_bucket{le=\"0\"} 1\n",
         "lodestar_native_bridge_notify_chain_bucket{le=\"2\"} 2\n",

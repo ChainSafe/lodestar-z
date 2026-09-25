@@ -124,11 +124,13 @@ const contract = [_]Series{
     .{ .name = "lodestar_native_gossip_admission_lag_seconds", .kind = "histogram", .labels = &.{"kind"} },
     .{ .name = "lodestar_native_bridge_call_seconds", .kind = "histogram", .labels = &.{"entry"} },
     .{ .name = "lodestar_native_bridge_lock_wait_seconds", .kind = "histogram", .labels = &.{"entry"} },
+    .{ .name = "lodestar_native_bridge_owner_lock_wait_seconds", .kind = "histogram", .labels = &.{"phase"} },
     .{ .name = "lodestar_native_bridge_lock_hold_seconds", .kind = "histogram", .labels = &.{"phase"} },
     .{ .name = "lodestar_native_bridge_notify_total", .kind = "counter" },
     .{ .name = "lodestar_native_bridge_notify_seconds", .kind = "histogram" },
     .{ .name = "lodestar_native_bridge_notify_chain", .kind = "histogram" },
     .{ .name = "lodestar_native_bridge_js_pings_total", .kind = "counter", .labels = &.{"entry"} },
+    .{ .name = "lodestar_native_bridge_delivered_items_total", .kind = "counter", .labels = &.{"kind"} },
     .{ .name = "lodestar_native_publication_queue_seconds", .kind = "histogram" },
 };
 

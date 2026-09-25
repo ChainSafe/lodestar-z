@@ -205,6 +205,7 @@ pub fn settle(env: napi.Env, runtime: *Runtime, limit: usize) !bool {
             break;
         }
         settled += 1;
+        runtime.bridge.deliver(.completion, 1);
         table.settle_cursor = i + 1;
         const cell = &runtime.requests.?.cells[i];
         std.debug.assert(requests.settleable(cell, runtime.stop, runtime.disposed));

@@ -146,7 +146,7 @@ test "a payload release while the owner waits for budget wakes the owner once" {
     try runtime.wake.?.drain();
 }
 
-test "runtime mutex records JS waits under the calling entry and owner holds under the phase" {
+test "runtime mutex records JS waits under the calling entry and owner waits and holds under the phase" {
     var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 }, .notify_live = false, .env_alive = false };
     const Holder = struct {
         held: std.atomic.Value(bool) = .init(false),
@@ -156,22 +156,26 @@ test "runtime mutex records JS waits under the calling entry and owner holds und
             std.Io.sleep(std.Io.Threaded.global_single_threaded.io(), .fromMilliseconds(5), .awake) catch {};
             target.unlock();
         }
+        fn contend(target: *Runtime) !void {
+            var holder: @This() = .{};
+            const thread = try std.Thread.spawn(.{}, run, .{ &holder, target });
+            for (0..10_000) |_| {
+                if (holder.held.load(.acquire)) break;
+                std.Thread.yield() catch {};
+            }
+            target.lock();
+            target.unlock();
+            thread.join();
+        }
     };
-    var holder: Holder = .{};
-    const thread = try std.Thread.spawn(.{}, Holder.run, .{ &holder, &runtime });
-    for (0..10_000) |_| {
-        if (holder.held.load(.acquire)) break;
-        std.Thread.yield() catch {};
-    }
     const call = r.call(&runtime, .report_gossip);
-    runtime.lock();
-    runtime.unlock();
+    try Holder.contend(&runtime);
     call.end();
-    thread.join();
     const waits = &runtime.bridge.waits[@intFromEnum(r.bridge.Entry.report_gossip)];
     try std.testing.expectEqual(@as(u64, 1), waits.count);
     try std.testing.expectEqual(@as(u64, 0), waits.buckets[0]);
     const previous = r.phase(.gossip_flags);
+    try Holder.contend(&runtime);
     runtime.lock();
     runtime.unlock();
     r.restore(previous);
@@ -180,13 +184,18 @@ test "runtime mutex records JS waits under the calling entry and owner holds und
     var snapshot: r.bridge.Snapshot = .{};
     runtime.bridge.snapshot(&snapshot);
     try std.testing.expectEqual(@as(u64, 1), snapshot.calls[@intFromEnum(r.bridge.Entry.report_gossip)].count);
-    try std.testing.expectEqual(@as(u64, 1), snapshot.holds[@intFromEnum(r.bridge.Phase.gossip_flags)].count);
+    try std.testing.expectEqual(@as(u64, 2), snapshot.holds[@intFromEnum(r.bridge.Phase.gossip_flags)].count);
+    const owner_waits = &snapshot.owner_waits[@intFromEnum(r.bridge.Phase.gossip_flags)];
+    try std.testing.expectEqual(@as(u64, 2), owner_waits.count);
+    // The contended acquisition waits past the first bucket; the uncontended one records zero.
+    try std.testing.expectEqual(@as(u64, 1), owner_waits.buckets[0]);
     var holds: u64 = 0;
     for (snapshot.holds) |value| holds += value.count;
     var waited: u64 = 0;
     for (snapshot.waits) |value| waited += value.count;
-    try std.testing.expectEqual(@as(u64, 1), holds);
-    try std.testing.expectEqual(@as(u64, 1), waited);
+    for (snapshot.owner_waits) |value| waited += value.count;
+    try std.testing.expectEqual(@as(u64, 2), holds);
+    try std.testing.expectEqual(@as(u64, 3), waited);
 }
 
 test "a notification keeps the latch and leaves every completion for the host drain" {
