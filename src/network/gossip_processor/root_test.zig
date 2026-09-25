@@ -101,6 +101,32 @@ test "gossip processor copy rollback preserves paged bytes" {
     try t.expectEqual(p.limits_mod.bytes(&limits) / 4096 - 2, table.store.free_pages);
 }
 
+test "gossip processor claims an item larger than the demand bytes alone" {
+    const payload: [4097]u8 = @splat(9);
+    const limits: p.limits_mod.Limits = @splat(.{ .items = 4, .bytes = 16384 });
+    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits });
+    defer table.deinit();
+    defer table.close();
+    var blocks: [2]p.Token = undefined;
+    for (&blocks) |*block| {
+        block.* = try table.reserve(payload.len);
+        table.get(block.*).?.deadline = 100;
+        table.get(block.*).?.id = @splat(1);
+        table.install(block.*, &payload);
+    }
+    const attestation = try add(&table, .beacon_attestation, null);
+    for (blocks) |block| {
+        const batch = table.claimDemand(1, .{ .bytes = 4096 });
+        try t.expectEqual(@as(usize, 1), batch.len);
+        try t.expectEqual(block, batch.tokens[0]);
+        table.finish(&batch, true);
+    }
+    const batch = table.claimDemand(1, .{ .bytes = 4096 });
+    try t.expectEqual(@as(usize, 1), batch.len);
+    try t.expectEqual(attestation, batch.tokens[0]);
+    table.finish(&batch, true);
+}
+
 test "gossip processor batches identical attestation data with a bounded wait" {
     const limits: p.limits_mod.Limits = @splat(.{ .items = 64, .bytes = 4096 });
     var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits });

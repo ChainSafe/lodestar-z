@@ -333,7 +333,7 @@ export interface NativeNetworkApplicationRuntime {
   getMetrics(): string;
   /** A failed runtime cannot restart. The host must shut down the beacon node on terminal failure. */
   readonly closed: Promise<NativeRuntimeCloseResult>;
-  /** Copies work within host credits, up to 64 messages/16 MiB. Processor plans also apply kind and ordinary scheduling gates. */
+  /** Copies work within host credits, up to 64 messages/16 MiB. A first message larger than `bytes` comes alone. Processor plans also apply kind and ordinary scheduling gates. */
   drainGossip(demand?: {items: number; bytes: number; ordinary: boolean}): NativeGossipBatch;
   /** Returns up to 64 metadata-only dependency checks. Answer with one bounded classifyGossip call. */
   drainGossipChecks(): NativeGossipDependencyCheck[];
