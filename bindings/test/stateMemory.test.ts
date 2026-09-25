@@ -1,32 +1,11 @@
 import {spawnSync} from "node:child_process";
+import {fileURLToPath} from "node:url";
 import {expect, it} from "vitest";
 
 it("reclaims discarded native states under memory pressure without explicit GC", {timeout: 40_000}, () => {
   const result = spawnSync(
     process.execPath,
-    [
-      "--input-type=module",
-      "-e",
-      `
-      import assert from "node:assert/strict";
-      import {ssz} from "@lodestar/types";
-      import bindings from "./bindings/src/index.js";
-      import {createStfState, stfConfig} from "./bindings/test/stfFixture.ts";
-      assert.equal(typeof global.gc, "undefined");
-      const config = new bindings.BeaconConfig(stfConfig, new Uint8Array(32));
-      bindings.pubkeys.ensureCapacity(16);
-      const bytes = ssz.fulu.BeaconState.serialize(createStfState());
-      const seed = bindings.BeaconStateView.createFromBytes(bytes, config);
-      const seedRoot = seed.hashTreeRoot();
-      for (let i = 0; i < 500; i++) {
-        assert.equal(bindings.BeaconStateView.createFromBytes(bytes, config).forkSeq, 6, "iteration " + i);
-        assert.equal(seed.processSlots(seed.slot).slot, seed.slot, "clone " + i);
-        await new Promise((resolve) => setImmediate(resolve));
-      }
-      assert.deepEqual(seed.hashTreeRoot(), seedRoot);
-      console.log("completed");
-      `,
-    ],
+    ["--import", "tsx", fileURLToPath(new URL("./fixtures/stateMemory.ts", import.meta.url))],
     {
       cwd: new URL("../../", import.meta.url),
       encoding: "utf8",

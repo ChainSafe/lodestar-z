@@ -4,10 +4,8 @@ import {ssz} from "@lodestar/types";
 import {describe, expect, it} from "vitest";
 import {SecretKey} from "../src/blst.js";
 import bindings from "../src/index.js";
+import type {EnvironmentScenario} from "./fixtures/stateEnvironment.js";
 import {createStfState, stfConfig} from "./stfFixture.js";
-
-const bindingsPath = new URL("../src/index.js", import.meta.url).href;
-const fixturePath = new URL("./stfFixture.ts", import.meta.url).href;
 
 function createState() {
   const config = new bindings.BeaconConfig(stfConfig, new Uint8Array(32));
@@ -122,15 +120,7 @@ describe("state environment ownership", () => {
     const expectedRoot = state.processSlots(state.slot + 33).hashTreeRoot();
     const beforeWorker = bindings.metrics.scrapeMetrics();
     expect(beforeWorker).toMatch(/validator_monitor_prev_epoch_on_chain_balance [1-9]\d*/);
-    const root = await runWorker<Uint8Array>(`
-      const config = new bindings.BeaconConfig(stfConfig, new Uint8Array(32));
-      bindings.metrics.init();
-      bindings.metrics.registerLocalValidator(2);
-      bindings.metrics.registerLocalValidator(3);
-      const state = bindings.BeaconStateView.createFromBytes(ssz.fulu.BeaconState.serialize(createStfState()), config);
-      const root = state.processSlots(state.slot + 33).hashTreeRoot();
-      parentPort.postMessage(root);
-    `);
+    const root = await runWorker<Uint8Array>("isolated metrics");
     expect(root).toEqual(expectedRoot);
     expect(bindings.metrics.scrapeMetrics()).toBe(beforeWorker);
     expect(state.getVoluntaryExitValidity(signedExit(), true)).toBe("valid");
@@ -142,17 +132,7 @@ describe("state environment ownership", () => {
   it("runs simultaneous epoch transitions in independent workers", {timeout: 20_000}, async () => {
     const {state} = createState();
     const expectedRoot = state.processSlots(state.slot + 1).hashTreeRoot();
-    const roots = await Promise.all(
-      Array.from({length: 3}, () =>
-        runWorker<Uint8Array>(`
-      const config = new bindings.BeaconConfig(stfConfig, new Uint8Array(32));
-      const state = bindings.BeaconStateView.createFromBytes(ssz.fulu.BeaconState.serialize(createStfState()), config);
-      let root;
-      for (let i = 0; i < 8; i++) root = state.processSlots(state.slot + 1).hashTreeRoot();
-      parentPort.postMessage(root);
-    `)
-      )
-    );
+    const roots = await Promise.all(Array.from({length: 3}, () => runWorker<Uint8Array>("epoch transitions")));
     for (const [index, root] of roots.entries()) {
       expect(root, `worker ${index}`).toEqual(expectedRoot);
     }
@@ -163,15 +143,7 @@ describe("state environment ownership", () => {
     const previousCapacity = process.env.LODESTAR_Z_NODE_POOL_CAPACITY;
     process.env.LODESTAR_Z_NODE_POOL_CAPACITY = "0";
     try {
-      const code = await runWorker<string>(`
-        const config = new bindings.BeaconConfig(stfConfig, new Uint8Array(32));
-        try {
-          bindings.BeaconStateView.createFromBytes(ssz.fulu.BeaconState.serialize(createStfState()), config);
-          parentPort.postMessage("created");
-        } catch (error) {
-          parentPort.postMessage(error.code);
-        }
-      `);
+      const code = await runWorker<string>("pool exhaustion");
       expect(code).toBe("PoolExhausted");
       expect(state.processSlots(state.slot + 1).slot).toBe(state.slot + 1);
     } finally {
@@ -184,11 +156,7 @@ describe("state environment ownership", () => {
   });
 
   it("uses a distinct historical metrics prefix", async () => {
-    const metrics = await runWorker<string>(`
-      bindings.metrics.init({historical: true});
-      bindings.metrics.init({historical: true});
-      parentPort.postMessage(bindings.metrics.scrapeMetrics());
-    `);
+    const metrics = await runWorker<string>("historical metrics");
     expect(metrics).toContain("lodestar_historical_state_stfn_epoch_transition_seconds");
     expect(metrics).not.toContain("\nlodestar_stfn_");
   });
@@ -199,19 +167,13 @@ describe("state environment ownership", () => {
   });
 });
 
-function runWorker<T>(source: string): Promise<T> {
+function runWorker<T>(scenario: EnvironmentScenario): Promise<T> {
   return new Promise((resolve, reject) => {
     let result: T;
-    const worker = new Worker(
-      `
-      import {parentPort} from "node:worker_threads";
-      import {ssz} from "@lodestar/types";
-      import bindings from ${JSON.stringify(bindingsPath)};
-      import {createStfState, stfConfig} from ${JSON.stringify(fixturePath)};
-      ${source}
-    `,
-      {eval: true}
-    );
+    const worker = new Worker(new URL("./fixtures/stateEnvironment.ts", import.meta.url), {
+      execArgv: ["--import", "tsx"],
+      workerData: scenario,
+    });
     worker.on("message", (message: T) => {
       result = message;
     });

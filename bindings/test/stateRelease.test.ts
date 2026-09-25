@@ -1,218 +1,39 @@
 import {spawnSync} from "node:child_process";
+import {fileURLToPath} from "node:url";
 import {expect, it} from "vitest";
+import type {ReleaseScenario} from "./fixtures/stateRelease.js";
 
 it("reclaims released states while their wrappers remain reachable without GC", {timeout: 40_000}, () => {
-  runProcess(`
-    assert.equal(typeof global.gc, "undefined");
-    const config = new bindings.BeaconConfig(stfConfig, new Uint8Array(32));
-    const retained = [];
-    const expectedRoot = ssz.fulu.BeaconState.hashTreeRoot(value);
-    for (let i = 0; i < 100; i++) {
-      const state = bindings.BeaconStateView.createFromBytes(bytes, config);
-      const clone = state.processSlots(state.slot);
-      state.release();
-      assert.throws(() => state.slot, {code: "InvalidState"}, "released state " + i);
-      assert.deepEqual(clone.hashTreeRoot(), expectedRoot, "retained clone " + i);
-      clone.release();
-      state.release();
-      clone.release();
-      assert.throws(() => clone.hashTreeRoot(), {code: "InvalidState"}, "released clone " + i);
-      retained.push(state, clone);
-    }
-    assert.equal(retained.length, 200);
-  `);
+  runProcess("retained wrappers");
 });
 
 it("keeps descendants usable after release and finalization of their owners", {timeout: 40_000}, () => {
-  runProcess(
-    `
-    let config = new bindings.BeaconConfig(stfConfig, new Uint8Array(32));
-    let state = bindings.BeaconStateView.createFromBytes(bytes, config);
-    const descendant = state.processSlots(state.slot);
-    const expectedRoot = descendant.hashTreeRoot();
-    config = undefined;
-    state.release();
-    state = undefined;
-    global.gc();
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.deepEqual(descendant.hashTreeRoot(), expectedRoot);
-    const advanced = descendant.processSlots(descendant.slot + 1);
-    descendant.release();
-    descendant.release();
-    assert.equal(advanced.slot, value.slot + 1);
-    globalThis.retainedAtExit = {advanced, descendant};
-    `,
-    true
-  );
+  runProcess("retained descendants", true);
 });
 
 it.each([
-  [
-    "slot options getter",
-    `
-    const slot = state.slot;
-    const descendant = state.processSlots(slot, {
-      get dontTransferCache() {
-        state.release();
-        assert.throws(() => state.slot, {code: "InvalidState"});
-        return true;
-      }
-    });
-    assert.equal(descendant.slot, slot);
-    assert.deepEqual(descendant.hashTreeRoot(), ssz.fulu.BeaconState.hashTreeRoot(value));
-    descendant.release();
-    `,
-  ],
-  [
-    "transition options getter",
-    `
-    const block = ssz.fulu.SignedBeaconBlock.defaultValue();
-    block.message.slot = state.slot + 1;
-    block.message.proposerIndex = state.getBeaconProposer(block.message.slot);
-    assert.throws(() => state.stateTransition(ssz.fulu.SignedBeaconBlock.serialize(block), false, {
-      get verifyStateRoot() { state.release(); return false; },
-      verifyProposer: false,
-      verifySignatures: false
-    }), {code: "BlockParentRootMismatch"});
-    `,
-  ],
-  [
-    "block rewards getter",
-    `
-    const block = ssz.fulu.SignedBeaconBlock.defaultValue();
-    block.message.slot = state.slot;
-    const rewards = state.computeBlockRewards(ssz.fulu.SignedBeaconBlock.serialize(block), false, {
-      get attestations() { state.release(); return 1; },
-      syncAggregate: 2,
-      slashing: 0
-    });
-    assert.equal(rewards.attestations, 1);
-    assert.equal(rewards.syncAggregate, 2);
-    assert.equal(rewards.total, 3);
-    `,
-  ],
-  [
-    "block rewards output setter",
-    `
-    const block = ssz.fulu.SignedBeaconBlock.defaultValue();
-    block.message.slot = state.slot;
-    Object.defineProperty(Object.prototype, "total", {
-      configurable: true,
-      set(total) {
-        state.release();
-        Object.defineProperty(this, "total", {value: total, enumerable: true});
-      }
-    });
-    let rewards;
-    try { rewards = state.computeBlockRewards(ssz.fulu.SignedBeaconBlock.serialize(block), false); }
-    finally { Reflect.deleteProperty(Object.prototype, "total"); }
-    assert.equal(rewards.total, 0);
-    `,
-  ],
-  [
-    "Map construction and set callbacks",
-    `
-    const NativeMap = Map;
-    globalThis.Map = class extends NativeMap {
-      constructor() { super(); state.release(); }
-      set(key, value) { state.release(); return super.set(key, value); }
-    };
-    let committee;
-    try { committee = state.currentSyncCommitteeIndexed; }
-    finally { globalThis.Map = NativeMap; }
-    assert.equal(committee.validatorIndices.length, 512);
-    assert.deepEqual(committee.validatorIndexMap.get(0), Array.from({length: 512}, (_, i) => i));
-    `,
-  ],
-  [
-    "Set membership callback",
-    `
-    const epoch = state.epoch;
-    const statuses = new Set();
-    statuses.has = () => { state.release(); return true; };
-    assert.equal(state.getValidatorsByStatus(statuses, epoch).length, value.validators.length);
-    `,
-  ],
-  [
-    "inherited output setter",
-    `
-    Object.defineProperty(Object.prototype, "depositRoot", {
-      configurable: true,
-      set(root) {
-        state.release();
-        Object.defineProperty(this, "depositRoot", {value: root, enumerable: true});
-      }
-    });
-    let result;
-    try { result = state.eth1Data; }
-    finally { Reflect.deleteProperty(Object.prototype, "depositRoot"); }
-    assert.deepEqual(result.depositRoot, value.eth1Data.depositRoot);
-    assert.equal(result.depositCount, value.eth1Data.depositCount);
-    `,
-  ],
-  [
-    "nested output setter",
-    `
-    let nested = false;
-    Object.defineProperty(Object.prototype, "depositRoot", {
-      configurable: true,
-      set(root) {
-        if (nested) {
-          state.release();
-        } else {
-          nested = true;
-          assert.equal(state.eth1Data.depositCount, value.eth1Data.depositCount);
-        }
-        Object.defineProperty(this, "depositRoot", {value: root, enumerable: true});
-      }
-    });
-    let result;
-    try { result = state.eth1Data; }
-    finally { Reflect.deleteProperty(Object.prototype, "depositRoot"); }
-    assert.deepEqual(result.depositRoot, value.eth1Data.depositRoot);
-    assert.equal(result.depositCount, value.eth1Data.depositCount);
-    `,
-  ],
-  [
-    "throwing options getter",
-    `
-    const slot = state.slot;
-    assert.throws(() => state.processSlots(slot, {
-      get dontTransferCache() {
-        state.release();
-        throw new Error("options failed");
-      }
-    }), {message: "options failed"});
-    `,
-  ],
-])("retains the active state through release in a %s", {timeout: 40_000}, (_name, source) => {
-  runProcess(`
-    const state = bindings.BeaconStateView.createFromBytes(bytes, new bindings.BeaconConfig(stfConfig, new Uint8Array(32)));
-    ${source}
-    assert.throws(() => state.slot, {code: "InvalidState"});
-    state.release();
-  `);
+  "slot options getter",
+  "transition options getter",
+  "block rewards getter",
+  "block rewards output setter",
+  "Map construction and set callbacks",
+  "Set membership callback",
+  "inherited output setter",
+  "nested output setter",
+  "throwing options getter",
+] satisfies ReleaseScenario[])("retains the active state through release in a %s", {timeout: 40_000}, (scenario) => {
+  runProcess(scenario);
 });
 
-function runProcess(source: string, exposeGc = false): void {
+function runProcess(scenario: ReleaseScenario, exposeGc = false): void {
   const result = spawnSync(
     process.execPath,
     [
       ...(exposeGc ? ["--expose-gc"] : []),
-      "--input-type=module",
-      "-e",
-      `
-      import assert from "node:assert/strict";
-      import {ssz} from "@lodestar/types";
-      import bindings from "./bindings/src/index.js";
-      import {pubkeyCache} from "./bindings/src/pubkeys.js";
-      import {createStfState, stfConfig} from "./bindings/test/stfFixture.ts";
-      const value = createStfState();
-      const bytes = ssz.fulu.BeaconState.serialize(value);
-      pubkeyCache.ensureCapacity(value.validators.length);
-      ${source}
-      console.log("completed");
-      `,
+      "--import",
+      "tsx",
+      fileURLToPath(new URL("./fixtures/stateRelease.ts", import.meta.url)),
+      scenario,
     ],
     {
       cwd: new URL("../../", import.meta.url),
