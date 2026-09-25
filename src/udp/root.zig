@@ -47,6 +47,9 @@ pub const Buffers = struct {
         return self.receive >= bytes_min and self.receive <= bytes_max and
             self.send >= bytes_min and self.send <= bytes_max;
     }
+
+    /// Sizes as getsockopt reported them. Null where the read failed.
+    pub const Reported = struct { receive: ?u32, send: ?u32 };
 };
 
 /// Owns at most one socket per configured address family. The caller serializes
@@ -54,8 +57,8 @@ pub const Buffers = struct {
 pub const Sockets = struct {
     values: [2]?net.Socket = .{ null, null },
     /// Buffer sizes per family as getsockopt reported them after `requestBuffers`. Linux reports
-    /// double the size it grants. Zero where the kernel reported no size.
-    buffers: [2]?Buffers = .{ null, null },
+    /// double the size it grants.
+    buffers: [2]?Buffers.Reported = .{ null, null },
     cursor: u1 = 0,
 
     /// IPv6 sockets accept IPv6 only, including when both families share a port.
@@ -81,8 +84,9 @@ pub const Sockets = struct {
 
     /// Requests `request` on each socket and records what the kernel reports. The kernel caps a
     /// request at its limit (net.core.rmem_max and wmem_max on Linux), so a smaller size is not
-    /// an error. Returns the families whose sockets the kernel granted less than the request.
-    /// Sockets of other I/O providers and platforms keep their sizes and record nothing.
+    /// an error. Returns the families whose sockets the kernel granted less than the request; an
+    /// unknown size does not count. Sockets of other I/O providers and platforms keep their sizes
+    /// and record nothing.
     pub fn requestBuffers(self: *Sockets, io: std.Io, request: Buffers) [2]bool {
         assert(request.valid());
         var short: [2]bool = .{ false, false };
@@ -93,9 +97,9 @@ pub const Sockets = struct {
                 const handle = (socket orelse continue).handle;
                 setBuffer(handle, p.SO.RCVBUF, request.receive);
                 setBuffer(handle, p.SO.SNDBUF, request.send);
-                const sizes: Buffers = .{ .receive = readBuffer(handle, p.SO.RCVBUF), .send = readBuffer(handle, p.SO.SNDBUF) };
+                const sizes: Buffers.Reported = .{ .receive = readBuffer(handle, p.SO.RCVBUF), .send = readBuffer(handle, p.SO.SNDBUF) };
                 reported.* = sizes;
-                below.* = !grants(sizes.receive, request.receive) or !grants(sizes.send, request.send);
+                below.* = capped(sizes.receive, request.receive) or capped(sizes.send, request.send);
             }
         }
         return short;
@@ -195,10 +199,11 @@ fn threaded(io: std.Io) bool {
     return io.vtable.netBindIp == std.Io.Threaded.global_single_threaded.io().vtable.netBindIp;
 }
 
-/// Linux doubles a granted size for bookkeeping and reports the doubled value.
-fn grants(reported: u32, requested: u32) bool {
+/// Linux doubles a granted size for bookkeeping and reports the doubled value. An unknown size
+/// is not a cap.
+fn capped(reported: ?u32, requested: u32) bool {
     const full: u64 = if (os == .linux) @as(u64, requested) * 2 else requested;
-    return reported >= full;
+    return (reported orelse return false) < full;
 }
 
 fn setBuffer(handle: net.Socket.Handle, option: u32, bytes: u32) void {
@@ -209,13 +214,13 @@ fn setBuffer(handle: net.Socket.Handle, option: u32, bytes: u32) void {
     _ = p.system.setsockopt(handle, p.SOL.SOCKET, option, std.mem.asBytes(&value), @sizeOf(c_int));
 }
 
-fn readBuffer(handle: net.Socket.Handle, option: u32) u32 {
+fn readBuffer(handle: net.Socket.Handle, option: u32) ?u32 {
     const p = std.posix;
     var value: c_int = 0;
     var len: p.socklen_t = @sizeOf(c_int);
-    if (p.errno(p.system.getsockopt(handle, p.SOL.SOCKET, option, std.mem.asBytes(&value), &len)) != .SUCCESS) return 0;
-    if (len != @sizeOf(c_int)) return 0;
-    return std.math.cast(u32, value) orelse 0;
+    if (p.errno(p.system.getsockopt(handle, p.SOL.SOCKET, option, std.mem.asBytes(&value), &len)) != .SUCCESS) return null;
+    if (len != @sizeOf(c_int)) return null;
+    return std.math.cast(u32, value);
 }
 
 fn readDrops(handle: net.Socket.Handle) ?u32 {

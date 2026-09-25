@@ -193,8 +193,8 @@ fn writeSockets(self: *const Context, w: *prom.Encoder) prom.Error!void {
     });
     for (roles) |role| for ((role[1] orelse continue).buffers, families) |reported, family| {
         const sizes = reported orelse continue;
-        try buffers.sample(.{ role[0], family, "receive" }, sizes.receive);
-        try buffers.sample(.{ role[0], family, "send" }, sizes.send);
+        if (sizes.receive) |bytes| try buffers.sample(.{ role[0], family, "receive" }, bytes);
+        if (sizes.send) |bytes| try buffers.sample(.{ role[0], family, "send" }, bytes);
     };
     const drops = try w.family(.{
         .name = "lodestar_native_udp_socket_drops_total",
