@@ -92,21 +92,16 @@ async function checks(runtime: NativeNetworkApplicationRuntime, count: number) {
 }
 
 test("native processor retains dependencies, protects blocks, batches ready work and bounds future slots", async () => {
-  let ready: (() => void) | undefined;
-  const pair = await incomingPair(
-    undefined,
-    () => ready?.(),
-    (left, right) => {
-      for (const config of [left, right]) {
-        config.gossipPolicy.processor = Array.from({length: 13}, (_, kind) => ({
-          bytes: (kind === 0 || kind === 12 ? 16 : kind === 4 ? 4 : 1) * 1024 * 1024,
-          items: 8,
-        }));
-        config.gossipPolicy.execution = undefined;
-        config.resources.nativeBudgetBytes = 256 * 1024 * 1024;
-      }
+  const pair = await incomingPair(undefined, undefined, (left, right) => {
+    for (const config of [left, right]) {
+      config.gossipPolicy.processor = Array.from({length: 13}, (_, kind) => ({
+        bytes: (kind === 0 || kind === 12 ? 16 : kind === 4 ? 4 : 1) * 1024 * 1024,
+        items: 8,
+      }));
+      config.gossipPolicy.execution = undefined;
+      config.resources.nativeBudgetBytes = 256 * 1024 * 1024;
     }
-  );
+  });
   try {
     for (const [runtime, config] of [
       [pair.left, pair.leftConfig],
@@ -129,19 +124,11 @@ test("native processor retains dependencies, protects blocks, batches ready work
     data[228] = 1;
     const root = data.slice(20, 52);
     exchange(pair.right, {...settleOnly, peers: 64});
-    const pendingChecks: NativeGossipDependencyCheck[] = [];
-    const deadline = performance.now() + 5000;
-    ready = () => {
-      pendingChecks.push(...exchange(pair.right, checksOnly).checks);
-    };
     for (const signature of [1, 2]) {
       data[132] = signature;
       await pair.left.publishGossip(ATTESTATION, data);
     }
-    for (let i = 0; i < 1000 && pendingChecks.length < 2 && performance.now() < deadline; i++) await delay(5);
-    expect(pendingChecks).toHaveLength(2);
-    ready = undefined;
-    const waiting = pendingChecks;
+    const waiting = await checks(pair.right, 2);
     for (const check of waiting) expect(check.root).toEqual(root);
     // A batch with an invalid action applies none of it.
     expect(() =>
