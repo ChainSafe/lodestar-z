@@ -201,7 +201,7 @@ test "gossip scheduler stage clock changes no claim, credit or state" {
     var claimed: u64 = 0;
     var credit_stops: u64 = 0;
     for (timed.stages.intervals, timed.stages.stops) |intervals, stops| {
-        claimed += intervals[@intFromEnum(p.stages_mod.Interval.eligible_to_claimed)].count;
+        claimed += intervals[@intFromEnum(p.stages_mod.Interval.ready_other_wait)].count;
         credit_stops += stops[@intFromEnum(p.stages_mod.Stop.item_credit)];
     }
     try t.expect(claimed > 0);
@@ -234,16 +234,25 @@ test "gossip scheduler times each claimed message's stages, credit waits and cla
     try t.expectEqual(@as(u64, 1), table.stages.stops[column][@intFromEnum(Stop.item_credit)]);
     table.finish(&claimed, true);
     table.stages.tick(1010 * ms);
+    // The host settled its validation 3 ms before calling the exchange that entered 1 ms ago and applies it now.
+    table.timeVerdict(first, 3 * ms, 1009 * ms);
     try t.expect(table.report(first, .accept, 1010));
+    table.timeVerdict(first, 3 * ms, 1009 * ms);
+    table.stages.tick(1012 * ms);
+    table.forwarding(table.get(first).?);
     table.stages.tick(1015 * ms);
     const next = table.claimDemand(1015, .{ .ordinary = false });
     try t.expectEqualSlices(p.Token, &.{second}, next.tokens[0..next.len]);
     table.finish(&next, true);
     // Both were ready 1 ms after receipt. The second waited 8 ms on the first's credit, then 7 ms for a claim.
     try expectStage(&table, .data_column_sidecar, .receipt_to_ready, 2, 2 * ms);
-    try expectStage(&table, .data_column_sidecar, .ready_to_eligible, 2, 8 * ms);
-    try expectStage(&table, .data_column_sidecar, .eligible_to_claimed, 2, 2 * ms + 7 * ms);
+    try expectStage(&table, .data_column_sidecar, .ready_credit_blocked, 2, 8 * ms);
+    try expectStage(&table, .data_column_sidecar, .ready_other_wait, 2, 2 * ms + 7 * ms);
     try expectStage(&table, .data_column_sidecar, .claimed_to_applied, 1, 8 * ms);
+    // Only the verdict that reached a delivered message is timed.
+    try expectStage(&table, .data_column_sidecar, .completed_to_exchange, 1, 3 * ms);
+    try expectStage(&table, .data_column_sidecar, .completed_to_applied, 1, 4 * ms);
+    try expectStage(&table, .data_column_sidecar, .applied_to_forwarded, 1, 2 * ms);
     try t.expectEqual(8 * ms, table.stages.blocked(.data_column_sidecar));
     try t.expectEqual(@as(u128, 8 * ms), table.stages.item_ns[column]);
     try t.expectEqual(@as(u128, 4 * 8 * ms), table.stages.byte_ns[column]);

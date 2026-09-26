@@ -28,6 +28,8 @@ const Host = struct {
     fatals: usize = 0,
     /// Terminate on a contract failure, as the N-API host's fatal error does.
     aborts: bool = false,
+    /// The last build's time from the exchange call to its claim.
+    claim_offset_ns: u64 = 0,
     during: ?*const fn (*Runtime) void = null,
 
     pub const Result = struct {
@@ -47,6 +49,7 @@ const Host = struct {
     }
     pub fn build(self: *Host, selection: *exchange.Selection) !Result {
         self.builds += 1;
+        self.claim_offset_ns = selection.claimed_ns - selection.entered_ns;
         if (self.during) |during| during(self.runtime);
         if (self.failing(.peers) and selection.peer_count > 0) return self.failure_error();
         for (0..selection.serving_count) |i| {
@@ -87,7 +90,7 @@ const Host = struct {
             const i = self.runtime.table.nextTerminal(0) orelse break;
             self.runtime.table.retire(.{ .index = @intCast(i), .generation = self.runtime.table.cells[i].generation });
         }
-        return exchange.run(self.runtime, actions, &demand, self.clock, self);
+        return exchange.run(self.runtime, actions, &demand, self.clock, r.bridge.now(), self);
     }
 };
 
@@ -422,10 +425,52 @@ test "actions apply before selection, so a check classified in an exchange is cl
     // Each exchange advances the stage clock: the claim timed the way to it, and the verdict the credit's hold.
     const stages = &runtime.gossip.?.stages;
     try std.testing.expect(stages.now_ns > 0);
-    for (stages.intervals[@intFromEnum(Kind.beacon_attestation)]) |interval| try std.testing.expectEqual(@as(u64, 1), interval.count);
+    const Interval = n.gossip_processor.stages_mod.Interval;
+    for ([_]Interval{ .receipt_to_ready, .ready_credit_blocked, .ready_other_wait, .claimed_to_applied }) |interval| {
+        try std.testing.expectEqual(@as(u64, 1), stages.intervals[@intFromEnum(Kind.beacon_attestation)][@intFromEnum(interval)].count);
+    }
     try std.testing.expectEqual(@as(c_int, 1), std.c.poll(&readable, 1, 0));
     try runtime.wake.?.drain();
     runtime.gossip.?.retire(checked);
+}
+
+test "an exchange claims and applies after settlement and the runtime mutex, and times a verdict from its settlement" {
+    var fixture: Fixture = undefined;
+    try fixture.init(false, 2);
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    const column = try admit(runtime, .data_column_sidecar, null, "data");
+    const Holder = struct {
+        held: std.atomic.Value(bool) = .init(false),
+        fn run(self: *@This(), target: *Runtime) void {
+            target.lock();
+            self.held.store(true, .release);
+            std.Io.sleep(std.Io.Threaded.global_single_threaded.io(), .fromMilliseconds(20), .awake) catch {};
+            target.unlock();
+        }
+    };
+    const ms = std.time.ns_per_ms;
+    var host: Host = .{ .runtime = runtime };
+    // The call spent 10 ms settling before phase B, which then waits for another holder of the mutex.
+    var holder: Holder = .{};
+    const thread = try std.Thread.spawn(.{}, Holder.run, .{ &holder, runtime });
+    for (0..10_000) |_| {
+        if (holder.held.load(.acquire)) break;
+        std.Thread.yield() catch {};
+    }
+    const claimed = try exchange.run(runtime, &.{}, &deployed, host.clock, r.bridge.now() -| 10 * ms, &host);
+    thread.join();
+    try std.testing.expectEqualSlices(g.Token, &.{column}, claimed.gossip.?.tokens[0..claimed.gossip.?.len]);
+    try std.testing.expect(host.claim_offset_ns >= 25 * ms);
+
+    // The host's validation settled 7 ms before the call of the exchange that applies its verdict, 3 ms in.
+    const applied: exchange.Action = .{ .verdict = .{ .token = column, .verdict = .accept, .waited_ns = 7 * ms } };
+    _ = try exchange.run(runtime, &.{applied}, &control, host.clock, r.bridge.now() -| 3 * ms, &host);
+    const Interval = n.gossip_processor.stages_mod.Interval;
+    const intervals = &runtime.gossip.?.stages.intervals[@intFromEnum(Kind.data_column_sidecar)];
+    try std.testing.expectEqual(@as(u128, 7 * ms), intervals[@intFromEnum(Interval.completed_to_exchange)].sum);
+    try std.testing.expect(intervals[@intFromEnum(Interval.completed_to_applied)].sum >= 10 * ms);
+    try std.testing.expectEqual(@as(u64, 1), intervals[@intFromEnum(Interval.completed_to_applied)].count);
 }
 
 test "a 128-column burst reaches the host within two exchanges under saturated ordinary gossip and serving" {

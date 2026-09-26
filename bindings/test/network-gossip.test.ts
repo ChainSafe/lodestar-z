@@ -62,6 +62,7 @@ async function nextGossip(runtime: NativeNetworkApplicationRuntime): Promise<Nat
     answers = checks.map(({handle}) => ({available: true, handle, type: "classify"}));
     if (gossip?.messages.length) {
       expect(gossip.messages).toHaveLength(1);
+      expect(gossip.claimOffsetMs).toBeGreaterThanOrEqual(0);
       return gossip.messages[0];
     }
     await delay(5);

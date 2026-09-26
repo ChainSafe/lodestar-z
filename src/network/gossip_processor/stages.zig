@@ -1,17 +1,20 @@
-//! Per-kind timing of each message's way through the processor, to attribute its wait before the host starts
-//! it. Receipt is gossipsub admission (`admitted_ms`, the origin of the host's job wait). A message is ready when it
-//! first queues past its dependency check, and claimed when an exchange selects it. Its credit wait is the time the
-//! kind's execution credits refused the kind's next ready item while it was ready, since no item of a kind is claimed
-//! past a refused one; the rest of ready to claimed waited for an exchange to claim it. Its credit is freed when the
-//! host's verdict reaches the processor. Also records why claims leave ready work behind and the time integral of
-//! execution credits in use. Times are monotonic nanoseconds of the clock `tick` last advanced.
+//! Per-kind timing of each message's way through the processor, to attribute its wait before the host starts it and
+//! the wait of its verdict. Receipt is gossipsub admission (`admitted_ms`, the origin of the host's job wait). A message
+//! is ready when it first queues past its dependency check, and claimed when an exchange selects it. Ready to claimed
+//! splits into `ready_credit_blocked`, the time the kind's execution credits refused the kind's next ready item while
+//! this one was ready (no item of a kind is claimed past a refused one), and `ready_other_wait`, the rest; neither alone
+//! proves a cause when credit pressure and host delay overlap. Claim to verdict application covers the host holding
+//! its credit. For verdicts the host times, the host's validation settlement to the call of the exchange carrying the
+//! verdict and to its application; application to the owner forwarding an accepted message. Add means of intervals
+//! only over comparable populations, never quantiles. Times are monotonic nanoseconds of the clock `tick` last
+//! advanced, which callers read after taking the runtime mutex.
 const std = @import("std");
 const limits_mod = @import("../gossip_limits.zig");
 const histogram = @import("../metrics/histogram.zig");
 const Kind = limits_mod.Kind;
 const kind_count = limits_mod.kind_count;
 
-pub const Interval = enum { receipt_to_ready, ready_to_eligible, eligible_to_claimed, claimed_to_applied };
+pub const Interval = enum { receipt_to_ready, ready_credit_blocked, ready_other_wait, claimed_to_applied, completed_to_exchange, completed_to_applied, applied_to_forwarded };
 pub const interval_count = @typeInfo(Interval).@"enum".fields.len;
 /// Why a claim left a kind's next ready item: the kind's execution items or bytes, the claim's item, work or byte
 /// bound, an ordinary kind the claim excluded, or none of these (a group whose members all expired).

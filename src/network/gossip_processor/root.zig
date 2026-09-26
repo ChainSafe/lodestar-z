@@ -54,10 +54,11 @@ pub const Cell = struct {
     source_charge: usize = 0,
     retired: bool = false,
     verdict: native.Verdict = .ignore,
-    /// When it first queued past its dependency check, the kind's credit wait then, and when it was claimed.
+    /// When it first queued past its dependency check, the kind's credit wait then, and when it was claimed, then
+    /// when its verdict was applied.
     ready_ns: ?u64 = null,
     credit_ns: u64 = 0,
-    claimed_ns: u64 = 0,
+    stage_ns: u64 = 0,
 };
 pub const Diagnostics = struct {
     capacity: usize = 0,
@@ -618,9 +619,9 @@ pub const GossipProcessor = struct {
         const now = self.stages.now_ns;
         const credit = self.stages.blocked(cell.kind) -| cell.credit_ns;
         self.stages.observe(cell.kind, .receipt_to_ready, ready -| cell.admitted_ms *| std.time.ns_per_ms);
-        self.stages.observe(cell.kind, .ready_to_eligible, credit);
-        self.stages.observe(cell.kind, .eligible_to_claimed, (now -| ready) -| credit);
-        cell.claimed_ns = now;
+        self.stages.observe(cell.kind, .ready_credit_blocked, credit);
+        self.stages.observe(cell.kind, .ready_other_wait, (now -| ready) -| credit);
+        cell.stage_ns = now;
         self.transition(index, .copying);
         const k = @intFromEnum(cell.kind);
         self.stages.integrate(cell.kind, self.executing_items[k], self.executing_bytes[k]);
@@ -721,10 +722,23 @@ pub const GossipProcessor = struct {
             if (cell.retired and (!success or self.closed)) self.retire(handle);
         }
     }
+    /// Times a host verdict before `report` applies it: its validation settled `waited_ns` before the call of this
+    /// exchange, which entered at `entered_ns`.
+    pub fn timeVerdict(self: *GossipProcessor, handle: Token, waited_ns: u64, entered_ns: u64) void {
+        const cell = self.get(handle) orelse return;
+        if (cell.state != .delivered) return;
+        self.stages.observe(cell.kind, .completed_to_exchange, waited_ns);
+        self.stages.observe(cell.kind, .completed_to_applied, waited_ns +| (self.stages.now_ns -| entered_ns));
+    }
+    /// Times an accepted verdict from its application to the owner handing the message to gossip delivery.
+    pub fn forwarding(self: *GossipProcessor, cell: *const Cell) void {
+        if (cell.verdict == .accept) self.stages.observe(cell.kind, .applied_to_forwarded, self.stages.now_ns -| cell.stage_ns);
+    }
     /// Records the host's verdict. A late verdict, or one for a message expiry already retired, retires it here.
     pub fn report(self: *GossipProcessor, handle: Token, verdict: native.Verdict, now: u64) bool {
         if (self.get(handle)) |cell| if (cell.state == .delivered) {
-            self.stages.observe(cell.kind, .claimed_to_applied, self.stages.now_ns -| cell.claimed_ns);
+            self.stages.observe(cell.kind, .claimed_to_applied, self.stages.now_ns -| cell.stage_ns);
+            cell.stage_ns = self.stages.now_ns;
             self.releaseExecution(cell);
             if (cell.retired or now >= cell.deadline) {
                 self.retire(handle);
