@@ -239,7 +239,7 @@ test "gossip scheduler times each claimed message's stages, credit waits and cla
     try t.expect(table.report(first, .accept, 1010));
     table.timeVerdict(first, 3 * ms, 1009 * ms);
     table.stages.tick(1012 * ms);
-    table.forwarding(table.get(first).?);
+    table.forwarded(table.get(first).?);
     table.stages.tick(1015 * ms);
     const next = table.claimDemand(1015, .{ .ordinary = false });
     try t.expectEqualSlices(p.Token, &.{second}, next.tokens[0..next.len]);

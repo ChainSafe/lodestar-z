@@ -48,9 +48,11 @@ pub fn flags(runtime: *Runtime, io: std.Io) !bool {
         const cell = table.get(token).?;
         if (retired_bytes > 0 and cell.input.len > batch_bytes -| retired_bytes) break;
         retired_bytes += cell.input.len;
+        const counters = &runtime.heavy.?.core.service.gossipsub.counters;
+        const forwards = counters.accepted_forwards;
         table.stages.tick(r.bridge.now());
-        table.forwarding(cell);
         const result = runtime.heavy.?.core.reportValidation(cell.handle, cell.verdict, now);
+        if (counters.accepted_forwards != forwards) table.forwarded(cell);
         table.outcome(result);
         table.retire(token);
     }

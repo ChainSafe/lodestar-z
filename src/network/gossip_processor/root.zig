@@ -730,9 +730,10 @@ pub const GossipProcessor = struct {
         self.stages.observe(cell.kind, .completed_to_exchange, waited_ns);
         self.stages.observe(cell.kind, .completed_to_applied, waited_ns +| (self.stages.now_ns -| entered_ns));
     }
-    /// Times an accepted verdict from its application to the owner handing the message to gossip delivery.
-    pub fn forwarding(self: *GossipProcessor, cell: *const Cell) void {
-        if (cell.verdict == .accept) self.stages.observe(cell.kind, .applied_to_forwarded, self.stages.now_ns -| cell.stage_ns);
+    /// Times a verdict from its application to the owner report that handed its message to gossip delivery.
+    pub fn forwarded(self: *GossipProcessor, cell: *const Cell) void {
+        assert(cell.verdict == .accept);
+        self.stages.observe(cell.kind, .applied_to_forwarded, self.stages.now_ns -| cell.stage_ns);
     }
     /// Records the host's verdict. A late verdict, or one for a message expiry already retired, retires it here.
     pub fn report(self: *GossipProcessor, handle: Token, verdict: native.Verdict, now: u64) bool {

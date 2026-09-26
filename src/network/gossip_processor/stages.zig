@@ -5,8 +5,10 @@
 //! this one was ready (no item of a kind is claimed past a refused one), and `ready_other_wait`, the rest; neither alone
 //! proves a cause when credit pressure and host delay overlap. Claim to verdict application covers the host holding
 //! its credit. For verdicts the host times, the host's validation settlement to the call of the exchange carrying the
-//! verdict and to its application; application to the owner forwarding an accepted message. Add means of intervals
-//! only over comparable populations, never quantiles. Times are monotonic nanoseconds of the clock `tick` last
+//! verdict and to its application; application to the owner report that hands an accepted message to gossip delivery.
+//! Add means of intervals only over comparable populations, never quantiles. With the host's stages, which start at
+//! the claim and end at the verdict's exchange call, the means add up to within the host's time from its exchange
+//! timestamp to native's call entry (about 12 us median). Times are monotonic nanoseconds of the clock `tick` last
 //! advanced, which callers read after taking the runtime mutex.
 const std = @import("std");
 const limits_mod = @import("../gossip_limits.zig");

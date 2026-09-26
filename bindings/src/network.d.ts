@@ -735,7 +735,10 @@ export interface NativeGossipBatch {
   /** Non-attestation jobs contain one message; attestation jobs contain one compatible group. */
   jobs: NativeGossipJob[];
   messages: NativeGossipMessage[];
-  /** Milliseconds from the exchange call to its claim, which follows settlement and the runtime mutex. */
+  /**
+   * Milliseconds from the exchange call's native entry to its claim, which follows settlement and the runtime mutex.
+   * Added to the host's timestamp before the call, it places the claim on the host clock to within microseconds.
+   */
   claimOffsetMs: number;
 }
 export interface NativeGossipPublishOptions {
