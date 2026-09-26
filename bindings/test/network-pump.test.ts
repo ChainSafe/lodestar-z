@@ -765,6 +765,19 @@ describe("binding pump delivery", () => {
     ],
     ["miscounts", () => [true], [false, false], "NativeHostContract: checkDependencies"],
     ["returns no array", () => "yes" as unknown as boolean[], [false, false], "NativeHostContract: checkDependencies"],
+    ["returns a sparse array", () => new Array<boolean>(2), [false, false], "NativeHostContract: checkDependencies"],
+    [
+      "returns a partially populated array",
+      () => Object.assign([true], {length: 2}),
+      [false, false],
+      "NativeHostContract: checkDependencies",
+    ],
+    [
+      "returns a non-boolean answer",
+      () => [true, 1] as unknown as boolean[],
+      [false, false],
+      "NativeHostContract: checkDependencies",
+    ],
   ])("classifies dependency checks in one call when the host %s", async (_, answer, classes, error) => {
     const node = fixture();
     node.host.checkDependencies.mockImplementationOnce(answer);
@@ -792,6 +805,12 @@ describe("binding pump delivery", () => {
     ["rejects", () => Promise.reject(new Error("validator failed")), "validator failed"],
     ["miscounts", () => Promise.resolve(["accept"] as const), "NativeHostContract: validate"],
     ["returns an unknown verdict", () => Promise.resolve(["accept", "maybe"]), "NativeHostContract: validate"],
+    ["returns a sparse array", () => Promise.resolve(new Array(2)), "NativeHostContract: validate"],
+    [
+      "returns a partially populated array",
+      () => Promise.resolve(Object.assign(["accept"], {length: 2})),
+      "NativeHostContract: validate",
+    ],
   ])("ignores every message of a job whose validation %s, and validates the others", async (_, validate, error) => {
     const node = fixture();
     node.host.validate.mockImplementationOnce(validate as () => Promise<readonly Verdict[]>);

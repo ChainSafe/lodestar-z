@@ -520,13 +520,16 @@ export class NativePump {
       const answers = this.#host.checkDependencies(
         checks.map(({root, slot, peerId, topic}) => ({peerId, root, slot, topic}))
       );
-      if (!Array.isArray(answers) || answers.length !== checks.length) throw contractError("checkDependencies");
+      // Every index is checked, since array methods skip the holes of a sparse array.
+      const answered = Array.isArray(answers) && answers.length === checks.length;
+      if (!answered || !checks.every((_, i) => typeof answers[i] === "boolean"))
+        throw contractError("checkDependencies");
       available = answers;
     } catch (error) {
       this.#error(error);
     }
     for (const [i, {handle}] of checks.entries())
-      this.#obligations.push({available: available?.[i] === true, handle, type: "classify"});
+      this.#obligations.push({available: available !== null && available[i], handle, type: "classify"});
   }
 
   /**
@@ -585,7 +588,7 @@ export class NativePump {
     if (this.#stopped) return;
     const count = record.handles.length;
     const valid =
-      values !== null && Array.isArray(values) && values.length === count && values.every((v) => VERDICTS.has(v));
+      Array.isArray(values) && values.length === count && record.handles.every((_, i) => VERDICTS.has(values[i]));
     if (values !== null && !valid) this.#error(contractError("validate"));
     for (let i = 0; i < count; i++)
       this.#obligations.push({handle: record.handles[i], type: "verdict", verdict: valid ? values[i] : "ignore"});
