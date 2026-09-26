@@ -21,6 +21,7 @@ pub fn build(b: *std.Build) void {
         // which Zig's Run step treats as diagnostic output and reports under a
         // misleading "failed command:" header (even though cargo exited cleanly).
         "--quiet",
+        "--locked",
         "--features",
         "ffi",
         "--target",
@@ -50,7 +51,7 @@ pub fn build(b: *std.Build) void {
 
 /// A copy of the quiche crate with the patch applied. The fetched package stays untouched.
 fn patched(b: *std.Build, crate: std.Build.LazyPath) std.Build.LazyPath {
-    const apply = b.addSystemCommand(&.{ "sh", "-c", "mkdir -p \"$1\" && cp -R \"$0\"/. \"$1\" && chmod -R u+w \"$1\" && patch -s -p1 -d \"$1\" < \"$2\"" });
+    const apply = b.addSystemCommand(&.{ "sh", "-c", "mkdir -p \"$1\" && cp -R \"$0\"/. \"$1\" && chmod -R u+w \"$1\" && patch --batch --fuzz=0 -s -p1 -d \"$1\" < \"$2\"" });
     apply.addDirectoryArg(crate);
     const copy = apply.addOutputDirectoryArg("quiche");
     apply.addFileArg(b.path("patches/send-capacity.patch"));
