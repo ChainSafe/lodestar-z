@@ -163,16 +163,18 @@ export class NativePump {
   }
 
   /**
-   * Leaves settlement only: held serving starts are cancelled and held jobs dropped, as native close retires their
-   * messages. Turns continue until native reports closed.
+   * Leaves settlement only: held serving starts are cancelled and held jobs ignored. Turns continue until native
+   * reports closed. From a host callback, it also ends the delivery in progress.
    */
   close() {
     if (this.#closing) return;
     this.#closing = true;
     const starts = this.#heldStarts;
+    const jobs = this.#heldJobs;
     this.#heldStarts = [];
-    for (const incoming of starts) void incoming.cancel().catch(noop);
     this.#heldJobs = [];
+    for (const incoming of starts) void incoming.cancel().catch(noop);
+    for (const job of jobs) this.#verdicts(job, null);
   }
 
   /** A fatal failure after a delivery: the first is the close result's error, and the network closes. */
@@ -317,7 +319,8 @@ export class NativePump {
   #demand(deadline) {
     if (this.#closing) return null;
     const capacity = this.#host.capacity();
-    if (capacity === null) return null;
+    // The host may close the network from its capacity read.
+    if (capacity === null || this.#closing) return null;
     const serving = capacity?.serving;
     if (typeof serving !== "number" || !Number.isFinite(serving) || typeof capacity.ordinary !== "boolean")
       throw contractError("capacity");
@@ -396,9 +399,9 @@ export class NativePump {
 
   /**
    * Hands one exchange's delivery to the host: peers, then serving starts, then dependency checks, then gossip jobs.
-   * If the host's peer handler throws, the pump keeps what it never handed over: every job gets an ignore verdict,
-   * every serving start is cancelled once and every check is classified unavailable. Returns whether delivered work
-   * waits for the next turn.
+   * If the host's peer handler throws, or the host closes the network, the delivery stops there and the pump retires
+   * what it never handed over: every job gets an ignore verdict, every serving start is cancelled once and every check
+   * is classified unavailable. Returns whether delivered work waits for the next turn.
    */
   #deliver(result, deadline) {
     const jobs = this.#jobs(result.gossip);
@@ -406,12 +409,16 @@ export class NativePump {
     const checks = result.checks;
     let checked = checks.length === 0;
     try {
+      // Host code may already have run within the exchange's settlements.
+      if (this.#closing) return false;
       if (result.peers.length > 0) this.#host.peers(result.peers);
+      if (this.#closing) return false;
       const heldStarts = this.#start(starts, deadline);
+      if (this.#closing) return false;
       this.#check(checks);
       checked = true;
-      const heldJobs = this.#dispatch(jobs, deadline);
-      return heldStarts || heldJobs;
+      if (this.#closing) return false;
+      return this.#dispatch(jobs, deadline) || heldStarts;
     } finally {
       for (const job of jobs) if (!job.adopted) this.#verdicts(job, null);
       for (const start of starts) if (!start.adopted) void start.incoming.cancel().catch(noop);
@@ -468,7 +475,11 @@ export class NativePump {
       this.#heldStarts = pending;
       return true;
     }
-    for (const incoming of pending) this.#serve(incoming);
+    // Starts after a serve that closed the network are cancelled instead.
+    for (const incoming of pending) {
+      if (this.#closing) void incoming.cancel().catch(noop);
+      else this.#serve(incoming);
+    }
     return false;
   }
 
@@ -542,19 +553,20 @@ export class NativePump {
   #dispatch(jobs, deadline) {
     // Ordinary work delivered at the turn's start is new work, which a spent budget defers like the claim it replaced.
     const progress = this.#heldJobs.length > 0 || performance.now() < deadline;
-    // Jobs arrive in priority order, so urgent jobs start first and none waits for the budget.
+    // Jobs arrive in priority order, so urgent jobs start first and none waits for the budget. A validation that
+    // closes the network leaves the rest to the delivery's cleanup, and held jobs to close.
     for (const job of jobs) {
+      if (this.#closing) break;
       job.adopted = true;
       if (job.urgent) this.#validate(job);
       else this.#heldJobs.push(job);
     }
     let started = 0;
-    for (const job of this.#heldJobs) {
+    while (this.#heldJobs.length > 0 && !this.#closing) {
       if ((started > 0 || !progress) && performance.now() >= deadline) break;
       started++;
-      this.#validate(job);
+      this.#validate(this.#heldJobs.shift());
     }
-    this.#heldJobs = this.#heldJobs.slice(started);
     return this.#heldJobs.length > 0;
   }
 
