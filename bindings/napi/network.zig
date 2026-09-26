@@ -234,7 +234,7 @@ pub fn exchange(self: *@This(), actions_value: js.Value, demand_value: js.Value)
 }
 
 /// A private control for binding ownership tests: while held, the owner leaves reported verdicts unapplied, so no
-/// acknowledgement follows them; a release wakes the owner.
+/// acknowledgement follows them, though expiry still disposes of them; a release wakes the owner.
 pub fn holdVerdicts(self: *@This(), held: js.Value) !void {
     const runtime = try self.owner();
     const value = try cfg.boolean(held.val);

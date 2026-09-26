@@ -263,17 +263,6 @@ test.each([
   );
 }, 15000);
 
-/** Exchanges settlement only until `handle` is acknowledged, returning the diagnostics seen just before. */
-async function acknowledgement(runtime: NativeNetworkApplicationRuntime, handle: NativeGossipHandle) {
-  for (let i = 0; i < 1000; i++) {
-    const before = runtime.diagnostics().gossip;
-    const {acknowledged} = exchange(runtime, settleOnly);
-    if (acknowledged.some((ack) => ack.index === handle.index && ack.generation === handle.generation)) return before;
-    await delay(5);
-  }
-  throw Error("Acknowledgement deadline");
-}
-
 test("an acknowledgement follows only the owner's disposition of a delivered message", async () => {
   const pair = await gossipPair();
   try {
@@ -281,7 +270,8 @@ test("an acknowledgement follows only the owner's disposition of a delivered mes
     const message = await nextGossip(pair.right);
     pair.right.holdVerdicts(true);
     const accepted = pair.right.diagnostics().gossip.reportsAppliedAccept;
-    // The reporting exchange cannot carry the acknowledgement, nor can later ones while the owner holds verdicts.
+    // The exchange that reports a fresh verdict cannot carry its acknowledgement, nor can later ones while the owner
+    // holds verdicts.
     const reported = exchange(pair.right, settleOnly, [{handle: message.handle, type: "verdict", verdict: "accept"}]);
     expect(reported.acknowledged).toEqual([]);
     for (let i = 0; i < 20; i++) {
@@ -290,9 +280,12 @@ test("an acknowledgement follows only the owner's disposition of a delivered mes
     }
     expect(pair.right.diagnostics().gossip).toMatchObject({acknowledging: 0, pendingVerdicts: 1, reportsAppliedAccept: accepted});
     pair.right.holdVerdicts(false);
-    // The owner applied the verdict, which admits forwarding, before its acknowledgement became deliverable.
-    const before = await acknowledgement(pair.right, message.handle);
-    expect(before.reportsAppliedAccept).toBe(accepted + 1n);
+    // Released, the owner applies the verdict, which admits forwarding, and in the same locked step leaves its
+    // acknowledgement, which the next exchange returns.
+    await vi.waitFor(() => expect(pair.right.diagnostics().gossip.reportsAppliedAccept).toBe(accepted + 1n), {
+      timeout: 5000,
+    });
+    expect(exchange(pair.right, settleOnly).acknowledged).toEqual([message.handle]);
     expect(pair.right.diagnostics().gossip).toMatchObject({acknowledging: 0, occupied: 0, pendingVerdicts: 0});
     expect(exchange(pair.right, settleOnly).acknowledged).toEqual([]);
   } finally {

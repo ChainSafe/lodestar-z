@@ -449,7 +449,10 @@ export interface NativeNetworkApplicationRuntime {
   exchange(actions: readonly NativeAction[], demand: NativeExchangeDemand): NativeExchange;
   /** Terminates the process for an escalated bridge contract failure. */
   fail(trigger: NativeEscalation, reason: string): never;
-  /** Private control for binding ownership tests: while held, the owner leaves reported verdicts unapplied. */
+  /**
+   * Private control for binding ownership tests: while held, the owner leaves reported verdicts unapplied. Expiry
+   * still disposes of them.
+   */
   holdVerdicts(held: boolean): void;
   close(): Promise<NativeRuntimeCloseResult>;
 }
