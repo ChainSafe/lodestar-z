@@ -59,6 +59,7 @@ pub fn initialize(self: *@This(), config: js.Value, callback: js.Value) !js.Valu
     try runtime.results.prepare(env);
     const holder = try env.createObject();
     try holder.setNamedProperty("identity", try identity(env, &runtime.identity));
+    try holder.setNamedProperty("limits", try resolvedLimits(env, runtime));
     try holder.setNamedProperty("closed", runtime.close_deferred.?.getPromise());
     runtime.retain();
     errdefer runtime.release();
@@ -333,6 +334,14 @@ const endpoint = @import("network_js.zig").endpoint;
 fn text(value: []const u8) !Value {
     return js.env().createStringUtf8(value);
 }
+/// The resolved limits a host sizes its own work by: retained peers and concurrently served requests.
+fn resolvedLimits(env: napi.Env, runtime: *const Runtime) !Value {
+    const object = try env.createObject();
+    try object.setNamedProperty("peerCapacity", try env.createUint32(runtime.peer_capacity));
+    try object.setNamedProperty("incomingCapacity", try env.createUint32(@intCast(runtime.incoming.?.diag.capacity)));
+    return object;
+}
+
 fn identity(env: napi.Env, value: *const r.Identity) !Value {
     const object = try env.createObject();
     try object.setNamedProperty("peerId", try @import("network_js.zig").peerIdValue(env, &value.peer));

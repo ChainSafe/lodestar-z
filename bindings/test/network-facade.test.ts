@@ -319,11 +319,13 @@ test("the facade validates its host, starts without host callbacks and hides the
   const network = createNativeNetwork(config, recorded);
   try {
     expect(calls).toEqual([]);
+    // Resolved by native at initialization, as its private diagnostics report them.
     const diagnostics = runtimeOf(network)?.diagnostics();
     expect(network.limits).toEqual({
       incomingCapacity: diagnostics?.incoming.capacity,
-      peerCapacity: diagnostics?.resolvedCapacities.peerCapacity,
+      peerCapacity: config.resources.peerCapacity,
     });
+    expect(Object.isFrozen(network.limits)).toBe(true);
     for (const name of ["exchange", "fail", "holdVerdicts", "diagnostics", "identity", "state"])
       expect(name in network).toBe(false);
     await network.applyIntent(localIntent(config), config.initialSlot);

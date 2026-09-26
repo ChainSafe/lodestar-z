@@ -315,6 +315,7 @@ test("actual 200/210 resources resolve and publish complete capacity", async () 
     await runtime.identity;
     await runtime.applyIntent(localIntent(config), 100n);
     expect((await runtime.getPeers()).capacity).toBe(512);
+    expect(runtime.limits).toEqual({incomingCapacity: runtime.diagnostics().incoming.capacity, peerCapacity: 512});
     expect(runtime.diagnostics().resolvedCapacities).toEqual({
       admissionIdentityCapacity: 512,
       connectionCapacity: 256,

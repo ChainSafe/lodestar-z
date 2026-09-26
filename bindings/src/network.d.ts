@@ -667,6 +667,7 @@ export type Verdict = "accept" | "reject" | "ignore";
 
 export type CloseResult = {readonly reason: "requested"} | {readonly reason: "failed"; readonly error: Error};
 
+/** Resolved at initialization: peer records the network retains, and incoming requests it serves at once. */
 export interface NativeResolvedLimits {
   readonly peerCapacity: number;
   readonly incomingCapacity: number;

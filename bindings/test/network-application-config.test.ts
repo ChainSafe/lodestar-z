@@ -92,6 +92,7 @@ test.each([512, 513])("retained peer capacity %s respects the native gossip ceil
   const runtime = startRuntime(config);
   try {
     expect(runtime.diagnostics().resolvedCapacities).toMatchObject({gossipRetainedCapacity: 512, peerCapacity: 512});
+    expect(runtime.limits.peerCapacity).toBe(512);
   } finally {
     await runtime.close();
   }
