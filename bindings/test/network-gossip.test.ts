@@ -29,7 +29,6 @@ test("gossip drain and stale verdict on an activated application", async () => {
 
 import {setTimeout as delay} from "node:timers/promises";
 import type {
-  NativeAction,
   NativeApplicationConfig,
   NativeGossipHandle,
   NativeGossipMessage,
@@ -53,13 +52,11 @@ function report(runtime: NativeNetworkApplicationRuntime, handle: NativeGossipHa
   return runtime.diagnostics().gossip.reportsAccepted > before;
 }
 
-/** Claims gossip, classifying every dependency the previous exchange delivered as available, as a host that already
- * holds each parent block does; the next exchange claims what its classifications queued. */
+/** Claims the next gossip block, which queues without a dependency check. */
 async function nextGossip(runtime: NativeNetworkApplicationRuntime): Promise<NativeGossipMessage> {
-  let answers: NativeAction[] = [];
   for (let i = 0; i < 1000; i++) {
-    const {checks, gossip} = exchange(runtime, gossipAll, answers);
-    answers = checks.map(({handle}) => ({available: true, handle, type: "classify"}));
+    const {checks, gossip} = exchange(runtime, gossipAll);
+    expect(checks).toEqual([]);
     if (gossip?.messages.length) {
       expect(gossip.messages).toHaveLength(1);
       expect(gossip.claimOffsetMs).toBeGreaterThanOrEqual(0);
@@ -350,10 +347,8 @@ test.each([
     await pair.left.publishGossip(TOPIC, blockPayload(4000, 5), {allowZeroPeers: false});
     let message: NativeGossipMessage | undefined;
     if (delivered) message = await nextGossip(pair.right);
-    let answers: NativeAction[] = [];
     for (let i = 0; i < 1000; i++) {
-      const {checks} = exchange(pair.right, {...settleOnly, checks: 64}, answers);
-      answers = checks.map(({handle}) => ({available: true, handle, type: "classify"}));
+      exchange(pair.right, settleOnly);
       const diag = pair.right.diagnostics().gossip;
       if (diag.queuedExpired + diag.deliveredExpired > 0n) break;
       await delay(5);
@@ -450,12 +445,12 @@ for (const hoodi of [false, true]) {
         if (!hoodi) {
           for (let i = 0; i < 64; i++)
             await peer.command("gossipPublish", {length: 4000, seed: 900 + i, slot: 100, topic: firstTopic});
-          for (let i = 0; i < 1000 && runtime.diagnostics().gossip.checking !== held; i++) await delay(5);
+          for (let i = 0; i < 1000 && runtime.diagnostics().gossip.queued !== held; i++) await delay(5);
           expect(runtime.diagnostics().gossip).toMatchObject({
-            checking: held,
+            checking: 0,
             occupied: held,
             payloadBytes: held * 4000,
-            queued: 0,
+            queued: held,
             reservedBytes: 0,
           });
         }
@@ -463,13 +458,6 @@ for (const hoodi of [false, true]) {
           await peer.command("ping", {addressBytes: Buffer.from(identity.localMultiaddr).toString("hex")})
         ).toMatchObject({length: 8});
         if (!hoodi) {
-          const {checks} = exchange(runtime, {...settleOnly, checks: 64});
-          exchange(
-            runtime,
-            settleOnly,
-            checks.map(({handle}) => ({available: true, handle, type: "classify"}))
-          );
-          for (let i = 0; i < 1000 && runtime.diagnostics().gossip.queued !== held; i++) await delay(5);
           const messages = exchange(runtime, gossipAll).gossip?.messages ?? [];
           expect(messages).toHaveLength(held);
           const before = runtime.diagnostics().gossip.reportsAccepted;

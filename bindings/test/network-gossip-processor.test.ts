@@ -150,17 +150,12 @@ test("native processor retains dependencies, protects blocks, batches ready work
     const blockBytes = new Uint8Array(4000);
     new DataView(blockBytes.buffer).setBigUint64(100, pair.rightConfig.initialSlot, true);
     await pair.left.publishGossip(BLOCK, blockBytes);
-    const [blockCheck] = await checks(pair.right, 1);
     const urgent = {...settleOnly, bytes: 4096, capacity, checks: 64, messages: 1};
     let block;
     for (let i = 0; i < 1000 && !block; i++) {
-      // Waiting attestations are neither checkable nor claimable; only the urgent block is, and its negative check
-      // applies before the claim in the same exchange.
-      const {checks: pending, gossip} = exchange(
-        pair.right,
-        urgent,
-        i === 0 ? [classify(blockCheck.handle, false)] : []
-      );
+      // Waiting attestations are neither checkable nor claimable. The block queues without a check of its parent,
+      // which the host's validator checks.
+      const {checks: pending, gossip} = exchange(pair.right, urgent);
       expect(pending).toEqual([]);
       if (!gossip) await delay(5);
       else {
@@ -241,11 +236,6 @@ test("expired validation execution remains visible until late host completion", 
     const block = new Uint8Array(4000);
     new DataView(block.buffer).setBigUint64(100, pair.rightConfig.initialSlot, true);
     await pair.left.publishGossip(BLOCK, block);
-    exchange(
-      pair.right,
-      settleOnly,
-      (await checks(pair.right, 1)).map(({handle}) => classify(handle, true))
-    );
     let message: NativeGossipMessage | undefined;
     for (let i = 0; i < 1000 && !message; i++) {
       message = exchange(pair.right, {...settleOnly, bytes: 4096, capacity, claimOrdinary: true, messages: 1}).gossip

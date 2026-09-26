@@ -669,7 +669,7 @@ pub const GossipProcessor = struct {
         if (cell.state != .checking or cell.retired) return false;
         if (self.last_now >= cell.deadline or !self.eligible(cell)) {
             self.ignore(cell);
-        } else if (available or !cell.metadata.await_block) {
+        } else if (available) {
             self.transition(handle.index, .queued);
         } else if (cell.check_notification != self.dependencies.notification or self.dependencies.notification == std.math.maxInt(u64)) {
             self.transition(handle.index, .needs_check);
