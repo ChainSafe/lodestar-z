@@ -15,6 +15,7 @@ import {
 } from "../utils/network.js";
 
 const mode = process.argv[2];
+const noop = () => undefined;
 if (mode === "exit") {
   const runtime = startRuntime(applicationConfig());
   assert.equal(runtime.state, "running");
@@ -62,9 +63,11 @@ if (mode === "exit") {
   assert.deepEqual(settlements.counts, [1, 1, 1, 1, 1, 1]);
   assert.equal(settlements.outcomes[0], "NetworkClosed");
   console.log("promises-settled");
-} else if (mode === "facade-gc") {
-  // A dropped facade and its host are collected without close, while operation promises and a job's report alone
-  // remain, and each settles when native closes.
+} else if (mode === "facade-gc" || mode === "facade-gc-reaction") {
+  // A dropped facade and its host are collected without close, while operation promises alone remain and settle when
+  // native closes. A job's report retained elsewhere rejects then; one dropped with the host may hold a deferred
+  // handler that captures the host, which holds the facade, and still roots none of them.
+  const retained = mode === "facade-gc";
   const {startPeer} = await import("../utils/network-peer.js");
   const config = applicationConfig();
   const remoteConfig = applicationConfig();
@@ -76,10 +79,16 @@ if (mode === "exit") {
     deliver = resolve;
   });
   let host = {
+    network: null,
+    handled: 0,
     capacity: () => ({ordinary: true, serving: 32}),
     // The validation never finishes, so the job's report stays outstanding.
-    validate: (job) => {
-      deliver({reported: job.reported});
+    validate(job) {
+      if (retained) deliver({reported: job.reported});
+      else {
+        job.reported.then(() => this.handled++, noop);
+        deliver({reported: null});
+      }
       return new Promise(() => undefined);
     },
     checkDependencies: (checks) => checks.map(() => false),
@@ -88,6 +97,7 @@ if (mode === "exit") {
     failed: () => undefined,
   };
   let network = createNativeNetwork(config, host);
+  host.network = network;
   const intent = (value) => ({...localIntent(value), subscriptions: subscriptions(topicName())});
   await network.applyIntent(intent(config), config.initialSlot);
   await remote.applyIntent(intent(remoteConfig), remoteConfig.initialSlot);
@@ -101,11 +111,12 @@ if (mode === "exit") {
   const block = new Uint8Array(4000).fill(7);
   new DataView(block.buffer).setBigUint64(100, 100n, true);
   await remote.publishGossip(topicName(), block, {allowZeroPeers: false});
-  const {reported} = await delivered;
-  const report = reported.then(
+  let {reported} = await delivered;
+  const report = reported?.then(
     () => "resolved",
     (error) => error.code
   );
+  reported = null;
   const closed = network.closed;
   const settlements = new Settlements();
   const unsettled = settlements.unsettledAtClose(closed);
@@ -129,7 +140,7 @@ if (mode === "exit") {
   assert.deepEqual(await unsettled, []);
   assert.deepEqual(settlements.counts, [1, 1]);
   assert.equal(settlements.outcomes[0], "NetworkClosed");
-  assert.equal(await Promise.race([report, delay(5000, "pending")]), "NetworkClosed");
+  if (retained) assert.equal(await Promise.race([report, delay(5000, "pending")]), "NetworkClosed");
   await remote.stop();
   await runtimeReleased();
   console.log("facade-collected");

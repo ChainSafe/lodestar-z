@@ -329,11 +329,18 @@ test("the facade validates its host, starts without host callbacks and hides the
   expect(await network.closed).toEqual({reason: "requested"});
 });
 
-test("drops the facade and host without close while operation promises remain", () => {
-  const output = execFileSync(
-    process.execPath,
-    ["--import", "tsx", "--expose-gc", "bindings/test/fixtures/network-lifecycle.mjs", "facade-gc"],
-    {encoding: "utf8", timeout: 20000}
-  );
-  expect(output).toContain("facade-collected");
-}, 25000);
+test.each([
+  ["a job's report retained elsewhere", "facade-gc"],
+  ["a report reaction that captures the host", "facade-gc-reaction"],
+])(
+  "drops the facade and host without close, with %s",
+  (_, mode) => {
+    const output = execFileSync(
+      process.execPath,
+      ["--import", "tsx", "--expose-gc", "bindings/test/fixtures/network-lifecycle.mjs", mode],
+      {encoding: "utf8", timeout: 20000}
+    );
+    expect(output).toContain("facade-collected");
+  },
+  25000
+);

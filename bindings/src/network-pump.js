@@ -31,6 +31,8 @@ export const BURST_NAME = "lodestar_native_drain_burst_seconds";
 export const BURST_BUCKETS = Object.freeze([0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2]);
 const VERDICTS = new Set(["accept", "reject", "ignore"]);
 const noop = () => undefined;
+/** Each report's settler, which lives exactly as long as its report is reachable. */
+const settlers = new WeakMap();
 
 function closedError() {
   return Object.assign(new Error("NetworkClosed"), {code: "NetworkClosed"});
@@ -117,11 +119,13 @@ export class NativePump {
   #heldJobs = [];
   /** Delivered serving starts a spent time budget left for the next turn, at most one turn's quota. */
   #heldStarts = [];
-  /**
-   * Each delivered message awaiting its owner disposition, by native handle. The closed observation holds it without
-   * the pump, so reports a host retains settle at close although the pump and host were collected.
-   */
+  /** Each delivered message awaiting its owner disposition, by native handle. */
   #reported = new Map();
+  /**
+   * Each unsettled report's settler, held weakly: a report retained elsewhere settles at close although the pump and
+   * host were collected, and one nobody retains roots neither its reactions nor the host they capture.
+   */
+  #unsettled = new Set();
   #burst = {buckets: new Array(BURST_BUCKETS.length).fill(0), count: 0, sum: 0};
   /** Peer penalties dropped because the coalescing table was full. */
   reportsDropped = 0;
@@ -134,15 +138,15 @@ export class NativePump {
   /** Starts draining `runtime`, whose notifications call `request`. */
   attach(runtime) {
     this.#runtime = runtime;
-    NativePump.#observe(this.#weak, this.#reported, runtime.closed);
+    NativePump.#observe(this.#weak, this.#unsettled, runtime.closed);
   }
 
-  static #observe(weak, reported, closed) {
+  static #observe(weak, unsettled, closed) {
     const stop = () => {
       // Shutdown prevents the owner from disposing of whatever it has not acknowledged.
-      const jobs = new Set(reported.values());
-      reported.clear();
-      for (const job of jobs) job.reject(closedError());
+      const pending = [...unsettled];
+      unsettled.clear();
+      for (const settler of pending) settler.deref()?.reject(closedError());
       const pump = weak.deref();
       if (pump) pump.#stop();
     };
@@ -402,7 +406,9 @@ export class NativePump {
       const job = this.#reported.get(key);
       if (!job) continue;
       this.#reported.delete(key);
-      if (--job.remaining === 0) job.resolve();
+      if (--job.remaining > 0) continue;
+      this.#unsettled.delete(job.weak);
+      job.resolve();
     }
   }
 
@@ -448,7 +454,10 @@ export class NativePump {
       });
       // A host that does not await a job's disposition sees no unhandled rejection at shutdown.
       reported.catch(noop);
-      const settle = {reject, remaining: natives.length, resolve};
+      const settle = {reject, remaining: natives.length, resolve, weak: null};
+      settle.weak = new WeakRef(settle);
+      settlers.set(reported, settle);
+      this.#unsettled.add(settle.weak);
       for (const {handle} of natives) this.#reported.set(keyOf(handle), settle);
       const messages = natives.map((message) => ({
         attestationData: message.attestationData,
