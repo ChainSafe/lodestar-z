@@ -43,8 +43,8 @@ interface DirectIncomingBridge {
   ): {identity: import("../src/network.js").NativeIdentity; closed: Promise<unknown>};
   applyIntent(intent: ReturnType<typeof localIntent>, slot: bigint): Promise<unknown>;
   exchange(
-    actions: readonly import("../src/network.js").NativeAction[],
-    demand: import("../src/network.js").NativeExchangeDemand
+    actions: readonly import("../src/network-runtime.js").NativeAction[],
+    demand: import("../src/network-runtime.js").NativeExchangeDemand
   ): {serving: IncomingDescriptor[]};
   incomingTerminal(handle: IncomingHandle, action: number, status?: number, message?: Uint8Array): void;
   incomingRelease(handle: IncomingHandle): void;

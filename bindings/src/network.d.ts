@@ -156,51 +156,6 @@ export interface NativeIdentity {
   metadata: NativeLocalState["metadata"];
 }
 
-export type NativeRuntimeState = "running" | "stopping" | "closed" | "failed";
-
-export interface NativeRuntimeDiagnostics {
-  payloadBudget: {
-    limitBytes: number;
-    usedBytes: number;
-    incomingMinimumBytes: number;
-    outgoingMinimumBytes: number;
-    publicationMinimumBytes: number;
-  };
-  publications: NativePublicationDiagnostics;
-  requests: NativeRequestDiagnostics;
-  incoming: NativeIncomingDiagnostics;
-  gossip: NativeGossipDiagnostics;
-  state: NativeRuntimeState;
-  terminalErrorCode: string | null;
-  currentSlot: bigint;
-  ownerTurns: bigint;
-  operationalFailures: bigint;
-  operationOccupied: number;
-  peerReportsIgnored: bigint;
-  connectOccupied: number;
-  preparingPins: number;
-  copyingPins: number;
-  peerLaneOccupied: number;
-  ownerSequence: bigint;
-  liveNativeRequestedBytes: number;
-  liveBridgeRequestedBytes: number;
-  typedStoreBytes: number;
-  metricsExportBytes: number;
-  peerLaneBytes: number;
-  ownerShellBytes: number;
-  nativeAllocationCount: number;
-  /** Configured QUIC flow-control ceilings, separate from the native allocation ledger. */
-  quicReceiveWindowBytes: bigint;
-  quicConnectionWindowBytes: bigint;
-  quicStreamWindowBytes: bigint;
-  resolvedCapacities: NativeResolvedCapacities;
-  nativeRequestedBytes: number;
-  bridgeRequestedBytes: number;
-}
-
-/** A failed close names the owner's first terminal error, also when it followed a requested close. */
-export type NativeRuntimeCloseResult = {reason: "requested"} | {reason: "failed"; error: Error & {code: string}};
-
 export type NativeLogLevel = "error" | "warn" | "info" | "debug" | "off";
 
 export interface NativeLogRecord {
@@ -215,14 +170,6 @@ export interface NativeLogRecord {
 
 /** Native log records lost since the last report: past capacity, over the rate limits, or cut to fit. */
 export interface NativeLogLoss {
-  dropped: bigint;
-  suppressed: bigint;
-  truncated: bigint;
-}
-
-export interface NativeLogBatch {
-  records: NativeLogRecord[];
-  more: boolean;
   dropped: bigint;
   suppressed: bigint;
   truncated: bigint;
@@ -329,29 +276,6 @@ export interface NativePeerSnapshot {
   ownerSequence: bigint;
 }
 
-export interface NativePublicationDiagnostics {
-  capacity: number;
-  urgentReserved: number;
-  occupied: number;
-  highWater: number;
-  refusals: bigint;
-  byteRefusals: bigint;
-  reservedBytes: number;
-  reservedBytesHighWater: number;
-  payloadBytes: number;
-  copies: bigint;
-  bytesCopied: bigint;
-  queued: bigint;
-  pressured: bigint;
-  selected: bigint;
-  unavailable: bigint;
-  duplicates: bigint;
-  latencyCount: bigint;
-  /** Upper histogram bucket bounds, in milliseconds. */
-  latencyMsP50: bigint;
-  latencyMsP99: bigint;
-}
-
 export type NativeProtocolId =
   | "/ipfs/id/1.0.0"
   | "/meshsub/1.2.0"
@@ -432,22 +356,6 @@ export type NativePeerObservation =
       ownerSequence: bigint;
     };
 
-export interface NativeResolvedCapacities {
-  peerCapacity: number;
-  targetPeers: number;
-  maxPeers: number;
-  minOutbound: number;
-  outboundReserve: number;
-  connectionCapacity: number;
-  handshakingCapacity: number;
-  dialingCapacity: number;
-  requestPeerCapacity: number;
-  admissionIdentityCapacity: number;
-  gossipConnectedCapacity: number;
-  gossipRetainedCapacity: number;
-  dialEngineCapacity: number;
-}
-
 export interface NativeRequestOptions {
   expectedChunks?: number;
   negotiationTimeoutMs?: number;
@@ -499,23 +407,6 @@ export type NativeRequestError = Error &
     | {code: "NetworkClosed"}
     | {code: "NetworkRequestBusy"}
   );
-export interface NativeRequestDiagnostics {
-  capacity: number;
-  occupied: number;
-  highWater: number;
-  pendingPulls: number;
-  terminalCells: number;
-  reservedBytes: number;
-  reservedBytesHighWater: number;
-  inputBytes: number;
-  sinkBytes: number;
-  copyingBytes: number;
-  chunksCopied: bigint;
-  bytesCopied: bigint;
-  requestFull: bigint;
-  busyPulls: bigint;
-}
-
 export type NativeIncomingFailure =
   | "timeout"
   | "host_timeout"
@@ -544,28 +435,6 @@ export type NativeIncomingError = Error &
     | {code: "NetworkClosed"}
   );
 
-export interface NativeIncomingDiagnostics {
-  retiring: number;
-  pendingPermissions: number;
-  capacity: number;
-  occupied: number;
-  queued: number;
-  highWater: number;
-  pendingResponses: number;
-  closedPromises: number;
-  reservedBytes: number;
-  reservedBytesHighWater: number;
-  requestBytes: number;
-  responseBytes: number;
-  copyingBytes: number;
-  requestsTaken: bigint;
-  responseBytesCopied: bigint;
-  chunksWritten: bigint;
-  bytesWritten: bigint;
-  capacityRefusals: bigint;
-  byteRefusals: bigint;
-}
-
 export interface NativeGossipPublishOptions {
   allowZeroPeers?: boolean;
   ignoreDuplicate?: boolean;
@@ -577,44 +446,6 @@ export interface NativeGossipPublishResult {
   selected: number;
   unavailable: number;
   duplicate: boolean;
-}
-
-export interface NativeGossipDiagnostics {
-  waiting: number;
-  checking: number;
-  executing: number;
-  executingBytes: number;
-  copying: number;
-  expiredExecuting: number;
-  /** Milliseconds past the earliest verdict deadline among delivered validations awaiting host completion; zero when none. */
-  oldestExpiredExecutionAgeMs: bigint;
-  slotRefusals: bigint;
-  capacity: number;
-  occupied: number;
-  highWater: number;
-  queued: number;
-  pendingVerdicts: number;
-  /** Owner dispositions of delivered messages awaiting an exchange's acknowledgement. */
-  acknowledging: number;
-  reservedBytes: number;
-  reservedBytesHighWater: number;
-  payloadBytes: number;
-  copyingBytes: number;
-  publicationBytes: number;
-  messagesCopied: bigint;
-  bytesCopied: bigint;
-  capacityRefusals: bigint;
-  byteRefusals: bigint;
-  queuedExpired: bigint;
-  deliveredExpired: bigint;
-  reportsAccepted: bigint;
-  reportsAppliedAccept: bigint;
-  reportsAppliedReject: bigint;
-  reportsAppliedIgnore: bigint;
-  publicationCopies: bigint;
-  publicationQueued: bigint;
-  publicationSelected: bigint;
-  publicationDuplicates: bigint;
 }
 
 export type NetworkGossipPublishFailed = Error & {
@@ -822,20 +653,3 @@ export interface NativeNetwork {
  * whose binding drains it for `host`; failure is terminal. Invokes no host callback synchronously.
  */
 export function createNativeNetwork(config: NativeApplicationConfig, host: NativeHost): NativeNetwork;
-
-/** Temporary: the low-level runtime, until Lodestar constructs the network through `createNativeNetwork`. */
-export {initializeNativeNetworkRuntime} from "./network-runtime.js";
-export type {
-  NativeAction,
-  NativeEscalation,
-  NativeExchange,
-  NativeExchangeDemand,
-  NativeGossipBatch,
-  NativeGossipDependencyCheck,
-  NativeGossipHandle,
-  NativeGossipJob,
-  NativeGossipMessage,
-  NativeGossipVerdict,
-  NativeIncomingRequest,
-  NativeNetworkApplicationRuntime,
-} from "./network-runtime.js";

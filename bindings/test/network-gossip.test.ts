@@ -29,13 +29,13 @@ test("gossip drain and stale verdict on an activated application", async () => {
 });
 
 import {setTimeout as delay} from "node:timers/promises";
+import type {NativeApplicationConfig} from "../src/network.js";
 import type {
-  NativeApplicationConfig,
   NativeGossipHandle,
   NativeGossipMessage,
   NativeGossipVerdict,
   NativeNetworkApplicationRuntime,
-} from "../src/network.js";
+} from "../src/network-runtime.js";
 import {BLOCKS, incomingPair, takeIncoming} from "./utils/network-incoming.js";
 
 const TOPIC = topicName();

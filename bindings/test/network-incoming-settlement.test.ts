@@ -1,5 +1,5 @@
 import {expect, test, vi} from "vitest";
-import {type NativeIncomingRequest, initializeNativeNetworkRuntime} from "../src/network.js";
+import {type NativeIncomingRequest, initializeNativeNetworkRuntime} from "../src/network-runtime.js";
 import {applicationConfig, capacity, localIntent, settleOnly, unreachableConnect} from "./utils/network.js";
 import {BLOCKS} from "./utils/network-incoming.js";
 import {startPeer} from "./utils/network-peer.js";

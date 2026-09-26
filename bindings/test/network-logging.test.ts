@@ -1,5 +1,6 @@
 import {expect, test} from "vitest";
-import type {NativeLogRecord, NativeNetworkApplicationRuntime} from "../src/network.js";
+import type {NativeLogRecord} from "../src/network.js";
+import type {NativeNetworkApplicationRuntime} from "../src/network-runtime.js";
 import {applicationConfig, startRuntime} from "./utils/network.js";
 import {BLOCKS, incomingPair, takeIncoming} from "./utils/network-incoming.js";
 import {type PeerRuntime, startPeer} from "./utils/network-peer.js";

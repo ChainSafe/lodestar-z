@@ -1,7 +1,5 @@
 import {NativePump, closeResult} from "./network-pump.js";
-import {NativeRuntime, initializeNativeNetworkRuntime, registerRuntime} from "./network-runtime.js";
-
-export {initializeNativeNetworkRuntime};
+import {NativeRuntime, registerRuntime} from "./network-runtime.js";
 
 const HOST_METHODS = ["capacity", "validate", "checkDependencies", "serve", "peers", "failed", "logs"];
 const CONNECT_TIMEOUT_MS = 10000n;

@@ -140,7 +140,7 @@ export class NativeRuntime {
   }
 }
 
-/** The legacy low-level runtime, which its host drains through `exchange`. Private once Lodestar uses the facade. */
+/** A low-level runtime, which its host drains through `exchange`. Private: for binding ownership tests. */
 export function initializeNativeNetworkRuntime(config, onWorkAvailable) {
   return new NativeRuntime(config, onWorkAvailable);
 }

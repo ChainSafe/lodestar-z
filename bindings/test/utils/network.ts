@@ -1,27 +1,29 @@
 import {publicKeyFromProtobuf} from "@libp2p/crypto/keys";
 import {peerIdFromPublicKey} from "@libp2p/peer-id";
 import {testChain} from "../../../test/interop/network_chain.mjs";
-import {initializeNativeNetworkRuntime} from "../../src/network.js";
+import {initializeNativeNetworkRuntime} from "../../src/network-runtime.js";
 export {testChain};
 
 import {type ChainConfig, createBeaconConfig} from "@lodestar/config";
 import bindings from "../../src/index.js";
 import type {
   IpEndpoint,
-  NativeAction,
   NativeApplicationConfig,
   NativeDiscoveryConfig,
-  NativeExchange,
-  NativeExchangeDemand,
   NativeGossipProcessorLimit,
-  NativeIncomingRequest,
   NativeLocalIntent,
-  NativeNetworkApplicationRuntime,
   NativeRuntimeConfig,
   NativeSubscriptionSet,
   NativeTopicKind,
   NativeTopicScoreParams,
 } from "../../src/network.js";
+import type {
+  NativeAction,
+  NativeExchange,
+  NativeExchangeDemand,
+  NativeIncomingRequest,
+  NativeNetworkApplicationRuntime,
+} from "../../src/network-runtime.js";
 
 const MIB = 1024 * 1024;
 
@@ -209,6 +211,7 @@ export function applicationConfig(): NativeApplicationConfig {
   return {
     ...config,
     identify: {agentVersion: "lodestar-z/application-test", protocolVersion: "eth2/1.0.0"},
+    logLevel: "info",
     resources: {
       bridgeBudgetBytes: 512 * MIB,
       connectionCapacity: 16,
@@ -223,7 +226,6 @@ export function applicationConfig(): NativeApplicationConfig {
       targetPeers: 8,
     },
     serveLightClients: false,
-    logLevel: "info",
   };
 }
 

@@ -1,12 +1,6 @@
 import bindings from "../../src/bindings.js";
-import type {
-  NativeIdentity,
-  NativeNetworkApplicationRuntime,
-  NativeProtocolId,
-  NativeRequestOptions,
-  NativeResponseChunk,
-  NativeRuntimeCloseResult,
-} from "../../src/network.js";
+import type {NativeIdentity, NativeProtocolId, NativeRequestOptions, NativeResponseChunk} from "../../src/network.js";
+import type {NativeNetworkApplicationRuntime, NativeRuntimeCloseResult} from "../../src/network-runtime.js";
 
 interface RequestHandle {
   generation: bigint;
