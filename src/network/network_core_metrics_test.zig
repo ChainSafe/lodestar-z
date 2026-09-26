@@ -144,6 +144,7 @@ const contract = [_]Series{
     .{ .name = "lodestar_native_gossip_apply_spacing_seconds", .kind = "histogram" },
     .{ .name = "lodestar_native_gossip_apply_forward_recipients", .kind = "histogram", .labels = &.{"outcome"} },
     .{ .name = "lodestar_native_gossip_apply_forward_bytes", .kind = "histogram" },
+    .{ .name = "lodestar_native_gossipsub_accepted_forwards_total", .kind = "counter" },
     .{ .name = "lodestar_native_gossip_apply_service_frames", .kind = "histogram" },
     .{ .name = "lodestar_native_gossip_outbox_observed_seconds_total", .kind = "counter", .labels = &.{"phase_bps"} },
     .{ .name = "lodestar_native_gossip_outbox_descriptor_seconds_total", .kind = "counter", .labels = &.{"phase_bps"} },
