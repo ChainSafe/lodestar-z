@@ -232,15 +232,9 @@ test("incoming input validation rolls back before a later valid response", async
       code: "NetworkIncomingRejected",
       reason: "chunk_too_large",
     });
-    const data = new Uint8Array(4000);
-    const context = {
-      digest: requestForks[0].digest,
-      get fork() {
-        structuredClone(data.buffer, {transfer: [data.buffer]});
-        return "deneb" as const;
-      },
-    };
-    await expect(incoming.respond(data, context)).rejects.toMatchObject({code: "InvalidNetworkBytes"});
+    const detached = new Uint8Array(4000);
+    structuredClone(detached.buffer, {transfer: [detached.buffer]});
+    await expect(incoming.respond(detached, requestForks[0])).rejects.toMatchObject({code: "InvalidNetworkBytes"});
     expect(pair.right.diagnostics().incoming).toMatchObject({
       pendingResponses: 0,
       responseBytes: 0,

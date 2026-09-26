@@ -8,7 +8,7 @@ const BLOCK = topicName();
 const SYNC = topicName("sync_committee_0");
 const REQUEST = "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy";
 
-test("publication byte pressure rejects before copying and permits retry after credit returns", async () => {
+test("publication byte pressure rejects before copying and keeps ordinary and urgent admission", async () => {
   const config = applicationConfig();
   const probe = await startPeer(config);
   const diagnostics = await probe.diagnostics();
@@ -23,32 +23,21 @@ test("publication byte pressure rejects before copying and permits retry after c
     7999;
   const runtime = startRuntime(config);
   try {
+    await runtime.applyIntent(localIntent(config), config.initialSlot);
     const options = {allowZeroPeers: true, ignoreDuplicate: true};
-    let refused: Promise<unknown> | undefined;
-    let second: Promise<unknown> | undefined;
-    const chunk = publicationMinimumBytes / 2;
-    await runtime.publishGossip(BLOCK, new Uint8Array(chunk).fill(1), {
-      ...options,
-      get flood() {
-        second = runtime.publishGossip(BLOCK, new Uint8Array(chunk).fill(2), {
-          ...options,
-          get flood() {
-            refused = runtime
-              .publishGossip(BLOCK, new Uint8Array(8000).fill(3), options)
-              .catch((error: unknown) => error);
-            return false;
-          },
-        });
-        return false;
-      },
+    // Ordinary publications share only the 7999 bytes past every protected minimum.
+    await expect(runtime.publishGossip(SYNC, new Uint8Array(8000).fill(3), options)).rejects.toMatchObject({
+      code: "NetworkGossipPublishFailed",
+      reason: "admission_full",
     });
-    await second;
-    expect(await refused).toMatchObject({code: "NetworkGossipPublishFailed", reason: "admission_full"});
-    expect(runtime.diagnostics().publications).toMatchObject({byteRefusals: 1n, copies: 2n, occupied: 0});
+    expect(runtime.diagnostics().publications).toMatchObject({byteRefusals: 1n, copies: 0n, occupied: 0});
+    await expect(runtime.publishGossip(SYNC, new Uint8Array(144).fill(3), options)).resolves.toMatchObject({
+      duplicate: false,
+    });
     await expect(runtime.publishGossip(BLOCK, new Uint8Array(8000).fill(3), options)).resolves.toMatchObject({
       duplicate: false,
     });
-    expect(runtime.diagnostics().publications).toMatchObject({copies: 3n, occupied: 0, reservedBytes: 0});
+    expect(runtime.diagnostics().publications).toMatchObject({copies: 2n, occupied: 0, reservedBytes: 0});
     expect(runtime.diagnostics().payloadBudget.usedBytes).toBe(0);
   } finally {
     await runtime.close();

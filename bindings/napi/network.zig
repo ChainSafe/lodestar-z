@@ -34,7 +34,6 @@ pub fn initialize(self: *@This(), config: js.Value, callback: js.Value) !js.Valu
     runtime.heavy = try r.allocator.create(r.Owner);
     runtime.heavy.?.* = .{};
     try application_cfg.parse(config.val, &runtime.heavy.?.config, &runtime.heavy.?.application);
-    if (self.stopped) return error.NetworkClosed;
     try @import("network_owner.zig").prepareConfiguration(runtime);
     try prepareApplicationStorage(runtime, &runtime.heavy.?.application);
     runtime.slot = runtime.heavy.?.config.slot;
@@ -61,7 +60,6 @@ pub fn initialize(self: *@This(), config: js.Value, callback: js.Value) !js.Valu
     const holder = try env.createObject();
     try holder.setNamedProperty("identity", try identity(env, &runtime.identity));
     try holder.setNamedProperty("closed", runtime.close_deferred.?.getPromise());
-    if (self.stopped) return error.NetworkClosed;
     runtime.retain();
     errdefer runtime.release();
     runtime.thread = try std.Thread.spawn(.{ .stack_size = std.Thread.SpawnConfig.default_stack_size }, @import("network_owner.zig").run, .{runtime});
