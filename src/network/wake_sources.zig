@@ -1,7 +1,6 @@
 const std = @import("std");
 
-/// Owner-loop wakeup sources. Each name is a `source` label value of
-/// lodestar_native_network_due_now_turns_total.
+/// Owner-loop wakeup sources.
 pub const Source = enum {
     transport_backlog,
     transport_events,

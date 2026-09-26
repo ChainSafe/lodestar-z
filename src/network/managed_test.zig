@@ -66,7 +66,6 @@ test "managed publishes the authenticated endpoint after QUIC rebinding" {
     setup.pair.client_source = rebound;
     setup.client.reStatusPeers(setup.pair.now);
     for (0..60) |_| try setup.step(0);
-    try std.testing.expectEqual(@as(u64, 1), setup.pair.server.counters.path_changes);
     try std.testing.expectEqual(rebound, setup.pair.server.peerAddress(before.connection.?).?);
     const after = setup.server.catalog.get(before.peer).?;
     try std.testing.expectEqual(before.connection, after.connection);

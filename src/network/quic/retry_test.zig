@@ -31,7 +31,6 @@ test "QUIC Retry admits an address-validated handshake" {
     try pair.init(.{}, .{ .handshaking_max = 1 });
     defer pair.deinit();
     _ = try support.connectPair(&pair);
-    try std.testing.expectEqual(@as(u64, 1), pair.server.counters.retries);
     try std.testing.expectEqual(@as(usize, 1), pair.server.registry.active_len);
 }
 
@@ -51,7 +50,6 @@ test "QUIC Retry does not allocate a connection for repeated unvalidated Initial
         try std.testing.expectEqual(@as(u16, 0), pair.server.registry.handshaking);
         try std.testing.expectEqual(@as(usize, 0), pair.server.registry.routes.count);
     }
-    try std.testing.expectEqual(@as(u64, 4), pair.server.counters.retries);
 }
 
 test "QUIC cached tokens of bounded wire lengths get Retry without connection allocation" {
@@ -71,8 +69,6 @@ test "QUIC cached tokens of bounded wire lengths get Retry without connection al
         try std.testing.expectEqual(@as(usize, 0), pair.server.registry.active_len);
         try std.testing.expectEqual(@as(usize, 0), pair.server.registry.routes.count);
     }
-    try std.testing.expectEqual(@as(u64, 4), pair.server.counters.cached_token_retries);
-    try std.testing.expectEqual(@as(u64, 0), pair.server.counters.invalid_retry_tokens);
 }
 
 test "QUIC invalid local Retry tokens do not receive another Retry" {
@@ -93,8 +89,6 @@ test "QUIC invalid local Retry tokens do not receive another Retry" {
     token[8] ^= 1;
     try std.testing.expect(retry.isLocal(issued));
     try std.testing.expect(pair.server.receive(initialWithToken(&packet, issued), &support.client_address, pair.now, &output) == .dropped);
-    try std.testing.expectEqual(@as(u64, 4), pair.server.counters.invalid_retry_tokens);
-    try std.testing.expectEqual(@as(u64, 0), pair.server.counters.retries);
     try std.testing.expectEqual(@as(usize, 0), pair.server.registry.active_len);
 }
 

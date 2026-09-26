@@ -38,18 +38,13 @@ test "engine idle connections cost no timer, collect or flush visits" {
 
     const engines = [_]*engine_mod.Engine{ &pair.client, &pair.server };
     var visits: [2]engine_mod.Visits = undefined;
-    var fired: [2]u64 = undefined;
-    for (engines, &visits, &fired) |engine, *before, *timeouts| {
-        before.* = engine.visits;
-        timeouts.* = engine.counters.timeouts_fired;
-    }
+    for (engines, &visits) |engine, *before| before.* = engine.visits;
     for (0..100) |_| {
         pair.advance(1);
         try pair.pump();
     }
-    for (engines, visits, fired) |engine, before, timeouts| {
+    for (engines, visits) |engine, before| {
         try std.testing.expectEqualDeep(before, engine.visits);
-        try std.testing.expectEqual(timeouts, engine.counters.timeouts_fired);
         try std.testing.expect(!engine.backlog());
         try std.testing.expect(!engine.eventsPending());
     }
@@ -162,7 +157,7 @@ test "engine calls on_timeout only for keys whose quiche timer expired" {
     defer pair.deinit();
     const handles = try support.connectPair(&pair);
     try pair.pump();
-    var fired = pair.client.counters.timeouts_fired;
+    var fired = pair.client.visits.timeouts;
     var closed = false;
     for (0..40) |_| {
         sleepMs(25);
@@ -170,10 +165,10 @@ test "engine calls on_timeout only for keys whose quiche timer expired" {
         const top = pair.client.nextDeadlineNs();
         const pops = pair.client.visits.timer;
         pair.settle(&pair.client);
-        if (pair.client.counters.timeouts_fired > fired) {
+        if (pair.client.visits.timeouts > fired) {
             try std.testing.expect(top.? <= pair.now.nanos());
             try std.testing.expect(pair.client.visits.timer > pops);
-            fired = pair.client.counters.timeouts_fired;
+            fired = pair.client.visits.timeouts;
         }
         var storage: [8]Event = undefined;
         for (pair.events(&pair.client, &storage)) |event| if (event == .closed) {
@@ -185,7 +180,7 @@ test "engine calls on_timeout only for keys whose quiche timer expired" {
     }
     try std.testing.expect(closed);
     try std.testing.expect(fired >= 1);
-    try std.testing.expect(pair.client.visits.timer >= pair.client.counters.timeouts_fired);
+    try std.testing.expect(pair.client.visits.timer >= pair.client.visits.timeouts);
 }
 
 test "engine events drain connections in arrival order across one-event polls" {

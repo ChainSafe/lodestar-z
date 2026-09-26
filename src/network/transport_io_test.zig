@@ -365,7 +365,6 @@ test "transport requires startup seed entropy but no entropy for later dial and 
     const received = try support.step(&node.transport, io, &events, .{ .wait_max_ms = 10 });
     try std.testing.expect(received.datagrams_received > 0);
     try std.testing.expectEqual(@as(u32, 0), received.datagrams_accepted);
-    try std.testing.expectEqual(@as(u64, 1), node.transport.engine.counters.retries);
     var accepted: u32 = 0;
     for (0..8) |_| {
         _ = try support.step(&remote.transport, io, &events, .{ .wait_max_ms = 10 });
@@ -563,7 +562,7 @@ test "transport keys quiche's timer from a clock read after the flush so it neve
     // Each turn waits for the timer key as the owner loop does, and each popped key finds
     // quiche's timer expired.
     const pops = transport.engine.visits.timer;
-    const fired = transport.engine.counters.timeouts_fired;
+    const fired = transport.engine.visits.timeouts;
     for (0..2) |_| {
         const now = try transport_mod.currentTime(io);
         const deadline_ms = (transport.nextDeadlineNs().? + std.time.ns_per_ms - 1) / std.time.ns_per_ms;
@@ -576,7 +575,7 @@ test "transport keys quiche's timer from a clock read after the flush so it neve
         transport.flush(io, turn, &flushed);
     }
     try std.testing.expectEqual(pops + 2, transport.engine.visits.timer);
-    try std.testing.expectEqual(fired + 2, transport.engine.counters.timeouts_fired);
+    try std.testing.expectEqual(fired + 2, transport.engine.visits.timeouts);
 }
 
 test "transport progress failure retains real send receive work and exactly one lifecycle batch" {

@@ -194,7 +194,6 @@ test("real request and peer metrics are isolated, cumulative and do not drain re
         expect(right.get('lodestar_native_bridge_delivered_items_total{kind="serving_start"}')).toBe(1);
         expect(right.get('lodestar_native_bridge_delivered_items_total{kind="completion"}')).toBeGreaterThan(0);
         expect(right.get('lodestar_native_bridge_delivered_items_total{kind="gossip_message"}')).toBe(0);
-        expect(right.get('lodestar_native_network_host_applies_total{cause="readiness"}')).toBeGreaterThan(0);
       },
       {timeout: 5000}
     );

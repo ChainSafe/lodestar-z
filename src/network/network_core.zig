@@ -13,7 +13,6 @@ const Now = @import("types.zig").Now;
 const wake_sources = @import("wake_sources.zig");
 pub const wait = @import("wait.zig");
 
-const WaitTime = @import("metrics/histogram.zig").Duration(&.{ 0, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000 });
 /// discv5's standalone receive wait. NetworkCore polls the discovery sockets itself and steps
 /// discovery with a wake time of now, so this value never sets a wait.
 const discovery_poll_interval_ms: u32 = 5;
@@ -66,9 +65,6 @@ pub const Startup = struct {
     /// automatic candidates. Native drops expired, unusable and duplicate records.
     remembered: []const peers.remembered.Record = &.{},
 };
-/// Why a step applied host work: a readable host wake, a due host deadline, or work the
-/// previous apply left.
-pub const HostCause = enum { readiness, due, more };
 pub const HostProgress = struct {
     /// A per-turn cap stopped the host with work left, so the next turn is due now.
     more: bool = false,
@@ -107,21 +103,13 @@ pub const Result = struct {
     dial_deferred: u8 = 0,
     dial_failed: u8 = 0,
 };
+/// Dials the owner started or deferred, which the health log reports, and failed clock reads,
+/// transport steps and readiness polls.
 pub const Counters = struct {
-    discovered: u64 = 0,
-    candidates_refused: u64 = 0,
-    future_fork_mismatches: u64 = 0,
-    future_fork_unknown: u64 = 0,
     dial_started: u64 = 0,
     dial_deferred: u64 = 0,
-    dial_failed: u64 = 0,
     transport_failures: u64 = 0,
-    discovery_failures: u64 = 0,
-    readiness_calls: u64 = 0,
-    readiness_nonzero_waits: u64 = 0,
-    readiness_interruptions: u64 = 0,
     readiness_failures: u64 = 0,
-    discovery_only_turns: u64 = 0,
 };
 
 const DiscoveryOwners = struct {
@@ -173,9 +161,9 @@ pub const NetworkCore = struct {
     schedule: ForkSchedule,
     counters: Counters = .{},
     step_duration: @import("metrics/timing.zig").Duration = .{},
-    wait_duration: WaitTime = .{},
+    /// Zero-wait turns, counted under every source already due; readiness tests and the idle
+    /// benchmarks read them to show an idle owner does not spin.
     due_now_turns: [wake_sources.source_count]u64 = @splat(0),
-    host_applies: [@typeInfo(HostCause).@"enum".fields.len]u64 = @splat(0),
     last_now: Now,
     initialized: bool = false,
     host_wake: ?i32 = null,
@@ -201,9 +189,7 @@ pub const NetworkCore = struct {
         self.schedule = startup.schedule;
         self.counters = .{};
         self.step_duration = .{};
-        self.wait_duration = .{};
         self.due_now_turns = @splat(0);
-        self.host_applies = @splat(0);
         self.host_wake = null;
         self.current_slot = startup.slot;
         self.host_more = false;
@@ -528,7 +514,6 @@ pub const NetworkCore = struct {
     }
 
     fn observeWait(self: *NetworkCore, wakeups: *const wake_sources.Wakeups, now_ms: u64, chosen_wait: u32) void {
-        self.wait_duration.observe(chosen_wait);
         if (chosen_wait != 0) return;
         for (wakeups.due, &self.due_now_turns) |deadline, *turns| {
             const value = deadline orelse continue;
@@ -559,9 +544,6 @@ pub const NetworkCore = struct {
                 .host = self.host_wake,
             }, chosen_wait);
         } else result.readiness.failure = error.UnsupportedWait;
-        self.counters.readiness_calls +|= 1;
-        self.counters.readiness_nonzero_waits +|= @intFromBool(result.readiness.timeout_ms > 0);
-        self.counters.readiness_interruptions +|= @intFromBool(result.readiness.interrupted);
         self.counters.readiness_failures +|= @intFromBool(result.readiness.failure != null);
         result.failure = result.readiness.failure;
         const step_start = @import("metrics/timing.zig").now(io);
@@ -576,7 +558,6 @@ pub const NetworkCore = struct {
         result.transport.now = tick;
         if (self.discoveryOnly(&result.readiness, tick, outputs, host)) {
             result.discovery_only = true;
-            self.counters.discovery_only_turns +|= 1;
             // The previous turn's events were consumed by its caller; this turn reports none.
             self.native_event_count = 0;
             self.discover(io, tick, &result);
@@ -596,9 +577,7 @@ pub const NetworkCore = struct {
         self.native_event_count = result.transport.events;
         if (host.apply) |apply| {
             const due = if (host.deadline_ms) |deadline| deadline <= tick.mono_ms else false;
-            const cause: ?HostCause = if (result.readiness.host or result.readiness.failure != null) .readiness else if (self.host_more) .more else if (due) .due else null;
-            if (cause) |value| {
-                self.host_applies[@intFromEnum(value)] +|= 1;
+            if (result.readiness.host or result.readiness.failure != null or self.host_more or due) {
                 self.host_more = apply(host.context.?, self, tick).more;
             }
         } else self.host_more = false;
@@ -629,7 +608,6 @@ pub const NetworkCore = struct {
             }
             self.counters.dial_started +|= result.dial_started;
             self.counters.dial_deferred +|= result.dial_deferred;
-            self.counters.dial_failed +|= result.dial_failed;
         }
         self.transport.flush(io, tick, &result.transport);
         return result;
@@ -677,21 +655,12 @@ pub const NetworkCore = struct {
             if (!std.meta.eql(endpoints, owned.endpoints)) {
                 _ = self.updateLocalWithEndpoints(&self.peer_manager.local, self.schedule, endpoints, tick) catch |err| {
                     std.log.scoped(.network_discovery).warn("endpoint_update_failed reason={s}", .{@errorName(err)});
-                    self.counters.discovery_failures +|= 1;
                 };
             }
-            for (candidates[0..progress.candidates]) |*candidate| {
-                self.counters.discovered +|= 1;
-                if (futureCompatible(candidate, self.schedule)) |compatible| {
-                    if (!compatible) self.counters.future_fork_mismatches +|= 1;
-                } else self.counters.future_fork_unknown +|= 1;
-            }
             const intake = self.peer_manager.discoveredBatch(&self.service, candidates[0..progress.candidates], tick);
-            self.counters.candidates_refused +|= intake.refused;
             if (progress.candidates > 0) std.log.scoped(.network_discovery).debug("candidates_received count={d} refused={d}", .{ progress.candidates, intake.refused });
             if (progress.failure) |err| {
                 std.log.scoped(.network_discovery).debug("discovery_failed stage={s} reason={s}", .{ @tagName(progress.failure_stage), @errorName(err) });
-                self.counters.discovery_failures +|= 1;
                 result.failure = result.failure orelse err;
             }
             if (progress.datagrams == 0) break;
@@ -715,13 +684,6 @@ fn validateForkTable(table: []const rr.ForkEntry, context: *const t.ForkContext)
 fn validateSchedule(local: *const t.LocalState, schedule: ForkSchedule) !void {
     if (schedule.next_epoch == std.math.maxInt(u64) and !std.mem.allEqual(u8, &schedule.next_digest, 0)) return error.InvalidSchedule;
     if ((schedule.fulu_scheduled or local.fork.fork.gte(.fulu)) and local.metadata.custody_group_count == null) return error.MissingCustodyAdvertisement;
-}
-pub fn futureCompatible(candidate: *const peers.enr.Candidate, schedule: ForkSchedule) ?bool {
-    return compatibleHint(candidate.fork, candidate.next_fork_digest, schedule);
-}
-fn compatibleHint(fork: peers.enr.ForkId, next_digest: ?[4]u8, schedule: ForkSchedule) ?bool {
-    if (fork.next_epoch != schedule.next_epoch or !std.mem.eql(u8, &fork.next_version, &schedule.next_version)) return false;
-    return if (next_digest) |digest| std.mem.eql(u8, &digest, &schedule.next_digest) else null;
 }
 fn advertisementFor(local: *const t.LocalState, schedule: ForkSchedule, endpoints: AdvertisementEndpoints) peers.enr.LocalAdvertisement {
     return .{

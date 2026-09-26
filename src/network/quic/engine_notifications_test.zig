@@ -131,7 +131,7 @@ test "engine notifications preserve lifecycle order across one-event polls" {
     const outgoing = try pair.client.openStream(client);
     _ = try pair.client.write(outgoing, &([_]u8{1} ** 2000), false);
     try pair.pump();
-    try std.testing.expectEqual(@as(u64, 1), pair.server.counters.path_changes);
+    try std.testing.expectEqual(rebound, pair.server.peerAddress(server).?);
     var one: [1]engine.Event = undefined;
     try std.testing.expectEqual(@as(usize, 1), pair.server.pollEvents(&one));
     _ = try support.expectConnected(one[0], .inbound, &pair.client_ctx);

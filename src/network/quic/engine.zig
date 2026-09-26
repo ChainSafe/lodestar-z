@@ -86,29 +86,13 @@ pub const Limits = struct {
     keylog: bool = false,
 };
 
-pub const Counters = struct {
-    accepted: u64 = 0,
-    dropped_unroutable: u64 = 0,
-    dropped_short_initial: u64 = 0,
-    dropped_full: u64 = 0,
-    dropped_source_limit: u64 = 0,
-    recv_errors: u64 = 0,
-    send_errors: u64 = 0,
-    stream_errors: u64 = 0,
-    version_negotiations: u64 = 0,
-    retries: u64 = 0,
-    cached_token_retries: u64 = 0,
-    invalid_retry_tokens: u64 = 0,
-    path_changes: u64 = 0,
-    keylog_dropped: u64 = 0,
-    /// quiche_conn_on_timeout calls, made only when a popped key found quiche's timer expired.
-    timeouts_fired: u64 = 0,
-};
-
-/// Per-connection visits by phase. An idle connection is visited in none of them.
+/// Per-connection visits by phase. An idle connection is visited in none of them. Readiness tests
+/// and the idle benchmarks read them.
 pub const Visits = struct {
     /// Timer keys popped by expire.
     timer: u64 = 0,
+    /// quiche_conn_on_timeout calls, made only when a popped key found quiche's timer expired.
+    timeouts: u64 = 0,
     /// Connections whose stream readiness collect gathered.
     collect: u64 = 0,
     /// Dirty connections a flush pass drained.
@@ -162,20 +146,14 @@ pub const Engine = struct {
     outbound_max: u16,
     csprng: std.Random.DefaultCsprng,
     retry_key: [32]u8,
-    counters: Counters = .{},
     visits: Visits = .{},
     connection_metrics: ConnectionCounters = .{},
 
-    pub const Resources = struct {
-        capacity: usize,
-        active: usize,
-        handshaking: usize,
-        dialing: usize,
-        outbound: usize,
-    };
+    /// Live connections, and those still handshaking.
+    pub const Resources = struct { active: usize, handshaking: usize };
 
     pub fn resourceSnapshot(self: *const Engine) Resources {
-        return .{ .capacity = self.registry.slots.len, .active = self.registry.active_len, .handshaking = self.registry.handshaking, .dialing = self.registry.dialing, .outbound = self.registry.outbound };
+        return .{ .active = self.registry.active_len, .handshaking = self.registry.handshaking };
     }
 
     pub fn validateLimits(wanted: Limits) Error!u16 {
@@ -268,19 +246,10 @@ pub const Engine = struct {
         assert(out.len >= tls.keylog_capacity);
         const slot = &self.registry.slots[index];
         if (slot.state == .free) return 0;
-        self.collectKeylogDrops(index);
         return slot.takeKeylog(out);
     }
 
-    fn collectKeylogDrops(self: *Engine, index: u16) void {
-        if (!self.limits.keylog) return;
-        const state = &self.registry.slots[index].handshake;
-        self.counters.keylog_dropped +|= state.keylog_dropped;
-        state.keylog_dropped = 0;
-    }
-
     fn retire(self: *Engine, index: u16) void {
-        self.collectKeylogDrops(index);
         self.registry.retire(index);
     }
 
@@ -421,7 +390,7 @@ pub const Engine = struct {
         const slot = try self.liveSlot(conn);
         const opened = slot.openStream() catch |err| {
             if (err != error.StreamLimit and err != error.StreamTableFull and err != error.NotEstablished) self.markDirty(conn.index);
-            return self.streamError(err);
+            return streamError(err);
         };
         assert(opened.index < limits.streams_per_connection);
         assert(slot.table.matches(opened.index, opened.id));
@@ -435,7 +404,7 @@ pub const Engine = struct {
         assert(target.slot.table.matches(target.index, target.id));
         defer self.noteEvents(stream.conn.index);
         const result = target.slot.read(target.index, target.id, buf) catch |err|
-            return self.streamError(err);
+            return streamError(err);
         assert(result.len <= buf.len);
         if (result.len > 0) assert(result.reset_code == null);
         if (result.len > 0 or result.fin or result.reset_code != null) self.markLiveDirty(stream.conn.index);
@@ -508,7 +477,7 @@ pub const Engine = struct {
             } else if (target.slot.table.matches(target.index, target.id)) {
                 target.slot.table.disarm(target.index);
             }
-            return self.streamError(err);
+            return streamError(err);
         };
         assert(written <= bytes.len);
         if (written > 0 or (fin and written == bytes.len)) self.markDirty(index);
@@ -537,7 +506,7 @@ pub const Engine = struct {
         assert(target.slot.table.matches(target.index, target.id));
         defer self.noteEvents(stream.conn.index);
         const available = target.slot.capacity(target.index, target.id) catch |err|
-            return self.streamError(err);
+            return streamError(err);
         assert(target.index < limits.streams_per_connection);
         return available;
     }
@@ -698,9 +667,9 @@ pub const Engine = struct {
     ) ReceiveOutcome {
         assert(datagram.len <= out.len);
         assert(self.registry.slots.len > 0);
-        const local = self.localFor(from.*) orelse return drop(&self.counters.dropped_unroutable);
+        const local = self.localFor(from.*) orelse return .dropped;
         const header = binding.headerInfo(datagram) catch
-            return drop(&self.counters.dropped_unroutable);
+            return .dropped;
         if (self.registry.findRoute(&header.dcid)) |index| {
             _ = self.feed(index, datagram, from, now, false);
             return .{ .accepted = self.toHandle(index) };
@@ -709,40 +678,38 @@ pub const Engine = struct {
             // A peer that changed its connection ID after a rebinding is found by address. Junk
             // from a live peer's address marks nothing.
             const index = self.slotForPeer(from) orelse
-                return drop(&self.counters.dropped_unroutable);
-            if (!self.feed(index, datagram, from, now, true)) return drop(&self.counters.dropped_unroutable);
+                return .dropped;
+            if (!self.feed(index, datagram, from, now, true)) return .dropped;
             return .{ .accepted = self.toHandle(index) };
         }
         if (datagram.len < limits.client_initial_min) {
-            return drop(&self.counters.dropped_short_initial);
+            return .dropped;
         }
         if (header.packet_type == .version_negotiation or header.version == 0) {
-            return drop(&self.counters.dropped_unroutable);
+            return .dropped;
         }
         if (!binding.versionSupported(header.version)) {
-            return self.negotiateVersion(&header, out);
+            return negotiateVersion(&header, out);
         }
-        if (header.packet_type != .initial) return drop(&self.counters.dropped_unroutable);
+        if (header.packet_type != .initial) return .dropped;
         // RFC 9000 section 7.2 requires at least eight bytes for a new connection's DCID.
-        if (header.dcid.len < limits.initial_dcid_length_min) return drop(&self.counters.dropped_unroutable);
+        if (header.dcid.len < limits.initial_dcid_length_min) return .dropped;
         if (self.registry.handshaking >= self.limits.handshaking_max) {
-            return drop(&self.counters.dropped_full);
+            return .dropped;
         }
         if (self.handshakingFromSource(from) >= self.limits.handshaking_per_source_max) {
-            return drop(&self.counters.dropped_source_limit);
+            return .dropped;
         }
         const token = header.token[0..header.token_len];
         if (!retry.isLocal(token)) {
-            const outcome = self.sendRetry(&header, from, now, out);
-            if (token.len > 0 and outcome == .retry) self.counters.cached_token_retries +|= 1;
-            return outcome;
+            return self.sendRetry(&header, from, now, out);
         }
-        const original = retry.validate(&self.retry_key, from, &header.dcid, token, now.mono_ms, self.limits.handshake_timeout_ms) orelse return drop(&self.counters.invalid_retry_tokens);
+        const original = retry.validate(&self.retry_key, from, &header.dcid, token, now.mono_ms, self.limits.handshake_timeout_ms) orelse return .dropped;
         const scid = header.dcid.bytes[0..limits.local_cid_length].*;
         const reserved = self.limits.outbound_reserved -| self.registry.dialing;
         if (self.limits.connections_max - self.registry.active_len <= reserved)
-            return drop(&self.counters.dropped_full);
-        const index = self.registry.claim() orelse return drop(&self.counters.dropped_full);
+            return .dropped;
+        const index = self.registry.claim() orelse return .dropped;
 
         const slot = &self.registry.slots[index];
         slot.open(&self.tls, &self.config, .{
@@ -756,11 +723,11 @@ pub const Engine = struct {
             .keylog = self.registry.keylogFor(index),
         }) catch {
             self.registry.unclaim(index);
-            return drop(&self.counters.recv_errors);
+            return .dropped;
         };
         self.registry.addRoute(&slot.scid, index) catch {
             self.retire(index);
-            return drop(&self.counters.dropped_full);
+            return .dropped;
         };
         assert(slot.scid.eql(&header.dcid));
         self.registry.handshaking += 1;
@@ -774,13 +741,11 @@ pub const Engine = struct {
         const scid = binding.Cid.fromSlice(&bytes);
         var buffer: [retry.token_max]u8 = undefined;
         const token = retry.mint(&self.retry_key, from, &header.dcid, &scid, now.mono_ms, &buffer);
-        const length = (binding.check(c.quiche_retry(header.scid.slice().ptr, header.scid.len, header.dcid.slice().ptr, header.dcid.len, scid.slice().ptr, scid.len, token.ptr, token.len, header.version, out.ptr, out.len)) catch return drop(&self.counters.dropped_unroutable)) orelse return drop(&self.counters.dropped_unroutable);
-        self.counters.retries +|= 1;
+        const length = (binding.check(c.quiche_retry(header.scid.slice().ptr, header.scid.len, header.dcid.slice().ptr, header.dcid.len, scid.slice().ptr, scid.len, token.ptr, token.len, header.version, out.ptr, out.len)) catch return .dropped) orelse return .dropped;
         return .{ .retry = out[0..length] };
     }
 
     fn negotiateVersion(
-        self: *Engine,
         header: *const binding.HeaderInfo,
         out: []u8,
     ) ReceiveOutcome {
@@ -791,10 +756,9 @@ pub const Engine = struct {
             header.dcid.len,
             out.ptr,
             out.len,
-        )) catch return drop(&self.counters.dropped_unroutable);
-        const length = written orelse return drop(&self.counters.dropped_unroutable);
+        )) catch return .dropped;
+        const length = written orelse return .dropped;
         assert(length <= out.len);
-        self.counters.version_negotiations += 1;
         return .{ .version_negotiation = out[0..length] };
     }
 
@@ -818,7 +782,7 @@ pub const Engine = struct {
         assert(slot.state == .handshaking or slot.state == .established);
         if (slot.timeoutNs()) |remaining| if (remaining == 0) {
             slot.onTimeout();
-            self.counters.timeouts_fired +|= 1;
+            self.visits.timeouts +|= 1;
         };
         if (slot.state == .handshaking and slot.close_reason == null and
             now.mono_ms -| slot.created_ms >= self.handshakeLimitMs(slot))
@@ -928,7 +892,6 @@ pub const Engine = struct {
         const slot = &self.registry.slots[index];
         if (slot.state == .free or slot.state == .closed) return null;
         const datagram = slot.send(now.mono_ms, out) catch {
-            self.counters.send_errors += 1;
             self.refresh(index);
             return null;
         };
@@ -1108,7 +1071,7 @@ pub const Engine = struct {
         }
     }
 
-    fn streamError(self: *Engine, err: connection.Error) StreamError {
+    fn streamError(err: connection.Error) StreamError {
         return switch (err) {
             error.UnknownStream => error.UnknownStream,
             error.WouldBlock => error.WouldBlock,
@@ -1116,10 +1079,7 @@ pub const Engine = struct {
             error.StreamLimit => error.StreamLimit,
             error.StreamTableFull => error.StreamTableFull,
             error.NotEstablished => error.NotEstablished,
-            else => {
-                self.counters.stream_errors += 1;
-                return error.Transport;
-            },
+            else => return error.Transport,
         };
     }
 
@@ -1168,11 +1128,6 @@ pub const Engine = struct {
         return .{ .index = index, .generation = self.registry.slots[index].generation };
     }
 
-    fn drop(counter: *u64) ReceiveOutcome {
-        counter.* += 1;
-        return .dropped;
-    }
-
     fn localFor(self: *const Engine, peer: Address) ?Address {
         return self.local[
             switch (peer) {
@@ -1195,10 +1150,7 @@ pub const Engine = struct {
         const destination = binding.SockAddr.fromAddress(self.localFor(from.*).?);
         const received = if (slot.recv(datagram, &source, &destination)) |_| true else |_| false;
         if (require_progress and slot.receivedPackets() == received_before and !slot.isFinished()) return false;
-        if (received) {
-            self.counters.accepted += 1;
-            slot.answered = true;
-        } else self.counters.recv_errors += 1;
+        if (received) slot.answered = true;
         self.refresh(index);
         self.observePath(index);
         self.touched(index, now);
@@ -1215,7 +1167,6 @@ pub const Engine = struct {
         slot.peer = peer;
         slot.peer_sockaddr = binding.SockAddr.fromAddress(peer);
         slot.path_changed_pending = peer;
-        self.counters.path_changes += 1;
         self.noteEvents(index);
     }
 

@@ -93,14 +93,14 @@ test "gossip retries a flow-blocked session only when send capacity grows" {
     const visits = g.sessions.visits;
     const blocked = g.io_metrics.write_would_block;
     const attempts = g.io_metrics.write_calls;
-    const received = setup.shared.pair.client.counters.accepted;
+    const received = setup.shared.pair.client_accepted;
     for (0..100) |_| {
         try std.testing.expectEqual(@as(usize, 1), try setup.shared.pair.client.write(probe, "x", false));
         try setup.shared.pair.pump();
         try std.testing.expect(!processClient(&setup));
         try std.testing.expect(gossip_test.sessionWakeup(g, setup.shared.pair.now) > setup.shared.pair.now.mono_ms);
     }
-    try std.testing.expect(setup.shared.pair.client.counters.accepted - received >= 100);
+    try std.testing.expect(setup.shared.pair.client_accepted - received >= 100);
     try std.testing.expectEqual(visits, g.sessions.visits);
     try std.testing.expectEqual(blocked, g.io_metrics.write_would_block);
     try std.testing.expectEqual(attempts, g.io_metrics.write_calls);

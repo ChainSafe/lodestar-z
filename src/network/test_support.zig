@@ -27,6 +27,8 @@ pub const Pair = struct {
     drop_to_server: bool = false,
     client_source: types.Address = client_address,
     drop_to_address: ?types.Address = null,
+    /// Datagrams the client accepted from the server.
+    client_accepted: u64 = 0,
     batch: transport_mod.SendBatch = undefined,
     client_stash: Stash = .{},
     server_stash: Stash = .{},
@@ -153,6 +155,7 @@ pub const Pair = struct {
                     if (from == &self.client and self.first_initial_len == 0 and outcome == .accepted) {
                         self.first_initial_len = datagram.len;
                     }
+                    if (to == &self.client and outcome == .accepted) self.client_accepted += 1;
                     if (outcome == .retry) {
                         std.debug.assert(retry == null);
                         retry = .{ .bytes = undefined, .len = outcome.retry.len, .from = sent.to };

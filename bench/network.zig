@@ -393,7 +393,6 @@ fn idleWait(init: std.process.Init) !void {
     if (flags < 0 or std.c.fcntl(host.pipe[0], std.c.F.SETFL, flags | nonblock) < 0) return error.PipeFailed;
     try node.setHostWake(host.pipe[0]);
     const calls = node.reservations.allocation_calls;
-    const readiness_before = node.counters;
     const start = timestamp(io);
     const window_end_ms = (try network.transport.currentTime(io)).mono_ms + 1_000;
     var count: u32 = 0;
@@ -410,9 +409,8 @@ fn idleWait(init: std.process.Init) !void {
         count += 1;
     }
     const elapsed = timestamp(io) - start;
-    const readiness = node.counters;
     if (elapsed < 1_000_000_000) return error.TurnLimit;
-    std.debug.print("case=idle_wait profile=small window_ms=1000 elapsed_ns={} turns={} host_applies={} immediate_deadlines={} nonzero_readiness_waits={} turn_elapsed_ns={} turn_allocation_calls={} turns_max={}\n", .{ elapsed, count, host.applies, immediate, readiness.readiness_nonzero_waits - readiness_before.readiness_nonzero_waits, elapsed_turns, node.reservations.allocation_calls - calls, idle_wait_turns_max });
+    std.debug.print("case=idle_wait profile=small window_ms=1000 elapsed_ns={} turns={} host_applies={} immediate_deadlines={} turn_elapsed_ns={} turn_allocation_calls={} turns_max={}\n", .{ elapsed, count, host.applies, immediate, elapsed_turns, node.reservations.allocation_calls - calls, idle_wait_turns_max });
     std.debug.print("case=idle_wait due_now", .{});
     inline for (std.meta.fields(Source)) |field| std.debug.print(" {s}={}", .{ field.name, node.due_now_turns[field.value] });
     std.debug.print("\n", .{});
@@ -495,7 +493,6 @@ fn idleTransport(init: std.process.Init) !void {
     }
     if (quiet < 8) return error.SettleDeadline;
     const visits = hub.engine.visits;
-    const fired = hub.engine.counters.timeouts_fired;
     var ns: [turns]u64 = undefined;
     var received: u64 = 0;
     var sent: u64 = 0;
@@ -513,7 +510,7 @@ fn idleTransport(init: std.process.Init) !void {
     std.mem.sort(u64, &ns, {}, std.sort.asc(u64));
     const after = hub.engine.visits;
     const visited = (after.timer - visits.timer) + (after.collect - visits.collect) + (after.flush - visits.flush);
-    std.debug.print("case=idle_transport connections={} turns={} p50_ns={} p95_ns={} p99_ns={} max_ns={} rx={} tx={} visits_timer={} visits_collect={} visits_flush={} timeouts_fired={} p50_budget_ns={}\n", .{ idle_transport_spokes, turns, ns[turns / 2], ns[turns * 95 / 100], ns[turns * 99 / 100], ns[turns - 1], received, sent, after.timer - visits.timer, after.collect - visits.collect, after.flush - visits.flush, hub.engine.counters.timeouts_fired - fired, idle_transport_p50_budget_ns });
+    std.debug.print("case=idle_transport connections={} turns={} p50_ns={} p95_ns={} p99_ns={} max_ns={} rx={} tx={} visits_timer={} visits_collect={} visits_flush={} timeouts_fired={} p50_budget_ns={}\n", .{ idle_transport_spokes, turns, ns[turns / 2], ns[turns * 95 / 100], ns[turns * 99 / 100], ns[turns - 1], received, sent, after.timer - visits.timer, after.collect - visits.collect, after.flush - visits.flush, after.timeouts - visits.timeouts, idle_transport_p50_budget_ns });
     if (visited != 0) return error.IdleConnectionVisited;
     if (ns[turns / 2] > idle_transport_p50_budget_ns) return error.IdleTransportBudget;
 }

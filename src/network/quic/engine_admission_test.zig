@@ -80,7 +80,6 @@ test "engine routes existing streams and replayed Initials while source admissio
         &response,
     ));
     try std.testing.expectEqualDeep(random_before_refusal, pair.server.csprng);
-    try std.testing.expectEqual(@as(u64, 1), pair.server.counters.dropped_source_limit);
     try std.testing.expectEqual(@as(u16, 1), pair.server.registry.handshaking);
     try std.testing.expectEqual(@as(usize, 2), pair.server.activeIndices().len);
 
@@ -105,7 +104,6 @@ test "engine routes existing streams and replayed Initials while source admissio
     var buffer: [8]u8 = undefined;
     const received = try pair.server.read(inbound, &buffer);
     try std.testing.expectEqualStrings("hello", buffer[0..received.len]);
-    try std.testing.expectEqual(@as(u64, 1), pair.server.counters.dropped_source_limit);
     try std.testing.expectEqual(@as(u16, 1), pair.server.registry.handshaking);
     try std.testing.expectEqual(@as(usize, 2), pair.server.activeIndices().len);
 }
@@ -147,7 +145,7 @@ test "engine drops new handshakes when the server table is full" {
 
     const second = try pair.dial();
     try pair.pump();
-    try std.testing.expect(pair.server.counters.dropped_full > 0);
+    try std.testing.expectEqual(@as(usize, 1), pair.server.activeIndices().len);
     pair.advance(100);
     try pair.pump();
 
@@ -196,7 +194,6 @@ test "engine caps inbound handshakes per source address" {
     }
 
     try std.testing.expectEqual(limits.handshaking_per_source_max, admitted);
-    try std.testing.expectEqual(@as(u64, 1), pair.server.counters.dropped_source_limit);
     try std.testing.expectEqual(limits.handshaking_per_source_max, pair.server.registry.handshaking);
 
     const elsewhere = types.Address{ .ip4 = .{ .octets = .{ 127, 0, 0, 2 }, .port = 4_001 } };
@@ -253,7 +250,6 @@ test "engine drops version negotiation packets instead of reflecting them" {
     @memset(packet[15..20], 0xbb);
 
     var response: [constants.datagram_size_max]u8 = undefined;
-    const before = pair.server.counters.dropped_unroutable;
     try std.testing.expectEqual(
         engine_mod.ReceiveOutcome.dropped,
         pair.server.receive(
@@ -263,8 +259,6 @@ test "engine drops version negotiation packets instead of reflecting them" {
             &response,
         ),
     );
-    try std.testing.expectEqual(before + 1, pair.server.counters.dropped_unroutable);
-    try std.testing.expectEqual(@as(u64, 0), pair.server.counters.version_negotiations);
 }
 
 test "engine answers unsupported versions and drops unroutable packets" {
@@ -294,7 +288,6 @@ test "engine answers unsupported versions and drops unroutable packets" {
         .version_negotiation => |bytes| try std.testing.expect(bytes.len > 0),
         else => return error.TestUnexpectedResult,
     }
-    try std.testing.expectEqual(@as(u64, 1), pair.server.counters.version_negotiations);
 
     var short = [_]u8{0x40} ++ [_]u8{0xcc} ** limits.local_cid_length ++ [_]u8{0} ** 20;
     try std.testing.expectEqual(engine_mod.ReceiveOutcome.dropped, pair.server.receive(
@@ -303,7 +296,6 @@ test "engine answers unsupported versions and drops unroutable packets" {
         pair.now,
         &response,
     ));
-    try std.testing.expectEqual(@as(u64, 1), pair.server.counters.dropped_unroutable);
 
     var tiny = [_]u8{ 0xc3, 0, 0, 0, 1, 0x08 } ++ [_]u8{0xaa} ** 8 ++ [_]u8{0x04} ++ [_]u8{0xbb} ** 4 ++ [_]u8{0x00};
     try std.testing.expectEqual(engine_mod.ReceiveOutcome.dropped, pair.server.receive(
@@ -312,7 +304,6 @@ test "engine answers unsupported versions and drops unroutable packets" {
         pair.now,
         &response,
     ));
-    try std.testing.expectEqual(@as(u64, 1), pair.server.counters.dropped_short_initial);
     try std.testing.expectEqual(@as(u16, 0), pair.server.registry.handshaking);
 }
 

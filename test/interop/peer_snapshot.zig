@@ -5,7 +5,6 @@ const Peer = @import("network_peer.zig").Peer;
 pub fn emit(peer: *Peer, id: u32) !void {
     const reqresp = peer.service.reqresp.active();
     const gossip = peer.service.gossipsub.resourceSnapshot();
-    const transport = peer.transport.engine.counters;
     var streams: usize = 0;
     for (peer.transport.engine.activeIndices()) |index| {
         for (peer.transport.engine.registry.slots[index].table.entries) |entry| {
@@ -27,7 +26,6 @@ pub fn emit(peer: *Peer, id: u32) !void {
         .id = id,
         .ok = true,
         .connections = peer.transport.engine.activeIndices().len,
-        .accepted = transport.accepted,
         .streams = streams,
         .heldFin = peer.held_finish != null,
         .finishCalls = peer.finish_calls,
@@ -41,9 +39,6 @@ pub fn emit(peer: *Peer, id: u32) !void {
         .connectionDirection = if (peer.conn) |conn| if (peer.transport.engine.direction(conn)) |direction| @as(?[]const u8, @tagName(direction)) else null else null,
         .connectionGeneration = if (peer.conn) |conn| @as(?u32, conn.generation) else null,
         .malformedRpcs = peer.service.gossipsub.counters.malformed_rpcs,
-        .droppedUnroutable = transport.dropped_unroutable,
-        .droppedFull = transport.dropped_full,
-        .recvErrors = transport.recv_errors,
         .gossipPeers = gossip.admitted_peers,
         .remoteSubscriptions = gossip.remote_subscriptions,
         .meshMembers = gossip.mesh_members,

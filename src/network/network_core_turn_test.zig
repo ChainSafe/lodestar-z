@@ -305,7 +305,6 @@ test "a junk flood on the discovery socket costs discovery-only turns in batches
     for (0..40) |_| try sender.send(std.testing.io, &target, "junk datagram");
     const visits = Visits.capture(&node);
     const counted = datagramsCounted(&node);
-    const readiness = node.counters.readiness_calls;
     for ([_]u16{ runtime.discovery_batch_max, 40 - runtime.discovery_batch_max }) |expected| {
         const now = try currentTime();
         const result = node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| 5_000));
@@ -315,8 +314,6 @@ test "a junk flood on the discovery socket costs discovery-only turns in batches
         try std.testing.expectEqual(@as(u32, 0), result.transport.datagrams_sent);
     }
     try std.testing.expectEqual(counted + 40, datagramsCounted(&node));
-    try std.testing.expectEqual(@as(u64, 2), node.counters.discovery_only_turns);
-    try std.testing.expectEqual(readiness + 2, node.counters.readiness_calls);
     try std.testing.expectEqualDeep(visits, Visits.capture(&node));
 }
 
@@ -344,5 +341,71 @@ test "discovery readiness with other work due runs a full turn" {
     try std.testing.expect(!result.discovery_only);
     try std.testing.expectEqual(@as(u16, 1), result.discovery.datagrams);
     try std.testing.expect(result.transport.datagrams_sent > 0);
-    try std.testing.expectEqual(@as(u64, 0), node.counters.discovery_only_turns);
+}
+
+fn initOwner(node: *runtime.NetworkCore) !void {
+    const key = try @import("wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{94}));
+    const resolved = try @import("configuration.zig").resolve(.{ .profile = .beacon_node, .seed = 7, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }}, .admission_policy = @import("reqresp/policy_fixture.zig").config() });
+    try node.init(std.testing.allocator, std.testing.io, &resolved, .{
+        .host = &key,
+        .bind = .{ .ip4 = .loopback(0) },
+        .local = @import("managed_test_support.zig").localState(.{}),
+        .slot = 100,
+    });
+}
+
+test "owner zero-wait turns count under every due source until the owner settles" {
+    const node = try std.testing.allocator.create(runtime.NetworkCore);
+    defer std.testing.allocator.destroy(node);
+    try initOwner(node);
+    defer node.deinit(std.testing.io);
+    const now = try @import("transport.zig").currentTime(std.testing.io);
+    for (0..8) |_| try std.testing.expect(node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms)).failure == null);
+    const host = @intFromEnum(@import("wake_sources.zig").Source.host);
+    try std.testing.expectEqual(@as(u64, 8), node.due_now_turns[host]);
+    try std.testing.expect(node.nextWakeup(now, .{}).? > now.mono_ms);
+    const settled = node.due_now_turns;
+    try std.testing.expect(node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| 2)).failure == null);
+    try std.testing.expectEqualDeep(settled, node.due_now_turns);
+}
+
+test "owner zero-wait turn counts once under each of its two due sources" {
+    const node = try std.testing.allocator.create(runtime.NetworkCore);
+    defer std.testing.allocator.destroy(node);
+    try initOwner(node);
+    defer node.deinit(std.testing.io);
+    const now = try @import("transport.zig").currentTime(std.testing.io);
+    for (0..8) |_| try std.testing.expect(node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms)).failure == null);
+    try std.testing.expect(node.nextWakeup(now, .{}).? > now.mono_ms);
+    const remote = try @import("wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{95}));
+    const remote_key = remote.publicKey();
+    const peer = @import("wire/peer_id.zig").PeerId.fromPublicKey(&remote_key);
+    // The node binds IPv4 only, so this dial fails before sending a datagram.
+    try node.connectUntil(&peer, &.{.{ .ip6 = .{ .octets = .{0} ** 15 ++ .{1}, .port = 9000 } }}, now, now.mono_ms + 60_000);
+    const before = node.due_now_turns;
+    try std.testing.expect(node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| 100)).failure == null);
+    for (before, node.due_now_turns, 0..) |previous, current, index| {
+        const due = index == @intFromEnum(Source.dial) or index == @intFromEnum(Source.peer_policy);
+        try std.testing.expectEqual(previous + @intFromBool(due), current);
+    }
+}
+
+test "owner applies host work for a due host deadline and again for work the apply left" {
+    const node = try std.testing.allocator.create(runtime.NetworkCore);
+    defer std.testing.allocator.destroy(node);
+    try initOwner(node);
+    defer node.deinit(std.testing.io);
+    const Host = struct {
+        applies: usize = 0,
+        fn apply(context: *anyopaque, _: *runtime.NetworkCore, _: @import("types.zig").Now) runtime.HostProgress {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.applies += 1;
+            return .{ .more = self.applies == 1 };
+        }
+    };
+    var host: Host = .{};
+    const now = try @import("transport.zig").currentTime(std.testing.io);
+    try std.testing.expect(node.step(std.testing.io, now, .{}, .{ .context = &host, .apply = Host.apply, .deadline_ms = now.mono_ms }).failure == null);
+    try std.testing.expect(node.step(std.testing.io, now, .{}, .{ .context = &host, .apply = Host.apply }).failure == null);
+    try std.testing.expectEqual(@as(usize, 2), host.applies);
 }
