@@ -28,39 +28,6 @@ pub const OpenedStream = struct {
 
 pub const Sent = types.Sent;
 
-/// quiche's parts of a stream's send capacity.
-pub const SendCapacity = c.quiche_send_capacity;
-
-/// The active path's congestion state, with loss and flow-control signals counted since the
-/// connection opened.
-pub const Transport = struct {
-    cwnd: u64 = 0,
-    rtt_ns: u64 = 0,
-    rttvar_ns: u64 = 0,
-    /// Bytes per second.
-    delivery_rate: u64 = 0,
-    counts: Counts = .{},
-
-    pub const Counts = struct {
-        /// Packets, connection-wide.
-        lost: u64 = 0,
-        /// Lost STREAM and CRYPTO frames requeued, connection-wide.
-        retransmitted: u64 = 0,
-        /// Loss-detection timeouts on the active path, time-threshold loss detection included.
-        pto: u64 = 0,
-        /// DATA_BLOCKED and STREAM_DATA_BLOCKED frames sent.
-        data_blocked: u64 = 0,
-        stream_data_blocked: u64 = 0,
-
-        /// A path change restarts the probe timeout count, so each field saturates at zero.
-        pub fn since(self: *const Counts, earlier: *const Counts) Counts {
-            var result: Counts = undefined;
-            inline for (@typeInfo(Counts).@"struct".fields) |field| @field(result, field.name) = @field(self, field.name) -| @field(earlier, field.name);
-            return result;
-        }
-    };
-};
-
 pub const OpenParams = struct {
     direction: types.Direction,
     local: types.Address,
@@ -377,38 +344,6 @@ pub const Slot = struct {
             else => return err,
         };
         return available orelse error.WouldBlock;
-    }
-
-    /// Reads without changing quiche state. Null once quiche stopped or freed the stream.
-    pub fn sendCapacity(self: *const Slot, id: u64) ?SendCapacity {
-        assert(self.conn != null);
-        var parts: SendCapacity = undefined;
-        if (c.quiche_conn_send_capacity(self.conn.?, id, &parts) != 0) return null;
-        return parts;
-    }
-
-    pub fn transport(self: *const Slot) Transport {
-        assert(self.conn != null);
-        var stats: c.quiche_stats = undefined;
-        c.quiche_conn_stats(self.conn.?, &stats);
-        var result: Transport = .{ .counts = .{
-            .lost = stats.lost,
-            .retransmitted = stats.retrans,
-            .data_blocked = stats.data_blocked_sent_count,
-            .stream_data_blocked = stats.stream_data_blocked_sent_count,
-        } };
-        var path: c.quiche_path_stats = undefined;
-        for (0..@min(stats.paths_count, limits.active_connection_ids_max)) |index| {
-            if (c.quiche_conn_path_stats(self.conn.?, index, &path) != 0) break;
-            if (!path.active) continue;
-            result.cwnd = path.cwnd;
-            result.rtt_ns = path.rtt;
-            result.rttvar_ns = path.rttvar;
-            result.delivery_rate = path.delivery_rate;
-            result.counts.pto = path.total_pto_count;
-            break;
-        }
-        return result;
     }
 
     /// The peer's STOP_SENDING code when it stopped the stream. quiche frees a stopped stream

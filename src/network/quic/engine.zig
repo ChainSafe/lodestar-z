@@ -136,40 +136,6 @@ pub const ConnectionCounters = struct {
     closed: [@typeInfo(Direction).@"enum".fields.len][@typeInfo(CloseReason).@"union".fields.len]u64 = @splat(@splat(0)),
 };
 
-/// What holds a stream's send capacity below what its owner waits for. Flow credit comes before
-/// the congestion window and stream credit first, since only the peer raises credit. `cwnd` means
-/// quiche's admission allowance is short: it is refreshed from the congestion window at each
-/// received packet and decremented by data buffered since, so the window itself need not be full.
-pub const SendLimit = enum { cwnd, connection_credit, stream_credit, none, unknown };
-
-pub const SendState = struct {
-    /// The watermark a blocked write armed, or zero.
-    watermark: u32,
-    /// An undelivered writable edge waits in the engine.
-    writable_pending: bool,
-    /// Null once quiche stopped or freed the stream.
-    capacity: ?connection.SendCapacity,
-    transport: connection.Transport,
-
-    /// What the stream admits now, as quiche_conn_stream_capacity reports it.
-    pub fn available(self: *const SendState) ?u64 {
-        const parts = self.capacity orelse return null;
-        return @min(parts.tx_cap, parts.stream_credit);
-    }
-
-    /// The limit below the armed watermark, or below one byte when none is armed. quiche's
-    /// connection send capacity is the lesser of the congestion window available and connection
-    /// credit, so a shortfall that credit does not explain is the congestion window's.
-    pub fn limit(self: *const SendState) SendLimit {
-        const parts = self.capacity orelse return .unknown;
-        const wanted: u64 = @max(self.watermark, 1);
-        if (self.available().? >= wanted) return .none;
-        if (parts.stream_credit < wanted) return .stream_credit;
-        if (parts.connection_credit < wanted) return .connection_credit;
-        return .cwnd;
-    }
-};
-
 const Stream = struct {
     slot: *connection.Slot,
     index: u8,
@@ -513,21 +479,6 @@ pub const Engine = struct {
         return .{
             .read_open = slot.table.readOpen(stream.slot),
             .write_waiting = entry.write_lowat > 0 or entry.ready.writable or entry.stopped,
-        };
-    }
-
-    /// A live stream's send state on an established connection, or null otherwise. It arms no
-    /// write interest and changes no quiche state.
-    pub fn sendState(self: *const Engine, stream: StreamHandle) ?SendState {
-        if (self.route(stream) == null) return null;
-        const slot = &self.registry.slots[stream.conn.index];
-        if (slot.state != .established) return null;
-        const entry = &slot.table.entries[stream.slot];
-        return .{
-            .watermark = entry.write_lowat,
-            .writable_pending = entry.ready.writable,
-            .capacity = if (entry.stopped) null else slot.sendCapacity(entry.id),
-            .transport = slot.transport(),
         };
     }
 

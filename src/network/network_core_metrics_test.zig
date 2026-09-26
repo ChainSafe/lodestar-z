@@ -128,11 +128,6 @@ const contract = [_]Series{
     .{ .name = "lodestar_native_gossip_turn_stops_total", .kind = "counter", .labels = &.{"budget"} },
     .{ .name = "lodestar_native_gossip_turn_stop_skipped_peers_total", .kind = "counter", .labels = &.{ "budget", "output" } },
     .{ .name = "lodestar_native_gossip_turn_stop_unserved_seconds_total", .kind = "counter", .labels = &.{ "budget", "phase_bps" } },
-    .{ .name = "lodestar_native_gossip_stream_transitions_total", .kind = "counter", .labels = &.{ "transition", "limit", "writable_pending" } },
-    .{ .name = "lodestar_native_gossip_stream_transition_bytes", .kind = "histogram", .labels = &.{ "transition", "quantity" } },
-    .{ .name = "lodestar_native_gossip_stream_transition_rtt_seconds", .kind = "histogram", .labels = &.{"transition"} },
-    .{ .name = "lodestar_native_gossip_stream_transition_delivery_rate_bytes_per_second", .kind = "histogram", .labels = &.{"transition"} },
-    .{ .name = "lodestar_native_gossip_stream_transition_quic_events", .kind = "histogram", .labels = &.{ "transition", "event" } },
     .{ .name = "lodestar_native_gossip_data_drops_total", .kind = "counter", .labels = &.{ "origin", "reason", "client" } },
     .{ .name = "lodestar_native_gossip_data_drops_by_slot_phase_total", .kind = "counter", .labels = &.{"phase_bps"} },
     .{ .name = "lodestar_native_gossip_data_write_seconds", .kind = "histogram", .labels = &.{"origin"} },
@@ -550,7 +545,6 @@ test "metrics phases come from the owner's slot clock, which each clock read upd
     try node.init(std.testing.allocator, std.testing.io, &options.resolved, options.startup);
     defer node.deinit(std.testing.io);
     try std.testing.expectEqual(&node.slot_clock.?, node.service.gossipsub.slot_clock.?);
-    try std.testing.expectEqual(&node.transport.engine, node.service.gossipsub.engine.?);
     const wall = node.last_now.unix_ms.?;
     try std.testing.expectEqual(@as(?u16, @intCast(wall % 12_000 * 10_000 / 12_000)), node.slot_clock.?.phaseBps(node.last_now.mono_ms));
 }

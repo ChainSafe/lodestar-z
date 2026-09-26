@@ -543,12 +543,6 @@ const Session = @typeInfo(@FieldType(gossip.sessions.Sessions, "rows")).pointer.
 const DropReason = @FieldType(@FieldType(@FieldType(Session, "io"), "tx"), "last_drop");
 const Io = @FieldType(Gossipsub, "io_metrics");
 const Occupancy = @FieldType(Gossipsub, "occupancy");
-const Transport = @FieldType(Io, "transport");
-const Transition = Transport.Transition;
-const Quantity = Transport.Quantity;
-const SendLimit = network.quic.engine.SendLimit;
-const transition_count = @typeInfo(Transition).@"enum".fields.len;
-const limit_count = @typeInfo(SendLimit).@"enum".fields.len;
 /// `turn.Budget`, which the gossip package keeps private, in its declaration order.
 const budget_names = [_][]const u8{ "calls", "input", "output", "items", "fields", "work", "copy" };
 const calls_budget = 0;
@@ -594,10 +588,6 @@ const Totals = struct {
     /// Descriptor refusals by the peer's last write, and those while its stream was blocked.
     refusals: [@typeInfo(LastWrite).@"enum".fields.len]u64 = @splat(0),
     refusals_blocked: u64 = 0,
-    /// Out stream transitions by the limit below what the stream waited for, and those that found
-    /// an undelivered writable edge.
-    transitions: [transition_count][limit_count]u64 = @splat(@splat(0)),
-    writable_pending: [transition_count]u64 = @splat(0),
     steps: u64 = 0,
     step_ns: u64 = 0,
     observed_ms: [phase_spans]u64 = @splat(0),
@@ -650,12 +640,6 @@ const Totals = struct {
             for (total, outcomes) |*value, addition| value.* += addition;
         };
         for (&result.refusals, &g.delivery_metrics.refusals) |*count, *refusal| count.* = refusal.bytes.count;
-        for (&result.transitions, &result.writable_pending, &g.io_metrics.transport.transitions) |*limits, *pending, *flags| {
-            for (limits, flags) |*count, by_flag| {
-                count.* = by_flag[0] + by_flag[1];
-                pending.* += by_flag[1];
-            }
-        }
         return result;
     }
 
@@ -864,7 +848,6 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     const total = edges[windows.len].minus(&edges[0]);
     printWindow("run", &total, steps[0..packed_len]);
     printPhases(&total);
-    printTransitions(&hub.service.gossipsub.io_metrics.transport);
     var published: u64 = 0;
     var copies: u64 = 0;
     var pressured: u64 = 0;
@@ -928,11 +911,6 @@ fn printWindow(name: []const u8, delta: *const Totals, steps: []u32) void {
     std.debug.print(" unserved_ms", .{});
     for (budget_names, delta.unserved_ms) |budget, spans| std.debug.print(" {s}={d}", .{ budget, sum(&spans) });
     std.debug.print("\ncase=gossip_burst window={s} descriptor_refusals last_write_accepted={d} last_write_would_block={d} stream_blocked={d}\n", .{ name, delta.refusals[@intFromEnum(LastWrite.accepted)], delta.refusals[@intFromEnum(LastWrite.would_block)], delta.refusals_blocked });
-    for (delta.transitions, delta.writable_pending, 0..) |limits, pending, index| {
-        std.debug.print("case=gossip_burst window={s} transition={s} total={d}", .{ name, @tagName(@as(Transition, @enumFromInt(index))), sum(&limits) });
-        inline for (@typeInfo(SendLimit).@"enum".fields) |limit| std.debug.print(" {s}={d}", .{ limit.name, limits[limit.value] });
-        std.debug.print(" writable_pending={d}\n", .{pending});
-    }
     for (delta.by_kind, 0..) |outcomes, index| {
         const selected = outcomes[@intFromEnum(KindOutcome.selected)];
         const pressured = outcomes[@intFromEnum(KindOutcome.pressured)];
@@ -982,20 +960,6 @@ fn histogramQuantile(bounds: []const u64, buckets: []const u64, q: f64) f64 {
         cumulative = next;
     }
     return @floatFromInt(bounds[bounds.len - 1]);
-}
-
-/// Medians and 90th percentiles of each transition's byte quantities and RTT since the hub started.
-fn printTransitions(transport: *const Transport) void {
-    for (&transport.bytes, &transport.rtt, 0..) |*quantities, *rtt, index| {
-        if (rtt.count == 0) continue;
-        std.debug.print("case=gossip_burst transition={s} snapshots={d}", .{ @tagName(@as(Transition, @enumFromInt(index))), rtt.count });
-        inline for (@typeInfo(Quantity).@"enum".fields) |quantity| {
-            const histogram = &quantities[quantity.value];
-            const bounds = @TypeOf(histogram.*).bounds;
-            std.debug.print(" {s}_p50={d:.0} {s}_p90={d:.0}", .{ quantity.name, histogramQuantile(bounds, &histogram.buckets, 0.5), quantity.name, histogramQuantile(bounds, &histogram.buckets, 0.9) });
-        }
-        std.debug.print(" rtt_p50_us={d:.0}\n", .{histogramQuantile(@TypeOf(rtt.*).bounds, &rtt.buckets, 0.5) / std.time.ns_per_us});
-    }
 }
 
 /// The native slot-phase series over the run: time observed, mean queued frames, mean peers at the
