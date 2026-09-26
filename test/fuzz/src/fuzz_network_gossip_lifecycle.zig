@@ -66,14 +66,14 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
                 const entry = &store.entries[index];
                 if (entry.active) {
                     const handle: Handle = .{ .index = @intCast(index), .generation = entry.generation };
-                    queues[at % queues.len].append(store, handle, 65536, now) catch {};
+                    queues[at % queues.len].append(store, handle, .forward, .{ .bytes = 65536 }, now) catch {};
                 }
             },
             7 => {
                 const queue = &queues[at % queues.len];
                 if (byte < 128) {
                     queue.reset(store);
-                } else if (queue.first()) |tx| {
+                } else if (queue.next(store)) |tx| {
                     _ = queue.advance(store, @min(1 + at, tx.segment(store).len));
                 }
             },
@@ -132,9 +132,7 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
     }
     messages.validation.clear(&messages.store, &peers);
     for (&queues) |*queue| queue.reset(&messages.store);
-    for (0..messages.history.entries.len) |_| {
-        if (!messages.history.evictOldest(&messages.store)) break;
-    }
+    messages.history.age(&messages.store, epoch + gossip.constants.mcache_len);
     assert(messages.store.used_entries == 0);
     assert(messages.store.free_pages == messages.store.next.len);
     for (peers.rows) |peer| assert(peer.pins == 0);
