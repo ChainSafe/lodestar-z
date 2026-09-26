@@ -37,8 +37,6 @@ pub const Pool = struct {
     protected: usize,
     /// Each peer's descriptors that only local publications may use.
     local_descriptors: usize = 0,
-    /// Queues that refuse an ordinary frame for want of a descriptor.
-    full_queues: usize = 0,
 
     pub fn capacity(peers: usize, validations: usize) usize {
         assert(peers > 0 and peers <= constants.peers_cap);
@@ -54,7 +52,7 @@ pub const Pool = struct {
     }
 
     pub fn deinit(self: *Pool, a: std.mem.Allocator) void {
-        assert(self.available == self.slots.len and self.full_queues == 0);
+        assert(self.available == self.slots.len);
         a.free(self.slots);
         self.* = undefined;
     }
@@ -131,12 +129,10 @@ pub const Queue = struct {
         assert(!entry.provisional and self.bytes <= limits.bytes);
         assert(self.pool.local_descriptors < per_peer_limit and limits.local_bytes <= limits.bytes);
         const class = classOf(origin);
-        const reserved_descriptors = if (class == .local) 0 else self.pool.local_descriptors -| self.classCount(.local);
         const reserved_bytes = if (class == .local) 0 else limits.local_bytes -| self.local_bytes;
-        if (self.count + reserved_descriptors >= per_peer_limit) return error.Descriptors;
+        if (if (class == .local) self.count >= per_peer_limit else self.full()) return error.Descriptors;
         if (entry.len + reserved_bytes > limits.bytes - self.bytes) return error.Bytes;
         const slot = self.pool.acquire(self.count) orelse return error.PoolFull;
-        const was_full = self.full();
         self.pool.slots[slot].tx = .{ .message = message, .enqueued_ms = now, .origin = origin, .cursor = store.frameCursor(message) };
         const fifo = &self.fifos[@intFromEnum(class)];
         if (fifo.tail == none) fifo.head = slot else self.pool.slots[fifo.tail].next = slot;
@@ -147,19 +143,12 @@ pub const Queue = struct {
         if (class == .local) self.local_bytes += entry.len;
         self.bytes_high_water = @max(self.bytes_high_water, self.bytes);
         self.descriptors_high_water = @max(self.descriptors_high_water, self.count);
-        self.noteFull(was_full);
         store.retainTx(message);
     }
 
     /// Whether an ordinary frame would be refused for want of a descriptor.
     pub fn full(self: *const Queue) bool {
         return self.count + (self.pool.local_descriptors -| self.classCount(.local)) >= per_peer_limit;
-    }
-
-    fn noteFull(self: *Queue, was: bool) void {
-        const now = self.full();
-        if (now and !was) self.pool.full_queues += 1;
-        if (was and !now) self.pool.full_queues -= 1;
     }
 
     /// The frame to write next. A frame in progress continues. At a frame boundary a local frame
@@ -214,7 +203,6 @@ pub const Queue = struct {
         const slot = fifo.head;
         const tx = &self.pool.slots[slot].tx;
         const len = store.get(tx.message).?.len;
-        const was_full = self.full();
         fifo.head = self.pool.slots[slot].next;
         if (fifo.head == none) fifo.tail = none;
         self.origins[@intFromEnum(tx.origin)] -= 1;
@@ -223,7 +211,6 @@ pub const Queue = struct {
         store.releaseTx(tx.message);
         self.pool.release(slot, self.count);
         self.count -= 1;
-        self.noteFull(was_full);
     }
 
     pub fn reset(self: *Queue, store: *storage.Store) void {

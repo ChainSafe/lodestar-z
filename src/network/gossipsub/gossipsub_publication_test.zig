@@ -186,14 +186,9 @@ test "publication distinguishes topic capacity from unknown wire names" {
     try std.testing.expectError(error.UnknownTopic, g.publish("invalid", "body", .{ .mono_ms = 1, .unix_s = 0 }));
 }
 
-test "delivery metrics attribute refused frames by origin, limit, client and slot phase" {
+test "delivery metrics attribute refused frames by origin, limit and client" {
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
     defer g.deinit();
-    // Monotonic 2 ms is 6 s into a 12 s slot: phase 5,000 basis points.
-    const slots = @import("../slot_clock.zig");
-    var clock: slots.SlotClock = .{ .genesis_unix_ms = 1_742_213_400_000, .slot_duration_ms = 12_000 };
-    clock.observe(.{ .mono_ms = 2, .unix_s = 0, .unix_ms = clock.genesis_unix_ms + 7 * 12_000 + 6_000 });
-    g.slot_clock = &clock;
     const conn: @import("../quic/engine.zig").Handle = .{ .index = 0, .generation = 1 };
     const peer = support.addPeer(&g, conn, .v1_2).?;
     _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), peer.index, topic, true);
@@ -220,7 +215,6 @@ test "delivery metrics attribute refused frames by origin, limit, client and slo
         const expected = client == nimbus and reason == 0 and (origin == @intFromEnum(@import("delivery.zig").Origin.publication) or origin == @intFromEnum(@import("delivery.zig").Origin.iwant));
         try std.testing.expectEqual(@as(u64, @intFromBool(expected)), count);
     };
-    for (metrics.drops_by_phase, slots.bucket_labels) |count, label| try std.testing.expectEqual(@as(u64, if (std.mem.eql(u8, label, "5000")) 2 else 0), count);
     try std.testing.expectEqual(@as(u64, 2), g.counters.send_dropped);
     // The first queued frame was the publication; its write completes 39 ms after admission.
     for (0..16) |_| {

@@ -27,9 +27,6 @@ pub const Session = struct {
     conn: Handle = undefined,
     /// Named by the connection's identify exchange; unknown until it completes.
     client: @import("../peers/client.zig").Client = .Unknown,
-    /// The budget of the turn that stopped before visiting this session while it was writable. It
-    /// clears at the session's next visit or when its output is cancelled.
-    unserved: ?@import("turn.zig").Budget = null,
     in_stream: ?StreamHandle = null,
     dont_send: [constants.dont_send_cap]MessageId = undefined,
     dont_send_until: [constants.dont_send_cap]u64 = undefined,

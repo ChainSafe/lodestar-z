@@ -2,7 +2,6 @@ const std = @import("std");
 const support = @import("test_support.zig");
 const topic_mod = @import("topic.zig");
 const session_io = @import("session_io.zig");
-const slots = @import("../slot_clock.zig");
 const Gossipsub = @import("gossipsub.zig").Gossipsub;
 const Apply = @import("metrics.zig").Apply;
 const IwantOutcome = @import("metrics.zig").IwantOutcome;
@@ -80,48 +79,6 @@ test "owner applies record verdict bursts, forward admissions and the service be
     try std.testing.expectEqual(@as(u64, 2), metrics.verdicts.count);
 }
 
-test "occupancy integrates queued frames and full peers by slot phase across idle intervals" {
-    var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
-    defer g.deinit();
-    const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
-    _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), peer.index, name, true);
-    g.markDirect(g.sessions.rows[peer.index].conn);
-    g.sessions.rows[peer.index].io.tx.cancelStream(&g.messages.store);
-    // Monotonic zero is the start of a 12 s slot: each phase bucket lasts 750 ms.
-    var clock: slots.SlotClock = .{ .genesis_unix_ms = 1_000_000, .slot_duration_ms = 12_000 };
-    clock.observe(.{ .mono_ms = 0, .unix_s = 0, .unix_ms = 1_000_000 + 12_000 });
-    g.slot_clock = &clock;
-    _ = session_io.beginPump(&g, .{ .mono_ms = 100, .unix_s = 0 });
-    _ = try g.publish(name, "queued", .{ .mono_ms = 100, .unix_s = 0 });
-    const occupancy = &g.occupancy;
-    // No change for 700 ms: the queued frame is credited to the buckets the interval crossed.
-    _ = session_io.beginPump(&g, .{ .mono_ms = 800, .unix_s = 0 });
-    try std.testing.expectEqual(@as(u64, 700), occupancy.observed_ms[0] + occupancy.observed_ms[1]);
-    try std.testing.expectEqual(@as(u64, 650), occupancy.descriptor_ms[0]);
-    try std.testing.expectEqual(@as(u64, 50), occupancy.descriptor_ms[1]);
-    try std.testing.expectEqual(@as(u64, 0), occupancy.full_ms[1]);
-    // Fill the ordinary allowance; the peer counts as full until a frame leaves.
-    const h = g.messages.history.message(g.messages.history.get(&g.messages.store, topic_mod.validMessageId(name, "queued", .{})).?);
-    const tx = &g.sessions.rows[peer.index].io.tx;
-    for (0..@import("delivery.zig").per_peer_limit) |_| {
-        if (tx.data.full()) break;
-        try std.testing.expectEqual(.queued, tx.queueData(&g.messages.store, h, .forward, .{ .bytes = g.options.tx_peer_bytes }, 800));
-    }
-    try std.testing.expectEqual(@as(usize, 1), g.sessions.deliveries.full_queues);
-    const queued = tx.data.count;
-    _ = session_io.beginPump(&g, .{ .mono_ms = 1_600, .unix_s = 0 });
-    try std.testing.expectEqual(@as(u64, 700), occupancy.full_ms[1]);
-    try std.testing.expectEqual(@as(u64, 100), occupancy.full_ms[2]);
-    try std.testing.expectEqual(@as(u64, 50 + 700 * queued), occupancy.descriptor_ms[1]);
-    g.cancelWrites(g.sessions.ref(peer.index));
-    try std.testing.expectEqual(@as(usize, 0), g.sessions.deliveries.full_queues);
-    // Without a slot clock the time is kept, under an unknown phase.
-    g.slot_clock = null;
-    _ = session_io.beginPump(&g, .{ .mono_ms = 2_000, .unix_s = 0 });
-    try std.testing.expectEqual(@as(u64, 400), occupancy.observed_ms[slots.phase_buckets]);
-    try std.testing.expectEqual(@as(u64, 0), occupancy.descriptor_ms[slots.phase_buckets]);
-}
-
 test "IWANT outcomes separate misses, suppression, the retransmission limit, queued and refused responses" {
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
     defer g.deinit();
@@ -178,151 +135,6 @@ test "GRAFT outcomes, PRUNE reasons and mesh peer-time" {
     for (g.sessions.rows) |*row| if (row.active) row.io.tx.cancelStream(&g.messages.store);
 }
 
-test "occupancy and drop phases use each change's own time and never run backwards" {
-    var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
-    defer g.deinit();
-    const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
-    _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), peer.index, name, true);
-    g.markDirect(g.sessions.rows[peer.index].conn);
-    const tx = &g.sessions.rows[peer.index].io.tx;
-    tx.cancelStream(&g.messages.store);
-    const occupancy = &g.occupancy;
-    // A frame queued at 100 ms and completed by a write at 800 ms held a descriptor for 700 ms,
-    // though the next pump comes only at 900 ms.
-    _ = session_io.beginPump(&g, .{ .mono_ms = 100, .unix_s = 0 });
-    try std.testing.expectEqual(@as(u16, 1), (try g.publish(name, "written", .{ .mono_ms = 100, .unix_s = 0 })).queued);
-    g.advanceWrite(g.sessions.ref(peer.index), tx.segment(&g.messages.store).len, 800);
-    try std.testing.expectEqual(@as(usize, 0), tx.data.count);
-    _ = session_io.beginPump(&g, .{ .mono_ms = 900, .unix_s = 0 });
-    try std.testing.expectEqual(@as(u64, 700), occupancy.descriptor_ms[slots.phase_buckets]);
-    try std.testing.expectEqual(@as(u64, 800), occupancy.observed_ms[slots.phase_buckets]);
-
-    // Monotonic zero starts a 12 s slot, so 1,500 ms starts the third 750 ms phase bucket.
-    var clock: slots.SlotClock = .{ .genesis_unix_ms = 1_000_000, .slot_duration_ms = 12_000 };
-    clock.observe(.{ .mono_ms = 0, .unix_s = 0, .unix_ms = 1_000_000 + 12_000 });
-    g.slot_clock = &clock;
-    _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), peer.index, name, false);
-    const h = g.messages.history.message(g.messages.history.get(&g.messages.store, topic_mod.validMessageId(name, "written", .{})).?);
-    for (0..@import("delivery.zig").per_peer_limit) |_| {
-        if (tx.data.full()) break;
-        try std.testing.expectEqual(.queued, tx.queueData(&g.messages.store, h, .forward, .{ .bytes = g.options.tx_peer_bytes }, 900));
-    }
-    // A host publication at 1,600 ms, then a pump whose tick was read earlier, at 1,400 ms: the
-    // refused IWANT response is attributed to 1,600 ms and occupancy is not rewound.
-    try std.testing.expectEqual(@as(u16, 0), (try g.publish(name, "newer", .{ .mono_ms = 1_600, .unix_s = 0 })).selected);
-    _ = session_io.beginPump(&g, .{ .mono_ms = 1_400, .unix_s = 0 });
-    try std.testing.expectEqual(@as(u64, 1_600), g.observed_ms);
-    var body: [32]u8 = undefined;
-    support.control(&g, peer.index, .{ .iwant = .{ .body = ids(&body, 1, &.{topic_mod.validMessageId(name, "written", .{})}) } }, .{ .mono_ms = 1_400, .unix_s = 0 });
-    try std.testing.expectEqual(@as(u64, 1), g.rpc_metrics.iwant[@intFromEnum(IwantOutcome.refused)]);
-    for (g.delivery_metrics.drops_by_phase, 0..) |count, bucket| try std.testing.expectEqual(@as(u64, @intFromBool(bucket == 2)), count);
-    try std.testing.expectEqual(@as(?u64, 1_600), occupancy.last_ms);
-    g.cancelWrites(g.sessions.ref(peer.index));
-}
-
-test "a verdict that forwards nothing still keeps its newer time for drop phases" {
-    var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
-    defer g.deinit();
-    const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
-    try support.subscribe(&g, name);
-    const tx = &g.sessions.rows[peer.index].io.tx;
-    tx.cancelStream(&g.messages.store);
-    // Monotonic zero starts a 12 s slot, so 1,500 ms starts the third 750 ms phase bucket.
-    var clock: slots.SlotClock = .{ .genesis_unix_ms = 1_000_000, .slot_duration_ms = 12_000 };
-    clock.observe(.{ .mono_ms = 0, .unix_s = 0, .unix_ms = 1_000_000 + 12_000 });
-    g.slot_clock = &clock;
-    _ = session_io.beginPump(&g, .{ .mono_ms = 900, .unix_s = 0 });
-    _ = try g.publish(name, "stored", .{ .mono_ms = 900, .unix_s = 0 });
-    const id = topic_mod.validMessageId(name, "stored", .{});
-    const h = g.messages.history.message(g.messages.history.get(&g.messages.store, id).?);
-    for (0..@import("delivery.zig").per_peer_limit) |_| {
-        if (tx.data.full()) break;
-        try std.testing.expectEqual(.queued, tx.queueData(&g.messages.store, h, .forward, .{ .bytes = g.options.tx_peer_bytes }, 900));
-    }
-    var inbox: support.Inbox = .{};
-    defer inbox.deinit();
-    inbox.attach(&g);
-    try std.testing.expectEqual(@as(?usize, 1), try support.message(&g, peer.index, "ignored", 900));
-    // The host ignores it at 1,600 ms; the next pump's tick was read earlier, at 1,400 ms.
-    try std.testing.expectEqualDeep(@import("gossipsub.zig").ReportOutcome{ .applied = .ignore }, g.report(inbox.last().handle, .ignore, .{ .mono_ms = 1_600, .unix_s = 0 }));
-    _ = session_io.beginPump(&g, .{ .mono_ms = 1_400, .unix_s = 0 });
-    var body: [32]u8 = undefined;
-    support.control(&g, peer.index, .{ .iwant = .{ .body = ids(&body, 1, &.{id}) } }, .{ .mono_ms = 1_400, .unix_s = 0 });
-    try std.testing.expectEqual(@as(u64, 1), g.rpc_metrics.iwant[@intFromEnum(IwantOutcome.refused)]);
-    for (g.delivery_metrics.drops_by_phase, 0..) |count, bucket| try std.testing.expectEqual(@as(u64, @intFromBool(bucket == 2)), count);
-    g.cancelWrites(g.sessions.ref(peer.index));
-}
-
-test "forward and publication recipients count by message kind and the slot phase of their selection" {
-    const Outcome = @import("metrics.zig").Delivery.Outcome;
-    const selected = @intFromEnum(@import("metrics.zig").Delivery.KindOutcome.selected);
-    const pressured = @intFromEnum(@import("metrics.zig").Delivery.KindOutcome.pressured);
-    var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
-    defer g.deinit();
-    const source = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
-    var destinations: [2]u16 = undefined;
-    try support.subscribe(&g, name);
-    for (&destinations, 1..) |*destination, index| {
-        destination.* = support.addPeer(&g, .{ .index = @intCast(index), .generation = 1 }, .v1_2).?.index;
-        g.overlay.rows[g.overlay.findTopic(name).?].mesh.set(destination.*);
-        g.sessions.rows[destination.*].io.tx.cancelStream(&g.messages.store);
-    }
-    var inbox: support.Inbox = .{};
-    defer inbox.deinit();
-    inbox.attach(&g);
-    var handles: [2]@import("validation.zig").Handle = undefined;
-    for (&handles, 0..) |*handle, i| {
-        var text: [16]u8 = undefined;
-        try std.testing.expectEqual(@as(?usize, 1), try support.message(&g, source.index, try std.fmt.bufPrint(&text, "forward {d}", .{i}), 1));
-        handle.* = inbox.last().handle;
-    }
-    // Monotonic zero starts a 12 s slot: each phase bucket lasts 750 ms.
-    var clock: slots.SlotClock = .{ .genesis_unix_ms = 1_000_000, .slot_duration_ms = 12_000 };
-    clock.observe(.{ .mono_ms = 0, .unix_s = 0, .unix_ms = 1_000_000 + 12_000 });
-    g.slot_clock = &clock;
-    const by_kind = &g.delivery_metrics.by_kind;
-    const block = @intFromEnum(topic_mod.Kind.beacon_block);
-    // A publication at 100 ms and a forward at 1,600 ms each select both mesh peers.
-    try std.testing.expectEqual(@as(u16, 2), (try g.publish(name, "filler", .{ .mono_ms = 100, .unix_s = 0 })).queued);
-    _ = g.report(handles[0], .accept, .{ .mono_ms = 1_600, .unix_s = 0 });
-    try std.testing.expectEqualSlices(u64, &.{ 2, 0 }, &by_kind[block][0]);
-    try std.testing.expectEqualSlices(u64, &.{ 2, 0 }, &by_kind[block][2]);
-    // With the first peer's ordinary allowance full, a forward at 3,100 ms is refused there.
-    const tx = &g.sessions.rows[destinations[0]].io.tx;
-    const filler = g.messages.history.message(g.messages.history.get(&g.messages.store, topic_mod.validMessageId(name, "filler", .{})).?);
-    for (0..@import("delivery.zig").per_peer_limit) |_| {
-        if (tx.data.full()) break;
-        try std.testing.expectEqual(.queued, tx.queueData(&g.messages.store, filler, .forward, .{ .bytes = g.options.tx_peer_bytes }, 1_600));
-    }
-    _ = g.report(handles[1], .accept, .{ .mono_ms = 3_100, .unix_s = 0 });
-    try std.testing.expectEqualSlices(u64, &.{ 2, 1 }, &by_kind[block][4]);
-    // Without a slot clock the phase is unknown.
-    g.slot_clock = null;
-    try std.testing.expectEqual(@as(u16, 2), (try g.publish(name, "no clock", .{ .mono_ms = 3_200, .unix_s = 0 })).selected);
-    try std.testing.expectEqualSlices(u64, &.{ 2, 0 }, &by_kind[block][slots.phase_buckets]);
-    // Every cell sums to the forward and publication totals; IWANT responses stay out.
-    var totals: [2]u64 = @splat(0);
-    for (by_kind) |phases| for (phases) |outcomes| {
-        totals[selected] += outcomes[selected];
-        totals[pressured] += outcomes[pressured];
-    };
-    const recipients = g.delivery_metrics.recipients;
-    const Origin = @import("delivery.zig").Origin;
-    for ([_]Outcome{ .selected, .pressured }, totals) |outcome, total| {
-        try std.testing.expectEqual(recipients[@intFromEnum(Origin.forward)][@intFromEnum(outcome)] + recipients[@intFromEnum(Origin.publication)][@intFromEnum(outcome)], total);
-    }
-    try std.testing.expectEqual(@as(u64, 8), totals[selected]);
-    // Only a node without a topic policy admits a topic of no known kind.
-    var bare = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1 });
-    defer bare.deinit();
-    const other = "/eth2/01020304/unknown_kind/ssz_snappy";
-    const subscriber = support.addPeer(&bare, .{ .index = 0, .generation = 1 }, .v1_2).?;
-    try std.testing.expectEqual(@as(u16, 0), (try bare.publish(other, "interned", .{ .mono_ms = 1, .unix_s = 0 })).selected);
-    _ = bare.overlay.peerSubscription(&bare.overlayContext(bare.last_now_ms), subscriber.index, other, true);
-    try std.testing.expectEqual(@as(u16, 1), (try bare.publishWithOptions(other, "unknown", .{ .flood = true }, .{ .mono_ms = 1, .unix_s = 0 })).selected);
-    try std.testing.expectEqualSlices(u64, &.{ 1, 0 }, &bare.delivery_metrics.by_kind[by_kind.len - 1][slots.phase_buckets]);
-}
-
 test "descriptor refusals sample the refusing peer's queued bytes, oldest frame age and last write" {
     const Delivery = @import("metrics.zig").Delivery;
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
@@ -368,6 +180,5 @@ test "descriptor refusals sample the refusing peer's queued bytes, oldest frame 
     try std.testing.expectEqual(@as(u64, 2), would_block.bytes.count);
     try std.testing.expectEqual(@as(u64, 1), metrics.refusal_blocked.count);
     try std.testing.expectEqual(@as(u64, 3), g.rpc_metrics.iwant[@intFromEnum(IwantOutcome.refused)]);
-    for (metrics.by_kind) |phases| for (phases) |outcomes| try std.testing.expectEqualSlices(u64, &.{ 0, 0 }, &outcomes);
     g.cancelWrites(g.sessions.ref(peer.index));
 }

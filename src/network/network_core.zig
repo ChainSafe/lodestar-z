@@ -53,8 +53,6 @@ pub const DiscoveryOptions = struct {
     engine: d.Engine.Config = .{ .session_capacity = discovery_session_capacity, .session_idle_timeout_ms = discovery_session_idle_timeout_ms },
     coordinator: peers.discovery.Options = .{},
 };
-pub const SlotClock = @import("slot_clock.zig").SlotClock;
-
 pub const Startup = struct {
     keylog_path: ?[]const u8 = null,
     host: *const @import("wire/keys.zig").KeyPair,
@@ -64,8 +62,6 @@ pub const Startup = struct {
     discovery: ?DiscoveryOptions = null,
     /// The host's wall-clock slot until its first intent.
     slot: u64 = 0,
-    /// The chain's genesis time and slot duration. Without them slot phases are unknown.
-    slot_clock: ?SlotClock = null,
     /// Peers an earlier run remembered, at most `peers.remembered.capacity`, replayed as paced
     /// automatic candidates. Native drops expired, unusable and duplicate records.
     remembered: []const peers.remembered.Record = &.{},
@@ -187,10 +183,6 @@ pub const NetworkCore = struct {
     host_wake: ?i32 = null,
     /// The host's wall-clock slot for status validation. Intents only advance it.
     current_slot: u64 = 0,
-    /// Its wall offset is refreshed at initialization and at each step's clock read; any monotonic
-    /// time, including one a host clock read supplies, maps to a phase through the latest offset.
-    /// Gossip borrows it for slot phases.
-    slot_clock: ?SlotClock = null,
     /// The last host apply stopped at a per-turn cap.
     host_more: bool = false,
 
@@ -217,13 +209,10 @@ pub const NetworkCore = struct {
         self.tick_ns = 0;
         self.host_wake = null;
         self.current_slot = startup.slot;
-        if (startup.slot_clock) |clock| try clock.validate();
-        self.slot_clock = startup.slot_clock;
         self.host_more = false;
         self.native_event_count = 0;
         self.discovery = null;
         self.last_now = try transport_mod.currentTime(io);
-        if (self.slot_clock) |*clock| clock.observe(self.last_now);
         try self.transport.init(allocator, io, .{ .host = startup.host, .bind = startup.bind, .limits = resolved.limits, .work_limits = resolved.work_limits, .socket_buffers = resolved.socket_buffers.quic, .keylog_path = startup.keylog_path });
         errdefer self.transport.deinit(io);
         self.service = try service_mod.Service.init(allocator, managed.serviceOptions(resolved.core, &local));
@@ -234,7 +223,6 @@ pub const NetworkCore = struct {
         self.service.identify.bind(&self.transport.engine);
         self.peer_manager.metrics_io = io;
         self.service.gossipsub.metrics_io = io;
-        self.service.gossipsub.slot_clock = if (self.slot_clock) |*clock| clock else null;
         self.native_events = try allocator.alloc(engine.Event, @import("quic/limits.zig").events_per_turn_max);
         errdefer allocator.free(self.native_events);
         self.local_intent_workspace = try allocator.create(gossip.local_intent.Workspace);
@@ -588,7 +576,6 @@ pub const NetworkCore = struct {
         };
         const tick: Now = if (read.mono_ms >= now.mono_ms) read else now;
         self.last_now = tick;
-        if (self.slot_clock) |*clock| clock.observe(tick);
         self.tick_ns = step_start;
         result.transport.now = tick;
         if (self.discoveryOnly(&result.readiness, tick, outputs, host)) {
@@ -766,5 +753,4 @@ test {
     _ = @import("network_core_metrics_test.zig");
     _ = @import("network_core_endpoint_test.zig");
     _ = @import("network_core_turn_test.zig");
-    _ = @import("slot_clock.zig");
 }
