@@ -54,8 +54,8 @@ const Series = struct {
     labels: []const []const u8 = &.{},
 };
 
-/// The measurement contract: every native family the durable metrics manifest keeps, which the
-/// feat4 scorecard reads. Removing or renaming one needs the same change in that manifest.
+/// The measurement contract: exactly the native families the durable metrics manifest keeps, which
+/// the feat4 scorecard reads. Adding, removing or renaming one needs the same change in that manifest.
 const contract = [_]Series{
     // Peers
     .{ .name = "libp2p_peers", .kind = "gauge" },
@@ -331,7 +331,7 @@ test "metrics use retained usable coverage and accepted demand until replacement
     try contains(try f.render(true), "lodestar_discovery_subnet_peers_to_connect{type=\"attnets\"} 0\n");
 }
 
-test "metrics render every measurement contract series with its type and labels" {
+test "metrics render exactly the measurement contract families with their types and labels" {
     var f = try Fixture.initWith(&.{boundary(@splat(0), 100)}, .{ .bind = .{ .ip4 = .loopback(0) } });
     defer f.deinit();
     const output = try f.render(true);
@@ -342,6 +342,19 @@ test "metrics render every measurement contract series with its type and labels"
         missing += 1;
     }
     try std.testing.expectEqual(@as(usize, 0), missing);
+    var extra: usize = 0;
+    var lines = std.mem.splitScalar(u8, output, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "# TYPE ")) continue;
+        const name = line["# TYPE ".len..std.mem.lastIndexOfScalar(u8, line, ' ').?];
+        for (contract) |series| {
+            if (std.mem.eql(u8, series.name, name)) break;
+        } else {
+            std.debug.print("family outside the measurement contract: {s}\n", .{name});
+            extra += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), extra);
 }
 
 test "metrics report the kernel's buffer sizes and drops for every UDP socket" {
