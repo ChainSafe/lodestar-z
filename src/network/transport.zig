@@ -297,7 +297,7 @@ pub const Transport = struct {
         const previous = after.mono_ns orelse return after;
         const read = std.math.cast(u64, std.Io.Clock.awake.now(io).nanoseconds) orelse return after;
         if (read <= previous) return after;
-        return .{ .mono_ms = read / std.time.ns_per_ms, .mono_ns = read, .unix_s = after.unix_s, .unix_ms = after.unix_ms };
+        return .{ .mono_ms = read / std.time.ns_per_ms, .mono_ns = read, .unix_s = after.unix_s };
     }
 
     /// Sends up to burst_per_connection datagrams of one connection into the shared batch.
@@ -440,9 +440,9 @@ fn mapSendError(err: udp_mod.SendError) DialError {
 
 pub fn currentTime(io: std.Io) error{ClockOutOfRange}!engine_mod.Now {
     const mono = std.Io.Clock.awake.now(io).nanoseconds;
-    const wall = std.Io.Clock.real.now(io).toMilliseconds();
+    const wall = std.Io.Clock.real.now(io).toSeconds();
     if (mono < 0 or mono > std.math.maxInt(u64) or wall < 0) return error.ClockOutOfRange;
-    return .{ .mono_ms = @intCast(@divTrunc(mono, std.time.ns_per_ms)), .mono_ns = @intCast(mono), .unix_s = @divTrunc(wall, std.time.ms_per_s), .unix_ms = @intCast(wall) };
+    return .{ .mono_ms = @intCast(@divTrunc(mono, std.time.ns_per_ms)), .mono_ns = @intCast(mono), .unix_s = wall };
 }
 
 comptime {

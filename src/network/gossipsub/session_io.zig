@@ -474,13 +474,12 @@ pub fn runTurn(self: *Gossipsub, router: *routing.Router, engine: *Engine, turn:
         const index: u16 = @intCast(self.sessions.ready.pop(self.sessions.rows, "ready_link") orelse break);
         visited += 1;
         self.sessions.visits +|= 1;
-        self.setUnserved(index, null, now.mono_ms);
         serviceSession(self, router, engine, index, turn, &openings);
         self.sessions.serviced(index, &self.options);
         if (turn.exhausted().count() > 0) break;
     }
     const exhausted = turn.exhausted();
-    if (exhausted.count() > 0 and visited < marked) stopped(self, stoppingBudget(exhausted), marked - visited, now.mono_ms);
+    if (exhausted.count() > 0 and visited < marked) stopped(self, stoppingBudget(exhausted), marked - visited);
     var budgets = exhausted.iterator();
     while (budgets.next()) |budget| {
         self.io_metrics.turns_exhausted[@intFromEnum(budget)] +|= 1;
@@ -514,17 +513,15 @@ fn stoppingBudget(exhausted: Budgets) Budget {
 }
 
 /// Counts a turn that stopped on `budget` with `skipped` of the sessions it took unvisited, which
-/// lead the ready list. The writable ones wait on the stop until their next visit.
-fn stopped(self: *Gossipsub, budget: Budget, skipped: usize, now_ms: u64) void {
+/// lead the ready list.
+fn stopped(self: *Gossipsub, budget: Budget, skipped: usize) void {
     self.io_metrics.stops[@intFromEnum(budget)] +|= 1;
     var next = self.sessions.ready.head;
     for (0..skipped) |_| {
         if (next == index_list.none) break;
         const index: u16 = @intCast(next);
         next = self.sessions.rows[index].ready_link.next;
-        const writable = self.sessions.rows[index].writable();
-        self.io_metrics.skipped[@intFromEnum(budget)][@intFromBool(writable)] +|= 1;
-        if (writable) self.setUnserved(index, budget, now_ms);
+        self.io_metrics.skipped[@intFromEnum(budget)][@intFromBool(self.sessions.rows[index].writable())] +|= 1;
     }
 }
 
@@ -672,20 +669,14 @@ fn expireSession(self: *Gossipsub, router: *routing.Router, engine: *Engine, ind
 }
 
 /// Test builds check after every turn that the ready list holds every session that wants
-/// service, that each session off the list is keyed on its recomputed deadline, that the
-/// connection index finds each active session, and that unserved sessions wait on the ready list
-/// and match their counts.
+/// service, that each session off the list is keyed on its recomputed deadline, and that the
+/// connection index finds each active session.
 fn checkSessions(self: *const Gossipsub) void {
     const sessions = self.sessions;
     var linked: usize = 0;
-    var unserved: [@import("turn.zig").budget_count]usize = @splat(0);
     for (sessions.rows, 0..) |*row, position| {
         const index: u16 = @intCast(position);
         linked += @intFromBool(row.ready_link.linked);
-        if (row.unserved) |budget| {
-            assert(row.active and row.ready_link.linked);
-            unserved[@intFromEnum(budget)] += 1;
-        }
         if (!row.active) {
             assert(!row.ready_link.linked and sessions.deadlines.get(index) == null);
             continue;
@@ -695,7 +686,6 @@ fn checkSessions(self: *const Gossipsub) void {
         if (!row.ready_link.linked) assert(sessions.deadlines.get(index) == row.deadline(&self.options));
     }
     assert(linked == sessions.ready.len);
-    assert(std.mem.eql(usize, &unserved, &sessions.unserved));
 }
 
 /// Test builds check after every pump that each stream a session holds routes to it, that a
@@ -720,11 +710,8 @@ fn checkRoutes(self: *const Gossipsub, engine: *const Engine) void {
 pub const Admission = enum { admitted, duplicate, capacity, unauthenticated };
 
 pub fn beginPump(self: *Gossipsub, now: Now) Turn {
-    // A host call since the last pump may have supplied a newer time than this tick.
-    self.observed_ms = @max(self.observed_ms, self.last_now_ms);
     self.last_now_ms = now.mono_ms;
     self.apply_metrics.close();
-    self.integrateOccupancy(now.mono_ms);
     self.messages.expire(&self.peers, now.mono_ms);
     var turn = Turn.init(&self.options, now, self.msg_scratch);
     turn.sink = self.message_sink;

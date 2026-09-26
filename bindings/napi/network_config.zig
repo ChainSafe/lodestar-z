@@ -21,8 +21,6 @@ pub const Config = struct {
     bootstrap: [bootstrap_max]struct { bytes: [enr_max]u8, len: u16 },
     bootstrap_count: u8,
     slot: u64,
-    /// From the chain's genesis time and slot duration; null without a genesis time.
-    slot_clock: ?n.network_core.SlotClock,
     gossip: n.configuration.GossipOverrides,
     allowlist: [32][16]u8,
     allowlist_count: u8,
@@ -161,7 +159,6 @@ pub fn parse(value: Value, out: *Config) !void {
         .bootstrap = undefined,
         .bootstrap_count = 0,
         .slot = 0,
-        .slot_clock = null,
         .gossip = undefined,
         .allowlist = undefined,
         .allowlist_count = 0,
@@ -175,15 +172,6 @@ pub fn parse(value: Value, out: *Config) !void {
     out.secret = try fixed(32, try get(value, "identitySecretKey"));
     out.bind = try bindings(try get(value, "bind"));
     out.slot = try bigint(try get(value, "initialSlot"));
-    const genesis = try get(value, "genesisTime");
-    if (try genesis.typeof() != .undefined) {
-        const clock: n.network_core.SlotClock = .{
-            .genesis_unix_ms = std.math.mul(u64, try bigint(genesis), 1000) catch return error.InvalidNetworkInteger,
-            .slot_duration_ms = @import("config.zig").state.config.chain.SLOT_DURATION_MS,
-        };
-        clock.validate() catch return error.InvalidNetworkConfig;
-        out.slot_clock = clock;
-    }
     try parseLocal(try get(value, "local"), &out.local);
     out.chain = try n.chain.Plan.init(&@import("config.zig").state.config, try boolean(try get(value, "serveLightClients")));
     const update = try out.chain.update(out.local, null, out.slot);

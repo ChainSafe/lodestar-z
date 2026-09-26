@@ -144,8 +144,6 @@ export interface NativeRuntimeConfig {
   local: NativeLocalState;
   discovery: NativeDiscoveryConfig | null;
   initialSlot: bigint;
-  /** Chain genesis time in Unix seconds; with the chain's slot duration it gives slot phases. Without it they are unknown. */
-  genesisTime?: bigint;
   gossipPolicy: NativeGossipStartupPolicy;
 }
 

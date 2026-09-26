@@ -77,14 +77,10 @@ pub fn text(value: Value, out: []u8) !usize {
     return len;
 }
 const required = .{ "profile", "identitySecretKey", "bind", "local", "discovery", "initialSlot", "gossipPolicy", "resources", "identify", "serveLightClients" };
-const optional = .{ "rememberedPeers", "genesisTime" };
 
 pub fn parse(value: Value, common: *cfg.Config, out: *Config) !void {
     const remembered = try value.hasNamedProperty("rememberedPeers");
-    try cfg.object(value, &(required ++ optional));
-    var expected: u32 = required.len;
-    inline for (optional) |key| expected += @intFromBool(try value.hasNamedProperty(key));
-    if (try (try value.getAllPropertyNames(.own_only, .all_properties, .numbers_to_strings)).getArrayLength() != expected) return error.InvalidNetworkConfig;
+    if (remembered) try cfg.completeObject(value, &(required ++ .{"rememberedPeers"})) else try cfg.completeObject(value, &required);
     try cfg.parse(value, common);
     errdefer common.wipe();
     const resources = try cfg.get(value, "resources");

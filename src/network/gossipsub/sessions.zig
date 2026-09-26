@@ -35,8 +35,6 @@ pub const Sessions = struct {
     by_connection: []u16,
     /// Sessions taken from the ready list or the deadline heap. An idle mesh visits none.
     visits: u64 = 0,
-    /// Sessions whose `unserved` names each budget.
-    unserved: [@import("turn.zig").budget_count]usize = @splat(0),
     delivery_revision: u64 = 0,
     io_arena: []u8,
     receive_pool: ReceivePool,
@@ -113,7 +111,7 @@ pub const Sessions = struct {
         assert(index < self.rows.len);
         const row = &self.rows[index];
         if (!row.active) return;
-        assert(row.io.overflow.pages == 0 and row.io.rpc == null and !row.io.tx.pending() and row.unserved == null);
+        assert(row.io.overflow.pages == 0 and row.io.rpc == null and !row.io.tx.pending());
         self.setOutbound(index, .none);
         row.active = false;
         row.in_stream = null;

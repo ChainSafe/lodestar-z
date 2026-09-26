@@ -207,12 +207,3 @@ test.each([
   Reflect.set(config, "rememberedPeers", peers());
   expect(() => startRuntime(config)).toThrow(code);
 });
-
-test("rejects a genesis time beyond the millisecond clock", () => {
-  expect(() => startRuntime({...applicationConfig(), genesisTime: 1n << 62n}, () => undefined)).toThrow(
-    "InvalidNetworkInteger"
-  );
-  expect(() => startRuntime({...applicationConfig(), genesisTime: 1n << 54n}, () => undefined)).toThrow(
-    "InvalidNetworkConfig"
-  );
-});

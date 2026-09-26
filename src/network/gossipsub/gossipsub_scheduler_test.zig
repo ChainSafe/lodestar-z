@@ -114,7 +114,7 @@ fn readerAhead(setup: *Pair, writers: *[3]u16) !u16 {
     return reader;
 }
 
-test "gossip turn stopped by the receive item budget leaves its writable sessions waiting until their next visit" {
+test "gossip turn stopped by the receive item budget counts its skipped writable sessions" {
     var setup: Pair = .{};
     try setup.initOpts(.{ .random_seed = 1, .connected_capacity = 4 }, .{ .random_seed = 2 });
     defer setup.deinit();
@@ -122,76 +122,44 @@ test "gossip turn stopped by the receive item budget leaves its writable session
     const g = setup.shared.client.gossipsub;
     var writers: [3]u16 = undefined;
     _ = try readerAhead(&setup, &writers);
-    // The turn starts 2 ms before the second phase bucket of a 12 s slot.
-    var clock: @import("../slot_clock.zig").SlotClock = .{ .genesis_unix_ms = 1_000_000, .slot_duration_ms = 12_000 };
-    clock.observe(.{ .mono_ms = setup.shared.pair.now.mono_ms, .unix_s = 0, .unix_ms = 1_000_000 + 12_000 + 748 });
-    g.slot_clock = &clock;
     const items = @intFromEnum(Budget.items);
     _ = support.pumpTurn(g, &setup.shared.pair.client, setup.shared.pair.now);
     try std.testing.expectEqual(@as(u64, 1), g.io_metrics.stops[items]);
     try std.testing.expectEqualSlices(u64, &.{ 0, 3 }, &g.io_metrics.skipped[items]);
-    try std.testing.expectEqual(@as(usize, 3), g.sessions.unserved[items]);
-    for (writers) |index| try std.testing.expectEqual(@as(?Budget, .items), g.sessions.rows[index].unserved);
-    // Cancelled output stops the wait at once; the others wait 5 ms, until the next turn visits them.
+    // The next turn visits the writers without another stop.
     g.cancelWrites(g.sessions.ref(writers[2]));
-    try std.testing.expectEqual(@as(usize, 2), g.sessions.unserved[items]);
     setup.shared.pair.advance(5);
     _ = support.pumpTurn(g, &setup.shared.pair.client, setup.shared.pair.now);
-    try std.testing.expectEqual(@as(usize, 0), g.sessions.unserved[items]);
     try std.testing.expectEqual(@as(u64, 1), g.io_metrics.stops[items]);
-    const unserved = &g.occupancy.unserved_ms[items];
-    try std.testing.expectEqual(@as(u64, 2 * 2), unserved[0]);
-    try std.testing.expectEqual(@as(u64, 2 * 3), unserved[1]);
     for (writers[0..2]) |index| try std.testing.expect(!g.sessions.rows[index].io.tx.pending());
-    g.slot_clock = null;
 }
 
-test "gossip waiting sessions keep one mark across stops, take the latest stop's budget and drop it with the session" {
+test "gossip turn stops count skipped sessions under the budget that stopped each turn" {
     var setup: Pair = .{};
     try setup.initOpts(.{ .random_seed = 1, .connected_capacity = 4 }, .{ .random_seed = 2 });
     defer setup.deinit();
     for (0..20) |_| try setup.pumpOnce();
     const g = setup.shared.client.gossipsub;
     var writers: [3]u16 = undefined;
-    const reader = try readerAhead(&setup, &writers);
+    _ = try readerAhead(&setup, &writers);
     const items = @intFromEnum(Budget.items);
     const calls = @intFromEnum(Budget.calls);
-    const waited = struct {
-        fn total(spans: []const u64) u64 {
-            var sum: u64 = 0;
-            for (spans) |ms| sum += ms;
-            return sum;
-        }
-    }.total;
-    // An item stop marks all three writers.
     _ = support.pumpTurn(g, &setup.shared.pair.client, setup.shared.pair.now);
-    try std.testing.expectEqual(@as(usize, 3), g.sessions.unserved[items]);
-    // With one call per turn, the next turn writes for the first writer and stops on calls: the
-    // other two move to calls after their 3 ms under items, and the reader is skipped unmarked.
+    try std.testing.expectEqualSlices(u64, &.{ 0, 3 }, &g.io_metrics.skipped[items]);
+    // With one call per turn, the next turn writes for the first writer and stops on calls,
+    // skipping the other two writers and the reader.
     g.options.calls_per_pump = 1;
     setup.shared.pair.advance(3);
     _ = support.pumpTurn(g, &setup.shared.pair.client, setup.shared.pair.now);
-    try std.testing.expectEqual(@as(u64, 3 * 3), waited(&g.occupancy.unserved_ms[items]));
-    try std.testing.expectEqualSlices(usize, &.{ 2, 0, 0, 0, 0, 0, 0 }, &g.sessions.unserved);
-    try std.testing.expectEqual(@as(?Budget, null), g.sessions.rows[writers[0]].unserved);
-    for (writers[1..]) |index| try std.testing.expectEqual(@as(?Budget, .calls), g.sessions.rows[index].unserved);
-    try std.testing.expectEqual(@as(?Budget, null), g.sessions.rows[reader].unserved);
     try std.testing.expectEqualSlices(u64, &.{ 1, 2 }, &g.io_metrics.skipped[calls]);
-    // A second call stop skips the last writer again: its one mark keeps counting once.
+    // A second call stop skips the last writer and the reader again.
     setup.shared.pair.advance(4);
     _ = support.pumpTurn(g, &setup.shared.pair.client, setup.shared.pair.now);
-    try std.testing.expectEqual(@as(u64, 2 * 4), waited(&g.occupancy.unserved_ms[calls]));
-    try std.testing.expectEqual(@as(usize, 1), g.sessions.unserved[calls]);
     try std.testing.expectEqual(@as(u64, 2), g.io_metrics.stops[calls]);
     try std.testing.expectEqualSlices(u64, &.{ 2, 3 }, &g.io_metrics.skipped[calls]);
-    // Its connection closes 5 ms later, as `retireConnection` sees it, and its wait ends there.
     setup.shared.pair.advance(5);
     g.last_now_ms = setup.shared.pair.now.mono_ms;
     g.connectionClosed(g.sessions.rows[writers[2]].conn);
-    try std.testing.expectEqual(@as(usize, 0), g.sessions.unserved[calls]);
-    try std.testing.expectEqual(@as(u64, 2 * 4 + 5), waited(&g.occupancy.unserved_ms[calls]));
     setup.shared.pair.advance(5);
     _ = support.pumpTurn(g, &setup.shared.pair.client, setup.shared.pair.now);
-    try std.testing.expectEqual(@as(u64, 2 * 4 + 5), waited(&g.occupancy.unserved_ms[calls]));
-    try std.testing.expectEqual(@as(u64, 3 * 3), waited(&g.occupancy.unserved_ms[items]));
 }

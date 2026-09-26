@@ -28,8 +28,6 @@ pub const Now = struct {
     mono_ms: u64,
     unix_s: i64,
     mono_ns: ?u64 = null,
-    /// Wall time in milliseconds, when the clock read supplies it.
-    unix_ms: ?u64 = null,
 
     pub fn nanos(self: Now) u64 {
         return self.mono_ns orelse self.mono_ms *| 1_000_000;

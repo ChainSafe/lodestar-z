@@ -5,12 +5,6 @@ const topic = @import("topic.zig");
 const Item = @import("protobuf.zig").Item;
 const ItemKind = std.meta.Tag(Item);
 
-/// The label of an integration span: a slot phase bucket, then time without a known phase.
-fn spanLabel(index: usize) []const u8 {
-    const slots = @import("../slot_clock.zig");
-    return if (index < slots.phase_buckets) slots.bucket_labels[index] else "unknown";
-}
-
 pub const Io = struct {
     const Budget = @import("turn.zig").Budget;
     const budget_count = @import("turn.zig").budget_count;
@@ -41,21 +35,15 @@ pub const ValidationTime = @import("../metrics/histogram.zig").Duration(&.{ 10, 
 
 /// Data frame outcomes by delivery origin: selected recipients and their admission, the later
 /// completion or cancellation of queued frames, refused admissions with their queue limit and the
-/// peer's client, refusals by slot second, and the residence of each frame QUIC accepted in full.
-/// Forward and publication recipients also count by message kind and slot phase, and each refusal
-/// for want of a descriptor samples the refusing peer's queue and stream.
+/// peer's client, and the residence of each frame QUIC accepted in full. Each refusal for want of
+/// a descriptor samples the refusing peer's queue and stream.
 pub const Delivery = struct {
     const delivery = @import("delivery.zig");
     const Client = @import("../peers/client.zig").Client;
-    const Kind = @import("topic.zig").Kind;
-    const kind_count = @typeInfo(Kind).@"enum".fields.len;
     const DataDrop = enum { data_descriptors, data_pool, data_bytes };
     /// A selected recipient is queued, pressured or unavailable. A queued frame later completes
     /// when QUIC accepts its last byte, which is not delivery, or is cancelled by a stream reset.
     pub const Outcome = enum { selected, queued, pressured, unavailable, completed, cancelled };
-    /// The outcomes counted by kind and phase. Selected includes recipients without an out
-    /// stream, and pressured counts refusals by any queue limit.
-    pub const KindOutcome = enum { selected, pressured };
     /// The refusing peer's write history: would_block from a write that blocked until a write QUIC
     /// takes in full, even after a writable event; accepted otherwise, including a stream without
     /// writes. It is not by itself a split of owner service from transport.
@@ -63,16 +51,10 @@ pub const Delivery = struct {
     const WriteTime = @import("../metrics/histogram.zig").Duration(&.{ 1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000 });
     const Queued = @import("../metrics/histogram.zig").Histogram(u64, &.{ 0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 448, 480, 511 }, .{});
     const QueuedBytes = @import("../metrics/histogram.zig").Histogram(u64, &.{ 1 << 16, 1 << 17, 1 << 18, 1 << 19, 1 << 20, 1 << 21, 1 << 22, 1 << 23, 1 << 24 }, .{});
-    const slots = @import("../slot_clock.zig");
     const Refusal = struct { bytes: QueuedBytes = .{}, oldest: WriteTime = .{} };
 
     recipients: [delivery.origin_count][@typeInfo(Outcome).@"enum".fields.len]u64 = @splat(@splat(0)),
-    /// Forward and publication recipients by kind, then unknown, and by slot phase bucket, then
-    /// unknown.
-    by_kind: [kind_count + 1][slots.phase_buckets + 1][@typeInfo(KindOutcome).@"enum".fields.len]u64 = @splat(@splat(@splat(0))),
     drops: [@typeInfo(Client).@"enum".fields.len][delivery.origin_count][@typeInfo(DataDrop).@"enum".fields.len]u64 = @splat(@splat(@splat(0))),
-    /// Cumulative by slot phase, which scrape timing cannot alias.
-    drops_by_phase: [slots.phase_buckets]u64 = @splat(0),
     write_time: [delivery.origin_count]WriteTime = @splat(.{}),
     /// The recipient's queued data frames when each admission is attempted, and the age of the
     /// oldest one when there is one.
@@ -99,16 +81,8 @@ pub const Delivery = struct {
         for (&self.recipients, queued) |*outcomes, count| outcomes[@intFromEnum(Outcome.cancelled)] +|= count;
     }
 
-    /// One forward's or publication's recipients, selected and refused for queue pressure.
-    pub fn selectedByKind(self: *Delivery, kind: ?Kind, phase_bps: ?u16, selected: u64, pressured: u64) void {
-        std.debug.assert(pressured <= selected);
-        const outcomes = &self.by_kind[if (kind) |known| @intFromEnum(known) else kind_count][if (phase_bps) |bps| slots.SlotClock.bucket(bps) else slots.phase_buckets];
-        outcomes[@intFromEnum(KindOutcome.selected)] +|= selected;
-        outcomes[@intFromEnum(KindOutcome.pressured)] +|= pressured;
-    }
-
     /// A data frame the peer's outbox refused, with the reason in its `last_drop`.
-    pub fn dropped(self: *Delivery, origin: delivery.Origin, outbox: *const @import("outbox.zig").Outbox, client: Client, phase_bps: ?u16, now_ms: u64) void {
+    pub fn dropped(self: *Delivery, origin: delivery.Origin, outbox: *const @import("outbox.zig").Outbox, client: Client, now_ms: u64) void {
         const data: DataDrop = switch (outbox.last_drop) {
             .data_descriptors => .data_descriptors,
             .data_pool => .data_pool,
@@ -116,7 +90,6 @@ pub const Delivery = struct {
             else => unreachable,
         };
         self.drops[@intFromEnum(client)][@intFromEnum(origin)][@intFromEnum(data)] +|= 1;
-        if (phase_bps) |bps| self.drops_by_phase[slots.SlotClock.bucket(bps)] +|= 1;
         if (data != .data_descriptors) return;
         const refusal = &self.refusals[@intFromBool(outbox.last_write_blocked)];
         refusal.bytes.observe(outbox.data.bytes);
@@ -135,21 +108,12 @@ pub const Delivery = struct {
         inline for (@typeInfo(delivery.Origin).@"enum".fields) |origin| {
             inline for (@typeInfo(Outcome).@"enum".fields) |outcome| try recipients.sample(.{ origin.name, outcome.name }, self.recipients[origin.value][outcome.value]);
         }
-        const kinds = try w.family(.{ .name = "lodestar_native_gossip_data_recipients_by_kind_total", .kind = .counter, .help = "Forward and publication data frame recipients by message kind and the slot phase bucket of their selection: selected, including recipients without an out stream, and pressured, refused by any queue limit. Phase buckets are labeled by their first basis point of the slot, or unknown without the chain's genesis time", .labels = &.{ "kind", "phase_bps", "outcome" } });
-        for (&self.by_kind, 0..) |*phases, index| {
-            const kind = if (index < kind_count) @tagName(@as(Kind, @enumFromInt(index))) else "unknown";
-            for (phases, 0..) |outcomes, span| {
-                inline for (@typeInfo(KindOutcome).@"enum".fields) |outcome| try kinds.sample(.{ kind, spanLabel(span), outcome.name }, outcomes[outcome.value]);
-            }
-        }
         const drops = try w.family(.{ .name = "lodestar_native_gossip_data_drops_total", .kind = .counter, .help = "Refused data frame admissions by delivery origin, the queue limit that refused them and the peer's client", .labels = &.{ "origin", "reason", "client" } });
         inline for (@typeInfo(delivery.Origin).@"enum".fields) |origin| {
             inline for (@typeInfo(DataDrop).@"enum".fields) |reason| {
                 inline for (@typeInfo(Client).@"enum".fields) |client| try drops.sample(.{ origin.name, reason.name, client.name }, self.drops[client.value][origin.value][reason.value]);
             }
         }
-        const phases = try w.family(.{ .name = "lodestar_native_gossip_data_drops_by_slot_phase_total", .kind = .counter, .help = "Refused data frame admissions by slot phase, in 16 equal buckets labeled by their first basis point of the slot duration; counted only with the chain's genesis time and slot duration", .labels = &.{"phase_bps"} });
-        for (slots.bucket_labels, self.drops_by_phase) |label, count| try phases.sample(.{label}, count);
         const times = try w.histograms(.{ .name = "lodestar_native_gossip_data_write_seconds", .kind = .histogram, .help = "Data frame residence from queue admission until QUIC accepted its last byte, by delivery origin", .labels = &.{"origin"}, .unit = .seconds }, WriteTime);
         inline for (@typeInfo(delivery.Origin).@"enum".fields) |origin| try times.histogram(.{origin.name}, &self.write_time[origin.value]);
         const queued = try w.histograms(.{ .name = "lodestar_native_gossip_data_admission_queued", .kind = .histogram, .help = "The recipient's queued data frames when a data frame admission is attempted" }, Queued);
@@ -233,62 +197,6 @@ pub const Apply = struct {
         try bytes.histogram(.{}, &self.bytes);
         const service = try w.histograms(.{ .name = "lodestar_native_gossip_apply_service_frames", .kind = .histogram, .help = "Data frames QUIC accepted in full between one host apply and the previous one" }, Count);
         try service.histogram(.{}, &self.service);
-    }
-};
-
-/// Queued data frames across peers, peers with a full ordinary allowance and writable sessions a
-/// stopped turn left unvisited, integrated over time by slot phase. The owner integrates before
-/// every change and at every pump, so intervals without changes count too.
-pub const Occupancy = struct {
-    const slots = @import("../slot_clock.zig");
-    const Budget = @import("turn.zig").Budget;
-    const budget_count = @import("turn.zig").budget_count;
-    /// Phase buckets, then time without a known phase.
-    const spans = slots.phase_buckets + 1;
-
-    last_ms: ?u64 = null,
-    observed_ms: [spans]u64 = @splat(0),
-    descriptor_ms: [spans]u64 = @splat(0),
-    full_ms: [spans]u64 = @splat(0),
-    /// By the budget that stopped the turn.
-    unserved_ms: [budget_count][spans]u64 = @splat(@splat(0)),
-
-    /// The occupancy held since the previous integration.
-    pub const Level = struct { descriptors: usize, full: usize, unserved: *const [budget_count]usize };
-
-    pub fn integrate(self: *Occupancy, clock: ?*const slots.SlotClock, now_ms: u64, level: Level) void {
-        const last = self.last_ms orelse now_ms;
-        self.last_ms = @max(last, now_ms);
-        if (now_ms <= last) return;
-        var phases: [slots.phase_buckets]u64 = @splat(0);
-        const known = if (clock) |value| value.split(last, now_ms, &phases) else false;
-        if (!known) {
-            self.add(slots.phase_buckets, now_ms - last, level);
-            return;
-        }
-        for (phases, 0..) |ms, index| if (ms > 0) self.add(index, ms, level);
-    }
-
-    fn add(self: *Occupancy, index: usize, ms: u64, level: Level) void {
-        self.observed_ms[index] +|= ms;
-        self.descriptor_ms[index] +|= ms * level.descriptors;
-        self.full_ms[index] +|= ms * level.full;
-        for (&self.unserved_ms, level.unserved) |*budget, sessions| budget[index] +|= ms * sessions;
-    }
-
-    pub fn write(self: *const Occupancy, w: *prom.Encoder) prom.Error!void {
-        inline for (.{
-            .{ "lodestar_native_gossip_outbox_observed_seconds_total", "observed_ms", "Time over which data queue occupancy was integrated, by slot phase bucket labeled by its first basis point of the slot, or unknown without the chain's genesis time" },
-            .{ "lodestar_native_gossip_outbox_descriptor_seconds_total", "descriptor_ms", "Queued data frames across all peers, integrated over time, by slot phase bucket; divide by observed seconds for the mean" },
-            .{ "lodestar_native_gossip_outbox_full_peer_seconds_total", "full_ms", "Peers whose per-peer descriptor allowance refused ordinary data frames, integrated over time, by slot phase bucket; the byte limit and the shared pool are not counted" },
-        }) |metric| {
-            const family = try w.family(.{ .name = metric[0], .kind = .counter, .help = metric[2], .labels = &.{"phase_bps"}, .unit = .seconds });
-            for (@field(self, metric[1]), 0..) |ms, index| try family.sample(.{spanLabel(index)}, @as(f64, @floatFromInt(ms)) / 1000);
-        }
-        const unserved = try w.family(.{ .name = "lodestar_native_gossip_turn_stop_unserved_seconds_total", .kind = .counter, .help = "Writable sessions a gossip turn stopped before visiting, integrated over time until their next visit or cancelled output, by the budget that stopped the turn and slot phase bucket", .labels = &.{ "budget", "phase_bps" }, .unit = .seconds });
-        inline for (@typeInfo(Budget).@"enum".fields) |budget| {
-            for (self.unserved_ms[budget.value], 0..) |ms, index| try unserved.sample(.{ budget.name, spanLabel(index) }, @as(f64, @floatFromInt(ms)) / 1000);
-        }
     }
 };
 

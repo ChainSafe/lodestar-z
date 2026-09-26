@@ -97,19 +97,19 @@ test "gossip delivery keeps the local reserve from ordinary frames and pressures
     pool.local_descriptors = 4;
     const descriptors: Limits = .{ .bytes = 1 << 20 };
     for (0..per_peer_limit - 5) |_| try queue.append(&store, message, .forward, descriptors, 1);
-    try std.testing.expectEqual(@as(usize, 0), pool.full_queues);
+    try std.testing.expect(!queue.full());
     try queue.append(&store, message, .forward, descriptors, 1);
-    try std.testing.expectEqual(@as(usize, 1), pool.full_queues);
+    try std.testing.expect(queue.full());
     try std.testing.expectError(error.Descriptors, queue.append(&store, message, .iwant, descriptors, 1));
     for (0..4) |_| try queue.append(&store, message, .publication, descriptors, 2);
     try std.testing.expectError(error.Descriptors, queue.append(&store, message, .publication, descriptors, 3));
     try std.testing.expectEqual(@as(usize, 4), queue.classCount(.local));
     // Sending a local frame frees no ordinary room; sending an ordinary one does.
     try std.testing.expectEqual(Origin.publication, queue.advance(&store, queue.next(&store).?.segment(&store).len).?.origin);
-    try std.testing.expectEqual(@as(usize, 1), pool.full_queues);
+    try std.testing.expect(queue.full());
     queue.current = .ordinary;
     try std.testing.expectEqual(Origin.forward, queue.advance(&store, queue.next(&store).?.segment(&store).len).?.origin);
-    try std.testing.expectEqual(@as(usize, 0), pool.full_queues);
+    try std.testing.expect(!queue.full());
     queue.reset(&store);
     pool.local_descriptors = 0;
 
