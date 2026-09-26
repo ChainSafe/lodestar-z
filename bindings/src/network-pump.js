@@ -61,6 +61,18 @@ function coalescingKey(action) {
   }
 }
 
+/**
+ * The network's close result once native settled its close: the first failure, a delivery failure or the owner's
+ * terminal error, whichever came first, even when a requested close was already underway; else a requested close.
+ * It holds no host or pump reference, since native settlement roots its reaction.
+ */
+export function closeResult(closed, terminal) {
+  return closed.then((result) => {
+    if (terminal.failure) return {error: terminal.failure, reason: "failed"};
+    return result.reason === "failed" ? {error: result.error, reason: "failed"} : {reason: "requested"};
+  });
+}
+
 /** The public view of a serving start: the native handle and retention stay with the binding. */
 class IncomingRequest {
   #incoming;
@@ -192,8 +204,19 @@ export class NativePump {
   #fail(error) {
     if (this.#stopped || this.#terminal.failure !== null) return;
     const failure = error instanceof Error ? error : Object.assign(new Error("NativeHostFailure"), {cause: error});
-    this.#terminal.failure = failure;
     this.close();
+    let ownerFailed = false;
+    try {
+      ownerFailed = this.#runtime.state === "failed";
+    } catch {
+      // A runtime without state has closed.
+    }
+    // An owner that failed first is closing already, and its terminal error is the close result's.
+    if (ownerFailed) {
+      this.#error(failure);
+      return;
+    }
+    this.#terminal.failure = failure;
     try {
       this.#host.failed(failure);
     } catch (thrown) {

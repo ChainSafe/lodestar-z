@@ -292,11 +292,16 @@ pub const Runtime = struct {
         self.refreshLocked();
     }
     pub fn signalLocked(self: *Runtime) void {
-        if (self.wake) |*wake| wake.signal() catch {
-            self.stop = true;
-            self.reason = .failed;
-            self.terminal_error = error.NetworkWakeFailed;
-        };
+        if (self.wake) |*wake| wake.signal() catch self.failLocked(error.NetworkWakeFailed);
+    }
+    /// Stops the owner for a terminal failure. The first one is the close result's error, also after a requested
+    /// stop began.
+    pub fn failLocked(self: *Runtime, err: anyerror) void {
+        self.stop = true;
+        if (self.reason == .failed) return;
+        self.reason = .failed;
+        self.terminal_error = err;
+        self.diag.state = .failed;
     }
     pub fn snapshot(self: *Runtime) !Diagnostics {
         self.lock();
@@ -394,11 +399,7 @@ pub const Runtime = struct {
                 self.notify_live = false;
                 self.stop = true;
             },
-            else => {
-                self.stop = true;
-                self.reason = .failed;
-                self.terminal_error = err;
-            },
+            else => self.failLocked(err),
         };
     }
     /// An owner disposition of a delivered message that an exchange would acknowledge now. O(1).
@@ -514,10 +515,7 @@ pub const Runtime = struct {
         if (failure) |err| {
             if (err != error.AbortError) std.log.scoped(.network_runtime).err("owner_failed reason={s}", .{@errorName(err)});
             self.lock();
-            if (self.reason != .failed) {
-                self.terminal_error = err;
-                self.reason = .failed;
-            }
+            self.failLocked(err);
             self.unlock();
         }
         self.lock();
@@ -578,9 +576,7 @@ pub const Runtime = struct {
         if (self.stop or self.quiescent) return error.NetworkClosed;
         const token = self.table.reserve(command) catch |err| {
             if (err == error.NetworkSequenceExhausted) {
-                self.stop = true;
-                self.reason = .failed;
-                self.terminal_error = err;
+                self.failLocked(err);
                 self.signalLocked();
             }
             return err;

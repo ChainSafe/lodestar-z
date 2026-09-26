@@ -198,9 +198,8 @@ export interface NativeRuntimeDiagnostics {
   bridgeRequestedBytes: number;
 }
 
-export interface NativeRuntimeCloseResult {
-  reason: "requested" | "failed";
-}
+/** A failed close names the owner's first terminal error, also when it followed a requested close. */
+export type NativeRuntimeCloseResult = {reason: "requested"} | {reason: "failed"; error: Error & {code: string}};
 
 export type NativeLogLevel = "error" | "warn" | "info" | "debug" | "off";
 
@@ -665,6 +664,10 @@ export interface NativeGossipDiagnosticsPage {
 
 export type Verdict = "accept" | "reject" | "ignore";
 
+/**
+ * A failed close carries the first failure, a delivery failure the host's `failed` received or the owner's terminal
+ * error, also when a requested close was already underway.
+ */
 export type CloseResult = {readonly reason: "requested"} | {readonly reason: "failed"; readonly error: Error};
 
 /** Resolved at initialization: peer records the network retains, and incoming requests it serves at once. */

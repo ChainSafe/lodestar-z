@@ -198,11 +198,14 @@ fn settleWithin(env: napi.Env, runtime: *Runtime, limit: usize) !bool {
     // Owner quiescence is final, so completions it left before quiescing are all settleable now.
     more = more or runtime.settleableLocked();
     const reason = runtime.reason;
+    const terminal = runtime.terminal_error;
     runtime.unlock();
     if (idle) runtime.notify.unref(env) catch {};
     if (!closing or more) return more or closing;
     runtime.join();
     const value = try runtime.close_results[@intFromEnum(reason)].?.getValue();
+    // Every recorded failure names its error.
+    if (reason == .failed) try value.setNamedProperty("error", @import("network_js.zig").settled(env, makeError(env, terminal.?)) catch try runtime.copy_error.?.getValue());
     try runtime.close_deferred.?.resolve(value);
     runtime.close_settled = true;
     runtime.disposeCloseReferences();
