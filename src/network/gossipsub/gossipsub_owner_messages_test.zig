@@ -26,6 +26,10 @@ test "gossip graylist drops an RPC before decoding or admitting messages" {
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
     try support.subscribe(&g, name);
     support.penalize(&g, conn, 50);
+    // An accepting host: a message that got past the graylist would be delivered.
+    var inbox: support.Inbox = .{};
+    defer inbox.deinit();
+    inbox.attach(&g);
     var encoded: [256]u8 = undefined;
     var compressed: [64]u8 = undefined;
     const len = try snappy.raw.compress("payload", &compressed);
@@ -35,7 +39,9 @@ test "gossip graylist drops an RPC before decoding or admitting messages" {
     var count: usize = 0;
     var items = g.options.items_per_peer;
     try std.testing.expect(try support.processRpc(&g, session.index, .{ .mono_ms = 1, .unix_s = 0 }, &count, &items));
-    try std.testing.expectEqual(@as(usize, 0), count);
+    // The graylist ends the RPC before it takes an item credit or decodes a field.
+    try std.testing.expectEqual(g.options.items_per_peer, items);
+    try std.testing.expectEqual(@as(usize, 0), inbox.count);
     try std.testing.expectEqual(@as(usize, 0), g.messages.seen.count);
 }
 
