@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import {createSocket} from "node:dgram";
 import {setTimeout as delay} from "node:timers/promises";
-import {initializeNativeNetworkRuntime} from "../../src/network.js";
+import {createNativeNetwork, initializeNativeNetworkRuntime} from "../../src/network.js";
 import {
   applicationConfig,
   localIntent,
@@ -61,6 +61,43 @@ if (mode === "exit") {
   assert.deepEqual(settlements.counts, [1, 1, 1, 1, 1, 1]);
   assert.equal(settlements.outcomes[0], "NetworkClosed");
   console.log("promises-settled");
+} else if (mode === "facade-gc") {
+  // A dropped facade and its host are collected without close, while operation promises alone remain.
+  const config = applicationConfig();
+  let host = {
+    capacity: () => ({ordinary: true, serving: 32}),
+    validate: async (job) => job.messages.map(() => "ignore"),
+    checkDependencies: (checks) => checks.map(() => false),
+    serve: (request) => request.cancel(),
+    peers: () => undefined,
+  };
+  let network = createNativeNetwork(config, host);
+  await network.applyIntent(localIntent(config), config.initialSlot);
+  const closed = network.closed;
+  const settlements = new Settlements();
+  const unsettled = settlements.unsettledAtClose(closed);
+  settlements.watch(() => network.connect(...unreachableConnect()));
+  settlements.watch(() =>
+    network.publish(topicName(), new Uint8Array(4000), {allowZeroPeers: true, ignoreDuplicate: true})
+  );
+  const weakNetwork = new WeakRef(network);
+  const weakHost = new WeakRef(host);
+  network = null;
+  host = null;
+  for (let i = 0; i < 100; i++) {
+    await delay(10);
+    global.gc();
+    if (!weakNetwork.deref() && !weakHost.deref()) break;
+  }
+  assert.equal(weakNetwork.deref(), undefined, "Nothing but the host may retain the facade");
+  assert.equal(weakHost.deref(), undefined, "Only the facade may retain the host");
+  await settlements.settled();
+  assert.deepEqual(await closed, {reason: "requested"});
+  assert.deepEqual(await unsettled, []);
+  assert.deepEqual(settlements.counts, [1, 1]);
+  assert.equal(settlements.outcomes[0], "NetworkClosed");
+  await runtimeReleased();
+  console.log("facade-collected");
 } else if (mode === "await-close") {
   // Only the notifier ref, taken by close, keeps the loop alive until closed settles.
   const config = applicationConfig();
