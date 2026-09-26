@@ -47,7 +47,6 @@ test "gossip stream cancellation discards unsent work and session reuse preserve
     peer.io.tx.control_burst = 4;
     peer.io.tx.subscriptionChanged(0, 1);
     const token = peer.io.tx.injectFrame("frame", false, 1).?;
-    const high_water = peer.io.tx.control.bytes_high_water;
     peer.io.tx.drops[0] = 3;
     peer.io.tx.cancelStream(&store);
     try std.testing.expectEqual(@as(usize, 0), peer.io.tx.subscription_dirty.count());
@@ -63,7 +62,6 @@ test "gossip stream cancellation discards unsent work and session reuse preserve
     try std.testing.expect(!peer.io.write_first);
     try std.testing.expectEqual(@as(u8, 0), peer.io.tx.control_burst);
     try std.testing.expectEqual(@as(usize, 0), peer.io.tx.subscription_dirty.count());
-    try std.testing.expectEqual(high_water, peer.io.tx.control.bytes_high_water);
     try std.testing.expectEqual(@as(u64, 3), peer.io.tx.drops[0]);
     try std.testing.expect(peer.io.tx.injectFrame("next", false, 2).? > token);
     peer.io.tx.cancelStream(&store);

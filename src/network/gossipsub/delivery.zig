@@ -24,7 +24,7 @@ pub const Transmission = struct {
 };
 
 /// A frame that QUIC accepted in full.
-pub const Receipt = struct { origin: Origin, enqueued_ms: u64 };
+pub const Receipt = struct { origin: Origin };
 
 const Slot = struct { tx: Transmission = undefined, next: u32 = none };
 
@@ -112,8 +112,6 @@ pub const Queue = struct {
     /// Local frames and their bytes chosen in a row while an ordinary frame waited.
     run_frames: usize = 0,
     run_bytes: usize = 0,
-    bytes_high_water: usize = 0,
-    descriptors_high_water: usize = 0,
 
     pub fn classOf(origin: Origin) Class {
         return if (origin == .publication) .local else .ordinary;
@@ -141,8 +139,6 @@ pub const Queue = struct {
         self.origins[@intFromEnum(origin)] += 1;
         self.bytes += entry.len;
         if (class == .local) self.local_bytes += entry.len;
-        self.bytes_high_water = @max(self.bytes_high_water, self.bytes);
-        self.descriptors_high_water = @max(self.descriptors_high_water, self.count);
         store.retainTx(message);
     }
 
@@ -192,7 +188,7 @@ pub const Queue = struct {
         const class = self.current.?;
         const tx = &self.pool.slots[self.fifos[@intFromEnum(class)].head].tx;
         if (!store.advanceFrame(tx.message, &tx.cursor, len)) return null;
-        const receipt: Receipt = .{ .origin = tx.origin, .enqueued_ms = tx.enqueued_ms };
+        const receipt: Receipt = .{ .origin = tx.origin };
         self.remove(store, class);
         self.current = null;
         return receipt;

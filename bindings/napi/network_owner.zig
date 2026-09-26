@@ -336,7 +336,6 @@ fn publishMetrics(self: *Runtime, timestamp: n.Now) n.metrics.registry.Error!voi
     if (self.gossip) |*table| {
         const state = table.snapshot(timestamp.mono_ms);
         context.expired_executing = state.expiredExecuting;
-        context.oldest_expired_execution_age_ms = state.oldestExpiredExecutionAgeMs;
     }
     self.captureBridgeLocked(&self.heavy.?.bridge);
     self.unlock();

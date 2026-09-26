@@ -21,8 +21,6 @@ const Gossipsub = gossipsub_mod.Gossipsub;
 const Turn = @import("turn.zig").Turn;
 const Credits = @import("turn.zig").Credits;
 const Progress = @import("turn.zig").Progress;
-const Budget = @import("turn.zig").Budget;
-const Budgets = @import("turn.zig").Budgets;
 
 pub const openings_per_pump: usize = 16;
 pub const direct_retry_delay_ms: u64 = 30_000;
@@ -366,7 +364,6 @@ fn readPeer(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *T
         peer.calls -= 1;
         io.write_first = true;
         turn.budget.calls -= 1;
-        self.io_metrics.read_calls +|= 1;
         const read = engine.read(stream, io.unread[0..@min(io.unread.len, peer.input, turn.budget.input)]) catch |err| {
             io.rx_ready = false;
             if (err != error.WouldBlock) resetInbound(self, engine, index);
@@ -399,11 +396,11 @@ fn flush(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *Turn
         peer.calls -= 1;
         io.write_first = false;
         turn.budget.calls -= 1;
-        self.io_metrics.write_calls +|= 1;
+        self.sessions.writes +|= 1;
         if (io.tx.progress_ms == null) io.tx.progress_ms = now.mono_ms;
         const written = engine.write(stream, segment[0..take], false) catch |err| {
             if (err == error.WouldBlock) {
-                self.io_metrics.write_would_block +|= 1;
+                self.sessions.blocked_writes +|= 1;
                 io.tx.blocked(now.mono_ms);
             } else {
                 std.log.scoped(.network_gossip_errors).debug("gossip_write_failed connection={d}:{d} stream={d} reason={s} queued={d} bytes={d}", .{ stream.conn.index, stream.conn.generation, stream.id, @errorName(err), io.tx.data.count, io.tx.data.bytes });
@@ -412,7 +409,6 @@ fn flush(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *Turn
             return;
         };
         if (written == 0) {
-            self.io_metrics.write_zero +|= 1;
             io.write_zero +|= 1;
             io.tx.blocked(now.mono_ms);
             return;
@@ -422,11 +418,10 @@ fn flush(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *Turn
         io.tx.progress_ms = now.mono_ms;
         self.advanceWrite(self.sessions.ref(index), written, now.mono_ms);
         if (written < take) {
-            self.io_metrics.write_would_block +|= 1;
+            self.sessions.blocked_writes +|= 1;
             io.tx.blocked(now.mono_ms);
             return;
         }
-        io.tx.last_write_blocked = false;
     }
 }
 
@@ -457,60 +452,26 @@ pub fn runTurn(self: *Gossipsub, router: *routing.Router, engine: *Engine, turn:
     self.tick(now);
     const marked = @min(self.sessions.ready.len, self.options.peers_per_pump);
     var openings: usize = 0;
-    var visited: usize = 0;
     for (0..marked) |_| {
         const index: u16 = @intCast(self.sessions.ready.pop(self.sessions.rows, "ready_link") orelse break);
-        visited += 1;
         self.sessions.visits +|= 1;
         serviceSession(self, router, engine, index, turn, &openings);
         self.sessions.serviced(index, &self.options);
         if (turn.exhausted().count() > 0) break;
     }
+    // Writers a spent call or output budget left waiting, for the send-pressure log.
     const exhausted = turn.exhausted();
-    if (exhausted.count() > 0 and visited < marked) stopped(self, stoppingBudget(exhausted), marked - visited);
-    var budgets = exhausted.iterator();
-    while (budgets.next()) |budget| {
-        self.io_metrics.turns_exhausted[@intFromEnum(budget)] +|= 1;
+    if (exhausted.contains(.calls) or exhausted.contains(.output)) {
         var next = self.sessions.ready.head;
         for (0..self.sessions.ready.len) |_| {
             if (next == index_list.none) break;
             const row = &self.sessions.rows[next];
             next = row.ready_link.next;
-            const writing = row.outStream() != null and row.io.tx.ready and row.io.tx.pending();
-            const reading = row.in_stream != null and row.io.rx_ready;
-            const ready = switch (budget) {
-                .calls => reading or writing,
-                .output => writing,
-                .input, .items, .fields, .work, .copy => reading,
-            };
-            if (ready) self.io_metrics.ready_deferred[@intFromEnum(budget)] +|= 1;
-            if (writing and (budget == .calls or (budget == .output and !exhausted.contains(.calls)))) row.io.write_budget_deferred +|= 1;
+            if (row.outStream() != null and row.io.tx.ready and row.io.tx.pending()) row.io.write_budget_deferred +|= 1;
         }
     }
     finishPump(self, now);
     if (@import("builtin").is_test) checkSessions(self);
-}
-
-/// The budget a stopped turn is attributed to: calls or output, which writes spend too, before
-/// any receive budget, so a receive budget names only stops that left writes unspent.
-fn stoppingBudget(exhausted: Budgets) Budget {
-    if (exhausted.contains(.calls)) return .calls;
-    if (exhausted.contains(.output)) return .output;
-    var budgets = exhausted.iterator();
-    return budgets.next().?;
-}
-
-/// Counts a turn that stopped on `budget` with `skipped` of the sessions it took unvisited, which
-/// lead the ready list.
-fn stopped(self: *Gossipsub, budget: Budget, skipped: usize) void {
-    self.io_metrics.stops[@intFromEnum(budget)] +|= 1;
-    var next = self.sessions.ready.head;
-    for (0..skipped) |_| {
-        if (next == index_list.none) break;
-        const index: u16 = @intCast(next);
-        next = self.sessions.rows[index].ready_link.next;
-        self.io_metrics.skipped[@intFromEnum(budget)][@intFromBool(self.sessions.rows[index].writable())] +|= 1;
-    }
 }
 
 fn serviceSession(self: *Gossipsub, router: *routing.Router, engine: *Engine, index: u16, turn: *Turn, openings: *usize) void {
@@ -687,7 +648,6 @@ pub const Admission = enum { admitted, duplicate, capacity, unauthenticated };
 
 pub fn beginPump(self: *Gossipsub, now: Now) Turn {
     self.last_now_ms = now.mono_ms;
-    self.apply_metrics.close();
     self.messages.expire(&self.peers, now.mono_ms);
     var turn = Turn.init(&self.options, now, self.msg_scratch);
     turn.sink = self.message_sink;

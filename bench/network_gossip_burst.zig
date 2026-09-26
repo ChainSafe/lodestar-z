@@ -536,20 +536,10 @@ const Spoke = struct {
 const Gossipsub = gossip.Gossipsub;
 const Delivery = @FieldType(Gossipsub, "delivery_metrics");
 const Outcome = Delivery.Outcome;
-const LastWrite = Delivery.LastWrite;
-const WriteTime = @typeInfo(@FieldType(Delivery, "write_time")).array.child;
 const Session = @typeInfo(@FieldType(gossip.sessions.Sessions, "rows")).pointer.child;
 const DropReason = @FieldType(@FieldType(@FieldType(Session, "io"), "tx"), "last_drop");
-const Io = @FieldType(Gossipsub, "io_metrics");
-/// `turn.Budget`, which the gossip package keeps private, in its declaration order.
-const budget_names = [_][]const u8{ "calls", "input", "output", "items", "fields", "work", "copy" };
-const calls_budget = 0;
 const origin_count = @typeInfo(Origin).@"enum".fields.len;
 const outcome_count = @typeInfo(Outcome).@"enum".fields.len;
-
-comptime {
-    std.debug.assert(budget_names.len == @typeInfo(@FieldType(Io, "turns_exhausted")).array.len);
-}
 
 /// Cumulative hub counters at one instant; windows and samples are differences of two.
 const Totals = struct {
@@ -560,25 +550,11 @@ const Totals = struct {
     applies: u64 = 0,
     forwarded: u64 = 0,
     recipients: [origin_count][outcome_count]u64 = @splat(@splat(0)),
-    /// Data drops by origin and limit: descriptors, pool, bytes.
-    drops: [origin_count][3]u64 = @splat(@splat(0)),
     queue_drops: [@typeInfo(DropReason).@"enum".fields.len]u64 = @splat(0),
     write_calls: u64 = 0,
-    read_calls: u64 = 0,
     would_block: u64 = 0,
-    write_zero: u64 = 0,
-    exhausted: [budget_names.len]u64 = @splat(0),
-    deferred: [budget_names.len]u64 = @splat(0),
-    /// Stopped turns and the sessions each left unvisited (writable ones second), by the stopping
-    /// budget.
-    stops: [budget_names.len]u64 = @splat(0),
-    skipped: [budget_names.len][2]u64 = @splat(@splat(0)),
-    /// Descriptor refusals by the peer's last write, and those while its stream was blocked.
-    refusals: [@typeInfo(LastWrite).@"enum".fields.len]u64 = @splat(0),
-    refusals_blocked: u64 = 0,
     steps: u64 = 0,
     step_ns: u64 = 0,
-    write_time: [origin_count][WriteTime.bounds.len + 1]u64 = @splat(@splat(0)),
     udp_sent: u64 = 0,
     udp_received: u64 = 0,
 
@@ -592,29 +568,17 @@ const Totals = struct {
             .applies = host.applies,
             .recipients = g.delivery_metrics.recipients,
             .queue_drops = g.retired_queue_drops,
-            .write_calls = g.io_metrics.write_calls,
-            .read_calls = g.io_metrics.read_calls,
-            .would_block = g.io_metrics.write_would_block,
-            .write_zero = g.io_metrics.write_zero,
-            .exhausted = g.io_metrics.turns_exhausted,
-            .deferred = g.io_metrics.ready_deferred,
-            .stops = g.io_metrics.stops,
-            .skipped = g.io_metrics.skipped,
-            .refusals_blocked = g.delivery_metrics.refusal_blocked.count,
+            .write_calls = g.sessions.writes,
+            .would_block = g.sessions.blocked_writes,
             .steps = steps,
             .step_ns = @intCast(hub.step_duration.sum),
             .udp_sent = hub.transport.udp.counters.sent_datagrams,
             .udp_received = hub.transport.udp.counters.received_datagrams,
         };
         for (g.topic_metrics.counts) |counts| result.forwarded += counts.forwarded;
-        for (g.delivery_metrics.drops) |by_origin| for (&result.drops, by_origin) |*total, reasons| {
-            for (total, reasons) |*value, addition| value.* += addition;
-        };
         for (g.sessions.rows) |*row| for (&result.queue_drops, row.io.tx.drops) |*total, value| {
             total.* += value;
         };
-        for (&result.write_time, &g.delivery_metrics.write_time) |*buckets, *histogram| buckets.* = histogram.buckets;
-        for (&result.refusals, &g.delivery_metrics.refusals) |*count, *refusal| count.* = refusal.bytes.count;
         return result;
     }
 
@@ -640,12 +604,6 @@ const Totals = struct {
         return result;
     }
 };
-
-fn sum(values: []const u64) u64 {
-    var total: u64 = 0;
-    for (values) |value| total += value;
-    return total;
-}
 
 fn ratio(numerator: u64, denominator: u64) f64 {
     if (denominator == 0) return 0;
@@ -680,11 +638,10 @@ const Sample = struct {
     fn print(self: *const Sample, previous: *const Totals, start_ms: u64) void {
         const delta = self.totals.minus(previous);
         const forward = delta.recipients[@intFromEnum(Origin.forward)];
-        std.debug.print("case=gossip_burst sample t_ms={d} admitted={d} applied={d} pending_verdicts={d} forward_queued={d} forward_dropped={d} forward_completed={d} queued_frames={d} peer_max_frames={d} full_peers={d} steps={d} exhausted_calls={d} deferred_calls={d} owner_busy={d:.2}\n", .{
-            self.totals.at_ms - start_ms,          delta.admitted,                                         delta.applied,                            self.pending_verdicts,
-            forward[@intFromEnum(Outcome.queued)], forward[@intFromEnum(Outcome.pressured)],               forward[@intFromEnum(Outcome.completed)], self.queued,
-            self.peer_max,                         self.full_peers,                                        delta.steps,                              delta.exhausted[calls_budget],
-            delta.deferred[calls_budget],          ratio(delta.step_ns, delta.at_ms * std.time.ns_per_ms),
+        std.debug.print("case=gossip_burst sample t_ms={d} admitted={d} applied={d} pending_verdicts={d} forward_queued={d} forward_dropped={d} forward_completed={d} queued_frames={d} peer_max_frames={d} full_peers={d} steps={d} owner_busy={d:.2}\n", .{
+            self.totals.at_ms - start_ms,          delta.admitted,                           delta.applied,                            self.pending_verdicts,
+            forward[@intFromEnum(Outcome.queued)], forward[@intFromEnum(Outcome.pressured)], forward[@intFromEnum(Outcome.completed)], self.queued,
+            self.peer_max,                         self.full_peers,                          delta.steps,                              ratio(delta.step_ns, delta.at_ms * std.time.ns_per_ms),
         });
     }
 };
@@ -857,30 +814,15 @@ fn printWindow(name: []const u8, delta: *const Totals, steps: []u32) void {
     std.debug.print("case=gossip_burst window={s} ms={d} admitted={d} hub_refused={d} verdicts={d} applies={d} verdicts_per_apply={d:.1} forwarded={d} steps={d} owner_busy={d:.2}\n", .{ name, delta.at_ms, delta.admitted, delta.refused, delta.applied, delta.applies, ratio(delta.applied, delta.applies), delta.forwarded, delta.steps, ratio(delta.step_ns, delta.at_ms * std.time.ns_per_ms) });
     inline for (@typeInfo(Origin).@"enum".fields) |origin| {
         const outcomes = delta.recipients[origin.value];
-        const drops = delta.drops[origin.value];
         if (outcomes[@intFromEnum(Outcome.selected)] > 0 or outcomes[@intFromEnum(Outcome.completed)] > 0) {
-            std.debug.print("case=gossip_burst window={s} origin={s} selected={d} queued={d} pressured={d} unavailable={d} completed={d} cancelled={d} drop_data_descriptors={d} drop_data_pool={d} drop_data_bytes={d} dropped_share={d:.3}\n", .{ name, origin.name, outcomes[@intFromEnum(Outcome.selected)], outcomes[@intFromEnum(Outcome.queued)], outcomes[@intFromEnum(Outcome.pressured)], outcomes[@intFromEnum(Outcome.unavailable)], outcomes[@intFromEnum(Outcome.completed)], outcomes[@intFromEnum(Outcome.cancelled)], drops[0], drops[1], drops[2], ratio(outcomes[@intFromEnum(Outcome.pressured)], outcomes[@intFromEnum(Outcome.selected)]) });
+            std.debug.print("case=gossip_burst window={s} origin={s} selected={d} queued={d} pressured={d} unavailable={d} completed={d} cancelled={d} dropped_share={d:.3}\n", .{ name, origin.name, outcomes[@intFromEnum(Outcome.selected)], outcomes[@intFromEnum(Outcome.queued)], outcomes[@intFromEnum(Outcome.pressured)], outcomes[@intFromEnum(Outcome.unavailable)], outcomes[@intFromEnum(Outcome.completed)], outcomes[@intFromEnum(Outcome.cancelled)], ratio(outcomes[@intFromEnum(Outcome.pressured)], outcomes[@intFromEnum(Outcome.selected)]) });
         }
     }
     std.debug.print("case=gossip_burst window={s} queue_drops", .{name});
     inline for (@typeInfo(DropReason).@"enum".fields) |field| std.debug.print(" {s}={d}", .{ field.name, delta.queue_drops[field.value] });
-    std.debug.print("\ncase=gossip_burst window={s} write_calls={d} write_would_block={d} write_zero={d} read_calls={d} udp_sent={d} udp_received={d}\n", .{ name, delta.write_calls, delta.would_block, delta.write_zero, delta.read_calls, delta.udp_sent, delta.udp_received });
-    std.debug.print("case=gossip_burst window={s} turns_exhausted", .{name});
-    for (budget_names, delta.exhausted) |budget, count| std.debug.print(" {s}={d}", .{ budget, count });
-    std.debug.print(" ready_deferred", .{});
-    for (budget_names, delta.deferred) |budget, count| std.debug.print(" {s}={d}", .{ budget, count });
-    std.debug.print(" deferred_per_calls_exhausted={d:.1}\n", .{ratio(delta.deferred[calls_budget], delta.exhausted[calls_budget])});
-    std.debug.print("case=gossip_burst window={s} turn_stops", .{name});
-    for (budget_names, delta.stops) |budget, count| std.debug.print(" {s}={d}", .{ budget, count });
-    std.debug.print(" skipped", .{});
-    for (budget_names, delta.skipped) |budget, skipped| std.debug.print(" {s}={d}", .{ budget, skipped[0] + skipped[1] });
-    std.debug.print(" skipped_writable", .{});
-    for (budget_names, delta.skipped) |budget, skipped| std.debug.print(" {s}={d}", .{ budget, skipped[1] });
-    std.debug.print("\ncase=gossip_burst window={s} descriptor_refusals last_write_accepted={d} last_write_would_block={d} stream_blocked={d}\n", .{ name, delta.refusals[@intFromEnum(LastWrite.accepted)], delta.refusals[@intFromEnum(LastWrite.would_block)], delta.refusals_blocked });
+    std.debug.print("\ncase=gossip_burst window={s} write_calls={d} write_would_block={d} udp_sent={d} udp_received={d}\n", .{ name, delta.write_calls, delta.would_block, delta.udp_sent, delta.udp_received });
     std.mem.sort(u32, steps, {}, std.sort.asc(u32));
     std.debug.print("case=gossip_burst window={s} step_p50_us={d:.1} step_p99_us={d:.1} step_max_us={d:.1} step_le_100us={d:.4} step_le_1ms={d:.4} step_le_10ms={d:.4}\n", .{ name, stepQuantile(steps, 0.5), stepQuantile(steps, 0.99), stepQuantile(steps, 1), stepShare(steps, 100_000), stepShare(steps, 1_000_000), stepShare(steps, 10_000_000) });
-    const forward = delta.write_time[@intFromEnum(Origin.forward)];
-    std.debug.print("case=gossip_burst window={s} forward_frames_written={d} forward_write_p50_ms={d:.1} forward_write_p99_ms={d:.1}\n", .{ name, sum(&forward), histogramQuantile(WriteTime.bounds, &forward, 0.5), histogramQuantile(WriteTime.bounds, &forward, 0.99) });
 }
 
 /// The nearest-rank quantile of sorted step durations, in microseconds.
@@ -898,23 +840,4 @@ fn stepShare(sorted: []const u32, limit_ns: u32) f64 {
         below += 1;
     }
     return ratio(below, sorted.len);
-}
-
-/// Linear interpolation within the bucket holding the rank, as PromQL's histogram_quantile.
-fn histogramQuantile(bounds: []const u64, buckets: []const u64, q: f64) f64 {
-    const total = sum(buckets);
-    if (total == 0) return 0;
-    const rank = q * @as(f64, @floatFromInt(total));
-    var cumulative: u64 = 0;
-    for (buckets, 0..) |count, index| {
-        const next = cumulative + count;
-        if (count > 0 and @as(f64, @floatFromInt(next)) >= rank) {
-            if (index == bounds.len) return @floatFromInt(bounds[bounds.len - 1]);
-            const lower: f64 = if (index == 0) 0 else @floatFromInt(bounds[index - 1]);
-            const upper: f64 = @floatFromInt(bounds[index]);
-            return lower + (upper - lower) * (rank - @as(f64, @floatFromInt(cumulative))) / @as(f64, @floatFromInt(count));
-        }
-        cumulative = next;
-    }
-    return @floatFromInt(bounds[bounds.len - 1]);
 }

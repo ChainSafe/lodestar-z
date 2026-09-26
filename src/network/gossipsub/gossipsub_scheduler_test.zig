@@ -63,7 +63,6 @@ fn saturatedPeers(peers: u16, budget: Budget) !void {
         g.options.output_per_pump = 256;
     }
     var progressed = std.StaticBitSet(128).initEmpty();
-    const exhausted_before = g.io_metrics.turns_exhausted[@intFromEnum(budget)];
     const rounds = @divExact(peers, 4);
     for (0..rounds) |_| {
         for (g.sessions.rows, 0..) |*row, index| {
@@ -77,9 +76,7 @@ fn saturatedPeers(peers: u16, budget: Budget) !void {
         }
     }
     try std.testing.expectEqual(@as(usize, peers), progressed.count());
-    try std.testing.expectEqual(@as(u64, rounds), g.io_metrics.turns_exhausted[@intFromEnum(budget)] - exhausted_before);
-    try std.testing.expect(g.io_metrics.ready_deferred[@intFromEnum(budget)] > 0);
-    try std.testing.expectEqual(@as(u64, 0), g.io_metrics.write_would_block);
+    try std.testing.expectEqual(@as(u64, 0), g.sessions.blocked_writes);
     for (g.sessions.rows) |row| try std.testing.expect(row.io.write_budget_deferred > 0);
 }
 
@@ -111,7 +108,7 @@ fn readerAhead(setup: *Pair, writers: *[3]u16) !u16 {
     return reader;
 }
 
-test "gossip turn stopped by the receive item budget counts its skipped writable sessions" {
+test "gossip turn stopped by the receive item budget leaves its skipped writers ahead for the next turn" {
     var setup: Pair = .{};
     try setup.initOpts(.{ .random_seed = 1, .connected_capacity = 4 }, .{ .random_seed = 2 });
     defer setup.deinit();
@@ -119,44 +116,12 @@ test "gossip turn stopped by the receive item budget counts its skipped writable
     const g = setup.shared.client.gossipsub;
     var writers: [3]u16 = undefined;
     _ = try readerAhead(&setup, &writers);
-    const items = @intFromEnum(Budget.items);
     _ = support.pumpTurn(g, &setup.shared.pair.client, setup.shared.pair.now);
-    try std.testing.expectEqual(@as(u64, 1), g.io_metrics.stops[items]);
-    try std.testing.expectEqualSlices(u64, &.{ 0, 3 }, &g.io_metrics.skipped[items]);
-    // The next turn visits the writers without another stop.
+    try std.testing.expectEqual(writers[0], g.sessions.ready.head);
+    for (writers) |index| try std.testing.expect(g.sessions.rows[index].io.tx.pending());
+    // The next turn visits the writers.
     g.cancelWrites(g.sessions.ref(writers[2]));
     setup.shared.pair.advance(5);
     _ = support.pumpTurn(g, &setup.shared.pair.client, setup.shared.pair.now);
-    try std.testing.expectEqual(@as(u64, 1), g.io_metrics.stops[items]);
     for (writers[0..2]) |index| try std.testing.expect(!g.sessions.rows[index].io.tx.pending());
-}
-
-test "gossip turn stops count skipped sessions under the budget that stopped each turn" {
-    var setup: Pair = .{};
-    try setup.initOpts(.{ .random_seed = 1, .connected_capacity = 4 }, .{ .random_seed = 2 });
-    defer setup.deinit();
-    for (0..20) |_| try setup.pumpOnce();
-    const g = setup.shared.client.gossipsub;
-    var writers: [3]u16 = undefined;
-    _ = try readerAhead(&setup, &writers);
-    const items = @intFromEnum(Budget.items);
-    const calls = @intFromEnum(Budget.calls);
-    _ = support.pumpTurn(g, &setup.shared.pair.client, setup.shared.pair.now);
-    try std.testing.expectEqualSlices(u64, &.{ 0, 3 }, &g.io_metrics.skipped[items]);
-    // With one call per turn, the next turn writes for the first writer and stops on calls,
-    // skipping the other two writers and the reader.
-    g.options.calls_per_pump = 1;
-    setup.shared.pair.advance(3);
-    _ = support.pumpTurn(g, &setup.shared.pair.client, setup.shared.pair.now);
-    try std.testing.expectEqualSlices(u64, &.{ 1, 2 }, &g.io_metrics.skipped[calls]);
-    // A second call stop skips the last writer and the reader again.
-    setup.shared.pair.advance(4);
-    _ = support.pumpTurn(g, &setup.shared.pair.client, setup.shared.pair.now);
-    try std.testing.expectEqual(@as(u64, 2), g.io_metrics.stops[calls]);
-    try std.testing.expectEqualSlices(u64, &.{ 2, 3 }, &g.io_metrics.skipped[calls]);
-    setup.shared.pair.advance(5);
-    g.last_now_ms = setup.shared.pair.now.mono_ms;
-    g.connectionClosed(g.sessions.rows[writers[2]].conn);
-    setup.shared.pair.advance(5);
-    _ = support.pumpTurn(g, &setup.shared.pair.client, setup.shared.pair.now);
 }

@@ -681,7 +681,6 @@ test "gossipsub native write credit behind a ready session resumes and blocked w
     try std.testing.expect(io.tx.data.count > 0);
     try std.testing.expect(!io.tx.ready);
     try std.testing.expect(io.tx.blocked_since != null);
-    try std.testing.expect(g.io_metrics.write_would_block + g.io_metrics.write_zero > 0);
     try std.testing.expect(gossip_test.sessionWakeup(g, setup.shared.pair.now) > setup.shared.pair.now.mono_ms);
     const before = io.tx.data.next(&g.messages.store).?.cursor.sent;
     // A session added now is ready ahead of the writable edge the server's reads will grant.

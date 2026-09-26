@@ -43,48 +43,25 @@ const Progress = @import("turn.zig").Progress;
 const Layout = @import("layout.zig").Layout;
 pub const MemoryPlan = @import("layout.zig").Plan;
 
-/// Live occupancy for bounded host supervision and deterministic test baselines.
-/// This scans fixed startup capacities: peers, topics, validation entries and store entries.
-/// High waters are the largest physical-row peak since init, including previous connections.
-/// Age uses last_now_ms and original queue admission until complete send or reset.
+/// Live occupancy for bounded host supervision and deterministic test baselines. This scans fixed
+/// startup capacities: peers, topics, validation entries and store entries.
 pub const ResourceSnapshot = struct {
     receive_pages: usize = 0,
     receive_page_capacity: usize = 0,
-    receive_pages_high_water: usize = 0,
-    connected_capacity: usize = 0,
-    retained_capacity: usize = 0,
     validation_capacity: usize = 0,
-    history_capacity: usize = 0,
-    control_frames: usize = 0,
-    control_bytes: usize = 0,
-    critical_frames: usize = 0,
-    critical_bytes: usize = 0,
-    data_bytes_per_row_high_water: usize = 0,
-    data_descriptors_per_row_high_water: usize = 0,
-    control_bytes_per_row_high_water: usize = 0,
-    control_frames_per_row_high_water: usize = 0,
-    critical_bytes_per_row_high_water: usize = 0,
-    critical_frames_per_row_high_water: usize = 0,
-    oldest_tx_age_ms: ?u64 = null,
-    inbound_streams: usize = 0,
-    outbound_streams: usize = 0,
-    subscription_pending_peers: usize = 0,
     delivery_descriptors_capacity: usize = 0,
     delivery_descriptors_available: usize = 0,
-    delivery_descriptors_reserved: usize = 0,
-
-    admitted_peers: usize,
-    remote_subscriptions: usize,
-    mesh_members: usize,
-    queued_descriptors: usize,
-    queued_local_descriptors: usize = 0,
-    queued_bytes: usize,
-    held_frames: usize,
-    held_tx_retains: usize,
-    store_entries: usize,
-    store_pages: usize,
-    pending_validations: usize,
-    promises: usize,
+    admitted_peers: usize = 0,
+    remote_subscriptions: usize = 0,
+    mesh_members: usize = 0,
+    queued_descriptors: usize = 0,
+    queued_bytes: usize = 0,
+    held_frames: usize = 0,
+    held_tx_retains: usize = 0,
+    store_entries: usize = 0,
+    store_pages: usize = 0,
+    pending_validations: usize = 0,
+    promises: usize = 0,
 };
 
 pub const Gossipsub = struct {
@@ -97,7 +74,7 @@ pub const Gossipsub = struct {
     /// The sink and its context must outlive every pump that uses them.
     message_sink: ?*const MessageSink = null,
     cycle: @import("heartbeat_cycle.zig").Cycle = .{},
-    /// The clock that bounds each maintenance slice and times verdict applies.
+    /// The clock that bounds each maintenance slice.
     clock: std.Io = std.Io.Threaded.global_single_threaded.io(),
     retired_queue_drops: [@import("outbox.zig").drop_reason_count]u64 = @splat(0),
     overlay: *overlay_mod.Overlay,
@@ -109,9 +86,7 @@ pub const Gossipsub = struct {
     counters: Counters = .{},
     topic_metrics: @import("metrics.zig").Topics = .{},
     iwant_outcomes: [@import("metrics.zig").iwant_outcome_count]u64 = @splat(0),
-    io_metrics: @import("metrics.zig").Io = .{},
     delivery_metrics: @import("metrics.zig").Delivery = .{},
-    apply_metrics: @import("metrics.zig").Apply = .{},
     validation_time: @import("metrics.zig").ValidationTime = .{},
 
     pub const Admission = session_io.Admission;
@@ -351,10 +326,6 @@ pub const Gossipsub = struct {
     /// Event slices remain valid until the next pump, including after report or publish.
     pub fn report(self: *Gossipsub, handle: ValidationHandle, verdict: Verdict, now: Now) ReportOutcome {
         self.last_now_ms = @max(self.last_now_ms, now.mono_ms);
-        const start_ns = timing.now(self.clock);
-        var forwarded: ?PublishOutcome = null;
-        var forwarded_bytes: u64 = 0;
-        defer self.apply_metrics.verdict(self.last_now_ms, timing.now(self.clock) -| start_ns, forwarded, forwarded_bytes);
         const context = self.messageContext();
         const result = self.messages.report(&context, handle, verdict, now.mono_ms);
         if (result == .applied) {
@@ -368,10 +339,7 @@ pub const Gossipsub = struct {
             self.validation_time.observe(now.mono_ms -| applied.admitted_ms);
             if (verdict != .accept) std.log.scoped(.network_gossip).debug("validation_verdict validation={d}:{d} message_id={x} verdict={s} topic={s} peer={f} elapsed_ms={d}", .{ handle.index, handle.generation, applied.id, @tagName(verdict), applied.topicString(), @import("../logging.zig").peer(&applied.source), now.mono_ms -| applied.admitted_ms });
             if (applied.forward) |forward| {
-                const delivered = self.deliver(self.overlay.mesh(forward.topic.index), forward.message, forward.source, now.mono_ms);
-                forwarded = delivered;
-                forwarded_bytes = @as(u64, self.messages.store.get(forward.message).?.len) * delivered.queued;
-                if (delivered.queued > 0) counts.forwarded +|= 1;
+                if (self.deliver(self.overlay.mesh(forward.topic.index), forward.message, forward.source, now.mono_ms).queued > 0) counts.forwarded +|= 1;
             }
         } else {
             std.log.scoped(.network_gossip).debug("validation_report_refused validation={d}:{d} verdict={s} reason={s}", .{ handle.index, handle.generation, @tagName(verdict), @tagName(result) });
@@ -405,15 +373,13 @@ pub const Gossipsub = struct {
                 self.delivery_metrics.recipient(origin, .unavailable);
                 continue;
             }
-            const queued = self.sessions.rows[index].io.tx.queueData(&self.messages.store, h, origin, self.deliveryLimits(), now_ms) == .queued;
-            self.delivery_metrics.admitted(&self.sessions.rows[index].io.tx.data, now_ms, queued);
-            if (queued) {
+            if (self.sessions.rows[index].io.tx.queueData(&self.messages.store, h, origin, self.deliveryLimits(), now_ms) == .queued) {
                 result.queued += 1;
                 self.delivery_metrics.recipient(origin, .queued);
                 self.settle(index);
             } else {
                 result.pressured += 1;
-                self.dataRefused(index, origin, now_ms);
+                self.delivery_metrics.recipient(origin, .pressured);
             }
         }
         assert(result.selected == result.queued + result.pressured + result.unavailable);
@@ -477,48 +443,21 @@ pub const Gossipsub = struct {
 
     pub fn resourceSnapshot(self: *const Gossipsub) ResourceSnapshot {
         var result: ResourceSnapshot = .{
-            .connected_capacity = self.sessions.rows.len,
-            .retained_capacity = self.peers.rows.len,
-            .validation_capacity = self.messages.validationCapacity(),
-            .history_capacity = self.messages.history.entries.len,
-            .delivery_descriptors_capacity = self.sessions.deliveries.slots.len,
-            .delivery_descriptors_available = self.sessions.deliveries.available,
-            .delivery_descriptors_reserved = self.sessions.deliveries.protected,
-            .admitted_peers = 0,
-            .remote_subscriptions = 0,
-            .mesh_members = 0,
-            .queued_descriptors = 0,
-            .queued_bytes = 0,
-            .held_frames = 0,
             .receive_pages = self.sessions.receive_pool.next.len - self.sessions.receive_pool.free_pages,
             .receive_page_capacity = self.sessions.receive_pool.next.len,
-            .receive_pages_high_water = self.sessions.receive_pool.high_water,
-            .held_tx_retains = 0,
+            .validation_capacity = self.messages.validationCapacity(),
+            .delivery_descriptors_capacity = self.sessions.deliveries.slots.len,
+            .delivery_descriptors_available = self.sessions.deliveries.available,
             .store_entries = self.messages.store.used_entries,
             .store_pages = self.messages.store.next.len - self.messages.store.free_pages,
-            .pending_validations = 0,
+            .pending_validations = self.messages.pendingValidations(),
             .promises = self.recovery.len,
         };
         for (self.sessions.rows) |*peer| {
             const io = &peer.io;
             if (peer.active) result.admitted_peers += 1;
-            result.inbound_streams += @intFromBool(peer.in_stream != null);
-            result.outbound_streams += @intFromBool(peer.outStream() != null);
-            result.subscription_pending_peers += @intFromBool(io.tx.subscription_since != null);
             result.queued_descriptors += io.tx.data.count;
-            result.queued_local_descriptors += io.tx.data.classCount(.local);
             result.queued_bytes += io.tx.data.bytes;
-            result.control_frames += io.tx.control.count;
-            result.control_bytes += io.tx.control.used;
-            result.critical_frames += io.tx.critical.count;
-            result.critical_bytes += io.tx.critical.used;
-            result.data_bytes_per_row_high_water = @max(result.data_bytes_per_row_high_water, io.tx.data.bytes_high_water);
-            result.data_descriptors_per_row_high_water = @max(result.data_descriptors_per_row_high_water, io.tx.data.descriptors_high_water);
-            result.control_bytes_per_row_high_water = @max(result.control_bytes_per_row_high_water, io.tx.control.bytes_high_water);
-            result.control_frames_per_row_high_water = @max(result.control_frames_per_row_high_water, io.tx.control.frames_high_water);
-            result.critical_bytes_per_row_high_water = @max(result.critical_bytes_per_row_high_water, io.tx.critical.bytes_high_water);
-            result.critical_frames_per_row_high_water = @max(result.critical_frames_per_row_high_water, io.tx.critical.frames_high_water);
-            if (io.tx.oldest()) |since| result.oldest_tx_age_ms = @max(result.oldest_tx_age_ms orelse 0, self.last_now_ms -| since);
             if (io.reader.declaredLen() != null or io.rpc != null) result.held_frames += 1;
         }
         for (self.overlay.rows) |topic| {
@@ -530,7 +469,6 @@ pub const Gossipsub = struct {
         }
         if (self.overlay.namespace) |*ns| result.remote_subscriptions = ns.subscription_count;
         for (self.messages.store.entries) |entry| result.held_tx_retains += entry.tx;
-        result.pending_validations = self.messages.pendingValidations();
         return result;
     }
 
@@ -609,21 +547,12 @@ pub const Gossipsub = struct {
         const peer = session.index;
         switch (completion) {
             .control => |receipt| self.controlSent(peer, receipt.token, now_ms),
-            .data => |receipt| {
-                self.delivery_metrics.written(receipt, now_ms);
-                self.apply_metrics.frameCompleted();
-            },
+            .data => |receipt| self.delivery_metrics.recipient(receipt.origin, .completed),
         }
     }
 
     fn deliveryLimits(self: *const Gossipsub) @import("delivery.zig").Limits {
         return .{ .bytes = self.options.tx_peer_bytes, .local_bytes = self.options.tx_local_bytes };
-    }
-
-    fn dataRefused(self: *Gossipsub, index: u16, origin: @import("delivery.zig").Origin, now_ms: u64) void {
-        const row = &self.sessions.rows[index];
-        self.delivery_metrics.recipient(origin, .pressured);
-        self.delivery_metrics.dropped(origin, &row.io.tx, row.client, now_ms);
     }
 
     fn controlSent(self: *Gossipsub, peer: u16, token: u64, now_ms: u64) void {
@@ -646,12 +575,6 @@ pub const Gossipsub = struct {
     pub fn scoreSnapshot(self: *Gossipsub, conn: Handle, now: Now) ?f64 {
         const index = self.sessions.find(conn) orelse return null;
         return self.peerScore(index, now.mono_ms);
-    }
-
-    /// The client the connection's identify exchange named, for attributing its outgoing pressure.
-    pub fn identified(self: *Gossipsub, conn: Handle, client: @import("../peers/client.zig").Client) void {
-        const index = self.sessions.find(conn) orelse return;
-        self.sessions.rows[index].client = client;
     }
 
     pub fn unmarkDirect(self: *Gossipsub, identity: *const @import("../wire/peer_id.zig").PeerId) void {
@@ -785,10 +708,9 @@ pub const Gossipsub = struct {
             const outcome: IwantOutcome = switch (self.messages.serve(&self.sessions.rows[index].io.tx, self.logical(index), id, self.deliveryLimits(), self.last_now_ms)) {
                 .unknown => .miss,
                 .known => |known| blk: {
-                    if (known != .limited) self.delivery_metrics.admitted(&self.sessions.rows[index].io.tx.data, self.last_now_ms, known == .queued);
                     switch (known) {
                         .queued => self.delivery_metrics.recipient(.iwant, .queued),
-                        .pressured => self.dataRefused(index, .iwant, self.last_now_ms),
+                        .pressured => self.delivery_metrics.recipient(.iwant, .pressured),
                         .limited => {},
                     }
                     break :blk switch (known) {

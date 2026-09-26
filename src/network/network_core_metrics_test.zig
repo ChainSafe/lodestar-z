@@ -35,7 +35,6 @@ const Fixture = struct {
     fn render(self: *Fixture, running: bool) ![]const u8 {
         var context = metrics.Context.init(self.node, .{ .mono_ms = 2500, .unix_s = 123456 }, running);
         context.expired_executing = if (running) 3 else 0;
-        context.oldest_expired_execution_age_ms = if (running) 1500 else 0;
         var writer = std.Io.Writer.fixed(self.buffer);
         try metrics.write(&context, &writer);
         var encoder: metrics.registry.Encoder = .{ .writer = &writer };
@@ -228,7 +227,6 @@ test "metrics read owner counters exactly and preserve totals and capacities aft
     try contains(output, "beacon_reqresp_outgoing_requests_total{method=\"status\"} 9\n");
     try contains(output, "beacon_reqresp_outgoing_request_roundtrip_time_seconds_count{method=\"status\"} 2\n");
     try contains(output, "lodestar_native_gossip_expired_executing 3\n");
-    try contains(output, "lodestar_native_gossip_oldest_expired_execution_age_seconds 1.5\n");
     try contains(output, "lodestar_native_network_metrics_updated_timestamp_seconds 123456\n");
     try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_peer_manager_starved_bool") == null);
     try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_discovery_total_dial_attempts") == null);

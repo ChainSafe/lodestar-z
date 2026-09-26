@@ -82,8 +82,6 @@ fn FrameQueue(comptime capacity: usize) type {
         read_at: usize = 0,
         write_at: usize = 0,
         used: usize = 0,
-        bytes_high_water: usize = 0,
-        frames_high_water: usize = 0,
 
         const Frame = struct {
             remaining: u32,
@@ -101,8 +99,6 @@ fn FrameQueue(comptime capacity: usize) type {
             self.frames[slot] = .{ .remaining = @intCast(bytes.len), .token = token, .enqueued_ms = now_ms };
             self.count += 1;
             self.used += bytes.len;
-            self.bytes_high_water = @max(self.bytes_high_water, self.used);
-            self.frames_high_water = @max(self.frames_high_water, self.count);
             self.write_at = (self.write_at + bytes.len) % self.bytes.len;
             return .queued;
         }
@@ -122,7 +118,7 @@ fn FrameQueue(comptime capacity: usize) type {
             return receipt;
         }
         pub fn reset(self: *Queue) void {
-            self.* = .{ .bytes = self.bytes, .bytes_high_water = self.bytes_high_water, .frames_high_water = self.frames_high_water };
+            self.* = .{ .bytes = self.bytes };
         }
     };
 }
@@ -142,9 +138,6 @@ pub const Outbox = struct {
     ready: bool = true,
     /// When the last write blocked, until a writable event.
     blocked_since: ?u64 = null,
-    /// The last write on this stream blocked. A writable event leaves it set; a write QUIC takes
-    /// in full clears it.
-    last_write_blocked: bool = false,
     subscription_since: ?u64 = null,
     subscription_dirty: std.StaticBitSet(constants.topics_cap) = .initEmpty(),
     subscription_cursor: usize = 0,
@@ -164,13 +157,11 @@ pub const Outbox = struct {
         self.subscription_since = if (subscribed.count() == 0) null else self.subscription_since orelse now;
         self.ready = true;
         self.blocked_since = null;
-        self.last_write_blocked = false;
     }
 
     /// A write took fewer bytes than offered; the engine armed write interest.
     pub fn blocked(self: *Outbox, now: u64) void {
         self.ready = false;
-        self.last_write_blocked = true;
         self.blocked_since = self.blocked_since orelse now;
     }
 
@@ -335,7 +326,6 @@ pub const Outbox = struct {
         self.progress_ms = null;
         self.ready = false;
         self.blocked_since = null;
-        self.last_write_blocked = false;
     }
 };
 
@@ -410,8 +400,6 @@ test "gossip critical capacity and data queue pressure are independent and relea
     store.seal(h);
     for (0..data_capacity) |_| try std.testing.expectEqual(QueueResult.queued, io.queueData(&store, h, .forward, .{ .bytes = 8192 }, 0));
     try std.testing.expectEqual(QueueResult.full, io.queueData(&store, h, .forward, .{ .bytes = 8192 }, 0));
-    try std.testing.expectEqual(@as(usize, data_capacity), io.data.bytes_high_water);
-    try std.testing.expectEqual(@as(usize, data_capacity), io.data.descriptors_high_water);
     try std.testing.expect(io.inject("12345678", 0));
     try std.testing.expect(!io.inject("x", 0));
     try std.testing.expect(io.appendControl("critical", true, 0) != null);
@@ -486,20 +474,6 @@ test "gossip control receipts survive partial writes ring reuse and refused fram
     try std.testing.expect(io.advance(&store, 1) == null);
     io.cancelStream(&store);
     try std.testing.expect(!io.pending());
-}
-
-test "gossip control high water survives partial write refusal and reset" {
-    var bytes: [4]u8 = undefined;
-    var queue: ControlQueue = .{ .bytes = &bytes };
-    try std.testing.expectEqual(QueueResult.queued, queue.append("abc", 1, 7));
-    try std.testing.expectEqual(QueueResult.full, queue.append("ab", 2, 8));
-    try std.testing.expectEqual(@as(usize, 3), queue.bytes_high_water);
-    try std.testing.expectEqual(@as(usize, 1), queue.frames_high_water);
-    try std.testing.expect(queue.advance(1) == null);
-    try std.testing.expectEqual(@as(usize, 3), queue.bytes_high_water);
-    queue.reset();
-    try std.testing.expectEqual(@as(usize, 3), queue.bytes_high_water);
-    try std.testing.expectEqual(@as(usize, 0), queue.count);
 }
 
 test "gossip typed controls preserve maximum ID lists and completion kinds" {

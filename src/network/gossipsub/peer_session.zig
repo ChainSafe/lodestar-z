@@ -25,8 +25,6 @@ pub const Session = struct {
     active: bool = false,
     generation: u64 = 0,
     conn: Handle = undefined,
-    /// Named by the connection's identify exchange; unknown until it completes.
-    client: @import("../peers/client.zig").Client = .Unknown,
     in_stream: ?StreamHandle = null,
     dont_send: [constants.dont_send_cap]MessageId = undefined,
     dont_send_until: [constants.dont_send_cap]u64 = undefined,

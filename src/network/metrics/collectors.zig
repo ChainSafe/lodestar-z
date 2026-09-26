@@ -162,44 +162,27 @@ fn writeSockets(self: *const Context, w: *prom.Encoder) prom.Error!void {
 }
 
 fn writeGossipResources(self: *const Context, w: *prom.Encoder) prom.Error!void {
-    try w.scalar(.{ .name = "lodestar_native_gossip_data_descriptors_per_peer", .kind = .gauge, .help = "Bounded outgoing data descriptors per gossip peer" }, outbox.data_capacity);
     const resources = self.owner.service.gossipsub.resourceSnapshot();
-    try writeResourceFields("lodestar_native_gossipsub_", "Native gossip ", &resources, self.running, w);
+    inline for (.{
+        .{ "receive_pages", "Receive pages holding partial inbound frames", false },
+        .{ "receive_page_capacity", "Receive pages the pool holds", true },
+        .{ "validation_capacity", "Messages the validation table holds", true },
+        .{ "pending_validations", "Admitted messages awaiting a verdict", false },
+        .{ "delivery_descriptors_capacity", "Outgoing data descriptors the shared pool holds", true },
+        .{ "delivery_descriptors_available", "Outgoing data descriptors free in the shared pool", false },
+        .{ "queued_bytes", "Compressed bytes queued to peers as data frames", false },
+        .{ "store_pages", "Message store pages in use", false },
+    }) |field| try w.scalar(.{
+        .name = "lodestar_native_gossipsub_" ++ field[0],
+        .kind = .gauge,
+        .help = field[1],
+    }, if (field[2] or self.running) @field(resources, field[0]) else 0);
 }
-
 fn writeRequestResources(self: *const Context, w: *prom.Encoder) prom.Error!void {
     const requests = self.owner.service.reqresp.resourceSnapshot();
     try w.scalar(.{ .name = "lodestar_native_reqresp_resources_serving_capacity", .kind = .gauge, .help = "Incoming requests the host may serve at once" }, requests.serving_capacity);
     try w.scalar(.{ .name = "lodestar_native_reqresp_resources_serving_occupied", .kind = .gauge, .help = "Incoming requests the host is serving" }, self.live(requests.serving_occupied));
     try w.scalar(.{ .name = "lodestar_native_reqresp_resources_retiring", .kind = .gauge, .help = "Serving resources awaiting host retirement" }, self.live(requests.retiring));
-}
-
-fn writeResourceFields(comptime prefix: []const u8, comptime description: []const u8, resources: anytype, running: bool, w: *prom.Encoder) prom.Error!void {
-    inline for (std.meta.fields(@TypeOf(resources.*))) |field| {
-        if (comptime std.mem.eql(u8, field.name, "inbound_phases")) continue;
-        const persistent = comptime std.mem.endsWith(u8, field.name, "_capacity") or std.mem.endsWith(u8, field.name, "_high_water") or std.mem.endsWith(u8, field.name, "_control_reserved");
-        const current = if (running or persistent) @field(resources, field.name) else std.mem.zeroes(field.type);
-        if (comptime @typeInfo(field.type) == .optional) {
-            if (current) |value| {
-                if (comptime std.mem.endsWith(u8, field.name, "_ms")) {
-                    try w.scalar(.{
-                        .name = prefix ++ field.name[0 .. field.name.len - 3] ++ "_seconds",
-                        .kind = .gauge,
-                        .help = description ++ field.name ++ " in seconds",
-                        .unit = .seconds,
-                    }, @as(f64, @floatFromInt(value)) / 1000);
-                } else try w.scalar(.{
-                    .name = prefix ++ field.name,
-                    .kind = .gauge,
-                    .help = description ++ field.name,
-                }, value);
-            }
-        } else try w.scalar(.{
-            .name = prefix ++ field.name,
-            .kind = .gauge,
-            .help = description ++ field.name,
-        }, current);
-    }
 }
 
 fn writePeerCloses(self: *const Context, w: *prom.Encoder) prom.Error!void {
@@ -369,12 +352,6 @@ fn writeGossipExecution(self: *const Context, w: *prom.Encoder) prom.Error!void 
         .kind = .gauge,
         .help = "Delivered gossip validations still awaiting host completion after their verdict deadlines",
     }, self.expired_executing);
-    try w.scalar(.{
-        .name = "lodestar_native_gossip_oldest_expired_execution_age_seconds",
-        .kind = .gauge,
-        .help = "Seconds past the earliest verdict deadline among delivered validations awaiting host completion; zero when none",
-        .unit = .seconds,
-    }, @as(f64, @floatFromInt(self.oldest_expired_execution_age_ms)) / 1000);
 }
 
 fn writeGossip(self: *const Context, w: *prom.Encoder) prom.Error!void {
@@ -402,9 +379,7 @@ fn writeGossip(self: *const Context, w: *prom.Encoder) prom.Error!void {
         .kind = .counter,
         .help = "Randomly sampled IWANT batch promises that expired without their sampled message",
     }, g.counters.broken_promises);
-    try g.io_metrics.write(w);
     try g.delivery_metrics.write(w);
-    try g.apply_metrics.write(w);
     const validation_time = try w.histograms(.{
         .name = "gossipsub_async_validation_delay_from_first_seen",
         .kind = .histogram,
