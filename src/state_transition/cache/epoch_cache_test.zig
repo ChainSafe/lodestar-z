@@ -210,6 +210,7 @@ test "memory_safety: afterProcessEpoch should preserve shuffling state when deci
 test "effectiveBalanceIncrementsAppend grows in place only when the list is not shared" {
     const allocator = std.testing.allocator;
     var epoch_cache: EpochCache = undefined;
+    epoch_cache.allocator = allocator;
     {
         var increments = try effectiveBalanceIncrementsInit(allocator, 4);
         errdefer increments.deinit(allocator);

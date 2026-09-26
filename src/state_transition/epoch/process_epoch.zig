@@ -38,7 +38,7 @@ pub fn processEpoch(
     cache: *EpochTransitionCache,
 ) !void {
     if (comptime fork.gte(.fulu)) {
-        try startProposerLookaheadShuffling(fork, allocator, io, state, cache);
+        try startProposerLookaheadShuffling(fork, io, epoch_cache, state, cache);
     }
 
     var timer = time.start(io);

@@ -445,8 +445,8 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
                 const start_shuffling_timer = time.start(io);
                 state_transition.startProposerLookaheadShuffling(
                     fork,
-                    allocator,
                     io,
+                    BenchState.cloned_cached_state.epoch_cache,
                     BenchState.cloned_cached_state.state.castToFork(fork),
                     cache,
                 ) catch unreachable;
