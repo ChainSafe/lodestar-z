@@ -7,31 +7,30 @@ const r = @import("network_runtime.zig");
 const g = @import("network_gossip.zig");
 const Runtime = r.Runtime;
 
-const put = @import("network_js.zig").put;
 const bytes = @import("network_js.zig").bytes;
 pub fn descriptor(runtime: *Runtime, token: g.Token, cell: *const g.Cell) !Value {
     const env = runtime.env;
     const object = try env.createObject();
     const handle = try env.createObject();
-    try put(handle, "index", try env.createUint32(token.index));
-    try put(handle, "generation", try env.createBigintUint64(token.generation));
-    try put(object, "handle", handle);
+    try handle.setNamedProperty("index", try env.createUint32(token.index));
+    try handle.setNamedProperty("generation", try env.createBigintUint64(token.generation));
+    try object.setNamedProperty("handle", handle);
     const connection = try env.createObject();
-    try put(connection, "index", try env.createUint32(cell.connection.index));
-    try put(connection, "generation", try env.createUint32(cell.connection.generation));
-    try put(object, "connection", connection);
-    try put(object, "peerId", try @import("network_js.zig").peerIdValue(env, &cell.identity));
-    try put(object, "topic", try env.createStringUtf8(cell.topic[0..cell.topic_len]));
-    try put(object, "id", try bytes(env, &cell.id));
+    try connection.setNamedProperty("index", try env.createUint32(cell.connection.index));
+    try connection.setNamedProperty("generation", try env.createUint32(cell.connection.generation));
+    try object.setNamedProperty("connection", connection);
+    try object.setNamedProperty("peerId", try @import("network_js.zig").peerIdValue(env, &cell.identity));
+    try object.setNamedProperty("topic", try env.createStringUtf8(cell.topic[0..cell.topic_len]));
+    try object.setNamedProperty("id", try bytes(env, &cell.id));
     var destination: [*]u8 = undefined;
     const buffer = try env.createArrayBuffer(cell.input.len, &destination);
     const data = try env.createTypedarray(.uint8, cell.input.len, buffer, 0);
     runtime.gossip.?.copyPayload(cell, destination[0..cell.input.len]);
-    try put(object, "data", data);
+    try object.setNamedProperty("data", data);
     var encoded: [172]u8 = undefined;
-    try put(object, "attestationData", if (cell.metadata.group) |group| try env.createStringUtf8(std.base64.standard.Encoder.encode(&encoded, &group)) else try env.getNull());
-    try put(object, "slot", if (cell.metadata.slot) |slot| try env.createBigintUint64(slot) else try env.getNull());
-    try put(object, "receivedAtUnixMs", try env.createDouble(@floatFromInt(cell.received_at)));
+    try object.setNamedProperty("attestationData", if (cell.metadata.group) |group| try env.createStringUtf8(std.base64.standard.Encoder.encode(&encoded, &group)) else try env.getNull());
+    try object.setNamedProperty("slot", if (cell.metadata.slot) |slot| try env.createBigintUint64(slot) else try env.getNull());
+    try object.setNamedProperty("receivedAtUnixMs", try env.createDouble(@floatFromInt(cell.received_at)));
     return object;
 }
 pub fn optionsFor(value: Value) !n.gossipsub.Gossipsub.PublishOptions {
@@ -46,8 +45,8 @@ pub fn optionsFor(value: Value) !n.gossipsub.Gossipsub.PublishOptions {
 }
 pub fn publishResult(env: napi.Env, result: n.gossipsub.Gossipsub.PublishOutcome) !Value {
     const object = try env.createObject();
-    inline for (.{ "queued", "pressured", "selected", "unavailable" }) |name| try put(object, name, try env.createUint32(@field(result, name)));
-    try put(object, "duplicate", try env.getBoolean(result.duplicate));
+    inline for (.{ "queued", "pressured", "selected", "unavailable" }) |name| try object.setNamedProperty(name, try env.createUint32(@field(result, name)));
+    try object.setNamedProperty("duplicate", try env.getBoolean(result.duplicate));
     return object;
 }
 pub fn publishError(env: napi.Env, err: anyerror) !Value {
@@ -63,7 +62,7 @@ pub fn publishError(env: napi.Env, err: anyerror) !Value {
         else => null,
     };
     const object = try @import("network_js.zig").errorValue(env, if (reason != null) "NetworkGossipPublishFailed" else @errorName(err));
-    if (reason) |text| try put(object, "reason", try env.createStringUtf8(text));
+    if (reason) |text| try object.setNamedProperty("reason", try env.createStringUtf8(text));
     return object;
 }
 pub fn diagnostics(env: napi.Env, value: *const g.Diagnostics) !Value {

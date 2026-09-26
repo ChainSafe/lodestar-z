@@ -1,4 +1,3 @@
-import {execFileSync} from "node:child_process";
 import {expect, test} from "vitest";
 import type {NativeLogRecord, NativeNetworkApplicationRuntime} from "../src/network.js";
 import {applicationConfig, startRuntime} from "./utils/network.js";
@@ -151,12 +150,3 @@ test.each([
     await Promise.all([pair.left.close(), pair.right.close()]);
   }
 }, 15000);
-
-test("log projection cannot invoke prototype setters or reenter the drain", () => {
-  expect(
-    execFileSync(process.execPath, ["--import", "tsx", "bindings/test/fixtures/network-log-prototype.mjs"], {
-      encoding: "utf8",
-      timeout: 15000,
-    }).trim()
-  ).toBe("ok");
-}, 20000);

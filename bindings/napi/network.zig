@@ -59,8 +59,8 @@ pub fn initialize(self: *@This(), config: js.Value, callback: js.Value) !js.Valu
     try prepareCloseResults(env, runtime);
     try runtime.results.prepare(env);
     const holder = try env.createObject();
-    try put(holder, "identity", try identity(env, &runtime.identity));
-    try put(holder, "closed", runtime.close_deferred.?.getPromise());
+    try holder.setNamedProperty("identity", try identity(env, &runtime.identity));
+    try holder.setNamedProperty("closed", runtime.close_deferred.?.getPromise());
     if (self.stopped) return error.NetworkClosed;
     runtime.retain();
     errdefer runtime.release();
@@ -123,13 +123,13 @@ fn prepareApplicationStorage(runtime: *Runtime, app: *const application_cfg.Conf
 
 fn prepareCloseResults(env: napi.Env, runtime: *Runtime) !void {
     const fallback = try env.createObject();
-    try put(fallback, "name", try env.createStringUtf8("Error"));
-    try put(fallback, "code", try env.createStringUtf8("NetworkResultAllocationFailed"));
-    try put(fallback, "message", try env.createStringUtf8("NetworkResultAllocationFailed"));
+    try fallback.setNamedProperty("name", try env.createStringUtf8("Error"));
+    try fallback.setNamedProperty("code", try env.createStringUtf8("NetworkResultAllocationFailed"));
+    try fallback.setNamedProperty("message", try env.createStringUtf8("NetworkResultAllocationFailed"));
     runtime.copy_error = try napi.Ref.create(env.env, fallback, 1);
     inline for (.{ "requested", "failed" }, 0..) |reason, i| {
         const result = try env.createObject();
-        try put(result, "reason", try env.createStringUtf8(reason));
+        try result.setNamedProperty("reason", try env.createStringUtf8(reason));
         runtime.close_results[i] = try napi.Ref.create(env.env, result, 1);
     }
 }
@@ -322,8 +322,6 @@ pub fn close(self: *@This()) void {
     }
 }
 
-const put = @import("network_js.zig").put;
-const element = @import("network_js.zig").element;
 const bytes = @import("network_js.zig").bytes;
 const endpoint = @import("network_js.zig").endpoint;
 fn text(value: []const u8) !Value {
@@ -331,18 +329,18 @@ fn text(value: []const u8) !Value {
 }
 fn identity(env: napi.Env, value: *const r.Identity) !Value {
     const object = try env.createObject();
-    try put(object, "peerId", try @import("network_js.zig").peerIdValue(env, &value.peer));
-    try put(object, "metadata", try projection.metadata(env, &value.metadata));
+    try object.setNamedProperty("peerId", try @import("network_js.zig").peerIdValue(env, &value.peer));
+    try object.setNamedProperty("metadata", try projection.metadata(env, &value.metadata));
     const endpoints = try env.createArrayWithLength(@intFromBool(value.endpoints[0] != null) + @as(u32, @intFromBool(value.endpoints[1] != null)));
     var endpoint_index: u32 = 0;
     for (value.endpoints) |address| if (address) |bound| {
-        try element(endpoints, endpoint_index, try endpoint(env, bound));
+        try endpoints.setElement(endpoint_index, try endpoint(env, bound));
         endpoint_index += 1;
     };
-    try put(object, "localEndpoints", endpoints);
-    try put(object, "localEndpoint", try endpoint(env, value.endpoints[0] orelse value.endpoints[1].?));
-    try put(object, "localMultiaddr", try bytes(env, value.multiaddr[0..value.multiaddr_len]));
-    try put(object, "localEnr", if (value.enr_len == 0) try env.getNull() else try bytes(env, value.enr[0..value.enr_len]));
+    try object.setNamedProperty("localEndpoints", endpoints);
+    try object.setNamedProperty("localEndpoint", try endpoint(env, value.endpoints[0] orelse value.endpoints[1].?));
+    try object.setNamedProperty("localMultiaddr", try bytes(env, value.multiaddr[0..value.multiaddr_len]));
+    try object.setNamedProperty("localEnr", if (value.enr_len == 0) try env.getNull() else try bytes(env, value.enr[0..value.enr_len]));
     return object;
 }
 
@@ -371,14 +369,14 @@ pub fn setLogLevel(self: *@This(), level: js.Value) !void {
 pub fn diagnostics(self: *@This()) !js.Value {
     const snapshot = try (try self.owner()).snapshot();
     const object = try @import("network_js.zig").scalarFields(js.env(), &snapshot);
-    try put(object, "state", try text(@tagName(snapshot.state)));
-    try put(object, "terminalErrorCode", if (snapshot.terminal_error) |err| try text(@errorName(err)) else try js.env().getNull());
-    try put(object, "resolvedCapacities", try @import("network_js.zig").scalarFields(js.env(), &snapshot.resolvedCapacities));
-    try put(object, "payloadBudget", try @import("network_js.zig").scalarFields(js.env(), &snapshot.payloadBudget));
-    try put(object, "publications", try @import("network_js.zig").scalarFields(js.env(), &snapshot.publications));
-    try put(object, "requests", try request_js.diagnostics(js.env(), &snapshot.requests));
-    try put(object, "gossip", try gossip_js.diagnostics(js.env(), &snapshot.gossip));
-    try put(object, "incoming", try incoming_js.diagnostics(js.env(), &snapshot.incoming));
+    try object.setNamedProperty("state", try text(@tagName(snapshot.state)));
+    try object.setNamedProperty("terminalErrorCode", if (snapshot.terminal_error) |err| try text(@errorName(err)) else try js.env().getNull());
+    try object.setNamedProperty("resolvedCapacities", try @import("network_js.zig").scalarFields(js.env(), &snapshot.resolvedCapacities));
+    try object.setNamedProperty("payloadBudget", try @import("network_js.zig").scalarFields(js.env(), &snapshot.payloadBudget));
+    try object.setNamedProperty("publications", try @import("network_js.zig").scalarFields(js.env(), &snapshot.publications));
+    try object.setNamedProperty("requests", try request_js.diagnostics(js.env(), &snapshot.requests));
+    try object.setNamedProperty("gossip", try gossip_js.diagnostics(js.env(), &snapshot.gossip));
+    try object.setNamedProperty("incoming", try incoming_js.diagnostics(js.env(), &snapshot.incoming));
     return .{ .val = object };
 }
 const commands = @import("network_commands.zig");
@@ -517,41 +515,41 @@ fn copyOperation(env: napi.Env, runtime: *Runtime, index: usize) !Value {
         .removeDirectPeer => return env.getBoolean(operation.boolean),
         else => return env.getUndefined(),
     };
-    try put(object, "ownerSequence", try env.createBigintUint64(operation.sequence));
+    try object.setNamedProperty("ownerSequence", try env.createBigintUint64(operation.sequence));
     switch (operation.input.command) {
         .applyIntent => {
-            try put(object, "changed", try env.getBoolean(operation.boolean));
-            try put(object, "slot", try env.createBigintUint64(operation.input.slot));
+            try object.setNamedProperty("changed", try env.getBoolean(operation.boolean));
+            try object.setNamedProperty("slot", try env.createBigintUint64(operation.input.slot));
         },
         .getPeers => {
             const peers = try env.createArrayWithLength(operation.count);
-            for (runtime.stores.?.snapshots[store.?][0..operation.count], 0..) |*row, i| try element(peers, i, try projection.state(env, row));
-            try put(object, "peers", peers);
-            try put(object, "occupiedCount", try env.createDouble(@floatFromInt(operation.count)));
-            try put(object, "capacity", try env.createUint32(runtime.peer_capacity));
+            for (runtime.stores.?.snapshots[store.?][0..operation.count], 0..) |*row, i| try peers.setElement(@intCast(i), try projection.state(env, row));
+            try object.setNamedProperty("peers", peers);
+            try object.setNamedProperty("occupiedCount", try env.createDouble(@floatFromInt(operation.count)));
+            try object.setNamedProperty("capacity", try env.createUint32(runtime.peer_capacity));
             const counts = try env.createObject();
-            try put(counts, "connected", try env.createUint32(operation.counts.connected));
-            try put(counts, "relevant", try env.createUint32(operation.counts.relevant));
-            try put(counts, "outboundRelevant", try env.createUint32(operation.counts.outbound_relevant));
-            try put(object, "counts", counts);
+            try counts.setNamedProperty("connected", try env.createUint32(operation.counts.connected));
+            try counts.setNamedProperty("relevant", try env.createUint32(operation.counts.relevant));
+            try counts.setNamedProperty("outboundRelevant", try env.createUint32(operation.counts.outbound_relevant));
+            try object.setNamedProperty("counts", counts);
         },
         .getDirectPeers => {
             const identities = try env.createArrayWithLength(operation.count);
-            for (runtime.stores.?.direct[store.?][0..operation.count], 0..) |*peer, i| try element(identities, i, try @import("network_js.zig").peerIdValue(env, peer));
-            try put(object, "identities", identities);
+            for (runtime.stores.?.direct[store.?][0..operation.count], 0..) |*peer, i| try identities.setElement(@intCast(i), try @import("network_js.zig").peerIdValue(env, peer));
+            try object.setNamedProperty("identities", identities);
         },
         .getRememberedPeers => {
             const page = &runtime.stores.?.remembered[store.?];
-            try put(object, "genesisValidatorsRoot", try @import("network_js.zig").bytes(env, &page.genesis_root));
+            try object.setNamedProperty("genesisValidatorsRoot", try @import("network_js.zig").bytes(env, &page.genesis_root));
             const peers = try env.createArrayWithLength(operation.count);
             for (page.records[0..operation.count], 0..) |*record, i| {
                 const entry = try env.createObject();
-                try put(entry, "peerId", try @import("network_js.zig").peerIdValue(env, &record.peer));
-                try put(entry, "endpoint", try @import("network_js.zig").endpoint(env, record.address));
-                try put(entry, "qualifiedAtUnixS", try env.createDouble(@floatFromInt(record.qualified_at_s)));
-                try element(peers, i, entry);
+                try entry.setNamedProperty("peerId", try @import("network_js.zig").peerIdValue(env, &record.peer));
+                try entry.setNamedProperty("endpoint", try @import("network_js.zig").endpoint(env, record.address));
+                try entry.setNamedProperty("qualifiedAtUnixS", try env.createDouble(@floatFromInt(record.qualified_at_s)));
+                try peers.setElement(@intCast(i), entry);
             }
-            try put(object, "peers", peers);
+            try object.setNamedProperty("peers", peers);
         },
         else => {},
     }

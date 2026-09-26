@@ -26,14 +26,12 @@ pub const Lane = struct {
         self.len -= @intCast(count);
     }
 };
-const put = @import("network_js.zig").put;
-const element = @import("network_js.zig").element;
 const bytes = @import("network_js.zig").bytes;
 const endpoint = @import("network_js.zig").endpoint;
 fn connection(env: napi.Env, handle: t.Handle) !Value {
     const object = try env.createObject();
-    try put(object, "index", try env.createUint32(handle.index));
-    try put(object, "generation", try env.createUint32(handle.generation));
+    try object.setNamedProperty("index", try env.createUint32(handle.index));
+    try object.setNamedProperty("generation", try env.createUint32(handle.generation));
     return object;
 }
 fn groups(env: napi.Env, set: ?n.peers.custody.Groups) !Value {
@@ -41,73 +39,73 @@ fn groups(env: napi.Env, set: ?n.peers.custody.Groups) !Value {
     const array = try env.createArrayWithLength(value.count());
     var count: usize = 0;
     for (0..128) |i| if (value.isSet(i)) {
-        try element(array, count, try env.createUint32(@intCast(i)));
+        try array.setElement(@intCast(count), try env.createUint32(@intCast(i)));
         count += 1;
     };
     return array;
 }
 fn status(env: napi.Env, value: *const t.Status) !Value {
     const object = try env.createObject();
-    try put(object, "forkDigest", try bytes(env, &value.fork_digest));
-    try put(object, "finalizedRoot", try bytes(env, &value.finalized_root));
-    try put(object, "headRoot", try bytes(env, &value.head_root));
-    try put(object, "finalizedEpoch", try env.createBigintUint64(value.finalized_epoch));
-    try put(object, "headSlot", try env.createBigintUint64(value.head_slot));
-    try put(object, "earliestAvailableSlot", if (value.earliest_available_slot) |slot| try env.createBigintUint64(slot) else try env.getNull());
+    try object.setNamedProperty("forkDigest", try bytes(env, &value.fork_digest));
+    try object.setNamedProperty("finalizedRoot", try bytes(env, &value.finalized_root));
+    try object.setNamedProperty("headRoot", try bytes(env, &value.head_root));
+    try object.setNamedProperty("finalizedEpoch", try env.createBigintUint64(value.finalized_epoch));
+    try object.setNamedProperty("headSlot", try env.createBigintUint64(value.head_slot));
+    try object.setNamedProperty("earliestAvailableSlot", if (value.earliest_available_slot) |slot| try env.createBigintUint64(slot) else try env.getNull());
     return object;
 }
 pub fn metadata(env: napi.Env, value: *const t.Metadata) !Value {
     const object = try env.createObject();
-    try put(object, "sequenceNumber", try env.createBigintUint64(value.seq_number));
-    try put(object, "attnets", try bytes(env, &value.attnets));
-    try put(object, "syncnets", try env.createUint32(value.syncnets));
-    try put(object, "custodyGroupCount", if (value.custody_group_count) |count| try env.createBigintUint64(count) else try env.getNull());
+    try object.setNamedProperty("sequenceNumber", try env.createBigintUint64(value.seq_number));
+    try object.setNamedProperty("attnets", try bytes(env, &value.attnets));
+    try object.setNamedProperty("syncnets", try env.createUint32(value.syncnets));
+    try object.setNamedProperty("custodyGroupCount", if (value.custody_group_count) |count| try env.createBigintUint64(count) else try env.getNull());
     return object;
 }
 fn identify(env: napi.Env, value: *const n.identify.Metadata) !Value {
     const object = try env.createObject();
-    try put(object, "agent", if (value.agent) |*agent| try env.createStringUtf8(agent.slice()) else try env.getNull());
-    try put(object, "protocolVersion", if (value.protocol_version) |*version| try env.createStringUtf8(version.slice()) else try env.getNull());
+    try object.setNamedProperty("agent", if (value.agent) |*agent| try env.createStringUtf8(agent.slice()) else try env.getNull());
+    try object.setNamedProperty("protocolVersion", if (value.protocol_version) |*version| try env.createStringUtf8(version.slice()) else try env.getNull());
     const protocols = try env.createArrayWithLength(value.protocols.count());
     var index: usize = 0;
     var supported = value.protocols.iterator();
     while (supported.next()) |protocol| {
-        try element(protocols, index, try env.createStringUtf8(protocol.id()));
+        try protocols.setElement(@intCast(index), try env.createStringUtf8(protocol.id()));
         index += 1;
     }
-    try put(object, "protocols", protocols);
+    try object.setNamedProperty("protocols", protocols);
     return object;
 }
 pub fn state(env: napi.Env, value: *const t.Snapshot) !Value {
     const object = try env.createObject();
-    try put(object, "identity", try @import("network_js.zig").peerIdValue(env, &value.identity));
-    try put(object, "connection", if (value.connection) |handle| try connection(env, handle) else try env.getNull());
-    try put(object, "direction", try env.createStringUtf8(@tagName(value.direction)));
-    try put(object, "endpoint", try endpoint(env, value.endpoint));
-    try put(object, "relevant", try env.getBoolean(value.relevant));
-    try put(object, "disconnectReason", if (value.disconnect_reason) |reason| try env.createStringUtf8(@tagName(reason)) else try env.getNull());
-    try put(object, "status", if (value.status) |*v| try status(env, v) else try env.getNull());
-    try put(object, "metadata", if (value.metadata) |*v| try metadata(env, v) else try env.getNull());
-    try put(object, "identify", if (value.identify) |*v| try identify(env, v) else try env.getNull());
-    try put(object, "custodyGroups", try groups(env, value.custody_groups));
-    try put(object, "samplingGroups", try groups(env, value.sampling_groups));
-    try put(object, "direct", try env.getBoolean(value.direct));
-    try put(object, "score", try env.createDouble(value.score));
-    try put(object, "scoreAtMs", try env.createBigintUint64(value.score_at_ms));
+    try object.setNamedProperty("identity", try @import("network_js.zig").peerIdValue(env, &value.identity));
+    try object.setNamedProperty("connection", if (value.connection) |handle| try connection(env, handle) else try env.getNull());
+    try object.setNamedProperty("direction", try env.createStringUtf8(@tagName(value.direction)));
+    try object.setNamedProperty("endpoint", try endpoint(env, value.endpoint));
+    try object.setNamedProperty("relevant", try env.getBoolean(value.relevant));
+    try object.setNamedProperty("disconnectReason", if (value.disconnect_reason) |reason| try env.createStringUtf8(@tagName(reason)) else try env.getNull());
+    try object.setNamedProperty("status", if (value.status) |*v| try status(env, v) else try env.getNull());
+    try object.setNamedProperty("metadata", if (value.metadata) |*v| try metadata(env, v) else try env.getNull());
+    try object.setNamedProperty("identify", if (value.identify) |*v| try identify(env, v) else try env.getNull());
+    try object.setNamedProperty("custodyGroups", try groups(env, value.custody_groups));
+    try object.setNamedProperty("samplingGroups", try groups(env, value.sampling_groups));
+    try object.setNamedProperty("direct", try env.getBoolean(value.direct));
+    try object.setNamedProperty("score", try env.createDouble(value.score));
+    try object.setNamedProperty("scoreAtMs", try env.createBigintUint64(value.score_at_ms));
     inline for (.{ .{ "statusAtMs", "status_at_ms" }, .{ "metadataAtMs", "metadata_at_ms" }, .{ "connectedAtMs", "connected_at_ms" }, .{ "banUntilMs", "ban_until_ms" }, .{ "goodbyeUntilMs", "goodbye_until_ms" }, .{ "redialUntilMs", "redial_until_ms" } }) |pair|
-        try put(object, pair[0], try env.createBigintUint64(@field(value, pair[1])));
+        try object.setNamedProperty(pair[0], try env.createBigintUint64(@field(value, pair[1])));
     return object;
 }
 pub fn observation(env: napi.Env, entry: *const Entry) !Value {
     const object = try env.createObject();
-    try put(object, "type", try env.createStringUtf8(@tagName(entry.event)));
-    try put(object, "ownerSequence", try env.createBigintUint64(entry.sequence));
+    try object.setNamedProperty("type", try env.createStringUtf8(@tagName(entry.event)));
+    try object.setNamedProperty("ownerSequence", try env.createBigintUint64(entry.sequence));
     switch (entry.event) {
-        .ready, .updated => |*value| try put(object, "state", try state(env, value)),
+        .ready, .updated => |*value| try object.setNamedProperty("state", try state(env, value)),
         .closed => |value| {
-            try put(object, "connection", try connection(env, value.connection));
-            try put(object, "identity", try @import("network_js.zig").peerIdValue(env, &value.identity));
-            try put(object, "reason", try env.createStringUtf8(@tagName(value.reason)));
+            try object.setNamedProperty("connection", try connection(env, value.connection));
+            try object.setNamedProperty("identity", try @import("network_js.zig").peerIdValue(env, &value.identity));
+            try object.setNamedProperty("reason", try env.createStringUtf8(@tagName(value.reason)));
         },
     }
     return object;

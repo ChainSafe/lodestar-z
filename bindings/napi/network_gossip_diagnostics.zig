@@ -2,62 +2,60 @@ const std = @import("std");
 const napi = @import("zapi:zapi").napi;
 const d = @import("network").gossipsub.diagnostics;
 const Value = napi.Value;
-const element = @import("network_js.zig").element;
 
-const put = @import("network_js.zig").put;
 const bytes = @import("network_js.zig").bytes;
 fn weights(env: napi.Env, value: anytype) !Value {
     const object = try env.createObject();
-    inline for (std.meta.fields(@TypeOf(value.*))) |field| try put(object, field.name, try env.createDouble(@field(value, field.name)));
+    inline for (std.meta.fields(@TypeOf(value.*))) |field| try object.setNamedProperty(field.name, try env.createDouble(@field(value, field.name)));
     return object;
 }
 
 pub fn copy(env: napi.Env, page: *const d.Page) !Value {
     const object = try env.createObject();
-    try put(object, "observedMonoMs", try env.createBigintUint64(page.mono_ms));
-    try put(object, "observedUnixMs", try env.createBigintInt64(page.unix_s *| 1000));
-    try put(object, "nextCursor", if (page.next) |next| try env.createUint32(next) else try env.getNull());
+    try object.setNamedProperty("observedMonoMs", try env.createBigintUint64(page.mono_ms));
+    try object.setNamedProperty("observedUnixMs", try env.createBigintInt64(page.unix_s *| 1000));
+    try object.setNamedProperty("nextCursor", if (page.next) |next| try env.createUint32(next) else try env.getNull());
     const topics = try env.createArrayWithLength(page.topic_count);
     for (page.topics[0..page.topic_count], 0..) |*topic, i| {
         const row = try env.createObject();
-        try put(row, "index", try env.createUint32(topic.index));
-        try put(row, "topic", try env.createStringUtf8(topic.name[0..topic.len]));
-        try put(row, "subscribed", try env.getBoolean(topic.subscribed));
-        try put(row, "weight", try env.createDouble(topic.weight));
-        try put(row, "meshDeliveryActivationMs", try env.createBigintUint64(topic.mesh_activation_ms));
-        try element(topics, i, row);
+        try row.setNamedProperty("index", try env.createUint32(topic.index));
+        try row.setNamedProperty("topic", try env.createStringUtf8(topic.name[0..topic.len]));
+        try row.setNamedProperty("subscribed", try env.getBoolean(topic.subscribed));
+        try row.setNamedProperty("weight", try env.createDouble(topic.weight));
+        try row.setNamedProperty("meshDeliveryActivationMs", try env.createBigintUint64(topic.mesh_activation_ms));
+        try topics.setElement(@intCast(i), row);
     }
-    try put(object, "topics", topics);
+    try object.setNamedProperty("topics", topics);
     const peers = try env.createArrayWithLength(page.peer_count);
     for (page.peers[0..page.peer_count], 0..) |*peer, i| {
         const row = try env.createObject();
-        try put(row, "identity", try @import("network_js.zig").peerIdValue(env, &peer.identity));
-        try put(row, "ip", try bytes(env, &peer.address));
-        try put(row, "connected", try env.getBoolean(peer.connected));
-        try put(row, "outboundReady", try env.getBoolean(peer.outbound_ready));
-        try put(row, "expireAtMs", try env.createBigintUint64(peer.retain_until));
-        try put(row, "score", try env.createDouble(peer.score));
-        try put(row, "appScore", try env.createDouble(0));
-        try put(row, "behaviourPenalty", try env.createDouble(peer.behaviour));
-        try put(row, "weights", try weights(env, &peer.weights));
+        try row.setNamedProperty("identity", try @import("network_js.zig").peerIdValue(env, &peer.identity));
+        try row.setNamedProperty("ip", try bytes(env, &peer.address));
+        try row.setNamedProperty("connected", try env.getBoolean(peer.connected));
+        try row.setNamedProperty("outboundReady", try env.getBoolean(peer.outbound_ready));
+        try row.setNamedProperty("expireAtMs", try env.createBigintUint64(peer.retain_until));
+        try row.setNamedProperty("score", try env.createDouble(peer.score));
+        try row.setNamedProperty("appScore", try env.createDouble(0));
+        try row.setNamedProperty("behaviourPenalty", try env.createDouble(peer.behaviour));
+        try row.setNamedProperty("weights", try weights(env, &peer.weights));
         const scores = try env.createArrayWithLength(peer.topic_count);
         for (peer.topics[0..peer.topic_count], 0..) |*entry, j| {
             const stats = try env.createObject();
-            try put(stats, "index", try env.createUint32(entry.index));
-            try put(stats, "inMesh", try env.getBoolean(entry.counters.in_mesh));
-            try put(stats, "meshMember", try env.getBoolean(entry.mesh_member));
-            try put(stats, "graftTimeMs", try env.createBigintUint64(entry.counters.graft_ms));
-            try put(stats, "meshTimeMs", try env.createBigintUint64(if (entry.counters.in_mesh) page.mono_ms -| entry.counters.graft_ms else 0));
-            try put(stats, "firstMessageDeliveries", try env.createDouble(entry.counters.first_deliveries));
-            try put(stats, "meshMessageDeliveries", try env.createDouble(entry.counters.mesh_deliveries));
-            try put(stats, "meshFailurePenalty", try env.createDouble(entry.counters.mesh_failures));
-            try put(stats, "invalidMessageDeliveries", try env.createDouble(entry.counters.invalid));
-            try put(stats, "weights", try weights(env, &entry.weights));
-            try element(scores, j, stats);
+            try stats.setNamedProperty("index", try env.createUint32(entry.index));
+            try stats.setNamedProperty("inMesh", try env.getBoolean(entry.counters.in_mesh));
+            try stats.setNamedProperty("meshMember", try env.getBoolean(entry.mesh_member));
+            try stats.setNamedProperty("graftTimeMs", try env.createBigintUint64(entry.counters.graft_ms));
+            try stats.setNamedProperty("meshTimeMs", try env.createBigintUint64(if (entry.counters.in_mesh) page.mono_ms -| entry.counters.graft_ms else 0));
+            try stats.setNamedProperty("firstMessageDeliveries", try env.createDouble(entry.counters.first_deliveries));
+            try stats.setNamedProperty("meshMessageDeliveries", try env.createDouble(entry.counters.mesh_deliveries));
+            try stats.setNamedProperty("meshFailurePenalty", try env.createDouble(entry.counters.mesh_failures));
+            try stats.setNamedProperty("invalidMessageDeliveries", try env.createDouble(entry.counters.invalid));
+            try stats.setNamedProperty("weights", try weights(env, &entry.weights));
+            try scores.setElement(@intCast(j), stats);
         }
-        try put(row, "topics", scores);
-        try element(peers, i, row);
+        try row.setNamedProperty("topics", scores);
+        try peers.setElement(@intCast(i), row);
     }
-    try put(object, "peers", peers);
+    try object.setNamedProperty("peers", peers);
     return object;
 }

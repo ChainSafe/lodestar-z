@@ -6,20 +6,19 @@ const r = @import("network_runtime.zig");
 const incoming = @import("network_incoming.zig");
 const Runtime = r.Runtime;
 
-const put = @import("network_js.zig").put;
 const bytes = @import("network_js.zig").bytes;
 const errorValue = @import("network_js.zig").errorValue;
 fn connectionValue(env: napi.Env, connection: @import("network").quic.engine.Handle) !Value {
     const object = try env.createObject();
-    try put(object, "index", try env.createUint32(connection.index));
-    try put(object, "generation", try env.createUint32(connection.generation));
+    try object.setNamedProperty("index", try env.createUint32(connection.index));
+    try object.setNamedProperty("generation", try env.createUint32(connection.generation));
     return object;
 }
 fn tokenValue(runtime: *Runtime, token: incoming.Token) !Value {
     const env = runtime.env;
     const object = try env.createObject();
-    try put(object, "index", try env.createUint32(token.index));
-    try put(object, "generation", try env.createBigintUint64(token.generation));
+    try object.setNamedProperty("index", try env.createUint32(token.index));
+    try object.setNamedProperty("generation", try env.createBigintUint64(token.generation));
     return object;
 }
 fn parseHandle(value: Value) !incoming.Token {
@@ -44,16 +43,16 @@ fn refNotify(runtime: *Runtime) void {
 pub fn descriptorValue(runtime: *Runtime, token: incoming.Token, cell: *const incoming.Cell, deferred: napi.Deferred) !Value {
     const env = runtime.env;
     const object = try env.createObject();
-    try put(object, "handle", try tokenValue(runtime, token));
-    try put(object, "peerId", try @import("network_js.zig").peerIdValue(env, &cell.identity));
-    try put(object, "connection", try connectionValue(env, cell.connection));
-    try put(object, "protocol", try env.createStringUtf8(cell.protocol.id()));
+    try object.setNamedProperty("handle", try tokenValue(runtime, token));
+    try object.setNamedProperty("peerId", try @import("network_js.zig").peerIdValue(env, &cell.identity));
+    try object.setNamedProperty("connection", try connectionValue(env, cell.connection));
+    try object.setNamedProperty("protocol", try env.createStringUtf8(cell.protocol.id()));
     var destination: [*]u8 = undefined;
     const buffer = try env.createArrayBuffer(cell.input.len, &destination);
     const data = try env.createTypedarray(.uint8, cell.input.len, buffer, 0);
     @memcpy(destination[0..cell.input.len], cell.input);
-    try put(object, "data", data);
-    try put(object, "closed", deferred.getPromise());
+    try object.setNamedProperty("data", data);
+    try object.setNamedProperty("closed", deferred.getPromise());
     return object;
 }
 fn contextFor(value: Value) !?@import("network").reqresp.ForkEntry {
@@ -211,12 +210,12 @@ fn ackError(env: napi.Env, ack: incoming.Ack) !Value {
         .closed => return errorValue(env, "NetworkClosed"),
         .failed => |reason| {
             const object = try errorValue(env, "NetworkIncomingFailed");
-            try put(object, "failure", try env.createStringUtf8(@tagName(reason)));
+            try object.setNamedProperty("failure", try env.createStringUtf8(@tagName(reason)));
             return object;
         },
         .rejected => |reason| {
             const object = try errorValue(env, "NetworkIncomingRejected");
-            try put(object, "reason", try env.createStringUtf8(@tagName(reason)));
+            try object.setNamedProperty("reason", try env.createStringUtf8(@tagName(reason)));
             return object;
         },
     }

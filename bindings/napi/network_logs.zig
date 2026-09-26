@@ -3,8 +3,6 @@ const js = @import("zapi:zapi").js;
 const Value = @import("zapi:zapi").napi.Value;
 const logging = @import("network").logging;
 const cfg = @import("network_config.zig");
-const put = @import("network_js.zig").put;
-const element = @import("network_js.zig").element;
 const Runtime = @import("network_runtime.zig").Runtime;
 
 pub fn drain(runtime: *Runtime, limit: Value) !js.Value {
@@ -16,20 +14,20 @@ pub fn drain(runtime: *Runtime, limit: Value) !js.Value {
     const array = try env.createArrayWithLength(batch.count);
     for (records[0..batch.count], 0..) |*record, i| {
         const value = try env.createObject();
-        try put(value, "level", try env.createStringUtf8(logging.levelName(record.level)));
-        try put(value, "scope", try env.createStringUtf8(@tagName(record.scope)));
-        try put(value, "message", try env.createStringUtf8(record.message[0..record.len]));
-        try put(value, "sequence", try env.createBigintUint64(record.sequence));
-        try put(value, "timestampMs", try env.createBigintUint64(record.timestamp_ms));
-        try put(value, "monotonicMs", try env.createBigintUint64(record.monotonic_ms));
-        try put(value, "truncated", try env.getBoolean(record.truncated));
-        try element(array, i, value);
+        try value.setNamedProperty("level", try env.createStringUtf8(logging.levelName(record.level)));
+        try value.setNamedProperty("scope", try env.createStringUtf8(@tagName(record.scope)));
+        try value.setNamedProperty("message", try env.createStringUtf8(record.message[0..record.len]));
+        try value.setNamedProperty("sequence", try env.createBigintUint64(record.sequence));
+        try value.setNamedProperty("timestampMs", try env.createBigintUint64(record.timestamp_ms));
+        try value.setNamedProperty("monotonicMs", try env.createBigintUint64(record.monotonic_ms));
+        try value.setNamedProperty("truncated", try env.getBoolean(record.truncated));
+        try array.setElement(@intCast(i), value);
     }
     const result = try env.createObject();
-    try put(result, "records", array);
-    try put(result, "more", try env.getBoolean(batch.more));
+    try result.setNamedProperty("records", array);
+    try result.setNamedProperty("more", try env.getBoolean(batch.more));
     inline for (.{ "dropped", "suppressed", "truncated" }) |kind| {
-        try put(result, kind, try env.createBigintUint64(batch.stats.total(kind)));
+        try result.setNamedProperty(kind, try env.createBigintUint64(batch.stats.total(kind)));
     }
     runtime.logs.commit(batch.count);
     return .{ .val = result };
