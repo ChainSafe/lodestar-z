@@ -305,7 +305,7 @@ fn endLocked(runtime: *Runtime, demand: *const Demand, selection: *const Selecti
         if (enabled(runtime, demand, @enumFromInt(next))) outcome.more = true else outcome.disabled = true;
         next = ready.rows[next].link.next;
     }
-    if (ready.arm()) runtime.bridge.boundary();
+    _ = ready.arm();
     return outcome;
 }
 

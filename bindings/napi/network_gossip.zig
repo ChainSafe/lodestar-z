@@ -67,8 +67,6 @@ pub const Ingress = struct {
     fn hasCapacity(context: *anyopaque, kind: native.topic.Kind, len: usize) bool {
         const self: *Ingress = @ptrCast(@alignCast(context));
         if (self.failure != null) return false;
-        const previous = r.phase(.gossip_ingress);
-        defer r.restore(previous);
         const runtime = self.runtime;
         runtime.lock();
         defer runtime.unlock();
@@ -88,21 +86,13 @@ pub const Ingress = struct {
     }
 
     fn capture(self: *Ingress, candidate: *native.Admission) !bool {
-        const previous = r.phase(.gossip_ingress);
-        defer r.restore(previous);
         const runtime = self.runtime;
         const clock = try sample(self.io);
         const received_at = try projectWall(candidate.event.admitted_ms, clock);
         runtime.lock();
         defer runtime.unlock();
-        const admitted_ns = r.bridge.now();
         if (runtime.stop or self.failure != null) return false;
-        const table = &runtime.gossip.?;
-        const accepted = table.admit(runtime.heavy.?.core.service.gossipsub, candidate, clock.mono_ms, received_at, runtime.slot);
-        if (accepted) {
-            const kind = native.topic.parseCanonical(candidate.event.topic).?.name.kind;
-            runtime.bridge.admission_lag[@intFromEnum(r.bridge.admissionKind(kind))].observe(admitted_ns -| runtime.heavy.?.core.tick_ns);
-        }
+        const accepted = runtime.gossip.?.admit(runtime.heavy.?.core.service.gossipsub, candidate, clock.mono_ms, received_at, runtime.slot);
         runtime.recomputeLocked(.checks);
         runtime.recomputeLocked(.gossip);
         return accepted;

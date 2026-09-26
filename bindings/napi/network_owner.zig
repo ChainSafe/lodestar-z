@@ -117,8 +117,6 @@ fn serve(self: *Runtime) !void {
 /// poll, then the turn's application events, connect completions and publication. Returns null
 /// once the owner stops.
 fn turn(self: *Runtime, io: std.Io, host: *Host, ingress: *const gossip_mod.Ingress) !?n.network_core.Result {
-    const previous = r.phase(.turn);
-    defer r.restore(previous);
     self.lock();
     const stop = self.stop;
     const graceful = self.graceful and self.reason == .requested;
@@ -148,17 +146,10 @@ fn turn(self: *Runtime, io: std.Io, host: *Host, ingress: *const gossip_mod.Ingr
     if (ingress.failure) |err| return err;
     // The step's clock was read after its poll, so deadlines that ended the wait are due.
     const tick = result.transport.now;
-    try within(.capture, requests_mod.capture, .{ self, self.heavy.?.application_outputs[0..result.counts.application], tick });
-    within(.commands, commands.completeConnects, .{ self, tick });
-    within(.peer_lane, publishTurn, .{ self, &result, tick, sequence });
+    try requests_mod.capture(self, self.heavy.?.application_outputs[0..result.counts.application], tick);
+    commands.completeConnects(self, tick);
+    publishTurn(self, &result, tick, sequence);
     return result;
-}
-
-/// Runs one owner step with its runtime mutex holds attributed to `value`.
-fn within(value: bridge.Phase, comptime function: anytype, args: anytype) @TypeOf(@call(.auto, function, args)) {
-    const previous = r.phase(value);
-    defer r.restore(previous);
-    return @call(.auto, function, args);
 }
 
 /// The earliest host-owned deadline, read under the lock: metrics rendering, the health log,
@@ -209,12 +200,12 @@ fn applyWork(self: *Runtime, io: std.Io, tick: n.Now) !n.network_core.HostProgre
     if (stopped) return .{};
     var more = false;
     if (!stop) {
-        more = within(.reports, applyReports, .{ self, tick }) or more;
+        more = applyReports(self, tick) or more;
         more = try executeWork(self, io) or more;
     }
-    more = try within(.gossip_flags, gossip_mod.flags, .{ self, io }) or more;
-    within(.request_flags, requests_mod.flags, .{ self, io });
-    more = try within(.incoming_flags, incoming_mod.flags, .{ self, tick }) or more;
+    more = try gossip_mod.flags(self, io) or more;
+    requests_mod.flags(self, io);
+    more = try incoming_mod.flags(self, tick) or more;
     return .{ .more = more };
 }
 
@@ -272,7 +263,7 @@ fn executeWork(self: *Runtime, io: std.Io) !bool {
             };
             self.table.transition(cell, .executing);
             self.unlock();
-            within(.commands, commands.execute, .{ self, command.?, now(io) });
+            commands.execute(self, command.?, now(io));
             controls += 1;
         } else if (order == publish_order) {
             const len = self.publications.?.get(publication.?).?.payload.len;
@@ -285,7 +276,7 @@ fn executeWork(self: *Runtime, io: std.Io) !bool {
                 return err;
             };
             self.unlock();
-            within(.publications, publications.execute, .{ self, publication.?, now(io) });
+            publications.execute(self, publication.?, now(io));
             publishes += 1;
             bytes += len;
         } else {
@@ -298,7 +289,7 @@ fn executeWork(self: *Runtime, io: std.Io) !bool {
                 return err;
             };
             self.unlock();
-            try within(.requests, requests_mod.submit, .{ self, request.?, now(io) });
+            try requests_mod.submit(self, request.?, now(io));
             requests += 1;
         }
     }
@@ -307,7 +298,7 @@ fn executeWork(self: *Runtime, io: std.Io) !bool {
 fn publishTurn(self: *Runtime, result: *const n.network_core.Result, timestamp: n.Now, sequence: u64) void {
     const counts = self.heavy.?.core.peerCounts();
     if (timestamp.mono_ms >= self.metrics_due_ms) {
-        within(.metrics, publishMetrics, .{ self, now(self.heavy.?.threaded.io()) }) catch |err| {
+        publishMetrics(self, now(self.heavy.?.threaded.io())) catch |err| {
             self.lock();
             self.metrics.failure = err;
             self.unlock();
