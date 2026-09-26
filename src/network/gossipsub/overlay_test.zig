@@ -28,41 +28,39 @@ const Fixture = struct {
     }
 };
 
-test "mesh metrics count actual transitions once and distinguish local changes from peer failures" {
+test "mesh removals take each member out once whatever removed it" {
     var f = try Fixture.init(7);
     defer f.g.deinit();
     const context = f.g.overlayContext(2);
     const name = f.g.overlay.topicString(f.topic);
+    const mesh = f.g.overlay.mesh(f.topic);
     for (0..7) |peer| f.g.overlay.onGraft(&context, f.topic, @intCast(peer));
-    try std.testing.expectEqual(@as(usize, 7), f.g.overlay.mesh(f.topic).count());
+    try std.testing.expectEqual(@as(usize, 7), mesh.count());
     f.g.overlay.onGraft(&context, f.topic, 0);
+    try std.testing.expectEqual(@as(usize, 7), mesh.count());
     f.g.overlay.onPrune(&context, f.topic, 0, c.prune_backoff_ms);
     f.g.overlay.onPrune(&context, f.topic, 0, c.prune_backoff_ms);
     f.g.overlay.onGraft(&context, f.topic, 0);
+    try std.testing.expect(!mesh.isSet(0));
     _ = f.g.overlay.peerSubscription(&context, 1, name, false);
     _ = f.g.overlay.peerSubscription(&context, 1, name, false);
+    try std.testing.expect(!mesh.isSet(1));
     f.g.markDirect(f.g.sessions.rows[2].conn);
     f.g.markDirect(f.g.sessions.rows[2].conn);
+    try std.testing.expect(!mesh.isSet(2));
     const stream = f.g.sessions.rows[3].outStream().?;
     f.g.sessions.setOutbound(3, .{ .closing = stream });
     f.g.peers.scores.penalize(f.g.sessions.rows[4].logical.index, 50);
     f.g.overlay.maintain(&context, f.topic);
+    try std.testing.expect(!mesh.isSet(3) and !mesh.isSet(4));
+    try std.testing.expectEqual(@as(usize, 2), mesh.count());
     const disconnected = f.g.sessions.rows[6].conn;
     f.g.connectionClosed(disconnected);
     f.g.connectionClosed(disconnected);
+    try std.testing.expectEqual(@as(usize, 1), mesh.count());
     f.g.overlay.setLocal(&context, f.topic, false);
     f.g.overlay.setLocal(&context, f.topic, false);
-
-    const events = @import("mesh_metrics.zig");
-    const kind = @intFromEnum(@import("topic_policy.zig").Kind.beacon_block);
-    const counts = &f.g.overlay.metrics;
-    try std.testing.expectEqual(@as(u64, 7), counts.additions[kind][@intFromEnum(events.Addition.remote_graft)]);
-    inline for (.{ .prune, .remote_unsubscribe, .direct, .stream_unavailable, .bad_score, .disconnected, .local_unsubscribe }) |reason| {
-        try std.testing.expectEqual(@as(u64, 1), counts.removals[kind][@intFromEnum(@as(events.Removal, reason))]);
-    }
-    try std.testing.expectEqual(@as(u64, 0), counts.removals[kind][@intFromEnum(events.Removal.backoff)]);
-    try std.testing.expectEqual(@as(u64, 0), counts.removals[kind][@intFromEnum(events.Removal.excess)]);
-    try std.testing.expectEqual(@as(usize, 0), f.g.overlay.mesh(f.topic).count());
+    try std.testing.expectEqual(@as(usize, 0), mesh.count());
 }
 
 test "gossip heartbeat admits sessions newer than its score snapshot" {
@@ -95,7 +93,7 @@ test "gossip short PRUNE backoff does not count a GRAFT flood" {
     const context = f.context(2);
     f.g.overlay.onPrune(&context, f.topic, 0, c.graft_flood_threshold_ms);
     f.g.overlay.onGraft(&context, f.topic, 0);
-    try std.testing.expectEqual(@as(u64, 1), f.g.peers.scores.penalties.graft_backoff);
+    try std.testing.expectEqual(@as(f64, 1), f.g.peers.scores.rows[f.g.sessions.rows[0].logical.index].behaviour);
 }
 
 test "gossip policy mesh trimming preserves highest scores and outbound quota" {
@@ -138,17 +136,15 @@ test "gossip policy mesh queue pressure preserves required action ownership" {
     const bytes = try std.testing.allocator.alloc(u8, f.g.options.critical_bytes);
     defer std.testing.allocator.free(bytes);
     @memset(bytes, 0);
-    try std.testing.expect(f.g.sessions.rows[0].io.tx.injectFrame(bytes, true, null, 1) != null);
+    try std.testing.expect(f.g.sessions.rows[0].io.tx.injectFrame(bytes, true, 1) != null);
     f.g.cycle.takeSnapshot(context.sessions, context.peers, context.now);
     f.g.overlay.maintain(&context, f.topic);
     try std.testing.expectEqual(@as(usize, 0), f.g.overlay.mesh(f.topic).count());
-    try std.testing.expectEqual(@as(u64, 0), f.g.overlay.metrics.additions[0][0]);
     f.g.sessions.rows[0].io.tx.cancelStream(&f.g.messages.store);
     f.g.overlay.maintain(&context, f.topic);
     try std.testing.expectEqual(@as(usize, 1), f.g.overlay.mesh(f.topic).count());
-    try std.testing.expectEqual(@as(u64, 1), f.g.overlay.metrics.additions[0][0]);
     f.g.sessions.rows[0].io.tx.cancelStream(&f.g.messages.store);
-    try std.testing.expect(f.g.sessions.rows[0].io.tx.injectFrame(bytes, true, null, 2) != null);
+    try std.testing.expect(f.g.sessions.rows[0].io.tx.injectFrame(bytes, true, 2) != null);
     f.g.peers.scores.penalize(0, 7);
     f.g.cycle.takeSnapshot(context.sessions, context.peers, context.now);
     f.g.overlay.maintain(&context, f.topic);
@@ -199,14 +195,14 @@ test "gossip GRAFT admission preserves subscription and mesh state at both queue
     const tx = &f.g.sessions.rows[0].io.tx;
     const bytes = f.g.msg_scratch[0..tx.critical.bytes.len];
     @memset(bytes, 0);
-    try std.testing.expect(tx.injectFrame(bytes, true, null, 1) != null);
+    try std.testing.expect(tx.injectFrame(bytes, true, 1) != null);
     f.g.overlay.maintain(&context, f.topic);
     try std.testing.expect(tx.subscription_dirty.isSet(f.topic));
     try std.testing.expect(!f.g.overlay.inMesh(f.topic, 0));
     tx.critical.reset();
     const body = protobuf.subscriptionSize(f.g.overlay.topicString(f.topic));
     const subscription_size = protobuf.varintLen(body) + body;
-    try std.testing.expect(tx.injectFrame(bytes[0 .. bytes.len - subscription_size], true, null, 1) != null);
+    try std.testing.expect(tx.injectFrame(bytes[0 .. bytes.len - subscription_size], true, 1) != null);
     f.g.overlay.maintain(&context, f.topic);
     try std.testing.expect(!tx.subscription_dirty.isSet(f.topic));
     try std.testing.expect(!f.g.overlay.inMesh(f.topic, 0));
@@ -258,7 +254,7 @@ test "gossip PRUNE exhaustion ends eligibility even after queue capacity returns
     const full = try std.testing.allocator.alloc(u8, f.g.options.critical_bytes);
     defer std.testing.allocator.free(full);
     @memset(full, 0);
-    try std.testing.expect(io.tx.injectFrame(full, true, null, 1) != null);
+    try std.testing.expect(io.tx.injectFrame(full, true, 1) != null);
     try gossip_test.unsubscribe(&f.g, f.g.overlay.topicString(f.topic));
     try std.testing.expect(f.g.sessions.rows[0].outbound == .closing);
     try std.testing.expect(!f.g.overlay.mesh(f.topic).isSet(0));
@@ -297,9 +293,9 @@ test "overlay unsubscribe and disconnect retire membership and score together" {
     try std.testing.expect(!f.g.overlay.subscribers(f.topic).isSet(0));
     try std.testing.expect(!f.g.overlay.mesh(f.topic).isSet(0));
     try std.testing.expect(!f.g.peers.scores.topics[@as(usize, first) * c.topics_cap + f.topic].in_mesh);
-    const penalties = f.g.peers.scores.penalties.message_deficit;
+    const failures = f.g.peers.scores.topics[@as(usize, first) * c.topics_cap + f.topic].mesh_failures;
     _ = f.g.overlay.peerSubscription(&context, 0, f.g.overlay.topicString(f.topic), false);
-    try std.testing.expectEqual(penalties, f.g.peers.scores.penalties.message_deficit);
+    try std.testing.expectEqual(failures, f.g.peers.scores.topics[@as(usize, first) * c.topics_cap + f.topic].mesh_failures);
     f.g.overlay.peerDisconnected(&context, 1);
     try std.testing.expect(!f.g.overlay.subscribers(f.topic).isSet(1));
     try std.testing.expect(!f.g.overlay.mesh(f.topic).isSet(1));

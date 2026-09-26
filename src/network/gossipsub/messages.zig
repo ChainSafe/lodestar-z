@@ -96,8 +96,6 @@ pub const Messages = struct {
     seen: mcache.SeenCache,
     validation: validation.Validation,
     gossip_ids: []MessageId,
-    decoded_messages: u64 = 0,
-    fast_hits: u64 = 0,
     storage_refusals: StorageRefusals = @splat(0),
     /// Accepted or published messages whose kind's retention allowance stayed full: they are
     /// neither cached nor forwarded.
@@ -142,21 +140,9 @@ pub const Messages = struct {
             mcache.SeenCache.backingBytes(layout.seen);
     }
 
-    pub const Stats = struct {
-        seen: usize,
-        history: usize,
-        recent: usize = 0,
-        pending: usize = 0,
-        fast_hits: u64,
-        decoded: u64,
-        delivery_evictions: u64,
-        storage_refusals: StorageRefusals,
-    };
-
-    pub fn stats(self: *const Messages) Stats {
-        var result: Stats = .{ .seen = self.seen.count, .history = self.history.count, .fast_hits = self.fast_hits, .decoded = self.decoded_messages, .delivery_evictions = self.validation.delivery_evictions, .storage_refusals = self.storage_refusals };
-        for (self.validation.recent) |*entry| result.recent += @intFromBool(entry.state != .free);
-        for (self.validation.entries) |*entry| result.pending += @intFromBool(entry.state == .pending);
+    pub fn pendingValidations(self: *const Messages) usize {
+        var result: usize = 0;
+        for (self.validation.entries) |*entry| result += @intFromBool(entry.state == .pending);
         return result;
     }
 
@@ -187,17 +173,16 @@ pub const Messages = struct {
 
     pub const ServeOutcome = union(enum) {
         unknown,
-        known: struct { topic: []const u8, result: enum { queued, limited, pressured } },
+        known: enum { queued, limited, pressured },
     };
 
     pub fn serve(self: *Messages, outbox: *@import("outbox.zig").Outbox, peer: PeerRef, id: MessageId, limits: @import("delivery.zig").Limits, now: u64) ServeOutcome {
         const slot = self.history.get(&self.store, id) orelse return .unknown;
-        const topic = self.store.get(self.history.message(slot)).?.topicString();
         self.history.bindPeer(peer);
-        if (!self.history.iwantAllowed(slot, peer, @import("constants.zig").gossip_retransmission)) return .{ .known = .{ .topic = topic, .result = .limited } };
+        if (!self.history.iwantAllowed(slot, peer, @import("constants.zig").gossip_retransmission)) return .{ .known = .limited };
         const queued = outbox.queueData(&self.store, self.history.message(slot), .iwant, limits, now) == .queued;
         if (queued) self.history.sent(slot, peer);
-        return .{ .known = .{ .topic = topic, .result = if (queued) .queued else .pressured } };
+        return .{ .known = if (queued) .queued else .pressured };
     }
 
     pub fn publish(self: *Messages, id: MessageId, name: []const u8, compressed: []const u8, now: u64, epoch: u64) ?storage.Handle {
@@ -237,13 +222,9 @@ pub const Messages = struct {
         const fingerprint = hash.finalResult();
         const cached = &self.fast[std.mem.readInt(u64, fingerprint[0..8], .little) % self.fast.len];
         if (std.mem.eql(u8, &cached.fingerprint, &fingerprint)) switch (cached.result) {
-            .valid => |id| if (self.duplicateId(context, source, topic, id, now)) {
-                self.fast_hits +|= 1;
-                return .{ .duplicate = id };
-            },
+            .valid => |id| if (self.duplicateId(context, source, topic, id, now)) return .{ .duplicate = id },
             .invalid => |id| {
                 _ = self.seen.add(id, now);
-                self.fast_hits +|= 1;
                 return invalid(context, source, topic, .snappy);
             },
             .empty => {},
@@ -252,7 +233,6 @@ pub const Messages = struct {
         if (refusal) |reason| return self.refuseStorage(reason);
         const output = workspace.scratch[0..size];
         const decoded = admission.decode(&msg, output, context.options.message_id_policy);
-        self.decoded_messages +|= 1;
         cached.* = .{ .fingerprint = fingerprint, .result = if (decoded == .invalid) .{ .invalid = decoded.invalid } else .{ .valid = decoded.valid.id } };
         if (decoded == .invalid) {
             _ = self.seen.add(decoded.invalid, now);

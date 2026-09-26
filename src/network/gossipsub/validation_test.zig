@@ -50,7 +50,6 @@ test "gossip validation topic pins follow attribution ownership through replacem
         store.seal(m);
         v.finish(&store, handle, .accept, 32 + i);
     }
-    try std.testing.expectEqual(@as(u64, 2), v.delivery_evictions);
     try std.testing.expectEqual(@as(u32, 4), v.topic_pin_counts[0]);
     try std.testing.expectEqual(@as(u32, 4), v.topic_pin_counts[1]);
     v.clear(&store, &peers);
@@ -146,7 +145,6 @@ test "gossip validation reservation rollback preserves attribution and prior out
     try std.testing.expectEqual(indexed, v.index.find(id).?);
     try std.testing.expectEqual(Verdict.reject, v.find(id, 2).?.verdict);
     try std.testing.expectEqual(Outcome.already_resolved, v.inspect(&store, &peers, handle, 2).?);
-    try std.testing.expectEqual(@as(u64, 0), v.delivery_evictions);
     try std.testing.expectEqual(@as(u32, 1), peers.rows[0].pins);
 }
 
@@ -201,7 +199,6 @@ test "gossip validation index bounds sparse lookups and follows replacement expi
         try std.testing.expectEqual(Verdict.reject, v.find(id, 2).?.verdict);
     }
     try std.testing.expect(v.find(first, 2) != null);
-    try std.testing.expectEqual(@as(u64, 0), v.delivery_evictions);
     try std.testing.expect(v.find(second, 21) == null);
     try std.testing.expect(v.index.find(second) != null);
     var retry = v.reserve(second).?;

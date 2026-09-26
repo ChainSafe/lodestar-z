@@ -11,11 +11,8 @@ pub const TimeoutReason = enum { subscriptions, receive_frame, send_queue, send_
 pub const ActiveRpc = struct {
     reader: protobuf.RpcReader,
     item: ?protobuf.RpcReader.ItemRange = null,
-    item_observed: bool = false,
-    had_control: bool = false,
     pub fn consumeItem(self: *ActiveRpc) void {
         self.item = null;
-        self.item_observed = false;
     }
 };
 

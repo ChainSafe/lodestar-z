@@ -51,7 +51,6 @@ pub const Validation = struct {
     pending_entries: lists.List = .{},
     free_records: lists.List = .{},
     resolved_records: lists.List = .{},
-    delivery_evictions: u64 = 0,
     topic_pin_counts: [@import("constants.zig").topics_cap]u32 = @splat(0),
     topic_pins: @import("local_intent.zig").TopicSet = .initEmpty(),
 
@@ -146,7 +145,6 @@ pub const Validation = struct {
             const record = &owner.recent[self.record];
             assert(entry.reserved and record.reserved and topic.generation > 0);
             const id = store.get(message).?.id;
-            if (record.pinned and now < record.until and !std.mem.eql(u8, &record.id, &id)) owner.delivery_evictions +|= 1;
             if (record.state == .free) owner.free_records.remove(owner.recent, "link", self.record) else {
                 owner.resolved_records.remove(owner.recent, "link", self.record);
                 owner.index.remove(record.id);

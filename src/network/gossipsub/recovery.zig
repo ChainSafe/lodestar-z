@@ -28,7 +28,6 @@ pub const Recovery = struct {
     free: u16 = 0,
     len: usize = 0,
     batch_len: usize = 0,
-    metrics: @import("metrics.zig").Recovery = .{},
 
     pub fn init(allocator: std.mem.Allocator) !Recovery {
         comptime assert(promises_per_peer < constants.promises_cap and constants.promises_cap < none);
@@ -158,9 +157,7 @@ pub const Recovery = struct {
         self.batch_len += 1;
     }
 
-    pub const Receipt = struct { now_ms: u64, duplicate: bool = false };
-
-    pub fn resolve(self: *Recovery, peers: *Peers, id: MessageId, receipt: ?Receipt) void {
+    pub fn resolve(self: *Recovery, peers: *Peers, id: MessageId) void {
         var index: usize = 0;
         const batches = self.batch_len;
         for (0..batches) |_| {
@@ -175,11 +172,6 @@ pub const Recovery = struct {
                     link = &request.next;
                     continue;
                 }
-                if (receipt) |received| if (batch.sent_at_ms) |sent_at_ms| {
-                    self.metrics.resolved +|= 1;
-                    self.metrics.resolved_duplicate +|= @intFromBool(received.duplicate);
-                    self.metrics.delivery.observe(received.now_ms -| sent_at_ms);
-                };
                 link.* = request.next;
                 if (batch.sample == slot) batch.sample = none;
                 batch.count -= 1;
@@ -210,8 +202,6 @@ pub const Recovery = struct {
             if (batch.sent_at_ms == null and now_ms < batch.expiry and batch.token == token and std.meta.eql(batch.connection, connection)) {
                 batch.expiry = now_ms +| followup_ms;
                 batch.sent_at_ms = now_ms;
-                self.metrics.sent +|= batch.count;
-                self.metrics.batches_sent +|= 1;
             }
         }
     }
@@ -225,11 +215,9 @@ pub const Recovery = struct {
             const batch = self.batches[index];
             assert(peers.matches(batch.peer));
             if (now_ms >= batch.expiry) {
-                self.metrics.expired_ids +|= batch.count;
                 if (batch.sent_at_ms != null and batch.sample != none) {
                     broken += 1;
                     peers.penalize(batch.peer, 1);
-                    peers.scores.penalties.broken_promise +|= 1;
                 }
                 self.remove(peers, index);
             } else index += 1;

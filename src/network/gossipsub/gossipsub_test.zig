@@ -87,8 +87,7 @@ test "gossipsub delivers a published message to a mesh peer" {
         }
     }
     try std.testing.expect(received);
-    try std.testing.expectEqual(@as(u64, 1), setup.shared.server.gossipsub.counters.messages_received);
-    try std.testing.expectEqual(@as(u64, 1), setup.shared.client.gossipsub.counters.messages_published);
+    try std.testing.expectEqual(@as(u64, 1), setup.shared.server.gossipsub.topic_metrics.get(beacon_block).accepted);
 }
 
 test "gossipsub prunes a peer whose messages are rejected" {
@@ -204,19 +203,11 @@ test "gossipsub receives a message larger than the per-peer body buffer" {
 const constants_heartbeat = @import("constants.zig").heartbeat_interval_ms;
 
 fn expectControlFloodBounded(control_tag: u8) !void {
-    var setup: Pair = .{};
-    try setup.initOpts(.{
-        .random_seed = 1,
-    }, .{ .random_seed = 1, .items_per_peer = 4096, .items_per_pump = 8192 });
-    defer setup.deinit();
-    for (0..20) |_| try setup.pumpOnce();
-    const peer = setup.shared.server.gossipsub.sessions.find(setup.shared.handles.server).?;
-    const before = setup.shared.server.gossipsub.counters.rpcs_received;
-    const item: std.meta.Tag(@import("protobuf.zig").Item) = if (control_tag == 0x0a) .ihave else .idontwant;
-    const items_before = setup.shared.server.gossipsub.rpc_metrics.items[@intFromEnum(item)];
-    const now = setup.shared.pair.now.mono_ms;
+    var g = try gossip_test.init(std.testing.allocator, .{ .random_seed = 1, .items_per_peer = 4096, .items_per_pump = 8192 });
+    defer g.deinit();
+    const peer = gossip_test.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?.index;
     const controls_per_rpc = 4096;
-    const io = &setup.shared.server.gossipsub.sessions.rows[peer].io;
+    const io = &g.sessions.rows[peer].io;
     var rpc: [5 * controls_per_rpc + 8]u8 = undefined;
     var writer = @import("protobuf.zig").Writer.init(&rpc);
     writer.tag(3, 2);
@@ -225,30 +216,20 @@ fn expectControlFloodBounded(control_tag: u8) !void {
         writer.bytes(&.{ control_tag, if (control_tag == 0x0a) 3 else 0 });
         if (control_tag == 0x0a) writer.bytesField(1, "t");
     }
-    var framed: [rpc.len + 8]u8 = undefined;
-    const wire = @import("frame.zig").writeFrame(&framed, writer.written());
-    for (0..17) |rpc_index| {
-        var sent: usize = 0;
-        for (0..controls_per_rpc + 4) |_| {
-            if (sent < wire.len) sent += setup.shared.pair.client.write(setup.clientStream(), wire[sent..], false) catch |err| switch (err) {
-                error.WouldBlock => 0,
-                else => return err,
-            };
-            try setup.pumpOnce();
-            if (setup.shared.server.gossipsub.counters.rpcs_received == before + rpc_index + 1 and io.rpc == null) break;
+    // Seventeen RPCs carry more controls than a u16 counts, all inside one heartbeat.
+    for (0..17) |_| {
+        io.startRpc(writer.written());
+        var done = false;
+        for (0..controls_per_rpc + 1) |_| {
+            var delivered: usize = 0;
+            var items: usize = g.options.items_per_peer;
+            done = try gossip_test.processRpc(&g, peer, .{ .mono_ms = 1, .unix_s = 0 }, &delivered, &items);
+            if (done) break;
         }
-        try std.testing.expectEqual(wire.len, sent);
-        try std.testing.expectEqual(before + rpc_index + 1, setup.shared.server.gossipsub.counters.rpcs_received);
-        try std.testing.expect(io.rpc == null);
-        try std.testing.expectEqual(items_before + (rpc_index + 1) * controls_per_rpc, setup.shared.server.gossipsub.rpc_metrics.items[@intFromEnum(item)]);
-        try std.testing.expectEqual(now, setup.shared.pair.now.mono_ms);
+        try std.testing.expect(done);
+        _ = g.sessions.finishFrame(io);
     }
-    try std.testing.expectEqual(before + 17, setup.shared.server.gossipsub.counters.rpcs_received);
-    const count = if (control_tag == 0x0a)
-        setup.shared.server.gossipsub.sessions.rows[peer].io.ihave_recv
-    else
-        setup.shared.server.gossipsub.sessions.rows[peer].io.idontwant_recv;
-    try std.testing.expectEqual(@as(u16, 10), count);
+    try std.testing.expectEqual(@as(u16, 10), if (control_tag == 0x0a) io.ihave_recv else io.idontwant_recv);
 }
 
 test "gossipsub bounds more than 65535 IHAVE controls per heartbeat" {
@@ -342,8 +323,7 @@ test "gossipsub queues incompressible 64 KiB publish" {
     var payload: [65536]u8 = undefined;
     var rng = std.Random.DefaultPrng.init(42);
     rng.random().bytes(&payload);
-    _ = try g.publish(topic, &payload, .{ .mono_ms = 1, .unix_s = 1 });
-    try std.testing.expectEqual(@as(u64, 0), g.counters.send_dropped);
+    try std.testing.expectEqual(@as(u16, 1), (try g.publish(topic, &payload, .{ .mono_ms = 1, .unix_s = 1 })).queued);
 }
 
 const test_topic = "/eth2/01020304/beacon_block/ssz_snappy";
@@ -396,10 +376,8 @@ test "gossipsub readmission reuses tombstones across repeated Seen eviction" {
         const payload = [_]u8{@as(u8, @intCast(i)) + 'C'};
         _ = try setup.shared.server.gossipsub.publish(test_topic, &payload, setup.shared.pair.now);
         try std.testing.expect(!setup.shared.server.gossipsub.messages.seen.contains(id, setup.shared.pair.now.mono_ms));
-        const duplicates_before = setup.shared.server.gossipsub.counters.duplicates;
         const duplicate = try publishAdmissionA(&setup);
         try std.testing.expectEqual(@as(usize, 0), duplicate.count);
-        try std.testing.expectEqual(duplicates_before + 1, setup.shared.server.gossipsub.counters.duplicates);
         var pending: usize = 0;
         for (setup.shared.server.gossipsub.messages.validation.recent) |entry| {
             if (entry.state == .pending and std.mem.eql(u8, &entry.id, &id)) pending += 1;
@@ -445,7 +423,6 @@ test "gossipsub legal maximum and above two MiB publish use actual resumable IO"
             if (received) break;
         }
         try std.testing.expect(received);
-        try std.testing.expectEqual(@as(u64, 0), setup.shared.client.gossipsub.counters.send_dropped);
         try std.testing.expectEqual(setup.shared.server.gossipsub.sessions.receive_pool.next.len, setup.shared.server.gossipsub.sessions.receive_pool.free_pages);
     }
 }
@@ -579,7 +556,6 @@ test "gossipsub large frame deadline releases receive pages despite byte progres
     }
     setup.shared.pair.advance(100);
     try setup.pumpOnce();
-    try std.testing.expectEqual(@as(u64, 1), setup.shared.server.gossipsub.counters.large_stalled);
     try std.testing.expect(setup.shared.server.gossipsub.sessions.rows[server_peer].io.overflow.pages == 0);
     const logical = setup.shared.server.gossipsub.sessions.rows[server_peer].logical;
     try std.testing.expect(setup.shared.server.gossipsub.peers.rows[logical.index].large_frame_denied_until > setup.shared.pair.now.mono_ms);
@@ -623,9 +599,8 @@ test "gossipsub completed frame expiry releases pages without blaming the peer" 
     setup.shared.pair.advance(100);
     try setup.pumpOnce();
     try std.testing.expectEqual(@as(u64, 0), g.counters.local_pressure_resets);
-    try std.testing.expectEqual(@as(u64, 1), g.counters.local_pressure_discards);
-    try std.testing.expectEqual(@as(u64, 1), g.counters.promises_cancelled_pressure);
-    try std.testing.expectEqual(@as(u64, 0), g.counters.large_stalled);
+    try std.testing.expect(peer.io.rpc == null);
+    try std.testing.expectEqual(@as(usize, 0), g.recovery.len);
     try std.testing.expectEqual(@as(u64, 0), g.counters.broken_promises);
     try std.testing.expectEqual(before, g.peers.score(peer.logical, setup.shared.pair.now.mono_ms));
     try std.testing.expectEqual(@as(u64, 0), g.peers.rows[peer.logical.index].large_frame_denied_until);
@@ -659,10 +634,10 @@ test "gossipsub pinned payload pressure drops the publication and releases recei
     const peer = g.sessions.find(setup.shared.handles.server).?;
     for (0..2000) |_| {
         try setup.pumpOnce();
-        if (g.counters.message_capacity_refusals != 0) break;
+        if (g.messages.storage_refusals[@intFromEnum(@import("messages.zig").StorageRefusal.payload_capacity)] != 0) break;
     }
-    try std.testing.expectEqual(@as(u64, 1), g.counters.message_capacity_refusals);
-    try std.testing.expectEqual(@as(u64, 1), g.counters.messages_received);
+    try std.testing.expectEqual(@as(u64, 1), g.messages.storage_refusals[@intFromEnum(@import("messages.zig").StorageRefusal.payload_capacity)]);
+    try std.testing.expectEqual(@as(usize, 1), g.messages.pendingValidations());
     try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[peer].io.overflow.pages);
     try std.testing.expect(g.sessions.rows[peer].io.rpc == null);
     try std.testing.expect(!g.messages.wasSeen(refused_id, setup.shared.pair.now.mono_ms));
@@ -751,7 +726,6 @@ test "gossipsub healthy continuous frame turnover does not expire a nonempty que
         try std.testing.expectEqual(@as(u16, 1), result.queued);
     }
     try std.testing.expect(setup.shared.pair.now.mono_ms - began > 500);
-    try std.testing.expectEqual(@as(u64, 0), setup.shared.client.gossipsub.counters.tx_stalled);
     try std.testing.expect(setup.shared.client.gossipsub.sessions.outStream(index) != null);
 }
 
@@ -775,13 +749,10 @@ test "gossipsub receive page exhaustion discards only the requesting frame witho
     var rng = std.Random.DefaultPrng.init(113);
     rng.random().bytes(&payload);
     _ = try setup.shared.client.gossipsub.publish(test_topic, &payload, setup.shared.pair.now);
-    for (0..64) |_| {
-        try setup.pumpOnce();
-        if (g.counters.receive_capacity_refusals != 0 and g.sessions.rows[peer].io.reader.declaredLen() == null) break;
-    }
-    try std.testing.expectEqual(@as(u64, 1), g.counters.receive_capacity_refusals);
+    for (0..64) |_| try setup.pumpOnce();
+    try std.testing.expect(!g.messages.wasSeen(topic_mod.validMessageId(test_topic, &payload, .{}), setup.shared.pair.now.mono_ms));
+    try std.testing.expectEqual(@as(usize, 0), setup.serverMessages().len);
     try std.testing.expectEqual(@as(u64, 0), g.counters.local_pressure_resets);
-    try std.testing.expectEqual(@as(u64, 1), g.counters.local_pressure_discards);
     try std.testing.expectEqual(@as(u64, 0), g.counters.malformed_rpcs);
     try std.testing.expectEqual(before, g.peers.score(logical, setup.shared.pair.now.mono_ms));
     try std.testing.expectEqual(@as(u64, 0), g.peers.rows[logical.index].large_frame_denied_until);
@@ -818,7 +789,6 @@ test "gossipsub graylist refuses bulk reception and releases an idle partial fra
         writer.varint(@import("constants.zig").GOSSIP_MAX_SIZE);
         writer.bytes(&([_]u8{0} ** 128));
         if (!partial) @import("test_support.zig").penalize(g, row.conn, 50);
-        const before = g.rpc_metrics.received_bytes;
         try std.testing.expectEqual(writer.len, try setup.shared.pair.client.write(setup.clientStream(), writer.written(), false));
         for (0..8) |_| try setup.pumpOnce();
         if (partial) {
@@ -828,10 +798,9 @@ test "gossipsub graylist refuses bulk reception and releases an idle partial fra
             // The next heartbeat finds the graylisted session holding a frame.
             setup.shared.pair.advance(constants_heartbeat);
             try setup.pumpOnce();
-        } else try std.testing.expectEqual(before, g.rpc_metrics.received_bytes);
+        }
         try std.testing.expect(row.in_stream == null and row.io.rpc == null);
         try std.testing.expectEqual(g.sessions.receive_pool.next.len, g.sessions.receive_pool.free_pages);
-        try std.testing.expectEqual(@as(u64, 1), g.rpc_metrics.graylist_dropped);
         try std.testing.expectEqual(@as(u64, 0), g.counters.malformed_rpcs);
         try std.testing.expectEqual(@as(f64, 50), g.peers.scores.rows[row.logical.index].behaviour);
     }
@@ -861,7 +830,7 @@ test "gossipsub malformed framing and RPCs penalize authenticated sources across
         try std.testing.expectEqual(source, row.logical);
         try std.testing.expectEqual(@as(f64, @floatFromInt(i + 1)), g.peers.scores.rows[source.index].behaviour);
         try std.testing.expect(g.peers.score(source, setup.shared.pair.now.mono_ms) < 0);
-        try std.testing.expectEqual(@as(u64, 0), g.peers.scores.penalties.invalid_message);
+        try std.testing.expectEqual(@as(f64, 0), gossip_test.invalidDeliveries(g));
         try std.testing.expectEqual(g.sessions.receive_pool.next.len, g.sessions.receive_pool.free_pages);
         for (0..16) |_| try setup.pumpOnce();
         if (i + 1 < malformed.len) {
@@ -907,9 +876,7 @@ test "gossipsub discarding a locally refused frame preserves its deadline withou
     setup.shared.pair.advance(1);
     try setup.pumpOnce();
     try std.testing.expect(peer.in_stream == null);
-    try std.testing.expectEqual(@as(u64, 1), g.counters.local_pressure_discards);
     try std.testing.expectEqual(@as(u64, 1), g.counters.local_pressure_resets);
-    try std.testing.expectEqual(@as(u64, 0), g.counters.large_stalled);
     try std.testing.expectEqual(before, g.peers.score(peer.logical, setup.shared.pair.now.mono_ms));
     try std.testing.expectEqual(@as(u64, 0), g.peers.rows[peer.logical.index].large_frame_denied_until);
 }

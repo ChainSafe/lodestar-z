@@ -54,14 +54,14 @@ test "gossip idle mesh of 200 sessions costs no session visits" {
     try std.testing.expect(mesh >= 9);
     const visits = g.sessions.visits;
     const writes = g.io_metrics.write_calls;
-    const heartbeats = g.maintenance.cycles.count;
+    const cycles = g.cycle.epoch;
     for (0..120) |_| {
         setup.shared.pair.advance(30);
         try setup.pumpOnce();
         try std.testing.expectEqual(@as(usize, 0), g.sessions.ready.len);
         try std.testing.expect(g.nextWakeup(setup.shared.pair.now).? > setup.shared.pair.now.mono_ms);
     }
-    try std.testing.expect(g.maintenance.cycles.count - heartbeats >= 4);
+    try std.testing.expect(g.cycle.epoch - cycles >= 4);
     try std.testing.expectEqual(visits, g.sessions.visits);
     try std.testing.expectEqual(writes, g.io_metrics.write_calls);
     try std.testing.expectEqual(mesh, g.overlay.mesh(index).count());
@@ -124,7 +124,7 @@ test "gossip retries a flow-blocked session only when send capacity grows" {
     }
     try std.testing.expectEqual(@as(usize, 0), io.tx.data.count);
     try std.testing.expect(woken > 1);
-    try std.testing.expectEqual(@as(u64, 0), g.counters.tx_stalled);
+    try std.testing.expect(g.sessions.rows[index].outStream() != null);
 
     // A blocked stream that never gains credit is reset at its progress deadline, popped from
     // the heap on the first turn at or after it.
@@ -137,11 +137,10 @@ test "gossip retries a flow-blocked session only when send capacity grows" {
     setup.shared.pair.advance(deadline - 1 - setup.shared.pair.now.mono_ms);
     try std.testing.expect(g.nextWakeup(setup.shared.pair.now).? > setup.shared.pair.now.mono_ms);
     _ = processClient(&setup);
-    try std.testing.expectEqual(@as(u64, 0), g.counters.send_progress_timeouts);
+    try std.testing.expect(g.sessions.rows[index].outStream() != null);
     setup.shared.pair.advance(1);
     try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), g.nextWakeup(setup.shared.pair.now));
     _ = processClient(&setup);
-    try std.testing.expectEqual(@as(u64, 1), g.counters.send_progress_timeouts);
     try std.testing.expect(g.sessions.rows[index].outStream() == null);
     try std.testing.expect(!io.tx.pending());
 }

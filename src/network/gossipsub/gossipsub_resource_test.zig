@@ -40,7 +40,7 @@ test "gossip validation finishes without allocation while shared deliveries are 
     try std.testing.expectEqualDeep(gossip.ReportOutcome{ .applied = .accept }, g.report(inbox.last().handle, .accept, now));
     try std.testing.expect(g.messages.hasPayload(inbox.last().id));
     try std.testing.expectEqual(@as(usize, 0), g.resourceSnapshot().pending_validations);
-    try std.testing.expectEqual(@as(u64, 2), g.counters.send_dropped);
+    try std.testing.expectEqual(@as(u64, 2), g.delivery_metrics.recipients[@intFromEnum(delivery.Origin.forward)][@intFromEnum(@import("metrics.zig").Delivery.Outcome.pressured)]);
     const old = g.sessions.ref(1);
     g.connectionClosed(g.sessions.rows[1].conn);
     const replacement = support.addPeer(&g, .{ .index = 1, .generation = 2 }, .v1_2).?;

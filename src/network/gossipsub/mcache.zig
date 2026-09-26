@@ -206,9 +206,6 @@ const HistoryTopic = struct {
     tail: u32 = empty_slot,
     next_free: u32 = empty_slot,
 };
-/// Why a history entry left: its six windows passed, or earlier because the history was full,
-/// its kind's retention allowance was full, or the store needed its room.
-pub const Eviction = enum { age, capacity, retention, storage };
 
 pub const History = struct {
     /// The hard ceiling on entries: retransmission counts cost `capacity × retained` bytes.
@@ -226,8 +223,8 @@ pub const History = struct {
     /// Each kind's entries, oldest first.
     kinds: [@typeInfo(@import("topic.zig").Kind).@"enum".fields.len]KindList = @splat(.{}),
     free_topic: u32 = 0,
+    /// Entries `gossip` examined, which the bounded-work test reads.
     gossip_entries_visited: u64 = 0,
-    evictions: [@typeInfo(Eviction).@"enum".fields.len]u64 = @splat(0),
     head: u32 = empty_slot,
     tail: u32 = empty_slot,
     free: u32 = 0,
@@ -297,7 +294,7 @@ pub const History = struct {
                 if (store.canReserve(bytes.len)) break;
                 const candidate = slot;
                 slot = self.entries[slot].next;
-                if (reclaimable(store.get(self.entries[candidate].message).?)) self.evict(store, candidate, .storage);
+                if (reclaimable(store.get(self.entries[candidate].message).?)) self.remove(store, candidate);
             }
             assert(store.canReserve(bytes.len));
         }
@@ -312,7 +309,7 @@ pub const History = struct {
         if (payload.history) return;
         const id = payload.id;
         if (self.index.find(id)) |old| self.remove(store, old);
-        if (self.count == self.entries.len) self.evict(store, self.head, .capacity);
+        if (self.count == self.entries.len) self.remove(store, self.head);
         const topic = self.topic_index.find(payload.topicString()) orelse blk: {
             const index = self.free_topic;
             assert(index != empty_slot);
@@ -400,15 +397,11 @@ pub const History = struct {
             slot = self.entries[slot].kind_next;
         }
         if (pages < lacking.pages or chosen < lacking.entries) return false;
-        for (victims[0..chosen]) |victim| self.evict(store, victim, .retention);
+        for (victims[0..chosen]) |victim| self.remove(store, victim);
         assert(store.canRetain(handle));
         return true;
     }
 
-    fn evict(self: *History, store: *storage.Store, slot: u32, reason: Eviction) void {
-        self.evictions[@intFromEnum(reason)] +|= 1;
-        self.remove(store, slot);
-    }
     fn remove(self: *History, store: *storage.Store, slot: u32) void {
         const e = &self.entries[slot];
         const t = &self.topics[e.topic];
@@ -436,7 +429,7 @@ pub const History = struct {
             if (self.count == 0) break;
             assert(self.entries[self.head].born_epoch <= epoch);
             if (epoch - self.entries[self.head].born_epoch < constants.mcache_len) break;
-            self.evict(store, self.head, .age);
+            self.remove(store, self.head);
         }
     }
     pub fn gossip(self: *History, name: []const u8, out: []MessageId, epoch: u64) usize {

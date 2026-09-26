@@ -14,7 +14,7 @@ test "gossip deadlines track pressure and progress through partial frame reset" 
     try std.testing.expectEqual(TimeoutReason.receive_frame, io.deadlines(&options).expired(100).?);
     try std.testing.expect(!pool.resetRx(0));
     try std.testing.expect(io.deadlines(&options).next() == null);
-    _ = io.tx.injectFrame("abc", false, .iwant, 0).?;
+    _ = io.tx.injectFrame("abc", false, 0).?;
     io.tx.progress_ms = 20;
     try std.testing.expectEqual(TimeoutReason.send_progress, io.deadlines(&options).expired(70).?);
     io.tx.progress_ms = 50;
@@ -39,7 +39,7 @@ test "gossip active RPC completion discard and reset clear frame borrows and lim
         io.unread_end = wire.len;
         try std.testing.expect((try io.feedUnread(&sessions.receive_pool, wire.len, 1)).complete);
         const rpc = &io.rpc.?;
-        try std.testing.expect(rpc.item == null and !rpc.had_control);
+        try std.testing.expect(rpc.item == null);
         var fields: usize = 65536;
         rpc.item = (try rpc.reader.step(&fields)).item;
         try std.testing.expectEqualStrings("topic", (try rpc.reader.decode(rpc.item.?, &.{})).subscription.topic);
@@ -48,7 +48,6 @@ test "gossip active RPC completion discard and reset clear frame borrows and lim
             try std.testing.expect(rpc.item == null);
             try std.testing.expect(try rpc.reader.next() == null);
         }
-        rpc.had_control = true;
         try std.testing.expect(!if (finish == .reset) sessions.resetRx(0) else sessions.finishFrame(io));
         try std.testing.expect(io.rpc == null and io.reader.declaredLen() == null);
         try std.testing.expect(io.frame_since == null);

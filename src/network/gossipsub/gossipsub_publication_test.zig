@@ -27,9 +27,7 @@ test "publication refusal retry duplicate and exact expiry preserve admission" {
     try std.testing.expectEqual(tx_before, g.messages.store.get(retained).?.tx);
     try std.testing.expectEqual(seen_at, g.messages.seen.added_ms[g.messages.seen.tail]);
     try std.testing.expectEqual(fanout_at, g.overlay.rows[t].fanout_last_ms);
-    try std.testing.expectEqual(@as(u64, 1), g.counters.messages_published);
     _ = try g.publish(topic, "local", .{ .mono_ms = 111, .unix_s = 0 });
-    try std.testing.expectEqual(@as(u64, 2), g.counters.messages_published);
 }
 
 test "publication recipient policy tops up without graft and accounts unique shared descriptors" {
@@ -121,7 +119,6 @@ test "publication failed history admission retains payloads and recovery attribu
     const oversized = try std.testing.allocator.alloc(u8, @import("constants.zig").MAX_PAYLOAD_SIZE + 1);
     defer std.testing.allocator.free(oversized);
     try std.testing.expectError(error.PayloadTooLarge, g.publish(topic, oversized, .{ .mono_ms = 4, .unix_s = 0 }));
-    try std.testing.expectEqual(@as(u64, 3), g.counters.messages_published);
 }
 
 test "publication empty subscribed mesh reuses bounded fanout and full mesh excludes extra peers" {
@@ -215,7 +212,7 @@ test "delivery metrics attribute refused frames by origin, limit and client" {
         const expected = client == nimbus and reason == 0 and (origin == @intFromEnum(@import("delivery.zig").Origin.publication) or origin == @intFromEnum(@import("delivery.zig").Origin.iwant));
         try std.testing.expectEqual(@as(u64, @intFromBool(expected)), count);
     };
-    try std.testing.expectEqual(@as(u64, 2), g.counters.send_dropped);
+    try std.testing.expectEqual(@as(u64, 2), g.sessions.rows[peer.index].io.tx.drops[@intFromEnum(@import("outbox.zig").DropReason.data_descriptors)]);
     // The first queued frame was the publication; its write completes 39 ms after admission.
     for (0..16) |_| {
         const segment = io.tx.segment(&g.messages.store);

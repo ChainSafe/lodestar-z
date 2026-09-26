@@ -36,9 +36,7 @@ test "gossip graylist drops an RPC before decoding or admitting messages" {
     var items = g.options.items_per_peer;
     try std.testing.expect(try support.processRpc(&g, session.index, .{ .mono_ms = 1, .unix_s = 0 }, &count, &items));
     try std.testing.expectEqual(@as(usize, 0), count);
-    try std.testing.expectEqual(@as(u64, 1), g.rpc_metrics.graylist_dropped);
-    try std.testing.expectEqual(@as(u64, 0), g.counters.messages_received);
-    try std.testing.expectEqual(@as(u64, 0), g.topic_metrics.get(name).prevalidation);
+    try std.testing.expectEqual(@as(usize, 0), g.messages.seen.count);
 }
 
 test "gossip IWANT admits 5000 IDs and rejects larger envelopes before service" {
@@ -62,7 +60,7 @@ test "gossip IWANT admits 5000 IDs and rejects larger envelopes before service" 
         } else {
             try std.testing.expectError(error.OccurrenceLimit, result);
         }
-        try std.testing.expectEqual(@as(u64, constants.max_iwant_ids_per_rpc), g.rpc_metrics.iwant_unknown);
+        try std.testing.expectEqual(@as(u64, constants.max_iwant_ids_per_rpc), g.iwant_outcomes[@intFromEnum(@import("metrics.zig").IwantOutcome.miss)]);
         try std.testing.expectEqual(@as(usize, 0), emitted);
         _ = g.sessions.finishFrame(io);
     }
@@ -87,53 +85,7 @@ test "gossip turn separates credit exhaustion from host pressure and preserves e
     var turn = @import("session_io.zig").beginPump(&g, .{ .mono_ms = 1, .unix_s = 0 });
     var peer = Credits.peer(&g.options);
     try std.testing.expectEqual(Progress.credits, try driver.processRpc(&g, session.index, &turn, &peer));
-    try std.testing.expectEqual(@as(u64, 2), g.rpc_metrics.items[@intFromEnum(std.meta.Tag(protobuf.Item).message)]);
-}
-
-test "gossipsub metrics distinguish partial writes from complete publication RPCs" {
-    var setup: @import("test_pair.zig").Pair = .{};
-    try setup.init();
-    defer setup.deinit();
-    const name = "/eth2/01020304/beacon_block/ssz_snappy";
-    try support.subscribe(setup.shared.client.gossipsub, name);
-    try support.subscribe(setup.shared.server.gossipsub, name);
-    for (0..20) |_| try setup.pumpOnce();
-    setup.shared.pair.advance(1000);
-    for (0..128) |_| try setup.pumpOnce();
-    const before = setup.shared.client.gossipsub.rpc_metrics;
-    const ItemKind = std.meta.Tag(protobuf.Item);
-    try std.testing.expect(before.sent_items[@intFromEnum(ItemKind.subscription)] > 0);
-    try std.testing.expect(before.sent_items[@intFromEnum(ItemKind.graft)] + setup.shared.server.gossipsub.rpc_metrics.sent_items[@intFromEnum(ItemKind.graft)] > 0);
-    setup.shared.client.gossipsub.options.output_per_peer = 1;
-    const result = try setup.shared.client.gossipsub.publish(name, "payload", setup.shared.pair.now);
-    try std.testing.expectEqual(@as(u16, 1), result.queued);
-    try setup.pumpOnce();
-    try std.testing.expectEqual(before.sent_bytes + 1, setup.shared.client.gossipsub.rpc_metrics.sent_bytes);
-    try std.testing.expectEqual(before.sent_frames, setup.shared.client.gossipsub.rpc_metrics.sent_frames);
-    try std.testing.expectEqual(@as(u64, 0), setup.shared.client.gossipsub.rpc_metrics.sent_items[@intFromEnum(std.meta.Tag(protobuf.Item).message)]);
-    var received = false;
-    for (0..1000) |_| {
-        try setup.pumpOnce();
-        for (setup.serverMessages()) |message| {
-            try std.testing.expectEqualStrings("payload", message.bytes);
-            received = true;
-        }
-        if (received) break;
-    }
-    try std.testing.expect(received);
-    try std.testing.expectEqual(@as(u64, 1), setup.shared.client.gossipsub.rpc_metrics.sent_items[@intFromEnum(std.meta.Tag(protobuf.Item).message)]);
-    try std.testing.expectEqual(@as(u64, 1), setup.shared.server.gossipsub.topic_metrics.get(name).prevalidation);
-    try std.testing.expect(setup.shared.client.gossipsub.rpc_metrics.sent_bytes > before.sent_bytes + 1);
-    try std.testing.expectEqual(setup.shared.client.gossipsub.rpc_metrics.sent_bytes, setup.shared.server.gossipsub.rpc_metrics.received_bytes);
-    try support.unsubscribe(setup.shared.client.gossipsub, name);
-    for (0..1000) |_| {
-        try setup.pumpOnce();
-        if (setup.shared.server.gossipsub.rpc_metrics.items[@intFromEnum(ItemKind.prune)] > 0 and
-            setup.shared.server.gossipsub.rpc_metrics.items[@intFromEnum(ItemKind.subscription)] > 1) break;
-    }
-    try std.testing.expectEqual(@as(u64, 1), setup.shared.client.gossipsub.rpc_metrics.sent_items[@intFromEnum(ItemKind.prune)]);
-    try std.testing.expectEqual(@as(u64, 2), setup.shared.client.gossipsub.rpc_metrics.sent_items[@intFromEnum(ItemKind.subscription)]);
-    try std.testing.expectEqual(@as(u64, 1), setup.shared.server.gossipsub.rpc_metrics.items[@intFromEnum(ItemKind.prune)]);
+    try std.testing.expect(io.rpc.?.item != null);
 }
 
 test "gossipsub pending validation survives history churn and report publish event reuse" {
@@ -267,7 +219,7 @@ test "gossipsub IHAVE samples eligible IDs across the advertisement independentl
         try std.testing.expect(high);
     }
     try std.testing.expect(!selected[0].eql(selected[1]));
-    try std.testing.expectEqual(@as(u64, 2 * constants.gossip_ids_max), g.topic_metrics.get(name).ihave_unseen);
+    try std.testing.expectEqual(@as(usize, 2 * constants.gossip_ids_max), g.recovery.len);
 }
 
 test "gossipsub IHAVE security bounds one identity and deduplicates queued requests" {
@@ -484,7 +436,6 @@ test "gossip independent RPC enumerates every receive split through admission" {
         try std.testing.expectEqual(@as(usize, 0), snapshot.pending_validations);
         try std.testing.expectEqual(@as(usize, 0), snapshot.store_entries);
         try std.testing.expectEqual(@as(usize, 0), snapshot.store_pages);
-        try std.testing.expectEqual(@as(u64, 0), g.counters.duplicates);
     }
 }
 
@@ -518,7 +469,7 @@ test "gossipsub history queue refusal and authenticated reconnect preserve retra
     }
     support.control(&g, first.index, .{ .iwant = iwant }, .{ .mono_ms = g.last_now_ms, .unix_s = 0 });
     try std.testing.expectEqual(@as(u8, 0), g.messages.history.countsRow(g.messages.history.get(&g.messages.store, id).?)[logical_peer.index]);
-    try std.testing.expectEqual(@as(u64, 1), g.counters.send_dropped);
+    try std.testing.expectEqual(@as(u64, 1), g.iwant_outcomes[@intFromEnum(@import("metrics.zig").IwantOutcome.refused)]);
     g.sessions.rows[first.index].io.tx.cancelStream(&g.messages.store);
     for (0..4) |_| support.control(&g, first.index, .{ .iwant = iwant }, .{ .mono_ms = g.last_now_ms, .unix_s = 0 });
     try std.testing.expectEqual(@as(usize, 3), g.sessions.rows[first.index].io.tx.data.count);
@@ -561,7 +512,7 @@ test "gossipsub configured IWANT receipt starts twelve second deadline once" {
     const conn: Handle = .{ .index = 0, .generation = 1 };
     const p = @import("test_support.zig").addPeer(&g, conn, .v1_2).?;
     const io = &g.sessions.rows[p.index].io;
-    const token = io.tx.injectFrame("control", false, null, 1).?;
+    const token = io.tx.injectFrame("control", false, 1).?;
     g.recovery.add(&g.peers, [_]u8{1} ** 20, g.sessions.rows[p.index].logical, conn, token, 30_000);
     g.recovery.controlSent(.{ .index = 0, .generation = 2 }, token, 12_000, 5);
     g.recovery.controlSent(g.sessions.rows[p.index].conn, token + 1, g.options.iwant_followup_ms, 5);
@@ -569,12 +520,9 @@ test "gossipsub configured IWANT receipt starts twelve second deadline once" {
     _ = io.tx.segment(&g.messages.store);
     try std.testing.expect(io.tx.advance(&g.messages.store, 1) == null);
     try std.testing.expectEqual(@as(?u64, 30_000), g.recovery.nextExpiry());
-    try std.testing.expectEqual(@as(u64, 0), g.recovery.metrics.sent);
     g.writeCompleted(g.sessions.ref(p.index), io.tx.advance(&g.messages.store, 6).?, 100);
     g.recovery.controlSent(g.sessions.rows[p.index].conn, token, g.options.iwant_followup_ms, 200);
     try std.testing.expectEqual(@as(?u64, 12_100), g.recovery.nextExpiry());
-    try std.testing.expectEqual(@as(u64, 1), g.recovery.metrics.sent);
-    try std.testing.expectEqual(@as(u64, 0), g.recovery.metrics.resolved);
     @import("session_io.zig").finishPump(&g, .{ .mono_ms = 12_099, .unix_s = 0 });
     try std.testing.expectEqual(@as(usize, 1), g.recovery.len);
     @import("session_io.zig").finishPump(&g, .{ .mono_ms = 12_100, .unix_s = 0 });
@@ -655,7 +603,7 @@ test "gossipsub remote forwarding honors IDONTWANT and preserves borrowed event 
         }
     }
     try std.testing.expectEqual(@as(usize, 1), received);
-    try std.testing.expectEqual(@as(u64, 0), pair.shared.server.gossipsub.counters.messages_forwarded);
+    try std.testing.expectEqual(@as(u64, 0), pair.shared.server.gossipsub.topic_metrics.get(name).forwarded);
     try std.testing.expectEqual(@as(?usize, 1), try testMessage(pair.shared.server.gossipsub, source.index, "remote forwarded", pair.shared.pair.now.mono_ms));
     try std.testing.expectEqual(ReportOutcome{ .applied = .accept }, pair.shared.server.gossipsub.report(pair.shared.server_inbox.last().handle, .accept, pair.shared.pair.now));
     try std.testing.expectEqual(@as(usize, 1), pair.shared.server.gossipsub.sessions.rows[destination].io.tx.data.count);
@@ -668,7 +616,7 @@ test "gossipsub remote forwarding honors IDONTWANT and preserves borrowed event 
         }
     }
     try std.testing.expectEqual(@as(usize, 1), received);
-    try std.testing.expectEqual(@as(u64, 1), pair.shared.server.gossipsub.counters.messages_forwarded);
+    try std.testing.expectEqual(@as(u64, 1), pair.shared.server.gossipsub.topic_metrics.get(name).forwarded);
 }
 
 test "gossip forwarding excludes recorded duplicate senders but reaches other mesh peers" {
@@ -707,15 +655,13 @@ test "gossip duplicate fast path ignores host capacity and malformed bodies rece
     inbox.full = true;
     try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, peer.index, "pending", 2));
     inbox.full = false;
-    try std.testing.expectEqual(@as(u64, 1), g.messages.decoded_messages);
-    try std.testing.expectEqual(@as(u64, 1), g.messages.fast_hits);
+    try std.testing.expectEqual(@as(u64, 0), g.messages.storage_refusals[@intFromEnum(@import("messages.zig").StorageRefusal.processor_capacity)]);
     _ = g.report(handle, .ignore, .{ .mono_ms = 3, .unix_s = 1 });
     try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, peer.index, "pending", 4));
     for (0..20) |_| {
         _ = receiveForTest(&g, peer.index, .{ .topic = name, .data = &.{5} }, .{ .mono_ms = 5, .unix_s = 1 });
     }
-    try std.testing.expectEqual(@as(u64, 20), g.peers.scores.penalties.invalid_message);
-    try std.testing.expectEqual(@as(u64, 2), g.messages.decoded_messages);
+    try std.testing.expectEqual(@as(f64, 20), support.invalidDeliveries(&g));
 }
 
 test "gossip recent attribution survives validation slot reuse and duplicate pressure" {
@@ -736,9 +682,9 @@ test "gossip recent attribution survives validation slot reuse and duplicate pre
     try std.testing.expectEqual(old.index, current.handle.index);
     try std.testing.expect(old.generation != current.handle.generation);
     try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, duplicate.index, "rejected", 4));
-    try std.testing.expectEqual(@as(u64, 2), g.peers.scores.penalties.invalid_message);
+    try std.testing.expectEqual(@as(f64, 2), support.invalidDeliveries(&g));
     try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, duplicate.index, "rejected", 5));
-    try std.testing.expectEqual(@as(u64, 2), g.peers.scores.penalties.invalid_message);
+    try std.testing.expectEqual(@as(f64, 2), support.invalidDeliveries(&g));
     try std.testing.expectEqual(ReportOutcome.stale_handle, g.report(old, .accept, .{ .mono_ms = 6, .unix_s = 0 }));
     @memset(g.messages.fast, .{});
     try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, source.index, "pending", 7));
@@ -772,10 +718,8 @@ test "gossipsub IHAVE work preflight defers without consuming the advertisement"
         try std.testing.expectEqual(@as(u16, 0), io.ihave_recv);
         try std.testing.expect(io.rpc.?.item != null);
         try std.testing.expectEqual(@as(usize, 0), g.recovery.len);
-        try std.testing.expectEqual(@as(u64, 0), g.topic_metrics.get(name).ihave_ids);
         try std.testing.expect(!turn.large_used);
     }
-    try std.testing.expectEqual(@as(u64, 1), g.rpc_metrics.items[@intFromEnum(std.meta.Tag(protobuf.Item).ihave)]);
     const cost = g.ihaveWork(io.rpc.?.item.?.bytes.len);
     try std.testing.expect(cost > writer.len);
     turn.budget.work = cost;
@@ -790,16 +734,12 @@ test "gossipsub IHAVE work preflight defers without consuming the advertisement"
     try std.testing.expectEqual(@as(u16, 1), io.ihave_recv);
     try std.testing.expect(io.rpc.?.item == null);
     try std.testing.expectEqual(@as(usize, 1), g.recovery.len);
-    try std.testing.expectEqual(@as(u64, 128), g.topic_metrics.get(name).ihave_ids);
-    try std.testing.expectEqual(@as(u64, 1), g.topic_metrics.get(name).ihave_unseen);
     try std.testing.expect(!g.sessions.finishFrame(io));
     io.startRpc(writer.written());
     turn = @import("turn.zig").Turn.init(&g.options, turn.now, &.{});
     peer = Credits.peer(&g.options);
     try std.testing.expectEqual(Progress.done, try driver.processRpc(&g, session.index, &turn, &peer));
     try std.testing.expectEqual(@as(usize, 1), g.recovery.len);
-    try std.testing.expectEqual(@as(u64, 256), g.topic_metrics.get(name).ihave_ids);
-    try std.testing.expectEqual(@as(u64, 1), g.topic_metrics.get(name).ihave_unseen);
 }
 
 test "gossipsub IHAVE maximum advertisement shares oversized allowance with data and makes progress" {
@@ -846,8 +786,6 @@ test "gossipsub IHAVE maximum advertisement shares oversized allowance with data
     try std.testing.expect(turn.large_used);
     try std.testing.expectEqual(@as(usize, 1), g.recovery.len);
     try std.testing.expectEqual(@as(u16, 1), io.ihave_recv);
-    try std.testing.expectEqual(@as(u64, 5000), g.topic_metrics.get(name).ihave_ids);
-    try std.testing.expectEqual(@as(u64, 1), g.topic_metrics.get(name).ihave_unseen);
     turn = @import("turn.zig").Turn.init(&g.options, .{ .mono_ms = 2, .unix_s = 0 }, &scratch);
     turn.sink = g.message_sink;
     peer = Credits.peer(&g.options);
@@ -881,7 +819,6 @@ test "gossip pending validation quota preserves room for another peer and refund
         const held = inbox.last().handle;
         try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, first.index, "second", 2));
         try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, first.index, "third", 3));
-        try std.testing.expectEqual(@as(u64, 1), g.counters.message_capacity_refusals);
         try std.testing.expectEqual(@as(u64, 1), g.messages.storage_refusals[@intFromEnum(@import("messages.zig").StorageRefusal.peer_validations)]);
         try std.testing.expectEqual(@as(f64, 0), g.peers.score(g.sessions.rows[first.index].logical, 3));
         try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, second.index, "other peer", 4));
@@ -900,7 +837,6 @@ test "gossip unsent IWANT expiry refunds recovery slots without blaming the peer
     g.recovery.add(&g.peers, @splat(1), logical, conn, 1, 100);
     try std.testing.expectEqual(@as(u32, 1), g.peers.rows[logical.index].pins);
     g.recovery.controlSent(conn, 1, 3000, 100);
-    try std.testing.expectEqual(@as(u64, 0), g.recovery.metrics.sent);
     @import("session_io.zig").finishPump(&g, .{ .mono_ms = 100, .unix_s = 0 });
     try std.testing.expectEqual(capacity, g.recovery.available());
     try std.testing.expectEqual(@as(u32, 0), g.peers.rows[logical.index].pins);
@@ -968,7 +904,6 @@ test "gossip paged RPC cursors survive shared workspace reuse without runtime al
             if (done) _ = g.sessions.finishFrame(&g.sessions.rows[i + 2].io);
         }
     }
-    try std.testing.expectEqual(@as(u64, 4), g.rpc_metrics.items[@intFromEnum(std.meta.Tag(protobuf.Item).message)]);
     for (0..2) |i| try std.testing.expect(g.sessions.resetRx(@intCast(i)));
     try std.testing.expectEqual(g.sessions.receive_pool.next.len, g.sessions.receive_pool.free_pages);
     try std.testing.expectEqual(calls, ledger.allocation_calls);

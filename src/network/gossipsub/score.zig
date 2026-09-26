@@ -77,24 +77,16 @@ pub const TopicWeights = struct {
 };
 
 pub const GlobalWeights = struct { p5: f64 = 0, p6: f64 = 0, p7: f64 = 0 };
-pub const Penalties = struct { graft_backoff: u64 = 0, broken_promise: u64 = 0, message_deficit: u64 = 0, invalid_message: u64 = 0 };
 pub const Breakdown = struct {
     topics: [constants.topics_cap]TopicWeights = @splat(.{}),
     global: GlobalWeights = .{},
 };
 
-pub const CacheDelta = @import("../metrics/histogram.zig").Histogram(
-    f64,
-    &.{ 10, 100, 1000 },
-    .{ .nonnegative = true },
-);
-
 pub const PeerScore = struct {
     revision: u64 = 0,
+    /// Uncached score evaluations and the topic rows they visited, which the caching tests and
+    /// the network bench read.
     calculations: u64 = 0,
-    calls: u64 = 0,
-    cache_delta: CacheDelta = .{},
-    penalties: Penalties = .{},
     topic_visits: u64 = 0,
     params: Params,
     topics: []TopicCounters,
@@ -173,7 +165,6 @@ pub const PeerScore = struct {
         {
             const deficit = params.mesh_delivery_threshold - counters.mesh_deliveries;
             counters.mesh_failures = @min(counter_max, counters.mesh_failures + deficit * deficit);
-            self.penalties.message_deficit +|= 1;
         }
         counters.in_mesh = false;
     }
@@ -193,7 +184,6 @@ pub const PeerScore = struct {
     pub fn invalid(self: *PeerScore, peer: u16, topic: u16) void {
         const c = self.tc(peer, topic);
         c.invalid = @min(counter_max, c.invalid + 1);
-        self.penalties.invalid_message +|= 1;
     }
 
     pub fn penalize(self: *PeerScore, peer: u16, amount: f64) void {
@@ -206,14 +196,12 @@ pub const PeerScore = struct {
     pub fn score(self: *PeerScore, peer: u16, now_ms: u64, ip_count: u16) f64 {
         assert(peer < self.rows.len);
         const row = &self.rows[peer];
-        self.calls +|= 1;
         if (!row.dirty and row.cached_at != null and now_ms >= row.cached_at.? and
             (row.cached_until == null or now_ms < row.cached_until.?) and
             row.cached_ip == ip_count) return row.cached;
         self.calculations +|= 1;
         self.topic_visits +|= constants.topics_cap;
         const result = self.evaluate(peer, now_ms, ip_count, null);
-        if (row.cached_at != null) self.cache_delta.observe(@abs(result.total - row.cached));
         row.dirty = false;
         row.cached_at = now_ms;
         row.cached_until = result.next_change;
@@ -802,7 +790,7 @@ test "score retirement invalidates primed totals with identical parameters" {
     try std.testing.expectEqual(calculations, score.calculations);
 }
 
-test "metrics score snapshots preserve cache state and match policy evaluation" {
+test "score snapshots preserve cache state and match policy evaluation" {
     var scores = try testScores(std.testing.allocator, .{}, 1);
     defer scores.deinit(std.testing.allocator);
     scores.graft(0, 0, 0);
@@ -823,7 +811,7 @@ test "metrics score snapshots preserve cache state and match policy evaluation" 
     try std.testing.expectEqual(value, scores.score(0, 50000, 0));
 }
 
-test "metrics score weights use policy thresholds and snapshots do not count as cache calls" {
+test "score weights use policy thresholds and snapshots leave the cache untouched" {
     var ip_count: u16 = 0;
     var scores = try testScores(std.testing.allocator, .{
         .ip_colocation_weight = -3,
@@ -845,19 +833,14 @@ test "metrics score weights use policy thresholds and snapshots do not count as 
     try std.testing.expectEqualDeep(TopicWeights{ .p1 = 2, .p2 = 3, .p3 = -20, .p3b = -7, .p4 = -11 }, details.topics[0]);
     try std.testing.expectEqualDeep(GlobalWeights{ .p5 = 0, .p6 = -12, .p7 = -8 }, details.global);
     try std.testing.expectEqual(@as(f64, -86), value);
-    try std.testing.expectEqual(@as(u64, 0), scores.calls);
+    try std.testing.expectEqual(@as(u64, 0), scores.calculations);
     try std.testing.expectEqual(value, scores.score(0, 2000, ip_count));
     try std.testing.expectEqual(value, scores.score(0, 2000, ip_count));
-    try std.testing.expectEqual(@as(u64, 2), scores.calls);
     try std.testing.expectEqual(@as(u64, 1), scores.calculations);
-    try std.testing.expectEqual(@as(u64, 0), scores.cache_delta.count);
     scores.penalize(0, 2);
     try std.testing.expectEqual(value - 24, scores.score(0, 2000, ip_count));
-    try std.testing.expectEqual(@as(f64, 24), scores.cache_delta.sum);
-    try std.testing.expectEqualSlices(u64, &.{ 0, 1, 0, 0 }, &scores.cache_delta.buckets);
     scores.resetPeer(0);
     _ = scores.score(0, 2000, ip_count);
-    try std.testing.expectEqual(@as(u64, 1), scores.cache_delta.count);
     _ = scores.snapshotWeights(0, 2000, ip_count, &details);
     try std.testing.expectEqualDeep(TopicWeights{}, details.topics[0]);
     scores.topic_params[0].first_delivery_weight = 100;
@@ -868,6 +851,5 @@ test "metrics score weights use policy thresholds and snapshots do not count as 
     scores.graft(0, 0, 0);
     scores.prune(0, 0, 5000);
     scores.prune(0, 0, 5000);
-    try std.testing.expectEqual(@as(u64, 1), scores.penalties.message_deficit);
-    try std.testing.expectEqual(@as(u64, 1), scores.penalties.invalid_message);
+    try std.testing.expectEqual(@as(f64, 9), scores.topics[0].mesh_failures);
 }

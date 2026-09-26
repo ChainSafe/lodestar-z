@@ -14,27 +14,24 @@ test "gossip maintenance yields between bounded topics and resumes without repea
         elapsed: i96 = 0,
         fn now(context: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
             const self: *@This() = @ptrCast(@alignCast(context.?));
-            self.elapsed += 300_000;
+            self.elapsed += @import("constants.zig").maintenance_slice_target_ns;
             return .{ .nanoseconds = self.elapsed };
         }
     };
     var clock: Clock = .{};
     var vtable = std.Io.Threaded.global_single_threaded.io().vtable.*;
     vtable.now = Clock.now;
-    g.metrics_io = .{ .userdata = &clock, .vtable = &vtable };
+    g.clock = .{ .userdata = &clock, .vtable = &vtable };
     const now: @import("../types.zig").Now = .{ .mono_ms = 1, .unix_s = 0 };
     support.heartbeat(&g, now);
+    for (1..4) |serviced| {
+        g.maintainTopics(now);
+        try std.testing.expect(g.cycle.isActive());
+        try std.testing.expectEqual(serviced, g.cycle.cursor);
+    }
     g.maintainTopics(now);
-    try std.testing.expectEqual(@as(u64, 1), g.maintenance.topics_serviced);
-    try std.testing.expect(g.cycle.isActive());
-    for (0..3) |_| g.maintainTopics(now);
     try std.testing.expect(!g.cycle.isActive());
-    try std.testing.expectEqual(@as(u64, 3), g.maintenance.topics_serviced);
-    try std.testing.expectEqual(@as(u64, 3), g.maintenance.time_yields);
-    try std.testing.expectEqual(@as(u64, 3), g.maintenance.mesh.count);
-    try std.testing.expectEqual(@as(u64, 3), g.maintenance.gossip.count);
-    try std.testing.expectEqual(@as(u64, 3), g.maintenance.retire.count);
-    try std.testing.expectEqual(@as(u64, 1), g.maintenance.cycles.count);
+    try std.testing.expectEqual(@as(u64, 1), g.cycle.epoch);
 }
 
 test "gossip saturated peers rotate after shared call or output exhaustion" {

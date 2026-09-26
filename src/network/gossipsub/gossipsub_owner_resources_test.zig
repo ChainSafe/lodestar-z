@@ -76,7 +76,7 @@ test "gossip diagnostics tracks queued age and preserves peaks after owner relea
     g.messages.store.retainHistory(message);
     g.messages.store.seal(message);
     try std.testing.expectEqual(@import("outbox.zig").QueueResult.queued, io.tx.queueData(&g.messages.store, message, .forward, .{ .bytes = 10 }, 7));
-    try std.testing.expect(io.tx.injectFrame("ctrl", true, null, 9) != null);
+    try std.testing.expect(io.tx.injectFrame("ctrl", true, 9) != null);
     g.last_now_ms = 20;
     const snapshot = g.resourceSnapshot();
     try std.testing.expectEqual(@as(?u64, 13), snapshot.oldest_tx_age_ms);
@@ -236,22 +236,23 @@ test "gossip history at capacity serves IWANT until each message's sixth heartbe
     try std.testing.expectEqual(history.entries.len, history.count);
     // A full history evicts its oldest message while that message still has a window left.
     _ = try g.publish(name, "one more", .{ .mono_ms = 10, .unix_s = 0 });
-    try std.testing.expectEqual(@as(u64, 1), history.evictions[@intFromEnum(@import("mcache.zig").Eviction.capacity)]);
-    const unknown = g.rpc_metrics.iwant_unknown;
+    try std.testing.expectEqual(history.entries.len, history.count);
+    try std.testing.expect(history.get(&g.messages.store, ids[0][0]) == null);
+    const misses = &g.iwant_outcomes[@intFromEnum(@import("metrics.zig").IwantOutcome.miss)];
+    const unknown = misses.*;
     requestOne(&g, peer.index, &ids[0][0]);
-    try std.testing.expectEqual(unknown + 1, g.rpc_metrics.iwant_unknown);
+    try std.testing.expectEqual(unknown + 1, misses.*);
     requestOne(&g, peer.index, &ids[0][1]);
-    try std.testing.expectEqual(unknown + 1, g.rpc_metrics.iwant_unknown);
+    try std.testing.expectEqual(unknown + 1, misses.*);
     // Each heartbeat boundary retires exactly the window that reached six; the next stays servable.
     for (1..constants.mcache_len) |window| {
         support.ageHistory(&g);
-        // The first window lost one message to capacity.
-        try std.testing.expectEqual(@as(u64, 2 * window - 1), history.evictions[@intFromEnum(@import("mcache.zig").Eviction.age)]);
+        try std.testing.expect(history.get(&g.messages.store, ids[window - 1][1]) == null);
         requestOne(&g, peer.index, &ids[window - 1][1]);
-        try std.testing.expectEqual(unknown + window + 1, g.rpc_metrics.iwant_unknown);
+        try std.testing.expectEqual(unknown + window + 1, misses.*);
         requestOne(&g, peer.index, &ids[window][0]);
         requestOne(&g, peer.index, &ids[window][1]);
-        try std.testing.expectEqual(unknown + window + 1, g.rpc_metrics.iwant_unknown);
+        try std.testing.expectEqual(unknown + window + 1, misses.*);
     }
     g.cancelWrites(g.sessions.ref(peer.index));
 }
@@ -268,7 +269,7 @@ test "gossip retention makes room from its own kind's oldest copy and refuses wh
     for (0..4) |i| _ = try g.publish(name, &[_]u8{@intCast(i)}, .{ .mono_ms = 1, .unix_s = 0 });
     try std.testing.expectEqual(@as(usize, 4), g.messages.store.retained_entries_by_kind[kind]);
     _ = try g.publish(name, "fifth", .{ .mono_ms = 2, .unix_s = 0 });
-    try std.testing.expectEqual(@as(u64, 1), g.messages.history.evictions[@intFromEnum(@import("mcache.zig").Eviction.retention)]);
+    try std.testing.expect(g.messages.history.get(&g.messages.store, topic_mod.validMessageId(name, &[_]u8{0}, .{})) == null);
     try std.testing.expectEqual(@as(usize, 4), g.messages.history.count);
     // Copies queued to a peer stay retained, so a full allowance refuses the next message.
     var slot = g.messages.history.head;
@@ -278,7 +279,7 @@ test "gossip retention makes room from its own kind's oldest copy and refuses wh
     }
     try std.testing.expectError(error.ResourceExhausted, g.publish(name, "sixth", .{ .mono_ms = 3, .unix_s = 0 }));
     try std.testing.expectEqual(@as(u64, 1), g.messages.retention_refusals[kind]);
-    try std.testing.expectEqual(@as(u64, 1), g.messages.history.evictions[@intFromEnum(@import("mcache.zig").Eviction.retention)]);
+    try std.testing.expectEqual(@as(usize, 4), g.messages.history.count);
     g.cancelWrites(g.sessions.ref(peer.index));
 }
 
@@ -320,7 +321,6 @@ test "gossip refused retention leaves the history unchanged" {
         try std.testing.expectEqual(count, history.count);
         for (handles[0..kept]) |h| try std.testing.expect(history.get(&g.messages.store, g.messages.store.get(h).?.id) != null);
     }
-    try std.testing.expectEqual(@as(u64, 0), history.evictions[@intFromEnum(@import("mcache.zig").Eviction.retention)]);
     try std.testing.expectEqual(@as(u64, 1), g.messages.retention_refusals[@intFromEnum(block)]);
     try std.testing.expectEqual(@as(u64, 1), g.messages.retention_refusals[@intFromEnum(exit)]);
     g.cancelWrites(g.sessions.ref(peer.index));

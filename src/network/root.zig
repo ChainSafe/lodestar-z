@@ -79,6 +79,5 @@ test {
     _ = metrics;
     _ = logging;
     _ = @import("metrics/histogram.zig");
-    _ = @import("metrics/scores.zig");
     _ = @import("reqresp/metrics.zig");
 }

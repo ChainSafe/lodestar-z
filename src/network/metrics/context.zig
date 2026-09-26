@@ -1,8 +1,6 @@
 const std = @import("std");
 const network = @import("../network_core.zig");
-const gossip = @import("../gossipsub/root.zig");
 const peers = @import("peers.zig");
-const scores = @import("scores.zig");
 const client = @import("../peers/client.zig");
 
 /// Borrowed only on the network owner while it is not advancing protocol state.
@@ -15,7 +13,6 @@ pub const Context = struct {
     /// The host's bridge measurements, copied under its runtime mutex. Null renders zeros.
     bridge: ?*const @import("bridge.zig").Snapshot = null,
     population: peers.Distribution = .{},
-    scores: scores.Distribution = .{},
     peer_count: usize = 0,
     relevant: usize = 0,
     /// Kernel drop totals per family of the QUIC and discovery UDP sockets. Reading them extends
@@ -32,27 +29,6 @@ pub const Context = struct {
             result.peer_count += 1;
             result.relevant += @intFromBool(row.status != null);
             result.population.observe(row, client.fromIdentify(&row.identify), now.mono_ms);
-        }
-        const g = owner.service.gossipsub;
-        var meshes: [scores.kind_count]gossip.sessions.PeerSet = @splat(.initEmpty());
-        var kinds: scores.TopicKinds = @splat(null);
-        for (&g.overlay.rows, 0..) |*row, index| {
-            if (!row.active) continue;
-            const parsed = gossip.topic.parse(row.string[0..row.string_len]) orelse continue;
-            const known = gossip.topic.Name.parse(parsed.name);
-            const kind: u8 = if (known) |value| @intFromEnum(value.kind) else gossip.topic_policy.kind_count;
-            kinds[index] = kind;
-            meshes[kind].setUnion(row.mesh);
-        }
-        for (g.sessions.rows, 0..) |*row, index| {
-            if (!row.active) continue;
-            var details: gossip.score.Breakdown = undefined;
-            const value = g.peers.snapshotWeights(row.logical, now.mono_ms, &details);
-            result.scores.observe(value, &g.peers.scores.params);
-            result.scores.observeWeights(&details, &kinds);
-            for (&meshes, &result.scores.mesh_scores) |*mesh, *range| {
-                if (mesh.isSet(index)) range.observe(value);
-            }
         }
         return result;
     }

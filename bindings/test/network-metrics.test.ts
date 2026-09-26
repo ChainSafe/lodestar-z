@@ -42,8 +42,6 @@ test("metrics are available through startup and remain readable after close", as
       () => {
         const next = samples(runtime.getMetrics());
         expect(next.get("lodestar_native_network_metrics_updated_timestamp_seconds")).toBeGreaterThan(published ?? 0);
-        expect(next.get("gossipsub_heartbeat_duration_seconds_count")).toBeGreaterThan(0);
-        expect(next.get("lodestar_native_gossip_maintenance_completed_timestamp_seconds")).toBeGreaterThan(0);
         expect(next.get("lodestar_native_network_step_seconds_count")).toBeGreaterThan(0);
       },
       {timeout: 5000}
@@ -57,12 +55,6 @@ test("metrics are available through startup and remain readable after close", as
     }
     for (const counter of ["read_calls", "write_calls", "write_would_block", "write_zero"]) {
       expect(metrics.get(`lodestar_native_gossip_io_${counter}_total`)).toBe(0);
-    }
-    expect(metrics.get("lodestar_native_gossip_history_entries_visited_total")).toBe(0);
-    for (const phase of ["mesh", "gossip", "retire", "history"]) {
-      expect(
-        metrics.get(`lodestar_native_gossip_maintenance_work_seconds_count{phase="${phase}"}`)
-      ).toBeGreaterThanOrEqual(0);
     }
     for (const reason of ["peer_capacity", "protocol_concurrency", "peer_quota", "global_quota", "identity_capacity"]) {
       expect(metrics.get(`lodestar_native_reqresp_admission_refusals_total{method="status",reason="${reason}"}`)).toBe(
@@ -83,25 +75,8 @@ test("metrics are available through startup and remain readable after close", as
       if (value === undefined) throw Error(`Missing capacity: ${name}`);
       capacities.set(name, value);
     }
-    for (const kind of ["subscription", "message", "control", "ihave", "iwant", "graft", "prune", "idontwant"]) {
-      expect(metrics.get(`gossipsub_rpc_sent_${kind}_total`)).toBe(0);
-    }
-    for (const stat of ["avg", "min", "max"]) {
-      expect(metrics.get(`gossipsub_score_${stat}`)).toBe(0);
-      expect(metrics.get(`gossipsub_score_per_mesh_${stat}{topic="beacon_block"}`)).toBe(0);
-      for (const p of ["p1", "p2", "p3", "p3b", "p4"]) {
-        expect(metrics.get(`gossipsub_score_weights_${stat}{topic="beacon_block",p="${p}"}`)).toBe(0);
-      }
-      for (const p of ["p5", "p6", "p7"]) {
-        expect(metrics.get(`gossipsub_score_weights_${stat}{topic="",p="${p}"}`)).toBe(0);
-      }
-    }
-    expect(metrics.get('gossipsub_peers_by_score_threshold_count{threshold="mesh"}')).toBe(0);
-    expect(metrics.has("gossipsub_score_fn_calls_total")).toBe(true);
-    expect(metrics.has("gossipsub_score_fn_runs_total")).toBe(true);
-    expect(metrics.has("gossipsub_score_cache_delta_count")).toBe(true);
-    for (const penalty of ["graft_backoff", "broken_promise", "message_deficit", "invalid_message"]) {
-      expect(metrics.get(`gossipsub_scoring_penalties_total{penalty="${penalty}"}`)).toBe(0);
+    for (const outcome of ["miss", "suppressed", "limited", "queued", "refused"]) {
+      expect(metrics.get(`lodestar_native_gossip_iwant_ids_total{outcome="${outcome}"}`)).toBe(0);
     }
   } finally {
     await runtime.close();

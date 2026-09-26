@@ -12,6 +12,13 @@ const normalize = @import("peer_book.zig").normalize;
 const outbound_reserve = @import("peer_book.zig").outbound_reserve;
 const std = @import("std");
 
+/// Retained identities still carrying a penalty; an admission that reclaims one lowers it.
+fn penalized(peers: *const PeerBook, now: u64) usize {
+    var count: usize = 0;
+    for (peers.rows) |*row| count += @intFromBool(row.occupied and row.negative and now < row.retain_until);
+    return count;
+}
+
 test "gossip policy peers retain identity and reserve outbound recovery under negative churn" {
     var peers = try PeerBook.init(std.testing.allocator, &.{ .retained_score_ms = 10_000 });
     defer peers.deinit(std.testing.allocator);
@@ -29,7 +36,7 @@ test "gossip policy peers retain identity and reserve outbound recovery under ne
     metadata.identity.bytes[2] = 1;
     metadata.direction = .inbound;
     const inbound = peers.admit(.{ .index = 0, .generation = 1 }, &metadata, 1000).admitted;
-    try std.testing.expect(inbound.penalty_evicted);
+    try std.testing.expectEqual(@as(usize, capacity - 1), penalized(&peers, 1000));
     try std.testing.expect(inbound.peer.index < capacity - outbound_reserve);
     peers.disconnect(inbound.peer, 1000);
     metadata.identity.bytes[2] = 2;
@@ -37,7 +44,7 @@ test "gossip policy peers retain identity and reserve outbound recovery under ne
     peers.retain(pinned);
     metadata.direction = .outbound;
     const fallback = peers.admit(.{ .index = 0, .generation = 1 }, &metadata, 1000).admitted;
-    try std.testing.expect(fallback.penalty_evicted);
+    try std.testing.expectEqual(@as(usize, capacity - 2), penalized(&peers, 1000));
     try std.testing.expectEqual(@as(u16, 1), fallback.peer.index);
     try std.testing.expectEqual(Admission.duplicate, peers.admit(.{ .index = 1, .generation = 1 }, &metadata, 1001));
     peers.scores.penalize(fallback.peer.index, 7);
@@ -100,8 +107,9 @@ test "gossip pinned backoff survives identity churn" {
     metadata.identity.bytes[2] = 1;
     peers.retain(original);
     defer peers.release(original);
+    const retained = penalized(&peers, 1000);
     const churn = peers.admit(connection, &metadata, 1000).admitted;
-    try std.testing.expect(churn.penalty_evicted);
+    try std.testing.expectEqual(retained - 1, penalized(&peers, 1000));
     try std.testing.expect(churn.peer.index != original.index);
     peers.disconnect(churn.peer, 1000);
     try std.testing.expect(peers.backedOff(original, 0, 1, 1000));
@@ -120,8 +128,9 @@ test "gossip pinned backoff survives identity churn" {
         peers.disconnect(ref, 1001 + i);
     }
     metadata.identity.bytes[2] = 2;
+    const before = penalized(&peers, 1100);
     const fallback = peers.admit(connection, &metadata, 1100).admitted;
-    try std.testing.expect(!fallback.penalty_evicted);
+    try std.testing.expectEqual(before, penalized(&peers, 1100));
     try std.testing.expect(fallback.peer.index != 0);
     try std.testing.expect(peers.backedOff(original, 0, 1, 1100));
 }

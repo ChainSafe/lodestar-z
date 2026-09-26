@@ -63,17 +63,10 @@ pub const Control = union(enum) {
     }
 };
 
-pub const ControlReceipt = struct { token: u64, kind: ?ItemKind };
+pub const ControlReceipt = struct { token: u64 };
 pub const Completion = union(enum) {
     control: ControlReceipt,
     data: delivery.Receipt,
-
-    pub fn itemKind(self: Completion) ?ItemKind {
-        return switch (self) {
-            .control => |receipt| receipt.kind,
-            .data => .message,
-        };
-    }
 };
 
 pub const ControlQueue = FrameQueue(control_frames);
@@ -95,18 +88,17 @@ fn FrameQueue(comptime capacity: usize) type {
         const Frame = struct {
             remaining: u32,
             token: u64,
-            kind: ?ItemKind,
             enqueued_ms: u64,
         };
 
-        pub fn append(self: *Queue, bytes: []const u8, token: u64, kind: ?ItemKind, now_ms: u64) QueueResult {
+        pub fn append(self: *Queue, bytes: []const u8, token: u64, now_ms: u64) QueueResult {
             if (self.count == capacity or bytes.len > self.bytes.len - self.used) return .full;
             assert(bytes.len > 0);
             const n = @min(bytes.len, self.bytes.len - self.write_at);
             @memcpy(self.bytes[self.write_at..][0..n], bytes[0..n]);
             @memcpy(self.bytes[0 .. bytes.len - n], bytes[n..]);
             const slot = (self.head + self.count) % capacity;
-            self.frames[slot] = .{ .remaining = @intCast(bytes.len), .token = token, .kind = kind, .enqueued_ms = now_ms };
+            self.frames[slot] = .{ .remaining = @intCast(bytes.len), .token = token, .enqueued_ms = now_ms };
             self.count += 1;
             self.used += bytes.len;
             self.bytes_high_water = @max(self.bytes_high_water, self.used);
@@ -124,7 +116,7 @@ fn FrameQueue(comptime capacity: usize) type {
             self.used -= len;
             self.read_at = (self.read_at + len) % self.bytes.len;
             if (self.frames[self.head].remaining != 0) return null;
-            const receipt: ControlReceipt = .{ .token = self.frames[self.head].token, .kind = self.frames[self.head].kind };
+            const receipt: ControlReceipt = .{ .token = self.frames[self.head].token };
             self.head = (self.head + 1) % capacity;
             self.count -= 1;
             return receipt;
@@ -213,29 +205,26 @@ pub const Outbox = struct {
             .subscription, .graft, .prune => true,
             else => false,
         };
-        const kind: ItemKind = switch (control.*) {
-            inline else => |_, tag| @field(ItemKind, @tagName(tag)),
-        };
-        return self.appendControl(control.encode(&bytes), critical, kind, now_ms);
+        return self.appendControl(control.encode(&bytes), critical, now_ms);
     }
 
     pub fn inject(self: *Outbox, bytes: []const u8, now_ms: u64) bool {
         comptime assert(@import("builtin").is_test);
-        return self.appendControl(bytes, false, null, now_ms) != null;
+        return self.appendControl(bytes, false, now_ms) != null;
     }
 
-    pub fn injectFrame(self: *Outbox, bytes: []const u8, critical: bool, kind: ?ItemKind, now_ms: u64) ?u64 {
+    pub fn injectFrame(self: *Outbox, bytes: []const u8, critical: bool, now_ms: u64) ?u64 {
         comptime assert(@import("builtin").is_test);
-        return self.appendControl(bytes, critical, kind, now_ms);
+        return self.appendControl(bytes, critical, now_ms);
     }
 
-    fn appendControl(self: *Outbox, bytes: []const u8, critical: bool, kind: ?ItemKind, now_ms: u64) ?u64 {
+    fn appendControl(self: *Outbox, bytes: []const u8, critical: bool, now_ms: u64) ?u64 {
         if (self.sequence == std.math.maxInt(u64)) {
             self.dropped(.token_exhausted);
             return null;
         }
         const token = self.sequence + 1;
-        const result = if (critical) self.critical.append(bytes, token, kind, now_ms) else self.control.append(bytes, token, kind, now_ms);
+        const result = if (critical) self.critical.append(bytes, token, now_ms) else self.control.append(bytes, token, now_ms);
         if (result == .full) {
             self.dropped(if (critical)
                 (if (self.critical.count == critical_frames) .critical_frames else .critical_bytes)
@@ -387,7 +376,7 @@ test "gossip transmit retains pages and never interleaves control into partial d
     out[n] = io.segment(&store)[0];
     n += 1;
     _ = io.advance(&store, 1);
-    const token = io.appendControl("\x01x", true, null, 0).?;
+    const token = io.appendControl("\x01x", true, 0).?;
     for (0..127) |_| {
         const segment = io.segment(&store);
         if (segment.len == 0) break;
@@ -425,7 +414,7 @@ test "gossip critical capacity and data queue pressure are independent and relea
     try std.testing.expectEqual(@as(usize, data_capacity), io.data.descriptors_high_water);
     try std.testing.expect(io.inject("12345678", 0));
     try std.testing.expect(!io.inject("x", 0));
-    try std.testing.expect(io.appendControl("critical", true, null, 0) != null);
+    try std.testing.expect(io.appendControl("critical", true, 0) != null);
     store.releaseHistory(h);
     io.cancelStream(&store);
     try std.testing.expectEqual(@as(usize, 0), store.used_entries);
@@ -475,7 +464,7 @@ test "gossip queues a full validation burst in order and preserves byte bounds" 
     try std.testing.expectEqual(@as(u64, 0), io.drops[@intFromEnum(DropReason.data_descriptors)]);
 }
 
-test "metrics control kinds survive partial writes ring reuse and refused frames" {
+test "gossip control receipts survive partial writes ring reuse and refused frames" {
     var store = try storage.Store.init(std.testing.allocator, 1, 4096);
     defer store.deinit(std.testing.allocator);
     var normal: [4]u8 = undefined;
@@ -483,37 +472,27 @@ test "metrics control kinds survive partial writes ring reuse and refused frames
     var deliveries = try delivery.Pool.init(std.testing.allocator, 1, data_capacity);
     defer deliveries.deinit(std.testing.allocator);
     var io: Outbox = .{ .data = .{ .pool = &deliveries }, .control = .{ .bytes = &normal }, .critical = .{ .bytes = &critical } };
-    var metrics: @import("metrics.zig").Rpc = .{};
-    const kinds = [_]ItemKind{ .subscription, .ihave, .iwant, .graft, .prune, .idontwant };
-    for (0..control_frames * kinds.len) |index| {
-        const kind = kinds[index % kinds.len];
-        const token = io.appendControl("abc", false, kind, 1).?;
-        try std.testing.expect(io.appendControl("ab", false, .prune, 1) == null);
+    for (0..control_frames * 6) |_| {
+        const token = io.appendControl("abc", false, 1).?;
+        try std.testing.expect(io.appendControl("ab", false, 1) == null);
         for (0..3) |byte| {
             _ = io.segment(&store);
             const receipt = io.advance(&store, 1);
-            if (byte < 2) try std.testing.expect(receipt == null) else {
-                try std.testing.expectEqual(token, receipt.?.control.token);
-                try std.testing.expectEqual(kind, receipt.?.itemKind().?);
-            }
-            if (receipt) |done| metrics.observeSent(done.itemKind());
-            try std.testing.expectEqual(index + @intFromBool(byte == 2), metrics.sent_frames);
+            if (byte < 2) try std.testing.expect(receipt == null) else try std.testing.expectEqual(token, receipt.?.control.token);
         }
     }
-    for (kinds) |kind| try std.testing.expectEqual(@as(u64, control_frames), metrics.sent_items[@intFromEnum(kind)]);
-    try std.testing.expectEqual(@as(u64, control_frames * 5), metrics.control_frames_sent);
-    _ = io.appendControl("abc", false, .prune, 1).?;
+    _ = io.appendControl("abc", false, 1).?;
     _ = io.segment(&store);
-    _ = io.advance(&store, 1);
+    try std.testing.expect(io.advance(&store, 1) == null);
     io.cancelStream(&store);
-    try std.testing.expectEqual(@as(u64, control_frames), metrics.sent_items[@intFromEnum(ItemKind.prune)]);
+    try std.testing.expect(!io.pending());
 }
 
 test "gossip control high water survives partial write refusal and reset" {
     var bytes: [4]u8 = undefined;
     var queue: ControlQueue = .{ .bytes = &bytes };
-    try std.testing.expectEqual(QueueResult.queued, queue.append("abc", 1, null, 7));
-    try std.testing.expectEqual(QueueResult.full, queue.append("ab", 2, null, 8));
+    try std.testing.expectEqual(QueueResult.queued, queue.append("abc", 1, 7));
+    try std.testing.expectEqual(QueueResult.full, queue.append("ab", 2, 8));
     try std.testing.expectEqual(@as(usize, 3), queue.bytes_high_water);
     try std.testing.expectEqual(@as(usize, 1), queue.frames_high_water);
     try std.testing.expect(queue.advance(1) == null);
@@ -571,7 +550,6 @@ test "gossip typed controls preserve maximum ID lists and completion kinds" {
         }
         try std.testing.expect(try rpc.next() == null);
         try std.testing.expectEqual(token, completion.?.control.token);
-        try std.testing.expectEqual(expected, completion.?.itemKind().?);
         try std.testing.expect(!outbox.pending());
     }
 }
