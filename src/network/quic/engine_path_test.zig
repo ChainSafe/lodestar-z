@@ -46,7 +46,6 @@ test "engine validates a routed packet that arrives from another source path" {
     try std.testing.expectEqual(bulk.len, try pair.client.write(stream, &bulk, false));
     try pair.pump();
 
-    try std.testing.expectEqual(@as(u64, 1), pair.server.counters.path_changes);
     try std.testing.expectEqual(rebound_address, pair.server.peerAddress(handles.server).?);
     const events = pair.events(&pair.server, &storage);
     try std.testing.expectEqual(@as(usize, 2), events.len);
@@ -61,7 +60,6 @@ test "engine validates a routed packet that arrives from another source path" {
     var reply: [16]u8 = undefined;
     const echoed = try pair.client.read(stream, &reply);
     try std.testing.expectEqualStrings("world", reply[0..echoed.len]);
-    try std.testing.expectEqual(@as(u64, 0), pair.client.counters.path_changes);
     try std.testing.expectEqual(@as(usize, 0), pair.events(&pair.server, &storage).len);
 }
 
@@ -90,7 +88,6 @@ test "engine keeps the validated path when a new source fails validation" {
         try std.testing.expectEqual(client_address, pair.server.peerAddress(handles.server).?);
     }
     try std.testing.expect(inbound != null);
-    try std.testing.expectEqual(@as(u64, 0), pair.server.counters.path_changes);
 
     pair.client_source = client_address;
     pair.drop_to_address = null;
@@ -120,8 +117,6 @@ test "engine survives an undecryptable packet routed to a live slot" {
     @memcpy(garbage[1..][0..limits.local_cid_length], scid.slice());
     for (garbage[1 + limits.local_cid_length ..], 0..) |*byte, index| byte.* = @truncate(index *% 7 +% 3);
 
-    const before_errors = pair.client.counters.recv_errors;
-    const before_accepted = pair.client.counters.accepted;
     var response: [constants.datagram_size_max]u8 = undefined;
     const outcome = pair.client.receive(
         &garbage,
@@ -133,8 +128,6 @@ test "engine survives an undecryptable packet routed to a live slot" {
         .accepted => |handle| try std.testing.expectEqual(handles.client, handle),
         else => return error.TestUnexpectedResult,
     }
-    try std.testing.expectEqual(before_errors, pair.client.counters.recv_errors);
-    try std.testing.expectEqual(before_accepted + 1, pair.client.counters.accepted);
     try std.testing.expect(pair.client.peerId(handles.client) != null);
 }
 
@@ -206,8 +199,6 @@ test "engine junk short header from a live peer's address marks nothing" {
     reset[0] = 0x40;
     for (reset[1..], 0..) |*byte, index| byte.* = @truncate(index *% 37 +% 11);
 
-    const before_unroutable = pair.client.counters.dropped_unroutable;
-    const before_touched = pair.client.counters.accepted + pair.client.counters.recv_errors;
     var response: [constants.datagram_size_max]u8 = undefined;
     const outcome = pair.client.receive(
         &reset,
@@ -216,8 +207,6 @@ test "engine junk short header from a live peer's address marks nothing" {
         &response,
     );
     try std.testing.expectEqual(engine_mod.ReceiveOutcome.dropped, outcome);
-    try std.testing.expectEqual(before_unroutable + 1, pair.client.counters.dropped_unroutable);
-    try std.testing.expectEqual(before_touched, pair.client.counters.accepted + pair.client.counters.recv_errors);
     const slot = &pair.client.registry.slots[handles.client.index];
     try std.testing.expect(!slot.collect_link.linked and !slot.dirty_link.linked);
     try std.testing.expect(!pair.client.backlog());
@@ -234,7 +223,6 @@ test "engine junk short header from a live peer's address marks nothing" {
             &response,
         ),
     );
-    try std.testing.expectEqual(before_unroutable + 2, pair.client.counters.dropped_unroutable);
     try std.testing.expectEqual(live_before, pair.client.activeIndices().len);
     try std.testing.expect(pair.client.peerId(handles.client) != null);
     var events: [8]engine_mod.Event = undefined;

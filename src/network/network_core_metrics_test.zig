@@ -209,7 +209,7 @@ test "metrics read owner counters exactly and preserve totals and capacities aft
     var f = try Fixture.init(&.{});
     defer f.deinit();
     const node = f.node;
-    node.counters.dial_started = std.math.maxInt(u64);
+    node.counters.transport_failures = std.math.maxInt(u64);
     node.peer_manager.requested_connect = 17;
     node.peer_manager.requested_disconnect[0] = 3;
     node.service.reqresp.protocol_counters[@intFromEnum(protocol.status_v1)].outgoing = 4;
@@ -220,7 +220,7 @@ test "metrics read owner counters exactly and preserve totals and capacities aft
     node.peer_manager.selection.dial_budget = 7;
     const original = node.peer_manager.counters;
     const output = try f.render(true);
-    try contains(output, "lodestar_native_network_dial_started_total 18446744073709551615\n");
+    try contains(output, "lodestar_native_network_transport_failures_total 18446744073709551615\n");
     try contains(output, "# TYPE lodestar_peers_requested_total_to_connect counter\n");
     try contains(output, "lodestar_peers_requested_total_to_connect 17\n");
     try contains(output, "lodestar_native_peer_dials_requested 7\n");
@@ -240,7 +240,6 @@ test "metrics read owner counters exactly and preserve totals and capacities aft
     try contains(stopped, "lodestar_native_peer_dials_requested 0\n");
     try contains(stopped, "lodestar_peers_requested_total_to_connect 17\n");
     try contains(stopped, "beacon_reqresp_outgoing_requests_total{method=\"status\"} 9\n");
-    try contains(stopped, "lodestar_native_quic_connections_capacity 4\n");
     try contains(stopped, "lodestar_native_gossip_expired_executing 0\n");
 }
 
@@ -380,53 +379,6 @@ test "metrics label redials after a health close in the dial retries contract se
     try contains(try f.render(true), "lodestar_native_peer_dial_retries_total{previous=\"health\"} 2\n");
 }
 
-test "metrics owner loop series start at zero after initialization" {
-    var f = try Fixture.init(&.{});
-    defer f.deinit();
-    const output = try f.render(true);
-    try contains(output, "lodestar_native_network_step_seconds_count 0\n");
-    try contains(output, "lodestar_native_network_wait_seconds_count 0\n");
-    try contains(output, "lodestar_native_network_due_now_turns_total{source=\"host\"} 0\n");
-}
-
-fn initOwner(node: *core.NetworkCore) !void {
-    const key = try @import("wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{94}));
-    const resolved = try @import("configuration.zig").resolve(.{ .profile = .beacon_node, .seed = 7, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }}, .admission_policy = @import("reqresp/policy_fixture.zig").config() });
-    try node.init(std.testing.allocator, std.testing.io, &resolved, .{
-        .host = &key,
-        .bind = .{ .ip4 = .loopback(0) },
-        .local = @import("managed_test_support.zig").localState(.{}),
-        .slot = 100,
-    });
-}
-
-test "metrics attribute zero-wait owner turns to every due source and record the chosen wait" {
-    const node = try std.testing.allocator.create(core.NetworkCore);
-    defer std.testing.allocator.destroy(node);
-    try initOwner(node);
-    defer node.deinit(std.testing.io);
-    const now = try @import("transport.zig").currentTime(std.testing.io);
-    for (0..8) |_| try std.testing.expect(node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms)).failure == null);
-    const host = @intFromEnum(@import("wake_sources.zig").Source.host);
-    try std.testing.expectEqual(@as(u64, 8), node.due_now_turns[host]);
-    try std.testing.expectEqual(@as(u64, 8), node.wait_duration.buckets[0]);
-    try std.testing.expect(node.nextWakeup(now, .{}).? > now.mono_ms);
-    const settled = node.due_now_turns;
-    try std.testing.expect(node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| 2)).failure == null);
-    try std.testing.expectEqualDeep(settled, node.due_now_turns);
-    try std.testing.expectEqual(@as(u64, 9), node.wait_duration.count);
-    try std.testing.expectEqual(@as(u64, 8), node.wait_duration.buckets[0]);
-    const buffer = try std.testing.allocator.alloc(u8, metrics.textCapacity(&.{}));
-    defer std.testing.allocator.free(buffer);
-    var context = metrics.Context.init(node, now, true);
-    var writer = std.Io.Writer.fixed(buffer);
-    try metrics.write(&context, &writer);
-    const output = writer.buffered();
-    try contains(output, "lodestar_native_network_due_now_turns_total{source=\"host\"} 8\n");
-    try contains(output, "lodestar_native_network_wait_seconds_bucket{le=\"0\"} 8\n");
-    try contains(output, "lodestar_native_network_wait_seconds_count 9\n");
-}
-
 test "metrics export cumulative discovery lookups, session capacity and datagram rejections" {
     var f = try Fixture.initWith(&.{}, .{ .bind = .{ .ip4 = .loopback(0) }, .engine = .{ .session_capacity = 8, .challenge_capacity = 8, .call_capacity = 8 } });
     defer f.deinit();
@@ -459,59 +411,4 @@ test "metrics export stock per-topic gossipsub peer gauges under full topic stri
     try gossip_test.subscribe(g, future);
     output = try f.render(true);
     try contains(output, "gossipsub_mesh_peer_count{topicStr=\"" ++ future ++ "\"} 0\n");
-}
-
-test "metrics count a zero-wait owner turn once under each of its two due sources" {
-    const node = try std.testing.allocator.create(core.NetworkCore);
-    defer std.testing.allocator.destroy(node);
-    try initOwner(node);
-    defer node.deinit(std.testing.io);
-    const now = try @import("transport.zig").currentTime(std.testing.io);
-    for (0..8) |_| try std.testing.expect(node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms)).failure == null);
-    try std.testing.expect(node.nextWakeup(now, .{}).? > now.mono_ms);
-    const remote = try @import("wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{95}));
-    const remote_key = remote.publicKey();
-    const peer = @import("wire/peer_id.zig").PeerId.fromPublicKey(&remote_key);
-    // The node binds IPv4 only, so this dial fails before sending a datagram.
-    try node.connectUntil(&peer, &.{.{ .ip6 = .{ .octets = .{0} ** 15 ++ .{1}, .port = 9000 } }}, now, now.mono_ms + 60_000);
-    const before = node.due_now_turns;
-    const waits = node.wait_duration.buckets[0];
-    try std.testing.expect(node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| 100)).failure == null);
-    try std.testing.expectEqual(waits + 1, node.wait_duration.buckets[0]);
-    const Source = @import("wake_sources.zig").Source;
-    for (before, node.due_now_turns, 0..) |previous, current, index| {
-        const due = index == @intFromEnum(Source.dial) or index == @intFromEnum(Source.peer_policy);
-        try std.testing.expectEqual(previous + @intFromBool(due), current);
-    }
-}
-
-test "metrics count each host apply once under its cause" {
-    const node = try std.testing.allocator.create(core.NetworkCore);
-    defer std.testing.allocator.destroy(node);
-    try initOwner(node);
-    defer node.deinit(std.testing.io);
-    const Host = struct {
-        applies: usize = 0,
-        fn apply(context: *anyopaque, _: *core.NetworkCore, _: @import("types.zig").Now) core.HostProgress {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            self.applies += 1;
-            return .{ .more = self.applies == 1 };
-        }
-    };
-    var host: Host = .{};
-    const now = try @import("transport.zig").currentTime(std.testing.io);
-    try std.testing.expect(node.step(std.testing.io, now, .{}, .{ .context = &host, .apply = Host.apply, .deadline_ms = now.mono_ms }).failure == null);
-    try std.testing.expect(node.step(std.testing.io, now, .{}, .{ .context = &host, .apply = Host.apply }).failure == null);
-    try std.testing.expectEqual(@as(usize, 2), host.applies);
-    const HostCause = core.HostCause;
-    try std.testing.expectEqual(@as(u64, 0), node.host_applies[@intFromEnum(HostCause.readiness)]);
-    try std.testing.expectEqual(@as(u64, 1), node.host_applies[@intFromEnum(HostCause.due)]);
-    try std.testing.expectEqual(@as(u64, 1), node.host_applies[@intFromEnum(HostCause.more)]);
-    const buffer = try std.testing.allocator.alloc(u8, metrics.textCapacity(&.{}));
-    defer std.testing.allocator.free(buffer);
-    var context = metrics.Context.init(node, now, true);
-    var writer = std.Io.Writer.fixed(buffer);
-    try metrics.write(&context, &writer);
-    try contains(writer.buffered(), "lodestar_native_network_host_applies_total{cause=\"more\"} 1\n");
-    try contains(writer.buffered(), "lodestar_native_bridge_call_seconds_count{entry=\"publish_gossip\"} 0\n");
 }

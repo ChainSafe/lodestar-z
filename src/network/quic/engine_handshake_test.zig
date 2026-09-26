@@ -147,30 +147,23 @@ test "engine captures TLS key material per connection only when keylog is enable
     try std.testing.expect(std.mem.indexOf(u8, lines[0..length], "CLIENT_TRAFFIC_SECRET_0") != null);
     try std.testing.expect(std.mem.indexOf(u8, lines[0..length], "SERVER_TRAFFIC_SECRET_0") != null);
     try std.testing.expectEqual(@as(usize, 0), pair.client.takeKeylog(handles.client.index, &lines));
-    try std.testing.expectEqual(@as(u16, 0), pair.client.registry.slots[handles.client.index].handshake.keylog_dropped);
 
     try std.testing.expectEqual(@as(usize, 0), pair.server.registry.keylog_arena.len);
     try std.testing.expectEqual(@as(usize, 0), pair.server.takeKeylog(handles.server.index, &lines));
-    try std.testing.expect(pair.server.registry.slots[handles.server.index].handshake.keylog_dropped > 0);
-    try std.testing.expectEqual(@as(u64, 0), pair.server.counters.keylog_dropped);
 
     const state = &pair.client.registry.slots[handles.client.index].handshake;
     const oversized = [_]u8{'x'} ** tls.keylog_capacity;
     try std.testing.expect(!state.appendKeylog(&oversized));
-    _ = pair.client.takeKeylog(handles.client.index, &lines);
-    try std.testing.expectEqual(@as(u64, 1), pair.client.counters.keylog_dropped);
-    _ = pair.client.takeKeylog(handles.client.index, &lines);
-    try std.testing.expectEqual(@as(u64, 1), pair.client.counters.keylog_dropped);
+    try std.testing.expectEqual(@as(usize, 0), pair.client.takeKeylog(handles.client.index, &lines));
 }
 
-test "handshake state drops key lines that do not fit and counts them" {
+test "handshake state drops key lines that do not fit" {
     var storage: [tls.keylog_capacity]u8 = undefined;
     var state = tls.HandshakeState{ .keylog = &storage };
     const line = "CLIENT_TRAFFIC_SECRET_0 " ++ "a" ** 200;
     var appended: usize = 0;
     while (state.appendKeylog(line)) appended += 1;
     try std.testing.expectEqual(tls.keylog_capacity / (line.len + 1), appended);
-    try std.testing.expectEqual(@as(u16, 1), state.keylog_dropped);
 
     var out: [tls.keylog_capacity]u8 = undefined;
     const taken = state.takeKeylog(&out);
@@ -181,7 +174,6 @@ test "handshake state drops key lines that do not fit and counts them" {
 
     var disabled = tls.HandshakeState{};
     try std.testing.expect(!disabled.appendKeylog("x"));
-    try std.testing.expectEqual(@as(u16, 1), disabled.keylog_dropped);
     try std.testing.expectEqual(@as(usize, 0), disabled.takeKeylog(&out));
 }
 

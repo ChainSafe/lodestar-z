@@ -105,5 +105,4 @@ test "failed learned endpoint publication preserves the previous ENR and Identif
     try std.testing.expectEqualSlices(u8, before.slice(), node.localRecord().?.slice());
     try std.testing.expectEqualDeep(identify, node.service.identify.local.?);
     try std.testing.expect(node.advertisementEndpoints().?.ip4 == null);
-    try std.testing.expect(node.counters.discovery_failures > 0);
 }

@@ -16,15 +16,11 @@ pub const HandshakeState = struct {
     failure: ?verify.Error = null,
     keylog: []u8 = &.{},
     keylog_len: u16 = 0,
-    keylog_dropped: u16 = 0,
 
     pub fn appendKeylog(self: *HandshakeState, line: []const u8) bool {
         std.debug.assert(self.keylog.len <= keylog_capacity);
         std.debug.assert(self.keylog_len <= self.keylog.len);
-        if (line.len + 1 > self.keylog.len - self.keylog_len) {
-            self.keylog_dropped +|= 1;
-            return false;
-        }
+        if (line.len + 1 > self.keylog.len - self.keylog_len) return false;
         @memcpy(self.keylog[self.keylog_len..][0..line.len], line);
         self.keylog[self.keylog_len + line.len] = '\n';
         self.keylog_len += @intCast(line.len + 1);

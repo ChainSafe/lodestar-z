@@ -20,11 +20,6 @@ pub const Outcome = struct {
 };
 
 pub const Error = negotiate.Error || error{ InvalidCapabilities, ProtocolDisabled };
-pub const Counters = struct {
-    refused: u64 = 0,
-    inbound_failures: [std.enums.values(negotiate.Failure).len]u64 = @splat(0),
-};
-
 pub const Options = struct {
     capabilities: ?capability.Directional = null,
     negotiations_max: u16 = negotiate.negotiations_max_default,
@@ -36,7 +31,6 @@ pub const Options = struct {
 };
 
 pub const Router = struct {
-    counters: Counters = .{},
     negotiator: negotiate.Negotiator,
     supported: [capability.protocol_count]negotiate.Protocol = undefined,
     supported_count: u8 = 0,
@@ -194,7 +188,6 @@ pub const Router = struct {
         for (events) |event| switch (event) {
             .stream_opened => |stream| {
                 self.negotiator.acceptInbound(engine, stream, now) catch {
-                    self.counters.refused +|= 1;
                     engine.closeStream(stream, types.app_error_negotiation_failed);
                 };
             },
@@ -221,7 +214,6 @@ pub const Router = struct {
         const count = self.negotiator.pump(engine, now, self.supported[0..self.supported_count], raw[0..out.len]);
         for (raw[0..count], out[0..count]) |result, *outcome| {
             if (result.direction == .inbound and result.result == .failed) {
-                self.counters.inbound_failures[@intFromEnum(result.result.failed)] +|= 1;
                 std.log.scoped(.network_quic).debug("inbound_negotiation_failed connection={d}:{d} stream={d} reason={s}", .{ result.stream.conn.index, result.stream.conn.generation, result.stream.id, @tagName(result.result.failed) });
             }
             const selected: ?Protocol = if (result.protocol_index) |index| Protocol.fromIndex(index) else null;

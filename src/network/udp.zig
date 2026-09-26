@@ -40,7 +40,6 @@ pub const Counters = struct {
     sent_bytes: u64 = 0,
     received_datagrams: u64 = 0,
     sent_datagrams: u64 = 0,
-    truncated_datagrams: u64 = 0,
 };
 
 pub const Udp = struct {
@@ -74,10 +73,7 @@ pub const Udp = struct {
         timeout: std.Io.Timeout,
     ) ReceiveTimeoutError!Datagram {
         const incoming = self.sockets.receiveDatagram(io, buffer, timeout) catch |err| {
-            if (err == error.DatagramTooLarge) {
-                self.counters.received_datagrams +|= 1;
-                self.counters.truncated_datagrams +|= 1;
-            }
+            if (err == error.DatagramTooLarge) self.counters.received_datagrams +|= 1;
             return err;
         };
         self.counters.received_datagrams +|= 1;
