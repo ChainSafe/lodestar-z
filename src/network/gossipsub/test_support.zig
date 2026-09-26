@@ -66,6 +66,38 @@ pub const Inbox = struct {
     }
 };
 
+/// Counts the messages the attached sink admits while a helper runs: `begin` routes admissions
+/// through it and `end` restores the attached sink. It must not move in between.
+const Admissions = struct {
+    g: *gossip.Gossipsub,
+    inner: ?*const gossip.MessageSink,
+    sink: gossip.MessageSink = undefined,
+    count: usize = 0,
+
+    fn begin(self: *Admissions) void {
+        if (self.inner == null) return;
+        self.sink = .{ .context = self, .has_capacity = hasCapacity, .admit = admit };
+        self.g.message_sink = &self.sink;
+    }
+
+    fn end(self: *Admissions) usize {
+        self.g.message_sink = self.inner;
+        return self.count;
+    }
+
+    fn hasCapacity(context: *anyopaque, kind: @import("topic.zig").Kind, size: usize) bool {
+        const self: *Admissions = @ptrCast(@alignCast(context));
+        return self.inner.?.has_capacity(self.inner.?.context, kind, size);
+    }
+
+    fn admit(context: *anyopaque, candidate: *gossip.Admission) bool {
+        const self: *Admissions = @ptrCast(@alignCast(context));
+        const admitted = self.inner.?.admit(self.inner.?.context, candidate);
+        self.count += @intFromBool(admitted);
+        return admitted;
+    }
+};
+
 pub fn init(allocator: std.mem.Allocator, options: gossip.Options) !gossip.Gossipsub {
     var configured = options;
     configured.topic_policy = options.topic_policy orelse &.{topic_fixture.bytes(.{ 1, 2, 3, 4 })};
@@ -138,11 +170,12 @@ pub fn penalize(g: *gossip.Gossipsub, conn: engine.Handle, count: f64) void {
     g.peers.penalize(g.sessions.rows[index].logical, count);
 }
 
-/// Returns the messages delivered to the attached sink, as validations they left pending.
+/// Returns the messages delivered to the attached sink.
 pub fn pump(g: *gossip.Gossipsub, transport: *engine.Engine, now: @import("../types.zig").Now) usize {
-    const pending = g.messages.pendingValidations();
+    var admissions: Admissions = .{ .g = g, .inner = g.message_sink };
+    admissions.begin();
     _ = pumpTurn(g, transport, now);
-    return g.messages.pendingValidations() - pending;
+    return admissions.end();
 }
 
 pub fn pumpTurn(g: *gossip.Gossipsub, transport: *engine.Engine, now: @import("../types.zig").Now) @import("turn.zig").Turn {
@@ -162,15 +195,17 @@ pub fn sessionWakeup(g: *const gossip.Gossipsub, now: @import("../types.zig").No
 }
 
 pub fn processRpc(g: *gossip.Gossipsub, index: u16, now: @import("../types.zig").Now, count: *usize, items: *usize) !bool {
+    var admissions: Admissions = .{ .g = g, .inner = g.message_sink };
+    admissions.begin();
     var turn = @import("turn.zig").Turn.init(&g.options, now, g.msg_scratch);
     turn.sink = g.message_sink;
     var peer = @import("turn.zig").Credits.peer(&g.options);
     peer.items = items.*;
-    const pending = g.messages.pendingValidations();
-    const result = try @import("session_io.zig").processRpc(g, index, &turn, &peer);
-    count.* += g.messages.pendingValidations() - pending;
+    const result = @import("session_io.zig").processRpc(g, index, &turn, &peer);
+    count.* += admissions.end();
+    const progress = try result;
     items.* = peer.items;
-    return result == .done;
+    return progress == .done;
 }
 
 pub fn ageHistory(g: *gossip.Gossipsub) void {
@@ -190,15 +225,16 @@ const protobuf = @import("protobuf.zig");
 const Turn = @import("turn.zig").Turn;
 const Credits = @import("turn.zig").Credits;
 const snappy = @import("snappy");
-/// Returns the messages delivered to the attached sink, as validations they left pending, or null
-/// when the item needs more credits.
+/// Returns the messages delivered to the attached sink, or null when the item needs more credits.
 pub fn receiveMessage(g: *Gossipsub, index: u16, msg: protobuf.Message, now: Now) ?usize {
+    var admissions: Admissions = .{ .g = g, .inner = g.message_sink };
+    admissions.begin();
     var turn = Turn.init(&g.options, now, g.msg_scratch);
     turn.sink = g.message_sink;
     var peer = Credits.peer(&g.options);
-    const pending = g.messages.pendingValidations();
     const result = g.receiveItem(g.sessions.ref(index), .{ .message = msg }, &turn, &peer);
-    return if (result == .done) g.messages.pendingValidations() - pending else null;
+    const delivered = admissions.end();
+    return if (result == .done) delivered else null;
 }
 
 pub fn message(g: *Gossipsub, peer: u16, text: []const u8, now_ms: u64) !?usize {
