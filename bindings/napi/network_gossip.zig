@@ -38,7 +38,6 @@ pub fn flags(runtime: *Runtime, io: std.Io) !bool {
     runtime.lock();
     defer runtime.unlock();
     const table = if (runtime.gossip) |*table| table else return false;
-    table.stages.tick(r.bridge.now());
     const clock = try sample(io);
     const now: n.Now = .{ .mono_ms = clock.mono_ms, .unix_s = @intCast(clock.unix_ms / 1000) };
     table.maintain(now.mono_ms, runtime.slot);
@@ -48,11 +47,7 @@ pub fn flags(runtime: *Runtime, io: std.Io) !bool {
         const cell = table.get(token).?;
         if (retired_bytes > 0 and cell.input.len > batch_bytes -| retired_bytes) break;
         retired_bytes += cell.input.len;
-        const counters = &runtime.heavy.?.core.service.gossipsub.counters;
-        const forwards = counters.accepted_forwards;
-        table.stages.tick(r.bridge.now());
         const result = runtime.heavy.?.core.reportValidation(cell.handle, cell.verdict, now);
-        if (counters.accepted_forwards != forwards) table.forwarded(cell);
         table.outcome(result);
         table.retire(token);
     }
@@ -103,7 +98,6 @@ pub const Ingress = struct {
         const admitted_ns = r.bridge.now();
         if (runtime.stop or self.failure != null) return false;
         const table = &runtime.gossip.?;
-        table.stages.tick(admitted_ns);
         const accepted = table.admit(runtime.heavy.?.core.service.gossipsub, candidate, clock.mono_ms, received_at, runtime.slot);
         if (accepted) {
             const kind = native.topic.parseCanonical(candidate.event.topic).?.name.kind;

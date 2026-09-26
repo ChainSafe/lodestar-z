@@ -178,8 +178,6 @@ pub const Gossipsub = struct {
         receive_capacity_refusals: u64 = 0,
         local_pressure_discards: u64 = 0,
         message_capacity_refusals: u64 = 0,
-        /// Accepted verdicts whose message went to gossip delivery, with or without recipients.
-        accepted_forwards: u64 = 0,
         receive_copy_bytes: u64 = 0,
         receive_frame_timeouts: u64 = 0,
         send_queue_timeouts: u64 = 0,
@@ -399,7 +397,6 @@ pub const Gossipsub = struct {
             self.validation_time.observe(now.mono_ms -| applied.admitted_ms);
             if (verdict != .accept) std.log.scoped(.network_gossip).debug("validation_verdict validation={d}:{d} message_id={x} verdict={s} topic={s} peer={f} elapsed_ms={d}", .{ handle.index, handle.generation, applied.id, @tagName(verdict), applied.topicString(), @import("../logging.zig").peer(&applied.source), now.mono_ms -| applied.admitted_ms });
             if (applied.forward) |forward| {
-                self.counters.accepted_forwards += 1;
                 const delivered = self.deliver(self.overlay.mesh(forward.topic.index), forward.message, forward.source, now.mono_ms);
                 forwarded = delivered;
                 forwarded_bytes = @as(u64, self.messages.store.get(forward.message).?.len) * delivered.queued;

@@ -68,17 +68,13 @@ test("exchange actions validate roots, handles and verdicts, and stale handles a
       [classify({...handle, generation: 0n}, true), "InvalidGossipHandle"],
       [classify({...handle, index: 65535}, true), "InvalidNetworkInteger"],
       [{...verdict(handle, "accept"), verdict: "ACCEPT"}, "InvalidGossipVerdict"],
-      [{...verdict(handle, "accept"), waitedMs: -1}, "InvalidNetworkAction"],
-      [{...verdict(handle, "accept"), waitedMs: Number.NaN}, "InvalidNetworkAction"],
-      [{...verdict(handle, "accept"), waitedMs: "1"}, "InvalidNetworkAction"],
       [{type: "unknown"}, "InvalidNetworkAction"],
       [{action: "fatal", count: 0, peerId: runtime.identity.peerId, type: "reportPeer"}, "InvalidNetworkInteger"],
       [{action: "fatal", count: 101, peerId: runtime.identity.peerId, type: "reportPeer"}, "InvalidNetworkInteger"],
       [{action: "bad", count: 1, peerId: runtime.identity.peerId, type: "reportPeer"}, "InvalidNetworkAction"],
     ] as const)
       expect(() => runtime.exchange([classify(handle, true), invalid as NativeAction], settleOnly)).toThrow(code);
-    const timed: NativeAction = {handle, type: "verdict", verdict: "ignore", waitedMs: 1.5};
-    expect(exchange(runtime, settleOnly, [classify(handle, true), timed]).more).toBe(false);
+    expect(exchange(runtime, settleOnly, [classify(handle, true), verdict(handle, "ignore")]).more).toBe(false);
     expect(runtime.diagnostics().gossip).toMatchObject({checking: 0, reportsAccepted: 0n, waiting: 0});
   } finally {
     await runtime.close();

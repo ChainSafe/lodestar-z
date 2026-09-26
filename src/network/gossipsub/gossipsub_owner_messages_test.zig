@@ -163,7 +163,6 @@ test "gossipsub pending validation survives history churn and report publish eve
     const expires = inbox.last().handle;
     try std.testing.expectEqual(ReportOutcome.expired, g.report(expires, .accept, .{ .mono_ms = 30_007, .unix_s = 1 }));
     try std.testing.expectEqual(ReportOutcome.stale_handle, g.report(expires, .accept, .{ .mono_ms = 60_007, .unix_s = 1 }));
-    try std.testing.expectEqual(@as(u64, 0), g.counters.accepted_forwards);
 }
 
 test "gossipsub duplicate invalid bytes do not evict useful history" {
@@ -692,13 +691,6 @@ test "gossip forwarding excludes recorded duplicate senders but reaches other me
     try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[peers[0]].io.tx.data.count);
     try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[peers[1]].io.tx.data.count);
     try std.testing.expectEqual(@as(usize, 1), g.sessions.rows[peers[2]].io.tx.data.count);
-    try std.testing.expectEqual(@as(u64, 1), g.counters.accepted_forwards);
-    // An accepted verdict for a topic left while it waited reaches no delivery.
-    try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, peers[0], "late payload", 4));
-    const late = inbox.last().handle;
-    try support.unsubscribe(&g, name);
-    try std.testing.expectEqual(ReportOutcome{ .applied = .accept }, g.report(late, .accept, .{ .mono_ms = 5, .unix_s = 0 }));
-    try std.testing.expectEqual(@as(u64, 1), g.counters.accepted_forwards);
 }
 
 test "gossip duplicate fast path ignores host capacity and malformed bodies receive penalties" {
