@@ -374,7 +374,17 @@ test("the facade validates its host, starts without host callbacks and hides the
     expect((await network.getDirectPeers()).identities).toEqual([direct]);
     expect(await network.setDirectPeer(direct, null)).toBe(true);
     expect(await network.setDirectPeer(direct, null)).toBe(false);
-    expect(network.metrics()).toContain("# TYPE lodestar_native_drain_burst_seconds histogram\n");
+    // The native registry's families and the binding's two, each exactly once.
+    const families = (text: string) => [...text.matchAll(/^# TYPE (\S+) /gm)].map(([, name]) => name);
+    const native = families(runtimeOf(network)?.getMetrics() ?? "");
+    const rendered = families(network.metrics());
+    expect(native.length).toBeGreaterThan(0);
+    expect(rendered).toEqual([
+      ...native,
+      "lodestar_native_drain_burst_seconds",
+      "lodestar_native_log_delivery_errors_total",
+    ]);
+    expect(new Set(rendered).size).toBe(rendered.length);
   } finally {
     expect(await network.close()).toEqual({reason: "requested"});
   }
