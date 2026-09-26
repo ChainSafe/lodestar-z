@@ -189,8 +189,8 @@ function fixture() {
     closed: closed.promise,
     drainLogs: vi.fn((_max: number): NativeLogBatch => noLogs),
     exchange: vi.fn((_actions: readonly NativeAction[], _demand: NativeExchangeDemand): NativeExchange => idle),
-    fail: vi.fn((trigger: number, _reason: string): never => {
-      throw new Escalated(String(trigger));
+    fail: vi.fn((site: string, _reason: string): never => {
+      throw new Escalated(site);
     }),
     state: "running",
   };
@@ -421,7 +421,7 @@ describe("binding pump scheduling", () => {
     });
     node.pump.request();
     expect(() => queued.shift()?.()).toThrow(Escalated);
-    expect(node.runtime.fail).toHaveBeenCalledExactlyOnceWith(1, "InvalidNetworkActions");
+    expect(node.runtime.fail).toHaveBeenCalledExactlyOnceWith("generated_batch", "InvalidNetworkActions");
   });
 
   it.each([
@@ -446,7 +446,7 @@ describe("binding pump scheduling", () => {
     expect(node.host.error).toHaveBeenCalledTimes(2);
     expect(node.host.peers).not.toHaveBeenCalled();
     expect(node.runtime.fail).toHaveBeenCalledOnce();
-    expect(node.runtime.fail.mock.calls[0][0]).toBe(3);
+    expect(node.runtime.fail.mock.calls[0][0]).toBe("failed_turns");
     expect(node.runtime.fail.mock.calls[0][1]).toMatch(/capacity/);
   });
 
@@ -483,7 +483,7 @@ describe("binding pump scheduling", () => {
     expect(runUntilEscalated(queued, 20)).toBe(true);
     expect(node.host.capacity).toHaveBeenCalledTimes(3);
     expect(node.runtime.exchange).toHaveBeenCalledTimes(2);
-    expect(node.runtime.fail).toHaveBeenCalledExactlyOnceWith(3, "capacity failed");
+    expect(node.runtime.fail).toHaveBeenCalledExactlyOnceWith("failed_turns", "capacity failed");
   });
 
   it("after close, an exchange that settles ends a run of failed ones", () => {
@@ -573,8 +573,7 @@ describe("binding pump scheduling", () => {
     );
     const closed = child.status === 0 && child.stdout.includes("closed");
     const escalated =
-      child.signal === "SIGABRT" &&
-      child.stderr.includes("native network bridge escalation trigger 3: exchange failed");
+      child.signal === "SIGABRT" && child.stderr.includes("native network bridge failed_turns: exchange failed");
     expect(
       closed || escalated,
       JSON.stringify({signal: child.signal, status: child.status, stdout: child.stdout})

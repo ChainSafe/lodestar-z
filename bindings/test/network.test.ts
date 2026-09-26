@@ -294,11 +294,14 @@ it("rejects every invalid exchange demand, oversized batch and nested exchange b
   }
 }, 20000);
 
-it.each([1, 3] as const)("escalation trigger %i terminates the process through fatalError", (trigger) => {
+it.each([
+  "generated_batch",
+  "failed_turns",
+] as const)("the pump's fatal site %s terminates the process through fatalError", (site) => {
   const script = `import {initializeNativeNetworkRuntime} from "./bindings/src/network-runtime.js";
     import {applicationConfig} from "./bindings/test/utils/network.ts";
     const runtime = initializeNativeNetworkRuntime(applicationConfig(), () => undefined);
-    runtime.fail(${trigger}, "test");
+    runtime.fail("${site}", "test");
     console.log("survived");`;
   let failure: {status: number | null; signal: string | null; stdout: string; stderr: string} | undefined;
   try {
@@ -312,7 +315,7 @@ it.each([1, 3] as const)("escalation trigger %i terminates the process through f
   }
   expect(failure?.signal).toBe("SIGABRT");
   expect(failure?.stdout).not.toContain("survived");
-  expect(failure?.stderr).toContain(`native network bridge escalation trigger ${trigger}: test`);
+  expect(failure?.stderr).toContain(`native network bridge ${site}: test`);
 }, 30000);
 
 it.each([

@@ -409,10 +409,10 @@ export class NativePump {
     };
   }
 
-  #escalate(trigger, cause) {
+  #escalate(site, cause) {
     this.#stop();
     const reason = typeof cause === "string" ? cause : cause instanceof Error ? cause.message : "unknown";
-    this.#runtime.fail(trigger, reason.replace(/[^\x20-\x7e]/g, "?").slice(0, 64));
+    this.#runtime.fail(site, reason.replace(/[^\x20-\x7e]/g, "?").slice(0, 64));
     throw Error("Native escalation returned");
   }
 
@@ -468,7 +468,7 @@ export class NativePump {
       demand = this.#demand(deadline);
     } catch (error) {
       // The turn still settles control; the capacity read retries on the timer.
-      if (++this.#failures >= FAILURES_MAX) this.#escalate(3, error);
+      if (++this.#failures >= FAILURES_MAX) this.#escalate("failed_turns", error);
       failed = true;
       this.#error(error);
     }
@@ -480,10 +480,10 @@ export class NativePump {
       // Native refuses only an invalid batch or a nested exchange, so a refusal of this generated batch is a
       // broken contract. Anything else left native untouched: the batch requeues and the turn retries.
       const code = error?.code;
-      if (typeof code === "string") this.#escalate(1, code);
+      if (typeof code === "string") this.#escalate("generated_batch", code);
       this.#requeue(batch);
       // A turn whose capacity read failed has counted already.
-      if (!failed && ++this.#failures >= FAILURES_MAX) this.#escalate(3, error);
+      if (!failed && ++this.#failures >= FAILURES_MAX) this.#escalate("failed_turns", error);
       this.#error(error);
       return "retry";
     }

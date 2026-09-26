@@ -32,7 +32,7 @@ pump.attach({
     if (closing) throw Error("exchange failed");
     return native.exchange(actions, demand);
   },
-  fail: (trigger, reason) => native.fail(trigger, reason),
+  fail: (site, reason) => native.fail(site, reason),
 });
 // A command settles through the pump before the host closes.
 await native.getIdentity();

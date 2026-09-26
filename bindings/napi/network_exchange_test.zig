@@ -8,6 +8,7 @@ const projection = @import("network_peer_projection.zig");
 const readiness = @import("network_readiness.zig");
 const commands = @import("network_commands.zig");
 const tsfn = @import("network_runtime_test.zig");
+const fatal = @import("network_fatal.zig");
 const Runtime = r.Runtime;
 const Kind = n.gossip_processor.limits_mod.Kind;
 const limits_mod = n.gossip_processor.limits_mod;
@@ -16,7 +17,7 @@ const State = n.gossip_processor.State;
 const Part = enum { peers, serving, checks, gossip, acknowledged };
 
 /// Builds a summary instead of JS values, fails at one part or while finishing when asked, and records a
-/// contract failure instead of terminating. `during` runs where the build runs, as owner work racing phase C.
+/// contract failure's site instead of terminating. `during` runs where the build runs, as owner work racing phase C.
 const Host = struct {
     runtime: *Runtime,
     clock: u64 = 1,
@@ -26,7 +27,7 @@ const Host = struct {
     builds: usize = 0,
     discarded: usize = 0,
     kept_alive: usize = 0,
-    fatals: usize = 0,
+    site: ?fatal.Site = null,
     /// Terminate on a contract failure, as the N-API host's fatal error does.
     aborts: bool = false,
     during: ?*const fn (*Runtime) void = null,
@@ -77,9 +78,9 @@ const Host = struct {
     pub fn classify(self: *Host, _: anyerror) exchange.Failure {
         return self.failure;
     }
-    pub fn fatal(self: *Host, err: anyerror) anyerror {
+    pub fn terminate(self: *Host, site: fatal.Site, err: anyerror) anyerror {
         if (self.aborts) std.process.abort();
-        self.fatals += 1;
+        self.site = site;
         return err;
     }
 
@@ -185,7 +186,7 @@ fn stopAt(part: Part) !void {
 
     var host: Host = .{ .runtime = runtime, .fail = part };
     try std.testing.expectError(error.PendingException, host.turn(&.{}, deployed));
-    try std.testing.expectEqual(@as(usize, 0), host.fatals);
+    try std.testing.expectEqual(null, host.site);
     // Settled promises stay settled; every pinned item is back where it was, and the rows stay queued.
     try std.testing.expectEqual(@as(u8, 0), runtime.table.occupied);
     try std.testing.expectEqual(@as(u8, 2), fixture.lane.len);
@@ -233,7 +234,7 @@ test "a stopped environment while finishing a built result shuts down locally, a
         const exit = try admit(runtime, .voluntary_exit, null, "data");
         var host: Host = .{ .runtime = runtime, .fail_finish = true, .failure = failure };
         try std.testing.expectError(if (failure == .stopped) error.PendingException else error.InvalidArg, host.turn(&.{}, deployed));
-        try std.testing.expectEqual(@as(usize, @intFromBool(failure == .contract)), host.fatals);
+        try std.testing.expectEqual(if (failure == .contract) fatal.Site.exchange_finish else null, host.site);
         // The delivery committed before finishing: its items belong to the host, and teardown reclaims them.
         try std.testing.expectEqual(@as(u8, 0), fixture.lane.len);
         try std.testing.expectEqual(State.delivered, runtime.gossip.?.get(exit).?.state);
@@ -250,7 +251,7 @@ test "a contract failure is not retried: the exchange terminates after one build
     var host: Host = .{ .runtime = runtime, .fail = .gossip, .failure = .contract };
     try std.testing.expectError(error.InvalidArg, host.turn(&.{}, deployed));
     try std.testing.expectEqual(@as(usize, 1), host.builds);
-    try std.testing.expectEqual(@as(usize, 1), host.fatals);
+    try std.testing.expectEqual(fatal.Site.exchange_build, host.site);
     try std.testing.expectEqual(@as(usize, 0), runtime.gossip.?.diag.copying);
 }
 

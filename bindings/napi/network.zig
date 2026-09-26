@@ -15,6 +15,7 @@ const incoming = @import("network_incoming.zig");
 const incoming_js = @import("network_incoming_js.zig");
 const request_js = @import("network_request_js.zig");
 const exchange_mod = @import("network_exchange.zig");
+const fatal = @import("network_fatal.zig");
 
 pub const js_meta = js.class(.{});
 
@@ -150,8 +151,7 @@ fn onNotify(env: napi.Env, callback: Value, runtime: *Runtime, _: *void) void {
 
 fn settlementFailed(env: napi.Env, runtime: *Runtime, err: anyerror) void {
     if (jsStopped(err)) return runtime.forceStop(true);
-    // Failed settlement of valid, preallocated handles cannot notify the host reliably.
-    env.fatalError("native network result settlement", @errorName(err));
+    fatal.terminate(env, .settlement, @errorName(err));
 }
 
 /// Node may disable JavaScript before running environment cleanup hooks.
@@ -249,15 +249,16 @@ pub fn holdVerdicts(self: *@This(), held: js.Value) !void {
     if (!value) runtime.signalLocked();
 }
 
-/// Terminates the process for a bridge contract failure the host escalates: 1, an exchange refused a batch the
-/// host generated; 3, the host's demand failed on three consecutive turns.
-pub fn fail(_: *@This(), trigger_value: js.Value, reason_value: js.Value) !void {
-    const trigger = try cfg.integer(trigger_value.val, 3);
-    if (trigger != 1 and trigger != 3) return error.InvalidNetworkInteger;
-    var reason: [64]u8 = undefined;
-    const len = try application_cfg.text(reason_value.val, &reason);
-    var message: [96]u8 = undefined;
-    js.env().fatalError("native network bridge", std.fmt.bufPrint(&message, "escalation trigger {d}: {s}", .{ trigger, reason[0..len] }) catch unreachable);
+/// Terminates the process at a fatal site the pump raises (network_fatal.zig).
+pub fn fail(_: *@This(), site_value: js.Value, reason_value: js.Value) !void {
+    var name: [fatal.name_max]u8 = undefined;
+    const site = std.meta.stringToEnum(fatal.Site, name[0..try application_cfg.text(site_value.val, &name)]) orelse return error.InvalidNetworkConfig;
+    switch (site) {
+        .generated_batch, .failed_turns => {},
+        .settlement, .exchange_build, .exchange_finish => return error.InvalidNetworkConfig,
+    }
+    var reason: [fatal.detail_max]u8 = undefined;
+    fatal.terminate(js.env(), site, reason[0..try application_cfg.text(reason_value.val, &reason)]);
 }
 
 /// The N-API side of an exchange: legacy settlement and the result's JS values.
@@ -303,8 +304,8 @@ const Exchange = struct {
         _ = self.env.getAndClearLastException() catch return .stopped;
         return .contract;
     }
-    pub fn fatal(self: *Exchange, err: anyerror) noreturn {
-        self.env.fatalError("native network exchange", @errorName(err));
+    pub fn terminate(self: *Exchange, site: fatal.Site, err: anyerror) noreturn {
+        fatal.terminate(self.env, site, @errorName(err));
     }
 };
 

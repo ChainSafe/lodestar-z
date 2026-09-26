@@ -29,6 +29,7 @@ test {
     _ = projection;
     _ = @import("network_peer_reports.zig");
     _ = @import("network_owner.zig");
+    _ = @import("network_fatal.zig");
 }
 
 test "application typed store allocation prefixes release all requested bytes" {
