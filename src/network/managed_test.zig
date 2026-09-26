@@ -42,7 +42,6 @@ test "managed native two owners establish relevance and fetch initial metadata w
         try std.testing.expectEqual(@as(u16, 1), setup.server.peerCounts().relevant);
         try std.testing.expectEqualSlices(u64, &.{ 0, 1 }, &setup.client.control.counters.events.connected);
         try std.testing.expectEqualSlices(u64, &.{ 1, 0 }, &setup.server.control.counters.events.connected);
-        try std.testing.expect(setup.client.control.counters.events.relevance[0] > 0);
         var snapshots: [4]t.Snapshot = undefined;
         try std.testing.expectEqual(@as(usize, 1), setup.client.snapshots(&snapshots));
         try std.testing.expectEqualDeep(local.metadata, snapshots[0].metadata.?);
@@ -723,12 +722,10 @@ test "managed native Goodbye immediately removes relevance and delayed Status ca
     try std.testing.expectEqual(@as(u16, 0), setup.client.peerCounts().connected);
     try std.testing.expectEqual(@as(usize, 1), setup.client.catalog.pollEvents(&event));
     try std.testing.expectEqual(t.DisconnectReason.reputation, event[0].closed.reason);
-    try std.testing.expectEqualSlices(u64, &.{ 0, 1 }, &setup.client.control.counters.events.disconnected);
     const fault = @intFromEnum(@import("peers/goodbye.zig").Reason.bad_score);
-    try std.testing.expectEqual(@as(u64, 1), setup.client.control.counters.events.sent_goodbyes[fault]);
     try std.testing.expectEqual(@as(u64, 1), setup.server.control.counters.events.goodbyes[fault]);
     for (0..4) |_| try setup.step(0);
-    try std.testing.expectEqualSlices(u64, &.{ 0, 1 }, &setup.client.control.counters.events.disconnected);
+    try std.testing.expectEqual(@as(u16, 0), setup.client.peerCounts().connected);
 }
 
 test "managed native hard close retires QUIC routes streams and registry with zero public output" {
@@ -866,7 +863,6 @@ test "managed simultaneous selected dials consume one commitment and preserve du
         try std.testing.expectEqual(expected, row.direction);
         try std.testing.expectEqual(@as(u16, 0), owner.dialing.attempts().total);
         try std.testing.expectEqual(@as(u8, 0), row.intent.failures);
-        try std.testing.expectEqual(@as(u64, 0), owner.dialing.durations[1].count);
     }
     for (0..8) |_| {
         try setup.pair.pump();
@@ -874,7 +870,6 @@ test "managed simultaneous selected dials consume one commitment and preserve du
             var storage: [32]Engine.Event = undefined;
             for (setup.pair.events(engine, &storage)) |event| owner.transportEvent(service, engine, event, setup.pair.now);
             try std.testing.expectEqual(@as(u16, 2), owner.catalog.connectedCount());
-            try std.testing.expectEqual(@as(u64, 0), owner.dialing.durations[1].count);
         }
     }
 }
@@ -914,7 +909,7 @@ test "managed competing one-shot attempt expires during selected peer ban cooldo
     try std.testing.expect(!setup.client.dialFailed(token, setup.pair.now));
     try std.testing.expectEqual(@as(u16, 0), setup.pair.client.registry.outbound);
     try std.testing.expectEqual(@as(?u64, null), setup.client.dialing.nextWakeup(&setup.client.catalog, setup.pair.now.mono_ms, 1));
-    try std.testing.expectEqual(@as(usize, 0), setup.client.dialing.resourceSnapshot(&setup.client.catalog).occupied);
+    try std.testing.expectEqual(@as(usize, 0), setup.client.catalog.intent_count);
 }
 
 test "managed review early native close preserves selected reason and counts it once" {
@@ -1202,7 +1197,6 @@ test "managed reconciliation idle and candidate batch work" {
         _ = setup.client.dialIntents(&setup.client_service, &setup.pair.client, setup.pair.now, &.{});
     }
     const c = setup.client.counters;
-    const requested = setup.client.requested_connect;
     const candidate = try candidateFor(&setup.pair.server_ctx.local_peer_id, null);
     for (0..4) |_| try std.testing.expectEqual(@as(u16, 1), setup.client.discoveredBatch(&setup.client_service, &.{candidate}, setup.pair.now).accepted);
     var out: [1]managed.DialIntent = undefined;
@@ -1210,8 +1204,6 @@ test "managed reconciliation idle and candidate batch work" {
     const after = setup.client.counters;
     try std.testing.expectEqual(@as(u64, 1), c.selections);
     try std.testing.expectEqual(@as(u64, 0), after.selections - c.selections);
-    try std.testing.expectEqual(requested, setup.client.requested_connect);
-    try std.testing.expectEqual(c.selections, setup.client.selection_duration.count);
 }
 
 test "managed reconciliation reads preserve completed demand and catalog evaluation" {
@@ -1283,14 +1275,12 @@ test "managed reconciliation reads do not decay reputation or schedule peer remo
     try std.testing.expectEqual(@as(usize, 1), setup.client.catalog.pollEvents(&events));
     const dirty = view.catalog.get(snapshot.peer).?;
     const counters = view.counters;
-    const dial_counters = view.dialing.counters;
     for (0..8) |_| {
         try std.testing.expectEqualDeep(deficits, view.coverageDeficits());
         try std.testing.expectEqualDeep(need, view.discoveryNeed());
     }
     try std.testing.expectEqualDeep(dirty, view.catalog.get(snapshot.peer).?);
     try std.testing.expectEqualDeep(counters, view.counters);
-    try std.testing.expectEqualDeep(dial_counters, view.dialing.counters);
     try std.testing.expect(!view.catalog.eventsPending());
     setup.client.reconcile(&setup.client_service, setup.pair.now);
     const evaluated = view.catalog.get(snapshot.peer).?;
@@ -1848,7 +1838,6 @@ test "managed peer id mismatch releases the discovered endpoint and refuses its 
     try std.testing.expect(setup.client.dialStarted(intents[0].token, handle));
     for (0..20) |_| try setup.step(0);
     try std.testing.expect(setup.client.catalog.find(&stranger.peer) == null);
-    try std.testing.expectEqual(@as(u64, 1), setup.client.dialing.counters.failed_intents_released);
     try std.testing.expectEqual(@as(u64, 1), setup.client.dialing.outcomes[@intFromEnum(t.DialOutcome.peer_id_mismatch)]);
     var newer = stranger;
     newer.sequence = 2;

@@ -21,14 +21,12 @@ pub const attempts_max = 64;
 pub const history_retention_ms = catalog_mod.history_retention_ms;
 pub const hint_freshness_ms = catalog_mod.hint_freshness_ms;
 pub const connect_timeout_ms: u64 = 30_000;
-pub const DialTime = @import("../metrics/histogram.zig").Duration(&.{ 100, 500, 1000, 5000, 10000, 60000 });
 pub const Source = enum { discovery, manual, direct };
 const Attempt = struct {
     generation: u64 = 0,
     peer: ?t.PeerRef = null,
     connection: ?t.Handle = null,
     answered: bool = false,
-    started_ms: u64 = 0,
     lease_until_ms: u64 = 0,
     /// The dialed endpoint, which a discovery refresh may drop from the row's addresses mid-flight.
     address: t.Address = .unspecified,
@@ -49,9 +47,7 @@ pub const Dialing = struct {
     /// them waiting, and the replay pacer sets when each starts.
     replay_waiting: [remembered.replay_burst]?t.PeerRef = @splat(null),
     random: std.Random.DefaultPrng,
-    counters: Counters = .{},
     selected_attempts: [std.meta.fields(Source).len]u64 = @splat(0),
-    durations: [2]DialTime = @splat(.{}),
     outcomes: [std.meta.fields(t.DialOutcome).len]u64 = @splat(0),
     /// Redials of an endpoint by its previous failure, each counted when the redial is selected.
     retries: [std.meta.fields(t.DialFailure).len]u64 = @splat(0),
@@ -69,33 +65,6 @@ pub const Dialing = struct {
 
     const Demand = struct { revision: u64, intent_revision: u64, version: u64, pending: u16, host: u16 };
 
-    pub const Counters = struct {
-        manual_completed: u64 = 0,
-        manual_expired: u64 = 0,
-        manual_cancelled: u64 = 0,
-        failed_intents_released: u64 = 0,
-    };
-    pub const Resources = struct {
-        capacity: usize = 0,
-        occupied: usize = 0,
-        attempts: usize = 0,
-        connected: usize = 0,
-        automatic: usize = 0,
-        custody_incomplete: usize = 0,
-    };
-    pub fn resourceSnapshot(self: *const Dialing, catalog: *const Catalog) Resources {
-        var result: Resources = .{ .capacity = catalog.intent_capacity, .occupied = catalog.intent_count, .attempts = self.attempts().total };
-        var it = catalog.intents.iterator(.{});
-        while (it.next()) |index| {
-            const row = &catalog.rows[index];
-            if (row.connection != null) result.connected += 1;
-            if (row.intent.automatic) result.automatic += 1;
-            if (row.custody_work) |*work| {
-                if (!work.exhausted() and work.complete() == null) result.custody_incomplete += 1;
-            }
-        }
-        return result;
-    }
     pub fn validateOptions(options: Options) error{InvalidOptions}!void {
         if (options.capacity == 0 or options.capacity > 4096 or options.concurrent_max == 0 or
             options.concurrent_max > attempts_max or options.concurrent_max > options.capacity or
@@ -399,13 +368,11 @@ pub const Dialing = struct {
         if (row.intent.manual_until_ms != 0) {
             row.intent.manual_until_ms = 0;
             self.version +|= 1;
-            self.counters.manual_completed +|= 1;
         }
         if (row.attempt) |index| {
             const attempt = &self.active[index];
             if (attempt.connection) |current| {
                 if (!std.meta.eql(current, conn)) return;
-                self.durations[0].observe(now_ms -| attempt.started_ms);
                 row.dialed = attempt.address;
                 if (discoveryOnly(row)) {
                     row.origin = origin(row);
@@ -420,7 +387,6 @@ pub const Dialing = struct {
     pub fn cancelConnect(self: *Dialing, catalog: *Catalog, engine: *Engine, peer: *const t.PeerId, now_ms: u64) void {
         const ref = catalog.find(peer) orelse return;
         const row = catalog.rowFor(ref).?;
-        if (row.intent.manual_until_ms != 0) self.counters.manual_cancelled +|= 1;
         row.intent.manual_until_ms = 0;
         self.version +|= 1;
         catalog.markDial(ref.index);
@@ -492,7 +458,6 @@ pub const Dialing = struct {
         const redundant = row.connection != null;
         self.retire(catalog, index, if (redundant) .cancelled else failureOutcome(failure));
         if (!redundant) {
-            self.durations[1].observe(now_ms -| attempt.started_ms);
             row.intent.failures = @min(row.intent.failures +| 1, 7);
             catalog.history.markRetry(dialedKey(catalog, row, &attempt), failure, now_ms);
             const base: u64 = @min(@as(u64, 1_000) << @intCast(row.intent.failures - 1), 60_000);
@@ -503,7 +468,6 @@ pub const Dialing = struct {
         // A redundant attempt leaves the backoff alone but still records its endpoint evidence.
         const learned = evidence and discoveryOnly(row);
         if (learned and remember(catalog, row, &attempt, failure, now_ms)) {
-            self.counters.failed_intents_released +|= 1;
             row.intent.automatic = false;
         } else if (learned or !redundant) {
             rotate(catalog, row, &attempt, now_ms);
@@ -570,7 +534,6 @@ pub const Dialing = struct {
             };
             row.intent.manual_until_ms = 0;
             self.version +|= 1;
-            self.counters.manual_expired +|= 1;
             releaseUnused(catalog, peer);
         }
         var leases: u64 = 0;
@@ -667,7 +630,7 @@ pub const Dialing = struct {
             self.cursor = (index + 1) % catalog.rows.len;
             const row = &catalog.rows[index];
             const attempt = &self.active[slot];
-            attempt.* = .{ .generation = attempt.generation + 1, .peer = catalog.reference(index), .started_ms = now_ms, .lease_until_ms = if (row.direct or row.intent.automatic) now_ms +| 10_000 else @min(row.intent.manual_until_ms, now_ms +| 10_000), .address = row.intent.addresses[row.intent.address_index] };
+            attempt.* = .{ .generation = attempt.generation + 1, .peer = catalog.reference(index), .lease_until_ms = if (row.direct or row.intent.automatic) now_ms +| 10_000 else @min(row.intent.manual_until_ms, now_ms +| 10_000), .address = row.intent.addresses[row.intent.address_index] };
             row.attempt = slot;
             self.held.total += 1;
             self.held.unstarted += 1;

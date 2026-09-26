@@ -16,7 +16,6 @@ pub const Context = struct {
     bridge: ?*const @import("bridge.zig").Snapshot = null,
     population: peers.Distribution = .{},
     scores: scores.Distribution = .{},
-    mesh_clients: [std.meta.fields(client.Client).len]usize = @splat(0),
     peer_count: usize = 0,
     relevant: usize = 0,
     /// Kernel drop totals per family of the QUIC and discovery UDP sockets. Reading them extends
@@ -28,22 +27,17 @@ pub const Context = struct {
         result.socket_drops[0] = owner.transport.udp.sockets.drops();
         if (owner.discovery) |discovery| result.socket_drops[1] = discovery.transport.sockets.drops();
         if (!running) return result;
-        var clients: peers.ConnectionClients = .{};
         for (owner.peer_manager.catalog.rows) |*row| {
-            const conn = row.connection orelse continue;
+            if (row.connection == null) continue;
             result.peer_count += 1;
             result.relevant += @intFromBool(row.status != null);
-            const kind = client.fromIdentify(&row.identify);
-            clients.put(conn, kind);
-            result.population.observe(row, kind, now.mono_ms);
+            result.population.observe(row, client.fromIdentify(&row.identify), now.mono_ms);
         }
         const g = owner.service.gossipsub;
-        var mesh_peers = gossip.sessions.PeerSet.initEmpty();
         var meshes: [scores.kind_count]gossip.sessions.PeerSet = @splat(.initEmpty());
         var kinds: scores.TopicKinds = @splat(null);
         for (&g.overlay.rows, 0..) |*row, index| {
             if (!row.active) continue;
-            mesh_peers.setUnion(row.mesh);
             const parsed = gossip.topic.parse(row.string[0..row.string_len]) orelse continue;
             const known = gossip.topic.Name.parse(parsed.name);
             const kind: u8 = if (known) |value| @intFromEnum(value.kind) else gossip.topic_policy.kind_count;
@@ -59,9 +53,6 @@ pub const Context = struct {
             for (&meshes, &result.scores.mesh_scores) |*mesh, *range| {
                 if (mesh.isSet(index)) range.observe(value);
             }
-            const kind = clients.get(row.conn);
-            result.population.gossip_scores[@intFromEnum(kind)].observe(value);
-            if (mesh_peers.isSet(index)) result.mesh_clients[@intFromEnum(kind)] += 1;
         }
         return result;
     }

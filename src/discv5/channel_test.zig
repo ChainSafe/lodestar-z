@@ -144,6 +144,7 @@ test "invalid handshake proof receives only one verification attempt" {
     pair.a_to_b[signature_offset] ^= 1;
     const invalid = pair.node_b.receive(pair.a_to_b[0..length], pair.address_a, 2, &pair.scratch);
     try std.testing.expectEqual(types.RejectReason.invalid_handshake, invalid.rejected);
+    const charged = handshakeCharge(&pair);
     pair.a_to_b[signature_offset] ^= 1;
     for (0..8) |_| {
         const replay = pair.node_b.receive(pair.a_to_b[0..length], pair.address_a, 3, &pair.scratch);
@@ -151,7 +152,14 @@ test "invalid handshake proof receives only one verification attempt" {
     }
     try std.testing.expectEqual(@as(usize, 0), pair.node_b.sessions.sessionCount());
     try std.testing.expectEqual(@as(usize, 0), pair.node_b.sessions.challengeCount());
-    try std.testing.expectEqual(@as(u64, 1), pair.node_b.admission.counts[@intFromEnum(admission.Stage.handshake)][@intFromEnum(admission.Outcome.allowed)]);
+    try std.testing.expectEqual(charged, handshakeCharge(&pair));
+}
+
+/// When the source's handshake credit next replenishes; a verification attempt advances it.
+fn handshakeCharge(pair: *const Pair) u64 {
+    var group = pair.address_a;
+    group.ip4.port = 0;
+    return pair.node_b.admission.sources.get(group).?.buckets[@intFromEnum(admission.Stage.handshake)].charged_until_ms;
 }
 
 test "challenge admission shares source credit across ports and node identities" {
@@ -202,6 +210,7 @@ test "throttled challenge expires without a timer tick and cannot regain verific
     for (0..admission.source_quota.burst) |_|
         try std.testing.expect(pair.node_b.admission.allow(.handshake, &pair.address_a, 0));
     const length = try pair.challengeAndHandshake("ping", null, 1);
+    const charged = handshakeCharge(&pair);
     const limited = pair.node_b.receive(pair.a_to_b[0..length], pair.address_a, 100, &pair.scratch);
     try std.testing.expectEqual(types.RejectReason.admission_limited, limited.rejected);
     try std.testing.expectEqual(@as(?u64, 101), pair.node_b.nextDeadlineMs());
@@ -210,7 +219,7 @@ test "throttled challenge expires without a timer tick and cannot regain verific
         try std.testing.expectEqual(types.RejectReason.unexpected_handshake, expired.rejected);
     }
     try std.testing.expectEqual(@as(usize, 0), pair.node_b.sessions.challengeCount());
-    try std.testing.expectEqual(@as(u64, admission.source_quota.burst), pair.node_b.admission.counts[@intFromEnum(admission.Stage.handshake)][@intFromEnum(admission.Outcome.allowed)]);
+    try std.testing.expectEqual(charged, handshakeCharge(&pair));
 }
 
 test "established packets work while both discovery admission stages are exhausted" {

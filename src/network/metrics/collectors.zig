@@ -22,9 +22,8 @@ pub const registry = prom.Registry(Context, .{
     writePopulation,
     writePeerEvents,
     writePeerPolicy,
-    writePeerProcessing,
     writeConnections,
-    writePeeringProgress,
+    writeTransportConnections,
     writeRuntime,
     writeNativeCounters,
     writeSockets,
@@ -54,11 +53,6 @@ fn writePeers(self: *const Context, w: *prom.Encoder) prom.Error!void {
         .kind = .gauge,
         .help = "Connected peers below target while running",
     }, @intFromBool(self.running and self.peer_count < self.owner.peer_manager.catalog.options.target_peers));
-    try w.scalar(.{
-        .name = "lodestar_peer_manager_outbound_peers_ratio",
-        .kind = .gauge,
-        .help = "Fraction of connected peers that are outbound",
-    }, if (self.peer_count == 0) @as(f64, 0) else @as(f64, @floatFromInt(self.population.directionCount(.outbound))) / @as(f64, @floatFromInt(self.peer_count)));
     const directions = try w.family(.{
         .name = "lodestar_peers_by_direction_count",
         .kind = .gauge,
@@ -66,30 +60,19 @@ fn writePeers(self: *const Context, w: *prom.Encoder) prom.Error!void {
         .labels = &.{"direction"},
     });
     for ([_][]const u8{ "inbound", "outbound" }, self.population.directionCounts()) |direction, count| try directions.sample(.{direction}, count);
-    inline for (.{ .{ "lodestar_peers_by_client_count", "clients", "Connected peers by client" }, .{ "lodestar_gossip_mesh_peers_by_client_count", "mesh_clients", "Peers in at least one gossip mesh by client" } }) |metric| {
-        const clients = try w.family(.{
-            .name = metric[0],
-            .kind = .gauge,
-            .help = metric[2],
-            .labels = &.{"client"},
-        });
-        inline for (std.meta.fields(Client)) |field| {
-            const count = if (comptime std.mem.eql(u8, metric[1], "clients"))
-                self.population.clientCount(@enumFromInt(field.value))
-            else
-                self.mesh_clients[field.value];
-            try clients.sample(.{field.name}, count);
-        }
-    }
+    const clients = try w.family(.{
+        .name = "lodestar_peers_by_client_count",
+        .kind = .gauge,
+        .help = "Connected peers by client",
+        .labels = &.{"client"},
+    });
+    inline for (std.meta.fields(Client)) |field| try clients.sample(.{field.name}, self.population.clientCount(@enumFromInt(field.value)));
 }
 
 fn writeRuntime(self: *const Context, w: *prom.Encoder) prom.Error!void {
     if (self.owner.discovery) |discovery| {
         try w.scalar(.{ .name = "lodestar_discv5_active_session_count", .kind = .gauge, .help = "Stored discovery sessions" }, self.live(discovery.transport.engine.channel.sessions.sessionCount()));
         try w.scalar(.{ .name = "lodestar_discv5_kad_table_size", .kind = .gauge, .help = "Discovery routing table entries" }, self.live(discovery.transport.engine.peerCount()));
-        try w.scalar(.{ .name = "lodestar_discv5_lookup_count", .kind = .gauge, .help = "Total count of discv5 lookups" }, discovery.coordinator.counters.lookups_started);
-        try w.scalar(.{ .name = "lodestar_native_discovery_lookup_active", .kind = .gauge, .help = "A foreground discovery lookup is active" }, self.live(@as(usize, @intFromBool(discovery.coordinator.lookup != null))));
-        try w.scalar(.{ .name = "lodestar_native_discovery_session_capacity", .kind = .gauge, .help = "Discovery session store capacity" }, discovery.transport.engine.channel.sessions.session_capacity);
     }
     try w.scalar(.{ .name = "lodestar_native_network_metrics_updated_timestamp_seconds", .kind = .gauge, .help = "Unix time at which the owner last collected this metrics export", .unit = .seconds }, self.now.unix_s);
     try w.scalar(.{ .name = "lodestar_native_network_running", .kind = .gauge, .help = "Network owner is running" }, @intFromBool(self.running));
@@ -112,8 +95,6 @@ fn writeNativeCounters(self: *const Context, w: *prom.Encoder) prom.Error!void {
     }, @field(self.owner.transport.udp.counters, metric[0]));
     try w.counters("lodestar_native_reqresp_", &self.owner.service.reqresp.counters);
     try w.counters("lodestar_native_gossipsub_", &self.owner.service.gossipsub.counters);
-    try w.counters("lodestar_native_dial_", &self.owner.peer_manager.dialing.counters);
-    try w.counters("lodestar_native_dial_", &.{ .connection_backoffs = self.owner.peer_manager.catalog.connection_backoffs });
     const refused = try w.family(.{
         .name = "lodestar_native_dial_recent_failures_refused_total",
         .kind = .counter,
@@ -125,27 +106,15 @@ fn writeNativeCounters(self: *const Context, w: *prom.Encoder) prom.Error!void {
     inline for (std.meta.fields(peer_types.Rejection)) |field| try refused.sample(.{field.name}, refusals.identity[field.value]);
     const discovery_counts = if (self.owner.discovery) |d| d.coordinator.counters else discovery_metrics.Counters{};
     const rejections = if (self.owner.discovery) |d| d.coordinator.rejections else @as([discovery_metrics.rejection_count]u64, @splat(0));
-    const admissions = if (self.owner.discovery) |d| d.transport.engine.channel.admission.counts else @as(@import("discv5").admission.Counts, @splat(@splat(0)));
     const datagram_rejections = if (self.owner.discovery) |d| d.coordinator.datagram_rejections else @as([discovery_metrics.datagram_rejection_count]u64, @splat(0));
-    try w.counters("lodestar_native_discovery_", &discovery_counts);
+    try w.scalar(.{ .name = "lodestar_native_discovery_lookups_started_total", .kind = .counter, .help = "Foreground discovery lookups started" }, discovery_counts.lookups_started);
+    try w.scalar(.{ .name = "lodestar_native_discovery_candidates_published_total", .kind = .counter, .help = "Authenticated discovery candidates handed to peer selection" }, discovery_counts.candidates_published);
     try w.enums(.{
         .name = "lodestar_native_discovery_candidate_rejections_total",
         .kind = .counter,
         .help = "Authenticated discovery candidates rejected by reason",
         .labels = &.{"reason"},
     }, discovery_metrics.Rejection, &rejections);
-    const admission = @import("discv5").admission;
-    const discovery_admission = try w.family(.{
-        .name = "lodestar_native_discovery_admission_total",
-        .kind = .counter,
-        .help = "Discovery packet, expected response, challenge, handshake and record verification admission outcomes",
-        .labels = &.{ "stage", "outcome" },
-    });
-    inline for (std.meta.fields(admission.Stage)) |stage| {
-        inline for (std.meta.fields(admission.Outcome)) |outcome| {
-            try discovery_admission.sample(.{ stage.name, outcome.name }, admissions[stage.value][outcome.value]);
-        }
-    }
     const rejected = try w.family(.{
         .name = "lodestar_native_discovery_datagram_rejections_total",
         .kind = .counter,
@@ -204,9 +173,7 @@ fn writeGossipResources(self: *const Context, w: *prom.Encoder) prom.Error!void 
 
 fn writeRequestResources(self: *const Context, w: *prom.Encoder) prom.Error!void {
     const requests = self.owner.service.reqresp.resourceSnapshot();
-    const controls = self.owner.peer_manager.control.resourceSnapshot();
     try writeResourceFields("lodestar_native_reqresp_resources_", "Native request resources ", &requests, self.running, w);
-    try writeResourceFields("lodestar_native_control_", "Native peer control ", &controls, self.running, w);
 }
 
 fn writeResourceFields(comptime prefix: []const u8, comptime description: []const u8, resources: anytype, running: bool, w: *prom.Encoder) prom.Error!void {
@@ -244,23 +211,6 @@ fn writePeerCloses(self: *const Context, w: *prom.Encoder) prom.Error!void {
         .help = "Peer closes initiated by native peer control",
         .labels = &.{"reason"},
     }, peer_types.DisconnectReason, &self.owner.peer_manager.control.counters.closed);
-    const closes_by_client = try w.family(.{
-        .name = "lodestar_native_peer_closes_by_client_total",
-        .kind = .counter,
-        .help = "Peer closes by identified client and local reason",
-        .labels = &.{ "client", "reason" },
-    });
-    inline for (@typeInfo(Client).@"enum".fields) |client| {
-        inline for (@typeInfo(peer_types.DisconnectReason).@"enum".fields) |reason| {
-            try closes_by_client.sample(.{ client.name, reason.name }, self.owner.peer_manager.control.counters.closed_by_client[client.value][reason.value]);
-        }
-    }
-    try w.enums(.{
-        .name = "lodestar_native_peer_goodbyes_total",
-        .kind = .counter,
-        .help = "Received Ethereum Goodbye reasons; unknown wire codes share one label",
-        .labels = &.{"reason"},
-    }, goodbye.Reason, &self.owner.peer_manager.control.counters.events.goodbyes);
     try w.enums(.{
         .name = "lodestar_native_peer_rejections_total",
         .kind = .counter,
@@ -295,17 +245,6 @@ fn writeRememberedPeers(self: *const Context, w: *prom.Encoder) prom.Error!void 
         .help = "Loaded remembered peers visited by replay: queued as a candidate, already connected or a candidate, refused by the identity's rejection memory or the endpoint's failure history, or without candidate room",
         .labels = &.{"outcome"},
     }, remembered.Replay, &memory.counters.replays);
-    try w.enums(.{
-        .name = "lodestar_native_remembered_peer_removals_total",
-        .kind = .counter,
-        .help = "Remembered peers dropped by reason",
-        .labels = &.{"reason"},
-    }, remembered.Removal, &memory.counters.removals);
-    try w.scalar(.{
-        .name = "lodestar_native_remembered_peer_snapshot_records_total",
-        .kind = .counter,
-        .help = "Remembered peer records copied to the host for persistence",
-    }, memory.counters.snapshot_records);
     const funnel = try w.family(.{
         .name = "lodestar_native_peer_dial_funnel_total",
         .kind = .counter,
@@ -319,67 +258,17 @@ fn writeRememberedPeers(self: *const Context, w: *prom.Encoder) prom.Error!void 
     }
 }
 
-fn writePeerProcessing(self: *const Context, w: *prom.Encoder) prom.Error!void {
-    const processing = try w.family(.{
-        .name = "lodestar_native_peer_processing_total",
-        .kind = .counter,
-        .help = "Peer policy decisions and processing work by bounded operation",
-        .labels = &.{"operation"},
-    });
-    inline for (std.meta.fields(@TypeOf(self.owner.peer_manager.counters))) |field| {
-        try processing.sample(.{field.name}, @field(self.owner.peer_manager.counters, field.name));
-    }
-}
-
-fn writePeeringProgress(self: *const Context, w: *prom.Encoder) prom.Error!void {
-    try w.scalar(.{
-        .name = "lodestar_native_peer_identify_started_total",
-        .kind = .counter,
-        .help = "Started Identify exchanges",
-    }, self.owner.peer_manager.control.counters.identify_started);
-    try w.scalar(.{
-        .name = "lodestar_native_peer_identify_deferred_total",
-        .kind = .counter,
-        .help = "Identify starts deferred by local pressure",
-    }, self.owner.peer_manager.control.counters.identify_deferred);
-    try w.enums(.{
-        .name = "lodestar_native_peer_identify_failures_total",
-        .kind = .counter,
-        .help = "Identify failures by bounded protocol reason",
-        .labels = &.{"reason"},
-    }, @import("../identify/root.zig").Failure, &self.owner.peer_manager.control.counters.identify_failures);
+fn writeTransportConnections(self: *const Context, w: *prom.Encoder) prom.Error!void {
     const transport = self.owner.transport.engine.resourceSnapshot();
     try w.scalar(.{ .name = "lodestar_native_quic_connections_active", .kind = .gauge, .help = "Live QUIC connections, handshaking or established" }, self.live(transport.active));
     try w.scalar(.{ .name = "lodestar_native_quic_connections_handshaking", .kind = .gauge, .help = "QUIC connections still handshaking" }, self.live(transport.handshaking));
-    const dial = self.owner.peer_manager.dialing.resourceSnapshot(&self.owner.peer_manager.catalog);
-    inline for (std.meta.fields(@TypeOf(dial))) |field| {
-        const value = @field(dial, field.name);
-        try w.scalar(.{ .name = "lodestar_native_dial_" ++ field.name, .kind = .gauge, .help = "Native bounded resource " ++ field.name }, if (comptime std.mem.eql(u8, field.name, "capacity")) value else self.live(value));
-    }
 }
 
 fn writeDiscoveryProgress(self: *const Context, w: *prom.Encoder) prom.Error!void {
     try w.enums(.{ .name = "lodestar_native_peer_dial_selections_total", .kind = .counter, .help = "Selected peer connection attempts by initiating demand, including immediate errors and local start deferrals", .labels = &.{"source"} }, @import("../peers/dialing.zig").Source, &self.owner.peer_manager.dialing.selected_attempts);
     try w.enums(.{ .name = "lodestar_native_peer_dial_outcomes_total", .kind = .counter, .help = "Finished connection attempts by outcome; closes before admission map the transport close reason", .labels = &.{"outcome"} }, peer_types.DialOutcome, &self.owner.peer_manager.dialing.outcomes);
     try w.enums(.{ .name = "lodestar_native_peer_dial_retries_total", .kind = .counter, .help = "Redials of an endpoint by its previous failure", .labels = &.{"previous"} }, peer_types.DialFailure, &self.owner.peer_manager.dialing.retries);
-    const dial_time = try w.histograms(.{
-        .name = "lodestar_native_peer_dial_time_seconds",
-        .kind = .histogram,
-        .help = "Time from selecting a dial through authenticated connection or terminal failure; cancellations excluded",
-        .labels = &.{"status"},
-        .unit = .seconds,
-    }, @TypeOf(self.owner.peer_manager.dialing.durations[0]));
-    inline for (.{ "success", "error" }, 0..) |status, index|
-        try dial_time.histogram(.{status}, &self.owner.peer_manager.dialing.durations[index]);
     const discovery = self.owner.discovery orelse return;
-    const lookup_time = try w.histograms(.{
-        .name = "lodestar_discovery_find_node_query_time_seconds",
-        .kind = .histogram,
-        .help = "Time to finish a foreground FINDNODE walk; cancelled walks excluded",
-        .labels = &.{},
-        .unit = .seconds,
-    }, @TypeOf(discovery.coordinator.lookup_time));
-    try lookup_time.histogram(.{}, &discovery.coordinator.lookup_time);
     const lookup_finishes = try w.family(.{
         .name = "lodestar_native_discovery_lookup_finishes_total",
         .kind = .counter,
@@ -390,23 +279,6 @@ fn writeDiscoveryProgress(self: *const Context, w: *prom.Encoder) prom.Error!voi
         if (comptime !std.mem.eql(u8, field.name, "cancelled"))
             try lookup_finishes.sample(.{field.name}, discovery.coordinator.lookup_finishes[field.value]);
     }
-    try w.scalar(.{
-        .name = "lodestar_native_discovery_pending_revalidations",
-        .kind = .gauge,
-        .help = "Routing buckets waiting for incumbent revalidation",
-    }, self.live(discovery.transport.engine.routing.pendingCount()));
-    try w.scalar(.{
-        .name = "lodestar_native_discovery_waiting_queries",
-        .kind = .gauge,
-        .help = "Foreground FINDNODE calls awaiting responses",
-    }, self.live(if (discovery.coordinator.lookup) |*lookup| lookup.waitingCount() else @as(usize, 0)));
-    if (if (self.running) discovery.coordinator.last_candidate_ms else null) |last|
-        try w.scalar(.{
-            .name = "lodestar_native_discovery_candidate_idle_seconds",
-            .kind = .gauge,
-            .help = "Time since the last candidate publication while running; absent before first publication",
-            .unit = .seconds,
-        }, @as(f64, @floatFromInt(self.now.mono_ms -| last)) / 1000);
 }
 
 fn writeTopics(self: *const Context, w: *prom.Encoder) prom.Error!void {
@@ -722,6 +594,4 @@ fn writeMaintenance(self: *const Context, w: *prom.Encoder) prom.Error!void {
     try w.counters("lodestar_native_gossip_maintenance_", &.{ .topics_serviced = g.maintenance.topics_serviced, .time_yields = g.maintenance.time_yields });
     try w.scalar(.{ .name = "lodestar_native_gossip_maintenance_active", .kind = .gauge, .help = "A gossip maintenance cycle is unfinished" }, @intFromBool(self.running and g.cycle.isActive()));
     try w.scalar(.{ .name = "lodestar_native_gossip_maintenance_completed_timestamp_seconds", .kind = .gauge, .help = "Unix time of the last completed gossip maintenance cycle; zero before the first completion", .unit = .seconds }, g.maintenance.completed_unix_s);
-    const selection = try w.histograms(.{ .name = "lodestar_native_peer_selection_seconds", .kind = .histogram, .help = "Elapsed time building and applying an uncached peer selection", .unit = .seconds }, @import("timing.zig").Duration);
-    try selection.histogram(.{}, &self.owner.peer_manager.selection_duration);
 }

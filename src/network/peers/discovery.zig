@@ -10,23 +10,12 @@ pub const queries_max = 128;
 pub const Rejection = enum { missing_eth2, incompatible_fork, invalid_enr, no_quic, endpoint_family, endpoint_scope, demand, output_capacity };
 pub const rejection_count = @typeInfo(Rejection).@"enum".fields.len;
 pub const datagram_rejection_count = @typeInfo(d.types.RejectReason).@"enum".fields.len;
+/// Foreground lookups started, and candidates handed to peer selection, which also marks a
+/// lookup that found nothing.
 pub const Counters = struct {
     lookups_started: u64 = 0,
-    lookups_completed: u64 = 0,
-    queries_started: u64 = 0,
-    authenticated_candidates: u64 = 0,
-    authenticated_not_retained: u64 = 0,
-    referrals_received: u64 = 0,
-    referrals_published: u64 = 0,
     candidates_published: u64 = 0,
-    query_timeouts: u64 = 0,
-    query_failures: u64 = 0,
-    receive_failures: u64 = 0,
-    processing_failures: u64 = 0,
-    coordinator_failures: u64 = 0,
-    datagrams_accepted: u64 = 0,
 };
-pub const LookupTime = @import("../metrics/histogram.zig").Duration(&.{ 1000, 5000, 10000, 30000, 60000, 120000 });
 pub const Options = struct {
     quic_mode: d.types.Mode = .dual,
     query_interval_ms: u64 = 1_000,
@@ -103,9 +92,7 @@ pub const Discovery = struct {
     query_due_ms: u64,
     refill_due_ms: u64 = 0,
     resource_retry_ms: u64 = 0,
-    lookup_time: LookupTime = .{},
     lookup_finishes: [@typeInfo(d.Lookup.FinishReason).@"enum".fields.len]u64 = @splat(0),
-    last_candidate_ms: ?u64 = null,
     stopped: bool = false,
     counters: Counters = .{},
     rejections: [rejection_count]u64 = @splat(0),
@@ -179,7 +166,6 @@ pub const Discovery = struct {
         var result = Result{};
         self.refill(io, now_ms, &result) catch |err| {
             result.failure = err;
-            self.counters.coordinator_failures +|= 1;
             self.resource_retry_ms = now_ms +| self.options.local_retry_ms;
         };
         const progress = try self.transport.stepUntil(io, &self.storage.expiries, @min(wake_ms, self.nextWakeup(now_ms).?));
@@ -195,7 +181,6 @@ pub const Discovery = struct {
                     consumed.failure = err;
                     consumed.failure_stage = .process;
                 }
-                self.counters.processing_failures +|= 1;
             };
         }
         return .{ .learned = consumed.learned, .candidates = consumed.candidates, .started = result.started, .expired = consumed.expired, .rejected = consumed.rejected, .dropped = consumed.dropped, .unowned = consumed.unowned, .datagrams = consumed.datagrams, .failure = result.failure orelse consumed.failure, .failure_stage = if (result.failure != null) .coordinator else consumed.failure_stage };
@@ -209,17 +194,10 @@ pub const Discovery = struct {
         var result = Result{ .datagrams = @intFromBool(progress.datagram != .timeout), .failure = progress.failure, .failure_stage = progress.failure_stage };
         if (self.stopped) return result;
         switch (progress.datagram) {
-            .timeout => {},
-            .accepted => self.counters.datagrams_accepted +|= 1,
+            .timeout, .accepted => {},
             .rejected => |reason| self.datagram_rejections[@intFromEnum(reason)] +|= 1,
         }
-        if (progress.failure != null) switch (progress.failure_stage) {
-            .receive => self.counters.receive_failures +|= 1,
-            .process => self.counters.processing_failures +|= 1,
-            .clock, .coordinator => self.counters.coordinator_failures +|= 1,
-        };
         for (expiries) |expired| {
-            self.counters.query_timeouts +|= 1;
             if (self.lookupForCall(expired.handle)) |lookup| {
                 lookup.onFailure(&self.transport.engine, expired.handle) catch unreachable;
                 result.expired += 1;
@@ -237,8 +215,6 @@ pub const Discovery = struct {
         }
         self.consumeEvent(progress, out, &result);
         if (self.lookup) |*lookup| if (lookup.isFinished()) {
-            self.counters.lookups_completed +|= 1;
-            self.lookup_time.observe(progress.now_ms -| self.lookup_started_ms);
             self.lookup_finishes[@intFromEnum(lookup.finishReason().?)] +|= 1;
             std.log.scoped(.network_discovery).debug("lookup_completed reason={s} queried={d} candidates={d} published={d} elapsed_ms={d}", .{ @tagName(lookup.finishReason().?), lookup.queries_started, lookup.candidateCount(), self.counters.candidates_published -| self.lookup_published, progress.now_ms -| self.lookup_started_ms });
             self.lookup = null;
@@ -302,10 +278,7 @@ pub const Discovery = struct {
             error.TableFull, error.PeerBusy => return,
             else => return err,
         };
-        if (started.started) {
-            result.started += 1;
-            self.counters.queries_started +|= 1;
-        }
+        if (started.started) result.started += 1;
         if (started.failure) |err| return err;
     }
 
@@ -320,7 +293,6 @@ pub const Discovery = struct {
             .failed => |failed| failed.handle,
             else => return,
         };
-        if (progress.event == .failed) self.counters.query_failures +|= 1;
         if (self.lookupForCall(handle)) |lookup| {
             switch (progress.event) {
                 .response => |*response| {
@@ -361,10 +333,7 @@ pub const Discovery = struct {
         for (response.node_records) |*record| {
             if (std.mem.eql(u8, &record.node_id, &response.peer.node_id) or
                 std.mem.eql(u8, &record.node_id, &self.transport.engine.localRecord().node_id)) continue;
-            self.counters.referrals_received +|= 1;
-            const before = result.candidates;
             self.publish(record, response.peer.address, now_ms, out, result);
-            self.counters.referrals_published +|= result.candidates - before;
         }
     }
 
@@ -379,9 +348,6 @@ pub const Discovery = struct {
         for (response.node_records) |*updated| {
             if (updated.sequence > record.sequence and std.mem.eql(u8, &updated.node_id, &response.peer.node_id)) record = updated.*;
         }
-        self.counters.authenticated_candidates +|= 1;
-        const retained = self.transport.engine.peerRecord(&response.peer.node_id);
-        if (retained == null or retained.?.last_verified_ms != now_ms or !std.meta.eql(retained.?.peer, response.peer)) self.counters.authenticated_not_retained +|= 1;
         self.publish(&record, response.peer.address, now_ms, out, result);
     }
 
@@ -431,7 +397,6 @@ pub const Discovery = struct {
         out[result.candidates] = candidate;
         result.candidates += 1;
         self.counters.candidates_published +|= 1;
-        self.last_candidate_ms = now_ms;
     }
 };
 

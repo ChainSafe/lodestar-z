@@ -32,10 +32,6 @@ fn seeds(memory: *const Memory, stage: remembered.Seed) u64 {
     return memory.counters.seeds[@intFromEnum(stage)];
 }
 
-fn removals(memory: *const Memory, reason: remembered.Removal) u64 {
-    return memory.counters.removals[@intFromEnum(reason)];
-}
-
 fn snapshotOf(memory: *Memory, at_s: u64, out: *[remembered.capacity]Record) []Record {
     return out[0..memory.snapshot(at_s, out)];
 }
@@ -70,9 +66,8 @@ test "remembered load drops expired, unusable, local and duplicate seeds and kee
     try std.testing.expectEqual(now_s - (day_s - 1), find(records, 1).?.qualified_at_s);
     try std.testing.expectEqualDeep(record(5, ip4(10, 0, 6), 60), find(records, 5).?);
     try std.testing.expectEqual(now_s, find(records, 8).?.qualified_at_s);
-    try std.testing.expectEqual(@as(u64, 3), memory.counters.snapshot_records);
     try std.testing.expectEqual(@as(usize, 2), snapshotOf(&memory, now_s + 1, &out).len);
-    try std.testing.expectEqual(@as(u64, 1), removals(&memory, .expired));
+    try std.testing.expectEqual(@as(u16, 2), memory.count);
     try std.testing.expect(find(snapshotOf(&memory, now_s + 1, &out), 1) == null);
 }
 
@@ -116,14 +111,15 @@ test "remembered replay skips forgotten records and drops records that expired b
     var prng = std.Random.DefaultPrng.init(3);
     const loaded = [_]Record{ record(1, ip4(10, 1, 1), 60), record(2, ip4(10, 2, 2), day_s - 10), record(3, ip4(10, 3, 3), 60) };
     memory.load(&loaded, &local, now_s, prng.random());
-    memory.forget(&peer(3), .rejection);
+    memory.forget(&peer(3));
     memory.qualify(&peer(4), ip4(10, 4, 4), now_s);
     const first = memory.nextReplay(now_s + 10).?;
     try std.testing.expect(first.peer.eql(&peer(1)));
     try std.testing.expect(memory.nextReplay(now_s + 10) == null);
-    try std.testing.expectEqual(@as(u64, 1), removals(&memory, .expired));
-    try std.testing.expectEqual(@as(u64, 1), removals(&memory, .rejection));
     try std.testing.expectEqual(@as(u16, 2), memory.count);
+    var out: [remembered.capacity]Record = undefined;
+    const records = snapshotOf(&memory, now_s + 10, &out);
+    try std.testing.expect(find(records, 2) == null and find(records, 3) == null);
 }
 
 test "remembered qualification keeps loaded records through a partial ramp and evicts the oldest when full" {
@@ -141,11 +137,10 @@ test "remembered qualification keeps loaded records through a partial ramp and e
     try std.testing.expectEqual(@as(usize, 210), records.len);
     try std.testing.expectEqualDeep(Record{ .peer = peer(3), .address = ip4(172, 16, 3), .qualified_at_s = now_s + 300 }, find(records, 3).?);
     try std.testing.expectEqualDeep(loaded[150], find(records, 150).?);
-    try std.testing.expectEqual(@as(u64, 0), removals(&memory, .evicted));
     for (210..256) |index| memory.qualify(&peer(@intCast(index)), ip4(172, 18, @intCast(index)), now_s + 400);
     try std.testing.expectEqual(@as(u16, remembered.capacity), memory.count);
     memory.qualify(&stranger, ip4(172, 19, 1), now_s + 500);
-    try std.testing.expectEqual(@as(u64, 1), removals(&memory, .evicted));
+    try std.testing.expectEqual(@as(u16, remembered.capacity), memory.count);
     try std.testing.expect(find(snapshotOf(&memory, now_s + 500, &out), 199) == null);
     try std.testing.expect(find(snapshotOf(&memory, now_s + 500, &out), 198) != null);
 }
@@ -158,9 +153,8 @@ test "remembered forgets a record on an identity mismatch only at its own endpoi
     try std.testing.expectEqual(@as(u16, 1), memory.count);
     memory.forgetEndpoint(&peer(1), ip4(10, 1, 1));
     try std.testing.expectEqual(@as(u16, 0), memory.count);
-    try std.testing.expectEqual(@as(u64, 1), removals(&memory, .peer_id_mismatch));
-    memory.forget(&peer(1), .health);
-    try std.testing.expectEqual(@as(u64, 0), removals(&memory, .health));
+    memory.forget(&peer(1));
+    try std.testing.expectEqual(@as(u16, 0), memory.count);
 }
 
 test "remembered replay pacer admits a burst of four, then one every 250 ms" {

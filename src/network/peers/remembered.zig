@@ -35,16 +35,13 @@ pub const Seed = enum { loaded, expired, duplicate, invalid };
 /// candidate, refused by the identity's rejection memory, held back by the endpoint's failure
 /// history or the peer's own dial deadlines, or no candidate room.
 pub const Replay = enum { queued, known, rejected, failed, capacity };
-pub const Removal = enum { expired, evicted, health, rejection, peer_id_mismatch, banned };
 
 pub const Counters = struct {
     seeds: [@typeInfo(Seed).@"enum".fields.len]u64 = @splat(0),
     replays: [@typeInfo(Replay).@"enum".fields.len]u64 = @splat(0),
-    removals: [@typeInfo(Removal).@"enum".fields.len]u64 = @splat(0),
     /// Automatic dials by origin and stage: started, connected, and kept `qualify_ms` with a
     /// completed Status and Metadata exchange.
     funnel: [@typeInfo(Origin).@"enum".fields.len][@typeInfo(Stage).@"enum".fields.len]u64 = @splat(@splat(0)),
-    snapshot_records: u64 = 0,
 };
 
 const Entry = struct {
@@ -141,14 +138,14 @@ pub const Memory = struct {
     }
 
     /// Forgets the peer's record.
-    pub fn forget(self: *Memory, peer: *const t.PeerId, reason: Removal) void {
-        self.remove(self.find(peer) orelse return, reason);
+    pub fn forget(self: *Memory, peer: *const t.PeerId) void {
+        self.remove(self.find(peer) orelse return);
     }
 
     /// Forgets the peer's record when it names `address`, where another identity answered.
     pub fn forgetEndpoint(self: *Memory, peer: *const t.PeerId, address: t.Address) void {
         const index = self.find(peer) orelse return;
-        if (self.slots[index].?.record.address.eql(address)) self.remove(index, .peer_id_mismatch);
+        if (self.slots[index].?.record.address.eql(address)) self.remove(index);
     }
 
     /// The next loaded record to replay, each at most once, dropping records that expired
@@ -161,7 +158,7 @@ pub const Memory = struct {
             if (!entry.pending) continue;
             entry.pending = false;
             if (expired(entry.record.qualified_at_s, now_s)) {
-                self.remove(index, .expired);
+                self.remove(index);
                 continue;
             }
             return entry.record;
@@ -191,14 +188,13 @@ pub const Memory = struct {
         for (self.slots, 0..) |slot, index| {
             const entry = slot orelse continue;
             if (expired(entry.record.qualified_at_s, now_s)) {
-                self.remove(index, .expired);
+                self.remove(index);
                 continue;
             }
             out[copied] = entry.record;
             copied += 1;
         }
         std.debug.assert(copied == self.count);
-        self.counters.snapshot_records +|= copied;
         return copied;
     }
 
@@ -222,15 +218,14 @@ pub const Memory = struct {
         for (self.slots, 0..) |slot, index| {
             if (slot.?.record.qualified_at_s < self.slots[oldest].?.record.qualified_at_s) oldest = index;
         }
-        self.remove(oldest, .evicted);
+        self.remove(oldest);
         return oldest;
     }
 
-    fn remove(self: *Memory, index: usize, reason: Removal) void {
+    fn remove(self: *Memory, index: usize) void {
         std.debug.assert(self.slots[index] != null);
         self.slots[index] = null;
         self.count -= 1;
-        self.counters.removals[@intFromEnum(reason)] +|= 1;
     }
 };
 

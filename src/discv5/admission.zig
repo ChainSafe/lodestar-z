@@ -4,8 +4,6 @@ const types = @import("types.zig");
 pub const Stage = enum { challenge, handshake, packet, response, record };
 pub const Outcome = enum { allowed, source_limit, global_limit, source_capacity };
 pub const stage_count = std.meta.fields(Stage).len;
-pub const outcome_count = std.meta.fields(Outcome).len;
-pub const Counts = [stage_count][outcome_count]u64;
 
 const Quota = struct {
     interval_ms: u64,
@@ -63,7 +61,6 @@ const Source = struct {
 pub const Admission = struct {
     sources: std.AutoHashMapUnmanaged(types.Address, Source),
     global: [stage_count]Bucket = @splat(.{}),
-    counts: Counts = @splat(@splat(0)),
 
     pub fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!Admission {
         var sources: std.AutoHashMapUnmanaged(types.Address, Source) = .empty;
@@ -86,9 +83,7 @@ pub const Admission = struct {
     }
 
     fn allowCost(self: *Admission, stage: Stage, address: *const types.Address, cost: u16, now_ms: u64) bool {
-        const outcome = self.charge(stage, address, cost, now_ms);
-        self.counts[@intFromEnum(stage)][@intFromEnum(outcome)] +|= 1;
-        return outcome == .allowed;
+        return self.charge(stage, address, cost, now_ms) == .allowed;
     }
 
     fn charge(self: *Admission, stage: Stage, address: *const types.Address, cost: u16, now_ms: u64) Outcome {

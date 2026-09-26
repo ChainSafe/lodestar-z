@@ -67,16 +67,9 @@ pub const PeerManager = struct {
     stopped: bool = false,
     quiescing: bool = false,
     counters: Counters = .{},
-    metrics_io: std.Io = std.Io.Threaded.global_single_threaded.io(),
-    selection_duration: @import("metrics/timing.zig").Duration = .{},
-    requested_connect: u64 = 0,
-    requested_disconnect: [std.meta.fields(t.DisconnectReason).len]u64 = @splat(0),
 
+    /// Uncached selection work, which the caching and bounded-work tests and the network bench read.
     pub const Counters = struct {
-        rejected: u64 = 0,
-        gossip_refused: u64 = 0,
-        displaced: u64 = 0,
-        policy_disconnects: u64 = 0,
         custody_hashes: u64 = 0,
         selections: u64 = 0,
         selection_rows: u64 = 0,
@@ -174,7 +167,6 @@ pub const PeerManager = struct {
                 switch (decision) {
                     .admitted => |admission| {
                         if (admission.displaced) |old| {
-                            self.counters.displaced +|= 1;
                             self.control.cancelConnection(
                                 service,
                                 engine,
@@ -186,13 +178,11 @@ pub const PeerManager = struct {
                         }
                         self.control.connected(&self.catalog, admission.peer, connected.conn, direction, now);
                         const direct = self.catalog.rowFor(admission.peer).?.direct;
-                        const admission_result = service.gossipsub.peerConnected(engine, connected.conn, direct, now);
-                        if (admission_result != .admitted) self.counters.gossip_refused +|= 1;
+                        _ = service.gossipsub.peerConnected(engine, connected.conn, direct, now);
                         self.dialing.accepted(&self.catalog, admission.peer, connected.conn, now.mono_ms);
                     },
                     else => {
                         std.log.scoped(.network_peers).debug("peer_admission_refused peer={f} connection={d}:{d} reason={s}", .{ @import("logging.zig").peer(&identity), connected.conn.index, connected.conn.generation, @tagName(decision) });
-                        self.counters.rejected +|= 1;
                         _ = self.dialing.deferConnection(&self.catalog, connected.conn, now.mono_ms);
                         _ = engine.close(connected.conn, 0);
                     },
@@ -202,7 +192,7 @@ pub const PeerManager = struct {
                 _ = self.dialing.dialClosed(&self.catalog, closed.conn, closed.reason, now.mono_ms);
                 if (self.catalog.findConnection(closed.conn)) |peer| {
                     const goodbye = service.reqresp.closingGoodbye(engine, closed.conn, now);
-                    if (goodbye) |code| self.control.receivedGoodbye(&self.catalog, peer, closed.conn, code, now, true);
+                    if (goodbye) |code| self.control.receivedGoodbye(&self.catalog, peer, closed.conn, code, true);
                     if (closed.reason == .peer_closed) self.control.remoteClosed(peer, closed.conn);
                     const snapshot = self.catalog.get(peer).?;
                     const reason = snapshot.disconnect_reason orelse if (goodbye != null) t.DisconnectReason.remote_goodbye else .transport_closed;
@@ -314,9 +304,6 @@ pub const PeerManager = struct {
         try self.dialing.enqueueDiscovered(&self.catalog, candidate, &self.local.fork, &self.selection.deficits.missing, now.mono_ms);
     }
     fn refreshSelection(self: *PeerManager, service: *service_mod.Service, now: Now) void {
-        const timing = @import("metrics/timing.zig");
-        const start = timing.now(self.metrics_io);
-        defer self.selection_duration.observe(timing.now(self.metrics_io) -| start);
         self.counters.selections +|= 1;
         self.counters.selection_rows +|= self.catalog.rows.len;
         self.selection_deadline = null;
@@ -337,10 +324,8 @@ pub const PeerManager = struct {
             }
         }
         self.selection = policy.selectWithPacing(self.policy_scratch[0..input_count], &self.demand, self.catalog.options, self.policy_seed, now.mono_ms >= self.replacement_after_ms);
-        self.requested_connect +|= self.selection.dial_budget;
         for (self.policy_scratch[0..input_count], 0..) |input, i| if (self.selection.reasons[i]) |reason| {
-            self.requested_disconnect[@intFromEnum(reason)] +|= 1;
-            if (self.disconnect(input.peer, reason, now)) self.counters.policy_disconnects +|= 1;
+            _ = self.disconnect(input.peer, reason, now);
             if (reason == .count_pruning) self.replacement_after_ms = now.mono_ms +| replacement_interval_ms;
         };
         if (now.mono_ms < self.replacement_after_ms)
