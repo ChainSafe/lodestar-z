@@ -30,7 +30,7 @@ fn add(table: *p.GossipProcessor, kind: p.limits_mod.Kind, root: ?[32]u8) !p.Tok
     const cell = table.get(token).?;
     cell.id = @splat(1);
     cell.deadline = if (table.expiry.tail == @import("../index_list.zig").none) 100 else @max(100, table.cells[table.expiry.tail].deadline);
-    cell.metadata = .{ .root = root, .slot = 1, .await_block = root != null };
+    cell.metadata = .{ .root = root, .slot = 1 };
     table.install(token, "x");
     return token;
 }

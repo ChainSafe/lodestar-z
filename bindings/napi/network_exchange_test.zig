@@ -103,7 +103,7 @@ fn admit(runtime: *Runtime, kind: Kind, root: ?[32]u8, payload: []const u8) !g.T
     const cell = table.get(token).?;
     cell.id = @splat(1);
     cell.deadline = 100;
-    cell.metadata = .{ .slot = 1, .root = root, .await_block = root != null };
+    cell.metadata = .{ .slot = 1, .root = root };
     @memset(&cell.topic, 0);
     table.install(token, payload);
     runtime.lock();

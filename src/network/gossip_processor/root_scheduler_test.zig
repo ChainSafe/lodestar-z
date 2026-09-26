@@ -111,7 +111,7 @@ test "gossip scheduler budgets mass expiry and root promotion without releasing 
     defer table.deinit();
     defer table.close();
     const root: [32]u8 = @splat(3);
-    for (0..130) |_| _ = try add(&table, .beacon_attestation, 1, .{ .slot = 1, .root = root, .await_block = true });
+    for (0..130) |_| _ = try add(&table, .beacon_attestation, 1, .{ .slot = 1, .root = root });
     for (0..3) |_| {
         const checks = table.claimChecks(1, p.batch_max);
         for (checks.tokens[0..checks.len]) |token| try t.expect(table.classify(token, false));
@@ -143,7 +143,7 @@ fn lifecycleStep(table: *p.GossipProcessor, kind: Kind, step: usize) !p.Batch {
     if (table.hasCapacity(kind, 4)) {
         const root: ?[32]u8 = if (kind == .beacon_attestation and step % 3 == 0) @splat(7) else null;
         const group: ?[128]u8 = if (kind == .beacon_attestation) @splat(@intCast(step % 5)) else null;
-        _ = try add(table, kind, now, .{ .root = root, .group = group, .await_block = root != null, .slot = 1 });
+        _ = try add(table, kind, now, .{ .root = root, .group = group, .slot = 1 });
     }
     table.maintain(now, 0);
     const checks = table.claimChecks(now, p.batch_max);
@@ -346,7 +346,7 @@ test "gossip readiness reports checks and executable urgent and ordinary jobs" {
     try t.expectEqual(Work{ .ordinary = true }, table.readiness());
     _ = try add(&table, .data_column_sidecar, 1, .{});
     _ = try add(&table, .data_column_sidecar, 1, .{});
-    _ = try add(&table, .beacon_attestation, 1, .{ .slot = 1, .root = @splat(4), .await_block = true });
+    _ = try add(&table, .beacon_attestation, 1, .{ .slot = 1, .root = @splat(4) });
     try t.expectEqual(Work{ .checks = true, .urgent = true, .ordinary = true }, table.readiness());
     // The column kind at its execution limit reports its second job as not claimable.
     const batch = table.claimDemand(1, .{ .ordinary = false });
