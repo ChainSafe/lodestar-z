@@ -177,16 +177,25 @@ export class NativePump {
     for (const job of jobs) this.#verdicts(job, null);
   }
 
-  /** A fatal failure after a delivery: the first is the close result's error, and the network closes. */
+  /**
+   * A delivery failure: the first is the close result's error and reaches the host's `failed`. Payload delivery stops
+   * while settlement continues, so the host can finish bounded cleanup before it closes the network.
+   */
   #fail(error) {
-    if (this.#stopped) return;
-    this.#terminal.failure ??=
-      error instanceof Error ? error : Object.assign(new Error("NativeHostFailure"), {cause: error});
+    if (this.#stopped || this.#terminal.failure !== null) return;
+    const failure = error instanceof Error ? error : Object.assign(new Error("NativeHostFailure"), {cause: error});
+    this.#terminal.failure = failure;
     this.close();
     try {
-      this.#runtime.close();
-    } catch {
-      // A runtime that cannot close is already closing.
+      this.#host.failed(failure);
+    } catch (thrown) {
+      // A host that cannot clean up leaves nothing to wait for.
+      this.#error(thrown);
+      try {
+        this.#runtime.close();
+      } catch {
+        // A runtime that cannot close is already closing.
+      }
     }
   }
 

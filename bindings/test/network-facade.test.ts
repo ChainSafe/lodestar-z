@@ -37,6 +37,7 @@ function host(overrides: Partial<NativeHost> = {}): NativeHost {
   return {
     capacity: () => ({ordinary: true, serving: 32}),
     checkDependencies: (checks) => checks.map(() => false),
+    failed: () => undefined,
     peers: () => undefined,
     serve: (request) => request.cancel(),
     validate: (job) => Promise.resolve(job.messages.map(() => "ignore" as const)),
@@ -252,15 +253,24 @@ test("serving capacity stays charged after the stream closes until serve settles
   }
 }, 30000);
 
-test("a host failure closes the network as failed, also racing a requested close", async () => {
+test.each([
+  "after the host's cleanup",
+  "racing a requested close",
+])("a throwing peer handler fails the network %s", async (mode) => {
   const failure = new Error("peer handler failed");
   const config = applicationConfig();
   const peerConfig = applicationConfig();
   peerConfig.identitySecretKey[31] = 2;
   let network: NativeNetwork | undefined;
+  let cleanup: Promise<unknown> | undefined;
   const networkHost = host({
+    failed(error) {
+      expect(error).toBe(failure);
+      // Settlement continues, so the final remembered-peer snapshot still succeeds before the host closes.
+      if (mode === "after the host's cleanup") cleanup = network?.getRememberedPeers().finally(() => network?.close());
+    },
     peers() {
-      void network?.close();
+      if (mode === "racing a requested close") void network?.close();
       throw failure;
     },
   });
@@ -273,6 +283,7 @@ test("a host failure closes the network as failed, also racing a requested close
     // The connection's first peer event reaches the throwing handler.
     await peer.connect(remote.peerId, [remote.localEndpoint], 5000n).catch(() => undefined);
     expect(await network.closed).toEqual({error: failure, reason: "failed"});
+    if (mode === "after the host's cleanup") await expect(cleanup).resolves.toMatchObject({peers: expect.any(Array)});
   } finally {
     await Promise.allSettled([network?.close(), peer.close()]);
   }
@@ -284,7 +295,7 @@ test("the facade validates its host, starts without host callbacks and hides the
   );
   const calls: string[] = [];
   const recorded = host();
-  for (const name of ["capacity", "validate", "checkDependencies", "serve", "peers"] as const) {
+  for (const name of ["capacity", "validate", "checkDependencies", "serve", "peers", "failed"] as const) {
     const callback = recorded[name] as (...args: unknown[]) => unknown;
     (recorded as unknown as Record<string, unknown>)[name] = (...args: unknown[]) => {
       calls.push(name);

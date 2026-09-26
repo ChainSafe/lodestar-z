@@ -736,8 +736,14 @@ export interface NativeHost {
   checkDependencies(checks: readonly DependencyCheck[]): readonly boolean[];
   /** Settles only after the serving source and its child work retire. A throw or rejection fails the stream. */
   serve(request: IncomingRequest): Promise<void>;
-  /** Updates replace the previous state of the same peer. A throw closes the network with that failure. */
+  /** Updates replace the previous state of the same peer. A throw fails the network. */
   peers(events: readonly NativePeerObservation[]): void;
+  /**
+   * The network failed with `error`, a throwing peer handler or a serving start the binding could not hand over, which
+   * the close result reports first. Payload delivery has stopped and settlement continues: finish bounded cleanup,
+   * such as the final remembered-peer snapshot, then close the network. A throw closes it at once.
+   */
+  failed(error: Error): void;
   /** A failure the binding recovered from: one of the above that threw, rejected or broke its contract. */
   error?(error: unknown): void;
 }

@@ -85,6 +85,7 @@ if (mode === "exit") {
     checkDependencies: (checks) => checks.map(() => false),
     serve: (request) => request.cancel(),
     peers: () => undefined,
+    failed: () => undefined,
   };
   let network = createNativeNetwork(config, host);
   const intent = (value) => ({...localIntent(value), subscriptions: subscriptions(topicName())});
