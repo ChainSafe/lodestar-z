@@ -1,144 +1,124 @@
-import bindings from "./bindings.js";
-import {NativeIncoming} from "./network-incoming.js";
-import {NativeRequest} from "./network-request.js";
+import {NativePump} from "./network-pump.js";
+import {NativeRuntime, initializeNativeNetworkRuntime, registerRuntime} from "./network-runtime.js";
 
-class NativeRuntime {
-  #native;
-  #closed;
-  #onWorkAvailable;
-  #wake;
+export {initializeNativeNetworkRuntime};
 
-  constructor(config, onWorkAvailable) {
-    this.#native = new bindings.NativeNetworkRuntime();
-    this.#onWorkAvailable = onWorkAvailable;
-    const weak = new WeakRef(this);
-    this.#wake = NativeRuntime.#waker(weak);
-    const callback = typeof onWorkAvailable === "function" ? NativeRuntime.#notifier(weak) : onWorkAvailable;
-    const initialized = this.#native.initialize(config, callback);
-    this.identity = initialized.identity;
-    this.#closed = initialized.closed;
+const HOST_METHODS = ["capacity", "validate", "checkDependencies", "serve", "peers"];
+const CONNECT_TIMEOUT_MS = 10000n;
+
+/**
+ * The close result: a pump failure first, then the owner's terminal error, else a requested close. It holds the
+ * runtime weakly and no host reference, since native settlement roots this promise's reactions.
+ */
+function closeResult(closed, terminal, weak) {
+  return closed.then((result) => {
+    if (terminal.failure) return {error: terminal.failure, reason: "failed"};
+    if (result.reason !== "failed") return {reason: "requested"};
+    let code = "NetworkFailed";
+    try {
+      code = weak.deref()?.diagnostics().terminalErrorCode ?? code;
+    } catch {
+      // The runtime was collected; its code is gone.
+    }
+    return {error: Object.assign(new Error(code), {code}), reason: "failed"};
+  });
+}
+
+class NativeNetwork {
+  #runtime;
+  #pump;
+
+  constructor(config, host) {
+    for (const name of HOST_METHODS)
+      if (typeof host?.[name] !== "function") throw new TypeError(`NativeHost.${name} must be a function`);
+    const terminal = {failure: null};
+    const pump = new NativePump(host, terminal);
+    const runtime = new NativeRuntime(config, pump.request);
+    pump.attach(runtime);
+    this.#runtime = runtime;
+    this.#pump = pump;
+    // Temporary: read from diagnostics until initialization returns the resolved limits.
+    const diagnostics = runtime.diagnostics();
+    this.limits = Object.freeze({
+      incomingCapacity: diagnostics.incoming.capacity,
+      peerCapacity: diagnostics.resolvedCapacities.peerCapacity,
+    });
+    this.closed = closeResult(runtime.closed, terminal, new WeakRef(runtime));
+    registerRuntime(this, runtime);
   }
 
-  /** Reports whether a host took the notification; a collected wrapper leaves settlement to native. */
-  static #notifier(weak) {
-    return () => {
-      const runtime = weak.deref();
-      if (runtime === undefined) return false;
-      runtime.#onWorkAvailable();
-      return true;
-    };
-  }
-
-  /** Schedules the host drain after a call that leaves results to settle. */
-  static #waker(weak) {
-    return () => {
-      try {
-        weak.deref()?.#onWorkAvailable();
-      } catch {
-        // The owner's notifications report a throwing host; the caller's operation stands.
-      }
-    };
-  }
-
-  get closed() {
-    return this.#closed;
-  }
-  get state() {
-    return this.#native.getState();
-  }
-  diagnostics() {
-    return this.#native.diagnostics();
-  }
-  getMetrics() {
-    return this.#native.getMetrics();
-  }
-  drainLogs(maxRecords = 32) {
-    return this.#native.drainLogs(maxRecords);
-  }
-  setLogLevel(level) {
-    this.#native.setLogLevel(level);
-  }
-  async applyIntent(intent, slot) {
-    return this.#native.applyIntent(intent, slot);
+  applyIntent(intent, slot) {
+    return this.#runtime.applyIntent(intent, slot);
   }
   updateStatus(status) {
-    return this.#native.updateStatus(status);
+    return this.#runtime.updateStatus(status);
   }
-  getIdentity() {
-    return this.#native.getIdentity();
+  blockImported(root) {
+    this.#pump.block(root);
   }
-  getPeers() {
-    return this.#native.getPeers();
+  reportPeer(peerId, action) {
+    this.#pump.reportPeer(peerId, action);
   }
-  getGossipDiagnostics(cursor = 0) {
-    return this.#native.getGossipDiagnostics(cursor);
+  dropQueuedGossip() {
+    this.#pump.dropQueued();
   }
-  connect(peerId, addresses, timeoutMs) {
-    return this.#native.connect(peerId, addresses, timeoutMs);
+  notifyCapacity() {
+    this.#pump.request();
   }
-  disconnect(peerId) {
-    return this.#native.disconnect(peerId);
-  }
-  reStatusPeers(peerIds) {
-    return this.#native.reStatusPeers(peerIds);
-  }
-  addDirectPeer(peerId, addresses) {
-    return this.#native.addDirectPeer(peerId, addresses);
-  }
-  removeDirectPeer(peerId) {
-    return this.#native.removeDirectPeer(peerId);
-  }
-  getDirectPeers() {
-    return this.#native.getDirectPeers();
-  }
-  getRememberedPeers() {
-    return this.#native.getRememberedPeers();
-  }
-  exchange(actions, demand) {
-    const result = this.#native.exchange(actions, demand);
-    // An exchange that delivered nothing is frozen with no serving starts.
-    const serving = result.serving;
-    if (serving.length === 0) return result;
-    // Native has committed every item, so nothing may throw from here. A start without a facade is cancelled,
-    // released and reported with `more` set, so the host still takes the rest and exchanges again.
-    let taken = 0;
-    for (let i = 0; i < serving.length; i++) {
-      const descriptor = serving[i];
-      try {
-        serving[taken] = new NativeIncoming(this.#native, descriptor, this.#wake);
-        taken++;
-      } catch (error) {
-        try {
-          this.#native.incomingTerminal(descriptor.handle, 2, undefined, undefined);
-          this.#native.incomingRelease(descriptor.handle);
-        } catch {
-          // Runtime teardown also releases native serving capacity.
-        }
-        result.failure ??= error;
-        result.more = true;
-      }
-    }
-    serving.length = taken;
-    return result;
-  }
-  fail(trigger, reason) {
-    return this.#native.fail(trigger, reason);
-  }
-  holdVerdicts(held) {
-    this.#native.holdVerdicts(held);
-  }
-  async publishGossip(topic, data, options) {
-    return this.#native.publishGossip(topic, data, options);
+  publish(topic, data, options) {
+    return this.#runtime.publishGossip(topic, data, options);
   }
   request(peerId, protocol, data, options) {
-    return new NativeRequest(this.#native, this.#native.requestStart(peerId, protocol, data, options), this.#wake);
+    return this.#runtime.request(peerId, protocol, data, options);
+  }
+  connect(peerId, endpoints, timeoutMs = CONNECT_TIMEOUT_MS) {
+    return this.#runtime.connect(peerId, endpoints, timeoutMs);
+  }
+  disconnect(peerId) {
+    return this.#runtime.disconnect(peerId);
+  }
+  setDirectPeer(peerId, endpoints) {
+    return endpoints === null ? this.#runtime.removeDirectPeer(peerId) : this.#runtime.addDirectPeer(peerId, endpoints);
+  }
+  reStatus(peerIds) {
+    return this.#runtime.reStatusPeers(peerIds);
+  }
+  getIdentity() {
+    return this.#runtime.getIdentity();
+  }
+  getPeers() {
+    return this.#runtime.getPeers();
+  }
+  getDirectPeers() {
+    return this.#runtime.getDirectPeers();
+  }
+  getGossipDiagnostics(cursor) {
+    return this.#runtime.getGossipDiagnostics(cursor);
+  }
+  getRememberedPeers() {
+    return this.#runtime.getRememberedPeers();
+  }
+  metrics() {
+    return this.#runtime.getMetrics() + this.#pump.burstMetrics();
+  }
+  setLogLevel(level) {
+    this.#runtime.setLogLevel(level);
+  }
+  /** Temporary: the host polls native logs until the binding delivers them. */
+  drainLogs(maxRecords) {
+    return this.#runtime.drainLogs(maxRecords);
   }
   close() {
-    this.#native.close();
-    return this.#closed;
+    this.#pump.close();
+    this.#runtime.close();
+    return this.closed;
   }
 }
 
-export function initializeNativeNetworkRuntime(config, onWorkAvailable) {
-  return new NativeRuntime(config, onWorkAvailable);
+/**
+ * Starts a runtime whose binding-owned pump drives `host`. Invokes no host callback synchronously; the first turn
+ * follows the first native notification.
+ */
+export function createNativeNetwork(config, host) {
+  return new NativeNetwork(config, host);
 }

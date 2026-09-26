@@ -67,6 +67,7 @@ try {
     import {fileURLToPath} from "node:url";
     const require = createRequire(join(process.cwd(), "probe.cjs"));
     const network = await import(${JSON.stringify(`${pkg.name}/network`)});
+    assert.equal(typeof network.createNativeNetwork, "function");
     assert.equal(typeof network.initializeNativeNetworkRuntime, "function");
     const nativePath = realpathSync(require.resolve(${JSON.stringify(platformPackage)}));
     assert(!relative(process.cwd(), nativePath).startsWith(".."));
