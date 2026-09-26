@@ -223,6 +223,7 @@ export function applicationConfig(): NativeApplicationConfig {
       targetPeers: 8,
     },
     serveLightClients: false,
+    logLevel: "info",
   };
 }
 

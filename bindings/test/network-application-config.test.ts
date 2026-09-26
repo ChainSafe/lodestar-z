@@ -4,7 +4,7 @@ import {expect, test} from "vitest";
 import type {NativeRememberedPeer} from "../src/network.js";
 import {applicationConfig, startRuntime, testChain} from "./utils/network.js";
 
-test.each(["resources", "identify", "serveLightClients"])("rejects missing %s", (field) => {
+test.each(["resources", "identify", "serveLightClients", "logLevel"])("rejects missing %s", (field) => {
   const config = applicationConfig();
   Reflect.deleteProperty(config, field);
   expect(() => startRuntime(config, () => undefined)).toThrow();
@@ -48,6 +48,9 @@ test.each([
   },
   (c: ReturnType<typeof applicationConfig>) => {
     Reflect.set(c, "serveLightClients", 1);
+  },
+  (c: ReturnType<typeof applicationConfig>) => {
+    Reflect.set(c, "logLevel", "trace");
   },
   (c: ReturnType<typeof applicationConfig>) => {
     c.identify.agentVersion = "x".repeat(257);

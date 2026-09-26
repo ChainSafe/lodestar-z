@@ -13,6 +13,8 @@ pub const Config = struct {
     genesis_root: [32]u8,
     remembered: [n.peers.remembered.capacity]n.peers.remembered.Record,
     remembered_count: u16,
+    /// The threshold native records are kept at, or null for none, until the host selects another.
+    log_level: ?std.log.Level,
 
     pub fn buildRequest(self: *const Config, common: *const cfg.Config, seed: u64) !n.configuration.Request {
         const r = &self.resources;
@@ -76,7 +78,7 @@ pub fn text(value: Value, out: []u8) !usize {
     @memcpy(out[0..len], copied);
     return len;
 }
-const required = .{ "profile", "identitySecretKey", "bind", "local", "discovery", "initialSlot", "gossipPolicy", "resources", "identify", "serveLightClients" };
+const required = .{ "profile", "identitySecretKey", "bind", "local", "discovery", "initialSlot", "gossipPolicy", "resources", "identify", "serveLightClients", "logLevel" };
 
 pub fn parse(value: Value, common: *cfg.Config, out: *Config) !void {
     const remembered = try value.hasNamedProperty("rememberedPeers");
@@ -95,6 +97,7 @@ pub fn parse(value: Value, common: *cfg.Config, out: *Config) !void {
     out.agent_len = @intCast(try text(try cfg.get(identify, "agentVersion"), &out.agent));
     out.version_len = @intCast(try text(try cfg.get(identify, "protocolVersion"), &out.version));
     out.genesis_root = @import("config.zig").state.config.genesis_validator_root;
+    out.log_level = try @import("network_logs.zig").level(try cfg.get(value, "logLevel"));
     out.remembered_count = 0;
     if (remembered) try parseRemembered(try cfg.get(value, "rememberedPeers"), out);
 }

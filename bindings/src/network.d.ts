@@ -213,6 +213,13 @@ export interface NativeLogRecord {
   truncated: boolean;
 }
 
+/** Native log records lost since the last report: past capacity, over the rate limits, or cut to fit. */
+export interface NativeLogLoss {
+  dropped: bigint;
+  suppressed: bigint;
+  truncated: bigint;
+}
+
 export interface NativeLogBatch {
   records: NativeLogRecord[];
   more: boolean;
@@ -263,6 +270,8 @@ export interface NativeApplicationConfig extends NativeRuntimeConfig {
   resources: NativeResources;
   identify: {agentVersion: string; protocolVersion: string};
   serveLightClients: boolean;
+  /** The threshold native records are kept at from initialization, until setLogLevel selects another. */
+  logLevel: NativeLogLevel;
   /**
    * Peers an earlier run remembered, replayed as paced automatic candidates. Another network's root, more than 256
    * peers or a malformed peer rejects the configuration; native drops expired and duplicate peers.
@@ -753,6 +762,12 @@ export interface NativeHost {
    * such as the final remembered-peer snapshot, then close the network. A throw closes it at once.
    */
   failed(error: Error): void;
+  /**
+   * Native log records at or above the configured level, up to 32 every 250 ms and a final few after close, with the
+   * records native lost since the last report when that grew, at most every 30 s. A throw counts the delivery's
+   * records in lodestar_native_log_delivery_errors_total and never fails the network.
+   */
+  logs(records: readonly NativeLogRecord[], lost: NativeLogLoss | null): void;
   /** A failure the binding recovered from: one of the above that threw, rejected or broke its contract. */
   error?(error: unknown): void;
 }
@@ -791,11 +806,13 @@ export interface NativeNetwork {
   getGossipDiagnostics(cursor?: number): Promise<NativeGossipDiagnosticsPage>;
   /** Remembered peers for the host to persist. Take the final snapshot before close, which refuses it. */
   getRememberedPeers(): Promise<NativeRememberedPeersSnapshot>;
-  /** Prometheus text: the owner's families, rendered once per second, and the drain burst histogram. */
+  /**
+   * Prometheus text: the owner's families, rendered once per second, the drain burst histogram and the log delivery
+   * errors.
+   */
   metrics(): string;
+  /** Selects the threshold native records are kept at from now on. */
   setLogLevel(level: NativeLogLevel): void;
-  /** Temporary: the host polls native logs until the binding delivers them. */
-  drainLogs(maxRecords?: number): NativeLogBatch;
   close(): Promise<CloseResult>;
 }
 
