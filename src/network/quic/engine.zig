@@ -137,7 +137,9 @@ pub const ConnectionCounters = struct {
 };
 
 /// What holds a stream's send capacity below what its owner waits for. Flow credit comes before
-/// the congestion window and stream credit first, since only the peer raises credit.
+/// the congestion window and stream credit first, since only the peer raises credit. `cwnd` means
+/// quiche's admission allowance is short: it is refreshed from the congestion window at each
+/// received packet and decremented by data buffered since, so the window itself need not be full.
 pub const SendLimit = enum { cwnd, connection_credit, stream_credit, none, unknown };
 
 pub const SendState = struct {

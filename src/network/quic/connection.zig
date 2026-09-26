@@ -44,8 +44,9 @@ pub const Transport = struct {
     pub const Counts = struct {
         /// Packets, connection-wide.
         lost: u64 = 0,
+        /// Lost STREAM and CRYPTO frames requeued, connection-wide.
         retransmitted: u64 = 0,
-        /// Probe timeouts on the active path.
+        /// Loss-detection timeouts on the active path, time-threshold loss detection included.
         pto: u64 = 0,
         /// DATA_BLOCKED and STREAM_DATA_BLOCKED frames sent.
         data_blocked: u64 = 0,
