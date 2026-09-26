@@ -62,6 +62,8 @@ const idle: NativeExchange = {
   serving: [],
 };
 const handle = (index: number, generation = 1n): NativeGossipHandle => ({generation, index});
+/** Each fixture's native close, which the test may leave pending. */
+const running: {resolve(result: {reason: "requested"}): void}[] = [];
 /** The pump's log delivery timer, armed until native closes. */
 const LOG_TIMER = 1;
 const noLogs = {dropped: 0n, more: false, records: [], suppressed: 0n, truncated: 0n};
@@ -178,6 +180,7 @@ function fixture() {
   let now = 0;
   vi.spyOn(performance, "now").mockImplementation(() => now);
   const closed = deferred<{reason: "requested"} | {reason: "failed"; error: Error}>();
+  running.push(closed);
   const runtime = {
     close: vi.fn(() => closed.promise),
     closed: closed.promise,
@@ -221,9 +224,12 @@ function fixture() {
   };
 }
 
-afterEach(() => {
+afterEach(async () => {
   vi.useRealTimers();
   vi.restoreAllMocks();
+  // Native closes under every pump a test left running, which stops its log timer before a later test fakes timers.
+  for (const closed of running.splice(0)) closed.resolve({reason: "requested"});
+  await macrotask();
 });
 
 describe("binding pump scheduling", () => {
