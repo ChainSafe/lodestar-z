@@ -74,7 +74,7 @@ pub fn processSlots(
                 epoch_cache,
                 state,
             );
-            defer epoch_transition_cache.deinit(allocator);
+            defer epoch_transition_cache.deinit();
             try observeEpochTransitionStep(.{ .step = .before_process_epoch }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
 
             switch (state.forkSeq()) {

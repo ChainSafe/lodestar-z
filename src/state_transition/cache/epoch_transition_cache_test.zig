@@ -76,8 +76,50 @@ test "EpochTransitionCache.beforeProcessEpoch" {
             test_state.cached_state.epoch_cache,
             test_state.cached_state.state,
         );
-        defer epoch_transition_cache.deinit(allocator);
+        defer epoch_transition_cache.deinit();
     }
 
     deinitReusedEpochTransitionCache(std.testing.io);
+}
+
+test "memory_safety: borrowed scratch growth stays with the owner across sequential callers" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 200_000 });
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    test_state.epoch_transition_cache.deinit();
+    allocator.destroy(test_state.epoch_transition_cache);
+    defer {
+        test_state.cached_state.deinit();
+        allocator.destroy(test_state.cached_state);
+        test_state.pubkey_cache.deinit();
+        allocator.destroy(test_state.pubkey_cache);
+        deinitReusedEpochTransitionCache(std.testing.io);
+        allocator.destroy(test_state.config);
+    }
+
+    var second_caller = std.testing.FailingAllocator.init(allocator, .{});
+
+    var cache = try EpochTransitionCache.init(
+        second_caller.allocator(),
+        std.testing.io,
+        test_state.cached_state.config,
+        test_state.cached_state.epoch_cache,
+        test_state.cached_state.state,
+    );
+    defer cache.deinit();
+
+    const scratch = cache.is_compounding_validator_arr;
+    const owner_is_not_caller = scratch.owner_allocator.ptr != second_caller.allocator().ptr;
+    try std.testing.expect(owner_is_not_caller);
+
+    const grown_len = scratch.array.capacity + 1;
+    const bytes_before = second_caller.allocated_bytes;
+    while (scratch.items().len < grown_len) {
+        try scratch.append(true);
+    }
+
+    try std.testing.expectEqual(bytes_before, second_caller.allocated_bytes);
+    try std.testing.expectEqual(grown_len, scratch.items().len);
 }

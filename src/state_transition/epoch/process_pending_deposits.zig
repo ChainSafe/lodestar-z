@@ -85,7 +85,7 @@ pub fn processPendingDeposits(
 
         if (is_validator_withdrawn) {
             // Deposited balance will never become active. Increase balance but do not consume churn
-            try applyPendingDeposit(fork, allocator, io, config, epoch_cache, state, deposit, cache);
+            try applyPendingDeposit(fork, io, config, epoch_cache, state, deposit, cache);
         } else if (is_validator_exited) {
             // Validator is exiting, postpone the deposit until after withdrawable epoch
             try deposits_to_postpone.append(allocator, deposit);
@@ -97,7 +97,7 @@ pub fn processPendingDeposits(
             }
             // Consume churn and apply deposit.
             processed_amount += deposit.amount;
-            try applyPendingDeposit(fork, allocator, io, config, epoch_cache, state, deposit, cache);
+            try applyPendingDeposit(fork, io, config, epoch_cache, state, deposit, cache);
         }
 
         // Regardless of how the deposit was handled, we move on in the queue.
@@ -124,7 +124,6 @@ pub fn processPendingDeposits(
 /// we append EpochTransitionCache.is_compounding_validator_arr in this flow
 fn applyPendingDeposit(
     comptime fork: ForkSeq,
-    allocator: Allocator,
     io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
@@ -143,13 +142,13 @@ fn applyPendingDeposit(
     if (!is_validator_known) {
         // Verify the deposit signature (proof of possession) which is not checked by the deposit contract
         if (validateDepositSignature(config, pubkey, withdrawal_credentials, amount, signature)) {
-            try addValidatorToRegistry(fork, allocator, io, epoch_cache, state, pubkey, withdrawal_credentials, amount);
-            try cache.is_compounding_validator_arr.append(allocator, hasCompoundingWithdrawalCredential(withdrawal_credentials));
+            try addValidatorToRegistry(fork, io, epoch_cache, state, pubkey, withdrawal_credentials, amount);
+            try cache.is_compounding_validator_arr.append(hasCompoundingWithdrawalCredential(withdrawal_credentials));
             // set balance, so that the next deposit of same pubkey will increase the balance correctly
             // this is to fix the double deposit issue found in mekong
             // see https://github.com/ChainSafe/lodestar/pull/7255
             if (cache.balances) |*balances| {
-                try balances.append(allocator, amount);
+                try balances.append(cache.allocator, amount);
             }
         } else |_| {
             // invalid deposit signature, ignore the deposit
