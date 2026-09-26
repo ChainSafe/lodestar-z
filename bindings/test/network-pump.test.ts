@@ -3,15 +3,6 @@ import type {
   DependencyCheck,
   GossipJob,
   IncomingRequest,
-  NativeAction,
-  NativeExchange,
-  NativeExchangeDemand,
-  NativeGossipBatch,
-  NativeGossipDependencyCheck,
-  NativeGossipHandle,
-  NativeGossipMessage,
-  NativeIncomingRequest,
-  NativeLogBatch,
   NativeLogLoss,
   NativeLogRecord,
   NativePeerObservation,
@@ -28,6 +19,17 @@ import {
   NativePump,
   closeResult,
 } from "../src/network-pump.js";
+import type {
+  NativeAction,
+  NativeExchange,
+  NativeExchangeDemand,
+  NativeGossipBatch,
+  NativeGossipDependencyCheck,
+  NativeGossipHandle,
+  NativeGossipMessage,
+  NativeIncomingRequest,
+  NativeLogBatch,
+} from "../src/network-runtime.js";
 
 const MIB = 1024 * 1024;
 const full: NativeExchangeDemand = {

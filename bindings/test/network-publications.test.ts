@@ -1,6 +1,6 @@
 import {setTimeout as delay} from "node:timers/promises";
 import {expect, test, vi} from "vitest";
-import {initializeNativeNetworkRuntime} from "../src/network.js";
+import {initializeNativeNetworkRuntime} from "../src/network-runtime.js";
 import {applicationConfig, localIntent, settleOnly, startRuntime, topicName} from "./utils/network.js";
 import {startPeer} from "./utils/network-peer.js";
 

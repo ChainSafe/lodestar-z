@@ -137,8 +137,7 @@ async function fixture({extraFiles = {}, networkSource} = {}) {
   await writeFile(join(nativeDir, "bindings", "src", "index.d.ts"), "export declare const fixture: true;\n");
   await writeFile(
     join(nativeDir, "bindings", "src", "network.js"),
-    networkSource ??
-      "export const createNativeNetwork = () => {};\nexport const initializeNativeNetworkRuntime = () => {};\n"
+    networkSource ?? "export const createNativeNetwork = () => {};\n"
   );
   for (const [path, source] of Object.entries(extraFiles)) {
     await writeFile(join(nativeDir, path), source);
@@ -486,7 +485,7 @@ test("install rejects external-star ambiguity before host mutation", async () =>
   await writeFile(join(nativeDir, "bindings", "src", "join-conflict.js"), "export const join = null;\n");
   await writeFile(
     join(nativeDir, "bindings", "src", "network.js"),
-    "export const initializeNativeNetworkRuntime = () => {};\n" +
+    "export const createNativeNetwork = () => {};\n" +
       "" +
       'export * from "node:path";\n' +
       'export * from "./join-conflict.js";\n'
@@ -608,8 +607,7 @@ test("pack emits structured child failure evidence across the CLI boundary", asy
 test("pack rejects a named re-exported network test hook", async () => {
   const {nativeDir, out, buildRecord} = await fixture({
     extraFiles: {"bindings/src/hooks.js": "export const networkTestHook = true;\n"},
-    networkSource:
-      'export const initializeNativeNetworkRuntime = () => {};\nexport {networkTestHook} from "./hooks.js";\n',
+    networkSource: 'export const createNativeNetwork = () => {};\nexport {networkTestHook} from "./hooks.js";\n',
   });
   const packed = await command(
     process.execPath,
@@ -629,7 +627,7 @@ test("pack rejects an export-star test hook without evaluating archived modules"
   await writeFile(
     join(nativeDir, "bindings", "src", "network.js"),
     `process.getBuiltinModule("node:fs").writeFileSync(${JSON.stringify(marker)}, "yes");\n` +
-      "export const initializeNativeNetworkRuntime = () => {};\n" +
+      "export const createNativeNetwork = () => {};\n" +
       "" +
       'export * from "./hooks.js";\n'
   );

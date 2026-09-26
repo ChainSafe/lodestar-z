@@ -2,12 +2,14 @@ import {fork} from "node:child_process";
 import type {
   NativeApplicationConfig,
   NativeIdentity,
-  NativeIncomingRequest,
-  NativeNetworkApplicationRuntime,
   NativeRequestOptions,
   NativeResponseChunk,
-  NativeRuntimeCloseResult,
 } from "../../src/network.js";
+import type {
+  NativeIncomingRequest,
+  NativeNetworkApplicationRuntime,
+  NativeRuntimeCloseResult,
+} from "../../src/network-runtime.js";
 import {configuredChain} from "./network.js";
 
 type AsyncMethods<T> = {

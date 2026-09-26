@@ -7,7 +7,7 @@ import type {
   NativeGossipMessage,
   NativeGossipVerdict,
   NativeNetworkApplicationRuntime,
-} from "../src/network.js";
+} from "../src/network-runtime.js";
 import {
   applicationConfig,
   capacity,

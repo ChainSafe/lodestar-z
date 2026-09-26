@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import {createSocket} from "node:dgram";
 import {setTimeout as delay} from "node:timers/promises";
-import {createNativeNetwork, initializeNativeNetworkRuntime} from "../../src/network.js";
+import {createNativeNetwork} from "../../src/network.js";
+import {initializeNativeNetworkRuntime} from "../../src/network-runtime.js";
 import {
   applicationConfig,
   localIntent,

@@ -3,7 +3,7 @@ import {setTimeout as delay} from "node:timers/promises";
 import {privateKeyFromRaw} from "@libp2p/crypto/keys";
 import {peerIdFromPublicKey} from "@libp2p/peer-id";
 import {expect, it, vi} from "vitest";
-import {type NativeAction, type NativeExchangeDemand, initializeNativeNetworkRuntime} from "../src/network.js";
+import {type NativeAction, type NativeExchangeDemand, initializeNativeNetworkRuntime} from "../src/network-runtime.js";
 import {
   applicationConfig,
   capacity,
@@ -295,7 +295,7 @@ it("rejects every invalid exchange demand, oversized batch and nested exchange b
 }, 20000);
 
 it.each([1, 3] as const)("escalation trigger %i terminates the process through fatalError", (trigger) => {
-  const script = `import {initializeNativeNetworkRuntime} from "./bindings/src/network.js";
+  const script = `import {initializeNativeNetworkRuntime} from "./bindings/src/network-runtime.js";
     import {applicationConfig} from "./bindings/test/utils/network.ts";
     const runtime = initializeNativeNetworkRuntime(applicationConfig(), () => undefined);
     runtime.fail(${trigger}, "test");
