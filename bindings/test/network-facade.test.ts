@@ -120,10 +120,20 @@ test("a job's deferred handler runs only after the owner applied its verdicts, a
   const validated: number[] = [];
   const handled: {byte: number; applied: bigint}[] = [];
   const failures: {byte: number; code: unknown}[] = [];
+  // Promises derived from the last job's report, which the test holds instead of the report.
+  let closing: Promise<unknown>[] = [];
   const networkHost = host({
     validate(job: GossipJob) {
       const byte = job.messages[0].data[0];
       validated.push(byte);
+      if (byte === COUNT) {
+        const outcome = (promise: Promise<unknown>) =>
+          promise.then(
+            () => "resolved",
+            (error: {code?: unknown}) => error.code
+          );
+        closing = [outcome(job.reported), outcome(Promise.all([delay(0), job.reported]))];
+      }
       // As #9990 defers a handler to a later macrotask, and here also until the owner disposed of the job.
       void Promise.all([delay(0), job.reported]).then(
         () => handled.push({applied: network ? applied(network) : -1n, byte}),
@@ -170,7 +180,10 @@ test("a job's deferred handler runs only after the owner applied its verdicts, a
     runtime.holdVerdicts(true);
     await publisher.publishGossip(TOPIC, blockPayload(COUNT), {allowZeroPeers: false});
     await vi.waitFor(() => expect(gossipCounts(facade).pendingVerdicts).toBe(1), {timeout: 5000});
+    global.gc?.();
+    // The facade stays reachable until close completes, so derivatives of the report settle as it does.
     expect(await network.close()).toEqual({reason: "requested"});
+    expect(await Promise.all(closing)).toEqual(["NetworkClosed", "NetworkClosed"]);
     await vi.waitFor(() => expect(failures).toEqual([{byte: COUNT, code: "NetworkClosed"}]));
     expect(handled).toHaveLength(COUNT);
   } finally {
@@ -332,6 +345,7 @@ test("the facade validates its host, starts without host callbacks and hides the
 test.each([
   ["a job's report retained elsewhere", "facade-gc"],
   ["a report reaction that captures the host", "facade-gc-reaction"],
+  ["promises only derived from a report", "facade-gc-derived"],
 ])(
   "drops the facade and host without close, with %s",
   (_, mode) => {

@@ -691,6 +691,11 @@ export interface GossipJob {
   /**
    * Resolves after the owner disposes of every returned verdict: eligible accepts have undergone forwarding admission,
    * and expired or already resolved messages are retired. Rejects with NetworkClosed if shutdown prevents it.
+   *
+   * While the network stays reachable until its close() completes, every report and anything derived from it settles.
+   * A network dropped without close() closes once collected: a report retained directly then rejects with
+   * NetworkClosed, but a promise only derived from it, such as `reported.then(...)` or `Promise.all([..., reported])`,
+   * may stay pending.
    */
   readonly reported: Promise<void>;
 }

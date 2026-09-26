@@ -63,11 +63,13 @@ if (mode === "exit") {
   assert.deepEqual(settlements.counts, [1, 1, 1, 1, 1, 1]);
   assert.equal(settlements.outcomes[0], "NetworkClosed");
   console.log("promises-settled");
-} else if (mode === "facade-gc" || mode === "facade-gc-reaction") {
+} else if (mode === "facade-gc" || mode === "facade-gc-reaction" || mode === "facade-gc-derived") {
   // A dropped facade and its host are collected without close, while operation promises alone remain and settle when
   // native closes. A job's report retained elsewhere rejects then; one dropped with the host may hold a deferred
-  // handler that captures the host, which holds the facade, and still roots none of them.
+  // handler that captures the host, which holds the facade, and still roots none of them. Promises only derived from
+  // a report may stay pending once the report is collected.
   const retained = mode === "facade-gc";
+  const derivedOnly = mode === "facade-gc-derived";
   const {startPeer} = await import("../utils/network-peer.js");
   const config = applicationConfig();
   const remoteConfig = applicationConfig();
@@ -85,7 +87,15 @@ if (mode === "exit") {
     // The validation never finishes, so the job's report stays outstanding.
     validate(job) {
       if (retained) deliver({reported: job.reported});
-      else {
+      else if (derivedOnly) {
+        // The handoff holds the derivatives and a weak reference, never the report itself.
+        const outcome = (promise) => promise.then(
+          () => "resolved",
+          (error) => error.code
+        );
+        const derived = [outcome(job.reported), outcome(Promise.all([delay(0), job.reported]))];
+        deliver({derived, reported: null, source: new WeakRef(job.reported)});
+      } else {
         job.reported.then(() => this.handled++, noop);
         deliver({reported: null});
       }
@@ -111,7 +121,7 @@ if (mode === "exit") {
   const block = new Uint8Array(4000).fill(7);
   new DataView(block.buffer).setBigUint64(100, 100n, true);
   await remote.publishGossip(topicName(), block, {allowZeroPeers: false});
-  let {reported} = await delivered;
+  let {reported, derived, source} = await delivered;
   const report = reported?.then(
     () => "resolved",
     (error) => error.code
@@ -141,6 +151,15 @@ if (mode === "exit") {
   assert.deepEqual(settlements.counts, [1, 1]);
   assert.equal(settlements.outcomes[0], "NetworkClosed");
   if (retained) assert.equal(await Promise.race([report, delay(5000, "pending")]), "NetworkClosed");
+  if (derivedOnly) {
+    const outcomes = await Promise.all(derived.map((promise) => Promise.race([promise, delay(1000, "pending")])));
+    derived = null;
+    // A report that outlived native close was rejected, and its derivatives with it. Once it was collected they may
+    // stay pending, and either outcome is correct.
+    if (source.deref() === undefined) assert(outcomes.every((outcome) => outcome === "pending" || outcome === "NetworkClosed"));
+    else assert.deepEqual(outcomes, ["NetworkClosed", "NetworkClosed"]);
+    console.log(`derived ${outcomes.join(",")}; source ${source.deref() === undefined ? "collected" : "retained"}`);
+  }
   await remote.stop();
   await runtimeReleased();
   console.log("facade-collected");
