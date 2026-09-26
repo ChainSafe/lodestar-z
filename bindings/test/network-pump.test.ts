@@ -175,6 +175,7 @@ function fixture() {
     capacity: vi.fn((): {ordinary: boolean; serving: number} | null => ({ordinary: true, serving: 32})),
     checkDependencies: vi.fn((checks: readonly DependencyCheck[]): readonly boolean[] => checks.map(() => true)),
     error: vi.fn((_error: unknown): void => undefined),
+    failed: vi.fn((_error: Error): void => undefined),
     peers: vi.fn((_events: readonly NativePeerObservation[]): void => undefined),
     serve: vi.fn((_request: IncomingRequest): Promise<void> => Promise.resolve()),
     validate: vi.fn(
@@ -855,11 +856,13 @@ describe("binding pump delivery", () => {
     expect(held.retainUntil).not.toHaveBeenCalled();
     await macrotask();
     expect(node.terminal.failure).toBe(failure);
-    expect(node.runtime.close).toHaveBeenCalledOnce();
+    expect(node.host.failed).toHaveBeenCalledExactlyOnceWith(failure);
+    // The host closes the network once its cleanup finishes.
+    expect(node.runtime.close).not.toHaveBeenCalled();
     expect(delivered.cancel).toHaveBeenCalledOnce();
     expect(held.cancel).toHaveBeenCalledOnce();
     await macrotask();
-    // The closing network settles only, and reports what the host never took.
+    // The failed network settles only, and reports what the host never took.
     expect(node.calls()[2]).toEqual([
       [
         {handle: handle(4), type: "verdict", verdict: "ignore"},
@@ -876,7 +879,7 @@ describe("binding pump delivery", () => {
     expect(delivered.cancel).toHaveBeenCalledOnce();
   });
 
-  it("reports a serving start the binding could not hand over after delivering the rest, and closes", async () => {
+  it("fails the network for a serving start the binding could not hand over, after delivering the rest", async () => {
     const node = fixture();
     const failure = new Error("facade construction failed");
     node.runtime.exchange.mockReturnValueOnce({...idle, failure, more: true, peers: [peerEvent]});
@@ -884,9 +887,39 @@ describe("binding pump delivery", () => {
     await macrotask();
     expect(node.host.peers).toHaveBeenCalledOnce();
     expect(node.terminal.failure).toBe(failure);
-    expect(node.runtime.close).toHaveBeenCalledOnce();
+    expect(node.host.failed).toHaveBeenCalledExactlyOnceWith(failure);
+    expect(node.runtime.close).not.toHaveBeenCalled();
     await macrotask();
     expect(node.calls()[1][1]).toEqual(control);
+  });
+
+  it("keeps settling after a failure until the host closes, and reports only the first failure", async () => {
+    const node = fixture();
+    const first = new Error("first failure");
+    node.runtime.exchange
+      .mockReturnValueOnce({...idle, failure: first, more: true})
+      .mockReturnValueOnce({...idle, failure: new Error("second failure"), more: true})
+      .mockReturnValueOnce({...idle, more: true});
+    node.pump.request();
+    for (let i = 0; i < 4; i++) await macrotask();
+    expect(node.calls().map(([, demand]) => demand)).toEqual([full, control, control, control]);
+    expect(node.host.capacity).toHaveBeenCalledOnce();
+    expect(node.host.failed).toHaveBeenCalledExactlyOnceWith(first);
+    expect(node.terminal.failure).toBe(first);
+    expect(node.runtime.close).not.toHaveBeenCalled();
+  });
+
+  it("closes native at once when the host's failure handler throws", async () => {
+    const node = fixture();
+    const thrown = new Error("cleanup failed");
+    node.host.failed.mockImplementation(() => {
+      throw thrown;
+    });
+    node.runtime.exchange.mockReturnValueOnce({...idle, failure: new Error("facade construction failed")});
+    node.pump.request();
+    await macrotask();
+    expect(node.runtime.close).toHaveBeenCalledOnce();
+    expect(node.host.error).toHaveBeenCalledExactlyOnceWith(thrown);
   });
 
   it("holds serving starts once the budget is spent and starts them first next turn, counted once", async () => {

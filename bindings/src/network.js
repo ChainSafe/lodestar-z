@@ -3,7 +3,7 @@ import {NativeRuntime, initializeNativeNetworkRuntime, registerRuntime} from "./
 
 export {initializeNativeNetworkRuntime};
 
-const HOST_METHODS = ["capacity", "validate", "checkDependencies", "serve", "peers"];
+const HOST_METHODS = ["capacity", "validate", "checkDependencies", "serve", "peers", "failed"];
 const CONNECT_TIMEOUT_MS = 10000n;
 
 /**
