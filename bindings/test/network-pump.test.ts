@@ -997,7 +997,72 @@ describe("binding pump delivery", () => {
     for (const start of [slow, thrown, rejected, ended]) expect(start.cancel).not.toHaveBeenCalled();
   });
 
-  it("close cancels held serving starts once and drops held jobs, which native close retires", async () => {
+  it.each([
+    ["capacity read", 0, [], 0, 0, 0, 0],
+    ["exchange's settlement", 0, [1, 2, 3], false, 0, 0, 2],
+    ["peer handler", 1, [1, 2, 3], false, 0, 0, 2],
+    ["first serve", 1, [1, 2, 3], false, 1, 0, 1],
+    ["dependency check", 1, [1, 2, 3], true, 2, 0, 0],
+    ["urgent validation", 1, [2, 3], true, 2, 1, 0],
+    ["ordinary validation", 1, [3], true, 2, 2, 0],
+  ] as const)("a close from the host's %s ends the delivery and retires the rest once", async (closer, peers, ignored, available, served, validated, cancelled) => {
+    const node = fixture();
+    const starts = [incoming("first"), incoming("second")];
+    const close = (name: string) => {
+      if (name === closer) node.pump.close();
+    };
+    node.host.capacity.mockImplementation(() => {
+      close("capacity read");
+      return {ordinary: true, serving: 32};
+    });
+    node.runtime.exchange.mockImplementationOnce((_actions, demand) => {
+      close("exchange's settlement");
+      if (demand.messages === 0) return idle;
+      return {
+        ...idle,
+        checks: [check(7)],
+        gossip: gossip({messages: [1], urgent: true}, {messages: [2]}, {messages: [3]}),
+        peers: [peerEvent],
+        serving: starts as NativeIncomingRequest[],
+      };
+    });
+    node.host.peers.mockImplementation(() => close("peer handler"));
+    node.host.serve.mockImplementation(() => {
+      close("first serve");
+      return Promise.resolve();
+    });
+    node.host.checkDependencies.mockImplementation((checks) => {
+      close("dependency check");
+      return checks.map(() => true);
+    });
+    node.host.validate.mockImplementation((job) => {
+      close(job.messages[0].data[0] === 1 ? "urgent validation" : "ordinary validation");
+      return new Promise(() => undefined);
+    });
+    node.pump.request();
+    await macrotask();
+    await macrotask();
+    expect(node.host.peers).toHaveBeenCalledTimes(peers);
+    expect(node.host.serve).toHaveBeenCalledTimes(served);
+    expect(node.host.validate).toHaveBeenCalledTimes(validated);
+    expect(starts.map(({cancel}) => cancel.mock.calls.length).reduce((a, b) => a + b)).toBe(cancelled);
+    if (served === 1) expect(starts[1].cancel).toHaveBeenCalledOnce();
+    // The next exchange settles only, retiring each undelivered message and check once.
+    const retired: NativeAction[] = ignored.map((index) => ({
+      handle: handle(index),
+      type: "verdict",
+      verdict: "ignore",
+    }));
+    if (available !== 0) retired.push({available, handle: handle(7), type: "classify"});
+    if (retired.length === 0) expect(node.calls()).toEqual([[[], control]]);
+    else {
+      expect(node.calls()[1][1]).toEqual(control);
+      expect(node.actions(1)).toHaveLength(retired.length);
+      expect(node.actions(1)).toEqual(expect.arrayContaining(retired));
+    }
+  });
+
+  it("close cancels held serving starts once and ignores held jobs", async () => {
     const node = fixture();
     const held = incoming("held");
     node.runtime.exchange.mockImplementationOnce(() => {
@@ -1010,7 +1075,7 @@ describe("binding pump delivery", () => {
     node.pump.close();
     expect(held.cancel).toHaveBeenCalledOnce();
     await macrotask();
-    expect(node.calls()[1]).toEqual([[], control]);
+    expect(node.calls()[1]).toEqual([[{handle: handle(1), type: "verdict", verdict: "ignore"}], control]);
     expect(node.host.validate).not.toHaveBeenCalled();
     expect(node.host.serve).not.toHaveBeenCalled();
     node.closed.resolve({reason: "requested"});
