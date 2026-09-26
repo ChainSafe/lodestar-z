@@ -8,19 +8,18 @@ const r = @import("network_runtime.zig");
 const requests = @import("network_requests.zig");
 const Runtime = r.Runtime;
 
-const put = @import("network_js.zig").put;
 const bytes = @import("network_js.zig").bytes;
 const errorValue = @import("network_js.zig").errorValue;
 fn result(env: napi.Env, value: ?Value) !Value {
     const object = try env.createObject();
-    try put(object, "done", try env.getBoolean(value == null));
-    try put(object, "value", value orelse try env.getUndefined());
+    try object.setNamedProperty("done", try env.getBoolean(value == null));
+    try object.setNamedProperty("value", value orelse try env.getUndefined());
     return object;
 }
 fn tokenValue(env: napi.Env, token: requests.Token) !Value {
     const object = try env.createObject();
-    try put(object, "index", try env.createUint32(token.index));
-    try put(object, "generation", try env.createBigintUint64(token.generation));
+    try object.setNamedProperty("index", try env.createUint32(token.index));
+    try object.setNamedProperty("generation", try env.createBigintUint64(token.generation));
     return object;
 }
 fn tokenFor(value: Value) !requests.Token {
@@ -95,7 +94,7 @@ pub fn start(runtime: *Runtime, peer: Value, protocol: Value, data: Value, optio
 }
 fn rejectAdmission(env: napi.Env) anyerror {
     const value = errorValue(env, "NetworkRequestRejected") catch |err| return err;
-    put(value, "reason", env.createStringUtf8("slots_exhausted") catch |err| return err) catch |err| return err;
+    value.setNamedProperty("reason", env.createStringUtf8("slots_exhausted") catch |err| return err) catch |err| return err;
     env.throw(value) catch |err| return err;
     return error.PendingException;
 }
@@ -149,22 +148,22 @@ fn terminalError(env: napi.Env, terminal: requests.Terminal, cell: *const reques
         .closed => return errorValue(env, "NetworkClosed"),
         .rejected => |reason| {
             const object = try errorValue(env, "NetworkRequestRejected");
-            try put(object, "reason", try env.createStringUtf8(@tagName(reason)));
+            try object.setNamedProperty("reason", try env.createStringUtf8(@tagName(reason)));
             return object;
         },
         .failed => |failure| {
             const object = try errorValue(env, "NetworkRequestFailed");
-            try put(object, "reason", try env.createStringUtf8(@tagName(failure.reason)));
-            try put(object, "phase", if (failure.phase) |phase| try env.createStringUtf8(@tagName(phase)) else try env.getNull());
+            try object.setNamedProperty("reason", try env.createStringUtf8(@tagName(failure.reason)));
+            try object.setNamedProperty("phase", if (failure.phase) |phase| try env.createStringUtf8(@tagName(phase)) else try env.getNull());
             const detail: ?[]const u8 = switch (failure.reason) {
                 .invalid_response => |err| @errorName(err),
                 .negotiation_failed => |err| @tagName(err),
                 else => null,
             };
-            try put(object, "detail", if (detail) |text| try env.createStringUtf8(text) else try env.getNull());
-            try put(object, "context", if (failure.reason == .unknown_context) try bytes(env, &failure.reason.unknown_context) else try env.getNull());
-            try put(object, "peerStatus", if (failure.reason == .peer_error) try env.createUint32(failure.reason.peer_error.code) else try env.getNull());
-            try put(object, "peerMessage", if (failure.reason == .peer_error) try bytes(env, cell.peer_message[0..cell.peer_message_len]) else try env.getNull());
+            try object.setNamedProperty("detail", if (detail) |text| try env.createStringUtf8(text) else try env.getNull());
+            try object.setNamedProperty("context", if (failure.reason == .unknown_context) try bytes(env, &failure.reason.unknown_context) else try env.getNull());
+            try object.setNamedProperty("peerStatus", if (failure.reason == .peer_error) try env.createUint32(failure.reason.peer_error.code) else try env.getNull());
+            try object.setNamedProperty("peerMessage", if (failure.reason == .peer_error) try bytes(env, cell.peer_message[0..cell.peer_message_len]) else try env.getNull());
             return object;
         },
         .done => unreachable,
@@ -177,9 +176,9 @@ fn chunkResult(env: napi.Env, cell: *const requests.Cell) !Value {
     const buffer = try env.createArrayBuffer(chunk.len, &destination);
     const data = try env.createTypedarray(.uint8, chunk.len, buffer, 0);
     @memcpy(destination[0..chunk.len], cell.sink[0..chunk.len]);
-    try put(object, "data", data);
-    try put(object, "fork", if (requests.forkLabel(chunk.fork)) |fork| try env.createStringUtf8(fork) else try env.getNull());
-    try put(object, "protocol", try env.createStringUtf8(cell.protocol.id()));
+    try object.setNamedProperty("data", data);
+    try object.setNamedProperty("fork", if (requests.forkLabel(chunk.fork)) |fork| try env.createStringUtf8(fork) else try env.getNull());
+    try object.setNamedProperty("protocol", try env.createStringUtf8(cell.protocol.id()));
     return result(env, object);
 }
 /// Settles up to `limit` request chunks and terminal outcomes. Returns whether more remain.

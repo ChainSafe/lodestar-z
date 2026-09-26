@@ -17,8 +17,6 @@ const Runtime = r.Runtime;
 const Row = readiness.Row;
 const none = n.index_list.none;
 
-const put = @import("network_js.zig").put;
-const element = @import("network_js.zig").element;
 const bytes = @import("network_js.zig").bytes;
 
 /// Actions one exchange applies; a longer batch is refused before any is applied.
@@ -383,9 +381,9 @@ pub const Results = struct {
         try empty.objectFreeze();
         for (&self.idle, 0..) |*slot, i| {
             const result = try env.createObject();
-            inline for (.{ "peers", "serving", "checks" }) |field| try put(result, field, empty);
-            try put(result, "gossip", try env.getNull());
-            try put(result, "failure", try env.getNull());
+            inline for (.{ "peers", "serving", "checks" }) |field| try result.setNamedProperty(field, empty);
+            try result.setNamedProperty("gossip", try env.getNull());
+            try result.setNamedProperty("failure", try env.getNull());
             try schedule(env, result, @bitCast(@as(u4, @intCast(i))));
             try (try result.getNamedProperty("parked")).objectFreeze();
             try result.objectFreeze();
@@ -402,12 +400,12 @@ pub const Results = struct {
 };
 
 fn schedule(env: napi.Env, result: Value, outcome: Outcome) !void {
-    try put(result, "more", try env.getBoolean(outcome.more));
-    try put(result, "disabledWaiting", try env.getBoolean(outcome.disabled));
+    try result.setNamedProperty("more", try env.getBoolean(outcome.more));
+    try result.setNamedProperty("disabledWaiting", try env.getBoolean(outcome.disabled));
     const parked = try env.createObject();
-    try put(parked, "serving", try env.getBoolean(outcome.parked_serving));
-    try put(parked, "ordinary", try env.getBoolean(outcome.parked_ordinary));
-    try put(result, "parked", parked);
+    try parked.setNamedProperty("serving", try env.getBoolean(outcome.parked_serving));
+    try parked.setNamedProperty("ordinary", try env.getBoolean(outcome.parked_ordinary));
+    try result.setNamedProperty("parked", parked);
 }
 
 /// Builds a fresh result for a selection that delivers something. Creates the serving starts' closed promises,
@@ -415,33 +413,32 @@ fn schedule(env: napi.Env, result: Value, outcome: Outcome) !void {
 pub fn build(env: napi.Env, runtime: *Runtime, selection: *Selection) !Value {
     const result = try env.createObject();
     const peers = try env.createArrayWithLength(selection.peer_count);
-    for (selection.peers[0..selection.peer_count], 0..) |*entry, i| try element(peers, i, try projection.observation(env, entry));
-    try put(result, "peers", peers);
+    for (selection.peers[0..selection.peer_count], 0..) |*entry, i| try peers.setElement(@intCast(i), try projection.observation(env, entry));
+    try result.setNamedProperty("peers", peers);
     const serving = try env.createArrayWithLength(selection.serving_count);
     for (selection.serving[0..selection.serving_count], 0..) |token, i| {
         selection.closed[i] = try env.createPromise();
         selection.closed_count = i + 1;
         const cell = &runtime.incoming.?.cells[token.index];
-        try element(serving, i, try @import("network_incoming_js.zig").descriptorValue(runtime, token, cell, selection.closed[i]));
+        try serving.setElement(@intCast(i), try @import("network_incoming_js.zig").descriptorValue(runtime, token, cell, selection.closed[i]));
     }
-    try put(result, "serving", serving);
+    try result.setNamedProperty("serving", serving);
     const checks = try env.createArrayWithLength(selection.checks.len);
     for (selection.checks.tokens[0..selection.checks.len], selection.views[0..selection.checks.len], 0..) |token, *view, i| {
         const check = try env.createObject();
         const reference = try env.createObject();
-        try put(reference, "index", try env.createUint32(token.index));
-        try put(reference, "generation", try env.createBigintUint64(token.generation));
-        try put(check, "handle", reference);
-        try put(check, "root", try bytes(env, &view.root));
-        try put(check, "slot", try env.createBigintUint64(view.slot));
-        try put(check, "peerId", try @import("network_js.zig").peerIdValue(env, &view.identity));
-        try put(check, "topic", try env.createStringUtf8(view.topic[0..view.topic_len]));
-        try element(checks, i, check);
+        try reference.setNamedProperty("index", try env.createUint32(token.index));
+        try reference.setNamedProperty("generation", try env.createBigintUint64(token.generation));
+        try check.setNamedProperty("handle", reference);
+        try check.setNamedProperty("root", try bytes(env, &view.root));
+        try check.setNamedProperty("slot", try env.createBigintUint64(view.slot));
+        try check.setNamedProperty("peerId", try @import("network_js.zig").peerIdValue(env, &view.identity));
+        try check.setNamedProperty("topic", try env.createStringUtf8(view.topic[0..view.topic_len]));
+        try checks.setElement(@intCast(i), check);
     }
-    try put(result, "checks", checks);
-    try put(result, "gossip", if (selection.gossip) |*batch| try jobs(env, runtime, selection, batch) else try env.getNull());
-    // Own, so the binding records a start it could not hand over without reaching inherited accessors.
-    try put(result, "failure", try env.getNull());
+    try result.setNamedProperty("checks", checks);
+    try result.setNamedProperty("gossip", if (selection.gossip) |*batch| try jobs(env, runtime, selection, batch) else try env.getNull());
+    try result.setNamedProperty("failure", try env.getNull());
     return result;
 }
 
@@ -456,23 +453,23 @@ fn jobs(env: napi.Env, runtime: *Runtime, selection: *const Selection, batch: *c
     const table = &runtime.gossip.?;
     const messages = try env.createArrayWithLength(batch.len);
     for (batch.tokens[0..batch.len], 0..) |token, i| {
-        try element(messages, i, try @import("network_gossip_js.zig").descriptor(runtime, token, &table.cells[token.index]));
+        try messages.setElement(@intCast(i), try @import("network_gossip_js.zig").descriptor(runtime, token, &table.cells[token.index]));
     }
     const result = try env.createObject();
-    try put(result, "messages", messages);
+    try result.setNamedProperty("messages", messages);
     const list = try env.createArrayWithLength(batch.job_count);
     for (batch.jobs[0..batch.job_count], 0..) |job, i| {
         const value = try env.createObject();
-        try put(value, "kind", try env.createStringUtf8(@tagName(job.kind)));
-        try put(value, "start", try env.createUint32(@intCast(job.start)));
-        try put(value, "length", try env.createUint32(@intCast(job.len)));
-        try put(value, "grouped", try env.getBoolean(job.grouped));
-        try put(value, "urgent", try env.getBoolean(n.gossip_processor.limits_mod.urgent(job.kind)));
-        try element(list, i, value);
+        try value.setNamedProperty("kind", try env.createStringUtf8(@tagName(job.kind)));
+        try value.setNamedProperty("start", try env.createUint32(@intCast(job.start)));
+        try value.setNamedProperty("length", try env.createUint32(@intCast(job.len)));
+        try value.setNamedProperty("grouped", try env.getBoolean(job.grouped));
+        try value.setNamedProperty("urgent", try env.getBoolean(n.gossip_processor.limits_mod.urgent(job.kind)));
+        try list.setElement(@intCast(i), value);
     }
-    try put(result, "jobs", list);
+    try result.setNamedProperty("jobs", list);
     const offset: f64 = @floatFromInt(selection.claimed_ns -| selection.entered_ns);
-    try put(result, "claimOffsetMs", try env.createDouble(offset / std.time.ns_per_ms));
+    try result.setNamedProperty("claimOffsetMs", try env.createDouble(offset / std.time.ns_per_ms));
     return result;
 }
 

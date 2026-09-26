@@ -99,9 +99,8 @@ class NativeRuntime {
     // An exchange that delivered nothing is frozen with no serving starts.
     const serving = result.serving;
     if (serving.length === 0) return result;
-    // Native has committed every item, so nothing may throw from here. Only own properties native created are read
-    // or written. A start without a facade is cancelled, released and reported with `more` set, so the host still
-    // takes the rest and exchanges again.
+    // Native has committed every item, so nothing may throw from here. A start without a facade is cancelled,
+    // released and reported with `more` set, so the host still takes the rest and exchanges again.
     let taken = 0;
     for (let i = 0; i < serving.length; i++) {
       const descriptor = serving[i];

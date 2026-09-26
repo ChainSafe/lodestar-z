@@ -109,12 +109,6 @@ pub fn array(value: Value, max: usize) !u32 {
     if (!try value.isArray()) return error.InvalidNetworkConfig;
     const count = try value.getArrayLength();
     if (count > max) return error.InvalidNetworkConfig;
-    const env: napi.Env = .{ .env = value.env };
-    for (0..count) |i| {
-        var buffer: [11]u8 = undefined;
-        const index = try std.fmt.bufPrint(&buffer, "{d}", .{i});
-        if (!try value.hasOwnProperty(try env.createStringUtf8(index))) return error.InvalidNetworkConfig;
-    }
     return count;
 }
 pub fn fork(value: Value) !t.ForkSeq {
