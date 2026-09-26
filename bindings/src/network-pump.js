@@ -134,6 +134,9 @@ export class NativePump {
   #retry = undefined;
   /** Consecutive turns whose capacity read threw or whose exchange could not run. */
   #failures = 0;
+  /** A delivery failure was arbitrated, and the host's `failed` received the first. */
+  #arbitrated = false;
+  #notified = false;
   #obligations = [];
   /** One entry per imported root, per penalized peer and action, and for a recheck or a drop, in arrival order. */
   #coalesced = new Map();
@@ -212,25 +215,33 @@ export class NativePump {
   }
 
   /**
-   * A delivery failure: the first is the close result's error and reaches the host's `failed`. Payload delivery stops
-   * while settlement continues, so the host can finish bounded cleanup before it closes the network.
+   * Decides whether a delivery failure is the network's first, before cleanup whose native calls could record a later
+   * owner failure: the first is the close result's error, and one that follows an owner failure goes to the error sink.
    */
-  #fail(error) {
-    if (this.#stopped || this.#terminal.failure !== null) return;
+  #arbitrate(error) {
+    if (this.#stopped || this.#arbitrated) return;
+    this.#arbitrated = true;
     const failure = error instanceof Error ? error : Object.assign(new Error("NativeHostFailure"), {cause: error});
-    this.close();
     let ownerFailed = false;
     try {
       ownerFailed = this.#runtime.state === "failed";
     } catch {
       // A runtime without state has closed.
     }
-    // An owner that failed first is closing already, and its terminal error is the close result's.
-    if (ownerFailed) {
-      this.#error(failure);
-      return;
-    }
-    this.#terminal.failure = failure;
+    if (ownerFailed) this.#error(failure);
+    else this.#terminal.failure = failure;
+  }
+
+  /**
+   * After an arbitrated failure and the delivery's cleanup: payload delivery stops while settlement continues, and a
+   * first failure reaches the host's `failed` once, so the host can finish bounded cleanup before it closes.
+   */
+  #fail() {
+    if (this.#stopped) return;
+    this.close();
+    const failure = this.#terminal.failure;
+    if (failure === null || this.#notified) return;
+    this.#notified = true;
     try {
       this.#host.failed(failure);
     } catch (thrown) {
@@ -480,18 +491,21 @@ export class NativePump {
     if (!failed) this.#failures = 0;
     this.#acknowledge(result.acknowledged);
     let held = false;
-    let failure = result.failure;
+    // A serving start native could not hand over is decided before delivery and its cleanup.
+    let deliveryFailed = result.failure !== null;
+    if (deliveryFailed) this.#arbitrate(result.failure);
     try {
       if (demand !== null) held = this.#deliver(result, deadline);
-    } catch (error) {
-      failure ??= error;
+    } catch {
+      // The delivery arbitrated it before its cleanup.
+      deliveryFailed = true;
     }
     // Ordinary work the time budget left unclaimed waits for the next turn, as held jobs do.
     const budgetEnded = demand !== null && demand.messages > 0 && !demand.claimOrdinary;
     let next = "idle";
     if (result.more || held || (budgetEnded && result.disabledWaiting)) next = "now";
     else if (failed || result.parked.serving || result.parked.ordinary || result.disabledWaiting) next = "later";
-    if (failure !== null) this.#fail(failure);
+    if (deliveryFailed) this.#fail();
     return next;
   }
 
@@ -530,6 +544,10 @@ export class NativePump {
       checked = true;
       if (this.#closing) return false;
       return this.#dispatch(jobs, deadline) || heldStarts;
+    } catch (error) {
+      // Decided before the cleanup below, whose cancellations reach native and could record a later owner failure.
+      this.#arbitrate(error);
+      throw error;
     } finally {
       for (const job of jobs) if (!job.adopted) this.#verdicts(job, null);
       for (const start of starts) if (!start.adopted) void start.incoming.cancel().catch(noop);

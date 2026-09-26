@@ -1308,6 +1308,46 @@ describe("binding pump close results", () => {
     expect(await result).toEqual({error: failure, reason: "failed"});
   });
 
+  it.each([
+    "held",
+    "unadopted",
+  ] as const)("keeps a delivery failure first when cancelling a %s serving start records a later owner failure", async (kind) => {
+    const node = fixture();
+    const result = closeResult(node.runtime.closed, node.terminal);
+    const start = incoming(kind);
+    // A real cancellation reaches native, whose wake can record a terminal failure.
+    start.cancel.mockImplementation(() => {
+      node.runtime.state = "failed";
+      return Promise.resolve();
+    });
+    const failure = new Error("peer handler failed");
+    node.host.peers.mockImplementation(() => {
+      throw failure;
+    });
+    if (kind === "held")
+      node.runtime.exchange
+        .mockImplementationOnce(() => {
+          node.advance(BUDGET_MS);
+          return {...idle, serving: [start as NativeIncomingRequest]};
+        })
+        .mockReturnValueOnce({...idle, peers: [peerEvent]});
+    else
+      node.runtime.exchange.mockReturnValueOnce({
+        ...idle,
+        peers: [peerEvent],
+        serving: [start as NativeIncomingRequest],
+      });
+    node.pump.request();
+    await macrotask();
+    if (kind === "held") await macrotask();
+    expect(start.cancel).toHaveBeenCalledOnce();
+    expect(node.runtime.state).toBe("failed");
+    expect(node.host.failed).toHaveBeenCalledExactlyOnceWith(failure);
+    expect(node.host.error).not.toHaveBeenCalled();
+    node.closed.resolve({error: new Error("NetworkWakeFailed"), reason: "failed"});
+    expect(await result).toEqual({error: failure, reason: "failed"});
+  });
+
   it("leaves the close result to an owner that failed first, and reports a later delivery failure", async () => {
     const node = fixture();
     const result = closeResult(node.runtime.closed, node.terminal);
