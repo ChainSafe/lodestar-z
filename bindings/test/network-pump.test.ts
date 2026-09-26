@@ -1190,4 +1190,32 @@ describe("binding pump acknowledgements", () => {
     await macrotask();
     expect(node.runtime.exchange).toHaveBeenCalledTimes(2);
   });
+
+  it("settles a report's derivatives at native close while the pump lives, though nothing retains the report", async () => {
+    const node = fixture();
+    const outcome = (promise: Promise<unknown>) =>
+      promise.then(
+        () => "resolved",
+        (error: {code?: unknown}) => error.code
+      );
+    let derived: Promise<unknown>[] = [];
+    let source: WeakRef<Promise<void>> | undefined;
+    node.host.validate.mockImplementation((job) => {
+      derived = [outcome(job.reported), outcome(Promise.all([macrotask(), job.reported]))];
+      source = new WeakRef(job.reported);
+      return new Promise(() => undefined);
+    });
+    node.runtime.exchange.mockReturnValueOnce({...idle, gossip: gossip({messages: [1]})});
+    node.pump.request();
+    await macrotask();
+    // Only the pump now holds the report.
+    node.host.validate.mockClear();
+    for (let i = 0; i < 3; i++) {
+      global.gc?.();
+      await macrotask();
+    }
+    expect(source?.deref()).toBeInstanceOf(Promise);
+    node.closed.resolve({reason: "requested"});
+    expect(await Promise.all(derived)).toEqual(["NetworkClosed", "NetworkClosed"]);
+  });
 });

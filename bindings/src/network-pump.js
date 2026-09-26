@@ -31,7 +31,11 @@ export const BURST_NAME = "lodestar_native_drain_burst_seconds";
 export const BURST_BUCKETS = Object.freeze([0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2]);
 const VERDICTS = new Set(["accept", "reject", "ignore"]);
 const noop = () => undefined;
-/** Each report's settler, which lives exactly as long as its report is reachable. */
+/**
+ * Each report's settler, kept alive by the report itself. The pump also holds every unfinished settler while it lives;
+ * once it is collected, only a report still reachable keeps its settler, and a promise derived from a report does not
+ * keep the report.
+ */
 const settlers = new WeakMap();
 
 function closedError() {
