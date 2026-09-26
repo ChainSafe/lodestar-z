@@ -188,11 +188,7 @@ const Host = struct {
 /// order, gossip verdicts and processor maintenance, and request and response flags.
 fn applyWork(self: *Runtime, io: std.Io, tick: n.Now) !n.network_core.HostProgress {
     self.lock();
-    self.wake.?.drain() catch {
-        self.stop = true;
-        self.reason = .failed;
-        self.terminal_error = error.NetworkWakeFailed;
-    };
+    self.wake.?.drain() catch self.failLocked(error.NetworkWakeFailed);
     self.host_due = false;
     const stop = self.stop;
     const stopped = self.stop and !(self.graceful and self.reason == .requested);
@@ -316,11 +312,7 @@ fn publishTurn(self: *Runtime, result: *const n.network_core.Result, timestamp: 
     if (result.failure) |err| {
         std.log.scoped(.network_runtime).debug("owner_turn_failed reason={s} fatal={any}", .{ @errorName(err), result.readiness.failure != null });
         self.diag.operationalFailures +|= 1;
-        if (result.readiness.failure != null) {
-            self.stop = true;
-            self.reason = .failed;
-            self.terminal_error = err;
-        }
+        if (result.readiness.failure != null) self.failLocked(err);
     }
     self.diag.ownerTurns +|= 1;
     self.unlock();

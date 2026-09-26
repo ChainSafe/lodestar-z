@@ -175,6 +175,26 @@ test "an owner completion notifies once while armed and leaves settlement to the
     try std.testing.expectEqual(before + 1, notifications.load(.acquire));
 }
 
+test "the first terminal failure is the close result's, also after a requested stop" {
+    var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 } };
+    runtime.requestStop();
+    try std.testing.expectEqual(r.Reason.requested, runtime.reason);
+    // A notification the host cannot receive fails the stopping owner; a later failure keeps the first.
+    status = 9;
+    defer status = 0;
+    runtime.lock();
+    runtime.notifyLocked();
+    const first = runtime.terminal_error.?;
+    runtime.failLocked(error.NetworkWakeFailed);
+    runtime.unlock();
+    runtime.requestStop();
+    const snapshot = try runtime.snapshot();
+    try std.testing.expectEqual(r.Reason.failed, runtime.reason);
+    try std.testing.expect(first != error.NetworkWakeFailed);
+    try std.testing.expectEqual(first, snapshot.terminal_error.?);
+    try std.testing.expect(snapshot.state == .failed);
+}
+
 /// An exchange host that builds only the peer count.
 const PeerHost = struct {
     pub const Result = struct { peers: usize, more: bool };

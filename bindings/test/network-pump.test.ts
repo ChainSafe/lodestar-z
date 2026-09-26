@@ -15,7 +15,7 @@ import type {
   NativeTopicKind,
   Verdict,
 } from "../src/network.js";
-import {ACTION_MAX, BUDGET_MS, BURST_NAME, NativePump} from "../src/network-pump.js";
+import {ACTION_MAX, BUDGET_MS, BURST_NAME, NativePump, closeResult} from "../src/network-pump.js";
 
 const MIB = 1024 * 1024;
 const full: NativeExchangeDemand = {
@@ -162,7 +162,7 @@ const peerEvent: NativePeerObservation = {
 function fixture() {
   let now = 0;
   vi.spyOn(performance, "now").mockImplementation(() => now);
-  const closed = deferred<{reason: "requested"}>();
+  const closed = deferred<{reason: "requested"} | {reason: "failed"; error: Error}>();
   const runtime = {
     close: vi.fn(() => closed.promise),
     closed: closed.promise,
@@ -170,6 +170,7 @@ function fixture() {
     fail: vi.fn((trigger: number, _reason: string): never => {
       throw new Escalated(String(trigger));
     }),
+    state: "running",
   };
   const host = {
     capacity: vi.fn((): {ordinary: boolean; serving: number} | null => ({ordinary: true, serving: 32})),
@@ -1217,5 +1218,66 @@ describe("binding pump acknowledgements", () => {
     expect(source?.deref()).toBeInstanceOf(Promise);
     node.closed.resolve({reason: "requested"});
     expect(await Promise.all(derived)).toEqual(["NetworkClosed", "NetworkClosed"]);
+  });
+});
+
+describe("binding pump close results", () => {
+  it("reports a requested close, and a failed one with the owner's terminal error", async () => {
+    const node = fixture();
+    const owner = Object.assign(new Error("NetworkWakeFailed"), {code: "NetworkWakeFailed"});
+    expect(await closeResult(Promise.resolve({reason: "requested"}), node.terminal)).toEqual({reason: "requested"});
+    expect(await closeResult(Promise.resolve({error: owner, reason: "failed"}), node.terminal)).toEqual({
+      error: owner,
+      reason: "failed",
+    });
+  });
+
+  it("reports an owner failure that follows a requested close", async () => {
+    const node = fixture();
+    const result = closeResult(node.runtime.closed, node.terminal);
+    node.pump.close();
+    const owner = new Error("owner failed while stopping");
+    node.closed.resolve({error: owner, reason: "failed"});
+    expect(await result).toEqual({error: owner, reason: "failed"});
+  });
+
+  it("reports a delivery failure first, once native settles the close the host then requests", async () => {
+    const node = fixture();
+    const result = closeResult(node.runtime.closed, node.terminal);
+    let settled = false;
+    void result.then(() => {
+      settled = true;
+    });
+    const failure = new Error("peer handler failed");
+    node.host.peers.mockImplementation(() => {
+      throw failure;
+    });
+    node.runtime.exchange.mockReturnValueOnce({...idle, peers: [peerEvent]});
+    node.pump.request();
+    await macrotask();
+    expect(node.host.failed).toHaveBeenCalledExactlyOnceWith(failure);
+    await macrotask();
+    expect(settled).toBe(false);
+    node.closed.resolve({reason: "requested"});
+    expect(await result).toEqual({error: failure, reason: "failed"});
+  });
+
+  it("leaves the close result to an owner that failed first, and reports a later delivery failure", async () => {
+    const node = fixture();
+    const result = closeResult(node.runtime.closed, node.terminal);
+    node.runtime.state = "failed";
+    const failure = new Error("peer handler failed");
+    node.host.peers.mockImplementation(() => {
+      throw failure;
+    });
+    node.runtime.exchange.mockReturnValueOnce({...idle, peers: [peerEvent]});
+    node.pump.request();
+    await macrotask();
+    expect(node.host.failed).not.toHaveBeenCalled();
+    expect(node.host.error).toHaveBeenCalledExactlyOnceWith(failure);
+    expect(node.terminal.failure).toBeNull();
+    const owner = new Error("owner failed");
+    node.closed.resolve({error: owner, reason: "failed"});
+    expect(await result).toEqual({error: owner, reason: "failed"});
   });
 });

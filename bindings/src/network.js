@@ -1,28 +1,10 @@
-import {NativePump} from "./network-pump.js";
+import {NativePump, closeResult} from "./network-pump.js";
 import {NativeRuntime, initializeNativeNetworkRuntime, registerRuntime} from "./network-runtime.js";
 
 export {initializeNativeNetworkRuntime};
 
 const HOST_METHODS = ["capacity", "validate", "checkDependencies", "serve", "peers", "failed"];
 const CONNECT_TIMEOUT_MS = 10000n;
-
-/**
- * The close result: a pump failure first, then the owner's terminal error, else a requested close. It holds the
- * runtime weakly and no host reference, since native settlement roots this promise's reactions.
- */
-function closeResult(closed, terminal, weak) {
-  return closed.then((result) => {
-    if (terminal.failure) return {error: terminal.failure, reason: "failed"};
-    if (result.reason !== "failed") return {reason: "requested"};
-    let code = "NetworkFailed";
-    try {
-      code = weak.deref()?.diagnostics().terminalErrorCode ?? code;
-    } catch {
-      // The runtime was collected; its code is gone.
-    }
-    return {error: Object.assign(new Error(code), {code}), reason: "failed"};
-  });
-}
 
 class NativeNetwork {
   #runtime;
@@ -38,7 +20,7 @@ class NativeNetwork {
     this.#runtime = runtime;
     this.#pump = pump;
     this.limits = Object.freeze({...runtime.limits});
-    this.closed = closeResult(runtime.closed, terminal, new WeakRef(runtime));
+    this.closed = closeResult(runtime.closed, terminal);
     registerRuntime(this, runtime);
   }
 
