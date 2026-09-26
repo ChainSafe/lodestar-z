@@ -32,6 +32,13 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
             fork.fork = if (protocol == .metadata_v3) .fulu else if (protocol == .metadata_v2) .altair else .phase0;
             const value = wire.decodeMetadata(protocol, bytes, fork) catch return;
             var encoded: [25]u8 = undefined;
+            // Decoding accepts a remote custody group count of zero, which the spec lets clients
+            // keep ("MAY reject" below CUSTODY_REQUIREMENT) and which earns no custody credit;
+            // encoding refuses it because local metadata never advertises zero.
+            if (value.custody_group_count == 0) {
+                if (wire.encodeMetadata(protocol, &value, fork, &encoded)) |_| unreachable else |err| std.debug.assert(err == error.InvalidCustodyCount);
+                return;
+            }
             const length = wire.encodeMetadata(protocol, &value, fork, &encoded) catch unreachable;
             std.debug.assert(std.mem.eql(u8, bytes, encoded[0..length]));
         },
