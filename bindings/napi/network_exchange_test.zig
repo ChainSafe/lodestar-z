@@ -440,28 +440,26 @@ test "an exchange claims and applies after settlement and the runtime mutex, and
     defer fixture.deinit();
     const runtime = &fixture.runtime;
     const column = try admit(runtime, .data_column_sidecar, null, "data");
-    const Holder = struct {
-        held: std.atomic.Value(bool) = .init(false),
-        fn run(self: *@This(), target: *Runtime) void {
-            target.lock();
-            self.held.store(true, .release);
-            std.Io.sleep(std.Io.Threaded.global_single_threaded.io(), .fromMilliseconds(20), .awake) catch {};
-            target.unlock();
+    const Runner = struct {
+        result: anyerror!Host.Result = undefined,
+        fn run(self: *@This(), host: *Host, entered_ns: u64) void {
+            self.result = exchange.run(host.runtime, &.{}, &deployed, host.clock, entered_ns, host);
         }
     };
     const ms = std.time.ns_per_ms;
     var host: Host = .{ .runtime = runtime };
-    // The call spent 10 ms settling before phase B, which then waits for another holder of the mutex.
-    var holder: Holder = .{};
-    const thread = try std.Thread.spawn(.{}, Holder.run, .{ &holder, runtime });
-    for (0..10_000) |_| {
-        if (holder.held.load(.acquire)) break;
-        std.Thread.yield() catch {};
-    }
-    const claimed = try exchange.run(runtime, &.{}, &deployed, host.clock, r.bridge.now() -| 10 * ms, &host);
+    // The call entered 10 ms ago, settling, and its phase B waits while this thread holds the mutex for 20 ms, so it
+    // claims at least 30 ms after the entry however the threads are scheduled.
+    const entered = r.bridge.now() -| 10 * ms;
+    runtime.lock();
+    var runner: Runner = .{};
+    const thread = try std.Thread.spawn(.{}, Runner.run, .{ &runner, &host, entered });
+    std.Io.sleep(std.Io.Threaded.global_single_threaded.io(), .fromMilliseconds(20), .awake) catch {};
+    runtime.unlock();
     thread.join();
+    const claimed = try runner.result;
     try std.testing.expectEqualSlices(g.Token, &.{column}, claimed.gossip.?.tokens[0..claimed.gossip.?.len]);
-    try std.testing.expect(host.claim_offset_ns >= 25 * ms);
+    try std.testing.expect(host.claim_offset_ns >= 30 * ms);
 
     // The host's validation settled 7 ms before the call of the exchange that applies its verdict, 3 ms in.
     const applied: exchange.Action = .{ .verdict = .{ .token = column, .verdict = .accept, .waited_ns = 7 * ms } };
