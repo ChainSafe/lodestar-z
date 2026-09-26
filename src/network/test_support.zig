@@ -215,9 +215,12 @@ const Stash = struct {
     /// Stream events not yet routed by `forward`.
     unrouted: [256]Event = undefined,
     unrouted_len: usize = 0,
+    /// Streams the remote side opened, as this engine claimed them.
+    peer_streams: u64 = 0,
 
     fn noteStreams(self: *Stash, polled: []const Event) void {
         for (polled) |event| {
+            if (event == .stream_opened) self.peer_streams += 1;
             if (event != .stream_ready and event != .stream_closed) continue;
             // Harnesses that never forward keep only the newest events.
             if (self.unrouted_len == self.unrouted.len) {
