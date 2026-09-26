@@ -88,7 +88,16 @@ test "memory_safety: borrowed scratch growth stays with the owner across sequent
     defer pool.deinit();
 
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
-    defer test_state.deinit();
+    test_state.epoch_transition_cache.deinit();
+    allocator.destroy(test_state.epoch_transition_cache);
+    defer {
+        test_state.cached_state.deinit();
+        allocator.destroy(test_state.cached_state);
+        test_state.pubkey_cache.deinit();
+        allocator.destroy(test_state.pubkey_cache);
+        deinitReusedEpochTransitionCache(std.testing.io);
+        allocator.destroy(test_state.config);
+    }
 
     var second_caller = std.testing.FailingAllocator.init(allocator, .{});
 
@@ -113,6 +122,4 @@ test "memory_safety: borrowed scratch growth stays with the owner across sequent
 
     try std.testing.expectEqual(bytes_before, second_caller.allocated_bytes);
     try std.testing.expectEqual(grown_len, scratch.items().len);
-
-    deinitReusedEpochTransitionCache(std.testing.io);
 }
