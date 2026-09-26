@@ -1062,8 +1062,11 @@ test "identify core schedules once after Status and completes without public out
     try std.testing.expectEqualStrings("core-test", before.identify.?.agent.?.slice());
     const schedule = &setup.client.control.schedules[before.peer.index];
     try std.testing.expectEqual(.done, schedule.identify_state);
+    const opened = setup.pair.server_stash.peer_streams;
     setup.client.reStatusPeers(setup.pair.now);
     for (0..100) |_| try setup.step(0);
+    // The re-Status request is the only stream the client opens; another Identify would open one more.
+    try std.testing.expectEqual(opened + 1, setup.pair.server_stash.peer_streams);
     try std.testing.expectEqual(.done, schedule.identify_state);
     try std.testing.expectEqualDeep(before.identify, setup.client.catalog.get(before.peer).?.identify);
 }
@@ -1086,8 +1089,11 @@ test "identify remote refusal completes generation without losing accepted Statu
     try std.testing.expect(snapshots[0].relevant and snapshots[0].identify == null);
     const schedule = &setup.client.control.schedules[snapshots[0].peer.index];
     try std.testing.expectEqual(.done, schedule.identify_state);
+    const opened = setup.pair.server_stash.peer_streams;
     setup.client.reStatusPeers(setup.pair.now);
     for (0..60) |_| try setup.step(0);
+    // The re-Status request is the only stream the client opens; another Identify would open one more.
+    try std.testing.expectEqual(opened + 1, setup.pair.server_stash.peer_streams);
     try std.testing.expectEqual(.done, schedule.identify_state);
     try std.testing.expect(setup.client.catalog.get(snapshots[0].peer).?.identify == null);
     try std.testing.expect(setup.client.catalog.get(snapshots[0].peer).?.relevant);
