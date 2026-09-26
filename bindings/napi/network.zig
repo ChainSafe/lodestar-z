@@ -231,7 +231,7 @@ pub fn exchange(self: *@This(), actions_value: js.Value, demand_value: js.Value)
     var host: Exchange = .{ .env = js.env(), .runtime = runtime };
     try host.settle(demand.settle);
     const now = try gossip.monotonic();
-    const result = exchange_mod.run(runtime, actions[0..count], &demand, now, &host) catch |err| {
+    const result = exchange_mod.run(runtime, actions[0..count], &demand, now, call.started_ns, &host) catch |err| {
         if (jsStopped(err)) runtime.forceStop(true);
         return err;
     };

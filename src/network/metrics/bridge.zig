@@ -161,7 +161,7 @@ pub fn write(snapshot: *const Snapshot, running: bool, w: *prom.Encoder) prom.Er
     for (snapshot.refusals, 0..) |reasons, k| for (reasons, 0..) |count, reason| {
         try refusals.sample(.{ @tagName(@as(Kind, @enumFromInt(k))), @tagName(@as(processor.Refusal, @enumFromInt(reason))) }, count);
     };
-    const stage = try w.histograms(.{ .name = "lodestar_native_gossip_processor_stage_seconds", .kind = .histogram, .help = "Processor stages of each claimed message per kind: receipt (gossipsub admission) to dependency-ready, ready to credit-eligible (time the kind's execution credits refused its next ready item), eligible to the exchange claim, and claim to the host verdict that frees its credit", .labels = &.{ "kind", "interval" }, .unit = .seconds }, stages.Duration);
+    const stage = try w.histograms(.{ .name = "lodestar_native_gossip_processor_stage_seconds", .kind = .histogram, .help = "Processor stages of each gossip message per kind: receipt (gossipsub admission) to dependency-ready; ready to claim, split into time the kind's execution credits refused its next ready item (ready_credit_blocked) and the rest (ready_other_wait), neither alone proving a cause; claim to the verdict's application, which frees its credit; for verdicts the host times, its validation settling to the call of the exchange carrying the verdict and to the application; and application to the owner forwarding an accepted message. Add means only over comparable populations, never quantiles", .labels = &.{ "kind", "interval" }, .unit = .seconds }, stages.Duration);
     for (&snapshot.stages.intervals, 0..) |*intervals, k| for (intervals, 0..) |*value, i| {
         try stage.histogram(.{ @tagName(@as(Kind, @enumFromInt(k))), @tagName(@as(stages.Interval, @enumFromInt(i))) }, value);
     };
@@ -220,7 +220,7 @@ test "bridge snapshot renders recorded calls, waits, holds, deliveries, notifica
     defer table.executing_items[column] = 0;
     defer table.executing_bytes[column] = 0;
     table.stages.credit(.data_column_sidecar, true);
-    table.stages.observe(.data_column_sidecar, .ready_to_eligible, 7_000_000);
+    table.stages.observe(.data_column_sidecar, .ready_credit_blocked, 7_000_000);
     table.stages.stop(.data_column_sidecar, .item_credit);
     var recorder: Recorder = .{};
     recorder.calls[@intFromEnum(Entry.exchange)].observe(3_000);
@@ -243,7 +243,7 @@ test "bridge snapshot renders recorded calls, waits, holds, deliveries, notifica
     try std.testing.expectEqual(@as(u128, 0), table.stages.item_ns[column]);
     snapshot.items[@intFromEnum(Kind.beacon_attestation)][@intFromEnum(processor.Occupancy.waiting)] = 5;
     snapshot.refusals[@intFromEnum(Kind.data_column_sidecar)][@intFromEnum(processor.Refusal.source_full)] = 2;
-    var buffer: [256 * 1024]u8 = undefined;
+    var buffer: [512 * 1024]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     var encoder: prom.Encoder = .{ .writer = &writer };
     try write(&snapshot, true, &encoder);
@@ -264,8 +264,8 @@ test "bridge snapshot renders recorded calls, waits, holds, deliveries, notifica
         "lodestar_native_bridge_notify_chain_bucket{le=\"2\"} 2\n",
         "lodestar_native_gossip_processor_items{kind=\"beacon_attestation\",state=\"waiting\"} 5\n",
         "lodestar_native_gossip_processor_refusals_total{kind=\"data_column_sidecar\",reason=\"source_full\"} 2\n",
-        "lodestar_native_gossip_processor_stage_seconds_bucket{kind=\"data_column_sidecar\",interval=\"ready_to_eligible\",le=\"0.005\"} 0\n",
-        "lodestar_native_gossip_processor_stage_seconds_bucket{kind=\"data_column_sidecar\",interval=\"ready_to_eligible\",le=\"0.01\"} 1\n",
+        "lodestar_native_gossip_processor_stage_seconds_bucket{kind=\"data_column_sidecar\",interval=\"ready_credit_blocked\",le=\"0.005\"} 0\n",
+        "lodestar_native_gossip_processor_stage_seconds_bucket{kind=\"data_column_sidecar\",interval=\"ready_credit_blocked\",le=\"0.01\"} 1\n",
         "lodestar_native_gossip_processor_stage_seconds_count{kind=\"data_column_sidecar\",interval=\"claimed_to_applied\"} 0\n",
         "lodestar_native_gossip_processor_claim_stops_total{kind=\"data_column_sidecar\",reason=\"item_credit\"} 1\n",
         "lodestar_native_gossip_processor_credit_blocked_seconds_total{kind=\"data_column_sidecar\"} 0.5\n",

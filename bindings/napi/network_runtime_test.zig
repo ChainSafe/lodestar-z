@@ -285,7 +285,7 @@ test "owner work that races an exchange's check and arm always reaches a later e
         const notified = notifications.load(.acquire) != delivered;
         if (notified) delivered += 1;
         if (notified or again) {
-            const output = try exchange.run(&runtime, &.{}, &demand, 0, &host);
+            const output = try exchange.run(&runtime, &.{}, &demand, 0, 0, &host);
             consumed += output.peers;
             again = output.more;
             exchanges += 1;
