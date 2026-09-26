@@ -341,12 +341,10 @@ export interface NativeExchangeDemand {
 
 /**
  * Applied before the exchange selects its delivery: one verdict per delivered message, one classification per
- * delivered check, imported blocks, a recheck of every waiting message, and coalesced peer penalties (1..100). A
- * verdict's optional `waitedMs` (0 or more; a day counts at most) is how long before this exchange call the host's
- * validation settled, for verdicts the host times.
+ * delivered check, imported blocks, a recheck of every waiting message, and coalesced peer penalties (1..100).
  */
 export type NativeAction =
-  | {type: "verdict"; handle: NativeGossipHandle; verdict: NativeGossipVerdict; waitedMs?: number}
+  | {type: "verdict"; handle: NativeGossipHandle; verdict: NativeGossipVerdict}
   | {type: "classify"; handle: NativeGossipHandle; available: boolean}
   | {type: "block"; root: Uint8Array}
   | {type: "recheck"}
@@ -733,11 +731,6 @@ export interface NativeGossipBatch {
   /** Non-attestation jobs contain one message; attestation jobs contain one compatible group. */
   jobs: NativeGossipJob[];
   messages: NativeGossipMessage[];
-  /**
-   * Milliseconds from the exchange call's native entry to its claim, which follows settlement and the runtime mutex.
-   * Added to the host's timestamp before the call, it places the claim on the host clock to within microseconds.
-   */
-  claimOffsetMs: number;
 }
 export interface NativeGossipPublishOptions {
   allowZeroPeers?: boolean;

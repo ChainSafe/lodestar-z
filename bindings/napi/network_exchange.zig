@@ -62,10 +62,9 @@ fn object(value: Value) !Value {
     return value;
 }
 
-/// A host obligation or request, applied in O(1) under the mutex. A verdict's `waited_ns` is how long before this
-/// exchange's call the host's validation settled, for the verdicts the host times.
+/// A host obligation or request, applied in O(1) under the mutex.
 pub const Action = union(enum) {
-    verdict: struct { token: g.Token, verdict: n.gossipsub.Verdict, waited_ns: ?u64 = null },
+    verdict: struct { token: g.Token, verdict: n.gossipsub.Verdict },
     classify: struct { token: g.Token, available: bool },
     block: [32]u8,
     recheck,
@@ -88,7 +87,6 @@ fn parseAction(value: Value) !Action {
         .verdict => .{ .verdict = .{
             .token = try handle(try cfg.get(value, "handle")),
             .verdict = try name(n.gossipsub.Verdict, try cfg.get(value, "verdict"), error.InvalidGossipVerdict),
-            .waited_ns = try waited(try cfg.get(value, "waitedMs")),
         } },
         .classify => .{ .classify = .{ .token = try handle(try cfg.get(value, "handle")), .available = try cfg.boolean(try cfg.get(value, "available")) } },
         .block => .{ .block = try cfg.fixed(32, try cfg.get(value, "root")) },
@@ -116,14 +114,6 @@ fn handle(value: Value) !g.Token {
     return .{ .index = @intCast(index), .generation = generation };
 }
 
-/// A verdict's optional wait, capped at a day so the host's clock cannot overflow it.
-fn waited(value: Value) !?u64 {
-    if (try value.typeof() == .undefined) return null;
-    const ms = cfg.number(value) catch return error.InvalidNetworkAction;
-    if (ms < 0) return error.InvalidNetworkAction;
-    return @intFromFloat(@min(ms, std.time.ms_per_day) * std.time.ns_per_ms);
-}
-
 fn reportCount(value: Value) !u8 {
     const result = try cfg.integer(value, @import("network_peer_reports.zig").report_max);
     if (result == 0) return error.InvalidNetworkInteger;
@@ -148,9 +138,6 @@ pub const Selection = struct {
     gossip: ?g.Batch = null,
     /// The owner has work from this exchange.
     wake: bool = false,
-    /// When the exchange call entered, and when it applied and claimed, after settlement and the runtime mutex.
-    entered_ns: u64 = 0,
-    claimed_ns: u64 = 0,
 
     pub fn delivers(self: *const Selection) bool {
         return self.peer_count > 0 or self.serving_count > 0 or self.checks.len > 0 or self.gossip != null;
@@ -182,15 +169,12 @@ fn enabled(runtime: *Runtime, demand: *const Demand, row: Row) bool {
     };
 }
 
-fn applyLocked(runtime: *Runtime, actions: []const Action, now: u64, entered_ns: u64) void {
+fn applyLocked(runtime: *Runtime, actions: []const Action, now: u64) void {
     if (runtime.stop or runtime.quiescent) return;
     for (actions) |action| switch (action) {
         .report_peer => |report| runtime.reports.addCount(&report.identity, report.action, report.count),
         else => if (runtime.gossip) |*table| switch (action) {
-            .verdict => |verdict| {
-                if (verdict.waited_ns) |ns| table.timeVerdict(verdict.token, ns, entered_ns);
-                _ = table.report(verdict.token, verdict.verdict, now);
-            },
+            .verdict => |verdict| _ = table.report(verdict.token, verdict.verdict, now),
             .classify => |check| _ = table.classify(check.token, check.available),
             .block => |root| table.notifyBlock(root),
             .recheck => table.recheck(),
@@ -330,16 +314,14 @@ fn gossipMarks(runtime: *Runtime) struct { bool, ?u64 } {
     return .{ table.pending(), table.deadline() };
 }
 
-/// Runs phases B to D for a call that entered at `entered_ns`. `host` builds and finishes the result, discards what
-/// a failed build created, classifies a failure and keeps the event loop alive for serving starts.
-pub fn run(runtime: *Runtime, actions: []const Action, demand: *const Demand, now: u64, entered_ns: u64, host: anytype) !@TypeOf(host.*).Result {
-    var selection: Selection = .{ .wake = actions.len > 0, .entered_ns = entered_ns };
+/// Runs phases B to D. `host` builds and finishes the result, discards what a failed build created, classifies
+/// a failure and keeps the event loop alive for serving starts.
+pub fn run(runtime: *Runtime, actions: []const Action, demand: *const Demand, now: u64, host: anytype) !@TypeOf(host.*).Result {
+    var selection: Selection = .{ .wake = actions.len > 0 };
     runtime.lock();
-    selection.claimed_ns = r.bridge.now();
-    if (runtime.gossip) |*table| table.stages.tick(selection.claimed_ns);
     runtime.readiness.armed = false;
     const marks = gossipMarks(runtime);
-    applyLocked(runtime, actions, now, entered_ns);
+    applyLocked(runtime, actions, now);
     if (demand.capacity) |capacity| runtime.capacity = capacity;
     runtime.refreshLocked();
     selectLocked(runtime, demand, now, &selection);
@@ -437,7 +419,7 @@ pub fn build(env: napi.Env, runtime: *Runtime, selection: *Selection) !Value {
         try checks.setElement(@intCast(i), check);
     }
     try result.setNamedProperty("checks", checks);
-    try result.setNamedProperty("gossip", if (selection.gossip) |*batch| try jobs(env, runtime, selection, batch) else try env.getNull());
+    try result.setNamedProperty("gossip", if (selection.gossip) |*batch| try jobs(env, runtime, batch) else try env.getNull());
     try result.setNamedProperty("failure", try env.getNull());
     return result;
 }
@@ -449,7 +431,7 @@ pub fn finish(env: napi.Env, runtime: *Runtime, output: ?Value, outcome: Outcome
     return result;
 }
 
-fn jobs(env: napi.Env, runtime: *Runtime, selection: *const Selection, batch: *const g.Batch) !Value {
+fn jobs(env: napi.Env, runtime: *Runtime, batch: *const g.Batch) !Value {
     const table = &runtime.gossip.?;
     const messages = try env.createArrayWithLength(batch.len);
     for (batch.tokens[0..batch.len], 0..) |token, i| {
@@ -468,8 +450,6 @@ fn jobs(env: napi.Env, runtime: *Runtime, selection: *const Selection, batch: *c
         try list.setElement(@intCast(i), value);
     }
     try result.setNamedProperty("jobs", list);
-    const offset: f64 = @floatFromInt(selection.claimed_ns -| selection.entered_ns);
-    try result.setNamedProperty("claimOffsetMs", try env.createDouble(offset / std.time.ns_per_ms));
     return result;
 }
 
