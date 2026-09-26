@@ -117,7 +117,10 @@ export class NativePump {
   #heldJobs = [];
   /** Delivered serving starts a spent time budget left for the next turn, at most one turn's quota. */
   #heldStarts = [];
-  /** Each delivered message awaiting its owner disposition, by native handle. */
+  /**
+   * Each delivered message awaiting its owner disposition, by native handle. The closed observation holds it without
+   * the pump, so reports a host retains settle at close although the pump and host were collected.
+   */
   #reported = new Map();
   #burst = {buckets: new Array(BURST_BUCKETS.length).fill(0), count: 0, sum: 0};
   /** Peer penalties dropped because the coalescing table was full. */
@@ -131,11 +134,15 @@ export class NativePump {
   /** Starts draining `runtime`, whose notifications call `request`. */
   attach(runtime) {
     this.#runtime = runtime;
-    NativePump.#observe(this.#weak, runtime.closed);
+    NativePump.#observe(this.#weak, this.#reported, runtime.closed);
   }
 
-  static #observe(weak, closed) {
+  static #observe(weak, reported, closed) {
     const stop = () => {
+      // Shutdown prevents the owner from disposing of whatever it has not acknowledged.
+      const jobs = new Set(reported.values());
+      reported.clear();
+      for (const job of jobs) job.reject(closedError());
       const pump = weak.deref();
       if (pump) pump.#stop();
     };
@@ -278,10 +285,6 @@ export class NativePump {
     if (this.#retry) clearTimeout(this.#retry);
     this.#retry = undefined;
     this.close();
-    // Shutdown prevents the owner from disposing of whatever it has not acknowledged.
-    const reported = new Set(this.#reported.values());
-    this.#reported.clear();
-    for (const job of reported) job.reject(closedError());
   }
 
   #escalate(trigger, cause) {
