@@ -23,6 +23,7 @@ import type {
   NativePeerSnapshot,
   NativeRememberedPeersSnapshot,
   NativeRequestOptions,
+  NativeResolvedLimits,
   NativeResponseChunk,
   NativeRuntimeCloseResult,
   NativeRuntimeDiagnostics,
@@ -106,6 +107,7 @@ export interface NativeNetworkApplicationRuntime {
     options?: NativeRequestOptions
   ): AsyncIterableIterator<NativeResponseChunk>;
   readonly identity: NativeIdentity;
+  readonly limits: NativeResolvedLimits;
   readonly state: NativeRuntimeState;
   diagnostics(): NativeRuntimeDiagnostics;
   applyIntent(intent: NativeLocalIntent, slot: bigint): Promise<NativeIntentResult>;

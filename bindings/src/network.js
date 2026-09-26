@@ -37,12 +37,7 @@ class NativeNetwork {
     pump.attach(runtime);
     this.#runtime = runtime;
     this.#pump = pump;
-    // Temporary: read from diagnostics until initialization returns the resolved limits.
-    const diagnostics = runtime.diagnostics();
-    this.limits = Object.freeze({
-      incomingCapacity: diagnostics.incoming.capacity,
-      peerCapacity: diagnostics.resolvedCapacities.peerCapacity,
-    });
+    this.limits = Object.freeze({...runtime.limits});
     this.closed = closeResult(runtime.closed, terminal, new WeakRef(runtime));
     registerRuntime(this, runtime);
   }

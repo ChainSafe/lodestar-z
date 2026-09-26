@@ -16,6 +16,7 @@ export class NativeRuntime {
     const callback = typeof onWorkAvailable === "function" ? NativeRuntime.#notifier(weak) : onWorkAvailable;
     const initialized = this.#native.initialize(config, callback);
     this.identity = initialized.identity;
+    this.limits = initialized.limits;
     this.#closed = initialized.closed;
   }
 
