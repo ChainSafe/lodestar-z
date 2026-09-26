@@ -32,8 +32,9 @@ pub fn projectWall(admitted: u64, clock: Clock) !u64 {
     if (elapsed > clock.unix_ms or clock.unix_ms > 9007199254740991) return error.InvalidNetworkClock;
     return clock.unix_ms - elapsed;
 }
-/// Runs processor maintenance and applies queued verdicts. Returns whether bounded carry-over
-/// work remains for the next turn.
+/// Runs processor maintenance and applies queued verdicts, unless the host holds them. Each message the host was
+/// handed then awaits acknowledgement of its disposition. Returns whether bounded carry-over work remains for the
+/// next turn.
 pub fn flags(runtime: *Runtime, io: std.Io) !bool {
     runtime.lock();
     defer runtime.unlock();
@@ -42,7 +43,7 @@ pub fn flags(runtime: *Runtime, io: std.Io) !bool {
     const now: n.Now = .{ .mono_ms = clock.mono_ms, .unix_s = @intCast(clock.unix_ms / 1000) };
     table.maintain(now.mono_ms, runtime.slot);
     var retired_bytes: usize = 0;
-    for (0..batch_max) |_| {
+    for (0..if (runtime.verdicts_held) 0 else batch_max) |_| {
         const token = table.nextVerdict() orelse break;
         const cell = table.get(token).?;
         if (retired_bytes > 0 and cell.input.len > batch_bytes -| retired_bytes) break;
@@ -51,9 +52,10 @@ pub fn flags(runtime: *Runtime, io: std.Io) !bool {
         table.outcome(result);
         table.retire(token);
     }
+    runtime.recomputeLocked(.legacy);
     runtime.recomputeLocked(.checks);
     runtime.recomputeLocked(.gossip);
-    return table.pending();
+    return table.pending(!runtime.verdicts_held);
 }
 pub const Ingress = struct {
     runtime: *Runtime,

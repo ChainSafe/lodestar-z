@@ -23,6 +23,8 @@ const bytes = @import("network_js.zig").bytes;
 pub const action_max = 256;
 pub const peers_max = 64;
 pub const serving_max = 8;
+/// Owner dispositions one exchange acknowledges; more set `more`.
+pub const acknowledged_max = action_max;
 const settle_max = @import("network_publications.zig").capacity_max;
 
 /// One exchange's quotas, where zero disables a service, and the host's standing capacities, null to keep them.
@@ -136,11 +138,15 @@ pub const Selection = struct {
     checks: g.Batch = .{},
     views: [g.batch_max]CheckView = undefined,
     gossip: ?g.Batch = null,
+    /// Owner dispositions of delivered messages, taken whatever the demand. Their cells stay acknowledging until
+    /// the commit frees them.
+    acknowledged: [acknowledged_max]g.Token = undefined,
+    acknowledged_count: usize = 0,
     /// The owner has work from this exchange.
     wake: bool = false,
 
     pub fn delivers(self: *const Selection) bool {
-        return self.peer_count > 0 or self.serving_count > 0 or self.checks.len > 0 or self.gossip != null;
+        return self.peer_count > 0 or self.serving_count > 0 or self.checks.len > 0 or self.gossip != null or self.acknowledged_count > 0;
     }
 };
 
@@ -185,6 +191,7 @@ fn applyLocked(runtime: *Runtime, actions: []const Action, now: u64) void {
 }
 
 fn selectLocked(runtime: *Runtime, demand: *const Demand, now: u64, selection: *Selection) void {
+    if (runtime.gossip) |*table| selection.acknowledged_count = table.acknowledgements(&selection.acknowledged);
     const ready = &runtime.readiness;
     var next = ready.payload.head;
     for (0..readiness.row_count) |_| {
@@ -256,6 +263,8 @@ fn commitLocked(runtime: *Runtime, selection: *Selection) bool {
         selection.wake = true;
     }
     runtime.bridge.deliver(.dependency_check, selection.checks.len);
+    // Close may have freed these cells meanwhile; a freed token is ignored. Not counted as delivered items.
+    if (runtime.gossip) |*table| for (selection.acknowledged[0..selection.acknowledged_count]) |token| table.acknowledge(token);
     if (selection.gossip) |*batch| {
         runtime.bridge.deliver(.gossip_message, batch.len);
         runtime.gossip.?.finish(batch, true);
@@ -311,7 +320,7 @@ fn endLocked(runtime: *Runtime, demand: *const Demand, selection: *const Selecti
 
 fn gossipMarks(runtime: *Runtime) struct { bool, ?u64 } {
     const table = if (runtime.gossip) |*table| table else return .{ false, null };
-    return .{ table.pending(), table.deadline() };
+    return .{ table.pending(true), table.deadline() };
 }
 
 /// Runs phases B to D. `host` builds and finishes the result, discards what a failed build created, classifies
@@ -363,7 +372,7 @@ pub const Results = struct {
         try empty.objectFreeze();
         for (&self.idle, 0..) |*slot, i| {
             const result = try env.createObject();
-            inline for (.{ "peers", "serving", "checks" }) |field| try result.setNamedProperty(field, empty);
+            inline for (.{ "peers", "serving", "checks", "acknowledged" }) |field| try result.setNamedProperty(field, empty);
             try result.setNamedProperty("gossip", try env.getNull());
             try result.setNamedProperty("failure", try env.getNull());
             try schedule(env, result, @bitCast(@as(u4, @intCast(i))));
@@ -420,6 +429,14 @@ pub fn build(env: napi.Env, runtime: *Runtime, selection: *Selection) !Value {
     }
     try result.setNamedProperty("checks", checks);
     try result.setNamedProperty("gossip", if (selection.gossip) |*batch| try jobs(env, runtime, batch) else try env.getNull());
+    const acknowledged = try env.createArrayWithLength(selection.acknowledged_count);
+    for (selection.acknowledged[0..selection.acknowledged_count], 0..) |token, i| {
+        const reference = try env.createObject();
+        try reference.setNamedProperty("index", try env.createUint32(token.index));
+        try reference.setNamedProperty("generation", try env.createBigintUint64(token.generation));
+        try acknowledged.setElement(@intCast(i), reference);
+    }
+    try result.setNamedProperty("acknowledged", acknowledged);
     try result.setNamedProperty("failure", try env.getNull());
     return result;
 }

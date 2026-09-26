@@ -124,6 +124,9 @@ class NativeRuntime {
   fail(trigger, reason) {
     return this.#native.fail(trigger, reason);
   }
+  holdVerdicts(held) {
+    this.#native.holdVerdicts(held);
+  }
   async publishGossip(topic, data, options) {
     return this.#native.publishGossip(topic, data, options);
   }

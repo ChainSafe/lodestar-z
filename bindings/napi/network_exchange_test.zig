@@ -5,6 +5,7 @@ const r = @import("network_runtime.zig");
 const g = @import("network_gossip.zig");
 const incoming = @import("network_incoming.zig");
 const projection = @import("network_peer_projection.zig");
+const readiness = @import("network_readiness.zig");
 const commands = @import("network_commands.zig");
 const tsfn = @import("network_runtime_test.zig");
 const Runtime = r.Runtime;
@@ -12,7 +13,7 @@ const Kind = n.gossip_processor.limits_mod.Kind;
 const limits_mod = n.gossip_processor.limits_mod;
 const State = n.gossip_processor.State;
 
-const Part = enum { peers, serving, checks, gossip };
+const Part = enum { peers, serving, checks, gossip, acknowledged };
 
 /// Builds a summary instead of JS values, fails at one part or while finishing when asked, and records a
 /// contract failure instead of terminating. `during` runs where the build runs, as owner work racing phase C.
@@ -36,6 +37,8 @@ const Host = struct {
         serving_count: usize = 0,
         checks: g.Batch = .{},
         gossip: ?g.Batch = null,
+        acknowledged: [exchange.acknowledged_max]g.Token = undefined,
+        acknowledged_count: usize = 0,
         outcome: exchange.Outcome = .{},
     };
 
@@ -56,7 +59,8 @@ const Host = struct {
         }
         if (self.failing(.checks) and selection.checks.len > 0) return self.failure_error();
         if (self.failing(.gossip) and selection.gossip != null) return self.failure_error();
-        return .{ .peers = selection.peer_count, .serving = selection.serving, .serving_count = selection.serving_count, .checks = selection.checks, .gossip = selection.gossip };
+        if (self.failing(.acknowledged) and selection.acknowledged_count > 0) return self.failure_error();
+        return .{ .peers = selection.peer_count, .serving = selection.serving, .serving_count = selection.serving_count, .checks = selection.checks, .gossip = selection.gossip, .acknowledged = selection.acknowledged, .acknowledged_count = selection.acknowledged_count };
     }
     pub fn finish(self: *Host, output: Result, outcome: exchange.Outcome) !Result {
         if (self.fail_finish) return self.failure_error();
@@ -196,6 +200,7 @@ fn stopAt(part: Part) !void {
     try std.testing.expectEqual(@as(usize, 0), table.diag.copying);
     try std.testing.expectEqual(@as(usize, switch (part) {
         .peers => 0,
+        .acknowledged => unreachable,
         .serving => 1,
         .checks, .gossip => 2,
     }), host.discarded);
@@ -215,7 +220,7 @@ fn stopAt(part: Part) !void {
 }
 
 test "a stopped environment during the build at any payload part restores the pins and never replays settlement" {
-    inline for (@typeInfo(Part).@"enum".fields) |field| try stopAt(@field(Part, field.name));
+    inline for (.{ Part.peers, Part.serving, Part.checks, Part.gossip }) |part| try stopAt(part);
 }
 
 test "a stopped environment while finishing a built result shuts down locally, and a contract failure there is fatal" {
@@ -471,4 +476,42 @@ test "a 128-column burst reaches the host within two exchanges under saturated o
     try std.testing.expectEqual(@as(usize, 2), turns);
     retireQueued(&runtime);
     table.close();
+}
+
+test "exchange acknowledges owner dispositions under any demand, once, without counting delivered items" {
+    var fixture: Fixture = undefined;
+    try fixture.init(false, 2);
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    const table = &runtime.gossip.?;
+    var tokens: [2]g.Token = undefined;
+    for (&tokens) |*token| token.* = try admit(runtime, .voluntary_exit, null, "exit");
+    var host: Host = .{ .runtime = runtime };
+    const delivered = try host.turn(&.{}, deployed);
+    try std.testing.expectEqual(@as(usize, 2), delivered.gossip.?.len);
+
+    // The exchange that reports the verdicts cannot acknowledge them: the owner has not applied them.
+    var actions: [2]exchange.Action = undefined;
+    for (&actions, tokens) |*action, token| action.* = .{ .verdict = .{ .token = token, .verdict = .accept } };
+    try std.testing.expectEqual(@as(usize, 0), (try host.turn(&actions, control)).acknowledged_count);
+    runtime.lock();
+    for (tokens) |token| table.retire(token);
+    runtime.recomputeLocked(.legacy);
+    runtime.unlock();
+    try std.testing.expectEqual(readiness.Place.control, runtime.readiness.place(.legacy));
+
+    // A failed build keeps them for the next exchange.
+    const items = runtime.bridge.delivered;
+    host.fail = .acknowledged;
+    try std.testing.expectError(error.PendingException, host.turn(&.{}, control));
+    try std.testing.expectEqual(@as(usize, 2), table.diag.acknowledging);
+    host.fail = null;
+    const acknowledged = try host.turn(&.{}, control);
+    try std.testing.expectEqual(@as(usize, 2), acknowledged.acknowledged_count);
+    for (acknowledged.acknowledged[0..2], tokens) |got, token| try std.testing.expect(std.meta.eql(got, token));
+    try std.testing.expect(!acknowledged.outcome.more);
+    try std.testing.expectEqual(@as(usize, 0), table.diag.acknowledging);
+    for (tokens) |token| try std.testing.expect(table.get(token) == null);
+    try std.testing.expectEqual(items, runtime.bridge.delivered);
+    try std.testing.expectEqual(@as(usize, 0), (try host.turn(&.{}, control)).acknowledged_count);
 }

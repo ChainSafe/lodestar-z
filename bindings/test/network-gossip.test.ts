@@ -263,6 +263,63 @@ test.each([
   );
 }, 15000);
 
+/** Exchanges settlement only until `handle` is acknowledged, returning the diagnostics seen just before. */
+async function acknowledgement(runtime: NativeNetworkApplicationRuntime, handle: NativeGossipHandle) {
+  for (let i = 0; i < 1000; i++) {
+    const before = runtime.diagnostics().gossip;
+    const {acknowledged} = exchange(runtime, settleOnly);
+    if (acknowledged.some((ack) => ack.index === handle.index && ack.generation === handle.generation)) return before;
+    await delay(5);
+  }
+  throw Error("Acknowledgement deadline");
+}
+
+test("an acknowledgement follows only the owner's disposition of a delivered message", async () => {
+  const pair = await gossipPair();
+  try {
+    await pair.left.publishGossip(TOPIC, blockPayload(4000, 1), {allowZeroPeers: false});
+    const message = await nextGossip(pair.right);
+    pair.right.holdVerdicts(true);
+    const accepted = pair.right.diagnostics().gossip.reportsAppliedAccept;
+    // The reporting exchange cannot carry the acknowledgement, nor can later ones while the owner holds verdicts.
+    const reported = exchange(pair.right, settleOnly, [{handle: message.handle, type: "verdict", verdict: "accept"}]);
+    expect(reported.acknowledged).toEqual([]);
+    for (let i = 0; i < 20; i++) {
+      expect(exchange(pair.right, settleOnly).acknowledged).toEqual([]);
+      await delay(5);
+    }
+    expect(pair.right.diagnostics().gossip).toMatchObject({acknowledging: 0, pendingVerdicts: 1, reportsAppliedAccept: accepted});
+    pair.right.holdVerdicts(false);
+    // The owner applied the verdict, which admits forwarding, before its acknowledgement became deliverable.
+    const before = await acknowledgement(pair.right, message.handle);
+    expect(before.reportsAppliedAccept).toBe(accepted + 1n);
+    expect(pair.right.diagnostics().gossip).toMatchObject({acknowledging: 0, occupied: 0, pendingVerdicts: 0});
+    expect(exchange(pair.right, settleOnly).acknowledged).toEqual([]);
+  } finally {
+    await Promise.all([pair.left.close(), pair.right.close()]);
+  }
+}, 15000);
+
+test("an expired delivery is acknowledged without a verdict and close drops held acknowledgements", async () => {
+  const pair = await gossipPair(300n);
+  try {
+    await pair.left.publishGossip(TOPIC, blockPayload(4000, 2), {allowZeroPeers: false});
+    const expired = await nextGossip(pair.right);
+    await delay(400);
+    const late = exchange(pair.right, settleOnly, [{handle: expired.handle, type: "verdict", verdict: "accept"}]);
+    expect(late.acknowledged).toEqual([expired.handle]);
+    expect(pair.right.diagnostics().gossip.deliveredExpired).toBe(1n);
+    await pair.left.publishGossip(TOPIC, blockPayload(4000, 3), {allowZeroPeers: false});
+    const held = await nextGossip(pair.right);
+    pair.right.holdVerdicts(true);
+    exchange(pair.right, settleOnly, [{handle: held.handle, type: "verdict", verdict: "accept"}]);
+  } finally {
+    await Promise.all([pair.left.close(), pair.right.close()]);
+  }
+  expect(pair.right.diagnostics().gossip.acknowledging).toBe(0);
+  expect(exchange(pair.right, settleOnly).acknowledged).toEqual([]);
+}, 15000);
+
 test("gossip payload credit retires on close while descriptors remain held", async () => {
   const pair = await gossipPair();
   try {

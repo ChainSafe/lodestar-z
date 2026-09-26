@@ -18,10 +18,12 @@ fn add(table: *p.GossipProcessor, kind: Kind, now: u64, metadata: p.metadata_mod
 
 fn verify(table: *const p.GossipProcessor) !void {
     var occupied: usize = 0;
+    var acknowledging: usize = 0;
     var executing: usize = 0;
     var payload: usize = 0;
     for (table.cells, 0..) |cell, i| {
-        occupied += @intFromBool(cell.state != .free);
+        occupied += @intFromBool(cell.state != .free and cell.state != .acknowledging);
+        acknowledging += @intFromBool(cell.state == .acknowledging);
         executing += @intFromBool(cell.executing);
         payload += cell.input.len;
         if (cell.state != .free) try t.expectEqual(cell.state_link.linked, true);
@@ -54,6 +56,7 @@ fn verify(table: *const p.GossipProcessor) !void {
         if (slot > 0) try t.expect(table.groups.rows[table.groups.timers[(slot - 1) / 2]].due <= table.groups.rows[index].due);
     }
     try t.expectEqual(occupied, table.diag.occupied);
+    try t.expectEqual(acknowledging, table.diag.acknowledging);
     try t.expectEqual(executing, table.diag.executing);
     try t.expectEqual(payload, table.diag.payloadBytes);
 }
@@ -120,14 +123,14 @@ test "gossip scheduler budgets mass expiry and root promotion without releasing 
     try t.expectEqual(@as(usize, 130), table.diag.waiting);
     table.maintain(1, 0);
     try t.expectEqual(@as(usize, 66), table.diag.waiting);
-    try t.expect(table.pending() or table.deadline().? <= 1);
+    try t.expect(table.pending(true) or table.deadline().? <= 1);
     table.maintain(1, 0);
     try t.expectEqual(@as(usize, 2), table.diag.waiting);
     table.maintain(1, 0);
     try t.expectEqual(@as(usize, 0), table.diag.waiting);
     table.expire(101);
     try t.expectEqual(@as(usize, 66), table.diag.occupied);
-    try t.expect(table.pending() or table.deadline().? <= 101);
+    try t.expect(table.pending(true) or table.deadline().? <= 101);
     table.expire(101);
     table.expire(101);
     try t.expectEqual(@as(usize, 0), table.diag.occupied);
