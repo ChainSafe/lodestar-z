@@ -552,7 +552,7 @@ export class NativePump {
       this.#error(error);
     }
     for (const [i, {handle}] of checks.entries())
-      this.#obligations.push({available: available !== null && available[i], handle, type: "classify"});
+      this.#obligations.push({available: available?.[i] === true, handle, type: "classify"});
   }
 
   /**
