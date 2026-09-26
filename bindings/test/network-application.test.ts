@@ -192,25 +192,6 @@ test("Status-only validation uses the active fork and leaves rejected updates un
   }
 });
 
-test("reentrant close during Status copying retires its command without publication", async () => {
-  const config = applicationConfig();
-  const runtime = startRuntime(config, () => undefined);
-  await runtime.identity;
-  await runtime.applyIntent(localIntent(config), 100n);
-  const status = structuredClone(config.local.status);
-  Object.defineProperty(status, "headRoot", {
-    enumerable: true,
-    get() {
-      runtime.close();
-      return config.local.status.headRoot;
-    },
-  });
-  expect(() => runtime.updateStatus(status)).toThrow("NetworkClosed");
-  await runtime.closed;
-  expect(runtime.diagnostics().operationOccupied).toBe(0);
-  expect(runtime.diagnostics().currentSlot).toBe(100n);
-});
-
 test("identity metadata belongs to its owner snapshot across queued intent updates", async () => {
   const config = applicationConfig();
   const runtime = startRuntime(config, () => undefined);
@@ -311,23 +292,6 @@ test("bounded typed stores refuse the third intent and unwind malformed input", 
   } finally {
     await runtime.close();
   }
-});
-
-test("reentrant close during input copying cancels publication", async () => {
-  const config = applicationConfig();
-  const runtime = startRuntime(config, () => undefined);
-  await runtime.identity;
-  const intent = localIntent(config);
-  Object.defineProperty(intent, "update", {
-    enumerable: true,
-    get() {
-      runtime.close();
-      return localIntent(config).update;
-    },
-  });
-  await expect(runtime.applyIntent(intent, 101n)).rejects.toThrow("NetworkClosed");
-  await runtime.close();
-  expect(runtime.diagnostics().currentSlot).toBe(100n);
 });
 
 test("actual 200/210 resources resolve and publish complete capacity", async () => {

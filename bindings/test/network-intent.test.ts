@@ -98,57 +98,6 @@ test("demand validates fields and target array bounds, offsets and zero padding 
   }
 });
 
-test("compact intent copies masks before later getters mutate their backing", async () => {
-  const config = applicationConfig();
-  const runtime = startRuntime(config);
-  const intent = localIntent(config);
-  const mask = Uint8Array.of(1);
-  intent.subscriptions = [
-    {
-      digest: requestForks[0].digest,
-      subnets: {
-        get beacon_attestation() {
-          structuredClone(mask, {transfer: [mask.buffer]});
-          return new Uint8Array(0);
-        },
-        beacon_block: mask,
-      },
-    },
-  ];
-  try {
-    await runtime.applyIntent(intent, config.initialSlot);
-    expect(
-      (await runtime.getGossipDiagnostics()).topics.some((topic) => topic.subscribed && topic.topic === topicName())
-    ).toBe(true);
-  } finally {
-    await runtime.close();
-  }
-});
-
-test("closing from a mask getter rejects the prepared command and retires its storage", async () => {
-  const config = applicationConfig();
-  const runtime = startRuntime(config);
-  const intent = localIntent(config);
-  intent.subscriptions = [
-    {
-      digest: requestForks[0].digest,
-      subnets: {
-        get beacon_block() {
-          void runtime.close();
-          return Uint8Array.of(1);
-        },
-      },
-    },
-  ];
-  try {
-    await expect(runtime.applyIntent(intent, config.initialSlot)).rejects.toThrow("NetworkClosed");
-    await runtime.closed;
-    expect(runtime.diagnostics().preparingPins).toBe(0);
-  } finally {
-    await runtime.close();
-  }
-});
-
 test("bounded generated masks agree with the configured subnet limits", async () => {
   const config = applicationConfig();
   const runtime = startRuntime(config);

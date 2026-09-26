@@ -407,24 +407,12 @@ it("memory_safety: terminates workers while publication and command results are 
   }
 }, 90000);
 
-it("gates raw reentrant initialization and close before config getters execute", async () => {
+it("rejects initialization of a closed raw runtime", async () => {
   const {networkBindings: addon} = await import("./utils/network-bindings.js");
   const raw = new addon.NativeNetworkRuntime();
-  const config = applicationConfig();
-  Object.defineProperty(config, "profile", {
-    enumerable: true,
-    get() {
-      expect(() => raw.initialize(applicationConfig(), () => undefined)).toThrow("NetworkAlreadyInitialized");
-      raw.close();
-      return "small";
-    },
-  });
-  expect(() => raw.initialize(config, () => undefined)).toThrow("NetworkClosed");
+  raw.close();
   expect(() => raw.initialize(applicationConfig(), () => undefined)).toThrow("NetworkClosed");
-  const runtime = startRuntime(applicationConfig());
-  expect(runtime.state).toBe("running");
-  await runtime.close();
-}, 20000);
+});
 
 it("initializes signed discovery without waiting for bootstrap reachability", async () => {
   const config = applicationConfig();

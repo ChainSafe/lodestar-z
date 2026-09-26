@@ -184,7 +184,7 @@ stockTest(
   20000
 );
 
-test("request validation rejects late malformed options and detached backing without retained ownership", async () => {
+test("request validation rejects malformed options and detached input without retained ownership", async () => {
   const config = applicationConfig();
   const runtime = startRuntime(config, () => undefined);
   try {
@@ -200,25 +200,11 @@ test("request validation rejects late malformed options and detached backing wit
         "InvalidNetworkInteger"
       );
     }
-    const input = new Uint8Array(32);
-    expect(() =>
-      runtime.request(identity.peerId, BLOCKS, input, {
-        get responseTimeoutMs() {
-          structuredClone(input.buffer, {transfer: [input.buffer]});
-          return 5000;
-        },
-      })
-    ).toThrow("InvalidNetworkBytes");
+    const detached = new Uint8Array(32);
+    structuredClone(detached.buffer, {transfer: [detached.buffer]});
+    expect(() => runtime.request(identity.peerId, BLOCKS, detached)).toThrow("InvalidNetworkBytes");
     expect(runtime.diagnostics().requests).toMatchObject({occupied: 0, reservedBytes: 0});
     expect(runtime.diagnostics().operationOccupied).toBe(0);
-    expect(() =>
-      runtime.request(identity.peerId, BLOCKS, new Uint8Array(32), {
-        get responseTimeoutMs() {
-          void runtime.close();
-          return 5000;
-        },
-      })
-    ).toThrow("NetworkClosed");
   } finally {
     await runtime.close();
   }

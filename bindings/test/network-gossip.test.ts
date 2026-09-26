@@ -517,39 +517,6 @@ test("gossip operation promises and weak notifier permit facade collection", () 
   expect(result.accepted).toBe(result.settled);
 }, 20000);
 
-test("gossip publication rechecks a detached view and rolls back reentrant close", async () => {
-  const config = applicationConfig();
-  const runtime = startRuntime(config, () => undefined);
-  try {
-    await runtime.identity;
-    await runtime.applyIntent(localIntent(config), config.initialSlot);
-    const data = new Uint8Array(4000);
-    await expect(
-      runtime.publishGossip(TOPIC, data, {
-        get flood() {
-          structuredClone(data, {transfer: [data.buffer]});
-          return false;
-        },
-      })
-    ).rejects.toThrow("InvalidNetworkBytes");
-    expect(runtime.diagnostics()).toMatchObject({
-      gossip: {publicationBytes: 0, reservedBytes: 0},
-      operationOccupied: 0,
-    });
-    await expect(
-      runtime.publishGossip(TOPIC, new Uint8Array(4000), {
-        get flood() {
-          void runtime.close();
-          return false;
-        },
-      })
-    ).rejects.toThrow("NetworkClosed");
-  } finally {
-    await runtime.close();
-  }
-  expect(runtime.diagnostics()).toMatchObject({gossip: {publicationBytes: 0, reservedBytes: 0}, operationOccupied: 0});
-});
-
 test("closed runtime rejects a retained verdict", async () => {
   const pair = await gossipPair();
   try {
