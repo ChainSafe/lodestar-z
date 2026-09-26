@@ -39,10 +39,7 @@ test "reqresp complete incoming transfer deadline survives partial bytes and mis
             setup.shared.pair.now.mono_ms = deadline;
             try setup.pumpOnce();
             try std.testing.expectEqual(rr.Failure.timeout, slot.request.terminalEvent().?.failed.reason);
-            try std.testing.expectEqual(@as(u64, 1), setup.shared.server.reqresp.counters.timeouts);
-            try std.testing.expectEqual(@as(u64, 0), setup.shared.server.reqresp.counters.requests_served);
             for (0..3) |_| try setup.pumpOnce();
-            try std.testing.expectEqual(@as(u64, 1), setup.shared.server.reqresp.counters.timeouts);
             setup.server_event_capacity = 16;
             try setup.pumpOnce();
             try std.testing.expectEqual(@as(usize, 1), setup.serverEvents().len);
@@ -79,15 +76,12 @@ test "reqresp incoming transfer completed at the boundary starts the host deadli
     setup.shared.pair.now.mono_ms = started + 100;
     try setup.pumpOnce();
     try std.testing.expect(slot.request.running());
-    try std.testing.expectEqual(@as(u64, 0), setup.shared.server.reqresp.counters.timeouts);
     try std.testing.expect(setup.shared.server.reqresp.finish(handle, setup.shared.pair.now));
     for (0..20) |_| {
         try setup.pumpOnce();
         if (setup.serverEvents().len > 0) break;
     }
     try std.testing.expectEqual(@as(u32, 0), setup.serverEvents()[0].served.chunks);
-    try std.testing.expectEqual(@as(u64, 1), setup.shared.server.reqresp.counters.requests_served);
-    try std.testing.expectEqual(@as(u64, 0), setup.shared.server.reqresp.counters.error_responses_sent);
 }
 
 test "reqresp rejected wire requests retain diagnostics and count terminal outcomes once" {
@@ -122,10 +116,6 @@ test "reqresp rejected wire requests retain diagnostics and count terminal outco
         }
         try std.testing.expectEqual(expected, slot.rejection.?);
         try std.testing.expectEqual(@as(u32, 0), slot.request.terminalEvent().?.served.chunks);
-        try std.testing.expectEqual(@as(u64, 1), setup.shared.server.reqresp.counters.malformed);
-        try std.testing.expectEqual(@as(u64, 1), setup.shared.server.reqresp.counters.error_responses_sent);
-        try std.testing.expectEqual(@as(u64, 1), setup.shared.server.reqresp.counters.requests_served);
-        try std.testing.expectEqual(@as(u64, 0), setup.shared.server.reqresp.counters.failures);
         try std.testing.expectEqual(@as(u64, 0), setup.shared.server.reqresp.protocol_counters[@intFromEnum(Protocol.ping_v1)].incoming_errors);
         for (0..3) |_| try setup.pumpOnce();
         setup.server_event_capacity = 16;
@@ -136,8 +126,6 @@ test "reqresp rejected wire requests retain diagnostics and count terminal outco
         try std.testing.expect(fault.identity.eql(&slot.identity));
         try setup.pumpOnce();
         try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.active().inbound);
-        try std.testing.expectEqual(@as(u64, 1), setup.shared.server.reqresp.counters.malformed);
-        try std.testing.expectEqual(@as(u64, 1), setup.shared.server.reqresp.counters.error_responses_sent);
     }
 }
 
@@ -160,7 +148,5 @@ test "reqresp router negotiation timeout contributes once to aggregate timeout c
     try std.testing.expectEqual(rr.Failure.timeout, events[0].failed.reason);
     try std.testing.expectEqual(.negotiation, events[0].failed.phase.?);
     for (0..3) |_| _ = setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &events });
-    try std.testing.expectEqual(@as(u64, 1), setup.shared.client.reqresp.counters.timeouts);
-    try std.testing.expectEqual(@as(u64, 1), setup.shared.client.reqresp.counters.failures);
     try std.testing.expectEqual(@as(u64, 1), setup.shared.client.reqresp.outgoing_error_reasons[@intFromEnum(rr.metrics.ErrorReason.REQUEST_ERROR_DIAL_TIMEOUT)]);
 }

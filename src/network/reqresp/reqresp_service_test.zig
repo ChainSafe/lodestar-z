@@ -71,7 +71,6 @@ test "service reclaims inbound sinks across more requests than it has slots" {
 
     var seed: u8 = 0;
     while (seed < 12) : (seed += 1) try roundTrip(&setup, seed);
-    try std.testing.expectEqual(@as(u64, 12), setup.shared.server.reqresp.counters.requests_served);
     try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.active().inbound);
 }
 

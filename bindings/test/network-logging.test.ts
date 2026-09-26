@@ -36,7 +36,6 @@ test("native std.log captures lifecycle, timestamps and isolated processes throu
         sequence = record.sequence;
       }
       expect((await runtime.drainLogs()).records).toEqual([]);
-      expect(await runtime.getMetrics()).toContain("lodestar_native_logs_queued 0\n");
     }
   } finally {
     await Promise.all([left.close(), right.close()]);

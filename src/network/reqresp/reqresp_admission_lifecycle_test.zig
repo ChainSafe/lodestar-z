@@ -217,7 +217,6 @@ test "reqresp admission lifecycle a fresh burst starts full requests before spli
     try std.testing.expectEqual(@as(usize, 2), result.application);
     try std.testing.expectEqual(@as(u16, 0), events[0].request.peer.index);
     try std.testing.expectEqual(@as(u16, 1), events[1].request.peer.index);
-    try std.testing.expectEqual(@as(u128, 8), owner.counters.charged_work);
 }
 
 test "reqresp admission lifecycle a blocked control writer cannot take another peer's execution reserve" {

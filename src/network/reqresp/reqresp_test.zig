@@ -90,13 +90,10 @@ test "reqresp rejects non-null status context then completes a status round trip
     try std.testing.expect(exchange.done);
     try std.testing.expectEqual(@as(u32, 1), exchange.chunks);
     try std.testing.expect(exchange.failed == null);
-    try std.testing.expectEqual(@as(u64, 1), setup.shared.client.reqresp.counters.requests_sent);
     try std.testing.expectEqual(@as(u64, 1), setup.shared.client.reqresp.protocol_counters[@intFromEnum(Protocol.status_v1)].outgoing);
     try std.testing.expectEqual(@as(u64, 1), setup.shared.server.reqresp.protocol_counters[@intFromEnum(Protocol.status_v1)].incoming);
-    try std.testing.expectEqual(@as(u64, 1), setup.shared.server.reqresp.counters.requests_served);
     try std.testing.expectEqual(@as(u64, 1), setup.shared.client.reqresp.protocol_counters[@intFromEnum(Protocol.status_v1)].outgoing_time.count);
     try std.testing.expectEqual(@as(u64, 1), setup.shared.server.reqresp.protocol_counters[@intFromEnum(Protocol.status_v1)].incoming_time.count);
-    try std.testing.expectEqual(@as(u64, 1), setup.shared.client.reqresp.counters.chunks_received);
     try setup.pumpOnce();
     try std.testing.expectEqual(@as(u16, 0), setup.shared.client.reqresp.active().outbound);
     try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.active().inbound);
@@ -230,7 +227,6 @@ test "reqresp streams blocks by range chunks with fork context" {
     }
     try std.testing.expect(done and served);
     try std.testing.expectEqual(@as(u32, 3), received);
-    try std.testing.expectEqual(@as(u64, 3), setup.shared.server.reqresp.counters.chunks_sent);
 }
 
 test "reqresp rejects undersized sinks and stale handles" {

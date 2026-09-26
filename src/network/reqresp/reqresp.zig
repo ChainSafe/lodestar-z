@@ -174,25 +174,6 @@ pub const RespondError = error{
     TooManyChunks,
 };
 
-pub const Counters = struct {
-    inspected: u64 = 0,
-    admitted: u64 = 0,
-    charged_work: u128 = 0,
-    malformed: u64 = 0,
-    peer_refusals: u64 = 0,
-    aggregate_refusals: u64 = 0,
-    identity_capacity_refusals: u64 = 0,
-    requests_sent: u64 = 0,
-    requests_served: u64 = 0,
-    error_responses_sent: u64 = 0,
-    chunks_received: u64 = 0,
-    chunks_sent: u64 = 0,
-    failures: u64 = 0,
-    timeouts: u64 = 0,
-    goodbyes_recovered_on_close: u64 = 0,
-    goodbyes_incomplete_on_close: u64 = 0,
-};
-
 pub const metrics = @import("metrics.zig");
 pub const ProtocolCounters = metrics.ProtocolCounters;
 
@@ -246,36 +227,25 @@ pub const ReqResp = struct {
     admission: Admission,
     request_fork: config.ForkSeq,
     last_now_ms: u64 = 0,
-    counters: Counters = .{},
     protocol_counters: [Protocol.count]ProtocolCounters = @splat(.{}),
     outgoing_error_reasons: [metrics.error_reason_count]u64 = @splat(0),
     forks: [64]ForkEntry = undefined,
     fork_count: u8 = 0,
 
+    /// Occupied request slots and their undelivered events, inbound slots by phase, and serving
+    /// resources held or retiring.
     pub const Resources = struct {
-        outbound_capacity: usize = 0,
-        inbound_capacity: usize = 0,
-        outbound_control_reserved: usize = 0,
-        inbound_control_reserved: usize = 0,
         outbound_occupied: usize = 0,
-        inbound_occupied: usize = 0,
         inbound_phases: [metrics.inbound_phase_count]usize = @splat(0),
         pending_events: usize = 0,
         pending_terminals: usize = 0,
-        held_chunks: usize = 0,
         serving_capacity: usize = 0,
         serving_occupied: usize = 0,
         retiring: usize = 0,
     };
 
     pub fn resourceSnapshot(self: *const ReqResp) Resources {
-        var result: Resources = .{
-            .outbound_capacity = self.outbound.len,
-            .inbound_capacity = self.inbound.len,
-            .outbound_control_reserved = self.options.outbound_control_reserved,
-            .inbound_control_reserved = self.options.inbound_control_reserved,
-            .serving_capacity = self.serving.entries.len,
-        };
+        var result: Resources = .{ .serving_capacity = self.serving.entries.len };
         for (self.serving.entries) |entry| {
             result.serving_occupied += @intFromBool(entry.request != null);
             result.retiring += @intFromBool(entry.retiring);
@@ -284,13 +254,9 @@ pub const ReqResp = struct {
             if (slot.request.occupied()) result.outbound_occupied += 1;
             if (slot.request.pendingEvent() != null) result.pending_events += 1;
             if (slot.request.terminalEvent() != null) result.pending_terminals += 1;
-            if (slot.request.notification == .borrowed_chunk) result.held_chunks += 1;
         }
         for (self.inbound) |*slot| {
-            if (slot.occupancy()) |phase| {
-                result.inbound_occupied += 1;
-                result.inbound_phases[@intFromEnum(phase)] += 1;
-            }
+            if (slot.occupancy()) |phase| result.inbound_phases[@intFromEnum(phase)] += 1;
             if (slot.request.pendingEvent() != null) result.pending_events += 1;
             if (slot.request.terminalEvent() != null) result.pending_terminals += 1;
         }
@@ -301,10 +267,6 @@ pub const ReqResp = struct {
         const reason_index = @intFromEnum(reason);
         const counts = &self.protocol_counters[@intFromEnum(which)];
         counts.admission_refusals[reason_index] +|= 1;
-        switch (reason) {
-            .peer_capacity => {},
-            .protocol_concurrency, .peer_quota, .global_quota, .identity_capacity, .request_starts => counts.rate_limited +|= 1,
-        }
         std.log.scoped(.network_reqresp_errors).debug("request_admission_refused connection={d}:{d} stream={d} method={s} reason={s} cost={d}", .{ stream.conn.index, stream.conn.generation, stream.id, @tagName(which), @tagName(reason), cost });
     }
 
@@ -592,18 +554,15 @@ pub const ReqResp = struct {
             if (slot.request.running() and slot.state == .ready) {
                 const bytes = slot.request.io.decoder.payload();
                 assert(bytes.len == @import("consensus_types").phase0.Goodbye.fixed_size);
-                self.counters.goodbyes_recovered_on_close +|= 1;
                 slot.state = .serving;
                 return std.mem.readInt(u64, bytes[0..8], .little);
             }
             if (slot.request.pendingEvent()) |event| if (event == .request) {
                 assert(event.request.bytes.len == 8);
-                self.counters.goodbyes_recovered_on_close +|= 1;
                 slot.request.notification = .none;
                 slot.state = .serving;
                 return std.mem.readInt(u64, event.request.bytes[0..8], .little);
             };
-            self.counters.goodbyes_incomplete_on_close +|= 1;
             std.log.scoped(.network_reqresp_errors).debug("goodbye_incomplete_on_close request={d}:{d} connection={d}:{d} stream={d} buffered_bytes={d} decoded_bytes={d} decoder_phase={s} fin={any} detail={s}", .{ index, slot.request.generation, conn.index, conn.generation, slot.request.stream.id, slot.request.io.buffered_end - slot.request.io.buffered_start, if (slot.request.io.decoding) slot.request.io.decoder.written else 0, if (slot.request.io.decoding) @tagName(slot.request.io.decoder.phase) else "cleared", slot.request.io.fin_seen, slot.request.failure_detail });
         }
         return null;
@@ -851,12 +810,7 @@ pub const ReqResp = struct {
         if (!record.terminate(event)) return;
         const counts = &owner.protocol_counters[@intFromEnum(record.protocol)];
         const duration_ms = owner.last_now_ms -| record.started_ms;
-        if (info.rejection != null) {
-            owner.counters.malformed +|= 1;
-        }
-        if (event == .served) owner.counters.requests_served +|= 1;
         if (event == .served and info.result_code != constants.result_success) {
-            owner.counters.error_responses_sent +|= 1;
             std.log.scoped(.network_reqresp_errors).debug("request_error_response request={d}:{d} connection={d}:{d} method={s} code={d} detail={s} chunks={d} elapsed_ms={d}", .{ index, record.generation, record.conn.index, record.conn.generation, @tagName(record.protocol), info.result_code, if (info.rejection) |err| @errorName(err) else "", record.chunks, duration_ms });
         } else if (event != .failed) std.log.scoped(.network_reqresp).debug("request_completed direction={s} request={d}:{d} connection={d}:{d} method={s} chunks={d} elapsed_ms={d}", .{ @tagName(record.direction), index, record.generation, record.conn.index, record.conn.generation, @tagName(record.protocol), record.chunks, duration_ms });
         if (record.direction == .outbound) counts.outgoing_time.observe(duration_ms) else counts.incoming_time.observe(duration_ms);
@@ -865,12 +819,10 @@ pub const ReqResp = struct {
 
     fn recordFailure(owner: *ReqResp, record: *const RequestState, index: u16, event: Event, info: CompletionInfo) void {
         const reason = event.failed.reason;
-        if (reason == .timeout) owner.counters.timeouts +|= 1;
         const counts = &owner.protocol_counters[@intFromEnum(record.protocol)];
         const duration_ms = owner.last_now_ms -| record.started_ms;
         const request_detail = info.rejection;
         if (reason == .cancelled) {
-            if (record.direction == .outbound) counts.outgoing_cancelled +|= 1 else counts.incoming_cancelled +|= 1;
             std.log.scoped(.network_reqresp).debug("request_cancelled direction={s} request={d}:{d} connection={d}:{d} method={s} request_detail={s} chunks={d} elapsed_ms={d}", .{ @tagName(record.direction), index, record.generation, record.conn.index, record.conn.generation, @tagName(record.protocol), if (request_detail) |err| @errorName(err) else "", record.chunks, duration_ms });
         } else {
             const detail: []const u8 = switch (reason) {
@@ -881,7 +833,6 @@ pub const ReqResp = struct {
             };
             const peer_code: u16 = if (reason == .peer_error) reason.peer_error.code else 0;
             std.log.scoped(.network_reqresp_errors).debug("request_failed direction={s} request={d}:{d} connection={d}:{d} method={s} phase={s} reason={s} detail={s} request_detail={s} peer_code={d} chunks={d} elapsed_ms={d}", .{ @tagName(record.direction), index, record.generation, record.conn.index, record.conn.generation, @tagName(record.protocol), info.phase_name, @tagName(reason), detail, if (request_detail) |err| @errorName(err) else "", peer_code, record.chunks, duration_ms });
-            owner.counters.failures += 1;
             if (record.direction == .outbound) {
                 counts.outgoing_errors +|= 1;
                 owner.outgoing_error_reasons[@intFromEnum(metrics.ErrorReason.fromFailure(reason, event.failed.phase.?))] +|= 1;

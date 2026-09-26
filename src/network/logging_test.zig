@@ -9,14 +9,14 @@ const std = @import("std");
 
 test "native logging bounds records, sanitizes text and isolates sinks" {
     var first: Sink = .{};
-    var second: Sink = .{};
+    const second: Sink = .{};
     first.configure(.debug);
     first.write(.debug, .network_reqresp, 10, 20, "event value={s}", .{"a\n\r\x1bb"});
     var records: [drain_max]Record = undefined;
     const batch = first.peek(&records);
     try std.testing.expectEqual(@as(usize, 1), batch.count);
     try std.testing.expectEqualStrings("event value=a???b", records[0].message[0..records[0].len]);
-    try std.testing.expectEqual(@as(u16, 0), second.snapshot().queued);
+    try std.testing.expectEqual(@as(u16, 0), second.len);
     try std.testing.expectEqual(@as(usize, 1), first.peek(&records).count);
     first.commit(1);
     first.write(.info, .network_core, 10, 20, "{s}", .{&([_]u8{'x'} ** (message_capacity + 1))});
@@ -25,7 +25,7 @@ test "native logging bounds records, sanitizes text and isolates sinks" {
     try std.testing.expectEqual(@as(u16, message_capacity), records[0].len);
     first.configure(null);
     first.write(.err, .network_runtime, 10, 20, "disabled", .{});
-    try std.testing.expectEqual(@as(u16, 1), first.snapshot().queued);
+    try std.testing.expectEqual(@as(u16, 1), first.len);
 }
 
 test "native logging rate limits independently and reserves capacity for severe records" {
@@ -34,10 +34,10 @@ test "native logging rate limits independently and reserves capacity for severe 
     for (0..100) |_| sink.write(.debug, .network_gossip, 1, 1, "busy", .{});
     try std.testing.expectEqual(@as(u64, 92), sink.snapshot().total("suppressed"));
     for (1..20) |i| for (0..8) |_| sink.write(.debug, .network_gossip, i * 1000, i * 1000, "busy", .{});
-    try std.testing.expectEqual(@as(u16, capacity - 32), sink.snapshot().queued);
+    try std.testing.expectEqual(@as(u16, capacity - 32), sink.len);
     sink.write(.info, .network_runtime, 20000, 20000, "lifecycle", .{});
     sink.write(.err, .network_runtime, 20000, 20000, "failure", .{});
-    try std.testing.expectEqual(@as(u16, capacity - 30), sink.snapshot().queued);
+    try std.testing.expectEqual(@as(u16, capacity - 30), sink.len);
     try std.testing.expect(sink.snapshot().total("dropped") > 0);
 }
 
@@ -87,7 +87,7 @@ test "native logging preserves copied records and ordering across queue wrap and
         sink.commit(batch.count);
         if (!batch.more) break;
     }
-    try std.testing.expectEqual(@as(u16, 0), sink.snapshot().queued);
+    try std.testing.expectEqual(@as(u16, 0), sink.len);
     try std.testing.expectEqual(@as(u64, 8), sink.snapshot().total("dropped"));
     try std.testing.expectEqual(@as(u64, 152), sequence);
 }
