@@ -263,7 +263,6 @@ test("expired validation execution remains visible until late host completion", 
     });
     for (let i = 0; i < 1000 && pair.right.getMetrics().includes(expiredSample); i++) await delay(5);
     expect(pair.right.getMetrics()).toContain("lodestar_native_gossip_expired_executing 0\n");
-    expect(pair.right.getMetrics()).toContain("lodestar_native_gossip_oldest_expired_execution_age_seconds 0\n");
   } finally {
     await Promise.all([pair.left.close(), pair.right.close()]);
   }

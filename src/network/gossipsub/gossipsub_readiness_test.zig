@@ -53,7 +53,7 @@ test "gossip idle mesh of 200 sessions costs no session visits" {
     const mesh = g.overlay.mesh(index).count();
     try std.testing.expect(mesh >= 9);
     const visits = g.sessions.visits;
-    const writes = g.io_metrics.write_calls;
+    const writes = g.sessions.writes;
     const cycles = g.cycle.epoch;
     for (0..120) |_| {
         setup.shared.pair.advance(30);
@@ -63,7 +63,7 @@ test "gossip idle mesh of 200 sessions costs no session visits" {
     }
     try std.testing.expect(g.cycle.epoch - cycles >= 4);
     try std.testing.expectEqual(visits, g.sessions.visits);
-    try std.testing.expectEqual(writes, g.io_metrics.write_calls);
+    try std.testing.expectEqual(writes, g.sessions.writes);
     try std.testing.expectEqual(mesh, g.overlay.mesh(index).count());
 }
 
@@ -81,9 +81,9 @@ test "gossip retries a flow-blocked session only when send capacity grows" {
     try std.testing.expectEqual(@as(u16, 1), (try g.publish(topic, &payload, setup.shared.pair.now)).queued);
 
     // The publish is written in the turn that follows it, until the server's credit runs out.
-    const writes = g.io_metrics.write_calls;
+    const writes = g.sessions.writes;
     _ = processClient(&setup);
-    try std.testing.expect(g.io_metrics.write_calls > writes);
+    try std.testing.expect(g.sessions.writes > writes);
     try std.testing.expect(!io.tx.ready and io.tx.pending());
     try std.testing.expect(!g.sessions.rows[index].ready_link.linked);
 
@@ -91,8 +91,8 @@ test "gossip retries a flow-blocked session only when send capacity grows" {
     // the server acknowledges it: ACKs without credit wake no session and retry no write.
     const probe = try setup.shared.pair.client.openStream(setup.shared.handles.client);
     const visits = g.sessions.visits;
-    const blocked = g.io_metrics.write_would_block;
-    const attempts = g.io_metrics.write_calls;
+    const blocked = g.sessions.blocked_writes;
+    const attempts = g.sessions.writes;
     const received = setup.shared.pair.client_accepted;
     for (0..100) |_| {
         try std.testing.expectEqual(@as(usize, 1), try setup.shared.pair.client.write(probe, "x", false));
@@ -102,8 +102,8 @@ test "gossip retries a flow-blocked session only when send capacity grows" {
     }
     try std.testing.expect(setup.shared.pair.client_accepted - received >= 100);
     try std.testing.expectEqual(visits, g.sessions.visits);
-    try std.testing.expectEqual(blocked, g.io_metrics.write_would_block);
-    try std.testing.expectEqual(attempts, g.io_metrics.write_calls);
+    try std.testing.expectEqual(blocked, g.sessions.blocked_writes);
+    try std.testing.expectEqual(attempts, g.sessions.writes);
 
     // The server reads, and its credit arrives as writable events. A turn visits the session
     // exactly when an event reached it, and each visit writes into the new credit.
@@ -113,13 +113,13 @@ test "gossip retries a flow-blocked session only when send capacity grows" {
         _ = setup.shared.processServer(.{});
         try setup.shared.pair.pump();
         const before = g.sessions.visits;
-        const calls = g.io_metrics.write_calls;
+        const calls = g.sessions.writes;
         const routed = processClient(&setup);
         try std.testing.expectEqual(@as(u64, @intFromBool(routed)), g.sessions.visits - before);
         if (routed) {
             woken += 1;
-            try std.testing.expect(g.io_metrics.write_calls > calls);
-        } else try std.testing.expectEqual(calls, g.io_metrics.write_calls);
+            try std.testing.expect(g.sessions.writes > calls);
+        } else try std.testing.expectEqual(calls, g.sessions.writes);
         try setup.shared.pair.pump();
     }
     try std.testing.expectEqual(@as(usize, 0), io.tx.data.count);
@@ -235,14 +235,14 @@ test "gossip resumes a small frame cut by a short write once the stream is writa
         offset -= frame;
         whole += 1;
     }
-    const calls = g.io_metrics.write_calls;
-    const blocked = g.io_metrics.write_would_block;
+    const calls = g.sessions.writes;
+    const blocked = g.sessions.blocked_writes;
     _ = processClient(&setup);
     // QUIC took every whole frame the credit covers in one write each, then a prefix of the next.
     try std.testing.expect(offset > 0);
-    try std.testing.expectEqual(@as(u64, whole + 1), g.io_metrics.write_calls - calls);
-    try std.testing.expectEqual(blocked + 1, g.io_metrics.write_would_block);
-    try std.testing.expect(!io.tx.ready and io.tx.pending() and io.tx.last_write_blocked);
+    try std.testing.expectEqual(@as(u64, whole + 1), g.sessions.writes - calls);
+    try std.testing.expectEqual(blocked + 1, g.sessions.blocked_writes);
+    try std.testing.expect(!io.tx.ready and io.tx.pending() and io.tx.blocked_since != null);
     try std.testing.expectEqual(payloads.len - whole, io.tx.data.count);
     try std.testing.expectEqual(offset, io.tx.data.next(&g.messages.store).?.cursor.sent);
 
@@ -256,11 +256,10 @@ test "gossip resumes a small frame cut by a short write once the stream is writa
     }
     _ = setup.shared.processServer(.{});
     try std.testing.expectEqual(@as(usize, 0), io.tx.data.count);
-    try std.testing.expect(!io.tx.last_write_blocked);
+    try std.testing.expect(io.tx.blocked_since == null);
     try std.testing.expectEqual(payloads.len, setup.serverMessages().len);
     for (setup.serverMessages(), &payloads) |message, *payload| try std.testing.expectEqualSlices(u8, payload, message.bytes);
-    try std.testing.expect(g.io_metrics.write_calls - calls <= payloads.len + (g.io_metrics.write_would_block - blocked));
-    try std.testing.expectEqual(@as(u64, payloads.len), g.delivery_metrics.write_time[@intFromEnum(@import("delivery.zig").Origin.publication)].count);
+    try std.testing.expect(g.sessions.writes - calls <= payloads.len + (g.sessions.blocked_writes - blocked));
 }
 
 test "gossip local publications lead each turn for a bounded run and cannot starve forwards or IWANT responses" {

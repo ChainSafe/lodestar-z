@@ -63,7 +63,7 @@ test "gossip default owner memory reconciles requested allocations" {
     try std.testing.expectEqual(@as(usize, 0), ledger.bytes);
 }
 
-test "gossip diagnostics tracks queued age and preserves peaks after owner release" {
+test "gossip resource snapshot releases queued bytes and transmit retains with the owner" {
     var ledger: @import("../reservations.zig").Reservations = .{ .backing = std.testing.allocator };
     var g = try support.init(ledger.allocator(), .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1 });
     defer g.deinit();
@@ -76,23 +76,15 @@ test "gossip diagnostics tracks queued age and preserves peaks after owner relea
     g.messages.store.retainHistory(message);
     g.messages.store.seal(message);
     try std.testing.expectEqual(@import("outbox.zig").QueueResult.queued, io.tx.queueData(&g.messages.store, message, .forward, .{ .bytes = 10 }, 7));
-    try std.testing.expect(io.tx.injectFrame("ctrl", true, 9) != null);
-    g.last_now_ms = 20;
     const snapshot = g.resourceSnapshot();
-    try std.testing.expectEqual(@as(?u64, 13), snapshot.oldest_tx_age_ms);
     try std.testing.expectEqual(@as(usize, 3), snapshot.queued_bytes);
-    try std.testing.expectEqual(@as(usize, 3), snapshot.data_bytes_per_row_high_water);
-    try std.testing.expectEqual(@as(usize, 4), snapshot.critical_bytes);
     try std.testing.expectEqual(@as(usize, 1), snapshot.held_tx_retains);
     try std.testing.expectEqualDeep(snapshot, g.resourceSnapshot());
     g.connectionClosed(conn);
     g.messages.store.releaseHistory(message);
     const released = g.resourceSnapshot();
-    try std.testing.expectEqual(@as(?u64, null), released.oldest_tx_age_ms);
     try std.testing.expectEqual(@as(usize, 0), released.queued_bytes);
     try std.testing.expectEqual(@as(usize, 0), released.held_tx_retains);
-    try std.testing.expectEqual(@as(usize, 3), released.data_bytes_per_row_high_water);
-    try std.testing.expectEqual(@as(usize, 3), snapshot.queued_bytes);
     try std.testing.expectEqual(calls, ledger.allocation_calls);
 }
 
@@ -208,7 +200,6 @@ test "gossip history covers the processor retention allowance and the memory pla
         var ledger: @import("../reservations.zig").Reservations = .{ .backing = std.testing.allocator };
         var g = try support.init(ledger.allocator(), .{ .random_seed = 1, .topic_policy = &.{boundary}, .mcache_capacity = floor, .validation_capacity = total, .processor_limits = limits });
         try std.testing.expectEqual(expected, g.messages.history.entries.len);
-        try std.testing.expectEqual(expected, g.resourceSnapshot().history_capacity);
         try std.testing.expectEqual(expected + total, g.messages.store.entries.len);
         try std.testing.expectEqual(ledger.bytes, g.memoryPlan().total_bytes - @sizeOf(Gossipsub));
         g.deinit();

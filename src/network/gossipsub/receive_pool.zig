@@ -17,7 +17,6 @@ pub const ReceivePool = struct {
     next: []u32,
     free: u32 = 0,
     free_pages: usize,
-    high_water: usize = 0,
 
     pub fn init(a: std.mem.Allocator, byte_capacity: usize) !ReceivePool {
         if (byte_capacity < page_bytes or byte_capacity > 1024 * 1024 * 1024 or byte_capacity % page_bytes != 0) return error.InvalidLimits;
@@ -50,7 +49,6 @@ pub const ReceivePool = struct {
             chain.last = page;
             chain.pages += 1;
             self.free_pages -= 1;
-            self.high_water = @max(self.high_water, self.next.len - self.free_pages);
         }
         return self.bytes[@as(usize, chain.last) * page_bytes + offset ..][0 .. page_bytes - offset];
     }
@@ -163,5 +161,4 @@ test "receive pages charge stored bytes and preserve other chains on exhaustion"
     var view: View = .{ .prefix = "abc", .pool = &pool, .first = b.first, .len = 4 };
     var out: [4]u8 = undefined;
     try std.testing.expectEqualSlices(u8, &.{ 'a', 'b', 'c', 23 }, view.materialize(.{ .start = view.begin(), .len = 4 }, &out));
-    try std.testing.expectEqual(@as(usize, 2), pool.high_water);
 }

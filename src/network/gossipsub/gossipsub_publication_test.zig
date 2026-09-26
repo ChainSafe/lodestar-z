@@ -183,22 +183,22 @@ test "publication distinguishes topic capacity from unknown wire names" {
     try std.testing.expectError(error.UnknownTopic, g.publish("invalid", "body", .{ .mono_ms = 1, .unix_s = 0 }));
 }
 
-test "delivery metrics attribute refused frames by origin, limit and client" {
+test "delivery recipients count refused frames and completions by origin" {
+    const Origin = @import("delivery.zig").Origin;
+    const Outcome = @import("metrics.zig").Delivery.Outcome;
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
     defer g.deinit();
     const conn: @import("../quic/engine.zig").Handle = .{ .index = 0, .generation = 1 };
     const peer = support.addPeer(&g, conn, .v1_2).?;
     _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), peer.index, topic, true);
     g.markDirect(conn);
-    g.identified(conn, .Nimbus);
-    try std.testing.expectEqual(@import("../peers/client.zig").Client.Nimbus, g.sessions.rows[peer.index].client);
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 1, .queued = 1 }, try g.publish(topic, "filler", .{ .mono_ms = 1, .unix_s = 0 }));
     const id = topic_mod.validMessageId(topic, "filler", .{});
     const filler = g.messages.history.message(g.messages.history.get(&g.messages.store, id).?);
     const io = &g.sessions.rows[peer.index].io;
     // Forwards fill the ordinary allowance and publications the local reserve.
     for (1..@import("outbox.zig").data_capacity) |_| {
-        const origin: @import("delivery.zig").Origin = if (io.tx.data.full()) .publication else .forward;
+        const origin: Origin = if (io.tx.data.full()) .publication else .forward;
         try std.testing.expectEqual(.queued, io.tx.queueData(&g.messages.store, filler, origin, .{ .bytes = g.options.tx_peer_bytes }, 1));
     }
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 1, .pressured = 1 }, try g.publish(topic, "refused", .{ .mono_ms = 2, .unix_s = 0 }));
@@ -206,23 +206,18 @@ test "delivery metrics attribute refused frames by origin, limit and client" {
     var writer = @import("protobuf.zig").Writer.init(&body);
     writer.bytesField(1, &id);
     support.control(&g, peer.index, .{ .iwant = .{ .body = writer.written() } }, .{ .mono_ms = 3, .unix_s = 0 });
-    const metrics = &g.delivery_metrics;
-    const nimbus = @intFromEnum(@import("../peers/client.zig").Client.Nimbus);
-    for (metrics.drops, 0..) |origins, client| for (origins, 0..) |reasons, origin| for (reasons, 0..) |count, reason| {
-        const expected = client == nimbus and reason == 0 and (origin == @intFromEnum(@import("delivery.zig").Origin.publication) or origin == @intFromEnum(@import("delivery.zig").Origin.iwant));
-        try std.testing.expectEqual(@as(u64, @intFromBool(expected)), count);
-    };
-    try std.testing.expectEqual(@as(u64, 2), g.sessions.rows[peer.index].io.tx.drops[@intFromEnum(@import("outbox.zig").DropReason.data_descriptors)]);
-    // The first queued frame was the publication; its write completes 39 ms after admission.
+    const recipients = &g.delivery_metrics.recipients;
+    try std.testing.expectEqual(@as(u64, 1), recipients[@intFromEnum(Origin.publication)][@intFromEnum(Outcome.pressured)]);
+    try std.testing.expectEqual(@as(u64, 1), recipients[@intFromEnum(Origin.iwant)][@intFromEnum(Outcome.pressured)]);
+    try std.testing.expectEqual(@as(u64, 2), io.tx.drops[@intFromEnum(@import("outbox.zig").DropReason.data_descriptors)]);
+    // The first queued frame was the publication.
     for (0..16) |_| {
         const segment = io.tx.segment(&g.messages.store);
         g.advanceWrite(g.sessions.ref(peer.index), segment.len, 40);
-        if (metrics.write_time[@intFromEnum(@import("delivery.zig").Origin.publication)].count == 1) break;
+        if (recipients[@intFromEnum(Origin.publication)][@intFromEnum(Outcome.completed)] == 1) break;
     }
-    const written = &metrics.write_time[@intFromEnum(@import("delivery.zig").Origin.publication)];
-    try std.testing.expectEqual(@as(u64, 1), written.count);
-    try std.testing.expectEqual(@as(u128, 39), written.sum);
-    try std.testing.expectEqual(@as(u64, 0), metrics.write_time[@intFromEnum(@import("delivery.zig").Origin.forward)].count);
+    try std.testing.expectEqual(@as(u64, 1), recipients[@intFromEnum(Origin.publication)][@intFromEnum(Outcome.completed)]);
+    try std.testing.expectEqual(@as(u64, 0), recipients[@intFromEnum(Origin.forward)][@intFromEnum(Outcome.completed)]);
     io.tx.cancelStream(&g.messages.store);
 }
 
@@ -260,5 +255,4 @@ test "publication priority belongs to each attempt: an IWANT for our publication
         try std.testing.expectEqual(local, publication[@intFromEnum(outcome)]);
         try std.testing.expectEqual(ordinary, iwant[@intFromEnum(outcome)]);
     }
-    try std.testing.expectEqual(@as(u64, 2), g.delivery_metrics.write_time[@intFromEnum(Origin.publication)].count + g.delivery_metrics.write_time[@intFromEnum(Origin.iwant)].count);
 }

@@ -47,15 +47,7 @@ test("metrics are available through startup and remain readable after close", as
       {timeout: 5000}
     );
     expect(metrics.get("lodestar_native_gossip_expired_executing")).toBe(0);
-    expect(metrics.get("lodestar_native_gossip_oldest_expired_execution_age_seconds")).toBe(0);
     expect(metrics.get('lodestar_native_gossip_processor_items{kind="beacon_block",state="queued"}')).toBe(0);
-    for (const budget of ["calls", "input", "output", "items", "fields", "work", "copy"]) {
-      expect(metrics.get(`lodestar_native_gossip_turns_exhausted_total{budget="${budget}"}`)).toBe(0);
-      expect(metrics.get(`lodestar_native_gossip_ready_deferred_total{budget="${budget}"}`)).toBe(0);
-    }
-    for (const counter of ["read_calls", "write_calls", "write_would_block", "write_zero"]) {
-      expect(metrics.get(`lodestar_native_gossip_io_${counter}_total`)).toBe(0);
-    }
     for (const reason of ["peer_capacity", "protocol_concurrency", "peer_quota", "global_quota", "identity_capacity"]) {
       expect(metrics.get(`lodestar_native_reqresp_admission_refusals_total{method="status",reason="${reason}"}`)).toBe(
         0
@@ -65,8 +57,7 @@ test("metrics are available through startup and remain readable after close", as
       expect(metrics.get(`lodestar_native_reqresp_inbound_occupied{phase="${phase}"}`)).toBe(0);
     }
     for (const name of [
-      "lodestar_native_gossipsub_connected_capacity",
-      "lodestar_native_gossipsub_retained_capacity",
+      "lodestar_native_gossipsub_receive_page_capacity",
       "lodestar_native_gossipsub_validation_capacity",
       "lodestar_native_gossipsub_delivery_descriptors_capacity",
     ]) {
@@ -84,7 +75,6 @@ test("metrics are available through startup and remain readable after close", as
   const closed = runtime.getMetrics();
   const closedSamples = samples(closed);
   expect(closedSamples.get("lodestar_native_gossip_expired_executing")).toBe(0);
-  expect(closedSamples.get("lodestar_native_gossip_oldest_expired_execution_age_seconds")).toBe(0);
   for (const [name, value] of capacities) expect(closedSamples.get(name)).toBe(value);
   expect(samples(closed).get("lodestar_native_network_running")).toBe(0);
   expect(samples(closed).get("libp2p_peers")).toBe(0);

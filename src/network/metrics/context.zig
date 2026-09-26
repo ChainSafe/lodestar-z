@@ -9,7 +9,6 @@ pub const Context = struct {
     now: @import("../types.zig").Now,
     running: bool,
     expired_executing: usize = 0,
-    oldest_expired_execution_age_ms: u64 = 0,
     /// The host's bridge measurements, copied under its runtime mutex. Null renders zeros.
     bridge: ?*const @import("bridge.zig").Snapshot = null,
     population: peers.Distribution = .{},

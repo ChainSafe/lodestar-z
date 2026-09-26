@@ -35,6 +35,10 @@ pub const Sessions = struct {
     by_connection: []u16,
     /// Sessions taken from the ready list or the deadline heap. An idle mesh visits none.
     visits: u64 = 0,
+    /// Stream writes attempted, and those QUIC did not take in full, which the readiness tests
+    /// read to show a blocked stream is written again only after it gains capacity.
+    writes: u64 = 0,
+    blocked_writes: u64 = 0,
     delivery_revision: u64 = 0,
     io_arena: []u8,
     receive_pool: ReceivePool,

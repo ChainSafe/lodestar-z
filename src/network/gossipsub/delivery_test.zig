@@ -72,7 +72,7 @@ test "gossip delivery resumes a frame cut by a short write and releases a cut fr
     try std.testing.expect(queue.advance(&store, 3) == null);
     try std.testing.expectEqual(first, queue.next(&store).?.message);
     try std.testing.expectEqual(frame_len - 3, queue.next(&store).?.segment(&store).len);
-    try std.testing.expectEqual(Receipt{ .origin = .publication, .enqueued_ms = 5 }, queue.advance(&store, frame_len - 3).?);
+    try std.testing.expectEqual(Receipt{ .origin = .publication }, queue.advance(&store, frame_len - 3).?);
     try std.testing.expectEqual(@as(u32, 0), store.get(first).?.tx);
     try std.testing.expectEqual(second, queue.next(&store).?.message);
     try std.testing.expect(queue.advance(&store, 1) == null);
