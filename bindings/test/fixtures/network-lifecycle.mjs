@@ -9,6 +9,7 @@ import {
   Settlements,
   settleOnly,
   startRuntime,
+  subscriptions,
   topicName,
   unreachableConnect,
 } from "../utils/network.js";
@@ -62,17 +63,48 @@ if (mode === "exit") {
   assert.equal(settlements.outcomes[0], "NetworkClosed");
   console.log("promises-settled");
 } else if (mode === "facade-gc") {
-  // A dropped facade and its host are collected without close, while operation promises alone remain.
+  // A dropped facade and its host are collected without close, while operation promises and a job's report alone
+  // remain, and each settles when native closes.
+  const {startPeer} = await import("../utils/network-peer.js");
   const config = applicationConfig();
+  const remoteConfig = applicationConfig();
+  // Not the unreachable peer's key.
+  remoteConfig.identitySecretKey[31] = 3;
+  const remote = await startPeer(remoteConfig);
+  let deliver;
+  const delivered = new Promise((resolve) => {
+    deliver = resolve;
+  });
   let host = {
     capacity: () => ({ordinary: true, serving: 32}),
-    validate: async (job) => job.messages.map(() => "ignore"),
+    // The validation never finishes, so the job's report stays outstanding.
+    validate: (job) => {
+      deliver({reported: job.reported});
+      return new Promise(() => undefined);
+    },
     checkDependencies: (checks) => checks.map(() => false),
     serve: (request) => request.cancel(),
     peers: () => undefined,
   };
   let network = createNativeNetwork(config, host);
-  await network.applyIntent(localIntent(config), config.initialSlot);
+  const intent = (value) => ({...localIntent(value), subscriptions: subscriptions(topicName())});
+  await network.applyIntent(intent(config), config.initialSlot);
+  await remote.applyIntent(intent(remoteConfig), remoteConfig.initialSlot);
+  const [identity, remoteIdentity] = await Promise.all([network.getIdentity(), remote.identity]);
+  await remote.connect(identity.peerId, [identity.localEndpoint], 5000n);
+  await Promise.all([
+    remote.addDirectPeer(identity.peerId, [identity.localEndpoint]),
+    network.setDirectPeer(remoteIdentity.peerId, [remoteIdentity.localEndpoint]),
+  ]);
+  await delay(1250);
+  const block = new Uint8Array(4000).fill(7);
+  new DataView(block.buffer).setBigUint64(100, 100n, true);
+  await remote.publishGossip(topicName(), block, {allowZeroPeers: false});
+  const {reported} = await delivered;
+  const report = reported.then(
+    () => "resolved",
+    (error) => error.code
+  );
   const closed = network.closed;
   const settlements = new Settlements();
   const unsettled = settlements.unsettledAtClose(closed);
@@ -96,6 +128,8 @@ if (mode === "exit") {
   assert.deepEqual(await unsettled, []);
   assert.deepEqual(settlements.counts, [1, 1]);
   assert.equal(settlements.outcomes[0], "NetworkClosed");
+  assert.equal(await Promise.race([report, delay(5000, "pending")]), "NetworkClosed");
+  await remote.stop();
   await runtimeReleased();
   console.log("facade-collected");
 } else if (mode === "await-close") {
