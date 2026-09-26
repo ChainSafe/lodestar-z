@@ -13,6 +13,7 @@ const g = @import("network_gossip.zig");
 const incoming = @import("network_incoming.zig");
 const projection = @import("network_peer_projection.zig");
 const readiness = @import("network_readiness.zig");
+const fatal = @import("network_fatal.zig");
 const Runtime = r.Runtime;
 const Row = readiness.Row;
 const none = n.index_list.none;
@@ -324,7 +325,7 @@ fn gossipMarks(runtime: *Runtime) struct { bool, ?u64 } {
 }
 
 /// Runs phases B to D. `host` builds and finishes the result, discards what a failed build created, classifies
-/// a failure and keeps the event loop alive for serving starts.
+/// a failure, terminates at a fatal site and keeps the event loop alive for serving starts.
 pub fn run(runtime: *Runtime, actions: []const Action, demand: *const Demand, now: u64, host: anytype) !@TypeOf(host.*).Result {
     var selection: Selection = .{ .wake = actions.len > 0 };
     runtime.lock();
@@ -344,21 +345,21 @@ pub fn run(runtime: *Runtime, actions: []const Action, demand: *const Demand, no
         restoreLocked(runtime, &selection);
         _ = endLocked(runtime, demand, &selection);
         runtime.unlock();
-        return fail(host, failure, err);
+        return fail(host, failure, .exchange_build, err);
     };
     runtime.lock();
     const keep_alive = commitLocked(runtime, &selection);
     const outcome = endLocked(runtime, demand, &selection);
     runtime.unlock();
     if (keep_alive) host.keepAlive();
-    return host.finish(output, outcome) catch |err| return fail(host, host.classify(err), err);
+    return host.finish(output, outcome) catch |err| return fail(host, host.classify(err), .exchange_finish, err);
 }
 
-/// A stopped environment returns the error, for the caller's local shutdown; a contract failure terminates.
-fn fail(host: anytype, failure: Failure, err: anyerror) anyerror {
+/// A stopped environment returns the error, for the caller's local shutdown; a contract failure terminates at `site`.
+fn fail(host: anytype, failure: Failure, site: fatal.Site, err: anyerror) anyerror {
     return switch (failure) {
         .stopped => err,
-        .contract => host.fatal(err),
+        .contract => host.terminate(site, err),
     };
 }
 

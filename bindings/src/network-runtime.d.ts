@@ -81,8 +81,11 @@ export interface NativeExchange {
   readonly failure: unknown;
 }
 
-/** An escalation trigger: 1, an exchange refused a generated batch; 3, the host's demand kept failing. */
-export type NativeEscalation = 1 | 3;
+/**
+ * A fatal site the pump raises: `generated_batch`, an exchange refused a batch or demand the pump generated;
+ * `failed_turns`, a third consecutive turn failed.
+ */
+export type NativeEscalation = "generated_batch" | "failed_turns";
 
 export interface NativeNetworkApplicationRuntime {
   drainLogs(maxRecords?: number): NativeLogBatch;
@@ -134,8 +137,8 @@ export interface NativeNetworkApplicationRuntime {
    * peerReportsIgnored.
    */
   exchange(actions: readonly NativeAction[], demand: NativeExchangeDemand): NativeExchange;
-  /** Terminates the process for an escalated bridge contract failure. */
-  fail(trigger: NativeEscalation, reason: string): never;
+  /** Terminates the process at a fatal site for a bridge contract failure the pump detects. */
+  fail(site: NativeEscalation, reason: string): never;
   /**
    * Private control for binding ownership tests: while held, the owner leaves reported verdicts unapplied. Expiry
    * still disposes of them.

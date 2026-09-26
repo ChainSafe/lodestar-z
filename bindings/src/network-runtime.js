@@ -122,8 +122,8 @@ export class NativeRuntime {
     serving.length = taken;
     return result;
   }
-  fail(trigger, reason) {
-    return this.#native.fail(trigger, reason);
+  fail(site, reason) {
+    return this.#native.fail(site, reason);
   }
   holdVerdicts(held) {
     this.#native.holdVerdicts(held);
