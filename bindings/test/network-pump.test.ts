@@ -11,11 +11,23 @@ import type {
   NativeGossipHandle,
   NativeGossipMessage,
   NativeIncomingRequest,
+  NativeLogBatch,
+  NativeLogLoss,
+  NativeLogRecord,
   NativePeerObservation,
   NativeTopicKind,
   Verdict,
 } from "../src/network.js";
-import {ACTION_MAX, BUDGET_MS, BURST_NAME, NativePump, closeResult} from "../src/network-pump.js";
+import {
+  ACTION_MAX,
+  BUDGET_MS,
+  BURST_NAME,
+  LOG_ERRORS_NAME,
+  LOG_MS,
+  LOG_RECORDS,
+  NativePump,
+  closeResult,
+} from "../src/network-pump.js";
 
 const MIB = 1024 * 1024;
 const full: NativeExchangeDemand = {
@@ -50,6 +62,9 @@ const idle: NativeExchange = {
   serving: [],
 };
 const handle = (index: number, generation = 1n): NativeGossipHandle => ({generation, index});
+/** The pump's log delivery timer, armed until native closes. */
+const LOG_TIMER = 1;
+const noLogs = {dropped: 0n, more: false, records: [], suppressed: 0n, truncated: 0n};
 
 class Escalated extends Error {}
 
@@ -166,6 +181,7 @@ function fixture() {
   const runtime = {
     close: vi.fn(() => closed.promise),
     closed: closed.promise,
+    drainLogs: vi.fn((_max: number): NativeLogBatch => noLogs),
     exchange: vi.fn((_actions: readonly NativeAction[], _demand: NativeExchangeDemand): NativeExchange => idle),
     fail: vi.fn((trigger: number, _reason: string): never => {
       throw new Escalated(String(trigger));
@@ -177,6 +193,7 @@ function fixture() {
     checkDependencies: vi.fn((checks: readonly DependencyCheck[]): readonly boolean[] => checks.map(() => true)),
     error: vi.fn((_error: unknown): void => undefined),
     failed: vi.fn((_error: Error): void => undefined),
+    logs: vi.fn((_records: readonly NativeLogRecord[], _lost: NativeLogLoss | null): void => undefined),
     peers: vi.fn((_events: readonly NativePeerObservation[]): void => undefined),
     serve: vi.fn((_request: IncomingRequest): Promise<void> => Promise.resolve()),
     validate: vi.fn(
@@ -282,7 +299,7 @@ describe("binding pump scheduling", () => {
     node.pump.request();
     for (let i = 0; i < 5; i++) await macrotask();
     expect(node.runtime.exchange).toHaveBeenCalledTimes(4);
-    expect(vi.getTimerCount()).toBe(0);
+    expect(vi.getTimerCount()).toBe(LOG_TIMER);
   });
 
   it("retries parked external capacity on the single timer until capacity returns", async () => {
@@ -292,15 +309,15 @@ describe("binding pump scheduling", () => {
     node.runtime.exchange.mockReturnValueOnce(parked).mockReturnValueOnce(parked);
     node.pump.request();
     await macrotask();
-    expect(vi.getTimerCount()).toBe(1);
+    expect(vi.getTimerCount()).toBe(LOG_TIMER + 1);
     // Another request does not add a timer.
     node.pump.request();
     await macrotask();
-    expect(vi.getTimerCount()).toBe(1);
+    expect(vi.getTimerCount()).toBe(LOG_TIMER + 1);
     vi.advanceTimersByTime(25);
     await macrotask();
     expect(node.runtime.exchange).toHaveBeenCalledTimes(3);
-    expect(vi.getTimerCount()).toBe(0);
+    expect(vi.getTimerCount()).toBe(LOG_TIMER);
     expect(node.runtime.fail).not.toHaveBeenCalled();
   });
 
@@ -315,7 +332,7 @@ describe("binding pump scheduling", () => {
       [[], control],
       [[], control],
     ]);
-    expect(vi.getTimerCount()).toBe(1);
+    expect(vi.getTimerCount()).toBe(LOG_TIMER + 1);
     node.closed.resolve({reason: "requested"});
     await macrotask();
     expect(vi.getTimerCount()).toBe(0);
@@ -495,7 +512,7 @@ describe("binding pump scheduling", () => {
     await macrotask();
     await macrotask();
     expect(node.host.error).toHaveBeenCalledExactlyOnceWith(failure);
-    expect(vi.getTimerCount()).toBe(1);
+    expect(vi.getTimerCount()).toBe(LOG_TIMER + 1);
     vi.advanceTimersByTime(25);
     await macrotask();
     expect(node.actions(2)).toEqual([
@@ -585,7 +602,7 @@ describe("binding pump scheduling", () => {
     node.runtime.exchange.mockReturnValueOnce({...idle, peers: [peerEvent]});
     node.pump.request();
     for (let i = 0; i < 3; i++) await macrotask();
-    const text = node.pump.burstMetrics();
+    const text = node.pump.metrics();
     const read = (suffix: string) => Number(new RegExp(`^${BURST_NAME}_${suffix} (\\S+)$`, "m").exec(text)?.[1]);
     // Two turns: each burst adds the continuation's 2 ms to the turn's own 1 ms, and neither includes the other.
     expect(read("count")).toBe(2);
@@ -1279,5 +1296,93 @@ describe("binding pump close results", () => {
     const owner = new Error("owner failed");
     node.closed.resolve({error: owner, reason: "failed"});
     expect(await result).toEqual({error: owner, reason: "failed"});
+  });
+});
+
+function logRecord(sequence: number): NativeLogRecord {
+  return {
+    level: "info",
+    message: `record ${sequence}`,
+    monotonicMs: 1n,
+    scope: "network_runtime",
+    sequence: BigInt(sequence),
+    timestampMs: 1n,
+    truncated: false,
+  };
+}
+
+describe("binding pump log delivery", () => {
+  it("delivers up to 32 native records every 250 ms, one batch each time", () => {
+    vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
+    const node = fixture();
+    const records = [logRecord(1), logRecord(2)];
+    node.runtime.drainLogs.mockReturnValue({...noLogs, more: true, records});
+    vi.advanceTimersByTime(LOG_MS - 1);
+    expect(node.runtime.drainLogs).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(node.runtime.drainLogs).toHaveBeenCalledExactlyOnceWith(LOG_RECORDS);
+    expect(node.host.logs).toHaveBeenCalledExactlyOnceWith(records, null);
+    vi.advanceTimersByTime(LOG_MS);
+    expect(node.host.logs).toHaveBeenCalledTimes(2);
+    // An empty batch is not delivered.
+    node.runtime.drainLogs.mockReturnValue(noLogs);
+    vi.advanceTimersByTime(LOG_MS);
+    expect(node.host.logs).toHaveBeenCalledTimes(2);
+  });
+
+  it("counts a throwing log handler's records as delivery errors and never fails the network", () => {
+    vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
+    const node = fixture();
+    node.runtime.drainLogs.mockReturnValue({...noLogs, records: [logRecord(1), logRecord(2)]});
+    node.host.logs.mockImplementation(() => {
+      throw new Error("logger failed");
+    });
+    vi.advanceTimersByTime(LOG_MS);
+    const failure = new Error("drain failed");
+    node.runtime.drainLogs.mockImplementationOnce(() => {
+      throw failure;
+    });
+    vi.advanceTimersByTime(LOG_MS);
+    vi.advanceTimersByTime(LOG_MS);
+    expect(node.host.logs).toHaveBeenCalledTimes(2);
+    expect(node.pump.metrics()).toContain(`${LOG_ERRORS_NAME} 5\n`);
+    expect(node.host.error).toHaveBeenCalledExactlyOnceWith(failure);
+    expect(node.host.failed).not.toHaveBeenCalled();
+    expect(node.terminal.failure).toBeNull();
+  });
+
+  it("drains at most four more batches once native closes, then stops", async () => {
+    vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
+    const node = fixture();
+    node.runtime.drainLogs.mockReturnValue({...noLogs, more: true, records: [logRecord(1)]});
+    node.closed.resolve({reason: "requested"});
+    await macrotask();
+    expect(node.host.logs).toHaveBeenCalledTimes(4);
+    expect(vi.getTimerCount()).toBe(0);
+    vi.advanceTimersByTime(10 * LOG_MS);
+    expect(node.host.logs).toHaveBeenCalledTimes(4);
+  });
+
+  it("reports the records native lost since the last report once dropped or truncated ones grew, at most every 30 s", () => {
+    vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
+    let now = 1_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const node = fixture();
+    const deliver = (stats: {dropped: bigint; suppressed: bigint; truncated: bigint}) => {
+      node.runtime.drainLogs.mockReturnValueOnce({...noLogs, ...stats});
+      vi.advanceTimersByTime(LOG_MS);
+      return node.host.logs.mock.calls.at(-1)?.[1];
+    };
+    expect(deliver({dropped: 3n, suppressed: 1n, truncated: 0n})).toEqual({dropped: 3n, suppressed: 1n, truncated: 0n});
+    const reports = node.host.logs.mock.calls.length;
+    now += 29_000;
+    deliver({dropped: 5n, suppressed: 1n, truncated: 1n});
+    expect(node.host.logs).toHaveBeenCalledTimes(reports);
+    now += 1_000;
+    expect(deliver({dropped: 5n, suppressed: 4n, truncated: 1n})).toEqual({dropped: 2n, suppressed: 3n, truncated: 1n});
+    // Suppression alone is not reported.
+    now += 30_000;
+    deliver({dropped: 5n, suppressed: 9n, truncated: 1n});
+    expect(node.host.logs).toHaveBeenCalledTimes(reports + 1);
   });
 });

@@ -3,7 +3,7 @@ import {NativeRuntime, initializeNativeNetworkRuntime, registerRuntime} from "./
 
 export {initializeNativeNetworkRuntime};
 
-const HOST_METHODS = ["capacity", "validate", "checkDependencies", "serve", "peers", "failed"];
+const HOST_METHODS = ["capacity", "validate", "checkDependencies", "serve", "peers", "failed", "logs"];
 const CONNECT_TIMEOUT_MS = 10000n;
 
 class NativeNetwork {
@@ -76,14 +76,10 @@ class NativeNetwork {
     return this.#runtime.getRememberedPeers();
   }
   metrics() {
-    return this.#runtime.getMetrics() + this.#pump.burstMetrics();
+    return this.#runtime.getMetrics() + this.#pump.metrics();
   }
   setLogLevel(level) {
     this.#runtime.setLogLevel(level);
-  }
-  /** Temporary: the host polls native logs until the binding delivers them. */
-  drainLogs(maxRecords) {
-    return this.#runtime.drainLogs(maxRecords);
   }
   close() {
     this.#pump.close();

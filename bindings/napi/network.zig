@@ -34,6 +34,7 @@ pub fn initialize(self: *@This(), config: js.Value, callback: js.Value) !js.Valu
     runtime.heavy = try r.allocator.create(r.Owner);
     runtime.heavy.?.* = .{};
     try application_cfg.parse(config.val, &runtime.heavy.?.config, &runtime.heavy.?.application);
+    runtime.logs.configure(runtime.heavy.?.application.log_level);
     try @import("network_owner.zig").prepareConfiguration(runtime);
     try prepareApplicationStorage(runtime, &runtime.heavy.?.application);
     runtime.slot = runtime.heavy.?.config.slot;

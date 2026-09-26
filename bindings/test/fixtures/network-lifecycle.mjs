@@ -105,6 +105,7 @@ if (mode === "exit") {
     serve: (request) => request.cancel(),
     peers: () => undefined,
     failed: () => undefined,
+    logs: () => undefined,
   };
   let network = createNativeNetwork(config, host);
   host.network = network;

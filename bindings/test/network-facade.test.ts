@@ -6,6 +6,7 @@ import type {
   IncomingRequest,
   NativeApplicationConfig,
   NativeHost,
+  NativeLogRecord,
   NativeNetwork,
   Verdict,
 } from "../src/network.js";
@@ -38,6 +39,7 @@ function host(overrides: Partial<NativeHost> = {}): NativeHost {
     capacity: () => ({ordinary: true, serving: 32}),
     checkDependencies: (checks) => checks.map(() => false),
     failed: () => undefined,
+    logs: () => undefined,
     peers: () => undefined,
     serve: (request) => request.cancel(),
     validate: (job) => Promise.resolve(job.messages.map(() => "ignore" as const)),
@@ -302,13 +304,48 @@ test.each([
   }
 }, 30000);
 
+test.each([
+  ["info", "info"],
+  ["warn", "info"],
+] as const)(
+  "delivers native records at level %s, then at the level setLogLevel selects, through close",
+  async (initial, selected) => {
+    const config = applicationConfig();
+    config.logLevel = initial;
+    const records: NativeLogRecord[] = [];
+    const network = createNativeNetwork(config, host({logs: (delivered) => void records.push(...delivered)}));
+    let closedAt = -1;
+    void network.closed.then(() => {
+      closedAt = records.length;
+    });
+    try {
+      await network.applyIntent(localIntent(config), config.initialSlot);
+      await vi.waitFor(() => expect(records.length > 0 || initial !== "info").toBe(true), {timeout: 2000});
+      await delay(300);
+      const levels = new Set(records.map(({level}) => level));
+      if (initial === "info") expect(records.some(({message}) => message.startsWith("owner_initialized "))).toBe(true);
+      else expect([...levels].every((level) => level === "error" || level === "warn")).toBe(true);
+      network.setLogLevel(selected);
+    } finally {
+      expect(await network.close()).toEqual({reason: "requested"});
+    }
+    // The last records, the owner's shutdown included, arrive before the close result.
+    expect(records.slice(0, closedAt).some(({message}) => message.startsWith("owner_stopped reason=requested "))).toBe(
+      true
+    );
+    const sequences = records.map(({sequence}) => sequence);
+    expect(sequences).toEqual([...sequences].sort((a, b) => (a < b ? -1 : 1)));
+  },
+  15000
+);
+
 test("the facade validates its host, starts without host callbacks and hides the exchange", async () => {
   expect(() => createNativeNetwork(applicationConfig(), {} as NativeHost)).toThrow(
     "NativeHost.capacity must be a function"
   );
   const calls: string[] = [];
   const recorded = host();
-  for (const name of ["capacity", "validate", "checkDependencies", "serve", "peers", "failed"] as const) {
+  for (const name of ["capacity", "validate", "checkDependencies", "serve", "peers", "failed", "logs"] as const) {
     const callback = recorded[name] as (...args: unknown[]) => unknown;
     (recorded as unknown as Record<string, unknown>)[name] = (...args: unknown[]) => {
       calls.push(name);

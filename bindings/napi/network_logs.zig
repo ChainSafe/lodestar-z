@@ -34,14 +34,16 @@ pub fn drain(runtime: *Runtime, limit: Value) !js.Value {
 }
 
 pub fn configure(runtime: *Runtime, value: Value) !void {
+    runtime.logs.configure(try level(value));
+}
+
+/// A threshold by name: error, warn, info or debug, or null for off.
+pub fn level(value: Value) !?std.log.Level {
     var buffer: [5]u8 = undefined;
     const len = @import("network_application_config.zig").text(value, &buffer) catch return error.InvalidNetworkLogLevel;
     const text = buffer[0..len];
     inline for (.{ "error", "warn", "info", "debug", "off" }, 0..) |name, index| {
-        if (std.mem.eql(u8, text, name)) {
-            runtime.logs.configure(if (index == 4) null else @enumFromInt(index));
-            return;
-        }
+        if (std.mem.eql(u8, text, name)) return if (index == 4) null else @enumFromInt(index);
     }
     return error.InvalidNetworkLogLevel;
 }
