@@ -1,3 +1,4 @@
+import {spawnSync} from "node:child_process";
 import {afterEach, describe, expect, it, vi} from "vitest";
 import type {
   DependencyCheck,
@@ -559,6 +560,26 @@ describe("binding pump scheduling", () => {
     closing.closed.resolve({reason: "requested"});
     await macrotask();
   });
+
+  it("a close whose exchanges keep failing, with nothing else alive, settles or escalates in a child process", () => {
+    // The parent enforces the deadline; exiting without the close result or the trigger-3 abort is the regression.
+    const child = spawnSync(
+      process.execPath,
+      ["--import", "tsx", "bindings/test/fixtures/network-shutdown-retry.mjs"],
+      {
+        encoding: "utf8",
+        timeout: 30_000,
+      }
+    );
+    const closed = child.status === 0 && child.stdout.includes("closed");
+    const escalated =
+      child.signal === "SIGABRT" &&
+      child.stderr.includes("native network bridge escalation trigger 3: exchange failed");
+    expect(
+      closed || escalated,
+      JSON.stringify({signal: child.signal, status: child.status, stdout: child.stdout})
+    ).toBe(true);
+  }, 40_000);
 
   it("never escalates turns without deliveries: external capacity polling and held jobs", async () => {
     vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
