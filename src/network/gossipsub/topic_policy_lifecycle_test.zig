@@ -148,7 +148,7 @@ test "topic policy local publication enforces both size bounds before state" {
     try std.testing.expectError(error.PayloadTooSmall, g.publish(name, "short", .{ .mono_ms = 1, .unix_s = 0 }));
     try std.testing.expectEqual(@as(usize, 0), live(&g));
     _ = try g.publish(name, "0123456789", .{ .mono_ms = 1, .unix_s = 0 });
-    try std.testing.expectEqual(@as(u64, 1), g.counters.messages_published);
+    try std.testing.expectEqual(@as(usize, 1), g.messages.store.used_entries);
     try std.testing.expectError(error.Duplicate, g.publish(name, "0123456789", .{ .mono_ms = 1, .unix_s = 0 }));
 }
 

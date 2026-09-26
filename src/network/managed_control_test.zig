@@ -1282,7 +1282,7 @@ fn expectQuiescentGoodbye(setup: *Setup, serving: usize) !void {
         var transport: [32]Engine.Event = undefined;
         _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, setup.pair.events(&setup.pair.client, &transport), setup.pair.now, 100, &.{}, &.{});
         try std.testing.expectEqual(@as(usize, 0), setup.client_inbox.messages().len);
-        try std.testing.expectEqual(@as(u64, 0), setup.client_service.gossipsub.counters.messages_received);
+        try std.testing.expectEqual(@as(usize, 0), setup.client_service.gossipsub.messages.pendingValidations());
         try std.testing.expect(setup.client_service.reqresp.resourceSnapshot().serving_occupied <= serving);
         for (setup.client_service.reqresp.inbound) |slot| {
             if (slot.request.occupied() and !slot.request.protocol.isControl()) try std.testing.expect(slot.request.pendingEvent() == null);

@@ -119,11 +119,6 @@ fn takeNegotiated(self: *Gossipsub, engine: *Engine, index: u16, outcome: routin
         };
         if (!std.meta.eql(pending, outcome.stream)) return;
     }
-    switch (outcome.result) {
-        .ready => self.counters.negotiation_ready += 1,
-        .rejected => self.counters.negotiation_rejected += 1,
-        .failed => self.counters.negotiation_failed += 1,
-    }
     if (outcome.result != .ready) std.log.scoped(.network_gossip_errors).debug("gossip_negotiation_failed connection={d}:{d} stream={d} direction={s} reason={s}", .{ outcome.stream.conn.index, outcome.stream.conn.generation, outcome.stream.id, @tagName(outcome.direction), if (outcome.result == .failed) @tagName(outcome.result.failed) else "rejected" });
     if (outcome.direction == .outbound) {
         switch (outcome.result) {
@@ -218,7 +213,6 @@ fn openOutbound(
 ) void {
     const conn = self.sessions.rows[index].conn;
     const stream = router.beginMeshsub(engine, conn, now) catch |err| {
-        self.counters.negotiation_refused += 1;
         std.log.scoped(.network_gossip_errors).debug("gossip_negotiation_refused connection={d}:{d} reason={s}", .{ conn.index, conn.generation, @errorName(err) });
         resetOutbound(self, engine, index);
         return;
@@ -348,7 +342,6 @@ fn readPeer(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *T
             const take = @min(io.unread_end - io.unread_start, peer.input, turn.budget.input);
             const result = io.feedUnread(&self.sessions.receive_pool, take, now.mono_ms) catch |err| {
                 if (err == error.ReceiveCapacity) {
-                    self.counters.receive_capacity_refusals += 1;
                     discardInboundFrame(self, index);
                     continue;
                 } else {
@@ -360,12 +353,7 @@ fn readPeer(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *T
             };
             peer.input -= result.consumed;
             turn.budget.input -= result.consumed;
-            self.rpc_metrics.received_bytes +|= result.consumed;
-            if (result.complete) {
-                if (io.discarding) {
-                    _ = self.sessions.finishFrame(io);
-                } else self.counters.rpcs_received += 1;
-            }
+            if (result.complete and io.discarding) _ = self.sessions.finishFrame(io);
             continue;
         }
         io.unread_start = 0;
@@ -541,7 +529,7 @@ fn serviceSession(self: *Gossipsub, router: *routing.Router, engine: *Engine, in
         },
         .none, .retry_at, .negotiating, .live => {},
     }
-    if (session.in_stream != null and self.ignoreRpc(index, now)) resetInbound(self, engine, index);
+    if (session.in_stream != null and !self.acceptsRpc(index, now)) resetInbound(self, engine, index);
     const io = &session.io;
     var peer = Credits.peer(&self.options);
     const write_first = io.write_first;
@@ -557,7 +545,7 @@ pub fn processRpc(self: *Gossipsub, index: u16, turn: *Turn, peer: *Credits) pro
     const io = &self.sessions.rows[index].io;
     const rpc = &io.rpc.?;
     for (0..self.options.items_per_peer) |_| {
-        if (self.ignoreRpc(index, now)) return .done;
+        if (!self.acceptsRpc(index, now)) return .done;
         if (peer.items == 0 or turn.budget.items == 0) return .credits;
         peer.items -= 1;
         turn.budget.items -= 1;
@@ -592,12 +580,6 @@ pub fn processRpc(self: *Gossipsub, index: u16, turn: *Turn, peer: *Credits) pro
         const copy_bytes = rpc.reader.view.copyBytes(rpc.item.?.bytes);
         if (!turn.chargeCopy(peer, &self.options, copy_bytes)) return .credits;
         const item = try rpc.reader.decode(rpc.item.?, self.sessions.decode_scratch);
-        self.counters.receive_copy_bytes +|= copy_bytes;
-        if (!rpc.item_observed) {
-            self.rpc_metrics.observeItem(item, &rpc.had_control);
-            if (item == .message) self.topic_metrics.get(item.message.topic).prevalidation +|= 1;
-            rpc.item_observed = true;
-        }
         const result = self.receiveItem(self.sessions.ref(index), item, turn, peer);
         if (result != .done) return result;
         rpc.consumeItem();
@@ -606,7 +588,6 @@ pub fn processRpc(self: *Gossipsub, index: u16, turn: *Turn, peer: *Credits) pro
 }
 
 fn discardInboundFrame(self: *Gossipsub, index: u16) void {
-    self.counters.local_pressure_discards += 1;
     self.cancelPromises(index, true);
     self.sessions.discardFrame(&self.sessions.rows[index].io);
 }
@@ -636,12 +617,10 @@ fn expireSession(self: *Gossipsub, router: *routing.Router, engine: *Engine, ind
         switch (reason) {
             .subscriptions => {
                 g.counters.local_pressure_resets += 1;
-                g.counters.subscription_timeouts += 1;
                 retirePeer(self, router, engine, index);
                 break;
             },
             .receive_frame => {
-                g.counters.receive_frame_timeouts += 1;
                 if (io.rpc != null) {
                     discardInboundFrame(self, index);
                     continue;
@@ -653,13 +632,10 @@ fn expireSession(self: *Gossipsub, router: *routing.Router, engine: *Engine, ind
                         g.peers.penalize(peer.logical, 1);
                         g.peers.rows[peer.logical.index].large_frame_denied_until = now_ms +| g.options.pressure_timeout_ms;
                     }
-                    g.counters.large_stalled += 1;
                 }
                 resetInbound(self, engine, index);
             },
             .send_queue, .send_progress => {
-                g.counters.tx_stalled += 1;
-                if (reason == .send_queue) g.counters.send_queue_timeouts += 1 else g.counters.send_progress_timeouts += 1;
                 const retry_direct = peer.outbound == .live and g.peers.rows[peer.logical.index].direct;
                 resetOutbound(self, engine, index);
                 if (retry_direct) g.sessions.setOutbound(index, .{ .retry_at = now_ms +| direct_retry_delay_ms });

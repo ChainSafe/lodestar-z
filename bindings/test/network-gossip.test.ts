@@ -185,18 +185,8 @@ test.each([
     const message = await nextGossip(pair.right);
     await vi.waitFor(
       async () => {
-        expect(await pair.left.getMetrics()).toContain('gossipsub_msg_publish_count_total{topic="beacon_block"} 1\n');
-        expect(pair.right.getMetrics()).toContain('gossipsub_pre_validation_valid_total{topic="beacon_block"} 1\n');
-        expect(pair.right.getMetrics()).toContain(
-          'gossipsub_msg_received_prevalidation_total{topic="beacon_block"} 1\n'
-        );
-        expect(pair.right.getMetrics()).toContain("gossipsub_rpc_recv_message_total 1\n");
-        expect(await pair.left.getMetrics()).toContain("gossipsub_rpc_sent_message_total 1\n");
-        expect(await pair.left.getMetrics()).toContain("gossipsub_rpc_recv_message_total 0\n");
-        expect(await pair.left.getMetrics()).toMatch(/gossipsub_rpc_sent_bytes_total [1-9][0-9]*\n/);
-        expect(pair.right.getMetrics()).toMatch(/gossipsub_rpc_recv_bytes_total [1-9][0-9]*\n/);
-        expect(await pair.left.getMetrics()).toMatch(
-          /gossipsub_msg_publish_bytes_total\{topic="beacon_block"\} [1-9][0-9]*\n/
+        expect(await pair.left.getMetrics()).toContain(
+          'lodestar_native_gossip_data_recipients_total{origin="publication",outcome="queued"} 1\n'
         );
         expect(await pair.left.getMetrics()).toContain(
           `lodestar_gossip_topic_peers_by_type_count{type="beacon_block",boundary="${requestForks[0].fork}_0"} 1\n`
@@ -224,7 +214,6 @@ test.each([
         const metrics = pair.right.getMetrics();
         expect(metrics).toContain(`gossipsub_${verdictMetric}_messages_total{topic="beacon_block"} 1\n`);
         expect(metrics).toContain("gossipsub_async_validation_delay_from_first_seen_count 1\n");
-        expect(metrics).toContain("lodestar_native_gossip_scored_peers 1\n");
       },
       {timeout: 5000}
     );
@@ -269,11 +258,9 @@ test.each([
   } finally {
     await Promise.all([pair.left.close(), pair.right.close()]);
   }
-  expect(await pair.left.getMetrics()).toContain("gossipsub_rpc_sent_message_total 1\n");
-  expect(pair.right.getMetrics()).toContain("gossipsub_rpc_recv_message_total 1\n");
-  expect(pair.right.getMetrics()).toContain('gossipsub_cache_size{cache="seenCache"} 0\n');
-  expect(pair.right.getMetrics()).toContain('gossipsub_cache_size{cache="gossipTracer.promises"} 0\n');
-  expect(pair.right.getMetrics()).toContain("gossipsub_mcache_size 0\n");
+  expect(await pair.left.getMetrics()).toContain(
+    'lodestar_native_gossip_data_recipients_total{origin="publication",outcome="completed"} 1\n'
+  );
 }, 15000);
 
 test("gossip payload credit retires on close while descriptors remain held", async () => {

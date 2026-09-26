@@ -84,11 +84,10 @@ test "gossip direct processor admission drains paged RPCs while the host queue s
             else => return err,
         };
         try pair.pumpOnce();
-        if (sent == wire.len and g.counters.message_capacity_refusals > 0 and row.io.rpc == null) break;
+        if (sent == wire.len and g.messages.storage_refusals[@intFromEnum(messages.StorageRefusal.processor_capacity)] > 0 and row.io.rpc == null) break;
     }
     try t.expectEqual(wire.len, sent);
     try t.expectEqual(@as(usize, 2), table.diag.occupied);
-    try t.expectEqual(@as(u64, 2), g.messages.decoded_messages);
     try t.expectEqual(@as(u64, 1), g.messages.storage_refusals[@intFromEnum(messages.StorageRefusal.processor_capacity)]);
     try t.expectEqual(@as(usize, 2), g.resourceSnapshot().pending_validations);
     try t.expectEqual(g.sessions.receive_pool.next.len, g.sessions.receive_pool.free_pages);
@@ -128,12 +127,10 @@ test "gossip full processor preserves duplicate attribution without runtime allo
     var turn = @import("session_io.zig").beginPump(&g, .{ .mono_ms = 1, .unix_s = 0 });
     var credit = @import("turn.zig").Credits.peer(&g.options);
     try t.expectEqual(.done, g.receiveItem(g.sessions.ref(1), .{ .message = .{ .topic = block, .data = &.{7} } }, &turn, &credit));
-    try t.expectEqual(@as(u64, 1), g.messages.fast_hits);
-    try t.expectEqual(@as(u64, 2), g.messages.decoded_messages);
-    try t.expectEqual(@as(u64, 0), g.peers.scores.penalties.invalid_message);
+    try t.expectEqual(@as(f64, 0), support.invalidDeliveries(&g));
     try t.expectEqual(gossip.ReportOutcome{ .applied = .reject }, g.report(handle, .reject, .{ .mono_ms = 2, .unix_s = 0 }));
-    try t.expectEqual(@as(u64, 2), g.peers.scores.penalties.invalid_message);
-    try t.expectEqual(@as(u64, 2), g.counters.message_capacity_refusals);
+    try t.expectEqual(@as(f64, 2), support.invalidDeliveries(&g));
+    try t.expectEqual(@as(u64, 2), g.messages.storage_refusals[@intFromEnum(messages.StorageRefusal.processor_capacity)]);
     try t.expectEqual(allocations, ledger.allocation_calls);
 }
 
@@ -156,7 +153,6 @@ test "gossip saturated attestation intake preserves block priority and storage" 
     try receive(&g, 0, attestation, "refused");
     try receive(&g, 0, block, "urgent");
     try t.expectEqual(@as(usize, 3), table.diag.occupied);
-    try t.expectEqual(@as(u64, 4), g.messages.decoded_messages);
     const batch = table.claimDemand(2, .{ .ordinary = false });
     try t.expectEqual(@as(usize, 1), batch.len);
     try t.expectEqual(.beacon_block, table.get(batch.tokens[0]).?.kind);
@@ -183,8 +179,7 @@ test "gossip invalid verdict stops remaining publications in the same RPC" {
     var turn = @import("session_io.zig").beginPump(&g, .{ .mono_ms = 1, .unix_s = 0 });
     var credit = @import("turn.zig").Credits.peer(&g.options);
     try t.expectEqual(.done, try @import("session_io.zig").processRpc(&g, source.index, &turn, &credit));
-    try t.expectEqual(@as(u64, 1), g.peers.scores.penalties.invalid_message);
-    try t.expectEqual(@as(u64, 1), g.rpc_metrics.graylist_dropped);
+    try t.expectEqual(@as(f64, 1), support.invalidDeliveries(&g));
     _ = g.sessions.finishFrame(io);
 }
 
@@ -233,7 +228,7 @@ test "gossip admission rejects ineligible candidates without replacing work and 
     try t.expectEqual(@as(usize, 4), table.diag.occupied);
     try t.expectEqual(@as(usize, 4), g.resourceSnapshot().pending_validations);
     try t.expectEqual(gossip.ReportOutcome.already_resolved, g.report(handle, .reject, .{ .mono_ms = 2, .unix_s = 0 }));
-    try t.expectEqual(@as(u64, 0), g.peers.scores.penalties.invalid_message);
+    try t.expectEqual(@as(f64, 0), support.invalidDeliveries(&g));
 }
 
 test "gossip admission leaves queued work intact when a host copy pins the required pages" {

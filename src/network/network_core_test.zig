@@ -1690,7 +1690,6 @@ test "managed runtime metrics aggregate subnets and count distinct mesh peers" {
     const context = metrics.Context.init(&pair.a, pair.a.last_now, true);
     try std.testing.expectEqual(@as(usize, 3), mesh_count);
     try std.testing.expectEqual(@as(usize, 1), context.peer_count);
-    try std.testing.expectEqual(@as(u16, 1), context.scores.values.count);
 }
 
 test "managed runtime local intent fork BPO announcements remembered peer and event borrows" {

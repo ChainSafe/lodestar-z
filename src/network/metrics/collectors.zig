@@ -18,7 +18,6 @@ pub const registry = prom.Registry(Context, .{
     writeRequestTimes,
     writeGossip,
     writeGossipExecution,
-    writeScores,
     writePopulation,
     writePeerEvents,
     writePeerPolicy,
@@ -33,7 +32,6 @@ pub const registry = prom.Registry(Context, .{
     writeRememberedPeers,
     writeDiscoveryProgress,
     writeGossipTopics,
-    writeMaintenance,
     writeBridge,
 });
 
@@ -93,7 +91,6 @@ fn writeNativeCounters(self: *const Context, w: *prom.Encoder) prom.Error!void {
         .kind = .counter,
         .help = metric[1],
     }, @field(self.owner.transport.udp.counters, metric[0]));
-    try w.counters("lodestar_native_gossipsub_", &self.owner.service.gossipsub.counters);
     const refused = try w.family(.{
         .name = "lodestar_native_dial_recent_failures_refused_total",
         .kind = .counter,
@@ -361,40 +358,6 @@ fn writeRequestTimes(self: *const Context, w: *prom.Encoder) prom.Error!void {
     }, rr.reqresp.metrics.ErrorReason, &self.owner.service.reqresp.outgoing_error_reasons);
 }
 
-fn writeScores(self: *const Context, w: *prom.Encoder) prom.Error!void {
-    try self.scores.write(w);
-    try @import("scores.zig").writeTotals(&self.owner.service.gossipsub.peers.scores, w);
-    try w.scalar(.{
-        .name = "lodestar_gossip_score_avg_min_max_min",
-        .kind = .gauge,
-        .help = "Minimum connected gossip peer score",
-    }, self.scores.values.min);
-    try w.scalar(.{
-        .name = "lodestar_gossip_score_avg_min_max_max",
-        .kind = .gauge,
-        .help = "Maximum connected gossip peer score",
-    }, self.scores.values.max);
-    try w.scalar(.{
-        .name = "lodestar_gossip_score_avg_min_max_avg",
-        .kind = .gauge,
-        .help = "Average connected gossip peer score",
-    }, self.scores.average());
-    try w.scalar(.{
-        .name = "lodestar_native_gossip_scored_peers",
-        .kind = .gauge,
-        .help = "Connected gossip peers included in score gauges",
-    }, self.scores.values.count);
-    const thresholds = try w.family(.{
-        .name = "lodestar_gossip_peer_score_by_threshold_count",
-        .kind = .gauge,
-        .help = "Connected gossip peers at or above configured score thresholds; mesh uses zero",
-        .labels = &.{"threshold"},
-    });
-    inline for (.{ "graylist", "publish", "gossip", "mesh" }) |threshold| {
-        try thresholds.sample(.{threshold}, @field(self.scores, threshold));
-    }
-}
-
 fn writeBridge(self: *const Context, w: *prom.Encoder) prom.Error!void {
     const bridge = @import("bridge.zig");
     try bridge.write(self.bridge orelse &bridge.empty, self.running, w);
@@ -415,109 +378,51 @@ fn writeGossipExecution(self: *const Context, w: *prom.Encoder) prom.Error!void 
 }
 
 fn writeGossip(self: *const Context, w: *prom.Encoder) prom.Error!void {
-    const caches_now = self.owner.service.gossipsub.messages.stats();
+    const g = self.owner.service.gossipsub;
     try w.enums(.{
         .name = "lodestar_native_gossipsub_storage_refusals_total",
         .kind = .counter,
         .help = "Gossip storage admission attempts refused by bounded resource reason",
         .labels = &.{"reason"},
-    }, @import("../gossipsub/messages.zig").StorageRefusal, &self.owner.service.gossipsub.messages.storage_refusals);
+    }, @import("../gossipsub/messages.zig").StorageRefusal, &g.messages.storage_refusals);
     try w.enums(.{
         .name = "lodestar_native_gossip_retention_refusals_total",
         .kind = .counter,
         .help = "Accepted or published messages neither cached nor forwarded because their kind's retention allowance stayed full",
         .labels = &.{"kind"},
-    }, gossip.topic.Kind, &self.owner.service.gossipsub.messages.retention_refusals);
+    }, gossip.topic.Kind, &g.messages.retention_refusals);
     try w.enums(.{
-        .name = "lodestar_native_gossip_history_evictions_total",
+        .name = "lodestar_native_gossip_iwant_ids_total",
         .kind = .counter,
-        .help = "Message history evictions: six windows passed, the history was full, the kind's retention allowance was full, or the store needed the room",
-        .labels = &.{"reason"},
-    }, gossip.mcache.Eviction, &self.owner.service.gossipsub.messages.history.evictions);
-    try self.owner.service.gossipsub.rpc_metrics.write(w);
-    try self.owner.service.gossipsub.io_metrics.write(w);
-    try self.owner.service.gossipsub.delivery_metrics.write(w);
-    try self.owner.service.gossipsub.apply_metrics.write(w);
-    try w.scalar(.{ .name = "lodestar_native_gossip_history_entries_visited_total", .kind = .counter, .help = "History entries examined while selecting advertised message IDs" }, self.owner.service.gossipsub.messages.history.gossip_entries_visited);
-    try w.scalar(.{
-        .name = "gossipsub_fast_message_id_hits_total",
-        .kind = .counter,
-        .help = "Exact compressed fingerprints avoiding repeated decompression",
-    }, self.owner.service.gossipsub.messages.fast_hits);
-    try w.scalar(.{
-        .name = "gossipsub_message_decode_total",
-        .kind = .counter,
-        .help = "Snappy body decode attempts",
-    }, self.owner.service.gossipsub.messages.decoded_messages);
-    try w.scalar(.{
-        .name = "gossipsub_delivery_attribution_evictions_total",
-        .kind = .counter,
-        .help = "Resolved delivery records replaced before their attribution deadline",
-    }, self.owner.service.gossipsub.messages.validation.delivery_evictions);
-    try self.owner.service.gossipsub.recovery.metrics.write(w);
-    try w.scalar(.{
-        .name = "gossipsub_rpc_recv_err_count_total",
-        .kind = .counter,
-        .help = "Malformed incoming RPC frames or protobuf items",
-    }, self.owner.service.gossipsub.counters.malformed_rpcs);
+        .help = "Examined valid IWANT IDs by outcome: absent from history, or present and then suppressed by IDONTWANT, over the retransmission limit, queued, or refused for queue pressure",
+        .labels = &.{"outcome"},
+    }, @import("../gossipsub/metrics.zig").IwantOutcome, &g.iwant_outcomes);
     try w.scalar(.{
         .name = "gossipsub_iwant_promise_broken",
         .kind = .counter,
         .help = "Randomly sampled IWANT batch promises that expired without their sampled message",
-    }, self.owner.service.gossipsub.counters.broken_promises);
-    try w.scalar(.{
-        .name = "gossipsub_mcache_size",
-        .kind = .gauge,
-        .help = "Stored message history entries",
-    }, self.live(caches_now.history));
-    const caches = try w.family(.{
-        .name = "gossipsub_cache_size",
-        .kind = .gauge,
-        .help = "Native bounded cache entry counts",
-        .labels = &.{"cache"},
-    });
-    try caches.sample(.{"seenCache"}, self.live(caches_now.seen));
-    try caches.sample(.{"mcache"}, self.live(caches_now.history));
-    try caches.sample(.{"deliveryCache"}, self.live(caches_now.recent));
-    try caches.sample(.{"gossipTracer.promises"}, self.live(self.owner.service.gossipsub.recovery.len));
-    try w.scalar(.{
-        .name = "gossipsub_rpc_recv_count_total",
-        .kind = .counter,
-        .help = "Complete received gossip RPCs",
-    }, self.owner.service.gossipsub.counters.rpcs_received);
+    }, g.counters.broken_promises);
+    try g.io_metrics.write(w);
+    try g.delivery_metrics.write(w);
+    try g.apply_metrics.write(w);
     const validation_time = try w.histograms(.{
         .name = "gossipsub_async_validation_delay_from_first_seen",
         .kind = .histogram,
         .help = "Seconds from native gossip admission until an applied validation verdict",
         .labels = &.{},
         .unit = .seconds,
-    }, @TypeOf(self.owner.service.gossipsub.validation_time));
-    try validation_time.histogram(.{}, &self.owner.service.gossipsub.validation_time);
+    }, @TypeOf(g.validation_time));
+    try validation_time.histogram(.{}, &g.validation_time);
 }
 
 fn writeGossipTopics(self: *const Context, w: *prom.Encoder) prom.Error!void {
     inline for (.{
-        .{ "gossipsub_accepted_messages_total", "accepted" },
-        .{ "gossipsub_rejected_messages_total", "rejected" },
-        .{ "gossipsub_ignored_messages_total", "ignored" },
-        .{ "gossipsub_msg_publish_count_total", "published" },
-        .{ "gossipsub_msg_publish_peers_total", "published_peers" },
-        .{ "gossipsub_msg_publish_bytes_total", "published_bytes", "Compressed publication bytes summed over successfully queued peer copies" },
-        .{ "gossipsub_msg_received_prevalidation_total", "prevalidation", "Decoded publication items before admission, including deferred and refused items" },
-        .{ "gossipsub_ihave_rcv_msgids_total", "ihave_ids", "Examined valid IHAVE IDs within processing limits" },
-        .{ "gossipsub_ihave_rcv_not_seen_msgids_total", "ihave_unseen", "Unique eligible IHAVE IDs selected for an IWANT attempt after deduplication, outstanding-request and known-message filtering" },
-        .{ "gossipsub_iwant_rcv_msgids_total", "iwant_ids", "Examined valid unsuppressed IWANT IDs present in message history" },
-        .{ "gossipsub_msg_forward_count_total", "forwarded" },
-        .{ "gossipsub_msg_forward_peers_total", "forwarded_peers" },
-        .{ "gossipsub_pre_validation_valid_total", "admitted" },
-        .{ "gossipsub_pre_validation_duplicate_total", "duplicates" },
+        .{ "gossipsub_accepted_messages_total", "accepted", "Applied accept verdicts by topic kind" },
+        .{ "gossipsub_rejected_messages_total", "rejected", "Applied reject verdicts by topic kind" },
+        .{ "gossipsub_ignored_messages_total", "ignored", "Applied ignore verdicts by topic kind" },
+        .{ "gossipsub_msg_forward_count_total", "forwarded", "Accepted messages handed to forwarding by topic kind" },
     }) |metric| {
-        const messages = try w.family(.{
-            .name = metric[0],
-            .kind = .counter,
-            .help = if (metric.len == 3) metric[2] else "Native gossip " ++ metric[1] ++ "; peer copies count successful queue admissions",
-            .labels = &.{"topic"},
-        });
+        const messages = try w.family(.{ .name = metric[0], .kind = .counter, .help = metric[2], .labels = &.{"topic"} });
         inline for (@typeInfo(gossip.topic_policy.Kind).@"enum".fields) |field| {
             try messages.sample(.{field.name}, @field(self.owner.service.gossipsub.topic_metrics.counts[field.value], metric[1]));
         }
@@ -571,23 +476,4 @@ fn writePeerEvents(self: *const Context, w: *prom.Encoder) prom.Error!void {
 }
 fn writePeerPolicy(self: *const Context, w: *prom.Encoder) prom.Error!void {
     try @import("peer_policy.zig").write(&self.owner.peer_manager, self.running, w);
-}
-
-fn writeMaintenance(self: *const Context, w: *prom.Encoder) prom.Error!void {
-    const g = self.owner.service.gossipsub;
-    try g.overlay.metrics.write(w);
-    inline for (.{
-        .{ "gossipsub_heartbeat_duration_seconds", "cycles", "Elapsed duration of a completed gossip maintenance cycle, including time between slices" },
-        .{ "lodestar_native_gossip_heartbeat_lateness_seconds", "lateness", "Delay from the scheduled heartbeat deadline until it is serviced" },
-    }) |metric| {
-        const histogram = try w.histograms(.{ .name = metric[0], .kind = .histogram, .help = metric[2], .unit = .seconds }, @import("timing.zig").Duration);
-        try histogram.histogram(.{}, &@field(g.maintenance, metric[1]));
-    }
-    const slices = try w.histograms(.{ .name = "lodestar_native_gossip_maintenance_slice_seconds", .kind = .histogram, .help = "Elapsed time inside uninterrupted maintenance regions, including OS preemption; excludes time between slices", .unit = .seconds, .labels = &.{"phase"} }, @import("timing.zig").Duration);
-    inline for (.{ "setup", "topics" }) |phase| try slices.histogram(.{phase}, &@field(g.maintenance, phase));
-    const work = try w.histograms(.{ .name = "lodestar_native_gossip_maintenance_work_seconds", .kind = .histogram, .help = "Subphase duration within topic maintenance slices, including OS preemption", .unit = .seconds, .labels = &.{"phase"} }, @import("timing.zig").Duration);
-    inline for (.{ "mesh", "gossip", "retire", "history" }) |phase| try work.histogram(.{phase}, &@field(g.maintenance, phase));
-    try w.counters("lodestar_native_gossip_maintenance_", &.{ .topics_serviced = g.maintenance.topics_serviced, .time_yields = g.maintenance.time_yields });
-    try w.scalar(.{ .name = "lodestar_native_gossip_maintenance_active", .kind = .gauge, .help = "A gossip maintenance cycle is unfinished" }, @intFromBool(self.running and g.cycle.isActive()));
-    try w.scalar(.{ .name = "lodestar_native_gossip_maintenance_completed_timestamp_seconds", .kind = .gauge, .help = "Unix time of the last completed gossip maintenance cycle; zero before the first completion", .unit = .seconds }, g.maintenance.completed_unix_s);
 }

@@ -42,7 +42,7 @@ test "gossipsub service composes the mesh and delivers a message" {
         }
     }
     try std.testing.expect(received);
-    try std.testing.expectEqual(@as(u64, 1), setup.shared.server.gossipsub.counters.messages_received);
+    try std.testing.expectEqual(@as(u64, 1), setup.shared.server.gossipsub.topic_metrics.get(beacon_block).accepted);
 }
 
 test "gossipsub service does not retry a closed outbound stream" {
@@ -85,7 +85,6 @@ test "gossipsub direct send timeout retries once after a bounded delay" {
         try std.testing.expectEqual(@as(u16, 1), (try g.publish(topic, "stalled", setup.shared.pair.now)).queued);
         setup.shared.pair.advance(g.options.tx_timeout_ms);
         for (0..4) |_| try setup.pumpOnce();
-        try std.testing.expectEqual(@as(u64, 1), g.counters.send_queue_timeouts);
         try std.testing.expectEqual(setup.shared.pair.now.mono_ms + driver.direct_retry_delay_ms, g.sessions.rows[index].outbound.retry_at);
         try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[index].io.tx.data.count);
         try std.testing.expectEqual(.pending, setup.shared.client.gossipsub.deliveryStatus(setup.shared.handles.client));
@@ -116,7 +115,6 @@ test "gossipsub direct send timeout retries once after a bounded delay" {
                 try std.testing.expectEqual(started + 1, g.counters.negotiation_started);
                 setup.shared.pair.advance(@import("../negotiate.zig").negotiate_timeout_ms + 1);
                 _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{});
-                try std.testing.expectEqual(@as(u64, 1), g.counters.negotiation_failed);
             }
             try std.testing.expect(g.sessions.rows[index].outbound == .none);
             const final_started = g.counters.negotiation_started;
@@ -194,7 +192,6 @@ test "gossipsub service subscribes only after negotiation and retirement cancels
     setup.shared.pair.advance(6);
     _ = setup.shared.client.gossipsub.pump(&setup.shared.client.router, &setup.shared.pair.client, setup.shared.pair.now);
     try std.testing.expect(setup.shared.client.gossipsub.admitted(setup.shared.handles.client));
-    try std.testing.expectEqual(@as(u64, 0), setup.shared.client.gossipsub.counters.subscription_timeouts);
     @import("session_io.zig").retirePeer(setup.shared.client.gossipsub, &setup.shared.client.router, &setup.shared.pair.client, index);
     try std.testing.expectEqual(@as(?u64, null), setup.shared.client.router.nextWakeup(setup.shared.pair.now, 16));
     try std.testing.expect(setup.shared.pair.client.peerId(setup.shared.handles.client) != null);
@@ -323,7 +320,6 @@ test "gossipsub rejected negotiation stays terminal without new inbound evidence
     setup.shared.server.router = try @import("../router.zig").Router.init(std.testing.allocator, .{ .meshsub_versions = &.{.v1_1} });
     for (0..32) |_| try setup.pumpOnce();
     try std.testing.expectEqual(@as(u64, 1), setup.shared.client.gossipsub.counters.negotiation_started);
-    try std.testing.expect(setup.shared.client.gossipsub.counters.negotiation_rejected > 0);
     const index = setup.shared.client.gossipsub.sessions.find(setup.shared.handles.client).?;
     try std.testing.expect(setup.shared.client.gossipsub.sessions.rows[index].outbound == .none);
     for (0..20) |_| {
@@ -331,7 +327,6 @@ test "gossipsub rejected negotiation stays terminal without new inbound evidence
         for (0..4) |_| try setup.pumpOnce();
     }
     try std.testing.expectEqual(@as(u64, 1), setup.shared.client.gossipsub.counters.negotiation_started);
-    try std.testing.expectEqual(@as(u64, 0), setup.shared.client.gossipsub.counters.subscription_timeouts);
     try std.testing.expect(setup.shared.pair.client.peerId(setup.shared.handles.client) != null);
 }
 
@@ -344,7 +339,6 @@ test "gossipsub negotiation timeout releases resources without creating a retry 
     _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{});
     setup.shared.pair.advance(@import("../negotiate.zig").negotiate_timeout_ms + 1);
     _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{});
-    try std.testing.expectEqual(@as(u64, 1), setup.shared.client.gossipsub.counters.negotiation_failed);
     _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{});
     try std.testing.expect(setup.shared.client.router.nextWakeup(setup.shared.pair.now, 16) == null);
     const index = setup.shared.client.gossipsub.sessions.find(setup.shared.handles.client).?;
@@ -373,8 +367,8 @@ test "gossipsub PRUNE exhaustion closes gossip streams and leaves the transport 
     const full = try std.testing.allocator.alloc(u8, g.options.critical_bytes);
     defer std.testing.allocator.free(full);
     @memset(full, 0);
-    try std.testing.expect(tx.injectFrame(full, true, null, setup.shared.pair.now.mono_ms) != null);
-    g.overlay.prune(&g.overlayContext(setup.shared.pair.now.mono_ms), topic_index, index, 60_000, .excess);
+    try std.testing.expect(tx.injectFrame(full, true, setup.shared.pair.now.mono_ms) != null);
+    g.overlay.prune(&g.overlayContext(setup.shared.pair.now.mono_ms), topic_index, index, 60_000);
     try std.testing.expect(g.sessions.rows[index].outbound == .closing);
     try std.testing.expect(!setup.shared.client.gossipsub.deliveryAvailable(setup.shared.handles.client));
     _ = setup.shared.client.gossipsub.pump(&setup.shared.client.router, &setup.shared.pair.client, setup.shared.pair.now);

@@ -32,7 +32,7 @@ pub const Row = struct {
     direct: bool = false,
 };
 pub const Admission = union(enum) {
-    admitted: struct { peer: Ref, fresh: bool, penalty_evicted: bool },
+    admitted: struct { peer: Ref, fresh: bool },
     duplicate,
     capacity,
 };
@@ -92,7 +92,7 @@ pub const PeerBook = struct {
             if (row.connection != null) return .duplicate;
             if (row.pins > 0 or now < row.retain_until) {
                 self.connect(ref.index, conn, metadata, now);
-                return .{ .admitted = .{ .peer = ref, .fresh = false, .penalty_evicted = false } };
+                return .{ .admitted = .{ .peer = ref, .fresh = false } };
             }
             if (row.generation != std.math.maxInt(u64)) expired = ref.index;
             row.occupied = false;
@@ -100,7 +100,6 @@ pub const PeerBook = struct {
         const index = expired orelse self.reclaimable(metadata.direction, now) orelse return .capacity;
         const row = &self.rows[index];
         assert(row.connection == null and row.pins == 0);
-        const penalty_evicted = row.occupied and row.negative and now < row.retain_until;
         @memset(self.backoffs[index * constants.topics_cap ..][0..constants.topics_cap], .{});
         row.* = .{ .generation = row.generation + 1, .occupied = true, .identity = metadata.identity };
         self.scores.resetPeer(@intCast(index));
@@ -108,7 +107,6 @@ pub const PeerBook = struct {
         return .{ .admitted = .{
             .peer = .{ .index = @intCast(index), .generation = row.generation },
             .fresh = true,
-            .penalty_evicted = penalty_evicted,
         } };
     }
 

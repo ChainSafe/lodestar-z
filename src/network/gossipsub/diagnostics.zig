@@ -95,7 +95,7 @@ test "gossip diagnostic pages bound peers preserve scores and include empty mesh
     }
     const page = try a.create(Page);
     defer a.destroy(page);
-    const calls = g.peers.scores.calls;
+    const calculations = g.peers.scores.calculations;
     const revision = g.peers.scores.revision;
     const rows = try a.dupe(score.PeerScore.PeerState, g.peers.scores.rows);
     defer a.free(rows);
@@ -110,7 +110,7 @@ test "gossip diagnostic pages bound peers preserve scores and include empty mesh
     try capture(&g, page.next.?, .{ .mono_ms = 200, .unix_s = 1000 }, page);
     try std.testing.expectEqual(@as(u8, 2), page.peer_count);
     try std.testing.expectEqual(@as(?u16, null), page.next);
-    try std.testing.expectEqual(calls, g.peers.scores.calls);
+    try std.testing.expectEqual(calculations, g.peers.scores.calculations);
     try std.testing.expectEqual(revision, g.peers.scores.revision);
     try std.testing.expectEqualDeep(rows, g.peers.scores.rows);
     try std.testing.expectError(error.InvalidDiagnosticsCursor, capture(&g, 17, .{ .mono_ms = 200, .unix_s = 1000 }, page));

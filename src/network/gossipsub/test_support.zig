@@ -126,16 +126,23 @@ pub fn addPeer(g: *gossip.Gossipsub, conn: engine.Handle, version: sessions_mod.
     return peer;
 }
 
+/// Invalid deliveries the score counters hold across peers and topics.
+pub fn invalidDeliveries(g: *const gossip.Gossipsub) f64 {
+    var total: f64 = 0;
+    for (g.peers.scores.topics) |counters| total += counters.invalid;
+    return total;
+}
+
 pub fn penalize(g: *gossip.Gossipsub, conn: engine.Handle, count: f64) void {
     const index = g.sessions.find(conn).?;
     g.peers.penalize(g.sessions.rows[index].logical, count);
 }
 
-/// Returns the messages delivered to the attached sink.
+/// Returns the messages delivered to the attached sink, as validations they left pending.
 pub fn pump(g: *gossip.Gossipsub, transport: *engine.Engine, now: @import("../types.zig").Now) usize {
-    const received = g.counters.messages_received;
+    const pending = g.messages.pendingValidations();
     _ = pumpTurn(g, transport, now);
-    return g.counters.messages_received - received;
+    return g.messages.pendingValidations() - pending;
 }
 
 pub fn pumpTurn(g: *gossip.Gossipsub, transport: *engine.Engine, now: @import("../types.zig").Now) @import("turn.zig").Turn {
@@ -159,9 +166,9 @@ pub fn processRpc(g: *gossip.Gossipsub, index: u16, now: @import("../types.zig")
     turn.sink = g.message_sink;
     var peer = @import("turn.zig").Credits.peer(&g.options);
     peer.items = items.*;
-    const received = g.counters.messages_received;
+    const pending = g.messages.pendingValidations();
     const result = try @import("session_io.zig").processRpc(g, index, &turn, &peer);
-    count.* += g.counters.messages_received - received;
+    count.* += g.messages.pendingValidations() - pending;
     items.* = peer.items;
     return result == .done;
 }
@@ -183,14 +190,15 @@ const protobuf = @import("protobuf.zig");
 const Turn = @import("turn.zig").Turn;
 const Credits = @import("turn.zig").Credits;
 const snappy = @import("snappy");
-/// Returns the messages delivered to the attached sink, or null when the item needs more credits.
+/// Returns the messages delivered to the attached sink, as validations they left pending, or null
+/// when the item needs more credits.
 pub fn receiveMessage(g: *Gossipsub, index: u16, msg: protobuf.Message, now: Now) ?usize {
     var turn = Turn.init(&g.options, now, g.msg_scratch);
     turn.sink = g.message_sink;
     var peer = Credits.peer(&g.options);
-    const received = g.counters.messages_received;
+    const pending = g.messages.pendingValidations();
     const result = g.receiveItem(g.sessions.ref(index), .{ .message = msg }, &turn, &peer);
-    return if (result == .done) g.counters.messages_received - received else null;
+    return if (result == .done) g.messages.pendingValidations() - pending else null;
 }
 
 pub fn message(g: *Gossipsub, peer: u16, text: []const u8, now_ms: u64) !?usize {

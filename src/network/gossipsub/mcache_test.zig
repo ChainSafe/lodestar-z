@@ -352,8 +352,9 @@ test "gossip retention reclaims its own kind's old copies however many other mes
     var limits: limits_mod.Limits = @splat(.{ .items = 2, .bytes = storage.page_bytes });
     limits[@intFromEnum(@import("topic.zig").Kind.beacon_attestation)].items = 9000;
     limits[@intFromEnum(@import("topic.zig").Kind.voluntary_exit)].items = 8;
-    // The old 8,192-entry history and one holding the whole retention window admit the same exits.
-    for ([_]usize{ 8192, 8300 }, [_]u64{ 73, 0 }, [_]u64{ 0, 1 }) |capacity, capacity_evictions, retention_evictions| {
+    // The old 8,192-entry history and one holding the whole retention window admit the same exits:
+    // the smaller one ages the first exits out by capacity, the larger reclaims one by retention.
+    for ([_]usize{ 8192, 8300 }, [_]usize{ 8192, 8264 }) |capacity, retained| {
         var store = try storage.Store.init(a, capacity + 2, storage.page_bytes);
         defer store.deinit(a);
         store.limits = limits;
@@ -366,8 +367,7 @@ test "gossip retention reclaims its own kind's old copies however many other mes
                 index += 1;
             }
         }
-        try std.testing.expectEqual(capacity_evictions, history.evictions[@intFromEnum(mcache.Eviction.capacity)]);
-        try std.testing.expectEqual(retention_evictions, history.evictions[@intFromEnum(mcache.Eviction.retention)]);
+        try std.testing.expectEqual(retained, history.count);
         history.age(&store, constants.mcache_len);
         try std.testing.expectEqual(@as(usize, 0), store.used_entries);
     }

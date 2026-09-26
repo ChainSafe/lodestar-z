@@ -32,8 +32,6 @@ pub fn emit(peer: *Peer, id: u32) !void {
         .negotiations = negotiations,
         .hasInboundStream = has_inbound,
         .outboundVersion = outbound_version,
-        .rpcsReceived = peer.service.gossipsub.counters.rpcs_received,
-        .duplicates = peer.service.gossipsub.counters.duplicates,
         .steps = peer.steps,
         .connectionIndex = if (peer.conn) |conn| @as(?u16, conn.index) else null,
         .connectionDirection = if (peer.conn) |conn| if (peer.transport.engine.direction(conn)) |direction| @as(?[]const u8, @tagName(direction)) else null else null,

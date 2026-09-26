@@ -52,7 +52,6 @@ test "gossip simulation ignores decoded items and write receipts from a retired 
     var turn = @import("session_io.zig").beginPump(&node.core, now);
     var peer = @import("turn.zig").Credits.peer(&node.core.options);
     try std.testing.expectEqual(.done, node.core.receiveItem(old, .{ .subscription = .{ .topic = name, .subscribe = true } }, &turn, &peer));
-    node.core.writeCompleted(old, .{ .control = .{ .token = 1, .kind = .iwant } }, now.mono_ms);
+    node.core.writeCompleted(old, .{ .control = .{ .token = 1 } }, now.mono_ms);
     try std.testing.expectEqual(@as(usize, 0), node.core.resourceSnapshot().remote_subscriptions);
-    try std.testing.expectEqual(@as(u64, 0), node.core.rpc_metrics.sent_frames);
 }

@@ -500,7 +500,8 @@ const Spoke = struct {
             const result = self.core.step(io, now, outputs, .deadlineOnly(wake));
             if (result.readiness.failure) |err| return err;
         }
-        self.received = self.core.service.gossipsub.rpc_metrics.items[@intFromEnum(std.meta.Tag(gossip.protobuf.Item).message)];
+        // A spoke runs without a host, so it refuses every message it receives for storage.
+        for (self.core.service.gossipsub.messages.storage_refusals) |count| self.received += count;
     }
 
     /// Publishes up to 64 due messages and returns when the spoke should step again.
@@ -566,8 +567,6 @@ const Totals = struct {
     read_calls: u64 = 0,
     would_block: u64 = 0,
     write_zero: u64 = 0,
-    sent_frames: u64 = 0,
-    sent_bytes: u64 = 0,
     exhausted: [budget_names.len]u64 = @splat(0),
     deferred: [budget_names.len]u64 = @splat(0),
     /// Stopped turns and the sessions each left unvisited (writable ones second), by the stopping
@@ -591,15 +590,12 @@ const Totals = struct {
             .refused = host.refused,
             .applied = host.applied,
             .applies = host.applies,
-            .forwarded = g.counters.messages_forwarded,
             .recipients = g.delivery_metrics.recipients,
             .queue_drops = g.retired_queue_drops,
             .write_calls = g.io_metrics.write_calls,
             .read_calls = g.io_metrics.read_calls,
             .would_block = g.io_metrics.write_would_block,
             .write_zero = g.io_metrics.write_zero,
-            .sent_frames = g.rpc_metrics.sent_frames,
-            .sent_bytes = g.rpc_metrics.sent_bytes,
             .exhausted = g.io_metrics.turns_exhausted,
             .deferred = g.io_metrics.ready_deferred,
             .stops = g.io_metrics.stops,
@@ -610,6 +606,7 @@ const Totals = struct {
             .udp_sent = hub.transport.udp.counters.sent_datagrams,
             .udp_received = hub.transport.udp.counters.received_datagrams,
         };
+        for (g.topic_metrics.counts) |counts| result.forwarded += counts.forwarded;
         for (g.delivery_metrics.drops) |by_origin| for (&result.drops, by_origin) |*total, reasons| {
             for (total, reasons) |*value, addition| value.* += addition;
         };
@@ -867,7 +864,7 @@ fn printWindow(name: []const u8, delta: *const Totals, steps: []u32) void {
     }
     std.debug.print("case=gossip_burst window={s} queue_drops", .{name});
     inline for (@typeInfo(DropReason).@"enum".fields) |field| std.debug.print(" {s}={d}", .{ field.name, delta.queue_drops[field.value] });
-    std.debug.print("\ncase=gossip_burst window={s} write_calls={d} frames_sent={d} writes_per_frame={d:.3} write_would_block={d} write_zero={d} read_calls={d} sent_mib={d:.1} udp_sent={d} udp_received={d}\n", .{ name, delta.write_calls, delta.sent_frames, ratio(delta.write_calls, delta.sent_frames), delta.would_block, delta.write_zero, delta.read_calls, @as(f64, @floatFromInt(delta.sent_bytes)) / mib, delta.udp_sent, delta.udp_received });
+    std.debug.print("\ncase=gossip_burst window={s} write_calls={d} write_would_block={d} write_zero={d} read_calls={d} udp_sent={d} udp_received={d}\n", .{ name, delta.write_calls, delta.would_block, delta.write_zero, delta.read_calls, delta.udp_sent, delta.udp_received });
     std.debug.print("case=gossip_burst window={s} turns_exhausted", .{name});
     for (budget_names, delta.exhausted) |budget, count| std.debug.print(" {s}={d}", .{ budget, count });
     std.debug.print(" ready_deferred", .{});

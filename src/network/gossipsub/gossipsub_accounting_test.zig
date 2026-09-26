@@ -5,8 +5,6 @@ const session_io = @import("session_io.zig");
 const Gossipsub = @import("gossipsub.zig").Gossipsub;
 const Apply = @import("metrics.zig").Apply;
 const IwantOutcome = @import("metrics.zig").IwantOutcome;
-const GraftOutcome = @import("mesh_metrics.zig").GraftOutcome;
-const Removal = @import("mesh_metrics.zig").Removal;
 const MessageId = topic_mod.MessageId;
 
 const name = "/eth2/01020304/beacon_block/ssz_snappy";
@@ -103,36 +101,10 @@ test "IWANT outcomes separate misses, suppression, the retransmission limit, que
         _ = tx.queueData(&g.messages.store, h, .forward, .{ .bytes = g.options.tx_peer_bytes }, 2);
     }
     support.control(&g, peer.index, .{ .iwant = .{ .body = ids(&body, 1, &.{known[1]}) } }, now);
-    const outcomes = g.rpc_metrics.iwant;
     for ([_]IwantOutcome{ .miss, .suppressed, .limited, .queued, .refused }, [_]u64{ 1, 1, 1, 3, 1 }) |outcome, count| {
-        try std.testing.expectEqual(count, outcomes[@intFromEnum(outcome)]);
+        try std.testing.expectEqual(count, g.iwant_outcomes[@intFromEnum(outcome)]);
     }
-    try std.testing.expectEqual(@as(u64, 1), g.rpc_metrics.iwant_unknown);
     g.cancelWrites(g.sessions.ref(peer.index));
-}
-
-test "GRAFT outcomes, PRUNE reasons and mesh peer-time" {
-    var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
-    defer g.deinit();
-    const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
-    const direct = support.addPeer(&g, .{ .index = 1, .generation = 1 }, .v1_2).?;
-    g.markDirect(g.sessions.rows[direct.index].conn);
-    try support.subscribe(&g, name);
-    const now: @import("../types.zig").Now = .{ .mono_ms = 1, .unix_s = 0 };
-    support.control(&g, peer.index, .{ .graft = "/eth2/01020304/voluntary_exit/ssz_snappy" }, now);
-    support.control(&g, peer.index, .{ .graft = name }, now);
-    support.control(&g, peer.index, .{ .graft = name }, now);
-    support.control(&g, direct.index, .{ .graft = name }, now);
-    const metrics = &g.overlay.metrics;
-    for ([_]GraftOutcome{ .unknown_topic, .accepted, .member, .direct, .backoff }, [_]u64{ 1, 1, 1, 1, 0 }) |outcome, count| {
-        try std.testing.expectEqual(count, metrics.graft_received[@intFromEnum(outcome)]);
-    }
-    try std.testing.expectEqual(@as(u64, 1), metrics.prune_sent[@intFromEnum(Removal.direct)]);
-    // One mesh member for 700 ms between heartbeat samples.
-    metrics.sampleMesh(&g.overlay.rows, 1_000);
-    metrics.sampleMesh(&g.overlay.rows, 1_700);
-    try std.testing.expectEqual(@as(u64, 700), metrics.peer_ms[@intFromEnum(topic_mod.Kind.beacon_block)]);
-    for (g.sessions.rows) |*row| if (row.active) row.io.tx.cancelStream(&g.messages.store);
 }
 
 test "descriptor refusals sample the refusing peer's queued bytes, oldest frame age and last write" {
@@ -179,6 +151,6 @@ test "descriptor refusals sample the refusing peer's queued bytes, oldest frame 
     support.control(&g, peer.index, .{ .iwant = .{ .body = ids(&body, 1, &.{known[1]}) } }, .{ .mono_ms = 800, .unix_s = 0 });
     try std.testing.expectEqual(@as(u64, 2), would_block.bytes.count);
     try std.testing.expectEqual(@as(u64, 1), metrics.refusal_blocked.count);
-    try std.testing.expectEqual(@as(u64, 3), g.rpc_metrics.iwant[@intFromEnum(IwantOutcome.refused)]);
+    try std.testing.expectEqual(@as(u64, 3), g.iwant_outcomes[@intFromEnum(IwantOutcome.refused)]);
     g.cancelWrites(g.sessions.ref(peer.index));
 }
