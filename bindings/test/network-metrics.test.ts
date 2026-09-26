@@ -53,7 +53,6 @@ test("metrics are available through startup and remain readable after close", as
     expect(metrics.get("lodestar_native_gossip_expired_executing")).toBe(0);
     expect(metrics.get("lodestar_native_gossip_oldest_expired_execution_age_seconds")).toBe(0);
     expect(metrics.get('lodestar_native_gossip_processor_items{kind="beacon_block",state="queued"}')).toBe(0);
-    expect(metrics.get('lodestar_native_bridge_js_pings_total{entry="request_pull"}')).toBe(0);
     for (const budget of ["calls", "input", "output", "items", "fields", "work", "copy"]) {
       expect(metrics.get(`lodestar_native_gossip_turns_exhausted_total{budget="${budget}"}`)).toBe(0);
       expect(metrics.get(`lodestar_native_gossip_ready_deferred_total{budget="${budget}"}`)).toBe(0);
@@ -192,19 +191,10 @@ test("real request and peer metrics are isolated, cumulative and do not drain re
         expect(right.get(incoming)).toBe(1);
         expect(right.get(outgoing)).toBe(0);
         expect(right.get('lodestar_native_bridge_call_seconds_count{entry="exchange"}')).toBeGreaterThanOrEqual(1);
-        expect(right.get('lodestar_native_bridge_lock_wait_seconds_count{entry="exchange"}')).toBeGreaterThanOrEqual(1);
-        expect(right.get('lodestar_native_bridge_lock_hold_seconds_count{phase="capture"}')).toBeGreaterThan(0);
-        // One owner wait sample per acquisition, recorded before its hold.
-        expect(right.get('lodestar_native_bridge_owner_lock_wait_seconds_count{phase="capture"}')).toBe(
-          right.get('lodestar_native_bridge_lock_hold_seconds_count{phase="capture"}')
-        );
         expect(right.get('lodestar_native_bridge_delivered_items_total{kind="serving_start"}')).toBe(1);
         expect(right.get('lodestar_native_bridge_delivered_items_total{kind="completion"}')).toBeGreaterThan(0);
         expect(right.get('lodestar_native_bridge_delivered_items_total{kind="gossip_message"}')).toBe(0);
-        expect(right.get("lodestar_native_bridge_notify_total")).toBeGreaterThan(0);
         expect(right.get('lodestar_native_network_host_applies_total{cause="readiness"}')).toBeGreaterThan(0);
-        for (const entry of ["exchange", "incoming_respond", "incoming_ready", "incoming_terminal", "request_pull"])
-          expect(right.get(`lodestar_native_bridge_js_pings_total{entry="${entry}"}`)).toBe(0);
       },
       {timeout: 5000}
     );

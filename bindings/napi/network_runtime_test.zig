@@ -148,58 +148,6 @@ test "a payload release while the owner waits for budget wakes the owner once" {
     try runtime.wake.?.drain();
 }
 
-test "runtime mutex records JS waits under the calling entry and owner waits and holds under the phase" {
-    var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 }, .notify_live = false, .env_alive = false };
-    const Holder = struct {
-        held: std.atomic.Value(bool) = .init(false),
-        fn run(self: *@This(), target: *Runtime) void {
-            target.lock();
-            self.held.store(true, .release);
-            std.Io.sleep(std.Io.Threaded.global_single_threaded.io(), .fromMilliseconds(5), .awake) catch {};
-            target.unlock();
-        }
-        fn contend(target: *Runtime) !void {
-            var holder: @This() = .{};
-            const thread = try std.Thread.spawn(.{}, run, .{ &holder, target });
-            for (0..10_000) |_| {
-                if (holder.held.load(.acquire)) break;
-                std.Thread.yield() catch {};
-            }
-            target.lock();
-            target.unlock();
-            thread.join();
-        }
-    };
-    const call = r.call(&runtime, .exchange);
-    try Holder.contend(&runtime);
-    call.end();
-    const waits = &runtime.bridge.waits[@intFromEnum(r.bridge.Entry.exchange)];
-    try std.testing.expectEqual(@as(u64, 1), waits.count);
-    try std.testing.expectEqual(@as(u64, 0), waits.buckets[0]);
-    const previous = r.phase(.gossip_flags);
-    try Holder.contend(&runtime);
-    runtime.lock();
-    runtime.unlock();
-    r.restore(previous);
-    runtime.lock();
-    runtime.unlock();
-    var snapshot: r.bridge.Snapshot = .{};
-    runtime.bridge.snapshot(&snapshot);
-    try std.testing.expectEqual(@as(u64, 1), snapshot.calls[@intFromEnum(r.bridge.Entry.exchange)].count);
-    try std.testing.expectEqual(@as(u64, 2), snapshot.holds[@intFromEnum(r.bridge.Phase.gossip_flags)].count);
-    const owner_waits = &snapshot.owner_waits[@intFromEnum(r.bridge.Phase.gossip_flags)];
-    try std.testing.expectEqual(@as(u64, 2), owner_waits.count);
-    // The contended acquisition waits past the first bucket; the uncontended one records zero.
-    try std.testing.expectEqual(@as(u64, 1), owner_waits.buckets[0]);
-    var holds: u64 = 0;
-    for (snapshot.holds) |value| holds += value.count;
-    var waited: u64 = 0;
-    for (snapshot.waits) |value| waited += value.count;
-    for (snapshot.owner_waits) |value| waited += value.count;
-    try std.testing.expectEqual(@as(u64, 2), holds);
-    try std.testing.expectEqual(@as(u64, 3), waited);
-}
-
 test "an owner completion notifies once while armed and leaves settlement to the exchange" {
     var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 } };
     const before = notifications.load(.acquire);
@@ -225,7 +173,6 @@ test "an owner completion notifies once while armed and leaves settlement to the
     try std.testing.expect(runtime.readiness.arm());
     runtime.unlock();
     try std.testing.expectEqual(before + 1, notifications.load(.acquire));
-    try std.testing.expectEqual(@as(u64, 0), runtime.bridge.js_pings[@intFromEnum(r.bridge.Entry.exchange)]);
 }
 
 /// An exchange host that builds only the peer count.
@@ -326,7 +273,6 @@ test "pulls and retirements neither notify from the JS thread nor settle before 
     try std.testing.expect(cell.retiring and cell.cancel and cell.retirement != null);
     try std.testing.expectEqual(before, notifications.load(.acquire));
     try std.testing.expect(runtime.readiness.armed);
-    for (runtime.bridge.js_pings) |count| try std.testing.expectEqual(@as(u64, 0), count);
     // An owner-side move that a JS-thread call makes notifies from that call.
     const ping = r.call(&runtime, .request_pull);
     const command = try runtime.table.reserve(.getIdentity);
@@ -336,7 +282,7 @@ test "pulls and retirements neither notify from the JS thread nor settle before 
     runtime.unlock();
     ping.end();
     runtime.table.retire(command);
-    try std.testing.expectEqual(@as(u64, 1), runtime.bridge.js_pings[@intFromEnum(r.bridge.Entry.request_pull)]);
+    try std.testing.expectEqual(before + 1, notifications.load(.acquire));
     cell.native = null;
     cell.chunk = null;
     cell.pull = null;

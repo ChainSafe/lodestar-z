@@ -161,10 +161,7 @@ fn jsStopped(err: anyerror) bool {
 /// nothing is queued. A callback that returns anything else, such as a wrapper already collected, leaves no host
 /// exchange, so legacy results settle here; payload waits for a host.
 fn notify(env: napi.Env, callback: Value, runtime: *Runtime) !void {
-    const started = r.bridge.now();
-    defer runtime.bridge.notify.observe(r.bridge.now() -| started);
     runtime.lock();
-    runtime.bridge.notified();
     const alive = runtime.env_alive;
     runtime.unlock();
     if (!alive) return;

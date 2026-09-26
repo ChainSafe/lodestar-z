@@ -176,8 +176,6 @@ pub const NetworkCore = struct {
     wait_duration: WaitTime = .{},
     due_now_turns: [wake_sources.source_count]u64 = @splat(0),
     host_applies: [@typeInfo(HostCause).@"enum".fields.len]u64 = @splat(0),
-    /// Monotonic nanoseconds at the current step's tick.
-    tick_ns: u64 = 0,
     last_now: Now,
     initialized: bool = false,
     host_wake: ?i32 = null,
@@ -206,7 +204,6 @@ pub const NetworkCore = struct {
         self.wait_duration = .{};
         self.due_now_turns = @splat(0);
         self.host_applies = @splat(0);
-        self.tick_ns = 0;
         self.host_wake = null;
         self.current_slot = startup.slot;
         self.host_more = false;
@@ -576,7 +573,6 @@ pub const NetworkCore = struct {
         };
         const tick: Now = if (read.mono_ms >= now.mono_ms) read else now;
         self.last_now = tick;
-        self.tick_ns = step_start;
         result.transport.now = tick;
         if (self.discoveryOnly(&result.readiness, tick, outputs, host)) {
             result.discovery_only = true;
