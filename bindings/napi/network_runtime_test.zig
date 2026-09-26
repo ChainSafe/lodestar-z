@@ -19,8 +19,44 @@ fn napiCallThreadsafeFunction(_: ?*anyopaque, _: ?*anyopaque, _: c_uint) callcon
     _ = notifications.fetchAdd(1, .acq_rel);
     return status;
 }
+/// As Node's does, prints the location and message, then aborts.
+fn napiFatalError(location: [*]const u8, location_len: usize, message: [*]const u8, message_len: usize) callconv(.c) noreturn {
+    var buffer: [256]u8 = undefined;
+    const line = std.fmt.bufPrint(&buffer, "FATAL ERROR: {s} {s}\n", .{ location[0..location_len], message[0..message_len] }) catch unreachable;
+    _ = std.c.write(2, line.ptr, line.len);
+    std.c.abort();
+}
 comptime {
     @export(&napiCallThreadsafeFunction, .{ .name = "napi_call_threadsafe_function" });
+    @export(&napiFatalError, .{ .name = "napi_fatal_error" });
+}
+
+/// Runs `run` in a child process, which must abort after printing exactly `expected` to stderr.
+pub fn expectFatal(comptime run: fn () void, expected: []const u8) !void {
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+    const pid = std.c.fork();
+    try std.testing.expect(pid >= 0);
+    if (pid == 0) {
+        _ = std.c.dup2(fds[1], 2);
+        run();
+        std.c._exit(3);
+    }
+    _ = std.c.close(fds[1]);
+    var output: [512]u8 = undefined;
+    var len: usize = 0;
+    for (0..output.len) |_| {
+        const read = std.c.read(fds[0], output[len..].ptr, output.len - len);
+        if (read <= 0) break;
+        len += @intCast(read);
+    }
+    _ = std.c.close(fds[0]);
+    var wait_status: c_int = 0;
+    try std.testing.expectEqual(pid, std.c.waitpid(pid, &wait_status, 0));
+    const code: u32 = @bitCast(wait_status);
+    try std.testing.expect(std.c.W.IFSIGNALED(code));
+    try std.testing.expectEqual(std.c.SIG.ABRT, std.c.W.TERMSIG(code));
+    try std.testing.expectEqualStrings(expected, output[0..len]);
 }
 
 test {
@@ -30,6 +66,7 @@ test {
     _ = @import("network_peer_reports.zig");
     _ = @import("network_owner.zig");
     _ = @import("network_fatal.zig");
+    _ = @import("network.zig");
 }
 
 test "application typed store allocation prefixes release all requested bytes" {
