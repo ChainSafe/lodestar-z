@@ -617,3 +617,17 @@ pub fn publishGossip(self: *@This(), topic: js.Value, data: js.Value, options: j
     defer call.end();
     return .{ .val = try publication_js.publish(try self.owner(), topic.val, data.val, options.val) };
 }
+
+test "legacy settlement terminates at its site while JavaScript can run, and stops locally once it cannot" {
+    for ([_]anyerror{ error.Closing, error.CannotRunJS, error.PendingException }) |err| {
+        var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 }, .notify_live = false };
+        settlementFailed(undefined, &runtime, err);
+        try std.testing.expect(runtime.disposed and runtime.stop and !runtime.env_alive);
+    }
+    try @import("network_runtime_test.zig").expectFatal(struct {
+        fn run() void {
+            var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 }, .notify_live = false };
+            settlementFailed(undefined, &runtime, error.GenericFailure);
+        }
+    }.run, "FATAL ERROR: native network bridge settlement: GenericFailure\n");
+}

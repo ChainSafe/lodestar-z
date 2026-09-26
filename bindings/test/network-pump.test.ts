@@ -580,6 +580,24 @@ describe("binding pump scheduling", () => {
     ).toBe(true);
   }, 40_000);
 
+  it.each([
+    ["generated_batch", "InvalidNetworkInteger"],
+    ["failed_turns", "capacity failed"],
+  ])(
+    "raising %s over a real native runtime terminates the process through native fail, in a child process",
+    (site, reason) => {
+      const child = spawnSync(
+        process.execPath,
+        ["--import", "tsx", "bindings/test/fixtures/network-escalation.mjs", site],
+        {encoding: "utf8", timeout: 30_000}
+      );
+      expect(child.signal, child.stderr).toBe("SIGABRT");
+      expect(child.stdout).not.toContain("survived");
+      expect(child.stderr).toContain(`FATAL ERROR: native network bridge ${site}: ${reason}\n`);
+    },
+    40_000
+  );
+
   it("never escalates turns without deliveries: external capacity polling and held jobs", async () => {
     vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
     const node = fixture();

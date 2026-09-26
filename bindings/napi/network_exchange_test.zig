@@ -28,7 +28,7 @@ const Host = struct {
     discarded: usize = 0,
     kept_alive: usize = 0,
     site: ?fatal.Site = null,
-    /// Terminate on a contract failure, as the N-API host's fatal error does.
+    /// Terminate on a contract failure, as the N-API host does.
     aborts: bool = false,
     during: ?*const fn (*Runtime) void = null,
 
@@ -79,7 +79,7 @@ const Host = struct {
         return self.failure;
     }
     pub fn terminate(self: *Host, site: fatal.Site, err: anyerror) anyerror {
-        if (self.aborts) std.process.abort();
+        if (self.aborts) fatal.terminate(undefined, site, @errorName(err));
         self.site = site;
         return err;
     }
@@ -255,22 +255,16 @@ test "a contract failure is not retried: the exchange terminates after one build
     try std.testing.expectEqual(@as(usize, 0), runtime.gossip.?.diag.copying);
 }
 
-test "a contract failure terminates the process without a retry (child process)" {
-    const pid = std.c.fork();
-    try std.testing.expect(pid >= 0);
-    if (pid == 0) {
-        var fixture: Fixture = undefined;
-        fixture.init(false, 2) catch std.c._exit(2);
-        _ = admit(&fixture.runtime, .voluntary_exit, null, "data") catch std.c._exit(2);
-        var host: Host = .{ .runtime = &fixture.runtime, .fail = .gossip, .failure = .contract, .aborts = true };
-        _ = host.turn(&.{}, deployed) catch {};
-        std.c._exit(3);
-    }
-    var status: c_int = 0;
-    try std.testing.expectEqual(pid, std.c.waitpid(pid, &status, 0));
-    const code: u32 = @bitCast(status);
-    try std.testing.expect(std.c.W.IFSIGNALED(code));
-    try std.testing.expectEqual(std.c.SIG.ABRT, std.c.W.TERMSIG(code));
+test "a contract failure terminates the process at the build site without a retry (child process)" {
+    try tsfn.expectFatal(struct {
+        fn run() void {
+            var fixture: Fixture = undefined;
+            fixture.init(false, 2) catch std.c._exit(2);
+            _ = admit(&fixture.runtime, .voluntary_exit, null, "data") catch std.c._exit(2);
+            var host: Host = .{ .runtime = &fixture.runtime, .fail = .gossip, .failure = .contract, .aborts = true };
+            _ = host.turn(&.{}, deployed) catch {};
+        }
+    }.run, "FATAL ERROR: native network bridge exchange_build: InvalidArg\n");
 }
 
 test "control-only exchanges settle in batches immediately while queued payload keeps its place for the timer" {

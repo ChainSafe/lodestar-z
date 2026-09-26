@@ -3,7 +3,12 @@ import {setTimeout as delay} from "node:timers/promises";
 import {privateKeyFromRaw} from "@libp2p/crypto/keys";
 import {peerIdFromPublicKey} from "@libp2p/peer-id";
 import {expect, it, vi} from "vitest";
-import {type NativeAction, type NativeExchangeDemand, initializeNativeNetworkRuntime} from "../src/network-runtime.js";
+import {
+  type NativeAction,
+  type NativeEscalation,
+  type NativeExchangeDemand,
+  initializeNativeNetworkRuntime,
+} from "../src/network-runtime.js";
 import {
   applicationConfig,
   capacity,
@@ -317,6 +322,17 @@ it.each([
   expect(failure?.stdout).not.toContain("survived");
   expect(failure?.stderr).toContain(`native network bridge ${site}: test`);
 }, 30000);
+
+it("refuses a fatal site the pump does not raise with an ordinary throw", async () => {
+  const runtime = startRuntime(applicationConfig(), () => undefined);
+  try {
+    for (const site of ["settlement", "exchange_build", "exchange_finish", "unknown", 1])
+      expect(() => runtime.fail(site as NativeEscalation, "test")).toThrow("InvalidNetworkConfig");
+    expect((await runtime.getIdentity()).peerId).toBe(runtime.identity.peerId);
+  } finally {
+    expect(await runtime.close()).toEqual({reason: "requested"});
+  }
+});
 
 it.each([
   ["gc", "gc-rebound"],
