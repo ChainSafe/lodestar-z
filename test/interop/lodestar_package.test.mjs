@@ -137,7 +137,8 @@ async function fixture({extraFiles = {}, networkSource} = {}) {
   await writeFile(join(nativeDir, "bindings", "src", "index.d.ts"), "export declare const fixture: true;\n");
   await writeFile(
     join(nativeDir, "bindings", "src", "network.js"),
-    networkSource ?? "export const initializeNativeNetworkRuntime = () => {};\n"
+    networkSource ??
+      "export const createNativeNetwork = () => {};\nexport const initializeNativeNetworkRuntime = () => {};\n"
   );
   for (const [path, source] of Object.entries(extraFiles)) {
     await writeFile(join(nativeDir, path), source);
