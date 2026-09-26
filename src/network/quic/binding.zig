@@ -84,7 +84,7 @@ pub const Config = struct {
         c.quiche_config_set_initial_max_streams_uni(ptr, 0);
         c.quiche_config_set_max_connection_window(ptr, connection_window);
         c.quiche_config_set_max_stream_window(ptr, stream_window);
-        c.quiche_config_set_active_connection_id_limit(ptr, limits.active_connection_ids_max);
+        c.quiche_config_set_active_connection_id_limit(ptr, 2);
         c.quiche_config_set_disable_active_migration(ptr, true);
         c.quiche_config_set_disable_dcid_reuse(ptr, false);
         c.quiche_config_set_cc_algorithm(ptr, c.QUICHE_CC_CUBIC);

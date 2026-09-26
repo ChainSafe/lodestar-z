@@ -153,8 +153,6 @@ pub const Outbox = struct {
     /// The last write on this stream blocked. A writable event leaves it set; a write QUIC takes
     /// in full clears it.
     last_write_blocked: bool = false,
-    /// A data frame was refused since the write that blocked, before a writable event.
-    refused_while_blocked: bool = false,
     subscription_since: ?u64 = null,
     subscription_dirty: std.StaticBitSet(constants.topics_cap) = .initEmpty(),
     subscription_cursor: usize = 0,
@@ -181,7 +179,6 @@ pub const Outbox = struct {
     pub fn blocked(self: *Outbox, now: u64) void {
         self.ready = false;
         self.last_write_blocked = true;
-        if (self.blocked_since == null) self.refused_while_blocked = false;
         self.blocked_since = self.blocked_since orelse now;
     }
 
