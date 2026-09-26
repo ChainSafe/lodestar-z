@@ -3,6 +3,7 @@ import {
   applicationConfig,
   exchange,
   gossipAll,
+  holdSettling,
   localIntent,
   peerIdFromHex,
   requestForks,
@@ -268,6 +269,8 @@ test("an acknowledgement follows only the owner's disposition of a delivered mes
   try {
     await pair.left.publishGossip(TOPIC, blockPayload(4000, 1), {allowZeroPeers: false});
     const message = await nextGossip(pair.right);
+    // Every exchange from here is the test's, so none but these can take the acknowledgement.
+    holdSettling(pair.right, true);
     pair.right.holdVerdicts(true);
     const accepted = pair.right.diagnostics().gossip.reportsAppliedAccept;
     // The exchange that reports a fresh verdict cannot carry its acknowledgement, nor can later ones while the owner
@@ -278,7 +281,11 @@ test("an acknowledgement follows only the owner's disposition of a delivered mes
       expect(exchange(pair.right, settleOnly).acknowledged).toEqual([]);
       await delay(5);
     }
-    expect(pair.right.diagnostics().gossip).toMatchObject({acknowledging: 0, pendingVerdicts: 1, reportsAppliedAccept: accepted});
+    expect(pair.right.diagnostics().gossip).toMatchObject({
+      acknowledging: 0,
+      pendingVerdicts: 1,
+      reportsAppliedAccept: accepted,
+    });
     pair.right.holdVerdicts(false);
     // Released, the owner applies the verdict, which admits forwarding, and in the same locked step leaves its
     // acknowledgement, which the next exchange returns.
@@ -289,6 +296,8 @@ test("an acknowledgement follows only the owner's disposition of a delivered mes
     expect(pair.right.diagnostics().gossip).toMatchObject({acknowledging: 0, occupied: 0, pendingVerdicts: 0});
     expect(exchange(pair.right, settleOnly).acknowledged).toEqual([]);
   } finally {
+    // Close settles through the host's exchanges.
+    holdSettling(pair.right, false);
     await Promise.all([pair.left.close(), pair.right.close()]);
   }
 }, 15000);

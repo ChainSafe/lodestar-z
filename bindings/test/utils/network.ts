@@ -246,15 +246,17 @@ export function localIntent(config: NativeApplicationConfig): NativeLocalIntent 
 /**
  * The least a host does: each notification schedules settle-only exchanges in later macrotasks while they report
  * more, and retries on a timer while payload waits for a service it disables. Peers, serving starts and gossip stay
- * with the test.
+ * with the test, which can also hold the host to take every exchange's results itself.
  */
 function settlingHost(onWorkAvailable: () => void = () => undefined) {
   // Weak, so a pending retry never keeps the facade alive.
   let runtime: WeakRef<Pick<NativeNetworkApplicationRuntime, "exchange">> | undefined;
   let scheduled = false;
+  let held = false;
   let timer: NodeJS.Timeout | undefined;
   const drain = () => {
     scheduled = false;
+    if (held) return;
     const result = runtime?.deref()?.exchange([], settleOnly);
     if (result?.more) schedule();
     else if (result?.disabledWaiting && !timer) {
@@ -274,6 +276,11 @@ function settlingHost(onWorkAvailable: () => void = () => undefined) {
     attach(value: Pick<NativeNetworkApplicationRuntime, "exchange">) {
       runtime = new WeakRef(value);
     },
+    hold(value: boolean) {
+      held = value;
+      // A notification the held host skipped leaves its work queued.
+      if (!held) schedule();
+    },
     onWorkAvailable() {
       schedule();
       onWorkAvailable();
@@ -281,11 +288,21 @@ function settlingHost(onWorkAvailable: () => void = () => undefined) {
   };
 }
 
+const settlingHosts = new WeakMap<object, ReturnType<typeof settlingHost>>();
+
 export function startRuntime(config: NativeApplicationConfig, onWorkAvailable: () => void = () => undefined) {
   const host = settlingHost(onWorkAvailable);
   const runtime = initializeNativeNetworkRuntime(config, host.onWorkAvailable);
   host.attach(runtime);
+  settlingHosts.set(runtime, host);
   return runtime;
+}
+
+/** While held, a started runtime's settling host exchanges nothing, so the test's own exchanges take every result. */
+export function holdSettling(runtime: object, held: boolean): void {
+  const host = settlingHosts.get(runtime);
+  if (!host) throw Error("Not a started runtime");
+  host.hold(held);
 }
 
 /** Collects released runtimes until the process may initialize another one. */
