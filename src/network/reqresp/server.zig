@@ -175,7 +175,6 @@ pub const Server = struct {
                     request.io.decoder.payload()
                 else
                     &.{};
-                owner.counters.inspected +|= 1;
                 const inspected = owner.inspectRequest(request.protocol, payload, slot.request_fork) catch |err| {
                     if (err == error.MalformedSsz or err == error.InvalidRequest) request.peer_fault = .protocol;
                     _ = takeAdmission(owner, engine, slot, 1, now);
@@ -205,7 +204,6 @@ pub const Server = struct {
         if (self.admission_paid < cost) {
             const granted = admission.limiter.grant(&self.identity, request.protocol, cost - self.admission_paid, self.request_fork, now.mono_ms);
             self.admission_paid += granted;
-            owner.counters.charged_work +|= granted;
             if (self.admission_paid < cost) {
                 self.eligible_ms = admission.limiter.eligibleAt(&self.identity, request.protocol, 1, self.request_fork, now.mono_ms).?;
                 self.admission_wait = .tokens;
@@ -213,7 +211,6 @@ pub const Server = struct {
             }
         }
         self.admission_wait = .none;
-        owner.counters.admitted +|= 1;
         const payload: []const u8 = if (request.io.decoding) request.io.decoder.payload() else &.{};
         request.io.decoding = false;
         request.io.scratch = owner.serving.acquire(execution, request.handle(index), &self.identity, request.protocol.isControl());
@@ -240,15 +237,7 @@ pub const Server = struct {
         const request = &slot.request;
         const identity = engine.peerId(request.conn) orelse return false;
         const decision = owner.admission.limiter.take(&identity, request.protocol, cost, slot.request_fork, now.mono_ms);
-        switch (decision) {
-            .allowed => {
-                owner.counters.charged_work +|= cost;
-                return true;
-            },
-            .peer_quota => owner.counters.peer_refusals +|= 1,
-            .global_quota => owner.counters.aggregate_refusals +|= 1,
-            .identity_capacity => owner.counters.identity_capacity_refusals +|= 1,
-        }
+        if (decision == .allowed) return true;
         owner.recordAdmissionRefusal(request.stream, request.protocol, switch (decision) {
             .allowed => unreachable,
             .peer_quota => .peer_quota,
@@ -323,7 +312,6 @@ pub const Server = struct {
         }
         if (slot.pending_result == constants.result_success) {
             request.chunks += 1;
-            owner.counters.chunks_sent += 1;
         }
         request.io.payload = &.{};
         request.io.writer = undefined;
@@ -356,7 +344,6 @@ pub const Server = struct {
                 slot.failStream(owner, index, err, engine);
                 return;
             }
-            owner.protocol_counters[@intFromEnum(request.protocol)].response_finish_stops +|= 1;
             std.log.scoped(.network_reqresp).debug("response_finish_stopped request={d}:{d} connection={d}:{d} stream={d} method={s} chunks={d}", .{ index, request.generation, request.conn.index, request.conn.generation, request.stream.id, @tagName(request.protocol), request.chunks });
             request.io.outbox = .{};
             break :stopped .done;
@@ -392,7 +379,6 @@ pub const Server = struct {
         const bounds = owner.requestBounds(which);
         const decision = owner.admission.limiter.start(&identity, which.isControl(), now.mono_ms);
         if (decision != .allowed) {
-            if (decision == .identity_capacity) owner.counters.identity_capacity_refusals +|= 1 else owner.counters.peer_refusals +|= 1;
             owner.recordAdmissionRefusal(stream, which, if (decision == .identity_capacity) .identity_capacity else .request_starts, 1);
             return error.TooManyRequests;
         }

@@ -103,9 +103,6 @@ test("metrics are available through startup and remain readable after close", as
     for (const penalty of ["graft_backoff", "broken_promise", "message_deficit", "invalid_message"]) {
       expect(metrics.get(`gossipsub_scoring_penalties_total{penalty="${penalty}"}`)).toBe(0);
     }
-    expect(
-      samples(runtime.getMetrics()).get('lodestar_native_reqresp_request_write_stops_total{method="metadata"}')
-    ).toBe(0);
   } finally {
     await runtime.close();
   }

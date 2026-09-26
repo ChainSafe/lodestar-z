@@ -93,7 +93,6 @@ fn writeNativeCounters(self: *const Context, w: *prom.Encoder) prom.Error!void {
         .kind = .counter,
         .help = metric[1],
     }, @field(self.owner.transport.udp.counters, metric[0]));
-    try w.counters("lodestar_native_reqresp_", &self.owner.service.reqresp.counters);
     try w.counters("lodestar_native_gossipsub_", &self.owner.service.gossipsub.counters);
     const refused = try w.family(.{
         .name = "lodestar_native_dial_recent_failures_refused_total",
@@ -173,7 +172,9 @@ fn writeGossipResources(self: *const Context, w: *prom.Encoder) prom.Error!void 
 
 fn writeRequestResources(self: *const Context, w: *prom.Encoder) prom.Error!void {
     const requests = self.owner.service.reqresp.resourceSnapshot();
-    try writeResourceFields("lodestar_native_reqresp_resources_", "Native request resources ", &requests, self.running, w);
+    try w.scalar(.{ .name = "lodestar_native_reqresp_resources_serving_capacity", .kind = .gauge, .help = "Incoming requests the host may serve at once" }, requests.serving_capacity);
+    try w.scalar(.{ .name = "lodestar_native_reqresp_resources_serving_occupied", .kind = .gauge, .help = "Incoming requests the host is serving" }, self.live(requests.serving_occupied));
+    try w.scalar(.{ .name = "lodestar_native_reqresp_resources_retiring", .kind = .gauge, .help = "Serving resources awaiting host retirement" }, self.live(requests.retiring));
 }
 
 fn writeResourceFields(comptime prefix: []const u8, comptime description: []const u8, resources: anytype, running: bool, w: *prom.Encoder) prom.Error!void {
@@ -290,12 +291,7 @@ fn writeRequests(self: *const Context, w: *prom.Encoder) prom.Error!void {
         .{ "beacon_reqresp_outgoing_requests_total", "outgoing", "Started outgoing native requests, including control methods" },
         .{ "beacon_reqresp_incoming_requests_total", "incoming", "Accepted incoming native request streams, including control methods" },
         .{ "beacon_reqresp_outgoing_requests_error_total", "outgoing_errors", "Outgoing requests with a terminal native failure, excluding local cancellation" },
-        .{ "lodestar_native_reqresp_outgoing_cancelled_total", "outgoing_cancelled", "Outgoing requests cancelled by the local owner" },
-        .{ "lodestar_native_reqresp_incoming_cancelled_total", "incoming_cancelled", "Incoming requests cancelled by the local owner" },
-        .{ "lodestar_native_reqresp_request_write_stops_total", "request_write_stops", "Peer stops of the request write direction that retain response processing" },
-        .{ "lodestar_native_reqresp_response_finish_stops_total", "response_finish_stops", "Peer stops of response FIN after complete response chunks were written" },
         .{ "beacon_reqresp_incoming_requests_error_total", "incoming_errors", "Incoming requests with a terminal native failure" },
-        .{ "beacon_reqresp_rate_limiter_errors_total", "rate_limited", "Requests refused by protocol concurrency limits, decoded work quotas or identity capacity" },
     }) |metric| {
         const requests = try w.family(.{
             .name = metric[0],

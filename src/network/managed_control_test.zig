@@ -227,7 +227,6 @@ test "managed records a buffered Goodbye before transport cancellation and prese
         try std.testing.expectEqual(if (local_ban) null else @as(?t.Rejection, .too_many_peers), setup.server.catalog.history.rejection(identity, blocked_until - 1));
         try std.testing.expectEqual(@as(?t.Rejection, null), setup.server.catalog.history.rejection(identity, blocked_until));
         try std.testing.expectEqual(@as(u64, 1), setup.server.control.counters.events.goodbyes[@intFromEnum(@import("peers/goodbye.zig").Reason.too_many_peers)]);
-        try std.testing.expectEqual(@as(u64, 1), setup.server_service.reqresp.counters.goodbyes_recovered_on_close);
     }
 }
 
@@ -1274,7 +1273,9 @@ test "application graceful quiescence sends shutdown Goodbye and suppresses admi
     try std.testing.expect(received);
 }
 
-fn expectQuiescentGoodbye(setup: *Setup, admitted: u64) !void {
+/// No application request reaches serving while the Goodbye goes out; `serving` is the serving
+/// occupancy when quiescence began.
+fn expectQuiescentGoodbye(setup: *Setup, serving: usize) !void {
     var received = false;
     for (0..80) |_| {
         try setup.pair.pump();
@@ -1282,7 +1283,7 @@ fn expectQuiescentGoodbye(setup: *Setup, admitted: u64) !void {
         _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, setup.pair.events(&setup.pair.client, &transport), setup.pair.now, 100, &.{}, &.{});
         try std.testing.expectEqual(@as(usize, 0), setup.client_inbox.messages().len);
         try std.testing.expectEqual(@as(u64, 0), setup.client_service.gossipsub.counters.messages_received);
-        try std.testing.expectEqual(admitted, setup.client_service.reqresp.counters.admitted);
+        try std.testing.expect(setup.client_service.reqresp.resourceSnapshot().serving_occupied <= serving);
         for (setup.client_service.reqresp.inbound) |slot| {
             if (slot.request.occupied() and !slot.request.protocol.isControl()) try std.testing.expect(slot.request.pendingEvent() == null);
         }
@@ -1339,12 +1340,12 @@ fn quiescenceRequest(mode: enum { fin, selection, borrowed }) !void {
         borrowed = application[0].request.bytes;
         try std.testing.expectEqualSlices(u8, &([_]u8{7} ** 32), borrowed);
     }
-    const admitted = setup.client_service.reqresp.counters.admitted;
+    const serving = setup.client_service.reqresp.resourceSnapshot().serving_occupied;
     managed.beginGracefulClose(&setup.client, &setup.client_service, setup.pair.now);
     if (mode == .borrowed) {
         try std.testing.expectEqualSlices(u8, &([_]u8{7} ** 32), borrowed);
     } else try std.testing.expectEqual(total - first, try setup.pair.server.write(stream, bytes[first..total], true));
-    try expectQuiescentGoodbye(&setup, admitted);
+    try expectQuiescentGoodbye(&setup, serving);
 }
 
 test "application quiescence rejects the final request FIN on an existing application stream" {
@@ -1393,7 +1394,7 @@ fn quiescenceGossip(hold_selection: bool) !void {
     if (!hold_selection) try std.testing.expectEqual(frame.len - 1, try setup.pair.server.write(stream, frame[0 .. frame.len - 1], false));
     for (0..10) |_| try setup.step(0);
     try std.testing.expectEqual(@as(usize, 0), setup.client_service.gossipsub.resourceSnapshot().pending_validations);
-    const admitted = setup.client_service.reqresp.counters.admitted;
+    const serving = setup.client_service.reqresp.resourceSnapshot().serving_occupied;
     managed.beginGracefulClose(&setup.client, &setup.client_service, setup.pair.now);
     if (hold_selection) {
         var proposal_bytes: [64]u8 = undefined;
@@ -1402,7 +1403,7 @@ fn quiescenceGossip(hold_selection: bool) !void {
     }
     const remaining = if (hold_selection) frame else frame[frame.len - 1 ..];
     try std.testing.expectEqual(remaining.len, try setup.pair.server.write(stream, remaining, false));
-    try expectQuiescentGoodbye(&setup, admitted);
+    try expectQuiescentGoodbye(&setup, serving);
     try std.testing.expectEqual(@as(usize, 0), setup.client_service.gossipsub.resourceSnapshot().pending_validations);
 }
 
@@ -1484,7 +1485,6 @@ test "managed control response deadline survives continuous peer progress" {
     var storage: [rr.codec.frame_scratch_max]u8 = undefined;
     const encoded = try rr.codec.encodeChunk(0, null, payload[0..length], &storage);
     try std.testing.expect(encoded.len > 9);
-    const timeouts = setup.client_service.reqresp.counters.timeouts;
     for (0..9) |i| {
         setup.pair.now.mono_ms = due - 90 + i * 10;
         try std.testing.expectEqual(@as(usize, 1), try setup.pair.server.write(stream, encoded[i .. i + 1], false));
@@ -1492,11 +1492,9 @@ test "managed control response deadline survives continuous peer progress" {
         var transport: [32]Engine.Event = undefined;
         _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, setup.pair.events(&setup.pair.client, &transport), setup.pair.now, 100, &.{}, &.{});
         try std.testing.expectEqual(@as(?u64, due), client.deadline());
-        try std.testing.expectEqual(timeouts, setup.client_service.reqresp.counters.timeouts);
     }
     setup.pair.now.mono_ms = due;
     _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, setup.pair.now, 100, &.{}, &.{});
-    try std.testing.expectEqual(timeouts + 1, setup.client_service.reqresp.counters.timeouts);
     for (setup.client.control.operations) |op| if (op.request) |active| {
         try std.testing.expect(!std.meta.eql(handle, active));
     };

@@ -11,6 +11,13 @@ const first: reqresp.ForkEntry = .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu };
 const second: reqresp.ForkEntry = .{ .digest = .{ 5, 6, 7, 8 }, .fork = .fulu };
 const phase0: reqresp.ForkEntry = .{ .digest = .{ 9, 10, 11, 12 }, .fork = .phase0 };
 
+/// Admission refusals for `reason`, summed over every method.
+fn refusals(owner: *const reqresp.ReqResp, reason: reqresp.metrics.AdmissionRefusal) u64 {
+    var total: u64 = 0;
+    for (owner.protocol_counters) |counts| total += counts.admission_refusals[@intFromEnum(reason)];
+    return total;
+}
+
 fn request(setup: *harness.Pair, which: protocol.Protocol, bytes: []const u8, sink: []u8, options: reqresp.RequestOptions) !reqresp.RequestHandle {
     return setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, which, bytes, sink, options, setup.shared.pair.now);
 }
@@ -189,7 +196,6 @@ test "reqresp active hostile coalesced context rejects before sink writes with o
             try setup.pumpOnce();
             try std.testing.expectEqual(@as(u16, 0), setup.shared.client.reqresp.active().outbound);
             try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.active().inbound);
-            try std.testing.expectEqual(@as(u64, 1), setup.shared.client.reqresp.counters.failures);
         }
     }
 }
@@ -478,11 +484,7 @@ test "reqresp request admission empty success quota waiting malformed attempts a
     try emptyExchange(&setup, .data_column_sidecars_by_range_v1, bytes[0..20], true, 0);
     try emptyExchange(&setup, .data_column_sidecars_by_range_v1, bytes[0..20], true, 0);
     try emptyExchange(&setup, .data_column_sidecars_by_range_v1, bytes[0..20], false, 139);
-    try std.testing.expectEqual(@as(u64, 14), setup.shared.server.reqresp.counters.inspected);
-    try std.testing.expectEqual(@as(u64, 8), setup.shared.server.reqresp.counters.admitted);
-    try std.testing.expectEqual(@as(u128, 10), setup.shared.server.reqresp.counters.charged_work);
-    try std.testing.expectEqual(@as(u64, 1), setup.shared.server.reqresp.counters.peer_refusals);
-    try std.testing.expectEqual(@as(u64, 2), setup.shared.server.reqresp.counters.malformed);
+    try std.testing.expectEqual(@as(u64, 1), refusals(&setup.shared.server.reqresp, .peer_quota) + refusals(&setup.shared.server.reqresp, .request_starts));
 }
 
 test "reqresp permits an empty contextual response below its payload minimum" {
@@ -573,8 +575,7 @@ test "reqresp request admission concurrent connections and reconnect retain full
     const reconnected = try support.connectPair(&setup.shared.pair);
     setup.shared.handles = .{ .client = reconnected.client, .server = reconnected.server };
     try emptyExchange(&setup, .blocks_by_root_v2, &.{}, false, 139);
-    try std.testing.expectEqual(@as(u64, 2), setup.shared.server.reqresp.counters.admitted);
-    try std.testing.expectEqual(@as(u64, 0), setup.shared.server.reqresp.counters.peer_refusals);
+    try std.testing.expectEqual(@as(u64, 0), refusals(&setup.shared.server.reqresp, .peer_quota) + refusals(&setup.shared.server.reqresp, .request_starts));
 }
 
 fn changeClientIdentity(setup: *harness.Pair, seed: u8) !void {
@@ -621,8 +622,8 @@ test "reqresp request admission distinct identity peer aggregate and retained ca
             try emptyExchange(&setup, .blocks_by_root_v2, &.{}, true, 0);
             try waitExchange(&setup, .blob_sidecars_by_root_v1, &.{});
         }
-        try std.testing.expectEqual(@as(u64, 0), setup.shared.server.reqresp.counters.peer_refusals);
-        try std.testing.expectEqual(@as(u64, if (identities == 1) 2 else 0), setup.shared.server.reqresp.counters.identity_capacity_refusals);
-        try std.testing.expectEqual(@as(u64, 0), setup.shared.server.reqresp.counters.aggregate_refusals);
+        try std.testing.expectEqual(@as(u64, 0), refusals(&setup.shared.server.reqresp, .peer_quota) + refusals(&setup.shared.server.reqresp, .request_starts));
+        try std.testing.expectEqual(@as(u64, if (identities == 1) 2 else 0), refusals(&setup.shared.server.reqresp, .identity_capacity));
+        try std.testing.expectEqual(@as(u64, 0), refusals(&setup.shared.server.reqresp, .global_quota));
     }
 }

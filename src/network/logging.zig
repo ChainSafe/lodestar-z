@@ -31,10 +31,8 @@ pub const Record = struct {
     len: u16,
     message: [message_capacity]u8,
 };
-pub const Counts = struct { emitted: u64 = 0, dropped: u64 = 0, suppressed: u64 = 0, truncated: u64 = 0 };
+pub const Counts = struct { dropped: u64 = 0, suppressed: u64 = 0, truncated: u64 = 0 };
 pub const Stats = struct {
-    queued: u16 = 0,
-    high_water: u16 = 0,
     counts: [scope_count][level_count]Counts = @splat(@splat(.{})),
 
     pub fn total(self: *const Stats, comptime field: []const u8) u64 {
@@ -46,32 +44,15 @@ pub const Stats = struct {
     }
 
     pub fn write(self: *const Stats, writer: *prom.Encoder) prom.Error!void {
-        try writer.scalar(.{
-            .name = "lodestar_native_logs_queued",
-            .kind = .gauge,
-            .help = "Native log records awaiting host delivery",
-        }, self.queued);
-        try writer.scalar(.{
-            .name = "lodestar_native_logs_capacity",
-            .kind = .gauge,
-            .help = "Native log queue capacity",
-        }, capacity);
-        try writer.scalar(.{
-            .name = "lodestar_native_logs_high_water",
-            .kind = .gauge,
-            .help = "Maximum native log queue occupancy",
-        }, self.high_water);
-        inline for (.{ "emitted", "dropped", "suppressed", "truncated" }) |kind| {
-            const records = try writer.family(.{
-                .name = "lodestar_native_logs_" ++ kind ++ "_total",
-                .kind = .counter,
-                .help = "Native log records " ++ kind ++ " by scope and level",
-                .labels = &.{ "scope", "level" },
-            });
-            inline for (@typeInfo(Scope).@"enum".fields) |scope| {
-                inline for (@typeInfo(std.log.Level).@"enum".fields) |level| {
-                    try records.sample(.{ scope.name, levelName(@enumFromInt(level.value)) }, @field(self.counts[scope.value][level.value], kind));
-                }
+        const records = try writer.family(.{
+            .name = "lodestar_native_logs_dropped_total",
+            .kind = .counter,
+            .help = "Native log records dropped by scope and level",
+            .labels = &.{ "scope", "level" },
+        });
+        inline for (@typeInfo(Scope).@"enum".fields) |scope| {
+            inline for (@typeInfo(std.log.Level).@"enum".fields) |level| {
+                try records.sample(.{ scope.name, levelName(@enumFromInt(level.value)) }, self.counts[scope.value][level.value].dropped);
             }
         }
     }
@@ -147,10 +128,8 @@ pub const Sink = struct {
         record.level = level;
         record.truncated = truncated;
         record.len = @intCast(message.len);
-        counts.emitted +|= 1;
         counts.truncated +|= @intFromBool(truncated);
         self.len += 1;
-        self.stats.high_water = @max(self.stats.high_water, self.len);
     }
 
     pub fn peek(self: *Sink, out: []Record) struct { count: usize, stats: Stats, more: bool } {
@@ -159,9 +138,7 @@ pub const Sink = struct {
         defer self.unlock();
         const count = @min(out.len, self.len);
         for (0..count) |i| out[i] = self.records[(@as(usize, self.head) + i) % capacity];
-        var stats = self.stats;
-        stats.queued = self.len;
-        return .{ .count = count, .stats = stats, .more = self.len > count };
+        return .{ .count = count, .stats = self.stats, .more = self.len > count };
     }
 
     /// Commit only after the host has copied the entire batch. Producers never evict queued records.
@@ -176,9 +153,7 @@ pub const Sink = struct {
     pub fn snapshot(self: *Sink) Stats {
         self.lock();
         defer self.unlock();
-        var result = self.stats;
-        result.queued = self.len;
-        return result;
+        return self.stats;
     }
     fn lock(self: *Sink) void {
         std.Io.Threaded.mutexLock(&self.mutex);

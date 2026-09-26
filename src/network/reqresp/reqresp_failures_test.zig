@@ -64,6 +64,13 @@ fn waitForRequest(setup: *Pair) !void {
     try std.testing.expect(request_seen);
 }
 
+/// Admission refusals of one method, over every reason.
+fn refused(owner: *const reqresp.ReqResp, which: Protocol) u64 {
+    var total: u64 = 0;
+    for (owner.protocol_counters[@intFromEnum(which)].admission_refusals) |count| total += count;
+    return total;
+}
+
 test "reqresp fails a request whose peer stops making progress" {
     var setup: Pair = .{};
     try setup.init(.{}, .{ .progress_timeout_ms = 2_000, .host_timeout_ms = 2_000 });
@@ -90,7 +97,6 @@ test "reqresp fails a request whose peer stops making progress" {
     try std.testing.expect(client_failure != null and client_failure.? == .timeout);
     try std.testing.expect(server_failure != null);
     try std.testing.expect(server_failure.? == .host_timeout or server_failure.? == .stream_closed);
-    try std.testing.expectEqual(@as(u64, 1), setup.shared.client.reqresp.counters.timeouts);
     try setup.pumpOnce();
     try std.testing.expectEqual(@as(u16, 0), setup.shared.client.reqresp.active().outbound);
     try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.active().inbound);
@@ -296,9 +302,9 @@ test "reqresp bounds concurrent requests per protocol on both sides" {
     _ = try setup.openRaw(.blocks_by_range_v2);
     for (0..40) |_| {
         try setup.pumpOnce();
-        if (setup.shared.server.reqresp.protocol_counters[@intFromEnum(Protocol.blocks_by_range_v2)].rate_limited > 0) break;
+        if (refused(&setup.shared.server.reqresp, .blocks_by_range_v2) > 0) break;
     }
-    try std.testing.expectEqual(@as(u64, 1), setup.shared.server.reqresp.protocol_counters[@intFromEnum(Protocol.blocks_by_range_v2)].rate_limited);
+    try std.testing.expectEqual(@as(u64, 1), refused(&setup.shared.server.reqresp, .blocks_by_range_v2));
     try std.testing.expectEqual(@as(u8, 2), setup.shared.server.reqresp.inboundCount(setup.shared.handles.server, .blocks_by_range_v2));
     try std.testing.expect(setup.shared.server.reqresp.finish(first_incoming.?, setup.shared.pair.now));
     var rounds: usize = 0;
@@ -819,8 +825,6 @@ test "reqresp cancellation removes Router ownership before output delivery" {
     try std.testing.expect(events[0].failed.reason == .cancelled);
     try std.testing.expect(!setup.shared.client.reqresp.cancel(handle));
     try std.testing.expectEqual(@as(usize, 0), setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &events }).control);
-    try std.testing.expectEqual(@as(u64, 0), setup.shared.client.reqresp.counters.failures);
-    try std.testing.expectEqual(@as(u64, 1), setup.shared.client.reqresp.protocol_counters[@intFromEnum(Protocol.ping_v1)].outgoing_cancelled);
     try std.testing.expectEqual(@as(u64, 0), setup.shared.client.reqresp.protocol_counters[@intFromEnum(Protocol.ping_v1)].outgoing_errors);
     try std.testing.expectEqual(@as(usize, 0), setup.shared.client.reqresp.resourceSnapshot().outbound_occupied);
     try std.testing.expectEqual(@as(usize, 0), setup.shared.client.reqresp.resourceSnapshot().pending_terminals);
@@ -839,7 +843,6 @@ test "reqresp caller cardinality rejects invalid bounds before opening a stream"
         try std.testing.expectError(error.InvalidRequestOptions, setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .ping_v1, &bytes, &sink, invalid, setup.shared.pair.now));
     }
     try std.testing.expectEqual(@as(u16, 0), setup.shared.client.reqresp.active().outbound);
-    try std.testing.expectEqual(@as(u64, 0), setup.shared.client.reqresp.counters.requests_sent);
 }
 
 test "reqresp narrowed chunks retire without FIN after a host pause" {
@@ -951,8 +954,6 @@ test "reqresp cancellation releases read held chunk and response write states on
         try std.testing.expect(events[0].failed.reason == .cancelled);
         try std.testing.expectEqual(@as(usize, 1), setup.shared.server.reqresp.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .control = &events }).control);
         try std.testing.expect(events[0].failed.reason == .cancelled);
-        try std.testing.expectEqual(@as(u64, 0), setup.shared.client.reqresp.counters.failures);
-        try std.testing.expectEqual(@as(u64, 0), setup.shared.server.reqresp.counters.failures);
     }
 }
 
@@ -1007,7 +1008,6 @@ test "reqresp negotiated handoff starts a fresh progress interval" {
     try std.testing.expect(ready);
     var events: [1]Event = undefined;
     try std.testing.expectEqual(@as(usize, 0), setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &events }).control);
-    try std.testing.expectEqual(@as(u64, 0), setup.shared.client.reqresp.counters.timeouts);
     try std.testing.expect(setup.shared.client.reqresp.cancel(handle));
 }
 
@@ -1065,7 +1065,6 @@ test "reqresp admission wait expires as local policy and not peer timeout" {
         expired = true;
     };
     try std.testing.expect(expired);
-    try std.testing.expectEqual(@as(u64, 0), setup.shared.server.reqresp.counters.timeouts);
 }
 
 test "reqresp blocked response writes expire and do not advertise ready local work" {
@@ -1435,9 +1434,9 @@ test "reqresp request admission host capacity cancellation and queued cancellati
     const outbound = try setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .blocks_by_root_v2, &.{}, sink, .{}, setup.shared.pair.now);
     for (0..50) |_| {
         try setup.pumpOnce();
-        if (setup.shared.server.reqresp.counters.admitted == 1) break;
+        if (setup.shared.server.reqresp.resourceSnapshot().serving_occupied == 1) break;
     }
-    try std.testing.expectEqual(@as(u64, 1), setup.shared.server.reqresp.counters.admitted);
+    try std.testing.expectEqual(@as(usize, 1), setup.shared.server.reqresp.resourceSnapshot().serving_occupied);
     try std.testing.expectEqual(@as(usize, 0), setup.server_count);
     const slot = for (setup.shared.server.reqresp.inbound, 0..) |*candidate, index| {
         if (candidate.request.occupied()) break index;
@@ -1480,7 +1479,6 @@ test "reqresp request admission host capacity cancellation and queued cancellati
     try std.testing.expect(failed);
     try setup.pumpOnce();
     try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.active().inbound);
-    try std.testing.expectEqual(@as(u128, 1), setup.shared.server.reqresp.counters.charged_work);
     try std.testing.expectEqual(@as(usize, 0), setup.shared.server.reqresp.resourceSnapshot().pending_events);
 }
 
@@ -1625,7 +1623,6 @@ test "reqresp absolute policies validate all durations before stream admission" 
             try std.testing.expectError(error.InvalidRequestOptions, setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .status_v1, &request, &sink, .{ .absolute_timeouts = policy }, setup.shared.pair.now));
         }
     }
-    try std.testing.expectEqual(@as(u64, 0), setup.shared.client.reqresp.counters.requests_sent);
     try std.testing.expectEqual(@as(usize, 0), setup.shared.client.router.negotiator.active());
 }
 

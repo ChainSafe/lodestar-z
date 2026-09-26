@@ -86,7 +86,6 @@ pub const Client = struct {
                 // quiche may already have retired that stream if its response FIN was read by the router.
                 request.io.writing = false;
                 request.io.outbox = .{};
-                owner.protocol_counters[@intFromEnum(request.protocol)].request_write_stops +|= 1;
                 std.log.scoped(.network_reqresp).debug("request_write_stopped request={d}:{d} connection={d}:{d} method={s} detail={s} response_fin={any} awaiting_response=true", .{ index, request.generation, request.conn.index, request.conn.generation, @tagName(request.protocol), @errorName(err), request.io.fin_seen });
                 break :stopped RequestIO.Flush{ .done = true };
             }
@@ -216,7 +215,6 @@ pub const Client = struct {
             };
         }
         request.chunks += 1;
-        owner.counters.chunks_received += 1;
         slot.host_hold_started_ms = now.mono_ms;
         request.queue(.{ .chunk = .{
             .request = request.handle(index),
@@ -296,7 +294,6 @@ pub const Client = struct {
             },
         };
         owner.outbound_by_connection[conn.index].append(owner.outbound, "conn_link", index);
-        owner.counters.requests_sent += 1;
         owner.protocol_counters[@intFromEnum(which)].outgoing +|= 1;
         std.log.scoped(.network_reqresp).debug("request_started direction=outbound request={d}:{d} connection={d}:{d} stream={d} method={s} bytes={d} max_chunks={d}", .{ index, slot.request.generation, conn.index, conn.generation, stream.id, @tagName(which), request_ssz.len, chunks_max });
         assert(slot.request.active());
