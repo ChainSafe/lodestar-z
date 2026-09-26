@@ -21,7 +21,9 @@ comptime {
 }
 pub const topic_max = native.topic.topic_max_len;
 pub const Token = struct { index: u16, generation: u64 };
-pub const State = enum { free, capturing, needs_check, checking, waiting, queued, copying, delivered, verdict_pending };
+/// `acknowledging`: the owner disposed of a message the host was handed, and the cell keeps its generation until an
+/// exchange hands that acknowledgement to the host.
+pub const State = enum { free, capturing, needs_check, checking, waiting, queued, copying, delivered, verdict_pending, acknowledging };
 pub const Cell = struct {
     state: State = .free,
     generation: u64 = 0,
@@ -52,6 +54,8 @@ pub const Cell = struct {
     execution_bytes: usize = 0,
     source_charge: usize = 0,
     retired: bool = false,
+    /// The host was handed this message and awaits the owner's disposition of it.
+    exposed: bool = false,
     verdict: native.Verdict = .ignore,
 };
 pub const Diagnostics = struct {
@@ -60,6 +64,7 @@ pub const Diagnostics = struct {
     highWater: usize = 0,
     queued: usize = 0,
     pendingVerdicts: usize = 0,
+    acknowledging: usize = 0,
     reservedBytes: usize = 0,
     reservedBytesHighWater: usize = 0,
     payloadBytes: usize = 0,
@@ -374,6 +379,7 @@ pub const GossipProcessor = struct {
             .copying => &self.diag.copying,
             .needs_check, .checking => &self.diag.checking,
             .verdict_pending => &self.diag.pendingVerdicts,
+            .acknowledging => &self.diag.acknowledging,
             else => null,
         };
         if (count) |value| {
@@ -415,13 +421,16 @@ pub const GossipProcessor = struct {
         self.diag.executingBytes -= cell.execution_bytes;
         cell.executing = false;
     }
+    /// Frees the cell's resources. A cell the host was handed then awaits acknowledgement of this disposition,
+    /// unless the table closed.
     pub fn retire(self: *GossipProcessor, handle: Token) void {
         const cell = self.get(handle).?;
-        assert(cell.state != .copying);
+        assert(cell.state != .copying and cell.state != .acknowledging);
+        const acknowledged = cell.exposed and !self.closed;
         if (cell.expiry_link.linked) self.expiry.remove(self.cells, "expiry_link", handle.index);
         self.releasePayload(cell);
         self.releaseExecution(cell);
-        self.transition(handle.index, .free);
+        self.transition(handle.index, if (acknowledged) .acknowledging else .free);
         self.used_items[@intFromEnum(cell.kind)] -= 1;
         if (cell.source_charge > 0) {
             const source = cell.source.?;
@@ -431,12 +440,39 @@ pub const GossipProcessor = struct {
                 usage.bytes[@intFromEnum(cell.kind)] -= cell.source_charge;
             }
         }
+        const state = cell.state;
         const generation = cell.generation;
         const kind = cell.kind;
         const link = cell.state_link;
-        cell.* = .{ .generation = generation, .kind = kind, .state_link = link };
-        if (generation == std.math.maxInt(u64)) self.queue(kind, .free).remove(self.cells, "state_link", handle.index);
+        cell.* = .{ .state = state, .generation = generation, .kind = kind, .state_link = link };
+        if (!acknowledged) self.freed(handle.index);
         self.diag.occupied -= 1;
+    }
+    /// A cell whose last generation is spent leaves the free list for good.
+    fn freed(self: *GossipProcessor, index: u32) void {
+        const cell = &self.cells[index];
+        if (cell.generation == std.math.maxInt(u64)) self.queue(cell.kind, .free).remove(self.cells, "state_link", index);
+    }
+    /// Up to `out.len` owner dispositions awaiting acknowledgement, by kind priority. O(out.len + kinds).
+    pub fn acknowledgements(self: *const GossipProcessor, out: []Token) usize {
+        var count: usize = 0;
+        for (limits_mod.priority) |kind| {
+            var index = self.queueValue(kind, .acknowledging).head;
+            for (0..out.len - count) |_| {
+                if (index == none) break;
+                out[count] = self.token(index);
+                count += 1;
+                index = self.cells[index].state_link.next;
+            }
+        }
+        return count;
+    }
+    /// Frees a cell whose disposition the host received. A token close freed, or a reused cell, is ignored.
+    pub fn acknowledge(self: *GossipProcessor, handle: Token) void {
+        const cell = self.get(handle) orelse return;
+        if (cell.state != .acknowledging) return;
+        self.transition(handle.index, .free);
+        self.freed(handle.index);
     }
     pub fn oldest(self: *const GossipProcessor) ?Token {
         var selected: u32 = none;
@@ -508,6 +544,10 @@ pub const GossipProcessor = struct {
         self.closed = true;
         for (self.cells, 0..) |*cell, i| {
             if (cell.state == .free) continue;
+            if (cell.state == .acknowledging) {
+                self.acknowledge(self.token(@intCast(i)));
+                continue;
+            }
             cell.retired = true;
             if (cell.state != .copying and cell.state != .capturing) self.retire(self.token(@intCast(i)));
         }
@@ -666,6 +706,7 @@ pub const GossipProcessor = struct {
             self.transition(handle.index, if (success) .delivered else .queued);
             if (!success) self.releaseExecution(cell);
             if (success) {
+                cell.exposed = true;
                 self.diag.messagesCopied +|= 1;
                 self.diag.bytesCopied +|= cell.input.len;
                 self.releasePayload(cell);
@@ -700,10 +741,10 @@ pub const GossipProcessor = struct {
     }
 
     /// Work the owner carries over turns in bounded batches: a slot prune, a dependency recheck,
-    /// dependency promotion or queued verdicts.
-    pub fn pending(self: *const GossipProcessor) bool {
+    /// dependency promotion or, unless `verdicts` is false, queued verdicts.
+    pub fn pending(self: *const GossipProcessor, verdicts: bool) bool {
         if (self.closed) return false;
-        return self.prune_remaining > 0 or self.dependencies.rechecking() or self.dependencies.promoting.len > 0 or self.diag.pendingVerdicts > 0;
+        return self.prune_remaining > 0 or self.dependencies.rechecking() or self.dependencies.promoting.len > 0 or (verdicts and self.diag.pendingVerdicts > 0);
     }
     /// Earliest attestation group or expiry deadline. O(1).
     pub fn deadline(self: *const GossipProcessor) ?u64 {

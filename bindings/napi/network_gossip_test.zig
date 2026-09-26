@@ -92,9 +92,15 @@ test "gossip flags remain independent of full command capacity and reject stale 
         try std.testing.expect(!table.report(token, .reject, 2));
     }
     try std.testing.expectEqual(@as(usize, 64), table.snapshot(1).pendingVerdicts);
-    try std.testing.expect(table.pending());
+    try std.testing.expect(table.pending(true));
     table.expire(100);
-    try std.testing.expect(!table.pending() and table.deadline() == null);
+    try std.testing.expect(!table.pending(true) and table.deadline() == null);
+    // Expiry disposed of every delivered message; each cell returns once an exchange acknowledges it.
+    try std.testing.expectEqual(@as(usize, 64), table.snapshot(1).acknowledging);
+    try std.testing.expectError(error.NetworkGossipFull, table.reserve(1));
+    var acknowledged: [64]g.Token = undefined;
+    try std.testing.expectEqual(@as(usize, 64), table.acknowledgements(&acknowledged));
+    for (acknowledged) |token| table.acknowledge(token);
     const replacement = try table.reserve(1);
     table.get(replacement).?.deadline = 200;
     table.install(replacement, "y");

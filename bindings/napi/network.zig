@@ -233,6 +233,17 @@ pub fn exchange(self: *@This(), actions_value: js.Value, demand_value: js.Value)
     return .{ .val = result };
 }
 
+/// A private control for binding ownership tests: while held, the owner leaves reported verdicts unapplied, so no
+/// acknowledgement follows them; a release wakes the owner.
+pub fn holdVerdicts(self: *@This(), held: js.Value) !void {
+    const runtime = try self.owner();
+    const value = try cfg.boolean(held.val);
+    runtime.lock();
+    defer runtime.unlock();
+    runtime.verdicts_held = value;
+    if (!value) runtime.signalLocked();
+}
+
 /// Terminates the process for a bridge contract failure the host escalates: 1, an exchange refused a batch the
 /// host generated; 3, the host's demand failed on three consecutive turns.
 pub fn fail(_: *@This(), trigger_value: js.Value, reason_value: js.Value) !void {

@@ -358,6 +358,11 @@ export interface NativeExchange {
   readonly serving: readonly NativeIncomingRequest[];
   readonly checks: readonly NativeGossipDependencyCheck[];
   readonly gossip: NativeGossipBatch | null;
+  /**
+   * Delivered messages the owner has disposed of, whatever the demand: it applied their verdicts, found them already
+   * resolved or expired them. Each handle arrives once; close drops the rest. Not a peer penalty.
+   */
+  readonly acknowledged: readonly NativeGossipHandle[];
   /** Another exchange with the same enablement would make progress. */
   readonly more: boolean;
   /** Work waits for capacity the host reported as zero, or for a service this demand disabled. */
@@ -444,6 +449,8 @@ export interface NativeNetworkApplicationRuntime {
   exchange(actions: readonly NativeAction[], demand: NativeExchangeDemand): NativeExchange;
   /** Terminates the process for an escalated bridge contract failure. */
   fail(trigger: NativeEscalation, reason: string): never;
+  /** Private control for binding ownership tests: while held, the owner leaves reported verdicts unapplied. */
+  holdVerdicts(held: boolean): void;
   close(): Promise<NativeRuntimeCloseResult>;
 }
 
@@ -760,6 +767,8 @@ export interface NativeGossipDiagnostics {
   highWater: number;
   queued: number;
   pendingVerdicts: number;
+  /** Owner dispositions of delivered messages awaiting an exchange's acknowledgement. */
+  acknowledging: number;
   reservedBytes: number;
   reservedBytesHighWater: number;
   payloadBytes: number;

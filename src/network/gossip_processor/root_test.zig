@@ -215,6 +215,59 @@ test "gossip processor copied host work survives native expiry but close release
     }
 }
 
+test "gossip processor holds a delivered message's cell until an exchange acknowledges its owner disposition" {
+    const limits: p.limits_mod.Limits = @splat(.{ .items = 8, .bytes = 32768 });
+    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits });
+    defer table.deinit();
+    defer table.close();
+    const applied = try add(&table, .beacon_block, null);
+    const late = try add(&table, .beacon_block, null);
+    const expired = try add(&table, .beacon_block, null);
+    table.finish(&table.claim(1), true);
+    for ([_]p.Token{ applied, late, expired }) |token| try t.expectEqual(p.State.delivered, table.get(token).?.state);
+    const unseen = try add(&table, .beacon_block, null);
+
+    // The owner applies one verdict; the host reports another after expiry, and a third expires while pending.
+    try t.expect(table.report(applied, .accept, 2));
+    table.retire(applied);
+    try t.expect(table.report(expired, .ignore, 2));
+    table.get(unseen).?.deadline = 200;
+    table.expire(100);
+    try t.expect(!table.report(late, .reject, 101));
+    // A message the host was never handed frees at once.
+    table.ignore(table.get(unseen).?);
+    table.retire(unseen);
+
+    // Each disposition holds only its cell: payload, charges and occupancy are released.
+    try t.expectEqual(@as(usize, 3), table.diag.acknowledging);
+    try t.expectEqual(@as(usize, 0), table.diag.occupied);
+    try t.expectEqual(@as(usize, 0), table.diag.payloadBytes);
+    try t.expect(!table.report(applied, .accept, 101));
+    var out: [4]p.Token = undefined;
+    try t.expectEqual(@as(usize, 3), table.acknowledgements(&out));
+    for (out[0..3]) |token| try t.expect(std.meta.eql(token, applied) or std.meta.eql(token, late) or std.meta.eql(token, expired));
+    try t.expectEqual(@as(usize, 1), table.acknowledgements(out[0..1]));
+
+    // Acknowledged cells return; a reused cell ignores its previous generation's acknowledgement.
+    table.acknowledge(applied);
+    table.acknowledge(applied);
+    try t.expectEqual(@as(usize, 2), table.diag.acknowledging);
+    var reused = try add(&table, .beacon_block, null);
+    for (0..limits[0].items) |_| {
+        if (reused.index == applied.index) break;
+        reused = try add(&table, .beacon_block, null);
+    }
+    try t.expectEqual(applied.index, reused.index);
+    try t.expect(reused.generation > applied.generation);
+    table.acknowledge(applied);
+    try t.expectEqual(p.State.queued, table.get(reused).?.state);
+
+    // Close drops outstanding acknowledgements.
+    table.close();
+    try t.expectEqual(@as(usize, 0), table.diag.acknowledging);
+    try t.expectEqual(@as(usize, 0), table.acknowledgements(&out));
+}
+
 test "gossip processor expired execution diagnostics track delivered work until actual completion" {
     const limits: p.limits_mod.Limits = @splat(.{ .items = 8, .bytes = 16384 });
     var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits });
@@ -278,7 +331,7 @@ test "gossip processor rechecks every waiting root in bounded passes and runs on
         table.maintain(1, 0);
         turns += 1;
     }
-    try t.expect(!table.pending());
+    try t.expect(!table.pending(true));
     try t.expectEqual(@as(usize, 0), table.snapshot(1).waiting);
     // Each pass walks every row and spends one step ending.
     try t.expectEqual((2 * (rows + 1) + p.batch_max - 1) / p.batch_max, turns);

@@ -173,6 +173,8 @@ pub const Runtime = struct {
     results: @import("network_exchange.zig").Results = .{},
     /// Owner thread: an event capture left host work for the next apply, so the next turn is due now.
     host_due: bool = false,
+    /// The owner leaves reported verdicts unapplied while an ownership test holds them.
+    verdicts_held: bool = false,
     env_alive: bool = true,
     disposed: bool = false,
     close_deferred: ?napi.Deferred = null,
@@ -356,7 +358,7 @@ pub const Runtime = struct {
     /// quiescence, and nothing once the close result settled, so a host may stop exchanging.
     pub fn wantLocked(self: *Runtime, row: Row) Place {
         switch (row) {
-            .legacy => return if (self.settleableLocked() or (self.quiescent and !self.close_settled)) .control else .none,
+            .legacy => return if (self.settleableLocked() or self.acknowledgingLocked() or (self.quiescent and !self.close_settled)) .control else .none,
             .peers => return if (!self.close_settled and self.lane != null and self.lane.?.len > 0) .payload else .none,
             .checks => {
                 const table = if (self.gossip) |*table| table else return .none;
@@ -398,6 +400,10 @@ pub const Runtime = struct {
                 self.terminal_error = err;
             },
         };
+    }
+    /// An owner disposition of a delivered message that an exchange would acknowledge now. O(1).
+    pub fn acknowledgingLocked(self: *const Runtime) bool {
+        return if (self.gossip) |*table| table.diag.acknowledging > 0 else false;
     }
     /// A publication, command, request or incoming completion that an exchange would settle now. O(1).
     pub fn settleableLocked(self: *const Runtime) bool {
