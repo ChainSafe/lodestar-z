@@ -1,5 +1,4 @@
 const Admission = @import("admission.zig").Admission;
-const Outcome = @import("admission.zig").Outcome;
 const global_quota = @import("admission.zig").global_quota;
 const source_quota = @import("admission.zig").source_quota;
 const std = @import("std");
@@ -52,7 +51,7 @@ test "discovery admission refuses full source accounting until credit has replen
     }
     const other = types.Address{ .ip4 = .{ .octets = .{ 192, 1, 0, 1 }, .port = 0 } };
     try std.testing.expect(!admission.allow(.challenge, &other, 249));
-    try std.testing.expectEqual(@as(u64, 1), admission.counts[0][@intFromEnum(Outcome.source_capacity)]);
+    try std.testing.expect(!admission.sources.contains(other));
     try std.testing.expect(admission.allow(.challenge, &other, 250));
     try std.testing.expect(admission.sources.contains(other));
 }

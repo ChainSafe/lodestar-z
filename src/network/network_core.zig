@@ -204,7 +204,6 @@ pub const NetworkCore = struct {
         errdefer self.peer_manager.deinit();
         self.peer_manager.loadRemembered(startup.remembered, self.last_now);
         self.service.identify.bind(&self.transport.engine);
-        self.peer_manager.metrics_io = io;
         self.service.gossipsub.metrics_io = io;
         self.native_events = try allocator.alloc(engine.Event, @import("quic/limits.zig").events_per_turn_max);
         errdefer allocator.free(self.native_events);

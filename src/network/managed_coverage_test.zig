@@ -142,10 +142,12 @@ test "managed coverage gives initial subscriptions finite grace even after metad
     setup.pair.advance(1);
     setup.client.reconcile(&setup.client_service, setup.pair.now);
     try equal(@as(u16, 0), setup.client.selection.retained_count);
-    try equal(@as(u64, 1), setup.client.counters.policy_disconnects);
+    const closing = &setup.client.control.schedules[snapshots[0].peer.index];
+    try expect(closing.closing != null);
     try equal(setup.pair.now.mono_ms + manager.replacement_interval_ms, setup.client.replacement_after_ms);
     try equal(@as(u16, 1), setup.client.selection.dial_budget);
     try equal(@as(u16, 2), setup.client.coverageDeficits().attestation);
+    const closed = closing.closing.?;
     for (0..10) |_| setup.client.reconcile(&setup.client_service, setup.pair.now);
-    try equal(@as(u64, 1), setup.client.counters.policy_disconnects);
+    try std.testing.expectEqualDeep(closed, closing.closing.?);
 }

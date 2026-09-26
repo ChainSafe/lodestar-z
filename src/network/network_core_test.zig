@@ -55,11 +55,11 @@ const MaintenancePeers = struct {
             initialized += 1;
         }
         const hub = &nodes[0];
-        errdefer |err| std.debug.print("maintenance bootstrap failed: {t}, peers={any}, operations={any}, requests={any}\n", .{ err, hub.peerCounts(), hub.peer_manager.control.resourceSnapshot(), hub.service.reqresp.active() });
+        errdefer |err| std.debug.print("maintenance bootstrap failed: {t}, peers={any}, operations={any}, requests={any}\n", .{ err, hub.peerCounts(), hub.peer_manager.control.operationsInFlight(), hub.service.reqresp.active() });
         for (nodes[1..]) |*remote| try hub.connectUntil(&remote.peerId(), &.{remote.transport.localAddress()}, hub.last_now, hub.last_now.mono_ms +| @import("peers/dialing.zig").connect_timeout_ms);
         for (0..3000) |_| {
             try step(&.{ &nodes[0], &nodes[1], &nodes[2], &nodes[3] });
-            if (hub.peerCounts().relevant != 3 or hub.peer_manager.control.resourceSnapshot().operations != 0) continue;
+            if (hub.peerCounts().relevant != 3 or hub.peer_manager.control.operationsInFlight() != 0) continue;
             var snapshots: [4]t.Snapshot = undefined;
             const count = hub.peer_manager.snapshots(&snapshots);
             var metadata = true;
@@ -104,7 +104,7 @@ test "managed maintenance isolates slow peers and full application capacity" {
     var fixture = try MaintenancePeers.init();
     defer fixture.deinit();
     const hub = &fixture.nodes[0];
-    errdefer |err| std.debug.print("maintenance isolation failed: {t}, peers={any}, operations={any}, requests={any}\n", .{ err, hub.peerCounts(), hub.peer_manager.control.resourceSnapshot(), hub.service.reqresp.active() });
+    errdefer |err| std.debug.print("maintenance isolation failed: {t}, peers={any}, operations={any}, requests={any}\n", .{ err, hub.peerCounts(), hub.peer_manager.control.operationsInFlight(), hub.service.reqresp.active() });
     const healthy = &fixture.nodes[3];
     const slow = hub.peer_manager.catalog.find(&fixture.nodes[1].peerId()).?;
     const healthy_peer = hub.peer_manager.catalog.find(&healthy.peerId()).?;
@@ -129,14 +129,14 @@ test "managed maintenance isolates slow peers and full application capacity" {
         control.maintain(&hub.service, &hub.peer_manager.catalog, &hub.transport.engine, &hub.peer_manager.local, hub.last_now);
         try std.testing.expectEqual(started + turn + 1, control.counters.started);
     }
-    try std.testing.expectEqual(@as(usize, 3), control.resourceSnapshot().operations);
+    try std.testing.expectEqual(@as(usize, 3), control.operationsInFlight());
     for (0..1000) |_| {
         try MaintenancePeers.step(&.{ hub, healthy });
         const snapshot = hub.peer_manager.catalog.get(healthy_peer).?;
-        if (snapshot.status.?.head_slot == 42 and control.resourceSnapshot().operations == 2) break;
+        if (snapshot.status.?.head_slot == 42 and control.operationsInFlight() == 2) break;
     }
     try std.testing.expectEqual(@as(u64, 42), hub.peer_manager.catalog.get(healthy_peer).?.status.?.head_slot);
-    try std.testing.expectEqual(@as(usize, 2), control.resourceSnapshot().operations);
+    try std.testing.expectEqual(@as(usize, 2), control.operationsInFlight());
     try std.testing.expectEqual(@as(u16, 2), hub.service.reqresp.outboundApplicationCount(conn));
     try std.testing.expectEqual(calls, hub.reservations.allocation_calls);
 }
@@ -186,7 +186,6 @@ test "managed runtime metrics copy peer processing work without advancing it" {
     defer node.deinit(std.testing.io);
     node.peer_manager.reconcile(&node.service, node.last_now);
     const peer_work = node.peer_manager.counters;
-    const dial_work = node.peer_manager.dialing.counters;
     try std.testing.expect(peer_work.catalog_deadline_rows > 0);
     const metrics = @import("metrics/export.zig");
     const context = metrics.Context.init(&node, node.last_now, true);
@@ -195,7 +194,6 @@ test "managed runtime metrics copy peer processing work without advancing it" {
     var writer = std.Io.Writer.fixed(bytes);
     try metrics.write(&context, &writer);
     try std.testing.expectEqualDeep(peer_work, node.peer_manager.counters);
-    try std.testing.expectEqualDeep(dial_work, node.peer_manager.dialing.counters);
 }
 
 test "managed runtime local transaction sequences no-op schedule and rollback" {
@@ -652,7 +650,6 @@ test "managed runtime socket faults preserve the other owner and local dial refu
         try std.testing.expectEqual(error.Canceled, result.failure.?);
         if (socket.handle == node.discovery.?.transport.sockets.primary().handle) {
             try std.testing.expectEqual(@import("discv5").Transport.FailureStage.receive, result.discovery.failure_stage);
-            try std.testing.expectEqual(@as(u64, 1), node.discovery.?.coordinator.counters.receive_failures);
         }
         try std.testing.expect(faults.receive_calls >= 1);
         try std.testing.expect(node.last_now.mono_ms >= now.mono_ms);
@@ -1006,7 +1003,6 @@ test "managed runtime subscriptions use copied startup policy and reject atomica
     const calls = node.reservations.allocation_calls;
     try std.testing.expectEqual(@as(usize, 4), node.transport.engine.registry.slots.len);
     try std.testing.expectEqual(@as(usize, 0), node.transport.engine.resourceSnapshot().active);
-    try std.testing.expectEqual(@as(usize, 0), node.peer_manager.dialing.resourceSnapshot(&node.peer_manager.catalog).custody_incomplete);
     const owner = node.service.gossipsub;
     opts.resolved.core.service.gossipsub.topic_params.?[0].params.weight = 3;
     var text = "/eth2/01020304/beacon_block/ssz_snappy".*;
@@ -1366,7 +1362,7 @@ test "managed runtime targeted Status serves two current schedules and immediate
         }
         const count = a.peer_manager.snapshots(&rows);
         if (count == 2 and a.peerCounts().relevant == 2 and rows[0].identify != null and rows[1].identify != null and
-            a.peer_manager.control.resourceSnapshot().operations == 0)
+            a.peer_manager.control.operationsInFlight() == 0)
         {
             ready = true;
             break;
@@ -1695,9 +1691,6 @@ test "managed runtime metrics aggregate subnets and count distinct mesh peers" {
     try std.testing.expectEqual(@as(usize, 3), mesh_count);
     try std.testing.expectEqual(@as(usize, 1), context.peer_count);
     try std.testing.expectEqual(@as(u16, 1), context.scores.values.count);
-    var clients: usize = 0;
-    for (context.mesh_clients) |count| clients += count;
-    try std.testing.expectEqual(@as(usize, 1), clients);
 }
 
 test "managed runtime local intent fork BPO announcements remembered peer and event borrows" {

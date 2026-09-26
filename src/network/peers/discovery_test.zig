@@ -109,8 +109,6 @@ test "peer discovery TALK send failure preserves call expiry progress" {
     try std.testing.expectEqual(@as(usize, 1), host.sends);
     try std.testing.expectEqual(@as(u16, 1), result.unowned);
     try std.testing.expect(responder.transport.engine.calls.endpoint(expired) == null);
-    try std.testing.expectEqual(@as(u64, 1), controller.counters.processing_failures);
-    try std.testing.expectEqual(@as(u64, 1), controller.counters.query_timeouts);
 }
 
 test "peer discovery publishes signed referrals before their discovery endpoint responds" {
@@ -167,19 +165,16 @@ fn referralCase(rejection: ?discovery.Rejection, custody_only: bool) !void {
         for (output[0..result.candidates]) |candidate| {
             if (std.mem.eql(u8, &candidate.node_id, &c_peer.node_id)) found = candidate;
         }
-        if (controller.counters.referrals_received > 0) break;
+        if (found != null or (if (rejection) |reason| controller.rejections[@intFromEnum(reason)] > 0 else false)) break;
     }
-    try std.testing.expectEqual(@as(u64, 1), controller.counters.referrals_received);
     try std.testing.expect(a.transport.engine.peerRecord(&c_peer.node_id) == null);
     if (rejection) |reason| {
         try std.testing.expect(found == null);
-        try std.testing.expectEqual(@as(u64, 0), controller.counters.referrals_published);
         try std.testing.expect(controller.rejections[@intFromEnum(reason)] > 0);
         return;
     }
     try std.testing.expect(found != null);
     if (custody_only) try std.testing.expect(found.?.custody_group_count == null);
-    try std.testing.expectEqual(@as(u64, 1), controller.counters.referrals_published);
     _ = try a.transport.stepUntil(std.testing.io, &expiries, now);
     try adapter.requireIdentity(c.transport.engine.localRecord(), &found.?.peer);
     try std.testing.expectEqual(@as(u16, 9003), found.?.addresses[0].port());
@@ -228,7 +223,6 @@ test "peer discovery publishes authenticated lookup responders outside a full ro
             try std.testing.expectEqual(@as(usize, 1), consumed.candidates);
             try adapter.requireIdentity(b.transport.engine.localRecord(), &output[0].peer);
             try std.testing.expectEqual(@as(u16, 9002), output[0].addresses[0].port());
-            try std.testing.expectEqual(@as(u64, 1), controller.counters.authenticated_not_retained);
             checked = true;
             break;
         }
@@ -423,13 +417,11 @@ test "peer discovery empty lookup backs off and startup allocations balance" {
     const result = try controller.step(std.testing.io, 10, 10, &out);
     try std.testing.expectEqual(@as(usize, 0), result.candidates);
     try std.testing.expect(controller.nextWakeup(10).? > 10);
-    try std.testing.expectEqual(@as(u64, 1), controller.lookup_time.count);
     try std.testing.expectEqual(@as(u64, 1), controller.lookup_finishes[@intFromEnum(d.Lookup.FinishReason.exhausted)]);
-    const completed = controller.lookup_time;
     const progress: d.Transport.StepResult = .{ .now_ms = 11 };
     _ = controller.consume(&progress, &.{}, &out);
-    try std.testing.expectEqualDeep(completed, controller.lookup_time);
-    try std.testing.expect(controller.last_candidate_ms == null);
+    try std.testing.expectEqual(@as(u64, 1), controller.lookup_finishes[@intFromEnum(d.Lookup.FinishReason.exhausted)]);
+    try std.testing.expectEqual(@as(u64, 0), controller.counters.candidates_published);
     try std.testing.expectEqual(allocated, allocation.allocated_bytes);
     controller.deinit();
     try std.testing.expectEqual(allocation.allocated_bytes, allocation.freed_bytes);
@@ -437,7 +429,7 @@ test "peer discovery empty lookup backs off and startup allocations balance" {
     try std.testing.expectError(error.OutOfMemory, discovery.Discovery.init(failed.allocator(), &a.transport, &context, &.{}, 10, .{}));
 }
 
-test "peer discovery counts every received datagram result by reason" {
+test "peer discovery counts every rejected datagram by reason" {
     var node: Node = undefined;
     try node.init(41, 9041);
     defer node.deinit();
@@ -448,7 +440,6 @@ test "peer discovery counts every received datagram result by reason" {
     _ = controller.consume(&.{ .now_ms = 11, .datagram = .{ .rejected = .unsolicited_response } }, &.{}, &out);
     _ = controller.consume(&.{ .now_ms = 12, .datagram = .{ .rejected = .unsolicited_response } }, &.{}, &out);
     _ = controller.consume(&.{ .now_ms = 13 }, &.{}, &out);
-    try std.testing.expectEqual(@as(u64, 1), controller.counters.datagrams_accepted);
     try std.testing.expectEqual(@as(u64, 2), controller.datagram_rejections[@intFromEnum(d.types.RejectReason.unsolicited_response)]);
     var rejected: u64 = 0;
     for (controller.datagram_rejections) |count| rejected += count;
@@ -505,7 +496,6 @@ test "peer discovery consumes actual response and expiry alongside failure befor
         if (response) {
             try std.testing.expectEqual(error.DestinationUnreachable, consumed.failure.?);
             try std.testing.expectEqual(d.Transport.FailureStage.process, consumed.failure_stage);
-            try std.testing.expectEqual(@as(u64, 1), controller.counters.processing_failures);
             try std.testing.expectEqual(@as(usize, 1), consumed.candidates);
             candidate = output[0];
             break;
@@ -725,9 +715,7 @@ fn foregroundQuery(a: *Node, b: *Node) !void {
         if (result.candidates != 0) {
             try adapter.requireIdentity(b.transport.engine.localRecord(), &output[0].peer);
             try std.testing.expect(controller.lookup != null);
-            try std.testing.expectEqual(@as(u64, 0), controller.counters.lookups_completed);
             try std.testing.expectEqual(@as(u64, 1), controller.counters.candidates_published);
-            try std.testing.expect(controller.last_candidate_ms != null);
             found = true;
             break;
         }

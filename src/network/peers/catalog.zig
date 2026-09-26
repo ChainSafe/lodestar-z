@@ -80,7 +80,6 @@ pub const Catalog = struct {
     relevant_count: u16 = 0,
     direct_count: u16 = 0,
     intent_revision: u64 = 0,
-    connection_backoffs: u64 = 0,
     /// Rejections recorded against identities, by kind.
     rejections: [@typeInfo(t.Rejection).@"enum".fields.len]u64 = @splat(0),
     random: std.Random.DefaultPrng,
@@ -685,9 +684,8 @@ pub const Catalog = struct {
         row.intent.failures = @min(row.intent.failures +| 1, 7);
         const delay = @min(@as(u64, 5_000) << @intCast(row.intent.failures - 1), 300_000);
         row.intent.eligible_at_ms = @max(row.intent.eligible_at_ms, now_ms +| delay +| (self.random.random().int(u16) % 1_001));
-        self.connection_backoffs +|= 1;
         if (reason == .health_timeout or reason == .health_error) {
-            self.remembered.forget(&row.identity, .health);
+            self.remembered.forget(&row.identity);
             self.recordHealth(index, now_ms);
         }
     }
@@ -737,7 +735,7 @@ pub const Catalog = struct {
         const kind = rejection orelse return;
         const block_ms = self.history.reject(key, kind, now_ms);
         self.rejections[@intFromEnum(kind)] +|= 1;
-        if (kind != .shutdown) self.remembered.forget(&row.identity, .rejection);
+        if (kind != .shutdown) self.remembered.forget(&row.identity);
         std.log.scoped(.network_peers).debug("peer_rejection_recorded peer={f} connection={d}:{d} kind={s} block_ms={d}", .{ @import("../logging.zig").peer(&row.identity), conn.index, conn.generation, @tagName(kind), block_ms });
         if (!row.intent.automatic) return;
         row.intent.automatic = false;
@@ -910,7 +908,7 @@ pub const Catalog = struct {
         }
         const decision = row.reputation.apply(action, now_ms);
         // A local ban forgets the peer whether or not a connection is left to close.
-        if (decision == .ban) self.remembered.forget(&row.identity, .banned);
+        if (decision == .ban) self.remembered.forget(&row.identity);
         return decision;
     }
 

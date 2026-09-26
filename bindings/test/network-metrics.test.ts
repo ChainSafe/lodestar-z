@@ -34,7 +34,6 @@ test("metrics are available through startup and remain readable after close", as
     await runtime.applyIntent(localIntent(config), config.initialSlot);
     await vi.waitFor(() => expect(samples(runtime.getMetrics()).get("lodestar_native_network_running")).toBe(1));
     const metrics = samples(runtime.getMetrics());
-    expect(runtime.getMetrics()).toContain("# TYPE lodestar_peers_requested_total_to_connect counter\n");
     expect(metrics.has("lodestar_peer_manager_starved_bool")).toBe(false);
     expect(metrics.has("lodestar_discovery_total_dial_attempts")).toBe(false);
     const published = metrics.get("lodestar_native_network_metrics_updated_timestamp_seconds");
@@ -45,7 +44,6 @@ test("metrics are available through startup and remain readable after close", as
         expect(next.get("lodestar_native_network_metrics_updated_timestamp_seconds")).toBeGreaterThan(published ?? 0);
         expect(next.get("gossipsub_heartbeat_duration_seconds_count")).toBeGreaterThan(0);
         expect(next.get("lodestar_native_gossip_maintenance_completed_timestamp_seconds")).toBeGreaterThan(0);
-        expect(next.get("lodestar_native_peer_selection_seconds_count")).toBeGreaterThan(0);
         expect(next.get("lodestar_native_network_step_seconds_count")).toBeGreaterThan(0);
       },
       {timeout: 5000}
@@ -66,11 +64,6 @@ test("metrics are available through startup and remain readable after close", as
         metrics.get(`lodestar_native_gossip_maintenance_work_seconds_count{phase="${phase}"}`)
       ).toBeGreaterThanOrEqual(0);
     }
-    for (const stage of ["challenge", "handshake", "packet", "response", "record"]) {
-      for (const outcome of ["allowed", "source_limit", "global_limit", "source_capacity"]) {
-        expect(metrics.get(`lodestar_native_discovery_admission_total{stage="${stage}",outcome="${outcome}"}`)).toBe(0);
-      }
-    }
     for (const reason of ["peer_capacity", "protocol_concurrency", "peer_quota", "global_quota", "identity_capacity"]) {
       expect(metrics.get(`lodestar_native_reqresp_admission_refusals_total{method="status",reason="${reason}"}`)).toBe(
         0
@@ -80,8 +73,6 @@ test("metrics are available through startup and remain readable after close", as
       expect(metrics.get(`lodestar_native_reqresp_inbound_occupied{phase="${phase}"}`)).toBe(0);
     }
     for (const name of [
-      "lodestar_native_quic_connections_capacity",
-      "lodestar_native_dial_capacity",
       "lodestar_native_gossipsub_connected_capacity",
       "lodestar_native_gossipsub_retained_capacity",
       "lodestar_native_gossipsub_validation_capacity",
@@ -127,7 +118,6 @@ test("metrics are available through startup and remain readable after close", as
   expect(samples(closed).get("libp2p_peers")).toBe(0);
   expect(samples(closed).get("lodestar_peer_connection_seconds_count")).toBe(0);
   expect(samples(closed).get("lodestar_native_quic_connections_active")).toBe(0);
-  expect(samples(closed).get("lodestar_native_dial_attempts")).toBe(0);
   expect(runtime.getMetrics()).toBe(closed);
 }, 20000);
 
@@ -135,7 +125,6 @@ test("real request and peer metrics are isolated, cumulative and do not drain re
   const pair = await incomingPair();
   const outgoing = 'beacon_reqresp_outgoing_requests_total{method="beacon_blocks_by_root"}';
   const incoming = 'beacon_reqresp_incoming_requests_total{method="beacon_blocks_by_root"}';
-  let requestedBeforeClose = 0;
   try {
     const stream = pair.left.request(pair.remote.peerId, BLOCKS, new Uint8Array(32).fill(7));
     const pending = stream.next();
@@ -152,27 +141,13 @@ test("real request and peer metrics are isolated, cumulative and do not drain re
         expect(left.get("libp2p_peers")).toBe(1);
         expect(left.get('lodestar_peer_connected_total{direction="outbound",status="open"}')).toBe(1);
         expect(right.get('lodestar_peer_connected_total{direction="inbound",status="open"}')).toBe(1);
-        expect(left.get("lodestar_peer_manager_connected_peers_map_size")).toBe(1);
         expect(left.get('lodestar_peers_by_direction_count{direction="outbound"}')).toBe(1);
         expect(right.get('lodestar_peers_by_direction_count{direction="inbound"}')).toBe(1);
-        for (const [metrics, direction] of [
-          [left, "outbound"],
-          [right, "inbound"],
-        ] as const) {
-          const jointCount = [...metrics]
-            .filter(
-              ([name]) =>
-                name.startsWith("lodestar_native_peers_by_client_direction{") &&
-                name.includes(`direction="${direction}"`)
-            )
-            .reduce((total, [, value]) => total + value, 0);
-          expect(jointCount).toBe(1);
-        }
         expect(left.get("lodestar_peer_connection_seconds_count")).toBe(1);
-        expect(right.get("lodestar_peer_long_lived_attnets_count_count")).toBe(1);
+        expect(right.get("lodestar_peer_connection_seconds_count")).toBe(1);
         expect(left.get('lodestar_native_quic_connections_established_total{direction="outbound"}')).toBe(1);
         expect(right.get('lodestar_native_quic_connections_established_total{direction="inbound"}')).toBe(1);
-        expect(left.get('lodestar_native_peer_dial_time_seconds_count{status="success"}')).toBe(1);
+        expect(left.get('lodestar_native_peer_dial_outcomes_total{outcome="connected"}')).toBe(1);
         expect(left.get('lodestar_native_peer_dial_selections_total{source="manual"}')).toBe(1);
         expect(left.get('lodestar_native_peer_dial_selections_total{source="discovery"}')).toBe(0);
         expect(left.get(outgoing)).toBe(1);
@@ -198,22 +173,14 @@ test("real request and peer metrics are isolated, cumulative and do not drain re
       {timeout: 5000}
     );
     for (let i = 0; i < 10; i++) expect(samples(await pair.left.getMetrics()).get(outgoing)).toBe(1);
-    requestedBeforeClose = samples(await pair.left.getMetrics()).get("lodestar_peers_requested_total_to_connect") ?? 0;
   } finally {
     await Promise.all([pair.left.close(), pair.right.close()]);
   }
   expect(samples(await pair.left.getMetrics()).get(outgoing)).toBe(1);
   expect(samples(pair.right.getMetrics()).get(incoming)).toBe(1);
   expect(samples(await pair.left.getMetrics()).get("libp2p_peers")).toBe(0);
-  expect(samples(await pair.left.getMetrics()).get('lodestar_peer_disconnected_total{direction="outbound"}')).toBe(1);
-  expect(samples(pair.right.getMetrics()).get('lodestar_peer_disconnected_total{direction="inbound"}')).toBe(1);
-  expect(samples(await pair.left.getMetrics()).get("lodestar_peer_manager_connected_peers_map_size")).toBe(0);
-  expect(samples(await pair.left.getMetrics()).get("lodestar_native_peer_dials_requested")).toBe(0);
-  expect(samples(await pair.left.getMetrics()).get("lodestar_peers_requested_total_to_connect")).toBeGreaterThanOrEqual(
-    requestedBeforeClose
-  );
   expect(
-    samples(await pair.left.getMetrics()).get('lodestar_native_peer_dial_time_seconds_count{status="success"}')
+    samples(await pair.left.getMetrics()).get('lodestar_native_peer_dial_outcomes_total{outcome="connected"}')
   ).toBe(1);
   expect(samples(await pair.left.getMetrics()).get("lodestar_peer_connection_seconds_count")).toBe(0);
 }, 20000);

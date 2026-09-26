@@ -280,7 +280,7 @@ const Visits = struct {
 
 fn datagramsCounted(node: *const runtime.NetworkCore) u64 {
     const coordinator = &node.discovery.?.coordinator;
-    var total = coordinator.counters.datagrams_accepted;
+    var total: u64 = 0;
     for (coordinator.datagram_rejections) |count| total += count;
     return total;
 }

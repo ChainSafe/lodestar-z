@@ -210,20 +210,21 @@ test "metrics read owner counters exactly and preserve totals and capacities aft
     defer f.deinit();
     const node = f.node;
     node.counters.transport_failures = std.math.maxInt(u64);
-    node.peer_manager.requested_connect = 17;
-    node.peer_manager.requested_disconnect[0] = 3;
+    node.peer_manager.control.counters.closed[0] = 17;
     node.service.reqresp.protocol_counters[@intFromEnum(protocol.status_v1)].outgoing = 4;
     node.service.reqresp.protocol_counters[@intFromEnum(protocol.status_v2)].outgoing = 5;
     node.service.reqresp.protocol_counters[@intFromEnum(protocol.status_v1)].outgoing_time.observe(100);
     node.service.reqresp.protocol_counters[@intFromEnum(protocol.status_v2)].outgoing_time.observe(200);
     node.service.gossipsub.messages.storage_refusals[0] = 11;
-    node.peer_manager.selection.dial_budget = 7;
+    node.peer_manager.selection.deficits.outbound = 7;
     const original = node.peer_manager.counters;
     const output = try f.render(true);
     try contains(output, "lodestar_native_network_transport_failures_total 18446744073709551615\n");
-    try contains(output, "# TYPE lodestar_peers_requested_total_to_connect counter\n");
-    try contains(output, "lodestar_peers_requested_total_to_connect 17\n");
-    try contains(output, "lodestar_native_peer_dials_requested 7\n");
+    const closed = @tagName(@as(@import("peers/types.zig").DisconnectReason, @enumFromInt(0)));
+    var line: [128]u8 = undefined;
+    const closes = try std.fmt.bufPrint(&line, "lodestar_native_peer_closes_total{{reason=\"{s}\"}} 17\n", .{closed});
+    try contains(output, closes);
+    try contains(output, "lodestar_native_peer_outbound_deficit 7\n");
     try contains(output, "beacon_reqresp_outgoing_requests_total{method=\"status\"} 9\n");
     try contains(output, "beacon_reqresp_outgoing_request_roundtrip_time_seconds_count{method=\"status\"} 2\n");
     try contains(output, "lodestar_native_gossip_expired_executing 3\n");
@@ -234,11 +235,10 @@ test "metrics read owner counters exactly and preserve totals and capacities aft
     try std.testing.expect(std.mem.indexOf(u8, output, "_total_total") == null);
     _ = try f.render(true);
     try std.testing.expectEqualDeep(original, node.peer_manager.counters);
-    try std.testing.expectEqual(@as(u64, 17), node.peer_manager.requested_connect);
     const stopped = try f.render(false);
     try contains(stopped, "lodestar_native_network_running 0\n");
-    try contains(stopped, "lodestar_native_peer_dials_requested 0\n");
-    try contains(stopped, "lodestar_peers_requested_total_to_connect 17\n");
+    try contains(stopped, "lodestar_native_peer_outbound_deficit 0\n");
+    try contains(stopped, closes);
     try contains(stopped, "beacon_reqresp_outgoing_requests_total{method=\"status\"} 9\n");
     try contains(stopped, "lodestar_native_gossip_expired_executing 0\n");
 }
@@ -326,13 +326,11 @@ test "metrics use retained usable coverage and accepted demand until replacement
     try contains(output, "lodestar_peer_count_per_sampling_group{groupIndex=\"0\"} 1\n");
     try contains(output, "lodestar_peer_count_per_sampling_group{groupIndex=\"127\"} 0\n");
     try contains(output, "lodestar_discovery_subnet_peers_to_connect{type=\"attnets\"} 3\n");
-    try contains(output, "lodestar_native_peers_per_active_subnet_count{type=\"attnets\"} 2\n");
-    try contains(output, "lodestar_native_peer_disconnects_requested{reason=\"banned\"} 1\n");
-    try contains(try f.render(false), "lodestar_native_peers_per_active_subnet_count{type=\"attnets\"} 0\n");
-    try contains(try f.render(true), "lodestar_native_peers_per_active_subnet_count{type=\"attnets\"} 2\n");
+    try contains(try f.render(false), "lodestar_discovery_subnet_peers_to_connect{type=\"attnets\"} 0\n");
+    try contains(try f.render(true), "lodestar_discovery_subnet_peers_to_connect{type=\"attnets\"} 3\n");
     try manager.setDemand(&.{});
     manager.selection = .{};
-    try contains(try f.render(true), "lodestar_native_peers_per_active_subnet_count{type=\"attnets\"} 0\n");
+    try contains(try f.render(true), "lodestar_discovery_subnet_peers_to_connect{type=\"attnets\"} 0\n");
 }
 
 test "metrics render every measurement contract series with its type and labels" {
@@ -379,18 +377,16 @@ test "metrics label redials after a health close in the dial retries contract se
     try contains(try f.render(true), "lodestar_native_peer_dial_retries_total{previous=\"health\"} 2\n");
 }
 
-test "metrics export cumulative discovery lookups, session capacity and datagram rejections" {
+test "metrics export cumulative discovery lookups and datagram rejections" {
     var f = try Fixture.initWith(&.{}, .{ .bind = .{ .ip4 = .loopback(0) }, .engine = .{ .session_capacity = 8, .challenge_capacity = 8, .call_capacity = 8 } });
     defer f.deinit();
     const coordinator = &f.node.discovery.?.coordinator;
     coordinator.counters.lookups_started = 5;
     coordinator.datagram_rejections[@intFromEnum(@import("discv5").types.RejectReason.invalid_handshake)] = 3;
     const output = try f.render(true);
-    try contains(output, "# TYPE lodestar_discv5_lookup_count gauge\nlodestar_discv5_lookup_count 5\n");
-    try contains(output, "lodestar_native_discovery_lookup_active 0\n");
-    try contains(output, "lodestar_native_discovery_session_capacity 8\n");
+    try contains(output, "lodestar_native_discovery_lookups_started_total 5\n");
     try contains(output, "lodestar_native_discovery_datagram_rejections_total{stage=\"handshake\",reason=\"invalid_handshake\"} 3\n");
-    try contains(try f.render(false), "lodestar_discv5_lookup_count 5\n");
+    try contains(try f.render(false), "lodestar_native_discovery_lookups_started_total 5\n");
 }
 
 test "metrics export stock per-topic gossipsub peer gauges under full topic strings" {

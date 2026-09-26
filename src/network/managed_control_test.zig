@@ -1061,10 +1061,11 @@ test "identify core schedules once after Status and completes without public out
     const before = snapshots[0];
     try std.testing.expect(before.relevant);
     try std.testing.expectEqualStrings("core-test", before.identify.?.agent.?.slice());
-    try std.testing.expectEqual(@as(u64, 1), setup.client.control.counters.identify_started);
+    const schedule = &setup.client.control.schedules[before.peer.index];
+    try std.testing.expectEqual(.done, schedule.identify_state);
     setup.client.reStatusPeers(setup.pair.now);
     for (0..100) |_| try setup.step(0);
-    try std.testing.expectEqual(@as(u64, 1), setup.client.control.counters.identify_started);
+    try std.testing.expectEqual(.done, schedule.identify_state);
     try std.testing.expectEqualDeep(before.identify, setup.client.catalog.get(before.peer).?.identify);
 }
 
@@ -1084,11 +1085,12 @@ test "identify remote refusal completes generation without losing accepted Statu
     var snapshots: [4]t.Snapshot = undefined;
     _ = setup.client.snapshots(&snapshots);
     try std.testing.expect(snapshots[0].relevant and snapshots[0].identify == null);
-    try std.testing.expectEqual(@as(u64, 1), setup.client.control.counters.identify_started);
-    try std.testing.expectEqual(@as(u64, 1), setup.client.control.counters.identify_failures[@intFromEnum(@import("identify/root.zig").Failure.negotiation)]);
+    const schedule = &setup.client.control.schedules[snapshots[0].peer.index];
+    try std.testing.expectEqual(.done, schedule.identify_state);
     setup.client.reStatusPeers(setup.pair.now);
     for (0..60) |_| try setup.step(0);
-    try std.testing.expectEqual(@as(u64, 1), setup.client.control.counters.identify_started);
+    try std.testing.expectEqual(.done, schedule.identify_state);
+    try std.testing.expect(setup.client.catalog.get(snapshots[0].peer).?.identify == null);
     try std.testing.expect(setup.client.catalog.get(snapshots[0].peer).?.relevant);
 }
 
@@ -1112,7 +1114,7 @@ test "identify replacement generation starts a fresh query and rejects stale com
     try std.testing.expectEqualDeep(old.peer, selected.peer);
     try std.testing.expect(!std.meta.eql(old.connection, selected.connection));
     try std.testing.expectEqualStrings("replacement", selected.identify.?.agent.?.slice());
-    try std.testing.expectEqual(@as(u64, 2), setup.client.control.counters.identify_started);
+    try std.testing.expectEqual(.done, setup.client.control.schedules[selected.peer.index].identify_state);
     setup.client.control.identifyResults(&setup.client.catalog, &.{.{ .peer = old.peer, .conn = old.connection.?, .outcome = .{ .success = old.identify.? } }});
     try std.testing.expectEqualDeep(selected, setup.client.catalog.get(selected.peer).?);
 }
@@ -1137,16 +1139,17 @@ test "identify local refusal retries after one second without resetting accepted
     setup.client.control.reschedule(&setup.client.catalog, peer);
     setup.client.control.maintain(&setup.client_service, &setup.client.catalog, &setup.pair.client, &setup.client.local, setup.pair.now);
     const retry = setup.pair.now.mono_ms + 1000;
-    try std.testing.expectEqual(retry, setup.client.control.schedules[peer.index].identify_retry_ms);
-    try std.testing.expectEqual(@as(u64, 0), setup.client.control.counters.identify_started);
+    const schedule = &setup.client.control.schedules[peer.index];
+    try std.testing.expectEqual(retry, schedule.identify_retry_ms);
+    try std.testing.expectEqual(.pending, schedule.identify_state);
     for (0..60) |_| try setup.step(0);
-    try std.testing.expectEqual(@as(u64, 0), setup.client.control.counters.identify_started);
+    try std.testing.expectEqual(.pending, schedule.identify_state);
     setup.pair.now.mono_ms = retry - 1;
     try setup.step(0);
-    try std.testing.expectEqual(@as(u64, 0), setup.client.control.counters.identify_started);
+    try std.testing.expectEqual(.pending, schedule.identify_state);
     setup.pair.now.mono_ms = retry;
     for (0..60) |_| try setup.step(0);
-    try std.testing.expectEqual(@as(u64, 1), setup.client.control.counters.identify_started);
+    try std.testing.expectEqual(.done, schedule.identify_state);
     try std.testing.expectEqualStrings("core", setup.client.catalog.get(peer).?.identify.?.agent.?.slice());
 }
 
@@ -1415,7 +1418,7 @@ test "application quiescence preserves the current request borrow before deferre
     try quiescenceRequest(.borrowed);
 }
 
-test "peer request metrics count retired schedules once across connection generations" {
+test "peer control retires each connection's schedule once across connection generations" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -1426,16 +1429,21 @@ test "peer request metrics count retired schedules once across connection genera
     const old = snapshots[0].connection.?;
     const replacement: t.Handle = .{ .index = old.index, .generation = old.generation + 1 };
     const control = &setup.client.control;
+    const schedule = &control.schedules[peer.index];
     control.cancelConnection(&setup.client_service, &setup.pair.client, peer, replacement);
-    try std.testing.expectEqualSlices(u64, &.{ 0, 0 }, &control.counters.events.disconnected);
+    try std.testing.expectEqualDeep(old, schedule.conn);
+    try std.testing.expect(schedule.peer != null);
     control.cancelConnection(&setup.client_service, &setup.pair.client, peer, old);
+    try std.testing.expect(schedule.peer == null);
     control.connected(&setup.client.catalog, peer, replacement, .inbound, setup.pair.now);
     control.cancelConnection(&setup.client_service, &setup.pair.client, peer, old);
-    try std.testing.expectEqualSlices(u64, &.{ 0, 1 }, &control.counters.events.disconnected);
+    try std.testing.expectEqualDeep(replacement, schedule.conn);
+    try std.testing.expect(schedule.peer != null);
     control.cancelConnection(&setup.client_service, &setup.pair.client, peer, replacement);
+    try std.testing.expect(schedule.peer == null);
     control.cancelConnection(&setup.client_service, &setup.pair.client, peer, replacement);
+    try std.testing.expect(schedule.peer == null);
     try std.testing.expectEqualSlices(u64, &.{ 1, 1 }, &control.counters.events.connected);
-    try std.testing.expectEqualSlices(u64, &.{ 1, 1 }, &control.counters.events.disconnected);
 }
 
 test "managed control response deadline survives continuous peer progress" {

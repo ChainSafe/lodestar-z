@@ -87,39 +87,18 @@ pub const Control = struct {
     counters: Counters = .{},
 
     pub const Counters = struct {
-        identify_started: u64 = 0,
-        identify_deferred: u64 = 0,
-        identify_failures: [@typeInfo(@import("../identify/root.zig").Failure).@"enum".fields.len]u64 = @splat(0),
         started: u64 = 0,
         deferred: u64 = 0,
         closed: [@typeInfo(t.DisconnectReason).@"enum".fields.len]u64 = @splat(0),
-        closed_by_client: [client.count][@typeInfo(t.DisconnectReason).@"enum".fields.len]u64 = @splat(@splat(0)),
         health_failures: [health_probe_count]u64 = @splat(0),
         events: @import("control_metrics.zig").Counters = .{},
     };
 
-    pub const Resources = struct {
-        operation_capacity: usize = 0,
-        response_capacity: usize = 0,
-        operations: usize = 0,
-        responses: usize = 0,
-        cancelled_operations: usize = 0,
-        closing: usize = 0,
-    };
-
-    pub fn resourceSnapshot(self: *const Control) Resources {
-        var snapshot: Resources = .{ .operation_capacity = self.operations.len, .response_capacity = self.responses.len };
-        for (self.operations) |*op| if (op.request != null) {
-            snapshot.operations += 1;
-            if (op.cancelled) snapshot.cancelled_operations += 1;
-        };
-        for (self.responses) |*op| if (op.request != null) {
-            snapshot.responses += 1;
-        };
-        for (self.schedules) |*row| if (row.peer != null and row.closing != null) {
-            snapshot.closing += 1;
-        };
-        return snapshot;
+    /// Control operations holding a request, which retirement tests watch drain.
+    pub fn operationsInFlight(self: *const Control) usize {
+        var count: usize = 0;
+        for (self.operations) |*op| count += @intFromBool(op.request != null);
+        return count;
     }
 
     pub fn validateOptions(options: Options) error{InvalidOptions}!void {
@@ -252,7 +231,6 @@ pub const Control = struct {
         };
         service.reqresp.cleanupPending(engine, &service.router);
         if (self.schedule(peer, conn)) |row| {
-            self.counters.events.disconnected[@intFromEnum(row.direction)] +|= 1;
             row.peer = null;
             self.deadlines.clear(peer.index);
         }
@@ -436,7 +414,7 @@ pub const Control = struct {
             if (starts_remaining > 0 and relevant and row.closing == null and row.identify_state == .pending and now.mono_ms >= row.identify_retry_ms) {
                 starts_remaining -= 1;
                 self.cursor = (index + 1) % self.schedules.len;
-                self.startIdentify(service, engine, row, now);
+                startIdentify(service, engine, row, now);
             }
             const action = decision.request orelse continue;
             if (starts_remaining == 0) continue;
@@ -451,10 +429,7 @@ pub const Control = struct {
             switch (self.start(service, engine, row, protocol, local, now)) {
                 .started => {
                     row.retry_ms = 0;
-                    if (action == .goodbye) {
-                        row.closing.?.sent = true;
-                        self.counters.events.observeGoodbye(goodbyeReason(row.closing.?.reason), true, current.connected_at_ms, now.mono_ms);
-                    }
+                    if (action == .goodbye) row.closing.?.sent = true;
                 },
                 .retiring, .deferred => {
                     self.counters.deferred +|= 1;
@@ -472,14 +447,12 @@ pub const Control = struct {
             return (a + self.len - self.start) % self.len < (b + self.len - self.start) % self.len;
         }
     };
-    fn startIdentify(self: *Control, service: *Service, engine: *Engine, row: *Schedule, now: Now) void {
+    fn startIdentify(service: *Service, engine: *Engine, row: *Schedule, now: Now) void {
         service.identify.start(&service.router, engine, row.peer.?, row.conn, now) catch {
             row.identify_retry_ms = now.mono_ms +| 1_000;
-            self.counters.identify_deferred +|= 1;
             return;
         };
         row.identify_state = .started;
-        self.counters.identify_started +|= 1;
     }
 
     pub fn identifyResults(self: *Control, catalog: *Catalog, results: []const @import("../identify/root.zig").Result) void {
@@ -497,7 +470,6 @@ pub const Control = struct {
                     }
                 },
                 .failed => |failure| {
-                    self.counters.identify_failures[@intFromEnum(failure)] +|= 1;
                     const snapshot = catalog.get(completion.peer).?;
                     std.log.scoped(.network_peers).debug("identify_failed peer={f} connection={d}:{d} reason={s}", .{ @import("../logging.zig").peer(&snapshot.identity), completion.conn.index, completion.conn.generation, @tagName(failure) });
                 },
@@ -505,10 +477,10 @@ pub const Control = struct {
         }
     }
 
-    pub fn receivedGoodbye(self: *Control, catalog: *Catalog, peer: t.PeerRef, conn: t.Handle, code: u64, now: Now, during_close: bool) void {
+    pub fn receivedGoodbye(self: *Control, catalog: *Catalog, peer: t.PeerRef, conn: t.Handle, code: u64, during_close: bool) void {
         const reason = goodbye.reason(code);
         const snapshot = catalog.get(peer).?;
-        self.counters.events.observeGoodbye(code, false, snapshot.connected_at_ms, now.mono_ms);
+        self.counters.events.goodbyeReceived(code);
         std.log.scoped(.network_peers).debug("peer_goodbye_received peer={f} connection={d}:{d} code={d} reason={s} during_close={any} agent={f}", .{ @import("../logging.zig").peer(&snapshot.identity), conn.index, conn.generation, code, @tagName(reason), during_close, std.json.fmt(client.agent(&snapshot.identify), .{}) });
         const row = self.schedule(peer, conn) orelse return;
         if (row.closing == null and row.rejection == null) row.rejection = goodbye.rejection(code);
@@ -533,15 +505,12 @@ pub const Control = struct {
         now: Now,
     ) void {
         const row = self.schedule(peer, conn) orelse return;
-        const snapshot = catalog.get(peer).?;
-        const kind = client.fromIdentify(&snapshot.identify);
         catalog.settleRejections(peer, conn, row.evidence != .pending, row.rejection, now.mono_ms);
         catalog.rememberClosed(peer, conn, row.evidence != .pending, reason, row.rejection, now);
         self.cancelConnection(service, engine, peer, conn);
         service.gossipsub.retireConnection(&service.router, engine, conn, now);
         _ = catalog.disconnect(peer, conn, reason, now.mono_ms);
         self.counters.closed[@intFromEnum(reason)] +|= 1;
-        self.counters.closed_by_client[@intFromEnum(kind)][@intFromEnum(reason)] +|= 1;
         _ = engine.close(conn, 0);
     }
     fn acceptStatus(
@@ -560,7 +529,6 @@ pub const Control = struct {
         const status = wire.decodeStatus(protocol, bytes) catch |err| {
             if (err == error.InvalidLength or err == error.InvalidEncoding)
                 _ = catalog.report(peer, .low_tolerance, now.mono_ms);
-            self.counters.events.observeRelevance(.invalid_status);
             _ = self.disconnect(catalog, peer, conn, .invalid_status, now);
             return;
         };
@@ -573,7 +541,6 @@ pub const Control = struct {
             return;
         }
         const relevance = wire.relevance(local, &status, slot);
-        self.counters.events.observeRelevance(relevance);
         if (relevance) |reason| {
             _ = self.disconnect(catalog, peer, conn, reason, now);
             return;
@@ -690,7 +657,7 @@ pub const Control = struct {
             .goodbye_v1 => blk: {
                 std.debug.assert(event.bytes.len == 8);
                 const code = std.mem.readInt(u64, event.bytes[0..8], .little);
-                self.receivedGoodbye(catalog, peer, event.peer, code, now, false);
+                self.receivedGoodbye(catalog, peer, event.peer, code, false);
                 _ = self.disconnect(catalog, peer, event.peer, .remote_goodbye, now);
                 self.schedules[peer.index].closing.?.sent = true;
                 std.mem.writeInt(u64, response.bytes[0..8], 1, .little);

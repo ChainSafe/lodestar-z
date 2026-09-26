@@ -1,35 +1,15 @@
 const std = @import("std");
-const t = @import("types.zig");
 const goodbye = @import("goodbye.zig");
 const prom = @import("../metrics/registry.zig");
-const long_connection_ms = 24 * 60 * 60 * 1000;
 
-pub const Relevance = enum { relevant, invalid_status, incompatible_fork, future_head, finalized_mismatch, missing_availability };
-
+/// Admitted connections by direction and received Goodbye reasons.
 pub const Counters = struct {
     connected: [2]u64 = @splat(0),
-    disconnected: [2]u64 = @splat(0),
     goodbyes: [goodbye.count]u64 = @splat(0),
-    sent_goodbyes: [goodbye.count]u64 = @splat(0),
-    long_goodbyes: [goodbye.count]u64 = @splat(0),
-    relevance: [@typeInfo(Relevance).@"enum".fields.len]u64 = @splat(0),
 
-    pub fn observeGoodbye(self: *Counters, code: u64, sent: bool, connected_at_ms: u64, now_ms: u64) void {
-        const index = @intFromEnum(goodbye.reason(code));
-        if (sent) self.sent_goodbyes[index] +|= 1 else self.goodbyes[index] +|= 1;
-        if (now_ms -| connected_at_ms > long_connection_ms) self.long_goodbyes[index] +|= 1;
-    }
-
-    pub fn observeRelevance(self: *Counters, reason: ?t.DisconnectReason) void {
-        const result: Relevance = if (reason) |value| switch (value) {
-            .invalid_status => .invalid_status,
-            .incompatible_fork => .incompatible_fork,
-            .future_head => .future_head,
-            .finalized_mismatch => .finalized_mismatch,
-            .missing_availability => .missing_availability,
-            else => unreachable,
-        } else .relevant;
-        self.relevance[@intFromEnum(result)] +|= 1;
+    /// A received Goodbye; unknown wire codes share one reason.
+    pub fn goodbyeReceived(self: *Counters, code: u64) void {
+        self.goodbyes[@intFromEnum(goodbye.reason(code))] +|= 1;
     }
 
     pub fn write(self: *const Counters, w: *prom.Encoder) prom.Error!void {
@@ -42,37 +22,14 @@ pub const Counters = struct {
         inline for (.{ "inbound", "outbound" }, 0..) |direction, index| {
             try connected.sample(.{ direction, "open" }, self.connected[index]);
         }
-        const disconnected = try w.family(.{
-            .name = "lodestar_peer_disconnected_total",
+        const goodbyes = try w.family(.{
+            .name = "lodestar_peer_goodbye_received_total",
             .kind = .counter,
-            .help = "Admitted connections retired by the native peer manager",
-            .labels = &.{"direction"},
+            .help = "Decoded peer Goodbye requests",
+            .labels = &.{"reason"},
         });
-        inline for (.{ "inbound", "outbound" }, 0..) |direction, index| {
-            try disconnected.sample(.{direction}, self.disconnected[index]);
-        }
-        inline for (.{
-            .{ "lodestar_peer_goodbye_received_total", "goodbyes", "Decoded peer Goodbye requests" },
-            .{ "lodestar_peer_goodbye_sent_total", "sent_goodbyes", "Local Goodbye requests admitted to the request engine" },
-            .{ "lodestar_peer_long_connection_disconnect_total", "long_goodbyes", "Sent or received Goodbyes on connections older than 24 hours" },
-        }) |metric| {
-            const goodbyes = try w.family(.{
-                .name = metric[0],
-                .kind = .counter,
-                .help = metric[2],
-                .labels = &.{"reason"},
-            });
-            inline for (@typeInfo(goodbye.Reason).@"enum".fields) |field|
-                try goodbyes.sample(.{goodbyeLabel(@enumFromInt(field.value))}, @field(self, metric[1])[field.value]);
-        }
-        const relevance = try w.family(.{
-            .name = "lodestar_peer_relevance_check_total",
-            .kind = .counter,
-            .help = "Native Status evaluations, excluding obsolete fork transition responses",
-            .labels = &.{"result"},
-        });
-        inline for (@typeInfo(Relevance).@"enum".fields) |field|
-            try relevance.sample(.{relevanceLabel(@enumFromInt(field.value))}, self.relevance[field.value]);
+        inline for (@typeInfo(goodbye.Reason).@"enum".fields) |field|
+            try goodbyes.sample(.{goodbyeLabel(@enumFromInt(field.value))}, self.goodbyes[field.value]);
     }
 };
 
@@ -90,30 +47,15 @@ fn goodbyeLabel(reason: goodbye.Reason) []const u8 {
     };
 }
 
-fn relevanceLabel(result: Relevance) []const u8 {
-    return switch (result) {
-        .relevant => "relevant",
-        .invalid_status => "error",
-        .incompatible_fork => "IRRELEVANT_PEER_INCOMPATIBLE_FORKS",
-        .future_head => "IRRELEVANT_PEER_DIFFERENT_CLOCKS",
-        .finalized_mismatch => "IRRELEVANT_PEER_DIFFERENT_FINALIZED",
-        .missing_availability => "NO_EARLIEST_AVAILABLE_SLOT",
-    };
-}
-
-test "peer event metrics bound unknown reasons and count long Goodbye boundaries" {
+test "peer event metrics bound unknown Goodbye reasons" {
     var counters: Counters = .{};
-    counters.observeGoodbye(129, false, 10, long_connection_ms + 10);
-    counters.observeGoodbye(129, true, 10, long_connection_ms + 11);
-    counters.observeGoodbye(std.math.maxInt(u64), false, 10, 0);
-    counters.observeRelevance(.future_head);
-    counters.observeRelevance(null);
-    try std.testing.expectEqual(@as(u64, 1), counters.long_goodbyes[@intFromEnum(goodbye.Reason.too_many_peers)]);
+    counters.goodbyeReceived(129);
+    counters.goodbyeReceived(std.math.maxInt(u64));
+    try std.testing.expectEqual(@as(u64, 1), counters.goodbyes[@intFromEnum(goodbye.Reason.too_many_peers)]);
     try std.testing.expectEqual(@as(u64, 1), counters.goodbyes[@intFromEnum(goodbye.Reason.unknown)]);
-    var buffer: [8192]u8 = undefined;
+    var buffer: [4096]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     var encoder: prom.Encoder = .{ .writer = &writer };
     try counters.write(&encoder);
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "lodestar_peer_goodbye_sent_total{reason=\"Client has too many peers\"} 1\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "lodestar_peer_relevance_check_total{result=\"IRRELEVANT_PEER_DIFFERENT_CLOCKS\"} 1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "lodestar_peer_goodbye_received_total{reason=\"Unknown\"} 1\n") != null);
 }

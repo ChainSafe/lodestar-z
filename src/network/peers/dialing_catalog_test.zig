@@ -160,7 +160,6 @@ test "peer fold canonical disconnect backs off once even without a dial intent" 
     try std.testing.expect(!c.disconnect(peer, conn, .health_timeout, 2));
     const before = c.rowFor(peer).?.intent;
     try d.enqueueDiscovered(&c, &hint, &.{}, &.{}, 2);
-    try std.testing.expectEqual(@as(u64, 1), c.connection_backoffs);
     try std.testing.expectEqual(before.failures, c.rowFor(peer).?.intent.failures);
     try std.testing.expectEqual(before.eligible_at_ms, d.nextWakeup(&c, 2, 1).?);
 }
@@ -180,7 +179,6 @@ test "peer fold inbound health close leaves the discovered endpoint history unto
     try std.testing.expect(c.disconnect(peer, conn, .health_timeout, 1));
     try std.testing.expectEqual(@as(u8, 1), c.history.strikesFor(key, hint.sequence, 1));
     try std.testing.expectEqual(@as(u8, 1), c.rowFor(peer).?.intent.failures);
-    try std.testing.expectEqual(@as(u64, 1), c.connection_backoffs);
 }
 
 test "peer fold long-lived health disconnect restarts redial backoff" {
@@ -495,9 +493,6 @@ test "remembered records refresh at a served close and drop on rejection, health
         const expected: u64 = if (value.peer.eql(&candidates[0].peer)) unix_s + 300 else unix_s - 60;
         try std.testing.expect(value.peer.eql(&candidates[0].peer) or value.peer.eql(&candidates[1].peer));
         try std.testing.expectEqual(expected, value.qualified_at_s);
-    }
-    inline for (.{ .{ .rejection, 1 }, .{ .health, 1 }, .{ .banned, 2 }, .{ .peer_id_mismatch, 1 } }) |removal| {
-        try std.testing.expectEqual(@as(u64, removal[1]), c.remembered.counters.removals[@intFromEnum(@as(remembered.Removal, removal[0]))]);
     }
     try std.testing.expectEqual([3]u64{ 7, 6, 6 }, funnel(&c, .fresh));
 }
