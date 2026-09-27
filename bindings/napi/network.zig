@@ -623,13 +623,30 @@ pub fn publishGossip(self: *@This(), topic: js.Value, data: js.Value, options: j
     return .{ .val = try publication_js.publish(try self.owner(), topic.val, data.val, options.val) };
 }
 
-test "legacy settlement terminates at its site while JavaScript can run, and stops locally once it cannot" {
+test "settlement and exchange failures terminate while JavaScript can run, and a stopped environment stops locally" {
+    const shim = @import("network_runtime_test.zig");
     for ([_]anyerror{ error.Closing, error.CannotRunJS, error.PendingException }) |err| {
         var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 }, .notify_live = false };
         settlementFailed(undefined, &runtime, err);
         try std.testing.expect(runtime.disposed and runtime.stop and !runtime.env_alive);
     }
-    try @import("network_runtime_test.zig").expectFatal(struct {
+    // An exception that clears is the bridge's contract failure; a pending-exception status with none pending is how
+    // N-API reports JavaScript that cannot run.
+    var classified: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 }, .notify_live = false };
+    var host: Exchange = .{ .env = undefined, .runtime = &classified };
+    for ([_]struct { anyerror, bool, exchange_mod.Failure }{
+        .{ error.Closing, true, .stopped },
+        .{ error.CannotRunJS, true, .stopped },
+        .{ error.PendingException, false, .stopped },
+        .{ error.PendingException, true, .contract },
+        .{ error.GenericFailure, false, .contract },
+        .{ error.GenericFailure, true, .contract },
+    }) |case| {
+        shim.exception_pending = case[1];
+        try std.testing.expectEqual(case[2], host.classify(case[0]));
+        try std.testing.expectEqual(case[1] and case[2] == .stopped, shim.exception_pending);
+    }
+    try shim.expectFatal(struct {
         fn run() void {
             var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 }, .notify_live = false };
             settlementFailed(undefined, &runtime, error.GenericFailure);
