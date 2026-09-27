@@ -633,10 +633,13 @@ async function servedPair() {
   return {...pair, peer: pair.identity.peerId};
 }
 
-/** Exchanges until one delivers a request completion, as a held runtime's own host would. */
-async function requestCompleted(runtime: NativeNetworkApplicationRuntime): Promise<void> {
+/**
+ * Exchanges until one delivers a request completion, as a held runtime's own host would, then runs `then` in the same
+ * job, before any reaction to what the exchange settled.
+ */
+async function requestCompleted(runtime: NativeNetworkApplicationRuntime, then?: () => void): Promise<void> {
   for (let i = 0; i < 2000; i++) {
-    if (runtime.exchange([], settleOnly).completions.some(({family}) => family === "request")) return;
+    if (runtime.exchange([], settleOnly).completions.some(({family}) => family === "request")) return then?.();
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   throw Error("No request completion arrived");
@@ -691,9 +694,12 @@ test("a return racing a delivered chunk or a pending pull settles the pull first
     const pulled = first.next();
     void pulled.then(() => order.push("pull"));
     await (await takeIncoming(left)).respond(chunk(5), requestForks[0]);
-    await requestCompleted(right);
-    const retired = first.return?.();
-    void retired?.then(() => order.push("return"));
+    let retired: Promise<unknown> | undefined;
+    await requestCompleted(right, () => {
+      expect(order).toEqual([]);
+      retired = first.return?.();
+      void retired?.then(() => order.push("return"));
+    });
     await requestCompleted(right);
     expect((await pulled).value?.data).toEqual(chunk(5));
     expect(await retired).toEqual(done);
