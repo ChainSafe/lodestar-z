@@ -1,7 +1,7 @@
 //! One host exchange. Phase A decodes the actions and demand, and throws with nothing applied. Phase 0 settles
-//! legacy results. Phase B, under the mutex, disarms, applies the actions, takes the capacities and pins the rows it
-//! serves. Phase C builds the result; no user code runs from here on. Phase D, under the mutex, commits (or restores
-//! the pins when JavaScript stopped), unpins, wakes the owner once and arms when nothing is queued.
+//! legacy results. Phase B, under the mutex, disarms, applies the actions, takes the capacities and pins the
+//! completions and rows it serves. Phase C builds the result; no user code runs from here on. Phase D, under the mutex,
+//! commits (or restores the pins when JavaScript stopped), unpins, wakes the owner once and arms when nothing is queued.
 const std = @import("std");
 const n = @import("network");
 const napi = @import("zapi:zapi").napi;
@@ -13,6 +13,7 @@ const g = @import("network_gossip.zig");
 const incoming = @import("network_incoming.zig");
 const projection = @import("network_peer_projection.zig");
 const readiness = @import("network_readiness.zig");
+const publications = @import("network_publications.zig");
 const fatal = @import("network_fatal.zig");
 const Runtime = r.Runtime;
 const Row = readiness.Row;
@@ -26,7 +27,7 @@ pub const peers_max = 64;
 pub const serving_max = 8;
 /// Owner dispositions one exchange acknowledges; more set `more`.
 pub const acknowledged_max = action_max;
-const settle_max = @import("network_publications.zig").capacity_max;
+const settle_max = publications.capacity_max;
 
 /// One exchange's quotas, where zero disables a service, and the host's standing capacities, null to keep them.
 pub const Demand = struct {
@@ -143,11 +144,15 @@ pub const Selection = struct {
     /// the commit frees them.
     acknowledged: [acknowledged_max]g.Token = undefined,
     acknowledged_count: usize = 0,
+    /// Completed publications, taken whatever the demand up to its settle quota. Their cells stay copying until the
+    /// commit retires them.
+    publications: [publications.capacity_max]publications.Token = undefined,
+    publication_count: usize = 0,
     /// The owner has work from this exchange.
     wake: bool = false,
 
     pub fn delivers(self: *const Selection) bool {
-        return self.peer_count > 0 or self.serving_count > 0 or self.checks.len > 0 or self.gossip != null or self.acknowledged_count > 0;
+        return self.peer_count > 0 or self.serving_count > 0 or self.checks.len > 0 or self.gossip != null or self.acknowledged_count > 0 or self.publication_count > 0;
     }
 };
 
@@ -193,6 +198,7 @@ fn applyLocked(runtime: *Runtime, actions: []const Action, now: u64) void {
 
 fn selectLocked(runtime: *Runtime, demand: *const Demand, now: u64, selection: *Selection) void {
     if (runtime.gossip) |*table| selection.acknowledged_count = table.acknowledgements(&selection.acknowledged);
+    selectPublications(runtime, demand.settle, selection);
     const ready = &runtime.readiness;
     var next = ready.payload.head;
     for (0..readiness.row_count) |_| {
@@ -220,6 +226,20 @@ fn selectLocked(runtime: *Runtime, demand: *const Demand, now: u64, selection: *
                 if (claim.len > 0) selection.gossip = claim;
             },
         }
+    }
+}
+
+/// Pins up to `limit` completed publications, resuming past the last one delivered so refilled lower cells cannot
+/// starve higher ones.
+fn selectPublications(runtime: *Runtime, limit: usize, selection: *Selection) void {
+    const table = if (runtime.publications) |*table| table else return;
+    for (0..limit) |_| {
+        const i = table.nextTerminal(table.settle_cursor) orelse table.nextTerminal(0) orelse break;
+        table.settle_cursor = i + 1;
+        const cell = &table.cells[i];
+        table.transition(cell, .copying);
+        selection.publications[selection.publication_count] = .{ .index = @intCast(i), .generation = cell.generation };
+        selection.publication_count += 1;
     }
 }
 
@@ -263,6 +283,12 @@ fn commitLocked(runtime: *Runtime, selection: *Selection) bool {
         runtime.capacity.serving -|= @intCast(selection.serving_count);
         selection.wake = true;
     }
+    if (selection.publication_count > 0) {
+        const table = &runtime.publications.?;
+        for (selection.publications[0..selection.publication_count]) |token| table.retire(token);
+        runtime.bridge.deliver(.completion, selection.publication_count);
+        runtime.retireRequestStorageLocked();
+    }
     runtime.bridge.deliver(.dependency_check, selection.checks.len);
     // Close may have freed these cells meanwhile; a freed token is ignored. Not counted as delivered items.
     if (runtime.gossip) |*table| for (selection.acknowledged[0..selection.acknowledged_count]) |token| table.acknowledge(token);
@@ -276,6 +302,10 @@ fn commitLocked(runtime: *Runtime, selection: *Selection) bool {
 
 /// Returns every pinned item to where it was, so teardown reclaims it.
 fn restoreLocked(runtime: *Runtime, selection: *const Selection) void {
+    if (selection.publication_count > 0) {
+        const table = &runtime.publications.?;
+        for (selection.publications[0..selection.publication_count]) |token| table.transition(table.get(token).?, .terminal);
+    }
     if (selection.serving_count > 0) {
         const table = &runtime.incoming.?;
         for (selection.serving[0..selection.serving_count]) |token| {
@@ -351,6 +381,8 @@ pub fn run(runtime: *Runtime, actions: []const Action, demand: *const Demand, no
     const keep_alive = commitLocked(runtime, &selection);
     const outcome = endLocked(runtime, demand, &selection);
     runtime.unlock();
+    // Each admitted publication held the runtime until its completion was delivered.
+    for (0..selection.publication_count) |_| runtime.release();
     if (keep_alive) host.keepAlive();
     return host.finish(output, outcome) catch |err| return fail(host, host.classify(err), .exchange_finish, err);
 }
@@ -439,7 +471,11 @@ pub fn build(env: napi.Env, runtime: *Runtime, selection: *Selection, closed: ?V
         try acknowledged.setElement(@intCast(i), reference);
     }
     try result.setNamedProperty("acknowledged", acknowledged);
-    try result.setNamedProperty("completions", try env.createArrayWithLength(0));
+    const completions = try env.createArrayWithLength(selection.publication_count);
+    for (selection.publications[0..selection.publication_count], 0..) |token, i| {
+        try completions.setElement(@intCast(i), try @import("network_publication_js.zig").completion(env, token, runtime.publications.?.get(token).?));
+    }
+    try result.setNamedProperty("completions", completions);
     try result.setNamedProperty("failure", try env.getNull());
     try result.setNamedProperty("closed", closed orelse try env.getNull());
     return result;

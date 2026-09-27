@@ -145,7 +145,7 @@ export class NativeRuntime {
     this.#native.holdVerdicts(held);
   }
   async publishGossip(topic, data, options) {
-    return this.#native.publishGossip(topic, data, options);
+    return this.#owner.admit("publication", undefined, () => this.#native.publishGossip(topic, data, options));
   }
   request(peerId, protocol, data, options) {
     return new NativeRequest(this.#native, this.#native.requestStart(peerId, protocol, data, options), this.#wake);

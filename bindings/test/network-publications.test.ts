@@ -1,7 +1,7 @@
 import {setTimeout as delay} from "node:timers/promises";
 import {expect, test, vi} from "vitest";
 import {initializeNativeNetworkRuntime} from "../src/network-runtime.js";
-import {applicationConfig, localIntent, settleOnly, startRuntime, topicName} from "./utils/network.js";
+import {applicationConfig, holdSettling, localIntent, settleOnly, startRuntime, topicName} from "./utils/network.js";
 import {startPeer} from "./utils/network-peer.js";
 
 const BLOCK = topicName();
@@ -207,4 +207,49 @@ test("limited settlement reaches a terminal publication above refilled lower cel
   }
   await Promise.all(publications);
   expect(await runtime.closed).toEqual({reason: "requested"});
+});
+
+test("a completion delivered in the job that admitted its publication settles the record installed there", async () => {
+  const runtime = startRuntime(applicationConfig());
+  try {
+    const published = runtime.publishGossip(BLOCK, new Uint8Array(4000), {allowZeroPeers: true});
+    // Without yielding, exchange until the owner has published it, so its completion is the earliest possible.
+    let delivered = 0;
+    for (let i = 0; i < 1_000_000 && delivered === 0; i++)
+      delivered = runtime.exchange([], settleOnly).completions.length;
+    expect(delivered).toBe(1);
+    await expect(published).resolves.toMatchObject({duplicate: false});
+  } finally {
+    await runtime.close();
+  }
+});
+
+test("close settles after every publication and command admitted before it, one completion per exchange", async () => {
+  const runtime = startRuntime(applicationConfig());
+  holdSettling(runtime, true);
+  const order: string[] = [];
+  const record = (promise: Promise<unknown>, label: string) =>
+    promise.then(
+      () => order.push(label),
+      () => order.push(label)
+    );
+  const options = {allowZeroPeers: true, ignoreDuplicate: true};
+  const operations = [
+    ...Array.from({length: 4}, (_, i) =>
+      record(runtime.publishGossip(BLOCK, new Uint8Array(4000).fill(i), options), "publication")
+    ),
+    record(runtime.getIdentity(), "command"),
+    record(runtime.getPeers(), "command"),
+  ];
+  const closing = record(runtime.close(), "closed");
+  const delivered: number[] = [];
+  for (let i = 0; i < 400 && !order.includes("closed"); i++) {
+    await delay(5);
+    delivered.push(runtime.exchange([], {...settleOnly, settleCells: 1}).completions.length);
+  }
+  await Promise.all([...operations, closing]);
+  expect(order.at(-1)).toBe("closed");
+  expect(order.filter((label) => label === "publication")).toHaveLength(4);
+  expect(delivered.every((count) => count <= 1)).toBe(true);
+  expect(delivered.reduce((sum, count) => sum + count, 0)).toBe(4);
 });
