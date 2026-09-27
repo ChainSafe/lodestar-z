@@ -610,7 +610,9 @@ export interface NativeNetwork {
   applyIntent(intent: NativeLocalIntent, slot: bigint): Promise<NativeIntentResult>;
   /** Updates Status for the active fork; preserves clock, subscriptions, Metadata, ENR and demand. */
   updateStatus(status: NetworkStatusUpdate): Promise<void>;
+  /** Throws InvalidNetworkBytes, queueing nothing, unless `root` is a 32-byte Uint8Array. */
   blockImported(root: Uint8Array): void;
+  /** Throws, queueing nothing, for a malformed peer id or an unknown action. */
   reportPeer(peerId: PeerIdStr, action: NativePeerAction): void;
   dropQueuedGossip(): void;
   /** Capacity the host released; the binding drains again. */

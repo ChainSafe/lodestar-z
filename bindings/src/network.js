@@ -29,9 +29,11 @@ class NativeNetwork {
     return this.#runtime.updateStatus(status);
   }
   blockImported(root) {
+    this.#runtime.checkAction({root, type: "block"});
     this.#pump.block(root);
   }
   reportPeer(peerId, action) {
+    this.#runtime.checkAction({action, count: 1, peerId, type: "reportPeer"});
     this.#pump.reportPeer(peerId, action);
   }
   dropQueuedGossip() {

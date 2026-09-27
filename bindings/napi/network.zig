@@ -238,6 +238,11 @@ pub fn exchange(self: *@This(), actions_value: js.Value, demand_value: js.Value)
     return .{ .val = result };
 }
 
+/// Throws what an exchange would for `action`, applying nothing, so a host's invalid input fails its own call.
+pub fn checkAction(_: *@This(), action: js.Value) !void {
+    _ = try exchange_mod.parseAction(action.val);
+}
+
 /// A private control for binding ownership tests: while held, the owner leaves reported verdicts unapplied, so no
 /// acknowledgement follows them, though expiry still disposes of them; a release wakes the owner.
 pub fn holdVerdicts(self: *@This(), held: js.Value) !void {

@@ -339,6 +339,30 @@ test.each([
   15000
 );
 
+test("refuses an invalid peer report or imported root with an ordinary throw before queueing it", async () => {
+  const config = applicationConfig();
+  const network = createNativeNetwork(config, host());
+  try {
+    const self = (await network.getIdentity()).peerId;
+    const [peer] = unreachableConnect();
+    for (const [report, code] of [
+      [() => network.reportPeer("not-a-peer", "fatal"), "InvalidNetworkPeerId"],
+      [() => network.reportPeer(`${peer}\0`, "fatal"), "InvalidNetworkPeerId"],
+      [() => network.reportPeer(peer, "severe" as "fatal"), "InvalidNetworkAction"],
+      [() => network.blockImported(new Uint8Array(31)), "InvalidNetworkBytes"],
+      [() => network.blockImported([...new Uint8Array(32)] as unknown as Uint8Array), "InvalidNetworkBytes"],
+    ] as const)
+      expect(report).toThrow(code);
+    // Valid input still reaches native, which ignores a penalty for an identity it does not know.
+    network.reportPeer(peer, "fatal");
+    network.blockImported(new Uint8Array(32));
+    await vi.waitFor(() => expect(runtimeOf(network)?.diagnostics().peerReportsIgnored).toBe(1n));
+    expect((await network.getIdentity()).peerId).toBe(self);
+  } finally {
+    expect(await network.close()).toEqual({reason: "requested"});
+  }
+});
+
 test("the facade validates its host, starts without host callbacks and hides the exchange", async () => {
   expect(() => createNativeNetwork(applicationConfig(), {} as NativeHost)).toThrow(
     "NativeHost.capacity must be a function"

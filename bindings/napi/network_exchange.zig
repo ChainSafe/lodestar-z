@@ -84,7 +84,7 @@ pub fn parseActions(value: Value, into: *[action_max]Action) !usize {
     return count;
 }
 
-fn parseAction(value: Value) !Action {
+pub fn parseAction(value: Value) !Action {
     _ = object(value) catch return error.InvalidNetworkAction;
     return switch (try name(ActionType, try cfg.get(value, "type"), error.InvalidNetworkAction)) {
         .verdict => .{ .verdict = .{
