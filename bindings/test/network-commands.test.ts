@@ -138,12 +138,16 @@ test("the owner starts commands, publications and requests in their admission or
     const first = runtime.getIdentity();
     const publication = runtime.publishGossip(topicName(), new Uint8Array(4000), PUBLISH);
     const second = runtime.getIdentity();
-    const request = runtime.request(runtime.identity.peerId, BLOCKS, new Uint8Array(32)).next();
+    // Handled now: native can reject the request, and an exchange settle it, before the commands below complete.
+    const request = runtime
+      .request(runtime.identity.peerId, BLOCKS, new Uint8Array(32))
+      .next()
+      .catch(() => undefined);
     const third = runtime.getIdentity();
     // Released together, they start in one pass that advances the owner's sequence once per operation.
     runtime.holdOperations(false);
     const [a, b, c] = await Promise.all([first, second, third]);
-    await Promise.all([publication, request.catch(() => undefined)]);
+    await Promise.all([publication, request]);
     expect([b.ownerSequence - a.ownerSequence, c.ownerSequence - b.ownerSequence]).toEqual([2n, 2n]);
   } finally {
     await runtime.close();
