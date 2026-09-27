@@ -190,10 +190,9 @@ export interface NativeNetworkApplicationRuntime {
    */
   getRememberedPeers(): Promise<NativeRememberedPeersSnapshot>;
   /**
-   * One host turn: applies up to 256 `actions`, settles up to `demand.settleCells` request pulls and retirements and
-   * incoming acknowledgements per table, delivers as many completed publications and commands per family in
-   * `completions`, then the close result once nothing else awaits settlement or delivery, and delivers the payload
-   * `demand` asks for. It throws only for invalid input or a nested call, before applying anything. Actions after
+   * One host turn: applies up to 256 `actions`, settles up to `demand.settleCells` incoming acknowledgements, delivers
+   * as many publication, command and request completions per family in `completions`, then the close result once
+   * nothing else awaits settlement or delivery, and delivers the payload `demand` asks for. It throws only for invalid input or a nested call, before applying anything. Actions after
    * close are ignored; unknown penalized identities count in peerReportsIgnored.
    */
   exchange(actions: readonly NativeAction[], demand: NativeExchangeDemand): NativeExchange;
