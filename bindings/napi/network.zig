@@ -260,6 +260,17 @@ pub fn holdVerdicts(self: *@This(), held: js.Value) !void {
     if (!value) runtime.signalLocked();
 }
 
+/// A private control for binding ownership tests: while held, the owner starts no admitted command, publication or
+/// request, which keep their admission order; a release wakes the owner.
+pub fn holdOperations(self: *@This(), held: js.Value) !void {
+    const runtime = try self.owner();
+    const value = try cfg.boolean(held.val);
+    runtime.lock();
+    defer runtime.unlock();
+    runtime.operations_held = value;
+    if (!value) runtime.signalLocked();
+}
+
 /// Terminates the process at a fatal site JavaScript raises (network_fatal.zig). `reason` is at most 64 printable ASCII
 /// bytes.
 pub fn fail(_: *@This(), site_value: js.Value, reason_value: js.Value) !void {

@@ -232,7 +232,7 @@ fn executeWork(self: *Runtime, io: std.Io) !bool {
     var bytes: usize = 0;
     for (0..commands.turn_max + publications.turn_max + requests_mod.turn_max) |_| {
         self.lock();
-        if (self.stop) {
+        if (self.stop or self.operations_held) {
             self.unlock();
             return false;
         }

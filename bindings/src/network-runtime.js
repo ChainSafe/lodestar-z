@@ -148,6 +148,9 @@ export class NativeRuntime {
   holdVerdicts(held) {
     this.#native.holdVerdicts(held);
   }
+  holdOperations(held) {
+    this.#native.holdOperations(held);
+  }
   async publishGossip(topic, data, options) {
     return this.#owner.admit("publication", undefined, () => this.#native.publishGossip(topic, data, options));
   }

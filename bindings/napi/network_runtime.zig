@@ -175,6 +175,8 @@ pub const Runtime = struct {
     host_due: bool = false,
     /// The owner leaves reported verdicts unapplied while an ownership test holds them.
     verdicts_held: bool = false,
+    /// The owner starts no admitted command, publication or request while an ownership test holds them.
+    operations_held: bool = false,
     env_alive: bool = true,
     disposed: bool = false,
     close_deferred: ?napi.Deferred = null,
