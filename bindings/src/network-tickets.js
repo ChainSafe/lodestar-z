@@ -2,6 +2,9 @@ import {Turns} from "./network-pump.js";
 
 /** Families whose operation settles once, from its cell's one completion. */
 const ONE_SHOT = ["publication", "command"];
+/** The longest timer period, whose timer only holds what it is given and keeps the event loop alive. */
+const HOLD_MS = 2 ** 31 - 1;
+const noop = () => undefined;
 
 /**
  * One family's one-shot operation records, a slot per native cell. A handle `{index, generation}` names a record: it
@@ -58,6 +61,13 @@ export class CompletionOwner {
   /** Each migrated family's records, sized from native's cells. */
   #tables = new Map();
   #abandoned = false;
+  /**
+   * From native's last notification until its close result arrives. Native then released its notifier, so this holds
+   * the owner and keeps the event loop alive for the exchanges that deliver the rest, also after the wrapper's
+   * finalizer handed them to the owner.
+   */
+  #hold = undefined;
+  #closed = false;
   /** The runtime's one scheduling flag and retry timer, which a pump shares while it lives. */
   turns = new Turns(this);
 
@@ -68,6 +78,8 @@ export class CompletionOwner {
 
   /** Native's notification: a live wrapper takes it, and otherwise the owner drains. */
   notifier = () => {
+    if (!this.#closed && this.#hold === undefined && ["closed", "failed"].includes(this.#native.getState()))
+      this.#hold = setInterval(noop, HOLD_MS, this);
     if (!this.#notify()) this.abandon();
     return true;
   };
@@ -121,6 +133,8 @@ export class CompletionOwner {
   }
 
   #close() {
+    this.#closed = true;
+    clearInterval(this.#hold);
     let live = 0;
     for (const table of this.#tables.values()) live += table.live;
     if (live > 0) this.#breach(`closed with records unsettled: ${live}`);
