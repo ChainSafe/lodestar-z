@@ -1,4 +1,4 @@
-import {requestForks} from "../utils/network.ts";
+import {holdSettling, requestForks} from "../utils/network.ts";
 import assert from "node:assert/strict";
 import {setTimeout as delay} from "node:timers/promises";
 import {BLOCKS, incomingPair, takeIncoming} from "../utils/network-incoming.ts";
@@ -46,6 +46,27 @@ try {
     }
     assert.equal(weak.deref(), undefined);
     assert.equal(await closed, undefined);
+  } else if (mode === "ready-gc") {
+    // A runtime collected while its host awaits a permission settles it, refused, after the stream's close.
+    holdSettling(right, true);
+    const permission = incoming.ready();
+    const order = [];
+    void permission.then(
+      () => order.push("granted"),
+      (error) => order.push(error.code)
+    );
+    void closed.then(() => order.push("closed"));
+    const weak = new WeakRef(right);
+    right = null;
+    for (let i = 0; i < 300; i++) {
+      await delay(10);
+      global.gc();
+      if (!weak.deref()) break;
+    }
+    assert.equal(weak.deref(), undefined);
+    await assert.rejects(permission, {code: "NetworkIncomingClosed"});
+    assert.equal(await closed, undefined);
+    assert.deepEqual(order, ["closed", "NetworkIncomingClosed"]);
   } else if (mode === "held-ack") {
     const ack = incoming.respond(new Uint8Array(10 * 1024 * 1024), context).then(() => "sent", (error) => error.code);
     await right.close();

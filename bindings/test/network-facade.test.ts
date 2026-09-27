@@ -268,6 +268,40 @@ test("serving capacity stays charged after the stream closes until serve settles
   }
 }, 30000);
 
+test("a serve that outlives the network's close retires quietly after it", async () => {
+  let retire: () => void = () => undefined;
+  const retired = new Promise<void>((resolve) => {
+    retire = resolve;
+  });
+  let started: IncomingRequest | undefined;
+  const errors: unknown[] = [];
+  const networkHost = host({
+    error: (error) => void errors.push(error),
+    async serve(request) {
+      started = request;
+      await retired;
+    },
+  });
+  const {network, peers, remote} = await facadeWithPeers(networkHost, 1);
+  const [client] = peers;
+  try {
+    const stream = client.request(remote.peerId, BLOCKS, new Uint8Array(32));
+    const pending = stream.next().catch(() => undefined);
+    await vi.waitFor(() => expect(started).toBeDefined(), {timeout: 5000});
+    // Close does not wait for the host's work, whose stream it ends.
+    expect(await network.close()).toEqual({reason: "requested"});
+    expect(await started?.closed).toBeUndefined();
+    expect(runtimeOf(network)?.diagnostics().incoming.occupied).toBe(0);
+    retire();
+    await delay(20);
+    expect(errors).toEqual([]);
+    await pending;
+  } finally {
+    retire();
+    await Promise.allSettled([network.close(), client.close()]);
+  }
+}, 30000);
+
 test.each([
   "after the host's cleanup",
   "racing a requested close",

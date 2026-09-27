@@ -6,6 +6,7 @@ import {initializeNativeNetworkRuntime} from "../../src/network-runtime.js";
 import {
   applicationConfig,
   localIntent,
+  requestForks,
   runtimeReleased,
   Settlements,
   settleOnly,
@@ -229,6 +230,42 @@ if (mode === "exit") {
     assert.equal(published.duplicate, false);
     console.log("published-exit");
   }
+} else if (mode === "incoming-exit") {
+  // A served stream whose close and retirement completed leaves a running, idle network, which the process exits
+  // under without a close.
+  const {startPeer} = await import("../utils/network-peer.js");
+  const {BLOCKS} = await import("../utils/network-incoming.js");
+  const config = applicationConfig();
+  let served = noop;
+  const retired = new Promise((resolve) => {
+    served = resolve;
+  });
+  const network = createNativeNetwork(config, {
+    capacity: () => ({ordinary: true, serving: 32}),
+    validate: (job) => Promise.resolve(job.messages.map(() => "ignore")),
+    checkDependencies: (checks) => checks.map(() => false),
+    async serve(request) {
+      await request.respond(new Uint8Array(4000).fill(5), requestForks[0]);
+      await request.finish();
+      served();
+    },
+    peers: noop,
+    failed: noop,
+    logs: noop,
+  });
+  globalThis.retained = network;
+  const remote = await network.getIdentity();
+  await network.applyIntent(localIntent(config), config.initialSlot);
+  const peerConfig = applicationConfig();
+  peerConfig.identitySecretKey[31] = 2;
+  const peer = await startPeer(peerConfig);
+  await peer.applyIntent(localIntent(peerConfig), peerConfig.initialSlot);
+  await peer.connect(remote.peerId, [remote.localEndpoint], 5000n);
+  const stream = peer.request(remote.peerId, BLOCKS, new Uint8Array(32));
+  assert.deepEqual((await stream.next()).value.data, new Uint8Array(4000).fill(5));
+  await retired;
+  await peer.stop();
+  console.log("served-exit");
 } else if (mode === "await-close") {
   // Only the notifier ref, taken by close, keeps the loop alive until closed settles.
   const config = applicationConfig();
