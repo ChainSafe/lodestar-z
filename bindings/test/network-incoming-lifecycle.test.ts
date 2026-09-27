@@ -34,7 +34,6 @@ interface IncomingHandle {
 }
 interface IncomingDescriptor {
   handle: IncomingHandle;
-  closed: Promise<void>;
 }
 interface DirectIncomingBridge {
   initialize(
@@ -48,17 +47,13 @@ interface DirectIncomingBridge {
   ): import("../src/network-runtime.js").NativeExchange & {serving: IncomingDescriptor[]};
   incomingTerminal(handle: IncomingHandle, action: number, status?: number, message?: Uint8Array): void;
   incomingRelease(handle: IncomingHandle): void;
-  incomingRespond(
-    handle: IncomingHandle,
-    data: Uint8Array,
-    context: import("../src/network.js").NativeForkEntry
-  ): Promise<void>;
+  incomingRespond(handle: IncomingHandle, data: Uint8Array, context: import("../src/network.js").NativeForkEntry): void;
   requestPull(handle: IncomingHandle): void;
   close(): void;
 }
 
 test("incoming tokens reject malformed handles and stale slot generations", async () => {
-  const {commandCompleted, networkBindings: exports} = await import("./utils/network-bindings.js");
+  const {commandCompleted, completed, networkBindings: exports} = await import("./utils/network-bindings.js");
   const {NativeNetworkRuntime} = exports as unknown as {NativeNetworkRuntime: new () => DirectIncomingBridge};
   const config = applicationConfig();
   config.resources.bridgeBudgetBytes = 512 * 1024 * 1024;
@@ -85,7 +80,7 @@ test("incoming tokens reject malformed handles and stale slot generations", asyn
       await expect
         .poll(
           () => {
-            // Peer events are taken too, so nothing waits and the declining notifier settles completions.
+            // Peer events are taken too, so nothing waits.
             incoming = native.exchange([], {...settleOnly, capacity, peers: 64, servingStarts: 1}).serving[0] ?? null;
             return incoming !== null;
           },
@@ -99,16 +94,24 @@ test("incoming tokens reject malformed handles and stale slot generations", asyn
         expect(() => native.incomingTerminal(invalid, 2, undefined, undefined)).toThrow("InvalidNetworkInteger");
       expect(() => native.requestPull(handle)).toThrow();
       if (previous) {
-        const ack = native.incomingRespond(handle, new Uint8Array(4000), requestForks[0]);
+        native.incomingRespond(handle, new Uint8Array(4000), requestForks[0]);
         expect(handle.index).toBe(previous.index);
         expect(handle.generation).toBe(previous.generation + 1n);
         const stale = previous;
         expect(() => native.incomingTerminal(stale, 2, undefined, undefined)).toThrow("NetworkIncomingClosed");
-        await ack;
+        expect(await completed(native, "incoming", handle, settleOnly)).toEqual({
+          family: "incoming",
+          handle,
+          response: {},
+        });
         expect((await pending).done).toBe(false);
       }
       native.incomingTerminal(handle, 0, undefined, undefined);
-      expect(await descriptor.closed).toBeUndefined();
+      expect(await completed(native, "incoming", handle, settleOnly)).toEqual({
+        closed: true,
+        family: "incoming",
+        handle,
+      });
       native.incomingRelease(handle);
       await expect
         .poll(() => {

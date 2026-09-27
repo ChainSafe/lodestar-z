@@ -1,7 +1,7 @@
 import {Turns} from "./network-pump.js";
 
 /** The families whose completions the owner settles, each with a record per native cell. */
-const FAMILIES = ["publication", "command", "request"];
+const FAMILIES = ["publication", "command", "request", "incoming"];
 /** The longest timer period, whose timer only holds what it is given and keeps the event loop alive. */
 const HOLD_MS = 2 ** 31 - 1;
 const noop = () => undefined;
@@ -49,9 +49,19 @@ class Records {
 }
 
 /**
+ * Whether `completion` is its cell's last: a request's terminal outcome, an incoming stream's close, or a publication's
+ * or command's only completion.
+ */
+function final(family, completion) {
+  if (family === "request") return !("value" in completion);
+  if (family === "incoming") return completion.closed === true;
+  return true;
+}
+
+/**
  * Settles `record` with its cell's `completion`. A request's chunk answers its pending pull and its terminal outcome
- * ends the request; any other family's single completion settles the promise of the kind it expects. Returns false
- * when the record cannot take the completion.
+ * ends the request; an incoming stream's completion settles its pending call and its close; any other family's single
+ * completion settles the promise of the kind it expects. Returns false when the record cannot take the completion.
  */
 function settle(family, record, completion) {
   if (family === "request") {
@@ -59,6 +69,7 @@ function settle(family, record, completion) {
     record.end(completion);
     return true;
   }
+  if (family === "incoming") return record.complete(completion);
   if (record.kind !== completion.kind) return false;
   if ("error" in completion) record.reject(completion.error);
   else record.resolve(completion.value);
@@ -124,6 +135,11 @@ export class CompletionOwner {
     return this.#install("request", record, submit);
   }
 
+  /** Takes one serving start, whose completions settle its stream's `record`, before the start is exposed. */
+  serve(record) {
+    this.#install("incoming", record, () => record.handle);
+  }
+
   /**
    * `submit` reserves the native cell and returns its handle, and `record` is installed before this returns. A
    * submission that throws installs nothing.
@@ -159,8 +175,7 @@ export class CompletionOwner {
   #complete(completion) {
     const {family, handle} = completion;
     const table = this.#tables.get(family);
-    // A request cell completes with each chunk and ends with its terminal outcome; the others complete once.
-    const record = table === undefined ? null : table.take(handle, family !== "request" || !("value" in completion));
+    const record = table === undefined ? null : table.take(handle, final(family, completion));
     if (record === undefined) return;
     if (record === null || !settle(family, record, completion))
       this.#breach(`completed ${family} ${handle.index}:${handle.generation}`);

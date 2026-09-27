@@ -163,7 +163,7 @@ fn jsStopped(err: anyerror) bool {
 
 /// The notification callback only schedules: a host that returns true runs an exchange, which arms again once
 /// nothing is queued. The completion owner always does, also for a collected wrapper. A callback that returns anything
-/// else leaves no host exchange, so legacy results settle here; payload waits for a host.
+/// else leaves no host exchange, so only the close result settles here; completions and payload wait for a host.
 fn notify(env: napi.Env, callback: Value, runtime: *Runtime) !void {
     runtime.lock();
     const alive = runtime.env_alive;
@@ -178,7 +178,7 @@ fn notify(env: napi.Env, callback: Value, runtime: *Runtime) !void {
         return;
     };
     if (try result.typeof() == .boolean and try result.getValueBool()) return;
-    for (0..2) |_| if (!try settleWithin(env, runtime, publications.capacity_max, null)) break;
+    _ = try settleClose(env, runtime, null);
     runtime.lock();
     defer runtime.unlock();
     runtime.refreshLocked();
@@ -188,15 +188,14 @@ fn makeError(env: napi.Env, err: anyerror) !Value {
     return @import("network_js.zig").errorValue(env, @errorName(err));
 }
 
-/// Settles up to `limit` legacy incoming completions, then the close result once the owner has quiesced and nothing
-/// awaits settlement or delivery, which `closed` receives. Returns whether more remain.
-fn settleWithin(env: napi.Env, runtime: *Runtime, limit: usize, closed: ?*?Value) !bool {
-    var more = try incoming_js.settle(env, runtime, limit);
+/// Settles the close result once the owner has quiesced and no completion awaits delivery, which `closed` receives.
+/// Returns whether completions or the close remain.
+fn settleClose(env: napi.Env, runtime: *Runtime, closed: ?*?Value) !bool {
     runtime.lock();
     const idle = runtime.idleLocked();
     const closing = runtime.quiescent and !runtime.close_settled;
-    // Owner quiescence is final, so completions it left before quiescing are all settleable now.
-    more = more or runtime.settleableLocked();
+    // Owner quiescence is final, so completions it left before quiescing are all deliverable now.
+    const more = runtime.settleableLocked();
     const reason = runtime.reason;
     const terminal = runtime.terminal_error;
     runtime.unlock();
@@ -214,8 +213,8 @@ fn settleWithin(env: napi.Env, runtime: *Runtime, limit: usize, closed: ?*?Value
     return false;
 }
 
-/// One host exchange (network_exchange.zig): the host's actions, then legacy settlement and the payload `demand`
-/// asks for, delivered in one result.
+/// One host exchange (network_exchange.zig): the host's actions, then the completions, the close result and the
+/// payload `demand` asks for, delivered in one result.
 pub fn exchange(self: *@This(), actions_value: js.Value, demand_value: js.Value) !js.Value {
     const call = r.call(self.runtime, .exchange);
     defer call.end();
@@ -229,7 +228,7 @@ pub fn exchange(self: *@This(), actions_value: js.Value, demand_value: js.Value)
     const count = try exchange_mod.parseActions(actions_value.val, &actions);
     const demand = try exchange_mod.Demand.parse(demand_value.val);
     var host: Exchange = .{ .env = js.env(), .runtime = runtime };
-    try host.settle(demand.settle);
+    try host.settle();
     const now = try gossip.monotonic();
     const result = exchange_mod.run(runtime, actions[0..count], &demand, now, &host) catch |err| {
         if (jsStopped(err)) runtime.forceStop(true);
@@ -285,7 +284,7 @@ pub fn fail(_: *@This(), site_value: js.Value, reason_value: js.Value) !void {
     fatal.terminate(js.env(), site, reason[0..try application_cfg.text(reason_value.val, &reason)]);
 }
 
-/// The N-API side of an exchange: legacy settlement and the result's JS values.
+/// The N-API side of an exchange: the close result's settlement and the result's JS values.
 const Exchange = struct {
     env: napi.Env,
     runtime: *Runtime,
@@ -294,14 +293,14 @@ const Exchange = struct {
 
     pub const Result = Value;
 
-    /// Settles up to `limit` completions per legacy table.
-    pub fn settle(self: *Exchange, limit: usize) !void {
+    /// Settles the close result once it is due.
+    pub fn settle(self: *Exchange) !void {
         const runtime = self.runtime;
         runtime.lock();
-        const due = runtime.settleableLocked() or (runtime.quiescent and !runtime.close_settled);
+        const due = runtime.quiescent and !runtime.close_settled;
         runtime.unlock();
         if (!due) return;
-        _ = settleWithin(self.env, runtime, limit, &self.closed) catch |err| {
+        _ = settleClose(self.env, runtime, &self.closed) catch |err| {
             settlementFailed(self.env, runtime, err);
             return err;
         };
@@ -313,9 +312,6 @@ const Exchange = struct {
     }
     pub fn finish(self: *Exchange, output: ?Value, outcome: exchange_mod.Outcome) !Value {
         return exchange_mod.finish(self.env, self.runtime, output, outcome);
-    }
-    pub fn discard(self: *Exchange, selection: *const exchange_mod.Selection) void {
-        for (selection.closed[0..selection.closed_count]) |deferred| @import("network_js.zig").discardPromise(self.env, deferred);
     }
     pub fn keepAlive(self: *Exchange) void {
         self.runtime.notify.ref(self.env) catch {};
@@ -525,25 +521,25 @@ pub fn requestRetire(self: *@This(), handle: js.Value, abandoned: js.Value) !voi
     try request_js.retire(try self.owner(), handle.val, try cfg.boolean(abandoned.val));
 }
 
-pub fn incomingRespond(self: *@This(), handle: js.Value, data: js.Value, context: js.Value) !js.Value {
+pub fn incomingRespond(self: *@This(), handle: js.Value, data: js.Value, context: js.Value) !void {
     const call = r.call(self.runtime, .incoming_respond);
     defer call.end();
-    return .{ .val = try incoming_js.respond(try self.owner(), handle.val, data.val, context.val) };
+    try incoming_js.respond(try self.owner(), handle.val, data.val, context.val);
 }
-pub fn incomingRelease(self: *@This(), handle: js.Value) !js.Value {
+pub fn incomingRelease(self: *@This(), handle: js.Value) !void {
     const call = r.call(self.runtime, .incoming_release);
     defer call.end();
-    return .{ .val = try incoming_js.release(try self.owner(), handle.val) };
+    try incoming_js.release(try self.owner(), handle.val);
 }
-pub fn incomingReady(self: *@This(), handle: js.Value) !js.Value {
+pub fn incomingReady(self: *@This(), handle: js.Value) !void {
     const call = r.call(self.runtime, .incoming_ready);
     defer call.end();
-    return .{ .val = try incoming_js.ready(try self.owner(), handle.val) };
+    try incoming_js.ready(try self.owner(), handle.val);
 }
-pub fn incomingTerminal(self: *@This(), handle: js.Value, action: js.Value, status: js.Value, message: js.Value) !js.Value {
+pub fn incomingTerminal(self: *@This(), handle: js.Value, action: js.Value, status: js.Value, message: js.Value) !void {
     const call = r.call(self.runtime, .incoming_terminal);
     defer call.end();
-    return .{ .val = try incoming_js.terminal(try self.owner(), handle.val, action.val, status.val, message.val) };
+    try incoming_js.terminal(try self.owner(), handle.val, action.val, status.val, message.val);
 }
 
 pub fn publishGossip(self: *@This(), topic: js.Value, data: js.Value, options: js.Value) !js.Value {

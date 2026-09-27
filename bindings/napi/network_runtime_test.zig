@@ -255,7 +255,6 @@ const PeerHost = struct {
     pub fn finish(_: *PeerHost, peers: usize, outcome: exchange.Outcome) !Result {
         return .{ .peers = peers, .more = outcome.more };
     }
-    pub fn discard(_: *PeerHost, _: *const exchange.Selection) void {}
     pub fn keepAlive(_: *PeerHost) void {}
     pub fn idle(_: *PeerHost) void {}
     pub fn classify(_: *PeerHost, _: anyerror) exchange.Failure {
@@ -413,7 +412,6 @@ test "the O(1) settle-able state matches a full scan across state transitions" {
     defer runtime.requests.?.deinit();
     runtime.incoming = try incoming_mod.Table.init(std.testing.allocator, 2, &runtime.payload_budget);
     defer runtime.incoming.?.deinit();
-    const deferred: napi.Deferred = undefined;
     try expectDueMatchesScan(&runtime);
 
     // Commands: queued, executing, waiting and terminal through the owner's transitions.
@@ -485,25 +483,25 @@ test "the O(1) settle-able state matches a full scan across state transitions" {
     runtime.stop = false;
     runtime.quiescent = false;
 
-    // Incoming: a taken request whose permission, acknowledgement and close settle.
+    // Incoming: a taken request whose permission, acknowledgement and close are delivered.
     const incoming = &runtime.incoming.?;
     const served = try incoming.reserve(.blocks_by_root_v2, 32);
     const inbound = incoming.get(served).?;
     inbound.native = true;
     inbound.exposed = true;
-    inbound.closed = deferred;
+    inbound.closed_awaited = true;
     inbound.state = .serving;
     incoming.refresh(inbound);
     try expectDueMatchesScan(&runtime);
-    inbound.permission = deferred;
+    inbound.permission_awaited = true;
     incoming.refresh(inbound);
     try expectDueMatchesScan(&runtime);
     inbound.permission_ready = true;
     incoming.refresh(inbound);
     try expectDueMatchesScan(&runtime);
-    inbound.permission = null;
+    inbound.permission_awaited = false;
     inbound.permission_ready = false;
-    inbound.pending = deferred;
+    inbound.response_awaited = true;
     inbound.state = .response_native;
     incoming.refresh(inbound);
     try expectDueMatchesScan(&runtime);
@@ -515,14 +513,14 @@ test "the O(1) settle-able state matches a full scan across state transitions" {
     incoming.refresh(inbound);
     try expectDueMatchesScan(&runtime);
     inbound.copying = false;
-    inbound.pending = null;
+    inbound.response_awaited = false;
     inbound.ack = null;
     incoming.refresh(inbound);
     try expectDueMatchesScan(&runtime);
     runtime.quiescent = true;
     incoming_mod.closeLocked(&runtime);
     try expectDueMatchesScan(&runtime);
-    inbound.closed = null;
+    inbound.closed_awaited = false;
     incoming.retire(served);
     try expectDueMatchesScan(&runtime);
     runtime.quiescent = false;
@@ -551,11 +549,11 @@ test "the O(1) settle-able state matches a full scan across state transitions" {
             0 => inbound_cell.state = random.enumValue(incoming_mod.State),
             1 => inbound_cell.copying = random.boolean(),
             2 => inbound_cell.ack = if (random.boolean()) .sent else null,
-            3 => inbound_cell.pending = if (random.boolean()) deferred else null,
+            3 => inbound_cell.response_awaited = random.boolean(),
             4 => inbound_cell.native = random.boolean(),
-            5 => inbound_cell.closed = if (random.boolean()) deferred else null,
+            5 => inbound_cell.closed_awaited = random.boolean(),
             else => {
-                inbound_cell.permission = if (random.boolean()) deferred else null;
+                inbound_cell.permission_awaited = random.boolean();
                 inbound_cell.permission_ready = random.boolean();
             },
         }

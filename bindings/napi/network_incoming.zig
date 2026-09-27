@@ -1,7 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const n = @import("network");
-const napi = @import("zapi:zapi").napi;
 const rr = n.reqresp;
 const Runtime = @import("network_runtime.zig").Runtime;
 
@@ -30,9 +29,12 @@ pub const Cell = struct {
     context: ?rr.ForkEntry = null,
     copying: bool = false,
     exposed: bool = false,
-    closed: ?napi.Deferred = null,
-    pending: ?napi.Deferred = null,
-    permission: ?napi.Deferred = null,
+    /// The host's stream awaits its close, which an exchange delivers once the stream ends.
+    closed_awaited: bool = false,
+    /// A response awaits its acknowledgement, `ack`.
+    response_awaited: bool = false,
+    /// A readiness call awaits its permission, granted once `permission_ready`.
+    permission_awaited: bool = false,
     permission_ready: bool = false,
     ack: ?Ack = null,
     chunks: u32 = 0,
@@ -40,6 +42,15 @@ pub const Cell = struct {
     error_status: u8 = 0,
     error_message: [256]u8 = undefined,
     error_len: u16 = 0,
+};
+/// What an exchange delivers for one due cell: the pending response's acknowledgement, the stream's close and the
+/// pending permission's outcome, whichever are due, in that order.
+pub const Completion = struct {
+    token: Token,
+    ack: ?Ack = null,
+    closed: bool = false,
+    /// Whether the pending permission was granted.
+    permission: ?bool = null,
 };
 pub const Diagnostics = struct {
     capacity: usize = 0,
@@ -65,9 +76,9 @@ pub const Diagnostics = struct {
 pub const capacity_max = 32;
 pub const Table = struct {
     cells: []Cell,
-    /// The cells whose settlement is due now. `refresh` keeps it current after each change to a cell.
+    /// The cells whose completion is due now. `refresh` keeps it current after each change to a cell.
     due: std.StaticBitSet(capacity_max) = .initEmpty(),
-    /// Past the last settled cell, where settlement resumes, so refilled low cells cannot starve higher ones.
+    /// Past the last delivered cell, where delivery resumes, so refilled low cells cannot starve higher ones.
     settle_cursor: usize = 0,
     backing: std.mem.Allocator,
     budget: *Budget,
@@ -168,22 +179,63 @@ pub const Table = struct {
         self.refresh(cell);
         self.diag.occupied -= 1;
     }
-    /// Recomputes whether settlement of `cell` is due.
+    /// Recomputes whether the completion of `cell` is due.
     pub fn refresh(self: *Table, cell: *const Cell) void {
         const index = (@intFromPtr(cell) - @intFromPtr(self.cells.ptr)) / @sizeOf(Cell);
         std.debug.assert(&self.cells[index] == cell);
         self.due.setValue(index, settleable(cell));
     }
-    /// The first cell at or after `from` whose settlement is due. O(1).
+    /// The first cell at or after `from` whose completion is due. O(1).
     pub fn nextDue(self: *const Table, from: usize) ?usize {
         var rest = self.due;
         rest.setRangeValue(.{ .start = 0, .end = @min(from, capacity_max) }, false);
         return rest.findFirstSet();
     }
-    /// Whether settlement of any cell is due. O(1); debug builds check it against a scan.
+    /// Whether the completion of any cell is due. O(1); debug builds check it against a scan.
     pub fn anyDue(self: *const Table) bool {
         if (builtin.mode == .Debug) for (0..capacity_max) |i| std.debug.assert(self.due.isSet(i) == (i < self.cells.len and settleable(&self.cells[i])));
         return self.due.findFirstSet() != null;
+    }
+    /// Pins the due cell at `index` for delivery, with what is due of its acknowledgement, close and permission.
+    pub fn pin(self: *Table, index: usize) Completion {
+        const cell = &self.cells[index];
+        defer self.refresh(cell);
+        defer cell.copying = true;
+        return .{
+            .token = .{ .index = @intCast(index), .generation = cell.generation },
+            .ack = if (cell.response_awaited) cell.ack else null,
+            .closed = !cell.native and cell.closed_awaited,
+            .permission = if (cell.permission_awaited and (cell.permission_ready or !cell.native)) cell.native and cell.permission_ready else null,
+        };
+    }
+    /// Commits a delivered completion, retiring a cell that ended and holds nothing more. Returns whether the owner now
+    /// returns the cell's retained serving slot.
+    pub fn commit(self: *Table, completion: Completion) bool {
+        const cell = self.get(completion.token).?;
+        cell.copying = false;
+        if (completion.ack != null) {
+            cell.response_awaited = false;
+            cell.ack = null;
+        }
+        if (completion.closed) cell.closed_awaited = false;
+        if (completion.permission != null) {
+            cell.permission_awaited = false;
+            cell.permission_ready = false;
+        }
+        self.releasePayload(cell);
+        self.refresh(cell);
+        if (!cell.native and !cell.serving_retained and !awaited(cell)) {
+            self.retire(completion.token);
+            return false;
+        }
+        return releasable(cell);
+    }
+    /// Returns a pinned cell, still due, to where it was.
+    pub fn restore(self: *Table, completion: Completion) void {
+        const cell = self.get(completion.token).?;
+        cell.copying = false;
+        self.releasePayload(cell);
+        self.refresh(cell);
     }
     pub fn oldest(self: *Table) ?Token {
         var selected: ?Token = null;
@@ -203,17 +255,18 @@ pub const Table = struct {
             if (cell.state == .free) continue;
             result.queued += @intFromBool(cell.state == .queued);
             result.retiring += @intFromBool(!cell.native and cell.serving_retained);
-            result.closedPromises += @intFromBool(cell.closed != null);
-            result.pendingResponses += @intFromBool(cell.pending != null);
-            result.pendingPermissions += @intFromBool(cell.permission != null);
+            result.closedPromises += @intFromBool(cell.closed_awaited);
+            result.pendingResponses += @intFromBool(cell.response_awaited);
+            result.pendingPermissions += @intFromBool(cell.permission_awaited);
             result.requestBytes += cell.input.len;
             if (cell.state != .response_preparing) result.responseBytes += cell.response.len;
             if (cell.copying) result.copyingBytes += cell.input.len;
         }
         return result;
     }
+    /// Whether the host awaits a close, an acknowledgement or a permission, which keeps the event loop alive.
     pub fn obligated(self: *const Table) bool {
-        for (self.cells) |*cell| if (cell.closed != null or cell.pending != null or cell.permission != null) return true;
+        for (self.cells) |*cell| if (awaited(cell)) return true;
         return false;
     }
 };
@@ -246,21 +299,24 @@ pub fn awaitingTerminal(owner: *rr.ReqResp, handle: rr.RequestHandle, err: anyer
     const slot = owner.inboundSlot(handle) orelse return false;
     return slot.request.terminalEvent() != null;
 }
-/// A promise the host's settlement resolves now: a write acknowledgement, the close of a finished
-/// stream, or a response permission.
+/// Whether the host awaits a close, an acknowledgement or a permission of the cell.
+fn awaited(cell: *const Cell) bool {
+    return cell.closed_awaited or cell.response_awaited or cell.permission_awaited;
+}
+/// A completion an exchange delivers now: a write acknowledgement, the close of a finished stream, or a response
+/// permission.
 pub fn settleable(cell: *const Cell) bool {
     if (cell.state == .free or cell.copying or cell.state == .response_preparing) return false;
-    return (cell.ack != null and cell.pending != null) or (!cell.native and cell.closed != null) or ((cell.permission_ready or !cell.native) and cell.permission != null);
+    return (cell.ack != null and cell.response_awaited) or (!cell.native and cell.closed_awaited) or ((cell.permission_ready or !cell.native) and cell.permission_awaited);
 }
-/// A retained serving slot whose host released it and holds no promise, so the owner returns it.
+/// A retained serving slot whose host released it and awaits nothing, so the owner returns it.
 pub fn releasable(cell: *const Cell) bool {
-    return cell.serving_retained and cell.release_requested and !cell.native and !cell.copying and
-        cell.closed == null and cell.pending == null and cell.permission == null;
+    return cell.serving_retained and cell.release_requested and !cell.native and !cell.copying and !awaited(cell);
 }
 /// Work the owner does for a cell at its next host apply: a release or a response permission.
 fn ownerWork(cell: *const Cell) bool {
     if (cell.state == .free) return false;
-    return releasable(cell) or (cell.native and cell.permission != null and !cell.permission_ready);
+    return releasable(cell) or (cell.native and cell.permission_awaited and !cell.permission_ready);
 }
 /// Applies releases, cancels, response permissions, queued responses and terminal actions.
 /// Returns whether the per-turn response cap left queued responses for the next turn.
@@ -289,7 +345,7 @@ pub fn flags(runtime: *Runtime, now: n.Now) !bool {
             _ = core.cancel(cell.handle);
             continue;
         }
-        if (cell.permission != null and !cell.permission_ready and core.service.reqresp.reserveResponse(cell.handle)) {
+        if (cell.permission_awaited and !cell.permission_ready and core.service.reqresp.reserveResponse(cell.handle)) {
             table.reserveResponse(cell, cell.protocol.info().response_max) catch {
                 // A payload release wakes the owner to retry.
                 table.budget.waiting = true;
@@ -363,13 +419,13 @@ pub fn captureLocked(runtime: *Runtime, event: rr.Event, now: n.Now) !void {
             },
             .failed => |failed| {
                 const reason = try failure(failed.reason);
-                if (cell.pending != null and cell.ack == null and !runtime.stop) cell.ack = .{ .failed = reason };
+                if (cell.response_awaited and cell.ack == null and !runtime.stop) cell.ack = .{ .failed = reason };
                 cell.native = false;
             },
             else => unreachable,
         }
         if (!cell.native) {
-            if (cell.pending != null and cell.ack == null) {
+            if (cell.response_awaited and cell.ack == null) {
                 std.debug.assert(runtime.stop);
                 cell.ack = .closed;
             }
@@ -420,16 +476,18 @@ fn admitLocked(runtime: *Runtime, request: @FieldType(rr.Event, "request"), now:
     table.refresh(cell);
     runtime.recomputeLocked(.serving);
 }
+/// Ends every stream at the owner's quiescence. With no owner left to return serving slots, a cell the host awaits
+/// nothing more of retires now, also one whose close the host already took and whose release may come later.
 pub fn closeLocked(runtime: *Runtime) void {
     if (runtime.incoming) |*table| for (table.cells, 0..) |*cell, i| {
         if (cell.state == .free) continue;
         cell.native = false;
         cell.serving_retained = false;
-        if (cell.pending != null and cell.ack == null) cell.ack = .closed;
+        if (cell.response_awaited and cell.ack == null) cell.ack = .closed;
         if (cell.state != .response_preparing) cell.state = .terminal;
         table.releasePayload(cell);
         table.refresh(cell);
-        if (!cell.exposed and !cell.copying) table.retire(.{ .index = @intCast(i), .generation = cell.generation });
+        if (!awaited(cell) and !cell.copying) table.retire(.{ .index = @intCast(i), .generation = cell.generation });
     };
 }
 test {

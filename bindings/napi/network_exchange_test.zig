@@ -27,7 +27,6 @@ const Host = struct {
     fail_finish: bool = false,
     failure: exchange.Failure = .stopped,
     builds: usize = 0,
-    discarded: usize = 0,
     kept_alive: usize = 0,
     idled: usize = 0,
     site: ?fatal.Site = null,
@@ -62,11 +61,7 @@ const Host = struct {
         self.builds += 1;
         if (self.during) |during| during(self.runtime);
         if (self.failing(.peers) and selection.peer_count > 0) return self.failure_error();
-        for (0..selection.serving_count) |i| {
-            selection.closed[i] = undefined;
-            selection.closed_count = i + 1;
-            if (self.failing(.serving)) return self.failure_error();
-        }
+        if (self.failing(.serving) and selection.serving_count > 0) return self.failure_error();
         if (self.failing(.checks) and selection.checks.len > 0) return self.failure_error();
         if (self.failing(.gossip) and selection.gossip != null) return self.failure_error();
         if (self.failing(.acknowledged) and selection.acknowledged_count > 0) return self.failure_error();
@@ -78,9 +73,6 @@ const Host = struct {
         var result = output;
         result.outcome = outcome;
         return result;
-    }
-    pub fn discard(self: *Host, selection: *const exchange.Selection) void {
-        self.discarded += selection.closed_count;
     }
     pub fn keepAlive(self: *Host) void {
         self.kept_alive += 1;
@@ -141,10 +133,10 @@ fn publishPeer(runtime: *Runtime) void {
     runtime.recomputeLocked(.peers);
 }
 
-/// Ends a served stream the host was handed, as its close settlement and release would.
+/// Ends a served stream the host was handed, as its close completion and release would.
 fn retireServed(table: *incoming.Table, token: incoming.Token) void {
     const cell = table.get(token).?;
-    cell.closed = null;
+    cell.closed_awaited = false;
     cell.native = false;
     table.retire(token);
 }
@@ -205,12 +197,6 @@ fn stopAt(part: Part) !void {
     for ([_]g.Token{ column, exit }) |token| try std.testing.expectEqual(State.queued, table.get(token).?.state);
     try std.testing.expectEqual(@as(usize, 0), table.diag.executing);
     try std.testing.expectEqual(@as(usize, 0), table.diag.copying);
-    try std.testing.expectEqual(@as(usize, switch (part) {
-        .peers => 0,
-        .acknowledged, .completions => unreachable,
-        .serving => 1,
-        .checks, .gossip => 2,
-    }), host.discarded);
     try std.testing.expect(!runtime.readiness.armed);
     try std.testing.expectEqual(@as(usize, 4), runtime.readiness.payload.len);
 
