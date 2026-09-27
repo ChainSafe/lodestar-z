@@ -49,7 +49,10 @@ export async function commandCompleted(
   for (;;) {
     const completion = native
       .exchange([], demand)
-      .completions.find(({handle: done}) => done.index === handle.index && done.generation === handle.generation);
+      .completions.find(
+        ({family, handle: done}) =>
+          family === "command" && done.index === handle.index && done.generation === handle.generation
+      );
     if (completion) {
       if ("error" in completion) throw completion.error;
       return completion.value;

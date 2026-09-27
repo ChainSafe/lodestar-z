@@ -1,6 +1,7 @@
 import {expect, test} from "vitest";
 import type {NativeNetworkApplicationRuntime} from "../src/network-runtime.js";
 import {applicationConfig, localIntent, startRuntime, topicName, unreachableConnect} from "./utils/network.js";
+import {BLOCKS} from "./utils/network-incoming.js";
 import {startPeer} from "./utils/network-peer.js";
 
 const PUBLISH = {allowZeroPeers: true, ignoreDuplicate: true};
@@ -83,29 +84,20 @@ function commands(): [string, [string, Command][]][] {
   ];
 }
 
-test.each(commands())(
-  "%s, queued behind slow publications at close, each reject with NetworkClosed",
-  async (_, kinds) => {
-    const config = applicationConfig();
-    config.resources.bridgeBudgetBytes = 512 * 1024 * 1024;
-    const runtime = startRuntime(config);
-    // The owner runs work in admission order, so publications it takes milliseconds each to publish hold the commands
-    // queued until the close in this same job cancels them.
-    const publications = Array.from({length: 4}, (_, i) =>
-      runtime.publishGossip(topicName(), new Uint8Array(8 * 1024 * 1024).fill(i + 1), PUBLISH).catch(() => undefined)
-    );
-    const outcomes = kinds.map(([kind, command]) =>
-      command(runtime).then(
-        () => `${kind} resolved`,
-        (error) => `${kind} ${error.code}`
-      )
-    );
-    const closed = runtime.close();
-    expect(await Promise.all(outcomes)).toEqual(kinds.map(([kind]) => `${kind} NetworkClosed`));
-    await Promise.all([closed, ...publications]);
-  },
-  20000
-);
+test.each(commands())("%s, held unstarted at close, each reject with NetworkClosed", async (_, kinds) => {
+  const runtime = startRuntime(applicationConfig());
+  // Held, the owner starts none of them, so the close cancels each one queued.
+  runtime.holdOperations(true);
+  const outcomes = kinds.map(([kind, command]) =>
+    command(runtime).then(
+      () => `${kind} resolved`,
+      (error) => `${kind} ${error.code}`
+    )
+  );
+  const closed = runtime.close();
+  expect(await Promise.all(outcomes)).toEqual(kinds.map(([kind]) => `${kind} NetworkClosed`));
+  expect(await closed).toEqual({reason: "requested"});
+});
 
 test("a full command table refuses admission without a record: a throw, and a rejection from applyIntent", async () => {
   const config = applicationConfig();
@@ -139,18 +131,20 @@ test("a delivered snapshot keeps its contents while its cell and store serve the
   }
 });
 
-test("commands and publications execute in their admission order across families", async () => {
+test("the owner starts commands, publications and requests in their admission order", async () => {
   const runtime = startRuntime(applicationConfig());
   try {
+    runtime.holdOperations(true);
     const first = runtime.getIdentity();
-    const publications = [1, 2, 3].map((fill) =>
-      runtime.publishGossip(topicName(), new Uint8Array(4000).fill(fill), PUBLISH)
-    );
-    const last = runtime.getIdentity();
-    const [before, after] = await Promise.all([first, last]);
-    await Promise.all(publications);
-    // Each execution advances the owner's sequence, so the three publications ran between the two commands.
-    expect(after.ownerSequence - before.ownerSequence).toBeGreaterThanOrEqual(4n);
+    const publication = runtime.publishGossip(topicName(), new Uint8Array(4000), PUBLISH);
+    const second = runtime.getIdentity();
+    const request = runtime.request(runtime.identity.peerId, BLOCKS, new Uint8Array(32)).next();
+    const third = runtime.getIdentity();
+    // Released together, they start in one pass that advances the owner's sequence once per operation.
+    runtime.holdOperations(false);
+    const [a, b, c] = await Promise.all([first, second, third]);
+    await Promise.all([publication, request.catch(() => undefined)]);
+    expect([b.ownerSequence - a.ownerSequence, c.ownerSequence - b.ownerSequence]).toEqual([2n, 2n]);
   } finally {
     await runtime.close();
   }

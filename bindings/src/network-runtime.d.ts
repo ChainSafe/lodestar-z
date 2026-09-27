@@ -100,36 +100,31 @@ export type NativeCompletion =
       | {value: NativeGossipPublishResult}
       | {error: NativeOperationError}
     ))
-  | ({family: "command"; handle: NativeCellHandle; kind: NativeCommandKind} & (
-      | {value: NativeCommandResult}
-      | {error: NativeOperationError}
-    ));
+  | NativeCommandCompletion;
 
-/** The command a completion answers, named as the runtime method that admitted it. */
-export type NativeCommandKind =
-  | "applyIntent"
-  | "updateStatus"
-  | "getIdentity"
-  | "getPeers"
-  | "getGossipDiagnostics"
-  | "connect"
-  | "disconnect"
-  | "reStatusPeers"
-  | "addDirectPeer"
-  | "removeDirectPeer"
-  | "getDirectPeers"
-  | "getRememberedPeers";
+/** What each command's promise resolves with, keyed by the runtime method that admitted it. */
+export interface NativeCommandResults {
+  applyIntent: NativeIntentResult;
+  updateStatus: undefined;
+  getIdentity: NativeIdentitySnapshot;
+  getPeers: NativePeerSnapshot;
+  getGossipDiagnostics: NativeGossipDiagnosticsPage;
+  connect: undefined;
+  disconnect: undefined;
+  reStatusPeers: undefined;
+  addDirectPeer: undefined;
+  removeDirectPeer: boolean;
+  getDirectPeers: NativeDirectSnapshot;
+  getRememberedPeers: NativeRememberedPeersSnapshot;
+}
 
-/** What a command's promise resolves with: a snapshot or intent result, removeDirectPeer's boolean, or nothing. */
-export type NativeCommandResult =
-  | NativeIntentResult
-  | NativeIdentitySnapshot
-  | NativePeerSnapshot
-  | NativeGossipDiagnosticsPage
-  | NativeDirectSnapshot
-  | NativeRememberedPeersSnapshot
-  | boolean
-  | undefined;
+/** A completed command, whose value is its kind's result. */
+export type NativeCommandCompletion = {
+  [Kind in keyof NativeCommandResults]: {family: "command"; handle: NativeCellHandle; kind: Kind} & (
+    | {value: NativeCommandResults[Kind]}
+    | {error: NativeOperationError}
+  );
+}[keyof NativeCommandResults];
 
 /**
  * A fatal site JavaScript raises: `generated_batch`, an exchange refused a batch or demand the pump generated;
@@ -197,6 +192,11 @@ export interface NativeNetworkApplicationRuntime {
    * still disposes of them.
    */
   holdVerdicts(held: boolean): void;
+  /**
+   * Private control for binding ownership tests: while held, the owner starts no admitted command, publication or
+   * request; each keeps its admission order.
+   */
+  holdOperations(held: boolean): void;
   close(): Promise<NativeRuntimeCloseResult>;
 }
 
