@@ -191,6 +191,10 @@ pub const Runtime = struct {
     slot: u64 = 0,
     diag: Diagnostics,
 
+    /// No admitted operation awaits its outcome and the owner runs, so the event loop need not wait for this runtime.
+    pub fn idleLocked(self: *const Runtime) bool {
+        return self.table.occupied == 0 and (self.publications == null or !self.publications.?.obligated()) and !self.requestObligations() and self.notify_live and !self.stop;
+    }
     pub fn requestObligations(self: *const Runtime) bool {
         return (if (self.requests) |*requests| requests.obligated() else false) or (if (self.incoming) |*incoming| incoming.obligated() else false);
     }

@@ -28,6 +28,7 @@ const Host = struct {
     builds: usize = 0,
     discarded: usize = 0,
     kept_alive: usize = 0,
+    idled: usize = 0,
     site: ?fatal.Site = null,
     /// Terminate on a contract failure, as the N-API host does.
     aborts: bool = false,
@@ -78,6 +79,9 @@ const Host = struct {
     }
     pub fn keepAlive(self: *Host) void {
         self.kept_alive += 1;
+    }
+    pub fn idle(self: *Host) void {
+        self.idled += 1;
     }
     pub fn classify(self: *Host, _: anyerror) exchange.Failure {
         return self.failure;
@@ -556,6 +560,8 @@ test "publication completions arrive at most `settle` per exchange whatever the 
     try std.testing.expectEqualSlices(publications.Token, &.{ low, high, .{ .index = 0, .generation = 2 }, .{ .index = 0, .generation = 3 } }, &delivered);
     const completion = @intFromEnum(r.bridge.Delivery.completion);
     try std.testing.expectEqual(delivered_before[completion] + 4, runtime.bridge.delivered[completion]);
+    // Unfinished publications keep the runtime busy.
+    try std.testing.expectEqual(@as(usize, 0), host.idled);
     for (unfinished) |token| runtime.retirePublication(token);
 }
 
@@ -574,4 +580,6 @@ test "a stopped environment returns pinned publication completions, which the ne
     const result = try host.turn(&.{}, control);
     try std.testing.expectEqualSlices(publications.Token, &tokens, result.publications[0..result.publication_count]);
     try std.testing.expect(!result.outcome.more and runtime.publications.?.diag.occupied == 0);
+    // Retiring the last admitted publication lets the event loop go; the restored exchange did not.
+    try std.testing.expectEqual(@as(usize, 1), host.idled);
 }

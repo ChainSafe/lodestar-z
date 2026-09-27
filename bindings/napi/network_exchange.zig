@@ -355,7 +355,8 @@ fn gossipMarks(runtime: *Runtime) struct { bool, ?u64 } {
 }
 
 /// Runs phases B to D. `host` builds and finishes the result, discards what a failed build created, classifies
-/// a failure, terminates at a fatal site and keeps the event loop alive for serving starts.
+/// a failure, terminates at a fatal site, keeps the event loop alive for serving starts and lets it go once the last
+/// delivered publication left the runtime idle.
 pub fn run(runtime: *Runtime, actions: []const Action, demand: *const Demand, now: u64, host: anytype) !@TypeOf(host.*).Result {
     var selection: Selection = .{ .wake = actions.len > 0 };
     runtime.lock();
@@ -379,11 +380,14 @@ pub fn run(runtime: *Runtime, actions: []const Action, demand: *const Demand, no
     };
     runtime.lock();
     const keep_alive = commitLocked(runtime, &selection);
+    // Settlement found the runtime busy while these publications were still admitted.
+    const idle = selection.publication_count > 0 and runtime.idleLocked();
     const outcome = endLocked(runtime, demand, &selection);
     runtime.unlock();
     // Each admitted publication held the runtime until its completion was delivered.
     for (0..selection.publication_count) |_| runtime.release();
     if (keep_alive) host.keepAlive();
+    if (idle) host.idle();
     return host.finish(output, outcome) catch |err| return fail(host, host.classify(err), .exchange_finish, err);
 }
 

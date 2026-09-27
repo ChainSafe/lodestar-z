@@ -202,6 +202,21 @@ if (mode === "exit") {
   assert.equal(connect, "NetworkClosed");
   assert((await published).every((result) => result === "resolved" || result === "NetworkClosed"));
   console.log("orphan-drained");
+} else if (mode === "publication-exit") {
+  // A completed publication leaves a running, idle network, which the process exits under without a close.
+  const network = createNativeNetwork(applicationConfig(), {
+    capacity: () => ({ordinary: true, serving: 32}),
+    validate: (job) => Promise.resolve(job.messages.map(() => "ignore")),
+    checkDependencies: (checks) => checks.map(() => false),
+    serve: (request) => request.cancel(),
+    peers: noop,
+    failed: noop,
+    logs: noop,
+  });
+  globalThis.retained = network;
+  const published = await network.publish(topicName(), new Uint8Array(4000), {allowZeroPeers: true});
+  assert.equal(published.duplicate, false);
+  console.log("published-exit");
 } else if (mode === "await-close") {
   // Only the notifier ref, taken by close, keeps the loop alive until closed settles.
   const config = applicationConfig();
