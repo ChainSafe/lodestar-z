@@ -1,5 +1,6 @@
 import {startPeer} from "../utils/network-peer.js";
-import {startRuntime} from "../utils/network.js";
+import {requestForks, startRuntime} from "../utils/network.js";
+import {takeIncoming} from "../utils/network-incoming.js";
 import assert from "node:assert/strict";
 import {setTimeout as delay} from "node:timers/promises";
 
@@ -30,6 +31,51 @@ if (mode === "exit") {
     .request(remote.peerId, "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy", new Uint8Array(32))
     .next()
     .catch(() => undefined);
+  console.log("request-lifecycle", mode, "ok");
+  process.exit(0);
+}
+
+if (mode === "pull-gc") {
+  // A pending pull keeps its iterator alive, as a reaction to it would. Once it settles, the idle iterator is
+  // collected, and its finalizer retires the request at both ends.
+  const serverConfig = applicationConfig();
+  serverConfig.identitySecretKey[31] = 63;
+  const server = await startPeer(serverConfig);
+  const config = applicationConfig();
+  const runtime = startRuntime(config, () => undefined);
+  const [, remote] = await Promise.all([runtime.identity, server.identity]);
+  await Promise.all([
+    runtime.applyIntent(localIntent(config), config.initialSlot),
+    server.applyIntent(localIntent(serverConfig), serverConfig.initialSlot),
+  ]);
+  await runtime.connect(remote.peerId, [remote.localEndpoint], 5000n);
+  let stream = runtime.request(
+    remote.peerId,
+    "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy",
+    new Uint8Array(32),
+    {responseTimeoutMs: 60000}
+  );
+  const weak = new WeakRef(stream);
+  const pulled = stream.next();
+  stream = null;
+  const incoming = await takeIncoming(server);
+  for (let i = 0; i < 20; i++) {
+    await delay(10);
+    global.gc();
+  }
+  assert.notEqual(weak.deref(), undefined);
+  assert.equal(runtime.diagnostics().requests.pendingPulls, 1);
+  await incoming.respond(new Uint8Array(4000).fill(9), requestForks[0]);
+  assert.deepEqual((await pulled).value.data, new Uint8Array(4000).fill(9));
+  for (let i = 0; i < 100; i++) {
+    await delay(10);
+    global.gc();
+    if (!weak.deref() && runtime.diagnostics().requests.occupied === 0) break;
+  }
+  assert.equal(weak.deref(), undefined);
+  assert.equal(runtime.diagnostics().requests.occupied, 0);
+  await incoming.closed;
+  await Promise.all([runtime.close(), server.close()]);
   console.log("request-lifecycle", mode, "ok");
   process.exit(0);
 }

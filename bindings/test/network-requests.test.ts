@@ -1,12 +1,15 @@
 import {expect, test} from "vitest";
+import type {NativeNetworkApplicationRuntime} from "../src/network-runtime.js";
 import {
   applicationConfig,
+  holdSettling,
   localIntent,
   peerIdFromHex,
   requestForks,
   settleOnly,
   startRuntime,
 } from "./utils/network.js";
+import {incomingPair, takeIncoming} from "./utils/network-incoming.js";
 import {startPeer} from "./utils/network-peer.js";
 
 test("application request rejects control protocols at the exported boundary", async () => {
@@ -325,6 +328,7 @@ stockTest(
 
 test.each([
   "iterator-gc",
+  "pull-gc",
   "facade-gc",
   "exit",
   "closed-terminal",
@@ -620,3 +624,223 @@ stockTest(
   },
   20000
 );
+
+/** A pair whose in-process runtime requests from a child peer, which serves each request the test takes from it. */
+async function servedPair() {
+  const pair = await incomingPair();
+  const {waitFor} = await import("../../test/interop/child.mjs");
+  await waitFor(async () => (await pair.right.getPeers()).peers[0]?.status != null);
+  return {...pair, peer: pair.identity.peerId};
+}
+
+/** Exchanges until one delivers a request completion, as a held runtime's own host would. */
+async function requestCompleted(runtime: NativeNetworkApplicationRuntime): Promise<void> {
+  for (let i = 0; i < 2000; i++) {
+    if (runtime.exchange([], settleOnly).completions.some(({family}) => family === "request")) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw Error("No request completion arrived");
+}
+
+const chunk = (fill: number) => new Uint8Array(4000).fill(fill);
+const done = {done: true, value: undefined};
+
+test("a final chunk waits for a delayed pull, and an outcome that arrives with no pull waits for the next", async () => {
+  const {left, peer, right} = await servedPair();
+  try {
+    const finished = right.request(peer, BLOCKS, new Uint8Array(32));
+    const first = finished.next();
+    const served = await takeIncoming(left);
+    await served.respond(chunk(7), requestForks[0]);
+    await served.finish();
+    expect((await first).value?.data).toEqual(chunk(7));
+    // The stream ends only once the next pull consumes its chunk, so meanwhile it keeps its cell and awaits nothing.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(right.diagnostics().requests).toMatchObject({chunksCopied: 1n, occupied: 1, pendingPulls: 0});
+    expect(await finished.next()).toEqual(done);
+
+    // Held past its response deadline, a delivered chunk ends its stream while no pull waits.
+    const timed = right.request(peer, BLOCKS, new Uint8Array(32), {responseTimeoutMs: 1000});
+    const held = timed.next();
+    const incoming = await takeIncoming(left);
+    await incoming.respond(chunk(9), requestForks[0]);
+    const value = (await held).value;
+    await expect
+      .poll(() => right.diagnostics().requests, {timeout: 5000})
+      .toMatchObject({occupied: 1, pendingPulls: 0, sinkBytes: 0, terminalCells: 1});
+    await expect(timed.next()).rejects.toMatchObject({
+      code: "NetworkRequestFailed",
+      phase: "response",
+      reason: "host_timeout",
+    });
+    expect(await timed.next()).toEqual(done);
+    expect(value?.data).toEqual(chunk(9));
+    expect(right.diagnostics().requests).toMatchObject({occupied: 0, reservedBytes: 0});
+  } finally {
+    await Promise.all([left.close(), right.close()]);
+  }
+}, 20000);
+
+test("a return racing a delivered chunk or a pending pull settles the pull first and delivers no later chunk", async () => {
+  const {left, peer, right} = await servedPair();
+  holdSettling(right, true);
+  try {
+    // The pull took its chunk in an exchange whose reactions have not run when the return arrives.
+    const order: string[] = [];
+    const first = right.request(peer, BLOCKS, new Uint8Array(32));
+    const pulled = first.next();
+    void pulled.then(() => order.push("pull"));
+    await (await takeIncoming(left)).respond(chunk(5), requestForks[0]);
+    await requestCompleted(right);
+    const retired = first.return?.();
+    void retired?.then(() => order.push("return"));
+    await requestCompleted(right);
+    expect((await pulled).value?.data).toEqual(chunk(5));
+    expect(await retired).toEqual(done);
+    expect(order).toEqual(["pull", "return"]);
+    expect(await first.next()).toEqual(done);
+
+    // With the peer's chunk sent but undelivered, the return cancels the stream, whose pull takes the cancellation.
+    const settled: string[] = [];
+    const second = right.request(peer, BLOCKS, new Uint8Array(32));
+    const pending = second.next();
+    const cancelled = expect(pending).rejects.toMatchObject({
+      code: "NetworkRequestFailed",
+      phase: "response",
+      reason: "cancelled",
+    });
+    void pending.catch(() => settled.push("pull"));
+    await (await takeIncoming(left)).respond(chunk(6), requestForks[0]);
+    const retiring = second.return?.();
+    void retiring?.then(() => settled.push("return"));
+    await requestCompleted(right);
+    await cancelled;
+    expect(await retiring).toEqual(done);
+    expect(settled).toEqual(["pull", "return"]);
+    expect(right.diagnostics().requests).toMatchObject({chunksCopied: 1n, occupied: 0, reservedBytes: 0});
+  } finally {
+    holdSettling(right, false);
+    await Promise.all([left.close(), right.close()]);
+  }
+}, 20000);
+
+test("every return or throw shares the first retirement, which settles after the pull with the first value", async () => {
+  const {left, peer, right} = await servedPair();
+  try {
+    const stream = right.request(peer, BLOCKS, new Uint8Array(32));
+    const pending = stream.next();
+    const cancelled = expect(pending).rejects.toMatchObject({code: "NetworkRequestFailed", reason: "cancelled"});
+    await takeIncoming(left);
+    const retired = stream.return?.();
+    expect(stream.throw?.(Error("ignored"))).toBe(retired);
+    expect(stream.return?.()).toBe(retired);
+    expect(await retired).toEqual(done);
+    await cancelled;
+    expect(await stream.next()).toEqual(done);
+
+    const value = {sentinel: 71};
+    const thrown = right.request(peer, BLOCKS, new Uint8Array(32));
+    const threw = thrown.throw?.(value);
+    expect(thrown.return?.()).toBe(threw);
+    await expect(threw).rejects.toBe(value);
+    expect(await thrown.next()).toEqual(done);
+
+    // Once its outcome was taken, a retirement settles at once.
+    const ended = right.request(right.identity.peerId, BLOCKS, new Uint8Array(32));
+    await expect(ended.next()).rejects.toMatchObject({reason: "disconnected"});
+    await expect(ended.throw?.(value)).rejects.toBe(value);
+    await expect
+      .poll(() => right.diagnostics().requests)
+      .toMatchObject({occupied: 0, pendingPulls: 0, reservedBytes: 0});
+  } finally {
+    await Promise.all([left.close(), right.close()]);
+  }
+}, 20000);
+
+test("close hands each unpulled request's outcome to its iterator, whose next pull takes it", async () => {
+  const {left, peer, right} = await servedPair();
+  try {
+    const delivered = right.request(peer, BLOCKS, new Uint8Array(32));
+    const first = delivered.next();
+    await (await takeIncoming(left)).respond(chunk(3), requestForks[0]);
+    await first;
+    const held = right.request(peer, BLOCKS, new Uint8Array(32));
+    await takeIncoming(left);
+    const refused = right.request(right.identity.peerId, BLOCKS, new Uint8Array(32));
+    await expect.poll(() => right.diagnostics().requests.terminalCells).toBe(1);
+    expect(await right.close()).toEqual({reason: "requested"});
+    // No request outlives the close.
+    expect(right.diagnostics().requests).toMatchObject({
+      occupied: 0,
+      pendingPulls: 0,
+      reservedBytes: 0,
+      terminalCells: 0,
+    });
+    for (const stream of [delivered, held, refused]) {
+      await expect(stream.next()).rejects.toMatchObject({code: "NetworkClosed"});
+      expect(await stream.next()).toEqual(done);
+      expect(await stream.return?.()).toEqual(done);
+    }
+  } finally {
+    await Promise.all([left.close(), right.close()]);
+  }
+}, 20000);
+
+test("a full request table delivers every outcome and reuses each cell with the next generation", async () => {
+  const {commandCompleted, networkBindings: bindings} = await import("./utils/network-bindings.js");
+  const config = applicationConfig();
+  const native = new bindings.NativeNetworkRuntime();
+  const lifecycle = native.initialize(config, () => undefined);
+  try {
+    const self = lifecycle.identity.peerId;
+    await commandCompleted(native, native.applyIntent(localIntent(config), config.initialSlot), settleOnly);
+    const capacity = native.diagnostics().requests.capacity;
+    for (const generation of [1n, 2n]) {
+      const handles = Array.from({length: capacity}, () =>
+        native.requestStart(self, BLOCKS, new Uint8Array(32), undefined)
+      );
+      expect(handles.map((handle) => handle.generation)).toEqual(handles.map(() => generation));
+      expect(() => native.requestStart(self, BLOCKS, new Uint8Array(32), undefined)).toThrow(
+        expect.objectContaining({code: "NetworkRequestRejected", reason: "slots_exhausted"})
+      );
+      for (const handle of handles) native.requestPull(handle);
+      const outcomes = new Map<number, unknown>();
+      for (let i = 0; i < 2000 && outcomes.size < capacity; i++) {
+        for (const completion of native.exchange([], settleOnly).completions)
+          if (completion.family === "request") outcomes.set(completion.handle.index, completion);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      expect([...outcomes.values()]).toEqual(
+        handles.map(() => expect.objectContaining({error: expect.objectContaining({reason: "disconnected"})}))
+      );
+      for (const handle of handles) expect(() => native.requestPull(handle)).toThrow("InvalidRequestHandle");
+    }
+    expect(native.diagnostics().requests).toMatchObject({occupied: 0, requestFull: 2n, reservedBytes: 0});
+  } finally {
+    native.close();
+    await lifecycle.closed;
+  }
+});
+
+test("requests start in their admission order among commands", async () => {
+  const runtime = startRuntime(applicationConfig());
+  try {
+    runtime.holdOperations(true);
+    const outcome = () =>
+      runtime
+        .request(runtime.identity.peerId, BLOCKS, new Uint8Array(32))
+        .next()
+        .catch(() => undefined);
+    const first = outcome();
+    const before = runtime.getIdentity();
+    const second = outcome();
+    const after = runtime.getIdentity();
+    // Released together, each starts in one pass that advances the owner's sequence once per operation.
+    runtime.holdOperations(false);
+    const [a, b] = await Promise.all([before, after]);
+    await Promise.all([first, second]);
+    expect(b.ownerSequence - a.ownerSequence).toBe(2n);
+  } finally {
+    await runtime.close();
+  }
+});
