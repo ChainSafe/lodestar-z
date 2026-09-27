@@ -10,7 +10,7 @@ const RETRY_MS = 25;
 const FAILURES_MAX = 3;
 /** One turn's time budget; the rest yields to the next turn. */
 export const BUDGET_MS = 8;
-/** Completions settled per native table in one turn. */
+/** Completions settled or delivered per family in one turn. */
 const SETTLE_CELLS = 32;
 /** Serving capacity native accepts. */
 const SERVING_MAX = 32;

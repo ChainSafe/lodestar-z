@@ -31,10 +31,10 @@ import type {
 } from "./network.js";
 
 /**
- * One exchange's quotas, where zero disables a service, and the host's standing capacities. Completions settle per
- * table (1..256); up to `peers` (0..64), `checks` (0..64) and `servingStarts` (0..8) are delivered, and one job batch
- * of `messages` (0..64) and `bytes` (0..16 MiB, a larger first message comes alone), with ordinary jobs only under
- * `claimOrdinary` and ordinary capacity.
+ * One exchange's quotas, where zero disables a service, and the host's standing capacities. Completions settle or
+ * arrive per family (1..256), whatever the rest of the demand; up to `peers` (0..64), `checks` (0..64) and
+ * `servingStarts` (0..8) are delivered, and one job batch of `messages` (0..64) and `bytes` (0..16 MiB, a larger first
+ * message comes alone), with ordinary jobs only under `claimOrdinary` and ordinary capacity.
  */
 export interface NativeExchangeDemand {
   settleCells: number;
@@ -79,7 +79,7 @@ export interface NativeExchange {
   readonly disabledWaiting: boolean;
   /** Null, or why a serving start could not be handed over; it was cancelled and released, and `more` is true. */
   readonly failure: unknown;
-  /** Completed operation cells, which the exchange retired; empty until an operation family migrates. */
+  /** Completed publications, which the exchange retired; each settles its operation's promise. */
   readonly completions: readonly NativeCompletion[];
   /** The close result, in the one exchange that settled it; otherwise null. */
   readonly closed: NativeRuntimeCloseResult | null;
@@ -148,11 +148,11 @@ export interface NativeNetworkApplicationRuntime {
    */
   getRememberedPeers(): Promise<NativeRememberedPeersSnapshot>;
   /**
-   * One host turn: applies up to 256 `actions`, settles up to `demand.settleCells` completed publications, commands,
-   * request pulls and retirements, and incoming acknowledgements per table, then the close result once nothing else
-   * awaits settlement, and delivers the payload `demand` asks for. It throws only for invalid input or a nested call,
-   * before applying anything. Actions after close are ignored; unknown penalized identities count in
-   * peerReportsIgnored.
+   * One host turn: applies up to 256 `actions`, settles up to `demand.settleCells` completed commands, request pulls
+   * and retirements, and incoming acknowledgements per table, delivers as many completed publications in
+   * `completions`, then the close result once nothing else awaits settlement or delivery, and delivers the payload
+   * `demand` asks for. It throws only for invalid input or a nested call, before applying anything. Actions after
+   * close are ignored; unknown penalized identities count in peerReportsIgnored.
    */
   exchange(actions: readonly NativeAction[], demand: NativeExchangeDemand): NativeExchange;
   /** Terminates the process at a fatal site. `reason` is at most 64 printable ASCII characters. */

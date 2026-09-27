@@ -7,6 +7,7 @@ const cfg = @import("network_config.zig");
 const app = @import("network_application_config.zig");
 const g = @import("network_gossip_js.zig");
 const clock = @import("network_gossip.zig");
+const js = @import("network_js.zig");
 
 fn rejectInput(env: napi.Env, err: anyerror) anyerror {
     const value = g.publishError(env, err) catch |failure| return failure;
@@ -20,6 +21,8 @@ fn payloadLength(data: Value) !usize {
     if (view.length > clock.payload_max) return error.PayloadTooLarge;
     return view.length;
 }
+/// Admits one publication and returns its handle, which JavaScript's record holds before an exchange can deliver the
+/// completion. A refusal leaves no cell.
 pub fn publish(runtime: *r.Runtime, topic: Value, data: Value, options: Value) !Value {
     runtime.retain();
     defer runtime.release();
@@ -36,8 +39,8 @@ pub fn publish(runtime: *r.Runtime, topic: Value, data: Value, options: Value) !
     cell.options = publish_options;
     const copy = try r.allocator.alloc(u8, len);
     errdefer r.allocator.free(copy);
-    const deferred = try runtime.env.createPromise();
-    errdefer @import("network_js.zig").discardPromise(runtime.env, deferred);
+    // Prepared before admission commits, so every admitted publication has a handle to complete.
+    const handle = try js.handle(runtime.env, token.index, token.generation);
     try cfg.bytes(data, copy);
     const queued_ms = try clock.monotonic();
     runtime.lock();
@@ -46,59 +49,22 @@ pub fn publish(runtime: *r.Runtime, topic: Value, data: Value, options: Value) !
     cell.order = try runtime.table.nextOrder();
     cell.queued_ms = queued_ms;
     cell.payload = copy;
-    cell.deferred = deferred;
     runtime.publications.?.transition(cell, .queued);
     runtime.publications.?.diag.copies +|= 1;
     runtime.publications.?.diag.bytesCopied +|= len;
     runtime.signalLocked();
     // Ref does not allocate JS values or invoke JavaScript.
     runtime.notify.ref(runtime.env) catch {};
-    return deferred.getPromise();
+    return handle;
 }
-/// Settles up to `limit` terminal publications. Returns whether more remain.
-pub fn settle(env: napi.Env, runtime: *r.Runtime, limit: usize) !bool {
-    runtime.retain();
-    defer runtime.release();
-    var settled: usize = 0;
-    var more = false;
-    for (0..p.capacity_max) |_| {
-        runtime.lock();
-        const table = if (runtime.publications) |*table| table else {
-            runtime.unlock();
-            break;
-        };
-        const i = table.nextTerminal(table.settle_cursor) orelse table.nextTerminal(0) orelse {
-            runtime.unlock();
-            break;
-        };
-        if (settled == limit) {
-            runtime.unlock();
-            more = true;
-            break;
-        }
-        settled += 1;
-        runtime.bridge.deliver(.completion, 1);
-        table.settle_cursor = i + 1;
-        const cell = &table.cells[i];
-        table.transition(cell, .copying);
-        const token: p.Token = .{ .index = @intCast(i), .generation = cell.generation };
-        runtime.unlock();
-        defer runtime.retirePublication(token);
-        if (cell.deferred) |deferred| {
-            if (cell.failure) |err| {
-                try deferred.reject(@import("network_js.zig").settled(env, g.publishError(env, err)) catch try runtime.copy_error.?.getValue());
-            } else {
-                const value = copyResult(env, cell) catch {
-                    try deferred.reject(try runtime.copy_error.?.getValue());
-                    continue;
-                };
-                try deferred.resolve(value);
-            }
-        }
-    }
-    runtime.disposeTerminalReferences();
-    return more;
-}
-fn copyResult(env: napi.Env, cell: *const p.Cell) !Value {
-    return g.publishResult(env, cell.outcome);
+
+/// A completed publication's record: its outcome, or the error its operation rejects with.
+pub fn completion(env: napi.Env, token: p.Token, cell: *const p.Cell) !Value {
+    const object = try env.createObject();
+    try object.setNamedProperty("family", try env.createStringUtf8("publication"));
+    try object.setNamedProperty("handle", try js.handle(env, token.index, token.generation));
+    if (cell.failure) |err| {
+        try object.setNamedProperty("error", try js.settled(env, g.publishError(env, err)));
+    } else try object.setNamedProperty("value", try g.publishResult(env, cell.outcome));
+    return object;
 }

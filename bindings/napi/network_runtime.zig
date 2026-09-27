@@ -406,7 +406,8 @@ pub const Runtime = struct {
     pub fn acknowledgingLocked(self: *const Runtime) bool {
         return if (self.gossip) |*table| table.diag.acknowledging > 0 else false;
     }
-    /// A publication, command, request or incoming completion that an exchange would settle now. O(1).
+    /// A command, request or incoming result an exchange would settle, or a publication completion it would deliver,
+    /// now. O(1).
     pub fn settleableLocked(self: *const Runtime) bool {
         return self.table.anyTerminal() or
             (if (self.publications) |*table| table.anyTerminal() else false) or

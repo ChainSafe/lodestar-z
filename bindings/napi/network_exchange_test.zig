@@ -7,6 +7,7 @@ const incoming = @import("network_incoming.zig");
 const projection = @import("network_peer_projection.zig");
 const readiness = @import("network_readiness.zig");
 const commands = @import("network_commands.zig");
+const publications = @import("network_publications.zig");
 const tsfn = @import("network_runtime_test.zig");
 const fatal = @import("network_fatal.zig");
 const Runtime = r.Runtime;
@@ -14,7 +15,7 @@ const Kind = n.gossip_processor.limits_mod.Kind;
 const limits_mod = n.gossip_processor.limits_mod;
 const State = n.gossip_processor.State;
 
-const Part = enum { peers, serving, checks, gossip, acknowledged };
+const Part = enum { peers, serving, checks, gossip, acknowledged, completions };
 
 /// Builds a summary instead of JS values, fails at one part or while finishing when asked, and records a
 /// contract failure's site instead of terminating. `during` runs where the build runs, as owner work racing phase C.
@@ -40,6 +41,8 @@ const Host = struct {
         gossip: ?g.Batch = null,
         acknowledged: [exchange.acknowledged_max]g.Token = undefined,
         acknowledged_count: usize = 0,
+        publications: [publications.capacity_max]publications.Token = undefined,
+        publication_count: usize = 0,
         outcome: exchange.Outcome = .{},
     };
 
@@ -61,7 +64,8 @@ const Host = struct {
         if (self.failing(.checks) and selection.checks.len > 0) return self.failure_error();
         if (self.failing(.gossip) and selection.gossip != null) return self.failure_error();
         if (self.failing(.acknowledged) and selection.acknowledged_count > 0) return self.failure_error();
-        return .{ .peers = selection.peer_count, .serving = selection.serving, .serving_count = selection.serving_count, .checks = selection.checks, .gossip = selection.gossip, .acknowledged = selection.acknowledged, .acknowledged_count = selection.acknowledged_count };
+        if (self.failing(.completions) and selection.publication_count > 0) return self.failure_error();
+        return .{ .peers = selection.peer_count, .serving = selection.serving, .serving_count = selection.serving_count, .checks = selection.checks, .gossip = selection.gossip, .acknowledged = selection.acknowledged, .acknowledged_count = selection.acknowledged_count, .publications = selection.publications, .publication_count = selection.publication_count };
     }
     pub fn finish(self: *Host, output: Result, outcome: exchange.Outcome) !Result {
         if (self.fail_finish) return self.failure_error();
@@ -201,7 +205,7 @@ fn stopAt(part: Part) !void {
     try std.testing.expectEqual(@as(usize, 0), table.diag.copying);
     try std.testing.expectEqual(@as(usize, switch (part) {
         .peers => 0,
-        .acknowledged => unreachable,
+        .acknowledged, .completions => unreachable,
         .serving => 1,
         .checks, .gossip => 2,
     }), host.discarded);
@@ -509,4 +513,65 @@ test "exchange acknowledges owner dispositions under any demand, once, without c
     for (tokens) |token| try std.testing.expect(table.get(token) == null);
     try std.testing.expectEqual(items, runtime.bridge.delivered);
     try std.testing.expectEqual(@as(usize, 0), (try host.turn(&.{}, control)).acknowledged_count);
+}
+
+/// A publication the owner completed at the lowest free cell, as execution leaves it.
+fn completePublication(runtime: *Runtime) !publications.Token {
+    const token = try runtime.reservePublication(.beacon_block, 0);
+    runtime.lock();
+    defer runtime.unlock();
+    runtime.publications.?.transition(runtime.publications.?.get(token).?, .terminal);
+    runtime.recomputeLocked(.legacy);
+    return token;
+}
+
+test "publication completions arrive at most `settle` per exchange whatever the demand, fairly under refill" {
+    var fixture: Fixture = undefined;
+    try fixture.init(false, 2);
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    runtime.publications = try publications.Table.init(std.testing.allocator, 4, &runtime.payload_budget);
+    defer runtime.publications.?.deinit();
+    const table = &runtime.publications.?;
+    const low = try completePublication(runtime);
+    // Two cells stay admitted but unfinished, so only the lowest and the highest complete.
+    const unfinished = [_]publications.Token{ try runtime.reservePublication(.beacon_block, 0), try runtime.reservePublication(.beacon_block, 0) };
+    const high = try completePublication(runtime);
+    try std.testing.expectEqual(@as(u8, 3), high.index);
+    var host: Host = .{ .runtime = runtime };
+    var demand = control;
+    demand.settle = 1;
+    const delivered_before = runtime.bridge.delivered;
+    var delivered: [4]publications.Token = undefined;
+    for (&delivered, 0..) |*token, pass| {
+        // The lowest cell completes again whenever it was delivered, with the next generation.
+        if (pass > 0 and table.get(.{ .index = 0, .generation = table.cells[0].generation }) == null) _ = try completePublication(runtime);
+        const result = try host.turn(&.{}, demand);
+        try std.testing.expectEqual(@as(usize, 1), result.publication_count);
+        try std.testing.expect(result.outcome.more == (table.anyTerminal()));
+        token.* = result.publications[0];
+        try std.testing.expect(table.get(token.*) == null);
+    }
+    // The highest cell comes second although the lowest refilled, and the reused cell carries a fresh generation.
+    try std.testing.expectEqualSlices(publications.Token, &.{ low, high, .{ .index = 0, .generation = 2 }, .{ .index = 0, .generation = 3 } }, &delivered);
+    const completion = @intFromEnum(r.bridge.Delivery.completion);
+    try std.testing.expectEqual(delivered_before[completion] + 4, runtime.bridge.delivered[completion]);
+    for (unfinished) |token| runtime.retirePublication(token);
+}
+
+test "a stopped environment returns pinned publication completions, which the next exchange delivers" {
+    var fixture: Fixture = undefined;
+    try fixture.init(false, 2);
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    runtime.publications = try publications.Table.init(std.testing.allocator, 4, &runtime.payload_budget);
+    defer runtime.publications.?.deinit();
+    const tokens = [_]publications.Token{ try completePublication(runtime), try completePublication(runtime) };
+    var host: Host = .{ .runtime = runtime, .fail = .completions };
+    try std.testing.expectError(error.PendingException, host.turn(&.{}, control));
+    for (tokens) |token| try std.testing.expectEqual(publications.State.terminal, runtime.publications.?.get(token).?.state);
+    host.fail = null;
+    const result = try host.turn(&.{}, control);
+    try std.testing.expectEqualSlices(publications.Token, &tokens, result.publications[0..result.publication_count]);
+    try std.testing.expect(!result.outcome.more and runtime.publications.?.diag.occupied == 0);
 }

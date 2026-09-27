@@ -26,6 +26,14 @@ pub fn settled(env: napi.Env, created: anyerror!Value) !Value {
     return value;
 }
 
+/// An operation cell's `{index, generation}` handle.
+pub fn handle(env: napi.Env, index: u32, generation: u64) !Value {
+    const object = try env.createObject();
+    try object.setNamedProperty("index", try env.createUint32(index));
+    try object.setNamedProperty("generation", try env.createBigintUint64(generation));
+    return object;
+}
+
 pub fn bytes(env: napi.Env, value: []const u8) !Value {
     return env.createTypedarray(.uint8, value.len, try env.createArrayBufferCopy(value, null), 0);
 }

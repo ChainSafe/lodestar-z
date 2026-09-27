@@ -1,7 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const n = @import("network");
-const napi = @import("zapi:zapi").napi;
 const Runtime = @import("network_runtime.zig").Runtime;
 const Budget = @import("network_budget.zig").Budget;
 const gossip = n.gossipsub;
@@ -22,7 +21,6 @@ pub const Cell = struct {
     options: gossip.Gossipsub.PublishOptions = .{},
     payload: []u8 = &.{},
     reservation: usize = 0,
-    deferred: ?napi.Deferred = null,
     outcome: gossip.Gossipsub.PublishOutcome = .{},
     failure: ?anyerror = null,
 };
@@ -49,9 +47,9 @@ pub const Diagnostics = struct {
 };
 pub const Table = struct {
     cells: []Cell,
-    /// The terminal cells, which the host's settlement delivers. `transition` keeps it current.
+    /// The terminal cells, whose completions an exchange delivers. `transition` keeps it current.
     terminal: std.StaticBitSet(capacity_max) = .initEmpty(),
-    /// Past the last settled cell, where settlement resumes, so refilled low cells cannot starve higher ones.
+    /// Past the last delivered cell, where delivery resumes, so refilled low cells cannot starve higher ones.
     settle_cursor: usize = 0,
     backing: std.mem.Allocator,
     budget: *Budget,
@@ -162,7 +160,7 @@ pub const Table = struct {
             self.transition(cell, .terminal);
         }
     }
-    /// Whether an admitted publication still owes its caller an outcome, whether settlement or a completion delivers it.
+    /// Whether an admitted publication still owes its caller an outcome, which its completion delivers.
     pub fn obligated(self: *const Table) bool {
         return self.diag.occupied > 0;
     }

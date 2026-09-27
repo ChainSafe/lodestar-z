@@ -187,11 +187,10 @@ fn makeError(env: napi.Env, err: anyerror) !Value {
     return @import("network_js.zig").errorValue(env, @errorName(err));
 }
 
-/// Settles up to `limit` completions per table, then the close result once the owner has
-/// quiesced and nothing else awaits settlement, which `closed` receives. Returns whether more remain.
+/// Settles up to `limit` legacy completions per table, then the close result once the owner has quiesced and nothing
+/// awaits settlement or delivery, which `closed` receives. Returns whether more remain.
 fn settleWithin(env: napi.Env, runtime: *Runtime, limit: usize, closed: ?*?Value) !bool {
-    var more = try publication_js.settle(env, runtime, limit);
-    more = try settleOperations(env, runtime, limit) or more;
+    var more = try settleOperations(env, runtime, limit);
     more = try request_js.settle(env, runtime, limit) or more;
     more = try incoming_js.settle(env, runtime, limit) or more;
     runtime.lock();

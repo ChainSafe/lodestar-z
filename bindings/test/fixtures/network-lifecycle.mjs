@@ -167,13 +167,23 @@ if (mode === "exit") {
   console.log("facade-collected");
 } else if (mode === "orphan") {
   // A host that never exchanges drops its runtime with operations outstanding. The collected wrapper's completion
-  // owner stops native and settles them on its own turns, after native's last notification and with no timer left.
-  let runtime = initializeNativeNetworkRuntime(applicationConfig(), noop);
-  const outcomes = Promise.all(
-    [runtime.getIdentity(), runtime.connect(...unreachableConnect())].map((promise) =>
-      promise.then(
-        () => "resolved",
-        (error) => error.code
+  // owner stops native and settles them on its own turns, after native's last notification and with no timer left,
+  // through as many exchanges of 32 publication completions as it takes.
+  const config = applicationConfig();
+  config.profile = "beaconNode";
+  config.resources.bridgeBudgetBytes = 512 * 1024 * 1024;
+  config.resources.nativeBudgetBytes = 512 * 1024 * 1024;
+  let runtime = initializeNativeNetworkRuntime(config, noop);
+  const outcome = (promise) =>
+    promise.then(
+      () => "resolved",
+      (error) => error.code
+    );
+  const outcomes = Promise.all([runtime.getIdentity(), runtime.connect(...unreachableConnect())].map(outcome));
+  const published = Promise.all(
+    Array.from({length: 100}, (_, i) =>
+      outcome(
+        runtime.publishGossip(topicName(), new Uint8Array(4000).fill(i), {allowZeroPeers: true, ignoreDuplicate: true})
       )
     )
   );
@@ -190,6 +200,7 @@ if (mode === "exit") {
   const [identity, connect] = await outcomes;
   assert(identity === "resolved" || identity === "NetworkClosed");
   assert.equal(connect, "NetworkClosed");
+  assert((await published).every((result) => result === "resolved" || result === "NetworkClosed"));
   console.log("orphan-drained");
 } else if (mode === "await-close") {
   // Only the notifier ref, taken by close, keeps the loop alive until closed settles.
