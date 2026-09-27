@@ -19,6 +19,17 @@ fn napiCallThreadsafeFunction(_: ?*anyopaque, _: ?*anyopaque, _: c_uint) callcon
     _ = notifications.fetchAdd(1, .acq_rel);
     return status;
 }
+/// Whether an exception is pending, which clearing the last exception resets.
+pub var exception_pending = false;
+fn napiIsExceptionPending(_: ?*anyopaque, result: *bool) callconv(.c) c_uint {
+    result.* = exception_pending;
+    return 0;
+}
+fn napiGetAndClearLastException(_: ?*anyopaque, result: *?*anyopaque) callconv(.c) c_uint {
+    exception_pending = false;
+    result.* = null;
+    return 0;
+}
 /// As Node's does, prints the location and message, then aborts.
 fn napiFatalError(location: [*]const u8, location_len: usize, message: [*]const u8, message_len: usize) callconv(.c) noreturn {
     var buffer: [256]u8 = undefined;
@@ -29,6 +40,8 @@ fn napiFatalError(location: [*]const u8, location_len: usize, message: [*]const 
 comptime {
     @export(&napiCallThreadsafeFunction, .{ .name = "napi_call_threadsafe_function" });
     @export(&napiFatalError, .{ .name = "napi_fatal_error" });
+    @export(&napiIsExceptionPending, .{ .name = "napi_is_exception_pending" });
+    @export(&napiGetAndClearLastException, .{ .name = "napi_get_and_clear_last_exception" });
 }
 
 /// Runs `run` in a child process, which must abort after printing exactly `expected` to stderr.
