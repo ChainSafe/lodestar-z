@@ -125,6 +125,9 @@ export class NativeRuntime {
   fail(site, reason) {
     return this.#native.fail(site, reason);
   }
+  checkAction(action) {
+    this.#native.checkAction(action);
+  }
   holdVerdicts(held) {
     this.#native.holdVerdicts(held);
   }

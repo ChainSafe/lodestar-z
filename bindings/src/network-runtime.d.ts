@@ -139,6 +139,8 @@ export interface NativeNetworkApplicationRuntime {
   exchange(actions: readonly NativeAction[], demand: NativeExchangeDemand): NativeExchange;
   /** Terminates the process at a fatal site for a bridge contract failure the pump detects. */
   fail(site: NativeEscalation, reason: string): never;
+  /** Throws what an exchange would for `action`, applying nothing. */
+  checkAction(action: NativeAction): void;
   /**
    * Private control for binding ownership tests: while held, the owner leaves reported verdicts unapplied. Expiry
    * still disposes of them.
