@@ -124,8 +124,9 @@ test "reqresp recovers only complete Goodbye bytes retained by a closed authenti
     }
 }
 
-test "reqresp response FIN stops complete written chunks but do not hide an empty stopped response" {
-    for ([_]bool{ false, true }) |send_chunk| {
+test "reqresp response FIN stops complete written responses but do not hide an empty stopped response" {
+    const Case = enum { empty, chunk, refused };
+    for (std.enums.values(Case)) |case| {
         var pair: Pair = .{};
         try pair.init(.{}, .{});
         defer pair.deinit();
@@ -139,31 +140,41 @@ test "reqresp response FIN stops complete written chunks but do not hide an empt
             for (pair.serverEvents()) |event| switch (event) {
                 .request => |value| {
                     incoming = value.request;
-                    if (send_chunk) try pair.shared.server.reqresp.respond(value.request, &payload, null, pair.shared.pair.now);
+                    if (case == .chunk) try pair.shared.server.reqresp.respond(value.request, &payload, null, pair.shared.pair.now);
                 },
                 .chunk_sent => sent = true,
                 .failed => return error.TestUnexpectedResult,
                 else => {},
             };
-            if (incoming != null and (!send_chunk or sent)) break;
+            if (incoming != null and (case != .chunk or sent)) break;
         }
         try std.testing.expect(incoming != null);
+        var events: [8]rr.Event = undefined;
+        if (case == .refused) {
+            try pair.shared.server.reqresp.respondError(incoming.?, 2, "refused", pair.shared.pair.now);
+            // Writes the error chunk, leaving its FIN for a later pump.
+            const slot = &pair.shared.server.reqresp.inbound[incoming.?.index];
+            for (0..4) |_| {
+                try std.testing.expectEqual(0, pair.shared.server.reqresp.pump(&pair.shared.pair.server, &pair.shared.server.router, pair.shared.pair.now, .{ .control = &events }).control);
+                if (slot.state == .finishing) break;
+            }
+            try std.testing.expectEqual(.finishing, slot.state);
+        }
         const stream = pair.shared.client.reqresp.outbound[request.index].request.stream;
         pair.shared.pair.client.shutdown(stream, .read, 0);
         try pair.shared.pair.pump();
-        try std.testing.expect(pair.shared.server.reqresp.finish(incoming.?, pair.shared.pair.now));
+        if (case != .refused) try std.testing.expect(pair.shared.server.reqresp.finish(incoming.?, pair.shared.pair.now));
         var terminal = false;
         for (0..8) |_| {
-            var events: [8]rr.Event = undefined;
             const count = pair.shared.server.reqresp.pump(&pair.shared.pair.server, &pair.shared.server.router, pair.shared.pair.now, .{ .control = &events }).control;
             for (events[0..count]) |event| switch (event) {
                 .served => |value| {
-                    try std.testing.expect(send_chunk);
-                    try std.testing.expectEqual(@as(u32, 1), value.chunks);
+                    try std.testing.expect(case != .empty);
+                    try std.testing.expectEqual(@as(u32, @intFromBool(case == .chunk)), value.chunks);
                     terminal = true;
                 },
                 .failed => |value| {
-                    try std.testing.expect(!send_chunk);
+                    try std.testing.expectEqual(.empty, case);
                     try std.testing.expectEqual(rr.Failure.stream_closed, value.reason);
                     terminal = true;
                 },
