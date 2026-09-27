@@ -1,10 +1,12 @@
 import {once} from "node:events";
 import {isMainThread, Worker} from "node:worker_threads";
 
-// Only the worker loads the addon, so Node unloads it when the worker's environment ends, before the thread exits.
+// Only the workers load the addon, one after another, so each worker's environment is the addon's last one and
+// ends before its thread exits.
 if (isMainThread) {
-  const [code] = await once(new Worker(new URL(import.meta.url)), "exit");
-  console.log(`worker-exited ${code}`);
+  const codes = [];
+  for (let i = 0; i < 3; i++) codes.push((await once(new Worker(new URL(import.meta.url)), "exit"))[0]);
+  console.log(`workers-exited ${codes.join(",")}`);
 } else {
   const {applicationConfig, startRuntime} = await import("../utils/network.js");
   await startRuntime(applicationConfig()).close();
