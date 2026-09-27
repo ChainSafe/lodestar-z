@@ -340,7 +340,9 @@ pub const Server = struct {
         const request = &slot.request;
         assert(slot.state == .finishing);
         const flushed = request.io.outbox.pump(engine, request.stream) catch |err| stopped: {
-            if (err != error.StreamStopped or request.chunks == 0 or request.io.outbox.offset != request.io.outbox.bytes.len) {
+            // An error chunk ends the response, so a peer can stop the stream once it has read one.
+            const answered = request.chunks > 0 or slot.pending_result != constants.result_success;
+            if (err != error.StreamStopped or !answered or request.io.outbox.offset != request.io.outbox.bytes.len) {
                 slot.failStream(owner, index, err, engine);
                 return;
             }
