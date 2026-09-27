@@ -373,9 +373,10 @@ pub const Results = struct {
         try empty.objectFreeze();
         for (&self.idle, 0..) |*slot, i| {
             const result = try env.createObject();
-            inline for (.{ "peers", "serving", "checks", "acknowledged" }) |field| try result.setNamedProperty(field, empty);
+            inline for (.{ "peers", "serving", "checks", "acknowledged", "completions" }) |field| try result.setNamedProperty(field, empty);
             try result.setNamedProperty("gossip", try env.getNull());
             try result.setNamedProperty("failure", try env.getNull());
+            try result.setNamedProperty("closed", try env.getNull());
             try schedule(env, result, @bitCast(@as(u4, @intCast(i))));
             try (try result.getNamedProperty("parked")).objectFreeze();
             try result.objectFreeze();
@@ -400,9 +401,9 @@ fn schedule(env: napi.Env, result: Value, outcome: Outcome) !void {
     try result.setNamedProperty("parked", parked);
 }
 
-/// Builds a fresh result for a selection that delivers something. Creates the serving starts' closed promises,
-/// which the caller discards if a later step fails.
-pub fn build(env: napi.Env, runtime: *Runtime, selection: *Selection) !Value {
+/// Builds a fresh result for a selection that delivers something, or for the close result `closed`. Creates the serving
+/// starts' closed promises, which the caller discards if a later step fails.
+pub fn build(env: napi.Env, runtime: *Runtime, selection: *Selection, closed: ?Value) !Value {
     const result = try env.createObject();
     const peers = try env.createArrayWithLength(selection.peer_count);
     for (selection.peers[0..selection.peer_count], 0..) |*entry, i| try peers.setElement(@intCast(i), try projection.observation(env, entry));
@@ -438,7 +439,9 @@ pub fn build(env: napi.Env, runtime: *Runtime, selection: *Selection) !Value {
         try acknowledged.setElement(@intCast(i), reference);
     }
     try result.setNamedProperty("acknowledged", acknowledged);
+    try result.setNamedProperty("completions", try env.createArrayWithLength(0));
     try result.setNamedProperty("failure", try env.getNull());
+    try result.setNamedProperty("closed", closed orelse try env.getNull());
     return result;
 }
 

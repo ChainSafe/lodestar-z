@@ -165,6 +165,32 @@ if (mode === "exit") {
   await remote.stop();
   await runtimeReleased();
   console.log("facade-collected");
+} else if (mode === "orphan") {
+  // A host that never exchanges drops its runtime with operations outstanding. The collected wrapper's completion
+  // owner stops native and settles them on its own turns, after native's last notification and with no timer left.
+  let runtime = initializeNativeNetworkRuntime(applicationConfig(), noop);
+  const outcomes = Promise.all(
+    [runtime.getIdentity(), runtime.connect(...unreachableConnect())].map((promise) =>
+      promise.then(
+        () => "resolved",
+        (error) => error.code
+      )
+    )
+  );
+  const closed = runtime.closed;
+  const weak = new WeakRef(runtime);
+  runtime = null;
+  for (let i = 0; i < 100; i++) {
+    await delay(10);
+    global.gc();
+    if (!weak.deref()) break;
+  }
+  assert.equal(weak.deref(), undefined, "The completion owner must not retain the wrapper");
+  assert.deepEqual(await closed, {reason: "requested"});
+  const [identity, connect] = await outcomes;
+  assert(identity === "resolved" || identity === "NetworkClosed");
+  assert.equal(connect, "NetworkClosed");
+  console.log("orphan-drained");
 } else if (mode === "await-close") {
   // Only the notifier ref, taken by close, keeps the loop alive until closed settles.
   const config = applicationConfig();

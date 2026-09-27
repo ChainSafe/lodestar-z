@@ -33,6 +33,7 @@ pump.attach({
     return native.exchange(actions, demand);
   },
   fail: (site, reason) => native.fail(site, reason),
+  turns: native.turns,
 });
 // A command settles through the pump before the host closes.
 await native.getIdentity();

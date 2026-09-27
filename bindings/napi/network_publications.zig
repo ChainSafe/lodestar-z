@@ -162,9 +162,9 @@ pub const Table = struct {
             self.transition(cell, .terminal);
         }
     }
+    /// Whether an admitted publication still owes its caller an outcome, whether settlement or a completion delivers it.
     pub fn obligated(self: *const Table) bool {
-        for (self.cells) |*cell| if (cell.deferred != null) return true;
-        return false;
+        return self.diag.occupied > 0;
     }
     pub fn snapshot(self: *const Table) Diagnostics {
         var result = self.diag;
