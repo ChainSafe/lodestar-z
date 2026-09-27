@@ -450,7 +450,7 @@ test.skipIf(!HOST || !HOODI)(
 );
 
 test("native bridge validates full handles and stale retirement", async () => {
-  const {commandCompleted, networkBindings: bindings} = await import("./utils/network-bindings.js");
+  const {commandCompleted, completed, networkBindings: bindings} = await import("./utils/network-bindings.js");
   const config = applicationConfig();
   const native = new bindings.NativeNetworkRuntime();
   const lifecycle = native.initialize(config, () => undefined);
@@ -460,8 +460,9 @@ test("native bridge validates full handles and stale retirement", async () => {
     const handle = native.requestStart(identity.peerId, BLOCKS, new Uint8Array(32), undefined);
     expect(() => native.requestPull({...handle, generation: 0n})).toThrow("InvalidRequestHandle");
     expect(() => native.requestPull({...handle, generation: handle.generation + 1n})).toThrow("InvalidRequestHandle");
-    const pending = native.requestPull(handle);
-    await expect(pending).rejects.toMatchObject({reason: "disconnected"});
+    native.requestPull(handle);
+    expect(() => native.requestPull(handle)).toThrow("NetworkRequestBusy");
+    expect(await completed(native, "request", handle, settleOnly)).toMatchObject({error: {reason: "disconnected"}});
     expect(() => native.requestPull(handle)).toThrow("InvalidRequestHandle");
     expect(native.requestRetire(handle, true)).toBeUndefined();
   } finally {
@@ -531,22 +532,19 @@ test.skipIf(!NATIVE_PEER)(
 stockTest(
   "direct native calls allow exactly one pending pull",
   async () => {
-    const {native, peer, id, stop} = await connectedNative();
+    const {completed, native, peer, id, stop} = await connectedNative();
     try {
       await peer.command("scenario", {scenario: "hold"});
       const handle = native.requestStart(id, BLOCKS, new Uint8Array(32), undefined);
-      const pending = native.requestPull(handle);
-      await expect(native.requestPull(handle)).rejects.toMatchObject({code: "NetworkRequestBusy"});
+      native.requestPull(handle);
+      expect(() => native.requestPull(handle)).toThrow("NetworkRequestBusy");
       expect(native.diagnostics().requests.busyPulls).toBe(1n);
       const {waitFor} = await import("../../test/interop/child.mjs");
       await waitFor(async () => (await peer.command("stats")).lastRequest === "00".repeat(32));
-      const cancelled = expect(pending).rejects.toMatchObject({
-        code: "NetworkRequestFailed",
-        phase: "response",
-        reason: "cancelled",
+      native.requestRetire(handle, false);
+      expect(await completed(native, "request", handle, settleOnly)).toMatchObject({
+        error: {code: "NetworkRequestFailed", phase: "response", reason: "cancelled"},
       });
-      await native.requestRetire(handle, false);
-      await cancelled;
     } finally {
       await stop();
     }
@@ -557,7 +555,7 @@ stockTest(
 async function connectedNative() {
   if (!HOST) throw Error("LODESTAR_Z_NETWORK_STOCK_HOST is required");
   const {Child} = await import("../../test/interop/child.mjs");
-  const {commandCompleted, networkBindings: bindings} = await import("./utils/network-bindings.js");
+  const {commandCompleted, completed, networkBindings: bindings} = await import("./utils/network-bindings.js");
   const peer = new Child("request-phase-stock", process.execPath, [
     "--import",
     "tsx",
@@ -592,7 +590,7 @@ async function connectedNative() {
       ),
       settleOnly
     );
-    return {bindings, closed, id, native, peer, stop};
+    return {bindings, closed, completed, id, native, peer, stop};
   } catch (error) {
     await stop();
     throw error;

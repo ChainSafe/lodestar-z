@@ -79,7 +79,10 @@ export interface NativeExchange {
   readonly disabledWaiting: boolean;
   /** Null, or why a serving start could not be handed over; it was cancelled and released, and `more` is true. */
   readonly failure: unknown;
-  /** Completed publications and commands, which the exchange retired; each settles its operation's promise. */
+  /**
+   * Completed publications and commands, and requests' chunks and terminal outcomes. Each settles its operation's
+   * promise, or its request's pending pull and retirement; the exchange retired each cell's final completion.
+   */
   readonly completions: readonly NativeCompletion[];
   /** The close result, in the one exchange that settled it; otherwise null. */
   readonly closed: NativeRuntimeCloseResult | null;
@@ -100,7 +103,18 @@ export type NativeCompletion =
       | {value: NativeGossipPublishResult}
       | {error: NativeOperationError}
     ))
-  | NativeCommandCompletion;
+  | NativeCommandCompletion
+  | NativeRequestCompletion;
+
+/**
+ * A request cell's completion: a chunk its pending pull resolves with, or its terminal outcome, the end of the stream
+ * or the error a pending pull rejects with. A terminal outcome also ends a pending return or throw.
+ */
+export type NativeRequestCompletion = {family: "request"; handle: NativeCellHandle; kind?: undefined} & (
+  | {value: NativeResponseChunk}
+  | {done: true}
+  | {error: NativeOperationError}
+);
 
 /** What each command's promise resolves with, keyed by the runtime method that admitted it. */
 export interface NativeCommandResults {

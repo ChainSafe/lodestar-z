@@ -1,17 +1,17 @@
 import {Turns} from "./network-pump.js";
 
-/** Families whose operation settles once, from its cell's one completion. */
-const ONE_SHOT = ["publication", "command"];
+/** The families whose completions the owner settles, each with a record per native cell. */
+const FAMILIES = ["publication", "command", "request"];
 /** The longest timer period, whose timer only holds what it is given and keeps the event loop alive. */
 const HOLD_MS = 2 ** 31 - 1;
 const noop = () => undefined;
 
 /**
- * One family's one-shot operation records, a slot per native cell. A handle `{index, generation}` names a record: it
- * is installed before the admitting call yields and cleared before its promise settles. A cell's generation only grows
- * and never wraps, so a completion for an older generation than its slot's is obsolete.
+ * One family's records, a slot per native cell. A handle `{index, generation}` names a record: it is installed before
+ * the admitting call yields and cleared by its cell's final completion before that settles it. A cell's generation
+ * only grows and never wraps, so a completion for an older generation than its slot's is obsolete.
  */
-class Operations {
+class Records {
   #records;
   #generations;
   live = 0;
@@ -32,21 +32,37 @@ class Operations {
   }
 
   /**
-   * Settles the record `completion` names, or ignores it for an obsolete generation. Returns false when no live record
-   * of its current generation and kind matches.
+   * The live record `handle` names, cleared from its slot when `final`: undefined for an obsolete generation, and null
+   * when no live record of its current generation matches.
    */
-  complete(completion) {
-    const {index, generation} = completion.handle;
-    if (!(index < this.#records.length)) return false;
-    if (generation < this.#generations[index]) return true;
+  take({index, generation}, final) {
+    if (!(index < this.#records.length)) return null;
+    if (generation < this.#generations[index]) return undefined;
     const record = this.#records[index];
-    if (generation !== this.#generations[index] || record === null || record.kind !== completion.kind) return false;
-    this.#records[index] = null;
-    this.live--;
-    if ("error" in completion) record.reject(completion.error);
-    else record.resolve(completion.value);
+    if (generation !== this.#generations[index] || record === null) return null;
+    if (final) {
+      this.#records[index] = null;
+      this.live--;
+    }
+    return record;
+  }
+}
+
+/**
+ * Settles `record` with its cell's `completion`. A request's chunk answers its pending pull and its terminal outcome
+ * ends the request; any other family's single completion settles the promise of the kind it expects. Returns false
+ * when the record cannot take the completion.
+ */
+function settle(family, record, completion) {
+  if (family === "request") {
+    if ("value" in completion) return record.chunk(completion.value);
+    record.end(completion);
     return true;
   }
+  if (record.kind !== completion.kind) return false;
+  if ("error" in completion) record.reject(completion.error);
+  else record.resolve(completion.value);
+  return true;
 }
 
 /**
@@ -84,14 +100,14 @@ export class CompletionOwner {
     return true;
   };
 
-  /** Sizes each one-shot family's records from native's `capacities`. */
+  /** Sizes each family's records from native's `capacities`. */
   size(capacities) {
-    for (const family of ONE_SHOT) this.#tables.set(family, new Operations(capacities[family]));
+    for (const family of FAMILIES) this.#tables.set(family, new Records(capacities[family]));
   }
 
   /**
-   * Admits one operation: `submit` reserves its native cell and returns the handle, and the record is installed before
-   * this returns. A submission that throws creates no record.
+   * Admits one operation of `family` and `kind`, whose promise its cell's completion settles. The record is installed
+   * before this returns.
    */
   admit(family, kind, submit) {
     const record = {kind, reject: null, resolve: null};
@@ -99,10 +115,24 @@ export class CompletionOwner {
       record.resolve = resolve;
       record.reject = reject;
     });
+    this.#install(family, record, submit);
+    return promise;
+  }
+
+  /** Admits one outgoing request, whose completions settle its iterator's `record`. Returns the request's handle. */
+  request(record, submit) {
+    return this.#install("request", record, submit);
+  }
+
+  /**
+   * `submit` reserves the native cell and returns its handle, and `record` is installed before this returns. A
+   * submission that throws installs nothing.
+   */
+  #install(family, record, submit) {
     const handle = submit();
     if (!this.#tables.get(family)?.install(handle, record))
       this.#breach(`admitted ${family} ${handle?.index}:${handle?.generation}`);
-    return promise;
+    return handle;
   }
 
   /** One exchange: its completions settle their records, and its close result ends the turns. */
@@ -128,7 +158,11 @@ export class CompletionOwner {
 
   #complete(completion) {
     const {family, handle} = completion;
-    if (!this.#tables.get(family)?.complete(completion))
+    const table = this.#tables.get(family);
+    // A request cell completes with each chunk and ends with its terminal outcome; the others complete once.
+    const record = table === undefined ? null : table.take(handle, family !== "request" || !("value" in completion));
+    if (record === undefined) return;
+    if (record === null || !settle(family, record, completion))
       this.#breach(`completed ${family} ${handle.index}:${handle.generation}`);
   }
 

@@ -1,6 +1,7 @@
 import bindings from "../../src/bindings.js";
-import type {NativeIdentity, NativeProtocolId, NativeRequestOptions, NativeResponseChunk} from "../../src/network.js";
+import type {NativeIdentity, NativeProtocolId, NativeRequestOptions} from "../../src/network.js";
 import type {
+  NativeCompletion,
   NativeExchange,
   NativeExchangeDemand,
   NativeNetworkApplicationRuntime,
@@ -28,8 +29,10 @@ interface NativeBridge extends Pick<NativeNetworkApplicationRuntime, "diagnostic
     data: Uint8Array,
     options: NativeRequestOptions | undefined
   ): RequestHandle;
-  requestPull(handle: RequestHandle): Promise<IteratorResult<NativeResponseChunk, undefined>>;
-  requestRetire(handle: RequestHandle, abandoned: boolean): Promise<void> | undefined;
+  /** Arms a pull, whose chunk or terminal outcome a request completion delivers. */
+  requestPull(handle: RequestHandle): void;
+  /** Cancels the request, whose terminal completion ends the retirement. */
+  requestRetire(handle: RequestHandle, abandoned: boolean): void;
 }
 
 interface NetworkTestBindings {
@@ -38,6 +41,28 @@ interface NetworkTestBindings {
 
 export const networkBindings = bindings as NetworkTestBindings;
 
+/** Exchanges until a raw runtime delivers a completion of `family` for the cell `handle` names, and returns it. */
+export async function completed(
+  native: Pick<NativeBridge, "exchange">,
+  family: NativeCompletion["family"],
+  handle: RequestHandle,
+  demand: NativeExchangeDemand,
+  timeoutMs = 10000
+): Promise<NativeCompletion> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const completion = native
+      .exchange([], demand)
+      .completions.find(
+        (done) =>
+          done.family === family && done.handle.index === handle.index && done.handle.generation === handle.generation
+      );
+    if (completion) return completion;
+    if (Date.now() > deadline) throw Error(`The ${family} completion did not arrive`);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 /** Exchanges until a raw runtime delivers the completion of the command `handle` names; throws its error. */
 export async function commandCompleted(
   native: Pick<NativeBridge, "exchange">,
@@ -45,19 +70,7 @@ export async function commandCompleted(
   demand: NativeExchangeDemand,
   timeoutMs = 10000
 ): Promise<unknown> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const completion = native
-      .exchange([], demand)
-      .completions.find(
-        ({family, handle: done}) =>
-          family === "command" && done.index === handle.index && done.generation === handle.generation
-      );
-    if (completion) {
-      if ("error" in completion) throw completion.error;
-      return completion.value;
-    }
-    if (Date.now() > deadline) throw Error("Command completion did not arrive");
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
+  const completion = await completed(native, "command", handle, demand, timeoutMs);
+  if ("error" in completion) throw completion.error;
+  return "value" in completion ? completion.value : undefined;
 }

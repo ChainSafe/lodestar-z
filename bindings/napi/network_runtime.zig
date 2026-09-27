@@ -412,12 +412,12 @@ pub const Runtime = struct {
     pub fn acknowledgingLocked(self: *const Runtime) bool {
         return if (self.gossip) |*table| table.diag.acknowledging > 0 else false;
     }
-    /// A request or incoming result an exchange would settle, or a command or publication completion it would deliver,
+    /// An incoming result an exchange would settle, or a command, publication or request completion it would deliver,
     /// now. O(1).
     pub fn settleableLocked(self: *const Runtime) bool {
         return self.table.anyTerminal() or
             (if (self.publications) |*table| table.anyTerminal() else false) or
-            (if (self.requests) |*table| table.anyDue(self.stop, self.disposed) else false) or
+            (if (self.requests) |*table| table.anyDue(self.stop, self.quiescent) else false) or
             (if (self.incoming) |*table| table.anyDue() else false);
     }
     pub fn join(self: *Runtime) void {
@@ -452,7 +452,6 @@ pub const Runtime = struct {
         if (self.requests) |*table| for (table.cells, 0..) |cell, i| {
             if (cell.state == .free) continue;
             std.debug.assert(cell.state == .terminal and cell.native == null and !cell.copying);
-            std.debug.assert(cell.pull == null and cell.retirement == null);
             self.retireRequest(.{ .index = @intCast(i), .generation = cell.generation });
         };
         if (self.incoming) |*table| for (table.cells, 0..) |cell, i| {

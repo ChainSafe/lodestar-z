@@ -53,7 +53,7 @@ interface DirectIncomingBridge {
     data: Uint8Array,
     context: import("../src/network.js").NativeForkEntry
   ): Promise<void>;
-  requestPull(handle: IncomingHandle): Promise<unknown>;
+  requestPull(handle: IncomingHandle): void;
   close(): void;
 }
 

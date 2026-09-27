@@ -10,18 +10,6 @@ const Runtime = r.Runtime;
 
 const bytes = @import("network_js.zig").bytes;
 const errorValue = @import("network_js.zig").errorValue;
-fn result(env: napi.Env, value: ?Value) !Value {
-    const object = try env.createObject();
-    try object.setNamedProperty("done", try env.getBoolean(value == null));
-    try object.setNamedProperty("value", value orelse try env.getUndefined());
-    return object;
-}
-fn tokenValue(env: napi.Env, token: requests.Token) !Value {
-    const object = try env.createObject();
-    try object.setNamedProperty("index", try env.createUint32(token.index));
-    try object.setNamedProperty("generation", try env.createBigintUint64(token.generation));
-    return object;
-}
 fn tokenFor(value: Value) !requests.Token {
     try cfg.completeObject(value, &.{ "index", "generation" });
     const index = try cfg.integer(try cfg.get(value, "index"), 31);
@@ -81,7 +69,7 @@ pub fn start(runtime: *Runtime, peer: Value, protocol: Value, data: Value, optio
     const cell = runtime.requests.?.get(token).?;
     cell.peer = identity;
     cell.options = request_options;
-    const value = try tokenValue(runtime.env, token);
+    const value = try @import("network_js.zig").handle(runtime.env, token.index, token.generation);
     try cfg.bytes(data, cell.input);
     runtime.lock();
     defer runtime.unlock();
@@ -98,50 +86,38 @@ fn rejectAdmission(env: napi.Env) anyerror {
     env.throw(value) catch |err| return err;
     return error.PendingException;
 }
-pub fn pull(runtime: *Runtime, handle: Value) !Value {
+/// Arms a pull, whose chunk or terminal outcome an exchange delivers. The iterator allows one pull at a time, so a
+/// second one breaks its contract.
+pub fn pull(runtime: *Runtime, handle: Value) !void {
     const token = try tokenFor(handle);
-    const env = runtime.env;
     runtime.lock();
     const cell = runtime.requests.?.get(token) orelse {
         runtime.unlock();
         return error.InvalidRequestHandle;
     };
-    if (cell.pull != null) {
+    if (cell.pulling) {
         runtime.requests.?.diag.busyPulls +|= 1;
         runtime.unlock();
-        const deferred = try env.createPromise();
-        try deferred.reject(try errorValue(env, "NetworkRequestBusy"));
-        return deferred.getPromise();
+        return error.NetworkRequestBusy;
     }
-    runtime.unlock();
-    const deferred = try env.createPromise();
-    runtime.lock();
-    requests.armPull(runtime, cell, deferred);
+    requests.armPull(runtime, cell);
     const ref_notify = runtime.notify_live;
     runtime.unlock();
-    if (ref_notify) runtime.notify.ref(env) catch {};
-    return deferred.getPromise();
+    if (ref_notify) runtime.notify.ref(runtime.env) catch {};
 }
-pub fn retire(runtime: *Runtime, handle: Value, abandoned: bool) !Value {
+/// Cancels and retires the request. Its terminal completion ends a retirement the iterator awaits, one not
+/// `abandoned`; a stale handle's request already retired.
+pub fn retire(runtime: *Runtime, handle: Value, abandoned: bool) !void {
     const token = try tokenFor(handle);
-    const env = runtime.env;
     runtime.lock();
     const cell = runtime.requests.?.get(token) orelse {
         runtime.unlock();
-        return env.getUndefined();
+        return;
     };
-    if (cell.retirement) |existing| {
-        runtime.unlock();
-        return existing.getPromise();
-    }
-    runtime.unlock();
-    const deferred = if (abandoned) null else try env.createPromise();
-    runtime.lock();
-    requests.armRetirement(runtime, cell, deferred);
+    requests.armRetirement(runtime, cell, !abandoned);
     const ref_notify = runtime.notify_live;
     runtime.unlock();
-    if (ref_notify and !abandoned) runtime.notify.ref(env) catch {};
-    return if (deferred) |value| value.getPromise() else env.getUndefined();
+    if (ref_notify and !abandoned) runtime.notify.ref(runtime.env) catch {};
 }
 fn terminalError(env: napi.Env, terminal: requests.Terminal, cell: *const requests.Cell) !Value {
     switch (terminal) {
@@ -169,102 +145,30 @@ fn terminalError(env: napi.Env, terminal: requests.Terminal, cell: *const reques
         .done => unreachable,
     }
 }
-fn chunkResult(env: napi.Env, cell: *const requests.Cell) !Value {
-    const chunk = cell.chunk.?;
+/// A request completion: `value`, a copy of the chunk its pending pull resolves with, or its terminal outcome, `done`
+/// or the `error` a pending pull rejects with.
+pub fn completion(env: napi.Env, runtime: *Runtime, delivered: requests.Completion) !Value {
+    const cell = &runtime.requests.?.cells[delivered.token.index];
     const object = try env.createObject();
-    var destination: [*]u8 = undefined;
-    const buffer = try env.createArrayBuffer(chunk.len, &destination);
-    const data = try env.createTypedarray(.uint8, chunk.len, buffer, 0);
-    @memcpy(destination[0..chunk.len], cell.sink[0..chunk.len]);
-    try object.setNamedProperty("data", data);
-    try object.setNamedProperty("fork", if (requests.forkLabel(chunk.fork)) |fork| try env.createStringUtf8(fork) else try env.getNull());
-    try object.setNamedProperty("protocol", try env.createStringUtf8(cell.protocol.id()));
-    return result(env, object);
-}
-/// Settles up to `limit` request chunks and terminal outcomes. Returns whether more remain.
-pub fn settle(env: napi.Env, runtime: *Runtime, limit: usize) !bool {
-    if (runtime.requests == null) return false;
-    runtime.retain();
-    defer runtime.release();
-    var settled: usize = 0;
-    var more = false;
-    for (0..requests.capacity_max) |_| {
-        runtime.lock();
-        const table = &runtime.requests.?;
-        const i = table.nextDue(table.settle_cursor, runtime.stop, runtime.disposed) orelse table.nextDue(0, runtime.stop, runtime.disposed) orelse {
-            runtime.unlock();
-            break;
-        };
-        if (settled == limit) {
-            runtime.unlock();
-            more = true;
-            break;
-        }
-        settled += 1;
-        runtime.bridge.deliver(.completion, 1);
-        table.settle_cursor = i + 1;
-        const cell = &runtime.requests.?.cells[i];
-        std.debug.assert(requests.settleable(cell, runtime.stop, runtime.disposed));
-        const deliver_chunk = requests.deliverable(cell, runtime.stop);
-        const token: requests.Token = .{ .index = @intCast(i), .generation = cell.generation };
-        cell.copying = true;
-        runtime.requests.?.refresh(cell);
-        const deferred = cell.pull;
-        const retirement = cell.retirement;
-        const terminal = cell.terminal;
-        const retiring = cell.retiring;
-        runtime.unlock();
-        var failed_copy = false;
-        defer {
-            runtime.lock();
-            cell.copying = false;
-            cell.pull = null;
-            if (deliver_chunk and !failed_copy) {
-                runtime.requests.?.diag.chunksCopied +|= 1;
-                runtime.requests.?.diag.bytesCopied +|= cell.chunk.?.len;
-                cell.delivered = true;
-                if (cell.native == null) {
-                    cell.chunk = null;
-                    cell.delivered = false;
-                }
-            }
-            if (failed_copy) {
-                cell.cancel = true;
-                cell.retiring = true;
-                cell.chunk = null;
-                runtime.signalLocked();
-            }
-            runtime.requests.?.releasePayload(cell);
-            runtime.requests.?.refresh(cell);
-            runtime.unlock();
-            if (!deliver_chunk) runtime.retireRequest(token);
-        }
-        errdefer failed_copy = true;
-        if (deferred) |pending| {
-            if (deliver_chunk) {
-                const value = chunkResult(env, cell) catch blk: {
-                    failed_copy = true;
-                    break :blk try runtime.copy_error.?.getValue();
-                };
-                if (failed_copy) try pending.reject(value) else try pending.resolve(value);
-            } else if (terminal.? == .done and !retiring) {
-                const value = result(env, null) catch blk: {
-                    failed_copy = true;
-                    break :blk try runtime.copy_error.?.getValue();
-                };
-                if (failed_copy) try pending.reject(value) else try pending.resolve(value);
-            } else {
-                const selected: requests.Terminal = if (retiring and terminal.? != .closed) .{ .failed = .{ .reason = .cancelled, .phase = if (terminal.? == .failed) terminal.?.failed.phase else if (terminal.? == .done) .response else null } } else terminal.?;
-                try pending.reject(@import("network_js.zig").settled(env, terminalError(env, selected, cell)) catch try runtime.copy_error.?.getValue());
-            }
-        }
-        if (!deliver_chunk) if (retirement) |pending| try pending.resolve(try env.getUndefined());
+    try object.setNamedProperty("family", try env.createStringUtf8("request"));
+    try object.setNamedProperty("handle", try @import("network_js.zig").handle(env, delivered.token.index, delivered.token.generation));
+    switch (delivered.value) {
+        .chunk => |chunk| {
+            const value = try env.createObject();
+            var destination: [*]u8 = undefined;
+            const buffer = try env.createArrayBuffer(chunk.len, &destination);
+            @memcpy(destination[0..chunk.len], cell.sink[0..chunk.len]);
+            try value.setNamedProperty("data", try env.createTypedarray(.uint8, chunk.len, buffer, 0));
+            try value.setNamedProperty("fork", if (requests.forkLabel(chunk.fork)) |fork| try env.createStringUtf8(fork) else try env.getNull());
+            try value.setNamedProperty("protocol", try env.createStringUtf8(cell.protocol.id()));
+            try object.setNamedProperty("value", value);
+        },
+        .terminal => |terminal| if (terminal == .done)
+            try object.setNamedProperty("done", try env.getBoolean(true))
+        else
+            try object.setNamedProperty("error", try @import("network_js.zig").settled(env, terminalError(env, terminal, cell))),
     }
-    runtime.lock();
-    runtime.retireRequestStorageLocked();
-    runtime.unlock();
-    runtime.disposeTerminalReferences();
-    return more;
+    return object;
 }
 pub fn diagnostics(env: napi.Env, value: *const requests.Diagnostics) !Value {
     return @import("network_js.zig").scalarFields(env, value);

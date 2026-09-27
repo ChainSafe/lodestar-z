@@ -1,7 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const n = @import("network");
-const napi = @import("zapi:zapi").napi;
 const rr = n.reqresp;
 const Budget = @import("network_budget.zig").Budget;
 pub fn forkLabel(fork: ?@FieldType(rr.ForkEntry, "fork")) ?[]const u8 {
@@ -23,6 +22,7 @@ pub const Terminal = union(enum) {
     failed: struct { reason: rr.Failure, phase: ?rr.reqresp.RequestPhase },
 };
 pub const Rejection = enum { disconnected, protocol_disabled, invalid_request, invalid_request_options, too_many_requests, slots_exhausted, negotiation_table_full, transport };
+pub const Chunk = struct { len: usize, fork: ?@FieldType(rr.ForkEntry, "fork") };
 pub const Cell = struct {
     state: State = .free,
     generation: u64 = 0,
@@ -35,7 +35,7 @@ pub const Cell = struct {
     reservation: usize = 0,
     native: ?rr.RequestHandle = null,
     terminal: ?Terminal = null,
-    chunk: ?struct { len: usize, fork: ?@FieldType(rr.ForkEntry, "fork") } = null,
+    chunk: ?Chunk = null,
     delivered: bool = false,
     copying: bool = false,
     consume: bool = false,
@@ -43,8 +43,16 @@ pub const Cell = struct {
     retiring: bool = false,
     peer_message: [rr.codec.error_message_max]u8 = undefined,
     peer_message_len: u16 = 0,
-    pull: ?napi.Deferred = null,
-    retirement: ?napi.Deferred = null,
+    /// A pull awaits the next chunk or the terminal outcome, which an exchange delivers.
+    pulling: bool = false,
+    /// A return or throw awaits the retirement, which the terminal completion ends.
+    retirement_awaited: bool = false,
+};
+/// What an exchange delivers for one due cell: its chunk, to the pending pull, or its terminal outcome, which answers
+/// a pending pull, ends a retirement or, once the owner has quiesced, awaits the iterator's next pull.
+pub const Completion = struct {
+    token: Token,
+    value: union(enum) { chunk: Chunk, terminal: Terminal },
 };
 pub const Diagnostics = struct {
     capacity: usize = 0,
@@ -65,10 +73,10 @@ pub const Diagnostics = struct {
 pub const capacity_max = 32;
 pub const Table = struct {
     cells: []Cell = &.{},
-    /// The cells whose settlement is due now, one set per combination of the runtime's stop and
-    /// dispose flags. `refresh` keeps them current after each change to a cell.
+    /// The cells whose completion is due now, one set per combination of the runtime's stop and
+    /// quiescent flags. `refresh` keeps them current after each change to a cell.
     due: [4]std.StaticBitSet(capacity_max) = @splat(.initEmpty()),
-    /// Past the last settled cell, where settlement resumes, so refilled low cells cannot starve higher ones.
+    /// Past the last delivered cell, where delivery resumes, so refilled low cells cannot starve higher ones.
     settle_cursor: usize = 0,
     backing: std.mem.Allocator,
     budget: *Budget,
@@ -148,38 +156,79 @@ pub const Table = struct {
         cell.chunk = null;
         self.releasePayload(cell);
         cell.state = .free;
-        cell.pull = null;
-        cell.retirement = null;
+        cell.pulling = false;
+        cell.retirement_awaited = false;
         self.refresh(cell);
         self.diag.occupied -= 1;
     }
-    /// Recomputes whether settlement of `cell` is due, under each stop and dispose flag.
+    /// Recomputes whether the completion of `cell` is due, under each stop and quiescent flag.
     pub fn refresh(self: *Table, cell: *const Cell) void {
         const index = (@intFromPtr(cell) - @intFromPtr(self.cells.ptr)) / @sizeOf(Cell);
         std.debug.assert(&self.cells[index] == cell);
         for (&self.due, 0..) |*set, flags_index| set.setValue(index, settleable(cell, flags_index & 1 != 0, flags_index & 2 != 0));
     }
-    /// The first cell at or after `from` whose settlement is due. O(1).
-    pub fn nextDue(self: *const Table, from: usize, stop: bool, disposed: bool) ?usize {
-        var rest = self.due[dueIndex(stop, disposed)];
+    /// The first cell at or after `from` whose completion is due. O(1).
+    pub fn nextDue(self: *const Table, from: usize, stop: bool, quiescent: bool) ?usize {
+        var rest = self.due[dueIndex(stop, quiescent)];
         rest.setRangeValue(.{ .start = 0, .end = @min(from, capacity_max) }, false);
         return rest.findFirstSet();
     }
-    /// Whether settlement of any cell is due. O(1); debug builds check it against a scan.
-    pub fn anyDue(self: *const Table, stop: bool, disposed: bool) bool {
+    /// Whether the completion of any cell is due. O(1); debug builds check it against a scan.
+    pub fn anyDue(self: *const Table, stop: bool, quiescent: bool) bool {
         if (builtin.mode == .Debug) for (&self.due, 0..) |*set, flags_index| for (0..capacity_max) |i| {
             std.debug.assert(set.isSet(i) == (i < self.cells.len and settleable(&self.cells[i], flags_index & 1 != 0, flags_index & 2 != 0)));
         };
-        return self.due[dueIndex(stop, disposed)].findFirstSet() != null;
+        return self.due[dueIndex(stop, quiescent)].findFirstSet() != null;
     }
-    fn dueIndex(stop: bool, disposed: bool) usize {
-        return @as(usize, @intFromBool(stop)) | @as(usize, @intFromBool(disposed)) << 1;
+    fn dueIndex(stop: bool, quiescent: bool) usize {
+        return @as(usize, @intFromBool(stop)) | @as(usize, @intFromBool(quiescent)) << 1;
+    }
+    /// Pins the due cell at `index` for delivery: its chunk when a pull awaits one, else its terminal outcome.
+    pub fn pin(self: *Table, index: usize, stop: bool) Completion {
+        const cell = &self.cells[index];
+        const token: Token = .{ .index = @intCast(index), .generation = cell.generation };
+        defer self.refresh(cell);
+        defer cell.copying = true;
+        if (deliverable(cell, stop)) return .{ .token = token, .value = .{ .chunk = cell.chunk.? } };
+        return .{ .token = token, .value = .{ .terminal = outcome(cell) } };
+    }
+    /// Commits a delivered completion. Returns whether it retired the cell, whose runtime reference the caller
+    /// releases.
+    pub fn commit(self: *Table, completion: Completion) bool {
+        const cell = self.get(completion.token).?;
+        cell.copying = false;
+        const chunk = switch (completion.value) {
+            .terminal => {
+                self.retire(completion.token);
+                return true;
+            },
+            .chunk => |chunk| chunk,
+        };
+        cell.pulling = false;
+        self.diag.chunksCopied +|= 1;
+        self.diag.bytesCopied +|= chunk.len;
+        cell.delivered = true;
+        // The stream ended meanwhile, so no pull consumes the chunk.
+        if (cell.native == null) {
+            cell.chunk = null;
+            cell.delivered = false;
+        }
+        self.releasePayload(cell);
+        self.refresh(cell);
+        return false;
+    }
+    /// Returns a pinned cell, still due, to where it was.
+    pub fn restore(self: *Table, completion: Completion) void {
+        const cell = self.get(completion.token).?;
+        cell.copying = false;
+        self.releasePayload(cell);
+        self.refresh(cell);
     }
     pub fn snapshot(self: *const Table) Diagnostics {
         var result = self.diag;
         for (self.cells) |*cell| {
             if (cell.state == .free) continue;
-            result.pendingPulls += @intFromBool(cell.pull != null);
+            result.pendingPulls += @intFromBool(cell.pulling);
             result.terminalCells += @intFromBool(cell.terminal != null);
             // Preparing storage is private to the JS thread until publication.
             if (cell.state == .preparing) continue;
@@ -189,40 +238,53 @@ pub const Table = struct {
         }
         return result;
     }
+    /// Whether a pull or a return awaits a completion, which keeps the event loop alive.
     pub fn obligated(self: *const Table) bool {
-        for (self.cells) |*cell| if (cell.pull != null or cell.retirement != null) return true;
+        for (self.cells) |*cell| if (cell.pulling or cell.retirement_awaited) return true;
         return false;
     }
 };
 
 /// A received chunk and a pull waiting for it.
 pub fn deliverable(cell: *const Cell, stop: bool) bool {
-    return cell.pull != null and cell.chunk != null and !cell.delivered and !cell.retiring and !stop;
+    return cell.pulling and cell.chunk != null and !cell.delivered and !cell.retiring and !stop;
 }
-/// A chunk or terminal outcome the host's settlement delivers now: to a pending pull, to a
-/// retirement, or unobserved once the runtime is disposed.
-pub fn settleable(cell: *const Cell, stop: bool, disposed: bool) bool {
+/// A completion an exchange delivers now: a chunk to its pending pull, or the terminal outcome to a pending pull or a
+/// retirement, or to the iterator once the owner has quiesced, so no request outlives the runtime's close.
+pub fn settleable(cell: *const Cell, stop: bool, quiescent: bool) bool {
     if (cell.state == .free or cell.state == .preparing or cell.copying) return false;
     if (deliverable(cell, stop)) return true;
     const terminal = cell.terminal != null and cell.native == null and (cell.chunk == null or cell.retiring or stop);
-    return terminal and (cell.pull != null or cell.retiring or disposed);
+    return terminal and (cell.pulling or cell.retiring or quiescent);
 }
-/// JS thread: arms a pull. The owner consumes a delivered chunk first; settlement happens only in
-/// the host's drain.
-pub fn armPull(runtime: *Runtime, cell: *Cell, deferred: napi.Deferred) void {
-    cell.pull = deferred;
+/// The terminal outcome a pending pull takes: a retirement turns any outcome but the runtime's close into a
+/// cancellation.
+pub fn outcome(cell: *const Cell) Terminal {
+    const terminal = cell.terminal.?;
+    if (!cell.retiring or terminal == .closed) return terminal;
+    return .{ .failed = .{ .reason = .cancelled, .phase = switch (terminal) {
+        .failed => |failure| failure.phase,
+        .done => .response,
+        else => null,
+    } } };
+}
+/// JS thread: arms a pull. The owner consumes a delivered chunk first; an exchange delivers the answer.
+pub fn armPull(runtime: *Runtime, cell: *Cell) void {
+    cell.pulling = true;
     if (cell.delivered) cell.consume = true;
     runtime.requests.?.refresh(cell);
     runtime.signalLocked();
+    runtime.recomputeLocked(.legacy);
 }
-/// JS thread: asks the owner to cancel and retire the request; settlement happens only in the
-/// host's drain.
-pub fn armRetirement(runtime: *Runtime, cell: *Cell, deferred: ?napi.Deferred) void {
-    cell.retirement = deferred;
+/// JS thread: asks the owner to cancel and retire the request, whose terminal completion ends a retirement that is
+/// `awaited`.
+pub fn armRetirement(runtime: *Runtime, cell: *Cell, awaited: bool) void {
+    cell.retirement_awaited = cell.retirement_awaited or awaited;
     cell.retiring = true;
     cell.cancel = true;
     runtime.requests.?.refresh(cell);
     runtime.signalLocked();
+    runtime.recomputeLocked(.legacy);
 }
 
 pub fn rejection(err: anyerror) !Rejection {
@@ -281,7 +343,7 @@ pub fn flags(runtime: *Runtime, io: std.Io) void {
         }
         table.releasePayload(cell);
         table.refresh(cell);
-        if (cell.terminal != null and (cell.pull != null or cell.retiring)) runtime.recomputeLocked(.legacy);
+        if (cell.terminal != null and (cell.pulling or cell.retiring)) runtime.recomputeLocked(.legacy);
     };
 }
 pub fn capture(runtime: *Runtime, events: []const rr.Event, now: n.Now) !void {
