@@ -1,11 +1,14 @@
 import {Turns} from "./network-pump.js";
 
+/** Families whose operation settles once, from its cell's one completion. */
+const ONE_SHOT = ["publication", "command"];
+
 /**
- * One family's operation records, a slot per native cell. A handle `{index, generation}` names a record: it is
- * installed before the admitting call yields and taken, cleared, before its promise settles. A cell's generation only
- * grows and never wraps, so a completion for an older generation than its slot's is obsolete.
+ * One family's one-shot operation records, a slot per native cell. A handle `{index, generation}` names a record: it
+ * is installed before the admitting call yields and cleared before its promise settles. A cell's generation only grows
+ * and never wraps, so a completion for an older generation than its slot's is obsolete.
  */
-class Table {
+class Operations {
   #records;
   #generations;
   live = 0;
@@ -25,18 +28,21 @@ class Table {
     return true;
   }
 
-  obsolete({index, generation}) {
-    return index < this.#records.length && generation < this.#generations[index];
-  }
-
-  /** The live record of `handle`'s current generation, cleared, or null when there is none. */
-  take({index, generation}) {
-    if (!(index < this.#records.length) || generation !== this.#generations[index]) return null;
+  /**
+   * Settles the record `completion` names, or ignores it for an obsolete generation. Returns false when no live record
+   * of its current generation and kind matches.
+   */
+  complete(completion) {
+    const {index, generation} = completion.handle;
+    if (!(index < this.#records.length)) return false;
+    if (generation < this.#generations[index]) return true;
     const record = this.#records[index];
-    if (record === null) return null;
+    if (generation !== this.#generations[index] || record === null || record.kind !== completion.kind) return false;
     this.#records[index] = null;
     this.live--;
-    return record;
+    if ("error" in completion) record.reject(completion.error);
+    else record.resolve(completion.value);
+    return true;
   }
 }
 
@@ -49,7 +55,7 @@ class Table {
 export class CompletionOwner {
   #native;
   #notify;
-  /** Each family's records, sized from native's cells. */
+  /** Each migrated family's records, sized from native's cells. */
   #tables = new Map();
   #abandoned = false;
   /** The runtime's one scheduling flag and retry timer, which a pump shares while it lives. */
@@ -66,9 +72,9 @@ export class CompletionOwner {
     return true;
   };
 
-  /** Sizes each family's records from native's `capacities`. */
+  /** Sizes each one-shot family's records from native's `capacities`. */
   size(capacities) {
-    for (const [family, capacity] of Object.entries(capacities)) this.#tables.set(family, new Table(capacity));
+    for (const family of ONE_SHOT) this.#tables.set(family, new Operations(capacities[family]));
   }
 
   /**
@@ -76,14 +82,13 @@ export class CompletionOwner {
    * this returns. A submission that throws creates no record.
    */
   admit(family, kind, submit) {
-    let resolve;
-    let reject;
-    const promise = new Promise((res, rej) => {
-      resolve = res;
-      reject = rej;
+    const record = {kind, reject: null, resolve: null};
+    const promise = new Promise((resolve, reject) => {
+      record.resolve = resolve;
+      record.reject = reject;
     });
     const handle = submit();
-    if (!this.#tables.get(family)?.install(handle, {kind, reject, resolve}))
+    if (!this.#tables.get(family)?.install(handle, record))
       this.#breach(`admitted ${family} ${handle?.index}:${handle?.generation}`);
     return promise;
   }
@@ -111,13 +116,8 @@ export class CompletionOwner {
 
   #complete(completion) {
     const {family, handle} = completion;
-    const table = this.#tables.get(family);
-    if (table?.obsolete(handle)) return;
-    const record = table?.take(handle) ?? null;
-    if (record === null || record.kind !== completion.kind)
+    if (!this.#tables.get(family)?.complete(completion))
       this.#breach(`completed ${family} ${handle.index}:${handle.generation}`);
-    if ("error" in completion) record.reject(completion.error);
-    else record.resolve(completion.value);
   }
 
   #close() {
