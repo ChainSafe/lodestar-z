@@ -182,22 +182,18 @@ test("limited settlement reaches a terminal publication above refilled lower cel
   void runtime.closed.then(() => {
     closed = true;
   });
-  let high = false;
-  const publications = [
-    publish(1),
-    publish(2).then(() => {
-      high = true;
-    }),
-  ];
+  const publications = [publish(1), publish(2)];
+  const delivered: number[] = [];
   try {
     // Each pass settles one cell; the lowest cell then refills and completes before the next pass.
     for (let pass = 0; pass < 2; pass++) {
       await executed();
-      runtime.exchange([], {...settleOnly, settleCells: 1});
+      for (const {handle} of runtime.exchange([], {...settleOnly, settleCells: 1}).completions)
+        delivered.push(handle.index);
       publications.push(publish(3 + pass));
     }
-    await executed();
-    expect(high).toBe(true);
+    // The second pass reached the higher cell although the lowest had refilled.
+    expect(delivered).toEqual([0, 1]);
   } finally {
     runtime.close();
     for (let i = 0; i < 400 && !closed; i++) {
