@@ -25,6 +25,7 @@ const allocator = if (builtin.mode == .Debug) gpa.allocator() else std.heap.c_al
 
 fn init(old_ref_count: u32) !void {
     if (old_ref_count == 0) {
+        try pinImage();
         // First environment — initialize shared state in your threadpool init.
         var cpu_count: u64 = options.thread_count;
         if (options.thread_count == 0) {
@@ -50,6 +51,25 @@ fn init(old_ref_count: u32) !void {
 
         config.state.init();
     }
+}
+
+const DlInfo = extern struct {
+    fname: ?[*:0]const u8,
+    fbase: ?*anyopaque,
+    sname: ?[*:0]const u8,
+    saddr: ?*anyopaque,
+};
+extern "c" fn dladdr(address: *const anyopaque, info: *DlInfo) c_int;
+
+/// Keeps this image loaded for the process lifetime. The network's BoringSSL frees a thread's
+/// state from a pthread key destructor in this image, also on the JS thread that initialized a
+/// runtime. Node unloads an addon when its last environment ends, which for a worker comes
+/// before its thread exits and runs that destructor.
+fn pinImage() !void {
+    var info: DlInfo = undefined;
+    if (dladdr(@ptrCast(&pinImage), &info) == 0) return error.AddonImageUnknown;
+    const path = info.fname orelse return error.AddonImageUnknown;
+    _ = std.c.dlopen(path, .{ .NOW = true, .NOLOAD = true, .NODELETE = true }) orelse return error.AddonImageUnknown;
 }
 
 /// cgroup-aware CPU count for sizing the BLS pool. A detection failure must

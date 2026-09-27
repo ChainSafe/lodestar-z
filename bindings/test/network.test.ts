@@ -417,6 +417,15 @@ it("releases live requests, incoming cells and gossip batches on worker terminat
   expect(output).toContain("live-worker-resources-released");
 }, 25000);
 
+it("exits a worker that alone loaded the addon after running a runtime", () => {
+  const output = execFileSync(
+    process.execPath,
+    ["--import", "tsx", "bindings/test/fixtures/network-worker-unload.mjs"],
+    {encoding: "utf8", timeout: 10000}
+  );
+  expect(output).toContain("worker-exited 0");
+}, 15000);
+
 it("rejects initialization from another Node environment", async () => {
   const {Worker} = await import("node:worker_threads");
   const runtime = startRuntime(applicationConfig());
