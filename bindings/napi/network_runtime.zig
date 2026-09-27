@@ -220,7 +220,7 @@ pub const Runtime = struct {
             table.cells = &.{};
         }
     }
-    fn retireStoresLocked(self: *Runtime) void {
+    pub fn retireStoresLocked(self: *Runtime) void {
         if (!self.quiescent or self.table.occupied != 0) return;
         if (self.stores) |stores| {
             stores.destroy();
@@ -410,7 +410,7 @@ pub const Runtime = struct {
     pub fn acknowledgingLocked(self: *const Runtime) bool {
         return if (self.gossip) |*table| table.diag.acknowledging > 0 else false;
     }
-    /// A command, request or incoming result an exchange would settle, or a publication completion it would deliver,
+    /// A request or incoming result an exchange would settle, or a command or publication completion it would deliver,
     /// now. O(1).
     pub fn settleableLocked(self: *const Runtime) bool {
         return self.table.anyTerminal() or

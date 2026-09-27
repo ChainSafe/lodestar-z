@@ -41,11 +41,11 @@ interface DirectIncomingBridge {
     config: ReturnType<typeof applicationConfig>,
     onWorkAvailable: () => void
   ): {identity: import("../src/network.js").NativeIdentity; closed: Promise<unknown>};
-  applyIntent(intent: ReturnType<typeof localIntent>, slot: bigint): Promise<unknown>;
+  applyIntent(intent: ReturnType<typeof localIntent>, slot: bigint): IncomingHandle;
   exchange(
     actions: readonly import("../src/network-runtime.js").NativeAction[],
     demand: import("../src/network-runtime.js").NativeExchangeDemand
-  ): {serving: IncomingDescriptor[]};
+  ): import("../src/network-runtime.js").NativeExchange & {serving: IncomingDescriptor[]};
   incomingTerminal(handle: IncomingHandle, action: number, status?: number, message?: Uint8Array): void;
   incomingRelease(handle: IncomingHandle): void;
   incomingRespond(
@@ -58,7 +58,7 @@ interface DirectIncomingBridge {
 }
 
 test("incoming tokens reject malformed handles and stale slot generations", async () => {
-  const {networkBindings: exports} = await import("./utils/network-bindings.js");
+  const {commandCompleted, networkBindings: exports} = await import("./utils/network-bindings.js");
   const {NativeNetworkRuntime} = exports as unknown as {NativeNetworkRuntime: new () => DirectIncomingBridge};
   const config = applicationConfig();
   config.resources.bridgeBudgetBytes = 512 * 1024 * 1024;
@@ -72,10 +72,9 @@ test("incoming tokens reject malformed handles and stale slot generations", asyn
     const promises = native.initialize(config, () => undefined);
     closed = promises.closed;
     const [, identity] = await Promise.all([client.identity, promises.identity]);
-    await Promise.all([
-      client.applyIntent(localIntent(clientConfig), clientConfig.initialSlot),
-      native.applyIntent(localIntent(config), config.initialSlot),
-    ]);
+    const intent = native.applyIntent(localIntent(config), config.initialSlot);
+    await client.applyIntent(localIntent(clientConfig), clientConfig.initialSlot);
+    await commandCompleted(native, intent, settleOnly);
     await client.connect(identity.peerId, [identity.localEndpoint], 5000n);
     let previous: IncomingHandle | undefined;
     for (let i = 0; i < 2; i++) {

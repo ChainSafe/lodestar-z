@@ -14,6 +14,7 @@ const incoming = @import("network_incoming.zig");
 const projection = @import("network_peer_projection.zig");
 const readiness = @import("network_readiness.zig");
 const publications = @import("network_publications.zig");
+const commands = @import("network_commands.zig");
 const fatal = @import("network_fatal.zig");
 const Runtime = r.Runtime;
 const Row = readiness.Row;
@@ -144,15 +145,18 @@ pub const Selection = struct {
     /// the commit frees them.
     acknowledged: [acknowledged_max]g.Token = undefined,
     acknowledged_count: usize = 0,
-    /// Completed publications, taken whatever the demand up to its settle quota. Their cells stay copying until the
-    /// commit retires them.
+    /// Completed publications, taken whatever the demand up to its settle quota per family. Their cells stay copying
+    /// until the commit retires them.
     publications: [publications.capacity_max]publications.Token = undefined,
     publication_count: usize = 0,
+    /// Completed commands, taken likewise.
+    commands: [commands.capacity]commands.Token = undefined,
+    command_count: usize = 0,
     /// The owner has work from this exchange.
     wake: bool = false,
 
     pub fn delivers(self: *const Selection) bool {
-        return self.peer_count > 0 or self.serving_count > 0 or self.checks.len > 0 or self.gossip != null or self.acknowledged_count > 0 or self.publication_count > 0;
+        return self.peer_count > 0 or self.serving_count > 0 or self.checks.len > 0 or self.gossip != null or self.acknowledged_count > 0 or self.publication_count > 0 or self.command_count > 0;
     }
 };
 
@@ -199,6 +203,7 @@ fn applyLocked(runtime: *Runtime, actions: []const Action, now: u64) void {
 fn selectLocked(runtime: *Runtime, demand: *const Demand, now: u64, selection: *Selection) void {
     if (runtime.gossip) |*table| selection.acknowledged_count = table.acknowledgements(&selection.acknowledged);
     selectPublications(runtime, demand.settle, selection);
+    selectCommands(runtime, demand.settle, selection);
     const ready = &runtime.readiness;
     var next = ready.payload.head;
     for (0..readiness.row_count) |_| {
@@ -240,6 +245,18 @@ fn selectPublications(runtime: *Runtime, limit: usize, selection: *Selection) vo
         table.transition(cell, .copying);
         selection.publications[selection.publication_count] = .{ .index = @intCast(i), .generation = cell.generation };
         selection.publication_count += 1;
+    }
+}
+
+/// Pins up to `limit` completed commands, resuming past the last one delivered.
+fn selectCommands(runtime: *Runtime, limit: usize, selection: *Selection) void {
+    const table = &runtime.table;
+    for (0..@min(limit, commands.capacity)) |_| {
+        const i = table.nextTerminal(table.settle_cursor) orelse table.nextTerminal(0) orelse break;
+        table.settle_cursor = i + 1;
+        table.transition(&table.cells[i], .copying);
+        selection.commands[selection.command_count] = .{ .index = @intCast(i), .generation = table.cells[i].generation };
+        selection.command_count += 1;
     }
 }
 
@@ -289,6 +306,11 @@ fn commitLocked(runtime: *Runtime, selection: *Selection) bool {
         runtime.bridge.deliver(.completion, selection.publication_count);
         runtime.retireRequestStorageLocked();
     }
+    if (selection.command_count > 0) {
+        for (selection.commands[0..selection.command_count]) |token| runtime.table.retire(token);
+        runtime.bridge.deliver(.completion, selection.command_count);
+        runtime.retireStoresLocked();
+    }
     runtime.bridge.deliver(.dependency_check, selection.checks.len);
     // Close may have freed these cells meanwhile; a freed token is ignored. Not counted as delivered items.
     if (runtime.gossip) |*table| for (selection.acknowledged[0..selection.acknowledged_count]) |token| table.acknowledge(token);
@@ -306,6 +328,7 @@ fn restoreLocked(runtime: *Runtime, selection: *const Selection) void {
         const table = &runtime.publications.?;
         for (selection.publications[0..selection.publication_count]) |token| table.transition(table.get(token).?, .terminal);
     }
+    for (selection.commands[0..selection.command_count]) |token| runtime.table.transition(runtime.table.get(token), .terminal);
     if (selection.serving_count > 0) {
         const table = &runtime.incoming.?;
         for (selection.serving[0..selection.serving_count]) |token| {
@@ -380,12 +403,12 @@ pub fn run(runtime: *Runtime, actions: []const Action, demand: *const Demand, no
     };
     runtime.lock();
     const keep_alive = commitLocked(runtime, &selection);
-    // Settlement found the runtime busy while these publications were still admitted.
-    const idle = selection.publication_count > 0 and runtime.idleLocked();
+    // Settlement found the runtime busy while these operations were still admitted.
+    const idle = selection.publication_count + selection.command_count > 0 and runtime.idleLocked();
     const outcome = endLocked(runtime, demand, &selection);
     runtime.unlock();
-    // Each admitted publication held the runtime until its completion was delivered.
-    for (0..selection.publication_count) |_| runtime.release();
+    // Each admitted operation held the runtime until its completion was delivered.
+    for (0..selection.publication_count + selection.command_count) |_| runtime.release();
     if (keep_alive) host.keepAlive();
     if (idle) host.idle();
     return host.finish(output, outcome) catch |err| return fail(host, host.classify(err), .exchange_finish, err);
@@ -475,9 +498,12 @@ pub fn build(env: napi.Env, runtime: *Runtime, selection: *Selection, closed: ?V
         try acknowledged.setElement(@intCast(i), reference);
     }
     try result.setNamedProperty("acknowledged", acknowledged);
-    const completions = try env.createArrayWithLength(selection.publication_count);
+    const completions = try env.createArrayWithLength(@intCast(selection.publication_count + selection.command_count));
     for (selection.publications[0..selection.publication_count], 0..) |token, i| {
         try completions.setElement(@intCast(i), try @import("network_publication_js.zig").completion(env, token, runtime.publications.?.get(token).?));
+    }
+    for (selection.commands[0..selection.command_count], selection.publication_count..) |token, i| {
+        try completions.setElement(@intCast(i), try @import("network_command_js.zig").completion(env, runtime, token));
     }
     try result.setNamedProperty("completions", completions);
     try result.setNamedProperty("failure", try env.getNull());

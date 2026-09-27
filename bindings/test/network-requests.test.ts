@@ -1,5 +1,12 @@
 import {expect, test} from "vitest";
-import {applicationConfig, localIntent, peerIdFromHex, requestForks, startRuntime} from "./utils/network.js";
+import {
+  applicationConfig,
+  localIntent,
+  peerIdFromHex,
+  requestForks,
+  settleOnly,
+  startRuntime,
+} from "./utils/network.js";
 import {startPeer} from "./utils/network-peer.js";
 
 test("application request rejects control protocols at the exported boundary", async () => {
@@ -443,13 +450,13 @@ test.skipIf(!HOST || !HOODI)(
 );
 
 test("native bridge validates full handles and stale retirement", async () => {
-  const {networkBindings: bindings} = await import("./utils/network-bindings.js");
+  const {commandCompleted, networkBindings: bindings} = await import("./utils/network-bindings.js");
   const config = applicationConfig();
   const native = new bindings.NativeNetworkRuntime();
   const lifecycle = native.initialize(config, () => undefined);
   try {
     const identity = await lifecycle.identity;
-    await native.applyIntent(localIntent(config), config.initialSlot);
+    await commandCompleted(native, native.applyIntent(localIntent(config), config.initialSlot), settleOnly);
     const handle = native.requestStart(identity.peerId, BLOCKS, new Uint8Array(32), undefined);
     expect(() => native.requestPull({...handle, generation: 0n})).toThrow("InvalidRequestHandle");
     expect(() => native.requestPull({...handle, generation: handle.generation + 1n})).toThrow("InvalidRequestHandle");
@@ -550,7 +557,7 @@ stockTest(
 async function connectedNative() {
   if (!HOST) throw Error("LODESTAR_Z_NETWORK_STOCK_HOST is required");
   const {Child} = await import("../../test/interop/child.mjs");
-  const {networkBindings: bindings} = await import("./utils/network-bindings.js");
+  const {commandCompleted, networkBindings: bindings} = await import("./utils/network-bindings.js");
   const peer = new Child("request-phase-stock", process.execPath, [
     "--import",
     "tsx",
@@ -574,12 +581,16 @@ async function connectedNative() {
     const prepared = native.initialize(config, () => undefined);
     closed = prepared.closed;
     await prepared.identity;
-    await native.applyIntent(localIntent(config), config.initialSlot);
+    await commandCompleted(native, native.applyIntent(localIntent(config), config.initialSlot), settleOnly);
     const id = peerIdFromHex(remote.peer);
-    await native.connect(
-      id,
-      [{address: Uint8Array.of(127, 0, 0, 1), family: 4, port: Number(remote.address.split("/")[4])}],
-      5000n
+    await commandCompleted(
+      native,
+      native.connect(
+        id,
+        [{address: Uint8Array.of(127, 0, 0, 1), family: 4, port: Number(remote.address.split("/")[4])}],
+        5000n
+      ),
+      settleOnly
     );
     return {bindings, closed, id, native, peer, stop};
   } catch (error) {

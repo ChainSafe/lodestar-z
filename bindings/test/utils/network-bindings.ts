@@ -1,13 +1,22 @@
 import bindings from "../../src/bindings.js";
 import type {NativeIdentity, NativeProtocolId, NativeRequestOptions, NativeResponseChunk} from "../../src/network.js";
-import type {NativeNetworkApplicationRuntime, NativeRuntimeCloseResult} from "../../src/network-runtime.js";
+import type {
+  NativeExchange,
+  NativeExchangeDemand,
+  NativeNetworkApplicationRuntime,
+  NativeRuntimeCloseResult,
+} from "../../src/network-runtime.js";
 
 interface RequestHandle {
   generation: bigint;
   index: number;
 }
 
-interface NativeBridge extends Pick<NativeNetworkApplicationRuntime, "applyIntent" | "connect" | "diagnostics"> {
+interface NativeBridge extends Pick<NativeNetworkApplicationRuntime, "diagnostics"> {
+  /** Each command returns its cell handle; its completion arrives in an exchange. */
+  applyIntent(...args: Parameters<NativeNetworkApplicationRuntime["applyIntent"]>): RequestHandle;
+  connect(...args: Parameters<NativeNetworkApplicationRuntime["connect"]>): RequestHandle;
+  exchange(actions: readonly never[], demand: NativeExchangeDemand): NativeExchange;
   close(): void;
   initialize(
     config: unknown,
@@ -28,3 +37,24 @@ interface NetworkTestBindings {
 }
 
 export const networkBindings = bindings as NetworkTestBindings;
+
+/** Exchanges until a raw runtime delivers the completion of the command `handle` names; throws its error. */
+export async function commandCompleted(
+  native: Pick<NativeBridge, "exchange">,
+  handle: RequestHandle,
+  demand: NativeExchangeDemand,
+  timeoutMs = 10000
+): Promise<unknown> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const completion = native
+      .exchange([], demand)
+      .completions.find(({handle: done}) => done.index === handle.index && done.generation === handle.generation);
+    if (completion) {
+      if ("error" in completion) throw completion.error;
+      return completion.value;
+    }
+    if (Date.now() > deadline) throw Error("Command completion did not arrive");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}

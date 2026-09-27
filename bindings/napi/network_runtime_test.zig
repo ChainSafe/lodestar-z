@@ -261,9 +261,6 @@ const PeerHost = struct {
     pub fn classify(_: *PeerHost, _: anyerror) exchange.Failure {
         unreachable;
     }
-    pub fn fatal(_: *PeerHost, err: anyerror) anyerror {
-        return err;
-    }
 };
 
 test "owner work that races an exchange's check and arm always reaches a later exchange" {

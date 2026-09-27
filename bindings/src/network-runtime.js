@@ -73,40 +73,44 @@ export class NativeRuntime {
     this.#native.setLogLevel(level);
   }
   async applyIntent(intent, slot) {
-    return this.#native.applyIntent(intent, slot);
+    return this.#command("applyIntent", () => this.#native.applyIntent(intent, slot));
   }
   updateStatus(status) {
-    return this.#native.updateStatus(status);
+    return this.#command("updateStatus", () => this.#native.updateStatus(status));
   }
   getIdentity() {
-    return this.#native.getIdentity();
+    return this.#command("getIdentity", () => this.#native.getIdentity());
   }
   getPeers() {
-    return this.#native.getPeers();
+    return this.#command("getPeers", () => this.#native.getPeers());
   }
   getGossipDiagnostics(cursor = 0) {
-    return this.#native.getGossipDiagnostics(cursor);
+    return this.#command("getGossipDiagnostics", () => this.#native.getGossipDiagnostics(cursor));
   }
   connect(peerId, addresses, timeoutMs) {
-    return this.#native.connect(peerId, addresses, timeoutMs);
+    return this.#command("connect", () => this.#native.connect(peerId, addresses, timeoutMs));
   }
   disconnect(peerId) {
-    return this.#native.disconnect(peerId);
+    return this.#command("disconnect", () => this.#native.disconnect(peerId));
   }
   reStatusPeers(peerIds) {
-    return this.#native.reStatusPeers(peerIds);
+    return this.#command("reStatusPeers", () => this.#native.reStatusPeers(peerIds));
   }
   addDirectPeer(peerId, addresses) {
-    return this.#native.addDirectPeer(peerId, addresses);
+    return this.#command("addDirectPeer", () => this.#native.addDirectPeer(peerId, addresses));
   }
   removeDirectPeer(peerId) {
-    return this.#native.removeDirectPeer(peerId);
+    return this.#command("removeDirectPeer", () => this.#native.removeDirectPeer(peerId));
   }
   getDirectPeers() {
-    return this.#native.getDirectPeers();
+    return this.#command("getDirectPeers", () => this.#native.getDirectPeers());
   }
   getRememberedPeers() {
-    return this.#native.getRememberedPeers();
+    return this.#command("getRememberedPeers", () => this.#native.getRememberedPeers());
+  }
+  /** Admits one command of `kind`, whose completion must name that kind. Refusal throws, as the native call does. */
+  #command(kind, submit) {
+    return this.#owner.admit("command", kind, submit);
   }
   exchange(actions, demand) {
     const result = this.#owner.exchange(actions, demand);
