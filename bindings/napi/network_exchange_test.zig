@@ -8,6 +8,7 @@ const projection = @import("network_peer_projection.zig");
 const readiness = @import("network_readiness.zig");
 const commands = @import("network_commands.zig");
 const publications = @import("network_publications.zig");
+const outgoing = @import("network_requests.zig");
 const tsfn = @import("network_runtime_test.zig");
 const fatal = @import("network_fatal.zig");
 const Runtime = r.Runtime;
@@ -46,6 +47,8 @@ const Host = struct {
         publication_count: usize = 0,
         commands: [commands.capacity]commands.Token = undefined,
         command_count: usize = 0,
+        requests: [outgoing.capacity_max]outgoing.Completion = undefined,
+        request_count: usize = 0,
         outcome: exchange.Outcome = .{},
     };
 
@@ -67,8 +70,8 @@ const Host = struct {
         if (self.failing(.checks) and selection.checks.len > 0) return self.failure_error();
         if (self.failing(.gossip) and selection.gossip != null) return self.failure_error();
         if (self.failing(.acknowledged) and selection.acknowledged_count > 0) return self.failure_error();
-        if (self.failing(.completions) and selection.publication_count + selection.command_count > 0) return self.failure_error();
-        return .{ .peers = selection.peer_count, .serving = selection.serving, .serving_count = selection.serving_count, .checks = selection.checks, .gossip = selection.gossip, .acknowledged = selection.acknowledged, .acknowledged_count = selection.acknowledged_count, .publications = selection.publications, .publication_count = selection.publication_count, .commands = selection.commands, .command_count = selection.command_count };
+        if (self.failing(.completions) and selection.publication_count + selection.command_count + selection.request_count > 0) return self.failure_error();
+        return .{ .peers = selection.peer_count, .serving = selection.serving, .serving_count = selection.serving_count, .checks = selection.checks, .gossip = selection.gossip, .acknowledged = selection.acknowledged, .acknowledged_count = selection.acknowledged_count, .publications = selection.publications, .publication_count = selection.publication_count, .commands = selection.commands, .command_count = selection.command_count, .requests = selection.requests, .request_count = selection.request_count };
     }
     pub fn finish(self: *Host, output: Result, outcome: exchange.Outcome) !Result {
         if (self.fail_finish) return self.failure_error();
@@ -622,4 +625,170 @@ test "command completions arrive at most `settle` per exchange, fairly under ref
     try std.testing.expect(!runtime.table.stores[1][0] and !runtime.table.stores[1][1]);
     try std.testing.expectEqual(@as(usize, 0), host.idled);
     for (unfinished) |token| runtime.abortCommand(token);
+}
+
+/// A request admitted at the lowest free cell, holding the runtime as `requestStart` does.
+fn admitRequest(runtime: *Runtime) !outgoing.Token {
+    const table = &runtime.requests.?;
+    const token = try table.reserve(.blocks_by_root_v2, 0);
+    runtime.retain();
+    try table.allocate(token, 0);
+    table.get(token).?.state = .queued;
+    return token;
+}
+
+/// Moves an admitted request to where the owner leaves it, and readiness with it.
+fn ownerMoves(runtime: *Runtime, token: outgoing.Token, comptime move: fn (*outgoing.Cell) void) void {
+    runtime.lock();
+    defer runtime.unlock();
+    const cell = runtime.requests.?.get(token).?;
+    move(cell);
+    runtime.requests.?.releasePayload(cell);
+    runtime.requests.?.refresh(cell);
+    runtime.recomputeLocked(.legacy);
+}
+
+fn pulledDone(cell: *outgoing.Cell) void {
+    cell.state = .terminal;
+    cell.terminal = .done;
+    cell.pulling = true;
+}
+
+fn pulledChunk(cell: *outgoing.Cell) void {
+    cell.state = .native;
+    cell.native = .{ .index = 0, .generation = 1, .direction = .outbound };
+    cell.chunk = .{ .len = 4, .fork = null };
+    cell.pulling = true;
+}
+
+/// Ends a request the owner still streams, and retires it.
+fn retireStreaming(runtime: *Runtime, token: outgoing.Token) void {
+    const cell = runtime.requests.?.get(token).?;
+    cell.native = null;
+    cell.chunk = null;
+    cell.delivered = false;
+    runtime.requests.?.retire(token);
+    runtime.release();
+}
+
+/// A request whose terminal outcome awaits its pending pull, at the lowest free cell.
+fn completeRequest(runtime: *Runtime) !outgoing.Token {
+    const token = try admitRequest(runtime);
+    ownerMoves(runtime, token, pulledDone);
+    return token;
+}
+
+test "request completions arrive at most `settle` per exchange, fairly under refill" {
+    var fixture: Fixture = undefined;
+    try fixture.init(false, 2);
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    runtime.payload_budget.limit = 1 << 30;
+    runtime.requests = try outgoing.Table.init(std.testing.allocator, 4, &runtime.payload_budget);
+    defer runtime.requests.?.deinit();
+    const table = &runtime.requests.?;
+    const low = try completeRequest(runtime);
+    // Two requests stay admitted with no pull, so only the lowest and the highest complete.
+    const unpulled = [_]outgoing.Token{ try admitRequest(runtime), try admitRequest(runtime) };
+    const high = try completeRequest(runtime);
+    try std.testing.expectEqual(@as(u8, 3), high.index);
+    var host: Host = .{ .runtime = runtime };
+    var demand = control;
+    demand.settle = 1;
+    const delivered_before = runtime.bridge.delivered;
+    var delivered: [4]outgoing.Token = undefined;
+    for (&delivered, 0..) |*token, pass| {
+        // The lowest cell completes again whenever it was delivered, with the next generation.
+        if (pass > 0 and table.cells[0].state == .free) _ = try completeRequest(runtime);
+        const result = try host.turn(&.{}, demand);
+        try std.testing.expectEqual(@as(usize, 1), result.request_count);
+        try std.testing.expectEqual(outgoing.Terminal.done, result.requests[0].value.terminal);
+        token.* = result.requests[0].token;
+        try std.testing.expect(table.get(token.*) == null);
+    }
+    // The highest cell comes second although the lowest refilled, and the reused cell carries a fresh generation.
+    try std.testing.expectEqualSlices(outgoing.Token, &.{ low, high, .{ .index = 0, .generation = 2 }, .{ .index = 0, .generation = 3 } }, &delivered);
+    const completion = @intFromEnum(r.bridge.Delivery.completion);
+    try std.testing.expectEqual(delivered_before[completion] + 4, runtime.bridge.delivered[completion]);
+    // Once no pull awaits a completion, unpulled requests let the event loop go: after the third and the fourth.
+    try std.testing.expectEqual(@as(usize, 2), host.idled);
+    for (unpulled) |token| {
+        table.retire(token);
+        runtime.release();
+    }
+}
+
+test "a stopped environment returns pinned request chunks and outcomes, which the next exchange delivers" {
+    var fixture: Fixture = undefined;
+    try fixture.init(false, 2);
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    runtime.payload_budget.limit = 1 << 30;
+    runtime.requests = try outgoing.Table.init(std.testing.allocator, 2, &runtime.payload_budget);
+    defer runtime.requests.?.deinit();
+    const table = &runtime.requests.?;
+    const streaming = try admitRequest(runtime);
+    ownerMoves(runtime, streaming, pulledChunk);
+    const ended = try completeRequest(runtime);
+    var host: Host = .{ .runtime = runtime, .fail = .completions };
+    try std.testing.expectError(error.PendingException, host.turn(&.{}, control));
+    for ([_]outgoing.Token{ streaming, ended }) |token| {
+        const cell = table.get(token).?;
+        try std.testing.expect(!cell.copying and cell.pulling);
+    }
+    try std.testing.expectEqual(@as(u64, 0), table.diag.chunksCopied);
+    host.fail = null;
+    const result = try host.turn(&.{}, control);
+    try std.testing.expectEqual(@as(usize, 2), result.request_count);
+    try std.testing.expectEqual(streaming, result.requests[0].token);
+    try std.testing.expectEqual(@as(usize, 4), result.requests[0].value.chunk.len);
+    try std.testing.expectEqual(outgoing.Terminal.done, result.requests[1].value.terminal);
+    // The delivered chunk waits for the next pull to consume it; the outcome retired its cell.
+    const cell = table.get(streaming).?;
+    try std.testing.expect(!cell.pulling and cell.delivered and cell.chunk != null);
+    try std.testing.expect(table.get(ended) == null);
+    try std.testing.expectEqual(@as(u64, 1), table.diag.chunksCopied);
+    try std.testing.expect(!result.outcome.more);
+    retireStreaming(runtime, streaming);
+}
+
+test "an outcome the owner records while its chunk is copied survives the commit and waits for the next pull" {
+    var fixture: Fixture = undefined;
+    try fixture.init(false, 2);
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    runtime.payload_budget.limit = 1 << 30;
+    runtime.requests = try outgoing.Table.init(std.testing.allocator, 1, &runtime.payload_budget);
+    defer runtime.requests.?.deinit();
+    const table = &runtime.requests.?;
+    const token = try admitRequest(runtime);
+    ownerMoves(runtime, token, pulledChunk);
+    const Owner = struct {
+        /// The stream's end, captured as the owner does while the chunk is pinned.
+        fn ends(target: *Runtime) void {
+            target.lock();
+            defer target.unlock();
+            const cell = &target.requests.?.cells[0];
+            cell.native = null;
+            cell.terminal = .done;
+            cell.state = .terminal;
+            target.requests.?.releasePayload(cell);
+            target.requests.?.refresh(cell);
+        }
+    };
+    var host: Host = .{ .runtime = runtime, .during = Owner.ends };
+    const chunk = try host.turn(&.{}, control);
+    try std.testing.expectEqual(@as(usize, 4), chunk.requests[0].value.chunk.len);
+    const cell = table.get(token).?;
+    try std.testing.expect(cell.terminal.? == .done and cell.chunk == null and !cell.delivered and !cell.pulling);
+    // No pull awaits the outcome, so it stays with the cell.
+    host.during = null;
+    try std.testing.expectEqual(@as(usize, 0), (try host.turn(&.{}, control)).request_count);
+    runtime.lock();
+    outgoing.armPull(runtime, cell);
+    runtime.unlock();
+    const ended = try host.turn(&.{}, control);
+    try std.testing.expectEqual(@as(usize, 1), ended.request_count);
+    try std.testing.expectEqual(outgoing.Terminal.done, ended.requests[0].value.terminal);
+    try std.testing.expect(table.get(token) == null);
 }

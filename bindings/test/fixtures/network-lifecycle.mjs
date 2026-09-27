@@ -202,8 +202,9 @@ if (mode === "exit") {
   assert.equal(connect, "NetworkClosed");
   assert((await published).every((result) => result === "resolved" || result === "NetworkClosed"));
   console.log("orphan-drained");
-} else if (mode === "publication-exit" || mode === "command-exit") {
-  // A completed publication or command leaves a running, idle network, which the process exits under without a close.
+} else if (mode === "publication-exit" || mode === "command-exit" || mode === "request-exit") {
+  // A completed publication, command or request pull leaves a running, idle network, which the process exits under
+  // without a close. So does a request whose outcome no pull took.
   const network = createNativeNetwork(applicationConfig(), {
     capacity: () => ({ordinary: true, serving: 32}),
     validate: (job) => Promise.resolve(job.messages.map(() => "ignore")),
@@ -217,6 +218,12 @@ if (mode === "exit") {
   if (mode === "command-exit") {
     assert.equal(typeof (await network.getIdentity()).peerId, "string");
     console.log("commanded-exit");
+  } else if (mode === "request-exit") {
+    const {peerId} = await network.getIdentity();
+    const blocks = "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy";
+    await assert.rejects(network.request(peerId, blocks, new Uint8Array(32)).next(), {reason: "disconnected"});
+    globalThis.unpulled = network.request(peerId, blocks, new Uint8Array(32));
+    console.log("requested-exit");
   } else {
     const published = await network.publish(topicName(), new Uint8Array(4000), {allowZeroPeers: true});
     assert.equal(published.duplicate, false);

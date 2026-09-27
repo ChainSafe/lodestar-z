@@ -1,4 +1,5 @@
 import {describe, expect, it, vi} from "vitest";
+import {RequestRecord} from "../src/network-request.js";
 import {CompletionOwner} from "../src/network-tickets.js";
 
 class Breached extends Error {}
@@ -10,6 +11,7 @@ type NativeCompletion = {
   kind?: string;
   value?: unknown;
   error?: unknown;
+  done?: true;
 };
 
 /** An owner over a native stand-in whose next exchange delivers `completions` and `closed`. */
@@ -43,6 +45,17 @@ function owner() {
 }
 
 const handle = (index: number, generation: bigint) => ({generation, index});
+
+/** A promise with its resolvers, as a pending pull holds them. */
+function pending() {
+  let resolve: (value: unknown) => void = () => undefined;
+  let reject: (error: unknown) => void = () => undefined;
+  const promise = new Promise((resolved, rejected) => {
+    resolve = resolved;
+    reject = rejected;
+  });
+  return {promise, reject, resolve};
+}
 
 describe("completion owner", () => {
   it("installs a record before admission returns, and clears it as its completion settles it", async () => {
@@ -137,5 +150,44 @@ describe("completion owner", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("keeps a request record through its chunks and clears it with the terminal outcome, pull first", async () => {
+    const node = owner();
+    const record = new RequestRecord();
+    expect(node.completions.request(record, () => handle(1, 1n))).toEqual(handle(1, 1n));
+    const pulls = [pending(), pending()];
+    record.pull = {iterator: null, ...pulls[0]};
+    node.deliver([{family: "request", handle: handle(1, 1n), value: "chunk"}]);
+    expect(record.pull).toBeNull();
+    record.pull = {iterator: null, ...pulls[1]};
+    const retired = pending();
+    record.retirement = () => retired.resolve(undefined);
+    const order: string[] = [];
+    void retired.promise.then(() => order.push("retired"));
+    void pulls[1].promise.then(() => order.push("pulled"));
+    node.deliver([{done: true, family: "request", handle: handle(1, 1n)}]);
+    expect([record.pull, record.retirement, record.done]).toEqual([null, null, true]);
+    expect(await pulls[0].promise).toEqual({done: false, value: "chunk"});
+    expect(await pulls[1].promise).toEqual({done: true, value: undefined});
+    await retired.promise;
+    // The terminal outcome settled the pull before the retirement.
+    expect(order).toEqual(["pulled", "retired"]);
+    // The terminal outcome cleared the record.
+    expect(() => node.deliver([{done: true, family: "request", handle: handle(1, 1n)}])).toThrow(Breached);
+  });
+
+  it("keeps a terminal outcome no pull awaits for the iterator, and breaches for a chunk no pull awaits", () => {
+    const node = owner();
+    const ended = new RequestRecord();
+    node.completions.request(ended, () => handle(0, 1n));
+    const closed = {error: "NetworkClosed", family: "request", handle: handle(0, 1n)};
+    node.deliver([closed]);
+    expect([ended.outcome, ended.done]).toEqual([closed, false]);
+    expect(node.deliver([], {reason: "requested"}).closed).toEqual({reason: "requested"});
+    const unpulled = owner();
+    unpulled.completions.request(new RequestRecord(), () => handle(0, 1n));
+    expect(() => unpulled.deliver([{family: "request", handle: handle(0, 1n), value: "chunk"}])).toThrow(Breached);
+    expect(unpulled.native.fail).toHaveBeenCalledExactlyOnceWith("completion_contract", "completed request 0:1");
   });
 });

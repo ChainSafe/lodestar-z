@@ -358,6 +358,7 @@ it.each([
   ["orphan", "orphan-drained"],
   ["publication-exit", "published-exit"],
   ["command-exit", "commanded-exit"],
+  ["request-exit", "requested-exit"],
 ])(
   "finishes bounded %s subprocess lifecycle",
   (mode, expected) => {
