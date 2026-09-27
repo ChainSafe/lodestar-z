@@ -425,14 +425,20 @@ pub const Runtime = struct {
         self.hook_live = false;
         self.release();
     }
-    pub fn forceStop(self: *Runtime, env_dying: bool) void {
+    /// Stops the owner at once and joins it, without disposing of what JavaScript can still settle.
+    pub fn abandon(self: *Runtime) void {
         self.lock();
-        self.disposed = true;
         self.graceful = false;
-        if (env_dying) self.env_alive = false;
         self.unlock();
         self.requestStop();
         self.join();
+    }
+    pub fn forceStop(self: *Runtime, env_dying: bool) void {
+        self.lock();
+        self.disposed = true;
+        if (env_dying) self.env_alive = false;
+        self.unlock();
+        self.abandon();
     }
     pub fn retireClosedRequests(self: *Runtime) void {
         std.debug.assert(self.quiescent and self.notify_finalized and self.disposed);

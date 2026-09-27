@@ -13,10 +13,14 @@
 //!   through the runtime's `fail`, when an exchange refuses them with a coded error. Kept.
 //! - `failed_turns`: the only completion path does not stay unusable. The pump, through the runtime's `fail`, on its
 //!   third consecutive failed turn, during shutdown too. Kept.
+//! - `completion_contract`: every completion names the current generation of a record the completion owner installed,
+//!   of the kind it expects, and the close result leaves no promised completion missing. The completion owner
+//!   (network-tickets.js), through the runtime's `fail`; a completion for an older generation is obsolete and ignored.
+//!   Kept.
 const std = @import("std");
 const napi = @import("zapi:zapi").napi;
 
-pub const Site = enum { settlement, exchange_build, exchange_finish, generated_batch, failed_turns };
+pub const Site = enum { settlement, exchange_build, exchange_finish, generated_batch, failed_turns, completion_contract };
 
 /// A longer detail is cut to this many bytes.
 pub const detail_max = 64;

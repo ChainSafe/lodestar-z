@@ -1,9 +1,14 @@
 import bindings from "./bindings.js";
 import {NativeIncoming} from "./network-incoming.js";
 import {NativeRequest} from "./network-request.js";
+import {CompletionOwner} from "./network-tickets.js";
+
+/** Stops the native runtime of a wrapper collected without close; its completion owner drains the rest. */
+const abandonment = new FinalizationRegistry((owner) => owner.deref()?.abandon());
 
 export class NativeRuntime {
   #native;
+  #owner;
   #closed;
   #onWorkAvailable;
   #wake;
@@ -13,14 +18,18 @@ export class NativeRuntime {
     this.#onWorkAvailable = onWorkAvailable;
     const weak = new WeakRef(this);
     this.#wake = NativeRuntime.#waker(weak);
-    const callback = typeof onWorkAvailable === "function" ? NativeRuntime.#notifier(weak) : onWorkAvailable;
+    const owner = new CompletionOwner(this.#native, NativeRuntime.#notifier(weak));
+    const callback = typeof onWorkAvailable === "function" ? owner.notifier : onWorkAvailable;
     const initialized = this.#native.initialize(config, callback);
+    owner.size(initialized.capacities);
+    this.#owner = owner;
+    abandonment.register(this, new WeakRef(owner));
     this.identity = initialized.identity;
     this.limits = initialized.limits;
     this.#closed = initialized.closed;
   }
 
-  /** Reports whether a host took the notification; a collected wrapper leaves settlement to native. */
+  /** Reports whether a live wrapper's host took the notification. */
   static #notifier(weak) {
     return () => {
       const runtime = weak.deref();
@@ -43,6 +52,10 @@ export class NativeRuntime {
 
   get closed() {
     return this.#closed;
+  }
+  /** The turns a pump drives this runtime on. */
+  get turns() {
+    return this.#owner.turns;
   }
   get state() {
     return this.#native.getState();
@@ -96,7 +109,7 @@ export class NativeRuntime {
     return this.#native.getRememberedPeers();
   }
   exchange(actions, demand) {
-    const result = this.#native.exchange(actions, demand);
+    const result = this.#owner.exchange(actions, demand);
     // An exchange that delivered nothing is frozen with no serving starts.
     const serving = result.serving;
     if (serving.length === 0) return result;

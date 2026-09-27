@@ -18,6 +18,7 @@ import {
   LOG_MS,
   LOG_RECORDS,
   NativePump,
+  Turns,
   closeResult,
 } from "../src/network-pump.js";
 import type {
@@ -56,6 +57,8 @@ const control: NativeExchangeDemand = {
 const idle: NativeExchange = {
   acknowledged: [],
   checks: [],
+  closed: null,
+  completions: [],
   disabledWaiting: false,
   failure: null,
   gossip: null,
@@ -193,7 +196,10 @@ function fixture() {
       throw new Escalated(site);
     }),
     state: "running",
+    turns: null as unknown,
   };
+  // The pump outlives every test, so its turns never drain without it.
+  runtime.turns = new Turns(runtime);
   const host = {
     capacity: vi.fn((): {ordinary: boolean; serving: number} | null => ({ordinary: true, serving: 32})),
     checkDependencies: vi.fn((checks: readonly DependencyCheck[]): readonly boolean[] => checks.map(() => true)),
@@ -583,6 +589,7 @@ describe("binding pump scheduling", () => {
   it.each([
     ["generated_batch", "InvalidNetworkInteger"],
     ["failed_turns", "capacity failed"],
+    ["completion_contract", "completed publication 0:1"],
   ])(
     "raising %s over a real native runtime terminates the process through native fail, in a child process",
     (site, reason) => {
@@ -597,6 +604,36 @@ describe("binding pump scheduling", () => {
     },
     40_000
   );
+
+  it("without a live pump, turns drain control while native reports more, and escalate a third failed drain", () => {
+    vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
+    const queued = immediates();
+    const failure = new Error("exchange failed");
+    const results: (NativeExchange | Error)[] = [{...idle, more: true}, idle, failure, failure, failure];
+    const route = {
+      exchange: vi.fn((_actions: readonly NativeAction[], _demand: NativeExchangeDemand): NativeExchange => {
+        const result = results.shift() ?? idle;
+        if (result instanceof Error) throw result;
+        return result;
+      }),
+      fail: vi.fn((site: string, _reason: string): never => {
+        throw new Escalated(site);
+      }),
+    };
+    const turns = new Turns(route);
+    turns.schedule();
+    turns.schedule();
+    expect(runUntilEscalated(queued, 5)).toBe(false);
+    expect(route.exchange.mock.calls).toEqual([
+      [[], control],
+      [[], control],
+    ]);
+    // Only a notification brings the next drain, and failed ones retry on the timer.
+    turns.schedule();
+    expect(runUntilEscalated(queued, 20)).toBe(true);
+    expect(route.exchange).toHaveBeenCalledTimes(5);
+    expect(route.fail).toHaveBeenCalledExactlyOnceWith("failed_turns", "exchange failed");
+  });
 
   it("never escalates turns without deliveries: external capacity polling and held jobs", async () => {
     vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});

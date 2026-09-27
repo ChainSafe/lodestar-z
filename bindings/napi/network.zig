@@ -62,6 +62,7 @@ pub fn initialize(self: *@This(), config: js.Value, callback: js.Value) !js.Valu
     const holder = try env.createObject();
     try holder.setNamedProperty("identity", try identity(env, &runtime.identity));
     try holder.setNamedProperty("limits", try resolvedLimits(env, runtime));
+    try holder.setNamedProperty("capacities", try capacities(env, runtime));
     try holder.setNamedProperty("closed", runtime.close_deferred.?.getPromise());
     runtime.retain();
     errdefer runtime.release();
@@ -160,8 +161,8 @@ fn jsStopped(err: anyerror) bool {
 }
 
 /// The notification callback only schedules: a host that returns true runs an exchange, which arms again once
-/// nothing is queued. A callback that returns anything else, such as a wrapper already collected, leaves no host
-/// exchange, so legacy results settle here; payload waits for a host.
+/// nothing is queued. The completion owner always does, also for a collected wrapper. A callback that returns anything
+/// else leaves no host exchange, so legacy results settle here; payload waits for a host.
 fn notify(env: napi.Env, callback: Value, runtime: *Runtime) !void {
     runtime.lock();
     const alive = runtime.env_alive;
@@ -176,7 +177,7 @@ fn notify(env: napi.Env, callback: Value, runtime: *Runtime) !void {
         return;
     };
     if (try result.typeof() == .boolean and try result.getValueBool()) return;
-    for (0..2) |_| if (!try settleWithin(env, runtime, publications.capacity_max)) break;
+    for (0..2) |_| if (!try settleWithin(env, runtime, publications.capacity_max, null)) break;
     runtime.lock();
     defer runtime.unlock();
     runtime.refreshLocked();
@@ -187,8 +188,8 @@ fn makeError(env: napi.Env, err: anyerror) !Value {
 }
 
 /// Settles up to `limit` completions per table, then the close result once the owner has
-/// quiesced and nothing else awaits settlement. Returns whether more remain.
-fn settleWithin(env: napi.Env, runtime: *Runtime, limit: usize) !bool {
+/// quiesced and nothing else awaits settlement, which `closed` receives. Returns whether more remain.
+fn settleWithin(env: napi.Env, runtime: *Runtime, limit: usize, closed: ?*?Value) !bool {
     var more = try publication_js.settle(env, runtime, limit);
     more = try settleOperations(env, runtime, limit) or more;
     more = try request_js.settle(env, runtime, limit) or more;
@@ -208,6 +209,7 @@ fn settleWithin(env: napi.Env, runtime: *Runtime, limit: usize) !bool {
     // Every recorded failure names its error.
     if (reason == .failed) try value.setNamedProperty("error", @import("network_js.zig").settled(env, makeError(env, terminal.?)) catch try runtime.copy_error.?.getValue());
     try runtime.close_deferred.?.resolve(value);
+    if (closed) |result| result.* = value;
     runtime.close_settled = true;
     runtime.disposeCloseReferences();
     runtime.removeHook();
@@ -243,6 +245,11 @@ pub fn checkAction(_: *@This(), action: js.Value) !void {
     _ = try exchange_mod.parseAction(action.val);
 }
 
+/// Stops the owner at once for a wrapper collected without close. JavaScript still drains every result.
+pub fn abandon(self: *@This()) void {
+    if (self.runtime) |runtime| runtime.abandon();
+}
+
 /// A private control for binding ownership tests: while held, the owner leaves reported verdicts unapplied, so no
 /// acknowledgement follows them, though expiry still disposes of them; a release wakes the owner.
 pub fn holdVerdicts(self: *@This(), held: js.Value) !void {
@@ -254,12 +261,13 @@ pub fn holdVerdicts(self: *@This(), held: js.Value) !void {
     if (!value) runtime.signalLocked();
 }
 
-/// Terminates the process at a fatal site the pump raises (network_fatal.zig).
+/// Terminates the process at a fatal site JavaScript raises (network_fatal.zig). `reason` is at most 64 printable ASCII
+/// bytes.
 pub fn fail(_: *@This(), site_value: js.Value, reason_value: js.Value) !void {
     var name: [fatal.name_max]u8 = undefined;
     const site = std.meta.stringToEnum(fatal.Site, name[0..try application_cfg.text(site_value.val, &name)]) orelse return error.InvalidNetworkConfig;
     switch (site) {
-        .generated_batch, .failed_turns => {},
+        .generated_batch, .failed_turns, .completion_contract => {},
         .settlement, .exchange_build, .exchange_finish => return error.InvalidNetworkConfig,
     }
     var reason: [fatal.detail_max]u8 = undefined;
@@ -270,6 +278,8 @@ pub fn fail(_: *@This(), site_value: js.Value, reason_value: js.Value) !void {
 const Exchange = struct {
     env: napi.Env,
     runtime: *Runtime,
+    /// The close result this exchange's settlement settled, which its result carries.
+    closed: ?Value = null,
 
     pub const Result = Value;
 
@@ -280,15 +290,15 @@ const Exchange = struct {
         const due = runtime.settleableLocked() or (runtime.quiescent and !runtime.close_settled);
         runtime.unlock();
         if (!due) return;
-        _ = settleWithin(self.env, runtime, limit) catch |err| {
+        _ = settleWithin(self.env, runtime, limit, &self.closed) catch |err| {
             settlementFailed(self.env, runtime, err);
             return err;
         };
     }
-    /// A fresh result, or null when there is nothing to deliver and a prepared one serves.
+    /// A fresh result, or null when there is nothing to deliver or close and a prepared one serves.
     pub fn build(self: *Exchange, selection: *exchange_mod.Selection) !?Value {
-        if (!selection.delivers()) return null;
-        return try exchange_mod.build(self.env, self.runtime, selection);
+        if (!selection.delivers() and self.closed == null) return null;
+        return try exchange_mod.build(self.env, self.runtime, selection, self.closed);
     }
     pub fn finish(self: *Exchange, output: ?Value, outcome: exchange_mod.Outcome) !Value {
         return exchange_mod.finish(self.env, self.runtime, output, outcome);
@@ -349,6 +359,16 @@ fn resolvedLimits(env: napi.Env, runtime: *const Runtime) !Value {
     const object = try env.createObject();
     try object.setNamedProperty("peerCapacity", try env.createUint32(runtime.peer_capacity));
     try object.setNamedProperty("incomingCapacity", try env.createUint32(@intCast(runtime.incoming.?.diag.capacity)));
+    return object;
+}
+
+/// Each operation family's cells, which size the completion owner's records.
+fn capacities(env: napi.Env, runtime: *const Runtime) !Value {
+    const object = try env.createObject();
+    try object.setNamedProperty("publication", try env.createUint32(@intCast(runtime.publications.?.diag.capacity)));
+    try object.setNamedProperty("command", try env.createUint32(commands.capacity));
+    try object.setNamedProperty("request", try env.createUint32(@intCast(runtime.requests.?.diag.capacity)));
+    try object.setNamedProperty("incoming", try env.createUint32(@intCast(runtime.incoming.?.diag.capacity)));
     return object;
 }
 

@@ -16,6 +16,7 @@ import {
   discoveryConfig,
   exchange,
   gossipAll,
+  holdSettling,
   localIntent,
   requestForks,
   runtimeReleased,
@@ -323,7 +324,22 @@ it.each([
   expect(failure?.stderr).toContain(`native network bridge ${site}: test`);
 }, 30000);
 
-it("refuses a fatal site the pump does not raise with an ordinary throw", async () => {
+it("carries the close result in the one exchange that settles it", async () => {
+  const runtime = startRuntime(applicationConfig());
+  holdSettling(runtime, true);
+  const closing = runtime.close();
+  const delivered: unknown[] = [];
+  for (let i = 0; i < 400 && !delivered.some((closed) => closed !== null); i++) {
+    await delay(5);
+    delivered.push(exchange(runtime, settleOnly).closed);
+  }
+  // The close promise settles with the same result the exchange carried.
+  expect(delivered.at(-1)).toBe(await closing);
+  expect(delivered.slice(0, -1).every((closed) => closed === null)).toBe(true);
+  expect(exchange(runtime, settleOnly).closed).toBeNull();
+});
+
+it("refuses a fatal site JavaScript does not raise with an ordinary throw", async () => {
   const runtime = startRuntime(applicationConfig(), () => undefined);
   try {
     for (const site of ["settlement", "exchange_build", "exchange_finish", "unknown", 1])
@@ -339,6 +355,7 @@ it.each([
   ["exit", "ready-exit"],
   ["promises", "promises-settled"],
   ["await-close", "close-awaited"],
+  ["orphan", "orphan-drained"],
 ])(
   "finishes bounded %s subprocess lifecycle",
   (mode, expected) => {

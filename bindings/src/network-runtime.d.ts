@@ -79,13 +79,31 @@ export interface NativeExchange {
   readonly disabledWaiting: boolean;
   /** Null, or why a serving start could not be handed over; it was cancelled and released, and `more` is true. */
   readonly failure: unknown;
+  /** Completed operation cells, which the exchange retired; empty until an operation family migrates. */
+  readonly completions: readonly NativeCompletion[];
+  /** The close result, in the one exchange that settled it; otherwise null. */
+  readonly closed: NativeRuntimeCloseResult | null;
 }
 
+/** An operation cell's handle, scoped to one runtime and family. */
+export interface NativeCellHandle {
+  index: number;
+  generation: bigint;
+}
+
+/** One completed operation cell: the value its promise resolves with, or the error it rejects with. */
+export type NativeCompletion = {
+  family: "publication" | "command" | "request" | "incoming";
+  handle: NativeCellHandle;
+  kind?: string;
+} & ({value: unknown} | {error: unknown});
+
 /**
- * A fatal site the pump raises: `generated_batch`, an exchange refused a batch or demand the pump generated;
- * `failed_turns`, a third consecutive turn failed.
+ * A fatal site JavaScript raises: `generated_batch`, an exchange refused a batch or demand the pump generated;
+ * `failed_turns`, a third consecutive turn failed; `completion_contract`, a completion matched no record the
+ * completion owner installed, or native closed with promised completions missing.
  */
-export type NativeEscalation = "generated_batch" | "failed_turns";
+export type NativeEscalation = "generated_batch" | "failed_turns" | "completion_contract";
 
 export interface NativeNetworkApplicationRuntime {
   drainLogs(maxRecords?: number): NativeLogBatch;
@@ -137,7 +155,7 @@ export interface NativeNetworkApplicationRuntime {
    * peerReportsIgnored.
    */
   exchange(actions: readonly NativeAction[], demand: NativeExchangeDemand): NativeExchange;
-  /** Terminates the process at a fatal site for a bridge contract failure the pump detects. */
+  /** Terminates the process at a fatal site. `reason` is at most 64 printable ASCII characters. */
   fail(site: NativeEscalation, reason: string): never;
   /** Throws what an exchange would for `action`, applying nothing. */
   checkAction(action: NativeAction): void;
@@ -158,7 +176,7 @@ export interface NativeNetworkApplicationRuntime {
  * onWorkAvailable must only schedule an exchange in a later macrotask. No further notification arrives while work
  * stays queued, so the host exchanges again while one returns `more`, retries on a timer while it returns
  * `disabledWaiting` or `parked` work it can take later, and never cancels a scheduled exchange, also after the
- * runtime closes.
+ * runtime closes. A runtime collected without close stops at once, and its admitted operations still settle.
  */
 export function initializeNativeNetworkRuntime(
   config: NativeApplicationConfig,
