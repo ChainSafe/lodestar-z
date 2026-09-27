@@ -650,7 +650,8 @@ it("settles results only in an exchange and notifies once until an exchange find
     expect((await identity).peerId).toBe(runtime.identity.peerId);
     const pull = runtime.request(runtime.identity.peerId, BLOCKS, new Uint8Array(32)).next();
     const pullSettled = watch(pull);
-    await vi.waitFor(() => expect(notifications).toBe(3));
+    // Native notifies once its outcome is due, and the pull itself schedules nothing.
+    await vi.waitFor(() => expect(notifications).toBe(2));
     await delay(20);
     expect(pullSettled()).toBe(false);
     for (let pass = 0; pass < 8 && drain(); pass++);

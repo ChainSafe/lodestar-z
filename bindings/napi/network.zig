@@ -188,11 +188,10 @@ fn makeError(env: napi.Env, err: anyerror) !Value {
     return @import("network_js.zig").errorValue(env, @errorName(err));
 }
 
-/// Settles up to `limit` legacy completions per table, then the close result once the owner has quiesced and nothing
+/// Settles up to `limit` legacy incoming completions, then the close result once the owner has quiesced and nothing
 /// awaits settlement or delivery, which `closed` receives. Returns whether more remain.
 fn settleWithin(env: napi.Env, runtime: *Runtime, limit: usize, closed: ?*?Value) !bool {
-    var more = try request_js.settle(env, runtime, limit);
-    more = try incoming_js.settle(env, runtime, limit) or more;
+    var more = try incoming_js.settle(env, runtime, limit);
     runtime.lock();
     const idle = runtime.idleLocked();
     const closing = runtime.quiescent and !runtime.close_settled;
@@ -236,6 +235,8 @@ pub fn exchange(self: *@This(), actions_value: js.Value, demand_value: js.Value)
         if (jsStopped(err)) runtime.forceStop(true);
         return err;
     };
+    // The exchange may have retired the last operation that needed the references after the notifier finalized.
+    runtime.disposeTerminalReferences();
     return .{ .val = result };
 }
 
@@ -513,15 +514,15 @@ pub fn requestStart(self: *@This(), peer: js.Value, protocol: js.Value, data: js
     defer call.end();
     return .{ .val = try request_js.start(try self.owner(), peer.val, protocol.val, data.val, options.val) };
 }
-pub fn requestPull(self: *@This(), handle: js.Value) !js.Value {
+pub fn requestPull(self: *@This(), handle: js.Value) !void {
     const call = r.call(self.runtime, .request_pull);
     defer call.end();
-    return .{ .val = try request_js.pull(try self.owner(), handle.val) };
+    try request_js.pull(try self.owner(), handle.val);
 }
-pub fn requestRetire(self: *@This(), handle: js.Value, abandoned: js.Value) !js.Value {
+pub fn requestRetire(self: *@This(), handle: js.Value, abandoned: js.Value) !void {
     const call = r.call(self.runtime, .request_retire);
     defer call.end();
-    return .{ .val = try request_js.retire(try self.owner(), handle.val, try cfg.boolean(abandoned.val)) };
+    try request_js.retire(try self.owner(), handle.val, try cfg.boolean(abandoned.val));
 }
 
 pub fn incomingRespond(self: *@This(), handle: js.Value, data: js.Value, context: js.Value) !js.Value {

@@ -1,6 +1,6 @@
 import bindings from "./bindings.js";
 import {NativeIncoming} from "./network-incoming.js";
-import {NativeRequest} from "./network-request.js";
+import {NativeRequest, RequestRecord} from "./network-request.js";
 import {CompletionOwner} from "./network-tickets.js";
 
 /** Stops the native runtime of a wrapper collected without close; its completion owner drains the rest. */
@@ -39,7 +39,7 @@ export class NativeRuntime {
     };
   }
 
-  /** Schedules the host drain after a call that leaves results to settle. */
+  /** Schedules the host drain after an incoming call that leaves results to settle. */
   static #waker(weak) {
     return () => {
       try {
@@ -155,7 +155,9 @@ export class NativeRuntime {
     return this.#owner.admit("publication", undefined, () => this.#native.publishGossip(topic, data, options));
   }
   request(peerId, protocol, data, options) {
-    return new NativeRequest(this.#native, this.#native.requestStart(peerId, protocol, data, options), this.#wake);
+    const record = new RequestRecord();
+    const handle = this.#owner.request(record, () => this.#native.requestStart(peerId, protocol, data, options));
+    return new NativeRequest(this.#native, handle, record);
   }
   close() {
     this.#native.close();

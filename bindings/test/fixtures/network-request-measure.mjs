@@ -80,7 +80,8 @@ if (process.env.LODESTAR_Z_NETWORK_STOCK_HOST) {
     await runtime.close();
     const closed = runtime.diagnostics();
     assert.equal(closed.requests.reservedBytes, 0);
-    assert.equal(closed.requests.terminalCells, 1);
+    // The close handed the unpulled outcome to its iterator.
+    assert.equal(closed.requests.occupied, 0);
     await stream.return();
     const retired = runtime.diagnostics();
     assert.equal(retired.requests.occupied, 0);

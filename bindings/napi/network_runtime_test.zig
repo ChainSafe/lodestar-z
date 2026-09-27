@@ -313,7 +313,7 @@ test "owner work that races an exchange's check and arm always reaches a later e
     try std.testing.expect(exchanges > 0);
 }
 
-test "pulls and retirements neither notify from the JS thread nor settle before the host drain" {
+test "a pull that makes a completion due notifies once while armed, and only an exchange delivers it" {
     var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 } };
     runtime.payload_budget.limit = 32 + 2 * n.reqresp.Protocol.blocks_by_root_v2.info().response_max;
     runtime.requests = try requests_mod.Table.init(std.testing.allocator, 1, &runtime.payload_budget);
@@ -325,42 +325,33 @@ test "pulls and retirements neither notify from the JS thread nor settle before 
     cell.native = .{ .index = 0, .generation = 1, .direction = .outbound };
     cell.chunk = .{ .len = 4, .fork = null };
     const before = notifications.load(.acquire);
-    const deferred: @import("zapi:zapi").napi.Deferred = undefined;
     const pull = r.call(&runtime, .request_pull);
     runtime.lock();
     try std.testing.expect(!runtime.settleableLocked());
-    requests_mod.armPull(&runtime, cell, deferred);
+    requests_mod.armPull(&runtime, cell);
     try std.testing.expect(runtime.settleableLocked());
     runtime.unlock();
     pull.end();
-    try std.testing.expect(cell.pull != null and cell.chunk != null and !cell.delivered);
+    try std.testing.expect(cell.pulling and cell.chunk != null and !cell.delivered);
+    try std.testing.expectEqual(before + 1, notifications.load(.acquire));
+    try std.testing.expect(!runtime.readiness.armed);
+    // Disarmed, a retirement adds no notification. It wins over the undelivered chunk: the pull waits for the
+    // cancellation's terminal outcome.
     const retire = r.call(&runtime, .request_retire);
     runtime.lock();
-    requests_mod.armRetirement(&runtime, cell, deferred);
+    requests_mod.armRetirement(&runtime, cell, true);
+    try std.testing.expect(!runtime.settleableLocked());
     runtime.unlock();
     retire.end();
-    try std.testing.expect(cell.retiring and cell.cancel and cell.retirement != null);
-    try std.testing.expectEqual(before, notifications.load(.acquire));
-    try std.testing.expect(runtime.readiness.armed);
-    // An owner-side move that a JS-thread call makes notifies from that call.
-    const ping = r.call(&runtime, .request_pull);
-    const command = try runtime.table.reserve(.getIdentity);
-    runtime.lock();
-    runtime.table.transition(runtime.table.get(command), .terminal);
-    runtime.recomputeLocked(.legacy);
-    runtime.unlock();
-    ping.end();
-    runtime.table.retire(command);
+    try std.testing.expect(cell.retiring and cell.cancel and cell.retirement_awaited and cell.pulling);
     try std.testing.expectEqual(before + 1, notifications.load(.acquire));
     cell.native = null;
     cell.chunk = null;
-    cell.pull = null;
-    cell.retirement = null;
     runtime.requests.?.retire(token);
 }
 
 /// Checks each table's settle-able set against a scan of its cells, and the O(1) check against
-/// the scan under every stop and dispose flag.
+/// the scan under every stop and quiescent flag.
 fn expectDueMatchesScan(runtime: *Runtime) !void {
     runtime.lock();
     defer runtime.unlock();
@@ -391,24 +382,24 @@ fn expectDueMatchesScan(runtime: *Runtime) !void {
         incoming_any = next != 0;
     }
     const stop = runtime.stop;
-    const disposed = runtime.disposed;
+    const quiescent = runtime.quiescent;
     defer {
         runtime.stop = stop;
-        runtime.disposed = disposed;
+        runtime.quiescent = quiescent;
     }
-    for ([_]bool{ false, true }) |stopped| for ([_]bool{ false, true }) |dispose| {
+    for ([_]bool{ false, true }) |stopped| for ([_]bool{ false, true }) |quiesced| {
         var requests_any = false;
         if (runtime.requests) |*table| {
             next = 0;
-            for (table.cells, 0..) |*cell, i| if (requests_mod.settleable(cell, stopped, dispose)) {
-                try std.testing.expectEqual(@as(?usize, i), table.nextDue(next, stopped, dispose));
+            for (table.cells, 0..) |*cell, i| if (requests_mod.settleable(cell, stopped, quiesced)) {
+                try std.testing.expectEqual(@as(?usize, i), table.nextDue(next, stopped, quiesced));
                 next = i + 1;
             };
-            try std.testing.expectEqual(@as(?usize, null), table.nextDue(next, stopped, dispose));
+            try std.testing.expectEqual(@as(?usize, null), table.nextDue(next, stopped, quiesced));
             requests_any = next != 0;
         }
         runtime.stop = stopped;
-        runtime.disposed = dispose;
+        runtime.quiescent = quiesced;
         try std.testing.expectEqual(any or incoming_any or requests_any, runtime.settleableLocked());
     };
 }
@@ -463,7 +454,7 @@ test "the O(1) settle-able state matches a full scan across state transitions" {
     cell.state = .queued;
     requests.refresh(cell);
     runtime.lock();
-    requests_mod.armPull(&runtime, cell, deferred);
+    requests_mod.armPull(&runtime, cell);
     runtime.unlock();
     try expectDueMatchesScan(&runtime);
     cell.state = .native;
@@ -475,25 +466,24 @@ test "the O(1) settle-able state matches a full scan across state transitions" {
     requests.refresh(cell);
     try expectDueMatchesScan(&runtime);
     cell.copying = false;
-    cell.pull = null;
+    cell.pulling = false;
     cell.delivered = true;
     requests.refresh(cell);
     try expectDueMatchesScan(&runtime);
     runtime.lock();
-    requests_mod.armRetirement(&runtime, cell, deferred);
+    requests_mod.armRetirement(&runtime, cell, true);
     runtime.unlock();
     try expectDueMatchesScan(&runtime);
     runtime.stop = true;
     try expectDueMatchesScan(&runtime);
     requests_mod.closeLocked(&runtime);
     try expectDueMatchesScan(&runtime);
-    runtime.disposed = true;
+    runtime.quiescent = true;
     try expectDueMatchesScan(&runtime);
-    cell.retirement = null;
     requests.retire(request);
     try expectDueMatchesScan(&runtime);
     runtime.stop = false;
-    runtime.disposed = false;
+    runtime.quiescent = false;
 
     // Incoming: a taken request whose permission, acknowledgement and close settle.
     const incoming = &runtime.incoming.?;
@@ -547,7 +537,7 @@ test "the O(1) settle-able state matches a full scan across state transitions" {
         switch (random.uintLessThan(u8, 8)) {
             0 => outbound.state = random.enumValue(requests_mod.State),
             1 => outbound.copying = random.boolean(),
-            2 => outbound.pull = if (random.boolean()) deferred else null,
+            2 => outbound.pulling = random.boolean(),
             3 => outbound.chunk = if (random.boolean()) .{ .len = 1, .fork = null } else null,
             4 => outbound.delivered = random.boolean(),
             5 => outbound.retiring = random.boolean(),
@@ -572,11 +562,11 @@ test "the O(1) settle-able state matches a full scan across state transitions" {
         if (inbound_cell.state == .free) inbound_cell.state = .serving;
         incoming.refresh(inbound_cell);
         runtime.stop = random.boolean();
-        runtime.disposed = random.boolean();
+        runtime.quiescent = random.boolean();
         try expectDueMatchesScan(&runtime);
     }
     runtime.stop = false;
-    runtime.disposed = false;
+    runtime.quiescent = false;
     for (requested) |token| {
         const outbound = requests.get(token).?;
         outbound.* = .{ .state = .terminal, .generation = outbound.generation, .reservation = outbound.reservation };

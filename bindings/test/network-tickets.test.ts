@@ -30,7 +30,7 @@ function owner() {
     state: "running",
   };
   const completions = new CompletionOwner(native, () => true);
-  completions.size({command: 2, publication: 2});
+  completions.size({command: 2, publication: 2, request: 2});
   return {
     completions,
     deliver(delivered: NativeCompletion[], closed: unknown = null) {
@@ -72,7 +72,7 @@ describe("completion owner", () => {
     ["a generation never admitted", [{family: "publication", handle: handle(0, 1n), value: 1}]],
     ["a kind the record does not expect", [{family: "command", handle: handle(1, 1n), kind: "connect", value: 1}]],
     ["an index past the family's cells", [{family: "publication", handle: handle(2, 1n), value: 1}]],
-    ["a family without records", [{family: "request", handle: handle(0, 1n), value: 1}]],
+    ["a family without records", [{family: "incoming", handle: handle(0, 1n), value: 1}]],
   ] as [string, NativeCompletion[]][])("breaches the completion contract for %s", (_, delivered) => {
     const node = owner();
     void node.completions.admit("command", "getPeers", () => handle(1, 1n));

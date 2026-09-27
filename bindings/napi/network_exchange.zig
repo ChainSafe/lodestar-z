@@ -15,6 +15,7 @@ const projection = @import("network_peer_projection.zig");
 const readiness = @import("network_readiness.zig");
 const publications = @import("network_publications.zig");
 const commands = @import("network_commands.zig");
+const requests = @import("network_requests.zig");
 const fatal = @import("network_fatal.zig");
 const Runtime = r.Runtime;
 const Row = readiness.Row;
@@ -152,11 +153,16 @@ pub const Selection = struct {
     /// Completed commands, taken likewise.
     commands: [commands.capacity]commands.Token = undefined,
     command_count: usize = 0,
+    /// Due requests, taken likewise: each a chunk for its pending pull or its terminal outcome.
+    requests: [requests.capacity_max]requests.Completion = undefined,
+    request_count: usize = 0,
+    /// The requests the commit retired, each holding a runtime reference until then.
+    requests_retired: usize = 0,
     /// The owner has work from this exchange.
     wake: bool = false,
 
     pub fn delivers(self: *const Selection) bool {
-        return self.peer_count > 0 or self.serving_count > 0 or self.checks.len > 0 or self.gossip != null or self.acknowledged_count > 0 or self.publication_count > 0 or self.command_count > 0;
+        return self.peer_count > 0 or self.serving_count > 0 or self.checks.len > 0 or self.gossip != null or self.acknowledged_count > 0 or self.publication_count > 0 or self.command_count > 0 or self.request_count > 0;
     }
 };
 
@@ -204,6 +210,7 @@ fn selectLocked(runtime: *Runtime, demand: *const Demand, now: u64, selection: *
     if (runtime.gossip) |*table| selection.acknowledged_count = table.acknowledgements(&selection.acknowledged);
     selectPublications(runtime, demand.settle, selection);
     selectCommands(runtime, demand.settle, selection);
+    selectRequests(runtime, demand.settle, selection);
     const ready = &runtime.readiness;
     var next = ready.payload.head;
     for (0..readiness.row_count) |_| {
@@ -260,6 +267,17 @@ fn selectCommands(runtime: *Runtime, limit: usize, selection: *Selection) void {
     }
 }
 
+/// Pins up to `limit` due requests, resuming past the last one delivered.
+fn selectRequests(runtime: *Runtime, limit: usize, selection: *Selection) void {
+    const table = if (runtime.requests) |*table| table else return;
+    for (0..@min(limit, requests.capacity_max)) |_| {
+        const i = table.nextDue(table.settle_cursor, runtime.stop, runtime.quiescent) orelse table.nextDue(0, runtime.stop, runtime.quiescent) orelse break;
+        table.settle_cursor = i + 1;
+        selection.requests[selection.request_count] = table.pin(i, runtime.stop);
+        selection.request_count += 1;
+    }
+}
+
 fn selectServing(runtime: *Runtime, demand: *const Demand, selection: *Selection) void {
     const table = &runtime.incoming.?;
     const limit = @min(demand.serving, runtime.capacity.serving);
@@ -311,6 +329,12 @@ fn commitLocked(runtime: *Runtime, selection: *Selection) bool {
         runtime.bridge.deliver(.completion, selection.command_count);
         runtime.retireStoresLocked();
     }
+    if (selection.request_count > 0) {
+        const table = &runtime.requests.?;
+        for (selection.requests[0..selection.request_count]) |completion| selection.requests_retired += @intFromBool(table.commit(completion));
+        runtime.bridge.deliver(.completion, selection.request_count);
+        runtime.retireRequestStorageLocked();
+    }
     runtime.bridge.deliver(.dependency_check, selection.checks.len);
     // Close may have freed these cells meanwhile; a freed token is ignored. Not counted as delivered items.
     if (runtime.gossip) |*table| for (selection.acknowledged[0..selection.acknowledged_count]) |token| table.acknowledge(token);
@@ -329,6 +353,7 @@ fn restoreLocked(runtime: *Runtime, selection: *const Selection) void {
         for (selection.publications[0..selection.publication_count]) |token| table.transition(table.get(token).?, .terminal);
     }
     for (selection.commands[0..selection.command_count]) |token| runtime.table.transition(runtime.table.get(token), .terminal);
+    for (selection.requests[0..selection.request_count]) |completion| runtime.requests.?.restore(completion);
     if (selection.serving_count > 0) {
         const table = &runtime.incoming.?;
         for (selection.serving[0..selection.serving_count]) |token| {
@@ -379,7 +404,7 @@ fn gossipMarks(runtime: *Runtime) struct { bool, ?u64 } {
 
 /// Runs phases B to D. `host` builds and finishes the result, discards what a failed build created, classifies
 /// a failure, terminates at a fatal site, keeps the event loop alive for serving starts and lets it go once the last
-/// delivered publication left the runtime idle.
+/// delivered completion left the runtime idle.
 pub fn run(runtime: *Runtime, actions: []const Action, demand: *const Demand, now: u64, host: anytype) !@TypeOf(host.*).Result {
     var selection: Selection = .{ .wake = actions.len > 0 };
     runtime.lock();
@@ -403,12 +428,12 @@ pub fn run(runtime: *Runtime, actions: []const Action, demand: *const Demand, no
     };
     runtime.lock();
     const keep_alive = commitLocked(runtime, &selection);
-    // Settlement found the runtime busy while these operations were still admitted.
-    const idle = selection.publication_count + selection.command_count > 0 and runtime.idleLocked();
+    // Settlement found the runtime busy while these operations were still admitted or pulled.
+    const idle = selection.publication_count + selection.command_count + selection.request_count > 0 and runtime.idleLocked();
     const outcome = endLocked(runtime, demand, &selection);
     runtime.unlock();
-    // Each admitted operation held the runtime until its completion was delivered.
-    for (0..selection.publication_count + selection.command_count) |_| runtime.release();
+    // Each admitted operation held the runtime until its final completion was delivered.
+    for (0..selection.publication_count + selection.command_count + selection.requests_retired) |_| runtime.release();
     if (keep_alive) host.keepAlive();
     if (idle) host.idle();
     return host.finish(output, outcome) catch |err| return fail(host, host.classify(err), .exchange_finish, err);
@@ -498,12 +523,15 @@ pub fn build(env: napi.Env, runtime: *Runtime, selection: *Selection, closed: ?V
         try acknowledged.setElement(@intCast(i), reference);
     }
     try result.setNamedProperty("acknowledged", acknowledged);
-    const completions = try env.createArrayWithLength(@intCast(selection.publication_count + selection.command_count));
+    const completions = try env.createArrayWithLength(@intCast(selection.publication_count + selection.command_count + selection.request_count));
     for (selection.publications[0..selection.publication_count], 0..) |token, i| {
         try completions.setElement(@intCast(i), try @import("network_publication_js.zig").completion(env, token, runtime.publications.?.get(token).?));
     }
     for (selection.commands[0..selection.command_count], selection.publication_count..) |token, i| {
         try completions.setElement(@intCast(i), try @import("network_command_js.zig").completion(env, runtime, token));
+    }
+    for (selection.requests[0..selection.request_count], selection.publication_count + selection.command_count..) |completion, i| {
+        try completions.setElement(@intCast(i), try @import("network_request_js.zig").completion(env, runtime, completion));
     }
     try result.setNamedProperty("completions", completions);
     try result.setNamedProperty("failure", try env.getNull());
