@@ -257,6 +257,7 @@ const PeerHost = struct {
     }
     pub fn discard(_: *PeerHost, _: *const exchange.Selection) void {}
     pub fn keepAlive(_: *PeerHost) void {}
+    pub fn idle(_: *PeerHost) void {}
     pub fn classify(_: *PeerHost, _: anyerror) exchange.Failure {
         unreachable;
     }

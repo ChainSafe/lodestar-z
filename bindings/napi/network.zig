@@ -194,7 +194,7 @@ fn settleWithin(env: napi.Env, runtime: *Runtime, limit: usize, closed: ?*?Value
     more = try request_js.settle(env, runtime, limit) or more;
     more = try incoming_js.settle(env, runtime, limit) or more;
     runtime.lock();
-    const idle = runtime.table.occupied == 0 and (runtime.publications == null or !runtime.publications.?.obligated()) and !runtime.requestObligations() and runtime.notify_live and !runtime.stop;
+    const idle = runtime.idleLocked();
     const closing = runtime.quiescent and !runtime.close_settled;
     // Owner quiescence is final, so completions it left before quiescing are all settleable now.
     more = more or runtime.settleableLocked();
@@ -307,6 +307,9 @@ const Exchange = struct {
     }
     pub fn keepAlive(self: *Exchange) void {
         self.runtime.notify.ref(self.env) catch {};
+    }
+    pub fn idle(self: *Exchange) void {
+        self.runtime.notify.unref(self.env) catch {};
     }
     /// An exception that clears means the bridge broke its contract. One that will not clear means JavaScript cannot
     /// run, as does a pending-exception status with none pending, which N-API returns for cannot_run_js to this
