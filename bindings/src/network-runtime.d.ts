@@ -80,8 +80,9 @@ export interface NativeExchange {
   /** Null, or why a serving start could not be handed over; it was cancelled and released, and `more` is true. */
   readonly failure: unknown;
   /**
-   * Completed publications and commands, and requests' chunks and terminal outcomes. Each settles its operation's
-   * promise, or its request's pending pull and retirement; the exchange retired each cell's final completion.
+   * Completed publications and commands, requests' chunks and terminal outcomes, and incoming streams'
+   * acknowledgements, closes and permissions. Each settles its operation's promise, or its stream's pending calls and
+   * close; the exchange retired each cell's final completion.
    */
   readonly completions: readonly NativeCompletion[];
   /** The close result, in the one exchange that settled it; otherwise null. */
@@ -104,7 +105,8 @@ export type NativeCompletion =
       | {error: NativeOperationError}
     ))
   | NativeCommandCompletion
-  | NativeRequestCompletion;
+  | NativeRequestCompletion
+  | NativeIncomingCompletion;
 
 /**
  * A request cell's completion: a chunk its pending pull resolves with, or its terminal outcome, the end of the stream
@@ -115,6 +117,20 @@ export type NativeRequestCompletion = {family: "request"; handle: NativeCellHand
   | {done: true}
   | {error: NativeOperationError}
 );
+
+/**
+ * An incoming stream cell's completion, whose parts settle in this order: `response`, the pending `respond`'s
+ * acknowledgement; `closed`, the stream's end; `ready`, the pending permission's outcome. An outcome without `error`
+ * resolves.
+ */
+export interface NativeIncomingCompletion {
+  family: "incoming";
+  handle: NativeCellHandle;
+  kind?: undefined;
+  response?: {error?: NativeOperationError};
+  closed?: true;
+  ready?: {error?: NativeOperationError};
+}
 
 /** What each command's promise resolves with, keyed by the runtime method that admitted it. */
 export interface NativeCommandResults {
@@ -190,9 +206,9 @@ export interface NativeNetworkApplicationRuntime {
    */
   getRememberedPeers(): Promise<NativeRememberedPeersSnapshot>;
   /**
-   * One host turn: applies up to 256 `actions`, settles up to `demand.settleCells` incoming acknowledgements, delivers
-   * as many publication, command and request completions per family in `completions`, then the close result once
-   * nothing else awaits settlement or delivery, and delivers the payload `demand` asks for. It throws only for invalid input or a nested call, before applying anything. Actions after
+   * One host turn: applies up to 256 `actions`, delivers up to `demand.settleCells` publication, command, request and
+   * incoming completions per family in `completions`, then the close result once nothing else awaits delivery, and
+   * delivers the payload `demand` asks for. It throws only for invalid input or a nested call, before applying anything. Actions after
    * close are ignored; unknown penalized identities count in peerReportsIgnored.
    */
   exchange(actions: readonly NativeAction[], demand: NativeExchangeDemand): NativeExchange;

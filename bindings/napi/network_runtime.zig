@@ -456,7 +456,7 @@ pub const Runtime = struct {
         };
         if (self.incoming) |*table| for (table.cells, 0..) |cell, i| {
             if (cell.state == .free) continue;
-            std.debug.assert(!cell.native and !cell.copying and cell.closed == null and cell.pending == null and cell.permission == null);
+            std.debug.assert(!cell.native and !cell.copying);
             table.retire(.{ .index = @intCast(i), .generation = cell.generation });
         };
         self.retireClosedPublications();

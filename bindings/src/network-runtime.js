@@ -1,5 +1,5 @@
 import bindings from "./bindings.js";
-import {NativeIncoming} from "./network-incoming.js";
+import {IncomingRecord, NativeIncoming} from "./network-incoming.js";
 import {NativeRequest, RequestRecord} from "./network-request.js";
 import {CompletionOwner} from "./network-tickets.js";
 
@@ -11,13 +11,11 @@ export class NativeRuntime {
   #owner;
   #closed;
   #onWorkAvailable;
-  #wake;
 
   constructor(config, onWorkAvailable) {
     this.#native = new bindings.NativeNetworkRuntime();
     this.#onWorkAvailable = onWorkAvailable;
     const weak = new WeakRef(this);
-    this.#wake = NativeRuntime.#waker(weak);
     const owner = new CompletionOwner(this.#native, NativeRuntime.#notifier(weak));
     const callback = typeof onWorkAvailable === "function" ? owner.notifier : onWorkAvailable;
     const initialized = this.#native.initialize(config, callback);
@@ -36,17 +34,6 @@ export class NativeRuntime {
       if (runtime === undefined) return false;
       runtime.#onWorkAvailable();
       return true;
-    };
-  }
-
-  /** Schedules the host drain after an incoming call that leaves results to settle. */
-  static #waker(weak) {
-    return () => {
-      try {
-        weak.deref()?.#onWorkAvailable();
-      } catch {
-        // The owner's notifications report a throwing host; the caller's operation stands.
-      }
     };
   }
 
@@ -117,21 +104,19 @@ export class NativeRuntime {
     // An exchange that delivered nothing is frozen with no serving starts.
     const serving = result.serving;
     if (serving.length === 0) return result;
-    // Native has committed every item, so nothing may throw from here. A start without a facade is cancelled,
-    // released and reported with `more` set, so the host still takes the rest and exchanges again.
+    // Native has committed every item, so nothing may throw from here. Each stream's record is installed before its
+    // start is exposed. A start without a facade is cancelled, released and reported with `more` set, so the host
+    // still takes the rest and exchanges again, while its record takes the close.
     let taken = 0;
     for (let i = 0; i < serving.length; i++) {
       const descriptor = serving[i];
+      const record = new IncomingRecord(this.#native, descriptor.handle);
+      this.#owner.serve(record);
       try {
-        serving[taken] = new NativeIncoming(this.#native, descriptor, this.#wake);
+        serving[taken] = new NativeIncoming(descriptor, record);
         taken++;
       } catch (error) {
-        try {
-          this.#native.incomingTerminal(descriptor.handle, 2, undefined, undefined);
-          this.#native.incomingRelease(descriptor.handle);
-        } catch {
-          // Runtime teardown also releases native serving capacity.
-        }
+        record.abandon();
         result.failure ??= error;
         result.more = true;
       }

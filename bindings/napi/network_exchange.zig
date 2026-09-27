@@ -1,5 +1,5 @@
 //! One host exchange. Phase A decodes the actions and demand, and throws with nothing applied. Phase 0 settles
-//! legacy results. Phase B, under the mutex, disarms, applies the actions, takes the capacities and pins the
+//! the close result. Phase B, under the mutex, disarms, applies the actions, takes the capacities and pins the
 //! completions and rows it serves. Phase C builds the result; no user code runs from here on. Phase D, under the mutex,
 //! commits (or restores the pins when JavaScript stopped), unpins, wakes the owner once and arms when nothing is queued.
 const std = @import("std");
@@ -136,9 +136,6 @@ pub const Selection = struct {
     peer_count: usize = 0,
     serving: [serving_max]incoming.Token = undefined,
     serving_count: usize = 0,
-    /// Each serving start's closed promise; the build creates the first `closed_count`.
-    closed: [serving_max]napi.Deferred = undefined,
-    closed_count: usize = 0,
     checks: g.Batch = .{},
     views: [g.batch_max]CheckView = undefined,
     gossip: ?g.Batch = null,
@@ -158,11 +155,14 @@ pub const Selection = struct {
     request_count: usize = 0,
     /// The requests the commit retired, each holding a runtime reference until then.
     requests_retired: usize = 0,
+    /// Due incoming streams, taken likewise: each its acknowledgement, close and permission outcome.
+    incoming: [incoming.capacity_max]incoming.Completion = undefined,
+    incoming_count: usize = 0,
     /// The owner has work from this exchange.
     wake: bool = false,
 
     pub fn delivers(self: *const Selection) bool {
-        return self.peer_count > 0 or self.serving_count > 0 or self.checks.len > 0 or self.gossip != null or self.acknowledged_count > 0 or self.publication_count > 0 or self.command_count > 0 or self.request_count > 0;
+        return self.peer_count > 0 or self.serving_count > 0 or self.checks.len > 0 or self.gossip != null or self.acknowledged_count > 0 or self.publication_count > 0 or self.command_count > 0 or self.request_count > 0 or self.incoming_count > 0;
     }
 };
 
@@ -211,6 +211,7 @@ fn selectLocked(runtime: *Runtime, demand: *const Demand, now: u64, selection: *
     selectPublications(runtime, demand.settle, selection);
     selectCommands(runtime, demand.settle, selection);
     selectRequests(runtime, demand.settle, selection);
+    selectIncoming(runtime, demand.settle, selection);
     const ready = &runtime.readiness;
     var next = ready.payload.head;
     for (0..readiness.row_count) |_| {
@@ -278,6 +279,17 @@ fn selectRequests(runtime: *Runtime, limit: usize, selection: *Selection) void {
     }
 }
 
+/// Pins up to `limit` due incoming streams, resuming past the last one delivered.
+fn selectIncoming(runtime: *Runtime, limit: usize, selection: *Selection) void {
+    const table = if (runtime.incoming) |*table| table else return;
+    for (0..@min(limit, incoming.capacity_max)) |_| {
+        const i = table.nextDue(table.settle_cursor) orelse table.nextDue(0) orelse break;
+        table.settle_cursor = i + 1;
+        selection.incoming[selection.incoming_count] = table.pin(i);
+        selection.incoming_count += 1;
+    }
+}
+
 fn selectServing(runtime: *Runtime, demand: *const Demand, selection: *Selection) void {
     const table = &runtime.incoming.?;
     const limit = @min(demand.serving, runtime.capacity.serving);
@@ -293,7 +305,7 @@ fn selectServing(runtime: *Runtime, demand: *const Demand, selection: *Selection
     }
 }
 
-/// Returns whether serving starts now hold promises that keep the event loop alive.
+/// Returns whether serving starts now await closes that keep the event loop alive.
 fn commitLocked(runtime: *Runtime, selection: *Selection) bool {
     if (selection.peer_count > 0) {
         runtime.bridge.deliver(.peer_event, selection.peer_count);
@@ -303,9 +315,9 @@ fn commitLocked(runtime: *Runtime, selection: *Selection) bool {
     }
     if (selection.serving_count > 0) {
         const table = &runtime.incoming.?;
-        for (selection.serving[0..selection.serving_count], selection.closed[0..selection.serving_count]) |token, deferred| {
+        for (selection.serving[0..selection.serving_count]) |token| {
             const cell = table.get(token).?;
-            cell.closed = deferred;
+            cell.closed_awaited = true;
             cell.copying = false;
             cell.exposed = true;
             table.diag.requestsTaken +|= 1;
@@ -335,6 +347,15 @@ fn commitLocked(runtime: *Runtime, selection: *Selection) bool {
         runtime.bridge.deliver(.completion, selection.request_count);
         runtime.retireRequestStorageLocked();
     }
+    if (selection.incoming_count > 0) {
+        const table = &runtime.incoming.?;
+        // A released slot the host no longer awaits goes back to the owner.
+        for (selection.incoming[0..selection.incoming_count]) |completion| if (table.commit(completion)) {
+            selection.wake = true;
+        };
+        runtime.bridge.deliver(.completion, selection.incoming_count);
+        runtime.retireRequestStorageLocked();
+    }
     runtime.bridge.deliver(.dependency_check, selection.checks.len);
     // Close may have freed these cells meanwhile; a freed token is ignored. Not counted as delivered items.
     if (runtime.gossip) |*table| for (selection.acknowledged[0..selection.acknowledged_count]) |token| table.acknowledge(token);
@@ -354,6 +375,7 @@ fn restoreLocked(runtime: *Runtime, selection: *const Selection) void {
     }
     for (selection.commands[0..selection.command_count]) |token| runtime.table.transition(runtime.table.get(token), .terminal);
     for (selection.requests[0..selection.request_count]) |completion| runtime.requests.?.restore(completion);
+    for (selection.incoming[0..selection.incoming_count]) |completion| runtime.incoming.?.restore(completion);
     if (selection.serving_count > 0) {
         const table = &runtime.incoming.?;
         for (selection.serving[0..selection.serving_count]) |token| {
@@ -402,9 +424,8 @@ fn gossipMarks(runtime: *Runtime) struct { bool, ?u64 } {
     return .{ table.pending(true), table.deadline() };
 }
 
-/// Runs phases B to D. `host` builds and finishes the result, discards what a failed build created, classifies
-/// a failure, terminates at a fatal site, keeps the event loop alive for serving starts and lets it go once the last
-/// delivered completion left the runtime idle.
+/// Runs phases B to D. `host` builds and finishes the result, classifies a failure, terminates at a fatal site, keeps
+/// the event loop alive for serving starts and lets it go once the last delivered completion left the runtime idle.
 pub fn run(runtime: *Runtime, actions: []const Action, demand: *const Demand, now: u64, host: anytype) !@TypeOf(host.*).Result {
     var selection: Selection = .{ .wake = actions.len > 0 };
     runtime.lock();
@@ -419,7 +440,6 @@ pub fn run(runtime: *Runtime, actions: []const Action, demand: *const Demand, no
     runtime.unlock();
     const output = host.build(&selection) catch |err| {
         const failure = host.classify(err);
-        host.discard(&selection);
         runtime.lock();
         restoreLocked(runtime, &selection);
         _ = endLocked(runtime, demand, &selection);
@@ -429,7 +449,7 @@ pub fn run(runtime: *Runtime, actions: []const Action, demand: *const Demand, no
     runtime.lock();
     const keep_alive = commitLocked(runtime, &selection);
     // Settlement found the runtime busy while these operations were still admitted or pulled.
-    const idle = selection.publication_count + selection.command_count + selection.request_count > 0 and runtime.idleLocked();
+    const idle = selection.publication_count + selection.command_count + selection.request_count + selection.incoming_count > 0 and runtime.idleLocked();
     const outcome = endLocked(runtime, demand, &selection);
     runtime.unlock();
     // Each admitted operation held the runtime until its final completion was delivered.
@@ -485,8 +505,7 @@ fn schedule(env: napi.Env, result: Value, outcome: Outcome) !void {
     try result.setNamedProperty("parked", parked);
 }
 
-/// Builds a fresh result for a selection that delivers something, or for the close result `closed`. Creates the serving
-/// starts' closed promises, which the caller discards if a later step fails.
+/// Builds a fresh result for a selection that delivers something, or for the close result `closed`.
 pub fn build(env: napi.Env, runtime: *Runtime, selection: *Selection, closed: ?Value) !Value {
     const result = try env.createObject();
     const peers = try env.createArrayWithLength(selection.peer_count);
@@ -494,10 +513,8 @@ pub fn build(env: napi.Env, runtime: *Runtime, selection: *Selection, closed: ?V
     try result.setNamedProperty("peers", peers);
     const serving = try env.createArrayWithLength(selection.serving_count);
     for (selection.serving[0..selection.serving_count], 0..) |token, i| {
-        selection.closed[i] = try env.createPromise();
-        selection.closed_count = i + 1;
         const cell = &runtime.incoming.?.cells[token.index];
-        try serving.setElement(@intCast(i), try @import("network_incoming_js.zig").descriptorValue(runtime, token, cell, selection.closed[i]));
+        try serving.setElement(@intCast(i), try @import("network_incoming_js.zig").descriptorValue(runtime, token, cell));
     }
     try result.setNamedProperty("serving", serving);
     const checks = try env.createArrayWithLength(selection.checks.len);
@@ -523,7 +540,7 @@ pub fn build(env: napi.Env, runtime: *Runtime, selection: *Selection, closed: ?V
         try acknowledged.setElement(@intCast(i), reference);
     }
     try result.setNamedProperty("acknowledged", acknowledged);
-    const completions = try env.createArrayWithLength(@intCast(selection.publication_count + selection.command_count + selection.request_count));
+    const completions = try env.createArrayWithLength(@intCast(selection.publication_count + selection.command_count + selection.request_count + selection.incoming_count));
     for (selection.publications[0..selection.publication_count], 0..) |token, i| {
         try completions.setElement(@intCast(i), try @import("network_publication_js.zig").completion(env, token, runtime.publications.?.get(token).?));
     }
@@ -532,6 +549,9 @@ pub fn build(env: napi.Env, runtime: *Runtime, selection: *Selection, closed: ?V
     }
     for (selection.requests[0..selection.request_count], selection.publication_count + selection.command_count..) |completion, i| {
         try completions.setElement(@intCast(i), try @import("network_request_js.zig").completion(env, runtime, completion));
+    }
+    for (selection.incoming[0..selection.incoming_count], selection.publication_count + selection.command_count + selection.request_count..) |completion, i| {
+        try completions.setElement(@intCast(i), try @import("network_incoming_js.zig").completion(env, completion));
     }
     try result.setNamedProperty("completions", completions);
     try result.setNamedProperty("failure", try env.getNull());

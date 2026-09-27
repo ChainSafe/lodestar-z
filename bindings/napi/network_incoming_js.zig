@@ -14,13 +14,6 @@ fn connectionValue(env: napi.Env, connection: @import("network").quic.engine.Han
     try object.setNamedProperty("generation", try env.createUint32(connection.generation));
     return object;
 }
-fn tokenValue(runtime: *Runtime, token: incoming.Token) !Value {
-    const env = runtime.env;
-    const object = try env.createObject();
-    try object.setNamedProperty("index", try env.createUint32(token.index));
-    try object.setNamedProperty("generation", try env.createBigintUint64(token.generation));
-    return object;
-}
 fn parseHandle(value: Value) !incoming.Token {
     try cfg.completeObject(value, &.{ "index", "generation" });
     return .{
@@ -40,10 +33,11 @@ fn refNotify(runtime: *Runtime) void {
     runtime.unlock();
     if (live) runtime.notify.ref(runtime.env) catch {};
 }
-pub fn descriptorValue(runtime: *Runtime, token: incoming.Token, cell: *const incoming.Cell, deferred: napi.Deferred) !Value {
+/// A serving start's descriptor, whose stream the binding's record owns from here.
+pub fn descriptorValue(runtime: *Runtime, token: incoming.Token, cell: *const incoming.Cell) !Value {
     const env = runtime.env;
     const object = try env.createObject();
-    try object.setNamedProperty("handle", try tokenValue(runtime, token));
+    try object.setNamedProperty("handle", try @import("network_js.zig").handle(env, token.index, token.generation));
     try object.setNamedProperty("peerId", try @import("network_js.zig").peerIdValue(env, &cell.identity));
     try object.setNamedProperty("connection", try connectionValue(env, cell.connection));
     try object.setNamedProperty("protocol", try env.createStringUtf8(cell.protocol.id()));
@@ -52,7 +46,6 @@ pub fn descriptorValue(runtime: *Runtime, token: incoming.Token, cell: *const in
     const data = try env.createTypedarray(.uint8, cell.input.len, buffer, 0);
     @memcpy(destination[0..cell.input.len], cell.input);
     try object.setNamedProperty("data", data);
-    try object.setNamedProperty("closed", deferred.getPromise());
     return object;
 }
 fn contextFor(value: Value) !?@import("network").reqresp.ForkEntry {
@@ -69,7 +62,9 @@ fn viewLength(value: Value, max: usize) !usize {
     if (view.length > max) return error.ChunkTooLarge;
     return view.length;
 }
-pub fn respond(runtime: *Runtime, value: Value, data: Value, context_value: Value) !Value {
+/// Queues a copy of `data` as the next response chunk, whose acknowledgement an exchange delivers once the server no
+/// longer borrows it.
+pub fn respond(runtime: *Runtime, value: Value, data: Value, context_value: Value) !void {
     const handle = try parseHandle(value);
     const context = try contextFor(context_value);
     runtime.retain();
@@ -83,7 +78,7 @@ pub fn respond(runtime: *Runtime, value: Value, data: Value, context_value: Valu
         runtime.unlock();
         return error.NetworkIncomingClosed;
     }
-    if (cell.pending != null or cell.permission != null or cell.state != .serving) {
+    if (cell.response_awaited or cell.permission_awaited or cell.state != .serving) {
         runtime.unlock();
         return error.NetworkIncomingBusy;
     }
@@ -109,8 +104,6 @@ pub fn respond(runtime: *Runtime, value: Value, data: Value, context_value: Valu
     }
     const copy = try r.allocator.alloc(u8, len);
     errdefer r.allocator.free(copy);
-    const deferred = try runtime.env.createPromise();
-    errdefer @import("network_js.zig").discardPromise(runtime.env, deferred);
     try cfg.bytes(data, copy);
     runtime.lock();
     if (runtime.stop or !cell.native) {
@@ -119,16 +112,15 @@ pub fn respond(runtime: *Runtime, value: Value, data: Value, context_value: Valu
     }
     cell.response = copy;
     cell.context = context;
-    cell.pending = deferred;
+    cell.response_awaited = true;
     cell.ack = null;
     cell.state = .response_queued;
     runtime.incoming.?.refresh(cell);
     runtime.incoming.?.diag.responseBytesCopied +|= len;
     runtime.unlock();
     refNotify(runtime);
-    return deferred.getPromise();
 }
-pub fn terminal(runtime: *Runtime, value: Value, action_value: Value, status_value: Value, message_value: Value) !Value {
+pub fn terminal(runtime: *Runtime, value: Value, action_value: Value, status_value: Value, message_value: Value) !void {
     const handle = try parseHandle(value);
     const action: incoming.Action = switch (try cfg.integer(action_value, 2)) {
         0 => .finish,
@@ -151,7 +143,7 @@ pub fn terminal(runtime: *Runtime, value: Value, action_value: Value, status_val
         return err;
     };
     if (cell.native) {
-        if (action != .cancel and (cell.pending != null or cell.permission != null or cell.state == .response_preparing)) {
+        if (action != .cancel and (cell.response_awaited or cell.permission_awaited or cell.state == .response_preparing)) {
             runtime.unlock();
             return error.NetworkIncomingBusy;
         }
@@ -164,26 +156,22 @@ pub fn terminal(runtime: *Runtime, value: Value, action_value: Value, status_val
     }
     runtime.unlock();
     refNotify(runtime);
-    return runtime.env.getUndefined();
 }
 
-pub fn release(runtime: *Runtime, value: Value) !Value {
+/// Returns the serving slot the host's work retained. The owner releases it without JavaScript, so the call keeps no
+/// event loop alive.
+pub fn release(runtime: *Runtime, value: Value) !void {
     const handle = try parseHandle(value);
     runtime.lock();
-    const cell = cellFor(runtime, handle) catch |err| {
-        runtime.unlock();
-        return err;
-    };
+    defer runtime.unlock();
+    const cell = try cellFor(runtime, handle);
     cell.release_requested = true;
-    runtime.unlock();
-    refNotify(runtime);
-    return runtime.env.getUndefined();
+    runtime.signalLocked();
 }
 
-pub fn ready(runtime: *Runtime, value: Value) !Value {
+/// Asks for a response permission, which an exchange delivers once the owner reserved the response's quota.
+pub fn ready(runtime: *Runtime, value: Value) !void {
     const handle = try parseHandle(value);
-    const deferred = try runtime.env.createPromise();
-    errdefer @import("network_js.zig").discardPromise(runtime.env, deferred);
     runtime.lock();
     const cell = cellFor(runtime, handle) catch |err| {
         runtime.unlock();
@@ -193,16 +181,15 @@ pub fn ready(runtime: *Runtime, value: Value) !Value {
         runtime.unlock();
         return error.NetworkIncomingClosed;
     }
-    if (cell.permission != null or cell.pending != null or cell.state != .serving) {
+    if (cell.permission_awaited or cell.response_awaited or cell.state != .serving) {
         runtime.unlock();
         return error.NetworkIncomingBusy;
     }
-    cell.permission = deferred;
+    cell.permission_awaited = true;
     cell.permission_ready = false;
     runtime.incoming.?.refresh(cell);
     runtime.unlock();
     refNotify(runtime);
-    return deferred.getPromise();
 }
 fn ackError(env: napi.Env, ack: incoming.Ack) !Value {
     switch (ack) {
@@ -220,70 +207,24 @@ fn ackError(env: napi.Env, ack: incoming.Ack) !Value {
         },
     }
 }
-/// Settles up to `limit` incoming acknowledgements, closes and permissions. Returns whether more remain.
-pub fn settle(env: napi.Env, runtime: *Runtime, limit: usize) !bool {
-    if (runtime.incoming == null) return false;
-    runtime.retain();
-    defer runtime.release();
-    var settled: usize = 0;
-    var more = false;
-    for (0..incoming.capacity_max) |_| {
-        runtime.lock();
-        const table = &runtime.incoming.?;
-        const i = table.nextDue(table.settle_cursor) orelse table.nextDue(0) orelse {
-            runtime.unlock();
-            break;
-        };
-        if (settled == limit) {
-            runtime.unlock();
-            more = true;
-            break;
-        }
-        settled += 1;
-        runtime.bridge.deliver(.completion, 1);
-        table.settle_cursor = i + 1;
-        const cell = &table.cells[i];
-        std.debug.assert(incoming.settleable(cell));
-        const pending = if (cell.ack != null) cell.pending else null;
-        const closed = if (!cell.native) cell.closed else null;
-        const permission = if (cell.permission_ready or !cell.native) cell.permission else null;
-        cell.copying = true;
-        table.refresh(cell);
-        const ack = cell.ack;
-        const permitted = cell.native and cell.permission_ready;
-        runtime.unlock();
-        defer {
-            runtime.lock();
-            cell.copying = false;
-            if (pending != null) {
-                cell.pending = null;
-                cell.ack = null;
-            }
-            if (closed != null) cell.closed = null;
-            if (permission != null) {
-                cell.permission = null;
-                cell.permission_ready = false;
-            }
-            table.releasePayload(cell);
-            table.refresh(cell);
-            if (!cell.native and !cell.serving_retained and cell.closed == null and cell.pending == null and cell.permission == null) {
-                table.retire(.{ .index = @intCast(i), .generation = cell.generation });
-            } else if (incoming.releasable(cell)) runtime.signalLocked();
-            runtime.unlock();
-        }
-        if (pending) |deferred| {
-            if (ack.? == .sent) try deferred.resolve(try env.getUndefined()) else try deferred.reject(@import("network_js.zig").settled(env, ackError(env, ack.?)) catch try runtime.copy_error.?.getValue());
-        }
-        if (closed) |deferred| try deferred.resolve(try env.getUndefined());
-        if (permission) |deferred| {
-            if (permitted) try deferred.resolve(try env.getUndefined()) else try deferred.reject(@import("network_js.zig").settled(env, errorValue(env, "NetworkIncomingClosed")) catch try runtime.copy_error.?.getValue());
-        }
+/// An incoming completion: `response`, the pending response's acknowledgement, then `closed`, the stream's end, then
+/// `ready`, the pending permission's outcome, each present when due. An outcome without `error` resolves.
+pub fn completion(env: napi.Env, delivered: incoming.Completion) !Value {
+    const object = try env.createObject();
+    try object.setNamedProperty("family", try env.createStringUtf8("incoming"));
+    try object.setNamedProperty("handle", try @import("network_js.zig").handle(env, delivered.token.index, delivered.token.generation));
+    if (delivered.ack) |ack| {
+        const outcome = try env.createObject();
+        if (ack != .sent) try outcome.setNamedProperty("error", try @import("network_js.zig").settled(env, ackError(env, ack)));
+        try object.setNamedProperty("response", outcome);
     }
-    runtime.lock();
-    runtime.retireRequestStorageLocked();
-    runtime.unlock();
-    runtime.disposeTerminalReferences();
-    return more;
+    if (delivered.closed) try object.setNamedProperty("closed", try env.getBoolean(true));
+    if (delivered.permission) |permitted| {
+        const outcome = try env.createObject();
+        if (!permitted) try outcome.setNamedProperty("error", try @import("network_js.zig").settled(env, errorValue(env, "NetworkIncomingClosed")));
+        try object.setNamedProperty("ready", outcome);
+    }
+    return object;
 }
 pub fn diagnostics(env: napi.Env, value: *const incoming.Diagnostics) !Value {
     return @import("network_js.zig").scalarFields(env, value);
