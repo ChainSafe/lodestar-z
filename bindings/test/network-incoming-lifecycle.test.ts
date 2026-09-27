@@ -7,6 +7,7 @@ test.each([
   "exit",
   "facade-gc",
   "object-gc",
+  "ready-gc",
   "held-ack",
   "held-closed",
   "notifier",

@@ -1,4 +1,5 @@
 import {describe, expect, it, vi} from "vitest";
+import {IncomingRecord} from "../src/network-incoming.js";
 import {RequestRecord} from "../src/network-request.js";
 import {CompletionOwner} from "../src/network-tickets.js";
 
@@ -12,6 +13,9 @@ type NativeCompletion = {
   value?: unknown;
   error?: unknown;
   done?: true;
+  response?: {error?: unknown};
+  closed?: true;
+  ready?: {error?: unknown};
 };
 
 /** An owner over a native stand-in whose next exchange delivers `completions` and `closed`. */
@@ -189,5 +193,39 @@ describe("completion owner", () => {
     unpulled.completions.request(new RequestRecord(), () => handle(0, 1n));
     expect(() => unpulled.deliver([{family: "request", handle: handle(0, 1n), value: "chunk"}])).toThrow(Breached);
     expect(unpulled.native.fail).toHaveBeenCalledExactlyOnceWith("completion_contract", "completed request 0:1");
+  });
+
+  it("keeps an incoming record through its acknowledgements and settles the close between response and permission", async () => {
+    const node = owner();
+    const released: unknown[] = [];
+    const native = {incomingRelease: (handle: unknown) => void released.push(handle)};
+    const record = new IncomingRecord(native, handle(1, 1n));
+    node.completions.serve(record);
+    const order: string[] = [];
+    void record.closed.then(() => order.push("closed"));
+    const responded = pending();
+    record.pending = {kind: "respond", ...responded};
+    void responded.promise.then(() => order.push("response"));
+    node.deliver([{family: "incoming", handle: handle(1, 1n), response: {}}]);
+    expect([record.pending, record.done]).toEqual([null, false]);
+    const permission = pending();
+    record.pending = {kind: "ready", ...permission};
+    void permission.promise.catch((error: unknown) => order.push(String(error)));
+    node.deliver([{closed: true, family: "incoming", handle: handle(1, 1n), ready: {error: "NetworkIncomingClosed"}}]);
+    expect([record.pending, record.done]).toEqual([null, true]);
+    // The close returned the serving slot no host work retains.
+    expect(released).toEqual([handle(1, 1n)]);
+    await record.closed;
+    await permission.promise.catch(() => undefined);
+    expect(order).toEqual(["response", "closed", "NetworkIncomingClosed"]);
+    // The close cleared the record.
+    expect(() => node.deliver([{closed: true, family: "incoming", handle: handle(1, 1n)}])).toThrow(Breached);
+  });
+
+  it("breaches the completion contract for an incoming acknowledgement no call awaits", () => {
+    const node = owner();
+    node.completions.serve(new IncomingRecord({}, handle(0, 1n)));
+    expect(() => node.deliver([{family: "incoming", handle: handle(0, 1n), response: {}}])).toThrow(Breached);
+    expect(node.native.fail).toHaveBeenCalledExactlyOnceWith("completion_contract", "completed incoming 0:1");
   });
 });

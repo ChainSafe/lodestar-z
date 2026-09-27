@@ -1,5 +1,14 @@
 import {expect, test} from "vitest";
-import {applicationConfig, localIntent, nextIncoming, requestForks, startRuntime} from "./utils/network.js";
+import type {NativeCompletion, NativeNetworkApplicationRuntime} from "../src/network-runtime.js";
+import {
+  applicationConfig,
+  holdSettling,
+  localIntent,
+  nextIncoming,
+  requestForks,
+  settleOnly,
+  startRuntime,
+} from "./utils/network.js";
 import {BLOCKS, incomingPair, takeIncoming} from "./utils/network-incoming.js";
 
 test("incoming request take is empty on an active application", async () => {
@@ -363,6 +372,103 @@ test("incoming response bytes are acquired at readiness and released after the c
     await incoming.finish();
     await pair.right.reStatusPeers([pair.identity.peerId]);
     expect((await pair.right.getIdentity()).peerId).toEqual(pair.remote.peerId);
+  } finally {
+    await Promise.all([pair.left.close(), pair.right.close()]);
+  }
+}, 20000);
+
+/** Exchanges until one delivers an incoming completion, as a held runtime's own host would, and returns it. */
+async function incomingCompleted(runtime: NativeNetworkApplicationRuntime): Promise<NativeCompletion> {
+  for (let i = 0; i < 2000; i++) {
+    const completion = runtime.exchange([], settleOnly).completions.find(({family}) => family === "incoming");
+    if (completion) return completion;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw Error("No incoming completion arrived");
+}
+
+/** Records the order in which a stream's close and its pending call settle. */
+function settlementOrder(closed: Promise<void>, pending: Promise<unknown>) {
+  const order: string[] = [];
+  void pending.then(
+    () => order.push("pending"),
+    (error) => order.push(error.code)
+  );
+  void closed.then(() => order.push("closed"));
+  return order;
+}
+
+test("a permission the stream's end overtakes arrives with the close and settles after it, refused", async () => {
+  const pair = await incomingPair();
+  holdSettling(pair.right, true);
+  try {
+    const stream = pair.left.request(pair.remote.peerId, BLOCKS, new Uint8Array(32));
+    const pending = stream.next().catch(() => undefined);
+    const incoming = await takeIncoming(pair.right);
+    const permission = incoming.ready();
+    const order = settlementOrder(incoming.closed, permission);
+    // The owner grants the permission by reserving the response's bytes, but no exchange delivers it yet.
+    await expect.poll(() => pair.right.diagnostics().incoming.reservedBytes, {timeout: 5000}).toBe(10 * 1024 * 1024);
+    await stream.return?.();
+    await pending;
+    await expect.poll(() => pair.right.diagnostics().incoming.retiring, {timeout: 5000}).toBe(1);
+    expect(await incomingCompleted(pair.right)).toMatchObject({
+      closed: true,
+      family: "incoming",
+      ready: {error: {code: "NetworkIncomingClosed"}},
+    });
+    await expect(permission).rejects.toMatchObject({code: "NetworkIncomingClosed"});
+    expect(order).toEqual(["closed", "NetworkIncomingClosed"]);
+  } finally {
+    holdSettling(pair.right, false);
+    await Promise.all([pair.left.close(), pair.right.close()]);
+  }
+}, 20000);
+
+test("an acknowledgement due with the stream's close arrives in one completion and settles first", async () => {
+  const pair = await incomingPair();
+  holdSettling(pair.right, true);
+  try {
+    const stream = pair.left.request(pair.remote.peerId, BLOCKS, new Uint8Array(32));
+    const first = stream.next();
+    const incoming = await takeIncoming(pair.right);
+    const data = new Uint8Array(4000).fill(23);
+    const responded = incoming.respond(data, requestForks[0]);
+    const order = settlementOrder(incoming.closed, responded);
+    // The client took the chunk, so native acknowledged it, and then ends the stream before any exchange.
+    expect((await first).value?.data).toEqual(data);
+    await stream.return?.();
+    await expect.poll(() => pair.right.diagnostics().incoming.retiring, {timeout: 5000}).toBe(1);
+    const completion = await incomingCompleted(pair.right);
+    expect(completion).toEqual({closed: true, family: "incoming", handle: expect.anything(), response: {}});
+    await responded;
+    await incoming.closed;
+    expect(order).toEqual(["pending", "closed"]);
+  } finally {
+    holdSettling(pair.right, false);
+    await Promise.all([pair.left.close(), pair.right.close()]);
+  }
+}, 20000);
+
+test("a response cancelled while native holds it settles once, before the close, and releases its copy", async () => {
+  const pair = await incomingPair();
+  try {
+    const stream = pair.left.request(pair.remote.peerId, BLOCKS, new Uint8Array(32));
+    const pending = stream.next().catch(() => undefined);
+    const incoming = await takeIncoming(pair.right);
+    const responded = incoming.respond(new Uint8Array(10 * 1024 * 1024), requestForks[0]);
+    const order = settlementOrder(incoming.closed, responded);
+    // The owner starts the write before the cancellation arrives.
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(await incoming.cancel()).toBeUndefined();
+    const outcome = await responded.then(
+      () => "sent",
+      (error) => error.failure
+    );
+    expect(["sent", "cancelled"]).toContain(outcome);
+    expect(order).toEqual([outcome === "sent" ? "pending" : "NetworkIncomingFailed", "closed"]);
+    await pending;
+    expect(pair.right.diagnostics().incoming).toMatchObject({pendingResponses: 0, reservedBytes: 0, responseBytes: 0});
   } finally {
     await Promise.all([pair.left.close(), pair.right.close()]);
   }

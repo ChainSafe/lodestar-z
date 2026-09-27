@@ -48,6 +48,8 @@ const Host = struct {
         command_count: usize = 0,
         requests: [outgoing.capacity_max]outgoing.Completion = undefined,
         request_count: usize = 0,
+        incoming: [incoming.capacity_max]incoming.Completion = undefined,
+        incoming_count: usize = 0,
         outcome: exchange.Outcome = .{},
     };
 
@@ -65,8 +67,8 @@ const Host = struct {
         if (self.failing(.checks) and selection.checks.len > 0) return self.failure_error();
         if (self.failing(.gossip) and selection.gossip != null) return self.failure_error();
         if (self.failing(.acknowledged) and selection.acknowledged_count > 0) return self.failure_error();
-        if (self.failing(.completions) and selection.publication_count + selection.command_count + selection.request_count > 0) return self.failure_error();
-        return .{ .peers = selection.peer_count, .serving = selection.serving, .serving_count = selection.serving_count, .checks = selection.checks, .gossip = selection.gossip, .acknowledged = selection.acknowledged, .acknowledged_count = selection.acknowledged_count, .publications = selection.publications, .publication_count = selection.publication_count, .commands = selection.commands, .command_count = selection.command_count, .requests = selection.requests, .request_count = selection.request_count };
+        if (self.failing(.completions) and selection.publication_count + selection.command_count + selection.request_count + selection.incoming_count > 0) return self.failure_error();
+        return .{ .peers = selection.peer_count, .serving = selection.serving, .serving_count = selection.serving_count, .checks = selection.checks, .gossip = selection.gossip, .acknowledged = selection.acknowledged, .acknowledged_count = selection.acknowledged_count, .publications = selection.publications, .publication_count = selection.publication_count, .commands = selection.commands, .command_count = selection.command_count, .requests = selection.requests, .request_count = selection.request_count, .incoming = selection.incoming, .incoming_count = selection.incoming_count };
     }
     pub fn finish(self: *Host, output: Result, outcome: exchange.Outcome) !Result {
         if (self.fail_finish) return self.failure_error();
@@ -777,4 +779,141 @@ test "an outcome the owner records while its chunk is copied survives the commit
     try std.testing.expectEqual(@as(usize, 1), ended.request_count);
     try std.testing.expectEqual(outgoing.Terminal.done, ended.requests[0].value.terminal);
     try std.testing.expect(table.get(token) == null);
+}
+
+/// A stream the host was handed, as a serving start's commit leaves it.
+fn exposeStream(runtime: *Runtime) !incoming.Token {
+    const token = try queueRequest(runtime);
+    runtime.lock();
+    defer runtime.unlock();
+    const table = &runtime.incoming.?;
+    const cell = table.get(token).?;
+    table.releaseInput(cell);
+    cell.exposed = true;
+    cell.closed_awaited = true;
+    cell.state = .serving;
+    table.refresh(cell);
+    runtime.recomputeLocked(.serving);
+    return token;
+}
+
+/// Moves a handed stream to where the owner leaves it, and readiness with it.
+fn streamMoves(runtime: *Runtime, token: incoming.Token, comptime move: fn (*incoming.Cell) void) void {
+    runtime.lock();
+    defer runtime.unlock();
+    const table = &runtime.incoming.?;
+    const cell = table.get(token).?;
+    move(cell);
+    table.releasePayload(cell);
+    table.refresh(cell);
+    runtime.recomputeLocked(.legacy);
+}
+
+fn streamEnds(cell: *incoming.Cell) void {
+    cell.native = false;
+    cell.state = .terminal;
+}
+
+fn chunkSent(cell: *incoming.Cell) void {
+    cell.response_awaited = true;
+    cell.ack = .sent;
+}
+
+/// A handed stream that ended, whose close awaits delivery, at the lowest free cell.
+fn endedStream(runtime: *Runtime) !incoming.Token {
+    const token = try exposeStream(runtime);
+    streamMoves(runtime, token, streamEnds);
+    return token;
+}
+
+test "incoming completions arrive at most `settle` per exchange, fairly under refill" {
+    var fixture: Fixture = undefined;
+    try fixture.init(false, 4);
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    const table = &runtime.incoming.?;
+    const low = try endedStream(runtime);
+    // Two streams still run, so only the lowest and the highest complete.
+    const running = [_]incoming.Token{ try exposeStream(runtime), try exposeStream(runtime) };
+    const high = try endedStream(runtime);
+    try std.testing.expectEqual(@as(u8, 3), high.index);
+    var host: Host = .{ .runtime = runtime };
+    var demand = control;
+    demand.settle = 1;
+    var delivered: [4]incoming.Token = undefined;
+    for (&delivered, 0..) |*token, pass| {
+        // The lowest cell ends again whenever it was delivered, with the next generation.
+        if (pass > 0 and table.cells[0].state == .free) _ = try endedStream(runtime);
+        const result = try host.turn(&.{}, demand);
+        try std.testing.expectEqual(@as(usize, 1), result.incoming_count);
+        try std.testing.expect(result.incoming[0].closed and result.incoming[0].ack == null and result.incoming[0].permission == null);
+        token.* = result.incoming[0].token;
+        try std.testing.expect(table.get(token.*) == null);
+    }
+    try std.testing.expectEqualSlices(incoming.Token, &.{ low, high, .{ .index = 0, .generation = 2 }, .{ .index = 0, .generation = 3 } }, &delivered);
+    // The running streams' closes keep the event loop alive.
+    try std.testing.expectEqual(@as(usize, 0), host.idled);
+    for (running) |token| retireServed(table, token);
+}
+
+test "a stopped environment returns pinned incoming completions, which the next exchange delivers" {
+    var fixture: Fixture = undefined;
+    try fixture.init(false, 2);
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    const table = &runtime.incoming.?;
+    const acknowledged = try exposeStream(runtime);
+    streamMoves(runtime, acknowledged, chunkSent);
+    const ended = try endedStream(runtime);
+    var host: Host = .{ .runtime = runtime, .fail = .completions };
+    try std.testing.expectError(error.PendingException, host.turn(&.{}, control));
+    for ([_]incoming.Token{ acknowledged, ended }) |token| try std.testing.expect(!table.get(token).?.copying);
+    try std.testing.expect(table.get(acknowledged).?.response_awaited and table.get(ended).?.closed_awaited);
+    host.fail = null;
+    const result = try host.turn(&.{}, control);
+    try std.testing.expectEqual(@as(usize, 2), result.incoming_count);
+    try std.testing.expectEqual(incoming.Ack.sent, result.incoming[0].ack.?);
+    try std.testing.expect(!result.incoming[0].closed and result.incoming[1].closed);
+    // The acknowledged stream still runs and awaits its close; the ended one retired.
+    try std.testing.expect(!table.get(acknowledged).?.response_awaited and table.get(acknowledged).?.closed_awaited);
+    try std.testing.expect(table.get(ended) == null);
+    retireServed(table, acknowledged);
+}
+
+test "an acknowledgement and a close due together share one completion, and an end during its copy waits for the next" {
+    var fixture: Fixture = undefined;
+    try fixture.init(false, 2);
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    const table = &runtime.incoming.?;
+    // The stream ended before the exchange, so its acknowledgement and close are due in one cell.
+    const together = try exposeStream(runtime);
+    streamMoves(runtime, together, chunkSent);
+    streamMoves(runtime, together, streamEnds);
+    var host: Host = .{ .runtime = runtime };
+    const both = try host.turn(&.{}, control);
+    try std.testing.expectEqual(@as(usize, 1), both.incoming_count);
+    try std.testing.expect(both.incoming[0].ack.? == .sent and both.incoming[0].closed);
+    try std.testing.expect(table.get(together) == null);
+    // The stream ends while its acknowledgement is copied: the close waits for the next exchange.
+    const racing = try exposeStream(runtime);
+    streamMoves(runtime, racing, chunkSent);
+    const Owner = struct {
+        fn ends(target: *Runtime) void {
+            target.lock();
+            defer target.unlock();
+            const cell = &target.incoming.?.cells[0];
+            streamEnds(cell);
+            target.incoming.?.releasePayload(cell);
+            target.incoming.?.refresh(cell);
+        }
+    };
+    host.during = Owner.ends;
+    const acknowledged = try host.turn(&.{}, control);
+    try std.testing.expect(acknowledged.incoming[0].ack.? == .sent and !acknowledged.incoming[0].closed);
+    host.during = null;
+    const closed = try host.turn(&.{}, control);
+    try std.testing.expectEqual(@as(usize, 1), closed.incoming_count);
+    try std.testing.expect(closed.incoming[0].ack == null and closed.incoming[0].closed);
+    try std.testing.expect(table.get(racing) == null);
 }
