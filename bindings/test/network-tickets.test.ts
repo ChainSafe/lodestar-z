@@ -1,8 +1,16 @@
 import {describe, expect, it, vi} from "vitest";
-import type {NativeCompletion} from "../src/network-runtime.js";
 import {CompletionOwner} from "../src/network-tickets.js";
 
 class Breached extends Error {}
+
+/** A completion as native delivers one, loosely typed so tests can deliver ones native never would. */
+type NativeCompletion = {
+  family: string;
+  handle: {index: number; generation: bigint};
+  kind?: string;
+  value?: unknown;
+  error?: unknown;
+};
 
 /** An owner over a native stand-in whose next exchange delivers `completions` and `closed`. */
 function owner() {

@@ -79,7 +79,7 @@ export interface NativeExchange {
   readonly disabledWaiting: boolean;
   /** Null, or why a serving start could not be handed over; it was cancelled and released, and `more` is true. */
   readonly failure: unknown;
-  /** Completed publications, which the exchange retired; each settles its operation's promise. */
+  /** Completed publications and commands, which the exchange retired; each settles its operation's promise. */
   readonly completions: readonly NativeCompletion[];
   /** The close result, in the one exchange that settled it; otherwise null. */
   readonly closed: NativeRuntimeCloseResult | null;
@@ -91,12 +91,45 @@ export interface NativeCellHandle {
   generation: bigint;
 }
 
+/** An operation's error, whose `code` names it. */
+export type NativeOperationError = Error & {code: string};
+
 /** One completed operation cell: the value its promise resolves with, or the error it rejects with. */
-export type NativeCompletion = {
-  family: "publication" | "command" | "request" | "incoming";
-  handle: NativeCellHandle;
-  kind?: string;
-} & ({value: unknown} | {error: unknown});
+export type NativeCompletion =
+  | ({family: "publication"; handle: NativeCellHandle; kind?: undefined} & (
+      | {value: NativeGossipPublishResult}
+      | {error: NativeOperationError}
+    ))
+  | ({family: "command"; handle: NativeCellHandle; kind: NativeCommandKind} & (
+      | {value: NativeCommandResult}
+      | {error: NativeOperationError}
+    ));
+
+/** The command a completion answers, named as the runtime method that admitted it. */
+export type NativeCommandKind =
+  | "applyIntent"
+  | "updateStatus"
+  | "getIdentity"
+  | "getPeers"
+  | "getGossipDiagnostics"
+  | "connect"
+  | "disconnect"
+  | "reStatusPeers"
+  | "addDirectPeer"
+  | "removeDirectPeer"
+  | "getDirectPeers"
+  | "getRememberedPeers";
+
+/** What a command's promise resolves with: a snapshot or intent result, removeDirectPeer's boolean, or nothing. */
+export type NativeCommandResult =
+  | NativeIntentResult
+  | NativeIdentitySnapshot
+  | NativePeerSnapshot
+  | NativeGossipDiagnosticsPage
+  | NativeDirectSnapshot
+  | NativeRememberedPeersSnapshot
+  | boolean
+  | undefined;
 
 /**
  * A fatal site JavaScript raises: `generated_batch`, an exchange refused a batch or demand the pump generated;
@@ -148,8 +181,8 @@ export interface NativeNetworkApplicationRuntime {
    */
   getRememberedPeers(): Promise<NativeRememberedPeersSnapshot>;
   /**
-   * One host turn: applies up to 256 `actions`, settles up to `demand.settleCells` completed commands, request pulls
-   * and retirements, and incoming acknowledgements per table, delivers as many completed publications in
+   * One host turn: applies up to 256 `actions`, settles up to `demand.settleCells` request pulls and retirements and
+   * incoming acknowledgements per table, delivers as many completed publications and commands per family in
    * `completions`, then the close result once nothing else awaits settlement or delivery, and delivers the payload
    * `demand` asks for. It throws only for invalid input or a nested call, before applying anything. Actions after
    * close are ignored; unknown penalized identities count in peerReportsIgnored.

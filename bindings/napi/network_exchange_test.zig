@@ -44,6 +44,8 @@ const Host = struct {
         acknowledged_count: usize = 0,
         publications: [publications.capacity_max]publications.Token = undefined,
         publication_count: usize = 0,
+        commands: [commands.capacity]commands.Token = undefined,
+        command_count: usize = 0,
         outcome: exchange.Outcome = .{},
     };
 
@@ -65,8 +67,8 @@ const Host = struct {
         if (self.failing(.checks) and selection.checks.len > 0) return self.failure_error();
         if (self.failing(.gossip) and selection.gossip != null) return self.failure_error();
         if (self.failing(.acknowledged) and selection.acknowledged_count > 0) return self.failure_error();
-        if (self.failing(.completions) and selection.publication_count > 0) return self.failure_error();
-        return .{ .peers = selection.peer_count, .serving = selection.serving, .serving_count = selection.serving_count, .checks = selection.checks, .gossip = selection.gossip, .acknowledged = selection.acknowledged, .acknowledged_count = selection.acknowledged_count, .publications = selection.publications, .publication_count = selection.publication_count };
+        if (self.failing(.completions) and selection.publication_count + selection.command_count > 0) return self.failure_error();
+        return .{ .peers = selection.peer_count, .serving = selection.serving, .serving_count = selection.serving_count, .checks = selection.checks, .gossip = selection.gossip, .acknowledged = selection.acknowledged, .acknowledged_count = selection.acknowledged_count, .publications = selection.publications, .publication_count = selection.publication_count, .commands = selection.commands, .command_count = selection.command_count };
     }
     pub fn finish(self: *Host, output: Result, outcome: exchange.Outcome) !Result {
         if (self.fail_finish) return self.failure_error();
@@ -92,14 +94,7 @@ const Host = struct {
         return err;
     }
 
-    /// Settles as the N-API host does, retiring terminal commands at once, then runs phases B to D.
     fn turn(self: *Host, actions: []const exchange.Action, demand: exchange.Demand) !Result {
-        for (0..demand.settle) |_| {
-            self.runtime.lock();
-            defer self.runtime.unlock();
-            const i = self.runtime.table.nextTerminal(0) orelse break;
-            self.runtime.table.retire(.{ .index = @intCast(i), .generation = self.runtime.table.cells[i].generation });
-        }
         return exchange.run(self.runtime, actions, &demand, self.clock, self);
     }
 };
@@ -190,13 +185,13 @@ fn stopAt(part: Part) !void {
     const checked = try admit(runtime, .beacon_attestation, @splat(3), "data");
     const column = try admit(runtime, .data_column_sidecar, null, "data");
     const exit = try admit(runtime, .voluntary_exit, null, "data");
-    for (0..2) |_| runtime.table.transition(runtime.table.get(try runtime.table.reserve(.getIdentity)), .terminal);
+    const completed = [_]commands.Token{ try completeCommand(runtime, .getIdentity), try completeCommand(runtime, .getIdentity) };
 
     var host: Host = .{ .runtime = runtime, .fail = part };
     try std.testing.expectError(error.PendingException, host.turn(&.{}, deployed));
     try std.testing.expectEqual(null, host.site);
-    // Settled promises stay settled; every pinned item is back where it was, and the rows stay queued.
-    try std.testing.expectEqual(@as(u8, 0), runtime.table.occupied);
+    // Every pinned item is back where it was, completed commands included, and the rows stay queued.
+    for (completed) |token| try std.testing.expectEqual(commands.State.terminal, runtime.table.get(token).state);
     try std.testing.expectEqual(@as(u8, 2), fixture.lane.len);
     for (requests) |token| {
         const cell = runtime.incoming.?.get(token).?;
@@ -225,6 +220,8 @@ fn stopAt(part: Part) !void {
     try std.testing.expectEqual(@as(usize, 1), host.kept_alive);
     try std.testing.expectEqualSlices(g.Token, &.{checked}, delivered.checks.tokens[0..delivered.checks.len]);
     try std.testing.expectEqualSlices(g.Token, &.{ column, exit }, delivered.gossip.?.tokens[0..delivered.gossip.?.len]);
+    try std.testing.expectEqualSlices(commands.Token, &completed, delivered.commands[0..delivered.command_count]);
+    try std.testing.expectEqual(@as(u8, 0), runtime.table.occupied);
     for (requests) |token| retireServed(&runtime.incoming.?, token);
 }
 
@@ -282,7 +279,7 @@ test "control-only exchanges settle in batches immediately while queued payload 
     const runtime = &fixture.runtime;
     publishPeer(runtime);
     const exit = try admit(runtime, .voluntary_exit, null, "data");
-    for (0..commands.capacity) |_| runtime.table.transition(runtime.table.get(try runtime.table.reserve(.getIdentity)), .terminal);
+    for (0..commands.capacity) |_| _ = try completeCommand(runtime, .getIdentity);
     var host: Host = .{ .runtime = runtime };
     var batches: usize = 0;
     var demand = control;
@@ -576,10 +573,53 @@ test "a stopped environment returns pinned publication completions, which the ne
     var host: Host = .{ .runtime = runtime, .fail = .completions };
     try std.testing.expectError(error.PendingException, host.turn(&.{}, control));
     for (tokens) |token| try std.testing.expectEqual(publications.State.terminal, runtime.publications.?.get(token).?.state);
+    try std.testing.expectEqual(@as(usize, 0), host.idled);
     host.fail = null;
     const result = try host.turn(&.{}, control);
     try std.testing.expectEqualSlices(publications.Token, &tokens, result.publications[0..result.publication_count]);
     try std.testing.expect(!result.outcome.more and runtime.publications.?.diag.occupied == 0);
     // Retiring the last admitted publication lets the event loop go; the restored exchange did not.
     try std.testing.expectEqual(@as(usize, 1), host.idled);
+}
+
+/// A command the owner completed at the lowest free cell, as execution leaves it.
+fn completeCommand(runtime: *Runtime, command: commands.Command) !commands.Token {
+    const token = try runtime.reserveCommand(command);
+    runtime.lock();
+    defer runtime.unlock();
+    runtime.table.transition(runtime.table.get(token), .terminal);
+    runtime.recomputeLocked(.legacy);
+    return token;
+}
+
+test "command completions arrive at most `settle` per exchange, fairly under refill, and retire their typed stores" {
+    var fixture: Fixture = undefined;
+    try fixture.init(false, 2);
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    var stores = try r.Stores.create(std.testing.allocator, 4);
+    defer stores.destroy();
+    runtime.stores = stores;
+    defer runtime.stores = null;
+    const low = try completeCommand(runtime, .getPeers);
+    const unfinished = [_]commands.Token{ try runtime.reserveCommand(.getIdentity), try runtime.reserveCommand(.getIdentity) };
+    const high = try completeCommand(runtime, .getDirectPeers);
+    try std.testing.expectEqual(@as(u8, 3), high.index);
+    var host: Host = .{ .runtime = runtime };
+    var demand = control;
+    demand.settle = 1;
+    var delivered: [4]commands.Token = undefined;
+    for (&delivered, 0..) |*token, pass| {
+        // The lowest cell completes again whenever it was delivered, taking the freed snapshot store.
+        if (pass > 0 and runtime.table.cells[0].state == .free) _ = try completeCommand(runtime, .getPeers);
+        const result = try host.turn(&.{}, demand);
+        try std.testing.expectEqual(@as(usize, 1), result.command_count);
+        token.* = result.commands[0];
+        try std.testing.expectEqual(commands.State.free, runtime.table.cells[token.index].state);
+    }
+    try std.testing.expectEqualSlices(commands.Token, &.{ low, high, .{ .index = 0, .generation = 2 }, .{ .index = 0, .generation = 3 } }, &delivered);
+    // Delivery freed each snapshot store, so both remain available.
+    try std.testing.expect(!runtime.table.stores[1][0] and !runtime.table.stores[1][1]);
+    try std.testing.expectEqual(@as(usize, 0), host.idled);
+    for (unfinished) |token| runtime.abortCommand(token);
 }

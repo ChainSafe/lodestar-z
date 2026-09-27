@@ -15,6 +15,7 @@ const incoming = @import("network_incoming.zig");
 const incoming_js = @import("network_incoming_js.zig");
 const request_js = @import("network_request_js.zig");
 const exchange_mod = @import("network_exchange.zig");
+const command_js = @import("network_command_js.zig");
 const fatal = @import("network_fatal.zig");
 
 pub const js_meta = js.class(.{});
@@ -60,7 +61,7 @@ pub fn initialize(self: *@This(), config: js.Value, callback: js.Value) !js.Valu
     try prepareCloseResults(env, runtime);
     try runtime.results.prepare(env);
     const holder = try env.createObject();
-    try holder.setNamedProperty("identity", try identity(env, &runtime.identity));
+    try holder.setNamedProperty("identity", try command_js.identity(env, &runtime.identity));
     try holder.setNamedProperty("limits", try resolvedLimits(env, runtime));
     try holder.setNamedProperty("capacities", try capacities(env, runtime));
     try holder.setNamedProperty("closed", runtime.close_deferred.?.getPromise());
@@ -190,8 +191,7 @@ fn makeError(env: napi.Env, err: anyerror) !Value {
 /// Settles up to `limit` legacy completions per table, then the close result once the owner has quiesced and nothing
 /// awaits settlement or delivery, which `closed` receives. Returns whether more remain.
 fn settleWithin(env: napi.Env, runtime: *Runtime, limit: usize, closed: ?*?Value) !bool {
-    var more = try settleOperations(env, runtime, limit);
-    more = try request_js.settle(env, runtime, limit) or more;
+    var more = try request_js.settle(env, runtime, limit);
     more = try incoming_js.settle(env, runtime, limit) or more;
     runtime.lock();
     const idle = runtime.idleLocked();
@@ -351,8 +351,6 @@ pub fn close(self: *@This()) void {
     }
 }
 
-const bytes = @import("network_js.zig").bytes;
-const endpoint = @import("network_js.zig").endpoint;
 fn text(value: []const u8) !Value {
     return js.env().createStringUtf8(value);
 }
@@ -371,23 +369,6 @@ fn capacities(env: napi.Env, runtime: *const Runtime) !Value {
     try object.setNamedProperty("command", try env.createUint32(commands.capacity));
     try object.setNamedProperty("request", try env.createUint32(@intCast(runtime.requests.?.diag.capacity)));
     try object.setNamedProperty("incoming", try env.createUint32(@intCast(runtime.incoming.?.diag.capacity)));
-    return object;
-}
-
-fn identity(env: napi.Env, value: *const r.Identity) !Value {
-    const object = try env.createObject();
-    try object.setNamedProperty("peerId", try @import("network_js.zig").peerIdValue(env, &value.peer));
-    try object.setNamedProperty("metadata", try projection.metadata(env, &value.metadata));
-    const endpoints = try env.createArrayWithLength(@intFromBool(value.endpoints[0] != null) + @as(u32, @intFromBool(value.endpoints[1] != null)));
-    var endpoint_index: u32 = 0;
-    for (value.endpoints) |address| if (address) |bound| {
-        try endpoints.setElement(endpoint_index, try endpoint(env, bound));
-        endpoint_index += 1;
-    };
-    try object.setNamedProperty("localEndpoints", endpoints);
-    try object.setNamedProperty("localEndpoint", try endpoint(env, value.endpoints[0] orelse value.endpoints[1].?));
-    try object.setNamedProperty("localMultiaddr", try bytes(env, value.multiaddr[0..value.multiaddr_len]));
-    try object.setNamedProperty("localEnr", if (value.enr_len == 0) try env.getNull() else try bytes(env, value.enr[0..value.enr_len]));
     return object;
 }
 
@@ -474,12 +455,11 @@ fn submit(self: *@This(), comptime command: commands.Command, args: []const Valu
         },
     }
     const env = js.env();
-    operation.deferred = try env.createPromise();
-    errdefer if (operation.deferred) |deferred| @import("network_js.zig").discardPromise(env, deferred);
-    const result = if (operation.deferred) |deferred| deferred.getPromise() else try env.getUndefined();
+    // Prepared before admission commits, so every admitted command has a handle to complete.
+    const handle = try @import("network_js.zig").handle(env, token.index, token.generation);
     try runtime.queueCommand(token);
     runtime.notify.ref(env) catch {};
-    return .{ .val = result };
+    return .{ .val = handle };
 }
 pub fn applyIntent(self: *@This(), intent: js.Value, slot: js.Value) !js.Value {
     return self.submit(.applyIntent, &.{ intent.val, slot.val });
@@ -516,91 +496,6 @@ pub fn getDirectPeers(self: *@This()) !js.Value {
 }
 pub fn getRememberedPeers(self: *@This()) !js.Value {
     return self.submit(.getRememberedPeers, &.{});
-}
-fn settleOperations(env: napi.Env, runtime: *Runtime, limit: usize) !bool {
-    var settled: usize = 0;
-    for (0..commands.capacity) |_| {
-        runtime.lock();
-        const i = runtime.table.nextTerminal(runtime.table.settle_cursor) orelse runtime.table.nextTerminal(0) orelse {
-            runtime.unlock();
-            return false;
-        };
-        if (settled == limit) {
-            runtime.unlock();
-            return true;
-        }
-        settled += 1;
-        runtime.bridge.deliver(.completion, 1);
-        runtime.table.settle_cursor = i + 1;
-        const cell = &runtime.table.cells[i];
-        runtime.table.transition(cell, .copying);
-        const token: commands.Token = .{ .index = @intCast(i), .generation = cell.generation };
-        runtime.unlock();
-        defer runtime.abortCommand(token);
-        const operation = &runtime.table.cells[i];
-        if (operation.deferred) |deferred| {
-            if (operation.failure) |err| {
-                try deferred.reject(@import("network_js.zig").settled(env, makeError(env, err)) catch try runtime.copy_error.?.getValue());
-            } else {
-                const value = copyOperation(env, runtime, i) catch {
-                    try deferred.reject(try runtime.copy_error.?.getValue());
-                    continue;
-                };
-                try deferred.resolve(value);
-            }
-        }
-    }
-    return false;
-}
-fn copyOperation(env: napi.Env, runtime: *Runtime, index: usize) !Value {
-    const operation = &runtime.table.cells[index];
-    const store = runtime.table.cells[index].store;
-    const object = switch (operation.input.command) {
-        .getGossipDiagnostics => try @import("network_gossip_diagnostics.zig").copy(env, &runtime.stores.?.gossip_diagnostics[store.?]),
-        .getIdentity => try identity(env, &operation.identity),
-        .applyIntent, .getPeers, .getDirectPeers, .getRememberedPeers => try env.createObject(),
-        .removeDirectPeer => return env.getBoolean(operation.boolean),
-        else => return env.getUndefined(),
-    };
-    try object.setNamedProperty("ownerSequence", try env.createBigintUint64(operation.sequence));
-    switch (operation.input.command) {
-        .applyIntent => {
-            try object.setNamedProperty("changed", try env.getBoolean(operation.boolean));
-            try object.setNamedProperty("slot", try env.createBigintUint64(operation.input.slot));
-        },
-        .getPeers => {
-            const peers = try env.createArrayWithLength(operation.count);
-            for (runtime.stores.?.snapshots[store.?][0..operation.count], 0..) |*row, i| try peers.setElement(@intCast(i), try projection.state(env, row));
-            try object.setNamedProperty("peers", peers);
-            try object.setNamedProperty("occupiedCount", try env.createDouble(@floatFromInt(operation.count)));
-            try object.setNamedProperty("capacity", try env.createUint32(runtime.peer_capacity));
-            const counts = try env.createObject();
-            try counts.setNamedProperty("connected", try env.createUint32(operation.counts.connected));
-            try counts.setNamedProperty("relevant", try env.createUint32(operation.counts.relevant));
-            try counts.setNamedProperty("outboundRelevant", try env.createUint32(operation.counts.outbound_relevant));
-            try object.setNamedProperty("counts", counts);
-        },
-        .getDirectPeers => {
-            const identities = try env.createArrayWithLength(operation.count);
-            for (runtime.stores.?.direct[store.?][0..operation.count], 0..) |*peer, i| try identities.setElement(@intCast(i), try @import("network_js.zig").peerIdValue(env, peer));
-            try object.setNamedProperty("identities", identities);
-        },
-        .getRememberedPeers => {
-            const page = &runtime.stores.?.remembered[store.?];
-            try object.setNamedProperty("genesisValidatorsRoot", try @import("network_js.zig").bytes(env, &page.genesis_root));
-            const peers = try env.createArrayWithLength(operation.count);
-            for (page.records[0..operation.count], 0..) |*record, i| {
-                const entry = try env.createObject();
-                try entry.setNamedProperty("peerId", try @import("network_js.zig").peerIdValue(env, &record.peer));
-                try entry.setNamedProperty("endpoint", try @import("network_js.zig").endpoint(env, record.address));
-                try entry.setNamedProperty("qualifiedAtUnixS", try env.createDouble(@floatFromInt(record.qualified_at_s)));
-                try peers.setElement(@intCast(i), entry);
-            }
-            try object.setNamedProperty("peers", peers);
-        },
-        else => {},
-    }
-    return object;
 }
 pub fn requestStart(self: *@This(), peer: js.Value, protocol: js.Value, data: js.Value, options: js.Value) !js.Value {
     const call = r.call(self.runtime, .request_start);

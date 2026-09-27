@@ -224,7 +224,7 @@ test("a completion delivered in the job that admitted its publication settles th
   }
 });
 
-test("close settles after every publication and command admitted before it, one completion per exchange", async () => {
+test("close settles after every publication and command admitted before it, one completion per family per exchange", async () => {
   const runtime = startRuntime(applicationConfig());
   holdSettling(runtime, true);
   const order: string[] = [];
@@ -242,14 +242,15 @@ test("close settles after every publication and command admitted before it, one 
     record(runtime.getPeers(), "command"),
   ];
   const closing = record(runtime.close(), "closed");
-  const delivered: number[] = [];
+  const delivered: string[][] = [];
   for (let i = 0; i < 400 && !order.includes("closed"); i++) {
     await delay(5);
-    delivered.push(runtime.exchange([], {...settleOnly, settleCells: 1}).completions.length);
+    delivered.push(runtime.exchange([], {...settleOnly, settleCells: 1}).completions.map(({family}) => family));
   }
   await Promise.all([...operations, closing]);
   expect(order.at(-1)).toBe("closed");
   expect(order.filter((label) => label === "publication")).toHaveLength(4);
-  expect(delivered.every((count) => count <= 1)).toBe(true);
-  expect(delivered.reduce((sum, count) => sum + count, 0)).toBe(4);
+  expect(order.filter((label) => label === "command")).toHaveLength(2);
+  expect(delivered.every((families) => new Set(families).size === families.length)).toBe(true);
+  expect(delivered.flat().sort()).toEqual(["command", "command", ...Array(4).fill("publication")]);
 });

@@ -22,7 +22,6 @@ pub const Cell = struct {
     store: ?u8 = null,
     order: u64 = 0,
     input: Input = .{ .command = .getIdentity },
-    deferred: ?@import("zapi:zapi").napi.Deferred = null,
     failure: ?anyerror = null,
     sequence: u64 = 0,
     boolean: bool = false,
@@ -33,9 +32,9 @@ pub const Cell = struct {
 };
 pub const Table = struct {
     cells: [capacity]Cell = @splat(.{}),
-    /// The terminal cells, which the host's settlement delivers. `transition` keeps it current.
+    /// The terminal cells, whose completions an exchange delivers. `transition` keeps it current.
     terminal: std.StaticBitSet(capacity) = .initEmpty(),
-    /// Past the last settled cell, where settlement resumes, so refilled low cells cannot starve higher ones.
+    /// Past the last delivered cell, where delivery resumes, so refilled low cells cannot starve higher ones.
     settle_cursor: usize = 0,
     stores: [3][2]bool = @splat(@splat(false)),
     connects: u8 = 0,
@@ -119,7 +118,7 @@ pub const Table = struct {
         rest.setRangeValue(.{ .start = 0, .end = @min(from, capacity) }, false);
         return rest.findFirstSet();
     }
-    /// Whether any completion awaits settlement. O(1); debug builds check it against a scan.
+    /// Whether any completion awaits delivery. O(1); debug builds check it against a scan.
     pub fn anyTerminal(self: *const Table) bool {
         if (builtin.mode == .Debug) for (&self.cells, 0..) |*cell, i| std.debug.assert(self.terminal.isSet(i) == (cell.state == .terminal));
         return self.terminal.findFirstSet() != null;
