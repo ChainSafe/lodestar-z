@@ -4,7 +4,6 @@ const w = @import("../control_wire.zig");
 const Catalog = @import("catalog.zig").Catalog;
 const Control = @import("control.zig").Control;
 const ControlProtocol = @import("../control_protocol.zig").ControlProtocol;
-const relevance = @import("control.zig").relevance;
 const rr = @import("../reqresp/root.zig");
 const Now = @import("../types.zig").Now;
 
@@ -63,7 +62,7 @@ test "control start quota and cursor preserve order across Identify and RPC star
             try std.testing.expect(due.close == null and due.identify);
             try std.testing.expectEqual(expected.work[seen].request, if (due.request) |probe| probe.protocol else null);
             control.identifyStarted(due, true, now);
-            if (due.request != null) control.requestStarted(due, .started, now);
+            if (due.request != null) control.requestStarted(due, true, now);
             control.rekey(&catalog, &requests, due.index);
         }
         try std.testing.expectEqual(expected.work.len, seen);
@@ -79,37 +78,51 @@ test "peer control relevance boundary roots forks and availability" {
     local.status.finalized_root = @splat(1);
     var remote = local.status;
     remote.head_slot = 11;
-    try std.testing.expectEqual(@as(?t.DisconnectReason, null), relevance(&local, &remote, 10));
+    try std.testing.expectEqual(@as(?t.DisconnectReason, null), try statusVerdict(&local, &remote, 10));
     remote.head_slot = 12;
-    try std.testing.expectEqual(t.DisconnectReason.future_head, relevance(&local, &remote, 10).?);
+    try std.testing.expectEqual(t.DisconnectReason.future_head, (try statusVerdict(&local, &remote, 10)).?);
     remote.head_slot = 10;
     remote.fork_digest[0] = 1;
-    try std.testing.expectEqual(
-        t.DisconnectReason.incompatible_fork,
-        relevance(&local, &remote, 10).?,
-    );
+    try std.testing.expectEqual(t.DisconnectReason.incompatible_fork, (try statusVerdict(&local, &remote, 10)).?);
     remote.fork_digest[0] = 0;
     remote.finalized_root = @splat(2);
-    try std.testing.expectEqual(
-        t.DisconnectReason.finalized_mismatch,
-        relevance(&local, &remote, 10).?,
-    );
+    try std.testing.expectEqual(t.DisconnectReason.finalized_mismatch, (try statusVerdict(&local, &remote, 10)).?);
     remote.finalized_epoch = 3;
-    try std.testing.expect(relevance(&local, &remote, 10) == null);
+    try std.testing.expect(try statusVerdict(&local, &remote, 10) == null);
     remote.finalized_epoch = 4;
     remote.finalized_root = @splat(0);
-    try std.testing.expect(relevance(&local, &remote, 10) == null);
+    try std.testing.expect(try statusVerdict(&local, &remote, 10) == null);
     local.fork.fork = .fulu;
-    try std.testing.expectEqual(
-        t.DisconnectReason.missing_availability,
-        relevance(&local, &remote, 10).?,
-    );
+    try std.testing.expectEqual(t.DisconnectReason.missing_availability, (try statusVerdict(&local, &remote, 10)).?);
     remote.earliest_available_slot = 0;
-    try std.testing.expect(relevance(&local, &remote, 10) == null);
-    try std.testing.expectEqual(w.Protocol.status_v2, w.statusProtocol(local.fork));
-    try std.testing.expectEqual(w.Protocol.metadata_v3, w.metadataProtocol(local.fork));
-    local.fork.fork = .altair;
-    try std.testing.expectEqual(w.Protocol.metadata_v2, w.metadataProtocol(local.fork));
-    local.fork.fork = .phase0;
-    try std.testing.expectEqual(w.Protocol.metadata_v1, w.metadataProtocol(local.fork));
+    try std.testing.expect(try statusVerdict(&local, &remote, 10) == null);
+}
+
+/// Delivers the remote Status as an inbound request on a fresh connection and returns the close
+/// reason peer control chose, or null after it accepted the Status.
+fn statusVerdict(local: *const t.LocalState, remote: *const t.Status, slot: u64) !?t.DisconnectReason {
+    const a = std.testing.allocator;
+    var catalog = try Catalog.init(a, .{ .capacity = 1, .outbound_reserve = 0, .target_peers = 1, .max_peers = 1, .min_outbound = 0 }, 1, 0);
+    defer catalog.deinit(a);
+    var control = try Control.init(a, .{}, 1);
+    defer control.deinit(a);
+    var requests = try ControlProtocol.init(a, 1, 1, 1);
+    defer requests.deinit(a);
+    const now: Now = .{ .mono_ms = 10, .unix_s = 0 };
+    const conn: t.Handle = .{ .index = 0, .generation = 1 };
+    const peer = catalog.admit(&.{ .bytes = @splat(1) }, &.{ .bytes = @splat(0) }, conn, &.{ .direction = .inbound, .endpoint = .unspecified, .now_ms = now.mono_ms }).admitted.peer;
+    control.connected(&catalog, &requests, peer, conn, .inbound, now);
+    // Status v1 carries no earliest available slot.
+    const protocol: w.Protocol = if (remote.earliest_available_slot == null) .status_v1 else .status_v2;
+    var bytes: [w.status_size_max]u8 = undefined;
+    const len = try w.encodeStatus(protocol, remote, &bytes);
+    const request: rr.RequestHandle = .{ .index = 0, .generation = 1, .direction = .inbound };
+    control.requested(&catalog, &requests, peer, &.{ .request = request, .peer = conn, .protocol = protocol, .bytes = bytes[0..len] }, local, now, slot);
+    const snapshot = catalog.get(peer).?;
+    if (snapshot.disconnect_reason) |reason| {
+        try std.testing.expect(snapshot.status == null);
+        return reason;
+    }
+    try std.testing.expectEqualDeep(remote.*, snapshot.status.?);
+    return null;
 }

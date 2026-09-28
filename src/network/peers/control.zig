@@ -168,11 +168,6 @@ pub const Control = struct {
         if (current.established_slot == null or !std.meta.eql(current.connection, conn)) return null;
         return current;
     }
-    /// Rekeys a schedule after a test edited its row or the peer's catalog row directly.
-    pub fn reschedule(self: *Control, catalog: *const Catalog, requests: *const ControlProtocol, peer: t.PeerRef) void {
-        comptime assert(@import("builtin").is_test);
-        self.rekey(catalog, requests, peer.index);
-    }
     fn pingInterval(self: *const Control, direction: t.Direction) u64 {
         return if (direction == .inbound)
             self.options.ping_inbound_ms
@@ -357,19 +352,16 @@ pub const Control = struct {
         }
         row.identify_state = .started;
     }
-    pub fn requestStarted(self: *Control, due: *const Due, start: protocol_mod.Start, now: Now) void {
+    pub fn requestStarted(self: *Control, due: *const Due, started: bool, now: Now) void {
         const row = &self.schedules[due.index];
-        switch (start) {
-            .started => {
-                self.counters.started +|= 1;
-                row.retry_ms = 0;
-                if (due.request.?.protocol == .goodbye_v1) row.closing.?.sent = true;
-            },
-            .retiring, .deferred => {
-                self.counters.deferred +|= 1;
-                row.retry_ms = now.mono_ms +| self.options.local_retry_ms;
-            },
+        if (!started) {
+            self.counters.deferred +|= 1;
+            row.retry_ms = now.mono_ms +| self.options.local_retry_ms;
+            return;
         }
+        self.counters.started +|= 1;
+        row.retry_ms = 0;
+        if (due.request.?.protocol == .goodbye_v1) row.closing.?.sent = true;
     }
 
     pub fn identifyResults(self: *Control, catalog: *Catalog, requests: *const ControlProtocol, results: []const @import("../identify/root.zig").Result) void {
@@ -765,7 +757,7 @@ fn healthProbe(protocol: rr.Protocol) ?HealthProbe {
     };
 }
 
-pub fn relevance(
+fn relevance(
     local: *const t.LocalState,
     remote: *const t.Status,
     current_slot: u64,

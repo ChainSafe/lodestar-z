@@ -400,6 +400,13 @@ pub fn intent(node: *const core.NetworkCore, subscriptions: []const local_intent
     };
 }
 
+/// Control operations holding a request, which retirement tests watch drain.
+pub fn controlOperations(node: *const core.NetworkCore) usize {
+    var count: usize = 0;
+    for (node.control_protocol.operations) |*op| count += @intFromBool(op.request != null);
+    return count;
+}
+
 pub fn subscribe(node: *core.NetworkCore, name: []const u8) !void {
     try setSubscription(node, name, true);
 }

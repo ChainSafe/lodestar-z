@@ -814,8 +814,8 @@ pub const NetworkCore = struct {
                 pm.control.identifyStarted(due, started, now);
             }
             const probe = due.request orelse continue;
-            const start = requests.start(&self.service.reqresp, &self.service.router, quic, due.peer, due.conn, &probe, &pm.local, now);
-            pm.control.requestStarted(due, start, now);
+            const started = requests.start(&self.service.reqresp, &self.service.router, quic, due.peer, due.conn, &probe, &pm.local, now);
+            pm.control.requestStarted(due, started, now);
         }
     }
 

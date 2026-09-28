@@ -18,8 +18,8 @@ pub const Options = struct { capacity: u16 = 256, concurrent_max: u16 = 4, outbo
 /// Unanswered QUIC dials cost one handshake slot each, so the table is sized for dead endpoints,
 /// not for peer headroom.
 pub const attempts_max = 64;
-pub const history_retention_ms = catalog_mod.history_retention_ms;
-pub const hint_freshness_ms = catalog_mod.hint_freshness_ms;
+const history_retention_ms = catalog_mod.history_retention_ms;
+const hint_freshness_ms = catalog_mod.hint_freshness_ms;
 pub const connect_timeout_ms: u64 = 30_000;
 pub const Source = enum { discovery, manual, direct };
 const Attempt = struct {
@@ -289,7 +289,7 @@ pub const Dialing = struct {
         self.selection_dirty = false;
         self.selection_revision = catalog.intent_revision;
     }
-    pub fn hostDemand(_: *const Dialing, catalog: *const Catalog) u16 {
+    fn hostDemand(_: *const Dialing, catalog: *const Catalog) u16 {
         var count: u16 = 0;
         var it = catalog.intents.iterator(.{});
         while (it.next()) |index| {

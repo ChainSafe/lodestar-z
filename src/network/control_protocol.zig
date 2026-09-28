@@ -41,7 +41,6 @@ const Response = struct {
     conn: t.Handle = undefined,
     bytes: [wire.status_size_max]u8 = undefined,
 };
-pub const Start = enum { started, retiring, deferred };
 
 pub const ControlProtocol = struct {
     operations: []Operation,
@@ -79,21 +78,14 @@ pub const ControlProtocol = struct {
         self.* = undefined;
     }
 
-    /// Control operations holding a request, which retirement tests watch drain.
-    pub fn operationsInFlight(self: *const ControlProtocol) usize {
-        var count: usize = 0;
-        for (self.operations) |*op| count += @intFromBool(op.request != null);
-        return count;
-    }
-
     /// Whether a request holds the catalog index's operation, including a replaced connection's
     /// cancelled request that has not reached its terminal event.
     pub fn busy(self: *const ControlProtocol, index: usize) bool {
         return self.operation_by_peer[index] != no_operation;
     }
 
-    /// Encodes the probe into a free operation and submits it. The operation's buffers stay
-    /// immutable until the request's terminal event retires it.
+    /// Encodes the probe into a free operation and submits it, returning whether it started. The
+    /// operation's buffers stay immutable until the request's terminal event retires it.
     pub fn start(
         self: *ControlProtocol,
         reqresp: *rr.ReqResp,
@@ -104,7 +96,7 @@ pub const ControlProtocol = struct {
         probe: *const Probe,
         local: *const t.LocalState,
         now: Now,
-    ) Start {
+    ) bool {
         assert(self.operation_by_peer[peer.index] == no_operation);
         defer if (@import("builtin").is_test) self.checkIndex();
         for (self.operations, 0..) |*op, index| {
@@ -114,7 +106,7 @@ pub const ControlProtocol = struct {
                     probe.protocol,
                     &local.status,
                     &op.bytes,
-                ) catch return .deferred,
+                ) catch return false,
                 .ping_v1, .goodbye_v1 => blk: {
                     std.mem.writeInt(
                         u64,
@@ -139,10 +131,7 @@ pub const ControlProtocol = struct {
                 &op.sink,
                 .{},
                 now,
-            ) catch |err| return switch (err) {
-                error.SlotsExhausted, error.NegotiationTableFull => .retiring,
-                else => .deferred,
-            };
+            ) catch return false;
             op.peer = peer;
             op.conn = conn;
             op.protocol = probe.protocol;
@@ -151,9 +140,9 @@ pub const ControlProtocol = struct {
             op.after_ready = probe.after_ready;
             op.request = request;
             self.operation_by_peer[peer.index] = @intCast(index);
-            return .started;
+            return true;
         }
-        return .retiring;
+        return false;
     }
 
     /// Cancels the peer's in-flight request on this connection. Its operation stays held until

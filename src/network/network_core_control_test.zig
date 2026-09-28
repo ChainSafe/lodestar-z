@@ -121,7 +121,7 @@ test "managed production Fulu receives old Status only with established revalida
         try @import("network_core_test_support.zig").updateLocal(&setup.server, &next, setup.pair.now);
         const deadline = setup.server.peer_manager.control.schedules[peer.index].transition_until_ms;
         setup.server.peer_manager.control.schedules[peer.index].retry_ms = std.math.maxInt(u64);
-        setup.server.peer_manager.control.reschedule(&setup.server.peer_manager.catalog, &setup.server.control_protocol, peer);
+        setup.server.peer_manager.control.rekey(&setup.server.peer_manager.catalog, &setup.server.control_protocol, peer.index);
         try previousStatus(&setup);
         const snapshot = setup.server.peer_manager.catalog.get(peer).?;
         try std.testing.expect(!snapshot.relevant);
@@ -130,7 +130,7 @@ test "managed production Fulu receives old Status only with established revalida
             try std.testing.expectEqual(deadline, setup.server.peer_manager.control.schedules[peer.index].transition_until_ms);
             setup.pair.advance(deadline - setup.pair.now.mono_ms);
             setup.server.peer_manager.control.schedules[peer.index].retry_ms = std.math.maxInt(u64);
-            setup.server.peer_manager.control.reschedule(&setup.server.peer_manager.catalog, &setup.server.control_protocol, peer);
+            setup.server.peer_manager.control.rekey(&setup.server.peer_manager.catalog, &setup.server.control_protocol, peer.index);
             try previousStatus(&setup);
         }
         try std.testing.expectEqual(t.DisconnectReason.incompatible_fork, setup.server.peer_manager.catalog.get(peer).?.disconnect_reason.?);
@@ -276,12 +276,12 @@ test "managed stale metadata finishes one refresh while periodic Status and late
         const started = setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing;
         const statuses = setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing;
         row.status_due_ms = setup.pair.now.mono_ms + 2000;
-        setup.client.peer_manager.control.reschedule(&setup.client.peer_manager.catalog, &setup.client.control_protocol, peer);
+        setup.client.peer_manager.control.rekey(&setup.client.peer_manager.catalog, &setup.client.control_protocol, peer.index);
         try std.testing.expectEqual(@as(usize, 1), setup.server.peer_manager.snapshots(&snapshots));
         const remote = snapshots[0].peer;
         remoteSequence(&setup.server, 11);
         setup.server.peer_manager.control.schedules[remote.index].ping_due_ms = setup.pair.now.mono_ms;
-        setup.server.peer_manager.control.reschedule(&setup.server.peer_manager.catalog, &setup.server.control_protocol, remote);
+        setup.server.peer_manager.control.rekey(&setup.server.peer_manager.catalog, &setup.server.control_protocol, remote.index);
         for (0..80) |_| {
             try setup.step(0);
             if (setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing > started) break;
@@ -301,14 +301,14 @@ test "managed stale metadata finishes one refresh while periodic Status and late
         setup.pair.advance(rr.Protocol.metadata_v1.info().quota_period_ms);
         remoteSequence(&setup.server, 12);
         setup.client.peer_manager.control.schedules[peer.index].ping_due_ms = setup.pair.now.mono_ms;
-        setup.client.peer_manager.control.reschedule(&setup.client.peer_manager.catalog, &setup.client.control_protocol, peer);
+        setup.client.peer_manager.control.rekey(&setup.client.peer_manager.catalog, &setup.client.control_protocol, peer.index);
         for (0..80) |_| try setup.step(0);
         try std.testing.expectEqual(started + 2, setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing);
         try std.testing.expectEqual(@as(u64, 12), setup.client.peer_manager.catalog.get(peer).?.metadata.?.seq_number);
         row.metadata_due_ms = setup.pair.now.mono_ms;
         row.ping_due_ms = setup.pair.now.mono_ms;
         row.status_due_ms = setup.pair.now.mono_ms - 1;
-        setup.client.peer_manager.control.reschedule(&setup.client.peer_manager.catalog, &setup.client.control_protocol, peer);
+        setup.client.peer_manager.control.rekey(&setup.client.peer_manager.catalog, &setup.client.control_protocol, peer.index);
         _ = try setup.turn(&setup.client, .{});
         try std.testing.expectEqual(statuses + 2, setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing);
         try std.testing.expectEqual(started + 2, setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing);
@@ -328,7 +328,7 @@ test "managed control accepts zero custody metadata without retaining previous c
     try std.testing.expectEqual(@as(usize, fork.custody_groups), snapshots[0].custody_groups.?.count());
     const row = &setup.client.peer_manager.control.schedules[peer.index];
     row.metadata_due_ms = setup.pair.now.mono_ms;
-    setup.client.peer_manager.control.reschedule(&setup.client.peer_manager.catalog, &setup.client.control_protocol, peer);
+    setup.client.peer_manager.control.rekey(&setup.client.peer_manager.catalog, &setup.client.control_protocol, peer.index);
     _ = try setup.turn(&setup.client, .{});
     var response: [25]u8 = @splat(0);
     response[0] = 1;
@@ -905,7 +905,7 @@ test "managed control irrelevant metadata cannot create an ineligible wakeup" {
     row.metadata_due_ms = setup.pair.now.mono_ms;
     row.status_due_ms = setup.pair.now.mono_ms + 100;
     row.ping_due_ms = setup.pair.now.mono_ms + 200;
-    setup.client.peer_manager.control.reschedule(&setup.client.peer_manager.catalog, &setup.client.control_protocol, peer);
+    setup.client.peer_manager.control.rekey(&setup.client.peer_manager.catalog, &setup.client.control_protocol, peer.index);
     const started = setup.client.peer_manager.control.counters.started;
     _ = try setup.turn(&setup.client, .{});
     try std.testing.expectEqual(started, setup.client.peer_manager.control.counters.started);
@@ -1178,7 +1178,7 @@ test "identify local refusal retries after one second without resetting accepted
     try std.testing.expect(!snapshots[0].relevant);
     try setup.client.service.identify.start(&setup.client.service.router, setup.pair.client, .{ .index = 3, .generation = 99 }, conn, setup.pair.now);
     try std.testing.expect(setup.client.peer_manager.catalog.updateStatus(peer, conn, &.{}, setup.pair.now.mono_ms));
-    setup.client.peer_manager.control.reschedule(&setup.client.peer_manager.catalog, &setup.client.control_protocol, peer);
+    setup.client.peer_manager.control.rekey(&setup.client.peer_manager.catalog, &setup.client.control_protocol, peer.index);
     _ = try setup.turn(&setup.client, .{});
     const retry = setup.pair.now.mono_ms + 1000;
     const schedule = &setup.client.peer_manager.control.schedules[peer.index];
@@ -1577,7 +1577,7 @@ test "managed control scores intrinsic decoding once and keeps custody schema li
         const peer = snapshots[0].peer;
         const schedule = &setup.client.peer_manager.control.schedules[peer.index];
         schedule.metadata_due_ms = setup.pair.now.mono_ms;
-        setup.client.peer_manager.control.reschedule(&setup.client.peer_manager.catalog, &setup.client.control_protocol, peer);
+        setup.client.peer_manager.control.rekey(&setup.client.peer_manager.catalog, &setup.client.control_protocol, peer.index);
         _ = try setup.turn(&setup.client, .{});
         var response: [25]u8 = @splat(0);
         if (intrinsic) {

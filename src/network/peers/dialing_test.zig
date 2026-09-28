@@ -1,5 +1,6 @@
 const std = @import("std");
 const mod = @import("dialing.zig");
+const catalog_mod = @import("catalog.zig");
 const t = @import("types.zig");
 const a = std.testing.allocator;
 const address: t.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 1234 } };
@@ -193,7 +194,7 @@ test "peer dial custody diagnostics count unfinished derivations without mutatin
         try std.testing.expectEqual(custody_cursor, catalog.candidate_custody_cursor);
         try std.testing.expectEqualDeep(random, q.random);
         try std.testing.expect(!q.selection_dirty);
-        try std.testing.expectEqual(@as(?u64, mod.hint_freshness_ms), q.selection_deadline);
+        try std.testing.expectEqual(@as(?u64, catalog_mod.hint_freshness_ms), q.selection_deadline);
         try std.testing.expectEqual(calls, ledger.allocation_calls);
         try std.testing.expectEqual(bytes, ledger.bytes);
     }
@@ -209,13 +210,13 @@ test "peer dial custody work retains expired unfinished work without claiming el
     try q.enqueueDiscovered(&catalog, &candidate, &.{}, &.{}, 0);
     const work = candidates[0].custody_work.?;
     var budget: u16 = 64;
-    try std.testing.expect(!catalog.advanceCustody(&.{}, mod.hint_freshness_ms, 60_000, &budget));
+    try std.testing.expect(!catalog.advanceCustody(&.{}, catalog_mod.hint_freshness_ms, 60_000, &budget));
     try std.testing.expectEqual(@as(u16, 64), budget);
     try std.testing.expectEqual(@as(usize, 1), custodyIncomplete(&catalog));
     try std.testing.expectEqualDeep(work, candidates[0].custody_work.?);
 
-    try q.enqueueDiscovered(&catalog, &candidate, &.{}, &.{}, mod.hint_freshness_ms);
-    try std.testing.expect(!catalog.advanceCustody(&.{}, mod.hint_freshness_ms, 60_000, &budget));
+    try q.enqueueDiscovered(&catalog, &candidate, &.{}, &.{}, catalog_mod.hint_freshness_ms);
+    try std.testing.expect(!catalog.advanceCustody(&.{}, catalog_mod.hint_freshness_ms, 60_000, &budget));
     try std.testing.expectEqual(@as(u16, 63), budget);
     try std.testing.expectEqual(@as(usize, 0), custodyIncomplete(&catalog));
     try std.testing.expectEqual(@as(usize, 1), candidates[0].custody_work.?.walk.groups.count());
@@ -387,7 +388,7 @@ test "peer discovery breadth cannot evict an untried candidate matching current 
     try q.enqueueDiscovered(&catalog, &narrow, &.{}, &wanted, 0);
     try std.testing.expectError(error.Capacity, q.enqueueDiscovered(&catalog, &broad, &.{}, &wanted, 1));
     try std.testing.expect(candidates[0].identity.eql(&narrow.peer));
-    try q.enqueueDiscovered(&catalog, &broad, &.{}, &wanted, mod.hint_freshness_ms);
+    try q.enqueueDiscovered(&catalog, &broad, &.{}, &wanted, catalog_mod.hint_freshness_ms);
     try std.testing.expect(candidates[0].identity.eql(&broad.peer));
 }
 
