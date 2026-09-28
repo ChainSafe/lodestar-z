@@ -1,7 +1,7 @@
 const std = @import("std");
 const ct = @import("consensus_types");
-const t = @import("types.zig");
-pub const Protocol = @import("../reqresp/protocol.zig").Protocol;
+const t = @import("peers/types.zig");
+pub const Protocol = @import("reqresp/protocol.zig").Protocol;
 pub const status_size_max = 92;
 pub const Error = error{
     InvalidLength,
@@ -156,30 +156,12 @@ pub fn copyLocal(out: *t.LocalState, source: *const t.LocalState) Error!void {
     out.* = source.*;
 }
 
-pub fn copyServingLocal(out: *t.LocalState, source: *const t.LocalState, receive: @import("../capabilities.zig").Set) Error!void {
+pub fn copyServingLocal(out: *t.LocalState, source: *const t.LocalState, receive: @import("capabilities.zig").Set) Error!void {
     if (receive.contains(.{ .reqresp = .metadata_v3 }) and source.metadata.custody_group_count == null)
         return error.MissingCustodyAdvertisement;
     if (receive.contains(.{ .reqresp = .status_v2 }) and source.status.earliest_available_slot == null)
         return error.MissingAvailability;
     try copyLocal(out, source);
-}
-
-pub fn relevance(
-    local: *const t.LocalState,
-    remote: *const t.Status,
-    current_slot: u64,
-) ?t.DisconnectReason {
-    if (!std.mem.eql(u8, &remote.fork_digest, &local.fork.digest)) return .incompatible_fork;
-    if (remote.head_slot > current_slot +| 1) return .future_head;
-    if (local.fork.fork.gte(.fulu) and remote.earliest_available_slot == null)
-        return .missing_availability;
-    const zero: [32]u8 = @splat(0);
-    if (remote.finalized_epoch == local.status.finalized_epoch and
-        !std.mem.eql(u8, &remote.finalized_root, &zero) and
-        !std.mem.eql(u8, &local.status.finalized_root, &zero) and
-        !std.mem.eql(u8, &remote.finalized_root, &local.status.finalized_root))
-        return .finalized_mismatch;
-    return null;
 }
 
 test {

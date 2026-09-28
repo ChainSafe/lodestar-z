@@ -1,5 +1,5 @@
 const std = @import("std");
-const t = @import("types.zig");
+const t = @import("peers/types.zig");
 const w = @import("control_wire.zig");
 const status: t.Status = .{
     .fork_digest = .{ 1, 2, 3, 4 },
@@ -91,46 +91,6 @@ test "peer control wire independent exact metadata versions and hostile bounds" 
         w.encodeMetadata(.metadata_v1, &bad, .{}, &bytes),
     );
 }
-test "peer control relevance boundary roots forks and availability" {
-    var local: t.LocalState = .{};
-    local.status.finalized_epoch = 4;
-    local.status.finalized_root = @splat(1);
-    var remote = local.status;
-    remote.head_slot = 11;
-    try std.testing.expectEqual(@as(?t.DisconnectReason, null), w.relevance(&local, &remote, 10));
-    remote.head_slot = 12;
-    try std.testing.expectEqual(t.DisconnectReason.future_head, w.relevance(&local, &remote, 10).?);
-    remote.head_slot = 10;
-    remote.fork_digest[0] = 1;
-    try std.testing.expectEqual(
-        t.DisconnectReason.incompatible_fork,
-        w.relevance(&local, &remote, 10).?,
-    );
-    remote.fork_digest[0] = 0;
-    remote.finalized_root = @splat(2);
-    try std.testing.expectEqual(
-        t.DisconnectReason.finalized_mismatch,
-        w.relevance(&local, &remote, 10).?,
-    );
-    remote.finalized_epoch = 3;
-    try std.testing.expect(w.relevance(&local, &remote, 10) == null);
-    remote.finalized_epoch = 4;
-    remote.finalized_root = @splat(0);
-    try std.testing.expect(w.relevance(&local, &remote, 10) == null);
-    local.fork.fork = .fulu;
-    try std.testing.expectEqual(
-        t.DisconnectReason.missing_availability,
-        w.relevance(&local, &remote, 10).?,
-    );
-    remote.earliest_available_slot = 0;
-    try std.testing.expect(w.relevance(&local, &remote, 10) == null);
-    try std.testing.expectEqual(w.Protocol.status_v2, w.statusProtocol(local.fork));
-    try std.testing.expectEqual(w.Protocol.metadata_v3, w.metadataProtocol(local.fork));
-    local.fork.fork = .altair;
-    try std.testing.expectEqual(w.Protocol.metadata_v2, w.metadataProtocol(local.fork));
-    local.fork.fork = .phase0;
-    try std.testing.expectEqual(w.Protocol.metadata_v1, w.metadataProtocol(local.fork));
-}
 test "peer local state validated immutable copy leaves previous value on rejection" {
     var source: t.LocalState = .{};
     var copied: t.LocalState = undefined;
@@ -180,7 +140,7 @@ test "peer control bounded malformed input sweep preserves fixed scratch" {
 }
 
 test "peer control serving prerequisites follow receive protocols before Fulu" {
-    var receive: @import("../capabilities.zig").Set = .initEmpty();
+    var receive: @import("capabilities.zig").Set = .initEmpty();
     receive.insert(.{ .reqresp = .status_v1 });
     receive.insert(.{ .reqresp = .metadata_v2 });
     var source: t.LocalState = .{};

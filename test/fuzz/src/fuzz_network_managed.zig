@@ -1,7 +1,7 @@
 const std = @import("std");
 const d = @import("discv5");
 const peers = @import("network").peers;
-const wire = peers.control_wire;
+const wire = @import("network").control_wire;
 const context: peers.ForkContext = .{ .digest = .{ 1, 2, 3, 4 } };
 const input_max = 302;
 

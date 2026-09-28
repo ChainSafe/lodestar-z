@@ -14,7 +14,6 @@ pub const catalog = @import("catalog.zig");
 pub const remembered = @import("remembered.zig");
 pub const identity_index = @import("identity_index.zig");
 pub const reputation = @import("reputation.zig");
-pub const control_wire = @import("control_wire.zig");
 pub const Catalog = catalog.Catalog;
 pub const PeerRef = types.PeerRef;
 pub const Status = types.Status;
@@ -36,7 +35,6 @@ test {
     _ = @import("types.zig");
     _ = @import("catalog.zig");
     _ = @import("reputation.zig");
-    _ = @import("control_wire.zig");
     _ = @import("dialing.zig");
     _ = @import("control.zig");
     _ = @import("control_metrics.zig");

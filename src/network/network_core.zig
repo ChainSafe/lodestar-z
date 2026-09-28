@@ -11,6 +11,7 @@ const rr = @import("reqresp/root.zig");
 const gossip = @import("gossipsub/root.zig");
 const Now = @import("types.zig").Now;
 const wake_sources = @import("wake_sources.zig");
+const control_wire = @import("control_wire.zig");
 pub const wait = @import("wait.zig");
 
 /// discv5's standalone receive wait. NetworkCore polls the discovery sockets itself and steps
@@ -178,7 +179,7 @@ pub const NetworkCore = struct {
         if (!wait.supported) return error.UnsupportedWait;
         if (startup.remembered.len > peers.remembered.capacity) return error.InvalidOptions;
         var local: t.LocalState = undefined;
-        try peers.control_wire.copyServingLocal(&local, &startup.local, @import("router.zig").Router.initialCapabilities(resolved.core.service.router).receive);
+        try control_wire.copyServingLocal(&local, &startup.local, @import("router.zig").Router.initialCapabilities(resolved.core.service.router).receive);
         try validateSchedule(&local, startup.schedule);
         try validateForkTable(resolved.core.service.reqresp.forks, &local.fork);
         self.initialized = false;
@@ -409,7 +410,7 @@ pub const NetworkCore = struct {
         }
         var local = update.local;
         local.metadata.seq_number = self.peer_manager.local.metadata.seq_number;
-        try peers.control_wire.copyServingLocal(&local, &local, capabilities.receive);
+        try control_wire.copyServingLocal(&local, &local, capabilities.receive);
         try validateSchedule(&local, schedule);
         const request = &self.service.reqresp;
         try validateForkTable(request.forks[0..request.fork_count], &local.fork);

@@ -121,7 +121,7 @@ test "network chain honors configured wire limits and requires complete metadata
     try std.testing.expectError(error.MissingCustodyAdvertisement, plan.update(.{}, null, 0));
     const update = try plan.update(.{ .metadata = .{ .custody_group_count = 1 } }, null, 0);
     try std.testing.expect(update.capabilities.receive.contains(.{ .reqresp = .metadata_v3 }));
-    const wire = @import("peers/control_wire.zig");
+    const wire = @import("control_wire.zig");
     var encoded: [25]u8 = undefined;
     try std.testing.expectEqual(encoded.len, try wire.encodeMetadata(.metadata_v3, &update.local.metadata, update.local.fork, &encoded));
     try std.testing.expectEqualDeep(update.local.metadata, try wire.decodeMetadata(.metadata_v3, &encoded, update.local.fork));
