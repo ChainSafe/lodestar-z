@@ -324,16 +324,13 @@ pub const Engine = struct {
         return bytes;
     }
 
-    /// A connection whose final handshake flight may be unsent closes once a flush has sent it;
-    /// its timer is due at once so the next expire advances the deferred close.
+    /// An outbound connection whose final handshake flight may be unsent closes on the turn after
+    /// a flush drains its output.
     pub fn close(self: *Engine, conn: Handle, code: u64) bool {
         const slot = self.liveSlot(conn) catch return false;
         assert(slot.conn != null);
         assert(slot.close_reason == null);
-        if (slot.flight_pending) {
-            slot.deferClose(.host, code);
-            self.registry.timers.set(conn.index, 0);
-        } else slot.close(.host, code);
+        if (slot.flight_pending) slot.deferClose(.host, code) else slot.close(.host, code);
         self.markDirty(conn.index);
         return true;
     }
@@ -767,9 +764,10 @@ pub const Engine = struct {
         return .{ .version_negotiation = out[0..length] };
     }
 
-    /// Pops due timer keys. Applies the handshake limit, keep-alive and an armed deferred close,
-    /// and calls on_timeout only when quiche's own timer has expired. Each popped connection
-    /// joins collect and dirty. A connection re-keyed during this call is not popped again in it.
+    /// Pops due timer keys. Applies the handshake limit, keep-alive and a deferred close whose
+    /// flight left, and calls on_timeout only when quiche's own timer has expired. Each popped
+    /// connection joins collect and dirty. A connection re-keyed during this call is not popped
+    /// again in it.
     pub fn expire(self: *Engine, now: Now) void {
         const registry = &self.registry;
         const now_ns = now.nanos();
@@ -801,14 +799,10 @@ pub const Engine = struct {
         {
             slot.last_send_ms = now.mono_ms;
         }
-        if (slot.pending_close) |pending| {
-            if (pending.stage == .armed) {
-                slot.pending_close = null;
-                slot.close(pending.reason, pending.code);
-            } else {
-                slot.pending_close.?.stage = .armed;
-            }
-        }
+        if (slot.pending_close) |pending| if (!slot.flight_pending) {
+            slot.pending_close = null;
+            slot.close(pending.reason, pending.code);
+        };
         self.refresh(index);
         self.observePath(index);
         self.touched(index, now);
@@ -901,6 +895,9 @@ pub const Engine = struct {
             return null;
         };
         if (datagram == null) {
+            // The establishing pass acknowledges the server's Handshake flight, and quiche sends that
+            // ACK regardless of congestion and then discards the Initial space's bytes in flight.
+            // Cubic keeps two datagrams of window and the final flight fits one, so Done means it left.
             slot.flight_pending = false;
             self.refresh(index);
         }
@@ -960,7 +957,7 @@ pub const Engine = struct {
                         slot.last_send_ms +| self.limits.keep_alive_ms;
                     assert(deadline <= due_ms *| std.time.ns_per_ms);
                 }
-                if (slot.pending_close != null) assert(deadline <= now.nanos());
+                if (slot.pending_close != null and !slot.flight_pending) assert(deadline <= now.nanos());
                 // quiche reads its own clock, so its timer is comparable only with a real clock,
                 // and only up to the time this turn has run since its clock read.
                 if (now.mono_ns != null) if (slot.timeoutNs()) |remaining| {
@@ -1016,8 +1013,8 @@ pub const Engine = struct {
         }
     }
 
-    /// The earliest deadline among quiche's timers, the handshake limit, keep-alive and a
-    /// deferred close, or null when none is armed.
+    /// The earliest deadline among quiche's timers, the handshake limit, keep-alive and a deferred
+    /// close whose flight left, or null when none is armed.
     fn deadlineNs(self: *const Engine, index: u16, now: Now) ?u64 {
         const slot = &self.registry.slots[index];
         if (slot.state != .handshaking and slot.state != .established) return null;
@@ -1031,7 +1028,7 @@ pub const Engine = struct {
             const due = due_ms *| std.time.ns_per_ms;
             deadline = @min(deadline orelse due, due);
         }
-        if (slot.pending_close != null) deadline = @min(deadline orelse now.nanos(), now.nanos());
+        if (slot.pending_close != null and !slot.flight_pending) deadline = @min(deadline orelse now.nanos(), now.nanos());
         return deadline;
     }
 
@@ -1194,7 +1191,7 @@ pub const Engine = struct {
         if (slot.state == .handshaking and slot.isEstablished()) {
             self.leaveHandshaking(slot);
             slot.state = .established;
-            slot.flight_pending = true;
+            slot.flight_pending = slot.direction == .outbound;
             slot.learnPeerWindows();
             if (slot.handshake.peer_id) |id| {
                 assert(slot.peer_id == null);

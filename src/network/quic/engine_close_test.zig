@@ -1,4 +1,5 @@
 const std = @import("std");
+const constants = @import("../constants.zig");
 const engine_mod = @import("engine.zig");
 const keys = @import("../wire/keys.zig");
 const support = @import("../test_support.zig");
@@ -118,14 +119,9 @@ test "engine closes on peer id mismatch" {
     try std.testing.expectEqual(@as(u16, 0), pair.client.registry.handshaking);
 }
 
-test "engine delivers a close requested before the establishing flight leaves" {
-    var pair: Pair = .{};
-    try pair.init(.{}, .{});
-    defer pair.deinit();
-    const start = pair.now;
-
-    // The first Initial draws a Retry, and the server's flight answering the retried Initial
-    // establishes the client before the client has sent its own flight.
+/// Dials, then delivers the server's flight so the client is established before it has sent its
+/// own final flight. The first Initial draws a Retry.
+fn establishClient(pair: *Pair) !engine_mod.Handle {
     const handle = try pair.dial();
     try pair.flush(&pair.client);
     try pair.flush(&pair.client);
@@ -136,26 +132,93 @@ test "engine delivers a close requested before the establishing flight leaves" {
     const connected = pair.events(&pair.client, &storage);
     try std.testing.expectEqual(@as(usize, 1), connected.len);
     try std.testing.expectEqual(handle, try expectConnected(connected[0], .outbound, &pair.server_ctx));
-    try std.testing.expect(pair.client.close(handle, 7));
-    try pair.pump();
+    return handle;
+}
 
+test "engine delivers a close requested before the establishing flight leaves" {
+    // Turns whose flush never reaches the connection, as when the send quota runs out first.
+    for ([_]usize{ 0, 3 }) |unserviced| {
+        var pair: Pair = .{};
+        try pair.init(.{}, .{});
+        defer pair.deinit();
+        const start = pair.now;
+        const handle = try establishClient(&pair);
+        try std.testing.expect(pair.client.close(handle, 7));
+        for (0..unserviced) |_| {
+            pair.settle(&pair.client);
+            pair.client.finishFlush(pair.now);
+        }
+
+        // One datagram carries the whole final flight, within quiche's two-datagram minimum window.
+        var datagrams: usize = 0;
+        var out: [constants.datagram_size_max]u8 = undefined;
+        for (0..4) |_| {
+            const datagram = pair.sendOne(&pair.client, handle.index, &out) orelse break;
+            var response: [constants.datagram_size_max]u8 = undefined;
+            try std.testing.expect(pair.server.receive(datagram, &client_address, pair.now, &response) == .accepted);
+            datagrams += 1;
+        }
+        pair.client.sent(handle.index, pair.now, true);
+        try std.testing.expectEqual(@as(usize, 1), datagrams);
+        pair.settle(&pair.server);
+        var storage: [8]Event = undefined;
+        const connected = pair.events(&pair.server, &storage);
+        try std.testing.expectEqual(@as(usize, 1), connected.len);
+        const server_handle = try expectConnected(connected[0], .inbound, &pair.client_ctx);
+        try pair.pump();
+
+        const client_events = pair.events(&pair.client, &storage);
+        try std.testing.expectEqual(@as(usize, 1), client_events.len);
+        try std.testing.expectEqual(
+            engine_mod.CloseReason.host,
+            try expectClosed(client_events[0], handle, .outbound, &pair.server_ctx),
+        );
+        const server_events = pair.events(&pair.server, &storage);
+        try std.testing.expectEqual(@as(usize, 1), server_events.len);
+        const reason = try expectClosed(server_events[0], server_handle, .inbound, &pair.client_ctx);
+        try std.testing.expect(reason.peer_closed.app);
+        try std.testing.expectEqual(@as(u64, 7), reason.peer_closed.code);
+        try std.testing.expectEqual(@as(usize, 0), pair.events(&pair.client, &storage).len);
+        try std.testing.expectEqual(@as(usize, 0), pair.events(&pair.server, &storage).len);
+        try std.testing.expectEqual(@as(usize, 0), pair.client.activeIndices().len);
+        try std.testing.expectEqual(@as(usize, 0), pair.server.activeIndices().len);
+        // The virtual clock never moved, so no timer ended either side.
+        try std.testing.expectEqual(start, pair.now);
+    }
+}
+
+test "engine sends an inbound close requested in the turn the connection establishes" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const start = pair.now;
+    const handle = try establishClient(&pair);
+    try pair.flush(&pair.client);
+    pair.settle(&pair.server);
+    var storage: [8]Event = undefined;
+    const connected = pair.events(&pair.server, &storage);
+    try std.testing.expectEqual(@as(usize, 1), connected.len);
+    const server_handle = try expectConnected(connected[0], .inbound, &pair.client_ctx);
+    try std.testing.expect(pair.server.close(server_handle, 9));
+
+    // The server's first flush carries the close without waiting on its own flight.
+    try pair.flush(&pair.server);
     const client_events = pair.events(&pair.client, &storage);
     try std.testing.expectEqual(@as(usize, 1), client_events.len);
+    const reason = try expectClosed(client_events[0], handle, .outbound, &pair.server_ctx);
+    try std.testing.expect(reason.peer_closed.app);
+    try std.testing.expectEqual(@as(u64, 9), reason.peer_closed.code);
+    try pair.pump();
+    const server_events = pair.events(&pair.server, &storage);
+    try std.testing.expectEqual(@as(usize, 1), server_events.len);
     try std.testing.expectEqual(
         engine_mod.CloseReason.host,
-        try expectClosed(client_events[0], handle, .outbound, &pair.server_ctx),
+        try expectClosed(server_events[0], server_handle, .inbound, &pair.client_ctx),
     );
-    const server_events = pair.events(&pair.server, &storage);
-    try std.testing.expectEqual(@as(usize, 2), server_events.len);
-    const server_handle = try expectConnected(server_events[0], .inbound, &pair.client_ctx);
-    const reason = try expectClosed(server_events[1], server_handle, .inbound, &pair.client_ctx);
-    try std.testing.expect(reason.peer_closed.app);
-    try std.testing.expectEqual(@as(u64, 7), reason.peer_closed.code);
     try std.testing.expectEqual(@as(usize, 0), pair.events(&pair.client, &storage).len);
     try std.testing.expectEqual(@as(usize, 0), pair.events(&pair.server, &storage).len);
     try std.testing.expectEqual(@as(usize, 0), pair.client.activeIndices().len);
     try std.testing.expectEqual(@as(usize, 0), pair.server.activeIndices().len);
-    // The virtual clock never moved, so no timer ended either side.
     try std.testing.expectEqual(start, pair.now);
 }
 

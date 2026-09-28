@@ -55,8 +55,9 @@ pub const Slot = struct {
     last_send_ms: u64 = 0,
     close_reason: ?types.CloseReason = null,
     pending_close: ?types.PendingClose = null,
-    /// Established, and quiche has not reported its output drained since, so the final handshake
-    /// flight may still be unsent.
+    /// An outbound connection is established and quiche has not reported its output drained
+    /// since, so its final handshake flight may be unsent. The server cannot read a client's close
+    /// without that flight, while a client reads a server's close without the server's.
     flight_pending: bool = false,
     connected_pending: bool = false,
     answered: bool = false,
@@ -236,9 +237,10 @@ pub const Slot = struct {
         assert(self.close_reason != null);
     }
 
+    /// Closes once a flush has sent the final handshake flight, which quiche_close would discard.
     pub fn deferClose(self: *Slot, reason: types.CloseReason, code: u64) void {
-        // Flush the handshake flight before quiche_close discards it, so the peer can read the application close.
         assert(self.state == .established);
+        assert(self.flight_pending);
         assert(self.pending_close == null);
         if (self.close_reason == null) self.close_reason = reason;
         self.pending_close = .{ .reason = reason, .code = code };
