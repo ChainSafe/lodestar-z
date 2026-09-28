@@ -578,6 +578,10 @@ jobs:
       - name: Run bindings formatter
         run: |
           pnpm biome ci
+      - name: Check network line budgets
+        run: |
+          node --test scripts/line_budget.test.mjs
+          node scripts/line_budget.mjs check
       - name: Build bindings
         run: |
           zig build build-lib:bindings -Doptimize=ReleaseSafe
