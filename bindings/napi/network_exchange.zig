@@ -221,6 +221,8 @@ fn selectLocked(runtime: *Runtime, demand: *const Demand, now: u64, selection: *
     selectCommands(runtime, demand.settle, selection);
     selectRequests(runtime, demand.settle, selection);
     selectIncoming(runtime, demand.settle, selection);
+    // The close ends delivery: no payload handler runs in its exchange, and none waits for a later one.
+    if (selection.closed != null) return;
     const ready = &runtime.readiness;
     var next = ready.payload.head;
     for (0..readiness.row_count) |_| {
