@@ -31,6 +31,10 @@ pub fn addInstrumentedExe(
     afl_cc.addFileArg(pkg.path("afl.c"));
     afl_cc.addFileArg(obj.getEmittedLlvmBc());
     for (extra_libs) |lib| {
+        // Debug C code calls Zig's UBSan runtime, which Zig adds only when it
+        // links the executable itself. afl-cc links here, so the archive
+        // carries the runtime; it stays unreferenced when checks trap.
+        lib.bundle_ubsan_rt = true;
         afl_cc.addFileArg(lib.getEmittedBin());
     }
     for (extra_objects) |object| afl_cc.addFileArg(object);
