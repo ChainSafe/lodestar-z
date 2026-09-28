@@ -264,8 +264,12 @@ fn processDatagram(
     };
     result.datagram = .accepted;
     result.event = accepted.event;
-    if (accepted.packet_length > 0) {
-        _ = try self.reply(io, datagram.from, self.output[0..accepted.packet_length]);
+    if (accepted.packet_length > 0 and !try self.reply(io, datagram.from, self.output[0..accepted.packet_length])) {
+        // The call's owner sees a local failure now rather than a remote timeout later.
+        if (accepted.call) |handle| {
+            result.event = self.engine.failCall(handle, error.DestinationUnreachable);
+            return;
+        }
     }
     result.event = try self.handleEvent(io, accepted.event, result);
 }
@@ -302,8 +306,9 @@ fn handleEvent(
     return .none;
 }
 
-/// Sends a reply this step owns. A destination failure drops the reply rather than failing the
-/// step; the requester retries or its call expires.
+/// Sends a packet this step produced and returns false when its destination refuses it. The
+/// refusal fails only that destination: a requester retries a dropped reply, and a refused
+/// handshake fails its call.
 fn reply(self: *const Transport, io: std.Io, destination: types.Address, bytes: []const u8) Error!bool {
     self.transmit(io, destination, bytes) catch |err| switch (err) {
         error.DestinationUnreachable => return false,

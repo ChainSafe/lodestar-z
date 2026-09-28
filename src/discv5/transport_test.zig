@@ -304,6 +304,44 @@ test "transport drops replies its destination refuses and keeps the step's expir
     }
 }
 
+test "transport fails a call whose handshake its destination refuses so maintenance keeps the incumbent" {
+    var pair: Pair = undefined;
+    try pair.init(1_000, false);
+    defer pair.deinit();
+    try pair.fillBucket();
+    const incumbent = pair.transport_a.engine.peerRecord(&pair.record_b.node_id).?;
+    const now_ms = try Transport.monotonicMilliseconds(std.testing.io);
+    var controller: Maintenance = undefined;
+    try controller.init(now_ms, .{}, .ip4);
+    defer controller.cancel(&pair.transport_a.engine);
+    var out: [1_280]u8 = undefined;
+    const started = (try controller.startNext(&pair.transport_a.engine, &out, try .init(&.{1}), now_ms, &test_support.sealEntropy(10))).?;
+    try std.testing.expectEqual(endpoint(&pair.record_b), started.peer);
+    try pair.transport_a.transmit(std.testing.io, started.peer.address, out[0..started.call.packet_length]);
+    var expired: [4]CallTable.Expired = undefined;
+    const challenged = try pair.transport_b.step(std.testing.io, &expired);
+    try std.testing.expect(challenged.failure == null and challenged.datagram == .accepted);
+    var host = @import("udp").testing.FaultIo{ .send = .{ .socket = pair.transport_a.sockets.primary().handle } };
+    host.init(std.testing.io);
+    defer host.deinit();
+    const refused = try pair.transport_a.step(host.io(), &expired);
+    try std.testing.expectEqual(@as(?Transport.Error, null), refused.failure);
+    try std.testing.expectEqual(@as(usize, 1), host.send_calls);
+    try std.testing.expect(refused.event == .failed);
+    try std.testing.expectEqual(started.call.handle, refused.event.failed.handle);
+    try std.testing.expectEqual(@as(usize, 0), pair.transport_a.engine.calls.count());
+    try std.testing.expect(try controller.onEvent(&pair.transport_a.engine, &refused.event, refused.now_ms));
+    try std.testing.expect(pair.transport_a.engine.routing.contains(&pair.record_b.node_id));
+    try std.testing.expect(!pair.transport_a.engine.routing.contains(&pair.candidate_id));
+    try std.testing.expectEqual(@as(usize, 1), pair.transport_a.engine.routing.pendingCount());
+    try std.testing.expectEqual(incumbent.last_verified_ms, pair.transport_a.engine.peerRecord(&pair.record_b.node_id).?.last_verified_ms);
+    // A local failure retries the probe after its interval.
+    const retry_ms = controller.nextDeadlineMs(&pair.transport_a.engine).?;
+    try std.testing.expect(retry_ms > refused.now_ms);
+    const retry = (try controller.startNext(&pair.transport_a.engine, &out, try .init(&.{2}), retry_ms, &test_support.sealEntropy(11))).?;
+    try std.testing.expectEqual(started.peer, retry.peer);
+}
+
 test "transport completes a caller-owned lookup across multiple peers" {
     var network: LookupNetwork = undefined;
     try network.init(1_000);
