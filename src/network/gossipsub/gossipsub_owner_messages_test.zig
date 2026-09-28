@@ -933,3 +933,43 @@ fn feedPagedTestFrame(g: *Gossipsub, index: u16, wire: []const u8) !void {
     }
     unreachable;
 }
+
+test "gossip counts each consumed message once by topic kind and never on a work retry" {
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
+    defer g.deinit();
+    const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const name = "/eth2/01020304/beacon_block/ssz_snappy";
+    try support.subscribe(&g, name);
+    var inbox: support.Inbox = .{};
+    defer inbox.deinit();
+    inbox.attach(&g);
+    var compressed: [64]u8 = undefined;
+    const message: protobuf.Message = .{ .topic = name, .data = compressed[0..try snappy.raw.compress("payload", &compressed)] };
+    const now: Now = .{ .mono_ms = 1, .unix_s = 0 };
+    var turn = @import("turn.zig").Turn.init(&g.options, now, g.msg_scratch);
+    turn.sink = g.message_sink;
+    turn.large_used = true;
+    turn.budget.work = 0;
+    var credits = Credits.peer(&g.options);
+    try std.testing.expectEqual(Progress.credits, g.receiveItem(g.sessions.ref(peer.index), .{ .message = message }, &turn, &credits));
+    const counts = g.topic_metrics.get(name);
+    try std.testing.expectEqual(@as(u64, 0), counts.received);
+    try std.testing.expectEqual(@as(?usize, 1), receiveForTest(&g, peer.index, message, now));
+    try std.testing.expectEqual(@as(?usize, 0), receiveForTest(&g, peer.index, message, now));
+    try std.testing.expectEqual(@as(?usize, 0), receiveForTest(&g, peer.index, .{ .topic = name, .data = &.{5} }, now));
+    try std.testing.expectEqual(@as(f64, 1), support.invalidDeliveries(&g));
+    inbox.full = true;
+    try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, peer.index, "refused", 1));
+    try std.testing.expectEqual(@as(u64, 1), g.messages.storage_refusals[@intFromEnum(@import("messages.zig").StorageRefusal.processor_capacity)]);
+    try std.testing.expectEqual(@as(u64, 4), counts.received);
+    try std.testing.expectEqual(@as(u64, 1), counts.duplicate);
+    const unsubscribed = "/eth2/01020304/voluntary_exit/ssz_snappy";
+    const unknown = "/eth2/01020304/beacon_blocks/ssz_snappy";
+    for ([_][]const u8{ unsubscribed, unknown, unknown }) |topic| {
+        try std.testing.expectEqual(@as(?usize, 0), receiveForTest(&g, peer.index, .{ .topic = topic, .data = message.data }, now));
+    }
+    try std.testing.expectEqual(@as(u64, 1), g.topic_metrics.get(unsubscribed).received);
+    try std.testing.expectEqual(@as(u64, 2), g.topic_metrics.counts[@import("topic_policy.zig").kind_count].received);
+    try std.testing.expectEqual(@as(u64, 4), counts.received);
+    for (g.topic_metrics.counts) |kind| try std.testing.expectEqual(@as(u64, 0), kind.published);
+}

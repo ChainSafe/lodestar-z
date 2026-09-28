@@ -77,6 +77,8 @@ pub const TopicWeights = struct {
 };
 
 pub const GlobalWeights = struct { p5: f64 = 0, p6: f64 = 0, p7: f64 = 0 };
+/// Protocol violations that each add one P7 behaviour penalty unit.
+pub const Penalty = enum { graft_backoff, graft_flood, broken_iwant, malformed_rpc, malformed_frame, large_frame_timeout };
 pub const Breakdown = struct {
     topics: [constants.topics_cap]TopicWeights = @splat(.{}),
     global: GlobalWeights = .{},
@@ -88,6 +90,8 @@ pub const PeerScore = struct {
     /// the network bench read.
     calculations: u64 = 0,
     topic_visits: u64 = 0,
+    /// Applied behaviour penalty units by violation. Decay lowers peer counters, never these.
+    penalties: [std.meta.fields(Penalty).len]u64 = @splat(0),
     params: Params,
     topics: []TopicCounters,
     rows: []PeerState,
@@ -191,6 +195,11 @@ pub const PeerScore = struct {
         self.revision +|= 1;
         self.rows[peer].dirty = true;
         self.rows[peer].behaviour = @min(counter_max, self.rows[peer].behaviour + amount);
+    }
+
+    pub fn penalizeFor(self: *PeerScore, peer: u16, violation: Penalty) void {
+        self.penalize(peer, 1);
+        self.penalties[@intFromEnum(violation)] +|= 1;
     }
 
     pub fn score(self: *PeerScore, peer: u16, now_ms: u64, ip_count: u16) f64 {

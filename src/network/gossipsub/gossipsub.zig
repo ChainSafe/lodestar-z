@@ -315,6 +315,7 @@ pub const Gossipsub = struct {
         if (recipients.count() == 0 and !options.allow_zero_peers) return error.NoPeersSubscribedToTopic;
         const clen = snappy.raw.compress(ssz, self.msg_scratch) catch return error.CompressFailed;
         const h = self.messages.publish(id, topic_str, self.msg_scratch[0..clen], now_ms, self.cycle.epoch) orelse return error.ResourceExhausted;
+        self.topic_metrics.get(topic_str).published +|= 1;
         _ = self.recovery.resolve(&self.peers, id);
         const result = self.deliver(&recipients, h, null, now_ms);
         return result;
@@ -589,7 +590,7 @@ pub const Gossipsub = struct {
         self.peers.rows[self.logical(index).index].direct = true;
         const context = self.overlayContext(self.last_now_ms);
         for (&self.overlay.rows, 0..) |*topic, t| {
-            if (topic.mesh.isSet(index)) self.overlay.prune(&context, @intCast(t), index, constants.prune_backoff_ms);
+            if (topic.mesh.isSet(index)) self.overlay.prune(&context, @intCast(t), index, constants.prune_backoff_ms, .direct_peer);
             topic.fanout.unset(index);
         }
     }
@@ -600,6 +601,10 @@ pub const Gossipsub = struct {
         const workspace = turn.workspace(peer);
         const source: @import("messages.zig").Source = .{ .peer = self.logical(index), .session = self.sessions.ref(index), .connection = self.sessions.rows[index].conn };
         const result = self.messages.receive(&context, &workspace, &source, msg, now.mono_ms);
+        // The turn offers a message refused for work again, so only its final outcome counts.
+        if (result == .blocked and result.blocked == .work) return .credits;
+        const counts = self.topic_metrics.get(msg.topic);
+        counts.received +|= 1;
         switch (result) {
             .ignored => return .done,
             .invalid => |reason| {
@@ -608,15 +613,14 @@ pub const Gossipsub = struct {
                 return .done;
             },
             .duplicate => |id| {
+                counts.duplicate +|= 1;
                 self.resolvePromises(turn, peer, id);
                 return .done;
             },
-            .blocked => |reason| switch (reason) {
-                .storage => {
-                    self.cancelPromises(index, true);
-                    return .done;
-                },
-                .work => return .credits,
+            .blocked => |reason| {
+                assert(reason == .storage);
+                self.cancelPromises(index, true);
+                return .done;
             },
             .admitted => |event| {
                 self.resolvePromises(turn, peer, event.id);

@@ -317,7 +317,7 @@ fn readPeer(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *T
                 const conn = self.sessions.rows[index].conn;
                 std.log.scoped(.network_gossip).debug("gossip_rpc_refused connection={d}:{d} reason={s}", .{ conn.index, conn.generation, @errorName(err) });
                 self.counters.malformed_rpcs += 1;
-                self.peers.penalize(self.sessions.rows[index].logical, 1);
+                self.peers.penalize(self.sessions.rows[index].logical, .malformed_rpc);
                 resetInbound(self, engine, index);
                 return;
             };
@@ -344,7 +344,7 @@ fn readPeer(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *T
                     continue;
                 } else {
                     self.counters.malformed_rpcs += 1;
-                    self.peers.penalize(logical, 1);
+                    self.peers.penalize(logical, .malformed_frame);
                 }
                 resetInbound(self, engine, index);
                 return;
@@ -590,7 +590,7 @@ fn expireSession(self: *Gossipsub, router: *routing.Router, engine: *Engine, ind
                     g.counters.local_pressure_resets += 1;
                 } else {
                     if ((io.reader.declaredLen() orelse 0) > io.body.len) {
-                        g.peers.penalize(peer.logical, 1);
+                        g.peers.penalize(peer.logical, .large_frame_timeout);
                         g.peers.rows[peer.logical.index].large_frame_denied_until = now_ms +| g.options.pressure_timeout_ms;
                     }
                 }

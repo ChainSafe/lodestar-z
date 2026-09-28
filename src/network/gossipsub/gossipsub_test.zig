@@ -9,6 +9,7 @@ const Gossipsub = gossipsub.Gossipsub;
 const digest = topic_mod.ForkDigest{ 0x6a, 0x95, 0xa1, 0xa9 };
 
 const Pair = @import("test_pair.zig").Pair;
+const Penalty = @import("score.zig").Penalty;
 
 fn buildTopic(name: []const u8, out: []u8) []const u8 {
     return topic_mod.build(digest, name, out);
@@ -559,6 +560,7 @@ test "gossipsub large frame deadline releases receive pages despite byte progres
     try std.testing.expect(setup.shared.server.gossipsub.sessions.rows[server_peer].io.overflow.pages == 0);
     const logical = setup.shared.server.gossipsub.sessions.rows[server_peer].logical;
     try std.testing.expect(setup.shared.server.gossipsub.peers.rows[logical.index].large_frame_denied_until > setup.shared.pair.now.mono_ms);
+    try std.testing.expectEqual(@as(u64, 1), setup.shared.server.gossipsub.peers.scores.penalties[@intFromEnum(Penalty.large_frame_timeout)]);
     setup.shared.pair.advance(300);
     try setup.pumpOnce();
     try std.testing.expectEqual(@as(usize, 0), setup.shared.client.gossipsub.sessions.rows[client_peer].io.tx.data.count);
@@ -755,6 +757,7 @@ test "gossipsub receive page exhaustion discards only the requesting frame witho
     try std.testing.expectEqual(@as(u64, 0), g.counters.malformed_rpcs);
     try std.testing.expectEqual(before, g.peers.score(logical, setup.shared.pair.now.mono_ms));
     try std.testing.expectEqual(@as(u64, 0), g.peers.rows[logical.index].large_frame_denied_until);
+    for (g.peers.scores.penalties) |count| try std.testing.expectEqual(@as(u64, 0), count);
     try std.testing.expect(g.sessions.rows[peer].in_stream != null);
     try std.testing.expect(g.sessions.rows[peer].outStream() != null);
     try std.testing.expect(g.sessions.rows[peer].io.reader.declaredLen() == null);
@@ -841,6 +844,8 @@ test "gossipsub malformed framing and RPCs penalize authenticated sources across
             try std.testing.expect(client.sessions.rows[client_index].outStream() != null);
         }
     }
+    try std.testing.expectEqual(@as(u64, 1), g.peers.scores.penalties[@intFromEnum(Penalty.malformed_rpc)]);
+    try std.testing.expectEqual(@as(u64, 1), g.peers.scores.penalties[@intFromEnum(Penalty.malformed_frame)]);
 }
 
 test "gossipsub discarding a locally refused frame preserves its deadline without blaming the peer" {
@@ -878,4 +883,5 @@ test "gossipsub discarding a locally refused frame preserves its deadline withou
     try std.testing.expectEqual(@as(u64, 1), g.counters.local_pressure_resets);
     try std.testing.expectEqual(before, g.peers.score(peer.logical, setup.shared.pair.now.mono_ms));
     try std.testing.expectEqual(@as(u64, 0), g.peers.rows[peer.logical.index].large_frame_denied_until);
+    for (g.peers.scores.penalties) |count| try std.testing.expectEqual(@as(u64, 0), count);
 }

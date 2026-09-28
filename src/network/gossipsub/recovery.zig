@@ -36,6 +36,9 @@ pub const Recovery = struct {
     free: u16 = 0,
     len: usize = 0,
     batch_len: usize = 0,
+    /// Sampled promises armed: batches whose IWANT send completed while their sample was
+    /// outstanding. Only these can later expire broken.
+    armed: u64 = 0,
 
     pub fn init(allocator: std.mem.Allocator) !Recovery {
         comptime assert(promises_per_peer < constants.promises_cap and constants.promises_cap < none);
@@ -240,6 +243,7 @@ pub const Recovery = struct {
             if (batch.sent_at_ms == null and now_ms < batch.expiry and batch.token == token and std.meta.eql(batch.connection, connection)) {
                 batch.expiry = now_ms +| followup_ms;
                 batch.sent_at_ms = now_ms;
+                self.armed +|= @intFromBool(batch.sample != none);
             }
         }
     }
@@ -255,7 +259,7 @@ pub const Recovery = struct {
             if (now_ms >= batch.expiry) {
                 if (batch.sent_at_ms != null and batch.sample != none) {
                     broken += 1;
-                    peers.penalize(batch.peer, 1);
+                    peers.penalize(batch.peer, .broken_iwant);
                 }
                 self.remove(peers, index);
             } else index += 1;

@@ -179,9 +179,9 @@ pub const PeerBook = struct {
         self.rows[ref.index].negative = true;
     }
 
-    pub fn penalize(self: *PeerBook, ref: Ref, count: f64) void {
+    pub fn penalize(self: *PeerBook, ref: Ref, violation: @import("score.zig").Penalty) void {
         assert(self.matches(ref));
-        self.scores.penalize(ref.index, count);
+        self.scores.penalizeFor(ref.index, violation);
         self.rows[ref.index].negative = true;
     }
 

@@ -113,6 +113,12 @@ const contract = [_]Series{
     .{ .name = "lodestar_native_gossip_retention_refusals_total", .kind = "counter", .labels = &.{"kind"} },
     .{ .name = "lodestar_native_gossip_iwant_ids_total", .kind = "counter", .labels = &.{"outcome"} },
     .{ .name = "gossipsub_iwant_promise_broken", .kind = "counter" },
+    .{ .name = "lodestar_native_gossip_iwant_promises_started_total", .kind = "counter" },
+    .{ .name = "lodestar_native_gossip_messages_received_total", .kind = "counter", .labels = &.{"topic"} },
+    .{ .name = "lodestar_native_gossip_messages_duplicate_total", .kind = "counter", .labels = &.{"topic"} },
+    .{ .name = "lodestar_native_gossip_messages_published_total", .kind = "counter", .labels = &.{"topic"} },
+    .{ .name = "lodestar_native_gossip_mesh_changes_total", .kind = "counter", .labels = &.{ "topic", "event", "reason" } },
+    .{ .name = "lodestar_native_gossip_behaviour_penalties_total", .kind = "counter", .labels = &.{"reason"} },
     // Gossip processor
     .{ .name = "lodestar_native_gossip_processor_items", .kind = "gauge", .labels = &.{ "kind", "state" } },
     .{ .name = "lodestar_native_gossip_processor_execution_credit_limit", .kind = "gauge", .labels = &.{ "kind", "credit" } },
@@ -418,4 +424,39 @@ test "metrics export stock per-topic gossipsub peer gauges under full topic stri
     try gossip_test.subscribe(g, future);
     output = try f.render(true);
     try contains(output, "gossipsub_mesh_peer_count{topicStr=\"" ++ future ++ "\"} 0\n");
+}
+
+test "metrics export gossip message, mesh change, penalty and promise counters through shutdown" {
+    var f = try Fixture.init(&.{boundary(@splat(0), 100)});
+    defer f.deinit();
+    const g = f.node.service.gossipsub;
+    const name = "/eth2/00000000/beacon_block/ssz_snappy";
+    try gossip_test.subscribe(g, name);
+    const peer = gossip_test.addPeer(g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const topic = g.overlay.peerSubscription(&g.overlayContext(0), peer.index, name, true).?;
+    g.overlay.onGraft(&g.overlayContext(0), topic, peer.index);
+    const counts = &g.topic_metrics.counts[@intFromEnum(policy.Kind.beacon_block)];
+    counts.received = 5;
+    counts.duplicate = 2;
+    g.topic_metrics.counts[policy.kind_count].published = std.math.maxInt(u64);
+    g.peers.scores.penalties[@intFromEnum(@import("gossipsub/score.zig").Penalty.graft_flood)] = 6;
+    g.recovery.armed = 9;
+    const expected = [_][]const u8{
+        "lodestar_native_gossip_messages_received_total{topic=\"beacon_block\"} 5\n",
+        "lodestar_native_gossip_messages_duplicate_total{topic=\"beacon_block\"} 2\n",
+        "lodestar_native_gossip_messages_published_total{topic=\"unknown\"} 18446744073709551615\n",
+        "lodestar_native_gossip_messages_received_total{topic=\"data_column_sidecar\"} 0\n",
+        "lodestar_native_gossip_mesh_changes_total{topic=\"beacon_block\",event=\"join\",reason=\"remote_graft\"} 1\n",
+        "lodestar_native_gossip_mesh_changes_total{topic=\"unknown\",event=\"leave\",reason=\"refused_graft\"} 0\n",
+        "lodestar_native_gossip_behaviour_penalties_total{reason=\"graft_flood\"} 6\n",
+        "lodestar_native_gossip_behaviour_penalties_total{reason=\"large_frame_timeout\"} 0\n",
+        "lodestar_native_gossip_iwant_promises_started_total 9\n",
+    };
+    const running = try f.render(true);
+    for (expected) |line| try contains(running, line);
+    try std.testing.expectEqual(@as(usize, (policy.kind_count + 1) * 12), std.mem.count(u8, running, "lodestar_native_gossip_mesh_changes_total{"));
+    g.connectionClosed(g.sessions.rows[peer.index].conn);
+    const stopped = try f.render(false);
+    for (expected) |line| try contains(stopped, line);
+    try contains(stopped, "lodestar_native_gossip_mesh_changes_total{topic=\"beacon_block\",event=\"leave\",reason=\"session_end\"} 1\n");
 }

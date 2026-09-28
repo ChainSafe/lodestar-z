@@ -368,7 +368,7 @@ test "gossipsub PRUNE exhaustion closes gossip streams and leaves the transport 
     defer std.testing.allocator.free(full);
     @memset(full, 0);
     try std.testing.expect(tx.injectFrame(full, true, setup.shared.pair.now.mono_ms) != null);
-    g.overlay.prune(&g.overlayContext(setup.shared.pair.now.mono_ms), topic_index, index, 60_000);
+    g.overlay.prune(&g.overlayContext(setup.shared.pair.now.mono_ms), topic_index, index, 60_000, .excess);
     try std.testing.expect(g.sessions.rows[index].outbound == .closing);
     try std.testing.expect(!setup.shared.client.gossipsub.deliveryAvailable(setup.shared.handles.client));
     _ = setup.shared.client.gossipsub.pump(&setup.shared.client.router, &setup.shared.pair.client, setup.shared.pair.now);
