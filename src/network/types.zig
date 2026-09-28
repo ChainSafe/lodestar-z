@@ -52,7 +52,7 @@ pub const Sent = struct {
     transmit_at_ns: u64 = 0,
 };
 
-pub const PendingClose = struct { reason: CloseReason, code: u64, stage: enum { waiting, armed } = .waiting };
+pub const PendingClose = struct { reason: CloseReason, code: u64 };
 
 pub const Read = struct {
     len: usize,
