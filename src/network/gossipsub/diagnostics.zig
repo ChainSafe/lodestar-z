@@ -1,4 +1,3 @@
-const gossip_test = @import("test_support.zig");
 const std = @import("std");
 const c = @import("constants.zig");
 const score = @import("score.zig");
@@ -83,6 +82,7 @@ pub fn capture(g: *const Gossipsub, cursor: u16, now: @import("../types.zig").No
 }
 
 test "gossip diagnostic pages bound peers preserve scores and include empty meshes" {
+    const gossip_test = @import("test_support.zig");
     const a = std.testing.allocator;
     var g = try gossip_test.init(a, .{ .random_seed = 1, .connected_capacity = 10, .retained_capacity = 16, .retained_outbound_reserve = 1 });
     defer g.deinit();
@@ -90,7 +90,7 @@ test "gossip diagnostic pages bound peers preserve scores and include empty mesh
     try gossip_test.subscribe(&g, name);
     const t = g.overlay.findTopic(name).?;
     for (0..10) |i| {
-        const peer = @import("test_support.zig").addPeer(&g, .{ .index = @intCast(i), .generation = 1 }, .v1_2).?;
+        const peer = gossip_test.addPeer(&g, .{ .index = @intCast(i), .generation = 1 }, .v1_2).?;
         g.peers.scores.invalid(g.sessions.rows[peer.index].logical.index, t);
     }
     const page = try a.create(Page);
