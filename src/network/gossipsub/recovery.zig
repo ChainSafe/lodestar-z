@@ -7,10 +7,13 @@ const Handle = @import("../quic/engine.zig").Handle;
 const MessageId = @import("topic.zig").MessageId;
 const assert = std.debug.assert;
 const none = std.math.maxInt(u16);
+const bucket_count = @import("mcache.zig").indexCapacity(constants.promises_cap);
 
 pub const promises_per_peer = constants.max_ihave_per_heartbeat * constants.gossip_ids_max;
 
-const Request = struct { id: MessageId = undefined, next: u16 = none };
+/// `next` links a batch's requests, or the free slots; `bucket_next` and `bucket_prev` link the
+/// requests whose ids share a bucket; `batch` indexes the batch holding the request.
+const Request = struct { id: MessageId = undefined, next: u16 = none, batch: u16 = none, bucket_next: u16 = none, bucket_prev: u16 = none };
 pub const Batch = struct {
     peer: PeerRef,
     token: u64,
@@ -25,6 +28,11 @@ pub const Batch = struct {
 pub const Recovery = struct {
     requests: []Request,
     batches: []Batch,
+    /// Chain heads by id hash. A request joins its chain when added and leaves it when released,
+    /// before its slot can be reused, so a chain holds exactly the live requests of its bucket.
+    /// Gossipsub keys the hash with host entropy, so peers cannot choose ids that share a chain.
+    buckets: []u16,
+    seed: u64 = 0,
     free: u16 = 0,
     len: usize = 0,
     batch_len: usize = 0,
@@ -34,8 +42,10 @@ pub const Recovery = struct {
         const requests = try allocator.alloc(Request, constants.promises_cap);
         errdefer allocator.free(requests);
         const batches = try allocator.alloc(Batch, constants.promises_cap);
-        var result: Recovery = .{ .requests = requests, .batches = batches };
-        result.resetFree();
+        errdefer allocator.free(batches);
+        const buckets = try allocator.alloc(u16, bucket_count);
+        var result: Recovery = .{ .requests = requests, .batches = batches, .buckets = buckets };
+        result.resetRequests();
         return result;
     }
 
@@ -43,6 +53,7 @@ pub const Recovery = struct {
         self.clear(peers);
         allocator.free(self.requests);
         allocator.free(self.batches);
+        allocator.free(self.buckets);
         self.* = undefined;
     }
 
@@ -50,12 +61,17 @@ pub const Recovery = struct {
         for (self.batches[0..self.batch_len]) |batch| peers.release(batch.peer);
         self.len = 0;
         self.batch_len = 0;
-        self.resetFree();
+        self.resetRequests();
     }
 
-    fn resetFree(self: *Recovery) void {
+    fn resetRequests(self: *Recovery) void {
         for (self.requests, 0..) |*request, i| request.* = .{ .next = if (i + 1 < self.requests.len) @intCast(i + 1) else none };
+        @memset(self.buckets, none);
         self.free = 0;
+    }
+
+    fn bucket(self: *Recovery, id: *const MessageId) *u16 {
+        return &self.buckets[@as(usize, @truncate(std.hash.Wyhash.hash(self.seed, id))) & (self.buckets.len - 1)];
     }
 
     pub fn available(self: *const Recovery) usize {
@@ -97,10 +113,6 @@ pub const Recovery = struct {
         return .{ .count = count, .capacity = capacity };
     }
 
-    pub fn resolveWork(self: *const Recovery) usize {
-        return self.len * (@sizeOf(Request) + @sizeOf(MessageId)) + self.batch_len * @sizeOf(Batch);
-    }
-
     pub fn selectionWork(ids: usize, batches: usize, requests: usize) usize {
         assert(ids <= constants.max_ihave_ids_per_heartbeat and batches <= constants.promises_cap and requests <= constants.promises_cap);
         const levels = std.math.log2_int_ceil(usize, @max(ids, 2));
@@ -121,7 +133,7 @@ pub const Recovery = struct {
     }
 
     pub fn backingBytes() usize {
-        return constants.promises_cap * (@sizeOf(Request) + @sizeOf(Batch));
+        return constants.promises_cap * (@sizeOf(Request) + @sizeOf(Batch)) + bucket_count * @sizeOf(u16);
     }
 
     /// Commit a nonempty subset admitted by filterPending, without intervening recovery mutation.
@@ -142,13 +154,17 @@ pub const Recovery = struct {
 
     pub fn addBatch(self: *Recovery, peers: *Peers, ids: []const MessageId, peer: PeerRef, connection: Handle, token: u64, sample: usize, expiry: u64) void {
         assert(ids.len > 0 and ids.len <= constants.gossip_ids_max and ids.len <= self.available() and sample < ids.len);
-        const batch = &self.batches[self.batch_len];
+        const index: u16 = @intCast(self.batch_len);
+        const batch = &self.batches[index];
         batch.* = .{ .peer = peer, .connection = connection, .token = token, .expiry = expiry, .count = @intCast(ids.len) };
         for (ids, 0..) |id, i| {
             const slot = self.free;
             assert(slot != none);
             self.free = self.requests[slot].next;
-            self.requests[slot] = .{ .id = id, .next = batch.head };
+            const head = self.bucket(&id);
+            self.requests[slot] = .{ .id = id, .next = batch.head, .batch = index, .bucket_next = head.* };
+            if (head.* != none) self.requests[head.*].bucket_prev = slot;
+            head.* = slot;
             batch.head = slot;
             if (i == sample) batch.sample = slot;
         }
@@ -157,28 +173,50 @@ pub const Recovery = struct {
         self.batch_len += 1;
     }
 
-    pub fn resolve(self: *Recovery, peers: *Peers, id: MessageId) void {
-        var index: usize = 0;
-        const batches = self.batch_len;
-        for (0..batches) |_| {
-            if (index == self.batch_len) break;
-            const batch = &self.batches[index];
-            var link = &batch.head;
-            const count = batch.count;
-            for (0..count) |_| {
-                const slot = link.*;
-                const request = &self.requests[slot];
-                if (!std.mem.eql(u8, &request.id, &id)) {
-                    link = &request.next;
-                    continue;
-                }
-                link.* = request.next;
-                if (batch.sample == slot) batch.sample = none;
-                batch.count -= 1;
-                self.releaseRequest(slot);
+    /// Resolves every request for `id` and returns the bytes visited, for the caller's work budget.
+    pub fn resolve(self: *Recovery, peers: *Peers, id: MessageId) usize {
+        var chained: usize = 0;
+        var walked: usize = 0;
+        var resolved: usize = 0;
+        var slot = self.bucket(&id).*;
+        for (0..self.requests.len) |_| {
+            if (slot == none) break;
+            const request = self.requests[slot];
+            chained += 1;
+            if (std.mem.eql(u8, &request.id, &id)) {
+                walked += self.detach(peers, slot);
+                resolved += 1;
             }
-            if (batch.count == 0) self.remove(peers, index) else index += 1;
+            slot = request.bucket_next;
         }
+        assert(slot == none);
+        // Hashing the id and reading its bucket, comparing each chained request, and per resolved
+        // request the requests walked in its batch and in the batch moved into its place.
+        return @sizeOf(MessageId) + @sizeOf(u16) + chained * (@sizeOf(Request) + @sizeOf(MessageId)) +
+            walked * @sizeOf(Request) + resolved * 2 * @sizeOf(Batch);
+    }
+
+    /// Unlinks a resolved request from its batch and removes the batch once empty. Returns the
+    /// requests visited besides it: those ahead of it in its batch and those of a moved batch.
+    fn detach(self: *Recovery, peers: *Peers, slot: u16) usize {
+        const index = self.requests[slot].batch;
+        const batch = &self.batches[index];
+        var link = &batch.head;
+        var visited: usize = 0;
+        for (0..batch.count) |_| {
+            if (link.* == slot) break;
+            link = &self.requests[link.*].next;
+            visited += 1;
+        }
+        assert(link.* == slot);
+        link.* = self.requests[slot].next;
+        if (batch.sample == slot) batch.sample = none;
+        batch.count -= 1;
+        self.releaseRequest(slot);
+        if (batch.count > 0) return visited;
+        const moved = self.batches[self.batch_len - 1].count;
+        self.remove(peers, index);
+        return visited + moved;
     }
 
     pub fn cancel(self: *Recovery, peers: *Peers, connection: Handle, local_pressure: bool) u64 {
@@ -234,7 +272,14 @@ pub const Recovery = struct {
     }
 
     fn releaseRequest(self: *Recovery, slot: u16) void {
-        self.requests[slot].next = self.free;
+        const request = &self.requests[slot];
+        if (request.bucket_prev == none) {
+            const head = self.bucket(&request.id);
+            assert(head.* == slot);
+            head.* = request.bucket_next;
+        } else self.requests[request.bucket_prev].bucket_next = request.bucket_next;
+        if (request.bucket_next != none) self.requests[request.bucket_next].bucket_prev = request.bucket_prev;
+        request.next = self.free;
         self.free = slot;
         self.len -= 1;
     }
@@ -251,7 +296,15 @@ pub const Recovery = struct {
         assert(slot == none);
         peers.release(batch.peer);
         self.batch_len -= 1;
-        self.batches[index] = self.batches[self.batch_len];
+        if (index == self.batch_len) return;
+        const moved = &self.batches[index];
+        moved.* = self.batches[self.batch_len];
+        slot = moved.head;
+        for (0..moved.count) |_| {
+            self.requests[slot].batch = @intCast(index);
+            slot = self.requests[slot].next;
+        }
+        assert(slot == none);
     }
 };
 

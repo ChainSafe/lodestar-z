@@ -170,6 +170,7 @@ pub const Gossipsub = struct {
         errdefer allocator.free(msg_scratch);
         var recovery = try Recovery.init(allocator);
         errdefer recovery.deinit(allocator, &peers);
+        recovery.seed = options.random_seed.? ^ 5;
 
         var result: Gossipsub = .{
             .allocator = allocator,
@@ -314,7 +315,7 @@ pub const Gossipsub = struct {
         if (recipients.count() == 0 and !options.allow_zero_peers) return error.NoPeersSubscribedToTopic;
         const clen = snappy.raw.compress(ssz, self.msg_scratch) catch return error.CompressFailed;
         const h = self.messages.publish(id, topic_str, self.msg_scratch[0..clen], now_ms, self.cycle.epoch) orelse return error.ResourceExhausted;
-        self.recovery.resolve(&self.peers, id);
+        _ = self.recovery.resolve(&self.peers, id);
         const result = self.deliver(&recipients, h, null, now_ms);
         return result;
     }
@@ -599,11 +600,6 @@ pub const Gossipsub = struct {
         const workspace = turn.workspace(peer);
         const source: @import("messages.zig").Source = .{ .peer = self.logical(index), .session = self.sessions.ref(index), .connection = self.sessions.rows[index].conn };
         const result = self.messages.receive(&context, &workspace, &source, msg, now.mono_ms);
-        if (result == .duplicate or result == .admitted) {
-            const work = self.recovery.resolveWork();
-            turn.budget.work -|= work;
-            peer.work -|= work;
-        }
         switch (result) {
             .ignored => return .done,
             .invalid => |reason| {
@@ -612,7 +608,7 @@ pub const Gossipsub = struct {
                 return .done;
             },
             .duplicate => |id| {
-                self.recovery.resolve(&self.peers, id);
+                self.resolvePromises(turn, peer, id);
                 return .done;
             },
             .blocked => |reason| switch (reason) {
@@ -623,11 +619,17 @@ pub const Gossipsub = struct {
                 .work => return .credits,
             },
             .admitted => |event| {
-                self.recovery.resolve(&self.peers, event.id);
+                self.resolvePromises(turn, peer, event.id);
                 if (msg.data.len >= self.options.idontwant_min_data_size) self.broadcastIdontwant(self.overlay.findTopic(event.topic).?, event.id, index);
                 return .done;
             },
         }
+    }
+
+    fn resolvePromises(self: *Gossipsub, turn: *Turn, peer: *Credits, id: MessageId) void {
+        const work = self.recovery.resolve(&self.peers, id);
+        turn.budget.work -|= work;
+        peer.work -|= work;
     }
 
     pub fn ihaveWork(self: *const Gossipsub, body_len: usize) usize {
