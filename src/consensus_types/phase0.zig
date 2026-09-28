@@ -55,7 +55,7 @@ pub const PendingAttestation = ssz.VariableContainerType(struct {
 
 pub const Eth1Data = ssz.FixedContainerType(struct {
     deposit_root: p.Root,
-    deposit_count: p.Uint64,
+    deposit_count: p.BigUint64,
     block_hash: p.Bytes32,
 });
 

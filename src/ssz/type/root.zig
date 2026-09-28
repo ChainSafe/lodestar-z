@@ -4,6 +4,7 @@ pub const isFixedType = @import("type_kind.zig").isFixedType;
 
 pub const BoolType = @import("bool.zig").BoolType;
 pub const UintType = @import("uint.zig").UintType;
+pub const BigUint64Type = @import("uint.zig").BigUint64Type;
 
 pub const BitListType = @import("bit_list.zig").BitListType;
 pub const isBitListType = @import("bit_list.zig").isBitListType;

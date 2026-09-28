@@ -3,6 +3,15 @@ const TypeKind = @import("type_kind.zig").TypeKind;
 const Node = @import("persistent_merkle_tree").Node;
 
 pub fn UintType(comptime bits: comptime_int) type {
+    return UintTypeImpl(bits, false);
+}
+
+/// Selects JavaScript bigint output while retaining uint64 storage and SSZ encoding.
+pub fn BigUint64Type() type {
+    return UintTypeImpl(64, true);
+}
+
+fn UintTypeImpl(comptime bits: comptime_int, comptime bigint: bool) type {
     const NativeType = switch (bits) {
         8 => u8,
         16 => u16,
@@ -15,6 +24,7 @@ pub fn UintType(comptime bits: comptime_int) type {
     const bytes = bits / 8;
     return struct {
         pub const kind = TypeKind.uint;
+        pub const is_bigint = bigint;
         pub const Type: type = NativeType;
         pub const fixed_size: usize = bytes;
 

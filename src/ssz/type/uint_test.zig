@@ -5,6 +5,7 @@ const expectEqualRoots = @import("test_utils.zig").expectEqualRoots;
 const expectEqualSerialized = @import("test_utils.zig").expectEqualSerialized;
 const Node = @import("persistent_merkle_tree").Node;
 const UintType = @import("uint.zig").UintType;
+const BigUint64Type = @import("uint.zig").BigUint64Type;
 
 fn testFixed(
     allocator: std.mem.Allocator,
@@ -203,4 +204,34 @@ test "UintType - default_root" {
 
     try Uint16.hashTreeRoot(&Uint16.default_value, &expected_root);
     try std.testing.expectEqualSlices(u8, &expected_root, &Uint16.default_root);
+}
+
+test "BigUint64Type preserves uint64 SSZ representation" {
+    const BigUint64 = BigUint64Type();
+    const Uint64 = UintType(64);
+    try std.testing.expect(BigUint64 != Uint64);
+    try std.testing.expect(BigUint64.Type == Uint64.Type);
+    try std.testing.expect(BigUint64.is_bigint);
+    try std.testing.expect(!Uint64.is_bigint);
+
+    const value: u64 = std.math.maxInt(u64);
+    try testFixed(
+        std.testing.allocator,
+        BigUint64,
+        value,
+        &[_]u8{0xff} ** 8,
+        &[_]u8{0xff} ** 8 ++ [_]u8{0x00} ** 24,
+    );
+
+    const json = "\"18446744073709551615\"";
+    var scanner = std.json.Scanner.initCompleteInput(std.testing.allocator, json);
+    defer scanner.deinit();
+    var decoded: u64 = undefined;
+    try BigUint64.deserializeFromJson(&scanner, &decoded);
+    try std.testing.expectEqual(value, decoded);
+
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    try BigUint64.serializeIntoJson(&output.writer, &value);
+    try std.testing.expectEqualStrings(json, output.written());
 }

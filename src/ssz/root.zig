@@ -10,6 +10,7 @@ pub const isFixedType = types.isFixedType;
 
 pub const BoolType = types.BoolType;
 pub const UintType = types.UintType;
+pub const BigUint64Type = types.BigUint64Type;
 
 pub const BitListType = types.BitListType;
 pub const isBitListType = types.isBitListType;
