@@ -109,7 +109,7 @@ test "managed native immutable metadata response survives local update during pe
     var pending = false;
     for (0..40) |_| {
         try setup.step(0);
-        for (setup.server.control.responses) |response| if (response.request) |request| {
+        for (setup.server.control_protocol.responses) |response| if (response.request) |request| {
             const slot = setup.server_service.reqresp.inboundSlot(request).?;
             if (slot.request.protocol != .metadata_v1) continue;
             try std.testing.expect(slot.request.io.writing);
@@ -169,7 +169,7 @@ test "managed native control timeout releases owners independent of public outpu
 }
 
 fn failStatus(setup: *Setup, failure: rr.Failure) !void {
-    for (setup.client.control.operations) |operation| if (operation.request) |request| {
+    for (setup.client.control_protocol.operations) |operation| if (operation.request) |request| {
         if (operation.protocol != .status_v1) continue;
         const service = &setup.client_service.reqresp;
         const slot = service.outboundSlot(request).?;
@@ -239,7 +239,7 @@ test "managed native control retries a failed probe on the turn its retry deadli
     try std.testing.expectEqual(@as(u8, 1), row.health_failures[status]);
     const retry = row.retry_ms;
     try std.testing.expectEqual(setup.pair.now.mono_ms + setup.client.control.options.failure_retry_ms, retry);
-    try std.testing.expectEqual(retry, setup.client.control.nextWakeup(&setup.client.catalog, setup.pair.now).?);
+    try std.testing.expectEqual(retry, setup.client.control.nextWakeup(&setup.client.catalog, &setup.client.control_protocol, setup.pair.now).?);
     const counter = &setup.client_service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing;
     const started = counter.*;
     const visits = setup.client.control.visits;
@@ -396,7 +396,7 @@ test "managed native deterministic replacement cancels old control and ignores s
     setup.client.reStatusPeers(setup.pair.now);
     try setup.step(1);
     var old_request: ?rr.RequestHandle = null;
-    for (setup.client.control.operations) |op| if (op.request != null) {
+    for (setup.client.control_protocol.operations) |op| if (op.request != null) {
         old_request = op.request;
         break;
     };
@@ -428,11 +428,9 @@ test "managed native deterministic replacement cancels old control and ignores s
         &.{},
         &.{},
     );
-    setup.client.control.events(
+    setup.client.controlEvents(
         &setup.client_service,
-        &setup.client.catalog,
         &setup.pair.client,
-        &setup.client.local,
         setup.pair.now,
         100,
         &.{.{ .failed = .{ .request = old_request.?, .reason = .timeout } }},
@@ -553,7 +551,7 @@ test "managed native local control capacity defers with future wakeup and no pee
     _ = setup.client.snapshots(&snapshots);
     try std.testing.expectEqual(@as(f64, 0), snapshots[0].score);
     try std.testing.expect(snapshots[0].relevant);
-    const control_due = setup.client.control.nextWakeup(&setup.client.catalog, setup.pair.now).?;
+    const control_due = setup.client.control.nextWakeup(&setup.client.catalog, &setup.client.control_protocol, setup.pair.now).?;
     try std.testing.expect(control_due > setup.pair.now.mono_ms);
     managed.shutdown(&setup.client, &setup.client_service, &setup.pair.client, setup.pair.now);
 }
@@ -1450,7 +1448,7 @@ test "managed reconciliation ban expiry still defers until strict score recovery
     const peer = snapshots[0].peer;
     const conn = snapshots[0].connection.?;
     try std.testing.expectEqual(t.ReputationDecision.ban, setup.client.reportPeer(peer, .fatal, setup.pair.now).?);
-    setup.client.control.close(&setup.client_service, &setup.client.catalog, &setup.pair.client, peer, conn, .banned, setup.pair.now);
+    setup.client.closeConnection(&setup.client_service, &setup.pair.client, peer, conn, .banned, setup.pair.now);
     const candidate = try candidateFor(&snapshots[0].identity, null);
     try std.testing.expectEqual(@as(u16, 1), setup.client.discoveredBatch(&setup.client_service, &.{candidate}, setup.pair.now).accepted);
     var out: [1]managed.DialIntent = undefined;
@@ -1756,7 +1754,7 @@ test "managed replaces failed gossip below target without a reputation penalty o
     try std.testing.expectEqual(t.DisconnectReason.gossip_unavailable, after.disconnect_reason.?);
     try std.testing.expectEqual(snapshot.score, after.score);
     try std.testing.expectEqual(@as(u64, 0), after.ban_until_ms);
-    setup.client.control.maintain(&setup.client_service, &setup.client.catalog, &setup.pair.client, &setup.client.local, setup.pair.now);
+    setup.client.maintainControl(&setup.client_service, &setup.pair.client, setup.pair.now);
     try std.testing.expectEqual(started, driver.counters.negotiation_started);
 }
 

@@ -3,6 +3,7 @@ const service_mod = @import("service.zig");
 const t = @import("peers/types.zig");
 const peers = @import("peers/root.zig");
 const control_mod = @import("peers/control.zig");
+const ControlProtocol = @import("control_protocol.zig").ControlProtocol;
 const dial_mod = @import("peers/dialing.zig");
 const policy = peers.policy;
 const engine_mod = @import("quic/engine.zig");
@@ -48,6 +49,7 @@ pub const PeerManager = struct {
     allocator: std.mem.Allocator,
     catalog: peers.Catalog,
     control: control_mod.Control,
+    control_protocol: ControlProtocol,
     dialing: dial_mod.Dialing,
     local_identity: t.PeerId,
     local: t.LocalState,
@@ -101,14 +103,15 @@ pub const PeerManager = struct {
         try validateOptions(options);
         var catalog = try peers.Catalog.initWithIntents(a, options.peers, options.dial.capacity, connections_max, options.dial.seed);
         errdefer catalog.deinit(a);
-        var control = try control_mod.Control.init(
+        var control = try control_mod.Control.init(a, options.control, @intCast(catalog.rows.len));
+        errdefer control.deinit(a);
+        var control_protocol = try ControlProtocol.init(
             a,
-            options.control,
             @intCast(catalog.rows.len),
             options.peers.max_peers,
             service.reqresp.serving.control_reserved,
         );
-        errdefer control.deinit(a);
+        errdefer control_protocol.deinit(a);
         const dialing = try dial_mod.Dialing.init(options.dial);
         const scratch = try a.alloc(t.Snapshot, options.peers.capacity);
         errdefer a.free(scratch);
@@ -118,6 +121,7 @@ pub const PeerManager = struct {
             .allocator = a,
             .catalog = catalog,
             .control = control,
+            .control_protocol = control_protocol,
             .dialing = dialing,
             .local_identity = identity.*,
             .local = copied,
@@ -131,6 +135,7 @@ pub const PeerManager = struct {
     pub fn deinit(self: *PeerManager) void {
         self.allocator.free(self.policy_scratch);
         self.allocator.free(self.snapshot_scratch);
+        self.control_protocol.deinit(self.allocator);
         self.control.deinit(self.allocator);
         self.catalog.deinit(self.allocator);
         self.* = undefined;
@@ -168,16 +173,12 @@ pub const PeerManager = struct {
                 switch (decision) {
                     .admitted => |admission| {
                         if (admission.displaced) |old| {
-                            self.control.cancelConnection(
-                                service,
-                                engine,
-                                admission.peer,
-                                old,
-                            );
+                            self.control_protocol.cancelConnection(&service.reqresp, &service.router, engine, admission.peer, old);
+                            self.control.retire(admission.peer, old);
                             service.gossipsub.retireConnection(&service.router, engine, old, now);
                             _ = engine.close(old, 0);
                         }
-                        self.control.connected(&self.catalog, admission.peer, connected.conn, direction, now);
+                        self.control.connected(&self.catalog, &self.control_protocol, admission.peer, connected.conn, direction, now);
                         const direct = self.catalog.rowFor(admission.peer).?.direct;
                         _ = service.gossipsub.peerConnected(engine, connected.conn, direct, now);
                         self.dialing.accepted(&self.catalog, admission.peer, connected.conn, now.mono_ms);
@@ -197,15 +198,7 @@ pub const PeerManager = struct {
                     if (closed.reason == .peer_closed) self.control.remoteClosed(peer, closed.conn);
                     const snapshot = self.catalog.get(peer).?;
                     const reason = snapshot.disconnect_reason orelse if (goodbye != null) t.DisconnectReason.remote_goodbye else .transport_closed;
-                    self.control.close(
-                        service,
-                        &self.catalog,
-                        engine,
-                        peer,
-                        closed.conn,
-                        reason,
-                        now,
-                    );
+                    self.closeConnection(service, engine, peer, closed.conn, reason, now);
                 }
             },
             .path_changed => |changed| {
@@ -214,6 +207,71 @@ pub const PeerManager = struct {
                 }
             },
             else => {},
+        }
+    }
+    /// Closes a connection its schedule owns: peer control records the close evidence and
+    /// retires the schedule, the control protocol cancels the connection's requests, gossip
+    /// retires it, and the catalog and transport release it.
+    pub fn closeConnection(
+        self: *PeerManager,
+        service: *service_mod.Service,
+        engine: *engine_mod.Engine,
+        peer: t.PeerRef,
+        conn: t.Handle,
+        reason: t.DisconnectReason,
+        now: Now,
+    ) void {
+        if (!self.control.close(&self.catalog, peer, conn, reason, now)) return;
+        self.control_protocol.cancelConnection(&service.reqresp, &service.router, engine, peer, conn);
+        service.gossipsub.retireConnection(&service.router, engine, conn, now);
+        _ = self.catalog.disconnect(peer, conn, reason, now.mono_ms);
+        _ = engine.close(conn, 0);
+    }
+    /// Routes one turn's control events. Peer control applies each request or reply before the
+    /// control protocol answers, consumes or retires it, and the peer's schedule is rekeyed after.
+    pub fn controlEvents(
+        self: *PeerManager,
+        service: *service_mod.Service,
+        engine: *engine_mod.Engine,
+        now: Now,
+        slot: u64,
+        batch: []const rr.Event,
+    ) void {
+        for (batch) |*event| switch (event.*) {
+            .request => |*request| {
+                const peer = self.catalog.findConnection(request.peer) orelse {
+                    _ = service.reqresp.cancel(request.request);
+                    continue;
+                };
+                self.control.requested(&self.catalog, &self.control_protocol, peer, request, &self.local, now, slot);
+                self.control_protocol.respond(&service.reqresp, peer, request, &self.local, now);
+            },
+            else => {
+                const index = self.control_protocol.result(&service.reqresp, event.*, now) orelse continue;
+                const op = &self.control_protocol.operations[index];
+                self.control.replied(&self.catalog, &self.control_protocol, op, event.*, &self.local, now, slot);
+                self.control_protocol.settle(&service.reqresp, &service.router, engine, index, event.*, now);
+                self.control.rekey(&self.catalog, &self.control_protocol, op.peer.index);
+            },
+        };
+    }
+    /// Executes the due control work in peer control's order: a close, or an Identify start and
+    /// a control request start, each recorded before the schedule is rekeyed.
+    pub fn maintainControl(self: *PeerManager, service: *service_mod.Service, engine: *engine_mod.Engine, now: Now) void {
+        var pass = self.control.beginMaintenance(now);
+        while (self.control.nextDue(&pass, &self.catalog, &self.control_protocol, &self.local, now)) |*due| {
+            defer self.control.rekey(&self.catalog, &self.control_protocol, due.index);
+            if (due.close) |reason| {
+                self.closeConnection(service, engine, due.peer, due.conn, reason, now);
+                continue;
+            }
+            if (due.identify) {
+                const started = if (service.identify.start(&service.router, engine, due.peer, due.conn, now)) true else |_| false;
+                self.control.identifyStarted(due, started, now);
+            }
+            const probe = due.request orelse continue;
+            const start = self.control_protocol.start(&service.reqresp, &service.router, engine, due.peer, due.conn, &probe, &self.local, now);
+            self.control.requestStarted(due, start, now);
         }
     }
     fn catalogDeadline(self: *PeerManager, now_ms: u64) ?u64 {
@@ -412,7 +470,10 @@ pub const PeerManager = struct {
     /// The caller must validate the complete local state before committing it.
     pub fn commitLocal(self: *PeerManager, service: *service_mod.Service, local: *const t.LocalState, now: Now) void {
         if (!std.meta.eql(self.local.fork, local.fork)) {
-            self.control.forkUpdated(service, &self.catalog, self.local.fork, now);
+            for (0..self.control.schedules.len) |index| {
+                const stale = self.control.revalidate(&self.catalog, &self.control_protocol, index, self.local.fork, now) orelse continue;
+                self.control_protocol.cancel(&service.reqresp, stale.peer, stale.conn);
+            }
         }
         self.local = local.*;
         service.reqresp.setRequestFork(local.fork.fork);
@@ -426,10 +487,10 @@ pub const PeerManager = struct {
     }
     pub fn reStatusPeer(self: *PeerManager, peer: t.PeerRef, connection: t.Handle, now: Now) bool {
         if (self.stopped) return false;
-        return self.control.reStatusPeer(&self.catalog, peer, connection, now);
+        return self.control.reStatusPeer(&self.catalog, &self.control_protocol, peer, connection, now);
     }
     pub fn reStatusPeers(self: *PeerManager, now: Now) void {
-        self.control.reStatusPeers(&self.catalog, now);
+        self.control.reStatusPeers(&self.catalog, &self.control_protocol, now);
     }
     pub fn reportPeer(
         self: *PeerManager,
@@ -499,7 +560,7 @@ pub const PeerManager = struct {
         if (self.stopped) return false;
         const snapshot = self.catalog.get(peer) orelse return false;
         if (!std.meta.eql(snapshot.connection, connection)) return false;
-        self.control.close(service, &self.catalog, engine, peer, connection, .host, now);
+        self.closeConnection(service, engine, peer, connection, .host, now);
         self.dialing.cancelConnect(&self.catalog, engine, &snapshot.identity, now.mono_ms);
         self.selection_revision = null;
         return true;
@@ -508,6 +569,7 @@ pub const PeerManager = struct {
         const snapshot = self.catalog.get(peer) orelse return false;
         return self.control.disconnect(
             &self.catalog,
+            &self.control_protocol,
             peer,
             snapshot.connection orelse return false,
             reason,
