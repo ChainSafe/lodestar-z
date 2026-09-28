@@ -3,6 +3,7 @@ const testing = std.testing;
 
 pub const stateTransition = @import("state_transition.zig").stateTransition;
 pub const processSlots = @import("state_transition.zig").processSlots;
+pub const Diagnostics = @import("diagnostics").Diagnostics;
 pub const TransitionOpts = @import("state_transition.zig").TransitionOpts;
 
 pub const metrics = @import("metrics.zig");
@@ -18,6 +19,7 @@ pub const buildSlashingsCacheFromStateIfNeeded = @import("./cache/slashings_cach
 
 pub const EpochCacheImmutableData = @import("./cache/epoch_cache.zig").EpochCacheImmutableData;
 pub const EpochCache = @import("./cache/epoch_cache.zig").EpochCache;
+pub const SyncCommitteeCache = @import("./cache/sync_committee_cache.zig").SyncCommitteeCache;
 
 pub const committee_indices = @import("./utils/committee_indices.zig");
 pub const PubkeyCache = @import("./cache/pubkey_cache.zig").PubkeyCache;

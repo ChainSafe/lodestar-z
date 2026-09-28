@@ -210,6 +210,25 @@ test "Pool - fixed capacity exhausts, reuses slots, and keeps columns stable" {
     try std.testing.expectEqual(max_depth, pool.getNodesInUse());
 }
 
+test "Pool - live occupancy counts shared nodes and chunked payloads once" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4 });
+    defer pool.deinit();
+
+    const leaf = try pool.createChunkedLeafEmpty(1);
+    const first = try pool.createBranch(leaf, leaf);
+    const second = try pool.createBranch(leaf, leaf);
+    try std.testing.expectEqual(max_depth + 3, pool.getNodesInUse());
+
+    pool.unref(first);
+    try std.testing.expectEqual(max_depth + 2, pool.getNodesInUse());
+    pool.unref(first);
+    pool.unref(@enumFromInt(0));
+    try std.testing.expectEqual(max_depth + 2, pool.getNodesInUse());
+    pool.unref(second);
+    try std.testing.expectEqual(max_depth, pool.getNodesInUse());
+}
+
 test "Pool - invalid capacity fails before allocation" {
     for ([_]u32{
         Node.State.next_free_mask - max_depth + 1,

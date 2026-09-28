@@ -3,12 +3,12 @@ const Allocator = std.mem.Allocator;
 const m = @import("metrics");
 
 /// Defaults to noop metrics, making this safe to use whether or not `metrics.init` is called.
-pub var state_transition = m.initializeNoop(Metrics);
+pub threadlocal var state_transition = m.initializeNoop(Metrics);
 
 /// Validator monitor metrics.
 ///
 /// Defaults to noop metrics, making this safe to use whether or not `metrics.init` is called.
-pub var validator_monitor = m.initializeNoop(ValidatorMonitorMetrics);
+pub threadlocal var validator_monitor = m.initializeNoop(ValidatorMonitorMetrics);
 
 pub const StateHashTreeRootSource = enum {
     state_transition,
@@ -89,6 +89,7 @@ const Metrics = struct {
         self.state_hash_tree_root.deinit();
         self.proposer_rewards.deinit();
         self.progressive_balances_mismatches.deinit();
+        self.* = m.initializeNoop(Metrics);
     }
 };
 

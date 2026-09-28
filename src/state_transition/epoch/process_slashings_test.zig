@@ -26,7 +26,7 @@ test "processSlashings stores a high-index penalty compactly" {
         epoch_cache.epoch + @divFloor(preset.EPOCHS_PER_SLASHINGS_VECTOR, 2),
     );
 
-    test_state.epoch_transition_cache.deinit(allocator);
+    test_state.epoch_transition_cache.deinit();
     test_state.epoch_transition_cache.* = try EpochTransitionCache.init(
         allocator,
         std.testing.io,

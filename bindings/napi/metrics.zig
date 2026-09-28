@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const js = @import("zapi:zapi").js;
 const state_transition = @import("state_transition");
+const validator_monitor = @import("./validator_monitor.zig");
 
 var gpa: std.heap.DebugAllocator(.{}) = .init;
 const allocator = if (builtin.mode == .Debug)
@@ -9,20 +10,32 @@ const allocator = if (builtin.mode == .Debug)
 else
     std.heap.c_allocator;
 
-var initialized: bool = false;
+threadlocal var initialized_historical: ?bool = null;
 
-const validator_monitor = @import("./validator_monitor.zig");
-
-/// JS: metrics.init() → void
-pub fn init() !void {
-    if (initialized) return;
-    try state_transition.metrics.init(allocator, js.io(), .{});
-    initialized = true;
+/// JS: metrics.init({historical?: boolean}) → void
+pub fn init(options: ?js.Value) !void {
+    var historical = false;
+    if (options) |value| {
+        const raw = value.toValue();
+        if (try raw.hasNamedProperty("historical")) {
+            historical = try (try raw.getNamedProperty("historical")).getValueBool();
+        }
+    }
+    if (initialized_historical) |previous| {
+        if (previous != historical) return error.MetricsAlreadyInitialized;
+        return;
+    }
+    if (historical) {
+        try state_transition.metrics.init(allocator, js.io(), .{ .prefix = "lodestar_historical_state_" });
+    } else {
+        try state_transition.metrics.init(allocator, js.io(), .{});
+    }
+    initialized_historical = historical;
 }
 
 /// JS: metrics.registerLocalValidator(index) → void
 ///
-/// Adds a validator index to the process-wide validator monitor so that
+/// Adds a validator index to the environment's validator monitor so that
 /// metrics are recorded for it on every epoch transition.
 pub fn registerLocalValidator(index: js.Number) !void {
     const value = try index.toI64();
@@ -32,7 +45,7 @@ pub fn registerLocalValidator(index: js.Number) !void {
 
 /// JS: metrics.unregisterLocalValidator(index) → void
 ///
-/// Prunes a validator index from the process-wide validator monitor.
+/// Prunes a validator index from the environment's validator monitor.
 pub fn unregisterLocalValidator(index: js.Number) !void {
     const value = try index.toI64();
     if (value < 0) return error.InvalidValidatorIndex;
@@ -49,8 +62,8 @@ pub fn scrapeMetrics() !js.String {
 }
 
 pub fn deinit() void {
-    if (!initialized) return;
-    state_transition.metrics.deinit();
     validator_monitor.deinit();
-    initialized = false;
+    if (initialized_historical == null) return;
+    state_transition.metrics.deinit();
+    initialized_historical = null;
 }

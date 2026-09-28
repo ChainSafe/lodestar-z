@@ -1,11 +1,9 @@
 import {config} from "@lodestar/config/default";
 import {ssz} from "@lodestar/types";
-import {beforeAll, expect, it} from "vitest";
+import {expect, it} from "vitest";
 import bindings from "../src/index.js";
 
-beforeAll(() => {
-  bindings.config.set(config, new Uint8Array(32));
-});
+const nativeConfig = new bindings.BeaconConfig(config, new Uint8Array(32));
 
 it.each([
   {count: 0n, name: "zero"},
@@ -29,7 +27,7 @@ it.each([
   data.setBigUint64(ranges[fields.indexOf("eth1Data")].start + countOffset, count, true);
   data.setBigUint64(ranges[fields.indexOf("eth1DataVotes")].start + countOffset, count, true);
 
-  const state = bindings.BeaconStateView.createFromBytes(bytes);
+  const state = bindings.BeaconStateView.createFromBytes(bytes, nativeConfig);
   try {
     const result = state.toValue();
     expect(result.eth1Data.depositCount).toBe(count);
