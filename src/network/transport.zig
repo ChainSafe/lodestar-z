@@ -431,6 +431,7 @@ fn mapSendError(err: udp_mod.SendError) DialError {
         error.AddressFamilyUnsupported,
         error.ConnectionRefused,
         error.ConnectionResetByPeer,
+        error.DestinationRefused,
         error.HostUnreachable,
         error.NetworkUnreachable,
         => error.DestinationUnreachable,

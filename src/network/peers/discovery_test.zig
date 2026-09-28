@@ -80,7 +80,7 @@ test "peer discovery answers unknown TALK protocols without demand or candidate 
     }
 }
 
-test "peer discovery TALK send failure preserves call expiry progress" {
+test "peer discovery refused TALK reply fails only its destination and preserves call expiry progress" {
     var requester: Node = undefined;
     try requester.init(33, 9033);
     defer requester.deinit();
@@ -104,8 +104,7 @@ test "peer discovery TALK send failure preserves call expiry progress" {
     const expired = try responder.transport.engine.calls.begin(from, &requester.transport.engine.localRecord().public_key, &request, now, d.wire.constants.ordinary_plaintext_size_max);
     var host: SendFailure = .{ .now_ms = now, .receive_real = true };
     const result = try controller.step(host.io(), now, now, &.{});
-    try std.testing.expectEqual(error.DestinationUnreachable, result.failure.?);
-    try std.testing.expectEqual(d.Transport.FailureStage.process, result.failure_stage);
+    if (result.failure) |err| return err;
     try std.testing.expectEqual(@as(usize, 1), host.sends);
     try std.testing.expectEqual(@as(u16, 1), result.unowned);
     try std.testing.expect(responder.transport.engine.calls.endpoint(expired) == null);
@@ -555,6 +554,8 @@ const SendFailure = struct {
     now_ms: u64,
     sends: usize = 0,
     receive_real: bool = false,
+    /// Refuses only sends to this port and delivers the rest. Null refuses every send.
+    refused_port: ?u16 = null,
     fn io(self: *SendFailure) std.Io {
         const vtable = comptime blk: {
             var value = std.Io.failing.vtable.*;
@@ -578,32 +579,91 @@ const SendFailure = struct {
         const self: *SendFailure = @ptrCast(@alignCast(context_ptr.?));
         return .{ .nanoseconds = @as(i96, @intCast(self.now_ms)) * std.time.ns_per_ms };
     }
-    fn send(context_ptr: ?*anyopaque, _: std.Io.net.Socket.Handle, _: []std.Io.net.OutgoingMessage, _: std.Io.net.SendFlags) struct { ?std.Io.net.Socket.SendError, usize } {
+    fn send(context_ptr: ?*anyopaque, handle: std.Io.net.Socket.Handle, messages: []std.Io.net.OutgoingMessage, flags: std.Io.net.SendFlags) struct { ?std.Io.net.Socket.SendError, usize } {
         const self: *SendFailure = @ptrCast(@alignCast(context_ptr.?));
+        if (self.refused_port) |port| if (messages[0].address.getPort() != port) {
+            return std.testing.io.vtable.netSend(std.testing.io.userdata, handle, messages, flags);
+        };
         self.sends += 1;
         return .{ error.NetworkUnreachable, 0 };
     }
 };
 
-test "peer discovery failed initial lookup send cancels call and defers retry" {
+test "peer discovery refused lookup send releases its call and continues with other candidates in the same step" {
     var a: Node = undefined;
     try a.init(1, 9001);
     defer a.deinit();
     var b: Node = undefined;
     try b.init(2, 9002);
     defer b.deinit();
+    var c: Node = undefined;
+    try c.init(3, 9003);
+    defer c.deinit();
+    const refused = c.transport.engine.localRecord().node_id;
     const now = try d.Transport.monotonicMilliseconds(std.testing.io);
-    var controller = try discovery.Discovery.init(std.testing.allocator, &a.transport, &context, &.{b.transport.engine.localRecord().*}, now, .{});
+    var controller = try discovery.Discovery.init(std.testing.allocator, &a.transport, &context, &.{ b.transport.engine.localRecord().*, c.transport.engine.localRecord().* }, now, .{});
     defer controller.deinit();
     try controller.request(.{ .general = true }, now);
-    var host = SendFailure{ .now_ms = now };
-    const result = try controller.step(host.io(), now, now, &.{});
-    try std.testing.expectEqual(error.DestinationUnreachable, result.failure.?);
+    var host = SendFailure{ .now_ms = now, .receive_real = true, .refused_port = c.transport.localAddress().port() };
+    var output: [1]adapter.Candidate = undefined;
+    const result = try controller.step(host.io(), now, now, &output);
+    if (result.failure) |err| return err;
+    try std.testing.expectEqual(@as(u8, 2), result.started);
     try std.testing.expectEqual(@as(usize, 1), host.sends);
-    try std.testing.expectEqual(@as(usize, 0), a.transport.engine.calls.count());
-    const seed = a.transport.engine.peerRecord(&b.transport.engine.localRecord().node_id).?;
-    try std.testing.expect(seed.last_verified_ms == null);
-    try std.testing.expect(controller.nextWakeup(now).? >= now + 1_000);
+    try std.testing.expectEqual(@as(u64, 0), controller.resource_retry_ms);
+    const lookup = &controller.lookup.?;
+    try std.testing.expectEqual(@as(usize, 1), lookup.waitingCount());
+    try std.testing.expectEqual(@as(usize, 1), a.transport.engine.calls.count());
+    for (controller.storage.candidates[0..lookup.candidateCount()]) |candidate| {
+        if (std.mem.eql(u8, &candidate.peer.node_id, &refused)) try std.testing.expect(candidate.state == .failed);
+    }
+    try std.testing.expect(a.transport.engine.peerRecord(&refused) != null);
+    var expiries: [d.CallTable.capacity_max]d.CallTable.Expired = undefined;
+    var found = false;
+    for (0..30) |_| {
+        const tick = try d.Transport.monotonicMilliseconds(std.testing.io);
+        const remote = try b.transport.stepUntil(std.testing.io, &expiries, tick);
+        if (remote.failure) |err| return err;
+        const next = try controller.step(std.testing.io, tick, tick, &output);
+        if (next.failure) |err| return err;
+        if (next.candidates > 0) {
+            try adapter.requireIdentity(b.transport.engine.localRecord(), &output[0].peer);
+            found = true;
+            break;
+        }
+    }
+    try std.testing.expect(found);
+}
+
+test "peer discovery refused maintenance probe stays a local failure and the step goes on" {
+    var a: Node = undefined;
+    try a.init(1, 9001);
+    defer a.deinit();
+    var b: Node = undefined;
+    try b.init(2, 9002);
+    defer b.deinit();
+    var c: Node = undefined;
+    try c.init(3, 9003);
+    defer c.deinit();
+    const now = try d.Transport.monotonicMilliseconds(std.testing.io);
+    const refused: d.types.Endpoint = .{ .node_id = c.transport.engine.localRecord().node_id, .address = c.transport.localAddress() };
+    _ = try a.transport.engine.confirmPeer(&refused, c.transport.engine.localRecord(), now);
+    const interval = 10;
+    var controller = try discovery.Discovery.init(std.testing.allocator, &a.transport, &context, &.{b.transport.engine.localRecord().*}, now, .{ .maintenance = .{ .probe_interval_ms = interval, .stale_after_ms = interval, .retry_interval_ms = interval } });
+    defer controller.deinit();
+    try controller.request(.{ .general = true }, now);
+    const tick = now + interval;
+    var host = SendFailure{ .now_ms = tick, .receive_real = true, .refused_port = refused.address.port() };
+    const result = try controller.step(host.io(), tick, tick, &.{});
+    if (result.failure) |err| return err;
+    // The stale probe to the verified peer and both lookup seeds start; both sends to it are refused.
+    try std.testing.expectEqual(@as(u8, 3), result.started);
+    try std.testing.expectEqual(@as(usize, 2), host.sends);
+    try std.testing.expectEqual(@as(usize, 1), a.transport.engine.calls.count());
+    try std.testing.expectEqual(@as(u64, 0), controller.resource_retry_ms);
+    // A timeout would keep the probe for a retry and then mark the peer unresponsive.
+    try std.testing.expect(controller.maintenance.pending == null);
+    try std.testing.expectEqual(@as(?u64, now), a.transport.engine.peerRecord(&refused.node_id).?.last_verified_ms);
 }
 
 fn handoff(candidate: *const adapter.Candidate) !void {

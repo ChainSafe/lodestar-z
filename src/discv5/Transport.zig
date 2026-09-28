@@ -145,6 +145,7 @@ pub fn transmit(
             error.AddressFamilyUnsupported,
             error.ConnectionRefused,
             error.ConnectionResetByPeer,
+            error.DestinationRefused,
             error.HostUnreachable,
             error.NetworkUnreachable,
             => error.DestinationUnreachable,
@@ -264,7 +265,7 @@ fn processDatagram(
     result.datagram = .accepted;
     result.event = accepted.event;
     if (accepted.packet_length > 0) {
-        try self.transmit(io, datagram.from, self.output[0..accepted.packet_length]);
+        _ = try self.reply(io, datagram.from, self.output[0..accepted.packet_length]);
     }
     result.event = try self.handleEvent(io, accepted.event, result);
 }
@@ -293,11 +294,22 @@ fn handleEvent(
             result.now_ms,
             &entropy,
         ) orelse break;
-        try self.transmit(io, request.peer.address, self.output[0..packet_length]);
+        // The destination refuses the remaining fragments too.
+        if (!try self.reply(io, request.peer.address, self.output[0..packet_length])) return .none;
         result.progress.standard_responses += 1;
     }
     std.debug.assert(self.response.complete());
     return .none;
+}
+
+/// Sends a reply this step owns. A destination failure drops the reply rather than failing the
+/// step; the requester retries or its call expires.
+fn reply(self: *const Transport, io: std.Io, destination: types.Address, bytes: []const u8) Error!bool {
+    self.transmit(io, destination, bytes) catch |err| switch (err) {
+        error.DestinationUnreachable => return false,
+        else => return err,
+    };
+    return true;
 }
 
 pub fn monotonicMilliseconds(io: std.Io) Error!u64 {
