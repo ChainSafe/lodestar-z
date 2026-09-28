@@ -487,9 +487,9 @@ test "exchange acknowledges owner dispositions under any demand, once, without c
     try std.testing.expectEqual(@as(usize, 0), (try host.turn(&actions, control)).acknowledged_count);
     runtime.lock();
     for (tokens) |token| table.retire(token);
-    runtime.recomputeLocked(.legacy);
+    runtime.recomputeLocked(.completions);
     runtime.unlock();
-    try std.testing.expectEqual(readiness.Place.control, runtime.readiness.place(.legacy));
+    try std.testing.expectEqual(readiness.Place.control, runtime.readiness.place(.completions));
 
     // A failed build keeps them for the next exchange.
     const items = runtime.bridge.delivered;
@@ -513,7 +513,7 @@ fn completePublication(runtime: *Runtime) !publications.Token {
     runtime.lock();
     defer runtime.unlock();
     runtime.publications.?.transition(runtime.publications.?.get(token).?, .terminal);
-    runtime.recomputeLocked(.legacy);
+    runtime.recomputeLocked(.completions);
     return token;
 }
 
@@ -579,7 +579,7 @@ fn completeCommand(runtime: *Runtime, command: commands.Command) !commands.Token
     runtime.lock();
     defer runtime.unlock();
     runtime.table.transition(runtime.table.get(token), .terminal);
-    runtime.recomputeLocked(.legacy);
+    runtime.recomputeLocked(.completions);
     return token;
 }
 
@@ -633,7 +633,7 @@ fn ownerMoves(runtime: *Runtime, token: outgoing.Token, comptime move: fn (*outg
     move(cell);
     runtime.requests.?.releasePayload(cell);
     runtime.requests.?.refresh(cell);
-    runtime.recomputeLocked(.legacy);
+    runtime.recomputeLocked(.completions);
 }
 
 fn pulledDone(cell: *outgoing.Cell) void {
@@ -806,7 +806,7 @@ fn streamMoves(runtime: *Runtime, token: incoming.Token, comptime move: fn (*inc
     move(cell);
     table.releasePayload(cell);
     table.refresh(cell);
-    runtime.recomputeLocked(.legacy);
+    runtime.recomputeLocked(.completions);
 }
 
 fn streamEnds(cell: *incoming.Cell) void {

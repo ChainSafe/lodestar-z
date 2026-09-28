@@ -96,7 +96,6 @@ pub fn pull(runtime: *Runtime, handle: Value) !void {
         return error.InvalidRequestHandle;
     };
     if (cell.pulling) {
-        runtime.requests.?.diag.busyPulls +|= 1;
         runtime.unlock();
         return error.NetworkRequestBusy;
     }

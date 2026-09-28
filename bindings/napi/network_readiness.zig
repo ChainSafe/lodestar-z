@@ -8,7 +8,7 @@
 const std = @import("std");
 const lists = @import("network").index_list;
 
-pub const Row = enum(u8) { legacy, peers, checks, serving, gossip };
+pub const Row = enum(u8) { completions, peers, checks, serving, gossip };
 pub const Place = enum { none, control, payload, parked };
 pub const row_count = @typeInfo(Row).@"enum".fields.len;
 
@@ -65,8 +65,7 @@ pub const Readiness = struct {
     }
 
     /// Takes every row out of the lists and arms, so owner activity that recomputes a row with work can notify
-    /// again. For a host that declined or threw on a notification, outside any exchange; the next exchange refreshes
-    /// every row.
+    /// again. For a host that threw on a notification, outside any exchange; the next exchange refreshes every row.
     pub fn forget(self: *Readiness) void {
         for (&self.rows, 0..) |*entry, i| {
             std.debug.assert(!entry.pinned);

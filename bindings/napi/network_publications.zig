@@ -210,7 +210,7 @@ pub fn execute(runtime: *Runtime, token: Token, now: n.Now) void {
     } else |err| cell.failure = err;
     table.releasePayload(cell);
     table.transition(cell, .terminal);
-    runtime.recomputeLocked(.legacy);
+    runtime.recomputeLocked(.completions);
 }
 
 test {

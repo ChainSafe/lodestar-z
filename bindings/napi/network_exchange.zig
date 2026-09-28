@@ -1,7 +1,8 @@
-//! One host exchange. Phase A decodes the actions and demand, and throws with nothing applied. Phase 0 settles
-//! the close result. Phase B, under the mutex, disarms, applies the actions, takes the capacities and pins the
-//! completions and rows it serves. Phase C builds the result; no user code runs from here on. Phase D, under the mutex,
-//! commits (or restores the pins when JavaScript stopped), unpins, wakes the owner once and arms when nothing is queued.
+//! One host exchange. Phase A decodes the actions and demand, and throws with nothing applied. Phase B, under the
+//! mutex, disarms, applies the actions, takes the capacities and pins the completions and rows it serves, or takes the
+//! close result once the owner quiesced and nothing else is due. Phase C joins the owner for a close and builds the
+//! result; no user code runs from here on. Phase D, under the mutex, commits (or restores the pins when JavaScript
+//! stopped), unpins, wakes the owner once and arms when nothing is queued.
 const std = @import("std");
 const n = @import("network");
 const napi = @import("zapi:zapi").napi;
@@ -158,13 +159,18 @@ pub const Selection = struct {
     /// Due incoming streams, taken likewise: each its acknowledgement, close and permission outcome.
     incoming: [incoming.capacity_max]incoming.Completion = undefined,
     incoming_count: usize = 0,
+    /// The close result, taken alone once the owner quiesced and no completion is due, which the commit delivers.
+    closed: ?Closed = null,
     /// The owner has work from this exchange.
     wake: bool = false,
 
     pub fn delivers(self: *const Selection) bool {
-        return self.peer_count > 0 or self.serving_count > 0 or self.checks.len > 0 or self.gossip != null or self.acknowledged_count > 0 or self.publication_count > 0 or self.command_count > 0 or self.request_count > 0 or self.incoming_count > 0;
+        return self.closed != null or self.peer_count > 0 or self.serving_count > 0 or self.checks.len > 0 or self.gossip != null or self.acknowledged_count > 0 or self.publication_count > 0 or self.command_count > 0 or self.request_count > 0 or self.incoming_count > 0;
     }
 };
+
+/// Why the network closed: requested, or the first failure, which names its error.
+pub const Closed = struct { reason: r.Reason, failure: ?anyerror };
 
 /// The result's scheduling fields, read in phase D.
 pub const Outcome = packed struct(u4) {
@@ -183,7 +189,7 @@ pub const Failure = enum { stopped, contract };
 
 fn enabled(runtime: *Runtime, demand: *const Demand, row: Row) bool {
     return switch (row) {
-        .legacy => true,
+        .completions => true,
         .peers => demand.peers > 0,
         .checks => demand.checks > 0,
         .serving => demand.serving > 0,
@@ -207,6 +213,9 @@ fn applyLocked(runtime: *Runtime, actions: []const Action, now: u64) void {
 }
 
 fn selectLocked(runtime: *Runtime, demand: *const Demand, now: u64, selection: *Selection) void {
+    // Owner quiescence is final, so every completion it left is due now; the close follows the last one.
+    if (runtime.quiescent and !runtime.close_delivered and !runtime.settleableLocked())
+        selection.closed = .{ .reason = runtime.reason, .failure = if (runtime.reason == .failed) runtime.terminal_error.? else null };
     if (runtime.gossip) |*table| selection.acknowledged_count = table.acknowledgements(&selection.acknowledged);
     selectPublications(runtime, demand.settle, selection);
     selectCommands(runtime, demand.settle, selection);
@@ -223,7 +232,7 @@ fn selectLocked(runtime: *Runtime, demand: *const Demand, now: u64, selection: *
         selection.pinned[selection.pinned_count] = row;
         selection.pinned_count += 1;
         switch (row) {
-            .legacy => unreachable,
+            .completions => unreachable,
             .peers => selection.peer_count = runtime.lane.?.peek(selection.peers[0..demand.peers]),
             .serving => selectServing(runtime, demand, selection),
             .checks => {
@@ -364,6 +373,7 @@ fn commitLocked(runtime: *Runtime, selection: *Selection) bool {
         runtime.gossip.?.finish(batch, true);
     }
     if (runtime.quiescent) if (runtime.gossip) |*table| table.trim();
+    if (selection.closed != null) runtime.close_delivered = true;
     return selection.serving_count > 0 and runtime.notify_live;
 }
 
@@ -438,6 +448,8 @@ pub fn run(runtime: *Runtime, actions: []const Action, demand: *const Demand, no
     // Ignored claims leave verdicts to apply, and a classification can move the owner's deadline.
     if (!std.meta.eql(marks, gossipMarks(runtime))) selection.wake = true;
     runtime.unlock();
+    // The owner quiesced and releases nothing more, so its thread ends without the mutex.
+    if (selection.closed != null) runtime.join();
     const output = host.build(&selection) catch |err| {
         const failure = host.classify(err);
         runtime.lock();
@@ -454,6 +466,8 @@ pub fn run(runtime: *Runtime, actions: []const Action, demand: *const Demand, no
     runtime.unlock();
     // Each admitted operation held the runtime until its final completion was delivered.
     for (0..selection.publication_count + selection.command_count + selection.requests_retired) |_| runtime.release();
+    // Delivered, the close leaves environment cleanup nothing to do.
+    if (selection.closed != null) runtime.removeHook();
     if (keep_alive) host.keepAlive();
     if (idle) host.idle();
     return host.finish(output, outcome) catch |err| return fail(host, host.classify(err), .exchange_finish, err);
@@ -505,8 +519,8 @@ fn schedule(env: napi.Env, result: Value, outcome: Outcome) !void {
     try result.setNamedProperty("parked", parked);
 }
 
-/// Builds a fresh result for a selection that delivers something, or for the close result `closed`.
-pub fn build(env: napi.Env, runtime: *Runtime, selection: *Selection, closed: ?Value) !Value {
+/// Builds a fresh result for a selection that delivers something.
+pub fn build(env: napi.Env, runtime: *Runtime, selection: *Selection) !Value {
     const result = try env.createObject();
     const peers = try env.createArrayWithLength(selection.peer_count);
     for (selection.peers[0..selection.peer_count], 0..) |*entry, i| try peers.setElement(@intCast(i), try projection.observation(env, entry));
@@ -555,8 +569,16 @@ pub fn build(env: napi.Env, runtime: *Runtime, selection: *Selection, closed: ?V
     }
     try result.setNamedProperty("completions", completions);
     try result.setNamedProperty("failure", try env.getNull());
-    try result.setNamedProperty("closed", closed orelse try env.getNull());
+    try result.setNamedProperty("closed", if (selection.closed) |closed| try closedValue(env, closed) else try env.getNull());
     return result;
+}
+
+/// `{reason: "requested"}`, or `{reason: "failed", error}` with the first failure's code.
+fn closedValue(env: napi.Env, closed: Closed) !Value {
+    const value = try env.createObject();
+    try value.setNamedProperty("reason", try env.createStringUtf8(@tagName(closed.reason)));
+    if (closed.failure) |err| try value.setNamedProperty("error", try @import("network_js.zig").settled(env, @import("network_js.zig").errorValue(env, @errorName(err))));
+    return value;
 }
 
 /// Sets a fresh result's scheduling fields, or returns the prepared result when nothing was built.

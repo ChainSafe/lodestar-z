@@ -30,6 +30,17 @@ fn napiGetAndClearLastException(_: ?*anyopaque, result: *?*anyopaque) callconv(.
     result.* = null;
     return 0;
 }
+/// The status `napi_get_undefined` returns, as Node's does once JavaScript can no longer run.
+pub var undefined_status: c_uint = 0;
+fn napiGetUndefined(_: ?*anyopaque, result: *?*anyopaque) callconv(.c) c_uint {
+    result.* = null;
+    return undefined_status;
+}
+/// N-API calls the tests link but never reach: no cleanup hook is live, no reference was created, and a notification
+/// fails before calling its callback.
+fn napiUnreached() callconv(.c) c_uint {
+    return napi.c.napi_generic_failure;
+}
 /// As Node's does, prints the location and message, then aborts.
 fn napiFatalError(location: [*]const u8, location_len: usize, message: [*]const u8, message_len: usize) callconv(.c) noreturn {
     var buffer: [256]u8 = undefined;
@@ -42,6 +53,8 @@ comptime {
     @export(&napiFatalError, .{ .name = "napi_fatal_error" });
     @export(&napiIsExceptionPending, .{ .name = "napi_is_exception_pending" });
     @export(&napiGetAndClearLastException, .{ .name = "napi_get_and_clear_last_exception" });
+    @export(&napiGetUndefined, .{ .name = "napi_get_undefined" });
+    for (.{ "napi_remove_env_cleanup_hook", "napi_delete_reference", "napi_call_function" }) |name| @export(&napiUnreached, .{ .name = name });
 }
 
 /// Runs `run` in a child process, which must abort after printing exactly `expected` to stderr.
@@ -205,8 +218,8 @@ test "an owner completion notifies once while armed and leaves settlement to the
     const token = try runtime.table.reserve(.getIdentity);
     runtime.table.transition(runtime.table.get(token), .terminal);
     runtime.lock();
-    runtime.recomputeLocked(.legacy);
-    runtime.recomputeLocked(.legacy);
+    runtime.recomputeLocked(.completions);
+    runtime.recomputeLocked(.completions);
     runtime.unlock();
     try std.testing.expectEqual(before + 1, notifications.load(.acquire));
     try std.testing.expect(!runtime.readiness.armed);
@@ -215,7 +228,7 @@ test "an owner completion notifies once while armed and leaves settlement to the
     const second = try runtime.table.reserve(.getIdentity);
     runtime.lock();
     runtime.table.transition(runtime.table.get(second), .terminal);
-    runtime.recomputeLocked(.legacy);
+    runtime.recomputeLocked(.completions);
     try std.testing.expect(!runtime.readiness.arm());
     runtime.unlock();
     for ([_]commands.Token{ token, second }) |settled| runtime.table.retire(settled);

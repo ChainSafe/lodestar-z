@@ -68,7 +68,6 @@ pub const Diagnostics = struct {
     chunksCopied: u64 = 0,
     bytesCopied: u64 = 0,
     requestFull: u64 = 0,
-    busyPulls: u64 = 0,
 };
 pub const capacity_max = 32;
 pub const Table = struct {
@@ -274,7 +273,7 @@ pub fn armPull(runtime: *Runtime, cell: *Cell) void {
     if (cell.delivered) cell.consume = true;
     runtime.requests.?.refresh(cell);
     runtime.signalLocked();
-    runtime.recomputeLocked(.legacy);
+    runtime.recomputeLocked(.completions);
 }
 /// JS thread: asks the owner to cancel and retire the request, whose terminal completion ends a retirement that is
 /// `awaited`.
@@ -284,7 +283,7 @@ pub fn armRetirement(runtime: *Runtime, cell: *Cell, awaited: bool) void {
     cell.cancel = true;
     runtime.requests.?.refresh(cell);
     runtime.signalLocked();
-    runtime.recomputeLocked(.legacy);
+    runtime.recomputeLocked(.completions);
 }
 
 pub fn rejection(err: anyerror) !Rejection {
@@ -325,7 +324,7 @@ pub fn submit(runtime: *Runtime, token: Token, now: n.Now) !void {
     }
     table.releasePayload(cell);
     table.refresh(cell);
-    runtime.recomputeLocked(.legacy);
+    runtime.recomputeLocked(.completions);
 }
 pub fn flags(runtime: *Runtime, io: std.Io) void {
     runtime.lock();
@@ -343,7 +342,7 @@ pub fn flags(runtime: *Runtime, io: std.Io) void {
         }
         table.releasePayload(cell);
         table.refresh(cell);
-        if (cell.terminal != null and (cell.pulling or cell.retiring)) runtime.recomputeLocked(.legacy);
+        if (cell.terminal != null and (cell.pulling or cell.retiring)) runtime.recomputeLocked(.completions);
     };
 }
 pub fn capture(runtime: *Runtime, events: []const rr.Event, now: n.Now) !void {
@@ -402,7 +401,7 @@ pub fn capture(runtime: *Runtime, events: []const rr.Event, now: n.Now) !void {
             }
             table.releasePayload(cell);
             table.refresh(cell);
-            runtime.recomputeLocked(.legacy);
+            runtime.recomputeLocked(.completions);
             break;
         }
     }

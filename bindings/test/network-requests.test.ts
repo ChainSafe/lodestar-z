@@ -454,7 +454,12 @@ test.skipIf(!HOST || !HOODI)(
 );
 
 test("native bridge validates full handles and stale retirement", async () => {
-  const {commandCompleted, completed, networkBindings: bindings} = await import("./utils/network-bindings.js");
+  const {
+    closedBy,
+    commandCompleted,
+    completed,
+    networkBindings: bindings,
+  } = await import("./utils/network-bindings.js");
   const config = applicationConfig();
   const native = new bindings.NativeNetworkRuntime();
   const lifecycle = native.initialize(config, () => undefined);
@@ -470,8 +475,7 @@ test("native bridge validates full handles and stale retirement", async () => {
     expect(() => native.requestPull(handle)).toThrow("InvalidRequestHandle");
     expect(native.requestRetire(handle, true)).toBeUndefined();
   } finally {
-    native.close();
-    await lifecycle.closed;
+    await closedBy(native, settleOnly);
   }
 });
 
@@ -542,7 +546,6 @@ stockTest(
       const handle = native.requestStart(id, BLOCKS, new Uint8Array(32), undefined);
       native.requestPull(handle);
       expect(() => native.requestPull(handle)).toThrow("NetworkRequestBusy");
-      expect(native.diagnostics().requests.busyPulls).toBe(1n);
       const {waitFor} = await import("../../test/interop/child.mjs");
       await waitFor(async () => (await peer.command("stats")).lastRequest === "00".repeat(32));
       native.requestRetire(handle, false);
@@ -559,7 +562,12 @@ stockTest(
 async function connectedNative() {
   if (!HOST) throw Error("LODESTAR_Z_NETWORK_STOCK_HOST is required");
   const {Child} = await import("../../test/interop/child.mjs");
-  const {commandCompleted, completed, networkBindings: bindings} = await import("./utils/network-bindings.js");
+  const {
+    closedBy,
+    commandCompleted,
+    completed,
+    networkBindings: bindings,
+  } = await import("./utils/network-bindings.js");
   const peer = new Child("request-phase-stock", process.execPath, [
     "--import",
     "tsx",
@@ -567,11 +575,9 @@ async function connectedNative() {
     HOST,
   ]);
   let native: InstanceType<typeof bindings.NativeNetworkRuntime> | undefined;
-  let closed: Promise<unknown> | undefined;
   const stop = async () => {
     try {
-      native?.close();
-      await closed;
+      if (native) await closedBy(native, settleOnly);
     } finally {
       await peer.stop();
     }
@@ -581,7 +587,6 @@ async function connectedNative() {
     const config = applicationConfig();
     native = new bindings.NativeNetworkRuntime();
     const prepared = native.initialize(config, () => undefined);
-    closed = prepared.closed;
     await prepared.identity;
     await commandCompleted(native, native.applyIntent(localIntent(config), config.initialSlot), settleOnly);
     const id = peerIdFromHex(remote.peer);
@@ -594,7 +599,7 @@ async function connectedNative() {
       ),
       settleOnly
     );
-    return {bindings, closed, completed, id, native, peer, stop};
+    return {bindings, completed, id, native, peer, stop};
   } catch (error) {
     await stop();
     throw error;
@@ -793,7 +798,7 @@ test("close hands each unpulled request's outcome to its iterator, whose next pu
 }, 20000);
 
 test("a full request table delivers every outcome and reuses each cell with the next generation", async () => {
-  const {commandCompleted, networkBindings: bindings} = await import("./utils/network-bindings.js");
+  const {closedBy, commandCompleted, networkBindings: bindings} = await import("./utils/network-bindings.js");
   const config = applicationConfig();
   const native = new bindings.NativeNetworkRuntime();
   const lifecycle = native.initialize(config, () => undefined);
@@ -823,8 +828,7 @@ test("a full request table delivers every outcome and reuses each cell with the 
     }
     expect(native.diagnostics().requests).toMatchObject({occupied: 0, requestFull: 2n, reservedBytes: 0});
   } finally {
-    native.close();
-    await lifecycle.closed;
+    await closedBy(native, settleOnly);
   }
 });
 

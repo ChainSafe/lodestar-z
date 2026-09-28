@@ -77,16 +77,25 @@ function settle(family, record, completion) {
 }
 
 /**
- * Owns one runtime's operation records and its route to native, and outlives the wrapper: native's notifications hold
- * it, so every admitted operation settles also after the wrapper and its host were collected. It forwards each
- * notification through `notify`, which reports whether a live wrapper took it; once none does, it stops native and
- * drains control alone on the runtime's turns. It holds the wrapper, the pump and the host only weakly.
+ * Owns one runtime's operation records, its close promise and its route to native, and outlives the wrapper: native's
+ * notifications hold it, so every admitted operation settles also after the wrapper and its host were collected, and
+ * the close settles last. It forwards each notification through `notify`, which reports whether a live wrapper took
+ * it; once none does, it stops native and drains control alone on the runtime's turns. It holds the wrapper, the pump
+ * and the host only weakly.
  */
 export class CompletionOwner {
   #native;
   #notify;
-  /** Each migrated family's records, sized from native's cells. */
+  /** Each family's records, sized from native's cells. */
   #tables = new Map();
+  #resolveClosed = noop;
+  /**
+   * The network's close result, which settles in the exchange that delivers it, after every record it promised.
+   * It exists before initialization exposes the runtime.
+   */
+  closed = new Promise((resolve) => {
+    this.#resolveClosed = resolve;
+  });
   #abandoned = false;
   /**
    * From native's last notification until its close result arrives. Native then released its notifier, so this holds
@@ -108,7 +117,6 @@ export class CompletionOwner {
     if (!this.#closed && this.#hold === undefined && ["closed", "failed"].includes(this.#native.getState()))
       this.#hold = setInterval(noop, HOLD_MS, this);
     if (!this.#notify()) this.abandon();
-    return true;
   };
 
   /** Sizes each family's records from native's `capacities`. */
@@ -151,11 +159,11 @@ export class CompletionOwner {
     return handle;
   }
 
-  /** One exchange: its completions settle their records, and its close result ends the turns. */
+  /** One exchange: its completions settle their records, and its close result settles `closed` and ends the turns. */
   exchange(actions, demand) {
     const result = this.#native.exchange(actions, demand);
     for (const completion of result.completions) this.#complete(completion);
-    if (result.closed !== null) this.#close();
+    if (result.closed !== null) this.#close(result.closed);
     return result;
   }
 
@@ -181,13 +189,15 @@ export class CompletionOwner {
       this.#breach(`completed ${family} ${handle.index}:${handle.generation}`);
   }
 
-  #close() {
+  /** Native closed after every completion it promised, so a live record is one it left missing. */
+  #close(result) {
     this.#closed = true;
     clearInterval(this.#hold);
     let live = 0;
     for (const table of this.#tables.values()) live += table.live;
     if (live > 0) this.#breach(`closed with records unsettled: ${live}`);
     this.turns.stop();
+    this.#resolveClosed(result);
   }
 
   #breach(reason) {
