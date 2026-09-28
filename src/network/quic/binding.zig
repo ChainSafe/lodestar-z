@@ -218,20 +218,20 @@ pub const HeaderInfo = struct {
     packet_type: PacketType,
     scid: Cid,
     dcid: Cid,
-    token: [token_length_max]u8,
-    token_len: usize,
+    /// Borrows the token storage passed to `headerInfo`.
+    token: []const u8,
 };
 
-const token_length_max = @import("../constants.zig").datagram_size_max;
+pub const token_length_max = @import("../constants.zig").datagram_size_max;
 
-pub fn headerInfo(datagram: []const u8) Error!HeaderInfo {
+/// Writes the packet's token into `token`, which the result borrows.
+pub fn headerInfo(datagram: []const u8, token: *[token_length_max]u8) Error!HeaderInfo {
     var version: u32 = 0;
     var packet_type: u8 = 0;
     var scid: [limits.cid_length_max]u8 = undefined;
     var scid_len: usize = scid.len;
     var dcid: [limits.cid_length_max]u8 = undefined;
     var dcid_len: usize = dcid.len;
-    var token: [token_length_max]u8 = undefined;
     var token_len: usize = token.len;
     const written = try check(c.quiche_header_info(
         datagram.ptr,
@@ -243,19 +243,19 @@ pub fn headerInfo(datagram: []const u8) Error!HeaderInfo {
         &scid_len,
         &dcid,
         &dcid_len,
-        &token,
+        token,
         &token_len,
     ));
     if (written == null) return error.InvalidPacket;
     std.debug.assert(scid_len <= scid.len);
     std.debug.assert(dcid_len <= dcid.len);
+    std.debug.assert(token_len <= token.len);
     return .{
         .version = version,
         .packet_type = @enumFromInt(packet_type),
         .scid = Cid.fromSlice(scid[0..scid_len]),
         .dcid = Cid.fromSlice(dcid[0..dcid_len]),
-        .token = token,
-        .token_len = token_len,
+        .token = token[0..token_len],
     };
 }
 

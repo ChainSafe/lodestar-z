@@ -61,8 +61,9 @@ test "QUIC cached tokens of bounded wire lengths get Retry without connection al
     const cached: [1024]u8 = @splat(0xa5);
     for ([_]usize{ 1, 256, 300, 1024 }) |length| {
         const initial = initialWithToken(&packet, cached[0..length]);
-        const header = try binding.headerInfo(initial);
-        try std.testing.expectEqual(length, header.token_len);
+        var token: [binding.token_length_max]u8 = undefined;
+        const header = try binding.headerInfo(initial, &token);
+        try std.testing.expectEqual(length, header.token.len);
         const outcome = pair.server.receive(initial, &support.client_address, pair.now, &output);
         try std.testing.expect(outcome == .retry);
         try std.testing.expect(outcome.retry.len <= initial.len);
@@ -90,6 +91,18 @@ test "QUIC invalid local Retry tokens do not receive another Retry" {
     try std.testing.expect(retry.isLocal(issued));
     try std.testing.expect(pair.server.receive(initialWithToken(&packet, issued), &support.client_address, pair.now, &output) == .dropped);
     try std.testing.expectEqual(@as(usize, 0), pair.server.registry.active_len);
+}
+
+test "QUIC Retry validates a token received after a longer foreign token" {
+    var pair: support.Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    var packet: [@import("../constants.zig").datagram_size_max]u8 = undefined;
+    var output: [packet.len]u8 = undefined;
+    const cached: [1024]u8 = @splat(0xa5);
+    try std.testing.expect(pair.server.receive(initialWithToken(&packet, &cached), &support.client_address, pair.now, &output) == .retry);
+    _ = try support.connectPair(&pair);
+    try std.testing.expectEqual(@as(usize, 1), pair.server.registry.active_len);
 }
 
 fn initialWithToken(packet: []u8, token: []const u8) []u8 {
