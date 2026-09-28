@@ -148,6 +148,9 @@ pub const Engine = struct {
     retry_key: [32]u8,
     visits: Visits = .{},
     connection_metrics: ConnectionCounters = .{},
+    /// The received packet's token, borrowed by its header until the next receive. A field
+    /// rather than a local so ReleaseSafe does not fill it for every datagram.
+    header_token: [binding.token_length_max]u8 = undefined,
 
     /// Live connections, and those still handshaking.
     pub const Resources = struct { active: usize, handshaking: usize };
@@ -670,7 +673,7 @@ pub const Engine = struct {
         assert(datagram.len <= out.len);
         assert(self.registry.slots.len > 0);
         const local = self.localFor(from.*) orelse return .dropped;
-        const header = binding.headerInfo(datagram) catch
+        const header = binding.headerInfo(datagram, &self.header_token) catch
             return .dropped;
         if (self.registry.findRoute(&header.dcid)) |index| {
             _ = self.feed(index, datagram, from, now, false);
@@ -702,11 +705,10 @@ pub const Engine = struct {
         if (self.handshakingFromSource(from) >= self.limits.handshaking_per_source_max) {
             return .dropped;
         }
-        const token = header.token[0..header.token_len];
-        if (!retry.isLocal(token)) {
+        if (!retry.isLocal(header.token)) {
             return self.sendRetry(&header, from, now, out);
         }
-        const original = retry.validate(&self.retry_key, from, &header.dcid, token, now.mono_ms, self.limits.handshake_timeout_ms) orelse return .dropped;
+        const original = retry.validate(&self.retry_key, from, &header.dcid, header.token, now.mono_ms, self.limits.handshake_timeout_ms) orelse return .dropped;
         const scid = header.dcid.bytes[0..limits.local_cid_length].*;
         const reserved = self.limits.outbound_reserved -| self.registry.dialing;
         if (self.limits.connections_max - self.registry.active_len <= reserved)
