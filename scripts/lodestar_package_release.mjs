@@ -8,7 +8,7 @@ const ENTRY_MAX = 250_000;
 const BYTE_MAX = 32 * 1024 * 1024 * 1024;
 const PATH_DEPTH_MAX = 4096;
 
-function contains(root, path) {
+export function contains(root, path) {
   const tail = relative(root, path);
   return tail === "" || (!tail.startsWith(`..${sep}`) && tail !== ".." && !isAbsolute(tail));
 }

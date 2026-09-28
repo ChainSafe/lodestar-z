@@ -20,6 +20,7 @@ import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {afterEach, test} from "node:test";
 import {promisify} from "node:util";
+import {getTarget} from "@chainsafe/zapi";
 import {runBoundedCommand} from "../../scripts/bounded_child.mjs";
 import {collectFiles, sha256} from "../../scripts/lodestar_package_io.mjs";
 
@@ -44,6 +45,10 @@ test("packed package metadata permits packing transformations and rejects unrela
   assert.throws(() => assertPackedPackageJson(source, {...packed, scripts: {install: "unexpected"}}), {
     code: "PackedPackageJsonMismatch",
   });
+  const release = {...source, zapi: {targets: ["x86_64-unknown-linux-gnu"]}};
+  const optionalDependencies = {"example-x86_64-unknown-linux-gnu": "1.0.0"};
+  assertPackedPackageJson(release, {...release, optionalDependencies}, "platform");
+  assert.throws(() => assertPackedPackageJson(release, release, "platform"), {code: "PackedPackageJsonMismatch"});
 });
 
 function fixtureCommand(program, args, cwd) {
@@ -126,6 +131,23 @@ function killProcessIfAlive(pid) {
   }
 }
 
+const hostTarget = getTarget(process.platform, process.arch);
+// Loads the addon as zapi does: the embedded build first, else the target's platform package.
+const fixtureIndex = `import {existsSync} from "node:fs";
+import {createRequire} from "node:module";
+const require = createRequire(import.meta.url);
+const embedded = new URL("../../zig-out/lib/bindings.node", import.meta.url);
+export default existsSync(embedded) ? require(embedded.pathname) : require("@chainsafe/lodestar-z-${hostTarget}");
+`;
+// Stands in for the facade so the probe's lifecycle runs without the native runtime.
+const fixtureNetwork = `export const createNativeNetwork = (config) => ({
+  applyIntent: async (_intent, slot) => ({slot}),
+  close: async () => ({reason: "requested"}),
+  closed: Promise.resolve({reason: "requested"}),
+  getIdentity: async () => ({localEndpoint: {port: 1}, peerId: "fixture"}),
+});
+`;
+
 async function fixture({extraFiles = {}, networkSource} = {}) {
   const root = await mkdtemp(join(tmpdir(), "lodestar-package-test-"));
   temporaryDirectories.push(root);
@@ -133,12 +155,9 @@ async function fixture({extraFiles = {}, networkSource} = {}) {
   const out = join(root, "lodestar-z.tgz");
   await mkdir(join(nativeDir, "bindings", "src"), {recursive: true});
   await mkdir(join(nativeDir, "zig-out", "lib"), {recursive: true});
-  await writeFile(join(nativeDir, "bindings", "src", "index.js"), "export const fixture = true;\n");
+  await writeFile(join(nativeDir, "bindings", "src", "index.js"), fixtureIndex);
   await writeFile(join(nativeDir, "bindings", "src", "index.d.ts"), "export declare const fixture: true;\n");
-  await writeFile(
-    join(nativeDir, "bindings", "src", "network.js"),
-    networkSource ?? "export const createNativeNetwork = () => {};\n"
-  );
+  await writeFile(join(nativeDir, "bindings", "src", "network.js"), networkSource ?? fixtureNetwork);
   for (const [path, source] of Object.entries(extraFiles)) {
     await writeFile(join(nativeDir, path), source);
   }
@@ -178,6 +197,7 @@ async function fixture({extraFiles = {}, networkSource} = {}) {
         scripts: {prepare: "node prepare.cjs"},
         type: "module",
         version: "1.0.0",
+        zapi: {binaryName: "bindings", targets: [hostTarget]},
       },
       null,
       2
@@ -345,6 +365,96 @@ test("install and verify use a relocated archive without the native checkout", a
   assert.equal(divergent.exitCode, 1);
   assert.equal(JSON.parse(divergent.stderr).error.code, "InstalledPackageMismatch");
   assert.deepEqual(await collectFiles(baselineRoot), baselineFiles);
+});
+
+test("platform layout ships the target's addon in its own package and the host loads it from there", async () => {
+  const {root, nativeDir, out, buildRecord} = await fixture();
+  const packed = await command(
+    process.execPath,
+    [tool.pathname, "pack", "--native-dir", nativeDir, "--out", out, "--build-record", buildRecord],
+    nativeDir
+  );
+  assert.equal(packed.exitCode, 0, JSON.stringify(packed));
+  const artifact = `artifacts/${hostTarget}/bindings.node`;
+  await mkdir(join(nativeDir, "artifacts", hostTarget), {recursive: true});
+  await copyFile(join(nativeDir, "zig-out", "lib", "bindings.node"), join(nativeDir, artifact));
+  const record = JSON.parse(await readFile(buildRecord, "utf8"));
+  record.files[0].path = artifact;
+  const platformRecord = join(root, "platform-build-record.json");
+  await writeFile(platformRecord, `${JSON.stringify(record, null, 2)}\n`);
+  const platformOut = join(root, "platform", "lodestar-z.tgz");
+  const platformPacked = await command(
+    process.execPath,
+    [tool.pathname, "pack", "--native-dir", nativeDir, "--out", platformOut, "--build-record", platformRecord],
+    nativeDir
+  );
+  assert.equal(platformPacked.exitCode, 0, JSON.stringify(platformPacked));
+  await assert.rejects(readFile(join(nativeDir, "prepare-ran")), {code: "ENOENT"});
+  const manifest = JSON.parse(await readFile(`${platformOut}.json`, "utf8"));
+  assert.equal(manifest.layout, "platform");
+  assert(!manifest.files.some((file) => file.path.startsWith("zig-out/")));
+  assert.equal(manifest.platform.name, `@chainsafe/lodestar-z-${hostTarget}`);
+  assert.deepEqual(manifest.platform.files.map((file) => file.path).sort(), [
+    "README.md",
+    "bindings.node",
+    "package.json",
+  ]);
+  assert.equal(manifest.platform.files.find((file) => file.path === "bindings.node").sha256, manifest.addon.sha256);
+
+  const hostDir = join(root, "host");
+  await mkdir(hostDir);
+  await writeFile(
+    join(hostDir, "package.json"),
+    `${JSON.stringify(
+      {
+        dependencies: {"@chainsafe/lodestar-z": `file:${out}`},
+        name: "host-fixture",
+        packageManager: "pnpm@10.24.0",
+        private: true,
+        type: "module",
+      },
+      null,
+      2
+    )}\n`
+  );
+  await writeFile(join(hostDir, "pnpm-workspace.yaml"), 'packages:\n  - "."\n');
+  await writeFile(join(hostDir, ".npmrc"), `store-dir=${join(root, "store")}\n`);
+  const baseline = await command(
+    "corepack",
+    ["pnpm", "install", "--offline", "--ignore-scripts", "--lockfile=false"],
+    hostDir
+  );
+  assert.equal(baseline.exitCode, 0, JSON.stringify(baseline));
+  await symlink(hostDir, join(root, "current"), "dir");
+  const evidenceDir = join(root, "evidence");
+  const installed = await command(
+    process.execPath,
+    [
+      tool.pathname,
+      "install",
+      "--host-dir",
+      hostDir,
+      "--manifest",
+      `${platformOut}.json`,
+      "--evidence-dir",
+      evidenceDir,
+      "--release-dir",
+      join(root, "release"),
+      "--active-link",
+      join(root, "current"),
+    ],
+    root
+  );
+  assert.equal(installed.exitCode, 0, JSON.stringify(installed));
+  const {verification} = JSON.parse(await readFile(join(evidenceDir, "install-evidence.json"), "utf8"));
+  assert.equal(verification.installed.addon.sha256, manifest.addon.sha256);
+  assert.equal(verification.installed.addon.path, join(verification.installed.platform.packageRoot, "bindings.node"));
+  assert(verification.installed.platform.packageRoot.startsWith(`${join(root, "release")}/`));
+  assert.deepEqual(
+    verification.runtime.cycles.map((cycle) => cycle.closed),
+    ["requested", "requested"]
+  );
+  await missing(join(root, "release", "pnpm-lock.yaml"));
 });
 
 test("install persists and emits a structured pnpm failure record", async () => {

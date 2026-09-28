@@ -40,6 +40,21 @@ export const EXPECTED_PACKAGE_EXPORTS = [
 ];
 export const EXPECTED_NETWORK_EXPORTS = ["createNativeNetwork"];
 
+export const EMBEDDED_ADDON_PATH = "zig-out/lib/bindings.node";
+export const PLATFORM_ADDON_FILE = "bindings.node";
+const PLATFORM_ADDON_PATTERN = /^artifacts\/([a-z0-9_-]+)\/bindings\.node$/;
+
+/**
+ * Where a build put the addon selects the package layout: a local zig-out build embeds it in the package, and a zapi
+ * artifact for one target ships in that target's platform package, as the release workflow publishes it.
+ */
+export function addonLayout(addonPath) {
+  if (addonPath === EMBEDDED_ADDON_PATH) return {layout: "embedded", target: null};
+  const target = PLATFORM_ADDON_PATTERN.exec(addonPath)?.[1];
+  if (target === undefined) fail("InvalidBuildRecord", `unsupported addon path ${addonPath}`);
+  return {layout: "platform", target};
+}
+
 export function validateBuildRecord(record) {
   if (!record || typeof record !== "object" || Array.isArray(record)) fail("InvalidBuildRecord");
   if (!COMMIT_PATTERN.test(record.sourceCommit)) fail("InvalidBuildRecord", "sourceCommit");
@@ -66,8 +81,9 @@ export function validateBuildRecord(record) {
     if (paths.has(file.path)) fail("DuplicateBuildFile", file.path);
     paths.add(file.path);
   }
-  const addons = record.files.filter((file) => file.path === "zig-out/lib/bindings.node");
+  const addons = record.files.filter((file) => file.path.endsWith(".node"));
   if (addons.length !== 1) fail("InvalidBuildRecord", "exact addon entry required");
+  addonLayout(addons[0].path);
   return addons[0];
 }
 
@@ -246,7 +262,7 @@ export async function inspectNativeExports(addonPath, runCommand) {
   return JSON.parse(command.stdout);
 }
 
-export async function inspectArchive(archive, expectedAddon, runCommand, {maxSourceBytes = MAX_SOURCE_BYTES} = {}) {
+async function listArchive(archive, runCommand, maxSourceBytes) {
   const info = await stat(archive);
   if (!info.isFile()) fail("InvalidArchive", "not a regular file");
   if (info.size > MAX_ARCHIVE_BYTES) fail("ArchiveByteBound", `more than ${MAX_ARCHIVE_BYTES} bytes`);
@@ -276,10 +292,14 @@ export async function inspectArchive(archive, expectedAddon, runCommand, {maxSou
       regularPaths.push(path);
     }
   }
-  const nativeLibraries = regularPaths.filter((path) => /\.(?:node|so|dll|dylib|a)$/i.test(path));
-  if (nativeLibraries.length !== 1 || nativeLibraries[0] !== "package/zig-out/lib/bindings.node") {
-    fail("UnexpectedNativeLibrary", nativeLibraries.join(","));
-  }
+  return regularPaths;
+}
+
+/** Lists and extracts `archive`, requiring exactly `nativeLibraries` among its files, then runs `inspect` on it. */
+async function withExtractedArchive(archive, nativeLibraries, runCommand, maxSourceBytes, inspect) {
+  const regularPaths = await listArchive(archive, runCommand, maxSourceBytes);
+  const actualLibraries = regularPaths.filter((path) => /\.(?:node|so|dll|dylib|a)$/i.test(path));
+  if (!isDeepStrictEqual(actualLibraries, nativeLibraries)) fail("UnexpectedNativeLibrary", actualLibraries.join(","));
   const extractDir = await mkdtemp(join(tmpdir(), `lodestar-package-extract-${randomBytes(4).toString("hex")}-`));
   try {
     await runCommand(
@@ -288,15 +308,32 @@ export async function inspectArchive(archive, expectedAddon, runCommand, {maxSou
       dirname(archive)
     );
     const packageRoot = join(extractDir, "package");
-    const files = await collectFiles(packageRoot, {maxBytes: maxSourceBytes});
-    const addon = files.find((file) => file.path === expectedAddon.path);
-    if (!addon || addon.bytes !== expectedAddon.bytes || addon.sha256 !== expectedAddon.sha256) {
-      fail("AddonMismatch", JSON.stringify({actual: addon ?? null, expected: expectedAddon}));
-    }
+    return await inspect(packageRoot, await collectFiles(packageRoot, {maxBytes: maxSourceBytes}));
+  } finally {
+    await rm(extractDir, {force: true, recursive: true});
+  }
+}
+
+function assertAddon(files, path, expectedAddon) {
+  const addon = files.find((file) => file.path === path);
+  if (!addon || addon.bytes !== expectedAddon.bytes || addon.sha256 !== expectedAddon.sha256) {
+    fail("AddonMismatch", JSON.stringify({actual: addon ?? null, expected: expectedAddon}));
+  }
+  return addon;
+}
+
+/** Inspects the main package archive. The addon is embedded unless `expectedAddon` is null for the platform layout. */
+export async function inspectArchive(archive, expectedAddon, runCommand, {maxSourceBytes = MAX_SOURCE_BYTES} = {}) {
+  const nativeLibraries = expectedAddon === null ? [] : [`package/${EMBEDDED_ADDON_PATH}`];
+  return withExtractedArchive(archive, nativeLibraries, runCommand, maxSourceBytes, async (packageRoot, files) => {
     const packageJson = await readJson(join(packageRoot, "package.json"), "archived package.json");
     assertPackageExports(packageJson);
     const network = await inspectNetworkExports(packageRoot, packageJson, runCommand);
-    const native = await inspectNativeExports(join(packageRoot, addon.path), runCommand);
+    let native = null;
+    if (expectedAddon !== null) {
+      assertAddon(files, EMBEDDED_ADDON_PATH, expectedAddon);
+      native = await inspectNativeExports(join(packageRoot, EMBEDDED_ADDON_PATH), runCommand);
+    }
     return {
       externalNamespaces: network.externalNamespaces,
       files,
@@ -304,24 +341,64 @@ export async function inspectArchive(archive, expectedAddon, runCommand, {maxSou
       networkExports: network.exports,
       packageJson,
     };
-  } finally {
-    await rm(extractDir, {force: true, recursive: true});
-  }
+  });
 }
 
-export function assertPackedPackageJson(source, packed) {
-  const expected = Object.fromEntries(
-    Object.entries(source).filter(([key]) => !["packageManager", "pnpm"].includes(key))
-  );
-  if (expected.scripts) {
-    const omitted = ["prepublishOnly", "prepack", "prepare", "postpack", "publish", "postpublish"];
-    expected.scripts = Object.fromEntries(Object.entries(expected.scripts).filter(([key]) => !omitted.includes(key)));
+/** Inspects the archive of the platform package zapi prepublish generates for `target`. */
+export async function inspectPlatformArchive(archive, expectedAddon, target, mainPackage, runCommand) {
+  const nativeLibraries = [`package/${PLATFORM_ADDON_FILE}`];
+  return withExtractedArchive(archive, nativeLibraries, runCommand, MAX_SOURCE_BYTES, async (packageRoot, files) => {
+    const packageJson = await readJson(join(packageRoot, "package.json"), "archived platform package.json");
+    const expectedName = platformPackageName(mainPackage.name, target);
+    if (
+      packageJson.name !== expectedName ||
+      packageJson.version !== mainPackage.version ||
+      packageJson.main !== PLATFORM_ADDON_FILE ||
+      !isDeepStrictEqual(packageJson.files, [PLATFORM_ADDON_FILE])
+    ) {
+      fail("PlatformPackageMismatch", JSON.stringify(packageJson));
+    }
+    const paths = files.map((file) => file.path).sort();
+    if (!isDeepStrictEqual(paths, ["README.md", PLATFORM_ADDON_FILE, "package.json"].sort())) {
+      fail("PlatformPackageInventory", paths.join(","));
+    }
+    assertAddon(files, PLATFORM_ADDON_FILE, expectedAddon);
+    const native = await inspectNativeExports(join(packageRoot, PLATFORM_ADDON_FILE), runCommand);
+    return {files, name: expectedName, native, packageJson, target};
+  });
+}
+
+export function platformPackageName(name, target) {
+  return `${name}-${target}`;
+}
+
+/**
+ * pnpm pack drops package-manager fields and lifecycle scripts from the embedded layout's package.json. For the platform
+ * layout, zapi prepublish adds one optional dependency per target and npm pack, which the release publishes with, keeps
+ * the rest.
+ */
+export function assertPackedPackageJson(source, packed, layout = "embedded") {
+  let expected;
+  if (layout === "platform") {
+    const targets = Array.isArray(source.zapi?.targets) ? source.zapi.targets : [];
+    expected = {
+      ...source,
+      optionalDependencies: Object.fromEntries(
+        targets.map((target) => [platformPackageName(source.name, target), source.version])
+      ),
+    };
+  } else {
+    expected = Object.fromEntries(Object.entries(source).filter(([key]) => !["packageManager", "pnpm"].includes(key)));
+    if (expected.scripts) {
+      const omitted = ["prepublishOnly", "prepack", "prepare", "postpack", "publish", "postpublish"];
+      expected.scripts = Object.fromEntries(Object.entries(expected.scripts).filter(([key]) => !omitted.includes(key)));
+    }
   }
   if (!isDeepStrictEqual(expected, packed)) fail("PackedPackageJsonMismatch");
 }
 
-export async function verifyArchiveSources(nativeDir, archivedFiles, packageJson) {
-  assertPackedPackageJson(await readJson(join(nativeDir, "package.json"), "source package.json"), packageJson);
+export async function verifyArchiveSources(nativeDir, archivedFiles, packageJson, layout) {
+  assertPackedPackageJson(await readJson(join(nativeDir, "package.json"), "source package.json"), packageJson, layout);
   const before = [];
   for (const file of archivedFiles) {
     if (file.path === "package.json") continue;
@@ -380,35 +457,25 @@ export function assertPackageExports(packageJson) {
   }
 }
 
-export function validatePackageManifest(manifest) {
-  if (!manifest || manifest.schemaVersion !== 1) fail("InvalidPackageManifest");
-  if (manifest.package?.name !== "@chainsafe/lodestar-z" || typeof manifest.package.version !== "string") {
-    fail("InvalidPackageManifest", "package");
-  }
+function validateManifestArchive(archive, label) {
   if (
-    !manifest.archive ||
-    basename(manifest.archive.file) !== manifest.archive.file ||
-    !Number.isSafeInteger(manifest.archive.bytes) ||
-    manifest.archive.bytes < 0 ||
-    manifest.archive.bytes > MAX_ARCHIVE_BYTES ||
-    !HASH_PATTERN.test(manifest.archive.sha256)
+    !archive ||
+    typeof archive.file !== "string" ||
+    basename(archive.file) !== archive.file ||
+    !Number.isSafeInteger(archive.bytes) ||
+    archive.bytes < 0 ||
+    archive.bytes > MAX_ARCHIVE_BYTES ||
+    !HASH_PATTERN.test(archive.sha256)
   ) {
-    fail("InvalidPackageManifest", "archive");
+    fail("InvalidPackageManifest", label);
   }
-  if (
-    !manifest.addon ||
-    manifest.addon.path !== "zig-out/lib/bindings.node" ||
-    !Number.isSafeInteger(manifest.addon.bytes) ||
-    manifest.addon.bytes < 0 ||
-    !HASH_PATTERN.test(manifest.addon.sha256)
-  ) {
-    fail("InvalidPackageManifest", "addon");
-  }
-  validateBuildRecord({...manifest.build, files: [manifest.addon]});
-  if (!Array.isArray(manifest.files) || manifest.files.length > MAX_FILES) fail("InvalidPackageManifest", "files");
+}
+
+function validateManifestFiles(files, required) {
+  if (!Array.isArray(files) || files.length > MAX_FILES) fail("InvalidPackageManifest", "files");
   const paths = new Set();
   let bytes = 0;
-  for (const file of manifest.files) {
+  for (const file of files) {
     if (
       !file ||
       typeof file.path !== "string" ||
@@ -424,24 +491,59 @@ export function validatePackageManifest(manifest) {
     if (file.bytes > MAX_SOURCE_BYTES - bytes) fail("PackageSourceByteBound", `more than ${MAX_SOURCE_BYTES} bytes`);
     bytes += file.bytes;
   }
-  for (const required of ["package.json", "zig-out/lib/bindings.node"]) {
-    if (!paths.has(required)) fail("InvalidPackageManifest", `missing ${required}`);
+  for (const path of required) if (!paths.has(path)) fail("InvalidPackageManifest", `missing ${path}`);
+}
+
+export function validatePackageManifest(manifest) {
+  if (!manifest || manifest.schemaVersion !== 2) fail("InvalidPackageManifest");
+  if (manifest.package?.name !== "@chainsafe/lodestar-z" || typeof manifest.package.version !== "string") {
+    fail("InvalidPackageManifest", "package");
   }
+  validateManifestArchive(manifest.archive, "archive");
+  if (
+    !manifest.addon ||
+    typeof manifest.addon.path !== "string" ||
+    !Number.isSafeInteger(manifest.addon.bytes) ||
+    manifest.addon.bytes < 0 ||
+    !HASH_PATTERN.test(manifest.addon.sha256)
+  ) {
+    fail("InvalidPackageManifest", "addon");
+  }
+  validateBuildRecord({...manifest.build, files: [manifest.addon]});
+  const {layout, target} = addonLayout(manifest.addon.path);
+  if (manifest.layout !== layout) fail("InvalidPackageManifest", "layout");
+  if (layout === "embedded") {
+    validateManifestFiles(manifest.files, ["package.json", EMBEDDED_ADDON_PATH]);
+    if (manifest.platform !== null) fail("InvalidPackageManifest", "platform");
+    return;
+  }
+  validateManifestFiles(manifest.files, ["package.json"]);
+  if (manifest.files.some((file) => file.path.endsWith(".node"))) fail("InvalidPackageManifest", "embedded addon");
+  const platform = manifest.platform;
+  if (platform?.target !== target || platform.name !== platformPackageName(manifest.package.name, target)) {
+    fail("InvalidPackageManifest", "platform");
+  }
+  validateManifestArchive(platform.archive, "platform archive");
+  if (platform.archive.file === manifest.archive.file) fail("InvalidPackageManifest", "platform archive");
+  validateManifestFiles(platform.files, ["package.json", PLATFORM_ADDON_FILE]);
+}
+
+async function verifyArchiveFile(manifestPath, expected) {
+  const archive = join(dirname(manifestPath), expected.file);
+  const archiveInfo = await stat(archive);
+  const archiveHash = await sha256(archive);
+  if (archiveInfo.size !== expected.bytes || archiveHash !== expected.sha256) {
+    fail("ArchiveMismatch", JSON.stringify({actual: {bytes: archiveInfo.size, sha256: archiveHash}, expected}));
+  }
+  return archive;
 }
 
 export async function verifyManifestArchive(manifestPath, runCommand) {
   const manifest = await readJson(manifestPath, "package manifest");
   validatePackageManifest(manifest);
-  const archive = join(dirname(manifestPath), manifest.archive.file);
-  const archiveInfo = await stat(archive);
-  const archiveHash = await sha256(archive);
-  if (archiveInfo.size !== manifest.archive.bytes || archiveHash !== manifest.archive.sha256) {
-    fail(
-      "ArchiveMismatch",
-      JSON.stringify({actual: {bytes: archiveInfo.size, sha256: archiveHash}, expected: manifest.archive})
-    );
-  }
-  const inspected = await inspectArchive(archive, manifest.addon, runCommand);
+  const archive = await verifyArchiveFile(manifestPath, manifest.archive);
+  const embedded = manifest.layout === "embedded";
+  const inspected = await inspectArchive(archive, embedded ? manifest.addon : null, runCommand);
   if (!isDeepStrictEqual(manifest.files, inspected.files)) fail("ArchiveInventoryMismatch");
   if (
     inspected.packageJson.name !== "@chainsafe/lodestar-z" ||
@@ -452,7 +554,20 @@ export async function verifyManifestArchive(manifestPath, runCommand) {
   if (JSON.stringify(manifest.ordinaryExports?.network) !== JSON.stringify(inspected.networkExports)) {
     fail("ArchiveNetworkExportsMismatch");
   }
-  return {archive, inspected, manifest, manifestSha256: await sha256(manifestPath)};
+  let platformArchive = null;
+  if (!embedded) {
+    platformArchive = await verifyArchiveFile(manifestPath, manifest.platform.archive);
+    const platform = await inspectPlatformArchive(
+      platformArchive,
+      manifest.addon,
+      manifest.platform.target,
+      inspected.packageJson,
+      runCommand
+    );
+    if (!isDeepStrictEqual(manifest.platform.files, platform.files)) fail("PlatformArchiveInventoryMismatch");
+    inspected.platform = platform;
+  }
+  return {archive, inspected, manifest, manifestSha256: await sha256(manifestPath), platformArchive};
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
