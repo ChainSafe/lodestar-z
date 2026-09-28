@@ -1,6 +1,5 @@
 const std = @import("std");
-const n = @import("../root.zig");
-const native = n.gossipsub;
+const native = @import("../gossipsub/root.zig");
 const storage = @import("../gossipsub/message_store.zig");
 pub const Plan = @import("plan.zig").Plan;
 pub const Source = @import("../gossipsub/peer_book.zig").Ref;
@@ -29,9 +28,9 @@ pub const Cell = struct {
     generation: u64 = 0,
     order: u64 = 0,
     handle: native.ValidationHandle = undefined,
-    identity: n.PeerId = undefined,
+    identity: @import("../wire/peer_id.zig").PeerId = undefined,
     source: ?Source = null,
-    connection: n.quic.engine.Handle = undefined,
+    connection: @import("../quic/engine.zig").Handle = undefined,
     id: native.MessageId = undefined,
     topic: [topic_max]u8 = undefined,
     topic_len: u16 = 0,
@@ -136,7 +135,7 @@ pub const GossipProcessor = struct {
     waiting_items: [limits_mod.kind_count]usize = @splat(0),
     executing_items: [limits_mod.kind_count]usize = @splat(0),
     executing_bytes: [limits_mod.kind_count]usize = @splat(0),
-    forks: [@import("../chain.zig").boundary_max]n.reqresp.ForkEntry = undefined,
+    forks: [native.topic_policy.boundary_max]@import("../reqresp/root.zig").ForkEntry = undefined,
     fork_count: usize = 0,
     source_maximum: [limits_mod.kind_count]usize = @splat(payload_max),
     sources: [@import("../gossipsub/peer_book.zig").capacity]struct {
@@ -156,7 +155,7 @@ pub const GossipProcessor = struct {
         const capacity = plan.capacity;
         const bytes = plan.bytes;
         const limits = plan.limits;
-        if (plan.forks.len > @import("../chain.zig").boundary_max) return error.InvalidGossipProcessorLimits;
+        if (plan.forks.len > native.topic_policy.boundary_max) return error.InvalidGossipProcessorLimits;
         if (capacity == 0 or capacity > limits_mod.capacity_max) return error.InvalidGossipProcessorLimits;
         try limits_mod.validate(&limits);
         if (capacity != limits_mod.items(&limits) or bytes != limits_mod.bytes(&limits)) return error.InvalidGossipProcessorLimits;
