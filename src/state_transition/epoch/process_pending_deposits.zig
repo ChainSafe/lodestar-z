@@ -142,7 +142,7 @@ fn applyPendingDeposit(
     if (!is_validator_known) {
         // Verify the deposit signature (proof of possession) which is not checked by the deposit contract
         if (validateDepositSignature(config, pubkey, withdrawal_credentials, amount, signature)) {
-            try addValidatorToRegistry(fork, io, epoch_cache, state, pubkey, withdrawal_credentials, amount);
+             try addValidatorToRegistry(fork, io, epoch_cache, state, pubkey, withdrawal_credentials, amount);
             cache.appendCompoundingValidatorFlag(hasCompoundingWithdrawalCredential(withdrawal_credentials));
             // set balance, so that the next deposit of same pubkey will increase the balance correctly
             // this is to fix the double deposit issue found in mekong

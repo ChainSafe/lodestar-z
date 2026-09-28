@@ -122,6 +122,19 @@ const ShufflingJob = struct {
     }
 };
 
+const BorrowedBoolArray = struct {
+    array: *BoolArray,
+    owner_allocator: Allocator,
+
+    pub fn items(self: BorrowedBoolArray) []bool {
+        return self.array.items;
+    }
+
+    pub fn append(self: BorrowedBoolArray, value: bool) !void {
+        try self.array.append(self.owner_allocator, value);
+    }
+};
+
 /// this is a cache that's never gc'd, it is used to store data that is reused across multiple epochs
 const ReusedEpochTransitionCache = struct {
     allocator: Allocator,
@@ -644,10 +657,10 @@ pub const EpochTransitionCache = struct {
         // self.is_active_prev_epoch.deinit();
         // self.is_active_curr_epoch.deinit();
         // self.is_active_next_epoch.deinit();
-        self.indices_to_slash.deinit(self.allocator);
-        self.indices_eligible_for_activation_queue.deinit(self.allocator);
-        self.indices_eligible_for_activation.deinit(self.allocator);
-        self.indices_to_eject.deinit(self.allocator);
+         self.indices_to_slash.deinit();
+         self.indices_eligible_for_activation_queue.deinit();
+         self.indices_eligible_for_activation.deinit();
+         self.indices_to_eject.deinit();
         // rewards and penalties are from reused_cache
         if (self.balances) |*balances| {
             balances.deinit(self.allocator);
