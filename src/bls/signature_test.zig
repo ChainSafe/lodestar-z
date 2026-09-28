@@ -1,7 +1,6 @@
 //! Tests for `Signature.zig`.
 
 const std = @import("std");
-const BlstError = @import("error.zig").BlstError;
 const PublicKey = @import("root.zig").PublicKey;
 const AggregateSignature = @import("AggregateSignature.zig");
 const Pairing = @import("Pairing.zig");
@@ -36,7 +35,7 @@ test sigValidate {
 
     var infinity = [_]u8{0} ** COMPRESS_SIZE;
     infinity[0] = 0xc0;
-    try std.testing.expectError(BlstError.PkIsInfinity, sigValidate(&infinity, true));
+    try std.testing.expectError(error.PkIsInfinity, sigValidate(&infinity, true));
     try std.testing.expect((try sigValidate(&infinity, false)).isInfinity());
 }
 
@@ -51,16 +50,16 @@ test uncompress {
     try std.testing.expect(sig.isEqual(&sig_uncomp));
 
     // Invalid lengths must be rejected, even with the compression bit set.
-    try std.testing.expectError(BlstError.BadEncoding, uncompress(&[_]u8{}));
-    try std.testing.expectError(BlstError.BadEncoding, uncompress(sig_comp[0 .. COMPRESS_SIZE - 1]));
+    try std.testing.expectError(error.BadEncoding, uncompress(&[_]u8{}));
+    try std.testing.expectError(error.BadEncoding, uncompress(sig_comp[0 .. COMPRESS_SIZE - 1]));
     var too_long = [_]u8{0} ** (COMPRESS_SIZE + 1);
     @memcpy(too_long[0..COMPRESS_SIZE], &sig_comp);
-    try std.testing.expectError(BlstError.BadEncoding, uncompress(&too_long));
+    try std.testing.expectError(error.BadEncoding, uncompress(&too_long));
 
     // Correct length without the compression bit must be rejected.
     var no_comp_bit = sig_comp;
     no_comp_bit[0] &= 0x7f;
-    try std.testing.expectError(BlstError.BadEncoding, uncompress(&no_comp_bit));
+    try std.testing.expectError(error.BadEncoding, uncompress(&no_comp_bit));
 }
 
 test "test_sign_n_verify" {

@@ -46,6 +46,15 @@ pub fn RefCount(comptime T: type) type {
             return self.instance;
         }
 
+        /// Mutable access to the instance when the caller holds the only reference, else null.
+        ///
+        /// The caller must ensure exclusive access to `self` and its instance
+        /// for the lifetime of the returned pointer.
+        pub fn getMutIfUnique(self: *@This()) ?*T {
+            if (self._ref_count.load(.acquire) != 1) return null;
+            return &self.instance;
+        }
+
         pub fn ref(self: *@This()) *@This() {
             _ = self._ref_count.fetchAdd(1, .monotonic);
             return self;

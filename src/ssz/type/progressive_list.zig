@@ -39,9 +39,14 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
         }
 
         pub fn chunkCount(value: *const Type) usize {
+            return chunkCountForLength(value.items.len);
+        }
+
+        fn chunkCountForLength(len: usize) usize {
             if (comptime isBasicType(Element)) {
-                return (Element.fixed_size * value.items.len + 31) / 32;
-            } else return value.items.len;
+                const items_per_chunk = 32 / Element.fixed_size;
+                return len / items_per_chunk + @intFromBool(len % items_per_chunk != 0);
+            } else return len;
         }
 
         pub fn hashTreeRoot(allocator: std.mem.Allocator, value: *const Type, out: *[32]u8) !void {
@@ -143,10 +148,7 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
             pub fn hashTreeRoot(allocator: std.mem.Allocator, data: []const u8, out: *[32]u8) !void {
                 const len = try length(data);
 
-                const chunk_count = if (comptime isBasicType(Element))
-                    (Element.fixed_size * len + 31) / 32
-                else
-                    len;
+                const chunk_count = chunkCountForLength(len);
                 const chunks = try allocator.alloc([32]u8, chunk_count);
                 defer allocator.free(chunks);
 
@@ -232,12 +234,23 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
             }
 
             pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
-                const allocator = pool.allocator;
-                var value = Self.default_value;
-                defer Self.deinit(allocator, &value);
-
-                try toValue(allocator, node, pool, &value);
-                return Self.serializeIntoBytes(&value, out);
+                const len = try length(node, pool);
+                const size = try std.math.mul(usize, len, Element.fixed_size);
+                if (out.len < size) return error.InvalidSize;
+                const chunk_count = chunkCountForLength(len);
+                var it = try progressive.NodeIterator.init(pool, try node.getLeft(pool), chunk_count);
+                var offset: usize = 0;
+                while (try it.next()) |chunk| {
+                    if (comptime isBasicType(Element)) {
+                        const byte_count = @min(32, size - offset);
+                        @memcpy(out[offset..][0..byte_count], chunk.getRoot(pool)[0..byte_count]);
+                        offset += byte_count;
+                    } else {
+                        offset += try Element.tree.serializeIntoBytes(chunk, pool, out[offset..][0..Element.fixed_size]);
+                    }
+                }
+                std.debug.assert(offset == size);
+                return size;
             }
 
             pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {

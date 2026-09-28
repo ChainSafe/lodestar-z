@@ -62,30 +62,19 @@ fn deserializeBeaconStateTreeViewWithSeedOverrides(
     seed_validators_node: Node.Id,
 ) !*StateST.TreeView {
     if (comptime out_fork.gte(.altair)) {
-        const scores_field_index = comptime StateST.getFieldIndex("inactivity_scores");
-        const scores_range = ranges[scores_field_index];
-        const inactivity_scores_bytes = state_bytes[scores_range[0]..scores_range[1]];
-        const ScoresType = comptime StateST.getFieldType("inactivity_scores");
-
-        // If the seed fork is pre-altair, there are no scores to reuse, so we fully
-        // deserialize inactivity_scores here (diff optimization only applies when seed_fork >= altair).
-        const scores_node = if (seed_fork.gte(.altair)) blk: {
-            break :blk try inactivityScoresNodeId(seed_state);
-        } else blk: {
-            const node_id = try ScoresType.tree.deserializeFromBytes(pool, inactivity_scores_bytes);
-            errdefer pool.unref(node_id);
-
-            break :blk node_id;
-        };
-
-        return try ssz_container.deserializeContainerOverrideFieldsWithRanges(
-            allocator,
-            pool,
-            StateST,
-            state_bytes,
-            ranges,
-            .{ .validators = seed_validators_node, .inactivity_scores = scores_node },
-        );
+        // If the seed fork is pre-altair, there are no scores to reuse, so the container
+        // deserializes inactivity_scores (diff optimization only applies when seed_fork >= altair).
+        if (seed_fork.gte(.altair)) {
+            const scores_node = try inactivityScoresNodeId(seed_state);
+            return try ssz_container.deserializeContainerOverrideFieldsWithRanges(
+                allocator,
+                pool,
+                StateST,
+                state_bytes,
+                ranges,
+                .{ .validators = seed_validators_node, .inactivity_scores = scores_node },
+            );
+        }
     }
 
     return try ssz_container.deserializeContainerOverrideFieldsWithRanges(
@@ -837,4 +826,62 @@ test "loadValidators/loadInactivityScores: rejection scenarios" {
             loadInactivityScores(allocator, StateST, migrated_view, &pool, seed_scores_node, bad_bytes[0..]),
         );
     }
+}
+
+test "memory_safety: loadState releases new inactivity scores on failure" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 345_000 });
+    defer pool.deinit();
+
+    var chain_config = @import("config").minimal.chain_config;
+    chain_config.ALTAIR_FORK_EPOCH = 1;
+    const beacon_config = BeaconConfig.init(chain_config, .{0} ** 32);
+
+    var seed_value = types.phase0.BeaconState.default_value;
+    defer types.phase0.BeaconState.deinit(allocator, &seed_value);
+    try seed_value.validators.append(allocator, types.phase0.Validator.default_value);
+    try seed_value.balances.append(allocator, 32_000_000_000);
+    var seed = try AnyBeaconState.fromValue(allocator, &pool, .phase0, &seed_value);
+    defer seed.deinit();
+    const seed_root = (try seed.hashTreeRoot()).*;
+
+    var target_value = types.altair.BeaconState.default_value;
+    defer types.altair.BeaconState.deinit(allocator, &target_value);
+    target_value.slot = @import("preset").preset.SLOTS_PER_EPOCH;
+    try target_value.validators.append(allocator, types.phase0.Validator.default_value);
+    try target_value.balances.append(allocator, 32_000_000_000);
+    try target_value.previous_epoch_participation.append(allocator, 0);
+    try target_value.current_epoch_participation.append(allocator, 0);
+    try target_value.inactivity_scores.append(allocator, 123);
+
+    const bytes = try allocator.alloc(u8, types.altair.BeaconState.serializedSize(&target_value));
+    defer allocator.free(bytes);
+    _ = types.altair.BeaconState.serializeIntoBytes(&target_value, bytes);
+    const ranges = try types.altair.BeaconState.readFieldRanges(bytes);
+    const justification_offset = ranges[comptime types.altair.BeaconState.getFieldIndex("justification_bits")][0];
+    const baseline = pool.getNodesInUse();
+
+    bytes[justification_offset] = 0x80;
+    try std.testing.expectError(error.trailingData, loadState(allocator, &beacon_config, &seed, bytes, null));
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+    try std.testing.expectEqualSlices(u8, &seed_root, try seed.hashTreeRoot());
+    bytes[justification_offset] = 0;
+
+    // The pool uses its own allocator; the first loadState allocation creates the completed container's view.
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, loadState(failing.allocator(), &beacon_config, &seed, bytes, null));
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+    try std.testing.expectEqualSlices(u8, &seed_root, try seed.hashTreeRoot());
+
+    {
+        var loaded = try loadState(allocator, &beacon_config, &seed, bytes, null);
+        defer loaded.state.deinit();
+        defer allocator.free(loaded.modified_validators);
+        var expected_root: [32]u8 = undefined;
+        try types.altair.BeaconState.hashTreeRoot(allocator, &target_value, &expected_root);
+        try std.testing.expectEqualSlices(u8, &expected_root, try loaded.state.hashTreeRoot());
+    }
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+    try std.testing.expectEqualSlices(u8, &seed_root, try seed.hashTreeRoot());
 }

@@ -1,4 +1,5 @@
 const std = @import("std");
+const Diagnostics = @import("diagnostics").Diagnostics;
 const Allocator = std.mem.Allocator;
 const BeaconConfig = @import("config").BeaconConfig;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
@@ -28,6 +29,7 @@ const getExpectedWithdrawals = @import("./process_withdrawals.zig").getExpectedW
 const isExecutionEnabled = @import("../utils/execution.zig").isExecutionEnabled;
 
 pub const ProcessBlockOpts = struct {
+    diagnostics: ?*Diagnostics = null,
     verify_signature: bool = true,
 };
 
@@ -92,7 +94,7 @@ pub fn processBlock(
                     },
                     .blinded => block.body().executionPayloadHeader().inner.withdrawals_root,
                 };
-                try processWithdrawals(fork, allocator, state, withdrawals_result, payload_withdrawals_root);
+                try processWithdrawals(fork, allocator, state, withdrawals_result, payload_withdrawals_root, opts.diagnostics);
             }
 
             try processExecutionPayload(
@@ -112,7 +114,16 @@ pub fn processBlock(
     try processEth1Data(fork, state, body.eth1Data());
     try processOperations(fork, allocator, io, config, epoch_cache, state, proposer_rewards, slashings_cache, block_type, body, opts);
     if (comptime fork.gte(.altair)) {
-        try processSyncAggregate(fork, allocator, io, config, epoch_cache, state, proposer_rewards, body.syncAggregate(), opts.verify_signature);
+        try processSyncAggregate(
+            fork,
+            io,
+            config,
+            epoch_cache,
+            state,
+            proposer_rewards,
+            body.syncAggregate(),
+            opts.verify_signature,
+        );
     }
 
     if (comptime fork.gte(.deneb)) {

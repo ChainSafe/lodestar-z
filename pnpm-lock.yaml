@@ -9,15 +9,15 @@ importers:
   .:
     dependencies:
       '@chainsafe/zapi':
-        specifier: 4.0.0
-        version: 4.0.0
+        specifier: 4.1.0
+        version: 4.1.0
     devDependencies:
       '@biomejs/biome':
         specifier: ^2.3.11
         version: 2.3.11
       '@chainsafe/benchmark':
-        specifier: ^2.0.1
-        version: 2.0.1
+        specifier: 2.1.0
+        version: 2.1.0
       '@chainsafe/biomejs-config':
         specifier: ^1.0.0
         version: 1.0.0(@biomejs/biome@2.3.11)
@@ -184,8 +184,8 @@ packages:
   '@chainsafe/as-sha256@1.2.0':
     resolution: {integrity: sha512-H2BNHQ5C3RS+H0ZvOdovK6GjFAyq5T6LClad8ivwj9Oaiy28uvdsGVS7gNJKuZmg0FGHAI+n7F0Qju6U0QkKDA==}
 
-  '@chainsafe/benchmark@2.0.1':
-    resolution: {integrity: sha512-Noecu9z6kjXWdKl9ZL/PckJxfi+Ax4/8/i4F862jo3FZcViK8LWR5Byc8pKeNC5vcDMSP73/ME3vgUovYGqwUw==}
+  '@chainsafe/benchmark@2.1.0':
+    resolution: {integrity: sha512-ePdMfWNbtmhe5PAhJCv+uKiLyIkcKJmsTeYLJTeTCmkU4BcvOOUn2NF2lC80ppZ0Qn+OaKsVsXLhiVOAJFzPRg==}
     hasBin: true
 
   '@chainsafe/biomejs-config@1.0.0':
@@ -401,8 +401,8 @@ packages:
     resolution: {integrity: sha512-H8YdEoXXv2Hw17gDWGOJEya4LHlBbpChJP3jDQRfIk9hhwr0c/zbBemBRmjADowZhArL+ymkO+j5hGaYySjdpw==}
     engines: {node: '>= 18'}
 
-  '@chainsafe/zapi@4.0.0':
-    resolution: {integrity: sha512-jcWUJT7bsS7F3H2aycUEs7sBTw+oL+MgKOC2CZ80n2asvCmAXjz6D0H2ZYuAbfmwG12myBDezGHs+JzIUQEs+A==}
+  '@chainsafe/zapi@4.1.0':
+    resolution: {integrity: sha512-U/JgUc9KAfDeKlgJWWTvBuKEMezhnb4GVEGd3zYaMB3Vi85YTJtcd2b9eO+upk5buROwRo9DEF+ev32PaO98mg==}
     hasBin: true
 
   '@colors/colors@1.5.0':
@@ -2434,7 +2434,7 @@ snapshots:
 
   '@chainsafe/as-sha256@1.2.0': {}
 
-  '@chainsafe/benchmark@2.0.1':
+  '@chainsafe/benchmark@2.1.0':
     dependencies:
       '@actions/cache': 4.1.0
       '@actions/github': 6.0.1
@@ -2608,7 +2608,7 @@ snapshots:
       '@chainsafe/swap-or-not-shuffle-win32-arm64-msvc': 1.2.1
       '@chainsafe/swap-or-not-shuffle-win32-x64-msvc': 1.2.1
 
-  '@chainsafe/zapi@4.0.0': {}
+  '@chainsafe/zapi@4.1.0': {}
 
   '@colors/colors@1.5.0':
     optional: true

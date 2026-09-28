@@ -2,10 +2,13 @@
 //!
 //! Run with `zig build test:tidy`.
 //!
-//! These rules guard test discovery. Zig only collects tests from files reached
+//! Most rules guard test discovery. Zig only collects tests from files reached
 //! through an analyzed `test` block, so a test file that nothing imports
 //! compiles cleanly, runs nothing, and still reports success. That failure is
 //! invisible in CI, which makes it worth a lint rather than a code review.
+//!
+//! The remaining rule guards how error values are written. Both spellings
+//! compile, so nothing but a lint keeps the rejected one out.
 //!
 //! Rules read the parsed AST rather than raw lines, so a brace or the word
 //! `test` inside a comment or string literal cannot skew them. Every rule
@@ -26,9 +29,9 @@ const max_tracked_files = 4096;
 const max_file_bytes: std.Io.Limit = .limited(8 << 20);
 const max_git_output_bytes = 4 << 20;
 
-/// A module holds at most this many `test` blocks. One inline test is a usage
+/// A file holds at most this many `test` blocks. One inline test is a usage
 /// example; a second makes it a suite, and suites live in a sibling
-/// `<module>_test.zig`. The wiring block counts, so a module is either inline
+/// `<file>_test.zig`. The wiring block counts, so a file is either inline
 /// (one test) or extracted (only the wiring block), never both. Documented in
 /// AGENTS.md.
 const max_test_blocks = 1;
@@ -119,7 +122,7 @@ const Errors = struct {
 
     fn addUnpairedTestFile(errors: *Errors, path: []const u8, expected: []const u8) void {
         errors.emit(
-            "{s}: error: no sibling module to pair with, expected {s}\n",
+            "{s}: error: no sibling file to pair with, expected {s}\n",
             .{ path, expected },
         );
     }
@@ -152,7 +155,7 @@ const Errors = struct {
 
     fn addTooManyTestBlocks(errors: *Errors, path: []const u8, line: usize, count: usize) void {
         errors.emit(
-            "{s}:{d}: error: {d} test blocks, a module holds at most {d}; " ++
+            "{s}:{d}: error: {d} test blocks, a file holds at most {d}; " ++
                 "move the tests to a sibling _test.zig\n",
             .{ path, line, count, max_test_blocks },
         );
@@ -160,6 +163,19 @@ const Errors = struct {
 
     fn addStaleAllowlistEntry(errors: *Errors, path: []const u8, reason: []const u8) void {
         errors.emit("{s}: error: allowlisted but {s}\n", .{ path, reason });
+    }
+
+    fn addQualifiedErrorValue(
+        errors: *Errors,
+        path: []const u8,
+        line: usize,
+        set: []const u8,
+        name: []const u8,
+    ) void {
+        errors.emit(
+            "{s}:{d}: error: `{s}.{s}` names an error through its set, write `error.{s}`\n",
+            .{ path, line, set, name, name },
+        );
     }
 };
 
@@ -187,6 +203,14 @@ const Import = struct {
     in_test_block: bool,
 };
 
+/// One `<Set>.<Name>` reference to an error value.
+const QualifiedErrorValue = struct {
+    /// One-based line, for the diagnostic.
+    line: usize,
+    set: []const u8,
+    name: []const u8,
+};
+
 /// One analyzed file. Everything a rule needs is extracted during the single
 /// load pass, so no rule re-reads or re-parses.
 const File = struct {
@@ -197,6 +221,8 @@ const File = struct {
     /// stringified import is not mistaken for a real one.
     imports: []const Import,
     inline_tests: InlineTests,
+    error_set_names: []const []const u8,
+    qualified_error_values: []const QualifiedErrorValue,
 
     fn hasTestBlock(file: File) bool {
         return file.inline_tests.count > 0;
@@ -273,12 +299,76 @@ fn analyze(gpa: Allocator, path: []const u8, text: [:0]const u8, errors: *Errors
         });
     }
 
+    // Collect error sets declared in this file. Looking up the declaration avoids
+    // treating a struct such as `HttpError` as an error set merely because its
+    // name ends in `Error`. Imported error sets retain the repository's `*Error`
+    // naming convention because their declarations are outside this file.
+    var error_set_names: std.ArrayList([]const u8) = .empty;
+    var declared_names: std.ArrayList([]const u8) = .empty;
+    for (token_tags, 0..) |tag, index| {
+        if (tag != .keyword_const) continue;
+        if (index + 2 >= token_tags.len) continue;
+        if (token_tags[index + 1] != .identifier) continue;
+        if (token_tags[index + 2] != .equal) continue;
+        try declared_names.append(gpa, try gpa.dupe(u8, tree.tokenSlice(@intCast(index + 1))));
+
+        var expression_index = index + 3;
+        while (expression_index + 1 < token_tags.len and
+            token_tags[expression_index] != .semicolon and
+            token_tags[expression_index] != .l_brace) : (expression_index += 1)
+        {
+            if (token_tags[expression_index] != .keyword_error) continue;
+            if (token_tags[expression_index + 1] != .l_brace) continue;
+            try error_set_names.append(gpa, try gpa.dupe(u8, tree.tokenSlice(@intCast(index + 1))));
+            break;
+        }
+    }
+
+    var qualified_error_values: std.ArrayList(QualifiedErrorValue) = .empty;
+    for (token_tags, 0..) |tag, index| {
+        if (tag != .identifier) continue;
+        if (index + 2 >= token_tags.len) continue;
+        if (token_tags[index + 1] != .period) continue;
+        if (token_tags[index + 2] != .identifier) continue;
+
+        const set = tree.tokenSlice(@intCast(index));
+        var is_error_set = false;
+        for (error_set_names.items) |error_set_name| {
+            if (std.mem.eql(u8, set, error_set_name)) {
+                is_error_set = true;
+                break;
+            }
+        }
+        if (!is_error_set and std.mem.endsWith(u8, set, "Error")) {
+            var declared_non_error = false;
+            for (declared_names.items) |declared_name| {
+                if (std.mem.eql(u8, set, declared_name)) {
+                    declared_non_error = true;
+                    break;
+                }
+            }
+            is_error_set = !declared_non_error;
+        }
+        if (!is_error_set) continue;
+        const name = tree.tokenSlice(@intCast(index + 2));
+        assert(name.len > 0);
+        if (!std.ascii.isUpper(name[0])) continue;
+
+        try qualified_error_values.append(gpa, .{
+            .line = tree.tokenLocation(0, @intCast(index)).line + 1,
+            .set = try gpa.dupe(u8, set),
+            .name = try gpa.dupe(u8, name),
+        });
+    }
+
     return .{
         .path = path,
         .dir = std.fs.path.dirnamePosix(path) orelse "",
         .basename = std.fs.path.basenamePosix(path),
         .imports = imports.items,
         .inline_tests = inline_tests,
+        .error_set_names = error_set_names.items,
+        .qualified_error_values = qualified_error_values.items,
     };
 }
 
@@ -371,10 +461,10 @@ fn findFile(files: []const File, path: []const u8) ?*const File {
     return null;
 }
 
-/// The sibling module a `<stem>_test.zig` pairs with. Accepts the snake_case
+/// The sibling file a `<stem>_test.zig` pairs with. Accepts the snake_case
 /// name and the TitleCase name, since a file that is itself a type keeps its
 /// TitleCase name: `Node.zig` pairs with `node_test.zig`.
-fn pairedModule(
+fn pairedFile(
     gpa: Allocator,
     dir: []const u8,
     stem: []const u8,
@@ -404,8 +494,8 @@ fn pairedModule(
 // Rules
 // -------------------------------------------------------------------------
 
-/// Every `_test.zig` must be imported, must pair with a module of the same
-/// name, and must be wired from that module rather than from a package root.
+/// Every `_test.zig` must be imported, must pair with a file of the same
+/// name, and must be wired from that file rather than from a module root.
 fn tidyTestFileWiring(gpa: Allocator, files: []const File, errors: *Errors) !void {
     for (files) |file| {
         if (!isTestFile(file.basename)) continue;
@@ -424,8 +514,8 @@ fn tidyTestFileWiring(gpa: Allocator, files: []const File, errors: *Errors) !voi
         }
 
         const stem = file.basename[0 .. file.basename.len - "_test.zig".len];
-        const snake = try pairedModule(gpa, file.dir, stem, .snake);
-        const title = try pairedModule(gpa, file.dir, stem, .title);
+        const snake = try pairedFile(gpa, file.dir, stem, .snake);
+        const title = try pairedFile(gpa, file.dir, stem, .title);
 
         const pair = findFile(files, snake) orelse findFile(files, title) orelse {
             errors.addUnpairedTestFile(file.path, snake);
@@ -534,7 +624,7 @@ fn tidyDeadFiles(
     }
 }
 
-/// No module holds more than `max_test_blocks` test blocks.
+/// No file holds more than `max_test_blocks` test blocks.
 fn tidyInlineTests(files: []const File, scope: []const []const u8, errors: *Errors) void {
     for (files) |file| {
         if (!inScope(scope, file.path)) continue;
@@ -544,6 +634,21 @@ fn tidyInlineTests(files: []const File, scope: []const []const u8, errors: *Erro
         const inline_tests = file.inline_tests;
         if (inline_tests.count > max_test_blocks) {
             errors.addTooManyTestBlocks(file.path, inline_tests.first_line, inline_tests.count);
+        }
+    }
+}
+
+/// Error values are written `error.Name`, never `Set.Name`.
+///
+/// Error names are global in Zig, so a set reference resolves to the same value
+/// and the two spellings are interchangeable at every use site. Only one of them
+/// stays correct: the qualified form has to be revisited whenever the value
+/// moves between sets, and it reads as though the set, rather than the function's
+/// return type, decides which errors can arrive.
+fn tidyErrorValues(files: []const File, errors: *Errors) void {
+    for (files) |file| {
+        for (file.qualified_error_values) |value| {
+            errors.addQualifiedErrorValue(file.path, value.line, value.set, value.name);
         }
     }
 }
@@ -663,12 +768,14 @@ test "tidy" {
     tidyRootTestBlocks(files, &errors);
     try tidyDeadFiles(arena, files, roots, &dead_file_scope, &errors);
     tidyInlineTests(files, &inline_test_scope, &errors);
+    tidyErrorValues(files, &errors);
     tidyAllowlists(files, &errors);
     try tidyCiCoverage(arena, zon, ci, &errors);
 
     if (errors.count > 0) {
         std.debug.print(
-            "\n{d} tidy violation(s). See AGENTS.md `Test file layout` for the rules.\n",
+            "\n{d} tidy violation(s). See AGENTS.md `Code style` and `Test file layout` " ++
+                "for the rules.\n",
             .{errors.count},
         );
         return error.Untidy;
@@ -862,7 +969,7 @@ test "rule: unpaired test file" {
     try tidyTestFileWiring(fixture.arena(), files, errors);
 
     try expectDiagnostics(fixture.output(),
-        \\src/ghost_test.zig: error: no sibling module to pair with, expected src/ghost.zig
+        \\src/ghost_test.zig: error: no sibling file to pair with, expected src/ghost.zig
         \\
     );
 }
@@ -885,7 +992,7 @@ test "rule: test file wired from a package root instead of its module" {
     );
 }
 
-test "rule: TitleCase module pairs with a snake_case test file" {
+test "rule: TitleCase file pairs with a snake_case test file" {
     var fixture: Fixture = .init();
     defer fixture.deinit();
     const errors = fixture.start();
@@ -950,8 +1057,8 @@ test "rule: a second test block means the tests belong in a _test.zig" {
     tidyInlineTests(files, &.{"src/"}, errors);
 
     try expectDiagnostics(fixture.output(),
-        \\src/suite.zig:2: error: 2 test blocks, a module holds at most 1; move the tests to a sibling _test.zig
-        \\src/mixed.zig:1: error: 2 test blocks, a module holds at most 1; move the tests to a sibling _test.zig
+        \\src/suite.zig:2: error: 2 test blocks, a file holds at most 1; move the tests to a sibling _test.zig
+        \\src/mixed.zig:1: error: 2 test blocks, a file holds at most 1; move the tests to a sibling _test.zig
         \\
     );
 }
@@ -977,6 +1084,57 @@ test "rule: stale allowlist entry" {
         fixture.output(),
         "src/cpu_count.zig: error: allowlisted but the file does not exist",
     ) != null);
+}
+
+test "rule: error values named through their set" {
+    var fixture: Fixture = .init();
+    defer fixture.deinit();
+    const errors = fixture.start();
+
+    const files = try analyzeAll(fixture.arena(), &.{
+        .{
+            "src/demo.zig",
+            \\const Node = @import("Node.zig");
+            \\pub const DemoError = error{Bad};
+            \\pub const Failures = error{Other};
+            \\const HttpError = struct { Bad: u8 };
+            \\
+            \\pub fn a() DemoError!void {
+            \\    return DemoError.Bad;
+            \\}
+            \\
+            \\pub fn a2() Failures!void {
+            \\    return Failures.Other;
+            \\}
+            \\
+            \\pub fn a3() u8 {
+            \\    return HttpError.Bad;
+            \\}
+            \\
+            \\pub fn b() Node.Error!void {
+            \\    return Node.Error.InvalidNode;
+            \\}
+            \\
+            \\pub fn c() error{Bad}!void {
+            \\    // DemoError.Bad in a comment is prose, not code.
+            \\    const text = "DemoError.Bad";
+            \\    _ = text;
+            \\    _ = Node.Error.init;
+            \\    return error.Bad;
+            \\}
+            \\
+        },
+    }, errors);
+    tidyErrorValues(files, errors);
+
+    // `Node.Error` as a return type is a type, not a value, and a lowercase
+    // member is a call rather than an error name.
+    try expectDiagnostics(fixture.output(),
+        \\src/demo.zig:7: error: `DemoError.Bad` names an error through its set, write `error.Bad`
+        \\src/demo.zig:11: error: `Failures.Other` names an error through its set, write `error.Other`
+        \\src/demo.zig:19: error: `Error.InvalidNode` names an error through its set, write `error.InvalidNode`
+        \\
+    );
 }
 
 test "rule: a longer target name does not satisfy a shorter one" {

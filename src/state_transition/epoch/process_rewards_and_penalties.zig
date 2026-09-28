@@ -1,5 +1,4 @@
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 const ForkSeq = @import("config").ForkSeq;
 const BeaconConfig = @import("config").BeaconConfig;
 const BeaconState = @import("fork_types").BeaconState;
@@ -11,7 +10,6 @@ const getRewardsAndPenaltiesAltair = @import("./get_rewards_and_penalties.zig").
 
 pub fn processRewardsAndPenalties(
     comptime fork: ForkSeq,
-    allocator: Allocator,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
     state: *BeaconState(fork),
@@ -27,8 +25,8 @@ pub fn processRewardsAndPenalties(
     const penalties = cache.penalties;
     try getRewardsAndPenalties(fork, config, epoch_cache, state, cache, rewards, penalties);
 
-    const balances = try state.balancesSlice(allocator);
-    errdefer allocator.free(balances);
+    const balances = try state.balancesSlice(cache.allocator);
+    errdefer cache.allocator.free(balances);
 
     for (rewards, penalties, balances) |reward, penalty, *balance| {
         balance.* = (try std.math.add(u64, balance.*, reward)) -| penalty;
@@ -47,7 +45,7 @@ pub fn processRewardsAndPenalties(
     try state.setBalances(&new_balances);
 
     if (cache.balances) |*old_balances| {
-        old_balances.deinit(allocator);
+        old_balances.deinit(cache.allocator);
     }
     cache.balances = new_balances;
 }

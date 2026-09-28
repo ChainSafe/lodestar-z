@@ -1,6 +1,7 @@
 //! Tests for `state_transition.zig`.
 
 const std = @import("std");
+const Diagnostics = @import("diagnostics").Diagnostics;
 const types = @import("consensus_types");
 const AnySignedBeaconBlock = @import("fork_types").AnySignedBeaconBlock;
 const deinitReusedEpochTransitionCache = @import("cache/epoch_transition_cache.zig").deinitReusedEpochTransitionCache;
@@ -50,7 +51,7 @@ test "state transition - electra block" {
         const signed_beacon_block = AnySignedBeaconBlock{ .full_electra = &electra_block };
 
         // this returns the error so no need to handle returned post_state
-        // TODO: if blst can publish BlstError.BadEncoding, can just use testing.expectError
+        // TODO: if blst can publish error.BadEncoding, can just use testing.expectError
         // testing.expectError(blst.c.BLST_BAD_ENCODING, stateTransition(allocator, test_state.cached_state, signed_block, .{ .verify_signatures = true }));
         const res = stateTransition(
             allocator,
@@ -159,6 +160,8 @@ test "state transition - records per-block and per-epoch metrics" {
     for (0..try state.validatorsCount()) |i| {
         try current_participation.set(i, 0);
     }
+    // Exercise the progressive-balance self-heal path at the epoch boundary.
+    test_state.cached_state.epoch_cache.current_target_unslashed_balance_increments += 1;
     try test_state.cached_state.state.commit();
 
     const signed_beacon_block = AnySignedBeaconBlock{ .full_electra = &electra_block };
@@ -194,6 +197,10 @@ test "state transition - records per-block and per-epoch metrics" {
     try testing.expectEqual(@as(?u64, attestation_count), metricValue(out, "lodestar_stfn_attestations_per_block_total"));
     try testing.expect(metricValue(out, "lodestar_stfn_new_seen_attesters_per_block_total").? > 0);
     try testing.expect(metricValue(out, "lodestar_stfn_new_seen_attesters_effective_balance_per_block_total").? > 0);
+    try testing.expectEqual(
+        @as(?u64, 1),
+        metricValue(out, "lodestar_stfn_progressive_balances_mismatches_total{target=\"current\"}"),
+    );
     const proposer_rewards = post_state.getProposerRewards();
     try testing.expectEqual(
         @as(?u64, proposer_rewards.attestations),
@@ -259,7 +266,7 @@ test "proposer rewards should count sync positions without participant rewards" 
     const state = cached.state.castToFork(.electra);
     const epoch_cache = cached.epoch_cache;
     const proposer = try cached.getBeaconProposer(try state.slot());
-    const indices = epoch_cache.current_sync_committee_indexed.get().getValidatorIndices();
+    const indices = try epoch_cache.current_sync_committee_indexed.get().getValidatorIndices();
     var proposer_positions: u64 = 0;
     var aggregate = types.electra.SyncAggregate.default_value;
     for (0..preset.SYNC_COMMITTEE_SIZE) |index| {
@@ -268,7 +275,16 @@ test "proposer rewards should count sync positions without participant rewards" 
     }
     var balances = try state.balances();
     const before = try balances.get(proposer);
-    try processSyncAggregate(.electra, allocator, std.testing.io, cached.config, epoch_cache, state, &cached.proposer_rewards, &aggregate, false);
+    try processSyncAggregate(
+        .electra,
+        std.testing.io,
+        cached.config,
+        epoch_cache,
+        state,
+        &cached.proposer_rewards,
+        &aggregate,
+        false,
+    );
     const expected = preset.SYNC_COMMITTEE_SIZE * epoch_cache.sync_proposer_reward;
     try std.testing.expect(expected > 0);
     try std.testing.expectEqual(expected, cached.getProposerRewards().sync_aggregate);
@@ -301,4 +317,80 @@ test "proposer rewards should accumulate slashing rewards with and without a whi
     try std.testing.expectEqual(@as(u64, reward + proposer_share), cached.getProposerRewards().slashing);
     try std.testing.expectEqual(@as(u64, reward + proposer_share), try balances.get(proposer) - before);
     try std.testing.expectEqual(@as(u64, reward - proposer_share), try balances.get(whistleblower) - whistleblower_before);
+}
+
+test "state transition should preserve withdrawal diagnostics after failure" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 180_000,
+    });
+    defer pool.deinit();
+
+    const generate_state = @import("test_utils/generate_state.zig");
+    const chain_config = if (@import("preset").active_preset == .mainnet)
+        @import("config").mainnet.chain_config
+    else
+        @import("config").minimal.chain_config;
+    const state = try generate_state.generateElectraState(
+        allocator,
+        &pool,
+        generate_state.getConfig(chain_config, .electra, 0),
+        256,
+    );
+    var test_state = TestCachedBeaconState.initFromState(allocator, &pool, state, .electra, 0) catch |err| {
+        state.deinit();
+        allocator.destroy(state);
+        return err;
+    };
+    defer test_state.deinit();
+    const before_root = (try state.hashTreeRoot()).*;
+    const slot = try state.slot();
+    var latest_header = try state.latestBlockHeader();
+    var block = types.electra.SignedBlindedBeaconBlock.default_value;
+    block.message.slot = slot;
+    block.message.proposer_index = test_state.cached_state.epoch_cache.proposers[slot % preset.SLOTS_PER_EPOCH];
+    block.message.parent_root = (try latest_header.hashTreeRoot()).*;
+    var expected_root: [32]u8 = undefined;
+    try types.capella.Withdrawals.hashTreeRoot(allocator, &types.capella.Withdrawals.default_value, &expected_root);
+    block.message.body.execution_payload_header.withdrawals_root = expected_root;
+    block.message.body.execution_payload_header.withdrawals_root[0] ^= 1;
+    const actual_root = block.message.body.execution_payload_header.withdrawals_root;
+    var diagnostics: Diagnostics = .{};
+
+    try testing.expectError(error.WithdrawalsRootMismatch, stateTransition(
+        allocator,
+        std.testing.io,
+        test_state.cached_state,
+        .{ .blinded_electra = &block },
+        .{ .diagnostics = &diagnostics, .verify_proposer = false },
+        null,
+    ));
+    const mismatch = &diagnostics.detail.?.state_transition.withdrawals_root_mismatch;
+    try testing.expectEqualSlices(u8, &expected_root, &mismatch.expected);
+    try testing.expectEqualSlices(u8, &actual_root, &mismatch.actual);
+    try testing.expectEqualSlices(u8, &before_root, try state.hashTreeRoot());
+    try testing.expectEqual(slot, try state.slot());
+
+    try testing.expectError(error.WithdrawalsRootMismatch, stateTransition(
+        allocator,
+        std.testing.io,
+        test_state.cached_state,
+        .{ .blinded_electra = &block },
+        .{ .verify_proposer = false },
+        null,
+    ));
+
+    diagnostics = .{};
+    block.message.slot = slot - 1;
+    try testing.expectError(error.outdatedSlot, stateTransition(
+        allocator,
+        std.testing.io,
+        test_state.cached_state,
+        .{ .blinded_electra = &block },
+        .{ .diagnostics = &diagnostics },
+        null,
+    ));
+    try testing.expectEqual(null, diagnostics.detail);
 }
