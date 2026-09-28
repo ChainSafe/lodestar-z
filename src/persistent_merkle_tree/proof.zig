@@ -337,15 +337,6 @@ fn getBit(bitlist: []const u8, bit_index: usize) bool {
     return (byte & (@as(u8, 0x80) >> bit_idx)) != 0;
 }
 
-/// Converts a canonical descriptor to a bitlist after validating its shape and depth.
-/// Returns `InvalidProofDepth` before allocation if a path exceeds `max_depth` branches.
-pub fn descriptorToBitlist(allocator: Allocator, descriptor: []const u8) ![]bool {
-    const bit_length = try validateDescriptor(descriptor);
-    const bools = try allocator.alloc(bool, bit_length);
-    for (bools, 0..) |*bit, i| bit.* = getBit(descriptor, i);
-    return bools;
-}
-
 fn validateDescriptor(descriptor: []const u8) Error!usize {
     const max_bit_length = std.math.mul(usize, descriptor.len, 8) catch return error.InvalidWitnessLength;
     var right_pending: [max_depth]bool = undefined;
@@ -467,7 +458,7 @@ pub fn createNodeFromCompactMultiProof(
         }
         left_roots[depth - 1] = current;
     }
-    unreachable;
+    return error.InvalidWitnessLength;
 }
 
 test {

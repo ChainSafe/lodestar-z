@@ -11,33 +11,34 @@ const ChunkedLeaf = @import("ChunkedLeaf.zig");
 
 const DescriptorTestCase = struct {
     input: []const u8,
-    output: []const bool,
+    leaf_count: usize,
 };
 
 const descriptor_test_cases = [_]DescriptorTestCase{
     .{
         .input = &[_]u8{0b1000_0000},
-        .output = &[_]bool{true},
+        .leaf_count = 1,
     },
     .{
         .input = &[_]u8{ 0b0010_0101, 0b1110_0000 },
-        .output = &[_]bool{ false, false, true, false, false, true, false, true, true, true, true },
+        .leaf_count = 6,
     },
     .{
         .input = &[_]u8{ 0b0101_0101, 0b1000_0000 },
-        .output = &[_]bool{ false, true, false, true, false, true, false, true, true },
+        .leaf_count = 5,
     },
     .{
         .input = &[_]u8{0b0101_0110},
-        .output = &[_]bool{ false, true, false, true, false, true, true },
+        .leaf_count = 4,
     },
 };
 
-const descriptor_error_cases = [_][]const u8{
-    &[_]u8{ 0b1000_0000, 0 },
-    &[_]u8{ 0b0000_0001, 0 },
-    &[_]u8{0b0101_0111},
-    &[_]u8{ 0b0101_0110, 0 },
+const descriptor_error_cases = [_]DescriptorTestCase{
+    .{ .input = &.{}, .leaf_count = 1 },
+    .{ .input = &.{ 0b1000_0000, 0 }, .leaf_count = 1 },
+    .{ .input = &.{ 0b0000_0001, 0 }, .leaf_count = 1 },
+    .{ .input = &.{0b0101_0111}, .leaf_count = 4 },
+    .{ .input = &.{ 0b0101_0110, 0 }, .leaf_count = 4 },
 };
 
 fn fullTreeDescriptor(comptime depth: usize, witness_first: bool, out: []u8) []const u8 {
@@ -196,17 +197,19 @@ test "single proof invalid gindex" {
     try testing.expectError(error.InvalidGindex, proof.createNodeFromSingleProof(&pool, zero_gindex, leaf_hash, empty_witnesses));
 }
 
-test "descriptorToBitlist - should convert valid descriptor to a bitlist" {
-    for (descriptor_test_cases) |case| {
-        const result = try proof.descriptorToBitlist(testing.allocator, case.input);
-        defer testing.allocator.free(result);
-        try testing.expectEqualSlices(bool, case.output, result);
-    }
-}
+test "compact multiproof reconstruction rejects invalid descriptors before allocation" {
+    var pool = try Node.Pool.init(.{
+        .page_allocator = testing.allocator,
+        .allocator = testing.allocator,
+        .pool_size = 0,
+    });
+    defer pool.deinit();
+    const baseline = pool.getNodesInUse();
+    var leaves: [4][32]u8 = @splat(makeLeaf(1));
 
-test "descriptorToBitlist - should throw on invalid descriptors" {
     for (descriptor_error_cases) |case| {
-        try testing.expectError(error.InvalidWitnessLength, proof.descriptorToBitlist(testing.allocator, case));
+        try testing.expectError(error.InvalidWitnessLength, proof.createNodeFromCompactMultiProof(&pool, leaves[0..case.leaf_count], case.input));
+        try testing.expectEqual(baseline, pool.getNodesInUse());
     }
 }
 
@@ -357,7 +360,6 @@ test "memory_safety: compact multiproof depth validation precedes allocation" {
 
     for ([_]bool{ true, false }) |left| {
         const descriptor = spineDescriptor(depth, left, &descriptor_bytes);
-        try testing.expectError(error.InvalidProofDepth, proof.descriptorToBitlist(failing.allocator(), descriptor));
         try testing.expectError(error.InvalidProofDepth, proof.createNodeFromCompactMultiProof(&pool, &leaves, descriptor));
         try testing.expectEqual(baseline, pool.getNodesInUse());
         try testing.expect(!failing.has_induced_failure);
@@ -607,7 +609,7 @@ test "memory_safety: compact proof output allocation failures preserve plain sou
         }
     }.run;
     for (descriptor_test_cases) |case| {
-        try testing.checkAllAllocationFailures(testing.allocator, check, .{ &pool, root, case.input, case.output.len / 2 + 1 });
+        try testing.checkAllAllocationFailures(testing.allocator, check, .{ &pool, root, case.input, case.leaf_count });
         try testing.expectEqual(baseline, pool.getNodesInUse());
         try testing.expectEqualSlices(u8, &before, root.getRoot(&pool));
     }
