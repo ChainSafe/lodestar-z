@@ -379,6 +379,18 @@ fn writeGossip(self: *const Context, w: *prom.Encoder) prom.Error!void {
         .kind = .counter,
         .help = "Randomly sampled IWANT batch promises that expired without their sampled message",
     }, g.counters.broken_promises);
+    try w.scalar(.{
+        .name = "lodestar_native_gossip_iwant_promises_started_total",
+        .kind = .counter,
+        .help = "Randomly sampled IWANT batch promises armed when the request's send completed with its sample outstanding; local cancellation can remove one before it expires",
+    }, g.recovery.armed);
+    try w.enums(.{
+        .name = "lodestar_native_gossip_behaviour_penalties_total",
+        .kind = .counter,
+        .help = "Behaviour penalty units applied to peers by protocol violation",
+        .labels = &.{"reason"},
+    }, gossip.score.Penalty, &g.peers.scores.penalties);
+    try g.overlay.mesh_changes.write(w);
     try g.delivery_metrics.write(w);
     const validation_time = try w.histograms(.{
         .name = "gossipsub_async_validation_delay_from_first_seen",
@@ -392,6 +404,9 @@ fn writeGossip(self: *const Context, w: *prom.Encoder) prom.Error!void {
 
 fn writeGossipTopics(self: *const Context, w: *prom.Encoder) prom.Error!void {
     inline for (.{
+        .{ "lodestar_native_gossip_messages_received_total", "received", "Decoded gossip messages consumed from peers by topic kind, including ignored, invalid, duplicate and storage-refused messages" },
+        .{ "lodestar_native_gossip_messages_duplicate_total", "duplicate", "Received gossip messages already seen or awaiting validation by topic kind" },
+        .{ "lodestar_native_gossip_messages_published_total", "published", "Local publications admitted to gossip history by topic kind, including those without recipients" },
         .{ "gossipsub_accepted_messages_total", "accepted", "Applied accept verdicts by topic kind" },
         .{ "gossipsub_rejected_messages_total", "rejected", "Applied reject verdicts by topic kind" },
         .{ "gossipsub_ignored_messages_total", "ignored", "Applied ignore verdicts by topic kind" },

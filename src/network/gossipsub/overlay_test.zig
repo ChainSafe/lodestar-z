@@ -28,6 +28,26 @@ const Fixture = struct {
     }
 };
 
+/// The exported mesh change count for one label set, read from the rendered family.
+fn meshChanges(overlay: *const Overlay, comptime topic: []const u8, comptime event: []const u8, comptime reason: []const u8) !u64 {
+    var buffer: [32 * 1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    var encoder: @import("../metrics/registry.zig").Encoder = .{ .writer = &writer };
+    try overlay.mesh_changes.write(&encoder);
+    const prefix = "lodestar_native_gossip_mesh_changes_total{topic=\"" ++ topic ++ "\",event=\"" ++ event ++ "\",reason=\"" ++ reason ++ "\"} ";
+    const start = (std.mem.indexOf(u8, writer.buffered(), prefix) orelse return error.MissingSeries) + prefix.len;
+    const end = std.mem.indexOfScalarPos(u8, writer.buffered(), start, '\n').?;
+    return std.fmt.parseInt(u64, writer.buffered()[start..end], 10);
+}
+
+fn meshChangeTotal(overlay: *const Overlay) u64 {
+    var total: u64 = 0;
+    for (overlay.mesh_changes.counts) |reasons| for (reasons) |count| {
+        total += count;
+    };
+    return total;
+}
+
 test "mesh removals take each member out once whatever removed it" {
     var f = try Fixture.init(7);
     defer f.g.deinit();
@@ -85,6 +105,8 @@ test "gossip opportunistic graft improves a mesh below its target degree" {
     f.g.cycle.takeSnapshot(context.sessions, context.peers, context.now);
     f.g.overlay.opportunistic(&context, f.topic);
     try std.testing.expectEqual(@as(usize, 8), f.g.overlay.mesh(f.topic).count());
+    try std.testing.expectEqual(@as(u64, 2), try meshChanges(f.g.overlay, "beacon_block", "join", "opportunistic"));
+    try std.testing.expectEqual(@as(u64, 2), meshChangeTotal(f.g.overlay));
 }
 
 test "gossip short PRUNE backoff does not count a GRAFT flood" {
@@ -110,6 +132,8 @@ test "gossip policy mesh trimming preserves highest scores and outbound quota" {
     f.g.cycle.takeSnapshot(context.sessions, context.peers, context.now);
     f.g.overlay.maintain(&context, f.topic);
     try std.testing.expectEqual(@as(usize, c.mesh_d), f.g.overlay.mesh(f.topic).count());
+    try std.testing.expectEqual(@as(u64, 16 - c.mesh_d), try meshChanges(f.g.overlay, "beacon_block", "leave", "excess"));
+    try std.testing.expectEqual(@as(u64, 16 - c.mesh_d), meshChangeTotal(f.g.overlay));
     for (0..4) |peer| try std.testing.expect(f.g.overlay.mesh(f.topic).isSet(peer));
     try std.testing.expect(f.g.overlay.mesh(f.topic).isSet(14));
     try std.testing.expect(f.g.overlay.mesh(f.topic).isSet(15));
@@ -125,6 +149,8 @@ test "gossip policy outbound repair applies inside mesh degree limits" {
     f.g.cycle.takeSnapshot(context.sessions, context.peers, context.now);
     f.g.overlay.maintain(&context, f.topic);
     try std.testing.expectEqual(@as(usize, 10), f.g.overlay.mesh(f.topic).count());
+    try std.testing.expectEqual(@as(u64, 2), try meshChanges(f.g.overlay, "beacon_block", "join", "fill_outbound"));
+    try std.testing.expectEqual(@as(u64, 2), meshChangeTotal(f.g.overlay));
     try std.testing.expect(f.g.overlay.mesh(f.topic).isSet(8));
     try std.testing.expect(f.g.overlay.mesh(f.topic).isSet(9));
 }
@@ -207,6 +233,7 @@ test "gossip GRAFT admission preserves subscription and mesh state at both queue
     try std.testing.expect(!tx.subscription_dirty.isSet(f.topic));
     try std.testing.expect(!f.g.overlay.inMesh(f.topic, 0));
     try std.testing.expectEqual(@as(usize, 2), tx.critical.count);
+    try std.testing.expectEqual(@as(u64, 0), meshChangeTotal(f.g.overlay));
     for (0..3) |_| {
         const segment = tx.segment(&f.g.messages.store);
         if (segment.len == 0) break;
@@ -216,6 +243,8 @@ test "gossip GRAFT admission preserves subscription and mesh state at both queue
     f.g.overlay.maintain(&context, f.topic);
     try std.testing.expect(f.g.overlay.inMesh(f.topic, 0));
     try std.testing.expectEqual(@as(usize, 1), tx.critical.count);
+    try std.testing.expectEqual(@as(u64, 1), try meshChanges(f.g.overlay, "beacon_block", "join", "fill_mesh"));
+    try std.testing.expectEqual(@as(u64, 1), meshChangeTotal(f.g.overlay));
 }
 
 test "gossip policy adaptive gossip randomizes recipients and fanout expires" {
@@ -258,12 +287,15 @@ test "gossip PRUNE exhaustion ends eligibility even after queue capacity returns
     try gossip_test.unsubscribe(&f.g, f.g.overlay.topicString(f.topic));
     try std.testing.expect(f.g.sessions.rows[0].outbound == .closing);
     try std.testing.expect(!f.g.overlay.mesh(f.topic).isSet(0));
+    try std.testing.expectEqual(@as(u64, 1), try meshChanges(f.g.overlay, "beacon_block", "leave", "local_unsubscribe"));
     io.tx.cancelStream(&f.g.messages.store);
     context.now = c.prune_backoff_ms * 2;
     try gossip_test.subscribe(&f.g, f.g.overlay.topicString(f.topic));
     f.g.overlay.onGraft(&context, f.topic, 0);
     try std.testing.expect(!f.g.overlay.mesh(f.topic).isSet(0));
     try std.testing.expect(!io.tx.pending());
+    try std.testing.expectEqual(@as(u64, 1), try meshChanges(f.g.overlay, "beacon_block", "join", "remote_graft"));
+    try std.testing.expectEqual(@as(u64, 2), meshChangeTotal(f.g.overlay));
 }
 
 test "gossip policy review I3 bounded shuffle consumes one draw per swap" {
@@ -351,4 +383,72 @@ test "gossip state intern snapshots an aliased retiring topic string" {
     try std.testing.expectEqual(topic_mod.topic_max_len, maximum.len);
     try std.testing.expectEqual(@as(?u16, 1), gossip_test.intern(&g, maximum));
     try std.testing.expectEqualStrings(maximum, overlay.topicString(1));
+}
+
+test "mesh changes count each committed join and leave once by reason, not controls" {
+    var f = try Fixture.init(8);
+    defer f.g.deinit();
+    const overlay = f.g.overlay;
+    const context = f.g.overlayContext(2);
+    const name = overlay.topicString(f.topic);
+    for (0..7) |peer| overlay.onGraft(&context, f.topic, @intCast(peer));
+    overlay.onGraft(&context, f.topic, 0);
+    try std.testing.expectEqual(@as(u64, 7), try meshChanges(overlay, "beacon_block", "join", "remote_graft"));
+    overlay.onPrune(&context, f.topic, 0, c.prune_backoff_ms);
+    overlay.onPrune(&context, f.topic, 0, c.prune_backoff_ms);
+    // A GRAFT refused during backoff from a peer outside the mesh changes no membership.
+    overlay.onGraft(&context, f.topic, 0);
+    try std.testing.expectEqual(@as(u64, 1), try meshChanges(overlay, "beacon_block", "leave", "remote_prune"));
+    try std.testing.expectEqual(@as(u64, 0), try meshChanges(overlay, "beacon_block", "leave", "refused_graft"));
+    try std.testing.expectEqual(@as(u64, 1), f.g.peers.scores.penalties[@intFromEnum(@import("score.zig").Penalty.graft_backoff)]);
+    try std.testing.expectEqual(@as(u64, 1), f.g.peers.scores.penalties[@intFromEnum(@import("score.zig").Penalty.graft_flood)]);
+    for (0..2) |_| _ = overlay.peerSubscription(&context, 1, name, false);
+    for (0..2) |_| f.g.markDirect(f.g.sessions.rows[2].conn);
+    f.g.peers.scores.penalize(f.g.sessions.rows[3].logical.index, 50);
+    overlay.onGraft(&context, f.topic, 3);
+    const stream = f.g.sessions.rows[4].outStream().?;
+    f.g.sessions.setOutbound(4, .{ .closing = stream });
+    overlay.maintain(&context, f.topic);
+    try std.testing.expect(overlay.mesh(f.topic).isSet(7));
+    const disconnected = f.g.sessions.rows[6].conn;
+    for (0..2) |_| f.g.connectionClosed(disconnected);
+    for (0..2) |_| overlay.setLocal(&context, f.topic, false);
+    try std.testing.expectEqual(@as(usize, 0), overlay.mesh(f.topic).count());
+    try std.testing.expectEqual(@as(u64, 1), try meshChanges(overlay, "beacon_block", "leave", "remote_unsubscribe"));
+    try std.testing.expectEqual(@as(u64, 1), try meshChanges(overlay, "beacon_block", "leave", "direct_peer"));
+    try std.testing.expectEqual(@as(u64, 1), try meshChanges(overlay, "beacon_block", "leave", "refused_graft"));
+    try std.testing.expectEqual(@as(u64, 1), try meshChanges(overlay, "beacon_block", "leave", "ineligible"));
+    try std.testing.expectEqual(@as(u64, 1), try meshChanges(overlay, "beacon_block", "join", "fill_mesh"));
+    try std.testing.expectEqual(@as(u64, 1), try meshChanges(overlay, "beacon_block", "leave", "session_end"));
+    try std.testing.expectEqual(@as(u64, 2), try meshChanges(overlay, "beacon_block", "leave", "local_unsubscribe"));
+    try std.testing.expectEqual(@as(u64, 16), meshChangeTotal(overlay));
+}
+
+test "mesh changes follow reused sessions and a reused overlay row's current topic kind" {
+    var f = try Fixture.init(1);
+    defer f.g.deinit();
+    const overlay = f.g.overlay;
+    var context = f.g.overlayContext(1);
+    const name = overlay.topicString(f.topic);
+    overlay.onGraft(&context, f.topic, 0);
+    f.g.connectionClosed(f.g.sessions.rows[0].conn);
+    const next = gossip_test.addPeer(&f.g, .{ .index = 0, .generation = 2 }, .v1_2).?;
+    try std.testing.expectEqual(@as(u16, 0), next.index);
+    _ = overlay.peerSubscription(&context, next.index, name, true);
+    overlay.onGraft(&context, f.topic, next.index);
+    overlay.setLocal(&context, f.topic, false);
+    overlay.flushSubscriptions(&f.g.sessions.rows[next.index].io.tx, context.now);
+    context.now = std.math.maxInt(u64) / 2;
+    overlay.reclaimTopic(&context, &f.g.messages.topicPins(), f.topic);
+    try std.testing.expect(!overlay.rows[f.topic].active);
+    const exit = "/eth2/01020304/voluntary_exit/ssz_snappy";
+    try gossip_test.subscribe(&f.g, exit);
+    try std.testing.expectEqual(f.topic, overlay.findTopic(exit).?);
+    _ = overlay.peerSubscription(&context, next.index, exit, true);
+    overlay.onGraft(&context, f.topic, next.index);
+    try std.testing.expectEqual(@as(u64, 2), try meshChanges(overlay, "beacon_block", "join", "remote_graft"));
+    try std.testing.expectEqual(@as(u64, 1), try meshChanges(overlay, "beacon_block", "leave", "session_end"));
+    try std.testing.expectEqual(@as(u64, 1), try meshChanges(overlay, "beacon_block", "leave", "local_unsubscribe"));
+    try std.testing.expectEqual(@as(u64, 1), try meshChanges(overlay, "voluntary_exit", "join", "remote_graft"));
+    try std.testing.expectEqual(@as(u64, 5), meshChangeTotal(overlay));
 }

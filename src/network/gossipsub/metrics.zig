@@ -31,8 +31,12 @@ pub const Delivery = struct {
     }
 };
 
-/// Applied verdicts, and accepted messages handed to forwarding, for one topic kind.
+/// Messages received, received again and published, applied verdicts, and accepted messages
+/// handed to forwarding, for one topic kind.
 pub const Counters = struct {
+    received: u64 = 0,
+    duplicate: u64 = 0,
+    published: u64 = 0,
     accepted: u64 = 0,
     rejected: u64 = 0,
     ignored: u64 = 0,

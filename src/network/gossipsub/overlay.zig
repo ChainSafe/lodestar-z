@@ -4,6 +4,7 @@ const topic_mod = @import("topic.zig");
 const topic_policy = @import("topic_policy.zig");
 const score_mod = @import("score.zig");
 const local_intent = @import("local_intent.zig");
+const prom = @import("../metrics/registry.zig");
 const Sessions = @import("sessions.zig").Sessions;
 const PeerSet = @import("sessions.zig").PeerSet;
 const assert = std.debug.assert;
@@ -38,6 +39,56 @@ pub const Row = struct {
     }
 };
 
+/// Why a peer joined or left a topic mesh. Each reason implies its event.
+const MeshReason = enum {
+    fill_mesh,
+    fill_outbound,
+    opportunistic,
+    remote_graft,
+    ineligible,
+    excess,
+    remote_prune,
+    local_unsubscribe,
+    remote_unsubscribe,
+    session_end,
+    direct_peer,
+    refused_graft,
+
+    fn event(self: MeshReason) enum { join, leave } {
+        return switch (self) {
+            .fill_mesh, .fill_outbound, .opportunistic, .remote_graft => .join,
+            .ineligible, .excess, .remote_prune, .local_unsubscribe, .remote_unsubscribe, .session_end, .direct_peer, .refused_graft => .leave,
+        };
+    }
+};
+
+/// Committed mesh membership changes by topic kind and reason. GRAFT and PRUNE controls that
+/// change no membership do not count.
+pub const MeshChanges = struct {
+    counts: [topic_policy.kind_count + 1][std.meta.fields(MeshReason).len]u64 = @splat(@splat(0)),
+
+    fn record(self: *MeshChanges, kind: ?topic_mod.Kind, reason: MeshReason) void {
+        const index = if (kind) |known| @intFromEnum(known) else topic_policy.kind_count;
+        self.counts[index][@intFromEnum(reason)] +|= 1;
+    }
+
+    pub fn write(self: *const MeshChanges, w: *prom.Encoder) prom.Error!void {
+        const changes = try w.family(.{
+            .name = "lodestar_native_gossip_mesh_changes_total",
+            .kind = .counter,
+            .help = "Committed mesh joins and leaves by topic kind and reason, not GRAFT or PRUNE controls",
+            .labels = &.{ "topic", "event", "reason" },
+        });
+        inline for (0..topic_policy.kind_count + 1) |kind| {
+            const topic = if (kind < topic_policy.kind_count) @tagName(@as(topic_policy.Kind, @enumFromInt(kind))) else "unknown";
+            inline for (std.meta.fields(MeshReason)) |reason| {
+                const event = comptime @tagName(@as(MeshReason, @enumFromInt(reason.value)).event());
+                try changes.sample(.{ topic, event, reason.name }, self.counts[kind][reason.value]);
+            }
+        }
+    }
+};
+
 pub const Overlay = struct {
     rng: std.Random.DefaultPrng,
 
@@ -45,6 +96,7 @@ pub const Overlay = struct {
     namespace: ?topic_policy.Namespace = null,
     subscription_revision: u64 = 0,
     slot: u64 = 0,
+    mesh_changes: MeshChanges = .{},
 
     pub fn deinit(self: *Overlay, a: std.mem.Allocator) void {
         if (self.namespace) |*ns| ns.deinit(a);
@@ -59,7 +111,7 @@ pub const Overlay = struct {
             row.retire_after_ms = null;
         } else {
             var it = row.mesh.iterator(.{});
-            while (it.next()) |peer| self.prune(context, index, @intCast(peer), constants.unsubscribe_backoff_ms);
+            while (it.next()) |peer| self.prune(context, index, @intCast(peer), constants.unsubscribe_backoff_ms, .local_unsubscribe);
             row.retire_after_ms = context.now +| context.options.retained_score_ms;
         }
         row.subscribed = on;
@@ -312,12 +364,12 @@ pub const Overlay = struct {
         return self.rows[index].active and self.rows[index].subscribed;
     }
 
-    fn applySubscription(self: *Overlay, context: *const Context, topic: u16, peer: u16, on: bool) void {
+    fn applySubscription(self: *Overlay, context: *const Context, topic: u16, peer: u16, on: bool, leave: MeshReason) void {
         assert(self.rows[topic].active);
         if (self.rows[topic].subscribers.isSet(peer) != on) self.subscription_revision +|= 1;
         if (on) self.rows[topic].subscribers.set(peer) else {
             self.rows[topic].subscribers.unset(peer);
-            self.leaveMesh(context, topic, peer);
+            self.leaveMesh(context, topic, peer, leave);
             self.rows[topic].fanout.unset(peer);
         }
     }
@@ -389,7 +441,7 @@ pub const Overlay = struct {
         var it = members.iterator(.{});
         while (it.next()) |index| {
             const peer: u16 = @intCast(index);
-            if (!eligiblePeer(context, peer, 0)) self.prune(context, topic, peer, c.prune_backoff_ms);
+            if (!eligiblePeer(context, peer, 0)) self.prune(context, topic, peer, c.prune_backoff_ms, .ineligible);
         }
         if (!self.subscribed(topic)) return;
         var candidate_peers: [c.peers_cap]u16 = undefined;
@@ -398,12 +450,12 @@ pub const Overlay = struct {
         var out = outboundCount(context, members);
         for (candidate_peers[0..n]) |peer| {
             if (out >= c.mesh_d_out) break;
-            if (outbound(context, peer) and self.graft(context, topic, peer)) out += 1;
+            if (outbound(context, peer) and self.graft(context, topic, peer, .fill_outbound)) out += 1;
         }
         if (members.count() < c.mesh_d_low) {
             for (candidate_peers[0..n]) |peer| {
                 if (members.count() >= c.mesh_d) break;
-                _ = self.graft(context, topic, peer);
+                _ = self.graft(context, topic, peer, .fill_mesh);
             }
         }
         if (members.count() > c.mesh_d_high) self.trim(context, topic);
@@ -431,7 +483,8 @@ pub const Overlay = struct {
         return count;
     }
 
-    fn graft(self: *Overlay, context: *const Context, topic: u16, peer: u16) bool {
+    fn graft(self: *Overlay, context: *const Context, topic: u16, peer: u16, reason: MeshReason) bool {
+        assert(reason.event() == .join);
         const members = &self.rows[topic].mesh;
         if (members.isSet(peer) or !self.graftEligible(context, topic, peer)) return false;
         const outbox = &context.sessions.rows[peer].io.tx;
@@ -441,15 +494,16 @@ pub const Overlay = struct {
         defer context.sessions.settle(peer, context.options);
         if (outbox.submit(&.{ .graft = name }, context.now) == null) return false;
         members.set(peer);
+        self.mesh_changes.record(self.rows[topic].kind, reason);
         context.peers.scores.graft(context.sessions.rows[peer].logical.index, topic, context.now);
         self.logChange(context, topic, peer, "mesh_graft_queued", 0);
         return true;
     }
 
-    pub fn prune(self: *Overlay, context: *const Context, topic: u16, peer: u16, backoff_ms: u64) void {
+    pub fn prune(self: *Overlay, context: *const Context, topic: u16, peer: u16, backoff_ms: u64, reason: MeshReason) void {
         if (self.mesh(topic).isSet(peer)) {
             self.logChange(context, topic, peer, "mesh_prune_local", backoff_ms);
-            self.leaveMesh(context, topic, peer);
+            self.leaveMesh(context, topic, peer, reason);
         }
         const row = &context.sessions.rows[peer];
         if (!row.active) return;
@@ -466,22 +520,23 @@ pub const Overlay = struct {
         const backoff = context.peers.backoff(row.logical, topic);
         const blocked = backoff.topic_generation == self.rows[topic].generation and context.now < backoff.until;
         if (blocked) {
-            context.peers.scores.penalize(row.logical.index, 1);
-            if (backoff.until -| context.now > c.prune_backoff_ms - c.graft_flood_threshold_ms) context.peers.scores.penalize(row.logical.index, 1);
+            context.peers.scores.penalizeFor(row.logical.index, .graft_backoff);
+            if (backoff.until -| context.now > c.prune_backoff_ms - c.graft_flood_threshold_ms) context.peers.scores.penalizeFor(row.logical.index, .graft_flood);
         }
         if (row.outStream() == null) return;
         const refused = !self.subscribed(topic) or context.peers.rows[row.logical.index].direct or blocked or context.peers.score(row.logical, context.now) < 0 or
             (!self.mesh(topic).isSet(peer) and self.mesh(topic).count() >= c.mesh_d_high and !outbound(context, peer));
-        if (refused) return self.prune(context, topic, peer, c.prune_backoff_ms);
+        if (refused) return self.prune(context, topic, peer, c.prune_backoff_ms, .refused_graft);
         if (self.mesh(topic).isSet(peer)) return;
         self.rows[topic].mesh.set(peer);
+        self.mesh_changes.record(self.rows[topic].kind, .remote_graft);
         context.peers.scores.graft(row.logical.index, topic, context.now);
         self.logChange(context, topic, peer, "mesh_graft_received", 0);
     }
 
     pub fn onPrune(self: *Overlay, context: *const Context, topic: u16, peer: u16, backoff_ms: u64) void {
         self.logChange(context, topic, peer, "mesh_prune_received", backoff_ms);
-        self.leaveMesh(context, topic, peer);
+        self.leaveMesh(context, topic, peer, .remote_prune);
         context.peers.addBackoff(context.sessions.rows[peer].logical, topic, self.rows[topic].generation, context.now, backoff_ms);
     }
 
@@ -509,7 +564,7 @@ pub const Overlay = struct {
             if (survivors.count() >= c.mesh_d) break;
             survivors.set(peer);
         }
-        for (ordered[0..count]) |peer| if (!survivors.isSet(peer)) self.prune(context, topic, peer, c.prune_backoff_ms);
+        for (ordered[0..count]) |peer| if (!survivors.isSet(peer)) self.prune(context, topic, peer, c.prune_backoff_ms, .excess);
         assert(self.mesh(topic).count() == c.mesh_d);
     }
 
@@ -548,7 +603,7 @@ pub const Overlay = struct {
         var added: usize = 0;
         for (ordered[0..n]) |peer| {
             if (added == c.opportunistic_graft_peers) break;
-            if (score(context, peer) > median and self.graft(context, topic, peer)) added += 1;
+            if (score(context, peer) > median and self.graft(context, topic, peer, .opportunistic)) added += 1;
         }
     }
 
@@ -623,15 +678,17 @@ pub const Overlay = struct {
         for (candidates_buf[0..wanted]) |peer| result.set(peer);
         return result;
     }
-    fn leaveMesh(self: *Overlay, context: *const Context, topic: u16, peer: u16) void {
+    fn leaveMesh(self: *Overlay, context: *const Context, topic: u16, peer: u16, reason: MeshReason) void {
+        assert(reason.event() == .leave);
         if (!self.rows[topic].mesh.isSet(peer)) return;
         context.peers.scores.prune(context.sessions.rows[peer].logical.index, topic, context.now);
         self.rows[topic].mesh.unset(peer);
+        self.mesh_changes.record(self.rows[topic].kind, reason);
     }
 
     pub fn peerDisconnected(self: *Overlay, context: *const Context, peer: u16) void {
         for (&self.rows, 0..) |*row, topic| {
-            if (row.active) self.applySubscription(context, @intCast(topic), peer, false);
+            if (row.active) self.applySubscription(context, @intCast(topic), peer, false, .session_end);
         }
         if (self.namespace) |*ns| ns.clearPeer(peer);
     }
@@ -642,7 +699,7 @@ pub const Overlay = struct {
             ns.setSubscription(peer, match.ordinal, on);
         }
         const topic = self.findTopic(name) orelse return null;
-        self.applySubscription(context, topic, peer, on);
+        self.applySubscription(context, topic, peer, on, .remote_unsubscribe);
         return topic;
     }
 

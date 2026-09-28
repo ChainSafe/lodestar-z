@@ -383,3 +383,43 @@ test "recovery index resolves what a scan of every batch finds under random oper
         now += random.uintLessThan(u64, 100);
     }
 }
+
+test "recovery arms one sampled promise per sent batch whose sample is still outstanding" {
+    const a = std.testing.allocator;
+    var peers = try Peers.init(a, &.{ .retained_score_ms = 10_000, .retained_capacity = 2, .retained_outbound_reserve = 1 });
+    defer peers.deinit(a);
+    var recovery = try Recovery.init(a);
+    defer recovery.deinit(a, &peers);
+    const peer = admit(&peers, 0);
+    const connection: Handle = .{ .index = 0, .generation = 1 };
+    const ids = [_]MessageId{ @splat(1), @splat(2), @splat(3), @splat(4), @splat(5), @splat(6), @splat(7) };
+    // Resolved before the send: the sample of one batch, then all of another.
+    recovery.addBatch(&peers, ids[0..2], peer, connection, 1, 0, 30_000);
+    recovery.addBatch(&peers, ids[2..3], peer, connection, 2, 0, 30_000);
+    _ = recovery.resolve(&peers, ids[0]);
+    _ = recovery.resolve(&peers, ids[2]);
+    recovery.controlSent(connection, 1, 3_000, 10);
+    recovery.controlSent(connection, 2, 3_000, 10);
+    try std.testing.expectEqual(@as(u64, 0), recovery.armed);
+    // Armed once however often its send completes, then broken at expiry.
+    recovery.addBatch(&peers, ids[3..4], peer, connection, 3, 0, 30_000);
+    for (0..2) |_| recovery.controlSent(connection, 3, 3_000, 10);
+    try std.testing.expectEqual(@as(u64, 1), recovery.armed);
+    try std.testing.expectEqual(@as(u64, 1), recovery.expire(&peers, 3_010));
+    // Local pressure cancels an armed promise before it can break; a send after expiry arms none.
+    recovery.addBatch(&peers, ids[4..5], peer, connection, 4, 0, 30_000);
+    recovery.addBatch(&peers, ids[5..6], peer, connection, 5, 0, 3_020);
+    recovery.controlSent(connection, 4, 3_000, 3_020);
+    recovery.controlSent(connection, 5, 3_000, 3_020);
+    try std.testing.expectEqual(@as(u64, 2), recovery.armed);
+    try std.testing.expectEqual(@as(u64, 2), recovery.cancel(&peers, connection, true));
+    // A sample resolved after the send keeps its promise.
+    recovery.addBatch(&peers, ids[6..7], peer, connection, 6, 0, 30_000);
+    recovery.controlSent(connection, 6, 3_000, 3_030);
+    _ = recovery.resolve(&peers, ids[6]);
+    try std.testing.expectEqual(@as(u64, 3), recovery.armed);
+    try std.testing.expectEqual(@as(u64, 0), recovery.expire(&peers, 30_000));
+    try std.testing.expectEqual(@as(usize, 0), recovery.len);
+    try std.testing.expectEqual(@as(u64, 1), peers.scores.penalties[@intFromEnum(@import("score.zig").Penalty.broken_iwant)]);
+    try std.testing.expectEqual(@as(f64, 1), peers.scores.rows[peer.index].behaviour);
+}

@@ -167,7 +167,7 @@ pub fn invalidDeliveries(g: *const gossip.Gossipsub) f64 {
 
 pub fn penalize(g: *gossip.Gossipsub, conn: engine.Handle, count: f64) void {
     const index = g.sessions.find(conn).?;
-    g.peers.penalize(g.sessions.rows[index].logical, count);
+    g.peers.scores.penalize(g.sessions.rows[index].logical.index, count);
 }
 
 /// Returns the messages delivered to the attached sink.
