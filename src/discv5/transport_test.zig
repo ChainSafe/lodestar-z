@@ -269,6 +269,41 @@ test "transport returns call expiries when rejecting a malformed datagram" {
     try std.testing.expectEqual(handle, expired[0].handle);
 }
 
+test "transport drops replies its destination refuses and keeps the step's expiries" {
+    for ([_]bool{ false, true }) |established| {
+        var pair: Pair = undefined;
+        try pair.init(1_000, established);
+        defer pair.deinit();
+        const request = message.Message{ .ping = .{
+            .request_id = try message.RequestId.init(&.{0x48}),
+            .enr_sequence = pair.record_a.sequence,
+        } };
+        var output: [1_280]u8 = undefined;
+        const expiring = try pair.transport_a.engine.startCall(
+            &output,
+            endpoint(&pair.record_b),
+            &pair.record_b,
+            &request,
+            0,
+            &test_support.sealEntropy(0x33),
+        );
+        _ = try pair.transport_b.startCall(std.testing.io, endpoint(&pair.record_a), &pair.record_a, &request);
+        // A challenge answers the cold request and a PONG the established one.
+        var host = @import("udp").testing.FaultIo{ .send = .{ .socket = pair.transport_a.sockets.primary().handle } };
+        host.init(std.testing.io);
+        defer host.deinit();
+        var expired: [4]CallTable.Expired = undefined;
+        const result = try pair.transport_a.step(host.io(), &expired);
+        try std.testing.expectEqual(@as(?Transport.Error, null), result.failure);
+        try std.testing.expect(result.datagram == .accepted);
+        try std.testing.expect(result.event == .none);
+        try std.testing.expectEqual(@as(u8, 0), result.progress.standard_responses);
+        try std.testing.expectEqual(@as(usize, 1), host.send_calls);
+        try std.testing.expectEqual(@as(usize, 1), result.calls_expired);
+        try std.testing.expectEqual(expiring.handle, expired[0].handle);
+    }
+}
+
 test "transport completes a caller-owned lookup across multiple peers" {
     var network: LookupNetwork = undefined;
     try network.init(1_000);

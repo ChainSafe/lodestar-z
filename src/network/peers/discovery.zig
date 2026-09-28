@@ -177,7 +177,7 @@ pub const Discovery = struct {
                 .response = &.{},
             } };
             self.transport.sendResponse(io, incoming.peer, &response) catch |err| {
-                if (consumed.failure == null) {
+                if (err != error.DestinationUnreachable and consumed.failure == null) {
                     consumed.failure = err;
                     consumed.failure_stage = .process;
                 }
@@ -279,7 +279,9 @@ pub const Discovery = struct {
             else => return err,
         };
         if (started.started) result.started += 1;
-        if (started.failure) |err| return err;
+        // lookup_io released the refused call and reported a local failure to its owner, so the
+        // refusal fails only its destination and the step goes on.
+        if (started.failure) |err| if (err != error.DestinationUnreachable) return err;
     }
 
     fn lookupForCall(self: *Discovery, handle: d.CallTable.Handle) ?*d.Lookup {

@@ -231,3 +231,64 @@ test "UDP records a failed size readback as unknown and not below the request" {
     try std.testing.expectEqual([2]?udp.Buffers.Reported{ .{ .receive = null, .send = null }, null }, sockets.buffers);
     try std.testing.expectEqual([2]?u64{ null, null }, sockets.drops());
 }
+
+test "UDP names a send the kernel refuses and keeps the mapping of other errnos" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    var refused = try udp.Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
+    defer refused.close(std.testing.io);
+    var denied = try udp.Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
+    defer denied.close(std.testing.io);
+    var outcome: Refusal = .{};
+    const thread = try std.Thread.spawn(.{}, Refusal.run, .{ &outcome, &refused, &denied });
+    thread.join();
+    // Kernels without seccomp filters cannot produce the errnos.
+    if (!outcome.installed) return error.SkipZigTest;
+    try std.testing.expectError(error.DestinationRefused, outcome.refused);
+    try std.testing.expectError(error.AccessDenied, outcome.denied);
+}
+
+/// Refuses sendto on one thread through a seccomp filter: EPERM from `refused`, as an egress
+/// firewall drop reports it, and EACCES from `denied`. Threaded's own sendmmsg passes, so only
+/// a send issued outside it can observe the refusal. The filter ends with the thread.
+const Refusal = struct {
+    installed: bool = false,
+    refused: udp.SendError!void = {},
+    denied: udp.SendError!void = {},
+
+    const Instruction = extern struct { code: u16, jt: u8, jf: u8, k: u32 };
+    const Program = extern struct { len: c_ushort, filter: [*]const Instruction };
+
+    fn run(self: *Refusal, refused: *const udp.Sockets, denied: *const udp.Sockets) void {
+        const linux = std.os.linux;
+        const bpf = linux.BPF;
+        const descriptor: u32 = comptime @offsetOf(linux.SECCOMP.data, "arg0") + if (@import("builtin").cpu.arch.endian() == .little) 0 else 4;
+        const filter = [_]Instruction{
+            .{ .code = bpf.LD | bpf.W | bpf.ABS, .jt = 0, .jf = 0, .k = @offsetOf(linux.SECCOMP.data, "nr") },
+            .{ .code = bpf.JMP | bpf.JEQ | bpf.K, .jt = 0, .jf = 5, .k = @intFromEnum(linux.SYS.sendto) },
+            .{ .code = bpf.LD | bpf.W | bpf.ABS, .jt = 0, .jf = 0, .k = descriptor },
+            .{ .code = bpf.JMP | bpf.JEQ | bpf.K, .jt = 0, .jf = 1, .k = @intCast(refused.primary().handle) },
+            .{ .code = bpf.RET | bpf.K, .jt = 0, .jf = 0, .k = linux.SECCOMP.RET.ERRNO | @as(u32, @intFromEnum(linux.E.PERM)) },
+            .{ .code = bpf.JMP | bpf.JEQ | bpf.K, .jt = 0, .jf = 1, .k = @intCast(denied.primary().handle) },
+            .{ .code = bpf.RET | bpf.K, .jt = 0, .jf = 0, .k = linux.SECCOMP.RET.ERRNO | @as(u32, @intFromEnum(linux.E.ACCES)) },
+            .{ .code = bpf.RET | bpf.K, .jt = 0, .jf = 0, .k = linux.SECCOMP.RET.ALLOW },
+        };
+        const program: Program = .{ .len = filter.len, .filter = &filter };
+        if (linux.errno(linux.prctl(@intFromEnum(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0)) != .SUCCESS) return;
+        if (linux.errno(linux.seccomp(linux.SECCOMP.SET_MODE_FILTER, 0, &program)) != .SUCCESS) return;
+        self.installed = true;
+        const destination = udp.Address.fromNetwork(refused.primary().address);
+        self.refused = refused.sendTo(std.testing.io, destination, "refused", 16);
+        self.denied = denied.sendTo(std.testing.io, destination, "denied", 16);
+    }
+};
+
+test "UDP leaves sends to a provider that replaces them" {
+    var sockets = try udp.Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
+    defer sockets.close(std.testing.io);
+    var faults: udp.testing.FaultIo = .{ .send = .{} };
+    faults.init(std.testing.io);
+    defer faults.deinit();
+    const destination = udp.Address.fromNetwork(sockets.primary().address);
+    try std.testing.expectError(error.AddressFamilyUnsupported, sockets.sendTo(faults.io(), destination, "provider", 16));
+    try std.testing.expectEqual(@as(usize, 1), faults.send_calls);
+}
