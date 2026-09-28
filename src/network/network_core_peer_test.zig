@@ -1614,42 +1614,57 @@ test "managed sampling delivery follows real outbound stream retirement replacem
     try std.testing.expect(!handler.deliveryAvailable(snapshot.connection.?));
 }
 
-test "managed sampling demand rejects atomically trims fork bound and persists until replacement" {
+test "local intent refuses sampling demand beyond its fork atomically and a valid replacement persists" {
     var setup: Setup = .{};
-    var local: t.LocalState = .{ .fork = .{ .fork = .fulu, .minimum_sampling_groups = 8 }, .status = .{ .earliest_available_slot = 0 }, .metadata = .{ .custody_group_count = 4 } };
-    try setup.initOwners(&local);
+    try setup.initOwners(&.{ .fork = .{ .fork = .fulu, .minimum_sampling_groups = 8 }, .status = .{ .earliest_available_slot = 0 }, .metadata = .{ .custody_group_count = 4 } });
     defer setup.deinit();
+    const node = &setup.client;
+    const manager = &node.peer_manager;
+    const owner = @import("network_core_test_support.zig");
+    const local = node.localState();
     var demand: t.Demand = .{};
     demand.group_targets[0] = 1;
     demand.custody_group_targets[0] = 1;
-    demand.group_targets[127] = setup.client.peer_manager.catalog.options.max_peers;
-    try setup.client.peer_manager.setDemand(&demand);
-    const before = setup.client.peer_manager.demand;
-    demand.group_targets[1] = setup.client.peer_manager.catalog.options.max_peers + 1;
-    try std.testing.expectError(error.InvalidDemand, setup.client.peer_manager.setDemand(&demand));
-    try std.testing.expectEqualDeep(before, setup.client.peer_manager.demand);
-    setup.client.peer_manager.reconcile(setup.client.service.gossipsub, &setup.client.control_protocol, setup.pair.now);
-    try std.testing.expectEqual(@as(u16, 4), setup.client.peer_manager.coverageDeficits().groups);
-    local.fork.custody_groups = 64;
-    // The intent path refuses a demand beyond the new fork; peer policy's own commit trims it.
-    setup.client.peer_manager.commitLocal(&local, setup.pair.now);
-    try std.testing.expectEqual(@as(u16, 0), setup.client.peer_manager.demand.group_targets[127]);
-    try std.testing.expectEqual(@as(u16, 4), setup.client.peer_manager.coverageDeficits().groups);
-    setup.client.peer_manager.reconcile(setup.client.service.gossipsub, &setup.client.control_protocol, setup.pair.now);
-    try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.coverageDeficits().groups);
-    _ = try setup.turn(&setup.client, .{});
-    try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.coverageDeficits().groups);
-    try @import("network_core_test_support.zig").advanceSlot(&setup.client, 10_000, setup.pair.now);
-    _ = try setup.turn(&setup.client, .{});
-    try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.coverageDeficits().groups);
-    try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.coverageDeficits().custody_groups);
-    try std.testing.expect(setup.client.peer_manager.discoveryNeed().custody);
-    try setup.client.peer_manager.setDemand(&.{});
-    _ = try setup.turn(&setup.client, .{});
-    try std.testing.expectEqual(@as(u16, 0), setup.client.peer_manager.coverageDeficits().groups);
-    try std.testing.expectEqual(@as(u16, 0), setup.client.peer_manager.coverageDeficits().custody_groups);
-    try std.testing.expect(!setup.client.peer_manager.discoveryNeed().custody);
-    try std.testing.expectEqualDeep(t.Demand{}, setup.client.peer_manager.demand);
+    demand.group_targets[127] = manager.catalog.options.max_peers;
+    try owner.updateLocalDemand(node, &local, &demand, setup.pair.now);
+    try std.testing.expectEqualDeep(demand, manager.demand);
+    // A demand change past the peer ceiling and a fork too narrow for the committed demand are
+    // both refused before any owner commits.
+    var excessive = demand;
+    excessive.group_targets[1] = manager.catalog.options.max_peers + 1;
+    try std.testing.expectError(error.InvalidDemand, owner.updateLocalDemand(node, &local, &excessive, setup.pair.now));
+    var narrower = local;
+    narrower.fork.custody_groups = 64;
+    const request_fork = node.service.reqresp.request_fork;
+    try std.testing.expectError(error.InvalidDemand, owner.updateLocal(node, &narrower, setup.pair.now));
+    try std.testing.expectEqualDeep(demand, manager.demand);
+    try std.testing.expectEqualDeep(local, node.localState());
+    try std.testing.expectEqual(request_fork, node.service.reqresp.request_fork);
+    manager.reconcile(node.service.gossipsub, &node.control_protocol, setup.pair.now);
+    try std.testing.expectEqual(@as(u16, 4), manager.coverageDeficits().groups);
+    // The narrower fork commits with a demand inside it; selection keeps its last result until
+    // the next evaluation.
+    var within = demand;
+    within.group_targets[127] = 0;
+    try owner.updateLocalDemand(node, &narrower, &within, setup.pair.now);
+    try std.testing.expectEqual(@as(u16, 64), node.localState().fork.custody_groups);
+    try std.testing.expectEqualDeep(within, manager.demand);
+    try std.testing.expectEqual(@as(u16, 4), manager.coverageDeficits().groups);
+    manager.reconcile(node.service.gossipsub, &node.control_protocol, setup.pair.now);
+    try std.testing.expectEqual(@as(u16, 1), manager.coverageDeficits().groups);
+    _ = try setup.turn(node, .{});
+    try std.testing.expectEqual(@as(u16, 1), manager.coverageDeficits().groups);
+    try owner.advanceSlot(node, 10_000, setup.pair.now);
+    _ = try setup.turn(node, .{});
+    try std.testing.expectEqual(@as(u16, 1), manager.coverageDeficits().groups);
+    try std.testing.expectEqual(@as(u16, 1), manager.coverageDeficits().custody_groups);
+    try std.testing.expect(manager.discoveryNeed().custody);
+    try owner.updateLocalDemand(node, &node.localState(), &.{}, setup.pair.now);
+    _ = try setup.turn(node, .{});
+    try std.testing.expectEqual(@as(u16, 0), manager.coverageDeficits().groups);
+    try std.testing.expectEqual(@as(u16, 0), manager.coverageDeficits().custody_groups);
+    try std.testing.expect(!manager.discoveryNeed().custody);
+    try std.testing.expectEqualDeep(t.Demand{}, manager.demand);
 }
 
 test "managed replaces failed gossip below target without a reputation penalty or admission timer" {
