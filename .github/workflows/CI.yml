@@ -526,10 +526,7 @@ jobs:
             llvm-config-18 --version
           fi
       - name: Build fuzz harnesses
-        # Build in ReleaseFast so Zig 0.16's Debug `sanitize_c = .full`
-        # doesn't emit `__ubsan_handle_*` calls into blst's C objects that
-        # `afl-cc` can't resolve without `libubsan`. Fuzzers want throughput
-        # anyway; devs can still use `zig build` in Debug locally.
+        # Build in ReleaseFast for fuzzing throughput.
         run: |
           cd test/fuzz && zig build -Doptimize=ReleaseFast
       - name: Replay and smoke bounded network parsers with safety checks
