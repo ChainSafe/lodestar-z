@@ -5,6 +5,7 @@ import {isDeepStrictEqual} from "node:util";
 import {runBoundedCommand} from "./bounded_child.mjs";
 import {
   EMBEDDED_ADDON_PATH,
+  LEGAL_FILES,
   PLATFORM_ADDON_FILE,
   addonLayout,
   assertNetworkExports,
@@ -32,6 +33,7 @@ import {activateRelease, contains, copyRelease, prepareRelease} from "./lodestar
 
 const COMMAND_TIMEOUT_MS = 20 * 60 * 1000;
 const MAX_PACKAGE_EXPORTS = 64;
+const MAX_PLATFORM_TARGETS = 16;
 const MAX_RESOLUTION_RECORDS = 16 * 1024;
 const MAX_GRAPH_NODES = 8192;
 const MAX_GRAPH_EDGES = 64 * 1024;
@@ -94,6 +96,7 @@ function parseOptions(argv) {
   const command = argv[0];
   const allowed = {
     install: new Set(["--host-dir", "--manifest", "--evidence-dir", "--release-dir", "--active-link"]),
+    notices: new Set(["--package-dir"]),
     pack: new Set(["--native-dir", "--out", "--build-record"]),
     verify: new Set(["--host-dir", "--manifest"]),
   }[command];
@@ -170,6 +173,7 @@ async function packPlatform(
   await copyFile(join(nativeDir, addon.path), join(staging, "artifacts", target, PLATFORM_ADDON_FILE));
   const zapiCli = join(dirname(fileURLToPath(import.meta.resolve("@chainsafe/zapi"))), "cli.js");
   const prepublish = await runCommand(process.execPath, [zapiCli, "prepublish"], staging);
+  await addPlatformLegalFiles(staging);
   const packed = [];
   for (const [directory, destination] of [
     [staging, mainArchive],
@@ -191,8 +195,33 @@ async function packPlatform(
     packed.push(command);
   }
   const inspected = await inspectArchive(mainArchive, null, runCommand);
-  const platform = await inspectPlatformArchive(platformArchive, addon, target, inspected.packageJson, runCommand);
+  const platform = await inspectPlatformArchive(platformArchive, addon, target, inspected, runCommand);
   return {command: {main: packed[0], platform: packed[1], prepublish}, inspected, platform};
+}
+
+/**
+ * Copies the legal files into each platform package zapi prepublish generated under `packageDir`/npm and adds them to
+ * its `files`, since zapi ships the addon alone. The release workflow runs this between prepublish and publish.
+ */
+export async function addPlatformLegalFiles(packageDir) {
+  const packageJson = await readJson(join(packageDir, "package.json"), "package.json");
+  const targets = packageJson.zapi?.targets;
+  if (!Array.isArray(targets) || targets.length > MAX_PLATFORM_TARGETS) fail("InvalidPackageTargets");
+  for (const target of targets) {
+    const directory = join(packageDir, "npm", target);
+    const manifestPath = join(directory, "package.json");
+    const manifest = await readJson(manifestPath, "platform package.json");
+    if (
+      manifest.name !== `${packageJson.name}-${target}` ||
+      !isDeepStrictEqual(manifest.files, [PLATFORM_ADDON_FILE])
+    ) {
+      fail("PlatformPackageMismatch", JSON.stringify(manifest));
+    }
+    for (const file of LEGAL_FILES) await copyFile(join(packageDir, file), join(directory, file));
+    manifest.files = [PLATFORM_ADDON_FILE, ...LEGAL_FILES];
+    await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
+  }
+  return targets;
 }
 
 async function archiveRecord(path, file) {
@@ -223,6 +252,9 @@ export async function pack(nativeDir, out, buildRecordPath) {
     const packageJson = await readJson(join(nativeDir, "package.json"), "source package.json");
     assertPackageExports(packageJson);
     const sourceFilesBefore = await collectPackSources(nativeDir, packageJson);
+    for (const file of LEGAL_FILES) {
+      if (!sourceFilesBefore.some((entry) => entry.path === file)) fail("MissingLegalFile", file);
+    }
     let command;
     let inspected;
     let platform = null;
@@ -701,6 +733,11 @@ async function main() {
   if (command === "pack") {
     const manifest = await pack(options["--native-dir"], options["--out"], options["--build-record"]);
     process.stdout.write(`${JSON.stringify(manifest)}\n`);
+    return;
+  }
+  if (command === "notices") {
+    const targets = await addPlatformLegalFiles(options["--package-dir"]);
+    process.stdout.write(`${JSON.stringify({legalFiles: LEGAL_FILES, targets})}\n`);
     return;
   }
   if (command === "install") {

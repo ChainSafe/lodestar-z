@@ -1,15 +1,17 @@
 import {createHash} from "node:crypto";
 import {readFile, readdir} from "node:fs/promises";
+import {homedir} from "node:os";
 import {join, resolve} from "node:path";
 import {fileURLToPath, pathToFileURL} from "node:url";
 import {isDeepStrictEqual} from "node:util";
 import {runBoundedCommand} from "./bounded_child.mjs";
-import {EMBEDDED_ADDON_PATH} from "./lodestar_package_archive.mjs";
+import {EMBEDDED_ADDON_PATH, LEGAL_FILES} from "./lodestar_package_archive.mjs";
 import {exists} from "./lodestar_package_io.mjs";
 
-// Checks the dependency and install provenance record against the tree: Zig pins and their use, the npm runtime pins
-// and the two install paths. When zig-pkg holds the packages it also checks transitive Zig pins and cargo's offline
-// resolution of the quiche lockfile. Needs no build and no network.
+// Checks the dependency and install provenance record against the tree: Zig pins and their use, the npm runtime pins,
+// the two install paths and the notices file's sections. When zig-pkg holds the packages it also checks transitive Zig
+// pins, cargo's offline resolution of the quiche lockfile and the license texts the notices must reproduce. Needs no
+// build and no network.
 
 const RECORD = "scripts/lodestar_package_provenance.json";
 const MAX_ZON_TOKENS = 64 * 1024;
@@ -129,6 +131,72 @@ async function readOptional(path) {
   return readFile(path, "utf8").catch((error) => (error.code === "ENOENT" ? null : Promise.reject(error)));
 }
 
+const normalizeText = (source) =>
+  source
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .join("\n")
+    .trim();
+
+/** Sections of the notices file, each opened by a `=== <id>: <description>` line. */
+export function parseNotices(source) {
+  const sections = new Map();
+  const duplicates = [];
+  let body = null;
+  for (const line of source.split("\n")) {
+    const id = /^=== (\S+): /.exec(line)?.[1];
+    if (id === undefined) {
+      body?.push(line);
+      continue;
+    }
+    if (sections.has(id)) duplicates.push(id);
+    body = [];
+    sections.set(id, body);
+  }
+  return {duplicates, sections: new Map([...sections].map(([id, lines]) => [id, normalizeText(lines.join("\n"))]))};
+}
+
+/**
+ * The notice each component compiled into the addon needs: Zig packages whose own code the addon holds, vendored
+ * sources and linked crates of the Cargo build, and toolchain runtimes. `file` locates the license text the notice must
+ * reproduce, when the record names one.
+ */
+export function expectedNotices(record) {
+  const notices = [];
+  const walk = (entries, prefix, addon) => {
+    for (const entry of entries) {
+      const path = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
+      const inAddon = addon || entry.use === "addon";
+      if (!inAddon) continue;
+      if (entry.reviewed.contributes === "code") {
+        const file = entry.reviewed.licenseFile === null ? null : {hash: entry.hash, path: entry.reviewed.licenseFile};
+        notices.push({file: file === null ? null : {...file, kind: "zig-package"}, id: `zig:${path}`});
+      }
+      walk(entry.dependencies ?? [], path, true);
+    }
+  };
+  walk(record.zig.dependencies, "", false);
+  const crateHash = cargoCrate(record)?.hash;
+  for (const vendored of record.cargo.vendored) {
+    const file = {hash: crateHash, kind: "zig-package", path: vendored.reviewed.licenseFile};
+    notices.push({file, id: `vendored:${vendored.name}`});
+  }
+  for (const crate of record.cargo.crates.slice(1)) {
+    if (crate.use !== "linked") continue;
+    const notice = crate.reviewed?.notice;
+    const file =
+      notice === undefined ? null : {kind: "cargo-registry", path: join(`${crate.name}-${crate.version}`, notice)};
+    notices.push({file, id: `crate:${crate.name}@${crate.version}`});
+  }
+  for (const runtime of record.runtime) {
+    const path = runtime.reviewed.licenseFile;
+    const kind = runtime.toolchain === "zig" ? "zig-lib" : "rust-library";
+    notices.push({file: path === undefined ? null : {kind, path}, id: `runtime:${runtime.id}`});
+  }
+  return notices;
+}
+
 function cargoCrate(record) {
   const [parentName, crateName] = record.cargo.crate.split("/");
   const parent = record.zig.dependencies.find((entry) => entry.name === parentName);
@@ -228,16 +296,44 @@ async function packageFiles(directory) {
   return files.sort();
 }
 
+function readmeLicense(readme) {
+  return /^## License\s*\n+([^\n]+)/m.exec(readme)?.[1].trim() ?? null;
+}
+
+async function toolchainRoots(root) {
+  const roots = {"cargo-registry": null, "rust-library": null, "zig-lib": null};
+  const cargoHome = process.env.CARGO_HOME ?? join(homedir(), ".cargo");
+  const registries = await readdir(join(cargoHome, "registry", "src")).catch(() => []);
+  const index = registries.find((name) => name.startsWith("index.crates.io-"));
+  if (index !== undefined) roots["cargo-registry"] = join(cargoHome, "registry", "src", index);
+  const zig = await command("zig", ["env"], root);
+  if (zig.stdout !== undefined) roots["zig-lib"] = parseZon(zig.stdout).lib_dir ?? null;
+  const sysroot = await command("rustc", ["--print", "sysroot"], root);
+  if (sysroot.stdout !== undefined) roots["rust-library"] = join(sysroot.stdout.trim(), "lib/rustlib/src/rust/library");
+  return roots;
+}
+
 /** Returns every disagreement between `record` and the tree at `root`, and what it could verify. */
 export async function checkProvenance(root, record, {requireFetched = false} = {}) {
   const errors = [];
   const report = (code, detail) => errors.push({code, detail});
-  const summary = {cargo: "unfetched", direct: 0, npm: 0, transitive: {unfetched: 0, verified: 0}};
+  const summary = {
+    cargo: "unfetched",
+    direct: 0,
+    notices: {reproduced: 0, reviewed: 0, sections: 0},
+    npm: 0,
+    transitive: {unfetched: 0, verified: 0},
+  };
   const packageJson = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
   const zon = parseZon(await readFile(join(root, "build.zig.zon"), "utf8"));
 
-  if (packageJson.name !== record.package.name || packageJson.license !== record.package.license) {
-    report("PackageIdentity", `${packageJson.name} ${packageJson.license}`);
+  if (packageJson.name !== record.package.name) report("PackageIdentity", packageJson.name);
+  const declared = {
+    "README.md": readmeLicense(await readFile(join(root, "README.md"), "utf8")),
+    "package.json": packageJson.license ?? null,
+  };
+  if (!isDeepStrictEqual(declared, record.package.declaredLicenses)) {
+    report("PackageLicense", JSON.stringify(declared));
   }
   const licenseFile = (await readdir(root)).find((name) => /^licen[cs]e(?:\..*)?$/i.test(name)) ?? null;
   if (licenseFile !== record.package.licenseFile) report("PackageLicenseFile", String(licenseFile));
@@ -318,6 +414,39 @@ export async function checkProvenance(root, record, {requireFetched = false} = {
     if (flags.includes("--locked") !== record.cargo.locked) report("CargoLocked", String(!record.cargo.locked));
   } else if (requireFetched) report("CargoLockfileUnfetched", record.cargo.crate);
 
+  const notices = await readOptional(resolve(root, record.notices));
+  if (notices === null) report("NoticesMissing", record.notices);
+  else {
+    const parsed = parseNotices(notices);
+    for (const id of parsed.duplicates) report("NoticeDuplicate", id);
+    const expected = expectedNotices(record);
+    const expectedIds = new Set(expected.map((notice) => notice.id));
+    for (const id of parsed.sections.keys()) if (!expectedIds.has(id)) report("NoticeUnexpected", id);
+    const roots = lockfile === null ? null : await toolchainRoots(root);
+    for (const notice of expected) {
+      const body = parsed.sections.get(notice.id);
+      if (body === undefined) {
+        report("NoticeMissing", notice.id);
+        continue;
+      }
+      summary.notices.sections++;
+      const base =
+        notice.file?.kind === "zig-package" ? join(root, "zig-pkg", notice.file.hash) : roots?.[notice.file?.kind];
+      const text = notice.file === null || base == null ? null : await readOptional(join(base, notice.file.path));
+      if (text === null) {
+        summary.notices.reviewed++;
+        continue;
+      }
+      if (!body.includes(normalizeText(text))) report("NoticeText", `${notice.id}: ${notice.file.path}`);
+      else summary.notices.reproduced++;
+    }
+    if (roots !== null) {
+      const zig = await command("zig", ["version"], root);
+      if (zig.stdout !== undefined && zig.stdout.trim() !== record.zig.toolchain) report("ZigInstalled", zig.stdout);
+      summary.rustc = (await command("rustc", ["--version"], root)).stdout?.trim() ?? null;
+    }
+  }
+
   const runtime = Object.fromEntries(record.npm.runtime.map(({name, version}) => [name, version]));
   if (!isDeepStrictEqual(packageJson.dependencies ?? {}, runtime)) {
     report("NpmRuntimePins", JSON.stringify(packageJson.dependencies));
@@ -339,6 +468,11 @@ export async function checkProvenance(root, record, {requireFetched = false} = {
   if (!isDeepStrictEqual(packageJson.files, record.install.files)) {
     report("PackageFiles", JSON.stringify(packageJson.files));
   }
+  if (!isDeepStrictEqual(LEGAL_FILES, record.install.legal)) report("LegalFiles", JSON.stringify(LEGAL_FILES));
+  for (const file of record.install.legal) {
+    if (!(packageJson.files ?? []).includes(file) && !/^licen[cs]e/i.test(file)) report("LegalFileUnpacked", file);
+  }
+  if (!record.install.legal.includes(record.notices)) report("LegalFiles", `${record.notices} is not shipped`);
   if (!isDeepStrictEqual(packageJson.zapi?.targets, record.install.platform.targets)) {
     report("PlatformTargets", JSON.stringify(packageJson.zapi?.targets));
   }

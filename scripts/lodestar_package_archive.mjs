@@ -40,6 +40,8 @@ export const EXPECTED_PACKAGE_EXPORTS = [
 ];
 export const EXPECTED_NETWORK_EXPORTS = ["createNativeNetwork"];
 
+/** Legal files every package ships: the main package lists them in `files` and each platform package gets a copy. */
+export const LEGAL_FILES = ["THIRD_PARTY_NOTICES.txt"];
 export const EMBEDDED_ADDON_PATH = "zig-out/lib/bindings.node";
 export const PLATFORM_ADDON_FILE = "bindings.node";
 const PLATFORM_ADDON_PATTERN = /^artifacts\/([a-z0-9_-]+)\/bindings\.node$/;
@@ -328,6 +330,7 @@ export async function inspectArchive(archive, expectedAddon, runCommand, {maxSou
   return withExtractedArchive(archive, nativeLibraries, runCommand, maxSourceBytes, async (packageRoot, files) => {
     const packageJson = await readJson(join(packageRoot, "package.json"), "archived package.json");
     assertPackageExports(packageJson);
+    for (const file of LEGAL_FILES) if (!files.some((entry) => entry.path === file)) fail("MissingLegalFile", file);
     const network = await inspectNetworkExports(packageRoot, packageJson, runCommand);
     let native = null;
     if (expectedAddon !== null) {
@@ -344,8 +347,12 @@ export async function inspectArchive(archive, expectedAddon, runCommand, {maxSou
   });
 }
 
-/** Inspects the archive of the platform package zapi prepublish generates for `target`. */
-export async function inspectPlatformArchive(archive, expectedAddon, target, mainPackage, runCommand) {
+/**
+ * Inspects the archive of the platform package zapi prepublish generates for `target`, with the main package's legal
+ * files added.
+ */
+export async function inspectPlatformArchive(archive, expectedAddon, target, main, runCommand) {
+  const mainPackage = main.packageJson;
   const nativeLibraries = [`package/${PLATFORM_ADDON_FILE}`];
   return withExtractedArchive(archive, nativeLibraries, runCommand, MAX_SOURCE_BYTES, async (packageRoot, files) => {
     const packageJson = await readJson(join(packageRoot, "package.json"), "archived platform package.json");
@@ -354,13 +361,18 @@ export async function inspectPlatformArchive(archive, expectedAddon, target, mai
       packageJson.name !== expectedName ||
       packageJson.version !== mainPackage.version ||
       packageJson.main !== PLATFORM_ADDON_FILE ||
-      !isDeepStrictEqual(packageJson.files, [PLATFORM_ADDON_FILE])
+      !isDeepStrictEqual(packageJson.files, [PLATFORM_ADDON_FILE, ...LEGAL_FILES])
     ) {
       fail("PlatformPackageMismatch", JSON.stringify(packageJson));
     }
     const paths = files.map((file) => file.path).sort();
-    if (!isDeepStrictEqual(paths, ["README.md", PLATFORM_ADDON_FILE, "package.json"].sort())) {
+    if (!isDeepStrictEqual(paths, ["README.md", PLATFORM_ADDON_FILE, "package.json", ...LEGAL_FILES].sort())) {
       fail("PlatformPackageInventory", paths.join(","));
+    }
+    for (const path of LEGAL_FILES) {
+      const copy = files.find((file) => file.path === path);
+      const original = main.files.find((file) => file.path === path);
+      if (original === undefined || copy.sha256 !== original.sha256) fail("PlatformLegalFileMismatch", path);
     }
     assertAddon(files, PLATFORM_ADDON_FILE, expectedAddon);
     const native = await inspectNativeExports(join(packageRoot, PLATFORM_ADDON_FILE), runCommand);
@@ -424,7 +436,8 @@ export async function collectPackSources(nativeDir, packageJson) {
       fail("InvalidPackageFiles", entry);
     }
     const path = join(nativeDir, normalized);
-    const info = await lstat(path);
+    const info = await lstat(path).catch((error) => (error.code === "ENOENT" ? null : Promise.reject(error)));
+    if (info === null) fail("PackageFileMissing", normalized);
     if (info.isSymbolicLink()) fail("PackageLink", normalized);
     if (info.isFile()) selected.add(normalized);
     else if (info.isDirectory()) {
@@ -513,11 +526,11 @@ export function validatePackageManifest(manifest) {
   const {layout, target} = addonLayout(manifest.addon.path);
   if (manifest.layout !== layout) fail("InvalidPackageManifest", "layout");
   if (layout === "embedded") {
-    validateManifestFiles(manifest.files, ["package.json", EMBEDDED_ADDON_PATH]);
+    validateManifestFiles(manifest.files, ["package.json", EMBEDDED_ADDON_PATH, ...LEGAL_FILES]);
     if (manifest.platform !== null) fail("InvalidPackageManifest", "platform");
     return;
   }
-  validateManifestFiles(manifest.files, ["package.json"]);
+  validateManifestFiles(manifest.files, ["package.json", ...LEGAL_FILES]);
   if (manifest.files.some((file) => file.path.endsWith(".node"))) fail("InvalidPackageManifest", "embedded addon");
   const platform = manifest.platform;
   if (platform?.target !== target || platform.name !== platformPackageName(manifest.package.name, target)) {
@@ -525,7 +538,7 @@ export function validatePackageManifest(manifest) {
   }
   validateManifestArchive(platform.archive, "platform archive");
   if (platform.archive.file === manifest.archive.file) fail("InvalidPackageManifest", "platform archive");
-  validateManifestFiles(platform.files, ["package.json", PLATFORM_ADDON_FILE]);
+  validateManifestFiles(platform.files, ["package.json", PLATFORM_ADDON_FILE, ...LEGAL_FILES]);
 }
 
 async function verifyArchiveFile(manifestPath, expected) {
@@ -561,7 +574,7 @@ export async function verifyManifestArchive(manifestPath, runCommand) {
       platformArchive,
       manifest.addon,
       manifest.platform.target,
-      inspected.packageJson,
+      inspected,
       runCommand
     );
     if (!isDeepStrictEqual(manifest.platform.files, platform.files)) fail("PlatformArchiveInventoryMismatch");
