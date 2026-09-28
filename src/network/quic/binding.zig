@@ -259,13 +259,34 @@ pub fn headerInfo(datagram: []const u8, token: *[token_length_max]u8) Error!Head
     };
 }
 
+/// quiche's `quiche_send_info`. translate-c makes the C struct opaque for musl, whose
+/// `struct timespec` pads with bitfields.
+pub const SendInfo = extern struct {
+    from: c.struct_sockaddr_storage,
+    from_len: c.socklen_t,
+    to: c.struct_sockaddr_storage,
+    to_len: c.socklen_t,
+    at: std.c.timespec,
+};
+
+comptime {
+    if (@typeInfo(c.quiche_send_info) == .@"struct") {
+        std.debug.assert(@sizeOf(SendInfo) == @sizeOf(c.quiche_send_info));
+        std.debug.assert(@offsetOf(SendInfo, "at") == @offsetOf(c.quiche_send_info, "at"));
+    }
+}
+
+pub fn connSend(conn: *c.quiche_conn, out: []u8, info: *SendInfo) isize {
+    return c.quiche_conn_send(conn, out.ptr, out.len, @ptrCast(info));
+}
+
 /// quiche's release time for a datagram. Under CUBIC it is the send time, so a datagram is
 /// never held; the transport asserts that in debug builds.
-pub fn transmitDeadline(info: *const c.quiche_send_info) u64 {
-    std.debug.assert(info.at.tv_sec >= 0);
-    std.debug.assert(info.at.tv_nsec >= 0 and info.at.tv_nsec < std.time.ns_per_s);
-    const seconds: u64 = @intCast(info.at.tv_sec);
-    return seconds *| std.time.ns_per_s +| @as(u64, @intCast(info.at.tv_nsec));
+pub fn transmitDeadline(info: *const SendInfo) u64 {
+    std.debug.assert(info.at.sec >= 0);
+    std.debug.assert(info.at.nsec >= 0 and info.at.nsec < std.time.ns_per_s);
+    const seconds: u64 = @intCast(info.at.sec);
+    return seconds *| std.time.ns_per_s +| @as(u64, @intCast(info.at.nsec));
 }
 
 test {
