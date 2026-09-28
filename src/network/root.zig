@@ -6,7 +6,6 @@ pub const metrics = @import("metrics/export.zig");
 pub const logging = @import("logging.zig");
 pub const identify = @import("identify/root.zig");
 pub const capabilities = @import("capabilities.zig");
-pub const managed = @import("managed.zig");
 pub const peer_manager = @import("peer_manager.zig");
 pub const PeerManager = peer_manager.PeerManager;
 pub const network_core = @import("network_core.zig");
@@ -70,7 +69,6 @@ test {
     _ = @import("transport.zig");
     _ = @import("negotiate.zig");
     _ = @import("router.zig");
-    _ = @import("managed.zig");
     _ = @import("network_core.zig");
     _ = @import("reservations.zig");
     _ = @import("deadline_heap.zig");

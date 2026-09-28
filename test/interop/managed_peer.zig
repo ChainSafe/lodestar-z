@@ -70,7 +70,7 @@ const Peer = struct {
             };
             return control.emit(self.allocator, .{ .id = instruction.id, .ok = true, .connected = self.node.peerCounts().connected, .relevant = self.node.peerCounts().relevant, .generation = native_generation, .sequence = metadata_sequence, .custody = custody, .sampling = sampling, .closed = self.node.isClosed(), .reason = reason, .deadline = deadline, .now = self.now.mono_ms });
         } else if (std.mem.eql(u8, instruction.op, "disconnect")) {
-            if (!self.node.peer_manager.disconnect(self.peer orelse return error.NoPeer, .host, self.now)) return error.NoPeer;
+            if (!self.node.peer_manager.disconnect(&self.node.control_protocol, self.peer orelse return error.NoPeer, .host, self.now)) return error.NoPeer;
         } else if (std.mem.eql(u8, instruction.op, "shutdown")) {
             self.node.shutdown(self.now);
             for (0..100) |_| {

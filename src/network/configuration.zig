@@ -1,5 +1,6 @@
 const std = @import("std");
-const core = @import("managed.zig");
+const service = @import("service.zig");
+const peer_manager = @import("peer_manager.zig");
 const engine = @import("quic/engine.zig");
 const transport = @import("transport.zig");
 const udp = @import("udp.zig");
@@ -35,11 +36,24 @@ pub const Request = struct {
     control: ?@import("peers/control.zig").Options = null,
     byte_limit: ?usize = null,
 };
+/// NetworkCore's peer policy and protocol options.
+pub const Core = struct {
+    peers: peers.Options = .{},
+    service: service.Options,
+    control: @import("peers/control.zig").Options = .{},
+    dial: dial.Options,
+    metadata_freshness_ms: u64 = 60_000,
+
+    /// The part of the options peer policy owns.
+    pub fn peerManager(self: *const Core) peer_manager.Options {
+        return .{ .peers = self.peers, .control = self.control, .dial = self.dial, .metadata_freshness_ms = self.metadata_freshness_ms };
+    }
+};
 pub const Resolved = struct {
     limits: engine.Limits,
     work_limits: transport.WorkLimits,
     socket_buffers: udp.SocketBuffers,
-    core: core.Options,
+    core: Core,
     byte_limit: usize,
 };
 
@@ -144,9 +158,10 @@ pub fn resolve(request: Request) !Resolved {
     return result;
 }
 
-pub fn validate(limits: engine.Limits, options: core.Options) !void {
+pub fn validate(limits: engine.Limits, options: Core) !void {
     _ = try engine.Engine.validateLimits(limits);
-    try core.validateOptions(options);
+    try peer_manager.PeerManager.validateOptions(options.peerManager());
+    try service.Service.validateOptions(options.service);
     if (options.peers.max_peers > limits.connections_max or
         options.service.reqresp.peers < limits.connections_max or
         options.service.gossipsub.connection_slots < limits.connections_max or
