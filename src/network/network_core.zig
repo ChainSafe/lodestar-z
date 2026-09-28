@@ -628,9 +628,10 @@ pub const NetworkCore = struct {
             return result;
         }
         self.transport.engine.releaseReported();
-        // A failed poll reports no readiness, so the socket is drained anyway.
-        if (result.readiness.quic or result.readiness.failure != null) {
-            self.transport.receive(io, &result.transport) catch |err| {
+        // A failed poll reports no readiness, so both sockets are drained anyway.
+        const quic: [2]bool = if (result.readiness.failure == null) result.readiness.quic else @splat(true);
+        if (quic[0] or quic[1]) {
+            self.transport.receive(io, &result.transport, quic) catch |err| {
                 result.failure = result.failure orelse err;
                 self.counters.transport_failures +|= 1;
             };
@@ -822,7 +823,7 @@ pub const NetworkCore = struct {
     /// A turn drains discovery alone when discovery is readable or due, the QUIC sockets and the
     /// host are not readable, and every other source, re-read at the post-poll time, is in the future.
     fn discoveryOnly(self: *NetworkCore, readiness: *const wait.Result, tick: Now, outputs: Outputs, host: Host) bool {
-        if (readiness.quic or readiness.host or readiness.failure != null) return false;
+        if (readiness.quicReady() or readiness.host or readiness.failure != null) return false;
         if (self.discovery == null or self.peer_manager.stopped or self.peer_manager.quiescing) return false;
         var wakeups: wake_sources.Wakeups = .{};
         self.collectWakeups(tick, outputs, &wakeups);

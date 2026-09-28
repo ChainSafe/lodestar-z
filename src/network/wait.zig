@@ -7,12 +7,17 @@ pub const native_wait_max_ms: u32 = 1_000;
 pub const Error = error{ UnsupportedWait, InvalidWakeSource, WaitFailed, WaitSourceClosed, Canceled };
 pub const Sources = struct { quic: [2]?i32, discovery: [2]?i32 = .{ null, null }, host: ?i32 = null };
 pub const Result = struct {
-    quic: bool = false,
+    /// Per family, indexed like `Sources.quic`.
+    quic: [2]bool = .{ false, false },
     discovery: bool = false,
     host: bool = false,
     interrupted: bool = false,
     timeout_ms: u32 = 0,
     failure: ?Error = null,
+
+    pub fn quicReady(self: *const Result) bool {
+        return self.quic[0] or self.quic[1];
+    }
 };
 
 /// Requires real OS descriptors from an Io provider with the OS awake clock.
@@ -35,7 +40,7 @@ pub fn poll(io: std.Io, sources: Sources, timeout_ms: u32) Result {
             else => result.failure = error.WaitFailed,
         }
     } else {
-        result.quic = (descriptors[0].revents | descriptors[1].revents) & std.c.POLL.IN != 0;
+        for (&result.quic, descriptors[0..2]) |*ready, descriptor| ready.* = descriptor.revents & std.c.POLL.IN != 0;
         result.discovery = (descriptors[2].revents | descriptors[3].revents) & std.c.POLL.IN != 0;
         result.host = descriptors[4].revents & std.c.POLL.IN != 0;
         for (descriptors) |descriptor| {

@@ -211,7 +211,7 @@ test "a host applies only on its wake, a carried-over cap or its deadline" {
     try sender.send(std.testing.io, &node.transport.udp.sockets.primary().address, "junk");
     var now = try currentTime();
     const quic = node.step(std.testing.io, now, .{}, host.seam(now.mono_ms +| 5_000));
-    try std.testing.expect(quic.failure == null and quic.readiness.quic and !quic.readiness.host);
+    try std.testing.expect(quic.failure == null and quic.readiness.quicReady() and !quic.readiness.host);
     try std.testing.expectEqual(@as(u32, 0), host.applies);
 
     // The host deadline bounds the wait and is applied when it passes.
@@ -408,4 +408,49 @@ test "owner applies host work for a due host deadline and again for work the app
     try std.testing.expect(node.step(std.testing.io, now, .{}, .{ .context = &host, .apply = Host.apply, .deadline_ms = now.mono_ms }).failure == null);
     try std.testing.expect(node.step(std.testing.io, now, .{}, .{ .context = &host, .apply = Host.apply }).failure == null);
     try std.testing.expectEqual(@as(usize, 2), host.applies);
+}
+
+test "a continuous QUIC flood on both families shares each receive quota and leaves the host progressing" {
+    if (!runtime.wait.supported) return error.SkipZigTest;
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{66}));
+    var opts = options(&key);
+    opts.startup.bind = .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } };
+    var node: runtime.NetworkCore = undefined;
+    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
+    defer node.deinit(std.testing.io);
+    var host: TestHost = .{};
+    try host.init();
+    defer host.deinit();
+    try node.setHostWake(host.pipe[0]);
+    for (0..4) |_| {
+        const now = try currentTime();
+        _ = node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms));
+    }
+    const quota = node.transport.work_limits.receive_per_step_max;
+    const sockets = node.transport.udp.sockets.values;
+    const sender4 = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
+    defer sender4.close(std.testing.io);
+    const sender6 = try (std.Io.net.IpAddress{ .ip6 = .loopback(0) }).bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
+    defer sender6.close(std.testing.io);
+    for (0..2 * quota + 6) |_| try sender4.send(std.testing.io, &sockets[0].?.address, "junk");
+    for (0..4) |_| try sender6.send(std.testing.io, &sockets[1].?.address, "junk");
+
+    // A wake, a due host deadline, then a wake again: each turn applies the host while the flood
+    // lasts. Both families share the first quota, so IPv6 is drained by the second turn.
+    const turns = [_]struct { wake: bool, due: bool, quic: [2]bool, received: u32 }{
+        .{ .wake = true, .due = false, .quic = .{ true, true }, .received = quota },
+        .{ .wake = false, .due = true, .quic = .{ true, false }, .received = quota },
+        .{ .wake = true, .due = false, .quic = .{ true, false }, .received = 10 },
+        .{ .wake = false, .due = false, .quic = .{ false, false }, .received = 0 },
+    };
+    for (turns, 0..) |expected, index| {
+        if (expected.wake) host.signal();
+        const now = try currentTime();
+        const result = node.step(std.testing.io, now, .{}, host.seam(if (expected.due) now.mono_ms else now.mono_ms +| 5_000));
+        try std.testing.expect(result.failure == null);
+        try std.testing.expectEqual(expected.quic, result.readiness.quic);
+        try std.testing.expectEqual(expected.received, result.transport.datagrams_received);
+        try std.testing.expectEqual(expected.received, result.transport.datagrams_dropped);
+        try std.testing.expectEqual(@as(u32, @intCast(@min(index + 1, 3))), host.applies);
+    }
 }
