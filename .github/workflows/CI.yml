@@ -625,7 +625,7 @@ jobs:
       - name: Build release artifacts
         run: |
           pnpm zapi build-artifacts --optimize ReleaseSafe
-      - name: Install and load the packed native platform package
+      - name: Install the packed release packages and run a native lifecycle
         run: |
           expected=zig_std
           if grep -qw sha_ni /proc/cpuinfo && grep -qw avx2 /proc/cpuinfo; then expected=x86_sha_avx2; fi

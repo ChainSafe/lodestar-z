@@ -1,16 +1,18 @@
-import {randomBytes} from "node:crypto";
 import {copyFile, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeFile} from "node:fs/promises";
-import {tmpdir} from "node:os";
 import {basename, dirname, join, relative, resolve} from "node:path";
 import {fileURLToPath, pathToFileURL} from "node:url";
 import {isDeepStrictEqual} from "node:util";
 import {runBoundedCommand} from "./bounded_child.mjs";
 import {
+  EMBEDDED_ADDON_PATH,
+  PLATFORM_ADDON_FILE,
+  addonLayout,
   assertNetworkExports,
   assertPackageExports,
   collectPackSources,
   inspectArchive,
   inspectNativeExports,
+  inspectPlatformArchive,
   validateBuildRecord,
   verifyArchiveSources,
   verifyManifestArchive,
@@ -26,7 +28,7 @@ import {
   readJson,
   sha256,
 } from "./lodestar_package_io.mjs";
-import {activateRelease, copyRelease, prepareRelease} from "./lodestar_package_release.mjs";
+import {activateRelease, contains, copyRelease, prepareRelease} from "./lodestar_package_release.mjs";
 
 const COMMAND_TIMEOUT_MS = 20 * 60 * 1000;
 const MAX_PACKAGE_EXPORTS = 64;
@@ -141,12 +143,72 @@ async function verifySource(nativeDir, sourceCommit) {
   };
 }
 
-async function pack(nativeDir, out, buildRecordPath) {
+/**
+ * Reproduces the release workflow for one target: zapi prepublish over the tracked package files and that target's
+ * artifact, without zig-out/lib, then npm pack of the main and platform packages, as zapi publish runs npm publish.
+ */
+async function packPlatform(
+  nativeDir,
+  temporary,
+  packageJson,
+  sourceFiles,
+  addon,
+  target,
+  mainArchive,
+  platformArchive
+) {
+  if (!Array.isArray(packageJson.zapi?.targets) || !packageJson.zapi.targets.includes(target)) {
+    fail("UnsupportedPlatformTarget", target);
+  }
+  const staging = join(temporary, "staging");
+  for (const file of sourceFiles) {
+    if (file.path.startsWith("zig-out/")) continue;
+    await mkdir(dirname(join(staging, file.path)), {recursive: true});
+    await copyFile(join(nativeDir, file.path), join(staging, file.path));
+  }
+  await mkdir(join(staging, "artifacts", target), {recursive: true});
+  await copyFile(join(nativeDir, addon.path), join(staging, "artifacts", target, PLATFORM_ADDON_FILE));
+  const zapiCli = join(dirname(fileURLToPath(import.meta.resolve("@chainsafe/zapi"))), "cli.js");
+  const prepublish = await runCommand(process.execPath, [zapiCli, "prepublish"], staging);
+  const packed = [];
+  for (const [directory, destination] of [
+    [staging, mainArchive],
+    [join(staging, "npm", target), platformArchive],
+  ]) {
+    const command = await runCommand(
+      "npm",
+      ["pack", "--ignore-scripts", "--json", "--pack-destination", temporary],
+      directory
+    );
+    let filename;
+    try {
+      filename = JSON.parse(command.stdout)[0]?.filename;
+    } catch (error) {
+      fail("InvalidPackOutput", error.message);
+    }
+    if (typeof filename !== "string" || basename(filename) !== filename) fail("InvalidPackOutput", command.stdout);
+    await rename(join(temporary, filename), destination);
+    packed.push(command);
+  }
+  const inspected = await inspectArchive(mainArchive, null, runCommand);
+  const platform = await inspectPlatformArchive(platformArchive, addon, target, inspected.packageJson, runCommand);
+  return {command: {main: packed[0], platform: packed[1], prepublish}, inspected, platform};
+}
+
+async function archiveRecord(path, file) {
+  return {bytes: (await stat(path)).size, file, sha256: await sha256(path)};
+}
+
+/** The build record's addon path selects the layout: zig-out/lib embeds the addon, artifacts/<target> ships it apart. */
+export async function pack(nativeDir, out, buildRecordPath) {
   for (const path of [nativeDir, buildRecordPath]) if (!(await exists(path))) fail("MissingPath", path);
-  if ((await exists(out)) || (await exists(`${out}.json`))) fail("OutputExists", out);
-  await mkdir(dirname(out), {recursive: true});
   const buildRecord = await readJson(buildRecordPath, "build record");
   const expectedAddon = validateBuildRecord(buildRecord);
+  const {layout, target} = addonLayout(expectedAddon.path);
+  const platformOut = layout === "platform" ? join(dirname(out), `${basename(out, ".tgz")}-${target}.tgz`) : null;
+  for (const path of [out, `${out}.json`, platformOut])
+    if (path !== null && (await exists(path))) fail("OutputExists", path);
+  await mkdir(dirname(out), {recursive: true});
   const sourceCheck = await verifySource(nativeDir, buildRecord.sourceCommit);
   const addonPath = join(nativeDir, expectedAddon.path);
   const addonInfo = await stat(addonPath);
@@ -154,25 +216,51 @@ async function pack(nativeDir, out, buildRecordPath) {
   if (actualAddon.bytes !== expectedAddon.bytes || actualAddon.sha256 !== expectedAddon.sha256) {
     fail("AddonMismatch", JSON.stringify({actual: actualAddon, expected: expectedAddon}));
   }
-  const temporaryArchive = join(dirname(out), `.${basename(out)}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`);
-  const packArgs = ["--config.ignore-scripts=true", "pack", "--json", "--out", temporaryArchive];
-  let command;
+  const temporary = await mkdtemp(join(dirname(out), `.${basename(out)}.${process.pid}.`));
+  const mainArchive = join(temporary, basename(out));
+  const platformArchive = platformOut === null ? null : join(temporary, basename(platformOut));
   try {
     const packageJson = await readJson(join(nativeDir, "package.json"), "source package.json");
     assertPackageExports(packageJson);
     const sourceFilesBefore = await collectPackSources(nativeDir, packageJson);
-    command = await runCommand("pnpm", packArgs, nativeDir);
-    const inspected = await inspectArchive(temporaryArchive, expectedAddon, runCommand);
-    await verifyArchiveSources(nativeDir, inspected.files, inspected.packageJson);
+    let command;
+    let inspected;
+    let platform = null;
+    if (layout === "embedded") {
+      command = await runCommand(
+        "pnpm",
+        ["--config.ignore-scripts=true", "pack", "--json", "--out", mainArchive],
+        nativeDir
+      );
+      inspected = await inspectArchive(mainArchive, expectedAddon, runCommand);
+    } else {
+      const packed = await packPlatform(
+        nativeDir,
+        temporary,
+        packageJson,
+        sourceFilesBefore,
+        actualAddon,
+        target,
+        mainArchive,
+        platformArchive
+      );
+      ({command, inspected} = packed);
+      platform = {
+        archive: await archiveRecord(platformArchive, basename(platformOut)),
+        files: packed.platform.files,
+        name: packed.platform.name,
+        target,
+      };
+    }
+    await verifyArchiveSources(nativeDir, inspected.files, inspected.packageJson, layout);
     const sourceFilesAfter = await collectPackSources(nativeDir, packageJson);
     assertSameInventory(sourceFilesBefore, sourceFilesAfter, "SourceChangedDuringPack");
     if (JSON.stringify(packageJson.exports) !== JSON.stringify(inspected.packageJson.exports)) {
       fail("PackageExportsMismatch");
     }
-    const archiveInfo = await stat(temporaryArchive);
     const manifest = {
       addon: actualAddon,
-      archive: {bytes: archiveInfo.size, file: basename(out), sha256: await sha256(temporaryArchive)},
+      archive: await archiveRecord(mainArchive, basename(out)),
       build: {
         buildCommand: buildRecord.buildCommand,
         instrumented: buildRecord.instrumented,
@@ -186,20 +274,21 @@ async function pack(nativeDir, out, buildRecordPath) {
       },
       command,
       files: inspected.files,
+      layout,
       ordinaryExports: {externalNamespaces: inspected.externalNamespaces, network: inspected.networkExports},
       package: {name: inspected.packageJson.name, version: inspected.packageJson.version},
-      schemaVersion: 1,
+      platform,
+      schemaVersion: 2,
       sourceCheck: {...sourceCheck, packageFiles: sourceFilesBefore},
     };
-    const temporaryManifest = `${temporaryArchive}.json`;
+    const temporaryManifest = join(temporary, `${basename(out)}.json`);
     await writeFile(temporaryManifest, `${JSON.stringify(manifest, null, 2)}\n`, {flag: "wx"});
-    await rename(temporaryArchive, out);
+    if (platformOut !== null) await rename(platformArchive, platformOut);
+    await rename(mainArchive, out);
     await rename(temporaryManifest, `${out}.json`);
     return manifest;
-  } catch (error) {
-    await rm(temporaryArchive, {force: true});
-    await rm(`${temporaryArchive}.json`, {force: true});
-    throw error;
+  } finally {
+    await rm(temporary, {force: true, recursive: true});
   }
 }
 
@@ -262,89 +351,92 @@ async function packageRootForResolved(resolvedUrl) {
   fail("ResolvedPackageRootMissing", resolvedUrl);
 }
 
-async function resolveFromParents(hostDir, parents, exports) {
+/**
+ * Runs the package probe in the host: every export resolved from every declaring manifest and loaded, the native addons
+ * the process loaded, and two native network lifecycles through the installed facade.
+ */
+async function probeHost(hostDir, parents, exports) {
   const specifiers = Object.keys(exports).map((subpath) =>
     subpath === "." ? "@chainsafe/lodestar-z" : `@chainsafe/lodestar-z/${subpath.slice(2)}`
   );
   if (specifiers.length > MAX_PACKAGE_EXPORTS || parents.length * specifiers.length > MAX_RESOLUTION_RECORDS) {
     fail("ResolutionBound");
   }
-  const source = `
-import {pathToFileURL} from "node:url";
-const parents = ${JSON.stringify(parents)};
-const specifiers = ${JSON.stringify(specifiers)};
-const result = {resolutions: [], exports: {}};
-for (const parent of parents) {
-  for (const specifier of specifiers) {
-    try {
-      result.resolutions.push({parent, specifier, resolved: import.meta.resolve(specifier, pathToFileURL(parent))});
-    } catch (error) {
-      result.resolutions.push({parent, specifier, error: {code: error.code, message: error.message}});
-    }
-  }
-}
-for (const specifier of specifiers) {
-  const resolved = result.resolutions.find((row) => row.specifier === specifier && row.error === undefined)?.resolved;
-  if (!resolved) continue;
-  const module = await import(resolved);
-  result.exports[specifier] = Object.keys(module).sort();
-}
-process.stdout.write(JSON.stringify(result));
-`;
-  const directory = await mkdtemp(join(tmpdir(), "lodestar-package-resolve-"));
-  const scriptPath = join(directory, "resolve.mjs");
+  const probe = fileURLToPath(new URL("./lodestar_package_probe.mjs", import.meta.url));
+  const command = await runCommand(
+    process.execPath,
+    [
+      "--experimental-import-meta-resolve",
+      "--expose-gc",
+      probe,
+      JSON.stringify(parents),
+      JSON.stringify(specifiers),
+      "@chainsafe/lodestar-z/network",
+    ],
+    hostDir,
+    {allowFailure: true}
+  );
+  if (command.exitCode !== 0) failCommand("HostModuleEvaluationFailed", command);
+  let result;
   try {
-    await writeFile(scriptPath, source, {flag: "wx"});
-    const command = await runCommand(process.execPath, ["--experimental-import-meta-resolve", scriptPath], hostDir, {
-      allowFailure: true,
-    });
-    if (command.exitCode !== 0) failCommand("HostModuleEvaluationFailed", command);
-    let result;
-    try {
-      result = JSON.parse(command.stdout);
-    } catch (error) {
-      fail("InvalidResolverOutput", `${error.message}: ${JSON.stringify(command)}`);
-    }
-    return {command, ...result};
-  } finally {
-    await rm(directory, {force: true, recursive: true});
+    result = JSON.parse(command.stdout);
+  } catch (error) {
+    fail("InvalidResolverOutput", `${error.message}: ${JSON.stringify(command)}`);
   }
+  return {command, ...result};
 }
 
-async function verifyInstalled(hostDir, manifestPath, verifiedArchive) {
+export async function verifyInstalled(hostDir, manifestPath, verifiedArchive) {
   const archiveState = verifiedArchive ?? (await verifyManifestArchive(manifestPath, runCommand));
+  const {manifest} = archiveState;
+  const hostRoot = await realpath(hostDir);
   const manifests = await hostManifestPaths(hostDir);
   const parents = await resolutionParents(manifests);
   if (parents.length === 0) fail("NoHostPackageConsumers");
-  const resolved = await resolveFromParents(hostDir, parents, archiveState.inspected.packageJson.exports);
-  const failures = resolved.resolutions.filter((row) => row.error !== undefined);
+  const probe = await probeHost(hostDir, parents, archiveState.inspected.packageJson.exports);
+  const failures = probe.resolutions.filter((row) => row.error !== undefined);
   if (failures.length !== 0) fail("HostResolutionFailed", JSON.stringify(failures));
-  const networkExports = resolved.exports["@chainsafe/lodestar-z/network"] ?? [];
-  assertNetworkExports(networkExports);
+  assertNetworkExports(probe.exports["@chainsafe/lodestar-z/network"] ?? []);
   const roots = [];
-  for (const row of resolved.resolutions) roots.push(await packageRootForResolved(row.resolved));
+  for (const row of probe.resolutions) roots.push(await packageRootForResolved(row.resolved));
   const packageRoots = [...new Set(roots)];
   if (packageRoots.length !== 1) fail("SplitPackageIdentity", JSON.stringify(packageRoots));
   const packageRoot = packageRoots[0];
+  if (!contains(hostRoot, packageRoot)) fail("PackageOutsideHost", packageRoot);
   const installedFiles = await collectFiles(packageRoot);
-  assertSameInventory(archiveState.manifest.files, installedFiles, "InstalledPackageMismatch");
-  const addonPath = join(packageRoot, archiveState.manifest.addon.path);
+  assertSameInventory(manifest.files, installedFiles, "InstalledPackageMismatch");
+  // The addon the host process loaded, wherever the loader found it, must be this build's and inside the host.
+  if (probe.loadedAddons.length !== 1) fail("LoadedAddonCount", JSON.stringify(probe.loadedAddons));
+  const addonPath = probe.loadedAddons[0];
+  let platform = null;
+  if (manifest.layout === "embedded") {
+    if (addonPath !== join(packageRoot, EMBEDDED_ADDON_PATH)) fail("UnexpectedLoadedAddon", addonPath);
+  } else {
+    const platformRoot = dirname(addonPath);
+    if (basename(addonPath) !== PLATFORM_ADDON_FILE || !contains(hostRoot, platformRoot)) {
+      fail("UnexpectedLoadedAddon", addonPath);
+    }
+    const files = await collectFiles(platformRoot);
+    assertSameInventory(manifest.platform.files, files, "InstalledPlatformPackageMismatch");
+    platform = {files, packageRoot: platformRoot};
+  }
   const addonInfo = await stat(addonPath);
   const addon = {bytes: addonInfo.size, path: addonPath, sha256: await sha256(addonPath)};
-  if (addon.bytes !== archiveState.manifest.addon.bytes || addon.sha256 !== archiveState.manifest.addon.sha256) {
+  if (addon.bytes !== manifest.addon.bytes || addon.sha256 !== manifest.addon.sha256) {
     fail("InstalledAddonMismatch", JSON.stringify(addon));
   }
   const native = await inspectNativeExports(addonPath, runCommand);
   const head = await runCommand("git", ["rev-parse", "HEAD"], hostDir, {allowFailure: true});
   return {
-    archive: archiveState.manifest.archive,
+    archive: manifest.archive,
     archiveExternalNamespaces: archiveState.inspected.externalNamespaces,
     host: {head: head.exitCode === 0 ? head.stdout.trim() : null},
-    installed: {addon, files: installedFiles, native, packageRoot},
-    manifest: archiveState.manifest,
+    installed: {addon, files: installedFiles, native, packageRoot, platform},
+    manifest,
     manifestSha256: archiveState.manifestSha256,
-    ordinaryExports: resolved.exports,
-    resolutions: {command: resolved.command, packageRoots, parents, records: resolved.resolutions},
+    ordinaryExports: probe.exports,
+    resolutions: {command: probe.command, packageRoots, parents, records: probe.resolutions},
+    runtime: probe.runtime,
   };
 }
 
@@ -453,6 +545,31 @@ async function install(hostDir, manifestPath, evidenceDir, releaseDir, activeLin
   }
 }
 
+/** A pnpmfile pointing every declaration of the package, and for the platform layout its target, at the archives. */
+export function installHook(archiveState) {
+  const main = `file:${archiveState.archive}`;
+  const platform =
+    archiveState.manifest.layout === "platform"
+      ? {name: archiveState.manifest.platform.name, specifier: `file:${archiveState.platformArchive}`}
+      : null;
+  const source = `const main = ${JSON.stringify(main)};
+const platform = ${JSON.stringify(platform)};
+module.exports = {hooks: {readPackage(pkg) {
+  for (const kind of ["dependencies", "devDependencies", "optionalDependencies"]) {
+    if (pkg[kind]?.["@chainsafe/lodestar-z"] !== undefined) {
+      pkg[kind]["@chainsafe/lodestar-z"] = main;
+    }
+  }
+  // The other targets' platform packages cannot load here; the one this host loads is the build's own.
+  if (platform !== null && pkg.name === "@chainsafe/lodestar-z") {
+    pkg.optionalDependencies = {[platform.name]: platform.specifier};
+  }
+  return pkg;
+}}};
+`;
+  return {dependencies: {explicitArchiveDependency: main, platformDependency: platform}, source};
+}
+
 async function restoreLockfile(lockfile, hostLockfile, evidenceDir) {
   if (await exists(lockfile)) await copyFile(lockfile, join(evidenceDir, "install-lockfile.yaml"));
   if (hostLockfile === null) await rm(lockfile, {force: true});
@@ -473,19 +590,9 @@ async function installWithEvidence(hostDir, manifestPath, evidenceDir, archiveSt
   if (version.stdout.trim() !== selectedVersion) {
     fail("PackageManagerVersionMismatch", JSON.stringify({actual: version.stdout.trim(), selectedVersion}));
   }
-  const explicitArchiveDependency = `file:${archiveState.archive}`;
   const hookPath = join(evidenceDir, "lodestar-package-hook.cjs");
-  const hook = `const explicitArchiveDependency = ${JSON.stringify(explicitArchiveDependency)};
-module.exports = {hooks: {readPackage(pkg) {
-  for (const kind of ["dependencies", "devDependencies", "optionalDependencies"]) {
-    if (pkg[kind]?.["@chainsafe/lodestar-z"] !== undefined) {
-      pkg[kind]["@chainsafe/lodestar-z"] = explicitArchiveDependency;
-    }
-  }
-  return pkg;
-}}};
-`;
-  await writeFile(hookPath, hook, {flag: "wx"});
+  const hook = installHook(archiveState);
+  await writeFile(hookPath, hook.source, {flag: "wx"});
   const majorVersion = Number.parseInt(selectedVersion.split(".")[0], 10);
   // The host lockfile pins every other package: pnpm re-resolves with it, fetching only the metadata it lacks, and
   // the graph comparison below proves nothing else changed. pnpm rewrites the lockfile for the replacement; the
@@ -578,7 +685,7 @@ module.exports = {hooks: {readPackage(pkg) {
   const evidence = {
     archive: archiveState.manifest.archive,
     graph: {after: afterGraph, before: beforeGraph},
-    hook: {explicitArchiveDependency, path: hookPath, sha256: await sha256(hookPath)},
+    hook: {...hook.dependencies, path: hookPath, sha256: await sha256(hookPath)},
     hostFiles: {after: afterFiles, before: beforeFiles},
     manifestPath,
     manifestSha256: archiveState.manifestSha256,
