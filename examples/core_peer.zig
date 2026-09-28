@@ -7,7 +7,7 @@ const turns_max = 2000;
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len < 2 or args.len > 3 or args[1].len != 64) {
-        std.debug.print("usage: managed_peer <64 hex secret key> [trusted bootstrap ENR]\n", .{});
+        std.debug.print("usage: core_peer <64 hex secret key> [trusted bootstrap ENR]\n", .{});
         return error.Usage;
     }
     var secret: [32]u8 = undefined;

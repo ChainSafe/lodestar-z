@@ -578,7 +578,7 @@ it("publishes copied peer observations without repeating unread notifications", 
     "tsx",
     "test/interop/libp2p_peer.mjs",
     "v12",
-    "managed",
+    "control",
     Buffer.from(requestForks[0].digest).toString("hex"),
   ]);
   try {
@@ -590,7 +590,7 @@ it("publishes copied peer observations without repeating unread notifications", 
       pending,
       delay(3000).then(async () => {
         throw new Error(
-          `Peer observation timeout ${JSON.stringify(runtime.diagnostics(), (_, value) => (typeof value === "bigint" ? value.toString() : value))} remote=${JSON.stringify(await remote.command("managedSnapshot"))}`
+          `Peer observation timeout ${JSON.stringify(runtime.diagnostics(), (_, value) => (typeof value === "bigint" ? value.toString() : value))} remote=${JSON.stringify(await remote.command("controlSnapshot"))}`
         );
       }),
     ]);

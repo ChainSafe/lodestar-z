@@ -157,7 +157,7 @@ jobs:
           cmake --version
           node --test test/interop/*.test.mjs
           pnpm test:network-interop
-          pnpm test:network-managed-interop
+          pnpm test:network-core-interop
           pnpm test:network-identify-interop
 
   network-bindings-lifecycle:

@@ -269,15 +269,15 @@
                 .imports = .{ .network, .config },
             },
         },
-        .managed_peer = .{
+        .core_peer = .{
             .root_module = .{
-                .root_source_file = "examples/managed_peer.zig",
+                .root_source_file = "examples/core_peer.zig",
                 .imports = .{ .network, .discv5, .config },
             },
         },
-        .managed_interop_peer = .{
+        .core_interop_peer = .{
             .root_module = .{
-                .root_source_file = "test/interop/managed_peer.zig",
+                .root_source_file = "test/interop/core_peer.zig",
                 .imports = .{ .network, .config },
             },
         },

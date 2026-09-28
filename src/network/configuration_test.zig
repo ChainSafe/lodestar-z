@@ -7,7 +7,7 @@ const transport = @import("transport.zig");
 const udp = @import("udp.zig");
 const validate = @import("configuration.zig").validate;
 
-test "managed configuration resolves dial concurrency independently of peer headroom" {
+test "configuration resolves dial concurrency independently of peer headroom" {
     for ([_]u16{ 1, 2, 10 }) |headroom| {
         const resolved = try resolve(.{
             .seed = 1,
@@ -47,7 +47,7 @@ test "managed configuration resolves dial concurrency independently of peer head
     }));
 }
 
-test "managed control admission quotas permit the full two hundred peer workload" {
+test "configuration control admission quotas permit the full two hundred peer workload" {
     const resolved = try resolve(.{
         .seed = 1,
         .forks = &.{},
@@ -74,7 +74,7 @@ test "managed control admission quotas permit the full two hundred peer workload
     }
 }
 
-test "managed configuration resolves shared capacities from their owners" {
+test "configuration resolves shared capacities from their owners" {
     const small = try resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
     try std.testing.expectEqual(small.limits.connections_max, small.core.service.reqresp.peers);
     try std.testing.expectEqual(small.core.peers.max_peers, small.core.service.gossipsub.connected_capacity);
@@ -89,7 +89,7 @@ test "managed configuration resolves shared capacities from their owners" {
     try std.testing.expect(small.byte_limit < beacon.byte_limit);
 }
 
-test "managed configuration overrides preserve profile defaults and derive shared fields" {
+test "configuration overrides preserve profile defaults and derive shared fields" {
     const forks: []const rr.ForkEntry = &.{.{ .digest = @splat(1), .fork = .fulu }};
     const resolved = try resolve(.{
         .profile = .small,
@@ -122,7 +122,7 @@ test "managed configuration overrides preserve profile defaults and derive share
     try std.testing.expect(@hasField(rr.Options, "request_fork"));
 }
 
-test "managed configuration rejects inconsistent capacity sections before owners" {
+test "configuration rejects inconsistent capacity sections before owners" {
     const resolved = try resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
     var options = resolved.core;
     options.service.router.outbound_control_reserved += 1;
@@ -156,21 +156,21 @@ test "managed configuration rejects inconsistent capacity sections before owners
     try std.testing.expectError(error.InvalidLimits, validate(limits, resolved.core));
 }
 
-test "managed configuration rejects zero request work override" {
+test "configuration rejects zero request work override" {
     try std.testing.expectError(error.InvalidOptions, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .reqresp = .{ .work_per_pump_max = 0 }, .admission_policy = policy_fixture.config() }));
 }
 
-test "managed configuration rejects zero control timer from complete section" {
+test "configuration rejects zero control timer from complete section" {
     try std.testing.expectError(error.InvalidOptions, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .control = .{ .ping_inbound_ms = 0 }, .admission_policy = policy_fixture.config() }));
 }
 
-test "managed configuration validates router and score overrides" {
+test "configuration validates router and score overrides" {
     try std.testing.expectError(error.InvalidLimits, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .gossip = .{ .score_params = .{ .decay_interval_ms = 0 } }, .admission_policy = policy_fixture.config() }));
     try std.testing.expectError(error.InvalidOptions, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .reqresp = .{ .outbound_max = 12 }, .admission_policy = policy_fixture.config() }));
     try std.testing.expectError(error.InvalidLimits, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .router = .{ .negotiations_max = 2 }, .admission_policy = policy_fixture.config() }));
 }
 
-test "managed runtime request admission derives retained capacity quotas and control reservation" {
+test "configuration request admission derives retained capacity quotas and control reservation" {
     const resolved = try resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
     const admission = resolved.core.service.reqresp.admission.limits;
     try std.testing.expectEqual(resolved.core.peers.capacity, admission.identities);
@@ -181,7 +181,7 @@ test "managed runtime request admission derives retained capacity quotas and con
     try std.testing.expectEqual(@as(u32, resolved.core.peers.max_peers) * admission.peer[@intFromEnum(ForkSeq.fulu)][@intFromEnum(Protocol.ping_v1)].tokens, admission.global[@intFromEnum(ForkSeq.fulu)][@intFromEnum(Protocol.ping_v1)].tokens);
 }
 
-test "managed runtime request admission memory plan measures both retained profiles" {
+test "configuration request admission memory plan measures both retained profiles" {
     for ([_]Profile{ .small, .beacon_node }) |profile| {
         const resolved = try resolve(.{ .profile = profile, .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
         var allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
@@ -193,14 +193,14 @@ test "managed runtime request admission memory plan measures both retained profi
     }
 }
 
-test "managed configuration preserves independent transport work limits" {
+test "configuration preserves independent transport work limits" {
     const limits: transport.WorkLimits = .{ .send_per_step_max = 3, .receive_per_step_max = 2, .burst_per_connection = 2 };
     const resolved = try resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .work_limits = limits, .admission_policy = policy_fixture.config() });
     try std.testing.expectEqual(limits, resolved.work_limits);
     try std.testing.expectError(error.InvalidLimits, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .work_limits = .{ .send_per_step_max = 0 }, .admission_policy = policy_fixture.config() }));
 }
 
-test "managed configuration carries bounded UDP socket buffer requests" {
+test "configuration carries bounded UDP socket buffer requests" {
     const resolved = try resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
     const mib = 1024 * 1024;
     try std.testing.expectEqual(udp.Buffers{ .receive = 8 * mib, .send = 4 * mib }, resolved.socket_buffers.quic);

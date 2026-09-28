@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import {readFile} from "node:fs/promises";
 import test from "node:test";
 import {ssz} from "@lodestar/types";
-import {metadata, sequence, status, uint64} from "./managed_wire.mjs";
+import {metadata, sequence, status, uint64} from "./control_wire.mjs";
 
-const fixture = JSON.parse(await readFile(new URL("managed-control-vectors.json", import.meta.url), "utf8"));
+const fixture = JSON.parse(await readFile(new URL("control-wire-vectors.json", import.meta.url), "utf8"));
 test("independent control layouts match pinned serializer fixtures and public Lodestar serializers", () => {
   assert.equal(fixture.records.length, 11);
   for (const record of fixture.records) {
@@ -30,7 +30,7 @@ test("independent control layouts match pinned serializer fixtures and public Lo
 });
 
 test("empty Metadata reader accepts FIN received before handler attachment", async () => {
-  const {readEmptyRequest} = await import("./managed_control.mjs");
+  const {readEmptyRequest} = await import("./control_handler.mjs");
   const stream = Object.assign(new EventTarget(), {
     readBufferLength: 0,
     remoteWriteStatus: "closed",
@@ -48,7 +48,7 @@ test("empty Metadata reader accepts FIN received before handler attachment", asy
 });
 
 test("empty Metadata reader handles later FIN and rejects later content", async () => {
-  const {readEmptyRequest} = await import("./managed_control.mjs");
+  const {readEmptyRequest} = await import("./control_handler.mjs");
   for (const invalid of [false, true]) {
     const stream = Object.assign(new EventTarget(), {readBufferLength: 0, remoteWriteStatus: "writable"});
     const result = readEmptyRequest(stream);

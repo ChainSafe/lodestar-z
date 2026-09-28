@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import {multiaddr} from "@multiformats/multiaddr";
 import {encodePayload, loopback, readPayload, sendFragments} from "./codec.mjs";
-import * as wire from "./managed_wire.mjs";
+import * as wire from "./control_wire.mjs";
 
-export class ManagedControl {
+export class ControlHandler {
   constructor(forkDigest = Uint8Array.of(1, 2, 3, 4)) {
     assert.equal(forkDigest.length, 4);
     this.forkDigest = forkDigest;

@@ -23,7 +23,7 @@ fn subscribeServer(setup: *Setup, name: []const u8) !void {
     try gossip_test.subscribe(setup.server.service.gossipsub, name);
 }
 
-test "managed native two owners establish relevance and fetch initial metadata without public output" {
+test "core native two owners establish relevance and fetch initial metadata without public output" {
     for ([_]@import("config").ForkSeq{ .phase0, .altair, .fulu }) |fork| {
         const local: t.LocalState = .{
             .fork = .{ .fork = fork },
@@ -52,7 +52,7 @@ test "managed native two owners establish relevance and fetch initial metadata w
     }
 }
 
-test "managed publishes the authenticated endpoint after QUIC rebinding" {
+test "core publishes the authenticated endpoint after QUIC rebinding" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -75,7 +75,7 @@ test "managed publishes the authenticated endpoint after QUIC rebinding" {
     try std.testing.expectEqual(rebound, event[0].updated.endpoint);
 }
 
-test "managed native ping coalesces metadata and confirms unchanged freshness then periodic Status" {
+test "core native ping coalesces metadata and confirms unchanged freshness then periodic Status" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -104,7 +104,7 @@ test "managed native ping coalesces metadata and confirms unchanged freshness th
     try std.testing.expectEqualDeep(status, snapshots[0].status.?);
 }
 
-test "managed native immutable metadata response survives local update during pending writer" {
+test "core native immutable metadata response survives local update during pending writer" {
     var setup: Setup = .{};
     const old: t.LocalState = .{ .metadata = .{ .seq_number = 4, .attnets = @splat(8) } };
     try setup.init(&old);
@@ -134,7 +134,7 @@ test "managed native immutable metadata response survives local update during pe
     try std.testing.expectEqual(@as(u64, 5), snapshots[0].metadata.?.seq_number);
 }
 
-test "managed native wrong fork Goodbye hard closes with zero output and shutdown repeats" {
+test "core native wrong fork Goodbye hard closes with zero output and shutdown repeats" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -152,7 +152,7 @@ test "managed native wrong fork Goodbye hard closes with zero output and shutdow
     setup.client.shutdown(setup.pair.now);
 }
 
-test "managed native control timeout releases owners independent of public output" {
+test "core native control timeout releases owners independent of public output" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -189,7 +189,7 @@ fn failStatusRound(setup: *Setup, failure: rr.Failure) !void {
     for (0..4) |_| try setup.step(0);
 }
 
-test "managed native control disconnects only after consecutive health failures" {
+test "core native control disconnects only after consecutive health failures" {
     const status = @intFromEnum(@import("peers/control.zig").HealthProbe.status);
     const Case = struct { failure: rr.Failure, reason: ?t.DisconnectReason };
     for ([_]Case{
@@ -230,7 +230,7 @@ test "managed native control disconnects only after consecutive health failures"
     }
 }
 
-test "managed native control retries a failed probe on the turn its retry deadline passes" {
+test "core native control retries a failed probe on the turn its retry deadline passes" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -257,7 +257,7 @@ test "managed native control retries a failed probe on the turn its retry deadli
     try std.testing.expectEqual(@as(u8, 1), row.health_failures[status]);
 }
 
-test "managed native control success clears a health failure streak" {
+test "core native control success clears a health failure streak" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -298,7 +298,7 @@ fn discoverServer(setup: *Setup) !@import("peers/enr.zig").Candidate {
     return server;
 }
 
-test "managed Status and Metadata clear dial failures that QUIC admission keeps" {
+test "core Status and Metadata clear dial failures that QUIC admission keeps" {
     var setup: Setup = .{};
     try setup.initOwners(&.{});
     defer setup.deinit();
@@ -325,7 +325,7 @@ test "managed Status and Metadata clear dial failures that QUIC admission keeps"
     try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.peerCounts().relevant);
 }
 
-test "managed health strikes survive an answered reconnect until a later probe succeeds" {
+test "core health strikes survive an answered reconnect until a later probe succeeds" {
     var setup: Setup = .{};
     try setup.initOwners(&.{});
     defer setup.deinit();
@@ -354,7 +354,7 @@ test "managed health strikes survive an answered reconnect until a later probe s
     try std.testing.expectEqual(@as(u8, 0), serverStrikes(&setup, &server));
 }
 
-test "managed local probe stalls add no health strike" {
+test "core local probe stalls add no health strike" {
     var setup: Setup = .{};
     try setup.initOwners(&.{});
     defer setup.deinit();
@@ -380,11 +380,11 @@ fn allocationCheck(a: std.mem.Allocator) !void {
     defer core.deinit();
 }
 
-test "managed startup allocation failure cleans every prefix" {
+test "core startup allocation failure cleans every prefix" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationCheck, .{});
 }
 
-test "managed native deterministic replacement cancels old control and ignores stale physical close" {
+test "core native deterministic replacement cancels old control and ignores stale physical close" {
     var setup: Setup = .{};
     const local: t.LocalState = .{ .fork = .{ .fork = .fulu, .minimum_sampling_groups = 8 }, .status = .{ .earliest_available_slot = 0 }, .metadata = .{ .custody_group_count = 4 } };
     try setup.initDirection(&local, true);
@@ -424,7 +424,7 @@ test "managed native deterministic replacement cancels old control and ignores s
     try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.peerCounts().relevant);
 }
 
-test "managed native saturated app requests retain partitioned borrows while controls progress" {
+test "core native saturated app requests retain partitioned borrows while controls progress" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -498,7 +498,7 @@ test "managed native saturated app requests retain partitioned borrows while con
     try std.testing.expectEqual(@as(usize, 8), delivered);
 }
 
-test "managed native local control capacity defers with future wakeup and no peer penalty" {
+test "core native local control capacity defers with future wakeup and no peer penalty" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -522,7 +522,7 @@ test "managed native local control capacity defers with future wakeup and no pee
     setup.client.shutdown(setup.pair.now);
 }
 
-test "managed retains explicit direct connections without periodically resurrecting gossip" {
+test "core retains explicit direct connections without periodically resurrecting gossip" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -552,7 +552,7 @@ test "managed retains explicit direct connections without periodically resurrect
     try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.selection.deficits.outbound);
 }
 
-test "managed direct removal clears both pins and gossip score reads have no feedback" {
+test "core direct removal clears both pins and gossip score reads have no feedback" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -585,7 +585,7 @@ test "managed direct removal clears both pins and gossip score reads have no fee
     );
 }
 
-test "managed native preserves gossip events under one output and caller validation wrappers" {
+test "core native preserves gossip events under one output and caller validation wrappers" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -602,7 +602,7 @@ test "managed native preserves gossip events under one output and caller validat
     }
     setup.pair.advance(1_001);
     for (0..10) |_| try setup.step(0);
-    const payload = "bounded managed gossip payload";
+    const payload = "bounded core gossip payload";
     _ = try setup.client.publishGossipWithOptions(topic, payload, .{ .allow_zero_peers = false }, setup.pair.now);
     try std.testing.expectError(error.Duplicate, setup.client.publishGossipWithOptions(topic, payload, .{}, setup.pair.now));
     try std.testing.expect((try setup.client.publishGossipWithOptions(topic, payload, .{ .ignore_duplicate = true }, setup.pair.now)).duplicate);
@@ -626,7 +626,7 @@ test "managed native preserves gossip events under one output and caller validat
     try gossip_test.unsubscribe(setup.client.service.gossipsub, topic);
 }
 
-test "managed native continuous reStatus cannot starve due metadata sequence confirmation" {
+test "core native continuous reStatus cannot starve due metadata sequence confirmation" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -644,7 +644,7 @@ test "managed native continuous reStatus cannot starve due metadata sequence con
     try std.testing.expectEqual(sequence, snapshots[0].metadata.?.seq_number);
 }
 
-test "managed native Goodbye immediately removes relevance and delayed Status cannot revive it" {
+test "core native Goodbye immediately removes relevance and delayed Status cannot revive it" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -680,7 +680,7 @@ test "managed native Goodbye immediately removes relevance and delayed Status ca
     try std.testing.expectEqual(@as(u16, 0), setup.client.peer_manager.peerCounts().connected);
 }
 
-test "managed native hard close retires QUIC routes streams and registry with zero public output" {
+test "core native hard close retires QUIC routes streams and registry with zero public output" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -698,7 +698,7 @@ test "managed native hard close retires QUIC routes streams and registry with ze
     try std.testing.expectError(error.StaleHandle, setup.pair.client.openStream(conn));
 }
 
-test "managed native leased dial retires uncompleted handshake and rejects late acknowledgements" {
+test "core native leased dial retires uncompleted handshake and rejects late acknowledgements" {
     var setup: Setup = .{};
     try setup.initOwners(&.{});
     defer setup.deinit();
@@ -732,7 +732,7 @@ test "managed native leased dial retires uncompleted handshake and rejects late 
         setup.pair.now.mono_ms);
 }
 
-test "managed native dial expiry closes authenticated attempt before connected event delivery" {
+test "core native dial expiry closes authenticated attempt before connected event delivery" {
     for ([_]bool{ false, true }) |shutdown| {
         var setup: Setup = .{};
         try setup.initOwners(&.{});
@@ -769,7 +769,7 @@ test "managed native dial expiry closes authenticated attempt before connected e
     }
 }
 
-test "managed simultaneous selected dials consume one commitment and preserve duplicate tie breaking" {
+test "core simultaneous selected dials consume one commitment and preserve duplicate tie breaking" {
     var setup: Setup = .{};
     var opts = options();
     opts.core.peers.target_peers = 1;
@@ -813,7 +813,7 @@ test "managed simultaneous selected dials consume one commitment and preserve du
     }
 }
 
-test "managed competing one-shot attempt expires during selected peer ban cooldown" {
+test "core competing one-shot attempt expires during selected peer ban cooldown" {
     var setup: Setup = .{};
     try setup.initOwners(&.{});
     defer setup.deinit();
@@ -845,7 +845,7 @@ test "managed competing one-shot attempt expires during selected peer ban cooldo
     try std.testing.expectEqual(@as(usize, 0), setup.client.peer_manager.catalog.intent_count);
 }
 
-test "managed review early native close preserves selected reason and counts it once" {
+test "core review early native close preserves selected reason and counts it once" {
     for ([_]?t.DisconnectReason{ .host, .reputation, .banned, .incompatible_fork, null }) |reason| {
         var setup: Setup = .{};
         try setup.init(&.{});
@@ -874,7 +874,7 @@ test "managed review early native close preserves selected reason and counts it 
     }
 }
 
-test "managed records a remote close of its dial before Status as an early close and none once ready" {
+test "core records a remote close of its dial before Status as an early close and none once ready" {
     for ([_]bool{ false, true }) |ready| {
         var setup: Setup = .{};
         try setup.init(&.{});
@@ -898,7 +898,7 @@ test "managed records a remote close of its dial before Status as an early close
     }
 }
 
-test "managed coverage demand copies persists across slots and keeps general discovery independent" {
+test "core coverage demand copies persists across slots and keeps general discovery independent" {
     var setup: Setup = .{};
     try setup.initOwners(&.{});
     defer setup.deinit();
@@ -926,7 +926,7 @@ test "managed coverage demand copies persists across slots and keeps general dis
     try std.testing.expect(due == null or due.? > setup.pair.now.mono_ms);
 }
 
-test "managed coverage authenticated custody differs from gossip delivery and invalidates fork groups" {
+test "core coverage authenticated custody differs from gossip delivery and invalidates fork groups" {
     var setup: Setup = .{};
     var local: t.LocalState = .{ .fork = .{ .fork = .fulu }, .status = .{ .earliest_available_slot = 0 }, .metadata = .{ .syncnets = 1, .custody_group_count = 128 } };
     try setup.init(&local);
@@ -963,7 +963,7 @@ test "managed coverage authenticated custody differs from gossip delivery and in
     try std.testing.expect(snapshots[0].custody_groups == null);
 }
 
-test "managed coverage physical closing capacity blocks new leased intents" {
+test "core coverage physical closing capacity blocks new leased intents" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -985,7 +985,7 @@ test "managed coverage physical closing capacity blocks new leased intents" {
     try std.testing.expectEqual(@as(u16, 0), setup.client.peer_manager.dialing.attempts().total);
 }
 
-test "managed coverage direct candidate dials at soft target and respects physical hard capacity" {
+test "core coverage direct candidate dials at soft target and respects physical hard capacity" {
     var setup: Setup = .{};
     var opts = options();
     opts.core.peers.target_peers = 1;
@@ -1010,7 +1010,7 @@ fn candidateFor(peer: *const t.PeerId, count: ?u64) !@import("peers/enr.zig").Ca
     return .{ .peer = peer.*, .node_id = try @import("peers/custody.zig").nodeId(peer), .sequence = 1, .record_hash = @splat(0), .addresses = .{ support.server_address, .unspecified }, .address_count = 1, .fork = .{ .digest = @splat(0), .next_version = @splat(0), .next_epoch = 0 }, .next_fork_digest = null, .attnets = null, .syncnets = null, .custody_group_count = count };
 }
 
-test "managed coverage automatic retention renews only at authenticated Status success" {
+test "core coverage automatic retention renews only at authenticated Status success" {
     var setup: Setup = .{};
     try setup.initOwners(&.{});
     defer setup.deinit();
@@ -1032,7 +1032,7 @@ test "managed coverage automatic retention renews only at authenticated Status s
     try std.testing.expect(setup.client.peer_manager.catalog.rows[0].intent.history_until_ms > horizon);
 }
 
-test "managed coverage bounded custody work resumes without output and stale metadata cannot satisfy demand" {
+test "core coverage bounded custody work resumes without output and stale metadata cannot satisfy demand" {
     var setup: Setup = .{};
     const local: t.LocalState = .{ .fork = .{ .fork = .fulu }, .status = .{ .earliest_available_slot = 0 }, .metadata = .{ .custody_group_count = 127, .syncnets = 1 } };
     try setup.init(&local);
@@ -1074,7 +1074,7 @@ test "managed coverage bounded custody work resumes without output and stale met
     try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.coverageDeficits().sync);
 }
 
-test "managed coverage outbound deficit uses admission headroom while retaining existing inbound" {
+test "core coverage outbound deficit uses admission headroom while retaining existing inbound" {
     for ([_]u16{ 2, 3 }) |maximum| {
         var setup: Setup = .{};
         var opts = options();
@@ -1098,7 +1098,7 @@ test "managed coverage outbound deficit uses admission headroom while retaining 
     }
 }
 
-test "managed coverage review same-digest group update disables cached automatic candidate" {
+test "core coverage review same-digest group update disables cached automatic candidate" {
     var setup: Setup = .{};
     var local: t.LocalState = .{ .fork = .{ .fork = .fulu }, .status = .{ .earliest_available_slot = 0 }, .metadata = .{ .custody_group_count = 128 } };
     try setup.initOwners(&local);
@@ -1122,7 +1122,7 @@ test "managed coverage review same-digest group update disables cached automatic
     try std.testing.expect(out[0].peer.eql(&candidate.peer));
 }
 
-test "managed reconciliation idle and candidate batch work" {
+test "core reconciliation idle and candidate batch work" {
     var setup: Setup = .{};
     try setup.initOwners(&.{});
     defer setup.deinit();
@@ -1140,7 +1140,7 @@ test "managed reconciliation idle and candidate batch work" {
     try std.testing.expectEqual(@as(u64, 0), after.selections - c.selections);
 }
 
-test "managed reconciliation reads preserve completed demand and catalog evaluation" {
+test "core reconciliation reads preserve completed demand and catalog evaluation" {
     var setup: Setup = .{};
     var opts = options();
     opts.core.peers.target_peers = 1;
@@ -1189,7 +1189,7 @@ test "managed reconciliation reads preserve completed demand and catalog evaluat
     try std.testing.expectEqualDeep(DiscoveryNeed{}, view.discoveryNeed());
 }
 
-test "managed reconciliation reads do not decay reputation or schedule peer removal" {
+test "core reconciliation reads do not decay reputation or schedule peer removal" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -1225,7 +1225,7 @@ test "managed reconciliation reads do not decay reputation or schedule peer remo
     try std.testing.expect(view.catalog.eventsPending());
 }
 
-test "managed reconciliation clears policy observations at quiescence and shutdown" {
+test "core reconciliation clears policy observations at quiescence and shutdown" {
     for ([_]bool{ false, true }) |graceful| {
         var setup: Setup = .{};
         try setup.initOwners(&.{});
@@ -1250,7 +1250,7 @@ test "managed reconciliation clears policy observations at quiescence and shutdo
     }
 }
 
-test "managed reconciliation raw mutators and deadlines invalidate once" {
+test "core reconciliation raw mutators and deadlines invalidate once" {
     var setup: Setup = .{};
     const local: t.LocalState = .{ .fork = .{ .fork = .altair }, .metadata = .{ .syncnets = 1 } };
     try setup.init(&local);
@@ -1332,7 +1332,7 @@ test "managed reconciliation raw mutators and deadlines invalidate once" {
     try std.testing.expectEqual(@as(u16, 0), setup.client.peer_manager.selection.retained_count);
 }
 
-test "managed reconciliation batch counts refusal and fresh native room independently" {
+test "core reconciliation batch counts refusal and fresh native room independently" {
     var setup: Setup = .{};
     var opts = options();
     opts.core.peers.max_peers = 2;
@@ -1364,7 +1364,7 @@ test "managed reconciliation batch counts refusal and fresh native room independ
     try std.testing.expectEqual(baseline.candidate_selections + 1, setup.client.peer_manager.counters.candidate_selections);
 }
 
-test "managed reconciliation exhausted revisions stay invalidated" {
+test "core reconciliation exhausted revisions stay invalidated" {
     var setup: Setup = .{};
     try setup.initOwners(&.{});
     defer setup.deinit();
@@ -1375,7 +1375,7 @@ test "managed reconciliation exhausted revisions stay invalidated" {
     try std.testing.expectEqual(before + 1, setup.client.peer_manager.counters.selections);
 }
 
-test "managed reconciliation ban expiry still defers until strict score recovery" {
+test "core reconciliation ban expiry still defers until strict score recovery" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -1406,7 +1406,7 @@ test "managed reconciliation ban expiry still defers until strict score recovery
     try std.testing.expect(out[0].peer.eql(&candidate.peer));
 }
 
-test "managed native immediate close preserves direct membership and rejects stale generations" {
+test "core native immediate close preserves direct membership and rejects stale generations" {
     for ([_]usize{ 0, 1 }) |capacity| {
         var setup: Setup = .{};
         try setup.init(&.{});
@@ -1463,7 +1463,7 @@ test "managed native immediate close preserves direct membership and rejects sta
     }
 }
 
-test "managed native peer counts distinguish open relevant invalidated and closed without scratch mutation" {
+test "core native peer counts distinguish open relevant invalidated and closed without scratch mutation" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -1495,7 +1495,7 @@ test "managed native peer counts distinguish open relevant invalidated and close
     try std.testing.expect(!setup.client.removeDirectPeer(&offline));
 }
 
-test "managed native public close cancels overlapping attempts and preserves bounded direct retry" {
+test "core native public close cancels overlapping attempts and preserves bounded direct retry" {
     var setup: Setup = .{};
     try setup.initOwners(&.{});
     defer setup.deinit();
@@ -1548,7 +1548,7 @@ fn waitSampling(setup: *Setup) !t.Snapshot {
     return error.SamplingReadinessTimeout;
 }
 
-test "managed sampling delivery follows real outbound stream retirement replacement and stale events" {
+test "core sampling delivery follows real outbound stream retirement replacement and stale events" {
     var setup: Setup = .{};
     const local: t.LocalState = .{ .fork = .{ .fork = .fulu, .minimum_sampling_groups = 8 }, .status = .{ .earliest_available_slot = 0 }, .metadata = .{ .custody_group_count = 4 } };
     var opts = options();
@@ -1667,7 +1667,7 @@ test "local intent refuses sampling demand beyond its fork atomically and a vali
     try std.testing.expectEqualDeep(t.Demand{}, manager.demand);
 }
 
-test "managed replaces failed gossip below target without a reputation penalty or admission timer" {
+test "core replaces failed gossip below target without a reputation penalty or admission timer" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -1708,7 +1708,7 @@ fn discoveredAt(tag: u8, endpoint: t.Address) !@import("peers/enr.zig").Candidat
     return .{ .peer = peer, .node_id = try @import("peers/custody.zig").nodeId(&peer), .sequence = 1, .record_hash = @splat(0), .addresses = .{ endpoint, .unspecified }, .address_count = 1, .fork = .{ .digest = @splat(0), .next_version = @splat(0), .next_epoch = 0 }, .next_fork_digest = null, .attnets = null, .syncnets = 0, .custody_group_count = null };
 }
 
-test "managed dial admission reserve counts only answered dials" {
+test "core dial admission reserve counts only answered dials" {
     var setup: Setup = .{};
     var opts = @import("network_core_test_support.zig").options();
     opts.core.dial.concurrent_max = 2;
@@ -1733,7 +1733,7 @@ test "managed dial admission reserve counts only answered dials" {
     try std.testing.expectEqual(@as(u16, 0), setup.client.peer_manager.dialing.answeredPeers(&setup.client.peer_manager.catalog, &answering.peer));
 }
 
-test "managed inbound admission is not blocked by unanswered dials in flight" {
+test "core inbound admission is not blocked by unanswered dials in flight" {
     var setup: Setup = .{};
     var opts = @import("network_core_test_support.zig").options();
     opts.core.dial.concurrent_max = 3;
@@ -1762,7 +1762,7 @@ test "managed inbound admission is not blocked by unanswered dials in flight" {
     try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.peerCounts().connected);
 }
 
-test "managed peer id mismatch releases the discovered endpoint and refuses its rediscovery" {
+test "core peer id mismatch releases the discovered endpoint and refuses its rediscovery" {
     var setup: Setup = .{};
     try setup.initOwners(&.{});
     defer setup.deinit();
@@ -1782,7 +1782,7 @@ test "managed peer id mismatch releases the discovered endpoint and refuses its 
     try std.testing.expectEqual(@as(u64, 0), setup.client.peer_manager.dialing.retries[@intFromEnum(t.DialFailure.peer_id_mismatch)]);
 }
 
-test "managed remembers a served dial, keeps it through close, and replays it after a restart" {
+test "core remembers a served dial, keeps it through close, and replays it after a restart" {
     const remembered = @import("peers/remembered.zig");
     var records: [remembered.capacity]remembered.Record = undefined;
     var count: usize = 0;
