@@ -38,6 +38,8 @@ pub const SendError = net.Socket.SendError || error{
     /// (EPERM).
     DestinationRefused,
 };
+/// `sent` datagrams went out; `failure` is the error of the next one, null when all did.
+pub const SendOutcome = struct { sent: usize, failure: ?SendError };
 pub const Datagram = struct { from: Address, bytes: []u8 };
 
 /// Kernel socket buffer sizes in bytes.
@@ -211,10 +213,27 @@ pub const Sockets = struct {
         }
         try socket.send(io, &address, bytes);
     }
+
+    /// Sends datagrams of one address family in order, as `std.Io.VTable.netSend` does, and stops
+    /// at the first that fails. Each sent message's `data_len` becomes the bytes the kernel took.
+    pub fn sendMany(self: *const Sockets, io: std.Io, messages: []net.OutgoingMessage) SendOutcome {
+        assert(messages.len > 0);
+        const socket = self.get(messages[0].address.*) orelse return .{ .sent = 0, .failure = error.AddressFamilyUnsupported };
+        for (messages) |message| assert(index(message.address.*) == index(messages[0].address.*));
+        if (native_batches) {
+            if (threadedSend(io)) return sendManyNative(io, socket.handle, messages);
+        }
+        const failure, const sent = io.vtable.netSend(io.userdata, socket.handle, messages, .{});
+        return .{ .sent = sent, .failure = failure };
+    }
 };
 
 const os = @import("builtin").os.tag;
 const native_sockets = std.options.networking and (os == .linux or os == .macos);
+/// Zig 0.16 Threaded batches sends with sendmmsg on Linux only.
+const native_batches = native_sockets and os == .linux;
+/// Datagrams per sendmmsg call, as Zig 0.16 Threaded sends them.
+const send_many_max = 64;
 
 /// Zig 0.16 Threaded hands out native descriptors; other I/O providers keep their own contract.
 fn threaded(io: std.Io) bool {
@@ -310,6 +329,66 @@ fn sendNative(io: std.Io, handle: net.Socket.Handle, address: *const net.IpAddre
     const sent = p.system.sendto(handle, bytes.ptr, bytes.len, p.MSG.NOSIGNAL | p.MSG.DONTWAIT, &storage.any, length);
     return switch (p.errno(sent)) {
         .SUCCESS => if (@as(usize, @intCast(sent)) == bytes.len) {} else error.MessageOversize,
+        else => |err| sendError(err),
+    };
+}
+
+/// Sends as Zig 0.16 Threaded's sendmmsg does, keeping its errno mapping, but names EPERM. The
+/// kernel reports a datagram's errno only when it is the first of a call, so each call starts at
+/// the first unsent datagram and a failure is that datagram's own. The calls never wait: after a
+/// full send buffer, the next datagram waits in Threaded's own cancellable send, which reports
+/// EPERM as `error.Unexpected`.
+fn sendManyNative(io: std.Io, handle: net.Socket.Handle, messages: []net.OutgoingMessage) SendOutcome {
+    const p = std.posix;
+    var sent: usize = 0;
+    // Each pass sends at least one datagram or returns.
+    for (0..messages.len) |_| {
+        if (sent == messages.len) break;
+        const pending = messages[sent..][0..@min(messages.len - sent, send_many_max)];
+        var headers: [send_many_max]p.system.mmsghdr = undefined;
+        var storage: [send_many_max]std.Io.Threaded.PosixAddress = undefined;
+        var vectors: [send_many_max]p.iovec = undefined;
+        for (pending, headers[0..pending.len], storage[0..pending.len], vectors[0..pending.len]) |*message, *header, *address, *vector| {
+            vector.* = .{ .base = @constCast(message.data_ptr), .len = message.data_len };
+            header.* = .{
+                .hdr = .{
+                    .name = &address.any,
+                    .namelen = std.Io.Threaded.addressToPosix(message.address, address),
+                    .iov = vector[0..1],
+                    .iovlen = 1,
+                    .control = @constCast(message.control.ptr),
+                    .controllen = message.control.len,
+                    .flags = 0,
+                },
+                .len = undefined,
+            };
+        }
+        io.checkCancel() catch |err| return .{ .sent = sent, .failure = err };
+        const result = p.system.sendmmsg(handle, &headers, @intCast(pending.len), p.MSG.NOSIGNAL | p.MSG.DONTWAIT);
+        switch (p.errno(result)) {
+            .SUCCESS => {
+                const count: usize = @intCast(result);
+                assert(count > 0 and count <= pending.len);
+                for (pending[0..count], headers[0..count]) |*message, header| message.data_len = header.len;
+                sent += count;
+            },
+            .AGAIN => {
+                const failure, const count = io.vtable.netSend(io.userdata, handle, pending[0..1], .{});
+                if (count == 0) return .{ .sent = sent, .failure = failure.? };
+                sent += 1;
+            },
+            else => |err| return .{ .sent = sent, .failure = sendError(err) },
+        }
+    }
+    assert(sent == messages.len);
+    return .{ .sent = sent, .failure = null };
+}
+
+/// Zig 0.16 Threaded's send errno mapping, except that EPERM names a destination refusal and a
+/// full send buffer, which a send that does not wait reports as EAGAIN, is `SystemResources`.
+fn sendError(errno: std.posix.E) SendError {
+    return switch (errno) {
+        .SUCCESS => unreachable,
         .PERM => error.DestinationRefused,
         .ACCES => error.AccessDenied,
         .ALREADY => error.FastOpenAlreadyInProgress,
@@ -322,7 +401,7 @@ fn sendNative(io: std.Io, handle: net.Socket.Handle, address: *const net.IpAddre
         .NETUNREACH => error.NetworkUnreachable,
         .NETDOWN => error.NetworkDown,
         .BADF, .DESTADDRREQ, .FAULT, .INVAL, .ISCONN, .NOTSOCK, .OPNOTSUPP => |err| std.Io.Threaded.errnoBug(err),
-        else => |err| p.unexpectedErrno(err),
+        else => |err| std.posix.unexpectedErrno(err),
     };
 }
 

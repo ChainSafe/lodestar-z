@@ -1,5 +1,56 @@
 const std = @import("std");
 
+/// A seccomp filter that fails sendto and sendmmsg on chosen sockets with a real errno.
+pub const SendFilter = struct {
+    pub const Instruction = extern struct { code: u16, jt: u8, jf: u8, k: u32 };
+    pub const Program = extern struct { len: c_ushort, filter: [*]const Instruction };
+
+    pub const Rule = struct {
+        socket: std.Io.net.Socket.Handle,
+        errno: std.os.linux.E,
+        /// Fails only sends that ask not to wait, as a full send buffer does.
+        nonblocking_only: bool = false,
+    };
+
+    const rules_max = 4;
+
+    /// Filters the calling thread's sends until the thread ends, one rule per socket. Threads it
+    /// starts afterwards inherit the filter, so the caller must not start any, including Io tasks.
+    /// Returns false where the kernel refuses seccomp filters.
+    pub fn install(rules: []const Rule) bool {
+        const linux = std.os.linux;
+        const bpf = linux.BPF;
+        std.debug.assert(rules.len > 0 and rules.len <= rules_max);
+        const little = comptime @import("builtin").cpu.arch.endian() == .little;
+        const descriptor: u32 = @offsetOf(linux.SECCOMP.data, "arg0") + if (little) 0 else 4;
+        const flags: u32 = @offsetOf(linux.SECCOMP.data, "arg3") + if (little) 0 else 4;
+        var length: usize = 5;
+        for (rules) |rule| length += if (rule.nonblocking_only) 4 else 2;
+        const allow = length - 1;
+        var filter: [5 + 4 * rules_max]Instruction = undefined;
+        filter[0] = .{ .code = bpf.LD | bpf.W | bpf.ABS, .jt = 0, .jf = 0, .k = @offsetOf(linux.SECCOMP.data, "nr") };
+        filter[1] = .{ .code = bpf.JMP | bpf.JEQ | bpf.K, .jt = 1, .jf = 0, .k = @intFromEnum(linux.SYS.sendto) };
+        filter[2] = .{ .code = bpf.JMP | bpf.JEQ | bpf.K, .jt = 0, .jf = @intCast(allow - 3), .k = @intFromEnum(linux.SYS.sendmmsg) };
+        filter[3] = .{ .code = bpf.LD | bpf.W | bpf.ABS, .jt = 0, .jf = 0, .k = descriptor };
+        var at: usize = 4;
+        for (rules) |rule| {
+            const block: u8 = if (rule.nonblocking_only) 4 else 2;
+            filter[at] = .{ .code = bpf.JMP | bpf.JEQ | bpf.K, .jt = 0, .jf = block - 1, .k = @intCast(rule.socket) };
+            if (rule.nonblocking_only) {
+                filter[at + 1] = .{ .code = bpf.LD | bpf.W | bpf.ABS, .jt = 0, .jf = 0, .k = flags };
+                filter[at + 2] = .{ .code = bpf.JMP | bpf.JSET | bpf.K, .jt = 0, .jf = @intCast(allow - at - 3), .k = linux.MSG.DONTWAIT };
+            }
+            filter[at + block - 1] = .{ .code = bpf.RET | bpf.K, .jt = 0, .jf = 0, .k = linux.SECCOMP.RET.ERRNO | @as(u32, @intFromEnum(rule.errno)) };
+            at += block;
+        }
+        std.debug.assert(at == allow);
+        filter[allow] = .{ .code = bpf.RET | bpf.K, .jt = 0, .jf = 0, .k = linux.SECCOMP.RET.ALLOW };
+        const program: Program = .{ .len = @intCast(length), .filter = &filter };
+        if (linux.errno(linux.prctl(@intFromEnum(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0)) != .SUCCESS) return false;
+        return linux.errno(linux.seccomp(linux.SECCOMP.SET_MODE_FILTER, 0, &program)) == .SUCCESS;
+    }
+};
+
 pub const FaultIo = struct {
     base: std.Io = undefined,
     vtable: std.Io.VTable = undefined,

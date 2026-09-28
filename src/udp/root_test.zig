@@ -238,9 +238,9 @@ test "UDP records a failed size readback as unknown and not below the request" {
     try std.testing.expectEqual([2]?u64{ null, null }, sockets.drops());
 }
 
-test "UDP names a refused send, reports a full buffer without waiting and keeps other errnos" {
+test "UDP names a refused send or batch, keeps other errnos, and waits out a full buffer in a batch" {
     if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
-    var sockets: [3]udp.Sockets = undefined;
+    var sockets: [4]udp.Sockets = undefined;
     for (&sockets, 0..) |*socket, index| {
         errdefer for (sockets[0..index]) |bound| bound.close(std.testing.io);
         socket.* = try udp.Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
@@ -254,48 +254,88 @@ test "UDP names a refused send, reports a full buffer without waiting and keeps 
     try std.testing.expectError(error.DestinationRefused, outcome.results[0]);
     try std.testing.expectError(error.AccessDenied, outcome.results[1]);
     try std.testing.expectError(error.SystemResources, outcome.results[2]);
+    try std.testing.expectError(error.SystemResources, outcome.results[3]);
+    try std.testing.expectEqual(udp.SendOutcome{ .sent = 0, .failure = error.DestinationRefused }, outcome.batches[0]);
+    try std.testing.expectEqual(udp.SendOutcome{ .sent = 0, .failure = error.AccessDenied }, outcome.batches[1]);
+    try std.testing.expectEqual(udp.SendOutcome{ .sent = 1, .failure = null }, outcome.batches[2]);
+    try std.testing.expectEqual(udp.SendOutcome{ .sent = 0, .failure = error.SystemResources }, outcome.batches[3]);
+    // Only the batch that met a full buffer went out, through Threaded's waiting send.
+    var buffer: [16]u8 = undefined;
+    const delivered = (try readAny(&sockets[0], std.testing.io, &buffer)).?;
+    try std.testing.expectEqualStrings("filtered", delivered.data);
+    try std.testing.expectEqualDeep(udp.Address.fromNetwork(sockets[2].primary().address), udp.Address.fromNetwork(delivered.from));
+    try std.testing.expectEqual(null, try readAny(&sockets[0], std.testing.io, &buffer));
 }
 
-/// Filters sendto on one thread through seccomp: EPERM from the first socket, as an egress
-/// firewall drop reports it, EACCES from the second, and EAGAIN from the third when the send
-/// asks not to wait, as a full send buffer reports it. Threaded's own sendmmsg and a waiting
-/// send pass, so only a nonblocking send issued outside Threaded observes the errnos. The filter
-/// ends with the thread.
+/// Filters one thread's sends: EPERM from the first socket, as an egress firewall drop reports
+/// it, EACCES from the second, EAGAIN from the third when the send asks not to wait, as a full
+/// send buffer reports it, and ENOBUFS from the fourth. Each socket sends once alone and once as
+/// a batch. The filter ends with the thread.
 const Refusal = struct {
     installed: bool = false,
-    results: [3]udp.SendError!void = @splat({}),
+    results: [4]udp.SendError!void = @splat({}),
+    batches: [4]udp.SendOutcome = undefined,
 
-    const Instruction = extern struct { code: u16, jt: u8, jf: u8, k: u32 };
-    const Program = extern struct { len: c_ushort, filter: [*]const Instruction };
+    const Instruction = udp.testing.SendFilter.Instruction;
+    const Program = udp.testing.SendFilter.Program;
 
-    fn run(self: *Refusal, sockets: *const [3]udp.Sockets) void {
-        const linux = std.os.linux;
-        const bpf = linux.BPF;
-        const little = comptime @import("builtin").cpu.arch.endian() == .little;
-        const descriptor: u32 = @offsetOf(linux.SECCOMP.data, "arg0") + if (little) 0 else 4;
-        const flags: u32 = @offsetOf(linux.SECCOMP.data, "arg3") + if (little) 0 else 4;
-        const filter = [_]Instruction{
-            .{ .code = bpf.LD | bpf.W | bpf.ABS, .jt = 0, .jf = 0, .k = @offsetOf(linux.SECCOMP.data, "nr") },
-            .{ .code = bpf.JMP | bpf.JEQ | bpf.K, .jt = 0, .jf = 9, .k = @intFromEnum(linux.SYS.sendto) },
-            .{ .code = bpf.LD | bpf.W | bpf.ABS, .jt = 0, .jf = 0, .k = descriptor },
-            .{ .code = bpf.JMP | bpf.JEQ | bpf.K, .jt = 0, .jf = 1, .k = @intCast(sockets[0].primary().handle) },
-            .{ .code = bpf.RET | bpf.K, .jt = 0, .jf = 0, .k = linux.SECCOMP.RET.ERRNO | @as(u32, @intFromEnum(linux.E.PERM)) },
-            .{ .code = bpf.JMP | bpf.JEQ | bpf.K, .jt = 0, .jf = 1, .k = @intCast(sockets[1].primary().handle) },
-            .{ .code = bpf.RET | bpf.K, .jt = 0, .jf = 0, .k = linux.SECCOMP.RET.ERRNO | @as(u32, @intFromEnum(linux.E.ACCES)) },
-            .{ .code = bpf.JMP | bpf.JEQ | bpf.K, .jt = 0, .jf = 3, .k = @intCast(sockets[2].primary().handle) },
-            .{ .code = bpf.LD | bpf.W | bpf.ABS, .jt = 0, .jf = 0, .k = flags },
-            .{ .code = bpf.JMP | bpf.JSET | bpf.K, .jt = 0, .jf = 1, .k = linux.MSG.DONTWAIT },
-            .{ .code = bpf.RET | bpf.K, .jt = 0, .jf = 0, .k = linux.SECCOMP.RET.ERRNO | @as(u32, @intFromEnum(linux.E.AGAIN)) },
-            .{ .code = bpf.RET | bpf.K, .jt = 0, .jf = 0, .k = linux.SECCOMP.RET.ALLOW },
-        };
-        const program: Program = .{ .len = filter.len, .filter = &filter };
-        if (linux.errno(linux.prctl(@intFromEnum(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0)) != .SUCCESS) return;
-        if (linux.errno(linux.seccomp(linux.SECCOMP.SET_MODE_FILTER, 0, &program)) != .SUCCESS) return;
+    fn run(self: *Refusal, sockets: *const [4]udp.Sockets) void {
+        const errnos = [_]std.os.linux.E{ .PERM, .ACCES, .AGAIN, .NOBUFS };
+        var rules: [4]udp.testing.SendFilter.Rule = undefined;
+        for (&rules, sockets, errnos, 0..) |*rule, socket, errno, index| {
+            rule.* = .{ .socket = socket.primary().handle, .errno = errno, .nonblocking_only = index == 2 };
+        }
+        if (!udp.testing.SendFilter.install(&rules)) return;
         self.installed = true;
-        const destination = udp.Address.fromNetwork(sockets[0].primary().address);
-        for (sockets, &self.results) |*socket, *result| result.* = socket.sendTo(std.testing.io, destination, "filtered", 16);
+        const destination = sockets[0].primary().address;
+        for (sockets, &self.results, &self.batches) |*socket, *result, *batch| {
+            result.* = socket.sendTo(std.testing.io, udp.Address.fromNetwork(destination), "filtered", 16);
+            var message: net.OutgoingMessage = .{ .address = &destination, .data_ptr = "filtered", .data_len = 8 };
+            batch.* = socket.sendMany(std.testing.io, (&message)[0..1]);
+        }
     }
 };
+
+test "UDP batches report the exact prefix before a failing datagram and resume after it" {
+    var sockets = try udp.Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
+    defer sockets.close(std.testing.io);
+    const self_address = sockets.primary().address;
+    // Linux refuses a broadcast without SO_BROADCAST with EACCES.
+    const broadcast: net.IpAddress = .{ .ip4 = .{ .bytes = @splat(255), .port = self_address.ip4.port } };
+    var messages = [_]net.OutgoingMessage{
+        .{ .address = &self_address, .data_ptr = "first", .data_len = 5 },
+        .{ .address = &broadcast, .data_ptr = "refused", .data_len = 7 },
+        .{ .address = &self_address, .data_ptr = "third", .data_len = 5 },
+    };
+    try std.testing.expectEqual(udp.SendOutcome{ .sent = 0, .failure = error.AccessDenied }, sockets.sendMany(std.testing.io, messages[1..]));
+    try std.testing.expectEqual(udp.SendOutcome{ .sent = 1, .failure = error.AccessDenied }, sockets.sendMany(std.testing.io, &messages));
+    try std.testing.expectEqual(@as(usize, 5), messages[0].data_len);
+    try std.testing.expectEqual(udp.SendOutcome{ .sent = 1, .failure = null }, sockets.sendMany(std.testing.io, messages[2..]));
+    var buffer: [16]u8 = undefined;
+    for ([_][]const u8{ "first", "third" }) |expected| {
+        try std.testing.expectEqualStrings(expected, (try readAny(&sockets, std.testing.io, &buffer)).?.data);
+    }
+    try std.testing.expectEqual(null, try readAny(&sockets, std.testing.io, &buffer));
+}
+
+test "UDP native batches check cancellation before sending" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const Canceled = struct {
+        fn check(_: ?*anyopaque) std.Io.Cancelable!void {
+            return error.Canceled;
+        }
+    };
+    var sockets = try udp.Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
+    defer sockets.close(std.testing.io);
+    var vtable = std.testing.io.vtable.*;
+    vtable.checkCancel = Canceled.check;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    const destination = sockets.primary().address;
+    var message: net.OutgoingMessage = .{ .address = &destination, .data_ptr = "canceled", .data_len = 8 };
+    try std.testing.expectEqual(udp.SendOutcome{ .sent = 0, .failure = error.Canceled }, sockets.sendMany(io, (&message)[0..1]));
+    var buffer: [16]u8 = undefined;
+    try std.testing.expectEqual(null, try readAny(&sockets, std.testing.io, &buffer));
+}
 
 test "UDP leaves sends to a provider that replaces them" {
     var sockets = try udp.Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
@@ -306,6 +346,9 @@ test "UDP leaves sends to a provider that replaces them" {
     const destination = udp.Address.fromNetwork(sockets.primary().address);
     try std.testing.expectError(error.AddressFamilyUnsupported, sockets.sendTo(faults.io(), destination, "provider", 16));
     try std.testing.expectEqual(@as(usize, 1), faults.send_calls);
+    var message: net.OutgoingMessage = .{ .address = &sockets.primary().address, .data_ptr = "provider", .data_len = 8 };
+    try std.testing.expectEqual(udp.SendOutcome{ .sent = 0, .failure = error.AddressFamilyUnsupported }, sockets.sendMany(faults.io(), (&message)[0..1]));
+    try std.testing.expectEqual(@as(usize, 2), faults.send_calls);
 }
 
 test "UDP ready reads alternate marked families across turns and clear each one found empty" {

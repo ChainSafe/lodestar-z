@@ -417,6 +417,87 @@ test "transport isolates a failing destination in a mixed-owner batch" {
     try std.testing.expectError(error.Timeout, sink.receiveTimeout(std.testing.io, &receive_buffer, .{ .duration = .{ .raw = .zero, .clock = .awake } }));
 }
 
+test "transport fails only the connection whose destination the host refuses and keeps serving its batch" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const limits: engine_mod.Limits = .{ .connections_max = 3, .handshaking_max = 3, .dialing_max = 3, .outbound_max = 3 };
+    const hub_key = try @import("wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{111}));
+    var hub: transport_mod.Transport = .{};
+    try hub.init(std.testing.allocator, std.testing.io, .{ .host = &hub_key, .bind = .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } }, .limits = limits });
+    defer hub.deinit(std.testing.io);
+    var peers: [2]Node = .{ .{}, .{} };
+    try peers[0].init(112);
+    defer peers[0].deinit();
+    try peers[1].init(113);
+    defer peers[1].deinit();
+    const Refused = struct {
+        installed: bool = false,
+        result: anyerror!void = {},
+
+        fn run(self: *@This(), node: *transport_mod.Transport, remotes: *[2]Node) void {
+            const filter = @import("udp").testing.SendFilter;
+            if (!filter.install(&.{.{ .socket = node.udp.sockets.values[1].?.handle, .errno = .PERM }})) return;
+            self.installed = true;
+            self.result = serve(node, remotes);
+        }
+
+        /// The filter refuses every send from the hub's IPv6 socket; turns never wait, so no Io
+        /// task starts on the filtered thread.
+        fn serve(node: *transport_mod.Transport, remotes: *[2]Node) !void {
+            const io = std.testing.io;
+            const turn: transport_mod.StepOptions = .{ .wait_max_ms = 0 };
+            const refused_address: types.Address = .{ .ip6 = .{ .octets = .{0} ** 15 ++ .{1}, .port = 9 } };
+            const expected = remotes[0].transport.peerId();
+            try std.testing.expectError(error.DestinationUnreachable, node.dialPeer(io, refused_address, expected));
+            try std.testing.expectEqual(@as(u16, 0), node.engine.registry.active_len);
+            try std.testing.expectEqual(@as(u16, 0), node.engine.registry.outbound);
+            const now = try transport_mod.currentTime(io);
+            const first = try node.engine.dial(&remotes[0].transport.localAddress(), expected, now);
+            const refused = try node.engine.dial(&refused_address, expected, now);
+            const second = try node.engine.dial(&remotes[1].transport.localAddress(), remotes[1].transport.peerId(), now);
+            var events: [8]engine_mod.Event = undefined;
+            // One Initial each: the IPv4 prefix goes out, the refused one ends only its connection
+            // and the rest of the batch follows.
+            const flushed = try support.step(node, io, &events, turn);
+            try std.testing.expectEqual(@as(u32, 2), flushed.datagrams_sent);
+            try std.testing.expectEqual(@as(u32, 2), flushed.send_calls);
+            try std.testing.expectEqual(@as(u32, 1), flushed.send_failures);
+            try std.testing.expectEqual(@as(usize, 1), flushed.events);
+            try std.testing.expectEqual(refused, events[0].closed.conn);
+            try std.testing.expect(events[0].closed.reason == .send_failed);
+            try std.testing.expectEqual(@as(u16, 2), node.engine.registry.outbound);
+            // The next turn releases the slot; a new generation there is refused on its own.
+            _ = try support.step(node, io, &events, turn);
+            const again = try node.engine.dial(&refused_address, expected, now);
+            try std.testing.expectEqual(refused.index, again.index);
+            try std.testing.expect(again.generation != refused.generation);
+            try std.testing.expect(!node.engine.close(refused, 0));
+            const retried = try support.step(node, io, &events, turn);
+            try std.testing.expectEqual(@as(u32, 1), retried.send_failures);
+            try std.testing.expectEqual(@as(usize, 1), retried.events);
+            try std.testing.expectEqual(again, events[0].closed.conn);
+            var connected: [2]bool = .{ false, false };
+            var remote_events: [8]engine_mod.Event = undefined;
+            for (0..200) |_| {
+                for (remotes) |*remote| _ = try support.step(&remote.transport, io, &remote_events, turn);
+                const progress = try support.step(node, io, &events, turn);
+                for (events[0..progress.events]) |event| if (event == .connected) {
+                    for ([_]engine_mod.Handle{ first, second }, &connected) |handle, *done| {
+                        if (std.meta.eql(event.connected.conn, handle)) done.* = true;
+                    }
+                };
+                if (connected[0] and connected[1]) break;
+            }
+            try std.testing.expectEqual([2]bool{ true, true }, connected);
+        }
+    };
+    var refused: Refused = .{};
+    const thread = try std.Thread.spawn(.{}, Refused.run, .{ &refused, &hub, &peers });
+    thread.join();
+    // Kernels without seccomp filters cannot refuse the sends.
+    if (!refused.installed) return error.SkipZigTest;
+    try refused.result;
+}
+
 test "transport bounds each turn's receive drain without active connections" {
     var node: Node = .{};
     try node.init(17);

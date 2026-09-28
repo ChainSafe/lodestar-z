@@ -10,7 +10,7 @@ pub const Datagram = sockets_mod.Datagram;
 pub const ReceiveTimeoutError = sockets_mod.DatagramError;
 pub const SendError = sockets_mod.SendError;
 
-pub const SendOutcome = struct { sent: usize, failure: ?SendError };
+pub const SendOutcome = sockets_mod.SendOutcome;
 pub const Buffers = sockets_mod.Buffers;
 
 const mib = 1024 * 1024;
@@ -129,17 +129,16 @@ pub const Udp = struct {
         }
         var begin: usize = 0;
         while (begin < batch.len) {
-            const socket = self.sockets.get(addresses[begin]) orelse return .{ .sent = begin, .failure = error.AddressFamilyUnsupported };
             var end = begin + 1;
             while (end < batch.len and std.meta.activeTag(addresses[end]) == std.meta.activeTag(addresses[begin])) : (end += 1) {}
-            const failure, const count = io.vtable.netSend(io.userdata, socket.handle, messages[begin..end], .{});
-            std.debug.assert(count <= end - begin);
-            for (messages[begin..][0..count], batch[begin..][0..count], 0..) |message, sent, offset| {
+            const run = self.sockets.sendMany(io, messages[begin..end]);
+            std.debug.assert(run.sent <= end - begin);
+            for (messages[begin..][0..run.sent], batch[begin..][0..run.sent], 0..) |message, sent, offset| {
                 if (message.data_len != sent.bytes.len) return .{ .sent = begin + offset, .failure = error.MessageOversize };
                 self.counters.sent_bytes +|= message.data_len;
                 self.counters.sent_datagrams +|= 1;
             }
-            if (count != end - begin) return .{ .sent = begin + count, .failure = failure.? };
+            if (run.sent != end - begin) return .{ .sent = begin + run.sent, .failure = run.failure.? };
             begin = end;
         }
         return .{ .sent = batch.len, .failure = null };
