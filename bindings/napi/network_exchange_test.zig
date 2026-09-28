@@ -381,6 +381,8 @@ test "a stop ends checks and serving starts, and quiescence ends claims" {
     const request = try queueRequest(runtime);
     const checked = try admit(runtime, .beacon_attestation, @splat(3), "data");
     const exit = try admit(runtime, .voluntary_exit, null, "data");
+    const command = try runtime.reserveCommand(.getIdentity);
+    try runtime.queueCommand(command);
     runtime.stop = true;
     var host: Host = .{ .runtime = runtime };
     const stopped = try host.turn(&.{}, deployed);
@@ -389,10 +391,17 @@ test "a stop ends checks and serving starts, and quiescence ends claims" {
     try std.testing.expectEqual(r.Place.none, runtime.readiness.place(.serving));
     try std.testing.expectEqual(r.Place.none, runtime.readiness.place(.checks));
     try std.testing.expectEqual(State.needs_check, runtime.gossip.?.get(checked).?.state);
+    // Quiescence cancels the command, whose completion holds the close back: its exchange still delivers the peer
+    // event but claims no gossip. The close then arrives alone.
+    runtime.lock();
     runtime.quiescent = true;
+    runtime.cancelCommandsLocked();
+    runtime.recomputeLocked(.completions);
+    runtime.unlock();
     publishPeer(runtime);
     const quiescent = try host.turn(&.{}, deployed);
-    try std.testing.expect(quiescent.peers == 1 and quiescent.gossip == null);
+    try std.testing.expect(quiescent.peers == 1 and quiescent.gossip == null and quiescent.command_count == 1 and quiescent.closed == null);
+    try std.testing.expect((try host.turn(&.{}, deployed)).closed != null);
     _ = request;
 }
 
@@ -952,4 +961,27 @@ test "the close result follows the last due completion alone, a stopped build ke
     try std.testing.expectError(error.PendingException, host.turn(&.{}, control));
     try std.testing.expect(runtime.close_delivered);
     try std.testing.expectEqual(null, host.site);
+}
+
+test "the close result arrives alone although peer events wait under a peer demand, and takes none with it" {
+    var fixture: Fixture = undefined;
+    try fixture.init(false, 2);
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    for (0..5) |_| publishPeer(runtime);
+    runtime.lock();
+    runtime.stop = true;
+    runtime.quiescent = true;
+    runtime.refreshLocked();
+    runtime.unlock();
+    try std.testing.expectEqual(readiness.Place.payload, runtime.readiness.place(.peers));
+    var host: Host = .{ .runtime = runtime };
+    const closed = try host.turn(&.{}, deployed);
+    try std.testing.expectEqual(exchange.Closed{ .reason = .requested, .failure = null }, closed.closed.?);
+    try std.testing.expectEqual(@as(usize, 0), closed.peers);
+    try std.testing.expect(!closed.outcome.more and !closed.outcome.disabled);
+    // Delivered, the close ends the peer events too: no exchange takes them.
+    try std.testing.expectEqual(readiness.Place.none, runtime.readiness.place(.peers));
+    try std.testing.expectEqual(@as(usize, 0), (try host.turn(&.{}, deployed)).peers);
+    try std.testing.expectEqual(@as(u8, 5), fixture.lane.len);
 }
