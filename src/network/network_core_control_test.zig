@@ -1001,6 +1001,8 @@ test "control replacement retirement rekeys the current schedule without crediti
     const stale = op.request.?;
     try std.testing.expectEqualDeep(old, op.conn);
     try std.testing.expect(op.after_ready);
+    // The replacement reuses the operation, so keep the old one as peer control would see it.
+    var previous = op.*;
     const started = control.counters.started;
     // The client's own dial replaces the connection whose Status is unanswered.
     _ = try setup.pair.dial();
@@ -1025,6 +1027,19 @@ test "control replacement retirement rekeys the current schedule without crediti
     try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0 }, &row.health_failures);
     try std.testing.expect(row.evidence == .pending);
     try std.testing.expect(!setup.client.peer_manager.catalog.get(peer).?.relevant);
+    // A successful Status reply on the replaced connection, even uncancelled, credits nothing to
+    // the replacement: its schedule, deadline, relevance and evidence stay as they were.
+    const schedule = row.*;
+    const key = control.deadlines.get(peer.index);
+    var bytes: [wire.status_size_max]u8 = undefined;
+    const length = try wire.encodeStatus(.status_v1, &setup.server.peer_manager.local.status, &bytes);
+    reply(&setup.client, &previous, .{ .chunk = .{ .request = stale, .bytes = bytes[0..length], .fork = null } }, setup.pair.now);
+    previous.received = true;
+    reply(&setup.client, &previous, .{ .done = .{ .request = stale, .chunks = 1 } }, setup.pair.now);
+    try std.testing.expectEqualDeep(schedule, row.*);
+    try std.testing.expectEqual(key, control.deadlines.get(peer.index));
+    try std.testing.expect(!setup.client.peer_manager.catalog.get(peer).?.relevant);
+    try std.testing.expect(row.evidence == .pending);
 }
 
 test "managed control capabilities pre-Fulu Metadata3 serves configured custody count" {
@@ -1730,9 +1745,12 @@ test "managed control retries a start refused for want of a request slot after t
     try std.testing.expectEqual(row.retry_ms, setup.client.peer_manager.control.nextWakeup(&setup.client.peer_manager.catalog, &setup.client.control_protocol, setup.pair.now).?);
 }
 
-test "local publication failure preserves control schedules request fork subscriptions and demand" {
+test "local intent failing at ENR sequence exhaustion preserves control schedules request fork subscriptions and demand" {
     var setup: Setup = .{};
-    // The client's ENR sits at its last sequence, so any change to what it advertises fails to publish.
+    // The client's ENR sits at its last sequence, so an intent that changes what it advertises
+    // fails while the owner prepares it: building the record exhausts the sequence before the
+    // subscriptions are staged. Once a record is built, installing it cannot fail, so no
+    // publication-only failure is reachable.
     setup.client_discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .sequence = std.math.maxInt(u64) };
     try setup.init(&.{});
     defer setup.deinit();
