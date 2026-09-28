@@ -40,6 +40,9 @@ pub const Router = struct {
     meshsub_versions_count: u8,
     meshsub_candidates: [3]negotiate.Protocol = undefined,
     meshsub_count: u8 = 0,
+    /// The negotiator's results that `pump` translates. A field rather than a local so
+    /// ReleaseSafe does not fill it every turn.
+    raw_outcomes: [outcomes_per_pump]negotiate.Outcome = undefined,
 
     pub fn validateOptions(options: Options) Error!void {
         if (options.meshsub_versions.len == 0 or options.meshsub_versions.len > 3) {
@@ -210,8 +213,8 @@ pub const Router = struct {
 
     pub fn pump(self: *Router, engine: *engine_mod.Engine, now: types.Now, out: []Outcome) usize {
         std.debug.assert(out.len <= outcomes_per_pump);
-        var raw: [outcomes_per_pump]negotiate.Outcome = undefined;
-        const count = self.negotiator.pump(engine, now, self.supported[0..self.supported_count], raw[0..out.len]);
+        const raw = self.raw_outcomes[0..out.len];
+        const count = self.negotiator.pump(engine, now, self.supported[0..self.supported_count], raw);
         for (raw[0..count], out[0..count]) |result, *outcome| {
             if (result.direction == .inbound and result.result == .failed) {
                 std.log.scoped(.network_quic).debug("inbound_negotiation_failed connection={d}:{d} stream={d} reason={s}", .{ result.stream.conn.index, result.stream.conn.generation, result.stream.id, @tagName(result.result.failed) });

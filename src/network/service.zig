@@ -25,6 +25,9 @@ pub const Service = struct {
     router: routing.Router,
     reqresp: reqresp_mod.ReqResp,
     gossipsub: *gossip_mod.Gossipsub,
+    /// The router outcomes `dispatch` hands to their owners. A field rather than a local so
+    /// ReleaseSafe does not fill it every turn.
+    outcomes: [routing.outcomes_per_pump]routing.Outcome = undefined,
 
     pub fn validateOptions(options: Options) InitError!void {
         try routing.Router.validateOptions(options.router);
@@ -172,10 +175,9 @@ pub const Service = struct {
             if (self.applications != .active or event == .connected) continue;
             self.gossipsub.transportEvents(&self.router, engine, &.{event}, now);
         }
-        var outcomes: [routing.outcomes_per_pump]routing.Outcome = undefined;
-        const count = self.router.pump(engine, now, &outcomes);
+        const count = self.router.pump(engine, now, &self.outcomes);
         defer self.router.releaseOutcomes();
-        for (outcomes[0..count]) |outcome| {
+        for (self.outcomes[0..count]) |outcome| {
             const owner = outcome.owner orelse continue;
             if (self.rejectApplication(&outcome)) {
                 engine.closeStream(outcome.stream, 0);

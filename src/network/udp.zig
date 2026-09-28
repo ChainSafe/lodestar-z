@@ -47,6 +47,10 @@ pub const Counters = struct {
 pub const Udp = struct {
     counters: Counters = .{},
     sockets: sockets_mod.Sockets,
+    /// The sendmmsg descriptors of the batch `sendMany` is sending. Fields rather than locals so
+    /// ReleaseSafe does not fill them for every batch.
+    send_addresses: [constants.send_batch_max]net.IpAddress = undefined,
+    send_messages: [constants.send_batch_max]net.OutgoingMessage = undefined,
 
     pub fn bind(io: std.Io, addresses: Bindings) sockets_mod.BindError!Udp {
         return .{ .sockets = try sockets_mod.Sockets.bind(io, addresses) };
@@ -116,8 +120,8 @@ pub const Udp = struct {
     pub fn sendMany(self: *Udp, io: std.Io, batch: []const types.Sent) SendOutcome {
         std.debug.assert(batch.len <= constants.send_batch_max);
         std.debug.assert(batch.len > 0);
-        var addresses: [constants.send_batch_max]net.IpAddress = undefined;
-        var messages: [constants.send_batch_max]net.OutgoingMessage = undefined;
+        const addresses = &self.send_addresses;
+        const messages = &self.send_messages;
         for (batch, 0..) |sent, position| {
             if (sent.bytes.len > constants.datagram_size_max) return .{ .sent = 0, .failure = error.DatagramTooLarge };
             addresses[position] = toNetwork(sent.to);

@@ -276,7 +276,8 @@ pub const Control = struct {
         }
         self.visits +|= count;
         const due = self.due[0..count];
-        std.sort.pdq(u32, due, Rotation{ .start = self.cursor, .len = self.schedules.len }, Rotation.lessThan);
+        // std.sort.pdq fills its stack in ReleaseSafe even when there is nothing to order.
+        if (due.len > 1) std.sort.pdq(u32, due, Rotation{ .start = self.cursor, .len = self.schedules.len }, Rotation.lessThan);
         return .{ .count = count, .starts_remaining = self.options.starts_per_turn_max };
     }
     /// Returns the pass's next schedule with work, spending the start quota and advancing the
