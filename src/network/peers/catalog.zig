@@ -77,7 +77,6 @@ pub const Catalog = struct {
     established: []?u16,
     free: lists.List = .{},
     connected_count: u16 = 0,
-    relevant_count: u16 = 0,
     direct_count: u16 = 0,
     intent_revision: u64 = 0,
     /// Rejections recorded against identities, by kind.
@@ -198,17 +197,6 @@ pub const Catalog = struct {
         a.free(self.by_identity.slots);
         a.free(self.rows);
         self.* = undefined;
-    }
-
-    pub fn isDirect(self: *const Catalog, identity: *const t.PeerId) bool {
-        const peer = self.find(identity) orelse return false;
-        return self.rowFor(peer).?.direct;
-    }
-
-    pub fn removeDirect(self: *Catalog, identity: *const t.PeerId) bool {
-        const peer = self.find(identity) orelse return false;
-        if (!self.rowFor(peer).?.direct) return false;
-        return self.setDirect(peer, false);
     }
 
     pub fn directPeers(self: *const Catalog, out: []t.PeerId) error{OutputTooSmall}!usize {
@@ -430,7 +418,6 @@ pub const Catalog = struct {
             const fresh = row.established_slot == null;
             if (fresh and !self.promote(ref, options.direction, options.now_ms)) return .capacity;
             if (row.connection == null) self.connected_count += 1;
-            if (row.status != null) self.relevant_count -= 1;
             row.reputation = current_reputation;
             if (displaced) |old| self.by_connection[old.index] = null;
             connect(row, conn, options);
@@ -587,10 +574,6 @@ pub const Catalog = struct {
         row.pending_update = row.published;
     }
 
-    pub fn relevantCount(self: *const Catalog) u16 {
-        return self.relevant_count;
-    }
-
     pub fn eventsPending(self: *const Catalog) bool {
         if (@import("builtin").is_test) self.checkEvents();
         return self.event_count != 0;
@@ -650,7 +633,6 @@ pub const Catalog = struct {
         self.revision +|= 1;
         self.by_connection[conn.index] = null;
         self.connected_count -= 1;
-        if (row.status != null) self.relevant_count -= 1;
         row.connection = null;
         row.custody_work = null;
         row.custody_context = null;
@@ -791,7 +773,6 @@ pub const Catalog = struct {
         if (row.closing_reason != null) return true;
         self.revision +|= 1;
         row.closing_reason = reason;
-        if (row.status != null) self.relevant_count -= 1;
         row.status = null;
         row.pending_update = row.published;
         self.syncEvent(ref.index);
@@ -803,7 +784,6 @@ pub const Catalog = struct {
         if (row.closing_reason != null) return false;
         if (row.status == null and row.custody_work == null) return true;
         self.revision +|= 1;
-        if (row.status != null) self.relevant_count -= 1;
         row.status = null;
         row.custody_work = null;
         row.pending_update = row.published;
@@ -822,7 +802,6 @@ pub const Catalog = struct {
         const row = self.connectedRow(ref, conn) orelse return false;
         if (row.closing_reason != null) return false;
         self.revision +|= 1;
-        if (row.status == null) self.relevant_count += 1;
         row.status = status.*;
         row.intent.history_until_ms = @max(row.intent.history_until_ms, now_ms +| history_retention_ms);
         row.status_at_ms = now_ms;

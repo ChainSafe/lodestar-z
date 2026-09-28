@@ -12,6 +12,7 @@ const gossip = @import("gossipsub/root.zig");
 const options = @import("network_core_test_support.zig").options;
 const localState = @import("network_core_test_support.zig").localState;
 const Setup = @import("network_core_test_support.zig").Setup;
+const updateDemand = @import("network_core_test_support.zig").updateDemand;
 
 fn clientWakeup(setup: *Setup) ?u64 {
     return setup.client.nextWakeup(setup.pair.now, .{});
@@ -1010,7 +1011,7 @@ test "core coverage demand copies persists across slots and keeps general discov
     try setup.initOwners(&.{});
     defer setup.deinit();
     var demand: t.Demand = .{ .syncnets = 1 };
-    try setup.client.peer_manager.setDemand(&demand);
+    try updateDemand(&setup.client, &demand, setup.pair.now);
     demand.syncnets = 2;
     _ = try setup.turn(&setup.client, .{});
     try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.coverageDeficits().sync);
@@ -1024,7 +1025,7 @@ test "core coverage demand copies persists across slots and keeps general discov
     _ = try setup.turn(&setup.client, .{});
     try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.coverageDeficits().sync);
     try std.testing.expectEqual(@as(u8, 1), setup.client.peer_manager.discoveryNeed().syncnets);
-    try setup.client.peer_manager.setDemand(&.{});
+    try updateDemand(&setup.client, &.{}, setup.pair.now);
     _ = try setup.turn(&setup.client, .{});
     try std.testing.expectEqual(@as(u16, 0), setup.client.peer_manager.coverageDeficits().sync);
     try std.testing.expectEqual(@as(u8, 0), setup.client.peer_manager.discoveryNeed().syncnets);
@@ -1042,7 +1043,7 @@ test "core coverage authenticated custody differs from gossip delivery and inval
     try subscribeServer(&setup, "/eth2/00000000/data_column_sidecar_0/ssz_snappy");
     var demand: t.Demand = .{ .syncnets = 1 };
     demand.group_targets[0] = 1;
-    try setup.client.peer_manager.setDemand(&demand);
+    try updateDemand(&setup.client, &demand, setup.pair.now);
     for (0..60) |_| try setup.step(0);
     setup.pair.advance(1_000);
     setup.client.peer_manager.reconcile(setup.client.service.gossipsub, &setup.client.control_protocol, setup.pair.now);
@@ -1146,7 +1147,7 @@ test "core coverage bounded custody work resumes without output and stale metada
     defer setup.deinit();
     var demand: t.Demand = .{ .syncnets = 1 };
     demand.group_targets[0] = 1;
-    try setup.client.peer_manager.setDemand(&demand);
+    try updateDemand(&setup.client, &demand, setup.pair.now);
     for (0..50) |_| try setup.step(0);
     var initial: [4]t.Snapshot = undefined;
     _ = setup.client.peer_manager.snapshots(&initial);
@@ -1212,7 +1213,7 @@ test "core coverage review same-digest group update disables cached automatic ca
     defer setup.deinit();
     var candidate = try candidateFor(&setup.server.peerId(), 128);
     candidate.syncnets = 1;
-    try setup.client.peer_manager.setDemand(&.{ .syncnets = 1 });
+    try updateDemand(&setup.client, &.{ .syncnets = 1 }, setup.pair.now);
     try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.discoveredBatch(setup.client.service.gossipsub, &setup.client.control_protocol, &.{candidate}, setup.pair.now).accepted);
     setup.client.peer_manager.reconcile(setup.client.service.gossipsub, &setup.client.control_protocol, setup.pair.now);
     local.fork.custody_groups = 64;
@@ -1260,7 +1261,7 @@ test "core reconciliation reads preserve completed demand and catalog evaluation
     try std.testing.expectEqualDeep(DiscoveryNeed{}, view.discoveryNeed());
     var demand: t.Demand = .{ .attnets = 0x81, .syncnets = 1 };
     demand.group_targets[0] = 1;
-    try setup.client.peer_manager.setDemand(&demand);
+    try updateDemand(&setup.client, &demand, setup.pair.now);
     _ = try setup.turn(&setup.client, .{});
     const deficits = view.coverageDeficits();
     const need = view.discoveryNeed();
@@ -1271,7 +1272,7 @@ test "core reconciliation reads preserve completed demand and catalog evaluation
     try std.testing.expectEqual(@as(u8, 0x81), need.attnets[0]);
     try std.testing.expectEqual(@as(u8, 1), need.syncnets);
 
-    try setup.client.peer_manager.setDemand(&.{});
+    try updateDemand(&setup.client, &.{}, setup.pair.now);
     try std.testing.expectEqual(setup.pair.now.mono_ms, clientWakeup(&setup).?);
     const dirty = view.counters;
     for (0..8) |_| {
@@ -1337,7 +1338,7 @@ test "core reconciliation clears policy observations at quiescence and shutdown"
         var setup: Setup = .{};
         try setup.initOwners(&.{});
         defer setup.deinit();
-        try setup.client.peer_manager.setDemand(&.{ .syncnets = 1 });
+        try updateDemand(&setup.client, &.{ .syncnets = 1 }, setup.pair.now);
         _ = try setup.turn(&setup.client, .{});
         try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.coverageDeficits().sync);
         try std.testing.expect(setup.client.peer_manager.discoveryNeed().general);
@@ -1364,7 +1365,7 @@ test "core reconciliation raw mutators and deadlines invalidate once" {
     defer setup.deinit();
     try subscribeServer(&setup, "/eth2/00000000/sync_committee_0/ssz_snappy");
     const demand: t.Demand = .{ .syncnets = 1 };
-    try setup.client.peer_manager.setDemand(&demand);
+    try updateDemand(&setup.client, &demand, setup.pair.now);
     for (0..60) |_| try setup.step(0);
     setup.pair.advance(setup.client.peer_manager.control.options.inbound_status_grace_ms);
     setup.client.peer_manager.reconcile(setup.client.service.gossipsub, &setup.client.control_protocol, setup.pair.now);
@@ -1427,11 +1428,11 @@ test "core reconciliation raw mutators and deadlines invalidate once" {
     _ = setup.client.removeDirectPeer(&snapshots[0].identity);
     setup.client.peer_manager.reconcile(setup.client.service.gossipsub, &setup.client.control_protocol, clock);
     try std.testing.expectEqual(penalized + 2, setup.client.peer_manager.counters.selections);
-    try setup.client.peer_manager.setDemand(&.{});
+    try updateDemand(&setup.client, &.{}, clock);
     setup.client.peer_manager.reconcile(setup.client.service.gossipsub, &setup.client.control_protocol, clock);
     try std.testing.expectEqual(@as(u16, 0), setup.client.peer_manager.coverageDeficits().sync);
     try std.testing.expectEqual(penalized + 3, setup.client.peer_manager.counters.selections);
-    try setup.client.peer_manager.setDemand(&.{});
+    try updateDemand(&setup.client, &.{}, clock);
     setup.client.peer_manager.reconcile(setup.client.service.gossipsub, &setup.client.control_protocol, clock);
     try std.testing.expectEqual(penalized + 3, setup.client.peer_manager.counters.selections);
     try std.testing.expect(setup.client.peer_manager.disconnect(&setup.client.control_protocol, peer, .host, clock));
@@ -1680,7 +1681,7 @@ test "core sampling delivery follows real outbound stream retirement replacement
         try setup.step(0);
         setup.pair.advance(25);
     }
-    try setup.client.peer_manager.setDemand(&demand);
+    try updateDemand(&setup.client, &demand, setup.pair.now);
     setup.client.peer_manager.reconcile(setup.client.service.gossipsub, &setup.client.control_protocol, setup.pair.now);
     try std.testing.expectEqual(@as(u16, 0), setup.client.peer_manager.coverageDeficits().groups);
     const handler = setup.client.service.gossipsub;

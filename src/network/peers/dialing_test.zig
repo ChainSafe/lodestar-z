@@ -312,9 +312,10 @@ test "peer dial queue bounded pressure generation exhaustion and zero output do 
     try std.testing.expect(q.dialFailed(&catalog, token, 0));
     try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 0, &out));
     try std.testing.expect(out[0].peer.eql(&second));
-    try std.testing.expect(catalog.isDirect(&first));
-    _ = catalog.removeDirect(&first);
-    try std.testing.expect(!catalog.isDirect(&first));
+    const first_peer = catalog.find(&first).?;
+    try std.testing.expect(catalog.rowFor(first_peer).?.direct);
+    _ = catalog.setDirect(first_peer, false);
+    try std.testing.expect(!catalog.rowFor(first_peer).?.direct);
     accept(&q, &catalog, &first, .{ .index = 0, .generation = 1 }, 1);
     try std.testing.expect(!catalog.intents.isSet(catalog.find(&first).?.index));
     q.active[token.index].generation = std.math.maxInt(u64);
@@ -684,7 +685,7 @@ test "peer dial review group shrink invalidates all hints while preserving owner
     try q.enqueue(&catalog, &candidate.peer, &.{manual}, true, eligible);
     q.configureSelection(&catalog, &wanted, true, &smaller, eligible);
     try std.testing.expectEqual(@as(u16, 0), candidates[0].intent.priority);
-    try std.testing.expect(catalog.isDirect(&candidate.peer));
+    try std.testing.expect(catalog.rowFor(catalog.find(&candidate.peer).?).?.direct);
     try std.testing.expectEqual(conn, q.active[0].connection.?);
     try std.testing.expectEqual(@as(usize, 0), q.poll(&catalog, eligible, &out));
     try std.testing.expect(q.dialClosed(&catalog, conn, .handshake_timeout, eligible));
@@ -763,7 +764,7 @@ test "peer direct membership enumeration is complete atomic and read only" {
     const addresses = [_]t.Address{ address, .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 2345 } } };
     const sentinel: t.PeerId = .{ .bytes = @splat(9) };
     try std.testing.expectEqual(@as(usize, 0), try catalog.directPeers(&.{}));
-    try std.testing.expect(!catalog.removeDirect(&first));
+    try std.testing.expect(catalog.find(&first) == null);
     try q.enqueue(&catalog, &first, &addresses, true, 0);
     try q.enqueue(&catalog, &first, &addresses, true, 0);
     try q.enqueue(&catalog, &second, &addresses, true, 0);
@@ -778,11 +779,15 @@ test "peer direct membership enumeration is complete atomic and read only" {
     try std.testing.expectEqualDeep([_]t.PeerId{ first, second }, out);
     try std.testing.expectEqualDeep(before, q);
     try std.testing.expectEqualDeep(rows, candidates[0..2].*);
-    try std.testing.expect(catalog.removeDirect(&first));
-    try std.testing.expect(!catalog.removeDirect(&first));
+    const first_peer = catalog.find(&first).?;
+    try std.testing.expect(catalog.setDirect(first_peer, false));
+    try std.testing.expect(!catalog.rowFor(first_peer).?.direct);
+    const revision = catalog.revision;
+    try std.testing.expect(catalog.setDirect(first_peer, false));
+    try std.testing.expectEqual(revision, catalog.revision);
     try std.testing.expectEqual(@as(usize, 1), try catalog.directPeers(&out));
     try std.testing.expect(out[0].eql(&second));
-    try std.testing.expect(catalog.removeDirect(&second));
+    try std.testing.expect(catalog.setDirect(catalog.find(&second).?, false));
     try std.testing.expectEqual(@as(usize, 0), try catalog.directPeers(&.{}));
 }
 
@@ -967,7 +972,7 @@ test "peer manual dial deadlines merge while direct reconnects back off" {
         now = due;
     }
     try std.testing.expectEqual(@as(u8, 3), catalog.rowFor(catalog.find(&peer).?).?.intent.failures);
-    try std.testing.expect(catalog.isDirect(&peer));
+    try std.testing.expect(catalog.rowFor(catalog.find(&peer).?).?.direct);
 }
 
 test "peer dial simultaneous inbound success does not record the redundant outbound close as failure" {
