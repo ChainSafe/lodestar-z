@@ -26,8 +26,8 @@ pub fn admit(table: *processor.GossipProcessor, owner: *gossip.Gossipsub, candid
         table.refuse(kind, .source_full);
         return false;
     }
-    var tokens: [processor.batch_max]processor.Token = undefined;
-    var handles: [processor.batch_max]gossip.ValidationHandle = undefined;
+    const tokens = &table.victim_tokens;
+    const handles = &table.victim_handles;
     var count: usize = 0;
     var bytes: usize = 0;
     const states = [_]processor.State{ .queued, .needs_check, .checking, .waiting };

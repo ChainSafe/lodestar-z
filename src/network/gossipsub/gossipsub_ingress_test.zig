@@ -274,3 +274,51 @@ test "gossip admission leaves queued work intact when a host copy pins the requi
     try t.expect(table.get(victim) != null);
     try t.expectEqual(processor.State.copying, table.get(copying.tokens[0]).?.state);
 }
+
+test "gossip admission after a refused victim selection retires only its own victims" {
+    var opts = options;
+    const limits: processor.limits_mod.Limits = @splat(.{ .items = 4, .bytes = 8192 });
+    var boundary = @import("topic_fixture.zig").bytes(.{ 1, 2, 3, 4 });
+    for (&boundary.rules) |*rule| rule.ssz_max = 6000;
+    opts.topic_policy = &.{boundary};
+    opts.processor_limits = limits;
+    opts.validation_capacity = processor.limits_mod.items(&limits);
+    var g = try support.init(t.allocator, opts);
+    defer g.deinit();
+    var table = try processor.GossipProcessor.init(t.allocator, processor.Plan.resolve(&opts, &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }}));
+    defer table.deinit();
+    defer table.close();
+    var consumer: Consumer = .{ .table = &table, .owner = &g };
+    const sink = consumer.sink();
+    g.message_sink = &sink;
+    try support.subscribe(&g, attestation);
+    for (0..3) |i| _ = support.addPeer(&g, .{ .index = @intCast(i), .generation = 1 }, .v1_2).?;
+    var large: [6000]u8 = undefined;
+    vote(&large, 1, 1);
+    try receive(&g, 0, attestation, &large);
+    const checks = table.claimChecks(1, processor.batch_max);
+    try t.expect(table.classify(checks.tokens[0], true));
+    table.maintain(60, table.slot);
+    const copying = table.claim(60);
+    try t.expectEqual(@as(usize, 1), copying.len);
+    var small: [240]u8 = undefined;
+    for (0..2) |i| {
+        vote(&small, @intCast(i + 2), 1);
+        try receive(&g, 1, attestation, &small);
+    }
+    const oldest_small = table.freshnessVictim(.beacon_attestation).?;
+    var candidate: [1000]u8 = undefined;
+    vote(&candidate, 4, 1);
+    try receive(&g, 2, attestation, &candidate);
+    try t.expectEqual(@as(u64, 1), table.diag.capacityRefusals);
+    try t.expectEqual(@as(u64, 0), table.diag.reportsAppliedIgnore);
+    try t.expectEqual(@as(usize, 3), table.diag.occupied);
+    table.finish(&copying, false);
+    vote(&candidate, 5, 1);
+    try receive(&g, 2, attestation, &candidate);
+    try t.expectEqual(@as(u64, 1), table.diag.reportsAppliedIgnore);
+    try t.expect(table.get(copying.tokens[0]) == null);
+    try t.expect(table.get(oldest_small) != null);
+    try t.expectEqual(@as(usize, 3), table.diag.occupied);
+    try t.expectEqual(@as(usize, 3), g.resourceSnapshot().pending_validations);
+}

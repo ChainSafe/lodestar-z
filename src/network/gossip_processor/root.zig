@@ -143,6 +143,10 @@ pub const GossipProcessor = struct {
         items: [limits_mod.kind_count]usize = @splat(0),
         bytes: [limits_mod.kind_count]usize = @splat(0),
     } = @splat(.{}),
+    /// The victims `admit` selects and retires within one call. Fields rather than locals so
+    /// ReleaseSafe does not fill them for every admission.
+    victim_tokens: [batch_max]Token = undefined,
+    victim_handles: [batch_max]native.ValidationHandle = undefined,
 
     pub const admit = @import("admission.zig").admit;
 
