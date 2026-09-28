@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import {resolve} from "node:path";
 import {Child, verifyExecutable, waitFor} from "./child.mjs";
 import {TOPIC, encodePayload, messageId, payload, readPayload, sendFragments, summary} from "./codec.mjs";
-import {status2} from "./managed_wire.mjs";
+import {status2} from "./control_wire.mjs";
 import {stockPackages} from "./stock_packages.mjs";
 
 const hostRoot = process.argv[3];

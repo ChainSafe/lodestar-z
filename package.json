@@ -49,7 +49,7 @@
     "network:package": "node scripts/lodestar_package.mjs",
     "test:network-package": "node --test test/interop/lodestar_package*.test.mjs",
     "test:network-interop": "zig build build-exe:network_interop_peer -Doptimize=ReleaseSafe && node --max-old-space-size=256 test/interop/run.mjs zig-out/bin/network_interop_peer",
-    "test:network-managed-interop": "zig build build-exe:managed_interop_peer -Doptimize=ReleaseSafe && node --max-old-space-size=256 test/interop/managed_run.mjs",
+    "test:network-core-interop": "zig build build-exe:core_interop_peer -Doptimize=ReleaseSafe && node --max-old-space-size=256 test/interop/core_run.mjs",
     "test:network-identify-interop": "zig build build-exe:network_interop_peer -Doptimize=ReleaseSafe && node --max-old-space-size=256 test/interop/identify_run.mjs zig-out/bin/network_interop_peer installed",
     "test": "NODE_OPTIONS='--expose-gc' vitest run bindings/test/*.test.ts",
     "benchmark": "NODE_OPTIONS='--import tsx' benchmark 'bindings/perf/**/*.test.ts' --isolate --config .benchrc.yaml --defaultBranch main",

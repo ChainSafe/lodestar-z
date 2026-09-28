@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import {readFile} from "node:fs/promises";
 import {boundedLines} from "./bounded_lines.mjs";
 import {encodePayload, messageId, payload, readPayload, sendFragments, summary} from "./codec.mjs";
-import {readEmptyRequest} from "./managed_control.mjs";
-import {uint64} from "./managed_wire.mjs";
+import {readEmptyRequest} from "./control_handler.mjs";
+import {uint64} from "./control_wire.mjs";
 import {testChain} from "./network_chain.mjs";
 import {stockPackages} from "./stock_packages.mjs";
 

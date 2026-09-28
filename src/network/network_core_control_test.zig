@@ -15,7 +15,7 @@ fn reply(node: *@import("network_core.zig").NetworkCore, op: *const @import("con
     manager.control.rekey(&manager.catalog, &node.control_protocol, op.peer.index);
 }
 
-test "managed fork revalidation protects retention but old replies never restore application relevance" {
+test "core fork revalidation protects retention but old replies never restore application relevance" {
     var setup: Setup = .{};
     try setup.init(&.{ .fork = .{ .fork = .fulu }, .metadata = .{ .custody_group_count = 1 } });
     defer setup.deinit();
@@ -53,7 +53,7 @@ test "managed fork revalidation protects retention but old replies never restore
     try std.testing.expectEqual(t.DisconnectReason.incompatible_fork, setup.client.peer_manager.catalog.get(peer.peer).?.disconnect_reason.?);
 }
 
-test "managed fork revalidation excludes peers that never established relevance" {
+test "core fork revalidation excludes peers that never established relevance" {
     var setup: Setup = .{};
     try setup.initOwners(&.{});
     defer setup.deinit();
@@ -68,7 +68,7 @@ test "managed fork revalidation excludes peers that never established relevance"
     try std.testing.expectEqual(@as(?u64, null), setup.client.peer_manager.control.revalidationDeadline(peer, conn, setup.pair.now));
 }
 
-test "managed production fork capabilities defer rejected Status probes only during revalidation" {
+test "core production fork capabilities defer rejected Status probes only during revalidation" {
     const capabilities = @import("capabilities.zig");
     var setup: Setup = .{};
     var opts = @import("network_core_test_support.zig").options();
@@ -100,7 +100,7 @@ test "managed production fork capabilities defer rejected Status probes only dur
     try std.testing.expectEqual(t.DisconnectReason.health_error, setup.client.peer_manager.catalog.get(peer).?.disconnect_reason.?);
 }
 
-test "managed production Fulu receives old Status only with established revalidation semantics" {
+test "core production Fulu receives old Status only with established revalidation semantics" {
     const capabilities = @import("capabilities.zig");
     for ([_]bool{ false, true }) |established| {
         var setup: Setup = .{};
@@ -137,7 +137,7 @@ test "managed production Fulu receives old Status only with established revalida
     }
 }
 
-test "managed local pruning records automatic redial backoff separately from peer faults" {
+test "core local pruning records automatic redial backoff separately from peer faults" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -155,7 +155,7 @@ test "managed local pruning records automatic redial backoff separately from pee
     try std.testing.expect(setup.client.peer_manager.catalog.get(peer).?.ban_until_ms > pruned.redial_until_ms);
 }
 
-test "managed admission evaluation expires without protocol progress" {
+test "core admission evaluation expires without protocol progress" {
     var setup: Setup = .{};
     var opts = @import("network_core_test_support.zig").options();
     opts.core.peers.target_peers = 0;
@@ -185,7 +185,7 @@ test "managed admission evaluation expires without protocol progress" {
     try std.testing.expectEqual(t.DisconnectReason.count_pruning, setup.client.peer_manager.catalog.get(peer).?.disconnect_reason.?);
 }
 
-test "managed records a buffered Goodbye before transport cancellation and preserves selected local reasons" {
+test "core records a buffered Goodbye before transport cancellation and preserves selected local reasons" {
     const multistream = @import("wire/multistream.zig");
     const codec = @import("reqresp/codec.zig");
     for ([_]bool{ false, true }) |local_ban| {
@@ -236,7 +236,7 @@ test "managed records a buffered Goodbye before transport cancellation and prese
     }
 }
 
-test "managed local head and metadata updates preserve periodic status scheduling" {
+test "core local head and metadata updates preserve periodic status scheduling" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -263,7 +263,7 @@ test "managed local head and metadata updates preserve periodic status schedulin
     try std.testing.expect(setup.client.peer_manager.control.schedules[peer.index].status_due_ms > due);
 }
 
-test "managed stale metadata finishes one refresh while periodic Status and later changes progress" {
+test "core stale metadata finishes one refresh while periodic Status and later changes progress" {
     for ([_]u64{ 9, 10 }) |reply_sequence| {
         var setup: Setup = .{};
         try setup.init(&.{ .metadata = .{ .seq_number = 10 } });
@@ -315,7 +315,7 @@ test "managed stale metadata finishes one refresh while periodic Status and late
     }
 }
 
-test "managed control accepts zero custody metadata without retaining previous custody credit" {
+test "core control accepts zero custody metadata without retaining previous custody credit" {
     const fork: t.ForkContext = .{ .fork = .fulu, .custody_requirement = 4, .minimum_sampling_groups = 8 };
     var setup: Setup = .{};
     try setup.init(&.{ .fork = fork, .metadata = .{ .custody_group_count = fork.custody_groups } });
@@ -363,7 +363,7 @@ test "managed control accepts zero custody metadata without retaining previous c
     try std.testing.expect(row.closing == null and row.metadata_due_ms == null);
 }
 
-test "managed native stalled fork transition only wakes for eligible work" {
+test "core native stalled fork transition only wakes for eligible work" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -402,7 +402,7 @@ test "managed native stalled fork transition only wakes for eligible work" {
     try std.testing.expect(setup.client.peer_manager.control.nextWakeup(&setup.client.peer_manager.catalog, &setup.client.control_protocol, setup.pair.now).? > setup.pair.now.mono_ms);
 }
 
-test "managed native host fork transition cancels old maintenance without reviving closing peers" {
+test "core native host fork transition cancels old maintenance without reviving closing peers" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -448,7 +448,7 @@ test "managed native host fork transition cancels old maintenance without revivi
     try std.testing.expectEqual(deadline, setup.client.peer_manager.control.schedules[before.peer.index].closing.?.deadline_ms);
 }
 
-test "managed native previous fork request grace does not refresh relevance and expires" {
+test "core native previous fork request grace does not refresh relevance and expires" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -513,7 +513,7 @@ fn previousStatus(setup: *Setup) !void {
     try std.testing.expect(done);
 }
 
-test "managed control native Fulu serves older schemas but old Status cannot establish relevance" {
+test "core control native Fulu serves older schemas but old Status cannot establish relevance" {
     const local: t.LocalState = .{
         .fork = .{ .fork = .fulu },
         .status = .{ .earliest_available_slot = 0 },
@@ -616,7 +616,7 @@ test "managed control native Fulu serves older schemas but old Status cannot est
     }
 }
 
-test "managed native application response borrows survive same turn hard close" {
+test "core native application response borrows survive same turn hard close" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -689,7 +689,7 @@ test "managed native application response borrows survive same turn hard close" 
     );
 }
 
-test "managed native gossip admission precedes Status without establishing managed relevance" {
+test "core native gossip admission precedes Status without establishing relevance" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -718,7 +718,7 @@ test "managed native gossip admission precedes Status without establishing manag
     try std.testing.expectEqual(@as(u16, 0), setup.server.peer_manager.peerCounts().relevant);
 }
 
-test "managed native shutdown cancels shared negotiations before native retirement without outputs" {
+test "core native shutdown cancels shared negotiations before native retirement without outputs" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -736,7 +736,7 @@ test "managed native shutdown cancels shared negotiations before native retireme
     try std.testing.expectEqual(@as(u16, 0), setup.pair.client.registry.active_len);
 }
 
-test "managed native inbound application per peer cap protects control from extra raw bulk owners" {
+test "core native inbound application per peer cap protects control from extra raw bulk owners" {
     var setup: Setup = .{};
     var options = @import("network_core_test_support.zig").options();
     options.core.service.reqresp.inbound_max = 24;
@@ -810,7 +810,7 @@ test "managed native inbound application per peer cap protects control from extr
     );
 }
 
-test "managed native older Ping sequence cannot confirm cached metadata freshness" {
+test "core native older Ping sequence cannot confirm cached metadata freshness" {
     var setup: Setup = .{};
     try setup.init(&.{ .metadata = .{ .seq_number = 10 } });
     defer setup.deinit();
@@ -827,7 +827,7 @@ test "managed native older Ping sequence cannot confirm cached metadata freshnes
     try std.testing.expect(snapshots[0].relevant);
 }
 
-test "managed native immutable Status writer survives local update" {
+test "core native immutable Status writer survives local update" {
     var setup: Setup = .{};
     const original: t.LocalState = .{ .status = .{ .head_slot = 40 } };
     try setup.init(&original);
@@ -856,7 +856,7 @@ test "managed native immutable Status writer survives local update" {
     try std.testing.expectEqual(@as(u64, 80), snapshots[0].status.?.head_slot);
 }
 
-test "managed control native Goodbye maps shutdown incompatibility and fault wire reasons" {
+test "core control native Goodbye maps shutdown incompatibility and fault wire reasons" {
     const cases = [_]struct { reason: t.DisconnectReason, wire_reason: u64 }{
         .{ .reason = .shutdown, .wire_reason = 1 },
         .{ .reason = .incompatible_fork, .wire_reason = 2 },
@@ -891,7 +891,7 @@ test "managed control native Goodbye maps shutdown incompatibility and fault wir
     }
 }
 
-test "managed control irrelevant metadata cannot create an ineligible wakeup" {
+test "core control irrelevant metadata cannot create an ineligible wakeup" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -915,7 +915,7 @@ test "managed control irrelevant metadata cannot create an ineligible wakeup" {
     try std.testing.expectEqual(started + 1, setup.client.peer_manager.control.counters.started);
 }
 
-test "managed control does not schedule gossip admission alongside active request" {
+test "core control does not schedule gossip admission alongside active request" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -938,7 +938,7 @@ test "managed control does not schedule gossip admission alongside active reques
     try std.testing.expect(setup.client.peer_manager.catalog.get(peer).?.connection == null);
 }
 
-test "managed control cancelled canonical requests retain buffers until local retirement" {
+test "core control cancelled canonical requests retain buffers until local retirement" {
     var setup: Setup = .{};
     var opts = @import("network_core_test_support.zig").options();
     opts.core.peers.max_peers = 2;
@@ -1042,7 +1042,7 @@ test "control replacement retirement rekeys the current schedule without crediti
     try std.testing.expect(row.evidence == .pending);
 }
 
-test "managed control capabilities pre-Fulu Metadata3 serves configured custody count" {
+test "core control capabilities pre-Fulu Metadata3 serves configured custody count" {
     const local: t.LocalState = .{ .metadata = .{ .custody_group_count = 1 } };
     var setup: Setup = .{};
     try setup.init(&local);
@@ -1195,7 +1195,7 @@ test "identify local refusal retries after one second without resetting accepted
     try std.testing.expectEqualStrings("core", setup.client.peer_manager.catalog.get(peer).?.identify.?.agent.?.slice());
 }
 
-test "managed native targeted Status only schedules the full current nonclosing owner" {
+test "core native targeted Status only schedules the full current nonclosing owner" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -1232,7 +1232,7 @@ test "managed native targeted Status only schedules the full current nonclosing 
     try std.testing.expect(!setup.client.peer_manager.reStatusPeer(&setup.client.control_protocol, selected.peer, selected.connection.?, setup.pair.now));
 }
 
-test "managed native application response borrows survive immediate public close" {
+test "core native application response borrows survive immediate public close" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -1479,7 +1479,7 @@ test "peer control retires each connection's schedule once across connection gen
     try std.testing.expectEqualSlices(u64, &.{ 1, 1 }, &control.counters.events.connected);
 }
 
-test "managed control response deadline survives continuous peer progress" {
+test "core control response deadline survives continuous peer progress" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -1531,7 +1531,7 @@ test "managed control response deadline survives continuous peer progress" {
     };
 }
 
-test "managed coalesces silent inbound request owners before host request delivery" {
+test "core coalesces silent inbound request owners before host request delivery" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -1566,7 +1566,7 @@ fn remoteSequence(node: *@import("network_core.zig").NetworkCore, sequence: u64)
     node.peer_manager.local.metadata.seq_number = sequence;
 }
 
-test "managed control scores intrinsic decoding once and keeps custody schema limits separate" {
+test "core control scores intrinsic decoding once and keeps custody schema limits separate" {
     for ([_]bool{ false, true }) |intrinsic| {
         var setup: Setup = .{};
         try setup.init(&.{ .fork = .{ .fork = .fulu }, .metadata = .{ .custody_group_count = 1 } });
@@ -1613,7 +1613,7 @@ test "managed control scores intrinsic decoding once and keeps custody schema li
     }
 }
 
-test "managed request terminal scores captured identity without a JavaScript consumer" {
+test "core request terminal scores captured identity without a JavaScript consumer" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -1648,7 +1648,7 @@ test "managed request terminal scores captured identity without a JavaScript con
     try std.testing.expectEqual(@as(f64, -10), setup.client.peer_manager.catalog.get(peer).?.score);
 }
 
-test "managed idle connected peers cost no control or dial visits" {
+test "core idle connected peers cost no control or dial visits" {
     const Source = @import("wake_sources.zig").Source;
     var setup: Setup = .{};
     try setup.init(&.{});
@@ -1686,7 +1686,7 @@ test "managed idle connected peers cost no control or dial visits" {
     try std.testing.expectEqual(refresh_visits, setup.client.peer_manager.catalog.refresh_visits);
 }
 
-test "managed control starts a due ping or Status on the turn its deadline passes" {
+test "core control starts a due ping or Status on the turn its deadline passes" {
     for ([_]rr.Protocol{ .ping_v1, .status_v1 }) |protocol| {
         var opts = @import("network_core_test_support.zig").options();
         // A Status interval shorter than the ping interval makes Status the next probe.
@@ -1718,7 +1718,7 @@ test "managed control starts a due ping or Status on the turn its deadline passe
     }
 }
 
-test "managed control retries a start refused for want of a request slot after the local retry delay" {
+test "core control retries a start refused for want of a request slot after the local retry delay" {
     var opts = @import("network_core_test_support.zig").options();
     opts.core.peers.max_peers = 2;
     opts.core.peers.target_peers = 1;

@@ -25,7 +25,7 @@ fn settle(setup: *support.Setup) !void {
     setup.client.peer_manager.reconcile(setup.client.service.gossipsub, &setup.client.control_protocol, setup.pair.now);
 }
 
-test "managed coverage counts real duty subscriptions separately from custodians" {
+test "core coverage counts real duty subscriptions separately from custodians" {
     var setup: support.Setup = .{};
     const local: t.LocalState = .{ .fork = .{ .fork = .fulu, .minimum_sampling_groups = 8 }, .status = .{ .earliest_available_slot = 0 }, .metadata = .{ .custody_group_count = 4 } };
     try init(&setup, &local);
@@ -68,7 +68,7 @@ test "managed coverage counts real duty subscriptions separately from custodians
     try equal(@as(f64, 0), setup.client.peer_manager.catalog.get(peer.peer).?.score);
 }
 
-test "managed coverage coalesces subscription and score changes with operation eligibility" {
+test "core coverage coalesces subscription and score changes with operation eligibility" {
     var setup: support.Setup = .{};
     try init(&setup, &.{ .fork = .{ .fork = .altair } });
     defer setup.deinit();
@@ -118,7 +118,7 @@ test "managed coverage coalesces subscription and score changes with operation e
     try equal(@as(f64, 0), setup.client.peer_manager.catalog.get(snapshots[0].peer).?.score);
 }
 
-test "managed coverage gives initial subscriptions finite grace even after metadata arrives" {
+test "core coverage gives initial subscriptions finite grace even after metadata arrives" {
     var setup: support.Setup = .{};
     var opts = support.options();
     opts.core.peers.target_peers = 0;

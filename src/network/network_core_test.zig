@@ -86,7 +86,7 @@ const MaintenancePeers = struct {
     }
 };
 
-test "managed runtime rejects incomplete serving state before startup allocation" {
+test "core rejects incomplete serving state before startup allocation" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{1}));
     var opts = options(&key);
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
@@ -99,7 +99,7 @@ test "managed runtime rejects incomplete serving state before startup allocation
     try std.testing.expectEqual(@as(usize, 0), failing.alloc_index);
 }
 
-test "managed maintenance isolates slow peers and full application capacity" {
+test "core maintenance isolates slow peers and full application capacity" {
     const rr = @import("reqresp/root.zig");
     var fixture = try MaintenancePeers.init();
     defer fixture.deinit();
@@ -142,7 +142,7 @@ test "managed maintenance isolates slow peers and full application capacity" {
     try std.testing.expectEqual(calls, hub.reservations.allocation_calls);
 }
 
-test "managed runtime validates capacities and current application fork before allocation" {
+test "core validates capacities and current application fork before allocation" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{1}));
     var node: runtime.NetworkCore = undefined;
     var opts = options(&key);
@@ -156,7 +156,7 @@ test "managed runtime validates capacities and current application fork before a
     try std.testing.expectError(error.UnknownFork, node.init(failing.allocator(), std.testing.io, &opts.resolved, opts.startup));
 }
 
-test "managed runtime loads at most 256 remembered peers and snapshots them" {
+test "core loads at most 256 remembered peers and snapshots them" {
     const remembered = @import("peers/remembered.zig");
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{1}));
     var node: runtime.NetworkCore = undefined;
@@ -179,7 +179,7 @@ test "managed runtime loads at most 256 remembered peers and snapshots them" {
     try std.testing.expectEqual(@as(u64, 2), node.peer_manager.catalog.remembered.counters.seeds[@intFromEnum(remembered.Seed.loaded)]);
 }
 
-test "managed runtime metrics copy peer processing work without advancing it" {
+test "core metrics copy peer processing work without advancing it" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{1}));
     var node: runtime.NetworkCore = undefined;
     const opts = options(&key);
@@ -197,7 +197,7 @@ test "managed runtime metrics copy peer processing work without advancing it" {
     try std.testing.expectEqualDeep(peer_work, node.peer_manager.counters);
 }
 
-test "managed runtime local transaction sequences no-op schedule and rollback" {
+test "core local transaction sequences no-op schedule and rollback" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{1}));
     var opts = options(&key);
     opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .engine = .{
@@ -237,7 +237,7 @@ test "managed runtime local transaction sequences no-op schedule and rollback" {
     try std.testing.expectError(error.InvalidSchedule, updateLocal(&node, &local, invalid, now));
 }
 
-test "managed runtime signed bootstrap reaches relevant peer with zero and one outputs" {
+test "core signed bootstrap reaches relevant peer with zero and one outputs" {
     const key_a = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{11}));
     const key_b = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{12}));
     var opts_b = options(&key_b);
@@ -266,7 +266,7 @@ test "managed runtime signed bootstrap reaches relevant peer with zero and one o
     var events: [1]t.Event = undefined;
     var ready = false;
     const start = try @import("transport.zig").currentTime(std.testing.io);
-    errdefer std.debug.print("managed scenario elapsed={}ms a={any} b={any}\n", .{ a.last_now.mono_ms -| start.mono_ms, a.peerCounts(), b.peerCounts() });
+    errdefer std.debug.print("core scenario elapsed={}ms a={any} b={any}\n", .{ a.last_now.mono_ms -| start.mono_ms, a.peerCounts(), b.peerCounts() });
     for (0..3000) |turn| {
         const now = try @import("transport.zig").currentTime(std.testing.io);
         if (now.mono_ms - start.mono_ms > 10_000) break;
@@ -312,7 +312,7 @@ test "managed runtime signed bootstrap reaches relevant peer with zero and one o
 fn applicationAndFork(a: *runtime.NetworkCore, b: *runtime.NetworkCore, b_inbox: *Inbox) !void {
     var stage: enum { transition, application, gossip } = .transition;
     const begun = try @import("transport.zig").currentTime(std.testing.io);
-    errdefer std.debug.print("managed stage={s} elapsed={}ms a={any} b={any}\n", .{ @tagName(stage), a.last_now.mono_ms -| begun.mono_ms, a.peerCounts(), b.peerCounts() });
+    errdefer std.debug.print("core stage={s} elapsed={}ms a={any} b={any}\n", .{ @tagName(stage), a.last_now.mono_ms -| begun.mono_ms, a.peerCounts(), b.peerCounts() });
     const rr = @import("reqresp/root.zig");
     var rows: [4]t.Snapshot = undefined;
     const now = try @import("transport.zig").currentTime(std.testing.io);
@@ -433,7 +433,7 @@ fn applicationAndFork(a: *runtime.NetworkCore, b: *runtime.NetworkCore, b_inbox:
     _ = b.removeDirectPeer(&a.peerId());
 }
 
-test "managed runtime every allocation prefix cleans up and reservations count owned storage" {
+test "core every allocation prefix cleans up and reservations count owned storage" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{21}));
     var opts = options(&key);
     opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .engine = .{
@@ -470,7 +470,7 @@ test "managed runtime every allocation prefix cleans up and reservations count o
     }
 }
 
-test "managed runtime reservation forwarding tracks resize remap and failure without ownership" {
+test "core reservation forwarding tracks resize remap and failure without ownership" {
     const Reservations = @import("reservations.zig").Reservations;
     var buffer: [4096]u8 = undefined;
     var backing = std.heap.FixedBufferAllocator.init(&buffer);
@@ -490,7 +490,7 @@ test "managed runtime reservation forwarding tracks resize remap and failure wit
     try std.testing.expectEqual(@as(usize, 0), reservation.bytes);
 }
 
-test "managed runtime sequence exhaustion rolls back and future fork hints stay advisory" {
+test "core sequence exhaustion rolls back and future fork hints stay advisory" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{22}));
     var opts = options(&key);
     opts.startup.local.metadata.seq_number = std.math.maxInt(u64);
@@ -515,7 +515,7 @@ test "managed runtime sequence exhaustion rolls back and future fork hints stay 
     try std.testing.expectEqualSlices(u8, record.slice(), node.localRecord().?.slice());
 }
 
-test "managed runtime demand persists until replacement and reaches discovery after selection" {
+test "core demand persists until replacement and reaches discovery after selection" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{23}));
     var opts = options(&key);
     opts.resolved.core.peers.target_peers = 0;
@@ -559,7 +559,7 @@ test "managed runtime demand persists until replacement and reaches discovery af
     try std.testing.expectEqual(@as(u8, 0), node.discovery.?.coordinator.demand.attnets[0]);
 }
 
-test "managed runtime explicit advertisement is independent and atomic" {
+test "core explicit advertisement is independent and atomic" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{21}));
     var opts = options(&key);
     opts.startup.bind = .{ .ip4 = .{ .bytes = @splat(0), .port = 0 } };
@@ -597,7 +597,7 @@ test "managed runtime explicit advertisement is independent and atomic" {
     try std.testing.expectEqualSlices(u8, previous.slice(), node.localRecord().?.slice());
 }
 
-test "managed runtime unreachable destination backs off and rotates to its alternate address" {
+test "core unreachable destination backs off and rotates to its alternate address" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{22}));
     const remote = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{23}));
     var node: runtime.NetworkCore = undefined;
@@ -629,7 +629,7 @@ test "managed runtime unreachable destination backs off and rotates to its alter
     try std.testing.expect(node.peer_manager.dialing.active[row.attempt.?].connection != null);
 }
 
-test "managed runtime socket faults preserve the other owner and local dial refusal is deferred" {
+test "core socket faults preserve the other owner and local dial refusal is deferred" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{22}));
     const remote_key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{23}));
     var opts = options(&key);
@@ -760,7 +760,7 @@ fn failureAndReplacement(a: *runtime.NetworkCore, b: *runtime.NetworkCore) !void
     replacement.shutdown(now);
 }
 
-test "managed profiles measure reservations and unwind byte exhaustion" {
+test "core profiles measure reservations and unwind byte exhaustion" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{21}));
     inline for (.{ @import("configuration.zig").Profile.small, .beacon_node }) |profile| {
         var ledger: @import("reservations.zig").Reservations = .{ .backing = std.testing.allocator };
@@ -774,7 +774,7 @@ test "managed profiles measure reservations and unwind byte exhaustion" {
         const measured = ledger.bytes;
         const mib = 1024 * 1024;
         const total: usize = if (profile == .small) 96 * mib else 384 * mib;
-        std.debug.print("managed memory {s}: total={d} reqresp={d} negotiations={d}\n", .{ @tagName(profile), measured, node.service.reqresp.memoryPlan().total_bytes, node.service.router.negotiator.entries.len });
+        std.debug.print("core memory {s}: total={d} reqresp={d} negotiations={d}\n", .{ @tagName(profile), measured, node.service.reqresp.memoryPlan().total_bytes, node.service.router.negotiator.entries.len });
         try std.testing.expect(measured <= total);
         try std.testing.expectEqual(@as(u64, if (profile == .small) 64 * mib else 512 * mib), node.transport.engine.memoryPlan().receive_window_bytes);
         try std.testing.expect(measured <= node.reservations.byte_limit.?);
@@ -795,7 +795,7 @@ test "managed profiles measure reservations and unwind byte exhaustion" {
     }
 }
 
-test "managed small profile cleans every failed allocation prefix" {
+test "core small profile cleans every failed allocation prefix" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, profileAllocationFailures, .{});
 }
 
@@ -807,7 +807,7 @@ fn profileAllocationFailures(a: std.mem.Allocator) !void {
     node.deinit(std.testing.io);
 }
 
-test "managed invalid complete sections reject before allocation" {
+test "core invalid complete sections reject before allocation" {
     const forks: []const @import("reqresp/reqresp.zig").ForkEntry = &.{.{ .digest = @splat(0), .fork = .phase0 }};
     inline for (.{ error.InvalidOptions, error.InvalidOptions, error.InvalidOptions, error.InvalidLimits, error.InvalidLimits, error.InvalidOptions }, 0..) |expected, section| {
         var request: @import("configuration.zig").Request = .{ .profile = .small, .seed = 1, .forks = forks, .admission_policy = @import("reqresp/policy_fixture.zig").config() };
@@ -824,7 +824,7 @@ test "managed invalid complete sections reject before allocation" {
     }
 }
 
-test "managed runtime native readiness wakes for either delayed protocol socket" {
+test "core native readiness wakes for either delayed protocol socket" {
     if (!runtime.wait.supported) return error.SkipZigTest;
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{31}));
     var opts = options(&key);
@@ -859,7 +859,7 @@ fn delayedRuntimeDatagram(sender: std.Io.net.Socket, address: std.Io.net.IpAddre
     sender.send(std.testing.io, &address, "invalid") catch unreachable;
 }
 
-test "managed runtime native host wake validates rollback detaches and preserves bytes" {
+test "core native host wake validates rollback detaches and preserves bytes" {
     if (!runtime.wait.supported) return error.SkipZigTest;
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{32}));
     var opts = options(&key);
@@ -895,7 +895,7 @@ test "managed runtime native host wake validates rollback detaches and preserves
     try std.testing.expectEqualStrings("invalid", message.data);
 }
 
-test "managed runtime native wait source failure retains completed protocol progress" {
+test "core native wait source failure retains completed protocol progress" {
     if (!runtime.wait.supported) return error.SkipZigTest;
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{34}));
     var opts = options(&key);
@@ -923,7 +923,7 @@ test "managed runtime native wait source failure retains completed protocol prog
     try std.testing.expectEqual(@as(u64, 1), node.counters.readiness_failures);
 }
 
-test "managed runtime native wait honors engine timers and pending lifecycle work" {
+test "core native wait honors engine timers and pending lifecycle work" {
     if (!runtime.wait.supported) return error.SkipZigTest;
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{35}));
     var opts = options(&key);
@@ -961,7 +961,7 @@ test "managed runtime native wait honors engine timers and pending lifecycle wor
     try std.testing.expectEqual(@as(usize, 0), repeated.transport.events);
 }
 
-test "managed runtime flushes a protocol reply in the turn that wrote it" {
+test "core flushes a protocol reply in the turn that wrote it" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{36}));
     const spoke_key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{37}));
     var opts = options(&key);
@@ -1014,7 +1014,7 @@ test "managed runtime flushes a protocol reply in the turn that wrote it" {
     try std.testing.expectEqualSlices(u8, hello, reply[0..hello.len]);
 }
 
-test "managed runtime subscriptions use copied startup policy and reject atomically" {
+test "core subscriptions use copied startup policy and reject atomically" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{1}));
     var opts = options(&key);
     opts.resolved.core.service.gossipsub.topic_policy = &@import("gossipsub/topic_fixture.zig").churn;
@@ -1051,7 +1051,7 @@ test "managed runtime subscriptions use copied startup policy and reject atomica
     try std.testing.expectEqual(calls, node.reservations.allocation_calls);
 }
 
-test "managed beacon idle scans do not manufacture immediate deadlines" {
+test "core beacon idle scans do not manufacture immediate deadlines" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{11}));
     const resolved = try @import("configuration.zig").resolve(.{ .profile = .beacon_node, .seed = 7, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }}, .admission_policy = @import("reqresp/policy_fixture.zig").config() });
     var node: runtime.NetworkCore = undefined;
@@ -1073,7 +1073,7 @@ test "managed beacon idle scans do not manufacture immediate deadlines" {
     try std.testing.expectEqual(calls, node.reservations.allocation_calls);
 }
 
-test "managed idle turns with pending negotiations are never due for reqresp or negotiation" {
+test "core idle turns with pending negotiations are never due for reqresp or negotiation" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{38}));
     const spoke_key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{39}));
     var opts = options(&key);
@@ -1108,7 +1108,7 @@ test "managed idle turns with pending negotiations are never due for reqresp or 
     try std.testing.expect(node.service.router.negotiator.active() > 0);
 }
 
-test "managed runtime BPO same-fork digest transition updates status and advertisement" {
+test "core BPO same-fork digest transition updates status and advertisement" {
     const rr = @import("reqresp/reqresp.zig");
     const first: rr.ForkEntry = .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu };
     const second: rr.ForkEntry = .{ .digest = .{ 5, 6, 7, 8 }, .fork = .fulu };
@@ -1154,7 +1154,7 @@ test "managed runtime BPO same-fork digest transition updates status and adverti
     }
 }
 
-test "managed runtime BPO duplicate digest validation precedes allocation" {
+test "core BPO duplicate digest validation precedes allocation" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{1}));
     var node: runtime.NetworkCore = undefined;
     var opts = options(&key);
@@ -1166,7 +1166,7 @@ test "managed runtime BPO duplicate digest validation precedes allocation" {
     try std.testing.expectError(error.InvalidOptions, node.init(failing.allocator(), std.testing.io, &opts.resolved, opts.startup));
 }
 
-test "managed runtime request admission selector commits with validated local fork" {
+test "core request admission selector commits with validated local fork" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{23}));
     var opts = options(&key);
     opts.resolved.core.service.reqresp.request_fork = .gloas;
@@ -1217,7 +1217,7 @@ const ActivationSnapshot = struct {
     }
 };
 
-test "managed runtime capabilities activation rolls back all owners on rejected candidates" {
+test "core capabilities activation rolls back all owners on rejected candidates" {
     const caps = @import("capabilities.zig");
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{24}));
     var opts = options(&key);
@@ -1261,7 +1261,7 @@ test "managed runtime capabilities activation rolls back all owners on rejected 
     try before.expectUnchanged(&node);
 }
 
-test "managed runtime capabilities activation commits fork BPO and copied directional values" {
+test "core capabilities activation commits fork BPO and copied directional values" {
     const caps = @import("capabilities.zig");
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{25}));
     var opts = options(&key);
@@ -1327,10 +1327,10 @@ test "managed runtime capabilities activation commits fork BPO and copied direct
     try std.testing.expectEqual(before.local.metadata.seq_number + 1, node.localState().metadata.seq_number);
 }
 
-test "identify managed advertisement follows committed endpoints and rejected updates preserve it" {
+test "identify advertisement follows committed endpoints and rejected updates preserve it" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{24}));
     var opts = options(&key);
-    opts.resolved.core.service.identify = .{ .agent = "managed", .addresses = &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 19009 } }} };
+    opts.resolved.core.service.identify = .{ .agent = "core", .addresses = &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 19009 } }} };
     opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .engine = .{ .session_capacity = 8, .challenge_capacity = 8, .call_capacity = 8 } };
     var node: runtime.NetworkCore = undefined;
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
@@ -1350,7 +1350,7 @@ test "identify managed advertisement follows committed endpoints and rejected up
     try std.testing.expectEqualDeep(updated, node.service.identify.local.?);
 }
 
-test "managed runtime targeted Status serves two current schedules and immediate close is local" {
+test "core targeted Status serves two current schedules and immediate close is local" {
     const key_a = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{31}));
     const key_b = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{32}));
     const key_c = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{33}));
@@ -1457,7 +1457,7 @@ fn recycledPeerOperations(a: *runtime.NetworkCore, b: *runtime.NetworkCore, c: *
     try std.testing.expect(a.closePeer(&selected.identity, a.last_now));
 }
 
-test "managed runtime complete local intent rejects invalid last topic atomically" {
+test "core complete local intent rejects invalid last topic atomically" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{41}));
     var opts = options(&key);
     opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
@@ -1497,7 +1497,7 @@ fn intentFor(node: *const runtime.NetworkCore) runtime.LocalIntent {
     };
 }
 
-test "managed runtime Status-only update preserves local owners and permits a regressing head" {
+test "core Status-only update preserves local owners and permits a regressing head" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{44}));
     var opts = options(&key);
     opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .sequence = std.math.maxInt(u64) };
@@ -1540,7 +1540,7 @@ test "managed runtime Status-only update preserves local owners and permits a re
     }
 }
 
-test "managed runtime Status-only validation preserves accepted local state" {
+test "core Status-only validation preserves accepted local state" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{45}));
     var opts = options(&key);
     opts.startup.local.fork = .{ .fork = .fulu, .digest = .{ 1, 2, 3, 4 } };
@@ -1565,7 +1565,7 @@ test "managed runtime Status-only validation preserves accepted local state" {
     try before.expectUnchanged(&node);
 }
 
-test "managed runtime local intent demand candidate sequence and stopped refusals" {
+test "core local intent demand candidate sequence and stopped refusals" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{42}));
     for (0..2) |exhausted| {
         var opts = options(&key);
@@ -1603,7 +1603,7 @@ test "managed runtime local intent demand candidate sequence and stopped refusal
     }
 }
 
-test "managed runtime local intent topic demand no-op preserves Status scheduling and counters" {
+test "core local intent topic demand no-op preserves Status scheduling and counters" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{43}));
     var opts = options(&key);
     opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
@@ -1676,7 +1676,7 @@ const IntentPair = struct {
     }
 };
 
-test "managed runtime metrics aggregate subnets and count distinct mesh peers" {
+test "core metrics aggregate subnets and count distinct mesh peers" {
     const full = @import("gossipsub/topic_fixture.zig").full;
     const key_a = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{51}));
     const key_b = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{52}));
@@ -1713,7 +1713,7 @@ test "managed runtime metrics aggregate subnets and count distinct mesh peers" {
     try std.testing.expectEqual(@as(usize, 1), context.peer_count);
 }
 
-test "managed runtime local intent fork BPO announcements remembered peer and event borrows" {
+test "core local intent fork BPO announcements remembered peer and event borrows" {
     const full = @import("gossipsub/topic_fixture.zig").full;
     const old = "/eth2/00000000/beacon_block/ssz_snappy";
     const active = "/eth2/01020304/beacon_block/ssz_snappy";
@@ -1869,7 +1869,7 @@ const BoundaryUnion = struct {
     }
 };
 
-test "managed runtime local intent three boundaries fit and all-column overlap refuses atomically" {
+test "core local intent three boundaries fit and all-column overlap refuses atomically" {
     const full = @import("gossipsub/topic_fixture.zig").full;
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{46}));
     var opts = options(&key);
@@ -2003,7 +2003,7 @@ test "dual-stack runtime signs both bound discovery and QUIC endpoints" {
     try std.testing.expectEqualSlices(u8, &quic[1].?.ip6.octets, &record.ip6.?);
 }
 
-test "managed runtime candidate identities do not expose admitted APIs or enlarge snapshot capacity" {
+test "core candidate identities do not expose admitted APIs or enlarge snapshot capacity" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{31}));
     const remote = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{32}));
     var node: runtime.NetworkCore = undefined;
@@ -2023,7 +2023,7 @@ test "managed runtime candidate identities do not expose admitted APIs or enlarg
     try std.testing.expectEqual(@as(usize, 0), try node.completeSnapshots(&snapshots));
 }
 
-test "managed runtime discovery sessions expire idle lookup contacts" {
+test "core discovery sessions expire idle lookup contacts" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{41}));
     var opts = options(&key);
     opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
