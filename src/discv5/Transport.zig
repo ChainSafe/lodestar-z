@@ -264,13 +264,19 @@ fn processDatagram(
     };
     result.datagram = .accepted;
     result.event = accepted.event;
-    if (accepted.packet_length > 0 and !try self.reply(io, datagram.from, self.output[0..accepted.packet_length])) {
-        // The call's owner sees a local failure now rather than a remote timeout later.
-        if (accepted.call) |handle| {
-            result.event = self.engine.failCall(handle, error.DestinationUnreachable);
-            return;
-        }
+    const packet = self.output[0..accepted.packet_length];
+    if (accepted.call) |handle| {
+        std.debug.assert(packet.len > 0 and accepted.event == .none);
+        // An unsent handshake fails its call now, so the owner records a local failure rather
+        // than a remote timeout later. A local fault still fails the step.
+        const sent = self.reply(io, datagram.from, packet) catch |err| {
+            result.event = self.engine.failCall(handle, error.HandshakeUnsent);
+            return err;
+        };
+        if (!sent) result.event = self.engine.failCall(handle, error.HandshakeUnsent);
+        return;
     }
+    if (packet.len > 0) _ = try self.reply(io, datagram.from, packet);
     result.event = try self.handleEvent(io, accepted.event, result);
 }
 
@@ -307,8 +313,7 @@ fn handleEvent(
 }
 
 /// Sends a packet this step produced and returns false when its destination refuses it. The
-/// refusal fails only that destination: a requester retries a dropped reply, and a refused
-/// handshake fails its call.
+/// refusal fails only that destination: a requester retries a dropped reply.
 fn reply(self: *const Transport, io: std.Io, destination: types.Address, bytes: []const u8) Error!bool {
     self.transmit(io, destination, bytes) catch |err| switch (err) {
         error.DestinationUnreachable => return false,

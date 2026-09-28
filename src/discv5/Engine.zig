@@ -16,7 +16,7 @@ pub const Error = CallTable.Error || Channel.Error || RoutingTable.Error ||
     ResponsePlan.Error || error{
     ApplicationResponseRequired,
     ClockOverflow,
-    DestinationUnreachable,
+    HandshakeUnsent,
     MissingCall,
     SessionRequired,
     UnexpectedChallenge,

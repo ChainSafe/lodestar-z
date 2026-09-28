@@ -5,6 +5,7 @@ pub const FaultIo = struct {
     vtable: std.Io.VTable = undefined,
     receive: ?Trigger = null,
     send: ?Trigger = null,
+    send_failure: std.Io.net.Socket.SendError = error.AddressFamilyUnsupported,
     clock: ?Trigger = null,
     entropy: ?Trigger = null,
     receive_calls: usize = 0,
@@ -62,7 +63,7 @@ pub const FaultIo = struct {
     fn sendHook(_: ?*anyopaque, socket: std.Io.net.Socket.Handle, messages: []std.Io.net.OutgoingMessage, flags: std.Io.net.SendFlags) struct { ?std.Io.net.Socket.SendError, usize } {
         const self = active.?;
         self.send_calls += 1;
-        if (self.send) |trigger| if (trigger.matches(self.send_calls, socket)) return .{ error.AddressFamilyUnsupported, 0 };
+        if (self.send) |trigger| if (trigger.matches(self.send_calls, socket)) return .{ self.send_failure, 0 };
         return self.base.vtable.netSend(self.base.userdata, socket, messages, flags);
     }
 
