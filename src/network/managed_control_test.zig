@@ -1010,6 +1010,63 @@ test "managed control cancelled canonical requests retain buffers until local re
     try std.testing.expectEqual(grace, setup.client.control.schedules[peer.index].transition_until_ms);
 }
 
+test "control replacement retirement rekeys the current schedule without crediting stale evidence" {
+    var setup: Setup = .{};
+    try setup.initDirection(&.{}, true);
+    defer setup.deinit();
+    for (0..60) |_| try setup.step(1);
+    var snapshots: [4]t.Snapshot = undefined;
+    _ = setup.client.snapshots(&snapshots);
+    const peer = snapshots[0].peer;
+    const old = snapshots[0].connection.?;
+    const control = &setup.client.control;
+    const requests = &setup.client.control_protocol;
+    try std.testing.expect(snapshots[0].relevant);
+    try std.testing.expect(control.schedules[peer.index].evidence == .ready);
+    _ = try setup.pair.dial();
+    try setup.pair.pump();
+    setup.client.reStatusPeers(setup.pair.now);
+    setup.client.maintainControl(&setup.client_service, &setup.pair.client, setup.pair.now);
+    const op = for (requests.operations) |*op| {
+        if (op.request != null) break op;
+    } else return error.TestUnexpectedResult;
+    const stale = op.request.?;
+    try std.testing.expectEqualDeep(old, op.conn);
+    try std.testing.expect(op.after_ready);
+    var storage: [32]Engine.Event = undefined;
+    for (setup.pair.events(&setup.pair.client, &storage)) |event| if (event == .connected) {
+        setup.client.transportEvent(&setup.client_service, &setup.pair.client, event, setup.pair.now);
+    };
+    const current = setup.client.catalog.get(peer).?.connection.?;
+    const row = &control.schedules[peer.index];
+    try std.testing.expect(!std.meta.eql(old, current));
+    try std.testing.expectEqualDeep(current, row.conn);
+    try std.testing.expect(op.cancelled);
+    try std.testing.expectEqual(stale, op.request.?);
+    try std.testing.expect(requests.busy(peer.index));
+    try std.testing.expectEqual(@as(?u64, null), control.nextWakeup(&setup.client.catalog, requests, setup.pair.now));
+    const status_due = row.status_due_ms;
+    var bytes: [wire.status_size_max]u8 = undefined;
+    const length = try wire.encodeStatus(.status_v1, &setup.server.local.status, &bytes);
+    setup.client.controlEvents(&setup.client_service, &setup.pair.client, setup.pair.now, 100, &.{.{ .chunk = .{ .request = stale, .bytes = bytes[0..length], .fork = null } }});
+    try std.testing.expect(!setup.client.catalog.get(peer).?.relevant);
+    try std.testing.expectEqual(status_due, row.status_due_ms);
+    try std.testing.expect(requests.busy(peer.index));
+    const started = control.counters.started;
+    _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, setup.pair.now, 100, &.{}, &.{});
+    try std.testing.expectEqual(started + 1, control.counters.started);
+    const next = for (requests.operations) |*candidate| {
+        if (candidate.request != null) break candidate;
+    } else return error.TestUnexpectedResult;
+    try std.testing.expectEqualDeep(current, next.conn);
+    try std.testing.expect(!std.meta.eql(stale, next.request.?));
+    try std.testing.expect(!next.cancelled and !next.after_ready);
+    try std.testing.expectEqual(@as(u64, 0), row.retry_ms);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0 }, &row.health_failures);
+    try std.testing.expect(row.evidence == .pending);
+    try std.testing.expect(!setup.client.catalog.get(peer).?.relevant);
+}
+
 test "managed control capabilities pre-Fulu Metadata3 serves configured custody count" {
     const local: t.LocalState = .{ .metadata = .{ .custody_group_count = 1 } };
     var setup: Setup = .{};

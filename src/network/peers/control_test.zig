@@ -5,6 +5,8 @@ const Catalog = @import("catalog.zig").Catalog;
 const Control = @import("control.zig").Control;
 const ControlProtocol = @import("../control_protocol.zig").ControlProtocol;
 const relevance = @import("control.zig").relevance;
+const rr = @import("../reqresp/root.zig");
+const Now = @import("../types.zig").Now;
 
 test "control repeated Status intent preserves the first due time" {
     var control = try Control.init(std.testing.allocator, .{}, 2);
@@ -25,6 +27,50 @@ test "control repeated Status intent preserves the first due time" {
         try std.testing.expectEqual(@as(u64, 10), control.schedules[0].status_due_ms);
         try std.testing.expectEqual(@as(u64, 20), control.schedules[1].status_due_ms);
     }
+}
+
+test "control start quota and cursor preserve order across Identify and RPC starts" {
+    const a = std.testing.allocator;
+    var catalog = try Catalog.init(a, .{ .capacity = 4, .outbound_reserve = 0, .target_peers = 4, .max_peers = 4, .min_outbound = 0 }, 4, 0);
+    defer catalog.deinit(a);
+    var control = try Control.init(a, .{ .starts_per_turn_max = 3 }, 4);
+    defer control.deinit(a);
+    var requests = try ControlProtocol.init(a, 4, 4, 1);
+    defer requests.deinit(a);
+    const now: Now = .{ .mono_ms = 10, .unix_s = 0 };
+    const local: t.LocalState = .{};
+    const local_identity: t.PeerId = .{ .bytes = @splat(0) };
+    for (0..4) |index| {
+        const identity: t.PeerId = .{ .bytes = @splat(@intCast(index + 1)) };
+        const conn: t.Handle = .{ .index = @intCast(index), .generation = 1 };
+        const peer = catalog.admit(&identity, &local_identity, conn, &.{ .direction = .outbound, .endpoint = .unspecified, .now_ms = now.mono_ms }).admitted.peer;
+        try std.testing.expect(catalog.updateStatus(peer, conn, &local.status, now.mono_ms));
+        control.connected(&catalog, &requests, peer, conn, .outbound, now);
+    }
+    // Every row is due for an Identify and a Status start. Nothing holds an operation here, so a
+    // started Status stays due; the passes check which work each row gets and in what order.
+    const Work = struct { index: u32, request: ?rr.Protocol };
+    const passes = [_]struct { work: [2]Work, cursor: usize }{
+        .{ .work = .{ .{ .index = 0, .request = .status_v1 }, .{ .index = 1, .request = null } }, .cursor = 2 },
+        .{ .work = .{ .{ .index = 2, .request = .status_v1 }, .{ .index = 3, .request = null } }, .cursor = 0 },
+    };
+    for (passes) |expected| {
+        var pass = control.beginMaintenance(now);
+        var seen: usize = 0;
+        while (control.nextDue(&pass, &catalog, &requests, &local, now)) |*due| : (seen += 1) {
+            try std.testing.expect(seen < expected.work.len);
+            try std.testing.expectEqual(expected.work[seen].index, due.index);
+            try std.testing.expect(due.close == null and due.identify);
+            try std.testing.expectEqual(expected.work[seen].request, if (due.request) |probe| probe.protocol else null);
+            control.identifyStarted(due, true, now);
+            if (due.request != null) control.requestStarted(due, .started, now);
+            control.rekey(&catalog, &requests, due.index);
+        }
+        try std.testing.expectEqual(expected.work.len, seen);
+        try std.testing.expectEqual(expected.cursor, control.cursor);
+    }
+    try std.testing.expectEqual(@as(u64, 2), control.counters.started);
+    try std.testing.expectEqual(@as(u64, 8), control.visits);
 }
 
 test "peer control relevance boundary roots forks and availability" {
