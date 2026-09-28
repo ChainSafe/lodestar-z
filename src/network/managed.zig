@@ -168,9 +168,3 @@ pub fn shutdown(self: *PeerManager, service: *service_mod.Service, engine: *engi
     };
     self.dialing.shutdown(&self.catalog, engine);
 }
-
-test {
-    _ = @import("managed_coverage_test.zig");
-    _ = @import("managed_control_test.zig");
-    _ = @import("managed_test.zig");
-}

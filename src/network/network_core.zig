@@ -711,4 +711,7 @@ test {
     _ = @import("network_core_metrics_test.zig");
     _ = @import("network_core_endpoint_test.zig");
     _ = @import("network_core_turn_test.zig");
+    _ = @import("network_core_peer_test.zig");
+    _ = @import("network_core_control_test.zig");
+    _ = @import("network_core_coverage_test.zig");
 }

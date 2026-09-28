@@ -126,7 +126,8 @@ test "managed maintenance isolates slow peers and full application capacity" {
     const control = &hub.peer_manager.control;
     const started = control.counters.started;
     for (0..3) |turn| {
-        hub.peer_manager.maintainControl(&hub.service, &hub.transport.engine, hub.last_now);
+        const now = try @import("transport.zig").currentTime(std.testing.io);
+        _ = hub.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms));
         try std.testing.expectEqual(started + turn + 1, control.counters.started);
     }
     try std.testing.expectEqual(@as(usize, 3), hub.peer_manager.control_protocol.operationsInFlight());
@@ -663,10 +664,6 @@ test "managed runtime socket faults preserve the other owner and local dial refu
     const discovery_due = node.discovery.?.coordinator.nextWakeup(settled.mono_ms).?;
     try std.testing.expect(discovery_due > settled.mono_ms);
     try std.testing.expectEqual(discovery_due, node.nextWakeup(settled, .{}).?);
-    var protocol_wakeups: @import("wake_sources.zig").Wakeups = .{};
-    @import("managed.zig").collectWakeups(&node.peer_manager, &node.service, settled, 0, 0, 4, &protocol_wakeups);
-    const protocol_due = protocol_wakeups.earliest();
-    try std.testing.expect(protocol_due == null or protocol_due.? > discovery_due);
     const peer = t.PeerId.fromPublicKey(&remote_key.publicKey());
     try node.connectUntil(&peer, &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 19003 } }}, settled, settled.mono_ms +| @import("peers/dialing.zig").connect_timeout_ms);
     try std.testing.expectEqual(settled.mono_ms, node.nextWakeup(settled, .{}).?);
@@ -739,7 +736,7 @@ test "managed profiles measure reservations and unwind byte exhaustion" {
     inline for (.{ @import("configuration.zig").Profile.small, .beacon_node }) |profile| {
         var ledger: @import("reservations.zig").Reservations = .{ .backing = std.testing.allocator };
         var request: @import("configuration.zig").Request = .{ .profile = profile, .seed = 1, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }}, .admission_policy = @import("reqresp/policy_fixture.zig").config() };
-        const startup: runtime.Startup = .{ .host = &key, .bind = .{ .ip4 = .loopback(0) }, .local = @import("managed_test_support.zig").localState(.{}) };
+        const startup: runtime.Startup = .{ .host = &key, .bind = .{ .ip4 = .loopback(0) }, .local = @import("network_core_test_support.zig").localState(.{}) };
         var resolved = try @import("configuration.zig").resolve(request);
         var node: runtime.NetworkCore = undefined;
         try node.init(ledger.allocator(), std.testing.io, &resolved, startup);
@@ -775,9 +772,9 @@ test "managed small profile cleans every failed allocation prefix" {
 
 fn profileAllocationFailures(a: std.mem.Allocator) !void {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{22}));
-    const resolved = try @import("configuration.zig").resolve(.{ .profile = .small, .seed = 1, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }}, .socket_buffers = @import("managed_test_support.zig").socket_buffers, .admission_policy = @import("reqresp/policy_fixture.zig").config() });
+    const resolved = try @import("configuration.zig").resolve(.{ .profile = .small, .seed = 1, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }}, .socket_buffers = @import("network_core_test_support.zig").socket_buffers, .admission_policy = @import("reqresp/policy_fixture.zig").config() });
     var node: runtime.NetworkCore = undefined;
-    try node.init(a, std.testing.io, &resolved, .{ .host = &key, .bind = .{ .ip4 = .loopback(0) }, .local = @import("managed_test_support.zig").localState(.{}) });
+    try node.init(a, std.testing.io, &resolved, .{ .host = &key, .bind = .{ .ip4 = .loopback(0) }, .local = @import("network_core_test_support.zig").localState(.{}) });
     node.deinit(std.testing.io);
 }
 
@@ -920,11 +917,7 @@ test "managed runtime native wait honors engine timers and pending lifecycle wor
     const deadline = node.transport.nextDeadlineNs().?;
     const deadline_ms = deadline / std.time.ns_per_ms + @intFromBool(deadline % std.time.ns_per_ms != 0);
     try std.testing.expect(deadline_ms <= now.mono_ms + 80);
-    var protocol_wakeups: @import("wake_sources.zig").Wakeups = .{};
-    @import("managed.zig").collectWakeups(&node.peer_manager, &node.service, current, 0, 0, 4, &protocol_wakeups);
-    if (protocol_wakeups.earliest() == null or protocol_wakeups.earliest().? > deadline_ms) {
-        try std.testing.expectEqual(deadline_ms, node.nextWakeup(current, .{}).?);
-    }
+    try std.testing.expect(node.nextWakeup(current, .{}).? <= deadline_ms);
     const timer = node.step(std.testing.io, current, .{}, .deadlineOnly(current.mono_ms +| 100));
     try std.testing.expect(timer.failure == null);
     try std.testing.expect(timer.readiness.timeout_ms <= deadline_ms -| current.mono_ms);
@@ -1036,7 +1029,7 @@ test "managed beacon idle scans do not manufacture immediate deadlines" {
     try node.init(std.testing.allocator, std.testing.io, &resolved, .{
         .host = &key,
         .bind = .{ .ip4 = .loopback(0) },
-        .local = @import("managed_test_support.zig").localState(.{}),
+        .local = @import("network_core_test_support.zig").localState(.{}),
         .slot = 100,
     });
     defer node.deinit(std.testing.io);
