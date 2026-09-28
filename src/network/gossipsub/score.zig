@@ -136,12 +136,21 @@ pub const PeerScore = struct {
         self.* = undefined;
     }
 
-    fn tc(self: *PeerScore, peer: u16, topic: u16) *TopicCounters {
+    fn load(self: *const PeerScore, peer: u16, topic: u16) TopicCounters {
+        const index = @as(usize, peer) * constants.topics_cap + topic;
+        assert(index < self.topics.len);
+        return self.topics[index];
+    }
+
+    /// Every write advances the revision the peer manager's coverage wakeup compares, even one that
+    /// leaves the counters unchanged. The cached score is invalidated only when `evaluate` reads a
+    /// different value from the new counters.
+    fn store(self: *PeerScore, peer: u16, topic: u16, next: TopicCounters) void {
         const index = @as(usize, peer) * constants.topics_cap + topic;
         assert(index < self.topics.len);
         self.revision +|= 1;
-        self.rows[peer].dirty = true;
-        return &self.topics[index];
+        if (observable(&self.topic_params[topic], &self.topics[index], &next)) self.rows[peer].dirty = true;
+        self.topics[index] = next;
     }
 
     /// Clears every counter for a peer whose slot is being reused.
@@ -153,41 +162,43 @@ pub const PeerScore = struct {
     }
 
     pub fn graft(self: *PeerScore, peer: u16, topic: u16, now_ms: u64) void {
-        const counters = self.tc(peer, topic);
-        if (counters.in_mesh) return;
-        counters.in_mesh = true;
-        counters.graft_ms = now_ms;
+        var next = self.load(peer, topic);
+        if (!next.in_mesh) next.graft_ms = now_ms;
+        next.in_mesh = true;
+        self.store(peer, topic, next);
     }
 
     pub fn prune(self: *PeerScore, peer: u16, topic: u16, now_ms: u64) void {
-        const counters = self.tc(peer, topic);
-        if (!counters.in_mesh) return;
+        var next = self.load(peer, topic);
         const params = self.topic_params[topic];
-        const elapsed = now_ms -| counters.graft_ms;
-        if (elapsed > params.mesh_delivery_activation_ms and
-            counters.mesh_deliveries < params.mesh_delivery_threshold)
+        const elapsed = now_ms -| next.graft_ms;
+        if (next.in_mesh and elapsed > params.mesh_delivery_activation_ms and
+            next.mesh_deliveries < params.mesh_delivery_threshold)
         {
-            const deficit = params.mesh_delivery_threshold - counters.mesh_deliveries;
-            counters.mesh_failures = @min(counter_max, counters.mesh_failures + deficit * deficit);
+            const deficit = params.mesh_delivery_threshold - next.mesh_deliveries;
+            next.mesh_failures = @min(counter_max, next.mesh_failures + deficit * deficit);
         }
-        counters.in_mesh = false;
+        next.in_mesh = false;
+        self.store(peer, topic, next);
     }
 
     pub fn deliverEligible(self: *PeerScore, peer: u16, topic: u16, mesh_eligible: bool) void {
-        const counters = self.tc(peer, topic);
-        const params = self.topic_params[topic];
-        counters.first_deliveries = @min(counters.first_deliveries + 1, params.first_delivery_cap);
+        var next = self.load(peer, topic);
+        next.first_deliveries = @min(next.first_deliveries + 1, self.topic_params[topic].first_delivery_cap);
+        self.store(peer, topic, next);
         if (mesh_eligible) self.creditMesh(peer, topic);
     }
 
     pub fn creditMesh(self: *PeerScore, peer: u16, topic: u16) void {
-        const counters = self.tc(peer, topic);
-        counters.mesh_deliveries = @min(counters.mesh_deliveries + 1, self.topic_params[topic].mesh_delivery_cap);
+        var next = self.load(peer, topic);
+        next.mesh_deliveries = @min(next.mesh_deliveries + 1, self.topic_params[topic].mesh_delivery_cap);
+        self.store(peer, topic, next);
     }
 
     pub fn invalid(self: *PeerScore, peer: u16, topic: u16) void {
-        const c = self.tc(peer, topic);
-        c.invalid = @min(counter_max, c.invalid + 1);
+        var next = self.load(peer, topic);
+        next.invalid = @min(counter_max, next.invalid + 1);
+        self.store(peer, topic, next);
     }
 
     pub fn penalize(self: *PeerScore, peer: u16, amount: f64) void {
@@ -224,8 +235,8 @@ pub const PeerScore = struct {
         return self.cached(peer, now_ms, ip_count) orelse self.evaluate(peer, now_ms, ip_count, null).total;
     }
 
-    /// The cached score while no counter, parameter or IP population changed since it was computed
-    /// and no time-driven term has moved.
+    /// The cached score while no counter value `evaluate` reads, parameter or IP population changed
+    /// since it was computed and no time-driven term has moved.
     fn cached(self: *const PeerScore, peer: u16, now_ms: u64, ip_count: u16) ?f64 {
         const row = &self.rows[peer];
         const at = row.cached_at orelse return null;
@@ -304,6 +315,20 @@ pub const PeerScore = struct {
         return .{ .total = total, .next_change = next_change };
     }
 
+    /// Whether `evaluate` reads a different value from `after` than from `before`. A zero-weight
+    /// topic sets no deadline and adds its finite terms times zero, which leaves the total unchanged;
+    /// the graft time is read only in the mesh, and mesh deliveries only in the mesh and below the
+    /// threshold.
+    fn observable(params: *const TopicParams, before: *const TopicCounters, after: *const TopicCounters) bool {
+        if (params.weight == 0) return false;
+        if (before.in_mesh != after.in_mesh or before.first_deliveries != after.first_deliveries or
+            before.mesh_failures != after.mesh_failures or before.invalid != after.invalid) return true;
+        if (!after.in_mesh) return false;
+        const threshold = params.mesh_delivery_threshold;
+        return before.graft_ms != after.graft_ms or (before.mesh_deliveries != after.mesh_deliveries and
+            (before.mesh_deliveries < threshold or after.mesh_deliveries < threshold));
+    }
+
     /// Valid after a cached score read. Background refresh invalidates on counter decay;
     /// reads never advance decay or change the heartbeat's fixed score snapshot.
     pub fn nextChange(self: *const PeerScore, peer: u16) ?u64 {
@@ -313,9 +338,8 @@ pub const PeerScore = struct {
 
     pub fn resetTopic(self: *PeerScore, topic: u16) void {
         for (0..self.rows.len) |peer| {
-            const counters = self.tc(@intCast(peer), topic);
-            assert(!counters.in_mesh);
-            counters.* = .{};
+            assert(!self.load(@intCast(peer), topic).in_mesh);
+            self.store(@intCast(peer), topic, .{});
         }
     }
 
@@ -374,15 +398,14 @@ pub const PeerScore = struct {
     fn decayPeer(self: *PeerScore, peer: u16, steps: u64) void {
         const zero = self.params.decay_to_zero;
         for (0..constants.topics_cap) |topic| {
-            const c = &self.topics[@as(usize, peer) * constants.topics_cap + topic];
+            var c = self.load(peer, @intCast(topic));
             if (c.first_deliveries == 0 and c.mesh_deliveries == 0 and c.mesh_failures == 0 and c.invalid == 0) continue;
-            self.revision +|= 1;
-            self.rows[peer].dirty = true;
             const tp = self.topic_params[topic];
             c.first_deliveries = decayed(c.first_deliveries, tp.first_delivery_decay, steps, zero);
             c.mesh_deliveries = decayed(c.mesh_deliveries, tp.mesh_delivery_decay, steps, zero);
             c.mesh_failures = decayed(c.mesh_failures, tp.mesh_failure_decay, steps, zero);
             c.invalid = decayed(c.invalid, tp.invalid_decay, steps, zero);
+            self.store(peer, @intCast(topic), c);
         }
         if (self.rows[peer].behaviour != 0) {
             self.revision +|= 1;
@@ -455,6 +478,20 @@ fn testScores(a: Allocator, params: Params, count: u16) !PeerScore {
     return scores;
 }
 
+/// Checks a peer's policy score against a fresh evaluation, bit for bit.
+fn expectExact(scores: *PeerScore, peer: u16, now_ms: u64, ip_count: u16) !void {
+    const fresh: u64 = @bitCast(scores.evaluate(peer, now_ms, ip_count, null).total);
+    try std.testing.expectEqual(fresh, @as(u64, @bitCast(scores.score(peer, now_ms, ip_count))));
+}
+
+/// Checks that a peer's cached score is still valid and still exact.
+fn expectCached(scores: *PeerScore, peer: u16, now_ms: u64, ip_count: u16) !void {
+    try std.testing.expect(!scores.rows[peer].dirty);
+    const calculations = scores.calculations;
+    try expectExact(scores, peer, now_ms, ip_count);
+    try std.testing.expectEqual(calculations, scores.calculations);
+}
+
 test "score accepts small validator set weights with bounded counters" {
     var score = try testScores(std.testing.allocator, .{}, peer_capacity);
     defer score.deinit(std.testing.allocator);
@@ -470,7 +507,7 @@ test "score weight limit keeps worst case arithmetic finite" {
     defer score.deinit(std.testing.allocator);
     for (0..constants.topics_cap) |topic| {
         try score.configureTopic(@intCast(topic), .{ .weight = weight_max, .invalid_weight = -weight_max });
-        score.tc(0, @intCast(topic)).invalid = counter_max;
+        score.store(0, @intCast(topic), .{ .invalid = counter_max });
     }
     const worst = score.score(0, 0, 0);
     try std.testing.expect(std.math.isFinite(worst) and worst < 0 and worst > -1e40);
@@ -588,8 +625,8 @@ test "gossip policy score matches independent libp2p 17.1.1 two topic oracle" {
     second.invalid_weight = -8;
     try score.configureTopic(0, first);
     try score.configureTopic(1, second);
-    score.tc(0, 0).* = .{ .in_mesh = true, .graft_ms = 1, .first_deliveries = 4, .mesh_deliveries = 2, .mesh_failures = 1.5, .invalid = 2 };
-    score.tc(0, 1).* = .{ .first_deliveries = 3, .mesh_failures = 2, .invalid = 1 };
+    score.store(0, 0, .{ .in_mesh = true, .graft_ms = 1, .first_deliveries = 4, .mesh_deliveries = 2, .mesh_failures = 1.5, .invalid = 2 });
+    score.store(0, 1, .{ .first_deliveries = 3, .mesh_failures = 2, .invalid = 1 });
     score.penalize(0, 5);
     ip_count = 5;
     try std.testing.expectEqual(@as(f64, -138), score.score(0, 40_001, ip_count));
@@ -598,8 +635,8 @@ test "gossip policy score matches independent libp2p 17.1.1 two topic oracle" {
     ip_count = 5;
     score.rows[0].behaviour = 2;
     try std.testing.expectEqual(@as(f64, -111), score.score(0, 40_002, ip_count));
-    score.tc(0, 0).* = .{ .first_deliveries = 20 };
-    score.tc(0, 1).* = .{ .first_deliveries = 3 };
+    score.store(0, 0, .{ .first_deliveries = 20 });
+    score.store(0, 1, .{ .first_deliveries = 3 });
     ip_count = 0;
     score.rows[0].behaviour = 0;
     try std.testing.expectEqual(@as(f64, 50), score.score(0, 40_001, ip_count));
@@ -609,9 +646,9 @@ test "gossip policy saturated penalties stay finite" {
     var score = try testScores(std.testing.allocator, .{}, peer_capacity);
     defer score.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(f64, 0), score.score(0, 1, 0));
-    score.tc(0, 0).invalid = counter_max;
+    score.store(0, 0, .{ .invalid = counter_max });
     score.invalid(0, 0);
-    try std.testing.expectEqual(counter_max, score.tc(0, 0).invalid);
+    try std.testing.expectEqual(counter_max, score.load(0, 0).invalid);
     score.penalize(0, counter_max);
     score.penalize(0, counter_max);
     try std.testing.expectEqual(counter_max, score.rows[0].behaviour);
@@ -853,7 +890,9 @@ test "score weights use policy thresholds and snapshots leave the cache untouche
     scores.graft(0, 0, 0);
     scores.deliverEligible(0, 0, true);
     scores.invalid(0, 0);
-    scores.tc(0, 0).mesh_failures = 1;
+    var failed = scores.load(0, 0);
+    failed.mesh_failures = 1;
+    scores.store(0, 0, failed);
     scores.penalize(0, 3);
     ip_count = 3;
     var details: Breakdown = undefined;
@@ -880,4 +919,153 @@ test "score weights use policy thresholds and snapshots leave the cache untouche
     scores.prune(0, 0, 5000);
     scores.prune(0, 0, 5000);
     try std.testing.expectEqual(@as(f64, 9), scores.topics[0].mesh_failures);
+}
+
+test "score first deliveries invalidate the cache only below the cap" {
+    var scores = try testScores(std.testing.allocator, .{}, 1);
+    defer scores.deinit(std.testing.allocator);
+    try scores.configureTopic(0, .{ .first_delivery_weight = 2, .first_delivery_cap = 2 });
+    scores.deliverEligible(0, 0, false);
+    try std.testing.expectEqual(@as(f64, 2), scores.score(0, 0, 0));
+    scores.deliverEligible(0, 0, false);
+    try std.testing.expect(scores.rows[0].dirty);
+    try std.testing.expectEqual(@as(f64, 4), scores.score(0, 0, 0));
+    scores.deliverEligible(0, 0, false);
+    try expectCached(&scores, 0, 0, 0);
+    try std.testing.expectEqual(@as(f64, 4), scores.score(0, 0, 0));
+}
+
+test "score mesh deliveries invalidate the cache only in the mesh and below the threshold" {
+    var scores = try testScores(std.testing.allocator, .{ .topic = .{ .time_in_mesh_weight = 0, .mesh_delivery_threshold = 3, .mesh_delivery_cap = 5, .mesh_delivery_activation_ms = 10 } }, 1);
+    defer scores.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(f64, 0), scores.score(0, 0, 0));
+    scores.creditMesh(0, 0);
+    try expectCached(&scores, 0, 0, 0);
+    scores.graft(0, 0, 0);
+    try std.testing.expectEqual(@as(f64, -4), scores.score(0, 11, 0));
+    for ([_]f64{ -1, 0 }) |expected| {
+        scores.creditMesh(0, 0);
+        try std.testing.expect(scores.rows[0].dirty);
+        try std.testing.expectEqual(expected, scores.score(0, 11, 0));
+    }
+    for (0..3) |_| {
+        scores.creditMesh(0, 0);
+        try expectCached(&scores, 0, 11, 0);
+    }
+    try std.testing.expectEqual(@as(f64, 5), scores.load(0, 0).mesh_deliveries);
+}
+
+test "score unchanged grafts, prunes, saturated invalid counters and empty topic resets keep the cache" {
+    var scores = try testScores(std.testing.allocator, .{}, 2);
+    defer scores.deinit(std.testing.allocator);
+    scores.graft(0, 0, 5);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.06), scores.score(0, 2_005, 0), 1e-12);
+    scores.graft(0, 0, 2_005);
+    scores.prune(0, 1, 2_005);
+    try expectCached(&scores, 0, 2_005, 0);
+    scores.prune(0, 0, 2_005);
+    try std.testing.expect(scores.rows[0].dirty);
+    try std.testing.expectEqual(@as(f64, 0), scores.score(0, 2_005, 0));
+
+    scores.store(1, 0, .{ .invalid = counter_max - 1 });
+    try std.testing.expectEqual(@as(f64, -100 * (counter_max - 1) * (counter_max - 1)), scores.score(1, 0, 0));
+    scores.invalid(1, 0);
+    try std.testing.expect(scores.rows[1].dirty);
+    try std.testing.expectEqual(@as(f64, -100 * counter_max * counter_max), scores.score(1, 0, 0));
+    scores.invalid(1, 0);
+    try expectCached(&scores, 1, 0, 0);
+
+    scores.resetTopic(1);
+    try expectCached(&scores, 0, 2_005, 0);
+    try expectCached(&scores, 1, 0, 0);
+    scores.resetTopic(0);
+    try std.testing.expect(scores.rows[1].dirty);
+    try std.testing.expectEqual(@as(f64, 0), scores.score(1, 0, 0));
+}
+
+test "score background decay invalidates the cache only for counters evaluate reads" {
+    var scores = try testScores(std.testing.allocator, .{ .decay_interval_ms = 10, .topic = .{ .time_in_mesh_weight = 0, .mesh_delivery_weight = -4, .mesh_delivery_threshold = 1, .mesh_delivery_cap = 8, .mesh_delivery_decay = 0.5, .mesh_delivery_activation_ms = 0 } }, 1);
+    defer scores.deinit(std.testing.allocator);
+    scores.graft(0, 0, 0);
+    for (0..8) |_| scores.creditMesh(0, 0);
+    scores.refresh(0);
+    try std.testing.expectEqual(@as(f64, 0), scores.score(0, 1, 0));
+    // Deliveries decay 8, 4, 2, 1 without reaching below the threshold.
+    for ([_]u64{ 10, 20, 30 }) |now| {
+        scores.refresh(now);
+        try expectCached(&scores, 0, now, 0);
+    }
+    try std.testing.expectEqual(@as(f64, 1), scores.load(0, 0).mesh_deliveries);
+    scores.refresh(40);
+    try std.testing.expect(scores.rows[0].dirty);
+    try std.testing.expectEqual(@as(f64, -1), scores.score(0, 40, 0));
+}
+
+test "score unweighted topics keep the cache until a weight exposes their counters" {
+    var scores = try testScores(std.testing.allocator, .{ .decay_interval_ms = 10 }, 1);
+    defer scores.deinit(std.testing.allocator);
+    try scores.configureTopic(0, .{ .weight = 0 });
+    scores.refresh(0);
+    try std.testing.expectEqual(@as(f64, 0), scores.score(0, 0, 0));
+    scores.graft(0, 0, 0);
+    scores.deliverEligible(0, 0, true);
+    scores.creditMesh(0, 0);
+    scores.invalid(0, 0);
+    scores.prune(0, 0, 5);
+    scores.deliverEligible(0, 0, false);
+    try expectCached(&scores, 0, 5, 0);
+    scores.refresh(10);
+    try expectCached(&scores, 0, 10, 0);
+    try std.testing.expectEqualDeep(TopicCounters{ .graft_ms = 0, .first_deliveries = 1.8, .mesh_deliveries = 1.8, .invalid = 0.9 }, scores.load(0, 0));
+    try scores.configureTopic(0, .{});
+    try std.testing.expect(scores.rows[0].dirty);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.8 - 100 * 0.81), scores.score(0, 10, 0), 1e-9);
+}
+
+test "score cache matches fresh evaluation across random mutations" {
+    const base: TopicParams = .{ .time_in_mesh_weight = 1, .time_in_mesh_cap = 3, .time_in_mesh_quantum_ms = 5, .first_delivery_cap = 4, .first_delivery_decay = 0.5, .mesh_delivery_threshold = 3, .mesh_delivery_cap = 6, .mesh_delivery_decay = 0.5, .mesh_delivery_activation_ms = 7, .mesh_failure_decay = 0.5, .invalid_decay = 0.5 };
+    var variants: [4]TopicParams = @splat(base);
+    variants[1].weight = 0;
+    variants[2] = (TopicPolicy{ .params = base, .mesh_delivery_start_slot = 1 }).atSlot(0);
+    variants[3].mesh_delivery_threshold = 6;
+    const peers = 4;
+    const topics = 4;
+    var scores = try testScores(std.testing.allocator, .{ .ip_colocation_weight = -1, .ip_colocation_threshold = 1, .behaviour_threshold = 2, .decay_interval_ms = 10, .topic_cap = 20, .topic = base }, peers);
+    defer scores.deinit(std.testing.allocator);
+    var prng = std.Random.DefaultPrng.init(0x5c0e);
+    const random = prng.random();
+    var ip: [peers]u16 = @splat(0);
+    var now: u64 = 0;
+    var reads: u64 = 0;
+    var kept: u64 = 0;
+    for (0..10_000) |_| {
+        const peer = random.uintLessThan(u16, peers);
+        const topic = random.uintLessThan(u16, topics);
+        const clean = !scores.rows[peer].dirty;
+        const choice = random.uintLessThan(u8, 14);
+        switch (choice) {
+            0 => scores.graft(peer, topic, now),
+            1 => scores.prune(peer, topic, now),
+            2 => scores.deliverEligible(peer, topic, random.boolean()),
+            3, 4 => scores.creditMesh(peer, topic),
+            5 => scores.invalid(peer, topic),
+            6 => scores.penalize(peer, random.float(f64) * 2),
+            7 => now += random.uintLessThan(u64, 12),
+            8 => scores.refresh(now),
+            9 => scores.setConnected(peer, !scores.rows[peer].connected, now),
+            10 => try scores.configureTopic(topic, variants[random.uintLessThan(usize, variants.len)]),
+            11 => ip[peer] = random.uintLessThan(u16, 4),
+            12 => {
+                for (0..peers) |other| scores.prune(@intCast(other), topic, now);
+                scores.resetTopic(topic);
+            },
+            13 => scores.resetPeer(peer),
+            else => unreachable,
+        }
+        kept += @intFromBool(choice <= 5 and clean and !scores.rows[peer].dirty);
+        for (0..peers) |other| try expectExact(&scores, @intCast(other), now, ip[other]);
+        reads += peers;
+    }
+    // The walk must exercise both invalidating and cache-preserving mutations.
+    try std.testing.expect(kept > 1_000 and scores.calculations > 1_000 and scores.calculations < reads / 2);
 }

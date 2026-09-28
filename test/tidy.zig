@@ -54,7 +54,7 @@ const inline_test_allowlist = [_][]const u8{
     "src/network/gossipsub/outbox.zig",
     // Private mesh selection helper: Overlay.shuffle.
     "src/network/gossipsub/overlay.zig",
-    // Private score counters: PeerScore.tc.
+    // Private score counters: PeerScore.load, PeerScore.store.
     "src/network/gossipsub/score.zig",
     // Private conversion of the bounded poll timeout: receiveTimeout.
     "src/network/transport.zig",
