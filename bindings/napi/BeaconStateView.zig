@@ -192,13 +192,7 @@ pub fn eth1Data(self: *const BeaconStateView) !js_types.Eth1Data {
     var eth1_data_view = try cached_state.state.eth1Data();
     var eth1_data: ct.phase0.Eth1Data.Type = undefined;
     try eth1_data_view.toValue(allocator, &eth1_data);
-    // Manually create 'obj' since proposers can vote in any u64 deposit count,
-    // which does not fit a JS number.
-    const obj = try env.createObject();
-    try obj.setNamedProperty("depositRoot", try sszValueToNapiValue(env, ct.primitive.Root, &eth1_data.deposit_root));
-    try obj.setNamedProperty("depositCount", try env.createBigintUint64(eth1_data.deposit_count));
-    try obj.setNamedProperty("blockHash", try sszValueToNapiValue(env, ct.primitive.Bytes32, &eth1_data.block_hash));
-    return js_types.wrap(js_types.Eth1Data, obj);
+    return js_types.wrap(js_types.Eth1Data, try sszValueToNapiValue(env, ct.phase0.Eth1Data, &eth1_data));
 }
 
 pub fn latestBlockHeader(self: *const BeaconStateView) !js_types.BeaconBlockHeader {
@@ -1588,10 +1582,12 @@ pub fn toValue(self: *const BeaconStateView) !js.Value {
     switch (cached_state.state.forkSeq()) {
         inline else => |f| {
             const ForkBeaconState = fork_types.ForkTypes(f).BeaconState;
-            var value: ForkBeaconState.Type = ForkBeaconState.default_value;
-            defer ForkBeaconState.deinit(allocator, &value);
-            try cached_state.state.castToFork(f).inner.toValue(allocator, &value);
-            return js_types.wrap(js.Value, try sszValueToNapiValue(env, ForkBeaconState, &value));
+            const value = try allocator.create(ForkBeaconState.Type);
+            defer allocator.destroy(value);
+            value.* = ForkBeaconState.default_value;
+            defer ForkBeaconState.deinit(allocator, value);
+            try cached_state.state.castToFork(f).inner.toValue(allocator, value);
+            return js_types.wrap(js.Value, try sszValueToNapiValue(env, ForkBeaconState, value));
         },
     }
 }
