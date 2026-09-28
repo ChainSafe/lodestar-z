@@ -180,7 +180,7 @@ pub fn execute(self: *Runtime, token: Token, timestamp: n.Now) void {
         if (self.stop) cell.failure = self.terminal_error orelse error.NetworkClosed;
         self.table.transition(cell, .terminal);
     }
-    if (cell.state == .terminal) self.recomputeLocked(.legacy);
+    if (cell.state == .terminal) self.recomputeLocked(.completions);
 }
 fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
     const operation = &self.table.cells[index];
@@ -248,7 +248,7 @@ pub fn completeConnects(self: *Runtime, timestamp: n.Now) void {
     self.lock();
     defer self.unlock();
     if (self.stop) return;
-    if (latchConnects(&self.table, events, timestamp)) self.recomputeLocked(.legacy);
+    if (latchConnects(&self.table, events, timestamp)) self.recomputeLocked(.completions);
 }
 
 pub fn latchConnects(table: *Table, events: []const n.Event, timestamp: n.Now) bool {

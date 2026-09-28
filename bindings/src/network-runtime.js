@@ -24,7 +24,7 @@ export class NativeRuntime {
     abandonment.register(this, new WeakRef(owner));
     this.identity = initialized.identity;
     this.limits = initialized.limits;
-    this.#closed = initialized.closed;
+    this.#closed = owner.closed;
   }
 
   /** Reports whether a live wrapper's host took the notification. */

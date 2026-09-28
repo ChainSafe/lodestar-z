@@ -56,15 +56,11 @@ pub fn initialize(self: *@This(), config: js.Value, callback: js.Value) !js.Valu
     runtime.hook_live = true;
     runtime.retain();
     errdefer runtime.removeHook();
-    runtime.close_deferred = try env.createPromise();
-    errdefer @import("network_js.zig").discardPromise(env, runtime.close_deferred.?);
-    try prepareCloseResults(env, runtime);
     try runtime.results.prepare(env);
     const holder = try env.createObject();
     try holder.setNamedProperty("identity", try command_js.identity(env, &runtime.identity));
     try holder.setNamedProperty("limits", try resolvedLimits(env, runtime));
     try holder.setNamedProperty("capacities", try capacities(env, runtime));
-    try holder.setNamedProperty("closed", runtime.close_deferred.?.getPromise());
     runtime.retain();
     errdefer runtime.release();
     runtime.thread = try std.Thread.spawn(.{ .stack_size = std.Thread.SpawnConfig.default_stack_size }, @import("network_owner.zig").run, .{runtime});
@@ -124,36 +120,19 @@ fn prepareApplicationStorage(runtime: *Runtime, app: *const application_cfg.Conf
     runtime.diag.bridgeRequestedBytes = bridge;
 }
 
-fn prepareCloseResults(env: napi.Env, runtime: *Runtime) !void {
-    const fallback = try env.createObject();
-    try fallback.setNamedProperty("name", try env.createStringUtf8("Error"));
-    try fallback.setNamedProperty("code", try env.createStringUtf8("NetworkResultAllocationFailed"));
-    try fallback.setNamedProperty("message", try env.createStringUtf8("NetworkResultAllocationFailed"));
-    runtime.copy_error = try napi.Ref.create(env.env, fallback, 1);
-    inline for (.{ "requested", "failed" }, 0..) |reason, i| {
-        const result = try env.createObject();
-        try result.setNamedProperty("reason", try env.createStringUtf8(reason));
-        runtime.close_results[i] = try napi.Ref.create(env.env, result, 1);
-    }
-}
-
 pub fn deinit(self: *@This()) void {
     if (self.runtime) |runtime| {
         runtime.forceStop(false);
         runtime.removeHook();
-        if (runtime.notify_finalized) runtime.retireClosedRequests();
+        if (runtime.notify_finalized) runtime.reclaim();
         runtime.release();
         self.runtime = null;
     }
 }
 
 fn onNotify(env: napi.Env, callback: Value, runtime: *Runtime, _: *void) void {
-    notify(env, callback, runtime) catch |err| settlementFailed(env, runtime, err);
-}
-
-fn settlementFailed(env: napi.Env, runtime: *Runtime, err: anyerror) void {
-    if (jsStopped(err)) return runtime.forceStop(true);
-    fatal.terminate(env, .settlement, @errorName(err));
+    // Only an environment that stopped running JavaScript fails the notification's own N-API calls.
+    notify(env, callback, runtime) catch runtime.forceStop(true);
 }
 
 /// Node may disable JavaScript before running environment cleanup hooks.
@@ -161,59 +140,22 @@ fn jsStopped(err: anyerror) bool {
     return err == error.Closing or err == error.CannotRunJS or err == error.PendingException;
 }
 
-/// The notification callback only schedules: a host that returns true runs an exchange, which arms again once
-/// nothing is queued. The completion owner always does, also for a collected wrapper. A callback that returns anything
-/// else leaves no host exchange, so only the close result settles here; completions and payload wait for a host.
+/// The notification callback only schedules: the host runs an exchange, which arms again once nothing is queued. The
+/// completion owner always does, also for a collected wrapper.
 fn notify(env: napi.Env, callback: Value, runtime: *Runtime) !void {
     runtime.lock();
     const alive = runtime.env_alive;
     runtime.unlock();
     if (!alive) return;
-    const result = env.callFunction(callback, try env.getUndefined(), .{}) catch {
-        // A throwing host may not have scheduled an exchange, so owner activity can notify again. No settlement
-        // can run until the exception propagates.
+    _ = env.callFunction(callback, try env.getUndefined(), .{}) catch {
+        // A throwing host may not have scheduled an exchange, so owner activity can notify again.
         runtime.lock();
         runtime.readiness.forget();
         runtime.unlock();
-        return;
     };
-    if (try result.typeof() == .boolean and try result.getValueBool()) return;
-    _ = try settleClose(env, runtime, null);
-    runtime.lock();
-    defer runtime.unlock();
-    runtime.refreshLocked();
-    if (runtime.readiness.control.len > 0) runtime.notifyLocked() else runtime.readiness.forget();
-}
-fn makeError(env: napi.Env, err: anyerror) !Value {
-    return @import("network_js.zig").errorValue(env, @errorName(err));
 }
 
-/// Settles the close result once the owner has quiesced and no completion awaits delivery, which `closed` receives.
-/// Returns whether completions or the close remain.
-fn settleClose(env: napi.Env, runtime: *Runtime, closed: ?*?Value) !bool {
-    runtime.lock();
-    const idle = runtime.idleLocked();
-    const closing = runtime.quiescent and !runtime.close_settled;
-    // Owner quiescence is final, so completions it left before quiescing are all deliverable now.
-    const more = runtime.settleableLocked();
-    const reason = runtime.reason;
-    const terminal = runtime.terminal_error;
-    runtime.unlock();
-    if (idle) runtime.notify.unref(env) catch {};
-    if (!closing or more) return more or closing;
-    runtime.join();
-    const value = try runtime.close_results[@intFromEnum(reason)].?.getValue();
-    // Every recorded failure names its error.
-    if (reason == .failed) try value.setNamedProperty("error", @import("network_js.zig").settled(env, makeError(env, terminal.?)) catch try runtime.copy_error.?.getValue());
-    try runtime.close_deferred.?.resolve(value);
-    if (closed) |result| result.* = value;
-    runtime.close_settled = true;
-    runtime.disposeCloseReferences();
-    runtime.removeHook();
-    return false;
-}
-
-/// One host exchange (network_exchange.zig): the host's actions, then the completions, the close result and the
+/// One host exchange (network_exchange.zig): the host's actions, then the completions or the close result, and the
 /// payload `demand` asks for, delivered in one result.
 pub fn exchange(self: *@This(), actions_value: js.Value, demand_value: js.Value) !js.Value {
     const call = r.call(self.runtime, .exchange);
@@ -228,14 +170,11 @@ pub fn exchange(self: *@This(), actions_value: js.Value, demand_value: js.Value)
     const count = try exchange_mod.parseActions(actions_value.val, &actions);
     const demand = try exchange_mod.Demand.parse(demand_value.val);
     var host: Exchange = .{ .env = js.env(), .runtime = runtime };
-    try host.settle();
     const now = try gossip.monotonic();
     const result = exchange_mod.run(runtime, actions[0..count], &demand, now, &host) catch |err| {
         if (jsStopped(err)) runtime.forceStop(true);
         return err;
     };
-    // The exchange may have retired the last operation that needed the references after the notifier finalized.
-    runtime.disposeTerminalReferences();
     return .{ .val = result };
 }
 
@@ -278,37 +217,23 @@ pub fn fail(_: *@This(), site_value: js.Value, reason_value: js.Value) !void {
     const site = std.meta.stringToEnum(fatal.Site, name[0..try application_cfg.text(site_value.val, &name)]) orelse return error.InvalidNetworkConfig;
     switch (site) {
         .generated_batch, .failed_turns, .completion_contract => {},
-        .settlement, .exchange_build, .exchange_finish => return error.InvalidNetworkConfig,
+        .exchange_build, .exchange_finish => return error.InvalidNetworkConfig,
     }
     var reason: [fatal.detail_max]u8 = undefined;
     fatal.terminate(js.env(), site, reason[0..try application_cfg.text(reason_value.val, &reason)]);
 }
 
-/// The N-API side of an exchange: the close result's settlement and the result's JS values.
+/// The N-API side of an exchange: the result's JS values.
 const Exchange = struct {
     env: napi.Env,
     runtime: *Runtime,
-    /// The close result this exchange's settlement settled, which its result carries.
-    closed: ?Value = null,
 
     pub const Result = Value;
 
-    /// Settles the close result once it is due.
-    pub fn settle(self: *Exchange) !void {
-        const runtime = self.runtime;
-        runtime.lock();
-        const due = runtime.quiescent and !runtime.close_settled;
-        runtime.unlock();
-        if (!due) return;
-        _ = settleClose(self.env, runtime, &self.closed) catch |err| {
-            settlementFailed(self.env, runtime, err);
-            return err;
-        };
-    }
-    /// A fresh result, or null when there is nothing to deliver or close and a prepared one serves.
+    /// A fresh result, or null when there is nothing to deliver and a prepared one serves.
     pub fn build(self: *Exchange, selection: *exchange_mod.Selection) !?Value {
-        if (!selection.delivers() and self.closed == null) return null;
-        return try exchange_mod.build(self.env, self.runtime, selection, self.closed);
+        if (!selection.delivers()) return null;
+        return try exchange_mod.build(self.env, self.runtime, selection);
     }
     pub fn finish(self: *Exchange, output: ?Value, outcome: exchange_mod.Outcome) !Value {
         return exchange_mod.finish(self.env, self.runtime, output, outcome);
@@ -548,13 +473,13 @@ pub fn publishGossip(self: *@This(), topic: js.Value, data: js.Value, options: j
     return .{ .val = try publication_js.publish(try self.owner(), topic.val, data.val, options.val) };
 }
 
-test "settlement and exchange failures terminate while JavaScript can run, and a stopped environment stops locally" {
+test "a notification JavaScript cannot run stops locally, and exchange failures classify as stopped or contract" {
     const shim = @import("network_runtime_test.zig");
-    for ([_]anyerror{ error.Closing, error.CannotRunJS, error.PendingException }) |err| {
-        var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 }, .notify_live = false };
-        settlementFailed(undefined, &runtime, err);
-        try std.testing.expect(runtime.disposed and runtime.stop and !runtime.env_alive);
-    }
+    shim.undefined_status = napi.c.napi_cannot_run_js;
+    defer shim.undefined_status = napi.c.napi_ok;
+    var notified: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 }, .notify_live = false };
+    onNotify(undefined, undefined, &notified, undefined);
+    try std.testing.expect(notified.disposed and notified.stop and !notified.env_alive);
     // An exception that clears is the bridge's contract failure; a pending-exception status with none pending is how
     // N-API reports JavaScript that cannot run.
     var classified: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 }, .notify_live = false };
@@ -571,10 +496,4 @@ test "settlement and exchange failures terminate while JavaScript can run, and a
         try std.testing.expectEqual(case[2], host.classify(case[0]));
         try std.testing.expectEqual(case[1] and case[2] == .stopped, shim.exception_pending);
     }
-    try shim.expectFatal(struct {
-        fn run() void {
-            var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 }, .notify_live = false };
-            settlementFailed(undefined, &runtime, error.GenericFailure);
-        }
-    }.run, "FATAL ERROR: native network bridge settlement: GenericFailure\n");
 }

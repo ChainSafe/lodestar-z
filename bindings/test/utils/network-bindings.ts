@@ -19,10 +19,7 @@ interface NativeBridge extends Pick<NativeNetworkApplicationRuntime, "diagnostic
   connect(...args: Parameters<NativeNetworkApplicationRuntime["connect"]>): RequestHandle;
   exchange(actions: readonly never[], demand: NativeExchangeDemand): NativeExchange;
   close(): void;
-  initialize(
-    config: unknown,
-    onWorkAvailable: () => void
-  ): {identity: NativeIdentity; closed: Promise<NativeRuntimeCloseResult>};
+  initialize(config: unknown, onWorkAvailable: () => void): {identity: NativeIdentity};
   requestStart(
     peer: string,
     protocol: NativeProtocolId,
@@ -73,4 +70,20 @@ export async function commandCompleted(
   const completion = await completed(native, "command", handle, demand, timeoutMs);
   if ("error" in completion) throw completion.error;
   return "value" in completion ? completion.value : undefined;
+}
+
+/** Closes a raw runtime and exchanges until one delivers its close result, which it returns. */
+export async function closedBy(
+  native: Pick<NativeBridge, "close" | "exchange">,
+  demand: NativeExchangeDemand,
+  timeoutMs = 10000
+): Promise<NativeRuntimeCloseResult> {
+  native.close();
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const {closed} = native.exchange([], demand);
+    if (closed !== null) return closed;
+    if (Date.now() > deadline) throw Error("The close result did not arrive");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
 }

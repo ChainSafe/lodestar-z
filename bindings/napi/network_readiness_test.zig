@@ -30,7 +30,7 @@ test "only the first move into a list, or from none to parked, disarms" {
     _ = ready.recompute(.serving, .parked);
     try std.testing.expect(ready.arm());
     try std.testing.expect(!ready.recompute(.serving, .parked));
-    try std.testing.expect(ready.recompute(.legacy, .control));
+    try std.testing.expect(ready.recompute(.completions, .control));
 }
 
 test "recomputing a queued row keeps its position" {
@@ -55,7 +55,7 @@ test "a pinned row ignores publications until its unpin moves it where it belong
     ready.unpin(.gossip, .parked);
     try std.testing.expectEqual(readiness.Place.parked, ready.place(.gossip));
     try std.testing.expect(!ready.arm());
-    // A declined notification forgets every row, so recomputing any of them with work notifies again.
+    // A notification the host threw on forgets every row, so recomputing any of them with work notifies again.
     ready.forget();
     try std.testing.expect(ready.armed and ready.payload.len == 0);
     try std.testing.expect(ready.recompute(.peers, .payload));

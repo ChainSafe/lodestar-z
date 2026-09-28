@@ -233,8 +233,8 @@ export interface NativeNetworkApplicationRuntime {
  * Initialize from the owning thread, after configuring BeaconConfig. One runtime is live per process;
  * another initializes only after the previous one is garbage collected.
  * Copies configuration and returns a running runtime; failure is terminal.
- * Calls onWorkAvailable on that thread when results, peer events, incoming requests, or gossip work arrive after
- * an exchange found nothing queued, and from request and incoming calls that leave results to settle.
+ * Calls onWorkAvailable on that thread when completions, the close result, peer events, incoming requests, or gossip
+ * work arrive after an exchange found nothing queued.
  * onWorkAvailable must only schedule an exchange in a later macrotask. No further notification arrives while work
  * stays queued, so the host exchanges again while one returns `more`, retries on a timer while it returns
  * `disabledWaiting` or `parked` work it can take later, and never cancels a scheduled exchange, also after the
@@ -415,7 +415,6 @@ export interface NativeRequestDiagnostics {
   chunksCopied: bigint;
   bytesCopied: bigint;
   requestFull: bigint;
-  busyPulls: bigint;
 }
 
 export interface NativeIncomingDiagnostics {

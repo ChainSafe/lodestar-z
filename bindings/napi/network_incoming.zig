@@ -327,8 +327,8 @@ pub fn flags(runtime: *Runtime, now: n.Now) !bool {
     if (table.cells.len == 0) return false;
     var submissions: usize = 0;
     var more = false;
-    // Cells refresh their settlement at the end of each iteration, so the legacy row is recomputed after the loop.
-    defer runtime.recomputeLocked(.legacy);
+    // Cells refresh their completions at the end of each iteration, so the completions row is recomputed after the loop.
+    defer runtime.recomputeLocked(.completions);
     for (0..table.cells.len) |offset| {
         const cell = &table.cells[(table.cursor + offset) % table.cells.len];
         defer table.refresh(cell);
@@ -441,7 +441,7 @@ pub fn captureLocked(runtime: *Runtime, event: rr.Event, now: n.Now) !void {
             }
         }
         table.refresh(cell);
-        runtime.recomputeLocked(.legacy);
+        runtime.recomputeLocked(.completions);
         runtime.recomputeLocked(.serving);
         if (ownerWork(cell)) runtime.host_due = true;
         break;

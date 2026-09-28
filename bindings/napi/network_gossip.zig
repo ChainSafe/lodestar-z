@@ -52,7 +52,7 @@ pub fn flags(runtime: *Runtime, io: std.Io) !bool {
         table.outcome(result);
         table.retire(token);
     }
-    runtime.recomputeLocked(.legacy);
+    runtime.recomputeLocked(.completions);
     runtime.recomputeLocked(.checks);
     runtime.recomputeLocked(.gossip);
     return table.pending(!runtime.verdicts_held);

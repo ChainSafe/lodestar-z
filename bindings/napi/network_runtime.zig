@@ -179,10 +179,8 @@ pub const Runtime = struct {
     operations_held: bool = false,
     env_alive: bool = true,
     disposed: bool = false,
-    close_deferred: ?napi.Deferred = null,
-    close_settled: bool = false,
-    copy_error: ?napi.Ref = null,
-    close_results: [2]?napi.Ref = @splat(null),
+    /// An exchange delivered the close result, after owner quiescence, the join and every promised completion.
+    close_delivered: bool = false,
     hook_live: bool = false,
     env: napi.Env,
     stop: bool = false,
@@ -366,11 +364,11 @@ pub const Runtime = struct {
         return result;
     }
     /// Where `row` belongs now. Neither checks nor serving starts are served after a stop, no claim after
-    /// quiescence, and nothing once the close result settled, so a host may stop exchanging.
+    /// quiescence, and nothing once the close result was delivered, so a host may stop exchanging.
     pub fn wantLocked(self: *Runtime, row: Row) Place {
         switch (row) {
-            .legacy => return if (self.settleableLocked() or self.acknowledgingLocked() or (self.quiescent and !self.close_settled)) .control else .none,
-            .peers => return if (!self.close_settled and self.lane != null and self.lane.?.len > 0) .payload else .none,
+            .completions => return if (self.settleableLocked() or self.acknowledgingLocked() or (self.quiescent and !self.close_delivered)) .control else .none,
+            .peers => return if (!self.close_delivered and self.lane != null and self.lane.?.len > 0) .payload else .none,
             .checks => {
                 const table = if (self.gossip) |*table| table else return .none;
                 return if (!self.stop and !self.quiescent and table.readiness().checks) .payload else .none;
@@ -447,7 +445,8 @@ pub const Runtime = struct {
         self.unlock();
         self.abandon();
     }
-    pub fn retireClosedRequests(self: *Runtime) void {
+    /// Environment disposal reclaims every cell JavaScript can no longer take, rather than emulating its delivery.
+    pub fn reclaim(self: *Runtime) void {
         std.debug.assert(self.quiescent and self.notify_finalized and self.disposed);
         if (self.requests) |*table| for (table.cells, 0..) |cell, i| {
             if (cell.state == .free) continue;
@@ -463,25 +462,9 @@ pub const Runtime = struct {
         self.retireRequestStorageLocked();
         self.disposeJsReferences();
     }
-    /// The host's drain can settle the close result after the notifier finalizes, so its
-    /// references outlive the notifier until close settles or the runtime is disposed.
-    pub fn disposeTerminalReferences(self: *Runtime) void {
-        if (!self.notify_finalized or self.table.occupied != 0 or (self.publications != null and self.publications.?.diag.occupied != 0) or (self.requests != null and self.requests.?.diag.occupied != 0) or (self.incoming != null and self.incoming.?.diag.occupied != 0)) return;
-        if (self.copy_error) |ref| ref.delete() catch unreachable;
-        self.copy_error = null;
-        if (self.close_settled) self.disposeCloseReferences();
-    }
+    /// Deletes the prepared exchange results, the runtime's only JavaScript references.
     pub fn disposeJsReferences(self: *Runtime) void {
-        if (self.copy_error) |ref| ref.delete() catch unreachable;
-        self.copy_error = null;
-        self.disposeCloseReferences();
         self.results.dispose();
-    }
-    pub fn disposeCloseReferences(self: *Runtime) void {
-        for (&self.close_results) |*entry| {
-            if (entry.*) |ref| ref.delete() catch unreachable;
-            entry.* = null;
-        }
     }
     pub fn cleanup(self: *Runtime) void {
         self.hook_live = false;
@@ -508,7 +491,7 @@ pub const Runtime = struct {
     }
     pub fn finalize(_: napi.Env, self: *Runtime) void {
         self.notify_finalized = true;
-        if (self.disposed) self.retireClosedRequests() else self.disposeTerminalReferences();
+        if (self.disposed) self.reclaim();
         self.release();
     }
 

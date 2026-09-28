@@ -70,9 +70,9 @@ function coalescingKey(action) {
 }
 
 /**
- * The network's close result once native settled its close: the first failure, a delivery failure or the owner's
- * terminal error, whichever came first, even when a requested close was already underway; else a requested close.
- * It holds no host or pump reference, since native settlement roots its reaction.
+ * The network's close result once the completion owner settled the runtime's close: the first failure, a delivery
+ * failure or the owner's terminal error, whichever came first, even when a requested close was already underway; else
+ * a requested close. It holds no host or pump reference, since the completion owner roots its reaction.
  */
 export function closeResult(closed, terminal) {
   return closed.then((result) => {

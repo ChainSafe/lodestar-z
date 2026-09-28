@@ -40,7 +40,7 @@ interface DirectIncomingBridge {
   initialize(
     config: ReturnType<typeof applicationConfig>,
     onWorkAvailable: () => void
-  ): {identity: import("../src/network.js").NativeIdentity; closed: Promise<unknown>};
+  ): {identity: import("../src/network.js").NativeIdentity};
   applyIntent(intent: ReturnType<typeof localIntent>, slot: bigint): IncomingHandle;
   exchange(
     actions: readonly import("../src/network-runtime.js").NativeAction[],
@@ -54,7 +54,7 @@ interface DirectIncomingBridge {
 }
 
 test("incoming tokens reject malformed handles and stale slot generations", async () => {
-  const {commandCompleted, completed, networkBindings: exports} = await import("./utils/network-bindings.js");
+  const {closedBy, commandCompleted, completed, networkBindings: exports} = await import("./utils/network-bindings.js");
   const {NativeNetworkRuntime} = exports as unknown as {NativeNetworkRuntime: new () => DirectIncomingBridge};
   const config = applicationConfig();
   config.resources.bridgeBudgetBytes = 512 * 1024 * 1024;
@@ -63,10 +63,8 @@ test("incoming tokens reject malformed handles and stale slot generations", asyn
   clientConfig.resources.bridgeBudgetBytes = 512 * 1024 * 1024;
   const client = await startPeer(clientConfig);
   const native = new NativeNetworkRuntime();
-  let closed: Promise<unknown> | undefined;
   try {
     const promises = native.initialize(config, () => undefined);
-    closed = promises.closed;
     const [, identity] = await Promise.all([client.identity, promises.identity]);
     const intent = native.applyIntent(localIntent(config), config.initialSlot);
     await client.applyIntent(localIntent(clientConfig), clientConfig.initialSlot);
@@ -129,7 +127,6 @@ test("incoming tokens reject malformed handles and stale slot generations", asyn
       previous = handle;
     }
   } finally {
-    native.close();
-    await Promise.all([client.close(), closed]);
+    await Promise.all([client.close(), closedBy(native, settleOnly)]);
   }
 }, 15000);
