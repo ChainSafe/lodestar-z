@@ -1,0 +1,65 @@
+// Run from a consumer that installed the packed main and platform packages: the addon loads from the platform
+// package built for this process's platform, and ordinary exports work on the main thread around a worker's load and
+// unload.
+import assert from "node:assert/strict";
+import {existsSync, readFileSync, realpathSync} from "node:fs";
+import {createRequire} from "node:module";
+import {dirname, join, relative} from "node:path";
+import {fileURLToPath} from "node:url";
+import {isMainThread, parentPort, Worker} from "node:worker_threads";
+import {SecretKey, verify} from "@chainsafe/lodestar-z/blst";
+import {innerShuffleList} from "@chainsafe/lodestar-z/shuffle";
+
+function ordinaryExports() {
+  const secretKey = SecretKey.fromKeygen(new Uint8Array(32).fill(7));
+  const message = new Uint8Array(32).fill(1);
+  assert(verify(message, secretKey.toPublicKey(), secretKey.sign(message)));
+  const list = Uint32Array.of(0, 1, 2, 3, 4, 5, 6, 7, 8);
+  innerShuffleList(list, new Uint8Array(32), 32, false);
+  assert.deepEqual(list, Uint32Array.of(6, 2, 3, 5, 1, 7, 8, 0, 4));
+}
+
+if (!isMainThread) {
+  ordinaryExports();
+  parentPort.postMessage("ok");
+} else {
+  const root = process.cwd();
+  const consumer = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  const main = "@chainsafe/lodestar-z";
+  const [platformPackage, ...others] = Object.keys(consumer.dependencies).filter((name) => name.startsWith(`${main}-`));
+  assert.deepEqual(others, []);
+  const libc =
+    process.platform !== "linux" ? "" : process.report.getReport().header.glibcVersionRuntime ? "-gnu" : "-musl";
+  const arch = {arm64: "aarch64", x64: "x86_64"}[process.arch];
+  const vendor = process.platform === "darwin" ? "apple-darwin" : `unknown-${process.platform}`;
+  assert.equal(platformPackage, `${main}-${arch}-${vendor}${libc}`, "platform package for another platform");
+
+  const network = await import(`${main}/network`);
+  assert.deepEqual(Object.keys(network), ["createNativeNetwork"]);
+  const require = createRequire(join(root, "package.json"));
+  const nativePath = realpathSync(require.resolve(platformPackage));
+  assert(!relative(root, nativePath).startsWith(".."));
+  const native = require(nativePath);
+  assert.equal(typeof native.NativeNetworkRuntime, "function");
+  assert(!Object.getOwnPropertyNames(native).some((name) => /^networkTest/i.test(name)));
+  const packageRoot = join(dirname(fileURLToPath(import.meta.resolve(`${main}/network`))), "../..");
+  assert(!existsSync(join(packageRoot, "zig-out/lib/bindings.node")));
+  assert.deepEqual(
+    Object.keys(require.cache).filter((path) => path.endsWith(".node")),
+    [nativePath]
+  );
+
+  ordinaryExports();
+  for (let i = 0; i < 2; i++) {
+    const worker = new Worker(new URL(import.meta.url));
+    const [message] = await Promise.all([
+      new Promise((resolve, reject) => worker.once("message", resolve).once("error", reject)),
+      new Promise((resolve) => worker.once("exit", resolve)),
+    ]);
+    assert.equal(message, "ok");
+    ordinaryExports();
+  }
+  console.log(
+    JSON.stringify({loaded: true, platformPackage, glibc: process.report.getReport().header.glibcVersionRuntime})
+  );
+}
