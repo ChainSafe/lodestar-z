@@ -55,6 +55,9 @@ pub const Slot = struct {
     last_send_ms: u64 = 0,
     close_reason: ?types.CloseReason = null,
     pending_close: ?types.PendingClose = null,
+    /// Established, and quiche has not reported its output drained since, so the final handshake
+    /// flight may still be unsent.
+    flight_pending: bool = false,
     connected_pending: bool = false,
     answered: bool = false,
     close_event: enum { none, pending, reported } = .none,
@@ -96,6 +99,7 @@ pub const Slot = struct {
         self.last_send_ms = params.now.mono_ms;
         self.close_reason = null;
         self.pending_close = null;
+        self.flight_pending = false;
         self.connected_pending = false;
         self.answered = false;
         self.close_event = .none;
