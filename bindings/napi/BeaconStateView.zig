@@ -1582,12 +1582,10 @@ pub fn toValue(self: *const BeaconStateView) !js.Value {
     switch (cached_state.state.forkSeq()) {
         inline else => |f| {
             const ForkBeaconState = fork_types.ForkTypes(f).BeaconState;
-            const value = try allocator.create(ForkBeaconState.Type);
-            defer allocator.destroy(value);
-            value.* = ForkBeaconState.default_value;
-            defer ForkBeaconState.deinit(allocator, value);
-            try cached_state.state.castToFork(f).inner.toValue(allocator, value);
-            return js_types.wrap(js.Value, try sszValueToNapiValue(env, ForkBeaconState, value));
+            var value: ForkBeaconState.Type = ForkBeaconState.default_value;
+            defer ForkBeaconState.deinit(allocator, &value);
+            try cached_state.state.castToFork(f).inner.toValue(allocator, &value);
+            return js_types.wrap(js.Value, try sszValueToNapiValue(env, ForkBeaconState, &value));
         },
     }
 }
