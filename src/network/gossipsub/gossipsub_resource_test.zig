@@ -64,14 +64,17 @@ test "gossip recovery refusal restores promise slots and identity pins before re
     try std.testing.expectError(error.OutboxFull, g.recovery.requestBatch(&g.peers, &row.io.tx, &ids, row.logical, row.conn, g.overlay.rng.random(), g.options.iwant_followup_ms, 1));
     try std.testing.expectEqual(available, g.recovery.available());
     try std.testing.expectEqual(@as(usize, 0), g.recovery.batch_len);
+    try std.testing.expect(std.mem.allEqual(u16, g.recovery.buckets, std.math.maxInt(u16)));
     try std.testing.expectEqual(@as(u32, 0), g.peers.rows[row.logical.index].pins);
     try std.testing.expect(row.io.tx.submit(&.{ .graft = name }, 1) != null);
     row.io.tx.cancelStream(&g.messages.store);
     _ = try g.recovery.filterPending(row.logical, &ids);
     try g.recovery.requestBatch(&g.peers, &row.io.tx, &ids, row.logical, row.conn, g.overlay.rng.random(), g.options.iwant_followup_ms, 2);
     try std.testing.expectEqual(@as(usize, 2), g.recovery.len);
+    try std.testing.expectEqual(g.recovery.buckets.len - 2, std.mem.count(u16, g.recovery.buckets, &.{std.math.maxInt(u16)}));
     try std.testing.expectEqual(@as(u32, 1), g.peers.rows[row.logical.index].pins);
     g.cancelWrites(peer);
     try std.testing.expectEqual(available, g.recovery.available());
+    try std.testing.expect(std.mem.allEqual(u16, g.recovery.buckets, std.math.maxInt(u16)));
     try std.testing.expectEqual(@as(u32, 0), g.peers.rows[row.logical.index].pins);
 }
