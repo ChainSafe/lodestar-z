@@ -86,9 +86,16 @@ pub fn options() configuration.Resolved {
 /// Commits `local` through the owner's intent path, keeping its schedule, endpoints,
 /// capabilities, subscriptions and demand. The owner assigns the metadata sequence.
 pub fn updateLocal(node: *NetworkCore, local: *const t.LocalState, now: Now) !void {
+    try updateLocalDemand(node, local, &node.peer_manager.demand, now);
+}
+
+/// Commits `local` and `demand` together through the owner's intent path, keeping its schedule,
+/// endpoints, capabilities and subscriptions.
+pub fn updateLocalDemand(node: *NetworkCore, local: *const t.LocalState, demand: *const t.Demand, now: Now) !void {
     var boundaries: [@import("gossipsub/topic_policy.zig").boundary_max]@import("gossipsub/local_intent.zig").Boundary = undefined;
     var desired = support.intent(node, try @import("gossipsub/test_support.zig").subscriptionUpdate(node.service.gossipsub, null, false, &boundaries));
     desired.update.local = local.*;
+    desired.demand = demand.*;
     _ = try node.applyIntent(&desired, now);
 }
 

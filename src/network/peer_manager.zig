@@ -372,13 +372,9 @@ pub const PeerManager = struct {
     }
 
     /// Applies peer policy's consequences of a committed local state. The caller validates it and
-    /// revalidates control schedules first when the fork changes.
+    /// the demand that holds under it, and revalidates control schedules first when the fork changes.
     pub fn commitLocal(self: *PeerManager, local: *const t.LocalState, now: Now) void {
         self.local = local.*;
-        for (self.local.fork.custody_groups..128) |index| {
-            self.demand.group_targets[index] = 0;
-            self.demand.custody_group_targets[index] = 0;
-        }
         var budget: u16 = 0;
         _ = self.catalog.advanceCustody(&self.local.fork, now.mono_ms, self.metadata_freshness_ms, &budget);
         self.selection_revision = null;
