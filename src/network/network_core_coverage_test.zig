@@ -22,7 +22,7 @@ fn settle(setup: *support.Setup) !void {
         try setup.step(0);
         setup.pair.advance(25);
     }
-    setup.client.peer_manager.reconcile(&setup.client.service, setup.pair.now);
+    setup.client.peer_manager.reconcile(setup.client.service.gossipsub, &setup.client.control_protocol, setup.pair.now);
 }
 
 test "managed coverage counts real duty subscriptions separately from custodians" {
@@ -41,7 +41,7 @@ test "managed coverage counts real duty subscriptions separately from custodians
         demand.custody_group_targets[group] = 1;
     };
     try setup.client.peer_manager.setDemand(&demand);
-    setup.client.peer_manager.reconcile(&setup.client.service, setup.pair.now);
+    setup.client.peer_manager.reconcile(setup.client.service.gossipsub, &setup.client.control_protocol, setup.pair.now);
     try equal(@as(u16, 8), setup.client.peer_manager.coverageDeficits().groups);
     try equal(@as(u16, 4), setup.client.peer_manager.coverageDeficits().custody_groups);
     try equal(@as(u16, 1), setup.client.peer_manager.coverageDeficits().attestation);
@@ -62,7 +62,7 @@ test "managed coverage counts real duty subscriptions separately from custodians
     try expect(setup.client.service.gossipsub.overlay.findTopic(attestation) == null);
     try equal(@as(u64, 0), setup.client.peer_manager.policy_scratch[0].stable.attnets);
     setup.pair.advance(setup.client.peer_manager.metadata_freshness_ms);
-    setup.client.peer_manager.reconcile(&setup.client.service, setup.pair.now);
+    setup.client.peer_manager.reconcile(setup.client.service.gossipsub, &setup.client.control_protocol, setup.pair.now);
     try equal(@as(u16, 8), setup.client.peer_manager.coverageDeficits().custody_groups);
     try equal(@as(u16, 0), setup.client.peer_manager.coverageDeficits().groups);
     try equal(@as(f64, 0), setup.client.peer_manager.catalog.get(peer.peer).?.score);
@@ -74,7 +74,7 @@ test "managed coverage coalesces subscription and score changes with operation e
     defer setup.deinit();
     try settle(&setup);
     try setup.client.peer_manager.setDemand(&.{ .attnets = 1 << 7 });
-    setup.client.peer_manager.reconcile(&setup.client.service, setup.pair.now);
+    setup.client.peer_manager.reconcile(setup.client.service.gossipsub, &setup.client.control_protocol, setup.pair.now);
     const g = setup.client.service.gossipsub;
     var snapshots: [4]t.Snapshot = undefined;
     _ = setup.client.peer_manager.snapshots(&snapshots);
@@ -82,38 +82,38 @@ test "managed coverage coalesces subscription and score changes with operation e
     const index = g.sessions.find(conn).?;
     const baseline = setup.client.peer_manager.counters.selections;
     gossip_test.control(g, index, .{ .subscription = .{ .topic = attestation, .subscribe = true } }, setup.pair.now);
-    setup.client.peer_manager.reconcile(&setup.client.service, setup.pair.now);
+    setup.client.peer_manager.reconcile(setup.client.service.gossipsub, &setup.client.control_protocol, setup.pair.now);
     try equal(baseline, setup.client.peer_manager.counters.selections);
-    const due = setup.client.peer_manager.policyWakeup(&setup.client.service, setup.pair.now).?;
+    const due = setup.client.peer_manager.policyWakeup(setup.client.service.gossipsub, setup.pair.now).?;
     try equal(setup.pair.now.mono_ms + manager.coverage_reconcile_interval_ms, due);
     const revision = g.coverageRevision();
     for (0..100) |_| gossip_test.control(g, index, .{ .subscription = .{ .topic = attestation, .subscribe = true } }, setup.pair.now);
     try equal(revision, g.coverageRevision());
     setup.pair.advance(manager.coverage_reconcile_interval_ms);
-    setup.client.peer_manager.reconcile(&setup.client.service, setup.pair.now);
+    setup.client.peer_manager.reconcile(setup.client.service.gossipsub, &setup.client.control_protocol, setup.pair.now);
     try equal(baseline + 1, setup.client.peer_manager.counters.selections);
     try equal(@as(u16, 0), setup.client.peer_manager.coverageDeficits().attestation);
     gossip_test.penalize(g, conn, 7);
     setup.pair.advance(manager.coverage_reconcile_interval_ms);
-    setup.client.peer_manager.reconcile(&setup.client.service, setup.pair.now);
+    setup.client.peer_manager.reconcile(setup.client.service.gossipsub, &setup.client.control_protocol, setup.pair.now);
     try equal(@as(u16, 0), setup.client.peer_manager.coverageDeficits().attestation);
     try gossip_test.subscribe(g, attestation);
     setup.pair.advance(manager.coverage_reconcile_interval_ms);
-    setup.client.peer_manager.reconcile(&setup.client.service, setup.pair.now);
+    setup.client.peer_manager.reconcile(setup.client.service.gossipsub, &setup.client.control_protocol, setup.pair.now);
     try equal(@as(u16, 1), setup.client.peer_manager.coverageDeficits().attestation);
     try gossip_test.unsubscribe(g, attestation);
     gossip_test.penalize(g, conn, 40);
     setup.pair.advance(manager.coverage_reconcile_interval_ms);
-    setup.client.peer_manager.reconcile(&setup.client.service, setup.pair.now);
+    setup.client.peer_manager.reconcile(setup.client.service.gossipsub, &setup.client.control_protocol, setup.pair.now);
     try equal(@as(u16, 1), setup.client.peer_manager.coverageDeficits().attestation);
     g.peers.scores.rows[g.sessions.rows[index].logical.index].behaviour = 0;
     gossip_test.penalize(g, conn, 0);
     setup.pair.advance(manager.coverage_reconcile_interval_ms);
-    setup.client.peer_manager.reconcile(&setup.client.service, setup.pair.now);
+    setup.client.peer_manager.reconcile(setup.client.service.gossipsub, &setup.client.control_protocol, setup.pair.now);
     try equal(@as(u16, 0), setup.client.peer_manager.coverageDeficits().attestation);
     gossip_test.control(g, index, .{ .subscription = .{ .topic = attestation, .subscribe = false } }, setup.pair.now);
     setup.pair.advance(manager.coverage_reconcile_interval_ms);
-    setup.client.peer_manager.reconcile(&setup.client.service, setup.pair.now);
+    setup.client.peer_manager.reconcile(setup.client.service.gossipsub, &setup.client.control_protocol, setup.pair.now);
     try equal(@as(u16, 1), setup.client.peer_manager.coverageDeficits().attestation);
     try equal(@as(f64, 0), setup.client.peer_manager.catalog.get(snapshots[0].peer).?.score);
 }
@@ -136,10 +136,10 @@ test "managed coverage gives initial subscriptions finite grace even after metad
     const grace = snapshots[0].connected_at_ms + setup.client.peer_manager.control.options.inbound_status_grace_ms;
     setup.pair.advance(grace - setup.pair.now.mono_ms - 1);
     try setup.client.peer_manager.setDemand(&.{ .attnets = 3 });
-    setup.client.peer_manager.reconcile(&setup.client.service, setup.pair.now);
+    setup.client.peer_manager.reconcile(setup.client.service.gossipsub, &setup.client.control_protocol, setup.pair.now);
     try equal(@as(u16, 1), setup.client.peer_manager.selection.retained_count);
     setup.pair.advance(1);
-    setup.client.peer_manager.reconcile(&setup.client.service, setup.pair.now);
+    setup.client.peer_manager.reconcile(setup.client.service.gossipsub, &setup.client.control_protocol, setup.pair.now);
     try equal(@as(u16, 0), setup.client.peer_manager.selection.retained_count);
     const closing = &setup.client.peer_manager.control.schedules[snapshots[0].peer.index];
     try expect(closing.closing != null);
@@ -147,6 +147,6 @@ test "managed coverage gives initial subscriptions finite grace even after metad
     try equal(@as(u16, 1), setup.client.peer_manager.selection.dial_budget);
     try equal(@as(u16, 2), setup.client.peer_manager.coverageDeficits().attestation);
     const closed = closing.closing.?;
-    for (0..10) |_| setup.client.peer_manager.reconcile(&setup.client.service, setup.pair.now);
+    for (0..10) |_| setup.client.peer_manager.reconcile(setup.client.service.gossipsub, &setup.client.control_protocol, setup.pair.now);
     try std.testing.expectEqualDeep(closed, closing.closing.?);
 }

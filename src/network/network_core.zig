@@ -1,6 +1,5 @@
 const std = @import("std");
 const d = @import("discv5");
-const managed = @import("managed.zig");
 const manager = @import("peer_manager.zig");
 const service_mod = @import("service.zig");
 const transport_mod = @import("transport.zig");
@@ -12,6 +11,7 @@ const gossip = @import("gossipsub/root.zig");
 const Now = @import("types.zig").Now;
 const wake_sources = @import("wake_sources.zig");
 const control_wire = @import("control_wire.zig");
+const ControlProtocol = @import("control_protocol.zig").ControlProtocol;
 pub const wait = @import("wait.zig");
 
 /// discv5's standalone receive wait. NetworkCore polls the discovery sockets itself and steps
@@ -19,6 +19,10 @@ pub const wait = @import("wait.zig");
 const discovery_poll_interval_ms: u32 = 5;
 /// Discovery datagrams drained per turn, matching the QUIC receive batch.
 pub const discovery_batch_max: u32 = @import("constants.zig").receive_batch_max;
+pub const controls_per_turn = 32;
+pub const identify_per_turn = 8;
+pub const dials_per_turn = 4;
+pub const candidates_per_turn = d.types.findnode_result_max + 1;
 pub const ForkSchedule = struct {
     fulu_scheduled: bool = false,
     next_version: [4]u8 = @splat(0),
@@ -91,8 +95,9 @@ pub const Outputs = struct {
     application: []rr.Event = &.{},
 };
 pub const OperationalError = transport_mod.StepError || transport_mod.DialError || peers.discovery.Error || wait.Error;
+pub const Counts = struct { peers: usize, application: usize };
 pub const Result = struct {
-    counts: managed.Counts = .{ .peers = 0, .application = 0 },
+    counts: Counts = .{ .peers = 0, .application = 0 },
     transport: transport_mod.StepResult,
     readiness: wait.Result = .{},
     /// Discovery progress summed over the turn's datagram batch.
@@ -154,6 +159,7 @@ pub const NetworkCore = struct {
     allocator: std.mem.Allocator,
     transport: transport_mod.Transport,
     peer_manager: manager.PeerManager,
+    control_protocol: ControlProtocol,
     service: service_mod.Service,
     discovery: ?*DiscoveryOwners,
     native_events: []engine.Event,
@@ -199,10 +205,15 @@ pub const NetworkCore = struct {
         self.last_now = try transport_mod.currentTime(io);
         try self.transport.init(allocator, io, .{ .host = startup.host, .bind = startup.bind, .limits = resolved.limits, .work_limits = resolved.work_limits, .socket_buffers = resolved.socket_buffers.quic, .keylog_path = startup.keylog_path });
         errdefer self.transport.deinit(io);
-        self.service = try service_mod.Service.init(allocator, managed.serviceOptions(resolved.core, &local));
+        var service_options = resolved.core.service;
+        service_options.reqresp.request_fork = local.fork.fork;
+        self.service = try service_mod.Service.init(allocator, service_options);
         errdefer self.service.deinit();
-        self.peer_manager = try manager.PeerManager.init(allocator, &self.transport.peerId(), &local, managed.peerOptions(resolved.core), &self.service, self.transport.engine.limits.connections_max);
+        self.peer_manager = try manager.PeerManager.init(allocator, &self.transport.peerId(), &local, resolved.core.peerManager(), self.service.router.capabilities().receive, self.transport.engine.limits.connections_max);
         errdefer self.peer_manager.deinit();
+        const peer_capacity: u16 = @intCast(self.peer_manager.catalog.rows.len);
+        self.control_protocol = try ControlProtocol.init(allocator, peer_capacity, resolved.core.peers.max_peers, self.service.reqresp.serving.control_reserved);
+        errdefer self.control_protocol.deinit(allocator);
         self.peer_manager.loadRemembered(startup.remembered, self.last_now);
         self.service.identify.bind(&self.transport.engine);
         self.service.gossipsub.clock = io;
@@ -234,6 +245,7 @@ pub const NetworkCore = struct {
         }
         self.allocator.destroy(self.local_intent_workspace);
         self.service.deinit();
+        self.control_protocol.deinit(self.allocator);
         self.peer_manager.deinit();
         self.allocator.free(self.native_events);
         self.transport.deinit(io);
@@ -243,7 +255,18 @@ pub const NetworkCore = struct {
     pub fn shutdown(self: *NetworkCore, now: Now) void {
         self.host_wake = null;
         self.last_now = now;
-        managed.shutdown(&self.peer_manager, &self.service, &self.transport.engine, now);
+        const pm = &self.peer_manager;
+        if (!pm.stopped) {
+            pm.stopped = true;
+            pm.selection = .{};
+            pm.discovery_need = .{};
+            self.service.shutdown(&self.transport.engine);
+            const count = pm.catalog.snapshots(pm.snapshot_scratch);
+            for (pm.snapshot_scratch[0..count]) |snapshot| if (snapshot.connection) |conn| {
+                self.closeConnection(snapshot.peer, conn, .shutdown, now);
+            };
+            pm.dialing.shutdown(&pm.catalog, &self.transport.engine);
+        }
         if (self.discovery) |owned| owned.coordinator.cancel();
         // Include handshakes not yet admitted to the catalog.
         for (self.transport.engine.registry.slots, 0..) |slot, index| {
@@ -279,10 +302,12 @@ pub const NetworkCore = struct {
         self.peer_manager.cancelConnect(&self.transport.engine, identity, now);
     }
     pub fn addDirectPeer(self: *NetworkCore, identity: *const t.PeerId, addresses: []const t.Address, now: Now) !void {
-        try self.peer_manager.addDirectPeer(&self.service, identity, addresses, now);
+        if (try self.peer_manager.addDirectPeer(identity, addresses, now)) |conn| self.service.gossipsub.markDirect(conn);
     }
     pub fn removeDirectPeer(self: *NetworkCore, identity: *const t.PeerId) bool {
-        return self.peer_manager.removeDirectPeer(&self.service, identity);
+        if (!self.peer_manager.removeDirectPeer(identity)) return false;
+        self.service.gossipsub.unmarkDirect(identity);
+        return true;
     }
     pub fn directPeers(self: *const NetworkCore, out: []t.PeerId) error{OutputTooSmall}!usize {
         return self.peer_manager.directPeers(out);
@@ -294,26 +319,31 @@ pub const NetworkCore = struct {
     pub fn closePeer(self: *NetworkCore, identity: *const t.PeerId, now: Now) bool {
         const peer = self.peer_manager.catalog.find(identity) orelse return false;
         const connection = self.peer_manager.catalog.rowFor(peer).?.connection orelse return false;
-        return self.peer_manager.closePeer(&self.service, &self.transport.engine, peer, connection, now);
+        if (self.peer_manager.stopped) return false;
+        self.closeConnection(peer, connection, .host, now);
+        self.peer_manager.cancelConnect(&self.transport.engine, identity, now);
+        return true;
     }
     pub fn reStatusPeer(self: *NetworkCore, identity: *const t.PeerId, now: Now) bool {
         const peer = self.peer_manager.catalog.find(identity) orelse return false;
         const connection = self.peer_manager.catalog.rowFor(peer).?.connection orelse return false;
-        return self.peer_manager.reStatusPeer(peer, connection, now);
+        return self.peer_manager.reStatusPeer(&self.control_protocol, peer, connection, now);
     }
     pub fn reportPeer(self: *NetworkCore, identity: *const t.PeerId, action: t.PeerAction, now: Now) ?t.ReputationDecision {
         const peer = self.peer_manager.catalog.find(identity) orelse return null;
-        return self.peer_manager.reportPeer(peer, action, now);
+        return self.peer_manager.reportPeer(&self.control_protocol, peer, action, now);
     }
     pub fn updateStatus(self: *NetworkCore, status: *const t.Status) !void {
         if (self.peer_manager.stopped) return error.Stopped;
-        try self.peer_manager.updateStatus(&self.service, status);
+        try self.peer_manager.updateStatus(self.service.router.capabilities().receive, status);
     }
     pub fn sendReqRespRequest(self: *NetworkCore, identity: *const t.PeerId, protocol: rr.Protocol, request: []const u8, sink: []u8, options: rr.RequestOptions, now: Now) !rr.RequestHandle {
         const peer = self.peer_manager.catalog.find(identity) orelse return error.StalePeer;
         const snapshot = self.peer_manager.catalog.get(peer) orelse return error.StalePeer;
         const conn = snapshot.connection orelse return error.Disconnected;
-        return managed.sendReqRespRequest(&self.peer_manager, &self.service, &self.transport.engine, conn, protocol, request, sink, options, now);
+        if (self.peer_manager.stopped or self.peer_manager.quiescing) return error.Stopped;
+        if (protocol.isControl()) return error.ControlProtocol;
+        return self.service.request(&self.transport.engine, conn, protocol, request, sink, options, now);
     }
     pub fn consume(self: *NetworkCore, request: rr.RequestHandle, now: Now) bool {
         return self.service.reqresp.consume(request, now);
@@ -335,7 +365,8 @@ pub const NetworkCore = struct {
     }
 
     pub fn publishGossipWithOptions(self: *NetworkCore, topic: []const u8, bytes: []const u8, options: gossip.Gossipsub.PublishOptions, now: Now) !gossip.Gossipsub.PublishOutcome {
-        return managed.publishGossipWithOptions(&self.peer_manager, &self.service, topic, bytes, options, now);
+        if (self.peer_manager.stopped or self.peer_manager.quiescing) return error.Stopped;
+        return self.service.gossipsub.publishWithOptions(topic, bytes, options, now);
     }
     pub fn reportValidation(self: *NetworkCore, handle: gossip.ValidationHandle, verdict: gossip.Verdict, now: Now) gossip.ReportOutcome {
         return self.service.gossipsub.report(handle, verdict, now);
@@ -354,8 +385,22 @@ pub const NetworkCore = struct {
         if (out.len < peers.remembered.capacity) return error.OutputTooSmall;
         return self.peer_manager.rememberedPeers(now, out);
     }
+    /// Quiesces applications and closes every connection gracefully, sending Goodbye while
+    /// control progress continues.
     pub fn beginGracefulClose(self: *NetworkCore, now: Now) void {
-        managed.beginGracefulClose(&self.peer_manager, &self.service, now);
+        const pm = &self.peer_manager;
+        if (pm.stopped or pm.quiescing) return;
+        pm.quiescing = true;
+        pm.selection = .{};
+        pm.discovery_need = .{};
+        self.service.quiesceApplications();
+        var active = self.service.router.active_capabilities;
+        active.receive = .initEmpty();
+        self.service.router.setCapabilities(active);
+        for (pm.catalog.rows, 0..) |row, index| {
+            if (!row.occupied or row.connection == null) continue;
+            _ = pm.disconnect(&self.control_protocol, .{ .index = @intCast(index), .generation = row.generation }, .shutdown, now);
+        }
     }
 
     fn updateLocalWithEndpoints(self: *NetworkCore, desired: *const t.LocalState, schedule: ForkSchedule, endpoints: ?AdvertisementEndpoints, now: Now) !bool {
@@ -449,7 +494,15 @@ pub const NetworkCore = struct {
         }
         self.service.identify.local = prepared.identify;
         self.service.router.setCapabilities(prepared.capabilities);
-        self.peer_manager.commitLocal(&self.service, &prepared.local, now);
+        const pm = &self.peer_manager;
+        if (!std.meta.eql(pm.local.fork, prepared.local.fork)) {
+            for (0..pm.control.schedules.len) |index| {
+                const stale = pm.control.revalidate(&pm.catalog, &self.control_protocol, index, pm.local.fork, now) orelse continue;
+                self.control_protocol.cancel(&self.service.reqresp, stale.peer, stale.conn);
+            }
+        }
+        pm.commitLocal(&prepared.local, now);
+        self.service.reqresp.setRequestFork(prepared.local.fork.fork);
         self.schedule = prepared.schedule;
     }
 
@@ -504,7 +557,21 @@ pub const NetworkCore = struct {
     }
 
     fn collectWakeups(self: *NetworkCore, now: Now, outputs: Outputs, wakeups: *wake_sources.Wakeups) void {
-        managed.collectWakeups(&self.peer_manager, &self.service, now, outputs.peers.len, outputs.application.len, 4, wakeups);
+        const pm = &self.peer_manager;
+        wakeups.note(.peer_events, pm.peerWakeup(now, outputs.peers.len));
+        if (!pm.stopped) {
+            const application = if (pm.quiescing) 0 else outputs.application.len;
+            self.service.collectWakeups(now, .{ .application = application, .control = controls_per_turn, .identify = identify_per_turn }, wakeups);
+            wakeups.note(.control, pm.control.nextWakeup(&pm.catalog, &self.control_protocol, now));
+        }
+        if (!pm.stopped and !pm.quiescing) {
+            wakeups.note(.dial, pm.dialing.nextWakeup(&pm.catalog, now.mono_ms, @min(dials_per_turn, pm.dialRoom())));
+            wakeups.note(.dial, if (pm.dialing.selectionNeeded(&pm.catalog)) now.mono_ms else null);
+            wakeups.note(.dial, pm.dialing.selection_deadline);
+            wakeups.note(.peer_policy, pm.policyWakeup(self.service.gossipsub, now));
+            wakeups.note(.peer_policy, pm.reconciliation_deadline);
+            wakeups.note(.peer_policy, if (pm.custody_pending) now.mono_ms +| 1 else null);
+        }
         const quic = &self.transport.engine;
         if (quic.backlog()) wakeups.note(.transport_backlog, now.mono_ms);
         if (quic.eventsPending()) wakeups.note(.transport_events, now.mono_ms);
@@ -581,13 +648,13 @@ pub const NetworkCore = struct {
                 self.host_more = apply(host.context.?, self, tick).more;
             }
         } else self.host_more = false;
-        result.counts = managed.process(&self.peer_manager, &self.service, &self.transport.engine, self.native_events[0..result.transport.events], tick, self.current_slot, outputs.peers, outputs.application);
+        result.counts = self.process(self.native_events[0..result.transport.events], tick, outputs);
         if (!self.peer_manager.stopped and !self.peer_manager.quiescing) {
             // This turn's coverage selection already ran, without a second protocol pump.
             if (self.discovery != null) self.discover(io, tick, &result);
-            var intents: [managed.dials_per_turn]managed.DialIntent = undefined;
+            var intents: [dials_per_turn]manager.DialIntent = undefined;
             const room = self.transport.engine.limits.dialing_max -| self.transport.engine.registry.dialing;
-            const count = self.peer_manager.dialIntents(&self.service, &self.transport.engine, tick, intents[0..@min(room, intents.len)]);
+            const count = self.peer_manager.dialIntents(self.service.gossipsub, &self.control_protocol, &self.transport.engine, tick, intents[0..@min(room, intents.len)]);
             for (intents[0..count]) |intent| {
                 const handle = self.transport.dialPeer(io, intent.address, intent.peer) catch |err| {
                     if (err == error.DestinationUnreachable) {
@@ -613,6 +680,148 @@ pub const NetworkCore = struct {
         return result;
     }
 
+    /// Delivers the turn's transport events, runs the one Service pass, applies its faults and
+    /// control results, runs due control maintenance, then advances custody and selection.
+    /// Application borrows stay valid until the next turn; closes after publication clean up
+    /// without a second recycling pass.
+    fn process(self: *NetworkCore, events: []const engine.Event, now: Now, outputs: Outputs) Counts {
+        std.debug.assert(events.len <= @import("quic/limits.zig").events_per_turn_max);
+        const pm = &self.peer_manager;
+        const quic = &self.transport.engine;
+        if (pm.stopped) return .{
+            .peers = pm.catalog.pollEvents(outputs.peers),
+            .application = 0,
+        };
+        if (!pm.quiescing) pm.dialing.expire(&pm.catalog, quic, now.mono_ms);
+        for (events) |*event| self.transportEvent(event, now);
+        var controls: [controls_per_turn]rr.Event = undefined;
+        var identify_results: [identify_per_turn]@import("identify/root.zig").Result = undefined;
+        const counts = self.service.process(quic, events, now, .{ .application = outputs.application, .control = &controls, .identify = &identify_results });
+        for ([_][]const rr.Event{ outputs.application[0..counts.application], controls[0..counts.control] }) |batch| {
+            for (batch) |event| {
+                const fault = self.service.reqresp.peerFault(event) orelse continue;
+                const peer = pm.catalog.find(fault.identity) orelse continue;
+                switch (fault.kind) {
+                    .protocol => _ = pm.reportPeer(&self.control_protocol, peer, .low_tolerance, now),
+                    .non_completion => {
+                        _ = pm.catalog.nonCompletion(peer, now.mono_ms);
+                        pm.selection_revision = null;
+                    },
+                }
+            }
+        }
+        pm.control.identifyResults(&pm.catalog, &self.control_protocol, identify_results[0..counts.identify]);
+        self.controlEvents(controls[0..counts.control], now);
+        self.maintainControl(now);
+        if (pm.quiescing) return .{ .peers = pm.catalog.pollEvents(outputs.peers), .application = counts.application };
+        var budget: u16 = peers.custody.hashes_per_turn;
+        pm.custody_pending = pm.catalog.advanceCustody(&pm.local.fork, now.mono_ms, pm.metadata_freshness_ms, &budget);
+        pm.counters.custody_hashes +|= peers.custody.hashes_per_turn - budget;
+        pm.reconcile(self.service.gossipsub, &self.control_protocol, now);
+        pm.updateNativeRoom(quic);
+        return .{
+            .peers = pm.catalog.pollEvents(outputs.peers),
+            .application = counts.application,
+        };
+    }
+
+    fn transportEvent(self: *NetworkCore, event: *const engine.Event, now: Now) void {
+        const pm = &self.peer_manager;
+        const quic = &self.transport.engine;
+        switch (event.*) {
+            .connected => |*connected| {
+                if (pm.quiescing) {
+                    _ = quic.close(connected.conn, 0);
+                    return;
+                }
+                const endpoint = quic.peerAddress(connected.conn) orelse return;
+                const admission = pm.admit(quic, connected, endpoint, now) orelse {
+                    _ = quic.close(connected.conn, 0);
+                    return;
+                };
+                if (admission.displaced) |old| {
+                    self.control_protocol.cancelConnection(&self.service.reqresp, &self.service.router, quic, admission.peer, old);
+                    pm.control.retire(admission.peer, old);
+                    self.service.gossipsub.retireConnection(&self.service.router, quic, old, now);
+                    _ = quic.close(old, 0);
+                }
+                pm.connected(&self.control_protocol, admission.peer, connected.conn, connected.direction, now);
+                _ = self.service.gossipsub.peerConnected(quic, connected.conn, pm.catalog.rowFor(admission.peer).?.direct, now);
+            },
+            .closed => |*closed| {
+                const peer = pm.transportClosed(closed, now) orelse return;
+                const goodbye = self.service.reqresp.closingGoodbye(quic, closed.conn, now);
+                const reason = pm.closedReason(peer, closed.conn, goodbye, closed.reason == .peer_closed);
+                self.closeConnection(peer, closed.conn, reason, now);
+            },
+            .path_changed => |*changed| if (pm.catalog.findConnection(changed.conn)) |peer| {
+                _ = pm.catalog.updateEndpoint(peer, changed.conn, &changed.peer);
+            },
+            else => {},
+        }
+    }
+
+    /// Closes a connection its control schedule owns: peer control records the close evidence
+    /// and retires the schedule, the control protocol cancels the connection's requests, gossip
+    /// retires it, and the catalog and transport release it.
+    fn closeConnection(self: *NetworkCore, peer: t.PeerRef, conn: t.Handle, reason: t.DisconnectReason, now: Now) void {
+        const pm = &self.peer_manager;
+        const quic = &self.transport.engine;
+        if (!pm.control.close(&pm.catalog, peer, conn, reason, now)) return;
+        self.control_protocol.cancelConnection(&self.service.reqresp, &self.service.router, quic, peer, conn);
+        self.service.gossipsub.retireConnection(&self.service.router, quic, conn, now);
+        _ = pm.catalog.disconnect(peer, conn, reason, now.mono_ms);
+        _ = quic.close(conn, 0);
+    }
+
+    /// Routes one turn's control events. Peer control applies each request or reply before the
+    /// control protocol answers, consumes or retires it, and the peer's schedule is rekeyed after.
+    fn controlEvents(self: *NetworkCore, batch: []const rr.Event, now: Now) void {
+        const pm = &self.peer_manager;
+        const requests = &self.control_protocol;
+        const reqresp = &self.service.reqresp;
+        for (batch) |*event| switch (event.*) {
+            .request => |*request| {
+                const peer = pm.catalog.findConnection(request.peer) orelse {
+                    _ = reqresp.cancel(request.request);
+                    continue;
+                };
+                pm.control.requested(&pm.catalog, requests, peer, request, &pm.local, now, self.current_slot);
+                requests.respond(reqresp, peer, request, &pm.local, now);
+            },
+            else => {
+                const index = requests.result(reqresp, event.*, now) orelse continue;
+                const op = &requests.operations[index];
+                pm.control.replied(&pm.catalog, requests, op, event.*, &pm.local, now, self.current_slot);
+                requests.settle(reqresp, &self.service.router, &self.transport.engine, index, event.*, now);
+                pm.control.rekey(&pm.catalog, requests, op.peer.index);
+            },
+        };
+    }
+
+    /// Executes the due control work in peer control's order: a close, or an Identify start and
+    /// a control request start, each recorded before the schedule is rekeyed.
+    fn maintainControl(self: *NetworkCore, now: Now) void {
+        const pm = &self.peer_manager;
+        const requests = &self.control_protocol;
+        const quic = &self.transport.engine;
+        var pass = pm.control.beginMaintenance(now);
+        while (pm.control.nextDue(&pass, &pm.catalog, requests, &pm.local, now)) |*due| {
+            defer pm.control.rekey(&pm.catalog, requests, due.index);
+            if (due.close) |reason| {
+                self.closeConnection(due.peer, due.conn, reason, now);
+                continue;
+            }
+            if (due.identify) {
+                const started = if (self.service.identify.start(&self.service.router, quic, due.peer, due.conn, now)) true else |_| false;
+                pm.control.identifyStarted(due, started, now);
+            }
+            const probe = due.request orelse continue;
+            const start = requests.start(&self.service.reqresp, &self.service.router, quic, due.peer, due.conn, &probe, &pm.local, now);
+            pm.control.requestStarted(due, start, now);
+        }
+    }
+
     /// A turn drains discovery alone when discovery is readable or due, the QUIC sockets and the
     /// host are not readable, and every other source, re-read at the post-poll time, is in the future.
     fn discoveryOnly(self: *NetworkCore, readiness: *const wait.Result, tick: Now, outputs: Outputs, host: Host) bool {
@@ -636,7 +845,7 @@ pub const NetworkCore = struct {
         const need = self.peer_manager.discoveryNeed();
         owned.coordinator.request(need.query(tick.mono_ms +| 1_000), tick.mono_ms) catch unreachable;
         for (0..discovery_batch_max) |_| {
-            var candidates: [managed.candidates_per_turn]peers.enr.Candidate = undefined;
+            var candidates: [candidates_per_turn]peers.enr.Candidate = undefined;
             const progress = owned.coordinator.step(io, tick.mono_ms, tick.mono_ms, &candidates) catch |err| peers.discovery.Result{ .failure = err };
             result.discovery.add(&progress);
             var endpoints = owned.endpoints;
@@ -657,7 +866,7 @@ pub const NetworkCore = struct {
                     std.log.scoped(.network_discovery).warn("endpoint_update_failed reason={s}", .{@errorName(err)});
                 };
             }
-            const intake = self.peer_manager.discoveredBatch(&self.service, candidates[0..progress.candidates], tick);
+            const intake = self.peer_manager.discoveredBatch(self.service.gossipsub, &self.control_protocol, candidates[0..progress.candidates], tick);
             if (progress.candidates > 0) std.log.scoped(.network_discovery).debug("candidates_received count={d} refused={d}", .{ progress.candidates, intake.refused });
             if (progress.failure) |err| {
                 std.log.scoped(.network_discovery).debug("discovery_failed stage={s} reason={s}", .{ @tagName(progress.failure_stage), @errorName(err) });

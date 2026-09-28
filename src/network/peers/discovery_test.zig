@@ -262,7 +262,7 @@ test "peer discovery reserves output for the responder alongside a full referral
         record.* = try adapter.build(&key, 1, &.{ .fork = .{ .digest = context.digest, .next_version = @splat(0), .next_epoch = std.math.maxInt(u64) }, .ip4 = .{ 127, 0, 0, 1 }, .udp = 9000, .quic = 9001 }, &context);
         bytes.* = record.slice();
     }
-    var output: [@import("../managed.zig").candidates_per_turn]adapter.Candidate = undefined;
+    var output: [@import("../network_core.zig").candidates_per_turn]adapter.Candidate = undefined;
     try std.testing.expectEqual(records.len + 1, output.len);
     for ([_]usize{ 0, 1, records.len, output.len }) |capacity| {
         var controller = try discovery.Discovery.init(std.testing.allocator, &a.transport, &context, &.{}, now, .{});
@@ -608,27 +608,28 @@ test "peer discovery failed initial lookup send cancels call and defers retry" {
 
 fn handoff(candidate: *const adapter.Candidate) !void {
     const support = @import("../test_support.zig");
-    const core_mod = @import("../managed.zig");
     const dial = @import("dialing.zig");
     var pair = support.Pair{};
     try pair.init(.{ .connections_max = 4, .handshaking_max = 4, .handshaking_per_source_max = 4, .dialing_max = 2 }, .{ .connections_max = 4, .handshaking_max = 4, .handshaking_per_source_max = 4, .dialing_max = 2 });
     defer pair.deinit();
     const opts = @import("../network_core_test_support.zig").options().core;
     const local = @import("../network_core_test_support.zig").localState(.{ .fork = context, .status = .{ .fork_digest = context.digest } });
-    var service = try @import("../service.zig").Service.init(std.testing.allocator, core_mod.serviceOptions(opts, &local));
+    var service = try @import("../service.zig").Service.init(std.testing.allocator, opts.service);
     defer service.deinit();
-    var core = try core_mod.PeerManager.init(std.testing.allocator, &pair.client_ctx.local_peer_id, &local, core_mod.peerOptions(opts), &service, pair.client.limits.connections_max);
+    const gossipsub = service.gossipsub;
+    var core = try @import("../peer_manager.zig").PeerManager.init(std.testing.allocator, &pair.client_ctx.local_peer_id, &local, opts.peerManager(), service.router.capabilities().receive, pair.client.limits.connections_max);
     defer core.deinit();
-    defer core_mod.shutdown(&core, &service, &pair.client, pair.now);
-    try std.testing.expectEqual(@as(u16, 1), core.discoveredBatch(&service, &.{candidate.*}, pair.now).accepted);
+    var control = try @import("../control_protocol.zig").ControlProtocol.init(std.testing.allocator, @intCast(core.catalog.rows.len), opts.peers.max_peers, 1);
+    defer control.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u16, 1), core.discoveredBatch(gossipsub, &control, &.{candidate.*}, pair.now).accepted);
     try std.testing.expectEqual(candidate.sequence, core.catalog.rows[0].intent.hints.?.sequence);
     var intents: [2]dial.DialIntent = undefined;
-    try std.testing.expectEqual(@as(usize, 1), core.dialIntents(&service, &pair.client, pair.now, &intents));
+    try std.testing.expectEqual(@as(usize, 1), core.dialIntents(gossipsub, &control, &pair.client, pair.now, &intents));
     try std.testing.expect(intents[0].peer.eql(&candidate.peer));
     try std.testing.expectEqual(candidate.addresses[0], intents[0].address);
     try std.testing.expect(core.dialFailed(intents[0].token, pair.now));
-    try std.testing.expectEqual(@as(u16, 1), core.discoveredBatch(&service, &.{candidate.*}, pair.now).accepted);
-    try std.testing.expectEqual(@as(usize, 0), core.dialIntents(&service, &pair.client, pair.now, &intents));
+    try std.testing.expectEqual(@as(u16, 1), core.discoveredBatch(gossipsub, &control, &.{candidate.*}, pair.now).accepted);
+    try std.testing.expectEqual(@as(usize, 0), core.dialIntents(gossipsub, &control, &pair.client, pair.now, &intents));
     for (3..6) |scalar| {
         const key = try @import("../wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{@as(u8, @intCast(scalar))}));
         const identity = types.PeerId.fromPublicKey(&key.publicKey());
@@ -636,8 +637,8 @@ fn handoff(candidate: *const adapter.Candidate) !void {
     }
     const key = try @import("../wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{6}));
     try std.testing.expectError(error.Capacity, core.connect(&types.PeerId.fromPublicKey(&key.publicKey()), candidate.addresses[0..candidate.address_count], pair.now));
-    try std.testing.expectEqual(@as(u16, 1), core.discoveredBatch(&service, &.{candidate.*}, pair.now).accepted);
-    const count = core.dialIntents(&service, &pair.client, pair.now, &intents);
+    try std.testing.expectEqual(@as(u16, 1), core.discoveredBatch(gossipsub, &control, &.{candidate.*}, pair.now).accepted);
+    const count = core.dialIntents(gossipsub, &control, &pair.client, pair.now, &intents);
     try std.testing.expectEqual(@as(usize, opts.dial.concurrent_max), count);
     for (intents[0..count]) |intent| try std.testing.expect(!intent.peer.eql(&candidate.peer));
 }
