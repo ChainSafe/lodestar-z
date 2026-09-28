@@ -200,11 +200,6 @@ pub const Catalog = struct {
         self.* = undefined;
     }
 
-    pub fn candidateHints(self: *const Catalog, identity: *const t.PeerId, now_ms: u64) ?enr.Hints {
-        const row = self.rowFor(self.find(identity) orelse return null).?;
-        return if (now_ms < row.intent.hints_at_ms +| hint_freshness_ms) row.intent.hints else null;
-    }
-
     pub fn isDirect(self: *const Catalog, identity: *const t.PeerId) bool {
         const peer = self.find(identity) orelse return false;
         return self.rowFor(peer).?.direct;

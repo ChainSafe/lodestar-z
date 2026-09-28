@@ -165,3 +165,13 @@ test "peer control serving prerequisites follow receive protocols before Fulu" {
     const len = try w.encodeStatus(.status_v2, &copied.status, &bytes);
     try std.testing.expectEqualDeep(source.status, try w.decodeStatus(.status_v2, bytes[0..len]));
 }
+
+test "peer control wire selects Status and Metadata versions by fork" {
+    var fork: t.ForkContext = .{ .fork = .fulu };
+    try std.testing.expectEqual(w.Protocol.status_v2, w.statusProtocol(fork));
+    try std.testing.expectEqual(w.Protocol.metadata_v3, w.metadataProtocol(fork));
+    fork.fork = .altair;
+    try std.testing.expectEqual(w.Protocol.metadata_v2, w.metadataProtocol(fork));
+    fork.fork = .phase0;
+    try std.testing.expectEqual(w.Protocol.metadata_v1, w.metadataProtocol(fork));
+}

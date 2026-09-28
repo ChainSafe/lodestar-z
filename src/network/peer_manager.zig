@@ -241,9 +241,6 @@ pub const PeerManager = struct {
     pub fn coverageDeficits(self: *const PeerManager) policy.Deficits {
         return self.selection.deficits;
     }
-    pub fn candidateHints(self: *const PeerManager, identity: *const t.PeerId, now: Now) ?peers.enr.Hints {
-        return self.catalog.candidateHints(identity, now.mono_ms);
-    }
     /// Returns the same completed evaluation as coverageDeficits without advancing policy.
     pub fn discoveryNeed(self: *const PeerManager) DiscoveryNeed {
         return self.discovery_need;
