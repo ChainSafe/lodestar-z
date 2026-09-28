@@ -204,9 +204,6 @@ pub const Sockets = struct {
 
 const os = @import("builtin").os.tag;
 const native_sockets = std.options.networking and (os == .linux or os == .macos);
-/// Signal interruptions one send retries. Linux interrupts a UDP send only while it waits for
-/// send buffer space, so running out reports a full buffer.
-const send_interrupts_max = 8;
 
 /// Zig 0.16 Threaded hands out native descriptors; other I/O providers keep their own contract.
 fn threaded(io: std.Io) bool {
@@ -219,40 +216,31 @@ fn threadedSend(io: std.Io) bool {
 }
 
 /// Sends as Zig 0.16 Threaded does, keeping its errno mapping, but names EPERM, which Threaded
-/// reports as `error.Unexpected`. The errno is read straight from this send's return.
-/// Cancellation is checked before each attempt; unlike Threaded's, it cannot interrupt a send
-/// blocked on a full send buffer.
+/// reports as `error.Unexpected`. The errno is read straight from this send's return. The send
+/// never waits: a full send buffer reports `SystemResources`, so the cancellation check before it
+/// covers the whole send.
 fn sendNative(io: std.Io, handle: net.Socket.Handle, address: *const net.IpAddress, bytes: []const u8) SendError!void {
     const p = std.posix;
     var storage: std.Io.Threaded.PosixAddress = undefined;
     const length = std.Io.Threaded.addressToPosix(address, &storage);
-    for (0..send_interrupts_max) |_| {
-        try io.checkCancel();
-        const sent = p.system.sendto(handle, bytes.ptr, bytes.len, p.MSG.NOSIGNAL, &storage.any, length);
-        switch (p.errno(sent)) {
-            .SUCCESS => {
-                if (@as(usize, @intCast(sent)) != bytes.len) return error.MessageOversize;
-                return;
-            },
-            .INTR => continue,
-            .PERM => return error.DestinationRefused,
-            .ACCES => return error.AccessDenied,
-            .ALREADY => return error.FastOpenAlreadyInProgress,
-            .CONNRESET => return error.ConnectionResetByPeer,
-            .MSGSIZE => return error.MessageOversize,
-            .NOBUFS, .NOMEM => return error.SystemResources,
-            .PIPE, .NOTCONN => return error.SocketUnconnected,
-            .AFNOSUPPORT => return error.AddressFamilyUnsupported,
-            .HOSTUNREACH => return error.HostUnreachable,
-            .NETUNREACH => return error.NetworkUnreachable,
-            .NETDOWN => return error.NetworkDown,
-            .BADF, .DESTADDRREQ, .FAULT, .INVAL, .ISCONN, .NOTSOCK, .OPNOTSUPP => |err| return std.Io.Threaded.errnoBug(err),
-            // Threaded sends through sendmmsg on Linux, which treats EAGAIN as a bug, and sendmsg elsewhere.
-            .AGAIN => |err| return if (os == .linux) std.Io.Threaded.errnoBug(err) else p.unexpectedErrno(err),
-            else => |err| return p.unexpectedErrno(err),
-        }
-    }
-    return error.SystemResources;
+    try io.checkCancel();
+    const sent = p.system.sendto(handle, bytes.ptr, bytes.len, p.MSG.NOSIGNAL | p.MSG.DONTWAIT, &storage.any, length);
+    return switch (p.errno(sent)) {
+        .SUCCESS => if (@as(usize, @intCast(sent)) == bytes.len) {} else error.MessageOversize,
+        .PERM => error.DestinationRefused,
+        .ACCES => error.AccessDenied,
+        .ALREADY => error.FastOpenAlreadyInProgress,
+        .CONNRESET => error.ConnectionResetByPeer,
+        .MSGSIZE => error.MessageOversize,
+        .AGAIN, .NOBUFS, .NOMEM => error.SystemResources,
+        .PIPE, .NOTCONN => error.SocketUnconnected,
+        .AFNOSUPPORT => error.AddressFamilyUnsupported,
+        .HOSTUNREACH => error.HostUnreachable,
+        .NETUNREACH => error.NetworkUnreachable,
+        .NETDOWN => error.NetworkDown,
+        .BADF, .DESTADDRREQ, .FAULT, .INVAL, .ISCONN, .NOTSOCK, .OPNOTSUPP => |err| std.Io.Threaded.errnoBug(err),
+        else => |err| p.unexpectedErrno(err),
+    };
 }
 
 /// Linux doubles a granted size for bookkeeping and reports the doubled value. An unknown size

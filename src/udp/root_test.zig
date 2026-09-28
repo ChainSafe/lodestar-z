@@ -232,53 +232,62 @@ test "UDP records a failed size readback as unknown and not below the request" {
     try std.testing.expectEqual([2]?u64{ null, null }, sockets.drops());
 }
 
-test "UDP names a send the kernel refuses and keeps the mapping of other errnos" {
+test "UDP names a refused send, reports a full buffer without waiting and keeps other errnos" {
     if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
-    var refused = try udp.Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
-    defer refused.close(std.testing.io);
-    var denied = try udp.Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
-    defer denied.close(std.testing.io);
+    var sockets: [3]udp.Sockets = undefined;
+    for (&sockets, 0..) |*socket, index| {
+        errdefer for (sockets[0..index]) |bound| bound.close(std.testing.io);
+        socket.* = try udp.Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
+    }
+    defer for (sockets) |socket| socket.close(std.testing.io);
     var outcome: Refusal = .{};
-    const thread = try std.Thread.spawn(.{}, Refusal.run, .{ &outcome, &refused, &denied });
+    const thread = try std.Thread.spawn(.{}, Refusal.run, .{ &outcome, &sockets });
     thread.join();
     // Kernels without seccomp filters cannot produce the errnos.
     if (!outcome.installed) return error.SkipZigTest;
-    try std.testing.expectError(error.DestinationRefused, outcome.refused);
-    try std.testing.expectError(error.AccessDenied, outcome.denied);
+    try std.testing.expectError(error.DestinationRefused, outcome.results[0]);
+    try std.testing.expectError(error.AccessDenied, outcome.results[1]);
+    try std.testing.expectError(error.SystemResources, outcome.results[2]);
 }
 
-/// Refuses sendto on one thread through a seccomp filter: EPERM from `refused`, as an egress
-/// firewall drop reports it, and EACCES from `denied`. Threaded's own sendmmsg passes, so only
-/// a send issued outside it can observe the refusal. The filter ends with the thread.
+/// Filters sendto on one thread through seccomp: EPERM from the first socket, as an egress
+/// firewall drop reports it, EACCES from the second, and EAGAIN from the third when the send
+/// asks not to wait, as a full send buffer reports it. Threaded's own sendmmsg and a waiting
+/// send pass, so only a nonblocking send issued outside Threaded observes the errnos. The filter
+/// ends with the thread.
 const Refusal = struct {
     installed: bool = false,
-    refused: udp.SendError!void = {},
-    denied: udp.SendError!void = {},
+    results: [3]udp.SendError!void = @splat({}),
 
     const Instruction = extern struct { code: u16, jt: u8, jf: u8, k: u32 };
     const Program = extern struct { len: c_ushort, filter: [*]const Instruction };
 
-    fn run(self: *Refusal, refused: *const udp.Sockets, denied: *const udp.Sockets) void {
+    fn run(self: *Refusal, sockets: *const [3]udp.Sockets) void {
         const linux = std.os.linux;
         const bpf = linux.BPF;
-        const descriptor: u32 = comptime @offsetOf(linux.SECCOMP.data, "arg0") + if (@import("builtin").cpu.arch.endian() == .little) 0 else 4;
+        const little = comptime @import("builtin").cpu.arch.endian() == .little;
+        const descriptor: u32 = @offsetOf(linux.SECCOMP.data, "arg0") + if (little) 0 else 4;
+        const flags: u32 = @offsetOf(linux.SECCOMP.data, "arg3") + if (little) 0 else 4;
         const filter = [_]Instruction{
             .{ .code = bpf.LD | bpf.W | bpf.ABS, .jt = 0, .jf = 0, .k = @offsetOf(linux.SECCOMP.data, "nr") },
-            .{ .code = bpf.JMP | bpf.JEQ | bpf.K, .jt = 0, .jf = 5, .k = @intFromEnum(linux.SYS.sendto) },
+            .{ .code = bpf.JMP | bpf.JEQ | bpf.K, .jt = 0, .jf = 9, .k = @intFromEnum(linux.SYS.sendto) },
             .{ .code = bpf.LD | bpf.W | bpf.ABS, .jt = 0, .jf = 0, .k = descriptor },
-            .{ .code = bpf.JMP | bpf.JEQ | bpf.K, .jt = 0, .jf = 1, .k = @intCast(refused.primary().handle) },
+            .{ .code = bpf.JMP | bpf.JEQ | bpf.K, .jt = 0, .jf = 1, .k = @intCast(sockets[0].primary().handle) },
             .{ .code = bpf.RET | bpf.K, .jt = 0, .jf = 0, .k = linux.SECCOMP.RET.ERRNO | @as(u32, @intFromEnum(linux.E.PERM)) },
-            .{ .code = bpf.JMP | bpf.JEQ | bpf.K, .jt = 0, .jf = 1, .k = @intCast(denied.primary().handle) },
+            .{ .code = bpf.JMP | bpf.JEQ | bpf.K, .jt = 0, .jf = 1, .k = @intCast(sockets[1].primary().handle) },
             .{ .code = bpf.RET | bpf.K, .jt = 0, .jf = 0, .k = linux.SECCOMP.RET.ERRNO | @as(u32, @intFromEnum(linux.E.ACCES)) },
+            .{ .code = bpf.JMP | bpf.JEQ | bpf.K, .jt = 0, .jf = 3, .k = @intCast(sockets[2].primary().handle) },
+            .{ .code = bpf.LD | bpf.W | bpf.ABS, .jt = 0, .jf = 0, .k = flags },
+            .{ .code = bpf.JMP | bpf.JSET | bpf.K, .jt = 0, .jf = 1, .k = linux.MSG.DONTWAIT },
+            .{ .code = bpf.RET | bpf.K, .jt = 0, .jf = 0, .k = linux.SECCOMP.RET.ERRNO | @as(u32, @intFromEnum(linux.E.AGAIN)) },
             .{ .code = bpf.RET | bpf.K, .jt = 0, .jf = 0, .k = linux.SECCOMP.RET.ALLOW },
         };
         const program: Program = .{ .len = filter.len, .filter = &filter };
         if (linux.errno(linux.prctl(@intFromEnum(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0)) != .SUCCESS) return;
         if (linux.errno(linux.seccomp(linux.SECCOMP.SET_MODE_FILTER, 0, &program)) != .SUCCESS) return;
         self.installed = true;
-        const destination = udp.Address.fromNetwork(refused.primary().address);
-        self.refused = refused.sendTo(std.testing.io, destination, "refused", 16);
-        self.denied = denied.sendTo(std.testing.io, destination, "denied", 16);
+        const destination = udp.Address.fromNetwork(sockets[0].primary().address);
+        for (sockets, &self.results) |*socket, *result| result.* = socket.sendTo(std.testing.io, destination, "filtered", 16);
     }
 };
 
