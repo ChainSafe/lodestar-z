@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
-import {readFile} from "node:fs/promises";
+import {mkdtemp, readFile, rm, writeFile} from "node:fs/promises";
+import {tmpdir} from "node:os";
+import {join} from "node:path";
 import {test} from "node:test";
 import {fileURLToPath} from "node:url";
 import {
   checkProvenance,
   compareCargo,
+  expectedNotices,
   linkedDependencies,
   parseCargoTree,
+  parseNotices,
   parseZon,
 } from "../../scripts/lodestar_package_provenance.mjs";
 
@@ -102,11 +106,38 @@ test("the crate inventory must equal the resolved closure", () => {
   assert.deepEqual(details([...resolved, resolved[1]]), ["CargoInventory duplicate bytes@1.11.1"]);
 });
 
+test("notice sections are keyed by their header and required for every distributed component", () => {
+  const parsed = parseNotices("preamble\n=== a: first\n\ntext  \n\n=== b: second\nmore\n=== a: again\n");
+  assert.deepEqual(
+    [...parsed.sections],
+    [
+      ["a", ""],
+      ["b", "more"],
+    ]
+  );
+  assert.deepEqual(parsed.duplicates, ["a"]);
+  const ids = expectedNotices(record).map((notice) => notice.id);
+  for (const id of [
+    "zig:blst/blst",
+    "vendored:boringssl",
+    "crate:bytes@1.11.1",
+    "runtime:rust-std",
+    "runtime:libcxx",
+  ]) {
+    assert(ids.includes(id), id);
+  }
+  for (const id of ["zig:blst", "zig:quiche_zig", "zig:zapi/zbuild", "zig:zbuild", "crate:quiche@0.28.0"]) {
+    assert(!ids.includes(id), id);
+  }
+  assert(!ids.some((id) => id.startsWith("crate:once_cell") || id.startsWith("crate:syn")));
+});
+
 test("the checked-in record matches the tree", async () => {
   const result = await checkProvenance(root, record);
   assert.deepEqual(result.errors, []);
   assert.equal(result.summary.direct, 10);
   assert.equal(result.summary.npm, 1);
+  assert.equal(result.summary.notices.sections, expectedNotices(record).length);
 });
 
 test("record drift from the tree fails with the disagreeing fact", async () => {
@@ -136,11 +167,22 @@ test("record drift from the tree fails with the disagreeing fact", async () => {
     ["ReleaseRunner", (r) => Object.assign(r.install.platform, {runner: "ubuntu-latest"})],
     ["EmbeddedAddonPath", (r) => Object.assign(r.install.embedded, {addon: "zig-out/bindings.node"})],
     ["PackageLicenseFile", (r) => Object.assign(r.package, {licenseFile: "LICENSE"})],
+    ["PackageLicense", (r) => Object.assign(r.package.declaredLicenses, {"README.md": "MIT"})],
+    ["LegalFiles", (r) => r.install.legal.push("LICENSE")],
+    ["NoticeMissing", (r) => r.runtime.push({id: "extra", reviewed: {}, toolchain: "rust"})],
+    ["NoticeUnexpected", (r) => r.runtime.pop()],
+    [
+      "NoticeMissing",
+      (r) =>
+        Object.assign(r.zig.dependencies.find((d) => d.name === "zapi").dependencies[0].reviewed, {
+          contributes: "code",
+        }),
+    ],
   ];
   for (const [code, mutate] of cases) assert((await drifted(mutate)).includes(code), code);
 });
 
-test("fetched packages verify transitive pins and the resolved crate closure", async (t) => {
+test("fetched packages verify transitive pins, the resolved crate closure and reproduced license texts", async (t) => {
   if (!fetched) {
     assert((await drifted(() => {}, {requireFetched: true})).includes("ZigPackageUnfetched"));
     t.skip("zig-pkg is not fetched or cargo cannot resolve offline; a Zig build fetches both");
@@ -149,6 +191,7 @@ test("fetched packages verify transitive pins and the resolved crate closure", a
   const result = await checkProvenance(root, record, {requireFetched: true});
   assert.deepEqual(result.errors, []);
   assert.deepEqual(result.summary.transitive, {unfetched: 0, verified: 15});
+  assert(result.summary.notices.reproduced > 0);
   const cases = [
     ["CargoLockfile", (r) => Object.assign(r.cargo, {lockfileSha256: "0".repeat(64)})],
     [
@@ -194,4 +237,13 @@ test("fetched packages verify transitive pins and the resolved crate closure", a
     ["ZigPackageFiles", (r) => r.zig.dependencies.find((d) => d.name === "blst").files.pop()],
   ];
   for (const [code, mutate] of cases) assert((await drifted(mutate, {requireFetched: true})).includes(code), code);
+  const directory = await mkdtemp(join(tmpdir(), "lodestar-notices-"));
+  try {
+    const notices = await readFile(join(root, record.notices), "utf8");
+    const altered = join(directory, "notices.txt");
+    await writeFile(altered, notices.replace("Copyright (c) 2018 Carl Lerche", "Copyright (c) 2018"));
+    assert((await drifted((r) => Object.assign(r, {notices: altered}))).includes("NoticeText"));
+  } finally {
+    await rm(directory, {force: true, recursive: true});
+  }
 });

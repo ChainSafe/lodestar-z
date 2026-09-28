@@ -4,7 +4,8 @@
   "description": "Lodestar-z NAPI bindings",
   "files": [
     "bindings/src/",
-    "zig-out/lib/"
+    "zig-out/lib/",
+    "THIRD_PARTY_NOTICES.txt"
   ],
   "type": "module",
   "exports": {

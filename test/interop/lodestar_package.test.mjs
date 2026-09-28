@@ -158,6 +158,7 @@ async function fixture({extraFiles = {}, networkSource} = {}) {
   await writeFile(join(nativeDir, "bindings", "src", "index.js"), fixtureIndex);
   await writeFile(join(nativeDir, "bindings", "src", "index.d.ts"), "export declare const fixture: true;\n");
   await writeFile(join(nativeDir, "bindings", "src", "network.js"), networkSource ?? fixtureNetwork);
+  await writeFile(join(nativeDir, "THIRD_PARTY_NOTICES.txt"), "=== fixture: notices\n");
   for (const [path, source] of Object.entries(extraFiles)) {
     await writeFile(join(nativeDir, path), source);
   }
@@ -191,7 +192,7 @@ async function fixture({extraFiles = {}, networkSource} = {}) {
             },
           ])
         ),
-        files: ["bindings/src/", "zig-out/lib/"],
+        files: ["bindings/src/", "zig-out/lib/", "THIRD_PARTY_NOTICES.txt"],
         name: "@chainsafe/lodestar-z",
         packageManager: "pnpm@10.24.0",
         scripts: {prepare: "node prepare.cjs"},
@@ -394,12 +395,11 @@ test("platform layout ships the target's addon in its own package and the host l
   assert.equal(manifest.layout, "platform");
   assert(!manifest.files.some((file) => file.path.startsWith("zig-out/")));
   assert.equal(manifest.platform.name, `@chainsafe/lodestar-z-${hostTarget}`);
-  assert.deepEqual(manifest.platform.files.map((file) => file.path).sort(), [
-    "README.md",
-    "bindings.node",
-    "package.json",
-  ]);
+  const platformFiles = ["README.md", "THIRD_PARTY_NOTICES.txt", "bindings.node", "package.json"];
+  assert.deepEqual(manifest.platform.files.map((file) => file.path).sort(), platformFiles);
   assert.equal(manifest.platform.files.find((file) => file.path === "bindings.node").sha256, manifest.addon.sha256);
+  const notices = (files) => files.find((file) => file.path === "THIRD_PARTY_NOTICES.txt").sha256;
+  assert.equal(notices(manifest.platform.files), notices(manifest.files));
 
   const hostDir = join(root, "host");
   await mkdir(hostDir);
@@ -455,6 +455,50 @@ test("platform layout ships the target's addon in its own package and the host l
     ["requested", "requested"]
   );
   await missing(join(root, "release", "pnpm-lock.yaml"));
+});
+
+test("platform archives must carry the main package's legal files", async () => {
+  const root = await mkdtemp(join(tmpdir(), "lodestar-platform-legal-"));
+  temporaryDirectories.push(root);
+  const {inspectPlatformArchive} = await import("../../scripts/lodestar_package_archive.mjs");
+  const addon = await readFile(new URL("../../zig-out/lib/bindings.node", import.meta.url));
+  const expectedAddon = {bytes: addon.byteLength, sha256: createHash("sha256").update(addon).digest("hex")};
+  const notices = "=== fixture: notices\n";
+  const main = {
+    files: [{path: "THIRD_PARTY_NOTICES.txt", sha256: createHash("sha256").update(notices).digest("hex")}],
+    packageJson: {name: "@chainsafe/lodestar-z", version: "1.0.0"},
+  };
+  const run = (program, args, cwd, {allowFailure = false} = {}) =>
+    runBoundedCommand(program, args, cwd, {allowFailure, maxOutputBytes: 16 * 1024 * 1024, timeoutMs: 20_000});
+  async function archive(name, {files, legal}) {
+    const directory = join(root, name, "package");
+    await mkdir(directory, {recursive: true});
+    await writeFile(join(directory, "README.md"), "platform\n");
+    await writeFile(join(directory, "bindings.node"), addon);
+    if (legal !== undefined) await writeFile(join(directory, "THIRD_PARTY_NOTICES.txt"), legal);
+    const packageJson = {files, main: "bindings.node", name: `@chainsafe/lodestar-z-${hostTarget}`, version: "1.0.0"};
+    await writeFile(join(directory, "package.json"), JSON.stringify(packageJson));
+    const out = join(root, `${name}.tgz`);
+    const entries = (await readdir(directory)).map((entry) => `package/${entry}`);
+    await run("tar", ["-czf", out, "-C", join(root, name), ...entries], root);
+    return out;
+  }
+  const withNotices = ["bindings.node", "THIRD_PARTY_NOTICES.txt"];
+  const complete = await archive("complete", {files: withNotices, legal: notices});
+  const inspected = await inspectPlatformArchive(complete, expectedAddon, hostTarget, main, run);
+  assert.equal(inspected.files.length, 4);
+  const addonOnly = await archive("addon-only", {files: ["bindings.node"]});
+  await assert.rejects(inspectPlatformArchive(addonOnly, expectedAddon, hostTarget, main, run), {
+    code: "PlatformPackageMismatch",
+  });
+  const unlisted = await archive("unlisted", {files: withNotices});
+  await assert.rejects(inspectPlatformArchive(unlisted, expectedAddon, hostTarget, main, run), {
+    code: "PlatformPackageInventory",
+  });
+  const altered = await archive("altered", {files: withNotices, legal: "=== fixture: other\n"});
+  await assert.rejects(inspectPlatformArchive(altered, expectedAddon, hostTarget, main, run), {
+    code: "PlatformLegalFileMismatch",
+  });
 });
 
 test("install persists and emits a structured pnpm failure record", async () => {
@@ -714,6 +758,33 @@ test("pack emits structured child failure evidence across the CLI boundary", asy
   assert.equal(evidence.error.commandRecord.stderr, "captured-err");
   await missing(out);
   await missing(`${out}.json`);
+});
+
+test("pack rejects a package without its third-party notices", async () => {
+  const {nativeDir, out, buildRecord} = await fixture();
+  const pack = async (message, edit) => {
+    await edit();
+    await fixtureCommand("git", ["commit", "-qam", message], nativeDir);
+    const {stdout: sourceCommit} = await fixtureCommand("git", ["rev-parse", "HEAD"], nativeDir);
+    const record = JSON.parse(await readFile(buildRecord, "utf8"));
+    record.sourceCommit = sourceCommit.trim();
+    await writeFile(buildRecord, `${JSON.stringify(record, null, 2)}\n`);
+    const packed = await command(
+      process.execPath,
+      [tool.pathname, "pack", "--native-dir", nativeDir, "--out", out, "--build-record", buildRecord],
+      nativeDir
+    );
+    assert.equal(packed.exitCode, 1);
+    await missing(out);
+    return JSON.parse(packed.stderr).error.code;
+  };
+  assert.equal(await pack("drop notices", () => rm(join(nativeDir, "THIRD_PARTY_NOTICES.txt"))), "PackageFileMissing");
+  const unlist = async () => {
+    const packageJson = JSON.parse(await readFile(join(nativeDir, "package.json"), "utf8"));
+    packageJson.files = packageJson.files.filter((file) => file !== "THIRD_PARTY_NOTICES.txt");
+    await writeFile(join(nativeDir, "package.json"), `${JSON.stringify(packageJson, null, 2)}\n`);
+  };
+  assert.equal(await pack("unlist notices", unlist), "MissingLegalFile");
 });
 
 test("pack rejects a named re-exported network test hook", async () => {
