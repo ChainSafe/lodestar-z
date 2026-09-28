@@ -117,6 +117,7 @@ pub const Link = struct {
     client: *Engine = undefined,
     server: *Engine = undefined,
     client_sockets: [2]?net.Socket.Handle = .{ null, null },
+    server_sockets: [2]?net.Socket.Handle = .{ null, null },
     drop_to_server: bool = false,
     client_source: types.Address = support.client_address,
     drop_to_address: ?types.Address = null,
@@ -258,9 +259,12 @@ pub const Link = struct {
         };
     }
 
-    fn sendHook(_: ?*anyopaque, socket: net.Socket.Handle, messages: []net.OutgoingMessage, _: net.SendFlags) struct { ?net.Socket.SendError, usize } {
+    /// Captures what the QUIC sockets send; other sockets send for real.
+    fn sendHook(_: ?*anyopaque, socket: net.Socket.Handle, messages: []net.OutgoingMessage, flags: net.SendFlags) struct { ?net.Socket.SendError, usize } {
         const self = active.?;
         const from_client = self.client_sockets[0] == socket or self.client_sockets[1] == socket;
+        const from_server = self.server_sockets[0] == socket or self.server_sockets[1] == socket;
+        if (!from_client and !from_server) return self.base.vtable.netSend(self.base.userdata, socket, messages, flags);
         for (messages) |message| {
             std.debug.assert(message.data_len <= constants.datagram_size_max);
             const datagram = self.sent.addOne(std.testing.allocator) catch return .{ error.SystemResources, 0 };
@@ -284,6 +288,8 @@ pub const Setup = struct {
     client: NetworkCore = undefined,
     server: NetworkCore = undefined,
     forks: [4]rr.ForkEntry = undefined,
+    /// Discovery for the client, set before init, so its local updates publish an ENR.
+    client_discovery: ?core_mod.DiscoveryOptions = null,
     initialized: [2]bool = .{ false, false },
     client_inbox: Inbox = .{},
     server_inbox: Inbox = .{},
@@ -329,7 +335,7 @@ pub const Setup = struct {
         resolved.core.service.reqresp.forks = self.forks[0..count];
         const io = self.pair.io();
         const client_key = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{1}));
-        try self.client.init(std.testing.allocator, io, &resolved, .{ .host = &client_key, .bind = .{ .ip4 = .loopback(0) }, .local = local, .slot = 100 });
+        try self.client.init(std.testing.allocator, io, &resolved, .{ .host = &client_key, .bind = .{ .ip4 = .loopback(0) }, .local = local, .slot = 100, .discovery = self.client_discovery });
         self.initialized[0] = true;
         self.client_inbox.attach(self.client.service.gossipsub);
         const server_key = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{2}));
@@ -339,6 +345,7 @@ pub const Setup = struct {
         self.pair.client = &self.client.transport.engine;
         self.pair.server = &self.server.transport.engine;
         self.pair.client_sockets = self.client.transport.udp.sockets.handles();
+        self.pair.server_sockets = self.server.transport.udp.sockets.handles();
     }
 
     pub fn deinit(self: *Setup) void {

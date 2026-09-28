@@ -1729,3 +1729,65 @@ test "managed control retries a start refused for want of a request slot after t
     try std.testing.expectEqual(setup.pair.now.mono_ms + opts.core.control.local_retry_ms, row.retry_ms);
     try std.testing.expectEqual(row.retry_ms, setup.client.peer_manager.control.nextWakeup(&setup.client.peer_manager.catalog, &setup.client.control_protocol, setup.pair.now).?);
 }
+
+test "local publication failure preserves control schedules request fork subscriptions and demand" {
+    var setup: Setup = .{};
+    // The client's ENR sits at its last sequence, so any change to what it advertises fails to publish.
+    setup.client_discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .sequence = std.math.maxInt(u64) };
+    try setup.init(&.{});
+    defer setup.deinit();
+    for (0..80) |_| try setup.step(0);
+    const node = &setup.client;
+    const manager = &node.peer_manager;
+    var snapshots: [4]t.Snapshot = undefined;
+    try std.testing.expectEqual(@as(usize, 1), manager.snapshots(&snapshots));
+    const peer = snapshots[0];
+    try std.testing.expect(peer.relevant);
+    manager.reStatusPeers(&node.control_protocol, setup.pair.now);
+    _ = try setup.turn(node, .{});
+    const probe = for (node.control_protocol.operations) |*op| {
+        if (op.request != null) break op;
+    } else return error.TestUnexpectedResult;
+    const probe_request = probe.request.?;
+    const schedule = manager.control.schedules[peer.peer.index];
+    const key = manager.control.deadlines.get(peer.peer.index);
+    const local = node.localState();
+    const request_fork = node.service.reqresp.request_fork;
+    const demand = manager.demand;
+    const identify = node.service.identify.local.?;
+    const capabilities = node.service.router.capabilities();
+    const record = node.localRecord().?.*;
+    const slot = node.current_slot;
+    var before: [@import("gossipsub/topic_policy.zig").boundary_max]@import("gossipsub/local_intent.zig").Boundary = undefined;
+    const subscribed = try gossip_test.subscriptionUpdate(node.service.gossipsub, null, false, &before);
+    var boundaries: [@import("gossipsub/topic_policy.zig").boundary_max]@import("gossipsub/local_intent.zig").Boundary = undefined;
+    var desired = @import("test_support.zig").intent(node, try gossip_test.subscriptionUpdate(node.service.gossipsub, "/eth2/00000000/beacon_block/ssz_snappy", true, &boundaries));
+    desired.update.local.fork = .{ .fork = .fulu, .digest = @splat(1) };
+    desired.update.local.status.fork_digest = @splat(1);
+    desired.update.local.metadata.attnets[0] = 1;
+    desired.demand = .{ .syncnets = 1 };
+    desired.slot = slot + 10;
+    try std.testing.expectError(error.SequenceExhausted, node.applyIntent(&desired, setup.pair.now));
+    try std.testing.expectEqualDeep(schedule, manager.control.schedules[peer.peer.index]);
+    try std.testing.expectEqual(key, manager.control.deadlines.get(peer.peer.index));
+    try std.testing.expectEqual(probe_request, probe.request.?);
+    try std.testing.expect(!probe.cancelled);
+    try std.testing.expect(manager.catalog.get(peer.peer).?.relevant);
+    try std.testing.expectEqualDeep(local, node.localState());
+    try std.testing.expectEqual(request_fork, node.service.reqresp.request_fork);
+    try std.testing.expectEqualDeep(demand, manager.demand);
+    try std.testing.expectEqualDeep(identify, node.service.identify.local.?);
+    try std.testing.expectEqualDeep(capabilities, node.service.router.capabilities());
+    try std.testing.expectEqualSlices(u8, record.slice(), node.localRecord().?.slice());
+    try std.testing.expectEqual(slot, node.current_slot);
+    var after: [@import("gossipsub/topic_policy.zig").boundary_max]@import("gossipsub/local_intent.zig").Boundary = undefined;
+    try std.testing.expectEqualDeep(subscribed, try gossip_test.subscriptionUpdate(node.service.gossipsub, null, false, &after));
+    // The same intent without the advertisement change commits every participant.
+    desired.update.local.metadata.attnets[0] = local.metadata.attnets[0];
+    desired.update.local.fork = local.fork;
+    desired.update.local.status.fork_digest = local.status.fork_digest;
+    try std.testing.expect(try node.applyIntent(&desired, setup.pair.now));
+    try std.testing.expectEqualDeep(desired.demand, manager.demand);
+    try std.testing.expectEqual(slot + 10, node.current_slot);
+    try std.testing.expect(!std.meta.eql(subscribed, try gossip_test.subscriptionUpdate(node.service.gossipsub, null, false, &after)));
+}
