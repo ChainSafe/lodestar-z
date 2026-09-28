@@ -32,6 +32,8 @@ const hasCompoundingWithdrawalCredential = @import("../utils/electra.zig").hasCo
 const computeBaseRewardPerIncrement = @import("../utils/sync_committee.zig").computeBaseRewardPerIncrement;
 const processPendingAttestations = @import("../epoch/process_pending_attestations.zig").processPendingAttestations;
 const Node = @import("persistent_merkle_tree").Node;
+const validator_flat_cache = @import("./validator_flat_cache.zig");
+const ValidatorFields = validator_flat_cache.ValidatorFields;
 const EpochShufflingRc = @import("../utils/epoch_shuffling.zig").EpochShufflingRc;
 const EpochShuffling = @import("../utils/epoch_shuffling.zig").EpochShuffling;
 
@@ -285,6 +287,13 @@ pub const EpochTransitionCache = struct {
         try validators_view.commit();
         const validator_count = try validators_view.length();
         var validators_it = validators_view.iteratorReadonly(0);
+        const flat_validators = if (validator_flat_cache.enabled) try validator_flat_cache.syncGlobal(
+            allocator,
+            validators_view.chunks.state.pool,
+            validators_view.getRoot(),
+            validators_it.depth_iterator.base_gindex.pathLen(),
+            validator_count,
+        ) else null;
 
         // Clone before being mutated in processEffectiveBalanceUpdates
         try epoch_cache.beforeEpochTransition();
@@ -298,7 +307,10 @@ pub const EpochTransitionCache = struct {
             try reused_cache.is_compounding_validator_arr.resize(reused_cache.allocator, validator_count);
         }
         for (0..validator_count) |i| {
-            const validator = try validators_it.nextValuePtr();
+            const validator: ValidatorFields = if (flat_validators) |flat|
+                flat.fields(i, effective_balances_by_increments[i])
+            else
+                .fromValidator(try validators_it.nextValuePtr());
             var flag: u8 = 0;
 
             if (validator.slashed) {
@@ -330,7 +342,7 @@ pub const EpochTransitionCache = struct {
             reused_cache.flags.items[i] = flag;
 
             if (fork_seq.gte(.electra)) {
-                reused_cache.is_compounding_validator_arr.items[i] = hasCompoundingWithdrawalCredential(&validator.withdrawal_credentials);
+                reused_cache.is_compounding_validator_arr.items[i] = validator.compounding;
             }
 
             if (is_active_curr) {
@@ -631,4 +643,5 @@ pub const EpochTransitionCache = struct {
 
 test {
     _ = @import("epoch_transition_cache_test.zig");
+    _ = @import("validator_flat_cache.zig");
 }
