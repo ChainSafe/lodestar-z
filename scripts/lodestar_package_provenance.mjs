@@ -3,18 +3,22 @@ import {readFile, readdir} from "node:fs/promises";
 import {join, resolve} from "node:path";
 import {fileURLToPath, pathToFileURL} from "node:url";
 import {isDeepStrictEqual} from "node:util";
+import {runBoundedCommand} from "./bounded_child.mjs";
 import {EMBEDDED_ADDON_PATH} from "./lodestar_package_archive.mjs";
 import {exists} from "./lodestar_package_io.mjs";
 
-// Checks the reviewed dependency and install provenance record against the tree: Zig pins and their use, transitive
-// Zig pins and the quiche crate lockfile when zig-pkg holds them, the npm runtime pins and the two install paths.
-// Needs no build and no network.
+// Checks the dependency and install provenance record against the tree: Zig pins and their use, the npm runtime pins
+// and the two install paths. When zig-pkg holds the packages it also checks transitive Zig pins and cargo's offline
+// resolution of the quiche lockfile. Needs no build and no network.
 
 const RECORD = "scripts/lodestar_package_provenance.json";
 const MAX_ZON_TOKENS = 64 * 1024;
 const MAX_ZON_DEPTH = 32;
 const MAX_ZIG_PACKAGES = 256;
 const MAX_MODULES = 1024;
+const MAX_PACKAGE_FILES = 4096;
+const MAX_COMMAND_OUTPUT_BYTES = 4 * 1024 * 1024;
+const COMMAND_TIMEOUT_MS = 60_000;
 
 /** Parses the ZON subset build manifests use: containers, strings, enum literals, numbers and comments. */
 export function parseZon(source) {
@@ -125,14 +129,103 @@ async function readOptional(path) {
   return readFile(path, "utf8").catch((error) => (error.code === "ENOENT" ? null : Promise.reject(error)));
 }
 
-function lockfilePackages(source) {
-  const packages = new Map();
-  for (const block of source.split(/\n\n+/)) {
-    const name = /^name = "([^"]+)"$/m.exec(block)?.[1];
-    const version = /^version = "([^"]+)"$/m.exec(block)?.[1];
-    if (name !== undefined && version !== undefined) packages.set(`${name}@${version}`, block);
+function cargoCrate(record) {
+  const [parentName, crateName] = record.cargo.crate.split("/");
+  const parent = record.zig.dependencies.find((entry) => entry.name === parentName);
+  const crate = parent?.dependencies.find((entry) => entry.name === crateName);
+  return crate === undefined ? undefined : {hash: crate.hash, parent};
+}
+
+/** Crates of one `cargo tree --format {p}|{l}` listing, by name and version. */
+export function parseCargoTree(stdout) {
+  const crates = new Map();
+  for (const line of stdout.split("\n")) {
+    const match = /^(\S+) v(\S+)(?: \([^)]*\))?\|(.*?)(?: \(\*\))?$/.exec(line.trim());
+    if (match !== null) crates.set(`${match[1]}@${match[2]}`, {license: match[3], name: match[1], version: match[2]});
   }
-  return packages;
+  return crates;
+}
+
+async function command(program, args, cwd) {
+  const result = await runBoundedCommand(program, args, cwd, {
+    allowFailure: true,
+    maxOutputBytes: MAX_COMMAND_OUTPUT_BYTES,
+    timeoutMs: COMMAND_TIMEOUT_MS,
+  }).catch((error) => ({exitCode: null, stderr: error.message, stdout: ""}));
+  return result.exitCode === 0 ? {stdout: result.stdout} : {error: `${program} ${args.join(" ")}: ${result.stderr}`};
+}
+
+/**
+ * The crates quiche's pinned lockfile resolves for the recorded features, defaults included, on every release target,
+ * offline. Linked crates are the normal dependencies without procedural macros; the rest serve only the build.
+ */
+export async function resolveCargo(crateDirectory, record) {
+  const key = JSON.stringify([
+    crateDirectory,
+    record.cargo.features,
+    record.cargo.defaultFeatures,
+    record.install.platform.targets,
+  ]);
+  if (!resolutions.has(key)) resolutions.set(key, await resolveCargoTrees(crateDirectory, record));
+  return resolutions.get(key);
+}
+
+const resolutions = new Map();
+
+async function resolveCargoTrees(crateDirectory, record) {
+  const linked = new Map();
+  const all = new Map();
+  for (const target of record.install.platform.targets) {
+    const base = ["tree", "--frozen", "--target", target, "--prefix", "none", "--format", "{p}|{l}"];
+    if (record.cargo.features.length > 0) base.push("--features", record.cargo.features.join(","));
+    if (!record.cargo.defaultFeatures) base.push("--no-default-features");
+    for (const [edges, into] of [
+      ["normal,no-proc-macro", linked],
+      ["normal,build", all],
+    ]) {
+      const tree = await command("cargo", [...base, "-e", edges], crateDirectory);
+      if (tree.error !== undefined) return {error: tree.error};
+      for (const [key, crate] of parseCargoTree(tree.stdout)) into.set(key, crate);
+    }
+  }
+  const crates = [...all].map(([key, crate]) => ({...crate, use: linked.has(key) ? "linked" : "build"}));
+  return {crates: crates.sort((left, right) => left.name.localeCompare(right.name))};
+}
+
+/** Differences between the recorded crate inventory and cargo's resolution. */
+export function compareCargo(recorded, resolved) {
+  const errors = [];
+  const key = (crate) => `${crate.name}@${crate.version}`;
+  const byKey = new Map(resolved.map((crate) => [key(crate), crate]));
+  const seen = new Set();
+  for (const crate of recorded) {
+    if (seen.has(key(crate))) errors.push({code: "CargoInventory", detail: `duplicate ${key(crate)}`});
+    seen.add(key(crate));
+    const actual = byKey.get(key(crate));
+    if (actual === undefined) errors.push({code: "CargoInventory", detail: `not resolved: ${key(crate)}`});
+    else if (actual.use !== crate.use) errors.push({code: "CargoInventory", detail: `${key(crate)} is ${actual.use}`});
+    else if (actual.license !== crate.license) {
+      errors.push({code: "CargoLicense", detail: `${key(crate)} declares ${actual.license}`});
+    }
+  }
+  for (const crate of resolved) {
+    if (!seen.has(key(crate))) errors.push({code: "CargoInventory", detail: `unrecorded ${crate.use}: ${key(crate)}`});
+  }
+  return errors;
+}
+
+async function packageFiles(directory) {
+  const files = [];
+  const queue = [""];
+  for (let index = 0; index < queue.length; index++) {
+    for (const entry of await readdir(join(directory, queue[index]), {withFileTypes: true})) {
+      const path = queue[index] === "" ? entry.name : `${queue[index]}/${entry.name}`;
+      if (entry.isDirectory()) queue.push(path);
+      else files.push(path);
+      if (files.length + queue.length > MAX_PACKAGE_FILES) throw Error("package file bound");
+    }
+  }
+  return files.sort();
 }
 
 /** Returns every disagreement between `record` and the tree at `root`, and what it could verify. */
@@ -187,45 +280,42 @@ export async function checkProvenance(root, record, {requireFetched = false} = {
     if (!isDeepStrictEqual(children, recordPins(entry.dependencies ?? []))) {
       report("ZigTransitivePins", `${path}: ${JSON.stringify(children)}`);
     }
+    // A package recorded as build input only must hold no sources beyond the files reviewed as such.
+    if (entry.files !== undefined && !isDeepStrictEqual(await packageFiles(directory), entry.files)) {
+      report("ZigPackageFiles", path);
+    }
     summary.transitive.verified++;
     for (const child of entry.dependencies ?? []) queue.push({entry: child, path: `${path}/${child.name}`});
   }
 
-  const [parentName, crateName] = record.cargo.crate.split("/");
-  const parent = record.zig.dependencies.find((entry) => entry.name === parentName);
-  const crateHash = parent?.dependencies.find((entry) => entry.name === crateName)?.hash;
-  if (crateHash === undefined) report("CargoCrateSource", record.cargo.crate);
-  const crateDirectory = crateHash === undefined ? null : join(root, "zig-pkg", crateHash);
+  const crate = cargoCrate(record);
+  if (crate === undefined) report("CargoCrateSource", record.cargo.crate);
+  const crateDirectory = crate === undefined ? null : join(root, "zig-pkg", crate.hash);
   const lockfile = crateDirectory === null ? null : await readOptional(join(crateDirectory, "Cargo.lock"));
   if (lockfile !== null) {
-    summary.cargo = "verified";
     const lockfileSha256 = createHash("sha256").update(lockfile).digest("hex");
     if (lockfileSha256 !== record.cargo.lockfileSha256) report("CargoLockfile", lockfileSha256);
-    const locked = lockfilePackages(lockfile);
-    for (const crate of record.cargo.crates) {
-      if (!locked.has(`${crate.name}@${crate.version}`)) report("CargoCrate", `${crate.name}@${crate.version}`);
+    const resolved = await resolveCargo(crateDirectory, record);
+    if (resolved.error !== undefined) {
+      summary.cargo = "unresolved";
+      if (requireFetched) report("CargoResolution", resolved.error);
+    } else {
+      summary.cargo = "resolved";
+      errors.push(...compareCargo(record.cargo.crates, resolved.crates));
     }
     const manifest = await readFile(join(crateDirectory, "Cargo.toml"), "utf8");
-    const rootCrate = record.cargo.crates[0];
     const packageSection = manifest.slice(manifest.indexOf("[package]"));
     const field = (key) => new RegExp(`^${key} = "([^"]+)"$`, "m").exec(packageSection)?.[1];
-    if (
-      field("name") !== rootCrate.name ||
-      field("version") !== rootCrate.version ||
-      field("license") !== rootCrate.license
-    ) {
-      report("CargoRootCrate", `${field("name")}@${field("version")} ${field("license")}`);
+    const rootCrate = record.cargo.crates[0];
+    if (field("name") !== rootCrate.name || field("version") !== rootCrate.version) {
+      report("CargoRootCrate", `${field("name")}@${field("version")}`);
     }
-    for (const vendored of record.cargo.vendored) {
-      if ((await readOptional(join(crateDirectory, vendored.path, "LICENSE"))) === null) {
-        report("CargoVendored", vendored.path);
-      }
-    }
-    const buildScript = await readFile(join(root, "zig-pkg", parent.hash, "build.zig"), "utf8");
-    for (const feature of record.cargo.features) {
-      if (!buildScript.includes(`"${feature}"`)) report("CargoFeatures", feature);
-    }
-    if (buildScript.includes('"--locked"') !== record.cargo.locked) report("CargoLocked", String(!record.cargo.locked));
+    const buildScript = await readFile(join(root, "zig-pkg", crate.parent.hash, "build.zig"), "utf8");
+    const flags = [...buildScript.matchAll(/"(--[a-z-]+)"/g)].map((match) => match[1]);
+    const features = /"--features",\s*"([^"]*)"/.exec(buildScript)?.[1].split(",") ?? [];
+    if (!isDeepStrictEqual(features, record.cargo.features)) report("CargoFeatures", features.join(","));
+    if (flags.includes("--no-default-features") === record.cargo.defaultFeatures) report("CargoDefaultFeatures", "");
+    if (flags.includes("--locked") !== record.cargo.locked) report("CargoLocked", String(!record.cargo.locked));
   } else if (requireFetched) report("CargoLockfileUnfetched", record.cargo.crate);
 
   const runtime = Object.fromEntries(record.npm.runtime.map(({name, version}) => [name, version]));
@@ -246,16 +336,18 @@ export async function checkProvenance(root, record, {requireFetched = false} = {
     summary.npm++;
   }
 
-  if (!isDeepStrictEqual(packageJson.files, record.install.files))
+  if (!isDeepStrictEqual(packageJson.files, record.install.files)) {
     report("PackageFiles", JSON.stringify(packageJson.files));
+  }
   if (!isDeepStrictEqual(packageJson.zapi?.targets, record.install.platform.targets)) {
     report("PlatformTargets", JSON.stringify(packageJson.zapi?.targets));
   }
   if (EMBEDDED_ADDON_PATH !== record.install.embedded.addon) report("EmbeddedAddonPath", EMBEDDED_ADDON_PATH);
   for (const path of record.install.platform.workflows) {
     const source = workflows.get(path.split("/").at(-1));
-    for (const step of record.install.platform.steps)
+    for (const step of record.install.platform.steps) {
       if (!source.includes(step)) report("ReleaseStep", `${path}: ${step}`);
+    }
     if (!source.includes(`runs-on: ${record.install.platform.runner}`)) report("ReleaseRunner", path);
   }
   return {errors, summary};
