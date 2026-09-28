@@ -72,7 +72,23 @@ pub const Udp = struct {
         buffer: *[constants.datagram_size_max]u8,
         timeout: std.Io.Timeout,
     ) ReceiveTimeoutError!Datagram {
-        const incoming = self.sockets.receiveDatagram(io, buffer, timeout) catch |err| {
+        return self.counted(self.sockets.receiveDatagram(io, buffer, timeout));
+    }
+
+    /// Reads one datagram without waiting from a family `ready` marks, and times out once none
+    /// remains. See `Sockets.receiveReady`.
+    pub fn receiveReady(
+        self: *Udp,
+        io: std.Io,
+        buffer: *[constants.datagram_size_max]u8,
+        ready: *[2]bool,
+    ) ReceiveTimeoutError!Datagram {
+        const received = self.sockets.receiveReadyDatagram(io, buffer, ready) catch |err| return self.counted(err);
+        return self.counted(received orelse error.Timeout);
+    }
+
+    fn counted(self: *Udp, received: ReceiveTimeoutError!Datagram) ReceiveTimeoutError!Datagram {
+        const incoming = received catch |err| {
             if (err == error.DatagramTooLarge) self.counters.received_datagrams +|= 1;
             return err;
         };

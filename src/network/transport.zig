@@ -231,7 +231,7 @@ pub const Transport = struct {
         } };
         self.engine.releaseReported();
         const wait_ms = self.idleWaitMs(result.now, options.wait_max_ms);
-        var failure: ?StepError = if (self.receiveBatch(io, &result, wait_ms)) |_| null else |err| err;
+        var failure: ?StepError = if (self.receiveBatch(io, &result, wait_ms, @splat(true))) |_| null else |err| err;
         // The wait may have slept; timers use a fresh clock when one can be read.
         if (currentTime(io)) |fresh| {
             if (fresh.mono_ms >= result.now.mono_ms) result.now = fresh;
@@ -248,9 +248,12 @@ pub const Transport = struct {
         return .{ .progress = result };
     }
 
-    /// Non-blocking drain of the QUIC socket into the engine, up to the receive budget.
-    pub fn receive(self: *Transport, io: std.Io, result: *StepResult) IoError!void {
-        return self.receiveBatch(io, result, 0);
+    /// Non-blocking drain of the QUIC sockets into the engine, up to the receive budget. Reads
+    /// only the families `ready` marks, indexed like the sockets, alternating while both hold
+    /// datagrams. A family found empty is not read again this turn; a later arrival keeps its
+    /// socket readable for the owner's next poll.
+    pub fn receive(self: *Transport, io: std.Io, result: *StepResult, ready: [2]bool) IoError!void {
+        return self.receiveBatch(io, result, 0, ready);
     }
 
     pub fn expire(self: *Transport, now: engine_mod.Now) void {
@@ -350,11 +353,12 @@ pub const Transport = struct {
         return @intCast(@min(wait_max_ms, ceiling));
     }
 
-    fn receiveBatch(self: *Transport, io: std.Io, result: *StepResult, first_wait_ms: u32) IoError!void {
+    fn receiveBatch(self: *Transport, io: std.Io, result: *StepResult, first_wait_ms: u32, ready: [2]bool) IoError!void {
+        var eligible = ready;
         var count: u32 = 0;
         while (count < self.work_limits.receive_per_step_max) : (count += 1) {
             const wait_ms: u32 = if (count == 0) first_wait_ms else 0;
-            const admitted = switch (try self.receiveDatagram(io, result, wait_ms)) {
+            const admitted = switch (try self.receiveDatagram(io, result, wait_ms, &eligible)) {
                 .timeout => break,
                 .dropped => continue,
                 .datagram => |datagram| datagram,
@@ -378,8 +382,13 @@ pub const Transport = struct {
         io: std.Io,
         result: *StepResult,
         wait_ms: u32,
+        ready: *[2]bool,
     ) IoError!Received {
-        const datagram = self.udp.receiveTimeout(io, &self.receive_buffer, receiveTimeout(wait_ms)) catch |err| switch (err) {
+        const received = if (wait_ms == 0)
+            self.udp.receiveReady(io, &self.receive_buffer, ready)
+        else
+            self.udp.receiveTimeout(io, &self.receive_buffer, receiveTimeout(wait_ms));
+        const datagram = received catch |err| switch (err) {
             error.Timeout => return .timeout,
             error.DatagramTooLarge,
             error.PortUnreachable,

@@ -709,3 +709,40 @@ test "transport bursts one busy connection among many idle ones in one flush vis
     try std.testing.expect(result.datagrams_sent >= expected);
     try std.testing.expectEqual(@as(u32, 0), result.send_failures);
 }
+
+test "transport reads only the ready families up to the turn quota and resumes the backlog on the next poll" {
+    const wait = @import("wait.zig");
+    if (!wait.supported) return error.SkipZigTest;
+    const key = try @import("wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{41}));
+    var hub: transport_mod.Transport = .{};
+    try hub.init(std.testing.allocator, std.testing.io, .{ .host = &key, .bind = .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } } });
+    defer hub.deinit(std.testing.io);
+    const quota = hub.work_limits.receive_per_step_max;
+    try std.testing.expectEqual(constants.receive_batch_max, quota);
+    const sockets = hub.udp.sockets.values;
+    const sources: wait.Sources = .{ .quic = hub.udp.sockets.handles() };
+    var stranger = try (net.IpAddress{ .ip4 = .loopback(0) }).bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
+    defer stranger.close(std.testing.io);
+    const oversized = [_]u8{0x5a} ** (constants.datagram_size_max + 1);
+    try stranger.send(std.testing.io, &sockets[0].?.address, &oversized);
+    for (0..quota + 7) |_| try stranger.send(std.testing.io, &sockets[0].?.address, &.{0});
+    for (0..3) |_| try sockets[1].?.send(std.testing.io, &sockets[1].?.address, &.{0});
+
+    var result: transport_mod.StepResult = .{ .now = try transport_mod.currentTime(std.testing.io) };
+    try hub.receive(std.testing.io, &result, .{ false, true });
+    try std.testing.expectEqual(@as(u32, 3), result.datagrams_received);
+    try std.testing.expectEqual(@as(u32, 3), result.datagrams_dropped);
+    try std.testing.expectEqual(@as(u32, 0), result.receive_errors);
+    // The quota counts the truncated datagram; the rest of the backlog keeps the socket readable.
+    for ([_]u32{ quota - 1, 8 }, [_]u32{ 1, 0 }) |received, errors| {
+        const readiness = wait.poll(std.testing.io, sources, 0);
+        try std.testing.expectEqual([2]bool{ true, false }, readiness.quic);
+        result = .{ .now = try transport_mod.currentTime(std.testing.io) };
+        try hub.receive(std.testing.io, &result, readiness.quic);
+        try std.testing.expectEqual(received, result.datagrams_received);
+        try std.testing.expectEqual(received, result.datagrams_dropped);
+        try std.testing.expectEqual(errors, result.receive_errors);
+    }
+    try std.testing.expectEqual([2]bool{ false, false }, wait.poll(std.testing.io, sources, 0).quic);
+    try std.testing.expectEqual(@as(u64, quota + 11), hub.udp.counters.received_datagrams);
+}

@@ -501,7 +501,7 @@ fn idleTransport(init: std.process.Init) !void {
     for (&ns) |*elapsed| {
         const start = timestamp(io);
         var result: network.StepResult = .{ .now = try network.transport.currentTime(io) };
-        try hub.receive(io, &result);
+        try hub.receive(io, &result, @splat(true));
         hub.expire(result.now);
         _ = hub.collect(result.now, &events);
         hub.flush(io, result.now, &result);

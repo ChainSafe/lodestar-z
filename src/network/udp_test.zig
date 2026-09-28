@@ -174,3 +174,25 @@ test "dual-stack UDP waits without consuming a second datagram and cancels an in
     try std.Io.sleep(std.testing.io, .fromMilliseconds(10), .awake);
     try std.testing.expectError(error.Canceled, receiver.cancel(std.testing.io));
 }
+
+test "dual-stack UDP ready reads count a truncated datagram and keep reading its family" {
+    var buffer: [constants.datagram_size_max]u8 = undefined;
+    var target = try udp_mod.Udp.bind(std.testing.io, .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } });
+    defer target.close(std.testing.io);
+    const local = target.localAddresses();
+    var raw_sender = try (net.IpAddress{ .ip4 = .loopback(0) }).bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
+    defer raw_sender.close(std.testing.io);
+    const oversized = [_]u8{0x55} ** (constants.datagram_size_max + 1);
+    try raw_sender.send(std.testing.io, &udp_mod.toNetwork(local[0].?), &oversized);
+    try target.send(std.testing.io, &local[0].?, "ip4");
+    try target.send(std.testing.io, &local[1].?, "ip6");
+    var ready: [2]bool = @splat(true);
+    try std.testing.expectError(error.DatagramTooLarge, target.receiveReady(std.testing.io, &buffer, &ready));
+    try std.testing.expectEqualSlices(u8, "ip6", (try target.receiveReady(std.testing.io, &buffer, &ready)).bytes);
+    try std.testing.expectEqualSlices(u8, "ip4", (try target.receiveReady(std.testing.io, &buffer, &ready)).bytes);
+    try std.testing.expectEqual([2]bool{ true, true }, ready);
+    try std.testing.expectError(error.Timeout, target.receiveReady(std.testing.io, &buffer, &ready));
+    try std.testing.expectEqual([2]bool{ false, false }, ready);
+    try std.testing.expectEqual(@as(u64, 3), target.counters.received_datagrams);
+    try std.testing.expectEqual(@as(u64, 6), target.counters.received_bytes);
+}

@@ -8,6 +8,12 @@ fn timeout(milliseconds: i64) std.Io.Timeout {
     return .{ .duration = .{ .raw = .fromMilliseconds(milliseconds), .clock = .awake } };
 }
 
+/// A ready read that tries every family.
+fn readAny(sockets: *udp.Sockets, io: std.Io, buffer: []u8) udp.ReceiveError!?net.IncomingMessage {
+    var ready: [2]bool = @splat(true);
+    return sockets.receiveReady(io, buffer, &ready);
+}
+
 test "UDP rejects mapped IPv6 listeners before any provider acquisition" {
     const Provider = struct {
         fn bind(_: ?*anyopaque, _: *const net.IpAddress, _: net.IpAddress.BindOptions) net.IpAddress.BindError!net.Socket {
@@ -126,7 +132,7 @@ test "UDP retains packets arriving between readiness probes and blocking receive
     }
     try std.testing.expect(Arrival.fired.load(.acquire));
     try std.testing.expect(families[0] and families[1]);
-    try std.testing.expectEqual(null, try sockets.receiveReady(io, &buffer));
+    try std.testing.expectEqual(null, try readAny(&sockets, io, &buffer));
 }
 
 test "UDP partial wait startup failure cancels the first task and leaves sockets usable" {
@@ -150,7 +156,7 @@ test "UDP partial wait startup failure cancels the first task and leaves sockets
     try std.testing.expectEqual(@as(u8, 2), Provider.starts);
     for (sockets.values) |target| try target.?.send(std.testing.io, &target.?.address, "retained");
     for (0..2) |_| {
-        const packet = (try sockets.receiveReady(std.testing.io, &buffer)).?;
+        const packet = (try readAny(&sockets, std.testing.io, &buffer)).?;
         try std.testing.expectEqualStrings("retained", packet.data);
     }
 }
@@ -162,7 +168,7 @@ test "UDP dual-stack timeout joins waits and ready reads need no concurrency" {
     var sockets = try udp.Sockets.bind(io, loopbacks);
     defer sockets.close(io);
     var buffer: [16]u8 = undefined;
-    try std.testing.expectEqual(null, try sockets.receiveReady(io, &buffer));
+    try std.testing.expectEqual(null, try readAny(&sockets, io, &buffer));
     try std.testing.expectError(error.Timeout, sockets.receiveTimeout(io, &buffer, timeout(0)));
     for (sockets.values) |target| try target.?.send(io, &target.?.address, "ready");
     for (0..2) |_| {
@@ -172,7 +178,7 @@ test "UDP dual-stack timeout joins waits and ready reads need no concurrency" {
     var concurrent_sockets = try udp.Sockets.bind(std.testing.io, loopbacks);
     defer concurrent_sockets.close(std.testing.io);
     try std.testing.expectError(error.Timeout, concurrent_sockets.receiveTimeout(std.testing.io, &buffer, timeout(10)));
-    try std.testing.expectEqual(null, try concurrent_sockets.receiveReady(std.testing.io, &buffer));
+    try std.testing.expectEqual(null, try readAny(&concurrent_sockets, std.testing.io, &buffer));
 }
 
 fn kernelSize(handle: net.Socket.Handle, option: u32) !u32 {
@@ -212,7 +218,7 @@ test "UDP records the kernel's socket buffer sizes and receive drops after a req
     for (0..sent) |_| try plain.values[0].?.send(std.testing.io, &sockets.values[0].?.address, &payload);
     var received: usize = 0;
     for (0..1000) |_| {
-        while (try sockets.receiveReady(std.testing.io, &payload)) |_| received += 1;
+        while (try readAny(&sockets, std.testing.io, &payload)) |_| received += 1;
         if (received + sockets.drops()[0].? == sent) break;
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     }
@@ -301,3 +307,150 @@ test "UDP leaves sends to a provider that replaces them" {
     try std.testing.expectError(error.AddressFamilyUnsupported, sockets.sendTo(faults.io(), destination, "provider", 16));
     try std.testing.expectEqual(@as(usize, 1), faults.send_calls);
 }
+
+test "UDP ready reads alternate marked families across turns and clear each one found empty" {
+    var sockets = try udp.Sockets.bind(std.testing.io, loopbacks);
+    defer sockets.close(std.testing.io);
+    const ip4 = sockets.values[0].?;
+    const ip6 = sockets.values[1].?;
+    for ([_][]const u8{ "4a", "4b", "4c" }) |payload| try ip4.send(std.testing.io, &ip4.address, payload);
+    for ([_][]const u8{ "6a", "6b" }) |payload| try ip6.send(std.testing.io, &ip6.address, payload);
+    var buffer: [16]u8 = undefined;
+    // A turn whose quota ends after three reads leaves the next turn to start at the other family.
+    for ([_][]const []const u8{ &.{ "4a", "6a", "4b" }, &.{ "6b", "4c" } }) |turn| {
+        var ready: [2]bool = @splat(true);
+        for (turn) |expected| {
+            const message = (try sockets.receiveReady(std.testing.io, &buffer, &ready)).?;
+            try std.testing.expectEqualStrings(expected, message.data);
+            try std.testing.expectEqual([2]bool{ true, true }, ready);
+        }
+        if (turn.len == 2) {
+            try std.testing.expectEqual(null, try sockets.receiveReady(std.testing.io, &buffer, &ready));
+            try std.testing.expectEqual([2]bool{ false, false }, ready);
+        }
+    }
+    try ip6.send(std.testing.io, &ip6.address, "6c");
+    var ready: [2]bool = .{ true, false };
+    try std.testing.expectEqual(null, try sockets.receiveReady(std.testing.io, &buffer, &ready));
+    try std.testing.expectEqual([2]bool{ false, false }, ready);
+    ready = .{ false, true };
+    try std.testing.expectEqualStrings("6c", (try sockets.receiveReady(std.testing.io, &buffer, &ready)).?.data);
+    var single = try udp.Sockets.bind(std.testing.io, .{ .ip6 = .loopback(0) });
+    defer single.close(std.testing.io);
+    ready = @splat(true);
+    try std.testing.expectEqual(null, try single.receiveReady(std.testing.io, &buffer, &ready));
+    try std.testing.expectEqual([2]bool{ true, false }, ready);
+}
+
+test "UDP ready reads leave a provider that replaces timed receives on its own receive" {
+    var sockets = try udp.Sockets.bind(std.testing.io, loopbacks);
+    defer sockets.close(std.testing.io);
+    for (sockets.values) |target| try target.?.send(std.testing.io, &target.?.address, "provider");
+    var faults: udp.testing.FaultIo = .{};
+    faults.init(std.testing.io);
+    defer faults.deinit();
+    var buffer: [16]u8 = undefined;
+    var ready: [2]bool = .{ true, false };
+    try std.testing.expectEqualStrings("provider", (try sockets.receiveReady(faults.io(), &buffer, &ready)).?.data);
+    try std.testing.expectEqual(null, try sockets.receiveReady(faults.io(), &buffer, &ready));
+    try std.testing.expectEqual([2]bool{ false, false }, ready);
+    // One provider receive per read, the empty one included, and none for the unmarked family.
+    try std.testing.expectEqual(@as(usize, 2), faults.receive_calls);
+    faults.receive = .{ .at = 3 };
+    ready = .{ false, true };
+    try std.testing.expectError(error.Canceled, sockets.receiveReady(faults.io(), &buffer, &ready));
+    try std.testing.expectEqual([2]bool{ false, true }, ready);
+    faults.receive = null;
+    try std.testing.expectEqualStrings("provider", (try sockets.receiveReady(faults.io(), &buffer, &ready)).?.data);
+}
+
+test "UDP native ready reads cost one receive each, never poll and never read an unmarked family" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    var sockets = try udp.Sockets.bind(std.testing.io, loopbacks);
+    defer sockets.close(std.testing.io);
+    var single = try udp.Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
+    defer single.close(std.testing.io);
+    const ip4 = sockets.values[0].?;
+    for ([_][]const u8{ "first", "second", "third" }) |payload| try ip4.send(std.testing.io, &ip4.address, payload);
+    try sockets.values[1].?.send(std.testing.io, &sockets.values[1].?.address, "unmarked");
+    var outcome: NoPoll = .{};
+    const thread = try std.Thread.spawn(.{}, NoPoll.run, .{ &outcome, &sockets, &single });
+    thread.join();
+    // Kernels without seccomp filters cannot refuse the calls.
+    if (!outcome.installed) return error.SkipZigTest;
+    // The filter refuses every poll, which Threaded reports as ConcurrencyUnavailable, and every
+    // read of the IPv6 socket.
+    try std.testing.expectError(error.ConcurrencyUnavailable, outcome.polled);
+    try std.testing.expectError(error.NetworkDown, outcome.unmarked);
+    try outcome.drained;
+    try std.testing.expectEqual(@as(usize, 3), outcome.received);
+    try std.testing.expectEqual(@as(usize, 4), outcome.reads);
+    try std.testing.expectEqual([2]bool{ false, false }, outcome.ready);
+    try std.testing.expectError(error.Timeout, outcome.timed);
+}
+
+/// Filters one thread through seccomp: every poll and ppoll fails with EPERM, and every recvmsg
+/// on the IPv6 socket with ENETDOWN. Counts native reads through the cancellation check each one
+/// makes. The filter ends with the thread.
+const NoPoll = struct {
+    installed: bool = false,
+    drained: udp.ReceiveError!void = {},
+    received: usize = 0,
+    reads: usize = 0,
+    ready: [2]bool = @splat(true),
+    timed: udp.ReceiveError!void = {},
+    polled: udp.ReceiveError!void = {},
+    unmarked: udp.ReceiveError!void = {},
+
+    const Instruction = Refusal.Instruction;
+    const Program = Refusal.Program;
+
+    threadlocal var checks: usize = 0;
+
+    fn check(userdata: ?*anyopaque) std.Io.Cancelable!void {
+        checks += 1;
+        return std.testing.io.vtable.checkCancel(userdata);
+    }
+
+    fn run(self: *NoPoll, sockets: *udp.Sockets, single: *udp.Sockets) void {
+        const linux = std.os.linux;
+        const bpf = linux.BPF;
+        const little = comptime @import("builtin").cpu.arch.endian() == .little;
+        const descriptor: u32 = @offsetOf(linux.SECCOMP.data, "arg0") + if (little) 0 else 4;
+        const poll: u32 = if (@hasField(linux.SYS, "poll")) @intFromEnum(linux.SYS.poll) else @intFromEnum(linux.SYS.ppoll);
+        const filter = [_]Instruction{
+            .{ .code = bpf.LD | bpf.W | bpf.ABS, .jt = 0, .jf = 0, .k = @offsetOf(linux.SECCOMP.data, "nr") },
+            .{ .code = bpf.JMP | bpf.JEQ | bpf.K, .jt = 0, .jf = 3, .k = @intFromEnum(linux.SYS.recvmsg) },
+            .{ .code = bpf.LD | bpf.W | bpf.ABS, .jt = 0, .jf = 0, .k = descriptor },
+            .{ .code = bpf.JMP | bpf.JEQ | bpf.K, .jt = 0, .jf = 4, .k = @intCast(sockets.values[1].?.handle) },
+            .{ .code = bpf.RET | bpf.K, .jt = 0, .jf = 0, .k = linux.SECCOMP.RET.ERRNO | @as(u32, @intFromEnum(linux.E.NETDOWN)) },
+            .{ .code = bpf.JMP | bpf.JEQ | bpf.K, .jt = 1, .jf = 0, .k = poll },
+            .{ .code = bpf.JMP | bpf.JEQ | bpf.K, .jt = 0, .jf = 1, .k = @intFromEnum(linux.SYS.ppoll) },
+            .{ .code = bpf.RET | bpf.K, .jt = 0, .jf = 0, .k = linux.SECCOMP.RET.ERRNO | @as(u32, @intFromEnum(linux.E.PERM)) },
+            .{ .code = bpf.RET | bpf.K, .jt = 0, .jf = 0, .k = linux.SECCOMP.RET.ALLOW },
+        };
+        const program: Program = .{ .len = filter.len, .filter = &filter };
+        if (linux.errno(linux.prctl(@intFromEnum(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0)) != .SUCCESS) return;
+        if (linux.errno(linux.seccomp(linux.SECCOMP.SET_MODE_FILTER, 0, &program)) != .SUCCESS) return;
+        self.installed = true;
+        var vtable = std.testing.io.vtable.*;
+        vtable.checkCancel = check;
+        const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+        var buffer: [16]u8 = undefined;
+        self.ready = .{ true, false };
+        checks = 0;
+        for (0..8) |_| {
+            _ = (sockets.receiveReady(io, &buffer, &self.ready) catch |err| {
+                self.drained = err;
+                break;
+            }) orelse break;
+            self.received += 1;
+        }
+        self.reads = checks;
+        if (single.receiveTimeout(io, &buffer, timeout(0))) |_| {} else |err| self.timed = err;
+        const zero: std.Io.Timeout = .{ .duration = .{ .raw = .zero, .clock = .awake } };
+        if (single.primary().receiveTimeout(std.testing.io, &buffer, zero)) |_| {} else |err| self.polled = err;
+        var ip6_only: [2]bool = .{ false, true };
+        if (sockets.receiveReady(io, &buffer, &ip6_only)) |_| {} else |err| self.unmarked = err;
+    }
+};

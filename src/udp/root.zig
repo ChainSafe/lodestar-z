@@ -151,12 +151,17 @@ pub const Sockets = struct {
     }
 
     /// Blocking on both sockets requires two units of Io concurrency. Ready reads
-    /// use no tasks. The returned data borrows buffer until the caller reuses it.
+    /// use no tasks, and a passed deadline reads without waiting. The returned data borrows
+    /// buffer until the caller reuses it.
     pub fn receiveTimeout(self: *Sockets, io: std.Io, buffer: []u8, timeout: std.Io.Timeout) ReceiveError!net.IncomingMessage {
-        if (self.values[0] == null or self.values[1] == null) return self.primary().receiveTimeout(io, buffer, timeout);
         const deadline = timeout.toDeadline(io);
-        if (try self.receiveReady(io, buffer)) |message| return message;
-        if (deadline.toDurationFromNow(io)) |duration| if (duration.raw.nanoseconds <= 0) return error.Timeout;
+        const dual = self.values[0] != null and self.values[1] != null;
+        if (dual or passed(io, deadline)) {
+            var ready: [2]bool = @splat(true);
+            if (try self.receiveReady(io, buffer, &ready)) |message| return message;
+            if (passed(io, deadline)) return error.Timeout;
+        }
+        if (!dual) return self.primary().receiveTimeout(io, buffer, timeout);
         {
             const Ready = union(enum) { ip4: ReceiveError!void, ip6: ReceiveError!void };
             var completions: [2]Ready = undefined;
@@ -168,27 +173,33 @@ pub const Sockets = struct {
                 inline else => |result| try result,
             }
         }
-        return (try self.receiveReady(io, buffer)) orelse error.Timeout;
+        var ready: [2]bool = @splat(true);
+        return (try self.receiveReady(io, buffer, &ready)) orelse error.Timeout;
     }
 
-    pub fn receiveReady(self: *Sockets, io: std.Io, buffer: []u8) ReceiveError!?net.IncomingMessage {
+    /// Reads one datagram, without waiting, from a family `ready` marks, indexed like `values`.
+    /// Families take turns across calls, so two ready families alternate. Readiness is only a
+    /// hint: a family found empty is cleared, and null means no marked family remains. The
+    /// returned data borrows buffer until the caller reuses it.
+    pub fn receiveReady(self: *Sockets, io: std.Io, buffer: []u8, ready: *[2]bool) ReceiveError!?net.IncomingMessage {
         for (0..2) |_| {
             const at = self.cursor;
             self.cursor +%= 1;
+            if (!ready[at]) continue;
             const socket = self.values[at] orelse continue;
-            return socket.receiveTimeout(io, buffer, .{ .duration = .{ .raw = .zero, .clock = .awake } }) catch |err| switch (err) {
-                error.Timeout => continue,
-                else => return err,
-            };
+            if (try receiveNow(io, socket, buffer)) |message| return message;
+            ready[at] = false;
         }
         return null;
     }
 
     pub fn receiveDatagram(self: *Sockets, io: std.Io, buffer: []u8, timeout: std.Io.Timeout) DatagramError!Datagram {
-        const incoming = try self.receiveTimeout(io, buffer, timeout);
-        if (incoming.flags.trunc) return error.DatagramTooLarge;
-        assert(incoming.data.len <= buffer.len);
-        return .{ .from = Address.fromNetwork(incoming.from), .bytes = buffer[0..incoming.data.len] };
+        return datagram(try self.receiveTimeout(io, buffer, timeout), buffer);
+    }
+
+    /// `receiveReady` as a datagram.
+    pub fn receiveReadyDatagram(self: *Sockets, io: std.Io, buffer: []u8, ready: *[2]bool) DatagramError!?Datagram {
+        return try datagram((try self.receiveReady(io, buffer, ready)) orelse return null, buffer);
     }
 
     pub fn sendTo(self: *const Sockets, io: std.Io, destination: Address, bytes: []const u8, payload_max: usize) SendError!void {
@@ -213,6 +224,78 @@ fn threaded(io: std.Io) bool {
 /// A provider that replaces only the send keeps its own send contract.
 fn threadedSend(io: std.Io) bool {
     return threaded(io) and io.vtable.netSend == std.Io.Threaded.global_single_threaded.io().vtable.netSend;
+}
+
+/// A provider that replaces only the timed receive keeps its own receive contract.
+fn threadedReceive(io: std.Io) bool {
+    return threaded(io) and io.vtable.batchAwaitConcurrent == std.Io.Threaded.global_single_threaded.io().vtable.batchAwaitConcurrent;
+}
+
+fn passed(io: std.Io, deadline: std.Io.Timeout) bool {
+    const duration = deadline.toDurationFromNow(io) orelse return false;
+    return duration.raw.nanoseconds <= 0;
+}
+
+fn datagram(incoming: net.IncomingMessage, buffer: []u8) DatagramError!Datagram {
+    if (incoming.flags.trunc) return error.DatagramTooLarge;
+    assert(incoming.data.len <= buffer.len);
+    return .{ .from = Address.fromNetwork(incoming.from), .bytes = buffer[0..incoming.data.len] };
+}
+
+/// Reads one datagram without waiting. Null when the socket holds none.
+fn receiveNow(io: std.Io, socket: net.Socket, buffer: []u8) ReceiveError!?net.IncomingMessage {
+    if (native_sockets) {
+        if (threadedReceive(io)) return receiveNative(io, socket.handle, buffer);
+    }
+    return socket.receiveTimeout(io, buffer, .{ .duration = .{ .raw = .zero, .clock = .awake } }) catch |err| switch (err) {
+        error.Timeout => null,
+        else => err,
+    };
+}
+
+/// Receives as Zig 0.16 Threaded does, keeping its errno mapping, but reports an empty socket
+/// as null where Threaded polls it once more before timing out. The read never waits, so the
+/// cancellation check before it covers the whole read. An interrupted read counts as empty; the
+/// socket stays readable for the caller's next poll.
+fn receiveNative(io: std.Io, handle: net.Socket.Handle, buffer: []u8) ReceiveError!?net.IncomingMessage {
+    const p = std.posix;
+    var storage: std.Io.Threaded.PosixAddress = undefined;
+    var vector: p.iovec = .{ .base = buffer.ptr, .len = buffer.len };
+    var header: p.msghdr = .{
+        .name = &storage.any,
+        .namelen = @sizeOf(std.Io.Threaded.PosixAddress),
+        .iov = (&vector)[0..1],
+        .iovlen = 1,
+        .control = null,
+        .controllen = 0,
+        .flags = 0,
+    };
+    try io.checkCancel();
+    const received = p.system.recvmsg(handle, &header, p.MSG.NOSIGNAL | p.MSG.DONTWAIT);
+    return switch (p.errno(received)) {
+        .SUCCESS => .{
+            .from = std.Io.Threaded.addressFromPosix(&storage),
+            .data = buffer[0..@intCast(received)],
+            .control = &.{},
+            .flags = .{
+                .eor = (header.flags & p.MSG.EOR) != 0,
+                .trunc = (header.flags & p.MSG.TRUNC) != 0,
+                .ctrunc = (header.flags & p.MSG.CTRUNC) != 0,
+                .oob = (header.flags & p.MSG.OOB) != 0,
+                .errqueue = if (@hasDecl(p.MSG, "ERRQUEUE")) (header.flags & p.MSG.ERRQUEUE) != 0 else false,
+            },
+        },
+        .AGAIN, .INTR => null,
+        .NFILE => error.SystemFdQuotaExceeded,
+        .MFILE => error.ProcessFdQuotaExceeded,
+        .NOBUFS, .NOMEM => error.SystemResources,
+        .NOTCONN, .PIPE => error.SocketUnconnected,
+        .MSGSIZE => error.MessageOversize,
+        .CONNRESET => error.ConnectionResetByPeer,
+        .NETDOWN => error.NetworkDown,
+        .BADF, .FAULT, .INVAL, .NOTSOCK, .OPNOTSUPP => |err| std.Io.Threaded.errnoBug(err),
+        else => |err| p.unexpectedErrno(err),
+    };
 }
 
 /// Sends as Zig 0.16 Threaded does, keeping its errno mapping, but names EPERM, which Threaded

@@ -850,7 +850,7 @@ test "core native readiness wakes for either delayed protocol socket" {
         const result = try stepAfter(&node, 100);
         try std.testing.expect(result.failure == null);
         if (source == 0) {
-            try std.testing.expect(result.readiness.quic);
+            try std.testing.expectEqual([2]bool{ true, false }, result.readiness.quic);
             try std.testing.expectEqual(@as(u32, 1), result.transport.datagrams_received);
         } else {
             try std.testing.expect(result.readiness.discovery);
@@ -918,7 +918,7 @@ test "core native wait source failure retains completed protocol progress" {
     const allocations = node.reservations.allocation_calls;
     const result = try stepAfter(&node, 100);
     try std.testing.expectEqual(error.WaitSourceClosed, result.failure.?);
-    try std.testing.expect(result.readiness.quic and result.readiness.discovery);
+    try std.testing.expect(result.readiness.quicReady() and result.readiness.discovery);
     try std.testing.expectEqual(@as(u32, 1), result.transport.datagrams_received);
     try std.testing.expectEqualSlices(u8, "invalid", node.discovery.?.transport.receive_buffer[0..7]);
     try std.testing.expectEqual(allocations, node.reservations.allocation_calls);
