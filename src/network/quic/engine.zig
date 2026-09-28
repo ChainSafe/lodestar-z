@@ -968,8 +968,8 @@ pub const Engine = struct {
             }
             // E2: a slot off the dirty list has no output.
             if (!slot.dirty_link.linked) {
-                var info: c.quiche_send_info = undefined;
-                const rc = c.quiche_conn_send(slot.conn.?, &scratch, scratch.len, &info);
+                var info: binding.SendInfo = undefined;
+                const rc = binding.connSend(slot.conn.?, &scratch, &info);
                 assert(rc == c.QUICHE_ERR_DONE);
             }
             if (slot.collect_link.linked or slot.state != .established or slot.pending_close != null) continue;

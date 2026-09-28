@@ -156,8 +156,8 @@ pub const Slot = struct {
 
     pub fn send(self: *Slot, now_ms: u64, out: []u8) Error!?Sent {
         assert(self.conn != null);
-        var info: c.quiche_send_info = undefined;
-        const rc = c.quiche_conn_send(self.conn.?, out.ptr, out.len, &info);
+        var info: binding.SendInfo = undefined;
+        const rc = binding.connSend(self.conn.?, out, &info);
         const length = try binding.check(rc) orelse return null;
         assert(length <= out.len);
         self.last_send_ms = now_ms;
