@@ -335,7 +335,7 @@ test "metrics use retained usable coverage and accepted demand until replacement
     try contains(output, "lodestar_discovery_subnet_peers_to_connect{type=\"attnets\"} 3\n");
     try contains(try f.render(false), "lodestar_discovery_subnet_peers_to_connect{type=\"attnets\"} 0\n");
     try contains(try f.render(true), "lodestar_discovery_subnet_peers_to_connect{type=\"attnets\"} 3\n");
-    try manager.setDemand(&.{});
+    try @import("network_core_test_support.zig").updateDemand(f.node, &.{}, f.node.last_now);
     manager.selection = .{};
     try contains(try f.render(true), "lodestar_discovery_subnet_peers_to_connect{type=\"attnets\"} 0\n");
 }

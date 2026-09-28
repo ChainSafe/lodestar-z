@@ -225,12 +225,6 @@ pub const PeerManager = struct {
         if (self.catalog.eventsPending()) return now.mono_ms;
         return null;
     }
-    pub fn setDemand(self: *PeerManager, demand: *const t.Demand) !void {
-        if (self.stopped) return error.Stopped;
-        try demand.validate(&self.local.fork, self.catalog.options.max_peers);
-        if (std.meta.eql(self.demand, demand.*)) return;
-        self.commitDemand(demand);
-    }
     /// Requires demand validated against the local fork before publication.
     pub fn commitDemand(self: *PeerManager, demand: *const t.Demand) void {
         self.demand = demand.*;

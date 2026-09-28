@@ -40,7 +40,7 @@ test "core coverage counts real duty subscriptions separately from custodians" {
         demand.group_targets[group] = 1;
         demand.custody_group_targets[group] = 1;
     };
-    try setup.client.peer_manager.setDemand(&demand);
+    try support.updateDemand(&setup.client, &demand, setup.pair.now);
     setup.client.peer_manager.reconcile(setup.client.service.gossipsub, &setup.client.control_protocol, setup.pair.now);
     try equal(@as(u16, 8), setup.client.peer_manager.coverageDeficits().groups);
     try equal(@as(u16, 4), setup.client.peer_manager.coverageDeficits().custody_groups);
@@ -73,7 +73,7 @@ test "core coverage coalesces subscription and score changes with operation elig
     try init(&setup, &.{ .fork = .{ .fork = .altair } });
     defer setup.deinit();
     try settle(&setup);
-    try setup.client.peer_manager.setDemand(&.{ .attnets = 1 << 7 });
+    try support.updateDemand(&setup.client, &.{ .attnets = 1 << 7 }, setup.pair.now);
     setup.client.peer_manager.reconcile(setup.client.service.gossipsub, &setup.client.control_protocol, setup.pair.now);
     const g = setup.client.service.gossipsub;
     var snapshots: [4]t.Snapshot = undefined;
@@ -126,7 +126,7 @@ test "core coverage gives initial subscriptions finite grace even after metadata
     opts.core.peers.min_outbound = 0;
     try setup.initOwnersWithOptions(&.{}, opts);
     defer setup.deinit();
-    try setup.client.peer_manager.setDemand(&.{ .attnets = 1 });
+    try support.updateDemand(&setup.client, &.{ .attnets = 1 }, setup.pair.now);
     _ = try setup.pair.dial();
     try settle(&setup);
     var snapshots: [4]t.Snapshot = undefined;
@@ -135,7 +135,7 @@ test "core coverage gives initial subscriptions finite grace even after metadata
     try equal(@as(u16, 1), setup.client.peer_manager.selection.retained_count);
     const grace = snapshots[0].connected_at_ms + setup.client.peer_manager.control.options.inbound_status_grace_ms;
     setup.pair.advance(grace - setup.pair.now.mono_ms - 1);
-    try setup.client.peer_manager.setDemand(&.{ .attnets = 3 });
+    try support.updateDemand(&setup.client, &.{ .attnets = 3 }, setup.pair.now);
     setup.client.peer_manager.reconcile(setup.client.service.gossipsub, &setup.client.control_protocol, setup.pair.now);
     try equal(@as(u16, 1), setup.client.peer_manager.selection.retained_count);
     setup.pair.advance(1);

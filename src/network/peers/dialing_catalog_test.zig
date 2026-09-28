@@ -335,7 +335,7 @@ test "peer fold a full direct peer waits 5, 15 then 60 minutes while a manual co
         now = d.nextWakeup(&c, until, 1).?;
         try std.testing.expectEqual(until, now);
         try rejectedRound(&c, &d, &direct.peer, @intCast(round), .too_many_peers, now);
-        try std.testing.expect(c.isDirect(&direct.peer));
+        try std.testing.expect(c.rowFor(c.find(&direct.peer).?).?.direct);
         until = now + minutes * 60_000;
     }
     try std.testing.expectEqual(until, d.nextWakeup(&c, now, 1).?);

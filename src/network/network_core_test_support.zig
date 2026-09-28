@@ -89,6 +89,12 @@ pub fn updateLocal(node: *NetworkCore, local: *const t.LocalState, now: Now) !vo
     try updateLocalDemand(node, local, &node.peer_manager.demand, now);
 }
 
+/// Commits `demand` through the owner's intent path, keeping its local state, schedule,
+/// endpoints, capabilities and subscriptions.
+pub fn updateDemand(node: *NetworkCore, demand: *const t.Demand, now: Now) !void {
+    try updateLocalDemand(node, &node.peer_manager.local, demand, now);
+}
+
 /// Commits `local` and `demand` together through the owner's intent path, keeping its schedule,
 /// endpoints, capabilities and subscriptions.
 pub fn updateLocalDemand(node: *NetworkCore, local: *const t.LocalState, demand: *const t.Demand, now: Now) !void {
