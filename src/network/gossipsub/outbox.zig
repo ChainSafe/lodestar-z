@@ -13,6 +13,8 @@ pub const critical_bytes = critical_frames * (32 + topic.topic_max_len);
 pub const QueueResult = enum { queued, full };
 pub const DropReason = enum { data_descriptors, data_pool, data_bytes, control_frames, control_bytes, critical_frames, critical_bytes, token_exhausted };
 pub const drop_reason_count = @typeInfo(DropReason).@"enum".fields.len;
+/// Storage for encoding one control frame, which the gossip owner shares across its outboxes.
+pub const ControlScratch = [32 + topic.topic_max_len + constants.gossip_ids_max * (constants.message_id_length + 2)]u8;
 
 pub const Control = union(enum) {
     subscription: struct { topic: []const u8, subscribed: bool },
@@ -181,22 +183,22 @@ pub const Outbox = struct {
         return null;
     }
 
-    pub fn announce(self: *Outbox, index: u16, name: []const u8, subscribed: bool, now: u64) bool {
+    pub fn announce(self: *Outbox, index: u16, name: []const u8, subscribed: bool, scratch: *ControlScratch, now: u64) bool {
         assert(self.subscription_dirty.isSet(index));
-        if (self.submit(&.{ .subscription = .{ .topic = name, .subscribed = subscribed } }, now) == null) return false;
+        if (self.submit(&.{ .subscription = .{ .topic = name, .subscribed = subscribed } }, scratch, now) == null) return false;
         self.subscription_dirty.unset(index);
         self.subscription_cursor = (index + 1) % constants.topics_cap;
         if (self.subscription_dirty.count() == 0) self.subscription_since = null;
         return true;
     }
 
-    pub fn submit(self: *Outbox, control: *const Control, now_ms: u64) ?u64 {
-        var bytes: [32 + topic.topic_max_len + constants.gossip_ids_max * (constants.message_id_length + 2)]u8 = undefined;
+    /// Encodes `control` into `scratch` and queues a copy, so `scratch` is free again on return.
+    pub fn submit(self: *Outbox, control: *const Control, scratch: *ControlScratch, now_ms: u64) ?u64 {
         const critical = switch (control.*) {
             .subscription, .graft, .prune => true,
             else => false,
         };
-        return self.appendControl(control.encode(&bytes), critical, now_ms);
+        return self.appendControl(control.encode(scratch), critical, now_ms);
     }
 
     pub fn inject(self: *Outbox, bytes: []const u8, now_ms: u64) bool {
@@ -493,8 +495,9 @@ test "gossip typed controls preserve maximum ID lists and completion kinds" {
     var outbox: Outbox = .{ .data = .{ .pool = &deliveries }, .control = .{ .bytes = bytes[0..4096] }, .critical = .{ .bytes = bytes[4096..] } };
     var store = try storage.Store.init(std.testing.allocator, 1, 4096);
     defer store.deinit(std.testing.allocator);
+    var scratch: ControlScratch = undefined;
     for (&controls) |*control| {
-        const token = outbox.submit(control, 1).?;
+        const token = outbox.submit(control, &scratch, 1).?;
         var reader: @import("frame.zig").Reader = .{};
         var body: [4096]u8 = undefined;
         var received: ?[]const u8 = null;
@@ -528,6 +531,21 @@ test "gossip typed controls preserve maximum ID lists and completion kinds" {
     }
 }
 
+test "gossip outboxes sharing one control scratch each queue a copy of their own frame" {
+    var sessions = try @import("test_support.zig").sessions(std.testing.allocator, 2);
+    defer sessions.deinit(std.testing.allocator);
+    const name = "/eth2/01020304/beacon_block/ssz_snappy";
+    const ids: [constants.gossip_ids_max]topic.MessageId = @splat(@splat(7));
+    const controls = [_]Control{ .{ .ihave = .{ .topic = name, .ids = &ids } }, .{ .graft = name } };
+    for (&controls, sessions.rows[0..2]) |*control, *row| try std.testing.expect(row.io.tx.submit(control, &sessions.control_scratch, 1) != null);
+    @memset(&sessions.control_scratch, 0xa5);
+    var expected: ControlScratch = undefined;
+    try std.testing.expectEqualSlices(u8, controls[0].encode(&expected), sessions.rows[0].io.tx.control.segment());
+    try std.testing.expectEqual(@as(usize, 0), sessions.rows[0].io.tx.critical.count);
+    try std.testing.expectEqualSlices(u8, controls[1].encode(&expected), sessions.rows[1].io.tx.critical.segment());
+    try std.testing.expectEqual(@as(usize, 0), sessions.rows[1].io.tx.control.count);
+}
+
 test "gossip critical queue holds a full subscription snapshot and full PRUNE burst" {
     var sessions = try @import("test_support.zig").sessions(std.testing.allocator, 1);
     defer sessions.deinit(std.testing.allocator);
@@ -535,13 +553,13 @@ test "gossip critical queue holds a full subscription snapshot and full PRUNE bu
     const name = "/eth2/01020304/sync_committee_contribution_and_proof/ssz_snappy";
     try std.testing.expectEqual(topic.topic_max_len, name.len);
     for (0..constants.topics_cap) |_| {
-        try std.testing.expect(tx.submit(&.{ .subscription = .{ .topic = name, .subscribed = true } }, 1) != null);
+        try std.testing.expect(tx.submit(&.{ .subscription = .{ .topic = name, .subscribed = true } }, &sessions.control_scratch, 1) != null);
     }
     for (0..constants.topics_cap) |_| {
-        try std.testing.expect(tx.submit(&.{ .prune = .{ .topic = name, .backoff_s = std.math.maxInt(u64) } }, 2) != null);
+        try std.testing.expect(tx.submit(&.{ .prune = .{ .topic = name, .backoff_s = std.math.maxInt(u64) } }, &sessions.control_scratch, 2) != null);
     }
     try std.testing.expectEqual(critical_frames, tx.critical.count);
-    try std.testing.expect(tx.submit(&.{ .prune = .{ .topic = name, .backoff_s = 60 } }, 3) == null);
+    try std.testing.expect(tx.submit(&.{ .prune = .{ .topic = name, .backoff_s = 60 } }, &sessions.control_scratch, 3) == null);
     try std.testing.expectEqual(@as(u64, 1), tx.drops[@intFromEnum(DropReason.critical_frames)]);
     for (0..critical_frames) |_| {
         const first = tx.critical.segment();

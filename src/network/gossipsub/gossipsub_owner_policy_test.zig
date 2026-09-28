@@ -255,7 +255,7 @@ test "gossip policy topic retirement bounds arbitrarily slow active score decay"
     const topic = g.overlay.findTopic(name).?;
     g.peers.scores.deliverEligible(g.sessions.rows[peer.index].logical.index, topic, false);
     try support.unsubscribe(&g, name);
-    g.overlay.flushSubscriptions(&g.sessions.rows[peer.index].io.tx, g.last_now_ms);
+    g.overlay.flushSubscriptions(&g.sessions.rows[peer.index].io.tx, &g.sessions.control_scratch, g.last_now_ms);
     g.last_now_ms = 11;
     g.peers.scores.refresh(11);
     g.overlay.reclaimTopic(&g.overlayContext(g.last_now_ms), &g.messages.topicPins(), topic);

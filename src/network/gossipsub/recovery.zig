@@ -140,11 +140,11 @@ pub const Recovery = struct {
     }
 
     /// Commit a nonempty subset admitted by filterPending, without intervening recovery mutation.
-    pub fn requestBatch(self: *Recovery, peers: *Peers, outbox: *@import("outbox.zig").Outbox, ids: []const MessageId, peer: PeerRef, connection: Handle, random: std.Random, followup_ms: u64, now: u64) error{OutboxFull}!void {
+    pub fn requestBatch(self: *Recovery, peers: *Peers, outbox: *@import("outbox.zig").Outbox, scratch: *@import("outbox.zig").ControlScratch, ids: []const MessageId, peer: PeerRef, connection: Handle, random: std.Random, followup_ms: u64, now: u64) error{OutboxFull}!void {
         assert(ids.len > 0 and ids.len <= constants.gossip_ids_max and ids.len <= self.available());
         const index = self.batch_len;
         self.addBatch(peers, ids, peer, connection, 0, random.uintLessThan(usize, ids.len), now +| followup_ms);
-        const token = outbox.submit(&.{ .iwant = ids }, now) orelse {
+        const token = outbox.submit(&.{ .iwant = ids }, scratch, now) orelse {
             self.remove(peers, index);
             return error.OutboxFull;
         };
