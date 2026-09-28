@@ -262,7 +262,7 @@ pub const NetworkCore = struct {
             for (pm.snapshot_scratch[0..count]) |snapshot| if (snapshot.connection) |conn| {
                 self.closeConnection(snapshot.peer, conn, .shutdown, now);
             };
-            pm.dialing.shutdown(&pm.catalog, &self.transport.engine);
+            pm.dialing.shutdown(&pm.catalog, &self.transport.engine, now.mono_ms);
         }
         if (self.discovery) |owned| owned.coordinator.cancel();
         // Include handshakes not yet admitted to the catalog.

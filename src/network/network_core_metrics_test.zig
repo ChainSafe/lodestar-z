@@ -71,6 +71,7 @@ const contract = [_]Series{
     .{ .name = "lodestar_native_peer_rejections_total", .kind = "counter", .labels = &.{"kind"} },
     .{ .name = "lodestar_native_peer_dial_selections_total", .kind = "counter", .labels = &.{"source"} },
     .{ .name = "lodestar_native_peer_dial_outcomes_total", .kind = "counter", .labels = &.{"outcome"} },
+    .{ .name = "lodestar_native_peer_dial_time_seconds", .kind = "histogram", .labels = &.{"outcome"} },
     .{ .name = "lodestar_native_peer_dial_retries_total", .kind = "counter", .labels = &.{"previous"} },
     .{ .name = "lodestar_native_dial_recent_failures_refused_total", .kind = "counter", .labels = &.{"reason"} },
     .{ .name = "lodestar_native_peer_dial_funnel_total", .kind = "counter", .labels = &.{ "origin", "stage" } },
@@ -396,6 +397,25 @@ test "metrics label redials after a health close in the dial retries contract se
     defer f.deinit();
     f.node.peer_manager.dialing.retries[@intFromEnum(@import("peers/types.zig").DialFailure.health)] = 2;
     try contains(try f.render(true), "lodestar_native_peer_dial_retries_total{previous=\"health\"} 2\n");
+}
+
+test "metrics export dial time by outcome in seconds through shutdown" {
+    var f = try Fixture.init(&.{});
+    defer f.deinit();
+    const dialing = &f.node.peer_manager.dialing;
+    const connected = @intFromEnum(@import("peers/types.zig").DialOutcome.connected);
+    dialing.durations[connected].observe(180);
+    dialing.outcomes[connected] = 1;
+    for ([_]bool{ true, false }) |running| {
+        const output = try f.render(running);
+        try contains(output, "# TYPE lodestar_native_peer_dial_time_seconds histogram\n");
+        try contains(output, "lodestar_native_peer_dial_time_seconds_bucket{outcome=\"connected\",le=\"0.1\"} 0\n");
+        try contains(output, "lodestar_native_peer_dial_time_seconds_bucket{outcome=\"connected\",le=\"0.25\"} 1\n");
+        try contains(output, "lodestar_native_peer_dial_time_seconds_bucket{outcome=\"connected\",le=\"+Inf\"} 1\n");
+        try contains(output, "lodestar_native_peer_dial_time_seconds_sum{outcome=\"connected\"} 0.18\n");
+        try contains(output, "lodestar_native_peer_dial_time_seconds_count{outcome=\"connected\"} 1\n");
+        try contains(output, "lodestar_native_peer_dial_time_seconds_count{outcome=\"expired\"} 0\n");
+    }
 }
 
 test "metrics export cumulative discovery lookups and datagram rejections" {

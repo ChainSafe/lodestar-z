@@ -249,6 +249,15 @@ fn writeTransportConnections(self: *const Context, w: *prom.Encoder) prom.Error!
 fn writeDiscoveryProgress(self: *const Context, w: *prom.Encoder) prom.Error!void {
     try w.enums(.{ .name = "lodestar_native_peer_dial_selections_total", .kind = .counter, .help = "Selected peer connection attempts by initiating demand, including immediate errors and local start deferrals", .labels = &.{"source"} }, @import("../peers/dialing.zig").Source, &self.owner.peer_manager.dialing.selected_attempts);
     try w.enums(.{ .name = "lodestar_native_peer_dial_outcomes_total", .kind = .counter, .help = "Finished connection attempts by outcome; closes before admission map the transport close reason", .labels = &.{"outcome"} }, peer_types.DialOutcome, &self.owner.peer_manager.dialing.outcomes);
+    const dialing = @import("../peers/dialing.zig");
+    const times = try w.histograms(.{
+        .name = "lodestar_native_peer_dial_time_seconds",
+        .kind = .histogram,
+        .help = "Selected connection attempts from selection to outcome, including local start deferrals; a connected attempt ends at connection admission, before Status and Metadata",
+        .labels = &.{"outcome"},
+        .unit = .seconds,
+    }, dialing.DialTime);
+    inline for (std.meta.fields(peer_types.DialOutcome)) |field| try times.histogram(.{field.name}, &self.owner.peer_manager.dialing.durations[field.value]);
     try w.enums(.{ .name = "lodestar_native_peer_dial_retries_total", .kind = .counter, .help = "Redials of an endpoint by its previous failure", .labels = &.{"previous"} }, peer_types.DialFailure, &self.owner.peer_manager.dialing.retries);
     const discovery = self.owner.discovery orelse return;
     const lookup_finishes = try w.family(.{

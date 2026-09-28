@@ -22,8 +22,10 @@ const history_retention_ms = catalog_mod.history_retention_ms;
 const hint_freshness_ms = catalog_mod.hint_freshness_ms;
 pub const connect_timeout_ms: u64 = 30_000;
 pub const Source = enum { discovery, manual, direct };
+pub const DialTime = @import("../metrics/histogram.zig").Duration(&.{ 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000 });
 const Attempt = struct {
     generation: u64 = 0,
+    selected_ms: u64 = 0,
     peer: ?t.PeerRef = null,
     connection: ?t.Handle = null,
     answered: bool = false,
@@ -49,6 +51,8 @@ pub const Dialing = struct {
     random: std.Random.DefaultPrng,
     selected_attempts: [std.meta.fields(Source).len]u64 = @splat(0),
     outcomes: [std.meta.fields(t.DialOutcome).len]u64 = @splat(0),
+    /// Time from selection to retirement by outcome; each count equals its outcome counter.
+    durations: [std.meta.fields(t.DialOutcome).len]DialTime = @splat(.{}),
     /// Redials of an endpoint by its previous failure, each counted when the redial is selected.
     retries: [std.meta.fields(t.DialFailure).len]u64 = @splat(0),
     /// Discovered candidates refused because every endpoint recently failed, or because the
@@ -351,7 +355,7 @@ pub const Dialing = struct {
             const peer = attempt.peer orelse continue;
             if (!std.meta.eql(attempt.connection, conn)) continue;
             const row = catalog.rowFor(peer).?;
-            self.retire(catalog, @intCast(index), .admission_refused);
+            self.retire(catalog, @intCast(index), .admission_refused, now_ms);
             row.intent.eligible_at_ms = @max(row.intent.eligible_at_ms, now_ms +| 1_000);
             catalog.markDial(peer.index);
             releaseUnused(catalog, peer);
@@ -379,7 +383,7 @@ pub const Dialing = struct {
                     catalog.remembered.note(row.origin.?, .connected);
                 }
             }
-            self.retire(catalog, index, .connected);
+            self.retire(catalog, index, .connected, now_ms);
         }
         row.intent.eligible_at_ms = @max(row.intent.eligible_at_ms, now_ms +| 1_000);
         releaseUnused(catalog, peer);
@@ -392,7 +396,7 @@ pub const Dialing = struct {
         catalog.markDial(ref.index);
         if (row.attempt) |index| {
             if (self.active[index].connection) |conn| closeAttempt(engine, conn);
-            self.retire(catalog, index, .cancelled);
+            self.retire(catalog, index, .cancelled, now_ms);
         }
         row.intent.eligible_at_ms = @max(row.intent.eligible_at_ms, now_ms +| 60_000);
         releaseUnused(catalog, ref);
@@ -432,12 +436,12 @@ pub const Dialing = struct {
         if (attempt.connection != null) return false;
         const peer = attempt.peer.?;
         const row = catalog.rowFor(peer).?;
-        self.retire(catalog, @intCast(token.index), .deferred);
+        self.retire(catalog, @intCast(token.index), .deferred, now_ms);
         row.intent.eligible_at_ms = @max(row.intent.eligible_at_ms, now_ms +| 1_000);
         releaseUnused(catalog, peer);
         return true;
     }
-    fn retire(self: *Dialing, catalog: *Catalog, index: u8, outcome: t.DialOutcome) void {
+    fn retire(self: *Dialing, catalog: *Catalog, index: u8, outcome: t.DialOutcome, now_ms: u64) void {
         const attempt = &self.active[index];
         const peer = attempt.peer.?;
         const row = catalog.rowFor(peer).?;
@@ -447,6 +451,7 @@ pub const Dialing = struct {
         if (attempt.connection == null) self.held.unstarted -= 1;
         self.version +|= 1;
         catalog.markDial(peer.index);
+        self.durations[@intFromEnum(outcome)].observe(now_ms -| attempt.selected_ms);
         attempt.* = .{ .generation = attempt.generation };
         self.outcomes[@intFromEnum(outcome)] +|= 1;
     }
@@ -456,7 +461,7 @@ pub const Dialing = struct {
         const row = catalog.rowFor(peer).?;
         // Another connection to the peer already won, so this attempt is redundant, not failed.
         const redundant = row.connection != null;
-        self.retire(catalog, index, if (redundant) .cancelled else failureOutcome(failure));
+        self.retire(catalog, index, if (redundant) .cancelled else failureOutcome(failure), now_ms);
         if (!redundant) {
             row.intent.failures = @min(row.intent.failures +| 1, 7);
             catalog.history.markRetry(dialedKey(catalog, row, &attempt), failure, now_ms);
@@ -530,7 +535,7 @@ pub const Dialing = struct {
                 if (self.active[slot].connection) |conn| {
                     closeAttempt(engine orelse continue, conn);
                 }
-                self.retire(catalog, slot, .cancelled);
+                self.retire(catalog, slot, .cancelled, now_ms);
             };
             row.intent.manual_until_ms = 0;
             self.version +|= 1;
@@ -630,7 +635,7 @@ pub const Dialing = struct {
             self.cursor = (index + 1) % catalog.rows.len;
             const row = &catalog.rows[index];
             const attempt = &self.active[slot];
-            attempt.* = .{ .generation = attempt.generation + 1, .peer = catalog.reference(index), .lease_until_ms = if (row.direct or row.intent.automatic) now_ms +| 10_000 else @min(row.intent.manual_until_ms, now_ms +| 10_000), .address = row.intent.addresses[row.intent.address_index] };
+            attempt.* = .{ .generation = attempt.generation + 1, .selected_ms = now_ms, .peer = catalog.reference(index), .lease_until_ms = if (row.direct or row.intent.automatic) now_ms +| 10_000 else @min(row.intent.manual_until_ms, now_ms +| 10_000), .address = row.intent.addresses[row.intent.address_index] };
             row.attempt = slot;
             self.held.total += 1;
             self.held.unstarted += 1;
@@ -694,7 +699,8 @@ pub const Dialing = struct {
     }
     /// Test builds check that the heaps hold every key a scan of every intent and attempt would
     /// compute, that a dialable row due now is due on the heap unless it waits out a forgotten
-    /// rejection block, and that the counts match the table.
+    /// rejection block, that the counts match the table, and that each outcome's dial times count
+    /// every attempt it retired.
     fn checkIntents(self: *const Dialing, catalog: *const Catalog, now_ms: u64) void {
         assert(catalog.dial.dirty_count == 0);
         var held: Attempts = .{};
@@ -705,6 +711,7 @@ pub const Dialing = struct {
             assert(catalog.intents.isSet(peer.index));
         };
         assert(std.meta.eql(held, self.held));
+        for (self.outcomes, self.durations) |count, time| assert(time.count == count);
         for (catalog.rows, 0..) |*row, index| {
             const retained = catalog.intents.isSet(index);
             assert(catalog.dial.expiries.get(@intCast(index)) == self.expiryOf(catalog, index));
@@ -726,11 +733,11 @@ pub const Dialing = struct {
             assert(cached.host == self.hostDemand(catalog));
         };
     }
-    pub fn shutdown(self: *Dialing, catalog: *Catalog, engine: *Engine) void {
+    pub fn shutdown(self: *Dialing, catalog: *Catalog, engine: *Engine, now_ms: u64) void {
         for (self.active, 0..) |attempt, index| {
             if (attempt.peer == null) continue;
             if (attempt.connection) |conn| closeAttempt(engine, conn);
-            self.retire(catalog, @intCast(index), .cancelled);
+            self.retire(catalog, @intCast(index), .cancelled, now_ms);
         }
         var it = catalog.intents.iterator(.{});
         while (it.next()) |index| {
