@@ -4,7 +4,6 @@ on:
   workflow_call:
 
 env:
-  ZIG_VERSION: "0.16.0"
   NODE_VERSION: "24"
 
 jobs:
@@ -27,14 +26,14 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           registry-url: "https://registry.npmjs.org"
           cache: pnpm
-      - name: Install Zig
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: ${{ env.ZIG_VERSION }}
-          cache-key: ubuntu-22.04-${{ env.ZIG_VERSION }}
       - name: Install dependencies
         run: |
-          pnpm install --frozen-lockfile
+          pnpm install --frozen-lockfile --ignore-scripts
+      - name: Download qualified artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: bindings-artifacts
+          path: artifacts
       - name: Set dev version
         run: |
           PACKAGE_VERSION=$(node -p "require('./package.json').version")
@@ -48,9 +47,8 @@ jobs:
           npm pkg set version="$VERSION"
 
           echo "Publishing @chainsafe/lodestar-z@$VERSION"
-      - name: Build and publish to npm
+      - name: Publish to npm
         run: |
-          pnpm zapi build-artifacts --optimize ReleaseSafe
           pnpm zapi prepublish
           node scripts/lodestar_package.mjs notices --package-dir .
           rm -rf zig-out/lib

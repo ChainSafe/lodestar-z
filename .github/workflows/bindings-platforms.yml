@@ -1,0 +1,106 @@
+name: Bindings platforms
+
+# Builds the ReleaseSafe addon for every zapi target in package.json, then installs each target's packed packages
+# into a consumer on that platform and runs the load probe and the lifecycle and worker fixtures there. Release
+# publishing publishes these qualified artifacts.
+on:
+  workflow_call:
+
+env:
+  ZIG_VERSION: "0.16.0"
+  NODE_VERSION: "24"
+
+jobs:
+  build:
+    name: build artifacts
+    # The release image. See the image pin in publish-bindings.yml.
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - name: Setup Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          cache-key: ubuntu-22.04-${{ env.ZIG_VERSION }}
+      - name: Install Rust targets
+        run: |
+          rustup target add aarch64-apple-darwin aarch64-unknown-linux-gnu aarch64-unknown-linux-musl \
+            x86_64-apple-darwin x86_64-unknown-linux-gnu x86_64-unknown-linux-musl
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build release artifacts
+        run: scripts/zig-cross.sh pnpm zapi build-artifacts --optimize ReleaseSafe
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bindings-artifacts
+          path: artifacts/*/bindings.node
+          if-no-files-found: error
+          retention-days: 7
+
+  qualify:
+    name: qualify ${{ matrix.target }}
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Debian 11's glibc 2.31 is the floor Zig links the glibc targets against.
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+            image: node:24-bullseye-slim@sha256:f7818cba7c85740e6f9dd31553636131d01e9992fb7d112b9b0893afd884d1d6
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            image: node:24-bullseye-slim@sha256:f7818cba7c85740e6f9dd31553636131d01e9992fb7d112b9b0893afd884d1d6
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+            image: node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            image: node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - target: aarch64-apple-darwin
+            runner: macos-15
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - name: Setup Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Download release artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: bindings-artifacts
+          path: artifacts
+      - name: Install the packed packages and run the lifecycle fixtures
+        if: matrix.image == ''
+        run: node scripts/check_network_package.mjs --lifecycle
+      - name: Install the packed packages for the container
+        if: matrix.image != ''
+        run: node scripts/check_network_package.mjs --lifecycle --target ${{ matrix.target }} --consumer "$RUNNER_TEMP/consumer"
+      - name: Run the lifecycle fixtures in the container
+        if: matrix.image != ''
+        run: |
+          docker run --rm --init -v "$RUNNER_TEMP/consumer:/consumer" -w /consumer "${{ matrix.image }}" \
+            node bindings/test/fixtures/network-package.mjs --lifecycle

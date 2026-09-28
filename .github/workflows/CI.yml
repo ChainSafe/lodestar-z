@@ -604,38 +604,11 @@ jobs:
         run: |
           pnpm test
 
-  bindings-artifacts:
-    name: bindings - build artifacts
-    # Runs the exact multi-target build the Release workflow publishes
-    # (see publish-bindings.yml), so cross-compile breakage is caught
-    # pre-merge instead of after a release tag already exists.
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-      - name: Setup pnpm
-        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
-      - name: Setup Node.js
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: pnpm
-      - name: Install Zig
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: ${{ env.ZIG_VERSION }}
-          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
-      - name: Install dependencies
-        run: |
-          pnpm install --frozen-lockfile
-      - name: Build release artifacts
-        run: |
-          pnpm zapi build-artifacts --optimize ReleaseSafe
-      - name: Install the packed release packages and run a native lifecycle
-        run: |
-          expected=zig_std
-          if grep -qw sha_ni /proc/cpuinfo && grep -qw avx2 /proc/cpuinfo; then expected=x86_sha_avx2; fi
-          LODESTAR_Z_EXPECT_GOSSIP_SHA256=$expected node scripts/check_network_package.mjs
+  bindings-platforms:
+    name: bindings - platforms
+    # Runs the exact multi-target build the Release workflow publishes (see publish-bindings.yml) and qualifies each
+    # target on its platform, so breakage is caught pre-merge instead of after a release tag already exists.
+    uses: ./.github/workflows/bindings-platforms.yml
 
   # metrics_stf depends on httpz, which is temporarily disabled for Zig 0.16 migration
   # build-examples:
