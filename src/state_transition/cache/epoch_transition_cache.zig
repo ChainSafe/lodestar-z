@@ -238,6 +238,8 @@ pub fn deinitReusedEpochTransitionCache(io: std.Io) void {
 /// `init` through `deinit` and exclude `deinitReusedEpochTransitionCache` throughout.
 /// The internal lock protects acquisition and resizing, not the borrowed lifetime.
 pub const EpochTransitionCache = struct {
+    /// Allocator used for cache-owned lists.
+    allocator: Allocator,
     prev_epoch: Epoch,
     current_epoch: Epoch,
     total_active_stake_by_increment: u64,
@@ -587,6 +589,7 @@ pub const EpochTransitionCache = struct {
         try reused_cache.slashing_penalties.resize(reused_cache.allocator, indices_to_slash.items.len);
 
         return .{
+            .allocator = allocator,
             .prev_epoch = prev_epoch,
             .current_epoch = current_epoch,
             .total_active_stake_by_increment = total_active_stake_by_increment,
@@ -632,7 +635,7 @@ pub const EpochTransitionCache = struct {
         return job.join();
     }
 
-    pub fn deinit(self: *EpochTransitionCache, allocator: Allocator) void {
+    pub fn deinit(self: *EpochTransitionCache) void {
         if (self.next_shuffling) |next_shuffling| next_shuffling.unref();
         if (self.shuffling_job) |*job| job.cancel();
         // no need to deinit proposer_indices and inclusion_delays as they are from reused_cache
@@ -641,13 +644,13 @@ pub const EpochTransitionCache = struct {
         // self.is_active_prev_epoch.deinit();
         // self.is_active_curr_epoch.deinit();
         // self.is_active_next_epoch.deinit();
-        self.indices_to_slash.deinit(allocator);
-        self.indices_eligible_for_activation_queue.deinit(allocator);
-        self.indices_eligible_for_activation.deinit(allocator);
-        self.indices_to_eject.deinit(allocator);
+        self.indices_to_slash.deinit(self.allocator);
+        self.indices_eligible_for_activation_queue.deinit(self.allocator);
+        self.indices_eligible_for_activation.deinit(self.allocator);
+        self.indices_to_eject.deinit(self.allocator);
         // rewards and penalties are from reused_cache
         if (self.balances) |*balances| {
-            balances.deinit(allocator);
+            balances.deinit(self.allocator);
         }
     }
 };

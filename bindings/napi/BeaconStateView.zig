@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const napi = @import("zapi:zapi").napi;
 const js = @import("zapi:zapi").js;
 const c = @import("config");
@@ -21,7 +22,7 @@ const validator_monitor = @import("./validator_monitor.zig");
 
 /// Allocator used for all BeaconStateView instances.
 var gpa: std.heap.DebugAllocator(.{}) = .init;
-const allocator = gpa.allocator();
+const allocator = if (builtin.mode == .Debug) gpa.allocator() else std.heap.c_allocator;
 
 pub const js_meta = js.class(.{ .properties = .{
     .slot = js.prop(.{ .get = true, .set = false }),
