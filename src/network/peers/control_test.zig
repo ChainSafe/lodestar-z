@@ -3,22 +3,25 @@ const t = @import("types.zig");
 const w = @import("../control_wire.zig");
 const Catalog = @import("catalog.zig").Catalog;
 const Control = @import("control.zig").Control;
+const ControlProtocol = @import("../control_protocol.zig").ControlProtocol;
 const relevance = @import("control.zig").relevance;
 
 test "control repeated Status intent preserves the first due time" {
-    var control = try Control.init(std.testing.allocator, .{}, 2, 2, 1);
+    var control = try Control.init(std.testing.allocator, .{}, 2);
     defer control.deinit(std.testing.allocator);
+    var requests = try ControlProtocol.init(std.testing.allocator, 2, 2, 1);
+    defer requests.deinit(std.testing.allocator);
     var catalog = try Catalog.init(std.testing.allocator, .{ .capacity = 2, .outbound_reserve = 0, .target_peers = 2, .max_peers = 2, .min_outbound = 0 }, 2, 0);
     defer catalog.deinit(std.testing.allocator);
     const first: t.PeerRef = .{ .index = 0, .generation = 1 };
     const second: t.PeerRef = .{ .index = 1, .generation = 1 };
     const first_conn: t.Handle = .{ .index = 0, .generation = 1 };
     const second_conn: t.Handle = .{ .index = 1, .generation = 1 };
-    control.connected(&catalog, first, first_conn, .outbound, .{ .mono_ms = 10, .unix_s = 0 });
-    control.connected(&catalog, second, second_conn, .inbound, .{ .mono_ms = 10, .unix_s = 0 });
+    control.connected(&catalog, &requests, first, first_conn, .outbound, .{ .mono_ms = 10, .unix_s = 0 });
+    control.connected(&catalog, &requests, second, second_conn, .inbound, .{ .mono_ms = 10, .unix_s = 0 });
     for ([_]u64{ 20, 30, 40 }) |now| {
-        control.reStatusPeers(&catalog, .{ .mono_ms = now, .unix_s = 0 });
-        try std.testing.expect(control.reStatusPeer(&catalog, second, second_conn, .{ .mono_ms = now, .unix_s = 0 }));
+        control.reStatusPeers(&catalog, &requests, .{ .mono_ms = now, .unix_s = 0 });
+        try std.testing.expect(control.reStatusPeer(&catalog, &requests, second, second_conn, .{ .mono_ms = now, .unix_s = 0 }));
         try std.testing.expectEqual(@as(u64, 10), control.schedules[0].status_due_ms);
         try std.testing.expectEqual(@as(u64, 20), control.schedules[1].status_due_ms);
     }

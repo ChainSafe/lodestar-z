@@ -55,11 +55,11 @@ const MaintenancePeers = struct {
             initialized += 1;
         }
         const hub = &nodes[0];
-        errdefer |err| std.debug.print("maintenance bootstrap failed: {t}, peers={any}, operations={any}, requests={any}\n", .{ err, hub.peerCounts(), hub.peer_manager.control.operationsInFlight(), hub.service.reqresp.active() });
+        errdefer |err| std.debug.print("maintenance bootstrap failed: {t}, peers={any}, operations={any}, requests={any}\n", .{ err, hub.peerCounts(), hub.peer_manager.control_protocol.operationsInFlight(), hub.service.reqresp.active() });
         for (nodes[1..]) |*remote| try hub.connectUntil(&remote.peerId(), &.{remote.transport.localAddress()}, hub.last_now, hub.last_now.mono_ms +| @import("peers/dialing.zig").connect_timeout_ms);
         for (0..3000) |_| {
             try step(&.{ &nodes[0], &nodes[1], &nodes[2], &nodes[3] });
-            if (hub.peerCounts().relevant != 3 or hub.peer_manager.control.operationsInFlight() != 0) continue;
+            if (hub.peerCounts().relevant != 3 or hub.peer_manager.control_protocol.operationsInFlight() != 0) continue;
             var snapshots: [4]t.Snapshot = undefined;
             const count = hub.peer_manager.snapshots(&snapshots);
             var metadata = true;
@@ -104,7 +104,7 @@ test "managed maintenance isolates slow peers and full application capacity" {
     var fixture = try MaintenancePeers.init();
     defer fixture.deinit();
     const hub = &fixture.nodes[0];
-    errdefer |err| std.debug.print("maintenance isolation failed: {t}, peers={any}, operations={any}, requests={any}\n", .{ err, hub.peerCounts(), hub.peer_manager.control.operationsInFlight(), hub.service.reqresp.active() });
+    errdefer |err| std.debug.print("maintenance isolation failed: {t}, peers={any}, operations={any}, requests={any}\n", .{ err, hub.peerCounts(), hub.peer_manager.control_protocol.operationsInFlight(), hub.service.reqresp.active() });
     const healthy = &fixture.nodes[3];
     const slow = hub.peer_manager.catalog.find(&fixture.nodes[1].peerId()).?;
     const healthy_peer = hub.peer_manager.catalog.find(&healthy.peerId()).?;
@@ -126,17 +126,17 @@ test "managed maintenance isolates slow peers and full application capacity" {
     const control = &hub.peer_manager.control;
     const started = control.counters.started;
     for (0..3) |turn| {
-        control.maintain(&hub.service, &hub.peer_manager.catalog, &hub.transport.engine, &hub.peer_manager.local, hub.last_now);
+        hub.peer_manager.maintainControl(&hub.service, &hub.transport.engine, hub.last_now);
         try std.testing.expectEqual(started + turn + 1, control.counters.started);
     }
-    try std.testing.expectEqual(@as(usize, 3), control.operationsInFlight());
+    try std.testing.expectEqual(@as(usize, 3), hub.peer_manager.control_protocol.operationsInFlight());
     for (0..1000) |_| {
         try MaintenancePeers.step(&.{ hub, healthy });
         const snapshot = hub.peer_manager.catalog.get(healthy_peer).?;
-        if (snapshot.status.?.head_slot == 42 and control.operationsInFlight() == 2) break;
+        if (snapshot.status.?.head_slot == 42 and hub.peer_manager.control_protocol.operationsInFlight() == 2) break;
     }
     try std.testing.expectEqual(@as(u64, 42), hub.peer_manager.catalog.get(healthy_peer).?.status.?.head_slot);
-    try std.testing.expectEqual(@as(usize, 2), control.operationsInFlight());
+    try std.testing.expectEqual(@as(usize, 2), hub.peer_manager.control_protocol.operationsInFlight());
     try std.testing.expectEqual(@as(u16, 2), hub.service.reqresp.outboundApplicationCount(conn));
     try std.testing.expectEqual(calls, hub.reservations.allocation_calls);
 }
@@ -1362,7 +1362,7 @@ test "managed runtime targeted Status serves two current schedules and immediate
         }
         const count = a.peer_manager.snapshots(&rows);
         if (count == 2 and a.peerCounts().relevant == 2 and rows[0].identify != null and rows[1].identify != null and
-            a.peer_manager.control.operationsInFlight() == 0)
+            a.peer_manager.control_protocol.operationsInFlight() == 0)
         {
             ready = true;
             break;
@@ -1374,7 +1374,7 @@ test "managed runtime targeted Status serves two current schedules and immediate
     const other = rows[1];
     const now = try @import("transport.zig").currentTime(std.testing.io);
     a.peer_manager.control.schedules[other.peer.index].status_due_ms = now.mono_ms;
-    a.peer_manager.control.reschedule(&a.peer_manager.catalog, other.peer);
+    a.peer_manager.control.reschedule(&a.peer_manager.catalog, &a.peer_manager.control_protocol, other.peer);
     const unselected = a.peer_manager.control.schedules[other.peer.index];
     const before = a.peer_manager.control.schedules[selected.peer.index];
     try std.testing.expect(a.reStatusPeer(&selected.identity, now));
@@ -1385,7 +1385,7 @@ test "managed runtime targeted Status serves two current schedules and immediate
     const result = a.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms));
     if (result.failure) |err| return err;
     var status_started: usize = 0;
-    for (a.peer_manager.control.operations) |op| if (op.request != null and op.protocol == .status_v1) {
+    for (a.peer_manager.control_protocol.operations) |op| if (op.request != null and op.protocol == .status_v1) {
         status_started += 1;
     };
     try std.testing.expectEqual(@as(usize, 2), status_started);

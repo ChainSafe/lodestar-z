@@ -79,17 +79,9 @@ pub fn process(
             }
         }
     }
-    self.control.identifyResults(&self.catalog, identify_results[0..counts.identify]);
-    self.control.events(
-        service,
-        &self.catalog,
-        engine,
-        &self.local,
-        now,
-        slot,
-        controls[0..counts.control],
-    );
-    self.control.maintain(service, &self.catalog, engine, &self.local, now);
+    self.control.identifyResults(&self.catalog, &self.control_protocol, identify_results[0..counts.identify]);
+    self.controlEvents(service, engine, now, slot, controls[0..counts.control]);
+    self.maintainControl(service, engine, now);
     if (self.quiescing) return .{ .peers = self.catalog.pollEvents(peer_events), .application = counts.application };
     var budget: u16 = custody.hashes_per_turn;
     self.custody_pending = self.catalog.advanceCustody(&self.local.fork, now.mono_ms, self.metadata_freshness_ms, &budget);
@@ -115,11 +107,11 @@ pub fn collectWakeups(
     if (self.stopped) return;
     if (self.quiescing) {
         service.collectWakeups(now, .{ .application = 0, .control = controls_per_turn, .identify = identify_per_turn }, wakeups);
-        wakeups.note(.control, self.control.nextWakeup(&self.catalog, now));
+        wakeups.note(.control, self.control.nextWakeup(&self.catalog, &self.control_protocol, now));
         return;
     }
     service.collectWakeups(now, .{ .application = application_capacity, .control = controls_per_turn, .identify = identify_per_turn }, wakeups);
-    wakeups.note(.control, self.control.nextWakeup(&self.catalog, now));
+    wakeups.note(.control, self.control.nextWakeup(&self.catalog, &self.control_protocol, now));
     wakeups.note(.dial, self.dialing.nextWakeup(&self.catalog, now.mono_ms, @min(dial_capacity, self.dialRoom())));
     wakeups.note(.dial, if (self.dialing.selectionNeeded(&self.catalog)) now.mono_ms else null);
     wakeups.note(.dial, self.dialing.selection_deadline);
@@ -172,15 +164,7 @@ pub fn shutdown(self: *PeerManager, service: *service_mod.Service, engine: *engi
     service.shutdown(engine);
     const count = self.catalog.snapshots(self.snapshot_scratch);
     for (self.snapshot_scratch[0..count]) |snapshot| if (snapshot.connection) |conn| {
-        self.control.close(
-            service,
-            &self.catalog,
-            engine,
-            snapshot.peer,
-            conn,
-            .shutdown,
-            now,
-        );
+        self.closeConnection(service, engine, snapshot.peer, conn, .shutdown, now);
     };
     self.dialing.shutdown(&self.catalog, engine);
 }
