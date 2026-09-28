@@ -164,19 +164,19 @@ export function parseNotices(source) {
  */
 export function expectedNotices(record) {
   const notices = [];
-  const walk = (entries, prefix, addon) => {
-    for (const entry of entries) {
-      const path = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
-      const inAddon = addon || entry.use === "addon";
-      if (!inAddon) continue;
-      if (entry.reviewed.contributes === "code") {
-        const file = entry.reviewed.licenseFile === null ? null : {hash: entry.hash, path: entry.reviewed.licenseFile};
-        notices.push({file: file === null ? null : {...file, kind: "zig-package"}, id: `zig:${path}`});
-      }
-      walk(entry.dependencies ?? [], path, true);
+  // Packages below an addon dependency are compiled into the addon too.
+  const queue = record.zig.dependencies
+    .filter((entry) => entry.use === "addon")
+    .map((entry) => ({entry, path: entry.name}));
+  for (let index = 0; index < queue.length; index++) {
+    if (index >= MAX_ZIG_PACKAGES) throw Error("Zig package bound");
+    const {entry, path} = queue[index];
+    if (entry.reviewed.contributes === "code") {
+      const file = entry.reviewed.licenseFile === null ? null : {hash: entry.hash, path: entry.reviewed.licenseFile};
+      notices.push({file: file === null ? null : {...file, kind: "zig-package"}, id: `zig:${path}`});
     }
-  };
-  walk(record.zig.dependencies, "", false);
+    for (const child of entry.dependencies ?? []) queue.push({entry: child, path: `${path}/${child.name}`});
+  }
   const crateHash = cargoCrate(record)?.hash;
   for (const vendored of record.cargo.vendored) {
     const file = {hash: crateHash, kind: "zig-package", path: vendored.reviewed.licenseFile};
@@ -320,7 +320,7 @@ export async function checkProvenance(root, record, {requireFetched = false} = {
   const summary = {
     cargo: "unfetched",
     direct: 0,
-    notices: {reproduced: 0, reviewed: 0, sections: 0},
+    notices: {comparedWordForWord: 0, reviewedWithoutSource: [], sections: 0, sourceUnavailable: []},
     npm: 0,
     transitive: {unfetched: 0, verified: 0},
   };
@@ -432,13 +432,18 @@ export async function checkProvenance(root, record, {requireFetched = false} = {
       summary.notices.sections++;
       const base =
         notice.file?.kind === "zig-package" ? join(root, "zig-pkg", notice.file.hash) : roots?.[notice.file?.kind];
-      const text = notice.file === null || base == null ? null : await readOptional(join(base, notice.file.path));
+      // Only a located source is compared; the rest are accepted by review and listed apart, never counted as compared.
+      if (notice.file === null) {
+        summary.notices.reviewedWithoutSource.push(notice.id);
+        continue;
+      }
+      const text = base == null ? null : await readOptional(join(base, notice.file.path));
       if (text === null) {
-        summary.notices.reviewed++;
+        summary.notices.sourceUnavailable.push(notice.id);
         continue;
       }
       if (!body.includes(normalizeText(text))) report("NoticeText", `${notice.id}: ${notice.file.path}`);
-      else summary.notices.reproduced++;
+      else summary.notices.comparedWordForWord++;
     }
     if (roots !== null) {
       const zig = await command("zig", ["version"], root);

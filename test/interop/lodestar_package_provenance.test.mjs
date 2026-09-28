@@ -137,7 +137,9 @@ test("the checked-in record matches the tree", async () => {
   assert.deepEqual(result.errors, []);
   assert.equal(result.summary.direct, 10);
   assert.equal(result.summary.npm, 1);
-  assert.equal(result.summary.notices.sections, expectedNotices(record).length);
+  const {comparedWordForWord, reviewedWithoutSource, sections, sourceUnavailable} = result.summary.notices;
+  assert.equal(sections, expectedNotices(record).length);
+  assert.equal(comparedWordForWord + reviewedWithoutSource.length + sourceUnavailable.length, sections);
 });
 
 test("record drift from the tree fails with the disagreeing fact", async () => {
@@ -191,7 +193,20 @@ test("fetched packages verify transitive pins, the resolved crate closure and re
   const result = await checkProvenance(root, record, {requireFetched: true});
   assert.deepEqual(result.errors, []);
   assert.deepEqual(result.summary.transitive, {unfetched: 0, verified: 15});
-  assert(result.summary.notices.reproduced > 0);
+  const {comparedWordForWord, reviewedWithoutSource} = result.summary.notices;
+  assert(comparedWordForWord > 0);
+  const unnamed = expectedNotices(record).filter((notice) => notice.file === null);
+  assert.deepEqual(
+    reviewedWithoutSource,
+    unnamed.map((notice) => notice.id)
+  );
+  // A source the record names but the checker cannot read is listed as unavailable, not compared or reviewed.
+  const missing = structuredClone(record);
+  Object.assign(missing.cargo.crates.find((c) => c.name === "bytes").reviewed, {notice: "MISSING"});
+  const unavailable = await checkProvenance(root, missing);
+  assert.deepEqual(unavailable.errors, []);
+  assert(unavailable.summary.notices.sourceUnavailable.includes("crate:bytes@1.11.1"));
+  assert.equal(unavailable.summary.notices.comparedWordForWord, comparedWordForWord - 1);
   const cases = [
     ["CargoLockfile", (r) => Object.assign(r.cargo, {lockfileSha256: "0".repeat(64)})],
     [
