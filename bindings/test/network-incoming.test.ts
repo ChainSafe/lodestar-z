@@ -387,6 +387,19 @@ async function incomingCompleted(runtime: NativeNetworkApplicationRuntime): Prom
   throw Error("No incoming completion arrived");
 }
 
+/** Reproducible bytes that snappy cannot compress, so their frame stays as large as they are. */
+function incompressible(length: number, seed: number): Uint8Array {
+  const data = new Uint8Array(length);
+  let state = seed;
+  for (let i = 0; i < length; i++) {
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    data[i] = state & 0xff;
+  }
+  return data;
+}
+
 /** Records the order in which a stream's close and its pending call settle. */
 function settlementOrder(closed: Promise<void>, pending: Promise<unknown>) {
   const order: string[] = [];
@@ -454,14 +467,15 @@ test("a response held in native borrow while its stream is cancelled and the net
   const pair = await incomingPair();
   try {
     // Two roots allow two chunks. The client's host holds the first, so the client reads no further, and the second,
-    // larger than the client's stream window, stays borrowed by the server's write.
+    // incompressible and larger than the client's stream window, stays borrowed by the server's write until the
+    // client pulls again, which it never does.
     expect((await pair.left.diagnostics()).quicStreamWindowBytes).toBeLessThan(10 * 1024 * 1024);
     const stream = pair.left.request(pair.remote.peerId, BLOCKS, new Uint8Array(64));
     const first = stream.next();
     const incoming = await takeIncoming(pair.right);
     await incoming.respond(new Uint8Array(4000).fill(1), requestForks[0]);
     expect((await first).done).toBe(false);
-    const held = incoming.respond(new Uint8Array(10 * 1024 * 1024), requestForks[0]);
+    const held = incoming.respond(incompressible(10 * 1024 * 1024, 71), requestForks[0]);
     const order = settlementOrder(incoming.closed, held);
     // Each command runs in a later owner turn than the one before it, so the second follows the turn that started the
     // write.
