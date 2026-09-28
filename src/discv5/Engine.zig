@@ -16,6 +16,7 @@ pub const Error = CallTable.Error || Channel.Error || RoutingTable.Error ||
     ResponsePlan.Error || error{
     ApplicationResponseRequired,
     ClockOverflow,
+    DestinationUnreachable,
     MissingCall,
     SessionRequired,
     UnexpectedChallenge,
@@ -77,6 +78,9 @@ pub const Failed = struct {
 
 pub const Accepted = struct {
     packet_length: u16 = 0,
+    /// The call whose handshake the packet carries. A host that cannot send it fails the call
+    /// with `failCall`.
+    call: ?CallTable.Handle = null,
     event: Event = .none,
 };
 
@@ -378,6 +382,14 @@ pub fn cancelCall(self: *Engine, handle: CallTable.Handle) bool {
     return self.calls.cancel(handle);
 }
 
+/// Cancels a live call that cannot proceed and reports the failure to its owner.
+pub fn failCall(self: *Engine, handle: CallTable.Handle, reason: Error) Event {
+    const peer = self.calls.endpoint(handle) orelse unreachable;
+    const cancelled = self.calls.cancel(handle);
+    std.debug.assert(cancelled);
+    return .{ .failed = .{ .handle = handle, .peer = peer, .reason = reason } };
+}
+
 pub fn confirmPeer(
     self: *Engine,
     peer: *const types.Endpoint,
@@ -461,15 +473,9 @@ fn recoverCall(
     )) orelse return Error.UnexpectedChallenge;
     const peer = self.calls.endpoint(handle) orelse unreachable;
     const packet_length = self.recoverAcceptedCall(out, handle, peer, whoareyou, args) catch |err| {
-        const cancelled = self.calls.cancel(handle);
-        std.debug.assert(cancelled);
-        return .{ .accepted = .{ .event = .{ .failed = .{
-            .handle = handle,
-            .peer = peer,
-            .reason = err,
-        } } } };
+        return .{ .accepted = .{ .event = self.failCall(handle, err) } };
     };
-    return .{ .accepted = .{ .packet_length = packet_length } };
+    return .{ .accepted = .{ .packet_length = packet_length, .call = handle } };
 }
 
 fn recoverAcceptedCall(
