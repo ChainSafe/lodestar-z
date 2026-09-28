@@ -101,7 +101,7 @@ test "EpochTransitionCache.beforeProcessEpoch" {
     deinitReusedEpochTransitionCache(std.testing.io);
 }
 
-test "memory_safety: borrowed scratch growth stays with the owner across sequential callers" {
+test "memory_safety: fixed compounding flag tail does not allocate for sequential callers" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 200_000 });
     defer pool.deinit();
@@ -129,16 +129,14 @@ test "memory_safety: borrowed scratch growth stays with the owner across sequent
     );
     defer cache.deinit();
 
-    const scratch = cache.is_compounding_validator_arr;
-    const owner_is_not_caller = scratch.owner_allocator.ptr != second_caller.allocator().ptr;
-    try std.testing.expect(owner_is_not_caller);
-
-    const grown_len = scratch.array.capacity + 1;
+    const initial_validator_count = try test_state.cached_state.state.validatorsCount();
     const bytes_before = second_caller.allocated_bytes;
-    while (scratch.items().len < grown_len) {
-        try scratch.append(true);
+    for (0..preset.MAX_PENDING_DEPOSITS_PER_EPOCH) |i| {
+        cache.appendCompoundingValidatorFlag(i % 2 == 0);
     }
 
     try std.testing.expectEqual(bytes_before, second_caller.allocated_bytes);
-    try std.testing.expectEqual(grown_len, scratch.items().len);
+    for (0..preset.MAX_PENDING_DEPOSITS_PER_EPOCH) |i| {
+        try std.testing.expectEqual(i % 2 == 0, cache.isCompoundingValidator(initial_validator_count + i));
+    }
 }
