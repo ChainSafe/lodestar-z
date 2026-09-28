@@ -349,7 +349,7 @@ fn initOwner(node: *runtime.NetworkCore) !void {
     try node.init(std.testing.allocator, std.testing.io, &resolved, .{
         .host = &key,
         .bind = .{ .ip4 = .loopback(0) },
-        .local = @import("managed_test_support.zig").localState(.{}),
+        .local = @import("network_core_test_support.zig").localState(.{}),
         .slot = 100,
     });
 }

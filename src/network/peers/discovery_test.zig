@@ -613,8 +613,8 @@ fn handoff(candidate: *const adapter.Candidate) !void {
     var pair = support.Pair{};
     try pair.init(.{ .connections_max = 4, .handshaking_max = 4, .handshaking_per_source_max = 4, .dialing_max = 2 }, .{ .connections_max = 4, .handshaking_max = 4, .handshaking_per_source_max = 4, .dialing_max = 2 });
     defer pair.deinit();
-    const opts = @import("../managed_test_support.zig").options();
-    const local = @import("../managed_test_support.zig").localState(.{ .fork = context, .status = .{ .fork_digest = context.digest } });
+    const opts = @import("../network_core_test_support.zig").options().core;
+    const local = @import("../network_core_test_support.zig").localState(.{ .fork = context, .status = .{ .fork_digest = context.digest } });
     var service = try @import("../service.zig").Service.init(std.testing.allocator, core_mod.serviceOptions(opts, &local));
     defer service.deinit();
     var core = try core_mod.PeerManager.init(std.testing.allocator, &pair.client_ctx.local_peer_id, &local, core_mod.peerOptions(opts), &service, pair.client.limits.connections_max);

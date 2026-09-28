@@ -358,10 +358,10 @@ pub const NetworkOptions = struct {
     startup: @import("network_core.zig").Startup,
 };
 
-/// The managed harness request resolved for a NetworkCore on loopback.
+/// The owner harness request resolved for a NetworkCore on loopback.
 pub fn networkOptions(key: *const keys.KeyPair) NetworkOptions {
-    const managed_support = @import("managed_test_support.zig");
-    var request = managed_support.request();
+    const owner_support = @import("network_core_test_support.zig");
+    var request = owner_support.request();
     request.forks = &.{
         .{ .digest = @splat(0), .fork = .phase0 },
         .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu },
@@ -376,7 +376,7 @@ pub fn networkOptions(key: *const keys.KeyPair) NetworkOptions {
         .startup = .{
             .host = key,
             .bind = .{ .ip4 = .loopback(0) },
-            .local = managed_support.localState(.{}),
+            .local = owner_support.localState(.{}),
             .slot = 100,
         },
     };
