@@ -1,12 +1,13 @@
 const std = @import("std");
 const ssz = @import("ssz");
 const napi = @import("zapi:zapi").napi;
+const js = @import("zapi:zapi").js;
 const constants = @import("constants");
+const js_types = @import("js_types.zig");
 
 pub fn sszValueToNapiValue(env: napi.Env, comptime ST: type, value: *const ST.Type) !napi.Value {
     switch (ST.kind) {
         .uint => {
-            if (comptime ST.is_bigint) return env.createBigintUint64(value.*);
             if (ST.Type == u64 and value.* == constants.FAR_FUTURE_EPOCH) {
                 return try (try env.getGlobal()).getNamedProperty("Infinity");
             }
@@ -61,10 +62,18 @@ pub fn sszValueToNapiValue(env: napi.Env, comptime ST: type, value: *const ST.Ty
             return try bitArrayToNapiValue(env, value.data.items, value.bit_len);
         },
         .container, .progressive_container => {
+            const JsFields = comptime js_types.fieldsForSsz(ST);
             const obj = try env.createObject();
             inline for (ST.fields) |field| {
+                const JsField = if (JsFields) |Fields|
+                    @FieldType(Fields, snakeToCamel(field.name))
+                else
+                    void;
                 const field_value = &@field(value, field.name);
-                const napi_field_value = try sszValueToNapiValue(env, field.type, field_value);
+                const napi_field_value = if (comptime JsField == js.BigInt)
+                    try env.createBigintUint64(field_value.*)
+                else
+                    try sszValueToNapiValue(env, field.type, field_value);
                 try obj.setNamedProperty(snakeToCamel(field.name), napi_field_value);
             }
             return obj;

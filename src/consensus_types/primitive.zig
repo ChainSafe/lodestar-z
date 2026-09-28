@@ -12,7 +12,6 @@ pub const Uint8 = ssz.UintType(8);
 pub const Uint16 = ssz.UintType(16);
 pub const Uint32 = ssz.UintType(32);
 pub const Uint64 = ssz.UintType(64);
-pub const BigUint64 = ssz.BigUint64Type();
 pub const Uint128 = ssz.UintType(128);
 pub const Uint256 = ssz.UintType(256);
 

@@ -1,5 +1,6 @@
 const js = @import("zapi:zapi").js;
 const napi = @import("zapi:zapi").napi;
+const ct = @import("consensus_types");
 
 pub fn wrap(comptime T: type, value: napi.Value) T {
     return .{ .val = value };
@@ -11,11 +12,17 @@ pub const Fork = js.Object(struct {
     epoch: js.Number,
 });
 
-pub const Eth1Data = js.Object(struct {
+pub const Eth1DataFields = struct {
     depositRoot: js.Uint8Array,
     depositCount: js.BigInt,
     blockHash: js.Uint8Array,
-});
+};
+
+pub const Eth1Data = js.Object(Eth1DataFields);
+
+pub fn fieldsForSsz(comptime ST: type) ?type {
+    return if (ST == ct.phase0.Eth1Data) Eth1DataFields else null;
+}
 
 pub const BeaconBlockHeader = js.Object(struct {
     slot: js.Number,
