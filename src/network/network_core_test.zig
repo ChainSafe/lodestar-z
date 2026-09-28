@@ -682,6 +682,33 @@ test "managed runtime socket faults preserve the other owner and local dial refu
     try std.testing.expectEqual(calls, node.reservations.allocation_calls);
 }
 
+test "core discovery drain is nonblocking under the standalone default interval" {
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{26}));
+    var opts = options(&key);
+    opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
+    var node: runtime.NetworkCore = undefined;
+    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
+    defer node.deinit(std.testing.io);
+    const standalone: d.Transport.Options = .{};
+    try std.testing.expectEqual(standalone.poll_interval_ms, node.discovery.?.transport.config.poll_interval_ms);
+    var faults: FaultIo = .{};
+    faults.init(std.testing.io);
+    defer faults.deinit();
+    const sender = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
+    defer sender.close(std.testing.io);
+    try sender.send(std.testing.io, &node.discovery.?.transport.sockets.primary().address, "invalid");
+    const now = try @import("transport.zig").currentTime(std.testing.io);
+    // The readable datagram keeps the drain going until a receive finds the socket empty.
+    const drained = node.step(faults.io(), now, .{}, .deadlineOnly(now.mono_ms));
+    try std.testing.expectEqual(@as(u16, 1), drained.discovery.datagrams);
+    const after_datagram = faults.receive_calls;
+    try std.testing.expect(after_datagram >= 2);
+    const idle = node.step(faults.io(), node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms));
+    try std.testing.expectEqual(@as(u16, 0), idle.discovery.datagrams);
+    try std.testing.expect(faults.receive_calls > after_datagram);
+    try std.testing.expectEqual(@as(i64, 0), faults.longest_wait_ms);
+}
+
 fn failureAndReplacement(a: *runtime.NetworkCore, b: *runtime.NetworkCore) !void {
     var snapshots: [4]t.Snapshot = undefined;
     const count = a.peer_manager.snapshots(&snapshots);
