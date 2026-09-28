@@ -147,8 +147,8 @@ pub const Peer = struct {
                     return;
                 }
                 if (r.protocol == .status_v2) {
-                    const remote = try network.peers.control_wire.decodeStatus(.status_v2, r.bytes);
-                    const local = try network.peers.control_wire.decodeStatus(.status_v2, &identify_status);
+                    const remote = try network.control_wire.decodeStatus(.status_v2, r.bytes);
+                    const local = try network.control_wire.decodeStatus(.status_v2, &identify_status);
                     if (!std.meta.eql(remote, local)) return error.InvalidStatus;
                     try self.service.reqresp.respond(r.request, &identify_status, null, self.now);
                     self.status_accepted = true;

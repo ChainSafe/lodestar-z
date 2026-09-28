@@ -1,6 +1,6 @@
 const std = @import("std");
 const t = @import("types.zig");
-const wire = @import("control_wire.zig");
+const wire = @import("../control_wire.zig");
 const Catalog = @import("catalog.zig").Catalog;
 const Service = @import("../service.zig").Service;
 const Engine = @import("../quic/engine.zig").Engine;
@@ -540,8 +540,7 @@ pub const Control = struct {
                 row.retry_ms = @min(row.transition_until_ms, now.mono_ms +| self.options.local_retry_ms);
             return;
         }
-        const relevance = wire.relevance(local, &status, slot);
-        if (relevance) |reason| {
+        if (relevance(local, &status, slot)) |reason| {
             _ = self.disconnect(catalog, peer, conn, reason, now);
             return;
         }
@@ -940,21 +939,24 @@ fn healthProbe(protocol: rr.Protocol) ?HealthProbe {
     };
 }
 
-test "control repeated Status intent preserves the first due time" {
-    var control = try Control.init(std.testing.allocator, .{}, 2, 2, 1);
-    defer control.deinit(std.testing.allocator);
-    var catalog = try Catalog.init(std.testing.allocator, .{ .capacity = 2, .outbound_reserve = 0, .target_peers = 2, .max_peers = 2, .min_outbound = 0 }, 2, 0);
-    defer catalog.deinit(std.testing.allocator);
-    const first: t.PeerRef = .{ .index = 0, .generation = 1 };
-    const second: t.PeerRef = .{ .index = 1, .generation = 1 };
-    const first_conn: t.Handle = .{ .index = 0, .generation = 1 };
-    const second_conn: t.Handle = .{ .index = 1, .generation = 1 };
-    control.connected(&catalog, first, first_conn, .outbound, .{ .mono_ms = 10, .unix_s = 0 });
-    control.connected(&catalog, second, second_conn, .inbound, .{ .mono_ms = 10, .unix_s = 0 });
-    for ([_]u64{ 20, 30, 40 }) |now| {
-        control.reStatusPeers(&catalog, .{ .mono_ms = now, .unix_s = 0 });
-        try std.testing.expect(control.reStatusPeer(&catalog, second, second_conn, .{ .mono_ms = now, .unix_s = 0 }));
-        try std.testing.expectEqual(@as(u64, 10), control.schedules[0].status_due_ms);
-        try std.testing.expectEqual(@as(u64, 20), control.schedules[1].status_due_ms);
-    }
+pub fn relevance(
+    local: *const t.LocalState,
+    remote: *const t.Status,
+    current_slot: u64,
+) ?t.DisconnectReason {
+    if (!std.mem.eql(u8, &remote.fork_digest, &local.fork.digest)) return .incompatible_fork;
+    if (remote.head_slot > current_slot +| 1) return .future_head;
+    if (local.fork.fork.gte(.fulu) and remote.earliest_available_slot == null)
+        return .missing_availability;
+    const zero: [32]u8 = @splat(0);
+    if (remote.finalized_epoch == local.status.finalized_epoch and
+        !std.mem.eql(u8, &remote.finalized_root, &zero) and
+        !std.mem.eql(u8, &local.status.finalized_root, &zero) and
+        !std.mem.eql(u8, &remote.finalized_root, &local.status.finalized_root))
+        return .finalized_mismatch;
+    return null;
+}
+
+test {
+    _ = @import("control_test.zig");
 }

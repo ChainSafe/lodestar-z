@@ -13,6 +13,7 @@ pub const network_core = @import("network_core.zig");
 pub const wake_sources = @import("wake_sources.zig");
 pub const NetworkCore = network_core.NetworkCore;
 pub const peers = @import("peers/root.zig");
+pub const control_wire = @import("control_wire.zig");
 pub const constants = @import("constants.zig");
 pub const types = @import("types.zig");
 pub const wire = @import("wire/root.zig");
@@ -51,6 +52,7 @@ test {
     _ = @import("chain.zig");
     _ = gossip_processor;
     _ = peers;
+    _ = control_wire;
     _ = constants;
     _ = types;
     _ = wire;

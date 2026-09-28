@@ -4,7 +4,7 @@ const std = @import("std");
 const localState = @import("managed_test_support.zig").localState;
 const Setup = @import("managed_test_support.zig").Setup;
 const t = @import("peers/types.zig");
-const wire = @import("peers/control_wire.zig");
+const wire = @import("control_wire.zig");
 const rr = @import("reqresp/root.zig");
 const Engine = @import("quic/engine.zig");
 

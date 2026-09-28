@@ -16,7 +16,7 @@ pub fn localState(overrides: t.LocalState) t.LocalState {
 
 pub fn updateLocal(manager: *managed.PeerManager, service: *@import("service.zig").Service, local: *const t.LocalState, now: @import("types.zig").Now) !void {
     var copied: t.LocalState = undefined;
-    try @import("peers/control_wire.zig").copyServingLocal(&copied, local, service.router.capabilities().receive);
+    try @import("control_wire.zig").copyServingLocal(&copied, local, service.router.capabilities().receive);
     manager.commitLocal(service, &copied, now);
 }
 

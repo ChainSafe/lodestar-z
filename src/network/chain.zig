@@ -118,7 +118,7 @@ pub const Plan = struct {
             result.schedule.next_epoch = next.epoch;
             result.schedule.next_digest = next.digest;
         }
-        try @import("peers/control_wire.zig").copyServingLocal(&result.local, &result.local, result.capabilities.receive);
+        try @import("control_wire.zig").copyServingLocal(&result.local, &result.local, result.capabilities.receive);
         return result;
     }
 };
