@@ -537,6 +537,22 @@ jobs:
           zig build network-corpus -Doptimize=ReleaseSafe -- "$generated"
           bash ./check-network-corpus.sh "$generated"
           NETWORK_GENERATED_CORPUS="$generated" ./smoke-network.sh
+      - name: Replay Debug harnesses that link Zig-built C and C++ archives
+        # Only Debug C code calls the UBSan runtime bundled into the snappy,
+        # blst and hashtree archives; ReleaseFast and ReleaseSafe link without it.
+        run: |
+          cd test/fuzz
+          out=$(mktemp -d)
+          zig build build-network_reqresp build-bls_public_key build-ssz_chunked_leaf_set --prefix "$out"
+          for target in network_reqresp bls_public_key ssz_chunked_leaf_set; do
+            count=0
+            for seed in corpus/"$target"-*/*; do
+              count=$((count + 1))
+              test "$count" -le 4096
+              __AFL_DEFER_FORKSRV=1 "$out/bin/fuzz-$target" < "$seed" >/dev/null
+            done
+            echo "$target: $count Debug seeds replayed"
+          done
 
   bindings-test:
     name: bindings - test
