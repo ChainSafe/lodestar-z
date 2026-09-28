@@ -142,11 +142,52 @@ test "peer dial outcomes count every retired attempt once and retries count each
     try std.testing.expect(q.dialStarted(try selectNext(&q, &catalog, &now), conn));
     accept(&q, &catalog, &peer, .{ .index = 1, .generation = 1 }, now);
     try std.testing.expect(q.dialClosed(&catalog, conn, .handshake_timeout, now));
-    for (q.outcomes) |count| try std.testing.expectEqual(@as(u64, 1), count);
+    for (q.outcomes, q.durations) |count, time| {
+        try std.testing.expectEqual(@as(u64, 1), count);
+        try std.testing.expectEqual(count, time.count);
+    }
     var selected: u64 = 0;
     for (q.selected_attempts) |count| selected += count;
     try std.testing.expectEqual(@as(u64, q.outcomes.len), selected);
     for (q.retries) |count| try std.testing.expectEqual(@as(u64, 1), count);
+}
+
+test "peer dial time samples each retired attempt once from its own selection" {
+    var q = try mod.Dialing.init(.{ .capacity = 2, .concurrent_max = 1, .seed = 4 });
+    var catalog = try initCatalog(a, q.options);
+    defer catalog.deinit(a);
+    const first: t.PeerId = .{ .bytes = @splat(1) };
+    const second: t.PeerId = .{ .bytes = @splat(2) };
+    try q.enqueueUntil(&catalog, &first, &.{address}, false, 0, 5_000);
+    var out: [1]mod.DialIntent = undefined;
+    try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 0, &out));
+    const deferred = out[0].token;
+    try std.testing.expect(q.dialDeferred(&catalog, deferred, 0));
+    try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 1_000, &out));
+    const connected = out[0].token;
+    try std.testing.expectEqual(deferred.index, connected.index);
+    try std.testing.expect(connected.generation != deferred.generation);
+    const conn: t.Handle = .{ .index = 0, .generation = 1 };
+    try std.testing.expect(!q.dialStarted(deferred, conn));
+    try std.testing.expect(q.dialStarted(connected, conn));
+    accept(&q, &catalog, &first, conn, 1_180);
+    accept(&q, &catalog, &first, conn, 1_250);
+    try std.testing.expect(!q.dialFailed(&catalog, connected, 1_250));
+    disconnect(&catalog, &first, 1_180, .transport_closed, 1_300);
+    // An unstarted manual attempt is cancelled when its intent lapses.
+    try q.enqueueUntil(&catalog, &second, &.{address}, false, 1_300, 4_300);
+    try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 1_300, &out));
+    try std.testing.expectEqual(connected.index, out[0].token.index);
+    q.expire(&catalog, null, 4_300);
+    _ = q.nextWakeup(&catalog, 4_300, 1);
+    for ([_]t.DialOutcome{ .deferred, .connected, .cancelled }, [_]u64{ 0, 180, 3_000 }, [_]usize{ 0, 4, 8 }) |outcome, elapsed, bucket| {
+        const time = &q.durations[@intFromEnum(outcome)];
+        try std.testing.expectEqual(@as(u64, 1), time.count);
+        try std.testing.expectEqual(@as(u128, elapsed), time.sum);
+        try std.testing.expectEqual(@as(u64, 1), time.buckets[bucket]);
+    }
+    for (q.outcomes, q.durations) |count, time| try std.testing.expectEqual(count, time.count);
+    try std.testing.expectEqual(@as(u64, 3), q.outcomes[@intFromEnum(t.DialOutcome.deferred)] + q.outcomes[@intFromEnum(t.DialOutcome.connected)] + q.outcomes[@intFromEnum(t.DialOutcome.cancelled)]);
 }
 
 test "peer dial custody diagnostics count unfinished derivations without mutating retained coverage" {
