@@ -324,11 +324,16 @@ pub const Engine = struct {
         return bytes;
     }
 
+    /// A connection whose final handshake flight may be unsent closes once a flush has sent it;
+    /// its timer is due at once so the next expire advances the deferred close.
     pub fn close(self: *Engine, conn: Handle, code: u64) bool {
         const slot = self.liveSlot(conn) catch return false;
         assert(slot.conn != null);
         assert(slot.close_reason == null);
-        slot.close(.host, code);
+        if (slot.flight_pending) {
+            slot.deferClose(.host, code);
+            self.registry.timers.set(conn.index, 0);
+        } else slot.close(.host, code);
         self.markDirty(conn.index);
         return true;
     }
@@ -895,7 +900,10 @@ pub const Engine = struct {
             self.refresh(index);
             return null;
         };
-        if (datagram == null) self.refresh(index);
+        if (datagram == null) {
+            slot.flight_pending = false;
+            self.refresh(index);
+        }
         return datagram;
     }
 
@@ -1186,6 +1194,7 @@ pub const Engine = struct {
         if (slot.state == .handshaking and slot.isEstablished()) {
             self.leaveHandshaking(slot);
             slot.state = .established;
+            slot.flight_pending = true;
             slot.learnPeerWindows();
             if (slot.handshake.peer_id) |id| {
                 assert(slot.peer_id == null);

@@ -299,10 +299,15 @@ test "core signed bootstrap reaches relevant peer with zero and one outputs" {
     a.shutdown(now);
     a.shutdown(now);
     b.shutdown(now);
-    for (0..100) |_| {
-        _ = a.step(std.testing.io, a.last_now, .{}, .deadlineOnly(a.last_now.mono_ms));
-        _ = b.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms));
+    // Closing needs only a datagram exchange, so the bound stays far below the QUIC timers (the
+    // 5 s handshake limit, the 10 s idle timeout) that would retire a connection whose close was lost.
+    var tick = now;
+    for (0..100_000) |_| {
         if (a.isClosed() and b.isClosed()) break;
+        if (tick.mono_ms -| now.mono_ms >= 1_000) break;
+        _ = a.step(std.testing.io, tick, .{}, .deadlineOnly(tick.mono_ms +| 1));
+        _ = b.step(std.testing.io, tick, .{}, .deadlineOnly(tick.mono_ms +| 1));
+        tick = try @import("transport.zig").currentTime(std.testing.io);
     }
     try std.testing.expect(a.isClosed());
     try std.testing.expect(b.isClosed());

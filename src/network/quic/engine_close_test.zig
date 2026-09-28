@@ -118,6 +118,47 @@ test "engine closes on peer id mismatch" {
     try std.testing.expectEqual(@as(u16, 0), pair.client.registry.handshaking);
 }
 
+test "engine delivers a close requested before the establishing flight leaves" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const start = pair.now;
+
+    // The first Initial draws a Retry, and the server's flight answering the retried Initial
+    // establishes the client before the client has sent its own flight.
+    const handle = try pair.dial();
+    try pair.flush(&pair.client);
+    try pair.flush(&pair.client);
+    pair.settle(&pair.server);
+    try pair.flush(&pair.server);
+    pair.settle(&pair.client);
+    var storage: [8]Event = undefined;
+    const connected = pair.events(&pair.client, &storage);
+    try std.testing.expectEqual(@as(usize, 1), connected.len);
+    try std.testing.expectEqual(handle, try expectConnected(connected[0], .outbound, &pair.server_ctx));
+    try std.testing.expect(pair.client.close(handle, 7));
+    try pair.pump();
+
+    const client_events = pair.events(&pair.client, &storage);
+    try std.testing.expectEqual(@as(usize, 1), client_events.len);
+    try std.testing.expectEqual(
+        engine_mod.CloseReason.host,
+        try expectClosed(client_events[0], handle, .outbound, &pair.server_ctx),
+    );
+    const server_events = pair.events(&pair.server, &storage);
+    try std.testing.expectEqual(@as(usize, 2), server_events.len);
+    const server_handle = try expectConnected(server_events[0], .inbound, &pair.client_ctx);
+    const reason = try expectClosed(server_events[1], server_handle, .inbound, &pair.client_ctx);
+    try std.testing.expect(reason.peer_closed.app);
+    try std.testing.expectEqual(@as(u64, 7), reason.peer_closed.code);
+    try std.testing.expectEqual(@as(usize, 0), pair.events(&pair.client, &storage).len);
+    try std.testing.expectEqual(@as(usize, 0), pair.events(&pair.server, &storage).len);
+    try std.testing.expectEqual(@as(usize, 0), pair.client.activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 0), pair.server.activeIndices().len);
+    // The virtual clock never moved, so no timer ended either side.
+    try std.testing.expectEqual(start, pair.now);
+}
+
 test "engine closes a dial the server never answers no later than the handshake timeout" {
     var pair: Pair = .{};
     try pair.init(.{ .handshake_timeout_ms = 100 }, .{});
