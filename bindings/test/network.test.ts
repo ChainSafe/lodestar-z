@@ -376,6 +376,22 @@ it.each([
   15000
 );
 
+it.each([
+  ["saturated-close", "saturated-closed"],
+  ["finalized-drain", "finalized-drained"],
+])(
+  "closes through the completion owner in the bounded %s subprocess lifecycle",
+  (mode, expected) => {
+    const output = execFileSync(
+      process.execPath,
+      ["--import", "tsx", "--expose-gc", "bindings/test/fixtures/network-lifecycle.mjs", mode],
+      {encoding: "utf8", timeout: 25000}
+    );
+    expect(output).toContain(expected);
+  },
+  30000
+);
+
 it("keeps queued records and closes after an ordinary callback exception", () => {
   const output = execFileSync(
     process.execPath,

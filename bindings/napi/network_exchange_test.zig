@@ -16,7 +16,7 @@ const Kind = n.gossip_processor.limits_mod.Kind;
 const limits_mod = n.gossip_processor.limits_mod;
 const State = n.gossip_processor.State;
 
-const Part = enum { peers, serving, checks, gossip, acknowledged, completions };
+const Part = enum { peers, serving, checks, gossip, acknowledged, completions, closed };
 
 /// Builds a summary instead of JS values, fails at one part or while finishing when asked, and records a
 /// contract failure's site instead of terminating. `during` runs where the build runs, as owner work racing phase C.
@@ -50,6 +50,7 @@ const Host = struct {
         request_count: usize = 0,
         incoming: [incoming.capacity_max]incoming.Completion = undefined,
         incoming_count: usize = 0,
+        closed: ?exchange.Closed = null,
         outcome: exchange.Outcome = .{},
     };
 
@@ -68,7 +69,8 @@ const Host = struct {
         if (self.failing(.gossip) and selection.gossip != null) return self.failure_error();
         if (self.failing(.acknowledged) and selection.acknowledged_count > 0) return self.failure_error();
         if (self.failing(.completions) and selection.publication_count + selection.command_count + selection.request_count + selection.incoming_count > 0) return self.failure_error();
-        return .{ .peers = selection.peer_count, .serving = selection.serving, .serving_count = selection.serving_count, .checks = selection.checks, .gossip = selection.gossip, .acknowledged = selection.acknowledged, .acknowledged_count = selection.acknowledged_count, .publications = selection.publications, .publication_count = selection.publication_count, .commands = selection.commands, .command_count = selection.command_count, .requests = selection.requests, .request_count = selection.request_count, .incoming = selection.incoming, .incoming_count = selection.incoming_count };
+        if (self.failing(.closed) and selection.closed != null) return self.failure_error();
+        return .{ .peers = selection.peer_count, .serving = selection.serving, .serving_count = selection.serving_count, .checks = selection.checks, .gossip = selection.gossip, .acknowledged = selection.acknowledged, .acknowledged_count = selection.acknowledged_count, .publications = selection.publications, .publication_count = selection.publication_count, .commands = selection.commands, .command_count = selection.command_count, .requests = selection.requests, .request_count = selection.request_count, .incoming = selection.incoming, .incoming_count = selection.incoming_count, .closed = selection.closed };
     }
     pub fn finish(self: *Host, output: Result, outcome: exchange.Outcome) !Result {
         if (self.fail_finish) return self.failure_error();
@@ -916,4 +918,38 @@ test "an acknowledgement and a close due together share one completion, and an e
     try std.testing.expectEqual(@as(usize, 1), closed.incoming_count);
     try std.testing.expect(closed.incoming[0].ack == null and closed.incoming[0].closed);
     try std.testing.expect(table.get(racing) == null);
+}
+
+test "the close result follows the last due completion alone, a stopped build keeps it for the next exchange, and a stopped finish leaves it delivered" {
+    var fixture: Fixture = undefined;
+    try fixture.init(false, 2);
+    defer fixture.deinit();
+    const runtime = &fixture.runtime;
+    _ = try completeCommand(runtime, .getIdentity);
+    runtime.lock();
+    runtime.stop = true;
+    runtime.failLocked(error.NetworkWakeFailed);
+    runtime.quiescent = true;
+    runtime.refreshLocked();
+    runtime.unlock();
+    var host: Host = .{ .runtime = runtime };
+    // The owner quiesced, but a completion is still due: it comes first, alone.
+    const completion = try host.turn(&.{}, control);
+    try std.testing.expect(completion.command_count == 1 and completion.closed == null and completion.outcome.more);
+    // JavaScript stops while the close result is built: nothing is delivered, and the next exchange takes it again.
+    host.fail = .closed;
+    try std.testing.expectError(error.PendingException, host.turn(&.{}, control));
+    try std.testing.expect(!runtime.close_delivered);
+    try std.testing.expectEqual(readiness.Place.control, runtime.readiness.place(.completions));
+    host.fail = null;
+    const closed = try host.turn(&.{}, control);
+    try std.testing.expectEqual(exchange.Closed{ .reason = .failed, .failure = error.NetworkWakeFailed }, closed.closed.?);
+    try std.testing.expect(runtime.close_delivered and !closed.outcome.more);
+    try std.testing.expectEqual(null, (try host.turn(&.{}, control)).closed);
+    // A stopped finish after the commit loses the result with the environment; the close stays delivered.
+    runtime.close_delivered = false;
+    host.fail_finish = true;
+    try std.testing.expectError(error.PendingException, host.turn(&.{}, control));
+    try std.testing.expect(runtime.close_delivered);
+    try std.testing.expectEqual(null, host.site);
 }

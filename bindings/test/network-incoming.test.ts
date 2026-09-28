@@ -450,25 +450,42 @@ test("an acknowledgement due with the stream's close arrives in one completion a
   }
 }, 20000);
 
-test("a response cancelled while native holds it settles once, before the close, and releases its copy", async () => {
+test("a response held in native borrow while its stream is cancelled and the network closes settles once, before the close", async () => {
   const pair = await incomingPair();
   try {
-    const stream = pair.left.request(pair.remote.peerId, BLOCKS, new Uint8Array(32));
-    const pending = stream.next().catch(() => undefined);
+    // Two roots allow two chunks. The client's host holds the first, so the client reads no further, and the second,
+    // larger than the client's stream window, stays borrowed by the server's write.
+    expect((await pair.left.diagnostics()).quicStreamWindowBytes).toBeLessThan(10 * 1024 * 1024);
+    const stream = pair.left.request(pair.remote.peerId, BLOCKS, new Uint8Array(64));
+    const first = stream.next();
     const incoming = await takeIncoming(pair.right);
-    const responded = incoming.respond(new Uint8Array(10 * 1024 * 1024), requestForks[0]);
-    const order = settlementOrder(incoming.closed, responded);
-    // The owner starts the write before the cancellation arrives.
-    await new Promise((resolve) => setImmediate(resolve));
-    expect(await incoming.cancel()).toBeUndefined();
-    const outcome = await responded.then(
+    await incoming.respond(new Uint8Array(4000).fill(1), requestForks[0]);
+    expect((await first).done).toBe(false);
+    const held = incoming.respond(new Uint8Array(10 * 1024 * 1024), requestForks[0]);
+    const order = settlementOrder(incoming.closed, held);
+    // Each command runs in a later owner turn than the one before it, so the second follows the turn that started the
+    // write.
+    await pair.right.getIdentity();
+    await pair.right.getIdentity();
+    expect(pair.right.diagnostics().incoming).toMatchObject({pendingResponses: 1, responseBytes: 10 * 1024 * 1024});
+    expect(order).toEqual([]);
+    const cancelled = incoming.cancel();
+    const closing = pair.right.close();
+    const outcome = await held.then(
       () => "sent",
-      (error) => error.failure
+      (error) => error.code
     );
-    expect(["sent", "cancelled"]).toContain(outcome);
-    expect(order).toEqual([outcome === "sent" ? "pending" : "NetworkIncomingFailed", "closed"]);
-    await pending;
-    expect(pair.right.diagnostics().incoming).toMatchObject({pendingResponses: 0, reservedBytes: 0, responseBytes: 0});
+    expect(["NetworkIncomingFailed", "NetworkClosed"]).toContain(outcome);
+    expect(await cancelled).toBeUndefined();
+    expect(await closing).toEqual({reason: "requested"});
+    expect(order).toEqual([outcome, "closed"]);
+    expect(pair.right.diagnostics().incoming).toMatchObject({
+      occupied: 0,
+      pendingResponses: 0,
+      reservedBytes: 0,
+      responseBytes: 0,
+    });
+    await stream.return?.();
   } finally {
     await Promise.all([pair.left.close(), pair.right.close()]);
   }
