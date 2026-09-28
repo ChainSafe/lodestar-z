@@ -586,6 +586,8 @@ jobs:
           if grep -qw sha_ni /proc/cpuinfo && grep -qw avx2 /proc/cpuinfo; then expected=x86_sha_avx2; fi
           LODESTAR_Z_EXPECT_GOSSIP_SHA256=$expected node scripts/check_network_addon.mjs zig-out/lib/bindings.node normal
           pnpm test:network-package
+      - name: Check dependency and install provenance
+        run: node scripts/lodestar_package_provenance.mjs --require-fetched
       - name: Restore era files cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
