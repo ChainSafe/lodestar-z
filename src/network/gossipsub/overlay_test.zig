@@ -437,7 +437,7 @@ test "mesh changes follow reused sessions and a reused overlay row's current top
     _ = overlay.peerSubscription(&context, next.index, name, true);
     overlay.onGraft(&context, f.topic, next.index);
     overlay.setLocal(&context, f.topic, false);
-    overlay.flushSubscriptions(&f.g.sessions.rows[next.index].io.tx, context.now);
+    overlay.flushSubscriptions(&f.g.sessions.rows[next.index].io.tx, &f.g.sessions.control_scratch, context.now);
     context.now = std.math.maxInt(u64) / 2;
     overlay.reclaimTopic(&context, &f.g.messages.topicPins(), f.topic);
     try std.testing.expect(!overlay.rows[f.topic].active);

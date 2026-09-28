@@ -132,12 +132,12 @@ pub const Overlay = struct {
         outbox.synchronize(&announcements, now);
     }
 
-    pub fn flushSubscriptions(self: *const Overlay, outbox: *@import("outbox.zig").Outbox, now: u64) void {
+    pub fn flushSubscriptions(self: *const Overlay, outbox: *@import("outbox.zig").Outbox, scratch: *@import("outbox.zig").ControlScratch, now: u64) void {
         for (0..constants.topics_cap) |_| {
             const index = outbox.nextSubscription() orelse return;
             const row = &self.rows[index];
             assert(row.active);
-            if (!outbox.announce(index, row.string[0..row.string_len], row.subscribed, now)) return;
+            if (!outbox.announce(index, row.string[0..row.string_len], row.subscribed, scratch, now)) return;
         }
     }
 
@@ -490,9 +490,10 @@ pub const Overlay = struct {
         const outbox = &context.sessions.rows[peer].io.tx;
         const name = self.topicString(topic);
         // A peer can reach mesh maintenance before its next I/O turn announces our subscription.
-        if (outbox.subscription_dirty.isSet(topic) and !outbox.announce(topic, name, true, context.now)) return false;
+        const scratch = &context.sessions.control_scratch;
+        if (outbox.subscription_dirty.isSet(topic) and !outbox.announce(topic, name, true, scratch, context.now)) return false;
         defer context.sessions.settle(peer, context.options);
-        if (outbox.submit(&.{ .graft = name }, context.now) == null) return false;
+        if (outbox.submit(&.{ .graft = name }, scratch, context.now) == null) return false;
         members.set(peer);
         self.mesh_changes.record(self.rows[topic].kind, reason);
         context.peers.scores.graft(context.sessions.rows[peer].logical.index, topic, context.now);
@@ -509,7 +510,7 @@ pub const Overlay = struct {
         if (!row.active) return;
         context.peers.addBackoff(row.logical, topic, self.rows[topic].generation, context.now, backoff_ms);
         const stream = row.outStream() orelse return;
-        if (row.io.tx.submit(&.{ .prune = .{ .topic = self.topicString(topic), .backoff_s = backoff_ms / 1000 } }, context.now) == null) {
+        if (row.io.tx.submit(&.{ .prune = .{ .topic = self.topicString(topic), .backoff_s = backoff_ms / 1000 } }, &context.sessions.control_scratch, context.now) == null) {
             context.sessions.setOutbound(peer, .{ .closing = stream });
         }
         context.sessions.settle(peer, context.options);

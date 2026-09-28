@@ -524,7 +524,7 @@ pub const Gossipsub = struct {
                 const j = self.overlay.rng.random().uintLessThan(usize, count - i) + i;
                 std.mem.swap(MessageId, &ids[i], &ids[j]);
             }
-            if (self.sessions.rows[peer].io.tx.submit(&.{ .ihave = .{ .topic = topic_str, .ids = ids[0..n] } }, self.last_now_ms) != null) self.settle(@intCast(peer));
+            if (self.sessions.rows[peer].io.tx.submit(&.{ .ihave = .{ .topic = topic_str, .ids = ids[0..n] } }, &self.sessions.control_scratch, self.last_now_ms) != null) self.settle(@intCast(peer));
         }
     }
 
@@ -535,7 +535,7 @@ pub const Gossipsub = struct {
     pub fn writeSegment(self: *Gossipsub, session: sessions_mod.SessionRef) []const u8 {
         assert(self.sessions.matches(session));
         const outbox = &self.sessions.rows[session.index].io.tx;
-        self.overlay.flushSubscriptions(outbox, self.last_now_ms);
+        self.overlay.flushSubscriptions(outbox, &self.sessions.control_scratch, self.last_now_ms);
         return outbox.segment(&self.messages.store);
     }
 
@@ -688,7 +688,7 @@ pub const Gossipsub = struct {
             const chosen = i + @as(usize, @intCast(self.overlay.rng.random().uintLessThanBiased(u64, @intCast(count - i))));
             std.mem.swap(MessageId, &candidates[i], &candidates[chosen]);
         }
-        self.recovery.requestBatch(&self.peers, &io.tx, candidates[0..requested], self.logical(index), self.sessions.rows[index].conn, self.overlay.rng.random(), self.options.iwant_followup_ms, now.mono_ms) catch return;
+        self.recovery.requestBatch(&self.peers, &io.tx, &self.sessions.control_scratch, candidates[0..requested], self.logical(index), self.sessions.rows[index].conn, self.overlay.rng.random(), self.options.iwant_followup_ms, now.mono_ms) catch return;
         io.iwant_ids_sent += @intCast(requested);
         self.settle(index);
     }
@@ -739,7 +739,7 @@ pub const Gossipsub = struct {
             if (peer_index == source) continue;
             const outbound = self.sessions.rows[peer_index].outbound;
             if (outbound != .live or outbound.live.version != .v1_2) continue;
-            if (self.sessions.rows[peer_index].io.tx.submit(&.{ .idontwant = &.{id} }, self.last_now_ms) != null) self.settle(peer_index);
+            if (self.sessions.rows[peer_index].io.tx.submit(&.{ .idontwant = &.{id} }, &self.sessions.control_scratch, self.last_now_ms) != null) self.settle(peer_index);
         }
     }
 

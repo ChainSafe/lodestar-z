@@ -44,6 +44,9 @@ pub const Sessions = struct {
     receive_pool: ReceivePool,
     decode_scratch: []u8,
     deliveries: *DeliveryPool,
+    /// Control encoding storage every outbox's `submit` borrows for one call. A field rather than
+    /// a local so ReleaseSafe does not fill it for every control frame.
+    control_scratch: @import("outbox.zig").ControlScratch = undefined,
 
     /// An opening or a close is ready work. Callers settle any other change.
     pub fn setOutbound(self: *Sessions, index: u16, outbound: @import("peer_session.zig").Outbound) void {
