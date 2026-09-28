@@ -13,3 +13,63 @@ test "metric topic labels have a fixed vocabulary and canonical subnet bounds" {
     counters.get("/eth2/00000000/unknown/ssz_snappy").accepted += 1;
     try std.testing.expectEqual(@as(u64, 1), counters.counts[policy.kind_count].accepted);
 }
+
+fn render(populations: *const @import("metrics.zig").ScorePopulations, buffer: []u8) ![]const u8 {
+    var writer = std.Io.Writer.fixed(buffer);
+    var encoder: @import("../metrics/registry.zig").Encoder = .{ .writer = &writer };
+    try populations.write(&encoder);
+    return writer.buffered();
+}
+
+test "score populations count cumulative gates, distinct mesh peers and empty scopes without mutating scores" {
+    const support = @import("test_support.zig");
+    const ScorePopulations = @import("metrics.zig").ScorePopulations;
+    const PeerState = @import("score.zig").PeerScore.PeerState;
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .score_params = .{ .behaviour_threshold = 0, .behaviour_weight = -1, .gossip_threshold = -4, .publish_threshold = -9, .graylist_threshold = -16 } });
+    defer g.deinit();
+    var buffer: [4096]u8 = undefined;
+    const empty = try render(&ScorePopulations.collect(&g.peers, g.overlay, g.sessions, 1), &buffer);
+    try std.testing.expect(std.mem.indexOf(u8, empty, "lodestar_native_gossip_score_peers{scope=\"mesh\",threshold=\"all\"} 0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, empty, "# TYPE lodestar_native_gossip_score gauge\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, empty, "lodestar_native_gossip_score{") == null);
+    const names = [_][]const u8{ "/eth2/01020304/beacon_block/ssz_snappy", "/eth2/01020304/voluntary_exit/ssz_snappy" };
+    for (names) |name| try support.subscribe(&g, name);
+    // Behaviour b scores -b^2: the peers sit on each gate, between gates and below the lowest.
+    for ([_]f64{ 0, 0.5, 2, 3, 4, 5 }, 0..) |behaviour, index| {
+        const peer = support.addPeer(&g, .{ .index = @intCast(index), .generation = 1 }, .v1_2).?;
+        g.peers.scores.penalize(g.sessions.rows[peer.index].logical.index, behaviour);
+    }
+    for ([_][2]u16{ .{ 1, 2 }, .{ 2, 3 } }, names) |members, name| {
+        for (members) |peer| g.overlay.rows[g.overlay.findTopic(name).?].mesh.set(peer);
+    }
+    for (0..3) |peer| _ = g.peers.score(g.sessions.rows[peer].logical, 1);
+    const rows = try std.testing.allocator.dupe(PeerState, g.peers.scores.rows);
+    defer std.testing.allocator.free(rows);
+    const revision = g.peers.scores.revision;
+    const calculations = g.peers.scores.calculations;
+    const populations = ScorePopulations.collect(&g.peers, g.overlay, g.sessions, 10 * g.peers.scores.params.decay_interval_ms);
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(rows), std.mem.sliceAsBytes(g.peers.scores.rows));
+    try std.testing.expectEqual(revision, g.peers.scores.revision);
+    try std.testing.expectEqual(calculations, g.peers.scores.calculations);
+    const output = try render(&populations, &buffer);
+    for ([_][]const u8{
+        "lodestar_native_gossip_score_peers{scope=\"connected\",threshold=\"all\"} 6\n",
+        "lodestar_native_gossip_score_peers{scope=\"connected\",threshold=\"nonnegative\"} 1\n",
+        "lodestar_native_gossip_score_peers{scope=\"connected\",threshold=\"gossip\"} 3\n",
+        "lodestar_native_gossip_score_peers{scope=\"connected\",threshold=\"publish\"} 4\n",
+        "lodestar_native_gossip_score_peers{scope=\"connected\",threshold=\"graylist\"} 5\n",
+        "lodestar_native_gossip_score_peers{scope=\"mesh\",threshold=\"all\"} 3\n",
+        "lodestar_native_gossip_score_peers{scope=\"mesh\",threshold=\"nonnegative\"} 0\n",
+        "lodestar_native_gossip_score_peers{scope=\"mesh\",threshold=\"gossip\"} 2\n",
+        "lodestar_native_gossip_score_peers{scope=\"mesh\",threshold=\"publish\"} 3\n",
+        "lodestar_native_gossip_score_peers{scope=\"mesh\",threshold=\"graylist\"} 3\n",
+        "lodestar_native_gossip_score{scope=\"connected\",stat=\"min\"} -25\n",
+        "lodestar_native_gossip_score{scope=\"connected\",stat=\"max\"} 0\n",
+        "lodestar_native_gossip_score{scope=\"mesh\",stat=\"min\"} -9\n",
+        "lodestar_native_gossip_score{scope=\"mesh\",stat=\"mean\"} -4.416666666666667\n",
+        "lodestar_native_gossip_score{scope=\"mesh\",stat=\"max\"} -0.25\n",
+    }) |line| try std.testing.expect(std.mem.indexOf(u8, output, line) != null);
+    var mean: [96]u8 = undefined;
+    const connected_mean = try std.fmt.bufPrint(&mean, "lodestar_native_gossip_score{{scope=\"connected\",stat=\"mean\"}} {d}\n", .{@as(f64, -54.25) / 6});
+    try std.testing.expect(std.mem.indexOf(u8, output, connected_mean) != null);
+}

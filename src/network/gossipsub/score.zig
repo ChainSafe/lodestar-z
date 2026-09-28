@@ -205,9 +205,7 @@ pub const PeerScore = struct {
     pub fn score(self: *PeerScore, peer: u16, now_ms: u64, ip_count: u16) f64 {
         assert(peer < self.rows.len);
         const row = &self.rows[peer];
-        if (!row.dirty and row.cached_at != null and now_ms >= row.cached_at.? and
-            (row.cached_until == null or now_ms < row.cached_until.?) and
-            row.cached_ip == ip_count) return row.cached;
+        if (self.cached(peer, now_ms, ip_count)) |value| return value;
         self.calculations +|= 1;
         self.topic_visits +|= constants.topics_cap;
         const result = self.evaluate(peer, now_ms, ip_count, null);
@@ -219,9 +217,21 @@ pub const PeerScore = struct {
         return result.total;
     }
 
-    /// Evaluates current counters without changing decay, cache validity or policy metrics.
+    /// Evaluates current counters without changing decay, cache validity or policy metrics. A valid
+    /// cached score is that evaluation, so it answers without one.
     pub fn snapshot(self: *const PeerScore, peer: u16, now_ms: u64, ip_count: u16) f64 {
-        return self.evaluate(peer, now_ms, ip_count, null).total;
+        assert(peer < self.rows.len);
+        return self.cached(peer, now_ms, ip_count) orelse self.evaluate(peer, now_ms, ip_count, null).total;
+    }
+
+    /// The cached score while no counter, parameter or IP population changed since it was computed
+    /// and no time-driven term has moved.
+    fn cached(self: *const PeerScore, peer: u16, now_ms: u64, ip_count: u16) ?f64 {
+        const row = &self.rows[peer];
+        const at = row.cached_at orelse return null;
+        if (row.dirty or now_ms < at or row.cached_ip != ip_count) return null;
+        if (row.cached_until) |until| if (now_ms >= until) return null;
+        return row.cached;
     }
 
     pub fn snapshotWeights(self: *const PeerScore, peer: u16, now_ms: u64, ip_count: u16, out: *Breakdown) f64 {
@@ -818,6 +828,15 @@ test "score snapshots preserve cache state and match policy evaluation" {
     try std.testing.expectEqual(next, scores.rows[0].cached_until);
     try std.testing.expect(scores.rows[0].dirty);
     try std.testing.expectEqual(value, scores.score(0, 50000, 0));
+    // A valid cache answers the snapshot; past its next change, or at another IP population, the
+    // snapshot evaluates.
+    const until = scores.rows[0].cached_until.?;
+    try std.testing.expectEqual(value, scores.snapshot(0, until - 1, 0));
+    try std.testing.expect(scores.snapshot(0, until, 0) != value);
+    try std.testing.expectEqual(scores.evaluate(0, until, 0, null).total, scores.snapshot(0, until, 0));
+    try std.testing.expectEqual(scores.evaluate(0, until - 1, 4, null).total, scores.snapshot(0, until - 1, 4));
+    try std.testing.expectEqual(calculations + 1, scores.calculations);
+    try std.testing.expect(!scores.rows[0].dirty);
 }
 
 test "score weights use policy thresholds and snapshots leave the cache untouched" {

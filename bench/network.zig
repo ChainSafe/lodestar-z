@@ -131,6 +131,7 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, selected, "gossip_burst")) return @import("network_gossip_burst.zig").run(init, &.{});
     if (std.mem.eql(u8, selected, "idle_wait")) return idleWait(init);
     if (std.mem.eql(u8, selected, "recovery_resolve")) return @import("network_recovery.zig").run(init);
+    if (std.mem.eql(u8, selected, "score_collection")) return @import("network_scores.zig").run(init);
     if (std.mem.eql(u8, selected, "idle_transport")) return idleTransport(init);
     if (std.mem.eql(u8, selected, "idle_connections")) return idleConnections(init);
     const profile: network.configuration.Profile = if (std.mem.eql(u8, selected, "small")) .small else if (std.mem.eql(u8, selected, "beacon_node")) .beacon_node else return error.InvalidProfile;
