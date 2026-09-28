@@ -51,8 +51,9 @@ pub fn processEffectiveBalanceUpdates(
     for (balances, 0..) |balance, i| {
         var effective_balance_increment = effective_balance_increments[i];
         var effective_balance = @as(u64, effective_balance_increment) * preset.EFFECTIVE_BALANCE_INCREMENT;
-        const effective_balance_limit: u64 = if (comptime fork.lt(.electra)) 
-            preset.MAX_EFFECTIVE_BALANCE else blk: {
+        const effective_balance_limit: u64 = if (comptime fork.lt(.electra))
+            preset.MAX_EFFECTIVE_BALANCE
+        else blk: {
             // from electra, effectiveBalanceLimit is per validator
             if (cache.isCompoundingValidator(i)) {
                 break :blk preset.MAX_EFFECTIVE_BALANCE_ELECTRA;
