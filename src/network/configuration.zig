@@ -12,7 +12,7 @@ const dial = @import("peers/dialing.zig");
 const router = @import("router.zig");
 
 pub const Profile = enum { small, beacon_node };
-pub const ReqRespOverrides = Overrides(rr.Options, &.{ "peers", "forks", "outbound_control_reserved", "inbound_control_reserved", "admission" });
+pub const ReqRespOverrides = Overrides(rr.Options, &.{ "peers", "forks", "request_fork", "outbound_control_reserved", "inbound_control_reserved", "admission" });
 pub const GossipOverrides = Overrides(gossip.Options, &.{ "connected_capacity", "connection_slots", "retained_capacity", "retained_outbound_reserve", "random_seed" });
 pub const IdentifyOverrides = Overrides(@import("identify/root.zig").Options, &.{});
 pub const RouterOverrides = Overrides(router.Options, &.{ "outbound_control_reserved", "inbound_connections" });

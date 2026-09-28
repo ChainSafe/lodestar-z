@@ -14,9 +14,6 @@ const control_wire = @import("control_wire.zig");
 const ControlProtocol = @import("control_protocol.zig").ControlProtocol;
 pub const wait = @import("wait.zig");
 
-/// discv5's standalone receive wait. NetworkCore polls the discovery sockets itself and steps
-/// discovery with a wake time of now, so this value never sets a wait.
-const discovery_poll_interval_ms: u32 = 5;
 /// Discovery datagrams drained per turn, matching the QUIC receive batch.
 pub const discovery_batch_max: u32 = @import("constants.zig").receive_batch_max;
 pub const controls_per_turn = 32;
@@ -140,7 +137,7 @@ const DiscoveryOwners = struct {
         const announced = advertisementFor(local, schedule, self.endpoints);
         const record = try peers.enr.build(&host.inner, options.sequence, &announced, &local.fork);
         try peers.enr.requireIdentity(&record, &t.PeerId.fromPublicKey(&host.publicKey()));
-        try self.transport.init(allocator, sockets, host.inner, record, .{ .engine = options.engine, .poll_interval_ms = discovery_poll_interval_ms });
+        try self.transport.init(allocator, sockets, host.inner, record, .{ .engine = options.engine });
         errdefer self.transport.engine.deinit(allocator);
         var coordinator_options = options.coordinator;
         coordinator_options.observations = plan.observations;
