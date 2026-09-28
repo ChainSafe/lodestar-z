@@ -119,6 +119,8 @@ const contract = [_]Series{
     .{ .name = "lodestar_native_gossip_messages_published_total", .kind = "counter", .labels = &.{"topic"} },
     .{ .name = "lodestar_native_gossip_mesh_changes_total", .kind = "counter", .labels = &.{ "topic", "event", "reason" } },
     .{ .name = "lodestar_native_gossip_behaviour_penalties_total", .kind = "counter", .labels = &.{"reason"} },
+    .{ .name = "lodestar_native_gossip_score_peers", .kind = "gauge", .labels = &.{ "scope", "threshold" } },
+    .{ .name = "lodestar_native_gossip_score", .kind = "gauge", .labels = &.{ "scope", "stat" } },
     // Gossip processor
     .{ .name = "lodestar_native_gossip_processor_items", .kind = "gauge", .labels = &.{ "kind", "state" } },
     .{ .name = "lodestar_native_gossip_processor_execution_credit_limit", .kind = "gauge", .labels = &.{ "kind", "credit" } },
@@ -340,6 +342,8 @@ test "metrics use retained usable coverage and accepted demand until replacement
 test "metrics render exactly the measurement contract families with their types and labels" {
     var f = try Fixture.initWith(&.{boundary(@splat(0), 100)}, .{ .bind = .{ .ip4 = .loopback(0) } });
     defer f.deinit();
+    // A connected gossip peer gives the score statistics a population to sample.
+    _ = gossip_test.addPeer(f.node.service.gossipsub, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const output = try f.render(true);
     var missing: usize = 0;
     for (contract) |series| {
@@ -424,6 +428,24 @@ test "metrics export stock per-topic gossipsub peer gauges under full topic stri
     try gossip_test.subscribe(g, future);
     output = try f.render(true);
     try contains(output, "gossipsub_mesh_peer_count{topicStr=\"" ++ future ++ "\"} 0\n");
+}
+
+test "metrics export gossip score populations only while running and omit empty statistics" {
+    var f = try Fixture.init(&.{});
+    defer f.deinit();
+    const g = f.node.service.gossipsub;
+    _ = gossip_test.addPeer(g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    gossip_test.penalize(g, g.sessions.rows[0].conn, 7);
+    const running = try f.render(true);
+    try contains(running, "lodestar_native_gossip_score_peers{scope=\"connected\",threshold=\"all\"} 1\n");
+    try contains(running, "lodestar_native_gossip_score_peers{scope=\"connected\",threshold=\"nonnegative\"} 0\n");
+    try contains(running, "lodestar_native_gossip_score_peers{scope=\"mesh\",threshold=\"all\"} 0\n");
+    try contains(running, "lodestar_native_gossip_score{scope=\"connected\",stat=\"max\"} -10\n");
+    try std.testing.expect(std.mem.indexOf(u8, running, "lodestar_native_gossip_score{scope=\"mesh\"") == null);
+    const stopped = try f.render(false);
+    try contains(stopped, "lodestar_native_gossip_score_peers{scope=\"connected\",threshold=\"all\"} 0\n");
+    try contains(stopped, "# TYPE lodestar_native_gossip_score gauge\n");
+    try std.testing.expect(std.mem.indexOf(u8, stopped, "lodestar_native_gossip_score{") == null);
 }
 
 test "metrics export gossip message, mesh change, penalty and promise counters through shutdown" {

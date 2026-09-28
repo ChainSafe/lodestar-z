@@ -17,6 +17,7 @@ pub const registry = prom.Registry(Context, .{
     writeRequests,
     writeRequestTimes,
     writeGossip,
+    writeGossipScores,
     writeGossipExecution,
     writePopulation,
     writePeerEvents,
@@ -400,6 +401,13 @@ fn writeGossip(self: *const Context, w: *prom.Encoder) prom.Error!void {
         .unit = .seconds,
     }, @TypeOf(g.validation_time));
     try validation_time.histogram(.{}, &g.validation_time);
+}
+
+fn writeGossipScores(self: *const Context, w: *prom.Encoder) prom.Error!void {
+    const ScorePopulations = @import("../gossipsub/metrics.zig").ScorePopulations;
+    const g = self.owner.service.gossipsub;
+    const populations: ScorePopulations = if (self.running) .collect(&g.peers, g.overlay, g.sessions, self.now.mono_ms) else .{};
+    try populations.write(w);
 }
 
 fn writeGossipTopics(self: *const Context, w: *prom.Encoder) prom.Error!void {

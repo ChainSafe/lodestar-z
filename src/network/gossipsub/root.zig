@@ -13,6 +13,7 @@ pub const mcache = @import("mcache.zig");
 pub const sessions = @import("sessions.zig");
 pub const frame = @import("frame.zig");
 pub const score = @import("score.zig");
+pub const metrics = @import("metrics.zig");
 pub const gossipsub = @import("gossipsub.zig");
 
 pub const Gossipsub = gossipsub.Gossipsub;
@@ -29,7 +30,7 @@ pub const ResourceSnapshot = gossipsub.ResourceSnapshot;
 test {
     _ = @import("gossipsub.zig");
     _ = delivery;
-    _ = @import("metrics.zig");
+    _ = metrics;
     _ = @import("options.zig");
     _ = @import("protobuf_schema.zig");
     _ = diagnostics;
