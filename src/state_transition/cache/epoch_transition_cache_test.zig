@@ -7,6 +7,7 @@ const Node = @import("persistent_merkle_tree").Node;
 const EpochTransitionCache = @import("epoch_transition_cache.zig").EpochTransitionCache;
 const deinitReusedEpochTransitionCache = @import("epoch_transition_cache.zig").deinitReusedEpochTransitionCache;
 const metrics = @import("../metrics.zig");
+const preset = @import("preset").preset;
 
 test "shuffling job records completed builds" {
     const allocator = std.testing.allocator;
@@ -55,6 +56,24 @@ test "EpochTransitionCache - finalProcessEpoch" {
 
     const epoch_cache = test_state.cached_state.epoch_cache;
     try epoch_cache.finalProcessEpoch(test_state.cached_state.state);
+}
+
+test "EpochTransitionCache stores added compounding flags in a fixed tail" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 200_000 });
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    const cache = test_state.epoch_transition_cache;
+    const initial_validator_count = try test_state.cached_state.state.validatorsCount();
+    for (0..preset.MAX_PENDING_DEPOSITS_PER_EPOCH) |i| {
+        cache.appendCompoundingValidatorFlag(i % 2 == 0);
+    }
+    for (0..preset.MAX_PENDING_DEPOSITS_PER_EPOCH) |i| {
+        try std.testing.expectEqual(i % 2 == 0, cache.isCompoundingValidator(initial_validator_count + i));
+    }
 }
 
 test "EpochTransitionCache.beforeProcessEpoch" {
