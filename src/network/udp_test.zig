@@ -163,6 +163,55 @@ test "dual-stack UDP counts the exact prefix when the host refuses a datagram af
     try std.testing.expectError(error.Timeout, target.receiveReady(std.testing.io, &buffer, &ready));
 }
 
+test "UDP sends each batch's own datagrams after a larger batch and a failed prefix" {
+    const Recorder = struct {
+        calls: usize = 0,
+        fail_after: ?usize = null,
+        ports: [constants.send_batch_max]u16 = undefined,
+        payloads: [constants.send_batch_max][]const u8 = undefined,
+        len: usize = 0,
+
+        fn send(userdata: ?*anyopaque, _: net.Socket.Handle, messages: []net.OutgoingMessage, _: net.SendFlags) struct { ?net.Socket.SendError, usize } {
+            const self: *@This() = @ptrCast(@alignCast(userdata.?));
+            self.calls += 1;
+            self.len = messages.len;
+            for (messages, 0..) |message, i| {
+                self.ports[i] = udp_mod.fromNetwork(message.address.*).port();
+                self.payloads[i] = message.data_ptr[0..message.data_len];
+            }
+            if (self.fail_after) |sent| return .{ error.NetworkUnreachable, sent };
+            return .{ null, messages.len };
+        }
+    };
+    var socket = try udp_mod.Udp.bind(std.testing.io, .{ .ip4 = .loopback(0) });
+    defer socket.close(std.testing.io);
+    var recorder: Recorder = .{};
+    var vtable = std.testing.io.vtable.*;
+    vtable.netSend = Recorder.send;
+    const io: std.Io = .{ .userdata = &recorder, .vtable = &vtable };
+    const first: types.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9_001 } };
+    const second: types.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9_002 } };
+    var payloads = [_]u8{ 1, 2, 3, 4 };
+    recorder.fail_after = 1;
+    const failed = socket.sendMany(io, &.{
+        .{ .to = first, .bytes = payloads[0..1] },
+        .{ .to = first, .bytes = payloads[1..2] },
+        .{ .to = first, .bytes = payloads[2..3] },
+    });
+    try std.testing.expectEqual(@as(usize, 1), failed.sent);
+    try std.testing.expectEqual(@as(usize, 3), recorder.len);
+    recorder.fail_after = null;
+    const outcome = socket.sendMany(io, &.{.{ .to = second, .bytes = payloads[3..4] }});
+    try std.testing.expectEqual(@as(usize, 1), outcome.sent);
+    try std.testing.expect(outcome.failure == null);
+    try std.testing.expectEqual(@as(usize, 2), recorder.calls);
+    try std.testing.expectEqual(@as(usize, 1), recorder.len);
+    try std.testing.expectEqual(@as(u16, 9_002), recorder.ports[0]);
+    try std.testing.expectEqualSlices(u8, &.{4}, recorder.payloads[0]);
+    try std.testing.expectEqual(@as(u64, 2), socket.counters.sent_datagrams);
+    try std.testing.expectEqual(@as(u64, 2), socket.counters.sent_bytes);
+}
+
 test "dual-stack UDP services both families fairly" {
     var buffer: [constants.datagram_size_max]u8 = undefined;
     var target = try udp_mod.Udp.bind(std.testing.io, .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } });

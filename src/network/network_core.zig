@@ -120,6 +120,9 @@ const DiscoveryOwners = struct {
     coordinator: peers.Discovery,
     endpoints: AdvertisementEndpoints,
     quic_ports: [2]?u16,
+    /// The candidates of the discovery step `discover` is handling. A field rather than a local
+    /// so ReleaseSafe does not fill it for every step.
+    candidates: [candidates_per_turn]peers.enr.Candidate = undefined,
 
     fn init(self: *DiscoveryOwners, allocator: std.mem.Allocator, io: std.Io, options: DiscoveryOptions, buffers: @import("udp.zig").Buffers, host: *const @import("wire/keys.zig").KeyPair, local: *const t.LocalState, schedule: ForkSchedule, quic: [2]?t.Address, now: Now) !void {
         var sockets = try @import("udp").Sockets.bind(io, options.bind);
@@ -175,6 +178,10 @@ pub const NetworkCore = struct {
     current_slot: u64 = 0,
     /// The last host apply stopped at a per-turn cap.
     host_more: bool = false,
+    /// The Service's control events and Identify results that `process` consumes within its turn.
+    /// Fields rather than locals so ReleaseSafe does not fill them every turn.
+    controls: [controls_per_turn]rr.Event = undefined,
+    identify_results: [identify_per_turn]@import("identify/root.zig").Result = undefined,
 
     pub fn init(self: *NetworkCore, backing: std.mem.Allocator, io: std.Io, resolved: *const @import("configuration.zig").Resolved, startup: Startup) !void {
         try @import("configuration.zig").validate(resolved.limits, resolved.core);
@@ -692,9 +699,9 @@ pub const NetworkCore = struct {
         };
         if (!pm.quiescing) pm.dialing.expire(&pm.catalog, quic, now.mono_ms);
         for (events) |*event| self.transportEvent(event, now);
-        var controls: [controls_per_turn]rr.Event = undefined;
-        var identify_results: [identify_per_turn]@import("identify/root.zig").Result = undefined;
-        const counts = self.service.process(quic, events, now, .{ .application = outputs.application, .control = &controls, .identify = &identify_results });
+        const controls = &self.controls;
+        const identify_results = &self.identify_results;
+        const counts = self.service.process(quic, events, now, .{ .application = outputs.application, .control = controls, .identify = identify_results });
         for ([_][]const rr.Event{ outputs.application[0..counts.application], controls[0..counts.control] }) |batch| {
             for (batch) |event| {
                 const fault = self.service.reqresp.peerFault(event) orelse continue;
@@ -842,9 +849,9 @@ pub const NetworkCore = struct {
         const owned = self.discovery.?;
         const need = self.peer_manager.discoveryNeed();
         owned.coordinator.request(need.query(tick.mono_ms +| 1_000), tick.mono_ms) catch unreachable;
+        const candidates = &owned.candidates;
         for (0..discovery_batch_max) |_| {
-            var candidates: [candidates_per_turn]peers.enr.Candidate = undefined;
-            const progress = owned.coordinator.step(io, tick.mono_ms, tick.mono_ms, &candidates) catch |err| peers.discovery.Result{ .failure = err };
+            const progress = owned.coordinator.step(io, tick.mono_ms, tick.mono_ms, candidates) catch |err| peers.discovery.Result{ .failure = err };
             result.discovery.add(&progress);
             var endpoints = owned.endpoints;
             for (progress.learned, 0..) |learned, family| if (learned) |address| switch (address) {
