@@ -7,6 +7,9 @@ pub const Wake = struct {
     read_fd: i32,
     write_fd: i32,
     pending: bool = false,
+    /// What `drain` reads and discards. A field rather than a local so ReleaseSafe does not fill it
+    /// on every drain.
+    drained: [4096]u8 = undefined,
 
     pub fn init() !Wake {
         if (builtin.os.tag != .linux and builtin.os.tag != .macos) return error.UnsupportedWait;
@@ -42,8 +45,7 @@ pub const Wake = struct {
 
     pub fn drain(self: *Wake) !void {
         self.pending = false;
-        var buffer: [4096]u8 = undefined;
-        const result = std.c.read(self.read_fd, &buffer, buffer.len);
+        const result = std.c.read(self.read_fd, &self.drained, self.drained.len);
         if (result > 0) return;
         if (result < 0 and std.c.errno(result) == .AGAIN) return;
         return error.NetworkWakeFailed;
