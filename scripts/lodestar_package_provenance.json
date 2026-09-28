@@ -1,0 +1,207 @@
+{
+  "schemaVersion": 1,
+  "package": {
+    "name": "@chainsafe/lodestar-z",
+    "license": "MIT",
+    "licenseFile": null
+  },
+  "zig": {
+    "toolchain": "0.16.0",
+    "dependencies": [
+      {
+        "name": "blst",
+        "url": "git+https://github.com/ChainSafe/blst.zig.git#4b13f897d72fe7c9168f0f0eccf055e3941f56c7",
+        "hash": "blst_zig-0.0.0-cnAxzmIPAADDM1ada7PDap4MdWbHWq-zpVsnJYTWWt3q",
+        "license": "NONE",
+        "use": "addon",
+        "dependencies": [
+          {
+            "name": "blst",
+            "url": "https://github.com/supranational/blst/archive/refs/tags/v0.3.16.tar.gz",
+            "hash": "N-V-__8AAN0aOwD_n2xFB-Q0eBNtvIKtGPfGZSVt0DdbmfH2",
+            "license": "Apache-2.0"
+          }
+        ]
+      },
+      {
+        "name": "hashtree",
+        "url": "git+https://github.com/ChainSafe/hashtree-z.git#f5c1b81da167f84376fb94aef29a57fc6c08dc28",
+        "hash": "hashtree-0.1.0-sBOovj8WAAAGCN62cybnffy7b4ITTQsog2oOG2AQZl9L",
+        "license": "MIT",
+        "use": "addon",
+        "dependencies": [
+          {
+            "name": "hashtree",
+            "url": "git+https://github.com/offchainlabs/hashtree#fba14494dada4420440d985c2c516341d9c24b9b",
+            "hash": "N-V-__8AAJ03FACfm8Hlfs97yP3-2Hd5ZzSv9yYuoEi3Yi_B",
+            "license": "MIT"
+          }
+        ]
+      },
+      {
+        "name": "metrics",
+        "url": "git+https://github.com/karlseguin/metrics.zig.git#6de29b83a750a06c438d268543e0e3c3c1b309da",
+        "hash": "metrics-0.0.0-W7G4eIegAQD4XxA9Co7Atbw59u_2zvxYf406AZuoAHPM",
+        "license": "MIT",
+        "use": "addon",
+        "dependencies": []
+      },
+      {
+        "name": "quiche_zig",
+        "url": "git+https://github.com/chainsafe/quiche-zig#2e0b489b3c9900f658ca97b766b802003525cdb0",
+        "hash": "quiche-0.1.0-rnTCo4cQAACPgyY1ZYEYw7Yw0JNl2jGqlVLz6pOmA06t",
+        "license": "MIT",
+        "use": "addon",
+        "dependencies": [
+          {
+            "name": "quiche",
+            "url": "https://static.crates.io/crates/quiche/quiche-0.28.0.crate",
+            "hash": "N-V-__8AAJ1bNgFxv6LRy4xAO27QsTK-XNfqe0BMfRodoMrg",
+            "license": "BSD-2-Clause"
+          }
+        ]
+      },
+      {
+        "name": "snappy",
+        "url": "git+https://github.com/ChainSafe/snappy.zig#713942410426051da6107a955b29f3f152815622",
+        "hash": "snappy-0.1.0-n4AaquQ4AADQScvw9-i6SJvZTTagvxmGgGKnat4T_a4e",
+        "license": "MIT",
+        "use": "addon",
+        "dependencies": [
+          {
+            "name": "snappy",
+            "url": "git+https://github.com/google/snappy#6f99459b5b837fa18abb1be317d3ac868530f384",
+            "hash": "N-V-__8AAGQlMwAN9FGuTgQ6eeGHXgLOoQUSPaBmljRIqfzy",
+            "license": "BSD-3-Clause"
+          }
+        ]
+      },
+      {
+        "name": "zapi",
+        "url": "https://github.com/ChainSafe/zapi/archive/ca55a240a07cbeaba7ac543125a108bca4076a5a.tar.gz",
+        "hash": "zapi-4.0.0-rIqzUasFBQBedS0-MCZXl1BnemstdjIhb5OUdGD305rI",
+        "license": "MIT",
+        "use": "addon",
+        "dependencies": [
+          {
+            "name": "zbuild",
+            "url": "git+https://github.com/chainsafe/zbuild.git#f7d5f19de09f2808e54acf599605f9e18c9bd804",
+            "hash": "zbuild-0.4.0-XJFav-1nAgDmfVY1nVSIIzbkcbuHZj7yMb7Fv8yvznPO",
+            "license": "MIT"
+          }
+        ]
+      },
+      {
+        "name": "zbuild",
+        "url": "git+https://github.com/chainsafe/zbuild.git#f7d5f19de09f2808e54acf599605f9e18c9bd804",
+        "hash": "zbuild-0.4.0-XJFav-1nAgDmfVY1nVSIIzbkcbuHZj7yMb7Fv8yvznPO",
+        "license": "MIT",
+        "use": "build",
+        "dependencies": []
+      },
+      {
+        "name": "yaml",
+        "url": "git+https://github.com/ChainSafe/zig-yaml#b74f4e8113bee6d307c4f1fd0f190767c8196fc8",
+        "hash": "zig_yaml-0.1.0-C1161kFWAwDxjKAFmklKwWVDvz2mmq0Q__bDhGGjeyd3",
+        "license": "MIT",
+        "use": "development",
+        "dependencies": []
+      },
+      {
+        "name": "zbench",
+        "url": "git+https://github.com/hendriknielaender/zBench#b2b89c475e3ef1bb2bd71255c80478a82d3e0ca8",
+        "hash": "zbench-0.13.0-YTdc7xVBAQCCMC-IdLLuotBeiNNNm8k9Pi2V4VYqrwfI",
+        "license": "MIT",
+        "use": "development",
+        "dependencies": []
+      },
+      {
+        "name": "zio",
+        "url": "git+https://github.com/lalinsky/zio?ref=v0.14.0#aa860381beb42bc077e24ef304827cbdc23fcef9",
+        "hash": "zio-0.14.0-xHbVVPxFHgBCop4CvfF4u360kzWlHD4FS8Ud-RIkPcZ7",
+        "license": "MIT",
+        "use": "development",
+        "dependencies": []
+      }
+    ]
+  },
+  "cargo": {
+    "crate": "quiche_zig/quiche",
+    "lockfileSha256": "a714a2e0dba9ecb33776e3daa42c0d6b3447f8f8b50325f362b847de26b21c23",
+    "features": ["ffi"],
+    "locked": false,
+    "vendored": [
+      {
+        "name": "boringssl",
+        "path": "deps/boringssl",
+        "license": "OpenSSL AND ISC AND MIT"
+      }
+    ],
+    "crates": [
+      {"name": "quiche", "version": "0.28.0", "license": "BSD-2-Clause", "use": "linked"},
+      {"name": "bytes", "version": "1.11.1", "license": "MIT", "use": "linked"},
+      {"name": "either", "version": "1.15.0", "license": "MIT OR Apache-2.0", "use": "linked"},
+      {"name": "intrusive-collections", "version": "0.9.7", "license": "Apache-2.0/MIT", "use": "linked"},
+      {"name": "libc", "version": "0.2.183", "license": "MIT OR Apache-2.0", "use": "linked"},
+      {"name": "libm", "version": "0.2.16", "license": "MIT", "use": "linked"},
+      {"name": "log", "version": "0.4.29", "license": "MIT OR Apache-2.0", "use": "linked"},
+      {"name": "memoffset", "version": "0.9.1", "license": "MIT", "use": "linked"},
+      {"name": "octets", "version": "0.3.5", "license": "BSD-2-Clause", "use": "linked"},
+      {"name": "once_cell", "version": "1.21.4", "license": "MIT OR Apache-2.0", "use": "linked"},
+      {"name": "slab", "version": "0.4.12", "license": "MIT", "use": "linked"},
+      {"name": "smallvec", "version": "1.15.1", "license": "MIT OR Apache-2.0", "use": "linked"},
+      {"name": "autocfg", "version": "1.5.0", "license": "Apache-2.0 OR MIT", "use": "build"},
+      {"name": "cc", "version": "1.2.58", "license": "MIT OR Apache-2.0", "use": "build"},
+      {"name": "cdylib-link-lines", "version": "0.1.5", "license": "MIT", "use": "build"},
+      {"name": "cmake", "version": "0.1.58", "license": "MIT OR Apache-2.0", "use": "build"},
+      {"name": "enum_dispatch", "version": "0.3.13", "license": "MIT OR Apache-2.0", "use": "build"},
+      {"name": "find-msvc-tools", "version": "0.1.9", "license": "MIT OR Apache-2.0", "use": "build"},
+      {"name": "proc-macro2", "version": "1.0.106", "license": "MIT OR Apache-2.0", "use": "build"},
+      {"name": "quote", "version": "1.0.45", "license": "MIT OR Apache-2.0", "use": "build"},
+      {"name": "shlex", "version": "1.3.0", "license": "MIT OR Apache-2.0", "use": "build"},
+      {"name": "syn", "version": "2.0.117", "license": "MIT OR Apache-2.0", "use": "build"},
+      {"name": "unicode-ident", "version": "1.0.24", "license": "(MIT OR Apache-2.0) AND Unicode-3.0", "use": "build"}
+    ]
+  },
+  "npm": {
+    "runtime": [
+      {
+        "name": "@chainsafe/zapi",
+        "version": "4.0.0",
+        "integrity": "sha512-jcWUJT7bsS7F3H2aycUEs7sBTw+oL+MgKOC2CZ80n2asvCmAXjz6D0H2ZYuAbfmwG12myBDezGHs+JzIUQEs+A==",
+        "license": "MIT"
+      }
+    ]
+  },
+  "install": {
+    "files": ["bindings/src/", "zig-out/lib/"],
+    "embedded": {
+      "addon": "zig-out/lib/bindings.node",
+      "build": "zig build build-lib:bindings -Doptimize=ReleaseSafe -Dpreset=<preset> -Dtarget=<zig target> -Dcpu=<cpu>",
+      "pack": "node scripts/lodestar_package.mjs pack",
+      "install": "node scripts/lodestar_package.mjs install",
+      "loader": "zapi requireNapiLibrary loads the package's zig-out/lib addon"
+    },
+    "platform": {
+      "addon": "artifacts/<target>/bindings.node",
+      "targets": [
+        "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "aarch64-unknown-linux-musl",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl"
+      ],
+      "workflows": [".github/workflows/publish-bindings.yml", ".github/workflows/publish-dev-bindings.yml"],
+      "runner": "ubuntu-22.04",
+      "steps": [
+        "pnpm install --frozen-lockfile",
+        "pnpm zapi build-artifacts --optimize ReleaseSafe",
+        "pnpm zapi prepublish",
+        "rm -rf zig-out/lib",
+        "--ignore-scripts --provenance"
+      ],
+      "loader": "zapi requireNapiLibrary loads @chainsafe/lodestar-z-<target> when the package has no zig-out/lib addon"
+    }
+  }
+}
