@@ -86,6 +86,19 @@ const ShufflingJob = struct {
     }
 };
 
+const BorrowedBoolArray = struct {
+    array: *BoolArray,
+    owner_allocator: Allocator,
+
+    pub fn items(self: BorrowedBoolArray) []bool {
+        return self.array.items;
+    }
+
+    pub fn append(self: BorrowedBoolArray, value: bool) !void {
+        try self.array.append(self.owner_allocator, value);
+    }
+};
+
 /// this is a cache that's never gc'd, it is used to store data that is reused across multiple epochs
 const ReusedEpochTransitionCache = struct {
     allocator: Allocator,
@@ -202,6 +215,8 @@ pub fn deinitReusedEpochTransitionCache(io: std.Io) void {
 /// `init` through `deinit` and exclude `deinitReusedEpochTransitionCache` throughout.
 /// The internal lock protects acquisition and resizing, not the borrowed lifetime.
 pub const EpochTransitionCache = struct {
+    /// Allocator used for cache-owned lists.
+    allocator: Allocator,
     prev_epoch: Epoch,
     current_epoch: Epoch,
     total_active_stake_by_increment: u64,
@@ -221,7 +236,7 @@ pub const EpochTransitionCache = struct {
     // this is borrowed from ReusedEpochTransitionCache
     flags: []const u8,
     // this is borrowed from ReusedEpochTransitionCache, we append it in processPendingDeposits() so it needs to be mutable and avoid stale pointer in ReusedEpochTransitionCache.deinit()
-    is_compounding_validator_arr: *BoolArray,
+    is_compounding_validator_arr: BorrowedBoolArray,
     rewards: []u64,
     penalties: []u64,
     slashing_penalties: []u64,
@@ -544,6 +559,7 @@ pub const EpochTransitionCache = struct {
         try reused_cache.slashing_penalties.resize(reused_cache.allocator, indices_to_slash.items.len);
 
         return .{
+            .allocator = allocator,
             .prev_epoch = prev_epoch,
             .current_epoch = current_epoch,
             .total_active_stake_by_increment = total_active_stake_by_increment,
@@ -567,7 +583,10 @@ pub const EpochTransitionCache = struct {
             .proposer_indices = reused_cache.proposer_indices.items,
             .inclusion_delays = reused_cache.inclusion_delays.items,
             .flags = reused_cache.flags.items,
-            .is_compounding_validator_arr = &reused_cache.is_compounding_validator_arr,
+            .is_compounding_validator_arr = .{
+                .array = &reused_cache.is_compounding_validator_arr,
+                .owner_allocator = reused_cache.allocator,
+            },
             .rewards = reused_cache.rewards.items,
             .penalties = reused_cache.penalties.items,
             .slashing_penalties = reused_cache.slashing_penalties.items,
@@ -589,7 +608,7 @@ pub const EpochTransitionCache = struct {
         return job.join();
     }
 
-    pub fn deinit(self: *EpochTransitionCache, allocator: Allocator) void {
+    pub fn deinit(self: *EpochTransitionCache) void {
         if (self.next_shuffling) |next_shuffling| next_shuffling.unref();
         if (self.shuffling_job) |*job| job.cancel();
         // no need to deinit proposer_indices and inclusion_delays as they are from reused_cache
@@ -599,13 +618,13 @@ pub const EpochTransitionCache = struct {
         // self.is_active_curr_epoch.deinit();
         // self.is_active_next_epoch.deinit();
         // self.is_compounding_validator_arr.deinit();
-        self.indices_to_slash.deinit(allocator);
-        self.indices_eligible_for_activation_queue.deinit(allocator);
-        self.indices_eligible_for_activation.deinit(allocator);
-        self.indices_to_eject.deinit(allocator);
+        self.indices_to_slash.deinit(self.allocator);
+        self.indices_eligible_for_activation_queue.deinit(self.allocator);
+        self.indices_eligible_for_activation.deinit(self.allocator);
+        self.indices_to_eject.deinit(self.allocator);
         // rewards and penalties are from reused_cache
         if (self.balances) |*balances| {
-            balances.deinit(allocator);
+            balances.deinit(self.allocator);
         }
     }
 };

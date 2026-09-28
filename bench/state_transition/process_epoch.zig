@@ -56,7 +56,7 @@ fn ProcessBeforeProcessEpochBench(comptime fork: ForkSeq) type {
                 BenchState.cloned_cached_state.epoch_cache,
                 BenchState.cloned_cached_state.state,
             ) catch unreachable;
-            defer epoch_transition_cache.deinit(allocator);
+            defer epoch_transition_cache.deinit();
         }
     };
 }
@@ -84,12 +84,11 @@ fn ProcessRewardsAndPenaltiesBench(comptime fork: ForkSeq) type {
     return struct {
         epoch_transition_cache: *EpochTransitionCache,
 
-        pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
+        pub fn run(self: *@This(), _: std.mem.Allocator) void {
             const cache = self.epoch_transition_cache;
 
             state_transition.processRewardsAndPenalties(
                 fork,
-                allocator,
                 BenchState.cloned_cached_state.config,
                 BenchState.cloned_cached_state.epoch_cache,
                 BenchState.cloned_cached_state.state.castToFork(fork),
@@ -403,7 +402,7 @@ fn ProcessEpochBench(comptime fork: ForkSeq) type {
                 BenchState.cloned_cached_state.epoch_cache,
                 BenchState.cloned_cached_state.state,
             ) catch unreachable;
-            defer cache.deinit(allocator);
+            defer cache.deinit();
 
             state_transition.processEpoch(
                 fork,
@@ -438,7 +437,7 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
                 BenchState.cloned_cached_state.epoch_cache,
                 BenchState.cloned_cached_state.state,
             ) catch unreachable;
-            defer cache_val.deinit(allocator);
+            defer cache_val.deinit();
             const cache = &cache_val;
             recordSegment(.before_process_epoch, @as(u64, @intCast(time.since(io, before_start).nanoseconds)));
 
@@ -446,8 +445,8 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
                 const start_shuffling_timer = time.start(io);
                 state_transition.startProposerLookaheadShuffling(
                     fork,
-                    allocator,
                     io,
+                    BenchState.cloned_cached_state.epoch_cache,
                     BenchState.cloned_cached_state.state.castToFork(fork),
                     cache,
                 ) catch unreachable;
@@ -497,7 +496,6 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
             const rewards_start = time.start(io);
             state_transition.processRewardsAndPenalties(
                 fork,
-                allocator,
                 BenchState.cloned_cached_state.config,
                 epoch_cache,
                 fork_state,
@@ -733,7 +731,7 @@ fn runBenchmark(
         cached_state.epoch_cache,
         cached_state.state,
     );
-    defer epoch_transition_cache.deinit(allocator);
+    defer epoch_transition_cache.deinit();
 
     try stdout.print("Cached state created at slot {}\n", .{try cached_state.state.slot()});
     try stdout.print("\nStarting process_epoch benchmarks for {s} fork...\n\n", .{@tagName(fork)});

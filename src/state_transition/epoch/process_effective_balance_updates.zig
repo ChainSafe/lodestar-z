@@ -40,7 +40,7 @@ pub fn processEffectiveBalanceUpdates(
     defer if (cache.balances == null) {
         allocator.free(balances);
     };
-    const is_compounding_validator_arr = cache.is_compounding_validator_arr.items;
+    const is_compounding_validator_arr = cache.is_compounding_validator_arr.items();
 
     var previous_epoch_participation: *types.altair.EpochParticipation.TreeView = undefined;
     var current_epoch_participation: *types.altair.EpochParticipation.TreeView = undefined;

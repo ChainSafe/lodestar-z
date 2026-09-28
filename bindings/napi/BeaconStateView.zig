@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const napi = @import("zapi:zapi").napi;
 const js = @import("zapi:zapi").js;
 const c = @import("config");

@@ -241,7 +241,7 @@ pub const TestCachedBeaconState = struct {
         self.allocator.destroy(self.cached_state);
         self.pubkey_cache.deinit();
         self.allocator.destroy(self.pubkey_cache);
-        self.epoch_transition_cache.deinit(self.allocator);
+        self.epoch_transition_cache.deinit();
         @import("../state_transition.zig").deinitReusedEpochTransitionCache(std.testing.io);
         self.allocator.destroy(self.epoch_transition_cache);
         self.allocator.destroy(self.config);
