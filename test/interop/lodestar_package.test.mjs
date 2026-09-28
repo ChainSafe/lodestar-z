@@ -316,6 +316,8 @@ test("install and verify use a relocated archive without the native checkout", a
   const evidence = JSON.parse(await readFile(join(evidenceDir, "install-evidence.json"), "utf8"));
   assert.equal(evidence.activation, "activated");
   assert.equal(JSON.parse(await readFile(join(evidenceDir, "install-prepared.json"), "utf8")).activation, "prepared");
+  assert.match(await readFile(join(evidenceDir, "install-lockfile.yaml"), "utf8"), /lodestar-z\.tgz/);
+  await missing(join(root, "release", "pnpm-lock.yaml"));
   const result = evidence.verification;
   assert.equal(result.archive.sha256.length, 64);
   assert.equal(result.resolutions.packageRoots.length, 1);
@@ -429,9 +431,9 @@ test("install persists and emits a structured pnpm failure record", async () => 
   assert.deepEqual(saved.attempts[0].command.argv, [
     "pnpm",
     "install",
-    "--offline",
+    "--prefer-offline",
     "--ignore-scripts",
-    "--lockfile=false",
+    "--no-frozen-lockfile",
     "--package-import-method=copy",
     "--no-optimistic-repeat-install",
     "--no-prefer-frozen-lockfile",

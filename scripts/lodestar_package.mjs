@@ -1,5 +1,5 @@
 import {randomBytes} from "node:crypto";
-import {mkdir, mkdtemp, realpath, rename, rm, stat, writeFile} from "node:fs/promises";
+import {copyFile, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeFile} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {basename, dirname, join, relative, resolve} from "node:path";
 import {fileURLToPath, pathToFileURL} from "node:url";
@@ -453,6 +453,12 @@ async function install(hostDir, manifestPath, evidenceDir, releaseDir, activeLin
   }
 }
 
+async function restoreLockfile(lockfile, hostLockfile, evidenceDir) {
+  if (await exists(lockfile)) await copyFile(lockfile, join(evidenceDir, "install-lockfile.yaml"));
+  if (hostLockfile === null) await rm(lockfile, {force: true});
+  else await writeFile(lockfile, hostLockfile);
+}
+
 async function installWithEvidence(hostDir, manifestPath, evidenceDir, archiveState) {
   const manifests = await hostManifestPaths(hostDir);
   const immutablePaths = [...manifests, join(hostDir, "pnpm-workspace.yaml"), join(hostDir, "pnpm-lock.yaml")];
@@ -481,13 +487,27 @@ module.exports = {hooks: {readPackage(pkg) {
 `;
   await writeFile(hookPath, hook, {flag: "wx"});
   const majorVersion = Number.parseInt(selectedVersion.split(".")[0], 10);
-  const installArgs = ["install", "--offline", "--ignore-scripts", "--lockfile=false", "--package-import-method=copy"];
+  // The host lockfile pins every other package: pnpm re-resolves with it, fetching only the metadata it lacks, and
+  // the graph comparison below proves nothing else changed. pnpm rewrites the lockfile for the replacement; the
+  // evidence keeps that copy and the host's own is restored.
+  const installArgs = [
+    "install",
+    "--prefer-offline",
+    "--ignore-scripts",
+    "--no-frozen-lockfile",
+    "--package-import-method=copy",
+  ];
   if (majorVersion >= 11) installArgs.push("--no-optimistic-repeat-install", "--no-prefer-frozen-lockfile");
   installArgs.push("--pnpmfile", hookPath);
+  const lockfile = join(hostDir, "pnpm-lock.yaml");
+  const hostLockfile = await readFile(lockfile).catch((error) =>
+    error.code === "ENOENT" ? null : Promise.reject(error)
+  );
   let command;
   try {
     command = await runCommand("pnpm", installArgs, hostDir, {allowFailure: true});
   } catch (error) {
+    await restoreLockfile(lockfile, hostLockfile, evidenceDir);
     await writeFile(
       join(evidenceDir, "install-failure.json"),
       `${JSON.stringify(
@@ -499,6 +519,7 @@ module.exports = {hooks: {readPackage(pkg) {
     );
     throw error;
   }
+  await restoreLockfile(lockfile, hostLockfile, evidenceDir);
   let attemptGraph;
   try {
     attemptGraph = await installedGraph(hostDir, manifests);
