@@ -1119,6 +1119,110 @@ test "Pool.unref reclaims trees deeper than the bounded traversal stack" {
     for (reclaimed.items) |id| pool.unref(id);
 }
 
+test "memory_safety: Pool.unref resumes deep subtrees and preserves a retained shared branch" {
+    const depth = 2 * max_depth + 2;
+    const pool_size = 3 * depth + 3;
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = pool_size,
+    });
+    defer pool.deinit();
+
+    const baseline = pool.getNodesInUse();
+    const left_leaf = try pool.createLeafFromUint(1);
+    const right_leaf = try pool.createLeafFromUint(2);
+    const shared = try pool.createBranch(left_leaf, right_leaf);
+    try pool.ref(shared);
+    const shared_root = shared.getRoot(&pool).*;
+
+    var right = shared;
+    for (0..depth) |i| {
+        const leaf = try pool.createLeafFromUint(i);
+        right = try pool.createBranch(right, leaf);
+    }
+
+    // The deep right subtree is deferred at the bottom of the left spine,
+    // so resuming it fills the stack again while older continuations remain.
+    var root = try pool.createBranch(shared, right);
+    for (1..depth) |_| {
+        root = try pool.createBranch(root, shared);
+    }
+
+    pool.unref(root);
+    try std.testing.expectEqual(baseline + 3, pool.getNodesInUse());
+    try std.testing.expectEqual(1, shared.getState(&pool).refCount());
+    try std.testing.expectEqual(1, left_leaf.getState(&pool).refCount());
+    try std.testing.expectEqual(1, right_leaf.getState(&pool).refCount());
+    try std.testing.expectEqual(left_leaf, try shared.getLeft(&pool));
+    try std.testing.expectEqual(right_leaf, try shared.getRight(&pool));
+    try std.testing.expectEqualSlices(u8, &shared_root, shared.getRoot(&pool));
+
+    pool.unref(shared);
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+
+    var reclaimed: [pool_size]Node.Id = undefined;
+    for (&reclaimed) |*id| id.* = try pool.createLeafFromUint(0);
+    try std.testing.expectError(error.PoolExhausted, pool.createLeafFromUint(0));
+    for (reclaimed) |id| pool.unref(id);
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+}
+
+test "memory_safety: Pool.unref destroys heap payloads in overflow continuations" {
+    const Payload = struct {
+        destroyed: *usize,
+
+        pub fn init(allocator: std.mem.Allocator, value: *const @This()) !*const @This() {
+            const ptr = try allocator.create(@This());
+            ptr.* = value.*;
+            return ptr;
+        }
+
+        pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+            self.destroyed.* += 1;
+            allocator.destroy(self);
+        }
+
+        pub fn getRoot(_: *const @This(), out: *[32]u8) void {
+            out.* = @splat(0);
+        }
+
+        pub fn toTree(_: *const @This(), pool: *Node.Pool) !Node.Id {
+            return pool.createLeafFromUint(0);
+        }
+    };
+    const allocator = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = failing.allocator(),
+        .pool_size = max_depth + 6,
+    });
+    defer pool.deinit();
+
+    const baseline = pool.getNodesInUse();
+    var destroyed: usize = 0;
+    const container = try pool.createContainerStruct(Payload, &.{ .destroyed = &destroyed });
+    const chunked = try pool.createChunkedLeafEmpty(1);
+    const leaf = try pool.createLeafFromUint(1);
+    var root = try pool.createBranch(leaf, chunked);
+    root = try pool.createBranch(root, container);
+    for (0..max_depth + 1) |_| {
+        root = try pool.createBranch(root, @enumFromInt(0));
+    }
+
+    const allocations_before = failing.alloc_index;
+    failing.fail_index = allocations_before;
+    failing.resize_fail_index = failing.resize_index;
+    pool.unref(root);
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+    try std.testing.expectEqual(1, destroyed);
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    try std.testing.expectEqual(allocations_before, failing.alloc_index);
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
 test "getRoot preserves shared branches and mixed cached payload roots" {
     const hashing = @import("hashing");
     const Payload = struct {
