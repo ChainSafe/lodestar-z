@@ -587,15 +587,16 @@ describe("binding pump scheduling", () => {
   }, 40_000);
 
   it.each([
-    ["generated_batch", "InvalidNetworkInteger"],
-    ["failed_turns", "capacity failed"],
-    ["completion_contract", "completed publication 0:1"],
+    ["generated_batch", "generated_batch", "InvalidNetworkInteger"],
+    ["failed_turns", "failed_turns", "capacity failed"],
+    ["completion_contract", "completion_contract", "completed publication 0:1"],
+    ["close_missing", "completion_contract", "closed with records unsettled: 1"],
   ])(
     "raising %s over a real native runtime terminates the process through native fail, in a child process",
-    (site, reason) => {
+    (scenario, site, reason) => {
       const child = spawnSync(
         process.execPath,
-        ["--import", "tsx", "bindings/test/fixtures/network-escalation.mjs", site],
+        ["--import", "tsx", "bindings/test/fixtures/network-escalation.mjs", scenario],
         {encoding: "utf8", timeout: 30_000}
       );
       expect(child.signal, child.stderr).toBe("SIGABRT");

@@ -1,4 +1,4 @@
-import {holdSettling, requestForks} from "../utils/network.ts";
+import {holdSettling, requestForks, runtimeReleased} from "../utils/network.ts";
 import assert from "node:assert/strict";
 import {setTimeout as delay} from "node:timers/promises";
 import {BLOCKS, incomingPair, takeIncoming} from "../utils/network-incoming.ts";
@@ -67,6 +67,20 @@ try {
     await assert.rejects(permission, {code: "NetworkIncomingClosed"});
     assert.equal(await closed, undefined);
     assert.deepEqual(order, ["closed", "NetworkIncomingClosed"]);
+  } else if (mode === "late-retire") {
+    // Host work that outlives the native runtime itself retires quietly once the runtime is gone.
+    let retire = () => undefined;
+    incoming.retainUntil(
+      new Promise((resolve) => {
+        retire = resolve;
+      })
+    );
+    assert.deepEqual(await right.close(), {reason: "requested"});
+    assert.equal(await closed, undefined);
+    right = null;
+    await runtimeReleased();
+    retire();
+    await delay(10);
   } else if (mode === "held-ack") {
     const ack = incoming.respond(new Uint8Array(10 * 1024 * 1024), context).then(() => "sent", (error) => error.code);
     await right.close();

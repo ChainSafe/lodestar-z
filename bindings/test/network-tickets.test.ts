@@ -228,4 +228,26 @@ describe("completion owner", () => {
     expect(() => node.deliver([{family: "incoming", handle: handle(0, 1n), response: {}}])).toThrow(Breached);
     expect(node.native.fail).toHaveBeenCalledExactlyOnceWith("completion_contract", "completed incoming 0:1");
   });
+
+  it("settles closed with native's close result after every earlier completion, and not when a record is missing", async () => {
+    const node = owner();
+    const order: unknown[] = [];
+    const published = node.completions.admit("publication", undefined, () => handle(0, 1n));
+    void published.then((value) => order.push(value));
+    void node.completions.closed.then((result) => order.push(result));
+    node.deliver([{family: "publication", handle: handle(0, 1n), value: "sent"}]);
+    const result = {error: "NetworkWakeFailed", reason: "failed"};
+    node.deliver([], result);
+    expect(await node.completions.closed).toBe(result);
+    expect(order).toEqual(["sent", result]);
+    const missing = owner();
+    let closed = false;
+    void missing.completions.closed.then(() => {
+      closed = true;
+    });
+    void missing.completions.admit("command", "getPeers", () => handle(0, 1n));
+    expect(() => missing.deliver([], {reason: "requested"})).toThrow(Breached);
+    await Promise.resolve();
+    expect(closed).toBe(false);
+  });
 });

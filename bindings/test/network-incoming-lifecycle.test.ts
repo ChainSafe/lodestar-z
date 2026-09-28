@@ -8,6 +8,7 @@ test.each([
   "facade-gc",
   "object-gc",
   "ready-gc",
+  "late-retire",
   "held-ack",
   "held-closed",
   "notifier",

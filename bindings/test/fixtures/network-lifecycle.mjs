@@ -5,6 +5,7 @@ import {createNativeNetwork} from "../../src/network.js";
 import {initializeNativeNetworkRuntime} from "../../src/network-runtime.js";
 import {
   applicationConfig,
+  holdSettling,
   localIntent,
   requestForks,
   runtimeReleased,
@@ -266,6 +267,79 @@ if (mode === "exit") {
   await retired;
   await peer.stop();
   console.log("served-exit");
+} else if (mode === "saturated-close") {
+  // Close begins with every family outstanding: each promise settles before closed, which leaves no cell, store or
+  // event-loop hold, and a collected runtime makes way for the next one.
+  const {incomingPair, takeIncoming, BLOCKS} = await import("../utils/network-incoming.js");
+  let pair = await incomingPair();
+  const {left, remote, identity} = pair;
+  let right = pair.right;
+  pair = null;
+  const settlements = new Settlements();
+  const unsettled = settlements.unsettledAtClose(right.closed);
+  const served = [];
+  for (let i = 0; i < 2; i++) {
+    void left.request(remote.peerId, BLOCKS, new Uint8Array(32)).next().catch(noop);
+    served.push(await takeIncoming(right));
+  }
+  settlements.watch(() => served[0].ready());
+  for (const incoming of served) settlements.watch(() => incoming.closed);
+  right.holdOperations(true);
+  for (let i = 0; i < right.diagnostics().requests.capacity; i++) {
+    const stream = right.request(identity.peerId, BLOCKS, new Uint8Array(32));
+    settlements.watch(() => stream.next());
+  }
+  for (let i = 0; i < 16; i++) settlements.watch(() => right.getIdentity());
+  for (let i = 0; i < 8; i++) settlements.watch(() => right.connect(...unreachableConnect()));
+  const {capacity, urgentReserved} = right.diagnostics().publications;
+  for (let i = 0; i < capacity - urgentReserved; i++)
+    settlements.watch(() =>
+      right.publishGossip(topicName(), new Uint8Array(4000).fill(i), {allowZeroPeers: true, ignoreDuplicate: true})
+    );
+  assert.deepEqual(await right.close(), {reason: "requested"});
+  await settlements.settled();
+  assert.deepEqual(await unsettled, []);
+  assert(settlements.counts.every((count) => count === 1));
+  const diagnostics = right.diagnostics();
+  assert.equal(diagnostics.operationOccupied, 0);
+  assert.equal(diagnostics.typedStoreBytes, 0);
+  for (const family of ["publications", "requests", "incoming"]) assert.equal(diagnostics[family].occupied, 0);
+  await left.close();
+  right = null;
+  served.length = 0;
+  await runtimeReleased();
+  const next = startRuntime(applicationConfig());
+  assert.equal(typeof (await next.getIdentity()).peerId, "string");
+  assert.deepEqual(await next.close(), {reason: "requested"});
+  console.log("saturated-closed");
+} else if (mode === "finalized-drain") {
+  // Native's notifier finalizes while several batches of completions remain: the owner still delivers every one, then
+  // the close.
+  const config = applicationConfig();
+  config.profile = "beaconNode";
+  config.resources.bridgeBudgetBytes = 512 * 1024 * 1024;
+  config.resources.nativeBudgetBytes = 512 * 1024 * 1024;
+  const runtime = startRuntime(config);
+  await runtime.applyIntent(localIntent(config), config.initialSlot);
+  holdSettling(runtime, true);
+  const settlements = new Settlements();
+  const unsettled = settlements.unsettledAtClose(runtime.closed);
+  for (let i = 0; i < 100; i++)
+    settlements.watch(() =>
+      runtime.publishGossip(topicName(), new Uint8Array(4000).fill(i), {allowZeroPeers: true, ignoreDuplicate: true})
+    );
+  for (let i = 0; i < 20; i++) settlements.watch(() => runtime.getIdentity());
+  const closing = runtime.close();
+  // The owner stops and releases the notifier, which finalizes while every completion waits for an exchange.
+  for (let i = 0; i < 400 && runtime.state !== "closed"; i++) await delay(5);
+  await delay(50);
+  assert(runtime.diagnostics().publications.occupied > 64);
+  holdSettling(runtime, false);
+  assert.deepEqual(await closing, {reason: "requested"});
+  await settlements.settled();
+  assert.deepEqual(await unsettled, []);
+  assert(settlements.counts.every((count) => count === 1));
+  console.log("finalized-drained");
 } else if (mode === "await-close") {
   // Only the notifier ref, taken by close, keeps the loop alive until closed settles.
   const config = applicationConfig();
