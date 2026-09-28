@@ -59,6 +59,9 @@ const Options = struct {
     calls_per_pump: u32 = 0,
     calls_per_peer: u32 = 0,
     sample_ms: u32 = 250,
+    /// Active validators from which the hub scores attestation subnets as Lodestar does, leaving
+    /// every other kind unscored as Lodestar leaves columns; zero keeps the default score parameters.
+    validators: u32 = 0,
 
     fn durationMs(self: *const Options) u64 {
         return @as(u64, self.lead_ms) + self.window_ms + self.tail_ms;
@@ -332,8 +335,55 @@ fn hubResolved(chain: *const Chain, options: *const Options) !network.configurat
             .opportunistic_graft_interval_ms = 42_000,
             .calls_per_pump = if (options.calls_per_pump == 0) null else options.calls_per_pump,
             .calls_per_peer = if (options.calls_per_peer == 0) null else options.calls_per_peer,
+            .topic_params = if (options.validators == 0) null else lodestarTopics(options.validators),
         },
     });
+}
+
+/// Lodestar's `getTopicScoreParams` for attestation subnets at `validators` active validators, with
+/// every other kind unscored.
+fn lodestarTopics(validators: u32) [gossip.topic_policy.kind_count]gossip.score.TopicPolicy {
+    const p = preset.preset;
+    const slot_ms: f64 = @floatFromInt(chain_config.chain.SLOT_DURATION_MS);
+    const slots: f64 = @floatFromInt(p.SLOTS_PER_EPOCH);
+    const subnets: f64 = @floatFromInt(Kind.beacon_attestation.countMax());
+    // Ten in-mesh and forty first-delivery points over Lodestar's scored topic weights.
+    const max_positive: f64 = 50 * 2.85;
+    const committees: u64 = @max(1, @min(p.MAX_COMMITTEES_PER_SLOT, validators / p.SLOTS_PER_EPOCH / p.TARGET_COMMITTEE_SIZE));
+    const bursts = committees * p.SLOTS_PER_EPOCH >= 2 * @as(u64, Kind.beacon_attestation.countMax());
+    const rate = @as(f64, @floatFromInt(validators)) / subnets / slots;
+    const weight = 1 / subnets;
+    const first_decay = decayOver(if (bursts) slots * slot_ms else 4 * slots * slot_ms, slot_ms);
+    const mesh_slots: u64 = if (bursts) 4 * p.SLOTS_PER_EPOCH else 16 * p.SLOTS_PER_EPOCH;
+    const mesh_decay = decayOver(@as(f64, @floatFromInt(mesh_slots)) * slot_ms, slot_ms);
+    const threshold = rate / 50 / (1 - mesh_decay) * mesh_decay;
+    const first_cap = 2 * rate / 8 / (1 - first_decay);
+    var topics: [gossip.topic_policy.kind_count]gossip.score.TopicPolicy = @splat(.{ .params = .{ .weight = 0 } });
+    topics[@intFromEnum(Kind.beacon_attestation)] = .{ .mesh_delivery_start_slot = mesh_slots + 1, .params = .{
+        .weight = weight,
+        .time_in_mesh_weight = 10 / (3600 / (slot_ms / 1000)),
+        .time_in_mesh_cap = 3600 / (slot_ms / 1000),
+        .time_in_mesh_quantum_ms = chain_config.chain.SLOT_DURATION_MS,
+        .first_delivery_weight = 40 / first_cap,
+        .first_delivery_cap = first_cap,
+        .first_delivery_decay = first_decay,
+        .mesh_delivery_weight = -max_positive / (weight * threshold * threshold),
+        .mesh_delivery_threshold = threshold,
+        .mesh_delivery_cap = @max(16 * threshold, 2),
+        .mesh_delivery_decay = mesh_decay,
+        .mesh_delivery_activation_ms = if (bursts) chain_config.chain.SLOT_DURATION_MS * (p.SLOTS_PER_EPOCH / 2 + 1) else chain_config.chain.SLOT_DURATION_MS * p.SLOTS_PER_EPOCH,
+        .mesh_delivery_window_ms = 12_000,
+        .mesh_failure_weight = -max_positive / (weight * threshold * threshold),
+        .mesh_failure_decay = mesh_decay,
+        .invalid_weight = -max_positive / weight,
+        .invalid_decay = decayOver(50 * slots * slot_ms, slot_ms),
+    } };
+    return topics;
+}
+
+/// The per-slot decay that brings a counter to 1% after `ms`.
+fn decayOver(ms: f64, slot_ms: f64) f64 {
+    return std.math.pow(f64, 0.01, slot_ms / ms);
 }
 
 const slow_tick_ms = 10;
@@ -544,11 +594,14 @@ const outcome_count = @typeInfo(Outcome).@"enum".fields.len;
 /// Cumulative hub counters at one instant; windows and samples are differences of two.
 const Totals = struct {
     at_ms: u64 = 0,
+    /// Data messages the hub read, duplicates included.
+    received: u64 = 0,
     admitted: u64 = 0,
     refused: u64 = 0,
     applied: u64 = 0,
     applies: u64 = 0,
     forwarded: u64 = 0,
+    score_evaluations: u64 = 0,
     recipients: [origin_count][outcome_count]u64 = @splat(@splat(0)),
     queue_drops: [@typeInfo(DropReason).@"enum".fields.len]u64 = @splat(0),
     write_calls: u64 = 0,
@@ -570,12 +623,16 @@ const Totals = struct {
             .queue_drops = g.retired_queue_drops,
             .write_calls = g.sessions.writes,
             .would_block = g.sessions.blocked_writes,
+            .score_evaluations = g.peers.scores.calculations,
             .steps = steps,
             .step_ns = @intCast(hub.step_duration.sum),
             .udp_sent = hub.transport.udp.counters.sent_datagrams,
             .udp_received = hub.transport.udp.counters.received_datagrams,
         };
-        for (g.topic_metrics.counts) |counts| result.forwarded += counts.forwarded;
+        for (g.topic_metrics.counts) |counts| {
+            result.received += counts.received;
+            result.forwarded += counts.forwarded;
+        }
         for (g.sessions.rows) |*row| for (&result.queue_drops, row.io.tx.drops) |*total, value| {
             total.* += value;
         };
@@ -811,7 +868,7 @@ fn udpDrops(hub: *network.NetworkCore) u64 {
 }
 
 fn printWindow(name: []const u8, delta: *const Totals, steps: []u32) void {
-    std.debug.print("case=gossip_burst window={s} ms={d} admitted={d} hub_refused={d} verdicts={d} applies={d} verdicts_per_apply={d:.1} forwarded={d} steps={d} owner_busy={d:.2}\n", .{ name, delta.at_ms, delta.admitted, delta.refused, delta.applied, delta.applies, ratio(delta.applied, delta.applies), delta.forwarded, delta.steps, ratio(delta.step_ns, delta.at_ms * std.time.ns_per_ms) });
+    std.debug.print("case=gossip_burst window={s} ms={d} received={d} admitted={d} hub_refused={d} verdicts={d} applies={d} verdicts_per_apply={d:.1} forwarded={d} steps={d} owner_busy={d:.2} owner_ns_per_received={d:.0} score_evaluations={d} evaluations_per_1k_received={d:.1}\n", .{ name, delta.at_ms, delta.received, delta.admitted, delta.refused, delta.applied, delta.applies, ratio(delta.applied, delta.applies), delta.forwarded, delta.steps, ratio(delta.step_ns, delta.at_ms * std.time.ns_per_ms), ratio(delta.step_ns, delta.received), delta.score_evaluations, 1000 * ratio(delta.score_evaluations, delta.received) });
     inline for (@typeInfo(Origin).@"enum".fields) |origin| {
         const outcomes = delta.recipients[origin.value];
         if (outcomes[@intFromEnum(Outcome.selected)] > 0 or outcomes[@intFromEnum(Outcome.completed)] > 0) {
