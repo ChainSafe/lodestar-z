@@ -634,6 +634,47 @@ test "core unreachable destination backs off and rotates to its alternate addres
     try std.testing.expect(node.peer_manager.dialing.active[row.attempt.?].connection != null);
 }
 
+test "core fails a dial the host refuses without failing the turn or penalizing the peer" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{24}));
+    const remote = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{25}));
+    var node: runtime.NetworkCore = undefined;
+    const opts = options(&key);
+    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
+    defer node.deinit(std.testing.io);
+    const now = try @import("transport.zig").currentTime(std.testing.io);
+    const peer = t.PeerId.fromPublicKey(&remote.publicKey());
+    try node.connectUntil(&peer, &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 19003 } }}, now, now.mono_ms +| @import("peers/dialing.zig").connect_timeout_ms);
+    const Refused = struct {
+        installed: bool = false,
+        result: runtime.Result = undefined,
+
+        /// The owner turn polls natively and starts no Io task on the filtered thread.
+        fn run(self: *@This(), core: *runtime.NetworkCore, at: Now) void {
+            const filter = @import("udp").testing.SendFilter;
+            if (!filter.install(&.{.{ .socket = core.transport.udp.sockets.primary().handle, .errno = .PERM }})) return;
+            self.installed = true;
+            self.result = core.step(std.testing.io, at, .{}, .deadlineOnly(at.mono_ms));
+        }
+    };
+    var refused: Refused = .{};
+    const thread = try std.Thread.spawn(.{}, Refused.run, .{ &refused, &node, now });
+    thread.join();
+    // Kernels without seccomp filters cannot refuse the send.
+    if (!refused.installed) return error.SkipZigTest;
+    try std.testing.expect(refused.result.failure == null);
+    try std.testing.expectEqual(@as(u8, 1), refused.result.dial_failed);
+    try std.testing.expectEqual(@as(u8, 0), refused.result.dial_deferred);
+    try std.testing.expectEqual(@as(u8, 0), refused.result.dial_started);
+    const row = &node.peer_manager.catalog.rows[0];
+    try std.testing.expectEqual(@as(u8, 1), row.intent.failures);
+    try std.testing.expect(row.attempt == null);
+    try std.testing.expectEqual(@as(f64, 0), row.reputation.score);
+    try std.testing.expect(!row.reputation.banned(now.mono_ms));
+    const history = &node.peer_manager.catalog.history;
+    try std.testing.expect(history.rejection(history.identityKey(&peer), now.mono_ms) == null);
+}
+
 test "core socket faults preserve the other owner and local dial refusal is deferred" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{22}));
     const remote_key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{23}));

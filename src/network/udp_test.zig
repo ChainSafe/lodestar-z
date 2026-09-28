@@ -104,6 +104,48 @@ test "UDP metrics count successful batch prefixes when a later send fails" {
     try std.testing.expectEqual(@as(u64, 5), socket.counters.sent_bytes);
 }
 
+test "dual-stack UDP counts the exact prefix of a batch the host refuses in one family" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    var buffer: [constants.datagram_size_max]u8 = undefined;
+    var target = try udp_mod.Udp.bind(std.testing.io, .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } });
+    defer target.close(std.testing.io);
+    const Refused = struct {
+        installed: bool = false,
+        outcomes: [2]udp_mod.SendOutcome = undefined,
+
+        fn run(self: *@This(), udp: *udp_mod.Udp) void {
+            const filter = @import("udp").testing.SendFilter;
+            if (!filter.install(&.{.{ .socket = udp.sockets.values[1].?.handle, .errno = .PERM }})) return;
+            self.installed = true;
+            const local = udp.localAddresses();
+            var payload = [_]u8{ 1, 2, 3 };
+            const batch = [_]types.Sent{
+                .{ .to = local[0].?, .bytes = payload[0..1] },
+                .{ .to = local[1].?, .bytes = payload[1..2] },
+                .{ .to = local[0].?, .bytes = payload[2..3] },
+            };
+            self.outcomes[0] = udp.sendMany(std.testing.io, &batch);
+            self.outcomes[1] = udp.sendMany(std.testing.io, batch[2..]);
+        }
+    };
+    var refused: Refused = .{};
+    const thread = try std.Thread.spawn(.{}, Refused.run, .{ &refused, &target });
+    thread.join();
+    // Kernels without seccomp filters cannot refuse the sends.
+    if (!refused.installed) return error.SkipZigTest;
+    try std.testing.expectEqual(udp_mod.SendOutcome{ .sent = 1, .failure = error.DestinationRefused }, refused.outcomes[0]);
+    try std.testing.expectEqual(udp_mod.SendOutcome{ .sent = 1, .failure = null }, refused.outcomes[1]);
+    try std.testing.expectEqual(@as(u64, 2), target.counters.sent_datagrams);
+    try std.testing.expectEqual(@as(u64, 2), target.counters.sent_bytes);
+    var ready: [2]bool = @splat(true);
+    for ([_]u8{ 1, 3 }) |expected| {
+        const message = try target.receiveReady(std.testing.io, &buffer, &ready);
+        try std.testing.expectEqualSlices(u8, &.{expected}, message.bytes);
+        try std.testing.expect(message.from == .ip4);
+    }
+    try std.testing.expectError(error.Timeout, target.receiveReady(std.testing.io, &buffer, &ready));
+}
+
 test "dual-stack UDP services both families fairly" {
     var buffer: [constants.datagram_size_max]u8 = undefined;
     var target = try udp_mod.Udp.bind(std.testing.io, .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } });
