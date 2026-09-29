@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import {copyFile, cp, mkdir, mkdtemp, readFile, rm, writeFile} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {dirname, join, resolve} from "node:path";
-import {fileURLToPath} from "node:url";
+import {fileURLToPath, pathToFileURL} from "node:url";
 import {getTarget} from "@chainsafe/zapi";
 import {runBoundedCommand} from "./bounded_child.mjs";
 import {inspectNetworkAddon} from "./check_network_addon.mjs";
@@ -65,6 +65,7 @@ try {
     import {existsSync, realpathSync} from "node:fs";
     import {dirname, join, relative} from "node:path";
     import {fileURLToPath} from "node:url";
+    import {assertExpectedGossipSha256} from ${JSON.stringify(pathToFileURL(join(source, "scripts/check_network_addon.mjs")).href)};
     const require = createRequire(join(process.cwd(), "probe.cjs"));
     const network = await import(${JSON.stringify(`${pkg.name}/network`)});
     assert.deepEqual(Object.keys(network), ["createNativeNetwork"]);
@@ -78,6 +79,7 @@ try {
     assert(!existsSync(join(packageRoot, "zig-out/lib/bindings.node")));
     assert.deepEqual(Object.keys(require.cache).filter(path => path.endsWith(".node")), [nativePath]);
     const gossipSha256Backend = native.NativeNetworkRuntime.gossipSha256Backend();
+    assertExpectedGossipSha256(gossipSha256Backend);
     console.log(JSON.stringify({target: ${JSON.stringify(target)}, platformPackage: ${JSON.stringify(platformPackage)}, loaded: true, gossipSha256Backend}));
   `,
     ],

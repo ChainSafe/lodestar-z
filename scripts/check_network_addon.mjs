@@ -3,6 +3,16 @@ import {createRequire} from "node:module";
 import {resolve} from "node:path";
 import {pathToFileURL} from "node:url";
 
+const GOSSIP_SHA256_BACKENDS = ["zig_std", "x86_sha_avx2", "aarch64_sha2"];
+
+/** Fails unless the addon selected the backend a qualification run names in LODESTAR_Z_EXPECT_GOSSIP_SHA256. */
+export function assertExpectedGossipSha256(backend) {
+  const expected = process.env.LODESTAR_Z_EXPECT_GOSSIP_SHA256;
+  if (!expected) return;
+  assert(GOSSIP_SHA256_BACKENDS.includes(expected), `unknown expected gossip SHA-256 backend ${expected}`);
+  assert.equal(backend, expected, "unexpected gossip SHA-256 backend");
+}
+
 export function inspectNetworkAddon(path) {
   const addon = createRequire(import.meta.url)(resolve(path));
   const names = Object.getOwnPropertyNames(addon).sort();
@@ -11,7 +21,8 @@ export function inspectNetworkAddon(path) {
   const actual = names.filter((name) => /^networkTest/i.test(name));
   assert.deepEqual(actual, [], "unexpected native network test exports");
   const gossipSha256Backend = addon.NativeNetworkRuntime.gossipSha256Backend();
-  assert(["zig_std", "x86_sha_avx2", "aarch64_sha2"].includes(gossipSha256Backend), "unknown gossip SHA-256 backend");
+  assert(GOSSIP_SHA256_BACKENDS.includes(gossipSha256Backend), "unknown gossip SHA-256 backend");
+  assertExpectedGossipSha256(gossipSha256Backend);
   return {exports: names, gossipSha256Backend, instrumented: false};
 }
 

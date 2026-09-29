@@ -568,7 +568,10 @@ jobs:
       - name: Build bindings
         run: |
           zig build build-lib:bindings -Doptimize=ReleaseSafe
-          node scripts/check_network_addon.mjs zig-out/lib/bindings.node normal
+          # The kernel's view of the runner's CPU names the gossip SHA-256 backend the addon must select.
+          expected=zig_std
+          if grep -qw sha_ni /proc/cpuinfo && grep -qw avx2 /proc/cpuinfo; then expected=x86_sha_avx2; fi
+          LODESTAR_Z_EXPECT_GOSSIP_SHA256=$expected node scripts/check_network_addon.mjs zig-out/lib/bindings.node normal
           pnpm test:network-package
       - name: Restore era files cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
@@ -610,7 +613,10 @@ jobs:
         run: |
           pnpm zapi build-artifacts --optimize ReleaseSafe
       - name: Install and load the packed native platform package
-        run: node scripts/check_network_package.mjs
+        run: |
+          expected=zig_std
+          if grep -qw sha_ni /proc/cpuinfo && grep -qw avx2 /proc/cpuinfo; then expected=x86_sha_avx2; fi
+          LODESTAR_Z_EXPECT_GOSSIP_SHA256=$expected node scripts/check_network_package.mjs
 
   # metrics_stf depends on httpz, which is temporarily disabled for Zig 0.16 migration
   # build-examples:
