@@ -480,6 +480,11 @@ test("platform archives must carry the main package's legal files", async () => 
   const complete = await archive("complete", {files: withNotices, legal: notices});
   const inspected = await inspectPlatformArchive(complete, expectedAddon, hostTarget, main, run);
   assert.equal(inspected.files.length, 4);
+  // macOS's tar is bsdtar, which lists archives differently.
+  if ((await run("bsdtar", ["--version"], root, {allowFailure: true}).catch(() => null))?.exitCode === 0) {
+    const bsdtar = (program, args, cwd, options) => run(program === "tar" ? "bsdtar" : program, args, cwd, options);
+    assert.deepEqual(await inspectPlatformArchive(complete, expectedAddon, hostTarget, main, bsdtar), inspected);
+  }
   const addonOnly = await archive("addon-only", {files: ["bindings.node"]});
   await assert.rejects(inspectPlatformArchive(addonOnly, expectedAddon, hostTarget, main, run), {
     code: "PlatformPackageMismatch",

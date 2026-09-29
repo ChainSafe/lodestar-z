@@ -100,8 +100,12 @@ export function validateArchivePath(path) {
 
 function parseVerboseEntry(line) {
   const fields = line.trim().split(/\s+/);
-  if (fields.length < 6 || !fields[1].includes("/") || !/^\d+$/.test(fields[2])) fail("InvalidArchiveListing", line);
-  const bytes = Number(fields[2]);
+  // GNU tar lists MODE OWNER/GROUP SIZE DATE TIME NAME; bsdtar, macOS's tar, MODE LINKS OWNER GROUP SIZE MONTH DAY
+  // YEAR NAME.
+  const gnu = fields[1]?.includes("/") === true;
+  const size = gnu ? fields[2] : fields[4];
+  if (fields.length < (gnu ? 6 : 9) || !/^\d+$/.test(size ?? "")) fail("InvalidArchiveListing", line);
+  const bytes = Number(size);
   if (!Number.isSafeInteger(bytes)) fail("InvalidArchiveListing", line);
   return {bytes, type: fields[0][0]};
 }
