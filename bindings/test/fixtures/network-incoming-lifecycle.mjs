@@ -101,6 +101,8 @@ try {
     assert.equal(right.diagnostics().incoming.reservedBytes, 0);
     assert.equal(right.diagnostics().liveNativeRequestedBytes, 0);
   } else throw Error("unknown lifecycle scenario");
+  // A collected server stops without closing its connection, so its request would otherwise run to its deadline.
+  if (mode === "facade-gc" || mode === "ready-gc") await stream.return();
   await pending;
   console.log("incoming-lifecycle", mode, "ok");
 } finally {
