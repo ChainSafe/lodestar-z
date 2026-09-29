@@ -19,7 +19,7 @@ const GENESIS_SLOT = @import("preset").GENESIS_SLOT;
 const c = @import("constants");
 const Node = @import("persistent_merkle_tree").Node;
 
-/// we append EpochTransitionCache.is_compounding_validator_arr in this flow
+/// Records compounding flags for validators added during this flow.
 pub fn processPendingDeposits(
     comptime fork: ForkSeq,
     allocator: Allocator,
@@ -121,7 +121,7 @@ pub fn processPendingDeposits(
         0);
 }
 
-/// we append EpochTransitionCache.is_compounding_validator_arr in this flow
+/// Records the compounding flag when this flow adds a validator.
 fn applyPendingDeposit(
     comptime fork: ForkSeq,
     io: std.Io,
@@ -143,7 +143,7 @@ fn applyPendingDeposit(
         // Verify the deposit signature (proof of possession) which is not checked by the deposit contract
         if (validateDepositSignature(config, pubkey, withdrawal_credentials, amount, signature)) {
             try addValidatorToRegistry(fork, io, epoch_cache, state, pubkey, withdrawal_credentials, amount);
-            try cache.is_compounding_validator_arr.append(hasCompoundingWithdrawalCredential(withdrawal_credentials));
+            cache.appendCompoundingValidatorFlag(hasCompoundingWithdrawalCredential(withdrawal_credentials));
             // set balance, so that the next deposit of same pubkey will increase the balance correctly
             // this is to fix the double deposit issue found in mekong
             // see https://github.com/ChainSafe/lodestar/pull/7255

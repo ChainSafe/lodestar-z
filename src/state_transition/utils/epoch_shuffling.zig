@@ -39,10 +39,22 @@ pub const EpochShuffling = struct {
     committees_per_slot: usize,
 
     pub fn init(allocator: Allocator, seed: [32]u8, epoch: Epoch, active_indices: []const ValidatorIndex) !*EpochShuffling {
+        if (active_indices.len > std.math.maxInt(u32)) return error.InvalidActiveIndicesLength;
+
         const shuffling = try allocator.alloc(ValidatorIndex, active_indices.len);
         errdefer allocator.free(shuffling);
-        std.mem.copyForwards(ValidatorIndex, shuffling, active_indices);
-        try unshuffleList(shuffling, seed[0..], preset.SHUFFLE_ROUND_COUNT);
+
+        {
+            const positions = try allocator.alloc(u32, active_indices.len);
+            defer allocator.free(positions);
+
+            for (positions, 0..) |*position, i| position.* = @intCast(i);
+            try unshuffleList(positions, seed[0..], preset.SHUFFLE_ROUND_COUNT);
+            for (positions, shuffling) |position, *validator_index| {
+                validator_index.* = active_indices[position];
+            }
+        }
+
         const committees = try buildCommitteesFromShuffling(allocator, shuffling);
         errdefer for (committees) |slot_committees| {
             allocator.free(slot_committees);
@@ -136,14 +148,14 @@ pub fn computeEpochShufflingForFork(
     return EpochShuffling.init(allocator, seed, epoch, active_indices);
 }
 
-/// unshuffle the `active_indices` array in place synchronously
-fn unshuffleList(active_indices_to_shuffle: []ValidatorIndex, seed: []const u8, rounds: u8) !void {
+/// Unshuffle positions in place synchronously.
+fn unshuffleList(positions: []u32, seed: []const u8, rounds: u8) !void {
     const forwards = false;
-    return innerShuffleList(ValidatorIndex, active_indices_to_shuffle, seed, rounds, forwards);
+    return innerShuffleList(u32, positions, seed, rounds, forwards);
 }
 
 test unshuffleList {
-    var active_indices: [5]ValidatorIndex = .{ 0, 1, 2, 3, 4 };
+    var active_indices: [5]u32 = .{ 0, 1, 2, 3, 4 };
     const seed: [32]u8 = [_]u8{0} ** 32;
 
     try unshuffleList(&active_indices, &seed, 32);

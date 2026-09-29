@@ -40,8 +40,6 @@ pub fn processEffectiveBalanceUpdates(
     defer if (cache.balances == null) {
         allocator.free(balances);
     };
-    const is_compounding_validator_arr = cache.is_compounding_validator_arr.items();
-
     var previous_epoch_participation: *types.altair.EpochParticipation.TreeView = undefined;
     var current_epoch_participation: *types.altair.EpochParticipation.TreeView = undefined;
     if (comptime fork.gte(.altair)) {
@@ -53,9 +51,11 @@ pub fn processEffectiveBalanceUpdates(
     for (balances, 0..) |balance, i| {
         var effective_balance_increment = effective_balance_increments[i];
         var effective_balance = @as(u64, effective_balance_increment) * preset.EFFECTIVE_BALANCE_INCREMENT;
-        const effective_balance_limit: u64 = if (comptime fork.lt(.electra)) preset.MAX_EFFECTIVE_BALANCE else blk: {
+        const effective_balance_limit: u64 = if (comptime fork.lt(.electra))
+            preset.MAX_EFFECTIVE_BALANCE
+        else blk: {
             // from electra, effectiveBalanceLimit is per validator
-            if (is_compounding_validator_arr[i]) {
+            if (cache.isCompoundingValidator(i)) {
                 break :blk preset.MAX_EFFECTIVE_BALANCE_ELECTRA;
             } else {
                 break :blk preset.MIN_ACTIVATION_BALANCE;

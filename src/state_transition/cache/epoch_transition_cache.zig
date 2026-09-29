@@ -43,6 +43,42 @@ const UsizeArray = std.ArrayList(usize);
 const U8Array = std.ArrayList(u8);
 const U64Array = std.ArrayList(u64);
 
+/// A tail buffer data structure which provides a view on a borrowed base slice
+/// and a fixed growable tail for validators added during epoch processing.
+///
+/// Provides validator-indexed compounding flags.
+///
+/// NOTE: This data structure is useful for views on large arrays with a small,
+/// upper-limit on array growth. The tail avoids reallocating the process-global
+/// reused cache.
+const CompoundingValidatorFlags = struct {
+    /// An immutable view on the base array.
+    base: []const bool,
+    /// Growth is bounded by `preset.MAX_PENDING_DEPOSITS_PER_EPOCH` = 16.
+    tail: [preset.MAX_PENDING_DEPOSITS_PER_EPOCH]bool = undefined,
+    tail_len: usize = 0,
+
+    /// Appends the flag for a validator added during epoch processing.
+    ///
+    /// Asserts that the fixed tail has remaining capacity.
+    fn append(self: *CompoundingValidatorFlags, value: bool) void {
+        std.debug.assert(self.tail_len < self.tail.len);
+        self.tail[self.tail_len] = value;
+        self.tail_len += 1;
+    }
+
+    /// Returns a validator's flag from the borrowed base or fixed tail.
+    ///
+    /// The index must be within the combined logical length.
+    fn get(self: *const CompoundingValidatorFlags, validator_index: usize) bool {
+        if (validator_index < self.base.len) return self.base[validator_index];
+
+        const tail_index = validator_index - self.base.len;
+        std.debug.assert(tail_index < self.tail_len);
+        return self.tail[tail_index];
+    }
+};
+
 const ValidatorActivation = struct {
     validator_index: ValidatorIndex,
     activation_eligibility_epoch: Epoch,
@@ -86,19 +122,6 @@ const ShufflingJob = struct {
         const result = self.future.cancel(self.io) catch return;
         metrics.state_transition.epoch_shuffling_job.observe(time.durationSeconds(result.duration));
         result.shuffling.deinit();
-    }
-};
-
-const BorrowedBoolArray = struct {
-    array: *BoolArray,
-    owner_allocator: Allocator,
-
-    pub fn items(self: BorrowedBoolArray) []bool {
-        return self.array.items;
-    }
-
-    pub fn append(self: BorrowedBoolArray, value: bool) !void {
-        try self.array.append(self.owner_allocator, value);
     }
 };
 
@@ -251,8 +274,7 @@ pub const EpochTransitionCache = struct {
     inclusion_delays: []const usize,
     // this is borrowed from ReusedEpochTransitionCache
     flags: []const u8,
-    // this is borrowed from ReusedEpochTransitionCache, we append it in processPendingDeposits() so it needs to be mutable and avoid stale pointer in ReusedEpochTransitionCache.deinit()
-    is_compounding_validator_arr: BorrowedBoolArray,
+    compounding_validator_flags: CompoundingValidatorFlags,
     rewards: []u64,
     penalties: []u64,
     slashing_penalties: []u64,
@@ -265,6 +287,14 @@ pub const EpochTransitionCache = struct {
     is_active_prev_epoch: []const bool,
     is_active_curr_epoch: []const bool,
     is_active_next_epoch: []const bool,
+
+    pub fn appendCompoundingValidatorFlag(self: *EpochTransitionCache, value: bool) void {
+        self.compounding_validator_flags.append(value);
+    }
+
+    pub fn isCompoundingValidator(self: *const EpochTransitionCache, validator_index: usize) bool {
+        return self.compounding_validator_flags.get(validator_index);
+    }
 
     // this is the same to beforeProcessEpoch in typesript version
     pub fn init(
@@ -618,10 +648,7 @@ pub const EpochTransitionCache = struct {
             .proposer_indices = reused_cache.proposer_indices.items,
             .inclusion_delays = reused_cache.inclusion_delays.items,
             .flags = reused_cache.flags.items,
-            .is_compounding_validator_arr = .{
-                .array = &reused_cache.is_compounding_validator_arr,
-                .owner_allocator = reused_cache.allocator,
-            },
+            .compounding_validator_flags = .{ .base = reused_cache.is_compounding_validator_arr.items },
             .rewards = reused_cache.rewards.items,
             .penalties = reused_cache.penalties.items,
             .slashing_penalties = reused_cache.slashing_penalties.items,
@@ -652,7 +679,6 @@ pub const EpochTransitionCache = struct {
         // self.is_active_prev_epoch.deinit();
         // self.is_active_curr_epoch.deinit();
         // self.is_active_next_epoch.deinit();
-        // self.is_compounding_validator_arr.deinit();
         self.indices_to_slash.deinit(self.allocator);
         self.indices_eligible_for_activation_queue.deinit(self.allocator);
         self.indices_eligible_for_activation.deinit(self.allocator);
