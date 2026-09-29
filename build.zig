@@ -10,6 +10,15 @@ pub fn build(b: *std.Build) !void {
     // snappy.zig leaves its static library to the target's default, which is not position independent for musl, and
     // the addon links it into a shared library.
     result.dependency("snappy").?.artifact("snappy").root_module.pic = true;
+    // binding.zig checks its quiche_send_info against the C compiler's layout for the target.
+    const network = result.module("network").?;
+    const send_info_layout = b.addTranslateC(.{
+        .root_source_file = b.path("src/network/quic/send_info_layout.h"),
+        .target = network.resolved_target.?,
+        .optimize = network.optimize.?,
+    });
+    send_info_layout.addIncludePath(result.dependency("quiche_zig").?.builder.dependency("quiche", .{}).path("include"));
+    network.addImport("quiche_send_info_layout", send_info_layout.createModule());
 
     const network_tools = b.step("check:network-tools", "Compile network examples, interoperability peers, and benchmark");
     for ([_][]const u8{ "discv5_interop", "discv5_crawl", "ping_peer", "reqresp_peer", "core_peer", "network_interop_peer", "core_interop_peer", "bench_network" }) |name| {
