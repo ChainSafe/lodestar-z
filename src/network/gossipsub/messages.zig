@@ -7,6 +7,7 @@ const topic_mod = @import("topic.zig");
 const MessageId = topic_mod.MessageId;
 const protobuf = @import("protobuf.zig");
 const admission = @import("admission.zig");
+const sha256 = @import("sha256.zig");
 const assert = std.debug.assert;
 const PeerRef = validation.PeerRef;
 const Workspace = @import("turn.zig").Workspace;
@@ -215,11 +216,7 @@ pub const Messages = struct {
         const refusal: ?StorageRefusal = if (workspace.sink) |sink| (if (!sink.has_capacity(sink.context, kind, size)) .processor_capacity else null) else .processor_capacity;
         const cost = if (refusal != null) msg.data.len else msg.data.len * 2 + size * 2;
         if (!workspace.chargeWork(context.options, cost)) return .{ .blocked = .work };
-        var hash = std.crypto.hash.sha2.Sha256.init(.{});
-        hash.update(&.{@intCast(msg.topic.len)});
-        hash.update(msg.topic);
-        hash.update(msg.data);
-        const fingerprint = hash.finalResult();
+        const fingerprint = sha256.digest(&.{@intCast(msg.topic.len)}, msg.topic, msg.data);
         const cached = &self.fast[std.mem.readInt(u64, fingerprint[0..8], .little) % self.fast.len];
         if (std.mem.eql(u8, &cached.fingerprint, &fingerprint)) switch (cached.result) {
             .valid => |id| if (self.duplicateId(context, source, topic, id, now)) return .{ .duplicate = id },

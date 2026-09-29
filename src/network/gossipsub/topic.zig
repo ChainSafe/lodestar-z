@@ -2,7 +2,7 @@ const std = @import("std");
 const constants = @import("constants.zig");
 
 const assert = std.debug.assert;
-const Sha256 = std.crypto.hash.sha2.Sha256;
+const sha256 = @import("sha256.zig");
 
 pub const prefix = "/eth2/";
 pub const suffix = "/ssz_snappy";
@@ -138,17 +138,10 @@ fn digestWithDomain(
     payload: []const u8,
     policy: MessageIdPolicy,
 ) MessageId {
-    var hash: [Sha256.digest_length]u8 = undefined;
-    var state = Sha256.init(.{});
-    state.update(&domain);
-    if (!policy.isPhase0(topic)) {
-        var topic_length: [8]u8 = undefined;
-        std.mem.writeInt(u64, &topic_length, @intCast(topic.len), .little);
-        state.update(&topic_length);
-        state.update(topic);
-    }
-    state.update(payload);
-    state.final(&hash);
+    var header: [12]u8 = undefined;
+    header[0..4].* = domain;
+    std.mem.writeInt(u64, header[4..12], @intCast(topic.len), .little);
+    const hash = if (policy.isPhase0(topic)) sha256.digest(&domain, &.{}, payload) else sha256.digest(&header, topic, payload);
     return hash[0..constants.message_id_length].*;
 }
 
