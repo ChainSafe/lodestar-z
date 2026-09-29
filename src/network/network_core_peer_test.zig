@@ -898,6 +898,113 @@ test "core records a remote close of its dial before Status as an early close an
     }
 }
 
+/// Refuses the client's Status in flight at negotiation, then runs the close it starts.
+fn refuseStatus(setup: *Setup) !void {
+    try failStatus(setup, .negotiation_rejected);
+    for (0..4) |_| try setup.step(1);
+    setup.pair.advance(2_001);
+    for (0..8) |_| try setup.step(1);
+}
+
+/// Checks that the client counted and closed `count` refused Status probes and recorded `rejections` early closes.
+fn expectRefusals(setup: *Setup, count: u64, rejections: u64) !void {
+    const manager = &setup.client.peer_manager;
+    try std.testing.expectEqual(@as(u16, 0), manager.catalog.connectedCount());
+    try std.testing.expectEqual(count, manager.control.counters.health_failures[@intFromEnum(@import("peers/control.zig").HealthProbe.status)]);
+    try std.testing.expectEqual(count, manager.control.counters.closed[@intFromEnum(t.DisconnectReason.health_error)]);
+    try std.testing.expectEqual(rejections, manager.catalog.rejections[@intFromEnum(t.Rejection.early_close)]);
+}
+
+test "core records a refused Status on its dial before readiness as an early close that escalates across endpoints" {
+    var setup: Setup = .{};
+    try setup.initOwners(&.{});
+    defer setup.deinit();
+    const manager = &setup.client.peer_manager;
+    const history = &manager.catalog.history;
+    const second: t.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 4_003 } };
+    var server = try discoveredAt(2, support.server_address);
+    server.addresses[1] = second;
+    server.address_count = 2;
+    const identity = history.identityKey(&server.peer);
+    // Two health strikes block the first endpoint for 30 minutes, so the third dial takes the second.
+    for ([_]struct { t.Address, u64 }{
+        .{ support.server_address, 60_000 },
+        .{ support.server_address, 15 * 60_000 },
+        .{ second, 60 * 60_000 },
+    }, 1..) |round, count| {
+        try std.testing.expectEqual(@as(u16, 1), manager.discoveredBatch(setup.client.service.gossipsub, &setup.client.control_protocol, &.{server}, setup.pair.now).accepted);
+        var intents: [1]DialIntent = undefined;
+        try std.testing.expectEqual(@as(usize, 1), manager.dialIntents(setup.client.service.gossipsub, &setup.client.control_protocol, setup.pair.client, setup.pair.now, &intents));
+        try std.testing.expect(intents[0].address.eql(round[0]));
+        const handle = try setup.pair.client.dial(&intents[0].address, intents[0].peer, setup.pair.now);
+        try std.testing.expect(manager.dialStarted(intents[0].token, handle));
+        setup.pair.server_source = round[0];
+        for (0..20) |_| {
+            try setup.step(1);
+            if (manager.catalog.connectedCount() == 1) break;
+        }
+        try std.testing.expectEqual(@as(u16, 1), manager.catalog.connectedCount());
+        const peer = manager.catalog.find(&server.peer).?;
+        try std.testing.expect(manager.control.schedules[peer.index].evidence == .pending);
+        try refuseStatus(&setup);
+        try expectRefusals(&setup, count, count);
+        try std.testing.expectEqual(@as(?t.Rejection, .early_close), history.rejection(identity, setup.pair.now.mono_ms));
+        try std.testing.expectEqual(setup.pair.now.mono_ms + round[1], history.rejectedUntil(identity, setup.pair.now.mono_ms));
+        try std.testing.expectEqual(@as(u16, 1), manager.discoveredBatch(setup.client.service.gossipsub, &setup.client.control_protocol, &.{server}, setup.pair.now).refused);
+        try std.testing.expectEqual(@as(u64, count), manager.dialing.refused.identity[@intFromEnum(t.Rejection.early_close)]);
+        setup.pair.advance(round[1]);
+    }
+}
+
+test "core refused Status records no rejection once ready or on an inbound connection" {
+    for ([_]bool{ false, true }) |inbound| {
+        var setup: Setup = .{};
+        try setup.initDirection(&.{}, inbound);
+        defer setup.deinit();
+        const manager = &setup.client.peer_manager;
+        // A dialer that starts no Status of its own leaves the connection short of readiness.
+        if (inbound) setup.server.peer_manager.control.options.starts_per_turn_max = 0;
+        for (0..50) |_| try setup.step(1);
+        manager.reStatusPeers(&setup.client.control_protocol, setup.pair.now);
+        try setup.step(1);
+        const peer = manager.catalog.find(&setup.server.peerId()).?;
+        try std.testing.expectEqual(!inbound, manager.control.schedules[peer.index].evidence != .pending);
+        try refuseStatus(&setup);
+        try expectRefusals(&setup, 1, 0);
+        try std.testing.expectEqual(@as(?t.Rejection, null), manager.catalog.history.rejection(manager.catalog.history.identityKey(&setup.server.peerId()), setup.pair.now.mono_ms));
+    }
+}
+
+test "core refused Status inside the fork transition grace neither closes nor records" {
+    var setup: Setup = .{};
+    try setup.init(&.{});
+    defer setup.deinit();
+    const manager = &setup.client.peer_manager;
+    for (0..20) |_| {
+        try setup.step(1);
+        if (manager.peerCounts().relevant == 1) break;
+    }
+    const peer = manager.catalog.find(&setup.server.peerId()).?;
+    const row = &manager.control.schedules[peer.index];
+    try std.testing.expect(row.evidence == .pending);
+    var next = manager.local;
+    next.fork.digest = @splat(3);
+    next.status.fork_digest = next.fork.digest;
+    try @import("network_core_test_support.zig").updateLocal(&setup.client, &next, setup.pair.now);
+    try setup.step(1);
+    try failStatus(&setup, .negotiation_rejected);
+    for (0..4) |_| try setup.step(1);
+    try std.testing.expect(setup.pair.now.mono_ms < row.transition_until_ms);
+    try std.testing.expect(manager.catalog.get(peer).?.disconnect_reason == null);
+    try std.testing.expectEqual(@as(?t.Rejection, null), row.rejection);
+    try std.testing.expectEqual(@as(u64, 0), manager.control.counters.health_failures[@intFromEnum(@import("peers/control.zig").HealthProbe.status)]);
+    // Past the grace, the same refusal closes and records.
+    setup.pair.advance(row.transition_until_ms - setup.pair.now.mono_ms);
+    try setup.step(1);
+    try refuseStatus(&setup);
+    try expectRefusals(&setup, 1, 1);
+}
+
 test "core coverage demand copies persists across slots and keeps general discovery independent" {
     var setup: Setup = .{};
     try setup.initOwners(&.{});
