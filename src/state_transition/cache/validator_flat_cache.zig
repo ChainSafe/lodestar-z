@@ -23,6 +23,8 @@ const flag_slashed: u8 = 1;
 const flag_compounding: u8 = 2;
 
 /// Fields that EpochTransitionCache.init needs to know about one validator.
+///
+/// NOTE: Effective balance is not stored: the epoch cache already keeps it flat as increments.
 pub const ValidatorFields = struct {
     activation_eligibility_epoch: u64,
     activation_epoch: u64,
@@ -79,7 +81,6 @@ pub const ValidatorFlatCache = struct {
         return self.len() * (4 * @sizeOf(u64) + @sizeOf(u8));
     }
 
-    /// Effective balance is not stored: the epoch cache already keeps it flat as increments.
     pub inline fn fields(self: *const ValidatorFlatCache, i: usize, effective_balance_increment: u16) ValidatorFields {
         const f = self.flags.items[i];
         return .{
