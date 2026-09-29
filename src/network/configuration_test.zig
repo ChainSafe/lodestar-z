@@ -203,7 +203,7 @@ test "configuration preserves independent transport work limits" {
 test "configuration carries bounded UDP socket buffer requests" {
     const resolved = try resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
     const mib = 1024 * 1024;
-    try std.testing.expectEqual(udp.Buffers{ .receive = 8 * mib, .send = 4 * mib }, resolved.socket_buffers.quic);
+    try std.testing.expectEqual(udp.Buffers{ .receive = 16 * mib, .send = 4 * mib }, resolved.socket_buffers.quic);
     try std.testing.expectEqual(udp.Buffers{ .receive = 2 * mib, .send = 1 * mib }, resolved.socket_buffers.discovery);
     const bounds: udp.SocketBuffers = .{
         .quic = .{ .receive = udp.Buffers.bytes_max, .send = udp.Buffers.bytes_min },
