@@ -11,6 +11,7 @@ import {RELEASE_BUILD, packageBuildRecord, record, verify} from "../../scripts/r
 const NAME = "@chainsafe/lodestar-z";
 const VERSION = "1.2.3";
 const TARGETS = ["aarch64-apple-darwin", "x86_64-unknown-linux-musl"];
+const NOTICES = "THIRD_PARTY_NOTICES.txt";
 const temporaryDirectories = [];
 
 afterEach(async () => {
@@ -43,6 +44,7 @@ async function release() {
   temporaryDirectories.push(root);
   const pkg = {name: NAME, version: VERSION, zapi: {binaryName: "bindings", targets: TARGETS}};
   await writeFile(join(root, "package.json"), JSON.stringify(pkg));
+  await writeFile(join(root, NOTICES), "=== fixture: notices\n");
   await git(root, "init", "-q");
   await git(root, "add", "package.json");
   for (const setting of ["user.name=fixture", "user.email=fixture@example.invalid", "commit.gpgSign=false"])
@@ -59,11 +61,12 @@ async function release() {
     const [arch, , os, abi] = target.split("-");
     await mkdir(join(root, "npm", target), {recursive: true});
     await writeFile(join(root, "npm", target, "bindings.node"), addon(target, TARGETS.indexOf(target)));
+    await writeFile(join(root, "npm", target, NOTICES), "=== fixture: notices\n");
     await writeFile(
       join(root, "npm", target, "package.json"),
       JSON.stringify({
         cpu: [arch === "aarch64" ? "arm64" : "x64"],
-        files: ["bindings.node"],
+        files: ["bindings.node", NOTICES],
         main: "bindings.node",
         name: `${NAME}-${target}`,
         os: [os],
@@ -153,6 +156,7 @@ test("verification refuses every incomplete, unrecorded or unqualified package",
       [
         "platform packages are not the advertised targets",
         `${musl} package.json is incomplete`,
+        `${musl} does not ship ${NOTICES}`,
         `${musl} does not hold the recorded addon`,
       ],
     ],
@@ -170,6 +174,20 @@ test("verification refuses every incomplete, unrecorded or unqualified package",
     [
       async (root) => writeFile(join(root, "npm", TARGETS[1], "bindings.node"), addon(TARGETS[1], 9)),
       [`${musl} does not hold the recorded addon`],
+    ],
+    // Prepared without the notices step, or with another notices file.
+    [
+      async (root) => {
+        await rm(join(root, "npm", TARGETS[1], NOTICES));
+        await edit(join(root, "npm", TARGETS[1], "package.json"), (pkg) => {
+          pkg.files = ["bindings.node"];
+        });
+      },
+      [`${musl} does not ship ${NOTICES}`],
+    ],
+    [
+      async (root) => writeFile(join(root, "npm", TARGETS[1], NOTICES), "=== fixture: other\n"),
+      [`${musl} does not ship ${NOTICES}`],
     ],
     [
       async (root) =>

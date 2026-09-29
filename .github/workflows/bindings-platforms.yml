@@ -156,4 +156,5 @@ jobs:
       - name: Prepare and check the packages publishing would publish
         run: |
           pnpm zapi prepublish
+          node scripts/lodestar_package.mjs notices --package-dir .
           node scripts/release_artifacts.mjs verify --qualification qualification

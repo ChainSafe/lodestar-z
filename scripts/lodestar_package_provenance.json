@@ -342,18 +342,36 @@
         "x86_64-unknown-linux-gnu",
         "x86_64-unknown-linux-musl"
       ],
-      "workflows": [".github/workflows/publish-bindings.yml", ".github/workflows/publish-dev-bindings.yml"],
       "runner": "ubuntu-22.04",
-      "steps": [
-        "pnpm install --frozen-lockfile",
-        "pnpm zapi build-artifacts --optimize ReleaseSafe",
-        "pnpm zapi prepublish",
-        "node scripts/lodestar_package.mjs notices --package-dir .",
-        "rm -rf zig-out/lib",
-        "--ignore-scripts --provenance"
-      ],
+      "workflows": {
+        ".github/workflows/bindings-platforms.yml": [
+          "pnpm install --frozen-lockfile --ignore-scripts",
+          "scripts/zig-cross.sh pnpm zapi build-artifacts --optimize ReleaseSafe",
+          "node scripts/release_artifacts.mjs record",
+          "node scripts/check_network_package.mjs --lifecycle",
+          "pnpm zapi prepublish",
+          "node scripts/lodestar_package.mjs notices --package-dir .",
+          "node scripts/release_artifacts.mjs verify --qualification qualification"
+        ],
+        ".github/workflows/publish-bindings.yml": [
+          "pnpm install --frozen-lockfile --ignore-scripts",
+          "pnpm zapi prepublish",
+          "node scripts/lodestar_package.mjs notices --package-dir .",
+          "node scripts/release_artifacts.mjs verify --qualification qualification",
+          "rm -rf zig-out/lib",
+          "--ignore-scripts --provenance"
+        ],
+        ".github/workflows/publish-dev-bindings.yml": [
+          "pnpm install --frozen-lockfile --ignore-scripts",
+          "pnpm zapi prepublish",
+          "node scripts/lodestar_package.mjs notices --package-dir .",
+          "node scripts/release_artifacts.mjs verify --qualification qualification",
+          "rm -rf zig-out/lib",
+          "--ignore-scripts --provenance"
+        ]
+      },
       "reviewed": {
-        "addon": "artifacts/<target>/bindings.node, from zapi build-artifacts",
+        "addon": "artifacts/<target>/bindings.node from the release build, recorded in artifacts/build.json, qualified on its platform and published from there",
         "loader": "zapi requireNapiLibrary loads @chainsafe/lodestar-z-<target> when the package has no zig-out/lib addon"
       }
     }
