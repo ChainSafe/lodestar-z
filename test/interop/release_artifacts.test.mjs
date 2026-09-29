@@ -5,7 +5,8 @@ import {join} from "node:path";
 import {afterEach, test} from "node:test";
 import {packageScenarios} from "../../bindings/test/fixtures/network-package-scenarios.mjs";
 import {runBoundedCommand} from "../../scripts/bounded_child.mjs";
-import {record, verify} from "../../scripts/release_artifacts.mjs";
+import {addonLayout, validateBuildRecord} from "../../scripts/lodestar_package_archive.mjs";
+import {RELEASE_BUILD, packageBuildRecord, record, verify} from "../../scripts/release_artifacts.mjs";
 
 const NAME = "@chainsafe/lodestar-z";
 const VERSION = "1.2.3";
@@ -116,6 +117,23 @@ test("recording takes the source commit from the package's own checkout and nowh
   await mkdir(join(outside, "artifacts"));
   await writeFile(join(outside, "package.json"), JSON.stringify({zapi: {targets: []}}));
   await assert.rejects(record(outside, join(outside, "artifacts")), {code: "CommandFailed"});
+});
+
+test("packing projects each target's record from build.json", async () => {
+  const {build} = await release();
+  assert.deepEqual(
+    {command: build.command, instrumented: build.instrumented, optimize: build.optimize, preset: build.preset},
+    RELEASE_BUILD
+  );
+  for (const target of TARGETS) {
+    const projected = packageBuildRecord(build, target);
+    const addon = validateBuildRecord(projected);
+    assert.deepEqual(addonLayout(addon.path), {layout: "platform", target});
+    assert.deepEqual({bytes: addon.bytes, sha256: addon.sha256}, build.targets[target]);
+    assert.equal(projected.sourceCommit, build.sourceCommit);
+    assert.equal(projected.toolchain, build.toolchain);
+  }
+  assert.throws(() => packageBuildRecord(build, "x86_64-unknown-linux-gnu"), /build.json records no/);
 });
 
 test("recording refuses a missing target and an addon built for another target", async () => {
