@@ -43,12 +43,9 @@ pub fn ContainerTreeView(comptime ST: type) type {
         const Self = @This();
 
         pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !*Self {
-            try pool.ref(root);
-            // Undo the ref without freeing: on init failure the caller still owns
-            // `root` and releases it; `unref` here would free a fresh rc-0 root.
-            errdefer pool.unrefUnsafe(root);
-
             const ptr = try allocator.create(Self);
+            errdefer allocator.destroy(ptr);
+
             ptr.* = .{
                 .allocator = allocator,
                 .pool = pool,
@@ -58,6 +55,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
                 .changed = std.StaticBitSet(ST.chunk_count).initEmpty(),
                 .field_root_cache = undefined,
             };
+            try pool.ref(root);
             return ptr;
         }
 
@@ -478,11 +476,6 @@ pub fn StructContainerTreeView(comptime ST: type) type {
         const Self = @This();
 
         pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !*Self {
-            try pool.ref(root);
-            // Undo the ref without freeing: on init failure the caller still owns
-            // `root` and releases it; `unref` here would free a fresh rc-0 root.
-            errdefer pool.unrefUnsafe(root);
-
             const ptr = try allocator.create(Self);
             errdefer allocator.destroy(ptr);
 
@@ -493,6 +486,7 @@ pub fn StructContainerTreeView(comptime ST: type) type {
             ptr.root = root;
             ptr.changed = std.StaticBitSet(ST.chunk_count).initEmpty();
             ptr.field_root_cache = undefined;
+            try pool.ref(root);
             return ptr;
         }
 

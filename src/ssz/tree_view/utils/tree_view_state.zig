@@ -38,18 +38,6 @@ pub const TreeViewState = struct {
         self.pool.unref(self.root);
     }
 
-    /// Cleanup for a partially-built view whose `init` failed after this state
-    /// took its `root` ref. Mirrors `deinit` but drops `root`'s ref WITHOUT
-    /// freeing, restoring `root` to its pre-init refcount: on the failure path
-    /// the caller still owns `root` and releases it itself (`unref` here would
-    /// free a freshly-built rc-0 root and double-free with the caller).
-    pub fn deinitAfterInitFailure(self: *TreeViewState) void {
-        self.clearChildrenNodesCache();
-        self.children_nodes.deinit(self.allocator);
-        self.changed.deinit(self.allocator);
-        self.pool.unrefUnsafe(self.root);
-    }
-
     pub fn getChildNode(self: *TreeViewState, gindex: Gindex) !Node.Id {
         if (self.children_nodes.get(gindex)) |child_node| {
             return child_node;

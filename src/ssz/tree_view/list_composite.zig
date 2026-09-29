@@ -49,12 +49,10 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
             const ptr = try allocator.create(Self);
             errdefer allocator.destroy(ptr);
 
-            try Chunks.init(&ptr.chunks, allocator, pool, root);
-            errdefer ptr.chunks.deinitAfterInitFailure();
-
             ptr.allocator = allocator;
-            ptr._orig_len = try ptr.chunks.getLength();
+            ptr._orig_len = try ST.tree.length(root, pool);
             ptr._len = ptr._orig_len;
+            try Chunks.init(&ptr.chunks, allocator, pool, root);
             return ptr;
         }
 

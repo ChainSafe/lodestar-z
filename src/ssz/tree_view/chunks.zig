@@ -53,11 +53,6 @@ pub fn BasicPackedChunks(
             self.state.deinit();
         }
 
-        /// Cleanup when the owning view's `init` failed; leaves `root` for the caller.
-        pub fn deinitAfterInitFailure(self: *Self) void {
-            self.state.deinitAfterInitFailure();
-        }
-
         pub fn commit(self: *Self) !void {
             try self.state.commitNodes();
         }
@@ -264,12 +259,6 @@ pub fn BasicPackedChunks(
             try self.state.setChildNode(gindex, node);
         }
 
-        pub fn getLength(self: *Self) !usize {
-            const length_node = try self.state.getChildNode(@enumFromInt(3));
-            const length_chunk = length_node.getRoot(self.state.pool);
-            return std.mem.readInt(usize, length_chunk[0..@sizeOf(usize)], .little);
-        }
-
         pub fn setLength(self: *Self, length: usize) !void {
             const length_node = try self.state.pool.createLeafFromUint(@intCast(length));
             errdefer self.state.pool.unref(length_node);
@@ -335,14 +324,6 @@ pub fn CompositeChunks(
             self.clearChildrenDataCache();
             self.children_data.deinit(allocator);
             self.state.deinit();
-        }
-
-        /// Cleanup when the owning view's `init` failed; leaves `root` for the caller.
-        pub fn deinitAfterInitFailure(self: *Self) void {
-            const allocator = self.state.allocator;
-            self.clearChildrenDataCache();
-            self.children_data.deinit(allocator);
-            self.state.deinitAfterInitFailure();
         }
 
         pub fn commit(self: *Self) !void {
@@ -519,12 +500,6 @@ pub fn CompositeChunks(
 
         pub fn setChildNode(self: *Self, gindex: Gindex, node: Node.Id) !void {
             try self.state.setChildNode(gindex, node);
-        }
-
-        pub fn getLength(self: *Self) !usize {
-            const length_node = try self.state.getChildNode(@enumFromInt(3));
-            const length_chunk = length_node.getRoot(self.state.pool);
-            return std.mem.readInt(usize, length_chunk[0..@sizeOf(usize)], .little);
         }
 
         pub fn setLength(self: *Self, length: usize) !void {
