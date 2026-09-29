@@ -1063,7 +1063,11 @@ test "score cache matches fresh evaluation across random mutations" {
             else => unreachable,
         }
         kept += @intFromBool(choice <= 5 and clean and !scores.rows[peer].dirty);
-        for (0..peers) |other| try expectExact(&scores, @intCast(other), now, ip[other]);
+        for (0..peers) |other| {
+            const other_peer: u16 = @intCast(other);
+            try expectExact(&scores, other_peer, now, ip[other]);
+            try std.testing.expectEqual(scores.evaluate(other_peer, now, ip[other], null).next_change, scores.nextChange(other_peer));
+        }
         reads += peers;
     }
     // The walk must exercise both invalidating and cache-preserving mutations.
