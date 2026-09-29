@@ -1,4 +1,5 @@
 import {type SpawnSyncReturns, spawnSync} from "node:child_process";
+import {basename} from "node:path";
 import {publicKeyFromProtobuf} from "@libp2p/crypto/keys";
 import {peerIdFromPublicKey} from "@libp2p/peer-id";
 import {testChain} from "../../../test/interop/network_chain.mjs";
@@ -447,12 +448,16 @@ export function childTestTimeout(children = 1, marginMs = 5000): {timeout: numbe
 }
 
 /**
- * Runs Node with `args` and returns how it exited. A child still running at `CHILD_TIMEOUT_MS` gets SIGKILL, because
- * this synchronous wait also holds off Vitest's own timeout. A timeout or a failed spawn throws with the end of the
- * child's output and the last `phase` line it wrote to stderr.
+ * Runs `command` with `args` and returns how it exited. A child still running at `CHILD_TIMEOUT_MS` gets SIGKILL,
+ * because this synchronous wait also holds off Vitest's own timeout. A timeout or a failed spawn throws with the end of
+ * the child's output and the last `phase` line it wrote to stderr.
  */
-export function spawnChild(args: readonly string[], env?: NodeJS.ProcessEnv): SpawnSyncReturns<string> {
-  const child = spawnSync(process.execPath, args, {
+export function spawnCommand(
+  command: string,
+  args: readonly string[],
+  env?: NodeJS.ProcessEnv
+): SpawnSyncReturns<string> {
+  const child = spawnSync(command, args, {
     encoding: "utf8",
     env,
     killSignal: "SIGKILL",
@@ -460,9 +465,16 @@ export function spawnChild(args: readonly string[], env?: NodeJS.ProcessEnv): Sp
   });
   if (child.error) {
     const timedOut = (child.error as NodeJS.ErrnoException).code === "ETIMEDOUT";
-    throw Error(childFailure(args, child, timedOut ? `timed out after ${CHILD_TIMEOUT_MS} ms` : String(child.error)));
+    throw Error(
+      childFailure(command, args, child, timedOut ? `timed out after ${CHILD_TIMEOUT_MS} ms` : String(child.error))
+    );
   }
   return child;
+}
+
+/** Runs Node with `args` under the same watchdog and returns how it exited. */
+export function spawnChild(args: readonly string[], env?: NodeJS.ProcessEnv): SpawnSyncReturns<string> {
+  return spawnCommand(process.execPath, args, env);
 }
 
 /** Runs Node with `args` under the same watchdog and returns its stdout. Throws unless it exits 0. */
@@ -470,17 +482,27 @@ export function runChild(args: readonly string[]): string {
   const child = spawnChild(args);
   if (child.status !== 0)
     throw Error(
-      childFailure(args, child, child.signal ? `was killed by ${child.signal}` : `exited with status ${child.status}`)
+      childFailure(
+        process.execPath,
+        args,
+        child,
+        child.signal ? `was killed by ${child.signal}` : `exited with status ${child.status}`
+      )
     );
   return child.stdout;
 }
 
-function childFailure(args: readonly string[], child: SpawnSyncReturns<string>, outcome: string): string {
+function childFailure(
+  command: string,
+  args: readonly string[],
+  child: SpawnSyncReturns<string>,
+  outcome: string
+): string {
   const tail = (output: string | null) =>
     !output ? "(none)" : output.length > CHILD_OUTPUT_TAIL ? `...${output.slice(-CHILD_OUTPUT_TAIL)}` : output;
   const phase = [...(child.stderr ?? "").matchAll(/^phase (.*)$/gm)].at(-1)?.[1];
   return [
-    `child ${outcome}: node ${args.join(" ")}`,
+    `child ${outcome}: ${basename(command)} ${args.join(" ")}`,
     ...(phase === undefined ? [] : [`last phase: ${phase}`]),
     `stdout (last ${CHILD_OUTPUT_TAIL} characters):`,
     tail(child.stdout),

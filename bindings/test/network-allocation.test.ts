@@ -1,9 +1,8 @@
-import {spawnSync} from "node:child_process";
 import {existsSync, mkdtempSync, rmSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {dirname, join} from "node:path";
 import {expect, test} from "vitest";
-import {childTestTimeout, spawnChild} from "./utils/network.js";
+import {childTestTimeout, spawnChild, spawnCommand} from "./utils/network.js";
 
 const headers = join(dirname(process.execPath), "..", "include", "node");
 /** Past the 47-bit user address space, so the allocation fails whatever the overcommit policy. */
@@ -18,15 +17,13 @@ function run(script: string) {
 // allocator's OutOfMemory is.
 test.skipIf(!existsSync(join(headers, "node_api.h")))(
   "an N-API ArrayBuffer allocation failure terminates the process instead of returning a status",
-  childTestTimeout(3, 30000),
+  childTestTimeout(4),
   () => {
     const directory = mkdtempSync(join(tmpdir(), "lodestar-z-arraybuffer-"));
     try {
       const addon = join(directory, "probe.node");
       const source = join(import.meta.dirname, "fixtures", "network-arraybuffer-probe.c");
-      const built = spawnSync("zig", ["cc", "-shared", "-fPIC", "-O2", "-I", headers, "-o", addon, source], {
-        encoding: "utf8",
-      });
+      const built = spawnCommand("zig", ["cc", "-shared", "-fPIC", "-O2", "-I", headers, "-o", addon, source]);
       expect(built.status, built.stderr).toBe(0);
       const native = run(`console.log(JSON.stringify(require(${JSON.stringify(addon)}).create(${unallocatable})))`);
       expect(native.stdout).toBe("");
@@ -55,13 +52,13 @@ const glibc = Boolean(
 // running until a requested close.
 test.skipIf(!glibc)(
   "a publication whose payload copy cannot be allocated rejects alone and never escalates",
-  childTestTimeout(1, 30000),
+  childTestTimeout(2),
   () => {
     const directory = mkdtempSync(join(tmpdir(), "lodestar-z-malloc-"));
     try {
       const shim = join(directory, "fault.so");
       const source = join(import.meta.dirname, "fixtures", "network-malloc-fault.c");
-      const built = spawnSync("zig", ["cc", "-shared", "-fPIC", "-O2", "-o", shim, source], {encoding: "utf8"});
+      const built = spawnCommand("zig", ["cc", "-shared", "-fPIC", "-O2", "-o", shim, source]);
       expect(built.status, built.stderr).toBe(0);
       const script = `import {createNativeNetwork} from "./bindings/src/network.js";
         import {applicationConfig, topicName} from "./bindings/test/utils/network.ts";
