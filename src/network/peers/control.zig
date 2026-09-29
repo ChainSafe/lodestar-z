@@ -45,8 +45,8 @@ const Schedule = struct {
     evidence: enum { pending, ready, proven } = .pending,
     closing: ?struct { reason: t.DisconnectReason, deadline_ms: u64, sent: bool = false } = null,
     /// How the remote refused us on this connection, recorded against its identity at close: its
-    /// Goodbye, or for our dial a close before the Status and Metadata exchange completed. Neither
-    /// counts once a local close began.
+    /// Goodbye, or for our dial a close or a refused Status before the Status and Metadata exchange
+    /// completed. None counts once a local close began.
     rejection: ?t.Rejection = null,
 };
 /// Peer control policy: probe scheduling, fork-transition grace, health streaks, evidence,
@@ -398,7 +398,12 @@ pub const Control = struct {
     /// Notes a close the remote initiated. On our dial before the Status and Metadata exchange
     /// completed, it is an early close.
     pub fn remoteClosed(self: *Control, peer: t.PeerRef, conn: t.Handle) void {
-        const row = self.schedule(peer, conn) orelse return;
+        earlyClose(self.schedule(peer, conn) orelse return);
+    }
+
+    /// Records the remote turning our dial away before the Status and Metadata exchange completed,
+    /// unless a local close began or the remote already refused us otherwise.
+    fn earlyClose(row: *Schedule) void {
         if (row.closing == null and row.rejection == null and row.direction == .outbound and row.evidence == .pending)
             row.rejection = .early_close;
     }
@@ -617,23 +622,24 @@ pub const Control = struct {
                     row.retry_ms = now.mono_ms +| self.options.local_retry_ms;
                 },
                 .negotiation_rejected => {
-                    if ((op.protocol == .status_v1 or op.protocol == .status_v2) and now.mono_ms < row.transition_until_ms) {
+                    const status = op.protocol == .status_v1 or op.protocol == .status_v2;
+                    if (status and now.mono_ms < row.transition_until_ms) {
                         row.retry_ms = @min(row.transition_until_ms, now.mono_ms +| self.options.local_retry_ms);
-                    } else {
-                        _ = self.disconnect(catalog, requests, op.peer, op.conn, .health_error, now);
+                        return;
                     }
+                    if (healthProbe(op.protocol)) |probe| self.countHealthFailure(row, op, probe, failed.reason, .immediate);
+                    if (status) earlyClose(row);
+                    _ = self.disconnect(catalog, requests, op.peer, op.conn, .health_error, now);
                 },
                 else => {
                     const probe = healthProbe(op.protocol) orelse return;
-                    const timed_out = failed.reason == .timeout or
-                        (failed.reason == .negotiation_failed and failed.reason.negotiation_failed == .timeout);
-                    self.healthFailure(catalog, requests, row, op, probe, if (timed_out) .health_timeout else .health_error, now);
+                    self.healthFailure(catalog, requests, row, op, probe, failed.reason, now);
                 },
             },
             .done => {
                 const probe = healthProbe(op.protocol) orelse return;
                 if (!op.received) {
-                    self.healthFailure(catalog, requests, row, op, probe, .health_error, now);
+                    self.healthFailure(catalog, requests, row, op, probe, .empty_response, now);
                     return;
                 }
                 row.health_failures[@intFromEnum(probe)] = 0;
@@ -648,16 +654,23 @@ pub const Control = struct {
         }
     }
 
-    fn healthFailure(self: *Control, catalog: *Catalog, requests: *const ControlProtocol, row: *Schedule, op: *const protocol_mod.Operation, probe: HealthProbe, reason: t.DisconnectReason, now: Now) void {
+    fn healthFailure(self: *Control, catalog: *Catalog, requests: *const ControlProtocol, row: *Schedule, op: *const protocol_mod.Operation, probe: HealthProbe, failure: rr.Failure, now: Now) void {
         const failures = &row.health_failures[@intFromEnum(probe)];
         failures.* +|= 1;
-        self.counters.health_failures[@intFromEnum(probe)] +|= 1;
-        std.log.scoped(.network_peers).debug("peer_health_failure connection={d}:{d} probe={s} failures={d} limit={d}", .{ op.conn.index, op.conn.generation, @tagName(probe), failures.*, self.options.health_failures_max });
-        if (failures.* >= self.options.health_failures_max) {
-            _ = self.disconnect(catalog, requests, op.peer, op.conn, reason, now);
+        const at_limit = failures.* >= self.options.health_failures_max;
+        self.countHealthFailure(row, op, probe, failure, if (at_limit) .at_limit else .none);
+        if (at_limit) {
+            const timed_out = failure == .timeout or (failure == .negotiation_failed and failure.negotiation_failed == .timeout);
+            _ = self.disconnect(catalog, requests, op.peer, op.conn, if (timed_out) .health_timeout else .health_error, now);
             return;
         }
         row.retry_ms = now.mono_ms +| self.options.failure_retry_ms;
+    }
+    /// Counts a failed probe once and logs it with the probe's streak and the close it causes:
+    /// none, the streak's limit, or an immediate one for a refused probe, which skips the streak.
+    fn countHealthFailure(self: *Control, row: *const Schedule, op: *const protocol_mod.Operation, probe: HealthProbe, failure: rr.Failure, closes: enum { none, at_limit, immediate }) void {
+        self.counters.health_failures[@intFromEnum(probe)] +|= 1;
+        std.log.scoped(.network_peers).debug("peer_health_failure connection={d}:{d} probe={s} reason={s} failures={d} limit={d} close={s}", .{ op.conn.index, op.conn.generation, @tagName(probe), @tagName(failure), row.health_failures[@intFromEnum(probe)], self.options.health_failures_max, @tagName(closes) });
     }
     /// The earliest schedule deadline, bounded below by now. O(1).
     pub fn nextWakeup(self: *const Control, catalog: *const Catalog, requests: *const ControlProtocol, now: Now) ?u64 {

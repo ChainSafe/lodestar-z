@@ -118,7 +118,7 @@ const Datagram = struct {
 
 /// Links the client and server cores' engines in memory. Everything the client sends reaches the
 /// server from `client_source`, and everything the server sends reaches the client from
-/// `support.server_address`, unless a drop rule applies.
+/// `server_source`, unless a drop rule applies.
 pub const Link = struct {
     now: Now = .{ .mono_ms = 1_000, .unix_s = support.now_unix },
     client: *Engine = undefined,
@@ -127,6 +127,7 @@ pub const Link = struct {
     server_sockets: [2]?net.Socket.Handle = .{ null, null },
     drop_to_server: bool = false,
     client_source: types.Address = support.client_address,
+    server_source: types.Address = support.server_address,
     drop_to_address: ?types.Address = null,
     base: std.Io = undefined,
     vtable: std.Io.VTable = undefined,
@@ -181,7 +182,7 @@ pub const Link = struct {
         while (rounds < 64) : (rounds += 1) {
             var moved = self.deliver();
             moved = self.transfer(self.client, self.server, self.client_source, self.drop_to_server) or moved;
-            moved = self.transfer(self.server, self.client, support.server_address, false) or moved;
+            moved = self.transfer(self.server, self.client, self.server_source, false) or moved;
             for ([_]*Engine{ self.client, self.server }) |engine| {
                 engine.expire(self.now);
                 engine.collect(self.now);
@@ -203,7 +204,7 @@ pub const Link = struct {
             if (datagram.from_client and self.drop_to_server) continue;
             if (self.drop_to_address) |blocked| if (datagram.to.eql(blocked)) continue;
             const from, const to = if (datagram.from_client) .{ self.client, self.server } else .{ self.server, self.client };
-            const source = if (datagram.from_client) self.client_source else support.server_address;
+            const source = if (datagram.from_client) self.client_source else self.server_source;
             var response: [constants.datagram_size_max]u8 = undefined;
             const outcome = to.receive(datagram.bytes[0..datagram.len], &source, self.now, &response);
             if (outcome == .retry) {
