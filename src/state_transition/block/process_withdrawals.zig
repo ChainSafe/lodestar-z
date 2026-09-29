@@ -1,4 +1,5 @@
 const std = @import("std");
+const diagnostics = @import("diagnostics");
 const Allocator = std.mem.Allocator;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const BeaconState = @import("fork_types").BeaconState;
@@ -32,6 +33,7 @@ pub fn processWithdrawals(
     state: *BeaconState(fork),
     expected_withdrawals_result: WithdrawalsResult,
     payload_withdrawals_root: Root,
+    diag: ?*diagnostics.Diagnostics,
 ) !void {
     // processedPartialWithdrawalsCount is withdrawals coming from EL since electra (EIP-7002)
     const processed_partial_withdrawals_count = expected_withdrawals_result.processed_partial_withdrawals_count;
@@ -42,7 +44,11 @@ pub fn processWithdrawals(
     try types.capella.Withdrawals.hashTreeRoot(allocator, &expected_withdrawals_result.withdrawals, &expected_withdrawals_root);
 
     if (!std.mem.eql(u8, &expected_withdrawals_root, &payload_withdrawals_root)) {
-        return error.WithdrawalsRootMismatch;
+        return diagnostics.state_transition.withdrawalsRootMismatch(
+            diag,
+            &expected_withdrawals_root,
+            &payload_withdrawals_root,
+        );
     }
 
     for (0..num_withdrawals) |i| {
@@ -267,6 +273,6 @@ test "getExpectedWithdrawals counts swept validators without rebuilding validato
 
         var root: Root = undefined;
         try types.capella.Withdrawals.hashTreeRoot(allocator, &withdrawals_result.withdrawals, &root);
-        try processWithdrawals(.electra, allocator, state, withdrawals_result, root);
+        try processWithdrawals(.electra, allocator, state, withdrawals_result, root, null);
     }
 }

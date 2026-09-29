@@ -35,32 +35,29 @@ test "computeAttestationsRewards - participation, slashing, eligibility, filters
     defer rewards.deinit(allocator);
     try std.testing.expectEqual(preset.MAX_EFFECTIVE_BALANCE_ELECTRA / preset.EFFECTIVE_BALANCE_INCREMENT + 1, rewards.ideal_rewards.len);
     try std.testing.expectEqual(@as(u64, 0), rewards.ideal_rewards[0].effective_balance);
-    try std.testing.expectEqual(@as(f64, 0), rewards.ideal_rewards[0].source);
+    try std.testing.expectEqual(@as(i64, 0), rewards.ideal_rewards[0].source);
     try std.testing.expectEqual(preset.MAX_EFFECTIVE_BALANCE_ELECTRA, rewards.ideal_rewards[rewards.ideal_rewards.len - 1].effective_balance);
     const base_reward = @import("../utils/sync_committee.zig").computeBaseRewardPerIncrement(255 * 32);
     const denominator = 255 * 32 * 64;
-    var rounded_up = false;
     for (rewards.ideal_rewards, 0..) |ideal, increment| {
         const numerator = increment * base_reward * 14 * (253 * 32);
-        const nearest = @divFloor(numerator + denominator / 2, denominator);
-        try std.testing.expectEqual(@as(f64, @floatFromInt(nearest)), ideal.source);
-        if (nearest != @divFloor(numerator, denominator)) rounded_up = true;
+        const expected = @divFloor(numerator, denominator);
+        try std.testing.expectEqual(@as(i64, @intCast(expected)), ideal.source);
     }
-    try std.testing.expect(rounded_up);
     try std.testing.expectEqual(@as(usize, 255), rewards.total_rewards.len);
     try std.testing.expectEqual(@as(u64, 5), rewards.total_rewards[4].validator_index);
     const missed = rewards.total_rewards[0];
     try std.testing.expect(missed.source < 0);
     try std.testing.expect(missed.target < 0);
-    try std.testing.expectEqual(@as(f64, 0), missed.head);
+    try std.testing.expectEqual(@as(i64, 0), missed.head);
     const expected_inactivity = @divFloor(@as(u64, 32_000_000_000) * 1000, state.config.chain.INACTIVITY_SCORE_BIAS * preset.INACTIVITY_PENALTY_QUOTIENT_BELLATRIX);
-    try std.testing.expectEqual(-@as(f64, @floatFromInt(expected_inactivity)), missed.inactivity);
-    try std.testing.expectEqual(@as(f64, 0), rewards.total_rewards[1].head);
+    try std.testing.expectEqual(-@as(i64, @intCast(expected_inactivity)), missed.inactivity);
+    try std.testing.expectEqual(@as(i64, 0), rewards.total_rewards[1].head);
     try std.testing.expect(rewards.total_rewards[1].source > 0);
     try std.testing.expect(rewards.total_rewards[2].head > 0);
     try std.testing.expectEqual(missed.source, rewards.total_rewards[3].source);
     try std.testing.expectEqual(missed.target, rewards.total_rewards[3].target);
-    try std.testing.expectEqual(@as(f64, 0), rewards.total_rewards[3].head);
+    try std.testing.expectEqual(@as(i64, 0), rewards.total_rewards[3].head);
     try std.testing.expectEqual(root_before, (try state.state.hashTreeRoot()).*);
 
     const selected = try computeAttestationsRewards(allocator, std.testing.io, state, &.{ 1, 1, 4, 255, 999 });
@@ -76,12 +73,12 @@ test "computeAttestationsRewards - participation, slashing, eligibility, filters
     try state.state.setFinalizedCheckpoint(&.{ .epoch = 0, .root = [_]u8{0} ** 32 });
     const leak = try computeAttestationsRewards(allocator, std.testing.io, state, &.{ 0, 2 });
     defer leak.deinit(allocator);
-    try std.testing.expectEqual(@as(f64, 0), leak.ideal_rewards[32].source);
+    try std.testing.expectEqual(@as(i64, 0), leak.ideal_rewards[32].source);
     try std.testing.expectEqual(missed.source, leak.total_rewards[0].source);
     try std.testing.expectEqual(missed.inactivity, leak.total_rewards[0].inactivity);
-    try std.testing.expectEqual(@as(f64, 0), leak.total_rewards[1].source);
-    try std.testing.expectEqual(@as(f64, 0), leak.total_rewards[1].target);
-    try std.testing.expectEqual(@as(f64, 0), leak.total_rewards[1].head);
+    try std.testing.expectEqual(@as(i64, 0), leak.total_rewards[1].source);
+    try std.testing.expectEqual(@as(i64, 0), leak.total_rewards[1].target);
+    try std.testing.expectEqual(@as(i64, 0), leak.total_rewards[1].head);
 }
 
 test "memory_safety: computeAttestationsRewards releases ideal rewards when total allocation fails" {

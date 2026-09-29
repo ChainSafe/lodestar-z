@@ -4,9 +4,9 @@ import {ssz} from "@lodestar/types";
 export const DEFAULT_PUBKEY_CACHE_HEADROOM = 324_000;
 
 const validatorFieldIndex = Object.keys(ssz.fulu.BeaconState.fields).indexOf("validators");
-const validatorSize = ssz.phase0.Validator.fixedSize;
+const validatorSize = ssz.phase0.Validator.fixedSize ?? 0;
 
-if (validatorFieldIndex === -1 || validatorSize === null) {
+if (validatorFieldIndex === -1 || validatorSize === 0) {
   throw new Error("Unable to locate the fixed-size validator list in Fulu BeaconState SSZ");
 }
 
@@ -26,4 +26,10 @@ export function getPubkeyCacheCapacityForState(
   headroom = DEFAULT_PUBKEY_CACHE_HEADROOM
 ): number {
   return getSerializedFuluValidatorCount(stateBytes) + headroom;
+}
+
+/** Genesis time (8 bytes) precedes the genesis validators root in every BeaconState fork. */
+export function getSerializedGenesisValidatorsRoot(stateBytes: Uint8Array): Uint8Array {
+  if (stateBytes.length < 40) throw new Error("Truncated BeaconState genesis validators root");
+  return stateBytes.subarray(8, 40);
 }

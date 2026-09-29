@@ -4,7 +4,7 @@ import * as era from "@lodestar/era";
 import bindings from "../src/index.js";
 import {pubkeyCache} from "../src/pubkeys.js";
 import {getEraFilePaths, getFirstEraFilePath} from "./eraFiles.ts";
-import {getPubkeyCacheCapacityForState} from "./serializedState.ts";
+import {getPubkeyCacheCapacityForState, getSerializedGenesisValidatorsRoot} from "./serializedState.ts";
 
 console.log("loaded bindings");
 
@@ -57,7 +57,10 @@ if (!loadedPkix || pubkeyCache.capacity < requiredPubkeyCapacity) {
   });
 }
 
-const state = printDuration("create state view", () => bindings.BeaconStateView.createFromBytes(stateBytes));
+const nativeConfig = new bindings.BeaconConfig(config, getSerializedGenesisValidatorsRoot(stateBytes));
+const state = printDuration("create state view", () =>
+  bindings.BeaconStateView.createFromBytes(stateBytes, nativeConfig)
+);
 
 const signedBlockBytes = (await printDurationAsync("read serialized block", () =>
   nextReader.readSerializedBlock(state.slot + 1)

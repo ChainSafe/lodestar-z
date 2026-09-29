@@ -1,9 +1,5 @@
 import {createBeaconConfig} from "@lodestar/config";
-import {
-  computeAttestationsRewards,
-  createCachedBeaconState,
-  createEmptyEpochCacheImmutableData,
-} from "@lodestar/state-transition";
+import {createCachedBeaconState, createEmptyEpochCacheImmutableData} from "@lodestar/state-transition";
 import {ssz} from "@lodestar/types";
 import {afterEach, describe, expect, it} from "vitest";
 import {SecretKey} from "../src/blst.js";
@@ -61,40 +57,61 @@ describe("attestation rewards", () => {
       value.genesisValidatorsRoot
     );
     value.fork.currentVersion = config.getForkVersion(value.slot);
-    bindings.config.set(config, value.genesisValidatorsRoot);
     pubkeyCache.ensureCapacity(validatorCount);
     pubkeyCache.syncPubkeys(value.validators);
     const reference = createCachedBeaconState(
       stateType.toViewDU(value),
       createEmptyEpochCacheImmutableData(config, value)
     );
-    const native = bindings.BeaconStateView.createFromBytes(stateType.serialize(value));
+    const nativeConfig = new bindings.BeaconConfig(config, value.genesisValidatorsRoot);
+    const native = bindings.BeaconStateView.createFromBytes(stateType.serialize(value), nativeConfig);
     views.push(native);
     return {config, native, reference, value};
   }
 
-  it.each([false, true])("matches Altair arithmetic and eligibility, inactivity leak=%s", async (leak) => {
-    const {config, native, reference} = fixture("altair", leak);
-    const root = native.hashTreeRoot();
-    const expected = await computeAttestationsRewards(config, reference.epochCtx.pubkey2index, reference);
-    const promise = native.computeAttestationsRewards();
-    expect(promise).toBeInstanceOf(Promise);
-    const rewards = await promise;
-    expect(rewards).toEqual(expected);
-    expect(rewards.idealRewards).toHaveLength(33);
-    expect(rewards.totalRewards.find((reward) => reward.validatorIndex === 2)).toBeUndefined();
-    expect(rewards.totalRewards.find((reward) => reward.validatorIndex === 1)?.target).toBeLessThan(0);
-    expect(native.hashTreeRoot()).toEqual(root);
-  });
-
-  it("uses the Bellatrix inactivity quotient", async () => {
-    const {config, native, reference} = fixture("bellatrix");
-    const rewards = await native.computeAttestationsRewards([1]);
-    const old = await computeAttestationsRewards(config, reference.epochCtx.pubkey2index, reference, [1]);
-    const inactivity = -Math.floor((32_000_000_000 * 1000) / (config.INACTIVITY_SCORE_BIAS * 2 ** 24));
-    expect(rewards.totalRewards[0]).toEqual({...old.totalRewards[0], inactivity});
-    expect(inactivity).not.toBe(old.totalRewards[0].inactivity);
-    expect(rewards.idealRewards).toEqual(old.idealRewards);
+  it.each(["altair", "bellatrix", "electra"] as const)("floors rewards and uses the %s quotient", async (fork) => {
+    for (const leak of [false, true]) {
+      const {config, native, reference, value} = fixture(fork, leak);
+      const root = native.hashTreeRoot();
+      const promise = native.computeAttestationsRewards();
+      expect(promise).toBeInstanceOf(Promise);
+      const rewards = await promise;
+      const base = BigInt(reference.epochCtx.baseRewardPerIncrement);
+      const active = BigInt(value.validators.filter((v) => v.activationEpoch === 0).length * 32);
+      const participants = BigInt(
+        value.validators.filter((v, i) => !v.slashed && value.previousEpochParticipation[i] === 7).length * 32
+      );
+      const quotient = fork === "altair" ? 3n * 2n ** 24n : 2n ** 24n;
+      const expectedIdeal = rewards.idealRewards.map((_, increment) => ({
+        effectiveBalance: increment * 1_000_000_000,
+        head: leak ? 0 : Number((BigInt(increment) * base * 14n * participants) / (active * 64n)),
+        inactivity: 0,
+        inclusionDelay: 0,
+        source: leak ? 0 : Number((BigInt(increment) * base * 14n * participants) / (active * 64n)),
+        target: leak ? 0 : Number((BigInt(increment) * base * 26n * participants) / (active * 64n)),
+      }));
+      expect(rewards.idealRewards).toEqual(expectedIdeal);
+      expect(rewards.idealRewards).toHaveLength(fork === "electra" ? 2049 : 33);
+      expect(rewards.totalRewards).toEqual(
+        value.validators.flatMap((validator, validatorIndex) => {
+          if (validator.activationEpoch !== 0) return [];
+          const participates = !validator.slashed && value.previousEpochParticipation[validatorIndex] === 7;
+          return [
+            {
+              head: participates ? expectedIdeal[32].head : 0,
+              inactivity: participates
+                ? 0
+                : -Number((32_000_000_000n * 1000n) / (BigInt(config.INACTIVITY_SCORE_BIAS) * quotient)),
+              inclusionDelay: 0,
+              source: participates ? expectedIdeal[32].source : -Number((32n * base * 14n) / 64n),
+              target: participates ? expectedIdeal[32].target : -Number((32n * base * 26n) / 64n),
+              validatorIndex,
+            },
+          ];
+        })
+      );
+      expect(native.hashTreeRoot()).toEqual(root);
+    }
   });
 
   it("includes the Electra ideal balance range", async () => {
@@ -106,12 +123,14 @@ describe("attestation rewards", () => {
   });
 
   it("sorts and deduplicates selection while accepting mixed-case and unprefixed pubkeys", async () => {
-    const {config, native, reference, value} = fixture();
+    const {native, value} = fixture();
     const hex = Buffer.from(value.validators[0].pubkey).toString("hex");
     const filters = [3, hex.toUpperCase(), `0x${hex}`, 3];
-    expect(await native.computeAttestationsRewards(filters)).toEqual(
-      await computeAttestationsRewards(config, reference.epochCtx.pubkey2index, reference, filters)
-    );
+    const all = await native.computeAttestationsRewards();
+    expect(await native.computeAttestationsRewards(filters)).toEqual({
+      idealRewards: all.idealRewards,
+      totalRewards: all.totalRewards.filter((reward) => reward.validatorIndex === 0 || reward.validatorIndex === 3),
+    });
     expect((await native.computeAttestationsRewards([`0x${"00".repeat(48)}`])).totalRewards).toEqual([]);
     expect((await native.computeAttestationsRewards([])).totalRewards).toHaveLength(63);
   });
@@ -127,15 +146,15 @@ describe("attestation rewards", () => {
   it("rejects Phase0 before reading validator filters", async () => {
     const value = ssz.phase0.BeaconState.defaultValue();
     const config = createBeaconConfig({ALTAIR_FORK_EPOCH: Infinity}, value.genesisValidatorsRoot);
-    bindings.config.set(config, value.genesisValidatorsRoot);
-    const native = bindings.BeaconStateView.createFromBytes(ssz.phase0.BeaconState.serialize(value));
+    const nativeConfig = new bindings.BeaconConfig(config, value.genesisValidatorsRoot);
+    const native = bindings.BeaconStateView.createFromBytes(ssz.phase0.BeaconState.serialize(value), nativeConfig);
     views.push(native);
     await expect(native.computeAttestationsRewards()).rejects.toThrow(
       "Unsupported fork. Attestations rewards calculation is not available in phase0"
     );
   });
 
-  it("rejects a filter getter releasing the state", async () => {
+  it("retains the active call when a filter getter releases the state", async () => {
     const {native} = fixture();
     const ids = [0];
     Object.defineProperty(ids, "0", {
@@ -144,7 +163,9 @@ describe("attestation rewards", () => {
         return 0;
       },
     });
-    await expect(native.computeAttestationsRewards(ids)).rejects.toThrow("InvalidState");
+    const expected = await native.computeAttestationsRewards([0]);
+    await expect(native.computeAttestationsRewards(ids)).resolves.toEqual(expected);
+    await expect(native.computeAttestationsRewards()).rejects.toThrow("InvalidState");
   });
 
   it("preserves thrown getter errors", async () => {

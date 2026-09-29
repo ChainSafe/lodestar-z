@@ -16,7 +16,6 @@ test "memory_safety: processRewardsAndPenalties - sanity" {
 
     try processRewardsAndPenalties(
         .electra,
-        allocator,
         test_state.cached_state.config,
         test_state.cached_state.epoch_cache,
         test_state.cached_state.state.castToFork(.electra),
@@ -27,7 +26,6 @@ test "memory_safety: processRewardsAndPenalties - sanity" {
     // Verify replacing the old cached balances does not leak.
     try processRewardsAndPenalties(
         .electra,
-        allocator,
         test_state.cached_state.config,
         test_state.cached_state.epoch_cache,
         test_state.cached_state.state.castToFork(.electra),
@@ -52,19 +50,18 @@ test "processRewardsAndPenalties maps compact slashing penalties to validator in
     var initial_balances = try state.balances();
     const initial_first_balance = try initial_balances.get(0);
     const initial_slashed_balance = try initial_balances.get(slashed_index);
-    try test_state.epoch_transition_cache.indices_to_slash.append(allocator, slashed_index);
+    const cache = test_state.epoch_transition_cache;
+    try cache.indices_to_slash.append(cache.allocator, slashed_index);
 
     try processRewardsAndPenalties(
         .electra,
-        allocator,
         test_state.cached_state.config,
         test_state.cached_state.epoch_cache,
         state,
-        test_state.epoch_transition_cache,
+        cache,
         &.{slashing_penalty},
     );
 
-    const cache = test_state.epoch_transition_cache;
     const first_balance_without_slashing =
         (try std.math.add(u64, initial_first_balance, cache.rewards[0])) -| cache.penalties[0];
     const slashed_balance_without_slashing =

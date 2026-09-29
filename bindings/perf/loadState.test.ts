@@ -5,7 +5,7 @@ import {loadState as loadStateTS} from "@lodestar/state-transition";
 import {ssz} from "@lodestar/types";
 import bindings from "../src/index.js";
 import {getFirstEraFilePath} from "../test/eraFiles.ts";
-import {getPubkeyCacheCapacityForState} from "../test/serializedState.ts";
+import {getPubkeyCacheCapacityForState, getSerializedGenesisValidatorsRoot} from "../test/serializedState.ts";
 
 const reader = await era.era.EraReader.open(config, getFirstEraFilePath());
 const stateBytes = await reader.readSerializedState();
@@ -23,7 +23,8 @@ if (!loadedPkix || bindings.pubkeys.capacity() < requiredPubkeyCapacity) {
   bindings.pubkeys.ensureCapacity(requiredPubkeyCapacity);
 }
 
-const seedState = bindings.BeaconStateView.createFromBytes(stateBytes);
+const nativeConfig = new bindings.BeaconConfig(config, getSerializedGenesisValidatorsRoot(stateBytes));
+const seedState = bindings.BeaconStateView.createFromBytes(stateBytes, nativeConfig);
 const seedValidatorsBytes = seedState.serializeValidators();
 
 const tsSeedState = ssz.fulu.BeaconState.deserializeToViewDU(stateBytes);

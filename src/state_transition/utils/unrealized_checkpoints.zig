@@ -30,7 +30,7 @@ pub fn computeUnrealizedCheckpoints(allocator: std.mem.Allocator, io: std.Io, ca
             cloned_state.epoch_cache,
             cloned_state.state,
         );
-        defer epoch_transition_cache.deinit(allocator);
+        defer epoch_transition_cache.deinit();
 
         switch (cloned_state.state.forkSeq()) {
             inline else => |fork| {

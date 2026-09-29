@@ -56,7 +56,7 @@ fn ProcessBeforeProcessEpochBench(comptime fork: ForkSeq) type {
                 BenchState.cloned_cached_state.epoch_cache,
                 BenchState.cloned_cached_state.state,
             ) catch unreachable;
-            defer epoch_transition_cache.deinit(allocator);
+            defer epoch_transition_cache.deinit();
         }
     };
 }
@@ -84,12 +84,11 @@ fn ProcessRewardsAndPenaltiesBench(comptime fork: ForkSeq) type {
     return struct {
         epoch_transition_cache: *EpochTransitionCache,
 
-        pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
+        pub fn run(self: *@This(), _: std.mem.Allocator) void {
             const cache = self.epoch_transition_cache;
 
             state_transition.processRewardsAndPenalties(
                 fork,
-                allocator,
                 BenchState.cloned_cached_state.config,
                 BenchState.cloned_cached_state.epoch_cache,
                 BenchState.cloned_cached_state.state.castToFork(fork),
@@ -303,9 +302,20 @@ fn ProcessSyncCommitteeUpdatesBench(comptime fork: ForkSeq) type {
 fn ProcessProposerLookaheadBench(comptime fork: ForkSeq) type {
     return struct {
         epoch_transition_cache: *EpochTransitionCache,
+        var cache_to_release: ?*EpochTransitionCache = null;
+
+        pub fn afterEach() void {
+            const cache = cache_to_release orelse unreachable;
+            const shuffling = cache.next_shuffling orelse unreachable;
+            cache.next_shuffling = null;
+            cache_to_release = null;
+            shuffling.unref();
+            BenchState.afterEach();
+        }
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             const cache = self.epoch_transition_cache;
+            std.debug.assert(cache.next_shuffling == null);
 
             state_transition.processProposerLookahead(
                 fork,
@@ -314,6 +324,7 @@ fn ProcessProposerLookaheadBench(comptime fork: ForkSeq) type {
                 BenchState.cloned_cached_state.state.castToFork(fork),
                 cache,
             ) catch unreachable;
+            cache_to_release = cache;
         }
     };
 }
@@ -321,6 +332,7 @@ fn ProcessProposerLookaheadBench(comptime fork: ForkSeq) type {
 const Step = enum {
     epoch_total,
     before_process_epoch,
+    start_shuffling,
     justification_finalization,
     inactivity_updates,
     rewards_and_penalties,
@@ -390,7 +402,7 @@ fn ProcessEpochBench(comptime fork: ForkSeq) type {
                 BenchState.cloned_cached_state.epoch_cache,
                 BenchState.cloned_cached_state.state,
             ) catch unreachable;
-            defer cache.deinit(allocator);
+            defer cache.deinit();
 
             state_transition.processEpoch(
                 fork,
@@ -425,9 +437,21 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
                 BenchState.cloned_cached_state.epoch_cache,
                 BenchState.cloned_cached_state.state,
             ) catch unreachable;
-            defer cache_val.deinit(allocator);
+            defer cache_val.deinit();
             const cache = &cache_val;
             recordSegment(.before_process_epoch, @as(u64, @intCast(time.since(io, before_start).nanoseconds)));
+
+            if (comptime fork.gte(.fulu)) {
+                const start_shuffling_timer = time.start(io);
+                state_transition.startProposerLookaheadShuffling(
+                    fork,
+                    io,
+                    BenchState.cloned_cached_state.epoch_cache,
+                    BenchState.cloned_cached_state.state.castToFork(fork),
+                    cache,
+                ) catch unreachable;
+                recordSegment(.start_shuffling, @as(u64, @intCast(time.since(io, start_shuffling_timer).nanoseconds)));
+            }
 
             const fork_state = BenchState.cloned_cached_state.state.castToFork(fork);
             const epoch_cache = BenchState.cloned_cached_state.epoch_cache;
@@ -472,7 +496,6 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
             const rewards_start = time.start(io);
             state_transition.processRewardsAndPenalties(
                 fork,
-                allocator,
                 BenchState.cloned_cached_state.config,
                 epoch_cache,
                 fork_state,
@@ -562,7 +585,7 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
                 recordSegment(.sync_committee_updates, @as(u64, @intCast(time.since(io, sync_updates_start).nanoseconds)));
             }
 
-            if (comptime fork == .fulu) {
+            if (comptime fork.gte(.fulu)) {
                 const lookahead_start = time.start(io);
                 state_transition.processProposerLookahead(
                     fork,
@@ -708,7 +731,7 @@ fn runBenchmark(
         cached_state.epoch_cache,
         cached_state.state,
     );
-    defer epoch_transition_cache.deinit(allocator);
+    defer epoch_transition_cache.deinit();
 
     try stdout.print("Cached state created at slot {}\n", .{try cached_state.state.slot()});
     try stdout.print("\nStarting process_epoch benchmarks for {s} fork...\n\n", .{@tagName(fork)});
@@ -786,9 +809,12 @@ fn runBenchmark(
     }
 
     if (comptime fork.gte(.fulu)) {
-        try bench.addParam("proposer_lookahead", &ProcessProposerLookaheadBench(fork){
+        try bench.addParam("proposer_lookahead(sync)", &ProcessProposerLookaheadBench(fork){
             .epoch_transition_cache = &epoch_transition_cache,
-        }, .{ .hooks = hooks });
+        }, .{ .hooks = .{
+            .before_each = BenchState.beforeEach,
+            .after_each = ProcessProposerLookaheadBench(fork).afterEach,
+        } });
     }
 
     // Non-segmented

@@ -12,6 +12,7 @@ describe("sync committee rewards", () => {
   const views: InstanceType<typeof bindings.BeaconStateView>[] = [];
   let participantReward: number;
   let bytes: Uint8Array;
+  let nativeConfig: InstanceType<typeof bindings.BeaconConfig>;
   let appearances: number;
 
   beforeAll(() => {
@@ -55,7 +56,7 @@ describe("sync committee rewards", () => {
       value.genesisValidatorsRoot
     );
     value.fork.currentVersion = config.BELLATRIX_FORK_VERSION;
-    bindings.config.set(config, value.genesisValidatorsRoot);
+    nativeConfig = new bindings.BeaconConfig(config, value.genesisValidatorsRoot);
     pubkeyCache.ensureCapacity(validatorCount);
     pubkeyCache.syncPubkeys(value.validators);
     const reference = createCachedBeaconState(
@@ -72,7 +73,7 @@ describe("sync committee rewards", () => {
   });
 
   function state() {
-    const view = bindings.BeaconStateView.createFromBytes(bytes);
+    const view = bindings.BeaconStateView.createFromBytes(bytes, nativeConfig);
     views.push(view);
     return view;
   }
@@ -149,7 +150,7 @@ describe("sync committee rewards", () => {
     await expect(promise).rejects.toBe(failure);
   });
 
-  it("rejects release during an input getter without accessing freed state", async () => {
+  it("retains the active call when an input getter releases the state", async () => {
     const view = state();
     const input = {
       body: block().body,
@@ -158,7 +159,9 @@ describe("sync committee rewards", () => {
         return value.slot;
       },
     };
-    await expect(view.computeSyncCommitteeRewards(input)).rejects.toThrow("InvalidState");
+    const expected = await view.computeSyncCommitteeRewards(block());
+    await expect(view.computeSyncCommitteeRewards(input)).resolves.toEqual(expected);
+    await expect(view.computeSyncCommitteeRewards(block())).rejects.toThrow("InvalidState");
   });
   it("keeps native results valid when an output setter releases the state", async () => {
     const view = state();
