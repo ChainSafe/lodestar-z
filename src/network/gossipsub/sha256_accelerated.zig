@@ -13,6 +13,7 @@ pub const panic = std.debug.no_panic;
 /// The features `sha256.zig`'s detector checks, beyond the baseline CPU.
 const detected = switch (builtin.cpu.arch) {
     .x86_64 => std.Target.x86.featureSet(&.{ .sse3, .ssse3, .sse4_1, .sse4_2, .crc32, .avx, .avx2, .sha }),
+    .aarch64 => std.Target.aarch64.featureSet(&.{ .fp_armv8, .neon, .sha2 }),
     else => @compileError("no accelerated gossip SHA-256 for this architecture"),
 };
 

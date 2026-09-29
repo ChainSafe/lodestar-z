@@ -25,9 +25,12 @@ pub fn build(b: *std.Build) !void {
 /// this object is compiled with them; `gossipsub/sha256.zig` runs it after detecting them.
 fn addGossipSha256(b: *std.Build, network: *std.Build.Module) void {
     const dispatch = b.option(bool, "gossip-sha256-dispatch", "Link the accelerated gossip SHA-256 object and select it at run time (default: true)") orelse true;
+    const arm = b.option(bool, "gossip-sha256-arm", "Also dispatch on aarch64 Linux and macOS, before ARM hardware has qualified it (default: false)") orelse false;
     const target = network.resolved_target.?;
+    const os = target.result.os.tag;
     const features: ?std.Target.Cpu.Feature.Set = switch (target.result.cpu.arch) {
         .x86_64 => std.Target.x86.featureSet(&.{ .sha, .avx2 }),
+        .aarch64 => if (arm and (os == .linux or os == .macos)) std.Target.aarch64.featureSet(&.{ .neon, .sha2 }) else null,
         else => null,
     };
     const options = b.addOptions();
