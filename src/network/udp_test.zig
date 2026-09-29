@@ -104,19 +104,28 @@ test "UDP metrics count successful batch prefixes when a later send fails" {
     try std.testing.expectEqual(@as(u64, 5), socket.counters.sent_bytes);
 }
 
-test "dual-stack UDP counts the exact prefix of a batch the host refuses in one family" {
+test "dual-stack UDP counts the exact prefix when the host refuses a datagram after it waited for room" {
     if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
     var buffer: [constants.datagram_size_max]u8 = undefined;
     var target = try udp_mod.Udp.bind(std.testing.io, .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } });
     defer target.close(std.testing.io);
+    // The IPv6 socket reports a full buffer to sends that do not wait, and the host starts refusing
+    // it while the batch waits for room. A later filter's errno wins.
     const Refused = struct {
         installed: bool = false,
         outcomes: [2]udp_mod.SendOutcome = undefined,
 
+        var socket: std.Io.net.Socket.Handle = -1;
+        var waits: usize = 0;
+
         fn run(self: *@This(), udp: *udp_mod.Udp) void {
             const filter = @import("udp").testing.SendFilter;
-            if (!filter.install(&.{.{ .socket = udp.sockets.values[1].?.handle, .errno = .PERM }})) return;
+            socket = udp.sockets.values[1].?.handle;
+            if (!filter.install(&.{.{ .socket = socket, .errno = .AGAIN, .nonblocking_only = true }})) return;
             self.installed = true;
+            var vtable = std.testing.io.vtable.*;
+            vtable.batchAwaitConcurrent = wait;
+            const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
             const local = udp.localAddresses();
             var payload = [_]u8{ 1, 2, 3 };
             const batch = [_]types.Sent{
@@ -124,15 +133,23 @@ test "dual-stack UDP counts the exact prefix of a batch the host refuses in one 
                 .{ .to = local[1].?, .bytes = payload[1..2] },
                 .{ .to = local[0].?, .bytes = payload[2..3] },
             };
-            self.outcomes[0] = udp.sendMany(std.testing.io, &batch);
-            self.outcomes[1] = udp.sendMany(std.testing.io, batch[2..]);
+            self.outcomes[0] = udp.sendMany(io, &batch);
+            self.outcomes[1] = udp.sendMany(io, batch[2..]);
+        }
+
+        fn wait(userdata: ?*anyopaque, batch: *std.Io.Batch, timeout: std.Io.Timeout) std.Io.Batch.AwaitConcurrentError!void {
+            waits += 1;
+            std.debug.assert(@import("udp").testing.SendFilter.install(&.{.{ .socket = socket, .errno = .PERM }}));
+            return std.testing.io.vtable.batchAwaitConcurrent(userdata, batch, timeout);
         }
     };
+    Refused.waits = 0;
     var refused: Refused = .{};
     const thread = try std.Thread.spawn(.{}, Refused.run, .{ &refused, &target });
     thread.join();
-    // Kernels without seccomp filters cannot refuse the sends.
+    // Kernels without seccomp filters cannot produce the errnos.
     if (!refused.installed) return error.SkipZigTest;
+    try std.testing.expectEqual(@as(usize, 1), Refused.waits);
     try std.testing.expectEqual(udp_mod.SendOutcome{ .sent = 1, .failure = error.DestinationRefused }, refused.outcomes[0]);
     try std.testing.expectEqual(udp_mod.SendOutcome{ .sent = 1, .failure = null }, refused.outcomes[1]);
     try std.testing.expectEqual(@as(u64, 2), target.counters.sent_datagrams);

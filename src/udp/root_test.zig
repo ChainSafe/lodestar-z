@@ -238,7 +238,7 @@ test "UDP records a failed size readback as unknown and not below the request" {
     try std.testing.expectEqual([2]?u64{ null, null }, sockets.drops());
 }
 
-test "UDP names a refused send or batch, keeps other errnos, and waits out a full buffer in a batch" {
+test "UDP names a refused send or batch and keeps other errnos, and a batch still full after its wait is pressure" {
     if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
     var sockets: [4]udp.Sockets = undefined;
     for (&sockets, 0..) |*socket, index| {
@@ -257,13 +257,11 @@ test "UDP names a refused send or batch, keeps other errnos, and waits out a ful
     try std.testing.expectError(error.SystemResources, outcome.results[3]);
     try std.testing.expectEqual(udp.SendOutcome{ .sent = 0, .failure = error.DestinationRefused }, outcome.batches[0]);
     try std.testing.expectEqual(udp.SendOutcome{ .sent = 0, .failure = error.AccessDenied }, outcome.batches[1]);
-    try std.testing.expectEqual(udp.SendOutcome{ .sent = 1, .failure = null }, outcome.batches[2]);
+    // The batch waits for room once; the socket polls writable, and the send after the wait meets
+    // the filter's full buffer again.
+    try std.testing.expectEqual(udp.SendOutcome{ .sent = 0, .failure = error.SystemResources }, outcome.batches[2]);
     try std.testing.expectEqual(udp.SendOutcome{ .sent = 0, .failure = error.SystemResources }, outcome.batches[3]);
-    // Only the batch that met a full buffer went out, through Threaded's waiting send.
     var buffer: [16]u8 = undefined;
-    const delivered = (try readAny(&sockets[0], std.testing.io, &buffer)).?;
-    try std.testing.expectEqualStrings("filtered", delivered.data);
-    try std.testing.expectEqualDeep(udp.Address.fromNetwork(sockets[2].primary().address), udp.Address.fromNetwork(delivered.from));
     try std.testing.expectEqual(null, try readAny(&sockets[0], std.testing.io, &buffer));
 }
 
@@ -336,6 +334,68 @@ test "UDP native batches check cancellation before sending" {
     var buffer: [16]u8 = undefined;
     try std.testing.expectEqual(null, try readAny(&sockets, std.testing.io, &buffer));
 }
+
+test "UDP batch cancellation interrupts a wait for room in a full send buffer" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const p = std.posix;
+    // Cancellation reaches only tasks of a Threaded pool, and this pool's thread, which the
+    // filter stays on, ends with it.
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var sockets = try udp.Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
+    defer sockets.close(std.testing.io);
+    var pipe: [2]p.fd_t = undefined;
+    try std.testing.expectEqual(p.E.SUCCESS, p.errno(p.system.pipe2(&pipe, .{ .NONBLOCK = true, .CLOEXEC = true })));
+    defer for (pipe) |fd| {
+        _ = p.system.close(fd);
+    };
+    const page: [4096]u8 = @splat(0);
+    for (0..1024) |_| {
+        if (p.errno(p.system.write(pipe[1], &page, page.len)) == .AGAIN) break;
+    } else return error.TestUnexpectedResult;
+    FullBuffer.pipe = pipe[1];
+    FullBuffer.waiting.store(false, .release);
+    var vtable = threaded.io().vtable.*;
+    vtable.batchAwaitConcurrent = FullBuffer.wait;
+    const io: std.Io = .{ .userdata = threaded.io().userdata, .vtable = &vtable };
+    var task = try io.concurrent(FullBuffer.send, .{ io, &sockets });
+    for (0..1000) |_| {
+        if (FullBuffer.waiting.load(.acquire)) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    // Lets the poll block before the cancel arrives.
+    try std.Io.sleep(std.testing.io, .fromMilliseconds(20), .awake);
+    const result = task.cancel(io);
+    // Kernels without seccomp filters cannot report the full buffer.
+    if (!result.installed) return error.SkipZigTest;
+    try std.testing.expect(FullBuffer.waiting.load(.acquire));
+    try std.testing.expectEqual(udp.SendOutcome{ .sent = 0, .failure = error.Canceled }, result.outcome);
+    var buffer: [16]u8 = undefined;
+    try std.testing.expectEqual(null, try readAny(&sockets, std.testing.io, &buffer));
+}
+
+/// A batch whose socket reports a full buffer to every send that asks not to wait. Its wait for
+/// room polls a pipe nobody reads, since a loopback UDP send buffer never stays full.
+const FullBuffer = struct {
+    var pipe: std.posix.fd_t = -1;
+    var waiting: std.atomic.Value(bool) = .init(false);
+
+    const Result = struct { installed: bool = false, outcome: udp.SendOutcome = .{ .sent = 0, .failure = null } };
+
+    fn send(io: std.Io, sockets: *const udp.Sockets) Result {
+        if (!udp.testing.SendFilter.install(&.{.{ .socket = sockets.primary().handle, .errno = .AGAIN, .nonblocking_only = true }})) return .{};
+        const destination = sockets.primary().address;
+        var message: net.OutgoingMessage = .{ .address = &destination, .data_ptr = "waiting", .data_len = 7 };
+        return .{ .installed = true, .outcome = sockets.sendMany(io, (&message)[0..1]) };
+    }
+
+    fn wait(userdata: ?*anyopaque, batch: *std.Io.Batch, limit: std.Io.Timeout) std.Io.Batch.AwaitConcurrentError!void {
+        const operation = &batch.storage[batch.submitted.head.toIndex()].submission.operation;
+        operation.file_write_streaming.file.handle = pipe;
+        waiting.store(true, .release);
+        return std.testing.io.vtable.batchAwaitConcurrent(userdata, batch, limit);
+    }
+};
 
 test "UDP leaves sends to a provider that replaces them" {
     var sockets = try udp.Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
