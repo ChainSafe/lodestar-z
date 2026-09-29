@@ -335,6 +335,59 @@ stock(
   60000
 );
 
+stock(
+  "stock sequential requests past the native start quota negotiate and wait for their start",
+  async () => {
+    const {Child} = await import("../../test/interop/child.mjs");
+    let peer: InstanceType<typeof Child> | undefined;
+    let runtime: ReturnType<typeof startRuntime> | undefined;
+    try {
+      const host = process.env.LODESTAR_Z_NETWORK_STOCK_HOST;
+      if (!host) throw Error("stock host path required");
+      peer = new Child("incoming-stock-starts", process.execPath, [
+        "--import",
+        "tsx",
+        "test/interop/request_responder.mjs",
+        host,
+      ]);
+      await peer.command("ready");
+      const config = applicationConfig();
+      config.resources.bridgeBudgetBytes = 512 * 1024 * 1024;
+      const live = startRuntime(config, () => undefined);
+      runtime = live;
+      const identity = await live.identity;
+      await live.applyIntent(localIntent(config), config.initialSlot);
+      live.setLogLevel("debug");
+      const addressBytes = Buffer.from(identity.localMultiaddr).toString("hex");
+      let waits = 0;
+      const drainWaits = () => {
+        for (let batch = 0; batch < 8; batch++) {
+          const drained = live.drainLogs(32);
+          waits += drained.records.filter((record) => record.message.startsWith("request_start_wait ")).length;
+          if (!drained.more) return;
+        }
+      };
+      // An identity starts 36 application requests per 10 s; later ones wait for a start.
+      const started = Date.now();
+      let burst = 0;
+      for (let i = 0; i < 40; i++) {
+        const reply = peer.command("request", {addressBytes});
+        await (await takeIncoming(live)).finish();
+        expect(await reply).toMatchObject({chunks: []});
+        if (i === 35) burst = Date.now() - started;
+        drainWaits();
+      }
+      // A slow host that spreads the burst past the refill period never needs to wait.
+      if (burst < 9000) expect(waits).toBeGreaterThan(0);
+    } finally {
+      await Promise.allSettled([runtime?.close(), peer?.stop()]).then((results) => {
+        for (const result of results) if (result.status === "rejected") throw result.reason;
+      });
+    }
+  },
+  60000
+);
+
 test("terminal before take never exposes a retired request", async () => {
   const pair = await incomingPair();
   try {
