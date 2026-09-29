@@ -260,7 +260,7 @@ pub fn headerInfo(datagram: []const u8, token: *[token_length_max]u8) Error!Head
 }
 
 /// quiche's `quiche_send_info`. translate-c makes the C struct opaque for musl, whose
-/// `struct timespec` pads with bitfields.
+/// `struct timespec` pads with bitfields, so this layout is checked against the C compiler's.
 pub const SendInfo = extern struct {
     from: c.struct_sockaddr_storage,
     from_len: c.socklen_t,
@@ -270,10 +270,16 @@ pub const SendInfo = extern struct {
 };
 
 comptime {
-    if (@typeInfo(c.quiche_send_info) == .@"struct") {
-        std.debug.assert(@sizeOf(SendInfo) == @sizeOf(c.quiche_send_info));
-        std.debug.assert(@offsetOf(SendInfo, "at") == @offsetOf(c.quiche_send_info, "at"));
-    }
+    const layout = @import("quiche_send_info_layout");
+    std.debug.assert(@sizeOf(SendInfo) == layout.send_info_size);
+    std.debug.assert(@alignOf(SendInfo) == layout.send_info_align);
+    std.debug.assert(@offsetOf(SendInfo, "from") == layout.send_info_from);
+    std.debug.assert(@offsetOf(SendInfo, "from_len") == layout.send_info_from_len);
+    std.debug.assert(@offsetOf(SendInfo, "to") == layout.send_info_to);
+    std.debug.assert(@offsetOf(SendInfo, "to_len") == layout.send_info_to_len);
+    std.debug.assert(@offsetOf(SendInfo, "at") == layout.send_info_at);
+    std.debug.assert(@sizeOf(@FieldType(SendInfo, "at")) == layout.send_info_at_size);
+    std.debug.assert(@offsetOf(@FieldType(SendInfo, "at"), "nsec") == layout.send_info_at_nsec);
 }
 
 pub fn connSend(conn: *c.quiche_conn, out: []u8, info: *SendInfo) isize {
