@@ -78,6 +78,16 @@ pub const Limiter = struct {
         return .allowed;
     }
 
+    /// Whether the identity has a row or one is free for it, so `start` would not refuse
+    /// `identity_capacity`. Charges nothing.
+    pub fn tracks(self: *const Limiter, identity: *const PeerId, now_ms: u64) bool {
+        const now_ns = @as(u128, now_ms) * ns_per_ms;
+        for (self.rows) |*row| {
+            if (!row.occupied or row.expires_ns <= now_ns or row.identity.eql(identity)) return true;
+        }
+        return false;
+    }
+
     /// When `start` next admits the identity's class, in the style of `eligibleAt`: a retry hint
     /// that reserves nothing, so a waiting request rechecks then. Without a free row, the
     /// earliest row expiry.

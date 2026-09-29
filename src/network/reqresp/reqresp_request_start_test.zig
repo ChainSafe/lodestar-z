@@ -355,6 +355,47 @@ test "reqresp request start concurrency peer and identity capacity still reset w
     try std.testing.expectEqual(@as(u16, 3), owner.active().inbound);
 }
 
+test "reqresp request start a request behind a waiter is still refused without an identity row" {
+    var setup: harness.Pair = .{};
+    try setup.init(.{}, .{ .admission = limits(1) });
+    defer setup.deinit();
+    var exchange: Exchange = .{ .setup = &setup };
+    const owner = &setup.shared.server.reqresp;
+    const blocks = try std.testing.allocator.alloc(u8, Protocol.blocks_by_root_v2.info().response_max);
+    defer std.testing.allocator.free(blocks);
+    const blobs = try std.testing.allocator.alloc(u8, Protocol.blob_sidecars_by_root_v1.info().response_max);
+    defer std.testing.allocator.free(blobs);
+    const start = setup.shared.pair.now.mono_ms;
+    for (0..2) |_| _ = try request(&setup, .blocks_by_root_v2, blocks);
+    try exchange.pumps(20);
+    try std.testing.expectEqual(@as(usize, 2), exchange.done);
+    // A waiter whose request bytes have not arrived stays owed its start past its row's expiry.
+    const slow = try setup.openRaw(.blocks_by_root_v2);
+    try exchange.pumps(10);
+    const waiter = try waiterAt(owner, start);
+    setup.shared.pair.advance(2 * refill_ms);
+    const stranger: PeerId = .{ .bytes = @splat(9) };
+    try std.testing.expectEqual(.allowed, owner.admission.limiter.start(&stranger, false, setup.shared.pair.now.mono_ms));
+    _ = try request(&setup, .blob_sidecars_by_root_v1, blobs);
+    try exchange.pumps(20);
+    try std.testing.expectEqual(@as(?rr.Failure, .{ .negotiation_failed = .stream_closed }), exchange.client_failure);
+    try std.testing.expectEqual(@as(u64, 1), refusals(owner, .blob_sidecars_by_root_v1, .identity_capacity));
+    try std.testing.expectEqual(@as(u16, 1), owner.active().inbound);
+    try std.testing.expect(owner.inbound[waiter].request.running());
+    // The admitted waiter keeps waiting, now for a free row.
+    var wire: [codec.frame_scratch_max]u8 = undefined;
+    const encoded = try codec.encodeRequest(&.{}, &wire);
+    try std.testing.expectEqual(encoded.len, try setup.shared.pair.client.write(slow, encoded, true));
+    try exchange.pumps(20);
+    try std.testing.expectEqual(@as(usize, 2), exchange.delivered_len);
+    try std.testing.expectEqual(@as(usize, 1), waitingStarts(owner));
+    setup.shared.pair.advance(refill_ms);
+    try exchange.pumps(20);
+    try std.testing.expectEqual(@as(usize, 3), exchange.delivered_len);
+    try std.testing.expectEqual(waiter, exchange.delivered[2].index);
+    try std.testing.expectEqual(start + 3 * refill_ms, exchange.delivered[2].at_ms);
+}
+
 /// A `.ready` request on connection index `peer` whose start accept deferred.
 fn deferredSlot(owner: *rr.ReqResp, peer: u16, which: Protocol, identity: *const PeerId, now_ms: u64) u16 {
     const index: u16 = @intCast(Plan.first(peer, which));
