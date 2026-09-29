@@ -212,7 +212,7 @@ pub const ReqResp = struct {
     /// Slots whose terminal was delivered; recycled by the next pump.
     reported: index_list.List = .{},
     /// Running slots keyed on their deadline, or on their admission eligibility while waiting
-    /// for tokens.
+    /// for their start or tokens.
     deadlines: DeadlineHeap,
     /// Per class, the connections with a `.ready` inbound slot.
     admission_ready: [2]index_list.List = .{ .{}, .{} },
@@ -732,7 +732,7 @@ pub const ReqResp = struct {
         if (id < self.outbound.len) return self.outbound[id].deadline();
         const slot = &self.inbound[id - self.outbound.len];
         const due = slot.deadline(self) orelse return null;
-        if (slot.state == .ready and slot.admission_wait == .tokens) return @min(due, slot.eligible_ms);
+        if (slot.state == .ready and (slot.admission_wait == .start or slot.admission_wait == .tokens)) return @min(due, slot.eligible_ms);
         return due;
     }
 
@@ -911,7 +911,8 @@ pub const ReqResp = struct {
         var marked = self.ready.len;
         const keyed: usize = self.deadlines.len;
         var serviced: usize = 0;
-        // A due key comes back at most once more, when its token wait ended before its deadline.
+        // A due key comes back at most once more, when its start or token wait ended before its
+        // deadline.
         for (0..marked + 2 * keyed + 1) |_| {
             if (serviced == self.options.work_per_pump_max) break;
             const due = self.deadlines.popDue(now.mono_ms);
@@ -924,7 +925,7 @@ pub const ReqResp = struct {
             if (due != null and id >= self.outbound.len) {
                 const slot = &self.inbound[id - self.outbound.len];
                 if (slot.request.running() and slot.state == .ready and now.mono_ms < slot.deadline(self).?) {
-                    // Only its token wait ended.
+                    // Only its start or token wait ended.
                     slot.admission_wait = .none;
                     self.admission_pending = true;
                     self.settle(id);
@@ -985,8 +986,8 @@ pub const ReqResp = struct {
         }
     }
 
-    /// Tries the connection's `.ready` slots of the class in turn until one is admitted or
-    /// pays toward its cost.
+    /// Tries the connection's `.ready` slots of the class in turn until one is admitted, is
+    /// charged its start or pays toward its cost.
     fn promotePeer(self: *ReqResp, peer: u16, comptime class: u1, now: Now) bool {
         const cursor = &self.peer_cursors[peer];
         const first = @as(usize, peer) * receive_plan.slots_per_peer;
@@ -998,9 +999,10 @@ pub const ReqResp = struct {
             const slot = &self.inbound[index];
             self.visits +|= 1;
             const paid = slot.admission_paid;
+            const start_pending = slot.start_pending;
             const admitted = slot.promote(self, index, now);
             self.settle(self.inboundId(index));
-            if (admitted or slot.admission_paid > paid) {
+            if (admitted or slot.admission_paid > paid or start_pending != slot.start_pending) {
                 cursor.admission[class] = @intCast((local + 1) % receive_plan.slots_per_peer);
                 return true;
             }
@@ -1210,6 +1212,35 @@ pub const ReqResp = struct {
         return count;
     }
 
+    /// Whether a running request of the class on the connection is still owed its start.
+    pub fn startsPending(self: *const ReqResp, conn: Handle, control: bool) bool {
+        for (self.inboundOf(conn)) |*slot| {
+            if (!slot.start_pending or !slot.request.running() or slot.request.protocol.isControl() != control) continue;
+            if (std.meta.eql(slot.request.conn, conn)) return true;
+        }
+        return false;
+    }
+
+    /// Whether another `.ready` request of the slot's class on its connection has waited longer
+    /// for its start, by accept time and then slot order. Starts go to the longest waiter, so a
+    /// waiter's start comes within one refill per request ahead of it.
+    pub fn startQueued(self: *const ReqResp, index: u16) bool {
+        const slot = &self.inbound[index];
+        const peer = index / receive_plan.slots_per_peer;
+        const first = @as(usize, peer) * receive_plan.slots_per_peer;
+        var mask = self.peer_cursors[peer].ready_mask[@intFromBool(slot.request.protocol.isControl())];
+        for (0..receive_plan.slots_per_peer) |_| {
+            if (mask == 0) break;
+            const other = first + @ctz(mask);
+            mask &= mask - 1;
+            const waiter = &self.inbound[other];
+            if (other == index or !waiter.start_pending) continue;
+            if (waiter.request.started_ms < slot.request.started_ms) return true;
+            if (waiter.request.started_ms == slot.request.started_ms and other < index) return true;
+        }
+        return false;
+    }
+
     pub fn inboundCount(self: *const ReqResp, conn: Handle, which: ?Protocol) u8 {
         var count: u8 = 0;
         for (self.inboundOf(conn)) |*slot| {
@@ -1285,6 +1316,7 @@ test {
     _ = @import("reqresp_control_partition_test.zig");
     _ = @import("reqresp_failures_test.zig");
     _ = @import("reqresp_half_close_test.zig");
+    _ = @import("reqresp_request_start_test.zig");
     _ = @import("reqresp_service_test.zig");
     _ = @import("reqresp_terminal_test.zig");
     _ = @import("reqresp_test.zig");

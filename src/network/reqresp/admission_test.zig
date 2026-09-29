@@ -24,6 +24,32 @@ test "reqresp request starts retain identity debt and isolate control from appli
     try std.testing.expectEqual(a.Decision.allowed, owner.start(&third, false, 1000));
 }
 
+test "reqresp request start hints name the first admitting millisecond without reserving it" {
+    var owner = try a.Limiter.init(std.testing.allocator, .{ .identities = 2, .peer = quotas(10, 1000), .global = quotas(20, 1000), .starts = .{ .tokens = 2, .period_ms = 1000 } });
+    defer owner.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 0), owner.startAt(&first, false, 0));
+    try std.testing.expectEqual(a.Decision.allowed, owner.start(&first, false, 0));
+    try std.testing.expectEqual(a.Decision.allowed, owner.start(&first, false, 0));
+    for (0..3) |_| try std.testing.expectEqual(@as(u64, 500), owner.startAt(&first, false, 0));
+    try std.testing.expectEqual(a.Decision.peer_quota, owner.start(&first, false, 499));
+    try std.testing.expectEqual(@as(u64, 500), owner.startAt(&first, false, 499));
+    try std.testing.expectEqual(@as(u64, 499), owner.startAt(&first, true, 499));
+    try std.testing.expectEqual(a.Decision.allowed, owner.start(&first, false, 500));
+    try std.testing.expectEqual(@as(u64, 1000), owner.startAt(&first, false, 500));
+    try std.testing.expectEqual(a.Decision.allowed, owner.start(&second, false, 500));
+    try std.testing.expectEqual(@as(u64, 1000), owner.startAt(&third, false, 600));
+    try std.testing.expectEqual(a.Decision.identity_capacity, owner.start(&third, false, 999));
+    try std.testing.expectEqual(a.Decision.allowed, owner.start(&third, false, 1000));
+
+    var rounded = try a.Limiter.init(std.testing.allocator, .{ .identities = 1, .peer = quotas(10, 1000), .global = quotas(20, 1000), .starts = .{ .tokens = 3, .period_ms = 1000 } });
+    defer rounded.deinit(std.testing.allocator);
+    try std.testing.expectEqual(a.Decision.allowed, rounded.start(&first, false, 0));
+    try std.testing.expectEqual(a.Decision.allowed, rounded.start(&first, false, 0));
+    try std.testing.expectEqual(a.Decision.peer_quota, rounded.start(&first, false, 0));
+    try std.testing.expectEqual(@as(u64, 1), rounded.startAt(&first, false, 0));
+    try std.testing.expectEqual(a.Decision.allowed, rounded.start(&first, false, 1));
+}
+
 test "reqresp request eligibility predicts peer and aggregate refill without charging queued work" {
     var owner = try a.Limiter.init(std.testing.allocator, .{ .identities = 2, .peer = quotas(2, 1000), .global = quotas(2, 1000) });
     defer owner.deinit(std.testing.allocator);
