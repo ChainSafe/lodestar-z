@@ -127,15 +127,26 @@ pub const TreeViewState = struct {
         const nodes = try self.allocator.alloc(Node.Id, self.changed.count());
         defer self.allocator.free(nodes);
 
+        const SortContext = struct {
+            keys: []const Gindex,
+
+            pub fn lessThan(context: @This(), a: usize, b: usize) bool {
+                return @intFromEnum(context.keys[a]) < @intFromEnum(context.keys[b]);
+            }
+        };
+        self.changed.sortUnstable(SortContext{ .keys = self.changed.keys() });
         const gindices = self.changed.keys();
-        Gindex.sortAsc(gindices);
+
+        // Failed tree rebuilds can reclaim their inputs. Keep pending nodes alive until
+        // publication, then drop only these temporary references, even when their count reaches zero.
+        var retained: usize = 0;
+        defer for (nodes[0..retained]) |node| self.pool.unrefUnsafe(node);
 
         for (gindices, 0..) |gindex, i| {
-            if (self.children_nodes.get(gindex)) |child_node| {
-                nodes[i] = child_node;
-            } else {
-                return error.ChildNotFound;
-            }
+            const child_node = self.children_nodes.get(gindex) orelse return error.ChildNotFound;
+            try self.pool.ref(child_node);
+            nodes[i] = child_node;
+            retained += 1;
         }
 
         const new_root = try self.root.setNodesGrouped(self.pool, gindices, nodes);
