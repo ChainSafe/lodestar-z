@@ -32,9 +32,9 @@ const hasCompoundingWithdrawalCredential = @import("../utils/electra.zig").hasCo
 const computeBaseRewardPerIncrement = @import("../utils/sync_committee.zig").computeBaseRewardPerIncrement;
 const processPendingAttestations = @import("../epoch/process_pending_attestations.zig").processPendingAttestations;
 const Node = @import("persistent_merkle_tree").Node;
-const validator_flat_cache = @import("./validator_flat_cache.zig");
-const ValidatorFlatCache = validator_flat_cache.ValidatorFlatCache;
-const ValidatorFields = validator_flat_cache.ValidatorFields;
+const vfc = @import("./validator_flat_cache.zig");
+const ValidatorFlatCache = vfc.ValidatorFlatCache;
+const ValidatorFields = vfc.ValidatorFields;
 const EpochShufflingRc = @import("../utils/epoch_shuffling.zig").EpochShufflingRc;
 const EpochShuffling = @import("../utils/epoch_shuffling.zig").EpochShuffling;
 
@@ -124,8 +124,13 @@ const ReusedEpochTransitionCache = struct {
     penalties: U64Array,
     slashing_penalties: U64Array,
 
+    /// Created by the first epoch transition, because the node pool is only known once a state
+    /// arrives. Holds a ref into that pool, so this struct must be torn down before the pool.
+    validator_flat_cache: ?ValidatorFlatCache,
+
     pub fn init(self: *ReusedEpochTransitionCache, allocator: Allocator, validator_count: usize) !void {
         self.allocator = allocator;
+        self.validator_flat_cache = null;
         self.is_active_prev_epoch = try BoolArray.initCapacity(allocator, validator_count);
         errdefer self.is_active_prev_epoch.deinit(allocator);
         self.is_active_current_epoch = try BoolArray.initCapacity(allocator, validator_count);
@@ -163,6 +168,7 @@ const ReusedEpochTransitionCache = struct {
     }
 
     pub fn deinit(self: *ReusedEpochTransitionCache) void {
+        if (self.validator_flat_cache) |*validator_flat_cache| validator_flat_cache.deinit();
         self.is_active_prev_epoch.deinit(self.allocator);
         self.is_active_current_epoch.deinit(self.allocator);
         self.is_active_next_epoch.deinit(self.allocator);
@@ -207,8 +213,6 @@ fn getReusedEpochTransitionCache(allocator: Allocator, io: std.Io, validator_cou
 pub fn deinitReusedEpochTransitionCache(io: std.Io) void {
     _reused_lock.lockUncancelable(io);
     defer _reused_lock.unlock(io);
-
-    validator_flat_cache.deinitGlobal();
 
     if (_reused_cache) |cache| {
         const allocator = cache.allocator;
@@ -292,11 +296,14 @@ pub const EpochTransitionCache = struct {
         try validators_view.commit();
         const validator_count = try validators_view.length();
         var validators_it = validators_view.iteratorReadonly(0);
-        var flat_validator_cache: validator_flat_cache.ValidatorFlatCache = ValidatorFlatCache.init(
-            allocator,
-            validators_view.chunks.state.pool,
-        );
-        try flat_validator_cache.sync(
+
+        var reused_cache = try getReusedEpochTransitionCache(allocator, io, validator_count);
+        if (reused_cache.validator_flat_cache == null) {
+            reused_cache.validator_flat_cache = ValidatorFlatCache.init(reused_cache.allocator, validators_view.chunks.state.pool);
+        }
+        const validator_flat_cache = &reused_cache.validator_flat_cache.?;
+        std.debug.assert(validator_flat_cache.pool == validators_view.chunks.state.pool);
+        try validator_flat_cache.sync(
             validators_view.getRoot(),
             validators_it.depth_iterator.base_gindex.pathLen(),
             validator_count,
@@ -309,12 +316,14 @@ pub const EpochTransitionCache = struct {
 
         var next_epoch_shuffling_active_indices_length: usize = 0;
 
-        var reused_cache = try getReusedEpochTransitionCache(allocator, io, validator_count);
         if (fork_seq.gte(.electra)) {
             try reused_cache.is_compounding_validator_arr.resize(reused_cache.allocator, validator_count);
         }
         for (0..validator_count) |i| {
-            const validator: ValidatorFields = flat_validator_cache.fields(i, effective_balances_by_increments[i]);
+            const validator: ValidatorFields = validator_flat_cache.fields(
+                i,
+                effective_balances_by_increments[i],
+            );
             var flag: u8 = 0;
 
             if (validator.slashed) {

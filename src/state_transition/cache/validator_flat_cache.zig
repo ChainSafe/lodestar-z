@@ -1,14 +1,12 @@
 //! Flat, index-addressed copy of the validator fields the epoch transition reads.
 //!
-//! The cache is derived from the validators tree and never written directly. `sync` diffs the
-//! tree it was last synced to against the target tree and patches only the leaves whose node id
-//! differs, so the cost is proportional to the number of changed validators. It holds a ref on
-//! the synced root: that keeps every node id reachable from it alive, which is what makes
-//! "same id" imply "same content".
+//! The cache is derived from the validators tree and should never be written directly.
+//! Use `sync` to do that. `sync` diffs the tree it was last synced to against
+//! the target tree and patches only the leaves whose node id differs,
+//! so the cost is proportional to the number of changed validators.
 //!
-//! One instance per thread, like the node pool and the reused epoch buffers, so no locking is
-//! needed. The cache holds a ref into the pool it serves and registers the pool's `deinit_hook`
-//! to drop it when that pool is torn down on this thread.
+//! Owner decides the lifetime and must `deinit` it before the pool it
+//! serves is torn down, because of the ref it holds.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -22,7 +20,7 @@ const Validator = types.phase0.Validator;
 const flag_slashed: u8 = 1;
 const flag_compounding: u8 = 2;
 
-/// What EpochTransitionCache.init needs to know about one validator, whatever the source.
+/// Fields that EpochTransitionCache.init needs to know about one validator.
 pub const ValidatorFields = struct {
     activation_eligibility_epoch: u64,
     activation_epoch: u64,
@@ -174,44 +172,6 @@ pub const ValidatorFlatCache = struct {
         return mismatches;
     }
 };
-
-threadlocal var global: ?ValidatorFlatCache = null;
-
-pub fn syncGlobal(allocator: Allocator, pool: *Node.Pool, root: Node.Id, depth: usize, list_len: usize) !*const ValidatorFlatCache {
-    // Node ids only mean something inside the pool that issued them. The previous pool is still
-    // alive here: its deinit hook would have cleared the cache otherwise.
-    if (global) |*existing| if (existing.pool != pool) deinitGlobal();
-    if (global == null) {
-        global = ValidatorFlatCache.init(allocator, pool);
-        pool.deinit_hook = onPoolDeinit;
-    }
-    const cache = &global.?;
-    try cache.sync(root, depth, list_len);
-    return cache;
-}
-
-pub fn getGlobal() ?*const ValidatorFlatCache {
-    return if (global) |*cache| cache else null;
-}
-
-pub fn invalidateGlobal() void {
-    if (global) |*cache| cache.invalidate();
-}
-
-pub fn deinitGlobal() void {
-    if (global) |*cache| {
-        if (cache.pool.deinit_hook == onPoolDeinit) cache.pool.deinit_hook = null;
-        cache.deinit();
-    }
-    global = null;
-}
-
-fn onPoolDeinit(pool: *Node.Pool) void {
-    if (global) |*cache| if (cache.pool == pool) {
-        cache.deinit();
-        global = null;
-    };
-}
 
 test {
     _ = @import("validator_flat_cache_test.zig");
