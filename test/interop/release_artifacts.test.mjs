@@ -4,6 +4,7 @@ import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {afterEach, test} from "node:test";
 import {packageScenarios} from "../../bindings/test/fixtures/network-package-scenarios.mjs";
+import {runBoundedCommand} from "../../scripts/bounded_child.mjs";
 import {record, verify} from "../../scripts/release_artifacts.mjs";
 
 const NAME = "@chainsafe/lodestar-z";
@@ -31,12 +32,21 @@ function addon(target, seed) {
   return bytes;
 }
 
+async function git(cwd, ...args) {
+  return (await runBoundedCommand("git", args, cwd, {maxOutputBytes: 64 * 1024, timeoutMs: 30_000})).stdout.trim();
+}
+
 /** A release after build, qualification and `zapi prepublish`, as the publishing job holds it. */
 async function release() {
   const root = await mkdtemp(join(tmpdir(), "release-artifacts-"));
   temporaryDirectories.push(root);
   const pkg = {name: NAME, version: VERSION, zapi: {binaryName: "bindings", targets: TARGETS}};
   await writeFile(join(root, "package.json"), JSON.stringify(pkg));
+  await git(root, "init", "-q");
+  await git(root, "add", "package.json");
+  for (const setting of ["user.name=fixture", "user.email=fixture@example.invalid", "commit.gpgSign=false"])
+    await git(root, "config", ...setting.split("="));
+  await git(root, "commit", "-qm", "fixture");
   for (const target of TARGETS) {
     await mkdir(join(root, "artifacts", target), {recursive: true});
     await writeFile(join(root, "artifacts", target, "bindings.node"), addon(target, TARGETS.indexOf(target)));
@@ -89,6 +99,23 @@ test("a complete release of qualified addons verifies", async () => {
   assert.deepEqual(Object.keys(build.targets), TARGETS);
   assert.equal(build.targets[TARGETS[0]].bytes, 64);
   assert.deepEqual(await check(), []);
+});
+
+test("recording takes the source commit from the package's own checkout and nowhere else", async () => {
+  const {build, root} = await release();
+  assert.equal(build.sourceCommit, await git(root, "rev-parse", "HEAD"));
+  const nested = join(root, "nested");
+  await mkdir(join(nested, "artifacts"), {recursive: true});
+  await writeFile(join(nested, "package.json"), JSON.stringify({zapi: {targets: []}}));
+  await assert.rejects(record(nested, join(nested, "artifacts")), /the package is not the top of its git checkout/);
+  await git(nested, "init", "-q");
+  await assert.rejects(record(nested, join(nested, "artifacts")), {code: "CommandFailed"});
+  await rm(join(nested, ".git"), {recursive: true});
+  const outside = await mkdtemp(join(tmpdir(), "release-artifacts-outside-"));
+  temporaryDirectories.push(outside);
+  await mkdir(join(outside, "artifacts"));
+  await writeFile(join(outside, "package.json"), JSON.stringify({zapi: {targets: []}}));
+  await assert.rejects(record(outside, join(outside, "artifacts")), {code: "CommandFailed"});
 });
 
 test("recording refuses a missing target and an addon built for another target", async () => {

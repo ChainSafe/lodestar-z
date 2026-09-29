@@ -8,7 +8,7 @@
 // qualification-TARGET/qualification.json shows ran each lifecycle scenario exactly once and passed on its platform.
 import assert from "node:assert/strict";
 import {createHash} from "node:crypto";
-import {readFile, readdir, writeFile} from "node:fs/promises";
+import {readFile, readdir, realpath, writeFile} from "node:fs/promises";
 import {join, resolve} from "node:path";
 import {fileURLToPath, pathToFileURL} from "node:url";
 import {parseArgs} from "node:util";
@@ -63,6 +63,17 @@ async function version(program, args) {
   }
 }
 
+/** The commit checked out at `packageDir`, which must be the top of its own git checkout. */
+async function sourceCommit(packageDir) {
+  const git = async (args) =>
+    (await runBoundedCommand("git", args, packageDir, {maxOutputBytes: 64 * 1024, timeoutMs: 30_000})).stdout.trim();
+  const top = await git(["rev-parse", "--show-toplevel"]);
+  assert.equal(await realpath(top), await realpath(packageDir), "the package is not the top of its git checkout");
+  const commit = await git(["rev-parse", "--verify", "HEAD^{commit}"]);
+  assert.match(commit, /^[0-9a-f]{40}$/, "HEAD is not a commit");
+  return commit;
+}
+
 export async function record(packageDir, artifactsDir) {
   const {zapi} = await readJson(join(packageDir, "package.json"));
   assert(sameSet(await subdirectories(artifactsDir), zapi.targets), "artifacts are not the advertised targets");
@@ -74,7 +85,7 @@ export async function record(packageDir, artifactsDir) {
   }
   const osRelease = await readFile("/etc/os-release", "utf8").catch(() => "");
   const build = {
-    sourceCommit: await version("git", ["rev-parse", "HEAD"]),
+    sourceCommit: await sourceCommit(packageDir),
     targets,
     toolchain: {
       assembler: await version("as", ["--version"]),
