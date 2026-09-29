@@ -1742,8 +1742,8 @@ fn attestationsRewardsValue(self: *BeaconStateView, validator_ids: ?js.Value) !n
         try row.setNamedProperty("head", js.Number.from(reward.head).val);
         try row.setNamedProperty("target", js.Number.from(reward.target).val);
         try row.setNamedProperty("source", js.Number.from(reward.source).val);
-        try row.setNamedProperty("inclusionDelay", js.Number.from(reward.inclusion_delay).val);
-        try row.setNamedProperty("inactivity", js.Number.from(reward.inactivity).val);
+        try row.setNamedProperty("inclusionDelay", js.Number.from(0).val);
+        try row.setNamedProperty("inactivity", js.Number.from(0).val);
         try ideal.setElement(@intCast(i), row);
     }
     const total = try env.createArrayWithLength(rewards.total_rewards.len);
@@ -1753,7 +1753,7 @@ fn attestationsRewardsValue(self: *BeaconStateView, validator_ids: ?js.Value) !n
         try row.setNamedProperty("head", js.Number.from(reward.head).val);
         try row.setNamedProperty("target", js.Number.from(reward.target).val);
         try row.setNamedProperty("source", js.Number.from(reward.source).val);
-        try row.setNamedProperty("inclusionDelay", js.Number.from(reward.inclusion_delay).val);
+        try row.setNamedProperty("inclusionDelay", js.Number.from(0).val);
         try row.setNamedProperty("inactivity", js.Number.from(reward.inactivity).val);
         try total.setElement(@intCast(i), row);
     }

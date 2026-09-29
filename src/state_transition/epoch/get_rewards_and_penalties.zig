@@ -53,6 +53,15 @@ pub fn computeRewardPenaltyItem(cache: *const EpochTransitionCache, effective_ba
     };
 }
 
+pub fn inactivityPenaltyDenominator(config: *const BeaconConfig, fork: ForkSeq) u64 {
+    const quotient: u64 = if (fork == .altair) INACTIVITY_PENALTY_QUOTIENT_ALTAIR else INACTIVITY_PENALTY_QUOTIENT_BELLATRIX;
+    return config.chain.INACTIVITY_SCORE_BIAS * quotient;
+}
+
+pub fn computeInactivityPenalty(effective_balance_increment: u64, inactivity_score: u64, denominator: u64) u64 {
+    return @divFloor(effective_balance_increment * EFFECTIVE_BALANCE_INCREMENT * inactivity_score, denominator);
+}
+
 /// consumer should deinit `rewards` and `penalties` arrays
 pub fn getRewardsAndPenaltiesAltair(
     comptime fork: ForkSeq,
@@ -77,9 +86,7 @@ pub fn getRewardsAndPenaltiesAltair(
     const max_increment = comptime max_effective / EFFECTIVE_BALANCE_INCREMENT + 1;
     var reward_penalty_item_cache: [max_increment]?RewardPenaltyItem = .{null} ** max_increment;
 
-    const inactivity_penality_multiplier: u64 =
-        if (fork == ForkSeq.altair) INACTIVITY_PENALTY_QUOTIENT_ALTAIR else INACTIVITY_PENALTY_QUOTIENT_BELLATRIX;
-    const penalty_denominator = config.chain.INACTIVITY_SCORE_BIAS * inactivity_penality_multiplier;
+    const penalty_denominator = inactivityPenaltyDenominator(config, fork);
 
     const flags = cache.flags;
     const effective_balance_increments = epoch_cache.getEffectiveBalanceIncrements().items;
@@ -127,8 +134,7 @@ pub fn getRewardsAndPenaltiesAltair(
         // Same logic to getInactivityPenaltyDeltas
         // TODO: if we have limited value in inactivityScores we can provide a cache too
         if (!hasMarkers(flag, FLAG_PREV_TARGET_ATTESTER_UNSLASHED)) {
-            const penalty_numerator: u64 = @as(u64, effective_balance_increment) * EFFECTIVE_BALANCE_INCREMENT * (try inactivity_scores.get(i));
-            penalties[i] += @divFloor(penalty_numerator, penalty_denominator);
+            penalties[i] += computeInactivityPenalty(effective_balance_increment, try inactivity_scores.get(i), penalty_denominator);
         }
     }
 }

@@ -2,7 +2,7 @@ const std = @import("std");
 const preset = @import("preset").preset;
 const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
-const computeRewardPenaltyItem = @import("../epoch/get_rewards_and_penalties.zig").computeRewardPenaltyItem;
+const rewards_and_penalties = @import("../epoch/get_rewards_and_penalties.zig");
 const status = @import("../utils/attester_status.zig");
 const isInInactivityLeak = @import("../epoch/inactivity_leak.zig").isInInactivityLeak;
 
@@ -11,8 +11,6 @@ pub const IdealAttestationsReward = struct {
     head: u64 = 0,
     target: u64 = 0,
     source: u64 = 0,
-    inclusion_delay: u64 = 0,
-    inactivity: u64 = 0,
 };
 
 pub const TotalAttestationsReward = struct {
@@ -20,7 +18,6 @@ pub const TotalAttestationsReward = struct {
     head: i64 = 0,
     target: i64 = 0,
     source: i64 = 0,
-    inclusion_delay: i64 = 0,
     inactivity: i64 = 0,
 };
 
@@ -38,15 +35,6 @@ const AttestationsPenalty = struct {
     source: u64,
     target: u64,
 };
-
-fn signedReward(value: u64) i64 {
-    // Effective-balance and reward bounds keep each API value within the signed range.
-    return @intCast(value);
-}
-
-fn negativePenalty(value: u64) i64 {
-    return -signedReward(value);
-}
 
 /// Returns caller-owned rewards. Filters must be sorted ascending; null selects all,
 /// while an empty slice selects none. Serialize with other EpochTransitionCache borrowers.
@@ -72,7 +60,7 @@ pub fn computeAttestationsRewards(
 
     const leak = isInInactivityLeak(state.epoch_cache.epoch, try state.state.finalizedEpoch());
     for (ideal_rewards, 0..) |*reward, increment| {
-        const item = computeRewardPenaltyItem(&cache, @intCast(increment));
+        const item = rewards_and_penalties.computeRewardPenaltyItem(&cache, increment);
         reward.* = .{ .effective_balance = increment * preset.EFFECTIVE_BALANCE_INCREMENT };
         if (!leak) {
             reward.source = item.timely_source_reward;
@@ -88,8 +76,7 @@ pub fn computeAttestationsRewards(
     );
     errdefer total_rewards.deinit(allocator);
 
-    const quotient: u64 = if (fork == .altair) preset.INACTIVITY_PENALTY_QUOTIENT_ALTAIR else preset.INACTIVITY_PENALTY_QUOTIENT_BELLATRIX;
-    const inactivity_denominator = state.config.chain.INACTIVITY_SCORE_BIAS * quotient;
+    const inactivity_denominator = rewards_and_penalties.inactivityPenaltyDenominator(state.config, fork);
     const effective_increments = state.epoch_cache.getEffectiveBalanceIncrements().items;
     var inactivity_scores = try state.state.inactivityScores();
     var filter_index: usize = 0;
@@ -103,18 +90,19 @@ pub fn computeAttestationsRewards(
 
         const increment = effective_increments[i];
         var reward = TotalAttestationsReward{ .validator_index = i };
+        const ideal = ideal_rewards[increment];
         reward.source = if (status.hasMarkers(flag, status.FLAG_PREV_SOURCE_ATTESTER_UNSLASHED))
-            signedReward(ideal_rewards[increment].source)
+            @intCast(ideal.source)
         else
-            negativePenalty(penalties[increment].source);
+            -@as(i64, @intCast(penalties[increment].source));
         if (status.hasMarkers(flag, status.FLAG_PREV_TARGET_ATTESTER_UNSLASHED)) {
-            reward.target = signedReward(ideal_rewards[increment].target);
+            reward.target = @intCast(ideal.target);
         } else {
-            reward.target = negativePenalty(penalties[increment].target);
-            const numerator: u64 = @as(u64, increment) * preset.EFFECTIVE_BALANCE_INCREMENT * try inactivity_scores.get(i);
-            reward.inactivity = negativePenalty(@divFloor(numerator, inactivity_denominator));
+            reward.target = -@as(i64, @intCast(penalties[increment].target));
+            const inactivity = rewards_and_penalties.computeInactivityPenalty(increment, try inactivity_scores.get(i), inactivity_denominator);
+            reward.inactivity = -@as(i64, @intCast(inactivity));
         }
-        if (status.hasMarkers(flag, status.FLAG_PREV_HEAD_ATTESTER_UNSLASHED)) reward.head = signedReward(ideal_rewards[increment].head);
+        if (status.hasMarkers(flag, status.FLAG_PREV_HEAD_ATTESTER_UNSLASHED)) reward.head = @intCast(ideal.head);
         total_rewards.appendAssumeCapacity(reward);
     }
 
