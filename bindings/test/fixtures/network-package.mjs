@@ -1,6 +1,7 @@
 // Runs, from the root of a consumer that installed the packed main and platform packages, the load probe and, with
-// --lifecycle, the lifecycle and worker fixtures, each in its own bounded process. LODESTAR_Z_TIMEOUT_SCALE stretches
-// each process's deadline for emulated targets.
+// --lifecycle, the lifecycle and worker fixtures, each in its own bounded process, and records the addon, runtime and
+// results in qualification.json. LODESTAR_Z_TIMEOUT_SCALE stretches each process's deadline for emulated targets.
+import {writeFile} from "node:fs/promises";
 import {runBoundedCommand} from "../../../scripts/bounded_child.mjs";
 
 const lifecycle = process.argv.includes("--lifecycle");
@@ -53,6 +54,7 @@ const scenarios = [
 ];
 
 const results = [];
+let probed = null;
 for (const scenario of scenarios) {
   const started = Date.now();
   let record;
@@ -83,6 +85,8 @@ for (const scenario of scenarios) {
     record.exitCode !== 0 &&
     record.stderr.includes(scenario.rejected);
   const passed = completed || escalated || rejected;
+  if (completed && scenario.args.length === 1 && scenario.args[0] === probe)
+    probed = JSON.parse(record.stdout.trim().split("\n").at(-1));
   const result = {ms: Date.now() - started, name: scenario.name, passed, ...(escalated ? {escalated} : {})};
   if (!passed) {
     Object.assign(result, {
@@ -97,5 +101,9 @@ for (const scenario of scenarios) {
   console.log(JSON.stringify(result));
 }
 const failed = results.filter((result) => !result.passed).length;
+await writeFile(
+  "qualification.json",
+  `${JSON.stringify({...probed, failed, lifecycle, results, timeoutScale: scale}, null, 2)}\n`
+);
 console.log(JSON.stringify({failed, scenarios: scenarios.length}));
 process.exitCode = failed === 0 ? 0 : 1;

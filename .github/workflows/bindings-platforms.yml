@@ -1,8 +1,10 @@
 name: Bindings platforms
 
 # Builds the ReleaseSafe addon for every zapi target in package.json, then installs each target's packed packages
-# into a consumer on that platform and runs the load probe and the lifecycle and worker fixtures there. Release
-# publishing publishes these qualified artifacts.
+# into a consumer on that platform and runs the load probe and the lifecycle and worker fixtures there, and checks
+# that the prepared packages hold exactly those qualified addons. Release publishing publishes these artifacts. Each
+# job retains its evidence: build.json with the addon hashes and toolchain, and per target the consumer's lockfile
+# and qualification.json with the addon hash, runtime and results.
 on:
   workflow_call:
 
@@ -32,21 +34,26 @@ jobs:
         with:
           version: ${{ env.ZIG_VERSION }}
           cache-key: ubuntu-22.04-${{ env.ZIG_VERSION }}
-      - name: Install Rust targets
+      - name: Install the pinned Rust toolchain and targets
         run: |
+          rustup toolchain install
           rustup target add aarch64-apple-darwin aarch64-unknown-linux-gnu aarch64-unknown-linux-musl \
             x86_64-apple-darwin x86_64-unknown-linux-gnu x86_64-unknown-linux-musl
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - name: Build release artifacts
-        run: scripts/zig-cross.sh pnpm zapi build-artifacts --optimize ReleaseSafe
+        run: |
+          scripts/zig-cross.sh pnpm zapi build-artifacts --optimize ReleaseSafe
+          node scripts/release_artifacts.mjs record
       - name: Upload release artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bindings-artifacts
-          path: artifacts/*/bindings.node
+          path: |
+            artifacts/build.json
+            artifacts/*/bindings.node
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 90
 
   qualify:
     name: qualify ${{ matrix.target }}
@@ -95,12 +102,57 @@ jobs:
           path: artifacts
       - name: Install the packed packages and run the lifecycle fixtures
         if: matrix.image == ''
-        run: node scripts/check_network_package.mjs --lifecycle
+        run: node scripts/check_network_package.mjs --lifecycle --consumer "$RUNNER_TEMP/consumer"
       - name: Install the packed packages for the container
         if: matrix.image != ''
-        run: node scripts/check_network_package.mjs --lifecycle --target ${{ matrix.target }} --consumer "$RUNNER_TEMP/consumer"
+        run: |
+          node scripts/check_network_package.mjs --lifecycle --target ${{ matrix.target }} \
+            --consumer "$RUNNER_TEMP/consumer" --prepare
       - name: Run the lifecycle fixtures in the container
         if: matrix.image != ''
         run: |
           docker run --rm --init -v "$RUNNER_TEMP/consumer:/consumer" -w /consumer "${{ matrix.image }}" \
             node bindings/test/fixtures/network-package.mjs --lifecycle
+      - name: Upload the qualification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: qualification-${{ matrix.target }}
+          path: |
+            ${{ runner.temp }}/consumer/qualification.json
+            ${{ runner.temp }}/consumer/pnpm-lock.yaml
+          if-no-files-found: error
+          retention-days: 90
+
+  packages:
+    name: prepare packages
+    needs: qualify
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - name: Setup Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Download release artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: bindings-artifacts
+          path: artifacts
+      - name: Download the qualification evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: qualification-*
+          path: qualification
+      - name: Prepare and check the packages publishing would publish
+        run: |
+          pnpm zapi prepublish
+          node scripts/release_artifacts.mjs verify --qualification qualification

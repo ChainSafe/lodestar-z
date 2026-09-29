@@ -1,9 +1,13 @@
 // Run from a consumer that installed the packed main and platform packages: the addon loads from the platform
 // package built for this process's platform, and ordinary exports work on the main thread around a worker's load and
-// unload. `--worker-exit=CODE` has the first worker exit with CODE after its checks pass, which must fail the probe.
+// unload. Prints the addon and the runtime it ran on. `--worker-exit=CODE` has the first worker exit with CODE after
+// its checks pass, which must fail the probe.
 import assert from "node:assert/strict";
+import {spawnSync} from "node:child_process";
+import {createHash} from "node:crypto";
 import {existsSync, readFileSync, realpathSync} from "node:fs";
 import {createRequire} from "node:module";
+import {availableParallelism, cpus, release} from "node:os";
 import {dirname, join, relative} from "node:path";
 import {fileURLToPath} from "node:url";
 import {isMainThread, parentPort, Worker, workerData} from "node:worker_threads";
@@ -36,6 +40,28 @@ function runWorker(exitCode) {
       else resolve();
     });
   });
+}
+
+function command(program, args) {
+  const result = spawnSync(program, args, {encoding: "utf8", timeout: 10_000});
+  return `${result.stdout ?? ""}${result.stderr ?? ""}`.trim().split("\n").slice(0, 2).join(" ") || null;
+}
+
+function runtime() {
+  const osRelease = existsSync("/etc/os-release")
+    ? (/^PRETTY_NAME="?([^"\n]*)"?$/m.exec(readFileSync("/etc/os-release", "utf8"))?.[1] ?? null)
+    : null;
+  const glibc = process.report.getReport().header.glibcVersionRuntime;
+  return {
+    cpu: cpus()[0]?.model ?? null,
+    cpus: availableParallelism(),
+    kernel: release(),
+    libc: process.platform !== "linux" ? null : glibc ? `glibc ${glibc}` : command("ldd", ["--version"]),
+    node: process.version,
+    os: process.platform === "darwin" ? `macOS ${command("sw_vers", ["-productVersion"])}` : osRelease,
+    platform: `${process.platform}-${process.arch}`,
+    v8: process.versions.v8,
+  };
 }
 
 if (!isMainThread) {
@@ -77,7 +103,17 @@ if (!isMainThread) {
     await runWorker(i === 0 ? firstExitCode : 0);
     ordinaryExports();
   }
+  const addon = readFileSync(nativePath);
   console.log(
-    JSON.stringify({loaded: true, platformPackage, glibc: process.report.getReport().header.glibcVersionRuntime})
+    JSON.stringify({
+      addon: {
+        bytes: addon.length,
+        path: relative(root, nativePath),
+        sha256: createHash("sha256").update(addon).digest("hex"),
+      },
+      loaded: true,
+      platformPackage,
+      runtime: runtime(),
+    })
   );
 }

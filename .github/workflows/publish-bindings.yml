@@ -81,6 +81,11 @@ jobs:
         with:
           name: bindings-artifacts
           path: artifacts
+      - name: Download the qualification evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: qualification-*
+          path: qualification
       - name: Determine npm dist tag
         id: detect_dist_tag
         run: |
@@ -99,5 +104,6 @@ jobs:
         run: |
           pnpm zapi prepublish
           node scripts/lodestar_package.mjs notices --package-dir .
+          node scripts/release_artifacts.mjs verify --qualification qualification
           rm -rf zig-out/lib
           pnpm zapi publish --access public -- --ignore-scripts --provenance ${{ steps.detect_dist_tag.outputs.tag_flag }}

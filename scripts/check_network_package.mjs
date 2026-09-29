@@ -1,10 +1,11 @@
-// Usage: node scripts/check_network_package.mjs [ADDON] [--lifecycle] [--target TARGET --consumer DIR]
+// Usage: node scripts/check_network_package.mjs [ADDON] [--lifecycle] [--target TARGET] [--consumer DIR] [--prepare]
 //
 // Packs the main package and TARGET's platform package around ADDON (default artifacts/TARGET/bindings.node) and
 // installs both into a consumer that runs bindings/test/fixtures/network-package.mjs: the load probe and, with
-// --lifecycle, the lifecycle and worker fixtures with their dependencies. Without --consumer, TARGET is this host's
-// and the checks run here in a temporary consumer. With --consumer, the consumer stays in DIR, for TARGET's platform to
-// run `node bindings/test/fixtures/network-package.mjs [--lifecycle]` from it.
+// --lifecycle, the lifecycle and worker fixtures with their dependencies. TARGET defaults to this host's, where the
+// checks then run. With --consumer the consumer stays in DIR, its lockfile and qualification.json as evidence. With
+// --prepare it is only installed, for TARGET's platform to run `node bindings/test/fixtures/network-package.mjs
+// [--lifecycle]` from it.
 import assert from "node:assert/strict";
 import {spawnSync} from "node:child_process";
 import {copyFile, cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile} from "node:fs/promises";
@@ -19,14 +20,22 @@ import {inspectNetworkAddon} from "./check_network_addon.mjs";
 const source = fileURLToPath(new URL("../", import.meta.url));
 const {values, positionals} = parseArgs({
   allowPositionals: true,
-  options: {consumer: {type: "string"}, lifecycle: {type: "boolean"}, target: {type: "string"}},
+  options: {
+    consumer: {type: "string"},
+    lifecycle: {type: "boolean"},
+    prepare: {type: "boolean"},
+    target: {type: "string"},
+  },
 });
-assert(positionals.length <= 1, "usage: check_network_package.mjs [ADDON] [--lifecycle] [--target T --consumer DIR]");
-const host = getTarget(process.platform, process.arch);
-const target = validateTarget(values.target ?? host);
-assert(values.consumer !== undefined || target === host, "another target's checks need --consumer DIR");
+assert(positionals.length <= 1, "usage: check_network_package.mjs [ADDON] [--lifecycle] [--target T] [--consumer DIR]");
+const target = validateTarget(values.target ?? getTarget(process.platform, process.arch));
+assert(
+  values.prepare || target === getTarget(process.platform, process.arch),
+  "another target's checks need --prepare"
+);
+assert(!values.prepare || values.consumer !== undefined, "--prepare needs --consumer DIR");
 const addon = resolve(positionals[0] ?? join(source, "artifacts", target, "bindings.node"));
-if (values.consumer === undefined) inspectNetworkAddon(addon);
+if (!values.prepare) inspectNetworkAddon(addon);
 const root =
   values.consumer === undefined ? await mkdtemp(join(tmpdir(), "lodestar-network-package-")) : resolve(values.consumer);
 const work = await mkdtemp(join(tmpdir(), "lodestar-network-pack-"));
@@ -100,7 +109,7 @@ try {
   ])
     await cp(join(source, path), join(root, path), {recursive: true});
 
-  if (values.consumer !== undefined) {
+  if (values.prepare) {
     process.stdout.write(`${JSON.stringify({consumer: root, run: ["node", ...command], target})}\n`);
   } else {
     const checks = spawnSync(process.execPath, command, {
