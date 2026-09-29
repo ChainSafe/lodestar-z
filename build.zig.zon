@@ -199,6 +199,7 @@
             .imports = .{
                 .diagnostics,
                 .build_options,
+                .bounded_array,
                 .swap_or_not_shuffle,
                 .ssz,
                 .config,

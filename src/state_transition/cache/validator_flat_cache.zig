@@ -1,4 +1,4 @@
-//! Flat, index-addressed copy of the validator fields the epoch transition reads.
+//! Flat, index-addressed copy of the validator fields the epoch transition reads.validator_flat_cac
 //!
 //! The cache is derived from the validators tree and should never be written directly.
 //! Use `sync` to do that. `sync` diffs the tree it was last synced to against
@@ -10,9 +10,11 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const BoundedArray = @import("bounded_array").BoundedArray;
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const Node = @import("persistent_merkle_tree").Node;
+const max_depth = @import("persistent_merkle_tree").max_depth;
 const hasCompoundingWithdrawalCredential = @import("../utils/electra.zig").hasCompoundingWithdrawalCredential;
 
 const Validator = types.phase0.Validator;
@@ -110,7 +112,7 @@ pub const ValidatorFlatCache = struct {
         errdefer self.pool.unref(root);
 
         if (self.synced_root) |old| {
-            try self.diff(old, root, depth, 0, new_len);
+            try self.diffAndPatch(old, root, depth, new_len);
         } else {
             var it = Node.DepthIterator.init(self.pool, root, @intCast(depth), 0);
             for (0..new_len) |i| try self.patch(i, try it.next());
@@ -130,13 +132,64 @@ pub const ValidatorFlatCache = struct {
         self.flags.clearRetainingCapacity();
     }
 
-    fn diff(self: *ValidatorFlatCache, old: Node.Id, new: Node.Id, depth: usize, base: usize, new_len: usize) !void {
-        if (old == new or base >= new_len) return;
-        if (depth == 0) return self.patch(base, new);
+    /// Compares `new` and `old` validator trees, patching only validators inside changed subtrees.
+    ///
+    /// This does a depth-first traversal through the tree, checking if nodes changed,
+    /// and patching the flat cache if so.
+    fn diffAndPatch(
+        self: *ValidatorFlatCache,
+        old_root: Node.Id,
+        new_root: Node.Id,
+        depth: usize,
+        new_len: usize,
+    ) !void {
+        // Each frame compares nodes at the same tree position and maps that position to the cache.
+        const Frame = struct {
+            old: Node.Id,
+            new: Node.Id,
+            depth: usize,
+            /// Index of the first leaf position covered by this subtree.
+            /// If the subtree is the leaf itself, then this is the validator index.
+            base: usize,
+        };
 
-        const half = @as(usize, 1) << @intCast(depth - 1);
-        try self.diff(try old.getLeft(self.pool), try new.getLeft(self.pool), depth - 1, base, new_len);
-        try self.diff(try old.getRight(self.pool), try new.getRight(self.pool), depth - 1, base + half, new_len);
+        var stack: BoundedArray(Frame, max_depth + 1) = .{};
+
+        // The root subtree starts at validator index 0
+        stack.push(.{ .old = old_root, .new = new_root, .depth = depth, .base = 0 });
+
+        // Terminates eventually since all paths reach the leaves
+        // and don't push new nodes after
+        while (stack.pop()) |f| {
+            if (
+            // Nodes are unchanged
+            f.old == f.new or
+                // Subtrees starting at new_len or later contain no live validators
+                f.base >= new_len) continue;
+
+            if (f.depth == 0) {
+                // At a leaf, base is the validator index to patch
+                try self.patch(f.base, f.new);
+                continue;
+            }
+
+            // Each child covers half of the current subtree's validator indexes
+            const half = @as(usize, 1) << @intCast(f.depth - 1);
+
+            // Push right first so the LIFO stack processes left first.
+            stack.push(.{
+                .old = try f.old.getRight(self.pool),
+                .new = try f.new.getRight(self.pool),
+                .depth = f.depth - 1,
+                .base = f.base + half,
+            });
+            stack.push(.{
+                .old = try f.old.getLeft(self.pool),
+                .new = try f.new.getLeft(self.pool),
+                .depth = f.depth - 1,
+                .base = f.base,
+            });
+        }
     }
 
     /// Patches the cache at index `i` with validator values from the tree at `leaf`.
