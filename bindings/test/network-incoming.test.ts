@@ -360,25 +360,31 @@ stock(
       live.setLogLevel("debug");
       const addressBytes = Buffer.from(identity.localMultiaddr).toString("hex");
       let waits = 0;
-      const drainWaits = () => {
+      let refusals = 0;
+      const drain = () => {
         for (let batch = 0; batch < 8; batch++) {
           const drained = live.drainLogs(32);
-          waits += drained.records.filter((record) => record.message.startsWith("request_start_wait ")).length;
+          for (const {message} of drained.records) {
+            if (message.startsWith("request_start_wait ")) waits += 1;
+            if (message.startsWith("request_admission_refused ")) refusals += 1;
+          }
           if (!drained.more) return;
         }
       };
-      // An identity starts 36 application requests per 10 s; later ones wait for a start.
-      const started = Date.now();
-      let burst = 0;
-      for (let i = 0; i < 40; i++) {
+      // An identity starts 36 application requests per 10 s. Requests continue until a wait record
+      // shows the quota exhausted, then four more; every one must negotiate and complete.
+      let sent = 0;
+      let afterWait = 0;
+      while (sent < 400 && afterWait < 4) {
         const reply = peer.command("request", {addressBytes});
         await (await takeIncoming(live)).finish();
         expect(await reply).toMatchObject({chunks: []});
-        if (i === 35) burst = Date.now() - started;
-        drainWaits();
+        sent += 1;
+        drain();
+        if (waits > 0) afterWait += 1;
       }
-      // A slow host that spreads the burst past the refill period never needs to wait.
-      if (burst < 9000) expect(waits).toBeGreaterThan(0);
+      expect(waits).toBeGreaterThan(0);
+      expect(refusals).toBe(0);
     } finally {
       await Promise.allSettled([runtime?.close(), peer?.stop()]).then((results) => {
         for (const result of results) if (result.status === "rejected") throw result.reason;
