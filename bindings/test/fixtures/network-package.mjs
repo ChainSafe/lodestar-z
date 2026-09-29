@@ -13,8 +13,11 @@ const lifecycleFixture = (mode, expected) => ({
   expected,
   name: mode,
 });
+const probe = fixture("network-package-probe.mjs");
 const scenarios = [
-  {args: [fixture("network-package-probe.mjs")], expected: '"loaded":true', name: "load"},
+  {args: [probe], expected: '"loaded":true', name: "load"},
+  // The probe must fail when a worker passes its checks but exits nonzero.
+  {args: [probe, "--worker-exit=7"], name: "worker exit code", rejected: "Worker exited with code 7"},
   ...(lifecycle
     ? [
         {
@@ -49,7 +52,7 @@ const scenarios = [
     : []),
 ];
 
-let failed = 0;
+const results = [];
 for (const scenario of scenarios) {
   const started = Date.now();
   let record;
@@ -64,16 +67,24 @@ for (const scenario of scenarios) {
     error = thrown;
     record = thrown.commandRecord;
   }
-  const completed = error === undefined && record.exitCode === 0 && record.stdout.includes(scenario.expected);
+  const completed =
+    error === undefined &&
+    scenario.expected !== undefined &&
+    record.exitCode === 0 &&
+    record.stdout.includes(scenario.expected);
   const escalated =
     error === undefined &&
     scenario.escalation !== undefined &&
     record.signal === "SIGABRT" &&
     record.stderr.includes(scenario.escalation);
-  const passed = completed || escalated;
+  const rejected =
+    error === undefined &&
+    scenario.rejected !== undefined &&
+    record.exitCode !== 0 &&
+    record.stderr.includes(scenario.rejected);
+  const passed = completed || escalated || rejected;
   const result = {ms: Date.now() - started, name: scenario.name, passed, ...(escalated ? {escalated} : {})};
   if (!passed) {
-    failed++;
     Object.assign(result, {
       error: error?.message,
       exitCode: record?.exitCode,
@@ -82,7 +93,9 @@ for (const scenario of scenarios) {
       stdout: record?.stdout.slice(-2000),
     });
   }
+  results.push(result);
   console.log(JSON.stringify(result));
 }
+const failed = results.filter((result) => !result.passed).length;
 console.log(JSON.stringify({failed, scenarios: scenarios.length}));
 process.exitCode = failed === 0 ? 0 : 1;
