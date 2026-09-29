@@ -102,6 +102,22 @@ jobs:
         with:
           name: bindings-artifacts
           path: artifacts
+      # The gossip SHA-256 backend the addon must select, from the runner's own view of its CPU rather than the addon's
+      # detector: x86_64 dispatches when the CPU has SHA and AVX2, and the release build does not dispatch on aarch64
+      # (build.zig's gossip-sha256-arm).
+      - name: Name the expected gossip SHA-256 backend
+        run: |
+          expected=zig_std
+          case "${{ matrix.target }}" in
+            x86_64-unknown-linux-*)
+              if grep -qw sha_ni /proc/cpuinfo && grep -qw avx2 /proc/cpuinfo; then expected=x86_sha_avx2; fi
+              ;;
+            x86_64-apple-darwin)
+              features=$(sysctl -n machdep.cpu.features machdep.cpu.leaf7_features)
+              if grep -qw SHA <<< "$features" && grep -qw AVX2 <<< "$features"; then expected=x86_sha_avx2; fi
+              ;;
+          esac
+          echo "LODESTAR_Z_EXPECT_GOSSIP_SHA256=$expected" | tee -a "$GITHUB_ENV"
       - name: Install the packed packages and run the lifecycle fixtures
         if: matrix.image == ''
         run: node scripts/check_network_package.mjs --lifecycle --consumer "$RUNNER_TEMP/consumer"
@@ -113,8 +129,8 @@ jobs:
       - name: Run the lifecycle fixtures in the container
         if: matrix.image != ''
         run: |
-          docker run --rm --init -v "$RUNNER_TEMP/consumer:/consumer" -w /consumer "${{ matrix.image }}" \
-            node bindings/test/fixtures/network-package.mjs --lifecycle
+          docker run --rm --init -e LODESTAR_Z_EXPECT_GOSSIP_SHA256 -v "$RUNNER_TEMP/consumer:/consumer" -w /consumer \
+            "${{ matrix.image }}" node bindings/test/fixtures/network-package.mjs --lifecycle
       - name: Upload the qualification evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
