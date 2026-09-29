@@ -1222,8 +1222,9 @@ pub const ReqResp = struct {
     }
 
     /// Whether another `.ready` request of the slot's class on its connection has waited longer
-    /// for its start, by accept time and then slot order. Starts go to the longest waiter, so a
-    /// waiter's start comes within one refill per request ahead of it.
+    /// for its start, by accept time and then slot order. Starts go to the longest waiter, so
+    /// while its identity keeps a limiter row and no other connection spends its starts, a
+    /// waiter is charged its start within one refill per request ahead of it.
     pub fn startQueued(self: *const ReqResp, index: u16) bool {
         const slot = &self.inbound[index];
         const peer = index / receive_plan.slots_per_peer;

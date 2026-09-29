@@ -38,6 +38,7 @@ test "reqresp request start hints name the first admitting millisecond without r
     try std.testing.expectEqual(@as(u64, 1000), owner.startAt(&first, false, 500));
     try std.testing.expectEqual(a.Decision.allowed, owner.start(&second, false, 500));
     try std.testing.expectEqual(@as(u64, 1000), owner.startAt(&third, false, 600));
+    try std.testing.expect(owner.tracks(&first, 600) and !owner.tracks(&third, 600) and owner.tracks(&third, 1000));
     try std.testing.expectEqual(a.Decision.identity_capacity, owner.start(&third, false, 999));
     try std.testing.expectEqual(a.Decision.allowed, owner.start(&third, false, 1000));
 

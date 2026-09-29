@@ -407,10 +407,15 @@ pub const Server = struct {
         const limiter = &owner.admission.limiter;
         // A responder rate-limits by withholding its response, never by closing the stream, so a
         // request past the starts limiter waits in `.ready` for its start. One arriving behind a
-        // request still owed its start waits too, so it cannot take the refill that one awaits.
-        const start_due: ?u64 = if (owner.startsPending(stream.conn, control))
-            limiter.startAt(&identity, control, now.mono_ms)
-        else switch (limiter.start(&identity, control, now.mono_ms)) {
+        // request still owed its start waits too, uncharged, so it cannot take the refill that one
+        // awaits; it still needs a limiter row for its identity.
+        const start_due: ?u64 = if (owner.startsPending(stream.conn, control)) behind: {
+            if (!limiter.tracks(&identity, now.mono_ms)) {
+                owner.recordAdmissionRefusal(stream, which, .identity_capacity, 1);
+                return error.TooManyRequests;
+            }
+            break :behind limiter.startAt(&identity, control, now.mono_ms);
+        } else switch (limiter.start(&identity, control, now.mono_ms)) {
             .allowed => null,
             .identity_capacity => {
                 owner.recordAdmissionRefusal(stream, which, .identity_capacity, 1);
