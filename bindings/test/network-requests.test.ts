@@ -2,10 +2,12 @@ import {expect, test} from "vitest";
 import type {NativeNetworkApplicationRuntime} from "../src/network-runtime.js";
 import {
   applicationConfig,
+  childTestTimeout,
   holdSettling,
   localIntent,
   peerIdFromHex,
   requestForks,
+  runChild,
   settleOnly,
   startRuntime,
 } from "./utils/network.js";
@@ -334,15 +336,18 @@ test.each([
   "closed-terminal",
   "closed-facade-gc",
   "closed-facade-gc-early",
-])("request lifecycle settles independently of facade and notifier: %s", async (mode) => {
-  const {execFileSync} = await import("node:child_process");
-  const output = execFileSync(
-    process.execPath,
-    ["--import", "tsx", "--expose-gc", "--import", "tsx", "bindings/test/fixtures/network-request-lifecycle.mjs", mode],
-    {encoding: "utf8", timeout: 20000}
-  );
+])("request lifecycle settles independently of facade and notifier: %s", childTestTimeout(), (mode) => {
+  const output = runChild([
+    "--import",
+    "tsx",
+    "--expose-gc",
+    "--import",
+    "tsx",
+    "bindings/test/fixtures/network-request-lifecycle.mjs",
+    mode,
+  ]);
   expect(output).toContain(`request-lifecycle ${mode} ok`);
-}, 25000);
+});
 
 stockTest(
   "close discards queued payloads and frees heavy request storage with held iterators",

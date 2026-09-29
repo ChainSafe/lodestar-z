@@ -5,11 +5,16 @@ import {isMainThread, parentPort, Worker} from "node:worker_threads";
 import {applicationConfig, localIntent, runtimeReleased, startRuntime, topicName} from "../utils/network.js";
 
 if (isMainThread) {
+  // Each phase line names the step that follows, for the parent's watchdog to report.
+  const phase = (name) => console.error("phase", name);
+  phase("worker runtime");
   const worker = new Worker(new URL(import.meta.url));
   try {
     const [{port, occupied}] = await once(worker, "message");
     assert(occupied > 0);
+    phase("worker termination");
     await worker.terminate();
+    phase("port rebind");
     const socket = createSocket("udp4");
     try {
       socket.bind(port, "127.0.0.1");
@@ -17,9 +22,12 @@ if (isMainThread) {
     } finally {
       socket.close();
     }
+    phase("runtime release");
     // Teardown with pending results returned the worker runtime's process claim.
     await runtimeReleased();
+    phase("second runtime");
     await startRuntime(applicationConfig()).close();
+    phase("exit");
     console.log("worker-settlement-released");
   } finally {
     await worker.terminate();

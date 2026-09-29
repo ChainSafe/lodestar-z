@@ -1,4 +1,3 @@
-import {spawnSync} from "node:child_process";
 import {afterEach, describe, expect, it, vi} from "vitest";
 import type {
   DependencyCheck,
@@ -32,6 +31,7 @@ import type {
   NativeIncomingRequest,
   NativeLogBatch,
 } from "../src/network-runtime.js";
+import {childTestTimeout, spawnChild} from "./utils/network.js";
 
 const MIB = 1024 * 1024;
 const full: NativeExchangeDemand = {
@@ -567,24 +567,21 @@ describe("binding pump scheduling", () => {
     await macrotask();
   });
 
-  it("a close whose exchanges keep failing, with nothing else alive, settles or escalates in a child process", () => {
-    // The parent enforces the deadline; exiting without the close result or the trigger-3 abort is the regression.
-    const child = spawnSync(
-      process.execPath,
-      ["--import", "tsx", "bindings/test/fixtures/network-shutdown-retry.mjs"],
-      {
-        encoding: "utf8",
-        timeout: 30_000,
-      }
-    );
-    const closed = child.status === 0 && child.stdout.includes("closed");
-    const escalated =
-      child.signal === "SIGABRT" && child.stderr.includes("native network bridge failed_turns: exchange failed");
-    expect(
-      closed || escalated,
-      JSON.stringify({signal: child.signal, status: child.status, stdout: child.stdout})
-    ).toBe(true);
-  }, 40_000);
+  it(
+    "a close whose exchanges keep failing, with nothing else alive, settles or escalates in a child process",
+    childTestTimeout(),
+    () => {
+      // The parent enforces the deadline; exiting without the close result or the trigger-3 abort is the regression.
+      const child = spawnChild(["--import", "tsx", "bindings/test/fixtures/network-shutdown-retry.mjs"]);
+      const closed = child.status === 0 && child.stdout.includes("closed");
+      const escalated =
+        child.signal === "SIGABRT" && child.stderr.includes("native network bridge failed_turns: exchange failed");
+      expect(
+        closed || escalated,
+        JSON.stringify({signal: child.signal, status: child.status, stdout: child.stdout})
+      ).toBe(true);
+    }
+  );
 
   it.each([
     ["generated_batch", "generated_batch", "InvalidNetworkInteger"],
@@ -593,17 +590,13 @@ describe("binding pump scheduling", () => {
     ["close_missing", "completion_contract", "closed with records unsettled: 1"],
   ])(
     "raising %s over a real native runtime terminates the process through native fail, in a child process",
+    childTestTimeout(),
     (scenario, site, reason) => {
-      const child = spawnSync(
-        process.execPath,
-        ["--import", "tsx", "bindings/test/fixtures/network-escalation.mjs", scenario],
-        {encoding: "utf8", timeout: 30_000}
-      );
+      const child = spawnChild(["--import", "tsx", "bindings/test/fixtures/network-escalation.mjs", scenario]);
       expect(child.signal, child.stderr).toBe("SIGABRT");
       expect(child.stdout).not.toContain("survived");
       expect(child.stderr).toContain(`FATAL ERROR: native network bridge ${site}: ${reason}\n`);
-    },
-    40_000
+    }
   );
 
   it("without a live pump, turns drain control while native reports more, and escalate a third failed drain", () => {

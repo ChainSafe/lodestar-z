@@ -3,13 +3,14 @@ import {existsSync, mkdtempSync, rmSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {dirname, join} from "node:path";
 import {expect, test} from "vitest";
+import {childTestTimeout, spawnChild} from "./utils/network.js";
 
 const headers = join(dirname(process.execPath), "..", "include", "node");
 /** Past the 47-bit user address space, so the allocation fails whatever the overcommit policy. */
 const unallocatable = 2 ** 48;
 
 function run(script: string) {
-  return spawnSync(process.execPath, ["-e", script], {encoding: "utf8", timeout: 60000});
+  return spawnChild(["-e", script]);
 }
 
 // Pins the exchange's failure classification: a payload ArrayBuffer that N-API cannot allocate returns no status,
@@ -17,6 +18,7 @@ function run(script: string) {
 // allocator's OutOfMemory is.
 test.skipIf(!existsSync(join(headers, "node_api.h")))(
   "an N-API ArrayBuffer allocation failure terminates the process instead of returning a status",
+  childTestTimeout(3, 30000),
   () => {
     const directory = mkdtempSync(join(tmpdir(), "lodestar-z-arraybuffer-"));
     try {
@@ -39,8 +41,7 @@ test.skipIf(!existsSync(join(headers, "node_api.h")))(
     } finally {
       rmSync(directory, {force: true, recursive: true});
     }
-  },
-  60000
+  }
 );
 
 /** A publication payload length nothing else in the process allocates. */
@@ -54,6 +55,7 @@ const glibc = Boolean(
 // running until a requested close.
 test.skipIf(!glibc)(
   "a publication whose payload copy cannot be allocated rejects alone and never escalates",
+  childTestTimeout(1, 30000),
   () => {
     const directory = mkdtempSync(join(tmpdir(), "lodestar-z-malloc-"));
     try {
@@ -77,10 +79,10 @@ test.skipIf(!glibc)(
         const refused = await publish(${refusedBytes}).then(() => "published", (error) => error.code);
         const admitted = await publish(${refusedBytes + 1});
         console.log(JSON.stringify({admitted, closed: await network.close(), refused}));`;
-      const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
-        encoding: "utf8",
-        env: {...process.env, LD_PRELOAD: shim, NETWORK_MALLOC_FAULT_BYTES: String(refusedBytes)},
-        timeout: 30000,
+      const child = spawnChild(["--import", "tsx", "--input-type=module", "-e", script], {
+        ...process.env,
+        LD_PRELOAD: shim,
+        NETWORK_MALLOC_FAULT_BYTES: String(refusedBytes),
       });
       expect(child.status, child.stderr).toBe(0);
       expect(JSON.parse(child.stdout)).toEqual({
@@ -91,6 +93,5 @@ test.skipIf(!glibc)(
     } finally {
       rmSync(directory, {force: true, recursive: true});
     }
-  },
-  60000
+  }
 );

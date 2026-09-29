@@ -1,12 +1,14 @@
 import {expect, test, vi} from "vitest";
 import {
   applicationConfig,
+  childTestTimeout,
   exchange,
   gossipAll,
   holdSettling,
   localIntent,
   peerIdFromHex,
   requestForks,
+  runChild,
   settleOnly,
   startRuntime,
   subscriptions,
@@ -530,25 +532,19 @@ for (const hoodi of [false, true]) {
   );
 }
 
-import {execFileSync} from "node:child_process";
-
-test("gossip operation promises and weak notifier permit facade collection", () => {
-  const output = execFileSync(
-    process.execPath,
-    [
-      "--import",
-      "tsx",
-      "--expose-gc",
-      "--force-node-api-uncaught-exceptions-policy",
-      "bindings/test/fixtures/network-gossip-lifecycle.mjs",
-    ],
-    {encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 15000}
-  );
+test("gossip operation promises and weak notifier permit facade collection", childTestTimeout(), () => {
+  const output = runChild([
+    "--import",
+    "tsx",
+    "--expose-gc",
+    "--force-node-api-uncaught-exceptions-policy",
+    "bindings/test/fixtures/network-gossip-lifecycle.mjs",
+  ]);
   const result = JSON.parse(output.trim());
   expect(result).toMatchObject({collected: true});
   expect(result.accepted).toBeGreaterThan(0);
   expect(result.accepted).toBe(result.settled);
-}, 20000);
+});
 
 test("closed runtime rejects a retained verdict", async () => {
   const pair = await gossipPair();

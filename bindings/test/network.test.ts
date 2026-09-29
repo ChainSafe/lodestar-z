@@ -1,4 +1,3 @@
-import {execFileSync} from "node:child_process";
 import {setTimeout as delay} from "node:timers/promises";
 import {privateKeyFromRaw} from "@libp2p/crypto/keys";
 import {peerIdFromPublicKey} from "@libp2p/peer-id";
@@ -12,6 +11,7 @@ import {
 import {
   applicationConfig,
   capacity,
+  childTestTimeout,
   configureChain,
   discoveryConfig,
   exchange,
@@ -19,8 +19,10 @@ import {
   holdSettling,
   localIntent,
   requestForks,
+  runChild,
   runtimeReleased,
   settleOnly,
+  spawnChild,
   startRuntime,
   subscriptions,
   topicName,
@@ -32,7 +34,7 @@ function report(peerId: string): NativeAction {
   return {action: "fatal", count: 1, peerId, type: "reportPeer"};
 }
 
-it("owns a real native socket and releases it on idempotent close", async () => {
+it("owns a real native socket and releases it on idempotent close", childTestTimeout(1, 15000), async () => {
   const config = applicationConfig();
   const expectedPeerId = peerIdFromPublicKey(privateKeyFromRaw(config.identitySecretKey).publicKey).toString();
   const runtime = startRuntime(config, () => undefined);
@@ -77,21 +79,17 @@ it("owns a real native socket and releases it on idempotent close", async () => 
     expect(runtime.close()).toBe(closing);
     await closing;
     expect(runtime.state).toBe("closed");
-    execFileSync(
-      process.execPath,
-      [
-        "--import",
-        "tsx",
-        "--input-type=module",
-        "-e",
-        `import {createSocket} from 'node:dgram'; const socket = createSocket('udp4'); socket.on('error', () => process.exit(1)); socket.bind(${identity.localEndpoint.port}, '127.0.0.1', () => socket.close());`,
-      ],
-      {timeout: 5000}
-    );
+    runChild([
+      "--import",
+      "tsx",
+      "--input-type=module",
+      "-e",
+      `import {createSocket} from 'node:dgram'; const socket = createSocket('udp4'); socket.on('error', () => process.exit(1)); socket.bind(${identity.localEndpoint.port}, '127.0.0.1', () => socket.close());`,
+    ]);
   } finally {
     await runtime.close();
   }
-}, 20000);
+});
 
 it("copies inputs before returning and advances the clock only through intents", async () => {
   const config = applicationConfig();
@@ -300,29 +298,21 @@ it("rejects every invalid exchange demand, oversized batch and nested exchange b
   }
 }, 20000);
 
-it.each([
-  "generated_batch",
-  "failed_turns",
-] as const)("the pump's fatal site %s terminates the process through fatalError", (site) => {
-  const script = `import {initializeNativeNetworkRuntime} from "./bindings/src/network-runtime.js";
+it.each(["generated_batch", "failed_turns"] as const)(
+  "the pump's fatal site %s terminates the process through fatalError",
+  childTestTimeout(),
+  (site) => {
+    const script = `import {initializeNativeNetworkRuntime} from "./bindings/src/network-runtime.js";
     import {applicationConfig} from "./bindings/test/utils/network.ts";
     const runtime = initializeNativeNetworkRuntime(applicationConfig(), () => undefined);
     runtime.fail("${site}", "test");
     console.log("survived");`;
-  let failure: {status: number | null; signal: string | null; stdout: string; stderr: string} | undefined;
-  try {
-    execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
-      encoding: "utf8",
-      stdio: "pipe",
-      timeout: 20000,
-    });
-  } catch (error) {
-    failure = error as typeof failure;
+    const child = spawnChild(["--import", "tsx", "--input-type=module", "-e", script]);
+    expect(child.signal).toBe("SIGABRT");
+    expect(child.stdout).not.toContain("survived");
+    expect(child.stderr).toContain(`native network bridge ${site}: test`);
   }
-  expect(failure?.signal).toBe("SIGABRT");
-  expect(failure?.stdout).not.toContain("survived");
-  expect(failure?.stderr).toContain(`native network bridge ${site}: test`);
-}, 30000);
+);
 
 it("carries the close result in the one exchange that settles it", async () => {
   const runtime = startRuntime(applicationConfig());
@@ -360,89 +350,55 @@ it.each([
   ["command-exit", "commanded-exit"],
   ["request-exit", "requested-exit"],
   ["incoming-exit", "served-exit"],
-])(
-  "finishes bounded %s subprocess lifecycle",
-  (mode, expected) => {
-    const output = execFileSync(
-      process.execPath,
-      ["--import", "tsx", "--expose-gc", "bindings/test/fixtures/network-lifecycle.mjs", mode],
-      {
-        encoding: "utf8",
-        timeout: 10000,
-      }
-    );
-    expect(output).toContain(expected);
-  },
-  15000
-);
+])("finishes bounded %s subprocess lifecycle", childTestTimeout(), (mode, expected) => {
+  const output = runChild(["--import", "tsx", "--expose-gc", "bindings/test/fixtures/network-lifecycle.mjs", mode]);
+  expect(output).toContain(expected);
+});
 
 it.each([
   ["saturated-close", "saturated-closed"],
   ["finalized-drain", "finalized-drained"],
 ])(
   "closes through the completion owner in the bounded %s subprocess lifecycle",
+  childTestTimeout(),
   (mode, expected) => {
-    const output = execFileSync(
-      process.execPath,
-      ["--import", "tsx", "--expose-gc", "bindings/test/fixtures/network-lifecycle.mjs", mode],
-      {encoding: "utf8", timeout: 25000}
-    );
+    const output = runChild(["--import", "tsx", "--expose-gc", "bindings/test/fixtures/network-lifecycle.mjs", mode]);
     expect(output).toContain(expected);
-  },
-  30000
+  }
 );
 
-it("keeps queued records and closes after an ordinary callback exception", () => {
-  const output = execFileSync(
-    process.execPath,
-    [
-      "--import",
-      "tsx",
-      "--expose-gc",
-      "--force-node-api-uncaught-exceptions-policy",
-      "bindings/test/fixtures/network-lifecycle.mjs",
-      "callback",
-    ],
-    {encoding: "utf8", timeout: 10000}
-  );
+it("keeps queued records and closes after an ordinary callback exception", childTestTimeout(), () => {
+  const output = runChild([
+    "--import",
+    "tsx",
+    "--expose-gc",
+    "--force-node-api-uncaught-exceptions-policy",
+    "bindings/test/fixtures/network-lifecycle.mjs",
+    "callback",
+  ]);
   expect(output).toContain("callback-closed");
-}, 15000);
+});
 
-it("notifies again after a callback that throws before scheduling an exchange", () => {
-  const output = execFileSync(
-    process.execPath,
-    [
-      "--import",
-      "tsx",
-      "--force-node-api-uncaught-exceptions-policy",
-      "bindings/test/fixtures/network-lifecycle.mjs",
-      "rearm",
-    ],
-    {encoding: "utf8", timeout: 10000}
-  );
+it("notifies again after a callback that throws before scheduling an exchange", childTestTimeout(), () => {
+  const output = runChild([
+    "--import",
+    "tsx",
+    "--force-node-api-uncaught-exceptions-policy",
+    "bindings/test/fixtures/network-lifecycle.mjs",
+    "rearm",
+  ]);
   expect(output).toContain("rearmed");
-}, 15000);
+});
 
-it("releases live requests, incoming cells and gossip batches on worker termination", () => {
-  const output = execFileSync(
-    process.execPath,
-    ["--import", "tsx", "bindings/test/fixtures/network-worker-resources.mjs"],
-    {
-      encoding: "utf8",
-      timeout: 20000,
-    }
-  );
+it("releases live requests, incoming cells and gossip batches on worker termination", childTestTimeout(), () => {
+  const output = runChild(["--import", "tsx", "bindings/test/fixtures/network-worker-resources.mjs"]);
   expect(output).toContain("live-worker-resources-released");
-}, 25000);
+});
 
-it("exits sequential workers that alone loaded the addon after running a runtime", () => {
-  const output = execFileSync(
-    process.execPath,
-    ["--import", "tsx", "bindings/test/fixtures/network-worker-unload.mjs"],
-    {encoding: "utf8", timeout: 10000}
-  );
+it("exits sequential workers that alone loaded the addon after running a runtime", childTestTimeout(), () => {
+  const output = runChild(["--import", "tsx", "bindings/test/fixtures/network-worker-unload.mjs"]);
   expect(output).toContain("workers-exited 0,0,0");
-}, 15000);
+});
 
 it("rejects initialization from another Node environment", async () => {
   const {Worker} = await import("node:worker_threads");
@@ -458,19 +414,17 @@ it("rejects initialization from another Node environment", async () => {
   }
 });
 
-it("memory_safety: terminates workers while publication and command results are pending", () => {
-  for (let i = 0; i < 8; i++) {
-    const output = execFileSync(
-      process.execPath,
-      ["--import", "tsx", "bindings/test/fixtures/network-worker-settlement.mjs"],
-      {
-        encoding: "utf8",
-        timeout: 10000,
-      }
-    );
-    expect(output, `worker termination ${i}`).toContain("worker-settlement-released");
+const terminations = 8;
+it(
+  "memory_safety: terminates workers while publication and command results are pending",
+  childTestTimeout(terminations),
+  () => {
+    for (let i = 0; i < terminations; i++) {
+      const output = runChild(["--import", "tsx", "bindings/test/fixtures/network-worker-settlement.mjs"]);
+      expect(output, `worker termination ${i}`).toContain("worker-settlement-released");
+    }
   }
-}, 90000);
+);
 
 it("rejects initialization of a closed raw runtime", async () => {
   const {networkBindings: addon} = await import("./utils/network-bindings.js");
