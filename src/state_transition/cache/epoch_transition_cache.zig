@@ -201,9 +201,13 @@ fn getReusedEpochTransitionCache(allocator: Allocator, io: std.Io, validator_cou
 }
 
 /// Callers must exclude cache initialization and use until teardown returns.
+/// Must run before this thread's node pool is torn down: the flat validator cache holds a ref
+/// into it.
 pub fn deinitReusedEpochTransitionCache(io: std.Io) void {
     _reused_lock.lockUncancelable(io);
     defer _reused_lock.unlock(io);
+
+    validator_flat_cache.deinitGlobal();
 
     if (_reused_cache) |cache| {
         const allocator = cache.allocator;

@@ -6,7 +6,9 @@
 //! the synced root: that keeps every node id reachable from it alive, which is what makes
 //! "same id" imply "same content".
 //!
-//! Prototype: one process-global instance, not thread-safe, assumes a single Node.Pool.
+//! One instance per thread, like the node pool and the reused epoch buffers: a thread only ever
+//! syncs against its own pool, so no locking is needed. The owner must call `deinitGlobal` on
+//! that thread before its pool is torn down, because the cache holds a ref into the pool.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -175,12 +177,13 @@ pub const ValidatorFlatCache = struct {
     }
 };
 
-var global: ?ValidatorFlatCache = null;
+threadlocal var global: ?ValidatorFlatCache = null;
 
 pub fn syncGlobal(allocator: Allocator, pool: *Node.Pool, root: Node.Id, depth: usize, list_len: usize) !*const ValidatorFlatCache {
     if (global == null) global = ValidatorFlatCache.init(allocator, pool);
     const cache = &global.?;
-    std.debug.assert(cache.pool == pool);
+    // Node ids only mean something inside the pool that issued them.
+    if (cache.pool != pool) return error.ValidatorFlatCachePoolMismatch;
     try cache.sync(root, depth, list_len);
     return cache;
 }
