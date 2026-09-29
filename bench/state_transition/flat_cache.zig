@@ -1,10 +1,10 @@
-//! Maintained flat validator cache vs the tree walk, measured on the real
-//! `EpochTransitionCache.init` and on a full epoch transition.
+//! Flat validator cache, measured on its own and through the real `EpochTransitionCache.init`
+//! and a full epoch transition.
 //!
 //! Every simulated epoch runs 32 "blocks" of churn (clone, balance bumps, participation writes,
 //! commit, old states released) and an epoch step (all balances rewritten, FLAT_WRITES validators
-//! rewritten). After each epoch both paths are timed on the same state, alternating which goes
-//! first. The flat cache is never rebuilt: it is only ever brought forward by `sync`.
+//! rewritten). The benchmark owns one `ValidatorFlatCache` that is filled once and from then on
+//! only brought forward by `sync`.
 //!
 //! Env:
 //!   FLAT_STATE=<path to fulu state ssz>  (required)
@@ -23,7 +23,7 @@ const fork_types = @import("fork_types");
 const AnyBeaconState = fork_types.AnyBeaconState;
 const CachedBeaconState = state_transition.CachedBeaconState;
 const EpochTransitionCache = state_transition.EpochTransitionCache;
-const flat = state_transition.validator_flat_cache;
+const ValidatorFlatCache = state_transition.validator_flat_cache.ValidatorFlatCache;
 const preset = state_transition.preset;
 
 const MAX_RING = 256;
@@ -49,55 +49,27 @@ fn validatorsRef(state: *AnyBeaconState) !ValidatorsRef {
     };
 }
 
-fn checksum(cache: *const EpochTransitionCache) u64 {
-    var h = std.hash.Wyhash.init(0);
-    h.update(cache.flags);
-    h.update(std.mem.sliceAsBytes(cache.is_active_prev_epoch));
-    h.update(std.mem.sliceAsBytes(cache.is_active_curr_epoch));
-    h.update(std.mem.sliceAsBytes(cache.is_active_next_epoch));
-    h.update(std.mem.sliceAsBytes(cache.is_compounding_validator_arr.items()));
-    h.update(std.mem.sliceAsBytes(cache.next_shuffling_active_indices));
-    h.update(std.mem.sliceAsBytes(cache.indices_to_slash.items));
-    h.update(std.mem.sliceAsBytes(cache.indices_eligible_for_activation_queue.items));
-    h.update(std.mem.sliceAsBytes(cache.indices_eligible_for_activation.items));
-    h.update(std.mem.sliceAsBytes(cache.indices_to_eject.items));
-    h.update(std.mem.asBytes(&cache.total_active_stake_by_increment));
-    h.update(std.mem.asBytes(&cache.base_reward_per_increment));
-    h.update(std.mem.asBytes(&cache.prev_epoch_unslashed_stake_target_by_increment));
-    h.update(std.mem.asBytes(&cache.curr_epoch_unslashed_target_stake_by_increment));
-    return h.final();
-}
-
-const InitRun = struct { ms: f64, sync_us: f64, patched: usize, checksum: u64 };
-
-/// One real `EpochTransitionCache.init`. With the flat path, the sync that init would do is
-/// timed on its own first, then counted into the total.
+/// Milliseconds for one real `EpochTransitionCache.init`.
 fn runInit(
     allocator: std.mem.Allocator,
     io: std.Io,
     beacon_config: *const config.BeaconConfig,
-    pool: *Node.Pool,
     head: *CachedBeaconState,
-    use_flat: bool,
-) !InitRun {
-    var sync_us: f64 = 0;
-    var patched: usize = 0;
+) !f64 {
     const t = time.start(io);
-    if (use_flat) {
-        const ref = try validatorsRef(head.state);
-        const ts = time.start(io);
-        const cache = try flat.syncGlobal(allocator, pool, ref.root, ref.depth, ref.len);
-        sync_us = ms(io, ts) * 1000.0;
-        patched = cache.last_patched;
-    }
-    var cache = if (use_flat)
-        try EpochTransitionCache.init(allocator, io, beacon_config, head.epoch_cache, head.state)
-    else
-        try EpochTransitionCache.initFromTree(allocator, io, beacon_config, head.epoch_cache, head.state);
+    var cache = try EpochTransitionCache.init(allocator, io, beacon_config, head.epoch_cache, head.state);
     const elapsed = ms(io, t);
-    const sum = checksum(&cache);
     cache.deinit();
-    return .{ .ms = elapsed, .sync_us = sync_us, .patched = patched, .checksum = sum };
+    return elapsed;
+}
+
+const SyncRun = struct { us: f64, patched: usize };
+
+fn runSync(io: std.Io, cache: *ValidatorFlatCache, state: *AnyBeaconState) !SyncRun {
+    const ref = try validatorsRef(state);
+    const t = time.start(io);
+    try cache.sync(ref.root, ref.depth, ref.len);
+    return .{ .us = ms(io, t) * 1000.0, .patched = cache.last_patched };
 }
 
 const TransitionRun = struct { ms: f64 };
@@ -126,8 +98,7 @@ fn runTransition(
 
 const Window = struct {
     n: usize = 0,
-    tree_sum: f64 = 0,
-    flat_sum: f64 = 0,
+    init_sum: f64 = 0,
     sync_sum_us: f64 = 0,
     patched_sum: usize = 0,
 
@@ -174,7 +145,9 @@ pub fn main(init: std.process.Init) !void {
         .pubkey_cache = &pubkey_cache,
     }, .{ .skip_sync_committee_cache = false, .skip_sync_pubkeys = false });
     defer state_transition.deinitReusedEpochTransitionCache(io);
-    defer flat.deinitGlobal();
+
+    var flat_cache = ValidatorFlatCache.init(allocator, &pool);
+    defer flat_cache.deinit();
 
     var ring: [MAX_RING]?*CachedBeaconState = @splat(null);
     var ring_pos: usize = 0;
@@ -193,17 +166,15 @@ pub fn main(init: std.process.Init) !void {
 
     // Cold start: the first sync fills the whole cache.
     {
-        const ref = try validatorsRef(head.state);
-        const t = time.start(io);
-        const cache = try flat.syncGlobal(allocator, &pool, ref.root, ref.depth, ref.len);
+        const cold = try runSync(io, &flat_cache, head.state);
         std.debug.print("cold fill: {d:.1} ms, patched={}, cache={d:.1} MiB\n", .{
-            ms(io, t),
-            cache.last_patched,
-            @as(f64, @floatFromInt(cache.byteSize())) / (1024.0 * 1024.0),
+            cold.us / 1000.0,
+            cold.patched,
+            @as(f64, @floatFromInt(flat_cache.byteSize())) / (1024.0 * 1024.0),
         });
     }
 
-    std.debug.print("epoch,init_tree_ms,init_flat_ms,of_which_sync_us,patched_per_epoch,transition_ms,cache_mismatches,init_parity\n", .{});
+    std.debug.print("epoch,init_ms,sync_us,patched_per_epoch,transition_ms,cache_mismatches\n", .{});
 
     var window: Window = .{};
     for (0..epochs + 1) |epoch| {
@@ -253,30 +224,24 @@ pub fn main(init: std.process.Init) !void {
             try head.state.commit();
         }
 
-        const flat_first = epoch % 2 == 0;
-        const a = try runInit(allocator, io, &beacon_config, &pool, head, flat_first);
-        const b = try runInit(allocator, io, &beacon_config, &pool, head, !flat_first);
-        const flat_run = if (flat_first) a else b;
-        const tree_run = if (flat_first) b else a;
-        if (flat_run.checksum != tree_run.checksum) return error.InitOutputMismatch;
+        const synced = try runSync(io, &flat_cache, head.state);
+        const init_ms = try runInit(allocator, io, &beacon_config, head);
 
         window.n += 1;
-        window.tree_sum += tree_run.ms;
-        window.flat_sum += flat_run.ms;
-        window.sync_sum_us += flat_run.sync_us;
-        window.patched_sum += flat_run.patched;
+        window.init_sum += init_ms;
+        window.sync_sum_us += synced.us;
+        window.patched_sum += synced.patched;
 
         if (epoch % report_every == 0) {
             const ref = try validatorsRef(head.state);
-            const mismatches = try flat.getGlobal().?.countMismatches(ref.root, ref.depth, ref.len);
+            const mismatches = try flat_cache.countMismatches(ref.root, ref.depth, ref.len);
             if (mismatches != 0) return error.FlatCacheOutOfSync;
 
             const transition = try runTransition(allocator, io, head);
 
-            std.debug.print("{},{d:.1},{d:.1},{d:.0},{d:.1},{d:.1},{},ok\n", .{
+            std.debug.print("{},{d:.1},{d:.0},{d:.1},{d:.1},{}\n", .{
                 epoch,
-                Window.mean(window.tree_sum, window.n),
-                Window.mean(window.flat_sum, window.n),
+                Window.mean(window.init_sum, window.n),
                 Window.mean(window.sync_sum_us, window.n),
                 Window.mean(@floatFromInt(window.patched_sum), window.n),
                 transition.ms,
@@ -289,16 +254,10 @@ pub fn main(init: std.process.Init) !void {
     // Switching to a state on another branch and back: cost follows the number of differences.
     {
         const other = ring[ring_pos] orelse first;
-        const there = try validatorsRef(other.state);
-        const here = try validatorsRef(head.state);
-        var t = time.start(io);
-        var cache = try flat.syncGlobal(allocator, &pool, there.root, there.depth, there.len);
-        const away_ms = ms(io, t);
-        const away_patched = cache.last_patched;
-        t = time.start(io);
-        cache = try flat.syncGlobal(allocator, &pool, here.root, here.depth, here.len);
+        const away = try runSync(io, &flat_cache, other.state);
+        const back = try runSync(io, &flat_cache, head.state);
         std.debug.print("switch to state {} blocks back: {d:.3} ms ({} patched), and back: {d:.3} ms ({} patched)\n", .{
-            ring_size - 1, away_ms, away_patched, ms(io, t), cache.last_patched,
+            ring_size - 1, away.us / 1000.0, away.patched, back.us / 1000.0, back.patched,
         });
     }
 
@@ -306,25 +265,17 @@ pub fn main(init: std.process.Init) !void {
     {
         var loaded = try AnyBeaconState.deserialize(allocator, &pool, .fulu, state_bytes);
         defer loaded.deinit();
-        const there = try validatorsRef(&loaded);
-        const here = try validatorsRef(head.state);
-        var t = time.start(io);
-        var cache = try flat.syncGlobal(allocator, &pool, there.root, there.depth, there.len);
-        const away_ms = ms(io, t);
-        const away_patched = cache.last_patched;
-        t = time.start(io);
-        cache = try flat.syncGlobal(allocator, &pool, here.root, here.depth, here.len);
+        const away = try runSync(io, &flat_cache, &loaded);
+        const back = try runSync(io, &flat_cache, head.state);
         std.debug.print("switch to a state loaded from bytes: {d:.1} ms ({} patched), and back to the scattered head: {d:.1} ms ({} patched)\n", .{
-            away_ms, away_patched, ms(io, t), cache.last_patched,
+            away.us / 1000.0, away.patched, back.us / 1000.0, back.patched,
         });
     }
 
     // Full refill on the scattered head.
     {
-        flat.invalidateGlobal();
-        const here = try validatorsRef(head.state);
-        const t = time.start(io);
-        const cache = try flat.syncGlobal(allocator, &pool, here.root, here.depth, here.len);
-        std.debug.print("cold fill on the scattered head: {d:.1} ms ({} patched)\n", .{ ms(io, t), cache.last_patched });
+        flat_cache.invalidate();
+        const cold = try runSync(io, &flat_cache, head.state);
+        std.debug.print("cold fill on the scattered head: {d:.1} ms ({} patched)\n", .{ cold.us / 1000.0, cold.patched });
     }
 }
