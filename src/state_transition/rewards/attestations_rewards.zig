@@ -1,18 +1,18 @@
 const std = @import("std");
 const preset = @import("preset").preset;
-const constants = @import("constants");
 const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
+const computeRewardPenaltyItem = @import("../epoch/get_rewards_and_penalties.zig").computeRewardPenaltyItem;
 const status = @import("../utils/attester_status.zig");
 const isInInactivityLeak = @import("../epoch/inactivity_leak.zig").isInInactivityLeak;
 
 pub const IdealAttestationsReward = struct {
     effective_balance: u64,
-    head: i64 = 0,
-    target: i64 = 0,
-    source: i64 = 0,
-    inclusion_delay: i64 = 0,
-    inactivity: i64 = 0,
+    head: u64 = 0,
+    target: u64 = 0,
+    source: u64 = 0,
+    inclusion_delay: u64 = 0,
+    inactivity: u64 = 0,
 };
 
 pub const TotalAttestationsReward = struct {
@@ -34,6 +34,20 @@ pub const AttestationsRewards = struct {
     }
 };
 
+const AttestationsPenalty = struct {
+    source: u64,
+    target: u64,
+};
+
+fn signedReward(value: u64) i64 {
+    // Effective-balance and reward bounds keep each API value within the signed range.
+    return @intCast(value);
+}
+
+fn negativePenalty(value: u64) i64 {
+    return -signedReward(value);
+}
+
 /// Returns caller-owned rewards. Filters must be sorted ascending; null selects all,
 /// while an empty slice selects none. Serialize with other EpochTransitionCache borrowers.
 pub fn computeAttestationsRewards(
@@ -52,23 +66,19 @@ pub fn computeAttestationsRewards(
     const max_balance: u64 = if (fork.gte(.electra)) preset.MAX_EFFECTIVE_BALANCE_ELECTRA else preset.MAX_EFFECTIVE_BALANCE;
     const ideal_rewards = try allocator.alloc(IdealAttestationsReward, max_balance / preset.EFFECTIVE_BALANCE_INCREMENT + 1);
     errdefer allocator.free(ideal_rewards);
+    const penalties = try allocator.alloc(AttestationsPenalty, ideal_rewards.len);
+    defer allocator.free(penalties);
 
     const leak = isInInactivityLeak(state.epoch_cache.epoch, try state.state.finalizedEpoch());
-    const base_reward_per_increment = cache.base_reward_per_increment;
-    const active_increments = cache.total_active_stake_by_increment;
-    const unslashed_increments = [_]u64{
-        cache.prev_epoch_unslashed_stake_source_by_increment,
-        cache.prev_epoch_unslashed_stake_target_by_increment,
-        cache.prev_epoch_unslashed_stake_head_by_increment,
-    };
     for (ideal_rewards, 0..) |*reward, increment| {
+        const item = computeRewardPenaltyItem(&cache, @intCast(increment));
         reward.* = .{ .effective_balance = increment * preset.EFFECTIVE_BALANCE_INCREMENT };
-        inline for (.{ "source", "target", "head" }, 0..) |field, flag_index| {
-            const numerator = @as(u128, increment) * base_reward_per_increment *
-                constants.PARTICIPATION_FLAG_WEIGHTS[flag_index] * unslashed_increments[flag_index];
-            const ideal_reward: i64 = @intCast(numerator / (@as(u128, active_increments) * constants.WEIGHT_DENOMINATOR));
-            @field(reward, field) = if (leak) 0 else ideal_reward;
+        if (!leak) {
+            reward.source = item.timely_source_reward;
+            reward.target = item.timely_target_reward;
+            reward.head = item.timely_head_reward;
         }
+        penalties[increment] = .{ .source = item.timely_source_penalty, .target = item.timely_target_penalty };
     }
 
     var total_rewards = try std.ArrayList(TotalAttestationsReward).initCapacity(
@@ -78,7 +88,7 @@ pub fn computeAttestationsRewards(
     errdefer total_rewards.deinit(allocator);
 
     const quotient: u64 = if (fork == .altair) preset.INACTIVITY_PENALTY_QUOTIENT_ALTAIR else preset.INACTIVITY_PENALTY_QUOTIENT_BELLATRIX;
-    const inactivity_denominator = @as(u128, state.config.chain.INACTIVITY_SCORE_BIAS) * quotient;
+    const inactivity_denominator = state.config.chain.INACTIVITY_SCORE_BIAS * quotient;
     const effective_increments = state.epoch_cache.getEffectiveBalanceIncrements().items;
     var inactivity_scores = try state.state.inactivityScores();
     var filter_index: usize = 0;
@@ -93,21 +103,17 @@ pub fn computeAttestationsRewards(
         const increment = effective_increments[i];
         var reward = TotalAttestationsReward{ .validator_index = i };
         reward.source = if (status.hasMarkers(flag, status.FLAG_PREV_SOURCE_ATTESTER_UNSLASHED))
-            ideal_rewards[increment].source
+            signedReward(ideal_rewards[increment].source)
         else
-            -@as(i64, @intCast(@as(u128, increment) * base_reward_per_increment *
-                constants.PARTICIPATION_FLAG_WEIGHTS[constants.TIMELY_SOURCE_FLAG_INDEX] /
-                constants.WEIGHT_DENOMINATOR));
+            negativePenalty(penalties[increment].source);
         if (status.hasMarkers(flag, status.FLAG_PREV_TARGET_ATTESTER_UNSLASHED)) {
-            reward.target = ideal_rewards[increment].target;
+            reward.target = signedReward(ideal_rewards[increment].target);
         } else {
-            reward.target = -@as(i64, @intCast(@as(u128, increment) * base_reward_per_increment *
-                constants.PARTICIPATION_FLAG_WEIGHTS[constants.TIMELY_TARGET_FLAG_INDEX] /
-                constants.WEIGHT_DENOMINATOR));
-            const numerator = @as(u128, increment) * preset.EFFECTIVE_BALANCE_INCREMENT * try inactivity_scores.get(i);
-            reward.inactivity = -@as(i64, @intCast(numerator / inactivity_denominator));
+            reward.target = negativePenalty(penalties[increment].target);
+            const numerator: u64 = @as(u64, increment) * preset.EFFECTIVE_BALANCE_INCREMENT * try inactivity_scores.get(i);
+            reward.inactivity = negativePenalty(@divFloor(numerator, inactivity_denominator));
         }
-        if (status.hasMarkers(flag, status.FLAG_PREV_HEAD_ATTESTER_UNSLASHED)) reward.head = ideal_rewards[increment].head;
+        if (status.hasMarkers(flag, status.FLAG_PREV_HEAD_ATTESTER_UNSLASHED)) reward.head = signedReward(ideal_rewards[increment].head);
         total_rewards.appendAssumeCapacity(reward);
     }
 

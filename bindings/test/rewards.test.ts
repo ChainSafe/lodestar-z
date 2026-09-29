@@ -137,6 +137,25 @@ describe("sync committee rewards", () => {
     await expect(promise).rejects.toThrow("InvalidByteArrayLength");
   });
 
+  it.each([
+    -1,
+    1.5,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    Number.MAX_SAFE_INTEGER + 1,
+  ])("rejects invalid proposer reward input %s", (attestations) => {
+    const view = state();
+    const signed = ssz.bellatrix.SignedBeaconBlock.defaultValue();
+    signed.message.slot = value.slot;
+    expect(() =>
+      view.computeBlockRewards(ssz.bellatrix.SignedBeaconBlock.serialize(signed), false, {
+        attestations,
+        slashing: 0,
+        syncAggregate: 0,
+      })
+    ).toThrow("InvalidUnsignedInteger");
+  });
+
   it("preserves a throwing getter as the Promise rejection", async () => {
     const failure = new Error("input getter failed");
     const input = {

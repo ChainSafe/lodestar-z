@@ -969,9 +969,9 @@ pub fn proposerRewards(self: *BeaconStateView) !js_types.ProposerRewards {
     const rewards = cached_state.getProposerRewards();
 
     const obj = try env.createObject();
-    try obj.setNamedProperty("attestations", try env.createDouble(@floatFromInt(rewards.attestations)));
-    try obj.setNamedProperty("syncAggregate", try env.createDouble(@floatFromInt(rewards.sync_aggregate)));
-    try obj.setNamedProperty("slashing", try env.createDouble(@floatFromInt(rewards.slashing)));
+    try obj.setNamedProperty("attestations", js.Number.from(rewards.attestations).val);
+    try obj.setNamedProperty("syncAggregate", js.Number.from(rewards.sync_aggregate).val);
+    try obj.setNamedProperty("slashing", js.Number.from(rewards.slashing).val);
     return .{ .val = obj };
 }
 
@@ -1711,8 +1711,7 @@ fn parseProposerRewards(value: ?js.Value) !?st.ProposerRewards {
 
 fn optionalU64(obj: napi.Value, name: [:0]const u8) !u64 {
     if (!try obj.hasNamedProperty(name)) return 0;
-    const raw = try (try obj.getNamedProperty(name)).getValueInt64();
-    return if (raw < 0) 0 else @intCast(raw);
+    return js_types.wrap(js.Number, try obj.getNamedProperty(name)).toU64Exact();
 }
 
 pub fn computeAttestationsRewards(self: *BeaconStateView, validator_ids: ?js.Value) !js.Value {
@@ -1739,23 +1738,23 @@ fn attestationsRewardsValue(self: *BeaconStateView, validator_ids: ?js.Value) !n
     const ideal = try env.createArrayWithLength(rewards.ideal_rewards.len);
     for (rewards.ideal_rewards, 0..) |reward, i| {
         const row = try env.createObject();
-        try row.setNamedProperty("effectiveBalance", try env.createInt64(@intCast(reward.effective_balance)));
-        try row.setNamedProperty("head", try env.createInt64(reward.head));
-        try row.setNamedProperty("target", try env.createInt64(reward.target));
-        try row.setNamedProperty("source", try env.createInt64(reward.source));
-        try row.setNamedProperty("inclusionDelay", try env.createInt64(reward.inclusion_delay));
-        try row.setNamedProperty("inactivity", try env.createInt64(reward.inactivity));
+        try row.setNamedProperty("effectiveBalance", js.Number.from(reward.effective_balance).val);
+        try row.setNamedProperty("head", js.Number.from(reward.head).val);
+        try row.setNamedProperty("target", js.Number.from(reward.target).val);
+        try row.setNamedProperty("source", js.Number.from(reward.source).val);
+        try row.setNamedProperty("inclusionDelay", js.Number.from(reward.inclusion_delay).val);
+        try row.setNamedProperty("inactivity", js.Number.from(reward.inactivity).val);
         try ideal.setElement(@intCast(i), row);
     }
     const total = try env.createArrayWithLength(rewards.total_rewards.len);
     for (rewards.total_rewards, 0..) |reward, i| {
         const row = try env.createObject();
-        try row.setNamedProperty("validatorIndex", try env.createInt64(@intCast(reward.validator_index)));
-        try row.setNamedProperty("head", try env.createInt64(reward.head));
-        try row.setNamedProperty("target", try env.createInt64(reward.target));
-        try row.setNamedProperty("source", try env.createInt64(reward.source));
-        try row.setNamedProperty("inclusionDelay", try env.createInt64(reward.inclusion_delay));
-        try row.setNamedProperty("inactivity", try env.createInt64(reward.inactivity));
+        try row.setNamedProperty("validatorIndex", js.Number.from(reward.validator_index).val);
+        try row.setNamedProperty("head", js.Number.from(reward.head).val);
+        try row.setNamedProperty("target", js.Number.from(reward.target).val);
+        try row.setNamedProperty("source", js.Number.from(reward.source).val);
+        try row.setNamedProperty("inclusionDelay", js.Number.from(reward.inclusion_delay).val);
+        try row.setNamedProperty("inactivity", js.Number.from(reward.inactivity).val);
         try total.setElement(@intCast(i), row);
     }
     const result = try env.createObject();
@@ -1774,9 +1773,11 @@ fn parseAttestationRewardFilters(allocator: std.mem.Allocator, value: ?js.Value)
     for (0..count) |i| {
         const id = try raw.getElement(@intCast(i));
         if (try id.typeof() == .number) {
-            const number = try id.getValueDouble();
-            if (std.math.isFinite(number) and number >= 0 and number <= 9007199254740991 and @trunc(number) == number)
-                try indices.append(allocator, @intFromFloat(number));
+            const index = js_types.wrap(js.Number, id).toU64Exact() catch |err| {
+                if (err == error.InvalidUnsignedInteger) continue;
+                return err;
+            };
+            try indices.append(allocator, index);
         } else {
             const string = js.String{ .val = id };
             const text = try string.toOwnedSlice(allocator);
@@ -1834,15 +1835,19 @@ fn syncCommitteeRewardsValue(self: *BeaconStateView, block: js.Value, validator_
     const cached_state = try self.acquireState();
     defer self.finishState();
     const allocator = cached_state.allocator;
-    const slot_value = try (try block.val.getNamedProperty("slot")).getValueDouble();
-    if (!std.math.isFinite(slot_value) or slot_value < 0 or slot_value > 9007199254740991 or @trunc(slot_value) != slot_value)
-        return error.InvalidSlot;
-    const block_slot: u64 = @intFromFloat(slot_value);
+    const slot_number = js_types.wrap(js.Number, try block.val.getNamedProperty("slot"));
+    const block_slot = slot_number.toU64Exact() catch |err| {
+        if (err == error.InvalidUnsignedInteger) return error.InvalidSlot;
+        return err;
+    };
     if (cached_state.config.forkSeq(block_slot) == .phase0) return error.SyncCommitteeRewardsUnsupportedFork;
     const body = try block.val.getNamedProperty("body");
     const aggregate = try body.getNamedProperty("syncAggregate");
     const bits = try aggregate.getNamedProperty("syncCommitteeBits");
-    const bit_len = try (try bits.getNamedProperty("bitLen")).getValueDouble();
+    const bit_len = js_types.wrap(js.Number, try bits.getNamedProperty("bitLen")).toU32Exact() catch |err| {
+        if (err == error.InvalidUnsignedInteger) return error.InvalidSyncCommitteeBitsLength;
+        return err;
+    };
     if (bit_len != preset.SYNC_COMMITTEE_SIZE) return error.InvalidSyncCommitteeBitsLength;
     var sync_aggregate: ct.altair.SyncAggregate.Type = undefined;
     // Copy before subsequent JS getters can detach or resize the backing buffer.
@@ -1860,8 +1865,8 @@ fn syncCommitteeRewardsValue(self: *BeaconStateView, block: js.Value, validator_
             if (std.mem.indexOfScalar(u64, indices, reward.validator_index) == null) continue;
         }
         const row = try env.createObject();
-        try row.setNamedProperty("validatorIndex", try env.createInt64(@intCast(reward.validator_index)));
-        try row.setNamedProperty("reward", try env.createInt64(reward.reward));
+        try row.setNamedProperty("validatorIndex", js.Number.from(reward.validator_index).val);
+        try row.setNamedProperty("reward", js.Number.from(reward.reward).val);
         try result.setElement(output_index, row);
         output_index += 1;
     }
@@ -1879,9 +1884,11 @@ fn parseSyncRewardFilters(allocator: std.mem.Allocator, value: ?js.Value) !?[]u6
         const id = try raw.getElement(@intCast(i));
         switch (try id.typeof()) {
             .number => {
-                const number = try id.getValueDouble();
-                if (std.math.isFinite(number) and number >= 0 and number <= 9007199254740991 and @trunc(number) == number)
-                    try indices.append(allocator, @intFromFloat(number));
+                const index = js_types.wrap(js.Number, id).toU64Exact() catch |err| {
+                    if (err == error.InvalidUnsignedInteger) continue;
+                    return err;
+                };
+                try indices.append(allocator, index);
             },
             .string => {
                 const string = js.String{ .val = id };

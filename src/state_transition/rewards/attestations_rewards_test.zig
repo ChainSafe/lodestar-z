@@ -35,14 +35,14 @@ test "computeAttestationsRewards - participation, slashing, eligibility, filters
     defer rewards.deinit(allocator);
     try std.testing.expectEqual(preset.MAX_EFFECTIVE_BALANCE_ELECTRA / preset.EFFECTIVE_BALANCE_INCREMENT + 1, rewards.ideal_rewards.len);
     try std.testing.expectEqual(@as(u64, 0), rewards.ideal_rewards[0].effective_balance);
-    try std.testing.expectEqual(@as(i64, 0), rewards.ideal_rewards[0].source);
+    try std.testing.expectEqual(@as(u64, 0), rewards.ideal_rewards[0].source);
     try std.testing.expectEqual(preset.MAX_EFFECTIVE_BALANCE_ELECTRA, rewards.ideal_rewards[rewards.ideal_rewards.len - 1].effective_balance);
     const base_reward = @import("../utils/sync_committee.zig").computeBaseRewardPerIncrement(255 * 32);
     const denominator = 255 * 32 * 64;
     for (rewards.ideal_rewards, 0..) |ideal, increment| {
         const numerator = increment * base_reward * 14 * (253 * 32);
         const expected = @divFloor(numerator, denominator);
-        try std.testing.expectEqual(@as(i64, @intCast(expected)), ideal.source);
+        try std.testing.expectEqual(@as(u64, expected), ideal.source);
     }
     try std.testing.expectEqual(@as(usize, 255), rewards.total_rewards.len);
     try std.testing.expectEqual(@as(u64, 5), rewards.total_rewards[4].validator_index);
@@ -73,7 +73,7 @@ test "computeAttestationsRewards - participation, slashing, eligibility, filters
     try state.state.setFinalizedCheckpoint(&.{ .epoch = 0, .root = [_]u8{0} ** 32 });
     const leak = try computeAttestationsRewards(allocator, std.testing.io, state, &.{ 0, 2 });
     defer leak.deinit(allocator);
-    try std.testing.expectEqual(@as(i64, 0), leak.ideal_rewards[32].source);
+    try std.testing.expectEqual(@as(u64, 0), leak.ideal_rewards[32].source);
     try std.testing.expectEqual(missed.source, leak.total_rewards[0].source);
     try std.testing.expectEqual(missed.inactivity, leak.total_rewards[0].inactivity);
     try std.testing.expectEqual(@as(i64, 0), leak.total_rewards[1].source);
