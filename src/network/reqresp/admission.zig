@@ -78,6 +78,30 @@ pub const Limiter = struct {
         return .allowed;
     }
 
+    /// When `start` next admits the identity's class, in the style of `eligibleAt`: a retry hint
+    /// that reserves nothing, so a waiting request rechecks then. Without a free row, the
+    /// earliest row expiry.
+    pub fn startAt(self: *const Limiter, identity: *const PeerId, control: bool, now_ms: u64) u64 {
+        const quota = self.options.starts;
+        var previous: u128 = 0;
+        var room = false;
+        var expires: u128 = std.math.maxInt(u128);
+        const now_ns = @as(u128, now_ms) * ns_per_ms;
+        for (self.rows) |*row| {
+            if (row.occupied and row.identity.eql(identity)) {
+                previous = row.starts_ns[@intFromBool(control)];
+                room = true;
+                break;
+            }
+            room = room or !row.occupied or row.expires_ns <= now_ns;
+            expires = @min(expires, row.expires_ns);
+        }
+        const period_ns = @as(u128, quota.period_ms) * ns_per_ms;
+        const charge = (period_ns + quota.tokens - 1) / quota.tokens;
+        const due = @max(if (room) 0 else expires, previous + charge -| period_ns);
+        return @max(now_ms, std.math.cast(u64, (due + ns_per_ms - 1) / ns_per_ms) orelse std.math.maxInt(u64));
+    }
+
     pub fn eligibleAt(self: *const Limiter, identity: *const PeerId, which: Protocol, cost: u128, fork: ForkSeq, now_ms: u64) ?u64 {
         const index = @intFromEnum(which);
         const peer = self.options.peer[@intFromEnum(fork)][index];

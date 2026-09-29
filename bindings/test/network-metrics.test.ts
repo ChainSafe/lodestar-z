@@ -53,7 +53,7 @@ test("metrics are available through startup and remain readable after close", as
         0
       );
     }
-    for (const phase of ["receiving_request", "waiting_host", "writing_response", "terminal"]) {
+    for (const phase of ["receiving_request", "waiting_start", "waiting_host", "writing_response", "terminal"]) {
       expect(metrics.get(`lodestar_native_reqresp_inbound_occupied{phase="${phase}"}`)).toBe(0);
     }
     for (const name of [
