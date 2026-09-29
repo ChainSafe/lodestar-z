@@ -26,8 +26,16 @@ pub fn build(b: *std.Build) void {
     });
 
     const quiche_module = lodestar_z.module("network").import_table.get("quiche_zig:quiche").?;
-    const quiche_objects = [_]std.Build.LazyPath{quiche_module.link_objects.items[0].static_path};
     std.debug.assert(quiche_module.link_objects.items.len == 1);
+    // A harness links its bitcode, so it takes the network module's own objects (the accelerated
+    // gossip SHA-256 object where the target has one) explicitly, as it takes quiche's.
+    const network_objects = lodestar_z.module("network").link_objects.items;
+    std.debug.assert(network_objects.len <= 1);
+    const gossip_objects: []const std.Build.LazyPath = if (network_objects.len == 1)
+        b.allocator.dupe(std.Build.LazyPath, &.{network_objects[0].other_step.getEmittedBin()}) catch @panic("out of memory")
+    else
+        &.{};
+    const quiche_objects = std.mem.concat(b.allocator, std.Build.LazyPath, &.{ &.{quiche_module.link_objects.items[0].static_path}, gossip_objects }) catch @panic("out of memory");
     const network_fixture = b.createModule(.{
         .root_source_file = b.path("tools/network_fixture.zig"),
         .target = target,
@@ -127,7 +135,7 @@ pub fn build(b: *std.Build) void {
             .corpus_suffix = corpus,
             .input_max = input_max,
             .extra_libs = if (snappy) &snappy_libs else &.{},
-            .extra_objects = if (quiche) &quiche_objects else &.{},
+            .extra_objects = if (quiche) quiche_objects else gossip_objects,
             .extra_args = if (snappy or quiche) &.{ "-lc++", "-lc++abi", "-lunwind" } else &.{},
         }) catch @panic("out of memory");
     }

@@ -9,6 +9,7 @@ pub const protocol = @import("protocol.zig");
 pub const protobuf = @import("protobuf.zig");
 pub const topic_policy = @import("topic_policy.zig");
 pub const topic = @import("topic.zig");
+pub const sha256 = @import("sha256.zig");
 pub const mcache = @import("mcache.zig");
 pub const sessions = @import("sessions.zig");
 pub const frame = @import("frame.zig");
@@ -48,6 +49,7 @@ test {
     _ = constants;
     _ = protobuf;
     _ = topic;
+    _ = sha256;
     _ = mcache;
     _ = sessions;
     _ = frame;

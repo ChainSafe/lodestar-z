@@ -10,7 +10,9 @@ export function inspectNetworkAddon(path) {
   assert.equal(typeof addon.NativeNetworkRuntime, "function", "native network runtime is missing");
   const actual = names.filter((name) => /^networkTest/i.test(name));
   assert.deepEqual(actual, [], "unexpected native network test exports");
-  return {exports: names, instrumented: false};
+  const gossipSha256Backend = addon.NativeNetworkRuntime.gossipSha256Backend();
+  assert(["zig_std", "x86_sha_avx2"].includes(gossipSha256Backend), "unknown gossip SHA-256 backend");
+  return {exports: names, gossipSha256Backend, instrumented: false};
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

@@ -77,7 +77,8 @@ try {
     const packageRoot = join(dirname(fileURLToPath(import.meta.resolve(${JSON.stringify(`${pkg.name}/network`)}))), "../..");
     assert(!existsSync(join(packageRoot, "zig-out/lib/bindings.node")));
     assert.deepEqual(Object.keys(require.cache).filter(path => path.endsWith(".node")), [nativePath]);
-    console.log(JSON.stringify({target: ${JSON.stringify(target)}, platformPackage: ${JSON.stringify(platformPackage)}, loaded: true}));
+    const gossipSha256Backend = native.NativeNetworkRuntime.gossipSha256Backend();
+    console.log(JSON.stringify({target: ${JSON.stringify(target)}, platformPackage: ${JSON.stringify(platformPackage)}, loaded: true, gossipSha256Backend}));
   `,
     ],
     installed

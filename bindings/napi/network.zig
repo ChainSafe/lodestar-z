@@ -305,6 +305,11 @@ fn capacities(env: napi.Env, runtime: *const Runtime) !Value {
     return object;
 }
 
+/// The gossip SHA-256 implementation this process selected, for packaged qualification records.
+pub fn gossipSha256Backend() js.String {
+    return js.String.from(@tagName(@import("network").gossipsub.sha256.backend()));
+}
+
 pub fn getMetrics(self: *@This()) !js.String {
     const call = r.call(self.runtime, .get_metrics);
     defer call.end();
