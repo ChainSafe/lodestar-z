@@ -135,6 +135,7 @@ try {
     "bindings/test/utils",
     "test/interop/network_chain.mjs",
     "scripts/bounded_child.mjs",
+    "scripts/check_network_addon.mjs",
     "scripts/lodestar_package_probe.mjs",
   ])
     await cp(join(source, path), join(root, path), {recursive: true});
