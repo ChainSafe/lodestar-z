@@ -16,9 +16,11 @@ pub const Buffers = sockets_mod.Buffers;
 const mib = 1024 * 1024;
 
 /// Kernel buffer sizes requested for each UDP socket role. The kernel default of 208 KiB holds
-/// about 20 ms of traffic at 8,000 datagrams/s, so a longer owner pause drops datagrams.
+/// about 20 ms of traffic at 8,000 datagrams/s, so a longer owner pause drops datagrams. Linux
+/// caps a request at net.core.rmem_max or wmem_max and doubles it: at a 16 MiB rmem_max, the QUIC
+/// receive buffer holds about 14,560 datagrams at a truesize of 2,304 bytes.
 pub const SocketBuffers = struct {
-    quic: Buffers = .{ .receive = 8 * mib, .send = 4 * mib },
+    quic: Buffers = .{ .receive = 16 * mib, .send = 4 * mib },
     discovery: Buffers = .{ .receive = 2 * mib, .send = 1 * mib },
 
     pub fn validate(self: SocketBuffers) error{InvalidLimits}!void {
