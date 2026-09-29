@@ -264,6 +264,29 @@ pub const EpochTransitionCache = struct {
         epoch_cache: *EpochCache,
         state: *AnyBeaconState,
     ) !EpochTransitionCache {
+        return initFrom(.flat_cache, allocator, io, config, epoch_cache, state);
+    }
+
+    /// Same result as `init`, reading every validator from the tree instead of the flat cache.
+    /// Reference for parity tests and benchmarks.
+    pub fn initFromTree(
+        allocator: Allocator,
+        io: std.Io,
+        config: *const BeaconConfig,
+        epoch_cache: *EpochCache,
+        state: *AnyBeaconState,
+    ) !EpochTransitionCache {
+        return initFrom(.tree, allocator, io, config, epoch_cache, state);
+    }
+
+    fn initFrom(
+        comptime source: enum { flat_cache, tree },
+        allocator: Allocator,
+        io: std.Io,
+        config: *const BeaconConfig,
+        epoch_cache: *EpochCache,
+        state: *AnyBeaconState,
+    ) !EpochTransitionCache {
         const fork_seq = state.forkSeq();
         const current_epoch = epoch_cache.epoch;
         const prev_epoch = epoch_cache.getPreviousShuffling().epoch;
@@ -291,7 +314,7 @@ pub const EpochTransitionCache = struct {
         try validators_view.commit();
         const validator_count = try validators_view.length();
         var validators_it = validators_view.iteratorReadonly(0);
-        const flat_validators = if (validator_flat_cache.enabled) try validator_flat_cache.syncGlobal(
+        const flat_validators: ?*const validator_flat_cache.ValidatorFlatCache = if (source == .flat_cache) try validator_flat_cache.syncGlobal(
             allocator,
             validators_view.chunks.state.pool,
             validators_view.getRoot(),

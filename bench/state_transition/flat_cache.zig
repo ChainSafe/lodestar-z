@@ -80,9 +80,6 @@ fn runInit(
     head: *CachedBeaconState,
     use_flat: bool,
 ) !InitRun {
-    flat.enabled = use_flat;
-    defer flat.enabled = false;
-
     var sync_us: f64 = 0;
     var patched: usize = 0;
     const t = time.start(io);
@@ -93,26 +90,25 @@ fn runInit(
         sync_us = ms(io, ts) * 1000.0;
         patched = cache.last_patched;
     }
-    var cache = try EpochTransitionCache.init(allocator, io, beacon_config, head.epoch_cache, head.state);
+    var cache = if (use_flat)
+        try EpochTransitionCache.init(allocator, io, beacon_config, head.epoch_cache, head.state)
+    else
+        try EpochTransitionCache.initFromTree(allocator, io, beacon_config, head.epoch_cache, head.state);
     const elapsed = ms(io, t);
     const sum = checksum(&cache);
     cache.deinit();
     return .{ .ms = elapsed, .sync_us = sync_us, .patched = patched, .checksum = sum };
 }
 
-const TransitionRun = struct { ms: f64, root: [32]u8 };
+const TransitionRun = struct { ms: f64 };
 
-/// A full epoch transition on a throwaway clone: advance to the last slot of the epoch untimed,
+/// A full epoch transition, which always uses the flat cache, on a throwaway clone: advance to the last slot of the epoch untimed,
 /// then time the slot that crosses the boundary.
 fn runTransition(
     allocator: std.mem.Allocator,
     io: std.Io,
     head: *CachedBeaconState,
-    use_flat: bool,
 ) !TransitionRun {
-    flat.enabled = use_flat;
-    defer flat.enabled = false;
-
     const clone = try head.clone(allocator, .{ .transfer_cache = false });
     defer {
         clone.deinit();
@@ -125,7 +121,7 @@ fn runTransition(
     const t = time.start(io);
     try state_transition.processSlots(allocator, io, clone, boundary, null);
     const elapsed = ms(io, t);
-    return .{ .ms = elapsed, .root = (try clone.state.hashTreeRoot()).* };
+    return .{ .ms = elapsed };
 }
 
 const Window = struct {
@@ -207,7 +203,7 @@ pub fn main(init: std.process.Init) !void {
         });
     }
 
-    std.debug.print("epoch,init_tree_ms,init_flat_ms,of_which_sync_us,patched_per_epoch,transition_tree_ms,transition_flat_ms,cache_mismatches,init_parity,root_parity\n", .{});
+    std.debug.print("epoch,init_tree_ms,init_flat_ms,of_which_sync_us,patched_per_epoch,transition_ms,cache_mismatches,init_parity\n", .{});
 
     var window: Window = .{};
     for (0..epochs + 1) |epoch| {
@@ -275,20 +271,15 @@ pub fn main(init: std.process.Init) !void {
             const mismatches = try flat.getGlobal().?.countMismatches(ref.root, ref.depth, ref.len);
             if (mismatches != 0) return error.FlatCacheOutOfSync;
 
-            const t_a = try runTransition(allocator, io, head, flat_first);
-            const t_b = try runTransition(allocator, io, head, !flat_first);
-            const t_flat = if (flat_first) t_a else t_b;
-            const t_tree = if (flat_first) t_b else t_a;
-            if (!std.mem.eql(u8, &t_flat.root, &t_tree.root)) return error.TransitionRootMismatch;
+            const transition = try runTransition(allocator, io, head);
 
-            std.debug.print("{},{d:.1},{d:.1},{d:.0},{d:.1},{d:.1},{d:.1},{},ok,ok\n", .{
+            std.debug.print("{},{d:.1},{d:.1},{d:.0},{d:.1},{d:.1},{},ok\n", .{
                 epoch,
                 Window.mean(window.tree_sum, window.n),
                 Window.mean(window.flat_sum, window.n),
                 Window.mean(window.sync_sum_us, window.n),
                 Window.mean(@floatFromInt(window.patched_sum), window.n),
-                t_tree.ms,
-                t_flat.ms,
+                transition.ms,
                 mismatches,
             });
             window = .{};

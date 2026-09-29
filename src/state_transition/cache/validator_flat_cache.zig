@@ -6,9 +6,9 @@
 //! the synced root: that keeps every node id reachable from it alive, which is what makes
 //! "same id" imply "same content".
 //!
-//! One instance per thread, like the node pool and the reused epoch buffers: a thread only ever
-//! syncs against its own pool, so no locking is needed. The owner must call `deinitGlobal` on
-//! that thread before its pool is torn down, because the cache holds a ref into the pool.
+//! One instance per thread, like the node pool and the reused epoch buffers, so no locking is
+//! needed. The cache holds a ref into the pool it serves and registers the pool's `deinit_hook`
+//! to drop it when that pool is torn down on this thread.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -21,8 +21,6 @@ const Validator = types.phase0.Validator;
 
 const flag_slashed: u8 = 1;
 const flag_compounding: u8 = 2;
-
-pub var enabled: bool = false;
 
 /// What EpochTransitionCache.init needs to know about one validator, whatever the source.
 pub const ValidatorFields = struct {
@@ -180,10 +178,14 @@ pub const ValidatorFlatCache = struct {
 threadlocal var global: ?ValidatorFlatCache = null;
 
 pub fn syncGlobal(allocator: Allocator, pool: *Node.Pool, root: Node.Id, depth: usize, list_len: usize) !*const ValidatorFlatCache {
-    if (global == null) global = ValidatorFlatCache.init(allocator, pool);
+    // Node ids only mean something inside the pool that issued them. The previous pool is still
+    // alive here: its deinit hook would have cleared the cache otherwise.
+    if (global) |*existing| if (existing.pool != pool) deinitGlobal();
+    if (global == null) {
+        global = ValidatorFlatCache.init(allocator, pool);
+        pool.deinit_hook = onPoolDeinit;
+    }
     const cache = &global.?;
-    // Node ids only mean something inside the pool that issued them.
-    if (cache.pool != pool) return error.ValidatorFlatCachePoolMismatch;
     try cache.sync(root, depth, list_len);
     return cache;
 }
@@ -197,8 +199,18 @@ pub fn invalidateGlobal() void {
 }
 
 pub fn deinitGlobal() void {
-    if (global) |*cache| cache.deinit();
+    if (global) |*cache| {
+        if (cache.pool.deinit_hook == onPoolDeinit) cache.pool.deinit_hook = null;
+        cache.deinit();
+    }
     global = null;
+}
+
+fn onPoolDeinit(pool: *Node.Pool) void {
+    if (global) |*cache| if (cache.pool == pool) {
+        cache.deinit();
+        global = null;
+    };
 }
 
 test {

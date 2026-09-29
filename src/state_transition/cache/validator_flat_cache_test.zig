@@ -5,7 +5,8 @@ const types = @import("consensus_types");
 
 const Validator = types.phase0.Validator;
 const Validators = types.phase0.Validators;
-const ValidatorFlatCache = @import("validator_flat_cache.zig").ValidatorFlatCache;
+const flat = @import("validator_flat_cache.zig");
+const ValidatorFlatCache = flat.ValidatorFlatCache;
 
 fn expectInSync(cache: *ValidatorFlatCache, view: *Validators.TreeView) !void {
     try view.commit();
@@ -88,4 +89,3 @@ test "ValidatorFlatCache follows writes, appends, truncation and forks" {
     try testing.expectEqual(@as(usize, 50), cache.len());
     try expectInSync(&cache, view);
 }
-

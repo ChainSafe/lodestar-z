@@ -266,6 +266,9 @@ pub const Pool = struct {
     allocator: Allocator,
     nodes: std.MultiArrayList(Node).Slice,
     next_free_node: Id,
+    /// Runs first in `deinit`, while every node is still valid. Lets a cache that holds refs
+    /// into this pool let go of them before the pool disappears.
+    deinit_hook: ?*const fn (*Pool) void = null,
     nodes_in_use: usize,
     // Reused scratch for chunked_leaf root recompute: single-threaded, and chunked_leaf is a leaf
     // of getRoot's traversal, so at most one computeRoot uses it at a time.
@@ -324,6 +327,10 @@ pub const Pool = struct {
     }
 
     pub fn deinit(self: *Pool) void {
+        if (self.deinit_hook) |hook| {
+            self.deinit_hook = null;
+            hook(self);
+        }
         // Release heap payloads owned by `.chunked_leaf` and `.container_struct` slots.
         // The MultiArrayList only owns its own column buffers; payload
         // pointers are heap-allocated separately and become unreachable
