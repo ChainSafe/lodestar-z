@@ -176,7 +176,10 @@ test("close settles every publication and releases its payload and result cells"
 test("limited settlement reaches a terminal publication above refilled lower cells", async () => {
   const runtime = initializeNativeNetworkRuntime(applicationConfig(), () => undefined);
   const publish = (fill: number) =>
-    runtime.publishGossip(BLOCK, new Uint8Array(4000).fill(fill), {allowZeroPeers: true, ignoreDuplicate: true});
+    runtime.publishGossip(BLOCK, new Uint8Array(4000).fill(fill), {allowZeroPeers: true, ignoreDuplicate: true}).then(
+      () => "published",
+      (error) => error.code
+    );
   const executed = () => vi.waitFor(() => expect(runtime.diagnostics().publications.payloadBytes).toBe(0));
   let closed = false;
   void runtime.closed.then(() => {
@@ -190,7 +193,7 @@ test("limited settlement reaches a terminal publication above refilled lower cel
       await executed();
       for (const {handle} of runtime.exchange([], {...settleOnly, settleCells: 1}).completions)
         delivered.push(handle.index);
-      publications.push(publish(3 + pass));
+      if (pass === 0) publications.push(publish(3));
     }
     // The second pass reached the higher cell although the lowest had refilled.
     expect(delivered).toEqual([0, 1]);
@@ -201,7 +204,7 @@ test("limited settlement reaches a terminal publication above refilled lower cel
       for (let pass = 0; pass < 8 && runtime.exchange([], settleOnly).more; pass++);
     }
   }
-  await Promise.all(publications);
+  expect(await Promise.all(publications)).toEqual(Array(3).fill("published"));
   expect(await runtime.closed).toEqual({reason: "requested"});
 });
 
