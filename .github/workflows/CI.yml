@@ -607,7 +607,9 @@ jobs:
   bindings-platforms:
     name: bindings - platforms
     # Runs the exact multi-target build the Release workflow publishes (see publish-bindings.yml) and qualifies each
-    # target on its platform, so breakage is caught pre-merge instead of after a release tag already exists.
+    # target on its platform, so breakage is caught pre-merge instead of after a release tag already exists. Pushes to
+    # main qualify in the Release workflow, which publishes what it qualified.
+    if: github.event_name == 'pull_request'
     uses: ./.github/workflows/bindings-platforms.yml
 
   # metrics_stf depends on httpz, which is temporarily disabled for Zig 0.16 migration
