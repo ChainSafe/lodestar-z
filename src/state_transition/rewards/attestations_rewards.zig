@@ -66,8 +66,9 @@ pub fn computeAttestationsRewards(
     const max_balance: u64 = if (fork.gte(.electra)) preset.MAX_EFFECTIVE_BALANCE_ELECTRA else preset.MAX_EFFECTIVE_BALANCE;
     const ideal_rewards = try allocator.alloc(IdealAttestationsReward, max_balance / preset.EFFECTIVE_BALANCE_INCREMENT + 1);
     errdefer allocator.free(ideal_rewards);
-    const penalties = try allocator.alloc(AttestationsPenalty, ideal_rewards.len);
-    defer allocator.free(penalties);
+    var penalty_buffer: [preset.MAX_EFFECTIVE_BALANCE_ELECTRA / preset.EFFECTIVE_BALANCE_INCREMENT + 1]AttestationsPenalty = undefined;
+    std.debug.assert(ideal_rewards.len <= penalty_buffer.len);
+    const penalties = penalty_buffer[0..ideal_rewards.len];
 
     const leak = isInInactivityLeak(state.epoch_cache.epoch, try state.state.finalizedEpoch());
     for (ideal_rewards, 0..) |*reward, increment| {
