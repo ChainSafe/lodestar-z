@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Usage: scripts/zig-cross.sh COMMAND [ARGS...]
 #
-# Runs COMMAND, typically `pnpm zapi build-artifacts`, with Cargo building every zapi target through Zig. quiche-zig
-# builds quiche and its BoringSSL with Cargo for the Zig target, which needs a C and C++ compiler, an archiver and a
-# linker for that target. Each Rust target must be installed with `rustup target add`.
+# Runs COMMAND, typically `pnpm zapi build-artifacts`, with Cargo building every zapi target through Zig and from
+# quiche's own lockfile. quiche-zig builds quiche and its BoringSSL with Cargo for the Zig target, which needs a C and
+# C++ compiler, an archiver and a linker for that target, and it lets Cargo resolve dependencies anew. Each Rust target
+# must be installed with `rustup target add`.
 set -euo pipefail
 
 if [ "${1-}" = --driver ]; then
@@ -26,6 +27,7 @@ if [ "${1-}" = --driver ]; then
 fi
 
 self=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")
+cargo=$(command -v cargo)
 tools=$(mktemp -d "${TMPDIR:-/tmp}/zig-cross.XXXXXX")
 trap 'rm -rf "$tools"' EXIT
 
@@ -56,5 +58,8 @@ for pair in \
   export "CC_$var=$tools/$rust-cc" "CXX_$var=$tools/$rust-c++" "AR_$var=$tools/$rust-ar"
   export "CARGO_TARGET_$(printf '%s' "$var" | tr '[:lower:]' '[:upper:]')_LINKER=$tools/$rust-cc"
 done
+# A build fails rather than change quiche's Cargo.lock.
+tool cargo "if [ \"\$1\" = build ]; then shift; exec \"$cargo\" build --locked \"\$@\"; fi; exec \"$cargo\" \"\$@\""
+export PATH="$tools:$PATH"
 
 "$@"
