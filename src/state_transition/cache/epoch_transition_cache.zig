@@ -198,6 +198,7 @@ fn getReusedEpochTransitionCache(
     defer _reused_lock.unlock(io);
 
     if (_reused_cache) |cache| {
+        std.debug.assert(cache.validator_flat_cache.pool == pool);
         try cache.resize(validator_count);
         return cache;
     }
