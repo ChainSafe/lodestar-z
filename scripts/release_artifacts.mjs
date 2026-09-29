@@ -2,8 +2,9 @@
 //   node scripts/release_artifacts.mjs record [--artifacts-dir artifacts]
 //   node scripts/release_artifacts.mjs verify --qualification DIR [--artifacts-dir artifacts] [--npm-dir npm]
 //
-// `record`, after `zapi build-artifacts`, writes build.json beside the addons: each advertised zapi target's addon hash
-// and the toolchain that built them. `verify`, after `zapi prepublish`, fails unless the main package depends on
+// `record`, after RELEASE_BUILD's command, writes build.json beside the addons: the source commit, the build flags, each
+// advertised zapi target's addon hash and the toolchain that built them. It is the one build record; packing a target
+// projects it (packageBuildRecord). `verify`, after `zapi prepublish`, fails unless the main package depends on
 // exactly the advertised platform packages, and each is complete and holds the recorded addon, which DIR's
 // qualification-TARGET/qualification.json shows ran each lifecycle scenario exactly once and passed on its platform.
 import assert from "node:assert/strict";
@@ -12,10 +13,18 @@ import {readFile, readdir, realpath, writeFile} from "node:fs/promises";
 import {join, resolve} from "node:path";
 import {fileURLToPath, pathToFileURL} from "node:url";
 import {parseArgs} from "node:util";
+import {getZigTriple} from "@chainsafe/zapi";
 import {packageScenarios} from "../bindings/test/fixtures/network-package-scenarios.mjs";
 import {runBoundedCommand} from "./bounded_child.mjs";
 
 const ADDON = "bindings.node";
+/** The release build the workflow runs before `record`: zapi builds every advertised target with the default preset. */
+export const RELEASE_BUILD = {
+  command: "scripts/zig-cross.sh pnpm zapi build-artifacts --optimize ReleaseSafe",
+  instrumented: false,
+  optimize: "ReleaseSafe",
+  preset: "mainnet",
+};
 const LIFECYCLE_SCENARIOS = packageScenarios(true).map((scenario) => scenario.name);
 // ELF e_machine and Mach-O cputype of each target's addon.
 const MACHINES = {
@@ -85,9 +94,11 @@ export async function record(packageDir, artifactsDir) {
   }
   const osRelease = await readFile("/etc/os-release", "utf8").catch(() => "");
   const build = {
+    ...RELEASE_BUILD,
     sourceCommit: await sourceCommit(packageDir),
     targets,
     toolchain: {
+      arch: process.arch,
       assembler: await version("as", ["--version"]),
       cargo: await version("cargo", ["--version"]),
       cmake: await version("cmake", ["--version"]),
@@ -101,6 +112,22 @@ export async function record(packageDir, artifactsDir) {
   };
   await writeFile(join(artifactsDir, "build.json"), `${JSON.stringify(build, null, 2)}\n`);
   return build;
+}
+
+/** The record `scripts/lodestar_package.mjs pack` takes for TARGET's addon, projected from build.json. */
+export function packageBuildRecord(build, target) {
+  const addon = build.targets[target];
+  assert(addon !== undefined, `build.json records no ${target} addon`);
+  return {
+    buildCommand: build.command,
+    files: [{bytes: addon.bytes, path: `artifacts/${target}/${ADDON}`, sha256: addon.sha256}],
+    instrumented: build.instrumented,
+    optimize: build.optimize,
+    preset: build.preset,
+    sourceCommit: build.sourceCommit,
+    targetPolicy: `zapi ${target}: the default CPU and libc of Zig's ${getZigTriple(target)}`,
+    toolchain: build.toolchain,
+  };
 }
 
 /** Every reason the prepared packages must not be published. */
