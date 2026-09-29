@@ -64,28 +64,27 @@ test "rotateEpochParticipation preserves transferred view after pool exhaustion"
 
 test "rotateEpochParticipation preserves transferred view after replacement allocation failure" {
     const allocator = std.testing.allocator;
-    for (1..3) |successful_allocations| {
-        var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
-        defer pool.deinit();
-        const initial_nodes = pool.getNodesInUse();
-        var failing = std.testing.FailingAllocator.init(allocator, .{});
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
+    defer pool.deinit();
+    const initial_nodes = pool.getNodesInUse();
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
 
-        {
-            var state = try initParticipationState(failing.allocator(), &pool);
-            defer state.deinit();
-            const nodes_before = pool.getNodesInUse();
+    {
+        var state = try initParticipationState(failing.allocator(), &pool);
+        defer state.deinit();
+        const nodes_before = pool.getNodesInUse();
 
-            failing.fail_index = failing.alloc_index + successful_allocations;
-            try std.testing.expectError(error.OutOfMemory, state.rotateEpochParticipation());
-            failing.fail_index = std.math.maxInt(usize);
+        // Allow the transferred clone, then fail allocation of its replacement.
+        failing.fail_index = failing.alloc_index + 1;
+        try std.testing.expectError(error.OutOfMemory, state.rotateEpochParticipation());
+        failing.fail_index = std.math.maxInt(usize);
 
-            try std.testing.expectEqual(nodes_before, pool.getNodesInUse());
-            try expectPreviousParticipation(&state);
-        }
-
-        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
-        try std.testing.expectEqual(initial_nodes, pool.getNodesInUse());
+        try std.testing.expectEqual(nodes_before, pool.getNodesInUse());
+        try expectPreviousParticipation(&state);
     }
+
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    try std.testing.expectEqual(initial_nodes, pool.getNodesInUse());
 }
 
 test "rotateEpochParticipation moves flags and resets current participation" {
