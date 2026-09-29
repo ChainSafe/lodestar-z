@@ -18,6 +18,9 @@ const root = fileURLToPath(new URL("../../", import.meta.url));
 const record = JSON.parse(await readFile(new URL("../../scripts/lodestar_package_provenance.json", import.meta.url)));
 const fetched = (await checkProvenance(root, record)).summary.cargo === "resolved";
 
+const PLATFORMS = ".github/workflows/bindings-platforms.yml";
+const PUBLISH = ".github/workflows/publish-bindings.yml";
+
 function codes(result) {
   return result.errors.map((error) => error.code);
 }
@@ -165,7 +168,19 @@ test("record drift from the tree fails with the disagreeing fact", async () => {
     ["NpmIntegrity", (r) => Object.assign(r.npm.runtime[0], {integrity: "sha512-drift"})],
     ["NpmRuntimePins", (r) => Object.assign(r.npm.runtime[0], {version: "4.0.1"})],
     ["PlatformTargets", (r) => r.install.platform.targets.pop()],
-    ["ReleaseStep", (r) => r.install.platform.steps.push("pnpm zapi publish --dry-run")],
+    ["ReleaseStep", (r) => r.install.platform.workflows[PUBLISH].push("pnpm zapi publish --dry-run")],
+    // The legal files must be in place before verification and publishing.
+    [
+      "ReleaseStep",
+      (r) => {
+        const steps = r.install.platform.workflows[PUBLISH];
+        [steps[2], steps[3]] = [steps[3], steps[2]];
+      },
+    ],
+    [
+      "ReleaseBuild",
+      (r) => r.install.platform.workflows[PLATFORMS].splice(1, 1, "pnpm zapi build-artifacts --optimize ReleaseSafe"),
+    ],
     ["ReleaseRunner", (r) => Object.assign(r.install.platform, {runner: "ubuntu-latest"})],
     ["EmbeddedAddonPath", (r) => Object.assign(r.install.embedded, {addon: "zig-out/bindings.node"})],
     ["PackageLicenseFile", (r) => Object.assign(r.package, {licenseFile: "LICENSE"})],

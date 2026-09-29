@@ -7,6 +7,7 @@ import {isDeepStrictEqual} from "node:util";
 import {runBoundedCommand} from "./bounded_child.mjs";
 import {EMBEDDED_ADDON_PATH, LEGAL_FILES} from "./lodestar_package_archive.mjs";
 import {exists} from "./lodestar_package_io.mjs";
+import {RELEASE_BUILD} from "./release_artifacts.mjs";
 
 // Checks the dependency and install provenance record against the tree: Zig pins and their use, the npm runtime pins,
 // the two install paths and the notices file's sections. When zig-pkg holds the packages it also checks transitive Zig
@@ -340,7 +341,10 @@ export async function checkProvenance(root, record, {requireFetched = false} = {
 
   if (zon.minimum_zig_version !== record.zig.toolchain) report("ZigToolchain", zon.minimum_zig_version);
   const workflows = new Map();
-  for (const name of ["CI.yml", ...record.install.platform.workflows.map((path) => path.split("/").at(-1))]) {
+  for (const name of [
+    "CI.yml",
+    ...Object.keys(record.install.platform.workflows).map((path) => path.split("/").at(-1)),
+  ]) {
     const source = await readFile(join(root, ".github/workflows", name), "utf8");
     workflows.set(name, source);
     for (const [, version] of source.matchAll(/ZIG_VERSION: "([^"]+)"/g)) {
@@ -482,12 +486,20 @@ export async function checkProvenance(root, record, {requireFetched = false} = {
     report("PlatformTargets", JSON.stringify(packageJson.zapi?.targets));
   }
   if (EMBEDDED_ADDON_PATH !== record.install.embedded.addon) report("EmbeddedAddonPath", EMBEDDED_ADDON_PATH);
-  for (const path of record.install.platform.workflows) {
+  for (const [path, steps] of Object.entries(record.install.platform.workflows)) {
     const source = workflows.get(path.split("/").at(-1));
-    for (const step of record.install.platform.steps) {
-      if (!source.includes(step)) report("ReleaseStep", `${path}: ${step}`);
+    // Each step must follow the one before it: the release builds, qualifies, prepares, adds the legal files, verifies
+    // and only then publishes.
+    let from = 0;
+    for (const step of steps) {
+      const at = source.indexOf(step, from);
+      if (at === -1) report("ReleaseStep", `${path}: ${step}`);
+      else from = at + step.length;
     }
     if (!source.includes(`runs-on: ${record.install.platform.runner}`)) report("ReleaseRunner", path);
+  }
+  if (!Object.values(record.install.platform.workflows).flat().includes(RELEASE_BUILD.command)) {
+    report("ReleaseBuild", RELEASE_BUILD.command);
   }
   return {errors, summary};
 }

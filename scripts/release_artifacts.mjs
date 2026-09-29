@@ -5,8 +5,9 @@
 // `record`, after RELEASE_BUILD's command, writes build.json beside the addons: the source commit, the build flags, each
 // advertised zapi target's addon hash and the toolchain that built them. It is the one build record; packing a target
 // projects it (packageBuildRecord). `verify`, after `zapi prepublish`, fails unless the main package depends on
-// exactly the advertised platform packages, and each is complete and holds the recorded addon, which DIR's
-// qualification-TARGET/qualification.json shows ran each lifecycle scenario exactly once and passed on its platform.
+// exactly the advertised platform packages, and each is complete, ships the main package's legal files (added by
+// `scripts/lodestar_package.mjs notices`) and holds the recorded addon, which DIR's qualification-TARGET/qualification.json
+// shows ran each lifecycle scenario exactly once and passed on its platform.
 import assert from "node:assert/strict";
 import {createHash} from "node:crypto";
 import {readFile, readdir, realpath, writeFile} from "node:fs/promises";
@@ -16,6 +17,7 @@ import {parseArgs} from "node:util";
 import {getZigTriple} from "@chainsafe/zapi";
 import {packageScenarios} from "../bindings/test/fixtures/network-package-scenarios.mjs";
 import {runBoundedCommand} from "./bounded_child.mjs";
+import {LEGAL_FILES} from "./lodestar_package_archive.mjs";
 
 const ADDON = "bindings.node";
 /** The release build the workflow runs before `record`: zapi builds every advertised target with the default preset. */
@@ -157,6 +159,11 @@ export async function verify(packageDir, artifactsDir, npmDir, qualificationDir)
       platform.cpu?.join() === (arch === "aarch64" ? "arm64" : "x64") &&
       platform.libc?.join() === (abi === undefined ? undefined : abi === "gnu" ? "glibc" : "musl");
     if (!complete) problems.push(`${name} package.json is incomplete`);
+    for (const file of LEGAL_FILES) {
+      const copy = await readFile(join(npmDir, target, file)).catch(() => null);
+      if (!platform?.files?.includes(file) || !copy?.equals(await readFile(join(packageDir, file))))
+        problems.push(`${name} does not ship ${file}`);
+    }
     const addon = await readFile(join(npmDir, target, ADDON)).catch(() => null);
     if (addon === null || createHash("sha256").update(addon).digest("hex") !== expected)
       problems.push(`${name} does not hold the recorded addon`);
