@@ -444,6 +444,7 @@ export async function checkProvenance(root, record, {requireFetched = false} = {
       const text = base == null ? null : await readOptional(join(base, notice.file.path));
       if (text === null) {
         summary.notices.sourceUnavailable.push(notice.id);
+        if (requireFetched) report("NoticeSourceUnavailable", notice.id);
         continue;
       }
       if (!body.includes(normalizeText(text))) report("NoticeText", `${notice.id}: ${notice.file.path}`);
