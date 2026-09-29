@@ -1,22 +1,21 @@
 import {expect, test} from "vitest";
-import {applicationConfig, capacity, localIntent, requestForks, settleOnly} from "./utils/network.js";
+import {
+  applicationConfig,
+  capacity,
+  childTestTimeout,
+  localIntent,
+  requestForks,
+  runChild,
+  settleOnly,
+} from "./utils/network.js";
 import {BLOCKS} from "./utils/network-incoming.js";
 import {startPeer} from "./utils/network-peer.js";
 
-test.each([
-  "exit",
-  "facade-gc",
-  "object-gc",
-  "ready-gc",
-  "late-retire",
-  "held-ack",
-  "held-closed",
-  "notifier",
-])("incoming lifecycle subprocess %s", async (mode) => {
-  const {execFileSync} = await import("node:child_process");
-  const output = execFileSync(
-    process.execPath,
-    [
+test.each(["exit", "facade-gc", "object-gc", "ready-gc", "late-retire", "held-ack", "held-closed", "notifier"])(
+  "incoming lifecycle subprocess %s",
+  childTestTimeout(),
+  (mode) => {
+    const output = runChild([
       "--import",
       "tsx",
       "--expose-gc",
@@ -24,11 +23,10 @@ test.each([
       "tsx",
       "bindings/test/fixtures/network-incoming-lifecycle.mjs",
       mode,
-    ],
-    {encoding: "utf8", timeout: 20000}
-  );
-  expect(output).toContain(`incoming-lifecycle ${mode} ok`);
-}, 25000);
+    ]);
+    expect(output).toContain(`incoming-lifecycle ${mode} ok`);
+  }
+);
 
 interface IncomingHandle {
   index: number;

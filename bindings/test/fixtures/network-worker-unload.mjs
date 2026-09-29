@@ -5,7 +5,11 @@ import {isMainThread, Worker} from "node:worker_threads";
 // ends before its thread exits.
 if (isMainThread) {
   const codes = [];
-  for (let i = 0; i < 3; i++) codes.push((await once(new Worker(new URL(import.meta.url)), "exit"))[0]);
+  for (let i = 0; i < 3; i++) {
+    console.error("phase worker", i);
+    codes.push((await once(new Worker(new URL(import.meta.url)), "exit"))[0]);
+  }
+  console.error("phase exit");
   console.log(`workers-exited ${codes.join(",")}`);
 } else {
   const {applicationConfig, startRuntime} = await import("../utils/network.js");

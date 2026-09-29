@@ -1,4 +1,3 @@
-import {execFileSync} from "node:child_process";
 import {createSocket} from "node:dgram";
 import {once} from "node:events";
 import {setTimeout as delay} from "node:timers/promises";
@@ -7,10 +6,12 @@ import {peerIdFromPublicKey} from "@libp2p/peer-id";
 import {expect, test} from "vitest";
 import {
   applicationConfig,
+  childTestTimeout,
   configureChain,
   discoveryConfig,
   exchange,
   localIntent,
+  runChild,
   settleOnly,
   startRuntime,
   subscriptions,
@@ -503,22 +504,18 @@ test("all typed stores and the connect allowance reject without partial admissio
   }
 });
 
-test.each(["gc", "exit"])("application lifecycle subprocess %s", (mode) => {
-  const output = execFileSync(
-    process.execPath,
-    [
-      "--import",
-      "tsx",
-      "--expose-gc",
-      "--import",
-      "tsx",
-      "bindings/test/fixtures/network-application-lifecycle.mjs",
-      mode,
-    ],
-    {encoding: "utf8", timeout: 15000}
-  );
+test.each(["gc", "exit"])("application lifecycle subprocess %s", childTestTimeout(), (mode) => {
+  const output = runChild([
+    "--import",
+    "tsx",
+    "--expose-gc",
+    "--import",
+    "tsx",
+    "bindings/test/fixtures/network-application-lifecycle.mjs",
+    mode,
+  ]);
   expect(output).toContain(mode === "exit" ? "application-ready-exit" : "application-command-settled NetworkClosed");
-}, 20000);
+});
 
 test("identity reads the current signed ENR and copied intent ignores later input mutation", async () => {
   const config = applicationConfig();

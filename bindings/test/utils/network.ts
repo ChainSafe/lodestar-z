@@ -1,3 +1,4 @@
+import {type SpawnSyncReturns, spawnSync} from "node:child_process";
 import {publicKeyFromProtobuf} from "@libp2p/crypto/keys";
 import {peerIdFromPublicKey} from "@libp2p/peer-id";
 import {testChain} from "../../../test/interop/network_chain.mjs";
@@ -430,4 +431,60 @@ export class Settlements {
   private unsettled(started: number): number[] {
     return this.counts.slice(0, started).flatMap((count, index) => (count === 0 ? [index] : []));
   }
+}
+
+/**
+ * The watchdog on each child process a test runs. The children check teardown, not speed, so the bound leaves room
+ * for a loaded machine.
+ */
+export const CHILD_TIMEOUT_MS = 30_000;
+/** How much of each output stream a failed child's error keeps, from the end. */
+const CHILD_OUTPUT_TAIL = 4096;
+
+/** The options of a test that runs `children` children one after another, with `marginMs` for its own work. */
+export function childTestTimeout(children = 1, marginMs = 5000): {timeout: number} {
+  return {timeout: children * CHILD_TIMEOUT_MS + marginMs};
+}
+
+/**
+ * Runs Node with `args` and returns how it exited. A child still running at `CHILD_TIMEOUT_MS` gets SIGKILL, because
+ * this synchronous wait also holds off Vitest's own timeout. A timeout or a failed spawn throws with the end of the
+ * child's output and the last `phase` line it wrote to stderr.
+ */
+export function spawnChild(args: readonly string[], env?: NodeJS.ProcessEnv): SpawnSyncReturns<string> {
+  const child = spawnSync(process.execPath, args, {
+    encoding: "utf8",
+    env,
+    killSignal: "SIGKILL",
+    timeout: CHILD_TIMEOUT_MS,
+  });
+  if (child.error) {
+    const timedOut = (child.error as NodeJS.ErrnoException).code === "ETIMEDOUT";
+    throw Error(childFailure(args, child, timedOut ? `timed out after ${CHILD_TIMEOUT_MS} ms` : String(child.error)));
+  }
+  return child;
+}
+
+/** Runs Node with `args` under the same watchdog and returns its stdout. Throws unless it exits 0. */
+export function runChild(args: readonly string[]): string {
+  const child = spawnChild(args);
+  if (child.status !== 0)
+    throw Error(
+      childFailure(args, child, child.signal ? `was killed by ${child.signal}` : `exited with status ${child.status}`)
+    );
+  return child.stdout;
+}
+
+function childFailure(args: readonly string[], child: SpawnSyncReturns<string>, outcome: string): string {
+  const tail = (output: string | null) =>
+    !output ? "(none)" : output.length > CHILD_OUTPUT_TAIL ? `...${output.slice(-CHILD_OUTPUT_TAIL)}` : output;
+  const phase = [...(child.stderr ?? "").matchAll(/^phase (.*)$/gm)].at(-1)?.[1];
+  return [
+    `child ${outcome}: node ${args.join(" ")}`,
+    ...(phase === undefined ? [] : [`last phase: ${phase}`]),
+    `stdout (last ${CHILD_OUTPUT_TAIL} characters):`,
+    tail(child.stdout),
+    `stderr (last ${CHILD_OUTPUT_TAIL} characters):`,
+    tail(child.stderr),
+  ].join("\n");
 }

@@ -1,4 +1,3 @@
-import {execFileSync} from "node:child_process";
 import {setTimeout as delay} from "node:timers/promises";
 import {expect, test, vi} from "vitest";
 import type {
@@ -14,8 +13,10 @@ import {createNativeNetwork} from "../src/network.js";
 import {runtimeOf} from "../src/network-runtime.js";
 import {
   applicationConfig,
+  childTestTimeout,
   gossipAll,
   localIntent,
+  runChild,
   subscriptions,
   topicKinds,
   topicName,
@@ -453,15 +454,7 @@ test.each([
   ["a job's report retained elsewhere", "facade-gc"],
   ["a report reaction that captures the host", "facade-gc-reaction"],
   ["promises only derived from a report", "facade-gc-derived"],
-])(
-  "drops the facade and host without close, with %s",
-  (_, mode) => {
-    const output = execFileSync(
-      process.execPath,
-      ["--import", "tsx", "--expose-gc", "bindings/test/fixtures/network-lifecycle.mjs", mode],
-      {encoding: "utf8", timeout: 20000}
-    );
-    expect(output).toContain("facade-collected");
-  },
-  25000
-);
+])("drops the facade and host without close, with %s", childTestTimeout(), (_, mode) => {
+  const output = runChild(["--import", "tsx", "--expose-gc", "bindings/test/fixtures/network-lifecycle.mjs", mode]);
+  expect(output).toContain("facade-collected");
+});
