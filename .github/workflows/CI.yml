@@ -572,9 +572,10 @@ jobs:
         with:
           version: ${{ env.ZIG_VERSION }}
           cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
       - name: Install dependencies
-        run: |
-          pnpm install
+        run: pnpm install --frozen-lockfile --ignore-scripts
       - name: Run bindings formatter
         run: |
           pnpm biome ci
@@ -584,7 +585,7 @@ jobs:
           node scripts/line_budget.mjs check
       - name: Build bindings
         run: |
-          zig build build-lib:bindings -Doptimize=ReleaseSafe
+          scripts/zig-cross.sh zig build build-lib:bindings -Doptimize=ReleaseSafe
           # The kernel's view of the runner's CPU names the gossip SHA-256 backend the addon must select.
           expected=zig_std
           if grep -qw sha_ni /proc/cpuinfo && grep -qw avx2 /proc/cpuinfo; then expected=x86_sha_avx2; fi
