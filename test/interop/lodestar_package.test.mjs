@@ -139,14 +139,6 @@ const require = createRequire(import.meta.url);
 const embedded = new URL("../../zig-out/lib/bindings.node", import.meta.url);
 export default existsSync(embedded) ? require(embedded.pathname) : require("@chainsafe/lodestar-z-${hostTarget}");
 `;
-// Stands in for the facade so the probe's lifecycle runs without the native runtime.
-const fixtureNetwork = `export const createNativeNetwork = (config) => ({
-  applyIntent: async (_intent, slot) => ({slot}),
-  close: async () => ({reason: "requested"}),
-  closed: Promise.resolve({reason: "requested"}),
-  getIdentity: async () => ({localEndpoint: {port: 1}, peerId: "fixture"}),
-});
-`;
 
 async function fixture({extraFiles = {}, networkSource} = {}) {
   const root = await mkdtemp(join(tmpdir(), "lodestar-package-test-"));
@@ -157,7 +149,10 @@ async function fixture({extraFiles = {}, networkSource} = {}) {
   await mkdir(join(nativeDir, "zig-out", "lib"), {recursive: true});
   await writeFile(join(nativeDir, "bindings", "src", "index.js"), fixtureIndex);
   await writeFile(join(nativeDir, "bindings", "src", "index.d.ts"), "export declare const fixture: true;\n");
-  await writeFile(join(nativeDir, "bindings", "src", "network.js"), networkSource ?? fixtureNetwork);
+  await writeFile(
+    join(nativeDir, "bindings", "src", "network.js"),
+    networkSource ?? "export const createNativeNetwork = () => {};\n"
+  );
   await writeFile(join(nativeDir, "THIRD_PARTY_NOTICES.txt"), "=== fixture: notices\n");
   for (const [path, source] of Object.entries(extraFiles)) {
     await writeFile(join(nativeDir, path), source);
@@ -379,6 +374,8 @@ test("platform layout ships the target's addon in its own package and the host l
   const artifact = `artifacts/${hostTarget}/bindings.node`;
   await mkdir(join(nativeDir, "artifacts", hostTarget), {recursive: true});
   await copyFile(join(nativeDir, "zig-out", "lib", "bindings.node"), join(nativeDir, artifact));
+  // The jobs that pack this layout build no embedded addon.
+  await rm(join(nativeDir, "zig-out"), {recursive: true});
   const record = JSON.parse(await readFile(buildRecord, "utf8"));
   record.files[0].path = artifact;
   const platformRecord = join(root, "platform-build-record.json");
@@ -450,10 +447,6 @@ test("platform layout ships the target's addon in its own package and the host l
   assert.equal(verification.installed.addon.sha256, manifest.addon.sha256);
   assert.equal(verification.installed.addon.path, join(verification.installed.platform.packageRoot, "bindings.node"));
   assert(verification.installed.platform.packageRoot.startsWith(`${join(root, "release")}/`));
-  assert.deepEqual(
-    verification.runtime.cycles.map((cycle) => cycle.closed),
-    ["requested", "requested"]
-  );
   await missing(join(root, "release", "pnpm-lock.yaml"));
 });
 

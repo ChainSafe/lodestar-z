@@ -1,4 +1,4 @@
-// Runs, from the root of a consumer that installed the packed main and platform packages, the load probe and, with
+// Runs, from the root of a consumer that installed the packed packages, the load probe and, with
 // --lifecycle, the lifecycle and worker fixtures, as network-package-scenarios.mjs lists them, each in its own bounded
 // process, and records the addon, runtime and results in qualification.json. LODESTAR_Z_TIMEOUT_SCALE stretches each
 // process's deadline for emulated targets.

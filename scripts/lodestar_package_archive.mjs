@@ -45,6 +45,7 @@ export const LEGAL_FILES = ["THIRD_PARTY_NOTICES.txt"];
 export const EMBEDDED_ADDON_PATH = "zig-out/lib/bindings.node";
 export const PLATFORM_ADDON_FILE = "bindings.node";
 const PLATFORM_ADDON_PATTERN = /^artifacts\/([a-z0-9_-]+)\/bindings\.node$/;
+const HOST_TARGET = zapiNamespace.getTarget(process.platform, process.arch);
 
 /**
  * Where a build put the addon selects the package layout: a local zig-out build embeds it in the package, and a zapi
@@ -375,7 +376,9 @@ export async function inspectPlatformArchive(archive, expectedAddon, target, mai
       if (original === undefined || copy.sha256 !== original.sha256) fail("PlatformLegalFileMismatch", path);
     }
     assertAddon(files, PLATFORM_ADDON_FILE, expectedAddon);
-    const native = await inspectNativeExports(join(packageRoot, PLATFORM_ADDON_FILE), runCommand);
+    // Another target's addon cannot load here; the load probe checks its exports on its own platform.
+    const native =
+      target === HOST_TARGET ? await inspectNativeExports(join(packageRoot, PLATFORM_ADDON_FILE), runCommand) : null;
     return {files, name: expectedName, native, packageJson, target};
   });
 }
@@ -426,7 +429,8 @@ export async function verifyArchiveSources(nativeDir, archivedFiles, packageJson
   return before;
 }
 
-export async function collectPackSources(nativeDir, packageJson) {
+/** The files packing takes from `nativeDir`; the platform layout takes no embedded addon, built or not. */
+export async function collectPackSources(nativeDir, packageJson, layout) {
   if (!Array.isArray(packageJson.files) || packageJson.files.length > MAX_FILES) fail("InvalidPackageFiles");
   const selected = new Set(["package.json"]);
   for (const entry of packageJson.files) {
@@ -435,6 +439,7 @@ export async function collectPackSources(nativeDir, packageJson) {
     if (normalized === "" || isAbsolute(normalized) || normalized.split("/").includes("..")) {
       fail("InvalidPackageFiles", entry);
     }
+    if (layout === "platform" && `${EMBEDDED_ADDON_PATH}/`.startsWith(`${normalized}/`)) continue;
     const path = join(nativeDir, normalized);
     const info = await lstat(path).catch((error) => (error.code === "ENOENT" ? null : Promise.reject(error)));
     if (info === null) fail("PackageFileMissing", normalized);
