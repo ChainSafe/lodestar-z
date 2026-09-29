@@ -170,11 +170,6 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
             try self.chunks.set(index, value);
         }
 
-        pub fn getAllReadonly(self: *Self, allocator: Allocator) ![]Element {
-            const list_length = try self.length();
-            return self.chunks.getAllReadonly(allocator, list_length);
-        }
-
         pub fn getAllReadonlyValues(self: *Self, allocator: Allocator) ![]ST.Element.Type {
             const list_length = try self.length();
             return self.chunks.getAllValues(allocator, list_length);
@@ -233,17 +228,6 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
                     ),
                     .elem_index = start_index,
                 };
-            }
-
-            pub fn next(self: *ReadonlyIterator) !Element {
-                const node = try self.depth_iterator.next();
-                const child_view = try ST.Element.TreeView.init(
-                    self.tree_view.allocator,
-                    self.tree_view.chunks.state.pool,
-                    node,
-                );
-                self.elem_index += 1;
-                return child_view;
             }
 
             /// Get the hash tree root of the next element without constructing a TreeView.
