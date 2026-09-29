@@ -1,12 +1,12 @@
 // Run from a consumer that installed the packed main and platform packages: the addon loads from the platform
 // package built for this process's platform, and ordinary exports work on the main thread around a worker's load and
-// unload.
+// unload. `--worker-exit=CODE` has the first worker exit with CODE after its checks pass, which must fail the probe.
 import assert from "node:assert/strict";
 import {existsSync, readFileSync, realpathSync} from "node:fs";
 import {createRequire} from "node:module";
 import {dirname, join, relative} from "node:path";
 import {fileURLToPath} from "node:url";
-import {isMainThread, parentPort, Worker} from "node:worker_threads";
+import {isMainThread, parentPort, Worker, workerData} from "node:worker_threads";
 import {SecretKey, verify} from "@chainsafe/lodestar-z/blst";
 import {innerShuffleList} from "@chainsafe/lodestar-z/shuffle";
 
@@ -19,10 +19,33 @@ function ordinaryExports() {
   assert.deepEqual(list, Uint32Array.of(6, 2, 3, 5, 1, 7, 8, 0, 4));
 }
 
+/** Runs a worker to its exit; its checks pass only if it reported "ok" alone, raised nothing and exited with 0. */
+function runWorker(exitCode) {
+  return new Promise((resolve, reject) => {
+    const messages = [];
+    let failure;
+    const worker = new Worker(new URL(import.meta.url), {workerData: {exitCode}});
+    worker.on("message", (message) => messages.push(message));
+    worker.once("error", (error) => {
+      failure = error;
+    });
+    worker.once("exit", (code) => {
+      if (failure) reject(failure);
+      else if (code !== 0) reject(Error(`Worker exited with code ${code}`));
+      else if (messages.length !== 1 || messages[0] !== "ok") reject(Error(`Worker reported ${messages}`));
+      else resolve();
+    });
+  });
+}
+
 if (!isMainThread) {
   ordinaryExports();
   parentPort.postMessage("ok");
+  if (workerData.exitCode !== 0) process.exit(workerData.exitCode);
 } else {
+  const exitArgument = process.argv.find((arg) => arg.startsWith("--worker-exit="));
+  const firstExitCode = exitArgument === undefined ? 0 : Number(exitArgument.slice("--worker-exit=".length));
+  assert(Number.isInteger(firstExitCode) && firstExitCode >= 0 && firstExitCode < 256, "invalid --worker-exit");
   const root = process.cwd();
   const consumer = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   const main = "@chainsafe/lodestar-z";
@@ -51,12 +74,7 @@ if (!isMainThread) {
 
   ordinaryExports();
   for (let i = 0; i < 2; i++) {
-    const worker = new Worker(new URL(import.meta.url));
-    const [message] = await Promise.all([
-      new Promise((resolve, reject) => worker.once("message", resolve).once("error", reject)),
-      new Promise((resolve) => worker.once("exit", resolve)),
-    ]);
-    assert.equal(message, "ok");
+    await runWorker(i === 0 ? firstExitCode : 0);
     ordinaryExports();
   }
   console.log(
