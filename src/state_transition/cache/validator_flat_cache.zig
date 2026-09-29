@@ -139,6 +139,7 @@ pub const ValidatorFlatCache = struct {
         try self.diff(try old.getRight(self.pool), try new.getRight(self.pool), depth - 1, base + half, new_len);
     }
 
+    /// Patches the cache at index `i` with validator values from the tree at `leaf`.
     fn patch(self: *ValidatorFlatCache, i: usize, leaf: Node.Id) !void {
         const v = try Validator.tree.getValuePtr(leaf, self.pool);
         self.activation_eligibility_epoch.items[i] = v.activation_eligibility_epoch;
