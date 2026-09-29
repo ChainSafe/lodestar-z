@@ -165,6 +165,7 @@ test("record drift from the tree fails with the disagreeing fact", async () => {
         ),
     ],
     ["ZigToolchain", (r) => Object.assign(r.zig, {toolchain: "0.15.2"})],
+    ["RustToolchain", (r) => Object.assign(r.rust, {toolchain: "1.90.0"})],
     ["NpmIntegrity", (r) => Object.assign(r.npm.runtime[0], {integrity: "sha512-drift"})],
     ["NpmRuntimePins", (r) => Object.assign(r.npm.runtime[0], {version: "4.0.1"})],
     ["PlatformTargets", (r) => r.install.platform.targets.pop()],
@@ -269,6 +270,15 @@ test("fetched packages verify transitive pins, the resolved crate closure and re
       (r) => Object.assign(r.zig.dependencies.find((d) => d.name === "snappy").dependencies[0], {url: "x"}),
     ],
     ["ZigPackageFiles", (r) => r.zig.dependencies.find((d) => d.name === "blst").files.pop()],
+    ["RustInstalled", (r) => Object.assign(r.rust, {toolchain: "1.90.0"})],
+    [
+      "RustLibraryCrate",
+      (r) =>
+        Object.assign(
+          r.runtime.find((entry) => entry.id === "rust-std/object@0.37.3"),
+          {id: "rust-std/object@0.37.2"}
+        ),
+    ],
   ];
   for (const [code, mutate] of cases) assert((await drifted(mutate, {requireFetched: true})).includes(code), code);
   const directory = await mkdtemp(join(tmpdir(), "lodestar-notices-"));

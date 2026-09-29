@@ -9,10 +9,10 @@ import {EMBEDDED_ADDON_PATH, LEGAL_FILES} from "./lodestar_package_archive.mjs";
 import {exists} from "./lodestar_package_io.mjs";
 import {RELEASE_BUILD} from "./release_artifacts.mjs";
 
-// Checks the dependency and install provenance record against the tree: Zig pins and their use, the npm runtime pins,
-// the two install paths and the notices file's sections. When zig-pkg holds the packages it also checks transitive Zig
-// pins, cargo's offline resolution of the quiche lockfile and the license texts the notices must reproduce. Needs no
-// build and no network.
+// Checks the dependency and install provenance record against the tree: Zig pins and their use, the Rust pin, the npm
+// runtime pins, the two install paths and the notices file's sections. When zig-pkg holds the packages it also checks
+// transitive Zig pins, cargo's offline resolution of the quiche lockfile, the pinned Rust's standard library crates and
+// the license texts the notices must reproduce. Needs no build and no network.
 
 const RECORD = "scripts/lodestar_package_provenance.json";
 const MAX_ZON_TOKENS = 64 * 1024;
@@ -340,6 +340,8 @@ export async function checkProvenance(root, record, {requireFetched = false} = {
   if (licenseFile !== record.package.licenseFile) report("PackageLicenseFile", String(licenseFile));
 
   if (zon.minimum_zig_version !== record.zig.toolchain) report("ZigToolchain", zon.minimum_zig_version);
+  const rustToolchain = /^channel = "([^"]+)"$/m.exec(await readFile(join(root, "rust-toolchain.toml"), "utf8"))?.[1];
+  if (rustToolchain !== record.rust.toolchain) report("RustToolchain", String(rustToolchain));
   const workflows = new Map();
   for (const name of [
     "CI.yml",
@@ -453,7 +455,22 @@ export async function checkProvenance(root, record, {requireFetched = false} = {
     if (roots !== null) {
       const zig = await command("zig", ["version"], root);
       if (zig.stdout !== undefined && zig.stdout.trim() !== record.zig.toolchain) report("ZigInstalled", zig.stdout);
+      // rustup selects the pinned toolchain here, so the Rust sources compared above are that toolchain's.
       summary.rustc = (await command("rustc", ["--version"], root)).stdout?.trim() ?? null;
+      if (!summary.rustc?.startsWith(`rustc ${record.rust.toolchain} `)) report("RustInstalled", String(summary.rustc));
+      const library = roots["rust-library"];
+      const libraryLock = library === null ? null : await readOptional(join(library, "Cargo.lock"));
+      if (libraryLock !== null) {
+        const crates = new Set(
+          [...libraryLock.matchAll(/^name = "([^"]+)"\nversion = "([^"]+)"$/gm)].map(
+            ([, name, version]) => `${name}@${version}`
+          )
+        );
+        for (const {id} of record.runtime) {
+          const crate = /^rust-std\/(.+@.+)$/.exec(id)?.[1];
+          if (crate !== undefined && !crates.has(crate)) report("RustLibraryCrate", id);
+        }
+      }
     }
   }
 
