@@ -1,57 +1,16 @@
 // Runs, from the root of a consumer that installed the packed main and platform packages, the load probe and, with
-// --lifecycle, the lifecycle and worker fixtures, each in its own bounded process, and records the addon, runtime and
-// results in qualification.json. LODESTAR_Z_TIMEOUT_SCALE stretches each process's deadline for emulated targets.
+// --lifecycle, the lifecycle and worker fixtures, as network-package-scenarios.mjs lists them, each in its own bounded
+// process, and records the addon, runtime and results in qualification.json. LODESTAR_Z_TIMEOUT_SCALE stretches each
+// process's deadline for emulated targets.
 import {writeFile} from "node:fs/promises";
 import {runBoundedCommand} from "../../../scripts/bounded_child.mjs";
+import {packageScenarios} from "./network-package-scenarios.mjs";
 
 const lifecycle = process.argv.includes("--lifecycle");
 const scale = Number(process.env.LODESTAR_Z_TIMEOUT_SCALE ?? "1");
 if (!Number.isInteger(scale) || scale < 1 || scale > 20) throw Error("LODESTAR_Z_TIMEOUT_SCALE must be 1..20");
 
-const fixture = (name) => `bindings/test/fixtures/${name}`;
-const lifecycleFixture = (mode, expected) => ({
-  args: ["--import", "tsx", "--expose-gc", fixture("network-lifecycle.mjs"), mode],
-  expected,
-  name: mode,
-});
-const probe = fixture("network-package-probe.mjs");
-const scenarios = [
-  {args: [probe], expected: '"loaded":true', name: "load"},
-  // The probe must fail when a worker passes its checks but exits nonzero.
-  {args: [probe, "--worker-exit=7"], name: "worker exit code", rejected: "Worker exited with code 7"},
-  ...(lifecycle
-    ? [
-        {
-          args: ["--import", "tsx", fixture("network-worker-unload.mjs")],
-          expected: "workers-exited 0,0,0",
-          name: "worker-only loads",
-        },
-        {
-          args: ["--import", "tsx", fixture("network-worker-settlement.mjs")],
-          expected: "worker-settlement-released",
-          name: "worker termination with publications",
-        },
-        {
-          args: ["--import", "tsx", fixture("network-worker-resources.mjs")],
-          expected: "live-worker-resources-released",
-          name: "worker termination with requests and incoming",
-        },
-        lifecycleFixture("incoming-exit", "served-exit"),
-        lifecycleFixture("promises", "promises-settled"),
-        lifecycleFixture("saturated-close", "saturated-closed"),
-        lifecycleFixture("gc", "gc-rebound"),
-        lifecycleFixture("facade-gc", "facade-collected"),
-        lifecycleFixture("await-close", "close-awaited"),
-        {
-          args: ["--import", "tsx", fixture("network-shutdown-retry.mjs")],
-          // Close settles, or the third failed exchange aborts through native `fail`; exiting with neither fails.
-          escalation: "native network bridge failed_turns: exchange failed",
-          expected: "closed",
-          name: "shutdown failure",
-        },
-      ]
-    : []),
-];
+const scenarios = packageScenarios(lifecycle);
 
 const results = [];
 let probed = null;
@@ -85,8 +44,7 @@ for (const scenario of scenarios) {
     record.exitCode !== 0 &&
     record.stderr.includes(scenario.rejected);
   const passed = completed || escalated || rejected;
-  if (completed && scenario.args.length === 1 && scenario.args[0] === probe)
-    probed = JSON.parse(record.stdout.trim().split("\n").at(-1));
+  if (completed && scenario.name === "load") probed = JSON.parse(record.stdout.trim().split("\n").at(-1));
   const result = {ms: Date.now() - started, name: scenario.name, passed, ...(escalated ? {escalated} : {})};
   if (!passed) {
     Object.assign(result, {
