@@ -54,7 +54,7 @@ const inline_test_allowlist = [_][]const u8{
     "src/network/gossipsub/outbox.zig",
     // Private mesh selection helper: Overlay.shuffle.
     "src/network/gossipsub/overlay.zig",
-    // Private CPU probe and accelerated-hash seams: x86ShaAvx2, hash.
+    // Private CPU probe and accelerated-hash seams: x86ShaAvx2, aarch64Sha2, hash.
     "src/network/gossipsub/sha256.zig",
     // Private score counters: PeerScore.load, PeerScore.store.
     "src/network/gossipsub/score.zig",

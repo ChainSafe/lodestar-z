@@ -7,7 +7,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
-pub const Backend = enum(u8) { zig_std, x86_sha_avx2 };
+pub const Backend = enum(u8) { zig_std, x86_sha_avx2, aarch64_sha2 };
 
 const Accelerated = fn (
     prefix: [*]const u8,
@@ -26,6 +26,7 @@ else
 
 const accelerated_backend: Backend = switch (builtin.cpu.arch) {
     .x86_64 => .x86_sha_avx2,
+    .aarch64 => .aarch64_sha2,
     else => .zig_std,
 };
 
@@ -76,6 +77,7 @@ fn hash(
 fn supported(probe: anytype) bool {
     return switch (builtin.cpu.arch) {
         .x86_64 => x86ShaAvx2(probe),
+        .aarch64 => aarch64Sha2(probe),
         else => false,
     };
 }
@@ -100,7 +102,34 @@ fn x86ShaAvx2(probe: anytype) bool {
     return probe.xgetbv() & xcr0_xmm_ymm == xcr0_xmm_ymm;
 }
 
+/// Linux AT_HWCAP: FP, ASIMD (NEON), SHA1 and SHA2, the instructions `sha2` enables.
+const hwcap_required: usize = 1 << 0 | 1 << 1 | 1 << 5 | 1 << 6;
+
+/// Whether the kernel reports the instructions `sha256_accelerated.zig` enables beyond the baseline
+/// aarch64 CPU. A failed or unavailable query reports none.
+fn aarch64Sha2(probe: anytype) bool {
+    return switch (builtin.os.tag) {
+        .linux => probe.hwcap() & hwcap_required == hwcap_required,
+        .macos => probe.sysctlFlag("hw.optional.arm.FEAT_SHA1") and probe.sysctlFlag("hw.optional.arm.FEAT_SHA256"),
+        else => false,
+    };
+}
+
 const Hardware = struct {
+    fn hwcap(_: Hardware) usize {
+        // std.os.linux reads the auxiliary vector Zig's own startup code saves, which a program
+        // started by libc, and a shared library such as the addon, never has.
+        if (builtin.link_libc) return @intCast(std.c.getauxval(std.elf.AT_HWCAP));
+        return std.os.linux.getauxval(std.elf.AT_HWCAP);
+    }
+
+    fn sysctlFlag(_: Hardware, name: [*:0]const u8) bool {
+        var value: c_int = 0;
+        var len: usize = @sizeOf(c_int);
+        if (std.c.sysctlbyname(name, &value, &len, null, 0) != 0) return false;
+        return len == @sizeOf(c_int) and value == 1;
+    }
+
     fn cpuid(_: Hardware, leaf: u32) Cpuid {
         var eax: u32 = undefined;
         var ebx: u32 = undefined;
@@ -157,7 +186,25 @@ const FakeCpu = struct {
     }
 };
 
-/// Real CPUID and XCR0 with SHA hidden, as on a CPU that lacks it.
+/// An AT_HWCAP value and sysctl answers, for the aarch64 detector.
+const FakeArm = struct {
+    hwcap_value: usize = hwcap_required,
+    sha1: bool = true,
+    sha256: bool = true,
+
+    fn hwcap(self: FakeArm) usize {
+        return self.hwcap_value;
+    }
+
+    fn sysctlFlag(self: FakeArm, name: [*:0]const u8) bool {
+        const flag = std.mem.span(name);
+        if (std.mem.eql(u8, flag, "hw.optional.arm.FEAT_SHA1")) return self.sha1;
+        if (std.mem.eql(u8, flag, "hw.optional.arm.FEAT_SHA256")) return self.sha256;
+        unreachable;
+    }
+};
+
+/// The running CPU with SHA-256 hidden, as on a CPU that lacks it.
 const WithoutSha = struct {
     fn cpuid(_: WithoutSha, leaf: u32) Cpuid {
         var registers = (Hardware{}).cpuid(leaf);
@@ -167,6 +214,14 @@ const WithoutSha = struct {
 
     fn xgetbv(_: WithoutSha) u64 {
         return (Hardware{}).xgetbv();
+    }
+
+    fn hwcap(_: WithoutSha) usize {
+        return (Hardware{}).hwcap() & ~@as(usize, 1 << 6);
+    }
+
+    fn sysctlFlag(_: WithoutSha, name: [*:0]const u8) bool {
+        return !std.mem.eql(u8, std.mem.span(name), "hw.optional.arm.FEAT_SHA256") and (Hardware{}).sysctlFlag(name);
     }
 };
 
@@ -222,6 +277,32 @@ test "gossip sha256 detector refuses each missing capability before XGETBV" {
         const hashed = hash(&fakeAccelerated, detected, "prefix", "topic", "payload");
         try testing.expectEqual(@as(u32, @intFromBool(case.supported)), fake_accelerated_calls);
         if (!case.supported) try testing.expectEqual(software, hashed);
+    }
+}
+
+test "gossip sha256 aarch64 detector requires every reported instruction" {
+    const Case = struct { name: []const u8, arm: FakeArm, supported: bool };
+    const linux = [_]Case{
+        .{ .name = "all features", .arm = .{}, .supported = true },
+        .{ .name = "no AT_HWCAP", .arm = .{ .hwcap_value = 0 }, .supported = false },
+        .{ .name = "no FP", .arm = .{ .hwcap_value = hwcap_required & ~@as(usize, 1 << 0) }, .supported = false },
+        .{ .name = "no ASIMD", .arm = .{ .hwcap_value = hwcap_required & ~@as(usize, 1 << 1) }, .supported = false },
+        .{ .name = "no SHA1", .arm = .{ .hwcap_value = hwcap_required & ~@as(usize, 1 << 5) }, .supported = false },
+        .{ .name = "no SHA2", .arm = .{ .hwcap_value = hwcap_required & ~@as(usize, 1 << 6) }, .supported = false },
+    };
+    const macos = [_]Case{
+        .{ .name = "all features", .arm = .{}, .supported = true },
+        .{ .name = "no FEAT_SHA1", .arm = .{ .sha1 = false }, .supported = false },
+        .{ .name = "no FEAT_SHA256", .arm = .{ .sha256 = false }, .supported = false },
+    };
+    const cases: []const Case = switch (builtin.os.tag) {
+        .linux => &linux,
+        .macos => &macos,
+        else => &.{},
+    };
+    for (cases) |case| {
+        errdefer std.debug.print("case: {s}\n", .{case.name});
+        try testing.expectEqual(case.supported, aarch64Sha2(case.arm));
     }
 }
 

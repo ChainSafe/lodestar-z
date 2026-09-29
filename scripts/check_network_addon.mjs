@@ -11,7 +11,7 @@ export function inspectNetworkAddon(path) {
   const actual = names.filter((name) => /^networkTest/i.test(name));
   assert.deepEqual(actual, [], "unexpected native network test exports");
   const gossipSha256Backend = addon.NativeNetworkRuntime.gossipSha256Backend();
-  assert(["zig_std", "x86_sha_avx2"].includes(gossipSha256Backend), "unknown gossip SHA-256 backend");
+  assert(["zig_std", "x86_sha_avx2", "aarch64_sha2"].includes(gossipSha256Backend), "unknown gossip SHA-256 backend");
   return {exports: names, gossipSha256Backend, instrumented: false};
 }
 
