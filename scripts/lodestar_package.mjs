@@ -165,7 +165,6 @@ async function packPlatform(
   }
   const staging = join(temporary, "staging");
   for (const file of sourceFiles) {
-    if (file.path.startsWith("zig-out/")) continue;
     await mkdir(dirname(join(staging, file.path)), {recursive: true});
     await copyFile(join(nativeDir, file.path), join(staging, file.path));
   }
@@ -251,7 +250,7 @@ export async function pack(nativeDir, out, buildRecordPath) {
   try {
     const packageJson = await readJson(join(nativeDir, "package.json"), "source package.json");
     assertPackageExports(packageJson);
-    const sourceFilesBefore = await collectPackSources(nativeDir, packageJson);
+    const sourceFilesBefore = await collectPackSources(nativeDir, packageJson, layout);
     for (const file of LEGAL_FILES) {
       if (!sourceFilesBefore.some((entry) => entry.path === file)) fail("MissingLegalFile", file);
     }
@@ -285,7 +284,7 @@ export async function pack(nativeDir, out, buildRecordPath) {
       };
     }
     await verifyArchiveSources(nativeDir, inspected.files, inspected.packageJson, layout);
-    const sourceFilesAfter = await collectPackSources(nativeDir, packageJson);
+    const sourceFilesAfter = await collectPackSources(nativeDir, packageJson, layout);
     assertSameInventory(sourceFilesBefore, sourceFilesAfter, "SourceChangedDuringPack");
     if (JSON.stringify(packageJson.exports) !== JSON.stringify(inspected.packageJson.exports)) {
       fail("PackageExportsMismatch");
@@ -384,8 +383,8 @@ async function packageRootForResolved(resolvedUrl) {
 }
 
 /**
- * Runs the package probe in the host: every export resolved from every declaring manifest and loaded, the native addons
- * the process loaded, and two native network lifecycles through the installed facade.
+ * Runs the package probe in the host: every export resolved from every declaring manifest and loaded, and the native
+ * addons the process loaded.
  */
 async function probeHost(hostDir, parents, exports) {
   const specifiers = Object.keys(exports).map((subpath) =>
@@ -397,14 +396,7 @@ async function probeHost(hostDir, parents, exports) {
   const probe = fileURLToPath(new URL("./lodestar_package_probe.mjs", import.meta.url));
   const command = await runCommand(
     process.execPath,
-    [
-      "--experimental-import-meta-resolve",
-      "--expose-gc",
-      probe,
-      JSON.stringify(parents),
-      JSON.stringify(specifiers),
-      "@chainsafe/lodestar-z/network",
-    ],
+    ["--experimental-import-meta-resolve", probe, JSON.stringify(parents), JSON.stringify(specifiers)],
     hostDir,
     {allowFailure: true}
   );
@@ -468,7 +460,6 @@ export async function verifyInstalled(hostDir, manifestPath, verifiedArchive) {
     manifestSha256: archiveState.manifestSha256,
     ordinaryExports: probe.exports,
     resolutions: {command: probe.command, packageRoots, parents, records: probe.resolutions},
-    runtime: probe.runtime,
   };
 }
 

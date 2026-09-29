@@ -7,14 +7,14 @@ const lifecycleFixture = (mode, expected) => ({
   expected,
   name: mode,
 });
-const probe = fixture("network-package-probe.mjs");
+const probe = ["--experimental-import-meta-resolve", fixture("network-package-probe.mjs")];
 
 /** The load probe's scenarios and, with `lifecycle`, the lifecycle and worker fixtures. */
 export function packageScenarios(lifecycle) {
   return [
-    {args: [probe], expected: '"loaded":true', name: "load"},
+    {args: probe, expected: '"loaded":true', name: "load"},
     // The probe must fail when a worker passes its checks but exits nonzero.
-    {args: [probe, "--worker-exit=7"], name: "worker exit code", rejected: "Worker exited with code 7"},
+    {args: [...probe, "--worker-exit=7"], name: "worker exit code", rejected: "Worker exited with code 7"},
     ...(lifecycle
       ? [
           {

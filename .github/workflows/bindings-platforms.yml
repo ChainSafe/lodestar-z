@@ -1,10 +1,11 @@
 name: Bindings platforms
 
-# Builds the ReleaseSafe addon for every zapi target in package.json, then installs each target's packed packages
-# into a consumer on that platform and runs the load probe and the lifecycle and worker fixtures there, and checks
-# that the prepared packages hold exactly those qualified addons. Release publishing publishes these artifacts. Each
-# job retains its evidence: build.json with the addon hashes and toolchain, and per target the consumer's lockfile
-# and qualification.json with the addon hash, runtime and results.
+# Builds the ReleaseSafe addon for every zapi target in package.json, then packs each target's packages as publishing
+# prepares them, installs them into a consumer on that platform and runs the load probe and the lifecycle and worker
+# fixtures there, and checks that the prepared packages hold exactly those qualified addons. Release publishing
+# publishes these artifacts. Each job retains its evidence: build.json with the build flags, addon hashes and
+# toolchain, and per target the archives' manifest and build record, the consumer's lockfile and qualification.json
+# with the addon hash, exports, runtime and results.
 on:
   workflow_call:
 
@@ -120,6 +121,7 @@ jobs:
         with:
           name: qualification-${{ matrix.target }}
           path: |
+            ${{ runner.temp }}/consumer/packages/*.json
             ${{ runner.temp }}/consumer/qualification.json
             ${{ runner.temp }}/consumer/pnpm-lock.yaml
           if-no-files-found: error
