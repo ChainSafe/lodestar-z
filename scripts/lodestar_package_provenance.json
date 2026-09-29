@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "fields": "Fields under `reviewed` are reviewed annotations and descriptions. The check verifies every other field against the tree, the fetched packages, cargo's resolution or the Zig toolchain, and verifies that each license text it can locate is reproduced in the notices file.",
+  "fields": "Fields under `reviewed` are reviewed annotations and descriptions. The check verifies every other field against the tree, the fetched packages, cargo's resolution or the Zig and Rust toolchains, and verifies that each license text it can locate is reproduced in the notices file.",
   "package": {
     "name": "@chainsafe/lodestar-z",
     "declaredLicenses": {"package.json": "MIT", "README.md": "Apache-2.0"},
@@ -216,6 +216,7 @@
       }
     ]
   },
+  "rust": {"toolchain": "1.91.1"},
   "runtime": [
     {
       "id": "zig",
@@ -247,8 +248,7 @@
       "reviewed": {
         "name": "Rust standard library, linked through libquiche.a",
         "license": "MIT OR Apache-2.0",
-        "rustc": "1.91.1",
-        "evidence": "LICENSE-MIT of rust-lang/rust at the rustc commit; the toolchain is not pinned"
+        "evidence": "LICENSE-MIT of rust-lang/rust at the commit of the pinned rustc"
       }
     },
     {
@@ -257,7 +257,6 @@
       "reviewed": {
         "name": "compiler_builtins 0.1.160, from the Rust library sources",
         "license": "MIT AND Apache-2.0 WITH LLVM-exception",
-        "rustc": "1.91.1",
         "licenseFile": "compiler-builtins/LICENSE.txt",
         "evidence": "Its intrinsics are unmangled symbols, so it is kept though Zig's compiler-rt may resolve them first"
       }
@@ -266,49 +265,49 @@
       "id": "rust-std/addr2line@0.25.0",
       "toolchain": "rust",
       "reviewed": {
-        "name": "addr2line 0.25.0","license": "Apache-2.0 OR MIT", "rustc": "1.91.1", "evidence": "LICENSE-MIT; symbols in the addon"}
+        "name": "addr2line 0.25.0","license": "Apache-2.0 OR MIT", "evidence": "LICENSE-MIT; symbols in the addon"}
     },
     {
       "id": "rust-std/adler2@2.0.1",
       "toolchain": "rust",
       "reviewed": {
-        "name": "adler2 2.0.1","license": "0BSD OR MIT OR Apache-2.0", "rustc": "1.91.1", "evidence": "LICENSE-MIT; symbols in the addon"}
+        "name": "adler2 2.0.1","license": "0BSD OR MIT OR Apache-2.0", "evidence": "LICENSE-MIT; symbols in the addon"}
     },
     {
       "id": "rust-std/gimli@0.32.0",
       "toolchain": "rust",
       "reviewed": {
-        "name": "gimli 0.32.0","license": "MIT OR Apache-2.0", "rustc": "1.91.1", "evidence": "LICENSE-MIT; symbols in the addon"}
+        "name": "gimli 0.32.0","license": "MIT OR Apache-2.0", "evidence": "LICENSE-MIT; symbols in the addon"}
     },
     {
       "id": "rust-std/hashbrown@0.15.5",
       "toolchain": "rust",
       "reviewed": {
-        "name": "hashbrown 0.15.5","license": "MIT OR Apache-2.0", "rustc": "1.91.1", "evidence": "LICENSE-MIT; symbols in the addon"}
+        "name": "hashbrown 0.15.5","license": "MIT OR Apache-2.0", "evidence": "LICENSE-MIT; symbols in the addon"}
     },
     {
       "id": "rust-std/memchr@2.7.5",
       "toolchain": "rust",
       "reviewed": {
-        "name": "memchr 2.7.5","license": "Unlicense OR MIT", "rustc": "1.91.1", "evidence": "LICENSE-MIT; symbols in the addon"}
+        "name": "memchr 2.7.5","license": "Unlicense OR MIT", "evidence": "LICENSE-MIT; symbols in the addon"}
     },
     {
       "id": "rust-std/miniz_oxide@0.8.9",
       "toolchain": "rust",
       "reviewed": {
-        "name": "miniz_oxide 0.8.9","license": "MIT OR Zlib OR Apache-2.0", "rustc": "1.91.1", "evidence": "LICENSE-MIT.md; symbols in the addon"}
+        "name": "miniz_oxide 0.8.9","license": "MIT OR Zlib OR Apache-2.0", "evidence": "LICENSE-MIT.md; symbols in the addon"}
     },
     {
       "id": "rust-std/object@0.37.3",
       "toolchain": "rust",
       "reviewed": {
-        "name": "object 0.37.3","license": "Apache-2.0 OR MIT", "rustc": "1.91.1", "evidence": "LICENSE-MIT; symbols in the addon"}
+        "name": "object 0.37.3","license": "Apache-2.0 OR MIT", "evidence": "LICENSE-MIT; symbols in the addon"}
     },
     {
       "id": "rust-std/rustc-demangle@0.1.26",
       "toolchain": "rust",
       "reviewed": {
-        "name": "rustc-demangle 0.1.26","license": "MIT/Apache-2.0", "rustc": "1.91.1", "evidence": "LICENSE-MIT; symbols in the addon"}
+        "name": "rustc-demangle 0.1.26","license": "MIT/Apache-2.0", "evidence": "LICENSE-MIT; symbols in the addon"}
     }
   ],
   "npm": {
