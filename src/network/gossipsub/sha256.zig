@@ -395,6 +395,11 @@ test "gossip sha256 falls back on capable hardware when a feature is masked" {
     try testing.expectEqual(hash(null, false, "", "", payload), hash(linked, true, "", "", payload));
 }
 
+test "gossip sha256 selects the backend a qualification run expects" {
+    const expected = testing.environ.getPosix("LODESTAR_Z_EXPECT_GOSSIP_SHA256") orelse return error.SkipZigTest;
+    try testing.expectEqualStrings(expected, @tagName(backend()));
+}
+
 test "gossip sha256 selects once across concurrent first use" {
     selection.store(.unselected, .monotonic);
     const Worker = struct {
