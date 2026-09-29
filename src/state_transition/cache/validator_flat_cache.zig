@@ -135,8 +135,8 @@ pub const ValidatorFlatCache = struct {
 
     /// Compares `new` and `old` validator trees, patching only validators inside changed subtrees.
     ///
-    /// This does a depth-first traversal through the tree, checking if nodes changed,
-    /// and patching the flat cache if so.
+    /// This does a depth-first traversal through the tree using a LIFO stack,
+    /// checking if nodes changed, and patching the flat cache if so.
     fn diffAndPatch(
         self: *ValidatorFlatCache,
         old_root: Node.Id,
@@ -144,7 +144,6 @@ pub const ValidatorFlatCache = struct {
         depth: usize,
         new_len: usize,
     ) !void {
-        // Each frame compares nodes at the same tree position and maps that position to the cache.
         const Frame = struct {
             old: Node.Id,
             new: Node.Id,
@@ -156,11 +155,9 @@ pub const ValidatorFlatCache = struct {
 
         var stack: BoundedArray(Frame, max_depth + 1) = .{};
 
-        // The root subtree starts at validator index 0
+        // Start: base of the tree
         stack.push(.{ .old = old_root, .new = new_root, .depth = depth, .base = 0 });
 
-        // Terminates eventually since all paths reach the leaves
-        // and don't push new nodes after
         while (stack.pop()) |f| {
             if (
             // Nodes are unchanged
