@@ -215,13 +215,17 @@ test("fetched packages verify transitive pins, the resolved crate closure and re
     reviewedWithoutSource,
     unnamed.map((notice) => notice.id)
   );
-  // A source the record names but the checker cannot read is listed as unavailable, not compared or reviewed.
+  // A source the record names but the checker cannot read is listed as unavailable, not compared or reviewed, and
+  // fails the check when sources are required.
   const missing = structuredClone(record);
   Object.assign(missing.cargo.crates.find((c) => c.name === "bytes").reviewed, {notice: "MISSING"});
   const unavailable = await checkProvenance(root, missing);
   assert.deepEqual(unavailable.errors, []);
   assert(unavailable.summary.notices.sourceUnavailable.includes("crate:bytes@1.11.1"));
   assert.equal(unavailable.summary.notices.comparedWordForWord, comparedWordForWord - 1);
+  assert.deepEqual((await checkProvenance(root, missing, {requireFetched: true})).errors, [
+    {code: "NoticeSourceUnavailable", detail: "crate:bytes@1.11.1"},
+  ]);
   const cases = [
     ["CargoLockfile", (r) => Object.assign(r.cargo, {lockfileSha256: "0".repeat(64)})],
     [
