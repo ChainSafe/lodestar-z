@@ -1,8 +1,9 @@
 // Run from a consumer that installed the packed packages: every export of the main package resolves inside it and
 // loads, the addon loads from the platform package built for this process's platform (or, in the embedded layout, from
 // the main package), and ordinary exports work on the main thread around a worker's load and unload. Prints the addon,
-// the exports and the runtime it ran on. `--worker-exit=CODE` has the first worker exit with CODE after its checks
-// pass, which must fail the probe. Run it with --experimental-import-meta-resolve.
+// its gossip SHA-256 backend, the exports and the runtime it ran on; LODESTAR_Z_EXPECT_GOSSIP_SHA256 names the backend
+// it must select. `--worker-exit=CODE` has the first worker exit with CODE after its checks pass, which must fail the
+// probe. Run it with --experimental-import-meta-resolve.
 import assert from "node:assert/strict";
 import {spawnSync} from "node:child_process";
 import {createHash} from "node:crypto";
@@ -14,6 +15,7 @@ import {fileURLToPath} from "node:url";
 import {isMainThread, parentPort, Worker, workerData} from "node:worker_threads";
 import {SecretKey, verify} from "@chainsafe/lodestar-z/blst";
 import {innerShuffleList} from "@chainsafe/lodestar-z/shuffle";
+import {assertExpectedGossipSha256} from "../../../scripts/check_network_addon.mjs";
 import {probeExports} from "../../../scripts/lodestar_package_probe.mjs";
 
 function ordinaryExports() {
@@ -106,6 +108,8 @@ if (!isMainThread) {
   const native = require(nativePath);
   assert.equal(typeof native.NativeNetworkRuntime, "function");
   assert(!Object.getOwnPropertyNames(native).some((name) => /^networkTest/i.test(name)));
+  const gossipSha256Backend = native.NativeNetworkRuntime.gossipSha256Backend();
+  assertExpectedGossipSha256(gossipSha256Backend);
 
   ordinaryExports();
   for (let i = 0; i < 2; i++) {
@@ -121,6 +125,7 @@ if (!isMainThread) {
         sha256: createHash("sha256").update(addon).digest("hex"),
       },
       exports: probe.exports,
+      gossipSha256Backend,
       loaded: true,
       platformPackage,
       runtime: runtime(),
