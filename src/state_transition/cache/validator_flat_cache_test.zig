@@ -16,7 +16,6 @@ fn expectInSync(cache: *ValidatorFlatCache, view: *Validators.TreeView) !void {
     try testing.expectEqual(@as(usize, 0), try cache.countMismatches(view.getRoot(), depth, list_len));
 }
 
-
 fn testValidator(i: usize) Validator.Type {
     var v: Validator.Type = Validator.default_value;
     v.pubkey[0] = @intCast(i & 0xff);
@@ -29,8 +28,6 @@ fn testValidator(i: usize) Validator.Type {
     v.withdrawable_epoch = std.math.maxInt(u64);
     return v;
 }
-
-
 
 test "ValidatorFlatCache follows writes, appends, truncation and forks" {
     const allocator = testing.allocator;

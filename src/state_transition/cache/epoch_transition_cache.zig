@@ -33,6 +33,7 @@ const computeBaseRewardPerIncrement = @import("../utils/sync_committee.zig").com
 const processPendingAttestations = @import("../epoch/process_pending_attestations.zig").processPendingAttestations;
 const Node = @import("persistent_merkle_tree").Node;
 const validator_flat_cache = @import("./validator_flat_cache.zig");
+const ValidatorFlatCache = validator_flat_cache.ValidatorFlatCache;
 const ValidatorFields = validator_flat_cache.ValidatorFields;
 const EpochShufflingRc = @import("../utils/epoch_shuffling.zig").EpochShufflingRc;
 const EpochShuffling = @import("../utils/epoch_shuffling.zig").EpochShuffling;
@@ -264,29 +265,6 @@ pub const EpochTransitionCache = struct {
         epoch_cache: *EpochCache,
         state: *AnyBeaconState,
     ) !EpochTransitionCache {
-        return initFrom(.flat_cache, allocator, io, config, epoch_cache, state);
-    }
-
-    /// Same result as `init`, reading every validator from the tree instead of the flat cache.
-    /// Reference for parity tests and benchmarks.
-    pub fn initFromTree(
-        allocator: Allocator,
-        io: std.Io,
-        config: *const BeaconConfig,
-        epoch_cache: *EpochCache,
-        state: *AnyBeaconState,
-    ) !EpochTransitionCache {
-        return initFrom(.tree, allocator, io, config, epoch_cache, state);
-    }
-
-    fn initFrom(
-        comptime source: enum { flat_cache, tree },
-        allocator: Allocator,
-        io: std.Io,
-        config: *const BeaconConfig,
-        epoch_cache: *EpochCache,
-        state: *AnyBeaconState,
-    ) !EpochTransitionCache {
         const fork_seq = state.forkSeq();
         const current_epoch = epoch_cache.epoch;
         const prev_epoch = epoch_cache.getPreviousShuffling().epoch;
@@ -314,13 +292,15 @@ pub const EpochTransitionCache = struct {
         try validators_view.commit();
         const validator_count = try validators_view.length();
         var validators_it = validators_view.iteratorReadonly(0);
-        const flat_validators: ?*const validator_flat_cache.ValidatorFlatCache = if (source == .flat_cache) try validator_flat_cache.syncGlobal(
+        var flat_validator_cache: validator_flat_cache.ValidatorFlatCache = ValidatorFlatCache.init(
             allocator,
             validators_view.chunks.state.pool,
+        );
+        try flat_validator_cache.sync(
             validators_view.getRoot(),
             validators_it.depth_iterator.base_gindex.pathLen(),
             validator_count,
-        ) else null;
+        );
 
         // Clone before being mutated in processEffectiveBalanceUpdates
         try epoch_cache.beforeEpochTransition();
@@ -334,10 +314,7 @@ pub const EpochTransitionCache = struct {
             try reused_cache.is_compounding_validator_arr.resize(reused_cache.allocator, validator_count);
         }
         for (0..validator_count) |i| {
-            const validator: ValidatorFields = if (flat_validators) |flat|
-                flat.fields(i, effective_balances_by_increments[i])
-            else
-                .fromValidator(try validators_it.nextValuePtr());
+            const validator: ValidatorFields = flat_validator_cache.fields(i, effective_balances_by_increments[i]);
             var flag: u8 = 0;
 
             if (validator.slashed) {
