@@ -3,6 +3,7 @@ import {mkdir, mkdtemp, readFile, rm, writeFile} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {afterEach, test} from "node:test";
+import {packageScenarios} from "../../bindings/test/fixtures/network-package-scenarios.mjs";
 import {record, verify} from "../../scripts/release_artifacts.mjs";
 
 const NAME = "@chainsafe/lodestar-z";
@@ -69,7 +70,7 @@ async function release() {
         failed: 0,
         lifecycle: true,
         platformPackage: `${NAME}-${target}`,
-        results: [{name: "load", passed: true}],
+        results: packageScenarios(true).map(({name}) => ({name, passed: true})),
       })
     );
   }
@@ -145,5 +146,27 @@ test("verification refuses every incomplete, unrecorded or unqualified package",
     const {check, root} = await release();
     await change(root);
     assert.deepEqual(await check(), problems);
+  }
+});
+
+test("verification refuses a qualification that did not run each lifecycle scenario once and pass", async () => {
+  const cases = {
+    failing: (results) => results.with(-1, {...results.at(-1), passed: false}),
+    "load only": (results) => results.slice(0, 1),
+    missing: (results) => results.slice(0, -1),
+    "repeated in addition": (results) => [...results, results.at(-1)],
+    "repeated in place of another": (results) => results.with(-1, results[0]),
+    substituted: (results) => results.with(-1, {...results.at(-1), name: "unrelated check"}),
+  };
+  for (const [label, change] of Object.entries(cases)) {
+    const {check, root} = await release();
+    await edit(join(root, "qualification", `qualification-${TARGETS[1]}`, "qualification.json"), (evidence) => {
+      evidence.results = change(evidence.results);
+    });
+    assert.deepEqual(
+      await check(),
+      [`${NAME}-${TARGETS[1]} has no passing lifecycle qualification of the recorded addon`],
+      label
+    );
   }
 });

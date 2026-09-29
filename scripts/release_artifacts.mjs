@@ -5,16 +5,18 @@
 // `record`, after `zapi build-artifacts`, writes build.json beside the addons: each advertised zapi target's addon hash
 // and the toolchain that built them. `verify`, after `zapi prepublish`, fails unless the main package depends on
 // exactly the advertised platform packages, and each is complete and holds the recorded addon, which DIR's
-// qualification-TARGET/qualification.json shows passed the lifecycle checks on its platform.
+// qualification-TARGET/qualification.json shows ran each lifecycle scenario exactly once and passed on its platform.
 import assert from "node:assert/strict";
 import {createHash} from "node:crypto";
 import {readFile, readdir, writeFile} from "node:fs/promises";
 import {join, resolve} from "node:path";
 import {fileURLToPath, pathToFileURL} from "node:url";
 import {parseArgs} from "node:util";
+import {packageScenarios} from "../bindings/test/fixtures/network-package-scenarios.mjs";
 import {runBoundedCommand} from "./bounded_child.mjs";
 
 const ADDON = "bindings.node";
+const LIFECYCLE_SCENARIOS = packageScenarios(true).map((scenario) => scenario.name);
 // ELF e_machine and Mach-O cputype of each target's addon.
 const MACHINES = {
   "aarch64-apple-darwin": 0x0100000c,
@@ -34,6 +36,7 @@ async function subdirectories(path) {
   return entries.filter((entry) => entry.isDirectory() && !entry.name.startsWith(".")).map((entry) => entry.name);
 }
 
+/** Whether ACTUAL is a reordering of EXPECTED: nothing missing, added or repeated. */
 function sameSet(actual, expected) {
   return actual.length === expected.length && [...actual].sort().every((name, i) => name === [...expected].sort()[i]);
 }
@@ -126,7 +129,7 @@ export async function verify(packageDir, artifactsDir, npmDir, qualificationDir)
       evidence.addon?.sha256 === expected &&
       evidence.lifecycle === true &&
       evidence.failed === 0 &&
-      evidence.results?.length > 0 &&
+      sameSet(evidence.results?.map((result) => result.name) ?? [], LIFECYCLE_SCENARIOS) &&
       evidence.results.every((result) => result.passed);
     if (!qualified) problems.push(`${name} has no passing lifecycle qualification of the recorded addon`);
     const lockfile = await readFile(join(qualification, "pnpm-lock.yaml")).catch(() => null);
