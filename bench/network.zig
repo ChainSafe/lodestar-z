@@ -104,7 +104,7 @@ const GossipSink = struct {
 
     fn admit(context: *anyopaque, candidate: *network.gossipsub.Admission) bool {
         const self: *GossipSink = @ptrCast(@alignCast(context));
-        if (self.count == self.handles.len or !candidate.feasible(&.{})) return false;
+        if (self.count == self.handles.len or !network.gossip_processor.policy.sourceRoom(candidate) or !network.gossip_processor.policy.feasible(candidate, &.{})) return false;
         candidate.commit();
         self.handles[self.count] = candidate.event.handle;
         self.count += 1;

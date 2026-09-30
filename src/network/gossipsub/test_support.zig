@@ -51,7 +51,7 @@ pub const Inbox = struct {
 
     fn admit(context: *anyopaque, candidate: *gossip.Admission) bool {
         const self: *Inbox = @ptrCast(@alignCast(context));
-        if (self.full or self.count == capacity or !candidate.feasible(&.{})) return false;
+        if (self.full or self.count == capacity or !@import("../gossip_processor/policy.zig").sourceRoom(candidate) or !@import("../gossip_processor/policy.zig").feasible(candidate, &.{})) return false;
         const topic = std.testing.allocator.dupe(u8, candidate.event.topic) catch return false;
         const bytes = std.testing.allocator.dupe(u8, candidate.event.bytes) catch {
             std.testing.allocator.free(topic);

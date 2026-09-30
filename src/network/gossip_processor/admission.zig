@@ -2,6 +2,7 @@ const std = @import("std");
 const processor = @import("root.zig");
 const gossip = @import("../gossipsub/root.zig");
 const storage = @import("../gossipsub/message_store.zig");
+const policy = @import("policy.zig");
 const none = @import("../index_list.zig").none;
 const assert = std.debug.assert;
 
@@ -22,6 +23,7 @@ pub fn admit(table: *processor.GossipProcessor, owner: *gossip.Gossipsub, candid
         table.refuse(kind, .ineligible);
         return false;
     }
+    if (!policy.sourceRoom(candidate)) return false;
     if (!table.sourceRoom(message.source, kind, message.bytes.len)) {
         table.refuse(kind, .source_full);
         return false;
@@ -30,12 +32,11 @@ pub fn admit(table: *processor.GossipProcessor, owner: *gossip.Gossipsub, candid
     const handles = &table.victim_handles;
     var count: usize = 0;
     var bytes: usize = 0;
-    const states = [_]processor.State{ .queued, .needs_check, .checking, .waiting };
-    var cursors: [states.len]u32 = undefined;
-    const k = @intFromEnum(kind);
-    for (states, &cursors) |state, *cursor| cursor.* = table.queues[k][@intFromEnum(state)].head;
+    var cursor = table.expiry.head;
+    var inspected: usize = 0;
     while (count <= tokens.len) {
-        if (capacityAfter(table, kind, message.bytes.len, tokens[0..count]) and candidate.feasible(handles[0..count])) {
+        if (!candidate.charge(count * @sizeOf(processor.Cell))) break;
+        if (capacityAfter(table, kind, message.bytes.len, tokens[0..count]) and policy.feasible(candidate, handles[0..count])) {
             for (tokens[0..count], handles[0..count]) |token, handle| {
                 table.outcome(owner.report(handle, .ignore, .{ .mono_ms = now, .unix_s = 0 }));
                 table.retire(token);
@@ -45,22 +46,24 @@ pub fn admit(table: *processor.GossipProcessor, owner: *gossip.Gossipsub, candid
             return true;
         }
         if (count == tokens.len or !processor.limits_mod.newestFirst(kind)) break;
-        var selected: ?usize = null;
-        for (cursors, 0..) |index, i| {
-            if (index != none and (selected == null or table.cells[index].order < table.cells[cursors[selected.?]].order)) selected = i;
+        var selected: u32 = none;
+        // This chain retains network admission order across dependency promotion
+        // and copy rollback. State and ready queues deliberately do not.
+        while (cursor != none and inspected < table.cells.len) {
+            if (!candidate.charge(@sizeOf(processor.Cell))) break;
+            const index = cursor;
+            const cell = &table.cells[index];
+            cursor = cell.expiry_link.next;
+            inspected += 1;
+            if (cell.kind != kind or !cell.replaceable()) continue;
+            selected = index;
+            break;
         }
-        const lane = selected orelse break;
-        const index = cursors[lane];
+        if (selected == none) break;
+        const index = selected;
         const cell = &table.cells[index];
-        assert(!cell.executing and cell.state != .copying);
-        cursors[lane] = cell.state_link.next;
-        var cost = cell.input.len;
-        const pending = &candidate.messages.validation;
-        if (cell.handle.index < pending.entries.len) {
-            const entry = &pending.entries[cell.handle.index];
-            if (entry.generation == cell.handle.generation and entry.state == .pending) cost += candidate.messages.store.get(entry.state.pending.message).?.len;
-        }
-        if (cost > processor.batch_bytes -| bytes) break;
+        const cost = cell.input.len + candidate.victimBytes(cell.handle);
+        if (cost > processor.batch_bytes -| bytes or !candidate.charge(cost)) break;
         bytes += cost;
         tokens[count] = .{ .index = @intCast(index), .generation = cell.generation };
         handles[count] = cell.handle;

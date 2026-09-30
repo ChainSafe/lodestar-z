@@ -92,7 +92,7 @@ fn prepareApplicationStorage(runtime: *Runtime, app: *const application_cfg.Conf
     const incoming_capacity: usize = limits.inbound_max - limits.inbound_control_reserved;
     const gossip_options = &resolved.core.service.gossipsub;
     const chain = &runtime.heavy.?.config.chain;
-    const gossip_plan = n.gossip_processor.Plan.resolve(gossip_options, chain.forks[0..chain.boundary_count]);
+    const gossip_plan = try n.gossip_processor.Plan.resolve(runtime.heavy.?.config.processor_limits, runtime.heavy.?.config.execution_limits, gossip_options.topic_policy.?, chain.forks[0..chain.boundary_count], gossip_options.random_seed.?);
     const gossip_backing = gossip.Table.backingBytes(gossip_plan.capacity, gossip_plan.bytes);
     const metrics_capacity = n.metrics.textCapacity(chain.topics[0..chain.boundary_count]);
     const publication_capacity: usize = if (runtime.heavy.?.config.profile == .small) 32 else publications.capacity_max;

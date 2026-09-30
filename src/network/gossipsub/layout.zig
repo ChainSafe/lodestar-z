@@ -60,7 +60,7 @@ pub const Layout = struct {
     /// equals and which stays below the history's ceiling. A node on every attestation subnet can
     /// retain a whole slot of attestations within six windows.
     fn historyCapacity(options: *const Options) usize {
-        return if (options.processor_limits != null) @max(options.mcache_capacity, options.validation_capacity) else options.mcache_capacity;
+        return if (options.payload_limits != null) @max(options.mcache_capacity, options.validation_capacity) else options.mcache_capacity;
     }
 
     pub fn plan(self: *const Layout) Plan {

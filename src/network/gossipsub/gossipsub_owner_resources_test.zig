@@ -198,7 +198,7 @@ test "gossip history covers the processor retention allowance and the memory pla
     boundary.rules[@intFromEnum(topic_mod.Kind.beacon_block)] = .{ .count = 1, .ssz_max = 1024 };
     for ([_]usize{ 16, total + 1 }, [_]usize{ total, total + 1 }) |floor, expected| {
         var ledger: @import("../reservations.zig").Reservations = .{ .backing = std.testing.allocator };
-        var g = try support.init(ledger.allocator(), .{ .random_seed = 1, .topic_policy = &.{boundary}, .mcache_capacity = floor, .validation_capacity = total, .processor_limits = limits });
+        var g = try support.init(ledger.allocator(), .{ .random_seed = 1, .topic_policy = &.{boundary}, .mcache_capacity = floor, .validation_capacity = total, .payload_limits = limits });
         try std.testing.expectEqual(expected, g.messages.history.entries.len);
         try std.testing.expectEqual(expected + total, g.messages.store.entries.len);
         try std.testing.expectEqual(ledger.bytes, g.memoryPlan().total_bytes - @sizeOf(Gossipsub));
@@ -252,7 +252,7 @@ test "gossip retention makes room from its own kind's oldest copy and refuses wh
     const limits: @import("../gossip_limits.zig").Limits = @splat(.{ .items = 4, .bytes = 4096 });
     var boundary: @import("topic_policy.zig").Boundary = .{ .digest = .{ 1, 2, 3, 4 } };
     boundary.rules[@intFromEnum(topic_mod.Kind.beacon_block)] = .{ .count = 1, .ssz_max = 1024 };
-    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .topic_policy = &.{boundary}, .validation_capacity = @import("../gossip_limits.zig").items(&limits), .processor_limits = limits });
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .topic_policy = &.{boundary}, .validation_capacity = @import("../gossip_limits.zig").items(&limits), .payload_limits = limits });
     defer g.deinit();
     const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
@@ -283,7 +283,7 @@ test "gossip refused retention leaves the history unchanged" {
     var boundary: @import("topic_policy.zig").Boundary = .{ .digest = .{ 1, 2, 3, 4 } };
     boundary.rules[@intFromEnum(block)] = .{ .count = 1, .ssz_max = 6000 };
     boundary.rules[@intFromEnum(exit)] = .{ .count = 1, .ssz_max = 3000 };
-    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .topic_policy = &.{boundary}, .validation_capacity = limits_mod.items(&limits), .processor_limits = limits });
+    var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .topic_policy = &.{boundary}, .validation_capacity = limits_mod.items(&limits), .payload_limits = limits });
     defer g.deinit();
     const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const history = &g.messages.history;

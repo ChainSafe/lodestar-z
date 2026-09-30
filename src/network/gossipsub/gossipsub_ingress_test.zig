@@ -28,7 +28,7 @@ const Consumer = struct {
 
     fn hasCapacity(context: *anyopaque, kind: processor.limits_mod.Kind, len: usize) bool {
         const self: *Consumer = @ptrCast(@alignCast(context));
-        return self.table.hasCapacity(kind, len) or self.table.freshnessVictim(kind) != null;
+        return self.table.admissible(kind, len);
     }
 
     fn admit(context: *anyopaque, candidate: *gossip.Admission) bool {
@@ -194,11 +194,11 @@ test "gossip admission rejects ineligible candidates without replacing work and 
     var boundary = @import("topic_fixture.zig").bytes(.{ 1, 2, 3, 4 });
     for (&boundary.rules) |*rule| rule.ssz_max = 6000;
     opts.topic_policy = &.{boundary};
-    opts.processor_limits = limits;
+    opts.payload_limits = limits;
     opts.validation_capacity = processor.limits_mod.items(&limits);
     var g = try support.init(t.allocator, opts);
     defer g.deinit();
-    var table = try processor.GossipProcessor.init(t.allocator, processor.Plan.resolve(&opts, &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }}));
+    var table = try processor.GossipProcessor.init(t.allocator, try processor.Plan.resolve(limits, null, opts.topic_policy.?, &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }}, opts.random_seed.?));
     defer table.deinit();
     defer table.close();
     var consumer: Consumer = .{ .table = &table, .owner = &g };
@@ -211,7 +211,7 @@ test "gossip admission rejects ineligible candidates without replacing work and 
         vote(&bytes, @intCast(i), 1);
         try receive(&g, @intCast(i / 2), attestation, &bytes);
     }
-    const victim = table.freshnessVictim(.beacon_attestation).?;
+    const victim = oldestReplaceable(&table);
     const handle = table.get(victim).?.handle;
     const free_pages = g.messages.store.free_pages;
     vote(&bytes, 9, 1000);
@@ -237,11 +237,11 @@ test "gossip admission leaves queued work intact when a host copy pins the requi
     var boundary = @import("topic_fixture.zig").bytes(.{ 1, 2, 3, 4 });
     for (&boundary.rules) |*rule| rule.ssz_max = 6000;
     opts.topic_policy = &.{boundary};
-    opts.processor_limits = limits;
+    opts.payload_limits = limits;
     opts.validation_capacity = processor.limits_mod.items(&limits);
     var g = try support.init(t.allocator, opts);
     defer g.deinit();
-    var table = try processor.GossipProcessor.init(t.allocator, processor.Plan.resolve(&opts, &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }}));
+    var table = try processor.GossipProcessor.init(t.allocator, try processor.Plan.resolve(limits, null, opts.topic_policy.?, &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }}, opts.random_seed.?));
     defer table.deinit();
     defer table.close();
     var consumer: Consumer = .{ .table = &table, .owner = &g };
@@ -264,7 +264,7 @@ test "gossip admission leaves queued work intact when a host copy pins the requi
         vote(&small, @intCast(i + 2), 1);
         try receive(&g, 1, attestation, &small);
     }
-    const victim = table.freshnessVictim(.beacon_attestation).?;
+    const victim = oldestReplaceable(&table);
     var candidate: [1000]u8 = undefined;
     vote(&candidate, 4, 1);
     try receive(&g, 2, attestation, &candidate);
@@ -281,11 +281,11 @@ test "gossip admission after a refused victim selection retires only its own vic
     var boundary = @import("topic_fixture.zig").bytes(.{ 1, 2, 3, 4 });
     for (&boundary.rules) |*rule| rule.ssz_max = 6000;
     opts.topic_policy = &.{boundary};
-    opts.processor_limits = limits;
+    opts.payload_limits = limits;
     opts.validation_capacity = processor.limits_mod.items(&limits);
     var g = try support.init(t.allocator, opts);
     defer g.deinit();
-    var table = try processor.GossipProcessor.init(t.allocator, processor.Plan.resolve(&opts, &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }}));
+    var table = try processor.GossipProcessor.init(t.allocator, try processor.Plan.resolve(limits, null, opts.topic_policy.?, &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }}, opts.random_seed.?));
     defer table.deinit();
     defer table.close();
     var consumer: Consumer = .{ .table = &table, .owner = &g };
@@ -306,7 +306,7 @@ test "gossip admission after a refused victim selection retires only its own vic
         vote(&small, @intCast(i + 2), 1);
         try receive(&g, 1, attestation, &small);
     }
-    const oldest_small = table.freshnessVictim(.beacon_attestation).?;
+    const oldest_small = oldestReplaceable(&table);
     var candidate: [1000]u8 = undefined;
     vote(&candidate, 4, 1);
     try receive(&g, 2, attestation, &candidate);
@@ -638,4 +638,212 @@ test "gossip ineligible QUIC publication preserves sent IWANT promises for other
     g.expirePromises(last_expiry);
     try t.expectEqual(@as(u64, 2), g.counters.broken_promises);
     try t.expectEqual(@as(f64, 2), g.peers.scores.rows[g.sessions.rows[source].logical.index].behaviour);
+}
+
+// A test oracle independent of the production expiry-chain traversal.
+fn oldestReplaceable(table: *const processor.GossipProcessor) processor.Token {
+    var oldest: ?processor.Token = null;
+    for (table.cells, 0..) |cell, i| {
+        if (cell.kind != .beacon_attestation or !cell.replaceable()) continue;
+        if (oldest == null or cell.order < table.cells[oldest.?.index].order) oldest = .{ .index = @intCast(i), .generation = cell.generation };
+    }
+    return oldest.?;
+}
+
+test "gossip replacement keeps original arrival age across dependency promotion and copy rollback" {
+    for ([_]bool{ false, true }) |rollback| {
+        var f: IwantFixture = .{};
+        try f.init(64);
+        defer f.deinit();
+        var data: [240]u8 = undefined;
+        vote(&data, 1, 96);
+        _ = try f.message(0, &data);
+        const first = oldestReplaceable(&f.table);
+        const first_handle = f.table.get(first).?.handle;
+        const deadline = f.table.get(first).?.deadline;
+        const root = f.table.get(first).?.metadata.root.?;
+        const checks = f.table.claimChecks(f.now, processor.batch_max);
+        try t.expectEqual(@as(usize, 1), checks.len);
+        try t.expect(f.table.classify(first, rollback));
+        var copying: processor.Batch = .{};
+        if (rollback) {
+            f.now += 60;
+            f.table.maintain(f.now, 96);
+            copying = f.table.claim(f.now);
+            try t.expectEqual(@as(usize, 1), copying.len);
+        }
+        // Later arrivals include an older (still useful) slot. Eviction age is
+        // network arrival, not unauthenticated slot rank.
+        for (0..3) |i| {
+            vote(&data, @intCast(i + 2), if (i == 0) 95 else 96);
+            _ = try f.message(if (i == 0) 0 else 1, &data);
+        }
+        const later = f.table.claimChecks(f.now, processor.batch_max);
+        try t.expectEqual(@as(usize, 3), later.len);
+        for (later.tokens[0..later.len]) |token| try t.expect(f.table.classify(token, true));
+        if (rollback) {
+            f.table.finish(&copying, false);
+        } else {
+            f.table.notifyBlock(root);
+            f.table.maintain(f.now, 96);
+            const promoted = f.table.claimChecks(f.now, processor.batch_max);
+            try t.expectEqual(@as(usize, 1), promoted.len);
+            try t.expectEqual(first, promoted.tokens[0]);
+            try t.expect(f.table.classify(first, true));
+        }
+        try t.expectEqual(deadline, f.table.get(first).?.deadline);
+        const queued = f.table.queues[@intFromEnum(processor.limits_mod.Kind.beacon_attestation)][@intFromEnum(processor.State.queued)];
+        try t.expectEqual(first.index, queued.tail);
+        try t.expect(queued.head != first.index);
+        vote(&data, 9, 95);
+        _ = try f.message(2, &data);
+        try t.expect(f.table.get(first) == null);
+        for (later.tokens[0..later.len]) |token| try t.expect(f.table.get(token) != null);
+        try t.expectEqual(@as(usize, 4), f.table.diag.occupied);
+        try t.expectEqual(@as(u64, 1), f.table.diag.reportsAppliedIgnore);
+        try t.expectEqual(gossip.ReportOutcome.already_resolved, f.g.report(first_handle, .reject, .{ .mono_ms = f.now, .unix_s = 0 }));
+        try t.expectEqual(@as(f64, 0), support.invalidDeliveries(&f.g));
+    }
+}
+
+test "gossip eviction scan is work charged and leaves candidates untouched on exhaustion" {
+    for ([_]bool{ false, true }) |after_selection| {
+        var f: IwantFixture = .{};
+        try f.init(64);
+        defer f.deinit();
+        try receive(&f.g, 0, block, "older FIFO work");
+        var data: [240]u8 = undefined;
+        for (0..4) |i| {
+            vote(&data, @intCast(i), 96);
+            _ = try f.message(@intCast(i / 2), &data);
+        }
+        const victim = oldestReplaceable(&f.table);
+        const original_id = f.table.get(victim).?.id;
+        const handle = f.table.get(victim).?.handle;
+        const payload = f.g.messages.validation.entries[handle.index].state.pending.message;
+        const victim_cost = f.table.get(victim).?.input.len + f.g.messages.store.get(payload).?.len;
+        const pages = f.table.store.free_pages;
+        const protocol_pages = f.g.messages.store.free_pages;
+        vote(&data, 9, 96);
+        const id = @import("topic.zig").validMessageId(attestation, &data, .{});
+        var compressed: [8192]u8 = undefined;
+        const length = try snappy.raw.compress(&data, &compressed);
+        var turn = @import("session_io.zig").beginPump(&f.g, .{ .mono_ms = f.now, .unix_s = 0 });
+        var credit = @import("turn.zig").Credits.peer(&f.g.options);
+        // Stop either after inspecting the older other-kind cell or after selecting
+        // and charging a victim, immediately before its repeated joint preflight.
+        const cost = length * 2 + data.len * 2;
+        const charged = cost + @sizeOf(processor.Cell) + if (after_selection) @sizeOf(processor.Cell) + victim_cost else @as(usize, 0);
+        turn.budget.work = charged + @sizeOf(processor.Cell) - 1;
+        credit.work = turn.budget.work;
+        const before = turn.budget.work;
+        try t.expectEqual(.done, f.g.receiveItem(f.g.sessions.ref(2), .{ .message = .{ .topic = attestation, .data = compressed[0..length] } }, &turn, &credit));
+        // Identified refusal also settles its IWANT ID. With no outstanding
+        // requests that costs only hashing the ID and reading its empty bucket.
+        try t.expectEqual(@as(usize, 0), f.g.recovery.len);
+        try t.expectEqual(charged + @sizeOf(gossip.MessageId) + @sizeOf(u16), before - turn.budget.work);
+        try t.expectEqual(original_id, f.table.get(victim).?.id);
+        try t.expectEqual(pages, f.table.store.free_pages);
+        try t.expectEqual(protocol_pages, f.g.messages.store.free_pages);
+        try t.expectEqual(.pending, f.g.messages.validation.find(original_id, f.now).?.state);
+        try t.expectEqual(handle, f.table.get(victim).?.handle);
+        try t.expectEqual(@as(usize, 5), f.table.diag.occupied);
+        try t.expectEqual(@as(u64, 0), f.table.diag.reportsAppliedIgnore);
+        try t.expect(!f.g.messages.wasSeen(id, f.now));
+        try t.expect(f.g.messages.wants(id, f.now));
+        _ = try f.message(2, &data);
+        try t.expect(f.table.get(victim) == null);
+        try t.expect(f.g.messages.wasSeen(id, f.now));
+    }
+}
+
+test "gossip local replacement suppresses push and IHAVE through the retained ignore tombstone" {
+    var f: IwantFixture = .{};
+    try f.init(64);
+    defer f.deinit();
+    var data: [240]u8 = undefined;
+    vote(&data, 1, 96);
+    const id = @import("topic.zig").validMessageId(attestation, &data, .{});
+    _ = try f.message(0, &data);
+    const victim = oldestReplaceable(&f.table);
+    const handle = f.table.get(victim).?.handle;
+    _ = try f.message(1, &data);
+    for (0..3) |i| {
+        vote(&data, @intCast(i + 2), 96);
+        _ = try f.message(if (i == 0) 0 else 1, &data);
+    }
+    vote(&data, 9, 96);
+    _ = try f.message(2, &data);
+    try t.expect(f.table.get(victim) == null);
+    // Natural capacity pressure removes seen independently of attribution.
+    for (0..f.g.messages.seen.ids.len) |i| {
+        var other: gossip.MessageId = @splat(0xee);
+        std.mem.writeInt(u64, other[0..8], @intCast(i), .little);
+        _ = f.g.messages.seen.add(other, f.now);
+    }
+    try t.expect(!f.g.messages.wasSeen(id, f.now));
+    const tombstone = f.g.messages.validation.find(id, f.now).?;
+    const until = tombstone.until;
+    try t.expectEqual(.resolved, tombstone.state);
+    try t.expectEqual(.ignore, tombstone.verdict);
+    try t.expect(!f.g.messages.wants(id, f.now));
+    try f.request(2, id);
+    try f.flush(2);
+    try t.expectEqual(@as(usize, 0), f.g.recovery.len);
+    vote(&data, 1, 96);
+    _ = try f.message(2, &data);
+    try t.expectEqual(@as(usize, 4), f.table.diag.occupied);
+    try t.expectEqual(@as(u64, 1), f.table.diag.reportsAppliedIgnore);
+    try t.expect(!f.g.messages.wasSeen(id, f.now));
+    try t.expectEqual(until, f.g.messages.validation.find(id, f.now).?.until);
+    try t.expectEqual(gossip.ReportOutcome.already_resolved, f.g.report(handle, .reject, .{ .mono_ms = f.now, .unix_s = 0 }));
+    try t.expectEqual(@as(f64, 0), support.invalidDeliveries(&f.g));
+}
+
+test "gossip replacement preflights compressed and decoded pages across multiple victims" {
+    var opts = options;
+    const limits: processor.limits_mod.Limits = @splat(.{ .items = 4, .bytes = 8192 });
+    var boundary = @import("topic_fixture.zig").bytes(.{ 1, 2, 3, 4 });
+    for (&boundary.rules) |*rule| rule.ssz_max = 6000;
+    opts.topic_policy = &.{boundary};
+    opts.payload_limits = limits;
+    opts.validation_capacity = processor.limits_mod.items(&limits);
+    var g = try support.init(t.allocator, opts);
+    defer g.deinit();
+    var table = try processor.GossipProcessor.init(t.allocator, try processor.Plan.resolve(limits, null, opts.topic_policy.?, &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }}, opts.random_seed.?));
+    defer table.deinit();
+    defer table.close();
+    var consumer: Consumer = .{ .table = &table, .owner = &g };
+    const sink = consumer.sink();
+    g.message_sink = &sink;
+    try support.subscribe(&g, attestation);
+    for (0..3) |i| _ = support.addPeer(&g, .{ .index = @intCast(i), .generation = 1 }, .v1_2).?;
+    var random = std.Random.DefaultPrng.init(1971);
+    var data: [4097]u8 = undefined;
+    var tokens: [4]processor.Token = undefined;
+    var ids: [4]gossip.MessageId = undefined;
+    for (0..4) |i| {
+        const bytes = data[0..if (i < 2) 513 else 240];
+        random.random().bytes(bytes);
+        std.mem.writeInt(u64, bytes[16..24], 1, .little);
+        ids[i] = @import("topic.zig").validMessageId(attestation, bytes, .{});
+        try receive(&g, @intCast(i / 2), attestation, bytes);
+        const index = table.expiry.tail;
+        tokens[i] = .{ .index = @intCast(index), .generation = table.cells[index].generation };
+    }
+    const k = @intFromEnum(processor.limits_mod.Kind.beacon_attestation);
+    try t.expectEqual(@as(usize, 8192), table.used_bytes[k]);
+    try t.expectEqual(@as(usize, 2), g.messages.store.used_by_kind[k]);
+    random.random().bytes(&data);
+    std.mem.writeInt(u64, data[16..24], 1, .little);
+    try receive(&g, 2, attestation, &data);
+    try t.expectEqual(@as(u64, 2), table.diag.reportsAppliedIgnore);
+    try t.expectEqual(@as(usize, 3), table.diag.occupied);
+    try t.expectEqual(@as(usize, 3), g.resourceSnapshot().pending_validations);
+    try t.expectEqual(@as(usize, 8192), table.used_bytes[k]);
+    try t.expectEqual(@as(usize, 2), g.messages.store.used_by_kind[k]);
+    for (tokens, ids, 0..) |token, id, i| {
+        try t.expectEqual(i >= 2, table.get(token) != null);
+        try t.expect(!g.messages.wants(id, 1));
+    }
 }

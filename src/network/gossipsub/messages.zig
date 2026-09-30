@@ -108,7 +108,7 @@ pub const Messages = struct {
     pub fn init(a: std.mem.Allocator, options: *const Options, layout: *const @import("layout.zig").Layout) !Messages {
         var store = try storage.Store.init(a, layout.payload_entries, layout.payload_bytes);
         errdefer store.deinit(a);
-        store.limits = options.processor_limits;
+        store.limits = options.payload_limits;
         var history = try mcache.History.init(a, layout.history, layout.retained);
         errdefer history.deinit(a);
         var seen = try mcache.SeenCache.init(a, layout.seen, options.seen_ttl_ms);
@@ -248,7 +248,7 @@ pub const Messages = struct {
 
     fn duplicateId(self: *Messages, context: *const Context, source: *const Source, topic: u16, id: topic_mod.MessageId, now: u64) bool {
         const pending = self.validation.find(id, now);
-        if ((pending != null and pending.?.state == .pending) or self.seen.contains(id, now)) {
+        if (pending != null or self.seen.contains(id, now)) {
             if (pending) |entry| recordDuplicate(context, entry, source, topic, now);
             return true;
         }
@@ -262,18 +262,10 @@ pub const Messages = struct {
     }
 
     fn admitReceived(self: *Messages, context: *const Context, workspace: *const Workspace, source: *const Source, topic: u16, msg: protobuf.Message, id: topic_mod.MessageId, written: usize, now: u64) Received {
-        const kind = if (topic_mod.parseCanonical(msg.topic)) |canonical| canonical.name.kind else .beacon_block;
-        const peer_limit = @max(1, if (context.options.processor_limits) |limits| limits[@intFromEnum(kind)].items / 2 else self.validation.entries.len / 2);
-        const peer_pending = if (context.options.processor_limits != null) self.validation.pending_per_peer_kind[source.peer.index][@intFromEnum(kind)] else self.validation.pending_per_peer[source.peer.index];
-        if (peer_pending >= peer_limit) return self.refuseStorage(.peer_validations, id);
-        if (context.options.processor_limits) |limits| {
-            const maximum = if (context.overlay.namespace) |ns| @import("constants.zig").maxCompressedLen(ns.lookup(msg.topic).?.rule.ssz_max) else @min(limits[@intFromEnum(kind)].bytes, @import("constants.zig").maxCompressedLen(@import("constants.zig").MAX_PAYLOAD_SIZE));
-            const source_bytes = @import("../gossip_limits.zig").sourceBytes(limits[@intFromEnum(kind)], Validation.chargedBytes(maximum), storage.inline_bytes);
-            if (Validation.chargedBytes(msg.data.len) > source_bytes -| self.validation.bytes_per_peer_kind[source.peer.index][@intFromEnum(kind)]) return self.refuseStorage(.peer_validations, id);
-        }
         assert(context.peers.matches(source.peer));
         var candidate: Admission = .{
             .messages = self,
+            .workspace = workspace,
             .context = context,
             .source = source,
             .topic_index = topic,

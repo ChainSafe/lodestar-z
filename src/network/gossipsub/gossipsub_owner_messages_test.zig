@@ -813,7 +813,7 @@ test "gossip pending validation quota preserves room for another peer and refund
     var boundary: @import("topic_policy.zig").Boundary = .{ .digest = .{ 1, 2, 3, 4 } };
     boundary.rules[@intFromEnum(topic_mod.Kind.beacon_block)] = .{ .count = 1, .ssz_max = 1024 };
     for ([_]bool{ false, true }) |planned| {
-        var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .topic_policy = &.{boundary}, .validation_capacity = if (planned) 4 * @import("../gossip_limits.zig").kind_count else 4, .processor_limits = if (planned) @as(@import("../gossip_limits.zig").Limits, @splat(.{ .items = 4, .bytes = 4096 })) else null });
+        var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .topic_policy = &.{boundary}, .validation_capacity = if (planned) 4 * @import("../gossip_limits.zig").kind_count else 4, .payload_limits = if (planned) @as(@import("../gossip_limits.zig").Limits, @splat(.{ .items = 4, .bytes = 4096 })) else null });
         defer g.deinit();
         const first = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
         const second = support.addPeer(&g, .{ .index = 1, .generation = 1 }, .v1_2).?;

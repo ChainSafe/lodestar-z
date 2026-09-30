@@ -327,7 +327,7 @@ fn hubResolved(chain: *const Chain, options: *const Options) !network.configurat
         .gossip = .{
             .topic_policy = chain.plan.topics[0..chain.plan.boundary_count],
             .message_id_policy = .{ .phase0_digest = chain.plan.phase0_digest },
-            .processor_limits = limits,
+            .payload_limits = limits,
             .validation_capacity = limits_mod.items(&limits),
             .mcache_arena_bytes = 2 * limits_mod.bytes(&limits),
             .iwant_followup_ms = 12_000,
@@ -445,7 +445,7 @@ const Host = struct {
 
     fn admit(context: *anyopaque, candidate: *gossip.Admission) bool {
         const self: *Host = @ptrCast(@alignCast(context));
-        if (self.len == self.ring.len or !candidate.feasible(&.{})) {
+        if (self.len == self.ring.len or !network.gossip_processor.policy.sourceRoom(candidate) or !network.gossip_processor.policy.feasible(candidate, &.{})) {
             self.refused += 1;
             return false;
         }
@@ -719,7 +719,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     const hub_resolved = try hubResolved(chain, options);
     const policy = &hub_resolved.core.service.gossipsub;
     std.debug.print("case=gossip_burst preset={s} chain_preset={s} optimize={s} peers={d} topics={d} mesh={d} recipients={d} slow={d} slow_rate={d} attestation_ssz_bytes={d} burst={d} window_ms={d} background={d} duplicates={d} duplicate_ms={d} lead_ms={d} tail_ms={d} delay_ms={d} exchange_ms={d} batch={d} columns={d} column_bytes={d} validators={d} messages={d}\n", .{ parsed.name, @tagName(preset.active_preset), @tagName(@import("builtin").mode), options.peers, options.topics, options.mesh, options.mesh - 1, options.slow, options.slow_rate, chain.attestation_bytes, options.burst, options.window_ms, options.background, options.duplicates, options.duplicate_ms, options.lead_ms, options.tail_ms, options.delay_ms, options.exchange_ms, options.batch, options.columns, options.column_bytes, options.validators, schedule.messages.len });
-    std.debug.print("case=gossip_burst hub calls_per_pump={d} calls_per_peer={d} peers_per_pump={d} per_peer_descriptors={d} local_descriptors={d} attestation_items={d} validation_capacity={d}\n", .{ policy.calls_per_pump, policy.calls_per_peer, policy.peers_per_pump, gossip.delivery.per_peer_limit, policy.tx_local_descriptors, policy.processor_limits.?[@intFromEnum(Kind.beacon_attestation)].items, policy.validation_capacity });
+    std.debug.print("case=gossip_burst hub calls_per_pump={d} calls_per_peer={d} peers_per_pump={d} per_peer_descriptors={d} local_descriptors={d} attestation_items={d} validation_capacity={d}\n", .{ policy.calls_per_pump, policy.calls_per_peer, policy.peers_per_pump, gossip.delivery.per_peer_limit, policy.tx_local_descriptors, policy.payload_limits.?[@intFromEnum(Kind.beacon_attestation)].items, policy.validation_capacity });
 
     const hub = try allocator.create(network.NetworkCore);
     defer allocator.destroy(hub);

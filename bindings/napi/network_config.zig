@@ -22,6 +22,8 @@ pub const Config = struct {
     bootstrap_count: u8,
     slot: u64,
     gossip: n.configuration.GossipOverrides,
+    processor_limits: n.gossip_processor.limits_mod.Limits = undefined,
+    execution_limits: ?n.gossip_processor.limits_mod.Limits = null,
     allowlist: [32][16]u8,
     allowlist_count: u8,
 
@@ -224,7 +226,8 @@ fn parseGossip(value: Value, out: *Config) !void {
             };
         }
         try limits_mod.validate(&limits);
-        out.gossip.processor_limits = limits;
+        out.processor_limits = limits;
+        out.gossip.payload_limits = limits;
         out.gossip.validation_capacity = limits_mod.items(&limits);
         out.gossip.mcache_arena_bytes = @max(2 * limits_mod.bytes(&limits), n.gossipsub.constants.maxCompressedLen(n.gossipsub.constants.MAX_PAYLOAD_SIZE) + 4096);
     }
@@ -241,7 +244,7 @@ fn parseGossip(value: Value, out: *Config) !void {
                 .bytes = @intCast(try integer(try get(value_limit, "bytes"), 1024 * 1024 * 1024)),
             };
         }
-        out.gossip.execution_limits = limits;
+        out.execution_limits = limits;
     }
     out.gossip.iwant_followup_ms = try bigint(try get(policy, "iwantFollowupMs"));
     out.gossip.idontwant_min_data_size = @as(usize, @intCast(try integer(try get(policy, "idontwantMinDataSize"), n.gossipsub.constants.GOSSIP_MAX_SIZE)));
