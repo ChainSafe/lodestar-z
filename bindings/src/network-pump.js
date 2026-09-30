@@ -6,7 +6,7 @@ const BLOCK_MAX = 256;
 const REPORT_ENTRY_MAX = 512;
 const REPORT_COUNT_MAX = 100;
 const RETRY_MS = 25;
-/** Consecutive failed turns, each counted once for a failed capacity read or exchange, before escalating. */
+/** Consecutive exchanges that could not run before escalating. */
 const FAILURES_MAX = 3;
 /** One turn's time budget; the rest yields to the next turn. */
 export const BUDGET_MS = 8;
@@ -220,7 +220,7 @@ export class NativePump {
   #weak = new WeakRef(this);
   #closing = false;
   #stopped = false;
-  /** Consecutive turns whose capacity read threw or whose exchange could not run. */
+  /** Consecutive exchanges that could not run. */
   #failures = 0;
   /** A delivery failure was arbitrated, and the host's `failed` received the first. */
   #arbitrated = false;
@@ -524,13 +524,12 @@ export class NativePump {
 
   #turn(deadline) {
     let demand = null;
-    let failed = false;
+    let capacityFailed = false;
     try {
       demand = this.#demand(deadline);
     } catch (error) {
       // The turn still settles control; the capacity read retries on the timer.
-      if (++this.#failures >= FAILURES_MAX) this.#escalate("failed_turns", error);
-      failed = true;
+      capacityFailed = true;
       this.#error(error);
     }
     const batch = this.#take();
@@ -543,13 +542,11 @@ export class NativePump {
       const code = error?.code;
       if (typeof code === "string") this.#escalate("generated_batch", code);
       this.#requeue(batch);
-      // A turn whose capacity read failed has counted already.
-      if (!failed && ++this.#failures >= FAILURES_MAX) this.#escalate("failed_turns", error);
+      if (++this.#failures >= FAILURES_MAX) this.#escalate("failed_turns", error);
       this.#error(error);
       return "retry";
     }
-    // Any exchange that ran without a failed capacity read ends the run, a settling one after close included.
-    if (!failed) this.#failures = 0;
+    this.#failures = 0;
     this.#acknowledge(result.acknowledged);
     let held = false;
     // A serving start native could not hand over is decided before delivery and its cleanup.
@@ -565,7 +562,8 @@ export class NativePump {
     const budgetEnded = demand !== null && demand.messages > 0 && !demand.claimOrdinary;
     let next = "idle";
     if (result.more || held || (budgetEnded && result.disabledWaiting)) next = "now";
-    else if (failed || result.parked.serving || result.parked.ordinary || result.disabledWaiting) next = "later";
+    else if (capacityFailed || result.parked.serving || result.parked.ordinary || result.disabledWaiting)
+      next = "later";
     if (deliveryFailed) this.#fail();
     return next;
   }

@@ -438,44 +438,83 @@ describe("binding pump scheduling", () => {
       },
     ],
     ["breaks its contract", () => ({ordinary: "yes", serving: 1})],
-  ])("retries a capacity read that %s on the timer, settling control each turn, and escalates the third", (_, read) => {
+  ])("pauses payload delivery when capacity %s while continuing settlement and timed retries", (_, read) => {
     vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
     const node = fixture();
     const queued = immediates();
     node.host.capacity.mockImplementation(read as unknown as () => null);
     node.pump.request();
-    expect(runUntilEscalated(queued, 20)).toBe(true);
-    expect(node.calls()).toEqual([
-      [[], control],
-      [[], control],
-    ]);
-    expect(node.host.error).toHaveBeenCalledTimes(2);
+    expect(runUntilEscalated(queued, 30)).toBe(false);
+    expect(node.calls().length).toBeGreaterThanOrEqual(5);
+    for (const call of node.calls()) expect(call).toEqual([[], control]);
+    expect(node.host.error).toHaveBeenCalledTimes(node.calls().length);
     expect(node.host.peers).not.toHaveBeenCalled();
-    expect(node.runtime.fail).toHaveBeenCalledOnce();
-    expect(node.runtime.fail.mock.calls[0][0]).toBe("failed_turns");
-    expect(node.runtime.fail.mock.calls[0][1]).toMatch(/capacity/);
+    expect(node.host.serve).not.toHaveBeenCalled();
+    expect(node.host.failed).not.toHaveBeenCalled();
+    expect(node.runtime.fail).not.toHaveBeenCalled();
   });
 
-  it("a capacity read that succeeds resets the failure count", () => {
+  it("acknowledges admitted work while capacity fails, resumes serving on recovery, and clears retries on close", async () => {
+    vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
+    const node = fixture();
+    node.runtime.exchange.mockImplementation((actions) => ({
+      ...idle,
+      acknowledged: actions.flatMap((action) => (action.type === "verdict" ? [action.handle] : [])),
+    }));
+    node.runtime.exchange.mockReturnValueOnce({...idle, gossip: gossip({messages: [1]})});
+    node.pump.request();
+    await macrotask();
+    const job = node.host.validate.mock.calls[0][0];
+    const failure = new Error("capacity failed");
+    node.host.capacity.mockImplementation(() => {
+      throw failure;
+    });
+    for (let i = 0; i < 6; i++) {
+      vi.advanceTimersByTime(25);
+      await macrotask();
+    }
+    await expect(job.reported).resolves.toBeUndefined();
+    expect(node.host.error.mock.calls.length).toBeGreaterThanOrEqual(5);
+    expect(node.host.failed).not.toHaveBeenCalled();
+    expect(node.runtime.fail).not.toHaveBeenCalled();
+    expect(node.host.validate).toHaveBeenCalledOnce();
+    const start = incoming();
+    node.host.capacity.mockReturnValue({ordinary: true, serving: 32});
+    node.runtime.exchange.mockReturnValueOnce({...idle, serving: [start]});
+    node.pump.request();
+    await macrotask();
+    expect(node.host.serve).toHaveBeenCalledOnce();
+    expect(start.cancel).not.toHaveBeenCalled();
+    node.host.capacity.mockImplementation(() => {
+      throw failure;
+    });
+    node.pump.close();
+    node.closed.resolve({reason: "requested"});
+    await macrotask();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("successful settlement resets exchange failures even while capacity remains unavailable", () => {
     vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
     const node = fixture();
     const queued = immediates();
-    const fails = [true, true, false, true, true];
     node.host.capacity.mockImplementation(() => {
-      if (fails.shift()) throw new Error("capacity failed");
-      return {ordinary: true, serving: 32};
+      throw new Error("capacity failed");
     });
-    // The delivering turn reports more, so the failing reads after it follow at once, then on the timer.
-    node.runtime.exchange.mockImplementation((_actions, demand) =>
-      demand.messages > 0 && fails.length > 0 ? {...idle, more: true} : idle
-    );
+    const failure = new Error("exchange failed");
+    const results = [failure, {...idle, more: true}, failure, {...idle, more: true}, failure, idle];
+    node.runtime.exchange.mockImplementation(() => {
+      const result = results.shift() ?? idle;
+      if (result instanceof Error) throw result;
+      return result;
+    });
     node.pump.request();
-    expect(runUntilEscalated(queued, 20)).toBe(false);
-    expect(node.host.capacity).toHaveBeenCalledTimes(6);
-    expect(node.host.error).toHaveBeenCalledTimes(4);
+    expect(runUntilEscalated(queued, 40)).toBe(false);
+    expect(node.runtime.exchange.mock.calls.length).toBeGreaterThanOrEqual(6);
+    expect(node.runtime.fail).not.toHaveBeenCalled();
   });
 
-  it("counts a turn whose capacity read and exchange both failed once", () => {
+  it("still escalates consecutive exchange failures when capacity also fails", () => {
     vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
     const node = fixture();
     const queued = immediates();
@@ -488,8 +527,8 @@ describe("binding pump scheduling", () => {
     node.pump.request();
     expect(runUntilEscalated(queued, 20)).toBe(true);
     expect(node.host.capacity).toHaveBeenCalledTimes(3);
-    expect(node.runtime.exchange).toHaveBeenCalledTimes(2);
-    expect(node.runtime.fail).toHaveBeenCalledExactlyOnceWith("failed_turns", "capacity failed");
+    expect(node.runtime.exchange).toHaveBeenCalledTimes(3);
+    expect(node.runtime.fail).toHaveBeenCalledExactlyOnceWith("failed_turns", "exchange failed");
   });
 
   it("after close, an exchange that settles ends a run of failed ones", () => {
@@ -585,7 +624,7 @@ describe("binding pump scheduling", () => {
 
   it.each([
     ["generated_batch", "generated_batch", "InvalidNetworkInteger"],
-    ["failed_turns", "failed_turns", "capacity failed"],
+    ["failed_turns", "failed_turns", "exchange failed"],
     ["completion_contract", "completion_contract", "completed publication 0:1"],
     ["close_missing", "completion_contract", "closed with records unsettled: 1"],
   ])(
@@ -596,6 +635,23 @@ describe("binding pump scheduling", () => {
       expect(child.signal, child.stderr).toBe("SIGABRT");
       expect(child.stdout).not.toContain("survived");
       expect(child.stderr).toContain(`FATAL ERROR: native network bridge ${site}: ${reason}\n`);
+    }
+  );
+
+  it(
+    "a real runtime settles commands through capacity failures, recovers, and closes normally",
+    childTestTimeout(),
+    () => {
+      const child = spawnChild([
+        "--import",
+        "tsx",
+        "bindings/test/fixtures/network-escalation.mjs",
+        "capacity_recovery",
+      ]);
+      expect(child.status, child.stderr).toBe(0);
+      expect(child.signal, child.stderr).toBeNull();
+      expect(child.stdout).toContain("capacity recovered; identity settled; closed");
+      expect(child.stdout).not.toContain("survived");
     }
   );
 

@@ -1,6 +1,6 @@
 // A real pump drains a real native runtime until the fatal site the first argument names terminates the process
 // through native `fail`: `generated_batch` sends a demand native refuses, as a pump generating an invalid one would,
-// `failed_turns` has a host whose capacity read keeps throwing, `completion_contract` has exchanges deliver a
+// `failed_turns` has an exchange that keeps throwing, `completion_contract` has exchanges deliver a
 // completion the completion owner never admitted, and `close_missing` has them lose a command's completion before
 // native closes. Printing "survived" is the regression.
 import bindings from "../../src/bindings.js";
@@ -21,9 +21,17 @@ if (site === "completion_contract") {
     return {...result, completions: result.completions.filter(({family}) => family !== "command")};
   };
 }
+let capacityReads = 0;
+let capacityErrors = 0;
+let identitySettled = false;
+let recovered;
+const recovery = new Promise((resolve) => {recovered = resolve;});
 const host = {
   capacity: () => {
-    if (site === "failed_turns") throw Error("capacity failed");
+    if (site === "capacity_recovery") {
+      if (++capacityReads <= 5 || !identitySettled) throw Error("capacity failed");
+      recovered();
+    }
     return {ordinary: true, serving: 32};
   },
   validate: (job) => Promise.resolve(job.messages.map(() => "ignore")),
@@ -32,7 +40,7 @@ const host = {
   peers: () => undefined,
   failed: () => undefined,
   logs: () => undefined,
-  error: () => undefined,
+  error: () => {capacityErrors++;},
 };
 const pump = new NativePump(host, {failure: null});
 const native = new NativeRuntime(applicationConfig(), pump.request);
@@ -45,15 +53,28 @@ pump.attach({
   },
   close: () => native.close(),
   drainLogs: (max) => native.drainLogs(max),
-  exchange: (actions, demand) =>
-    native.exchange(actions, site === "generated_batch" ? {...demand, settleCells: 0} : demand),
+  exchange: (actions, demand) => {
+    if (site === "failed_turns") throw Error("exchange failed");
+    return native.exchange(actions, site === "generated_batch" ? {...demand, settleCells: 0} : demand);
+  },
   fail: (raised, reason) => native.fail(raised, reason),
   turns: native.turns,
 });
-// A failed capacity read retries on an unreferenced timer, so this one keeps the process alive for the third.
-setTimeout(() => console.log("survived"), 5000);
+// Keep failed/recovering turns alive until the bounded scenario settles or its deadline expires.
+const deadline = setTimeout(() => console.log("survived"), 5000);
 pump.request();
 if (site === "close_missing") {
   void native.getIdentity();
   void native.close();
+}
+
+if (site === "capacity_recovery") {
+  await native.getIdentity();
+  identitySettled = true;
+  await recovery;
+  if (capacityErrors < 5) throw Error(`Unexpected capacity errors: ${capacityErrors}`);
+  pump.close();
+  await native.close();
+  clearTimeout(deadline);
+  console.log("capacity recovered; identity settled; closed");
 }
