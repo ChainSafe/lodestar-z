@@ -33,10 +33,9 @@ if (!isMainThread) {
   const outgoing = runtime.request(remote.peerId, blocks, new Uint8Array(32));
   const pending = outgoing.next().catch(() => undefined);
   const incoming = await until(() => nextIncoming(runtime));
-  await until(() => runtime.diagnostics().gossip.queued > 0);
-  const batch = exchange(runtime, gossipAll).gossip;
+  const batch = await until(() => exchange(runtime, gossipAll).gossip);
   assert.equal(batch.messages.length, 1);
-  parentPort.postMessage({port: identity.localEndpoint.port, diagnostics: runtime.diagnostics()});
+  parentPort.postMessage({port: identity.localEndpoint.port});
   parentPort.on("message", () => void [incoming, outgoing, pending, batch]);
 } else {
   const worker = new Worker(new URL(import.meta.url));
@@ -62,9 +61,6 @@ if (!isMainThread) {
       }
     });
     const [held] = await ready;
-    assert.equal(held.diagnostics.requests.occupied, 1);
-    assert.equal(held.diagnostics.incoming.occupied, 1);
-    assert.equal(held.diagnostics.gossip.occupied, 1);
     await worker.terminate();
     assert.deepEqual((await runtime.getIdentity()).peerId, identity.peerId);
     const socket = createSocket("udp4");

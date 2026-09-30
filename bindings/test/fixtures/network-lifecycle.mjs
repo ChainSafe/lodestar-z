@@ -285,14 +285,15 @@ if (mode === "exit") {
   settlements.watch(() => served[0].ready());
   for (const incoming of served) settlements.watch(() => incoming.closed);
   right.holdOperations(true);
-  for (let i = 0; i < right.diagnostics().requests.capacity; i++) {
-    const stream = right.request(identity.peerId, BLOCKS, new Uint8Array(32));
-    settlements.watch(() => stream.next());
-  }
+  assert.throws(() => {
+    for (let i = 0; i < 1024; i++) {
+      const stream = right.request(identity.peerId, BLOCKS, new Uint8Array(32));
+      settlements.watch(() => stream.next());
+    }
+  }, {code: "NetworkRequestRejected", reason: "slots_exhausted"});
   for (let i = 0; i < 16; i++) settlements.watch(() => right.getIdentity());
   for (let i = 0; i < 8; i++) settlements.watch(() => right.connect(...unreachableConnect()));
-  const {capacity, urgentReserved} = right.diagnostics().publications;
-  for (let i = 0; i < capacity - urgentReserved; i++)
+  for (let i = 0; i < 16; i++)
     settlements.watch(() =>
       right.publishGossip(topicName(), new Uint8Array(4000).fill(i), {allowZeroPeers: true, ignoreDuplicate: true})
     );
@@ -300,10 +301,6 @@ if (mode === "exit") {
   await settlements.settled();
   assert.deepEqual(await unsettled, []);
   assert(settlements.counts.every((count) => count === 1));
-  const diagnostics = right.diagnostics();
-  assert.equal(diagnostics.operationOccupied, 0);
-  assert.equal(diagnostics.typedStoreBytes, 0);
-  for (const family of ["publications", "requests", "incoming"]) assert.equal(diagnostics[family].occupied, 0);
   await left.close();
   right = null;
   served.length = 0;
@@ -333,7 +330,7 @@ if (mode === "exit") {
   // The owner stops and releases the notifier, which finalizes while every completion waits for an exchange.
   for (let i = 0; i < 400 && runtime.state !== "closed"; i++) await delay(5);
   await delay(50);
-  assert(runtime.diagnostics().publications.occupied > 64);
+  assert(settlements.counts.every((count) => count === 0));
   holdSettling(runtime, false);
   assert.deepEqual(await closing, {reason: "requested"});
   await settlements.settled();

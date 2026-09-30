@@ -13,7 +13,7 @@ interface RequestHandle {
   index: number;
 }
 
-interface NativeBridge extends Pick<NativeNetworkApplicationRuntime, "diagnostics"> {
+interface NativeBridge {
   /** Each command returns its cell handle; its completion arrives in an exchange. */
   applyIntent(...args: Parameters<NativeNetworkApplicationRuntime["applyIntent"]>): RequestHandle;
   connect(...args: Parameters<NativeNetworkApplicationRuntime["connect"]>): RequestHandle;

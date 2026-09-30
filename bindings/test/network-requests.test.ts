@@ -12,7 +12,6 @@ import {
   startRuntime,
 } from "./utils/network.js";
 import {incomingPair, takeIncoming} from "./utils/network-incoming.js";
-import {startPeer} from "./utils/network-peer.js";
 
 test("application request rejects control protocols at the exported boundary", async () => {
   const config = applicationConfig();
@@ -44,13 +43,6 @@ test("request admission owns terminal state and a bounded single pull", async ()
     await expect(stream.next()).rejects.toMatchObject({code: "NetworkRequestBusy"});
     await expect(pending).rejects.toMatchObject({code: "NetworkRequestRejected", reason: "disconnected"});
     expect(await stream.next()).toEqual({done: true, value: undefined});
-    expect(runtime.diagnostics().requests).toMatchObject({
-      capacity: 6,
-      inputBytes: 0,
-      occupied: 0,
-      reservedBytes: 0,
-      sinkBytes: 0,
-    });
   } finally {
     await runtime.close();
   }
@@ -112,22 +104,14 @@ stockTest(
       expect(first.done).toBe(false);
       expect(first.value).toMatchObject({fork: "deneb", protocol: BLOCKS});
       expect(first.value.data).toEqual(Uint8Array.from(payload(4000, 71)));
-      expect(runtime.diagnostics().requests.chunksCopied).toBe(1n);
+
       await new Promise((resolve) => setTimeout(resolve, 30));
-      expect(runtime.diagnostics().requests.chunksCopied).toBe(1n);
+
       const second = await stream.next();
       expect(second.value.data).toEqual(Uint8Array.from(payload(4000, 72)));
       expect(await stream.next()).toEqual({done: true, value: undefined});
       expect((await peer.command("stats")).lastRequest).toBe("00".repeat(64));
       expect(first.value.data).toEqual(Uint8Array.from(payload(4000, 71)));
-      expect(runtime.diagnostics().requests).toMatchObject({
-        bytesCopied: 8000n,
-        chunksCopied: 2n,
-        inputBytes: 0,
-        occupied: 0,
-        reservedBytes: 0,
-        sinkBytes: 0,
-      });
     } finally {
       await runtime.close();
       await peer.stop();
@@ -155,7 +139,6 @@ stockTest(
       await peer.command("scenario", {scenario: "empty"});
       const empty = runtime.request(id, BLOCKS, new Uint8Array(0), {expectedChunks: 0});
       expect(await empty.next()).toEqual({done: true, value: undefined});
-      expect(runtime.diagnostics().requests.reservedBytes).toBe(0);
     } finally {
       await runtime.close();
       await peer.stop();
@@ -187,7 +170,6 @@ stockTest(
       await cancelled;
       expect(await stream.next()).toEqual({done: true, value: undefined});
       await Promise.all(commands);
-      expect(runtime.diagnostics().requests).toMatchObject({occupied: 0, reservedBytes: 0});
     } finally {
       await runtime.close();
       await peer.stop();
@@ -215,8 +197,6 @@ test("request validation rejects malformed options and detached input without re
     const detached = new Uint8Array(32);
     structuredClone(detached.buffer, {transfer: [detached.buffer]});
     expect(() => runtime.request(identity.peerId, BLOCKS, detached)).toThrow("InvalidNetworkBytes");
-    expect(runtime.diagnostics().requests).toMatchObject({occupied: 0, reservedBytes: 0});
-    expect(runtime.diagnostics().operationOccupied).toBe(0);
   } finally {
     await runtime.close();
   }
@@ -231,7 +211,7 @@ stockTest(
       const copied = runtime.request(id, BLOCKS, new Uint8Array(64), {responseTimeoutMs: 100});
       const held = await copied.next();
       await new Promise((resolve) => setTimeout(resolve, 180));
-      expect(runtime.diagnostics().requests.sinkBytes).toBe(0);
+
       await expect(copied.next()).rejects.toMatchObject({
         code: "NetworkRequestFailed",
         phase: "response",
@@ -245,7 +225,6 @@ stockTest(
       await replacement.return?.();
       expect((await queued.next()).value.data).toEqual(Uint8Array.from(payload(4000, 71)));
       await expect(queued.next()).rejects.toMatchObject({phase: "response", reason: "host_timeout"});
-      expect(runtime.diagnostics().requests).toMatchObject({occupied: 0, reservedBytes: 0, sinkBytes: 0});
     } finally {
       await runtime.close();
       await peer.stop();
@@ -315,11 +294,6 @@ stockTest(
       const independent = runtime.request(id, BLOCKS, new Uint8Array(32));
       await Promise.all(commands);
       await independent.return?.();
-      expect(runtime.diagnostics().requests).toMatchObject({
-        occupied: 0,
-        requestFull: 1n,
-        reservedBytes: 0,
-      });
     } finally {
       await runtime.close();
       await peer.stop();
@@ -365,15 +339,9 @@ stockTest(
       );
       await runtime.close();
       expect(["chunk", "NetworkClosed"]).toContain(await settled);
-      expect(runtime.diagnostics().requests).toMatchObject({
-        copyingBytes: 0,
-        inputBytes: 0,
-        reservedBytes: 0,
-        sinkBytes: 0,
-      });
+
       await expect(streams[1].next()).rejects.toMatchObject({code: "NetworkClosed"});
       await streams[0].return?.();
-      expect(runtime.diagnostics().requests.occupied).toBe(0);
     } finally {
       await runtime.close();
       await peer.stop();
@@ -398,7 +366,6 @@ stockTest(
       const complete = runtime.request(id, BLOCKS, new Uint8Array(0));
       expect((await complete.next()).done).toBe(true);
       await expect(complete.throw?.(value)).rejects.toBe(value);
-      expect(runtime.diagnostics().requests.occupied).toBe(0);
     } finally {
       await runtime.close();
       await peer.stop();
@@ -406,32 +373,6 @@ stockTest(
   },
   20000
 );
-
-test.each([0, -1])("application startup requires RPC and publication progress capacity at delta %s", async (delta) => {
-  const config = applicationConfig();
-  const probe = await startPeer(config);
-  const budget = (await probe.diagnostics()).payloadBudget;
-  await probe.stop();
-  config.resources.bridgeBudgetBytes +=
-    budget.incomingMinimumBytes +
-    budget.outgoingMinimumBytes +
-    budget.publicationMinimumBytes -
-    budget.limitBytes +
-    delta;
-  if (delta < 0) {
-    expect(() => startRuntime(config)).toThrow("NetworkBridgeBudgetExceeded");
-    return;
-  }
-  const runtime = startRuntime(config);
-  try {
-    await expect(runtime.request(runtime.identity.peerId, BLOCKS, new Uint8Array(32)).next()).rejects.toMatchObject({
-      reason: "disconnected",
-    });
-    expect(runtime.diagnostics().requests).toMatchObject({inputBytes: 0, occupied: 0, reservedBytes: 0, sinkBytes: 0});
-  } finally {
-    await runtime.close();
-  }
-}, 20000);
 
 test.skipIf(!HOST || !HOODI)(
   "retained Hoodi bytes round-trip with a supported Fulu response context",
@@ -669,7 +610,7 @@ test("a final chunk waits for a delayed pull, and an outcome that arrives with n
     expect((await first).value?.data).toEqual(chunk(7));
     // The stream ends only once the next pull consumes its chunk, so meanwhile it keeps its cell and awaits nothing.
     await new Promise((resolve) => setTimeout(resolve, 30));
-    expect(right.diagnostics().requests).toMatchObject({chunksCopied: 1n, occupied: 1, pendingPulls: 0});
+
     expect(await finished.next()).toEqual(done);
 
     // Held past its response deadline, a delivered chunk ends its stream while no pull waits.
@@ -678,9 +619,7 @@ test("a final chunk waits for a delayed pull, and an outcome that arrives with n
     const incoming = await takeIncoming(left);
     await incoming.respond(chunk(9), requestForks[0]);
     const value = (await held).value;
-    await expect
-      .poll(() => right.diagnostics().requests, {timeout: 5000})
-      .toMatchObject({occupied: 1, pendingPulls: 0, sinkBytes: 0, terminalCells: 1});
+    await incoming.closed;
     await expect(timed.next()).rejects.toMatchObject({
       code: "NetworkRequestFailed",
       phase: "response",
@@ -688,7 +627,6 @@ test("a final chunk waits for a delayed pull, and an outcome that arrives with n
     });
     expect(await timed.next()).toEqual(done);
     expect(value?.data).toEqual(chunk(9));
-    expect(right.diagnostics().requests).toMatchObject({occupied: 0, reservedBytes: 0});
   } finally {
     await Promise.all([left.close(), right.close()]);
   }
@@ -733,7 +671,6 @@ test("a return racing a delivered chunk or a pending pull settles the pull first
     await cancelled;
     expect(await retiring).toEqual(done);
     expect(settled).toEqual(["pull", "return"]);
-    expect(right.diagnostics().requests).toMatchObject({chunksCopied: 1n, occupied: 0, reservedBytes: 0});
   } finally {
     holdSettling(right, false);
     await Promise.all([left.close(), right.close()]);
@@ -765,9 +702,6 @@ test("every return or throw shares the first retirement, which settles after the
     const ended = right.request(right.identity.peerId, BLOCKS, new Uint8Array(32));
     await expect(ended.next()).rejects.toMatchObject({reason: "disconnected"});
     await expect(ended.throw?.(value)).rejects.toBe(value);
-    await expect
-      .poll(() => right.diagnostics().requests)
-      .toMatchObject({occupied: 0, pendingPulls: 0, reservedBytes: 0});
   } finally {
     await Promise.all([left.close(), right.close()]);
   }
@@ -783,15 +717,10 @@ test("close hands each unpulled request's outcome to its iterator, whose next pu
     const held = right.request(peer, BLOCKS, new Uint8Array(32));
     await takeIncoming(left);
     const refused = right.request(right.identity.peerId, BLOCKS, new Uint8Array(32));
-    await expect.poll(() => right.diagnostics().requests.terminalCells).toBe(1);
+    await right.getIdentity();
     expect(await right.close()).toEqual({reason: "requested"});
     // No request outlives the close.
-    expect(right.diagnostics().requests).toMatchObject({
-      occupied: 0,
-      pendingPulls: 0,
-      reservedBytes: 0,
-      terminalCells: 0,
-    });
+
     for (const stream of [delivered, held, refused]) {
       await expect(stream.next()).rejects.toMatchObject({code: "NetworkClosed"});
       expect(await stream.next()).toEqual(done);
@@ -810,18 +739,15 @@ test("a full request table delivers every outcome and reuses each cell with the 
   try {
     const self = lifecycle.identity.peerId;
     await commandCompleted(native, native.applyIntent(localIntent(config), config.initialSlot), settleOnly);
-    const capacity = native.diagnostics().requests.capacity;
     for (const generation of [1n, 2n]) {
-      const handles = Array.from({length: capacity}, () =>
-        native.requestStart(self, BLOCKS, new Uint8Array(32), undefined)
-      );
+      const handles: ReturnType<typeof native.requestStart>[] = [];
+      expect(() => {
+        for (let i = 0; i < 1024; i++) handles.push(native.requestStart(self, BLOCKS, new Uint8Array(32), undefined));
+      }).toThrow(expect.objectContaining({code: "NetworkRequestRejected", reason: "slots_exhausted"}));
       expect(handles.map((handle) => handle.generation)).toEqual(handles.map(() => generation));
-      expect(() => native.requestStart(self, BLOCKS, new Uint8Array(32), undefined)).toThrow(
-        expect.objectContaining({code: "NetworkRequestRejected", reason: "slots_exhausted"})
-      );
       for (const handle of handles) native.requestPull(handle);
       const outcomes = new Map<number, unknown>();
-      for (let i = 0; i < 2000 && outcomes.size < capacity; i++) {
+      for (let i = 0; i < 2000 && outcomes.size < handles.length; i++) {
         for (const completion of native.exchange([], settleOnly).completions)
           if (completion.family === "request") outcomes.set(completion.handle.index, completion);
         await new Promise((resolve) => setTimeout(resolve, 5));
@@ -831,7 +757,6 @@ test("a full request table delivers every outcome and reuses each cell with the 
       );
       for (const handle of handles) expect(() => native.requestPull(handle)).toThrow("InvalidRequestHandle");
     }
-    expect(native.diagnostics().requests).toMatchObject({occupied: 0, requestFull: 2n, reservedBytes: 0});
   } finally {
     await closedBy(native, settleOnly);
   }

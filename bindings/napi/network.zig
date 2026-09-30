@@ -284,9 +284,6 @@ pub fn close(self: *@This()) void {
     }
 }
 
-fn text(value: []const u8) !Value {
-    return js.env().createStringUtf8(value);
-}
 /// The resolved limits a host sizes its own work by: retained peers and concurrently served requests.
 fn resolvedLimits(env: napi.Env, runtime: *const Runtime) !Value {
     const object = try env.createObject();
@@ -332,19 +329,6 @@ pub fn setLogLevel(self: *@This(), level: js.Value) !void {
     try @import("network_logs.zig").configure(try self.owner(), level.val);
 }
 
-pub fn diagnostics(self: *@This()) !js.Value {
-    const snapshot = try (try self.owner()).snapshot();
-    const object = try @import("network_js.zig").scalarFields(js.env(), &snapshot);
-    try object.setNamedProperty("state", try text(@tagName(snapshot.state)));
-    try object.setNamedProperty("terminalErrorCode", if (snapshot.terminal_error) |err| try text(@errorName(err)) else try js.env().getNull());
-    try object.setNamedProperty("resolvedCapacities", try @import("network_js.zig").scalarFields(js.env(), &snapshot.resolvedCapacities));
-    try object.setNamedProperty("payloadBudget", try @import("network_js.zig").scalarFields(js.env(), &snapshot.payloadBudget));
-    try object.setNamedProperty("publications", try @import("network_js.zig").scalarFields(js.env(), &snapshot.publications));
-    try object.setNamedProperty("requests", try request_js.diagnostics(js.env(), &snapshot.requests));
-    try object.setNamedProperty("gossip", try gossip_js.diagnostics(js.env(), &snapshot.gossip));
-    try object.setNamedProperty("incoming", try incoming_js.diagnostics(js.env(), &snapshot.incoming));
-    return .{ .val = object };
-}
 const commands = @import("network_commands.zig");
 const application_cfg = @import("network_application_config.zig");
 const projection = @import("network_peer_projection.zig");

@@ -24,7 +24,6 @@ const methods = new Set([
   "getDirectPeers",
   "exchange",
   "publishGossip",
-  "diagnostics",
   "getMetrics",
   "drainLogs",
   "setLogLevel",

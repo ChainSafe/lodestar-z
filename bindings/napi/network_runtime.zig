@@ -279,6 +279,8 @@ pub const Runtime = struct {
             if (self.requests) |*requests| requests.deinit();
             if (self.incoming) |*incoming| incoming.deinit();
             if (self.gossip) |*gossip| gossip.deinit();
+            std.debug.assert(self.payload_budget.used == 0);
+            for (self.payload_budget.owned) |owned| std.debug.assert(owned == 0);
             std.crypto.secureZero(u8, std.mem.asBytes(self));
             allocator.destroy(self);
             const claimed = runtime_live.swap(false, .release);
@@ -306,62 +308,6 @@ pub const Runtime = struct {
         self.reason = .failed;
         self.terminal_error = err;
         self.diag.state = .failed;
-    }
-    pub fn snapshot(self: *Runtime) !Diagnostics {
-        self.lock();
-        defer self.unlock();
-        var result = self.diag;
-        result.terminal_error = if (self.reason == .failed) self.terminal_error else null;
-        result.operationOccupied = self.table.occupied;
-        result.peerReportsIgnored = self.reports.ignored;
-        result.connectOccupied = self.table.connects;
-        result.ownerSequence = self.table.sequence;
-        for (&self.table.cells) |*cell| {
-            result.preparingPins += @intFromBool(cell.state == .preparing);
-            result.copyingPins += @intFromBool(cell.state == .copying);
-        }
-        if (self.lane) |lane| {
-            result.peerLaneOccupied = lane.len;
-            result.peerLaneBytes = @sizeOf(projection.Lane);
-        }
-        if (self.stores != null) result.typedStoreBytes = Stores.bytes(self.peer_capacity);
-        result.payloadBudget = self.payload_budget.snapshot();
-        if (self.requests) |*requests| {
-            result.requests = requests.snapshot();
-            for (requests.cells) |cell| result.copyingPins += @intFromBool(cell.copying);
-        }
-        result.liveNativeRequestedBytes = if (self.heavy != null) self.diag.nativeRequestedBytes else 0;
-        result.metricsExportBytes = self.metrics.allocatedBytes();
-        result.liveBridgeRequestedBytes = result.metricsExportBytes + @sizeOf(Runtime) + result.peerLaneBytes + result.typedStoreBytes + if (self.heavy != null) @sizeOf(Owner) - @sizeOf(n.NetworkCore) else @as(usize, 0);
-
-        if (self.requests) |*requests| result.liveBridgeRequestedBytes += requests.cells.len * @sizeOf(requests_mod.Cell) + result.requests.inputBytes + result.requests.sinkBytes;
-        if (self.incoming) |*incoming| {
-            result.incoming = incoming.snapshot();
-            for (incoming.cells) |cell| {
-                result.copyingPins += @intFromBool(cell.copying);
-                result.preparingPins += @intFromBool(cell.state == .response_preparing);
-            }
-            result.liveBridgeRequestedBytes += incoming.cells.len * @sizeOf(incoming_mod.Cell) + result.incoming.requestBytes + result.incoming.responseBytes;
-        }
-        if (self.gossip) |*gossip| {
-            result.gossip = gossip.snapshot(try gossip_mod.monotonic());
-            result.copyingPins += @intCast(gossip.diag.copying);
-            result.liveBridgeRequestedBytes += gossip_mod.Table.backingBytes(gossip.cells.len, gossip.store.bytes.len);
-        }
-        if (self.publications) |*table| {
-            result.publications = table.snapshot();
-            result.liveBridgeRequestedBytes += table.cells.len * @sizeOf(publications_mod.Cell) + result.publications.payloadBytes;
-            for (table.cells) |cell| {
-                result.preparingPins += @intFromBool(cell.state == .preparing);
-                result.copyingPins += @intFromBool(cell.state == .copying);
-            }
-            result.gossip.publicationBytes = result.publications.reservedBytes;
-            result.gossip.publicationCopies = result.publications.copies;
-            result.gossip.publicationQueued = result.publications.queued;
-            result.gossip.publicationSelected = result.publications.selected;
-            result.gossip.publicationDuplicates = result.publications.duplicates;
-        }
-        return result;
     }
     /// Where `row` belongs now. Neither checks nor serving starts are served after a stop, no claim after
     /// quiescence, and nothing once the close result was delivered, so a host may stop exchanging.

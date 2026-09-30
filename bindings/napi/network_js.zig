@@ -1,4 +1,3 @@
-const std = @import("std");
 const napi = @import("zapi:zapi").napi;
 const Value = napi.Value;
 
@@ -45,21 +44,6 @@ pub fn endpoint(env: napi.Env, value: @import("network").Address) !Value {
             try object.setNamedProperty("address", try bytes(env, &ip.octets));
             try object.setNamedProperty("port", try env.createUint32(ip.port));
         },
-    }
-    return object;
-}
-
-pub fn scalarFields(env: napi.Env, value: anytype) !napi.Value {
-    const fields = @typeInfo(@TypeOf(value.*)).@"struct".fields;
-    comptime std.debug.assert(fields.len <= 64);
-    const object = try env.createObject();
-    inline for (fields) |field| {
-        const copied: ?napi.Value = switch (@typeInfo(field.type)) {
-            .int => if (field.type == u64) try env.createBigintUint64(@field(value, field.name)) else try env.createDouble(@floatFromInt(@field(value, field.name))),
-            .float => try env.createDouble(@field(value, field.name)),
-            else => null,
-        };
-        if (copied) |item| try object.setNamedProperty(field.name, item);
     }
     return object;
 }
