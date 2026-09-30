@@ -679,17 +679,15 @@ fn handoff(candidate: *const adapter.Candidate) !void {
     const gossipsub = service.gossipsub;
     var core = try @import("../peer_manager.zig").PeerManager.init(std.testing.allocator, &pair.client_ctx.local_peer_id, &local, opts.peerManager(), service.router.capabilities().receive, pair.client.limits.connections_max);
     defer core.deinit();
-    var control = try @import("../control_protocol.zig").ControlProtocol.init(std.testing.allocator, @intCast(core.catalog.rows.len), opts.peers.max_peers, 1);
-    defer control.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(u16, 1), core.discoveredBatch(gossipsub, &control, &.{candidate.*}, pair.now).accepted);
+    try std.testing.expectEqual(@as(u16, 1), core.discoveredBatch(gossipsub, &.{candidate.*}, pair.now).accepted);
     try std.testing.expectEqual(candidate.sequence, core.catalog.rows[0].intent.hints.?.sequence);
     var intents: [2]dial.DialIntent = undefined;
-    try std.testing.expectEqual(@as(usize, 1), core.dialIntents(gossipsub, &control, &pair.client, pair.now, &intents));
+    try std.testing.expectEqual(@as(usize, 1), core.dialIntents(gossipsub, &pair.client, pair.now, &intents));
     try std.testing.expect(intents[0].peer.eql(&candidate.peer));
     try std.testing.expectEqual(candidate.addresses[0], intents[0].address);
     try std.testing.expect(core.dialFailed(intents[0].token, pair.now));
-    try std.testing.expectEqual(@as(u16, 1), core.discoveredBatch(gossipsub, &control, &.{candidate.*}, pair.now).accepted);
-    try std.testing.expectEqual(@as(usize, 0), core.dialIntents(gossipsub, &control, &pair.client, pair.now, &intents));
+    try std.testing.expectEqual(@as(u16, 1), core.discoveredBatch(gossipsub, &.{candidate.*}, pair.now).accepted);
+    try std.testing.expectEqual(@as(usize, 0), core.dialIntents(gossipsub, &pair.client, pair.now, &intents));
     for (3..6) |scalar| {
         const key = try @import("../wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{@as(u8, @intCast(scalar))}));
         const identity = types.PeerId.fromPublicKey(&key.publicKey());
@@ -697,8 +695,8 @@ fn handoff(candidate: *const adapter.Candidate) !void {
     }
     const key = try @import("../wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{6}));
     try std.testing.expectError(error.Capacity, core.connect(&types.PeerId.fromPublicKey(&key.publicKey()), candidate.addresses[0..candidate.address_count], pair.now));
-    try std.testing.expectEqual(@as(u16, 1), core.discoveredBatch(gossipsub, &control, &.{candidate.*}, pair.now).accepted);
-    const count = core.dialIntents(gossipsub, &control, &pair.client, pair.now, &intents);
+    try std.testing.expectEqual(@as(u16, 1), core.discoveredBatch(gossipsub, &.{candidate.*}, pair.now).accepted);
+    const count = core.dialIntents(gossipsub, &pair.client, pair.now, &intents);
     try std.testing.expectEqual(@as(usize, opts.dial.concurrent_max), count);
     for (intents[0..count]) |intent| try std.testing.expect(!intent.peer.eql(&candidate.peer));
 }
