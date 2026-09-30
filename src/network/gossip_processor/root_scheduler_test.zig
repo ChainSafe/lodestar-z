@@ -205,21 +205,27 @@ test "gossip scheduler source limits cover unfinished execution and survive peer
     try verify(&table);
 }
 
-test "gossip scheduler freshness replacement never selects copying or executing jobs" {
-    const limits: p.limits_mod.Limits = @splat(.{ .items = 4, .bytes = 4096 });
+test "gossip scheduler prefilter permits replacement only for eligible queued kinds" {
+    const limits: p.limits_mod.Limits = @splat(.{ .items = 2, .bytes = 4096 });
     var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits });
     defer table.deinit();
     defer table.close();
     const oldest = try add(&table, .beacon_attestation, 1, .{});
     const newest = try add(&table, .beacon_attestation, 2, .{});
+    try t.expect(table.admissible(.beacon_attestation, 1));
     const batch = table.claimDemand(2, .{ .items = 1 });
     try t.expectEqual(newest, batch.tokens[0]);
-    try t.expectEqual(oldest, table.freshnessVictim(.beacon_attestation).?);
     table.finish(&batch, true);
-    table.retire(oldest);
-    try t.expect(table.freshnessVictim(.beacon_attestation) == null);
+    // Protect delivered execution and copying simultaneously.
+    table.execution.?[@intFromEnum(Kind.beacon_attestation)].items = 2;
+    const copying = table.claimDemand(2, .{ .items = 1 });
+    try t.expectEqual(oldest, copying.tokens[0]);
+    try t.expect(!table.admissible(.beacon_attestation, 1));
+    table.finish(&copying, false);
+    try t.expect(table.admissible(.beacon_attestation, 1));
     _ = try add(&table, .beacon_block, 3, .{});
-    try t.expect(table.freshnessVictim(.beacon_block) == null);
+    _ = try add(&table, .beacon_block, 4, .{});
+    try t.expect(!table.admissible(.beacon_block, 1));
     try verify(&table);
 }
 

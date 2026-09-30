@@ -1,6 +1,7 @@
 const std = @import("std");
 const native = @import("../gossipsub/root.zig");
 const storage = @import("../gossipsub/message_store.zig");
+pub const policy = @import("policy.zig");
 pub const Plan = @import("plan.zig").Plan;
 pub const Source = @import("../gossipsub/peer_book.zig").Ref;
 pub const limits_mod = @import("../gossip_limits.zig");
@@ -26,6 +27,8 @@ pub const State = enum { free, capturing, needs_check, checking, waiting, queued
 pub const Cell = struct {
     state: State = .free,
     generation: u64 = 0,
+    /// Original admission age. Promotion and copy rollback change ready/group
+    /// order, never replacement age or the absolute deadline.
     order: u64 = 0,
     handle: native.ValidationHandle = undefined,
     identity: @import("../wire/peer_id.zig").PeerId = undefined,
@@ -56,6 +59,14 @@ pub const Cell = struct {
     /// The host was handed this message and awaits the owner's disposition of it.
     exposed: bool = false,
     verdict: native.Verdict = .ignore,
+
+    pub fn replaceable(self: *const Cell) bool {
+        if (self.executing or self.retired) return false;
+        return switch (self.state) {
+            .queued, .needs_check, .checking, .waiting => true,
+            else => false,
+        };
+    }
 };
 pub const Diagnostics = struct {
     capacity: usize = 0,
@@ -236,6 +247,19 @@ pub const GossipProcessor = struct {
         if (self.used_items[k] >= self.limits[k].items or pages * storage.page_bytes > self.limits[k].bytes - self.used_bytes[k]) return false;
         return self.queueValue(kind, .free).len > 0 and pages <= self.store.free_pages - self.staging_pages and self.store.used_entries + self.store.retired_entries + self.staging_items < self.store.entries.len;
     }
+    /// Cheap possibility check before decoding. Only admission can jointly reserve
+    /// processor and protocol resources; replaceable work does not promise room.
+    pub fn admissible(self: *GossipProcessor, kind: Kind, len: usize) bool {
+        if (self.closed or self.order == std.math.maxInt(u64)) return false;
+        if (self.hasCapacity(kind, len)) return true;
+        if (limits_mod.newestFirst(kind)) {
+            for ([_]State{ .queued, .needs_check, .checking, .waiting }) |state| {
+                if (self.queueValue(kind, state).len > 0) return true;
+            }
+        }
+        self.refuseCapacity(kind, len);
+        return false;
+    }
     pub fn refuse(self: *GossipProcessor, kind: Kind, reason: Refusal) void {
         self.refusals[@intFromEnum(kind)][@intFromEnum(reason)] +|= 1;
     }
@@ -253,15 +277,6 @@ pub const GossipProcessor = struct {
             self.queueValue(kind, .needs_check).len + self.queueValue(kind, .checking).len,
             self.executing_items[@intFromEnum(kind)],
         };
-    }
-    pub fn freshnessVictim(self: *const GossipProcessor, kind: Kind) ?Token {
-        if (!limits_mod.newestFirst(kind)) return null;
-        var selected: u32 = none;
-        for ([_]State{ .queued, .needs_check, .checking, .waiting }) |state| {
-            const index = self.queueValue(kind, state).head;
-            if (index != none and (selected == none or self.cells[index].order < self.cells[selected].order)) selected = index;
-        }
-        return if (selected == none) null else self.token(selected);
     }
     pub fn capture(self: *GossipProcessor, message: *const native.MessageEvent, metadata: *const metadata_mod.Metadata, deneb: bool, received_at: u64) !void {
         const kind = native.topic.parseCanonical(message.topic).?.name.kind;

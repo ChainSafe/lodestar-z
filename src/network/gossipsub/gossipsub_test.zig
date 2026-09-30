@@ -354,12 +354,12 @@ fn publishAdmissionA(setup: *Pair) !struct { count: usize, handle: ?gossipsub.Va
     return .{ .count = count, .handle = handle };
 }
 
-test "gossipsub readmission reuses tombstones across repeated Seen eviction" {
+test "gossipsub tombstones suppress Seen eviction replays and expire for natural readmission" {
     var setup: Pair = .{};
     try setup.initOpts(.{
         .random_seed = 1,
         .seen_ttl_ms = 1,
-    }, .{ .random_seed = 1, .seen_capacity = 1, .validation_capacity = 4, .mcache_capacity = 1 });
+    }, .{ .random_seed = 1, .seen_capacity = 1, .validation_capacity = 4, .validation_tombstone_ms = 100, .mcache_capacity = 1 });
     defer setup.deinit();
     try connectMesh(&setup);
     const first = try publishAdmissionA(&setup);
@@ -368,11 +368,16 @@ test "gossipsub readmission reuses tombstones across repeated Seen eviction" {
     try std.testing.expectEqual(gossipsub.ReportOutcome{ .applied = .ignore }, setup.shared.server.gossipsub.report(old, .ignore, setup.shared.pair.now));
     try std.testing.expectEqual(@as(usize, 0), setup.shared.server.gossipsub.messages.store.used_entries);
     _ = try setup.shared.server.gossipsub.publish(test_topic, "B", setup.shared.pair.now);
+    const id = topic_mod.validMessageId(test_topic, "A", .{});
+    try std.testing.expect(!setup.shared.server.gossipsub.messages.wants(id, setup.shared.pair.now.mono_ms));
+    const suppressed = try publishAdmissionA(&setup);
+    try std.testing.expectEqual(@as(usize, 0), suppressed.count);
+    setup.shared.pair.advance(100);
+    try std.testing.expect(setup.shared.server.gossipsub.messages.wants(id, setup.shared.pair.now.mono_ms));
     const second = try publishAdmissionA(&setup);
     try std.testing.expectEqual(@as(usize, 1), second.count);
     const current = second.handle.?;
     const retained = setup.shared.server.gossipsub.messages.validation.entries[current.index].state.pending.message;
-    const id = topic_mod.validMessageId(test_topic, "A", .{});
     for (0..8) |i| {
         const payload = [_]u8{@as(u8, @intCast(i)) + 'C'};
         _ = try setup.shared.server.gossipsub.publish(test_topic, &payload, setup.shared.pair.now);
@@ -387,8 +392,9 @@ test "gossipsub readmission reuses tombstones across repeated Seen eviction" {
         try std.testing.expectEqual(@as(usize, 2), setup.shared.server.gossipsub.messages.store.used_entries);
         try std.testing.expect(setup.shared.server.gossipsub.messages.store.get(retained).?.validation);
     }
-    try std.testing.expectEqual(old.index, current.index);
-    try std.testing.expectEqual(old.generation + 1, current.generation);
+    // Natural attribution expiry permits another free operation slot. The old
+    // capability must stay stale regardless of which slot readmission obtains.
+    try std.testing.expect(!std.meta.eql(old, current));
     try std.testing.expectEqual(gossipsub.ReportOutcome.stale_handle, setup.shared.server.gossipsub.report(old, .accept, setup.shared.pair.now));
     try std.testing.expectEqual(gossipsub.ReportOutcome{ .applied = .ignore }, setup.shared.server.gossipsub.report(current, .ignore, setup.shared.pair.now));
     try std.testing.expectEqual(gossipsub.ReportOutcome.already_resolved, setup.shared.server.gossipsub.report(current, .accept, setup.shared.pair.now));

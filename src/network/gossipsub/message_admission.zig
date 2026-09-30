@@ -14,10 +14,55 @@ pub const Admission = struct {
     topic_index: u16,
     compressed: []const u8,
     event: messages.MessageEvent,
+    workspace: *const @import("turn.zig").Workspace,
     committed: bool = false,
     refusal: messages.StorageRefusal = .processor_capacity,
 
-    pub fn feasible(self: *Admission, victims: []const validation.Handle) bool {
+    pub const Usage = struct {
+        available: usize,
+        records: usize,
+        pages: usize,
+        entries: usize,
+        kind_pending: usize,
+        kind_pages: usize,
+        kind_entries: usize,
+    };
+
+    pub const SourceUsage = struct {
+        items: usize,
+        kind_items: usize,
+        kind_bytes: usize,
+        maximum_bytes: usize,
+        validation_capacity: usize,
+    };
+
+    pub fn sourceUsage(self: *const Admission) SourceUsage {
+        const pending = &self.messages.validation;
+        const kind = if (topic.parseCanonical(self.event.topic)) |canonical| canonical.name.kind else .beacon_block;
+        const k = @intFromEnum(kind);
+        const maximum = if (self.context.overlay.namespace) |ns| @import("constants.zig").maxCompressedLen(ns.lookup(self.event.topic).?.rule.ssz_max) else @min(if (self.context.options.payload_limits) |limits| limits[k].bytes else @import("constants.zig").maxCompressedLen(@import("constants.zig").MAX_PAYLOAD_SIZE), @import("constants.zig").maxCompressedLen(@import("constants.zig").MAX_PAYLOAD_SIZE));
+        return .{
+            .items = pending.pending_per_peer[self.source.peer.index],
+            .kind_items = pending.pending_per_peer_kind[self.source.peer.index][k],
+            .kind_bytes = pending.bytes_per_peer_kind[self.source.peer.index][k],
+            .maximum_bytes = validation.Validation.chargedBytes(maximum),
+            .validation_capacity = pending.entries.len,
+        };
+    }
+
+    pub fn charge(self: *const Admission, cost: usize) bool {
+        return self.workspace.chargeWork(self.context.options, cost);
+    }
+
+    pub fn victimBytes(self: *const Admission, handle: validation.Handle) usize {
+        const pending = &self.messages.validation;
+        if (handle.index >= pending.entries.len) return 0;
+        const entry = &pending.entries[handle.index];
+        if (entry.generation != handle.generation or entry.state != .pending) return 0;
+        return self.messages.store.get(entry.state.pending.message).?.len;
+    }
+
+    pub fn usage(self: *const Admission, victims: []const validation.Handle) Usage {
         const owner = self.messages;
         const pending = &owner.validation;
         const store = &owner.store;
@@ -48,21 +93,23 @@ pub const Admission = struct {
                 kind_entries -= 1;
             }
         }
-        if (self.context.options.processor_limits) |limits| {
-            if (kind_pending >= limits[k].items) return self.refuse(.kind_validations);
-        }
-        if (store.limits) |limits| {
-            if (kind_entries >= limits[k].items or storage.Store.pagesFor(self.compressed.len) > limits[k].bytes / storage.page_bytes -| kind_pages) return self.refuse(.kind_payload);
-        }
-        if (available == 0 or records == 0) return self.refuse(.validation_capacity);
+        return .{ .available = available, .records = records, .pages = pages, .entries = entries, .kind_pending = kind_pending, .kind_pages = kind_pages, .kind_entries = kind_entries };
+    }
+
+    /// Global physical feasibility only. Per-kind and source policy belongs to the processor.
+    pub fn feasible(self: *Admission, resources: *const Usage) bool {
+        const owner = self.messages;
+        const pending = &owner.validation;
+        const store = &owner.store;
+        if (resources.available == 0 or resources.records == 0) return self.refuse(.validation_capacity);
         if (pending.index.find(self.event.id)) |index| {
             if (pending.recent[index].reserved or pending.recent[index].state == .pending) return self.refuse(.validation_capacity);
         }
-        if (!owner.history.canAdmitPayload(store, self.compressed.len, pages, entries)) return self.refuse(.payload_capacity);
+        if (!owner.history.canAdmitPayload(store, self.compressed.len, resources.pages, resources.entries)) return self.refuse(.payload_capacity);
         return true;
     }
 
-    fn refuse(self: *Admission, reason: messages.StorageRefusal) bool {
+    pub fn refuse(self: *Admission, reason: messages.StorageRefusal) bool {
         self.refusal = reason;
         return false;
     }
@@ -70,7 +117,8 @@ pub const Admission = struct {
     pub fn commit(self: *Admission) void {
         assert(!self.committed);
         const owner = self.messages;
-        assert(self.feasible(&.{}));
+        const resources = self.usage(&.{});
+        assert(self.feasible(&resources));
         var reservation = owner.validation.reserve(self.event.id).?;
         const payload = owner.history.admitPayload(&owner.store, self.event.id, self.event.topic, self.compressed).?;
         self.event.handle = reservation.commit(&owner.store, self.context.peers, payload, self.source.peer, self.context.overlay.ref(self.topic_index), self.event.admitted_ms);

@@ -74,9 +74,7 @@ pub const Ingress = struct {
         defer runtime.unlock();
         if (runtime.stop) return false;
         const table = if (runtime.gossip) |*table| table else return false;
-        if (table.hasCapacity(kind, len) or table.freshnessVictim(kind) != null) return true;
-        if (!table.closed) table.refuseCapacity(kind, len);
-        return false;
+        return table.admissible(kind, len);
     }
 
     fn admit(context: *anyopaque, candidate: *native.Admission) bool {

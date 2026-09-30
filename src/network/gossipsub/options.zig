@@ -18,8 +18,8 @@ pub const Options = struct {
     /// The smallest message history; processor limits can raise it (see `Layout.historyCapacity`).
     mcache_capacity: usize = 8_192,
     mcache_arena_bytes: usize = 64 * 1024 * 1024,
-    execution_limits: ?@import("../gossip_limits.zig").Limits = null,
-    processor_limits: ?@import("../gossip_limits.zig").Limits = null,
+    /// Compressed pending and retained payload allowances; their lifetimes differ from decoded work.
+    payload_limits: ?@import("../gossip_limits.zig").Limits = null,
     validation_capacity: usize = 1024,
     validation_timeout_ms: u64 = 30_000,
     validation_tombstone_ms: u64 = 30_000,
@@ -81,26 +81,12 @@ pub fn validate(o: *const Options) (error{InvalidLimits} || @import("topic_polic
     try range(o.retained_outbound_reserve, 1, o.retained_capacity - 1);
     const compressed = constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE);
     try range(o.validation_capacity, 1, 65535);
-    if (o.processor_limits) |limits| {
+    if (o.payload_limits) |limits| {
         @import("../gossip_limits.zig").validate(&limits) catch return error.InvalidLimits;
         if (o.topic_policy) |boundaries| for (boundaries) |boundary| {
             for (boundary.rules, limits) |rule, limit| if (rule.count > 0 and constants.maxCompressedLen(rule.ssz_max) > limit.bytes) return error.InvalidLimits;
         };
         if (o.validation_capacity != @import("../gossip_limits.zig").items(&limits) or o.mcache_arena_bytes < 2 * @import("../gossip_limits.zig").bytes(&limits)) return error.InvalidLimits;
-    }
-    if (o.execution_limits) |execution| {
-        const processor = o.processor_limits orelse return error.InvalidLimits;
-        var total_items: usize = 0;
-        var total_bytes: usize = 0;
-        for (execution, processor) |limit, work| {
-            if (limit.items == 0 or limit.items > work.items or limit.bytes == 0) return error.InvalidLimits;
-            total_items += limit.items;
-            total_bytes += limit.bytes;
-        }
-        if (total_items > 16384 or total_bytes > 1024 * 1024 * 1024) return error.InvalidLimits;
-        if (o.topic_policy) |boundaries| for (boundaries) |boundary| {
-            for (boundary.rules, execution) |rule, limit| if (rule.count > 0 and rule.ssz_max > limit.bytes) return error.InvalidLimits;
-        };
     }
     try range(o.seen_capacity, 1, 1_048_576);
     try range(o.mcache_capacity, 1, @import("mcache.zig").History.capacity_max);
