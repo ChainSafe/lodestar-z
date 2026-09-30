@@ -23,8 +23,6 @@ const flag_slashed: u8 = 1;
 const flag_compounding: u8 = 2;
 
 /// Fields that EpochTransitionCache.init needs to know about one validator.
-///
-/// NOTE: Effective balance is not stored: the epoch cache already keeps it flat as increments.
 pub const ValidatorFields = struct {
     activation_eligibility_epoch: u64,
     activation_epoch: u64,
@@ -55,6 +53,7 @@ pub const ValidatorFlatCache = struct {
     activation_epoch: std.ArrayList(u64) = .empty,
     exit_epoch: std.ArrayList(u64) = .empty,
     withdrawable_epoch: std.ArrayList(u64) = .empty,
+    effective_balance_increments: std.ArrayList(u16) = .empty,
     flags: std.ArrayList(u8) = .empty,
     /// Leaves rewritten by the last `sync`.
     last_patched: usize = 0,
@@ -69,6 +68,7 @@ pub const ValidatorFlatCache = struct {
         self.activation_epoch.deinit(self.allocator);
         self.exit_epoch.deinit(self.allocator);
         self.withdrawable_epoch.deinit(self.allocator);
+        self.effective_balance_increments.deinit(self.allocator);
         self.flags.deinit(self.allocator);
         self.* = undefined;
     }
@@ -78,17 +78,17 @@ pub const ValidatorFlatCache = struct {
     }
 
     pub fn byteSize(self: *const ValidatorFlatCache) usize {
-        return self.len() * (4 * @sizeOf(u64) + @sizeOf(u8));
+        return self.len() * (4 * @sizeOf(u64) + @sizeOf(u16) + @sizeOf(u8));
     }
 
-    pub inline fn fields(self: *const ValidatorFlatCache, i: usize, effective_balance_increment: u16) ValidatorFields {
+    pub inline fn fields(self: *const ValidatorFlatCache, i: usize) ValidatorFields {
         const f = self.flags.items[i];
         return .{
             .activation_eligibility_epoch = self.activation_eligibility_epoch.items[i],
             .activation_epoch = self.activation_epoch.items[i],
             .exit_epoch = self.exit_epoch.items[i],
             .withdrawable_epoch = self.withdrawable_epoch.items[i],
-            .effective_balance = @as(u64, effective_balance_increment) * preset.EFFECTIVE_BALANCE_INCREMENT,
+            .effective_balance = @as(u64, self.effective_balance_increments.items[i]) * preset.EFFECTIVE_BALANCE_INCREMENT,
             .slashed = (f & flag_slashed) != 0,
             .compounding = (f & flag_compounding) != 0,
         };
@@ -107,6 +107,7 @@ pub const ValidatorFlatCache = struct {
         try self.activation_epoch.resize(self.allocator, new_len);
         try self.exit_epoch.resize(self.allocator, new_len);
         try self.withdrawable_epoch.resize(self.allocator, new_len);
+        try self.effective_balance_increments.resize(self.allocator, new_len);
         try self.flags.resize(self.allocator, new_len);
 
         try self.pool.ref(root);
@@ -130,6 +131,7 @@ pub const ValidatorFlatCache = struct {
         self.activation_epoch.clearRetainingCapacity();
         self.exit_epoch.clearRetainingCapacity();
         self.withdrawable_epoch.clearRetainingCapacity();
+        self.effective_balance_increments.clearRetainingCapacity();
         self.flags.clearRetainingCapacity();
     }
 
@@ -197,6 +199,7 @@ pub const ValidatorFlatCache = struct {
         self.activation_epoch.items[i] = v.activation_epoch;
         self.exit_epoch.items[i] = v.exit_epoch;
         self.withdrawable_epoch.items[i] = v.withdrawable_epoch;
+        self.effective_balance_increments.items[i] = @intCast(@divFloor(v.effective_balance, preset.EFFECTIVE_BALANCE_INCREMENT));
         self.flags.items[i] = (if (v.slashed) flag_slashed else 0) |
             (if (hasCompoundingWithdrawalCredential(&v.withdrawal_credentials)) flag_compounding else 0);
         self.last_patched += 1;
@@ -210,11 +213,12 @@ pub const ValidatorFlatCache = struct {
         for (0..list_len) |i| {
             const v = try Validator.tree.getValuePtr(try it.next(), self.pool);
             const expected = ValidatorFields.fromValidator(v);
-            const actual = self.fields(i, 0);
+            const actual = self.fields(i);
             if (expected.activation_eligibility_epoch != actual.activation_eligibility_epoch or
                 expected.activation_epoch != actual.activation_epoch or
                 expected.exit_epoch != actual.exit_epoch or
                 expected.withdrawable_epoch != actual.withdrawable_epoch or
+                expected.effective_balance != actual.effective_balance or
                 expected.slashed != actual.slashed or
                 expected.compounding != actual.compounding)
             {
