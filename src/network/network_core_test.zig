@@ -652,7 +652,7 @@ test "core fails a dial the host refuses without failing the turn or penalizing 
         /// The owner turn polls natively and starts no Io task on the filtered thread.
         fn run(self: *@This(), core: *runtime.NetworkCore, at: Now) void {
             const filter = @import("udp").testing.SendFilter;
-            if (!filter.install(&.{.{ .socket = core.transport.udp.sockets.primary().handle, .errno = .PERM }})) return;
+            if (!filter.install(&.{.{ .socket = core.transport.sockets.primary().handle, .errno = .PERM }})) return;
             self.installed = true;
             self.result = core.step(std.testing.io, at, .{}, .deadlineOnly(at.mono_ms));
         }
@@ -690,7 +690,7 @@ test "core socket faults preserve the other owner and local dial refusal is defe
     const io = faults.io();
     const sender = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
     defer sender.close(std.testing.io);
-    for ([_]std.Io.net.Socket{ node.transport.udp.sockets.primary(), node.discovery.?.transport.sockets.primary() }) |socket| {
+    for ([_]std.Io.net.Socket{ node.transport.sockets.primary(), node.discovery.?.transport.sockets.primary() }) |socket| {
         // The owner receives only from a socket its poll reported readable.
         try sender.send(std.testing.io, &socket.address, "invalid");
         faults.receive = .{ .socket = socket.handle };
@@ -753,7 +753,7 @@ test "core discovery drain is nonblocking under the standalone default interval"
     try std.testing.expect(after_datagram >= 2);
     const idle = node.step(faults.io(), node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms));
     try std.testing.expectEqual(@as(u16, 0), idle.discovery.datagrams);
-    try std.testing.expect(faults.receive_calls > after_datagram);
+    try std.testing.expectEqual(after_datagram, faults.receive_calls);
     try std.testing.expectEqual(@as(i64, 0), faults.longest_wait_ms);
 }
 
@@ -766,7 +766,7 @@ fn failureAndReplacement(a: *runtime.NetworkCore, b: *runtime.NetworkCore) !void
     };
     const now = try @import("transport.zig").currentTime(std.testing.io);
     try std.testing.expectEqual(t.ReputationDecision.ban, a.reportPeer(&a.peer_manager.catalog.get(target.?).?.identity, .fatal, now).?);
-    var faults: FaultIo = .{ .receive = .{ .socket = a.transport.udp.sockets.primary().handle } };
+    var faults: FaultIo = .{ .receive = .{ .socket = a.transport.sockets.primary().handle } };
     faults.init(std.testing.io);
     defer faults.deinit();
     const faulty_io = faults.io();
@@ -885,7 +885,7 @@ test "core native readiness wakes for either delayed protocol socket" {
             const settled = try stepAfter(&node, 0);
             try std.testing.expect(settled.failure == null);
         }
-        const target = if (source == 0) node.transport.udp.sockets.primary() else node.discovery.?.transport.sockets.primary();
+        const target = if (source == 0) node.transport.sockets.primary() else node.discovery.?.transport.sockets.primary();
         const task = try std.Thread.spawn(.{}, delayedRuntimeDatagram, .{ sender, target.address });
         defer task.join();
         const result = try stepAfter(&node, 100);
@@ -894,7 +894,7 @@ test "core native readiness wakes for either delayed protocol socket" {
             try std.testing.expectEqual([2]bool{ true, false }, result.readiness.quic);
             try std.testing.expectEqual(@as(u32, 1), result.transport.datagrams_received);
         } else {
-            try std.testing.expect(result.readiness.discovery);
+            try std.testing.expect(result.readiness.discoveryReady());
             try std.testing.expectEqualSlices(u8, "invalid", node.discovery.?.transport.receive_buffer[0..7]);
         }
     }
@@ -917,7 +917,7 @@ test "core native host wake validates rollback detaches and preserves bytes" {
     defer host.close(std.testing.io);
     try node.setHostWake(host.handle);
     try std.testing.expectError(error.InvalidWakeSource, node.setHostWake(-1));
-    try std.testing.expectError(error.InvalidWakeSource, node.setHostWake(node.transport.udp.sockets.primary().handle));
+    try std.testing.expectError(error.InvalidWakeSource, node.setHostWake(node.transport.sockets.primary().handle));
     try std.testing.expectError(error.InvalidWakeSource, node.setHostWake(node.discovery.?.transport.sockets.primary().handle));
     _ = try stepAfter(&node, 0);
     const sender = try std.Thread.spawn(.{}, delayedRuntimeDatagram, .{ host, host.address });
@@ -926,7 +926,6 @@ test "core native host wake validates rollback detaches and preserves bytes" {
     try std.testing.expect(result.failure == null and result.readiness.host);
     const repeated = try stepAfter(&node, 0);
     try std.testing.expect(repeated.readiness.host);
-    try std.testing.expectEqual(@as(u32, 0), repeated.readiness.timeout_ms);
     try node.setHostWake(null);
     const detached = try stepAfter(&node, 0);
     try std.testing.expect(!detached.readiness.host);
@@ -934,7 +933,6 @@ test "core native host wake validates rollback detaches and preserves bytes" {
     node.shutdown(node.last_now);
     const stopped = node.step(std.testing.io, node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms +| 100));
     try std.testing.expect(!stopped.readiness.host);
-    try std.testing.expectEqual(@as(u32, 0), stopped.readiness.timeout_ms);
     try std.testing.expectError(error.Stopped, node.setHostWake(host.handle));
     var buffer: [8]u8 = undefined;
     const message = try host.receiveTimeout(std.testing.io, &buffer, .{ .duration = .{ .clock = .awake, .raw = .fromMilliseconds(0) } });
@@ -954,12 +952,12 @@ test "core native wait source failure retains completed protocol progress" {
     defer _ = std.c.close(pipe[0]);
     try node.setHostWake(pipe[0]);
     try std.testing.expectEqual(@as(c_int, 0), std.c.close(pipe[1]));
-    try node.transport.udp.sockets.primary().send(std.testing.io, &node.transport.udp.sockets.primary().address, "invalid");
-    try node.transport.udp.sockets.primary().send(std.testing.io, &node.discovery.?.transport.sockets.primary().address, "invalid");
+    try node.transport.sockets.primary().send(std.testing.io, &node.transport.sockets.primary().address, "invalid");
+    try node.transport.sockets.primary().send(std.testing.io, &node.discovery.?.transport.sockets.primary().address, "invalid");
     const allocations = node.reservations.allocation_calls;
     const result = try stepAfter(&node, 100);
     try std.testing.expectEqual(error.WaitSourceClosed, result.failure.?);
-    try std.testing.expect(result.readiness.quicReady() and result.readiness.discovery);
+    try std.testing.expect(result.readiness.quicReady() and result.readiness.discoveryReady());
     try std.testing.expectEqual(@as(u32, 1), result.transport.datagrams_received);
     try std.testing.expectEqualSlices(u8, "invalid", node.discovery.?.transport.receive_buffer[0..7]);
     try std.testing.expectEqual(allocations, node.reservations.allocation_calls);
@@ -979,13 +977,12 @@ test "core native wait honors engine timers and pending lifecycle work" {
     defer node.deinit(std.testing.io);
     const remote = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
     defer remote.close(std.testing.io);
-    const destination = @import("udp.zig").fromNetwork(remote.address);
+    const destination = @import("udp").Address.fromNetwork(remote.address);
     const now = try @import("transport.zig").currentTime(std.testing.io);
     _ = try node.transport.engine.dial(&destination, node.peerId(), now);
     try std.testing.expect(node.transport.engine.backlog());
     const first = node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| 100));
     try std.testing.expect(first.failure == null);
-    try std.testing.expectEqual(@as(u32, 0), first.readiness.timeout_ms);
     try std.testing.expect(first.transport.datagrams_sent > 0);
     try std.testing.expect(!first.transport.backlog);
     const current = node.last_now;
@@ -995,13 +992,11 @@ test "core native wait honors engine timers and pending lifecycle work" {
     try std.testing.expect(node.nextWakeup(current, .{}).? <= deadline_ms);
     const timer = node.step(std.testing.io, current, .{}, .deadlineOnly(current.mono_ms +| 100));
     try std.testing.expect(timer.failure == null);
-    try std.testing.expect(timer.readiness.timeout_ms <= deadline_ms -| current.mono_ms);
     const failed = try node.transport.engine.dial(&destination, node.peerId(), node.last_now);
     node.transport.engine.failSend(failed.index);
     try std.testing.expect(node.transport.engine.eventsPending());
     const lifecycle = node.step(std.testing.io, node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms +| 100));
     try std.testing.expect(lifecycle.failure == null);
-    try std.testing.expectEqual(@as(u32, 0), lifecycle.readiness.timeout_ms);
     try std.testing.expect(lifecycle.transport.events > 0);
     const repeated = node.step(std.testing.io, node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms));
     try std.testing.expectEqual(@as(usize, 0), repeated.transport.events);
@@ -2047,7 +2042,7 @@ test "dual-stack runtime signs both bound discovery and QUIC endpoints" {
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const record = node.localRecord().?;
-    const quic = node.transport.udp.localAddresses();
+    const quic = node.transport.sockets.localAddresses();
     const decoded = try @import("peers/enr.zig").decode(record, &opts.startup.local.fork);
     try std.testing.expectEqual(@as(u8, 2), decoded.address_count);
     try std.testing.expectEqualDeep(quic[0].?, decoded.addresses[0]);

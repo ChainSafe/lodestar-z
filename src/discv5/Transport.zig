@@ -84,7 +84,7 @@ pub fn deinit(self: *Transport, allocator: std.mem.Allocator, io: std.Io) void {
 }
 
 pub fn localAddress(self: *const Transport) types.Address {
-    return types.Address.fromNetwork(self.sockets.primary().address);
+    return self.sockets.localAddress();
 }
 
 /// Encodes and sends one request immediately. A failed send cancels the call, so no unsent
@@ -175,9 +175,18 @@ pub fn stepUntil(
     expired_calls: []CallTable.Expired,
     wake_ms: u64,
 ) Error!StepResult {
+    return self.stepWithReadiness(io, expired_calls, wake_ms, null);
+}
+
+/// Runs timers and protocol work even when no family is eligible for receiving.
+pub fn stepReady(self: *Transport, io: std.Io, expired_calls: []CallTable.Expired, ready: *[2]bool) Error!StepResult {
+    return self.stepWithReadiness(io, expired_calls, 0, ready);
+}
+
+fn stepWithReadiness(self: *Transport, io: std.Io, expired_calls: []CallTable.Expired, wake_ms: u64, ready: ?*[2]bool) Error!StepResult {
     if (expired_calls.len == 0) return error.MissingExpiryStorage;
     var result = StepResult{};
-    self.runStep(io, expired_calls, wake_ms, &result) catch |err| {
+    self.runStep(io, expired_calls, wake_ms, ready, &result) catch |err| {
         recordFailure(&result, err, .clock);
     };
     return result;
@@ -188,11 +197,12 @@ fn runStep(
     io: std.Io,
     expired_calls: []CallTable.Expired,
     wake_ms: u64,
+    ready: ?*[2]bool,
     result: *StepResult,
 ) Error!void {
     try self.advance(io, expired_calls, result);
 
-    const datagram = self.receiveDatagram(io, wake_ms, result) catch |err| {
+    const datagram = self.receiveDatagram(io, wake_ms, ready, result) catch |err| {
         recordFailure(result, err, .receive);
         return;
     };
@@ -222,14 +232,17 @@ fn recordFailure(result: *StepResult, err: Error, stage: FailureStage) void {
     result.failure_stage = stage;
 }
 
-fn receiveDatagram(self: *Transport, io: std.Io, wake_ms: u64, result: *StepResult) Error!?sockets_mod.Datagram {
+fn receiveDatagram(self: *Transport, io: std.Io, wake_ms: u64, ready: ?*[2]bool, result: *StepResult) Error!?sockets_mod.Datagram {
     const deadline_ms = @min(wake_ms, self.engine.nextDeadlineMs() orelse wake_ms);
     const wait_ms = @min(self.config.poll_interval_ms, deadline_ms -| result.now_ms);
     const timeout = std.Io.Timeout{ .duration = .{
         .raw = .fromMilliseconds(wait_ms),
         .clock = .awake,
     } };
-    return self.sockets.receiveDatagram(io, &self.receive_buffer, timeout) catch |err| switch (err) {
+    const received: sockets_mod.DatagramError!?sockets_mod.Datagram = if (ready) |eligible|
+        self.sockets.receiveReadyDatagram(io, &self.receive_buffer, eligible)
+    else if (self.sockets.receiveDatagram(io, &self.receive_buffer, timeout)) |packet| packet else |err| err;
+    return received catch |err| switch (err) {
         error.Timeout => null,
         error.DatagramTooLarge => blk: {
             result.datagram = .{ .rejected = .oversized_datagram };

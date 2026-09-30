@@ -205,7 +205,8 @@ test "UDP records the kernel's socket buffer sizes and receive drops after a req
         try std.testing.expectEqual(reported.?.receive.? < full or reported.?.send.? < full, below);
     }
     try std.testing.expectEqual([2]?udp.Buffers.Reported{ null, null }, plain.buffers);
-    try std.testing.expectEqual([2]?u64{ null, null }, plain.drops());
+    // A supported observation must work equally before and after requesting buffers.
+    try std.testing.expectEqual(sockets.drops(), plain.drops());
     const smallest: udp.Buffers = .{ .receive = udp.Buffers.bytes_min, .send = udp.Buffers.bytes_min };
     try std.testing.expectEqual([2]bool{ false, false }, sockets.requestBuffers(std.testing.io, smallest));
     if (os != .linux) return;
@@ -231,7 +232,7 @@ test "UDP records a failed size readback as unknown and not below the request" {
     const os = @import("builtin").os.tag;
     if (os != .linux and os != .macos) return error.SkipZigTest;
     // getsockopt fails on a descriptor that is not open.
-    var sockets: udp.Sockets = .{ .values = .{ .{ .handle = -1, .address = .{ .ip4 = .loopback(0) } }, null } };
+    var sockets: udp.Sockets = .{ .native = .{ true, false }, .values = .{ .{ .handle = -1, .address = .{ .ip4 = .loopback(0) } }, null } };
     const largest: udp.Buffers = .{ .receive = udp.Buffers.bytes_max, .send = udp.Buffers.bytes_max };
     try std.testing.expectEqual([2]bool{ false, false }, sockets.requestBuffers(std.testing.io, largest));
     try std.testing.expectEqual([2]?udp.Buffers.Reported{ .{ .receive = null, .send = null }, null }, sockets.buffers);
@@ -242,10 +243,10 @@ test "UDP distinguishes refused sends from nonblocking send pressure" {
     if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
     var sockets: [4]udp.Sockets = undefined;
     for (&sockets, 0..) |*socket, index| {
-        errdefer for (sockets[0..index]) |bound| bound.close(std.testing.io);
+        errdefer for (sockets[0..index]) |*bound| bound.close(std.testing.io);
         socket.* = try udp.Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
     }
-    defer for (sockets) |socket| socket.close(std.testing.io);
+    defer for (&sockets) |*socket| socket.close(std.testing.io);
     var outcome: Refusal = .{};
     const thread = try std.Thread.spawn(.{}, Refusal.run, .{ &outcome, &sockets });
     thread.join();
@@ -286,8 +287,8 @@ const Refusal = struct {
         const destination = sockets[0].primary().address;
         for (sockets, &self.results, &self.batches) |*socket, *result, *batch| {
             result.* = socket.sendTo(std.testing.io, udp.Address.fromNetwork(destination), "filtered", 16);
-            var message: net.OutgoingMessage = .{ .address = &destination, .data_ptr = "filtered", .data_len = 8 };
-            batch.* = socket.sendMany(std.testing.io, (&message)[0..1]);
+            const message: udp.Outgoing = .{ .to = udp.Address.fromNetwork(destination), .bytes = "filtered" };
+            batch.* = sendMany(socket, std.testing.io, (&message)[0..1]);
         }
     }
 };
@@ -298,15 +299,15 @@ test "UDP batches report the exact prefix before a failing datagram and resume a
     const self_address = sockets.primary().address;
     // Linux refuses a broadcast without SO_BROADCAST with EACCES.
     const broadcast: net.IpAddress = .{ .ip4 = .{ .bytes = @splat(255), .port = self_address.ip4.port } };
-    var messages = [_]net.OutgoingMessage{
-        .{ .address = &self_address, .data_ptr = "first", .data_len = 5 },
-        .{ .address = &broadcast, .data_ptr = "refused", .data_len = 7 },
-        .{ .address = &self_address, .data_ptr = "third", .data_len = 5 },
+    const messages = [_]udp.Outgoing{
+        .{ .to = udp.Address.fromNetwork(self_address), .bytes = "first" },
+        .{ .to = udp.Address.fromNetwork(broadcast), .bytes = "refused" },
+        .{ .to = udp.Address.fromNetwork(self_address), .bytes = "third" },
     };
-    try std.testing.expectEqual(udp.SendOutcome{ .sent = 0, .failure = error.AccessDenied }, sockets.sendMany(std.testing.io, messages[1..]));
-    try std.testing.expectEqual(udp.SendOutcome{ .sent = 1, .failure = error.AccessDenied }, sockets.sendMany(std.testing.io, &messages));
-    try std.testing.expectEqual(@as(usize, 5), messages[0].data_len);
-    try std.testing.expectEqual(udp.SendOutcome{ .sent = 1, .failure = null }, sockets.sendMany(std.testing.io, messages[2..]));
+    try std.testing.expectEqual(udp.SendOutcome{ .sent = 0, .failure = error.AccessDenied }, sendMany(&sockets, std.testing.io, messages[1..]));
+    try std.testing.expectEqual(udp.SendOutcome{ .sent = 1, .failure = error.AccessDenied }, sendMany(&sockets, std.testing.io, &messages));
+    try std.testing.expectEqual(@as(usize, 5), messages[0].bytes.len);
+    try std.testing.expectEqual(udp.SendOutcome{ .sent = 1, .failure = null }, sendMany(&sockets, std.testing.io, messages[2..]));
     var buffer: [16]u8 = undefined;
     for ([_][]const u8{ "first", "third" }) |expected| {
         try std.testing.expectEqualStrings(expected, (try readAny(&sockets, std.testing.io, &buffer)).?.data);
@@ -327,8 +328,8 @@ test "UDP native batches check cancellation before sending" {
     vtable.checkCancel = Canceled.check;
     const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
     const destination = sockets.primary().address;
-    var message: net.OutgoingMessage = .{ .address = &destination, .data_ptr = "canceled", .data_len = 8 };
-    try std.testing.expectEqual(udp.SendOutcome{ .sent = 0, .failure = error.Canceled }, sockets.sendMany(io, (&message)[0..1]));
+    const message: udp.Outgoing = .{ .to = udp.Address.fromNetwork(destination), .bytes = "canceled" };
+    try std.testing.expectEqual(udp.SendOutcome{ .sent = 0, .failure = error.Canceled }, sendMany(&sockets, io, (&message)[0..1]));
     var buffer: [16]u8 = undefined;
     try std.testing.expectEqual(null, try readAny(&sockets, std.testing.io, &buffer));
 }
@@ -367,8 +368,8 @@ const Pressure = struct {
         const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
         const destination = sockets.primary().address;
         self.single = sockets.sendTo(io, udp.Address.fromNetwork(destination), "dropped", 16);
-        var message: net.OutgoingMessage = .{ .address = &destination, .data_ptr = "dropped", .data_len = 7 };
-        self.batch = sockets.sendMany(io, (&message)[0..1]);
+        const message: udp.Outgoing = .{ .to = udp.Address.fromNetwork(destination), .bytes = "dropped" };
+        self.batch = sendMany(sockets, io, (&message)[0..1]);
     }
 
     fn wait(_: ?*anyopaque, _: *std.Io.Batch, _: std.Io.Timeout) std.Io.Batch.AwaitConcurrentError!void {
@@ -386,8 +387,8 @@ test "UDP leaves sends to a provider that replaces them" {
     const destination = udp.Address.fromNetwork(sockets.primary().address);
     try std.testing.expectError(error.AddressFamilyUnsupported, sockets.sendTo(faults.io(), destination, "provider", 16));
     try std.testing.expectEqual(@as(usize, 1), faults.send_calls);
-    var message: net.OutgoingMessage = .{ .address = &sockets.primary().address, .data_ptr = "provider", .data_len = 8 };
-    try std.testing.expectEqual(udp.SendOutcome{ .sent = 0, .failure = error.AddressFamilyUnsupported }, sockets.sendMany(faults.io(), (&message)[0..1]));
+    const message: udp.Outgoing = .{ .to = udp.Address.fromNetwork(sockets.primary().address), .bytes = "provider" };
+    try std.testing.expectEqual(udp.SendOutcome{ .sent = 0, .failure = error.AddressFamilyUnsupported }, sendMany(&sockets, faults.io(), (&message)[0..1]));
     try std.testing.expectEqual(@as(usize, 2), faults.send_calls);
 }
 
@@ -568,11 +569,11 @@ test "UDP native batch preserves its successful prefix when the next call report
             const broadcast: net.IpAddress = .{ .ip4 = .{ .bytes = @splat(255), .port = destination.ip4.port } };
             // The first call sends one datagram before broadcast refusal. Its successful prefix
             // hides that errno; the next call sees the injected EAGAIN on its own unsent suffix.
-            var messages = [_]net.OutgoingMessage{
-                .{ .address = &destination, .data_ptr = "prefix", .data_len = 6 },
-                .{ .address = &broadcast, .data_ptr = "suffix", .data_len = 6 },
+            const messages = [_]udp.Outgoing{
+                .{ .to = udp.Address.fromNetwork(destination), .bytes = "prefix" },
+                .{ .to = udp.Address.fromNetwork(broadcast), .bytes = "suffix" },
             };
-            self.outcome = sender.sendMany(std.testing.io, &messages);
+            self.outcome = sendMany(sender, std.testing.io, &messages);
         }
     };
     var partial: Partial = .{};
@@ -583,4 +584,9 @@ test "UDP native batch preserves its successful prefix when the next call report
     var buffer: [16]u8 = undefined;
     try std.testing.expectEqualStrings("prefix", (try readAny(&sockets, std.testing.io, &buffer)).?.data);
     try std.testing.expectEqual(null, try readAny(&sockets, std.testing.io, &buffer));
+}
+
+fn sendMany(sockets: *const udp.Sockets, io: std.Io, messages: []const udp.Outgoing) udp.SendOutcome {
+    var scratch: udp.BatchScratch = undefined;
+    return sockets.sendMany(io, messages, 1500, &scratch);
 }

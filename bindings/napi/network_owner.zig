@@ -32,7 +32,7 @@ pub const Owner = struct {
         var identity: r.Identity = undefined;
         identity.peer = self.core.peerId();
         identity.metadata = self.core.localState().metadata;
-        identity.endpoints = self.core.transport.udp.localAddresses();
+        identity.endpoints = self.core.transport.sockets.localAddresses();
         const multiaddr = self.core.localMultiaddr();
         identity.multiaddr_len = @intCast((try multiaddr.encode(&identity.multiaddr)).len);
         identity.enr_len = 0;
@@ -304,7 +304,7 @@ fn publishTurn(self: *Runtime, result: *const n.network_core.Result, timestamp: 
     self.lock();
     if (timestamp.mono_ms >= self.health_log_due_ms) {
         const active_requests = self.heavy.?.core.service.reqresp.active();
-        std.log.scoped(.network_runtime).info("network_health peers={d} relevant={d} target={d} requests_outbound={d} requests_inbound={d} dial_started={d} dial_deferred={d} discovery_peers={d} gossip_pressure_resets={d} received_bytes={d} sent_bytes={d}", .{ counts.connected, counts.relevant, self.heavy.?.resolved.core.peers.target_peers, active_requests.outbound, active_requests.inbound, self.heavy.?.core.counters.dial_started, self.heavy.?.core.counters.dial_deferred, if (self.heavy.?.core.discovery) |discovery| discovery.transport.engine.peerCount() else 0, self.heavy.?.core.service.gossipsub.counters.local_pressure_resets, self.heavy.?.core.transport.udp.counters.received_bytes, self.heavy.?.core.transport.udp.counters.sent_bytes });
+        std.log.scoped(.network_runtime).info("network_health peers={d} relevant={d} target={d} requests_outbound={d} requests_inbound={d} dial_started={d} dial_deferred={d} discovery_peers={d} gossip_pressure_resets={d} received_bytes={d} sent_bytes={d}", .{ counts.connected, counts.relevant, self.heavy.?.resolved.core.peers.target_peers, active_requests.outbound, active_requests.inbound, self.heavy.?.core.counters.dial_started, self.heavy.?.core.counters.dial_deferred, if (self.heavy.?.core.discovery) |discovery| discovery.transport.engine.peerCount() else 0, self.heavy.?.core.service.gossipsub.counters.local_pressure_resets, self.heavy.?.core.transport.counters.received_bytes, self.heavy.?.core.transport.counters.sent_bytes });
         self.health_log_due_ms = timestamp.mono_ms +| 30000;
     }
     if (self.lane) |lane| lane.publish(self.heavy.?.outputs[0..result.counts.peers], sequence);

@@ -208,7 +208,7 @@ test "a host applies only on its wake, a carried-over cap or its deadline" {
     // A turn woken by a QUIC datagram, with the host deadline in the future, leaves the host alone.
     const sender = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
     defer sender.close(std.testing.io);
-    try sender.send(std.testing.io, &node.transport.udp.sockets.primary().address, "junk");
+    try sender.send(std.testing.io, &node.transport.sockets.primary().address, "junk");
     var now = try currentTime();
     const quic = node.step(std.testing.io, now, .{}, host.seam(now.mono_ms +| 5_000));
     try std.testing.expect(quic.failure == null and quic.readiness.quicReady() and !quic.readiness.host);
@@ -219,7 +219,6 @@ test "a host applies only on its wake, a carried-over cap or its deadline" {
     const expected: u32 = @intCast(@min(150, (node.nextWakeup(now, .{}) orelse now.mono_ms + 150) -| now.mono_ms));
     const timed = node.step(std.testing.io, now, .{}, host.seam(now.mono_ms + 150));
     try std.testing.expect(timed.failure == null and !timed.readiness.host);
-    try std.testing.expectEqual(expected, timed.readiness.timeout_ms);
     if (expected == 150) {
         try std.testing.expect(timed.transport.now.mono_ms >= now.mono_ms + 150);
         try std.testing.expectEqual(@as(u32, 1), host.applies);
@@ -237,7 +236,6 @@ test "a host applies only on its wake, a carried-over cap or its deadline" {
     now = try currentTime();
     const carried = node.step(std.testing.io, now, .{}, host.seam(now.mono_ms +| 5_000));
     try std.testing.expect(!carried.readiness.host);
-    try std.testing.expectEqual(@as(u32, 0), carried.readiness.timeout_ms);
     try std.testing.expectEqual(due + 1, node.due_now_turns[host_source]);
     try std.testing.expectEqual(applied + 2, host.applies);
 
@@ -309,7 +307,7 @@ test "a junk flood on the discovery socket costs discovery-only turns in batches
         const now = try currentTime();
         const result = node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| 5_000));
         try std.testing.expect(result.failure == null);
-        try std.testing.expect(result.readiness.discovery and result.discovery_only);
+        try std.testing.expect(result.readiness.discoveryReady() and result.discovery_only);
         try std.testing.expectEqual(expected, result.discovery.datagrams);
         try std.testing.expectEqual(@as(u32, 0), result.transport.datagrams_sent);
     }
@@ -331,13 +329,13 @@ test "discovery readiness with other work due runs a full turn" {
     }
     const remote = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
     defer remote.close(std.testing.io);
-    const destination = @import("udp.zig").fromNetwork(remote.address);
+    const destination = @import("udp").Address.fromNetwork(remote.address);
     _ = try node.transport.engine.dial(&destination, node.peerId(), node.last_now);
     try std.testing.expect(node.transport.engine.backlog());
     try remote.send(std.testing.io, &node.discovery.?.transport.sockets.primary().address, "junk datagram");
     const now = try currentTime();
     const result = node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| 5_000));
-    try std.testing.expect(result.failure == null and result.readiness.discovery);
+    try std.testing.expect(result.failure == null and result.readiness.discoveryReady());
     try std.testing.expect(!result.discovery_only);
     try std.testing.expectEqual(@as(u16, 1), result.discovery.datagrams);
     try std.testing.expect(result.transport.datagrams_sent > 0);
@@ -427,7 +425,7 @@ test "a continuous QUIC flood on both families shares each receive quota and lea
         _ = node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms));
     }
     const quota = node.transport.work_limits.receive_per_step_max;
-    const sockets = node.transport.udp.sockets.values;
+    const sockets = node.transport.sockets.values;
     const sender4 = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
     defer sender4.close(std.testing.io);
     const sender6 = try (std.Io.net.IpAddress{ .ip6 = .loopback(0) }).bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });

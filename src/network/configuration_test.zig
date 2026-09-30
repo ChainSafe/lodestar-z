@@ -4,7 +4,7 @@ const resolve = @import("configuration.zig").resolve;
 const rr = @import("reqresp/reqresp.zig");
 const std = @import("std");
 const transport = @import("transport.zig");
-const udp = @import("udp.zig");
+const udp = @import("udp");
 const validate = @import("configuration.zig").validate;
 
 test "configuration resolves dial concurrency independently of peer headroom" {
@@ -202,12 +202,12 @@ test "configuration carries bounded UDP socket buffer requests" {
     const mib = 1024 * 1024;
     try std.testing.expectEqual(udp.Buffers{ .receive = 16 * mib, .send = 4 * mib }, resolved.socket_buffers.quic);
     try std.testing.expectEqual(udp.Buffers{ .receive = 2 * mib, .send = 1 * mib }, resolved.socket_buffers.discovery);
-    const bounds: udp.SocketBuffers = .{
+    const bounds: @import("configuration.zig").SocketBuffers = .{
         .quic = .{ .receive = udp.Buffers.bytes_max, .send = udp.Buffers.bytes_min },
         .discovery = .{ .receive = udp.Buffers.bytes_min, .send = udp.Buffers.bytes_max },
     };
     try std.testing.expectEqual(bounds, (try resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .socket_buffers = bounds, .admission_policy = policy_fixture.config() })).socket_buffers);
-    const invalid = [_]udp.SocketBuffers{
+    const invalid = [_]@import("configuration.zig").SocketBuffers{
         .{ .quic = .{ .receive = udp.Buffers.bytes_min - 1, .send = udp.Buffers.bytes_min } },
         .{ .quic = .{ .receive = udp.Buffers.bytes_min, .send = udp.Buffers.bytes_max + 1 } },
         .{ .discovery = .{ .receive = udp.Buffers.bytes_max + 1, .send = udp.Buffers.bytes_min } },

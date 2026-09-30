@@ -8,7 +8,7 @@ const multiaddr = @import("wire/multiaddr.zig");
 const peer_id = @import("wire/peer_id.zig");
 const tls = @import("tls/context.zig");
 const types = @import("types.zig");
-const udp_mod = @import("udp.zig");
+const udp_mod = @import("udp");
 
 const assert = std.debug.assert;
 
@@ -44,7 +44,9 @@ pub const WorkLimits = struct {
 /// different connections share a batch.
 pub const SendBatch = struct {
     buffers: [constants.send_batch_max][constants.datagram_size_max]u8 = undefined,
-    sent: [constants.send_batch_max]types.Sent = undefined,
+    outgoing: [constants.send_batch_max]udp_mod.Outgoing = undefined,
+    release_times: [constants.send_batch_max]u64 = undefined,
+    scratch: udp_mod.BatchScratch = undefined,
     owners: [constants.send_batch_max]types.Handle = undefined,
 };
 
@@ -55,7 +57,7 @@ pub const MemoryPlan = struct {
     ready_batch_storage_bytes: u64 = @sizeOf(SendBatch),
 };
 
-pub const StepError = udp_mod.ReceiveTimeoutError || error{ClockOutOfRange};
+pub const StepError = udp_mod.DatagramError || error{ClockOutOfRange};
 pub const DialError = udp_mod.SendError || engine_mod.DialError || error{ ClockOutOfRange, DestinationUnreachable, MissingPeerId };
 
 /// Options of the standalone `step`, which also waits for the socket. NetworkCore polls its
@@ -91,9 +93,18 @@ pub const ProgressResult = struct {
     failure: ?StepError = null,
 };
 
+pub const Counters = struct {
+    received_bytes: u64 = 0,
+    sent_bytes: u64 = 0,
+    received_datagrams: u64 = 0,
+    sent_datagrams: u64 = 0,
+};
+
 pub const Transport = struct {
     engine: engine_mod.Engine = undefined,
-    udp: udp_mod.Udp = undefined,
+    sockets: udp_mod.Sockets = .{},
+    counters: Counters = .{},
+    send_drops: udp_mod.SendDrops = .{},
     work_limits: WorkLimits = .{},
     batch: SendBatch = .{},
     batch_len: u8 = 0,
@@ -117,24 +128,26 @@ pub const Transport = struct {
         var context = try tls.Context.init(options.host, now.unix_s, serial);
         var context_owned = true;
         errdefer if (context_owned) context.deinit();
-        target.udp = try udp_mod.Udp.bind(io, options.bind);
-        errdefer target.udp.close(io);
-        if (options.socket_buffers) |request| udp_mod.requestBuffers(&target.udp.sockets, io, request, .network_quic);
+        target.sockets = try udp_mod.Sockets.bind(io, options.bind);
+        errdefer target.sockets.close(io);
+        if (options.socket_buffers) |request| @import("configuration.zig").requestBuffers(&target.sockets, io, request, .network_quic);
         target.engine = try engine_mod.Engine.init(allocator, .{
             .tls = context,
             .limits = options.limits,
-            .local = target.udp.localAddresses(),
+            .local = target.sockets.localAddresses(),
             .seed = &seed_bytes,
         });
         context_owned = false;
         target.work_limits = options.work_limits;
         target.batch_len = 0;
+        target.counters = .{};
+        target.send_drops = .{};
         assert(target.engine.registry.slots.len == options.limits.connections_max);
     }
 
     pub fn deinit(self: *Transport, io: std.Io) void {
         self.engine.deinit();
-        self.udp.close(io);
+        self.sockets.close(io);
         self.* = undefined;
     }
 
@@ -145,12 +158,12 @@ pub const Transport = struct {
 
     pub fn localAddress(self: *const Transport) types.Address {
         assert(self.engine.registry.slots.len > 0);
-        return self.udp.localAddress();
+        return self.sockets.localAddress();
     }
 
     pub fn localMultiaddr(self: *const Transport) multiaddr.Multiaddr {
         assert(self.engine.registry.slots.len > 0);
-        return .{ .address = self.udp.localAddress(), .peer = self.engine.tls.local_peer_id };
+        return .{ .address = self.sockets.localAddress(), .peer = self.engine.tls.local_peer_id };
     }
 
     pub fn memoryPlan(self: *const Transport) MemoryPlan {
@@ -292,7 +305,9 @@ pub const Transport = struct {
             if (self.batch_len == constants.send_batch_max) _ = self.submit(io, result);
             const at = self.batch_len;
             const sent = self.engine.sendOne(index, now, &self.batch.buffers[at]) orelse return true;
-            self.batch.sent[at] = sent;
+            assert(sent.bytes.len <= constants.datagram_size_max);
+            self.batch.outgoing[at] = .{ .to = sent.to, .bytes = sent.bytes };
+            self.batch.release_times[at] = sent.transmit_at_ns;
             self.batch.owners[at] = owner;
             self.batch_len += 1;
             turn.recordSend();
@@ -307,17 +322,24 @@ pub const Transport = struct {
         const count = self.batch_len;
         if (count == 0) return null;
         defer self.batch_len = 0;
-        if (builtin.mode == .Debug) assertReleased(io, self.batch.sent[0..count]);
+        if (builtin.mode == .Debug) assertReleased(io, self.batch.release_times[0..count]);
         var first: ?udp_mod.SendError = null;
         var begin: usize = 0;
         while (begin < count) {
             result.send_calls += 1;
-            const outcome = self.udp.sendMany(io, self.batch.sent[begin..count]);
+            const outcome = self.sockets.sendMany(io, self.batch.outgoing[begin..count], constants.datagram_size_max, &self.batch.scratch);
+            for (self.batch.outgoing[begin..][0..outcome.sent]) |sent| {
+                self.counters.sent_bytes +|= sent.bytes.len;
+                self.counters.sent_datagrams +|= 1;
+            }
             assert(begin + outcome.sent <= count);
             result.datagrams_sent += @intCast(outcome.sent);
             begin += outcome.sent;
             const err = outcome.failure orelse break;
-            if (@import("udp").sendPressure(err) != null) break;
+            if (udp_mod.sendPressure(err)) |reason| {
+                for (self.batch.outgoing[begin..count]) |unsent| self.send_drops.add(reason, unsent.bytes.len);
+                break;
+            }
             first = first orelse err;
             const owner = self.batch.owners[begin];
             if (self.engine.sendOwner(owner.index)) |current| if (std.meta.eql(current, owner)) {
@@ -353,7 +375,7 @@ pub const Transport = struct {
             switch (outcome) {
                 .accepted => result.datagrams_accepted += 1,
                 .version_negotiation, .retry => |bytes| {
-                    self.udp.send(io, &admitted.from, bytes) catch {};
+                    self.sendReply(io, admitted.from, bytes) catch {};
                     if (outcome == .version_negotiation) result.version_negotiations += 1;
                 },
                 .dropped => result.datagrams_dropped += 1,
@@ -368,10 +390,9 @@ pub const Transport = struct {
         wait_ms: u32,
         ready: *[2]bool,
     ) StepError!Received {
-        const received = if (wait_ms == 0)
-            self.udp.receiveReady(io, &self.receive_buffer, ready)
-        else
-            self.udp.receiveTimeout(io, &self.receive_buffer, receiveTimeout(wait_ms));
+        const received: udp_mod.DatagramError!?udp_mod.Datagram = if (wait_ms == 0)
+            self.sockets.receiveReadyDatagram(io, &self.receive_buffer, ready)
+        else if (self.sockets.receiveDatagram(io, &self.receive_buffer, receiveTimeout(wait_ms))) |packet| packet else |err| err;
         const datagram = received catch |err| switch (err) {
             error.Timeout => return .timeout,
             error.DatagramTooLarge,
@@ -380,20 +401,32 @@ pub const Transport = struct {
             error.NetworkDown,
             error.SystemResources,
             => {
+                if (err == error.DatagramTooLarge) self.counters.received_datagrams +|= 1;
                 result.receive_errors += 1;
                 return .dropped;
             },
             else => return err,
         };
-        return .{ .datagram = datagram };
+        const packet = datagram orelse return .timeout;
+        self.counters.received_datagrams +|= 1;
+        self.counters.received_bytes +|= packet.bytes.len;
+        return .{ .datagram = packet };
+    }
+    fn sendReply(self: *Transport, io: std.Io, destination: types.Address, bytes: []const u8) udp_mod.SendError!void {
+        self.sockets.sendTo(io, destination, bytes, constants.datagram_size_max) catch |err| {
+            if (udp_mod.sendPressure(err)) |reason| self.send_drops.add(reason, bytes.len);
+            return err;
+        };
+        self.counters.sent_bytes +|= bytes.len;
+        self.counters.sent_datagrams +|= 1;
     }
 };
 
 /// quiche 0.28 under CUBIC releases every datagram at its send time. A controller that paces
 /// would need held datagrams, which this transport does not keep.
-fn assertReleased(io: std.Io, batch: []const types.Sent) void {
+fn assertReleased(io: std.Io, release_times: []const u64) void {
     const now = currentTime(io) catch return;
-    for (batch) |sent| assert(sent.transmit_at_ns <= now.nanos());
+    for (release_times) |release_time| assert(release_time <= now.nanos());
 }
 
 fn receiveTimeout(wait_ms: u32) std.Io.Timeout {

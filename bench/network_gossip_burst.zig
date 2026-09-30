@@ -626,8 +626,8 @@ const Totals = struct {
             .score_evaluations = g.peers.scores.calculations,
             .steps = steps,
             .step_ns = @intCast(hub.step_duration.sum),
-            .udp_sent = hub.transport.udp.counters.sent_datagrams,
-            .udp_received = hub.transport.udp.counters.received_datagrams,
+            .udp_sent = hub.transport.counters.sent_datagrams,
+            .udp_received = hub.transport.counters.received_datagrams,
         };
         for (g.topic_metrics.counts) |counts| {
             result.received += counts.received;
@@ -863,7 +863,7 @@ fn hubReady(hub: *const network.NetworkCore, chain: *const Chain, options: *cons
 
 fn udpDrops(hub: *network.NetworkCore) u64 {
     var total: u64 = 0;
-    for (hub.transport.udp.sockets.drops()) |value| total += value orelse 0;
+    for (hub.transport.sockets.drops()) |value| total += value orelse 0;
     return total;
 }
 

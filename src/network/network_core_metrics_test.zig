@@ -375,7 +375,7 @@ test "metrics report the kernel's buffer sizes and drops for every UDP socket" {
     defer f.deinit();
     const output = try f.render(true);
     const roles = [_]struct { []const u8, *@import("udp").Sockets }{
-        .{ "quic", &f.node.transport.udp.sockets },
+        .{ "quic", &f.node.transport.sockets },
         .{ "discovery", &f.node.discovery.?.transport.sockets },
     };
     var line: [160]u8 = undefined;
@@ -525,8 +525,8 @@ test "stopped metrics report all delivery descriptors available with zero occupa
 test "metrics expose local UDP send drops by role and pressure without clearing at stop" {
     var f = try Fixture.initWith(&.{}, .{ .bind = .{ .ip4 = .loopback(0) } });
     defer f.deinit();
-    f.node.transport.udp.send_drops.add(.would_block, 17);
-    f.node.transport.udp.send_drops.add(.would_block, 19);
+    f.node.transport.send_drops.add(.would_block, 17);
+    f.node.transport.send_drops.add(.would_block, 19);
     f.node.discovery.?.transport.send_drops.add(.system_resources, 23);
     for ([_]bool{ true, false }) |running| {
         const output = try f.render(running);

@@ -162,13 +162,24 @@ pub const Discovery = struct {
     /// Runs one Transport step, then consumes all borrowed progress before exposing a local fault.
     /// The caller's monotonic time must use the same domain as the Transport's host I/O clock.
     pub fn step(self: *Discovery, io: std.Io, now_ms: u64, wake_ms: u64, out: []adapter.Candidate) Error!Result {
+        return self.stepWithReadiness(io, now_ms, wake_ms, null, out);
+    }
+
+    pub fn stepReady(self: *Discovery, io: std.Io, now_ms: u64, ready: *[2]bool, out: []adapter.Candidate) Error!Result {
+        return self.stepWithReadiness(io, now_ms, now_ms, ready, out);
+    }
+
+    fn stepWithReadiness(self: *Discovery, io: std.Io, now_ms: u64, wake_ms: u64, ready: ?*[2]bool, out: []adapter.Candidate) Error!Result {
         if (self.stopped) return error.Stopped;
         var result = Result{};
         self.refill(io, now_ms, &result) catch |err| {
             result.failure = err;
             self.resource_retry_ms = now_ms +| self.options.local_retry_ms;
         };
-        const progress = try self.transport.stepUntil(io, &self.storage.expiries, @min(wake_ms, self.nextWakeup(now_ms).?));
+        const progress = if (ready) |eligible|
+            try self.transport.stepReady(io, &self.storage.expiries, eligible)
+        else
+            try self.transport.stepUntil(io, &self.storage.expiries, @min(wake_ms, self.nextWakeup(now_ms).?));
         var consumed = self.consume(&progress, self.storage.expiries[0..progress.calls_expired], out);
         if (progress.event == .request and progress.event.request.message == .talk_request) {
             const incoming = progress.event.request;
