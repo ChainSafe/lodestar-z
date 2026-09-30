@@ -1,6 +1,7 @@
 const std = @import("std");
 const napi = @import("zapi:zapi").napi;
 const leveldb = @import("leveldb");
+const shared = @import("leveldb_shared.zig");
 const runtime = @import("leveldb_runtime.zig");
 const values = @import("leveldb_values.zig");
 const allocator = std.heap.c_allocator;
@@ -26,6 +27,7 @@ pub const Job = struct {
     number_result: u64 = 0,
     property_found: bool = false,
     options: leveldb.Options = .{},
+    multithreading: bool = false,
     range: leveldb.RangeOptions = .{},
     sync: bool = false,
     cursor_id: u32 = 0,
@@ -111,14 +113,14 @@ pub const Job = struct {
         const owner = self.owner;
         if (self.kind == .open) {
             std.debug.assert(owner.database == null);
-            owner.database = try leveldb.Database.open(allocator, self.input[0 .. self.input.len - 1 :0], self.options);
+            owner.database = try shared.Database.open(self.input[0 .. self.input.len - 1 :0], self.options, self.multithreading);
             return;
         }
         if (self.kind == .destroy) {
-            try leveldb.destroy(self.input[0 .. self.input.len - 1 :0]);
+            try shared.destroy(self.input[0 .. self.input.len - 1 :0]);
             return;
         }
-        const database = if (owner.database) |*db| db else return error.DatabaseClosed;
+        const database = if (owner.database) |db| &db.database else return error.DatabaseClosed;
         switch (self.kind) {
             .open, .destroy => unreachable,
             .clear => try database.clear(),

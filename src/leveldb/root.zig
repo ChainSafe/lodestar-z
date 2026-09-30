@@ -1,5 +1,6 @@
-//! Bounded result materialization over LevelDB. Callers serialize access and keep Database addresses stable while
-//! cursors live. LevelDB's internal block reads, decompression, cache and compaction are outside these result bounds.
+//! Bounded result materialization over LevelDB. Database operations may run concurrently; callers serialize each
+//! cursor, keep Database addresses stable and close only after all users retire. Engine reads, decompression,
+//! cache and compaction are outside these result bounds.
 const std = @import("std");
 const raw = @import("raw.zig");
 const ranges = @import("range.zig");
@@ -40,7 +41,7 @@ pub const Database = struct {
     allocator: Allocator,
     inner: ?raw.DB,
     cache: raw.Cache,
-    cursors: u32 = 0,
+    cursors: std.atomic.Value(u32) = .init(0),
     clear_max_entries: u64 = std.math.maxInt(u32),
 
     /// The host ensures one owner per physical directory, across path aliases, workers and other storage engines.
@@ -73,7 +74,7 @@ pub const Database = struct {
 
     pub fn close(self: *Database) !void {
         if (self.inner == null) return;
-        if (self.cursors != 0) return error.CursorsOpen;
+        if (self.cursors.load(.monotonic) != 0) return error.CursorsOpen;
         self.inner.?.close();
         self.inner = null;
         self.cache.destroy();
@@ -220,7 +221,12 @@ pub const Database = struct {
     /// Takes a snapshot now. The cursor must close before the database; its address need not be stable.
     pub fn cursor(self: *Database, range: RangeOptions) !Cursor {
         const db = try self.handle();
-        if (self.cursors >= max_cursors) return error.CursorCapacity;
+        const previous = self.cursors.fetchAdd(1, .monotonic);
+        if (previous >= max_cursors) {
+            _ = self.cursors.fetchSub(1, .monotonic);
+            return error.CursorCapacity;
+        }
+        errdefer _ = self.cursors.fetchSub(1, .monotonic);
         var bounds = try ranges.Range.init(self.allocator, &range, max_key_bytes);
         errdefer bounds.deinit(self.allocator);
         var snapshot = try db.createSnapshot();
@@ -232,7 +238,6 @@ pub const Database = struct {
         errdefer iterator.destroy();
 
         if (range.limit != 0) try bounds.seek(&iterator);
-        self.cursors += 1;
         return .{
             .db = self,
             .iterator = iterator,
@@ -265,8 +270,8 @@ pub const Cursor = struct {
         self.iterator.destroy();
         self.db.inner.?.releaseSnapshot(&self.snapshot);
         self.bounds.deinit(self.db.allocator);
-        std.debug.assert(self.db.cursors > 0);
-        self.db.cursors -= 1;
+        const previous = self.db.cursors.fetchSub(1, .monotonic);
+        std.debug.assert(previous > 0);
     }
 
     /// Keys and values share the byte budget. A row deferred for lack of remaining room is not consumed. Any error

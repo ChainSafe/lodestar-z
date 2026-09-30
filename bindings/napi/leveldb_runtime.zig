@@ -1,6 +1,7 @@
 const std = @import("std");
 const napi = @import("zapi:zapi").napi;
 const leveldb = @import("leveldb");
+const shared = @import("leveldb_shared.zig");
 const values = @import("leveldb_values.zig");
 const Job = @import("leveldb_job.zig").Job;
 const allocator = std.heap.c_allocator;
@@ -9,10 +10,10 @@ const queue_capacity = values.pending_operations_max + leveldb.max_cursors;
 pub const CursorSlot = struct { id: u32 = 0, cursor: ?leveldb.Cursor = null };
 pub const KnownCursor = struct { id: u32 = 0, closing: bool = false };
 
-/// The JS thread owns admission and lifetime fields. Only the single active worker touches database/cursors.
+/// The JS thread owns admission and lifetime fields. Each runtime serializes its own work and cursors.
 pub const Runtime = struct {
     env: napi.Env,
-    database: ?leveldb.Database = null,
+    database: ?*shared.Database = null,
     cursors: [leveldb.max_cursors]CursorSlot = @splat(.{}),
     next_cursor_id: u32 = 0,
     known_cursors: [leveldb.max_cursors]KnownCursor = @splat(.{}),
@@ -191,8 +192,8 @@ pub const Runtime = struct {
             if (slot.cursor) |*cursor| cursor.close();
             slot.cursor = null;
         }
-        if (self.database) |*database| {
-            database.close() catch |err| {
+        if (self.database) |database| {
+            database.release() catch |err| {
                 self.close_failure = err;
                 return;
             };

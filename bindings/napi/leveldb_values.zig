@@ -47,7 +47,7 @@ pub fn optionalInteger(options: Value, name: [:0]const u8, default: usize, maxim
     return positive(value, maximum);
 }
 
-fn optionalBoolean(options: Value, name: [:0]const u8, default: bool) !bool {
+pub fn optionalBoolean(options: Value, name: [:0]const u8, default: bool) !bool {
     const value = try options.getNamedProperty(name);
     if (try value.typeof() == .undefined) return default;
     return boolean(value);
