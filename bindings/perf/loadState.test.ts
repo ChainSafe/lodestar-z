@@ -4,13 +4,24 @@ import * as era from "@lodestar/era";
 import {loadState as loadStateTS} from "@lodestar/state-transition";
 import {ssz} from "@lodestar/types";
 import bindings from "../src/index.js";
-import {getFirstEraFilePath} from "../test/eraFiles.ts";
+import {getEraFilePaths} from "../test/eraFiles.ts";
 import {getPubkeyCacheCapacityForState, getSerializedGenesisValidatorsRoot} from "../test/serializedState.ts";
 
-const reader = await era.era.EraReader.open(config, getFirstEraFilePath());
-const stateBytes = await reader.readSerializedState();
-await reader.close();
-const requiredPubkeyCapacity = getPubkeyCacheCapacityForState(stateBytes);
+async function readSerializedState(path: string): Promise<Uint8Array> {
+  const reader = await era.era.EraReader.open(config, path);
+  const bytes = await reader.readSerializedState();
+  await reader.close();
+  return bytes;
+}
+
+// Load a later state onto an earlier seed so the validator and inactivity-score diffs are non-empty.
+const [seedEraPath, nextEraPath] = getEraFilePaths();
+const seedStateBytes = await readSerializedState(seedEraPath);
+const stateBytes = await readSerializedState(nextEraPath);
+const requiredPubkeyCapacity = Math.max(
+  getPubkeyCacheCapacityForState(seedStateBytes),
+  getPubkeyCacheCapacityForState(stateBytes)
+);
 
 let loadedPkix = false;
 try {
@@ -23,13 +34,13 @@ if (!loadedPkix || bindings.pubkeys.capacity() < requiredPubkeyCapacity) {
   bindings.pubkeys.ensureCapacity(requiredPubkeyCapacity);
 }
 
-const nativeConfig = new bindings.BeaconConfig(config, getSerializedGenesisValidatorsRoot(stateBytes));
-const seedState = bindings.BeaconStateView.createFromBytes(stateBytes, nativeConfig);
+const nativeConfig = new bindings.BeaconConfig(config, getSerializedGenesisValidatorsRoot(seedStateBytes));
+const seedState = bindings.BeaconStateView.createFromBytes(seedStateBytes, nativeConfig);
 const seedValidatorsBytes = seedState.serializeValidators();
 
-const tsSeedState = ssz.fulu.BeaconState.deserializeToViewDU(stateBytes);
+const tsSeedState = ssz.fulu.BeaconState.deserializeToViewDU(seedStateBytes);
 
-describe("loadState: native vs TS (mainnet)", () => {
+describe("loadState next era: native vs TS (mainnet)", () => {
   bench({
     fn: () => {
       seedState.loadOtherStateBench(stateBytes);

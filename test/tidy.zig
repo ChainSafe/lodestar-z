@@ -53,7 +53,7 @@ const inline_test_allowlist = [_][]const u8{
     "src/fork_choice/proto_array.zig",
     // Private helper: compatibleUnionOptionsAreCompatible.
     "src/ssz/type/compatible_union.zig",
-    // Private diff internals: findModifiedValidators, loadValidators.
+    // Private diff internals: findModifiedIndices, loadValidators.
     "src/state_transition/load_state.zig",
     // Private helper: ComputeShuffledIndex.
     "src/state_transition/utils/committee_indices.zig",
