@@ -243,9 +243,10 @@ pub const Transport = struct {
         // published with the rest.
         result.events = self.engine.pollEvents(events);
         result.events_pending = self.engine.eventsPending();
-        if (failure) |err| return .{ .progress = result, .failure = err };
-        self.drainKeylog(io) catch |err| return .{ .progress = result, .failure = err };
-        return .{ .progress = result };
+        self.drainKeylog(io) catch |err| {
+            failure = failure orelse err;
+        };
+        return .{ .progress = result, .failure = failure };
     }
 
     /// Non-blocking drain of the QUIC sockets into the engine, up to the receive budget. Reads
@@ -404,7 +405,9 @@ pub const Transport = struct {
         return .{ .datagram = datagram };
     }
 
-    fn drainKeylog(self: *Transport, io: std.Io) error{KeylogWriteFailed}!void {
+    /// Flush optional diagnostics before callbacks can retire connections and after flushing
+    /// their output. A write failure disables the writer without changing engine progress.
+    pub fn drainKeylog(self: *Transport, io: std.Io) error{KeylogWriteFailed}!void {
         const file = self.keylog orelse return;
         var lines: [tls.keylog_capacity]u8 = undefined;
         for (self.engine.activeIndices()) |index| {
