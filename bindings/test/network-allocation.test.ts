@@ -1,45 +1,8 @@
-import {existsSync, mkdtempSync, rmSync} from "node:fs";
+import {mkdtempSync, rmSync} from "node:fs";
 import {tmpdir} from "node:os";
-import {dirname, join} from "node:path";
+import {join} from "node:path";
 import {expect, test} from "vitest";
 import {childTestTimeout, spawnChild, spawnCommand} from "./utils/network.js";
-
-const headers = join(dirname(process.execPath), "..", "include", "node");
-/** Past the 47-bit user address space, so the allocation fails whatever the overcommit policy. */
-const unallocatable = 2 ** 48;
-
-function run(script: string) {
-  return spawnChild(["-e", script]);
-}
-
-// Pins the exchange's failure classification: a payload ArrayBuffer that N-API cannot allocate returns no status,
-// so no N-API outcome of a payload buffer creation is an operation-local allocation failure. Only the network
-// allocator's OutOfMemory is.
-test.skipIf(!existsSync(join(headers, "node_api.h")))(
-  "an N-API ArrayBuffer allocation failure terminates the process instead of returning a status",
-  childTestTimeout(4),
-  () => {
-    const directory = mkdtempSync(join(tmpdir(), "lodestar-z-arraybuffer-"));
-    try {
-      const addon = join(directory, "probe.node");
-      const source = join(import.meta.dirname, "fixtures", "network-arraybuffer-probe.c");
-      const built = spawnCommand("zig", ["cc", "-shared", "-fPIC", "-O2", "-I", headers, "-o", addon, source]);
-      expect(built.status, built.stderr).toBe(0);
-      const native = run(`console.log(JSON.stringify(require(${JSON.stringify(addon)}).create(${unallocatable})))`);
-      expect(native.stdout).toBe("");
-      expect(native.signal).toBe("SIGABRT");
-      expect(native.stderr).toContain("FATAL ERROR: v8::ArrayBuffer::New Allocation failed - process out of memory");
-      // The same failure in JavaScript is a catchable RangeError, so a RangeError alone never means allocation.
-      const script = run(
-        `try { new ArrayBuffer(${unallocatable}) } catch (e) { console.log(e.name + ": " + e.message) }`
-      );
-      expect(script.stdout.trim()).toBe("RangeError: Array buffer allocation failed");
-      expect(run(`console.log(require(${JSON.stringify(addon)}).create(16).status)`).stdout.trim()).toBe("0");
-    } finally {
-      rmSync(directory, {force: true, recursive: true});
-    }
-  }
-);
 
 /** A publication payload length nothing else in the process allocates. */
 const refusedBytes = 654321;

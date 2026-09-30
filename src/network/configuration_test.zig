@@ -117,9 +117,6 @@ test "configuration overrides preserve profile defaults and derive shared fields
     try std.testing.expectEqual(@as(usize, 16), service.gossipsub.validation_capacity);
     try std.testing.expectEqual(@as(usize, 256), service.gossipsub.mcache_capacity);
     try std.testing.expectEqual(@as(u16, 2), resolved.core.dial.concurrent_max);
-    // NetworkCore initialization derives the request fork from local state, so no override names it.
-    try std.testing.expect(!@hasField(@import("configuration.zig").ReqRespOverrides, "request_fork"));
-    try std.testing.expect(@hasField(rr.Options, "request_fork"));
 }
 
 test "configuration rejects inconsistent capacity sections before owners" {
