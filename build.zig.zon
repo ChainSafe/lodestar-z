@@ -260,28 +260,10 @@
                 .imports = .{.discv5},
             },
         },
-        .ping_peer = .{
-            .root_module = .{
-                .root_source_file = "examples/ping_peer.zig",
-                .imports = .{.network},
-            },
-        },
-        .reqresp_peer = .{
-            .root_module = .{
-                .root_source_file = "examples/reqresp_peer.zig",
-                .imports = .{ .network, .consensus_types, .config, .constants, .fork_types, .preset },
-            },
-        },
         .network_interop_peer = .{
             .root_module = .{
                 .root_source_file = "test/interop/network_peer.zig",
                 .imports = .{ .network, .config },
-            },
-        },
-        .core_peer = .{
-            .root_module = .{
-                .root_source_file = "examples/core_peer.zig",
-                .imports = .{ .network, .discv5, .config },
             },
         },
         .core_interop_peer = .{
@@ -456,12 +438,6 @@
     },
     .tests = .{
         .leveldb = .{ .root_module = .leveldb },
-        .reqresp_peer_bounds = .{
-            .root_module = .{
-                .root_source_file = "examples/reqresp_peer.zig",
-                .imports = .{ .network, .consensus_types, .config, .constants, .fork_types, .preset },
-            },
-        },
         .network_runtime = .{
             .root_module = .{
                 .root_source_file = "bindings/napi/network_runtime.zig",
