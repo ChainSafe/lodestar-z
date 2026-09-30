@@ -83,7 +83,6 @@ pub const Limits = struct {
     handshake_timeout_ms: u64 = limits.handshake_timeout_ms,
     unanswered_dial_timeout_ms: u64 = limits.unanswered_dial_timeout_ms,
     keep_alive_ms: u64 = limits.keep_alive_ms,
-    keylog: bool = false,
 };
 
 /// Per-connection visits by phase. An idle connection is visited in none of them. Readiness tests
@@ -210,7 +209,7 @@ pub const Engine = struct {
         var route_seed = csprng.random().int(u64);
         defer std.crypto.secureZero(u8, std.mem.asBytes(&route_seed));
 
-        var registry = try @import("registry.zig").Registry.init(allocator, wanted.connections_max, wanted.keylog, route_seed);
+        var registry = try @import("registry.zig").Registry.init(allocator, wanted.connections_max, route_seed);
         errdefer registry.deinit(allocator);
 
         return .{
@@ -242,14 +241,6 @@ pub const Engine = struct {
         const slot = &self.registry.slots[index];
         if (slot.state == .free or slot.state == .closed) return null;
         return .{ .index = index, .generation = slot.generation };
-    }
-
-    pub fn takeKeylog(self: *Engine, index: u16, out: []u8) usize {
-        assert(index < self.registry.slots.len);
-        assert(out.len >= tls.keylog_capacity);
-        const slot = &self.registry.slots[index];
-        if (slot.state == .free) return 0;
-        return slot.takeKeylog(out);
     }
 
     fn retire(self: *Engine, index: u16) void {
@@ -303,7 +294,6 @@ pub const Engine = struct {
             .scid = self.connectionId(),
             .expected_peer_id = expected,
             .now = now,
-            .keylog = self.registry.keylogFor(index),
         }) catch {
             self.registry.unclaim(index);
             return error.OpenFailed;
@@ -724,7 +714,6 @@ pub const Engine = struct {
             .scid = scid,
             .expected_peer_id = null,
             .now = now,
-            .keylog = self.registry.keylogFor(index),
         }) catch {
             self.registry.unclaim(index);
             return .dropped;

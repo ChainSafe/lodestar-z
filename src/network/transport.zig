@@ -19,12 +19,10 @@ pub const Options = struct {
     work_limits: WorkLimits = .{},
     /// Null keeps the system's default socket buffer sizes.
     socket_buffers: ?udp_mod.Buffers = null,
-    keylog_path: ?[]const u8 = null,
 };
 
 pub const InitError = tls.Error || engine_mod.Error || std.Io.net.IpAddress.BindError ||
-    std.Io.RandomSecureError || std.Io.File.OpenError || std.Io.File.StatError ||
-    error{ClockOutOfRange};
+    std.Io.RandomSecureError || error{ClockOutOfRange};
 
 pub const send_burst_max: u16 = 256;
 
@@ -57,9 +55,7 @@ pub const MemoryPlan = struct {
     ready_batch_storage_bytes: u64 = @sizeOf(SendBatch),
 };
 
-const IoError = udp_mod.ReceiveTimeoutError || error{ClockOutOfRange};
-
-pub const StepError = IoError || error{KeylogWriteFailed};
+pub const StepError = udp_mod.ReceiveTimeoutError || error{ClockOutOfRange};
 pub const DialError = udp_mod.SendError || engine_mod.DialError || error{ ClockOutOfRange, DestinationUnreachable, MissingPeerId };
 
 /// Options of the standalone `step`, which also waits for the socket. NetworkCore polls its
@@ -102,8 +98,6 @@ pub const Transport = struct {
     batch: SendBatch = .{},
     batch_len: u8 = 0,
     receive_buffer: [constants.datagram_size_max]u8 = undefined,
-    keylog: ?std.Io.File = null,
-    keylog_offset: u64 = 0,
 
     /// The I/O provider must honor std.Io.randomSecure's external entropy contract.
     pub fn init(
@@ -120,26 +114,15 @@ pub const Transport = struct {
         defer std.crypto.secureZero(u8, &seed_bytes);
         try std.Io.randomSecure(io, &seed_bytes);
         const now = try currentTime(io);
-        target.keylog = null;
-        target.keylog_offset = 0;
-        if (options.keylog_path) |path| {
-            const file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = false, .permissions = @enumFromInt(0o600) });
-            errdefer file.close(io);
-            target.keylog_offset = (try file.stat(io)).size;
-            target.keylog = file;
-        }
-        errdefer if (target.keylog) |file| file.close(io);
         var context = try tls.Context.init(options.host, now.unix_s, serial);
         var context_owned = true;
         errdefer if (context_owned) context.deinit();
         target.udp = try udp_mod.Udp.bind(io, options.bind);
         errdefer target.udp.close(io);
         if (options.socket_buffers) |request| udp_mod.requestBuffers(&target.udp.sockets, io, request, .network_quic);
-        var engine_limits = options.limits;
-        engine_limits.keylog = options.keylog_path != null;
         target.engine = try engine_mod.Engine.init(allocator, .{
             .tls = context,
-            .limits = engine_limits,
+            .limits = options.limits,
             .local = target.udp.localAddresses(),
             .seed = &seed_bytes,
         });
@@ -147,13 +130,11 @@ pub const Transport = struct {
         target.work_limits = options.work_limits;
         target.batch_len = 0;
         assert(target.engine.registry.slots.len == options.limits.connections_max);
-        assert(target.keylog != null or options.keylog_path == null);
     }
 
     pub fn deinit(self: *Transport, io: std.Io) void {
         self.engine.deinit();
         self.udp.close(io);
-        if (self.keylog) |file| file.close(io);
         self.* = undefined;
     }
 
@@ -243,9 +224,6 @@ pub const Transport = struct {
         // published with the rest.
         result.events = self.engine.pollEvents(events);
         result.events_pending = self.engine.eventsPending();
-        self.drainKeylog(io) catch |err| {
-            failure = failure orelse err;
-        };
         return .{ .progress = result, .failure = failure };
     }
 
@@ -253,7 +231,7 @@ pub const Transport = struct {
     /// only the families `ready` marks, indexed like the sockets, alternating while both hold
     /// datagrams. A family found empty is not read again this turn; a later arrival keeps its
     /// socket readable for the owner's next poll.
-    pub fn receive(self: *Transport, io: std.Io, result: *StepResult, ready: [2]bool) IoError!void {
+    pub fn receive(self: *Transport, io: std.Io, result: *StepResult, ready: [2]bool) StepError!void {
         return self.receiveBatch(io, result, 0, ready);
     }
 
@@ -354,7 +332,7 @@ pub const Transport = struct {
         return @intCast(@min(wait_max_ms, ceiling));
     }
 
-    fn receiveBatch(self: *Transport, io: std.Io, result: *StepResult, first_wait_ms: u32, ready: [2]bool) IoError!void {
+    fn receiveBatch(self: *Transport, io: std.Io, result: *StepResult, first_wait_ms: u32, ready: [2]bool) StepError!void {
         var eligible = ready;
         var count: u32 = 0;
         while (count < self.work_limits.receive_per_step_max) : (count += 1) {
@@ -384,7 +362,7 @@ pub const Transport = struct {
         result: *StepResult,
         wait_ms: u32,
         ready: *[2]bool,
-    ) IoError!Received {
+    ) StepError!Received {
         const received = if (wait_ms == 0)
             self.udp.receiveReady(io, &self.receive_buffer, ready)
         else
@@ -403,23 +381,6 @@ pub const Transport = struct {
             else => return err,
         };
         return .{ .datagram = datagram };
-    }
-
-    /// Flush optional diagnostics before callbacks can retire connections and after flushing
-    /// their output. A write failure disables the writer without changing engine progress.
-    pub fn drainKeylog(self: *Transport, io: std.Io) error{KeylogWriteFailed}!void {
-        const file = self.keylog orelse return;
-        var lines: [tls.keylog_capacity]u8 = undefined;
-        for (self.engine.activeIndices()) |index| {
-            const length = self.engine.takeKeylog(index, &lines);
-            if (length == 0) continue;
-            file.writePositionalAll(io, lines[0..length], self.keylog_offset) catch {
-                file.close(io);
-                self.keylog = null;
-                return error.KeylogWriteFailed;
-            };
-            self.keylog_offset += length;
-        }
     }
 };
 

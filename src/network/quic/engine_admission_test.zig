@@ -406,7 +406,7 @@ test "engine outgoing descriptor preserves native monotonic pacing timestamp" {
 }
 
 fn allocateRegistry(allocator: std.mem.Allocator) !void {
-    var registry = try @import("registry.zig").Registry.init(allocator, 4, true, 42);
+    var registry = try @import("registry.zig").Registry.init(allocator, 4, 42);
     defer registry.deinit(allocator);
 }
 

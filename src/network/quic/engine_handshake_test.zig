@@ -135,48 +135,6 @@ test "engine receive windows stay within the configured budget" {
     try std.testing.expectEqual(@as(u64, 2 * 1_024 * 1_024), standard.memoryPlan().stream_window_bytes);
 }
 
-test "engine captures TLS key material per connection only when keylog is enabled" {
-    var pair: Pair = .{};
-    try pair.init(.{ .keylog = true }, .{});
-    defer pair.deinit();
-    const handles = try connectPair(&pair);
-
-    var lines: [tls.keylog_capacity]u8 = undefined;
-    const length = pair.client.takeKeylog(handles.client.index, &lines);
-    try std.testing.expect(length > 0);
-    try std.testing.expect(std.mem.indexOf(u8, lines[0..length], "CLIENT_TRAFFIC_SECRET_0") != null);
-    try std.testing.expect(std.mem.indexOf(u8, lines[0..length], "SERVER_TRAFFIC_SECRET_0") != null);
-    try std.testing.expectEqual(@as(usize, 0), pair.client.takeKeylog(handles.client.index, &lines));
-
-    try std.testing.expectEqual(@as(usize, 0), pair.server.registry.keylog_arena.len);
-    try std.testing.expectEqual(@as(usize, 0), pair.server.takeKeylog(handles.server.index, &lines));
-
-    const state = &pair.client.registry.slots[handles.client.index].handshake;
-    const oversized = [_]u8{'x'} ** tls.keylog_capacity;
-    try std.testing.expect(!state.appendKeylog(&oversized));
-    try std.testing.expectEqual(@as(usize, 0), pair.client.takeKeylog(handles.client.index, &lines));
-}
-
-test "handshake state drops key lines that do not fit" {
-    var storage: [tls.keylog_capacity]u8 = undefined;
-    var state = tls.HandshakeState{ .keylog = &storage };
-    const line = "CLIENT_TRAFFIC_SECRET_0 " ++ "a" ** 200;
-    var appended: usize = 0;
-    while (state.appendKeylog(line)) appended += 1;
-    try std.testing.expectEqual(tls.keylog_capacity / (line.len + 1), appended);
-
-    var out: [tls.keylog_capacity]u8 = undefined;
-    const taken = state.takeKeylog(&out);
-    try std.testing.expectEqual(appended * (line.len + 1), taken);
-    try std.testing.expectEqual(@as(u16, 0), state.keylog_len);
-    try std.testing.expect(std.mem.startsWith(u8, out[0..taken], line));
-    try std.testing.expect(state.appendKeylog(line));
-
-    var disabled = tls.HandshakeState{};
-    try std.testing.expect(!disabled.appendKeylog("x"));
-    try std.testing.expectEqual(@as(usize, 0), disabled.takeKeylog(&out));
-}
-
 fn standaloneEngine(seed: u8, engine_limits: engine_mod.Limits) !Engine {
     const host = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{seed}));
     var ctx = try tls.Context.init(&host, now_unix, [_]u8{seed} ** 8);
