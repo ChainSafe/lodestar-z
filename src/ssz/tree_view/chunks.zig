@@ -412,16 +412,6 @@ pub fn CompositeChunks(
             return child_ptr;
         }
 
-        /// Get all child views without tracking changes (read-only).
-        pub fn getAllReadonly(self: *Self, allocator: Allocator, len: usize) ![]ElementPtr {
-            const views = try allocator.alloc(ElementPtr, len);
-            errdefer allocator.free(views);
-            for (0..len) |i| {
-                views[i] = try self.getReadonly(i);
-            }
-            return views;
-        }
-
         pub const Value = ST.Element.Type;
 
         /// Get a child value as an SSZ value type.

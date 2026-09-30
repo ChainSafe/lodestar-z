@@ -36,6 +36,29 @@ pub const EpochTransitionStepKind = enum {
     process_proposer_lookahead,
 };
 
+pub const ProcessBlockStepKind = enum {
+    processBlockHeader,
+    processWithdrawals,
+    processExecutionPayload,
+    processRandao,
+    processEth1Data,
+    processOperations,
+    processSyncAggregate,
+    processBlobKzgCommitments,
+};
+
+pub const ProcessOperationsStepKind = enum {
+    processProposerSlashing,
+    processAttesterSlashing,
+    processAttestations,
+    processDeposit,
+    processVoluntaryExit,
+    processBlsToExecutionChange,
+    processDepositRequest,
+    processWithdrawalRequest,
+    processConsolidationRequest,
+};
+
 pub const ProposerRewardKind = enum {
     attestation,
     sync_aggregate,
@@ -44,6 +67,8 @@ pub const ProposerRewardKind = enum {
 
 const HashTreeRootLabel = struct { source: StateHashTreeRootSource };
 const EpochTransitionStepLabel = struct { step: EpochTransitionStepKind };
+const ProcessBlockStepLabel = struct { step: ProcessBlockStepKind };
+const ProcessOperationsStepLabel = struct { step: ProcessOperationsStepKind };
 const ProposerRewardLabel = struct { type: ProposerRewardKind };
 const ProgressiveBalancesMismatchLabel = struct { target: ProgressiveBalancesTarget };
 
@@ -55,6 +80,8 @@ const Metrics = struct {
     epoch_transition_step: EpochTransitionStep,
     epoch_shuffling_job: EpochShufflingJob,
     process_block: ProcessBlock,
+    process_block_step: ProcessBlockStep,
+    process_operations_step: ProcessOperationsStep,
     process_block_commit: ProcessBlockCommit,
     state_hash_tree_root: StateHashTreeRoot,
     num_effective_balance_updates: CountGauge,
@@ -76,6 +103,8 @@ const Metrics = struct {
     const EpochTransitionStep = m.HistogramVec(f64, EpochTransitionStepLabel, &.{ 0.01, 0.05, 0.1, 0.2, 0.5, 0.75, 1 });
     const EpochShufflingJob = m.Histogram(f64, &.{ 0.01, 0.05, 0.1, 0.2, 0.5, 0.75, 1 });
     const ProcessBlock = m.Histogram(f64, &.{ 0.005, 0.01, 0.02, 0.05, 0.1, 1 });
+    const ProcessBlockStep = m.HistogramVec(f64, ProcessBlockStepLabel, &.{ 0.001, 0.005, 0.01, 0.025, 0.05, 0.1 });
+    const ProcessOperationsStep = m.HistogramVec(f64, ProcessOperationsStepLabel, &.{ 0.001, 0.005, 0.01, 0.025, 0.05, 0.1 });
     const ProcessBlockCommit = m.Histogram(f64, &.{ 0.005, 0.01, 0.02, 0.05, 0.1, 1 });
     const StateHashTreeRoot = m.HistogramVec(f64, HashTreeRootLabel, &.{ 0.05, 0.1, 0.2, 0.5, 1, 1.5 });
     const CountGauge = m.Gauge(u64);
@@ -86,6 +115,8 @@ const Metrics = struct {
     /// Deinitializes all `HistogramVec` and `GaugeVec` metrics for state transition.
     pub fn deinit(self: *Metrics) void {
         self.epoch_transition_step.deinit();
+        self.process_block_step.deinit();
+        self.process_operations_step.deinit();
         self.state_hash_tree_root.deinit();
         self.proposer_rewards.deinit();
         self.progressive_balances_mismatches.deinit();
@@ -123,6 +154,22 @@ pub fn init(allocator: Allocator, io: std.Io, comptime opts: m.RegistryOpts) !vo
         metric_opts,
     );
     errdefer epoch_transition_step.deinit();
+    var process_block_step = try Metrics.ProcessBlockStep.init(
+        allocator,
+        io,
+        "stfn_process_block_step_seconds",
+        .{ .help = "Time to call each step of process block in seconds" },
+        metric_opts,
+    );
+    errdefer process_block_step.deinit();
+    var process_operations_step = try Metrics.ProcessOperationsStep.init(
+        allocator,
+        io,
+        "stfn_process_operations_step_seconds",
+        .{ .help = "Time to call each step of process operations in seconds" },
+        metric_opts,
+    );
+    errdefer process_operations_step.deinit();
     var state_hash_tree_root = try Metrics.StateHashTreeRoot.init(
         allocator,
         io,
@@ -170,6 +217,8 @@ pub fn init(allocator: Allocator, io: std.Io, comptime opts: m.RegistryOpts) !vo
             .{ .help = "Time to process a single block in seconds" },
             metric_opts,
         ),
+        .process_block_step = process_block_step,
+        .process_operations_step = process_operations_step,
         .process_block_commit = Metrics.ProcessBlockCommit.init(
             "stfn_process_block_commit_seconds",
             .{ .help = "Time to call commit after process a single block in seconds" },
@@ -304,6 +353,9 @@ test "exports the expected metric names" {
     try init(allocator, std.testing.io, .{});
     defer deinit();
 
+    try state_transition.process_block_step.observe(.{ .step = .processBlockHeader }, 0.001);
+    try state_transition.process_operations_step.observe(.{ .step = .processAttestations }, 0.001);
+
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
     try write(&aw.writer);
@@ -314,6 +366,8 @@ test "exports the expected metric names" {
         "lodestar_stfn_epoch_transition_step_seconds",
         "lodestar_stfn_epoch_shuffling_job_seconds",
         "lodestar_stfn_process_block_seconds",
+        "lodestar_stfn_process_block_step_seconds",
+        "lodestar_stfn_process_operations_step_seconds",
         "lodestar_stfn_process_block_commit_seconds",
         "lodestar_stfn_hash_tree_root_seconds",
         "lodestar_stfn_effective_balance_updates_count",
@@ -351,4 +405,15 @@ test "exports the expected metric names" {
     for (expected, names.items) |name, actual| {
         try std.testing.expectEqualStrings(name, actual);
     }
+
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        aw.written(),
+        "lodestar_stfn_process_block_step_seconds_count{step=\"processBlockHeader\"} 1\n",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        aw.written(),
+        "lodestar_stfn_process_operations_step_seconds_count{step=\"processAttestations\"} 1\n",
+    ) != null);
 }
