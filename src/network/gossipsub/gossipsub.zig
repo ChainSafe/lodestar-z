@@ -264,10 +264,10 @@ pub const Gossipsub = struct {
         const index = self.sessions.find(conn) orelse return;
         _ = self.sessions.resetRx(index);
         self.cancelWrites(self.sessions.ref(index));
-        const context = self.overlayContext(self.last_now_ms);
-        self.overlay.peerDisconnected(&context, index);
         const ref = self.logical(index);
         self.peers.disconnect(ref, self.last_now_ms);
+        const context = self.overlayContext(self.last_now_ms);
+        self.overlay.peerDisconnected(&context, index);
         for (&self.retired_queue_drops, self.sessions.rows[index].io.tx.drops) |*total, value| total.* +|= value;
         self.sessions.rows[index].io.tx.drops = @splat(0);
         self.sessions.removePeer(index);

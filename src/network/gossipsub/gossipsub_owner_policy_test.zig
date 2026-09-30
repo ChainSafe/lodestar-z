@@ -573,3 +573,42 @@ test "gossip advertisements sample the whole burst independently for each recipi
     }
     try std.testing.expect(beyond_prefix > constants.gossip_ids_max / 2);
 }
+
+test "gossip disconnect classifies active mesh score before pruning and records failure once" {
+    for ([_]u64{ 50, 40, 30 }) |elapsed| {
+        var g = try support.init(std.testing.allocator, .{
+            .random_seed = 1,
+            .score_params = .{ .topic = .{
+                .time_in_mesh_weight = 1,
+                .time_in_mesh_quantum_ms = 10,
+                .mesh_delivery_threshold = 2,
+                .mesh_delivery_activation_ms = 10,
+            } },
+        });
+        defer g.deinit();
+        const conn: Handle = .{ .index = 0, .generation = 1 };
+        const metadata: peers_mod.Metadata = .{ .identity = .{ .bytes = @splat(1) }, .address = .unspecified, .direction = .inbound };
+        const first = g.addPeer(conn, &metadata, .{ .mono_ms = 0, .unix_s = 0 }).admitted;
+        const ref = g.sessions.rows[first.index].logical;
+        const name = "/eth2/01020304/beacon_block/ssz_snappy";
+        try support.subscribe(&g, name);
+        const topic = g.overlay.findTopic(name).?;
+        g.sessions.rows[first.index].outbound = .{ .live = .{ .stream = .{ .conn = conn, .id = 2, .slot = 0 }, .version = .v1_2 } };
+        const context = g.overlayContext(0);
+        _ = g.overlay.peerSubscription(&context, first.index, name, true);
+        g.overlay.onGraft(&context, topic, first.index);
+        try std.testing.expect(g.overlay.mesh(topic).isSet(first.index));
+        try std.testing.expectEqual(@as(f64, @floatFromInt(elapsed / 10)) - 4, g.peers.score(ref, elapsed));
+        g.last_now_ms = elapsed;
+        g.connectionClosed(conn);
+        g.connectionClosed(conn);
+        try std.testing.expect(!g.overlay.mesh(topic).isSet(first.index));
+        try std.testing.expect(!g.overlay.subscribers(topic).isSet(first.index));
+        const counters = g.peers.scores.topics[@as(usize, ref.index) * constants.topics_cap + topic];
+        try std.testing.expect(!counters.in_mesh);
+        try std.testing.expectEqual(@as(f64, if (elapsed > 40) 0 else 4), counters.mesh_failures);
+        const second = g.addPeer(.{ .index = 0, .generation = 2 }, &metadata, .{ .mono_ms = elapsed + 1, .unix_s = 0 }).admitted;
+        try std.testing.expectEqual(ref, g.sessions.rows[second.index].logical);
+        try std.testing.expectEqual(@as(f64, if (elapsed > 40) 0 else -4), g.peers.score(ref, elapsed + 1));
+    }
+}
