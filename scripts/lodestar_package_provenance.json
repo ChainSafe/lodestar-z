@@ -388,7 +388,6 @@
       "reviewed": {
         "build": "zig build build-lib:bindings -Doptimize=ReleaseSafe -Dpreset=<preset> -Dtarget=<zig target> -Dcpu=<cpu>",
         "pack": "node scripts/lodestar_package.mjs pack",
-        "install": "node scripts/lodestar_package.mjs install",
         "loader": "zapi requireNapiLibrary loads the package's zig-out/lib addon"
       }
     },
