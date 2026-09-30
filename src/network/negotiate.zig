@@ -25,6 +25,7 @@ pub const Error = error{ NegotiationTableFull, InvalidLimits } || multistream.Er
 
 pub const Failure = enum { timeout, malformed, stream_closed, transport, overflow, exhausted };
 
+/// The selection echo is queued in QUIC; resetting the write side can still discard it.
 pub const Ready = struct {
     leftover: []const u8,
     fin: bool,
@@ -64,6 +65,7 @@ const Entry = struct {
     candidate: u8 = 0,
     pending_result: Outcome.Result = undefined,
     fin_seen: bool = false,
+    finishing_selected: bool = false,
     outbox: stream_io.Outbox = .{},
     out_buffer: [outbox_capacity]u8 = undefined,
     inbox: stream_io.Inbox(inbox_capacity) = .{},
@@ -176,6 +178,7 @@ pub const Negotiator = struct {
         entry.role = .{ .dialer = dialer };
         entry.selected = null;
         entry.fin_seen = false;
+        entry.finishing_selected = false;
         entry.inbox = .{};
         entry.outbox = .{};
         entry.outbox.queue(hello, false);
@@ -225,6 +228,7 @@ pub const Negotiator = struct {
         entry.role = .{ .listener = .{} };
         entry.selected = null;
         entry.fin_seen = false;
+        entry.finishing_selected = false;
         entry.inbox = .{};
         entry.outbox = .{};
         self.begin(index);
@@ -281,6 +285,27 @@ pub const Negotiator = struct {
         if (self.pending.len > 0 and outcome_capacity > 0) return now.mono_ms;
         const top = self.timeouts.peek() orelse return null;
         return @max(now.mono_ms, top.deadline);
+    }
+
+    /// Retains a selected listener's existing row until a bounded final response and FIN are queued.
+    /// Call before releasing the outcome borrow; `bytes` are copied and may be stack-owned.
+    pub fn finishSelected(self: *Negotiator, engine: *Engine, stream: StreamHandle, bytes: []const u8, now: types.Now) bool {
+        if (bytes.len > outbox_capacity) return false;
+        var row = self.reported.head;
+        while (row != index_list.none) : (row = self.entries[row].outcome_link.next) {
+            const entry = &self.entries[row];
+            if (!std.meta.eql(entry.stream, stream)) continue;
+            if (entry.role != .listener or entry.pending_result != .ready) return false;
+            engine.bindStream(stream, routeOf(row)) catch return false;
+            self.reported.remove(self.entries, "outcome_link", row);
+            @memcpy(entry.out_buffer[0..bytes.len], bytes);
+            entry.outbox.queue(entry.out_buffer[0..bytes.len], true);
+            entry.finishing_selected = true;
+            entry.started_ms = now.mono_ms;
+            self.begin(row);
+            return true;
+        }
+        return false;
     }
 
     /// Ends the leftover borrows of every delivered outcome, freeing their entries.
@@ -341,7 +366,10 @@ pub const Negotiator = struct {
         for (self.entries, 0..) |*entry, index| {
             if (entry.state != .negotiating and entry.state != .pending) continue;
             if (!std.meta.eql(entry.stream.conn, conn)) continue;
-            self.settle(index, fail(engine, entry, .stream_closed).result);
+            if (entry.finishing_selected) {
+                engine.closeStream(entry.stream, types.app_error_negotiation_failed);
+                self.release(index);
+            } else self.settle(index, fail(engine, entry, .stream_closed).result);
         }
     }
 
@@ -352,7 +380,10 @@ pub const Negotiator = struct {
         if (entry.state != .negotiating and entry.state != .pending) return;
         if (!std.meta.eql(entry.stream, stream)) return;
         if (reset) {
-            self.settle(row, fail(engine, entry, .stream_closed).result);
+            if (entry.finishing_selected) {
+                engine.closeStream(entry.stream, types.app_error_negotiation_failed);
+                self.release(row);
+            } else self.settle(row, fail(engine, entry, .stream_closed).result);
         } else if (entry.state == .negotiating) self.markReady(row);
     }
 
@@ -395,6 +426,10 @@ pub const Negotiator = struct {
     fn advance(self: *Negotiator, engine: *Engine, index: usize, now: types.Now, supported: []const Protocol) ?Outcome {
         const entry = &self.entries[index];
         assert(entry.state == .negotiating);
+        if (entry.finishing_selected) {
+            self.finishSelectedWrite(engine, index, now);
+            return null;
+        }
         const waited_ms = now.mono_ms -| entry.started_ms;
         if (waited_ms >= entry.timeout_ms) return fail(engine, entry, .timeout);
         const flushed = entry.outbox.pump(engine, entry.stream) catch |err|
@@ -453,6 +488,28 @@ pub const Negotiator = struct {
         if (read.fin) return fail(engine, entry, .stream_closed);
         if (again) self.markReady(index);
         return null;
+    }
+
+    fn finishSelectedWrite(self: *Negotiator, engine: *Engine, index: usize, now: types.Now) void {
+        const entry = &self.entries[index];
+        if (now.mono_ms -| entry.started_ms >= entry.timeout_ms) {
+            engine.closeStream(entry.stream, types.app_error_negotiation_failed);
+            self.release(index);
+            return;
+        }
+        const progress = entry.outbox.pump(engine, entry.stream) catch {
+            engine.closeStream(entry.stream, types.app_error_negotiation_failed);
+            self.release(index);
+            return;
+        };
+        switch (progress) {
+            .blocked => {},
+            .yielded => self.markReady(index),
+            .done => {
+                engine.shutdown(entry.stream, .read, 0);
+                self.release(index);
+            },
+        }
     }
 
     /// Test builds check, after every pump, that the lists and the heap match the entry states,

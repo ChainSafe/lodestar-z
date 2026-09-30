@@ -43,6 +43,7 @@ const Setup = struct {
         const events = self.pair.events(engine, &storage);
         for (events) |event| {
             if (event == .stream_opened and negotiator == &self.listener) try negotiator.acceptInbound(engine, event.stream_opened, self.pair.now);
+            if (event == .closed) negotiator.connectionClosed(engine, event.closed.conn);
         }
         (support.Owners{ .negotiator = negotiator }).route(engine, events);
     }
@@ -569,5 +570,120 @@ test "negotiation timed entry owns exact expiry below and above the default" {
         try std.testing.expectEqual(@as(usize, 1), negotiator.pump(&pair.client, pair.now, &supported, &outcomes));
         try std.testing.expectEqual(stream, outcomes[0].stream);
         try std.testing.expectEqual(.timeout, outcomes[0].result.failed);
+    }
+}
+
+fn selectedRaw(setup: *Setup) !struct { client: engine_mod.StreamHandle, server: engine_mod.StreamHandle } {
+    const stream = try setup.pair.client.openStream(setup.handles.client);
+    const dialer = try multistream.Dialer.init(ping);
+    var bytes: [256]u8 = undefined;
+    const hello = try dialer.initialWrite(&bytes);
+    try std.testing.expectEqual(hello.len, try setup.pair.client.write(stream, hello, false));
+    var outcomes: [1]Outcome = undefined;
+    for (0..16) |_| {
+        try setup.pair.pump();
+        if (setup.pumpListener(&supported, &outcomes) > 0) {
+            try std.testing.expect(outcomes[0].result == .ready);
+            return .{ .client = stream, .server = outcomes[0].stream };
+        }
+    }
+    return error.TestUnexpectedResult;
+}
+
+fn blockSelectedWrite(setup: *Setup, stream: engine_mod.StreamHandle) !usize {
+    const padding = [_]u8{0x55} ** 4096;
+    var sent: usize = 0;
+    for (0..64) |_| {
+        sent += setup.pair.server.write(stream, &padding, false) catch |err| switch (err) {
+            error.WouldBlock => break,
+            else => return err,
+        };
+    }
+    try std.testing.expect(sent > 0);
+    try std.testing.expectEqual(@as(usize, 0), try setup.pair.server.streamCapacity(stream));
+    return sent;
+}
+
+test "negotiator retains final selected bytes through blocked writes and releases after FIN" {
+    var setup: Setup = .{};
+    try setup.init(1);
+    defer setup.deinit();
+    const streams = try selectedRaw(&setup);
+    const padding = try blockSelectedWrite(&setup, streams.server);
+    var response = "final selected response".*;
+    try std.testing.expect(setup.listener.finishSelected(&setup.pair.server, streams.server, &response, setup.pair.now));
+    @memset(&response, 0);
+    setup.listener.releaseReported();
+    try std.testing.expectEqual(@as(usize, 0), setup.pumpListener(&supported, &.{}));
+    try std.testing.expectEqual(@as(usize, 1), setup.listener.active());
+    const visits = setup.listener.visits;
+    for (0..8) |_| _ = setup.listener.pump(&setup.pair.server, setup.pair.now, &supported, &.{});
+    try std.testing.expectEqual(visits, setup.listener.visits);
+
+    var received: usize = 0;
+    var tail: ["final selected response".len]u8 = @splat(0);
+    var bytes: [4096]u8 = undefined;
+    var finished = false;
+    for (0..128) |_| {
+        try setup.pair.pump();
+        const read = try setup.pair.client.read(streams.client, &bytes);
+        try std.testing.expectEqual(@as(?u64, null), read.reset_code);
+        for (bytes[0..read.len]) |byte| {
+            std.mem.copyForwards(u8, &tail, tail[1..]);
+            tail[tail.len - 1] = byte;
+        }
+        received += read.len;
+        if (read.fin) {
+            finished = true;
+            break;
+        }
+        _ = setup.pumpListener(&supported, &.{});
+    }
+    try std.testing.expect(finished and received > padding);
+    try std.testing.expectEqualStrings("final selected response", &tail);
+    try std.testing.expectEqual(@as(usize, 0), setup.listener.active());
+    try std.testing.expectEqual(@as(?u64, null), setup.listener.nextWakeup(setup.pair.now, 1));
+}
+
+test "negotiator final selected write retires on timeout reset connection close and shutdown" {
+    const Case = enum { timeout, reset, connection_closed, shutdown };
+    for ([_]Case{ .timeout, .reset, .connection_closed, .shutdown }) |case| {
+        var setup: Setup = .{};
+        try setup.init(1);
+        defer setup.deinit();
+        const streams = try selectedRaw(&setup);
+        _ = try blockSelectedWrite(&setup, streams.server);
+        try std.testing.expect(setup.listener.finishSelected(&setup.pair.server, streams.server, "refused", setup.pair.now));
+        _ = setup.pumpListener(&supported, &.{});
+        try std.testing.expectEqual(@as(usize, 1), setup.listener.active());
+        switch (case) {
+            .timeout => {
+                setup.pair.advance(negotiate.negotiate_timeout_ms);
+                _ = setup.pumpListener(&supported, &.{});
+            },
+            .reset => {
+                setup.pair.client.closeStream(streams.client, 1);
+                try setup.pair.pump();
+                _ = setup.pumpListener(&supported, &.{});
+            },
+            .connection_closed => {
+                try std.testing.expect(setup.pair.client.close(setup.handles.client, 0));
+                try setup.pair.pump();
+                _ = setup.pumpListener(&supported, &.{});
+            },
+            .shutdown => setup.listener.shutdown(&setup.pair.server),
+        }
+        try std.testing.expectEqual(@as(usize, 0), setup.listener.active());
+        try std.testing.expectEqual(@as(?u64, null), setup.listener.nextWakeup(setup.pair.now, 1));
+        if (case == .connection_closed) continue;
+        const replacement = try setup.pair.client.openStream(setup.handles.client);
+        var hello: [256]u8 = undefined;
+        const dialer = try multistream.Dialer.init(ping);
+        const proposal = try dialer.initialWrite(&hello);
+        _ = try setup.pair.client.write(replacement, proposal, false);
+        try setup.pair.pump();
+        var outcomes: [1]Outcome = undefined;
+        try std.testing.expectEqual(@as(usize, 1), setup.pumpListener(&supported, &outcomes));
+        try std.testing.expect(outcomes[0].result == .ready);
     }
 }

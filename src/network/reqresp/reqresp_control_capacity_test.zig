@@ -411,9 +411,9 @@ test "reqresp admission refusals distinguish capacity and concurrency without fa
         failure: rr.AcceptError,
     };
     const cases = [_]Case{
-        .{ .slots = 4, .peer_limit = 2, .reason = .peer_capacity, .failure = error.PeerSlotsExhausted },
+        .{ .slots = 4, .peer_limit = 2, .refused = .status_v1, .reason = .peer_capacity, .failure = error.PeerSlotsExhausted },
         .{ .slots = 4, .peer_limit = 4, .application_limit = 1, .held = 1, .accepted = .blocks_by_root_v2, .refused = .blocks_by_range_v2, .reason = .peer_capacity, .failure = error.PeerSlotsExhausted },
-        .{ .slots = 4, .peer_limit = 4, .reason = .protocol_concurrency, .failure = error.TooManyRequests },
+        .{ .slots = 4, .peer_limit = 4, .reason = .protocol_concurrency, .failure = error.ProtocolConcurrency },
     };
     for (cases) |case| {
         var pair: support.Pair = .{};
