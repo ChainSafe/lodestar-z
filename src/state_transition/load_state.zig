@@ -764,7 +764,7 @@ test "diff helpers cases" {
     }
 }
 
-test "diff helpers should preserve appended indices on allocation failure" {
+test "memory_safety: diff helpers preserve appended indices on allocation failure" {
     inline for (.{ types.phase0.Validator.fixed_size, INACTIVITY_SCORE_SIZE }) |element_size| {
         const old_bytes = [_]u8{0} ** (257 * element_size);
         const new_bytes = [_]u8{1} ** (257 * element_size);
