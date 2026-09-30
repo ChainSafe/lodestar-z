@@ -1,4 +1,3 @@
-const std = @import("std");
 const cert = @import("cert.zig");
 const constants = @import("../constants.zig");
 const keys = @import("../wire/keys.zig");
@@ -8,33 +7,10 @@ const c = @import("quiche_zig:quiche");
 
 pub const Error = error{OpenSslFailed} || cert.Error;
 
-pub const keylog_capacity: usize = 1_280;
-
 pub const HandshakeState = struct {
     now_unix: i64 = 0,
     peer_id: ?peer_id.PeerId = null,
     failure: ?verify.Error = null,
-    keylog: []u8 = &.{},
-    keylog_len: u16 = 0,
-
-    pub fn appendKeylog(self: *HandshakeState, line: []const u8) bool {
-        std.debug.assert(self.keylog.len <= keylog_capacity);
-        std.debug.assert(self.keylog_len <= self.keylog.len);
-        if (line.len + 1 > self.keylog.len - self.keylog_len) return false;
-        @memcpy(self.keylog[self.keylog_len..][0..line.len], line);
-        self.keylog[self.keylog_len + line.len] = '\n';
-        self.keylog_len += @intCast(line.len + 1);
-        return true;
-    }
-
-    pub fn takeKeylog(self: *HandshakeState, out: []u8) usize {
-        std.debug.assert(self.keylog_len <= self.keylog.len);
-        std.debug.assert(out.len >= self.keylog.len);
-        const length = self.keylog_len;
-        @memcpy(out[0..length], self.keylog[0..length]);
-        self.keylog_len = 0;
-        return length;
-    }
 };
 
 const alpn_protos = [_]u8{constants.alpn.len} ++ constants.alpn.*;
@@ -66,7 +42,6 @@ pub const Context = struct {
             return error.OpenSslFailed;
         }
         c.SSL_CTX_set_alpn_select_cb(ssl_ctx, alpnSelect, null);
-        c.SSL_CTX_set_keylog_callback(ssl_ctx, keylogCallback);
         c.SSL_CTX_set_custom_verify(
             ssl_ctx,
             c.SSL_VERIFY_PEER | c.SSL_VERIFY_FAIL_IF_NO_PEER_CERT,
@@ -116,12 +91,6 @@ fn verifyCallback(ssl: ?*c.SSL, out_alert: [*c]u8) callconv(.c) c.enum_ssl_verif
         return c.ssl_verify_invalid;
     };
     return c.ssl_verify_ok;
-}
-
-fn keylogCallback(ssl: ?*const c.SSL, line: [*c]const u8) callconv(.c) void {
-    const handle = ssl orelse return;
-    const state = handshakeState(@constCast(handle)) orelse return;
-    _ = state.appendKeylog(std.mem.span(line));
 }
 
 fn alpnSelect(

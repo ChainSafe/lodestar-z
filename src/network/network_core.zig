@@ -55,7 +55,6 @@ pub const DiscoveryOptions = struct {
     coordinator: peers.discovery.Options = .{},
 };
 pub const Startup = struct {
-    keylog_path: ?[]const u8 = null,
     host: *const @import("wire/keys.zig").KeyPair,
     bind: @import("udp.zig").Bindings,
     local: t.LocalState,
@@ -207,7 +206,7 @@ pub const NetworkCore = struct {
         self.native_event_count = 0;
         self.discovery = null;
         self.last_now = try transport_mod.currentTime(io);
-        try self.transport.init(allocator, io, .{ .host = startup.host, .bind = startup.bind, .limits = resolved.limits, .work_limits = resolved.work_limits, .socket_buffers = resolved.socket_buffers.quic, .keylog_path = startup.keylog_path });
+        try self.transport.init(allocator, io, .{ .host = startup.host, .bind = startup.bind, .limits = resolved.limits, .work_limits = resolved.work_limits, .socket_buffers = resolved.socket_buffers.quic });
         errdefer self.transport.deinit(io);
         var service_options = resolved.core.service;
         service_options.reqresp.request_fork = local.fork.fork;
@@ -647,10 +646,6 @@ pub const NetworkCore = struct {
         result.transport.events = self.transport.collect(tick, self.native_events);
         result.transport.events_pending = self.transport.engine.eventsPending();
         self.native_event_count = result.transport.events;
-        self.transport.drainKeylog(io) catch |err| {
-            result.failure = result.failure orelse err;
-            self.counters.transport_failures +|= 1;
-        };
         if (host.apply) |apply| {
             const due = if (host.deadline_ms) |deadline| deadline <= tick.mono_ms else false;
             if (result.readiness.host or result.readiness.failure != null or self.host_more or due) {
@@ -686,10 +681,6 @@ pub const NetworkCore = struct {
             self.counters.dial_deferred +|= result.dial_deferred;
         }
         self.transport.flush(io, tick, &result.transport);
-        self.transport.drainKeylog(io) catch |err| {
-            result.failure = result.failure orelse err;
-            self.counters.transport_failures +|= 1;
-        };
         return result;
     }
 

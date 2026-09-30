@@ -4,7 +4,6 @@ const connection = @import("connection.zig");
 const index_list = @import("../index_list.zig");
 const route_table = @import("route_table.zig");
 const DeadlineHeap = @import("../deadline_heap.zig").DeadlineHeap;
-const tls = @import("../tls/context.zig");
 const assert = std.debug.assert;
 
 const RouteKeys = struct {
@@ -18,7 +17,6 @@ pub const Registry = struct {
     route_keys: []RouteKeys,
     active: []u16,
     positions: []u16,
-    keylog_arena: []u8,
     /// One key per live connection: its earliest QUIC timer, handshake limit, keep-alive or
     /// deferred close, in monotonic nanoseconds.
     timers: DeadlineHeap,
@@ -34,7 +32,7 @@ pub const Registry = struct {
     dialing: u16 = 0,
     outbound: u16 = 0,
 
-    pub fn init(allocator: std.mem.Allocator, slots_max: u16, keylog: bool, seed: u64) !Registry {
+    pub fn init(allocator: std.mem.Allocator, slots_max: u16, seed: u64) !Registry {
         const slots = try allocator.alloc(connection.Slot, slots_max);
         errdefer allocator.free(slots);
         @memset(slots, .{});
@@ -55,13 +53,6 @@ pub const Registry = struct {
         const expired = try allocator.alloc(u16, slots_max);
         errdefer allocator.free(expired);
 
-        const keylog_len: usize = if (keylog)
-            tls.keylog_capacity * @as(usize, slots_max)
-        else
-            0;
-        const keylog_arena = try allocator.alloc(u8, keylog_len);
-        errdefer allocator.free(keylog_arena);
-
         const positions = try allocator.alloc(u16, slots_max);
         errdefer allocator.free(positions);
         for (positions, 0..) |*entry, index| entry.* = @intCast(index);
@@ -74,7 +65,6 @@ pub const Registry = struct {
             .active = active,
             .timers = timers,
             .expired = expired,
-            .keylog_arena = keylog_arena,
             .positions = positions,
             .route_keys = route_keys,
         };
@@ -84,7 +74,6 @@ pub const Registry = struct {
         for (self.slots) |*slot| if (slot.state != .free) {
             slot.release();
         };
-        allocator.free(self.keylog_arena);
         allocator.free(self.expired);
         self.timers.deinit(allocator);
         allocator.free(self.active);
@@ -154,14 +143,6 @@ pub const Registry = struct {
         if (slot.release_link.linked) self.released.remove(self.slots, "release_link", index);
         if (slot.deferred_link.linked) self.deferred.remove(self.slots, "deferred_link", index);
         self.timers.clear(index);
-    }
-
-    pub fn keylogFor(self: *const Registry, index: u16) []u8 {
-        assert(index < self.slots.len);
-        if (self.keylog_arena.len == 0) return &.{};
-        assert(self.keylog_arena.len == tls.keylog_capacity * self.slots.len);
-        const start = tls.keylog_capacity * @as(usize, index);
-        return self.keylog_arena[start..][0..tls.keylog_capacity];
     }
 
     pub fn findRoute(self: *const Registry, cid: *const binding.Cid) ?u16 {

@@ -36,7 +36,6 @@ pub const OpenParams = struct {
     original_dcid: ?binding.Cid = null,
     expected_peer_id: ?peer_id.PeerId,
     now: types.Now,
-    keylog: []u8 = &.{},
 };
 
 pub const Slot = struct {
@@ -87,8 +86,7 @@ pub const Slot = struct {
         assert(self.conn == null);
         assert(!self.collect_link.linked and !self.dirty_link.linked and !self.event_link.linked and !self.release_link.linked);
         assert(!self.deferred_link.linked);
-        assert(params.keylog.len == 0 or params.keylog.len == tls.keylog_capacity);
-        self.handshake = .{ .now_unix = params.now.unix_s, .keylog = params.keylog };
+        self.handshake = .{ .now_unix = params.now.unix_s };
         self.direction = params.direction;
         self.peer = params.peer;
         self.peer_sockaddr = binding.SockAddr.fromAddress(params.peer);
@@ -125,12 +123,6 @@ pub const Slot = struct {
             params.direction == .inbound,
         ) orelse return error.Unknown;
         self.state = .handshaking;
-    }
-
-    pub fn takeKeylog(self: *Slot, out: []u8) usize {
-        assert(self.state != .free);
-        assert(out.len >= tls.keylog_capacity);
-        return self.handshake.takeKeylog(out);
     }
 
     pub fn release(self: *Slot) void {
