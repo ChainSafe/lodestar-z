@@ -502,3 +502,20 @@ test "metrics export gossip message, mesh change, penalty and promise counters t
     for (expected) |line| try contains(stopped, line);
     try contains(stopped, "lodestar_native_gossip_mesh_changes_total{topic=\"beacon_block\",event=\"leave\",reason=\"session_end\"} 1\n");
 }
+
+test "stopped metrics report all delivery descriptors available with zero occupancy" {
+    var f = try Fixture.init(&.{});
+    defer f.deinit();
+    const pool = f.node.service.gossipsub.sessions.deliveries;
+    const capacity = pool.available;
+    pool.available -= 1;
+    defer pool.available = capacity;
+    var line: [128]u8 = undefined;
+    const running = try f.render(true);
+    try contains(running, try std.fmt.bufPrint(&line, "lodestar_native_gossipsub_delivery_descriptors_available {d}\n", .{capacity - 1}));
+    const stopped = try f.render(false);
+    try contains(stopped, try std.fmt.bufPrint(&line, "lodestar_native_gossipsub_delivery_descriptors_capacity {d}\n", .{capacity}));
+    try contains(stopped, try std.fmt.bufPrint(&line, "lodestar_native_gossipsub_delivery_descriptors_available {d}\n", .{capacity}));
+    try contains(stopped, "lodestar_native_gossipsub_queued_bytes 0\n");
+    try std.testing.expectEqual(capacity - 1, pool.available);
+}
