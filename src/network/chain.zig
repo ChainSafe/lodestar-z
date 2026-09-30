@@ -80,7 +80,33 @@ pub const Plan = struct {
         }
         if (result.boundary_count == 0) return error.UnsupportedNetworkFork;
         _ = try topics.validate(result.topics[0..result.boundary_count]);
+        try result.validateScheduledTopicDemand();
         return result;
+    }
+
+    // The host adds namespaces two epochs early and removes them two epochs late.
+    // Preparation needs outgoing rows until additions fit. This checks scheduled demand only;
+    // delayed transitions and runtime retention pins can still exhaust the table.
+    fn validateScheduledTopicDemand(self: *const Plan) error{UnsupportedTopicOverlap}!void {
+        const lookahead: u64 = 2;
+        var counts: [boundary_max]usize = @splat(0);
+        for (self.topics[0..self.boundary_count], counts[0..self.boundary_count]) |*boundary, *count| {
+            for (boundary.rules, 0..) |topic_rule, k| {
+                const kind: topics.Kind = @enumFromInt(k);
+                if (!self.serve_light_clients and (kind == .light_client_finality_update or kind == .light_client_optimistic_update)) continue;
+                count.* += topic_rule.count;
+            }
+        }
+        for (self.boundaries[0..self.boundary_count]) |incoming| {
+            const epoch = incoming.epoch -| lookahead;
+            var demand: usize = 0;
+            for (self.boundaries[0..self.boundary_count], 0..) |boundary, i| {
+                if (epoch < boundary.epoch -| lookahead) continue;
+                if (i + 1 < self.boundary_count and epoch > self.boundaries[i + 1].epoch +| lookahead) continue;
+                demand += counts[i];
+            }
+            if (demand > @import("gossipsub/constants.zig").topics_cap) return error.UnsupportedTopicOverlap;
+        }
     }
 
     pub fn requestPolicy(self: *const Plan) policy.Config {
