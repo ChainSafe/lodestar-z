@@ -206,6 +206,7 @@ test "EIP-778 record creation round-trips IPv4 and IPv6 endpoints" {
     };
     for (endpoints) |endpoint| {
         const record = try enr.Record.create(&key_pair, 7, endpoint);
+        try std.testing.expectEqualDeep(record, try enr.Record.init(record.slice()));
         try std.testing.expectEqual(@as(u64, 7), record.sequence);
         try std.testing.expectEqual(endpoint, record.endpoint().?);
         try std.testing.expectEqual(
@@ -239,6 +240,7 @@ test "ENR generic fields preserve signed extensions and exact record boundary" {
         .{ .key = "x", .value = .{ .raw = &.{0xc0} } },
     };
     const record = try enr.Record.createFields(&key, 7, &fields);
+    try std.testing.expectEqualDeep(record, try enr.Record.init(record.slice()));
     try std.testing.expectEqualSlices(u8, &.{0xc0}, (try record.field("x")).?);
     try std.testing.expect((try record.field("missing")) == null);
     var changed = record;

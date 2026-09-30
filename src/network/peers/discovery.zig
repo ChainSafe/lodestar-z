@@ -1,12 +1,34 @@
-//! One demand-driven walk and DiscV5 liveness probes share a borrowed Transport. Keep the
-//! Transport at a stable address, serialize entry, and cancel before its teardown.
+//! Owns the application discovery transport, one demand-driven walk and liveness probes.
+//! Initialize at the final address and serialize entry, including cancellation and teardown.
 const std = @import("std");
 const d = @import("discv5");
 const adapter = @import("enr.zig");
 const types = @import("types.zig");
+const advertisement = @import("../advertisement.zig");
+
+pub const ForkSchedule = struct {
+    fulu_scheduled: bool = false,
+    next_version: [4]u8 = @splat(0),
+    next_epoch: u64 = std.math.maxInt(u64),
+    next_digest: [4]u8 = @splat(0),
+};
+/// Lookup queries touch many one-off nodes. Idle expiry keeps the discv5 session store at recent
+/// contacts instead of pinning it at capacity; routing-table peers are revalidated every 300 s.
+pub const discovery_session_capacity: usize = 2_048;
+pub const discovery_session_idle_timeout_ms: u64 = 10 * 60_000;
+pub const Config = struct {
+    advertisement: ?advertisement.Hints = null,
+    fixed: advertisement.Endpoints = .{},
+    bind: @import("udp").Bindings,
+    sequence: u64 = 1,
+    bootstrap: []const d.identity.enr.Record = &.{},
+    engine: d.Engine.Config = .{ .session_capacity = discovery_session_capacity, .session_idle_timeout_ms = discovery_session_idle_timeout_ms },
+    coordinator: Options = .{},
+};
 
 pub const Error = d.Transport.Error || d.Maintenance.Error || d.Lookup.Error || adapter.Error || std.mem.Allocator.Error || error{ Stopped, InvalidOptions, InvalidDemand, InvalidBootstrap, TooManyBootstraps };
 pub const queries_max = 128;
+pub const candidates_per_step = d.types.findnode_result_max + 1;
 pub const Rejection = enum { missing_eth2, incompatible_fork, invalid_enr, no_quic, endpoint_family, endpoint_scope, demand, output_capacity };
 pub const rejection_count = @typeInfo(Rejection).@"enum".fields.len;
 pub const datagram_rejection_count = @typeInfo(d.types.RejectReason).@"enum".fields.len;
@@ -82,7 +104,12 @@ const Storage = struct {
 
 pub const Discovery = struct {
     allocator: std.mem.Allocator,
-    transport: *d.Transport,
+    transport: d.Transport,
+    endpoints: advertisement.Endpoints = .{},
+    quic_ports: [2]?u16 = .{ null, null },
+    quic_bound: [2]bool = .{ false, false },
+    /// Output workspace for the application owner, consumed before the next step.
+    candidates: [candidates_per_step]adapter.Candidate = undefined,
     storage: *Storage,
     maintenance: d.Maintenance,
     lookup: ?d.Lookup = null,
@@ -101,37 +128,112 @@ pub const Discovery = struct {
     lookup_published: u64 = 0,
     empty_lookups: u3 = 0,
 
-    pub fn init(allocator: std.mem.Allocator, transport: *d.Transport, context: *const types.ForkContext, bootstrap: []const d.identity.enr.Record, now_ms: u64, options: Options) Error!Discovery {
+    pub fn init(self: *Discovery, allocator: std.mem.Allocator, io: std.Io, options: Config, buffers: @import("udp").Buffers, host: *const @import("../wire/keys.zig").KeyPair, local: *const types.LocalState, schedule: ForkSchedule, quic: [2]?types.Address, now_ms: u64) !void {
+        var sockets = try @import("udp").Sockets.bind(io, options.bind);
+        errdefer sockets.close(io);
+        @import("../configuration.zig").requestBuffers(&sockets, io, buffers, .network_discovery);
+        var udp_addresses: [2]?d.types.Address = .{ null, null };
+        for (sockets.values, 0..) |socket, i| if (socket) |value| {
+            udp_addresses[i] = d.types.Address.fromNetwork(value.address);
+        };
+        const plan = try advertisement.resolve(if (options.advertisement) |*value| value else null, &options.fixed, &quic, &udp_addresses);
+        try advertisement.validate(plan.endpoints);
+        const quic_bound = [2]bool{ quic[0] != null, quic[1] != null };
+        try validateEndpointFamilies(plan.endpoints, quic_bound, &sockets);
+        const announced = advertisementFor(local, schedule, plan.endpoints);
+        const record = try adapter.build(&host.inner, options.sequence, &announced, &local.fork);
+        try adapter.requireIdentity(&record, &types.PeerId.fromPublicKey(&host.publicKey()));
+        var coordinator_options = options.coordinator;
+        coordinator_options.observations = plan.observations;
+        coordinator_options.quic_mode = if (quic[0] == null) .ip6 else if (quic[1] == null) .ip4 else .dual;
+        try self.initBound(allocator, sockets, &host.inner, &record, &local.fork, options.bootstrap, now_ms, coordinator_options, .{ .engine = options.engine });
+        self.endpoints = plan.endpoints;
+        self.quic_ports = plan.quic_ports;
+        self.quic_bound = quic_bound;
+    }
+
+    /// Takes ownership of bound sockets on success. Records are immutable authenticated values.
+    /// This entry supports hosts that construct their own initial application advertisement.
+    pub fn initBound(self: *Discovery, allocator: std.mem.Allocator, sockets: @import("udp").Sockets, key: *const d.identity.crypto.KeyPair, record: *const d.identity.enr.Record, context: *const types.ForkContext, bootstrap: []const d.identity.enr.Record, now_ms: u64, options: Options, transport_options: d.Transport.Options) !void {
         try context.validate();
         if (options.query_interval_ms == 0 or options.query_interval_ms > 86_400_000 or options.local_retry_ms == 0 or options.local_retry_ms > 86_400_000) return error.InvalidOptions;
         if (bootstrap.len > d.types.bootstrap_max) return error.TooManyBootstraps;
-        var records: [d.types.bootstrap_max]d.identity.enr.Record = undefined;
-        for (bootstrap, records[0..bootstrap.len]) |*record, *copy| {
-            copy.* = try d.identity.enr.Record.init(record.slice());
-            if (copy.endpoint() == null) return error.InvalidBootstrap;
-        }
+        for (bootstrap) |*seed| if (seed.endpoint() == null) return error.InvalidBootstrap;
         var maintenance: d.Maintenance = undefined;
-        try maintenance.init(now_ms, options.maintenance, transport.sockets.mode());
+        try maintenance.init(now_ms, options.maintenance, sockets.mode());
         const storage = try allocator.create(Storage);
         errdefer allocator.destroy(storage);
         storage.observations.init(options.observations);
         maintenance.observations = &storage.observations;
-
-        for (records[0..bootstrap.len]) |*record| {
-            const address = record.endpointFor(transport.sockets.mode()) orelse continue;
-            const peer: d.types.Endpoint = .{ .node_id = record.node_id, .address = address };
-            _ = transport.engine.routing.addKnown(&peer, record) catch |err| switch (err) {
+        self.* = .{ .allocator = allocator, .transport = undefined, .storage = storage, .maintenance = maintenance, .context = context.*, .options = options, .query_due_ms = now_ms };
+        try self.transport.init(allocator, sockets, key.*, record.*, transport_options);
+        for (bootstrap) |*seed| {
+            const address = seed.endpointFor(sockets.mode()) orelse continue;
+            const peer: d.types.Endpoint = .{ .node_id = seed.node_id, .address = address };
+            _ = self.transport.engine.routing.addKnown(&peer, seed) catch |err| switch (err) {
                 error.AddressLimit, error.SelfEntry => continue,
                 else => unreachable,
             };
         }
-        return .{ .allocator = allocator, .transport = transport, .storage = storage, .maintenance = maintenance, .context = context.*, .options = options, .query_due_ms = now_ms };
     }
 
-    pub fn deinit(self: *Discovery) void {
+    pub fn deinit(self: *Discovery, io: std.Io) void {
         self.cancel();
+        self.transport.deinit(self.allocator, io);
         self.allocator.destroy(self.storage);
         self.* = undefined;
+    }
+
+    pub fn localRecord(self: *const Discovery) *const d.identity.enr.Record {
+        return self.transport.engine.localRecord();
+    }
+
+    /// An immutable value returned by prepareAdvertisement, valid for its originating owner
+    /// while previous_sequence is current. Installation rejects foreign or superseded values.
+    pub const PreparedAdvertisement = struct {
+        record: d.identity.enr.Record,
+        previous_sequence: u64,
+    };
+
+    /// Preparation never mutates the live record. Install only after all other owners prepare.
+    pub fn prepareAdvertisement(self: *const Discovery, local: *const adapter.LocalAdvertisement, context: *const types.ForkContext) Error!PreparedAdvertisement {
+        if (self.stopped) return error.Stopped;
+        const previous = self.localRecord().sequence;
+        return .{ .record = try adapter.build(&self.transport.engine.channel.local_key, try adapter.nextSequence(previous), local, context), .previous_sequence = previous };
+    }
+
+    pub fn installAdvertisement(self: *Discovery, prepared: *const PreparedAdvertisement) Error!void {
+        if (self.stopped) return error.Stopped;
+        if (self.localRecord().sequence != prepared.previous_sequence) return error.StaleLocalRecord;
+        try self.transport.engine.updateLocalRecord(&prepared.record);
+    }
+
+    pub fn validateEndpoints(self: *const Discovery, endpoints: advertisement.Endpoints) error{InvalidAdvertisement}!void {
+        try advertisement.validate(endpoints);
+        try validateEndpointFamilies(endpoints, self.quic_bound, &self.transport.sockets);
+    }
+
+    /// Completes the already prepared and published local-state transaction.
+    pub fn commitLocal(self: *Discovery, endpoints: advertisement.Endpoints, context: *const types.ForkContext) void {
+        self.endpoints = endpoints;
+        self.updateFork(context) catch unreachable;
+    }
+
+    pub fn learnedEndpoints(self: *const Discovery, learned: [2]?d.types.Address) advertisement.Endpoints {
+        var endpoints = self.endpoints;
+        for (learned, 0..) |value, family| if (value) |address| switch (address) {
+            .ip4 => |ip| {
+                endpoints.ip4 = ip.octets;
+                endpoints.udp = ip.port;
+                endpoints.quic = self.quic_ports[family];
+            },
+            .ip6 => |ip| {
+                endpoints.ip6 = ip.octets;
+                endpoints.udp6 = ip.port;
+                endpoints.quic6 = self.quic_ports[family];
+            },
+        };
+        return endpoints;
     }
 
     pub fn request(self: *Discovery, demand: Demand, now_ms: u64) Error!void {
@@ -197,7 +299,7 @@ pub const Discovery = struct {
         return .{ .learned = consumed.learned, .candidates = consumed.candidates, .started = result.started, .expired = consumed.expired, .rejected = consumed.rejected, .dropped = consumed.dropped, .unowned = consumed.unowned, .datagrams = consumed.datagrams, .failure = result.failure orelse consumed.failure, .failure_stage = if (result.failure != null) .coordinator else consumed.failure_stage };
     }
 
-    /// Supports hosts that drive the borrowed Transport themselves. Consume every result exactly
+    /// Supports hosts that drive this owner's Transport themselves. Consume every result exactly
     /// once before another Transport step, including results containing failure. The host answers
     /// TALK requests itself; step supplies the unsupported-protocol response. No slice escapes.
     pub fn consume(self: *Discovery, progress: *const d.Transport.StepResult, expiries: []const d.CallTable.Expired, out: []adapter.Candidate) Result {
@@ -285,7 +387,7 @@ pub const Discovery = struct {
     }
 
     fn start(self: *Discovery, io: std.Io, now_ms: u64, background: bool, result: *Result) Error!void {
-        const started = (if (background) d.lookup_io.startMaintenance(self.transport, io, &self.maintenance, now_ms) else d.lookup_io.startLookup(self.transport, io, &self.lookup.?, now_ms)) catch |err| switch (err) {
+        const started = (if (background) d.lookup_io.startMaintenance(&self.transport, io, &self.maintenance, now_ms) else d.lookup_io.startLookup(&self.transport, io, &self.lookup.?, now_ms)) catch |err| switch (err) {
             error.TableFull, error.PeerBusy => return,
             else => return err,
         };
@@ -412,6 +514,26 @@ pub const Discovery = struct {
         self.counters.candidates_published +|= 1;
     }
 };
+
+pub fn advertisementFor(local: *const types.LocalState, schedule: ForkSchedule, endpoints: advertisement.Endpoints) adapter.LocalAdvertisement {
+    return .{
+        .fork = .{ .digest = local.fork.digest, .next_version = schedule.next_version, .next_epoch = schedule.next_epoch },
+        .next_fork_digest = if (schedule.fulu_scheduled or local.fork.fork.gte(.fulu)) schedule.next_digest else null,
+        .attnets = local.metadata.attnets,
+        .syncnets = if (local.fork.fork.gte(.altair)) local.metadata.syncnets else null,
+        .custody_group_count = local.metadata.custody_group_count,
+        .ip4 = endpoints.ip4,
+        .ip6 = endpoints.ip6,
+        .udp = endpoints.udp,
+        .udp6 = endpoints.udp6,
+        .quic = endpoints.quic,
+        .quic6 = endpoints.quic6,
+    };
+}
+fn validateEndpointFamilies(endpoints: advertisement.Endpoints, quic: [2]bool, udp: *const @import("udp").Sockets) error{InvalidAdvertisement}!void {
+    if ((endpoints.quic != null and !quic[0]) or (endpoints.quic6 != null and !quic[1]) or
+        (endpoints.udp != null and udp.values[0] == null) or (endpoints.ip6 != null and (endpoints.udp6 orelse endpoints.udp) != null and udp.values[1] == null)) return error.InvalidAdvertisement;
+}
 
 fn matchesNetwork(context_opaque: *const anyopaque, record: *const d.identity.enr.Record) bool {
     const context: *const types.ForkContext = @ptrCast(@alignCast(context_opaque));

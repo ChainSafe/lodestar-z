@@ -6,9 +6,6 @@ const types = @import("types.zig");
 const context = types.ForkContext{ .digest = .{ 1, 2, 3, 4 } };
 
 test "peer discovery seeds the configured list without claiming reachability or starting walks" {
-    var node: Node = undefined;
-    try node.init(1, 9001);
-    defer node.deinit();
     var records: [17]d.identity.enr.Record = undefined;
     for (&records, 2..) |*record, index| {
         const scalar: u8 = @intCast(index);
@@ -16,11 +13,19 @@ test "peer discovery seeds the configured list without claiming reachability or 
         record.* = try d.identity.enr.Record.create(&key, 1, .{ .ip4 = .{ .octets = .{ 203, scalar, 1, 1 }, .port = 9000 } });
     }
     const now = try d.Transport.monotonicMilliseconds(std.testing.io);
-    var controller = try discovery.Discovery.init(std.testing.allocator, &node.transport, &context, &records, now, .{});
-    defer controller.deinit();
-    try std.testing.expectEqual(records.len, node.transport.engine.peerCount());
+    var owner: discovery.Discovery = undefined;
+    var sockets = try @import("udp").Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
+    var sockets_owned = true;
+    defer if (sockets_owned) sockets.close(std.testing.io);
+    const key = try d.identity.crypto.keyPairFromSecret(&(.{0} ** 31 ++ .{1}));
+    const local_record = try d.identity.enr.Record.create(&key, 1, sockets.localAddress());
+    try owner.initBound(std.testing.allocator, sockets, &key, &local_record, &context, &records, now, .{}, .{ .engine = .{ .session_capacity = 8, .challenge_capacity = 8, .call_capacity = 8 } });
+    sockets_owned = false;
+    defer owner.deinit(std.testing.io);
+    const controller = &owner;
+    try std.testing.expectEqual(records.len, owner.transport.engine.peerCount());
     for (&records) |*record| {
-        const entry = node.transport.engine.peerRecord(&record.node_id).?;
+        const entry = owner.transport.engine.peerRecord(&record.node_id).?;
         try std.testing.expect(entry.last_verified_ms == null);
         try std.testing.expectEqualDeep(record.*, entry.record);
     }
@@ -31,8 +36,8 @@ test "peer discovery seeds the configured list without claiming reachability or 
     var output: [1280]u8 = undefined;
     var entropy: d.Engine.StartEntropy = undefined;
     try std.Io.randomSecure(std.testing.io, std.mem.asBytes(&entropy));
-    try std.testing.expect((try controller.maintenance.startNext(&node.transport.engine, &output, try .init(&.{1}), now + 600_000, &entropy)) == null);
-    try std.testing.expectEqual(@as(usize, 0), node.transport.engine.calls.count());
+    try std.testing.expect((try controller.maintenance.startNext(&owner.transport.engine, &output, try .init(&.{1}), now + 600_000, &entropy)) == null);
+    try std.testing.expectEqual(@as(usize, 0), owner.transport.engine.calls.count());
 }
 
 test "peer discovery answers unknown TALK protocols without demand or candidate output" {
@@ -43,8 +48,7 @@ test "peer discovery answers unknown TALK protocols without demand or candidate 
     try responder.init(32, 9032);
     defer responder.deinit();
     const now = try d.Transport.monotonicMilliseconds(std.testing.io);
-    var controller = try discovery.Discovery.init(std.testing.allocator, &responder.transport, &context, &.{}, now, .{});
-    defer controller.deinit();
+    const controller = try responder.configure(&context, &.{}, now, .{});
     var expiries: [d.CallTable.capacity_max]d.CallTable.Expired = undefined;
     for ([_][]const u8{ "portal/test", "" }, 0..) |protocol, index| {
         const request_id = try d.wire.message.RequestId.init(&.{@intCast(index + 1)});
@@ -93,8 +97,7 @@ test "peer discovery refused TALK reply fails only its destination and preserves
     const session: d.SessionStore.Session = .{ .read_key = @splat(7), .write_key = @splat(7) };
     requester.transport.engine.channel.sessions.install(to, &session, now);
     responder.transport.engine.channel.sessions.install(from, &session, now);
-    var controller = try discovery.Discovery.init(std.testing.allocator, &responder.transport, &context, &.{}, now, .{});
-    defer controller.deinit();
+    const controller = try responder.configure(&context, &.{}, now, .{});
     const request: d.wire.message.Message = .{ .talk_request = .{
         .request_id = try d.wire.message.RequestId.init(&.{1}),
         .protocol = "unknown",
@@ -145,8 +148,7 @@ fn referralCase(rejection: ?discovery.Rejection, custody_only: bool) !void {
         fork.custody_requirement = 4;
     }
     if (rejection == .incompatible_fork) fork.digest[0] = 9;
-    var controller = try discovery.Discovery.init(std.testing.allocator, &a.transport, &fork, &.{}, now, .{});
-    defer controller.deinit();
+    const controller = try a.configure(&fork, &.{}, now, .{});
     try controller.request(if (rejection == .demand) .{ .syncnets = 1 } else if (custody_only) .{ .custody = true } else .{ .general = true }, now);
     const seed = a.transport.engine.peerRecord(&b_peer.node_id).?;
     var lookup: d.Lookup = undefined;
@@ -189,8 +191,7 @@ test "peer discovery publishes authenticated lookup responders outside a full ro
     defer b.deinit();
     const now = try d.Transport.monotonicMilliseconds(std.testing.io);
     try fillResponderBucket(&a.transport.engine, b.transport.engine.localRecord(), now);
-    var controller = try discovery.Discovery.init(std.testing.allocator, &a.transport, &context, &.{b.transport.engine.localRecord().*}, now, .{ .query_interval_ms = 1, .local_retry_ms = 1 });
-    defer controller.deinit();
+    const controller = try a.configure(&context, &.{b.transport.engine.localRecord().*}, now, .{ .query_interval_ms = 1, .local_retry_ms = 1 });
     try controller.request(.{ .general = true }, now);
     const seed: d.RoutingTable.Entry = .{
         .direction = .outgoing,
@@ -264,8 +265,7 @@ test "peer discovery reserves output for the responder alongside a full referral
     var output: [@import("../network_core.zig").candidates_per_turn]adapter.Candidate = undefined;
     try std.testing.expectEqual(records.len + 1, output.len);
     for ([_]usize{ 0, 1, records.len, output.len }) |capacity| {
-        var controller = try discovery.Discovery.init(std.testing.allocator, &a.transport, &context, &.{}, now, .{});
-        defer controller.deinit();
+        const controller = try a.configure(&context, &.{}, now, .{});
         try controller.request(.{ .general = true }, now);
         var lookup: d.Lookup = undefined;
         try lookup.init(&controller.storage.candidates, a.transport.engine.localRecord().node_id, peer.node_id, &.{seed}, .dual);
@@ -301,8 +301,7 @@ test "peer discovery clears an active foreground walk at demand expiry and can r
     try b.init(62, 9062);
     defer b.deinit();
     const now = try d.Transport.monotonicMilliseconds(std.testing.io);
-    var controller = try discovery.Discovery.init(std.testing.allocator, &a.transport, &context, &.{b.transport.engine.localRecord().*}, now, .{});
-    defer controller.deinit();
+    const controller = try a.configure(&context, &.{b.transport.engine.localRecord().*}, now, .{});
     try controller.request(.{ .general = true }, now);
     var candidates: [16]adapter.Candidate = undefined;
     var expiries: [d.CallTable.capacity_max]d.CallTable.Expired = undefined;
@@ -313,8 +312,8 @@ test "peer discovery clears an active foreground walk at demand expiry and can r
         if (result.candidates > 0) break;
     }
     try std.testing.expect(a.transport.engine.peerCount() > 0);
-    controller.deinit();
-    controller = try discovery.Discovery.init(std.testing.allocator, &a.transport, &context, &.{}, now, .{});
+    controller.cancel();
+    _ = try a.configure(&context, &.{}, now, .{});
     for ([_]bool{ false, true }) |replace_demand| {
         const tick = now + if (replace_demand) @as(u64, 4000) else @as(u64, 2000);
         try controller.request(.{ .attnets = .{1} ++ .{0} ** 7, .expires_ms = tick + 1 }, tick);
@@ -332,7 +331,8 @@ test "peer discovery clears an active foreground walk at demand expiry and can r
 }
 
 const Node = struct {
-    transport: d.Transport,
+    owner: discovery.Discovery,
+    transport: *d.Transport,
 
     fn init(self: *Node, scalar: u8, quic: ?u16) !void {
         return self.initAddress(scalar, quic, .{ .ip4 = .loopback(0) }, null);
@@ -341,29 +341,59 @@ const Node = struct {
         return self.initBindings(scalar, quic, .single(bind_address), alternate_ip4);
     }
     fn initBindings(self: *Node, scalar: u8, quic: ?u16, bindings: @import("udp").Bindings, alternate_ip4: ?[4]u8) !void {
-        self.transport.sockets = try @import("udp").Sockets.bind(std.testing.io, bindings);
-        errdefer self.transport.sockets.close(std.testing.io);
+        var sockets = try @import("udp").Sockets.bind(std.testing.io, bindings);
+        errdefer sockets.close(std.testing.io);
+        const address = sockets.localAddress();
         const key = try d.identity.crypto.keyPairFromSecret(&(.{0} ** 31 ++ .{scalar}));
         const local = adapter.LocalAdvertisement{
             .fork = .{ .digest = context.digest, .next_version = @splat(0), .next_epoch = std.math.maxInt(u64) },
-            .ip4 = switch (self.transport.localAddress()) {
+            .ip4 = switch (address) {
                 .ip4 => |value| value.octets,
                 .ip6 => alternate_ip4,
             },
-            .ip6 = if (self.transport.sockets.values[1]) |socket| socket.address.ip6.bytes else null,
-            .udp = if (self.transport.localAddress() == .ip4) self.transport.localAddress().port() else if (alternate_ip4 != null) @as(u16, 9000) else null,
-            .udp6 = if (self.transport.sockets.values[1]) |socket| socket.address.getPort() else null,
+            .ip6 = if (sockets.values[1]) |socket| socket.address.ip6.bytes else null,
+            .udp = if (address == .ip4) address.port() else if (alternate_ip4 != null) @as(u16, 9000) else null,
+            .udp6 = if (sockets.values[1]) |socket| socket.address.getPort() else null,
             .quic = quic,
         };
         const record = try adapter.build(&key, 1, &local, &context);
-        try self.transport.init(std.testing.allocator, self.transport.sockets, key, record, .{ .poll_interval_ms = 1, .engine = .{
+        try self.owner.initBound(std.testing.allocator, sockets, &key, &record, &context, &.{}, 0, .{}, .{ .poll_interval_ms = 1, .engine = .{
             .session_capacity = 8,
             .challenge_capacity = 8,
             .call_capacity = 8,
         } });
+        self.transport = &self.owner.transport;
     }
     fn deinit(self: *Node) void {
-        self.transport.deinit(std.testing.allocator, std.testing.io);
+        self.owner.deinit(std.testing.io);
+    }
+    // Reconfigure scheduling for synthetic scenarios without replacing the owned transport or
+    // its authenticated routing/session state. Construction and rollback use initBound below.
+    fn configure(self: *Node, fork: *const types.ForkContext, bootstrap: []const d.identity.enr.Record, now_ms: u64, options: discovery.Options) !*discovery.Discovery {
+        const owner = &self.owner;
+        owner.cancel();
+        try owner.maintenance.init(now_ms, options.maintenance, owner.transport.sockets.mode());
+        owner.storage.observations.init(options.observations);
+        owner.maintenance.observations = &owner.storage.observations;
+        owner.context = fork.*;
+        owner.options = options;
+        owner.query_due_ms = now_ms;
+        owner.refill_due_ms = 0;
+        owner.resource_retry_ms = 0;
+        owner.empty_lookups = 0;
+        owner.counters = .{};
+        owner.rejections = @splat(0);
+        owner.datagram_rejections = @splat(0);
+        owner.lookup_finishes = @splat(0);
+        owner.stopped = false;
+        for (bootstrap) |*record| {
+            const peer: d.types.Endpoint = .{ .node_id = record.node_id, .address = record.endpointFor(owner.transport.sockets.mode()).? };
+            _ = owner.transport.engine.routing.addKnown(&peer, record) catch |err| switch (err) {
+                error.SelfEntry, error.AddressLimit => continue,
+                else => return err,
+            };
+        }
+        return owner;
     }
 };
 
@@ -375,8 +405,7 @@ test "peer discovery independent local nodes confirm signed candidates and cance
     try b.init(2, 9002);
     defer b.deinit();
     const now = try d.Transport.monotonicMilliseconds(std.testing.io);
-    var controller = try discovery.Discovery.init(std.testing.allocator, &a.transport, &context, &.{b.transport.engine.localRecord().*}, now, .{});
-    defer controller.deinit();
+    const controller = try a.configure(&context, &.{b.transport.engine.localRecord().*}, now, .{});
     try controller.request(.{ .general = true }, now);
     var output: [16]adapter.Candidate = undefined;
     var expiries: [d.CallTable.capacity_max]d.CallTable.Expired = undefined;
@@ -404,36 +433,27 @@ test "peer discovery independent local nodes confirm signed candidates and cance
     try foregroundQuery(&a, &b);
 }
 
-test "peer discovery empty lookup backs off and startup allocations balance" {
+test "peer discovery empty lookup backs off and counts completion once" {
     var a: Node = undefined;
     try a.init(1, 9001);
     defer a.deinit();
-    var allocation = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    var controller = try discovery.Discovery.init(allocation.allocator(), &a.transport, &context, &.{}, 10, .{});
-    const allocated = allocation.allocated_bytes;
+    const controller = try a.configure(&context, &.{}, 10, .{});
     try controller.request(.{ .general = true }, 10);
     var out: [1]adapter.Candidate = undefined;
     const result = try controller.step(std.testing.io, 10, 10, &out);
     try std.testing.expectEqual(@as(usize, 0), result.candidates);
     try std.testing.expect(controller.nextWakeup(10).? > 10);
     try std.testing.expectEqual(@as(u64, 1), controller.lookup_finishes[@intFromEnum(d.Lookup.FinishReason.exhausted)]);
-    const progress: d.Transport.StepResult = .{ .now_ms = 11 };
-    _ = controller.consume(&progress, &.{}, &out);
+    _ = controller.consume(&.{ .now_ms = 11 }, &.{}, &out);
     try std.testing.expectEqual(@as(u64, 1), controller.lookup_finishes[@intFromEnum(d.Lookup.FinishReason.exhausted)]);
     try std.testing.expectEqual(@as(u64, 0), controller.counters.candidates_published);
-    try std.testing.expectEqual(allocated, allocation.allocated_bytes);
-    controller.deinit();
-    try std.testing.expectEqual(allocation.allocated_bytes, allocation.freed_bytes);
-    var failed = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
-    try std.testing.expectError(error.OutOfMemory, discovery.Discovery.init(failed.allocator(), &a.transport, &context, &.{}, 10, .{}));
 }
 
 test "peer discovery counts every rejected datagram by reason" {
     var node: Node = undefined;
     try node.init(41, 9041);
     defer node.deinit();
-    var controller = try discovery.Discovery.init(std.testing.allocator, &node.transport, &context, &.{}, 10, .{});
-    defer controller.deinit();
+    const controller = try node.configure(&context, &.{}, 10, .{});
     var out: [1]adapter.Candidate = undefined;
     _ = controller.consume(&.{ .now_ms = 10, .datagram = .accepted }, &.{}, &out);
     _ = controller.consume(&.{ .now_ms = 11, .datagram = .{ .rejected = .unsolicited_response } }, &.{}, &out);
@@ -467,8 +487,7 @@ test "peer discovery consumes actual response and expiry alongside failure befor
     try b.init(2, 9002);
     defer b.deinit();
     const now = try d.Transport.monotonicMilliseconds(std.testing.io);
-    var controller = try discovery.Discovery.init(std.testing.allocator, &a.transport, &context, &.{b.transport.engine.localRecord().*}, now, .{});
-    defer controller.deinit();
+    const controller = try a.configure(&context, &.{b.transport.engine.localRecord().*}, now, .{});
     try controller.request(.{ .general = true }, now);
     var output: [1]adapter.Candidate = undefined;
     _ = try controller.step(std.testing.io, now, now, &output);
@@ -528,8 +547,7 @@ test "peer discovery no QUIC nodes remain confirmed but produce no dial candidat
     try b.init(2, null);
     defer b.deinit();
     const now = try d.Transport.monotonicMilliseconds(std.testing.io);
-    var controller = try discovery.Discovery.init(std.testing.allocator, &a.transport, &context, &.{b.transport.engine.localRecord().*}, now, .{});
-    defer controller.deinit();
+    const controller = try a.configure(&context, &.{b.transport.engine.localRecord().*}, now, .{});
     try controller.request(.{ .general = true }, now);
     var output: [1]adapter.Candidate = undefined;
     var expiries: [d.CallTable.capacity_max]d.CallTable.Expired = undefined;
@@ -601,8 +619,7 @@ test "peer discovery refused lookup send releases its call and continues with ot
     defer c.deinit();
     const refused = c.transport.engine.localRecord().node_id;
     const now = try d.Transport.monotonicMilliseconds(std.testing.io);
-    var controller = try discovery.Discovery.init(std.testing.allocator, &a.transport, &context, &.{ b.transport.engine.localRecord().*, c.transport.engine.localRecord().* }, now, .{});
-    defer controller.deinit();
+    const controller = try a.configure(&context, &.{ b.transport.engine.localRecord().*, c.transport.engine.localRecord().* }, now, .{});
     try controller.request(.{ .general = true }, now);
     var host = SendFailure{ .now_ms = now, .receive_real = true, .refused_port = c.transport.localAddress().port() };
     var output: [1]adapter.Candidate = undefined;
@@ -649,8 +666,7 @@ test "peer discovery refused maintenance probe stays a local failure and the ste
     const refused: d.types.Endpoint = .{ .node_id = c.transport.engine.localRecord().node_id, .address = c.transport.localAddress() };
     _ = try a.transport.engine.confirmPeer(&refused, c.transport.engine.localRecord(), now);
     const interval = 10;
-    var controller = try discovery.Discovery.init(std.testing.allocator, &a.transport, &context, &.{b.transport.engine.localRecord().*}, now, .{ .maintenance = .{ .probe_interval_ms = interval, .stale_after_ms = interval, .retry_interval_ms = interval } });
-    defer controller.deinit();
+    const controller = try a.configure(&context, &.{b.transport.engine.localRecord().*}, now, .{ .maintenance = .{ .probe_interval_ms = interval, .stale_after_ms = interval, .retry_interval_ms = interval } });
     try controller.request(.{ .general = true }, now);
     const tick = now + interval;
     var host = SendFailure{ .now_ms = tick, .receive_real = true, .refused_port = refused.address.port() };
@@ -723,8 +739,7 @@ test "peer discovery fork and subnet filtering plus output pressure preserve con
         const now = try d.Transport.monotonicMilliseconds(std.testing.io);
         var fork = context;
         if (mode == 0) fork.digest[0] = 9;
-        var controller = try discovery.Discovery.init(std.testing.allocator, &a.transport, &fork, &.{b.transport.engine.localRecord().*}, now, .{ .quic_mode = if (mode == 4) .ip4 else .dual });
-        defer controller.deinit();
+        const controller = try a.configure(&fork, &.{b.transport.engine.localRecord().*}, now, .{ .quic_mode = if (mode == 4) .ip4 else .dual });
         try controller.request(if (mode == 1) .{ .syncnets = 1 } else .{ .general = true }, now);
         var output: [1]adapter.Candidate = undefined;
         var expiries: [d.CallTable.capacity_max]d.CallTable.Expired = undefined;
@@ -757,8 +772,7 @@ test "peer discovery fork and subnet filtering plus output pressure preserve con
 
 fn foregroundQuery(a: *Node, b: *Node) !void {
     const now = try d.Transport.monotonicMilliseconds(std.testing.io);
-    var controller = try discovery.Discovery.init(std.testing.allocator, &a.transport, &context, &.{}, now, .{});
-    defer controller.deinit();
+    const controller = try a.configure(&context, &.{}, now, .{});
     try controller.request(.{ .general = true }, now);
     var output: [1]adapter.Candidate = undefined;
     var expiries: [d.CallTable.capacity_max]d.CallTable.Expired = undefined;
@@ -785,28 +799,11 @@ fn foregroundQuery(a: *Node, b: *Node) !void {
     try std.testing.expectEqual(@as(usize, 0), a.transport.engine.calls.count());
 }
 
-test "peer discovery initialization rollback and coalesced demand retain query deadline" {
+test "peer discovery coalesced demand retains query deadline" {
     var a: Node = undefined;
     try a.init(1, 9001);
     defer a.deinit();
-    var allocation = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    const allocator = allocation.allocator();
-    try std.testing.expectError(error.InvalidConfig, discovery.Discovery.init(allocator, &a.transport, &context, &.{}, 0, .{ .maintenance = .{ .retry_interval_ms = 0 } }));
-    try std.testing.expectEqual(allocation.allocated_bytes, allocation.freed_bytes);
-    const key = try d.identity.crypto.keyPairFromSecret(&(.{0} ** 31 ++ .{2}));
-    const no_endpoint = try adapter.build(&key, 1, &.{ .fork = .{ .digest = context.digest, .next_version = @splat(0), .next_epoch = 0 } }, &context);
-    try std.testing.expectError(error.InvalidBootstrap, discovery.Discovery.init(allocator, &a.transport, &context, &.{no_endpoint}, 0, .{}));
-    try std.testing.expectEqual(allocation.allocated_bytes, allocation.freed_bytes);
-    const valid = try d.identity.enr.Record.create(&key, 1, .{ .ip4 = .{ .octets = .{ 203, 2, 1, 1 }, .port = 9000 } });
-    try std.testing.expectError(error.InvalidBootstrap, discovery.Discovery.init(allocator, &a.transport, &context, &.{ valid, no_endpoint }, 0, .{}));
-    try std.testing.expectEqual(@as(usize, 0), a.transport.engine.peerCount());
-    var excess: [d.types.bootstrap_max + 1]d.identity.enr.Record = undefined;
-    try std.testing.expectError(error.TooManyBootstraps, discovery.Discovery.init(allocator, &a.transport, &context, &excess, 0, .{}));
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
-    try std.testing.expectError(error.OutOfMemory, discovery.Discovery.init(failing.allocator(), &a.transport, &context, &.{valid}, 0, .{}));
-    try std.testing.expectEqual(@as(usize, 0), a.transport.engine.peerCount());
-    var controller = try discovery.Discovery.init(allocator, &a.transport, &context, &.{}, 0, .{});
-    defer controller.deinit();
+    const controller = try a.configure(&context, &.{}, 0, .{});
     try std.testing.expectError(error.InvalidDemand, controller.request(.{ .syncnets = 0x10 }, 0));
     try controller.request(.{ .general = true }, 0);
     const result = try controller.step(std.testing.io, 0, 0, &.{});
@@ -847,8 +844,7 @@ test "peer discovery foreground retains authenticated IPv6 source over alternate
         try std.testing.expectEqualDeep(b.transport.localAddress(), entry.peer.address);
         try std.testing.expect(entry.record.endpoint().? == .ip4);
         const now = try d.Transport.monotonicMilliseconds(std.testing.io);
-        var controller = try discovery.Discovery.init(std.testing.allocator, &a.transport, &context, &.{}, now, .{});
-        defer controller.deinit();
+        const controller = try a.configure(&context, &.{}, now, .{});
         try controller.request(.{ .general = true }, now);
         var output: [1]adapter.Candidate = undefined;
         var completed = false;
@@ -882,8 +878,7 @@ test "dual-stack discovery confirms both families in one routing table" {
     try ipv6.initAddress(93, null, .{ .ip6 = .loopback(0) }, null);
     defer ipv6.deinit();
     const now = try d.Transport.monotonicMilliseconds(std.testing.io);
-    var controller = try discovery.Discovery.init(std.testing.allocator, &hub.transport, &context, &.{ ipv4.transport.engine.localRecord().*, ipv6.transport.engine.localRecord().* }, now, .{});
-    defer controller.deinit();
+    const controller = try hub.configure(&context, &.{ ipv4.transport.engine.localRecord().*, ipv6.transport.engine.localRecord().* }, now, .{});
     try controller.request(.{ .general = true }, now);
     var expiries: [d.CallTable.capacity_max]d.CallTable.Expired = undefined;
     for (0..400) |_| {
@@ -913,8 +908,7 @@ test "IPv6-only discovery bootstraps a dual-stack record over IPv6" {
     try seed.initAddress(95, null, .{ .ip6 = .loopback(0) }, .{ 127, 0, 0, 1 });
     defer seed.deinit();
     const now = try d.Transport.monotonicMilliseconds(std.testing.io);
-    var controller = try discovery.Discovery.init(std.testing.allocator, &node.transport, &context, &.{seed.transport.engine.localRecord().*}, now, .{});
-    defer controller.deinit();
+    const controller = try node.configure(&context, &.{seed.transport.engine.localRecord().*}, now, .{});
     try controller.request(.{ .general = true }, now);
     var expiries: [d.CallTable.capacity_max]d.CallTable.Expired = undefined;
     for (0..100) |_| {
@@ -938,8 +932,7 @@ test "peer discovery ready step refills demand without reading an ineligible soc
     try b.init(62, 9062);
     defer b.deinit();
     const now = try d.Transport.monotonicMilliseconds(std.testing.io);
-    var controller = try discovery.Discovery.init(std.testing.allocator, &a.transport, &context, &.{b.transport.engine.localRecord().*}, now, .{});
-    defer controller.deinit();
+    const controller = try a.configure(&context, &.{b.transport.engine.localRecord().*}, now, .{});
     try controller.request(.{ .general = true }, now);
     var faults: @import("udp").testing.FaultIo = .{ .receive = .{} };
     faults.init(std.testing.io);
@@ -951,4 +944,58 @@ test "peer discovery ready step refills demand without reading an ineligible soc
     try std.testing.expect(result.started > 0);
     try std.testing.expect(a.transport.engine.calls.count() > 0);
     try std.testing.expectEqual(@as(usize, 0), faults.receive_calls);
+}
+
+test "peer discovery owning construction cleans every allocation prefix" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, constructOwner, .{});
+}
+
+fn constructOwner(allocator: std.mem.Allocator) !void {
+    var sockets = try @import("udp").Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
+    var sockets_owned = true;
+    defer if (sockets_owned) sockets.close(std.testing.io);
+    const key = try d.identity.crypto.keyPairFromSecret(&(.{0} ** 31 ++ .{119}));
+    const record = try d.identity.enr.Record.create(&key, 1, sockets.localAddress());
+    var owner: discovery.Discovery = undefined;
+    try owner.initBound(allocator, sockets, &key, &record, &context, &.{}, 0, .{}, .{ .engine = .{ .session_capacity = 8, .challenge_capacity = 8, .call_capacity = 8 } });
+    sockets_owned = false;
+    defer owner.deinit(std.testing.io);
+    try owner.request(.{ .general = true }, 0);
+    _ = try owner.step(std.testing.io, 0, 0, &.{});
+}
+
+test "peer discovery validates complete bootstrap list before taking sockets" {
+    var sockets = try @import("udp").Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
+    defer sockets.close(std.testing.io);
+    const key = try d.identity.crypto.keyPairFromSecret(&(.{0} ** 31 ++ .{120}));
+    const record = try d.identity.enr.Record.create(&key, 1, sockets.localAddress());
+    const no_endpoint = try adapter.build(&key, 1, &.{ .fork = .{ .digest = context.digest, .next_version = @splat(0), .next_epoch = 0 } }, &context);
+    var owner: discovery.Discovery = undefined;
+    try std.testing.expectError(error.InvalidBootstrap, owner.initBound(std.testing.allocator, sockets, &key, &record, &context, &.{ record, no_endpoint }, 0, .{}, .{}));
+    try std.testing.expectError(error.InvalidConfig, owner.initBound(std.testing.allocator, sockets, &key, &record, &context, &.{}, 0, .{ .maintenance = .{ .retry_interval_ms = 0 } }, .{}));
+    var excess: [d.types.bootstrap_max + 1]d.identity.enr.Record = undefined;
+    try std.testing.expectError(error.TooManyBootstraps, owner.initBound(std.testing.allocator, sockets, &key, &record, &context, &excess, 0, .{}, .{}));
+}
+
+test "peer discovery prepared advertisements reject stale and foreign installation without mutation" {
+    var node: Node = undefined;
+    try node.init(111, 9011);
+    defer node.deinit();
+    const initial = node.owner.localRecord().*;
+    var announced: adapter.LocalAdvertisement = .{ .fork = .{ .digest = context.digest, .next_version = @splat(0), .next_epoch = 0 }, .ip4 = initial.ip4, .udp = initial.udp, .quic = 9012 };
+    const first = try node.owner.prepareAdvertisement(&announced, &context);
+    try std.testing.expectEqualDeep(initial, node.owner.localRecord().*);
+    try std.testing.expectEqualDeep(first.record, try d.identity.enr.Record.init(first.record.slice()));
+    announced.quic = 9013;
+    const stale = try node.owner.prepareAdvertisement(&announced, &context);
+    try node.owner.installAdvertisement(&first);
+    try std.testing.expectError(error.StaleLocalRecord, node.owner.installAdvertisement(&stale));
+    try std.testing.expectEqualDeep(first.record, node.owner.localRecord().*);
+    const foreign = try d.identity.crypto.keyPairFromSecret(&(.{0} ** 31 ++ .{112}));
+    const foreign_record: discovery.Discovery.PreparedAdvertisement = .{ .record = try adapter.build(&foreign, first.record.sequence + 1, &announced, &context), .previous_sequence = first.record.sequence };
+    try std.testing.expectError(error.InvalidLocalRecord, node.owner.installAdvertisement(&foreign_record));
+    try std.testing.expectEqualDeep(first.record, node.owner.localRecord().*);
+    node.owner.cancel();
+    try std.testing.expectError(error.Stopped, node.owner.prepareAdvertisement(&announced, &context));
+    try std.testing.expectError(error.Stopped, node.owner.installAdvertisement(&first));
 }

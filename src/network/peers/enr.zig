@@ -40,6 +40,7 @@ pub const Candidate = struct {
     custody_group_count: ?u64,
 };
 
+/// Borrows an immutable authenticated Record; application claims still require validation.
 pub fn decode(record: *const Record, context: *const types.ForkContext) Error!Candidate {
     try context.validate();
     const eth2 = (try fixed(record, "eth2", 16)) orelse return error.MissingEth2;
@@ -48,7 +49,7 @@ pub fn decode(record: *const Record, context: *const types.ForkContext) Error!Ca
     if (syncnets) |bits| if (bits[0] & 0xf0 != 0) return error.InvalidField;
     const custody = try integer(record, "cgc", 8);
     if (custody) |count| if (count > context.custody_groups) return error.InvalidField;
-    const public_key = try keys.PublicKey.fromBytes(&record.public_key);
+    const public_key: keys.PublicKey = .{ .bytes = record.public_key };
     var result = Candidate{
         .peer = types.PeerId.fromPublicKey(&public_key),
         .node_id = record.node_id,
@@ -148,7 +149,7 @@ pub fn nextSequence(sequence: u64) error{SequenceExhausted}!u64 {
 }
 
 pub fn requireIdentity(record: *const Record, peer: *const types.PeerId) Error!void {
-    const public_key = try keys.PublicKey.fromBytes(&record.public_key);
+    const public_key: keys.PublicKey = .{ .bytes = record.public_key };
     if (!types.PeerId.fromPublicKey(&public_key).eql(peer)) return error.IdentityMismatch;
 }
 

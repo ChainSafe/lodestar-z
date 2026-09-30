@@ -695,3 +695,56 @@ test "duplicate NODES datagrams do not complete a fragmented response" {
     try std.testing.expectEqual(@as(usize, 0), last.accepted.event.response.node_records.len);
     try std.testing.expectEqual(@as(usize, 0), pair.node_a.calls.count());
 }
+
+test "NODES rejects invalid ENRs even beyond distance duplicate and remaining result filters" {
+    for ([_]enum { distance, duplicate, capacity }{ .distance, .duplicate, .capacity }) |filter| {
+        var pair: Pair = undefined;
+        try pair.init();
+        defer pair.deinit();
+        test_support.installSession(&pair.node_a, pair.peerB(), 0x55);
+        test_support.installSession(&pair.node_b, pair.peerA(), 0x55);
+        const distance: u16 = if (filter == .capacity) 256 else 0;
+        const request: message.Message = .{ .find_node = .{ .request_id = try .init(&.{1}), .distances = &.{distance} } };
+        const started = try pair.node_a.startCall(&pair.a_to_b, pair.peerB(), &pair.record_b, &request, 1, &sealEntropy(0x20));
+        var records: [types.findnode_result_max]enr.Record = undefined;
+        if (filter == .capacity) {
+            var count: usize = 0;
+            for (3..255) |scalar| {
+                const key = try keyPair(@intCast(scalar));
+                const record = try enr.Record.create(&key, 1, loopback(@intCast(scalar), 9000));
+                if (types.logDistance(&pair.record_b.node_id, &record.node_id) != distance) continue;
+                records[count] = record;
+                count += 1;
+                if (count == records.len) break;
+            }
+            try std.testing.expectEqual(records.len, count);
+            for (0..3) |batch| {
+                var raw: [5][]const u8 = undefined;
+                for (&raw, records[batch * 5 ..][0..5]) |*bytes, *record| bytes.* = record.slice();
+                const response: message.Message = .{ .nodes = .{ .request_id = request.find_node.request_id, .total = 4, .enrs = &raw } };
+                const length = try pair.node_b.sendResponse(&pair.b_to_a, pair.peerA(), &response, 2, &sealEntropy(0x30));
+                const received = try pair.node_a.receive(&pair.a_to_b, pair.b_to_a[0..length], pair.address_b, receiveArgs(3, 0x40), &pair.scratch_a);
+                try std.testing.expect(!received.accepted.event.response.matched.terminal);
+                try std.testing.expectEqual(@as(usize, 5), received.accepted.event.response.node_records.len);
+            }
+        }
+        const valid = if (filter == .capacity) &records[records.len - 1] else &pair.record_b;
+        const invalid = if (filter == .distance) &pair.record_a else valid;
+        var corrupt = invalid.bytes;
+        corrupt[10] ^= 1;
+        const response: message.Message = .{ .nodes = .{ .request_id = request.find_node.request_id, .total = if (filter == .capacity) 4 else 1, .enrs = &.{ valid.slice(), corrupt[0..invalid.length] } } };
+        var plaintext_buffer: [1_280]u8 = undefined;
+        const plaintext = try response.encode(&plaintext_buffer);
+        const hostile = try pair.node_b.channel.sealEstablished(&pair.b_to_a, pair.peerA(), plaintext, &sealEntropy(0x50), 4);
+        const received = try pair.node_a.receive(&pair.a_to_b, pair.b_to_a[0..hostile.packet_length], pair.address_b, receiveArgs(5, 0x60), &pair.scratch_a);
+        try std.testing.expectEqual(types.RejectReason.invalid_record, received.rejected);
+        try std.testing.expectEqual(@as(usize, 1), pair.node_a.calls.count());
+        const corrected: message.Message = .{ .nodes = .{ .request_id = request.find_node.request_id, .total = response.nodes.total, .enrs = &.{valid.slice()} } };
+        const final_length = try pair.node_b.sendResponse(&pair.b_to_a, pair.peerA(), &corrected, 6, &sealEntropy(0x70));
+        const completed = try pair.node_a.receive(&pair.a_to_b, pair.b_to_a[0..final_length], pair.address_b, receiveArgs(7, 0x80), &pair.scratch_a);
+        try std.testing.expectEqual(started.handle, completed.accepted.event.response.matched.handle);
+        try std.testing.expect(completed.accepted.event.response.matched.terminal);
+        try std.testing.expectEqual(@as(usize, 1), completed.accepted.event.response.node_records.len);
+        try std.testing.expectEqual(@as(usize, 0), pair.node_a.calls.count());
+    }
+}

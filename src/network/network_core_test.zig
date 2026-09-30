@@ -534,7 +534,7 @@ test "core demand persists until replacement and reaches discovery after selecti
     _ = try node.applyIntent(&desired, node.last_now);
     const now = try @import("transport.zig").currentTime(std.testing.io);
     _ = node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms));
-    try std.testing.expectEqual(@as(u8, 1), node.discovery.?.coordinator.demand.attnets[0]);
+    try std.testing.expectEqual(@as(u8, 1), node.discovery.?.demand.attnets[0]);
     const view: *const runtime.NetworkCore = &node;
     const evaluated = view.peer_manager.coverageDeficits();
     desired.demand = .{ .attnets = 2 };
@@ -542,26 +542,26 @@ test "core demand persists until replacement and reaches discovery after selecti
     try std.testing.expectEqual(node.last_now.mono_ms, node.nextWakeup(node.last_now, .{}).?);
     try std.testing.expectEqualDeep(evaluated, view.peer_manager.coverageDeficits());
     try std.testing.expectEqual(@as(u8, 1), view.peer_manager.discoveryNeed().attnets[0]);
-    try std.testing.expectEqual(@as(u8, 1), node.discovery.?.coordinator.demand.attnets[0]);
+    try std.testing.expectEqual(@as(u8, 1), node.discovery.?.demand.attnets[0]);
     _ = node.step(std.testing.io, node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms));
     try std.testing.expectEqual(@as(u8, 2), view.peer_manager.discoveryNeed().attnets[0]);
-    try std.testing.expectEqual(@as(u8, 2), node.discovery.?.coordinator.demand.attnets[0]);
+    try std.testing.expectEqual(@as(u8, 2), node.discovery.?.demand.attnets[0]);
     _ = node.step(std.testing.io, node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms));
     try std.testing.expectEqual(@as(u16, 1), view.peer_manager.coverageDeficits().attestation);
     try std.testing.expectEqual(@as(u8, 2), view.peer_manager.discoveryNeed().attnets[0]);
-    try std.testing.expectEqual(@as(u8, 2), node.discovery.?.coordinator.demand.attnets[0]);
+    try std.testing.expectEqual(@as(u8, 2), node.discovery.?.demand.attnets[0]);
     desired.demand = .{ .attnets = 4, .attestation_target = 0 };
     try std.testing.expectError(error.InvalidDemand, node.applyIntent(&desired, node.last_now));
     _ = node.step(std.testing.io, node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms));
     try std.testing.expectEqual(@as(u16, 1), view.peer_manager.coverageDeficits().attestation);
     try std.testing.expectEqual(@as(u8, 2), view.peer_manager.discoveryNeed().attnets[0]);
-    try std.testing.expectEqual(@as(u8, 2), node.discovery.?.coordinator.demand.attnets[0]);
+    try std.testing.expectEqual(@as(u8, 2), node.discovery.?.demand.attnets[0]);
     desired.demand = .{};
     _ = try node.applyIntent(&desired, node.last_now);
     _ = node.step(std.testing.io, node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms));
     try std.testing.expectEqual(@as(u16, 0), view.peer_manager.coverageDeficits().attestation);
     try std.testing.expectEqual(@as(u8, 0), view.peer_manager.discoveryNeed().attnets[0]);
-    try std.testing.expectEqual(@as(u8, 0), node.discovery.?.coordinator.demand.attnets[0]);
+    try std.testing.expectEqual(@as(u8, 0), node.discovery.?.demand.attnets[0]);
 }
 
 test "core explicit advertisement is independent and atomic" {
@@ -709,7 +709,7 @@ test "core socket faults preserve the other owner and local dial refusal is defe
     const idle = node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms));
     try std.testing.expect(idle.failure == null);
     const settled = node.last_now;
-    const discovery_due = node.discovery.?.coordinator.nextWakeup(settled.mono_ms).?;
+    const discovery_due = node.discovery.?.nextWakeup(settled.mono_ms).?;
     try std.testing.expect(discovery_due > settled.mono_ms);
     try std.testing.expectEqual(discovery_due, node.nextWakeup(settled, .{}).?);
     const peer = t.PeerId.fromPublicKey(&remote_key.publicKey());
