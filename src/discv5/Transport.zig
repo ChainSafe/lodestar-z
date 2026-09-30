@@ -58,6 +58,7 @@ const Transport = @This();
 
 engine: Engine,
 sockets: sockets_mod.Sockets,
+send_drops: sockets_mod.SendDrops = .{},
 config: Config,
 scratch: Engine.Scratch = .{},
 response: ResponsePlan = .{},
@@ -133,12 +134,13 @@ pub fn sendResponse(
 
 /// Failures tied to the destination collapse into `DestinationUnreachable`.
 pub fn transmit(
-    self: *const Transport,
+    self: *Transport,
     io: std.Io,
     destination: types.Address,
     bytes: []const u8,
 ) Error!void {
     return self.sockets.sendTo(io, destination, bytes, constants.packet_size_max) catch |err| {
+        if (sockets_mod.sendPressure(err)) |reason| self.send_drops.add(reason, bytes.len);
         std.log.scoped(.network_discovery).debug("discovery_send_failed endpoint={any} bytes={d} reason={s}", .{ destination, bytes.len, @errorName(err) });
         return switch (err) {
             error.AccessDenied,
@@ -314,7 +316,7 @@ fn handleEvent(
 
 /// Sends a packet this step produced and returns false when its destination refuses it. The
 /// refusal fails only that destination: a requester retries a dropped reply.
-fn reply(self: *const Transport, io: std.Io, destination: types.Address, bytes: []const u8) Error!bool {
+fn reply(self: *Transport, io: std.Io, destination: types.Address, bytes: []const u8) Error!bool {
     self.transmit(io, destination, bytes) catch |err| switch (err) {
         error.DestinationUnreachable => return false,
         else => return err,

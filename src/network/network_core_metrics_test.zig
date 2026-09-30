@@ -150,6 +150,8 @@ const contract = [_]Series{
     .{ .name = "lodestar_native_quic_udp_sent_bytes_total", .kind = "counter" },
     .{ .name = "lodestar_native_quic_udp_received_datagrams_total", .kind = "counter" },
     .{ .name = "lodestar_native_quic_udp_sent_datagrams_total", .kind = "counter" },
+    .{ .name = "lodestar_native_udp_send_dropped_datagrams_total", .kind = "counter", .labels = &.{ "role", "reason" } },
+    .{ .name = "lodestar_native_udp_send_dropped_bytes_total", .kind = "counter", .labels = &.{ "role", "reason" } },
     .{ .name = "lodestar_native_udp_socket_drops_total", .kind = "counter", .labels = &.{ "role", "family" } },
     .{ .name = "lodestar_native_udp_socket_buffer_bytes", .kind = "gauge", .labels = &.{ "role", "family", "direction" } },
     // Owner and resources
@@ -518,4 +520,21 @@ test "stopped metrics report all delivery descriptors available with zero occupa
     try contains(stopped, try std.fmt.bufPrint(&line, "lodestar_native_gossipsub_delivery_descriptors_available {d}\n", .{capacity}));
     try contains(stopped, "lodestar_native_gossipsub_queued_bytes 0\n");
     try std.testing.expectEqual(capacity - 1, pool.available);
+}
+
+test "metrics expose local UDP send drops by role and pressure without clearing at stop" {
+    var f = try Fixture.initWith(&.{}, .{ .bind = .{ .ip4 = .loopback(0) } });
+    defer f.deinit();
+    f.node.transport.udp.send_drops.add(.would_block, 17);
+    f.node.transport.udp.send_drops.add(.would_block, 19);
+    f.node.discovery.?.transport.send_drops.add(.system_resources, 23);
+    for ([_]bool{ true, false }) |running| {
+        const output = try f.render(running);
+        try contains(output, "lodestar_native_udp_send_dropped_datagrams_total{role=\"quic\",reason=\"would_block\"} 2\n");
+        try contains(output, "lodestar_native_udp_send_dropped_bytes_total{role=\"quic\",reason=\"would_block\"} 36\n");
+        try contains(output, "lodestar_native_udp_send_dropped_datagrams_total{role=\"discovery\",reason=\"system_resources\"} 1\n");
+        try contains(output, "lodestar_native_udp_send_dropped_bytes_total{role=\"discovery\",reason=\"system_resources\"} 23\n");
+        try contains(output, "lodestar_native_udp_send_dropped_datagrams_total{role=\"quic\",reason=\"system_resources\"} 0\n");
+        try contains(output, "lodestar_native_udp_send_dropped_datagrams_total{role=\"discovery\",reason=\"would_block\"} 0\n");
+    }
 }

@@ -34,6 +34,7 @@ pub const ReceiveError = net.Socket.ReceiveTimeoutError;
 pub const DatagramError = ReceiveError || error{DatagramTooLarge};
 pub const SendError = net.Socket.SendError || error{
     DatagramTooLarge,
+    WouldBlock,
     /// Local policy, such as an egress firewall rule, refused the datagram to this destination
     /// (EPERM). Only native sends under Zig 0.16 Threaded name it: single sends on Linux and
     /// macOS, batches on Linux. Other paths report EPERM as `error.Unexpected`.
@@ -41,6 +42,24 @@ pub const SendError = net.Socket.SendError || error{
 };
 /// `sent` datagrams went out; `failure` is the error of the next one, null when all did.
 pub const SendOutcome = struct { sent: usize, failure: ?SendError };
+/// EAGAIN is distinct from ENOBUFS/ENOMEM, which the Io send contract groups as SystemResources.
+pub const SendPressure = enum { would_block, system_resources };
+pub fn sendPressure(err: SendError) ?SendPressure {
+    return switch (err) {
+        error.WouldBlock => .would_block,
+        error.SystemResources => .system_resources,
+        else => null,
+    };
+}
+pub const SendDrops = struct {
+    datagrams: [std.meta.fields(SendPressure).len]u64 = @splat(0),
+    bytes: [std.meta.fields(SendPressure).len]u64 = @splat(0),
+
+    pub fn add(self: *SendDrops, reason: SendPressure, len: usize) void {
+        self.datagrams[@intFromEnum(reason)] +|= 1;
+        self.bytes[@intFromEnum(reason)] +|= len;
+    }
+};
 pub const Datagram = struct { from: Address, bytes: []u8 };
 
 /// Kernel socket buffer sizes in bytes.
@@ -222,8 +241,15 @@ pub const Sockets = struct {
         assert(messages.len > 0);
         const socket = self.get(messages[0].address.*) orelse return .{ .sent = 0, .failure = error.AddressFamilyUnsupported };
         for (messages) |message| assert(index(message.address.*) == index(messages[0].address.*));
-        if (native_batches) {
-            if (threadedSend(io)) return sendManyNative(io, socket.handle, messages);
+        if (native_sockets) {
+            if (threadedSend(io)) {
+                if (native_batches) return sendManyNative(io, socket.handle, messages);
+                for (messages, 0..) |message, sent| {
+                    sendNative(io, socket.handle, message.address, message.data_ptr[0..message.data_len]) catch |err|
+                        return .{ .sent = sent, .failure = err };
+                }
+                return .{ .sent = messages.len, .failure = null };
+            }
         }
         const failure, const sent = io.vtable.netSend(io.userdata, socket.handle, messages, .{});
         return .{ .sent = sent, .failure = failure };
@@ -321,7 +347,7 @@ fn receiveNative(io: std.Io, handle: net.Socket.Handle, buffer: []u8) ReceiveErr
 
 /// Sends as Zig 0.16 Threaded does, keeping its errno mapping, but names EPERM, which Threaded
 /// reports as `error.Unexpected`. The errno is read straight from this send's return. The send
-/// never waits: a full send buffer reports `SystemResources`, so the cancellation check before it
+/// never waits: a full send buffer reports `WouldBlock`, so the cancellation check before it
 /// covers the whole send.
 fn sendNative(io: std.Io, handle: net.Socket.Handle, address: *const net.IpAddress, bytes: []const u8) SendError!void {
     const p = std.posix;
@@ -337,14 +363,13 @@ fn sendNative(io: std.Io, handle: net.Socket.Handle, address: *const net.IpAddre
 
 /// Sends as Zig 0.16 Threaded's sendmmsg does, keeping its errno mapping, but names EPERM. The
 /// kernel reports a datagram's errno only when it is the first of a call, so each call starts at
-/// the first unsent datagram and a failure is that datagram's own. The calls never wait; a full
-/// send buffer waits for room through `waitWritable`, and the call after it reads its own errno.
+/// the first unsent datagram and a failure is that datagram's own. Every successful call advances
+/// the prefix; any error returns immediately, including EAGAIN. The calls never wait for room.
 fn sendManyNative(io: std.Io, handle: net.Socket.Handle, messages: []net.OutgoingMessage) SendOutcome {
     const p = std.posix;
     var sent: usize = 0;
-    var waited = false;
-    // Each datagram takes at most two passes: a wait for room and a send.
-    for (0..2 * messages.len) |_| {
+    // Every successful pass sends at least one datagram.
+    for (0..messages.len) |_| {
         if (sent == messages.len) break;
         const pending = messages[sent..][0..@min(messages.len - sent, send_many_max)];
         var headers: [send_many_max]p.system.mmsghdr = undefined;
@@ -373,14 +398,6 @@ fn sendManyNative(io: std.Io, handle: net.Socket.Handle, messages: []net.Outgoin
                 assert(count > 0 and count <= pending.len);
                 for (pending[0..count], headers[0..count]) |*message, header| message.data_len = header.len;
                 sent += count;
-                waited = false;
-            },
-            .AGAIN => {
-                // A socket polls writable once half its send buffer is free, so the datagram after
-                // a wait finds room; a full buffer again is resource pressure.
-                if (waited) return .{ .sent = sent, .failure = error.SystemResources };
-                waitWritable(io, handle) catch |err| return .{ .sent = sent, .failure = err };
-                waited = true;
             },
             else => |err| return .{ .sent = sent, .failure = sendError(err) },
         }
@@ -389,21 +406,8 @@ fn sendManyNative(io: std.Io, handle: net.Socket.Handle, messages: []net.Outgoin
     return .{ .sent = sent, .failure = null };
 }
 
-/// Waits until the socket has room for a datagram, through the Io so cancellation interrupts the
-/// wait. An empty streaming write completes once the socket polls writable and transfers nothing.
-/// Zig 0.16 Threaded polls first only under a deadline, so the wait passes the longest its poll
-/// accepts, about 25 days, and reaching it counts as resource pressure.
-fn waitWritable(io: std.Io, handle: net.Socket.Handle) SendError!void {
-    const file: std.Io.File = .{ .handle = handle, .flags = .{ .nonblocking = false } };
-    const longest: std.Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(std.math.maxInt(i32)), .clock = .awake } };
-    _ = io.operateTimeout(.{ .file_write_streaming = .{ .file = file, .data = &.{""} } }, longest) catch |err| return switch (err) {
-        error.Canceled => error.Canceled,
-        error.Timeout, error.ConcurrencyUnavailable => error.SystemResources,
-    };
-}
-
-/// Zig 0.16 Threaded's send errno mapping, except that EPERM names a destination refusal and a
-/// full send buffer, which a send that does not wait reports as EAGAIN, is `SystemResources`.
+/// Native EAGAIN means this nonblocking send found no room. ENOBUFS and ENOMEM retain the
+/// Io contract's SystemResources classification. Neither says the destination failed.
 fn sendError(errno: std.posix.E) SendError {
     return switch (errno) {
         .SUCCESS => unreachable,
@@ -412,7 +416,8 @@ fn sendError(errno: std.posix.E) SendError {
         .ALREADY => error.FastOpenAlreadyInProgress,
         .CONNRESET => error.ConnectionResetByPeer,
         .MSGSIZE => error.MessageOversize,
-        .AGAIN, .NOBUFS, .NOMEM => error.SystemResources,
+        .AGAIN => error.WouldBlock,
+        .NOBUFS, .NOMEM => error.SystemResources,
         .PIPE, .NOTCONN => error.SocketUnconnected,
         .AFNOSUPPORT => error.AddressFamilyUnsupported,
         .HOSTUNREACH => error.HostUnreachable,

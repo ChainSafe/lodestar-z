@@ -305,7 +305,7 @@ test "transport drops replies its destination refuses and keeps the step's expir
 }
 
 test "transport fails a call whose handshake is not sent so maintenance keeps the incumbent" {
-    // A refusal fails only the call; a full send buffer also fails the step.
+    // A refusal fails only the call; local resource pressure also reports a local step failure.
     for ([_]std.Io.net.Socket.SendError{ error.AddressFamilyUnsupported, error.SystemResources }) |send_failure| {
         var pair: Pair = undefined;
         try pair.init(1_000, false);
@@ -328,6 +328,10 @@ test "transport fails a call whose handshake is not sent so maintenance keeps th
         defer host.deinit();
         const unsent = try pair.transport_a.step(host.io(), &expired);
         try std.testing.expectEqual(if (send_failure == error.SystemResources) @as(?Transport.Error, error.SystemResources) else null, unsent.failure);
+        const dropped = &pair.transport_a.send_drops;
+        const pressure = @intFromEnum(@import("udp").SendPressure.system_resources);
+        try std.testing.expectEqual(@as(u64, @intFromBool(send_failure == error.SystemResources)), dropped.datagrams[pressure]);
+        try std.testing.expectEqual(send_failure == error.SystemResources, dropped.bytes[pressure] > 0);
         try std.testing.expectEqual(@as(usize, 1), host.send_calls);
         try std.testing.expect(unsent.event == .failed);
         try std.testing.expectEqual(started.call.handle, unsent.event.failed.handle);
@@ -833,3 +837,22 @@ const PollFailure = struct {
         return error.ConcurrencyUnavailable;
     }
 };
+
+test "transport cancels a discovery call dropped by local pressure without recording a remote timeout" {
+    var pair: Pair = undefined;
+    try pair.init(1_000, false);
+    defer pair.deinit();
+    var faults: @import("udp").testing.FaultIo = .{ .send = .{}, .send_failure = error.SystemResources };
+    faults.init(std.testing.io);
+    defer faults.deinit();
+    const request: message.Message = .{ .ping = .{ .request_id = try .init(&.{1}), .enr_sequence = pair.record_a.sequence } };
+    try std.testing.expectError(error.SystemResources, pair.transport_a.startCall(faults.io(), endpoint(&pair.record_b), &pair.record_b, &request));
+    try std.testing.expectEqual(@as(usize, 1), faults.send_calls);
+    try std.testing.expectEqual(@as(usize, 0), pair.transport_a.engine.calls.count());
+    const pressure = @intFromEnum(@import("udp").SendPressure.system_resources);
+    try std.testing.expectEqual(@as(u64, 1), pair.transport_a.send_drops.datagrams[pressure]);
+    try std.testing.expect(pair.transport_a.send_drops.bytes[pressure] > 0);
+    var expired: [4]CallTable.Expired = undefined;
+    const now = try Transport.monotonicMilliseconds(std.testing.io);
+    try std.testing.expectEqual(@as(usize, 0), pair.transport_a.engine.tick(now + 2_000, &expired).calls);
+}

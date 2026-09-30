@@ -104,13 +104,12 @@ test "UDP metrics count successful batch prefixes when a later send fails" {
     try std.testing.expectEqual(@as(u64, 5), socket.counters.sent_bytes);
 }
 
-test "dual-stack UDP counts the exact prefix when the host refuses a datagram after it waited for room" {
+test "dual-stack UDP drops the unsent suffix on pressure without waiting or retaining it" {
     if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
     var buffer: [constants.datagram_size_max]u8 = undefined;
     var target = try udp_mod.Udp.bind(std.testing.io, .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } });
     defer target.close(std.testing.io);
-    // The IPv6 socket reports a full buffer to sends that do not wait, and the host starts refusing
-    // it while the batch waits for room. A later filter's errno wins.
+    // A successful IPv4 prefix followed by IPv6 pressure also drops the remaining IPv4 suffix.
     const Refused = struct {
         installed: bool = false,
         outcomes: [2]udp_mod.SendOutcome = undefined,
@@ -134,13 +133,13 @@ test "dual-stack UDP counts the exact prefix when the host refuses a datagram af
                 .{ .to = local[0].?, .bytes = payload[2..3] },
             };
             self.outcomes[0] = udp.sendMany(io, &batch);
-            self.outcomes[1] = udp.sendMany(io, batch[2..]);
+            var fresh: [1]u8 = .{4};
+            self.outcomes[1] = udp.sendMany(io, &.{.{ .to = local[0].?, .bytes = &fresh }});
         }
 
-        fn wait(userdata: ?*anyopaque, batch: *std.Io.Batch, timeout: std.Io.Timeout) std.Io.Batch.AwaitConcurrentError!void {
+        fn wait(_: ?*anyopaque, _: *std.Io.Batch, _: std.Io.Timeout) std.Io.Batch.AwaitConcurrentError!void {
             waits += 1;
-            std.debug.assert(@import("udp").testing.SendFilter.install(&.{.{ .socket = socket, .errno = .PERM }}));
-            return std.testing.io.vtable.batchAwaitConcurrent(userdata, batch, timeout);
+            return error.Canceled;
         }
     };
     Refused.waits = 0;
@@ -149,13 +148,15 @@ test "dual-stack UDP counts the exact prefix when the host refuses a datagram af
     thread.join();
     // Kernels without seccomp filters cannot produce the errnos.
     if (!refused.installed) return error.SkipZigTest;
-    try std.testing.expectEqual(@as(usize, 1), Refused.waits);
-    try std.testing.expectEqual(udp_mod.SendOutcome{ .sent = 1, .failure = error.DestinationRefused }, refused.outcomes[0]);
+    try std.testing.expectEqual(@as(usize, 0), Refused.waits);
+    try std.testing.expectEqual(udp_mod.SendOutcome{ .sent = 1, .failure = error.WouldBlock }, refused.outcomes[0]);
+    try std.testing.expectEqual(@as(u64, 2), target.send_drops.datagrams[@intFromEnum(@import("udp").SendPressure.would_block)]);
+    try std.testing.expectEqual(@as(u64, 2), target.send_drops.bytes[@intFromEnum(@import("udp").SendPressure.would_block)]);
     try std.testing.expectEqual(udp_mod.SendOutcome{ .sent = 1, .failure = null }, refused.outcomes[1]);
     try std.testing.expectEqual(@as(u64, 2), target.counters.sent_datagrams);
     try std.testing.expectEqual(@as(u64, 2), target.counters.sent_bytes);
     var ready: [2]bool = @splat(true);
-    for ([_]u8{ 1, 3 }) |expected| {
+    for ([_]u8{ 1, 4 }) |expected| {
         const message = try target.receiveReady(std.testing.io, &buffer, &ready);
         try std.testing.expectEqualSlices(u8, &.{expected}, message.bytes);
         try std.testing.expect(message.from == .ip4);
