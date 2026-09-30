@@ -403,6 +403,10 @@ pub const Server = struct {
             else => return error.UnknownProtocol,
         };
         const bounds = owner.requestBounds(which);
+        if (owner.inboundCount(stream.conn, which) >= constants.MAX_CONCURRENT_REQUESTS) {
+            owner.recordAdmissionRefusal(stream, which, .protocol_concurrency, 0);
+            return error.ProtocolConcurrency;
+        }
         const control = which.isControl();
         const limiter = &owner.admission.limiter;
         // A responder rate-limits by withholding its response, never by closing the stream, so a
@@ -433,10 +437,6 @@ pub const Server = struct {
         {
             owner.recordAdmissionRefusal(stream, which, .peer_capacity, 0);
             return error.PeerSlotsExhausted;
-        }
-        if (owner.inboundCount(stream.conn, which) >= constants.MAX_CONCURRENT_REQUESTS) {
-            owner.recordAdmissionRefusal(stream, which, .protocol_concurrency, 0);
-            return error.TooManyRequests;
         }
         const index = available orelse {
             owner.recordAdmissionRefusal(stream, which, .peer_capacity, 0);

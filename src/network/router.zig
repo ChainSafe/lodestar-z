@@ -11,6 +11,7 @@ pub const Protocol = @import("protocol.zig").Protocol;
 
 /// Leftover bytes remain borrowed until the next router pump. The selected
 /// handler must copy or consume them synchronously, including a coalesced FIN.
+/// The selection echo is queued, not necessarily sent.
 pub const Selection = struct { protocol: Protocol, leftover: []const u8, fin: bool };
 pub const Outcome = struct {
     stream: engine_mod.StreamHandle,
@@ -200,6 +201,10 @@ pub const Router = struct {
             },
             else => {},
         };
+    }
+
+    pub fn finishSelected(self: *Router, engine: *engine_mod.Engine, stream: engine_mod.StreamHandle, bytes: []const u8, now: types.Now) bool {
+        return self.negotiator.finishSelected(engine, stream, bytes, now);
     }
 
     /// Ends the leftover borrows of the outcomes the last pump returned.

@@ -312,7 +312,7 @@ test "reqresp request start shutdown cancels its waiters without charging them" 
     for ([_]bool{ false, true }) |class| try std.testing.expectEqual(start + refill_ms, owner.admission.limiter.startAt(&identity, class, start));
 }
 
-test "reqresp request start concurrency peer and identity capacity still reset without charging a start" {
+test "reqresp request start preserves distinct protocol peer and identity capacity limits" {
     var setup: harness.Pair = .{};
     try setup.init(.{}, .{ .inbound_per_peer_max = 3, .admission = limits(1) });
     defer setup.deinit();
@@ -477,4 +477,55 @@ test "reqresp request start a waiter that then waits for serving is charged its 
     try std.testing.expectEqual(@as(usize, 1), pumpOwner(&setup, &events));
     try std.testing.expectEqual(index, events[0].request.request.index);
     try std.testing.expectEqual(start + 2 * refill_ms, limiter.startAt(&identity, false, setup.shared.pair.now.mono_ms));
+}
+
+test "reqresp protocol concurrency refusal preserves selection and returns a complete rate-limit response" {
+    for ([_]u8{ 2, 8 }) |peer_limit| {
+        var setup: harness.Pair = .{};
+        try setup.init(.{}, .{ .inbound_per_peer_max = peer_limit });
+        defer setup.deinit();
+        for (0..2) |_| {
+            const held = try setup.openRaw(.blocks_by_root_v2);
+            try setup.awaitRawSelection(held, .blocks_by_root_v2);
+        }
+        const refused = try setup.openRaw(.blocks_by_root_v2);
+        try expectRateLimitResponse(&setup, refused);
+        const owner = &setup.shared.server.reqresp;
+        try std.testing.expectEqual(@as(u64, 1), refusals(owner, .blocks_by_root_v2, .protocol_concurrency));
+        try std.testing.expectEqual(@as(u16, 2), owner.active().inbound);
+    }
+}
+
+fn expectRateLimitResponse(setup: *harness.Pair, stream: @import("../types.zig").StreamHandle) !void {
+    var dialer = try @import("../wire/multistream.zig").Dialer.init(Protocol.blocks_by_root_v2.id());
+    var selected = false;
+    var wire: [1024]u8 = undefined;
+    var buffered: usize = 0;
+    var scratch: [codec.frameLengthMax(codec.error_message_max)]u8 = undefined;
+    var decoder = codec.Decoder.initResponse(.{ .min = 0, .max = 0 }, false, &.{}, &scratch);
+    for (0..40) |_| {
+        try setup.pumpOnce();
+        const read = try setup.shared.pair.client.read(stream, wire[buffered..]);
+        try std.testing.expectEqual(@as(?u64, null), read.reset_code);
+        buffered += read.len;
+        if (!selected) {
+            const result = try dialer.feed(wire[0..buffered]);
+            try std.testing.expect(result.status != .rejected);
+            std.mem.copyForwards(u8, &wire, wire[result.consumed..buffered]);
+            buffered -= result.consumed;
+            selected = result.status == .accepted;
+        }
+        if (selected and buffered > 0) {
+            const decoded = try decoder.feed(wire[0..buffered]);
+            try std.testing.expectEqual(buffered, decoded.consumed);
+            buffered = 0;
+        }
+        if (read.fin) {
+            try std.testing.expect(selected and decoder.isDone());
+            try std.testing.expectEqual(@as(u8, 139), decoder.result());
+            try std.testing.expect(std.mem.startsWith(u8, decoder.payload(), "Rate limited"));
+            return;
+        }
+    }
+    return error.TestUnexpectedResult;
 }

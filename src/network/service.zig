@@ -192,6 +192,13 @@ pub const Service = struct {
                         if (!self.reqresp.negotiated(engine, outcome, now)) engine.closeStream(outcome.stream, 0);
                     } else switch (outcome.result) {
                         .ready => |selection| _ = self.reqresp.accept(engine, outcome.stream, selection, now) catch |err| {
+                            if (err == error.ProtocolConcurrency) {
+                                const codec = @import("reqresp/codec.zig");
+                                const message = "Rate limited: already 2 active requests for this protocol";
+                                var wire: [codec.encodedLengthMax(message.len)]u8 = undefined;
+                                const response = codec.encodeChunk(@import("reqresp/constants.zig").result_rate_limited, null, message, &wire) catch unreachable;
+                                if (self.router.finishSelected(engine, outcome.stream, response, now)) continue;
+                            }
                             engine.closeStream(outcome.stream, if (err == error.TooManyRequests) @import("reqresp/constants.zig").app_error_over_limit else 0);
                         },
                         else => {},

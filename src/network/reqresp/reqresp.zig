@@ -155,6 +155,7 @@ pub const RequestError = error{
 
 pub const AcceptError = error{
     TooManyRequests,
+    ProtocolConcurrency,
     InvalidCapacity,
     StaleHandle,
     InvalidHandoff,
