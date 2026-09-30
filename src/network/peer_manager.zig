@@ -3,7 +3,6 @@ const capabilities = @import("capabilities.zig");
 const t = @import("peers/types.zig");
 const peers = @import("peers/root.zig");
 const control_mod = @import("peers/control.zig");
-const ControlProtocol = @import("control_protocol.zig").ControlProtocol;
 const dial_mod = @import("peers/dialing.zig");
 const policy = peers.policy;
 const engine_mod = @import("quic/engine.zig");
@@ -129,17 +128,16 @@ pub const PeerManager = struct {
         self.catalog.deinit(self.allocator);
         self.* = undefined;
     }
-    /// Admits an authenticated connection or refuses it, deferring its dial. The owner closes a
+    /// After transportProgress, admits an authenticated connection and starts qualification, or
+    /// refuses it and defers its dial. The owner closes a
     /// refused connection and, for an admitted one, the connection it displaced.
     pub fn admit(
         self: *PeerManager,
-        engine: *engine_mod.Engine,
         event: *const @FieldType(engine_mod.Event, "connected"),
         endpoint: t.Address,
         now: Now,
     ) ?@FieldType(t.Admission, "admitted") {
         const identity = event.peer_id;
-        self.dialing.syncAnswered(engine);
         const decision = self.catalog.admit(
             &identity,
             &self.local_identity,
@@ -154,7 +152,11 @@ pub const PeerManager = struct {
             },
         );
         switch (decision) {
-            .admitted => |admission| return admission,
+            .admitted => |admission| {
+                if (admission.displaced) |old| self.control.retire(admission.peer, old);
+                self.connected(admission.peer, event.conn, event.direction, now);
+                return admission;
+            },
             else => {
                 std.log.scoped(.network_peers).debug("peer_admission_refused peer={f} connection={d}:{d} reason={s}", .{ @import("logging.zig").peer(&identity), event.conn.index, event.conn.generation, @tagName(decision) });
                 _ = self.dialing.deferConnection(&self.catalog, event.conn, now.mono_ms);
@@ -162,35 +164,98 @@ pub const PeerManager = struct {
             },
         }
     }
-    /// Starts peer control on an admitted connection and settles the dial it answers.
-    pub fn connected(self: *PeerManager, requests: *const ControlProtocol, peer: t.PeerRef, conn: t.Handle, direction: t.Direction, now: Now) void {
-        self.control.connected(&self.catalog, requests, peer, conn, direction, now);
+    /// Starts qualification and settles the dial after admission; replacement I/O may still be
+    /// cancelling, so the old request reservation remains until its terminal event.
+    fn connected(self: *PeerManager, peer: t.PeerRef, conn: t.Handle, direction: t.Direction, now: Now) void {
+        self.control.connected(&self.catalog, peer, conn, direction, now);
         self.dialing.accepted(&self.catalog, peer, conn, now.mono_ms);
     }
-    /// Settles the dial a transport close ends and returns the peer the connection was admitted for.
-    pub fn transportClosed(self: *PeerManager, closed: *const @FieldType(engine_mod.Event, "closed"), now: Now) ?t.PeerRef {
-        _ = self.dialing.dialClosed(&self.catalog, closed.conn, closed.reason, now.mono_ms);
-        return self.catalog.findConnection(closed.conn);
+    /// Stops selecting new work once, while the core releases existing I/O.
+    pub fn stop(self: *PeerManager) bool {
+        if (self.stopped) return false;
+        self.stopped = true;
+        self.selection = .{};
+        self.discovery_need = .{};
+        return true;
     }
-    /// Records how the remote ended the connection and selects its close reason: the reason peer
-    /// policy chose, else the remote's buffered Goodbye, else a transport close.
-    pub fn closedReason(self: *PeerManager, peer: t.PeerRef, conn: t.Handle, goodbye: ?u64, remote: bool) t.DisconnectReason {
-        if (goodbye) |code| self.control.receivedGoodbye(&self.catalog, peer, conn, code, true);
-        if (remote) self.control.remoteClosed(peer, conn);
+    /// Stops application demand while preserving control progress for graceful Goodbye.
+    pub fn quiesce(self: *PeerManager, now: Now) bool {
+        if (self.stopped or self.quiescing) return false;
+        self.quiescing = true;
+        self.selection = .{};
+        self.discovery_need = .{};
+        for (self.catalog.rows, 0..) |row, index| {
+            if (!row.occupied or row.connection == null) continue;
+            _ = self.disconnect(.{ .index = @intCast(index), .generation = row.generation }, .shutdown, now);
+        }
+        return true;
+    }
+    pub const Retired = struct { peer: t.PeerRef, conn: t.Handle };
+    /// Settles an ended dial and connection once. Preserve remote evidence before retirement
+    /// releases Status, Metadata and intent state. The caller then cancels protocol/gossip I/O.
+    pub fn transportClosed(self: *PeerManager, closed: *const @FieldType(engine_mod.Event, "closed"), goodbye: ?u64, now: Now) ?Retired {
+        _ = self.dialing.dialClosed(&self.catalog, closed.conn, closed.reason, now.mono_ms);
+        const peer = self.catalog.findConnection(closed.conn) orelse return null;
+        if (goodbye) |code| self.control.receivedGoodbye(&self.catalog, peer, closed.conn, code, true);
+        if (closed.reason == .peer_closed) self.control.remoteClosed(peer, closed.conn);
         const snapshot = self.catalog.get(peer).?;
-        return snapshot.disconnect_reason orelse if (goodbye != null) t.DisconnectReason.remote_goodbye else .transport_closed;
+        const reason = snapshot.disconnect_reason orelse if (goodbye != null) t.DisconnectReason.remote_goodbye else .transport_closed;
+        return self.retireConnection(peer, closed.conn, reason, now);
+    }
+    /// Completes policy retirement before returning the connection whose I/O the caller releases.
+    /// Duplicate and stale generations have no effect. Evidence is settled before catalog clearing.
+    pub fn retireConnection(self: *PeerManager, peer: t.PeerRef, conn: t.Handle, reason: t.DisconnectReason, now: Now) ?Retired {
+        const current = self.catalog.findConnection(conn) orelse return null;
+        if (!std.meta.eql(current, peer)) return null;
+        if (!self.control.close(&self.catalog, peer, conn, reason, now)) return null;
+        const disconnected = self.catalog.disconnect(peer, conn, reason, now.mono_ms);
+        std.debug.assert(disconnected);
+        return .{ .peer = peer, .conn = conn };
+    }
+    /// Starts one bounded qualification/health maintenance pass. Its outcomes must be reported
+    /// before taking more work so the scheduling quota, resource reservation and deadlines agree.
+    pub fn beginControl(self: *PeerManager, now: Now) control_mod.Control.Pass {
+        return self.control.beginMaintenance(now);
+    }
+    pub fn nextControl(self: *PeerManager, pass: *control_mod.Control.Pass, now: Now) ?control_mod.Control.Due {
+        return self.control.nextDue(pass, &self.catalog, &self.local, now);
+    }
+    pub fn controlStarted(self: *PeerManager, due: *const control_mod.Control.Due, identify_started: bool, request: ?@import("reqresp/root.zig").RequestHandle, now: Now) void {
+        if (due.identify) self.control.identifyStarted(due, identify_started, now);
+        if (due.request != null) self.control.requestStarted(due, request, now);
+        self.control.rekey(&self.catalog, due.index);
+    }
+    pub fn controlRequested(self: *PeerManager, request: *const @FieldType(@import("reqresp/root.zig").Event, "request"), now: Now, slot: u64) ?t.PeerRef {
+        const peer = self.catalog.findConnection(request.peer) orelse return null;
+        self.control.requested(&self.catalog, peer, request, &self.local, now, slot);
+        return peer;
+    }
+    /// Called before the protocol consumes the borrowed event and settles its resource token.
+    pub fn controlReplied(self: *PeerManager, reply: *const control_wire.ControlReply, event: @import("reqresp/root.zig").Event, now: Now, slot: u64) void {
+        self.control.replied(&self.catalog, reply, event, &self.local, now, slot);
+    }
+    pub fn identified(self: *PeerManager, results: []const @import("identify/root.zig").Result) void {
+        self.control.identifyResults(&self.catalog, results);
+    }
+    pub fn controlWakeup(self: *const PeerManager, now: Now) ?u64 {
+        return self.control.nextWakeup(&self.catalog, now);
+    }
+    /// Revalidates the connection at this bounded cursor after a fork change. The caller cancels
+    /// the returned request; its reservation survives until the protocol's terminal event.
+    pub fn revalidateConnection(self: *PeerManager, index: usize, now: Now) ?control_mod.Control.Connection {
+        return self.control.revalidate(&self.catalog, index, self.local.fork, now);
     }
     fn catalogDeadline(self: *PeerManager, now_ms: u64) ?u64 {
         self.counters.catalog_deadline_rows +|= self.catalog.rows.len;
         return self.catalog.nextDeadline(now_ms);
     }
     /// Reconciles at the supplied clock without pumping protocols or borrowing an Engine.
-    pub fn reconcile(self: *PeerManager, gossipsub: *gossip.Gossipsub, requests: *const ControlProtocol, now: Now) void {
+    pub fn reconcile(self: *PeerManager, gossipsub: *gossip.Gossipsub, now: Now) void {
         if (self.stopped or self.quiescing) return;
         self.catalog.refresh(now.mono_ms);
         const expired = if (self.reconciliation_deadline) |due| now.mono_ms >= due else false;
         if ((if (self.policyWakeup(gossipsub, now)) |due| now.mono_ms >= due else false) or expired) {
-            self.refreshSelection(gossipsub, requests, now);
+            self.refreshSelection(gossipsub, now);
             self.coverage_reconcile_after_ms = now.mono_ms +| coverage_reconcile_interval_ms;
             self.refreshDiscoveryNeed();
             const revision = self.currentSelectionRevision(gossipsub);
@@ -216,7 +281,10 @@ pub const PeerManager = struct {
             return @max(now.mono_ms, self.coverage_reconcile_after_ms);
         return null;
     }
-    pub fn updateNativeRoom(self: *PeerManager, engine: *const engine_mod.Engine) void {
+    /// Observes transport progress before admission or dial selection. Admission itself consumes
+    /// these bounded facts without borrowing transport or executing I/O.
+    pub fn transportProgress(self: *PeerManager, engine: *const engine_mod.Engine) void {
+        self.dialing.syncAnswered(engine);
         self.native_dial_room = engine.limits.connections_max -| engine.registry.active_len;
     }
 
@@ -241,9 +309,9 @@ pub const PeerManager = struct {
     }
     pub const DiscoveryIntake = struct { accepted: u16 = 0, refused: u16 = 0 };
     /// Requires Discovery.step output or equivalent authenticated-source scope authorization.
-    pub fn discoveredBatch(self: *PeerManager, gossipsub: *gossip.Gossipsub, requests: *const ControlProtocol, candidates: []const peers.enr.Candidate, now: Now) DiscoveryIntake {
+    pub fn discoveredBatch(self: *PeerManager, gossipsub: *gossip.Gossipsub, candidates: []const peers.enr.Candidate, now: Now) DiscoveryIntake {
         std.debug.assert(candidates.len <= 16);
-        self.reconcile(gossipsub, requests, now);
+        self.reconcile(gossipsub, now);
         var result: DiscoveryIntake = .{};
         for (candidates) |*candidate| {
             self.enqueueDiscovered(candidate, now) catch {
@@ -259,7 +327,7 @@ pub const PeerManager = struct {
         if (candidate.peer.eql(&self.local_identity)) return error.SelfDial;
         try self.dialing.enqueueDiscovered(&self.catalog, candidate, &self.local.fork, &self.selection.deficits.missing, now.mono_ms);
     }
-    fn refreshSelection(self: *PeerManager, gossipsub: *gossip.Gossipsub, requests: *const ControlProtocol, now: Now) void {
+    fn refreshSelection(self: *PeerManager, gossipsub: *gossip.Gossipsub, now: Now) void {
         self.counters.selections +|= 1;
         self.counters.selection_rows +|= self.catalog.rows.len;
         self.selection_deadline = null;
@@ -281,7 +349,7 @@ pub const PeerManager = struct {
         }
         self.selection = policy.selectWithPacing(self.policy_scratch[0..input_count], &self.demand, self.catalog.options, self.policy_seed, now.mono_ms >= self.replacement_after_ms);
         for (self.policy_scratch[0..input_count], 0..) |input, i| if (self.selection.reasons[i]) |reason| {
-            _ = self.disconnect(requests, input.peer, reason, now);
+            _ = self.disconnect(input.peer, reason, now);
             if (reason == .count_pruning) self.replacement_after_ms = now.mono_ms +| replacement_interval_ms;
         };
         if (now.mono_ms < self.replacement_after_ms)
@@ -373,16 +441,15 @@ pub const PeerManager = struct {
         _ = self.catalog.advanceCustody(&self.local.fork, now.mono_ms, self.metadata_freshness_ms, &budget);
         self.selection_revision = null;
     }
-    pub fn reStatusPeer(self: *PeerManager, requests: *const ControlProtocol, peer: t.PeerRef, connection: t.Handle, now: Now) bool {
+    pub fn reStatusPeer(self: *PeerManager, peer: t.PeerRef, connection: t.Handle, now: Now) bool {
         if (self.stopped) return false;
-        return self.control.reStatusPeer(&self.catalog, requests, peer, connection, now);
+        return self.control.reStatusPeer(&self.catalog, peer, connection, now);
     }
-    pub fn reStatusPeers(self: *PeerManager, requests: *const ControlProtocol, now: Now) void {
-        self.control.reStatusPeers(&self.catalog, requests, now);
+    pub fn reStatusPeers(self: *PeerManager, now: Now) void {
+        self.control.reStatusPeers(&self.catalog, now);
     }
     pub fn reportPeer(
         self: *PeerManager,
-        requests: *const ControlProtocol,
         peer: t.PeerRef,
         action: t.PeerAction,
         now: Now,
@@ -390,7 +457,6 @@ pub const PeerManager = struct {
         const decision = self.catalog.report(peer, action, now.mono_ms) orelse return null;
         self.selection_revision = null;
         if (decision != .none) _ = self.disconnect(
-            requests,
             peer,
             if (decision == .ban) .banned else .reputation,
             now,
@@ -445,11 +511,10 @@ pub const PeerManager = struct {
         self.selection_revision = null;
         return true;
     }
-    pub fn disconnect(self: *PeerManager, requests: *const ControlProtocol, peer: t.PeerRef, reason: t.DisconnectReason, now: Now) bool {
+    pub fn disconnect(self: *PeerManager, peer: t.PeerRef, reason: t.DisconnectReason, now: Now) bool {
         const snapshot = self.catalog.get(peer) orelse return false;
         return self.control.disconnect(
             &self.catalog,
-            requests,
             peer,
             snapshot.connection orelse return false,
             reason,
@@ -459,15 +524,14 @@ pub const PeerManager = struct {
     pub fn dialIntents(
         self: *PeerManager,
         gossipsub: *gossip.Gossipsub,
-        requests: *const ControlProtocol,
         engine: *engine_mod.Engine,
         now: Now,
         out: []dial_mod.DialIntent,
     ) usize {
         if (self.stopped) return 0;
         self.dialing.expire(&self.catalog, engine, now.mono_ms);
-        self.reconcile(gossipsub, requests, now);
-        self.updateNativeRoom(engine);
+        self.reconcile(gossipsub, now);
+        self.transportProgress(engine);
         const count = self.dialing.poll(&self.catalog, now.mono_ms, out[0..@min(out.len, self.dialRoom())]);
         // Replay refills the remembered candidates waiting for a paced first attempt after poll
         // started some, so their eligibility keys wake the owner for the next.
@@ -522,3 +586,7 @@ pub const PeerManager = struct {
         );
     }
 };
+
+test {
+    _ = @import("peer_manager_test.zig");
+}

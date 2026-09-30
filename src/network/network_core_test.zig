@@ -122,7 +122,7 @@ test "core maintenance isolates slow peers and full application capacity" {
     var status = healthy.localState().status;
     status.head_slot = 42;
     try healthy.updateStatus(&status);
-    hub.peer_manager.reStatusPeers(&hub.control_protocol, hub.last_now);
+    hub.peer_manager.reStatusPeers(hub.last_now);
     const control = &hub.peer_manager.control;
     const started = control.counters.started;
     for (0..3) |turn| {
@@ -185,7 +185,7 @@ test "core metrics copy peer processing work without advancing it" {
     const opts = options(&key);
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
-    node.peer_manager.reconcile(node.service.gossipsub, &node.control_protocol, node.last_now);
+    node.peer_manager.reconcile(node.service.gossipsub, node.last_now);
     const peer_work = node.peer_manager.counters;
     try std.testing.expect(peer_work.catalog_deadline_rows > 0);
     const metrics = @import("metrics/export.zig");
@@ -330,7 +330,7 @@ fn applicationAndFork(a: *runtime.NetworkCore, b: *runtime.NetworkCore, b_inbox:
         local.metadata.custody_group_count = local.fork.custody_groups;
         local.metadata.attnets[0] = 0x81;
         _ = try updateLocal(node, &local, .{ .fulu_scheduled = true }, now);
-        node.peer_manager.reStatusPeers(&node.control_protocol, now);
+        node.peer_manager.reStatusPeers(now);
     }
     var peer_a: ?t.PeerRef = null;
     var peer_b: ?t.PeerRef = null;
@@ -360,8 +360,8 @@ fn applicationAndFork(a: *runtime.NetworkCore, b: *runtime.NetworkCore, b_inbox:
         handle.* = try a.sendReqRespRequest(&b.peerId(), protocol, if (i < 2) &request else &([_]u8{0} ** 32), sinks[i * sink_size ..][0..sink_size], .{ .expected_chunks = 1 }, now);
     }
     try std.testing.expectError(error.TooManyRequests, a.sendReqRespRequest(&b.peerId(), .blocks_by_range_v2, &request, sinks[0..sink_size], .{}, now));
-    a.peer_manager.reStatusPeers(&a.control_protocol, now);
-    b.peer_manager.reStatusPeers(&b.control_protocol, now);
+    a.peer_manager.reStatusPeers(now);
+    b.peer_manager.reStatusPeers(now);
     for (0..20) |_| {
         const tick = try @import("transport.zig").currentTime(std.testing.io);
         _ = a.step(std.testing.io, tick, .{}, .deadlineOnly(tick.mono_ms +| 1));
@@ -1404,6 +1404,7 @@ test "core targeted Status serves two current schedules and immediate close is l
     var b: runtime.NetworkCore = undefined;
     var c: runtime.NetworkCore = undefined;
     var opts = options(&key_a);
+    opts.resolved.core.peers.capacity = 3;
     opts.resolved.core.peers.min_outbound = 0;
     opts.resolved.core.service.identify = .{ .agent = "peer-operations" };
     try a.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
@@ -1471,36 +1472,44 @@ test "core targeted Status serves two current schedules and immediate close is l
 }
 
 fn recycledPeerOperations(a: *runtime.NetworkCore, b: *runtime.NetworkCore, c: *runtime.NetworkCore, previous: *const t.Snapshot) !void {
-    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{34}));
-    var replacement: runtime.NetworkCore = undefined;
-    const opts = options(&key);
-    try replacement.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
-    defer replacement.deinit(std.testing.io);
-    var events: [4]t.Event = undefined;
-    _ = a.peer_manager.catalog.pollEvents(&events);
-    const start = try @import("transport.zig").currentTime(std.testing.io);
-    try a.addDirectPeer(&replacement.peerId(), &.{replacement.transport.localAddress()}, start);
-    var current: ?t.Snapshot = null;
-    for (0..3000) |_| {
-        const now = try @import("transport.zig").currentTime(std.testing.io);
-        if (now.mono_ms - start.mono_ms > 10_000) break;
-        for ([_]*runtime.NetworkCore{ a, b, c, &replacement }) |node| {
-            const result = node.step(std.testing.io, now, .{ .peers = &events }, .deadlineOnly(now.mono_ms +| 1));
-            if (result.failure) |err| return err;
+    // Fill the spare established slot before requiring the disconnected generation to be reclaimed.
+    for (0..2) |attempt| {
+        const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{@as(u8, @intCast(34 + attempt))}));
+        var replacement: runtime.NetworkCore = undefined;
+        const opts = options(&key);
+        try replacement.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
+        defer replacement.deinit(std.testing.io);
+        var events: [4]t.Event = undefined;
+        _ = a.peer_manager.catalog.pollEvents(&events);
+        const start = try @import("transport.zig").currentTime(std.testing.io);
+        try a.addDirectPeer(&replacement.peerId(), &.{replacement.transport.localAddress()}, start);
+        var current: ?t.Snapshot = null;
+        for (0..3000) |_| {
+            const now = try @import("transport.zig").currentTime(std.testing.io);
+            if (now.mono_ms - start.mono_ms > 10_000) break;
+            for ([_]*runtime.NetworkCore{ a, b, c, &replacement }) |node| {
+                const result = node.step(std.testing.io, now, .{ .peers = &events }, .deadlineOnly(now.mono_ms +| 1));
+                if (result.failure) |err| return err;
+            }
+            const ref = a.peer_manager.catalog.find(&replacement.peerId()) orelse continue;
+            const row = a.peer_manager.catalog.get(ref) orelse continue;
+            if (!row.relevant) continue;
+            current = row;
+            break;
         }
-        const ref = a.peer_manager.catalog.find(&replacement.peerId()) orelse continue;
-        const row = a.peer_manager.catalog.get(ref) orelse continue;
-        if (!row.relevant) continue;
-        current = row;
-        break;
+        const selected = current orelse return error.ReplacementNotReady;
+        try std.testing.expect(!std.meta.eql(previous.peer, selected.peer));
+        if (attempt == 0) {
+            try std.testing.expect(a.peer_manager.catalog.get(previous.peer).?.connection == null);
+        } else {
+            try std.testing.expect(a.peer_manager.catalog.get(previous.peer) == null);
+        }
+        try std.testing.expect(!a.closePeer(&previous.identity, a.last_now));
+        try std.testing.expect(!a.reStatusPeer(&previous.identity, a.last_now));
+        try std.testing.expectEqualDeep(selected, a.peer_manager.catalog.get(selected.peer).?);
+        try std.testing.expect(a.closePeer(&selected.identity, a.last_now));
+        try std.testing.expect(a.removeDirectPeer(&selected.identity));
     }
-    const selected = current orelse return error.ReplacementNotReady;
-    try std.testing.expect(!std.meta.eql(previous.peer, selected.peer));
-    try std.testing.expect(a.peer_manager.catalog.get(previous.peer) == null);
-    try std.testing.expect(!a.closePeer(&previous.identity, a.last_now));
-    try std.testing.expect(!a.reStatusPeer(&previous.identity, a.last_now));
-    try std.testing.expectEqualDeep(selected, a.peer_manager.catalog.get(selected.peer).?);
-    try std.testing.expect(a.closePeer(&selected.identity, a.last_now));
 }
 
 test "core complete local intent rejects invalid last topic atomically" {

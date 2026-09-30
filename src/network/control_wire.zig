@@ -2,6 +2,23 @@ const std = @import("std");
 const ct = @import("consensus_types");
 const t = @import("peers/types.zig");
 pub const Protocol = @import("reqresp/protocol.zig").Protocol;
+/// Work selected by peer policy and executed by the control protocol.
+pub const Probe = struct {
+    protocol: Protocol,
+    code: u64 = 0,
+    after_ready: bool = false,
+};
+/// Immutable facts from one matched outbound control operation. Buffers and operation-table
+/// ownership stay in the protocol; peer policy uses these facts with the decoded event.
+pub const ControlReply = struct {
+    peer: @import("types.zig").PeerRef,
+    conn: @import("types.zig").Handle,
+    request: ?@import("reqresp/events.zig").RequestHandle = null,
+    protocol: Protocol,
+    cancelled: bool = false,
+    received: bool = false,
+    after_ready: bool = false,
+};
 pub const status_size_max = 92;
 pub const Error = error{
     InvalidLength,

@@ -15,14 +15,7 @@ const assert = std.debug.assert;
 const no_operation = std.math.maxInt(u16);
 const RequestEvent = @FieldType(rr.Event, "request");
 
-/// A request peer control starts on a connection.
-pub const Probe = struct {
-    protocol: rr.Protocol,
-    /// The Goodbye reason code. Other protocols ignore it.
-    code: u64 = 0,
-    /// Started after the connection's Status and Metadata exchange, so its success proves health.
-    after_ready: bool = false,
-};
+pub const Probe = wire.Probe;
 pub const Operation = struct {
     request: ?rr.RequestHandle = null,
     peer: t.PeerRef = undefined,
@@ -34,6 +27,10 @@ pub const Operation = struct {
     after_ready: bool = false,
     bytes: [wire.status_size_max]u8 = undefined,
     sink: [wire.status_size_max]u8 = undefined,
+
+    pub fn reply(self: *const Operation) wire.ControlReply {
+        return .{ .peer = self.peer, .conn = self.conn, .request = self.request, .protocol = self.protocol, .cancelled = self.cancelled, .received = self.received, .after_ready = self.after_ready };
+    }
 };
 const Response = struct {
     request: ?rr.RequestHandle = null,
@@ -84,7 +81,7 @@ pub const ControlProtocol = struct {
         return self.operation_by_peer[index] != no_operation;
     }
 
-    /// Encodes the probe into a free operation and submits it, returning whether it started. The
+    /// Encodes the probe into a free operation and submits it, returning its token when it starts. The
     /// operation's buffers stay immutable until the request's terminal event retires it.
     pub fn start(
         self: *ControlProtocol,
@@ -96,7 +93,7 @@ pub const ControlProtocol = struct {
         probe: *const Probe,
         local: *const t.LocalState,
         now: Now,
-    ) bool {
+    ) ?rr.RequestHandle {
         assert(self.operation_by_peer[peer.index] == no_operation);
         defer if (@import("builtin").is_test) self.checkIndex();
         for (self.operations, 0..) |*op, index| {
@@ -106,7 +103,7 @@ pub const ControlProtocol = struct {
                     probe.protocol,
                     &local.status,
                     &op.bytes,
-                ) catch return false,
+                ) catch return null,
                 .ping_v1, .goodbye_v1 => blk: {
                     std.mem.writeInt(
                         u64,
@@ -131,7 +128,7 @@ pub const ControlProtocol = struct {
                 &op.sink,
                 .{},
                 now,
-            ) catch return false;
+            ) catch return null;
             op.peer = peer;
             op.conn = conn;
             op.protocol = probe.protocol;
@@ -140,9 +137,9 @@ pub const ControlProtocol = struct {
             op.after_ready = probe.after_ready;
             op.request = request;
             self.operation_by_peer[peer.index] = @intCast(index);
-            return true;
+            return request;
         }
-        return false;
+        return null;
     }
 
     /// Cancels the peer's in-flight request on this connection. Its operation stays held until
@@ -259,7 +256,7 @@ pub const ControlProtocol = struct {
     }
 
     /// Consumes the operation's reply chunk, or retires the operation at its terminal event and
-    /// frees its peer's index. The owner rekeys that peer's schedule afterwards.
+    /// frees its peer's index. Peer policy observes the matching outcome before this call.
     pub fn settle(
         self: *ControlProtocol,
         reqresp: *rr.ReqResp,

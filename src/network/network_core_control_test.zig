@@ -11,8 +11,8 @@ const Engine = @import("quic/engine.zig");
 /// Hands peer control a reply the remote did not send, as the owner hands it a real one, and rekeys.
 fn reply(node: *@import("network_core.zig").NetworkCore, op: *const @import("control_protocol.zig").Operation, event: rr.Event, now: @import("types.zig").Now) void {
     const manager = &node.peer_manager;
-    manager.control.replied(&manager.catalog, &node.control_protocol, op, event, &manager.local, now, node.current_slot);
-    manager.control.rekey(&manager.catalog, &node.control_protocol, op.peer.index);
+    const observed = op.reply();
+    manager.controlReplied(&observed, event, now, node.current_slot);
 }
 
 test "core fork revalidation protects retention but old replies never restore application relevance" {
@@ -30,7 +30,7 @@ test "core fork revalidation protects retention but old replies never restore ap
     next.fork.digest = @splat(1);
     next.status.fork_digest = next.fork.digest;
     try @import("network_core_test_support.zig").updateLocal(&setup.client, &next, setup.pair.now);
-    setup.client.peer_manager.reconcile(setup.client.service.gossipsub, &setup.client.control_protocol, setup.pair.now);
+    setup.client.peer_manager.reconcile(setup.client.service.gossipsub, setup.pair.now);
     const deadline = setup.client.peer_manager.control.revalidationDeadline(peer.peer, peer.connection.?, setup.pair.now).?;
     try std.testing.expect(!setup.client.peer_manager.catalog.get(peer.peer).?.relevant);
     try std.testing.expectEqual(@as(u16, 0), setup.client.peer_manager.coverageDeficits().outbound);
@@ -60,7 +60,7 @@ test "core fork revalidation excludes peers that never established relevance" {
     const identity = setup.server.peerId();
     const conn: t.Handle = .{ .index = 0, .generation = 1 };
     const peer = setup.client.peer_manager.catalog.admit(&identity, &setup.client.peer_manager.local_identity, conn, &.{ .direction = .inbound, .endpoint = .unspecified, .now_ms = setup.pair.now.mono_ms }).admitted.peer;
-    setup.client.peer_manager.control.connected(&setup.client.peer_manager.catalog, &setup.client.control_protocol, peer, conn, .inbound, setup.pair.now);
+    setup.client.peer_manager.control.connected(&setup.client.peer_manager.catalog, peer, conn, .inbound, setup.pair.now);
     var next = setup.client.peer_manager.local;
     next.fork.digest = @splat(3);
     next.status.fork_digest = next.fork.digest;
@@ -121,7 +121,7 @@ test "core production Fulu receives old Status only with established revalidatio
         try @import("network_core_test_support.zig").updateLocal(&setup.server, &next, setup.pair.now);
         const deadline = setup.server.peer_manager.control.schedules[peer.index].transition_until_ms;
         setup.server.peer_manager.control.schedules[peer.index].retry_ms = std.math.maxInt(u64);
-        setup.server.peer_manager.control.rekey(&setup.server.peer_manager.catalog, &setup.server.control_protocol, peer.index);
+        setup.server.peer_manager.control.rekey(&setup.server.peer_manager.catalog, peer.index);
         try previousStatus(&setup);
         const snapshot = setup.server.peer_manager.catalog.get(peer).?;
         try std.testing.expect(!snapshot.relevant);
@@ -130,7 +130,7 @@ test "core production Fulu receives old Status only with established revalidatio
             try std.testing.expectEqual(deadline, setup.server.peer_manager.control.schedules[peer.index].transition_until_ms);
             setup.pair.advance(deadline - setup.pair.now.mono_ms);
             setup.server.peer_manager.control.schedules[peer.index].retry_ms = std.math.maxInt(u64);
-            setup.server.peer_manager.control.rekey(&setup.server.peer_manager.catalog, &setup.server.control_protocol, peer.index);
+            setup.server.peer_manager.control.rekey(&setup.server.peer_manager.catalog, peer.index);
             try previousStatus(&setup);
         }
         try std.testing.expectEqual(t.DisconnectReason.incompatible_fork, setup.server.peer_manager.catalog.get(peer).?.disconnect_reason.?);
@@ -145,13 +145,13 @@ test "core local pruning records automatic redial backoff separately from peer f
     var snapshots: [4]t.Snapshot = undefined;
     try std.testing.expectEqual(@as(usize, 1), setup.client.peer_manager.snapshots(&snapshots));
     const peer = snapshots[0].peer;
-    try std.testing.expect(setup.client.peer_manager.disconnect(&setup.client.control_protocol, peer, .count_pruning, setup.pair.now));
+    try std.testing.expect(setup.client.peer_manager.disconnect(peer, .count_pruning, setup.pair.now));
     const pruned = setup.client.peer_manager.catalog.get(peer).?;
     try std.testing.expectEqual(setup.pair.now.mono_ms + 300_000, pruned.redial_until_ms);
     try std.testing.expectEqual(@as(u64, 0), pruned.goodbye_until_ms);
     try std.testing.expectEqual(@as(f64, 0), pruned.score);
     try std.testing.expectEqual(t.DisconnectReason.count_pruning, pruned.disconnect_reason.?);
-    try std.testing.expectEqual(t.ReputationDecision.ban, setup.client.peer_manager.reportPeer(&setup.client.control_protocol, peer, .fatal, setup.pair.now).?);
+    try std.testing.expectEqual(t.ReputationDecision.ban, setup.client.peer_manager.reportPeer(peer, .fatal, setup.pair.now).?);
     try std.testing.expect(setup.client.peer_manager.catalog.get(peer).?.ban_until_ms > pruned.redial_until_ms);
 }
 
@@ -177,10 +177,10 @@ test "core admission evaluation expires without protocol progress" {
     try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.selection.retained_count);
     try std.testing.expectEqual(grace, setup.client.peer_manager.selection_deadline.?);
     setup.pair.advance(grace - setup.pair.now.mono_ms - 1);
-    setup.client.peer_manager.reconcile(setup.client.service.gossipsub, &setup.client.control_protocol, setup.pair.now);
+    setup.client.peer_manager.reconcile(setup.client.service.gossipsub, setup.pair.now);
     try std.testing.expect(setup.client.peer_manager.catalog.get(peer).?.disconnect_reason == null);
     setup.pair.advance(1);
-    setup.client.peer_manager.reconcile(setup.client.service.gossipsub, &setup.client.control_protocol, setup.pair.now);
+    setup.client.peer_manager.reconcile(setup.client.service.gossipsub, setup.pair.now);
     try std.testing.expectEqual(@as(u16, 0), setup.client.peer_manager.selection.retained_count);
     try std.testing.expectEqual(t.DisconnectReason.count_pruning, setup.client.peer_manager.catalog.get(peer).?.disconnect_reason.?);
 }
@@ -218,7 +218,7 @@ test "core records a buffered Goodbye before transport cancellation and preserve
         const body = try codec.encodeRequest(&reason, &wire_bytes);
         try std.testing.expectEqual(body.len, try setup.pair.client.write(stream, body, true));
         try setup.pair.pump();
-        if (local_ban) try std.testing.expectEqual(t.ReputationDecision.ban, setup.server.peer_manager.reportPeer(&setup.server.control_protocol, peer, .fatal, setup.pair.now).?);
+        if (local_ban) try std.testing.expectEqual(t.ReputationDecision.ban, setup.server.peer_manager.reportPeer(peer, .fatal, setup.pair.now).?);
         try std.testing.expect(setup.pair.client.close(conn, 0));
         try setup.pair.pump();
         _ = try setup.turn(&setup.server, .{});
@@ -257,7 +257,7 @@ test "core local head and metadata updates preserve periodic status scheduling" 
         try std.testing.expectEqual(started, setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing);
     }
     setup.pair.advance(1);
-    setup.client.peer_manager.reStatusPeers(&setup.client.control_protocol, setup.pair.now);
+    setup.client.peer_manager.reStatusPeers(setup.pair.now);
     for (0..40) |_| try setup.step(1);
     try std.testing.expectEqual(started + 1, setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing);
     try std.testing.expect(setup.client.peer_manager.control.schedules[peer.index].status_due_ms > due);
@@ -276,12 +276,12 @@ test "core stale metadata finishes one refresh while periodic Status and later c
         const started = setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing;
         const statuses = setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing;
         row.status_due_ms = setup.pair.now.mono_ms + 2000;
-        setup.client.peer_manager.control.rekey(&setup.client.peer_manager.catalog, &setup.client.control_protocol, peer.index);
+        setup.client.peer_manager.control.rekey(&setup.client.peer_manager.catalog, peer.index);
         try std.testing.expectEqual(@as(usize, 1), setup.server.peer_manager.snapshots(&snapshots));
         const remote = snapshots[0].peer;
         remoteSequence(&setup.server, 11);
         setup.server.peer_manager.control.schedules[remote.index].ping_due_ms = setup.pair.now.mono_ms;
-        setup.server.peer_manager.control.rekey(&setup.server.peer_manager.catalog, &setup.server.control_protocol, remote.index);
+        setup.server.peer_manager.control.rekey(&setup.server.peer_manager.catalog, remote.index);
         for (0..80) |_| {
             try setup.step(0);
             if (setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing > started) break;
@@ -301,14 +301,14 @@ test "core stale metadata finishes one refresh while periodic Status and later c
         setup.pair.advance(rr.Protocol.metadata_v1.info().quota_period_ms);
         remoteSequence(&setup.server, 12);
         setup.client.peer_manager.control.schedules[peer.index].ping_due_ms = setup.pair.now.mono_ms;
-        setup.client.peer_manager.control.rekey(&setup.client.peer_manager.catalog, &setup.client.control_protocol, peer.index);
+        setup.client.peer_manager.control.rekey(&setup.client.peer_manager.catalog, peer.index);
         for (0..80) |_| try setup.step(0);
         try std.testing.expectEqual(started + 2, setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing);
         try std.testing.expectEqual(@as(u64, 12), setup.client.peer_manager.catalog.get(peer).?.metadata.?.seq_number);
         row.metadata_due_ms = setup.pair.now.mono_ms;
         row.ping_due_ms = setup.pair.now.mono_ms;
         row.status_due_ms = setup.pair.now.mono_ms - 1;
-        setup.client.peer_manager.control.rekey(&setup.client.peer_manager.catalog, &setup.client.control_protocol, peer.index);
+        setup.client.peer_manager.control.rekey(&setup.client.peer_manager.catalog, peer.index);
         _ = try setup.turn(&setup.client, .{});
         try std.testing.expectEqual(statuses + 2, setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing);
         try std.testing.expectEqual(started + 2, setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing);
@@ -328,7 +328,7 @@ test "core control accepts zero custody metadata without retaining previous cust
     try std.testing.expectEqual(@as(usize, fork.custody_groups), snapshots[0].custody_groups.?.count());
     const row = &setup.client.peer_manager.control.schedules[peer.index];
     row.metadata_due_ms = setup.pair.now.mono_ms;
-    setup.client.peer_manager.control.rekey(&setup.client.peer_manager.catalog, &setup.client.control_protocol, peer.index);
+    setup.client.peer_manager.control.rekey(&setup.client.peer_manager.catalog, peer.index);
     _ = try setup.turn(&setup.client, .{});
     var response: [25]u8 = @splat(0);
     response[0] = 1;
@@ -393,13 +393,13 @@ test "core native stalled fork transition only wakes for eligible work" {
     try std.testing.expect(active > 0);
     const service_due = setup.client.service.nextWakeup(setup.pair.now, .{ .application = 0, .control = 32 }).?;
     try std.testing.expect(service_due > setup.pair.now.mono_ms);
-    try std.testing.expect(setup.client.peer_manager.control.nextWakeup(&setup.client.peer_manager.catalog, &setup.client.control_protocol, setup.pair.now) == null);
+    try std.testing.expect(setup.client.peer_manager.control.nextWakeup(&setup.client.peer_manager.catalog, setup.pair.now) == null);
     const core_due = setup.client.nextWakeup(setup.pair.now, .{}).?;
     try std.testing.expect(core_due > setup.pair.now.mono_ms and core_due <= service_due);
     try @import("network_core_test_support.zig").updateLocal(&setup.server, &updated, setup.pair.now);
     for (0..80) |_| try setup.step(0);
     try std.testing.expect(setup.client.peer_manager.catalog.get(peer).?.relevant);
-    try std.testing.expect(setup.client.peer_manager.control.nextWakeup(&setup.client.peer_manager.catalog, &setup.client.control_protocol, setup.pair.now).? > setup.pair.now.mono_ms);
+    try std.testing.expect(setup.client.peer_manager.control.nextWakeup(&setup.client.peer_manager.catalog, setup.pair.now).? > setup.pair.now.mono_ms);
 }
 
 test "core native host fork transition cancels old maintenance without reviving closing peers" {
@@ -410,8 +410,8 @@ test "core native host fork transition cancels old maintenance without reviving 
     var snapshots: [4]t.Snapshot = undefined;
     _ = setup.client.peer_manager.snapshots(&snapshots);
     const before = snapshots[0];
-    setup.client.peer_manager.reStatusPeers(&setup.client.control_protocol, setup.pair.now);
-    setup.server.peer_manager.reStatusPeers(&setup.server.control_protocol, setup.pair.now);
+    setup.client.peer_manager.reStatusPeers(setup.pair.now);
+    setup.server.peer_manager.reStatusPeers(setup.pair.now);
     try setup.step(0);
     var old_operations: usize = 0;
     for (setup.client.control_protocol.operations) |op| if (op.request != null) {
@@ -438,7 +438,7 @@ test "core native host fork transition cancels old maintenance without reviving 
     try std.testing.expectEqualDeep(before.connection, confirmed.connection);
     try std.testing.expectEqual(@as(u64, 0), confirmed.status.?.earliest_available_slot.?);
     try std.testing.expectEqual(setup.server.localState().metadata.seq_number, confirmed.metadata.?.seq_number);
-    try std.testing.expect(setup.client.peer_manager.disconnect(&setup.client.control_protocol, before.peer, .host, setup.pair.now));
+    try std.testing.expect(setup.client.peer_manager.disconnect(before.peer, .host, setup.pair.now));
     const deadline = setup.client.peer_manager.control.schedules[before.peer.index].closing.?.deadline_ms;
     var next = updated;
     next.fork.digest = @splat(2);
@@ -654,7 +654,7 @@ test "core native application response borrows survive same turn hard close" {
             else => {},
         };
         if (sent and !received) {
-            _ = setup.client.peer_manager.disconnect(&setup.client.control_protocol, peer, .host, setup.pair.now);
+            _ = setup.client.peer_manager.disconnect(peer, .host, setup.pair.now);
             // The queued application response and hard-close cleanup share the next owner turn.
             setup.pair.advance(2_000);
             try setup.pair.pump();
@@ -775,7 +775,7 @@ test "core native inbound application per peer cap protects control from extra r
             setup.pair.now,
         );
     }
-    setup.client.peer_manager.reStatusPeers(&setup.client.control_protocol, setup.pair.now);
+    setup.client.peer_manager.reStatusPeers(setup.pair.now);
     for (0..40) |_| try setup.step(0);
     try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.peerCounts().relevant);
     var count: usize = 0;
@@ -850,7 +850,7 @@ test "core native immutable Status writer survives local update" {
     var snapshots: [4]t.Snapshot = undefined;
     _ = setup.client.peer_manager.snapshots(&snapshots);
     try std.testing.expectEqualDeep(original.status, snapshots[0].status.?);
-    setup.client.peer_manager.reStatusPeers(&setup.client.control_protocol, setup.pair.now);
+    setup.client.peer_manager.reStatusPeers(setup.pair.now);
     for (0..40) |_| try setup.step(0);
     _ = setup.client.peer_manager.snapshots(&snapshots);
     try std.testing.expectEqual(@as(u64, 80), snapshots[0].status.?.head_slot);
@@ -872,7 +872,7 @@ test "core control native Goodbye maps shutdown incompatibility and fault wire r
         for (0..50) |_| try setup.step(0);
         var snapshots: [4]t.Snapshot = undefined;
         _ = setup.client.peer_manager.snapshots(&snapshots);
-        try std.testing.expect(setup.client.peer_manager.disconnect(&setup.client.control_protocol, snapshots[0].peer, case.reason, setup.pair.now));
+        try std.testing.expect(setup.client.peer_manager.disconnect(snapshots[0].peer, case.reason, setup.pair.now));
         var received = false;
         for (0..40) |_| {
             try setup.pair.pump();
@@ -905,11 +905,11 @@ test "core control irrelevant metadata cannot create an ineligible wakeup" {
     row.metadata_due_ms = setup.pair.now.mono_ms;
     row.status_due_ms = setup.pair.now.mono_ms + 100;
     row.ping_due_ms = setup.pair.now.mono_ms + 200;
-    setup.client.peer_manager.control.rekey(&setup.client.peer_manager.catalog, &setup.client.control_protocol, peer.index);
+    setup.client.peer_manager.control.rekey(&setup.client.peer_manager.catalog, peer.index);
     const started = setup.client.peer_manager.control.counters.started;
     _ = try setup.turn(&setup.client, .{});
     try std.testing.expectEqual(started, setup.client.peer_manager.control.counters.started);
-    try std.testing.expectEqual(setup.pair.now.mono_ms + 100, setup.client.peer_manager.control.nextWakeup(&setup.client.peer_manager.catalog, &setup.client.control_protocol, setup.pair.now).?);
+    try std.testing.expectEqual(setup.pair.now.mono_ms + 100, setup.client.peer_manager.control.nextWakeup(&setup.client.peer_manager.catalog, setup.pair.now).?);
     setup.pair.advance(100);
     _ = try setup.turn(&setup.client, .{});
     try std.testing.expectEqual(started + 1, setup.client.peer_manager.control.counters.started);
@@ -924,15 +924,15 @@ test "core control does not schedule gossip admission alongside active request" 
     _ = setup.client.peer_manager.snapshots(&snapshots);
     const peer = snapshots[0].peer;
     const row = &setup.client.peer_manager.control.schedules[peer.index];
-    setup.client.peer_manager.reStatusPeers(&setup.client.control_protocol, setup.pair.now);
+    setup.client.peer_manager.reStatusPeers(setup.pair.now);
     _ = try setup.turn(&setup.client, .{});
     const started = setup.client.peer_manager.control.counters.started;
-    try std.testing.expect(setup.client.peer_manager.control.nextWakeup(&setup.client.peer_manager.catalog, &setup.client.control_protocol, setup.pair.now) == null);
+    try std.testing.expect(setup.client.peer_manager.control.nextWakeup(&setup.client.peer_manager.catalog, setup.pair.now) == null);
     _ = try setup.turn(&setup.client, .{});
     try std.testing.expectEqual(started, setup.client.peer_manager.control.counters.started);
-    try std.testing.expect(setup.client.peer_manager.disconnect(&setup.client.control_protocol, peer, .host, setup.pair.now));
+    try std.testing.expect(setup.client.peer_manager.disconnect(peer, .host, setup.pair.now));
     const deadline = row.closing.?.deadline_ms;
-    try std.testing.expectEqual(deadline, setup.client.peer_manager.control.nextWakeup(&setup.client.peer_manager.catalog, &setup.client.control_protocol, setup.pair.now).?);
+    try std.testing.expectEqual(deadline, setup.client.peer_manager.control.nextWakeup(&setup.client.peer_manager.catalog, setup.pair.now).?);
     setup.pair.advance(2000);
     _ = try setup.turn(&setup.client, .{});
     try std.testing.expect(setup.client.peer_manager.catalog.get(peer).?.connection == null);
@@ -952,7 +952,7 @@ test "core control cancelled canonical requests retain buffers until local retir
     var snapshots: [4]t.Snapshot = undefined;
     _ = setup.client.peer_manager.snapshots(&snapshots);
     const peer = snapshots[0].peer;
-    setup.client.peer_manager.reStatusPeers(&setup.client.control_protocol, setup.pair.now);
+    setup.client.peer_manager.reStatusPeers(setup.pair.now);
     _ = try setup.turn(&setup.client, .{});
     const op = &setup.client.control_protocol.operations[0];
     const request = op.request.?;
@@ -967,7 +967,7 @@ test "core control cancelled canonical requests retain buffers until local retir
     try std.testing.expectEqual(request, op.request.?);
     try std.testing.expectEqualSlices(u8, bytes[0..84], op.bytes[0..84]);
     // The held operation keeps the schedule off the heap, so nothing can start or defer.
-    try std.testing.expectEqual(@as(?u64, null), setup.client.peer_manager.control.nextWakeup(&setup.client.peer_manager.catalog, &setup.client.control_protocol, setup.pair.now));
+    try std.testing.expectEqual(@as(?u64, null), setup.client.peer_manager.control.nextWakeup(&setup.client.peer_manager.catalog, setup.pair.now));
     const started = setup.client.peer_manager.control.counters.started;
     const deferred = setup.client.peer_manager.control.counters.deferred;
     const grace = setup.client.peer_manager.control.schedules[peer.index].transition_until_ms;
@@ -993,7 +993,7 @@ test "control replacement retirement rekeys the current schedule without crediti
     const requests = &setup.client.control_protocol;
     try std.testing.expect(snapshots[0].relevant);
     try std.testing.expect(control.schedules[peer.index].evidence == .ready);
-    setup.client.peer_manager.reStatusPeers(&setup.client.control_protocol, setup.pair.now);
+    setup.client.peer_manager.reStatusPeers(setup.pair.now);
     _ = try setup.turn(&setup.client, .{});
     const op = for (requests.operations) |*op| {
         if (op.request != null) break op;
@@ -1100,7 +1100,7 @@ test "identify core schedules once after Status and completes without public out
     const schedule = &setup.client.peer_manager.control.schedules[before.peer.index];
     try std.testing.expectEqual(.done, schedule.identify_state);
     const opened = clientStreams(&setup, before.connection.?);
-    setup.client.peer_manager.reStatusPeers(&setup.client.control_protocol, setup.pair.now);
+    setup.client.peer_manager.reStatusPeers(setup.pair.now);
     for (0..100) |_| try setup.step(0);
     // The re-Status request is the only stream the client opens; another Identify would open one more.
     try std.testing.expectEqual(opened + 1, clientStreams(&setup, before.connection.?));
@@ -1127,7 +1127,7 @@ test "identify remote refusal completes generation without losing accepted Statu
     const schedule = &setup.client.peer_manager.control.schedules[snapshots[0].peer.index];
     try std.testing.expectEqual(.done, schedule.identify_state);
     const opened = clientStreams(&setup, snapshots[0].connection.?);
-    setup.client.peer_manager.reStatusPeers(&setup.client.control_protocol, setup.pair.now);
+    setup.client.peer_manager.reStatusPeers(setup.pair.now);
     for (0..60) |_| try setup.step(0);
     // The re-Status request is the only stream the client opens; another Identify would open one more.
     try std.testing.expectEqual(opened + 1, clientStreams(&setup, snapshots[0].connection.?));
@@ -1157,7 +1157,7 @@ test "identify replacement generation starts a fresh query and rejects stale com
     try std.testing.expect(!std.meta.eql(old.connection, selected.connection));
     try std.testing.expectEqualStrings("replacement", selected.identify.?.agent.?.slice());
     try std.testing.expectEqual(.done, setup.client.peer_manager.control.schedules[selected.peer.index].identify_state);
-    setup.client.peer_manager.control.identifyResults(&setup.client.peer_manager.catalog, &setup.client.control_protocol, &.{.{ .peer = old.peer, .conn = old.connection.?, .outcome = .{ .success = old.identify.? } }});
+    setup.client.peer_manager.control.identifyResults(&setup.client.peer_manager.catalog, &.{.{ .peer = old.peer, .conn = old.connection.?, .outcome = .{ .success = old.identify.? } }});
     try std.testing.expectEqualDeep(selected, setup.client.peer_manager.catalog.get(selected.peer).?);
 }
 
@@ -1178,7 +1178,7 @@ test "identify local refusal retries after one second without resetting accepted
     try std.testing.expect(!snapshots[0].relevant);
     try setup.client.service.identify.start(&setup.client.service.router, setup.pair.client, .{ .index = 3, .generation = 99 }, conn, setup.pair.now);
     try std.testing.expect(setup.client.peer_manager.catalog.updateStatus(peer, conn, &.{}, setup.pair.now.mono_ms));
-    setup.client.peer_manager.control.rekey(&setup.client.peer_manager.catalog, &setup.client.control_protocol, peer.index);
+    setup.client.peer_manager.control.rekey(&setup.client.peer_manager.catalog, peer.index);
     _ = try setup.turn(&setup.client, .{});
     const retry = setup.pair.now.mono_ms + 1000;
     const schedule = &setup.client.peer_manager.control.schedules[peer.index];
@@ -1205,17 +1205,17 @@ test "core native targeted Status only schedules the full current nonclosing own
     const selected = snapshots[0];
     const other_peer: t.PeerRef = .{ .index = 3, .generation = 55 };
     const other_conn: t.Handle = .{ .index = 3, .generation = 56 };
-    setup.client.peer_manager.control.connected(&setup.client.peer_manager.catalog, &setup.client.control_protocol, other_peer, other_conn, .inbound, setup.pair.now);
+    setup.client.peer_manager.control.connected(&setup.client.peer_manager.catalog, other_peer, other_conn, .inbound, setup.pair.now);
     const other_before = setup.client.peer_manager.control.schedules[3];
     const before = setup.client.peer_manager.control.schedules[selected.peer.index];
     var stale_peer = selected.peer;
     stale_peer.generation += 1;
     var stale_conn = selected.connection.?;
     stale_conn.generation += 1;
-    try std.testing.expect(!setup.client.peer_manager.reStatusPeer(&setup.client.control_protocol, stale_peer, selected.connection.?, setup.pair.now));
-    try std.testing.expect(!setup.client.peer_manager.reStatusPeer(&setup.client.control_protocol, selected.peer, stale_conn, setup.pair.now));
+    try std.testing.expect(!setup.client.peer_manager.reStatusPeer(stale_peer, selected.connection.?, setup.pair.now));
+    try std.testing.expect(!setup.client.peer_manager.reStatusPeer(selected.peer, stale_conn, setup.pair.now));
     try std.testing.expectEqualDeep(before, setup.client.peer_manager.control.schedules[selected.peer.index]);
-    try std.testing.expect(setup.client.peer_manager.reStatusPeer(&setup.client.control_protocol, selected.peer, selected.connection.?, setup.pair.now));
+    try std.testing.expect(setup.client.peer_manager.reStatusPeer(selected.peer, selected.connection.?, setup.pair.now));
     var expected = before;
     expected.status_due_ms = setup.pair.now.mono_ms;
     try std.testing.expectEqualDeep(expected, setup.client.peer_manager.control.schedules[selected.peer.index]);
@@ -1226,10 +1226,10 @@ test "core native targeted Status only schedules the full current nonclosing own
         if (op.request != null and op.protocol == .status_v1 and std.meta.eql(op.peer, selected.peer)) selected_started = true;
     }
     try std.testing.expect(selected_started);
-    try std.testing.expect(setup.client.peer_manager.disconnect(&setup.client.control_protocol, selected.peer, .host, setup.pair.now));
-    try std.testing.expect(!setup.client.peer_manager.reStatusPeer(&setup.client.control_protocol, selected.peer, selected.connection.?, setup.pair.now));
+    try std.testing.expect(setup.client.peer_manager.disconnect(selected.peer, .host, setup.pair.now));
+    try std.testing.expect(!setup.client.peer_manager.reStatusPeer(selected.peer, selected.connection.?, setup.pair.now));
     try std.testing.expect(setup.client.closePeer(&selected.identity, setup.pair.now));
-    try std.testing.expect(!setup.client.peer_manager.reStatusPeer(&setup.client.control_protocol, selected.peer, selected.connection.?, setup.pair.now));
+    try std.testing.expect(!setup.client.peer_manager.reStatusPeer(selected.peer, selected.connection.?, setup.pair.now));
 }
 
 test "core native application response borrows survive immediate public close" {
@@ -1468,7 +1468,7 @@ test "peer control retires each connection's schedule once across connection gen
     try std.testing.expect(schedule.peer != null);
     control.retire(peer, old);
     try std.testing.expect(schedule.peer == null);
-    control.connected(&setup.client.peer_manager.catalog, &setup.client.control_protocol, peer, replacement, .inbound, setup.pair.now);
+    control.connected(&setup.client.peer_manager.catalog, peer, replacement, .inbound, setup.pair.now);
     control.retire(peer, old);
     try std.testing.expectEqualDeep(replacement, schedule.conn);
     try std.testing.expect(schedule.peer != null);
@@ -1488,7 +1488,7 @@ test "core control response deadline survives continuous peer progress" {
     try std.testing.expectEqual(@as(usize, 1), setup.client.peer_manager.snapshots(&snapshots));
     const peer = snapshots[0].peer;
     const conn = snapshots[0].connection.?;
-    try std.testing.expect(setup.client.peer_manager.reStatusPeer(&setup.client.control_protocol, peer, conn, setup.pair.now));
+    try std.testing.expect(setup.client.peer_manager.reStatusPeer(peer, conn, setup.pair.now));
     _ = try setup.turn(&setup.client, .{});
     var request: ?rr.RequestHandle = null;
     for (setup.client.control_protocol.operations) |op| if (op.request != null and op.protocol == .status_v1) {
@@ -1577,7 +1577,7 @@ test "core control scores intrinsic decoding once and keeps custody schema limit
         const peer = snapshots[0].peer;
         const schedule = &setup.client.peer_manager.control.schedules[peer.index];
         schedule.metadata_due_ms = setup.pair.now.mono_ms;
-        setup.client.peer_manager.control.rekey(&setup.client.peer_manager.catalog, &setup.client.control_protocol, peer.index);
+        setup.client.peer_manager.control.rekey(&setup.client.peer_manager.catalog, peer.index);
         _ = try setup.turn(&setup.client, .{});
         var response: [25]u8 = @splat(0);
         if (intrinsic) {
@@ -1659,7 +1659,7 @@ test "core idle connected peers cost no control or dial visits" {
     const absent: t.PeerId = .{ .bytes = @splat(7) };
     try setup.client.peer_manager.connectUntil(&absent, &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9 } }}, setup.pair.now, setup.pair.now.mono_ms + 60_000);
     var intents: [4]DialIntent = undefined;
-    try std.testing.expectEqual(@as(usize, 1), setup.client.peer_manager.dialIntents(setup.client.service.gossipsub, &setup.client.control_protocol, setup.pair.client, setup.pair.now, &intents));
+    try std.testing.expectEqual(@as(usize, 1), setup.client.peer_manager.dialIntents(setup.client.service.gossipsub, setup.pair.client, setup.pair.now, &intents));
     try std.testing.expect(setup.client.peer_manager.dialFailed(intents[0].token, setup.pair.now));
     var control_visits: u64 = 0;
     var dial_visits: u64 = 0;
@@ -1677,7 +1677,7 @@ test "core idle connected peers cost no control or dial visits" {
             dial_due = due_now[@intFromEnum(Source.dial)];
         }
         try setup.step(0);
-        try std.testing.expectEqual(@as(usize, 0), setup.client.peer_manager.dialIntents(setup.client.service.gossipsub, &setup.client.control_protocol, setup.pair.client, setup.pair.now, &intents));
+        try std.testing.expectEqual(@as(usize, 0), setup.client.peer_manager.dialIntents(setup.client.service.gossipsub, setup.pair.client, setup.pair.now, &intents));
     }
     try std.testing.expectEqual(control_due, due_now[@intFromEnum(Source.control)]);
     try std.testing.expectEqual(dial_due, due_now[@intFromEnum(Source.dial)]);
@@ -1703,7 +1703,7 @@ test "core control starts a due ping or Status on the turn its deadline passes" 
         const row = &setup.client.peer_manager.control.schedules[peer.index];
         const due = if (protocol == .ping_v1) row.ping_due_ms else row.status_due_ms;
         try std.testing.expect(due > setup.pair.now.mono_ms);
-        try std.testing.expectEqual(due, setup.client.peer_manager.control.nextWakeup(&setup.client.peer_manager.catalog, &setup.client.control_protocol, setup.pair.now).?);
+        try std.testing.expectEqual(due, setup.client.peer_manager.control.nextWakeup(&setup.client.peer_manager.catalog, setup.pair.now).?);
         const counter = &setup.client.service.reqresp.protocol_counters[@intFromEnum(protocol)].outgoing;
         const started = counter.*;
         const visits = setup.client.peer_manager.control.visits;
@@ -1731,7 +1731,7 @@ test "core control retries a start refused for want of a request slot after the 
     for (0..80) |_| try setup.step(0);
     const peer = setup.client.peer_manager.catalog.find(&setup.server.peerId()).?;
     const row = &setup.client.peer_manager.control.schedules[peer.index];
-    try std.testing.expectEqual(row.ping_due_ms, setup.client.peer_manager.control.nextWakeup(&setup.client.peer_manager.catalog, &setup.client.control_protocol, setup.pair.now).?);
+    try std.testing.expectEqual(row.ping_due_ms, setup.client.peer_manager.control.nextWakeup(&setup.client.peer_manager.catalog, setup.pair.now).?);
     // Requests the control does not own hold both control slots.
     var sinks: [2][wire.status_size_max]u8 = undefined;
     const ping = [_]u8{0} ** 8;
@@ -1742,7 +1742,7 @@ test "core control retries a start refused for want of a request slot after the 
     _ = try setup.turn(&setup.client, .{});
     try std.testing.expectEqual(deferred + 1, setup.client.peer_manager.control.counters.deferred);
     try std.testing.expectEqual(setup.pair.now.mono_ms + opts.core.control.local_retry_ms, row.retry_ms);
-    try std.testing.expectEqual(row.retry_ms, setup.client.peer_manager.control.nextWakeup(&setup.client.peer_manager.catalog, &setup.client.control_protocol, setup.pair.now).?);
+    try std.testing.expectEqual(row.retry_ms, setup.client.peer_manager.control.nextWakeup(&setup.client.peer_manager.catalog, setup.pair.now).?);
 }
 
 test "local intent failing at ENR sequence exhaustion preserves control schedules request fork subscriptions and demand" {
@@ -1761,7 +1761,7 @@ test "local intent failing at ENR sequence exhaustion preserves control schedule
     try std.testing.expectEqual(@as(usize, 1), manager.snapshots(&snapshots));
     const peer = snapshots[0];
     try std.testing.expect(peer.relevant);
-    manager.reStatusPeers(&node.control_protocol, setup.pair.now);
+    manager.reStatusPeers(setup.pair.now);
     _ = try setup.turn(node, .{});
     const probe = for (node.control_protocol.operations) |*op| {
         if (op.request != null) break op;
