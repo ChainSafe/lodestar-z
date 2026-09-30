@@ -10,8 +10,7 @@ if (isMainThread) {
   phase("worker runtime");
   const worker = new Worker(new URL(import.meta.url));
   try {
-    const [{port, occupied}] = await once(worker, "message");
-    assert(occupied > 0);
+    const [{port}] = await once(worker, "message");
     phase("worker termination");
     await worker.terminate();
     phase("port rebind");
@@ -44,10 +43,8 @@ if (isMainThread) {
     pending.push(runtime.getIdentity());
   }
   void Promise.allSettled(pending);
-  const diagnostics = runtime.diagnostics();
   parentPort.postMessage({
     port: runtime.identity.localEndpoint.port,
-    occupied: diagnostics.publications.occupied + diagnostics.operationOccupied,
   });
   setInterval(() => {}, 1000);
 }

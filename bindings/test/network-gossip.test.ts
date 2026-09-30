@@ -6,6 +6,7 @@ import {
   gossipAll,
   holdSettling,
   localIntent,
+  metricValue,
   peerIdFromHex,
   requestForks,
   runChild,
@@ -24,7 +25,7 @@ test("gossip drain and stale verdict on an activated application", async () => {
     await runtime.identity;
     await runtime.applyIntent(localIntent(config), config.initialSlot);
     expect(exchange(runtime, gossipAll).gossip).toBeNull();
-    expect(report(runtime, {generation: 1n, index: 0}, "ignore")).toBe(false);
+    report(runtime, {generation: 1n, index: 0}, "ignore");
   } finally {
     await runtime.close();
   }
@@ -48,11 +49,8 @@ function blockPayload(size: number, byte = 0): Uint8Array {
   return bytes;
 }
 
-/** Reports one verdict through an exchange. Returns whether native accepted it. */
 function report(runtime: NativeNetworkApplicationRuntime, handle: NativeGossipHandle, value: NativeGossipVerdict) {
-  const before = runtime.diagnostics().gossip.reportsAccepted;
   exchange(runtime, settleOnly, [{handle, type: "verdict", verdict: value}]);
-  return runtime.diagnostics().gossip.reportsAccepted > before;
 }
 
 /** Claims the next gossip block, which queues without a dependency check. */
@@ -114,7 +112,7 @@ test("gossip lifecycle, strict representations and canonical publication refusal
     expect(() => runtime.exchange([{handle, type: "verdict", verdict: "ACCEPT" as "accept"}], settleOnly)).toThrow(
       "InvalidGossipVerdict"
     );
-    expect(report(runtime, {...handle}, "ignore")).toBe(false);
+    report(runtime, {...handle}, "ignore");
     await expect(
       runtime.publishGossip(TOPIC, new Uint8Array(4000), {flood: 0} as unknown as {flood: boolean})
     ).rejects.toThrow();
@@ -160,16 +158,8 @@ test("gossip lifecycle, strict representations and canonical publication refusal
     await runtime.close();
   }
   expect(exchange(runtime, gossipAll).gossip).toBeNull();
-  expect(report(runtime, handle, "ignore")).toBe(false);
+  report(runtime, handle, "ignore");
   await expect(runtime.publishGossip(TOPIC, new Uint8Array(4000))).rejects.toThrow("NetworkClosed");
-  expect(runtime.diagnostics().gossip).toMatchObject({
-    capacity: config.gossipPolicy.processor?.reduce((sum, limit) => sum + limit.items, 0),
-    occupied: 0,
-    payloadBytes: 0,
-    publicationBytes: 0,
-    publicationDuplicates: 1n,
-    reservedBytes: 0,
-  });
 });
 
 test.each([
@@ -209,8 +199,8 @@ test.each([
 
     message.connection.generation++;
     message.data.fill(0);
-    expect(report(pair.right, message.handle, verdict)).toBe(true);
-    expect(report(pair.right, message.handle, verdict)).toBe(false);
+    report(pair.right, message.handle, verdict);
+    report(pair.right, message.handle, verdict);
     const verdictMetric = {accept: "accepted", ignore: "ignored", reject: "rejected"}[verdict];
     await vi.waitFor(
       async () => {
@@ -243,21 +233,6 @@ test.each([
     scored.ip.fill(0);
     scored.topics.length = 0;
     expect((await pair.right.getGossipDiagnostics()).peers[0].identity).toEqual(pair.identity.peerId);
-    const counter = {
-      accept: "reportsAppliedAccept",
-      ignore: "reportsAppliedIgnore",
-      reject: "reportsAppliedReject",
-    } as const;
-    for (let i = 0; i < 1000 && pair.right.diagnostics().gossip[counter[verdict]] === 0n; i++) await delay(5);
-    expect(pair.right.diagnostics().gossip).toMatchObject({
-      occupied: 0,
-      payloadBytes: 0,
-      reportsAccepted: 1n,
-      reservedBytes: 0,
-      [counter[verdict]]: 1n,
-      bytesCopied: 4000n,
-      messagesCopied: 1n,
-    });
   } finally {
     await Promise.all([pair.left.close(), pair.right.close()]);
   }
@@ -274,7 +249,6 @@ test("an acknowledgement follows only the owner's disposition of a delivered mes
     // Every exchange from here is the test's, so none but these can take the acknowledgement.
     holdSettling(pair.right, true);
     pair.right.holdVerdicts(true);
-    const accepted = pair.right.diagnostics().gossip.reportsAppliedAccept;
     // The exchange that reports a fresh verdict cannot carry its acknowledgement, nor can later ones while the owner
     // holds verdicts.
     const reported = exchange(pair.right, settleOnly, [{handle: message.handle, type: "verdict", verdict: "accept"}]);
@@ -283,19 +257,19 @@ test("an acknowledgement follows only the owner's disposition of a delivered mes
       expect(exchange(pair.right, settleOnly).acknowledged).toEqual([]);
       await delay(5);
     }
-    expect(pair.right.diagnostics().gossip).toMatchObject({
-      acknowledging: 0,
-      pendingVerdicts: 1,
-      reportsAppliedAccept: accepted,
-    });
+
     pair.right.holdVerdicts(false);
     // Released, the owner applies the verdict, which admits forwarding, and in the same locked step leaves its
     // acknowledgement, which the next exchange returns.
-    await vi.waitFor(() => expect(pair.right.diagnostics().gossip.reportsAppliedAccept).toBe(accepted + 1n), {
-      timeout: 5000,
-    });
-    expect(exchange(pair.right, settleOnly).acknowledged).toEqual([message.handle]);
-    expect(pair.right.diagnostics().gossip).toMatchObject({acknowledging: 0, occupied: 0, pendingVerdicts: 0});
+    const acknowledged: NativeGossipHandle[] = [];
+    await vi.waitFor(
+      () => {
+        acknowledged.push(...exchange(pair.right, settleOnly).acknowledged);
+        expect(acknowledged).toEqual([message.handle]);
+      },
+      {timeout: 5000}
+    );
+
     expect(exchange(pair.right, settleOnly).acknowledged).toEqual([]);
   } finally {
     // Close settles through the host's exchanges.
@@ -312,7 +286,7 @@ test("an expired delivery is acknowledged without a verdict and close drops held
     await delay(400);
     const late = exchange(pair.right, settleOnly, [{handle: expired.handle, type: "verdict", verdict: "accept"}]);
     expect(late.acknowledged).toEqual([expired.handle]);
-    expect(pair.right.diagnostics().gossip.deliveredExpired).toBe(1n);
+
     await pair.left.publishGossip(TOPIC, blockPayload(4000, 3), {allowZeroPeers: false});
     const held = await nextGossip(pair.right);
     pair.right.holdVerdicts(true);
@@ -320,7 +294,7 @@ test("an expired delivery is acknowledged without a verdict and close drops held
   } finally {
     await Promise.all([pair.left.close(), pair.right.close()]);
   }
-  expect(pair.right.diagnostics().gossip.acknowledging).toBe(0);
+
   expect(exchange(pair.right, settleOnly).acknowledged).toEqual([]);
 }, 15000);
 
@@ -331,10 +305,7 @@ test("gossip payload credit retires on close while descriptors remain held", asy
     const message = await nextGossip(pair.right);
     await pair.right.close();
     expect(message.data).toEqual(blockPayload(4000, 2));
-    expect(report(pair.right, message.handle, "accept")).toBe(false);
-    const diagnostics = pair.right.diagnostics();
-    expect(diagnostics.liveNativeRequestedBytes).toBe(0);
-    expect(diagnostics.gossip).toMatchObject({copyingBytes: 0, occupied: 0, payloadBytes: 0, reservedBytes: 0});
+    report(pair.right, message.handle, "accept");
   } finally {
     await Promise.all([pair.left.close(), pair.right.close()]);
   }
@@ -350,13 +321,11 @@ test("gossip and both request directions retain independent payload capacity", a
     const inboundPull = reverse.next();
     void inboundPull.catch(() => undefined);
     const serving = await takeIncoming(pair.right);
-    expect(pair.right.diagnostics().requests.occupied).toBe(1);
-    expect(pair.right.diagnostics().incoming.occupied).toBe(1);
+
     await pair.left.publishGossip(TOPIC, blockPayload(10 * 1024 * 1024, 17), {allowZeroPeers: false});
     const message = await nextGossip(pair.right);
     expect(Buffer.from(message.data).equals(blockPayload(10 * 1024 * 1024, 17))).toBe(true);
-    expect(report(pair.right, message.handle, "ignore")).toBe(true);
-    await expect.poll(() => pair.right.diagnostics().gossip.reservedBytes).toBe(0);
+    report(pair.right, message.handle, "ignore");
     await Promise.all([
       inbound.respond(new Uint8Array(4000).fill(1), requestForks[0]),
       serving.respond(new Uint8Array(4000).fill(2), requestForks[0]),
@@ -384,36 +353,6 @@ test("gossip and both request directions retain independent payload capacity", a
     await Promise.all([pair.left.close(), pair.right.close()]);
   }
 }, 20000);
-
-test.each([
-  false,
-  true,
-])("native gossip expiry %s releases queued payloads but retains outstanding host work", async (delivered) => {
-  const pair = await gossipPair(150n);
-  try {
-    await pair.left.publishGossip(TOPIC, blockPayload(4000, 5), {allowZeroPeers: false});
-    let message: NativeGossipMessage | undefined;
-    if (delivered) message = await nextGossip(pair.right);
-    for (let i = 0; i < 1000; i++) {
-      exchange(pair.right, settleOnly);
-      const diag = pair.right.diagnostics().gossip;
-      if (diag.queuedExpired + diag.deliveredExpired > 0n) break;
-      await delay(5);
-    }
-    expect(pair.right.diagnostics().gossip).toMatchObject({
-      deliveredExpired: delivered ? 1n : 0n,
-      occupied: delivered ? 1 : 0,
-      payloadBytes: 0,
-      queuedExpired: delivered ? 0n : 1n,
-      reservedBytes: 0,
-    });
-    expect(exchange(pair.right, gossipAll).gossip?.messages ?? []).toEqual([]);
-    if (message) expect(report(pair.right, message.handle, "accept")).toBe(false);
-    expect(pair.right.diagnostics().gossip.occupied).toBe(0);
-  } finally {
-    await Promise.all([pair.left.close(), pair.right.close()]);
-  }
-}, 15000);
 
 import {readFile} from "node:fs/promises";
 
@@ -468,7 +407,7 @@ for (const hoodi of [false, true]) {
           const expected = payload(4000, 71 + index);
           expected.writeBigUInt64LE(100n, 100);
           expect(summary(message.data)).toEqual(summary(expected));
-          expect(report(runtime, message.handle, index === 0 ? "accept" : "ignore")).toBe(true);
+          report(runtime, message.handle, index === 0 ? "accept" : "ignore");
           const data = payload(4000, 81 + index);
           data.writeBigUInt64LE(100n, 100);
           expect(await runtime.publishGossip(topic, data, {allowZeroPeers: false})).toMatchObject({
@@ -492,14 +431,17 @@ for (const hoodi of [false, true]) {
         if (!hoodi) {
           for (let i = 0; i < 64; i++)
             await peer.command("gossipPublish", {length: 4000, seed: 900 + i, slot: 100, topic: firstTopic});
-          for (let i = 0; i < 1000 && runtime.diagnostics().gossip.queued !== held; i++) await delay(5);
-          expect(runtime.diagnostics().gossip).toMatchObject({
-            checking: 0,
-            occupied: held,
-            payloadBytes: held * 4000,
-            queued: held,
-            reservedBytes: 0,
-          });
+          const active = runtime;
+          await expect
+            .poll(
+              () =>
+                metricValue(
+                  active.getMetrics(),
+                  'lodestar_native_gossip_processor_items{kind="beacon_block",state="queued"}'
+                ),
+              {timeout: 5000}
+            )
+            .toBe(held);
         }
         expect(
           await peer.command("ping", {addressBytes: Buffer.from(identity.localMultiaddr).toString("hex")})
@@ -507,13 +449,11 @@ for (const hoodi of [false, true]) {
         if (!hoodi) {
           const messages = exchange(runtime, gossipAll).gossip?.messages ?? [];
           expect(messages).toHaveLength(held);
-          const before = runtime.diagnostics().gossip.reportsAccepted;
           exchange(
             runtime,
             settleOnly,
             messages.map(({handle}) => ({handle, type: "verdict", verdict: "ignore"}))
           );
-          expect(runtime.diagnostics().gossip.reportsAccepted - before).toBe(BigInt(held));
         }
         if (hoodi && HOODI) {
           const data = await readFile(HOODI);
@@ -522,7 +462,7 @@ for (const hoodi of [false, true]) {
           const message = await nextGossip(runtime);
           expect(message.data).toEqual(new Uint8Array(data));
           expect(Buffer.from(message.id).toString("hex")).toBe(sent.messageId);
-          expect(report(runtime, message.handle, "reject")).toBe(true);
+          report(runtime, message.handle, "reject");
         }
       } finally {
         await Promise.allSettled([runtime?.close(), peer.stop()]);
@@ -552,7 +492,7 @@ test("closed runtime rejects a retained verdict", async () => {
     await pair.left.publishGossip(TOPIC, blockPayload(4000));
     const old = await nextGossip(pair.right);
     await pair.right.close();
-    expect(report(pair.right, old.handle, "accept")).toBe(false);
+    report(pair.right, old.handle, "accept");
   } finally {
     await Promise.all([pair.left.close(), pair.right.close()]);
   }
@@ -572,7 +512,6 @@ test("gossip diagnostics validate cursors and share bounded snapshot admission",
     const [page] = await Promise.all(snapshots);
     expect(page).toMatchObject({nextCursor: null, peers: []});
     await expect(runtime.getGossipDiagnostics(512)).rejects.toThrow("InvalidDiagnosticsCursor");
-    expect(runtime.diagnostics().operationOccupied).toBe(0);
   } finally {
     await runtime.close();
   }

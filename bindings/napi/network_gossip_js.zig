@@ -65,6 +65,3 @@ pub fn publishError(env: napi.Env, err: anyerror) !Value {
     if (reason) |text| try object.setNamedProperty("reason", try env.createStringUtf8(text));
     return object;
 }
-pub fn diagnostics(env: napi.Env, value: *const g.Diagnostics) !Value {
-    return @import("network_js.zig").scalarFields(env, value);
-}

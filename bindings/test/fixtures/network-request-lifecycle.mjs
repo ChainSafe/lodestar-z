@@ -64,16 +64,16 @@ if (mode === "pull-gc") {
     global.gc();
   }
   assert.notEqual(weak.deref(), undefined);
-  assert.equal(runtime.diagnostics().requests.pendingPulls, 1);
+
   await incoming.respond(new Uint8Array(4000).fill(9), requestForks[0]);
   assert.deepEqual((await pulled).value.data, new Uint8Array(4000).fill(9));
   for (let i = 0; i < 100; i++) {
     await delay(10);
     global.gc();
-    if (!weak.deref() && runtime.diagnostics().requests.occupied === 0) break;
+    if (!weak.deref()) break;
   }
   assert.equal(weak.deref(), undefined);
-  assert.equal(runtime.diagnostics().requests.occupied, 0);
+
   await incoming.closed;
   await Promise.all([runtime.close(), server.close()]);
   console.log("request-lifecycle", mode, "ok");
@@ -94,7 +94,7 @@ if (["closed-facade-gc", "closed-facade-gc-early", "closed-terminal"].includes(m
   if (mode !== "closed-facade-gc-early") await delay(500);
   if (mode === "closed-terminal") {
     await assert.rejects(stream.next(), {code: "NetworkClosed"});
-    assert.equal(runtime.diagnostics().requests.occupied, 0);
+
   }
   const weak = new WeakRef(runtime);
   runtime = null;
@@ -142,20 +142,18 @@ try {
     responseTimeoutMs: 60000,
   });
   if (mode === "iterator-gc") {
+    const incoming = holding.native ? await takeIncoming(holding.native) : undefined;
     const weak = new WeakRef(stream);
     stream = null;
     for (let i = 0; i < 100; i++) {
       await delay(10);
       global.gc();
-      if (!weak.deref() && runtime.diagnostics().requests.occupied === 0) break;
+      if (!weak.deref()) break;
     }
     assert.equal(weak.deref(), undefined);
-    assert.equal(runtime.diagnostics().requests.occupied, 0);
-    assert.equal(runtime.diagnostics().requests.reservedBytes, 0);
-    // The retirement cancels the stream at the peer, which retires its queued request.
-    for (let i = 0; i < 100 && holding.native && (await holding.native.diagnostics()).incoming.occupied > 0; i++)
-      await delay(10);
-    if (holding.native) assert.equal((await holding.native.diagnostics()).incoming.occupied, 0);
+
+
+    await incoming?.closed;
   } else {
     // Promises held while the facade is collected without close still reach their terminals, closed last.
     const closed = runtime.closed;

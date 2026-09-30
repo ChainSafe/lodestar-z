@@ -226,9 +226,6 @@ pub fn completion(env: napi.Env, delivered: incoming.Completion) !Value {
     }
     return object;
 }
-pub fn diagnostics(env: napi.Env, value: *const incoming.Diagnostics) !Value {
-    return @import("network_js.zig").scalarFields(env, value);
-}
 
 fn rejectInput(env: napi.Env, reason: incoming.Rejection) anyerror {
     const value = ackError(env, .{ .rejected = reason }) catch |err| return err;

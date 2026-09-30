@@ -1,6 +1,13 @@
 import {expect, test, vi} from "vitest";
 import {type NativeIncomingRequest, initializeNativeNetworkRuntime} from "../src/network-runtime.js";
-import {applicationConfig, capacity, localIntent, settleOnly, unreachableConnect} from "./utils/network.js";
+import {
+  applicationConfig,
+  capacity,
+  localIntent,
+  metricValue,
+  settleOnly,
+  unreachableConnect,
+} from "./utils/network.js";
 import {BLOCKS} from "./utils/network-incoming.js";
 import {startPeer} from "./utils/network-peer.js";
 
@@ -58,7 +65,11 @@ test("a serving start the binding cannot wrap is cancelled alone while the drain
           () => "cancelled"
         )
     );
-    await expect.poll(() => right.diagnostics().incoming.queued).toBe(2);
+    await expect
+      .poll(() => metricValue(right.getMetrics(), 'lodestar_native_reqresp_inbound_occupied{phase="waiting_host"}'), {
+        timeout: 5000,
+      })
+      .toBe(2);
     facades.failures = 1;
     serving = 8;
     schedule();
@@ -70,7 +81,6 @@ test("a serving start the binding cannot wrap is cancelled alone while the drain
     await served[0].finish();
     expect((await Promise.all(outcomes)).sort()).toEqual(["cancelled", "served"]);
     expect(await right.close()).toEqual({reason: "requested"});
-    expect(right.diagnostics().incoming.occupied).toBe(0);
   } finally {
     facades.failures = 0;
     await Promise.allSettled([left.close(), right.close()]);

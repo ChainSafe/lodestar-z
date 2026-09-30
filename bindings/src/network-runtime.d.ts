@@ -1,5 +1,5 @@
 /**
- * The low-level runtime the binding pump drains through `exchange`, with its diagnostics and controls. Private: the
+ * The low-level runtime the binding pump drains through `exchange`, and its controls. Private: the
  * package exports only `createNativeNetwork`, and binding ownership tests import this module directly.
  */
 import type {
@@ -158,7 +158,7 @@ export type NativeCommandCompletion = {
 
 /**
  * A fatal site JavaScript raises: `generated_batch`, an exchange refused a batch or demand the pump generated;
- * `failed_turns`, a third consecutive turn failed; `completion_contract`, a completion matched no record the
+ * `failed_turns`, a third consecutive exchange could not run; `completion_contract`, a completion matched no record the
  * completion owner installed, or native closed with promised completions missing.
  */
 export type NativeEscalation = "generated_batch" | "failed_turns" | "completion_contract";
@@ -185,7 +185,6 @@ export interface NativeNetworkApplicationRuntime {
   readonly identity: NativeIdentity;
   readonly limits: NativeResolvedLimits;
   readonly state: NativeRuntimeState;
-  diagnostics(): NativeRuntimeDiagnostics;
   applyIntent(intent: NativeLocalIntent, slot: bigint): Promise<NativeIntentResult>;
   /** Updates Status for the active fork; preserves clock, subscriptions, Metadata, ENR and demand. */
   updateStatus(status: NetworkStatusUpdate): Promise<void>;
@@ -311,46 +310,6 @@ export function runtimeOf(network: NativeNetwork): NativeNetworkApplicationRunti
 
 export type NativeRuntimeState = "running" | "stopping" | "closed" | "failed";
 
-export interface NativeRuntimeDiagnostics {
-  payloadBudget: {
-    limitBytes: number;
-    usedBytes: number;
-    incomingMinimumBytes: number;
-    outgoingMinimumBytes: number;
-    publicationMinimumBytes: number;
-  };
-  publications: NativePublicationDiagnostics;
-  requests: NativeRequestDiagnostics;
-  incoming: NativeIncomingDiagnostics;
-  gossip: NativeGossipDiagnostics;
-  state: NativeRuntimeState;
-  terminalErrorCode: string | null;
-  currentSlot: bigint;
-  ownerTurns: bigint;
-  operationalFailures: bigint;
-  operationOccupied: number;
-  peerReportsIgnored: bigint;
-  connectOccupied: number;
-  preparingPins: number;
-  copyingPins: number;
-  peerLaneOccupied: number;
-  ownerSequence: bigint;
-  liveNativeRequestedBytes: number;
-  liveBridgeRequestedBytes: number;
-  typedStoreBytes: number;
-  metricsExportBytes: number;
-  peerLaneBytes: number;
-  ownerShellBytes: number;
-  nativeAllocationCount: number;
-  /** Configured QUIC flow-control ceilings, separate from the native allocation ledger. */
-  quicReceiveWindowBytes: bigint;
-  quicConnectionWindowBytes: bigint;
-  quicStreamWindowBytes: bigint;
-  resolvedCapacities: NativeResolvedCapacities;
-  nativeRequestedBytes: number;
-  bridgeRequestedBytes: number;
-}
-
 /** A failed close names the owner's first terminal error, also when it followed a requested close. */
 export type NativeRuntimeCloseResult = {reason: "requested"} | {reason: "failed"; error: Error & {code: string}};
 
@@ -360,119 +319,4 @@ export interface NativeLogBatch {
   dropped: bigint;
   suppressed: bigint;
   truncated: bigint;
-}
-
-export interface NativePublicationDiagnostics {
-  capacity: number;
-  urgentReserved: number;
-  occupied: number;
-  highWater: number;
-  refusals: bigint;
-  byteRefusals: bigint;
-  reservedBytes: number;
-  reservedBytesHighWater: number;
-  payloadBytes: number;
-  copies: bigint;
-  bytesCopied: bigint;
-  queued: bigint;
-  pressured: bigint;
-  selected: bigint;
-  unavailable: bigint;
-  duplicates: bigint;
-  latencyCount: bigint;
-  /** Upper histogram bucket bounds, in milliseconds. */
-  latencyMsP50: bigint;
-  latencyMsP99: bigint;
-}
-
-export interface NativeResolvedCapacities {
-  peerCapacity: number;
-  targetPeers: number;
-  maxPeers: number;
-  minOutbound: number;
-  outboundReserve: number;
-  connectionCapacity: number;
-  handshakingCapacity: number;
-  dialingCapacity: number;
-  requestPeerCapacity: number;
-  admissionIdentityCapacity: number;
-  gossipConnectedCapacity: number;
-  gossipRetainedCapacity: number;
-  dialEngineCapacity: number;
-}
-
-export interface NativeRequestDiagnostics {
-  capacity: number;
-  occupied: number;
-  highWater: number;
-  pendingPulls: number;
-  terminalCells: number;
-  reservedBytes: number;
-  reservedBytesHighWater: number;
-  inputBytes: number;
-  sinkBytes: number;
-  copyingBytes: number;
-  chunksCopied: bigint;
-  bytesCopied: bigint;
-  requestFull: bigint;
-}
-
-export interface NativeIncomingDiagnostics {
-  retiring: number;
-  pendingPermissions: number;
-  capacity: number;
-  occupied: number;
-  queued: number;
-  highWater: number;
-  pendingResponses: number;
-  closedPromises: number;
-  reservedBytes: number;
-  reservedBytesHighWater: number;
-  requestBytes: number;
-  responseBytes: number;
-  copyingBytes: number;
-  requestsTaken: bigint;
-  responseBytesCopied: bigint;
-  chunksWritten: bigint;
-  bytesWritten: bigint;
-  capacityRefusals: bigint;
-  byteRefusals: bigint;
-}
-
-export interface NativeGossipDiagnostics {
-  waiting: number;
-  checking: number;
-  executing: number;
-  executingBytes: number;
-  copying: number;
-  expiredExecuting: number;
-  /** Milliseconds past the earliest verdict deadline among delivered validations awaiting host completion; zero when none. */
-  oldestExpiredExecutionAgeMs: bigint;
-  slotRefusals: bigint;
-  capacity: number;
-  occupied: number;
-  highWater: number;
-  queued: number;
-  pendingVerdicts: number;
-  /** Owner dispositions of delivered messages awaiting an exchange's acknowledgement. */
-  acknowledging: number;
-  reservedBytes: number;
-  reservedBytesHighWater: number;
-  payloadBytes: number;
-  copyingBytes: number;
-  publicationBytes: number;
-  messagesCopied: bigint;
-  bytesCopied: bigint;
-  capacityRefusals: bigint;
-  byteRefusals: bigint;
-  queuedExpired: bigint;
-  deliveredExpired: bigint;
-  reportsAccepted: bigint;
-  reportsAppliedAccept: bigint;
-  reportsAppliedReject: bigint;
-  reportsAppliedIgnore: bigint;
-  publicationCopies: bigint;
-  publicationQueued: bigint;
-  publicationSelected: bigint;
-  publicationDuplicates: bigint;
 }

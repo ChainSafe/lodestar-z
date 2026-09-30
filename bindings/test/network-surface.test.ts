@@ -16,15 +16,14 @@ test("the package's network entry exports only createNativeNetwork, whose facade
   // Only the facade factory is a value export.
   const exported: keyof typeof network = "createNativeNetwork";
   const only: [keyof typeof network] extends ["createNativeNetwork"] ? true : false = true;
-  // The exchange, escalation, ownership controls, omnibus diagnostics and log polling stay private.
-  const hidden: [
-    Absent<"exchange">,
-    Absent<"fail">,
-    Absent<"holdVerdicts">,
-    Absent<"diagnostics">,
-    Absent<"drainLogs">,
-  ] = ["exchange", "fail", "holdVerdicts", "diagnostics", "drainLogs"];
+  // The exchange, escalation, ownership controls and log polling stay private.
+  const hidden: [Absent<"exchange">, Absent<"fail">, Absent<"holdVerdicts">, Absent<"drainLogs">] = [
+    "exchange",
+    "fail",
+    "holdVerdicts",
+    "drainLogs",
+  ];
   const host: (keyof NativeHost)[] = ["capacity", "validate", "checkDependencies", "serve", "peers", "failed", "logs"];
   const unexported: [Exchange?, Initialize?] = [];
-  expect([exported, only, hidden.length, host.length, unexported]).toEqual(["createNativeNetwork", true, 5, 7, []]);
+  expect([exported, only, hidden.length, host.length, unexported]).toEqual(["createNativeNetwork", true, 4, 7, []]);
 });

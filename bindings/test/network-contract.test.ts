@@ -84,11 +84,6 @@ async function closeRace(random: () => number): Promise<void> {
   for (const outcome of settlements.outcomes) expect(outcomes).toContain(outcome);
   expect(await unsettled).toEqual([]);
   await Promise.all(streams.map((started) => started.return?.()));
-  expect(runtime.diagnostics()).toMatchObject({
-    operationOccupied: 0,
-    publications: {occupied: 0, reservedBytes: 0},
-    requests: {occupied: 0, pendingPulls: 0, reservedBytes: 0},
-  });
 }
 
 test("every publish, command and request settles exactly once when it races close, and closed settles last", async () => {
@@ -114,15 +109,15 @@ test("a cancelled request retires on both ends while its peer holds it", async (
     const stream = runtime.request(peer.identity.peerId, BLOCKS, new Uint8Array(32), {responseTimeoutMs: 60000});
     const pending = stream.next();
     void pending.catch(() => undefined);
-    await expect.poll(async () => (await peer.diagnostics()).incoming.queued, {timeout: 5000}).toBe(1);
-    expect(runtime.diagnostics().requests).toMatchObject({occupied: 1, pendingPulls: 1});
+    const incoming = await takeIncoming(peer);
+
     const retired = stream.return?.();
     expect(stream.return?.()).toBe(retired);
     expect(await retired).toEqual({done: true, value: undefined});
     await expect(pending).rejects.toMatchObject({code: "NetworkRequestFailed", reason: "cancelled"});
     expect(await stream.next()).toEqual({done: true, value: undefined});
-    expect(runtime.diagnostics().requests).toMatchObject({occupied: 0, pendingPulls: 0, reservedBytes: 0});
-    await expect.poll(async () => (await peer.diagnostics()).incoming.occupied, {timeout: 5000}).toBe(0);
+
+    await incoming.closed;
   } finally {
     await Promise.allSettled([runtime.close(), peer.stop()]);
   }
@@ -140,7 +135,7 @@ test("a rejected response acknowledgement leaves the stream serving for later va
       code: "NetworkIncomingRejected",
       reason: "unknown_fork",
     });
-    expect(pair.right.diagnostics().incoming).toMatchObject({occupied: 1, pendingResponses: 0, responseBytes: 0});
+
     await incoming.respond(new Uint8Array(4000).fill(5), requestForks[0]);
     expect(await first).toMatchObject({done: false, value: {data: new Uint8Array(4000).fill(5)}});
     await expect(incoming.respond(new Uint8Array(1), requestForks[0])).rejects.toMatchObject({
@@ -152,7 +147,6 @@ test("a rejected response acknowledgement leaves the stream serving for later va
     expect(await second).toMatchObject({done: false, value: {data: new Uint8Array(4000).fill(6)}});
     await incoming.finish();
     expect(await stream.next()).toEqual({done: true, value: undefined});
-    expect(pair.right.diagnostics().incoming).toMatchObject({chunksWritten: 2n, responseBytes: 0});
   } finally {
     await Promise.all([pair.left.close(), pair.right.close()]);
   }
@@ -197,7 +191,6 @@ test("a terminal while an acknowledgement is pending delivers the acknowledgemen
     expect(["ack", "ack:NetworkIncomingFailed"]).toContain(cancelled.order[0]);
     expect(cancelled.order[1]).toBe("closed");
     await cancelled.first.catch(() => undefined);
-    await expect.poll(() => pair.right.diagnostics().incoming.occupied).toBe(0);
   } finally {
     await Promise.all([pair.left.close(), pair.right.close()]);
   }

@@ -47,9 +47,6 @@ export class NativeRuntime {
   get state() {
     return this.#native.getState();
   }
-  diagnostics() {
-    return this.#native.diagnostics();
-  }
   getMetrics() {
     return this.#native.getMetrics();
   }

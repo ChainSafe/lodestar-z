@@ -14,6 +14,7 @@ import {
   checksOnly,
   exchange,
   localIntent,
+  metricValue,
   settleOnly,
   startRuntime,
   subscriptions,
@@ -75,7 +76,6 @@ test("exchange actions validate roots, handles and verdicts, and stale handles a
     ] as const)
       expect(() => runtime.exchange([classify(handle, true), invalid as NativeAction], settleOnly)).toThrow(code);
     expect(exchange(runtime, settleOnly, [classify(handle, true), verdict(handle, "ignore")]).more).toBe(false);
-    expect(runtime.diagnostics().gossip).toMatchObject({checking: 0, reportsAccepted: 0n, waiting: 0});
   } finally {
     await runtime.close();
   }
@@ -137,12 +137,12 @@ test("native processor retains dependencies, protects blocks, batches ready work
         settleOnly
       )
     ).toThrow("InvalidGossipHandle");
-    expect(pair.right.diagnostics().gossip).toMatchObject({checking: 2, waiting: 0});
+
     exchange(pair.right, settleOnly, [
       classify({generation: 1n, index: 65534}, false),
       ...waiting.map(({handle}) => classify(handle, false)),
     ]);
-    expect(pair.right.diagnostics().gossip).toMatchObject({messagesCopied: 0n, payloadBytes: 458, waiting: 2});
+
     const blockBytes = new Uint8Array(4000);
     new DataView(blockBytes.buffer).setBigUint64(100, pair.rightConfig.initialSlot, true);
     await pair.left.publishGossip(BLOCK, blockBytes);
@@ -163,7 +163,7 @@ test("native processor retains dependencies, protects blocks, batches ready work
     if (!block) throw Error("Block dispatch deadline");
     expect(exchange(pair.right, urgent).gossip).toBeNull();
     exchange(pair.right, settleOnly, [verdict(block.handle, "accept"), {root, type: "block"}]);
-    expect(pair.right.diagnostics().gossip.reportsAccepted).toBe(1n);
+
     exchange(
       pair.right,
       settleOnly,
@@ -193,11 +193,20 @@ test("native processor retains dependencies, protects blocks, batches ready work
       settleOnly,
       batch.messages.map(({handle}) => verdict(handle, "ignore"))
     );
-    expect(pair.right.diagnostics().gossip.reportsAccepted).toBe(3n);
+
     view.setBigUint64(4, 999999999n, true);
     await pair.left.publishGossip(ATTESTATION, data);
-    for (let i = 0; i < 1000 && pair.right.diagnostics().gossip.slotRefusals === 0n; i++) await delay(5);
-    expect(pair.right.diagnostics().gossip).toMatchObject({checking: 0, executing: 0, slotRefusals: 1n, waiting: 0});
+    await expect
+      .poll(
+        () =>
+          metricValue(
+            pair.right.getMetrics(),
+            'lodestar_native_gossip_processor_refusals_total{kind="beacon_attestation",reason="ineligible"}'
+          ),
+        {timeout: 5000}
+      )
+      .toBe(1);
+    expect(exchange(pair.right, {...settleOnly, checks: 64}).checks).toEqual([]);
   } finally {
     await Promise.allSettled([pair.left.close(), pair.right.close()]);
   }
@@ -239,28 +248,14 @@ test("expired validation execution remains visible until late host completion", 
       if (!message) await delay(5);
     }
     if (!message) throw Error("Block dispatch deadline");
-    expect(pair.right.diagnostics().gossip).toMatchObject({executing: 1, expiredExecuting: 0, payloadBytes: 0});
+
     const expiredSample = "lodestar_native_gossip_expired_executing 1\n";
     for (let i = 0; i < 1000 && !pair.right.getMetrics().includes(expiredSample); i++) await delay(5);
     expect(pair.right.getMetrics()).toContain(expiredSample);
-    const expired = pair.right.diagnostics().gossip;
-    expect(expired).toMatchObject({executing: 1, expiredExecuting: 1, occupied: 1, payloadBytes: 0});
-    expect(expired.oldestExpiredExecutionAgeMs).toBeGreaterThanOrEqual(0n);
-    await delay(25);
-    expect(pair.right.diagnostics().gossip.oldestExpiredExecutionAgeMs).toBeGreaterThan(
-      expired.oldestExpiredExecutionAgeMs
-    );
+
     // A late verdict retires the message without applying it.
     exchange(pair.right, settleOnly, [verdict(message.handle, "accept"), verdict(message.handle, "reject")]);
-    expect(pair.right.diagnostics().gossip).toMatchObject({
-      executing: 0,
-      expiredExecuting: 0,
-      occupied: 0,
-      oldestExpiredExecutionAgeMs: 0n,
-      reportsAccepted: 0n,
-      reportsAppliedAccept: 0n,
-      reportsAppliedReject: 0n,
-    });
+
     for (let i = 0; i < 1000 && pair.right.getMetrics().includes(expiredSample); i++) await delay(5);
     expect(pair.right.getMetrics()).toContain("lodestar_native_gossip_expired_executing 0\n");
   } finally {

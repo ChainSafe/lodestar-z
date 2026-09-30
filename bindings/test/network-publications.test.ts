@@ -2,47 +2,10 @@ import {setTimeout as delay} from "node:timers/promises";
 import {expect, test, vi} from "vitest";
 import {initializeNativeNetworkRuntime} from "../src/network-runtime.js";
 import {applicationConfig, holdSettling, localIntent, settleOnly, startRuntime, topicName} from "./utils/network.js";
-import {startPeer} from "./utils/network-peer.js";
 
 const BLOCK = topicName();
 const SYNC = topicName("sync_committee_0");
 const REQUEST = "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy";
-
-test("publication byte pressure rejects before copying and keeps ordinary and urgent admission", async () => {
-  const config = applicationConfig();
-  const probe = await startPeer(config);
-  const diagnostics = await probe.diagnostics();
-  const {incomingMinimumBytes, outgoingMinimumBytes, publicationMinimumBytes} = diagnostics.payloadBudget;
-  await probe.stop();
-  config.resources.bridgeBudgetBytes =
-    config.resources.bridgeBudgetBytes -
-    diagnostics.payloadBudget.limitBytes +
-    incomingMinimumBytes +
-    outgoingMinimumBytes +
-    publicationMinimumBytes +
-    7999;
-  const runtime = startRuntime(config);
-  try {
-    await runtime.applyIntent(localIntent(config), config.initialSlot);
-    const options = {allowZeroPeers: true, ignoreDuplicate: true};
-    // Ordinary publications share only the 7999 bytes past every protected minimum.
-    await expect(runtime.publishGossip(SYNC, new Uint8Array(8000).fill(3), options)).rejects.toMatchObject({
-      code: "NetworkGossipPublishFailed",
-      reason: "admission_full",
-    });
-    expect(runtime.diagnostics().publications).toMatchObject({byteRefusals: 1n, copies: 0n, occupied: 0});
-    await expect(runtime.publishGossip(SYNC, new Uint8Array(144).fill(3), options)).resolves.toMatchObject({
-      duplicate: false,
-    });
-    await expect(runtime.publishGossip(BLOCK, new Uint8Array(8000).fill(3), options)).resolves.toMatchObject({
-      duplicate: false,
-    });
-    expect(runtime.diagnostics().publications).toMatchObject({copies: 2n, occupied: 0, reservedBytes: 0});
-    expect(runtime.diagnostics().payloadBudget.usedBytes).toBe(0);
-  } finally {
-    await runtime.close();
-  }
-}, 15000);
 
 test("request capacity refusal is typed while control and publication admission remain available", async () => {
   const config = applicationConfig();
@@ -50,18 +13,15 @@ test("request capacity refusal is typed while control and publication admission 
   const runtime = startRuntime(config);
   try {
     await runtime.applyIntent(localIntent(config), config.initialSlot);
-    const streams = Array.from({length: runtime.diagnostics().requests.capacity}, () =>
-      runtime.request(runtime.identity.peerId, REQUEST, new Uint8Array(0))
-    );
-    expect(() => runtime.request(runtime.identity.peerId, REQUEST, new Uint8Array(0))).toThrow(
-      expect.objectContaining({code: "NetworkRequestRejected", reason: "slots_exhausted"})
-    );
+    const streams: ReturnType<typeof runtime.request>[] = [];
+    expect(() => {
+      for (let i = 0; i < 1024; i++) streams.push(runtime.request(runtime.identity.peerId, REQUEST, new Uint8Array(0)));
+    }).toThrow(expect.objectContaining({code: "NetworkRequestRejected", reason: "slots_exhausted"}));
     await Promise.all([
       runtime.getIdentity(),
       runtime.publishGossip(BLOCK, new Uint8Array(4000), {allowZeroPeers: true}),
       ...streams.map((stream) => expect(stream.next()).rejects.toMatchObject({reason: "disconnected"})),
     ]);
-    expect(runtime.diagnostics().requests).toMatchObject({occupied: 0, requestFull: 1n, reservedBytes: 0});
   } finally {
     await runtime.close();
   }
@@ -72,43 +32,42 @@ test("publication pressure preserves urgent, control and request admission", asy
   const runtime = startRuntime(config);
   try {
     await runtime.applyIntent(localIntent(config), config.initialSlot);
-    const {capacity, urgentReserved} = runtime.diagnostics().publications;
+    runtime.holdOperations(true);
     const options = {allowZeroPeers: true, ignoreDuplicate: true};
-    const publications = Array.from({length: capacity - urgentReserved}, () =>
-      runtime.publishGossip(SYNC, new Uint8Array(144), options)
-    );
-    const refused = expect(runtime.publishGossip(SYNC, new Uint8Array(144), options)).rejects.toMatchObject({
-      code: "NetworkGossipPublishFailed",
-      reason: "admission_full",
-    });
-    publications.push(
-      ...Array.from({length: urgentReserved}, () => runtime.publishGossip(BLOCK, new Uint8Array(4000), options))
-    );
-    const controls = Array.from({length: 32}, () => runtime.getIdentity());
+    const publications: Promise<unknown>[] = [];
+    let refusal: unknown;
+    for (let i = 0; i < 1024 && refusal === undefined; i++) {
+      const publication = runtime.publishGossip(SYNC, new Uint8Array(144), options);
+      publications.push(publication);
+      void publication.catch((error) => {
+        refusal = error;
+      });
+      await Promise.resolve();
+    }
+    expect(refusal).toMatchObject({code: "NetworkGossipPublishFailed", reason: "admission_full"});
+    const urgent = runtime.publishGossip(BLOCK, new Uint8Array(4000), options);
+    const control = runtime.getIdentity();
     const request = runtime.request(runtime.identity.peerId, REQUEST, new Uint8Array(0));
-    expect(runtime.diagnostics()).toMatchObject({
-      operationOccupied: 32,
-      publications: {occupied: capacity, refusals: 1n},
-      requests: {occupied: 1},
-    });
-    await Promise.all([
-      refused,
-      ...publications,
-      ...controls,
+    runtime.holdOperations(false);
+    const [results] = await Promise.all([
+      Promise.allSettled(publications),
+      urgent,
+      control,
       expect(request.next()).rejects.toMatchObject({code: "NetworkRequestRejected", reason: "disconnected"}),
     ]);
-    expect(runtime.diagnostics()).toMatchObject({
-      operationOccupied: 0,
-      publications: {latencyCount: BigInt(capacity), occupied: 0, payloadBytes: 0, reservedBytes: 0},
-      requests: {occupied: 0},
-    });
+    expect(results.some((result) => result.status === "fulfilled")).toBe(true);
+    for (const result of results) {
+      if (result.status === "rejected")
+        expect(result.reason).toMatchObject({code: "NetworkGossipPublishFailed", reason: "admission_full"});
+    }
+
     await expect(runtime.publishGossip(SYNC, new Uint8Array(144), options)).resolves.toMatchObject({duplicate: true});
   } finally {
     await runtime.close();
   }
 });
 
-test("beacon profile admits 200 publications without occupying control cells", async () => {
+test("beacon profile admits 200 publications while control remains available", async () => {
   const config = applicationConfig();
   config.profile = "beaconNode";
   config.resources.bridgeBudgetBytes = 512 * 1024 * 1024;
@@ -119,18 +78,8 @@ test("beacon profile admits 200 publications without occupying control cells", a
     const pending = Array.from({length: 200}, () =>
       runtime.publishGossip(BLOCK, new Uint8Array(4000), {allowZeroPeers: true, ignoreDuplicate: true})
     );
-    expect(runtime.diagnostics()).toMatchObject({
-      operationOccupied: 0,
-      publications: {capacity: 256, highWater: 200, occupied: 200},
-    });
+
     await Promise.all([...pending, runtime.getPeers()]);
-    expect(runtime.diagnostics().publications).toMatchObject({
-      copies: 200n,
-      latencyCount: 200n,
-      occupied: 0,
-      payloadBytes: 0,
-      reservedBytes: 0,
-    });
   } finally {
     await runtime.close();
   }
@@ -146,17 +95,16 @@ test("publication turns make progress on payloads larger than the turn byte budg
         runtime.publishGossip(BLOCK, new Uint8Array(size), {allowZeroPeers: true, ignoreDuplicate: true})
       )
     );
-    expect(runtime.diagnostics().publications).toMatchObject({latencyCount: 3n, occupied: 0, reservedBytes: 0});
   } finally {
     await runtime.close();
   }
 });
 
-test("close settles every publication and releases its payload and result cells", async () => {
+test("close settles every pending publication", async () => {
   const config = applicationConfig();
   const runtime = startRuntime(config);
   await runtime.applyIntent(localIntent(config), config.initialSlot);
-  const pending = Array.from({length: runtime.diagnostics().publications.capacity}, () =>
+  const pending = Array.from({length: 16}, () =>
     runtime.publishGossip(BLOCK, new Uint8Array(4000), {allowZeroPeers: true, ignoreDuplicate: true})
   );
   const results = Promise.allSettled(pending);
@@ -165,12 +113,6 @@ test("close settles every publication and releases its payload and result cells"
     if (result.status === "rejected") expect(result.reason).toMatchObject({code: "NetworkClosed"});
     else expect(result.value).toMatchObject({queued: 0});
   }
-  expect(runtime.diagnostics()).toMatchObject({
-    copyingPins: 0,
-    operationOccupied: 0,
-    preparingPins: 0,
-    publications: {occupied: 0, payloadBytes: 0, reservedBytes: 0},
-  });
 });
 
 test("limited settlement reaches a terminal publication above refilled lower cells", async () => {
@@ -180,7 +122,7 @@ test("limited settlement reaches a terminal publication above refilled lower cel
       () => "published",
       (error) => error.code
     );
-  const executed = () => vi.waitFor(() => expect(runtime.diagnostics().publications.payloadBytes).toBe(0));
+
   let closed = false;
   void runtime.closed.then(() => {
     closed = true;
@@ -188,11 +130,13 @@ test("limited settlement reaches a terminal publication above refilled lower cel
   const publications = [publish(1), publish(2)];
   const delivered: number[] = [];
   try {
-    // Each pass settles one cell; the lowest cell then refills and completes before the next pass.
+    // Each pass settles one cell; the lowest cell refills before the next pass.
     for (let pass = 0; pass < 2; pass++) {
-      await executed();
-      for (const {handle} of runtime.exchange([], {...settleOnly, settleCells: 1}).completions)
-        delivered.push(handle.index);
+      await vi.waitFor(() => {
+        for (const {handle} of runtime.exchange([], {...settleOnly, settleCells: 1}).completions)
+          delivered.push(handle.index);
+        expect(delivered).toHaveLength(pass + 1);
+      });
       if (pass === 0) publications.push(publish(3));
     }
     // The second pass reached the higher cell although the lowest had refilled.

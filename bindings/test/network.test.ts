@@ -66,13 +66,6 @@ it("owns a real native socket and releases it on idempotent close", childTestTim
     }
     expect(identity.localEndpoint.port).toBeGreaterThan(0);
     expect(runtime.state).toBe("running");
-    const diagnostics = runtime.diagnostics();
-    expect(diagnostics.nativeRequestedBytes).toBeGreaterThan(0);
-    expect(diagnostics.quicReceiveWindowBytes).toBe(
-      diagnostics.quicConnectionWindowBytes * BigInt(diagnostics.resolvedCapacities.connectionCapacity)
-    );
-    expect(diagnostics.quicStreamWindowBytes).toBeGreaterThan(0n);
-    expect(diagnostics.quicStreamWindowBytes).toBeLessThanOrEqual(diagnostics.quicConnectionWindowBytes);
     expect((await runtime.applyIntent(localIntent(config), 101n)).slot).toBe(101n);
     const closing = runtime.close();
     expect(terminal).toBe(closing);
@@ -229,7 +222,6 @@ it("joins immediately after initialization and closes idempotently", async () =>
   expect(runtime.close()).toBe(closing);
   expect(await closing).toEqual({reason: "requested"});
   expect(runtime.state).toBe("closed");
-  expect(runtime.diagnostics().liveNativeRequestedBytes).toBe(0);
 });
 
 it("rejects every invalid exchange demand, oversized batch and nested exchange before applying anything", async () => {
@@ -480,7 +472,6 @@ it.each([17, 64])("accepts a bounded discovery bootstrap list of %i entries", as
   } finally {
     await runtime.close();
   }
-  expect(runtime.diagnostics().liveNativeRequestedBytes).toBe(0);
 }, 20000);
 
 it("starts wildcard discovery without advertised addresses", async () => {
@@ -544,7 +535,7 @@ it("publishes copied peer observations without repeating unread notifications", 
       pending,
       delay(3000).then(async () => {
         throw new Error(
-          `Peer observation timeout ${JSON.stringify(runtime.diagnostics(), (_, value) => (typeof value === "bigint" ? value.toString() : value))} remote=${JSON.stringify(await remote.command("controlSnapshot"))}`
+          `Peer observation timeout ${runtime.getMetrics()} remote=${JSON.stringify(await remote.command("controlSnapshot"))}`
         );
       }),
     ]);

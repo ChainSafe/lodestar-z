@@ -510,3 +510,8 @@ function childFailure(
     tail(child.stderr),
   ].join("\n");
 }
+
+export function metricValue(text: string, series: string): number | undefined {
+  const line = text.split("\n").find((line) => line.startsWith(`${series} `));
+  return line === undefined ? undefined : Number(line.slice(series.length + 1));
+}

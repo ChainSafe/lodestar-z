@@ -252,11 +252,10 @@ test "the first terminal failure is the close result's, also after a requested s
     runtime.failLocked(error.NetworkWakeFailed);
     runtime.unlock();
     runtime.requestStop();
-    const snapshot = try runtime.snapshot();
     try std.testing.expectEqual(r.Reason.failed, runtime.reason);
     try std.testing.expect(first != error.NetworkWakeFailed);
-    try std.testing.expectEqual(first, snapshot.terminal_error.?);
-    try std.testing.expect(snapshot.state == .failed);
+    try std.testing.expectEqual(first, runtime.terminal_error.?);
+    try std.testing.expect(runtime.diag.state == .failed);
 }
 
 /// An exchange host that builds only the peer count.

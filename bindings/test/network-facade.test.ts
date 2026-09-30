@@ -16,6 +16,7 @@ import {
   childTestTimeout,
   gossipAll,
   localIntent,
+  metricValue,
   runChild,
   subscriptions,
   topicKinds,
@@ -88,17 +89,6 @@ async function facadeWithPeers(
   }
 }
 
-function gossipCounts(network: NativeNetwork) {
-  const gossip = runtimeOf(network)?.diagnostics().gossip;
-  if (!gossip) throw Error("Not a facade");
-  return gossip;
-}
-
-function applied(network: NativeNetwork): bigint {
-  const gossip = gossipCounts(network);
-  return gossip.reportsAppliedAccept + gossip.reportsAppliedReject + gossip.reportsAppliedIgnore;
-}
-
 /** Takes the next gossip messages a subprocess peer received, ignoring each, until `count` arrived. */
 async function received(peer: PeerRuntime, count: number): Promise<number[]> {
   const bytes: number[] = [];
@@ -121,7 +111,7 @@ test("a job's deferred handler runs only after the owner applied its verdicts, a
   const accepted = [...Array(COUNT).keys()].filter((byte) => verdictOf(byte) === "accept");
   let network: NativeNetwork | undefined;
   const validated: number[] = [];
-  const handled: {byte: number; applied: bigint}[] = [];
+  const handled: number[] = [];
   const failures: {byte: number; code: unknown}[] = [];
   // Promises derived from the last job's report, which the test holds instead of the report.
   let closing: Promise<unknown>[] = [];
@@ -139,7 +129,7 @@ test("a job's deferred handler runs only after the owner applied its verdicts, a
       }
       // As #9990 defers a handler to a later macrotask, and here also until the owner disposed of the job.
       void Promise.all([delay(0), job.reported]).then(
-        () => handled.push({applied: network ? applied(network) : -1n, byte}),
+        () => handled.push(byte),
         (error) => failures.push({byte, code: (error as {code?: unknown}).code})
       );
       return Promise.resolve(job.messages.map(({data}) => verdictOf(data[0])));
@@ -155,26 +145,16 @@ test("a job's deferred handler runs only after the owner applied its verdicts, a
     const runtime = runtimeOf(network);
     if (!runtime) throw Error("Not a facade");
     runtime.holdVerdicts(true);
-    const before = gossipCounts(network);
-    const appliedBefore = applied(network);
     for (let byte = 0; byte < COUNT; byte++)
       await publisher.publishGossip(TOPIC, blockPayload(byte), {allowZeroPeers: false});
-    await vi.waitFor(() => expect(gossipCounts(facade).pendingVerdicts).toBe(COUNT), {timeout: 10000});
+    await vi.waitFor(() => expect(validated).toHaveLength(COUNT), {timeout: 10000});
     // Every verdict was reported and every handler's timer is due, but the owner holds the verdicts.
     await delay(50);
     expect(validated.slice().sort((a, b) => a - b)).toEqual([...Array(COUNT).keys()]);
     expect(handled).toEqual([]);
-    expect(applied(network)).toBe(appliedBefore);
     runtime.holdVerdicts(false);
     await vi.waitFor(() => expect(handled).toHaveLength(COUNT), {timeout: 10000});
-    // Each handler ran once the owner had applied its job's verdict, and every earlier handled job's.
-    for (const [i, entry] of handled.entries())
-      expect(entry.applied - appliedBefore).toBeGreaterThanOrEqual(BigInt(i + 1));
-    const after = gossipCounts(network);
-    expect(after.reportsAppliedAccept - before.reportsAppliedAccept).toBe(BigInt(accepted.length));
-    expect(after.reportsAppliedReject - before.reportsAppliedReject).toBe(2n);
-    expect(after.reportsAppliedIgnore - before.reportsAppliedIgnore).toBe(BigInt(COUNT - accepted.length - 2));
-    expect(after).toMatchObject({acknowledging: 0, pendingVerdicts: 0});
+    expect(handled.slice().sort((a, b) => a - b)).toEqual([...Array(COUNT).keys()]);
     expect(failures).toEqual([]);
     // Application admitted each accepted message, and no other, for forwarding.
     expect((await received(receiver, accepted.length)).sort((a, b) => a - b)).toEqual(accepted);
@@ -182,7 +162,7 @@ test("a job's deferred handler runs only after the owner applied its verdicts, a
     // Close prevents the owner from disposing of a held verdict: its report rejects and its handler never runs.
     runtime.holdVerdicts(true);
     await publisher.publishGossip(TOPIC, blockPayload(COUNT), {allowZeroPeers: false});
-    await vi.waitFor(() => expect(gossipCounts(facade).pendingVerdicts).toBe(1), {timeout: 5000});
+    await vi.waitFor(() => expect(closing).toHaveLength(2), {timeout: 5000});
     global.gc?.();
     // The facade stays reachable until close completes, so derivatives of the report settle as it does.
     expect(await network.close()).toEqual({reason: "requested"});
@@ -214,7 +194,6 @@ test("reports resolve through expiry and cell reuse", async () => {
   });
   const [publisher] = peers;
   try {
-    const before = gossipCounts(network);
     // The block kind's eight cells are reused in order, so the ninth and tenth messages reuse cells with new
     // generations while earlier handles have been acknowledged.
     for (let byte = 1; byte <= 10; byte++) {
@@ -222,14 +201,14 @@ test("reports resolve through expiry and cell reuse", async () => {
       await vi.waitFor(() => expect(handled).toContain(byte), {timeout: 5000});
     }
     expect(handled).toEqual([...Array(10).keys()].map((i) => i + 1));
-    expect(gossipCounts(network).reportsAppliedAccept - before.reportsAppliedAccept).toBe(10n);
+    const accepted = () => metricValue(network.metrics(), 'gossipsub_accepted_messages_total{topic="beacon_block"}');
+    await expect.poll(accepted, {timeout: 5000}).toBe(10);
 
     await publisher.publishGossip(TOPIC, blockPayload(200), {allowZeroPeers: false});
     await vi.waitFor(() => expect(handled).toContain(200), {timeout: 5000});
-    expect(gossipCounts(network)).toMatchObject({
-      deliveredExpired: before.deliveredExpired + 1n,
-      reportsAppliedAccept: before.reportsAppliedAccept + 10n,
-    });
+    // Close renders the owner's final counters, including disposition of the late verdict.
+    await network.close();
+    expect(accepted()).toBe(10);
     expect(failures).toEqual([]);
   } finally {
     await Promise.allSettled([network.close(), publisher.close()]);
@@ -257,12 +236,10 @@ test("serving capacity stays charged after the stream closes until serve settles
     const pending = stream.next().catch(() => undefined);
     await vi.waitFor(() => expect(started).toBeDefined(), {timeout: 5000});
     await pending;
-    const incoming = () => runtimeOf(network)?.diagnostics().incoming;
-    await vi.waitFor(() => expect(incoming()).toMatchObject({occupied: 1, retiring: 1}));
-    await delay(50);
-    expect(incoming()).toMatchObject({occupied: 1, retiring: 1});
+    const retiring = () => metricValue(network.metrics(), "lodestar_native_reqresp_resources_retiring");
+    await expect.poll(retiring, {timeout: 5000}).toBe(1);
     retire();
-    await vi.waitFor(() => expect(incoming()).toMatchObject({occupied: 0, retiring: 0}));
+    await expect.poll(retiring, {timeout: 5000}).toBe(0);
   } finally {
     retire();
     await Promise.allSettled([network.close(), client.close()]);
@@ -292,7 +269,7 @@ test("a serve that outlives the network's close retires quietly after it", async
     // Close does not wait for the host's work, whose stream it ends.
     expect(await network.close()).toEqual({reason: "requested"});
     expect(await started?.closed).toBeUndefined();
-    expect(runtimeOf(network)?.diagnostics().incoming.occupied).toBe(0);
+
     retire();
     await delay(20);
     expect(errors).toEqual([]);
@@ -391,7 +368,6 @@ test("refuses an invalid peer report or imported root with an ordinary throw bef
     // Valid input still reaches native, which ignores a penalty for an identity it does not know.
     network.reportPeer(peer, "fatal");
     network.blockImported(new Uint8Array(32));
-    await vi.waitFor(() => expect(runtimeOf(network)?.diagnostics().peerReportsIgnored).toBe(1n));
     expect((await network.getIdentity()).peerId).toBe(self);
   } finally {
     expect(await network.close()).toEqual({reason: "requested"});
@@ -415,15 +391,10 @@ test("the facade validates its host, starts without host callbacks and hides the
   const network = createNativeNetwork(config, recorded);
   try {
     expect(calls).toEqual([]);
-    // Resolved by native at initialization, as its private diagnostics report them.
-    const diagnostics = runtimeOf(network)?.diagnostics();
-    expect(network.limits).toEqual({
-      incomingCapacity: diagnostics?.incoming.capacity,
-      peerCapacity: config.resources.peerCapacity,
-    });
+    expect(network.limits.peerCapacity).toBe(config.resources.peerCapacity);
+    expect(network.limits.incomingCapacity).toBeGreaterThan(0);
     expect(Object.isFrozen(network.limits)).toBe(true);
-    for (const name of ["exchange", "fail", "holdVerdicts", "diagnostics", "identity", "state"])
-      expect(name in network).toBe(false);
+    for (const name of ["exchange", "fail", "holdVerdicts", "identity", "state"]) expect(name in network).toBe(false);
     await network.applyIntent(localIntent(config), config.initialSlot);
     const peer = (await network.getIdentity()).peerId;
     const endpoint = {address: Uint8Array.of(127, 0, 0, 1), family: 4 as const, port: 9};

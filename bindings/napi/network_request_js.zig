@@ -169,6 +169,3 @@ pub fn completion(env: napi.Env, runtime: *Runtime, delivered: requests.Completi
     }
     return object;
 }
-pub fn diagnostics(env: napi.Env, value: *const requests.Diagnostics) !Value {
-    return @import("network_js.zig").scalarFields(env, value);
-}

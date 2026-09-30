@@ -50,7 +50,6 @@ test("compact subscriptions reject invalid boundaries and masks atomically", asy
       next.subscriptions = sets;
       next.update.local.status.headSlot++;
       await expect(runtime.applyIntent(next, config.initialSlot + 1n)).rejects.toThrow(error);
-      expect(runtime.diagnostics().currentSlot).toBe(config.initialSlot);
       expect(
         (await runtime.getGossipDiagnostics()).topics.filter((topic) => topic.subscribed).map((topic) => topic.topic)
       ).toEqual([topicName()]);
@@ -77,7 +76,6 @@ test("demand validates fields and target array bounds, offsets and zero padding 
     expect((await runtime.applyIntent(same, config.initialSlot)).changed).toBe(false);
     const expiring = {...same, demand: {...same.demand, expiresAtSlot: config.initialSlot + 2n}};
     await expect(runtime.applyIntent(expiring, config.initialSlot + 1n)).rejects.toThrow("InvalidNetworkConfig");
-    expect(runtime.diagnostics().currentSlot).toBe(config.initialSlot);
     expect((await runtime.applyIntent(same, config.initialSlot)).changed).toBe(false);
     for (const targets of [new Uint16Array(129), Uint16Array.of(config.resources.maxPeers + 1)]) {
       intent.demand.groupTargets = targets;
@@ -135,7 +133,6 @@ test("bounded generated masks agree with the configured subnet limits", async ()
         ).toEqual(names.sort());
       }
     }
-    expect(runtime.diagnostics().preparingPins).toBe(0);
   } finally {
     await runtime.close();
   }
@@ -181,13 +178,11 @@ test("three-boundary overlap refuses capacity without partially changing subscri
     }));
     intent.subscriptions = sets;
     await expect(runtime.applyIntent(intent, config.initialSlot + 1n)).rejects.toThrow("TopicCapacity");
-    expect(runtime.diagnostics().currentSlot).toBe(config.initialSlot);
     intent.subscriptions = sets.slice(0, 2);
     expect((await runtime.applyIntent(intent, config.initialSlot)).changed).toBe(false);
     expect((await runtime.getGossipDiagnostics()).topics.map(({topic, subscribed}) => ({subscribed, topic}))).toEqual(
       before
     );
-    expect(runtime.diagnostics().preparingPins).toBe(0);
   } finally {
     await runtime.close();
   }

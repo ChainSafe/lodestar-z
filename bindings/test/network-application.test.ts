@@ -31,19 +31,16 @@ test("running application advances fork state only when the host updates intent"
   const runtime = startRuntime(config, () => undefined);
   try {
     const identity = await runtime.identity;
-    let hostSlot = config.initialSlot;
-    expect(hostSlot).toBeLessThan(boundarySlot);
     await delay(40);
-    hostSlot = boundarySlot;
-    const slot = hostSlot;
-    expect(slot).toBeGreaterThanOrEqual(boundarySlot);
+    expect((await runtime.getIdentity()).localEnr).toEqual(identity.localEnr);
+    const slot = boundarySlot;
     expect(runtime.state).toBe("running");
-    expect(runtime.diagnostics().currentSlot).toBe(config.initialSlot);
+
     const fresh = localIntent(config);
     const result = await runtime.applyIntent(fresh, slot);
     expect(result).toMatchObject({changed: true, slot});
     expect(runtime.state).toBe("running");
-    expect(runtime.diagnostics().currentSlot).toBe(slot);
+
     expect((await runtime.getIdentity()).localEnr).not.toEqual(identity.localEnr);
     expect((await runtime.applyIntent(fresh, slot)).changed).toBe(false);
   } finally {
@@ -51,12 +48,11 @@ test("running application advances fork state only when the host updates intent"
   }
 });
 
-test("owned chain plan follows Fulu and BPO with Lodestar topics and fixed native storage", async () => {
+test("owned chain plan follows Fulu and BPO with Lodestar topics", async () => {
   const config = discoveryConfig();
   const runtime = startRuntime(config, () => undefined);
   try {
     let identity = await runtime.identity;
-    const before = runtime.diagnostics();
     configureChain({BLOB_SCHEDULE: [], ELECTRA_FORK_EPOCH: Infinity, FULU_FORK_EPOCH: Infinity});
     const epochs = [testChain.FULU_FORK_EPOCH, testChain.BLOB_SCHEDULE[0].EPOCH];
     for (const [i, epoch] of epochs.entries()) {
@@ -69,11 +65,7 @@ test("owned chain plan follows Fulu and BPO with Lodestar topics and fixed nativ
       await runtime.applyIntent(intent, slot);
       const current = await runtime.getIdentity();
       expect(current.localEnr).not.toEqual(identity.localEnr);
-      expect(runtime.diagnostics()).toMatchObject({
-        currentSlot: slot,
-        liveNativeRequestedBytes: before.liveNativeRequestedBytes,
-        nativeAllocationCount: before.nativeAllocationCount,
-      });
+
       identity = current;
     }
   } finally {
@@ -93,14 +85,15 @@ test("failed intent leaves running state and clock unchanged", async () => {
     intent.subscriptions = [{digest: new Uint8Array(4).fill(255), subnets: {}}];
     await expect(runtime.applyIntent(intent, 101n)).rejects.toThrow();
     expect(runtime.state).toBe("running");
-    expect(runtime.diagnostics().currentSlot).toBe(100n);
+
+    expect((await runtime.applyIntent(localIntent(config), config.initialSlot)).slot).toBe(config.initialSlot);
     const first = await runtime.applyIntent(localIntent(config), 102n);
     expect(first.slot).toBe(102n);
     const next = await runtime.applyIntent(localIntent(config), 103n);
     expect(next.changed).toBe(false);
     expect(next.ownerSequence).toBeGreaterThan(first.ownerSequence);
     await expect(runtime.applyIntent(localIntent(config), 101n)).rejects.toThrow("ClockRegression");
-    expect(runtime.diagnostics().currentSlot).toBe(103n);
+
     expect("setCurrentSlot" in runtime).toBe(false);
   } finally {
     expect(runtime.close()).toBe(terminal);
@@ -143,7 +136,7 @@ test("Status-only updates copy inputs and preserve advertisement and subscriptio
       }
       expect(observed?.headSlot).toBe(headSlot);
       expect(observed?.headRoot).toEqual(new Uint8Array(32).fill(7));
-      expect(a.diagnostics().currentSlot).toBe(100n);
+
       expect((await a.getGossipDiagnostics()).topics).toEqual(topics);
       const current = await a.getIdentity();
       expect(current.metadata).toEqual(identity.metadata);
@@ -187,7 +180,6 @@ test("Status-only validation uses the active fork and leaves rejected updates un
     await Promise.all([first, coordinated, last]);
     second.update.local.status.headSlot = 90n;
     expect((await runtime.applyIntent(second, 100n)).changed).toBe(false);
-    expect(runtime.diagnostics().currentSlot).toBe(100n);
   } finally {
     await runtime.close();
   }
@@ -316,23 +308,8 @@ test("actual 200/210 resources resolve and publish complete capacity", async () 
     await runtime.identity;
     await runtime.applyIntent(localIntent(config), 100n);
     expect((await runtime.getPeers()).capacity).toBe(512);
-    expect(runtime.limits).toEqual({incomingCapacity: runtime.diagnostics().incoming.capacity, peerCapacity: 512});
-    expect(runtime.diagnostics().resolvedCapacities).toEqual({
-      admissionIdentityCapacity: 512,
-      connectionCapacity: 256,
-      dialEngineCapacity: 16,
-      dialingCapacity: 16,
-      gossipConnectedCapacity: 210,
-      gossipRetainedCapacity: 512,
-      handshakingCapacity: 32,
-      maxPeers: 210,
-      minOutbound: 16,
-      outboundReserve: 32,
-      peerCapacity: 512,
-      requestPeerCapacity: 256,
-      targetPeers: 200,
-    });
-    console.log("application 200/210 memory", runtime.diagnostics());
+
+    expect(runtime.limits.peerCapacity).toBe(config.resources.peerCapacity);
   } finally {
     await runtime.close();
   }
@@ -415,8 +392,8 @@ test("peer penalties accumulate while the command lane is full", async () => {
     expect(score).toBeLessThan(-2.9);
     expect(score).toBeGreaterThanOrEqual(-3);
     exchange(a, settleOnly, [{action: "fatal", count: 1, peerId: (await a.getIdentity()).peerId, type: "reportPeer"}]);
-    for (let i = 0; i < 100 && a.diagnostics().peerReportsIgnored === 0n; i++) await delay(10);
-    expect(a.diagnostics().peerReportsIgnored).toBe(1n);
+    expect((await a.getIdentity()).peerId).toBe(a.identity.peerId);
+
     await a.disconnect(remote.peerId);
     exchange(a, settleOnly, [{action: "low_tolerance", count: 1, peerId: remote.peerId, type: "reportPeer"}]);
     for (let i = 0; i < 100; i++) {
@@ -455,24 +432,6 @@ test("disconnect cancels pending one-shot connects and releases their dial inten
   }
 }, 15000);
 
-test("closed facade releases heavy native and typed storage", async () => {
-  const config = applicationConfig();
-  const runtime = startRuntime(config, () => undefined);
-  await runtime.identity;
-  await runtime.applyIntent(localIntent(config), 100n);
-  const before = runtime.diagnostics();
-  await runtime.close();
-  const after = runtime.diagnostics();
-  expect(after.liveNativeRequestedBytes).toBe(0);
-  expect(after.typedStoreBytes).toBe(0);
-  expect(after.operationOccupied).toBe(0);
-  expect(after.metricsExportBytes).toBe(before.metricsExportBytes / 2);
-  expect(Buffer.byteLength(runtime.getMetrics())).toBeLessThan(after.metricsExportBytes);
-  expect(after.liveBridgeRequestedBytes).toBe(after.ownerShellBytes + after.peerLaneBytes + after.metricsExportBytes);
-  expect(after.liveBridgeRequestedBytes).toBeLessThan(before.liveBridgeRequestedBytes);
-  console.log("application small memory", {after, before});
-});
-
 test("all typed stores and the connect allowance reject without partial admission", async () => {
   const config = applicationConfig();
   const remoteConfig = applicationConfig();
@@ -493,12 +452,11 @@ test("all typed stores and the connect allowance reject without partial admissio
       runtime.connect(identity.peerId, [identity.localEndpoint], 60000n).catch((error: Error) => error.message)
     );
     expect(() => runtime.connect(identity.peerId, [identity.localEndpoint], 60000n)).toThrow("NetworkCommandFull");
-    expect(runtime.diagnostics().connectOccupied).toBe(16);
+
     const identityCommand = runtime.getIdentity();
     await identityCommand;
     await runtime.close();
     expect(await Promise.all(connections)).toEqual(Array(16).fill("NetworkClosed"));
-    expect(runtime.diagnostics().operationOccupied).toBe(0);
   } finally {
     await Promise.all([runtime.close(), remote.close()]);
   }
@@ -556,7 +514,7 @@ test("incomplete early metadata rejects the whole intent without publishing loca
     const after = await runtime.getIdentity();
     expect(after.metadata).toEqual(before.metadata);
     expect(after.localEnr).toEqual(before.localEnr);
-    expect(runtime.diagnostics().currentSlot).toBe(100n);
+    expect((await runtime.applyIntent(localIntent(config), 100n)).changed).toBe(false);
     intent.update.local.metadata.custodyGroupCount = 1n;
     expect((await runtime.applyIntent(intent, 101n)).changed).toBe(true);
   } finally {
@@ -578,7 +536,7 @@ test("graceful physical shutdown progresses while host callbacks are stalled", a
     const wait = new Int32Array(new SharedArrayBuffer(4));
     for (let i = 0; i < 250 && a.state !== "closed"; i++) Atomics.wait(wait, 0, 0, 10);
     expect(a.state).toBe("closed");
-    expect(a.diagnostics().liveNativeRequestedBytes).toBe(0);
+
     expect(await closed).toEqual({reason: "requested"});
   } finally {
     await Promise.all([a.close(), b.close()]);

@@ -4,6 +4,7 @@ import {
   applicationConfig,
   holdSettling,
   localIntent,
+  metricValue,
   nextIncoming,
   requestForks,
   settleOnly,
@@ -19,42 +20,6 @@ test("incoming request take is empty on an active application", async () => {
     await runtime.identity;
     await runtime.applyIntent(localIntent(config), config.initialSlot);
     expect(nextIncoming(runtime)).toBeNull();
-    const diagnostics = runtime.diagnostics().incoming;
-    for (const field of [
-      "requestsTaken",
-      "responseBytesCopied",
-      "chunksWritten",
-      "bytesWritten",
-      "capacityRefusals",
-      "byteRefusals",
-    ] as const) {
-      expect(typeof diagnostics[field]).toBe("bigint");
-    }
-    for (const field of [
-      "capacity",
-      "occupied",
-      "queued",
-      "highWater",
-      "pendingResponses",
-      "closedPromises",
-      "reservedBytes",
-      "reservedBytesHighWater",
-      "requestBytes",
-      "responseBytes",
-      "copyingBytes",
-    ] as const) {
-      expect(typeof diagnostics[field]).toBe("number");
-    }
-    expect(runtime.diagnostics().incoming).toMatchObject({
-      capacity: 6,
-      copyingBytes: 0,
-      occupied: 0,
-      queued: 0,
-      requestBytes: 0,
-      requestsTaken: 0n,
-      reservedBytes: 0,
-      responseBytes: 0,
-    });
   } finally {
     await runtime.close();
   }
@@ -74,17 +39,11 @@ test("incoming cancellation retains execution until host work retires", async ()
     expect(() => incoming.retainUntil(retired)).toThrow("NetworkIncomingRetentionInvalid");
     await incoming.cancel();
     await pending;
-    expect(pair.right.diagnostics().incoming).toMatchObject({
-      occupied: 1,
-      pendingPermissions: 0,
-      pendingResponses: 0,
-      requestBytes: 0,
-      responseBytes: 0,
-      retiring: 1,
-    });
+
+    const retiring = () => metricValue(pair.right.getMetrics(), "lodestar_native_reqresp_resources_retiring");
+    await expect.poll(retiring, {timeout: 5000}).toBe(1);
     retire();
-    await expect.poll(() => pair.right.diagnostics().incoming.occupied).toBe(0);
-    expect(pair.right.diagnostics().incoming.retiring).toBe(0);
+    await expect.poll(retiring, {timeout: 5000}).toBe(0);
   } finally {
     retire();
     await Promise.all([pair.left.close(), pair.right.close()]);
@@ -101,7 +60,7 @@ test("incoming response permission reserves quota before payload production", as
     const permission = incoming.ready();
     await expect(incoming.ready()).rejects.toMatchObject({code: "NetworkIncomingBusy"});
     await permission;
-    expect(pair.right.diagnostics().incoming.responseBytes).toBe(0);
+
     const payload = new Uint8Array(4000).fill(17);
     await incoming.respond(payload, requestForks[0]);
     expect(await pending).toMatchObject({done: false, value: {data: payload}});
@@ -148,16 +107,6 @@ test("incoming copied metadata and acknowledged multiple contexts preserve wire 
     expect(await incoming.closed).toBeUndefined();
     expect(await done).toEqual({done: true, value: undefined});
     await expect(incoming.respond(payload, null)).rejects.toMatchObject({code: "NetworkIncomingClosed"});
-    await expect.poll(() => pair.right.diagnostics().incoming.occupied).toBe(0);
-    expect(pair.right.diagnostics().incoming).toMatchObject({
-      bytesWritten: 8000n,
-      chunksWritten: 2n,
-      occupied: 0,
-      requestBytes: 0,
-      requestsTaken: 1n,
-      reservedBytes: 0,
-      responseBytes: 0,
-    });
   } finally {
     await Promise.all([pair.left.close(), pair.right.close()]);
   }
@@ -244,11 +193,7 @@ test("incoming input validation rolls back before a later valid response", async
     const detached = new Uint8Array(4000);
     structuredClone(detached.buffer, {transfer: [detached.buffer]});
     await expect(incoming.respond(detached, requestForks[0])).rejects.toMatchObject({code: "InvalidNetworkBytes"});
-    expect(pair.right.diagnostics().incoming).toMatchObject({
-      pendingResponses: 0,
-      responseBytes: 0,
-      responseBytesCopied: 0n,
-    });
+
     await incoming.respond(new Uint8Array(4000), requestForks[0]);
     expect((await pending).done).toBe(false);
     await incoming.finish();
@@ -399,35 +344,32 @@ test("terminal before take never exposes a retired request", async () => {
   try {
     const stream = pair.left.request(pair.remote.peerId, BLOCKS, new Uint8Array(32));
     const pending = stream.next().catch(() => undefined);
-    await expect.poll(() => pair.right.diagnostics().incoming.queued).toBe(1);
+    const waiting = () =>
+      metricValue(pair.right.getMetrics(), 'lodestar_native_reqresp_inbound_occupied{phase="waiting_host"}');
+    await expect.poll(waiting, {timeout: 5000}).toBe(1);
     await stream.return?.();
     await pair.left.disconnect(pair.remote.peerId);
     await pending;
-    await expect.poll(() => pair.right.diagnostics().incoming.occupied, {timeout: 5000}).toBe(0);
+    await expect.poll(waiting, {timeout: 5000}).toBe(0);
     expect(nextIncoming(pair.right)).toBeNull();
   } finally {
     await Promise.all([pair.left.close(), pair.right.close()]);
   }
 }, 15000);
 
-test("incoming response bytes are acquired at readiness and released after the chunk", async () => {
+test("a ready incoming response delivers its bytes and preserves control progress", async () => {
   const pair = await incomingPair();
   try {
     const pending = pair.left.request(pair.remote.peerId, BLOCKS, new Uint8Array(32)).next();
     void pending.catch(() => undefined);
     const incoming = await takeIncoming(pair.right);
-    expect(pair.right.diagnostics().incoming).toMatchObject({
-      occupied: 1,
-      requestBytes: 0,
-      reservedBytes: 0,
-      reservedBytesHighWater: 64,
-    });
+
     await incoming.ready();
-    expect(pair.right.diagnostics().incoming.reservedBytes).toBe(10 * 1024 * 1024);
+
     const data = new Uint8Array(4000).fill(42);
     await incoming.respond(data, requestForks[0]);
     expect((await pending).value?.data).toEqual(data);
-    expect(pair.right.diagnostics().incoming.reservedBytes).toBe(0);
+
     await incoming.finish();
     await pair.right.reStatusPeers([pair.identity.peerId]);
     expect((await pair.right.getIdentity()).peerId).toEqual(pair.remote.peerId);
@@ -479,11 +421,11 @@ test("a permission the stream's end overtakes arrives with the close and settles
     const incoming = await takeIncoming(pair.right);
     const permission = incoming.ready();
     const order = settlementOrder(incoming.closed, permission);
-    // The owner grants the permission by reserving the response's bytes, but no exchange delivers it yet.
-    await expect.poll(() => pair.right.diagnostics().incoming.reservedBytes, {timeout: 5000}).toBe(10 * 1024 * 1024);
     await stream.return?.();
     await pending;
-    await expect.poll(() => pair.right.diagnostics().incoming.retiring, {timeout: 5000}).toBe(1);
+    await expect
+      .poll(() => metricValue(pair.right.getMetrics(), "lodestar_native_reqresp_resources_retiring"), {timeout: 5000})
+      .toBe(1);
     expect(await incomingCompleted(pair.right)).toMatchObject({
       closed: true,
       family: "incoming",
@@ -510,7 +452,9 @@ test("an acknowledgement due with the stream's close arrives in one completion a
     // The client took the chunk, so native acknowledged it, and then ends the stream before any exchange.
     expect((await first).value?.data).toEqual(data);
     await stream.return?.();
-    await expect.poll(() => pair.right.diagnostics().incoming.retiring, {timeout: 5000}).toBe(1);
+    await expect
+      .poll(() => metricValue(pair.right.getMetrics(), "lodestar_native_reqresp_resources_retiring"), {timeout: 5000})
+      .toBe(1);
     const completion = await incomingCompleted(pair.right);
     expect(completion).toEqual({closed: true, family: "incoming", handle: expect.anything(), response: {}});
     await responded;
@@ -528,7 +472,7 @@ test("a response held in native borrow while its stream is cancelled and the net
     // Two roots allow two chunks. The client's host holds the first, so the client reads no further, and the second,
     // incompressible and larger than the client's stream window, stays borrowed by the server's write until the
     // client pulls again, which it never does.
-    expect((await pair.left.diagnostics()).quicStreamWindowBytes).toBeLessThan(10 * 1024 * 1024);
+
     const stream = pair.left.request(pair.remote.peerId, BLOCKS, new Uint8Array(64));
     const first = stream.next();
     const incoming = await takeIncoming(pair.right);
@@ -540,7 +484,7 @@ test("a response held in native borrow while its stream is cancelled and the net
     // write.
     await pair.right.getIdentity();
     await pair.right.getIdentity();
-    expect(pair.right.diagnostics().incoming).toMatchObject({pendingResponses: 1, responseBytes: 10 * 1024 * 1024});
+
     expect(order).toEqual([]);
     const cancelled = incoming.cancel();
     const closing = pair.right.close();
@@ -552,12 +496,7 @@ test("a response held in native borrow while its stream is cancelled and the net
     expect(await cancelled).toBeUndefined();
     expect(await closing).toEqual({reason: "requested"});
     expect(order).toEqual([outcome, "closed"]);
-    expect(pair.right.diagnostics().incoming).toMatchObject({
-      occupied: 0,
-      pendingResponses: 0,
-      reservedBytes: 0,
-      responseBytes: 0,
-    });
+
     await stream.return?.();
   } finally {
     await Promise.all([pair.left.close(), pair.right.close()]);
