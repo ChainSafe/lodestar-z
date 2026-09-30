@@ -113,6 +113,11 @@ jobs:
         run: |
           zig build test:beacon_node
 
+      - name: Run LevelDB tests
+        run: |
+          zig build test:leveldb
+          zig build test:leveldb -Doptimize=ReleaseSafe
+
       - name: Run DiscV5 tests
         run: |
           zig build test:discv5
@@ -579,6 +584,7 @@ jobs:
       - name: Run bindings formatter
         run: |
           pnpm biome ci
+          pnpm typecheck:leveldb
       - name: Check network line budgets
         run: |
           node --test scripts/line_budget.test.mjs

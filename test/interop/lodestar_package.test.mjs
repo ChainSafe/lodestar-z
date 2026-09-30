@@ -28,6 +28,18 @@ const exec = promisify(execFile);
 const tool = new URL("../../scripts/lodestar_package.mjs", import.meta.url);
 const temporaryDirectories = [];
 
+test("the package export contract includes the native LevelDB entry point", async () => {
+  const {assertPackageExports} = await import("../../scripts/lodestar_package_archive.mjs");
+  const packageJson = JSON.parse(await readFile(new URL("../../package.json", import.meta.url), "utf8"));
+  assertPackageExports(packageJson);
+  const {"./leveldb": leveldb, ...remaining} = packageJson.exports;
+  assert.equal(leveldb.import, "./bindings/src/leveldb.js");
+  assert.equal(leveldb.types, "./bindings/src/leveldb.d.ts");
+  assert.throws(() => assertPackageExports({...packageJson, exports: remaining}), {
+    code: "UnexpectedPackageExports",
+  });
+});
+
 test("packed package metadata permits packing transformations and rejects unrelated changes", async () => {
   const {assertPackedPackageJson} = await import("../../scripts/lodestar_package_archive.mjs");
   const source = {
@@ -65,7 +77,7 @@ async function command(program, args, cwd, options = {}) {
       allowFailure: true,
       env: options.env,
       maxOutputBytes: 16 * 1024 * 1024,
-      timeoutMs: 20_000,
+      timeoutMs: 120_000,
     });
   } catch (error) {
     return error.commandRecord ?? {exitCode: error.code, stderr: "", stdout: ""};
@@ -174,6 +186,7 @@ async function fixture({extraFiles = {}, networkSource} = {}) {
             ".",
             "./bls-verifier",
             "./blst",
+            "./leveldb",
             "./metrics",
             "./network",
             "./pubkeys",

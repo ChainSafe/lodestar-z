@@ -32,6 +32,7 @@ export const EXPECTED_PACKAGE_EXPORTS = [
   ".",
   "./bls-verifier",
   "./blst",
+  "./leveldb",
   "./metrics",
   "./network",
   "./pubkeys",

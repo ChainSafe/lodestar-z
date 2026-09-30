@@ -1,7 +1,7 @@
 import {createHash} from "node:crypto";
-import {readFile, readdir} from "node:fs/promises";
+import {readFile, readdir, realpath} from "node:fs/promises";
 import {homedir} from "node:os";
-import {join, resolve} from "node:path";
+import {isAbsolute, join, relative, resolve, sep, win32} from "node:path";
 import {fileURLToPath, pathToFileURL} from "node:url";
 import {isDeepStrictEqual} from "node:util";
 import {runBoundedCommand} from "./bounded_child.mjs";
@@ -20,6 +20,7 @@ const MAX_ZON_DEPTH = 32;
 const MAX_ZIG_PACKAGES = 256;
 const MAX_MODULES = 1024;
 const MAX_PACKAGE_FILES = 4096;
+const MAX_PACKAGE_PATH_LENGTH = 4096;
 const MAX_COMMAND_OUTPUT_BYTES = 4 * 1024 * 1024;
 const COMMAND_TIMEOUT_MS = 60_000;
 
@@ -121,12 +122,39 @@ export function linkedDependencies(zon) {
 
 function pins(dependencies) {
   return Object.entries(dependencies ?? {})
-    .map(([name, pin]) => ({hash: pin.hash, name, url: pin.url}))
+    .map(([name, pin]) => ({hash: pin.hash, name, path: pin.path, url: pin.url}))
     .sort((left, right) => left.name.localeCompare(right.name));
 }
 
 const recordPins = (entries) =>
-  entries.map(({hash, name, url}) => ({hash, name, url})).sort((left, right) => left.name.localeCompare(right.name));
+  entries
+    .map(({hash, name, path, url}) => ({hash, name, path, url}))
+    .sort((left, right) => left.name.localeCompare(right.name));
+
+/** Copied licenses must stay within the repository, including through symlinks. */
+async function repositoryPath(directory, path) {
+  if (
+    typeof path !== "string" ||
+    path.length === 0 ||
+    path.length > MAX_PACKAGE_PATH_LENGTH ||
+    isAbsolute(path) ||
+    win32.isAbsolute(path) ||
+    /[\\:\0]/.test(path) ||
+    path.split("/").includes("..")
+  ) {
+    throw Error(`invalid repository-relative path: ${JSON.stringify(path)}`);
+  }
+  const base = await realpath(directory);
+  const target = await realpath(resolve(base, path)).catch((error) =>
+    error.code === "ENOENT" ? null : Promise.reject(error)
+  );
+  if (target === null) return null;
+  const within = relative(base, target);
+  if (within === "" || within === ".." || within.startsWith(`..${sep}`) || isAbsolute(within)) {
+    throw Error(`repository path escapes its root: ${path}`);
+  }
+  return target;
+}
 
 async function readOptional(path) {
   return readFile(path, "utf8").catch((error) => (error.code === "ENOENT" ? null : Promise.reject(error)));
@@ -177,6 +205,9 @@ export function expectedNotices(record) {
       notices.push({file: file === null ? null : {...file, kind: "zig-package"}, id: `zig:${path}`});
     }
     for (const child of entry.dependencies ?? []) queue.push({entry: child, path: `${path}/${child.name}`});
+  }
+  for (const copied of record.copiedSources ?? []) {
+    notices.push({file: {kind: "repository", path: copied.reviewed.licenseFile}, id: `copied:${copied.name}`});
   }
   const crateHash = cargoCrate(record)?.hash;
   for (const vendored of record.cargo.vendored) {
@@ -371,6 +402,10 @@ export async function checkProvenance(root, record, {requireFetched = false} = {
   for (let index = 0; index < queue.length; index++) {
     if (index >= MAX_ZIG_PACKAGES) throw Error("Zig package bound");
     const {entry, path} = queue[index];
+    if (entry.path !== undefined || typeof entry.hash !== "string") {
+      report("ZigPackagePin", `${path}: expected a remote pin`);
+      continue;
+    }
     const directory = join(root, "zig-pkg", entry.hash);
     if (!(await exists(directory))) {
       summary.transitive.unfetched++;
@@ -436,17 +471,30 @@ export async function checkProvenance(root, record, {requireFetched = false} = {
         continue;
       }
       summary.notices.sections++;
-      const base =
-        notice.file?.kind === "zig-package" ? join(root, "zig-pkg", notice.file.hash) : roots?.[notice.file?.kind];
       // Only a located source is compared; the rest are accepted by review and listed apart, never counted as compared.
       if (notice.file === null) {
         summary.notices.reviewedWithoutSource.push(notice.id);
         continue;
       }
-      const text = base == null ? null : await readOptional(join(base, notice.file.path));
+      const local = notice.file.kind === "repository";
+      const base = local
+        ? root
+        : notice.file.kind === "zig-package"
+          ? join(root, "zig-pkg", notice.file.hash)
+          : roots?.[notice.file.kind];
+      let source = null;
+      if (base != null) {
+        try {
+          source = local ? await repositoryPath(base, notice.file.path) : join(base, notice.file.path);
+        } catch (error) {
+          report("NoticeSourcePath", `${notice.id}: ${error.message}`);
+          continue;
+        }
+      }
+      const text = source === null ? null : await readOptional(source);
       if (text === null) {
         summary.notices.sourceUnavailable.push(notice.id);
-        if (requireFetched) report("NoticeSourceUnavailable", notice.id);
+        if (local || requireFetched) report("NoticeSourceUnavailable", notice.id);
         continue;
       }
       if (!body.includes(normalizeText(text))) report("NoticeText", `${notice.id}: ${notice.file.path}`);

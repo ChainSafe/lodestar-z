@@ -17,6 +17,12 @@ Or in TypeScript, via napi bindings:
 pnpm install @chainsafe/lodestar-z
 ```
 
+The [`@chainsafe/lodestar-z/leveldb` API](./docs/leveldb.md) provides asynchronous
+binary storage with bounded result copying, atomic batches, and snapshot cursors.
+Its Zig module lives in `src/leveldb`; run its tests with `zig build test:leveldb`.
+The root build links the C library artifact from the pinned ChainSafe `leveldb_c`
+dependency; `src/leveldb/raw.zig` provides the local handles through `@cImport`.
+
 ### Spec Test Compliance
 
 `lodestar-z` is compliant against the spec tests version specified in `build.zig.zon`
@@ -33,3 +39,7 @@ We may deprioritize or close low-effort issues and pull requests at our discreti
 ## License
 
 Apache-2.0
+
+The adapted ChainSafe LevelDB handles retain their
+[MIT license](./src/leveldb/LICENSE). See the [LevelDB documentation](./docs/leveldb.md#native-dependencies-and-attribution)
+for dependency attribution.

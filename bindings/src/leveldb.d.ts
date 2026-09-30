@@ -1,0 +1,120 @@
+export type LevelDbOptions = {
+  createIfMissing?: boolean;
+  errorIfExists?: boolean;
+  /** Defaults to 8 MiB. Must be an integer from 1 byte through 256 MiB. */
+  cacheBytes?: number;
+  /** Defaults to 4 MiB. Must be an integer from 64 KiB through 64 MiB. */
+  writeBufferBytes?: number;
+  /** Defaults to 64. Must be an integer from 20 through 4096. */
+  maxOpenFiles?: number;
+  /** Defaults to 4096. Must be an integer from 1 through 65536. */
+  maxPendingOperations?: number;
+  /** Queued native inputs and metadata. Defaults to 8 GiB, with a 16 GiB maximum. */
+  maxPendingBytes?: number;
+};
+
+export type LevelDbReadOptions = {
+  /** Maximum bytes per returned value, from 0 through 1 GiB. Defaults to 1 GiB. */
+  maxValueBytes?: number;
+  /** Populate the engine's block cache. Defaults to true for get and getMany. */
+  fillCache?: boolean;
+};
+
+export type LevelDbReadManyOptions = LevelDbReadOptions & {
+  /** Maximum total returned value bytes, from 0 through 1 GiB. Defaults to 1 GiB. */
+  maxTotalBytes?: number;
+};
+
+export type LevelDbWriteOptions = {
+  /** Wait for the engine to synchronize the write before resolving. Defaults to false. */
+  sync?: boolean;
+};
+
+export type LevelDbOperation = {type: "put"; key: Uint8Array; value: Uint8Array} | {type: "del"; key: Uint8Array};
+export type LevelDbEntry = {key: Uint8Array; value: Uint8Array};
+
+export type LevelDbScanOptions = {
+  /** Exclusive lower bound. Ignored when gte is present. */
+  gt?: Uint8Array;
+  /** Inclusive lower bound. Takes precedence over gt. */
+  gte?: Uint8Array;
+  /** Exclusive upper bound. Ignored when lte is present. */
+  lt?: Uint8Array;
+  /** Inclusive upper bound. Takes precedence over lt. */
+  lte?: Uint8Array;
+  reverse?: boolean;
+  /** Populate the engine's block cache. Defaults to false for iterators. */
+  fillCache?: boolean;
+  /** Maximum rows across all pages, from 0 through 2^32 - 1. Defaults to 2^32 - 1. */
+  limit?: number;
+  /** Maximum bytes per returned value, from 1 through 1 GiB. Defaults to 1 GiB. */
+  maxValueBytes?: number;
+  /** Maximum projected key and value bytes per page, from 1 through 1 GiB. Defaults to 1 GiB. */
+  maxTotalBytes?: number;
+  /** Maximum entries per page, from 1 through 1024. Defaults to 1024. */
+  maxEntries?: number;
+};
+
+export type LevelDbIteratorOptions = LevelDbScanOptions & {
+  /** Include keys. Defaults to true. Disabled components are empty Uint8Arrays. */
+  keys?: boolean;
+  /** Include values. Defaults to true. Disabled components are empty Uint8Arrays. */
+  values?: boolean;
+};
+
+export interface LevelDbIterator<T = LevelDbEntry> extends AsyncIterableIterator<T, undefined, undefined> {
+  /** Only one next() may be pending; concurrent pulls reject with IteratorBusy. */
+  next(): Promise<IteratorResult<T, undefined>>;
+  return(): Promise<IteratorResult<T, undefined>>;
+  throw(error?: unknown): Promise<IteratorResult<T, undefined>>;
+  close(): Promise<void>;
+}
+
+/**
+ * Ordered, asynchronous LevelDB access with bounded native admission and copied inputs and outputs.
+ * Keys are at most 4096 bytes, values at most 1 GiB, and atomic batch key/value totals at most 4 GiB.
+ * Batches and getMany accept at most 16,777,216 entries. These are operating limits, not protocol maxima.
+ * Admission rejects with PendingOperationsExceeded or PendingBytesExceeded instead of waiting for room.
+ * Pending-byte admission counts copied inputs and job metadata. Read results are allocated to their actual size;
+ * the single active worker has a separate output bound given by maxTotalBytes, or maxValueBytes for get.
+ * These bounds do not bound engine scratch memory, process RSS, or returned data retained by the caller.
+ * Close iterators when abandoning them. Inputs must be attached Uint8Arrays backed by ordinary ArrayBuffers;
+ * shared backing storage is rejected.
+ */
+export declare class LevelDb {
+  private constructor();
+  /**
+   * Opens off the event loop. The path must contain 1 through 4096 UTF-8 bytes and no NUL characters.
+   * The host must coordinate one owner per physical database directory, including path aliases and engine copies.
+   */
+  static open(path: string, options?: LevelDbOptions): Promise<LevelDb>;
+  /** Removes an unopened database off the event loop. The host must first close every owner of the directory. */
+  static destroy(path: string): Promise<void>;
+  get(key: Uint8Array, options?: LevelDbReadOptions): Promise<Uint8Array | null>;
+  /** Preserves key order and duplicates. Missing keys yield null; empty values yield empty arrays. */
+  getMany(keys: readonly Uint8Array[], options?: LevelDbReadManyOptions): Promise<(Uint8Array | null)[]>;
+  put(key: Uint8Array, value: Uint8Array, options?: LevelDbWriteOptions): Promise<void>;
+  del(key: Uint8Array, options?: LevelDbWriteOptions): Promise<void>;
+  /** Validates the entire batch before applying it atomically, in order. Never splits a batch into writes. */
+  batch(operations: readonly LevelDbOperation[], options?: LevelDbWriteOptions): Promise<void>;
+  /**
+   * Takes a snapshot at this call's position in the native operation queue, before later writes.
+   * Visits keys in byte order, descending when reverse is true. At most 64 cursors may be live.
+   * Releases the cursor on exhaustion, return(), close(), or a read error. Invalid options may throw synchronously.
+   */
+  iterator(options?: LevelDbIteratorOptions): LevelDbIterator;
+  /** Iterates keys without copying or applying value-size limits to discarded values. */
+  keys(options?: LevelDbScanOptions): LevelDbIterator<Uint8Array>;
+  /** Iterates values without copying discarded keys or charging them against the page output bound. */
+  values(options?: LevelDbScanOptions): LevelDbIterator<Uint8Array>;
+  /** Deletes all records in bounded batches. Not atomic; existing snapshots retain their view. */
+  clear(): Promise<void>;
+  /** Estimates disk usage in [start, end). May exclude recently written data. */
+  approximateSize(start: Uint8Array, end: Uint8Array): Promise<number>;
+  /** Compacts the inclusive range [start, end] off the event loop. */
+  compactRange(start: Uint8Array, end: Uint8Array): Promise<void>;
+  /** Reads an engine diagnostic property, capped at 1 MiB. Unknown property names return null. */
+  getProperty(name: string): Promise<string | null>;
+  /** Rejects new work immediately, settles accepted work, and destroys all cursors. Repeated calls share a promise. */
+  close(): Promise<void>;
+}
