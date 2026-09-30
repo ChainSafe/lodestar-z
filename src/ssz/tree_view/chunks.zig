@@ -486,7 +486,7 @@ pub fn CompositeChunks(
                     try ST.Element.tree.toValue(node, self.state.pool, &values[i]);
                 } else {
                     // Initialize value to default before toValue for variable types
-                    // (e.g. BitList fields need initialized ArrayListUnmanaged)
+                    // (e.g. BitList fields need initialized ArrayList)
                     if (comptime @hasDecl(ST.Element, "default_value")) {
                         values[i] = ST.Element.default_value;
                     } else {

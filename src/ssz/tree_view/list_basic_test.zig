@@ -1294,7 +1294,7 @@ test "ListBasicTreeView chunked_leaf: property test cross-commit set + push sequ
     var prng = std.Random.DefaultPrng.init(0xCAFE_BEEF_DEAD_BABE);
     const rand = prng.random();
 
-    var reference: std.ArrayListUnmanaged(u64) = .empty;
+    var reference: std.ArrayList(u64) = .empty;
     defer reference.deinit(allocator);
     for (0..K * items_per_chunk + 7) |i| try reference.append(allocator, @as(u64, @intCast(i * 31 + 7)));
 

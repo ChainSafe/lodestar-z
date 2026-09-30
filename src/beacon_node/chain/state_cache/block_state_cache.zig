@@ -64,7 +64,7 @@ pub const BlockStateCache = struct {
     /// under the add/evict churn (https://github.com/ziglang/zig/issues/17851; the std `rehash()`
     /// doc names exactly this long-lived insert+delete pattern). `ArrayHashMap`'s index deletes
     /// by backward shift and cannot accumulate tombstones.
-    map: std.AutoArrayHashMapUnmanaged(Root, *Entry),
+    map: std.array_hash_map.Auto(Root, *Entry),
 
     /// Stable-address backing storage for every `Entry`; sized `max_states + 2` because `insertItem`
     /// pushes before `prune` trims, so the peak resident count is `max_states + 2`. Allocated once in
@@ -89,7 +89,7 @@ pub const BlockStateCache = struct {
 
         const capacity = opts.max_states + 2;
 
-        var map: std.AutoArrayHashMapUnmanaged(Root, *Entry) = .empty;
+        var map: std.array_hash_map.Auto(Root, *Entry) = .empty;
         errdefer map.deinit(allocator);
         try map.ensureTotalCapacity(allocator, capacity);
 
