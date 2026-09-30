@@ -1,4 +1,4 @@
-//! Flat, index-addressed copy of the validator fields the epoch transition reads.validator_flat_cac
+//! Flat, index-addressed copy of the validator fields the epoch transition reads.
 //!
 //! The cache is derived from the validators tree and should never be written directly.
 //! Use `sync` to do that. `sync` diffs the tree it was last synced to against
