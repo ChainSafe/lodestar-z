@@ -401,8 +401,8 @@ test "engine outgoing descriptor preserves native monotonic pacing timestamp" {
     const count = support.sendBatch(&pair.client, handle.index, pair.now, &batch);
     const after = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
     try std.testing.expect(count > 0);
-    try std.testing.expect(batch.sent[0].transmit_at_ns >= before);
-    try std.testing.expect(batch.sent[0].transmit_at_ns <= after);
+    try std.testing.expect(batch.release_times[0] >= before);
+    try std.testing.expect(batch.release_times[0] <= after);
 }
 
 fn allocateRegistry(allocator: std.mem.Allocator) !void {

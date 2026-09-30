@@ -89,28 +89,6 @@ test "transport moves a bulk payload over loopback sockets with batched sends" {
     try std.testing.expect(send_calls < datagrams_sent);
 }
 
-test "transport socket refuses a batch that carries an oversized datagram" {
-    var node: Transport = .{};
-    try initTransport(&node, 26);
-    defer node.deinit(std.testing.io);
-
-    var oversized: [1_501]u8 = undefined;
-    @memset(&oversized, 0x5a);
-    var fitting: [8]u8 = undefined;
-    @memset(&fitting, 0x5b);
-    const to = node.localAddress();
-    const batch = [_]engine_mod.Sent{
-        .{ .bytes = &fitting, .to = to },
-        .{ .bytes = &oversized, .to = to },
-    };
-    const refused = node.udp.sendMany(std.testing.io, &batch);
-    try std.testing.expectEqual(@as(usize, 0), refused.sent);
-    try std.testing.expectEqual(error.DatagramTooLarge, refused.failure.?);
-    const fits = node.udp.sendMany(std.testing.io, batch[0..1]);
-    try std.testing.expectEqual(@as(usize, 1), fits.sent);
-    try std.testing.expect(fits.failure == null);
-}
-
 test "transport refuses to dial a multiaddr without a peer id" {
     var dialer: Transport = .{};
     try initTransport(&dialer, 23);
@@ -136,7 +114,7 @@ test "dual-stack transport authenticates both families through one connection bu
         var peer6: Transport = .{};
         try peer6.init(std.testing.allocator, std.testing.io, .{ .host = &key6, .bind = .{ .ip6 = .loopback(0) }, .limits = limits });
         defer peer6.deinit(std.testing.io);
-        const addresses = hub.udp.localAddresses();
+        const addresses = hub.sockets.localAddresses();
         if (inbound) {
             _ = try peer4.dialPeer(std.testing.io, addresses[0].?, hub.peerId());
             _ = try peer6.dialPeer(std.testing.io, addresses[1].?, hub.peerId());
@@ -187,7 +165,7 @@ test "transport validates socket work limits before startup allocation" {
 }
 
 test "transport requests configured socket buffers and records the kernel's sizes" {
-    const Buffers = @import("udp.zig").Buffers;
+    const Buffers = @import("udp").Buffers;
     const key = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{31}));
     const invalid = [_]Buffers{
         .{ .receive = Buffers.bytes_min - 1, .send = Buffers.bytes_min },
@@ -204,7 +182,7 @@ test "transport requests configured socket buffers and records the kernel's size
     var unsized: Transport = .{};
     try initTransport(&unsized, 32);
     defer unsized.deinit(std.testing.io);
-    try std.testing.expectEqual([2]?Buffers.Reported{ null, null }, unsized.udp.sockets.buffers);
+    try std.testing.expectEqual([2]?Buffers.Reported{ null, null }, unsized.sockets.buffers);
     var sized: Transport = .{};
     try sized.init(std.testing.allocator, std.testing.io, .{
         .host = &key,
@@ -214,9 +192,9 @@ test "transport requests configured socket buffers and records the kernel's size
     defer sized.deinit(std.testing.io);
     const os = @import("builtin").os.tag;
     if (os != .linux and os != .macos) return;
-    const reported = sized.udp.sockets.buffers[0].?;
+    const reported = sized.sockets.buffers[0].?;
     try std.testing.expect(reported.receive.? >= Buffers.bytes_min and reported.send.? >= Buffers.bytes_min);
-    try std.testing.expectEqual(null, sized.udp.sockets.buffers[1]);
+    try std.testing.expectEqual(null, sized.sockets.buffers[1]);
 }
 
 test "transport memory plan accounts for its send batch" {

@@ -21,7 +21,7 @@ pub fn main(init: std.process.Init) !void {
     if (address != .ip4 or address.ip4.octets[0] != 127) return error.NonLoopbackEndpoint;
     const peer = discv5.types.Endpoint{ .node_id = remote.node_id, .address = address };
 
-    const sockets = try discv5.sockets.Sockets.bind(io, .{ .ip4 = .loopback(0) });
+    var sockets = try discv5.sockets.Sockets.bind(io, .{ .ip4 = .loopback(0) });
     var sockets_owned = true;
     errdefer if (sockets_owned) sockets.close(io);
     var key = try discv5.identity.crypto.keyPairFromSecret(&([_]u8{0x11} ** 32));

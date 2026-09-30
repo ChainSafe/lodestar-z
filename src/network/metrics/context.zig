@@ -20,7 +20,7 @@ pub const Context = struct {
 
     pub fn init(owner: *network.NetworkCore, now: @import("../types.zig").Now, running: bool) Context {
         var result: Context = .{ .owner = owner, .now = now, .running = running };
-        result.socket_drops[0] = owner.transport.udp.sockets.drops();
+        result.socket_drops[0] = owner.transport.sockets.drops();
         if (owner.discovery) |discovery| result.socket_drops[1] = discovery.transport.sockets.drops();
         if (!running) return result;
         for (owner.peer_manager.catalog.rows) |*row| {

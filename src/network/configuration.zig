@@ -3,7 +3,7 @@ const service = @import("service.zig");
 const peer_manager = @import("peer_manager.zig");
 const engine = @import("quic/engine.zig");
 const transport = @import("transport.zig");
-const udp = @import("udp.zig");
+const udp = @import("udp");
 const rr = @import("reqresp/reqresp.zig");
 const gossip = @import("gossipsub/options.zig");
 const c = @import("gossipsub/constants.zig");
@@ -24,7 +24,7 @@ pub const Request = struct {
     forks: []const rr.ForkEntry,
     limits: ?engine.Limits = null,
     work_limits: transport.WorkLimits = .{},
-    socket_buffers: udp.SocketBuffers = .{},
+    socket_buffers: SocketBuffers = .{},
     peers: ?peers.Options = null,
     dial: ?dial.Options = null,
     reqresp: ReqRespOverrides = .{},
@@ -52,7 +52,7 @@ pub const Core = struct {
 pub const Resolved = struct {
     limits: engine.Limits,
     work_limits: transport.WorkLimits,
-    socket_buffers: udp.SocketBuffers,
+    socket_buffers: SocketBuffers,
     core: Core,
     byte_limit: usize,
 };
@@ -202,4 +202,28 @@ fn applyOverrides(options: anytype, overrides: anytype) void {
 
 test {
     _ = @import("configuration_test.zig");
+}
+
+const mib = 1024 * 1024;
+
+/// Kernel buffer sizes requested for each UDP socket role. The kernel default of 208 KiB holds
+/// about 20 ms of traffic at 8,000 datagrams/s, so a longer owner pause drops datagrams. Linux
+/// caps a request at net.core.rmem_max or wmem_max and doubles it: at a 16 MiB rmem_max, the QUIC
+/// receive buffer holds about 14,560 datagrams at a truesize of 2,304 bytes.
+pub const SocketBuffers = struct {
+    quic: udp.Buffers = .{ .receive = 16 * mib, .send = 4 * mib },
+    discovery: udp.Buffers = .{ .receive = 2 * mib, .send = 1 * mib },
+
+    pub fn validate(self: SocketBuffers) error{InvalidLimits}!void {
+        if (!self.quic.valid() or !self.discovery.valid()) return error.InvalidLimits;
+    }
+};
+
+/// Requests `request` on every socket and logs one warning per socket the kernel caps below it.
+pub fn requestBuffers(sockets: *udp.Sockets, io: std.Io, request: udp.Buffers, comptime scope: @EnumLiteral()) void {
+    const short = sockets.requestBuffers(io, request);
+    for (short, sockets.buffers, [_][]const u8{ "ip4", "ip6" }) |below, reported, family| {
+        if (!below) continue;
+        std.log.scoped(scope).warn("socket_buffers_below_request family={s} receive_bytes={?d} receive_requested={d} send_bytes={?d} send_requested={d}", .{ family, reported.?.receive, request.receive, reported.?.send, request.send });
+    }
 }

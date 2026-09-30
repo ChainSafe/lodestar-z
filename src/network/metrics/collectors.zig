@@ -91,7 +91,7 @@ fn writeNativeCounters(self: *const Context, w: *prom.Encoder) prom.Error!void {
         .name = "lodestar_native_quic_udp_" ++ metric[0] ++ "_total",
         .kind = .counter,
         .help = metric[1],
-    }, @field(self.owner.transport.udp.counters, metric[0]));
+    }, @field(self.owner.transport.counters, metric[0]));
     const udp = @import("udp");
     const discovery_drops = if (self.owner.discovery) |d| d.transport.send_drops else udp.SendDrops{};
     inline for (.{ "datagrams", "bytes" }) |measure| {
@@ -102,7 +102,7 @@ fn writeNativeCounters(self: *const Context, w: *prom.Encoder) prom.Error!void {
             .labels = &.{ "role", "reason" },
         });
         inline for (std.meta.fields(udp.SendPressure)) |reason| {
-            try dropped.sample(.{ "quic", reason.name }, @field(self.owner.transport.udp.send_drops, measure)[reason.value]);
+            try dropped.sample(.{ "quic", reason.name }, @field(self.owner.transport.send_drops, measure)[reason.value]);
             try dropped.sample(.{ "discovery", reason.name }, @field(discovery_drops, measure)[reason.value]);
         }
     }
@@ -150,7 +150,7 @@ fn writeNativeCounters(self: *const Context, w: *prom.Encoder) prom.Error!void {
 fn writeSockets(self: *const Context, w: *prom.Encoder) prom.Error!void {
     const Sockets = @import("udp").Sockets;
     const roles = [_]struct { []const u8, ?*const Sockets }{
-        .{ "quic", &self.owner.transport.udp.sockets },
+        .{ "quic", &self.owner.transport.sockets },
         .{ "discovery", if (self.owner.discovery) |d| &d.transport.sockets else null },
     };
     const families = [_][]const u8{ "ip4", "ip6" };

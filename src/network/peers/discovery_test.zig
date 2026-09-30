@@ -929,3 +929,26 @@ test "IPv6-only discovery bootstraps a dual-stack record over IPv6" {
     try std.testing.expect(node.transport.engine.peerRecord(&seed.transport.engine.localRecord().node_id).?.peer.address == .ip6);
     try std.testing.expect(node.transport.engine.peerRecord(&seed.transport.engine.localRecord().node_id).?.last_verified_ms != null);
 }
+
+test "peer discovery ready step refills demand without reading an ineligible socket" {
+    var a: Node = undefined;
+    try a.init(61, 9061);
+    defer a.deinit();
+    var b: Node = undefined;
+    try b.init(62, 9062);
+    defer b.deinit();
+    const now = try d.Transport.monotonicMilliseconds(std.testing.io);
+    var controller = try discovery.Discovery.init(std.testing.allocator, &a.transport, &context, &.{b.transport.engine.localRecord().*}, now, .{});
+    defer controller.deinit();
+    try controller.request(.{ .general = true }, now);
+    var faults: @import("udp").testing.FaultIo = .{ .receive = .{} };
+    faults.init(std.testing.io);
+    defer faults.deinit();
+    var ready: [2]bool = @splat(false);
+    var candidates: [16]adapter.Candidate = undefined;
+    const result = try controller.stepReady(faults.io(), now, &ready, &candidates);
+    try std.testing.expect(result.failure == null);
+    try std.testing.expect(result.started > 0);
+    try std.testing.expect(a.transport.engine.calls.count() > 0);
+    try std.testing.expectEqual(@as(usize, 0), faults.receive_calls);
+}

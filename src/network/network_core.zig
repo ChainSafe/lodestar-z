@@ -48,7 +48,7 @@ pub const discovery_session_idle_timeout_ms: u64 = 10 * 60_000;
 pub const DiscoveryOptions = struct {
     advertisement: ?AdvertisementHints = null,
     fixed: AdvertisementEndpoints = .{},
-    bind: @import("udp.zig").Bindings,
+    bind: @import("udp").Bindings,
     sequence: u64 = 1,
     bootstrap: []const d.identity.enr.Record = &.{},
     engine: d.Engine.Config = .{ .session_capacity = discovery_session_capacity, .session_idle_timeout_ms = discovery_session_idle_timeout_ms },
@@ -56,7 +56,7 @@ pub const DiscoveryOptions = struct {
 };
 pub const Startup = struct {
     host: *const @import("wire/keys.zig").KeyPair,
-    bind: @import("udp.zig").Bindings,
+    bind: @import("udp").Bindings,
     local: t.LocalState,
     schedule: ForkSchedule = .{},
     discovery: ?DiscoveryOptions = null,
@@ -123,10 +123,10 @@ const DiscoveryOwners = struct {
     /// so ReleaseSafe does not fill it for every step.
     candidates: [candidates_per_turn]peers.enr.Candidate = undefined,
 
-    fn init(self: *DiscoveryOwners, allocator: std.mem.Allocator, io: std.Io, options: DiscoveryOptions, buffers: @import("udp.zig").Buffers, host: *const @import("wire/keys.zig").KeyPair, local: *const t.LocalState, schedule: ForkSchedule, quic: [2]?t.Address, now: Now) !void {
+    fn init(self: *DiscoveryOwners, allocator: std.mem.Allocator, io: std.Io, options: DiscoveryOptions, buffers: @import("udp").Buffers, host: *const @import("wire/keys.zig").KeyPair, local: *const t.LocalState, schedule: ForkSchedule, quic: [2]?t.Address, now: Now) !void {
         var sockets = try @import("udp").Sockets.bind(io, options.bind);
         errdefer sockets.close(io);
-        @import("udp.zig").requestBuffers(&sockets, io, buffers, .network_discovery);
+        @import("configuration.zig").requestBuffers(&sockets, io, buffers, .network_discovery);
         var udp_addresses: [2]?d.types.Address = .{ null, null };
         for (sockets.values, 0..) |socket, i| if (socket) |value| {
             udp_addresses[i] = d.types.Address.fromNetwork(value.address);
@@ -229,7 +229,7 @@ pub const NetworkCore = struct {
         if (startup.discovery) |discovery_options| {
             const owned = try allocator.create(DiscoveryOwners);
             errdefer allocator.destroy(owned);
-            try owned.init(allocator, io, discovery_options, resolved.socket_buffers.discovery, startup.host, &local, startup.schedule, self.transport.udp.localAddresses(), self.last_now);
+            try owned.init(allocator, io, discovery_options, resolved.socket_buffers.discovery, startup.host, &local, startup.schedule, self.transport.sockets.localAddresses(), self.last_now);
             self.discovery = owned;
         }
         errdefer if (self.discovery) |owned| {
@@ -446,7 +446,7 @@ pub const NetworkCore = struct {
         if ((endpoints == null) != (self.discovery == null)) return error.InvalidAdvertisement;
         if (endpoints) |value| {
             try validateEndpoints(value);
-            try validateEndpointFamilies(value, self.transport.udp.localAddresses(), &self.discovery.?.transport.sockets);
+            try validateEndpointFamilies(value, self.transport.sockets.localAddresses(), &self.discovery.?.transport.sockets);
         }
         var local = update.local;
         local.metadata.seq_number = self.peer_manager.local.metadata.seq_number;
@@ -537,7 +537,7 @@ pub const NetworkCore = struct {
             if (!wait.supported) return error.UnsupportedWait;
             if (comptime wait.supported) {
                 if (fd < 0) return error.InvalidWakeSource;
-                for (self.transport.udp.sockets.handles()) |socket| if (socket == fd) return error.InvalidWakeSource;
+                for (self.transport.sockets.handles()) |socket| if (socket == fd) return error.InvalidWakeSource;
                 if (self.discovery) |owned| for (owned.transport.sockets.handles()) |socket| if (socket == fd) return error.InvalidWakeSource;
             }
         }
@@ -601,7 +601,7 @@ pub const NetworkCore = struct {
         if (!self.peer_manager.stopped) self.observeWait(&wakeups, now.mono_ms, chosen_wait);
         if (comptime wait.supported) {
             result.readiness = wait.poll(io, .{
-                .quic = self.transport.udp.sockets.handles(),
+                .quic = self.transport.sockets.handles(),
                 .discovery = if (!self.peer_manager.quiescing and self.discovery != null) self.discovery.?.transport.sockets.handles() else .{ null, null },
                 .host = self.host_wake,
             }, chosen_wait);
@@ -828,7 +828,7 @@ pub const NetworkCore = struct {
         wakeups.note(.host, host.deadline_ms);
         const discovery_slot = &wakeups.due[@intFromEnum(wake_sources.Source.discovery)];
         const discovery_due = if (discovery_slot.*) |deadline| deadline <= tick.mono_ms else false;
-        if (!readiness.discovery and !discovery_due) return false;
+        if (!readiness.discoveryReady() and !discovery_due) return false;
         discovery_slot.* = null;
         const earliest = wakeups.earliest() orelse return true;
         return earliest > tick.mono_ms;
@@ -841,8 +841,9 @@ pub const NetworkCore = struct {
         const need = self.peer_manager.discoveryNeed();
         owned.coordinator.request(need.query(tick.mono_ms +| 1_000), tick.mono_ms) catch unreachable;
         const candidates = &owned.candidates;
+        var eligible: [2]bool = if (result.readiness.failure == null) result.readiness.discovery else @splat(true);
         for (0..discovery_batch_max) |_| {
-            const progress = owned.coordinator.step(io, tick.mono_ms, tick.mono_ms, candidates) catch |err| peers.discovery.Result{ .failure = err };
+            const progress = owned.coordinator.stepReady(io, tick.mono_ms, &eligible, candidates) catch |err| peers.discovery.Result{ .failure = err };
             result.discovery.add(&progress);
             var endpoints = owned.endpoints;
             for (progress.learned, 0..) |learned, family| if (learned) |address| switch (address) {

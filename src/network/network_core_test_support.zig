@@ -29,7 +29,7 @@ pub fn localState(overrides: t.LocalState) t.LocalState {
 }
 
 /// Linux's default limit for both roles, so harness sockets never log a capped request.
-pub const socket_buffers: @import("udp.zig").SocketBuffers = .{
+pub const socket_buffers: @import("configuration.zig").SocketBuffers = .{
     .quic = .{ .receive = 208 * 1024, .send = 208 * 1024 },
     .discovery = .{ .receive = 208 * 1024, .send = 208 * 1024 },
 };
@@ -237,11 +237,11 @@ pub const Link = struct {
                 const count = support.sendBatch(from, index, self.now, &self.batch);
                 budget += count;
                 moved = moved or count > 0;
-                for (self.batch.sent[0..count]) |sent| {
+                for (self.batch.outgoing[0..count]) |sent| {
                     if (drop) continue;
                     if (self.drop_to_address) |blocked| if (sent.to.eql(blocked)) continue;
                     var response: [constants.datagram_size_max]u8 = undefined;
-                    const outcome = to.receive(sent.bytes, &from_address, self.now, &response);
+                    const outcome = to.receive(@constCast(sent.bytes), &from_address, self.now, &response);
                     if (outcome == .retry) {
                         std.debug.assert(retry == null);
                         retry = .{ .bytes = undefined, .len = outcome.retry.len, .from = sent.to };
@@ -358,8 +358,8 @@ pub const Setup = struct {
         self.server_inbox.attach(self.server.service.gossipsub);
         self.pair.client = &self.client.transport.engine;
         self.pair.server = &self.server.transport.engine;
-        self.pair.client_sockets = self.client.transport.udp.sockets.handles();
-        self.pair.server_sockets = self.server.transport.udp.sockets.handles();
+        self.pair.client_sockets = self.client.transport.sockets.handles();
+        self.pair.server_sockets = self.server.transport.sockets.handles();
     }
 
     pub fn deinit(self: *Setup) void {

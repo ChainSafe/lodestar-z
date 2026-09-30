@@ -24,7 +24,7 @@ const net = std.Io.net;
 
 test "transport rejects invalid polling and missing expiry storage" {
     var instance: Transport = undefined;
-    const sockets = try Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
+    var sockets = try Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
     defer sockets.close(std.testing.io);
     try std.testing.expectError(error.InvalidPollInterval, instance.init(std.testing.allocator, sockets, undefined, undefined, .{ .poll_interval_ms = 0 }));
     try std.testing.expectError(error.MissingExpiryStorage, instance.step(undefined, &.{}));
@@ -855,4 +855,63 @@ test "transport cancels a discovery call dropped by local pressure without recor
     var expired: [4]CallTable.Expired = undefined;
     const now = try Transport.monotonicMilliseconds(std.testing.io);
     try std.testing.expectEqual(@as(usize, 0), pair.transport_a.engine.tick(now + 2_000, &expired).calls);
+}
+
+test "discovery ready steps expire calls with no eligible socket and preserve late arrivals" {
+    var pair: Pair = undefined;
+    try pair.init(1, true);
+    defer pair.deinit();
+    var output: [1280]u8 = undefined;
+    const started = try pair.transport_a.engine.startCall(&output, endpoint(&pair.record_b), &pair.record_b, &.{ .ping = .{
+        .request_id = try .init(&.{0x55}),
+        .enr_sequence = pair.record_a.sequence,
+    } }, 0, &test_support.sealEntropy(0x33));
+    var faults: @import("udp").testing.FaultIo = .{ .receive = .{} };
+    faults.init(std.testing.io);
+    defer faults.deinit();
+    var eligible: [2]bool = @splat(false);
+    var expired: [4]CallTable.Expired = undefined;
+    const result = try pair.transport_a.stepReady(faults.io(), &expired, &eligible);
+    try std.testing.expect(result.failure == null);
+    try std.testing.expectEqual(@as(usize, 1), result.calls_expired);
+    try std.testing.expectEqual(started.handle, expired[0].handle);
+    try std.testing.expectEqual(@as(usize, 0), faults.receive_calls);
+    try pair.transport_b.sockets.sendTo(std.testing.io, pair.transport_a.localAddress(), &.{0xff}, 1280);
+    const late = try pair.transport_a.stepReady(faults.io(), &expired, &eligible);
+    try std.testing.expect(late.datagram == .timeout and late.failure == null);
+    try std.testing.expectEqual(@as(usize, 0), faults.receive_calls);
+    eligible = .{ true, false };
+    const next = try pair.transport_a.stepReady(std.testing.io, &expired, &eligible);
+    try std.testing.expect(next.datagram == .rejected and next.failure == null);
+    try std.testing.expectEqual(@as(usize, 0), next.calls_expired);
+}
+
+test "discovery ready steps retain one family mask through the drain" {
+    const key = try keyPair(0x66);
+    var sockets = try Sockets.bind(std.testing.io, .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } });
+    var owned = true;
+    defer if (owned) sockets.close(std.testing.io);
+    const record = try enr.Record.create(&key, 1, sockets.localAddress());
+    var transport: Transport = undefined;
+    try transport.init(std.testing.allocator, sockets, key, record, .{});
+    owned = false;
+    defer transport.deinit(std.testing.allocator, std.testing.io);
+    const addresses = transport.sockets.localAddresses();
+    for (addresses) |address| try transport.sockets.sendTo(std.testing.io, address.?, &.{0xff}, 1280);
+    var faults: @import("udp").testing.FaultIo = .{ .receive = .{ .socket = transport.sockets.values[1].?.handle } };
+    faults.init(std.testing.io);
+    defer faults.deinit();
+    var eligible: [2]bool = .{ true, false };
+    var expired: [4]CallTable.Expired = undefined;
+    const first = try transport.stepReady(faults.io(), &expired, &eligible);
+    try std.testing.expect(first.datagram == .rejected and first.failure == null);
+    const empty = try transport.stepReady(faults.io(), &expired, &eligible);
+    try std.testing.expect(empty.datagram == .timeout and empty.failure == null);
+    try std.testing.expectEqual([2]bool{ false, false }, eligible);
+    const reads = faults.receive_calls;
+    _ = try transport.stepReady(faults.io(), &expired, &eligible);
+    try std.testing.expectEqual(reads, faults.receive_calls);
+    eligible = .{ false, true };
+    const next = try transport.stepReady(std.testing.io, &expired, &eligible);
+    try std.testing.expect(next.datagram == .rejected and next.failure == null);
 }

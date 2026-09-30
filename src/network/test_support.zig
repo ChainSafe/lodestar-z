@@ -138,8 +138,8 @@ pub const Pair = struct {
                 const count = sendBatch(from, index, self.now, &self.batch);
                 budget += count;
                 moved = moved or count > 0;
-                for (self.batch.sent[0..count]) |sent| {
-                    const datagram = sent.bytes;
+                for (self.batch.outgoing[0..count]) |sent| {
+                    const datagram = @constCast(sent.bytes);
                     if (from == &self.client and self.first_initial_len == 0) {
                         @memcpy(self.first_initial[0..datagram.len], datagram);
                     }
@@ -342,7 +342,9 @@ pub fn expectStreamClosed(event: Event, stream: engine_mod.StreamHandle) !?u64 {
 pub fn sendBatch(engine: *Engine, index: u16, now: Now, batch: *transport_mod.SendBatch) u8 {
     var count: u8 = 0;
     while (count < constants.send_batch_max) : (count += 1) {
-        batch.sent[count] = engine.sendOne(index, now, &batch.buffers[count]) orelse break;
+        const sent = engine.sendOne(index, now, &batch.buffers[count]) orelse break;
+        batch.outgoing[count] = .{ .to = sent.to, .bytes = sent.bytes };
+        batch.release_times[count] = sent.transmit_at_ns;
     }
     return count;
 }
