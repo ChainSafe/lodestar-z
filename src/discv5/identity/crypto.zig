@@ -20,6 +20,7 @@ pub const Error = error{
 };
 
 pub const KeyPair = Ecdsa.KeyPair;
+pub const PublicKey = Ecdsa.PublicKey;
 
 pub fn keyPairFromSecret(secret: *const [32]u8) Error!KeyPair {
     var secret_key = Ecdsa.SecretKey.fromBytes(secret.*) catch
@@ -86,11 +87,17 @@ pub fn verify(
     signature: *const [64]u8,
     public_key: *const [33]u8,
 ) Error!void {
+    _ = try verifyAndDecode(digest, signature, public_key);
+}
+
+/// Returns the authenticated public point so identity derivation need not decode it again.
+pub fn verifyAndDecode(digest: *const [32]u8, signature: *const [64]u8, public_key: *const [33]u8) Error!PublicKey {
     const s = std.mem.readInt(u256, signature[32..64], .big);
     if (s == 0 or s > half_scalar_order) return Error.InvalidSignature;
-    const key = Ecdsa.PublicKey.fromSec1(public_key) catch return Error.InvalidPublicKey;
+    const key = PublicKey.fromSec1(public_key) catch return Error.InvalidPublicKey;
     const parsed = Ecdsa.Signature.fromBytes(signature.*);
     parsed.verifyPrehashed(digest.*, key) catch return Error.InvalidSignature;
+    return key;
 }
 
 const Rfc6979 = struct {

@@ -19,13 +19,8 @@ pub const discovery_batch_max: u32 = @import("constants.zig").receive_batch_max;
 pub const controls_per_turn = 32;
 pub const identify_per_turn = 8;
 pub const dials_per_turn = 4;
-pub const candidates_per_turn = d.types.findnode_result_max + 1;
-pub const ForkSchedule = struct {
-    fulu_scheduled: bool = false,
-    next_version: [4]u8 = @splat(0),
-    next_epoch: u64 = std.math.maxInt(u64),
-    next_digest: [4]u8 = @splat(0),
-};
+pub const candidates_per_turn = peers.discovery.candidates_per_step;
+pub const ForkSchedule = peers.discovery.ForkSchedule;
 const advertisement = @import("advertisement.zig");
 pub const AdvertisementEndpoints = advertisement.Endpoints;
 pub const AdvertisementHints = advertisement.Hints;
@@ -41,19 +36,9 @@ pub const LocalIntent = struct {
     subscriptions: []const gossip.local_intent.Boundary,
     slot: u64 = 0,
 };
-/// Lookup queries touch many one-off nodes. Idle expiry keeps the discv5 session store at recent
-/// contacts instead of pinning it at capacity; routing-table peers are revalidated every 300 s.
-pub const discovery_session_capacity: usize = 2_048;
-pub const discovery_session_idle_timeout_ms: u64 = 10 * 60_000;
-pub const DiscoveryOptions = struct {
-    advertisement: ?AdvertisementHints = null,
-    fixed: AdvertisementEndpoints = .{},
-    bind: @import("udp").Bindings,
-    sequence: u64 = 1,
-    bootstrap: []const d.identity.enr.Record = &.{},
-    engine: d.Engine.Config = .{ .session_capacity = discovery_session_capacity, .session_idle_timeout_ms = discovery_session_idle_timeout_ms },
-    coordinator: peers.discovery.Options = .{},
-};
+pub const discovery_session_capacity = peers.discovery.discovery_session_capacity;
+pub const discovery_session_idle_timeout_ms = peers.discovery.discovery_session_idle_timeout_ms;
+pub const DiscoveryOptions = peers.discovery.Config;
 pub const Startup = struct {
     host: *const @import("wire/keys.zig").KeyPair,
     bind: @import("udp").Bindings,
@@ -114,44 +99,6 @@ pub const Counters = struct {
     readiness_failures: u64 = 0,
 };
 
-const DiscoveryOwners = struct {
-    transport: d.Transport,
-    coordinator: peers.Discovery,
-    endpoints: AdvertisementEndpoints,
-    quic_ports: [2]?u16,
-    /// The candidates of the discovery step `discover` is handling. A field rather than a local
-    /// so ReleaseSafe does not fill it for every step.
-    candidates: [candidates_per_turn]peers.enr.Candidate = undefined,
-
-    fn init(self: *DiscoveryOwners, allocator: std.mem.Allocator, io: std.Io, options: DiscoveryOptions, buffers: @import("udp").Buffers, host: *const @import("wire/keys.zig").KeyPair, local: *const t.LocalState, schedule: ForkSchedule, quic: [2]?t.Address, now: Now) !void {
-        var sockets = try @import("udp").Sockets.bind(io, options.bind);
-        errdefer sockets.close(io);
-        @import("configuration.zig").requestBuffers(&sockets, io, buffers, .network_discovery);
-        var udp_addresses: [2]?d.types.Address = .{ null, null };
-        for (sockets.values, 0..) |socket, i| if (socket) |value| {
-            udp_addresses[i] = d.types.Address.fromNetwork(value.address);
-        };
-        const plan = try advertisement.resolve(if (options.advertisement) |*value| value else null, &options.fixed, &quic, &udp_addresses);
-        self.endpoints = plan.endpoints;
-        self.quic_ports = plan.quic_ports;
-        try validateEndpoints(self.endpoints);
-        try validateEndpointFamilies(self.endpoints, quic, &sockets);
-        const announced = advertisementFor(local, schedule, self.endpoints);
-        const record = try peers.enr.build(&host.inner, options.sequence, &announced, &local.fork);
-        try peers.enr.requireIdentity(&record, &t.PeerId.fromPublicKey(&host.publicKey()));
-        try self.transport.init(allocator, sockets, host.inner, record, .{ .engine = options.engine });
-        errdefer self.transport.engine.deinit(allocator);
-        var coordinator_options = options.coordinator;
-        coordinator_options.observations = plan.observations;
-        coordinator_options.quic_mode = if (quic[0] == null) .ip6 else if (quic[1] == null) .ip4 else .dual;
-        self.coordinator = try peers.Discovery.init(allocator, &self.transport, &local.fork, options.bootstrap, now.mono_ms, coordinator_options);
-    }
-    fn deinit(self: *DiscoveryOwners, allocator: std.mem.Allocator, io: std.Io) void {
-        self.coordinator.deinit();
-        self.transport.deinit(allocator, io);
-    }
-};
-
 /// Initialize at its final address. Serialize every call, including reads and teardown.
 pub const NetworkCore = struct {
     reservations: @import("reservations.zig").Reservations,
@@ -160,7 +107,7 @@ pub const NetworkCore = struct {
     peer_manager: manager.PeerManager,
     control_protocol: ControlProtocol,
     service: service_mod.Service,
-    discovery: ?*DiscoveryOwners,
+    discovery: ?*peers.Discovery,
     native_events: []engine.Event,
     native_event_count: usize = 0,
     local_intent_workspace: *gossip.local_intent.Workspace,
@@ -227,13 +174,13 @@ pub const NetworkCore = struct {
         self.local_intent_workspace.* = try gossip.local_intent.Workspace.init(allocator, self.service.gossipsub.overlay.rows.len);
         errdefer self.local_intent_workspace.deinit(allocator);
         if (startup.discovery) |discovery_options| {
-            const owned = try allocator.create(DiscoveryOwners);
+            const owned = try allocator.create(peers.Discovery);
             errdefer allocator.destroy(owned);
-            try owned.init(allocator, io, discovery_options, resolved.socket_buffers.discovery, startup.host, &local, startup.schedule, self.transport.sockets.localAddresses(), self.last_now);
+            try owned.init(allocator, io, discovery_options, resolved.socket_buffers.discovery, startup.host, &local, startup.schedule, self.transport.sockets.localAddresses(), self.last_now.mono_ms);
             self.discovery = owned;
         }
         errdefer if (self.discovery) |owned| {
-            owned.deinit(allocator, io);
+            owned.deinit(io);
             allocator.destroy(owned);
         };
         self.service.identify.local = try self.prepareIdentifyLocal(self.advertisementEndpoints(), self.service.router.capabilities());
@@ -244,7 +191,7 @@ pub const NetworkCore = struct {
         if (!self.initialized) return;
         self.shutdown(self.last_now);
         if (self.discovery) |owned| {
-            owned.deinit(self.allocator, io);
+            owned.deinit(io);
             self.allocator.destroy(owned);
         }
         self.local_intent_workspace.deinit(self.allocator);
@@ -269,7 +216,7 @@ pub const NetworkCore = struct {
             };
             pm.dialing.shutdown(&pm.catalog, &self.transport.engine, now.mono_ms);
         }
-        if (self.discovery) |owned| owned.coordinator.cancel();
+        if (self.discovery) |owned| owned.cancel();
         // Include handshakes not yet admitted to the catalog.
         for (self.transport.engine.registry.slots, 0..) |slot, index| {
             const handle: engine.Handle = .{ .index = @intCast(index), .generation = slot.generation };
@@ -286,7 +233,7 @@ pub const NetworkCore = struct {
         return self.transport.localMultiaddr();
     }
     pub fn localRecord(self: *const NetworkCore) ?*const d.identity.enr.Record {
-        return if (self.discovery) |owned| owned.transport.engine.localRecord() else null;
+        return if (self.discovery) |owned| owned.localRecord() else null;
     }
     pub fn advertisementEndpoints(self: *const NetworkCore) ?AdvertisementEndpoints {
         return if (self.discovery) |owned| owned.endpoints else null;
@@ -433,7 +380,7 @@ pub const NetworkCore = struct {
         endpoints: ?AdvertisementEndpoints,
         capabilities: @import("capabilities.zig").Directional,
         identify: @import("identify/root.zig").Local,
-        record: ?d.identity.enr.Record = null,
+        record: ?peers.Discovery.PreparedAdvertisement = null,
         changed: bool,
     };
 
@@ -445,8 +392,7 @@ pub const NetworkCore = struct {
         try self.service.router.validateCapabilities(capabilities);
         if ((endpoints == null) != (self.discovery == null)) return error.InvalidAdvertisement;
         if (endpoints) |value| {
-            try validateEndpoints(value);
-            try validateEndpointFamilies(value, self.transport.sockets.localAddresses(), &self.discovery.?.transport.sockets);
+            try self.discovery.?.validateEndpoints(value);
         }
         var local = update.local;
         local.metadata.seq_number = self.peer_manager.local.metadata.seq_number;
@@ -470,22 +416,20 @@ pub const NetworkCore = struct {
             const announced = advertisementFor(&local, schedule, endpoints.?);
             const previous = advertisementFor(&self.peer_manager.local, self.schedule, owned.endpoints);
             if (!std.meta.eql(announced, previous)) {
-                const sequence = try peers.enr.nextSequence(owned.transport.engine.localRecord().sequence);
-                prepared.record = try peers.enr.build(&owned.transport.engine.channel.local_key, sequence, &announced, &local.fork);
+                prepared.record = try owned.prepareAdvertisement(&announced, &local.fork);
             }
         };
         return prepared;
     }
 
     fn publishLocal(self: *NetworkCore, prepared: *const PreparedLocal) !void {
-        if (prepared.record) |*record| try self.discovery.?.transport.engine.updateLocalRecord(record);
+        if (prepared.record) |*record| try self.discovery.?.installAdvertisement(record);
     }
 
     fn commitLocal(self: *NetworkCore, prepared: *const PreparedLocal, now: Now) void {
         std.debug.assert(prepared.changed);
         if (self.discovery) |owned| {
-            owned.endpoints = prepared.endpoints.?;
-            owned.coordinator.updateFork(&prepared.local.fork) catch unreachable;
+            owned.commitLocal(prepared.endpoints.?, &prepared.local.fork);
         }
         self.service.identify.local = prepared.identify;
         self.service.router.setCapabilities(prepared.capabilities);
@@ -571,7 +515,7 @@ pub const NetworkCore = struct {
         if (quic.backlog()) wakeups.note(.transport_backlog, now.mono_ms);
         if (quic.eventsPending()) wakeups.note(.transport_events, now.mono_ms);
         if (quic.nextDeadlineNs()) |deadline| wakeups.note(.transport_timer, ceilMs(deadline));
-        if (!self.peer_manager.quiescing) if (self.discovery) |owned| wakeups.note(.discovery, owned.coordinator.nextWakeup(now.mono_ms));
+        if (!self.peer_manager.quiescing) if (self.discovery) |owned| wakeups.note(.discovery, owned.nextWakeup(now.mono_ms));
         if (self.host_more) wakeups.note(.host, now.mono_ms);
     }
 
@@ -850,25 +794,13 @@ pub const NetworkCore = struct {
     fn discover(self: *NetworkCore, io: std.Io, tick: Now, result: *Result) void {
         const owned = self.discovery.?;
         const need = self.peer_manager.discoveryNeed();
-        owned.coordinator.request(need.query(tick.mono_ms +| 1_000), tick.mono_ms) catch unreachable;
+        owned.request(need.query(tick.mono_ms +| 1_000), tick.mono_ms) catch unreachable;
         const candidates = &owned.candidates;
         var eligible: [2]bool = if (result.readiness.failure == null) result.readiness.discovery else @splat(true);
         for (0..discovery_batch_max) |_| {
-            const progress = owned.coordinator.stepReady(io, tick.mono_ms, &eligible, candidates) catch |err| peers.discovery.Result{ .failure = err };
+            const progress = owned.stepReady(io, tick.mono_ms, &eligible, candidates) catch |err| peers.discovery.Result{ .failure = err };
             result.discovery.add(&progress);
-            var endpoints = owned.endpoints;
-            for (progress.learned, 0..) |learned, family| if (learned) |address| switch (address) {
-                .ip4 => |ip| {
-                    endpoints.ip4 = ip.octets;
-                    endpoints.udp = ip.port;
-                    endpoints.quic = owned.quic_ports[family];
-                },
-                .ip6 => |ip| {
-                    endpoints.ip6 = ip.octets;
-                    endpoints.udp6 = ip.port;
-                    endpoints.quic6 = owned.quic_ports[family];
-                },
-            };
+            const endpoints = owned.learnedEndpoints(progress.learned);
             if (!std.meta.eql(endpoints, owned.endpoints)) {
                 _ = self.updateLocalWithEndpoints(&self.peer_manager.local, self.schedule, endpoints, tick) catch |err| {
                     std.log.scoped(.network_discovery).warn("endpoint_update_failed reason={s}", .{@errorName(err)});
@@ -902,26 +834,7 @@ fn validateSchedule(local: *const t.LocalState, schedule: ForkSchedule) !void {
     if (schedule.next_epoch == std.math.maxInt(u64) and !std.mem.allEqual(u8, &schedule.next_digest, 0)) return error.InvalidSchedule;
     if ((schedule.fulu_scheduled or local.fork.fork.gte(.fulu)) and local.metadata.custody_group_count == null) return error.MissingCustodyAdvertisement;
 }
-fn advertisementFor(local: *const t.LocalState, schedule: ForkSchedule, endpoints: AdvertisementEndpoints) peers.enr.LocalAdvertisement {
-    return .{
-        .fork = .{ .digest = local.fork.digest, .next_version = schedule.next_version, .next_epoch = schedule.next_epoch },
-        .next_fork_digest = if (schedule.fulu_scheduled or local.fork.fork.gte(.fulu)) schedule.next_digest else null,
-        .attnets = local.metadata.attnets,
-        .syncnets = if (local.fork.fork.gte(.altair)) local.metadata.syncnets else null,
-        .custody_group_count = local.metadata.custody_group_count,
-        .ip4 = endpoints.ip4,
-        .ip6 = endpoints.ip6,
-        .udp = endpoints.udp,
-        .udp6 = endpoints.udp6,
-        .quic = endpoints.quic,
-        .quic6 = endpoints.quic6,
-    };
-}
-const validateEndpoints = advertisement.validate;
-fn validateEndpointFamilies(endpoints: AdvertisementEndpoints, quic: [2]?t.Address, udp: *const @import("udp").Sockets) error{InvalidAdvertisement}!void {
-    if ((endpoints.quic != null and quic[0] == null) or (endpoints.quic6 != null and quic[1] == null) or
-        (endpoints.udp != null and udp.values[0] == null) or (endpoints.ip6 != null and (endpoints.udp6 orelse endpoints.udp) != null and udp.values[1] == null)) return error.InvalidAdvertisement;
-}
+const advertisementFor = peers.discovery.advertisementFor;
 
 test {
     _ = @import("network_core_test.zig");

@@ -159,13 +159,15 @@ pub fn hasSession(self: *const Channel, peer: types.Endpoint) bool {
     return self.sessions.hasSession(peer);
 }
 
+/// Installs an immutable authenticated Record from an ENR constructor. Identity and freshness
+/// remain channel invariants; hostile encoded bytes must pass Record.init before this call.
 pub fn updateLocalRecord(self: *Channel, record: *const enr.Record) Error!void {
     if (record.length > record.bytes.len) return Error.InvalidLocalRecord;
-    const verified = enr.Record.init(record.slice()) catch return Error.InvalidLocalRecord;
     const public_key = crypto.compressedPublicKey(&self.local_key);
-    if (!std.mem.eql(u8, &public_key, &verified.public_key)) return Error.InvalidLocalRecord;
-    if (verified.sequence <= self.local_record.sequence) return Error.StaleLocalRecord;
-    self.local_record = verified;
+    if (!std.mem.eql(u8, &public_key, &record.public_key)) return Error.InvalidLocalRecord;
+    if (!std.mem.eql(u8, &record.node_id, &self.local_record.node_id)) return Error.InvalidLocalRecord;
+    if (record.sequence <= self.local_record.sequence) return Error.StaleLocalRecord;
+    self.local_record = record.*;
 }
 
 /// Returns the largest request `seal` can send to `peer` right now. With a session that is the

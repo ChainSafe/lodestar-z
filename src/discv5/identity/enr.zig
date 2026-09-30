@@ -22,6 +22,9 @@ pub const Field = struct {
     pub const Value = union(enum) { bytes: []const u8, uint: u64, raw: []const u8 };
 };
 
+/// An immutable authenticated ENR. Construct with init/initText for hostile bytes, or
+/// create/createFields for local signing. Trusted callers must preserve bytes and cached fields
+/// together; a copied Record retains the same contract. Authentication does not imply reachability.
 pub const Record = struct {
     bytes: [constants.enr_size_max]u8,
     length: u16,
@@ -56,7 +59,7 @@ pub const Record = struct {
         try record_writer.writeBytes(&signature);
         try writeFields(&record_writer, sequence, endpoint_value, &public_key);
         record_writer.finishList(record);
-        return Record.init(record_writer.bytes());
+        return fromSigned(record_writer.bytes(), key_pair);
     }
 
     /// Borrows a complete sorted field list, including id and secp256k1, for this call.
@@ -76,10 +79,10 @@ pub const Record = struct {
         try writer.writeBytes(&signature);
         try writeGenericFields(&writer, sequence, fields);
         writer.finishList(outer);
-        return Record.init(writer.bytes());
+        return fromSigned(writer.bytes(), key_pair);
     }
 
-    /// Returns one encoded RLP value borrowed until this record is mutated or released.
+    /// Returns one encoded RLP value borrowed until this record is released.
     pub fn field(self: *const Record, key: []const u8) Error!?[]const u8 {
         var outer = rlp.Reader.init(self.slice());
         var list = try outer.readList();
@@ -105,14 +108,30 @@ pub const Record = struct {
     /// Parses and verifies a signed record. Keys must be unique and sorted, and the signature
     /// covers the RLP list of everything after it.
     pub fn init(data: []const u8) Error!Record {
-        if (data.len > constants.enr_size_max) return Error.InvalidRecord;
         const parsed = try parse(data);
+        var digest: [32]u8 = undefined;
+        hashSignedPayload(parsed.signed_payload, &digest);
+        const key = try crypto.verifyAndDecode(&digest, &parsed.signature, &parsed.public_key);
+        return fromParsed(data, &parsed, &key);
+    }
+
+    fn fromSigned(data: []const u8, key_pair: *const crypto.KeyPair) Error!Record {
+        const parsed = try parse(data);
+        if (!std.mem.eql(u8, &parsed.public_key, &crypto.compressedPublicKey(key_pair)))
+            return Error.InvalidSignature;
+        return fromParsed(data, &parsed, &key_pair.public_key);
+    }
+
+    fn fromParsed(data: []const u8, parsed: *const Parsed, key: *const crypto.PublicKey) Record {
+        const uncompressed = key.toUncompressedSec1();
+        var node_id: types.NodeId = undefined;
+        Keccak256.hash(uncompressed[1..], &node_id, .{});
         var record = Record{
             .bytes = [_]u8{0} ** constants.enr_size_max,
             .length = @intCast(data.len),
             .sequence = parsed.sequence,
             .public_key = parsed.public_key,
-            .node_id = try nodeIdFromPublicKey(&parsed.public_key),
+            .node_id = node_id,
             .ip4 = parsed.ip4,
             .ip6 = parsed.ip6,
             .udp = parsed.udp,
@@ -260,6 +279,8 @@ fn writeFields(
 }
 
 const Parsed = struct {
+    signature: [64]u8,
+    signed_payload: []const u8,
     sequence: u64,
     public_key: [33]u8,
     ip4: ?[4]u8 = null,
@@ -269,6 +290,7 @@ const Parsed = struct {
 };
 
 fn parse(data: []const u8) Error!Parsed {
+    if (data.len > constants.enr_size_max) return Error.InvalidRecord;
     var outer = rlp.Reader.init(data);
     var list = outer.readList() catch return Error.InvalidRecord;
     if (!outer.atEnd()) return Error.InvalidRecord;
@@ -276,7 +298,7 @@ fn parse(data: []const u8) Error!Parsed {
     if (signature_bytes.len != 64) return Error.InvalidRecord;
     const signed_payload = list.data[list.position..];
     const sequence = list.readUint() catch return Error.InvalidRecord;
-    var parsed = Parsed{ .sequence = sequence, .public_key = undefined };
+    var parsed = Parsed{ .signature = signature_bytes[0..64].*, .signed_payload = signed_payload, .sequence = sequence, .public_key = undefined };
     var saw_public_key = false;
     var saw_v4 = false;
     var previous_key: ?[]const u8 = null;
@@ -296,10 +318,6 @@ fn parse(data: []const u8) Error!Parsed {
     if (!saw_v4) return Error.UnsupportedScheme;
     if (!saw_public_key) return Error.InvalidRecord;
 
-    var digest: [32]u8 = undefined;
-    hashSignedPayload(signed_payload, &digest);
-    const signature = signature_bytes[0..64].*;
-    try crypto.verify(&digest, &signature, &parsed.public_key);
     return parsed;
 }
 

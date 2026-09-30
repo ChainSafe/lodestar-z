@@ -495,7 +495,7 @@ test "channel exposes the next challenge or idle session deadline" {
     try std.testing.expect(pair.node_b.nextDeadlineMs() == null);
 }
 
-test "local record updates require a newer valid signature from the local key" {
+test "local record updates require a newer authenticated value from the local key" {
     var pair: Pair = undefined;
     try pair.init();
     defer pair.deinit();
@@ -507,7 +507,7 @@ test "local record updates require a newer valid signature from the local key" {
     try std.testing.expectError(Channel.Error.InvalidLocalRecord, pair.node_a.updateLocalRecord(&pair.record_b));
     var corrupted = try enr.Record.create(&try keyPair(0x11), 3, pair.address_a);
     corrupted.bytes[10] ^= 1;
-    try std.testing.expectError(Channel.Error.InvalidLocalRecord, pair.node_a.updateLocalRecord(&corrupted));
+    try std.testing.expectError(error.InvalidSignature, enr.Record.init(corrupted.slice()));
     corrupted.length = constants.enr_size_max + 1;
     try std.testing.expectError(Channel.Error.InvalidLocalRecord, pair.node_a.updateLocalRecord(&corrupted));
     try std.testing.expectEqualSlices(u8, updated.slice(), pair.node_a.local_record.slice());
@@ -533,5 +533,36 @@ test "sequence zero handshake includes identity for unknown and known zero chall
         try std.testing.expectEqualStrings("ping", inbound.authenticated.plaintext);
         try std.testing.expect(pair.node_b.hasSession(pair.peerA()));
         try std.testing.expectEqual(!known, inbound.authenticated.record != null);
+    }
+}
+
+test "stale handshake ENR still requires a valid signature before known identity fallback" {
+    for ([_]bool{ false, true }) |corrupt| {
+        var pair: Pair = undefined;
+        try pair.init();
+        defer pair.deinit();
+        var known = pair.identityA();
+        known.sequence += 1;
+        const who = try pair.challenge("ping", known, 1);
+        // Construct a hostile sender's packet with a stale, optionally invalid ENR.
+        if (corrupt) pair.node_a.local_record.bytes[10] ^= 1;
+        const sealed = try pair.node_a.answerChallenge(&pair.a_to_b, .{
+            .peer = pair.peerB(),
+            .remote_public_key = &pair.record_b.public_key,
+            .plaintext = "ping",
+            .challenge_data = &who.challenge_data,
+            .enr_sequence = 0,
+            .entropy = &handshakeEntropy(0x30),
+            .now_ms = 1,
+        });
+        const inbound = pair.node_b.receive(pair.a_to_b[0..sealed.packet_length], pair.address_a, 2, &pair.scratch);
+        if (corrupt) {
+            try std.testing.expectEqual(types.RejectReason.invalid_record, inbound.rejected);
+            try std.testing.expectEqual(@as(usize, 0), pair.node_b.sessions.sessionCount());
+        } else {
+            try std.testing.expect(inbound == .authenticated);
+            try std.testing.expect(inbound.authenticated.record == null);
+        }
+        try std.testing.expectEqual(@as(usize, 0), pair.node_b.sessions.challengeCount());
     }
 }

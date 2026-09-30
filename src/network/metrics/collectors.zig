@@ -115,9 +115,9 @@ fn writeNativeCounters(self: *const Context, w: *prom.Encoder) prom.Error!void {
     const refusals = &self.owner.peer_manager.dialing.refused;
     try refused.sample(.{"endpoint"}, refusals.endpoint);
     inline for (std.meta.fields(peer_types.Rejection)) |field| try refused.sample(.{field.name}, refusals.identity[field.value]);
-    const discovery_counts = if (self.owner.discovery) |d| d.coordinator.counters else discovery_metrics.Counters{};
-    const rejections = if (self.owner.discovery) |d| d.coordinator.rejections else @as([discovery_metrics.rejection_count]u64, @splat(0));
-    const datagram_rejections = if (self.owner.discovery) |d| d.coordinator.datagram_rejections else @as([discovery_metrics.datagram_rejection_count]u64, @splat(0));
+    const discovery_counts = if (self.owner.discovery) |d| d.counters else discovery_metrics.Counters{};
+    const rejections = if (self.owner.discovery) |d| d.rejections else @as([discovery_metrics.rejection_count]u64, @splat(0));
+    const datagram_rejections = if (self.owner.discovery) |d| d.datagram_rejections else @as([discovery_metrics.datagram_rejection_count]u64, @splat(0));
     try w.scalar(.{ .name = "lodestar_native_discovery_lookups_started_total", .kind = .counter, .help = "Foreground discovery lookups started" }, discovery_counts.lookups_started);
     try w.scalar(.{ .name = "lodestar_native_discovery_candidates_published_total", .kind = .counter, .help = "Authenticated discovery candidates handed to peer selection" }, discovery_counts.candidates_published);
     try w.enums(.{
@@ -289,7 +289,7 @@ fn writeDiscoveryProgress(self: *const Context, w: *prom.Encoder) prom.Error!voi
     });
     inline for (@typeInfo(@import("discv5").Lookup.FinishReason).@"enum".fields) |field| {
         if (comptime !std.mem.eql(u8, field.name, "cancelled"))
-            try lookup_finishes.sample(.{field.name}, discovery.coordinator.lookup_finishes[field.value]);
+            try lookup_finishes.sample(.{field.name}, discovery.lookup_finishes[field.value]);
     }
 }
 

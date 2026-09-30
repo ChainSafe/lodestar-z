@@ -423,7 +423,7 @@ test "metrics export dial time by outcome in seconds through shutdown" {
 test "metrics export cumulative discovery lookups and datagram rejections" {
     var f = try Fixture.initWith(&.{}, .{ .bind = .{ .ip4 = .loopback(0) }, .engine = .{ .session_capacity = 8, .challenge_capacity = 8, .call_capacity = 8 } });
     defer f.deinit();
-    const coordinator = &f.node.discovery.?.coordinator;
+    const coordinator = f.node.discovery.?;
     coordinator.counters.lookups_started = 5;
     coordinator.datagram_rejections[@intFromEnum(@import("discv5").types.RejectReason.invalid_handshake)] = 3;
     const output = try f.render(true);
