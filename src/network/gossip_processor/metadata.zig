@@ -27,17 +27,14 @@ pub fn extract(kind: Kind, electra: bool, data: []const u8) Metadata {
 pub fn eligible(metadata: *const Metadata, kind: Kind, deneb: bool, slot: u64) bool {
     const message_slot = metadata.slot orelse return true;
     const slots = @import("preset").preset.SLOTS_PER_EPOCH;
-    const earliest = if (deneb and kind == .beacon_attestation) (slot / slots -| 1) * slots else slot -| 32;
+    const attestation = kind == .beacon_attestation or kind == .beacon_aggregate_and_proof;
+    // Slot-only admission retains the previous-slot clock-disparity allowance. The host
+    // applies the exact time bound before accepting either form of attestation.
+    const earliest_current = if (attestation) slot -| 1 else slot;
+    const earliest = if (deneb and attestation) (earliest_current / slots -| 1) * slots else earliest_current -| 32;
     return message_slot >= earliest and message_slot <= slot +| 1;
 }
 
-test "gossip metadata bounds offsets and rejects far future retention" {
-    const t = std.testing;
-    var data: [240]u8 = @splat(0);
-    std.mem.writeInt(u64, data[16..24], 9999999, .little);
-    const meta = extract(.beacon_attestation, true, &data);
-    try t.expect(!eligible(&meta, .beacon_attestation, true, 100));
-    try t.expect(extract(.beacon_block, false, data[0..100]).slot == null);
-    try t.expect(extract(.beacon_block, false, &data).root == null);
-    try t.expect(meta.group != null and meta.root != null);
+test {
+    _ = @import("metadata_test.zig");
 }
