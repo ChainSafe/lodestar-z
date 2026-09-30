@@ -645,13 +645,13 @@ pub const NetworkCore = struct {
             }
         } else self.host_more = false;
         result.counts = self.process(self.native_events[0..result.transport.events], tick, outputs);
-        if (!self.peer_manager.stopped and !self.peer_manager.quiescing) {
+        if (!self.peer_manager.stopped and !self.peer_manager.quiescing and (result.failure == null or result.failure.? != error.Canceled)) {
             // This turn's coverage selection already ran, without a second protocol pump.
             if (self.discovery != null) self.discover(io, tick, &result);
             var intents: [dials_per_turn]manager.DialIntent = undefined;
             const room = self.transport.engine.limits.dialing_max -| self.transport.engine.registry.dialing;
             const count = self.peer_manager.dialIntents(self.service.gossipsub, &self.transport.engine, tick, intents[0..@min(room, intents.len)]);
-            for (intents[0..count]) |intent| {
+            for (intents[0..count], 0..) |intent, index| {
                 const handle = self.transport.dialPeer(io, intent.address, intent.peer) catch |err| {
                     if (err == error.DestinationUnreachable) {
                         std.log.scoped(.network_core).debug("dial_failed peer={f} endpoint={any} reason={s}", .{ @import("logging.zig").peer(&intent.peer), intent.address, @errorName(err) });
@@ -663,6 +663,14 @@ pub const NetworkCore = struct {
                         result.dial_deferred += 1;
                         result.failure = result.failure orelse err;
                     }
+                    if (err == error.Canceled) {
+                        for (intents[index + 1 .. count]) |pending| {
+                            std.debug.assert(self.peer_manager.dialDeferred(pending.token, tick));
+                            result.dial_deferred += 1;
+                        }
+                        result.failure = err;
+                        break;
+                    }
                     continue;
                 };
                 std.debug.assert(self.peer_manager.dialStarted(intent.token, handle));
@@ -672,7 +680,10 @@ pub const NetworkCore = struct {
             self.counters.dial_started +|= result.dial_started;
             self.counters.dial_deferred +|= result.dial_deferred;
         }
-        self.transport.flush(io, tick, &result.transport);
+        if ((result.failure == null or result.failure.? != error.Canceled)) self.transport.flush(io, tick, &result.transport) catch |err| {
+            result.failure = err;
+            self.counters.transport_failures +|= 1;
+        };
         return result;
     }
 
