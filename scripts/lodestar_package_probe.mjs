@@ -1,10 +1,9 @@
 import {realpathSync} from "node:fs";
 import {createRequire} from "node:module";
-import {resolve} from "node:path";
 import {pathToFileURL} from "node:url";
 
-// Runs inside a consumer: resolves every package export from each declaring manifest, loads them and reports the
-// native addons the process loaded. Run it with --experimental-import-meta-resolve.
+// Resolves and loads package exports in a consumer, then reports the native addons the process loaded.
+// The consumer must run with --experimental-import-meta-resolve.
 
 export async function probeExports(parents, specifiers) {
   const result = {exports: {}, loadedAddons: [], resolutions: []};
@@ -26,9 +25,4 @@ export async function probeExports(parents, specifiers) {
     .filter((path) => path.endsWith(".node"))
     .map((path) => realpathSync(path));
   return result;
-}
-
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  const [parentsJson, specifiersJson] = process.argv.slice(2);
-  process.stdout.write(JSON.stringify(await probeExports(JSON.parse(parentsJson), JSON.parse(specifiersJson))));
 }
