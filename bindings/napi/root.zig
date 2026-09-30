@@ -12,6 +12,7 @@ pub const BeaconStateView = @import("./BeaconStateView.zig");
 pub const blst = @import("./blst.zig");
 pub const blsVerifier = @import("./bls_verifier.zig");
 pub const NativeNetworkRuntime = @import("./network.zig");
+pub const NativeLevelDb = @import("./leveldb.zig");
 pub const pubkeys = @import("./pubkeys.zig");
 
 const options = @import("bls_options");

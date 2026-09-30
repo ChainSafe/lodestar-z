@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import {mkdtemp, readFile, rm, writeFile} from "node:fs/promises";
+import {copyFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile} from "node:fs/promises";
 import {tmpdir} from "node:os";
-import {join} from "node:path";
+import {dirname, join} from "node:path";
 import {test} from "node:test";
 import {fileURLToPath} from "node:url";
 import {
@@ -29,6 +29,27 @@ async function drifted(mutate, options) {
   const copy = structuredClone(record);
   mutate(copy);
   return codes(await checkProvenance(root, copy, options));
+}
+
+async function provenanceFixture(t) {
+  const directory = await mkdtemp(join(tmpdir(), "lodestar-build-provenance-"));
+  t.after(() => rm(directory, {force: true, recursive: true}));
+  for (const path of [
+    "package.json",
+    "build.zig.zon",
+    "build.zig",
+    "README.md",
+    "rust-toolchain.toml",
+    "pnpm-lock.yaml",
+    ".github/workflows/CI.yml",
+    ...Object.keys(record.install.platform.workflows),
+    record.notices,
+    "src/leveldb/LICENSE",
+  ]) {
+    await mkdir(dirname(join(directory, path)), {recursive: true});
+    await copyFile(join(root, path), join(directory, path));
+  }
+  return {copy: structuredClone(record), directory};
 }
 
 test("ZON parser reads the manifest subset and rejects malformed containers", () => {
@@ -122,6 +143,11 @@ test("notice sections are keyed by their header and required for every distribut
   const ids = expectedNotices(record).map((notice) => notice.id);
   for (const id of [
     "zig:blst/blst",
+    "copied:leveldb-wrapper",
+    "zig:leveldb_c/leveldb",
+    "zig:leveldb_c/snappy/snappy",
+    "zig:snappy",
+    "zig:snappy/snappy",
     "vendored:boringssl",
     "crate:bytes@1.11.1",
     "runtime:rust-std",
@@ -129,7 +155,15 @@ test("notice sections are keyed by their header and required for every distribut
   ]) {
     assert(ids.includes(id), id);
   }
-  for (const id of ["zig:blst", "zig:quiche_zig", "zig:zapi/zbuild", "zig:zbuild", "crate:quiche@0.28.0"]) {
+  for (const id of [
+    "zig:leveldb_c",
+    "zig:leveldb_c/snappy",
+    "zig:blst",
+    "zig:quiche_zig",
+    "zig:zapi/zbuild",
+    "zig:zbuild",
+    "crate:quiche@0.28.0",
+  ]) {
     assert(!ids.includes(id), id);
   }
   assert(!ids.some((id) => id.startsWith("crate:once_cell") || id.startsWith("crate:syn")));
@@ -138,11 +172,54 @@ test("notice sections are keyed by their header and required for every distribut
 test("the checked-in record matches the tree", async () => {
   const result = await checkProvenance(root, record);
   assert.deepEqual(result.errors, []);
-  assert.equal(result.summary.direct, 10);
+  assert.equal(result.summary.direct, 11);
   assert.equal(result.summary.npm, 1);
   const {comparedWordForWord, reviewedWithoutSource, sections, sourceUnavailable} = result.summary.notices;
   assert.equal(sections, expectedNotices(record).length);
   assert.equal(comparedWordForWord + reviewedWithoutSource.length + sourceUnavailable.length, sections);
+});
+
+test("the LevelDB artifact follows manifest library links without importing its upstream wrapper", async (t) => {
+  const {directory, copy} = await provenanceFixture(t);
+  const manifest = await readFile(join(directory, "build.zig.zon"), "utf8");
+  assert(linkedDependencies(parseZon(manifest)).has("leveldb_c"));
+  const detached = manifest.replace('.link_libraries = .{"leveldb_c:leveldb"}', ".link_libraries = .{}");
+  assert.notEqual(detached, manifest);
+  await writeFile(join(directory, "build.zig.zon"), detached);
+  assert(codes(await checkProvenance(directory, copy)).includes("ZigDependencyUse"));
+});
+
+test("copied wrapper licenses are mandatory and reproduced without fetched packages", async (t) => {
+  const {directory, copy} = await provenanceFixture(t);
+  const result = await checkProvenance(directory, copy);
+  assert.deepEqual(result.errors, []);
+  assert.equal(result.summary.transitive.verified, 0);
+  assert.equal(result.summary.notices.comparedWordForWord, 1);
+  assert(!result.summary.notices.sourceUnavailable.includes("copied:leveldb-wrapper"));
+  const path = join(directory, "src/leveldb/LICENSE");
+  await writeFile(path, "changed wrapper license");
+  assert.deepEqual(codes(await checkProvenance(directory, copy)), ["NoticeText"]);
+  await rm(path);
+  assert.deepEqual(codes(await checkProvenance(directory, copy)), ["NoticeSourceUnavailable"]);
+});
+
+test("copied licenses reject paths outside the repository", async (t) => {
+  const {directory, copy} = await provenanceFixture(t);
+  const copied = copy.copiedSources[0];
+  await symlink(join(root, "src/leveldb/LICENSE"), join(directory, "outside-license"));
+  for (const path of [
+    "",
+    ".",
+    "../LICENSE",
+    "src/../LICENSE",
+    "/tmp/LICENSE",
+    "C:/LICENSE",
+    "src\\LICENSE",
+    "outside-license",
+  ]) {
+    copied.reviewed.licenseFile = path;
+    assert.deepEqual(codes(await checkProvenance(directory, copy)), ["NoticeSourcePath"], path);
+  }
 });
 
 test("record drift from the tree fails with the disagreeing fact", async () => {
@@ -168,6 +245,9 @@ test("record drift from the tree fails with the disagreeing fact", async () => {
     ["RustToolchain", (r) => Object.assign(r.rust, {toolchain: "1.90.0"})],
     ["NpmIntegrity", (r) => Object.assign(r.npm.runtime[0], {integrity: "sha512-drift"})],
     ["NpmRuntimePins", (r) => Object.assign(r.npm.runtime[0], {version: "4.0.1"})],
+    ["PackageFiles", (r) => r.install.files.splice(r.install.files.indexOf("docs/leveldb.md"), 1)],
+    ["PackageFiles", (r) => r.install.files.splice(r.install.files.indexOf("src/leveldb/LICENSE"), 1)],
+    ["PackageFiles", (r) => r.install.files.push("unexpected.txt")],
     ["PlatformTargets", (r) => r.install.platform.targets.pop()],
     ["ReleaseStep", (r) => r.install.platform.workflows[PUBLISH].push("pnpm zapi publish --dry-run")],
     // The legal files must be in place before verification and publishing.
@@ -208,7 +288,7 @@ test("fetched packages verify transitive pins, the resolved crate closure and re
   }
   const result = await checkProvenance(root, record, {requireFetched: true});
   assert.deepEqual(result.errors, []);
-  assert.deepEqual(result.summary.transitive, {unfetched: 0, verified: 15});
+  assert.deepEqual(result.summary.transitive, {unfetched: 0, verified: 19});
   const {comparedWordForWord, reviewedWithoutSource} = result.summary.notices;
   assert(comparedWordForWord > 0);
   const unnamed = expectedNotices(record).filter((notice) => notice.file === null);

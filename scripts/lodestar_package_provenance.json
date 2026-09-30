@@ -10,6 +10,17 @@
     }
   },
   "notices": "THIRD_PARTY_NOTICES.txt",
+  "copiedSources": [
+    {
+      "name": "leveldb-wrapper",
+      "reviewed": {
+        "license": "MIT",
+        "licenseFile": "src/leveldb/LICENSE",
+        "origin": "https://github.com/ChainSafe/leveldb.zig/tree/186c4ddb4d4569a54103cd00749ca5d81623d6aa",
+        "evidence": "Copied raw Zig wrapper adapted in src/leveldb/raw.zig for Zig 0.16.0, with the bounded API in src/leveldb/root.zig. Retains the ChainSafe Systems attribution and MIT license; no local Zig package dependency."
+      }
+    }
+  ],
   "zig": {
     "toolchain": "0.16.0",
     "dependencies": [
@@ -51,6 +62,55 @@
             "url": "git+https://github.com/offchainlabs/hashtree#fba14494dada4420440d985c2c516341d9c24b9b",
             "hash": "N-V-__8AAJ03FACfm8Hlfs97yP3-2Hd5ZzSv9yYuoEi3Yi_B",
             "reviewed": {"license": "MIT", "contributes": "code", "licenseFile": "LICENSE", "evidence": "LICENSE"}
+          }
+        ]
+      },
+      {
+        "name": "leveldb_c",
+        "url": "git+https://github.com/ChainSafe/leveldb.zig#e44b7544178a7fdcf12f41e15b5d043cf2ac3be9",
+        "hash": "leveldb-0.1.0-nY4h8EuhAADx4YKZtMTVqPkcCK1xjRl5qU4qp9g4LPwT",
+        "use": "addon",
+        "reviewed": {
+          "license": "MIT",
+          "contributes": "build",
+          "licenseFile": null,
+          "evidence": "The leveldb module links only this package's leveldb C++ artifact via link_libraries. build.zig compiles upstream Google LevelDB and links the snappy artifact; its separate src/root.zig wrapper module is not imported. The copied local raw wrapper has its own MIT notice (copied:leveldb-wrapper)."
+        },
+        "dependencies": [
+          {
+            "name": "leveldb",
+            "url": "git+https://github.com/google/leveldb#ac691084fdc5546421a55b25e7653d450e5a25fb",
+            "hash": "N-V-__8AAFYkDwAaCkrqWx3fY7zEKG2rp55dCDmkZYyv5zqn",
+            "reviewed": {
+              "license": "BSD-3-Clause",
+              "contributes": "code",
+              "licenseFile": "LICENSE",
+              "evidence": "LICENSE"
+            }
+          },
+          {
+            "name": "snappy",
+            "url": "git+https://github.com/chainsafe/snappy.zig#713942410426051da6107a955b29f3f152815622",
+            "hash": "snappy-0.1.0-n4AaquQ4AADQScvw9-i6SJvZTTagvxmGgGKnat4T_a4e",
+            "reviewed": {
+              "license": "MIT",
+              "contributes": "build",
+              "licenseFile": null,
+              "evidence": "Only the snappy C++ artifact is linked by leveldb.zig; its separate Zig module is not imported along this dependency path. LICENSE at 71394241 upstream; the package omits it."
+            },
+            "dependencies": [
+              {
+                "name": "snappy",
+                "url": "git+https://github.com/google/snappy#6f99459b5b837fa18abb1be317d3ac868530f384",
+                "hash": "N-V-__8AAGQlMwAN9FGuTgQ6eeGHXgLOoQUSPaBmljRIqfzy",
+                "reviewed": {
+                  "license": "BSD-3-Clause",
+                  "contributes": "code",
+                  "licenseFile": "COPYING",
+                  "evidence": "COPYING"
+                }
+              }
+            ]
           }
         ]
       },
@@ -321,7 +381,7 @@
     ]
   },
   "install": {
-    "files": ["bindings/src/", "zig-out/lib/", "THIRD_PARTY_NOTICES.txt"],
+    "files": ["bindings/src/", "docs/leveldb.md", "src/leveldb/LICENSE", "zig-out/lib/", "THIRD_PARTY_NOTICES.txt"],
     "legal": ["THIRD_PARTY_NOTICES.txt"],
     "embedded": {
       "addon": "zig-out/lib/bindings.node",

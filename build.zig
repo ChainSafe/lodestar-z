@@ -7,6 +7,10 @@ pub fn build(b: *std.Build) !void {
     const manifest = @import("build.zig.zon");
     const result = try zbuild.configureBuild(b, manifest, .{});
     addGossipSha256(b, result.module("network").?);
+    const leveldb = result.dependency("leveldb_c").?.artifact("leveldb").root_module;
+    leveldb.pic = true;
+    // The pinned upstream build spells O_CLOEXEC with a zero; keep database descriptors out of child processes.
+    if (leveldb.resolved_target.?.result.os.tag != .windows) leveldb.addCMacro("HAVE_O_CLOEXEC", "1");
     // snappy.zig leaves its static library to the target's default, which is not position independent for musl, and
     // the addon links it into a shared library.
     result.dependency("snappy").?.artifact("snappy").root_module.pic = true;
