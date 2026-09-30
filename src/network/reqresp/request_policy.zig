@@ -224,7 +224,8 @@ pub const Policy = struct {
                 try self.host(scalar(bytes, 76));
                 if (which == .status_v2) try self.host(scalar(bytes, 84));
             },
-            .ping_v1, .goodbye_v1 => try self.host(scalar(bytes, 0)),
+            .goodbye_v1 => try self.host(scalar(bytes, 0)),
+            .ping_v1 => {},
             .metadata_v1, .metadata_v2, .metadata_v3, .light_client_bootstrap_v1, .light_client_finality_update_v1, .light_client_optimistic_update_v1 => {},
         }
         const supported = if (which == .data_column_sidecars_by_range_v1 or which == .data_column_sidecars_by_root_v1)

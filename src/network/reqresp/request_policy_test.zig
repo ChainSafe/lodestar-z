@@ -239,3 +239,27 @@ test "reqresp request admission policy configured limits and full preset column 
     const maximum = @import("protocol.zig").requestMaxAll();
     try std.testing.expect(maximum >= @import("consensus_types").phase0.BeaconBlockRoots.max_size);
 }
+
+test "native Ping and Metadata preserve full u64 sequences under host integer policy" {
+    var cfg = fixture();
+    cfg.host_integer_max = 9007199254740991;
+    const policy = try p.Policy.init(&cfg);
+    const wire = @import("../control_wire.zig");
+    const peers = @import("../peers/types.zig");
+    const fork: peers.ForkContext = .{ .fork = .fulu, .custody_groups = 128 };
+    for ([_]u64{ 9007199254740991, 9007199254740992, std.math.maxInt(u64) }) |sequence| {
+        var ping: [8]u8 = undefined;
+        put(&ping, 0, sequence);
+        const inspected = try policy.inspect(.ping_v1, &ping, .fulu);
+        try std.testing.expectEqual(@as(u128, 1), inspected.charged_cost);
+        try std.testing.expectEqual(@as(u32, 1), inspected.chunks_max);
+        const metadata: peers.Metadata = .{ .seq_number = sequence, .custody_group_count = 1 };
+        var encoded: [25]u8 = undefined;
+        const length = try wire.encodeMetadata(.metadata_v3, &metadata, fork, &encoded);
+        try std.testing.expectEqual(sequence, (try wire.decodeMetadata(.metadata_v3, encoded[0..length], fork)).seq_number);
+        var range = [_]u8{0} ** 24;
+        put(&range, 0, sequence);
+        put(&range, 8, 1);
+        try std.testing.expectError(error.HostIntegerRange, policy.inspect(.blocks_by_range_v2, &range, .fulu));
+    }
+}
