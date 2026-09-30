@@ -160,7 +160,14 @@ jobs:
         run: |
           cargo --version
           cmake --version
-          node --test test/interop/*.test.mjs
+          node --test \
+            test/interop/bounded_lines.test.mjs \
+            test/interop/check_network_binding_results.test.mjs \
+            test/interop/codec.test.mjs \
+            test/interop/control_wire.test.mjs \
+            test/interop/fixtures.test.mjs \
+            test/interop/release_artifacts.test.mjs \
+            test/interop/stock_packages.test.mjs
           pnpm test:network-interop
           pnpm test:network-core-interop
           pnpm test:network-identify-interop
