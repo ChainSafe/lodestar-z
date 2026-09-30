@@ -647,6 +647,10 @@ pub const NetworkCore = struct {
         result.transport.events = self.transport.collect(tick, self.native_events);
         result.transport.events_pending = self.transport.engine.eventsPending();
         self.native_event_count = result.transport.events;
+        self.transport.drainKeylog(io) catch |err| {
+            result.failure = result.failure orelse err;
+            self.counters.transport_failures +|= 1;
+        };
         if (host.apply) |apply| {
             const due = if (host.deadline_ms) |deadline| deadline <= tick.mono_ms else false;
             if (result.readiness.host or result.readiness.failure != null or self.host_more or due) {
@@ -682,6 +686,10 @@ pub const NetworkCore = struct {
             self.counters.dial_deferred +|= result.dial_deferred;
         }
         self.transport.flush(io, tick, &result.transport);
+        self.transport.drainKeylog(io) catch |err| {
+            result.failure = result.failure orelse err;
+            self.counters.transport_failures +|= 1;
+        };
         return result;
     }
 

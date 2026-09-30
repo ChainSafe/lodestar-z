@@ -2082,3 +2082,80 @@ test "core discovery sessions expire idle lookup contacts" {
     try std.testing.expectEqual(@as(usize, 2_048), config.session_capacity);
     try std.testing.expectEqual(@as(u64, 600_000), config.session_idle_timeout_ms);
 }
+
+const SyntheticKeylogHost = struct {
+    previous: @import("types.zig").Handle,
+    replacement: ?@import("types.zig").Handle = null,
+    failure: ?anyerror = null,
+
+    fn apply(context: *anyopaque, node: *runtime.NetworkCore, now: Now) runtime.HostProgress {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.replace(node, now) catch |err| {
+            self.failure = err;
+        };
+        return .{};
+    }
+
+    fn replace(self: *@This(), node: *runtime.NetworkCore, now: Now) !void {
+        const engine = &node.transport.engine;
+        try std.testing.expect(engine.abandon(self.previous));
+        const replacement = try engine.dial(&node.transport.localAddress(), node.peerId(), now);
+        self.replacement = replacement;
+        try std.testing.expectEqual(self.previous.index, replacement.index);
+        try std.testing.expect(self.previous.generation != replacement.generation);
+        try std.testing.expect(engine.close(replacement, 0));
+        try std.testing.expect(engine.registry.slots[replacement.index].handshake.appendKeylog("synthetic after callback"));
+    }
+};
+
+fn failSyntheticKeylog(_: ?*anyopaque, _: std.Io.File, _: []const u8, _: []const []const u8, _: usize, _: u64) std.Io.File.WritePositionalError!usize {
+    return error.NoSpaceLeft;
+}
+
+test "core synthetic keylog drains before slot reuse and after callbacks despite earlier failure" {
+    for ([_]bool{ false, true }) |clock_failure| {
+        for ([_]bool{ false, true }) |write_failure| {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var path: [80]u8 = undefined;
+            const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{95}));
+            var opts = options(&key);
+            opts.startup.keylog_path = try std.fmt.bufPrint(&path, ".zig-cache/tmp/{s}/synthetic.log", .{&tmp.sub_path});
+            var node: runtime.NetworkCore = undefined;
+            try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
+            defer node.deinit(std.testing.io);
+            const now = node.last_now;
+            const handle = try node.transport.engine.dial(&node.transport.localAddress(), node.peerId(), now);
+            node.transport.engine.failSend(handle.index);
+            try std.testing.expect(node.transport.engine.eventsPending());
+            try std.testing.expect(node.transport.engine.registry.slots[handle.index].handshake.appendKeylog("synthetic before callback"));
+            var host: SyntheticKeylogHost = .{ .previous = handle };
+            var faults: FaultIo = .{ .clock = if (clock_failure) .{} else null };
+            faults.init(std.testing.io);
+            defer faults.deinit();
+            if (write_failure) faults.vtable.fileWritePositional = failSyntheticKeylog;
+            const result = node.step(faults.io(), now, .{}, .{ .context = &host, .apply = SyntheticKeylogHost.apply, .deadline_ms = now.mono_ms });
+            if (clock_failure) {
+                try std.testing.expectEqual(error.ClockOutOfRange, result.failure.?);
+            } else if (write_failure) {
+                try std.testing.expectEqual(error.KeylogWriteFailed, result.failure.?);
+            } else try std.testing.expect(result.failure == null);
+            try std.testing.expect(host.failure == null);
+            try std.testing.expect(host.replacement != null);
+            try std.testing.expectEqual(@as(usize, 1), result.transport.events);
+            try std.testing.expectEqual(@as(u32, 0), result.transport.datagrams_sent);
+            try std.testing.expectEqual(!write_failure, node.transport.keylog != null);
+            try std.testing.expectEqual(@as(u64, @intFromBool(clock_failure)) + @intFromBool(write_failure), node.counters.transport_failures);
+            const bytes = try tmp.dir.readFileAlloc(std.testing.io, "synthetic.log", std.testing.allocator, .limited(128));
+            defer std.testing.allocator.free(bytes);
+            try std.testing.expectEqualStrings(if (write_failure) "" else "synthetic before callback\nsynthetic after callback\n", bytes);
+            const next = node.step(std.testing.io, node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms));
+            try std.testing.expect(next.failure == null);
+            try std.testing.expectEqual(@as(usize, 1), next.transport.events);
+            const retired = node.step(std.testing.io, node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms));
+            try std.testing.expect(retired.failure == null);
+            try std.testing.expectEqual(@as(usize, 0), retired.transport.events);
+            try std.testing.expectEqual(@as(u16, 0), node.transport.engine.registry.active_len);
+        }
+    }
+}
