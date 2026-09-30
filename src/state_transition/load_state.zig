@@ -456,34 +456,7 @@ fn findModifiedValidators(
     modified_validators: *std.ArrayList(ValidatorIndex),
     validator_offset: usize,
 ) !void {
-    std.debug.assert(validators_bytes.len == validators_bytes2.len);
-    std.debug.assert(validators_bytes.len % types.phase0.Validator.fixed_size == 0);
-
-    if (std.mem.eql(u8, validators_bytes, validators_bytes2)) return;
-
-    if (validators_bytes.len == types.phase0.Validator.fixed_size) {
-        try modified_validators.append(allocator, @intCast(validator_offset));
-        return;
-    }
-
-    const num_validator = validators_bytes.len / types.phase0.Validator.fixed_size;
-    const half_validator = num_validator / 2;
-    const split = half_validator * types.phase0.Validator.fixed_size;
-
-    try findModifiedValidators(
-        allocator,
-        validators_bytes[0..split],
-        validators_bytes2[0..split],
-        modified_validators,
-        validator_offset,
-    );
-    try findModifiedValidators(
-        allocator,
-        validators_bytes[split..],
-        validators_bytes2[split..],
-        modified_validators,
-        validator_offset + half_validator,
-    );
+    return findModifiedIndices(types.phase0.Validator.fixed_size, allocator, validators_bytes, validators_bytes2, modified_validators, validator_offset);
 }
 
 /// Append the absolute indices (offset by `validator_offset`) of inactivity scores
@@ -495,34 +468,50 @@ fn findModifiedInactivityScores(
     modified_validators: *std.ArrayList(ValidatorIndex),
     validator_offset: usize,
 ) !void {
-    std.debug.assert(inactivity_scores_bytes.len == inactivity_scores_bytes2.len);
-    std.debug.assert(inactivity_scores_bytes.len % INACTIVITY_SCORE_SIZE == 0);
+    return findModifiedIndices(INACTIVITY_SCORE_SIZE, allocator, inactivity_scores_bytes, inactivity_scores_bytes2, modified_validators, validator_offset);
+}
 
-    if (std.mem.eql(u8, inactivity_scores_bytes, inactivity_scores_bytes2)) return;
+fn findModifiedIndices(
+    comptime element_size: usize,
+    allocator: Allocator,
+    old_bytes: []const u8,
+    new_bytes: []const u8,
+    modified: *std.ArrayList(ValidatorIndex),
+    index_offset: usize,
+) !void {
+    comptime std.debug.assert(element_size > 1);
+    std.debug.assert(old_bytes.len == new_bytes.len);
+    std.debug.assert(old_bytes.len % element_size == 0);
 
-    if (inactivity_scores_bytes.len == INACTIVITY_SCORE_SIZE) {
-        try modified_validators.append(allocator, @intCast(validator_offset));
-        return;
+    const Range = struct { start: usize, end: usize };
+    // Each split saves one right half, so even a usize-sized input needs at most this many slots.
+    var pending: [@bitSizeOf(usize)]Range = undefined;
+    var pending_count: usize = 0;
+    const count = old_bytes.len / element_size;
+    var range: Range = .{ .start = 0, .end = count };
+
+    // A binary partition visits at most 2 * count - 1 ranges; the extra slots also cover empty input.
+    for (0..2 * count + 1) |_| {
+        const start = range.start * element_size;
+        const end = range.end * element_size;
+        if (!std.mem.eql(u8, old_bytes[start..end], new_bytes[start..end])) {
+            if (range.end - range.start == 1) {
+                try modified.append(allocator, @intCast(index_offset + range.start));
+            } else {
+                const split = range.start + (range.end - range.start) / 2;
+                std.debug.assert(pending_count < pending.len);
+                pending[pending_count] = .{ .start = split, .end = range.end };
+                pending_count += 1;
+                range.end = split;
+                continue;
+            }
+        }
+
+        if (pending_count == 0) return;
+        pending_count -= 1;
+        range = pending[pending_count];
     }
-
-    const num_validator = inactivity_scores_bytes.len / INACTIVITY_SCORE_SIZE;
-    const half_validator = num_validator / 2;
-    const split = half_validator * INACTIVITY_SCORE_SIZE;
-
-    try findModifiedInactivityScores(
-        allocator,
-        inactivity_scores_bytes[0..split],
-        inactivity_scores_bytes2[0..split],
-        modified_validators,
-        validator_offset,
-    );
-    try findModifiedInactivityScores(
-        allocator,
-        inactivity_scores_bytes[split..],
-        inactivity_scores_bytes2[split..],
-        modified_validators,
-        validator_offset + half_validator,
-    );
+    unreachable;
 }
 
 test "loadState scenarios" {
@@ -711,7 +700,9 @@ test "diff helpers cases" {
         name: []const u8,
         kind: Kind,
         count: usize,
-        modified: []const usize,
+        modified: []const usize = &.{},
+        all_modified: bool = false,
+        offset: usize = 0,
     };
 
     const mod_none = [_]usize{};
@@ -719,6 +710,16 @@ test "diff helpers cases" {
     const mod_some_scores = [_]usize{ 0, 7, 31, 32, 63 };
 
     const cases = [_]Case{
+        .{ .name = "validators: empty", .kind = .validators, .count = 0 },
+        .{ .name = "scores: empty", .kind = .scores, .count = 0 },
+        .{ .name = "validators: single", .kind = .validators, .count = 1, .modified = &.{0}, .offset = 7 },
+        .{ .name = "scores: single", .kind = .scores, .count = 1, .modified = &.{0}, .offset = 9 },
+        .{ .name = "validators: odd sparse", .kind = .validators, .count = 129, .modified = &.{ 0, 64, 128 }, .offset = 11 },
+        .{ .name = "scores: odd sparse", .kind = .scores, .count = 129, .modified = &.{ 0, 64, 128 }, .offset = 13 },
+        .{ .name = "validators: large dense", .kind = .validators, .count = 65_537, .all_modified = true, .offset = 17 },
+        .{ .name = "scores: large dense", .kind = .scores, .count = 65_537, .all_modified = true, .offset = 19 },
+        .{ .name = "validators: large sparse", .kind = .validators, .count = 65_537, .modified = &.{ 0, 32_768, 65_536 }, .offset = 23 },
+        .{ .name = "scores: large sparse", .kind = .scores, .count = 65_537, .modified = &.{ 0, 32_768, 65_536 }, .offset = 29 },
         .{ .name = "validators: no diff", .kind = .validators, .count = 128, .modified = mod_none[0..] },
         .{ .name = "validators: some diff", .kind = .validators, .count = 128, .modified = mod_some_validators[0..] },
         .{ .name = "scores: no diff", .kind = .scores, .count = 64, .modified = mod_none[0..] },
@@ -728,6 +729,7 @@ test "diff helpers cases" {
     for (cases) |case| {
         var got: std.ArrayList(ValidatorIndex) = .empty;
         defer got.deinit(allocator);
+        const output_allocator = if (case.modified.len == 0 and !case.all_modified) std.testing.failing_allocator else allocator;
 
         if (case.kind == .validators) {
             const total = case.count * types.phase0.Validator.fixed_size;
@@ -745,12 +747,15 @@ test "diff helpers cases" {
             }
             @memcpy(new_bytes, old_bytes);
 
+            if (case.all_modified) {
+                for (0..case.count) |idx| new_bytes[idx * types.phase0.Validator.fixed_size] ^= 0x5a;
+            }
             for (case.modified) |idx| {
                 const start = idx * types.phase0.Validator.fixed_size;
                 new_bytes[start] ^= 0x5a;
             }
 
-            try findModifiedValidators(allocator, old_bytes, new_bytes, &got, 0);
+            try findModifiedValidators(output_allocator, old_bytes, new_bytes, &got, case.offset);
         } else {
             const total = case.count * INACTIVITY_SCORE_SIZE;
             const old_bytes = try allocator.alloc(u8, total);
@@ -765,18 +770,51 @@ test "diff helpers cases" {
             }
             @memcpy(new_bytes, old_bytes);
 
+            if (case.all_modified) {
+                for (0..case.count) |idx| new_bytes[idx * INACTIVITY_SCORE_SIZE] ^= 0xa5;
+            }
             for (case.modified) |idx| {
                 const start = idx * INACTIVITY_SCORE_SIZE;
                 new_bytes[start] ^= 0xa5;
             }
 
-            try findModifiedInactivityScores(allocator, old_bytes, new_bytes, &got, 0);
+            try findModifiedInactivityScores(output_allocator, old_bytes, new_bytes, &got, case.offset);
         }
 
-        try std.testing.expectEqual(case.modified.len, got.items.len);
-        for (case.modified, got.items) |e, g| {
-            try std.testing.expectEqual(@as(ValidatorIndex, @intCast(e)), g);
+        try std.testing.expectEqual(if (case.all_modified) case.count else case.modified.len, got.items.len);
+        for (got.items, 0..) |got_index, i| {
+            const expected = case.offset + if (case.all_modified) i else case.modified[i];
+            try std.testing.expectEqual(@as(ValidatorIndex, @intCast(expected)), got_index);
         }
+    }
+}
+
+test "diff helpers should preserve appended indices on allocation failure" {
+    inline for (.{ types.phase0.Validator.fixed_size, INACTIVITY_SCORE_SIZE }) |element_size| {
+        const old_bytes = [_]u8{0} ** (257 * element_size);
+        const new_bytes = [_]u8{1} ** (257 * element_size);
+        const diff = if (element_size == INACTIVITY_SCORE_SIZE) findModifiedInactivityScores else findModifiedValidators;
+        var saw_oom = false;
+
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+            fn run(allocator: Allocator, before: []const u8, after: []const u8, failed: *bool) !void {
+                var got: std.ArrayList(ValidatorIndex) = .empty;
+                defer got.deinit(allocator);
+                try got.append(allocator, 3);
+
+                diff(allocator, before, after, &got, 11) catch |err| {
+                    failed.* = true;
+                    try std.testing.expectEqual(error.OutOfMemory, err);
+                    try std.testing.expectEqual(@as(ValidatorIndex, 3), got.items[0]);
+                    for (got.items[1..], 0..) |index, i| try std.testing.expectEqual(@as(ValidatorIndex, 11 + i), index);
+                    return err;
+                };
+                try std.testing.expectEqual(@as(usize, 258), got.items.len);
+                try std.testing.expectEqual(@as(ValidatorIndex, 3), got.items[0]);
+                for (got.items[1..], 0..) |index, i| try std.testing.expectEqual(@as(ValidatorIndex, 11 + i), index);
+            }
+        }.run, .{ &old_bytes, &new_bytes, &saw_oom });
+        try std.testing.expect(saw_oom);
     }
 }
 
