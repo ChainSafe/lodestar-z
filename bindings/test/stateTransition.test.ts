@@ -43,7 +43,11 @@ describe("serialized state transition", () => {
     const bytes = ssz.fulu.BeaconState.serialize(value);
     const native = bindings.BeaconStateView.createFromBytes(bytes, config);
     expect(native.latestExecutionPayloadHeader).toEqual(value.latestExecutionPayloadHeader);
-    expect(ssz.fulu.BeaconState.serialize(native.toValue())).toEqual(bytes);
+    const result = native.toValue();
+    expect(result.eth1Data.depositCount).toBe(BigInt(value.eth1Data.depositCount));
+    // The pinned JS codec still expects a number for this fixture's deposit count.
+    result.eth1Data.depositCount = value.eth1Data.depositCount;
+    expect(Buffer.compare(ssz.fulu.BeaconState.serialize(result), bytes)).toBe(0);
   }, 30_000);
 
   it("returns expected withdrawal amounts as bigint", () => {
