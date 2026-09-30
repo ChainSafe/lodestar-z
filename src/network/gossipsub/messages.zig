@@ -118,7 +118,7 @@ pub const Messages = struct {
         const fast = try a.alloc(FastEntry, layout.fingerprints);
         errdefer a.free(fast);
         @memset(fast, .{});
-        var pending = try validation.Validation.init(a, layout.validations, options.validation_timeout_ms, options.validation_tombstone_ms);
+        var pending = try validation.Validation.initForTopics(a, layout.validations, options.validation_timeout_ms, options.validation_tombstone_ms, layout.topics);
         seen.index.seed = options.random_seed.?;
         history.index.seed = options.random_seed.? ^ 1;
         history.topic_index.seed = options.random_seed.? ^ 2;
@@ -138,7 +138,7 @@ pub const Messages = struct {
 
     pub fn metadataBytes(layout: *const @import("layout.zig").Layout) usize {
         return storage.Store.metadataBytes(layout.payload_entries, layout.payload_bytes) +
-            Validation.backingBytes(layout.validations) + layout.fingerprints * @sizeOf(FastEntry) +
+            Validation.backingBytesForTopics(layout.validations, layout.topics) + layout.fingerprints * @sizeOf(FastEntry) +
             mcache.History.backingBytes(layout.history, layout.retained) + layout.history * @sizeOf(MessageId) +
             mcache.SeenCache.backingBytes(layout.seen);
     }

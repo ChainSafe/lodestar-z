@@ -225,7 +225,7 @@ test "topic policy real wire receives only bounded SSZ and keeps borrowed payloa
     try std.testing.expectEqual(@as(usize, 2), seen);
 }
 
-test "topic policy all 784 names stay separate from retained live topic capacity" {
+test "topic policy all 784 resident names keep the live subscription limit at 512" {
     const boundaries = @import("topic_fixture.zig").hoodi();
     var g = try support.init(std.testing.allocator, options(&boundaries));
     defer g.deinit();
@@ -242,7 +242,7 @@ test "topic policy all 784 names stay separate from retained live topic capacity
                 if (names < 512) {
                     try support.subscribe(&g, topic_name);
                 } else {
-                    try std.testing.expectEqual(@as(?u16, null), support.intern(&g, topic_name));
+                    try std.testing.expectEqual(@as(?u16, @intCast(names)), support.intern(&g, topic_name));
                     try std.testing.expectError(error.TopicCapacity, support.subscribe(&g, topic_name));
                 }
                 names += 1;
@@ -250,9 +250,9 @@ test "topic policy all 784 names stay separate from retained live topic capacity
         }
     }
     try std.testing.expectEqual(@as(usize, 784), names);
-    try std.testing.expectEqual(@as(usize, 512), live(&g));
-    for (g.overlay.rows) |row| {
-        try std.testing.expect(row.subscribed);
+    try std.testing.expectEqual(@as(usize, 784), live(&g));
+    for (g.overlay.rows, 0..) |row, i| {
+        try std.testing.expectEqual(i < 512, row.subscribed);
         try std.testing.expectEqual(@as(u64, 1), row.generation);
     }
 }
@@ -273,9 +273,12 @@ test "topic policy copied startup allocation prefixes and whole owner memory rec
     const configured_bytes = ledger.bytes;
     var raw_options = options(&boundaries);
     raw_options.topic_policy = null;
-    var raw = try gossip.Gossipsub.init(std.testing.allocator, raw_options);
+    var raw_ledger: @import("../reservations.zig").Reservations = .{ .backing = std.testing.allocator };
+    var raw = try gossip.Gossipsub.init(raw_ledger.allocator(), raw_options);
     defer raw.deinit();
-    try std.testing.expectEqual(ns.allocatedBytes(), g.memoryPlan().total_bytes - raw.memoryPlan().total_bytes);
+    try std.testing.expectEqual(raw.memoryPlan().total_bytes - @sizeOf(Gossipsub), raw_ledger.bytes);
+    try std.testing.expectEqual(configured_bytes - raw_ledger.bytes, g.memoryPlan().total_bytes - raw.memoryPlan().total_bytes);
+    try std.testing.expect(ns.allocatedBytes() < configured_bytes - raw_ledger.bytes);
     std.debug.print("topic namespace memory: boundaries={d} topics={d} peers={d} descriptor_bytes={d} offset_bytes={d} bitmap_bytes={d} delta={d} owner_requested={d}\n", .{ ns.boundaries.len, ns.topic_count, ns.connected_capacity, ns.boundaries.len * @sizeOf(p.Boundary), ns.offsets.len * @sizeOf([p.kind_count]u16), ns.subscriptions.len * 8, ns.allocatedBytes(), configured_bytes });
 }
 
@@ -315,6 +318,7 @@ test "topic policy remembered ordinals remain independent of retained validation
         const next = try std.fmt.bufPrint(&buffer, "/eth2/{x:0>2}020304/data_column_sidecar_{d}/ssz_snappy", .{ i / 128 + 1, i % 128 });
         try support.subscribe(&g, next);
     }
+    for (g.overlay.rows[512..]) |*row| row.generation = std.math.maxInt(u64);
     const replacement = "/eth2/04020304/data_column_sidecar_127/ssz_snappy";
     try std.testing.expectEqual(@as(?u16, null), support.intern(&g, replacement));
     try std.testing.expectEqual(generation, g.overlay.rows[old].generation);

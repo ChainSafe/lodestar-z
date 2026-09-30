@@ -120,20 +120,31 @@ pub const Stores = struct {
     targets: [2][256]n.PeerId = undefined,
     remembered: [2]RememberedPage = undefined,
     pub fn create(backing: std.mem.Allocator, capacity: usize) !*Stores {
+        return createForTopics(backing, capacity, n.gossipsub.constants.topics_cap);
+    }
+    pub fn createForTopics(backing: std.mem.Allocator, capacity: usize, topics: usize) !*Stores {
         const self = try backing.create(Stores);
         errdefer backing.destroy(self);
         self.* = .{ .backing = backing, .snapshots = undefined };
         self.snapshots[0] = try backing.alloc(n.peers.types.Snapshot, capacity);
         errdefer backing.free(self.snapshots[0]);
         self.snapshots[1] = try backing.alloc(n.peers.types.Snapshot, capacity);
+        errdefer backing.free(self.snapshots[1]);
+        self.gossip_diagnostics[0] = try n.gossipsub.diagnostics.Page.init(backing, topics);
+        errdefer self.gossip_diagnostics[0].deinit(backing);
+        self.gossip_diagnostics[1] = try n.gossipsub.diagnostics.Page.init(backing, topics);
         return self;
     }
     pub fn destroy(self: *Stores) void {
+        for (&self.gossip_diagnostics) |*page| page.deinit(self.backing);
         for (self.snapshots) |snapshots| self.backing.free(snapshots);
         self.backing.destroy(self);
     }
     pub fn bytes(capacity: usize) usize {
-        return @sizeOf(Stores) + 2 * capacity * @sizeOf(n.peers.types.Snapshot);
+        return bytesForTopics(capacity, n.gossipsub.constants.topics_cap);
+    }
+    pub fn bytesForTopics(capacity: usize, topics: usize) usize {
+        return @sizeOf(Stores) + 2 * capacity * @sizeOf(n.peers.types.Snapshot) + 2 * n.gossipsub.diagnostics.Page.backingBytes(topics);
     }
 };
 

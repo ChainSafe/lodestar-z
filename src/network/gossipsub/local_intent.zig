@@ -28,10 +28,14 @@ pub const Boundary = struct {
     }
 };
 pub const OrdinalSet = std.StaticBitSet(policy.topic_max);
-pub const TopicSet = std.StaticBitSet(constants.topics_cap);
+pub const TopicSet = std.DynamicBitSetUnmanaged;
+
+pub fn topicSetBytes(topics: usize) usize {
+    return ((topics + @bitSizeOf(usize) - 1) / @bitSizeOf(usize) + 1) * @sizeOf(usize);
+}
 pub const Pins = struct {
-    validation: TopicSet = .initEmpty(),
-    outbound: TopicSet = .initEmpty(),
+    validation: TopicSet = .{},
+    outbound: TopicSet = .{},
 };
 pub const Assignment = struct {
     generation: u64,
@@ -45,11 +49,21 @@ pub const Workspace = struct {
     entries: [constants.topics_cap]Assignment = undefined,
     len: u16 = 0,
     desired: OrdinalSet = .initEmpty(),
-    reserved: TopicSet = .initEmpty(),
+    reserved: TopicSet = .{},
     pins: Pins = .{},
     now_ms: u64 = 0,
     slot: u64 = 0,
     prepared: bool = false,
+
+    pub fn init(a: std.mem.Allocator, topics: usize) !Workspace {
+        std.debug.assert(topics > 0 and topics <= policy.topic_max);
+        return .{ .reserved = try TopicSet.initEmpty(a, topics) };
+    }
+
+    pub fn deinit(self: *Workspace, a: std.mem.Allocator) void {
+        self.reserved.deinit(a);
+        self.* = undefined;
+    }
 };
 
 pub const Error = error{ TopicCapacity, DuplicateBoundary, InvalidTopic, TopicPolicyRequired };

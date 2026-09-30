@@ -141,7 +141,8 @@ pub const Outbox = struct {
     /// When the last write blocked, until a writable event.
     blocked_since: ?u64 = null,
     subscription_since: ?u64 = null,
-    subscription_dirty: std.StaticBitSet(constants.topics_cap) = .initEmpty(),
+    /// Borrows the session owner's startup-sized words; resets preserve this slice.
+    subscription_dirty: std.DynamicBitSetUnmanaged = .{},
     subscription_cursor: usize = 0,
     drops: [drop_reason_count]u64 = @splat(0),
     pressure_pending: bool = false,
@@ -154,9 +155,8 @@ pub const Outbox = struct {
     }
 
     /// Starts a new out stream, which takes writes, with a full subscription snapshot.
-    pub fn synchronize(self: *Outbox, subscribed: *const std.StaticBitSet(constants.topics_cap), now: u64) void {
-        self.subscription_dirty = subscribed.*;
-        self.subscription_since = if (subscribed.count() == 0) null else self.subscription_since orelse now;
+    pub fn synchronize(self: *Outbox, now: u64) void {
+        self.subscription_since = if (self.subscription_dirty.count() == 0) null else self.subscription_since orelse now;
         self.ready = true;
         self.blocked_since = null;
     }
@@ -175,10 +175,10 @@ pub const Outbox = struct {
 
     pub fn nextSubscription(self: *Outbox) ?u16 {
         if (self.subscription_dirty.count() == 0) return null;
-        for (0..constants.topics_cap) |_| {
+        for (0..self.subscription_dirty.bit_length) |_| {
             const index = self.subscription_cursor;
             if (self.subscription_dirty.isSet(index)) return @intCast(index);
-            self.subscription_cursor = (index + 1) % constants.topics_cap;
+            self.subscription_cursor = (index + 1) % self.subscription_dirty.bit_length;
         }
         return null;
     }
@@ -187,7 +187,7 @@ pub const Outbox = struct {
         assert(self.subscription_dirty.isSet(index));
         if (self.submit(&.{ .subscription = .{ .topic = name, .subscribed = subscribed } }, scratch, now) == null) return false;
         self.subscription_dirty.unset(index);
-        self.subscription_cursor = (index + 1) % constants.topics_cap;
+        self.subscription_cursor = (index + 1) % self.subscription_dirty.bit_length;
         if (self.subscription_dirty.count() == 0) self.subscription_since = null;
         return true;
     }
@@ -306,17 +306,19 @@ pub const Outbox = struct {
             .critical = self.critical,
             .data = self.data,
             .sequence = self.sequence,
+            .subscription_dirty = self.subscription_dirty,
             .drops = self.drops,
             .pressure_log_due_ms = self.pressure_log_due_ms,
             .last_drop = self.last_drop,
             .ready = false,
         };
+        self.subscription_dirty.setRangeValue(.{ .start = 0, .end = self.subscription_dirty.bit_length }, false);
         self.control.reset();
         self.critical.reset();
     }
 
     pub fn cancelStream(self: *Outbox, store: *storage.Store) void {
-        self.subscription_dirty = .initEmpty();
+        self.subscription_dirty.setRangeValue(.{ .start = 0, .end = self.subscription_dirty.bit_length }, false);
         self.subscription_since = null;
         self.subscription_cursor = 0;
         self.control_burst = 0;

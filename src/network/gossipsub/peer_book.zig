@@ -56,10 +56,11 @@ pub const PeerBook = struct {
         const rows = try a.alloc(Row, count);
         errdefer a.free(rows);
         @memset(rows, .{});
-        const backoffs = try a.alloc(Backoff, @as(usize, count) * constants.topics_cap);
+        const topic_count = @import("layout.zig").Layout.residentTopics(options);
+        const backoffs = try a.alloc(Backoff, @as(usize, count) * topic_count);
         errdefer a.free(backoffs);
         @memset(backoffs, .{});
-        const scores = try @import("score.zig").PeerScore.init(a, options.score_params, count);
+        const scores = try @import("score.zig").PeerScore.initForTopics(a, options.score_params, count, topic_count);
         var book: PeerBook = .{ .rows = rows, .backoffs = backoffs, .scores = scores, .retention_ms = retention_ms, .reserved = reserved };
         @memcpy(book.ip_allowlist[0..options.ip_allowlist.len], options.ip_allowlist);
         book.ip_allowlist_len = @intCast(options.ip_allowlist.len);
@@ -100,7 +101,7 @@ pub const PeerBook = struct {
         const index = expired orelse self.reclaimable(metadata.direction, now) orelse return .capacity;
         const row = &self.rows[index];
         assert(row.connection == null and row.pins == 0);
-        @memset(self.backoffs[index * constants.topics_cap ..][0..constants.topics_cap], .{});
+        @memset(self.backoffs[index * self.scores.topic_params.len ..][0..self.scores.topic_params.len], .{});
         row.* = .{ .generation = row.generation + 1, .occupied = true, .identity = metadata.identity };
         self.scores.resetPeer(@intCast(index));
         self.connect(@intCast(index), conn, metadata, now);
@@ -145,7 +146,7 @@ pub const PeerBook = struct {
         row.retain_until = now +| self.retention_ms;
         row.negative = self.score(ref, now) < 0;
         // Topic reclamation cannot reuse a generation while its backoff is live.
-        for (self.backoffs[@as(usize, ref.index) * constants.topics_cap ..][0..constants.topics_cap]) |entry| {
+        for (self.backoffs[@as(usize, ref.index) * self.scores.topic_params.len ..][0..self.scores.topic_params.len]) |entry| {
             row.retain_until = @max(row.retain_until, entry.until);
             if (entry.topic_generation != 0 and now < entry.until) row.negative = true;
         }
@@ -170,7 +171,11 @@ pub const PeerBook = struct {
     }
 
     pub fn backingBytes(count: usize) usize {
-        return count * (@sizeOf(Row) + constants.topics_cap * @sizeOf(Backoff)) + @import("score.zig").PeerScore.backingBytes(count);
+        return backingBytesForTopics(count, constants.topics_cap);
+    }
+
+    pub fn backingBytesForTopics(count: usize, topics: usize) usize {
+        return count * (@sizeOf(Row) + topics * @sizeOf(Backoff)) + @import("score.zig").PeerScore.backingBytesForTopics(count, topics);
     }
 
     pub fn invalid(self: *PeerBook, ref: Ref, topic: u16) void {
@@ -191,7 +196,7 @@ pub const PeerBook = struct {
             const ref: Ref = .{ .index = @intCast(i), .generation = row.generation };
             if (row.connection == null) {
                 var useful = self.score(ref, now) < 0;
-                for (self.backoffs[i * constants.topics_cap ..][0..constants.topics_cap]) |entry| {
+                for (self.backoffs[i * self.scores.topic_params.len ..][0..self.scores.topic_params.len]) |entry| {
                     if (now < entry.until) useful = true;
                 }
                 self.rows[i].negative = useful;
@@ -199,7 +204,7 @@ pub const PeerBook = struct {
             if (row.connection == null and row.pins == 0 and now >= row.retain_until) {
                 self.scores.resetPeer(@intCast(i));
                 self.rows[i].occupied = false;
-                @memset(self.backoffs[i * constants.topics_cap ..][0..constants.topics_cap], .{});
+                @memset(self.backoffs[i * self.scores.topic_params.len ..][0..self.scores.topic_params.len], .{});
             }
         }
         self.scores.refresh(now);
@@ -219,8 +224,8 @@ pub const PeerBook = struct {
 
     pub fn backoff(self: *PeerBook, ref: Ref, topic: u16) *Backoff {
         assert(self.matches(ref));
-        assert(topic < constants.topics_cap);
-        return &self.backoffs[@as(usize, ref.index) * constants.topics_cap + topic];
+        assert(topic < self.scores.topic_params.len);
+        return &self.backoffs[@as(usize, ref.index) * self.scores.topic_params.len + topic];
     }
 
     pub fn addBackoff(self: *PeerBook, ref: Ref, topic: u16, generation: u64, now: u64, duration_ms: u64) void {

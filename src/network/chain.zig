@@ -85,8 +85,8 @@ pub const Plan = struct {
     }
 
     // The host adds namespaces two epochs early and removes them two epochs late.
-    // Preparation needs outgoing rows until additions fit. This checks scheduled demand only;
-    // delayed transitions and runtime retention pins can still exhaust the table.
+    // Resident storage covers the complete namespace, including outgoing and retained rows.
+    // The live subscription limit applies to the committed host schedule.
     fn validateScheduledTopicDemand(self: *const Plan) error{UnsupportedTopicOverlap}!void {
         const lookahead: u64 = 2;
         var counts: [boundary_max]usize = @splat(0);
@@ -102,7 +102,7 @@ pub const Plan = struct {
             var demand: usize = 0;
             for (self.boundaries[0..self.boundary_count], 0..) |boundary, i| {
                 if (epoch < boundary.epoch -| lookahead) continue;
-                if (i + 1 < self.boundary_count and epoch > self.boundaries[i + 1].epoch +| lookahead) continue;
+                if (i + 1 < self.boundary_count and epoch >= self.boundaries[i + 1].epoch +| lookahead) continue;
                 demand += counts[i];
             }
             if (demand > @import("gossipsub/constants.zig").topics_cap) return error.UnsupportedTopicOverlap;

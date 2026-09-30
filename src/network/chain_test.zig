@@ -182,12 +182,12 @@ test "network chain scheduled topic demand accepts exact capacity and rejects on
     }
 }
 
-test "network chain scheduled demand includes additions before same epoch removals" {
+test "network chain live demand permits replacements at the same removal epoch" {
     var input = fuluSchedule();
-    input.BLOB_SCHEDULE = &.{ .{ .EPOCH = 10, .MAX_BLOBS_PER_BLOCK = 33 }, .{ .EPOCH = 14, .MAX_BLOBS_PER_BLOCK = 40 } };
+    input.BLOB_SCHEDULE = &.{ .{ .EPOCH = 10, .MAX_BLOBS_PER_BLOCK = 33 }, .{ .EPOCH = 13, .MAX_BLOBS_PER_BLOCK = 40 } };
     var cfg = config.BeaconConfig.init(input, @splat(0));
     try std.testing.expectError(error.UnsupportedTopicOverlap, chain.Plan.init(&cfg, true));
-    input.BLOB_SCHEDULE = &.{ .{ .EPOCH = 10, .MAX_BLOBS_PER_BLOCK = 33 }, .{ .EPOCH = 15, .MAX_BLOBS_PER_BLOCK = 40 } };
+    input.BLOB_SCHEDULE = &.{ .{ .EPOCH = 10, .MAX_BLOBS_PER_BLOCK = 33 }, .{ .EPOCH = 14, .MAX_BLOBS_PER_BLOCK = 40 } };
     cfg = config.BeaconConfig.init(input, @splat(0));
     _ = try chain.Plan.init(&cfg, true);
 }
@@ -240,7 +240,8 @@ fn applyScheduled(g: *gossip.Gossipsub, plan: *const chain.Plan, epoch: u64) !us
         }
         count += 1;
     }
-    var workspace: gossip.local_intent.Workspace = .{};
+    var workspace = try gossip.local_intent.Workspace.init(std.testing.allocator, g.overlay.rows.len);
+    defer workspace.deinit(std.testing.allocator);
     const slot = epoch * preset.preset.SLOTS_PER_EPOCH;
     if (try g.prepareSubscriptions(desired[0..count], &workspace, .{ .mono_ms = slot * 12_000, .unix_s = 0 }, slot)) g.commitSubscriptions(&workspace);
     return workspace.len;
@@ -262,24 +263,39 @@ test "network chain exact capacity schedule advances into the supported three di
     }
 }
 
-test "network chain scheduled demand validation leaves retained score capacity unresolved" {
-    var input = fuluSchedule();
-    input.BLOB_SCHEDULE = &.{ .{ .EPOCH = 10, .MAX_BLOBS_PER_BLOCK = 33 }, .{ .EPOCH = 16, .MAX_BLOBS_PER_BLOCK = 40 } };
-    const cfg = config.BeaconConfig.init(input, @splat(0));
-    const plan = try chain.Plan.init(&cfg, true);
-    var g = try initScheduledGossip(&plan);
-    defer g.deinit();
-    try std.testing.expectEqual(@as(usize, 410), try applyScheduled(&g, &plan, 8));
-    const peer = @import("gossipsub/test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
-    const logical = g.sessions.rows[peer.index].logical;
-    for (g.overlay.rows, 0..) |row, i| {
-        if (row.active and row.ordinal.? < 205) g.peers.scores.invalid(logical.index, @intCast(i));
+test "network chain namespace capacity preserves retired scores and backoffs across transitions" {
+    for ([_]u64{ 14, 16 }) |incoming_epoch| {
+        for ([_]bool{ false, true }) |delayed| {
+            var input = fuluSchedule();
+            input.BLOB_SCHEDULE = &.{ .{ .EPOCH = 10, .MAX_BLOBS_PER_BLOCK = 33 }, .{ .EPOCH = incoming_epoch, .MAX_BLOBS_PER_BLOCK = 40 } };
+            const cfg = config.BeaconConfig.init(input, @splat(0));
+            const plan = try chain.Plan.init(&cfg, true);
+            var g = try initScheduledGossip(&plan);
+            defer g.deinit();
+            try std.testing.expectEqual(@as(usize, 615), g.overlay.rows.len);
+            try std.testing.expectEqual(@as(usize, 410), try applyScheduled(&g, &plan, 8));
+            const peer = @import("gossipsub/test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+            const logical = g.sessions.rows[peer.index].logical;
+            var generations: [205]u64 = undefined;
+            for (g.overlay.rows[0..205], 0..) |row, i| {
+                generations[i] = row.generation;
+                g.peers.scores.invalid(logical.index, @intCast(i));
+                g.peers.addBackoff(logical, @intCast(i), row.generation, 1_000_000_000, 60_000);
+            }
+            if (!delayed) try std.testing.expectEqual(@as(usize, if (incoming_epoch == 14) 410 else 205), try applyScheduled(&g, &plan, 12));
+            try std.testing.expectEqual(@as(usize, 410), try applyScheduled(&g, &plan, incoming_epoch - 2));
+            for (g.overlay.rows[0..205], 0..) |row, i| {
+                try std.testing.expect(row.active and !row.subscribed);
+                try std.testing.expectEqual(generations[i], row.generation);
+                try std.testing.expectEqual(@as(f64, 1), g.peers.scores.topics[@as(usize, logical.index) * g.overlay.rows.len + i].invalid);
+                try std.testing.expect(g.peers.backedOff(logical, @intCast(i), generations[i], 1_000_000_001));
+            }
+            var live: usize = 0;
+            for (g.overlay.rows) |row| {
+                try std.testing.expect(row.active);
+                live += @intFromBool(row.subscribed);
+            }
+            try std.testing.expectEqual(@as(usize, 410), live);
+        }
     }
-    try std.testing.expectEqual(@as(usize, 205), try applyScheduled(&g, &plan, 12));
-    g.sessions.rows[peer.index].io.tx.subscription_dirty = .initEmpty();
-    try std.testing.expectError(error.TopicCapacity, applyScheduled(&g, &plan, 14));
-    for (g.overlay.rows, 0..) |row, i| {
-        if (row.active and !row.subscribed) g.peers.scores.resetTopic(@intCast(i));
-    }
-    try std.testing.expectEqual(@as(usize, 410), try applyScheduled(&g, &plan, 14));
 }

@@ -107,7 +107,7 @@ pub fn init(allocator: std.mem.Allocator, options: gossip.Options) !gossip.Gossi
 pub fn subscriptionUpdate(g: *const gossip.Gossipsub, name: ?[]const u8, subscribed: bool, out: *[topic_policy.boundary_max]local_intent.Boundary) ![]const local_intent.Boundary {
     var names: [@import("constants.zig").topics_cap][]const u8 = undefined;
     var count: usize = 0;
-    for (&g.overlay.rows, 0..) |*row, index| {
+    for (g.overlay.rows, 0..) |*row, index| {
         if (!row.active or !row.subscribed) continue;
         const current = g.overlay.topicString(@intCast(index));
         if (name) |changed| if (std.mem.eql(u8, current, changed)) continue;
@@ -136,7 +136,8 @@ pub fn unsubscribe(g: *gossip.Gossipsub, name: []const u8) !void {
 
 fn setSubscription(g: *gossip.Gossipsub, name: []const u8, subscribed: bool) !void {
     var boundaries: [topic_policy.boundary_max]local_intent.Boundary = undefined;
-    var workspace: local_intent.Workspace = .{};
+    var workspace = try local_intent.Workspace.init(std.testing.allocator, g.overlay.rows.len);
+    defer workspace.deinit(std.testing.allocator);
     _ = try g.prepareSubscriptions(try subscriptionUpdate(g, name, subscribed, &boundaries), &workspace, .{ .mono_ms = g.last_now_ms, .unix_s = 0 }, g.overlay.slot);
     g.commitSubscriptions(&workspace);
 }

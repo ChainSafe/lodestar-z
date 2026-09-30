@@ -205,3 +205,39 @@ test("host intents preserve native advertisement and reject endpoint overrides",
     await runtime.close();
   }
 });
+
+test("namespace-sized residents allow delayed replacement and diagnose rows above the live limit", async () => {
+  const config = applicationConfig();
+  const chain = configureChain({
+    BLOB_SCHEDULE: [
+      {EPOCH: 2010, MAX_BLOBS_PER_BLOCK: 33},
+      {EPOCH: 2014, MAX_BLOBS_PER_BLOCK: 66},
+    ],
+  });
+  const sets: NativeSubscriptionSet[] = chain.forkBoundariesAscendingEpochOrder
+    .filter((boundary) => boundary.epoch >= 2000 && boundary.epoch < Infinity)
+    .map((boundary) => ({
+      digest: chain.forkBoundary2ForkDigest(boundary),
+      subnets: {
+        beacon_attestation: new Uint8Array(8).fill(255),
+        data_column_sidecar: new Uint8Array(16).fill(255),
+      },
+    }));
+  expect(sets).toHaveLength(3);
+  const runtime = startRuntime(config);
+  const intent = localIntent(config);
+  try {
+    intent.subscriptions = sets.slice(0, 2);
+    await runtime.applyIntent(intent, config.initialSlot);
+    intent.subscriptions = sets.slice(1);
+    expect((await runtime.applyIntent(intent, config.initialSlot + 1n)).changed).toBe(true);
+    const current = (await runtime.getGossipDiagnostics()).topics.filter(({subscribed}) => subscribed);
+    expect(current).toHaveLength(384);
+    expect(current.some(({index}) => index > 511)).toBe(true);
+    intent.subscriptions = sets;
+    await expect(runtime.applyIntent(intent, config.initialSlot + 2n)).rejects.toThrow("TopicCapacity");
+    expect((await runtime.getGossipDiagnostics()).topics.filter(({subscribed}) => subscribed)).toEqual(current);
+  } finally {
+    await runtime.close();
+  }
+});

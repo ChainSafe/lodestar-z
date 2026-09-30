@@ -224,7 +224,8 @@ pub const NetworkCore = struct {
         errdefer allocator.free(self.native_events);
         self.local_intent_workspace = try allocator.create(gossip.local_intent.Workspace);
         errdefer allocator.destroy(self.local_intent_workspace);
-        self.local_intent_workspace.* = .{};
+        self.local_intent_workspace.* = try gossip.local_intent.Workspace.init(allocator, self.service.gossipsub.overlay.rows.len);
+        errdefer self.local_intent_workspace.deinit(allocator);
         if (startup.discovery) |discovery_options| {
             const owned = try allocator.create(DiscoveryOwners);
             errdefer allocator.destroy(owned);
@@ -246,6 +247,7 @@ pub const NetworkCore = struct {
             owned.deinit(self.allocator, io);
             self.allocator.destroy(owned);
         }
+        self.local_intent_workspace.deinit(self.allocator);
         self.allocator.destroy(self.local_intent_workspace);
         self.service.deinit();
         self.control_protocol.deinit(self.allocator);

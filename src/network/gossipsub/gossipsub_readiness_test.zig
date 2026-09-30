@@ -40,7 +40,7 @@ test "gossip idle mesh of 200 sessions costs no session visits" {
     for (0..199) |i| {
         const peer = gossip_test.addPeer(g, .{ .index = @intCast(300 + i), .generation = 1 }, .v1_2).?;
         const tx = &g.sessions.rows[peer.index].io.tx;
-        tx.subscription_dirty = .initEmpty();
+        tx.subscription_dirty.setRangeValue(.{ .start = 0, .end = tx.subscription_dirty.bit_length }, false);
         tx.subscription_since = null;
         g.settle(peer.index);
         const context = g.overlayContext(setup.shared.pair.now.mono_ms);

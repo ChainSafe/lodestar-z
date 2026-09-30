@@ -51,8 +51,8 @@ pub const Validation = struct {
     pending_entries: lists.List = .{},
     free_records: lists.List = .{},
     resolved_records: lists.List = .{},
-    topic_pin_counts: [@import("constants.zig").topics_cap]u32 = @splat(0),
-    topic_pins: @import("local_intent.zig").TopicSet = .initEmpty(),
+    topic_pin_counts: []u32,
+    topic_pins: @import("local_intent.zig").TopicSet,
 
     timeout_ms: u64,
     tombstone_ms: u64,
@@ -62,7 +62,16 @@ pub const Validation = struct {
     bytes_per_peer_kind: [@import("peer_book.zig").capacity][@import("../gossip_limits.zig").kind_count]usize = @splat(@splat(0)),
 
     pub fn init(a: std.mem.Allocator, capacity: usize, timeout_ms: u64, tombstone_ms: u64) !Validation {
-        if (capacity == 0 or capacity > 65535 or timeout_ms == 0 or tombstone_ms == 0) return error.InvalidLimits;
+        return initForTopics(a, capacity, timeout_ms, tombstone_ms, @import("constants.zig").topics_cap);
+    }
+
+    pub fn initForTopics(a: std.mem.Allocator, capacity: usize, timeout_ms: u64, tombstone_ms: u64, topics: usize) !Validation {
+        if (capacity == 0 or capacity > 65535 or timeout_ms == 0 or tombstone_ms == 0 or topics == 0 or topics > @import("topic_policy.zig").topic_max) return error.InvalidLimits;
+        const topic_pin_counts = try a.alloc(u32, topics);
+        errdefer a.free(topic_pin_counts);
+        @memset(topic_pin_counts, 0);
+        var topic_pins = try @import("local_intent.zig").TopicSet.initEmpty(a, topics);
+        errdefer topic_pins.deinit(a);
         const entries = try a.alloc(Entry, capacity);
         errdefer a.free(entries);
         @memset(entries, .{});
@@ -70,7 +79,7 @@ pub const Validation = struct {
         errdefer a.free(recent);
         @memset(recent, .{});
         const index = try mcache.IdIndex(Attribution).init(a, recent);
-        var result: Validation = .{ .entries = entries, .recent = recent, .index = index, .timeout_ms = timeout_ms, .tombstone_ms = tombstone_ms };
+        var result: Validation = .{ .topic_pin_counts = topic_pin_counts, .topic_pins = topic_pins, .entries = entries, .recent = recent, .index = index, .timeout_ms = timeout_ms, .tombstone_ms = tombstone_ms };
         for (0..entries.len) |i| result.available_entries.append(entries, "available_link", @intCast(i));
         for (0..recent.len) |i| result.free_records.append(recent, "link", @intCast(i));
         return result;
@@ -79,6 +88,8 @@ pub const Validation = struct {
     pub fn deinit(self: *Validation, a: std.mem.Allocator, store: *storage.Store, peers: *Peers) void {
         self.clear(store, peers);
         self.index.deinit(a);
+        self.topic_pins.deinit(a);
+        a.free(self.topic_pin_counts);
         a.free(self.recent);
         a.free(self.entries);
         self.* = undefined;
@@ -113,7 +124,11 @@ pub const Validation = struct {
     }
 
     pub fn backingBytes(capacity: usize) usize {
-        return capacity * @sizeOf(Entry) + attributionCapacity(capacity) * @sizeOf(Attribution) +
+        return backingBytesForTopics(capacity, @import("constants.zig").topics_cap);
+    }
+
+    pub fn backingBytesForTopics(capacity: usize, topics: usize) usize {
+        return topics * @sizeOf(u32) + @import("local_intent.zig").topicSetBytes(topics) + capacity * @sizeOf(Entry) + attributionCapacity(capacity) * @sizeOf(Attribution) +
             mcache.indexCapacity(attributionCapacity(capacity)) * @sizeOf(u32);
     }
 

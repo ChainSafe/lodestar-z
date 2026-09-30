@@ -41,6 +41,7 @@ pub const Sessions = struct {
     blocked_writes: u64 = 0,
     delivery_revision: u64 = 0,
     io_arena: []u8,
+    subscription_words: []usize,
     receive_pool: ReceivePool,
     decode_scratch: []u8,
     deliveries: *DeliveryPool,
@@ -59,6 +60,10 @@ pub const Sessions = struct {
     pub fn init(a: std.mem.Allocator, options: *const @import("options.zig").Options, layout: *const @import("layout.zig").Layout) !Sessions {
         const rows = try a.alloc(Session, layout.sessions);
         errdefer a.free(rows);
+        const words_per_peer = (@as(usize, layout.topics) + @bitSizeOf(usize) - 1) / @bitSizeOf(usize);
+        const subscription_words = try a.alloc(usize, rows.len * words_per_peer);
+        errdefer a.free(subscription_words);
+        @memset(subscription_words, 0);
         const per_peer = layout.session_buffer_bytes;
         const arena = try a.alloc(u8, rows.len * per_peer);
         errdefer a.free(arena);
@@ -78,13 +83,17 @@ pub const Sessions = struct {
         errdefer a.destroy(deliveries);
         deliveries.* = try DeliveryPool.init(a, rows.len, layout.deliveries);
         deliveries.local_descriptors = options.tx_local_descriptors;
-        for (rows, 0..) |*row, i| row.* = .{ .io = PeerIo.init(arena[i * per_peer ..][0..per_peer], options, deliveries) };
-        return .{ .rows = rows, .deadlines = deadlines, .by_connection = by_connection, .io_arena = arena, .receive_pool = receive_pool, .decode_scratch = decode_scratch, .deliveries = deliveries };
+        for (rows, 0..) |*row, i| {
+            row.* = .{ .io = PeerIo.init(arena[i * per_peer ..][0..per_peer], options, deliveries) };
+            row.io.tx.subscription_dirty = .{ .bit_length = layout.topics, .masks = subscription_words[i * words_per_peer ..].ptr };
+        }
+        return .{ .rows = rows, .deadlines = deadlines, .by_connection = by_connection, .io_arena = arena, .subscription_words = subscription_words, .receive_pool = receive_pool, .decode_scratch = decode_scratch, .deliveries = deliveries };
     }
 
     pub fn metadataBytes(layout: *const @import("layout.zig").Layout) usize {
         return @as(usize, layout.sessions) * (@sizeOf(Session) + @sizeOf(DeadlineHeap.Entry) + @sizeOf(u32)) + @sizeOf(DeliveryPool) +
             @as(usize, layout.connection_slots) * @sizeOf(u16) +
+            @as(usize, layout.sessions) * ((@as(usize, layout.topics) + @bitSizeOf(usize) - 1) / @bitSizeOf(usize)) * @sizeOf(usize) +
             DeliveryPool.backingBytes(layout.deliveries) + layout.receive_arena_bytes / @import("receive_pool.zig").page_bytes * @sizeOf(u32);
     }
 
@@ -97,6 +106,7 @@ pub const Sessions = struct {
         a.free(self.decode_scratch);
         a.free(self.rows);
         a.free(self.io_arena);
+        a.free(self.subscription_words);
     }
 
     // Peers ------------------------------------------------------------------
