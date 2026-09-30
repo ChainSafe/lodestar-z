@@ -934,6 +934,28 @@ test "memory_safety: TreeView container deserialize - view allocation OOM leaves
     try std.testing.expectEqual(baseline, pool.getNodesInUse());
 }
 
+test "memory_safety: TreeView container init preserves caller roots on allocation failure" {
+    const allocator = std.testing.allocator;
+    inline for (.{ Checkpoint, StructContainerType(struct { epoch: UintType(64), root: ByteVectorType(32) }) }) |ST| {
+        var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 32 });
+        defer pool.deinit();
+
+        for ([_]u32{ 0, 1 }) |caller_refs| {
+            const value: ST.Type = .{ .epoch = 7, .root = [_]u8{7} ** 32 };
+            const root = try ST.tree.fromValue(&pool, &value);
+            defer pool.unref(root);
+            if (caller_refs == 1) try pool.ref(root);
+
+            const nodes_before = pool.getNodesInUse();
+            var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+            try std.testing.expectError(error.OutOfMemory, ST.TreeView.init(failing.allocator(), &pool, root));
+            try std.testing.expect(!root.getState(&pool).isFree());
+            try std.testing.expectEqual(caller_refs, root.getState(&pool).refCount());
+            try std.testing.expectEqual(nodes_before, pool.getNodesInUse());
+        }
+    }
+}
+
 test "memory_safety: TreeView container init releases the view on reference overflow" {
     const allocator = std.testing.allocator;
     inline for (.{ Checkpoint, StructContainerType(struct { epoch: UintType(64), root: ByteVectorType(32) }) }) |ST| {
