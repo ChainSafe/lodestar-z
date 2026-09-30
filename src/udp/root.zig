@@ -340,7 +340,7 @@ const DropCount = struct {
 
 test "UDP drop totals keep counting across the kernel count's 32-bit wrap" {
     _ = @import("root_test.zig");
-    _ = @import("operations_test.zig");
+    _ = @import("root_operations_test.zig");
     const max = std.math.maxInt(u32);
     var count: DropCount = .{};
     try std.testing.expectEqual(@as(u64, 5), count.add(5));
