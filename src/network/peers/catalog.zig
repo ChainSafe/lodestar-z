@@ -530,11 +530,12 @@ pub const Catalog = struct {
             @as(usize, self.options.outbound_reserve)
         else
             0;
+        for (self.established[0..limit], 0..) |entry, slot| if (entry == null) return slot;
         var victim: ?usize = null;
         var victim_banned = false;
         var victim_deadline: u64 = 0;
         for (self.established[0..limit], 0..) |entry, slot| {
-            const index = entry orelse return slot;
+            const index = entry.?;
             const row = &self.rows[index];
             if (row.connection != null or row.direct or row.attempt != null or row.intent.manual_until_ms > now_ms or row.pending_close != null or
                 row.pending_update or row.generation == std.math.maxInt(u64)) continue;

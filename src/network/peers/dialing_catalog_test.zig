@@ -212,7 +212,12 @@ fn zombieRound(c: *Catalog, d: *dialing.Dialing, identity: *const t.PeerId, conn
 }
 
 test "peer fold zombie endpoint is blocked after two health closes across rediscovery and row replacement" {
-    var c = try Catalog.initWithIntents(a, opts, 2, 8, 1);
+    var options = opts;
+    options.capacity = 1;
+    options.max_peers = 1;
+    options.target_peers = 1;
+    options.outbound_reserve = 0;
+    var c = try Catalog.initWithIntents(a, options, 2, 8, 1);
     defer c.deinit(a);
     var d = try dialing.Dialing.init(.{ .capacity = 2, .concurrent_max = 1, .seed = 1 });
     var zombie = try candidate(1, 0);
@@ -226,6 +231,9 @@ test "peer fold zombie endpoint is blocked after two health closes across redisc
     const first: t.PeerId = .{ .bytes = @splat(9) };
     _ = admit(&c, &first, 4, .inbound, now).admitted;
     try std.testing.expect(c.find(&zombie.peer) == null);
+    try std.testing.expect(c.disconnect(c.find(&first).?, .{ .index = 4, .generation = 1 }, .host, now));
+    var events: [1]t.Event = undefined;
+    _ = c.pollEvents(&events);
     zombie.sequence = 2;
     try d.enqueueDiscovered(&c, &zombie, &.{}, &.{}, now);
     try std.testing.expectEqual(@as(u8, 1), c.rowFor(c.find(&zombie.peer).?).?.intent.failures);
@@ -618,4 +626,86 @@ test "replay alternates remembered first attempts with fresh candidates of equal
     }
     try std.testing.expectEqual([3]u64{ 2, 0, 0 }, funnel(&c, .remembered));
     try std.testing.expectEqual([3]u64{ 2, 0, 0 }, funnel(&c, .fresh));
+}
+
+test "peer discovery known and new identities share candidate replacement and refusal" {
+    for ([_]bool{ false, true }) |known| {
+        for ([_]bool{ false, true }) |matches| {
+            var c = try Catalog.initWithIntents(a, opts, 1, 8, 1);
+            defer c.deinit(a);
+            var d = try dialing.Dialing.init(.{ .capacity = 1, .concurrent_max = 1, .seed = 1 });
+            const incoming = try candidate(71, if (matches) 1 else 0);
+            var previous: ?t.PeerRef = null;
+            if (known) {
+                const peer = admit(&c, &incoming.peer, 0, .outbound, 0).admitted.peer;
+                _ = c.report(peer, .high_tolerance, 0);
+                try std.testing.expect(c.disconnect(peer, .{ .index = 0, .generation = 1 }, .host, 1));
+                var events: [1]t.Event = undefined;
+                _ = c.pollEvents(&events);
+                previous = peer;
+            }
+            const retained = try candidate(72, 0);
+            try d.enqueueDiscovered(&c, &retained, &.{}, &.{ .syncnets = 1 }, 2);
+            const victim = c.find(&retained.peer).?;
+            const old = if (previous) |peer| c.rowFor(peer).?.* else null;
+            if (matches) {
+                try d.enqueueDiscovered(&c, &incoming, &.{}, &.{ .syncnets = 1 }, 3);
+                const accepted = c.find(&incoming.peer).?;
+                try std.testing.expect(c.intents.isSet(accepted.index));
+                try std.testing.expect(c.rowFor(accepted).?.intent.automatic);
+                try std.testing.expectEqual(@as(?u8, 1), c.rowFor(accepted).?.intent.hints.?.syncnets);
+                try std.testing.expect(c.rowFor(accepted).?.intent.addresses[0].eql(incoming.addresses[0]));
+                try std.testing.expect(c.find(&retained.peer) == null);
+                if (previous) |peer| try std.testing.expectEqual(peer, accepted);
+            } else {
+                const revision = c.intent_revision;
+                try std.testing.expectError(error.Capacity, d.enqueueDiscovered(&c, &incoming, &.{}, &.{ .syncnets = 1 }, 3));
+                try std.testing.expectEqual(revision, c.intent_revision);
+                try std.testing.expectEqual(victim, c.find(&retained.peer).?);
+                try std.testing.expect(c.intents.isSet(victim.index));
+                if (previous) |peer| {
+                    try std.testing.expect(!c.intents.isSet(peer.index));
+                    try std.testing.expect(c.rowFor(peer).?.intent.hints == null);
+                    try std.testing.expectEqualDeep(old.?.node_id, c.rowFor(peer).?.node_id);
+                } else try std.testing.expect(c.find(&incoming.peer) == null);
+            }
+            try std.testing.expectEqual(@as(u16, 1), c.intent_count);
+            if (previous) |peer| {
+                const after = c.rowFor(peer).?;
+                try std.testing.expectEqualDeep(old.?.reputation, after.reputation);
+                try std.testing.expectEqual(old.?.intent.failures, after.intent.failures);
+                try std.testing.expectEqual(old.?.intent.eligible_at_ms, after.intent.eligible_at_ms);
+                try std.testing.expectEqual(old.?.intent.history_until_ms, after.intent.history_until_ms);
+            }
+        }
+    }
+}
+
+test "remembered candidates replace failed intents for known and new identities" {
+    for ([_]bool{ false, true }) |known| {
+        var c = try Catalog.initWithIntents(a, opts, 1, 8, 1);
+        defer c.deinit(a);
+        var d = try dialing.Dialing.init(.{ .capacity = 1, .concurrent_max = 1, .seed = 1 });
+        const incoming = try candidate(73, 0);
+        var previous: ?t.PeerRef = null;
+        if (known) {
+            const peer = admit(&c, &incoming.peer, 0, .outbound, 0).admitted.peer;
+            try std.testing.expect(c.disconnect(peer, .{ .index = 0, .generation = 1 }, .host, 1));
+            var events: [1]t.Event = undefined;
+            _ = c.pollEvents(&events);
+            previous = peer;
+        }
+        const retained = try candidate(74, 0);
+        try d.enqueueDiscovered(&c, &retained, &.{}, &.{}, 2);
+        c.rowFor(c.find(&retained.peer).?).?.intent.failures = 1;
+        const seeds = [_]remembered.Record{.{ .peer = incoming.peer, .address = address, .qualified_at_s = unix_s }};
+        c.remembered.load(&seeds, &local, unix_s, c.random.random());
+        try std.testing.expectEqual(@as(usize, 1), d.replayRemembered(&c, &.{}, &.{}, at(10_000)));
+        const accepted = c.find(&incoming.peer).?;
+        if (previous) |peer| try std.testing.expectEqual(peer, accepted);
+        try std.testing.expectEqual(.untried, c.rowFor(accepted).?.intent.replay);
+        try std.testing.expect(c.intents.isSet(accepted.index));
+        try std.testing.expect(c.find(&retained.peer) == null);
+        try std.testing.expectEqual(@as(u16, 1), c.intent_count);
+    }
 }

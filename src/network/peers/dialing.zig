@@ -122,6 +122,7 @@ pub const Dialing = struct {
         const hints: enr.Hints = .{ .sequence = candidate.sequence, .record_hash = candidate.record_hash, .fork = candidate.fork, .next_fork_digest = candidate.next_fork_digest, .attnets = candidate.attnets, .syncnets = candidate.syncnets, .custody_group_count = candidate.custody_group_count };
         if (!hints.validFor(context)) return error.InvalidCandidate;
         for (candidate.addresses[0..candidate.address_count]) |address| if (address.port() == 0) return error.InvalidCandidate;
+        var incoming: Row = .{ .identity = candidate.peer, .node_id = candidate.node_id, .intent = .{ .automatic = true, .eligible_at_ms = now_ms, .history_until_ms = now_ms +| history_retention_ms, .hints = hints, .hints_at_ms = now_ms } };
         if (catalog.find(&candidate.peer)) |ref| {
             const row = catalog.rowFor(ref).?;
             if (row.node_id) |id| if (!std.mem.eql(u8, &id, &candidate.node_id)) return error.InvalidCandidate;
@@ -139,8 +140,12 @@ pub const Dialing = struct {
             const retained = catalog.intents.isSet(ref.index);
             const admitted = admittedAddresses(catalog, &candidate.peer, candidate.addresses[0..candidate.address_count], candidate.sequence, now_ms);
             if ((!retained or row.intent.automatic) and admitted.count == 0) return self.refuse(&admitted);
-            _ = try catalog.retainIntent(&candidate.peer);
-            if (!retained) row.intent.automatic = true;
+            if (!retained) {
+                applyAddresses(&incoming.intent, &admitted);
+                Catalog.prepareCandidateCustody(&incoming, context);
+                _ = try retainCandidate(catalog, &incoming, context, wanted, now_ms);
+                row.intent.automatic = true;
+            }
             row.node_id = candidate.node_id;
             row.intent.hints = hints;
             row.intent.hints_at_ms = now_ms;
@@ -152,16 +157,9 @@ pub const Dialing = struct {
         }
         const admitted = admittedAddresses(catalog, &candidate.peer, candidate.addresses[0..candidate.address_count], candidate.sequence, now_ms);
         if (admitted.count == 0) return self.refuse(&admitted);
-        var incoming: Row = .{ .identity = candidate.peer, .node_id = candidate.node_id, .intent = .{ .automatic = true, .eligible_at_ms = now_ms, .history_until_ms = now_ms +| history_retention_ms, .hints = hints, .hints_at_ms = now_ms } };
         applyAddresses(&incoming.intent, &admitted);
         Catalog.prepareCandidateCustody(&incoming, context);
-        if (catalog.intent_count == catalog.intent_capacity) {
-            const index = replacement(catalog, &incoming, context, wanted, now_ms) orelse return error.Capacity;
-            // Candidate replacement may retire discovery intent, never established reputation.
-            catalog.rows[index].intent.automatic = false;
-            catalog.releaseIntent(catalog.reference(index));
-        }
-        const ref = try catalog.retainIntent(&candidate.peer);
+        const ref = try retainCandidate(catalog, &incoming, context, wanted, now_ms);
         const row = catalog.rowFor(ref).?;
         row.node_id = incoming.node_id;
         row.intent = incoming.intent;
@@ -213,12 +211,7 @@ pub const Dialing = struct {
         if (admitted.rejection != null) return .rejected;
         if (admitted.count == 0) return .failed;
         const incoming: Row = .{ .identity = record.peer, .intent = .{ .automatic = true, .replay = .untried } };
-        if (catalog.intent_count == catalog.intent_capacity) {
-            const index = replacement(catalog, &incoming, context, wanted, now_ms) orelse return .capacity;
-            catalog.rows[index].intent.automatic = false;
-            catalog.releaseIntent(catalog.reference(index));
-        }
-        const ref = catalog.retainIntent(&record.peer) catch return .capacity;
+        const ref = retainCandidate(catalog, &incoming, context, wanted, now_ms) catch return .capacity;
         const row = catalog.rowFor(ref).?;
         row.intent.automatic = true;
         row.intent.replay = .untried;
@@ -228,6 +221,15 @@ pub const Dialing = struct {
         self.selection_dirty = true;
         catalog.markDial(ref.index);
         return .queued;
+    }
+    fn retainCandidate(catalog: *Catalog, incoming: *const Row, context: *const t.ForkContext, wanted: *const t.Coverage, now_ms: u64) error{Capacity}!t.PeerRef {
+        if (catalog.intent_count == catalog.intent_capacity) {
+            const index = replacement(catalog, incoming, context, wanted, now_ms) orelse return error.Capacity;
+            // Candidate replacement may retire discovery intent, never established reputation.
+            catalog.rows[index].intent.automatic = false;
+            catalog.releaseIntent(catalog.reference(index));
+        }
+        return catalog.retainIntent(&incoming.identity);
     }
     fn replacement(catalog: *const Catalog, incoming: *const Row, context: *const t.ForkContext, wanted: *const t.Coverage, now_ms: u64) ?usize {
         const incoming_utility = matchesDemand(incoming, context, wanted, now_ms);
