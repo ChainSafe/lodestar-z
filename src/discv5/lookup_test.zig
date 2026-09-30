@@ -586,3 +586,95 @@ test "dual lookup chooses a relay-eligible endpoint before rejecting a signed re
         if (mode != .ip4) try std.testing.expectEqualDeep(remote.endpointFor(.ip6).?, candidates[1].peer.address);
     }
 }
+
+fn dualRecord(ip4: [4]u8, ip6: [16]u8, port6: u16) !enr.Record {
+    const key = try keyPair(9);
+    const public_key = crypto.compressedPublicKey(&key);
+    return enr.Record.createFields(&key, 1, &.{
+        .{ .key = "id", .value = .{ .bytes = "v4" } },
+        .{ .key = "ip", .value = .{ .bytes = &ip4 } },
+        .{ .key = "ip6", .value = .{ .bytes = &ip6 } },
+        .{ .key = "secp256k1", .value = .{ .bytes = &public_key } },
+        .{ .key = "udp", .value = .{ .uint = 9000 } },
+        .{ .key = "udp6", .value = .{ .uint = port6 } },
+    });
+}
+
+test "dual lookup retries the alternate signed seed endpoint and confirms its exact address" {
+    const record = try dualRecord(.{ 203, 0, 113, 9 }, .{ 0x26, 6, 0x47, 0 } ++ .{0} ** 11 ++ .{9}, 9000);
+    for ([_]types.Mode{ .ip4, .ip6 }) |first_family| {
+        var core = try initEngine();
+        defer core.deinit(std.testing.allocator);
+        const seed: RoutingTable.Entry = .{
+            .peer = .{ .node_id = record.node_id, .address = record.endpointFor(first_family).? },
+            .record = record,
+            .last_verified_ms = 0,
+            .direction = .outgoing,
+        };
+        var candidates: Lookup.Candidates = undefined;
+        var lookup: Lookup = undefined;
+        try lookup.init(&candidates, core.localRecord().node_id, record.node_id, &.{seed}, .dual);
+        defer lookup.cancel(&core);
+        var out: [1280]u8 = undefined;
+        const id = try message.RequestId.init(&.{1});
+        const first = (try lookup.startNext(&core, &out, id, 1, &sealEntropy(1))).?;
+        try std.testing.expectEqualDeep(seed.peer, first.peer);
+        try lookup.onFailure(&core, first.call.handle);
+        try std.testing.expectEqual(@as(usize, 0), core.calls.count());
+        const second = (try lookup.startNext(&core, &out, id, 2, &sealEntropy(2))).?;
+        try std.testing.expectEqual(record.node_id, second.peer.node_id);
+        try std.testing.expectEqualDeep(record.endpointFor(if (first_family == .ip4) .ip6 else .ip4).?, second.peer.address);
+        try std.testing.expectEqual(@as(usize, 1), lookup.candidateCount());
+        try completeNodes(&core, &lookup, second, id, &.{}, 3);
+        try std.testing.expect((try lookup.startNext(&core, &out, id, 4, &sealEntropy(3))) == null);
+        var result: [Lookup.result_max]Lookup.Confirmed = undefined;
+        try std.testing.expectEqualDeep(second.peer, lookup.confirmedResults(&result)[0].peer);
+        try std.testing.expectEqual(@as(u16, 2), lookup.statistics().queries_started);
+    }
+}
+
+test "discovered alternate retry preserves family relay port and total query limits" {
+    const global6: [16]u8 = .{ 0x26, 6, 0x47, 0 } ++ .{0} ** 11 ++ .{9};
+    const cases = [_]struct { mode: types.Mode = .dual, ip6: [16]u8 = global6, port6: u16 = 9000, budget: u16 = 3, retries: bool = false }{
+        .{ .retries = true },
+        .{ .mode = .ip4 },
+        .{ .mode = .ip6 },
+        .{ .ip6 = .{0xfd} ++ .{0} ** 15 },
+        .{ .port6 = Lookup.discovered_port_min - 1 },
+        .{ .budget = 2 },
+    };
+    for (cases) |case| {
+        var core = try initEngine();
+        defer core.deinit(std.testing.allocator);
+        var seed = fakeEntry(1);
+        if (case.mode == .ip6) {
+            seed.peer.address = test_support.address6(global6, 9001);
+            seed.record = fakeRecord(seed.peer.node_id, seed.peer.address, 1);
+        }
+        installSession(&core, seed.peer, 0x55);
+        const record = try dualRecord(.{ 203, 0, 113, 9 }, case.ip6, case.port6);
+        var candidates: Lookup.Candidates = undefined;
+        var lookup: Lookup = undefined;
+        try lookup.init(&candidates, core.localRecord().node_id, record.node_id, &.{seed}, case.mode);
+        defer lookup.cancel(&core);
+        lookup.query_limit = case.budget;
+        var out: [1280]u8 = undefined;
+        const id = try message.RequestId.init(&.{1});
+        const referral = (try lookup.startNext(&core, &out, id, 1, &sealEntropy(1))).?;
+        try completeNodes(&core, &lookup, referral, id, &.{ record, record }, 2);
+        try std.testing.expectEqual(@as(usize, 2), lookup.candidateCount());
+        const first = (try lookup.startNext(&core, &out, id, 3, &sealEntropy(2))).?;
+        try std.testing.expectEqualDeep(record.endpointFor(if (case.mode == .ip6) .ip6 else .ip4).?, first.peer.address);
+        try lookup.onFailure(&core, first.call.handle);
+        const second = try lookup.startNext(&core, &out, id, 4, &sealEntropy(3));
+        try std.testing.expectEqual(case.retries, second != null);
+        if (second) |retry| {
+            try std.testing.expectEqualDeep(record.endpointFor(.ip6).?, retry.peer.address);
+            try lookup.onFailure(&core, retry.call.handle);
+            try std.testing.expect((try lookup.startNext(&core, &out, id, 5, &sealEntropy(4))) == null);
+        }
+        try std.testing.expect(lookup.isFinished());
+        try std.testing.expectEqual(@as(usize, 0), core.calls.count());
+        try std.testing.expectEqual(@as(u16, if (case.retries) 3 else 2), lookup.statistics().queries_started);
+    }
+}

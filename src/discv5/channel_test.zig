@@ -374,11 +374,15 @@ const Pair = struct {
     b_to_a: [constants.packet_size_max]u8,
 
     fn init(self: *Pair) !void {
+        try self.initSequence(1);
+    }
+
+    fn initSequence(self: *Pair, sequence: u64) !void {
         self.address_a = loopback(1, 9_001);
         self.address_b = loopback(2, 9_002);
         const key_a = try keyPair(0x11);
         const key_b = try keyPair(0x22);
-        self.record_a = try enr.Record.create(&key_a, 1, self.address_a);
+        self.record_a = try enr.Record.create(&key_a, sequence, self.address_a);
         self.record_b = try enr.Record.create(&key_b, 1, self.address_b);
         try self.node_a.init(std.testing.allocator, key_a, self.record_a, channelConfig());
         errdefer self.node_a.deinit(std.testing.allocator);
@@ -513,4 +517,21 @@ test "local record updates require a newer valid signature from the local key" {
     try std.testing.expect(inbound == .authenticated);
     try std.testing.expectEqual(@as(u64, 2), inbound.authenticated.record.?.sequence);
     try std.testing.expectEqual(updated.endpoint(), inbound.authenticated.record.?.endpoint());
+}
+
+test "sequence zero handshake includes identity for unknown and known zero challengers" {
+    for ([_]bool{ false, true }) |known| {
+        var pair: Pair = undefined;
+        try pair.initSequence(0);
+        defer pair.deinit();
+        const length = try pair.challengeAndHandshake("ping", if (known) pair.identityA() else null, 1);
+        const decoded = try packet.decode(pair.a_to_b[0..length], &pair.record_b.node_id, &pair.scratch.packet_decode);
+        const record = try enr.Record.init(decoded.form.handshake.enr.?);
+        try std.testing.expectEqual(@as(u64, 0), record.sequence);
+        const inbound = pair.node_b.receive(pair.a_to_b[0..length], pair.address_a, 2, &pair.scratch);
+        try std.testing.expect(inbound == .authenticated);
+        try std.testing.expectEqualStrings("ping", inbound.authenticated.plaintext);
+        try std.testing.expect(pair.node_b.hasSession(pair.peerA()));
+        try std.testing.expectEqual(!known, inbound.authenticated.record != null);
+    }
 }
