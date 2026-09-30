@@ -521,7 +521,7 @@ test "loadState scenarios" {
         .{ .name = "trim validators to 0 (struct)", .mutation = .{ .trim_struct = .{ .new_len = 0 } }, .expect_modified = expect_none[0..], .expect_validators_len = 0, .expect_scores_len = 0 },
     };
 
-    inline for (cases) |case| {
+    for (cases) |case| {
         var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 750_000 });
         defer pool.deinit();
 
@@ -672,7 +672,6 @@ test "diff helpers cases" {
         all_modified: bool = false,
     };
 
-    const mod_none = [_]usize{};
     const mod_some_validators = [_]usize{ 0, 1, 63, 64, 127 };
     const mod_some_scores = [_]usize{ 0, 7, 31, 32, 63 };
 
@@ -683,16 +682,13 @@ test "diff helpers cases" {
         .{ .name = "scores: single", .kind = .scores, .count = 1, .modified = &.{0} },
         .{ .name = "validators: dense", .kind = .validators, .count = 257, .all_modified = true },
         .{ .name = "scores: dense", .kind = .scores, .count = 257, .all_modified = true },
-        .{ .name = "validators: no diff", .kind = .validators, .count = 128, .modified = mod_none[0..] },
         .{ .name = "validators: some diff", .kind = .validators, .count = 128, .modified = mod_some_validators[0..] },
-        .{ .name = "scores: no diff", .kind = .scores, .count = 64, .modified = mod_none[0..] },
         .{ .name = "scores: some diff", .kind = .scores, .count = 64, .modified = mod_some_scores[0..] },
     };
 
     for (cases) |case| {
         var got: std.ArrayList(ValidatorIndex) = .empty;
         defer got.deinit(allocator);
-        const output_allocator = if (case.modified.len == 0 and !case.all_modified) std.testing.failing_allocator else allocator;
 
         if (case.kind == .validators) {
             const total = case.count * types.phase0.Validator.fixed_size;
@@ -720,7 +716,7 @@ test "diff helpers cases" {
 
             try findModifiedIndices(
                 types.phase0.Validator.fixed_size,
-                output_allocator,
+                allocator,
                 old_bytes,
                 new_bytes,
                 &got,
@@ -749,7 +745,7 @@ test "diff helpers cases" {
 
             try findModifiedIndices(
                 INACTIVITY_SCORE_SIZE,
-                output_allocator,
+                allocator,
                 old_bytes,
                 new_bytes,
                 &got,
@@ -761,6 +757,31 @@ test "diff helpers cases" {
             const expected = if (case.all_modified) i else case.modified[i];
             try std.testing.expectEqual(@as(ValidatorIndex, @intCast(expected)), got_index);
         }
+    }
+}
+
+test "diff helpers: unchanged inputs do not allocate" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct { element_size: usize, count: usize }{
+        .{ .element_size = types.phase0.Validator.fixed_size, .count = 128 },
+        .{ .element_size = INACTIVITY_SCORE_SIZE, .count = 64 },
+    };
+
+    inline for (cases) |case| {
+        const total = case.count * case.element_size;
+        const old_bytes = try allocator.alloc(u8, total);
+        defer allocator.free(old_bytes);
+        @memset(old_bytes, 0x5a);
+
+        const new_bytes = try allocator.alloc(u8, total);
+        defer allocator.free(new_bytes);
+        @memcpy(new_bytes, old_bytes);
+
+        var got: std.ArrayList(ValidatorIndex) = .empty;
+        defer got.deinit(allocator);
+
+        try findModifiedIndices(case.element_size, std.testing.failing_allocator, old_bytes, new_bytes, &got);
+        try std.testing.expectEqual(@as(usize, 0), got.items.len);
     }
 }
 
