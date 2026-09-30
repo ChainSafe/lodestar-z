@@ -1,5 +1,4 @@
 const std = @import("std");
-const c = @import("constants.zig");
 const score = @import("score.zig");
 const topic = @import("topic.zig");
 const PeerId = @import("../wire/peer_id.zig").PeerId;
@@ -29,7 +28,7 @@ pub const Peer = struct {
     score: f64,
     behaviour: f64,
     weights: score.GlobalWeights,
-    topics: [c.topics_cap]TopicScore = undefined,
+    topics: []TopicScore,
     topic_count: u16 = 0,
 };
 pub const Page = struct {
@@ -38,18 +37,44 @@ pub const Page = struct {
     next: ?u16 = null,
     peers: [peers_per_page]Peer = undefined,
     peer_count: u8 = 0,
-    topics: [c.topics_cap]Topic = undefined,
+    topics: []Topic,
     topic_count: u16 = 0,
+    topic_scores: []TopicScore,
+    weights: []score.TopicWeights,
+
+    pub fn init(a: std.mem.Allocator, count: usize) !Page {
+        std.debug.assert(count > 0 and count <= @import("topic_policy.zig").topic_max);
+        const topics = try a.alloc(Topic, count);
+        errdefer a.free(topics);
+        const topic_scores = try a.alloc(TopicScore, count * peers_per_page);
+        errdefer a.free(topic_scores);
+        const weights = try a.alloc(score.TopicWeights, count);
+        var result: Page = .{ .topics = topics, .topic_scores = topic_scores, .weights = weights };
+        for (&result.peers, 0..) |*peer, i| peer.topics = topic_scores[i * count ..][0..count];
+        return result;
+    }
+
+    pub fn deinit(self: *Page, a: std.mem.Allocator) void {
+        a.free(self.weights);
+        a.free(self.topic_scores);
+        a.free(self.topics);
+        self.* = undefined;
+    }
+
+    pub fn backingBytes(count: usize) usize {
+        return count * (@sizeOf(Topic) + peers_per_page * @sizeOf(TopicScore) + @sizeOf(score.TopicWeights));
+    }
 };
 
 pub fn capture(g: *const Gossipsub, cursor: u16, now: @import("../types.zig").Now, out: *Page) error{InvalidDiagnosticsCursor}!void {
+    std.debug.assert(out.topics.len == g.overlay.rows.len);
     if (cursor > g.peers.rows.len) return error.InvalidDiagnosticsCursor;
     out.mono_ms = now.mono_ms;
     out.unix_s = now.unix_s;
     out.next = null;
     out.peer_count = 0;
     out.topic_count = 0;
-    for (&g.overlay.rows, 0..) |*row, i| {
+    for (g.overlay.rows, 0..) |*row, i| {
         if (!row.active) continue;
         const params = &g.peers.scores.topic_params[i];
         const target = &out.topics[out.topic_count];
@@ -65,12 +90,12 @@ pub fn capture(g: *const Gossipsub, cursor: u16, now: @import("../types.zig").No
         const row = &g.peers.rows[index];
         if (!row.occupied) continue;
         const session = if (row.connection) |conn| g.sessions.find(conn) else null;
-        var weights: score.Breakdown = undefined;
+        var weights: score.Breakdown = .{ .topics = out.weights };
         const total = g.peers.snapshotWeights(.{ .index = @intCast(index), .generation = row.generation }, now.mono_ms, &weights);
         const peer = &out.peers[out.peer_count];
-        peer.* = .{ .identity = row.identity, .connected = row.connection != null, .outbound_ready = if (session) |i| g.sessions.rows[i].outStream() != null else false, .address = row.address, .retain_until = row.retain_until, .score = total, .behaviour = g.peers.scores.rows[index].behaviour, .weights = weights.global };
+        peer.* = .{ .identity = row.identity, .connected = row.connection != null, .outbound_ready = if (session) |i| g.sessions.rows[i].outStream() != null else false, .address = row.address, .retain_until = row.retain_until, .score = total, .behaviour = g.peers.scores.rows[index].behaviour, .weights = weights.global, .topics = peer.topics };
         for (out.topics[0..out.topic_count]) |*known| {
-            const counters = &g.peers.scores.topics[index * c.topics_cap + known.index];
+            const counters = &g.peers.scores.topics[index * g.overlay.rows.len + known.index];
             const member = if (session) |i| g.overlay.rows[known.index].mesh.isSet(i) else false;
             if (!member and !counters.in_mesh and counters.first_deliveries == 0 and counters.mesh_deliveries == 0 and counters.mesh_failures == 0 and counters.invalid == 0) continue;
             peer.topics[peer.topic_count] = .{ .index = known.index, .counters = counters.*, .weights = weights.topics[known.index], .mesh_member = member };
@@ -95,6 +120,8 @@ test "gossip diagnostic pages bound peers preserve scores and include empty mesh
     }
     const page = try a.create(Page);
     defer a.destroy(page);
+    page.* = try Page.init(a, g.overlay.rows.len);
+    defer page.deinit(a);
     const calculations = g.peers.scores.calculations;
     const revision = g.peers.scores.revision;
     const rows = try a.dupe(score.PeerScore.PeerState, g.peers.scores.rows);

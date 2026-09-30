@@ -11,7 +11,6 @@ const preset = @import("preset");
 
 const gossip = network.gossipsub;
 const ScorePopulations = gossip.metrics.ScorePopulations;
-const topics_cap = gossip.constants.topics_cap;
 const chain_config = if (preset.active_preset == .minimal) &config.minimal.config else &config.mainnet.config;
 const peers = 200;
 const rounds = 200;
@@ -42,6 +41,7 @@ pub fn run(init: std.process.Init) !void {
     try node.init(allocator, io, &resolved, .{ .host = &key, .bind = .{ .ip4 = .loopback(0) }, .local = update.local, .schedule = update.schedule, .slot = 100 });
     defer node.deinit(io);
     const g = node.service.gossipsub;
+    const topics_cap = g.overlay.rows.len;
     for (0..peers) |index| {
         var identity: network.PeerId = .{ .bytes = @splat(0) };
         std.mem.writeInt(u16, identity.bytes[0..2], @intCast(index + 1), .little);
@@ -52,7 +52,7 @@ pub fn run(init: std.process.Init) !void {
     const buffer = try allocator.alloc(u8, network.metrics.textCapacity(plan.topics[0..plan.boundary_count]));
     defer allocator.free(buffer);
     std.debug.print("case=score_collection preset={s} optimize={s} peers={} topic_cells_per_peer={} rounds={}\n", .{ @tagName(preset.active_preset), @tagName(@import("builtin").mode), peers, topics_cap, rounds });
-    for ([_]struct { []const u8, usize, usize }{ .{ "empty", 0, 0 }, .{ "typical", 8, 32 }, .{ "full", topics_cap, topics_cap } }) |level| {
+    for ([_]struct { []const u8, usize, usize }{ .{ "empty", 0, 0 }, .{ "typical", 8, 32 }, .{ "full", @min(topics_cap, gossip.constants.topics_cap), topics_cap } }) |level| {
         for (g.sessions.rows, 0..) |*session, index| {
             if (!session.active) continue;
             const peer = session.logical.index;

@@ -366,6 +366,7 @@ test "gossip topic rejection preserves expired scores and retained obligations" 
         const text = try @import("topic_fixture.zig").churnTopic(index, &name);
         try support.subscribe(&g, text);
     }
+    for (g.overlay.rows[constants.topics_cap..]) |*row| row.generation = std.math.maxInt(u64);
     const first = g.overlay.topicString(0);
     try support.unsubscribe(&g, first);
     g.peers.scores.invalid(0, 0);
@@ -376,11 +377,12 @@ test "gossip topic rejection preserves expired scores and retained obligations" 
     const score = g.peers.scores.topics[0];
     const old_scores = try std.testing.allocator.dupe(@TypeOf(score), g.peers.scores.topics);
     defer std.testing.allocator.free(old_scores);
-    const old_topics = try std.testing.allocator.dupe(@TypeOf(g.overlay.rows[0]), &g.overlay.rows);
+    const old_topics = try std.testing.allocator.dupe(@TypeOf(g.overlay.rows[0]), g.overlay.rows);
     defer std.testing.allocator.free(old_topics);
     const old_backoffs = try std.testing.allocator.dupe(@TypeOf(g.peers.backoffs[0]), g.peers.backoffs);
     defer std.testing.allocator.free(old_backoffs);
-    const old_params = g.peers.scores.topic_params;
+    const old_params = try std.testing.allocator.dupe(score_mod.TopicParams, g.peers.scores.topic_params);
+    defer std.testing.allocator.free(old_params);
     const old_rows = try std.testing.allocator.dupe(score_mod.PeerScore.PeerState, g.peers.scores.rows);
     defer std.testing.allocator.free(old_rows);
     try std.testing.expectEqual(@as(?u16, null), support.intern(&g, "/eth2/090a0b0c/beacon_block/ssz_snappy"));
@@ -388,7 +390,7 @@ test "gossip topic rejection preserves expired scores and retained obligations" 
     try std.testing.expectEqualDeep(old_backoffs, g.peers.backoffs);
     try std.testing.expectEqualDeep(old_params, g.peers.scores.topic_params);
     try std.testing.expectEqualDeep(old_rows, g.peers.scores.rows);
-    for (old_topics, &g.overlay.rows) |*before, *after| {
+    for (old_topics, g.overlay.rows) |*before, *after| {
         try std.testing.expectEqual(before.active, after.active);
         try std.testing.expectEqual(before.generation, after.generation);
         try std.testing.expectEqual(before.subscribed, after.subscribed);
@@ -503,7 +505,8 @@ test "local intent reclaimed history answers actual IWANT with original wire top
     defer g.deinit();
     const workspace = try std.testing.allocator.create(local_intent.Workspace);
     defer std.testing.allocator.destroy(workspace);
-    workspace.* = .{};
+    workspace.* = try local_intent.Workspace.init(std.testing.allocator, g.overlay.rows.len);
+    defer workspace.deinit(std.testing.allocator);
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
     const replacement = "/eth2/01020304/voluntary_exit/ssz_snappy";
     for (g.overlay.rows[1..]) |*row| row.generation = std.math.maxInt(u64);
@@ -604,7 +607,7 @@ test "gossip disconnect classifies active mesh score before pruning and records 
         g.connectionClosed(conn);
         try std.testing.expect(!g.overlay.mesh(topic).isSet(first.index));
         try std.testing.expect(!g.overlay.subscribers(topic).isSet(first.index));
-        const counters = g.peers.scores.topics[@as(usize, ref.index) * constants.topics_cap + topic];
+        const counters = g.peers.scores.topics[@as(usize, ref.index) * g.overlay.rows.len + topic];
         try std.testing.expect(!counters.in_mesh);
         try std.testing.expectEqual(@as(f64, if (elapsed > 40) 0 else 4), counters.mesh_failures);
         const second = g.addPeer(.{ .index = 0, .generation = 2 }, &metadata, .{ .mono_ms = elapsed + 1, .unix_s = 0 }).admitted;

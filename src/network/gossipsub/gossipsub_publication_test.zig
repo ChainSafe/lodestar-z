@@ -187,6 +187,7 @@ test "publication distinguishes topic capacity from unknown wire names" {
         const name = try @import("topic_fixture.zig").churnTopic(i, &bytes);
         try support.subscribe(&g, name);
     }
+    for (g.overlay.rows[@import("constants.zig").topics_cap..]) |*row| row.generation = std.math.maxInt(u64);
     try std.testing.expectError(error.ResourceExhausted, g.publish(topic, "body", .{ .mono_ms = 1, .unix_s = 0 }));
     try std.testing.expectError(error.UnknownTopic, g.publish("invalid", "body", .{ .mono_ms = 1, .unix_s = 0 }));
 }

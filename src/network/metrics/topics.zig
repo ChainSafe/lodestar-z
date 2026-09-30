@@ -14,7 +14,7 @@ pub fn write(context: *const Context, w: *prom.Encoder) prom.Error!void {
         for (ns.boundaries, 0..) |*boundary, index| {
             if (std.mem.eql(u8, &boundary.digest, &context.owner.peer_manager.local.fork.digest)) visible.set(index);
         }
-        for (&overlay.rows) |*row| {
+        for (overlay.rows) |*row| {
             if (!row.active) continue;
             const match = ns.lookup(row.string[0..row.string_len]) orelse continue;
             mesh[match.ordinal] = @intCast(row.mesh.count());

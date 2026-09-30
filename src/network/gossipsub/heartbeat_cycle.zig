@@ -9,6 +9,7 @@ pub const Scores = [constants.peers_cap]Score;
 pub const Cycle = struct {
     scores: Scores = @splat(.{}),
     cursor: usize = 0,
+    topics: usize = constants.topics_cap,
     phase: union(enum) { idle, active: usize } = .idle,
     epoch: u64 = 0,
     opportunistic: bool = false,
@@ -23,7 +24,8 @@ pub const Cycle = struct {
         std.debug.assert(self.phase == .idle and self.epoch < std.math.maxInt(u64));
         self.epoch += 1;
         self.takeSnapshot(sessions, peers, now);
-        self.phase = .{ .active = constants.topics_cap };
+        self.topics = peers.scores.topic_params.len;
+        self.phase = .{ .active = self.topics };
         self.opportunistic = opportunistic;
     }
 
@@ -40,7 +42,7 @@ pub const Cycle = struct {
     pub fn next(self: *Cycle) ?u16 {
         if (self.phase == .idle or self.phase.active == 0) return null;
         const index = self.cursor;
-        self.cursor = (index + 1) % constants.topics_cap;
+        self.cursor = (index + 1) % self.topics;
         self.phase.active -= 1;
         return @intCast(index);
     }

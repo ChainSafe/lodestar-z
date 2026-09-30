@@ -92,7 +92,8 @@ pub const MeshChanges = struct {
 pub const Overlay = struct {
     rng: std.Random.DefaultPrng,
 
-    rows: [constants.topics_cap]Row = @splat(.{}),
+    rows: []Row,
+    outbound_pins: local_intent.TopicSet,
     namespace: ?topic_policy.Namespace = null,
     subscription_revision: u64 = 0,
     slot: u64 = 0,
@@ -100,6 +101,8 @@ pub const Overlay = struct {
 
     pub fn deinit(self: *Overlay, a: std.mem.Allocator) void {
         if (self.namespace) |*ns| ns.deinit(a);
+        self.outbound_pins.deinit(a);
+        a.free(self.rows);
     }
 
     pub fn setLocal(self: *Overlay, context: *const Context, index: u16, on: bool) void {
@@ -125,15 +128,17 @@ pub const Overlay = struct {
     }
 
     pub fn synchronize(self: *const Overlay, outbox: *@import("outbox.zig").Outbox, now: u64) void {
-        var announcements = std.StaticBitSet(constants.topics_cap).initEmpty();
+        const announcements = &outbox.subscription_dirty;
+        assert(announcements.bit_length == self.rows.len);
+        announcements.setRangeValue(.{ .start = 0, .end = announcements.bit_length }, false);
         for (self.rows, 0..) |row, index| if (row.active and row.subscribed) {
             announcements.set(index);
         };
-        outbox.synchronize(&announcements, now);
+        outbox.synchronize(now);
     }
 
     pub fn flushSubscriptions(self: *const Overlay, outbox: *@import("outbox.zig").Outbox, scratch: *@import("outbox.zig").ControlScratch, now: u64) void {
-        for (0..constants.topics_cap) |_| {
+        for (0..self.rows.len) |_| {
             const index = outbox.nextSubscription() orelse return;
             const row = &self.rows[index];
             assert(row.active);
@@ -144,9 +149,9 @@ pub const Overlay = struct {
     pub fn internTopic(self: *Overlay, context: *const Context, validation_pins: *const local_intent.TopicSet, name: []const u8) ?u16 {
         if (!self.validTopic(name)) return null;
         if (self.findTopic(name)) |topic| return topic;
-        const pins = retirementPins(context, validation_pins);
+        const pins = self.retirementPins(context, validation_pins);
         var cursor: usize = 0;
-        const index = self.vacantRow(context, &pins, &.initEmpty(), &cursor, context.now) orelse return null;
+        const index = self.vacantRow(context, &pins, null, &cursor, context.now) orelse return null;
         var bytes: [topic_mod.topic_max_len]u8 = undefined;
         const copied = bytes[0..name.len];
         @memcpy(copied, name);
@@ -171,8 +176,10 @@ pub const Overlay = struct {
         return topic;
     }
 
-    fn retirementPins(context: *const Context, validation_pins: *const local_intent.TopicSet) local_intent.Pins {
-        var pins: local_intent.Pins = .{ .validation = validation_pins.* };
+    fn retirementPins(self: *Overlay, context: *const Context, validation_pins: *const local_intent.TopicSet) local_intent.Pins {
+        assert(validation_pins.bit_length == self.rows.len);
+        self.outbound_pins.setRangeValue(.{ .start = 0, .end = self.rows.len }, false);
+        var pins: local_intent.Pins = .{ .validation = validation_pins.*, .outbound = self.outbound_pins };
         for (context.sessions.rows) |*peer| {
             if (peer.active) {
                 pins.outbound.setUnion(peer.io.tx.subscription_dirty);
@@ -191,7 +198,7 @@ pub const Overlay = struct {
         const expired = if (row.retire_after_ms) |deadline| now_ms >= deadline else false;
         var backoff = false;
         for (0..context.peers.rows.len) |peer| {
-            const value = context.peers.backoffs[peer * constants.topics_cap + topic];
+            const value = context.peers.backoffs[peer * self.rows.len + topic];
             if (value.topic_generation == row.generation and now_ms < value.until) {
                 backoff = true;
                 break;
@@ -200,15 +207,15 @@ pub const Overlay = struct {
         return .{ .blocked = false, .expired = expired, .reusable = (expired or !context.peers.scores.retainsTopic(topic)) and !backoff };
     }
 
-    fn vacantRow(self: *const Overlay, context: *const Context, pins: *const local_intent.Pins, reserved: *const local_intent.TopicSet, cursor: *usize, now_ms: u64) ?u16 {
-        assert(cursor.* <= 2 * constants.topics_cap);
+    fn vacantRow(self: *const Overlay, context: *const Context, pins: *const local_intent.Pins, reserved: ?*const local_intent.TopicSet, cursor: *usize, now_ms: u64) ?u16 {
+        assert(cursor.* <= 2 * self.rows.len);
         // Exhaust unused rows before reclaiming retained topic state.
-        while (cursor.* < 2 * constants.topics_cap) {
-            const reclaim = cursor.* >= constants.topics_cap;
-            const index: u16 = @intCast(cursor.* % constants.topics_cap);
+        while (cursor.* < 2 * self.rows.len) {
+            const reclaim = cursor.* >= self.rows.len;
+            const index: u16 = @intCast(cursor.* % self.rows.len);
             cursor.* += 1;
             const row = &self.rows[index];
-            if (row.active != reclaim or reserved.isSet(index) or row.generation == std.math.maxInt(u64)) continue;
+            if (row.active != reclaim or (if (reserved) |set| set.isSet(index) else false) or row.generation == std.math.maxInt(u64)) continue;
             if (reclaim and !self.retirement(context, index, pins, now_ms).reusable) continue;
             return index;
         }
@@ -225,7 +232,7 @@ pub const Overlay = struct {
     }
 
     pub fn reclaimTopic(self: *Overlay, context: *const Context, validation_pins: *const local_intent.TopicSet, topic: u16) void {
-        const pins = retirementPins(context, validation_pins);
+        const pins = self.retirementPins(context, validation_pins);
         self.reclaimObserved(context, topic, self.retirement(context, topic, &pins, context.now));
     }
 
@@ -241,7 +248,8 @@ pub const Overlay = struct {
         if (subscriptions.len > 0 and self.namespace == null) return error.TopicPolicyRequired;
         workspace.len = 0;
         workspace.desired = .initEmpty();
-        workspace.reserved = .initEmpty();
+        assert(workspace.reserved.bit_length == self.rows.len);
+        workspace.reserved.setRangeValue(.{ .start = 0, .end = self.rows.len }, false);
         workspace.now_ms = @max(context.now, now_ms);
         workspace.slot = slot;
         var boundaries = std.StaticBitSet(topic_policy.boundary_max).initEmpty();
@@ -272,7 +280,7 @@ pub const Overlay = struct {
         }
         var changed = false;
         // Reserve retained matches before selecting any rows for replacement.
-        for (&self.rows, 0..) |*row, i| {
+        for (self.rows, 0..) |*row, i| {
             if (!row.active) continue;
             if (row.ordinal) |ordinal| if (workspace.desired.isSet(ordinal)) {
                 workspace.entries[workspace.len] = .{ .ordinal = ordinal, .row = @intCast(i), .generation = row.generation, .existing = true };
@@ -284,10 +292,10 @@ pub const Overlay = struct {
             };
             if (row.subscribed) changed = true;
         }
-        workspace.pins = retirementPins(context, validation_pins);
+        workspace.pins = self.retirementPins(context, validation_pins);
         var cursor: usize = 0;
         var desired = workspace.desired.iterator(.{});
-        for (0..constants.topics_cap) |_| {
+        for (0..self.rows.len) |_| {
             const ordinal = desired.next() orelse break;
             changed = true;
             const index = self.vacantRow(context, &workspace.pins, &workspace.reserved, &cursor, workspace.now_ms) orelse return error.TopicCapacity;
@@ -319,7 +327,7 @@ pub const Overlay = struct {
             context.peers.scores.applyValidatedTopic(index, self.topicParams(context, row.kind, self.slot));
             self.setLocal(context, index, true);
         }
-        for (&self.rows, 0..) |*row, index| {
+        for (self.rows, 0..) |*row, index| {
             if (row.active and row.subscribed and !workspace.reserved.isSet(index)) self.setLocal(context, @intCast(index), false);
         }
     }
@@ -336,7 +344,7 @@ pub const Overlay = struct {
     }
 
     pub fn findTopic(self: *const Overlay, topic_str: []const u8) ?u16 {
-        for (&self.rows, 0..) |*topic, index| {
+        for (self.rows, 0..) |*topic, index| {
             if (!topic.active) continue;
             if (std.mem.eql(u8, topic.topicString(), topic_str)) return @intCast(index);
         }
@@ -381,7 +389,7 @@ pub const Overlay = struct {
     pub fn subnetSubscriptions(self: *const Overlay, peer: ?u16, digest: [4]u8) topic_policy.Subnets {
         if (peer) |index| if (self.namespace) |*ns| return ns.subnets(index, digest);
         var result: topic_policy.Subnets = .{};
-        for (&self.rows) |*row| {
+        for (self.rows) |*row| {
             if (!row.active or !(if (peer) |index| row.subscribers.isSet(index) else row.subscribed)) continue;
             const parsed = topic_mod.parseCanonical(row.topicString()) orelse continue;
             if (std.mem.eql(u8, &digest, &parsed.digest)) result.add(parsed.name);
@@ -398,8 +406,13 @@ pub const Overlay = struct {
         return &self.rows[topic].fanout;
     }
 
-    pub fn init(seed: u64) Overlay {
-        return .{ .rng = std.Random.DefaultPrng.init(seed) };
+    pub fn init(a: std.mem.Allocator, seed: u64, topics: usize) !Overlay {
+        assert(topics > 0 and topics <= topic_policy.topic_max);
+        const rows = try a.alloc(Row, topics);
+        errdefer a.free(rows);
+        @memset(rows, .{});
+        const outbound_pins = try local_intent.TopicSet.initEmpty(a, topics);
+        return .{ .rng = std.Random.DefaultPrng.init(seed), .rows = rows, .outbound_pins = outbound_pins };
     }
 
     fn score(context: *const Context, peer: u16) f64 {
@@ -688,7 +701,7 @@ pub const Overlay = struct {
     }
 
     pub fn peerDisconnected(self: *Overlay, context: *const Context, peer: u16) void {
-        for (&self.rows, 0..) |*row, topic| {
+        for (self.rows, 0..) |*row, topic| {
             if (row.active) self.applySubscription(context, @intCast(topic), peer, false, .session_end);
         }
         if (self.namespace) |*ns| ns.clearPeer(peer);
@@ -714,7 +727,8 @@ pub const Overlay = struct {
 test "gossip policy review I3 shuffle budget holds at empty singleton and capacity" {
     var members: [c.peers_cap]u16 = undefined;
     for ([_]usize{ 0, 1, 3, c.peers_cap }) |len| {
-        var mesh = Overlay.init(17);
+        var mesh = try Overlay.init(std.testing.allocator, 17, constants.topics_cap);
+        defer mesh.deinit(std.testing.allocator);
         var expected = mesh.rng;
         for (0..len -| 1) |_| _ = expected.next();
         for (members[0..len], 0..) |*peer, i| peer.* = @intCast(i);
@@ -726,7 +740,8 @@ test "gossip policy review I3 shuffle budget holds at empty singleton and capaci
             seen.set(peer);
         }
     }
-    var mesh = Overlay.init(17);
+    var mesh = try Overlay.init(std.testing.allocator, 17, constants.topics_cap);
+    defer mesh.deinit(std.testing.allocator);
     var ordered = [_]u16{ 0, 1, 2, 3, 4, 5, 6, 7 };
     mesh.shuffle(&ordered);
     try std.testing.expectEqualSlices(u16, &.{ 6, 7, 2, 0, 5, 1, 3, 4 }, &ordered);

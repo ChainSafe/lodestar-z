@@ -94,9 +94,10 @@ fn prepareApplicationStorage(runtime: *Runtime, app: *const application_cfg.Conf
     const chain = &runtime.heavy.?.config.chain;
     const gossip_plan = try n.gossip_processor.Plan.resolve(runtime.heavy.?.config.processor_limits, runtime.heavy.?.config.execution_limits, gossip_options.topic_policy.?, chain.forks[0..chain.boundary_count], gossip_options.random_seed.?);
     const gossip_backing = gossip.Table.backingBytes(gossip_plan.capacity, gossip_plan.bytes);
+    const resident_topics = try n.gossipsub.topic_policy.validate(gossip_options.topic_policy.?);
     const metrics_capacity = n.metrics.textCapacity(chain.topics[0..chain.boundary_count]);
     const publication_capacity: usize = if (runtime.heavy.?.config.profile == .small) 32 else publications.capacity_max;
-    const bridge = publication_capacity * @sizeOf(publications.Cell) + 2 * metrics_capacity + gossip_backing + incoming_capacity * @sizeOf(incoming.Cell) + request_capacity * @sizeOf(requests.Cell) + @sizeOf(Runtime) + @sizeOf(r.Owner) - @sizeOf(n.NetworkCore) + r.Stores.bytes(runtime.peer_capacity) + @sizeOf(projection.Lane);
+    const bridge = publication_capacity * @sizeOf(publications.Cell) + 2 * metrics_capacity + gossip_backing + incoming_capacity * @sizeOf(incoming.Cell) + request_capacity * @sizeOf(requests.Cell) + @sizeOf(Runtime) + @sizeOf(r.Owner) - @sizeOf(n.NetworkCore) + r.Stores.bytesForTopics(runtime.peer_capacity, resident_topics) + @sizeOf(projection.Lane);
     if (bridge > app.resources.bridgeBudgetBytes) return error.NetworkBridgeBudgetExceeded;
     runtime.metrics = try @import("network_metrics.zig").Export.init(metrics_capacity);
     runtime.requests = try requests.Table.init(r.allocator, request_capacity, &runtime.payload_budget);
@@ -114,7 +115,7 @@ fn prepareApplicationStorage(runtime: *Runtime, app: *const application_cfg.Conf
     runtime.publications = try publications.Table.init(r.allocator, publication_capacity, &runtime.payload_budget);
     runtime.incoming = try incoming.Table.init(r.allocator, incoming_capacity, &runtime.payload_budget);
     runtime.gossip = try gossip.Table.init(r.allocator, gossip_plan);
-    runtime.stores = try r.Stores.create(r.allocator, runtime.peer_capacity);
+    runtime.stores = try r.Stores.createForTopics(r.allocator, runtime.peer_capacity, resident_topics);
     runtime.lane = try r.allocator.create(projection.Lane);
     runtime.lane.?.* = .{};
     runtime.diag.bridgeRequestedBytes = bridge;

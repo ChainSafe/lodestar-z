@@ -64,7 +64,7 @@ pub fn seenTtlMs(slots_per_epoch: u64, seconds_per_slot: u64) u64 {
     return seconds_per_slot * 1000 * slots_per_epoch * seen_ttl_epochs;
 }
 
-/// Fixed connected-peer capacity and room for two full supported fork topic sets.
+/// Connected peers, retained peer identities, and simultaneously requested local topics.
 pub const peers_cap: usize = 256;
 pub const retained_peers_cap: u16 = 512;
 pub const topics_cap: usize = 512;

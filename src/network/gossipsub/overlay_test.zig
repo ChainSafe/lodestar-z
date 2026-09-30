@@ -318,20 +318,20 @@ test "overlay unsubscribe and disconnect retire membership and score together" {
     for (0..2) |peer| f.g.overlay.onGraft(&context, f.topic, @intCast(peer));
     const first = f.g.sessions.rows[0].logical.index;
     const second = f.g.sessions.rows[1].logical.index;
-    try std.testing.expect(f.g.peers.scores.topics[@as(usize, first) * c.topics_cap + f.topic].in_mesh);
-    try std.testing.expect(f.g.peers.scores.topics[@as(usize, second) * c.topics_cap + f.topic].in_mesh);
+    try std.testing.expect(f.g.peers.scores.topics[@as(usize, first) * f.g.overlay.rows.len + f.topic].in_mesh);
+    try std.testing.expect(f.g.peers.scores.topics[@as(usize, second) * f.g.overlay.rows.len + f.topic].in_mesh);
     context.now = 60_001;
     _ = f.g.overlay.peerSubscription(&context, 0, f.g.overlay.topicString(f.topic), false);
     try std.testing.expect(!f.g.overlay.subscribers(f.topic).isSet(0));
     try std.testing.expect(!f.g.overlay.mesh(f.topic).isSet(0));
-    try std.testing.expect(!f.g.peers.scores.topics[@as(usize, first) * c.topics_cap + f.topic].in_mesh);
-    const failures = f.g.peers.scores.topics[@as(usize, first) * c.topics_cap + f.topic].mesh_failures;
+    try std.testing.expect(!f.g.peers.scores.topics[@as(usize, first) * f.g.overlay.rows.len + f.topic].in_mesh);
+    const failures = f.g.peers.scores.topics[@as(usize, first) * f.g.overlay.rows.len + f.topic].mesh_failures;
     _ = f.g.overlay.peerSubscription(&context, 0, f.g.overlay.topicString(f.topic), false);
-    try std.testing.expectEqual(failures, f.g.peers.scores.topics[@as(usize, first) * c.topics_cap + f.topic].mesh_failures);
+    try std.testing.expectEqual(failures, f.g.peers.scores.topics[@as(usize, first) * f.g.overlay.rows.len + f.topic].mesh_failures);
     f.g.overlay.peerDisconnected(&context, 1);
     try std.testing.expect(!f.g.overlay.subscribers(f.topic).isSet(1));
     try std.testing.expect(!f.g.overlay.mesh(f.topic).isSet(1));
-    try std.testing.expect(!f.g.peers.scores.topics[@as(usize, second) * c.topics_cap + f.topic].in_mesh);
+    try std.testing.expect(!f.g.peers.scores.topics[@as(usize, second) * f.g.overlay.rows.len + f.topic].in_mesh);
 }
 
 test "gossip policy topic capacity supports two full fork subnet sets" {
@@ -342,7 +342,7 @@ test "gossip policy topic capacity supports two full fork subnet sets" {
     var buffer: [topic_mod.topic_max_len]u8 = undefined;
     for (0..3) |fork| {
         if (fork == 2) {
-            for (&overlay.rows, 0..) |*topic, index| {
+            for (overlay.rows, 0..) |*topic, index| {
                 if (topic.active and std.mem.startsWith(u8, overlay.topicString(@intCast(index)), "/eth2/00000000/")) {
                     try gossip_test.unsubscribe(&gossip, overlay.topicString(@intCast(index)));
                 }

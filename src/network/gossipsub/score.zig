@@ -80,7 +80,7 @@ pub const GlobalWeights = struct { p5: f64 = 0, p6: f64 = 0, p7: f64 = 0 };
 /// Protocol violations that each add one P7 behaviour penalty unit.
 pub const Penalty = enum { graft_backoff, graft_flood, broken_iwant, malformed_rpc, malformed_frame, large_frame_timeout };
 pub const Breakdown = struct {
-    topics: [constants.topics_cap]TopicWeights = @splat(.{}),
+    topics: []TopicWeights,
     global: GlobalWeights = .{},
 };
 
@@ -95,7 +95,7 @@ pub const PeerScore = struct {
     params: Params,
     topics: []TopicCounters,
     rows: []PeerState,
-    topic_params: [constants.topics_cap]TopicParams,
+    topic_params: []TopicParams,
 
     pub const PeerState = struct {
         behaviour: f64 = 0,
@@ -109,35 +109,47 @@ pub const PeerScore = struct {
     };
 
     pub fn backingBytes(count: usize) usize {
-        return count * (@sizeOf(PeerState) + constants.topics_cap * @sizeOf(TopicCounters));
+        return backingBytesForTopics(count, constants.topics_cap);
+    }
+
+    pub fn backingBytesForTopics(count: usize, topics: usize) usize {
+        return count * (@sizeOf(PeerState) + topics * @sizeOf(TopicCounters)) + topics * @sizeOf(TopicParams);
     }
 
     pub fn init(allocator: Allocator, params: Params, count: u16) (Allocator.Error || error{InvalidLimits})!PeerScore {
-        if (count == 0 or count > peer_capacity) return error.InvalidLimits;
+        return initForTopics(allocator, params, count, constants.topics_cap);
+    }
+
+    pub fn initForTopics(allocator: Allocator, params: Params, count: u16, topic_count: usize) (Allocator.Error || error{InvalidLimits})!PeerScore {
+        if (count == 0 or count > peer_capacity or topic_count == 0 or topic_count > @import("topic_policy.zig").topic_max) return error.InvalidLimits;
         try validateParams(params);
-        const cells = @as(usize, count) * constants.topics_cap;
+        const cells = @as(usize, count) * topic_count;
         const topics = try allocator.alloc(TopicCounters, cells);
         errdefer allocator.free(topics);
         @memset(topics, .{});
         const rows = try allocator.alloc(PeerState, count);
         errdefer allocator.free(rows);
         @memset(rows, .{});
+        const topic_params = try allocator.alloc(TopicParams, topic_count);
+        errdefer allocator.free(topic_params);
+        @memset(topic_params, params.topic);
         return .{
             .params = params,
-            .topic_params = [_]TopicParams{params.topic} ** constants.topics_cap,
+            .topic_params = topic_params,
             .topics = topics,
             .rows = rows,
         };
     }
 
     pub fn deinit(self: *PeerScore, allocator: Allocator) void {
+        allocator.free(self.topic_params);
         allocator.free(self.rows);
         allocator.free(self.topics);
         self.* = undefined;
     }
 
     fn load(self: *const PeerScore, peer: u16, topic: u16) TopicCounters {
-        const index = @as(usize, peer) * constants.topics_cap + topic;
+        const index = @as(usize, peer) * self.topic_params.len + topic;
         assert(index < self.topics.len);
         return self.topics[index];
     }
@@ -146,7 +158,7 @@ pub const PeerScore = struct {
     /// leaves the counters unchanged. The cached score is invalidated only when `evaluate` reads a
     /// different value from the new counters.
     fn store(self: *PeerScore, peer: u16, topic: u16, next: TopicCounters) void {
-        const index = @as(usize, peer) * constants.topics_cap + topic;
+        const index = @as(usize, peer) * self.topic_params.len + topic;
         assert(index < self.topics.len);
         self.revision +|= 1;
         if (observable(&self.topic_params[topic], &self.topics[index], &next)) self.rows[peer].dirty = true;
@@ -157,8 +169,8 @@ pub const PeerScore = struct {
     pub fn resetPeer(self: *PeerScore, peer: u16) void {
         self.revision +|= 1;
         self.rows[peer] = .{};
-        const base = @as(usize, peer) * constants.topics_cap;
-        @memset(self.topics[base..][0..constants.topics_cap], .{});
+        const base = @as(usize, peer) * self.topic_params.len;
+        @memset(self.topics[base..][0..self.topic_params.len], .{});
     }
 
     pub fn graft(self: *PeerScore, peer: u16, topic: u16, now_ms: u64) void {
@@ -218,7 +230,7 @@ pub const PeerScore = struct {
         const row = &self.rows[peer];
         if (self.cached(peer, now_ms, ip_count)) |value| return value;
         self.calculations +|= 1;
-        self.topic_visits +|= constants.topics_cap;
+        self.topic_visits +|= self.topic_params.len;
         const result = self.evaluate(peer, now_ms, ip_count, null);
         row.dirty = false;
         row.cached_at = now_ms;
@@ -246,7 +258,9 @@ pub const PeerScore = struct {
     }
 
     pub fn snapshotWeights(self: *const PeerScore, peer: u16, now_ms: u64, ip_count: u16, out: *Breakdown) f64 {
-        out.* = .{};
+        assert(out.topics.len == self.topic_params.len);
+        @memset(out.topics, .{});
+        out.global = .{};
         return self.evaluate(peer, now_ms, ip_count, out).total;
     }
 
@@ -256,9 +270,9 @@ pub const PeerScore = struct {
         var next_change: ?u64 = null;
         var total: f64 = 0;
         var topic: usize = 0;
-        while (topic < constants.topics_cap) : (topic += 1) {
+        while (topic < self.topic_params.len) : (topic += 1) {
             const params = &self.topic_params[topic];
-            const counters = &self.topics[@as(usize, peer) * constants.topics_cap + topic];
+            const counters = &self.topics[@as(usize, peer) * self.topic_params.len + topic];
             if (!counters.in_mesh and counters.first_deliveries == 0 and
                 counters.mesh_failures == 0 and counters.invalid == 0) continue;
             var weights: TopicWeights = .{};
@@ -344,9 +358,9 @@ pub const PeerScore = struct {
     }
 
     pub fn retainsTopic(self: *const PeerScore, topic: u16) bool {
-        assert(topic < constants.topics_cap);
+        assert(topic < self.topic_params.len);
         for (0..self.rows.len) |peer| {
-            const counters = &self.topics[peer * constants.topics_cap + topic];
+            const counters = &self.topics[peer * self.topic_params.len + topic];
             if (counters.in_mesh or counters.first_deliveries != 0 or counters.mesh_deliveries != 0 or
                 counters.mesh_failures != 0 or counters.invalid != 0) return true;
         }
@@ -354,14 +368,14 @@ pub const PeerScore = struct {
     }
 
     pub fn configureTopic(self: *PeerScore, topic: u16, params: TopicParams) error{InvalidLimits}!void {
-        assert(topic < constants.topics_cap);
+        assert(topic < self.topic_params.len);
         try validateTopic(params);
         self.applyValidatedTopic(topic, params);
     }
 
     /// Params must pass validateTopic before entering a prepared owner transaction.
     pub fn applyValidatedTopic(self: *PeerScore, topic: u16, params: TopicParams) void {
-        assert(topic < constants.topics_cap);
+        assert(topic < self.topic_params.len);
         if (std.meta.eql(self.topic_params[topic], params)) return;
         self.revision +|= 1;
         self.topic_params[topic] = params;
@@ -376,7 +390,7 @@ pub const PeerScore = struct {
         if (self.score(peer, now_ms, ip_count) > 0) {
             self.resetPeer(peer);
         } else {
-            for (0..constants.topics_cap) |topic| {
+            for (0..self.topic_params.len) |topic| {
                 const index: u16 = @intCast(topic);
                 if (self.load(peer, index).in_mesh) self.prune(peer, index, now_ms);
                 var next = self.load(peer, index);
@@ -393,7 +407,7 @@ pub const PeerScore = struct {
         const row = &self.rows[peer];
         // A validation completed offline must not carry first-delivery credit into a reconnect.
         if (connected and !row.connected) {
-            for (0..constants.topics_cap) |topic| {
+            for (0..self.topic_params.len) |topic| {
                 var next = self.load(peer, @intCast(topic));
                 if (next.first_deliveries == 0) continue;
                 next.first_deliveries = 0;
@@ -426,7 +440,7 @@ pub const PeerScore = struct {
 
     fn decayPeer(self: *PeerScore, peer: u16, steps: u64) void {
         const zero = self.params.decay_to_zero;
-        for (0..constants.topics_cap) |topic| {
+        for (0..self.topic_params.len) |topic| {
             var c = self.load(peer, @intCast(topic));
             if (c.first_deliveries == 0 and c.mesh_deliveries == 0 and c.mesh_failures == 0 and c.invalid == 0) continue;
             const tp = self.topic_params[topic];
@@ -447,7 +461,7 @@ pub const PeerScore = struct {
 pub const peer_capacity = constants.retained_peers_cap;
 pub const counter_max: f64 = 1_000_000;
 // Two weights and a squared counter bound each topic term by 1e36.
-// Summing all 512 topics and global terms stays below 1e40.
+// Summing the bounded namespace and global terms stays below 1e41.
 pub const weight_max: f64 = 1_000_000_000_000;
 
 fn safeMagnitude(value: f64) bool {
@@ -925,7 +939,8 @@ test "score weights use policy thresholds and snapshots leave the cache untouche
     scores.store(0, 0, failed);
     scores.penalize(0, 3);
     ip_count = 3;
-    var details: Breakdown = undefined;
+    var detail_topics: [constants.topics_cap]TopicWeights = undefined;
+    var details: Breakdown = .{ .topics = &detail_topics };
     const value = scores.snapshotWeights(0, 2000, ip_count, &details);
     try std.testing.expectEqualDeep(TopicWeights{ .p1 = 2, .p2 = 3, .p3 = -20, .p3b = -7, .p4 = -11 }, details.topics[0]);
     try std.testing.expectEqualDeep(GlobalWeights{ .p5 = 0, .p6 = -12, .p7 = -8 }, details.global);

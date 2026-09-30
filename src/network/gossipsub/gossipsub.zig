@@ -158,7 +158,8 @@ pub const Gossipsub = struct {
 
         const overlay = try allocator.create(overlay_mod.Overlay);
         errdefer allocator.destroy(overlay);
-        overlay.* = overlay_mod.Overlay.init(options.random_seed.?);
+        overlay.* = try overlay_mod.Overlay.init(allocator, options.random_seed.?, layout.topics);
+        errdefer overlay.deinit(allocator);
         overlay.slot = options.initial_slot;
 
         var peers = try peers_mod.PeerBook.init(allocator, &options);
@@ -493,7 +494,7 @@ pub const Gossipsub = struct {
         if (!self.cycle.isActive()) return;
         const start = timing.now(self.clock);
         var serviced: usize = 0;
-        for (0..constants.topics_cap) |_| {
+        for (0..self.overlay.rows.len) |_| {
             const index = self.cycle.next() orelse break;
             const topic = &self.overlay.rows[index];
             if (!topic.active) continue;
@@ -589,7 +590,7 @@ pub const Gossipsub = struct {
         const index = self.sessions.find(conn) orelse return;
         self.peers.rows[self.logical(index).index].direct = true;
         const context = self.overlayContext(self.last_now_ms);
-        for (&self.overlay.rows, 0..) |*topic, t| {
+        for (self.overlay.rows, 0..) |*topic, t| {
             if (topic.mesh.isSet(index)) self.overlay.prune(&context, @intCast(t), index, constants.prune_backoff_ms, .direct_peer);
             topic.fanout.unset(index);
         }
@@ -644,14 +645,14 @@ pub const Gossipsub = struct {
     }
 
     pub fn ihaveWork(self: *const Gossipsub, body_len: usize) usize {
-        return ihaveWorkBound(body_len, self.messages.seen.index.probe_limit + self.messages.validation.index.probe_limit, self.recovery.batch_len, self.recovery.len);
+        return ihaveWorkBound(body_len, self.overlay.rows.len, self.messages.seen.index.probe_limit + self.messages.validation.index.probe_limit, self.recovery.batch_len, self.recovery.len);
     }
 
-    pub fn ihaveWorkBound(body_len: usize, probes: usize, batches: usize, requests: usize) usize {
+    pub fn ihaveWorkBound(body_len: usize, topics: usize, probes: usize, batches: usize, requests: usize) usize {
         const ids: usize = @min(constants.max_ihave_ids_per_heartbeat, body_len / (constants.message_id_length + 2));
         const selected: usize = @min(ids, constants.gossip_ids_max);
         const fields: usize = @min(body_len / 2 + 1, 8193);
-        const header_work = constants.topics_cap * (topic_mod.topic_max_len + @sizeOf(score_mod.TopicParams) + @sizeOf(score_mod.TopicCounters) + @sizeOf(score_mod.TopicWeights)) +
+        const header_work = topics * (topic_mod.topic_max_len + @sizeOf(score_mod.TopicParams) + @sizeOf(score_mod.TopicCounters) + @sizeOf(score_mod.TopicWeights)) +
             @as(usize, peers_mod.capacity) * @sizeOf(peers_mod.Row) + @sizeOf(peers_mod.PeerBook);
         // Each protobuf field consumes at least two bytes and at most two
         // ten-byte varints. Include a score refresh, IP population and topic

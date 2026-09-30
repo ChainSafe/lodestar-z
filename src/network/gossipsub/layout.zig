@@ -25,6 +25,7 @@ pub const Layout = struct {
     sessions: u16,
     connection_slots: u16,
     retained: u16,
+    topics: u16,
     history: usize,
     seen: usize,
     validations: usize,
@@ -41,6 +42,7 @@ pub const Layout = struct {
             .sessions = options.connected_capacity,
             .connection_slots = options.connection_slots,
             .retained = options.retained_capacity,
+            .topics = residentTopics(options),
             .history = historyCapacity(options),
             .seen = options.seen_capacity,
             .validations = options.validation_capacity,
@@ -52,6 +54,10 @@ pub const Layout = struct {
             .session_buffer_bytes = @import("peer_io.zig").PeerIo.bufferBytes(options),
             .namespace_bytes = if (options.topic_policy) |boundaries| policy.Namespace.backingBytes(boundaries, options.connected_capacity) else 0,
         };
+    }
+
+    pub fn residentTopics(options: *const Options) u16 {
+        return if (options.topic_policy) |boundaries| policy.validate(boundaries) catch unreachable else constants.topics_cap;
     }
 
     /// The history must hold every message retained in its six windows, publications included,
@@ -68,7 +74,9 @@ pub const Layout = struct {
         const metadata = @sizeOf(@import("gossipsub.zig").Gossipsub) +
             @sizeOf(@import("sessions.zig").Sessions) + @sizeOf(@import("overlay.zig").Overlay) +
             @import("sessions.zig").Sessions.metadataBytes(self) +
-            peers.PeerBook.backingBytes(self.retained) +
+            peers.PeerBook.backingBytesForTopics(self.retained, self.topics) +
+            @as(usize, self.topics) * @sizeOf(@import("overlay.zig").Row) +
+            @import("local_intent.zig").topicSetBytes(self.topics) +
             @import("messages.zig").Messages.metadataBytes(self) +
             @import("recovery.zig").Recovery.backingBytes() + self.namespace_bytes;
         const frames = self.receive_arena_bytes + constants.GOSSIP_MAX_SIZE;
