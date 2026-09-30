@@ -827,3 +827,122 @@ test "transport reads only the ready families up to the turn quota and resumes t
     try std.testing.expectEqual([2]bool{ false, false }, wait.poll(std.testing.io, sources, 0).quic);
     try std.testing.expectEqual(@as(u64, quota + 11), hub.udp.counters.received_datagrams);
 }
+
+test "transport drops a pressure suffix once and preserves every connection and loss timer" {
+    const Prefix = struct {
+        var count: usize = 0;
+        var calls: usize = 0;
+        var dropped_bytes: usize = 0;
+        fn send(_: ?*anyopaque, _: net.Socket.Handle, messages: []net.OutgoingMessage, _: net.SendFlags) struct { ?net.Socket.SendError, usize } {
+            calls += 1;
+            const sent = @min(count, messages.len);
+            for (messages[sent..]) |message| dropped_bytes += message.data_len;
+            return .{ if (sent < messages.len) error.SystemResources else null, sent };
+        }
+    };
+    for ([_]usize{ 0, 1 }) |prefix| {
+        var node: Node = .{};
+        try node.init(122);
+        defer node.deinit();
+        const now = try transport_mod.currentTime(std.testing.io);
+        var handles: [3]engine_mod.Handle = undefined;
+        for (&handles) |*handle| handle.* = try node.transport.engine.dial(&node.transport.localAddress(), node.transport.peerId(), now);
+        Prefix.count = prefix;
+        Prefix.calls = 0;
+        Prefix.dropped_bytes = 0;
+        var vtable = std.testing.io.vtable.*;
+        vtable.netSend = Prefix.send;
+        const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+        var result: transport_mod.StepResult = .{ .now = now };
+        node.transport.flush(io, now, &result);
+        try std.testing.expectEqual(@as(usize, 1), Prefix.calls);
+        try std.testing.expectEqual(@as(u32, @intCast(prefix)), result.datagrams_sent);
+        try std.testing.expectEqual(@as(u32, 0), result.send_failures);
+        try std.testing.expectEqual(@as(u8, 0), node.transport.batch_len);
+        const reason = @intFromEnum(@import("udp").SendPressure.system_resources);
+        try std.testing.expectEqual(@as(u64, 3 - prefix), node.transport.udp.send_drops.datagrams[reason]);
+        try std.testing.expectEqual(@as(u64, Prefix.dropped_bytes), node.transport.udp.send_drops.bytes[reason]);
+        try std.testing.expect(Prefix.dropped_bytes > 0);
+        for (handles) |handle| try std.testing.expectEqual(@as(?engine_mod.Handle, handle), node.transport.engine.sendOwner(handle.index));
+        try std.testing.expect(node.transport.nextDeadlineNs().? > now.nanos());
+        try std.testing.expect(!result.backlog);
+        var idle: transport_mod.StepResult = .{ .now = now };
+        node.transport.flush(io, now, &idle);
+        try std.testing.expectEqual(@as(u32, 0), idle.send_calls);
+        try std.testing.expectEqual(@as(usize, 1), Prefix.calls);
+        try std.testing.expect(!idle.backlog);
+    }
+}
+
+test "transport recovers a locally dropped first flight through QUIC loss recovery" {
+    var client: Node = .{};
+    try client.init(123);
+    defer client.deinit();
+    var server: Node = .{};
+    try server.init(124);
+    defer server.deinit();
+    var faults: FaultIo = .{ .send = .{}, .send_failure = error.SystemResources };
+    faults.init(std.testing.io);
+    defer faults.deinit();
+    const handle = try client.transport.dialPeer(faults.io(), server.transport.localAddress(), server.transport.peerId());
+    try std.testing.expectEqual(@as(usize, 1), faults.send_calls);
+    try std.testing.expectEqual(@as(u64, 0), client.transport.udp.counters.sent_datagrams);
+    const reason = @intFromEnum(@import("udp").SendPressure.system_resources);
+    try std.testing.expectEqual(@as(u64, 1), client.transport.udp.send_drops.datagrams[reason]);
+    const c = @import("quic/binding.zig").c;
+    var stats: c.quiche_stats = undefined;
+    c.quiche_conn_stats(client.transport.engine.registry.slots[handle.index].conn.?, &stats);
+    try std.testing.expect(stats.sent > 0);
+    try std.testing.expect(!client.transport.engine.backlog());
+    const now = try transport_mod.currentTime(std.testing.io);
+    const deadline_ms = (client.transport.nextDeadlineNs().? + std.time.ns_per_ms - 1) / std.time.ns_per_ms;
+    try std.testing.expect(deadline_ms > now.mono_ms and deadline_ms - now.mono_ms < 3_000);
+    try std.Io.sleep(std.testing.io, .fromMilliseconds(@intCast(deadline_ms - now.mono_ms)), .awake);
+    const after = try transport_mod.currentTime(std.testing.io);
+    client.transport.expire(after);
+    var retransmitted: transport_mod.StepResult = .{ .now = after };
+    client.transport.flush(std.testing.io, after, &retransmitted);
+    try std.testing.expect(retransmitted.datagrams_sent > 0);
+    try std.testing.expectEqual(@as(u32, 0), retransmitted.send_failures);
+    var events_a: [8]engine_mod.Event = undefined;
+    var events_b: [8]engine_mod.Event = undefined;
+    var connected = false;
+    for (0..200) |_| {
+        const progress = try stepBoth(&client, &server, &events_a, &events_b);
+        for (events_a[0..progress.a]) |event| if (event == .connected and std.meta.eql(event.connected.conn, handle)) {
+            connected = true;
+        };
+        if (connected) break;
+    }
+    try std.testing.expect(connected);
+    try std.testing.expectEqual(@as(u64, 1), client.transport.udp.send_drops.datagrams[reason]);
+}
+
+test "network owner progresses and shuts down while UDP sends are under local pressure" {
+    const core = @import("network_core.zig");
+    const keys = @import("wire/keys.zig");
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{125}));
+    const remote = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{126}));
+    const identity = @import("wire/peer_id.zig").PeerId.fromPublicKey(&remote.publicKey());
+    const options = support.networkOptions(&key);
+    var node: core.NetworkCore = undefined;
+    try node.init(std.testing.allocator, std.testing.io, &options.resolved, options.startup);
+    defer node.deinit(std.testing.io);
+    var faults: FaultIo = .{ .send = .{}, .send_failure = error.SystemResources };
+    faults.init(std.testing.io);
+    defer faults.deinit();
+    const now = node.last_now;
+    try node.connectUntil(&identity, &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9 } }}, now, now.mono_ms + 5_000);
+    const progress = node.step(faults.io(), now, .{}, .deadlineOnly(now.mono_ms));
+    try std.testing.expect(progress.failure == null);
+    try std.testing.expect(faults.send_calls > 0 and faults.send_calls <= transport_mod.send_burst_max);
+    try std.testing.expect(!node.peer_manager.stopped);
+    try std.testing.expect(node.transport.udp.send_drops.datagrams[@intFromEnum(@import("udp").SendPressure.system_resources)] > 0);
+    node.shutdown(node.last_now);
+    for (0..4) |_| {
+        const stopped = node.step(faults.io(), node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms));
+        try std.testing.expect(stopped.failure == null);
+        if (node.isClosed()) break;
+    }
+    try std.testing.expect(node.isClosed());
+}

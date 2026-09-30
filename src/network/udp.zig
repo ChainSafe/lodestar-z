@@ -46,6 +46,7 @@ pub const Counters = struct {
 
 pub const Udp = struct {
     counters: Counters = .{},
+    send_drops: sockets_mod.SendDrops = .{},
     sockets: sockets_mod.Sockets,
     /// The sendmmsg descriptors of the batch `sendMany` is sending. Fields rather than locals so
     /// ReleaseSafe does not fill them for every batch.
@@ -110,13 +111,17 @@ pub const Udp = struct {
         bytes: []const u8,
     ) SendError!void {
         std.debug.assert(bytes.len > 0);
-        try self.sockets.sendTo(io, destination.*, bytes, constants.datagram_size_max);
+        self.sockets.sendTo(io, destination.*, bytes, constants.datagram_size_max) catch |err| {
+            if (sockets_mod.sendPressure(err)) |reason| self.send_drops.add(reason, bytes.len);
+            return err;
+        };
         self.counters.sent_bytes +|= bytes.len;
         self.counters.sent_datagrams +|= 1;
     }
 
     /// Sends the batch in order, one sendmmsg call per run of one address family. It stops at
     /// the first datagram that fails: `sent` datagrams went out and `failure` is that datagram's error.
+    /// Local pressure discards the unsent suffix; callers must not resubmit those datagrams.
     pub fn sendMany(self: *Udp, io: std.Io, batch: []const types.Sent) SendOutcome {
         std.debug.assert(batch.len <= constants.send_batch_max);
         std.debug.assert(batch.len > 0);
@@ -142,7 +147,12 @@ pub const Udp = struct {
                 self.counters.sent_bytes +|= message.data_len;
                 self.counters.sent_datagrams +|= 1;
             }
-            if (run.sent != end - begin) return .{ .sent = begin + run.sent, .failure = run.failure.? };
+            if (run.sent != end - begin) {
+                if (sockets_mod.sendPressure(run.failure.?)) |reason| {
+                    for (batch[begin + run.sent ..]) |unsent| self.send_drops.add(reason, unsent.bytes.len);
+                }
+                return .{ .sent = begin + run.sent, .failure = run.failure.? };
+            }
             begin = end;
         }
         return .{ .sent = batch.len, .failure = null };

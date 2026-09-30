@@ -171,7 +171,8 @@ pub const Transport = struct {
         return self.engine.nextDeadlineNs();
     }
 
-    /// Sends the first flight before returning, so a local send failure is a dial error.
+    /// Produces the first flight before returning. Local pressure drops it for QUIC loss recovery;
+    /// other send failures are dial errors.
     pub fn dialPeer(
         self: *Transport,
         io: std.Io,
@@ -248,7 +249,8 @@ pub const Transport = struct {
     /// Drains the dirty connections in bursts of burst_per_connection datagrams until each
     /// reports Done or the turn's send budget runs out. A connection its burst did not finish
     /// moves to the dirty tail, so busy connections share the budget round-robin. A failed
-    /// datagram fails only its own connection; the rest of its batch is resubmitted.
+    /// datagram fails only its own connection; the rest of its batch is resubmitted. Temporary
+    /// local pressure instead drops the unsent suffix for QUIC loss recovery.
     pub fn flush(self: *Transport, io: std.Io, now: engine_mod.Now, result: *StepResult) void {
         assert(self.batch_len == 0);
         var turn = schedule.Turn.init(self.work_limits.send_per_step_max);
@@ -298,7 +300,9 @@ pub const Transport = struct {
         return false;
     }
 
-    /// Returns the first send failure, after failing the connection that owned the datagram.
+    /// Returns the first fatal send failure, after failing its connection. QUIC already accounts
+    /// for produced packets as sent: local pressure drops their bytes without rolling back packet
+    /// state or closing connections, so loss timers can retransmit the frames.
     fn submit(self: *Transport, io: std.Io, result: *StepResult) ?udp_mod.SendError {
         const count = self.batch_len;
         if (count == 0) return null;
@@ -313,6 +317,7 @@ pub const Transport = struct {
             result.datagrams_sent += @intCast(outcome.sent);
             begin += outcome.sent;
             const err = outcome.failure orelse break;
+            if (@import("udp").sendPressure(err) != null) break;
             first = first orelse err;
             const owner = self.batch.owners[begin];
             if (self.engine.sendOwner(owner.index)) |current| if (std.meta.eql(current, owner)) {

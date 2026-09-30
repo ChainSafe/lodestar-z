@@ -92,6 +92,20 @@ fn writeNativeCounters(self: *const Context, w: *prom.Encoder) prom.Error!void {
         .kind = .counter,
         .help = metric[1],
     }, @field(self.owner.transport.udp.counters, metric[0]));
+    const udp = @import("udp");
+    const discovery_drops = if (self.owner.discovery) |d| d.transport.send_drops else udp.SendDrops{};
+    inline for (.{ "datagrams", "bytes" }) |measure| {
+        const dropped = try w.family(.{
+            .name = "lodestar_native_udp_send_dropped_" ++ measure ++ "_total",
+            .kind = .counter,
+            .help = "UDP " ++ measure ++ " discarded before kernel acceptance due to temporary local send pressure",
+            .labels = &.{ "role", "reason" },
+        });
+        inline for (std.meta.fields(udp.SendPressure)) |reason| {
+            try dropped.sample(.{ "quic", reason.name }, @field(self.owner.transport.udp.send_drops, measure)[reason.value]);
+            try dropped.sample(.{ "discovery", reason.name }, @field(discovery_drops, measure)[reason.value]);
+        }
+    }
     const refused = try w.family(.{
         .name = "lodestar_native_dial_recent_failures_refused_total",
         .kind = .counter,
