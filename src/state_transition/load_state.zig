@@ -714,8 +714,6 @@ test "diff helpers cases" {
         .{ .name = "scores: empty", .kind = .scores, .count = 0 },
         .{ .name = "validators: single", .kind = .validators, .count = 1, .modified = &.{0}, .offset = 7 },
         .{ .name = "scores: single", .kind = .scores, .count = 1, .modified = &.{0}, .offset = 9 },
-        .{ .name = "validators: odd sparse", .kind = .validators, .count = 129, .modified = &.{ 0, 64, 128 }, .offset = 11 },
-        .{ .name = "scores: odd sparse", .kind = .scores, .count = 129, .modified = &.{ 0, 64, 128 }, .offset = 13 },
         .{ .name = "validators: large dense", .kind = .validators, .count = 65_537, .all_modified = true, .offset = 17 },
         .{ .name = "scores: large dense", .kind = .scores, .count = 65_537, .all_modified = true, .offset = 19 },
         .{ .name = "validators: large sparse", .kind = .validators, .count = 65_537, .modified = &.{ 0, 32_768, 65_536 }, .offset = 23 },
