@@ -263,6 +263,7 @@ pub const Cursor = struct {
     values: bool,
     remaining: u32,
     closed: bool = false,
+    positioned: bool = true,
 
     pub fn close(self: *Cursor) void {
         if (self.closed) return;
@@ -272,6 +273,14 @@ pub const Cursor = struct {
         self.bounds.deinit(self.db.allocator);
         const previous = self.db.cursors.fetchSub(1, .monotonic);
         std.debug.assert(previous > 0);
+    }
+
+    /// Repositions within the original snapshot and bounds without resetting the consumed row limit.
+    pub fn seek(self: *Cursor, target: []const u8) !void {
+        if (self.closed) return error.CursorClosed;
+        errdefer self.close();
+        try checkKey(target);
+        self.positioned = try self.bounds.seekTarget(&self.iterator, target);
     }
 
     /// Keys and values share the byte budget. A row deferred for lack of remaining room is not consumed. Any error
@@ -324,6 +333,20 @@ pub const Cursor = struct {
             self.close();
             return error.InvalidReadLimit;
         }
+        return self.readOwnedPage(entries, value_limit, total_limit, null);
+    }
+
+    /// A soft watermark ends a batch AFTER the row that exceeds it. Hard limits still refuse oversized rows.
+    /// Unlike readOwned, natural exhaustion retains the snapshot for seek; callers must close it explicitly.
+    pub fn readOwnedBatch(self: *Cursor, entries: []Entry, value_limit: usize, total_limit: usize, high_water_mark_bytes: u32) !Page {
+        return self.readOwnedPage(entries, value_limit, total_limit, high_water_mark_bytes);
+    }
+
+    fn readOwnedPage(self: *Cursor, entries: []Entry, value_limit: usize, total_limit: usize, high_water_mark_bytes: ?u32) !Page {
+        if (entries.len > max_bulk_entries) {
+            self.close();
+            return error.InvalidReadLimit;
+        }
         @memset(entries, .{ .key = "", .value = "" });
         if (self.closed) return error.CursorClosed;
         errdefer self.close();
@@ -354,15 +377,16 @@ pub const Cursor = struct {
             page.bytes += bytes;
             self.remaining -= 1;
             if (self.remaining > 0) try self.bounds.advance(&self.iterator);
+            if (high_water_mark_bytes) |watermark| if (page.bytes > watermark) break;
         }
         if (!page.done) page.done = !try self.hasNext();
-        if (page.done) self.close();
+        if (page.done and high_water_mark_bytes == null) self.close();
         return page;
     }
 
     fn hasNext(self: *Cursor) !bool {
         try self.iterator.getError();
-        if (self.remaining == 0 or !self.iterator.valid()) return false;
+        if (!self.positioned or self.remaining == 0 or !self.iterator.valid()) return false;
         return self.bounds.contains(self.iterator.key());
     }
 };

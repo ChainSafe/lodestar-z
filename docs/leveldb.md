@@ -55,7 +55,8 @@ native write batch. Operations have the form `{type: "put", key, value}` or
 | Individual value | 1 GiB |
 | Atomic write batch | 16,777,216 operations and 4 GiB of keys plus values |
 | Multi-get | 16,777,216 keys; 1 GiB default per-value and aggregate result limits |
-| Cursor page | 1,024 entries; 1 GiB default selected key-plus-value byte limit |
+| Cursor refill | First pull: 1 row; later: up to 1,000 by default (configurable through 1,024), with a soft 16 KiB watermark |
+| Explicit cursor batch | Up to 16,777,216 entries; 1 GiB default hard selected key-plus-value byte limit |
 | Diagnostic property copy | 1 MiB |
 | Live cursors per database | 64 |
 | Admitted operations per database | 4,096 by default, configurable up to 65,536 |
@@ -83,11 +84,30 @@ explicitly. The 64-cursor limit applies across handles sharing one database.
 Cursors use a stable snapshot, `gt`/`gte` and `lt`/`lte` bounds, `reverse`, and an
 optional total row `limit`. Inclusive bounds take precedence when both forms are
 provided. `keys()` and `values()` project inside the native iterator, so a key-only
-scan never copies stored values. A row that fits an empty page but not its remaining
-space stays pending for the next page. A row exceeding the per-value or whole-page
-limit fails the iteration; it is never silently skipped. Snapshots retain old
-versions until exhausted or closed. Close an iterator when abandoning it outside
-a `for await` loop.
+scan never copies stored values. The first `next()` and the first `next()` after
+`seek(target)` read one row; later refills read up to 1000 rows by default.
+`highWaterMarkBytes` is a soft projected-byte watermark, defaulting to 16 KiB.
+A batch includes the row that takes it above the watermark, including a single
+oversized row, and then stops. Equality does not stop a batch. Discarded projection
+components do not count. `nextv(size)` returns up to the requested number, draining
+an existing cache first without combining it with another native read; explicit
+bulk requests can exceed the ordinary refill size.
+
+`maxValueBytes` and `maxTotalBytes` are separate hard limits. A row that fits an
+empty hard-bounded page but not its remaining space stays pending for the next
+page. A row exceeding the per-value or whole-page limit fails the iteration;
+partial results of a failing read are freed, and no row is silently skipped.
+
+`seek(target)` discards prefetched rows and repositions within the original
+snapshot and bounds, in the iterator's direction. Out-of-range targets end the
+iteration rather than clamp to a boundary. Seeking preserves the consumed limit,
+including prefetched rows, matching classic-level. Targets are copied at the call;
+only the latest target is retained, and the next pull positions before reading. Natural exhaustion of manual
+`next()`/`nextv()` calls retains the cursor so seek can reuse its snapshot. Close
+manual iterators when finished. `for await`, `return()`, explicit close, read
+errors and database close release their cursors, including cancellation while
+opening, seeking or reading. Only one pull may be pending; seek during a pull
+rejects with `IteratorBusy`.
 
 These limits bound application result materialization and admission. They do
 **not** bound LevelDB's internal block reads, decompression, compaction, snapshot
@@ -111,19 +131,20 @@ or refusing an exclusive open, and rejects destruction while a handle remains op
 The host must still prevent concurrent access through independent engine copies
 or filesystem aliases not resolved by `realpath`: POSIX process-scoped locks do
 not reliably enforce that requirement. Existing databases keep their binary key
-and value encodings. Block certification and the network serving policy retain
-their existing responsibilities.
+and value encodings. Lodestar forwards its serving value and batch/page output
+limits to native reads; serving admission and lease accounting remain in Lodestar.
 
 Storage bounds do not certify a block's consensus validity, canonicality,
-execution status, or provenance. Any later removal of block certification must
-preserve those obligations and distinguish bounded returned values from engine
-workspace.
+execution status, or provenance. Those checks remain with Lodestar. Returned-value
+bounds do not bound LevelDB's engine workspace.
 
 ## Zig use and validation
 
 `src/leveldb/root.zig` owns the bounded API. Zig callers provide destination
 buffers to `getInto`, `getManyInto`, and `Cursor.readInto`, or use
-`getManyOwned` and `Cursor.readOwned` for exact-sized allocated results. Callers
+`getManyOwned` and `Cursor.readOwned` for exact-sized allocated results.
+`Cursor.readOwnedBatch` adds the soft watermark and keeps exhausted cursors
+seekable until explicit close; legacy reads retain their exhaustion cleanup. Callers
 free each owned result with the database allocator. Database operations may run
 concurrently with a thread-safe allocator; each cursor requires serialized access.
 Callers keep the database address stable and retire all operations and cursors

@@ -6,7 +6,7 @@ const runtime = @import("leveldb_runtime.zig");
 const values = @import("leveldb_values.zig");
 const allocator = std.heap.c_allocator;
 
-pub const Kind = enum { open, destroy, get_many, write, cursor, read_cursor, close_cursor, clear, approximate_size, compact_range, property };
+pub const Kind = enum { open, destroy, get_many, write, cursor, read_cursor, seek_cursor, close_cursor, clear, approximate_size, compact_range, property };
 
 pub const Job = struct {
     owner: *runtime.Runtime,
@@ -32,6 +32,7 @@ pub const Job = struct {
     sync: bool = false,
     cursor_id: u32 = 0,
     value_limit: usize = 0,
+    high_water_mark_bytes: ?u32 = null,
     page: leveldb.Page = .{ .count = 0, .bytes = 0, .done = false },
     failure: ?anyerror = null,
 
@@ -78,7 +79,7 @@ pub const Job = struct {
         const name = try owner.env.createStringUtf8("LevelDb");
         self.work = try napi.AsyncWork(Job).create(owner.env, null, name, execute, complete, self);
         errdefer self.work.delete() catch {};
-        if (kind == .cursor or kind == .read_cursor) {
+        if (kind == .cursor or kind == .read_cursor or kind == .seek_cursor) {
             self.retire_work = try napi.AsyncWork(Job).create(owner.env, null, name, retireExecute, retireComplete, self);
         }
         return self;
@@ -137,6 +138,7 @@ pub const Job = struct {
             .write => try database.writeWithLimits(self.operations, self.sync, .{ .max_value_bytes = leveldb.max_owned_value_bytes, .max_total_bytes = leveldb.max_owned_batch_bytes, .max_entries = leveldb.max_bulk_entries }),
             .cursor => try self.openCursor(database),
             .read_cursor => try self.readCursor(),
+            .seek_cursor => try self.seekCursor(),
             .close_cursor => {
                 self.cursor_retired = true;
                 if (owner.findCursor(self.cursor_id)) |slot| {
@@ -167,18 +169,35 @@ pub const Job = struct {
         return error.CursorCapacity;
     }
 
-    fn readCursor(self: *Job) !void {
+    fn seekCursor(self: *Job) !void {
         const slot = self.owner.findCursor(self.cursor_id) orelse {
             self.cursor_retired = true;
             return error.CursorClosed;
         };
-        self.page = slot.cursor.?.readOwned(self.entries, self.value_limit, self.output_limit) catch |err| {
+        slot.cursor.?.seek(self.input) catch |err| {
             slot.cursor.?.close();
             slot.cursor = null;
             self.cursor_retired = true;
             return err;
         };
-        if (self.page.done) {
+    }
+
+    fn readCursor(self: *Job) !void {
+        const slot = self.owner.findCursor(self.cursor_id) orelse {
+            self.cursor_retired = true;
+            return error.CursorClosed;
+        };
+        const page = if (self.high_water_mark_bytes) |watermark|
+            slot.cursor.?.readOwnedBatch(self.entries, self.value_limit, self.output_limit, watermark)
+        else
+            slot.cursor.?.readOwned(self.entries, self.value_limit, self.output_limit);
+        self.page = page catch |err| {
+            slot.cursor.?.close();
+            slot.cursor = null;
+            self.cursor_retired = true;
+            return err;
+        };
+        if (self.page.done and self.high_water_mark_bytes == null) {
             self.cursor_retired = true;
             slot.cursor.?.close();
             slot.cursor = null;
@@ -205,7 +224,7 @@ pub const Job = struct {
             return true;
         }
         const result = self.buildResult(env) catch |err| {
-            if ((self.kind == .cursor or self.kind == .read_cursor) and !self.cursor_retired) {
+            if ((self.kind == .cursor or self.kind == .read_cursor or self.kind == .seek_cursor) and !self.cursor_retired) {
                 return self.retireUnpublished(env, err);
             }
             try self.reject(env, err);
@@ -264,7 +283,7 @@ pub const Job = struct {
 
     fn buildResult(self: *const Job, env: napi.Env) !napi.Value {
         return switch (self.kind) {
-            .open, .destroy, .write, .close_cursor, .clear, .compact_range => env.getUndefined(),
+            .open, .destroy, .write, .seek_cursor, .close_cursor, .clear, .compact_range => env.getUndefined(),
             .approximate_size => env.createDouble(@floatFromInt(self.number_result)),
             .property => if (self.property_found) env.createStringUtf8(self.output) else env.getNull(),
             .cursor => env.createUint32(self.cursor_id),

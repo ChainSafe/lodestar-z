@@ -238,3 +238,119 @@ test "extended write budgets retain hard ceilings and legacy entry limits" {
     @memset(&operations, .{ .key = "a", .value = "A" });
     try testing.expectError(error.BatchTooLarge, fixture.db.write(&operations, false));
 }
+
+test "owned batch soft watermark includes the crossing row and keeps exhausted snapshots seekable" {
+    var fixture: helpers.Fixture = undefined;
+    try fixture.init(allocator);
+    defer fixture.deinit();
+    for ([_][]const u8{ "a", "b", "c" }) |key| try fixture.db.put(key, "123", false);
+    var cursor = try fixture.db.cursor(.{});
+    defer cursor.close();
+    var entries: [4]leveldb.Entry = undefined;
+    const first = try cursor.readOwnedBatch(&entries, 3, 100, 4);
+    try testing.expectEqual(@as(usize, 2), first.count);
+    try testing.expectEqual(@as(usize, 8), first.bytes);
+    try testing.expect(!first.done);
+    helpers.freeEntries(allocator, entries[0..first.count]);
+    const oversized = try cursor.readOwnedBatch(&entries, 3, 100, 0);
+    try testing.expectEqual(@as(usize, 1), oversized.count);
+    try testing.expectEqualStrings("c", entries[0].key);
+    try testing.expect(oversized.done);
+    helpers.freeEntries(allocator, entries[0..oversized.count]);
+    try testing.expectEqual(@as(u32, 1), fixture.db.cursors.load(.monotonic));
+    try testing.expectEqual(@as(usize, 0), (try cursor.readOwnedBatch(&entries, 3, 100, 4)).count);
+    try cursor.seek("b");
+    const again = try cursor.readOwnedBatch(entries[0..1], 3, 100, 4);
+    defer helpers.freeEntries(allocator, entries[0..again.count]);
+    try testing.expectEqualStrings("b", entries[0].key);
+    cursor.close();
+    try fixture.close();
+}
+
+test "owned batch projection charges only copied components and hard limits remain independent" {
+    var fixture: helpers.Fixture = undefined;
+    try fixture.init(allocator);
+    defer fixture.deinit();
+    for ([_][]const u8{ "a", "b", "c" }) |key| try fixture.db.put(key, "12345", false);
+    var entries: [3]leveldb.Entry = undefined;
+    var keys = try fixture.db.cursor(.{ .values = false });
+    defer keys.close();
+    const key_page = try keys.readOwnedBatch(&entries, 0, 100, 1);
+    try testing.expectEqual(@as(usize, 2), key_page.count);
+    try testing.expectEqual(@as(usize, 2), key_page.bytes);
+    helpers.freeEntries(allocator, entries[0..key_page.count]);
+    var values = try fixture.db.cursor(.{ .keys = false });
+    defer values.close();
+    const value_page = try values.readOwnedBatch(&entries, 5, 100, 5);
+    try testing.expectEqual(@as(usize, 2), value_page.count);
+    try testing.expectEqual(@as(usize, 10), value_page.bytes);
+    helpers.freeEntries(allocator, entries[0..value_page.count]);
+    var neither = try fixture.db.cursor(.{ .keys = false, .values = false });
+    defer neither.close();
+    const empty_page = try neither.readOwnedBatch(&entries, 0, 0, 0);
+    try testing.expectEqual(@as(usize, 3), empty_page.count);
+    try testing.expectEqual(@as(usize, 0), empty_page.bytes);
+    helpers.freeEntries(allocator, entries[0..empty_page.count]);
+    var hard = try fixture.db.cursor(.{});
+    defer hard.close();
+    try testing.expectError(error.BatchTooLarge, hard.readOwnedBatch(&entries, 5, 5, 0));
+    try testing.expect(hard.closed);
+    for (entries) |entry| try testing.expectEqual(@as(usize, 0), entry.value.len);
+    var deferred = try fixture.db.cursor(.{});
+    defer deferred.close();
+    const page = try deferred.readOwnedBatch(&entries, 5, 7, 100);
+    try testing.expectEqual(@as(usize, 1), page.count);
+    helpers.freeEntries(allocator, entries[0..page.count]);
+    const next = try deferred.readOwnedBatch(&entries, 5, 7, 100);
+    defer helpers.freeEntries(allocator, entries[0..next.count]);
+    try testing.expectEqualStrings("b", entries[0].key);
+}
+
+test "owned explicit batches accept more than the legacy refill count" {
+    var fixture: helpers.Fixture = undefined;
+    try fixture.init(allocator);
+    defer fixture.deinit();
+    const count = leveldb.max_batch_entries + 1;
+    for (0..count) |i| {
+        var key: [2]u8 = undefined;
+        std.mem.writeInt(u16, &key, @intCast(i), .big);
+        try fixture.db.put(&key, "", false);
+    }
+    var cursor = try fixture.db.cursor(.{});
+    defer cursor.close();
+    const entries = try allocator.alloc(leveldb.Entry, count);
+    defer allocator.free(entries);
+    const page = try cursor.readOwnedBatch(entries, 0, count * 2, 16384);
+    defer helpers.freeEntries(allocator, entries[0..page.count]);
+    try testing.expectEqual(count, page.count);
+    try testing.expect(page.done);
+    try testing.expectEqual(@as(u16, count - 1), std.mem.readInt(u16, entries[count - 1].key[0..2], .big));
+}
+
+test "memory_safety: seekable batches free partial allocations and retire on hard failure" {
+    for (0..4) |fail_index| {
+        var failing = testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        var fixture: helpers.Fixture = undefined;
+        try fixture.init(failing.allocator());
+        defer fixture.deinit();
+        try fixture.db.put("a", "A", false);
+        try fixture.db.put("b", "B", false);
+        var cursor = try fixture.db.cursor(.{});
+        defer cursor.close();
+        var entries: [2]leveldb.Entry = undefined;
+        try testing.expectError(error.OutOfMemory, cursor.readOwnedBatch(&entries, 1, 4, 16384));
+        try testing.expectEqual(@as(u32, 0), fixture.db.cursors.load(.monotonic));
+        try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    }
+    var fixture: helpers.Fixture = undefined;
+    try fixture.init(allocator);
+    defer fixture.deinit();
+    try fixture.db.put("a", "A", false);
+    try fixture.db.put("b", "BB", false);
+    var cursor = try fixture.db.cursor(.{});
+    defer cursor.close();
+    var entries: [2]leveldb.Entry = undefined;
+    try testing.expectError(error.ValueTooLarge, cursor.readOwnedBatch(&entries, 1, 10, 16384));
+    for (entries) |entry| try testing.expectEqual(@as(usize, 0), entry.value.len);
+    try fixture.close();
+}

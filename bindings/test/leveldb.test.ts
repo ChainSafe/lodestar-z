@@ -397,7 +397,7 @@ it("rejects shared and detached buffers before changing stored data", async () =
 });
 
 for (const terminalError of [false, true]) {
-  it(`reserves cursor cleanup for new snapshots after 64 terminal ${terminalError ? "errors" : "pages"}`, async () => {
+  it(`reserves cursor cleanup for new snapshots after 64 ${terminalError ? "terminal errors" : "explicit closes"}`, async () => {
     await withDatabase(
       async (db) => {
         await db.batch([
@@ -413,7 +413,7 @@ for (const terminalError of [false, true]) {
             await cursor.next();
           }
           const terminal = old.map((cursor) =>
-            terminalError ? expect(cursor.next()).rejects.toThrow("ValueTooLarge") : cursor.next()
+            terminalError ? expect(cursor.next()).rejects.toThrow("ValueTooLarge") : cursor.close()
           );
           await Promise.resolve();
           for (let index = 0; index < 64; index++) fresh.push(db.iterator(PAGE));

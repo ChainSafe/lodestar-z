@@ -1,7 +1,10 @@
+import {types} from "node:util";
 import bindings from "./bindings.js";
 
 const MAX_BYTES = 1024 * 1024 * 1024;
 const MAX_PAGE_ENTRIES = 1024;
+const DEFAULT_PAGE_ENTRIES = 1000;
+const DEFAULT_HIGH_WATER_MARK_BYTES = 16 * 1024;
 const MAX_BATCH_ENTRIES = 16_777_216;
 const MAX_LIMIT = 0xffffffff;
 
@@ -9,8 +12,8 @@ function failure(code) {
   return Object.assign(new Error(code), {code});
 }
 
-function readLimit(value, maximum, minimum = 0) {
-  if (value === undefined) return maximum;
+function readLimit(value, maximum, minimum = 0, fallback = maximum) {
+  if (value === undefined) return fallback;
   if (!Number.isSafeInteger(value) || value < minimum || value > maximum) throw failure("InvalidLimit");
   return value;
 }
@@ -116,7 +119,8 @@ export class LevelDb {
     this.#assertOpen();
     const maxValueBytes = readLimit(options.maxValueBytes, MAX_BYTES, 1);
     const maxTotalBytes = readLimit(options.maxTotalBytes, MAX_BYTES, 1);
-    const maxEntries = readLimit(options.maxEntries, MAX_PAGE_ENTRIES, 1);
+    const maxEntries = readLimit(options.maxEntries, MAX_PAGE_ENTRIES, 1, DEFAULT_PAGE_ENTRIES);
+    const highWaterMarkBytes = readLimit(options.highWaterMarkBytes, MAX_LIMIT, 0, DEFAULT_HIGH_WATER_MARK_BYTES);
     const limit = readLimit(options.limit, MAX_LIMIT);
     const cursor = submit(this.#native, "cursor", [
       {
@@ -138,6 +142,7 @@ export class LevelDb {
       maxValueBytes,
       maxTotalBytes,
       maxEntries,
+      highWaterMarkBytes,
       projection
     );
   }
@@ -197,15 +202,27 @@ class LevelDbIterator {
   #maxValueBytes;
   #maxTotalBytes;
   #maxEntries;
+  #highWaterMarkBytes;
   #projection;
   #entries = [];
   #index = 0;
+  #first = true;
   #pageDone = false;
   #finished = false;
   #busy = false;
   #closing;
+  #seekTarget;
 
-  constructor(native, cursor, databaseClosing, maxValueBytes, maxTotalBytes, maxEntries, projection) {
+  constructor(
+    native,
+    cursor,
+    databaseClosing,
+    maxValueBytes,
+    maxTotalBytes,
+    maxEntries,
+    highWaterMarkBytes,
+    projection
+  ) {
     this.#native = native;
     this.#cursor = cursor.then(
       (id) => ({id}),
@@ -215,48 +232,98 @@ class LevelDbIterator {
     this.#maxValueBytes = maxValueBytes;
     this.#maxTotalBytes = maxTotalBytes;
     this.#maxEntries = maxEntries;
+    this.#highWaterMarkBytes = highWaterMarkBytes;
     this.#projection = projection;
   }
 
-  [Symbol.asyncIterator]() {
-    return this;
+  async *[Symbol.asyncIterator]() {
+    try {
+      for (;;) {
+        const row = await this.next();
+        if (row.done) return;
+        yield row.value;
+      }
+    } finally {
+      await this.close();
+    }
+  }
+
+  seek(target) {
+    if (this.#finished) return;
+    if (this.#busy) throw failure("IteratorBusy");
+    if (this.#databaseClosing() !== undefined) throw failure("DatabaseClosed");
+    if (!types.isUint8Array(target)) throw failure("InvalidBytes");
+    const prototype = Object.getPrototypeOf(Uint8Array.prototype);
+    const buffer = Reflect.get(prototype, "buffer", target);
+    if (!types.isArrayBuffer(buffer)) throw failure("InvalidBytes");
+    const length = Reflect.get(prototype, "byteLength", target);
+    if (length > 4096) throw failure("KeyTooLarge");
+    const key = new Uint8Array(length);
+    try {
+      key.set(target);
+    } catch {
+      throw failure("InvalidBytes");
+    }
+    this.#first = true;
+    this.#pageDone = false;
+    this.#entries = [];
+    this.#index = 0;
+    // Keep only the last copied target until the next pull positions the native snapshot.
+    this.#seekTarget = key;
   }
 
   async next() {
+    const entries = await this.#pull(1, true);
+    return entries.length === 0 ? {done: true, value: undefined} : {done: false, value: entries[0]};
+  }
+
+  async nextv(size) {
+    if (!Number.isSafeInteger(size) || size > MAX_BATCH_ENTRIES) throw failure("InvalidLimit");
+    return this.#pull(Math.max(1, size), false);
+  }
+
+  async #pull(size, cache) {
     if (this.#busy) throw failure("IteratorBusy");
-    if (this.#finished) return {done: true, value: undefined};
+    if (this.#finished) return [];
     this.#busy = true;
     try {
       if (this.#databaseClosing() !== undefined) throw failure("DatabaseClosed");
+      const count = cache ? (this.#first ? 1 : this.#maxEntries) : size;
+      this.#first = false;
       if (this.#index === this.#entries.length) {
         const cursor = await this.#cursor;
         if ("error" in cursor) throw cursor.error;
-        if (this.#finished) return {done: true, value: undefined};
+        if (this.#finished || this.#pageDone) return [];
         if (this.#databaseClosing() !== undefined) throw failure("DatabaseClosed");
-        const page = await submit(this.#native, "readCursor", [
+        if (this.#seekTarget !== undefined) {
+          const target = this.#seekTarget;
+          this.#seekTarget = undefined;
+          await submit(this.#native, "seekCursor", [cursor.id, target]);
+          if (this.#finished) return [];
+          if (this.#databaseClosing() !== undefined) throw failure("DatabaseClosed");
+        }
+        const page = await submit(this.#native, "readCursorBatch", [
           cursor.id,
           this.#maxValueBytes,
           this.#maxTotalBytes,
-          this.#maxEntries,
+          count,
+          this.#highWaterMarkBytes,
         ]);
-        if (this.#finished) return {done: true, value: undefined};
+        if (this.#finished) return [];
         if (this.#databaseClosing() !== undefined) throw failure("DatabaseClosed");
         this.#entries = page.entries;
         this.#index = 0;
         this.#pageDone = page.done;
-        if (this.#entries.length === 0) {
-          if (!this.#pageDone) throw failure("InvalidCursorPage");
-          await this.close();
-          return {done: true, value: undefined};
-        }
+        if (this.#entries.length === 0 && !this.#pageDone) throw failure("InvalidCursorPage");
       }
-      const value = this.#entries[this.#index];
-      this.#entries[this.#index++] = undefined;
-      if (this.#index === this.#entries.length && this.#pageDone) await this.close();
-      return {
-        done: false,
-        value: this.#projection === "keys" ? value.key : this.#projection === "values" ? value.value : value,
-      };
+      const length = Math.min(size, this.#entries.length - this.#index);
+      const result = [];
+      for (let i = 0; i < length; i++) {
+        const entry = this.#entries[this.#index];
+        this.#entries[this.#index++] = undefined;
+        result.push(this.#projection === "keys" ? entry.key : this.#projection === "values" ? entry.value : entry);
+      }
+      return result;
     } catch (error) {
       try {
         await this.close();
@@ -271,6 +338,7 @@ class LevelDbIterator {
 
   close() {
     this.#finished = true;
+    this.#seekTarget = undefined;
     this.#entries = [];
     this.#index = 0;
     this.#closing ??= this.#close().catch((error) => {
@@ -285,7 +353,7 @@ class LevelDbIterator {
     if ("error" in cursor) return;
     const closing = this.#databaseClosing();
     if (closing !== undefined) await closing;
-    else if (!this.#pageDone) await submit(this.#native, "closeCursor", [cursor.id]);
+    else await submit(this.#native, "closeCursor", [cursor.id]);
   }
 
   async return() {
