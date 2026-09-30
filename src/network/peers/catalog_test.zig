@@ -391,7 +391,11 @@ test "peer catalog changed custody metadata immediately invalidates copied group
 }
 
 test "peer catalog revisions follow canonical generation replacement and reject stale mutations" {
-    var c = try Catalog.init(std.testing.allocator, opts, 1024, 0);
+    var options = opts;
+    options.capacity = 1;
+    options.max_peers = 1;
+    options.target_peers = 1;
+    var c = try Catalog.init(std.testing.allocator, options, 1024, 0);
     defer c.deinit(std.testing.allocator);
     const ref = admit(&c, &remote, first, .inbound, 0).admitted.peer;
     const admitted_revision = c.revision;
@@ -452,7 +456,11 @@ test "identify catalog metadata copies only to current full peer and transport g
 }
 
 test "peer catalog sampling publishes complete pair and invalidates closed generation" {
-    var c = try Catalog.init(std.testing.allocator, opts, 1024, 0);
+    var options = opts;
+    options.capacity = 1;
+    options.max_peers = 1;
+    options.target_peers = 1;
+    var c = try Catalog.init(std.testing.allocator, options, 1024, 0);
     defer c.deinit(std.testing.allocator);
     const ref = admit(&c, &remote, first, .inbound, 0).admitted.peer;
     var fork: t.ForkContext = .{ .fork = .fulu, .custody_groups = 128, .minimum_sampling_groups = 127 };
@@ -575,7 +583,11 @@ test "catalog indexes retain disconnected identity and reject displaced and recy
 }
 
 test "catalog caches node ID across custody changes and reconnects and resets it on identity reuse" {
-    var c = try Catalog.init(std.testing.allocator, opts, 4, 9);
+    var options = opts;
+    options.capacity = 1;
+    options.max_peers = 1;
+    options.target_peers = 1;
+    var c = try Catalog.init(std.testing.allocator, options, 4, 9);
     defer c.deinit(std.testing.allocator);
     const ref = admit(&c, &remote, first, .outbound, 0).admitted.peer;
     try std.testing.expect(c.rows[ref.index].node_id == null);
@@ -622,4 +634,43 @@ test "weak non-completion persists across reconnect and connection slot reuse" {
     try std.testing.expectEqual(@as(f64, -1), catalog.get(peer).?.score);
     try std.testing.expect(catalog.nonCompletion(reconnected, 10_100));
     try std.testing.expect(catalog.get(peer).?.score < -1.9);
+}
+
+test "peer catalog uses empty established slots before reclaiming disconnected intent" {
+    for ([_]t.Direction{ .inbound, .outbound }) |direction| {
+        for ([_]bool{ false, true }) |promote| {
+            const options: t.Options = .{ .capacity = 3, .max_peers = 3, .target_peers = 3, .min_outbound = 0, .outbound_reserve = 1 };
+            var c = try Catalog.initWithIntents(std.testing.allocator, options, 2, 4, 0);
+            defer c.deinit(std.testing.allocator);
+            const peer = try c.retainIntent(&remote);
+            c.rowFor(peer).?.intent.automatic = true;
+            c.rowFor(peer).?.intent.addresses = .{ .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9001 } }, .unspecified };
+            c.rowFor(peer).?.intent.address_count = 1;
+            try std.testing.expectEqual(peer, admit(&c, &remote, first, direction, 0).admitted.peer);
+            try std.testing.expect(c.disconnect(peer, first, .host, 1));
+            var events: [3]t.Event = undefined;
+            _ = c.pollEvents(&events);
+            const before = c.rowFor(peer).?.intent;
+            try std.testing.expect(before.eligible_at_ms > 2);
+            const reputation = c.rowFor(peer).?.reputation;
+            const candidate_ref = if (promote) try c.retainIntent(&third) else null;
+            const next = admit(&c, &third, replacement, direction, 2).admitted.peer;
+            if (candidate_ref) |ref| try std.testing.expectEqual(ref, next);
+            try std.testing.expectEqual(@as(?u16, 1), c.rowFor(next).?.established_slot);
+            try std.testing.expectEqual(peer, c.find(&remote).?);
+            try std.testing.expectEqualDeep(before, c.rowFor(peer).?.intent);
+            try std.testing.expectEqualDeep(reputation, c.rowFor(peer).?.reputation);
+            try std.testing.expect(c.intents.isSet(peer.index));
+            const extra: t.PeerId = .{ .bytes = @splat(99) };
+            const last = admit(&c, &extra, .{ .index = 2, .generation = 1 }, direction, 3).admitted.peer;
+            if (direction == .inbound) {
+                try std.testing.expectEqual(@as(?u16, 0), c.rowFor(last).?.established_slot);
+                try std.testing.expect(c.established[2] == null);
+                try std.testing.expect(c.find(&remote) == null);
+            } else {
+                try std.testing.expectEqual(@as(?u16, 2), c.rowFor(last).?.established_slot);
+                try std.testing.expectEqual(peer, c.find(&remote).?);
+            }
+        }
+    }
 }
