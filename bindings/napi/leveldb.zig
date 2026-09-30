@@ -206,6 +206,36 @@ pub fn readCursor(self: *@This(), id: js.Value, max_value: js.Value, max_total: 
     try runtime.enqueue(job);
 }
 
+pub fn readCursorBatch(self: *@This(), id: js.Value, max_value: js.Value, max_total: js.Value, max_entries: js.Value, high_water_mark: js.Value, callback: js.Value) !void {
+    try self.enter();
+    defer self.entered = false;
+    const runtime = try self.owner();
+    const cursor_id = try v.positive(id.val, std.math.maxInt(u32));
+    const value_limit = try v.positive(max_value.val, leveldb.max_owned_value_bytes);
+    const total_limit = try v.positive(max_total.val, leveldb.max_owned_batch_bytes);
+    const count = try v.positive(max_entries.val, leveldb.max_bulk_entries);
+    const watermark = try v.integer(high_water_mark.val, std.math.maxInt(u32));
+    const job = try Job.create(runtime, .read_cursor, 0, total_limit, count, callback.val);
+    errdefer job.destroy();
+    job.cursor_id = @intCast(cursor_id);
+    job.value_limit = value_limit;
+    job.high_water_mark_bytes = @intCast(watermark);
+    try runtime.enqueue(job);
+}
+
+pub fn seekCursor(self: *@This(), id: js.Value, target: js.Value, callback: js.Value) !void {
+    try self.enter();
+    defer self.entered = false;
+    const runtime = try self.owner();
+    const cursor_id = try v.positive(id.val, std.math.maxInt(u32));
+    const key = try v.bytes(target.val, leveldb.max_key_bytes, error.KeyTooLarge);
+    const job = try Job.create(runtime, .seek_cursor, key.len, 0, 0, callback.val);
+    errdefer job.destroy();
+    @memcpy(job.input, key);
+    job.cursor_id = @intCast(cursor_id);
+    try runtime.enqueue(job);
+}
+
 pub fn closeCursor(self: *@This(), id: js.Value, callback: js.Value) !void {
     try self.enter();
     defer self.entered = false;

@@ -123,3 +123,68 @@ test "range allocation failures release both copied bounds" {
         try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
     }
 }
+
+test "seek honors original exclusive bounds and byte order in both directions" {
+    var fixture: helpers.Fixture = undefined;
+    try fixture.init(allocator);
+    defer fixture.deinit();
+    for ([_][]const u8{ "a", "c", "e" }) |key| try fixture.db.put(key, key, false);
+    for ([_]bool{ false, true }) |reverse| {
+        var cursor = try fixture.db.cursor(.{ .gt = "a", .lte = "e", .reverse = reverse });
+        defer cursor.close();
+        const Case = struct { target: []const u8, forward: ?[]const u8, backward: ?[]const u8 };
+        const cases = [_]Case{
+            .{ .target = "a", .forward = null, .backward = null },
+            .{ .target = "b", .forward = "c", .backward = null },
+            .{ .target = "c", .forward = "c", .backward = "c" },
+            .{ .target = "d", .forward = "e", .backward = "c" },
+            .{ .target = "e", .forward = "e", .backward = "e" },
+            .{ .target = "f", .forward = null, .backward = null },
+        };
+        for (cases) |case| {
+            try cursor.seek(case.target);
+            var entries: [1]leveldb.Entry = undefined;
+            const page = try cursor.readOwnedBatch(&entries, 1, 2, 0);
+            defer helpers.freeEntries(allocator, entries[0..page.count]);
+            if (if (reverse) case.backward else case.forward) |expected| {
+                try testing.expectEqual(@as(usize, 1), page.count);
+                try testing.expectEqualStrings(expected, entries[0].key);
+            } else try testing.expectEqual(@as(usize, 0), page.count);
+        }
+    }
+    var reverse = try fixture.db.cursor(.{ .reverse = true });
+    defer reverse.close();
+    try reverse.seek("z");
+    var entries: [1]leveldb.Entry = undefined;
+    const page = try reverse.readOwnedBatch(&entries, 1, 2, 0);
+    defer helpers.freeEntries(allocator, entries[0..page.count]);
+    try testing.expectEqualStrings("e", entries[0].key);
+}
+
+test "seek retains snapshot and consumed limit across repositions and exhaustion" {
+    var fixture: helpers.Fixture = undefined;
+    try fixture.init(allocator);
+    defer fixture.deinit();
+    try fixture.db.put("a", "A", false);
+    try fixture.db.put("b", "B", false);
+    var cursor = try fixture.db.cursor(.{ .limit = 2 });
+    defer cursor.close();
+    try fixture.db.put("a", "new", false);
+    var entries: [1]leveldb.Entry = undefined;
+    for (0..2) |_| {
+        try cursor.seek("a");
+        const page = try cursor.readOwnedBatch(&entries, 1, 2, 0);
+        defer helpers.freeEntries(allocator, entries[0..page.count]);
+        try testing.expectEqual(@as(usize, 1), page.count);
+        try testing.expectEqualStrings("A", entries[0].value);
+    }
+    try cursor.seek("b");
+    try testing.expectEqual(@as(usize, 0), (try cursor.readOwnedBatch(&entries, 1, 2, 0)).count);
+    cursor.close();
+    try testing.expectError(error.CursorClosed, cursor.seek("a"));
+    var invalid = try fixture.db.cursor(.{});
+    defer invalid.close();
+    const target = [_]u8{0} ** (leveldb.max_key_bytes + 1);
+    try testing.expectError(error.KeyTooLarge, invalid.seek(&target));
+    try testing.expect(invalid.closed);
+}

@@ -53,7 +53,9 @@ export type LevelDbScanOptions = {
   maxValueBytes?: number;
   /** Maximum projected key and value bytes per page, from 1 through 1 GiB. Defaults to 1 GiB. */
   maxTotalBytes?: number;
-  /** Maximum entries per page, from 1 through 1024. Defaults to 1024. */
+  /** Soft projected-byte watermark, from 0 through 2^32 - 1. Defaults to 16 KiB; the crossing row is included. */
+  highWaterMarkBytes?: number;
+  /** Refill size after the first next() or seek(), from 1 through 1024. Defaults to 1000. The first pull reads one row. */
   maxEntries?: number;
 };
 
@@ -65,8 +67,16 @@ export type LevelDbIteratorOptions = LevelDbScanOptions & {
 };
 
 export interface LevelDbIterator<T = LevelDbEntry> extends AsyncIterableIterator<T, undefined, undefined> {
-  /** Only one next() may be pending; concurrent pulls reject with IteratorBusy. */
+  /** Only one next() or nextv() may be pending; concurrent pulls and seek during a pull reject with IteratorBusy. */
   next(): Promise<IteratorResult<T, undefined>>;
+  /** Returns up to size rows, draining cached rows first. Sizes below 1 become 1; maximum 16,777,216. */
+  nextv(size: number): Promise<T[]>;
+  /**
+   * Copies target; the next pull positions the original snapshot before reading. Out-of-range targets end iteration.
+   * Preserves the snapshot and consumed row limit, including prefetched rows discarded by this seek.
+   * Natural exhaustion can be reset; close cannot. Native positioning errors reject the next pull.
+   */
+  seek(target: Uint8Array): void;
   return(): Promise<IteratorResult<T, undefined>>;
   throw(error?: unknown): Promise<IteratorResult<T, undefined>>;
   close(): Promise<void>;
@@ -105,7 +115,8 @@ export declare class LevelDb {
   /**
    * Takes a snapshot at this call's position in the native operation queue, before later writes.
    * Visits keys in byte order, descending when reverse is true. At most 64 cursors may be live per shared database.
-   * Releases the cursor on exhaustion, return(), close(), or a read error. Invalid options may throw synchronously.
+   * Manual next()/nextv() retain the snapshot after exhaustion so seek() can reuse it; close when finished.
+   * for-await iteration, return(), close(), read errors and database close release it. Invalid options may throw synchronously.
    */
   iterator(options?: LevelDbIteratorOptions): LevelDbIterator;
   /** Iterates keys without copying or applying value-size limits to discarded values. */

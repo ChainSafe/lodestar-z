@@ -71,6 +71,19 @@ pub const Range = struct {
         try iterator.getError();
     }
 
+    pub fn seekTarget(self: *const Range, iterator: *raw.Iterator, target: []const u8) !bool {
+        if (!self.contains(target)) return false;
+        iterator.seek(target);
+        try iterator.getError();
+        if (self.reverse) {
+            if (!iterator.valid()) {
+                iterator.seekToLast();
+            } else if (std.mem.order(u8, iterator.key(), target) == .gt) iterator.prev();
+        }
+        try iterator.getError();
+        return true;
+    }
+
     pub fn contains(self: *const Range, key: []const u8) bool {
         if (self.lower) |lower| {
             const order = std.mem.order(u8, key, lower);
