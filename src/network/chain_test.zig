@@ -15,7 +15,7 @@ fn fixture() config.ChainConfig {
     result.ELECTRA_FORK_EPOCH = 2;
     result.FULU_FORK_EPOCH = 3;
     result.GLOAS_FORK_EPOCH = constants.FAR_FUTURE_EPOCH;
-    result.BLOB_SCHEDULE = &.{ .{ .EPOCH = 3, .MAX_BLOBS_PER_BLOCK = 33 }, .{ .EPOCH = 5, .MAX_BLOBS_PER_BLOCK = 40 } };
+    result.BLOB_SCHEDULE = &.{ .{ .EPOCH = 3, .MAX_BLOBS_PER_BLOCK = 33 }, .{ .EPOCH = 8, .MAX_BLOBS_PER_BLOCK = 40 } };
     return result;
 }
 
@@ -35,11 +35,11 @@ test "network chain resolves same epoch forks BPO contexts and clock identity" {
     try std.testing.expectEqual(@as(u64, 1), fulu.local.status.head_slot);
     try std.testing.expectEqual(config.fork_digest.computeForkDigest(&cfg, 3), fulu.local.status.fork_digest);
     try std.testing.expectEqual(cfg.chain.FULU_FORK_VERSION, fulu.schedule.next_version);
-    try std.testing.expectEqual(@as(u64, 5), fulu.schedule.next_epoch);
-    try std.testing.expectEqual(config.fork_digest.computeForkDigest(&cfg, 5), fulu.schedule.next_digest);
+    try std.testing.expectEqual(@as(u64, 8), fulu.schedule.next_epoch);
+    try std.testing.expectEqual(config.fork_digest.computeForkDigest(&cfg, 8), fulu.schedule.next_digest);
     try std.testing.expect(fulu.capabilities.request.contains(.{ .reqresp = .light_client_bootstrap_v1 }));
     try std.testing.expect(!fulu.capabilities.receive.contains(.{ .reqresp = .light_client_bootstrap_v1 }));
-    const bpo = try plan.update(local, null, 5 * preset.preset.SLOTS_PER_EPOCH);
+    const bpo = try plan.update(local, null, 8 * preset.preset.SLOTS_PER_EPOCH);
     try std.testing.expectEqual(.fulu, bpo.local.fork.fork);
     try std.testing.expect(!std.mem.eql(u8, &fulu.local.fork.digest, &bpo.local.fork.digest));
     try std.testing.expectEqual(fulu.local.fork.digest, plan.forks[2].digest);
@@ -49,9 +49,9 @@ test "network chain resolves same epoch forks BPO contexts and clock identity" {
     try std.testing.expectEqual(.fulu, plan.topics[2].fork.?);
     try std.testing.expectEqual(@as(u64, 3), plan.topics[2].epoch);
     try std.testing.expectEqual(.fulu, plan.topics[3].fork.?);
-    try std.testing.expectEqual(@as(u64, 5), plan.topics[3].epoch);
+    try std.testing.expectEqual(@as(u64, 8), plan.topics[3].epoch);
     try std.testing.expectEqual(constants.FAR_FUTURE_EPOCH, bpo.schedule.next_epoch);
-    try std.testing.expectEqualDeep(bpo, try plan.update(local, null, 8 * preset.preset.SLOTS_PER_EPOCH));
+    try std.testing.expectEqualDeep(bpo, try plan.update(local, null, 11 * preset.preset.SLOTS_PER_EPOCH));
     cfg = config.BeaconConfig.init(fixture(), @splat(2));
     try std.testing.expectEqualDeep(fulu, try plan.update(local, null, 3 * preset.preset.SLOTS_PER_EPOCH));
 }
@@ -139,4 +139,147 @@ test "network chain honors configured wire limits and requires complete metadata
     const small = try chain.Plan.init(&small_cfg, false);
     try std.testing.expectEqual(@as(usize, input.MAX_PAYLOAD_SIZE), small.policy.requestMax());
     try std.testing.expectEqual(@as(usize, input.MAX_PAYLOAD_SIZE), small.policy.requestBounds(.data_column_sidecars_by_root_v1, .fulu).request_max);
+}
+
+fn fuluSchedule() config.ChainConfig {
+    var input = fixture();
+    input.ELECTRA_FORK_EPOCH = 0;
+    input.FULU_FORK_EPOCH = 0;
+    input.BLOB_SCHEDULE = &.{ .{ .EPOCH = 10, .MAX_BLOBS_PER_BLOCK = 33 }, .{ .EPOCH = 11, .MAX_BLOBS_PER_BLOCK = 40 } };
+    return input;
+}
+
+test "network chain rejects dense supported BPO demand before the future overlap" {
+    for ([_]bool{ false, true }) |light_clients| {
+        const cfg = config.BeaconConfig.init(fuluSchedule(), @splat(0));
+        try std.testing.expectError(error.UnsupportedTopicOverlap, chain.Plan.init(&cfg, light_clients));
+    }
+    var input = fixture();
+    input.BLOB_SCHEDULE = &.{ .{ .EPOCH = 3, .MAX_BLOBS_PER_BLOCK = 33 }, .{ .EPOCH = 5, .MAX_BLOBS_PER_BLOCK = 40 } };
+    const cfg = config.BeaconConfig.init(input, @splat(0));
+    try std.testing.expectError(error.UnsupportedTopicOverlap, chain.Plan.init(&cfg, true));
+}
+
+test "network chain scheduled topic demand accepts exact capacity and rejects one extra" {
+    for ([_]bool{ false, true }) |light_clients| {
+        var input = fuluSchedule();
+        input.ELECTRA_FORK_EPOCH = 10;
+        input.FULU_FORK_EPOCH = 10;
+        input.BLOB_SIDECAR_SUBNET_COUNT = if (light_clients) 25 else 31;
+        var cfg = config.BeaconConfig.init(input, @splat(0));
+        const plan = try chain.Plan.init(&cfg, light_clients);
+        try std.testing.expectEqual(@as(u8, 3), plan.boundary_count);
+        var demand: usize = 0;
+        for (plan.topics[0..plan.boundary_count]) |boundary| for (boundary.rules, 0..) |rule, k| {
+            const kind: topics.Kind = @enumFromInt(k);
+            if (!light_clients and (kind == .light_client_finality_update or kind == .light_client_optimistic_update)) continue;
+            demand += rule.count;
+        };
+        try std.testing.expectEqual(@as(usize, 512), demand);
+        input.BLOB_SIDECAR_SUBNET_COUNT += 1;
+        cfg = config.BeaconConfig.init(input, @splat(0));
+        try std.testing.expectError(error.UnsupportedTopicOverlap, chain.Plan.init(&cfg, light_clients));
+    }
+}
+
+test "network chain scheduled demand includes additions before same epoch removals" {
+    var input = fuluSchedule();
+    input.BLOB_SCHEDULE = &.{ .{ .EPOCH = 10, .MAX_BLOBS_PER_BLOCK = 33 }, .{ .EPOCH = 14, .MAX_BLOBS_PER_BLOCK = 40 } };
+    var cfg = config.BeaconConfig.init(input, @splat(0));
+    try std.testing.expectError(error.UnsupportedTopicOverlap, chain.Plan.init(&cfg, true));
+    input.BLOB_SCHEDULE = &.{ .{ .EPOCH = 10, .MAX_BLOBS_PER_BLOCK = 33 }, .{ .EPOCH = 15, .MAX_BLOBS_PER_BLOCK = 40 } };
+    cfg = config.BeaconConfig.init(input, @splat(0));
+    _ = try chain.Plan.init(&cfg, true);
+}
+
+test "network chain uses configured topic demand and imposes no lifetime namespace cap" {
+    var input = fuluSchedule();
+    input.DATA_COLUMN_SIDECAR_SUBNET_COUNT = 93;
+    var cfg = config.BeaconConfig.init(input, @splat(0));
+    _ = try chain.Plan.init(&cfg, true);
+    input.DATA_COLUMN_SIDECAR_SUBNET_COUNT = 94;
+    cfg = config.BeaconConfig.init(input, @splat(0));
+    try std.testing.expectError(error.UnsupportedTopicOverlap, chain.Plan.init(&cfg, true));
+    _ = try chain.Plan.init(&cfg, false);
+    input = fuluSchedule();
+    input.BLOB_SCHEDULE = &.{ .{ .EPOCH = 10, .MAX_BLOBS_PER_BLOCK = 33 }, .{ .EPOCH = 110, .MAX_BLOBS_PER_BLOCK = 40 }, .{ .EPOCH = 210, .MAX_BLOBS_PER_BLOCK = 48 } };
+    cfg = config.BeaconConfig.init(input, @splat(0));
+    const plan = try chain.Plan.init(&cfg, true);
+    try std.testing.expectEqual(@as(u16, 820), try topics.validate(plan.topics[0..plan.boundary_count]));
+    input.BLOB_SCHEDULE = &.{.{ .EPOCH = 0, .MAX_BLOBS_PER_BLOCK = 33 }};
+    cfg = config.BeaconConfig.init(input, @splat(0));
+    try std.testing.expectEqual(@as(u8, 1), (try chain.Plan.init(&cfg, true)).boundary_count);
+}
+
+const gossip = @import("gossipsub/root.zig");
+
+fn initScheduledGossip(plan: *const chain.Plan) !gossip.Gossipsub {
+    return gossip.Gossipsub.init(std.testing.allocator, .{
+        .random_seed = 1,
+        .connected_capacity = 2,
+        .retained_capacity = 4,
+        .retained_outbound_reserve = 1,
+        .seen_capacity = 16,
+        .mcache_capacity = 16,
+        .validation_capacity = 8,
+        .topic_policy = plan.topics[0..plan.boundary_count],
+    });
+}
+
+fn applyScheduled(g: *gossip.Gossipsub, plan: *const chain.Plan, epoch: u64) !usize {
+    var desired: [chain.boundary_max]gossip.local_intent.Boundary = undefined;
+    var count: usize = 0;
+    for (plan.topics[0..plan.boundary_count], 0..) |boundary, i| {
+        if (epoch < boundary.epoch -| 2 or (i + 1 < plan.boundary_count and epoch >= plan.boundaries[i + 1].epoch +| 2)) continue;
+        desired[count] = .{ .digest = boundary.digest };
+        for (boundary.rules, 0..) |rule, k| {
+            const kind: topics.Kind = @enumFromInt(k);
+            if (!plan.serve_light_clients and (kind == .light_client_finality_update or kind == .light_client_optimistic_update)) continue;
+            desired[count].lengths[k] = @intCast((rule.count + 7) / 8);
+            for (0..rule.count) |subnet| desired[count].mask(kind)[subnet / 8] |= @as(u8, 1) << @intCast(subnet % 8);
+        }
+        count += 1;
+    }
+    var workspace: gossip.local_intent.Workspace = .{};
+    const slot = epoch * preset.preset.SLOTS_PER_EPOCH;
+    if (try g.prepareSubscriptions(desired[0..count], &workspace, .{ .mono_ms = slot * 12_000, .unix_s = 0 }, slot)) g.commitSubscriptions(&workspace);
+    return workspace.len;
+}
+
+test "network chain exact capacity schedule advances into the supported three digest overlap" {
+    for ([_]bool{ false, true }) |light_clients| {
+        var input = fuluSchedule();
+        input.ELECTRA_FORK_EPOCH = 10;
+        input.FULU_FORK_EPOCH = 10;
+        input.BLOB_SIDECAR_SUBNET_COUNT = if (light_clients) 25 else 31;
+        const cfg = config.BeaconConfig.init(input, @splat(0));
+        const plan = try chain.Plan.init(&cfg, light_clients);
+        var g = try initScheduledGossip(&plan);
+        defer g.deinit();
+        try std.testing.expectEqual(@as(usize, if (light_clients) 102 else 106), try applyScheduled(&g, &plan, 0));
+        try std.testing.expectEqual(@as(usize, if (light_clients) 307 else 309), try applyScheduled(&g, &plan, 8));
+        try std.testing.expectEqual(@as(usize, 512), try applyScheduled(&g, &plan, 9));
+    }
+}
+
+test "network chain scheduled demand validation leaves retained score capacity unresolved" {
+    var input = fuluSchedule();
+    input.BLOB_SCHEDULE = &.{ .{ .EPOCH = 10, .MAX_BLOBS_PER_BLOCK = 33 }, .{ .EPOCH = 16, .MAX_BLOBS_PER_BLOCK = 40 } };
+    const cfg = config.BeaconConfig.init(input, @splat(0));
+    const plan = try chain.Plan.init(&cfg, true);
+    var g = try initScheduledGossip(&plan);
+    defer g.deinit();
+    try std.testing.expectEqual(@as(usize, 410), try applyScheduled(&g, &plan, 8));
+    const peer = @import("gossipsub/test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const logical = g.sessions.rows[peer.index].logical;
+    for (g.overlay.rows, 0..) |row, i| {
+        if (row.active and row.ordinal.? < 205) g.peers.scores.invalid(logical.index, @intCast(i));
+    }
+    try std.testing.expectEqual(@as(usize, 205), try applyScheduled(&g, &plan, 12));
+    g.sessions.rows[peer.index].io.tx.subscription_dirty = .initEmpty();
+    try std.testing.expectError(error.TopicCapacity, applyScheduled(&g, &plan, 14));
+    for (g.overlay.rows, 0..) |row, i| {
+        if (row.active and !row.subscribed) g.peers.scores.resetTopic(@intCast(i));
+    }
+    try std.testing.expectEqual(@as(usize, 410), try applyScheduled(&g, &plan, 14));
 }
