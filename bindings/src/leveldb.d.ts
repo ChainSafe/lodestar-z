@@ -1,6 +1,8 @@
 export type LevelDbOptions = {
   createIfMissing?: boolean;
   errorIfExists?: boolean;
+  /** Share the engine and cache with other opted-in handles in this addon, including worker threads. Defaults to false. */
+  multithreading?: boolean;
   /** Defaults to 8 MiB. Must be an integer from 1 byte through 256 MiB. */
   cacheBytes?: number;
   /** Defaults to 4 MiB. Must be an integer from 64 KiB through 64 MiB. */
@@ -72,6 +74,7 @@ export interface LevelDbIterator<T = LevelDbEntry> extends AsyncIterableIterator
 
 /**
  * Ordered, asynchronous LevelDB access with bounded native admission and copied inputs and outputs.
+ * Each handle has its own operation queue and admission limits. Shared handles may execute concurrently.
  * Keys are at most 4096 bytes, values at most 1 GiB, and atomic batch key/value totals at most 4 GiB.
  * Batches and getMany accept at most 16,777,216 entries. These are operating limits, not protocol maxima.
  * Admission rejects with PendingOperationsExceeded or PendingBytesExceeded instead of waiting for room.
@@ -85,10 +88,12 @@ export declare class LevelDb {
   private constructor();
   /**
    * Opens off the event loop. The path must contain 1 through 4096 UTF-8 bytes and no NUL characters.
-   * The host must coordinate one owner per physical database directory, including path aliases and engine copies.
+   * With multithreading enabled, handles for the same resolved directory share the first opener's engine options.
+   * Every handle must opt in. Closing one handle preserves other handles and their cursors.
+   * The host must prevent concurrent access through other engine copies or filesystem aliases not resolved by realpath.
    */
   static open(path: string, options?: LevelDbOptions): Promise<LevelDb>;
-  /** Removes an unopened database off the event loop. The host must first close every owner of the directory. */
+  /** Removes an unopened database off the event loop. Rejects while this addon has an open handle. */
   static destroy(path: string): Promise<void>;
   get(key: Uint8Array, options?: LevelDbReadOptions): Promise<Uint8Array | null>;
   /** Preserves key order and duplicates. Missing keys yield null; empty values yield empty arrays. */
@@ -99,7 +104,7 @@ export declare class LevelDb {
   batch(operations: readonly LevelDbOperation[], options?: LevelDbWriteOptions): Promise<void>;
   /**
    * Takes a snapshot at this call's position in the native operation queue, before later writes.
-   * Visits keys in byte order, descending when reverse is true. At most 64 cursors may be live.
+   * Visits keys in byte order, descending when reverse is true. At most 64 cursors may be live per shared database.
    * Releases the cursor on exhaustion, return(), close(), or a read error. Invalid options may throw synchronously.
    */
   iterator(options?: LevelDbIteratorOptions): LevelDbIterator;

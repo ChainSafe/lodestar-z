@@ -38,6 +38,7 @@ pub fn open(self: *@This(), path_value: js.Value, options_value: js.Value, callb
     defer self.entered = false;
     if (self.runtime != null) return error.DatabaseAlreadyOpen;
     const options = try v.parseOptions(options_value.val);
+    const multithreading = try v.optionalBoolean(options_value.val, "multithreading", false);
     const operation_limit = try v.optionalInteger(options_value.val, "maxPendingOperations", 4096, v.pending_operations_max);
     const byte_limit = try v.optionalInteger(options_value.val, "maxPendingBytes", 8 * 1024 * 1024 * 1024, v.pending_bytes_max);
     var path_buffer: [v.path_bytes_max + 1]u8 = undefined;
@@ -49,6 +50,7 @@ pub fn open(self: *@This(), path_value: js.Value, options_value: js.Value, callb
     errdefer job.destroy();
     @memcpy(job.input, path[0 .. path.len + 1]);
     job.options = options;
+    job.multithreading = multithreading;
     try runtime.enqueue(job);
     self.runtime = runtime;
 }

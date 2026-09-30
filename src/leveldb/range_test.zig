@@ -119,7 +119,7 @@ test "range allocation failures release both copied bounds" {
         try fixture.init(failing.allocator());
         defer fixture.deinit();
         try testing.expectError(error.OutOfMemory, fixture.db.cursor(.{ .gte = "a", .lte = "z" }));
-        try testing.expectEqual(@as(u32, 0), fixture.db.cursors);
+        try testing.expectEqual(@as(u32, 0), fixture.db.cursors.load(.monotonic));
         try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
     }
 }

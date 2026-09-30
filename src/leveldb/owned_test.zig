@@ -133,7 +133,7 @@ test "memory_safety: owned pages clean up partial copies on allocation or row li
         defer cursor.close();
         var entries: [2]leveldb.Entry = undefined;
         try testing.expectError(error.OutOfMemory, cursor.readOwned(&entries, 1, 4));
-        try testing.expectEqual(@as(u32, 0), fixture.db.cursors);
+        try testing.expectEqual(@as(u32, 0), fixture.db.cursors.load(.monotonic));
         try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
         for (entries) |entry| {
             try testing.expectEqual(@as(usize, 0), entry.key.len);
@@ -165,7 +165,7 @@ test "owned pages reject first row aggregate overflow and invalid metadata count
     var invalid = try fixture.db.cursor(.{});
     defer invalid.close();
     try testing.expectError(error.InvalidReadLimit, invalid.readOwned(&entries, 5, 8));
-    try testing.expectEqual(@as(u32, 0), fixture.db.cursors);
+    try testing.expectEqual(@as(u32, 0), fixture.db.cursors.load(.monotonic));
 }
 
 test "owned read limits reject oversized budgets and clear output metadata" {
@@ -193,7 +193,7 @@ test "owned read limits reject oversized budgets and clear output metadata" {
         try testing.expectError(error.InvalidReadLimit, cursor.readOwned(&entries, budget[0], budget[1]));
         try testing.expectEqual(@as(usize, 0), entries[0].key.len);
         try testing.expectEqual(@as(usize, 0), entries[0].value.len);
-        try testing.expectEqual(@as(u32, 0), fixture.db.cursors);
+        try testing.expectEqual(@as(u32, 0), fixture.db.cursors.load(.monotonic));
     }
     var results: [1]?[]const u8 = undefined;
     try fixture.db.getManyOwned(&.{"a"}, &results, leveldb.max_owned_value_bytes, leveldb.max_owned_batch_bytes, true);

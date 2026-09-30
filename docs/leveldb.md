@@ -67,15 +67,18 @@ payload and metadata budget; batches are never split into separate commits.
 Queue saturation rejects before copying payloads. Read results allocate their
 actual sizes on the worker after checking the requested bounds, rather than
 allocating each read's maximum in advance. Only one worker result is active per
-database. Its output bound is separate from queued input admission. Engine memory,
+handle. Each handle's output bound is separate from its queued input admission. Engine memory,
 write-batch backing and JavaScript results retained by callers are outside this
 accounting. An archive state therefore uses one ordinary value without a special
 controller-side encoding or chunking scheme.
 
-Each database runs one storage job at a time on Node's worker pool. Closing stops
-new admissions, drains accepted operations, retires cursors, and then releases
-the directory lock. Environment teardown retains ownership until active work
-finishes. Applications should close databases explicitly.
+Each handle runs one storage job at a time on Node's worker pool. Handles opened
+with `multithreading: true` share the engine and cache while retaining independent
+queues and admission limits; their jobs may execute concurrently. Closing stops
+that handle's admissions, drains its accepted operations and retires its cursors.
+The last handle releases the engine, cache and directory lock. Environment teardown
+retains ownership until active work finishes. Applications should close handles
+explicitly. The 64-cursor limit applies across handles sharing one database.
 
 Cursors use a stable snapshot, `gt`/`gte` and `lt`/`lte` bounds, `reverse`, and an
 optional total row `limit`. Inclusive bounds take precedence when both forms are
@@ -98,14 +101,18 @@ Lodestar's database controller and peer datastore use this binding instead of
 `classic-level` and `datastore-level`. The controller preserves missing-value,
 range, cache, batch, metrics and lifecycle behavior. The binding supplies
 `clear`, `approximateSize`, `compactRange`, `getProperty` and `destroy` directly;
-maintenance runs on the same serialized worker queue as reads and writes.
+maintenance runs on the calling handle's serialized queue alongside reads and writes.
 `clear` uses bounded deletion chunks and is not atomic across those chunks.
 
-The host ensures one owner per physical directory, including path aliases and
-workers. Fully close the old controller before opening another. POSIX
-process-scoped engine locks do not reliably enforce this requirement within one
-process. Existing databases keep their binary key and value encodings. Block
-certification and the network serving policy retain their existing responsibilities.
+The controller opts into `multithreading`, preserving same-directory access from
+its historical-state worker. Every sharing handle must opt in; engine options
+come from the first opener. The binding resolves directory paths before sharing
+or refusing an exclusive open, and rejects destruction while a handle remains open.
+The host must still prevent concurrent access through independent engine copies
+or filesystem aliases not resolved by `realpath`: POSIX process-scoped locks do
+not reliably enforce that requirement. Existing databases keep their binary key
+and value encodings. Block certification and the network serving policy retain
+their existing responsibilities.
 
 Storage bounds do not certify a block's consensus validity, canonicality,
 execution status, or provenance. Any later removal of block certification must
@@ -117,9 +124,10 @@ workspace.
 `src/leveldb/root.zig` owns the bounded API. Zig callers provide destination
 buffers to `getInto`, `getManyInto`, and `Cursor.readInto`, or use
 `getManyOwned` and `Cursor.readOwned` for exact-sized allocated results. Callers
-free each owned result with the database allocator. They serialize access,
-keep the database address stable while cursors exist, and close cursors before
-closing the database. No iterator-owned pointer escapes into a returned result.
+free each owned result with the database allocator. Database operations may run
+concurrently with a thread-safe allocator; each cursor requires serialized access.
+Callers keep the database address stable and retire all operations and cursors
+before closing it. No iterator-owned pointer escapes into a returned result.
 
 The sibling suites are `src/leveldb/root_test.zig` for the bounded API and
 `src/leveldb/raw_test.zig` for the raw handles. Run validation from the repository
