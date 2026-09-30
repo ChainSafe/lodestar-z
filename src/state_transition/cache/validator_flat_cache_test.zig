@@ -58,7 +58,6 @@ test "ValidatorFlatCache follows writes, appends, truncation and forks" {
     for ([_]usize{ 3, 64, 99 }) |i| {
         var v = try view.get(i);
         try v.set("exit_epoch", 1234 + i);
-        try v.set("effective_balance", 16_000_000_000);
         try v.set("slashed", true);
     }
     try expectInSync(&cache, view);

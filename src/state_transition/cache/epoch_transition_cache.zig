@@ -360,7 +360,10 @@ pub const EpochTransitionCache = struct {
             try reused_cache.is_compounding_validator_arr.resize(reused_cache.allocator, validator_count);
         }
         for (0..validator_count) |i| {
-            const validator: ValidatorFields = validator_flat_cache.fields(i);
+            const validator: ValidatorFields = validator_flat_cache.fields(
+                i,
+                effective_balances_by_increments[i],
+            );
             var flag: u8 = 0;
 
             if (validator.slashed) {

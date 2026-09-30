@@ -148,9 +148,8 @@ test "state transition - records per-block and per-epoch metrics" {
     const state = test_state.cached_state.state.castToFork(.electra);
     var balances = try state.balances();
     try balances.set(0, 20_000_000_000);
+    try test_state.setValidatorEffectiveBalance(1, 16_000_000_000);
     var validators = try state.validators();
-    var to_eject = try validators.get(1);
-    try to_eject.set("effective_balance", 16_000_000_000);
     var to_queue = try validators.get(2);
     try to_queue.set("activation_eligibility_epoch", FAR_FUTURE_EPOCH);
     // The fixture starts with full participation. The block's attestation targets the
