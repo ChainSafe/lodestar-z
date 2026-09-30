@@ -650,10 +650,25 @@ pub const Pool = struct {
     pub fn unref(self: *Pool, node_id: Id) void {
         const states = self.nodes.items(.state);
         const payloads = self.nodes.items(.payload);
-        // Branches with an unvisited right child form an intrusive stack through
-        // their payloads as `(right, next)`. The slots are already free, but no
-        // pool allocation happens during unref, so their payloads stay intact.
-        // Id(0) ends the stack because user nodes start at max_depth.
+        // Once a branch's refcount reaches zero, its original child links are no
+        // longer needed after reading them. Reuse its payload as a stack entry:
+        // low 32 bits = right child still to visit, high 32 bits = previous entry.
+        // `pending` points to the top entry; `next` selects the child to visit now.
+        // This stores traversal state in reclaimed nodes instead of allocating a
+        // separate stack or limiting cleanup to the hashing depth.
+        //
+        // Before retirement:  branch.payload = (left_child, right_child)
+        // After retirement:   pending -> [right_child, previous_pending]
+        //                                      -> [right_child, previous_pending]
+        //                                      -> Id(0)
+        // `unpackLeft` reads the deferred right child; `unpackRight` follows
+        // the link to the previous pending frame.
+        //
+        // Stack entries also enter the free list, whose links live in `state`.
+        // Writing `state` leaves `payload` intact. No allocation from this pool
+        // may occur during cleanup, including from payload destructors, because
+        // reusing a slot could overwrite a pending entry before it is read.
+        // Id(0) is the stack's end marker; user nodes start at max_depth.
         const end: Id = @enumFromInt(0);
         var pending: Id = end;
         var next: ?Id = node_id;
@@ -661,6 +676,8 @@ pub const Pool = struct {
         while (true) {
             const id = next orelse {
                 if (pending == end) return;
+                // The popped entry selects its saved right child. Its high bits
+                // link to the previous entry, not to a tree child anymore.
                 const p = payloads[@intFromEnum(pending)];
                 next = unpackLeft(p);
                 pending = unpackRight(p);
@@ -681,6 +698,8 @@ pub const Pool = struct {
             switch (k) {
                 .branch => {
                     const c = payloads[@intFromEnum(id)];
+                    // Save the right child for later and link this entry to the
+                    // previous stack top. The left child is visited immediately.
                     payloads[@intFromEnum(id)] = packChildren(unpackRight(c), pending);
                     pending = id;
                     next = unpackLeft(c);
