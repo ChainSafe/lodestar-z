@@ -47,3 +47,59 @@ test "progressive Merkleization matches tree roots without scratch allocation" {
         for (chunks, 0..) |chunk, i| try std.testing.expectEqual([_]u8{@truncate(i)} ** 32, chunk);
     }
 }
+
+test "memory_safety: progressive streaming builder reclaims every partial tree" {
+    const allocator = std.testing.allocator;
+    for ([_]usize{ 0, 1, 2, 5, 6, 21, 22, 85, 86 }) |count| {
+        var succeeded = false;
+        for (0..256) |capacity| {
+            var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+            var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = failing.allocator(), .pool_size = @intCast(capacity) });
+            defer pool.deinit();
+            const baseline = pool.getNodesInUse();
+            const root = buildProgressiveChunks(&pool, count) catch |err| {
+                try std.testing.expectEqual(error.PoolExhausted, err);
+                try std.testing.expectEqual(baseline, pool.getNodesInUse());
+                continue;
+            };
+            var chunks: [86][32]u8 = undefined;
+            for (chunks[0..count], 0..) |*chunk, i| chunk.* = @splat(@truncate(i));
+            var expected: [32]u8 = undefined;
+            try progressive.merkleizeChunks(allocator, chunks[0..count], &expected);
+            try std.testing.expectEqualSlices(u8, &expected, root.getRoot(&pool));
+            pool.unref(root);
+            try std.testing.expectEqual(baseline, pool.getNodesInUse());
+            try std.testing.expect(!failing.has_induced_failure);
+            succeeded = true;
+            break;
+        }
+        try std.testing.expect(succeeded);
+    }
+}
+
+fn buildProgressiveChunks(pool: *Node.Pool, count: usize) !Node.Id {
+    var builder = try progressive.TreeBuilder.init(pool, count);
+    defer builder.deinit();
+    for (0..count) |i| {
+        const chunk: [32]u8 = @splat(@truncate(i));
+        try builder.append(try pool.createLeaf(&chunk));
+    }
+    return builder.finish();
+}
+
+test "progressive streaming builder rejects excess input and invalid finish" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 16 });
+    defer pool.deinit();
+    const baseline = pool.getNodesInUse();
+    var builder = try progressive.TreeBuilder.init(&pool, 1);
+    defer builder.deinit();
+    try std.testing.expectError(error.InvalidLength, builder.finish());
+    try builder.append(try pool.createLeafFromUint(7));
+    try std.testing.expectError(error.InvalidLength, builder.append(try pool.createLeafFromUint(9)));
+    const root = try builder.finish();
+    pool.unref(root);
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+    try std.testing.expectError(error.InvalidState, builder.finish());
+    try std.testing.expectError(error.InputTooLong, progressive.TreeBuilder.init(&pool, std.math.maxInt(usize)));
+}
