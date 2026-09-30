@@ -263,7 +263,7 @@ test "gossipsub IHAVE security bounds one identity and deduplicates queued reque
     const occupied = g.recovery.len;
     support.control(&g, other.index, .{ .ihave = .{ .topic = name, .body = writer.written() } }, .{ .mono_ms = 7000, .unix_s = 1 });
     try std.testing.expectEqual(occupied + constants.gossip_ids_max, g.recovery.len);
-    try std.testing.expectEqual(occupied, g.recovery.cancel(&g.peers, g.sessions.rows[peer.index].conn, true));
+    try std.testing.expectEqual(occupied, g.recovery.cancel(&g.peers, g.sessions.rows[peer.index].conn, true).removed);
     io.resetHeartbeat();
     support.control(&g, peer.index, .{ .ihave = .{ .topic = name, .body = writer.written() } }, .{ .mono_ms = 7000, .unix_s = 1 });
     try std.testing.expectEqual(@as(usize, 2 * constants.gossip_ids_max), g.recovery.len);

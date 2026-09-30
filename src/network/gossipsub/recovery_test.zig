@@ -26,13 +26,13 @@ test "recovery receipts bind connection generation and token and release only ca
     try std.testing.expectEqual(@as(?u64, 30_000), recovery.nextExpiry());
     recovery.controlSent(connection, 7, 3000, 20);
     try std.testing.expectEqual(@as(?u64, 3020), recovery.nextExpiry());
-    try std.testing.expectEqual(@as(u64, 0), recovery.cancel(&peers, next_connection, true));
-    try std.testing.expectEqual(@as(u64, 1), recovery.cancel(&peers, connection, false));
+    try std.testing.expectEqual(@as(u64, 0), recovery.cancel(&peers, next_connection, true).removed);
+    try std.testing.expectEqual(@as(u64, 1), recovery.cancel(&peers, connection, false).removed);
     try std.testing.expectEqual(@as(u32, 1), peers.rows[peer.index].pins);
     recovery.controlSent(connection, 7, 3000, 200);
     recovery.controlSent(connection, 8, 3000, 200);
     try std.testing.expectEqual(@as(?u64, 3020), recovery.nextExpiry());
-    try std.testing.expectEqual(@as(u64, 1), recovery.cancel(&peers, connection, true));
+    try std.testing.expectEqual(@as(u64, 1), recovery.cancel(&peers, connection, true).removed);
     try std.testing.expectEqual(@as(u32, 0), peers.rows[peer.index].pins);
     try std.testing.expectEqual(@as(usize, constants.promises_cap), recovery.available());
     recovery.controlSent(connection, 7, 3000, 300);
@@ -284,11 +284,11 @@ test "recovery cancellation removes a connection's requests from the index" {
     recovery.addBatch(&peers, ids[1..3], cancelled, connection, 2, 0, 30_000);
     recovery.addBatch(&peers, &.{ ids[1], ids[3] }, other, .{ .index = 1, .generation = 1 }, 3, 0, 30_000);
     recovery.controlSent(connection, 1, 3_000, 10);
-    try std.testing.expectEqual(@as(u64, 2), recovery.cancel(&peers, connection, false));
+    try std.testing.expectEqual(@as(u64, 2), recovery.cancel(&peers, connection, false).removed);
     try expectIndexed(&recovery);
     _ = recovery.resolve(&peers, ids[2]);
     try std.testing.expectEqual(@as(usize, 4), recovery.len);
-    try std.testing.expectEqual(@as(u64, 2), recovery.cancel(&peers, connection, true));
+    try std.testing.expectEqual(@as(u64, 2), recovery.cancel(&peers, connection, true).removed);
     try expectIndexed(&recovery);
     try std.testing.expectEqual(@as(u32, 0), peers.rows[cancelled.index].pins);
     _ = recovery.resolve(&peers, ids[1]);
@@ -369,7 +369,7 @@ test "recovery index resolves what a scan of every batch finds under random oper
             for (before) |batch| {
                 if (batch.connection.index == owner and (local_pressure or !batch.sent)) removed += batch.count;
             }
-            try std.testing.expectEqual(removed, recovery.cancel(&peers, .{ .index = @intCast(owner), .generation = 1 }, local_pressure));
+            try std.testing.expectEqual(removed, recovery.cancel(&peers, .{ .index = @intCast(owner), .generation = 1 }, local_pressure).removed);
         } else if (before.len > 0) {
             const batch = before[random.uintLessThan(usize, before.len)];
             recovery.controlSent(batch.connection, batch.token, 3_000, now);
@@ -412,7 +412,7 @@ test "recovery arms one sampled promise per sent batch whose sample is still out
     recovery.controlSent(connection, 4, 3_000, 3_020);
     recovery.controlSent(connection, 5, 3_000, 3_020);
     try std.testing.expectEqual(@as(u64, 2), recovery.armed);
-    try std.testing.expectEqual(@as(u64, 2), recovery.cancel(&peers, connection, true));
+    try std.testing.expectEqual(@as(u64, 2), recovery.cancel(&peers, connection, true).removed);
     // A sample resolved after the send keeps its promise.
     recovery.addBatch(&peers, ids[6..7], peer, connection, 6, 0, 30_000);
     recovery.controlSent(connection, 6, 3_000, 3_030);
