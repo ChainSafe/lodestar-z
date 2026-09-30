@@ -222,19 +222,25 @@ pub const Recovery = struct {
         return visited + moved;
     }
 
-    pub fn cancel(self: *Recovery, peers: *Peers, connection: Handle, local_pressure: bool) u64 {
-        var removed: u64 = 0;
+    pub const Cancellation = struct { removed: u64 = 0, work: usize = 0 };
+
+    /// Counts the batches and requests visited, including requests relinked by compaction.
+    pub fn cancel(self: *Recovery, peers: *Peers, connection: Handle, local_pressure: bool) Cancellation {
+        var result: Cancellation = .{};
         var index: usize = 0;
         const count = self.batch_len;
         for (0..count) |_| {
             if (index == self.batch_len) break;
             const batch = self.batches[index];
+            result.work += @sizeOf(Batch);
             if (std.meta.eql(batch.connection, connection) and (local_pressure or batch.sent_at_ms == null)) {
-                removed += batch.count;
+                result.removed += batch.count;
+                result.work += @as(usize, batch.count) * @sizeOf(Request);
+                if (index + 1 < self.batch_len) result.work += @sizeOf(Batch) + @as(usize, self.batches[self.batch_len - 1].count) * @sizeOf(Request);
                 self.remove(peers, index);
             } else index += 1;
         }
-        return removed;
+        return result;
     }
 
     pub fn controlSent(self: *Recovery, connection: Handle, token: u64, followup_ms: u64, now_ms: u64) void {

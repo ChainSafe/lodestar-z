@@ -340,7 +340,10 @@ fn readPeer(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *T
             const take = @min(io.unread_end - io.unread_start, peer.input, turn.budget.input);
             const result = io.feedUnread(&self.sessions.receive_pool, take, now.mono_ms) catch |err| {
                 if (err == error.ReceiveCapacity) {
-                    discardInboundFrame(self, index);
+                    const work = discardInboundFrame(self, index);
+                    turn.budget.work -|= work;
+                    peer.work -|= work;
+                    if (peer.work == 0 or turn.budget.work == 0) return;
                     continue;
                 } else {
                     self.counters.malformed_rpcs += 1;
@@ -448,7 +451,7 @@ fn logIoTimeout(self: *Gossipsub, index: u16, reason: []const u8, now_ms: u64) v
 /// during the turn wait for the next one.
 pub fn runTurn(self: *Gossipsub, router: *routing.Router, engine: *Engine, turn: *Turn) void {
     const now = turn.now;
-    expireDue(self, router, engine, now.mono_ms);
+    expireDue(self, router, engine, turn);
     self.tick(now);
     const marked = @min(self.sessions.ready.len, self.options.peers_per_pump);
     var openings: usize = 0;
@@ -548,23 +551,26 @@ pub fn processRpc(self: *Gossipsub, index: u16, turn: *Turn, peer: *Credits) pro
     return .credits;
 }
 
-fn discardInboundFrame(self: *Gossipsub, index: u16) void {
-    self.cancelPromises(index, true);
+fn discardInboundFrame(self: *Gossipsub, index: u16) usize {
+    const work = self.cancelPromises(index, true);
     self.sessions.discardFrame(&self.sessions.rows[index].io);
+    return work;
 }
 
 /// Pops the sessions whose earliest deadline passed. Handling an expiry clears it or retires the
 /// session, so a key set here lies in the future and each session is popped at most once.
-fn expireDue(self: *Gossipsub, router: *routing.Router, engine: *Engine, now_ms: u64) void {
+fn expireDue(self: *Gossipsub, router: *routing.Router, engine: *Engine, turn: *Turn) void {
+    const now_ms = turn.now.mono_ms;
     for (0..self.sessions.deadlines.len) |_| {
         const index: u16 = @intCast(self.sessions.deadlines.popDue(now_ms) orelse break);
         self.sessions.visits +|= 1;
-        expireSession(self, router, engine, index, now_ms);
+        expireSession(self, router, engine, index, turn);
         self.settle(index);
     }
 }
 
-fn expireSession(self: *Gossipsub, router: *routing.Router, engine: *Engine, index: u16, now_ms: u64) void {
+fn expireSession(self: *Gossipsub, router: *routing.Router, engine: *Engine, index: u16, turn: *Turn) void {
+    const now_ms = turn.now.mono_ms;
     const g = self;
     const peer = &g.sessions.rows[index];
     assert(peer.active);
@@ -583,7 +589,7 @@ fn expireSession(self: *Gossipsub, router: *routing.Router, engine: *Engine, ind
             },
             .receive_frame => {
                 if (io.rpc != null) {
-                    discardInboundFrame(self, index);
+                    turn.budget.work -|= discardInboundFrame(self, index);
                     continue;
                 }
                 if (io.discarding) {

@@ -40,7 +40,9 @@ pub const MessageSink = struct {
     admit: *const fn (*anyopaque, *Admission) bool,
 };
 pub const InvalidReason = enum { signed, compressed_size, ssz_size, snappy };
-pub const Received = union(enum) { ignored, invalid: InvalidReason, duplicate: topic_mod.MessageId, admitted: MessageEvent, blocked: enum { storage, work } };
+/// Identified receipt proves the valid-domain ID, not successful gossip validation.
+pub const Refusal = union(enum) { identified: MessageId, unidentified };
+pub const Received = union(enum) { ignored, invalid: InvalidReason, duplicate: MessageId, admitted: MessageEvent, refused: Refusal, deferred };
 pub const StorageRefusal = enum { kind_validations, kind_payload, peer_validations, validation_capacity, payload_capacity, processor_capacity };
 pub const StorageRefusals = [std.meta.fields(StorageRefusal).len]u64;
 pub const Applied = struct {
@@ -206,7 +208,7 @@ pub const Messages = struct {
         const header = admission.inspect(&msg);
         if (header == .rejected) return invalid(context, source, topic, if (msg.data.len > @import("constants.zig").maxCompressedLen(@import("constants.zig").MAX_PAYLOAD_SIZE)) .compressed_size else .ssz_size);
         if (header == .invalid) {
-            if (!workspace.charge(context.options, msg.data.len, 0)) return .{ .blocked = .work };
+            if (!workspace.charge(context.options, msg.data.len, 0)) return .deferred;
             _ = self.seen.add(topic_mod.invalidMessageId(msg.topic, msg.data, context.options.message_id_policy), now);
             return invalid(context, source, topic, .snappy);
         }
@@ -215,11 +217,15 @@ pub const Messages = struct {
         const kind = if (topic_mod.parseCanonical(msg.topic)) |canonical| canonical.name.kind else .beacon_block;
         const refusal: ?StorageRefusal = if (workspace.sink) |sink| (if (!sink.has_capacity(sink.context, kind, size)) .processor_capacity else null) else .processor_capacity;
         const cost = if (refusal != null) msg.data.len else msg.data.len * 2 + size * 2;
-        if (!workspace.chargeWork(context.options, cost)) return .{ .blocked = .work };
+        if (!workspace.chargeWork(context.options, cost)) return .deferred;
         const fingerprint = sha256.digest(&.{@intCast(msg.topic.len)}, msg.topic, msg.data);
         const cached = &self.fast[std.mem.readInt(u64, fingerprint[0..8], .little) % self.fast.len];
+        var identified: ?MessageId = null;
         if (std.mem.eql(u8, &cached.fingerprint, &fingerprint)) switch (cached.result) {
-            .valid => |id| if (self.duplicateId(context, source, topic, id, now)) return .{ .duplicate = id },
+            .valid => |id| {
+                if (self.duplicateId(context, source, topic, id, now)) return .{ .duplicate = id };
+                identified = id;
+            },
             .invalid => |id| {
                 _ = self.seen.add(id, now);
                 return invalid(context, source, topic, .snappy);
@@ -227,7 +233,7 @@ pub const Messages = struct {
             .empty => {},
         };
         // Known duplicates retain attribution even when new work has no capacity.
-        if (refusal) |reason| return self.refuseStorage(reason);
+        if (refusal) |reason| return self.refuseStorage(reason, identified);
         const output = workspace.scratch[0..size];
         const decoded = admission.decode(&msg, output, context.options.message_id_policy);
         cached.* = .{ .fingerprint = fingerprint, .result = if (decoded == .invalid) .{ .invalid = decoded.invalid } else .{ .valid = decoded.valid.id } };
@@ -259,11 +265,11 @@ pub const Messages = struct {
         const kind = if (topic_mod.parseCanonical(msg.topic)) |canonical| canonical.name.kind else .beacon_block;
         const peer_limit = @max(1, if (context.options.processor_limits) |limits| limits[@intFromEnum(kind)].items / 2 else self.validation.entries.len / 2);
         const peer_pending = if (context.options.processor_limits != null) self.validation.pending_per_peer_kind[source.peer.index][@intFromEnum(kind)] else self.validation.pending_per_peer[source.peer.index];
-        if (peer_pending >= peer_limit) return self.refuseStorage(.peer_validations);
+        if (peer_pending >= peer_limit) return self.refuseStorage(.peer_validations, id);
         if (context.options.processor_limits) |limits| {
             const maximum = if (context.overlay.namespace) |ns| @import("constants.zig").maxCompressedLen(ns.lookup(msg.topic).?.rule.ssz_max) else @min(limits[@intFromEnum(kind)].bytes, @import("constants.zig").maxCompressedLen(@import("constants.zig").MAX_PAYLOAD_SIZE));
             const source_bytes = @import("../gossip_limits.zig").sourceBytes(limits[@intFromEnum(kind)], Validation.chargedBytes(maximum), storage.inline_bytes);
-            if (Validation.chargedBytes(msg.data.len) > source_bytes -| self.validation.bytes_per_peer_kind[source.peer.index][@intFromEnum(kind)]) return self.refuseStorage(.peer_validations);
+            if (Validation.chargedBytes(msg.data.len) > source_bytes -| self.validation.bytes_per_peer_kind[source.peer.index][@intFromEnum(kind)]) return self.refuseStorage(.peer_validations, id);
         }
         assert(context.peers.matches(source.peer));
         var candidate: Admission = .{
@@ -277,7 +283,7 @@ pub const Messages = struct {
         const sink = workspace.sink.?;
         if (!sink.admit(sink.context, &candidate)) {
             assert(!candidate.committed);
-            return self.refuseStorage(candidate.refusal);
+            return self.refuseStorage(candidate.refusal, id);
         }
         assert(candidate.committed);
         return .{ .admitted = candidate.event };
@@ -289,9 +295,9 @@ pub const Messages = struct {
         return false;
     }
 
-    fn refuseStorage(self: *Messages, reason: StorageRefusal) Received {
+    fn refuseStorage(self: *Messages, reason: StorageRefusal, id: ?MessageId) Received {
         self.storage_refusals[@intFromEnum(reason)] +|= 1;
-        return .{ .blocked = .storage };
+        return .{ .refused = if (id) |known| .{ .identified = known } else .unidentified };
     }
 
     pub fn report(self: *Messages, context: *const Context, handle: Handle, verdict: Verdict, now: u64) Report {

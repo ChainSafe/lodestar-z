@@ -278,7 +278,7 @@ pub const Gossipsub = struct {
         const tx = &self.sessions.rows[session.index].io.tx;
         self.delivery_metrics.cancelled(&tx.data.origins);
         tx.cancelStream(&self.messages.store);
-        self.cancelPromises(session.index, false);
+        _ = self.cancelPromises(session.index, false);
     }
 
     pub fn sendSubscriptions(self: *Gossipsub, index: u16) void {
@@ -528,8 +528,8 @@ pub const Gossipsub = struct {
         }
     }
 
-    pub fn cancelPromises(self: *Gossipsub, peer: u16, local_pressure: bool) void {
-        _ = self.recovery.cancel(&self.peers, self.sessions.rows[peer].conn, local_pressure);
+    pub fn cancelPromises(self: *Gossipsub, peer: u16, local_pressure: bool) usize {
+        return self.recovery.cancel(&self.peers, self.sessions.rows[peer].conn, local_pressure).work;
     }
 
     pub fn writeSegment(self: *Gossipsub, session: sessions_mod.SessionRef) []const u8 {
@@ -602,7 +602,7 @@ pub const Gossipsub = struct {
         const source: @import("messages.zig").Source = .{ .peer = self.logical(index), .session = self.sessions.ref(index), .connection = self.sessions.rows[index].conn };
         const result = self.messages.receive(&context, &workspace, &source, msg, now.mono_ms);
         // The turn offers a message refused for work again, so only its final outcome counts.
-        if (result == .blocked and result.blocked == .work) return .credits;
+        if (result == .deferred) return .credits;
         const counts = self.topic_metrics.get(msg.topic);
         counts.received +|= 1;
         switch (result) {
@@ -617,9 +617,16 @@ pub const Gossipsub = struct {
                 self.resolvePromises(turn, peer, id);
                 return .done;
             },
-            .blocked => |reason| {
-                assert(reason == .storage);
-                self.cancelPromises(index, true);
+            .deferred => unreachable,
+            .refused => |refusal| {
+                switch (refusal) {
+                    .identified => |id| self.resolvePromises(turn, peer, id),
+                    .unidentified => {
+                        const work = self.cancelPromises(index, true);
+                        turn.budget.work -|= work;
+                        peer.work -|= work;
+                    },
+                }
                 return .done;
             },
             .admitted => |event| {

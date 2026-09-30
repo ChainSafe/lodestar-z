@@ -322,3 +322,320 @@ test "gossip admission after a refused victim selection retires only its own vic
     try t.expectEqual(@as(usize, 3), table.diag.occupied);
     try t.expectEqual(@as(usize, 3), g.resourceSnapshot().pending_validations);
 }
+
+const IwantFixture = struct {
+    g: gossip.Gossipsub = undefined,
+    table: processor.GossipProcessor = undefined,
+    consumer: Consumer = undefined,
+    sink: gossip.MessageSink = undefined,
+    now: u64 = 200,
+
+    fn init(self: *IwantFixture, validation_capacity: usize) !void {
+        var opts = options;
+        opts.validation_capacity = validation_capacity;
+        opts.iwant_followup_ms = 12_000;
+        const policy = comptime policy: {
+            var boundary = @import("topic_fixture.zig").bytes(.{ 1, 2, 3, 4 });
+            for (&boundary.rules) |*rule| rule.ssz_max = 6000;
+            break :policy [_]@import("topic_policy.zig").Boundary{boundary};
+        };
+        opts.topic_policy = &policy;
+        self.g = try support.init(t.allocator, opts);
+        errdefer self.g.deinit();
+        const limits: processor.limits_mod.Limits = @splat(.{ .items = 4, .bytes = 16384 });
+        self.table = try processor.GossipProcessor.init(t.allocator, .{ .capacity = processor.limits_mod.items(&limits), .bytes = processor.limits_mod.bytes(&limits), .limits = limits, .source_maximum = @splat(6000), .forks = &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }} });
+        errdefer self.table.deinit();
+        self.table.maintain(0, 96);
+        self.consumer = .{ .table = &self.table, .owner = &self.g, .slot = 96 };
+        self.sink = self.consumer.sink();
+        self.g.message_sink = &self.sink;
+        try support.subscribe(&self.g, attestation);
+        try support.subscribe(&self.g, block);
+        for (0..3) |i| {
+            const session = support.addPeer(&self.g, .{ .index = @intCast(i), .generation = 1 }, .v1_2).?;
+            std.debug.assert(session.index == i);
+            try self.flush(@intCast(i));
+        }
+    }
+
+    fn deinit(self: *IwantFixture) void {
+        self.table.close();
+        self.table.deinit();
+        self.g.deinit();
+    }
+
+    fn rpc(self: *IwantFixture, source: u16, bytes: []const u8) !usize {
+        const io = &self.g.sessions.rows[source].io;
+        io.startRpc(bytes);
+        defer _ = self.g.sessions.finishFrame(io);
+        var turn = @import("session_io.zig").beginPump(&self.g, .{ .mono_ms = self.now, .unix_s = 0 });
+        var credit = @import("turn.zig").Credits.peer(&self.g.options);
+        try t.expectEqual(.done, try @import("session_io.zig").processRpc(&self.g, source, &turn, &credit));
+        return self.g.options.work_per_pump - turn.budget.work;
+    }
+
+    fn request(self: *IwantFixture, source: u16, id: gossip.MessageId) !void {
+        var body: [256]u8 = undefined;
+        var writer = protobuf.Writer.init(&body);
+        protobuf.beginIhaveRpc(&writer, attestation, 1, id.len);
+        protobuf.writeIhaveId(&writer, &id);
+        _ = try self.rpc(source, writer.written());
+    }
+
+    fn flush(self: *IwantFixture, source: u16) !void {
+        const session = self.g.sessions.ref(source);
+        for (0..64) |_| {
+            const bytes = self.g.writeSegment(session);
+            if (bytes.len == 0) return;
+            self.g.advanceWrite(session, bytes.len, self.now);
+        }
+        return error.UnfinishedControlWrite;
+    }
+
+    fn promises(self: *IwantFixture, x: gossip.MessageId) !void {
+        try self.request(0, x);
+        try self.request(0, @splat(0xee));
+        try self.request(1, x);
+        self.now = 300;
+        try self.flush(0);
+        try self.flush(1);
+        try t.expectEqual(@as(usize, 3), self.g.recovery.len);
+    }
+
+    fn message(self: *IwantFixture, source: u16, payload: []const u8) !usize {
+        var compressed: [8192]u8 = undefined;
+        const len = try snappy.raw.compress(payload, &compressed);
+        return self.receiveCompressed(source, compressed[0..len]);
+    }
+
+    fn receiveCompressed(self: *IwantFixture, source: u16, data: []const u8) !usize {
+        var encoded: [16384]u8 = undefined;
+        var writer = protobuf.Writer.init(&encoded);
+        protobuf.writeMessage(&writer, data, attestation);
+        return self.rpc(source, writer.written());
+    }
+
+    fn expire(self: *IwantFixture, p: f64, q: f64) !void {
+        self.g.expirePromises(12_299);
+        try t.expectEqual(@as(u64, 0), self.g.counters.broken_promises);
+        self.g.expirePromises(12_300);
+        try t.expectEqual(p, self.g.peers.scores.rows[self.g.sessions.rows[0].logical.index].behaviour);
+        try t.expectEqual(q, self.g.peers.scores.rows[self.g.sessions.rows[1].logical.index].behaviour);
+        try t.expectEqual(@as(usize, 0), self.g.recovery.len);
+    }
+};
+
+test "gossip identified receipts settle only their IWANT ID across providers despite admission refusal" {
+    const Case = enum { admitted, ineligible, source_items, processor_source, processor_bytes, validation_capacity, cached };
+    for (std.enums.values(Case)) |case| {
+        var f: IwantFixture = .{};
+        try f.init(if (case == .source_items or case == .validation_capacity) 2 else 64);
+        defer f.deinit();
+        var backing: [6000]u8 = undefined;
+        const payload = backing[0..if (case == .processor_bytes) 6000 else 240];
+        const slot: u64 = if (case == .ineligible or case == .cached) 1000 else 96;
+        vote(payload, 10, slot);
+        const x = @import("topic.zig").validMessageId(attestation, payload, .{});
+        if (case == .cached) {
+            _ = try f.message(0, payload);
+            try t.expect(!f.g.messages.wasSeen(x, f.now));
+            f.table.close();
+        }
+        if (case == .source_items or case == .processor_source or case == .processor_bytes or case == .validation_capacity) {
+            var filler_backing: [6000]u8 = undefined;
+            const filler = filler_backing[0..if (case == .processor_bytes) 6000 else 240];
+            const count: usize = if (case == .source_items or case == .processor_bytes) 1 else 2;
+            for (0..count) |i| {
+                vote(filler, @intCast(i), 96);
+                _ = try f.message(if (case == .validation_capacity) @intCast(i + 1) else 0, filler);
+            }
+            try t.expectEqual(count, f.table.diag.occupied);
+            if (case == .validation_capacity) {
+                const checks = f.table.claimChecks(200, processor.batch_max);
+                for (checks.tokens[0..checks.len]) |token| try t.expect(f.table.classify(token, true));
+                f.table.maintain(300, 96);
+                const batch = f.table.claim(300);
+                try t.expectEqual(count, batch.len);
+                f.table.finish(&batch, true);
+            }
+        }
+        const before = f.table.diag.occupied;
+        try f.promises(x);
+        _ = try f.message(0, payload);
+        try t.expectEqual(@as(usize, 1), f.g.recovery.len);
+        try t.expectEqual(before + @intFromBool(case == .admitted), f.table.diag.occupied);
+        try t.expectEqual(case == .admitted, f.g.messages.wasSeen(x, f.now));
+        try t.expectEqual(@as(f64, 0), support.invalidDeliveries(&f.g));
+        switch (case) {
+            .admitted => {
+                _ = try f.message(1, payload);
+                try t.expectEqual(@as(usize, 1), f.g.recovery.len);
+            },
+            .ineligible, .cached => try t.expectEqual(@as(u64, 1), f.table.diag.slotRefusals),
+            .source_items => try t.expectEqual(@as(u64, 1), f.g.messages.storage_refusals[@intFromEnum(messages.StorageRefusal.peer_validations)]),
+            .processor_source, .processor_bytes => try t.expectEqual(@as(u64, 1), f.table.refusals[@intFromEnum(processor.limits_mod.Kind.beacon_attestation)][@intFromEnum(processor.Refusal.source_full)]),
+            .validation_capacity => try t.expectEqual(@as(u64, 1), f.g.messages.storage_refusals[@intFromEnum(messages.StorageRefusal.validation_capacity)]),
+        }
+        try f.expire(1, 0);
+    }
+}
+
+test "gossip unrelated old and future receipts cannot erase IWANT obligations" {
+    for ([_]u64{ 0, 1000 }) |slot| {
+        var f: IwantFixture = .{};
+        try f.init(64);
+        defer f.deinit();
+        try f.promises(@splat(0xdd));
+        var payload: [240]u8 = undefined;
+        vote(&payload, 4, slot);
+        _ = try f.message(0, &payload);
+        try t.expectEqual(@as(u64, 1), f.table.diag.slotRefusals);
+        try t.expectEqual(@as(usize, 3), f.g.recovery.len);
+        try t.expectEqual(@as(usize, 0), f.table.diag.occupied);
+        try t.expectEqual(@as(f64, 0), support.invalidDeliveries(&f.g));
+        try f.expire(2, 1);
+    }
+}
+
+test "gossip unidentified local loss cancels only its connection and charges recovery work" {
+    var f: IwantFixture = .{};
+    try f.init(64);
+    defer f.deinit();
+    try f.promises(@splat(0xdd));
+    f.table.close();
+    var payload: [240]u8 = undefined;
+    vote(&payload, 4, 96);
+    const first_work = try f.message(0, &payload);
+    try t.expectEqual(@as(usize, 1), f.g.recovery.len);
+    const second_work = try f.message(0, &payload);
+    try t.expect(first_work > second_work);
+    try t.expect(second_work >= @sizeOf(@import("recovery.zig").Batch));
+    try t.expectEqual(@as(f64, 0), support.invalidDeliveries(&f.g));
+    try f.expire(0, 1);
+}
+
+test "gossip invalid-domain and malformed receipts do not satisfy valid-domain promises" {
+    var f: IwantFixture = .{};
+    try f.init(64);
+    defer f.deinit();
+    const invalid = [_]u8{ 5, 0 };
+    const invalid_id = @import("topic.zig").invalidMessageId(attestation, &invalid, .{});
+    try f.promises(invalid_id);
+    _ = try f.receiveCompressed(0, &invalid);
+    _ = try f.receiveCompressed(0, &.{0x80});
+    try t.expectEqual(@as(usize, 3), f.g.recovery.len);
+    try t.expectEqual(@as(f64, 2), support.invalidDeliveries(&f.g));
+    try t.expect(f.g.messages.wasSeen(invalid_id, 200));
+    try f.expire(2, 1);
+}
+
+test "gossip deferred receipt neither settles nor forgives promises before resumed processing" {
+    var f: IwantFixture = .{};
+    try f.init(64);
+    defer f.deinit();
+    var payload: [240]u8 = undefined;
+    vote(&payload, 10, 1000);
+    const x = @import("topic.zig").validMessageId(attestation, &payload, .{});
+    try f.promises(x);
+    var compressed: [512]u8 = undefined;
+    const len = try snappy.raw.compress(&payload, &compressed);
+    var encoded: [1024]u8 = undefined;
+    var writer = protobuf.Writer.init(&encoded);
+    protobuf.writeMessage(&writer, compressed[0..len], attestation);
+    const io = &f.g.sessions.rows[0].io;
+    io.startRpc(writer.written());
+    defer _ = f.g.sessions.finishFrame(io);
+    var turn = @import("session_io.zig").beginPump(&f.g, .{ .mono_ms = 300, .unix_s = 0 });
+    var credit = @import("turn.zig").Credits.peer(&f.g.options);
+    turn.budget.work = 0;
+    try t.expectEqual(.credits, try @import("session_io.zig").processRpc(&f.g, 0, &turn, &credit));
+    try t.expectEqual(@as(usize, 3), f.g.recovery.len);
+    turn = @import("session_io.zig").beginPump(&f.g, .{ .mono_ms = 301, .unix_s = 0 });
+    credit = @import("turn.zig").Credits.peer(&f.g.options);
+    try t.expectEqual(.done, try @import("session_io.zig").processRpc(&f.g, 0, &turn, &credit));
+    try t.expectEqual(@as(usize, 1), f.g.recovery.len);
+    try f.expire(1, 0);
+}
+
+test "gossip refused receipt before IWANT write completion cannot rearm its ID or another generation" {
+    var f: IwantFixture = .{};
+    try f.init(64);
+    defer f.deinit();
+    var payload: [240]u8 = undefined;
+    vote(&payload, 10, 1000);
+    const x = @import("topic.zig").validMessageId(attestation, &payload, .{});
+    try f.request(0, x);
+    try f.request(0, @splat(0xee));
+    try f.request(1, x);
+    const p = f.g.sessions.ref(0);
+    const segment = f.g.writeSegment(p);
+    try t.expect(segment.len > 1);
+    f.g.advanceWrite(p, 1, 250);
+    f.now = 250;
+    try t.expectEqual(@as(u64, 0), f.g.recovery.armed);
+    _ = try f.message(0, &payload);
+    try t.expectEqual(@as(usize, 1), f.g.recovery.len);
+    f.now = 300;
+    try f.flush(0);
+    try f.flush(1);
+    try t.expectEqual(@as(u64, 1), f.g.recovery.armed);
+    // A completion from an old session generation must not reset the remaining deadline.
+    f.g.writeCompleted(.{ .index = p.index, .generation = p.generation + 1 }, .{ .control = .{ .token = f.g.recovery.batches[0].token } }, 1000);
+    try f.expire(1, 0);
+}
+
+test "gossip ineligible QUIC publication preserves sent IWANT promises for other IDs" {
+    var pair: @import("test_pair.zig").Pair = .{};
+    var opts = options;
+    opts.iwant_followup_ms = 12_000;
+    try pair.initOpts(opts, opts);
+    defer pair.deinit();
+    const g = pair.shared.server.gossipsub;
+    try support.subscribe(g, attestation);
+    const limits: processor.limits_mod.Limits = @splat(.{ .items = 4, .bytes = 16384 });
+    var table = try processor.GossipProcessor.init(t.allocator, .{ .capacity = processor.limits_mod.items(&limits), .bytes = processor.limits_mod.bytes(&limits), .limits = limits, .forks = &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }} });
+    defer table.deinit();
+    defer table.close();
+    var consumer: Consumer = .{ .table = &table, .owner = g, .slot = 96 };
+    const sink = consumer.sink();
+    g.message_sink = &sink;
+    defer g.message_sink = null;
+    for (0..16) |_| try pair.pumpOnce();
+    const source = g.sessions.find(pair.shared.handles.server).?;
+    var ihave: [256]u8 = undefined;
+    var writer = protobuf.Writer.init(&ihave);
+    const ids = [_]gossip.MessageId{ @splat(0xdd), @splat(0xee) };
+    var framed: [1032]u8 = undefined;
+    for (ids, 0..) |id, i| {
+        writer = protobuf.Writer.init(&ihave);
+        protobuf.beginIhaveRpc(&writer, attestation, 1, id.len);
+        protobuf.writeIhaveId(&writer, &id);
+        const wire = @import("frame.zig").writeFrame(&framed, writer.written());
+        try t.expectEqual(wire.len, try pair.shared.pair.client.write(pair.clientStream(), wire, false));
+        for (0..32) |_| {
+            try pair.pumpOnce();
+            if (g.recovery.armed == i + 1) break;
+        }
+        try t.expectEqual(@as(u64, @intCast(i + 1)), g.recovery.armed);
+    }
+    var payload: [240]u8 = undefined;
+    vote(&payload, 10, 0);
+    var compressed: [512]u8 = undefined;
+    const len = try snappy.raw.compress(&payload, &compressed);
+    var body: [1024]u8 = undefined;
+    writer = protobuf.Writer.init(&body);
+    protobuf.writeMessage(&writer, compressed[0..len], attestation);
+    const wire = @import("frame.zig").writeFrame(&framed, writer.written());
+    try t.expectEqual(wire.len, try pair.shared.pair.client.write(pair.clientStream(), wire, false));
+    for (0..32) |_| {
+        try pair.pumpOnce();
+        if (table.diag.slotRefusals > 0) break;
+    }
+    try t.expectEqual(@as(u64, 1), table.diag.slotRefusals);
+    try t.expectEqual(@as(usize, 2), g.recovery.len);
+    try t.expectEqual(@as(f64, 0), support.invalidDeliveries(g));
+    const last_expiry = @max(g.recovery.batches[0].expiry, g.recovery.batches[1].expiry);
+    g.expirePromises(last_expiry);
+    try t.expectEqual(@as(u64, 2), g.counters.broken_promises);
+    try t.expectEqual(@as(f64, 2), g.peers.scores.rows[g.sessions.rows[source].logical.index].behaviour);
+}
