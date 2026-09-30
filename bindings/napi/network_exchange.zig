@@ -183,8 +183,7 @@ pub const Outcome = packed struct(u4) {
 };
 
 /// How a failed build or finish ends: JavaScript that cannot run shuts the runtime down locally, and anything else
-/// breaks the bridge contract and terminates the process. No allocation of ours can fail there
-/// (bindings/test/network-allocation.test.ts).
+/// breaks the bridge contract and terminates the process. No allocation of ours can fail there.
 pub const Failure = enum { stopped, contract };
 
 fn enabled(runtime: *Runtime, demand: *const Demand, row: Row) bool {

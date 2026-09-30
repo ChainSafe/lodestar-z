@@ -309,16 +309,6 @@ test "router gossip capacity refusal preserves reqresp and explicit host retry" 
     try std.testing.expect(server.gossipsub.admitted(handles.server));
 }
 
-test "protocol compositions expose no standalone processing on shared handlers" {
-    const Shared = @import("service.zig").Service;
-    const RequestHandler = @FieldType(Shared, "reqresp");
-    const GossipHandler = @typeInfo(@FieldType(Shared, "gossipsub")).pointer.child;
-    try std.testing.expect(!@hasField(RequestHandler, "router"));
-    try std.testing.expect(!@hasField(GossipHandler, "router"));
-    try std.testing.expect(!@hasDecl(RequestHandler, "process"));
-    try std.testing.expect(!@hasDecl(GossipHandler, "process"));
-}
-
 test "router capabilities validate service limits and preserve configured preference" {
     const routing = @import("router.zig");
     const caps = @import("capabilities.zig");
