@@ -151,11 +151,11 @@ test "reqresp attribution keeps local request bounds neutral and malformed SSZ s
         defer pair.deinit();
         pair.shared.server.reqresp.policy.config.host_integer_max = 10;
         pair.shared.server.reqresp.policy.config.max_payload_size = 128;
-        const which: Protocol = if (case == .host_integer) .ping_v1 else .blocks_by_root_v2;
+        const which: Protocol = if (case == .host_integer) .blocks_by_range_v2 else .blocks_by_root_v2;
         const stream = try pair.openRaw(which);
         try pair.awaitRawSelection(stream, which);
         const payload: []const u8 = switch (case) {
-            .host_integer => &.{ 11, 0, 0, 0, 0, 0, 0, 0 },
+            .host_integer => &.{ 11, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0 },
             .local_payload => &(@as([160]u8, @splat(0))),
             .malformed_ssz => &.{0},
         };
