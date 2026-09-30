@@ -285,9 +285,9 @@ pub fn challenge(
 }
 
 /// Completes the local side of the handshake and installs the session. The local ENR is
-/// included only when the challenger's `enr_sequence` is stale.
+/// included when the challenger's `enr_sequence` is zero (unknown) or stale.
 pub fn answerChallenge(self: *Channel, out: []u8, args: HandshakeArgs) Error!Sealed {
-    const local_enr: []const u8 = if (args.enr_sequence < self.local_record.sequence)
+    const local_enr: []const u8 = if (args.enr_sequence == 0 or args.enr_sequence < self.local_record.sequence)
         self.local_record.slice()
     else
         &.{};

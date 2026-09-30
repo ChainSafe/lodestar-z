@@ -51,6 +51,8 @@ pub const Candidate = struct {
     peer: types.Endpoint,
     record: enr.Record,
     state: State,
+    eligible_families: u2,
+    attempted_families: u2 = 0,
 };
 
 pub const Confirmed = struct {
@@ -170,6 +172,7 @@ pub fn startNext(
         now_ms,
         entropy,
     );
+    candidate.attempted_families |= familyBit(candidate.peer.address);
     candidate.state = .{ .waiting = started.handle };
     self.waiting_count += 1;
     self.queries_started += 1;
@@ -219,7 +222,16 @@ pub fn onFailure(
 ) Error!void {
     const index = self.waitingIndex(handle) orelse return Error.UnknownQuery;
     _ = core.cancelCall(handle);
-    self.candidates[index].state = .failed;
+    const candidate = &self.candidates[index];
+    candidate.state = .failed;
+    for (candidate.record.endpoints()) |endpoint| {
+        const address = endpoint orelse continue;
+        const family = familyBit(address);
+        if (candidate.eligible_families & family == 0 or candidate.attempted_families & family != 0) continue;
+        candidate.peer.address = address;
+        candidate.state = .unqueried;
+        break;
+    }
     self.waiting_count -= 1;
 }
 
@@ -278,7 +290,7 @@ fn addSeed(self: *Lookup, seed: *const RoutingTable.Entry) Error!void {
     if (self.findCandidate(&seed.peer.node_id) != null) return;
     var peer = seed.peer;
     if (!self.ip_mode.supports(peer.address)) peer.address = seed.record.endpointFor(self.ip_mode) orelse return;
-    self.appendCandidate(peer, &seed.record);
+    self.appendCandidate(peer, &seed.record, self.eligibleFamilies(&seed.record, seed.peer.address, 0));
 }
 
 fn addDiscovered(
@@ -287,18 +299,19 @@ fn addDiscovered(
     source: types.Address,
 ) void {
     if (std.mem.eql(u8, &record.node_id, &self.local_id)) return;
+    const eligible = self.eligibleFamilies(record, source, discovered_port_min);
     const address = for (record.endpoints()) |candidate| {
         const address = candidate orelse continue;
-        if (self.ip_mode.supports(address) and address.port() >= discovered_port_min and
-            RoutingTable.relayAllowed(source, address)) break address;
+        if (eligible & familyBit(address) != 0) break address;
     } else return;
     if (self.findCandidate(&record.node_id)) |index| {
         const candidate = &self.candidates[index];
-        if (candidate.state == .unqueried and
+        if (candidate.state == .unqueried and candidate.attempted_families == 0 and
             record.sequence > candidate.record.sequence)
         {
             candidate.peer.address = address;
             candidate.record = record.*;
+            candidate.eligible_families = eligible;
         }
         return;
     }
@@ -306,21 +319,40 @@ fn addDiscovered(
         self.capacity_drops +|= 1;
         return;
     }
-    self.appendCandidate(.{ .node_id = record.node_id, .address = address }, record);
+    self.appendCandidate(.{ .node_id = record.node_id, .address = address }, record, eligible);
 }
 
 fn appendCandidate(
     self: *Lookup,
     peer: types.Endpoint,
     record: *const enr.Record,
+    eligible_families: u2,
 ) void {
     std.debug.assert(self.candidate_count < candidate_capacity);
     self.candidates[self.candidate_count] = .{
         .peer = peer,
         .record = record.*,
         .state = .unqueried,
+        .eligible_families = eligible_families,
     };
     self.candidate_count += 1;
+}
+
+fn eligibleFamilies(self: *const Lookup, record: *const enr.Record, source: types.Address, port_min: u16) u2 {
+    var mask: u2 = 0;
+    for (record.endpoints()) |endpoint| {
+        const address = endpoint orelse continue;
+        if (self.ip_mode.supports(address) and address.port() >= port_min and RoutingTable.relayAllowed(source, address))
+            mask |= familyBit(address);
+    }
+    return mask;
+}
+
+fn familyBit(address: types.Address) u2 {
+    return switch (address) {
+        .ip4 => 1,
+        .ip6 => 2,
+    };
 }
 
 fn nextCandidateIndex(self: *const Lookup, core: ?*const Engine) ?usize {
