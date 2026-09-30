@@ -163,21 +163,28 @@ fn writeSockets(self: *const Context, w: *prom.Encoder) prom.Error!void {
 }
 
 fn writeGossipResources(self: *const Context, w: *prom.Encoder) prom.Error!void {
-    const resources = self.owner.service.gossipsub.resourceSnapshot();
+    var resources = self.owner.service.gossipsub.resourceSnapshot();
+    if (!self.running) {
+        resources.receive_pages = 0;
+        resources.pending_validations = 0;
+        resources.delivery_descriptors_available = resources.delivery_descriptors_capacity;
+        resources.queued_bytes = 0;
+        resources.store_pages = 0;
+    }
     inline for (.{
-        .{ "receive_pages", "Receive pages holding partial inbound frames", false },
-        .{ "receive_page_capacity", "Receive pages the pool holds", true },
-        .{ "validation_capacity", "Messages the validation table holds", true },
-        .{ "pending_validations", "Admitted messages awaiting a verdict", false },
-        .{ "delivery_descriptors_capacity", "Outgoing data descriptors the shared pool holds", true },
-        .{ "delivery_descriptors_available", "Outgoing data descriptors free in the shared pool", false },
-        .{ "queued_bytes", "Compressed bytes queued to peers as data frames", false },
-        .{ "store_pages", "Message store pages in use", false },
+        .{ "receive_pages", "Receive pages holding partial inbound frames" },
+        .{ "receive_page_capacity", "Receive pages the pool holds" },
+        .{ "validation_capacity", "Messages the validation table holds" },
+        .{ "pending_validations", "Admitted messages awaiting a verdict" },
+        .{ "delivery_descriptors_capacity", "Outgoing data descriptors the shared pool holds" },
+        .{ "delivery_descriptors_available", "Outgoing data descriptors free in the shared pool" },
+        .{ "queued_bytes", "Compressed bytes queued to peers as data frames" },
+        .{ "store_pages", "Message store pages in use" },
     }) |field| try w.scalar(.{
         .name = "lodestar_native_gossipsub_" ++ field[0],
         .kind = .gauge,
         .help = field[1],
-    }, if (field[2] or self.running) @field(resources, field[0]) else 0);
+    }, @field(resources, field[0]));
 }
 fn writeRequestResources(self: *const Context, w: *prom.Encoder) prom.Error!void {
     const requests = self.owner.service.reqresp.resourceSnapshot();
