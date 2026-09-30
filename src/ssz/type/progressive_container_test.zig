@@ -200,3 +200,46 @@ test "memory_safety: variable progressive container byte deserialization preserv
     try std.testing.expectEqual(@as(u8, 7), out.a);
     try std.testing.expectEqualSlices(bool, &.{ false, false }, out.items.items);
 }
+
+test "progressive container tree reads stream sparse fields" {
+    const allocator = std.testing.allocator;
+    const active = comptime blk: {
+        var flags: [256]u1 = @splat(0);
+        flags[0] = 1;
+        flags[85] = 1;
+        flags[255] = 1;
+        break :blk flags;
+    };
+    const Fixed = FixedProgressiveContainerType(struct { a: UintType(64), b: BoolType(), c: UintType(8) }, &active);
+    const Variable = VariableProgressiveContainerType(struct { a: UintType(64), b: FixedProgressiveListType(UintType(8)), c: UintType(8) }, &active);
+    inline for (.{ Fixed, Variable }) |ST| {
+        var value = ST.default_value;
+        defer if (ST == Variable) ST.deinit(allocator, &value);
+        value.a = 123;
+        value.c = 45;
+        if (ST == Fixed) value.b = true else try value.b.appendSlice(allocator, &.{ 2, 3, 4 });
+        var failing = std.testing.FailingAllocator.init(allocator, .{});
+        var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = failing.allocator(), .pool_size = 2048 });
+        defer pool.deinit();
+        const root = try ST.tree.fromValue(&pool, &value);
+        defer pool.unref(root);
+        failing.fail_index = failing.alloc_index;
+        var output_allocator = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 1 });
+        var actual = ST.default_value;
+        defer if (ST == Variable) ST.deinit(output_allocator.allocator(), &actual);
+        if (ST == Fixed) try ST.tree.toValue(root, &pool, &actual) else try ST.tree.toValue(output_allocator.allocator(), root, &pool, &actual);
+        try std.testing.expect(ST.equals(&value, &actual));
+        try std.testing.expect(!output_allocator.has_induced_failure);
+        const size = ST.serializedSize(&value);
+        try std.testing.expectEqual(size, try ST.tree.serializedSize(root, &pool));
+        const bytes = try allocator.alloc(u8, size);
+        defer allocator.free(bytes);
+        const expected = try allocator.alloc(u8, size);
+        defer allocator.free(expected);
+        _ = ST.serializeIntoBytes(&value, expected);
+        try std.testing.expectEqual(size, try ST.tree.serializeIntoBytes(root, &pool, bytes));
+        try std.testing.expectEqualSlices(u8, expected, bytes);
+        try std.testing.expectError(error.InvalidSize, ST.tree.serializeIntoBytes(root, &pool, bytes[0 .. size - 1]));
+        try std.testing.expect(!failing.has_induced_failure);
+    }
+}
