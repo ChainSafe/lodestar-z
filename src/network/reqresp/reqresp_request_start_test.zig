@@ -90,7 +90,7 @@ fn waitingStarts(owner: *const rr.ReqResp) usize {
 /// The slot of the request accepted at `now_ms` that still waits for its start.
 fn waiterAt(owner: *const rr.ReqResp, now_ms: u64) !u16 {
     var found: ?u16 = null;
-    for (owner.inbound, 0..) |*slot, index| if (slot.request.running() and slot.start_pending and slot.request.started_ms == now_ms) {
+    for (owner.inbound, 0..) |*slot, index| if (slot.request.running() and slot.admission.start_pending and slot.request.started_ms == now_ms) {
         if (found != null) return error.TestUnexpectedResult;
         found = @intCast(index);
     };
@@ -404,9 +404,9 @@ fn deferredSlot(owner: *rr.ReqResp, peer: u16, which: Protocol, identity: *const
     slot.identity = identity.*;
     slot.state = .ready;
     slot.progress_ms = now_ms;
-    slot.start_pending = true;
-    slot.eligible_ms = owner.admission.limiter.startAt(identity, which.isControl(), now_ms);
-    slot.admission_wait = if (slot.eligible_ms > now_ms) .start else .none;
+    slot.admission.start_pending = true;
+    slot.admission.eligible_ms = owner.admission.limiter.startAt(identity, which.isControl(), now_ms);
+    slot.admission.wait = if (slot.admission.eligible_ms > now_ms) .start else .none;
     slot.request = .{
         .direction = .inbound,
         .generation = 1,
@@ -439,7 +439,7 @@ test "reqresp request start another identity progresses while one waits" {
     var events: [4]rr.Event = undefined;
     try std.testing.expectEqual(@as(usize, 1), pumpOwner(&setup, &events));
     try std.testing.expectEqual(free, events[0].request.request.index);
-    try std.testing.expectEqual(start + refill_ms, owner.inbound[held].eligible_ms);
+    try std.testing.expectEqual(start + refill_ms, owner.inbound[held].admission.eligible_ms);
     // The other identity was charged one start, so one of its two remains.
     try std.testing.expectEqual(.allowed, limiter.start(&other, false, start));
     try std.testing.expectEqual(start + refill_ms, limiter.startAt(&other, false, start));
@@ -528,4 +528,39 @@ fn expectRateLimitResponse(setup: *harness.Pair, stream: @import("../types.zig")
         }
     }
     return error.TestUnexpectedResult;
+}
+
+test "reqresp request start hard capacity refusal preserves an available start without a waiter" {
+    for ([_]bool{ false, true }) |application_cap| {
+        var setup: harness.Pair = .{};
+        try setup.init(.{}, .{ .inbound_max = 1, .inbound_per_peer_max = if (application_cap) 8 else 1, .admission = limits(4) });
+        defer setup.deinit();
+        const owner = &setup.shared.server.reqresp;
+        if (application_cap) owner.options.inbound_application_per_peer_max = 1;
+        const now_ms = setup.shared.pair.now.mono_ms;
+        const held_stream = try setup.openRaw(.blocks_by_root_v2);
+        try setup.awaitRawSelection(held_stream, .blocks_by_root_v2);
+        const held_index: u16 = @intCast(Plan.first(setup.shared.handles.server.index, .blocks_by_root_v2));
+        const held = owner.inbound[held_index].request.handle(held_index);
+        try std.testing.expectEqual(@as(usize, 0), waitingStarts(owner));
+        var exchange: Exchange = .{ .setup = &setup };
+        const blobs = try std.testing.allocator.alloc(u8, Protocol.blob_sidecars_by_root_v1.info().response_max);
+        defer std.testing.allocator.free(blobs);
+        _ = try request(&setup, .blob_sidecars_by_root_v1, blobs);
+        try exchange.pumps(20);
+        try std.testing.expectEqual(@as(u64, 1), refusals(owner, .blob_sidecars_by_root_v1, .peer_capacity));
+        try std.testing.expectEqual(@as(?rr.Failure, .{ .negotiation_failed = .stream_closed }), exchange.client_failure);
+        try std.testing.expect(owner.cancel(held));
+        try exchange.pumps(10);
+        exchange.client_failure = null;
+        const blocks = try std.testing.allocator.alloc(u8, Protocol.blocks_by_root_v2.info().response_max);
+        defer std.testing.allocator.free(blocks);
+        _ = try request(&setup, .blocks_by_root_v2, blocks);
+        try exchange.pumps(20);
+        try std.testing.expectEqual(@as(usize, 1), exchange.delivered_len);
+        try std.testing.expectEqual(now_ms, exchange.delivered[0].at_ms);
+        try std.testing.expectEqual(now_ms, setup.shared.pair.now.mono_ms);
+        try std.testing.expectEqual(@as(usize, 0), waitingStarts(owner));
+        try std.testing.expectEqual(@as(?rr.Failure, null), exchange.client_failure);
+    }
 }

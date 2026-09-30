@@ -10,7 +10,6 @@ const StreamHandle = engine_mod.StreamHandle;
 const protocol = @import("protocol.zig");
 const Now = types.Now;
 const routing = @import("../router.zig");
-const AcceptError = reqresp.AcceptError;
 const RespondError = reqresp.RespondError;
 
 const ReqResp = reqresp.ReqResp;
@@ -34,13 +33,7 @@ pub const Server = struct {
     receive: @import("receive_plan.zig").Buffers = .{ .sink = &.{}, .scratch = &.{}, .read = &.{} },
     identity: @import("../wire/peer_id.zig").PeerId = undefined,
     execution: ?u16 = null,
-    charged_cost: u128 = 1,
-    admission_paid: u128 = 0,
-    eligible_ms: u64 = 0,
-    /// Accepted without its start charged; `promote` charges it once, before serving.
-    start_pending: bool = false,
-    /// Why a `.ready` slot was not admitted at its last attempt. `none` means it is due one.
-    admission_wait: enum { none, start, tokens, serving } = .none,
+    admission: @import("inbound_admission.zig").State = .{},
 
     pub fn complete(self: *Server, owner: *ReqResp, index: u16, event: Event, engine: ?*Engine) void {
         owner.complete(&self.request, index, event, .{ .phase_name = @tagName(self.state), .rejection = self.rejection, .result_code = self.pending_result });
@@ -78,7 +71,7 @@ pub const Server = struct {
         if (self.waitingHost()) return .waiting_host;
         return switch (self.state) {
             .receiving_request => .receiving_request,
-            .ready => if (self.start_pending) .waiting_start else .ready,
+            .ready => if (self.admission.start_pending) .waiting_start else .ready,
             .writing_chunk, .finishing => .writing_response,
             .serving => unreachable,
         };
@@ -179,19 +172,13 @@ pub const Server = struct {
                     &.{};
                 const inspected = owner.inspectRequest(request.protocol, payload, slot.request_fork) catch |err| {
                     if (err == error.MalformedSsz or err == error.InvalidRequest) request.peer_fault = .protocol;
-                    _ = takeAdmission(owner, engine, slot, 1, now);
+                    owner.admission.chargeRejected(owner, engine, slot, now);
                     Server.rejectRequest(owner, slot, index, err, now);
                     return;
                 };
                 request.chunks_max = inspected.chunks_max;
-                slot.charged_cost = inspected.charged_cost;
                 slot.progress_ms = now.mono_ms;
-                // A start deferred at accept keeps its due time.
-                slot.eligible_ms = @max(slot.eligible_ms, now.mono_ms);
-                if (slot.eligible_ms > now.mono_ms) {
-                    assert(slot.start_pending);
-                    slot.admission_wait = .start;
-                }
+                slot.admission.decoded(inspected.charged_cost, now.mono_ms);
                 slot.state = .ready;
                 return;
             }
@@ -199,30 +186,14 @@ pub const Server = struct {
         owner.markReady(.inbound, index);
     }
 
-    pub fn promote(self: *Server, owner: *ReqResp, index: u16, now: Now) bool {
+    pub fn admit(self: *Server, index: u16, lease: *const @import("inbound_admission.zig").Lease, now: Now) void {
         const request = &self.request;
-        if (!request.running() or self.state != .ready or now.mono_ms < self.eligible_ms) return false;
-        if (self.start_pending and !self.chargeStart(owner, index, now)) return false;
-        const execution = owner.serving.available(&self.identity, request.protocol.isControl()) orelse {
-            self.admission_wait = .serving;
-            return false;
-        };
-        const admission = &owner.admission;
-        const cost = admission.limiter.requestCost(request.protocol, self.charged_cost, self.request_fork);
-        if (self.admission_paid < cost) {
-            const granted = admission.limiter.grant(&self.identity, request.protocol, cost - self.admission_paid, self.request_fork, now.mono_ms);
-            self.admission_paid += granted;
-            if (self.admission_paid < cost) {
-                self.eligible_ms = admission.limiter.eligibleAt(&self.identity, request.protocol, 1, self.request_fork, now.mono_ms).?;
-                self.admission_wait = .tokens;
-                return false;
-            }
-        }
-        self.admission_wait = .none;
+        assert(request.running() and self.state == .ready);
+        assert(!self.admission.start_pending);
         const payload: []const u8 = if (request.io.decoding) request.io.decoder.payload() else &.{};
         request.io.decoding = false;
-        request.io.scratch = owner.serving.acquire(execution, request.handle(index), &self.identity, request.protocol.isControl());
-        self.execution = execution;
+        request.io.scratch = lease.scratch;
+        self.execution = lease.execution;
         self.state = .serving;
         self.progress_ms = now.mono_ms;
         request.queue(.{ .request = .{
@@ -231,22 +202,6 @@ pub const Server = struct {
             .protocol = request.protocol,
             .bytes = payload,
         } });
-        return true;
-    }
-
-    /// Charges the start deferred at accept once one is due and no `.ready` request of its class
-    /// on the connection has waited longer. Otherwise sets when to recheck; nothing is reserved.
-    fn chargeStart(self: *Server, owner: *ReqResp, index: u16, now: Now) bool {
-        const limiter = &owner.admission.limiter;
-        const control = self.request.protocol.isControl();
-        if (!owner.startQueued(index) and limiter.start(&self.identity, control, now.mono_ms) == .allowed) {
-            self.start_pending = false;
-            return true;
-        }
-        self.eligible_ms = limiter.startAt(&self.identity, control, now.mono_ms);
-        // A start due now goes to the longer waiter, so this one stays due an admission attempt.
-        self.admission_wait = if (self.eligible_ms > now.mono_ms) .start else .none;
-        return false;
     }
 
     fn rejectRequest(owner: *ReqResp, slot: *Server, index: u16, reason: Rejection, now: Now) void {
@@ -256,27 +211,13 @@ pub const Server = struct {
         owner.markReady(.inbound, index);
     }
 
-    fn takeAdmission(owner: *ReqResp, engine: *Engine, slot: *Server, cost: u128, now: Now) bool {
-        const request = &slot.request;
-        const identity = engine.peerId(request.conn) orelse return false;
-        const decision = owner.admission.limiter.take(&identity, request.protocol, cost, slot.request_fork, now.mono_ms);
-        if (decision == .allowed) return true;
-        owner.recordAdmissionRefusal(request.stream, request.protocol, switch (decision) {
-            .allowed => unreachable,
-            .peer_quota => .peer_quota,
-            .global_quota => .global_quota,
-            .identity_capacity => .identity_capacity,
-        }, cost);
-        return false;
-    }
-
     fn reject(slot: *Server, code: u8, message: []const u8, now: Now) void {
         const request = &slot.request;
         assert(message.len <= request.error_message.len);
         @memcpy(request.error_message[0..message.len], message);
         request.error_len = @intCast(message.len);
         request.io.decoding = false;
-        slot.start_pending = false;
+        slot.admission.rejected();
         slot.state = .serving;
         Server.queueChunk(
             slot,
@@ -387,72 +328,29 @@ pub const Server = struct {
         );
     }
 
-    pub fn accept(
+    /// The coordinator has checked all capacity and handoff bounds before charging the start.
+    pub fn acceptPrepared(
         owner: *ReqResp,
         engine: *Engine,
         stream: StreamHandle,
         ready: routing.Selection,
+        accepted: *const @import("inbound_admission.zig").Acceptance,
         now: Now,
-    ) AcceptError!RequestHandle {
-        try owner.attach(engine);
-        if (stream.conn.index >= owner.options.peers) return error.InvalidCapacity;
-        const identity = engine.peerId(stream.conn) orelse return error.StaleHandle;
-        if (ready.leftover.len > reqresp.read_buffer_length) return error.InvalidHandoff;
-        const which = switch (ready.protocol) {
-            .reqresp => |which| which,
-            else => return error.UnknownProtocol,
-        };
-        const bounds = owner.requestBounds(which);
-        if (owner.inboundCount(stream.conn, which) >= constants.MAX_CONCURRENT_REQUESTS) {
-            owner.recordAdmissionRefusal(stream, which, .protocol_concurrency, 0);
-            return error.ProtocolConcurrency;
-        }
-        const control = which.isControl();
-        const limiter = &owner.admission.limiter;
-        // A responder rate-limits by withholding its response, never by closing the stream, so a
-        // request past the starts limiter waits in `.ready` for its start. One arriving behind a
-        // request still owed its start waits too, uncharged, so it cannot take the refill that one
-        // awaits; it still needs a limiter row for its identity.
-        const start_due: ?u64 = if (owner.startsPending(stream.conn, control)) behind: {
-            if (!limiter.tracks(&identity, now.mono_ms)) {
-                owner.recordAdmissionRefusal(stream, which, .identity_capacity, 1);
-                return error.TooManyRequests;
-            }
-            break :behind limiter.startAt(&identity, control, now.mono_ms);
-        } else switch (limiter.start(&identity, control, now.mono_ms)) {
-            .allowed => null,
-            .identity_capacity => {
-                owner.recordAdmissionRefusal(stream, which, .identity_capacity, 1);
-                return error.TooManyRequests;
-            },
-            else => limiter.startAt(&identity, control, now.mono_ms),
-        };
-        if (owner.inboundCount(stream.conn, null) >= owner.options.inbound_per_peer_max) {
-            owner.recordAdmissionRefusal(stream, which, .peer_capacity, 0);
-            return error.PeerSlotsExhausted;
-        }
-        const available = owner.availableInbound(stream.conn, which);
-        if (!which.isControl() and owner.options.inbound_application_per_peer_max > 0 and
-            owner.inboundApplicationCount(stream.conn) >= owner.options.inbound_application_per_peer_max)
-        {
-            owner.recordAdmissionRefusal(stream, which, .peer_capacity, 0);
-            return error.PeerSlotsExhausted;
-        }
-        const index = available orelse {
-            owner.recordAdmissionRefusal(stream, which, .peer_capacity, 0);
-            return error.SlotsExhausted;
-        };
+    ) RequestHandle {
+        const index = accepted.index;
+        const which = accepted.protocol;
         const slot = &owner.inbound[index];
-        if (ready.leftover.len > slot.receive.read.len) return error.InvalidHandoff;
+        const bounds = &accepted.bounds;
         const request_sink = owner.inboundSink(index);
+        assert(slot.request.available());
+        assert(ready.leftover.len <= slot.receive.read.len);
         assert(request_sink.len >= bounds.request_max);
         slot.* = .{
             .receive = slot.receive,
-            .identity = identity,
+            .identity = accepted.identity,
             .request_fork = owner.request_fork,
             .progress_ms = now.mono_ms,
-            .eligible_ms = start_due orelse 0,
-            .start_pending = start_due != null,
+            .admission = accepted.state,
             .request = .{
                 .completion = .active,
                 .direction = .inbound,
@@ -482,7 +380,7 @@ pub const Server = struct {
         }
         owner.protocol_counters[@intFromEnum(which)].incoming +|= 1;
         std.log.scoped(.network_reqresp).debug("request_started direction=inbound request={d}:{d} connection={d}:{d} stream={d} method={s}", .{ index, slot.request.generation, stream.conn.index, stream.conn.generation, stream.id, @tagName(which) });
-        if (start_due) |due| std.log.scoped(.network_reqresp_errors).debug("request_start_wait request={d}:{d} connection={d}:{d} stream={d} method={s} due_in_ms={d}", .{ index, slot.request.generation, stream.conn.index, stream.conn.generation, stream.id, @tagName(which), due - now.mono_ms });
+        if (slot.admission.start_pending) std.log.scoped(.network_reqresp_errors).debug("request_start_wait request={d}:{d} connection={d}:{d} stream={d} method={s} due_in_ms={d}", .{ index, slot.request.generation, stream.conn.index, stream.conn.generation, stream.id, @tagName(which), slot.admission.eligible_ms - now.mono_ms });
         // A stream that is already gone fails on the slot's first read.
         engine.bindStream(stream, .{ .owner = .reqresp_inbound, .row = index }) catch {};
         owner.markReady(.inbound, index);

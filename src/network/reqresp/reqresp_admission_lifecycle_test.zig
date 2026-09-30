@@ -149,7 +149,7 @@ test "reqresp admission lifecycle control traffic preserves application quota fa
         defer owner.settleSlot(.inbound, @intCast(index));
         slot.identity = .{ .bytes = @splat(@as(u8, @intCast(peer + 1))) };
         slot.state = .ready;
-        slot.charged_cost = if (peer == 0) 4 else 1;
+        slot.admission.cost = if (peer == 0) 4 else 1;
         slot.progress_ms = setup.shared.pair.now.mono_ms;
         const conn: @import("../types.zig").Handle = .{ .index = @intCast(peer), .generation = std.math.maxInt(u32) };
         slot.request = .{
@@ -169,12 +169,12 @@ test "reqresp admission lifecycle control traffic preserves application quota fa
     const first = owner.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .application = &application_events, .control = &control_events });
     try std.testing.expectEqual(@as(usize, 0), first.application);
     try std.testing.expectEqual(@as(usize, 1), first.control);
-    try std.testing.expectEqual(@as(u128, 1), heavy.admission_paid);
+    try std.testing.expectEqual(@as(u128, 1), heavy.admission.paid);
     setup.shared.pair.advance(250);
     const second = owner.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .application = &application_events, .control = &control_events });
     try std.testing.expectEqual(@as(usize, 1), second.application);
     try std.testing.expectEqual(@as(u16, 1), application_events[0].request.peer.index);
-    try std.testing.expectEqual(@as(u128, 1), heavy.admission_paid);
+    try std.testing.expectEqual(@as(u128, 1), heavy.admission.paid);
 }
 
 test "reqresp admission lifecycle protocol buffers and all startup allocation failures" {
@@ -200,7 +200,7 @@ test "reqresp admission lifecycle a fresh burst starts full requests before spli
         defer owner.settleSlot(.inbound, @intCast(index));
         slot.identity = .{ .bytes = @splat(@as(u8, @intCast(peer + 1))) };
         slot.state = .ready;
-        slot.charged_cost = 4;
+        slot.admission.cost = 4;
         slot.progress_ms = setup.shared.pair.now.mono_ms;
         const conn: @import("../types.zig").Handle = .{ .index = @intCast(peer), .generation = std.math.maxInt(u32) };
         slot.request = .{

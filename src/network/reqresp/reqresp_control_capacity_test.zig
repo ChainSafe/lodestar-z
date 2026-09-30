@@ -24,7 +24,7 @@ test "reqresp blocked control writers leave other admitted identities able to se
         slot.request = .{ .direction = .inbound, .completion = .active, .generation = 1, .conn = conn, .protocol = .metadata_v1 };
         slot.identity = .{ .bytes = @splat(@as(u8, @intCast(index))) };
         slot.state = .ready;
-        try std.testing.expect(slot.promote(&requests, @intCast(index), now));
+        try std.testing.expectEqual(.admitted, requests.admission.promote(&requests, @intCast(index), now));
         const incoming = slot.deliver(true, now).?.request;
         try requests.respond(incoming.request, &metadata, null, now);
         try std.testing.expectEqual(@import("server.zig").State.writing_chunk, slot.state);
@@ -36,7 +36,7 @@ test "reqresp blocked control writers leave other admitted identities able to se
     repeated.request = .{ .direction = .inbound, .completion = .active, .generation = 1, .conn = .{ .index = 0, .generation = 1 }, .protocol = .ping_v1 };
     repeated.identity = requests.inbound[0].identity;
     repeated.state = .ready;
-    try std.testing.expect(!repeated.promote(&requests, 200, now));
+    try std.testing.expectEqual(.waiting, requests.admission.promote(&requests, 200, now));
 }
 
 test "reqresp decoder captures configured root byte bounds before reading a body" {

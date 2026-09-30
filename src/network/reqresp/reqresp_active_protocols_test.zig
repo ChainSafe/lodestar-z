@@ -419,7 +419,7 @@ fn waitExchange(setup: *harness.Pair, which: protocol.Protocol, bytes: []const u
         try std.testing.expectEqual(@as(usize, 0), setup.clientEvents().len);
         try std.testing.expectEqual(@as(usize, 0), setup.serverEvents().len);
         for (setup.shared.server.reqresp.inbound) |*slot| {
-            if (slot.request.running() and slot.state == .ready and slot.eligible_ms > setup.shared.pair.now.mono_ms) {
+            if (slot.request.running() and slot.state == .ready and slot.admission.eligible_ms > setup.shared.pair.now.mono_ms) {
                 waiting = true;
             }
         }
