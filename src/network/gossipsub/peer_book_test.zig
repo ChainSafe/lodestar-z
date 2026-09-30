@@ -189,3 +189,91 @@ test "gossip score snapshots follow population migration and identity reuse with
     try std.testing.expect(fresh.generation > first.generation);
     try std.testing.expectEqual(@as(f64, 0), book.snapshot(fresh, 13));
 }
+
+test "gossip reconnect resets positive scores and retains nonpositive evidence without first delivery credit" {
+    const topics_cap = @import("constants.zig").topics_cap;
+    const TopicCounters = @import("score.zig").TopicCounters;
+    for ([_]u8{ 7, 6, 5 }) |credits| {
+        var book = try PeerBook.init(std.testing.allocator, &.{
+            .retained_capacity = 2,
+            .retained_outbound_reserve = 0,
+            .retained_score_ms = 100,
+            .score_params = .{
+                .behaviour_weight = -1,
+                .behaviour_threshold = 0,
+                .behaviour_decay = 0.5,
+                .decay_interval_ms = 10,
+                .topic = .{
+                    .time_in_mesh_weight = 0,
+                    .mesh_delivery_threshold = 2,
+                    .mesh_delivery_activation_ms = 0,
+                    .mesh_delivery_decay = 0.5,
+                    .mesh_failure_decay = 0.5,
+                    .invalid_weight = -4,
+                    .invalid_decay = 0.5,
+                },
+            },
+        });
+        defer book.deinit(std.testing.allocator);
+        const metadata: Metadata = .{ .identity = .{ .bytes = @splat(1) }, .address = .unspecified, .direction = .inbound };
+        const first = book.admit(.{ .index = 0, .generation = 1 }, &metadata, 0).admitted.peer;
+        book.scores.graft(first.index, 0, 0);
+        book.scores.creditMesh(first.index, 0);
+        book.scores.prune(first.index, 0, 1);
+        for (1..credits) |_| book.scores.deliverEligible(first.index, 0, false);
+        book.scores.deliverEligible(first.index, topics_cap - 1, false);
+        book.invalid(first, 0);
+        book.scores.penalize(first.index, 1);
+        book.addBackoff(first, 0, 1, 1, 50);
+        book.retain(first);
+        defer book.release(first);
+        try std.testing.expectEqual(@as(f64, @floatFromInt(credits)) - 6, book.score(first, 1));
+        const revision = book.scores.revision;
+        book.disconnect(first, 2);
+        try std.testing.expect(book.scores.revision > revision);
+        try std.testing.expect(!book.scores.rows[first.index].connected);
+        const expected: f64 = if (credits > 6) 0 else -6;
+        try std.testing.expectEqual(expected, book.snapshot(first, 2));
+        const base = @as(usize, first.index) * topics_cap;
+        const counters: TopicCounters = if (credits > 6) .{} else .{ .mesh_deliveries = 1, .mesh_failures = 1, .invalid = 1 };
+        try std.testing.expectEqualDeep(counters, book.scores.topics[base]);
+        try std.testing.expectEqualDeep(TopicCounters{}, book.scores.topics[base + topics_cap - 1]);
+        try std.testing.expectEqual(@as(f64, if (credits > 6) 0 else 1), book.scores.rows[first.index].behaviour);
+        book.refresh(20);
+        try std.testing.expectEqual(expected, book.score(first, 20));
+        book.scores.deliverEligible(first.index, 0, false);
+        book.scores.deliverEligible(first.index, topics_cap - 1, false);
+        try std.testing.expectEqual(expected + 2, book.score(first, 20));
+        const reconnected = book.admit(.{ .index = 0, .generation = 2 }, &metadata, 20).admitted;
+        try std.testing.expectEqual(first, reconnected.peer);
+        try std.testing.expect(!reconnected.fresh);
+        try std.testing.expect(book.backedOff(first, 0, 1, 20));
+        try std.testing.expectEqual(@as(u32, 1), book.rows[first.index].pins);
+        try std.testing.expectEqual(expected, book.score(first, 20));
+        book.refresh(30);
+        try std.testing.expectEqual(@as(f64, if (credits > 6) 0 else -1.75), book.score(first, 30));
+    }
+}
+
+test "gossip disconnect classifies score before removing IP contribution" {
+    var book = try PeerBook.init(std.testing.allocator, &.{
+        .retained_capacity = 2,
+        .retained_outbound_reserve = 0,
+        .score_params = .{ .ip_colocation_weight = -2, .ip_colocation_threshold = 1, .topic = .{ .invalid_weight = -1 } },
+    });
+    defer book.deinit(std.testing.allocator);
+    var metadata: Metadata = .{ .identity = .{ .bytes = @splat(1) }, .address = .{ .ip4 = .{ .octets = .{ 192, 0, 2, 1 }, .port = 1 } }, .direction = .inbound };
+    const first = book.admit(.{ .index = 0, .generation = 1 }, &metadata, 0).admitted.peer;
+    metadata.identity.bytes[0] = 2;
+    _ = book.admit(.{ .index = 1, .generation = 1 }, &metadata, 0).admitted;
+    book.scores.deliverEligible(first.index, 0, false);
+    book.scores.deliverEligible(first.index, 0, false);
+    book.invalid(first, 0);
+    try std.testing.expectEqual(@as(f64, -1), book.score(first, 1));
+    book.disconnect(first, 1);
+    try std.testing.expectEqual(@as(f64, -1), book.score(first, 1));
+    metadata.identity.bytes[0] = 1;
+    const reconnected = book.admit(.{ .index = 0, .generation = 2 }, &metadata, 2).admitted;
+    try std.testing.expectEqual(first, reconnected.peer);
+    try std.testing.expectEqual(@as(f64, -3), book.score(first, 2));
+}

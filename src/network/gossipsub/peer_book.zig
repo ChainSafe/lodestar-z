@@ -138,7 +138,7 @@ pub const PeerBook = struct {
         assert(self.matches(ref));
         const row = &self.rows[ref.index];
         assert(row.connection != null);
-        self.scores.setConnected(ref.index, false, now);
+        self.scores.disconnect(ref.index, now, self.scorePopulation(ref));
         self.removeIp(ref.index);
         row.connection = null;
         row.disconnected_at = now;

@@ -368,9 +368,38 @@ pub const PeerScore = struct {
         for (self.rows) |*row| row.dirty = true;
     }
 
+    /// Classify before removing mesh time or IP weight. Positive peers lose all score counters;
+    /// retained non-positive peers lose first-delivery credit and keep their mesh failure evidence.
+    pub fn disconnect(self: *PeerScore, peer: u16, now_ms: u64, ip_count: u16) void {
+        assert(peer < self.rows.len and self.rows[peer].connected);
+        self.refreshPeer(peer, now_ms);
+        if (self.score(peer, now_ms, ip_count) > 0) {
+            self.resetPeer(peer);
+        } else {
+            for (0..constants.topics_cap) |topic| {
+                const index: u16 = @intCast(topic);
+                if (self.load(peer, index).in_mesh) self.prune(peer, index, now_ms);
+                var next = self.load(peer, index);
+                if (next.first_deliveries == 0) continue;
+                next.first_deliveries = 0;
+                self.store(peer, index, next);
+            }
+        }
+        self.setConnected(peer, false, now_ms);
+    }
+
     pub fn setConnected(self: *PeerScore, peer: u16, connected: bool, now_ms: u64) void {
         assert(peer < self.rows.len);
         const row = &self.rows[peer];
+        // A validation completed offline must not carry first-delivery credit into a reconnect.
+        if (connected and !row.connected) {
+            for (0..constants.topics_cap) |topic| {
+                var next = self.load(peer, @intCast(topic));
+                if (next.first_deliveries == 0) continue;
+                next.first_deliveries = 0;
+                self.store(peer, @intCast(topic), next);
+            }
+        }
         self.refreshPeer(peer, now_ms);
         self.revision +|= 1;
         row.dirty = true;
@@ -587,7 +616,7 @@ test "gossip policy score rejects unsafe finite configuration" {
     try std.testing.expectError(error.InvalidLimits, testScores(std.testing.allocator, .{ .topic = .{ .weight = std.math.nan(f64) } }, peer_capacity));
 }
 
-test "gossip policy independent topic decay and frozen offline counters" {
+test "gossip policy independent topic decay and frozen offline penalties" {
     var score = try testScores(std.testing.allocator, .{ .decay_interval_ms = 10 }, peer_capacity);
     defer score.deinit(std.testing.allocator);
     try score.configureTopic(0, .{ .first_delivery_weight = 2, .first_delivery_decay = 0.5 });
@@ -597,12 +626,13 @@ test "gossip policy independent topic decay and frozen offline counters" {
     score.refresh(0);
     score.refresh(10);
     try std.testing.expectEqual(@as(f64, 2), score.score(0, 10, 0));
-    score.setConnected(0, false, 10);
+    score.invalid(0, 0);
+    score.disconnect(0, 10, 0);
     score.refresh(1000);
-    try std.testing.expectEqual(@as(f64, 2), score.score(0, 1000, 0));
+    try std.testing.expectEqual(@as(f64, -100), score.score(0, 1000, 0));
     score.setConnected(0, true, 1000);
     score.refresh(1010);
-    try std.testing.expectEqual(@as(f64, 0.75), score.score(0, 1010, 0));
+    try std.testing.expectApproxEqAbs(@as(f64, -81), score.score(0, 1010, 0), 0.000000001);
 }
 
 test "gossip policy score matches independent libp2p 17.1.1 two topic oracle" {
