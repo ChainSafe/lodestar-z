@@ -572,8 +572,8 @@ export interface IncomingRequest {
 export interface NativeHost {
   /**
    * Null requests control-only draining. Serving is current additional host capacity, excluding active work; ordinary
-   * is whether ordinary gossip can execute. A throw or an invalid value skips the turn's payload and retries; the
-   * third consecutive one terminates the process.
+   * is whether ordinary gossip can execute. A throw or an invalid value pauses payload delivery, reports the error,
+   * and retries while control and completions continue to drain.
    */
   capacity(): {ordinary: boolean; serving: number} | null;
   /**
