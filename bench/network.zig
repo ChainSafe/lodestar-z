@@ -504,7 +504,7 @@ fn idleTransport(init: std.process.Init) !void {
         try hub.receive(io, &result, @splat(true));
         hub.expire(result.now);
         _ = hub.collect(result.now, &events);
-        hub.flush(io, result.now, &result);
+        try hub.flush(io, result.now, &result);
         elapsed.* = timestamp(io) - start;
         received += result.datagrams_received;
         sent += result.datagrams_sent;

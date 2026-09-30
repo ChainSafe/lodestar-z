@@ -200,7 +200,11 @@ pub const Transport = struct {
         assert(self.batch_len == 0);
         var result = StepResult{ .now = now };
         var turn = schedule.Turn.init(self.work_limits.send_per_step_max);
-        const drained = self.burst(io, handle.index, handle, now, &turn, &result);
+        const drained = self.burst(io, handle.index, handle, now, &turn, &result) catch |err| {
+            self.engine.sent(handle.index, keyClock(io, now), false);
+            _ = self.engine.abandon(handle);
+            return err;
+        };
         const failure = self.submit(io, &result);
         self.engine.sent(handle.index, keyClock(io, now), drained);
         if (failure) |err| {
@@ -233,7 +237,9 @@ pub const Transport = struct {
         } else |err| failure = failure orelse err;
         self.expire(result.now);
         self.engine.collect(result.now);
-        self.flush(io, result.now, &result);
+        if (failure == null or failure.? != error.Canceled) self.flush(io, result.now, &result) catch |err| {
+            failure = err;
+        };
         // Events from this turn's sends, such as a close reached by sending CONNECTION_CLOSE, are
         // published with the rest.
         result.events = self.engine.pollEvents(events);
@@ -264,11 +270,17 @@ pub const Transport = struct {
     /// moves to the dirty tail, so busy connections share the budget round-robin. A failed
     /// datagram fails only its own connection; the rest of its batch is resubmitted. Temporary
     /// local pressure instead drops the unsent suffix for QUIC loss recovery.
-    pub fn flush(self: *Transport, io: std.Io, now: engine_mod.Now, result: *StepResult) void {
+    /// Cancellation stops production and submission, retains completed progress, and leaves
+    /// connection recovery state intact. It never identifies a failed destination.
+    pub fn flush(self: *Transport, io: std.Io, now: engine_mod.Now, result: *StepResult) std.Io.Cancelable!void {
         assert(self.batch_len == 0);
         var turn = schedule.Turn.init(self.work_limits.send_per_step_max);
         // The latest clock read that keyed a timer.
         var keyed = now;
+        defer {
+            result.backlog = self.engine.backlog();
+            self.engine.finishFlush(keyed);
+        }
         // Each visit either drains its connection or sends at least one datagram.
         const visits_max = self.engine.dirtyCount() + turn.send_max;
         for (0..visits_max) |_| {
@@ -278,13 +290,15 @@ pub const Transport = struct {
                 self.engine.sent(index, keyed, true);
                 continue;
             };
-            const drained = self.burst(io, index, owner, now, &turn, result);
+            const drained = self.burst(io, index, owner, now, &turn, result) catch |err| {
+                keyed = keyClock(io, keyed);
+                self.engine.sent(index, keyed, false);
+                return err;
+            };
             keyed = keyClock(io, keyed);
             self.engine.sent(index, keyed, drained);
         }
-        _ = self.submit(io, result);
-        result.backlog = self.engine.backlog();
-        self.engine.finishFlush(keyed);
+        if (self.submit(io, result)) |err| if (err == error.Canceled) return error.Canceled;
     }
 
     /// quiche reports the time left on its timer from its own clock read, so a timer key built on
@@ -299,10 +313,12 @@ pub const Transport = struct {
 
     /// Sends up to burst_per_connection datagrams of one connection into the shared batch.
     /// Returns whether quiche reported nothing left to send.
-    fn burst(self: *Transport, io: std.Io, index: u16, owner: types.Handle, now: engine_mod.Now, turn: *schedule.Turn, result: *StepResult) bool {
+    fn burst(self: *Transport, io: std.Io, index: u16, owner: types.Handle, now: engine_mod.Now, turn: *schedule.Turn, result: *StepResult) std.Io.Cancelable!bool {
         var count: u16 = 0;
         while (count < self.work_limits.burst_per_connection and turn.canSend()) : (count += 1) {
-            if (self.batch_len == constants.send_batch_max) _ = self.submit(io, result);
+            if (self.batch_len == constants.send_batch_max) {
+                if (self.submit(io, result)) |err| if (err == error.Canceled) return error.Canceled;
+            }
             const at = self.batch_len;
             const sent = self.engine.sendOne(index, now, &self.batch.buffers[at]) orelse return true;
             assert(sent.bytes.len <= constants.datagram_size_max);
@@ -315,7 +331,7 @@ pub const Transport = struct {
         return false;
     }
 
-    /// Returns the first fatal send failure, after failing its connection. QUIC already accounts
+    /// Returns cancellation immediately, or the first destination failure after failing its owner. QUIC already accounts
     /// for produced packets as sent: local pressure drops their bytes without rolling back packet
     /// state or closing connections, so loss timers can retransmit the frames.
     fn submit(self: *Transport, io: std.Io, result: *StepResult) ?udp_mod.SendError {
@@ -340,6 +356,7 @@ pub const Transport = struct {
                 for (self.batch.outgoing[begin..count]) |unsent| self.send_drops.add(reason, unsent.bytes.len);
                 break;
             }
+            if (err == error.Canceled) return error.Canceled;
             first = first orelse err;
             const owner = self.batch.owners[begin];
             if (self.engine.sendOwner(owner.index)) |current| if (std.meta.eql(current, owner)) {
@@ -375,7 +392,9 @@ pub const Transport = struct {
             switch (outcome) {
                 .accepted => result.datagrams_accepted += 1,
                 .version_negotiation, .retry => |bytes| {
-                    self.sendReply(io, admitted.from, bytes) catch {};
+                    self.sendReply(io, admitted.from, bytes) catch |err| {
+                        if (err == error.Canceled) return error.Canceled;
+                    };
                     if (outcome == .version_negotiation) result.version_negotiations += 1;
                 },
                 .dropped => result.datagrams_dropped += 1,

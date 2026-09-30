@@ -65,6 +65,9 @@ on handles bound by another provider return `IncompatibleProvider`. Kernel drop
 observation is independent of buffer sizing and remains optional. Buffer gauges
 report raw kernel values.
 
-Owner-driven discovery uses one family readiness mask through
+Transport flush can return `Canceled` after completed work. It preserves the
+accepted prefix and connection recovery state, discards unsent datagrams, and stops
+further submissions. Callers must consume completed progress before handling an
+operation failure. Owner-driven discovery uses one family readiness mask through
 a drain while still advancing timers and coordinator work when no family is ready.
 Standalone timed receives retain their cancellable wait contract.

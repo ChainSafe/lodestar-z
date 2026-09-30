@@ -2086,3 +2086,41 @@ test "core discovery sessions expire idle lookup contacts" {
     try std.testing.expectEqual(@as(usize, 2_048), config.session_capacity);
     try std.testing.expectEqual(@as(u64, 600_000), config.session_idle_timeout_ms);
 }
+
+test "core cancellation releases every selected dial without blaming unstarted peers" {
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{121}));
+    var node: runtime.NetworkCore = undefined;
+    var opts = options(&key);
+    opts.resolved.core.dial.concurrent_max = 3;
+    opts.resolved.limits.dialing_max = 3;
+    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
+    defer node.deinit(std.testing.io);
+    const now = try @import("transport.zig").currentTime(std.testing.io);
+    var peers: [3]t.PeerId = undefined;
+    for (&peers, 122..) |*peer, seed| {
+        const remote = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{@as(u8, @intCast(seed))}));
+        peer.* = t.PeerId.fromPublicKey(&remote.publicKey());
+        try node.connectUntil(peer, &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 19003 } }}, now, now.mono_ms + 30_000);
+    }
+    var faults: FaultIo = .{ .send = .{}, .send_failure = error.Canceled };
+    faults.init(std.testing.io);
+    defer faults.deinit();
+    const stopped = node.step(faults.io(), now, .{}, .deadlineOnly(now.mono_ms));
+    try std.testing.expectEqual(error.Canceled, stopped.failure.?);
+    try std.testing.expectEqual(@as(u8, 3), stopped.dial_deferred);
+    try std.testing.expectEqual(@as(u8, 0), stopped.dial_started);
+    try std.testing.expectEqual(@as(u8, 0), stopped.dial_failed);
+    try std.testing.expectEqual(@as(usize, 1), faults.send_calls);
+    try std.testing.expectEqual(@as(u16, 0), node.peer_manager.dialing.held.total);
+    try std.testing.expectEqual(@as(u16, 0), node.peer_manager.dialing.held.unstarted);
+    try std.testing.expectEqual(@as(u16, 0), node.transport.engine.registry.active_len);
+    node.peer_manager.dialing.expire(&node.peer_manager.catalog, &node.transport.engine, now.mono_ms + 10_001);
+    for (peers) |peer| {
+        const row = node.peer_manager.catalog.rowFor(node.peer_manager.catalog.find(&peer).?).?;
+        try std.testing.expect(row.attempt == null);
+        try std.testing.expectEqual(@as(u8, 0), row.intent.failures);
+        try std.testing.expectEqual(@as(u8, 0), row.intent.address_index);
+        try std.testing.expectEqual(@as(f64, 0), row.reputation.score);
+    }
+    try std.testing.expectEqual(@as(u64, 0), node.peer_manager.dialing.outcomes[@intFromEnum(t.DialOutcome.expired)]);
+}
