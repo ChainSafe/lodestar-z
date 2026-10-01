@@ -697,7 +697,7 @@ pub const NetworkCore = struct {
             },
             .closed => |*closed| {
                 const goodbye = if (pm.catalog.findConnection(closed.conn) != null)
-                    self.service.reqresp.closingGoodbye(quic, closed.conn, now)
+                    self.service.reqresp.closingGoodbye(quic, &self.service.router, closed.conn, now)
                 else
                     null;
                 const retired = pm.transportClosed(closed, goodbye, now) orelse return;

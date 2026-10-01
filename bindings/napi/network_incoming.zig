@@ -294,11 +294,6 @@ fn failure(reason: rr.Failure) !Failure {
         else => error.InvalidIncomingFailure,
     };
 }
-pub fn awaitingTerminal(owner: *rr.ReqResp, handle: rr.RequestHandle, err: anyerror) bool {
-    if (err != error.Busy or handle.direction != .inbound) return false;
-    const slot = owner.inboundSlot(handle) orelse return false;
-    return slot.request.terminalEvent() != null;
-}
 /// Whether the host awaits a close, an acknowledgement or a permission of the cell.
 fn awaited(cell: *const Cell) bool {
     return cell.closed_awaited or cell.response_awaited or cell.permission_awaited;
@@ -345,7 +340,7 @@ pub fn flags(runtime: *Runtime, now: n.Now) !bool {
             _ = core.cancel(cell.handle);
             continue;
         }
-        if (cell.permission_awaited and !cell.permission_ready and core.service.reqresp.reserveResponse(cell.handle)) {
+        if (cell.permission_awaited and !cell.permission_ready and core.service.reqresp.responseReadiness(cell.handle) == .ready) {
             table.reserveResponse(cell, cell.protocol.info().response_max) catch {
                 // A payload release wakes the owner to retry.
                 table.budget.waiting = true;
@@ -357,7 +352,7 @@ pub fn flags(runtime: *Runtime, now: n.Now) !bool {
         if (cell.state == .response_queued and submissions < 4) {
             submissions += 1;
             core.respond(cell.handle, cell.response, cell.context, now) catch |err| {
-                if (awaitingTerminal(&core.service.reqresp, cell.handle, err)) continue;
+                if (err == error.Terminal) continue;
                 cell.ack = .{ .rejected = try rejection(err) };
                 table.releaseResponse(cell);
                 cell.state = .serving;
@@ -371,7 +366,7 @@ pub fn flags(runtime: *Runtime, now: n.Now) !bool {
             },
             .fail => {
                 core.respondError(cell.handle, cell.error_status, cell.error_message[0..cell.error_len], now) catch |err| {
-                    if (awaitingTerminal(&core.service.reqresp, cell.handle, err)) continue;
+                    if (err == error.Terminal) continue;
                     return err;
                 };
                 cell.action = .submitted;

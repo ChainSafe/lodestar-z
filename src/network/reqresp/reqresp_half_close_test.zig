@@ -99,7 +99,7 @@ fn expectFailure(pair: *Pair, expected: rr.Failure) !void {
 }
 
 test "reqresp recovers only complete Goodbye bytes retained by a closed authenticated connection" {
-    for ([_]bool{ false, true }) |truncated| {
+    for ([_]bool{ false, true }) |truncated| for ([_]bool{ false, true }) |fin| {
         var pair: Pair = .{};
         const quotas = @import("admission_fixture.zig").quotas(100, 1000);
         try pair.init(.{}, .{ .admission = .{ .policy = @import("policy_fixture.zig").config(), .limits = .{ .identities = 2, .peer = quotas, .global = quotas } } });
@@ -112,16 +112,16 @@ test "reqresp recovers only complete Goodbye bytes retained by a closed authenti
         var wire: [128]u8 = undefined;
         const encoded = try codec.encodeRequest(&payload, &wire);
         const bytes = encoded[0 .. encoded.len - @intFromBool(truncated)];
-        try std.testing.expectEqual(bytes.len, try pair.shared.pair.client.write(pair.shared.client.reqresp.outbound[request.handle.index].request.stream, bytes, true));
+        try std.testing.expectEqual(bytes.len, try pair.shared.pair.client.write(pair.shared.client.reqresp.outbound[request.handle.index].request.stream, bytes, fin));
         try pair.shared.pair.pump();
         try std.testing.expect(pair.shared.pair.client.close(pair.shared.handles.client, 0));
         try pair.shared.pair.pump();
         try std.testing.expectEqual(.closed, pair.shared.pair.server.registry.slots[pair.shared.handles.server.index].state);
-        const result = pair.shared.server.reqresp.closingGoodbye(&pair.shared.pair.server, pair.shared.handles.server, pair.shared.pair.now);
+        const result = pair.shared.server.reqresp.closingGoodbye(&pair.shared.pair.server, &pair.shared.server.router, pair.shared.handles.server, pair.shared.pair.now);
         try std.testing.expectEqual(if (truncated) @as(?u64, null) else @as(?u64, 129), result);
-        try std.testing.expect(pair.shared.server.reqresp.closingGoodbye(&pair.shared.pair.server, pair.shared.handles.server, pair.shared.pair.now) == null);
+        try std.testing.expect(pair.shared.server.reqresp.closingGoodbye(&pair.shared.pair.server, &pair.shared.server.router, pair.shared.handles.server, pair.shared.pair.now) == null);
         pair.shared.server.reqresp.connectionClosed(pair.shared.handles.server);
-    }
+    };
 }
 
 test "reqresp response FIN stops complete written responses but do not hide an empty stopped response" {
@@ -445,4 +445,31 @@ test "reqresp FIN before the first chunk still completes Goodbye" {
         if (done) break;
     }
     try std.testing.expect(done);
+}
+
+test "reqresp closing Goodbye drains read-failure cleanup before returning outside pump" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const stream = try pair.openRaw(.goodbye_v1);
+    try pair.awaitRawSelection(stream, .goodbye_v1);
+    const owner = &pair.shared.server.reqresp;
+    var handle: ?rr.RequestHandle = null;
+    for (owner.inbound, 0..) |*slot, index| if (slot.request.running() and slot.request.protocol == .goodbye_v1) {
+        handle = slot.request.handle(@intCast(index));
+        break;
+    };
+    const active = handle orelse return error.RequestNotReceived;
+    pair.shared.pair.client.closeStream(stream, 77);
+    try pair.shared.pair.pump();
+    try std.testing.expect(owner.closingGoodbye(&pair.shared.pair.server, &pair.shared.server.router, pair.shared.handles.server, pair.shared.pair.now) == null);
+    const slot = &owner.inbound[active.index];
+    try std.testing.expectEqual(rr.Failure.stream_closed, slot.request.terminalEvent().?.failed.reason);
+    try std.testing.expectEqual(.closed, slot.request.stream_owner);
+    try std.testing.expectEqual(@as(u32, 0), owner.closing.len);
+    try std.testing.expect(slot.request.occupied());
+    try std.testing.expect(owner.closingGoodbye(&pair.shared.pair.server, &pair.shared.server.router, pair.shared.handles.server, pair.shared.pair.now) == null);
+    var output: [1]rr.Event = undefined;
+    try std.testing.expectEqual(@as(usize, 1), owner.pump(&pair.shared.pair.server, &pair.shared.server.router, pair.shared.pair.now, .{ .control = &output }).control);
+    try std.testing.expectEqual(rr.Failure.stream_closed, output[0].failed.reason);
 }

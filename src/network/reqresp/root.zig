@@ -15,6 +15,7 @@ pub const Options = reqresp.Options;
 pub const RequestOptions = reqresp.RequestOptions;
 pub const AbsoluteTimeouts = reqresp.AbsoluteTimeouts;
 pub const RequestPhase = reqresp.RequestPhase;
+pub const ResponseReadiness = reqresp.ResponseReadiness;
 pub const RequestHandle = reqresp.RequestHandle;
 pub const Event = reqresp.Event;
 pub const Outputs = reqresp.Outputs;

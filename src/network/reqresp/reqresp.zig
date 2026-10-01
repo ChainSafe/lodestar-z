@@ -1,3 +1,15 @@
+//! ReqResp host contract (all calls serialized by its owner):
+//! - request borrows immutable request bytes and an exclusive response sink until terminal delivery.
+//! - chunk borrows the sink until consume or terminal delivery; consume supplies current owner time.
+//! - an inbound request borrows its receive bytes through served/failed delivery. respond borrows
+//!   one immutable response through chunk_sent or terminal delivery; respondError copies its message.
+//! - readiness grants no reservation. The binding reserves bytes before producing the next response;
+//!   respond may still return Terminal while that terminal event awaits output capacity.
+//! - pending chunk/chunk_sent notifications precede the terminal. Terminal delivery ends borrows;
+//!   the following pump recycles native slots. Cleanup closes streams without ending either lifetime.
+//! - retainServing/releaseServing cover asynchronous host execution independently of stream lifetime.
+//! - cancel and connection events latch close intent. Raw callers drain cleanupPending before Router
+//!   work or buffer reuse; Service and pump provide their documented cleanup barriers.
 const std = @import("std");
 const codec = @import("codec.zig");
 const constants = @import("constants.zig");
@@ -162,7 +174,10 @@ pub const AcceptError = error{
     UnknownProtocol,
 };
 
+pub const ResponseReadiness = enum { ready, backpressured, terminal, stale };
+
 pub const RespondError = error{
+    Terminal,
     InvalidError,
     InvalidContext,
     StaleHandle,
@@ -482,6 +497,8 @@ pub const ReqResp = struct {
         self.settle(self.inboundId(handle.index));
     }
 
+    /// Queues FIN, or asks the current chunk writer to finish after its bytes. A pending
+    /// chunk_sent is delivered first. False includes an already finishing, terminal or stale slot.
     pub fn finish(self: *ReqResp, handle: RequestHandle, now: Now) bool {
         if (!Server.finish(self, handle, now)) return false;
         self.settle(self.inboundId(handle.index));
@@ -500,11 +517,12 @@ pub const ReqResp = struct {
         return true;
     }
 
-    /// Reserve one response turn before the host produces its next chunk.
-    pub fn reserveResponse(self: *ReqResp, handle: RequestHandle) bool {
-        if (handle.direction != .inbound) return false;
-        const slot = self.inboundSlot(handle) orelse return false;
-        return slot.reserveResponse();
+    /// A snapshot only: the host reserves its own bytes and respond rechecks this state.
+    /// Terminal means the slot still owes its terminal event; stale includes already delivered terminals.
+    pub fn responseReadiness(self: *ReqResp, handle: RequestHandle) ResponseReadiness {
+        if (handle.direction != .inbound) return .stale;
+        const slot = self.inboundSlot(handle) orelse return .stale;
+        return slot.responseReadiness();
     }
 
     /// Supply fresh owner time so host-held chunks cannot become remote timeout evidence.
@@ -525,32 +543,20 @@ pub const ReqResp = struct {
         return record.error_message[0..record.error_len];
     }
 
-    /// Read retained Goodbye bytes before the close event cancels streams and releases their sinks.
-    pub fn closingGoodbye(self: *ReqResp, engine: *Engine, conn: Handle, now: Now) ?u64 {
+    /// Recovers one complete Goodbye before the caller cancels the connection's requests.
+    /// Reads may latch failures, so the cleanup barrier runs even outside pump.
+    pub fn closingGoodbye(self: *ReqResp, engine: *Engine, router: *routing.Router, conn: Handle, now: Now) ?u64 {
         assert(now.mono_ms >= self.last_now_ms);
         self.last_now_ms = now.mono_ms;
+        defer self.cleanupPending(engine, router);
         if (conn.index >= self.options.peers) return null;
         const first = receive_plan.Plan.first(conn.index, .goodbye_v1);
         for (first..first + constants.MAX_CONCURRENT_REQUESTS) |position| {
             const index: u16 = @intCast(position);
             const slot = &self.inbound[index];
-            if (!slot.request.running() or slot.request.protocol != .goodbye_v1 or !std.meta.eql(slot.request.conn, conn)) continue;
+            if (!slot.request.running() or !std.meta.eql(slot.request.conn, conn)) continue;
             defer self.settle(self.inboundId(index));
-            if (slot.state != .receiving_request and slot.state != .ready and (slot.request.pendingEvent() == null or slot.request.pendingEvent().? != .request)) continue;
-            if (slot.state == .receiving_request and slot.request.pendingEvent() == null) Server.readRequest(self, engine, slot, index, now);
-            if (slot.request.running() and slot.state == .ready) {
-                const bytes = slot.request.io.decoder.payload();
-                assert(bytes.len == @import("consensus_types").phase0.Goodbye.fixed_size);
-                slot.state = .serving;
-                return std.mem.readInt(u64, bytes[0..8], .little);
-            }
-            if (slot.request.pendingEvent()) |event| if (event == .request) {
-                assert(event.request.bytes.len == 8);
-                slot.request.notification = .none;
-                slot.state = .serving;
-                return std.mem.readInt(u64, event.request.bytes[0..8], .little);
-            };
-            std.log.scoped(.network_reqresp_errors).debug("goodbye_incomplete_on_close request={d}:{d} connection={d}:{d} stream={d} buffered_bytes={d} decoded_bytes={d} decoder_phase={s} fin={any} detail={s}", .{ index, slot.request.generation, conn.index, conn.generation, slot.request.stream.id, slot.request.io.buffered_end - slot.request.io.buffered_start, if (slot.request.io.decoding) slot.request.io.decoder.written else 0, if (slot.request.io.decoding) @tagName(slot.request.io.decoder.phase) else "cleared", slot.request.io.fin_seen, slot.request.failure_detail });
+            if (slot.closingGoodbye(self, engine, index, now)) |code| return code;
         }
         return null;
     }
@@ -566,16 +572,14 @@ pub const ReqResp = struct {
             cursor = self.outbound[index].conn_link.next;
             const slot = &self.outbound[index];
             if (!slot.request.active() or !std.meta.eql(slot.request.conn, conn)) continue;
-            slot.fail(self, index, .connection_closed, null);
-            self.settle(index);
+            slot.fail(self, index, .connection_closed);
         }
         const first = receive_plan.Plan.first(conn.index, @enumFromInt(0));
         for (first..first + receive_plan.slots_per_peer) |position| {
             const index: u16 = @intCast(position);
             const slot = &self.inbound[index];
             if (!slot.request.active() or !std.meta.eql(slot.request.conn, conn)) continue;
-            slot.fail(self, index, .connection_closed, null);
-            self.settle(self.inboundId(index));
+            slot.fail(self, index, .connection_closed);
         }
     }
 
@@ -593,8 +597,7 @@ pub const ReqResp = struct {
             const index: u16 = @intCast(route.row);
             const slot = &self.inbound[index];
             if (slot.state != .writing_chunk and slot.state != .finishing) {
-                slot.fail(self, index, .stream_closed, null);
-                self.settle(id);
+                slot.fail(self, index, .stream_closed);
                 return;
             }
         }
@@ -617,7 +620,8 @@ pub const ReqResp = struct {
         kind: RequestState.PeerFault,
     };
 
-    /// Read each delivered terminal once, before the next pump recycles its slot.
+    /// Read each delivered terminal once, before the next pump recycles its slot. The identity
+    /// is captured at admission, independent of connection reuse; copy it if retaining the fact.
     pub fn peerFault(self: *const ReqResp, event: Event) ?PeerFault {
         const handle = switch (event) {
             .failed => |e| e.request,
@@ -768,6 +772,7 @@ pub const ReqResp = struct {
 
     pub fn complete(owner: *ReqResp, record: *RequestState, index: u16, event: Event, info: CompletionInfo) void {
         if (!record.terminate(event)) return;
+        owner.settleSlot(record.direction, index);
         const counts = &owner.protocol_counters[@intFromEnum(record.protocol)];
         const duration_ms = owner.last_now_ms -| record.started_ms;
         if (event == .served and info.result_code != constants.result_success) {
@@ -805,18 +810,18 @@ pub const ReqResp = struct {
         if (handle.direction == .outbound) {
             const slot = self.outboundSlot(handle) orelse return false;
             if (slot.request.terminalEvent() != null) return false;
-            slot.fail(self, handle.index, .cancelled, null);
-            self.settle(handle.index);
+            slot.fail(self, handle.index, .cancelled);
         } else {
             const slot = self.inboundSlot(handle) orelse return false;
             if (slot.request.terminalEvent() != null) return false;
-            slot.fail(self, handle.index, .cancelled, null);
-            self.settle(self.inboundId(handle.index));
+            slot.fail(self, handle.index, .cancelled);
         }
         return true;
     }
 
-    /// Issues the stream closes of the slots on `closing`.
+    /// Issues each latched stream close once, without delivering events or recycling slots.
+    /// Raw owners call this after cancellation/connection events and before pumping Router
+    /// or releasing request buffers. pump also drains it before and after protocol work.
     pub fn cleanupPending(self: *ReqResp, engine: *Engine, router: *routing.Router) void {
         var closed: usize = 0;
         while (self.closing.pop(self.links, "close")) |id| : (closed += 1) {
@@ -1029,8 +1034,12 @@ pub const ReqResp = struct {
     pub fn servingSlot(self: *ReqResp, handle: RequestHandle) RespondError!*Server {
         if (handle.direction != .inbound) return error.StaleHandle;
         const slot = self.inboundSlot(handle) orelse return error.StaleHandle;
-        if (!slot.request.running() or slot.request.waitingHost() or slot.state != .serving) return error.Busy;
-        return slot;
+        return switch (slot.responseReadiness()) {
+            .ready => slot,
+            .backpressured => error.Busy,
+            .terminal => error.Terminal,
+            .stale => unreachable,
+        };
     }
 
     pub fn outboundSlot(self: *ReqResp, handle: RequestHandle) ?*Client {
@@ -1149,5 +1158,6 @@ test {
     _ = @import("reqresp_request_start_test.zig");
     _ = @import("reqresp_service_test.zig");
     _ = @import("reqresp_terminal_test.zig");
+    _ = @import("reqresp_host_contract_test.zig");
     _ = @import("reqresp_test.zig");
 }

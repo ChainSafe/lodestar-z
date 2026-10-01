@@ -70,21 +70,20 @@ test "incoming submission recognizes a genuine native terminal awaiting output c
         if (handle != null) break;
     }
     const request = handle.?;
-    try std.testing.expect(!incoming.awaitingTerminal(&pair.shared.server.reqresp, request, error.Busy));
+    try std.testing.expectEqual(.ready, pair.shared.server.reqresp.responseReadiness(request));
     try std.testing.expect(pair.shared.server.reqresp.cancel(request));
     pair.server_event_capacity = 0;
     try pair.pumpOnce();
     try std.testing.expectEqual(@as(usize, 0), pair.serverEvents().len);
     const response = [_]u8{0} ** 4000;
-    try std.testing.expectError(error.Busy, pair.shared.server.reqresp.respond(request, &response, .{ .digest = rr.testing.deneb_digest, .fork = .deneb }, pair.shared.pair.now));
-    try std.testing.expect(incoming.awaitingTerminal(&pair.shared.server.reqresp, request, error.Busy));
+    try std.testing.expectError(error.Terminal, pair.shared.server.reqresp.respond(request, &response, .{ .digest = rr.testing.deneb_digest, .fork = .deneb }, pair.shared.pair.now));
+    try std.testing.expectEqual(.terminal, pair.shared.server.reqresp.responseReadiness(request));
     var stale = request;
     stale.generation += 1;
-    try std.testing.expect(!incoming.awaitingTerminal(&pair.shared.server.reqresp, stale, error.Busy));
+    try std.testing.expectEqual(.stale, pair.shared.server.reqresp.responseReadiness(stale));
     stale = request;
     stale.direction = .outbound;
-    try std.testing.expect(!incoming.awaitingTerminal(&pair.shared.server.reqresp, stale, error.Busy));
-    try std.testing.expect(!incoming.awaitingTerminal(&pair.shared.server.reqresp, request, error.StaleHandle));
+    try std.testing.expectEqual(.stale, pair.shared.server.reqresp.responseReadiness(stale));
     pair.server_event_capacity = 16;
     try pair.pumpOnce();
     var terminal = false;
