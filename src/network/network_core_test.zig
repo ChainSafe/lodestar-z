@@ -722,7 +722,7 @@ test "core discovery drain is nonblocking under the standalone default interval"
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const standalone: d.Transport.Options = .{};
-    try std.testing.expectEqual(standalone.poll_interval_ms, node.discovery.?.transport.config.poll_interval_ms);
+    try std.testing.expectEqual(standalone.poll_interval_ms, node.discovery.?.transport.poll_interval_ms);
     var faults: FaultIo = .{};
     const sender = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
     defer sender.close(std.testing.io);

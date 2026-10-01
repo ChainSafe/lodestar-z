@@ -122,6 +122,8 @@ jobs:
         run: |
           zig build test:discv5
           zig build test:discv5 -Doptimize=ReleaseSafe
+          zig build test:discv5_crawl_batch
+          zig build test:discv5_crawl_batch -Doptimize=ReleaseSafe
 
       - name: Run network tests
         run: |

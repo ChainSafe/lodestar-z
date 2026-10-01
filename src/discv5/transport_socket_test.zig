@@ -29,7 +29,7 @@ test "maintenance retains a routing incumbent that answers through Transport" {
     try std.testing.expectEqual(@as(u8, 1), answered.progress.standard_responses);
     const completed = try pair.transport_a.step(std.testing.io, &expired);
     try std.testing.expect(completed.event == .response);
-    try std.testing.expect(try controller.onEvent(&pair.transport_a.engine, &completed.event, completed.now_ms));
+    try std.testing.expect(controller.onEvent(&pair.transport_a.engine, &completed.event, completed.now_ms).consumed);
     try std.testing.expectEqual(@as(usize, 0), pair.transport_a.engine.routing.pendingCount());
     try std.testing.expect(pair.transport_a.engine.routing.contains(&pair.record_b.node_id));
     try std.testing.expect(!pair.transport_a.engine.routing.contains(&pair.candidate_id));
@@ -200,7 +200,7 @@ test "transport fails a call whose handshake is not sent so maintenance keeps th
         try std.testing.expect(unsent.event == .failed);
         try std.testing.expectEqual(started.call.handle, unsent.event.failed.handle);
         try std.testing.expectEqual(@as(usize, 0), pair.transport_a.engine.calls.count());
-        try std.testing.expect(try controller.onEvent(&pair.transport_a.engine, &unsent.event, unsent.now_ms));
+        try std.testing.expect(controller.onEvent(&pair.transport_a.engine, &unsent.event, unsent.now_ms).consumed);
         try std.testing.expect(pair.transport_a.engine.routing.contains(&pair.record_b.node_id));
         try std.testing.expect(!pair.transport_a.engine.routing.contains(&pair.candidate_id));
         try std.testing.expectEqual(@as(usize, 1), pair.transport_a.engine.routing.pendingCount());

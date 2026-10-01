@@ -113,7 +113,7 @@ fn initEngine() !Engine {
     const key = try test_support.keyPair(1);
     const local_record = try record(1, 1);
     var core: Engine = undefined;
-    try core.initWithConfig(std.testing.allocator, key, local_record, test_support.engineConfig());
+    try core.init(std.testing.allocator, key, local_record, test_support.engineConfig());
     return core;
 }
 
@@ -163,7 +163,7 @@ fn observeResponse(
 ) !bool {
     const remote_key = try test_support.keyPair(2);
     var remote: Engine = undefined;
-    try remote.initWithConfig(
+    try remote.init(
         std.testing.allocator,
         remote_key,
         remote_record.*,
@@ -190,7 +190,11 @@ fn observeResponse(
         &scratch,
     );
     try std.testing.expect(outcome == .accepted);
-    return controller.onEvent(core, &outcome.accepted.event, now_ms);
+    const consumed = controller.onEvent(core, &outcome.accepted.event, now_ms);
+    if (consumed.consumed and outcome.accepted.event.response.matched.terminal) {
+        try std.testing.expectEqual(remote_record.node_id, consumed.responder.?.node_id);
+    } else try std.testing.expect(consumed.responder == null);
+    return consumed.consumed;
 }
 
 test "maintenance ENR refresh rejects an advertised endpoint that did not authenticate" {
@@ -288,14 +292,14 @@ test "maintenance preserves unrelated events and does not monopolize a busy peer
         .peer = target.peer,
         .reason = error.SessionRequired,
     } };
-    try std.testing.expect(!try controller.onEvent(&core, &unrelated_event, 21));
+    try std.testing.expect(!controller.onEvent(&core, &unrelated_event, 21).consumed);
     try std.testing.expect(core.cancelCall(unrelated.handle));
     const owned_event = Engine.Event{ .failed = .{
         .handle = started.call.handle,
         .peer = started.peer,
         .reason = error.SessionRequired,
     } };
-    try std.testing.expect(try controller.onEvent(&core, &owned_event, 21));
+    try std.testing.expect(controller.onEvent(&core, &owned_event, 21).consumed);
     try std.testing.expectEqual(@as(usize, 2), core.peerCount());
 }
 
@@ -304,7 +308,7 @@ test "maintenance backs off on shared call capacity without dropping a live oper
     var core: Engine = undefined;
     var config = test_support.engineConfig();
     config.call_capacity = 1;
-    try core.initWithConfig(std.testing.allocator, key, try record(1, 1), config);
+    try core.init(std.testing.allocator, key, try record(1, 1), config);
     defer core.deinit(std.testing.allocator);
     for (2..4) |seed| {
         const remote = try record(@intCast(seed), 1);

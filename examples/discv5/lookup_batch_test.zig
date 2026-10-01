@@ -1,20 +1,17 @@
 const std = @import("std");
-const endpoint = test_support.endpoint;
-const keyPair = test_support.keyPair;
-const installSession = test_support.installSession;
+const discv5 = @import("discv5");
 const net = std.Io.net;
-const CallTable = @import("CallTable.zig");
-const Transport = @import("Transport.zig");
-const Engine = @import("Engine.zig");
-const Lookup = @import("Lookup.zig");
-const RoutingTable = @import("RoutingTable.zig");
+const CallTable = discv5.CallTable;
+const Transport = discv5.Transport;
+const Engine = discv5.Engine;
+const Lookup = discv5.Lookup;
+const RoutingTable = discv5.RoutingTable;
 const Sockets = @import("udp").Sockets;
-const enr = @import("identity/enr.zig");
+const enr = discv5.identity.enr;
 const lookup_batch = @import("lookup_batch.zig");
-const message = @import("wire/message.zig");
-const packet = @import("wire/packet.zig");
-const test_support = @import("test_support.zig");
-const types = @import("types.zig");
+const message = discv5.wire.message;
+const packet = discv5.wire.packet;
+const types = discv5.types;
 
 test "lookup batch rotates priority under one-call contention" {
     var network: Network = undefined;
@@ -46,7 +43,7 @@ test "lookup batch rotates priority under one-call contention" {
         const expected_owner = operations[round % 2];
         try std.testing.expectEqual(@as(usize, 1), expected_owner.waitingCount());
         try std.testing.expectEqual(@as(usize, 0), operations[(round + 1) % 2].waitingCount());
-        try expected_owner.onFailure(&network.transport.engine, waitingCall(expected_owner));
+        try std.testing.expect(expected_owner.onFailure(&network.transport.engine, waitingCall(expected_owner)));
     }
     try std.testing.expectEqual(@as(usize, 0), network.transport.engine.calls.count());
 }
@@ -79,7 +76,7 @@ test "lookup batch preserves response and unrelated expiry after refill failure"
         &buffer,
         request_id,
         try Transport.monotonicMilliseconds(std.testing.io),
-        &test_support.sealEntropy(1),
+        &sealEntropy(1),
     )).?;
     network.transport.engine.calls.next_generations[2] = std.math.maxInt(u64);
     try network.sendNodes(seeds[0].peer.node_id, request_id);
@@ -118,7 +115,7 @@ test "lookup batch consumes expiry before reporting a transport fault" {
         &buffer,
         try message.RequestId.init(&.{1}),
         0,
-        &test_support.sealEntropy(1),
+        &sealEntropy(1),
     )).?;
     const Fault = struct {
         fn receive(_: ?*anyopaque, _: *std.Io.Batch, _: std.Io.Timeout) std.Io.Batch.AwaitConcurrentError!void {
@@ -128,7 +125,7 @@ test "lookup batch consumes expiry before reporting a transport fault" {
     var vtable = std.testing.io.vtable.*;
     vtable.batchAwaitConcurrent = Fault.receive;
     const failed_io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
-    try network.remote.sendTo(std.testing.io, @import("types.zig").Address.fromNetwork(network.transport.sockets.primary().address), &.{0xff}, @import("wire/constants.zig").packet_size_max);
+    try network.remote.sendTo(std.testing.io, discv5.types.Address.fromNetwork(network.transport.sockets.primary().address), &.{0xff}, discv5.wire.constants.packet_size_max);
     var expired: [1]CallTable.Expired = undefined;
     var cursor = lookup_batch.Cursor{};
 
@@ -164,7 +161,7 @@ test "lookup batch consumes only owned failed-call events" {
         var buffer: [1_280]u8 = undefined;
         const now_ms = try Transport.monotonicMilliseconds(std.testing.io);
         const request_id = try message.RequestId.init(&.{@intCast(round)});
-        const entropy = test_support.sealEntropy(@intCast(round));
+        const entropy = sealEntropy(@intCast(round));
         const started = if (round == 0) (try operation.startNext(
             &network.transport.engine,
             &buffer,
@@ -215,8 +212,8 @@ const Network = struct {
         errdefer self.transport.sockets.close(std.testing.io);
         self.remote = try Sockets.bind(std.testing.io, .single(loopback));
         errdefer self.remote.close(std.testing.io);
-        const key = try test_support.keyPair(0x11);
-        const record = try enr.Record.create(&key, 1, @import("types.zig").Address.fromNetwork(self.transport.sockets.primary().address));
+        const key = try keyPair(0x11);
+        const record = try enr.Record.create(&key, 1, discv5.types.Address.fromNetwork(self.transport.sockets.primary().address));
         try self.transport.init(std.testing.allocator, self.transport.sockets, key, record, .{ .poll_interval_ms = 1, .engine = .{
             .session_capacity = 8,
             .challenge_capacity = 4,
@@ -235,12 +232,17 @@ const Network = struct {
     fn seed(self: *Network, id: u8) RoutingTable.Entry {
         const peer = types.Endpoint{
             .node_id = [_]u8{id} ** 32,
-            .address = @import("types.zig").Address.fromNetwork(self.remote.primary().address),
+            .address = discv5.types.Address.fromNetwork(self.remote.primary().address),
         };
-        test_support.installSession(&self.transport.engine, peer, 0x55);
+        installSession(&self.transport.engine, peer, 0x55);
+        var record = std.mem.zeroes(enr.Record);
+        record.node_id = peer.node_id;
+        record.sequence = 1;
+        record.ip4 = peer.address.ip4.octets;
+        record.udp = peer.address.ip4.port;
         return .{
             .peer = peer,
-            .record = test_support.fakeRecord(peer.node_id, peer.address, 1),
+            .record = record,
             .last_verified_ms = 0,
             .direction = .outgoing,
         };
@@ -264,7 +266,7 @@ const Network = struct {
                 .plaintext = try response.encode(&plaintext),
             },
         });
-        try self.remote.sendTo(std.testing.io, @import("types.zig").Address.fromNetwork(self.transport.sockets.primary().address), bytes, @import("wire/constants.zig").packet_size_max);
+        try self.remote.sendTo(std.testing.io, discv5.types.Address.fromNetwork(self.transport.sockets.primary().address), bytes, discv5.wire.constants.packet_size_max);
     }
 
     fn challenge(self: *Network, request: []const u8) !void {
@@ -279,7 +281,7 @@ const Network = struct {
             .id_nonce = &([_]u8{0x44} ** 16),
             .enr_sequence = 0,
         }, null);
-        try self.remote.sendTo(std.testing.io, @import("types.zig").Address.fromNetwork(self.transport.sockets.primary().address), bytes, @import("wire/constants.zig").packet_size_max);
+        try self.remote.sendTo(std.testing.io, discv5.types.Address.fromNetwork(self.transport.sockets.primary().address), bytes, discv5.wire.constants.packet_size_max);
     }
 };
 
@@ -340,11 +342,9 @@ test "transport completes a caller-owned lookup across multiple peers" {
     try std.testing.expectEqual(@as(usize, 0), network.transport_a.engine.calls.count());
     try std.testing.expect(network.transport_a.engine.routing.contains(&network.record_c.node_id));
 
-    var records: [Lookup.result_max]enr.Record = undefined;
-    const results = operation.results(&records);
-    try std.testing.expectEqual(@as(usize, 2), results.len);
-    try std.testing.expectEqual(network.record_c.node_id, results[0].node_id);
-    try std.testing.expectEqual(network.record_b.node_id, results[1].node_id);
+    try std.testing.expectEqualDeep(endpoint(&network.record_b), second.transport.event.response.peer);
+    try std.testing.expectEqualDeep(endpoint(&network.record_c), completed.transport.event.response.peer);
+    try std.testing.expectEqual(@as(u16, 2), operation.statistics().queries_started);
 }
 
 test "lookup expiry is consumed without hiding an unrelated call expiry" {
@@ -363,7 +363,7 @@ test "lookup expiry is consumed without hiding an unrelated call expiry" {
         &network.record_c,
         &request,
         0,
-        &test_support.sealEntropy(10),
+        &sealEntropy(10),
     );
     const caller_handle = caller.handle;
     var seed_buffer: [Lookup.result_max]RoutingTable.Entry = undefined;
@@ -378,15 +378,34 @@ test "lookup expiry is consumed without hiding an unrelated call expiry" {
         &output,
         try message.RequestId.init(&.{0x25}),
         0,
-        &test_support.sealEntropy(20),
+        &sealEntropy(20),
     )).?;
 
-    var host: test_support.ManualIo = .{ .now_ms = 1 };
+    const ExpiredIo = struct {
+        fn now(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+            return .{ .nanoseconds = std.time.ns_per_ms };
+        }
+        fn random(_: ?*anyopaque, bytes: []u8) std.Io.RandomSecureError!void {
+            @memset(bytes, 0x11);
+        }
+        fn receive(_: ?*anyopaque, _: *std.Io.Batch, _: std.Io.Timeout) std.Io.Batch.AwaitConcurrentError!void {
+            return error.Timeout;
+        }
+        fn cancel(_: ?*anyopaque, batch: *std.Io.Batch) void {
+            std.debug.assert(batch.pending.head == .none);
+        }
+    };
+    var vtable = std.Io.failing.vtable.*;
+    vtable.now = ExpiredIo.now;
+    vtable.randomSecure = ExpiredIo.random;
+    vtable.batchAwaitConcurrent = ExpiredIo.receive;
+    vtable.batchCancel = ExpiredIo.cancel;
+    const expired_io: std.Io = .{ .userdata = null, .vtable = &vtable };
     var cursor: lookup_batch.Cursor = .{};
     var expired: [4]CallTable.Expired = undefined;
     const result = try lookup_batch.step(
         &network.transport_a,
-        host.io(),
+        expired_io,
         &.{&operation},
         &cursor,
         &expired,
@@ -485,6 +504,7 @@ test "two caller-owned lookups share one transport" {
     var expired: [4]CallTable.Expired = undefined;
     var responses_b: usize = 0;
     var responses_c: usize = 0;
+    var responders: [2]u2 = @splat(0);
     for (0..32) |_| {
         if (operation_b.isFinished() and operation_c.isFinished()) break;
         const result = try lookup_batch.step(
@@ -495,11 +515,20 @@ test "two caller-owned lookups share one transport" {
             &expired,
         );
         try std.testing.expect(result.transport.event != .response or result.consumed != null);
-        if (result.consumed) |index| switch (index) {
-            0 => responses_b += 1,
-            1 => responses_c += 1,
-            else => return error.TestUnexpectedResult,
-        };
+        if (result.consumed) |index| {
+            const peer = result.transport.event.response.peer;
+            if (std.mem.eql(u8, &peer.node_id, &network.record_b.node_id)) {
+                responders[index] |= 1;
+            } else {
+                try std.testing.expectEqual(network.record_c.node_id, peer.node_id);
+                responders[index] |= 2;
+            }
+            switch (index) {
+                0 => responses_b += 1,
+                1 => responses_c += 1,
+                else => return error.TestUnexpectedResult,
+            }
+        }
         _ = try network.transport_b.step(std.testing.io, &expired);
         _ = try network.transport_c.step(std.testing.io, &expired);
     }
@@ -509,13 +538,7 @@ test "two caller-owned lookups share one transport" {
     try std.testing.expectEqual(@as(usize, 2), responses_c);
     try std.testing.expectEqual(@as(usize, 0), network.transport_a.engine.calls.count());
 
-    var records: [Lookup.result_max]enr.Record = undefined;
-    const results_b = operation_b.results(&records);
-    try std.testing.expectEqual(@as(usize, 2), results_b.len);
-    try std.testing.expectEqual(network.record_b.node_id, results_b[0].node_id);
-    const results_c = operation_c.results(&records);
-    try std.testing.expectEqual(@as(usize, 2), results_c.len);
-    try std.testing.expectEqual(network.record_c.node_id, results_c[0].node_id);
+    try std.testing.expectEqual([_]u2{ 3, 3 }, responders);
 }
 
 const LookupNetwork = struct {
@@ -573,3 +596,26 @@ const LookupNetwork = struct {
         self.transport_a.deinit(std.testing.allocator, std.testing.io);
     }
 };
+
+fn keyPair(seed: u8) !discv5.identity.crypto.KeyPair {
+    return discv5.identity.crypto.keyPairFromSecret(&([_]u8{seed} ** 32));
+}
+
+fn endpoint(record: *const enr.Record) types.Endpoint {
+    return .{ .node_id = record.node_id, .address = record.endpoint().? };
+}
+
+fn installSession(core: *Engine, peer: types.Endpoint, key_byte: u8) void {
+    const key = [_]u8{key_byte} ** 16;
+    const active = discv5.SessionStore.Session{ .read_key = key, .write_key = key };
+    core.channel.sessions.install(peer, &active, 0);
+}
+
+fn sealEntropy(seed: u8) Engine.StartEntropy {
+    return .{
+        .masking_iv = [_]u8{seed} ** 16,
+        .nonce = [_]u8{seed +% 1} ** 12,
+        .nonce_tail = [_]u8{seed +% 2} ** 8,
+        .sessionless_key = [_]u8{seed +% 3} ** 16,
+    };
+}

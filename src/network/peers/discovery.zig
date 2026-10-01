@@ -292,10 +292,8 @@ pub const Discovery = struct {
             .rejected => |reason| self.datagram_rejections[@intFromEnum(reason)] +|= 1,
         }
         for (expiries) |expired| {
-            if (self.lookupForCall(expired.handle)) |lookup| {
-                lookup.onFailure(&self.transport.engine, expired.handle) catch unreachable;
-                result.expired += 1;
-            } else if (self.maintenance.onFailure(&self.transport.engine, expired.handle, progress.now_ms, .expired)) {
+            const lookup_expired = if (self.lookup) |*lookup| lookup.onFailure(&self.transport.engine, expired.handle) else false;
+            if (lookup_expired or self.maintenance.onFailure(&self.transport.engine, expired.handle, progress.now_ms, .expired)) {
                 result.expired += 1;
             } else result.unowned += 1;
         }
@@ -378,48 +376,27 @@ pub const Discovery = struct {
         if (started.failure) |err| if (err != error.DestinationUnreachable) return err;
     }
 
-    fn lookupForCall(self: *Discovery, handle: d.CallTable.Handle) ?*d.Lookup {
-        const lookup = if (self.lookup) |*active| active else return null;
-        return if (lookup.ownsCall(handle)) lookup else null;
-    }
-
     fn consumeEvent(self: *Discovery, progress: *const d.Transport.StepResult, out: []adapter.Candidate, result: *Result) void {
-        const handle = switch (progress.event) {
-            .response => |response| response.matched.handle,
-            .failed => |failed| failed.handle,
+        switch (progress.event) {
+            .response, .failed => {},
             else => return,
-        };
-        if (self.lookupForCall(handle)) |lookup| {
-            switch (progress.event) {
-                .response => |*response| {
-                    const known = lookup.knownRecord(handle).?.*;
-                    lookup.onResponse(&self.transport.engine, response, progress.now_ms) catch |err| {
-                        lookup.onFailure(&self.transport.engine, handle) catch unreachable;
-                        result.failure = result.failure orelse err;
-                        return;
-                    };
-                    if (response.matched.terminal) self.publishResponse(response, &known, progress.now_ms, out, result);
-                    self.publishReferrals(response, progress.now_ms, out, result);
-                },
-                .failed => lookup.onFailure(&self.transport.engine, handle) catch unreachable,
-                else => unreachable,
-            }
-            self.refill_due_ms = progress.now_ms;
-            return;
         }
-        const known: ?d.identity.enr.Record = if (self.maintenance.knownRecord(handle)) |record| record.* else null;
-        const consumed = self.maintenance.onEvent(&self.transport.engine, &progress.event, progress.now_ms) catch |err| {
-            _ = self.maintenance.onFailure(&self.transport.engine, handle, progress.now_ms, .local);
-            result.failure = result.failure orelse err;
-            return;
-        };
-        if (!consumed) {
+        var consumption: d.Engine.Event.Consumption = .{};
+        if (self.lookup) |*lookup| {
+            consumption = lookup.onEvent(&self.transport.engine, &progress.event, progress.now_ms) catch |err| {
+                result.failure = result.failure orelse err;
+                return;
+            };
+            if (consumption.consumed) self.refill_due_ms = progress.now_ms;
+        }
+        if (!consumption.consumed) consumption = self.maintenance.onEvent(&self.transport.engine, &progress.event, progress.now_ms);
+        if (!consumption.consumed) {
             result.unowned += 1;
             return;
         }
         if (progress.event == .response) {
             const response = &progress.event.response;
-            if (response.matched.terminal) if (known) |*record| self.publishResponse(response, record, progress.now_ms, out, result);
+            if (consumption.responder) |*record| self.publishResponse(response, record, progress.now_ms, out, result);
             self.publishReferrals(response, progress.now_ms, out, result);
         }
     }

@@ -164,7 +164,7 @@ test "engine derives challenge storage from quotas and lifetime within the confi
         .{ .config = .{ .challenge_capacity = 8 }, .expected = 8 },
     }) |case| {
         var engine: Engine = undefined;
-        try engine.initWithConfig(std.testing.allocator, key, record, case.config);
+        try engine.init(std.testing.allocator, key, record, case.config);
         defer engine.deinit(std.testing.allocator);
         try std.testing.expectEqual(case.expected, engine.channel.sessions.challenges.len);
     }
@@ -196,7 +196,7 @@ test "engine construction releases all allocations on partial failure" {
     const Construction = struct {
         fn run(allocator: std.mem.Allocator, local_key: *const crypto.KeyPair, local_record: *const enr.Record) !void {
             var engine: Engine = undefined;
-            try engine.initWithConfig(allocator, local_key.*, local_record.*, engineConfig());
+            try engine.init(allocator, local_key.*, local_record.*, engineConfig());
             defer engine.deinit(allocator);
         }
     };
@@ -227,9 +227,9 @@ const Pair = struct {
         const key_b = try keyPair(0x22);
         self.record_a = try enr.Record.create(&key_a, 1, self.address_a);
         self.record_b = try enr.Record.create(&key_b, 1, self.address_b);
-        try self.node_a.initWithConfig(std.testing.allocator, key_a, self.record_a, engineConfig());
+        try self.node_a.init(std.testing.allocator, key_a, self.record_a, engineConfig());
         errdefer self.node_a.deinit(std.testing.allocator);
-        try self.node_b.initWithConfig(std.testing.allocator, key_b, self.record_b, engineConfig());
+        try self.node_b.init(std.testing.allocator, key_b, self.record_b, engineConfig());
         self.scratch_a = .{};
         self.scratch_b = .{};
     }
@@ -561,7 +561,7 @@ test "engine rejects a local record owned by another key" {
     var invalid: TestEngine = undefined;
     try std.testing.expectError(
         Engine.InitError.InvalidLocalRecord,
-        invalid.initWithConfig(std.testing.allocator, key_a, record_b, .{}),
+        invalid.init(std.testing.allocator, key_a, record_b, .{}),
     );
 }
 
@@ -569,7 +569,7 @@ test "cold oversized requests fail before transmission" {
     const key = try keyPair(0x11);
     const local_record = try enr.Record.create(&key, 1, loopback(1, 9_001));
     var node: TestEngine = undefined;
-    try node.initWithConfig(std.testing.allocator, key, local_record, engineConfig());
+    try node.init(std.testing.allocator, key, local_record, engineConfig());
     defer node.deinit(std.testing.allocator);
     const remote_key = try keyPair(0x22);
     const remote_record = try enr.Record.create(&remote_key, 1, loopback(2, 9_002));
@@ -621,7 +621,7 @@ test "engine configuration rejects zero retention windows" {
     config.challenge_timeout_ms = 0;
     try std.testing.expectError(
         Engine.InitError.InvalidTimeout,
-        node.initWithConfig(std.testing.allocator, key, local_record, config),
+        node.init(std.testing.allocator, key, local_record, config),
     );
 }
 

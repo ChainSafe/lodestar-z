@@ -51,11 +51,6 @@ pub const Candidate = struct {
     attempted_families: u2 = 0,
 };
 
-pub const Confirmed = struct {
-    peer: types.Endpoint,
-    record: enr.Record,
-};
-
 /// The caller keeps context at a stable address until the lookup is cancelled or finished.
 pub const Filter = struct {
     context: *const anyopaque,
@@ -123,10 +118,6 @@ pub fn statistics(self: *const Lookup) Statistics {
     return .{ .queries_started = self.queries_started, .capacity_drops = self.capacity_drops };
 }
 
-pub fn ownsCall(self: *const Lookup, handle: CallTable.Handle) bool {
-    return self.waitingIndex(handle) != null;
-}
-
 /// Starts at most one call to the closest eligible unqueried candidate. Busy peers remain
 /// candidates for a later call, so a temporarily blocked lookup does not finish.
 pub fn startNext(
@@ -176,30 +167,31 @@ pub fn startNext(
     return .{ .call = started, .peer = candidate.peer };
 }
 
-pub fn knownRecord(
-    self: *const Lookup,
-    handle: CallTable.Handle,
-) ?*const enr.Record {
-    const index = self.waitingIndex(handle) orelse return null;
-    return &self.candidates[index].record;
-}
-
 /// Adds discovered records as candidates and, on the terminal fragment, confirms the responder
 /// in routing.
-pub fn onResponse(
+pub fn onEvent(
     self: *Lookup,
     core: *Engine,
-    response: *const Engine.AuthenticatedResponse,
+    event: *const Engine.Event,
     now_ms: u64,
-) Error!void {
+) Error!Engine.Event.Consumption {
+    const response = switch (event.*) {
+        .response => |*response| response,
+        .failed => |failed| return .{ .consumed = self.onFailure(core, failed.handle) },
+        else => return .{},
+    };
+    const index = self.waitingIndex(response.matched.handle) orelse return .{};
+    errdefer self.failCandidate(core, index, response.matched.handle);
     if (response.matched.response != .nodes) return Error.UnexpectedResponse;
-    const index = self.waitingIndex(response.matched.handle) orelse
-        return Error.UnknownQuery;
     if (!response.peer.eql(&self.candidates[index].peer))
         return Error.UnknownQuery;
+    const result = Engine.Event.Consumption{
+        .consumed = true,
+        .responder = if (response.matched.terminal) self.candidates[index].record else null,
+    };
     const source = response.peer.address;
     for (response.node_records) |*record| self.addDiscovered(record, source);
-    if (!response.matched.terminal) return;
+    if (!response.matched.terminal) return result;
 
     self.candidates[index].state = .succeeded;
     self.waiting_count -= 1;
@@ -208,15 +200,21 @@ pub fn onResponse(
         &candidate.peer,
         &candidate.record,
         now_ms,
-    ) catch return;
+    ) catch {};
+    return result;
 }
 
 pub fn onFailure(
     self: *Lookup,
     core: *Engine,
     handle: CallTable.Handle,
-) Error!void {
-    const index = self.waitingIndex(handle) orelse return Error.UnknownQuery;
+) bool {
+    const index = self.waitingIndex(handle) orelse return false;
+    self.failCandidate(core, index, handle);
+    return true;
+}
+
+fn failCandidate(self: *Lookup, core: *Engine, index: usize, handle: CallTable.Handle) void {
     _ = core.cancelCall(handle);
     const candidate = &self.candidates[index];
     candidate.state = .failed;
@@ -242,41 +240,6 @@ pub fn cancel(self: *Lookup, core: *Engine) void {
     };
     self.waiting_count = 0;
     self.finish_reason = .cancelled;
-}
-
-pub fn results(self: *const Lookup, out: []enr.Record) []enr.Record {
-    const bounded = out[0..@min(out.len, result_max)];
-    var length: usize = 0;
-    for (self.activeCandidates()) |*candidate| {
-        if (candidate.state != .succeeded or !self.matches(&candidate.record)) continue;
-        length = types.insertClosest(
-            enr.Record,
-            recordNodeId,
-            bounded,
-            length,
-            candidate.record,
-            &self.target,
-        );
-    }
-    return bounded[0..length];
-}
-
-/// Copies directly authenticated responders together with the exact endpoint used by the call.
-pub fn confirmedResults(self: *const Lookup, out: []Confirmed) []Confirmed {
-    const bounded = out[0..@min(out.len, result_max)];
-    var length: usize = 0;
-    for (self.activeCandidates()) |*candidate| {
-        if (candidate.state != .succeeded or !self.matches(&candidate.record)) continue;
-        length = types.insertClosest(
-            Confirmed,
-            confirmedNodeId,
-            bounded,
-            length,
-            .{ .peer = candidate.peer, .record = candidate.record },
-            &self.target,
-        );
-    }
-    return bounded[0..length];
 }
 
 fn addSeed(self: *Lookup, seed: *const RoutingTable.Entry) Error!void {
@@ -454,14 +417,6 @@ pub fn requestDistances(
     }
     std.debug.assert(count == result.len);
     return result;
-}
-
-fn confirmedNodeId(result: *const Confirmed) *const types.NodeId {
-    return &result.peer.node_id;
-}
-
-fn recordNodeId(record: *const enr.Record) *const types.NodeId {
-    return &record.node_id;
 }
 
 fn candidateNodeId(candidate: *const *const Candidate) *const types.NodeId {

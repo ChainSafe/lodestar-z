@@ -74,6 +74,13 @@ pub const Event = union(enum) {
     request: AuthenticatedRequest,
     response: AuthenticatedResponse,
     failed: Failed,
+
+    pub const Consumption = struct {
+        consumed: bool = false,
+        /// Copies the owner's known record before a terminal response releases its state.
+        /// The authenticated endpoint remains in the response event.
+        responder: ?enr.Record = null,
+    };
 };
 
 pub const Failed = struct {
@@ -125,7 +132,7 @@ channel: Channel,
 calls: CallTable,
 routing: RoutingTable,
 
-pub fn initWithConfig(
+pub fn init(
     self: *Engine,
     allocator: std.mem.Allocator,
     local_key: crypto.KeyPair,

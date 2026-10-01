@@ -1,9 +1,10 @@
 //! Advances a bounded batch of caller-owned lookups through Transport, one step at a time.
 
 const std = @import("std");
-const CallTable = @import("CallTable.zig");
-const Transport = @import("Transport.zig");
-const Lookup = @import("Lookup.zig");
+const discv5 = @import("discv5");
+const CallTable = discv5.CallTable;
+const Transport = discv5.Transport;
+const Lookup = discv5.Lookup;
 
 pub const operations_max: usize = CallTable.capacity_max / Lookup.parallelism;
 
@@ -115,11 +116,12 @@ fn consumeExpiries(
     result: *StepResult,
 ) void {
     var retained: usize = 0;
-    for (expired_calls[0..result.transport.calls_expired]) |item| {
-        if (owner(operations, item.handle)) |index| {
-            operations[index].onFailure(&transport.engine, item.handle) catch unreachable;
-            result.progress.failures += 1;
-            continue;
+    expiries: for (expired_calls[0..result.transport.calls_expired]) |item| {
+        for (operations) |operation| {
+            if (operation.onFailure(&transport.engine, item.handle)) {
+                result.progress.failures += 1;
+                continue :expiries;
+            }
         }
         expired_calls[retained] = item;
         retained += 1;
@@ -132,28 +134,17 @@ fn consumeEvent(
     operations: []const *Lookup,
     result: *StepResult,
 ) Lookup.Error!void {
-    switch (result.transport.event) {
-        .response => |response| {
-            const index = owner(operations, response.matched.handle) orelse return;
-            try operations[index].onResponse(&transport.engine, &response, result.transport.now_ms);
-            result.consumed = @intCast(index);
-            result.progress.responses += 1;
-        },
-        .failed => |failed| {
-            const index = owner(operations, failed.handle) orelse return;
-            try operations[index].onFailure(&transport.engine, failed.handle);
-            result.consumed = @intCast(index);
-            result.progress.failures += 1;
-        },
-        else => return,
-    }
-}
-
-fn owner(operations: []const *Lookup, handle: CallTable.Handle) ?usize {
     for (operations, 0..) |operation, index| {
-        if (operation.ownsCall(handle)) return index;
+        const consumed = try operation.onEvent(&transport.engine, &result.transport.event, result.transport.now_ms);
+        if (!consumed.consumed) continue;
+        result.consumed = @intCast(index);
+        switch (result.transport.event) {
+            .response => result.progress.responses += 1,
+            .failed => result.progress.failures += 1,
+            else => unreachable,
+        }
+        return;
     }
-    return null;
 }
 
 comptime {
