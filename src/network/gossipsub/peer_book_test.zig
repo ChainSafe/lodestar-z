@@ -1,5 +1,5 @@
 const Admission = @import("peer_book.zig").Admission;
-const Handle = @import("../quic/engine.zig").Handle;
+const Handle = @import("../quic/Engine.zig").Handle;
 const Metadata = @import("peer_book.zig").Metadata;
 const PeerBook = @import("peer_book.zig").PeerBook;
 const Ref = @import("peer_book.zig").Ref;

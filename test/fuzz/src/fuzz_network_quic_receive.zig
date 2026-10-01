@@ -2,7 +2,7 @@ const std = @import("std");
 const network = @import("network");
 const fixture = @import("network_fixture");
 const quic = network.quic;
-const Engine = quic.engine.Engine;
+const Engine = quic.Engine;
 var context: network.tls.context.Context = undefined;
 var engine: Engine = undefined;
 
@@ -21,7 +21,7 @@ pub export fn zig_fuzz_test(bytes: [*]const u8, len: usize) callconv(.c) void {
     if (len == 0 or len > network.constants.datagram_size_max) return;
     var datagram: [network.constants.datagram_size_max]u8 = undefined;
     var output: [datagram.len]u8 = undefined;
-    var events: [32]quic.engine.Event = undefined;
+    var events: [32]quic.Engine.Event = undefined;
     var now: network.Now = .{ .mono_ms = 0, .unix_s = fixture.unix_s };
     for (0..4) |i| {
         @memcpy(datagram[0..len], bytes[0..len]);
@@ -36,7 +36,7 @@ pub export fn zig_fuzz_test(bytes: [*]const u8, len: usize) callconv(.c) void {
         std.debug.assert(engine.registry.handshaking <= 2);
         std.debug.assert(engine.registry.routes.count <= 2 * engine.registry.active_len);
     }
-    for (engine.activeIndices()) |index| engine.failSend(index);
+    for (engine.registry.activeIndices()) |index| engine.failSend(index);
     _ = engine.pollEvents(&events);
     engine.releaseReported();
     std.debug.assert(engine.registry.active_len == 0 and engine.registry.handshaking == 0);

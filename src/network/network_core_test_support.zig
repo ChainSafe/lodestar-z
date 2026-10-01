@@ -7,7 +7,7 @@ const support = @import("test_support.zig");
 const configuration = @import("configuration.zig");
 const core_mod = @import("network_core.zig");
 const constants = @import("constants.zig");
-const engine_mod = @import("quic/engine.zig");
+const Engine = @import("quic/Engine.zig");
 const keys = @import("wire/keys.zig");
 const rr = @import("reqresp/root.zig");
 const t = @import("peers/types.zig");
@@ -16,9 +16,8 @@ const types = @import("types.zig");
 const Inbox = @import("gossipsub/test_support.zig").Inbox;
 
 const NetworkCore = core_mod.NetworkCore;
-const Engine = engine_mod.Engine;
-const Event = engine_mod.Event;
-const Now = engine_mod.Now;
+const Event = Engine.Event;
+const Now = Engine.Now;
 const net = std.Io.net;
 
 pub fn localState(overrides: t.LocalState) t.LocalState {
@@ -177,7 +176,7 @@ pub const Link = struct {
     }
 
     /// Dials the server from the client engine, outside the client's dialing policy.
-    pub fn dial(self: *Link) !engine_mod.Handle {
+    pub fn dial(self: *Link) !Engine.Handle {
         return self.client.dial(&support.server_address, self.server.tls.local_peer_id, self.now);
     }
 

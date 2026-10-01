@@ -3,13 +3,12 @@ const events = @import("events.zig");
 const codec = @import("codec.zig");
 const constants = @import("constants.zig");
 const RequestIO = @import("request_io.zig").RequestIO;
-const engine_mod = @import("../quic/engine.zig");
+const Engine = @import("../quic/Engine.zig");
 const routing = @import("../router.zig");
 const types = @import("../types.zig");
 
 const assert = std.debug.assert;
 const Event = events.Event;
-const Engine = engine_mod.Engine;
 
 /// Terminal delivery ends application borrows; the following pump recycles the slot.
 /// A queued response chunk survives termination until the host receives both events.
@@ -20,8 +19,8 @@ pub const RequestState = struct {
     close_code: ?u64 = null,
     direction: types.Direction = .outbound,
     generation: u32 = 0,
-    conn: engine_mod.Handle = undefined,
-    stream: engine_mod.StreamHandle = undefined,
+    conn: Engine.Handle = undefined,
+    stream: Engine.StreamHandle = undefined,
     protocol: @import("protocol.zig").Protocol = .status_v1,
     started_ms: u64 = 0,
     chunks: u32 = 0,

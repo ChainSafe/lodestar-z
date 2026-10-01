@@ -6,7 +6,7 @@ const Setup = @import("network_core_test_support.zig").Setup;
 const t = @import("peers/types.zig");
 const wire = @import("control_wire.zig");
 const rr = @import("reqresp/root.zig");
-const Engine = @import("quic/engine.zig");
+const Engine = @import("quic/Engine.zig");
 
 /// Hands peer control a reply the remote did not send, as the owner hands it a real one, and rekeys.
 fn reply(node: *@import("network_core.zig").NetworkCore, op: *const @import("control_protocol.zig").Operation, event: rr.Event, now: @import("types.zig").Now) void {

@@ -1,7 +1,7 @@
 const std = @import("std");
 const support = @import("../test_support.zig");
 const service = @import("../service.zig");
-const engine = @import("../quic/engine.zig");
+const Engine = @import("../quic/Engine.zig");
 const identify = @import("root.zig");
 
 fn options(agent: []const u8) !service.Options {
@@ -16,7 +16,7 @@ test "identify delivers retained completions before recycled lower slots" {
     defer router.deinit();
     var handler = try identify.Handler.init(std.testing.allocator, .{ .outbound_max = 4 }, &try @import("../service_test_support.zig").fixtureLocal(.{}));
     defer handler.deinit();
-    const conn: engine.Handle = .{ .index = 0, .generation = 1 };
+    const conn: Engine.Handle = .{ .index = 0, .generation = 1 };
     for (handler.outbound, 0..) |*slot, index| {
         const peer: @import("../peers/types.zig").PeerRef = .{ .index = @intCast(index), .generation = 1 };
         slot.* = .{ .stream = .{ .conn = conn, .id = index * 4, .slot = @intCast(index) }, .peer = peer, .phase = .terminal, .result = .{ .peer = peer, .conn = conn, .outcome = .{ .success = .{} } } };
@@ -53,7 +53,7 @@ test "identify service completes both directions with zero application output an
     try server.identify.start(&server.router, &pair.server, .{ .index = 0, .generation = 1 }, handles.server, pair.now);
     try std.testing.expectError(error.PeerLimit, client.identify.start(&client.router, &pair.client, .{ .index = 0, .generation = 1 }, handles.client, pair.now));
     for (0..32) |_| {
-        var events: [64]engine.Event = undefined;
+        var events: [64]Engine.Event = undefined;
         _ = client.process(&pair.client, pair.events(&pair.client, &events), pair.now, .{});
         try pair.pump();
         _ = server.process(&pair.server, pair.events(&pair.server, &events), pair.now, .{});
@@ -136,7 +136,7 @@ test "identify deadline includes stalled negotiation and retained completion doe
     try std.testing.expectEqual(@as(usize, 0), client.identify.pump(&client.router, &pair.client, pair.now, &results));
     try client.identify.start(&client.router, &pair.client, .{ .index = 0, .generation = 1 }, handles.client, pair.now);
     _ = pair.client.close(handles.client, 0);
-    var events: [64]engine.Event = undefined;
+    var events: [64]Engine.Event = undefined;
     _ = client.process(&pair.client, pair.events(&pair.client, &events), pair.now, .{ .identify = &results });
     // Engine emits close on its next service turn; shutdown also releases a negotiating stream.
     client.identify.shutdown(&client.router, &pair.client);
@@ -164,7 +164,7 @@ test "identify saturation leaves reserved Ping negotiation usable" {
     _ = try client.request(&pair.client, handles.client, .ping_v1, &ping, &sink, .{}, pair.now);
     var received = false;
     for (0..32) |_| {
-        var events: [64]engine.Event = undefined;
+        var events: [64]Engine.Event = undefined;
         var requests: [4]rr.Event = undefined;
         const cc = client.process(&pair.client, pair.events(&pair.client, &events), pair.now, .{ .control = &requests });
         for (requests[0..cc.control]) |event| if (event == .chunk) {

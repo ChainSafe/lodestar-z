@@ -1,7 +1,7 @@
 const gossip_test = @import("gossipsub/test_support.zig");
 const std = @import("std");
 const support = @import("test_support.zig");
-const engine = @import("quic/engine.zig");
+const Engine = @import("quic/Engine.zig");
 const rr = @import("reqresp/root.zig");
 const gs = @import("gossipsub/root.zig");
 const topic_mod = @import("gossipsub/topic.zig");
@@ -47,7 +47,7 @@ test "router composes simultaneous ping and meshsub on one connection" {
     try std.testing.expectEqual(len, try pair.client.write(stream, bytes[0..len], true));
     var pong = false;
     for (0..32) |_| {
-        var transport_events: [16]engine.Event = undefined;
+        var transport_events: [16]Engine.Event = undefined;
         var request_events: [16]rr.Event = undefined;
         const client_count = client.process(&pair.client, pair.events(&pair.client, &transport_events), pair.now, .{ .control = &request_events }).control;
         for (request_events[0..client_count]) |event| switch (event) {
@@ -99,7 +99,7 @@ test "router selects typed outbound protocol independently of offer indexes" {
             accepted = true;
         }
         try pair.pump();
-        var events: [16]engine.Event = undefined;
+        var events: [16]Engine.Event = undefined;
         server.transportEvents(&pair.server, pair.events(&pair.server, &events), pair.now);
         _ = pumpRouter(&server, &pair, &pair.server, pair.now, &out);
         try pair.pump();
@@ -123,11 +123,11 @@ test "router rejects unknown protocol and preserves one-byte fragmented handoff"
     const length = header.len + missing.len + ping.len;
     hello[length] = 42;
     var accepted = false;
-    var inbound: engine.StreamHandle = undefined;
+    var inbound: Engine.StreamHandle = undefined;
     for (hello[0 .. length + 1], 0..) |_, index| {
         try std.testing.expectEqual(@as(usize, 1), try pair.client.write(stream, hello[index..][0..1], index == length));
         try pair.pump();
-        var events: [16]engine.Event = undefined;
+        var events: [16]Engine.Event = undefined;
         router.transportEvents(&pair.server, pair.events(&pair.server, &events), pair.now);
         var out: [16]routing.Outcome = undefined;
         const count = pumpRouter(&router, &pair, &pair.server, pair.now, &out);
@@ -188,7 +188,7 @@ test "router accepted selection survives capability changes behind outcome press
     for (0..16) |_| {
         _ = pumpRouter(&client, &pair, &pair.client, pair.now, &.{});
         try pair.pump();
-        var events: [16]engine.Event = undefined;
+        var events: [16]Engine.Event = undefined;
         server.transportEvents(&pair.server, pair.events(&pair.server, &events), pair.now);
         _ = pumpRouter(&server, &pair, &pair.server, pair.now, &.{});
         try pair.pump();
@@ -231,7 +231,7 @@ test "router composed service handles native stream events past empty request ca
     var sink: [8]u8 = undefined;
     _ = try client.request(&pair.client, handles.client, .ping_v1, &ping, &sink, .{}, pair.now);
     var incoming: ?rr.RequestHandle = null;
-    var transport: [16]engine.Event = undefined;
+    var transport: [16]Engine.Event = undefined;
     var requests: [8]rr.Event = undefined;
     for (0..64) |_| {
         try pair.pump();
@@ -285,7 +285,7 @@ test "router gossip capacity refusal preserves reqresp and explicit host retry" 
     _ = try client.request(&pair.client, handles.client, .ping_v1, &ping, &sink, .{}, pair.now);
     var pong = false;
     for (0..64) |_| {
-        var transport: [16]engine.Event = undefined;
+        var transport: [16]Engine.Event = undefined;
         var requests: [16]rr.Event = undefined;
         try pair.pump();
         const count = client.process(&pair.client, pair.events(&pair.client, &transport), pair.now, .{ .control = &requests }).control;
@@ -379,7 +379,7 @@ test "router capabilities changes apply before inbound protocol selection" {
         const header = try multistream.encodeMessage(multistream.header, &bytes);
         try std.testing.expectEqual(header.len, try pair.client.write(stream, header, false));
         try pair.pump();
-        var events: [16]engine.Event = undefined;
+        var events: [16]Engine.Event = undefined;
         server.transportEvents(&pair.server, pair.events(&pair.server, &events), pair.now);
         _ = pumpRouter(&server, &pair, &pair.server, pair.now, &.{});
         _ = pumpRouter(&server, &pair, &pair.server, pair.now, &.{});
@@ -428,7 +428,7 @@ test "router capabilities enable a fallback after rejecting an earlier proposal"
     const hello = try dialer.initialWrite(&bytes);
     try std.testing.expectEqual(hello.len, try pair.client.write(stream, hello, false));
     try pair.pump();
-    var events: [16]engine.Event = undefined;
+    var events: [16]Engine.Event = undefined;
     server.transportEvents(&pair.server, pair.events(&pair.server, &events), pair.now);
     var out: [1]routing.Outcome = undefined;
     try std.testing.expectEqual(0, pumpRouter(&server, &pair, &pair.server, pair.now, &out));
@@ -480,7 +480,7 @@ test "router accepted selection survives capability changes while ACK is flow co
     @memcpy(bytes[hello.len..][0..payload.len], payload);
     try std.testing.expectEqual(hello.len + payload.len, try pair.client.write(stream, bytes[0 .. hello.len + payload.len], true));
     try pair.pump();
-    var event_storage: [16]engine.Event = undefined;
+    var event_storage: [16]Engine.Event = undefined;
     const events = pair.events(&pair.server, &event_storage);
     const inbound = try support.expectStreamOpened(events[0], handles.server);
     server.transportEvents(&pair.server, events, pair.now);
@@ -577,7 +577,7 @@ test "router capabilities activation preserves negotiated response context and c
     try std.testing.expectError(error.ProtocolDisabled, setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .blocks_by_root_v2, &bytes, sink, .{}, setup.shared.pair.now));
 }
 
-fn pumpRouter(router: *@import("router.zig").Router, pair: *support.Pair, transport: *engine.Engine, now: @import("types.zig").Now, outcomes: []@import("router.zig").Outcome) usize {
+fn pumpRouter(router: *@import("router.zig").Router, pair: *support.Pair, transport: *Engine, now: @import("types.zig").Now, outcomes: []@import("router.zig").Outcome) usize {
     pair.forward(transport, .{ .negotiator = &router.negotiator });
     return router.pump(transport, now, outcomes);
 }

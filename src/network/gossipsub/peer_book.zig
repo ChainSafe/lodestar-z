@@ -1,7 +1,7 @@
 const std = @import("std");
 const constants = @import("constants.zig");
 const types = @import("../types.zig");
-const Handle = @import("../quic/engine.zig").Handle;
+const Handle = @import("../quic/Engine.zig").Handle;
 const PeerId = @import("../wire/peer_id.zig").PeerId;
 const assert = std.debug.assert;
 

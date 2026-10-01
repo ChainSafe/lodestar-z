@@ -1,6 +1,6 @@
 const std = @import("std");
 const negotiate = @import("negotiate.zig");
-const engine_mod = @import("quic/engine.zig");
+const Engine = @import("quic/Engine.zig");
 const types = @import("types.zig");
 const reqresp = @import("reqresp/protocol.zig");
 const capability = @import("capabilities.zig");
@@ -14,7 +14,7 @@ pub const Protocol = @import("protocol.zig").Protocol;
 /// The selection echo is queued, not necessarily sent.
 pub const Selection = struct { protocol: Protocol, leftover: []const u8, fin: bool };
 pub const Outcome = struct {
-    stream: engine_mod.StreamHandle,
+    stream: Engine.StreamHandle,
     direction: types.Direction,
     owner: ?Kind,
     result: union(enum) { ready: Selection, rejected, failed: negotiate.Failure },
@@ -144,17 +144,17 @@ pub const Router = struct {
         return self.active_capabilities;
     }
 
-    pub fn cancel(self: *Router, engine: *engine_mod.Engine, stream: engine_mod.StreamHandle) void {
+    pub fn cancel(self: *Router, engine: *Engine, stream: Engine.StreamHandle) void {
         self.negotiator.cancel(engine, stream);
     }
 
     pub fn beginOutbound(
         self: *Router,
-        engine: *engine_mod.Engine,
-        conn: engine_mod.Handle,
+        engine: *Engine,
+        conn: Engine.Handle,
         protocol: Protocol,
         now: types.Now,
-    ) Error!engine_mod.StreamHandle {
+    ) Error!Engine.StreamHandle {
         if (!self.active_capabilities.request.contains(protocol)) return error.ProtocolDisabled;
         return self.negotiator.beginOutbound(engine, conn, &.{descriptor(protocol)}, now, .{
             .control = protocol == .reqresp and protocol.reqresp.isControl(),
@@ -163,30 +163,30 @@ pub const Router = struct {
 
     pub fn beginReqRespTimed(
         self: *Router,
-        engine: *engine_mod.Engine,
-        conn: engine_mod.Handle,
+        engine: *Engine,
+        conn: Engine.Handle,
         protocol: @import("reqresp/protocol.zig").Protocol,
         now: types.Now,
         timeout_ms: u64,
-    ) Error!engine_mod.StreamHandle {
+    ) Error!Engine.StreamHandle {
         if (!self.active_capabilities.request.contains(.{ .reqresp = protocol })) return error.ProtocolDisabled;
         return self.negotiator.beginOutbound(engine, conn, &.{descriptor(.{ .reqresp = protocol })}, now, .{ .control = protocol.isControl(), .timeout_ms = timeout_ms });
     }
 
     pub fn beginMeshsub(
         self: *Router,
-        engine: *engine_mod.Engine,
-        conn: engine_mod.Handle,
+        engine: *Engine,
+        conn: Engine.Handle,
         now: types.Now,
-    ) Error!engine_mod.StreamHandle {
+    ) Error!Engine.StreamHandle {
         if (self.meshsub_count == 0) return error.ProtocolDisabled;
         return self.negotiator.beginOutbound(engine, conn, self.meshsub_candidates[0..self.meshsub_count], now, .{});
     }
 
     pub fn transportEvents(
         self: *Router,
-        engine: *engine_mod.Engine,
-        events: []const engine_mod.Event,
+        engine: *Engine,
+        events: []const Engine.Event,
         now: types.Now,
     ) void {
         for (events) |event| switch (event) {
@@ -203,7 +203,7 @@ pub const Router = struct {
         };
     }
 
-    pub fn finishSelected(self: *Router, engine: *engine_mod.Engine, stream: engine_mod.StreamHandle, bytes: []const u8, now: types.Now) bool {
+    pub fn finishSelected(self: *Router, engine: *Engine, stream: Engine.StreamHandle, bytes: []const u8, now: types.Now) bool {
         return self.negotiator.finishSelected(engine, stream, bytes, now);
     }
 
@@ -216,7 +216,7 @@ pub const Router = struct {
         return self.negotiator.nextWakeup(now, outcome_capacity);
     }
 
-    pub fn pump(self: *Router, engine: *engine_mod.Engine, now: types.Now, out: []Outcome) usize {
+    pub fn pump(self: *Router, engine: *Engine, now: types.Now, out: []Outcome) usize {
         std.debug.assert(out.len <= outcomes_per_pump);
         const raw = self.raw_outcomes[0..out.len];
         const count = self.negotiator.pump(engine, now, self.supported[0..self.supported_count], raw);

@@ -1005,7 +1005,7 @@ test "core flushes a protocol reply in the turn that wrote it" {
     try spoke.init(std.testing.allocator, std.testing.io, .{ .host = &spoke_key, .bind = .{ .ip4 = .loopback(0) } });
     defer spoke.deinit(std.testing.io);
     const conn = try spoke.dialPeer(std.testing.io, node.transport.localAddress(), node.peerId());
-    var events: [32]@import("quic/engine.zig").Event = undefined;
+    var events: [32]@import("quic/Engine.zig").Event = undefined;
     var connected = false;
     for (0..400) |_| {
         const stepped = try core_test.step(&spoke, std.testing.io, &events, .{ .wait_max_ms = 1 });
@@ -1120,7 +1120,7 @@ test "core idle turns with pending negotiations are never due for reqresp or neg
     try spoke.init(std.testing.allocator, std.testing.io, .{ .host = &spoke_key, .bind = .{ .ip4 = .loopback(0) } });
     defer spoke.deinit(std.testing.io);
     _ = try spoke.dialPeer(std.testing.io, node.transport.localAddress(), node.peerId());
-    var events: [32]@import("quic/engine.zig").Event = undefined;
+    var events: [32]@import("quic/Engine.zig").Event = undefined;
     for (0..40) |_| {
         _ = try core_test.step(&spoke, std.testing.io, &events, .{ .wait_max_ms = 1 });
         _ = try stepAfter(&node, 1);

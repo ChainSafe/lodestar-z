@@ -1,12 +1,12 @@
 const std = @import("std");
 const support = @import("../test_support.zig");
 const service_mod = @import("../service.zig");
-const engine_mod = @import("../quic/engine.zig");
+const Engine = @import("../quic/Engine.zig");
 const identify = @import("root.zig");
 
 fn step(pair: *support.Pair, service: *service_mod.Service, server: bool, results: []identify.Result) usize {
     const engine = if (server) &pair.server else &pair.client;
-    var events: [64]engine_mod.Event = undefined;
+    var events: [64]Engine.Event = undefined;
     return service.process(engine, pair.events(engine, &events), pair.now, .{ .identify = results }).identify;
 }
 
@@ -112,7 +112,7 @@ test "identify inbound timeout closes only withheld writer and shutdown releases
         try pair.pump();
         _ = step(&pair, &server, true, &.{});
         try pair.pump();
-        var events: [64]engine_mod.Event = undefined;
+        var events: [64]Engine.Event = undefined;
         const received = pair.events(&pair.client, &events);
         for (received) |event| if (event == .stream_closed and std.meta.eql(event.stream_closed.stream, duplicate)) {
             refused = true;

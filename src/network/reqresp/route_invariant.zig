@@ -1,5 +1,5 @@
 const std = @import("std");
-const Engine = @import("../quic/engine.zig").Engine;
+const Engine = @import("../quic/Engine.zig");
 const StreamHandle = @import("../types.zig").StreamHandle;
 const Client = @import("client.zig").Client;
 const Server = @import("server.zig").Server;

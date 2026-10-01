@@ -33,11 +33,11 @@ pub const gossipsub = @import("gossipsub/root.zig");
 
 pub const Transport = transport.Transport;
 pub const Negotiator = negotiate.Negotiator;
-pub const Engine = quic.engine.Engine;
+pub const Engine = quic.Engine;
 pub const Handle = types.Handle;
 pub const StreamHandle = types.StreamHandle;
-pub const Event = quic.engine.Event;
-pub const Limits = quic.engine.Limits;
+pub const Event = quic.Engine.Event;
+pub const Limits = quic.Engine.Limits;
 pub const StepOptions = transport.StepOptions;
 pub const StepResult = transport.StepResult;
 pub const CloseReason = types.CloseReason;

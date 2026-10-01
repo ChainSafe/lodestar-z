@@ -2,7 +2,7 @@ const std = @import("std");
 const ct = @import("consensus_types");
 const protocol = @import("protocol.zig");
 const reqresp = @import("reqresp.zig");
-const engine_mod = @import("../quic/engine.zig");
+const Engine = @import("../quic/Engine.zig");
 const harness = @import("test_pair.zig");
 
 const Event = reqresp.Event;
@@ -161,7 +161,7 @@ test "service preserves drained native stream events across a partial request sw
     try std.testing.expectEqual(encoded.len, try setup.shared.pair.server.write(stream, encoded, false));
     try setup.shared.pair.pump();
     var events: [1]Event = undefined;
-    var transport: [16]engine_mod.Event = undefined;
+    var transport: [16]Engine.Event = undefined;
     const polled = setup.shared.pair.events(&setup.shared.pair.client, &transport);
     try std.testing.expect(polled.len > 0);
     const first_count = setup.shared.client.process(&setup.shared.pair.client, polled, setup.shared.pair.now, .{ .control = &events }).control;
@@ -301,7 +301,7 @@ test "service reqresp deadline fires on time while more slots than the pump budg
 
     // Busy slots on other connections, accepted later so their deadlines fall after it.
     setup.shared.pair.advance(500);
-    var connections: [9]engine_mod.Handle = undefined;
+    var connections: [9]Engine.Handle = undefined;
     var dialed: usize = 0;
     // The server admits a bounded number of handshakes per source address.
     while (dialed < connections.len) {
@@ -358,7 +358,7 @@ test "service reqresp slots stay indexed by connection across a reconnect at the
     const fresh_client = try setup.shared.pair.dial();
     for (0..8) |_| try setup.pumpOnce();
     try std.testing.expectEqual(@as(usize, 1), setup.shared.pair.server.registry.active_len);
-    const fresh_server = setup.shared.pair.server.sendOwner(setup.shared.pair.server.activeIndices()[0]).?;
+    const fresh_server = setup.shared.pair.server.sendOwner(setup.shared.pair.server.registry.activeIndices()[0]).?;
     try std.testing.expectEqual(old.server.index, fresh_server.index);
     try std.testing.expect(old.server.generation != fresh_server.generation);
 
@@ -427,7 +427,7 @@ test "service reqresp request on one connection among 64 visits only its own slo
     defer setup.deinit();
     const server = &setup.shared.server.reqresp;
     const client = &setup.shared.client.reqresp;
-    var connections: [64]engine_mod.Handle = undefined;
+    var connections: [64]Engine.Handle = undefined;
     connections[0] = setup.shared.handles.client;
     var dialed: usize = 1;
     // The server admits a bounded number of handshakes per source address.

@@ -13,12 +13,12 @@ const score_mod = @import("score.zig");
 const overlay_mod = @import("overlay.zig");
 const peers_mod = @import("peer_book.zig");
 const sessions_mod = @import("sessions.zig");
-const engine_mod = @import("../quic/engine.zig");
+const Engine = @import("../quic/Engine.zig");
 const types = @import("../types.zig");
 
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
-const Handle = engine_mod.Handle;
+const Handle = Engine.Handle;
 const Now = types.Now;
 const timing = @import("../metrics/timing.zig");
 const Sessions = sessions_mod.Sessions;

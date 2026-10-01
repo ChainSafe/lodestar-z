@@ -41,7 +41,7 @@ test "publication recipient policy tops up without graft and accounts unique sha
     try support.subscribe(&g, topic);
     const t = g.overlay.findTopic(topic).?;
     for (0..12) |index| {
-        const conn: @import("../quic/engine.zig").Handle = .{ .index = @intCast(index), .generation = 1 };
+        const conn: @import("../quic/Engine.zig").Handle = .{ .index = @intCast(index), .generation = 1 };
         const peer = support.addPeer(&g, conn, .v1_2).?;
         _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), peer.index, topic, true);
         g.sessions.rows[peer.index].outbound = .{ .live = .{ .stream = .{ .conn = conn, .id = 2, .slot = 0 }, .version = .v1_2 } };
@@ -87,7 +87,7 @@ test "publication recipient policy tops up without graft and accounts unique sha
 test "publication failed history admission retains payloads and recovery attribution" {
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .mcache_capacity = 1, .validation_capacity = 1 });
     defer g.deinit();
-    const conn: @import("../quic/engine.zig").Handle = .{ .index = 0, .generation = 1 };
+    const conn: @import("../quic/Engine.zig").Handle = .{ .index = 0, .generation = 1 };
     const peer = support.addPeer(&g, conn, .v1_2).?;
     var retained: [2]@import("message_store.zig").Handle = undefined;
     for ([_][]const u8{ "retained zero", "retained one" }, &retained) |payload, *h| {
@@ -97,7 +97,7 @@ test "publication failed history admission retains payloads and recovery attribu
     }
     const id = topic_mod.validMessageId(topic, "retry", .{});
     const logical = g.sessions.rows[peer.index].logical;
-    const second_conn: @import("../quic/engine.zig").Handle = .{ .index = 1, .generation = 1 };
+    const second_conn: @import("../quic/Engine.zig").Handle = .{ .index = 1, .generation = 1 };
     const second_peer = support.addPeer(&g, second_conn, .v1_2).?;
     const second_logical = g.sessions.rows[second_peer.index].logical;
     g.recovery.add(&g.peers, id, logical, conn, 1, 30_000);
@@ -135,7 +135,7 @@ test "publication empty subscribed mesh reuses bounded fanout and full mesh excl
     try support.subscribe(&g, topic);
     const t = g.overlay.findTopic(topic).?;
     for (0..10) |index| {
-        const conn: @import("../quic/engine.zig").Handle = .{ .index = @intCast(index), .generation = 1 };
+        const conn: @import("../quic/Engine.zig").Handle = .{ .index = @intCast(index), .generation = 1 };
         const p = support.addPeer(&g, conn, .v1_2).?;
         _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), p.index, topic, true);
         g.sessions.rows[p.index].outbound = .{ .live = .{ .stream = .{ .conn = conn, .id = 2, .slot = 0 }, .version = .v1_2 } };
@@ -197,7 +197,7 @@ test "delivery recipients count refused frames and completions by origin" {
     const Outcome = @import("metrics.zig").Delivery.Outcome;
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
     defer g.deinit();
-    const conn: @import("../quic/engine.zig").Handle = .{ .index = 0, .generation = 1 };
+    const conn: @import("../quic/Engine.zig").Handle = .{ .index = 0, .generation = 1 };
     const peer = support.addPeer(&g, conn, .v1_2).?;
     _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), peer.index, topic, true);
     g.markDirect(conn);
@@ -235,7 +235,7 @@ test "publication priority belongs to each attempt: an IWANT for our publication
     const Outcome = @import("metrics.zig").Delivery.Outcome;
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
     defer g.deinit();
-    const conn: @import("../quic/engine.zig").Handle = .{ .index = 0, .generation = 1 };
+    const conn: @import("../quic/Engine.zig").Handle = .{ .index = 0, .generation = 1 };
     const peer = support.addPeer(&g, conn, .v1_2).?;
     _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), peer.index, topic, true);
     g.markDirect(conn);

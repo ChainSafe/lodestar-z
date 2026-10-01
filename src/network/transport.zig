@@ -1,8 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const constants = @import("constants.zig");
-const schedule = @import("quic/schedule.zig");
-const engine_mod = @import("quic/engine.zig");
+const Engine = @import("quic/Engine.zig");
 const keys = @import("wire/keys.zig");
 const multiaddr = @import("wire/multiaddr.zig");
 const peer_id = @import("wire/peer_id.zig");
@@ -15,13 +14,13 @@ const assert = std.debug.assert;
 pub const Options = struct {
     host: *const keys.KeyPair,
     bind: Sockets.Bindings,
-    limits: engine_mod.Limits = .{},
+    limits: Engine.Limits = .{},
     work_limits: WorkLimits = .{},
     /// Null keeps the system's default socket buffer sizes.
     socket_buffers: ?Sockets.Buffers = null,
 };
 
-pub const InitError = tls.Error || engine_mod.Error || std.Io.net.IpAddress.BindError ||
+pub const InitError = tls.Error || Engine.Error || std.Io.net.IpAddress.BindError ||
     std.Io.RandomSecureError || error{ClockOutOfRange};
 
 pub const send_burst_max: u16 = 256;
@@ -52,13 +51,13 @@ pub const SendBatch = struct {
 
 /// Configured QUIC windows and the send batch, excluding native overhead.
 pub const MemoryPlan = struct {
-    engine: engine_mod.MemoryPlan,
+    engine: Engine.MemoryPlan,
     ready_batch_datagrams: u8 = constants.send_batch_max,
     ready_batch_storage_bytes: u64 = @sizeOf(SendBatch),
 };
 
 pub const StepError = Sockets.DatagramError || error{ClockOutOfRange};
-pub const DialError = Sockets.SendError || engine_mod.DialError || error{ ClockOutOfRange, DestinationUnreachable, MissingPeerId };
+pub const DialError = Sockets.SendError || Engine.DialError || error{ ClockOutOfRange, DestinationUnreachable, MissingPeerId };
 
 /// Options of the standalone `step`, which also waits for the socket. NetworkCore polls its
 /// sockets itself and drives the phases directly.
@@ -73,7 +72,7 @@ const Received = union(enum) {
 };
 
 pub const StepResult = struct {
-    now: engine_mod.Now,
+    now: Engine.Now,
     datagrams_received: u32 = 0,
     datagrams_accepted: u32 = 0,
     datagrams_dropped: u32 = 0,
@@ -101,7 +100,7 @@ pub const Counters = struct {
 };
 
 pub const Transport = struct {
-    engine: engine_mod.Engine = undefined,
+    engine: Engine = undefined,
     sockets: Sockets = .{},
     counters: Counters = .{},
     send_drops: Sockets.SendDrops = .{},
@@ -131,7 +130,7 @@ pub const Transport = struct {
         target.sockets = try Sockets.bind(io, options.bind);
         errdefer target.sockets.close(io);
         if (options.socket_buffers) |request| @import("configuration.zig").requestBuffers(&target.sockets, io, request, .network_quic);
-        target.engine = try engine_mod.Engine.init(allocator, .{
+        target.engine = try Engine.init(allocator, .{
             .tls = context,
             .limits = options.limits,
             .local = target.sockets.localAddresses(),
@@ -174,7 +173,7 @@ pub const Transport = struct {
         self: *Transport,
         io: std.Io,
         target: *const multiaddr.Multiaddr,
-    ) DialError!engine_mod.Handle {
+    ) DialError!Engine.Handle {
         const expected = target.peer orelse return error.MissingPeerId;
         return self.dialPeer(io, target.address, expected);
     }
@@ -191,7 +190,7 @@ pub const Transport = struct {
         io: std.Io,
         peer: types.Address,
         expected: peer_id.PeerId,
-    ) DialError!engine_mod.Handle {
+    ) DialError!Engine.Handle {
         const now = try currentTime(io);
         const handle = self.engine.dial(&peer, expected, now) catch |err| switch (err) {
             error.AddressFamilyUnsupported => return error.DestinationUnreachable,
@@ -199,8 +198,9 @@ pub const Transport = struct {
         };
         assert(self.batch_len == 0);
         var result = StepResult{ .now = now };
-        var turn = schedule.Turn.init(self.work_limits.send_per_step_max);
-        const drained = self.burst(io, handle.index, handle, now, &turn, &result) catch |err| {
+        var remaining: u32 = self.work_limits.send_per_step_max;
+        assert(remaining > 0);
+        const drained = self.burst(io, handle.index, handle, now, &remaining, &result) catch |err| {
             self.engine.sent(handle.index, keyClock(io, now), false);
             _ = self.engine.abandon(handle);
             return err;
@@ -221,7 +221,7 @@ pub const Transport = struct {
     pub fn step(
         self: *Transport,
         io: std.Io,
-        events: []engine_mod.Event,
+        events: []Engine.Event,
         options: StepOptions,
     ) ProgressResult {
         var result = StepResult{ .now = currentTime(io) catch |err| return .{
@@ -255,12 +255,12 @@ pub const Transport = struct {
         return self.receiveBatch(io, result, 0, ready);
     }
 
-    pub fn expire(self: *Transport, now: engine_mod.Now) void {
+    pub fn expire(self: *Transport, now: Engine.Now) void {
         self.engine.expire(now);
     }
 
     /// Gathers stream readiness for the connections touched this turn and drains their events.
-    pub fn collect(self: *Transport, now: engine_mod.Now, events: []engine_mod.Event) usize {
+    pub fn collect(self: *Transport, now: Engine.Now, events: []Engine.Event) usize {
         self.engine.collect(now);
         return self.engine.pollEvents(events);
     }
@@ -272,9 +272,10 @@ pub const Transport = struct {
     /// local pressure instead drops the unsent suffix for QUIC loss recovery.
     /// Cancellation stops production and submission, retains completed progress, and leaves
     /// connection recovery state intact. It never identifies a failed destination.
-    pub fn flush(self: *Transport, io: std.Io, now: engine_mod.Now, result: *StepResult) std.Io.Cancelable!void {
+    pub fn flush(self: *Transport, io: std.Io, now: Engine.Now, result: *StepResult) std.Io.Cancelable!void {
         assert(self.batch_len == 0);
-        var turn = schedule.Turn.init(self.work_limits.send_per_step_max);
+        var remaining: u32 = self.work_limits.send_per_step_max;
+        assert(remaining > 0);
         // The latest clock read that keyed a timer.
         var keyed = now;
         defer {
@@ -282,15 +283,15 @@ pub const Transport = struct {
             self.engine.finishFlush(keyed);
         }
         // Each visit either drains its connection or sends at least one datagram.
-        const visits_max = self.engine.dirtyCount() + turn.send_max;
+        const visits_max = self.engine.dirtyCount() + remaining;
         for (0..visits_max) |_| {
-            if (!turn.canSend()) break;
+            if (remaining == 0) break;
             const index = self.engine.nextDirty() orelse break;
             const owner = self.engine.sendOwner(index) orelse {
                 self.engine.sent(index, keyed, true);
                 continue;
             };
-            const drained = self.burst(io, index, owner, now, &turn, result) catch |err| {
+            const drained = self.burst(io, index, owner, now, &remaining, result) catch |err| {
                 keyed = keyClock(io, keyed);
                 self.engine.sent(index, keyed, false);
                 return err;
@@ -304,7 +305,7 @@ pub const Transport = struct {
     /// quiche reports the time left on its timer from its own clock read, so a timer key built on
     /// a clock read earlier in the turn lands early by the time the turn has run since. A clock
     /// supplied without nanoseconds is not the one quiche reads and is kept.
-    fn keyClock(io: std.Io, after: engine_mod.Now) engine_mod.Now {
+    fn keyClock(io: std.Io, after: Engine.Now) Engine.Now {
         const previous = after.mono_ns orelse return after;
         const read = std.math.cast(u64, std.Io.Clock.awake.now(io).nanoseconds) orelse return after;
         if (read <= previous) return after;
@@ -313,9 +314,9 @@ pub const Transport = struct {
 
     /// Sends up to burst_per_connection datagrams of one connection into the shared batch.
     /// Returns whether quiche reported nothing left to send.
-    fn burst(self: *Transport, io: std.Io, index: u16, owner: types.Handle, now: engine_mod.Now, turn: *schedule.Turn, result: *StepResult) std.Io.Cancelable!bool {
+    fn burst(self: *Transport, io: std.Io, index: u16, owner: types.Handle, now: Engine.Now, remaining: *u32, result: *StepResult) std.Io.Cancelable!bool {
         var count: u16 = 0;
-        while (count < self.work_limits.burst_per_connection and turn.canSend()) : (count += 1) {
+        while (count < self.work_limits.burst_per_connection and remaining.* > 0) : (count += 1) {
             if (self.batch_len == constants.send_batch_max) {
                 if (self.submit(io, result)) |err| if (err == error.Canceled) return error.Canceled;
             }
@@ -326,7 +327,7 @@ pub const Transport = struct {
             self.batch.release_times[at] = sent.transmit_at_ns;
             self.batch.owners[at] = owner;
             self.batch_len += 1;
-            turn.recordSend();
+            remaining.* -= 1;
         }
         return false;
     }
@@ -368,7 +369,7 @@ pub const Transport = struct {
         return first;
     }
 
-    fn idleWaitMs(self: *const Transport, now: engine_mod.Now, wait_max_ms: u32) u32 {
+    fn idleWaitMs(self: *const Transport, now: Engine.Now, wait_max_ms: u32) u32 {
         if (wait_max_ms == 0 or self.engine.backlog() or self.engine.eventsPending()) return 0;
         const deadline = self.engine.nextDeadlineNs() orelse return wait_max_ms;
         const remaining = deadline -| now.nanos();
@@ -469,7 +470,7 @@ fn mapSendError(err: Sockets.SendError) DialError {
     };
 }
 
-pub fn currentTime(io: std.Io) error{ClockOutOfRange}!engine_mod.Now {
+pub fn currentTime(io: std.Io) error{ClockOutOfRange}!Engine.Now {
     const mono = std.Io.Clock.awake.now(io).nanoseconds;
     const wall = std.Io.Clock.real.now(io).toSeconds();
     if (mono < 0 or mono > std.math.maxInt(u64) or wall < 0) return error.ClockOutOfRange;

@@ -1,6 +1,6 @@
 const std = @import("std");
 const constants = @import("../constants.zig");
-const engine_mod = @import("engine.zig");
+const Engine = @import("Engine.zig");
 const limits = @import("limits.zig");
 const support = @import("../test_support.zig");
 const types = @import("../types.zig");
@@ -13,7 +13,7 @@ const connectPair = support.connectPair;
 const rebound_address = types.Address{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 4_003 } };
 const bulk = [_]u8{0x5a} ** 2_000;
 
-fn expectPathChanged(event: engine_mod.Event, conn: engine_mod.Handle) !types.Address {
+fn expectPathChanged(event: Engine.Event, conn: Engine.Handle) !types.Address {
     switch (event) {
         .path_changed => |changed| {
             try std.testing.expectEqual(conn, changed.conn);
@@ -23,7 +23,7 @@ fn expectPathChanged(event: engine_mod.Event, conn: engine_mod.Handle) !types.Ad
     }
 }
 
-fn readAll(engine: *engine_mod.Engine, stream: engine_mod.StreamHandle, sink: []u8) !usize {
+fn readAll(engine: *Engine, stream: Engine.StreamHandle, sink: []u8) !usize {
     var total: usize = 0;
     var reads: usize = 0;
     while (reads < 16 and total < sink.len) : (reads += 1) {
@@ -39,7 +39,7 @@ test "engine validates a routed packet that arrives from another source path" {
     try pair.init(.{}, .{});
     defer pair.deinit();
     const handles = try connectPair(&pair);
-    var storage: [8]engine_mod.Event = undefined;
+    var storage: [8]Engine.Event = undefined;
 
     pair.client_source = rebound_address;
     const stream = try pair.client.openStream(handles.client);
@@ -68,14 +68,14 @@ test "engine keeps the validated path when a new source fails validation" {
     try pair.init(.{}, .{});
     defer pair.deinit();
     const handles = try connectPair(&pair);
-    var storage: [8]engine_mod.Event = undefined;
+    var storage: [8]Engine.Event = undefined;
 
     pair.client_source = rebound_address;
     pair.drop_to_address = rebound_address;
     const stream = try pair.client.openStream(handles.client);
     try std.testing.expectEqual(bulk.len, try pair.client.write(stream, &bulk, false));
 
-    var inbound: ?engine_mod.StreamHandle = null;
+    var inbound: ?Engine.StreamHandle = null;
     var rounds: usize = 0;
     while (rounds < 20) : (rounds += 1) {
         try pair.pump();
@@ -153,7 +153,7 @@ test "engine routes a replayed client Initial to the existing connection" {
         else => return error.TestUnexpectedResult,
     }
     try std.testing.expectEqual(@as(u16, 0), pair.server.registry.handshaking);
-    try std.testing.expectEqual(@as(usize, 1), pair.server.activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 1), pair.server.registry.activeIndices().len);
 }
 
 test "engine collects and flushes only the connections that received datagrams" {
@@ -174,7 +174,7 @@ test "engine collects and flushes only the connections that received datagrams" 
     pair.settle(&pair.client);
     try std.testing.expectEqual(@as(usize, 0), pair.client.registry.collect.len);
 
-    var storage: [8]engine_mod.Event = undefined;
+    var storage: [8]Engine.Event = undefined;
     const polled = pair.events(&pair.client, &storage);
     try std.testing.expect(polled.len > 0);
     for (polled) |event| {
@@ -206,16 +206,16 @@ test "engine junk short header from a live peer's address marks nothing" {
         pair.now,
         &response,
     );
-    try std.testing.expectEqual(engine_mod.ReceiveOutcome.dropped, outcome);
+    try std.testing.expectEqual(Engine.ReceiveOutcome.dropped, outcome);
     const slot = &pair.client.registry.slots[handles.client.index];
     try std.testing.expect(!slot.collect_link.linked and !slot.dirty_link.linked);
     try std.testing.expect(!pair.client.backlog());
 
     try std.testing.expect(pair.client.peerId(handles.client) != null);
-    const live_before = pair.client.activeIndices().len;
+    const live_before = pair.client.registry.activeIndices().len;
     const stranger = types.Address{ .ip4 = .{ .octets = .{ 127, 0, 0, 9 }, .port = 4_009 } };
     try std.testing.expectEqual(
-        engine_mod.ReceiveOutcome.dropped,
+        Engine.ReceiveOutcome.dropped,
         pair.client.receive(
             &reset,
             &stranger,
@@ -223,14 +223,14 @@ test "engine junk short header from a live peer's address marks nothing" {
             &response,
         ),
     );
-    try std.testing.expectEqual(live_before, pair.client.activeIndices().len);
+    try std.testing.expectEqual(live_before, pair.client.registry.activeIndices().len);
     try std.testing.expect(pair.client.peerId(handles.client) != null);
-    var events: [8]engine_mod.Event = undefined;
+    var events: [8]Engine.Event = undefined;
     for (events[0..pair.client.pollEvents(&events)]) |event| try std.testing.expect(event != .closed);
 }
 
 test "engine registry retires exhausted connection generations" {
-    var registry = try @import("registry.zig").Registry.init(std.testing.allocator, 2, 1);
+    var registry = try @import("Registry.zig").init(std.testing.allocator, 2, 1);
     defer registry.deinit(std.testing.allocator);
     registry.slots[0].generation = std.math.maxInt(u32);
     try std.testing.expectEqual(@as(?u16, 1), registry.claim());

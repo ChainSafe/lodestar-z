@@ -1,9 +1,8 @@
 const std = @import("std");
 const binding = @import("binding.zig");
-const route_table = @import("route_table.zig");
+const RouteTable = @import("RouteTable.zig");
 
 const Cid = binding.Cid;
-const RouteTable = route_table.RouteTable;
 
 fn cidFor(value: u16) Cid {
     var bytes: [16]u8 = undefined;

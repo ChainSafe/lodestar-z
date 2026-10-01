@@ -1,5 +1,5 @@
 const gossip = @import("gossipsub.zig");
-const engine = @import("../quic/engine.zig");
+const Engine = @import("../quic/Engine.zig");
 const MessageEvent = @import("messages.zig").MessageEvent;
 
 pub const Pair = struct {
@@ -33,12 +33,12 @@ pub const Pair = struct {
         _ = try self.shared.step(.{}, .{});
     }
 
-    pub fn clientStream(self: *const Pair) engine.StreamHandle {
+    pub fn clientStream(self: *const Pair) Engine.StreamHandle {
         const sessions = self.shared.client.gossipsub.sessions;
         return sessions.outStream(sessions.find(self.shared.handles.client).?).?;
     }
 
-    pub fn serverStream(self: *const Pair) engine.StreamHandle {
+    pub fn serverStream(self: *const Pair) Engine.StreamHandle {
         const sessions = self.shared.server.gossipsub.sessions;
         return sessions.outStream(sessions.find(self.shared.handles.server).?).?;
     }

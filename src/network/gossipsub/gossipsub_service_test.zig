@@ -3,7 +3,7 @@ const std = @import("std");
 const gossipsub = @import("gossipsub.zig");
 const service_mod = @import("../service.zig");
 const topic_mod = @import("topic.zig");
-const engine_mod = @import("../quic/engine.zig");
+const Engine = @import("../quic/Engine.zig");
 const support = @import("../test_support.zig");
 
 const Service = service_mod.Service;
@@ -125,7 +125,7 @@ test "gossipsub direct send timeout retries once after a bounded delay" {
     }
 }
 
-fn propose(pair: *support.Pair, conn: engine_mod.Handle, version: []const u8, payload: []const u8) !engine_mod.StreamHandle {
+fn propose(pair: *support.Pair, conn: Engine.Handle, version: []const u8, payload: []const u8) !Engine.StreamHandle {
     const stream = try pair.client.openStream(conn);
     const dialer = try @import("../wire/multistream.zig").Dialer.init(version);
     var bytes: [512]u8 = undefined;

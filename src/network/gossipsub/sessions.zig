@@ -1,14 +1,14 @@
 const std = @import("std");
 const constants = @import("constants.zig");
 const topic_mod = @import("topic.zig");
-const engine_mod = @import("../quic/engine.zig");
+const Engine = @import("../quic/Engine.zig");
 const index_list = @import("../index_list.zig");
 const DeadlineHeap = @import("../deadline_heap.zig").DeadlineHeap;
 const Options = @import("options.zig").Options;
 
 const assert = std.debug.assert;
-const Handle = engine_mod.Handle;
-const StreamHandle = engine_mod.StreamHandle;
+const Handle = Engine.Handle;
+const StreamHandle = Engine.StreamHandle;
 const MessageId = [constants.message_id_length]u8;
 pub const PeerSet = std.StaticBitSet(constants.peers_cap);
 

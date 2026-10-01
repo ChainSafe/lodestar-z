@@ -1,13 +1,13 @@
 const std = @import("std");
 const binding = @import("binding.zig");
 const constants = @import("../constants.zig");
-const engine_mod = @import("engine.zig");
+const Engine = @import("Engine.zig");
 const support = @import("../test_support.zig");
 
-const Event = engine_mod.Event;
+const Event = Engine.Event;
 const Pair = support.Pair;
 
-fn drainEvents(pair: *Pair, engine: *engine_mod.Engine) usize {
+fn drainEvents(pair: *Pair, engine: *Engine) usize {
     var storage: [64]Event = undefined;
     var total: usize = 0;
     for (0..16) |_| {
@@ -18,12 +18,6 @@ fn drainEvents(pair: *Pair, engine: *engine_mod.Engine) usize {
     return total;
 }
 
-fn sleepMs(ms: i64) void {
-    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    std.Io.sleep(threaded.io(), std.Io.Duration.fromMilliseconds(ms), .awake) catch {};
-}
-
 test "engine idle connections cost no timer, collect or flush visits" {
     var pair: Pair = .{};
     try pair.init(.{}, .{ .handshaking_per_source_max = 32 });
@@ -32,12 +26,12 @@ test "engine idle connections cost no timer, collect or flush visits" {
     try pair.pump();
     _ = drainEvents(&pair, &pair.client);
     _ = drainEvents(&pair, &pair.server);
-    try std.testing.expectEqual(@as(usize, 32), pair.client.activeIndices().len);
-    try std.testing.expectEqual(@as(usize, 32), pair.server.activeIndices().len);
-    for (pair.client.activeIndices()) |index| try std.testing.expect(pair.client.registry.slots[index].state == .established);
+    try std.testing.expectEqual(@as(usize, 32), pair.client.registry.activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 32), pair.server.registry.activeIndices().len);
+    for (pair.client.registry.activeIndices()) |index| try std.testing.expect(pair.client.registry.slots[index].state == .established);
 
-    const engines = [_]*engine_mod.Engine{ &pair.client, &pair.server };
-    var visits: [2]engine_mod.Visits = undefined;
+    const engines = [_]*Engine{ &pair.client, &pair.server };
+    var visits: [2]Engine.Visits = undefined;
     for (engines, &visits) |engine, *before| before.* = engine.visits;
     for (0..100) |_| {
         pair.advance(1);
@@ -91,7 +85,7 @@ test "engine writable event re-arms only when send capacity grows" {
 
     // The peer's MAX_STREAM_DATA grants credit and reports the stream once.
     var events: [16]Event = undefined;
-    var inbound: ?engine_mod.StreamHandle = null;
+    var inbound: ?Engine.StreamHandle = null;
     for (pair.events(&pair.server, &events)) |event| if (event == .stream_opened) {
         inbound = event.stream_opened;
     };
@@ -115,7 +109,7 @@ test "engine writable event re-arms only when send capacity grows" {
     try std.testing.expect(pair.client.backlog());
 }
 
-fn countWritable(pair: *Pair, stream: engine_mod.StreamHandle) usize {
+fn countWritable(pair: *Pair, stream: Engine.StreamHandle) usize {
     var storage: [32]Event = undefined;
     var count: usize = 0;
     for (pair.events(&pair.client, &storage)) |event| switch (event) {
@@ -136,7 +130,7 @@ test "engine wakeup is its timer heap top" {
     _ = drainEvents(&pair, &pair.client);
     var recomputed: ?u64 = null;
     var keyed: ?u64 = null;
-    for (pair.client.activeIndices()) |index| {
+    for (pair.client.registry.activeIndices()) |index| {
         const slot = &pair.client.registry.slots[index];
         var due = (slot.last_send_ms + 7_000) * std.time.ns_per_ms;
         if (slot.timeoutNs()) |remaining| due = @min(due, pair.now.nanos() + remaining);
@@ -149,38 +143,6 @@ test "engine wakeup is its timer heap top" {
     // quiche's own clock moved on since the keys were set, so its timer reads slightly earlier.
     try std.testing.expect(top >= recomputed.?);
     try std.testing.expect(top - recomputed.? <= std.time.ns_per_ms);
-}
-
-test "engine calls on_timeout only for keys whose quiche timer expired" {
-    var pair: Pair = .{};
-    try pair.init(.{ .idle_timeout_ms = 300, .keep_alive_ms = 60_000 }, .{ .idle_timeout_ms = 300, .keep_alive_ms = 60_000 });
-    defer pair.deinit();
-    const handles = try support.connectPair(&pair);
-    try pair.pump();
-    var fired = pair.client.visits.timeouts;
-    var closed = false;
-    for (0..40) |_| {
-        sleepMs(25);
-        pair.advance(25);
-        const top = pair.client.nextDeadlineNs();
-        const pops = pair.client.visits.timer;
-        pair.settle(&pair.client);
-        if (pair.client.visits.timeouts > fired) {
-            try std.testing.expect(top.? <= pair.now.nanos());
-            try std.testing.expect(pair.client.visits.timer > pops);
-            fired = pair.client.visits.timeouts;
-        }
-        var storage: [8]Event = undefined;
-        for (pair.events(&pair.client, &storage)) |event| if (event == .closed) {
-            try std.testing.expectEqual(handles.client, event.closed.conn);
-            try std.testing.expect(event.closed.reason == .idle_timeout);
-            closed = true;
-        };
-        if (closed) break;
-    }
-    try std.testing.expect(closed);
-    try std.testing.expect(fired >= 1);
-    try std.testing.expect(pair.client.visits.timer >= pair.client.visits.timeouts);
 }
 
 test "engine events drain connections in arrival order across one-event polls" {

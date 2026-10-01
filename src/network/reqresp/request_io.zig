@@ -1,5 +1,5 @@
 const std = @import("std");
-const engine_mod = @import("../quic/engine.zig");
+const Engine = @import("../quic/Engine.zig");
 const codec = @import("codec.zig");
 const stream_io = @import("../stream_io.zig");
 
@@ -21,8 +21,8 @@ pub const RequestIO = struct {
 
     pub fn flush(
         self: *RequestIO,
-        engine: *engine_mod.Engine,
-        stream: engine_mod.StreamHandle,
+        engine: *Engine,
+        stream: Engine.StreamHandle,
         fin: bool,
     ) !Flush {
         if (self.writing and self.outbox.idle()) {
@@ -41,9 +41,9 @@ pub const RequestIO = struct {
 
     pub fn read(
         self: *RequestIO,
-        engine: *engine_mod.Engine,
-        stream: engine_mod.StreamHandle,
-    ) engine_mod.StreamError!Input {
+        engine: *Engine,
+        stream: Engine.StreamHandle,
+    ) Engine.StreamError!Input {
         var progressed = false;
         var reset = false;
         if (self.buffered_start == self.buffered_end and !self.fin_seen) {
@@ -69,7 +69,7 @@ pub const RequestIO = struct {
         return progress.done;
     }
 
-    pub fn unread(self: *const RequestIO, engine: *engine_mod.Engine, stream: engine_mod.StreamHandle) bool {
+    pub fn unread(self: *const RequestIO, engine: *Engine, stream: Engine.StreamHandle) bool {
         if (self.buffered_start < self.buffered_end or self.fin_seen) return true;
         return engine.streamReadable(stream) catch true;
     }

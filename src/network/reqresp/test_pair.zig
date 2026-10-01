@@ -2,7 +2,7 @@ const std = @import("std");
 const ct = @import("consensus_types");
 const reqresp = @import("reqresp.zig");
 const protocol = @import("protocol.zig");
-const engine_mod = @import("../quic/engine.zig");
+const Engine = @import("../quic/Engine.zig");
 const multistream = @import("../wire/multistream.zig");
 const Event = reqresp.Event;
 
@@ -79,11 +79,11 @@ pub const Pair = struct {
         self.client_count = counts.client.application + counts.client.control;
     }
 
-    pub fn openRaw(self: *Pair, which: protocol.Protocol) !engine_mod.StreamHandle {
+    pub fn openRaw(self: *Pair, which: protocol.Protocol) !Engine.StreamHandle {
         return self.openRawOn(self.shared.handles.client, which);
     }
 
-    pub fn openRawOn(self: *Pair, conn: engine_mod.Handle, which: protocol.Protocol) !engine_mod.StreamHandle {
+    pub fn openRawOn(self: *Pair, conn: Engine.Handle, which: protocol.Protocol) !Engine.StreamHandle {
         const stream = try self.shared.pair.client.openStream(conn);
         var dialer = try multistream.Dialer.init(which.id());
         var bytes: [2 * multistream.message_length_max]u8 = undefined;
@@ -92,7 +92,7 @@ pub const Pair = struct {
         return stream;
     }
 
-    pub fn awaitRawSelection(self: *Pair, stream: engine_mod.StreamHandle, which: protocol.Protocol) !void {
+    pub fn awaitRawSelection(self: *Pair, stream: Engine.StreamHandle, which: protocol.Protocol) !void {
         var dialer = try multistream.Dialer.init(which.id());
         var bytes: [2 * multistream.message_length_max]u8 = undefined;
         var buffered: usize = 0;

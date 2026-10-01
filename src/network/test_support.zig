@@ -1,16 +1,15 @@
 const std = @import("std");
 const constants = @import("constants.zig");
-const engine_mod = @import("quic/engine.zig");
+const Engine = @import("quic/Engine.zig");
 const keys = @import("wire/keys.zig");
 const limits = @import("quic/limits.zig");
 const tls = @import("tls/context.zig");
 const transport_mod = @import("transport.zig");
 const types = @import("types.zig");
 
-const Engine = engine_mod.Engine;
-const Event = engine_mod.Event;
-const Limits = engine_mod.Limits;
-const Now = engine_mod.Now;
+const Event = Engine.Event;
+const Limits = Engine.Limits;
+const Now = Engine.Now;
 
 pub const client_address = types.Address{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 4_001 } };
 pub const server_address = types.Address{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 4_002 } };
@@ -79,7 +78,7 @@ pub const Pair = struct {
         return (engine.sendOne(index, self.now, out) orelse return null).bytes;
     }
 
-    pub fn dial(self: *Pair) !engine_mod.Handle {
+    pub fn dial(self: *Pair) !Engine.Handle {
         return self.client.dial(
             &server_address,
             self.server_ctx.local_peer_id,
@@ -277,7 +276,7 @@ pub const Node = struct {
     }
 };
 
-pub fn expectConnected(event: Event, direction: engine_mod.Direction, expected: *const tls.Context) !engine_mod.Handle {
+pub fn expectConnected(event: Event, direction: Engine.Direction, expected: *const tls.Context) !Engine.Handle {
     switch (event) {
         .connected => |connected| {
             try std.testing.expectEqual(direction, connected.direction);
@@ -288,7 +287,7 @@ pub fn expectConnected(event: Event, direction: engine_mod.Direction, expected: 
     }
 }
 
-pub fn connectPair(pair: *Pair) !struct { client: engine_mod.Handle, server: engine_mod.Handle } {
+pub fn connectPair(pair: *Pair) !struct { client: Engine.Handle, server: Engine.Handle } {
     _ = try pair.dial();
     try pair.pump();
     var storage: [8]Event = undefined;
@@ -297,7 +296,7 @@ pub fn connectPair(pair: *Pair) !struct { client: engine_mod.Handle, server: eng
     return .{ .client = client_handle, .server = server_handle };
 }
 
-pub fn expectStreamOpened(event: Event, conn: engine_mod.Handle) !engine_mod.StreamHandle {
+pub fn expectStreamOpened(event: Event, conn: Engine.Handle) !Engine.StreamHandle {
     switch (event) {
         .stream_opened => |stream| {
             try std.testing.expectEqual(conn, stream.conn);
@@ -309,10 +308,10 @@ pub fn expectStreamOpened(event: Event, conn: engine_mod.Handle) !engine_mod.Str
 
 pub fn expectClosed(
     event: Event,
-    conn: engine_mod.Handle,
-    direction: engine_mod.Direction,
+    conn: Engine.Handle,
+    direction: Engine.Direction,
     peer: ?*const tls.Context,
-) !engine_mod.CloseReason {
+) !Engine.CloseReason {
     switch (event) {
         .closed => |closed| {
             try std.testing.expectEqual(conn, closed.conn);
@@ -329,7 +328,7 @@ pub fn expectClosed(
     }
 }
 
-pub fn expectStreamClosed(event: Event, stream: engine_mod.StreamHandle) !?u64 {
+pub fn expectStreamClosed(event: Event, stream: Engine.StreamHandle) !?u64 {
     switch (event) {
         .stream_closed => |closed| {
             try std.testing.expectEqual(stream, closed.stream);

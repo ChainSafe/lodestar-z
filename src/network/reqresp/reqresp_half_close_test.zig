@@ -3,18 +3,18 @@ const codec = @import("codec.zig");
 const protocol = @import("protocol.zig");
 const rr = @import("reqresp.zig");
 const harness = @import("test_pair.zig");
-const engine = @import("../quic/engine.zig");
+const Engine = @import("../quic/Engine.zig");
 const router = @import("../router.zig");
 
 const Pair = harness.Pair;
-const Request = struct { handle: rr.RequestHandle, remote: engine.StreamHandle };
+const Request = struct { handle: rr.RequestHandle, remote: Engine.StreamHandle };
 
 fn negotiate(pair: *Pair, method: protocol.Protocol, bytes: []const u8, sink: []u8, options: rr.RequestOptions) !Request {
     const handle = try pair.shared.client.reqresp.request(&pair.shared.pair.client, &pair.shared.client.router, pair.shared.handles.client, method, bytes, sink, options, pair.shared.pair.now);
-    var remote: ?engine.StreamHandle = null;
+    var remote: ?Engine.StreamHandle = null;
     for (0..10) |_| {
         try pair.shared.pair.pump();
-        var events: [16]engine.Event = undefined;
+        var events: [16]Engine.Event = undefined;
         for (pair.shared.pair.events(&pair.shared.pair.server, &events)) |event| switch (event) {
             .stream_opened => |stream| try pair.shared.server.router.negotiator.acceptInbound(&pair.shared.pair.server, stream, pair.shared.pair.now),
             else => {},

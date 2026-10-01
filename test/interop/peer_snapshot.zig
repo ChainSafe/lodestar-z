@@ -6,7 +6,7 @@ pub fn emit(peer: *Peer, id: u32) !void {
     const reqresp = peer.service.reqresp.active();
     const gossip = peer.service.gossipsub.resourceSnapshot();
     var streams: usize = 0;
-    for (peer.transport.engine.activeIndices()) |index| {
+    for (peer.transport.engine.registry.activeIndices()) |index| {
         for (peer.transport.engine.registry.slots[index].table.entries) |entry| {
             if (entry.claimed) streams += 1;
         }
@@ -25,7 +25,7 @@ pub fn emit(peer: *Peer, id: u32) !void {
     try control.emit(peer.allocator, .{
         .id = id,
         .ok = true,
-        .connections = peer.transport.engine.activeIndices().len,
+        .connections = peer.transport.engine.registry.activeIndices().len,
         .streams = streams,
         .heldFin = peer.held_finish != null,
         .finishCalls = peer.finish_calls,

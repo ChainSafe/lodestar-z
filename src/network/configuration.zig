@@ -1,7 +1,7 @@
 const std = @import("std");
 const service = @import("service.zig");
 const peer_manager = @import("peer_manager.zig");
-const engine = @import("quic/engine.zig");
+const Engine = @import("quic/Engine.zig");
 const transport = @import("transport.zig");
 const udp = @import("udp");
 const rr = @import("reqresp/reqresp.zig");
@@ -22,7 +22,7 @@ pub const Request = struct {
     profile: Profile = .beacon_node,
     seed: u64,
     forks: []const rr.ForkEntry,
-    limits: ?engine.Limits = null,
+    limits: ?Engine.Limits = null,
     work_limits: transport.WorkLimits = .{},
     socket_buffers: SocketBuffers = .{},
     peers: ?peers.Options = null,
@@ -50,7 +50,7 @@ pub const Core = struct {
     }
 };
 pub const Resolved = struct {
-    limits: engine.Limits,
+    limits: Engine.Limits,
     work_limits: transport.WorkLimits,
     socket_buffers: SocketBuffers,
     core: Core,
@@ -63,7 +63,7 @@ pub fn resolve(request: Request) !Resolved {
     try request.work_limits.validate();
     try request.socket_buffers.validate();
     const small = request.profile == .small;
-    var limits: engine.Limits = request.limits orelse .{
+    var limits: Engine.Limits = request.limits orelse .{
         .connections_max = if (small) 16 else 128,
         .handshaking_max = if (small) 8 else 32,
         .dialing_max = if (small) 4 else 32,
@@ -158,8 +158,8 @@ pub fn resolve(request: Request) !Resolved {
     return result;
 }
 
-pub fn validate(limits: engine.Limits, options: Core) !void {
-    _ = try engine.Engine.validateLimits(limits);
+pub fn validate(limits: Engine.Limits, options: Core) !void {
+    _ = try limits.validate();
     try peer_manager.PeerManager.validateOptions(options.peerManager());
     try service.Service.validateOptions(options.service);
     if (options.peers.max_peers > limits.connections_max or

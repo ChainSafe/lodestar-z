@@ -1,6 +1,6 @@
 const std = @import("std");
 const support = @import("../test_support.zig");
-const engine = @import("engine.zig");
+const Engine = @import("Engine.zig");
 
 test "engine notifications deliver a later close during sustained earlier stream churn" {
     var pair: support.Pair = .{};
@@ -9,7 +9,7 @@ test "engine notifications deliver a later close during sustained earlier stream
     const handles = try support.connectPair(&pair);
     const victim = try pair.server.dial(&support.client_address, pair.client_ctx.local_peer_id, pair.now);
     pair.server.failSend(victim.index);
-    var one: [1]engine.Event = undefined;
+    var one: [1]Engine.Event = undefined;
     var delivered = false;
     for (0..8) |turn| {
         const outgoing = try pair.client.openStream(handles.client);
@@ -48,7 +48,7 @@ test "engine notifications deliver higher stream slot while lower slots recycle"
     const victim = try pair.client.openStream(handles.client);
     _ = try pair.client.write(victim, "y", true);
     try pair.pump();
-    var one: [1]engine.Event = undefined;
+    var one: [1]Engine.Event = undefined;
     var delivered = false;
     var low_opens: usize = 0;
     var opened: [128]?u64 = [_]?u64{null} ** 128;
@@ -92,12 +92,12 @@ test "engine notifications preserve generations through active swaps retirement 
     try pair.init(.{}, .{ .connections_max = 4, .handshaking_max = 4, .dialing_max = 4, .outbound_max = 4 });
     defer pair.deinit();
     _ = try support.connectPair(&pair);
-    var owners: [3]engine.Handle = undefined;
+    var owners: [3]Engine.Handle = undefined;
     for (&owners) |*owner| {
         owner.* = try pair.server.dial(&support.client_address, pair.client_ctx.local_peer_id, pair.now);
         pair.server.failSend(owner.index);
     }
-    var one: [1]engine.Event = undefined;
+    var one: [1]Engine.Event = undefined;
     try std.testing.expectEqual(@as(usize, 0), pair.server.pollEvents(&.{}));
     try std.testing.expect(pair.server.eventsPending());
     try std.testing.expectEqual(@as(usize, 1), pair.server.pollEvents(&one));
@@ -108,7 +108,7 @@ test "engine notifications preserve generations through active swaps retirement 
     try std.testing.expectEqual(owners[0].index, replacement.index);
     try std.testing.expect(replacement.generation != owners[0].generation);
     pair.server.failSend(replacement.index);
-    const expected = [_]engine.Handle{ owners[1], owners[2], replacement };
+    const expected = [_]Engine.Handle{ owners[1], owners[2], replacement };
     for (expected) |owner| {
         try std.testing.expectEqual(@as(usize, 1), pair.server.pollEvents(&one));
         _ = try support.expectClosed(one[0], owner, .outbound, null);
@@ -126,13 +126,13 @@ test "engine notifications preserve lifecycle order across one-event polls" {
     const client = try pair.dial();
     try pair.pump();
     const server = pair.server.sendOwner(0).?;
-    const rebound = engine.Address{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 4003 } };
+    const rebound = Engine.Address{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 4003 } };
     pair.client_source = rebound;
     const outgoing = try pair.client.openStream(client);
     _ = try pair.client.write(outgoing, &([_]u8{1} ** 2000), false);
     try pair.pump();
     try std.testing.expectEqual(rebound, pair.server.peerAddress(server).?);
-    var one: [1]engine.Event = undefined;
+    var one: [1]Engine.Event = undefined;
     try std.testing.expectEqual(@as(usize, 1), pair.server.pollEvents(&one));
     _ = try support.expectConnected(one[0], .inbound, &pair.client_ctx);
     try std.testing.expectEqual(@as(usize, 1), pair.server.pollEvents(&one));

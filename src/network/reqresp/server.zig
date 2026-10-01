@@ -2,11 +2,10 @@ const std = @import("std");
 const codec = @import("codec.zig");
 const constants = @import("constants.zig");
 const reqresp = @import("reqresp.zig");
-const engine_mod = @import("../quic/engine.zig");
+const Engine = @import("../quic/Engine.zig");
 const types = @import("../types.zig");
 const assert = std.debug.assert;
-const Engine = engine_mod.Engine;
-const StreamHandle = engine_mod.StreamHandle;
+const StreamHandle = Engine.StreamHandle;
 const protocol = @import("protocol.zig");
 const Now = types.Now;
 const routing = @import("../router.zig");
@@ -43,7 +42,7 @@ pub const Server = struct {
         self.complete(owner, index, .{ .failed = .{ .request = self.request.handle(index), .reason = reason, .phase = null } });
     }
 
-    fn failIo(self: *Server, owner: *ReqResp, index: u16, err: (engine_mod.StreamError || codec.Error)) void {
+    fn failIo(self: *Server, owner: *ReqResp, index: u16, err: (Engine.StreamError || codec.Error)) void {
         self.request.failure_detail = @errorName(err);
         self.fail(owner, index, switch (err) {
             error.StaleHandle, error.UnknownStream, error.StreamStopped => .stream_closed,

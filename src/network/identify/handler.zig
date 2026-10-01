@@ -1,7 +1,7 @@
 const std = @import("std");
 const codec = @import("codec.zig");
 const routing = @import("../router.zig");
-const engine_mod = @import("../quic/engine.zig");
+const Engine = @import("../quic/Engine.zig");
 const types = @import("../types.zig");
 const PeerRef = types.PeerRef;
 const Outbox = @import("../stream_io.zig").Outbox;
@@ -43,21 +43,21 @@ pub const Options = struct {
 pub const Failure = enum { negotiation, malformed, timeout, reset, transport, shutdown };
 pub const Result = struct {
     peer: PeerRef,
-    conn: engine_mod.Handle,
+    conn: Engine.Handle,
     outcome: union(enum) { success: codec.Metadata, failed: Failure },
 };
 pub const InitError = std.mem.Allocator.Error || codec.Error || error{InvalidLimits};
 pub const StartError = routing.Error || error{ PeerLimit, IdentifyCapacity, Stopped };
 const deadline_ms = 5_000;
 const Inbound = struct {
-    stream: ?engine_mod.StreamHandle = null,
+    stream: ?Engine.StreamHandle = null,
     deadline: u64 = 0,
     ready: bool = false,
     bytes: [codec.frame_max + 2]u8 = undefined,
     outbox: Outbox = .{},
 };
 const Outbound = struct {
-    stream: ?engine_mod.StreamHandle = null,
+    stream: ?Engine.StreamHandle = null,
     peer: PeerRef = undefined,
     deadline: u64 = 0,
     ready: bool = false,
@@ -108,7 +108,7 @@ pub const Handler = struct {
         return self.inbound.len * @sizeOf(Inbound) + self.outbound.len * @sizeOf(Outbound);
     }
 
-    pub fn start(self: *Handler, router: *routing.Router, engine: *engine_mod.Engine, peer: PeerRef, conn: engine_mod.Handle, now: types.Now) StartError!void {
+    pub fn start(self: *Handler, router: *routing.Router, engine: *Engine, peer: PeerRef, conn: Engine.Handle, now: types.Now) StartError!void {
         if (self.stopped) return error.Stopped;
         for (self.outbound) |*slot| if (slot.stream) |stream| {
             if (std.meta.eql(stream.conn, conn)) return error.PeerLimit;
@@ -126,7 +126,7 @@ pub const Handler = struct {
 
     /// A routed stream event. Inbound slot `i` is row `i`; outbound slot `j` is row
     /// `inbound.len + j`. An event for a stream the slot no longer holds is dropped.
-    pub fn streamReady(self: *Handler, row: u24, stream: engine_mod.StreamHandle) void {
+    pub fn streamReady(self: *Handler, row: u24, stream: Engine.StreamHandle) void {
         if (row < self.inbound.len) {
             const slot = &self.inbound[row];
             if (slot.stream != null and std.meta.eql(slot.stream.?, stream)) slot.ready = true;
@@ -137,7 +137,7 @@ pub const Handler = struct {
         if (slot.stream != null and std.meta.eql(slot.stream.?, stream) and slot.phase == .reading) slot.ready = true;
     }
 
-    pub fn transportEvents(self: *Handler, engine: *engine_mod.Engine, events: []const engine_mod.Event) void {
+    pub fn transportEvents(self: *Handler, engine: *Engine, events: []const Engine.Event) void {
         for (events) |event| switch (event) {
             .closed => |closed| self.closeMatching(engine, closed.conn, null, .transport),
             .stream_closed => |closed| if (closed.route.owner == .identify) {
@@ -149,12 +149,12 @@ pub const Handler = struct {
         };
     }
 
-    fn bindRow(engine: *engine_mod.Engine, stream: engine_mod.StreamHandle, row: usize) void {
+    fn bindRow(engine: *Engine, stream: Engine.StreamHandle, row: usize) void {
         // A stream that is already gone has no events to route.
         engine.bindStream(stream, .{ .owner = .identify, .row = @intCast(row) }) catch {};
     }
 
-    fn closeMatching(self: *Handler, engine: *engine_mod.Engine, conn: engine_mod.Handle, which: ?engine_mod.StreamHandle, failure: Failure) void {
+    fn closeMatching(self: *Handler, engine: *Engine, conn: Engine.Handle, which: ?Engine.StreamHandle, failure: Failure) void {
         for (self.inbound) |*slot| if (slot.stream) |stream| {
             if (std.meta.eql(stream.conn, conn) and (which == null or std.meta.eql(which.?, stream))) {
                 engine.closeStream(stream, types.app_error_normal);
@@ -166,7 +166,7 @@ pub const Handler = struct {
         };
     }
 
-    pub fn negotiationResult(self: *Handler, router: *const routing.Router, engine: *engine_mod.Engine, outcome: routing.Outcome, now: types.Now) void {
+    pub fn negotiationResult(self: *Handler, router: *const routing.Router, engine: *Engine, outcome: routing.Outcome, now: types.Now) void {
         if (outcome.direction == .outbound) {
             for (self.outbound, 0..) |*slot, index| if (std.meta.eql(slot.stream, outcome.stream) and slot.phase == .negotiating) {
                 switch (outcome.result) {
@@ -211,7 +211,7 @@ pub const Handler = struct {
         engine.closeStream(outcome.stream, types.app_error_normal);
     }
 
-    fn finish(slot: *Outbound, engine: *engine_mod.Engine, outcome: @FieldType(Result, "outcome")) void {
+    fn finish(slot: *Outbound, engine: *Engine, outcome: @FieldType(Result, "outcome")) void {
         const stream = slot.stream.?;
         engine.closeStream(stream, types.app_error_normal);
         slot.result = .{ .peer = slot.peer, .conn = stream.conn, .outcome = outcome };
@@ -219,7 +219,7 @@ pub const Handler = struct {
         slot.ready = false;
     }
 
-    pub fn pump(self: *Handler, router: *routing.Router, engine: *engine_mod.Engine, now: types.Now, out: []Result) usize {
+    pub fn pump(self: *Handler, router: *routing.Router, engine: *Engine, now: types.Now, out: []Result) usize {
         for (self.inbound) |*slot| if (slot.stream) |stream| {
             if (now.mono_ms >= slot.deadline) {
                 engine.closeStream(stream, types.app_error_normal);
@@ -317,7 +317,7 @@ pub const Handler = struct {
         return due;
     }
 
-    pub fn shutdown(self: *Handler, router: *routing.Router, engine: *engine_mod.Engine) void {
+    pub fn shutdown(self: *Handler, router: *routing.Router, engine: *Engine) void {
         self.stopped = true;
         for (self.inbound) |*slot| if (slot.stream) |stream| {
             engine.closeStream(stream, types.app_error_normal);

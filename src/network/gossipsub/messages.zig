@@ -22,7 +22,7 @@ pub const MessageEvent = struct {
     source: ?PeerRef = null,
     handle: Handle,
     id: topic_mod.MessageId,
-    peer: @import("../quic/engine.zig").Handle,
+    peer: @import("../quic/Engine.zig").Handle,
     topic: []const u8,
     bytes: []const u8,
     identity: @import("../wire/peer_id.zig").PeerId,
@@ -85,7 +85,7 @@ pub const Context = struct {
 pub const Source = struct {
     peer: PeerRef,
     session: @import("sessions.zig").SessionRef,
-    connection: @import("../quic/engine.zig").Handle,
+    connection: @import("../quic/Engine.zig").Handle,
 };
 
 const FastEntry = struct {

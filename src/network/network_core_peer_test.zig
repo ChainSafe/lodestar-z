@@ -5,7 +5,7 @@ const DialIntent = @import("peers/dialing.zig").DialIntent;
 const DiscoveryNeed = @import("peer_manager.zig").DiscoveryNeed;
 const support = @import("test_support.zig");
 const t = @import("peers/types.zig");
-const Engine = @import("quic/engine.zig");
+const Engine = @import("quic/Engine.zig");
 const rr = @import("reqresp/root.zig");
 const gossip = @import("gossipsub/root.zig");
 

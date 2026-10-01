@@ -1,9 +1,9 @@
-const Handle = engine_mod.Handle;
+const Handle = Engine.Handle;
 const MessageId = [constants.message_id_length]u8;
 const Sessions = @import("sessions.zig").Sessions;
 const constants = @import("constants.zig");
 const std = @import("std");
-const engine_mod = @import("../quic/engine.zig");
+const Engine = @import("../quic/Engine.zig");
 
 test "session slots track connection generations" {
     var sessions = try std.testing.allocator.create(Sessions);

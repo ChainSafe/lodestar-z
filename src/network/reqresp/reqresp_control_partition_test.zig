@@ -4,7 +4,7 @@ const protocol = @import("protocol.zig");
 const routing = @import("../router.zig");
 const support = @import("../test_support.zig");
 const service_mod = @import("../service.zig");
-const engine_mod = @import("../quic/engine.zig");
+const Engine = @import("../quic/Engine.zig");
 const reservedOptions = @import("control_fixture.zig").reservedOptions;
 
 test "reqresp drain retains blocked terminals across control and application partitions" {
@@ -129,7 +129,7 @@ test "reqresp service retains request and chunk bytes through control progress" 
         pair.now,
     );
     var got_pong = false;
-    var transport: [16]engine_mod.Event = undefined;
+    var transport: [16]Engine.Event = undefined;
     var output: [1]rr.Event = undefined;
     for (0..24) |_| {
         try pair.pump();

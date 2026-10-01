@@ -65,10 +65,6 @@ pub fn check(rc: anytype) Error!?usize {
     };
 }
 
-pub fn versionSupported(version: u32) bool {
-    return c.quiche_version_is_supported(version);
-}
-
 pub const Config = struct {
     ptr: *c.quiche_config,
 
@@ -203,61 +199,61 @@ pub const Cid = struct {
     }
 };
 
-pub const PacketType = enum(u8) {
-    initial = 1,
-    retry = 2,
-    handshake = 3,
-    zero_rtt = 4,
-    short = 5,
-    version_negotiation = 6,
-    _,
-};
-
-pub const HeaderInfo = struct {
+pub const Header = struct {
     version: u32,
-    packet_type: PacketType,
+    packet_type: Type,
     scid: Cid,
     dcid: Cid,
-    /// Borrows the token storage passed to `headerInfo`.
+    /// Borrows the token storage passed to `parse`.
     token: []const u8,
-};
 
-pub const token_length_max = @import("../constants.zig").datagram_size_max;
-
-/// Writes the packet's token into `token`, which the result borrows.
-pub fn headerInfo(datagram: []const u8, token: *[token_length_max]u8) Error!HeaderInfo {
-    var version: u32 = 0;
-    var packet_type: u8 = 0;
-    var scid: [limits.cid_length_max]u8 = undefined;
-    var scid_len: usize = scid.len;
-    var dcid: [limits.cid_length_max]u8 = undefined;
-    var dcid_len: usize = dcid.len;
-    var token_len: usize = token.len;
-    const written = try check(c.quiche_header_info(
-        datagram.ptr,
-        datagram.len,
-        limits.local_cid_length,
-        &version,
-        &packet_type,
-        &scid,
-        &scid_len,
-        &dcid,
-        &dcid_len,
-        token,
-        &token_len,
-    ));
-    if (written == null) return error.InvalidPacket;
-    std.debug.assert(scid_len <= scid.len);
-    std.debug.assert(dcid_len <= dcid.len);
-    std.debug.assert(token_len <= token.len);
-    return .{
-        .version = version,
-        .packet_type = @enumFromInt(packet_type),
-        .scid = Cid.fromSlice(scid[0..scid_len]),
-        .dcid = Cid.fromSlice(dcid[0..dcid_len]),
-        .token = token[0..token_len],
+    pub const Type = enum(u8) {
+        initial = 1,
+        retry = 2,
+        handshake = 3,
+        zero_rtt = 4,
+        short = 5,
+        version_negotiation = 6,
+        _,
     };
-}
+
+    pub const token_max = @import("../constants.zig").datagram_size_max;
+
+    /// Writes the packet's token into `token`, which the result borrows.
+    pub fn parse(datagram: []const u8, token: *[token_max]u8) Error!Header {
+        var version: u32 = 0;
+        var packet_type: u8 = 0;
+        var scid: [limits.cid_length_max]u8 = undefined;
+        var scid_len: usize = scid.len;
+        var dcid: [limits.cid_length_max]u8 = undefined;
+        var dcid_len: usize = dcid.len;
+        var token_len: usize = token.len;
+        const written = try check(c.quiche_header_info(
+            datagram.ptr,
+            datagram.len,
+            limits.local_cid_length,
+            &version,
+            &packet_type,
+            &scid,
+            &scid_len,
+            &dcid,
+            &dcid_len,
+            token,
+            &token_len,
+        ));
+        if (written == null) return error.InvalidPacket;
+        std.debug.assert(scid_len <= scid.len);
+        std.debug.assert(dcid_len <= dcid.len);
+        std.debug.assert(token_len <= token.len);
+        return .{
+            .version = version,
+            .packet_type = @enumFromInt(packet_type),
+            .scid = Cid.fromSlice(scid[0..scid_len]),
+            .dcid = Cid.fromSlice(dcid[0..dcid_len]),
+            .token = token[0..token_len],
+        };
+    }
+};
 
 /// quiche's `quiche_send_info`. translate-c makes the C struct opaque for musl, whose
 /// `struct timespec` pads with bitfields, so this layout is checked against the C compiler's.
@@ -267,6 +263,15 @@ pub const SendInfo = extern struct {
     to: c.struct_sockaddr_storage,
     to_len: c.socklen_t,
     at: std.c.timespec,
+
+    /// quiche's release time for a datagram. Under CUBIC it is the send time, so a datagram is
+    /// never held; the transport asserts that in debug builds.
+    pub fn transmitDeadline(self: *const SendInfo) u64 {
+        std.debug.assert(self.at.sec >= 0);
+        std.debug.assert(self.at.nsec >= 0 and self.at.nsec < std.time.ns_per_s);
+        const seconds: u64 = @intCast(self.at.sec);
+        return seconds *| std.time.ns_per_s +| @as(u64, @intCast(self.at.nsec));
+    }
 };
 
 comptime {
@@ -284,15 +289,6 @@ comptime {
 
 pub fn connSend(conn: *c.quiche_conn, out: []u8, info: *SendInfo) isize {
     return c.quiche_conn_send(conn, out.ptr, out.len, @ptrCast(info));
-}
-
-/// quiche's release time for a datagram. Under CUBIC it is the send time, so a datagram is
-/// never held; the transport asserts that in debug builds.
-pub fn transmitDeadline(info: *const SendInfo) u64 {
-    std.debug.assert(info.at.sec >= 0);
-    std.debug.assert(info.at.nsec >= 0 and info.at.nsec < std.time.ns_per_s);
-    const seconds: u64 = @intCast(info.at.sec);
-    return seconds *| std.time.ns_per_s +| @as(u64, @intCast(info.at.nsec));
 }
 
 test {
