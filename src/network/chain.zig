@@ -6,7 +6,7 @@ const constants = @import("constants");
 const topics = @import("gossipsub/topic_policy.zig");
 const policy = @import("reqresp/request_policy.zig");
 const core = @import("network_core.zig");
-const peers = @import("peers/types.zig");
+const values = @import("control_values.zig");
 const capabilities = @import("capabilities.zig");
 
 pub const boundary_max = topics.boundary_max;
@@ -115,7 +115,7 @@ pub const Plan = struct {
         return result;
     }
 
-    pub fn update(self: *const Plan, local: peers.LocalState, endpoints: ?core.AdvertisementEndpoints, slot: u64) !core.LocalUpdate {
+    pub fn update(self: *const Plan, local: values.LocalState, endpoints: ?core.AdvertisementEndpoints, slot: u64) !core.LocalUpdate {
         const epoch = slot / preset.preset.SLOTS_PER_EPOCH;
         var index: usize = 0;
         for (self.boundaries[0..self.boundary_count], 0..) |boundary, i| {
@@ -144,7 +144,7 @@ pub const Plan = struct {
             result.schedule.next_epoch = next.epoch;
             result.schedule.next_digest = next.digest;
         }
-        try @import("control_wire.zig").copyServingLocal(&result.local, &result.local, result.capabilities.receive);
+        try values.copyServingLocal(&result.local, &result.local, result.capabilities.receive);
         return result;
     }
 };

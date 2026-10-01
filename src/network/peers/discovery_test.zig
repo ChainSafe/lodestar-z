@@ -690,7 +690,7 @@ fn handoff(candidate: *const adapter.Candidate) !void {
     defer pair.deinit();
     const opts = @import("../network_core_test_support.zig").options().core;
     const local = @import("../network_core_test_support.zig").localState(.{ .fork = context, .status = .{ .fork_digest = context.digest } });
-    var service = try @import("../service.zig").Service.init(std.testing.allocator, opts.service);
+    var service = try @import("../service_test_support.zig").initService(std.testing.allocator, opts.service, &pair.client);
     defer service.deinit();
     const gossipsub = service.gossipsub;
     var core = try @import("../peer_manager.zig").PeerManager.init(std.testing.allocator, &pair.client_ctx.local_peer_id, &local, opts.peerManager(), service.router.capabilities().receive, pair.client.limits.connections_max);

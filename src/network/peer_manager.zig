@@ -10,6 +10,7 @@ const gossip = @import("gossipsub/root.zig");
 const Now = @import("types.zig").Now;
 const coverage = @import("peers/coverage.zig");
 const control_wire = @import("control_wire.zig");
+const control_values = @import("control_values.zig");
 
 pub const coverage_reconcile_interval_ms = 1_000;
 pub const replacement_interval_ms = 5_000;
@@ -96,7 +97,7 @@ pub const PeerManager = struct {
         connections_max: u16,
     ) !PeerManager {
         var copied: t.LocalState = undefined;
-        try control_wire.copyServingLocal(&copied, local, receive);
+        try control_values.copyServingLocal(&copied, local, receive);
         try validateOptions(options);
         var catalog = try peers.Catalog.initWithIntents(a, options.peers, options.dial.capacity, connections_max, options.dial.seed);
         errdefer catalog.deinit(a);
@@ -397,7 +398,7 @@ pub const PeerManager = struct {
         const subscriptions = gossipsub.coverageSubscriptions(conn, self.local.fork.digest, local_subscriptions, now);
         input.coverage = coverage.gossip(&subscriptions, &self.local.fork);
         const metadata = snapshot.metadata orelse return input;
-        control_wire.validateMetadata(&metadata, self.local.fork) catch return input;
+        control_values.validateMetadata(&metadata, self.local.fork) catch return input;
         const deadline = snapshot.metadata_at_ms +| self.metadata_freshness_ms;
         if (now.mono_ms >= deadline) return input;
         self.selection_deadline = @min(self.selection_deadline orelse deadline, deadline);
@@ -429,7 +430,7 @@ pub const PeerManager = struct {
     pub fn updateStatus(self: *PeerManager, receive: capabilities.Set, status: *const t.Status) !void {
         var local = self.local;
         local.status = status.*;
-        try control_wire.copyServingLocal(&self.local, &local, receive);
+        try control_values.copyServingLocal(&self.local, &local, receive);
         self.selection_revision = null;
     }
 

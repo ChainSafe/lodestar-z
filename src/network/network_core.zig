@@ -11,6 +11,7 @@ const gossip = @import("gossipsub/root.zig");
 const Now = @import("types.zig").Now;
 const wake_sources = @import("wake_sources.zig");
 const control_wire = @import("control_wire.zig");
+const control_values = @import("control_values.zig");
 const ControlProtocol = @import("control_protocol.zig").ControlProtocol;
 pub const wait = @import("wait.zig");
 
@@ -135,7 +136,7 @@ pub const NetworkCore = struct {
         if (!wait.supported) return error.UnsupportedWait;
         if (startup.remembered.len > peers.remembered.capacity) return error.InvalidOptions;
         var local: t.LocalState = undefined;
-        try control_wire.copyServingLocal(&local, &startup.local, @import("router.zig").Router.initialCapabilities(resolved.core.service.router).receive);
+        try control_values.copyServingLocal(&local, &startup.local, @import("router.zig").Router.initialCapabilities(resolved.core.service.router).receive);
         try validateSchedule(&local, startup.schedule);
         try validateForkTable(resolved.core.service.reqresp.forks, &local.fork);
         self.initialized = false;
@@ -155,24 +156,6 @@ pub const NetworkCore = struct {
         self.last_now = try transport_mod.currentTime(io);
         try self.transport.init(allocator, io, .{ .host = startup.host, .bind = startup.bind, .limits = resolved.limits, .work_limits = resolved.work_limits, .socket_buffers = resolved.socket_buffers.quic });
         errdefer self.transport.deinit(io);
-        var service_options = resolved.core.service;
-        service_options.reqresp.request_fork = local.fork.fork;
-        self.service = try service_mod.Service.init(allocator, service_options);
-        errdefer self.service.deinit();
-        self.peer_manager = try manager.PeerManager.init(allocator, &self.transport.peerId(), &local, resolved.core.peerManager(), self.service.router.capabilities().receive, self.transport.engine.limits.connections_max);
-        errdefer self.peer_manager.deinit();
-        const peer_capacity: u16 = @intCast(self.peer_manager.catalog.rows.len);
-        self.control_protocol = try ControlProtocol.init(allocator, peer_capacity, resolved.core.peers.max_peers, self.service.reqresp.serving.control_reserved);
-        errdefer self.control_protocol.deinit(allocator);
-        self.peer_manager.loadRemembered(startup.remembered, self.last_now);
-        self.service.identify.bind(&self.transport.engine);
-        self.service.gossipsub.clock = io;
-        self.native_events = try allocator.alloc(engine.Event, @import("quic/limits.zig").events_per_turn_max);
-        errdefer allocator.free(self.native_events);
-        self.local_intent_workspace = try allocator.create(gossip.local_intent.Workspace);
-        errdefer allocator.destroy(self.local_intent_workspace);
-        self.local_intent_workspace.* = try gossip.local_intent.Workspace.init(allocator, self.service.gossipsub.overlay.rows.len);
-        errdefer self.local_intent_workspace.deinit(allocator);
         if (startup.discovery) |discovery_options| {
             const owned = try allocator.create(peers.Discovery);
             errdefer allocator.destroy(owned);
@@ -183,7 +166,25 @@ pub const NetworkCore = struct {
             owned.deinit(io);
             allocator.destroy(owned);
         };
-        self.service.identify.local = try self.prepareIdentifyLocal(self.advertisementEndpoints(), self.service.router.capabilities());
+        var service_options = resolved.core.service;
+        service_options.reqresp.request_fork = local.fork.fork;
+        const identify_base = try service_options.identify.makeLocal(&self.transport.peerId(), &self.transport.sockets.localAddresses());
+        const identify_local = try prepareIdentifyLocal(&identify_base, self.advertisementEndpoints(), @import("router.zig").Router.initialCapabilities(service_options.router));
+        self.service = try service_mod.Service.init(allocator, service_options, &identify_local);
+        errdefer self.service.deinit();
+        self.peer_manager = try manager.PeerManager.init(allocator, &self.transport.peerId(), &local, resolved.core.peerManager(), self.service.router.capabilities().receive, self.transport.engine.limits.connections_max);
+        errdefer self.peer_manager.deinit();
+        const peer_capacity: u16 = @intCast(self.peer_manager.catalog.rows.len);
+        self.control_protocol = try ControlProtocol.init(allocator, peer_capacity, resolved.core.peers.max_peers, self.service.reqresp.serving.control_reserved);
+        errdefer self.control_protocol.deinit(allocator);
+        self.peer_manager.loadRemembered(startup.remembered, self.last_now);
+        self.service.gossipsub.clock = io;
+        self.native_events = try allocator.alloc(engine.Event, @import("quic/limits.zig").events_per_turn_max);
+        errdefer allocator.free(self.native_events);
+        self.local_intent_workspace = try allocator.create(gossip.local_intent.Workspace);
+        errdefer allocator.destroy(self.local_intent_workspace);
+        self.local_intent_workspace.* = try gossip.local_intent.Workspace.init(allocator, self.service.gossipsub.overlay.rows.len);
+        errdefer self.local_intent_workspace.deinit(allocator);
         self.initialized = true;
     }
 
@@ -350,8 +351,8 @@ pub const NetworkCore = struct {
         }, now);
     }
 
-    fn prepareIdentifyLocal(self: *const NetworkCore, endpoints: ?AdvertisementEndpoints, capabilities: @import("capabilities.zig").Directional) !@import("identify/root.zig").Local {
-        var local = self.service.identify.local.?;
+    fn prepareIdentifyLocal(base: *const @import("identify/root.zig").Local, endpoints: ?AdvertisementEndpoints, capabilities: @import("capabilities.zig").Directional) !@import("identify/root.zig").Local {
+        var local = base.*;
         if (endpoints) |announced| {
             var addresses: [2]t.Address = undefined;
             var count: usize = 0;
@@ -392,11 +393,11 @@ pub const NetworkCore = struct {
         }
         var local = update.local;
         local.metadata.seq_number = self.peer_manager.local.metadata.seq_number;
-        try control_wire.copyServingLocal(&local, &local, capabilities.receive);
+        try control_values.copyServingLocal(&local, &local, capabilities.receive);
         try validateSchedule(&local, schedule);
         const request = &self.service.reqresp;
         try validateForkTable(request.forks[0..request.fork_count], &local.fork);
-        const identify_local = try self.prepareIdentifyLocal(endpoints, capabilities);
+        const identify_local = try prepareIdentifyLocal(&self.service.identify.local, endpoints, capabilities);
         const metadata_changed = !std.meta.eql(local.metadata, self.peer_manager.local.metadata);
         if (metadata_changed) local.metadata.seq_number = try peers.enr.nextSequence(local.metadata.seq_number);
         var prepared: PreparedLocal = .{

@@ -515,18 +515,18 @@ pub const Control = struct {
                 slot,
             ),
             .ping_v1 => {
-                if (event.bytes.len == 8) self.sequence(
+                if (wire.decodeScalar(event.bytes)) |seq_number| self.sequence(
                     catalog,
                     peer,
                     event.peer,
-                    std.mem.readInt(u64, event.bytes[0..8], .little),
+                    seq_number,
                     now,
-                );
+                ) else |_| {}
             },
             .metadata_v1, .metadata_v2, .metadata_v3 => {},
             .goodbye_v1 => {
                 std.debug.assert(event.bytes.len == 8);
-                const code = std.mem.readInt(u64, event.bytes[0..8], .little);
+                const code = wire.decodeScalar(event.bytes) catch unreachable;
                 self.receivedGoodbye(catalog, peer, event.peer, code, false);
                 _ = self.disconnect(catalog, peer, event.peer, .remote_goodbye, now);
                 self.schedules[peer.index].closing.?.sent = true;
@@ -585,13 +585,13 @@ pub const Control = struct {
                 slot,
             ),
             .ping_v1 => {
-                if (bytes.len == 8) self.sequence(
+                if (wire.decodeScalar(bytes)) |seq_number| self.sequence(
                     catalog,
                     op.peer,
                     op.conn,
-                    std.mem.readInt(u64, bytes[0..8], .little),
+                    seq_number,
                     now,
-                );
+                ) else |_| {}
             },
             .metadata_v1, .metadata_v2, .metadata_v3 => {
                 const metadata = wire.decodeMetadata(op.protocol, bytes, local.fork) catch |err| {

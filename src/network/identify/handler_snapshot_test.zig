@@ -20,9 +20,9 @@ test "identify blocked responder finishes immutable advertisement while new requ
     defer pair.deinit();
     @import("../quic/binding.zig").c.quiche_config_set_initial_max_stream_data_bidi_local(pair.client.config.ptr, 96);
     const handles = try support.connectPair(&pair);
-    var client = try service_mod.Service.init(std.testing.allocator, try options("client"));
+    var client = try @import("../service_test_support.zig").initService(std.testing.allocator, try options("client"), &pair.client);
     defer client.deinit();
-    var server = try service_mod.Service.init(std.testing.allocator, try options("old"));
+    var server = try @import("../service_test_support.zig").initService(std.testing.allocator, try options("old"), &pair.server);
     defer server.deinit();
     try client.identify.start(&client.router, &pair.client, .{ .index = 0, .generation = 1 }, handles.client, pair.now);
     var blocked = false;
@@ -43,8 +43,8 @@ test "identify blocked responder finishes immutable advertisement while new requ
     const length = inbound.outbox.bytes.len;
     @memcpy(retained[0..length], inbound.outbox.bytes);
     const deadline = inbound.deadline;
-    server.identify.local.?.agent = try .init("new");
-    try server.identify.local.?.setAddresses(&.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 19001 } }});
+    server.identify.local.agent = try .init("new");
+    try server.identify.local.setAddresses(&.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 19001 } }});
     var active = server.router.capabilities();
     active.receive = .initEmpty();
     active.receive.insert(.identify);
@@ -88,9 +88,9 @@ test "identify inbound timeout closes only withheld writer and shutdown releases
     defer pair.deinit();
     @import("../quic/binding.zig").c.quiche_config_set_initial_max_stream_data_bidi_local(pair.client.config.ptr, 96);
     const handles = try support.connectPair(&pair);
-    var client = try service_mod.Service.init(std.testing.allocator, try options("client"));
+    var client = try @import("../service_test_support.zig").initService(std.testing.allocator, try options("client"), &pair.client);
     defer client.deinit();
-    var server = try service_mod.Service.init(std.testing.allocator, try options("server"));
+    var server = try @import("../service_test_support.zig").initService(std.testing.allocator, try options("server"), &pair.server);
     defer server.deinit();
     try client.identify.start(&client.router, &pair.client, .{ .index = 0, .generation = 1 }, handles.client, pair.now);
     for (0..16) |_| {
@@ -140,9 +140,9 @@ test "identify remote reset and transport close retain one failed result without
         defer pair.deinit();
         @import("../quic/binding.zig").c.quiche_config_set_initial_max_stream_data_bidi_local(pair.client.config.ptr, 96);
         const handles = try support.connectPair(&pair);
-        var client = try service_mod.Service.init(std.testing.allocator, try options("client"));
+        var client = try @import("../service_test_support.zig").initService(std.testing.allocator, try options("client"), &pair.client);
         defer client.deinit();
-        var server = try service_mod.Service.init(std.testing.allocator, try options("server"));
+        var server = try @import("../service_test_support.zig").initService(std.testing.allocator, try options("server"), &pair.server);
         defer server.deinit();
         try client.identify.start(&client.router, &pair.client, .{ .index = 0, .generation = 1 }, handles.client, pair.now);
         for (0..16) |_| {

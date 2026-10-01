@@ -1148,7 +1148,7 @@ test "identify replacement generation starts a fresh query and rejects stale com
     _ = setup.client.peer_manager.snapshots(&snapshots);
     const old = snapshots[0];
     try std.testing.expectEqualStrings("first", old.identify.?.agent.?.slice());
-    setup.server.service.identify.local.?.agent = try .init("replacement");
+    setup.server.service.identify.local.agent = try .init("replacement");
     _ = try setup.pair.dial();
     for (0..100) |_| try setup.step(1);
     _ = setup.client.peer_manager.snapshots(&snapshots);
@@ -1772,7 +1772,7 @@ test "local intent failing at ENR sequence exhaustion preserves control schedule
     const local = node.localState();
     const request_fork = node.service.reqresp.request_fork;
     const demand = manager.demand;
-    const identify = node.service.identify.local.?;
+    const identify = node.service.identify.local;
     const capabilities = node.service.router.capabilities();
     const record = node.localRecord().?.*;
     const slot = node.current_slot;
@@ -1794,7 +1794,7 @@ test "local intent failing at ENR sequence exhaustion preserves control schedule
     try std.testing.expectEqualDeep(local, node.localState());
     try std.testing.expectEqual(request_fork, node.service.reqresp.request_fork);
     try std.testing.expectEqualDeep(demand, manager.demand);
-    try std.testing.expectEqualDeep(identify, node.service.identify.local.?);
+    try std.testing.expectEqualDeep(identify, node.service.identify.local);
     try std.testing.expectEqualDeep(capabilities, node.service.router.capabilities());
     try std.testing.expectEqualSlices(u8, record.slice(), node.localRecord().?.slice());
     try std.testing.expectEqual(slot, node.current_slot);

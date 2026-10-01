@@ -62,7 +62,9 @@ pub const Peer = struct {
 
     fn admit(context: *anyopaque, candidate: *Gossip.Admission) bool {
         const self: *Peer = @ptrCast(@alignCast(context));
-        if (self.delivery_count == self.deliveries.len or !candidate.feasible(&.{})) return false;
+        if (self.delivery_count == self.deliveries.len) return false;
+        const usage = candidate.usage(&.{});
+        if (!candidate.feasible(&usage)) return false;
         candidate.commit();
         const event = &candidate.event;
         const delivery = &self.deliveries[self.delivery_count];
@@ -234,7 +236,8 @@ pub const Peer = struct {
             var subscription: Gossip.local_intent.Boundary = .{ .digest = parsed.digest };
             subscription.mask(.beacon_block)[0] = 1;
             subscription.lengths[@intFromEnum(Gossip.topic.Kind.beacon_block)] = 1;
-            var workspace: Gossip.local_intent.Workspace = .{};
+            var workspace = try Gossip.local_intent.Workspace.init(self.allocator, self.service.gossipsub.overlay.rows.len);
+            defer workspace.deinit(self.allocator);
             _ = try self.service.gossipsub.prepareSubscriptions(&.{subscription}, &workspace, self.now, 0);
             self.service.gossipsub.commitSubscriptions(&workspace);
         } else if (std.mem.eql(u8, c.op, "publish")) {
@@ -324,7 +327,13 @@ pub fn main(init: std.process.Init) !void {
     gossip_topics[0].rules[@intFromEnum(Gossip.topic.Kind.beacon_block)] = .{ .count = 1, .ssz_min = 0, .ssz_max = max_payload };
     const peer = try a.create(Peer);
     defer a.destroy(peer);
-    peer.* = .{ .application = application, .allocator = a, .io = init.io, .service = try network.Service.init(a, .{ .identify = .{ .agent = "lodestar-z-identify" }, .reqresp = .{ .admission = admission, .peers = 4, .outbound_max = 1, .inbound_max = if (application) 8 else 1, .inbound_per_peer_max = if (application) 8 else 1, .inbound_control_reserved = if (application) 2 else 0, .forks = &.{.{ .digest = if (application) applicationDigest() else .{ 1, 0, 0, 0 }, .fork = .deneb }}, .progress_timeout_ms = 5000 }, .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .topic_policy = &gossip_topics, .message_id_policy = .{ .phase0_digest = .{ 1, 0, 0, 0 } }, .random_seed = 0x6d2b79f5 } }), .sink = undefined, .response = undefined };
+    peer.* = .{ .application = application, .allocator = a, .io = init.io, .service = undefined, .sink = undefined, .response = undefined };
+    const key = try network.wire.keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ .{31}));
+    try peer.transport.init(a, init.io, .{ .host = &key, .bind = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } }, .limits = .{ .connections_max = 4, .handshaking_max = 4, .dialing_max = 2, .outbound_max = 3 } });
+    defer peer.transport.deinit(init.io);
+    const service_options: network.service.Options = .{ .identify = .{ .agent = "lodestar-z-identify" }, .reqresp = .{ .admission = admission, .peers = 4, .outbound_max = 1, .inbound_max = if (application) 8 else 1, .inbound_per_peer_max = if (application) 8 else 1, .inbound_control_reserved = if (application) 2 else 0, .forks = &.{.{ .digest = if (application) applicationDigest() else .{ 1, 0, 0, 0 }, .fork = .deneb }}, .progress_timeout_ms = 5000 }, .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .topic_policy = &gossip_topics, .message_id_policy = .{ .phase0_digest = .{ 1, 0, 0, 0 } }, .random_seed = 0x6d2b79f5 } };
+    const local = try service_options.identify.makeLocal(&peer.transport.peerId(), &peer.transport.sockets.localAddresses());
+    peer.service = try network.Service.init(a, service_options, &local);
     defer peer.service.deinit();
     peer.control_responses = try a.alloc([92]u8, peer.service.reqresp.inbound.len);
     defer a.free(peer.control_responses);
@@ -333,9 +342,7 @@ pub fn main(init: std.process.Init) !void {
     defer a.free(peer.sink);
     peer.response = try a.alloc(u8, max_payload);
     defer a.free(peer.response);
-    const key = try network.wire.keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ .{31}));
-    try peer.transport.init(a, init.io, .{ .host = &key, .bind = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } }, .limits = .{ .connections_max = 4, .handshaking_max = 4, .dialing_max = 2, .outbound_max = 3 } });
-    defer peer.transport.deinit(init.io);
+
     defer peer.service.identify.shutdown(&peer.service.router, &peer.transport.engine);
     defer peer.service.reqresp.shutdown(&peer.transport.engine, &peer.service.router);
     try control.run(peer);

@@ -6,12 +6,39 @@ const types = @import("../types.zig");
 const PeerRef = types.PeerRef;
 const Outbox = @import("../stream_io.zig").Outbox;
 
+pub const Limits = struct {
+    inbound_max: u16 = 2,
+    outbound_max: u16 = 2,
+
+    pub fn validate(self: Limits) error{InvalidLimits}!void {
+        if (self.inbound_max == 0 or self.inbound_max > 64 or self.outbound_max == 0 or self.outbound_max > 64) return error.InvalidLimits;
+    }
+};
 pub const Options = struct {
     inbound_max: u16 = 2,
     outbound_max: u16 = 2,
     agent: []const u8 = "",
     protocol_version: []const u8 = "ipfs/0.1.0",
     addresses: []const types.Address = &.{},
+
+    pub fn limits(self: Options) Limits {
+        return .{ .inbound_max = self.inbound_max, .outbound_max = self.outbound_max };
+    }
+
+    /// Resolve the complete local value at startup. Explicit addresses replace the usable
+    /// bound fallback, and the result owns its text, key and encoded addresses.
+    pub fn makeLocal(self: Options, peer: *const @import("../wire/peer_id.zig").PeerId, bound: *const [2]?types.Address) InitError!codec.Local {
+        try Handler.validate(self);
+        if (self.addresses.len > 0) return codec.Local.init(peer, self.agent, self.protocol_version, self.addresses);
+        var addresses: [2]types.Address = undefined;
+        var count: usize = 0;
+        for (bound) |address| if (address) |value| {
+            if (!value.isUsable()) continue;
+            addresses[count] = value;
+            count += 1;
+        };
+        return codec.Local.init(peer, self.agent, self.protocol_version, addresses[0..count]);
+    }
 };
 pub const Failure = enum { negotiation, malformed, timeout, reset, transport, shutdown };
 pub const Result = struct {
@@ -44,16 +71,12 @@ pub const Handler = struct {
     allocator: std.mem.Allocator,
     inbound: []Inbound,
     outbound: []Outbound,
-    agent: codec.Text(256),
-    protocol_version: codec.Text(64),
-    addresses: [8]types.Address = undefined,
-    address_count: u8 = 0,
-    local: ?codec.Local = null,
+    local: codec.Local,
     stopped: bool = false,
     delivery_cursor: usize = 0,
 
     pub fn validate(options: Options) InitError!void {
-        if (options.inbound_max == 0 or options.inbound_max > 64 or options.outbound_max == 0 or options.outbound_max > 64) return error.InvalidLimits;
+        try options.limits().validate();
         _ = try codec.Text(256).init(options.agent);
         _ = try codec.Text(64).init(options.protocol_version);
         if (options.addresses.len > 8) return error.OccurrenceLimit;
@@ -62,17 +85,17 @@ pub const Handler = struct {
         try check.setAddresses(options.addresses);
     }
 
-    pub fn init(allocator: std.mem.Allocator, options: Options) InitError!Handler {
-        try validate(options);
+    /// Copies a complete Local constructed for this transport identity. Each inbound stream
+    /// encodes its own snapshot, so later publication cannot change an active response.
+    pub fn init(allocator: std.mem.Allocator, options: Limits, local: *const codec.Local) InitError!Handler {
+        try options.validate();
         const inbound = try allocator.alloc(Inbound, options.inbound_max);
         errdefer allocator.free(inbound);
         const outbound = try allocator.alloc(Outbound, options.outbound_max);
         errdefer allocator.free(outbound);
         @memset(inbound, .{});
         @memset(outbound, .{});
-        var self: Handler = .{ .allocator = allocator, .inbound = inbound, .outbound = outbound, .agent = try .init(options.agent), .protocol_version = try .init(options.protocol_version), .address_count = @intCast(options.addresses.len) };
-        @memcpy(self.addresses[0..options.addresses.len], options.addresses);
-        return self;
+        return .{ .allocator = allocator, .inbound = inbound, .outbound = outbound, .local = local.* };
     }
 
     pub fn deinit(self: *Handler) void {
@@ -83,19 +106,6 @@ pub const Handler = struct {
 
     pub fn allocatedBytes(self: *const Handler) usize {
         return self.inbound.len * @sizeOf(Inbound) + self.outbound.len * @sizeOf(Outbound);
-    }
-
-    pub fn bind(self: *Handler, engine: *const engine_mod.Engine) void {
-        if (self.local != null) return;
-        var bound: [2]types.Address = undefined;
-        var count: usize = 0;
-        for (engine.local) |address| if (address) |value| {
-            if (!value.isUsable()) continue;
-            bound[count] = value;
-            count += 1;
-        };
-        const addresses = if (self.address_count == 0) bound[0..count] else self.addresses[0..self.address_count];
-        self.local = codec.Local.init(&engine.tls.local_peer_id, self.agent.slice(), self.protocol_version.slice(), addresses) catch unreachable;
     }
 
     pub fn start(self: *Handler, router: *routing.Router, engine: *engine_mod.Engine, peer: PeerRef, conn: engine_mod.Handle, now: types.Now) StartError!void {
@@ -112,7 +122,6 @@ pub const Handler = struct {
         const expected = engine.peerId(conn) orelse return error.StaleHandle;
         const stream = try router.beginOutbound(engine, conn, .identify, now);
         slot.* = .{ .stream = stream, .peer = peer, .deadline = now.mono_ms +| deadline_ms, .decoder = .init(&expected) };
-        self.bind(engine);
     }
 
     /// A routed stream event. Inbound slot `i` is row `i`; outbound slot `j` is row
@@ -188,11 +197,10 @@ pub const Handler = struct {
                 return;
             }
         };
-        self.bind(engine);
         for (self.inbound, 0..) |*slot, index| if (slot.stream == null) {
             bindRow(engine, outcome.stream, index);
             slot.* = .{ .stream = outcome.stream, .deadline = now.mono_ms +| deadline_ms, .ready = true };
-            const bytes = self.local.?.encode(router.capabilities().receive, engine.peerAddress(outcome.stream.conn), &slot.bytes) catch {
+            const bytes = self.local.encode(router.capabilities().receive, engine.peerAddress(outcome.stream.conn), &slot.bytes) catch {
                 engine.closeStream(outcome.stream, types.app_error_normal);
                 slot.* = .{};
                 return;
