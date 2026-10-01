@@ -359,4 +359,6 @@ pub const Sockets = struct {
 test {
     _ = @import("sockets_test.zig");
     _ = @import("sockets_operations_test.zig");
+    _ = @import("sockets_native_test.zig");
+    _ = @import("linux_test_support.zig");
 }

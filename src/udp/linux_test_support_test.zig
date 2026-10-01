@@ -1,6 +1,6 @@
 const std = @import("std");
 const udp = @import("root.zig");
-const testing = @import("test_io.zig");
+const testing = @import("linux_test_support.zig");
 const Seccomp = testing.Seccomp;
 
 test "UDP seccomp distinguishes unavailable capability from a malformed filter" {

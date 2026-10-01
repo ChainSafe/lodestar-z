@@ -1,7 +1,6 @@
 const std = @import("std");
 const Sockets = @import("sockets.zig").Sockets;
 const Address = @import("address.zig").Address;
-const test_io = @import("test_io.zig");
 const payload_max = 1500;
 
 const net = std.Io.net;
@@ -58,63 +57,6 @@ test "UDP rejects oversized sends before I/O" {
         error.DatagramTooLarge,
         transport.sendTo(undefined, destination, &oversized, payload_max),
     );
-}
-
-test "dual-stack UDP stops at pressure without sending or retaining later families" {
-    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
-    var buffer: [payload_max]u8 = undefined;
-    var target = try Sockets.bind(std.testing.io, .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } });
-    defer target.close(std.testing.io);
-    // IPv6 pressure must stop the batch before its later IPv4 entry.
-    const Refused = struct {
-        installation: test_io.Seccomp.Installation = undefined,
-        outcomes: [2]Sockets.SendOutcome = undefined,
-
-        var socket: std.Io.net.Socket.Handle = -1;
-        var waits: usize = 0;
-
-        fn run(self: *@This(), sockets: *Sockets) void {
-            const filter = @import("root.zig").testing.SendFilter;
-            socket = sockets.values[1].?.handle;
-            self.installation = filter.install(&.{.{ .socket = socket, .errno = .AGAIN, .nonblocking_only = true }});
-            if (self.installation != .installed) return;
-            var vtable = std.testing.io.vtable.*;
-            vtable.batchAwaitConcurrent = wait;
-            const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
-            const local = sockets.localAddresses();
-            var payload = [_]u8{ 1, 2, 3 };
-            const batch = [_]Sockets.Outgoing{
-                .{ .to = local[0].?, .bytes = payload[0..1] },
-                .{ .to = local[1].?, .bytes = payload[1..2] },
-                .{ .to = local[0].?, .bytes = payload[2..3] },
-            };
-            var scratch2: Sockets.BatchScratch = undefined;
-            self.outcomes[0] = sockets.sendMany(io, &batch, payload_max, &scratch2);
-            var fresh: [1]u8 = .{4};
-            var scratch3: Sockets.BatchScratch = undefined;
-            self.outcomes[1] = sockets.sendMany(io, &.{.{ .to = local[0].?, .bytes = &fresh }}, payload_max, &scratch3);
-        }
-
-        fn wait(_: ?*anyopaque, _: *std.Io.Batch, _: std.Io.Timeout) std.Io.Batch.AwaitConcurrentError!void {
-            waits += 1;
-            return error.Canceled;
-        }
-    };
-    Refused.waits = 0;
-    var refused: Refused = .{};
-    const thread = try std.Thread.spawn(.{}, Refused.run, .{ &refused, &target });
-    thread.join();
-    try refused.installation.require();
-    try std.testing.expectEqual(@as(usize, 0), Refused.waits);
-    try std.testing.expectEqual(Sockets.SendOutcome{ .sent = 1, .failure = error.WouldBlock }, refused.outcomes[0]);
-    try std.testing.expectEqual(Sockets.SendOutcome{ .sent = 1, .failure = null }, refused.outcomes[1]);
-    var ready: [2]bool = @splat(true);
-    for ([_]u8{ 1, 4 }) |expected| {
-        const message = (try target.receiveReadyDatagram(std.testing.io, &buffer, &ready)).?;
-        try std.testing.expectEqualSlices(u8, &.{expected}, message.bytes);
-        try std.testing.expect(message.from == .ip4);
-    }
-    try std.testing.expectEqual(null, try target.receiveReadyDatagram(std.testing.io, &buffer, &ready));
 }
 
 test "UDP reuses the same scratch for a smaller batch with new payloads and destinations" {

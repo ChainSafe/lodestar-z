@@ -950,9 +950,7 @@ test "peer discovery ready step refills demand without reading an ineligible soc
     const now = try d.Transport.monotonicMilliseconds(std.testing.io);
     const controller = try a.configure(&context, &.{b.transport.engine.localRecord().*}, now, .{});
     try controller.request(.{ .general = true }, now);
-    var faults: @import("udp").testing.FaultIo = .{ .receive = .{} };
-    faults.init(std.testing.io);
-    defer faults.deinit();
+    var faults: @import("fault_io") = .{ .receive = .{} };
     var ready: [2]bool = @splat(false);
     var candidates: [16]adapter.Candidate = undefined;
     const result = try controller.stepReady(faults.io(), now, &ready, &candidates);

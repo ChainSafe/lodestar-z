@@ -235,16 +235,20 @@
             .root_source_file = "src/leveldb/root.zig",
             .link_libraries = .{"leveldb_c:leveldb"},
         },
+        .fault_io = .{
+            .root_source_file = "test/fault_io.zig",
+        },
         .udp = .{
             .root_source_file = "src/udp/root.zig",
+            .imports = .{.fault_io},
         },
         .discv5 = .{
             .root_source_file = "src/discv5/root.zig",
-            .imports = .{.udp},
+            .imports = .{ .udp, .fault_io },
         },
         .network = .{
             .root_source_file = "src/network/root.zig",
-            .imports = .{ "quiche_zig:quiche", .consensus_types, .config, .constants, .preset, .snappy, .discv5, .udp },
+            .imports = .{ "quiche_zig:quiche", .consensus_types, .config, .constants, .preset, .snappy, .discv5, .udp, .fault_io },
         },
     },
     .executables = .{
@@ -464,6 +468,7 @@
         .fork_choice = .{ .root_module = .fork_choice },
         .clock = .{ .root_module = .clock },
         .beacon_node = .{ .root_module = .beacon_node },
+        .fault_io = .{ .root_module = .fault_io },
         .udp = .{ .root_module = .udp },
         .discv5 = .{
             .root_module = .discv5,

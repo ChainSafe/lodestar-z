@@ -45,9 +45,7 @@ test "transport refuses exhausted packet admission before entropy or decoding" {
     var vtable = std.testing.io.vtable.*;
     vtable.now = Clock.now;
     const base: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
-    var host = @import("udp").testing.FaultIo{ .entropy = .{} };
-    host.init(base);
-    defer host.deinit();
+    var host = @import("fault_io"){ .base = base, .entropy = .{} };
     try pair.transport_b.sockets.sendTo(std.testing.io, pair.transport_a.localAddress(), &([_]u8{0} ** 63), 1_280);
     var expired: [4]CallTable.Expired = undefined;
     const result = try pair.transport_a.step(host.io(), &expired);
@@ -286,9 +284,7 @@ test "transport drops replies its destination refuses and keeps the step's expir
         );
         _ = try pair.transport_b.startCall(std.testing.io, endpoint(&pair.record_a), &pair.record_a, &request);
         // A challenge answers the cold request and a PONG the established one.
-        var host = @import("udp").testing.FaultIo{ .send = .{ .socket = pair.transport_a.sockets.primary().handle } };
-        host.init(std.testing.io);
-        defer host.deinit();
+        var host = @import("fault_io"){ .send = .{ .socket = pair.transport_a.sockets.primary().handle } };
         var expired: [4]CallTable.Expired = undefined;
         const result = try pair.transport_a.step(host.io(), &expired);
         try std.testing.expectEqual(@as(?Transport.Error, null), result.failure);
@@ -320,9 +316,7 @@ test "transport fails a call whose handshake is not sent so maintenance keeps th
         var expired: [4]CallTable.Expired = undefined;
         const challenged = try pair.transport_b.step(std.testing.io, &expired);
         try std.testing.expect(challenged.failure == null and challenged.datagram == .accepted);
-        var host = @import("udp").testing.FaultIo{ .send = .{ .socket = pair.transport_a.sockets.primary().handle }, .send_failure = send_failure };
-        host.init(std.testing.io);
-        defer host.deinit();
+        var host = @import("fault_io"){ .send = .{ .socket = pair.transport_a.sockets.primary().handle }, .send_failure = send_failure };
         const unsent = try pair.transport_a.step(host.io(), &expired);
         try std.testing.expectEqual(if (send_failure == error.SystemResources) @as(?Transport.Error, error.SystemResources) else null, unsent.failure);
         const dropped = &pair.transport_a.send_drops;
@@ -533,9 +527,7 @@ test "transport cancels a discovery call dropped by local pressure without recor
     var pair: Pair = undefined;
     try pair.init(1_000, false);
     defer pair.deinit();
-    var faults: @import("udp").testing.FaultIo = .{ .send = .{}, .send_failure = error.SystemResources };
-    faults.init(std.testing.io);
-    defer faults.deinit();
+    var faults: @import("fault_io") = .{ .send = .{}, .send_failure = error.SystemResources };
     const request: message.Message = .{ .ping = .{ .request_id = try .init(&.{1}), .enr_sequence = pair.record_a.sequence } };
     try std.testing.expectError(error.SystemResources, pair.transport_a.startCall(faults.io(), endpoint(&pair.record_b), &pair.record_b, &request));
     try std.testing.expectEqual(@as(usize, 1), faults.send_calls);
@@ -557,9 +549,7 @@ test "discovery ready steps expire calls with no eligible socket and preserve la
         .request_id = try .init(&.{0x55}),
         .enr_sequence = pair.record_a.sequence,
     } }, 0, &test_support.sealEntropy(0x33));
-    var faults: @import("udp").testing.FaultIo = .{ .receive = .{} };
-    faults.init(std.testing.io);
-    defer faults.deinit();
+    var faults: @import("fault_io") = .{ .receive = .{} };
     var eligible: [2]bool = @splat(false);
     var expired: [4]CallTable.Expired = undefined;
     const result = try pair.transport_a.stepReady(faults.io(), &expired, &eligible);
@@ -589,9 +579,7 @@ test "discovery ready steps retain one family mask through the drain" {
     defer transport.deinit(std.testing.allocator, std.testing.io);
     const addresses = transport.sockets.localAddresses();
     for (addresses) |address| try transport.sockets.sendTo(std.testing.io, address.?, &.{0xff}, 1280);
-    var faults: @import("udp").testing.FaultIo = .{ .receive = .{ .socket = transport.sockets.values[1].?.handle } };
-    faults.init(std.testing.io);
-    defer faults.deinit();
+    var faults: @import("fault_io") = .{ .receive = .{ .socket = transport.sockets.values[1].?.handle } };
     var eligible: [2]bool = .{ true, false };
     var expired: [4]CallTable.Expired = undefined;
     const first = try transport.stepReady(faults.io(), &expired, &eligible);

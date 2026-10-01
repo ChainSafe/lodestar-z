@@ -1,7 +1,6 @@
 const std = @import("std");
 const Sockets = @import("sockets.zig").Sockets;
 const Address = @import("address.zig").Address;
-const test_io = @import("test_io.zig");
 const net = std.Io.net;
 
 const loopbacks: Sockets.Bindings = .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } };
@@ -261,48 +260,6 @@ test "UDP records a failed size readback as unknown and not below the request" {
     try std.testing.expectEqual([2]?u64{ null, null }, sockets.drops());
 }
 
-test "UDP distinguishes destination refusal from access denial for native single and batch sends" {
-    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
-    var sockets: [2]Sockets = undefined;
-    for (&sockets, 0..) |*socket, index| {
-        errdefer for (sockets[0..index]) |*bound| bound.close(std.testing.io);
-        socket.* = try Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
-    }
-    defer for (&sockets) |*socket| socket.close(std.testing.io);
-    var outcome: Refusal = .{};
-    const thread = try std.Thread.spawn(.{}, Refusal.run, .{ &outcome, &sockets });
-    thread.join();
-    try outcome.installation.require();
-    try std.testing.expectError(error.DestinationRefused, outcome.results[0]);
-    try std.testing.expectError(error.AccessDenied, outcome.results[1]);
-    try std.testing.expectEqual(Sockets.SendOutcome{ .sent = 0, .failure = error.DestinationRefused }, outcome.batches[0]);
-    try std.testing.expectEqual(Sockets.SendOutcome{ .sent = 0, .failure = error.AccessDenied }, outcome.batches[1]);
-    var buffer: [16]u8 = undefined;
-    try std.testing.expectEqual(null, try readAny(&sockets[0], std.testing.io, &buffer));
-}
-
-const Refusal = struct {
-    installation: test_io.Seccomp.Installation = undefined,
-    results: [2]Sockets.SendError!void = @splat({}),
-    batches: [2]Sockets.SendOutcome = undefined,
-
-    fn run(self: *Refusal, sockets: *const [2]Sockets) void {
-        const errnos = [_]std.os.linux.E{ .PERM, .ACCES };
-        var rules: [2]test_io.SendFilter.Rule = undefined;
-        for (&rules, sockets, errnos) |*rule, socket, errno| {
-            rule.* = .{ .socket = socket.primary().handle, .errno = errno };
-        }
-        self.installation = test_io.SendFilter.install(&rules);
-        if (self.installation != .installed) return;
-        const destination = sockets[0].primary().address;
-        for (sockets, &self.results, &self.batches) |*socket, *result, *batch| {
-            result.* = socket.sendTo(std.testing.io, Address.fromNetwork(destination), "filtered", 16);
-            const message: Sockets.Outgoing = .{ .to = Address.fromNetwork(destination), .bytes = "filtered" };
-            batch.* = sendMany(socket, std.testing.io, (&message)[0..1]);
-        }
-    }
-};
-
 test "UDP batches report the exact prefix before a failing datagram and resume after it" {
     var sockets = try Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
     defer sockets.close(std.testing.io);
@@ -381,56 +338,10 @@ test "UDP native retry cancellation preserves a same-family successful prefix" {
     try std.testing.expectEqualStrings("suffix", (try readAny(&sockets, std.testing.io, &buffer)).?.data);
 }
 
-test "UDP native pressure returns without polling writable for EAGAIN ENOBUFS and ENOMEM" {
-    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
-    var sockets = try Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
-    defer sockets.close(std.testing.io);
-    for ([_]std.os.linux.E{ .AGAIN, .NOBUFS, .NOMEM }) |errno| {
-        var pressure: Pressure = .{ .errno = errno };
-        const thread = try std.Thread.spawn(.{}, Pressure.run, .{ &pressure, &sockets });
-        thread.join();
-        try pressure.installation.require();
-        try std.testing.expectEqual(@as(usize, 0), Pressure.waits);
-        const expected: Sockets.SendError = if (errno == .AGAIN) error.WouldBlock else error.SystemResources;
-        try std.testing.expectError(expected, pressure.single);
-        try std.testing.expectEqual(Sockets.SendOutcome{ .sent = 0, .failure = expected }, pressure.batch);
-    }
-    var buffer: [16]u8 = undefined;
-    try std.testing.expectEqual(null, try readAny(&sockets, std.testing.io, &buffer));
-}
-
-const Pressure = struct {
-    errno: std.os.linux.E,
-    installation: test_io.Seccomp.Installation = undefined,
-    single: Sockets.SendError!void = {},
-    batch: Sockets.SendOutcome = undefined,
-    var waits: usize = 0;
-
-    fn run(self: *Pressure, sockets: *const Sockets) void {
-        self.installation = test_io.SendFilter.install(&.{.{ .socket = sockets.primary().handle, .errno = self.errno, .nonblocking_only = true }});
-        if (self.installation != .installed) return;
-        waits = 0;
-        var vtable = std.testing.io.vtable.*;
-        vtable.batchAwaitConcurrent = wait;
-        const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
-        const destination = sockets.primary().address;
-        self.single = sockets.sendTo(io, Address.fromNetwork(destination), "dropped", 16);
-        const message: Sockets.Outgoing = .{ .to = Address.fromNetwork(destination), .bytes = "dropped" };
-        self.batch = sendMany(sockets, io, (&message)[0..1]);
-    }
-
-    fn wait(_: ?*anyopaque, _: *std.Io.Batch, _: std.Io.Timeout) std.Io.Batch.AwaitConcurrentError!void {
-        waits += 1;
-        return error.Canceled;
-    }
-};
-
 test "UDP leaves sends to a provider that replaces them" {
     var sockets = try Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
     defer sockets.close(std.testing.io);
-    var faults: test_io.FaultIo = .{ .send = .{} };
-    faults.init(std.testing.io);
-    defer faults.deinit();
+    var faults: @import("fault_io") = .{ .send = .{} };
     const destination = Address.fromNetwork(sockets.primary().address);
     try std.testing.expectError(error.AddressFamilyUnsupported, sockets.sendTo(faults.io(), destination, "provider", 16));
     try std.testing.expectEqual(@as(usize, 1), faults.send_calls);
@@ -477,9 +388,7 @@ test "UDP ready reads leave a provider that replaces timed receives on its own r
     var sockets = try Sockets.bind(std.testing.io, loopbacks);
     defer sockets.close(std.testing.io);
     for (sockets.values) |target| try target.?.send(std.testing.io, &target.?.address, "provider");
-    var faults: test_io.FaultIo = .{};
-    faults.init(std.testing.io);
-    defer faults.deinit();
+    var faults: @import("fault_io") = .{};
     var buffer: [16]u8 = undefined;
     var ready: [2]bool = .{ true, false };
     try std.testing.expectEqualStrings("provider", (try sockets.receiveReady(faults.io(), &buffer, &ready)).?.data);
@@ -493,135 +402,6 @@ test "UDP ready reads leave a provider that replaces timed receives on its own r
     try std.testing.expectEqual([2]bool{ false, true }, ready);
     faults.receive = null;
     try std.testing.expectEqualStrings("provider", (try sockets.receiveReady(faults.io(), &buffer, &ready)).?.data);
-}
-
-test "UDP native ready reads cost one receive each, never poll and never read an unmarked family" {
-    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
-    var sockets = try Sockets.bind(std.testing.io, loopbacks);
-    defer sockets.close(std.testing.io);
-    var single = try Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
-    defer single.close(std.testing.io);
-    const ip4 = sockets.values[0].?;
-    for ([_][]const u8{ "first", "second", "third" }) |payload| try ip4.send(std.testing.io, &ip4.address, payload);
-    try sockets.values[1].?.send(std.testing.io, &sockets.values[1].?.address, "unmarked");
-    var outcome: NoPoll = .{};
-    const thread = try std.Thread.spawn(.{}, NoPoll.run, .{ &outcome, &sockets, &single });
-    thread.join();
-    try outcome.installation.require();
-    // The filter refuses every poll, which Threaded reports as ConcurrencyUnavailable, and every
-    // read of the IPv6 socket.
-    try std.testing.expectError(error.ConcurrencyUnavailable, outcome.polled);
-    try std.testing.expectError(error.NetworkDown, outcome.unmarked);
-    try outcome.drained;
-    try std.testing.expectEqual(@as(usize, 3), outcome.received);
-    try std.testing.expectEqual(@as(usize, 4), outcome.reads);
-    try std.testing.expectEqual([2]bool{ false, false }, outcome.ready);
-    try std.testing.expectError(error.Timeout, outcome.timed);
-}
-
-/// Filters one thread through seccomp: every poll and ppoll fails with EPERM, and every recvmsg
-/// on the IPv6 socket with ENETDOWN. Counts native reads through the cancellation check each one
-/// makes. The filter ends with the thread.
-const NoPoll = struct {
-    installation: test_io.Seccomp.Installation = undefined,
-    drained: Sockets.ReceiveError!void = {},
-    received: usize = 0,
-    reads: usize = 0,
-    ready: [2]bool = @splat(true),
-    timed: Sockets.ReceiveError!void = {},
-    polled: Sockets.ReceiveError!void = {},
-    unmarked: Sockets.ReceiveError!void = {},
-
-    threadlocal var checks: usize = 0;
-
-    fn check(userdata: ?*anyopaque) std.Io.Cancelable!void {
-        checks += 1;
-        return std.testing.io.vtable.checkCancel(userdata);
-    }
-
-    fn run(self: *NoPoll, sockets: *Sockets, single: *Sockets) void {
-        const linux = std.os.linux;
-        const bpf = linux.BPF;
-        const little = comptime @import("builtin").cpu.arch.endian() == .little;
-        const descriptor: u32 = @offsetOf(linux.SECCOMP.data, "arg0") + if (little) 0 else 4;
-        const poll: u32 = if (@hasField(linux.SYS, "poll")) @intFromEnum(linux.SYS.poll) else @intFromEnum(linux.SYS.ppoll);
-        const filter = [_]test_io.Seccomp.Instruction{
-            .{ .code = bpf.LD | bpf.W | bpf.ABS, .jt = 0, .jf = 0, .k = @offsetOf(linux.SECCOMP.data, "nr") },
-            .{ .code = bpf.JMP | bpf.JEQ | bpf.K, .jt = 0, .jf = 3, .k = @intFromEnum(linux.SYS.recvmsg) },
-            .{ .code = bpf.LD | bpf.W | bpf.ABS, .jt = 0, .jf = 0, .k = descriptor },
-            .{ .code = bpf.JMP | bpf.JEQ | bpf.K, .jt = 0, .jf = 4, .k = @intCast(sockets.values[1].?.handle) },
-            .{ .code = bpf.RET | bpf.K, .jt = 0, .jf = 0, .k = linux.SECCOMP.RET.ERRNO | @as(u32, @intFromEnum(linux.E.NETDOWN)) },
-            .{ .code = bpf.JMP | bpf.JEQ | bpf.K, .jt = 1, .jf = 0, .k = poll },
-            .{ .code = bpf.JMP | bpf.JEQ | bpf.K, .jt = 0, .jf = 1, .k = @intFromEnum(linux.SYS.ppoll) },
-            .{ .code = bpf.RET | bpf.K, .jt = 0, .jf = 0, .k = linux.SECCOMP.RET.ERRNO | @as(u32, @intFromEnum(linux.E.PERM)) },
-            .{ .code = bpf.RET | bpf.K, .jt = 0, .jf = 0, .k = linux.SECCOMP.RET.ALLOW },
-        };
-        self.installation = test_io.Seccomp.install(&filter);
-        if (self.installation != .installed) return;
-        var vtable = std.testing.io.vtable.*;
-        vtable.checkCancel = check;
-        const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
-        var buffer: [16]u8 = undefined;
-        self.ready = .{ true, false };
-        checks = 0;
-        for (0..8) |_| {
-            _ = (sockets.receiveReady(io, &buffer, &self.ready) catch |err| {
-                self.drained = err;
-                break;
-            }) orelse break;
-            self.received += 1;
-        }
-        self.reads = checks;
-        if (single.receiveTimeout(io, &buffer, timeout(0))) |_| {} else |err| self.timed = err;
-        const zero: std.Io.Timeout = .{ .duration = .{ .raw = .zero, .clock = .awake } };
-        if (single.primary().receiveTimeout(std.testing.io, &buffer, zero)) |_| {} else |err| self.polled = err;
-        var ip6_only: [2]bool = .{ false, true };
-        if (sockets.receiveReady(io, &buffer, &ip6_only)) |_| {} else |err| self.unmarked = err;
-    }
-};
-
-test "UDP native batch preserves its successful prefix when the next call reports pressure" {
-    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
-    var sockets = try Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
-    defer sockets.close(std.testing.io);
-    const Partial = struct {
-        installation: test_io.Seccomp.Installation = undefined,
-        outcome: Sockets.SendOutcome = undefined,
-        fn run(self: *@This(), sender: *const Sockets) void {
-            const linux = std.os.linux;
-            const bpf = linux.BPF;
-            const word: u32 = if (comptime @import("builtin").cpu.arch.endian() == .little) 0 else 4;
-            const filter = [_]test_io.Seccomp.Instruction{
-                .{ .code = bpf.LD | bpf.W | bpf.ABS, .jt = 0, .jf = 0, .k = @offsetOf(linux.SECCOMP.data, "nr") },
-                .{ .code = bpf.JMP | bpf.JEQ | bpf.K, .jt = 0, .jf = 5, .k = @intFromEnum(linux.SYS.sendmmsg) },
-                .{ .code = bpf.LD | bpf.W | bpf.ABS, .jt = 0, .jf = 0, .k = @offsetOf(linux.SECCOMP.data, "arg0") + word },
-                .{ .code = bpf.JMP | bpf.JEQ | bpf.K, .jt = 0, .jf = 3, .k = @intCast(sender.primary().handle) },
-                .{ .code = bpf.LD | bpf.W | bpf.ABS, .jt = 0, .jf = 0, .k = @offsetOf(linux.SECCOMP.data, "arg2") + word },
-                .{ .code = bpf.JMP | bpf.JEQ | bpf.K, .jt = 0, .jf = 1, .k = 1 },
-                .{ .code = bpf.RET | bpf.K, .jt = 0, .jf = 0, .k = linux.SECCOMP.RET.ERRNO | @as(u32, @intFromEnum(linux.E.AGAIN)) },
-                .{ .code = bpf.RET | bpf.K, .jt = 0, .jf = 0, .k = linux.SECCOMP.RET.ALLOW },
-            };
-            self.installation = test_io.Seccomp.install(&filter);
-            if (self.installation != .installed) return;
-            const destination = sender.primary().address;
-            const broadcast: net.IpAddress = .{ .ip4 = .{ .bytes = @splat(255), .port = destination.ip4.port } };
-            // The first call sends one datagram before broadcast refusal. Its successful prefix
-            // hides that errno; the next call sees the injected EAGAIN on its own unsent suffix.
-            const messages = [_]Sockets.Outgoing{
-                .{ .to = Address.fromNetwork(destination), .bytes = "prefix" },
-                .{ .to = Address.fromNetwork(broadcast), .bytes = "suffix" },
-            };
-            self.outcome = sendMany(sender, std.testing.io, &messages);
-        }
-    };
-    var partial: Partial = .{};
-    const thread = try std.Thread.spawn(.{}, Partial.run, .{ &partial, &sockets });
-    thread.join();
-    try partial.installation.require();
-    try std.testing.expectEqual(Sockets.SendOutcome{ .sent = 1, .failure = error.WouldBlock }, partial.outcome);
-    var buffer: [16]u8 = undefined;
-    try std.testing.expectEqualStrings("prefix", (try readAny(&sockets, std.testing.io, &buffer)).?.data);
-    try std.testing.expectEqual(null, try readAny(&sockets, std.testing.io, &buffer));
 }
 
 fn sendMany(sockets: *const Sockets, io: std.Io, messages: []const Sockets.Outgoing) Sockets.SendOutcome {

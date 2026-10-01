@@ -1,5 +1,5 @@
 const core_test = @import("test_support.zig");
-const FaultIo = @import("udp").testing.FaultIo;
+const FaultIo = @import("fault_io");
 const std = @import("std");
 const runtime = @import("network_core.zig");
 const t = @import("peers/types.zig");
@@ -619,8 +619,6 @@ test "core unreachable destination backs off and rotates to its alternate addres
         .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 19003 } },
     }, now, now.mono_ms +| @import("peers/dialing.zig").connect_timeout_ms);
     var faults: FaultIo = .{ .send = .{} };
-    faults.init(std.testing.io);
-    defer faults.deinit();
     const io = faults.io();
     const refused = node.step(io, now, .{}, .deadlineOnly(now.mono_ms));
     try std.testing.expect(refused.failure == null);
@@ -638,7 +636,6 @@ test "core unreachable destination backs off and rotates to its alternate addres
 }
 
 test "core fails a dial the host refuses without failing the turn or penalizing the peer" {
-    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{24}));
     const remote = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{25}));
     var node: runtime.NetworkCore = undefined;
@@ -648,26 +645,15 @@ test "core fails a dial the host refuses without failing the turn or penalizing 
     const now = try @import("transport.zig").currentTime(std.testing.io);
     const peer = t.PeerId.fromPublicKey(&remote.publicKey());
     try node.connectUntil(&peer, &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 19003 } }}, now, now.mono_ms +| @import("peers/dialing.zig").connect_timeout_ms);
-    const Refused = struct {
-        installation: @import("udp").testing.Seccomp.Installation = undefined,
-        result: runtime.Result = undefined,
-
-        /// The owner turn polls natively and starts no Io task on the filtered thread.
-        fn run(self: *@This(), core: *runtime.NetworkCore, at: Now) void {
-            const filter = @import("udp").testing.SendFilter;
-            self.installation = filter.install(&.{.{ .socket = core.transport.sockets.primary().handle, .errno = .PERM }});
-            if (self.installation != .installed) return;
-            self.result = core.step(std.testing.io, at, .{}, .deadlineOnly(at.mono_ms));
-        }
+    var faults: FaultIo = .{
+        .send = .{ .socket = node.transport.sockets.primary().handle },
+        .send_failure = error.AccessDenied,
     };
-    var refused: Refused = .{};
-    const thread = try std.Thread.spawn(.{}, Refused.run, .{ &refused, &node, now });
-    thread.join();
-    try refused.installation.require();
-    try std.testing.expect(refused.result.failure == null);
-    try std.testing.expectEqual(@as(u8, 1), refused.result.dial_failed);
-    try std.testing.expectEqual(@as(u8, 0), refused.result.dial_deferred);
-    try std.testing.expectEqual(@as(u8, 0), refused.result.dial_started);
+    const refused = node.step(faults.io(), now, .{}, .deadlineOnly(now.mono_ms));
+    try std.testing.expect(refused.failure == null);
+    try std.testing.expectEqual(@as(u8, 1), refused.dial_failed);
+    try std.testing.expectEqual(@as(u8, 0), refused.dial_deferred);
+    try std.testing.expectEqual(@as(u8, 0), refused.dial_started);
     const row = &node.peer_manager.catalog.rows[0];
     try std.testing.expectEqual(@as(u8, 1), row.intent.failures);
     try std.testing.expect(row.attempt == null);
@@ -688,8 +674,6 @@ test "core socket faults preserve the other owner and local dial refusal is defe
     defer node.deinit(std.testing.io);
     const now = try @import("transport.zig").currentTime(std.testing.io);
     var faults: FaultIo = .{};
-    faults.init(std.testing.io);
-    defer faults.deinit();
     const io = faults.io();
     const sender = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
     defer sender.close(std.testing.io);
@@ -740,8 +724,6 @@ test "core discovery drain is nonblocking under the standalone default interval"
     const standalone: d.Transport.Options = .{};
     try std.testing.expectEqual(standalone.poll_interval_ms, node.discovery.?.transport.config.poll_interval_ms);
     var faults: FaultIo = .{};
-    faults.init(std.testing.io);
-    defer faults.deinit();
     const sender = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
     defer sender.close(std.testing.io);
     try sender.send(std.testing.io, &node.discovery.?.transport.sockets.primary().address, "invalid");
@@ -770,8 +752,6 @@ fn failureAndReplacement(a: *runtime.NetworkCore, b: *runtime.NetworkCore) !void
     const now = try @import("transport.zig").currentTime(std.testing.io);
     try std.testing.expectEqual(t.ReputationDecision.ban, a.reportPeer(&a.peer_manager.catalog.get(target.?).?.identity, .fatal, now).?);
     var faults: FaultIo = .{ .receive = .{ .socket = a.transport.sockets.primary().handle } };
-    faults.init(std.testing.io);
-    defer faults.deinit();
     const faulty_io = faults.io();
     const deadline = a.peer_manager.control.schedules[target.?.index].closing.?.deadline_ms;
     var after_deadline = now;
@@ -2124,8 +2104,6 @@ test "core cancellation releases every selected dial without blaming unstarted p
         try node.connectUntil(peer, &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 19003 } }}, now, now.mono_ms + 30_000);
     }
     var faults: FaultIo = .{ .send = .{}, .send_failure = error.Canceled };
-    faults.init(std.testing.io);
-    defer faults.deinit();
     const stopped = node.step(faults.io(), now, .{}, .deadlineOnly(now.mono_ms));
     try std.testing.expectEqual(error.Canceled, stopped.failure.?);
     try std.testing.expectEqual(@as(u8, 3), stopped.dial_deferred);
