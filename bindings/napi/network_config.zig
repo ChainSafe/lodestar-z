@@ -10,11 +10,11 @@ const bootstrap_max = d.types.bootstrap_max;
 pub const Config = struct {
     profile: n.configuration.Profile,
     secret: [32]u8,
-    bind: n.udp.Bindings,
+    bind: n.udp.Sockets.Bindings,
     local: t.LocalState,
     schedule: n.network_core.ForkSchedule,
     chain: n.chain.Plan,
-    discovery_bind: ?n.udp.Bindings,
+    discovery_bind: ?n.udp.Sockets.Bindings,
     discovery_sequence: u64,
     advertisement: ?n.network_core.AdvertisementHints,
     fixed: n.network_core.AdvertisementEndpoints,
@@ -132,7 +132,7 @@ pub fn endpoint(value: Value) !std.Io.net.IpAddress {
     };
 }
 
-pub fn bindings(value: Value) !n.udp.Bindings {
+pub fn bindings(value: Value) !n.udp.Sockets.Bindings {
     if (!try value.isArray()) return .single(try endpoint(value));
     const count = try array(value, 2);
     if (count == 0) return error.InvalidNetworkConfig;

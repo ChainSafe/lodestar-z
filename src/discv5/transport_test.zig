@@ -326,7 +326,7 @@ test "transport fails a call whose handshake is not sent so maintenance keeps th
         const unsent = try pair.transport_a.step(host.io(), &expired);
         try std.testing.expectEqual(if (send_failure == error.SystemResources) @as(?Transport.Error, error.SystemResources) else null, unsent.failure);
         const dropped = &pair.transport_a.send_drops;
-        const pressure = @intFromEnum(@import("udp").SendPressure.system_resources);
+        const pressure = @intFromEnum(@import("udp").Sockets.SendDrops.Reason.system_resources);
         try std.testing.expectEqual(@as(u64, @intFromBool(send_failure == error.SystemResources)), dropped.datagrams[pressure]);
         try std.testing.expectEqual(send_failure == error.SystemResources, dropped.bytes[pressure] > 0);
         try std.testing.expectEqual(@as(usize, 1), host.send_calls);
@@ -540,7 +540,7 @@ test "transport cancels a discovery call dropped by local pressure without recor
     try std.testing.expectError(error.SystemResources, pair.transport_a.startCall(faults.io(), endpoint(&pair.record_b), &pair.record_b, &request));
     try std.testing.expectEqual(@as(usize, 1), faults.send_calls);
     try std.testing.expectEqual(@as(usize, 0), pair.transport_a.engine.calls.count());
-    const pressure = @intFromEnum(@import("udp").SendPressure.system_resources);
+    const pressure = @intFromEnum(@import("udp").Sockets.SendDrops.Reason.system_resources);
     try std.testing.expectEqual(@as(u64, 1), pair.transport_a.send_drops.datagrams[pressure]);
     try std.testing.expect(pair.transport_a.send_drops.bytes[pressure] > 0);
     var expired: [4]CallTable.Expired = undefined;

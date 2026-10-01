@@ -7,13 +7,13 @@ const CallTable = @import("CallTable.zig");
 const Engine = @import("Engine.zig");
 const ResponsePlan = @import("ResponsePlan.zig");
 const enr = @import("identity/enr.zig");
-const sockets_mod = @import("udp");
+const Sockets = @import("udp").Sockets;
 const types = @import("types.zig");
 const constants = @import("wire/constants.zig");
 const message = @import("wire/message.zig");
 
-pub const Error = Engine.Error || sockets_mod.DatagramError ||
-    sockets_mod.SendError || std.Io.RandomSecureError || error{
+pub const Error = Engine.Error || Sockets.DatagramError ||
+    Sockets.SendError || std.Io.RandomSecureError || error{
     ClockOutOfRange,
     DestinationUnreachable,
     InvalidPollInterval,
@@ -57,8 +57,8 @@ pub const SendContext = struct {
 const Transport = @This();
 
 engine: Engine,
-sockets: sockets_mod.Sockets,
-send_drops: sockets_mod.SendDrops = .{},
+sockets: Sockets,
+send_drops: Sockets.SendDrops = .{},
 config: Config,
 scratch: Engine.Scratch = .{},
 response: ResponsePlan = .{},
@@ -71,7 +71,7 @@ pub const Options = struct {
 };
 
 /// Takes ownership of bound sockets on success. Initialize at the final address.
-pub fn init(self: *Transport, allocator: std.mem.Allocator, sockets: sockets_mod.Sockets, key: @import("identity/crypto.zig").KeyPair, record: enr.Record, options: Options) !void {
+pub fn init(self: *Transport, allocator: std.mem.Allocator, sockets: Sockets, key: @import("identity/crypto.zig").KeyPair, record: enr.Record, options: Options) !void {
     if (options.poll_interval_ms == 0) return error.InvalidPollInterval;
     self.* = .{ .engine = undefined, .sockets = sockets, .config = .{ .poll_interval_ms = options.poll_interval_ms } };
     try self.engine.initWithConfig(allocator, key, record, options.engine);
@@ -140,7 +140,7 @@ pub fn transmit(
     bytes: []const u8,
 ) Error!void {
     return self.sockets.sendTo(io, destination, bytes, constants.packet_size_max) catch |err| {
-        if (sockets_mod.sendPressure(err)) |reason| self.send_drops.add(reason, bytes.len);
+        if (Sockets.SendDrops.Reason.fromError(err)) |reason| self.send_drops.add(reason, bytes.len);
         std.log.scoped(.network_discovery).debug("discovery_send_failed endpoint={any} bytes={d} reason={s}", .{ destination, bytes.len, @errorName(err) });
         return switch (err) {
             error.AccessDenied,
@@ -232,14 +232,14 @@ fn recordFailure(result: *StepResult, err: Error, stage: FailureStage) void {
     result.failure_stage = stage;
 }
 
-fn receiveDatagram(self: *Transport, io: std.Io, wake_ms: u64, ready: ?*[2]bool, result: *StepResult) Error!?sockets_mod.Datagram {
+fn receiveDatagram(self: *Transport, io: std.Io, wake_ms: u64, ready: ?*[2]bool, result: *StepResult) Error!?Sockets.Datagram {
     const deadline_ms = @min(wake_ms, self.engine.nextDeadlineMs() orelse wake_ms);
     const wait_ms = @min(self.config.poll_interval_ms, deadline_ms -| result.now_ms);
     const timeout = std.Io.Timeout{ .duration = .{
         .raw = .fromMilliseconds(wait_ms),
         .clock = .awake,
     } };
-    const received: sockets_mod.DatagramError!?sockets_mod.Datagram = if (ready) |eligible|
+    const received: Sockets.DatagramError!?Sockets.Datagram = if (ready) |eligible|
         self.sockets.receiveReadyDatagram(io, &self.receive_buffer, eligible)
     else if (self.sockets.receiveDatagram(io, &self.receive_buffer, timeout)) |packet| packet else |err| err;
     return received catch |err| switch (err) {
@@ -255,7 +255,7 @@ fn receiveDatagram(self: *Transport, io: std.Io, wake_ms: u64, ready: ?*[2]bool,
 fn processDatagram(
     self: *Transport,
     io: std.Io,
-    datagram: sockets_mod.Datagram,
+    datagram: Sockets.Datagram,
     result: *StepResult,
 ) Error!void {
     if (!self.engine.admitDatagram(&datagram.from, result.now_ms)) {
