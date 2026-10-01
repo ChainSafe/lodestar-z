@@ -4,9 +4,7 @@ const crypto = @import("identity/crypto.zig");
 const Transport = @import("Transport.zig");
 const Engine = @import("Engine.zig");
 const enr = @import("identity/enr.zig");
-const Lookup = @import("Lookup.zig");
 const Maintenance = @import("Maintenance.zig");
-const lookup_batch = @import("lookup_batch.zig");
 const message = @import("wire/message.zig");
 const RoutingTable = @import("RoutingTable.zig");
 const Sockets = @import("udp").Sockets;
@@ -246,27 +244,26 @@ test "transport returns call expiries when rejecting a malformed datagram" {
         .request_id = try message.RequestId.init(&.{0x45}),
         .enr_sequence = pair.record_a.sequence,
     } };
+    var host: test_support.ManualIo = .{};
     const handle = try pair.transport_a.startCall(
-        std.testing.io,
+        host.io(),
         endpoint(&pair.record_b),
         &pair.record_b,
         &request,
     );
-    try std.Io.sleep(std.testing.io, .fromMilliseconds(2), .awake);
-    try pair.transport_b.sockets.sendTo(
-        std.testing.io,
-        pair.transport_a.localAddress(),
-        &.{0xff},
-        @import("wire/constants.zig").packet_size_max,
-    );
+    host.receive_advance_ms = 1;
+    host.datagram = .{ .from = pair.transport_b.localAddress(), .bytes = &.{0xff} };
 
     var expired: [4]CallTable.Expired = undefined;
-    const result = try pair.transport_a.step(std.testing.io, &expired);
+    const result = try pair.transport_a.step(host.io(), &expired);
     try std.testing.expectEqual(@as(?Transport.Error, null), result.failure);
     try std.testing.expect(result.datagram == .rejected);
     try std.testing.expectEqual(types.RejectReason.malformed_packet, result.datagram.rejected);
     try std.testing.expectEqual(@as(usize, 1), result.calls_expired);
     try std.testing.expectEqual(handle, expired[0].handle);
+    try std.testing.expectEqual(@as(u64, 1), result.now_ms);
+    const next = try pair.transport_a.step(host.io(), &expired);
+    try std.testing.expectEqual(@as(usize, 0), next.calls_expired);
 }
 
 test "transport drops replies its destination refuses and keeps the step's expiries" {
@@ -350,233 +347,6 @@ test "transport fails a call whose handshake is not sent so maintenance keeps th
         try std.testing.expectEqual(@as(usize, 1), later.calls);
         try std.testing.expectEqual(retry.call.handle, expired[0].handle);
     }
-}
-
-test "transport completes a caller-owned lookup across multiple peers" {
-    var network: LookupNetwork = undefined;
-    try network.init(1_000);
-    defer network.deinit();
-
-    var seed_buffer: [Lookup.result_max]RoutingTable.Entry = undefined;
-    const seeds = network.transport_a.engine.closestNodes(&network.record_c.node_id, &seed_buffer);
-    var operation: Lookup = undefined;
-    var operation_candidates: Lookup.Candidates = undefined;
-    try operation.init(&operation_candidates, network.record_a.node_id, network.record_c.node_id, seeds, .dual);
-
-    var cursor: lookup_batch.Cursor = .{};
-    var expired: [4]CallTable.Expired = undefined;
-    const first = try lookup_batch.step(
-        &network.transport_a,
-        std.testing.io,
-        &.{&operation},
-        &cursor,
-        &expired,
-    );
-    try std.testing.expectEqual(@as(u16, 1), first.progress.started);
-    try std.testing.expectEqual(@as(usize, 0), first.transport.calls_expired);
-
-    const from_b = try network.transport_b.step(std.testing.io, &expired);
-    try std.testing.expectEqual(@as(u8, 1), from_b.progress.standard_responses);
-    const second = try lookup_batch.step(
-        &network.transport_a,
-        std.testing.io,
-        &.{&operation},
-        &cursor,
-        &expired,
-    );
-    try std.testing.expectEqual(@as(u16, 1), second.progress.responses);
-    try std.testing.expectEqual(@as(u16, 1), second.progress.started);
-    try std.testing.expectEqual(@as(?u16, 0), second.consumed);
-
-    const from_c = try network.transport_c.step(std.testing.io, &expired);
-    try std.testing.expectEqual(@as(u8, 1), from_c.progress.standard_responses);
-    const completed = try lookup_batch.step(
-        &network.transport_a,
-        std.testing.io,
-        &.{&operation},
-        &cursor,
-        &expired,
-    );
-    try std.testing.expectEqual(@as(u16, 1), completed.progress.responses);
-    try std.testing.expect(operation.isFinished());
-    try std.testing.expectEqual(@as(usize, 0), network.transport_a.engine.calls.count());
-    try std.testing.expect(network.transport_a.engine.routing.contains(&network.record_c.node_id));
-
-    var records: [Lookup.result_max]enr.Record = undefined;
-    const results = operation.results(&records);
-    try std.testing.expectEqual(@as(usize, 2), results.len);
-    try std.testing.expectEqual(network.record_c.node_id, results[0].node_id);
-    try std.testing.expectEqual(network.record_b.node_id, results[1].node_id);
-}
-
-test "lookup expiry is consumed without hiding an unrelated call expiry" {
-    var network: LookupNetwork = undefined;
-    try network.init(1);
-    defer network.deinit();
-
-    const request = message.Message{ .ping = .{
-        .request_id = try message.RequestId.init(&.{0x24}),
-        .enr_sequence = network.record_a.sequence,
-    } };
-    var output: [1_280]u8 = undefined;
-    const caller = try network.transport_a.engine.startCall(
-        &output,
-        endpoint(&network.record_c),
-        &network.record_c,
-        &request,
-        0,
-        &test_support.sealEntropy(10),
-    );
-    const caller_handle = caller.handle;
-    var seed_buffer: [Lookup.result_max]RoutingTable.Entry = undefined;
-    const seeds = network.transport_a.engine.closestNodes(&network.record_c.node_id, &seed_buffer);
-    var operation: Lookup = undefined;
-    var operation_candidates: Lookup.Candidates = undefined;
-    try operation.init(&operation_candidates, network.record_a.node_id, network.record_c.node_id, seeds, .dual);
-
-    defer operation.cancel(&network.transport_a.engine);
-    _ = (try operation.startNext(
-        &network.transport_a.engine,
-        &output,
-        try message.RequestId.init(&.{0x25}),
-        0,
-        &test_support.sealEntropy(20),
-    )).?;
-
-    var cursor: lookup_batch.Cursor = .{};
-    var expired: [4]CallTable.Expired = undefined;
-    const result = try lookup_batch.step(
-        &network.transport_a,
-        std.testing.io,
-        &.{&operation},
-        &cursor,
-        &expired,
-    );
-    try std.testing.expectEqual(@as(u16, 0), result.progress.started);
-    try std.testing.expectEqual(@as(u16, 1), result.progress.failures);
-    try std.testing.expectEqual(@as(usize, 1), result.transport.calls_expired);
-    try std.testing.expectEqual(caller_handle, expired[0].handle);
-    try std.testing.expect(operation.isFinished());
-    try std.testing.expectEqual(@as(usize, 0), network.transport_a.engine.calls.count());
-}
-
-test "lookup step preserves an unrelated response event" {
-    var network: LookupNetwork = undefined;
-    try network.init(1_000);
-    defer network.deinit();
-
-    const request = message.Message{ .ping = .{
-        .request_id = try message.RequestId.init(&.{0x25}),
-        .enr_sequence = network.record_a.sequence,
-    } };
-    const caller_handle = try network.transport_a.startCall(
-        std.testing.io,
-        endpoint(&network.record_c),
-        &network.record_c,
-        &request,
-    );
-    var cursor: lookup_batch.Cursor = .{};
-    var expired: [4]CallTable.Expired = undefined;
-    const answered = try network.transport_c.step(std.testing.io, &expired);
-    try std.testing.expectEqual(@as(u8, 1), answered.progress.standard_responses);
-
-    var seed_buffer: [Lookup.result_max]RoutingTable.Entry = undefined;
-    const seeds = network.transport_a.engine.closestNodes(&network.record_c.node_id, &seed_buffer);
-    var operation: Lookup = undefined;
-    var operation_candidates: Lookup.Candidates = undefined;
-    try operation.init(&operation_candidates, network.record_a.node_id, network.record_c.node_id, seeds, .dual);
-    defer operation.cancel(&network.transport_a.engine);
-
-    const result = try lookup_batch.step(
-        &network.transport_a,
-        std.testing.io,
-        &.{&operation},
-        &cursor,
-        &expired,
-    );
-    try std.testing.expectEqual(@as(u16, 1), result.progress.started);
-    try std.testing.expectEqual(@as(u16, 0), result.progress.responses);
-    try std.testing.expect(result.consumed == null);
-    try std.testing.expect(result.transport.event == .response);
-    try std.testing.expectEqual(
-        caller_handle,
-        result.transport.event.response.matched.handle,
-    );
-}
-
-test "two caller-owned lookups share one transport" {
-    var network: LookupNetwork = undefined;
-    try network.init(1_000);
-    defer network.deinit();
-
-    const peer_c = endpoint(&network.record_c);
-    _ = try network.transport_a.engine.confirmPeer(&peer_c, &network.record_c, 0);
-    var seeds_b_buffer: [Lookup.result_max]RoutingTable.Entry = undefined;
-    const seeds_b = network.transport_a.engine.closestNodes(
-        &network.record_b.node_id,
-        &seeds_b_buffer,
-    );
-    var operation_b: Lookup = undefined;
-    var operation_b_candidates: Lookup.Candidates = undefined;
-    try operation_b.init(
-        &operation_b_candidates,
-        network.record_a.node_id,
-        network.record_b.node_id,
-        seeds_b,
-        .dual,
-    );
-    defer operation_b.cancel(&network.transport_a.engine);
-    var seeds_c_buffer: [Lookup.result_max]RoutingTable.Entry = undefined;
-    const seeds_c = network.transport_a.engine.closestNodes(
-        &network.record_c.node_id,
-        &seeds_c_buffer,
-    );
-    var operation_c: Lookup = undefined;
-    var operation_c_candidates: Lookup.Candidates = undefined;
-    try operation_c.init(
-        &operation_c_candidates,
-        network.record_a.node_id,
-        network.record_c.node_id,
-        seeds_c,
-        .dual,
-    );
-    defer operation_c.cancel(&network.transport_a.engine);
-
-    var cursor: lookup_batch.Cursor = .{};
-    var expired: [4]CallTable.Expired = undefined;
-    var responses_b: usize = 0;
-    var responses_c: usize = 0;
-    for (0..32) |_| {
-        if (operation_b.isFinished() and operation_c.isFinished()) break;
-        const result = try lookup_batch.step(
-            &network.transport_a,
-            std.testing.io,
-            &.{ &operation_b, &operation_c },
-            &cursor,
-            &expired,
-        );
-        try std.testing.expect(result.transport.event != .response or result.consumed != null);
-        if (result.consumed) |index| switch (index) {
-            0 => responses_b += 1,
-            1 => responses_c += 1,
-            else => return error.TestUnexpectedResult,
-        };
-        _ = try network.transport_b.step(std.testing.io, &expired);
-        _ = try network.transport_c.step(std.testing.io, &expired);
-    }
-    try std.testing.expect(operation_b.isFinished());
-    try std.testing.expect(operation_c.isFinished());
-    try std.testing.expectEqual(@as(usize, 2), responses_b);
-    try std.testing.expectEqual(@as(usize, 2), responses_c);
-    try std.testing.expectEqual(@as(usize, 0), network.transport_a.engine.calls.count());
-
-    var records: [Lookup.result_max]enr.Record = undefined;
-    const results_b = operation_b.results(&records);
-    try std.testing.expectEqual(@as(usize, 2), results_b.len);
-    try std.testing.expectEqual(network.record_b.node_id, results_b[0].node_id);
-    const results_c = operation_c.results(&records);
-    try std.testing.expectEqual(@as(usize, 2), results_c.len);
-    try std.testing.expectEqual(network.record_c.node_id, results_c[0].node_id);
 }
 
 const Pair = struct {
@@ -667,62 +437,6 @@ const Pair = struct {
     }
 };
 
-const LookupNetwork = struct {
-    record_a: enr.Record,
-    record_b: enr.Record,
-    record_c: enr.Record,
-    transport_a: Transport,
-    transport_b: Transport,
-    transport_c: Transport,
-
-    fn init(self: *LookupNetwork, request_timeout_ms: u64) !void {
-        const loopback = net.IpAddress{ .ip4 = .loopback(0) };
-        self.transport_a.sockets = try Sockets.bind(std.testing.io, .single(loopback));
-        errdefer self.transport_a.sockets.close(std.testing.io);
-        self.transport_b.sockets = try Sockets.bind(std.testing.io, .single(loopback));
-        errdefer self.transport_b.sockets.close(std.testing.io);
-        self.transport_c.sockets = try Sockets.bind(std.testing.io, .single(loopback));
-        errdefer self.transport_c.sockets.close(std.testing.io);
-
-        const key_a = try keyPair(0x11);
-        const key_b = try keyPair(0x22);
-        const key_c = try keyPair(0x33);
-        self.record_a = try enr.Record.create(&key_a, 1, self.transport_a.localAddress());
-        self.record_b = try enr.Record.create(&key_b, 1, self.transport_b.localAddress());
-        self.record_c = try enr.Record.create(&key_c, 1, self.transport_c.localAddress());
-        const config = Engine.Config{
-            .session_capacity = 4,
-            .challenge_capacity = 4,
-            .call_capacity = 4,
-            .request_timeout_ms = request_timeout_ms,
-            .challenge_timeout_ms = 1_000,
-            .session_idle_timeout_ms = std.math.maxInt(u64),
-        };
-        try self.transport_a.init(std.testing.allocator, self.transport_a.sockets, key_a, self.record_a, .{ .engine = config, .poll_interval_ms = 10 });
-        errdefer self.transport_a.engine.deinit(std.testing.allocator);
-        try self.transport_b.init(std.testing.allocator, self.transport_b.sockets, key_b, self.record_b, .{ .engine = config, .poll_interval_ms = 10 });
-        errdefer self.transport_b.engine.deinit(std.testing.allocator);
-        try self.transport_c.init(std.testing.allocator, self.transport_c.sockets, key_c, self.record_c, .{ .engine = config, .poll_interval_ms = 10 });
-        errdefer self.transport_c.engine.deinit(std.testing.allocator);
-
-        installSession(&self.transport_a.engine, endpoint(&self.record_b), 0x51);
-        installSession(&self.transport_b.engine, endpoint(&self.record_a), 0x51);
-        installSession(&self.transport_a.engine, endpoint(&self.record_c), 0x52);
-        installSession(&self.transport_c.engine, endpoint(&self.record_a), 0x52);
-
-        const peer_b = endpoint(&self.record_b);
-        const peer_c = endpoint(&self.record_c);
-        _ = try self.transport_a.engine.confirmPeer(&peer_b, &self.record_b, 0);
-        _ = try self.transport_b.engine.confirmPeer(&peer_c, &self.record_c, 0);
-    }
-
-    fn deinit(self: *LookupNetwork) void {
-        self.transport_c.deinit(std.testing.allocator, std.testing.io);
-        self.transport_b.deinit(std.testing.allocator, std.testing.io);
-        self.transport_a.deinit(std.testing.allocator, std.testing.io);
-    }
-};
-
 fn variantNodeId(base: types.NodeId, salt: u8) types.NodeId {
     var result = base;
     result[31] ^= salt;
@@ -746,16 +460,17 @@ test "transport reports truncation alongside already produced expiries" {
         0,
         &test_support.sealEntropy(0x33),
     );
-    const destination = pair.transport_a.sockets.primary().address;
-    const oversized = [_]u8{0xff} ** 1_281;
-    try pair.transport_b.sockets.primary().send(std.testing.io, &destination, &oversized);
+    var host: test_support.ManualIo = .{
+        .now_ms = 1_000,
+        .datagram = .{ .from = pair.transport_b.localAddress(), .bytes = &.{0xff}, .truncated = true },
+    };
     var expired: [4]CallTable.Expired = undefined;
-    const result = try pair.transport_a.step(std.testing.io, &expired);
+    const result = try pair.transport_a.step(host.io(), &expired);
     try std.testing.expectEqual(@as(?Transport.Error, null), result.failure);
     try std.testing.expect(result.datagram == .rejected);
     try std.testing.expectEqual(@as(usize, 1), result.calls_expired);
     try std.testing.expectEqual(started.handle, expired[0].handle);
-    const next = try pair.transport_a.step(std.testing.io, &expired);
+    const next = try pair.transport_a.step(host.io(), &expired);
     try std.testing.expectEqual(@as(usize, 0), next.calls_expired);
 }
 
@@ -776,10 +491,11 @@ test "transport preserves expiry delivery when the host cannot receive" {
         0,
         &test_support.sealEntropy(0x33),
     );
-    var host = PollFailure{ .now_ms = 100 };
+    var host: test_support.ManualIo = .{ .now_ms = 100, .receive_failure = error.ConcurrencyUnavailable };
     var expired: [4]CallTable.Expired = undefined;
     const result = try pair.transport_a.step(host.io(), &expired);
     try std.testing.expectEqual(error.ConcurrencyUnavailable, result.failure.?);
+    try std.testing.expectEqual(Transport.FailureStage.receive, result.failure_stage);
     try std.testing.expectEqual(@as(usize, 1), result.calls_expired);
     try std.testing.expectEqual(started.handle, expired[0].handle);
     const next = try pair.transport_a.step(host.io(), &expired);
@@ -803,40 +519,15 @@ test "transport polls no later than a pending call deadline" {
         0,
         &test_support.sealEntropy(0x33),
     );
-    var host = PollFailure{ .now_ms = 100 };
+    var host: test_support.ManualIo = .{ .now_ms = 100, .receive_failure = error.ConcurrencyUnavailable };
     var expired: [4]CallTable.Expired = undefined;
     const result = try pair.transport_a.step(host.io(), &expired);
     try std.testing.expectEqual(error.ConcurrencyUnavailable, result.failure.?);
+    try std.testing.expectEqual(Transport.FailureStage.receive, result.failure_stage);
     try std.testing.expectEqual(@as(i96, 5), host.poll_ms.?);
     _ = try pair.transport_a.stepUntil(host.io(), &expired, 102);
     try std.testing.expectEqual(@as(i96, 2), host.poll_ms.?);
 }
-
-const PollFailure = struct {
-    now_ms: u64,
-    poll_ms: ?i96 = null,
-
-    fn io(self: *PollFailure) std.Io {
-        const vtable = comptime blk: {
-            var value = std.Io.failing.vtable.*;
-            value.now = now;
-            value.batchAwaitConcurrent = receive;
-            break :blk value;
-        };
-        return .{ .userdata = self, .vtable = &vtable };
-    }
-
-    fn now(context: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
-        const self: *PollFailure = @ptrCast(@alignCast(context.?));
-        return .{ .nanoseconds = @as(i96, self.now_ms) * std.time.ns_per_ms };
-    }
-
-    fn receive(context: ?*anyopaque, _: *std.Io.Batch, timeout: std.Io.Timeout) std.Io.Batch.AwaitConcurrentError!void {
-        const self: *PollFailure = @ptrCast(@alignCast(context.?));
-        self.poll_ms = timeout.duration.raw.toMilliseconds();
-        return error.ConcurrencyUnavailable;
-    }
-};
 
 test "transport cancels a discovery call dropped by local pressure without recording a remote timeout" {
     var pair: Pair = undefined;

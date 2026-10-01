@@ -304,11 +304,12 @@ test "a junk flood on the discovery socket costs discovery-only turns in batches
     const visits = Visits.capture(&node);
     const counted = datagramsCounted(&node);
     for ([_]u16{ runtime.discovery_batch_max, 40 - runtime.discovery_batch_max }) |expected| {
+        const before = datagramsCounted(&node);
         const now = try currentTime();
         const result = node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| 5_000));
         try std.testing.expect(result.failure == null);
         try std.testing.expect(result.readiness.discoveryReady() and result.discovery_only);
-        try std.testing.expectEqual(expected, result.discovery.datagrams);
+        try std.testing.expectEqual(expected, datagramsCounted(&node) - before);
         try std.testing.expectEqual(@as(u32, 0), result.transport.datagrams_sent);
     }
     try std.testing.expectEqual(counted + 40, datagramsCounted(&node));
@@ -337,7 +338,7 @@ test "discovery readiness with other work due runs a full turn" {
     const result = node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| 5_000));
     try std.testing.expect(result.failure == null and result.readiness.discoveryReady());
     try std.testing.expect(!result.discovery_only);
-    try std.testing.expectEqual(@as(u16, 1), result.discovery.datagrams);
+    try std.testing.expectEqual(@as(u64, 1), datagramsCounted(&node));
     try std.testing.expect(result.transport.datagrams_sent > 0);
 }
 

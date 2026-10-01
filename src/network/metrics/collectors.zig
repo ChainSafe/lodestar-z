@@ -484,7 +484,7 @@ fn rejectStage(reason: @import("discv5").types.RejectReason) []const u8 {
         .admission_limited => "admission",
         .malformed_packet => "packet",
         .unexpected_handshake, .invalid_handshake, .unexpected_challenge => "handshake",
-        .invalid_record => "record",
+        .invalid_record, .record_admission_limited => "record",
         .malformed_message, .request_too_large => "message",
         .unsolicited_response, .invalid_response, .duplicate_response => "response",
     };

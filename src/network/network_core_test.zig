@@ -700,9 +700,6 @@ test "core socket faults preserve the other owner and local dial refusal is defe
         faults.receive_calls = 0;
         const result = node.step(io, now, .{}, .deadlineOnly(now.mono_ms +| 1000));
         try std.testing.expectEqual(error.Canceled, result.failure.?);
-        if (socket.handle == node.discovery.?.transport.sockets.primary().handle) {
-            try std.testing.expectEqual(@import("discv5").Transport.FailureStage.receive, result.discovery.failure_stage);
-        }
         try std.testing.expect(faults.receive_calls >= 1);
         try std.testing.expect(node.last_now.mono_ms >= now.mono_ms);
         faults.receive = null;
@@ -751,11 +748,14 @@ test "core discovery drain is nonblocking under the standalone default interval"
     const now = try @import("transport.zig").currentTime(std.testing.io);
     // The readable datagram keeps the drain going until a receive finds the socket empty.
     const drained = node.step(faults.io(), now, .{}, .deadlineOnly(now.mono_ms));
-    try std.testing.expectEqual(@as(u16, 1), drained.discovery.datagrams);
+    try std.testing.expect(drained.failure == null);
+    const rejected = &node.discovery.?.datagram_rejections[@intFromEnum(d.types.RejectReason.malformed_packet)];
+    try std.testing.expectEqual(@as(u64, 1), rejected.*);
     const after_datagram = faults.receive_calls;
     try std.testing.expect(after_datagram >= 2);
     const idle = node.step(faults.io(), node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms));
-    try std.testing.expectEqual(@as(u16, 0), idle.discovery.datagrams);
+    try std.testing.expect(idle.failure == null);
+    try std.testing.expectEqual(@as(u64, 1), rejected.*);
     try std.testing.expectEqual(after_datagram, faults.receive_calls);
     try std.testing.expectEqual(@as(i64, 0), faults.longest_wait_ms);
 }

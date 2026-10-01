@@ -423,7 +423,7 @@ fn findPeer(self: *const CallTable, peer: types.Endpoint) ?usize {
     for (self.entries, 0..) |entry, index| {
         const stored = entry orelse continue;
         if (!stored.sent) continue;
-        if (std.meta.eql(stored.peer, peer)) return index;
+        if (stored.peer.eql(&peer)) return index;
     }
     return null;
 }
@@ -448,7 +448,7 @@ fn findNonce(
         if (excluded) |handle| {
             if (index == handle.index and stored.generation == handle.generation) continue;
         }
-        if (!std.meta.eql(stored.peer.address, address)) continue;
+        if (!stored.peer.address.eql(address)) continue;
         if (std.mem.eql(u8, &stored.sent_nonce, nonce)) return index;
     }
     return null;

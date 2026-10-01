@@ -145,7 +145,7 @@ test "matched NODES consumes record credit before validation and retains the cal
     const sealed = try pair.node_b.channel.sealEstablished(&pair.b_to_a, pair.peerA(), plaintext, &sealEntropy(0x30), 1);
     for (0..2) |_| try std.testing.expect(pair.node_a.channel.admission.allowRecords(&pair.address_b, types.findnode_result_max, 0));
     const refused = try pair.node_a.receive(&pair.a_to_b, pair.b_to_a[0..sealed.packet_length], pair.address_b, receiveArgs(2, 0x40), &pair.scratch_a);
-    try std.testing.expectEqual(types.RejectReason.admission_limited, refused.rejected);
+    try std.testing.expectEqual(types.RejectReason.record_admission_limited, refused.rejected);
     try std.testing.expectEqual(@as(usize, 1), pair.node_a.calls.count());
     const admitted = try pair.node_a.receive(&pair.a_to_b, pair.b_to_a[0..sealed.packet_length], pair.address_b, receiveArgs(40, 0x40), &pair.scratch_a);
     try std.testing.expectEqual(types.RejectReason.invalid_record, admitted.rejected);
@@ -522,7 +522,7 @@ test "engine rejects a local record owned by another key" {
     var invalid: TestEngine = undefined;
     try std.testing.expectError(
         Engine.InitError.InvalidLocalRecord,
-        invalid.init(std.testing.allocator, key_a, record_b),
+        invalid.initWithConfig(std.testing.allocator, key_a, record_b, .{}),
     );
 }
 

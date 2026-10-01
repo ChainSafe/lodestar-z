@@ -106,3 +106,64 @@ pub fn channelConfig() Channel.Config {
         .session_idle_timeout_ms = 1_000,
     };
 }
+
+pub const ManualIo = struct {
+    now_ms: u64 = 0,
+    receive_advance_ms: u64 = 0,
+    receive_failure: ?std.Io.Batch.AwaitConcurrentError = null,
+    datagram: ?struct { from: types.Address, bytes: []const u8, truncated: bool = false } = null,
+    poll_ms: ?i64 = null,
+
+    pub fn io(self: *ManualIo) std.Io {
+        const vtable = comptime blk: {
+            var value = std.Io.failing.vtable.*;
+            value.now = now;
+            value.randomSecure = random;
+            value.netSend = send;
+            value.batchAwaitConcurrent = receive;
+            value.batchCancel = cancel;
+            break :blk value;
+        };
+        return .{ .userdata = self, .vtable = &vtable };
+    }
+
+    fn now(context: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+        const self: *ManualIo = @ptrCast(@alignCast(context.?));
+        return .{ .nanoseconds = @as(i96, self.now_ms) * std.time.ns_per_ms };
+    }
+
+    fn random(_: ?*anyopaque, bytes: []u8) std.Io.RandomSecureError!void {
+        @memset(bytes, 0x11);
+    }
+
+    fn send(_: ?*anyopaque, _: std.Io.net.Socket.Handle, messages: []std.Io.net.OutgoingMessage, _: std.Io.net.SendFlags) struct { ?std.Io.net.Socket.SendError, usize } {
+        return .{ null, messages.len };
+    }
+
+    fn receive(context: ?*anyopaque, batch: *std.Io.Batch, timeout: std.Io.Timeout) std.Io.Batch.AwaitConcurrentError!void {
+        const self: *ManualIo = @ptrCast(@alignCast(context.?));
+        self.poll_ms = timeout.duration.raw.toMilliseconds();
+        self.now_ms += self.receive_advance_ms;
+        if (self.receive_failure) |err| return err;
+        const datagram = self.datagram orelse return error.Timeout;
+        self.datagram = null;
+        std.debug.assert(batch.storage.len == 1);
+        std.debug.assert(batch.submitted.head == std.Io.Operation.OptionalIndex.fromIndex(0));
+        const operation = batch.storage[0].submission.operation.net_receive;
+        std.debug.assert(datagram.bytes.len <= operation.data_buffer.len);
+        @memcpy(operation.data_buffer[0..datagram.bytes.len], datagram.bytes);
+        operation.message_buffer[0] = .{
+            .from = datagram.from.toNetwork(),
+            .data = operation.data_buffer[0..datagram.bytes.len],
+            .control = &.{},
+            .flags = .{ .eor = false, .trunc = datagram.truncated, .ctrunc = false, .oob = false, .errqueue = false },
+        };
+        batch.storage[0] = .{ .completion = .{ .node = .{ .next = .none }, .result = .{ .net_receive = .{ null, 1 } } } };
+        batch.submitted = .empty;
+        batch.completed = .{ .head = .fromIndex(0), .tail = .fromIndex(0) };
+    }
+
+    fn cancel(_: ?*anyopaque, batch: *std.Io.Batch) void {
+        std.debug.assert(batch.pending.head == .none);
+    }
+};

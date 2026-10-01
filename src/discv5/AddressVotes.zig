@@ -62,7 +62,7 @@ pub fn attempted(self: *AddressVotes, peer: *const types.Endpoint, handle: CallT
 
 pub fn localFailure(self: *AddressVotes, peer: *const types.Endpoint, handle: CallTable.Handle) void {
     for (&self.tables[index(peer.address)].entries) |*slot| if (slot.*) |entry| {
-        if (entry.observed == null and std.meta.eql(entry.attempt, handle) and std.meta.eql(entry.peer, peer.*)) slot.* = null;
+        if (entry.observed == null and std.meta.eql(entry.attempt, handle) and entry.peer.eql(peer)) slot.* = null;
     };
 }
 
@@ -110,10 +110,7 @@ fn replace(self: *AddressVotes, peer: *const types.Endpoint, value: Entry, now_m
 
 fn collides(a: *const types.Endpoint, b: *const types.Endpoint) bool {
     if (std.mem.eql(u8, &a.node_id, &b.node_id)) return true;
-    return switch (a.address) {
-        .ip4 => |ip| b.address == .ip4 and std.mem.eql(u8, ip.octets[0..3], b.address.ip4.octets[0..3]),
-        .ip6 => |ip| b.address == .ip6 and std.mem.eql(u8, ip.octets[0..8], b.address.ip6.octets[0..8]),
-    };
+    return types.sameSubnet(a.address, b.address);
 }
 
 fn index(address: types.Address) usize {

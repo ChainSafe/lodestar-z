@@ -249,7 +249,7 @@ pub fn challengeCount(self: *const SessionStore) usize {
 
 fn findChallenge(self: *const SessionStore, peer: types.Endpoint) ?usize {
     for (self.challenges, 0..) |entry, index| {
-        if (entry) |stored| if (std.meta.eql(stored.peer, peer)) return index;
+        if (entry) |stored| if (stored.peer.eql(&peer)) return index;
     }
     return null;
 }

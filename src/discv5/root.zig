@@ -29,6 +29,7 @@ test {
     _ = Engine;
     _ = Lookup;
     _ = Maintenance;
+    _ = AddressVotes;
     _ = ResponsePlan;
     _ = RoutingTable;
     _ = SessionStore;
@@ -36,16 +37,4 @@ test {
     _ = lookup_batch;
     _ = types;
     _ = wire;
-    _ = @import("CallTable.zig");
-    _ = @import("Channel.zig");
-    _ = @import("Transport.zig");
-    _ = @import("Engine.zig");
-    _ = @import("Lookup.zig");
-    _ = @import("ResponsePlan.zig");
-    _ = @import("RoutingTable.zig");
-    _ = @import("SessionStore.zig");
-    _ = @import("lookup_batch.zig");
-    _ = @import("Maintenance.zig");
-    _ = @import("types.zig");
-    _ = @import("root_udp_test.zig");
 }

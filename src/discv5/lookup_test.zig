@@ -678,3 +678,35 @@ test "discovered alternate retry preserves family relay port and total query lim
         try std.testing.expectEqual(@as(u16, if (case.retries) 3 else 2), lookup.statistics().queries_started);
     }
 }
+
+test "lookup evaluates each eligible filter once per selection and refreshes it next pass" {
+    const Filter = struct {
+        wanted: types.NodeId,
+        calls: [4]u8 = @splat(0),
+
+        fn matches(context: *const anyopaque, record: *const enr.Record) bool {
+            const self: *@This() = @ptrCast(@alignCast(@constCast(context)));
+            self.calls[record.node_id[31]] += 1;
+            return std.mem.eql(u8, &self.wanted, &record.node_id);
+        }
+    };
+    var core = try initEngine();
+    defer core.deinit(std.testing.allocator);
+    const seeds = [_]RoutingTable.Entry{ fakeEntry(1), fakeEntry(2), fakeEntry(3) };
+    for (&seeds) |*seed| installSession(&core, seed.peer, 0x55);
+    var operation: Lookup = undefined;
+    var candidates: Lookup.Candidates = undefined;
+    try operation.init(&candidates, core.localRecord().node_id, @splat(0), &seeds, .dual);
+    defer operation.cancel(&core);
+    var filter: Filter = .{ .wanted = nodeId(1) };
+    operation.filter = .{ .context = &filter, .matches = Filter.matches };
+    var out: [1280]u8 = undefined;
+    const first = (try operation.startNext(&core, &out, try .init(&.{1}), 1, &sealEntropy(1))).?;
+    try std.testing.expectEqual(nodeId(1), first.peer.node_id);
+    try std.testing.expectEqual([4]u8{ 0, 1, 1, 1 }, filter.calls);
+    filter.wanted = nodeId(3);
+    filter.calls = @splat(0);
+    const second = (try operation.startNext(&core, &out, try .init(&.{2}), 2, &sealEntropy(2))).?;
+    try std.testing.expectEqual(nodeId(3), second.peer.node_id);
+    try std.testing.expectEqual([4]u8{ 0, 0, 1, 1 }, filter.calls);
+}

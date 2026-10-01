@@ -119,21 +119,41 @@ pub fn get(self: *const RoutingTable, node_id: *const types.NodeId) ?Entry {
     return self.bucketEntries(index)[position];
 }
 
+/// Visits each slot at most once, starting at and advancing `cursor`. Entries are copied;
+/// callers must not mutate the table during a traversal.
+pub fn iterate(self: *const RoutingTable, cursor: *usize) Iterator {
+    std.debug.assert(cursor.* < table_capacity);
+    return .{ .table = self, .cursor = cursor };
+}
+
+pub const Iterator = struct {
+    table: *const RoutingTable,
+    cursor: *usize,
+    remaining: usize = table_capacity,
+
+    pub fn next(self: *Iterator) ?Entry {
+        while (self.remaining > 0) {
+            self.remaining -= 1;
+            const offset = self.cursor.*;
+            self.cursor.* = (offset + 1) % table_capacity;
+            if (offset % bucket_size >= self.table.counts[offset / bucket_size]) continue;
+            return self.table.entries[offset];
+        }
+        return null;
+    }
+};
+
 pub fn maintenanceTarget(
     self: *const RoutingTable,
     cursor: *usize,
     now_ms: u64,
     stale_after_ms: u64,
 ) ?Entry {
-    std.debug.assert(cursor.* < table_capacity);
-    for (0..table_capacity) |_| {
-        const offset = cursor.*;
-        cursor.* = (offset + 1) % table_capacity;
-        const index = offset / bucket_size;
-        if (offset % bucket_size >= self.counts[index]) continue;
-        const entry = self.entries[offset];
+    var iterator = self.iterate(cursor);
+    while (iterator.next()) |entry| {
         const verified_ms = entry.last_verified_ms orelse continue;
         if (now_ms -| verified_ms < stale_after_ms) continue;
+        const index = bucketIndex(types.logDistance(&self.local_id, &entry.peer.node_id));
         if (self.pending[index]) |candidate| {
             if (std.mem.eql(u8, &candidate.replace_id, &entry.peer.node_id)) continue;
         }
@@ -387,13 +407,13 @@ fn requireAddressCapacity(
     for (0..bucket_count) |index| {
         for (self.bucketEntries(index)) |entry| {
             if (std.mem.eql(u8, &entry.peer.node_id, exclude_id)) continue;
-            if (!sameSubnet(entry.peer.address, address)) continue;
+            if (!types.sameSubnet(entry.peer.address, address)) continue;
             table_matches += 1;
             if (index == bucket_index) bucket_matches += 1;
         }
         if (self.pending[index]) |candidate| {
             if (std.mem.eql(u8, &candidate.entry.peer.node_id, exclude_id)) continue;
-            if (!sameSubnet(candidate.entry.peer.address, address)) continue;
+            if (!types.sameSubnet(candidate.entry.peer.address, address)) continue;
             table_matches += 1;
             if (index == bucket_index) bucket_matches += 1;
         }
@@ -467,20 +487,6 @@ fn recordHasAddress(record: *const enr.Record, address: types.Address) bool {
                 std.mem.eql(u8, &ip, &value.octets)
         else
             false,
-    };
-}
-
-// Same IPv4 /24 or IPv6 /64.
-fn sameSubnet(left: types.Address, right: types.Address) bool {
-    return switch (left) {
-        .ip4 => |value| switch (right) {
-            .ip4 => |other| std.mem.eql(u8, value.octets[0..3], other.octets[0..3]),
-            .ip6 => false,
-        },
-        .ip6 => |value| switch (right) {
-            .ip4 => false,
-            .ip6 => |other| std.mem.eql(u8, value.octets[0..8], other.octets[0..8]),
-        },
     };
 }
 

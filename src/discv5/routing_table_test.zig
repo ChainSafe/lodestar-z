@@ -716,3 +716,44 @@ test "routing table reserves half of each bucket for outgoing peers" {
     try std.testing.expectError(error.IncomingLimit, table.upsertVerified(&peer, &record, 2, .incoming));
     try std.testing.expectEqual(RoutingTable.PutResult.inserted, try table.upsertVerified(&peer, &record, 2, .outgoing));
 }
+
+test "routing traversal is bounded ordered and returns independent copies" {
+    var table: RoutingTable = undefined;
+    try table.init(std.testing.allocator, @splat(0));
+    defer table.deinit(std.testing.allocator);
+    var cursor: usize = 13;
+    var empty = table.iterate(&cursor);
+    try std.testing.expect(empty.next() == null);
+    try std.testing.expectEqual(@as(usize, 13), cursor);
+    try std.testing.expect(empty.next() == null);
+
+    const ids = [_]types.NodeId{ nodeAtDistance(241, 1), nodeAtDistance(256, 1), nodeAtDistance(256, 2) };
+    for (ids, 0..) |id, i| {
+        const address = address4(203, @intCast(i + 1), 1, 1, 9000);
+        const record = fakeRecord(id, address, 1);
+        const peer: types.Endpoint = .{ .node_id = id, .address = address };
+        if (i == 1) {
+            try std.testing.expect(try table.addKnown(&peer, &record));
+        } else {
+            _ = try table.upsertVerified(&peer, &record, 0, .outgoing);
+        }
+    }
+    cursor = 0;
+    var iterator = table.iterate(&cursor);
+    for (ids, 0..) |id, i| {
+        var entry = iterator.next().?;
+        try std.testing.expectEqual(id, entry.peer.node_id);
+        try std.testing.expectEqual(i == 1, entry.last_verified_ms == null);
+        entry.record.sequence = 99;
+        try std.testing.expectEqual(@as(u64, 1), table.get(&id).?.record.sequence);
+    }
+    try std.testing.expect(iterator.next() == null);
+    try std.testing.expectEqual(@as(usize, 0), cursor);
+    try std.testing.expect(iterator.next() == null);
+
+    cursor = RoutingTable.table_capacity - 1;
+    var wrapped = table.iterate(&cursor);
+    for (ids) |id| try std.testing.expectEqual(id, wrapped.next().?.peer.node_id);
+    try std.testing.expect(wrapped.next() == null);
+    try std.testing.expectEqual(RoutingTable.table_capacity - 1, cursor);
+}
