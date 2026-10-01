@@ -337,7 +337,7 @@ pub fn flags(runtime: *Runtime, now: n.Now) !bool {
         if (!cell.native) continue;
         const core = &runtime.heavy.?.core;
         if (cell.action == .cancel or runtime.stop) {
-            _ = core.cancel(cell.handle);
+            _ = core.cancel(cell.handle, now);
             continue;
         }
         if (cell.permission_awaited and !cell.permission_ready and core.service.reqresp.responseReadiness(cell.handle) == .ready) {
@@ -383,7 +383,7 @@ pub fn captureLocked(runtime: *Runtime, event: rr.ReqResp.Event, now: n.Now) !vo
         error.OutOfMemory => {
             runtime.diag.operationalFailures +|= 1;
             runtime.heavy.?.core.respondError(event.request.request, 2, "local serving allocation failed", now) catch {
-                _ = runtime.heavy.?.core.cancel(event.request.request);
+                _ = runtime.heavy.?.core.cancel(event.request.request, now);
             };
         },
         else => return err,
@@ -446,13 +446,13 @@ fn admitLocked(runtime: *Runtime, request: @FieldType(rr.ReqResp.Event, "request
     const table = &runtime.incoming.?;
     const core = &runtime.heavy.?.core;
     const identity = core.transport.engine.peerId(request.peer) orelse {
-        _ = core.cancel(request.request);
+        _ = core.cancel(request.request, now);
         return;
     };
     const token = table.reserve(request.protocol, request.bytes.len) catch |err| switch (err) {
         error.NetworkIncomingFull, error.NetworkBridgeFull => {
             core.respondError(request.request, 2, "application capacity exhausted", now) catch {
-                _ = core.cancel(request.request);
+                _ = core.cancel(request.request, now);
             };
             return;
         },

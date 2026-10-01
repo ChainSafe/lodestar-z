@@ -1,8 +1,7 @@
+const std = @import("std");
 const protocol = @import("protocol.zig");
 const RequestIO = @import("RequestIO.zig");
-const std = @import("std");
 const codec = @import("codec.zig");
-const constants = @import("constants.zig");
 
 const Decoder = codec.Decoder;
 

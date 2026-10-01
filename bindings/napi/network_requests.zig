@@ -333,7 +333,7 @@ pub fn flags(runtime: *Runtime, io: std.Io) void {
         if (cell.state == .free or cell.state == .preparing or cell.state == .queued or cell.copying) continue;
         if (cell.cancel or runtime.stop) {
             cell.chunk = null;
-            if (cell.native) |handle| _ = runtime.heavy.?.core.cancel(handle);
+            if (cell.native) |handle| _ = runtime.heavy.?.core.cancel(handle, @import("network_owner.zig").now(io));
         } else if (cell.consume) {
             cell.consume = false;
             cell.chunk = null;

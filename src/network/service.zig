@@ -57,9 +57,9 @@ pub const Service = struct {
         };
     }
 
-    pub fn shutdown(self: *Service, engine: *Engine) void {
+    pub fn shutdown(self: *Service, engine: *Engine, now: types.Now) void {
         self.identify.shutdown(&self.router, engine);
-        self.reqresp.shutdown(engine, &self.router);
+        self.reqresp.shutdown(engine, &self.router, now);
         self.gossipsub.shutdown(&self.router, engine);
         self.router.negotiator.shutdown(engine);
         self.applications = .closed;
@@ -147,7 +147,7 @@ pub const Service = struct {
         now: types.Now,
     ) void {
         if (self.applications == .quiescing) {
-            self.reqresp.cancelApplications(engine, &self.router);
+            self.reqresp.cancelApplications(engine, &self.router, now);
             self.gossipsub.shutdown(&self.router, engine);
             self.applications = .closed;
         }
@@ -168,8 +168,8 @@ pub const Service = struct {
         self.reqresp.cleanupPending(engine, &self.router);
         self.router.transportEvents(engine, events, now);
         for (events) |event| switch (event) {
-            .closed => |closed| self.reqresp.connectionClosed(closed.conn),
-            .stream_closed => |closed| self.reqresp.streamClosed(closed.route, closed.stream, closed.reset_code),
+            .closed => |closed| self.reqresp.connectionClosed(closed.conn, now),
+            .stream_closed => |closed| self.reqresp.streamClosed(closed.route, closed.stream, closed.reset_code, now),
             else => {},
         };
         self.identify.transportEvents(engine, events);

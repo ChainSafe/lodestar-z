@@ -114,7 +114,7 @@ test "core native immutable metadata response survives local update during pendi
     for (0..40) |_| {
         try setup.step(0);
         for (setup.server.control_protocol.responses) |response| if (response.request) |request| {
-            const slot = setup.server.service.reqresp.inboundSlot(request).?;
+            const slot = &setup.server.service.reqresp.inbound[request.index];
             if (slot.request.protocol != .metadata_v1) continue;
             try std.testing.expect(slot.request.io.writing);
             const changed: t.Metadata = .{ .seq_number = 5, .attnets = @splat(9) };
@@ -176,8 +176,8 @@ fn failStatus(setup: *Setup, failure: rr.ReqResp.Failure) !void {
     for (setup.client.control_protocol.operations) |operation| if (operation.request) |request| {
         if (operation.protocol != .status_v1) continue;
         const service = &setup.client.service.reqresp;
-        const slot = service.outboundSlot(request).?;
-        slot.fail(service, request.index, failure);
+        const slot = &service.outbound[request.index];
+        slot.fail(service, request.index, failure, setup.pair.now);
         service.cleanupPending(setup.pair.client, &setup.client.service.router);
         return;
     };
@@ -495,7 +495,7 @@ test "core native saturated app requests retain partitioned borrows while contro
             request.bytes,
         );
         delivered += 1;
-        _ = setup.server.service.reqresp.cancel(request.request);
+        _ = setup.server.service.reqresp.cancel(request.request, setup.pair.now);
     }
     try std.testing.expectEqual(@as(usize, 8), delivered);
 }

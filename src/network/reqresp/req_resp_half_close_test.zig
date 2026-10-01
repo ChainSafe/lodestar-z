@@ -77,7 +77,7 @@ fn expectDone(pair: *Pair, request: Request, expected: []const u8) !void {
     try std.testing.expect(done);
     try std.testing.expectEqual(@as(u32, 1), chunks);
     pair.shared.client.reqresp.cleanupPending(&pair.shared.pair.client, &pair.shared.client.router);
-    try std.testing.expect(pair.shared.client.reqresp.outboundSlot(request.handle) == null);
+    try std.testing.expect(!pair.shared.client.reqresp.outbound[request.handle.index].request.awaitingTerminal());
     try std.testing.expect(!pair.shared.pair.client.registry.slots[pair.shared.handles.client.index].table.matches(
         pair.shared.client.reqresp.outbound[request.handle.index].request.stream.slot,
         pair.shared.client.reqresp.outbound[request.handle.index].request.stream.id,
@@ -120,7 +120,7 @@ test "reqresp recovers only complete Goodbye bytes retained by a closed authenti
         const result = pair.shared.server.reqresp.closingGoodbye(&pair.shared.pair.server, &pair.shared.server.router, pair.shared.handles.server, pair.shared.pair.now);
         try std.testing.expectEqual(if (truncated) @as(?u64, null) else @as(?u64, 129), result);
         try std.testing.expect(pair.shared.server.reqresp.closingGoodbye(&pair.shared.pair.server, &pair.shared.server.router, pair.shared.handles.server, pair.shared.pair.now) == null);
-        pair.shared.server.reqresp.connectionClosed(pair.shared.handles.server);
+        pair.shared.server.reqresp.connectionClosed(pair.shared.handles.server, pair.shared.pair.now);
     };
 }
 
@@ -341,7 +341,7 @@ test "reqresp half close cancellation frees the only slot for a subsequent reque
     const first = try negotiate(&pair, .metadata_v3, &.{}, &sink, .{});
     pair.shared.pair.server.shutdown(first.remote, .read, 0);
     for (0..4) |_| try std.testing.expectEqual(@as(usize, 0), (try pump(&pair)).len);
-    try std.testing.expect(pair.shared.client.reqresp.cancel(first.handle));
+    try std.testing.expect(pair.shared.client.reqresp.cancel(first.handle, pair.shared.pair.now));
     try expectFailure(&pair, .cancelled);
     pair.shared.client.reqresp.cleanupPending(&pair.shared.pair.client, &pair.shared.client.router);
     try std.testing.expectEqual(@as(usize, 0), (try pump(&pair)).len);

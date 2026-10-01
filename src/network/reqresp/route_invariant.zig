@@ -17,7 +17,7 @@ pub fn check(engine: *const Engine, outbound: []const Client, inbound: []const S
                 .reqresp_inbound => if (entry.route.row < inbound.len) &inbound[entry.route.row].request else return error.OrphanedRoute,
                 else => continue,
             };
-            if (!record.active() or record.stream_owner != .protocol) return error.OrphanedRoute;
+            if (!record.awaitingTerminal() or record.stream_owner != .protocol) return error.OrphanedRoute;
             const stream: StreamHandle = .{
                 .conn = .{ .index = @intCast(conn_index), .generation = connection.generation },
                 .id = entry.id,

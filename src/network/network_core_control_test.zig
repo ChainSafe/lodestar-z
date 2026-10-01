@@ -566,7 +566,7 @@ test "core control native Fulu serves older schemas but old Status cannot establ
             _ = try setup.turn(&setup.server, .{});
             if (protocol == .goodbye_v1) {
                 for (setup.server.control_protocol.responses) |response| if (response.request) |inbound| {
-                    const owner = setup.server.service.reqresp.inboundSlot(inbound).?;
+                    const owner = &setup.server.service.reqresp.inbound[inbound.index];
                     if (owner.request.protocol != .goodbye_v1 or !owner.request.io.writing) continue;
                     try std.testing.expectEqualSlices(u8, &goodbye_reply, response.bytes[0..8]);
                     goodbye_writer = true;
@@ -793,20 +793,20 @@ test "core native inbound application per peer cap protects control from extra r
     try std.testing.expectEqual(@as(usize, 4), setup.server.service.reqresp.resourceSnapshot().inbound_phases[ready]);
     _ = setup.server.peer_manager.snapshots(&snapshots);
     const server_conn = snapshots[0].connection.?;
-    try std.testing.expect(setup.server.service.reqresp.cancel(first.?));
+    try std.testing.expect(setup.server.service.reqresp.cancel(first.?, setup.pair.now));
     setup.server.service.reqresp.cleanupPending(
         setup.pair.server,
         &setup.server.service.router,
     );
     try std.testing.expectEqual(
         @as(u16, 8),
-        setup.server.service.reqresp.inboundApplicationCount(server_conn),
+        setup.server.service.reqresp.inboundApplicationOccupiedCount(server_conn),
     );
     var stale = server_conn;
     stale.generation += 1;
     try std.testing.expectEqual(
         @as(u16, 0),
-        setup.server.service.reqresp.inboundApplicationCount(stale),
+        setup.server.service.reqresp.inboundApplicationOccupiedCount(stale),
     );
 }
 
@@ -836,7 +836,7 @@ test "core native immutable Status writer survives local update" {
     for (0..40) |_| {
         try setup.step(0);
         for (setup.server.control_protocol.responses) |response| if (response.request) |request| {
-            const slot = setup.server.service.reqresp.inboundSlot(request).?;
+            const slot = &setup.server.service.reqresp.inbound[request.index];
             if (slot.request.protocol != .status_v1) continue;
             try std.testing.expect(slot.request.io.writing);
             try setup.server.updateStatus(&localState(.{ .status = .{ .head_slot = 80 } }).status);
@@ -1548,7 +1548,7 @@ test "core coalesces silent inbound request owners before host request delivery"
         try std.testing.expectEqual(header.len + proposal.len, try setup.pair.client.write(stream, bytes[0 .. header.len + proposal.len], false));
     }
     for (0..30) |_| try setup.step(0);
-    try std.testing.expectEqual(@as(u16, 2), setup.server.service.reqresp.active().inbound);
+    try std.testing.expectEqual(@as(u16, 2), setup.server.service.reqresp.pendingCounts().inbound);
     setup.pair.advance(10_000);
     // Both expired slots are serviced from the deadline heap in one turn.
     var events: [2]rr.ReqResp.Event = undefined;

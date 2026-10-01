@@ -3,7 +3,7 @@ const control = @import("peer_control.zig");
 const Peer = @import("network_peer.zig").Peer;
 
 pub fn emit(peer: *Peer, id: u32) !void {
-    const reqresp = peer.service.reqresp.active();
+    const reqresp = peer.service.reqresp.pendingCounts();
     const gossip = peer.service.gossipsub.resourceSnapshot();
     var streams: usize = 0;
     for (peer.transport.engine.registry.activeIndices()) |index| {

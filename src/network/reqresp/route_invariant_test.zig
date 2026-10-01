@@ -31,7 +31,7 @@ test "reverse route invariant requires the full handle and protocol ownership" {
     const handles = try support.connectPair(&pair);
     const stream = try pair.client.openStream(handles.client);
     var outbound = [_]Client{.{}};
-    outbound[0].request = .{ .completion = .active, .stream = stream };
+    outbound[0].request = .{ .completion = .running, .stream = stream };
     try pair.client.bindStream(stream, .{ .owner = .reqresp_outbound, .row = 0 });
     try invariant.check(&pair.client, &outbound, &.{});
     for (0..4) |changed| {

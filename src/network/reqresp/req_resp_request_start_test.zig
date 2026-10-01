@@ -262,10 +262,10 @@ test "reqresp request start a cancelled waiter leaves no start reserved" {
     for (&cancelled) |*handle| handle.* = try request(&setup, .blocks_by_root_v2, sink);
     try exchange.pumps(20);
     try std.testing.expectEqual(@as(usize, 2), waitingStarts(owner));
-    for (cancelled) |handle| try std.testing.expect(setup.shared.client.reqresp.cancel(handle));
+    for (cancelled) |handle| try std.testing.expect(setup.shared.client.reqresp.cancel(handle, setup.shared.pair.now));
     try exchange.pumps(20);
     try std.testing.expectEqual(@as(usize, 2), exchange.server_failures);
-    try std.testing.expectEqual(@as(u16, 0), owner.active().inbound);
+    try std.testing.expectEqual(@as(u16, 0), owner.pendingCounts().inbound);
     try std.testing.expectEqual(@as(usize, 2), exchange.delivered_len);
     try std.testing.expectEqual(start + refill_ms, owner.admission.limiter.startAt(&identity, false, start));
     setup.shared.pair.advance(refill_ms);
@@ -295,7 +295,7 @@ test "reqresp request start shutdown cancels its waiters without charging them" 
     _ = try request(&setup, .ping_v1, &pongs[2]);
     try exchange.pumps(20);
     try std.testing.expectEqual(@as(usize, 2), waitingStarts(owner));
-    owner.shutdown(&setup.shared.pair.server, &setup.shared.server.router);
+    owner.shutdown(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now);
     var application: [4]rr.Event = undefined;
     var control: [4]rr.Event = undefined;
     var cancelled: usize = 0;
@@ -306,7 +306,7 @@ test "reqresp request start shutdown cancels its waiters without charging them" 
         cancelled += counts.application + counts.control;
     }
     try std.testing.expectEqual(@as(usize, 2), cancelled);
-    try std.testing.expectEqual(@as(u16, 0), owner.active().inbound);
+    try std.testing.expectEqual(@as(u16, 0), owner.pendingCounts().inbound);
     try std.testing.expectEqual(@as(usize, 0), waitingStarts(owner));
     try std.testing.expectEqual(@as(usize, 4), exchange.delivered_len);
     for ([_]bool{ false, true }) |class| try std.testing.expectEqual(start + refill_ms, owner.admission.limiter.startAt(&identity, class, start));
@@ -352,7 +352,7 @@ test "reqresp request start preserves distinct protocol peer and identity capaci
     try std.testing.expectEqual(@as(u64, 3), allRefusals(owner));
     try std.testing.expectEqual(start + refill_ms, owner.admission.limiter.startAt(&identity, false, start));
     try std.testing.expectEqual(@as(?rr.Failure, null), exchange.client_failure);
-    try std.testing.expectEqual(@as(u16, 3), owner.active().inbound);
+    try std.testing.expectEqual(@as(u16, 3), owner.pendingCounts().inbound);
 }
 
 test "reqresp request start a request behind a waiter is still refused without an identity row" {
@@ -380,7 +380,7 @@ test "reqresp request start a request behind a waiter is still refused without a
     try exchange.pumps(20);
     try std.testing.expectEqual(@as(?rr.Failure, .{ .negotiation_failed = .stream_closed }), exchange.client_failure);
     try std.testing.expectEqual(@as(u64, 1), refusals(owner, .blob_sidecars_by_root_v1, .identity_capacity));
-    try std.testing.expectEqual(@as(u16, 1), owner.active().inbound);
+    try std.testing.expectEqual(@as(u16, 1), owner.pendingCounts().inbound);
     try std.testing.expect(owner.inbound[waiter].request.running());
     // The admitted waiter keeps waiting, now for a free row.
     var wire: [codec.frame_scratch_max]u8 = undefined;
@@ -410,7 +410,7 @@ fn deferredSlot(owner: *rr, peer: u16, which: Protocol, identity: *const PeerId,
     slot.request = .{
         .direction = .inbound,
         .generation = 1,
-        .completion = .active,
+        .completion = .running,
         .protocol = which,
         .conn = conn,
         .stream = .{ .conn = conn, .slot = 0, .id = 0 },
@@ -492,7 +492,7 @@ test "reqresp protocol concurrency refusal preserves selection and returns a com
         try expectRateLimitResponse(&setup, refused);
         const owner = &setup.shared.server.reqresp;
         try std.testing.expectEqual(@as(u64, 1), refusals(owner, .blocks_by_root_v2, .protocol_concurrency));
-        try std.testing.expectEqual(@as(u16, 2), owner.active().inbound);
+        try std.testing.expectEqual(@as(u16, 2), owner.pendingCounts().inbound);
     }
 }
 
@@ -550,7 +550,7 @@ test "reqresp request start hard capacity refusal preserves an available start w
         try exchange.pumps(20);
         try std.testing.expectEqual(@as(u64, 1), refusals(owner, .blob_sidecars_by_root_v1, .peer_capacity));
         try std.testing.expectEqual(@as(?rr.Failure, .{ .negotiation_failed = .stream_closed }), exchange.client_failure);
-        try std.testing.expect(owner.cancel(held));
+        try std.testing.expect(owner.cancel(held, setup.shared.pair.now));
         try exchange.pumps(10);
         exchange.client_failure = null;
         const blocks = try std.testing.allocator.alloc(u8, Protocol.blocks_by_root_v2.info().response_max);

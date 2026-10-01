@@ -10,9 +10,7 @@ const StreamHandle = Engine.StreamHandle;
 const protocol = @import("protocol.zig");
 const Now = types.Now;
 const routing = @import("../router.zig");
-const RespondError = ReqResp.RespondError;
 
-const RequestHandle = ReqResp.RequestHandle;
 const Event = ReqResp.Event;
 const Failure = ReqResp.Failure;
 const reads_per_pump_max = RequestIO.reads_per_pump_max;
@@ -35,20 +33,20 @@ identity: @import("../wire/peer_id.zig").PeerId = undefined,
 execution: ?u16 = null,
 admission: @import("InboundAdmission.zig").State = .{},
 
-pub fn complete(self: *Server, owner: *ReqResp, index: u16, event: Event) void {
-    owner.complete(&self.request, index, event, .{ .phase_name = @tagName(self.state), .rejection = self.rejection, .result_code = self.pending_result });
+pub fn complete(self: *Server, owner: *ReqResp, index: u16, event: Event, now: Now) void {
+    owner.complete(&self.request, index, event, .{ .phase_name = @tagName(self.state), .rejection = self.rejection, .result_code = self.pending_result }, now);
 }
 
-pub fn fail(self: *Server, owner: *ReqResp, index: u16, reason: Failure) void {
-    self.complete(owner, index, .{ .failed = .{ .request = self.request.handle(index), .reason = reason, .phase = null } });
+pub fn fail(self: *Server, owner: *ReqResp, index: u16, reason: Failure, now: Now) void {
+    self.complete(owner, index, .{ .failed = .{ .request = self.request.handle(index), .reason = reason, .phase = null } }, now);
 }
 
-fn failIo(self: *Server, owner: *ReqResp, index: u16, err: (Engine.StreamError || codec.Error)) void {
+fn failIo(self: *Server, owner: *ReqResp, index: u16, err: (Engine.StreamError || codec.Error), now: Now) void {
     self.request.failure_detail = @errorName(err);
     self.fail(owner, index, switch (err) {
         error.StaleHandle, error.UnknownStream, error.StreamStopped => .stream_closed,
         else => .transport,
-    });
+    }, now);
 }
 
 /// A finishing slot resumes its FIN once the host has taken its last event.
@@ -100,7 +98,7 @@ pub fn advance(self: *Server, ctx: *ReqResp, engine: *Engine, index: u16, now: N
         if (reason == .timeout and self.state == .receiving_request and !request.protocol.isControl() and
             !request.io.unread(engine, request.stream))
             request.peer_fault = .non_completion;
-        self.fail(ctx, index, reason);
+        self.fail(ctx, index, reason, now);
         return;
     };
     // A peer stop surfaces here while the host holds the slot. With an event still queued
@@ -109,7 +107,7 @@ pub fn advance(self: *Server, ctx: *ReqResp, engine: *Engine, index: u16, now: N
         _ = engine.streamCapacity(request.stream) catch |err| switch (err) {
             error.WouldBlock => 0,
             else => {
-                self.failIo(ctx, index, err);
+                self.failIo(ctx, index, err, now);
                 return;
             },
         };
@@ -128,11 +126,11 @@ fn readRequest(owner: *ReqResp, engine: *Engine, slot: *Server, index: u16, now:
     var reads: u32 = 0;
     while (reads < reads_per_pump_max) : (reads += 1) {
         const input = request.io.read(engine, request.stream) catch |err| {
-            slot.failIo(owner, index, err);
+            slot.failIo(owner, index, err, now);
             return;
         };
         if (input.reset) {
-            slot.fail(owner, index, .stream_closed);
+            slot.fail(owner, index, .stream_closed, now);
             return;
         }
         if (input.progressed) slot.progress_ms = now.mono_ms;
@@ -285,7 +283,7 @@ fn beginWrite(slot: *Server) void {
 fn writeChunk(owner: *ReqResp, engine: *Engine, slot: *Server, index: u16, now: Now) void {
     const request = &slot.request;
     const flushed = request.io.flush(engine, request.stream, false) catch |err| {
-        slot.failIo(owner, index, err);
+        slot.failIo(owner, index, err, now);
         return;
     };
     if (!flushed.done) {
@@ -325,7 +323,7 @@ fn finishStream(
         // An error chunk ends the response, so a peer can stop the stream once it has read one.
         const answered = request.chunks > 0 or slot.pending_result != constants.result_success;
         if (err != error.StreamStopped or !answered or request.io.outbox.offset != request.io.outbox.bytes.len) {
-            slot.failIo(owner, index, err);
+            slot.failIo(owner, index, err, now);
             return;
         }
         std.log.scoped(.network_reqresp).debug("response_finish_stopped request={d}:{d} connection={d}:{d} stream={d} method={s} chunks={d}", .{ index, request.generation, request.conn.index, request.conn.generation, request.stream.id, @tagName(request.protocol), request.chunks });
@@ -337,34 +335,32 @@ fn finishStream(
         return;
     }
     slot.progress_ms = now.mono_ms;
-    slot.complete(owner, index, .{ .served = .{ .request = request.handle(index), .chunks = request.chunks } });
+    slot.complete(owner, index, .{ .served = .{ .request = request.handle(index), .chunks = request.chunks } }, now);
 }
 
 /// The coordinator has checked all capacity and handoff bounds before charging the start.
 pub fn acceptPrepared(
-    owner: *ReqResp,
-    engine: *Engine,
+    slot: *Server,
     stream: StreamHandle,
     ready: routing.Selection,
     accepted: *const @import("InboundAdmission.zig").Acceptance,
+    request_fork: @import("config").ForkSeq,
     now: Now,
-) RequestHandle {
-    const index = accepted.index;
+) void {
     const which = accepted.protocol;
-    const slot = &owner.inbound[index];
     const bounds = &accepted.bounds;
-    const request_sink = owner.inboundSink(index);
+    const request_sink = slot.receive.sink;
     assert(slot.request.available());
     assert(ready.leftover.len <= slot.receive.read.len);
     assert(request_sink.len >= bounds.request_max);
     slot.* = .{
         .receive = slot.receive,
         .identity = accepted.identity,
-        .request_fork = owner.request_fork,
+        .request_fork = request_fork,
         .progress_ms = now.mono_ms,
         .admission = accepted.state,
         .request = .{
-            .completion = .active,
+            .completion = .running,
             .direction = .inbound,
             .generation = slot.request.generation + 1,
             .conn = stream.conn,
@@ -390,70 +386,32 @@ pub fn acceptPrepared(
         );
         slot.request.io.decoding = true;
     }
-    owner.protocol_counters[@intFromEnum(which)].incoming +|= 1;
-    std.log.scoped(.network_reqresp).debug("request_started direction=inbound request={d}:{d} connection={d}:{d} stream={d} method={s}", .{ index, slot.request.generation, stream.conn.index, stream.conn.generation, stream.id, @tagName(which) });
-    if (slot.admission.start_pending) std.log.scoped(.network_reqresp_errors).debug("request_start_wait request={d}:{d} connection={d}:{d} stream={d} method={s} due_in_ms={d}", .{ index, slot.request.generation, stream.conn.index, stream.conn.generation, stream.id, @tagName(which), slot.admission.eligible_ms - now.mono_ms });
-    // A stream that is already gone fails on the slot's first read.
-    engine.bindStream(stream, .{ .owner = .reqresp_inbound, .row = index }) catch {};
-    owner.markReady(.inbound, index);
-    assert(slot.request.active());
-    return slot.request.handle(index);
+    assert(slot.request.awaitingTerminal());
 }
 
-pub fn respond(
-    owner: *ReqResp,
-    request_handle: RequestHandle,
-    ssz: []const u8,
-    context: ?ReqResp.ForkEntry,
-    now: Now,
-) RespondError!void {
-    const slot = try owner.servingSlot(request_handle);
-    const request = &slot.request;
-    const bounds = owner.requestBounds(request.protocol);
-    if (request.chunks >= request.chunks_max) return error.TooManyChunks;
-    var response = codec.Bounds{ .min = bounds.response_min, .max = bounds.response_max };
-    var digest: ?[constants.context_bytes_length]u8 = null;
-    if (bounds.context_bytes) {
-        const selected = context orelse return error.UnknownFork;
-        const known = owner.forkFor(selected.digest) orelse return error.UnknownFork;
-        if (known != selected.fork) return error.UnknownFork;
-        response = owner.responseBounds(request.protocol, known) catch return error.InvalidContext;
-        digest = selected.digest;
-    }
-    if (!bounds.context_bytes and context != null) return error.InvalidContext;
-    if (ssz.len > response.max) return error.ChunkTooLarge;
-    if (ssz.len < response.min) return error.ChunkTooSmall;
-    Server.queueChunk(slot, constants.result_success, digest, ssz, false, now);
+pub fn respond(slot: *Server, ssz: []const u8, digest: ?[constants.context_bytes_length]u8, now: Now) void {
+    assert(slot.responseReadiness() == .ready);
+    queueChunk(slot, constants.result_success, digest, ssz, false, now);
 }
 
 pub fn responseReadiness(self: *const Server) ReqResp.ResponseReadiness {
     const request = &self.request;
-    assert(request.active());
+    assert(request.awaitingTerminal());
     if (!request.running()) return .terminal;
     if (request.waitingHost() or self.state != .serving) return .backpressured;
     return .ready;
 }
 
-pub fn respondError(
-    owner: *ReqResp,
-    request_handle: RequestHandle,
-    code: u8,
-    message: []const u8,
-    now: Now,
-) RespondError!void {
-    if (!constants.isErrorResult(code) or message.len > codec.error_message_max) {
-        return error.InvalidError;
-    }
-    const slot = try owner.servingSlot(request_handle);
+pub fn respondError(slot: *Server, code: u8, message: []const u8, now: Now) void {
+    assert(slot.responseReadiness() == .ready);
+    assert(constants.isErrorResult(code) and message.len <= codec.error_message_max);
     const request = &slot.request;
     @memcpy(request.error_message[0..message.len], message);
     request.error_len = @intCast(message.len);
-    Server.queueChunk(slot, code, null, request.error_message[0..message.len], true, now);
+    queueChunk(slot, code, null, request.error_message[0..message.len], true, now);
 }
 
-pub fn finish(owner: *ReqResp, request_handle: RequestHandle, now: Now) bool {
-    if (request_handle.direction != .inbound) return false;
-    const slot = owner.inboundSlot(request_handle) orelse return false;
+pub fn finish(slot: *Server, now: Now) bool {
     const request = &slot.request;
     if (!request.running()) return false;
     if (request.pendingEvent()) |event| if (event == .request) return false;
@@ -461,7 +419,6 @@ pub fn finish(owner: *ReqResp, request_handle: RequestHandle, now: Now) bool {
         .serving => {
             if (!request.io.outbox.idle()) return false;
             request.io.outbox.queue("", true);
-            owner.markReady(.inbound, request_handle.index);
             slot.state = .finishing;
             slot.progress_ms = now.mono_ms;
         },
