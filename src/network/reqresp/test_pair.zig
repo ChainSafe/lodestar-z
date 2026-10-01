@@ -67,8 +67,8 @@ pub const Pair = struct {
 
     /// Routes both sides' stream events to their negotiators and reqresp owners.
     pub fn forwardEvents(self: *Pair) void {
-        self.shared.pair.forward(&self.shared.pair.client, .{ .negotiator = &self.shared.client.router.negotiator, .reqresp = &self.shared.client.reqresp });
-        self.shared.pair.forward(&self.shared.pair.server, .{ .negotiator = &self.shared.server.router.negotiator, .reqresp = &self.shared.server.reqresp });
+        @import("../service_test_support.zig").forward(&self.shared.pair, &self.shared.pair.client, .{ .negotiator = &self.shared.client.router.negotiator, .reqresp = &self.shared.client.reqresp });
+        @import("../service_test_support.zig").forward(&self.shared.pair, &self.shared.pair.server, .{ .negotiator = &self.shared.server.router.negotiator, .reqresp = &self.shared.server.reqresp });
     }
 
     pub fn pumpOnce(self: *Pair) !void {

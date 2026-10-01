@@ -1,5 +1,5 @@
 const std = @import("std");
-const support = @import("test_support.zig");
+const support = @import("quic/test_support.zig");
 const service = @import("service.zig");
 const Engine = @import("quic/Engine.zig");
 const Inbox = @import("gossipsub/test_support.zig").Inbox;
@@ -83,3 +83,34 @@ pub const ServicePair = struct {
         return owner.process(transport, self.pair.events(transport, &events), self.pair.now, outputs);
     }
 };
+
+/// The owners a test drives directly, reached by stream route. A readable, writable or close event
+/// marks the owner's row ready; gossip takes readiness events only. Lifecycle handling stays with
+/// the test.
+pub const Owners = struct {
+    negotiator: ?*@import("negotiate.zig").Negotiator = null,
+    identify: ?*@import("identify/handler.zig").Handler = null,
+    reqresp: ?*@import("reqresp/reqresp.zig").ReqResp = null,
+    gossip: ?*@import("gossipsub/gossipsub.zig").Gossipsub = null,
+
+    pub fn route(self: Owners, engine: *Engine, events: []const Engine.Event) void {
+        for (events) |event| {
+            const stream, const bound = switch (event) {
+                .stream_ready => |ready| .{ ready.stream, engine.route(ready.stream) orelse continue },
+                .stream_closed => |closed| .{ closed.stream, closed.route },
+                else => continue,
+            };
+            switch (bound.owner) {
+                .negotiation => if (self.negotiator) |owner| owner.streamReady(bound.row, stream),
+                .identify => if (self.identify) |owner| owner.streamReady(bound.row, stream),
+                .reqresp_outbound, .reqresp_inbound => if (self.reqresp) |owner| owner.streamReady(bound, stream),
+                .gossip_inbound, .gossip_outbound => if (self.gossip) |owner| if (event == .stream_ready) owner.streamReady(engine, bound, stream, event.stream_ready.ready),
+                .none => {},
+            }
+        }
+    }
+};
+
+pub fn forward(pair: *support.Pair, engine: *Engine, owners: Owners) void {
+    owners.route(engine, pair.streamEvents(engine));
+}

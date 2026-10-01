@@ -289,7 +289,7 @@ test "reqresp active inbound invalid head range and no-body requests never reach
 
 test "reqresp active light client traffic preserves control reserve and cancellation reuse" {
     const routing = @import("../router.zig");
-    const support = @import("../test_support.zig");
+    const support = @import("../quic/test_support.zig");
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
@@ -555,7 +555,7 @@ test "reqresp request admission owner allocation failure prefixes" {
 }
 
 test "reqresp request admission concurrent connections and reconnect retain full identity debt" {
-    const support = @import("../test_support.zig");
+    const support = @import("../quic/test_support.zig");
     var setup: harness.Pair = .{};
     try setup.init(.{}, .{
         .admission = .{ .policy = policy_fixture(), .limits = .{ .identities = 2, .peer = admission_quotas(2, 86_400_000), .global = admission_quotas(100, 86_400_000) } },
@@ -579,7 +579,7 @@ test "reqresp request admission concurrent connections and reconnect retain full
 }
 
 fn changeClientIdentity(setup: *harness.Pair, seed: u8) !void {
-    const support = @import("../test_support.zig");
+    const support = @import("../quic/test_support.zig");
     const keys = @import("../wire/keys.zig");
     const tls = @import("../tls/context.zig");
     const Engine = @import("../quic/Engine.zig");

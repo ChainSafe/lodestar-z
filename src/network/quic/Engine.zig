@@ -46,10 +46,6 @@ pub const DialError = error{
 pub const Handle = types.Handle;
 pub const StreamHandle = types.StreamHandle;
 
-/// How long a turn may run after its clock read before a timer key checked against quiche's own
-/// clock is treated as late.
-const invariant_clock_slack_ns: u64 = 250 * std.time.ns_per_ms;
-
 pub const Event = Connection.Event;
 
 pub const Limits = struct {
@@ -158,11 +154,21 @@ connection_metrics: ConnectionCounters = .{},
 /// rather than a local so ReleaseSafe does not fill it for every datagram.
 header_token: [binding.Header.token_max]u8 = undefined,
 
-/// Live connections, and those still handshaking.
-pub const Resources = struct { active: usize, handshaking: usize };
+pub const Resources = struct {
+    /// Occupied slots, including closed connections awaiting retirement.
+    active: u16,
+    /// Inbound connections still handshaking.
+    handshaking: u16,
+    /// Outbound connections still handshaking.
+    dialing: u16,
+};
 
 pub fn resourceSnapshot(self: *const Engine) Resources {
-    return .{ .active = self.registry.active_len, .handshaking = self.registry.handshaking };
+    return .{
+        .active = self.registry.active_len,
+        .handshaking = self.registry.handshaking,
+        .dialing = self.registry.dialing,
+    };
 }
 
 pub fn init(allocator: std.mem.Allocator, options: Options) Error!Engine {
@@ -717,7 +723,7 @@ pub fn finishFlush(self: *Engine, now: Now) void {
     if (@import("builtin").is_test) self.checkInvariants(now);
 }
 
-/// E1 to E5. Runs after the turn's last send, before any time passes.
+/// E1 to E5. Runs after the turn's last send.
 fn checkInvariants(self: *Engine, now: Now) void {
     const slots = self.registry.slots;
     var scratch: [constants.datagram_size_max]u8 = undefined;
@@ -737,9 +743,10 @@ fn checkInvariants(self: *Engine, now: Now) void {
             assert(self.registry.timers.get(index) == null);
             continue;
         }
-        // E1: one key per live slot, no later than any of its sources.
+        // E1: application deadlines remain covered. rekey checks the native deadline using
+        // the timeout sampled there; resampling it here would mix two clock readings.
         const key = self.registry.timers.get(index);
-        assert((key == null) == (self.deadlineNs(index, now) == null));
+        if (slot.closing == .none or (slot.closing == .after_flight and !slot.flight_pending)) assert(key != null);
         if (key) |deadline| {
             if (slot.closing == .none) {
                 const due_ms = if (slot.state == .handshaking)
@@ -749,11 +756,6 @@ fn checkInvariants(self: *Engine, now: Now) void {
                 assert(deadline <= due_ms *| std.time.ns_per_ms);
             }
             if (slot.closing == .after_flight and !slot.flight_pending) assert(deadline <= now.nanos());
-            // quiche reads its own clock, so its timer is comparable only with a real clock,
-            // and only up to the time this turn has run since its clock read.
-            if (now.mono_ns != null) if (slot.timeoutNs()) |remaining| {
-                assert(deadline <= now.nanos() +| remaining +| invariant_clock_slack_ns);
-            };
         }
         // E2: a slot off the dirty list has no output.
         if (!slot.dirty_link.linked) {
@@ -782,11 +784,10 @@ pub fn releaseReported(self: *Engine) void {
 
 /// The earliest deadline among quiche's timers, the handshake limit, keep-alive and a deferred
 /// close whose flight left, or null when none is armed.
-fn deadlineNs(self: *const Engine, index: u16, now: Now) ?u64 {
+fn deadlineNs(self: *const Engine, index: u16, now: Now, native_deadline: ?u64) ?u64 {
     const slot = &self.registry.slots[index];
     if (slot.state != .handshaking and slot.state != .established) return null;
-    var deadline: ?u64 = null;
-    if (slot.timeoutNs()) |remaining| deadline = now.nanos() +| remaining;
+    var deadline = native_deadline;
     if (slot.closing == .none) {
         const due_ms = if (slot.state == .handshaking)
             slot.created_ms +| self.handshakeLimitMs(slot)
@@ -800,9 +801,16 @@ fn deadlineNs(self: *const Engine, index: u16, now: Now) ?u64 {
 }
 
 fn rekey(self: *Engine, index: u16, now: Now) void {
-    if (self.deadlineNs(index, now)) |deadline| {
+    const slot = &self.registry.slots[index];
+    const live = slot.state == .handshaking or slot.state == .established;
+    const remaining = if (live) slot.timeoutNs() else null;
+    const native_deadline = if (remaining) |ns| now.nanos() +| ns else null;
+    const scheduled = self.deadlineNs(index, now, native_deadline);
+    if (scheduled) |deadline| {
         self.registry.timers.set(index, deadline);
     } else self.registry.timers.clear(index);
+    assert(self.registry.timers.get(index) == scheduled);
+    if (native_deadline) |deadline| assert(self.registry.timers.get(index).? <= deadline);
 }
 
 /// A datagram was processed or a timer fired: gather readiness and flush this turn.

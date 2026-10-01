@@ -1,5 +1,5 @@
 const std = @import("std");
-const support = @import("../test_support.zig");
+const support = @import("../quic/test_support.zig");
 const service_mod = @import("../service.zig");
 const Engine = @import("../quic/Engine.zig");
 const identify = @import("root.zig");
@@ -107,7 +107,7 @@ test "identify inbound timeout closes only withheld writer and shutdown releases
     var refused = false;
     for (0..32) |_| {
         var outcomes: [8]@import("../router.zig").Outcome = undefined;
-        pair.forward(&pair.client, .{ .negotiator = &client.router.negotiator });
+        @import("../service_test_support.zig").forward(&pair, &pair.client, .{ .negotiator = &client.router.negotiator });
         _ = client.router.pump(&pair.client, pair.now, &outcomes);
         try pair.pump();
         _ = step(&pair, &server, true, &.{});

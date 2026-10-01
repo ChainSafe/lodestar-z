@@ -303,8 +303,8 @@ pub const Transport = struct {
     }
 
     /// quiche reports the time left on its timer from its own clock read, so a timer key built on
-    /// a clock read earlier in the turn lands early by the time the turn has run since. A clock
-    /// supplied without nanoseconds is not the one quiche reads and is kept.
+    /// a clock read earlier in the turn lands early by the time the turn has run since.
+    /// Refresh Io-based timestamps after the burst; millisecond-only caller timestamps stay fixed.
     fn keyClock(io: std.Io, after: Engine.Now) Engine.Now {
         const previous = after.mono_ns orelse return after;
         const read = std.math.cast(u64, std.Io.Clock.awake.now(io).nanoseconds) orelse return after;

@@ -1,4 +1,5 @@
-const core_test = @import("test_support.zig");
+const transport_test = @import("transport_test_support.zig");
+const core_test = @import("network_core_test_support.zig");
 const FaultIo = @import("fault_io");
 const std = @import("std");
 const runtime = @import("network_core.zig");
@@ -6,7 +7,7 @@ const t = @import("peers/types.zig");
 const keys = @import("wire/keys.zig");
 const d = @import("discv5");
 
-const options = @import("test_support.zig").networkOptions;
+const options = @import("network_core_test_support.zig").networkOptions;
 const Inbox = @import("gossipsub/test_support.zig").Inbox;
 const Now = @import("types.zig").Now;
 
@@ -1008,14 +1009,14 @@ test "core flushes a protocol reply in the turn that wrote it" {
     var events: [32]@import("quic/Engine.zig").Event = undefined;
     var connected = false;
     for (0..400) |_| {
-        const stepped = try core_test.step(&spoke, std.testing.io, &events, .{ .wait_max_ms = 1 });
+        const stepped = try transport_test.step(&spoke, std.testing.io, &events, .{ .wait_max_ms = 1 });
         for (events[0..stepped.events]) |event| connected = connected or event == .connected;
         _ = try stepAfter(&node, 1);
         if (connected) break;
     }
     try std.testing.expect(connected);
     for (0..20) |_| {
-        _ = try core_test.step(&spoke, std.testing.io, &events, .{ .wait_max_ms = 1 });
+        _ = try transport_test.step(&spoke, std.testing.io, &events, .{ .wait_max_ms = 1 });
         _ = try stepAfter(&node, 1);
     }
 
@@ -1024,7 +1025,7 @@ test "core flushes a protocol reply in the turn that wrote it" {
     var proposal: [256]u8 = undefined;
     const hello = try dialer.initialWrite(&proposal);
     try std.testing.expectEqual(hello.len, try spoke.engine.write(stream, hello, false));
-    const flushed = try core_test.step(&spoke, std.testing.io, &events, .{ .wait_max_ms = 0 });
+    const flushed = try transport_test.step(&spoke, std.testing.io, &events, .{ .wait_max_ms = 0 });
     try std.testing.expect(flushed.datagrams_sent > 0);
 
     const turn = try stepAfter(&node, 100);
@@ -1039,7 +1040,7 @@ test "core flushes a protocol reply in the turn that wrote it" {
     var reply: [256]u8 = undefined;
     var received: usize = 0;
     for (0..20) |_| {
-        _ = try core_test.step(&spoke, std.testing.io, &events, .{ .wait_max_ms = 10 });
+        _ = try transport_test.step(&spoke, std.testing.io, &events, .{ .wait_max_ms = 10 });
         received += (try spoke.engine.read(stream, reply[received..])).len;
         if (received >= hello.len) break;
     }
@@ -1122,7 +1123,7 @@ test "core idle turns with pending negotiations are never due for reqresp or neg
     _ = try spoke.dialPeer(std.testing.io, node.transport.localAddress(), node.peerId());
     var events: [32]@import("quic/Engine.zig").Event = undefined;
     for (0..40) |_| {
-        _ = try core_test.step(&spoke, std.testing.io, &events, .{ .wait_max_ms = 1 });
+        _ = try transport_test.step(&spoke, std.testing.io, &events, .{ .wait_max_ms = 1 });
         _ = try stepAfter(&node, 1);
     }
     try std.testing.expect(node.service.router.negotiator.active() > 0);

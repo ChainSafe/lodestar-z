@@ -2,7 +2,7 @@ const std = @import("std");
 const Engine = @import("Engine.zig");
 const keys = @import("../wire/keys.zig");
 const limits = @import("limits.zig");
-const support = @import("../test_support.zig");
+const support = @import("test_support.zig");
 const tls = @import("../tls/context.zig");
 
 const Event = Engine.Event;

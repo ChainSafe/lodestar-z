@@ -2,7 +2,7 @@ const std = @import("std");
 const constants = @import("../constants.zig");
 const Engine = @import("Engine.zig");
 const keys = @import("../wire/keys.zig");
-const support = @import("../test_support.zig");
+const support = @import("test_support.zig");
 
 const Event = Engine.Event;
 const Pair = support.Pair;

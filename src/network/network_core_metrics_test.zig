@@ -17,7 +17,7 @@ const Fixture = struct {
         const node = try std.testing.allocator.create(core.NetworkCore);
         errdefer std.testing.allocator.destroy(node);
         const key = try @import("wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{93}));
-        var options = @import("test_support.zig").networkOptions(&key);
+        var options = @import("network_core_test_support.zig").networkOptions(&key);
         options.resolved.core.service.gossipsub.topic_policy = if (boundaries.len > 0) boundaries else null;
         options.startup.discovery = discovery;
         try node.init(std.testing.allocator, std.testing.io, &options.resolved, options.startup);

@@ -1188,7 +1188,7 @@ test "reqresp native bytes arriving behind cursor remain ready after a routed re
     const encoded = try codec.encodeChunk(0, null, &bytes, &wire);
     try std.testing.expectEqual(encoded.len, try setup.shared.pair.server.write(stream, encoded, false));
     try setup.shared.pair.pump();
-    setup.shared.pair.forward(&setup.shared.pair.client, .{ .reqresp = &setup.shared.client.reqresp });
+    @import("../service_test_support.zig").forward(&setup.shared.pair, &setup.shared.pair.client, .{ .reqresp = &setup.shared.client.reqresp });
     var events: [1]Event = undefined;
     var received = false;
     for (0..3) |_| {
@@ -1241,7 +1241,7 @@ test "reqresp native write credit behind cursor resumes from a routed writable e
         }
     }
     try std.testing.expect(writable);
-    setup.shared.pair.forward(&setup.shared.pair.server, .{ .reqresp = &setup.shared.server.reqresp });
+    @import("../service_test_support.zig").forward(&setup.shared.pair, &setup.shared.pair.server, .{ .reqresp = &setup.shared.server.reqresp });
     var events: [1]Event = undefined;
     var sent = false;
     for (0..10) |_| {
@@ -1349,7 +1349,7 @@ test "reqresp request write preserves already readable native response" {
     const encoded = try codec.encodeChunk(0, null, &bytes, &wire);
     try std.testing.expectEqual(encoded.len, try setup.shared.pair.server.write(server_stream.?, encoded, false));
     try setup.shared.pair.pump();
-    setup.shared.pair.forward(&setup.shared.pair.client, .{ .reqresp = &setup.shared.client.reqresp });
+    @import("../service_test_support.zig").forward(&setup.shared.pair, &setup.shared.pair.client, .{ .reqresp = &setup.shared.client.reqresp });
     for (0..4) |_| {
         _ = setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &.{} }).control;
         if (setup.shared.client.reqresp.outbound[handle.index].phase == .response) break;
@@ -1679,7 +1679,7 @@ test "reqresp absolute response expires despite continuous wire progress" {
             setup.shared.pair.now.mono_ms = due - 90 + i * 10;
             try std.testing.expectEqual(@as(usize, 1), try setup.shared.pair.server.write(stream, encoded[i .. i + 1], false));
             try setup.shared.pair.pump();
-            setup.shared.pair.forward(&setup.shared.pair.client, .{ .reqresp = &setup.shared.client.reqresp });
+            @import("../service_test_support.zig").forward(&setup.shared.pair, &setup.shared.pair.client, .{ .reqresp = &setup.shared.client.reqresp });
             try std.testing.expectEqual(@as(usize, 0), setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &events }).control);
             try std.testing.expectEqual(@as(?u64, due), setup.shared.client.reqresp.outbound[handle.index].deadline());
         }

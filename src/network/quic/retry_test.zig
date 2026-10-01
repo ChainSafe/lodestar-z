@@ -2,7 +2,7 @@ const std = @import("std");
 const retry = @import("retry.zig");
 const binding = @import("binding.zig");
 const limits = @import("limits.zig");
-const support = @import("../test_support.zig");
+const support = @import("test_support.zig");
 
 test "QUIC Retry tokens bind source endpoint CIDs key and lifetime" {
     const key: [32]u8 = @splat(1);

@@ -264,7 +264,7 @@ test "gossip policy topic retirement bounds arbitrarily slow active score decay"
 }
 
 test "gossip policy unsent subscriptions cannot pin retired topics indefinitely" {
-    var pair: @import("../test_support.zig").Pair = .{};
+    var pair: @import("../quic/test_support.zig").Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .pressure_timeout_ms = 10 });

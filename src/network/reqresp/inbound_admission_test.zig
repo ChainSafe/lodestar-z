@@ -4,7 +4,7 @@ const Protocol = @import("protocol.zig").Protocol;
 const Plan = @import("receive_plan.zig").Plan;
 const PeerId = @import("../wire/peer_id.zig").PeerId;
 const types = @import("../types.zig");
-const support = @import("../test_support.zig");
+const support = @import("../quic/test_support.zig");
 const routing = @import("../router.zig");
 const quotas = @import("admission_fixture.zig").quotas;
 

@@ -1,6 +1,6 @@
 const gossip_test = @import("gossipsub/test_support.zig");
 const std = @import("std");
-const support = @import("test_support.zig");
+const support = @import("quic/test_support.zig");
 const Engine = @import("quic/Engine.zig");
 const rr = @import("reqresp/root.zig");
 const gs = @import("gossipsub/root.zig");
@@ -578,6 +578,6 @@ test "router capabilities activation preserves negotiated response context and c
 }
 
 fn pumpRouter(router: *@import("router.zig").Router, pair: *support.Pair, transport: *Engine, now: @import("types.zig").Now, outcomes: []@import("router.zig").Outcome) usize {
-    pair.forward(transport, .{ .negotiator = &router.negotiator });
+    @import("service_test_support.zig").forward(pair, transport, .{ .negotiator = &router.negotiator });
     return router.pump(transport, now, outcomes);
 }

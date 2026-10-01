@@ -1,11 +1,9 @@
 const std = @import("std");
-const constants = @import("constants.zig");
-const Engine = @import("quic/Engine.zig");
-const keys = @import("wire/keys.zig");
-const limits = @import("quic/limits.zig");
-const tls = @import("tls/context.zig");
-const transport_mod = @import("transport.zig");
-const types = @import("types.zig");
+const constants = @import("../constants.zig");
+const Engine = @import("Engine.zig");
+const keys = @import("../wire/keys.zig");
+const tls = @import("../tls/context.zig");
+const types = @import("../types.zig");
 
 const Event = Engine.Event;
 const Limits = Engine.Limits;
@@ -16,6 +14,8 @@ pub const server_address = types.Address{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 },
 pub const now_unix: i64 = 1_700_000_000;
 
 pub const Pair = struct {
+    const send_burst_max = 256;
+
     client_ctx: tls.Context = undefined,
     server_ctx: tls.Context = undefined,
     client: Engine = undefined,
@@ -28,7 +28,7 @@ pub const Pair = struct {
     drop_to_address: ?types.Address = null,
     /// Datagrams the client accepted from the server.
     client_accepted: u64 = 0,
-    batch: transport_mod.SendBatch = undefined,
+    batch: Batch = undefined,
     client_stash: Stash = .{},
     server_stash: Stash = .{},
 
@@ -133,8 +133,8 @@ pub const Pair = struct {
             var retry: ?struct { bytes: [constants.datagram_size_max]u8, len: usize, from: types.Address } = null;
             var budget: u32 = 0;
             var drained = false;
-            while (budget < transport_mod.send_burst_max) {
-                const count = sendBatch(from, index, self.now, &self.batch);
+            while (budget < send_burst_max) {
+                const count = self.batch.fill(from, index, self.now);
                 budget += count;
                 moved = moved or count > 0;
                 for (self.batch.outgoing[0..count]) |sent| {
@@ -177,7 +177,7 @@ pub const Pair = struct {
         return moved;
     }
 
-    /// Events polled by `forward` wait here for the next `events` call.
+    /// Events polled by `streamEvents` wait here for the next `events` call.
     fn stash(self: *Pair, engine: *const Engine) *Stash {
         std.debug.assert(engine == &self.client or engine == &self.server);
         return if (engine == &self.client) &self.client_stash else &self.server_stash;
@@ -185,6 +185,7 @@ pub const Pair = struct {
 
     pub fn events(self: *Pair, engine: *Engine, storage: []Event) []Event {
         const held = self.stash(engine);
+        // A polled close event must reach the test before its connection can be retired.
         if (held.len == 0) engine.releaseReported();
         const taken = @min(held.len, storage.len);
         @memcpy(storage[0..taken], held.events[0..taken]);
@@ -196,83 +197,38 @@ pub const Pair = struct {
         return storage[0 .. taken + polled];
     }
 
-    /// Routes the stream events polled since the last call, here or by `events`, to the owners
-    /// their routes name, as Service.dispatch does. Events polled here stay available to `events`.
-    pub fn forward(self: *Pair, engine: *Engine, owners: Owners) void {
+    /// Returns stream readiness and close events collected since the last call. Newly polled
+    /// events remain available to `events`. The slice lasts until the next event operation.
+    pub fn streamEvents(self: *Pair, engine: *Engine) []const Event {
         const held = self.stash(engine);
         const start = held.len;
         held.len += engine.pollEvents(held.events[start..]);
         held.noteStreams(held.events[start..held.len]);
-        owners.route(engine, held.unrouted[0..held.unrouted_len]);
-        held.unrouted_len = 0;
+        const pending = held.stream_events[0..held.stream_events_len];
+        held.stream_events_len = 0;
+        return pending;
     }
 };
 
 const Stash = struct {
     events: [256]Event = undefined,
     len: usize = 0,
-    /// Stream events not yet routed by `forward`.
-    unrouted: [256]Event = undefined,
-    unrouted_len: usize = 0,
-    /// Streams the remote side opened, as this engine claimed them.
-    peer_streams: u64 = 0,
+    /// Stream events not yet returned by `streamEvents`.
+    stream_events: [256]Event = undefined,
+    stream_events_len: usize = 0,
 
     fn noteStreams(self: *Stash, polled: []const Event) void {
         for (polled) |event| {
-            if (event == .stream_opened) self.peer_streams += 1;
             if (event != .stream_ready and event != .stream_closed) continue;
-            // Harnesses that never forward keep only the newest events.
-            if (self.unrouted_len == self.unrouted.len) {
-                const kept = self.unrouted.len / 2;
-                std.mem.copyForwards(Event, self.unrouted[0..kept], self.unrouted[self.unrouted.len - kept ..]);
-                self.unrouted_len = kept;
+            // Harnesses that never consume stream events keep only the newest events.
+            if (self.stream_events_len == self.stream_events.len) {
+                const kept = self.stream_events.len / 2;
+                std.mem.copyForwards(Event, self.stream_events[0..kept], self.stream_events[self.stream_events.len - kept ..]);
+                self.stream_events_len = kept;
             }
-            self.unrouted[self.unrouted_len] = event;
-            self.unrouted_len += 1;
+            self.stream_events[self.stream_events_len] = event;
+            self.stream_events_len += 1;
         }
-    }
-};
-
-/// The owners a test drives directly, reached by stream route. A readable, writable or close event
-/// marks the owner's row ready; gossip takes readiness events only. Lifecycle handling stays with
-/// the test.
-pub const Owners = struct {
-    negotiator: ?*@import("negotiate.zig").Negotiator = null,
-    identify: ?*@import("identify/handler.zig").Handler = null,
-    reqresp: ?*@import("reqresp/reqresp.zig").ReqResp = null,
-    gossip: ?*@import("gossipsub/gossipsub.zig").Gossipsub = null,
-
-    pub fn route(self: Owners, engine: *Engine, events: []const Event) void {
-        for (events) |event| {
-            const stream, const bound = switch (event) {
-                .stream_ready => |ready| .{ ready.stream, engine.route(ready.stream) orelse continue },
-                .stream_closed => |closed| .{ closed.stream, closed.route },
-                else => continue,
-            };
-            switch (bound.owner) {
-                .negotiation => if (self.negotiator) |owner| owner.streamReady(bound.row, stream),
-                .identify => if (self.identify) |owner| owner.streamReady(bound.row, stream),
-                .reqresp_outbound, .reqresp_inbound => if (self.reqresp) |owner| owner.streamReady(bound, stream),
-                .gossip_inbound, .gossip_outbound => if (self.gossip) |owner| if (event == .stream_ready) owner.streamReady(engine, bound, stream, event.stream_ready.ready),
-                .none => {},
-            }
-        }
-    }
-};
-
-pub const Node = struct {
-    transport: transport_mod.Transport = .{},
-
-    pub fn init(self: *Node, seed: u8) !void {
-        const key = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{seed}));
-        try self.transport.init(std.testing.allocator, std.testing.io, .{
-            .host = &key,
-            .bind = .{ .ip4 = .loopback(0) },
-        });
-    }
-
-    pub fn deinit(self: *Node) void {
-        self.transport.deinit(std.testing.io);
     }
 };
 
@@ -338,86 +294,15 @@ pub fn expectStreamClosed(event: Event, stream: Engine.StreamHandle) !?u64 {
     }
 }
 
-pub fn sendBatch(engine: *Engine, index: u16, now: Now, batch: *transport_mod.SendBatch) u8 {
-    var count: u8 = 0;
-    while (count < constants.send_batch_max) : (count += 1) {
-        const sent = engine.sendOne(index, now, &batch.buffers[count]) orelse break;
-        batch.outgoing[count] = .{ .to = sent.to, .bytes = sent.bytes };
-        batch.release_times[count] = sent.transmit_at_ns;
+pub const Batch = struct {
+    buffers: [constants.send_batch_max][constants.datagram_size_max]u8 = undefined,
+    outgoing: [constants.send_batch_max]Engine.Sent = undefined,
+
+    pub fn fill(self: *Batch, engine: *Engine, index: u16, now: Now) u8 {
+        var count: u8 = 0;
+        while (count < self.outgoing.len) : (count += 1) {
+            self.outgoing[count] = engine.sendOne(index, now, &self.buffers[count]) orelse break;
+        }
+        return count;
     }
-    return count;
-}
-
-pub fn step(transport: *transport_mod.Transport, io: std.Io, events: []Event, options: transport_mod.StepOptions) transport_mod.StepError!transport_mod.StepResult {
-    const result = transport.step(io, events, options);
-    if (result.failure) |err| return err;
-    return result.progress;
-}
-
-pub const NetworkOptions = struct {
-    resolved: @import("configuration.zig").Resolved,
-    startup: @import("network_core.zig").Startup,
 };
-
-/// The owner harness request resolved for a NetworkCore on loopback.
-pub fn networkOptions(key: *const keys.KeyPair) NetworkOptions {
-    const owner_support = @import("network_core_test_support.zig");
-    var request = owner_support.request();
-    request.forks = &.{
-        .{ .digest = @splat(0), .fork = .phase0 },
-        .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu },
-    };
-    request.reqresp.outbound_per_peer_max = 4;
-    request.gossip.topic_policy = comptime &.{
-        @import("gossipsub/topic_fixture.zig").bytes(@splat(0)),
-        @import("gossipsub/topic_fixture.zig").bytes(.{ 1, 2, 3, 4 }),
-    };
-    return .{
-        .resolved = @import("configuration.zig").resolve(request) catch unreachable,
-        .startup = .{
-            .host = key,
-            .bind = .{ .ip4 = .loopback(0) },
-            .local = owner_support.localState(.{}),
-            .slot = 100,
-        },
-    };
-}
-
-const core = @import("network_core.zig");
-const local_intent = @import("gossipsub/local_intent.zig");
-const topic_policy = @import("gossipsub/topic_policy.zig");
-
-pub fn intent(node: *const core.NetworkCore, subscriptions: []const local_intent.Boundary) core.LocalIntent {
-    return .{
-        .update = .{
-            .local = node.localState(),
-            .schedule = node.schedule,
-            .endpoints = node.advertisementEndpoints(),
-            .capabilities = node.service.router.capabilities(),
-        },
-        .demand = node.peer_manager.demand,
-        .subscriptions = subscriptions,
-        .slot = node.service.gossipsub.overlay.slot,
-    };
-}
-
-/// Control operations holding a request, which retirement tests watch drain.
-pub fn controlOperations(node: *const core.NetworkCore) usize {
-    var count: usize = 0;
-    for (node.control_protocol.operations) |*op| count += @intFromBool(op.request != null);
-    return count;
-}
-
-pub fn subscribe(node: *core.NetworkCore, name: []const u8) !void {
-    try setSubscription(node, name, true);
-}
-
-pub fn unsubscribe(node: *core.NetworkCore, name: []const u8) !void {
-    try setSubscription(node, name, false);
-}
-
-fn setSubscription(node: *core.NetworkCore, name: []const u8, subscribed: bool) !void {
-    var boundaries: [topic_policy.boundary_max]local_intent.Boundary = undefined;
-    const desired = intent(node, try @import("gossipsub/test_support.zig").subscriptionUpdate(node.service.gossipsub, name, subscribed, &boundaries));
-    _ = try node.applyIntent(&desired, node.last_now);
-}

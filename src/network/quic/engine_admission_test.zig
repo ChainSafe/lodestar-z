@@ -2,7 +2,7 @@ const std = @import("std");
 const constants = @import("../constants.zig");
 const Engine = @import("Engine.zig");
 const limits = @import("limits.zig");
-const support = @import("../test_support.zig");
+const support = @import("test_support.zig");
 const types = @import("../types.zig");
 const keys = @import("../wire/keys.zig");
 const tls = @import("../tls/context.zig");
@@ -531,10 +531,34 @@ test "engine outgoing descriptor preserves native monotonic pacing timestamp" {
     defer pair.deinit();
     const before = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
     const handle = try pair.dial();
-    var batch: @import("../transport.zig").SendBatch = .{};
-    const count = support.sendBatch(&pair.client, handle.index, pair.now, &batch);
+    var bytes: [constants.datagram_size_max]u8 = undefined;
+    const sent = pair.client.sendOne(handle.index, pair.now, &bytes).?;
     const after = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
+    try std.testing.expect(sent.bytes.len > 0);
+    try std.testing.expect(sent.transmit_at_ns >= before);
+    try std.testing.expect(sent.transmit_at_ns <= after);
+}
+
+test "engine resources distinguish handshake direction and retain closed slots until retirement" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    try std.testing.expectEqualDeep(Engine.Resources{ .active = 0, .handshaking = 0, .dialing = 0 }, pair.client.resourceSnapshot());
+
+    const inbound = try admitSource(&pair.server, &pair.client, &client_address);
+    try std.testing.expectEqualDeep(Engine.Resources{ .active = 1, .handshaking = 0, .dialing = 1 }, pair.client.resourceSnapshot());
+    try std.testing.expectEqualDeep(Engine.Resources{ .active = 1, .handshaking = 1, .dialing = 0 }, pair.server.resourceSnapshot());
+    try pair.pump();
+    try std.testing.expectEqualDeep(Engine.Resources{ .active = 1, .handshaking = 0, .dialing = 0 }, pair.client.resourceSnapshot());
+    try std.testing.expectEqualDeep(pair.client.resourceSnapshot(), pair.server.resourceSnapshot());
+
+    try std.testing.expect(pair.server.failSend(inbound));
+    try std.testing.expectEqualDeep(Engine.Resources{ .active = 1, .handshaking = 0, .dialing = 0 }, pair.server.resourceSnapshot());
+    var events: [8]Event = undefined;
+    const count = pair.server.pollEvents(&events);
     try std.testing.expect(count > 0);
-    try std.testing.expect(batch.release_times[0] >= before);
-    try std.testing.expect(batch.release_times[0] <= after);
+    try std.testing.expect(events[count - 1] == .closed);
+    try std.testing.expectEqual(@as(u16, 1), pair.server.resourceSnapshot().active);
+    pair.server.releaseReported();
+    try std.testing.expectEqualDeep(Engine.Resources{ .active = 0, .handshaking = 0, .dialing = 0 }, pair.server.resourceSnapshot());
 }

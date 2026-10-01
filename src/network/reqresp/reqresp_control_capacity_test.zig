@@ -2,7 +2,7 @@ const std = @import("std");
 const rr = @import("reqresp.zig");
 const protocol = @import("protocol.zig");
 const routing = @import("../router.zig");
-const support = @import("../test_support.zig");
+const support = @import("../quic/test_support.zig");
 
 const reservedOptions = @import("control_fixture.zig").reservedOptions;
 

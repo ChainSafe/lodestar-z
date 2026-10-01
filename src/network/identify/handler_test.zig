@@ -1,5 +1,5 @@
 const std = @import("std");
-const support = @import("../test_support.zig");
+const support = @import("../quic/test_support.zig");
 const service = @import("../service.zig");
 const Engine = @import("../quic/Engine.zig");
 const identify = @import("root.zig");

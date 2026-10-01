@@ -210,7 +210,7 @@ test "service request work remains bounded and rotates between live streams" {
         try std.testing.expectEqual(encoded.len, try setup.shared.pair.server.write(stream, encoded, false));
     }
     try setup.shared.pair.pump();
-    setup.shared.pair.forward(&setup.shared.pair.client, .{ .reqresp = &setup.shared.client.reqresp });
+    @import("../service_test_support.zig").forward(&setup.shared.pair, &setup.shared.pair.client, .{ .reqresp = &setup.shared.client.reqresp });
     setup.shared.client.reqresp.options.work_per_pump_max = 1;
     var events: [2]Event = undefined;
     var delivered: [2]reqresp.RequestHandle = undefined;

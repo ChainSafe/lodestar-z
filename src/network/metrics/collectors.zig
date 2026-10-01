@@ -263,8 +263,8 @@ fn writeRememberedPeers(self: *const Context, w: *prom.Encoder) prom.Error!void 
 
 fn writeTransportConnections(self: *const Context, w: *prom.Encoder) prom.Error!void {
     const transport = self.owner.transport.engine.resourceSnapshot();
-    try w.scalar(.{ .name = "lodestar_native_quic_connections_active", .kind = .gauge, .help = "Live QUIC connections, handshaking or established" }, self.live(transport.active));
-    try w.scalar(.{ .name = "lodestar_native_quic_connections_handshaking", .kind = .gauge, .help = "QUIC connections still handshaking" }, self.live(transport.handshaking));
+    try w.scalar(.{ .name = "lodestar_native_quic_connections_active", .kind = .gauge, .help = "Occupied QUIC slots, including closed connections awaiting retirement" }, self.live(transport.active));
+    try w.scalar(.{ .name = "lodestar_native_quic_connections_handshaking", .kind = .gauge, .help = "Inbound QUIC connections still handshaking" }, self.live(transport.handshaking));
 }
 
 fn writeDiscoveryProgress(self: *const Context, w: *prom.Encoder) prom.Error!void {
