@@ -145,7 +145,7 @@ pub fn onEvent(
                 response.matched.response == .pong)
             {
                 const entry = core.peerRecord(&response.peer.node_id) orelse return false;
-                if (!std.meta.eql(entry.peer, response.peer)) return false;
+                if (!entry.peer.eql(&response.peer)) return false;
                 if (response.matched.response.pong.enr_sequence > entry.record.sequence) {
                     self.pending = .{ .entry = entry, .kind = .enr, .ready_ms = now_ms };
                     self.next_start_ms = now_ms;
@@ -272,12 +272,9 @@ fn selectObservation(self: *Maintenance, core: *Engine, family: usize, now_ms: u
     const observations = self.observations orelse return false;
     if (now_ms < self.observation_due_ms or !observations.needsSample(family, now_ms)) return false;
     const mode: types.Mode = if (family == 0) .ip4 else .ip6;
-    const cursor = &self.observation_cursor[family];
-    for (0..RoutingTable.table_capacity) |_| {
-        const offset = cursor.*;
-        cursor.* = (offset + 1) % RoutingTable.table_capacity;
-        if (offset % RoutingTable.bucket_size >= core.routing.counts[offset / RoutingTable.bucket_size]) continue;
-        var entry = core.routing.entries[offset];
+    var iterator = core.routing.iterate(&self.observation_cursor[family]);
+    while (iterator.next()) |copied| {
+        var entry = copied;
         const address = entry.record.endpointFor(mode) orelse continue;
         if (!self.ip_mode.supports(address) or core.isPeerBusy(&entry.peer.node_id)) continue;
         entry.peer.address = address;
@@ -295,7 +292,7 @@ fn onProbeResponse(
     now_ms: u64,
 ) void {
     const pending = &self.pending.?;
-    std.debug.assert(std.meta.eql(pending.entry.peer, response.peer));
+    std.debug.assert(pending.entry.peer.eql(&response.peer));
     switch (pending.kind) {
         .ping => {
             std.debug.assert(response.matched.response == .pong);

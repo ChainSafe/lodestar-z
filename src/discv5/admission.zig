@@ -15,7 +15,7 @@ const Quota = struct {
 };
 pub const source_quota: Quota = .{ .interval_ms = 250, .burst = 4 };
 pub const global_quota: Quota = .{ .interval_ms = 50, .burst = 20 };
-// Permit two complete NODES exchanges, including handshake packets, in one source burst.
+// Packet and expected-response stages each permit two complete NODES exchanges per burst.
 pub const packet_source_quota: Quota = .{ .interval_ms = 25, .burst = 2 * (types.findnode_response_packets_max + 2) };
 pub const packet_global_quota: Quota = .{ .interval_ms = 10, .burst = 4 * packet_source_quota.burst };
 pub const record_source_quota: Quota = .{ .interval_ms = 40, .burst = 2 * types.findnode_result_max };

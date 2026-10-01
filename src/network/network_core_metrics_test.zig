@@ -425,10 +425,16 @@ test "metrics export cumulative discovery lookups and datagram rejections" {
     defer f.deinit();
     const coordinator = f.node.discovery.?;
     coordinator.counters.lookups_started = 5;
-    coordinator.datagram_rejections[@intFromEnum(@import("discv5").types.RejectReason.invalid_handshake)] = 3;
+    const d = @import("discv5");
+    coordinator.datagram_rejections[@intFromEnum(d.types.RejectReason.invalid_handshake)] = 3;
+    _ = coordinator.consume(&.{ .datagram = .{ .rejected = .record_admission_limited } }, &.{}, &.{});
+    _ = coordinator.consume(&.{ .datagram = .{ .rejected = .admission_limited } }, &.{}, &.{});
     const output = try f.render(true);
     try contains(output, "lodestar_native_discovery_lookups_started_total 5\n");
     try contains(output, "lodestar_native_discovery_datagram_rejections_total{stage=\"handshake\",reason=\"invalid_handshake\"} 3\n");
+    try contains(output, "lodestar_native_discovery_datagram_rejections_total{stage=\"record\",reason=\"record_admission_limited\"} 1\n");
+    try contains(output, "lodestar_native_discovery_datagram_rejections_total{stage=\"admission\",reason=\"admission_limited\"} 1\n");
+    try contains(output, "lodestar_native_discovery_datagram_rejections_total{stage=\"record\",reason=\"invalid_record\"} 0\n");
     try contains(try f.render(false), "lodestar_native_discovery_lookups_started_total 5\n");
 }
 

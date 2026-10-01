@@ -42,7 +42,19 @@ pub const Mode = @import("udp").Mode;
 pub const Endpoint = struct {
     node_id: NodeId,
     address: Address,
+
+    pub fn eql(self: *const Endpoint, other: *const Endpoint) bool {
+        return std.mem.eql(u8, &self.node_id, &other.node_id) and self.address.eql(other.address);
+    }
 };
+
+/// Compares IPv4 /24 or IPv6 /64 prefixes, ignoring ports and interface scopes.
+pub fn sameSubnet(left: Address, right: Address) bool {
+    return switch (left) {
+        .ip4 => |ip| right == .ip4 and std.mem.eql(u8, ip.octets[0..3], right.ip4.octets[0..3]),
+        .ip6 => |ip| right == .ip6 and std.mem.eql(u8, ip.octets[0..8], right.ip6.octets[0..8]),
+    };
+}
 
 /// Why a datagram was not acted on. Admission pressure does not establish peer misconduct.
 pub const RejectReason = enum {
@@ -58,6 +70,7 @@ pub const RejectReason = enum {
     invalid_response,
     duplicate_response,
     admission_limited,
+    record_admission_limited,
 };
 
 /// Keeps `out[0..length]` ordered by XOR distance to `target`, dropping the farthest when full.

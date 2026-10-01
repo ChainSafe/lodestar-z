@@ -18,6 +18,7 @@ pub const Error = CallTable.Error || Channel.Error || RoutingTable.Error ||
     ClockOverflow,
     HandshakeUnsent,
     MissingCall,
+    RecordAdmissionLimited,
     SessionRequired,
     UnexpectedChallenge,
 };
@@ -118,15 +119,6 @@ config: Config,
 channel: Channel,
 calls: CallTable,
 routing: RoutingTable,
-
-pub fn init(
-    self: *Engine,
-    allocator: std.mem.Allocator,
-    local_key: crypto.KeyPair,
-    local_record: enr.Record,
-) InitError!void {
-    return self.initWithConfig(allocator, local_key, local_record, .{});
-}
 
 pub fn initWithConfig(
     self: *Engine,
@@ -547,7 +539,7 @@ fn dispatchResponse(
     const parsed_records = switch (decoded) {
         .nodes => |nodes| blk: {
             if (nodes.enrs.len != 0 and !self.channel.admission.allowRecords(&peer.address, @intCast(nodes.enrs.len), now_ms))
-                return Error.AdmissionLimited;
+                return Error.RecordAdmissionLimited;
             break :blk try validateNodeRecords(nodes.enrs, scratch);
         },
         else => &.{},
@@ -596,6 +588,7 @@ fn routeAuthenticated(
 fn rejectReason(err: Error) ?types.RejectReason {
     return switch (err) {
         Error.AdmissionLimited => .admission_limited,
+        Error.RecordAdmissionLimited => .record_admission_limited,
         Error.InvalidMessage,
         Error.UnsupportedMessage,
         Error.InvalidEncoding,

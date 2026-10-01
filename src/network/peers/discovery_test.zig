@@ -437,16 +437,29 @@ test "peer discovery empty lookup backs off and counts completion once" {
     var a: Node = undefined;
     try a.init(1, 9001);
     defer a.deinit();
-    const controller = try a.configure(&context, &.{}, 10, .{});
+    const controller = try a.configure(&context, &.{}, 10, .{ .maintenance = .{
+        .probe_interval_ms = 100_000,
+        .stale_after_ms = 100_000,
+        .retry_interval_ms = 100_000,
+    } });
     try controller.request(.{ .general = true }, 10);
+    var host: SendFailure = .{ .now_ms = 10, .receive_failure = error.Timeout };
     var out: [1]adapter.Candidate = undefined;
-    const result = try controller.step(std.testing.io, 10, 10, &out);
-    try std.testing.expectEqual(@as(usize, 0), result.candidates);
-    try std.testing.expect(controller.nextWakeup(10).? > 10);
-    try std.testing.expectEqual(@as(u64, 1), controller.lookup_finishes[@intFromEnum(d.Lookup.FinishReason.exhausted)]);
-    _ = controller.consume(&.{ .now_ms = 11 }, &.{}, &out);
-    try std.testing.expectEqual(@as(u64, 1), controller.lookup_finishes[@intFromEnum(d.Lookup.FinishReason.exhausted)]);
+    for ([_]u64{ 2_000, 4_000, 8_000 }, 1..) |delay, completed| {
+        const result = try controller.step(host.io(), host.now_ms, host.now_ms, &out);
+        try std.testing.expect(result.failure == null);
+        try std.testing.expectEqual(@as(usize, 0), result.candidates);
+        const deadline = host.now_ms + delay;
+        try std.testing.expectEqual(@as(?u64, deadline), controller.nextWakeup(host.now_ms));
+        try std.testing.expectEqual(completed, controller.lookup_finishes[@intFromEnum(d.Lookup.FinishReason.exhausted)]);
+        host.now_ms = deadline - 1;
+        _ = try controller.step(host.io(), host.now_ms, host.now_ms, &out);
+        try std.testing.expectEqual(completed, controller.counters.lookups_started);
+        try std.testing.expectEqual(completed, controller.lookup_finishes[@intFromEnum(d.Lookup.FinishReason.exhausted)]);
+        host.now_ms = deadline;
+    }
     try std.testing.expectEqual(@as(u64, 0), controller.counters.candidates_published);
+    try std.testing.expectEqual(@as(usize, 0), host.sends);
 }
 
 test "peer discovery counts every rejected datagram by reason" {
@@ -460,9 +473,13 @@ test "peer discovery counts every rejected datagram by reason" {
     _ = controller.consume(&.{ .now_ms = 12, .datagram = .{ .rejected = .unsolicited_response } }, &.{}, &out);
     _ = controller.consume(&.{ .now_ms = 13 }, &.{}, &out);
     try std.testing.expectEqual(@as(u64, 2), controller.datagram_rejections[@intFromEnum(d.types.RejectReason.unsolicited_response)]);
+    for ([_]d.types.RejectReason{ .admission_limited, .record_admission_limited }) |reason| {
+        _ = controller.consume(&.{ .now_ms = 14, .datagram = .{ .rejected = reason } }, &.{}, &out);
+        try std.testing.expectEqual(@as(u64, 1), controller.datagram_rejections[@intFromEnum(reason)]);
+    }
     var rejected: u64 = 0;
     for (controller.datagram_rejections) |count| rejected += count;
-    try std.testing.expectEqual(@as(u64, 2), rejected);
+    try std.testing.expectEqual(@as(u64, 4), rejected);
 }
 
 test "peer discovery QUIC relay checks reject public to private and unscoped IPv6" {
@@ -572,6 +589,7 @@ const SendFailure = struct {
     now_ms: u64,
     sends: usize = 0,
     receive_real: bool = false,
+    receive_failure: std.Io.Batch.AwaitConcurrentError = error.ConcurrencyUnavailable,
     /// Refuses only sends to this port and delivers the rest. Null refuses every send.
     refused_port: ?u16 = null,
     fn io(self: *SendFailure) std.Io {
@@ -591,7 +609,7 @@ const SendFailure = struct {
     fn receive(context_ptr: ?*anyopaque, batch: *std.Io.Batch, timeout: std.Io.Timeout) std.Io.Batch.AwaitConcurrentError!void {
         const self: *SendFailure = @ptrCast(@alignCast(context_ptr.?));
         if (self.receive_real) return std.testing.io.vtable.batchAwaitConcurrent(std.testing.io.userdata, batch, timeout);
-        return error.ConcurrencyUnavailable;
+        return self.receive_failure;
     }
     fn currentTime(context_ptr: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
         const self: *SendFailure = @ptrCast(@alignCast(context_ptr.?));
@@ -891,7 +909,6 @@ test "dual-stack discovery confirms both families in one routing table" {
         }
         if (hub.transport.engine.peerRecord(&ipv4.transport.engine.localRecord().node_id).?.last_verified_ms != null and
             hub.transport.engine.peerRecord(&ipv6.transport.engine.localRecord().node_id).?.last_verified_ms != null) break;
-        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     }
     try std.testing.expectEqual(@as(usize, 2), hub.transport.engine.peerCount());
     try std.testing.expect(hub.transport.engine.peerRecord(&ipv4.transport.engine.localRecord().node_id).?.last_verified_ms != null);
@@ -918,7 +935,6 @@ test "IPv6-only discovery bootstraps a dual-stack record over IPv6" {
         const response = try seed.transport.stepUntil(std.testing.io, &expiries, tick);
         if (response.failure) |err| return err;
         if (node.transport.engine.peerRecord(&seed.transport.engine.localRecord().node_id).?.last_verified_ms != null) break;
-        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     }
     try std.testing.expect(node.transport.engine.peerRecord(&seed.transport.engine.localRecord().node_id).?.peer.address == .ip6);
     try std.testing.expect(node.transport.engine.peerRecord(&seed.transport.engine.localRecord().node_id).?.last_verified_ms != null);

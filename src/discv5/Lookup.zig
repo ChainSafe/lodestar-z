@@ -199,7 +199,7 @@ pub fn onResponse(
     if (response.matched.response != .nodes) return Error.UnexpectedResponse;
     const index = self.waitingIndex(response.matched.handle) orelse
         return Error.UnknownQuery;
-    if (!std.meta.eql(response.peer, self.candidates[index].peer))
+    if (!response.peer.eql(&self.candidates[index].peer))
         return Error.UnknownQuery;
     const source = response.peer.address;
     for (response.node_records) |*record| self.addDiscovered(record, source);
@@ -358,6 +358,7 @@ fn familyBit(address: types.Address) u2 {
 fn nextCandidateIndex(self: *const Lookup, core: ?*const Engine) ?usize {
     const boundary = self.successBoundary();
     var selected: ?usize = null;
+    var selected_preferred = false;
     for (self.activeCandidates(), 0..) |*candidate, index| {
         if (candidate.state != .unqueried) continue;
         if (!self.ip_mode.supports(candidate.peer.address)) continue;
@@ -368,21 +369,17 @@ fn nextCandidateIndex(self: *const Lookup, core: ?*const Engine) ?usize {
         if (core) |engine| {
             if (engine.isPeerBusy(&candidate.peer.node_id)) continue;
         }
+        const preferred = self.matches(&candidate.record);
         if (selected) |previous| {
-            const preferred = self.matches(&candidate.record);
-            const previous_preferred = self.matches(&self.candidates[previous].record);
-            if (!preferred and previous_preferred) continue;
-            if (preferred and !previous_preferred) {
-                selected = index;
-                continue;
-            }
-            if (!types.xorCloser(
+            if (!preferred and selected_preferred) continue;
+            if (preferred == selected_preferred and !types.xorCloser(
                 &candidate.peer.node_id,
                 &self.candidates[previous].peer.node_id,
                 &self.target,
             )) continue;
         }
         selected = index;
+        selected_preferred = preferred;
     }
     return selected;
 }

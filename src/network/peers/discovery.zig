@@ -32,8 +32,7 @@ pub const candidates_per_step = d.types.findnode_result_max + 1;
 pub const Rejection = enum { missing_eth2, incompatible_fork, invalid_enr, no_quic, endpoint_family, endpoint_scope, demand, output_capacity };
 pub const rejection_count = @typeInfo(Rejection).@"enum".fields.len;
 pub const datagram_rejection_count = @typeInfo(d.types.RejectReason).@"enum".fields.len;
-/// Foreground lookups started, and candidates handed to peer selection, which also marks a
-/// lookup that found nothing.
+/// Foreground lookups started and candidates handed to peer selection.
 pub const Counters = struct {
     lookups_started: u64 = 0,
     candidates_published: u64 = 0,
@@ -76,25 +75,6 @@ pub const Result = struct {
     datagrams: u16 = 0,
     failure: ?Error = null,
     failure_stage: d.Transport.FailureStage = .coordinator,
-
-    /// Sums the progress of consecutive steps. The latest learned address of each family and
-    /// the first failure are kept.
-    pub fn add(self: *Result, next: *const Result) void {
-        for (&self.learned, next.learned) |*kept, learned| {
-            if (learned) |address| kept.* = address;
-        }
-        self.candidates +|= next.candidates;
-        self.started +|= next.started;
-        self.expired +|= next.expired;
-        self.rejected +|= next.rejected;
-        self.dropped +|= next.dropped;
-        self.unowned +|= next.unowned;
-        self.datagrams +|= next.datagrams;
-        if (self.failure == null and next.failure != null) {
-            self.failure = next.failure;
-            self.failure_stage = next.failure_stage;
-        }
-    }
 };
 const Storage = struct {
     observations: d.AddressVotes,

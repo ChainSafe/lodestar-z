@@ -82,8 +82,6 @@ pub const Result = struct {
     counts: Counts = .{ .peers = 0, .application = 0 },
     transport: transport_mod.StepResult,
     readiness: wait.Result = .{},
-    /// Discovery progress summed over the turn's datagram batch.
-    discovery: peers.discovery.Result = .{},
     /// Only the discovery sockets had work, so the transport and protocols did not run.
     discovery_only: bool = false,
     failure: ?OperationalError = null,
@@ -796,7 +794,6 @@ pub const NetworkCore = struct {
         var eligible: [2]bool = if (result.readiness.failure == null) result.readiness.discovery else @splat(true);
         for (0..discovery_batch_max) |_| {
             const progress = owned.stepReady(io, tick.mono_ms, &eligible, candidates) catch |err| peers.discovery.Result{ .failure = err };
-            result.discovery.add(&progress);
             const endpoints = owned.learnedEndpoints(progress.learned);
             if (!std.meta.eql(endpoints, owned.endpoints)) {
                 _ = self.updateLocalWithEndpoints(&self.peer_manager.local, self.schedule, endpoints, tick) catch |err| {
