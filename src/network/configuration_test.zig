@@ -1,7 +1,7 @@
 const Profile = @import("configuration.zig").Profile;
 const policy_fixture = @import("reqresp/policy_fixture.zig");
 const resolve = @import("configuration.zig").resolve;
-const rr = @import("reqresp/reqresp.zig");
+const rr = @import("reqresp/ReqResp.zig");
 const std = @import("std");
 const transport = @import("transport.zig");
 const udp = @import("udp");
@@ -182,7 +182,7 @@ test "configuration request admission memory plan measures both retained profile
     for ([_]Profile{ .small, .beacon_node }) |profile| {
         const resolved = try resolve(.{ .profile = profile, .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
         var allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        var handler = try @import("reqresp/reqresp.zig").ReqResp.init(allocator.allocator(), resolved.core.service.reqresp);
+        var handler = try @import("reqresp/ReqResp.zig").init(allocator.allocator(), resolved.core.service.reqresp);
         defer handler.deinit();
         const plan = handler.memoryPlan();
         try std.testing.expectEqual(allocator.allocated_bytes, plan.total_bytes - plan.facade_bytes);

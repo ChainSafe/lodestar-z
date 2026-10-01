@@ -1,6 +1,6 @@
 const std = @import("std");
 const ct = @import("consensus_types");
-const reqresp = @import("reqresp.zig");
+const reqresp = @import("ReqResp.zig");
 const protocol = @import("protocol.zig");
 const Engine = @import("../quic/Engine.zig");
 const multistream = @import("../wire/multistream.zig");
@@ -19,7 +19,7 @@ pub const Overrides = struct {
     quota_timeout_ms: u64 = 60_000,
     forks: ?[]const reqresp.ForkEntry = null,
     request_fork: @import("config").ForkSeq = .phase0,
-    admission: ?reqresp.AdmissionOptions = null,
+    admission: ?reqresp.Options.Admission = null,
 };
 
 pub const Pair = struct {
@@ -55,7 +55,7 @@ pub const Pair = struct {
             .progress_timeout_ms = overrides.progress_timeout_ms,
             .forks = overrides.forks orelse forks,
             .request_fork = overrides.request_fork,
-            .admission = overrides.admission orelse try reqresp.AdmissionOptions.defaults(&@import("policy_fixture.zig").config(), peers, peers, overrides.inbound_max -| overrides.inbound_control_reserved),
+            .admission = overrides.admission orelse try reqresp.Options.Admission.defaults(&@import("policy_fixture.zig").config(), peers, peers, overrides.inbound_max -| overrides.inbound_control_reserved),
             .host_timeout_ms = overrides.host_timeout_ms,
             .quota_timeout_ms = overrides.quota_timeout_ms,
         };

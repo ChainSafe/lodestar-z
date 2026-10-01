@@ -1,8 +1,8 @@
 const std = @import("std");
 const Engine = @import("../quic/Engine.zig");
 const StreamHandle = @import("../types.zig").StreamHandle;
-const Client = @import("client.zig").Client;
-const Server = @import("server.zig").Server;
+const Client = @import("Client.zig");
+const Server = @import("Server.zig");
 
 /// The reverse half of ReqResp's ownership invariant: a stream route must name a live request
 /// that holds this exact stream. Scanning only the request slots cannot find orphaned routes.

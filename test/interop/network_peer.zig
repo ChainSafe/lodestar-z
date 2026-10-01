@@ -37,7 +37,7 @@ pub const Peer = struct {
     outbound: bool = false,
     paused: bool = false,
     hold_fin: bool = false,
-    held_finish: ?network.reqresp.RequestHandle = null,
+    held_finish: ?network.reqresp.ReqResp.RequestHandle = null,
     held_since: ?u64 = null,
     finish_calls: usize = 0,
     quit: bool = false,
@@ -85,7 +85,7 @@ pub const Peer = struct {
         if (self.steps >= 10_000_000) return error.StepBound;
         self.steps += 1;
         var events: [32]Engine.Event = undefined;
-        var requests: [16]network.reqresp.Event = undefined;
+        var requests: [16]network.reqresp.ReqResp.Event = undefined;
         const stepped = self.transport.step(self.io, &events, .{ .wait_max_ms = 1 });
         const result = stepped.progress;
         self.now = result.now;
@@ -107,7 +107,7 @@ pub const Peer = struct {
             },
             else => {},
         };
-        var controls: [16]network.reqresp.Event = undefined;
+        var controls: [16]network.reqresp.ReqResp.Event = undefined;
         var identified: [4]network.identify.Result = undefined;
         const counts = self.service.process(&self.transport.engine, events[0..result.events], self.now, .{ .application = &requests, .control = &controls, .identify = &identified });
         for (requests[0..counts.application]) |event| try self.requestEvent(event);
@@ -122,7 +122,7 @@ pub const Peer = struct {
         if (stepped.failure) |err| return err;
     }
 
-    fn requestEvent(self: *Peer, event: network.reqresp.Event) !void {
+    fn requestEvent(self: *Peer, event: network.reqresp.ReqResp.Event) !void {
         switch (event) {
             .request => |r| {
                 if (self.application and r.protocol.isControl()) {
@@ -318,7 +318,7 @@ pub fn main(init: std.process.Init) !void {
     const application = args.len == 2 and std.mem.eql(u8, args[1], "--application");
     var blob_schedule: [network.reqresp.request_policy.schedule_max]network.reqresp.request_policy.BlobLimit = undefined;
     const policy = try network.reqresp.request_policy.Config.fromBeaconConfig(&@import("config").mainnet.config, &blob_schedule);
-    var admission = try network.reqresp.reqresp.AdmissionOptions.defaults(&policy, 4, 4, if (application) 6 else 1);
+    var admission = try network.reqresp.ReqResp.Options.Admission.defaults(&policy, 4, 4, if (application) 6 else 1);
     for (&admission.limits.peer, &admission.limits.global) |*peer_quotas, *global_quotas| {
         peer_quotas[@intFromEnum(network.reqresp.Protocol.ping_v1)] = .{ .tokens = 16, .period_ms = 30_000 };
         global_quotas[@intFromEnum(network.reqresp.Protocol.ping_v1)] = .{ .tokens = 4 * 16, .period_ms = 30_000 };

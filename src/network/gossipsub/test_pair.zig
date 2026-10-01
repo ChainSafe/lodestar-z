@@ -16,7 +16,7 @@ pub const Pair = struct {
     /// As `initOpts`, with the server granting `stream_window` bytes of credit on each stream the
     /// client opens until it reads them.
     pub fn initWindow(self: *Pair, client: gossip.Options, server: gossip.Options, stream_window: ?u64) !void {
-        const reqresp: @import("../reqresp/reqresp.zig").Options = .{ .forks = &.{}, .peers = 128, .outbound_max = 1, .inbound_max = 1, .inbound_per_peer_max = 1, .admission = try @import("../reqresp/reqresp.zig").AdmissionOptions.defaults(&@import("../reqresp/policy_fixture.zig").config(), 128, 128, 1) };
+        const reqresp: @import("../reqresp/ReqResp.zig").Options = .{ .forks = &.{}, .peers = 128, .outbound_max = 1, .inbound_max = 1, .inbound_per_peer_max = 1, .admission = try @import("../reqresp/ReqResp.zig").Options.Admission.defaults(&@import("../reqresp/policy_fixture.zig").config(), 128, 128, 1) };
         const topics = &.{ @import("topic_fixture.zig").bytes(.{ 1, 2, 3, 4 }), @import("topic_fixture.zig").bytes(.{ 0x6a, 0x95, 0xa1, 0xa9 }) };
         var client_options = client;
         client_options.topic_policy = client.topic_policy orelse topics;

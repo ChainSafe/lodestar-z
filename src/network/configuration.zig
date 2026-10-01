@@ -4,7 +4,7 @@ const peer_manager = @import("peer_manager.zig");
 const Engine = @import("quic/Engine.zig");
 const transport = @import("transport.zig");
 const udp = @import("udp");
-const rr = @import("reqresp/reqresp.zig");
+const rr = @import("reqresp/ReqResp.zig");
 const gossip = @import("gossipsub/options.zig");
 const c = @import("gossipsub/constants.zig");
 const peers = @import("peers/types.zig");
@@ -108,7 +108,7 @@ pub fn resolve(request: Request) !Resolved {
         requests.outbound_max = requests.outbound_control_reserved + @min(maximum, requests.outbound_max - requests.outbound_control_reserved);
     }
 
-    requests.admission = try rr.AdmissionOptions.defaults(&request.admission_policy, peer_options.capacity, peer_options.max_peers, requests.inbound_max - requests.inbound_control_reserved);
+    requests.admission = try rr.Options.Admission.defaults(&request.admission_policy, peer_options.capacity, peer_options.max_peers, requests.inbound_max - requests.inbound_control_reserved);
     var identify: @import("identify/root.zig").Options = .{ .inbound_max = if (small) 2 else 4, .outbound_max = if (small) 2 else 4 };
     applyOverrides(&identify, request.identify);
     var protocols: router.Options = .{

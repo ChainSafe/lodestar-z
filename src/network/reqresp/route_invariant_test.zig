@@ -1,8 +1,8 @@
 const std = @import("std");
 const invariant = @import("route_invariant.zig");
 const support = @import("../quic/test_support.zig");
-const Client = @import("client.zig").Client;
-const Server = @import("server.zig").Server;
+const Client = @import("Client.zig");
+const Server = @import("Server.zig");
 
 test "reverse route invariant detects orphans without a forward request to visit" {
     var pair: support.Pair = .{};

@@ -74,7 +74,7 @@ pub const Host = struct {
 };
 pub const Outputs = struct {
     peers: []t.Event = &.{},
-    application: []rr.Event = &.{},
+    application: []rr.ReqResp.Event = &.{},
 };
 pub const OperationalError = transport_mod.StepError || transport_mod.DialError || peers.discovery.Error || wait.Error;
 pub const Counts = struct { peers: usize, application: usize };
@@ -125,7 +125,7 @@ pub const NetworkCore = struct {
     host_more: bool = false,
     /// The Service's control events and Identify results that `process` consumes within its turn.
     /// Fields rather than locals so ReleaseSafe does not fill them every turn.
-    controls: [controls_per_turn]rr.Event = undefined,
+    controls: [controls_per_turn]rr.ReqResp.Event = undefined,
     identify_results: [identify_per_turn]@import("identify/root.zig").Result = undefined,
 
     pub fn init(self: *NetworkCore, backing: std.mem.Allocator, io: std.Io, resolved: *const @import("configuration.zig").Resolved, startup: Startup) !void {
@@ -281,7 +281,7 @@ pub const NetworkCore = struct {
         if (self.peer_manager.stopped) return error.Stopped;
         try self.peer_manager.updateStatus(self.service.router.capabilities().receive, status);
     }
-    pub fn sendReqRespRequest(self: *NetworkCore, identity: *const t.PeerId, protocol: rr.Protocol, request: []const u8, sink: []u8, options: rr.RequestOptions, now: Now) !rr.RequestHandle {
+    pub fn sendReqRespRequest(self: *NetworkCore, identity: *const t.PeerId, protocol: rr.Protocol, request: []const u8, sink: []u8, options: rr.ReqResp.RequestOptions, now: Now) !rr.ReqResp.RequestHandle {
         const peer = self.peer_manager.catalog.find(identity) orelse return error.StalePeer;
         const snapshot = self.peer_manager.catalog.get(peer) orelse return error.StalePeer;
         const conn = snapshot.connection orelse return error.Disconnected;
@@ -289,22 +289,22 @@ pub const NetworkCore = struct {
         if (protocol.isControl()) return error.ControlProtocol;
         return self.service.request(&self.transport.engine, conn, protocol, request, sink, options, now);
     }
-    pub fn consume(self: *NetworkCore, request: rr.RequestHandle, now: Now) bool {
+    pub fn consume(self: *NetworkCore, request: rr.ReqResp.RequestHandle, now: Now) bool {
         return self.service.reqresp.consume(request, now);
     }
-    pub fn respond(self: *NetworkCore, request: rr.RequestHandle, bytes: []const u8, context: ?rr.ForkEntry, now: Now) !void {
+    pub fn respond(self: *NetworkCore, request: rr.ReqResp.RequestHandle, bytes: []const u8, context: ?rr.ReqResp.ForkEntry, now: Now) !void {
         try self.service.reqresp.respond(request, bytes, context, now);
     }
-    pub fn respondError(self: *NetworkCore, request: rr.RequestHandle, code: u8, message: []const u8, now: Now) !void {
+    pub fn respondError(self: *NetworkCore, request: rr.ReqResp.RequestHandle, code: u8, message: []const u8, now: Now) !void {
         try self.service.reqresp.respondError(request, code, message, now);
     }
-    pub fn finish(self: *NetworkCore, request: rr.RequestHandle, now: Now) bool {
+    pub fn finish(self: *NetworkCore, request: rr.ReqResp.RequestHandle, now: Now) bool {
         return self.service.reqresp.finish(request, now);
     }
-    pub fn cancel(self: *NetworkCore, request: rr.RequestHandle) bool {
+    pub fn cancel(self: *NetworkCore, request: rr.ReqResp.RequestHandle) bool {
         return self.service.reqresp.cancel(request);
     }
-    pub fn errorMessage(self: *const NetworkCore, request: rr.RequestHandle) []const u8 {
+    pub fn errorMessage(self: *const NetworkCore, request: rr.ReqResp.RequestHandle) []const u8 {
         return self.service.reqresp.errorMessage(request);
     }
 
@@ -643,7 +643,7 @@ pub const NetworkCore = struct {
         const controls = &self.controls;
         const identify_results = &self.identify_results;
         const counts = self.service.process(quic, events, now, .{ .application = outputs.application, .control = controls, .identify = identify_results });
-        for ([_][]const rr.Event{ outputs.application[0..counts.application], controls[0..counts.control] }) |batch| {
+        for ([_][]const rr.ReqResp.Event{ outputs.application[0..counts.application], controls[0..counts.control] }) |batch| {
             for (batch) |event| {
                 const fault = self.service.reqresp.peerFault(event) orelse continue;
                 const peer = pm.catalog.find(fault.identity) orelse continue;
@@ -723,7 +723,7 @@ pub const NetworkCore = struct {
     /// Routes one turn's control events. Peer control applies each request or reply before the
     /// control protocol answers, consumes or retires it. Each observed result settles before
     /// another policy evaluation.
-    fn controlEvents(self: *NetworkCore, batch: []const rr.Event, now: Now) void {
+    fn controlEvents(self: *NetworkCore, batch: []const rr.ReqResp.Event, now: Now) void {
         const pm = &self.peer_manager;
         const requests = &self.control_protocol;
         const reqresp = &self.service.reqresp;
@@ -816,8 +816,8 @@ fn ceilMs(ns: u64) u64 {
     return ns / std.time.ns_per_ms + @intFromBool(ns % std.time.ns_per_ms != 0);
 }
 
-fn validateForkTable(table: []const rr.ForkEntry, context: *const t.ForkContext) !void {
-    try rr.reqresp.validateForkTable(table);
+fn validateForkTable(table: []const rr.ReqResp.ForkEntry, context: *const t.ForkContext) !void {
+    try rr.ReqResp.validateForkTable(table);
     var found = false;
     for (table) |entry| {
         if (std.mem.eql(u8, &entry.digest, &context.digest) and entry.fork == context.fork) found = true;

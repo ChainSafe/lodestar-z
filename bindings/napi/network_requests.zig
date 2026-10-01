@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 const n = @import("network");
 const rr = n.reqresp;
 const Budget = @import("network_budget.zig").Budget;
-pub fn forkLabel(fork: ?@FieldType(rr.ForkEntry, "fork")) ?[]const u8 {
+pub fn forkLabel(fork: ?@FieldType(rr.ReqResp.ForkEntry, "fork")) ?[]const u8 {
     return if (fork) |value| @tagName(value) else null;
 }
 
@@ -19,21 +19,21 @@ pub const Terminal = union(enum) {
     done,
     closed,
     rejected: Rejection,
-    failed: struct { reason: rr.Failure, phase: ?rr.reqresp.RequestPhase },
+    failed: struct { reason: rr.ReqResp.Failure, phase: ?rr.ReqResp.RequestPhase },
 };
 pub const Rejection = enum { disconnected, protocol_disabled, invalid_request, invalid_request_options, too_many_requests, slots_exhausted, negotiation_table_full, transport };
-pub const Chunk = struct { len: usize, fork: ?@FieldType(rr.ForkEntry, "fork") };
+pub const Chunk = struct { len: usize, fork: ?@FieldType(rr.ReqResp.ForkEntry, "fork") };
 pub const Cell = struct {
     state: State = .free,
     generation: u64 = 0,
     order: u64 = 0,
     peer: n.PeerId = undefined,
     protocol: rr.Protocol = .blocks_by_root_v2,
-    options: rr.RequestOptions = .{},
+    options: rr.ReqResp.RequestOptions = .{},
     input: []u8 = &.{},
     sink: []u8 = &.{},
     reservation: usize = 0,
-    native: ?rr.RequestHandle = null,
+    native: ?rr.ReqResp.RequestHandle = null,
     terminal: ?Terminal = null,
     chunk: ?Chunk = null,
     delivered: bool = false,
@@ -345,7 +345,7 @@ pub fn flags(runtime: *Runtime, io: std.Io) void {
         if (cell.terminal != null and (cell.pulling or cell.retiring)) runtime.recomputeLocked(.completions);
     };
 }
-pub fn capture(runtime: *Runtime, events: []const rr.Event, now: n.Now) !void {
+pub fn capture(runtime: *Runtime, events: []const rr.ReqResp.Event, now: n.Now) !void {
     runtime.lock();
     defer runtime.unlock();
     const core = &runtime.heavy.?.core;

@@ -172,7 +172,7 @@ test "core native control timeout releases owners independent of public output" 
     try std.testing.expectEqual(t.DisconnectReason.health_timeout, events[0].closed.reason);
 }
 
-fn failStatus(setup: *Setup, failure: rr.Failure) !void {
+fn failStatus(setup: *Setup, failure: rr.ReqResp.Failure) !void {
     for (setup.client.control_protocol.operations) |operation| if (operation.request) |request| {
         if (operation.protocol != .status_v1) continue;
         const service = &setup.client.service.reqresp;
@@ -184,7 +184,7 @@ fn failStatus(setup: *Setup, failure: rr.Failure) !void {
     return error.TestUnexpectedResult;
 }
 
-fn failStatusRound(setup: *Setup, failure: rr.Failure) !void {
+fn failStatusRound(setup: *Setup, failure: rr.ReqResp.Failure) !void {
     setup.client.peer_manager.reStatusPeers(setup.pair.now);
     try setup.step(0);
     try failStatus(setup, failure);
@@ -193,7 +193,7 @@ fn failStatusRound(setup: *Setup, failure: rr.Failure) !void {
 
 test "core native control disconnects only after consecutive health failures" {
     const status = @intFromEnum(@import("peers/control.zig").HealthProbe.status);
-    const Case = struct { failure: rr.Failure, reason: ?t.DisconnectReason };
+    const Case = struct { failure: rr.ReqResp.Failure, reason: ?t.DisconnectReason };
     for ([_]Case{
         .{ .failure = .stream_closed, .reason = .health_error },
         .{ .failure = .{ .invalid_response = error.Truncated }, .reason = .health_error },
@@ -400,7 +400,7 @@ test "core native deterministic replacement cancels old control and ignores stal
     try std.testing.expectEqual(@as(usize, 8), old.sampling_groups.?.count());
     setup.client.peer_manager.reStatusPeers(setup.pair.now);
     try setup.step(1);
-    var old_request: ?rr.RequestHandle = null;
+    var old_request: ?rr.ReqResp.RequestHandle = null;
     for (setup.client.control_protocol.operations) |op| if (op.request != null) {
         old_request = op.request;
         break;
@@ -481,7 +481,7 @@ test "core native saturated app requests retain partitioned borrows while contro
     setup.client.peer_manager.reStatusPeers(setup.pair.now);
     for (0..40) |_| try setup.step(0);
     try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.peerCounts().relevant);
-    var applications: [1]rr.Event = undefined;
+    var applications: [1]rr.ReqResp.Event = undefined;
     var delivered: usize = 0;
     for (0..16) |_| {
         const counts = (try setup.turn(&setup.server, .{ .application = &applications })).counts;

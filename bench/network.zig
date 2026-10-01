@@ -245,7 +245,7 @@ fn connectPair(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, top
     }
 }
 
-fn pressure(a: *network.NetworkCore, b: *network.NetworkCore, sinks: []u8, io: std.Io, topic: []const u8, context: rr.ForkEntry) !void {
+fn pressure(a: *network.NetworkCore, b: *network.NetworkCore, sinks: []u8, io: std.Io, topic: []const u8, context: rr.ReqResp.ForkEntry) !void {
     var payload: [64 * 1024]u8 = undefined;
     var random = std.Random.DefaultPrng.init(123);
     random.random().bytes(&payload);
@@ -259,7 +259,7 @@ fn pressure(a: *network.NetworkCore, b: *network.NetworkCore, sinks: []u8, io: s
     var request: [32]u8 = @splat(0);
     request[8] = 1;
     request[16] = 1;
-    var requests: [4]rr.RequestHandle = undefined;
+    var requests: [4]rr.ReqResp.RequestHandle = undefined;
     for (&requests, 0..) |*handle, i| {
         const protocol: rr.Protocol = if (i < 2) .blocks_by_range_v2 else .blocks_by_root_v2;
         handle.* = try a.sendReqRespRequest(&b.peerId(), protocol, request[0..if (i < 2) 24 else 32], sinks[i * sink_size ..][0..sink_size], .{ .expected_chunks = 1 }, try network.transport.currentTime(io));
@@ -310,8 +310,8 @@ fn pressure(a: *network.NetworkCore, b: *network.NetworkCore, sinks: []u8, io: s
     try drain(a, b, io, requests.len, &payload, context, &gossip, delivered_gossip);
 }
 
-fn drain(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, expected: usize, payload: []const u8, context: rr.ForkEntry, gossip: *GossipSink, delivered_gossip: usize) !void {
-    var events: [8]rr.Event = undefined;
+fn drain(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, expected: usize, payload: []const u8, context: rr.ReqResp.ForkEntry, gossip: *GossipSink, delivered_gossip: usize) !void {
+    var events: [8]rr.ReqResp.Event = undefined;
     var received: usize = 0;
     var chunks: usize = 0;
     var terminals: usize = 0;

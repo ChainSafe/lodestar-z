@@ -1,8 +1,8 @@
 const std = @import("std");
-const rr = @import("reqresp.zig");
+const rr = @import("ReqResp.zig");
 const codec = @import("codec.zig");
 const Protocol = @import("protocol.zig").Protocol;
-const Plan = @import("receive_plan.zig").Plan;
+const Plan = @import("ReceivePlan.zig");
 const PeerId = @import("../wire/peer_id.zig").PeerId;
 const Handle = @import("../types.zig").Handle;
 const harness = @import("test_pair.zig");
@@ -13,7 +13,7 @@ const quotas = @import("admission_fixture.zig").quotas;
 /// for a 500 ms refill. Protocol quotas stay out of the way.
 const refill_ms = 500;
 
-fn limits(identities: u16) rr.AdmissionOptions {
+fn limits(identities: u16) rr.Options.Admission {
     return .{ .policy = policy(), .limits = .{
         .identities = identities,
         .peer = quotas(100, 1000),
@@ -71,11 +71,11 @@ const Exchange = struct {
     }
 };
 
-fn refusals(owner: *const rr.ReqResp, which: Protocol, reason: rr.metrics.AdmissionRefusal) u64 {
+fn refusals(owner: *const rr, which: Protocol, reason: rr.metrics.AdmissionRefusal) u64 {
     return owner.protocol_counters[@intFromEnum(which)].admission_refusals[@intFromEnum(reason)];
 }
 
-fn allRefusals(owner: *const rr.ReqResp) u64 {
+fn allRefusals(owner: *const rr) u64 {
     var total: u64 = 0;
     for (owner.protocol_counters) |counts| for (counts.admission_refusals) |count| {
         total += count;
@@ -83,12 +83,12 @@ fn allRefusals(owner: *const rr.ReqResp) u64 {
     return total;
 }
 
-fn waitingStarts(owner: *const rr.ReqResp) usize {
+fn waitingStarts(owner: *const rr) usize {
     return owner.resourceSnapshot().inbound_phases[@intFromEnum(rr.metrics.InboundPhase.waiting_start)];
 }
 
 /// The slot of the request accepted at `now_ms` that still waits for its start.
-fn waiterAt(owner: *const rr.ReqResp, now_ms: u64) !u16 {
+fn waiterAt(owner: *const rr, now_ms: u64) !u16 {
     var found: ?u16 = null;
     for (owner.inbound, 0..) |*slot, index| if (slot.request.running() and slot.admission.start_pending and slot.request.started_ms == now_ms) {
         if (found != null) return error.TestUnexpectedResult;
@@ -397,7 +397,7 @@ test "reqresp request start a request behind a waiter is still refused without a
 }
 
 /// A `.ready` request on connection index `peer` whose start accept deferred.
-fn deferredSlot(owner: *rr.ReqResp, peer: u16, which: Protocol, identity: *const PeerId, now_ms: u64) u16 {
+fn deferredSlot(owner: *rr, peer: u16, which: Protocol, identity: *const PeerId, now_ms: u64) u16 {
     const index: u16 = @intCast(Plan.first(peer, which));
     const slot = &owner.inbound[index];
     const conn: Handle = .{ .index = peer, .generation = std.math.maxInt(u32) };

@@ -26,7 +26,7 @@ const health_probe_count = @typeInfo(HealthProbe).@"enum".fields.len;
 const Schedule = struct {
     /// A started request keeps its catalog index reserved through cancellation and replacement.
     /// Only its matching terminal event releases this token; retiring a connection does not.
-    pending_request: ?rr.RequestHandle = null,
+    pending_request: ?rr.ReqResp.RequestHandle = null,
     direction: t.Direction = .inbound,
     identify_state: enum { pending, started, done } = .pending,
     identify_retry_ms: u64 = 0,
@@ -351,7 +351,7 @@ pub const Control = struct {
         }
         row.identify_state = .started;
     }
-    pub fn requestStarted(self: *Control, due: *const Due, request: ?rr.RequestHandle, now: Now) void {
+    pub fn requestStarted(self: *Control, due: *const Due, request: ?rr.ReqResp.RequestHandle, now: Now) void {
         const row = self.schedule(due.peer, due.conn) orelse return;
         std.debug.assert(row.pending_request == null);
         if (request == null) {
@@ -497,7 +497,7 @@ pub const Control = struct {
         self: *Control,
         catalog: *Catalog,
         peer: t.PeerRef,
-        event: *const @FieldType(rr.Event, "request"),
+        event: *const @FieldType(rr.ReqResp.Event, "request"),
         local: *const t.LocalState,
         now: Now,
         slot: u64,
@@ -541,7 +541,7 @@ pub const Control = struct {
         self: *Control,
         catalog: *Catalog,
         op: *const wire.ControlReply,
-        event: rr.Event,
+        event: rr.ReqResp.Event,
         local: *const t.LocalState,
         now: Now,
         slot: u64,
@@ -617,7 +617,7 @@ pub const Control = struct {
             else => {},
         }
     }
-    fn complete(self: *Control, catalog: *Catalog, op: *const wire.ControlReply, event: rr.Event, now: Now) void {
+    fn complete(self: *Control, catalog: *Catalog, op: *const wire.ControlReply, event: rr.ReqResp.Event, now: Now) void {
         const row = self.schedule(op.peer, op.conn) orelse return;
         if (row.closing != null) return;
         switch (event) {
@@ -658,7 +658,7 @@ pub const Control = struct {
         }
     }
 
-    fn healthFailure(self: *Control, catalog: *Catalog, row: *Schedule, op: *const wire.ControlReply, probe: HealthProbe, failure: rr.Failure, now: Now) void {
+    fn healthFailure(self: *Control, catalog: *Catalog, row: *Schedule, op: *const wire.ControlReply, probe: HealthProbe, failure: rr.ReqResp.Failure, now: Now) void {
         const failures = &row.health_failures[@intFromEnum(probe)];
         failures.* +|= 1;
         const at_limit = failures.* >= self.options.health_failures_max;
@@ -672,7 +672,7 @@ pub const Control = struct {
     }
     /// Counts a failed probe once and logs it with the probe's streak and the close it causes:
     /// none, the streak's limit, or an immediate one for a refused probe, which skips the streak.
-    fn countHealthFailure(self: *Control, row: *const Schedule, op: *const wire.ControlReply, probe: HealthProbe, failure: rr.Failure, closes: enum { none, at_limit, immediate }) void {
+    fn countHealthFailure(self: *Control, row: *const Schedule, op: *const wire.ControlReply, probe: HealthProbe, failure: rr.ReqResp.Failure, closes: enum { none, at_limit, immediate }) void {
         self.counters.health_failures[@intFromEnum(probe)] +|= 1;
         std.log.scoped(.network_peers).debug("peer_health_failure connection={d}:{d} probe={s} reason={s} failures={d} limit={d} close={s}", .{ op.conn.index, op.conn.generation, @tagName(probe), @tagName(failure), row.health_failures[@intFromEnum(probe)], self.options.health_failures_max, @tagName(closes) });
     }

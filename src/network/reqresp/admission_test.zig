@@ -3,7 +3,6 @@ const a = @import("admission.zig");
 const PeerId = @import("../wire/peer_id.zig").PeerId;
 const ForkSeq = @import("config").ForkSeq;
 const Protocol = @import("protocol.zig").Protocol;
-const limiter = @import("limiter.zig");
 
 const quotas = @import("admission_fixture.zig").quotas;
 const first: PeerId = .{ .bytes = @splat(1) };

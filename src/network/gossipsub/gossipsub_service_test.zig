@@ -165,7 +165,7 @@ test "gossipsub service negotiates with a v1.1-only peer" {
     try setup.init();
     defer setup.deinit();
     setup.shared.server.deinit();
-    setup.shared.server = try @import("../service_test_support.zig").initService(std.testing.allocator, .{ .reqresp = .{ .forks = &.{}, .peers = 4, .outbound_max = 1, .inbound_max = 1, .inbound_per_peer_max = 1, .admission = try @import("../reqresp/reqresp.zig").AdmissionOptions.defaults(&@import("../reqresp/policy_fixture.zig").config(), 4, 4, 1) }, .gossipsub = .{ .random_seed = 1 }, .router = .{ .meshsub_versions = &.{.v1_1} } }, &setup.shared.pair.server);
+    setup.shared.server = try @import("../service_test_support.zig").initService(std.testing.allocator, .{ .reqresp = .{ .forks = &.{}, .peers = 4, .outbound_max = 1, .inbound_max = 1, .inbound_per_peer_max = 1, .admission = try @import("../reqresp/ReqResp.zig").Options.Admission.defaults(&@import("../reqresp/policy_fixture.zig").config(), 4, 4, 1) }, .gossipsub = .{ .random_seed = 1 }, .router = .{ .meshsub_versions = &.{.v1_1} } }, &setup.shared.pair.server);
     setup.shared.server_inbox.attach(setup.shared.server.gossipsub);
     _ = setup.shared.server.gossipsub.peerConnected(&setup.shared.pair.server, setup.shared.handles.server, false, setup.shared.pair.now);
     for (0..24) |_| try setup.pumpOnce();

@@ -61,7 +61,7 @@ test "incoming submission recognizes a genuine native terminal awaiting output c
     }
     const query = [_]u8{0} ** 32;
     _ = try pair.shared.client.reqresp.request(&pair.shared.pair.client, &pair.shared.client.router, pair.shared.handles.client, .blocks_by_root_v2, &query, sink, .{}, pair.shared.pair.now);
-    var handle: ?rr.RequestHandle = null;
+    var handle: ?rr.ReqResp.RequestHandle = null;
     for (0..20) |_| {
         try pair.pumpOnce();
         for (pair.serverEvents()) |event| if (event == .request) {

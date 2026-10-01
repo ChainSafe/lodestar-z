@@ -2,7 +2,7 @@ const std = @import("std");
 const ct = @import("consensus_types");
 const codec = @import("codec.zig");
 const protocol = @import("protocol.zig");
-const reqresp = @import("reqresp.zig");
+const reqresp = @import("ReqResp.zig");
 const harness = @import("test_pair.zig");
 const Engine = @import("../quic/Engine.zig");
 const multistream = @import("../wire/multistream.zig");
@@ -65,7 +65,7 @@ fn waitForRequest(setup: *Pair) !void {
 }
 
 /// Admission refusals of one method, over every reason.
-fn refused(owner: *const reqresp.ReqResp, which: Protocol) u64 {
+fn refused(owner: *const reqresp, which: Protocol) u64 {
     var total: u64 = 0;
     for (owner.protocol_counters[@intFromEnum(which)].admission_refusals) |count| total += count;
     return total;
@@ -902,7 +902,7 @@ test "reqresp wakeup distinguishes host and quota waits and bounds idle scans" {
 
 test "reqresp validates transport capacity and copies its fork table" {
     var forks = [_]reqresp.ForkEntry{.{ .digest = deneb_digest, .fork = .deneb }};
-    var rr = try reqresp.ReqResp.init(std.testing.allocator, .{ .peers = 1, .forks = &forks, .admission = try reqresp.AdmissionOptions.defaults(&@import("policy_fixture.zig").config(), 1, 1, 64) });
+    var rr = try reqresp.init(std.testing.allocator, .{ .peers = 1, .forks = &forks, .admission = try reqresp.Options.Admission.defaults(&@import("policy_fixture.zig").config(), 1, 1, 64) });
     defer rr.deinit();
     forks[0].digest = fulu_digest;
     try std.testing.expectEqual(@as(?@import("config").ForkSeq, .deneb), rr.forkFor(deneb_digest));
@@ -911,7 +911,7 @@ test "reqresp validates transport capacity and copies its fork table" {
     try setup.init(.{}, .{});
     defer setup.deinit();
     try std.testing.expectError(error.InvalidCapacity, rr.attach(&setup.shared.pair.client));
-    try std.testing.expectError(error.InvalidOptions, reqresp.ReqResp.init(std.testing.allocator, .{ .peers = 1025, .forks = &.{}, .admission = try reqresp.AdmissionOptions.defaults(&@import("policy_fixture.zig").config(), 1, 1, 64) }));
+    try std.testing.expectError(error.InvalidOptions, reqresp.init(std.testing.allocator, .{ .peers = 1025, .forks = &.{}, .admission = try reqresp.Options.Admission.defaults(&@import("policy_fixture.zig").config(), 1, 1, 64) }));
     const plan = rr.memoryPlan();
     try std.testing.expectEqual(plan.total_bytes, plan.facade_bytes + plan.slot_bytes + plan.io_bytes + plan.admission_bytes + plan.request_sink_bytes + plan.serving_bytes + plan.scheduler_bytes);
     try std.testing.expect(plan.io_bytes > 0 and plan.slot_bytes > 0);
@@ -1031,7 +1031,7 @@ test "reqresp terminal pressure quiesces without capacity and wakes when host un
 }
 
 test "reqresp admission wait expires as local policy and not peer timeout" {
-    var admission = try reqresp.AdmissionOptions.defaults(&@import("policy_fixture.zig").config(), 128, 128, 8);
+    var admission = try reqresp.Options.Admission.defaults(&@import("policy_fixture.zig").config(), 128, 128, 8);
     for (&admission.limits.peer) |*quotas| quotas[@intFromEnum(Protocol.ping_v1)] = .{ .tokens = 1, .period_ms = 5000 };
     var setup: Pair = .{};
     try setup.init(.{}, .{ .quota_timeout_ms = 1000, .admission = admission });
@@ -1415,9 +1415,9 @@ test "reqresp rejects duplicate digests before allocating" {
     const first: reqresp.ForkEntry = .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu };
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     for ([_]@import("config").ForkSeq{ .fulu, .deneb }) |fork| {
-        try std.testing.expectError(error.InvalidOptions, reqresp.ReqResp.init(failing.allocator(), .{
+        try std.testing.expectError(error.InvalidOptions, reqresp.init(failing.allocator(), .{
             .forks = &.{ first, .{ .digest = first.digest, .fork = fork } },
-            .admission = try reqresp.AdmissionOptions.defaults(&@import("policy_fixture.zig").config(), 1, 1, 1),
+            .admission = try reqresp.Options.Admission.defaults(&@import("policy_fixture.zig").config(), 1, 1, 1),
         }));
     }
 }
@@ -1618,7 +1618,7 @@ test "reqresp absolute policies validate all durations before stream admission" 
     var sink: [ct.phase0.Status.fixed_size]u8 = undefined;
     inline for (.{ "negotiation_ms", "request_ms", "response_ms" }) |field| {
         for ([_]u64{ 0, 60001, std.math.maxInt(u64) }) |invalid| {
-            var policy: reqresp.AbsoluteTimeouts = .{ .negotiation_ms = 1, .request_ms = 1, .response_ms = 1 };
+            var policy: reqresp.RequestOptions.AbsoluteTimeouts = .{ .negotiation_ms = 1, .request_ms = 1, .response_ms = 1 };
             @field(policy, field) = invalid;
             try std.testing.expectError(error.InvalidRequestOptions, setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .status_v1, &request, &sink, .{ .absolute_timeouts = policy }, setup.shared.pair.now));
         }

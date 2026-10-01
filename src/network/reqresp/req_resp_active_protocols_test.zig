@@ -4,7 +4,7 @@ const ct = @import("consensus_types");
 const codec = @import("codec.zig");
 const protocol = @import("protocol.zig");
 const response_bounds = @import("response_bounds.zig");
-const reqresp = @import("reqresp.zig");
+const reqresp = @import("ReqResp.zig");
 const harness = @import("test_pair.zig");
 
 const first: reqresp.ForkEntry = .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu };
@@ -12,7 +12,7 @@ const second: reqresp.ForkEntry = .{ .digest = .{ 5, 6, 7, 8 }, .fork = .fulu };
 const phase0: reqresp.ForkEntry = .{ .digest = .{ 9, 10, 11, 12 }, .fork = .phase0 };
 
 /// Admission refusals for `reason`, summed over every method.
-fn refusals(owner: *const reqresp.ReqResp, reason: reqresp.metrics.AdmissionRefusal) u64 {
+fn refusals(owner: *const reqresp, reason: reqresp.metrics.AdmissionRefusal) u64 {
     var total: u64 = 0;
     for (owner.protocol_counters) |counts| total += counts.admission_refusals[@intFromEnum(reason)];
     return total;
@@ -296,7 +296,7 @@ test "reqresp active light client traffic preserves control reserve and cancella
     const handles = try support.connectPair(&pair);
     var router = try routing.Router.init(std.testing.allocator, .{});
     defer router.deinit();
-    var owner = try reqresp.ReqResp.init(std.testing.allocator, try @import("control_fixture.zig").reservedOptions());
+    var owner = try reqresp.init(std.testing.allocator, try @import("control_fixture.zig").reservedOptions());
     defer owner.deinit();
     const which = protocol.Protocol.light_client_finality_update_v1;
     const capacity = protocol.Protocol.light_client_updates_by_range_v1.info().response_max;
@@ -539,7 +539,7 @@ test "reqresp request admission outbound validation ceiling and owner fork snaps
 }
 
 fn admissionAllocation(allocator: std.mem.Allocator) !void {
-    var owner = try reqresp.ReqResp.init(allocator, .{
+    var owner = try reqresp.init(allocator, .{
         .forks = &.{},
         .outbound_max = 1,
         .inbound_max = 1,

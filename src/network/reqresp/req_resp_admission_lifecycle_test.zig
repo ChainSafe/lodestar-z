@@ -1,7 +1,7 @@
 const std = @import("std");
-const rr = @import("reqresp.zig");
+const rr = @import("ReqResp.zig");
 const Protocol = @import("protocol.zig").Protocol;
-const Plan = @import("receive_plan.zig").Plan;
+const Plan = @import("ReceivePlan.zig");
 const harness = @import("test_pair.zig");
 const support = @import("../quic/test_support.zig");
 const policy = @import("policy_fixture.zig").config;
@@ -116,10 +116,10 @@ test "reqresp admission lifecycle fair dispatch advances to the next peer before
 }
 
 fn allocation(allocator: std.mem.Allocator) !void {
-    var owner = try rr.ReqResp.init(allocator, .{
+    var owner = try rr.init(allocator, .{
         .peers = 2,
         .forks = &.{},
-        .admission = try rr.AdmissionOptions.defaults(&policy(), 2, 1, 1),
+        .admission = try rr.Options.Admission.defaults(&policy(), 2, 1, 1),
         .outbound_max = 2,
         .inbound_max = 2,
         .inbound_control_reserved = 1,
@@ -217,19 +217,4 @@ test "reqresp admission lifecycle a fresh burst starts full requests before spli
     try std.testing.expectEqual(@as(usize, 2), result.application);
     try std.testing.expectEqual(@as(u16, 0), events[0].request.peer.index);
     try std.testing.expectEqual(@as(u16, 1), events[1].request.peer.index);
-}
-
-test "reqresp admission lifecycle a blocked control writer cannot take another peer's execution reserve" {
-    var pool = try @import("serving_pool.zig").Pool.init(std.testing.allocator, 6, 2, 4);
-    defer pool.deinit(std.testing.allocator);
-    const PeerId = @import("../wire/peer_id.zig").PeerId;
-    const first: PeerId = .{ .bytes = @splat(1) };
-    const second: PeerId = .{ .bytes = @splat(2) };
-    const index = pool.available(&first, true).?;
-    _ = pool.acquire(index, .{ .direction = .inbound, .index = 0, .generation = 1 }, &first, true);
-    try std.testing.expectEqual(@as(?u16, null), pool.available(&first, true));
-    try std.testing.expect(pool.available(&second, true) != null);
-    try std.testing.expect(pool.available(&first, false) != null);
-    pool.retire(index);
-    try std.testing.expect(pool.available(&first, true) != null);
 }

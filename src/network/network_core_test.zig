@@ -358,7 +358,7 @@ fn applicationAndFork(a: *runtime.NetworkCore, b: *runtime.NetworkCore, b_inbox:
     const sink_size = rr.Protocol.blocks_by_range_v2.info().response_max;
     const sinks = try std.testing.allocator.alloc(u8, 4 * sink_size);
     defer std.testing.allocator.free(sinks);
-    var handles: [4]rr.RequestHandle = undefined;
+    var handles: [4]rr.ReqResp.RequestHandle = undefined;
     for (&handles, 0..) |*handle, i| {
         const protocol: rr.Protocol = if (i < 2) .blocks_by_range_v2 else .blocks_by_root_v2;
         handle.* = try a.sendReqRespRequest(&b.peerId(), protocol, if (i < 2) &request else &([_]u8{0} ** 32), sinks[i * sink_size ..][0..sink_size], .{ .expected_chunks = 1 }, now);
@@ -372,7 +372,7 @@ fn applicationAndFork(a: *runtime.NetworkCore, b: *runtime.NetworkCore, b_inbox:
         _ = b.step(std.testing.io, tick, .{}, .deadlineOnly(tick.mono_ms +| 1));
     }
     const response = [_]u8{9} ** @import("consensus_types").fulu.SignedBeaconBlock.min_size;
-    var app: [1]rr.Event = undefined;
+    var app: [1]rr.ReqResp.Event = undefined;
     var peer_events: [1]t.Event = undefined;
     var done: usize = 0;
     var chunks: usize = 0;
@@ -838,7 +838,7 @@ fn profileAllocationFailures(a: std.mem.Allocator) !void {
 }
 
 test "core invalid complete sections reject before allocation" {
-    const forks: []const @import("reqresp/reqresp.zig").ForkEntry = &.{.{ .digest = @splat(0), .fork = .phase0 }};
+    const forks: []const @import("reqresp/ReqResp.zig").ForkEntry = &.{.{ .digest = @splat(0), .fork = .phase0 }};
     inline for (.{ error.InvalidOptions, error.InvalidOptions, error.InvalidOptions, error.InvalidLimits, error.InvalidLimits, error.InvalidOptions }, 0..) |expected, section| {
         var request: @import("configuration.zig").Request = .{ .profile = .small, .seed = 1, .forks = forks, .admission_policy = @import("reqresp/policy_fixture.zig").config() };
         switch (section) {
@@ -1144,7 +1144,7 @@ test "core idle turns with pending negotiations are never due for reqresp or neg
 }
 
 test "core BPO same-fork digest transition updates status and advertisement" {
-    const rr = @import("reqresp/reqresp.zig");
+    const rr = @import("reqresp/ReqResp.zig");
     const first: rr.ForkEntry = .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu };
     const second: rr.ForkEntry = .{ .digest = .{ 5, 6, 7, 8 }, .fork = .fulu };
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{1}));
@@ -1702,7 +1702,7 @@ const IntentPair = struct {
     b: runtime.NetworkCore = undefined,
     a_inbox: Inbox = .{},
     b_inbox: Inbox = .{},
-    b_app: [4]@import("reqresp/root.zig").Event = undefined,
+    b_app: [4]@import("reqresp/root.zig").ReqResp.Event = undefined,
 
     fn attachInboxes(self: *IntentPair) void {
         self.a_inbox.attach(self.a.service.gossipsub);

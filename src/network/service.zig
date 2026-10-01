@@ -11,13 +11,13 @@ const wake_sources = @import("wake_sources.zig");
 pub const Options = struct {
     identify: identify_mod.Options = .{},
     router: routing.Options = .{},
-    reqresp: reqresp_mod.reqresp.Options,
+    reqresp: reqresp_mod.ReqResp.Options,
     gossipsub: gossip_mod.Options = .{},
 };
-pub const Outputs = struct { application: []reqresp_mod.Event = &.{}, control: []reqresp_mod.Event = &.{}, identify: []identify_mod.Result = &.{} };
+pub const Outputs = struct { application: []reqresp_mod.ReqResp.Event = &.{}, control: []reqresp_mod.ReqResp.Event = &.{}, identify: []identify_mod.Result = &.{} };
 pub const OutputCounts = struct { application: usize, control: usize, identify: usize };
 pub const Capacities = struct { application: usize = 0, control: usize = 0, identify: usize = 0 };
-pub const InitError = routing.Error || reqresp_mod.reqresp.InitError || gossip_mod.gossipsub.InitError || identify_mod.handler.InitError;
+pub const InitError = routing.Error || reqresp_mod.ReqResp.InitError || gossip_mod.gossipsub.InitError || identify_mod.handler.InitError;
 
 pub const Service = struct {
     identify: identify_mod.Handler,
@@ -32,7 +32,7 @@ pub const Service = struct {
     pub fn validateOptions(options: Options) InitError!void {
         try routing.Router.validateOptions(options.router);
         try identify_mod.Handler.validate(options.identify);
-        try reqresp_mod.ReqResp.validateOptions(options.reqresp);
+        try options.reqresp.validate();
         try @import("gossipsub/options.zig").validate(&options.gossipsub);
     }
 
@@ -82,9 +82,9 @@ pub const Service = struct {
         protocol: reqresp_mod.Protocol,
         bytes: []const u8,
         sink: []u8,
-        options: reqresp_mod.reqresp.RequestOptions,
+        options: reqresp_mod.ReqResp.RequestOptions,
         now: types.Now,
-    ) reqresp_mod.reqresp.RequestError!reqresp_mod.RequestHandle {
+    ) reqresp_mod.ReqResp.RequestError!reqresp_mod.ReqResp.RequestHandle {
         if (self.applications != .active and !protocol.isControl()) return error.ProtocolDisabled;
         return self.reqresp.request(
             engine,

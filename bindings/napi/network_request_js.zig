@@ -16,8 +16,8 @@ fn tokenFor(value: Value) !requests.Token {
     const generation = try cfg.bigint(try cfg.get(value, "generation"));
     return .{ .index = @intCast(index), .generation = generation };
 }
-fn optionsFor(value: Value) !n.reqresp.RequestOptions {
-    var result_options: n.reqresp.RequestOptions = .{};
+fn optionsFor(value: Value) !n.reqresp.ReqResp.RequestOptions {
+    var result_options: n.reqresp.ReqResp.RequestOptions = .{};
     if (try value.typeof() == .undefined) return result_options;
     try cfg.object(value, &.{ "expectedChunks", "negotiationTimeoutMs", "requestTimeoutMs", "responseTimeoutMs" });
     const expected = try cfg.get(value, "expectedChunks");

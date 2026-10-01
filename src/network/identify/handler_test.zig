@@ -5,7 +5,7 @@ const Engine = @import("../quic/Engine.zig");
 const identify = @import("root.zig");
 
 fn options(agent: []const u8) !service.Options {
-    return .{ .reqresp = .{ .forks = &.{}, .admission = try @import("../reqresp/reqresp.zig").AdmissionOptions.defaults(&@import("../reqresp/policy_fixture.zig").config(), 128, 128, 64) }, .gossipsub = .{ .random_seed = 1 }, .identify = .{ .agent = agent, .inbound_max = 1, .outbound_max = 1 } };
+    return .{ .reqresp = .{ .forks = &.{}, .admission = try @import("../reqresp/ReqResp.zig").Options.Admission.defaults(&@import("../reqresp/policy_fixture.zig").config(), 128, 128, 64) }, .gossipsub = .{ .random_seed = 1 }, .identify = .{ .agent = agent, .inbound_max = 1, .outbound_max = 1 } };
 }
 
 test "identify delivers retained completions before recycled lower slots" {
@@ -165,7 +165,7 @@ test "identify saturation leaves reserved Ping negotiation usable" {
     var received = false;
     for (0..32) |_| {
         var events: [64]Engine.Event = undefined;
-        var requests: [4]rr.Event = undefined;
+        var requests: [4]rr.ReqResp.Event = undefined;
         const cc = client.process(&pair.client, pair.events(&pair.client, &events), pair.now, .{ .control = &requests });
         for (requests[0..cc.control]) |event| if (event == .chunk) {
             try std.testing.expectEqualSlices(u8, &ping, event.chunk.bytes);

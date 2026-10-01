@@ -14,11 +14,11 @@ const Now = @import("types.zig").Now;
 const assert = std.debug.assert;
 /// An `operation_by_peer` entry with no request in flight.
 const no_operation = std.math.maxInt(u16);
-const RequestEvent = @FieldType(rr.Event, "request");
+const RequestEvent = @FieldType(rr.ReqResp.Event, "request");
 
 pub const Probe = wire.Probe;
 pub const Operation = struct {
-    request: ?rr.RequestHandle = null,
+    request: ?rr.ReqResp.RequestHandle = null,
     peer: t.PeerRef = undefined,
     conn: t.Handle = undefined,
     protocol: rr.Protocol = .ping_v1,
@@ -34,7 +34,7 @@ pub const Operation = struct {
     }
 };
 const Response = struct {
-    request: ?rr.RequestHandle = null,
+    request: ?rr.ReqResp.RequestHandle = null,
     peer: t.PeerRef = undefined,
     conn: t.Handle = undefined,
     bytes: [wire.status_size_max]u8 = undefined,
@@ -94,7 +94,7 @@ pub const ControlProtocol = struct {
         probe: *const Probe,
         local: *const values.LocalState,
         now: Now,
-    ) ?rr.RequestHandle {
+    ) ?rr.ReqResp.RequestHandle {
         assert(self.operation_by_peer[peer.index] == no_operation);
         defer if (@import("builtin").is_test) self.checkIndex();
         for (self.operations, 0..) |*op, index| {
@@ -215,7 +215,7 @@ pub const ControlProtocol = struct {
 
     /// Settles a result for a response this module serves, or returns the operation an outbound
     /// result belongs to. Peer control reads that operation before `settle` consumes or retires it.
-    pub fn result(self: *ControlProtocol, reqresp: *rr.ReqResp, event: rr.Event, now: Now) ?u16 {
+    pub fn result(self: *ControlProtocol, reqresp: *rr.ReqResp, event: rr.ReqResp.Event, now: Now) ?u16 {
         const request = switch (event) {
             .chunk => |e| e.request,
             .done => |e| e.request,
@@ -252,7 +252,7 @@ pub const ControlProtocol = struct {
         router: *Router,
         engine: *Engine,
         index: u16,
-        event: rr.Event,
+        event: rr.ReqResp.Event,
         now: Now,
     ) void {
         const op = &self.operations[index];

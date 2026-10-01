@@ -1,3 +1,5 @@
+const protocol = @import("protocol.zig");
+const RequestIO = @import("RequestIO.zig");
 const std = @import("std");
 const codec = @import("codec.zig");
 const constants = @import("constants.zig");
@@ -258,9 +260,8 @@ test "codec bounds errors separately from successful ping payloads" {
 }
 
 test "codec compact control buffers decode successful and maximum error payloads" {
-    const rr = @import("reqresp.zig");
     var sink: [@import("protocol.zig").payloadMaxControl()]u8 = undefined;
-    var scratch: [rr.control_scratch_length]u8 = undefined;
+    var scratch: [protocol.control_scratch_length]u8 = undefined;
     var encoded: [codec.encodedLengthMax(codec.error_message_max)]u8 = undefined;
     var payload: [codec.error_message_max]u8 = undefined;
     var random = std.Random.DefaultPrng.init(1);
@@ -268,7 +269,7 @@ test "codec compact control buffers decode successful and maximum error payloads
     for ([_]usize{ 8, 16, 17, 25, 84, 92, codec.error_message_max }) |length| {
         const is_error = length == codec.error_message_max;
         const bytes = try codec.encodeChunk(if (is_error) 1 else 0, null, payload[0..length], &encoded);
-        for ([_]usize{ 1, 7, rr.control_read_buffer_length }) |piece| {
+        for ([_]usize{ 1, 7, RequestIO.control_read_buffer_length }) |piece| {
             var decoder = Decoder.initResponse(.{ .min = 8, .max = sink.len }, false, &sink, &scratch);
             try std.testing.expectEqualSlices(u8, payload[0..length], try decodeAll(&decoder, bytes, piece));
             try std.testing.expectEqual(is_error, decoder.isError());
@@ -277,9 +278,8 @@ test "codec compact control buffers decode successful and maximum error payloads
 }
 
 test "codec compact control buffers reject oversized frame declarations before copying" {
-    const rr = @import("reqresp.zig");
     var sink = [_]u8{0xa5} ** 8;
-    var scratch = [_]u8{0xa5} ** rr.control_scratch_length;
+    var scratch = [_]u8{0xa5} ** protocol.control_scratch_length;
     for ([_]u8{ 0, 1, 0xfe }) |kind| {
         var decoder = Decoder.initResponse(.{ .min = 8, .max = 8 }, false, &sink, &scratch);
         const prefix = [_]u8{ 0, 8 } ++ codec.identifier;

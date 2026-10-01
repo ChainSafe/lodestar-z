@@ -1,7 +1,7 @@
 const std = @import("std");
 const ct = @import("consensus_types");
 const protocol = @import("protocol.zig");
-const reqresp = @import("reqresp.zig");
+const reqresp = @import("ReqResp.zig");
 const Engine = @import("../quic/Engine.zig");
 const harness = @import("test_pair.zig");
 
@@ -60,7 +60,7 @@ test "service round trips a status request through the collapsed host loop" {
 }
 
 test "service reclaims inbound sinks across more requests than it has slots" {
-    const admission: reqresp.AdmissionOptions = .{ .policy = @import("policy_fixture.zig").config(), .limits = .{
+    const admission: reqresp.Options.Admission = .{ .policy = @import("policy_fixture.zig").config(), .limits = .{
         .identities = 2,
         .peer = @import("admission_fixture.zig").quotas(1_000, 1_000),
         .global = @import("admission_fixture.zig").quotas(1_000, 1_000),
@@ -283,7 +283,7 @@ test "service reqresp slot is serviced only after a stream event or its deadline
 
 test "service reqresp deadline fires on time while more slots than the pump budget stay ready" {
     // One client identity opens every stream, so its request starts need a larger burst.
-    var admission = try reqresp.AdmissionOptions.defaults(&@import("policy_fixture.zig").config(), 128, 128, 8);
+    var admission = try reqresp.Options.Admission.defaults(&@import("policy_fixture.zig").config(), 128, 128, 8);
     admission.limits.starts.tokens = 64;
     var setup: Pair = .{};
     try setup.init(.{}, .{ .progress_timeout_ms = 1_000, .admission = admission });
@@ -347,7 +347,7 @@ test "service reqresp slots stay indexed by connection across a reconnect at the
     var sinks: [2][8]u8 = undefined;
     _ = try setup.shared.client.request(&setup.shared.pair.client, old.client, .ping_v1, &bytes, &sinks[0], .{}, setup.shared.pair.now);
     const stale = try awaitRequest(&setup);
-    const slots_per_peer = @import("receive_plan.zig").slots_per_peer;
+    const slots_per_peer = @import("ReceivePlan.zig").slots_per_peer;
     try std.testing.expectEqual(@as(usize, old.server.index), stale.index / slots_per_peer);
 
     // The server holds its host events while the connection closes and a new one takes its index.

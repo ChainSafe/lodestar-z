@@ -221,18 +221,18 @@ pub const PeerManager = struct {
     pub fn nextControl(self: *PeerManager, pass: *control_mod.Control.Pass, now: Now) ?control_mod.Control.Due {
         return self.control.nextDue(pass, &self.catalog, &self.local, now);
     }
-    pub fn controlStarted(self: *PeerManager, due: *const control_mod.Control.Due, identify_started: bool, request: ?@import("reqresp/root.zig").RequestHandle, now: Now) void {
+    pub fn controlStarted(self: *PeerManager, due: *const control_mod.Control.Due, identify_started: bool, request: ?@import("reqresp/root.zig").ReqResp.RequestHandle, now: Now) void {
         if (due.identify) self.control.identifyStarted(due, identify_started, now);
         if (due.request != null) self.control.requestStarted(due, request, now);
         self.control.rekey(&self.catalog, due.index);
     }
-    pub fn controlRequested(self: *PeerManager, request: *const @FieldType(@import("reqresp/root.zig").Event, "request"), now: Now, slot: u64) ?t.PeerRef {
+    pub fn controlRequested(self: *PeerManager, request: *const @FieldType(@import("reqresp/root.zig").ReqResp.Event, "request"), now: Now, slot: u64) ?t.PeerRef {
         const peer = self.catalog.findConnection(request.peer) orelse return null;
         self.control.requested(&self.catalog, peer, request, &self.local, now, slot);
         return peer;
     }
     /// Called before the protocol consumes the borrowed event and settles its resource token.
-    pub fn controlReplied(self: *PeerManager, reply: *const control_wire.ControlReply, event: @import("reqresp/root.zig").Event, now: Now, slot: u64) void {
+    pub fn controlReplied(self: *PeerManager, reply: *const control_wire.ControlReply, event: @import("reqresp/root.zig").ReqResp.Event, now: Now, slot: u64) void {
         self.control.replied(&self.catalog, reply, event, &self.local, now, slot);
     }
     pub fn identified(self: *PeerManager, results: []const @import("identify/root.zig").Result) void {

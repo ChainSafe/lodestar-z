@@ -14,7 +14,7 @@ fn rrOptions() !@import("service.zig").Options {
         .inbound_max = 4,
         .inbound_per_peer_max = 4,
         .forks = &.{},
-        .admission = try rr.reqresp.AdmissionOptions.defaults(&@import("reqresp/policy_fixture.zig").config(), 128, 128, 4),
+        .admission = try rr.ReqResp.Options.Admission.defaults(&@import("reqresp/policy_fixture.zig").config(), 128, 128, 4),
     } };
 }
 
@@ -48,7 +48,7 @@ test "router composes simultaneous ping and meshsub on one connection" {
     var pong = false;
     for (0..32) |_| {
         var transport_events: [16]Engine.Event = undefined;
-        var request_events: [16]rr.Event = undefined;
+        var request_events: [16]rr.ReqResp.Event = undefined;
         const client_count = client.process(&pair.client, pair.events(&pair.client, &transport_events), pair.now, .{ .control = &request_events }).control;
         for (request_events[0..client_count]) |event| switch (event) {
             .chunk => |chunk| {
@@ -219,7 +219,7 @@ test "router composed service handles native stream events past empty request ca
         .outbound_max = 64,
         .inbound_max = 64,
         .work_per_pump_max = 1,
-        .admission = try rr.reqresp.AdmissionOptions.defaults(&@import("reqresp/policy_fixture.zig").config(), 128, 128, 64),
+        .admission = try rr.ReqResp.Options.Admission.defaults(&@import("reqresp/policy_fixture.zig").config(), 128, 128, 64),
     } }, &pair.client);
     defer client.deinit();
     defer client.reqresp.shutdown(&pair.client, &client.router);
@@ -230,9 +230,9 @@ test "router composed service handles native stream events past empty request ca
     const ping = [_]u8{3} ** 8;
     var sink: [8]u8 = undefined;
     _ = try client.request(&pair.client, handles.client, .ping_v1, &ping, &sink, .{}, pair.now);
-    var incoming: ?rr.RequestHandle = null;
+    var incoming: ?rr.ReqResp.RequestHandle = null;
     var transport: [16]Engine.Event = undefined;
-    var requests: [8]rr.Event = undefined;
+    var requests: [8]rr.ReqResp.Event = undefined;
     for (0..64) |_| {
         try pair.pump();
         _ = client.process(&pair.client, pair.events(&pair.client, &transport), pair.now, .{ .control = &requests });
@@ -286,7 +286,7 @@ test "router gossip capacity refusal preserves reqresp and explicit host retry" 
     var pong = false;
     for (0..64) |_| {
         var transport: [16]Engine.Event = undefined;
-        var requests: [16]rr.Event = undefined;
+        var requests: [16]rr.ReqResp.Event = undefined;
         try pair.pump();
         const count = client.process(&pair.client, pair.events(&pair.client, &transport), pair.now, .{ .control = &requests }).control;
         for (requests[0..count]) |event| if (event == .chunk) {
@@ -515,7 +515,7 @@ test "router accepted selection survives capability changes while ACK is flow co
 test "router capabilities activation preserves negotiated response context and captured ceiling" {
     const harness = @import("reqresp/test_pair.zig");
     const ct = @import("consensus_types");
-    const context: rr.ForkEntry = .{ .digest = .{ 9, 10, 11, 12 }, .fork = .phase0 };
+    const context: rr.ReqResp.ForkEntry = .{ .digest = .{ 9, 10, 11, 12 }, .fork = .phase0 };
     var setup: harness.Pair = .{};
     const limits = @import("reqresp/admission_fixture.zig").quotas(2048, 1000);
     const options: harness.Overrides = .{
