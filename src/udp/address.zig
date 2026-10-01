@@ -51,33 +51,4 @@ pub const Address = union(enum) {
     pub fn eql(self: Address, other: Address) bool {
         return std.meta.eql(self, other);
     }
-
-    /// Handshake admission groups IPv4 hosts and IPv6 /64 prefixes.
-    pub fn sameSourceGroup(self: Address, other: Address) bool {
-        return switch (self) {
-            .ip4 => |value| switch (other) {
-                .ip4 => |peer| std.mem.eql(u8, &value.octets, &peer.octets),
-                .ip6 => false,
-            },
-            .ip6 => |value| switch (other) {
-                .ip4 => false,
-                .ip6 => |peer| std.mem.eql(u8, value.octets[0..8], peer.octets[0..8]),
-            },
-        };
-    }
 };
-
-test "handshake source grouping ignores ports and groups IPv6 prefixes" {
-    const a: Address = .{ .ip6 = .{ .octets = .{ 0x20, 1, 0xd, 0xb8 } ++ .{0} ** 11 ++ .{1}, .port = 1 } };
-    var b = a;
-    b.ip6.octets[15] = 2;
-    b.ip6.port = 2;
-    b.ip6.interface = 3;
-    try std.testing.expect(a.sameSourceGroup(b));
-    b.ip6.octets[7] = 1;
-    try std.testing.expect(!a.sameSourceGroup(b));
-    const v4: Address = .{ .ip4 = .{ .octets = .{ 192, 0, 2, 1 }, .port = 1 } };
-    try std.testing.expect(v4.sameSourceGroup(.{ .ip4 = .{ .octets = v4.ip4.octets, .port = 2 } }));
-    try std.testing.expect(!v4.sameSourceGroup(.{ .ip4 = .{ .octets = .{ 192, 0, 2, 2 }, .port = 1 } }));
-    try std.testing.expect(!a.sameSourceGroup(v4));
-}
