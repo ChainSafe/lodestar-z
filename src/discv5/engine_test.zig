@@ -18,6 +18,45 @@ const sealEntropy = test_support.sealEntropy;
 
 const TestEngine = Engine;
 
+test "NODES record validation rejects malformed ENRs before publication" {
+    var pair: Pair = undefined;
+    try pair.init();
+    defer pair.deinit();
+    test_support.installSession(&pair.node_a, pair.peerB(), 0x55);
+    test_support.installSession(&pair.node_b, pair.peerA(), 0x55);
+    const request: message.Message = .{ .find_node = .{ .request_id = try .init(&.{1}), .distances = &.{256} } };
+    const started = try pair.node_a.startCall(&pair.a_to_b, pair.peerB(), &pair.record_b, &request, 1, &sealEntropy(0x20));
+    const received = try receiveMalformedNodes(&pair);
+    try std.testing.expectEqual(types.RejectReason.invalid_record, received.rejected);
+    try std.testing.expectEqual(@as(usize, 1), pair.node_a.calls.count());
+    try std.testing.expect(pair.node_a.cancelCall(started.handle));
+}
+
+test "unsolicited NODES fails before record validation" {
+    var pair: Pair = undefined;
+    try pair.init();
+    defer pair.deinit();
+    test_support.installSession(&pair.node_a, pair.peerB(), 0x55);
+    test_support.installSession(&pair.node_b, pair.peerA(), 0x55);
+    const received = try receiveMalformedNodes(&pair);
+    try std.testing.expectEqual(types.RejectReason.unsolicited_response, received.rejected);
+    const record_stage = @intFromEnum(@import("Admission.zig").Stage.record);
+    try std.testing.expectEqual(@as(u64, 0), pair.node_a.channel.admission.global[record_stage].charged_until_ms);
+    try std.testing.expectEqual(@as(usize, 0), pair.node_a.calls.count());
+}
+
+fn receiveMalformedNodes(pair: *Pair) !Engine.Outcome {
+    const response: message.Message = .{ .nodes = .{
+        .request_id = try .init(&.{1}),
+        .total = 1,
+        .enrs = &.{&.{0xc0}},
+    } };
+    var buffer: [1_280]u8 = undefined;
+    const plaintext = try response.encode(&buffer);
+    const sealed = try pair.node_b.channel.sealEstablished(&pair.b_to_a, pair.peerA(), plaintext, &sealEntropy(0x30), 2);
+    return pair.node_a.receive(&pair.a_to_b, pair.b_to_a[0..sealed.packet_length], pair.address_b, receiveArgs(2, 0x40), &pair.scratch_a);
+}
+
 test "paired engines recover a session and complete one call without queues" {
     var pair: Pair = undefined;
     try pair.init();
@@ -36,7 +75,7 @@ test "engine reports source admission pressure without a local failure" {
     defer pair.deinit();
     const sealed = try pair.node_a.channel.seal(&pair.a_to_b, pair.peerB(), "ping", &sealEntropy(0x10), 0);
     var source = pair.address_a;
-    for (0..@import("admission.zig").source_quota.burst) |i| {
+    for (0..@import("Admission.zig").source_quota.burst) |i| {
         source.ip4.port = @intCast(9_000 + i);
         const outcome = try pair.node_b.receive(&pair.b_to_a, pair.a_to_b[0..sealed.packet_length], source, receiveArgs(0, 0x30), &pair.scratch_b);
         try std.testing.expectEqual(@as(u16, 63), outcome.accepted.packet_length);
@@ -52,7 +91,7 @@ test "engine limits malformed packets before decoding or touching output" {
     var pair: Pair = undefined;
     try pair.init();
     defer pair.deinit();
-    const limits = @import("admission.zig");
+    const limits = @import("Admission.zig");
     for (0..limits.packet_source_quota.burst) |_| {
         const result = try pair.node_b.receive(&pair.b_to_a, &.{}, pair.address_a, receiveArgs(0, 0x30), &pair.scratch_b);
         try std.testing.expectEqual(types.RejectReason.malformed_packet, result.rejected);
@@ -69,7 +108,7 @@ test "engine admits fragmented expected responses through unsolicited packet exh
     var pair: Pair = undefined;
     try pair.init();
     defer pair.deinit();
-    const limits = @import("admission.zig");
+    const limits = @import("Admission.zig");
     test_support.installSession(&pair.node_a, pair.peerB(), 0x55);
     test_support.installSession(&pair.node_b, pair.peerA(), 0x55);
     const request = message.Message{ .find_node = .{ .request_id = try .init(&.{1}), .distances = &.{256} } };
@@ -100,7 +139,7 @@ test "established packet pressure cannot refresh a session after receive refusal
     var pair: Pair = undefined;
     try pair.init();
     defer pair.deinit();
-    const limits = @import("admission.zig");
+    const limits = @import("Admission.zig");
     test_support.installSession(&pair.node_a, pair.peerB(), 0x55);
     test_support.installSession(&pair.node_b, pair.peerA(), 0x55);
     const request = pair.ping(1);

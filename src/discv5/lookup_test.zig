@@ -1,4 +1,5 @@
 const std = @import("std");
+const address_policy = @import("address_policy.zig");
 const Engine = @import("Engine.zig");
 const crypto = @import("identity/crypto.zig");
 const enr = @import("identity/enr.zig");
@@ -51,7 +52,7 @@ test "lookup uses the call table for bounded parallel queries" {
     try operation.init(&operation_candidates, core.localRecord().node_id, [_]u8{0} ** 32, &seeds, .dual);
 
     var packet_buffer: [1_280]u8 = undefined;
-    var started: [4]Lookup.Started = undefined;
+    var started: [4]Engine.OutboundCall = undefined;
     for (0..3) |index| {
         started[index] = (try operation.startNext(
             &core,
@@ -314,7 +315,7 @@ test "filtered lookup stops at its query budget after retiring pending calls" {
     operation.filter = .{ .context = &wanted, .matches = matchesNode };
     operation.query_limit = 2;
     var packet: [1280]u8 = undefined;
-    var pending: [2]Lookup.Started = undefined;
+    var pending: [2]Engine.OutboundCall = undefined;
     for (&pending, 1..) |*started, i| started.* = (try operation.startNext(&core, &packet, try message.RequestId.init(&.{@intCast(i)}), 1, &sealEntropy(@intCast(i)))).?;
     try std.testing.expect((try operation.startNext(&core, &packet, try message.RequestId.init(&.{3}), 2, &sealEntropy(3))) == null);
     try std.testing.expect(!operation.isFinished());
@@ -430,7 +431,7 @@ fn initEngine() !Engine {
 fn completeNodes(
     core: *Engine,
     operation: *Lookup,
-    started: Lookup.Started,
+    started: Engine.OutboundCall,
     request_id: message.RequestId,
     records: []const enr.Record,
     now_ms: u64,
@@ -512,8 +513,8 @@ test "lookup confirmed result retains global IPv6 provenance over private IPv4 r
     try std.testing.expectEqual(@as(usize, 1), confirmed.len);
     try std.testing.expectEqualDeep(source, confirmed[0].peer);
     try std.testing.expectEqualSlices(u8, record.slice(), confirmed[0].record.slice());
-    try std.testing.expect(!RoutingTable.relayAllowed(confirmed[0].peer.address, target));
-    try std.testing.expect(RoutingTable.relayAllowed(confirmed[0].record.endpoint().?, target));
+    try std.testing.expect(!address_policy.relayAllowed(confirmed[0].peer.address, target));
+    try std.testing.expect(address_policy.relayAllowed(confirmed[0].record.endpoint().?, target));
     try std.testing.expectEqual(@as(usize, 0), core.calls.count());
 }
 

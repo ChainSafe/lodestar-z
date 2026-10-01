@@ -13,7 +13,7 @@ const Peers = struct {
         errdefer for (nodes[0..initialized]) |*node| node.deinit(std.testing.allocator, std.testing.io);
         for (nodes, 0..) |*node, i| {
             const key = try d.identity.crypto.keyPairFromSecret(&(.{0} ** 31 ++ .{@as(u8, @intCast(100 + i))}));
-            var sockets = try d.sockets.Sockets.bind(std.testing.io, .{ .ip4 = .{ .bytes = .{ 127, 1, @intCast(i), 1 }, .port = 0 } });
+            var sockets = try @import("udp").Sockets.bind(std.testing.io, .{ .ip4 = .{ .bytes = .{ 127, 1, @intCast(i), 1 }, .port = 0 } });
             errdefer sockets.close(std.testing.io);
             const record = try d.identity.enr.Record.create(&key, 1, d.types.Address.fromNetwork(sockets.primary().address));
             try node.init(std.testing.allocator, sockets, key, record, .{});

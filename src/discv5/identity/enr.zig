@@ -391,3 +391,7 @@ comptime {
     std.debug.assert(field_pairs_max == 150);
     std.debug.assert(@sizeOf(Record) <= 448);
 }
+
+test {
+    _ = @import("enr_test.zig");
+}

@@ -987,7 +987,7 @@ test "peer discovery validates complete bootstrap list before taking sockets" {
     var owner: discovery.Discovery = undefined;
     try std.testing.expectError(error.InvalidBootstrap, owner.initBound(std.testing.allocator, sockets, &key, &record, &context, &.{ record, no_endpoint }, 0, .{}, .{}));
     try std.testing.expectError(error.InvalidConfig, owner.initBound(std.testing.allocator, sockets, &key, &record, &context, &.{}, 0, .{ .maintenance = .{ .retry_interval_ms = 0 } }, .{}));
-    var excess: [d.types.bootstrap_max + 1]d.identity.enr.Record = undefined;
+    var excess: [discovery.bootstrap_max + 1]d.identity.enr.Record = undefined;
     try std.testing.expectError(error.TooManyBootstraps, owner.initBound(std.testing.allocator, sockets, &key, &record, &context, &excess, 0, .{}, .{}));
 }
 

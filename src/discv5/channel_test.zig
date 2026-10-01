@@ -1,6 +1,6 @@
 const std = @import("std");
 const Channel = @import("Channel.zig");
-const admission = @import("admission.zig");
+const admission = @import("Admission.zig");
 const crypto = @import("identity/crypto.zig");
 const enr = @import("identity/enr.zig");
 const test_support = @import("test_support.zig");

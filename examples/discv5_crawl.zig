@@ -8,7 +8,7 @@ const std = @import("std");
 const discv5 = @import("discv5");
 
 const net = std.Io.net;
-const bootstrap_capacity: usize = discv5.types.bootstrap_max;
+const bootstrap_capacity: usize = 64;
 const call_capacity: usize = 64;
 const crawl_duration_seconds_default: u16 = 60;
 const crawl_duration_seconds_max: u16 = 300;
@@ -97,7 +97,7 @@ pub fn main(init: std.process.Init) !void {
 
     const bind_address = try net.IpAddress.parseLiteral(args[1]);
     const advertised_address = discv5.types.Address.fromNetwork(try net.IpAddress.parseLiteral(args[2]));
-    var sockets = try discv5.sockets.Sockets.bind(io, .single(bind_address));
+    var sockets = try @import("udp").Sockets.bind(io, .single(bind_address));
     var sockets_owned = true;
     errdefer if (sockets_owned) sockets.close(io);
     const bound_address = discv5.types.Address.fromNetwork(sockets.primary().address);
@@ -252,7 +252,7 @@ const CrawlStatistics = struct {
 };
 
 fn startMaintenance(io: std.Io, transport: *discv5.Transport, maintenance: *discv5.Maintenance) !void {
-    const result = try discv5.lookup_io.startMaintenance(transport, io, maintenance, try discv5.Transport.monotonicMilliseconds(io));
+    const result = try transport.startMaintenance(io, maintenance, try discv5.Transport.monotonicMilliseconds(io));
     if (result.failure) |err| if (err != error.DestinationUnreachable) return err;
 }
 

@@ -9,7 +9,6 @@ pub const distance_max: u16 = 256;
 pub const distance_count: usize = distance_max + 1;
 pub const findnode_result_max: usize = 16;
 pub const findnode_response_packets_max: u8 = 16;
-pub const bootstrap_max: usize = 64;
 
 /// Returns the log2 XOR distance, which is 0 for equal IDs and 256 when the top bits differ.
 pub fn logDistance(left: *const NodeId, right: *const NodeId) u16 {
@@ -47,14 +46,6 @@ pub const Endpoint = struct {
         return std.mem.eql(u8, &self.node_id, &other.node_id) and self.address.eql(other.address);
     }
 };
-
-/// Compares IPv4 /24 or IPv6 /64 prefixes, ignoring ports and interface scopes.
-pub fn sameSubnet(left: Address, right: Address) bool {
-    return switch (left) {
-        .ip4 => |ip| right == .ip4 and std.mem.eql(u8, ip.octets[0..3], right.ip4.octets[0..3]),
-        .ip6 => |ip| right == .ip6 and std.mem.eql(u8, ip.octets[0..8], right.ip6.octets[0..8]),
-    };
-}
 
 /// Why a datagram was not acted on. Admission pressure does not establish peer misconduct.
 pub const RejectReason = enum {

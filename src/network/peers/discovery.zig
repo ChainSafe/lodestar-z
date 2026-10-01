@@ -27,6 +27,7 @@ pub const Config = struct {
 };
 
 pub const Error = d.Transport.Error || d.Maintenance.Error || d.Lookup.Error || adapter.Error || std.mem.Allocator.Error || error{ Stopped, InvalidOptions, InvalidDemand, InvalidBootstrap, TooManyBootstraps };
+pub const bootstrap_max: usize = 64;
 pub const queries_max = 128;
 pub const candidates_per_step = d.types.findnode_result_max + 1;
 pub const Rejection = enum { missing_eth2, incompatible_fork, invalid_enr, no_quic, endpoint_family, endpoint_scope, demand, output_capacity };
@@ -137,7 +138,7 @@ pub const Discovery = struct {
     pub fn initBound(self: *Discovery, allocator: std.mem.Allocator, sockets: @import("udp").Sockets, key: *const d.identity.crypto.KeyPair, record: *const d.identity.enr.Record, context: *const types.ForkContext, bootstrap: []const d.identity.enr.Record, now_ms: u64, options: Options, transport_options: d.Transport.Options) !void {
         try context.validate();
         if (options.query_interval_ms == 0 or options.query_interval_ms > 86_400_000 or options.local_retry_ms == 0 or options.local_retry_ms > 86_400_000) return error.InvalidOptions;
-        if (bootstrap.len > d.types.bootstrap_max) return error.TooManyBootstraps;
+        if (bootstrap.len > bootstrap_max) return error.TooManyBootstraps;
         for (bootstrap) |*seed| if (seed.endpoint() == null) return error.InvalidBootstrap;
         var maintenance: d.Maintenance = undefined;
         try maintenance.init(now_ms, options.maintenance, sockets.mode());
@@ -367,12 +368,12 @@ pub const Discovery = struct {
     }
 
     fn start(self: *Discovery, io: std.Io, now_ms: u64, background: bool, result: *Result) Error!void {
-        const started = (if (background) d.lookup_io.startMaintenance(&self.transport, io, &self.maintenance, now_ms) else d.lookup_io.startLookup(&self.transport, io, &self.lookup.?, now_ms)) catch |err| switch (err) {
+        const started = (if (background) self.transport.startMaintenance(io, &self.maintenance, now_ms) else self.transport.startLookup(io, &self.lookup.?, now_ms)) catch |err| switch (err) {
             error.TableFull, error.PeerBusy => return,
             else => return err,
         };
         if (started.started) result.started += 1;
-        // lookup_io released the refused call and reported a local failure to its owner, so the
+        // Transport released the refused call and reported a local failure to its owner, so the
         // refusal fails only its destination and the step goes on.
         if (started.failure) |err| if (err != error.DestinationUnreachable) return err;
     }
@@ -531,7 +532,7 @@ pub fn relayAllowed(source: d.types.Address, candidate: types.Address) bool {
             break :blk .{ .ip6 = .{ .octets = value.octets, .port = value.port } };
         },
     };
-    return d.RoutingTable.relayAllowed(source, address);
+    return d.address_policy.relayAllowed(source, address);
 }
 
 test {

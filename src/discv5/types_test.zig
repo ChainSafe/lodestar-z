@@ -29,29 +29,3 @@ test "IPv6 interface scope is part of endpoint identity" {
     second.ip6.interface = 2;
     try std.testing.expect(!std.meta.eql(first, second));
 }
-
-test "endpoint equality and subnet grouping preserve distinct identity policies" {
-    const support = @import("test_support.zig");
-    var left = support.fakeEndpoint(1, 9000);
-    var right = left;
-    try std.testing.expect(left.eql(&right));
-    right.node_id[0] ^= 1;
-    try std.testing.expect(!left.eql(&right));
-    try std.testing.expect(types.sameSubnet(left.address, right.address));
-    right = left;
-    right.address.ip4.port += 1;
-    right.address.ip4.octets[3] += 1;
-    try std.testing.expect(!left.eql(&right));
-    try std.testing.expect(types.sameSubnet(left.address, right.address));
-    right.address.ip4.octets[2] += 1;
-    try std.testing.expect(!types.sameSubnet(left.address, right.address));
-    right.address = support.address6(@splat(0x20), 9000);
-    try std.testing.expect(!types.sameSubnet(left.address, right.address));
-    left.address = right.address;
-    right.address.ip6.interface = 1;
-    try std.testing.expect(!left.eql(&right));
-    right.address.ip6.octets[8] += 1;
-    try std.testing.expect(types.sameSubnet(left.address, right.address));
-    right.address.ip6.octets[7] += 1;
-    try std.testing.expect(!types.sameSubnet(left.address, right.address));
-}

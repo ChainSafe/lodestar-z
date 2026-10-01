@@ -2,6 +2,7 @@
 //! handles, while deadlines and response accumulation stay in the call table.
 
 const std = @import("std");
+const address_policy = @import("address_policy.zig");
 const CallTable = @import("CallTable.zig");
 const Engine = @import("Engine.zig");
 const enr = @import("identity/enr.zig");
@@ -20,11 +21,6 @@ pub const Error = Engine.Error || error{
     TooManySeeds,
     UnexpectedResponse,
     UnknownQuery,
-};
-
-pub const Started = struct {
-    call: Engine.StartResult,
-    peer: types.Endpoint,
 };
 
 pub const FinishReason = enum {
@@ -140,7 +136,7 @@ pub fn startNext(
     request_id: message.RequestId,
     now_ms: u64,
     entropy: *const Engine.StartEntropy,
-) Error!?Started {
+) Error!?Engine.OutboundCall {
     if (self.isFinished() or self.waiting_count == parallelism) return null;
     std.debug.assert(self.query_limit > 0 and self.query_limit <= candidate_capacity);
     if (self.queries_started >= self.query_limit) {
@@ -342,7 +338,7 @@ fn eligibleFamilies(self: *const Lookup, record: *const enr.Record, source: type
     var mask: u2 = 0;
     for (record.endpoints()) |endpoint| {
         const address = endpoint orelse continue;
-        if (self.ip_mode.supports(address) and address.port() >= port_min and RoutingTable.relayAllowed(source, address))
+        if (self.ip_mode.supports(address) and address.port() >= port_min and address_policy.relayAllowed(source, address))
             mask |= familyBit(address);
     }
     return mask;

@@ -1,9 +1,9 @@
 //! Bounded endpoint observations from authenticated, request-matched PONGs. Distinct node IDs
 //! and IPv4 /24 or IPv6 /64 sources must agree; neither proves operator independence.
 const std = @import("std");
+const address_policy = @import("address_policy.zig");
 const types = @import("types.zig");
 const message = @import("wire/message.zig");
-const RoutingTable = @import("RoutingTable.zig");
 const CallTable = @import("CallTable.zig");
 
 pub const capacity = 200;
@@ -74,7 +74,7 @@ pub fn observe(self: *AddressVotes, peer: *const types.Endpoint, pong: *const me
         .ip4 => |ip| .{ .ip4 = .{ .octets = ip, .port = table.policy.fixed_port orelse pong.recipient_port } },
         .ip6 => |ip| .{ .ip6 = .{ .octets = ip, .port = table.policy.fixed_port orelse pong.recipient_port } },
     };
-    if (index(observed) != index(peer.address) or !observed.isUsable() or !RoutingTable.relayAllowed(peer.address, observed)) return null;
+    if (index(observed) != index(peer.address) or !observed.isUsable() or !address_policy.relayAllowed(peer.address, observed)) return null;
     if (observed == .ip6 and observed.ip6.octets[0] == 0xfe and observed.ip6.octets[1] & 0xc0 == 0x80) return null;
     self.replace(peer, .{ .peer = peer.*, .observed = observed, .expires_ms = now_ms +| lifetime_ms }, now_ms);
     var live: usize = 0;
@@ -110,7 +110,7 @@ fn replace(self: *AddressVotes, peer: *const types.Endpoint, value: Entry, now_m
 
 fn collides(a: *const types.Endpoint, b: *const types.Endpoint) bool {
     if (std.mem.eql(u8, &a.node_id, &b.node_id)) return true;
-    return types.sameSubnet(a.address, b.address);
+    return address_policy.sameSubnet(a.address, b.address);
 }
 
 fn index(address: types.Address) usize {

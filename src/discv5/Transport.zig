@@ -5,6 +5,8 @@
 const std = @import("std");
 const CallTable = @import("CallTable.zig");
 const Engine = @import("Engine.zig");
+const Lookup = @import("Lookup.zig");
+const Maintenance = @import("Maintenance.zig");
 const ResponsePlan = @import("ResponsePlan.zig");
 const enr = @import("identity/enr.zig");
 const Sockets = @import("udp").Sockets;
@@ -19,6 +21,8 @@ pub const Error = Engine.Error || Sockets.DatagramError ||
     InvalidPollInterval,
     MissingExpiryStorage,
 };
+
+pub const StartResult = struct { started: bool = false, failure: ?Error = null };
 
 pub const Config = struct {
     poll_interval_ms: u32 = 100,
@@ -112,6 +116,30 @@ pub fn startCall(
         return err;
     };
     return started.handle;
+}
+
+pub fn startLookup(self: *Transport, io: std.Io, lookup: *Lookup, now_ms: u64) (Error || Lookup.Error)!StartResult {
+    var entropy: Engine.StartEntropy = undefined;
+    try io.randomSecure(std.mem.asBytes(&entropy));
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&entropy));
+    const started = try lookup.startNext(&self.engine, &self.output, try Transport.requestId(io), now_ms, &entropy) orelse return .{};
+    self.transmit(io, started.peer.address, self.output[0..started.call.packet_length]) catch |err| {
+        lookup.onFailure(&self.engine, started.call.handle) catch unreachable;
+        return .{ .started = true, .failure = err };
+    };
+    return .{ .started = true };
+}
+
+pub fn startMaintenance(self: *Transport, io: std.Io, maintenance: *Maintenance, now_ms: u64) (Error || Maintenance.Error)!StartResult {
+    var entropy: Engine.StartEntropy = undefined;
+    try io.randomSecure(std.mem.asBytes(&entropy));
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&entropy));
+    const started = try maintenance.startNext(&self.engine, &self.output, try Transport.requestId(io), now_ms, &entropy) orelse return .{};
+    self.transmit(io, started.peer.address, self.output[0..started.call.packet_length]) catch |err| {
+        std.debug.assert(maintenance.onFailure(&self.engine, started.call.handle, now_ms, .local));
+        return .{ .started = true, .failure = err };
+    };
+    return .{ .started = true };
 }
 
 pub fn sendResponse(
@@ -371,4 +399,5 @@ comptime {
 
 test {
     _ = @import("transport_test.zig");
+    _ = @import("transport_socket_test.zig");
 }
