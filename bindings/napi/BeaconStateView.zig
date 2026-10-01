@@ -1765,7 +1765,6 @@ fn attestationsRewardsValue(self: *BeaconStateView, validator_ids: ?js.Value) !n
 
 fn parseAttestationRewardFilters(allocator: std.mem.Allocator, value: ?js.Value) !?[]u64 {
     const raw = (value orelse return null).val;
-    if (try raw.typeof() == .undefined) return null;
     const count = try raw.getArrayLength();
     if (count == 0) return null;
     var indices: std.ArrayList(u64) = .empty;
@@ -1875,7 +1874,6 @@ fn syncCommitteeRewardsValue(self: *BeaconStateView, block: js.Value, validator_
 
 fn parseSyncRewardFilters(allocator: std.mem.Allocator, value: ?js.Value) !?[]u64 {
     const raw = (value orelse return null).val;
-    if (try raw.typeof() == .undefined) return null;
     const count = try raw.getArrayLength();
     if (count == 0) return null;
     var indices: std.ArrayList(u64) = .empty;
