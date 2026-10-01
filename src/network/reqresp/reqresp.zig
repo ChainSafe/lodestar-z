@@ -1016,21 +1016,7 @@ pub const ReqResp = struct {
         assert(lengths.events[@intFromEnum(EventList.application)] == self.deliver[0].len);
         assert(lengths.events[@intFromEnum(EventList.control)] == self.deliver[1].len);
         assert(lengths.events[@intFromEnum(EventList.reported)] == self.reported.len);
-        for (engine.registry.slots, 0..) |*connection, conn_index| {
-            // A closing connection keeps its streams until retired, and closes nothing more.
-            if (connection.state != .established or connection.pending_close != null or connection.close_reason != null) continue;
-            for (&connection.table.entries, 0..) |*entry, entry_index| {
-                if (!entry.claimed or entry.closed_pending) continue;
-                const direction: types.Direction = switch (entry.route.owner) {
-                    .reqresp_outbound => .outbound,
-                    .reqresp_inbound => .inbound,
-                    else => continue,
-                };
-                const record: *const RequestState = if (direction == .outbound) &self.outbound[entry.route.row].request else &self.inbound[entry.route.row].request;
-                assert(record.active() and record.stream_owner == .protocol);
-                assert(std.meta.eql(record.stream, StreamHandle{ .conn = .{ .index = @intCast(conn_index), .generation = connection.generation }, .id = entry.id, .slot = @intCast(entry_index) }));
-            }
-        }
+        @import("route_invariant.zig").check(engine, self.outbound, self.inbound) catch unreachable;
     }
 
     /// A reading slot off `ready` has consumed its buffered input and read its last delivered

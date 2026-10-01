@@ -482,3 +482,88 @@ test "engine reports pending events that did not fit the slice" {
     try std.testing.expect(!pair.server.eventsPending());
     try std.testing.expectEqual(@as(usize, 0), pair.server.pollEvents(&storage));
 }
+
+test "engine read shutdown consumes readiness while the write half stays open" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+    const stream = try pair.client.openStream(handles.client);
+    _ = try pair.client.write(stream, "payload", false);
+    try pair.pump();
+    var events: [8]Event = undefined;
+    const inbound = try expectStreamOpened(pair.events(&pair.server, &events)[0], handles.server);
+    var prefix: [2]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 2), (try pair.server.read(inbound, &prefix)).len);
+    try std.testing.expect(pair.server.streamWaits(inbound).?.read_open);
+    pair.server.shutdown(inbound, .read, 7);
+    try std.testing.expect(!pair.server.streamWaits(inbound).?.read_open);
+    try std.testing.expectEqual(@as(usize, 5), try pair.server.write(inbound, "reply", true));
+    try pair.pump();
+    var buffer: [8]u8 = undefined;
+    const response = try pair.client.read(stream, &buffer);
+    try std.testing.expectEqualStrings("reply", buffer[0..response.len]);
+    try std.testing.expect(response.fin);
+}
+
+test "engine immediate host close before collect preserves peer stream claims" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+    const stream = try pair.client.openStream(handles.client);
+    _ = try pair.client.write(stream, "last", true);
+    _ = try pair.transfer(&pair.client, &pair.server, client_address, false);
+    try std.testing.expect(pair.server.close(handles.server, 0));
+    pair.settle(&pair.server);
+    var storage: [8]Event = undefined;
+    const events = pair.events(&pair.server, &storage);
+    try std.testing.expectEqual(@as(usize, 1), events.len);
+    const inbound = try expectStreamOpened(events[0], handles.server);
+    try pair.pump();
+    const closed = pair.events(&pair.server, &storage);
+    try std.testing.expectEqual(@as(usize, 1), closed.len);
+    try std.testing.expectEqual(engine_mod.CloseReason.host, try expectClosed(closed[0], handles.server, .inbound, &pair.client_ctx));
+    var buffer: [8]u8 = undefined;
+    const read = try pair.server.read(inbound, &buffer);
+    try std.testing.expectEqualStrings("last", buffer[0..read.len]);
+    try std.testing.expect(read.fin);
+}
+
+// Bypass Slot for the peer FIN exchange to model a native stream collected before its table
+// entry. Each public operation must converge on the same closed wrapper and routed event.
+test "engine normalizes missing native streams on read write and capacity" {
+    for (0..3) |operation| {
+        var pair: Pair = .{};
+        try pair.init(.{}, .{});
+        defer pair.deinit();
+        const handles = try connectPair(&pair);
+        const stream = try pair.client.openStream(handles.client);
+        _ = try pair.client.write(stream, "x", true);
+        try pair.pump();
+        var storage: [8]Event = undefined;
+        const inbound = try expectStreamOpened(pair.events(&pair.server, &storage)[0], handles.server);
+        var buffer: [8]u8 = undefined;
+        _ = try pair.server.read(inbound, &buffer);
+        _ = try pair.server.write(inbound, "y", true);
+        try pair.pump();
+        const native = pair.client.registry.slots[handles.client.index].conn.?;
+        var fin = false;
+        var code: u64 = 0;
+        try std.testing.expectEqual(@as(isize, 1), binding.c.quiche_conn_stream_recv(native, stream.id, &buffer, buffer.len, &fin, &code));
+        try std.testing.expect(fin);
+        try pair.client.bindStream(stream, .{ .owner = .reqresp_outbound, .row = 3 });
+        switch (operation) {
+            0 => try std.testing.expectError(error.UnknownStream, pair.client.read(stream, &buffer)),
+            1 => try std.testing.expectError(error.UnknownStream, pair.client.write(stream, "z", false)),
+            2 => try std.testing.expectError(error.UnknownStream, pair.client.streamCapacity(stream)),
+            else => unreachable,
+        }
+        try std.testing.expect(!pair.client.eventsPending());
+        const events = pair.events(&pair.client, &storage);
+        try std.testing.expectEqual(@as(usize, 1), events.len);
+        _ = try expectStreamClosed(events[0], stream);
+        try std.testing.expectEqual(@as(u16, 3), events[0].stream_closed.route.row);
+        try std.testing.expectError(error.UnknownStream, pair.client.read(stream, &buffer));
+    }
+}
