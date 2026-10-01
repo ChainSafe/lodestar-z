@@ -360,10 +360,7 @@ pub const Transport = struct {
             if (err == error.Canceled) return error.Canceled;
             first = first orelse err;
             const owner = self.batch.owners[begin];
-            if (self.engine.sendOwner(owner.index)) |current| if (std.meta.eql(current, owner)) {
-                self.engine.failSend(owner.index);
-                result.send_failures += 1;
-            };
+            if (self.engine.failSend(owner)) result.send_failures += 1;
             begin += 1;
         }
         return first;

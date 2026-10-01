@@ -511,6 +511,36 @@ test "engine shutdown all abandons inbound precatalog handshakes" {
     try std.testing.expect(!pair.server.eventsPending());
 }
 
+test "engine send failures reject stale handles and count each close once" {
+    var pair: Pair = .{};
+    try pair.init(.{ .connections_max = 1, .handshaking_max = 1, .dialing_max = 1 }, .{});
+    defer pair.deinit();
+    try std.testing.expect(!pair.client.failSend(.{ .index = 0, .generation = 0 }));
+    try std.testing.expect(!pair.client.failSend(.{ .index = 1, .generation = 0 }));
+
+    const first = try pair.dial();
+    try std.testing.expect(!pair.client.failSend(.{ .index = first.index, .generation = first.generation + 1 }));
+    try std.testing.expect(pair.client.failSend(first));
+    try std.testing.expect(!pair.client.failSend(first));
+    var events: [2]Event = undefined;
+    try std.testing.expectEqual(@as(usize, 1), pair.client.pollEvents(&events));
+    try std.testing.expectEqual(Engine.CloseReason.send_failed, try expectClosed(events[0], first, .outbound, null));
+    pair.client.releaseReported();
+    try std.testing.expect(!pair.client.failSend(first));
+
+    const replacement = try pair.dial();
+    try std.testing.expectEqual(first.index, replacement.index);
+    try std.testing.expect(first.generation != replacement.generation);
+    try std.testing.expect(!pair.client.failSend(first));
+    try std.testing.expectEqual(replacement, pair.client.sendOwner(replacement.index).?);
+    try std.testing.expectEqual(@as(usize, 0), pair.client.pollEvents(&events));
+    const direction = @intFromEnum(Engine.Direction.outbound);
+    const reason = @intFromEnum(Engine.CloseReason.send_failed);
+    try std.testing.expectEqual(@as(u64, 1), pair.client.connection_metrics.closed[direction][reason]);
+    try std.testing.expect(pair.client.failSend(replacement));
+    try std.testing.expectEqual(@as(u64, 2), pair.client.connection_metrics.closed[direction][reason]);
+}
+
 test "engine close reason keeps first local cause but send failure overrides deferred close" {
     for ([_]bool{ false, true }) |fail_send| {
         var pair: Pair = .{};
@@ -519,7 +549,7 @@ test "engine close reason keeps first local cause but send failure overrides def
         const handle = if (fail_send) try establishClient(&pair) else (try support.connectPair(&pair)).client;
         try std.testing.expect(pair.client.close(handle, 7));
         if (fail_send) {
-            pair.client.failSend(handle.index);
+            try std.testing.expect(pair.client.failSend(handle));
         } else {
             // A second native close cause cannot replace the already latched host reason.
             const slot = &pair.client.registry.slots[handle.index];

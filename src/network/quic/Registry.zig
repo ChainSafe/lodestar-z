@@ -6,16 +6,10 @@ const RouteTable = @import("RouteTable.zig");
 const DeadlineHeap = @import("../deadline_heap.zig").DeadlineHeap;
 const assert = std.debug.assert;
 
-const RouteKeys = struct {
-    cids: [RouteTable.routes_per_slot]binding.Cid = undefined,
-    len: u8 = 0,
-};
-
 const Registry = @This();
 
 slots: []Connection,
 routes: RouteTable,
-route_keys: []RouteKeys,
 active: []u16,
 positions: []u16,
 /// One key per live connection: its earliest QUIC timer, handshake limit, keep-alive or
@@ -57,9 +51,6 @@ pub fn init(allocator: std.mem.Allocator, slots_max: u16, seed: u64) !Registry {
     const positions = try allocator.alloc(u16, slots_max);
     errdefer allocator.free(positions);
     for (positions, 0..) |*entry, index| entry.* = @intCast(index);
-    const route_keys = try allocator.alloc(RouteKeys, slots_max);
-    errdefer allocator.free(route_keys);
-    @memset(route_keys, .{});
     return .{
         .slots = slots,
         .routes = routes,
@@ -67,7 +58,6 @@ pub fn init(allocator: std.mem.Allocator, slots_max: u16, seed: u64) !Registry {
         .timers = timers,
         .expired = expired,
         .positions = positions,
-        .route_keys = route_keys,
     };
 }
 
@@ -79,7 +69,6 @@ pub fn deinit(self: *Registry, allocator: std.mem.Allocator) void {
     self.timers.deinit(allocator);
     allocator.free(self.active);
     allocator.free(self.positions);
-    allocator.free(self.route_keys);
     self.routes.deinit(allocator);
     allocator.free(self.slots);
     self.* = undefined;
@@ -109,7 +98,6 @@ pub fn claim(self: *Registry) ?u16 {
     self.active[self.active_len] = index;
     self.positions[index] = self.active_len;
     assert(self.slots[index].state == .free);
-    assert(self.route_keys[index].len == 0);
     self.active_len += 1;
     assert(self.timers.get(index) == null);
     return index;
@@ -133,7 +121,7 @@ pub fn retire(self: *Registry, index: u16) void {
     assert(index < self.slots.len);
     const slot = &self.slots[index];
     assert(slot.state != .free);
-    self.removeRoutesFor(index);
+    self.removeRoute(index);
     self.unlink(index);
     slot.release();
     self.unclaim(index);
@@ -159,24 +147,21 @@ pub fn findRoute(self: *const Registry, cid: *const binding.Cid) ?u16 {
     return index;
 }
 
-pub fn addRoute(self: *Registry, cid: *const binding.Cid, index: u16) RouteTable.Error!void {
+pub fn addRoute(self: *Registry, index: u16) RouteTable.Error!void {
     assert(index < self.slots.len);
-    assert(self.routes.count <= RouteTable.routes_per_slot * self.slots.len);
-    const keys = &self.route_keys[index];
-    if (keys.len == RouteTable.routes_per_slot) return error.Full;
-    try self.routes.insert(cid, index);
-    keys.cids[keys.len] = cid.*;
-    keys.len += 1;
+    assert(self.slots[index].state != .free);
+    try self.routes.insert(&self.slots[index].scid, index);
+    assert(self.routes.count <= self.active_len);
 }
 
-pub fn removeRoutesFor(self: *Registry, index: u16) void {
+pub fn removeRoute(self: *Registry, index: u16) void {
     assert(index < self.slots.len);
-    const keys = &self.route_keys[index];
-    for (keys.cids[0..keys.len]) |*cid| self.routes.remove(cid, index);
-    keys.len = 0;
-    assert(self.routes.count <= RouteTable.routes_per_slot * self.slots.len);
+    assert(self.slots[index].state != .free);
+    self.routes.remove(&self.slots[index].scid, index);
+    assert(self.routes.count <= self.active_len);
 }
 
 test {
     _ = RouteTable;
+    _ = @import("registry_test.zig");
 }

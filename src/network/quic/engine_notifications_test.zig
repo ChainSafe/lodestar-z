@@ -8,7 +8,7 @@ test "engine notifications deliver a later close during sustained earlier stream
     defer pair.deinit();
     const handles = try support.connectPair(&pair);
     const victim = try pair.server.dial(&support.client_address, pair.client_ctx.local_peer_id, pair.now);
-    pair.server.failSend(victim.index);
+    try std.testing.expect(pair.server.failSend(victim));
     var one: [1]Engine.Event = undefined;
     var delivered = false;
     for (0..8) |turn| {
@@ -95,7 +95,7 @@ test "engine notifications preserve generations through active swaps retirement 
     var owners: [3]Engine.Handle = undefined;
     for (&owners) |*owner| {
         owner.* = try pair.server.dial(&support.client_address, pair.client_ctx.local_peer_id, pair.now);
-        pair.server.failSend(owner.index);
+        try std.testing.expect(pair.server.failSend(owner.*));
     }
     var one: [1]Engine.Event = undefined;
     try std.testing.expectEqual(@as(usize, 0), pair.server.pollEvents(&.{}));
@@ -107,7 +107,7 @@ test "engine notifications preserve generations through active swaps retirement 
     const replacement = try pair.server.dial(&support.client_address, pair.client_ctx.local_peer_id, pair.now);
     try std.testing.expectEqual(owners[0].index, replacement.index);
     try std.testing.expect(replacement.generation != owners[0].generation);
-    pair.server.failSend(replacement.index);
+    try std.testing.expect(pair.server.failSend(replacement));
     const expected = [_]Engine.Handle{ owners[1], owners[2], replacement };
     for (expected) |owner| {
         try std.testing.expectEqual(@as(usize, 1), pair.server.pollEvents(&one));
@@ -141,7 +141,7 @@ test "engine notifications preserve lifecycle order across one-event polls" {
     try std.testing.expectEqual(@as(usize, 1), pair.server.pollEvents(&one));
     const incoming = try support.expectStreamOpened(one[0], server);
     pair.server.closeStream(incoming, 1);
-    pair.server.failSend(server.index);
+    try std.testing.expect(pair.server.failSend(server));
     try std.testing.expectEqual(@as(usize, 1), pair.server.pollEvents(&one));
     _ = try support.expectStreamClosed(one[0], incoming);
     try std.testing.expectEqual(@as(usize, 1), pair.server.pollEvents(&one));

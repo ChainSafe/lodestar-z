@@ -34,9 +34,12 @@ pub export fn zig_fuzz_test(bytes: [*]const u8, len: usize) callconv(.c) void {
         engine.releaseReported();
         std.debug.assert(engine.registry.active_len <= 4);
         std.debug.assert(engine.registry.handshaking <= 2);
-        std.debug.assert(engine.registry.routes.count <= 2 * engine.registry.active_len);
+        std.debug.assert(engine.registry.routes.count <= engine.registry.active_len);
     }
-    for (engine.registry.activeIndices()) |index| engine.failSend(index);
+    for (engine.registry.activeIndices()) |index| {
+        const owner = engine.sendOwner(index) orelse continue;
+        std.debug.assert(engine.failSend(owner));
+    }
     _ = engine.pollEvents(&events);
     engine.releaseReported();
     std.debug.assert(engine.registry.active_len == 0 and engine.registry.handshaking == 0);
