@@ -59,6 +59,12 @@ Valid entries before an oversized payload may be sent. The previous mutable
 longer supported. External Zig callers must migrate before adopting this API;
 JavaScript bindings and metric names/values are unchanged.
 
+`Address.sameSourceGroup` is removed, including through the network and discovery
+address aliases. QUIC owns its handshake admission comparison: one IPv4 host or
+IPv6 /64 shares a limit, regardless of port or IPv6 interface. External Zig callers
+must define source grouping in their own policy; endpoint equality and conversion
+remain on `Address`. Discovery admission and the JavaScript endpoint API are unchanged.
+
 Socket owners must not be copied while live. Close is mutable and clears socket
 state. Operation-time send/receive overrides remain supported; Threaded operations
 on handles bound by another provider return `IncompatibleProvider`. Kernel drop

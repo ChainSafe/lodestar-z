@@ -4,6 +4,8 @@ const engine_mod = @import("engine.zig");
 const limits = @import("limits.zig");
 const support = @import("../test_support.zig");
 const types = @import("../types.zig");
+const keys = @import("../wire/keys.zig");
+const tls = @import("../tls/context.zig");
 
 const Event = engine_mod.Event;
 const Pair = support.Pair;
@@ -11,6 +13,111 @@ const client_address = support.client_address;
 const server_address = support.server_address;
 const connectPair = support.connectPair;
 const expectClosed = support.expectClosed;
+
+const client_ip6: types.Address = .{ .ip6 = .{ .octets = .{ 0x20, 1, 0xd, 0xb8 } ++ .{0} ** 11 ++ .{1}, .port = 4_001 } };
+const server_ip6: types.Address = .{ .ip6 = .{ .octets = .{0} ** 15 ++ .{1}, .port = 4_002 } };
+const admission_now: engine_mod.Now = .{ .mono_ms = 1_000, .unix_s = support.now_unix };
+
+fn initAdmissionEngine(local: *const [2]?types.Address, seed: u8) !engine_mod.Engine {
+    const key = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{seed}));
+    var context = try tls.Context.init(&key, support.now_unix, @splat(seed));
+    errdefer context.deinit();
+
+    return engine_mod.Engine.init(std.testing.allocator, .{
+        .tls = context,
+        .local = local.*,
+        .seed = &@as([32]u8, @splat(seed)),
+        .limits = .{ .connections_max = 4, .handshaking_max = 4, .handshaking_per_source_max = 1, .dialing_max = 4, .outbound_max = 4 },
+    });
+}
+
+fn admitSource(server: *engine_mod.Engine, client: *engine_mod.Engine, source: *const types.Address) !engine_mod.Handle {
+    const destination = server.local[if (source.* == .ip4) @as(usize, 0) else 1].?;
+    const handle = try client.dial(&destination, server.tls.local_peer_id, admission_now);
+    var packet: [constants.datagram_size_max]u8 = undefined;
+    var response: [constants.datagram_size_max]u8 = undefined;
+    const initial = client.sendOne(handle.index, admission_now, &packet) orelse return error.TestUnexpectedResult;
+    const retry = server.receive(initial.bytes, source, admission_now, &response);
+    try std.testing.expect(retry == .retry);
+    const received = client.receive(retry.retry, &destination, admission_now, &packet);
+    try std.testing.expect(received == .accepted);
+    const validated = client.sendOne(handle.index, admission_now, &packet) orelse return error.TestUnexpectedResult;
+    const admitted = server.receive(validated.bytes, source, admission_now, &response);
+    try std.testing.expect(admitted == .accepted);
+    return admitted.accepted;
+}
+
+fn expectSourceAdmission(first: *const types.Address, candidate: *const types.Address, same_group: bool) !void {
+    var server = try initAdmissionEngine(&.{ server_address, server_ip6 }, 1);
+    defer server.deinit();
+    const first_local: [2]?types.Address = if (first.* == .ip4) .{ first.*, null } else .{ null, first.* };
+    var first_client = try initAdmissionEngine(&first_local, 2);
+    defer first_client.deinit();
+    const candidate_local: [2]?types.Address = if (candidate.* == .ip4) .{ candidate.*, null } else .{ null, candidate.* };
+    var candidate_client = try initAdmissionEngine(&candidate_local, 3);
+    defer candidate_client.deinit();
+
+    const pending = try admitSource(&server, &first_client, first);
+    _ = try server.dial(candidate, candidate_client.tls.local_peer_id, admission_now);
+    const before = server.resourceSnapshot();
+    try std.testing.expectEqual(@as(usize, 2), before.active);
+    try std.testing.expectEqual(@as(usize, 1), before.handshaking);
+
+    const destination = server.local[if (candidate.* == .ip4) @as(usize, 0) else 1].?;
+    const handle = try candidate_client.dial(&destination, server.tls.local_peer_id, admission_now);
+    var packet: [constants.datagram_size_max]u8 = undefined;
+    var response: [constants.datagram_size_max]u8 = undefined;
+    const initial = candidate_client.sendOne(handle.index, admission_now, &packet) orelse return error.TestUnexpectedResult;
+    const random_before = server.csprng;
+    const outcome = server.receive(initial.bytes, candidate, admission_now, &response);
+    try std.testing.expectEqualDeep(before, server.resourceSnapshot());
+    if (same_group) {
+        try std.testing.expect(outcome == .dropped);
+        try std.testing.expectEqualDeep(random_before, server.csprng);
+        try std.testing.expect(server.abandon(pending));
+    } else {
+        try std.testing.expect(outcome == .retry);
+    }
+
+    const admitted = try admitSource(&server, &candidate_client, candidate);
+    try std.testing.expectEqual(candidate.*, server.peerAddress(admitted).?);
+    try std.testing.expectEqual(@as(usize, if (same_group) 1 else 2), server.resourceSnapshot().handshaking);
+}
+
+test "engine source admission groups IPv4 hosts without ports" {
+    try expectSourceAdmission(&client_address, &client_address, true);
+    var candidate = client_address;
+    candidate.ip4.port += 1;
+    try expectSourceAdmission(&client_address, &candidate, true);
+    candidate = client_address;
+    candidate.ip4.octets[3] += 1;
+    try expectSourceAdmission(&client_address, &candidate, false);
+}
+
+test "engine source admission groups IPv6 prefixes without ports or interfaces" {
+    try expectSourceAdmission(&client_ip6, &client_ip6, true);
+    for ([_]usize{ 8, 15 }) |octet| {
+        var candidate = client_ip6;
+        candidate.ip6.octets[octet] ^= 1;
+        try expectSourceAdmission(&client_ip6, &candidate, true);
+    }
+    for ([_]usize{ 0, 7 }) |octet| {
+        var candidate = client_ip6;
+        candidate.ip6.octets[octet] ^= 1;
+        try expectSourceAdmission(&client_ip6, &candidate, false);
+    }
+    var candidate = client_ip6;
+    candidate.ip6.port += 1;
+    try expectSourceAdmission(&client_ip6, &candidate, true);
+    candidate = client_ip6;
+    candidate.ip6.interface = 3;
+    try expectSourceAdmission(&client_ip6, &candidate, true);
+}
+
+test "engine source admission separates address families" {
+    try expectSourceAdmission(&client_address, &client_ip6, false);
+    try expectSourceAdmission(&client_ip6, &client_address, false);
+}
 
 fn dialInitial(pair: *Pair, out: []u8) ![]u8 {
     const handle = try pair.dial();

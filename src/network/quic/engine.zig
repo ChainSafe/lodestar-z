@@ -73,6 +73,7 @@ pub const Event = union(enum) {
 pub const Limits = struct {
     connections_max: u16 = limits.connections_max_default,
     handshaking_max: u16 = limits.handshaking_max,
+    /// Concurrent inbound handshakes per IPv4 host or IPv6 /64, ignoring ports and interface.
     handshaking_per_source_max: u16 = limits.handshaking_per_source_max,
     dialing_max: u16 = limits.dialing_max,
     outbound_max: ?u16 = null,
@@ -1123,7 +1124,17 @@ pub const Engine = struct {
         for (self.registry.active[0..self.registry.active_len]) |index| {
             const slot = &self.registry.slots[index];
             if (slot.state != .handshaking or slot.direction != .inbound) continue;
-            if (slot.peer.sameSourceGroup(from.*)) count += 1;
+            const same_source = switch (slot.peer) {
+                .ip4 => |peer| switch (from.*) {
+                    .ip4 => |source| std.mem.eql(u8, &peer.octets, &source.octets),
+                    .ip6 => false,
+                },
+                .ip6 => |peer| switch (from.*) {
+                    .ip4 => false,
+                    .ip6 => |source| std.mem.eql(u8, peer.octets[0..8], source.octets[0..8]),
+                },
+            };
+            if (same_source) count += 1;
         }
         assert(count <= self.registry.handshaking);
         return count;
