@@ -1,5 +1,5 @@
 const std = @import("std");
-const engine_mod = @import("quic/engine.zig");
+const Engine = @import("quic/Engine.zig");
 const index_list = @import("index_list.zig");
 const multistream = @import("wire/multistream.zig");
 const stream_io = @import("stream_io.zig");
@@ -7,10 +7,9 @@ const types = @import("types.zig");
 const DeadlineHeap = @import("deadline_heap.zig").DeadlineHeap;
 
 const assert = std.debug.assert;
-const Engine = engine_mod.Engine;
-const Handle = engine_mod.Handle;
-const StreamHandle = engine_mod.StreamHandle;
-const StreamError = engine_mod.StreamError;
+const Handle = Engine.Handle;
+const StreamHandle = Engine.StreamHandle;
+const StreamError = Engine.StreamError;
 
 pub const negotiations_max_default: u16 = 256;
 pub const negotiations_max_ceiling: u16 = 4_096;

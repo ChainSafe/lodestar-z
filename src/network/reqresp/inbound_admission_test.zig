@@ -28,7 +28,7 @@ fn inboundStream(pair: *support.Pair, conn: types.Handle) !types.StreamHandle {
     const stream = try pair.client.openStream(conn);
     try std.testing.expectEqual(1, try pair.client.write(stream, &.{0}, false));
     try pair.pump();
-    var events: [16]@import("../quic/engine.zig").Event = undefined;
+    var events: [16]@import("../quic/Engine.zig").Event = undefined;
     for (pair.events(&pair.server, &events)) |event| {
         if (event == .stream_opened) return event.stream_opened;
     }

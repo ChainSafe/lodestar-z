@@ -1,6 +1,6 @@
 const std = @import("std");
 const gossip_test = @import("test_support.zig");
-const engine_mod = @import("../quic/engine.zig");
+const Engine = @import("../quic/Engine.zig");
 const Pair = @import("test_pair.zig").Pair;
 
 const topic = "/eth2/6a95a1a9/beacon_block/ssz_snappy";
@@ -17,7 +17,7 @@ fn connectMesh(setup: *Pair) !void {
 /// Delivers the client's pending engine events to its service and reports whether any of them
 /// was a readiness event routed to the client's gossip session.
 fn processClient(setup: *Pair) bool {
-    var storage: [64]engine_mod.Event = undefined;
+    var storage: [64]Engine.Event = undefined;
     const events = setup.shared.pair.events(&setup.shared.pair.client, &storage);
     var routed = false;
     for (events) |event| if (event == .stream_ready) {

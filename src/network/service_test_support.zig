@@ -1,10 +1,10 @@
 const std = @import("std");
 const support = @import("test_support.zig");
 const service = @import("service.zig");
-const engine = @import("quic/engine.zig");
+const Engine = @import("quic/Engine.zig");
 const Inbox = @import("gossipsub/test_support.zig").Inbox;
 
-pub fn initService(allocator: std.mem.Allocator, options: service.Options, transport: *const engine.Engine) !service.Service {
+pub fn initService(allocator: std.mem.Allocator, options: service.Options, transport: *const Engine) !service.Service {
     const local = try options.identify.makeLocal(&transport.tls.local_peer_id, &transport.local);
     return service.Service.init(allocator, options, &local);
 }
@@ -22,7 +22,7 @@ pub const ServicePair = struct {
     server: service.Service = undefined,
     client_inbox: Inbox = .{},
     server_inbox: Inbox = .{},
-    handles: struct { client: engine.Handle, server: engine.Handle } = undefined,
+    handles: struct { client: Engine.Handle, server: Engine.Handle } = undefined,
 
     pub fn init(self: *ServicePair, client: service.Options, server: service.Options) !void {
         try self.initWindow(client, server, null);
@@ -78,8 +78,8 @@ pub const ServicePair = struct {
         return self.process(&self.server, &self.pair.server, outputs);
     }
 
-    fn process(self: *ServicePair, owner: *service.Service, transport: *engine.Engine, outputs: service.Outputs) service.OutputCounts {
-        var events: [@import("quic/limits.zig").events_per_turn_max]engine.Event = undefined;
+    fn process(self: *ServicePair, owner: *service.Service, transport: *Engine, outputs: service.Outputs) service.OutputCounts {
+        var events: [@import("quic/limits.zig").events_per_turn_max]Engine.Event = undefined;
         return owner.process(transport, self.pair.events(transport, &events), self.pair.now, outputs);
     }
 };

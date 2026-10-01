@@ -1,11 +1,10 @@
 const std = @import("std");
-const engine_mod = @import("quic/engine.zig");
+const Engine = @import("quic/Engine.zig");
 const types = @import("types.zig");
 
 const assert = std.debug.assert;
-const Engine = engine_mod.Engine;
-const StreamHandle = engine_mod.StreamHandle;
-const StreamError = engine_mod.StreamError;
+const StreamHandle = Engine.StreamHandle;
+const StreamError = Engine.StreamError;
 
 pub const pump_attempts_max: u32 = 8;
 

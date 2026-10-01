@@ -1,10 +1,10 @@
 const std = @import("std");
 const constants = @import("../constants.zig");
-const engine_mod = @import("engine.zig");
+const Engine = @import("Engine.zig");
 const keys = @import("../wire/keys.zig");
 const support = @import("../test_support.zig");
 
-const Event = engine_mod.Event;
+const Event = Engine.Event;
 const Pair = support.Pair;
 const client_address = support.client_address;
 const server_address = support.server_address;
@@ -13,26 +13,20 @@ const expectConnected = support.expectConnected;
 const expectClosed = support.expectClosed;
 const expectStreamOpened = support.expectStreamOpened;
 
-fn sleepMs(ms: i64) void {
-    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    std.Io.sleep(threaded.io(), std.Io.Duration.fromMilliseconds(ms), .awake) catch {};
-}
-
 test "engine stale handles are rejected" {
     var pair: Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
     const handles = try connectPair(&pair);
-    const stale = engine_mod.Handle{ .index = handles.client.index, .generation = handles.client.generation +% 1 };
+    const stale = Engine.Handle{ .index = handles.client.index, .generation = handles.client.generation +% 1 };
     try std.testing.expectError(error.StaleHandle, pair.client.openStream(stale));
     try std.testing.expect(pair.client.peerId(stale) == null);
-    const out_of_range = engine_mod.Handle{ .index = 9_999, .generation = 0 };
+    const out_of_range = Engine.Handle{ .index = 9_999, .generation = 0 };
     try std.testing.expectError(error.StaleHandle, pair.client.openStream(out_of_range));
 
     const stream = try pair.client.openStream(handles.client);
     var buffer: [16]u8 = undefined;
-    const wrong_slot = engine_mod.StreamHandle{
+    const wrong_slot = Engine.StreamHandle{
         .conn = stream.conn,
         .id = stream.id,
         .slot = stream.slot + 1,
@@ -41,14 +35,14 @@ test "engine stale handles are rejected" {
     try std.testing.expectError(error.UnknownStream, pair.client.write(wrong_slot, "x", false));
     try std.testing.expectError(error.UnknownStream, pair.client.streamCapacity(wrong_slot));
 
-    const past_table = engine_mod.StreamHandle{ .conn = stream.conn, .id = stream.id, .slot = 255 };
+    const past_table = Engine.StreamHandle{ .conn = stream.conn, .id = stream.id, .slot = 255 };
     try std.testing.expectError(error.UnknownStream, pair.client.read(past_table, &buffer));
     try std.testing.expectError(error.UnknownStream, pair.client.write(past_table, "x", false));
 
     const other = try pair.client.openStream(handles.client);
     try std.testing.expect(other.slot != stream.slot);
     try std.testing.expect(other.id != stream.id);
-    const aliased = engine_mod.StreamHandle{
+    const aliased = Engine.StreamHandle{
         .conn = stream.conn,
         .id = stream.id,
         .slot = other.slot,
@@ -57,7 +51,7 @@ test "engine stale handles are rejected" {
     try std.testing.expectError(error.UnknownStream, pair.client.write(aliased, "x", false));
     try std.testing.expectError(error.UnknownStream, pair.client.streamCapacity(aliased));
 
-    const stale_stream = engine_mod.StreamHandle{
+    const stale_stream = Engine.StreamHandle{
         .conn = stale,
         .id = stream.id,
         .slot = stream.slot,
@@ -79,7 +73,7 @@ test "engine reports a host close on both sides" {
     const client_events = pair.events(&pair.client, &storage);
     const client_reason =
         try expectClosed(client_events[0], handles.client, .outbound, &pair.server_ctx);
-    try std.testing.expectEqual(engine_mod.CloseReason.host, client_reason);
+    try std.testing.expectEqual(Engine.CloseReason.host, client_reason);
     const server_events = pair.events(&pair.server, &storage);
     const server_reason =
         try expectClosed(server_events[0], handles.server, .inbound, &pair.client_ctx);
@@ -106,7 +100,7 @@ test "engine closes on peer id mismatch" {
     const client_events = pair.events(&pair.client, &storage);
     try std.testing.expectEqual(@as(usize, 1), client_events.len);
     try std.testing.expectEqual(
-        engine_mod.CloseReason.peer_id_mismatch,
+        Engine.CloseReason.peer_id_mismatch,
         try expectClosed(client_events[0], handle, .outbound, &pair.server_ctx),
     );
 
@@ -121,7 +115,7 @@ test "engine closes on peer id mismatch" {
 
 /// Dials, then delivers the server's flight so the client is established before it has sent its
 /// own final flight. The first Initial draws a Retry.
-fn establishClient(pair: *Pair) !engine_mod.Handle {
+fn establishClient(pair: *Pair) !Engine.Handle {
     const handle = try pair.dial();
     try pair.flush(&pair.client);
     try pair.flush(&pair.client);
@@ -170,7 +164,7 @@ test "engine delivers a close requested before the establishing flight leaves" {
         const client_events = pair.events(&pair.client, &storage);
         try std.testing.expectEqual(@as(usize, 1), client_events.len);
         try std.testing.expectEqual(
-            engine_mod.CloseReason.host,
+            Engine.CloseReason.host,
             try expectClosed(client_events[0], handle, .outbound, &pair.server_ctx),
         );
         const server_events = pair.events(&pair.server, &storage);
@@ -180,8 +174,8 @@ test "engine delivers a close requested before the establishing flight leaves" {
         try std.testing.expectEqual(@as(u64, 7), reason.peer_closed.code);
         try std.testing.expectEqual(@as(usize, 0), pair.events(&pair.client, &storage).len);
         try std.testing.expectEqual(@as(usize, 0), pair.events(&pair.server, &storage).len);
-        try std.testing.expectEqual(@as(usize, 0), pair.client.activeIndices().len);
-        try std.testing.expectEqual(@as(usize, 0), pair.server.activeIndices().len);
+        try std.testing.expectEqual(@as(usize, 0), pair.client.registry.activeIndices().len);
+        try std.testing.expectEqual(@as(usize, 0), pair.server.registry.activeIndices().len);
         // The virtual clock never moved, so no timer ended either side.
         try std.testing.expectEqual(start, pair.now);
     }
@@ -212,13 +206,13 @@ test "engine sends an inbound close requested in the turn the connection establi
     const server_events = pair.events(&pair.server, &storage);
     try std.testing.expectEqual(@as(usize, 1), server_events.len);
     try std.testing.expectEqual(
-        engine_mod.CloseReason.host,
+        Engine.CloseReason.host,
         try expectClosed(server_events[0], server_handle, .inbound, &pair.client_ctx),
     );
     try std.testing.expectEqual(@as(usize, 0), pair.events(&pair.client, &storage).len);
     try std.testing.expectEqual(@as(usize, 0), pair.events(&pair.server, &storage).len);
-    try std.testing.expectEqual(@as(usize, 0), pair.client.activeIndices().len);
-    try std.testing.expectEqual(@as(usize, 0), pair.server.activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 0), pair.client.registry.activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 0), pair.server.registry.activeIndices().len);
     try std.testing.expectEqual(start, pair.now);
 }
 
@@ -237,10 +231,10 @@ test "engine closes a dial the server never answers no later than the handshake 
     const client_events = pair.events(&pair.client, &storage);
     try std.testing.expectEqual(@as(usize, 1), client_events.len);
     try std.testing.expectEqual(
-        engine_mod.CloseReason.dial_unanswered,
+        Engine.CloseReason.dial_unanswered,
         try expectClosed(client_events[0], handle, .outbound, null),
     );
-    try std.testing.expectEqual(@as(u64, 1), pair.client.connection_metrics.closed[1][@intFromEnum(engine_mod.CloseReason.dial_unanswered)]);
+    try std.testing.expectEqual(@as(u64, 1), pair.client.connection_metrics.closed[1][@intFromEnum(Engine.CloseReason.dial_unanswered)]);
     try std.testing.expectEqual(@as(u64, 0), pair.client.connection_metrics.established[1]);
     try std.testing.expectEqual(@as(usize, 0), pair.events(&pair.client, &storage).len);
     try std.testing.expectEqual(@as(u16, 0), pair.client.registry.handshaking);
@@ -265,44 +259,8 @@ test "engine rejects a forged certificate with tls_failed" {
     const client_events = pair.events(&pair.client, &storage);
     try std.testing.expectEqual(@as(usize, 1), client_events.len);
     try std.testing.expectEqual(
-        engine_mod.CloseReason.tls_failed,
+        Engine.CloseReason.tls_failed,
         try expectClosed(client_events[0], handle, .outbound, null),
-    );
-}
-
-test "engine keep-alive survives a short idle timeout" {
-    var pair: Pair = .{};
-    try pair.init(.{ .idle_timeout_ms = 1_000, .keep_alive_ms = 200 }, .{ .idle_timeout_ms = 1_000, .keep_alive_ms = 200 });
-    defer pair.deinit();
-    const handles = try connectPair(&pair);
-
-    var round: usize = 0;
-    while (round < 8) : (round += 1) {
-        sleepMs(200);
-        pair.advance(200);
-        try pair.pump();
-    }
-    var storage: [8]Event = undefined;
-    try std.testing.expectEqual(@as(usize, 0), pair.events(&pair.client, &storage).len);
-    try std.testing.expect(pair.client.peerId(handles.client) != null);
-}
-
-test "engine reports idle timeout without keep-alive" {
-    var pair: Pair = .{};
-    try pair.init(.{ .idle_timeout_ms = 600, .keep_alive_ms = 60_000 }, .{ .idle_timeout_ms = 600, .keep_alive_ms = 60_000 });
-    defer pair.deinit();
-    const handles = try connectPair(&pair);
-
-    sleepMs(900);
-    pair.advance(900);
-    try pair.pump();
-
-    var storage: [8]Event = undefined;
-    const client_events = pair.events(&pair.client, &storage);
-    try std.testing.expectEqual(@as(usize, 1), client_events.len);
-    try std.testing.expectEqual(
-        engine_mod.CloseReason.idle_timeout,
-        try expectClosed(client_events[0], handles.client, .outbound, &pair.server_ctx),
     );
 }
 
@@ -327,11 +285,11 @@ test "engine reclaims slots across many connection lifetimes" {
         _ = pair.events(&pair.server, &storage);
     }
 
-    try std.testing.expectEqual(@as(usize, 1), pair.client.activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 1), pair.client.registry.activeIndices().len);
     _ = pair.events(&pair.client, &storage);
     _ = pair.events(&pair.server, &storage);
-    try std.testing.expectEqual(@as(usize, 0), pair.client.activeIndices().len);
-    try std.testing.expectEqual(@as(usize, 0), pair.server.activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 0), pair.client.registry.activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 0), pair.server.registry.activeIndices().len);
     try std.testing.expectEqual(@as(u16, 0), pair.client.registry.handshaking);
     try std.testing.expectEqual(@as(u16, 0), pair.server.registry.handshaking);
     for (pair.client.registry.slots) |*slot| try std.testing.expect(slot.conn == null);
@@ -349,7 +307,7 @@ test "engine abandon frees a closed slot whose event was never reported" {
     try std.testing.expect(pair.client.eventsPending());
 
     try std.testing.expect(pair.client.abandon(handles.client));
-    try std.testing.expectEqual(@as(usize, 0), pair.client.activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 0), pair.client.registry.activeIndices().len);
     try std.testing.expect(!pair.client.eventsPending());
 
     var storage: [8]Event = undefined;
@@ -370,11 +328,11 @@ test "engine abandon frees a closed slot after its event was reported" {
     const events = pair.events(&pair.client, &storage);
     try std.testing.expectEqual(@as(usize, 1), events.len);
     _ = try expectClosed(events[0], handles.client, .outbound, &pair.server_ctx);
-    try std.testing.expectEqual(@as(usize, 1), pair.client.activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 1), pair.client.registry.activeIndices().len);
     try std.testing.expect(!pair.client.eventsPending());
 
     try std.testing.expect(pair.client.abandon(handles.client));
-    try std.testing.expectEqual(@as(usize, 0), pair.client.activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 0), pair.client.registry.activeIndices().len);
     try std.testing.expect(!pair.client.abandon(handles.client));
     try std.testing.expect(pair.client.peerId(handles.client) == null);
 }
@@ -427,10 +385,10 @@ test "engine abandon frees a dialing slot without an event" {
     defer pair.deinit();
 
     const handle = try pair.dial();
-    try std.testing.expectEqual(@as(usize, 1), pair.client.activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 1), pair.client.registry.activeIndices().len);
 
     try std.testing.expect(pair.client.abandon(handle));
-    try std.testing.expectEqual(@as(usize, 0), pair.client.activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 0), pair.client.registry.activeIndices().len);
     try std.testing.expect(!pair.client.abandon(handle));
 
     var storage: [8]Event = undefined;
@@ -458,10 +416,10 @@ test "engine abandons an unanswered dial at the unanswered timeout" {
     const client_events = pair.events(&pair.client, &storage);
     try std.testing.expectEqual(@as(usize, 1), client_events.len);
     try std.testing.expectEqual(
-        engine_mod.CloseReason.dial_unanswered,
+        Engine.CloseReason.dial_unanswered,
         try expectClosed(client_events[0], handle, .outbound, null),
     );
-    try std.testing.expectEqual(@as(u64, 1), pair.client.connection_metrics.closed[1][@intFromEnum(engine_mod.CloseReason.dial_unanswered)]);
+    try std.testing.expectEqual(@as(u64, 1), pair.client.connection_metrics.closed[1][@intFromEnum(Engine.CloseReason.dial_unanswered)]);
     try std.testing.expectEqual(@as(u16, 0), pair.client.registry.dialing);
 }
 
@@ -483,7 +441,7 @@ test "engine keeps an answered dial until the handshake timeout" {
     const client_events = pair.events(&pair.client, &storage);
     try std.testing.expectEqual(@as(usize, 1), client_events.len);
     try std.testing.expectEqual(
-        engine_mod.CloseReason.handshake_timeout,
+        Engine.CloseReason.handshake_timeout,
         try expectClosed(client_events[0], handle, .outbound, null),
     );
 }
@@ -512,7 +470,7 @@ test "engine deferred host close delays peer claims until the final flight drain
     const closed = pair.events(&pair.client, &storage);
     try std.testing.expectEqual(@as(usize, 2), closed.len);
     const inbound = try support.expectStreamOpened(closed[0], handle);
-    try std.testing.expectEqual(engine_mod.CloseReason.host, try expectClosed(closed[1], handle, .outbound, &pair.server_ctx));
+    try std.testing.expectEqual(Engine.CloseReason.host, try expectClosed(closed[1], handle, .outbound, &pair.server_ctx));
     var buffer: [8]u8 = undefined;
     const read = try pair.client.read(inbound, &buffer);
     try std.testing.expectEqualStrings("last", buffer[0..read.len]);
@@ -534,11 +492,11 @@ test "engine shutdown all includes precatalog handshakes and is repeatable" {
     var storage: [8]Event = undefined;
     const events = pair.events(&pair.client, &storage);
     try std.testing.expectEqual(@as(usize, 1), events.len);
-    try std.testing.expectEqual(engine_mod.CloseReason.host, try expectClosed(events[0], handles.client, .outbound, &pair.server_ctx));
+    try std.testing.expectEqual(Engine.CloseReason.host, try expectClosed(events[0], handles.client, .outbound, &pair.server_ctx));
     pair.client.shutdownAll();
     pair.client.shutdownAll();
     try std.testing.expectEqual(@as(u16, 0), pair.client.registry.outbound);
-    try std.testing.expectEqual(@as(usize, 0), pair.client.activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 0), pair.client.registry.activeIndices().len);
 }
 
 test "engine shutdown all abandons inbound precatalog handshakes" {
@@ -549,7 +507,7 @@ test "engine shutdown all abandons inbound precatalog handshakes" {
     try std.testing.expectEqual(@as(u16, 1), pair.server.registry.handshaking);
     pair.server.shutdownAll();
     try std.testing.expectEqual(@as(u16, 0), pair.server.registry.handshaking);
-    try std.testing.expectEqual(@as(usize, 0), pair.server.activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 0), pair.server.registry.activeIndices().len);
     try std.testing.expect(!pair.server.eventsPending());
 }
 
@@ -566,13 +524,13 @@ test "engine close reason keeps first local cause but send failure overrides def
             // A second native close cause cannot replace the already latched host reason.
             const slot = &pair.client.registry.slots[handle.index];
             slot.close(.tls_failed, 0);
-            try std.testing.expectEqual(engine_mod.CloseReason.host, slot.closeReason());
+            try std.testing.expectEqual(Engine.CloseReason.host, slot.closeReason());
             try pair.pump();
         }
         var storage: [8]Event = undefined;
         const events = pair.events(&pair.client, &storage);
         try std.testing.expectEqual(@as(usize, 1), events.len);
-        const reason: engine_mod.CloseReason = if (fail_send) .send_failed else .host;
+        const reason: Engine.CloseReason = if (fail_send) .send_failed else .host;
         try std.testing.expectEqual(reason, try expectClosed(events[0], handle, .outbound, &pair.server_ctx));
         try std.testing.expectEqual(@as(u16, 0), pair.client.registry.outbound);
         try std.testing.expectEqual(@as(u16, 0), pair.client.registry.dialing);

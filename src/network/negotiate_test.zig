@@ -1,5 +1,5 @@
 const std = @import("std");
-const engine_mod = @import("quic/engine.zig");
+const Engine = @import("quic/Engine.zig");
 const multistream = @import("wire/multistream.zig");
 const negotiate = @import("negotiate.zig");
 const support = @import("test_support.zig");
@@ -18,7 +18,7 @@ const Setup = struct {
     pair: Pair = .{},
     dialer: Negotiator = undefined,
     listener: Negotiator = undefined,
-    handles: struct { client: engine_mod.Handle, server: engine_mod.Handle } = undefined,
+    handles: struct { client: Engine.Handle, server: Engine.Handle } = undefined,
 
     fn init(self: *Setup, negotiations_max: u16) !void {
         try self.pair.init(.{}, .{});
@@ -38,8 +38,8 @@ const Setup = struct {
 
     /// Delivers one side's engine events: stream events to its negotiator by route and, on the
     /// listener, new streams to acceptInbound.
-    fn deliver(self: *Setup, engine: *engine_mod.Engine, negotiator: *Negotiator) !void {
-        var storage: [64]engine_mod.Event = undefined;
+    fn deliver(self: *Setup, engine: *Engine, negotiator: *Negotiator) !void {
+        var storage: [64]Engine.Event = undefined;
         const events = self.pair.events(engine, &storage);
         for (events) |event| {
             if (event == .stream_opened and negotiator == &self.listener) try negotiator.acceptInbound(engine, event.stream_opened, self.pair.now);
@@ -236,13 +236,13 @@ test "negotiator sends four outbound proposals in preference order" {
     try std.testing.expectEqual(@as(usize, 0), setup.dialer.active());
     const stream = try setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, &offered, setup.pair.now, .{});
     try std.testing.expectEqual(@as(u64, 0), stream.id);
-    var inbound: engine_mod.StreamHandle = undefined;
+    var inbound: Engine.StreamHandle = undefined;
     var outcomes: [1]Outcome = undefined;
     for (offered, 0..) |protocol, index| {
         try std.testing.expectEqual(@as(usize, 0), setup.pumpDialer(&.{}, &outcomes));
         try setup.pair.pump();
         if (index == 0) {
-            var events: [8]engine_mod.Event = undefined;
+            var events: [8]Engine.Event = undefined;
             inbound = try support.expectStreamOpened(setup.pair.events(&setup.pair.server, &events)[0], setup.handles.server);
         }
         var request: [256]u8 = undefined;
@@ -281,7 +281,7 @@ test "negotiator bounds each inbound connection and reserves outbound applicatio
     });
     defer owner.deinit();
     for (0..5) |index| {
-        const stream: engine_mod.StreamHandle = .{ .conn = .{ .index = @intCast(index / 2), .generation = 1 }, .slot = 0, .id = index * 4 };
+        const stream: Engine.StreamHandle = .{ .conn = .{ .index = @intCast(index / 2), .generation = 1 }, .slot = 0, .id = index * 4 };
         try owner.acceptInbound(&setup.pair.server, stream, setup.pair.now);
         if (index == 1) try std.testing.expectError(error.NegotiationTableFull, owner.acceptInbound(&setup.pair.server, .{ .conn = stream.conn, .slot = 0, .id = 100 }, setup.pair.now));
     }
@@ -303,7 +303,7 @@ test "negotiator per connection reservations survive saturation and isolate outb
     });
     defer owner.deinit();
     for (0..3) |peer| {
-        const conn: engine_mod.Handle = .{ .index = @intCast(peer), .generation = 1 };
+        const conn: Engine.Handle = .{ .index = @intCast(peer), .generation = 1 };
         for (0..2) |i| try owner.acceptInbound(&setup.pair.server, .{ .conn = conn, .slot = @intCast(i), .id = i * 4 }, setup.pair.now);
         try std.testing.expectError(error.NegotiationTableFull, owner.acceptInbound(&setup.pair.server, .{ .conn = conn, .slot = 2, .id = 8 }, setup.pair.now));
     }
@@ -333,7 +333,7 @@ test "negotiator delivers retained outcomes before recycled lower slots" {
     var setup: Setup = .{};
     try setup.init(5);
     defer setup.deinit();
-    var initial: [5]engine_mod.StreamHandle = undefined;
+    var initial: [5]Engine.StreamHandle = undefined;
     for (&initial) |*stream| stream.* = try setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, &.{ping_protocol}, setup.pair.now, .{});
     setup.pair.advance(negotiate.negotiate_timeout_ms);
     try std.testing.expectEqual(@as(usize, 0), setup.pumpDialer(&supported, &.{}));
@@ -401,8 +401,8 @@ test "negotiator preserves coalesced acceptance payload and FIN for the dialer" 
     var outcomes: [1]Outcome = undefined;
     _ = setup.pumpDialer(&supported, &outcomes);
     try setup.pair.pump();
-    var events: [8]engine_mod.Event = undefined;
-    var inbound: ?engine_mod.StreamHandle = null;
+    var events: [8]Engine.Event = undefined;
+    var inbound: ?Engine.StreamHandle = null;
     for (setup.pair.events(&setup.pair.server, &events)) |event| {
         if (event == .stream_opened) inbound = event.stream_opened;
     }
@@ -481,7 +481,7 @@ test "negotiator retains an accepted tag across blocked acknowledgement and dela
     @memcpy(request[hello.len..][0..4], "kept");
     try std.testing.expectEqual(hello.len + 4, try setup.pair.client.write(stream, request[0 .. hello.len + 4], true));
     try setup.pair.pump();
-    var events: [8]engine_mod.Event = undefined;
+    var events: [8]Engine.Event = undefined;
     const inbound = try support.expectStreamOpened(setup.pair.events(&setup.pair.server, &events)[0], setup.handles.server);
     try setup.listener.acceptInbound(&setup.pair.server, inbound, setup.pair.now);
 
@@ -573,7 +573,7 @@ test "negotiation timed entry owns exact expiry below and above the default" {
     }
 }
 
-fn selectedRaw(setup: *Setup) !struct { client: engine_mod.StreamHandle, server: engine_mod.StreamHandle } {
+fn selectedRaw(setup: *Setup) !struct { client: Engine.StreamHandle, server: Engine.StreamHandle } {
     const stream = try setup.pair.client.openStream(setup.handles.client);
     const dialer = try multistream.Dialer.init(ping);
     var bytes: [256]u8 = undefined;
@@ -590,7 +590,7 @@ fn selectedRaw(setup: *Setup) !struct { client: engine_mod.StreamHandle, server:
     return error.TestUnexpectedResult;
 }
 
-fn blockSelectedWrite(setup: *Setup, stream: engine_mod.StreamHandle) !usize {
+fn blockSelectedWrite(setup: *Setup, stream: Engine.StreamHandle) !usize {
     const padding = [_]u8{0x55} ** 4096;
     var sent: usize = 0;
     for (0..64) |_| {

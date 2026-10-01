@@ -1,6 +1,6 @@
 const std = @import("std");
 const support = @import("test_support.zig");
-const engine_mod = @import("quic/engine.zig");
+const Engine = @import("quic/Engine.zig");
 const keys = @import("wire/keys.zig");
 const multiaddr = @import("wire/multiaddr.zig");
 const transport_mod = @import("transport.zig");
@@ -18,8 +18,8 @@ fn initTransport(target: *Transport, seed: u8) !void {
 }
 
 fn writeSome(
-    engine: *engine_mod.Engine,
-    stream: engine_mod.StreamHandle,
+    engine: *Engine,
+    stream: Engine.StreamHandle,
     bytes: []const u8,
 ) !usize {
     return engine.write(stream, bytes, false) catch |err| switch (err) {
@@ -40,8 +40,8 @@ test "transport moves a bulk payload over loopback sockets with batched sends" {
     try std.testing.expect(target.peer.?.eql(&listener.peerId()));
     const handle = try dialer.dial(std.testing.io, &target);
 
-    var dialer_events: [8]engine_mod.Event = undefined;
-    var listener_events: [8]engine_mod.Event = undefined;
+    var dialer_events: [8]Engine.Event = undefined;
+    var listener_events: [8]Engine.Event = undefined;
     var connected = false;
     var rounds: usize = 0;
     while (rounds < 200 and !connected) : (rounds += 1) {
@@ -59,7 +59,7 @@ test "transport moves a bulk payload over loopback sockets with batched sends" {
     var sink: [payload_len]u8 = undefined;
     var written: usize = 0;
     var received: usize = 0;
-    var inbound: ?engine_mod.StreamHandle = null;
+    var inbound: ?Engine.StreamHandle = null;
     var datagrams_sent: u32 = 0;
     var send_calls: u32 = 0;
     rounds = 0;
@@ -96,7 +96,7 @@ test "transport refuses to dial a multiaddr without a peer id" {
 
     const target = multiaddr.Multiaddr{ .address = dialer.localAddress() };
     try std.testing.expectError(error.MissingPeerId, dialer.dial(std.testing.io, &target));
-    try std.testing.expectEqual(@as(usize, 0), dialer.engine.activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 0), dialer.engine.registry.activeIndices().len);
 }
 
 test "dual-stack transport authenticates both families through one connection budget" {
@@ -104,7 +104,7 @@ test "dual-stack transport authenticates both families through one connection bu
         const hub_key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{101}));
         const key4 = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{102}));
         const key6 = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{103}));
-        const limits: engine_mod.Limits = .{ .connections_max = 2, .handshaking_max = 2, .dialing_max = 2, .outbound_max = 2 };
+        const limits: Engine.Limits = .{ .connections_max = 2, .handshaking_max = 2, .dialing_max = 2, .outbound_max = 2 };
         var hub: Transport = .{};
         try hub.init(std.testing.allocator, std.testing.io, .{ .host = &hub_key, .bind = .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } }, .limits = limits });
         defer hub.deinit(std.testing.io);
@@ -123,7 +123,7 @@ test "dual-stack transport authenticates both families through one connection bu
             _ = try hub.dialPeer(std.testing.io, peer6.localAddress(), peer6.peerId());
         }
         var connected: [2]bool = .{ false, false };
-        var events: [8]engine_mod.Event = undefined;
+        var events: [8]Engine.Event = undefined;
         for (0..400) |_| {
             const result = try support.step(&hub, std.testing.io, &events, .{ .wait_max_ms = 1 });
             for (events[0..result.events]) |event| if (event == .connected) {

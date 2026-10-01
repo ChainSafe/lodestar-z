@@ -5,7 +5,7 @@ const peers = @import("peers/root.zig");
 const control_mod = @import("peers/control.zig");
 const dial_mod = @import("peers/dialing.zig");
 const policy = peers.policy;
-const engine_mod = @import("quic/engine.zig");
+const Engine = @import("quic/Engine.zig");
 const gossip = @import("gossipsub/root.zig");
 const Now = @import("types.zig").Now;
 const coverage = @import("peers/coverage.zig");
@@ -134,7 +134,7 @@ pub const PeerManager = struct {
     /// refused connection and, for an admitted one, the connection it displaced.
     pub fn admit(
         self: *PeerManager,
-        event: *const @FieldType(engine_mod.Event, "connected"),
+        event: *const @FieldType(Engine.Event, "connected"),
         endpoint: t.Address,
         now: Now,
     ) ?@FieldType(t.Admission, "admitted") {
@@ -194,7 +194,7 @@ pub const PeerManager = struct {
     pub const Retired = struct { peer: t.PeerRef, conn: t.Handle };
     /// Settles an ended dial and connection once. Preserve remote evidence before retirement
     /// releases Status, Metadata and intent state. The caller then cancels protocol/gossip I/O.
-    pub fn transportClosed(self: *PeerManager, closed: *const @FieldType(engine_mod.Event, "closed"), goodbye: ?u64, now: Now) ?Retired {
+    pub fn transportClosed(self: *PeerManager, closed: *const @FieldType(Engine.Event, "closed"), goodbye: ?u64, now: Now) ?Retired {
         _ = self.dialing.dialClosed(&self.catalog, closed.conn, closed.reason, now.mono_ms);
         const peer = self.catalog.findConnection(closed.conn) orelse return null;
         if (goodbye) |code| self.control.receivedGoodbye(&self.catalog, peer, closed.conn, code, true);
@@ -284,7 +284,7 @@ pub const PeerManager = struct {
     }
     /// Observes transport progress before admission or dial selection. Admission itself consumes
     /// these bounded facts without borrowing transport or executing I/O.
-    pub fn transportProgress(self: *PeerManager, engine: *const engine_mod.Engine) void {
+    pub fn transportProgress(self: *PeerManager, engine: *const Engine) void {
         self.dialing.syncAnswered(engine);
         self.native_dial_room = engine.limits.connections_max -| engine.registry.active_len;
     }
@@ -478,7 +478,7 @@ pub const PeerManager = struct {
         try self.dialing.enqueueUntil(&self.catalog, identity, addresses, false, now.mono_ms, deadline_ms);
         self.selection_revision = null;
     }
-    pub fn cancelConnect(self: *PeerManager, engine: *engine_mod.Engine, identity: *const t.PeerId, now: Now) void {
+    pub fn cancelConnect(self: *PeerManager, engine: *Engine, identity: *const t.PeerId, now: Now) void {
         self.dialing.cancelConnect(&self.catalog, engine, identity, now.mono_ms);
         self.selection_revision = null;
     }
@@ -525,7 +525,7 @@ pub const PeerManager = struct {
     pub fn dialIntents(
         self: *PeerManager,
         gossipsub: *gossip.Gossipsub,
-        engine: *engine_mod.Engine,
+        engine: *Engine,
         now: Now,
         out: []dial_mod.DialIntent,
     ) usize {

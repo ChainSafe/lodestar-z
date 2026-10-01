@@ -1,6 +1,6 @@
 const std = @import("std");
 const routing = @import("router.zig");
-const engine_mod = @import("quic/engine.zig");
+const Engine = @import("quic/Engine.zig");
 const types = @import("types.zig");
 const reqresp_mod = @import("reqresp/root.zig");
 const gossip_mod = @import("gossipsub/root.zig");
@@ -57,7 +57,7 @@ pub const Service = struct {
         };
     }
 
-    pub fn shutdown(self: *Service, engine: *engine_mod.Engine) void {
+    pub fn shutdown(self: *Service, engine: *Engine) void {
         self.identify.shutdown(&self.router, engine);
         self.reqresp.shutdown(engine, &self.router);
         self.gossipsub.shutdown(&self.router, engine);
@@ -77,8 +77,8 @@ pub const Service = struct {
 
     pub fn request(
         self: *Service,
-        engine: *engine_mod.Engine,
-        conn: engine_mod.Handle,
+        engine: *Engine,
+        conn: Engine.Handle,
         protocol: reqresp_mod.Protocol,
         bytes: []const u8,
         sink: []u8,
@@ -113,7 +113,7 @@ pub const Service = struct {
     }
 
     /// Delivers one turn of engine events, then pumps each owner's ready work and due deadlines.
-    pub fn process(self: *Service, engine: *engine_mod.Engine, events: []const engine_mod.Event, now: types.Now, outputs: Outputs) OutputCounts {
+    pub fn process(self: *Service, engine: *Engine, events: []const Engine.Event, now: types.Now, outputs: Outputs) OutputCounts {
         self.dispatch(engine, events, now);
         const counts = self.reqresp.pump(engine, &self.router, now, .{ .application = outputs.application, .control = outputs.control });
         if (self.applications == .active) self.gossipsub.pump(&self.router, engine, now);
@@ -142,8 +142,8 @@ pub const Service = struct {
     /// unrouted one advances nothing.
     fn dispatch(
         self: *Service,
-        engine: *engine_mod.Engine,
-        events: []const engine_mod.Event,
+        engine: *Engine,
+        events: []const Engine.Event,
         now: types.Now,
     ) void {
         if (self.applications == .quiescing) {

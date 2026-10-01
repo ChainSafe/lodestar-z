@@ -4,7 +4,7 @@ const protocol = @import("protocol.zig");
 const protocol_mod = protocol;
 const reqresp = @import("reqresp.zig");
 const ReqResp = reqresp.ReqResp;
-const engine_mod = @import("../quic/engine.zig");
+const Engine = @import("../quic/Engine.zig");
 const Protocol = protocol.Protocol;
 const test_pair = @import("test_pair.zig");
 const Pair = test_pair.Pair;
@@ -68,7 +68,7 @@ test "reqresp rejects non-null status context then completes a status round trip
         .{},
         setup.shared.pair.now,
     );
-    try std.testing.expectEqual(engine_mod.Direction.outbound, handle.direction);
+    try std.testing.expectEqual(Engine.Direction.outbound, handle.direction);
 
     var exchange = Exchange{};
     var rounds: usize = 0;

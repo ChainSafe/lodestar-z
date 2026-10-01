@@ -17,7 +17,7 @@ const request_policy = @import("request_policy.zig");
 const admission_mod = @import("admission.zig");
 const protocol_mod = @import("protocol.zig");
 const config = @import("config");
-const engine_mod = @import("../quic/engine.zig");
+const Engine = @import("../quic/Engine.zig");
 const limits = @import("../quic/limits.zig");
 const negotiate = @import("../negotiate.zig");
 const Client = @import("client.zig").Client;
@@ -32,9 +32,8 @@ const index_list = @import("../index_list.zig");
 const DeadlineHeap = @import("../deadline_heap.zig").DeadlineHeap;
 
 const assert = std.debug.assert;
-const Engine = engine_mod.Engine;
-const Handle = engine_mod.Handle;
-const StreamHandle = engine_mod.StreamHandle;
+const Handle = Engine.Handle;
+const StreamHandle = Engine.StreamHandle;
 const Protocol = protocol_mod.Protocol;
 const Now = types.Now;
 

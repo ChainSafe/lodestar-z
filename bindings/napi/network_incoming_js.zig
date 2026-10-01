@@ -8,7 +8,7 @@ const Runtime = r.Runtime;
 
 const bytes = @import("network_js.zig").bytes;
 const errorValue = @import("network_js.zig").errorValue;
-fn connectionValue(env: napi.Env, connection: @import("network").quic.engine.Handle) !Value {
+fn connectionValue(env: napi.Env, connection: @import("network").quic.Engine.Handle) !Value {
     const object = try env.createObject();
     try object.setNamedProperty("index", try env.createUint32(connection.index));
     try object.setNamedProperty("generation", try env.createUint32(connection.generation));

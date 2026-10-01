@@ -1,4 +1,4 @@
-const Handle = @import("../quic/engine.zig").Handle;
+const Handle = @import("../quic/Engine.zig").Handle;
 const MessageId = @import("topic.zig").MessageId;
 const Peers = @import("peer_book.zig").PeerBook;
 const Recovery = @import("recovery.zig").Recovery;

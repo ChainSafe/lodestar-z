@@ -1,12 +1,11 @@
 const std = @import("std");
-const engine_mod = @import("engine.zig");
+const Engine = @import("Engine.zig");
 const keys = @import("../wire/keys.zig");
 const limits = @import("limits.zig");
 const support = @import("../test_support.zig");
 const tls = @import("../tls/context.zig");
 
-const Engine = engine_mod.Engine;
-const Event = engine_mod.Event;
+const Event = Engine.Event;
 const Pair = support.Pair;
 const client_address = support.client_address;
 const server_address = support.server_address;
@@ -76,8 +75,8 @@ test "engine reconnects with the same TLS contexts" {
         _ = pair.events(&pair.client, &storage);
         _ = pair.events(&pair.server, &storage);
     }
-    try std.testing.expectEqual(@as(usize, 0), pair.client.activeIndices().len);
-    try std.testing.expectEqual(@as(usize, 0), pair.server.activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 0), pair.client.registry.activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 0), pair.server.registry.activeIndices().len);
 
     const second = try pair.dial();
     try pair.pump();
@@ -90,7 +89,7 @@ test "engine reconnects with the same TLS contexts" {
     try std.testing.expectEqual(@as(usize, 1), server_events.len);
     _ = try expectConnected(server_events[0], .inbound, &pair.client_ctx);
     try std.testing.expectEqual(@as(u64, 2), pair.client.connection_metrics.established[1]);
-    try std.testing.expectEqual(@as(u64, 1), pair.client.connection_metrics.closed[1][@intFromEnum(engine_mod.CloseReason.host)]);
+    try std.testing.expectEqual(@as(u64, 1), pair.client.connection_metrics.closed[1][@intFromEnum(Engine.CloseReason.host)]);
 }
 
 test "engine reports connection metadata through handles" {
@@ -99,8 +98,8 @@ test "engine reports connection metadata through handles" {
     defer pair.deinit();
     const handles = try connectPair(&pair);
 
-    const outbound = engine_mod.Direction.outbound;
-    const inbound = engine_mod.Direction.inbound;
+    const outbound = Engine.Direction.outbound;
+    const inbound = Engine.Direction.inbound;
     try std.testing.expectEqual(outbound, pair.client.direction(handles.client).?);
     try std.testing.expectEqual(inbound, pair.server.direction(handles.server).?);
     try std.testing.expect(pair.client.peerAddress(handles.client).?.eql(server_address));
@@ -108,7 +107,7 @@ test "engine reports connection metadata through handles" {
 
     try std.testing.expectEqual(pair.client.memoryPlan().connection_window_bytes / 2, pair.client.memoryPlan().stream_window_bytes);
 
-    const stale = engine_mod.Handle{
+    const stale = Engine.Handle{
         .index = handles.client.index,
         .generation = handles.client.generation +% 1,
     };
@@ -135,7 +134,7 @@ test "engine receive windows stay within the configured budget" {
     try std.testing.expectEqual(@as(u64, 2 * 1_024 * 1_024), standard.memoryPlan().stream_window_bytes);
 }
 
-fn standaloneEngine(seed: u8, engine_limits: engine_mod.Limits) !Engine {
+fn standaloneEngine(seed: u8, engine_limits: Engine.Limits) !Engine {
     const host = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{seed}));
     var ctx = try tls.Context.init(&host, now_unix, [_]u8{seed} ** 8);
     errdefer ctx.deinit();

@@ -2,7 +2,7 @@ const FaultIo = @import("fault_io");
 const std = @import("std");
 const constants = @import("constants.zig");
 const transport_mod = @import("transport.zig");
-const engine_mod = @import("quic/engine.zig");
+const Engine = @import("quic/Engine.zig");
 const multistream = @import("wire/multistream.zig");
 const support = @import("test_support.zig");
 const types = @import("types.zig");
@@ -14,14 +14,14 @@ const Node = support.Node;
 const ping_protocol = "/ipfs/ping/1.0.0";
 const step_options = transport_mod.StepOptions{ .wait_max_ms = 10 };
 
-fn writeSome(engine: *engine_mod.Engine, stream: engine_mod.StreamHandle, bytes: []const u8, fin: bool) !usize {
+fn writeSome(engine: *Engine, stream: Engine.StreamHandle, bytes: []const u8, fin: bool) !usize {
     return engine.write(stream, bytes, fin) catch |err| switch (err) {
         error.WouldBlock => 0,
         else => err,
     };
 }
 
-fn stepBoth(a: *Node, b: *Node, events_a: []engine_mod.Event, events_b: []engine_mod.Event) !struct { a: usize, b: usize } {
+fn stepBoth(a: *Node, b: *Node, events_a: []Engine.Event, events_b: []Engine.Event) !struct { a: usize, b: usize } {
     const ra = try support.step(&a.transport, std.testing.io, events_a, step_options);
     const rb = try support.step(&b.transport, std.testing.io, events_b, step_options);
     try std.testing.expectEqual(@as(u32, 0), ra.send_failures);
@@ -34,7 +34,7 @@ test "transport bounds an idle step by the requested wait" {
     try node.init(6);
     defer node.deinit();
 
-    var events: [4]engine_mod.Event = undefined;
+    var events: [4]Engine.Event = undefined;
     const started = std.Io.Clock.awake.now(std.testing.io).toMilliseconds();
     const result = try support.step(&node.transport, std.testing.io, &events, .{ .wait_max_ms = 5 });
     const elapsed = std.Io.Clock.awake.now(std.testing.io).toMilliseconds() - started;
@@ -60,9 +60,9 @@ test "transport reports stream events for the connections with stream data" {
         server.transport.sockets.localAddress(),
         server.transport.peerId(),
     );
-    var client_events: [8]engine_mod.Event = undefined;
-    var server_events: [8]engine_mod.Event = undefined;
-    var server_handle: ?engine_mod.Handle = null;
+    var client_events: [8]Engine.Event = undefined;
+    var server_events: [8]Engine.Event = undefined;
+    var server_handle: ?Engine.Handle = null;
     var client_connected = false;
     for (0..200) |_| {
         const counts = try stepBoth(&client, &server, &client_events, &server_events);
@@ -128,7 +128,7 @@ test "transport counts a hostile oversized datagram and keeps stepping" {
     const destination = udp_mod.Address.toNetwork(node.transport.sockets.localAddress());
     try stranger.send(std.testing.io, &destination, &oversized);
 
-    var events: [4]engine_mod.Event = undefined;
+    var events: [4]Engine.Event = undefined;
     var errors: u32 = 0;
     var rounds: usize = 0;
     while (rounds < 50 and errors == 0) : (rounds += 1) {
@@ -159,7 +159,7 @@ test "transport keeps batching past a counted receive error" {
     var sent: usize = 0;
     while (sent < 3) : (sent += 1) try stranger.send(std.testing.io, &destination, &oversized);
 
-    var events: [4]engine_mod.Event = undefined;
+    var events: [4]Engine.Event = undefined;
     const result = try support.step(&node.transport, std.testing.io, &events, step_options);
     try std.testing.expect(result.receive_errors >= 2);
     try std.testing.expectEqual(@as(u32, 0), result.datagrams_received);
@@ -182,14 +182,14 @@ test "transport surfaces a send failure to an unreachable destination" {
         now,
     );
 
-    var events: [4]engine_mod.Event = undefined;
+    var events: [4]Engine.Event = undefined;
     const result = try support.step(&node.transport, std.testing.io, &events, step_options);
     try std.testing.expectEqual(@as(u32, 1), result.send_failures);
     try std.testing.expectEqual(@as(u32, 0), result.datagrams_sent);
     try std.testing.expectEqual(@as(usize, 1), result.events);
     switch (events[0]) {
         .closed => |closed| {
-            try std.testing.expectEqual(engine_mod.Direction.outbound, closed.direction);
+            try std.testing.expectEqual(Engine.Direction.outbound, closed.direction);
             try std.testing.expect(closed.reason == .send_failed);
             try std.testing.expect(closed.peer_id == null);
             try std.testing.expectEqual(@as(u16, 0), closed.conn.index);
@@ -214,9 +214,9 @@ test "transport completes a libp2p ping over loopback sockets" {
 
     const handle = try client.transport.dialPeer(std.testing.io, server.transport.sockets.localAddress(), server.transport.peerId());
 
-    var client_events: [8]engine_mod.Event = undefined;
-    var server_events: [8]engine_mod.Event = undefined;
-    var server_handle: ?engine_mod.Handle = null;
+    var client_events: [8]Engine.Event = undefined;
+    var server_events: [8]Engine.Event = undefined;
+    var server_handle: ?Engine.Handle = null;
     var client_connected = false;
     var rounds: usize = 0;
     while (rounds < 200 and (server_handle == null or !client_connected)) : (rounds += 1) {
@@ -240,7 +240,7 @@ test "transport completes a libp2p ping over loopback sockets" {
     try std.testing.expectEqual(hello_bytes.len, try writeSome(&client.transport.engine, stream, hello_bytes, false));
 
     var listener: multistream.Listener = .{};
-    var inbound: ?engine_mod.StreamHandle = null;
+    var inbound: ?Engine.StreamHandle = null;
     var negotiated = false;
     var accepted = false;
     const payload = [_]u8{0xab} ** 32;
@@ -309,7 +309,7 @@ test "transport rotates dirty connections under one aggregate send allowance" {
     for (0..3) |_| {
         _ = try node.transport.engine.dial(&destination, node.transport.peerId(), now);
     }
-    var events: [8]engine_mod.Event = undefined;
+    var events: [8]Engine.Event = undefined;
     var served: [3]u16 = undefined;
     for (&served) |*index| {
         index.* = node.transport.engine.nextDirty().?;
@@ -359,7 +359,7 @@ test "transport requires startup seed entropy but no entropy for later dial and 
     defer remote.deinit();
     _ = try node.transport.dialPeer(io, remote.transport.localAddress(), remote.transport.peerId());
     _ = try remote.transport.dialPeer(io, node.transport.localAddress(), node.transport.peerId());
-    var events: [4]engine_mod.Event = undefined;
+    var events: [4]Engine.Event = undefined;
     const received = try support.step(&node.transport, io, &events, .{ .wait_max_ms = 10 });
     try std.testing.expect(received.datagrams_received > 0);
     try std.testing.expectEqual(@as(u32, 0), received.datagrams_accepted);
@@ -397,9 +397,9 @@ test "transport isolates a failing destination in a mixed-owner batch" {
         node.transport.peerId(),
         now,
     );
-    var events: [4]engine_mod.Event = undefined;
+    var events: [4]Engine.Event = undefined;
     const result = try support.step(&node.transport, std.testing.io, &events, .{ .wait_max_ms = 0 });
-    try std.testing.expectEqual(@as(?engine_mod.Handle, healthy), node.transport.engine.sendOwner(healthy.index));
+    try std.testing.expectEqual(@as(?Engine.Handle, healthy), node.transport.engine.sendOwner(healthy.index));
     try std.testing.expectEqual(@as(u32, 1), result.send_failures);
     try std.testing.expectEqual(@as(u32, 1), result.datagrams_sent);
     try std.testing.expectEqual(@as(u32, 2), result.send_calls);
@@ -416,7 +416,7 @@ test "transport isolates a failing destination in a mixed-owner batch" {
 }
 
 test "transport fails only the connection whose destination the host refuses and keeps serving its batch" {
-    const limits: engine_mod.Limits = .{ .connections_max = 3, .handshaking_max = 3, .dialing_max = 3, .outbound_max = 3 };
+    const limits: Engine.Limits = .{ .connections_max = 3, .handshaking_max = 3, .dialing_max = 3, .outbound_max = 3 };
     const hub_key = try @import("wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{111}));
     var hub: transport_mod.Transport = .{};
     try hub.init(std.testing.allocator, std.testing.io, .{ .host = &hub_key, .bind = .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } }, .limits = limits });
@@ -443,7 +443,7 @@ test "transport fails only the connection whose destination the host refuses and
             const first = try node.engine.dial(&remotes[0].transport.localAddress(), expected, now);
             const refused = try node.engine.dial(&refused_address, expected, now);
             const second = try node.engine.dial(&remotes[1].transport.localAddress(), remotes[1].transport.peerId(), now);
-            var events: [8]engine_mod.Event = undefined;
+            var events: [8]Engine.Event = undefined;
             // One Initial each: the IPv4 prefix goes out, the refused one ends only its connection
             // and the rest of the batch follows.
             const flushed = try support.step(node, io, &events, turn);
@@ -465,12 +465,12 @@ test "transport fails only the connection whose destination the host refuses and
             try std.testing.expectEqual(@as(usize, 1), retried.events);
             try std.testing.expectEqual(again, events[0].closed.conn);
             var connected: [2]bool = .{ false, false };
-            var remote_events: [8]engine_mod.Event = undefined;
+            var remote_events: [8]Engine.Event = undefined;
             for (0..200) |_| {
                 for (remotes) |*remote| _ = try support.step(&remote.transport, io, &remote_events, turn);
                 const progress = try support.step(node, io, &events, turn);
                 for (events[0..progress.events]) |event| if (event == .connected) {
-                    for ([_]engine_mod.Handle{ first, second }, &connected) |handle, *done| {
+                    for ([_]Engine.Handle{ first, second }, &connected) |handle, *done| {
                         if (std.meta.eql(event.connected.conn, handle)) done.* = true;
                     }
                 };
@@ -491,11 +491,11 @@ test "transport bounds each turn's receive drain without active connections" {
     defer source.close(std.testing.io);
     const destination = node.transport.localAddress();
     for (0..3) |_| try source.sendTo(std.testing.io, destination, &.{0}, constants.datagram_size_max);
-    var events: [4]engine_mod.Event = undefined;
+    var events: [4]Engine.Event = undefined;
     const result = try support.step(&node.transport, std.testing.io, &events, .{ .wait_max_ms = 10 });
     try std.testing.expectEqual(@as(u32, 2), result.datagrams_received);
     try std.testing.expectEqual(@as(u32, 2), result.datagrams_dropped);
-    try std.testing.expectEqual(@as(usize, 0), node.transport.engine.activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 0), node.transport.engine.registry.activeIndices().len);
     try std.testing.expect(!result.backlog);
     try std.testing.expect(node.transport.nextDeadlineNs() == null);
     const drained = try support.step(&node.transport, std.testing.io, &events, .{ .wait_max_ms = 0 });
@@ -520,7 +520,7 @@ test "transport drains dirty connections across small send budgets" {
             now,
         );
     }
-    var events: [4]engine_mod.Event = undefined;
+    var events: [4]Engine.Event = undefined;
     var sent: u32 = 0;
     var quiescent = false;
     for (0..16) |_| {
@@ -539,7 +539,7 @@ test "transport drains dirty connections across small send budgets" {
 }
 
 fn quietConnectedNodes(client: *Node, server: *Node) !void {
-    var events: [8]engine_mod.Event = undefined;
+    var events: [8]Engine.Event = undefined;
     for (0..128) |_| {
         const a = try support.step(&client.transport, std.testing.io, &events, .{ .wait_max_ms = 1 });
         const b = try support.step(&server.transport, std.testing.io, &events, .{ .wait_max_ms = 1 });
@@ -559,8 +559,8 @@ test "transport restarts a completed quiet scan after host writes and reads" {
     try server.init(20);
     defer server.deinit();
     const handle = try client.transport.dialPeer(std.testing.io, server.transport.localAddress(), server.transport.peerId());
-    var client_events: [8]engine_mod.Event = undefined;
-    var server_events: [8]engine_mod.Event = undefined;
+    var client_events: [8]Engine.Event = undefined;
+    var server_events: [8]Engine.Event = undefined;
     var connected = false;
     for (0..100) |_| {
         const counts = try stepBoth(&client, &server, &client_events, &server_events);
@@ -575,7 +575,7 @@ test "transport restarts a completed quiet scan after host writes and reads" {
     try std.testing.expect(!client.transport.engine.backlog());
     try std.testing.expectEqual(@as(usize, 6), try client.transport.engine.write(stream, "credit", false));
     try std.testing.expect(client.transport.engine.backlog());
-    var inbound: ?engine_mod.StreamHandle = null;
+    var inbound: ?Engine.StreamHandle = null;
     for (0..100) |_| {
         const counts = try stepBoth(&client, &server, &client_events, &server_events);
         for (server_events[0..counts.b]) |event| {
@@ -602,8 +602,8 @@ test "transport keys quiche's timer from a clock read after the flush so it neve
     try server.init(72);
     defer server.deinit();
     const handle = try client.transport.dialPeer(io, server.transport.localAddress(), server.transport.peerId());
-    var client_events: [8]engine_mod.Event = undefined;
-    var server_events: [8]engine_mod.Event = undefined;
+    var client_events: [8]Engine.Event = undefined;
+    var server_events: [8]Engine.Event = undefined;
     var connected = false;
     for (0..100) |_| {
         const counts = try stepBoth(&client, &server, &client_events, &server_events);
@@ -657,7 +657,7 @@ test "transport receive cancellation retains progress and events while deferring
     try sink.primary().send(std.testing.io, &node.transport.sockets.primary().address, "invalid");
     var faults: FaultIo = .{ .receive = .{ .at = 2 } };
     const io = faults.io();
-    var events: [4]engine_mod.Event = undefined;
+    var events: [4]Engine.Event = undefined;
     const result = node.transport.step(io, &events, .{ .wait_max_ms = 0 });
     try std.testing.expectEqual(error.Canceled, result.failure.?);
     try std.testing.expectEqual(@as(u32, 1), result.progress.datagrams_received);
@@ -680,7 +680,7 @@ test "transport progress early clock failure does not begin or publish a turn" {
     node.transport.engine.failSend(failed.index);
     var faults: FaultIo = .{ .clock = .{} };
     const io = faults.io();
-    var events: [4]engine_mod.Event = undefined;
+    var events: [4]Engine.Event = undefined;
     const result = node.transport.step(io, &events, .{ .wait_max_ms = 0 });
     try std.testing.expectEqual(error.ClockOutOfRange, result.failure.?);
     try std.testing.expectEqual(@as(u64, 0), result.progress.now.mono_ms);
@@ -720,7 +720,7 @@ const ReceiveClockFault = struct {
 test "transport bursts one busy connection among many idle ones in one flush visit" {
     const keys = @import("wire/keys.zig");
     const connections = 64;
-    const limits: engine_mod.Limits = .{
+    const limits: Engine.Limits = .{
         .connections_max = connections,
         .handshaking_max = connections,
         .handshaking_per_source_max = connections,
@@ -735,8 +735,8 @@ test "transport bursts one busy connection among many idle ones in one flush vis
     var spoke: transport_mod.Transport = .{};
     try spoke.init(std.testing.allocator, std.testing.io, .{ .host = &spoke_key, .bind = .{ .ip4 = .loopback(0) }, .limits = limits });
     defer spoke.deinit(std.testing.io);
-    var handles: [connections]engine_mod.Handle = undefined;
-    var events: [256]engine_mod.Event = undefined;
+    var handles: [connections]Engine.Handle = undefined;
+    var events: [256]Engine.Event = undefined;
     var dialed: usize = 0;
     var established: usize = 0;
     for (0..2_000) |_| {
@@ -827,7 +827,7 @@ test "transport drops a pressure suffix once and preserves every connection and 
         try node.init(122);
         defer node.deinit();
         const now = try transport_mod.currentTime(std.testing.io);
-        var handles: [3]engine_mod.Handle = undefined;
+        var handles: [3]Engine.Handle = undefined;
         for (&handles) |*handle| handle.* = try node.transport.engine.dial(&node.transport.localAddress(), node.transport.peerId(), now);
         Prefix.count = prefix;
         Prefix.calls = 0;
@@ -845,7 +845,7 @@ test "transport drops a pressure suffix once and preserves every connection and 
         try std.testing.expectEqual(@as(u64, 3 - prefix), node.transport.send_drops.datagrams[reason]);
         try std.testing.expectEqual(@as(u64, Prefix.dropped_bytes), node.transport.send_drops.bytes[reason]);
         try std.testing.expect(Prefix.dropped_bytes > 0);
-        for (handles) |handle| try std.testing.expectEqual(@as(?engine_mod.Handle, handle), node.transport.engine.sendOwner(handle.index));
+        for (handles) |handle| try std.testing.expectEqual(@as(?Engine.Handle, handle), node.transport.engine.sendOwner(handle.index));
         try std.testing.expect(node.transport.nextDeadlineNs().? > now.nanos());
         try std.testing.expect(!result.backlog);
         var idle: transport_mod.StepResult = .{ .now = now };
@@ -884,8 +884,8 @@ test "transport recovers a locally dropped first flight through QUIC loss recove
     try client.transport.flush(std.testing.io, after, &retransmitted);
     try std.testing.expect(retransmitted.datagrams_sent > 0);
     try std.testing.expectEqual(@as(u32, 0), retransmitted.send_failures);
-    var events_a: [8]engine_mod.Event = undefined;
-    var events_b: [8]engine_mod.Event = undefined;
+    var events_a: [8]Engine.Event = undefined;
+    var events_b: [8]Engine.Event = undefined;
     var connected = false;
     for (0..200) |_| {
         const progress = try stepBoth(&client, &server, &events_a, &events_b);
@@ -932,7 +932,7 @@ test "transport pressure drops later families with exact cumulative accounting" 
     defer node.deinit(std.testing.io);
     const now = try transport_mod.currentTime(std.testing.io);
     const local = node.sockets.localAddresses();
-    var owners: [3]engine_mod.Handle = undefined;
+    var owners: [3]Engine.Handle = undefined;
     for (&owners, [_]usize{ 0, 1, 0 }) |*owner, family| owner.* = try node.engine.dial(&local[family].?, node.peerId(), now);
     var faults: FaultIo = .{ .send = .{ .socket = node.sockets.values[1].?.handle }, .send_failure = error.SystemResources };
     var result: transport_mod.StepResult = .{ .now = now };
@@ -947,7 +947,7 @@ test "transport pressure drops later families with exact cumulative accounting" 
     try std.testing.expectEqual(@as(u64, 2), node.send_drops.datagrams[reason]);
     try std.testing.expectEqual(node.batch.outgoing[1].bytes.len + node.batch.outgoing[2].bytes.len, node.send_drops.bytes[reason]);
     for (owners) |owner| {
-        try std.testing.expectEqual(@as(?engine_mod.Handle, owner), node.engine.sendOwner(owner.index));
+        try std.testing.expectEqual(@as(?Engine.Handle, owner), node.engine.sendOwner(owner.index));
         try std.testing.expect(node.engine.registry.timers.get(owner.index) != null);
     }
     var idle: transport_mod.StepResult = .{ .now = now };
@@ -971,12 +971,12 @@ test "transport cancellation stops final and capacity flushes without failing ow
     for ([_]usize{ 3, 17 }) |count| {
         for ([_]usize{ 0, 1 }) |prefix| {
             const key = try @import("wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{123}));
-            const limits: engine_mod.Limits = .{ .connections_max = 20, .handshaking_max = 20, .dialing_max = 20, .outbound_max = 20 };
+            const limits: Engine.Limits = .{ .connections_max = 20, .handshaking_max = 20, .dialing_max = 20, .outbound_max = 20 };
             var node: transport_mod.Transport = .{};
             try node.init(std.testing.allocator, std.testing.io, .{ .host = &key, .bind = .{ .ip4 = .loopback(0) }, .limits = limits });
             defer node.deinit(std.testing.io);
             const now = try transport_mod.currentTime(std.testing.io);
-            var owners: [17]engine_mod.Handle = undefined;
+            var owners: [17]Engine.Handle = undefined;
             for (owners[0..count]) |*owner| owner.* = try node.engine.dial(&node.localAddress(), node.peerId(), now);
             var vtable = std.testing.io.vtable.*;
             vtable.netSend = Canceled.send;
@@ -993,7 +993,7 @@ test "transport cancellation stops final and capacity flushes without failing ow
             try std.testing.expectEqual(@as(u8, 0), node.batch_len);
             try std.testing.expectEqualDeep(udp_mod.Sockets.SendDrops{}, node.send_drops);
             for (owners[0..count]) |owner| {
-                try std.testing.expectEqual(@as(?engine_mod.Handle, owner), node.engine.sendOwner(owner.index));
+                try std.testing.expectEqual(@as(?Engine.Handle, owner), node.engine.sendOwner(owner.index));
                 try std.testing.expect(node.engine.registry.timers.get(owner.index) != null);
             }
             try std.testing.expectEqual(count > constants.send_batch_max, result.backlog);
@@ -1020,7 +1020,7 @@ test "transport canceled step retains accepted progress and canceled dial releas
     try std.testing.expectEqual(@as(u16, 0), node.transport.engine.registry.active_len);
     const now = try transport_mod.currentTime(std.testing.io);
     for (0..3) |_| _ = try node.transport.engine.dial(&node.transport.localAddress(), node.transport.peerId(), now);
-    var events: [8]engine_mod.Event = undefined;
+    var events: [8]Engine.Event = undefined;
     const result = node.transport.step(io, &events, .{ .wait_max_ms = 0 });
     try std.testing.expectEqual(error.Canceled, result.failure.?);
     try std.testing.expectEqual(@as(u32, 2), result.progress.datagrams_sent);
@@ -1038,8 +1038,8 @@ test "established transport survives canceled output and recovers its lost paylo
     try server.init(126);
     defer server.deinit();
     const handle = try client.transport.dialPeer(std.testing.io, server.transport.localAddress(), server.transport.peerId());
-    var client_events: [8]engine_mod.Event = undefined;
-    var server_events: [8]engine_mod.Event = undefined;
+    var client_events: [8]Engine.Event = undefined;
+    var server_events: [8]Engine.Event = undefined;
     var connected = false;
     for (0..200) |_| {
         const counts = try stepBoth(&client, &server, &client_events, &server_events);
@@ -1057,9 +1057,9 @@ test "established transport survives canceled output and recovers its lost paylo
     try std.testing.expectEqual(error.Canceled, stopped.failure.?);
     try std.testing.expectEqual(@as(usize, 1), fault.send_calls);
     try std.testing.expectEqual(@as(u32, 0), stopped.progress.send_failures);
-    try std.testing.expectEqual(@as(?engine_mod.Handle, handle), client.transport.engine.sendOwner(handle.index));
+    try std.testing.expectEqual(@as(?Engine.Handle, handle), client.transport.engine.sendOwner(handle.index));
     try std.testing.expectEqualDeep(udp_mod.Sockets.SendDrops{}, client.transport.send_drops);
-    var incoming: ?engine_mod.StreamHandle = null;
+    var incoming: ?Engine.StreamHandle = null;
     var recovered: [payload.len]u8 = undefined;
     var count: usize = 0;
     for (0..400) |_| {

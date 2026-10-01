@@ -4,7 +4,7 @@ const codec = @import("codec.zig");
 const protocol = @import("protocol.zig");
 const reqresp = @import("reqresp.zig");
 const harness = @import("test_pair.zig");
-const engine_mod = @import("../quic/engine.zig");
+const Engine = @import("../quic/Engine.zig");
 const multistream = @import("../wire/multistream.zig");
 const negotiate = @import("../router.zig");
 
@@ -478,12 +478,12 @@ test "reqresp answers a malformed request with an invalid request error" {
     try std.testing.expectEqualStrings("invalid request", decoder.payload());
 }
 
-const RawReply = fn (*Pair, engine_mod.StreamHandle) anyerror!void;
+const RawReply = fn (*Pair, Engine.StreamHandle) anyerror!void;
 
 fn pumpRawServer(setup: *Pair, comptime reply: RawReply) !usize {
     try setup.shared.pair.pump();
     const now = setup.shared.pair.now;
-    var storage: [16]engine_mod.Event = undefined;
+    var storage: [16]Engine.Event = undefined;
     for (setup.shared.pair.events(&setup.shared.pair.server, &storage)) |event| switch (event) {
         .stream_opened => |stream| try setup.shared.server.router.negotiator.acceptInbound(&setup.shared.pair.server, stream, now),
         else => {},
@@ -507,7 +507,7 @@ fn pumpRawServer(setup: *Pair, comptime reply: RawReply) !usize {
     return leftover;
 }
 
-fn replyMetadataEarly(setup: *Pair, stream: engine_mod.StreamHandle) !void {
+fn replyMetadataEarly(setup: *Pair, stream: Engine.StreamHandle) !void {
     var out: [256]u8 = undefined;
     const metadata = [_]u8{5} ** ct.altair.MetaDataV2.fixed_size;
     const chunk = try codec.encodeChunk(0, null, &metadata, &out);
@@ -990,7 +990,7 @@ test "reqresp negotiated handoff starts a fresh progress interval" {
     var ready = false;
     for (0..30) |_| {
         try setup.shared.pair.pump();
-        var storage: [16]engine_mod.Event = undefined;
+        var storage: [16]Engine.Event = undefined;
         setup.shared.server.router.transportEvents(&setup.shared.pair.server, setup.shared.pair.events(&setup.shared.pair.server, &storage), setup.shared.pair.now);
         var outcomes: [8]negotiate.Outcome = undefined;
         setup.forwardEvents();
@@ -1323,10 +1323,10 @@ test "reqresp request write preserves already readable native response" {
     const bytes = [_]u8{7} ** 8;
     var sink: [8]u8 = undefined;
     const handle = try setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .ping_v1, &bytes, &sink, .{}, setup.shared.pair.now);
-    var server_stream: ?engine_mod.StreamHandle = null;
+    var server_stream: ?Engine.StreamHandle = null;
     for (0..10) |_| {
         try setup.shared.pair.pump();
-        var native_events: [16]engine_mod.Event = undefined;
+        var native_events: [16]Engine.Event = undefined;
         for (setup.shared.pair.events(&setup.shared.pair.server, &native_events)) |event| switch (event) {
             .stream_opened => |stream| try setup.shared.server.router.negotiator.acceptInbound(&setup.shared.pair.server, stream, setup.shared.pair.now),
             else => {},
@@ -1522,7 +1522,7 @@ test "reqresp absolute request phase expires under real stream backpressure" {
     var negotiated = false;
     for (0..50) |_| {
         try setup.shared.pair.pump();
-        var storage: [16]engine_mod.Event = undefined;
+        var storage: [16]Engine.Event = undefined;
         for (setup.shared.pair.events(&setup.shared.pair.server, &storage)) |event| switch (event) {
             .stream_opened => |stream| try setup.shared.server.router.negotiator.acceptInbound(
                 &setup.shared.pair.server,

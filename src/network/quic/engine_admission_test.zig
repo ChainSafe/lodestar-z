@@ -1,13 +1,13 @@
 const std = @import("std");
 const constants = @import("../constants.zig");
-const engine_mod = @import("engine.zig");
+const Engine = @import("Engine.zig");
 const limits = @import("limits.zig");
 const support = @import("../test_support.zig");
 const types = @import("../types.zig");
 const keys = @import("../wire/keys.zig");
 const tls = @import("../tls/context.zig");
 
-const Event = engine_mod.Event;
+const Event = Engine.Event;
 const Pair = support.Pair;
 const client_address = support.client_address;
 const server_address = support.server_address;
@@ -16,14 +16,14 @@ const expectClosed = support.expectClosed;
 
 const client_ip6: types.Address = .{ .ip6 = .{ .octets = .{ 0x20, 1, 0xd, 0xb8 } ++ .{0} ** 11 ++ .{1}, .port = 4_001 } };
 const server_ip6: types.Address = .{ .ip6 = .{ .octets = .{0} ** 15 ++ .{1}, .port = 4_002 } };
-const admission_now: engine_mod.Now = .{ .mono_ms = 1_000, .unix_s = support.now_unix };
+const admission_now: Engine.Now = .{ .mono_ms = 1_000, .unix_s = support.now_unix };
 
-fn initAdmissionEngine(local: *const [2]?types.Address, seed: u8) !engine_mod.Engine {
+fn initAdmissionEngine(local: *const [2]?types.Address, seed: u8) !Engine {
     const key = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{seed}));
     var context = try tls.Context.init(&key, support.now_unix, @splat(seed));
     errdefer context.deinit();
 
-    return engine_mod.Engine.init(std.testing.allocator, .{
+    return Engine.init(std.testing.allocator, .{
         .tls = context,
         .local = local.*,
         .seed = &@as([32]u8, @splat(seed)),
@@ -31,7 +31,7 @@ fn initAdmissionEngine(local: *const [2]?types.Address, seed: u8) !engine_mod.En
     });
 }
 
-fn admitSource(server: *engine_mod.Engine, client: *engine_mod.Engine, source: *const types.Address) !engine_mod.Handle {
+fn admitSource(server: *Engine, client: *Engine, source: *const types.Address) !Engine.Handle {
     const destination = server.local[if (source.* == .ip4) @as(usize, 0) else 1].?;
     const handle = try client.dial(&destination, server.tls.local_peer_id, admission_now);
     var packet: [constants.datagram_size_max]u8 = undefined;
@@ -141,7 +141,7 @@ test "engine incoming handshakes and closing slots preserve selected outgoing ca
     defer pair.deinit();
     var packet: [constants.datagram_size_max]u8 = undefined;
     var response: [constants.datagram_size_max]u8 = undefined;
-    var incoming: [3]engine_mod.Handle = undefined;
+    var incoming: [3]Engine.Handle = undefined;
     for (&incoming) |*handle| {
         const received = pair.server.receive(try dialValidatedInitial(&pair, &packet), &client_address, pair.now, &response);
         try std.testing.expect(received == .accepted);
@@ -149,15 +149,15 @@ test "engine incoming handshakes and closing slots preserve selected outgoing ca
     }
     try std.testing.expectEqual(@as(u16, 3), pair.server.registry.active_len);
     const initial = try dialValidatedInitial(&pair, &packet);
-    try std.testing.expectEqual(engine_mod.ReceiveOutcome.dropped, pair.server.receive(initial, &client_address, pair.now, &response));
+    try std.testing.expectEqual(Engine.ReceiveOutcome.dropped, pair.server.receive(initial, &client_address, pair.now, &response));
     const selected = try pair.server.dial(&client_address, pair.client_ctx.local_peer_id, pair.now);
     try std.testing.expectEqual(@as(u16, 4), pair.server.registry.active_len);
     try std.testing.expect(pair.server.close(incoming[0], 0));
     try std.testing.expectEqual(@as(u16, 4), pair.server.registry.active_len);
-    try std.testing.expectEqual(engine_mod.ReceiveOutcome.dropped, pair.server.receive(initial, &client_address, pair.now, &response));
+    try std.testing.expectEqual(Engine.ReceiveOutcome.dropped, pair.server.receive(initial, &client_address, pair.now, &response));
     try std.testing.expect(pair.server.abandon(selected));
     try std.testing.expectEqual(@as(u16, 3), pair.server.registry.active_len);
-    try std.testing.expectEqual(engine_mod.ReceiveOutcome.dropped, pair.server.receive(initial, &client_address, pair.now, &response));
+    try std.testing.expectEqual(Engine.ReceiveOutcome.dropped, pair.server.receive(initial, &client_address, pair.now, &response));
     _ = try pair.server.dial(&client_address, pair.client_ctx.local_peer_id, pair.now);
 }
 
@@ -177,10 +177,10 @@ test "engine routes existing streams and replayed Initials while source admissio
     );
     try std.testing.expect(pending == .accepted);
     try std.testing.expectEqual(@as(u16, 1), pair.server.registry.handshaking);
-    try std.testing.expectEqual(@as(usize, 2), pair.server.activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 2), pair.server.registry.activeIndices().len);
 
     const random_before_refusal = pair.server.csprng;
-    try std.testing.expectEqual(engine_mod.ReceiveOutcome.dropped, pair.server.receive(
+    try std.testing.expectEqual(Engine.ReceiveOutcome.dropped, pair.server.receive(
         try dialInitial(&pair, &packet),
         &client_address,
         pair.now,
@@ -188,7 +188,7 @@ test "engine routes existing streams and replayed Initials while source admissio
     ));
     try std.testing.expectEqualDeep(random_before_refusal, pair.server.csprng);
     try std.testing.expectEqual(@as(u16, 1), pair.server.registry.handshaking);
-    try std.testing.expectEqual(@as(usize, 2), pair.server.activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 2), pair.server.registry.activeIndices().len);
 
     var replay: [constants.datagram_size_max]u8 = undefined;
     @memcpy(replay[0..pair.first_initial_len], pair.first_initial[0..pair.first_initial_len]);
@@ -212,7 +212,7 @@ test "engine routes existing streams and replayed Initials while source admissio
     const received = try pair.server.read(inbound, &buffer);
     try std.testing.expectEqualStrings("hello", buffer[0..received.len]);
     try std.testing.expectEqual(@as(u16, 1), pair.server.registry.handshaking);
-    try std.testing.expectEqual(@as(usize, 2), pair.server.activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 2), pair.server.registry.activeIndices().len);
 }
 
 test "engine bounds concurrent dials and outbound connections" {
@@ -236,7 +236,7 @@ test "engine bounds concurrent dials and outbound connections" {
 
     _ = pair.client.close(third, 0);
     try pair.pump();
-    var storage: [16]engine_mod.Event = undefined;
+    var storage: [16]Engine.Event = undefined;
     _ = pair.events(&pair.client, &storage);
     try std.testing.expectEqual(@as(u16, 2), pair.client.registry.outbound);
     _ = try pair.dial();
@@ -252,7 +252,7 @@ test "engine drops new handshakes when the server table is full" {
 
     const second = try pair.dial();
     try pair.pump();
-    try std.testing.expectEqual(@as(usize, 1), pair.server.activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 1), pair.server.registry.activeIndices().len);
     pair.advance(100);
     try pair.pump();
 
@@ -260,7 +260,7 @@ test "engine drops new handshakes when the server table is full" {
     const client_events = pair.events(&pair.client, &storage);
     try std.testing.expectEqual(@as(usize, 1), client_events.len);
     try std.testing.expectEqual(
-        engine_mod.CloseReason.handshake_timeout,
+        Engine.CloseReason.handshake_timeout,
         try expectClosed(client_events[0], second, .outbound, null),
     );
     try std.testing.expectError(error.TableFull, pair.server.dial(
@@ -320,7 +320,7 @@ test "engine caps inbound handshakes per source address" {
 
 test "engine startup seeds reproducible independent connection IDs and Retry keys" {
     var pair: Pair = .{};
-    const bounded: engine_mod.Limits = .{ .connections_max = 4, .handshaking_max = 4, .outbound_max = 4 };
+    const bounded: Engine.Limits = .{ .connections_max = 4, .handshaking_max = 4, .outbound_max = 4 };
     try pair.init(bounded, bounded);
     defer pair.deinit();
     var repeated: Pair = .{};
@@ -358,7 +358,7 @@ test "engine drops version negotiation packets instead of reflecting them" {
 
     var response: [constants.datagram_size_max]u8 = undefined;
     try std.testing.expectEqual(
-        engine_mod.ReceiveOutcome.dropped,
+        Engine.ReceiveOutcome.dropped,
         pair.server.receive(
             &packet,
             &client_address,
@@ -397,7 +397,7 @@ test "engine answers unsupported versions and drops unroutable packets" {
     }
 
     var short = [_]u8{0x40} ++ [_]u8{0xcc} ** limits.local_cid_length ++ [_]u8{0} ** 20;
-    try std.testing.expectEqual(engine_mod.ReceiveOutcome.dropped, pair.server.receive(
+    try std.testing.expectEqual(Engine.ReceiveOutcome.dropped, pair.server.receive(
         &short,
         &client_address,
         pair.now,
@@ -405,7 +405,7 @@ test "engine answers unsupported versions and drops unroutable packets" {
     ));
 
     var tiny = [_]u8{ 0xc3, 0, 0, 0, 1, 0x08 } ++ [_]u8{0xaa} ** 8 ++ [_]u8{0x04} ++ [_]u8{0xbb} ** 4 ++ [_]u8{0x00};
-    try std.testing.expectEqual(engine_mod.ReceiveOutcome.dropped, pair.server.receive(
+    try std.testing.expectEqual(Engine.ReceiveOutcome.dropped, pair.server.receive(
         &tiny,
         &client_address,
         pair.now,
@@ -473,7 +473,7 @@ test "engine resolved memory plan reports budgeted receive windows" {
 }
 
 test "engine rejects native timeout overflow" {
-    const invalid = [_]engine_mod.Limits{
+    const invalid = [_]Engine.Limits{
         .{ .idle_timeout_ms = std.math.maxInt(u64) },
     };
     for (invalid) |options| {
@@ -513,7 +513,7 @@ test "engine outgoing descriptor preserves native monotonic pacing timestamp" {
 }
 
 fn allocateRegistry(allocator: std.mem.Allocator) !void {
-    var registry = try @import("registry.zig").Registry.init(allocator, 4, 42);
+    var registry = try @import("Registry.zig").init(allocator, 4, 42);
     defer registry.deinit(allocator);
 }
 

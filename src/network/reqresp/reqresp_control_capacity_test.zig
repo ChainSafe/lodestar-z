@@ -20,7 +20,7 @@ test "reqresp blocked control writers leave other admitted identities able to se
     const now: @import("../types.zig").Now = .{ .mono_ms = 1, .unix_s = 0 };
     const metadata: [16]u8 = @splat(0);
     for (requests.inbound[0..200], 0..) |*slot, index| {
-        const conn: engine_mod.Handle = .{ .index = @intCast(index), .generation = 1 };
+        const conn: Engine.Handle = .{ .index = @intCast(index), .generation = 1 };
         slot.request = .{ .direction = .inbound, .completion = .active, .generation = 1, .conn = conn, .protocol = .metadata_v1 };
         slot.identity = .{ .bytes = @splat(@as(u8, @intCast(index))) };
         slot.state = .ready;
@@ -360,13 +360,13 @@ test "reqresp control capacity bounds application requests per peer across proto
 }
 
 const service_mod = @import("../service.zig");
-const engine_mod = @import("../quic/engine.zig");
+const Engine = @import("../quic/Engine.zig");
 
-fn inboundStream(pair: *support.Pair, conn: engine_mod.Handle) !engine_mod.StreamHandle {
+fn inboundStream(pair: *support.Pair, conn: Engine.Handle) !Engine.StreamHandle {
     const stream = try pair.client.openStream(conn);
     try std.testing.expectEqual(1, try pair.client.write(stream, &.{0}, false));
     try pair.pump();
-    var events: [16]engine_mod.Event = undefined;
+    var events: [16]Engine.Event = undefined;
     for (pair.events(&pair.server, &events)) |event| {
         if (event == .stream_opened) return event.stream_opened;
     }
@@ -516,7 +516,7 @@ test "reqresp control capacity zero defaults retain all ordinary slots and admis
         requests.shutdown(&pair.client, &router);
         std.testing.allocator.free(sinks);
     }
-    const dead = engine_mod.Handle{
+    const dead = Engine.Handle{
         .index = handles.client.index,
         .generation = handles.client.generation + 1,
     };

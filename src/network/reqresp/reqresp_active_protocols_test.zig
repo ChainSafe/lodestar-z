@@ -162,7 +162,7 @@ test "reqresp active hostile coalesced context rejects before sink writes with o
             @memset(sink, 0xaa);
             _ = try request(&setup, .light_client_optimistic_update_v1, "", sink, .{});
             const bytes = [_]u8{0} ++ case[0].digest ++ [_]u8{ 1, 0xff, 6, 0, 0 };
-            var stream: ?@import("../quic/engine.zig").StreamHandle = null;
+            var stream: ?@import("../quic/Engine.zig").StreamHandle = null;
             var sent_suffix = false;
             var failed = false;
             for (0..40) |_| {
@@ -582,7 +582,7 @@ fn changeClientIdentity(setup: *harness.Pair, seed: u8) !void {
     const support = @import("../test_support.zig");
     const keys = @import("../wire/keys.zig");
     const tls = @import("../tls/context.zig");
-    const Engine = @import("../quic/engine.zig").Engine;
+    const Engine = @import("../quic/Engine.zig");
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{seed}));
     const ctx = try tls.Context.init(&key, support.now_unix, @splat(seed));
     const replacement = Engine.init(std.testing.allocator, .{

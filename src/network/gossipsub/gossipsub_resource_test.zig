@@ -13,7 +13,7 @@ test "gossip validation finishes without allocation while shared deliveries are 
     const topic = g.overlay.findTopic(name).?;
     const message = g.messages.publish(@splat(1), name, "retained", 0, 0).?;
     for (0..3) |i| {
-        const conn: @import("../quic/engine.zig").Handle = .{ .index = @intCast(i), .generation = 1 };
+        const conn: @import("../quic/Engine.zig").Handle = .{ .index = @intCast(i), .generation = 1 };
         const session = support.addPeer(&g, conn, .v1_2).?;
         g.sessions.rows[session.index].outbound = .{ .live = .{ .stream = .{ .conn = conn, .id = 2, .slot = 0 }, .version = .v1_2 } };
         g.overlay.rows[topic].mesh.set(i);

@@ -9,7 +9,7 @@ const values = @import("control_values.zig");
 const wire = @import("control_wire.zig");
 const rr = @import("reqresp/root.zig");
 const Router = @import("router.zig").Router;
-const Engine = @import("quic/engine.zig").Engine;
+const Engine = @import("quic/Engine.zig");
 const Now = @import("types.zig").Now;
 const assert = std.debug.assert;
 /// An `operation_by_peer` entry with no request in flight.

@@ -3,7 +3,7 @@ const d = @import("discv5");
 const manager = @import("peer_manager.zig");
 const service_mod = @import("service.zig");
 const transport_mod = @import("transport.zig");
-const engine = @import("quic/engine.zig");
+const Engine = @import("quic/Engine.zig");
 const t = @import("peers/types.zig");
 const peers = @import("peers/root.zig");
 const rr = @import("reqresp/root.zig");
@@ -107,7 +107,7 @@ pub const NetworkCore = struct {
     control_protocol: ControlProtocol,
     service: service_mod.Service,
     discovery: ?*peers.Discovery,
-    native_events: []engine.Event,
+    native_events: []Engine.Event,
     native_event_count: usize = 0,
     local_intent_workspace: *gossip.local_intent.Workspace,
     schedule: ForkSchedule,
@@ -177,7 +177,7 @@ pub const NetworkCore = struct {
         errdefer self.control_protocol.deinit(allocator);
         self.peer_manager.loadRemembered(startup.remembered, self.last_now);
         self.service.gossipsub.clock = io;
-        self.native_events = try allocator.alloc(engine.Event, @import("quic/limits.zig").events_per_turn_max);
+        self.native_events = try allocator.alloc(Engine.Event, @import("quic/limits.zig").events_per_turn_max);
         errdefer allocator.free(self.native_events);
         self.local_intent_workspace = try allocator.create(gossip.local_intent.Workspace);
         errdefer allocator.destroy(self.local_intent_workspace);
@@ -316,7 +316,7 @@ pub const NetworkCore = struct {
         return self.service.gossipsub.report(handle, verdict, now);
     }
     /// Borrows the last step's authenticated transport events until the next step.
-    pub fn transportEvents(self: *const NetworkCore) []const engine.Event {
+    pub fn transportEvents(self: *const NetworkCore) []const Engine.Event {
         return self.native_events[0..self.native_event_count];
     }
     pub fn completeSnapshots(self: *const NetworkCore, out: []t.Snapshot) error{OutputTooSmall}!usize {
@@ -630,7 +630,7 @@ pub const NetworkCore = struct {
     /// control results, runs due control maintenance, then advances custody and selection.
     /// Application borrows stay valid until the next turn; closes after publication clean up
     /// without a second recycling pass.
-    fn process(self: *NetworkCore, events: []const engine.Event, now: Now, outputs: Outputs) Counts {
+    fn process(self: *NetworkCore, events: []const Engine.Event, now: Now, outputs: Outputs) Counts {
         std.debug.assert(events.len <= @import("quic/limits.zig").events_per_turn_max);
         const pm = &self.peer_manager;
         const quic = &self.transport.engine;
@@ -671,7 +671,7 @@ pub const NetworkCore = struct {
         };
     }
 
-    fn transportEvent(self: *NetworkCore, event: *const engine.Event, now: Now) void {
+    fn transportEvent(self: *NetworkCore, event: *const Engine.Event, now: Now) void {
         const pm = &self.peer_manager;
         const quic = &self.transport.engine;
         switch (event.*) {

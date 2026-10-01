@@ -1,5 +1,5 @@
 const std = @import("std");
-const engine_mod = @import("../quic/engine.zig");
+const Engine = @import("../quic/Engine.zig");
 const routing = @import("../router.zig");
 const sessions_mod = @import("sessions.zig");
 const types = @import("../types.zig");
@@ -11,10 +11,9 @@ const PeerIo = peer_io_mod.PeerIo;
 const Version = sessions_mod.Version;
 const assert = std.debug.assert;
 
-const Engine = engine_mod.Engine;
-const Handle = engine_mod.Handle;
-const StreamHandle = engine_mod.StreamHandle;
-const TransportEvent = engine_mod.Event;
+const Handle = Engine.Handle;
+const StreamHandle = Engine.StreamHandle;
+const TransportEvent = Engine.Event;
 const Now = types.Now;
 const index_list = @import("../index_list.zig");
 const Gossipsub = gossipsub_mod.Gossipsub;

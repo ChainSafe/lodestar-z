@@ -1,11 +1,10 @@
 const std = @import("std");
 const binding = @import("binding.zig");
-const engine_mod = @import("engine.zig");
+const Engine = @import("Engine.zig");
 const limits = @import("limits.zig");
 const support = @import("../test_support.zig");
 
-const Engine = engine_mod.Engine;
-const Event = engine_mod.Event;
+const Event = Engine.Event;
 const Pair = support.Pair;
 const client_address = support.client_address;
 const server_address = support.server_address;
@@ -17,16 +16,16 @@ const expectStreamClosed = support.expectStreamClosed;
 test "engine stream errors leak no quiche or openssl member" {
     comptime {
         const leaked = [_][]const u8{ "Done", "OpenSslFailed", "TlsFail", "CryptoFail", "Unknown" };
-        for (@typeInfo(engine_mod.StreamError).error_set.?) |member| {
+        for (@typeInfo(Engine.StreamError).error_set.?) |member| {
             for (leaked) |name| std.debug.assert(!std.mem.eql(u8, member.name, name));
         }
-        std.debug.assert(@typeInfo(engine_mod.StreamError).error_set.?.len == 8);
-        std.debug.assert(@typeInfo(engine_mod.DialError).error_set.?.len == 4);
+        std.debug.assert(@typeInfo(Engine.StreamError).error_set.?.len == 8);
+        std.debug.assert(@typeInfo(Engine.DialError).error_set.?.len == 4);
         for (@typeInfo(binding.Error).error_set.?) |member| {
             std.debug.assert(!std.mem.eql(u8, member.name, "Done"));
         }
     }
-    try std.testing.expect(@typeInfo(engine_mod.StreamError).error_set != null);
+    try std.testing.expect(@typeInfo(Engine.StreamError).error_set != null);
 }
 
 test "engine reports a stopped write as a stream close carrying the peer's code" {
@@ -38,7 +37,7 @@ test "engine reports a stopped write as a stream close carrying the peer's code"
     const stream = try pair.client.openStream(handles.client);
     try std.testing.expectEqual(@as(usize, 1), try pair.client.write(stream, "x", true));
     try pair.pump();
-    var storage: [8]@import("engine.zig").Event = undefined;
+    var storage: [8]@import("Engine.zig").Event = undefined;
     const inbound = try support.expectStreamOpened(pair.events(&pair.server, &storage)[0], handles.server);
     var buffer: [8]u8 = undefined;
     const read = try pair.server.read(inbound, &buffer);
@@ -66,7 +65,7 @@ test "engine reports a stopped write on a stream that is still readable" {
     const stream = try pair.client.openStream(handles.client);
     try std.testing.expectEqual(@as(usize, 1), try pair.client.write(stream, "x", false));
     try pair.pump();
-    var storage: [8]@import("engine.zig").Event = undefined;
+    var storage: [8]@import("Engine.zig").Event = undefined;
     const inbound = try support.expectStreamOpened(pair.events(&pair.server, &storage)[0], handles.server);
     pair.client.shutdown(stream, .read, 7);
     try pair.pump();
@@ -135,7 +134,7 @@ test "engine server can open a stream toward the client" {
     try std.testing.expectError(error.StreamStopped, pair.server.write(stream, "more", false));
 }
 
-fn activePeerStreams(engine: *const Engine, handle: engine_mod.Handle) usize {
+fn activePeerStreams(engine: *const Engine, handle: Engine.Handle) usize {
     var count: usize = 0;
     const peer_half = engine.registry.slots[handle.index].table.entries[limits.streams_per_connection / 2 ..];
     for (peer_half) |*entry| {
@@ -523,7 +522,7 @@ test "engine immediate host close before collect preserves peer stream claims" {
     try pair.pump();
     const closed = pair.events(&pair.server, &storage);
     try std.testing.expectEqual(@as(usize, 1), closed.len);
-    try std.testing.expectEqual(engine_mod.CloseReason.host, try expectClosed(closed[0], handles.server, .inbound, &pair.client_ctx));
+    try std.testing.expectEqual(Engine.CloseReason.host, try expectClosed(closed[0], handles.server, .inbound, &pair.client_ctx));
     var buffer: [8]u8 = undefined;
     const read = try pair.server.read(inbound, &buffer);
     try std.testing.expectEqualStrings("last", buffer[0..read.len]);
