@@ -649,22 +649,21 @@ test "core fails a dial the host refuses without failing the turn or penalizing 
     const peer = t.PeerId.fromPublicKey(&remote.publicKey());
     try node.connectUntil(&peer, &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 19003 } }}, now, now.mono_ms +| @import("peers/dialing.zig").connect_timeout_ms);
     const Refused = struct {
-        installed: bool = false,
+        installation: @import("udp").testing.Seccomp.Installation = undefined,
         result: runtime.Result = undefined,
 
         /// The owner turn polls natively and starts no Io task on the filtered thread.
         fn run(self: *@This(), core: *runtime.NetworkCore, at: Now) void {
             const filter = @import("udp").testing.SendFilter;
-            if (!filter.install(&.{.{ .socket = core.transport.sockets.primary().handle, .errno = .PERM }})) return;
-            self.installed = true;
+            self.installation = filter.install(&.{.{ .socket = core.transport.sockets.primary().handle, .errno = .PERM }});
+            if (self.installation != .installed) return;
             self.result = core.step(std.testing.io, at, .{}, .deadlineOnly(at.mono_ms));
         }
     };
     var refused: Refused = .{};
     const thread = try std.Thread.spawn(.{}, Refused.run, .{ &refused, &node, now });
     thread.join();
-    // Kernels without seccomp filters cannot refuse the send.
-    if (!refused.installed) return error.SkipZigTest;
+    try refused.installation.require();
     try std.testing.expect(refused.result.failure == null);
     try std.testing.expectEqual(@as(u8, 1), refused.result.dial_failed);
     try std.testing.expectEqual(@as(u8, 0), refused.result.dial_deferred);
