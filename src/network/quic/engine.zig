@@ -8,7 +8,6 @@ const retry = @import("retry.zig");
 const peer_id = @import("../wire/peer_id.zig");
 const tls = @import("../tls/context.zig");
 const types = @import("../types.zig");
-const StreamTable = @import("stream_table.zig").StreamTable;
 
 const assert = std.debug.assert;
 const c = binding.c;
@@ -322,7 +321,7 @@ pub const Engine = struct {
     pub fn close(self: *Engine, conn: Handle, code: u64) bool {
         const slot = self.liveSlot(conn) catch return false;
         assert(slot.conn != null);
-        assert(slot.close_reason == null);
+        assert(slot.closing == .none);
         if (slot.flight_pending) slot.deferClose(.host, code) else slot.close(.host, code);
         self.markDirty(conn.index);
         return true;
@@ -345,6 +344,15 @@ pub const Engine = struct {
         assert(self.registry.active_len > 0);
         self.retire(conn.index);
         return true;
+    }
+
+    /// Includes handshakes not yet admitted to the peer catalog. Retirement can reorder the
+    /// active list, so walk the bounded slot storage rather than that list.
+    pub fn shutdownAll(self: *Engine) void {
+        for (self.registry.slots, 0..) |*slot, index| {
+            const handle: Handle = .{ .index = @intCast(index), .generation = slot.generation };
+            if (!self.abandon(handle)) _ = self.close(handle, 0);
+        }
     }
 
     pub fn peerId(self: *const Engine, conn: Handle) ?peer_id.PeerId {
@@ -396,17 +404,9 @@ pub const Engine = struct {
     /// A read that reaches Done ends the delivered readable edge.
     pub fn read(self: *Engine, stream: StreamHandle, buf: []u8) StreamError!Read {
         const target = try self.readableStream(stream);
-        assert(target.slot.table.matches(target.index, target.id));
-        defer self.noteEvents(stream.conn.index);
-        const result = target.slot.read(target.index, target.id, buf) catch |err|
-            return streamError(err);
-        assert(result.len <= buf.len);
-        if (result.len > 0) assert(result.reset_code == null);
-        if (result.len > 0 or result.fin or result.reset_code != null) self.markLiveDirty(stream.conn.index);
-        if ((result.len == 0 or result.fin) and target.slot.table.matches(target.index, target.id)) {
-            target.slot.table.readDone(target.index);
-        }
-        return result;
+        var effects: connection.Effects = .{};
+        defer self.streamEffects(stream.conn.index, effects);
+        return target.slot.read(target.index, target.id, buf, &effects) catch |err| return streamError(err);
     }
 
     /// Names the owner that now holds the stream. The engine never interprets the route; it
@@ -414,7 +414,7 @@ pub const Engine = struct {
     pub fn bindStream(self: *Engine, stream: StreamHandle, owner: Route) StreamError!void {
         const target = try self.readableStream(stream);
         assert(target.slot.table.matches(target.index, target.id));
-        target.slot.table.entries[target.index].route = owner;
+        target.slot.table.bind(target.index, owner);
     }
 
     /// The owner bound to a live stream, or null when the handle is stale. O(1).
@@ -438,7 +438,7 @@ pub const Engine = struct {
     pub fn streamWaits(self: *const Engine, stream: StreamHandle) ?StreamWaits {
         if (self.route(stream) == null) return null;
         const slot = &self.registry.slots[stream.conn.index];
-        if (slot.state != .established or slot.pending_close != null or slot.close_reason != null) return null;
+        if (slot.state != .established or slot.closing != .none) return null;
         const entry = &slot.table.entries[stream.slot];
         return .{
             .read_open = slot.table.readOpen(stream.slot),
@@ -448,7 +448,7 @@ pub const Engine = struct {
 
     pub fn streamReadable(self: *Engine, stream: StreamHandle) StreamError!bool {
         const target = try self.readableStream(stream);
-        return binding.c.quiche_conn_stream_readable(target.slot.conn.?, target.id);
+        return target.slot.streamReadable(target.index, target.id);
     }
 
     /// Marks the connection dirty only when bytes were accepted or a FIN was queued. A WouldBlock
@@ -456,44 +456,17 @@ pub const Engine = struct {
     /// ceiling); a writable event follows once the stream's send capacity reaches it. Arming may
     /// queue a blocked frame, so it marks the connection dirty; a repeated WouldBlock at the same
     /// watermark marks nothing.
-    pub fn write(
-        self: *Engine,
-        stream: StreamHandle,
-        bytes: []const u8,
-        fin: bool,
-    ) StreamError!usize {
+    pub fn write(self: *Engine, stream: StreamHandle, bytes: []const u8, fin: bool) StreamError!usize {
         const target = try self.liveStream(stream);
-        assert(target.slot.table.matches(target.index, target.id));
-        const index = stream.conn.index;
-        defer self.noteEvents(index);
-        const written = target.slot.write(target.index, target.id, bytes, fin) catch |err| {
-            if (err == error.WouldBlock) {
-                self.armWrite(index, target, bytes.len);
-            } else if (target.slot.table.matches(target.index, target.id)) {
-                target.slot.table.disarm(target.index);
-            }
-            return streamError(err);
-        };
-        assert(written <= bytes.len);
-        if (written > 0 or (fin and written == bytes.len)) self.markDirty(index);
-        if (!target.slot.table.matches(target.index, target.id)) return written;
-        if (written < bytes.len) {
-            self.armWrite(index, target, bytes.len - written);
-        } else target.slot.table.disarm(target.index);
-        return written;
+        var effects: connection.Effects = .{};
+        defer self.streamEffects(stream.conn.index, effects);
+        return target.slot.write(target.index, target.id, bytes, fin, &effects) catch |err| return streamError(err);
     }
 
-    fn armWrite(self: *Engine, index: u16, target: Stream, wanted: usize) void {
-        assert(target.slot.table.matches(target.index, target.id));
-        const lowat: u32 = @intCast(@min(wanted, target.slot.write_lowat_ceiling));
-        if (lowat == 0) return;
-        const entry = &target.slot.table.entries[target.index];
-        if (entry.write_lowat == lowat) return;
-        target.slot.table.arm(target.index, lowat);
-        self.markDirty(index);
-        const rc = c.quiche_conn_stream_writable(target.slot.conn.?, target.id, lowat);
-        // Already writable, stopped or finished: the owner learns which on its next write.
-        if (rc != 0) target.slot.table.markReady(target.index, .{ .writable = true });
+    fn streamEffects(self: *Engine, index: u16, effects: connection.Effects) void {
+        if (effects.dirty) self.markLiveDirty(index);
+        if (effects.collect) self.markCollect(index);
+        self.noteEvents(index);
     }
 
     pub fn streamCapacity(self: *Engine, stream: StreamHandle) StreamError!usize {
@@ -508,29 +481,12 @@ pub const Engine = struct {
 
     pub fn shutdown(self: *Engine, stream: StreamHandle, dir: ShutdownDirection, code: u64) void {
         const target = self.liveStream(stream) catch return;
-        assert(target.index < limits.streams_per_connection);
-        assert(target.slot.conn != null);
-        if (dir == .write) target.slot.table.disarm(target.index);
-        target.slot.shutdown(target.index, target.id, dir, code);
-        self.markDirty(stream.conn.index);
-        self.recheckWriters(stream.conn.index);
-        self.noteEvents(stream.conn.index);
+        self.streamEffects(stream.conn.index, target.slot.shutdown(target.index, target.id, dir, code));
     }
 
     pub fn closeStream(self: *Engine, stream: StreamHandle, code: u64) void {
         const target = self.liveStream(stream) catch return;
-        assert(target.index < limits.streams_per_connection);
-        assert(target.slot.conn != null);
-        target.slot.closeStream(target.index, target.id, code);
-        self.markDirty(stream.conn.index);
-        self.recheckWriters(stream.conn.index);
-        self.noteEvents(stream.conn.index);
-    }
-
-    /// A local reset recomputes quiche's connection send capacity, so blocked writers on the
-    /// connection are checked again at the next collect.
-    fn recheckWriters(self: *Engine, index: u16) void {
-        if (self.registry.slots[index].table.armed != 0) self.markCollect(index);
+        self.streamEffects(stream.conn.index, target.slot.closeStream(target.index, target.id, code));
     }
 
     /// Drains connections with undelivered events in FIFO order. A connection whose events do
@@ -619,7 +575,7 @@ pub const Engine = struct {
                 .conn = conn,
                 .peer_id = slot.peer_id,
                 .direction = slot.direction,
-                .reason = slot.close_reason.?,
+                .reason = slot.closing.started,
             } };
             count += 1;
             slot.close_event = .reported;
@@ -778,22 +734,19 @@ pub const Engine = struct {
             slot.onTimeout();
             self.visits.timeouts +|= 1;
         };
-        if (slot.state == .handshaking and slot.close_reason == null and
+        if (slot.state == .handshaking and slot.closing == .none and
             now.mono_ms -| slot.created_ms >= self.handshakeLimitMs(slot))
         {
             const unanswered = slot.direction == .outbound and !slot.answered;
             slot.close(if (unanswered) .dial_unanswered else .handshake_timeout, types.app_error_handshake_timeout);
         }
-        if (slot.state == .established and slot.close_reason == null and
+        if (slot.state == .established and slot.closing == .none and
             now.mono_ms -| slot.last_send_ms >= self.limits.keep_alive_ms and
             slot.keepAlive())
         {
             slot.last_send_ms = now.mono_ms;
         }
-        if (slot.pending_close) |pending| if (!slot.flight_pending) {
-            slot.pending_close = null;
-            slot.close(pending.reason, pending.code);
-        };
+        slot.closeAfterFlight();
         self.refresh(index);
         self.observePath(index);
         self.touched(index, now);
@@ -811,68 +764,10 @@ pub const Engine = struct {
             const slot = &slots[index];
             if (slot.state != .handshaking and slot.state != .established) continue;
             self.refresh(index);
-            if (slot.state == .established and slot.pending_close == null) {
-                self.gatherReadable(index);
-                self.gatherWritable(index);
-            }
+            slot.collectStreams();
             self.observePath(index);
             self.rekey(index, now);
             self.noteEvents(index);
-        }
-    }
-
-    /// Drains quiche's readable edges and claims new peer streams.
-    fn gatherReadable(self: *Engine, index: u16) void {
-        const slot = &self.registry.slots[index];
-        const conn = slot.conn.?;
-        for (0..limits.streams_per_connection) |_| {
-            const next = c.quiche_conn_stream_readable_next(conn);
-            if (next < 0) break;
-            const id: u64 = @intCast(next);
-            if (slot.table.find(id)) |entry_index| {
-                slot.table.markReady(entry_index, .{ .readable = true });
-                continue;
-            }
-            if (!StreamTable.isPeerInitiated(slot.direction, id)) continue;
-            if (slot.table.claimPeer(id) == null) {
-                slot.shutdownRaw(id, .read, types.app_error_stream_table_full);
-                slot.shutdownRaw(id, .write, types.app_error_stream_table_full);
-            }
-        }
-    }
-
-    /// Drains quiche's writable edges. A stream with write interest is reported, and so is one
-    /// the peer stopped: quiche frees a stopped stream once it leaves the writable set and its
-    /// reset is acknowledged, so the stop code is taken here for the owner's next write. Other
-    /// edges (a new stream, credit for a stream that was not blocked) concern no owner. quiche
-    /// does not re-arm a stream whose credit exactly equals its watermark, so armed streams are
-    /// also checked against it.
-    fn gatherWritable(self: *Engine, index: u16) void {
-        const slot = &self.registry.slots[index];
-        const conn = slot.conn.?;
-        for (0..limits.streams_per_connection) |_| {
-            const next = c.quiche_conn_stream_writable_next(conn);
-            if (next < 0) break;
-            const id: u64 = @intCast(next);
-            const entry_index = slot.table.find(id) orelse continue;
-            if (!slot.table.matches(entry_index, id)) continue;
-            const entry = &slot.table.entries[entry_index];
-            if (!entry.stopped and !entry.fin_sent) if (slot.stopCode(id)) |code| {
-                entry.stopped = true;
-                entry.reset_code = code;
-                slot.table.markReady(entry_index, .{ .writable = true });
-                continue;
-            };
-            if (entry.write_lowat > 0) slot.table.markReady(entry_index, .{ .writable = true });
-        }
-        var armed = slot.table.armed;
-        for (0..limits.streams_per_connection) |_| {
-            if (armed == 0) break;
-            const entry_index: u8 = @intCast(@ctz(armed));
-            armed &= armed - 1;
-            const entry = &slot.table.entries[entry_index];
-            const available = c.quiche_conn_stream_capacity(conn, entry.id);
-            if (available < 0 or available >= entry.write_lowat) slot.table.markReady(entry_index, .{ .writable = true });
         }
     }
 
@@ -941,14 +836,14 @@ pub const Engine = struct {
             const key = self.registry.timers.get(index);
             assert((key == null) == (self.deadlineNs(index, now) == null));
             if (key) |deadline| {
-                if (slot.close_reason == null) {
+                if (slot.closing == .none) {
                     const due_ms = if (slot.state == .handshaking)
                         slot.created_ms +| self.handshakeLimitMs(slot)
                     else
                         slot.last_send_ms +| self.limits.keep_alive_ms;
                     assert(deadline <= due_ms *| std.time.ns_per_ms);
                 }
-                if (slot.pending_close != null and !slot.flight_pending) assert(deadline <= now.nanos());
+                if (slot.closing == .after_flight and !slot.flight_pending) assert(deadline <= now.nanos());
                 // quiche reads its own clock, so its timer is comparable only with a real clock,
                 // and only up to the time this turn has run since its clock read.
                 if (now.mono_ns != null) if (slot.timeoutNs()) |remaining| {
@@ -961,32 +856,8 @@ pub const Engine = struct {
                 const rc = binding.connSend(slot.conn.?, &scratch, &info);
                 assert(rc == c.QUICHE_ERR_DONE);
             }
-            if (slot.collect_link.linked or slot.state != .established or slot.pending_close != null) continue;
-            const table = &slot.table;
-            // E4: an armed writer is below its watermark or has an undelivered writable edge.
-            var armed = table.armed;
-            for (0..limits.streams_per_connection) |_| {
-                if (armed == 0) break;
-                const entry_index: u8 = @intCast(@ctz(armed));
-                armed &= armed - 1;
-                const entry = &table.entries[entry_index];
-                assert(entry.write_lowat > 0);
-                const available = c.quiche_conn_stream_capacity(slot.conn.?, entry.id);
-                assert(entry.ready.writable or (available >= 0 and available < entry.write_lowat));
-            }
-            // E5: every readable stream has an undelivered readable edge or an open delivered one.
-            const iter = c.quiche_conn_readable(slot.conn.?) orelse continue;
-            defer c.quiche_stream_iter_free(iter);
-            var id: u64 = 0;
-            for (0..2 * limits.streams_per_connection) |_| {
-                if (!c.quiche_stream_iter_next(iter, &id)) break;
-                const entry_index = table.find(id) orelse {
-                    assert(!StreamTable.isPeerInitiated(slot.direction, id));
-                    continue;
-                };
-                const entry = &table.entries[entry_index];
-                assert(entry.ready.readable or table.readOpen(entry_index) or entry.opened_pending or entry.closed_pending);
-            }
+            if (slot.collect_link.linked or slot.state != .established or slot.closing == .after_flight) continue;
+            slot.checkStreamInvariants();
         }
     }
 
@@ -1011,7 +882,7 @@ pub const Engine = struct {
         if (slot.state != .handshaking and slot.state != .established) return null;
         var deadline: ?u64 = null;
         if (slot.timeoutNs()) |remaining| deadline = now.nanos() +| remaining;
-        if (slot.close_reason == null) {
+        if (slot.closing == .none) {
             const due_ms = if (slot.state == .handshaking)
                 slot.created_ms +| self.handshakeLimitMs(slot)
             else
@@ -1019,7 +890,7 @@ pub const Engine = struct {
             const due = due_ms *| std.time.ns_per_ms;
             deadline = @min(deadline orelse due, due);
         }
-        if (slot.pending_close != null and !slot.flight_pending) deadline = @min(deadline orelse now.nanos(), now.nanos());
+        if (slot.closing == .after_flight and !slot.flight_pending) deadline = @min(deadline orelse now.nanos(), now.nanos());
         return deadline;
     }
 
@@ -1106,7 +977,7 @@ pub const Engine = struct {
         if (conn.index >= self.registry.slots.len) return error.StaleHandle;
         const slot = &self.registry.slots[conn.index];
         if (slot.generation != conn.generation or slot.state == .free or slot.state == .closed or
-            slot.pending_close != null or slot.close_reason != null)
+            slot.closing != .none)
         {
             return error.StaleHandle;
         }
@@ -1197,7 +1068,7 @@ pub const Engine = struct {
             } else {
                 slot.close(.tls_failed, types.app_error_normal);
             }
-            if (slot.state == .established and slot.pending_close == null) self.markCollect(index);
+            if (slot.state == .established and slot.closing != .after_flight) self.markCollect(index);
         }
         if (slot.state != .closed and slot.isFinished()) {
             self.markClosed(index, slot.closeReason());
@@ -1215,7 +1086,6 @@ pub const Engine = struct {
             else => 0,
         };
         std.log.scoped(.network_quic).debug("connection_closed connection={d}:{d} direction={s} state={s} reason={s} code={d}", .{ index, slot.generation, @tagName(slot.direction), @tagName(slot.state), @tagName(reason), code });
-        if (slot.state == .established and slot.pending_close == null) self.gatherReadable(index);
         if (slot.state == .handshaking) {
             self.leaveHandshaking(slot);
         }
@@ -1223,13 +1093,9 @@ pub const Engine = struct {
             assert(self.registry.outbound > 0);
             self.registry.outbound -= 1;
         }
-        slot.state = .closed;
-        slot.close_reason = reason;
-        slot.close_event = .pending;
+        slot.markClosed(reason);
         self.registry.removeRoutesFor(index);
         const slots = self.registry.slots;
-        // Stream events precede the connection's close event.
-        slot.table.promoteDeferred();
         if (slot.deferred_link.linked) self.registry.deferred.remove(slots, "deferred_link", index);
         if (slot.collect_link.linked) self.registry.collect.remove(slots, "collect_link", index);
         if (slot.dirty_link.linked) self.registry.dirty.remove(slots, "dirty_link", index);

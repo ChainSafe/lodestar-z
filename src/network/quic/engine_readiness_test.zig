@@ -199,3 +199,30 @@ test "engine events drain connections in arrival order across one-event polls" {
     try std.testing.expectEqual(@as(usize, 0), pair.client.pollEvents(&one));
     try std.testing.expect(!pair.client.eventsPending());
 }
+
+test "engine changing a write watermark replaces an unpolled writable edge" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    binding.c.quiche_config_set_initial_max_stream_data_bidi_remote(pair.server.config.ptr, 4096);
+    const handles = try support.connectPair(&pair);
+    const stream = try pair.client.openStream(handles.client);
+    var payload: [16384]u8 = @splat(0x61);
+    try std.testing.expectEqual(@as(usize, 4096), try pair.client.write(stream, &payload, false));
+    try pair.pump();
+    var storage: [8]Event = undefined;
+    const inbound = try support.expectStreamOpened(pair.events(&pair.server, &storage)[0], handles.server);
+    var sink: [4096]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 4096), (try pair.server.read(inbound, &sink)).len);
+    try pair.pump();
+    try std.testing.expect(pair.client.eventsPending());
+    const available = try pair.client.streamCapacity(stream);
+    try std.testing.expect(available > 0 and available + 128 <= payload.len);
+    try std.testing.expectEqual(available, try pair.client.write(stream, payload[0 .. available + 128], false));
+    // The old edge represented credit just consumed by this write. The new interest must wait.
+    try std.testing.expectEqual(@as(usize, 0), countWritable(&pair, stream));
+    try pair.pump();
+    try std.testing.expectEqual(@as(usize, 0), countWritable(&pair, stream));
+    try std.testing.expectError(error.WouldBlock, pair.client.write(stream, payload[0..512], false));
+    try std.testing.expectEqual(@as(usize, 0), countWritable(&pair, stream));
+}

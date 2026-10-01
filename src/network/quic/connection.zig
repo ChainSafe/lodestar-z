@@ -21,6 +21,19 @@ pub const Error = binding.Error || tls.Error || error{
 
 pub const State = enum { free, handshaking, established, closed };
 
+/// Scheduling work produced by a stream operation, including one that returns an error.
+pub const Effects = struct {
+    dirty: bool = false,
+    collect: bool = false,
+};
+
+/// Independent of connection phase, final-flight drain and close-event delivery.
+pub const Closing = union(enum) {
+    none,
+    after_flight: types.PendingClose,
+    started: types.CloseReason,
+};
+
 pub const OpenedStream = struct {
     id: u64,
     index: u8,
@@ -52,8 +65,7 @@ pub const Slot = struct {
     scid: binding.Cid = .{},
     created_ms: u64 = 0,
     last_send_ms: u64 = 0,
-    close_reason: ?types.CloseReason = null,
-    pending_close: ?types.PendingClose = null,
+    closing: Closing = .none,
     /// An outbound connection is established and quiche has not reported its output drained
     /// since, so its final handshake flight may be unsent. The server cannot read a client's close
     /// without that flight, while a client reads a server's close without the server's.
@@ -96,8 +108,7 @@ pub const Slot = struct {
         self.scid = binding.Cid.fromSlice(&params.scid);
         self.created_ms = params.now.mono_ms;
         self.last_send_ms = params.now.mono_ms;
-        self.close_reason = null;
-        self.pending_close = null;
+        self.closing = .none;
         self.flight_pending = false;
         self.connected_pending = false;
         self.answered = false;
@@ -210,6 +221,86 @@ pub const Slot = struct {
         self.write_lowat_ceiling = @intCast(@max(1, @min(limits.write_lowat_max, window / 2)));
     }
 
+    pub fn collectStreams(self: *Slot) void {
+        if (self.state != .established or self.closing == .after_flight) return;
+        self.gatherReadable();
+        self.gatherWritable();
+    }
+
+    fn gatherReadable(self: *Slot) void {
+        const conn = self.conn.?;
+        for (0..limits.streams_per_connection) |_| {
+            const next = c.quiche_conn_stream_readable_next(conn);
+            if (next < 0) break;
+            const id: u64 = @intCast(next);
+            if (self.table.find(id)) |entry_index| {
+                self.table.markReady(entry_index, .{ .readable = true });
+                continue;
+            }
+            if (!StreamTable.isPeerInitiated(self.direction, id)) continue;
+            if (self.table.claimPeer(id) == null) {
+                self.shutdownRaw(id, .read, types.app_error_stream_table_full);
+                self.shutdownRaw(id, .write, types.app_error_stream_table_full);
+            }
+        }
+    }
+
+    // STOP must be captured before quiche reclaims a reset acknowledged by the peer. Native
+    // writable iteration omits exact-watermark credit, so also check the bounded armed set.
+    fn gatherWritable(self: *Slot) void {
+        const conn = self.conn.?;
+        for (0..limits.streams_per_connection) |_| {
+            const next = c.quiche_conn_stream_writable_next(conn);
+            if (next < 0) break;
+            const id: u64 = @intCast(next);
+            const entry_index = self.table.find(id) orelse continue;
+            if (!self.table.matches(entry_index, id)) continue;
+            const entry = &self.table.entries[entry_index];
+            if (!entry.stopped and !entry.fin_sent) if (self.stopCode(id)) |code| {
+                self.table.stop(entry_index, code);
+                continue;
+            };
+            if (entry.write_lowat > 0) self.table.markReady(entry_index, .{ .writable = true });
+        }
+        var armed = self.table.armed;
+        for (0..limits.streams_per_connection) |_| {
+            if (armed == 0) break;
+            const entry_index: u8 = @intCast(@ctz(armed));
+            armed &= armed - 1;
+            const entry = &self.table.entries[entry_index];
+            const available = c.quiche_conn_stream_capacity(conn, entry.id);
+            if (available < 0 or available >= entry.write_lowat) self.table.markReady(entry_index, .{ .writable = true });
+        }
+    }
+
+    pub fn checkStreamInvariants(self: *const Slot) void {
+        const table = &self.table;
+        // E4: an armed writer is below its watermark or has an undelivered writable edge.
+        var armed = table.armed;
+        for (0..limits.streams_per_connection) |_| {
+            if (armed == 0) break;
+            const entry_index: u8 = @intCast(@ctz(armed));
+            armed &= armed - 1;
+            const entry = &table.entries[entry_index];
+            assert(entry.write_lowat > 0);
+            const available = c.quiche_conn_stream_capacity(self.conn.?, entry.id);
+            assert(entry.ready.writable or (available >= 0 and available < entry.write_lowat));
+        }
+        // E5: every readable stream has an undelivered readable edge or an open delivered one.
+        const iter = c.quiche_conn_readable(self.conn.?) orelse return;
+        defer c.quiche_stream_iter_free(iter);
+        var id: u64 = 0;
+        for (0..2 * limits.streams_per_connection) |_| {
+            if (!c.quiche_stream_iter_next(iter, &id)) break;
+            const entry_index = table.find(id) orelse {
+                assert(!StreamTable.isPeerInitiated(self.direction, id));
+                continue;
+            };
+            const entry = &table.entries[entry_index];
+            assert(entry.ready.readable or table.readOpen(entry_index) or entry.opened_pending or entry.closed_pending);
+        }
+    }
+
     pub fn hasEvents(self: *const Slot) bool {
         return self.connected_pending or self.path_changed_pending != null or self.table.hasPending() or
             self.close_event == .pending;
@@ -222,20 +313,36 @@ pub const Slot = struct {
     }
 
     pub fn close(self: *Slot, reason: types.CloseReason, code: u64) void {
-        assert(self.conn != null);
-        assert(self.state != .free);
-        if (self.close_reason == null) self.close_reason = reason;
+        assert(self.conn != null and self.state != .free);
+        // The first local reason remains authoritative if another close cause arrives.
+        const latched = if (self.closing == .none) reason else self.closeReason();
+        self.closing = .{ .started = latched };
         _ = c.quiche_conn_close(self.conn.?, true, code, "", 0);
-        assert(self.close_reason != null);
     }
 
     /// Closes once a flush has sent the final handshake flight, which quiche_close would discard.
     pub fn deferClose(self: *Slot, reason: types.CloseReason, code: u64) void {
-        assert(self.state == .established);
-        assert(self.flight_pending);
-        assert(self.pending_close == null);
-        if (self.close_reason == null) self.close_reason = reason;
-        self.pending_close = .{ .reason = reason, .code = code };
+        assert(self.state == .established and self.flight_pending);
+        assert(self.closing != .after_flight);
+        const latched = if (self.closing == .none) reason else self.closeReason();
+        self.closing = .{ .after_flight = .{ .reason = latched, .code = code } };
+    }
+
+    pub fn closeAfterFlight(self: *Slot) void {
+        if (self.closing != .after_flight or self.flight_pending) return;
+        const pending = self.closing.after_flight;
+        self.close(pending.reason, pending.code);
+    }
+
+    pub fn markClosed(self: *Slot, reason: types.CloseReason) void {
+        assert(self.state == .handshaking or self.state == .established);
+        // Preserve the existing claims policy: immediate closes drain native readable streams;
+        // closes waiting for the final flight do not. Claimed buffered reads survive either.
+        if (self.state == .established and self.closing != .after_flight) self.gatherReadable();
+        self.state = .closed;
+        self.closing = .{ .started = reason };
+        self.close_event = .pending;
+        self.table.promoteDeferred();
     }
 
     pub fn isEstablished(self: *const Slot) bool {
@@ -247,7 +354,11 @@ pub const Slot = struct {
     }
 
     pub fn closeReason(self: *const Slot) types.CloseReason {
-        if (self.close_reason) |reason| return reason;
+        switch (self.closing) {
+            .none => {},
+            .after_flight => |pending| return pending.reason,
+            .started => |reason| return reason,
+        }
         if (self.handshake.failure != null) return .tls_failed;
         if (c.quiche_conn_is_timed_out(self.conn.?)) return .idle_timeout;
         var is_app = false;
@@ -264,7 +375,7 @@ pub const Slot = struct {
     }
 
     pub fn openStream(self: *Slot) Error!OpenedStream {
-        if (self.state != .established or self.close_reason != null) return error.NotEstablished;
+        if (self.state != .established or self.closing != .none) return error.NotEstablished;
         if (c.quiche_conn_peer_streams_left_bidi(self.conn.?) == 0) return error.StreamLimit;
         const index = self.table.freeLocal() orelse return error.StreamTableFull;
         const id = self.table.next_local_id;
@@ -275,7 +386,14 @@ pub const Slot = struct {
         return .{ .id = id, .index = index };
     }
 
-    pub fn read(self: *Slot, index: u8, id: u64, buf: []u8) Error!types.Read {
+    pub fn read(self: *Slot, index: u8, id: u64, buf: []u8, effects: *Effects) Error!types.Read {
+        const result = try self.readNative(index, id, buf);
+        effects.dirty = result.len > 0 or result.fin or result.reset_code != null;
+        if ((result.len == 0 or result.fin) and self.table.matches(index, id)) self.table.readDone(index);
+        return result;
+    }
+
+    fn readNative(self: *Slot, index: u8, id: u64, buf: []u8) Error!types.Read {
         assert(self.conn != null);
         assert(self.table.matches(index, id));
         var fin = false;
@@ -287,7 +405,7 @@ pub const Slot = struct {
             if (self.table.entries[index].fin_sent) self.finishStream(index, code);
             return .{ .len = 0, .fin = true, .reset_code = code };
         }
-        const length = try binding.check(rc) orelse return .{ .len = 0, .fin = false };
+        const length = try self.streamResult(index, rc) orelse return .{ .len = 0, .fin = false };
         assert(length <= buf.len);
         if (fin) {
             self.table.markFinReceived(index);
@@ -296,7 +414,23 @@ pub const Slot = struct {
         return .{ .len = length, .fin = fin };
     }
 
-    pub fn write(self: *Slot, index: u8, id: u64, bytes: []const u8, fin: bool) Error!usize {
+    pub fn write(self: *Slot, index: u8, id: u64, bytes: []const u8, fin: bool, effects: *Effects) Error!usize {
+        const written = self.writeNative(index, id, bytes, fin) catch |err| {
+            if (err == error.WouldBlock) {
+                effects.dirty = self.armWrite(index, id, bytes.len);
+            } else if (self.table.matches(index, id)) self.table.disarm(index);
+            return err;
+        };
+        effects.dirty = written > 0 or (fin and written == bytes.len);
+        if (self.table.matches(index, id)) {
+            if (written < bytes.len) {
+                effects.dirty = self.armWrite(index, id, bytes.len - written) or effects.dirty;
+            } else self.table.disarm(index);
+        }
+        return written;
+    }
+
+    fn writeNative(self: *Slot, index: u8, id: u64, bytes: []const u8, fin: bool) Error!usize {
         assert(self.conn != null);
         assert(self.table.matches(index, id));
         const entry = &self.table.entries[index];
@@ -313,7 +447,7 @@ pub const Slot = struct {
             if (self.table.entries[index].fin_received) self.finishStream(index, code);
             return error.StreamStopped;
         }
-        const length = try binding.check(rc) orelse {
+        const length = try self.streamResult(index, rc) orelse {
             const available = c.quiche_conn_stream_capacity(self.conn.?, id);
             if (available < 0 and available != c.QUICHE_ERR_DONE) {
                 self.finishStream(index, null);
@@ -330,23 +464,40 @@ pub const Slot = struct {
     }
 
     pub fn capacity(self: *Slot, index: u8, id: u64) Error!usize {
-        assert(self.conn != null);
-        assert(self.table.matches(index, id));
+        assert(self.conn != null and self.table.matches(index, id));
         if (self.table.entries[index].stopped) return error.StreamStopped;
-        const rc = c.quiche_conn_stream_capacity(self.conn.?, id);
-        const available = binding.check(rc) catch |err| switch (err) {
+        return (try self.streamResult(index, c.quiche_conn_stream_capacity(self.conn.?, id))) orelse error.WouldBlock;
+    }
+
+    fn streamResult(self: *Slot, index: u8, rc: isize) Error!?usize {
+        return binding.check(rc) catch |err| switch (err) {
             error.InvalidStreamState => {
                 self.finishStream(index, null);
                 return error.UnknownStream;
             },
             else => return err,
         };
-        return available orelse error.WouldBlock;
+    }
+
+    fn armWrite(self: *Slot, index: u8, id: u64, wanted: usize) bool {
+        assert(self.table.matches(index, id));
+        const lowat: u32 = @intCast(@min(wanted, self.write_lowat_ceiling));
+        if (lowat == 0 or self.table.entries[index].write_lowat == lowat) return false;
+        self.table.arm(index, lowat);
+        const rc = c.quiche_conn_stream_writable(self.conn.?, id, lowat);
+        // Already writable, stopped or finished: the owner learns which on its next write.
+        if (rc != 0) self.table.markReady(index, .{ .writable = true });
+        return true;
+    }
+
+    pub fn streamReadable(self: *const Slot, index: u8, id: u64) bool {
+        assert(self.table.matches(index, id));
+        return c.quiche_conn_stream_readable(self.conn.?, id);
     }
 
     /// The peer's STOP_SENDING code when it stopped the stream. quiche frees a stopped stream
     /// once its reset is acknowledged, so the code is read while the stream still exists.
-    pub fn stopCode(self: *Slot, id: u64) ?u64 {
+    fn stopCode(self: *Slot, id: u64) ?u64 {
         assert(self.conn != null);
         var code: u64 = 0;
         const rc = c.quiche_conn_stream_send(self.conn.?, id, "", 0, false, &code);
@@ -359,20 +510,21 @@ pub const Slot = struct {
         id: u64,
         direction: types.ShutdownDirection,
         code: u64,
-    ) void {
+    ) Effects {
         assert(self.conn != null);
         assert(self.table.matches(index, id));
         self.shutdownRaw(id, direction, code);
         if (direction == .read) {
-            self.table.markFinReceived(index);
+            self.table.shutdownRead(index);
         } else {
-            self.table.markFinSent(index);
+            self.table.shutdownWrite(index);
         }
         const entry = self.table.entries[index];
         if (entry.fin_received and entry.fin_sent) self.finishStream(index, null);
+        return .{ .dirty = true, .collect = self.table.armed != 0 };
     }
 
-    pub fn closeStream(self: *Slot, index: u8, id: u64, code: u64) void {
+    pub fn closeStream(self: *Slot, index: u8, id: u64, code: u64) Effects {
         assert(self.conn != null);
         assert(self.table.matches(index, id));
         const entry = self.table.entries[index];
@@ -380,6 +532,8 @@ pub const Slot = struct {
         if (!entry.fin_sent) self.shutdownRaw(id, .write, code);
         self.finishStream(index, null);
         assert(!self.table.matches(index, id));
+        // A local reset can release connection credit to other blocked writers.
+        return .{ .dirty = true, .collect = self.table.armed != 0 };
     }
 
     fn finishStream(self: *Slot, index: u8, reset_code: ?u64) void {
@@ -392,7 +546,7 @@ pub const Slot = struct {
         }
     }
 
-    pub fn shutdownRaw(self: *Slot, id: u64, direction: types.ShutdownDirection, code: u64) void {
+    fn shutdownRaw(self: *Slot, id: u64, direction: types.ShutdownDirection, code: u64) void {
         const which: c_int = if (direction == .read)
             c.QUICHE_SHUTDOWN_READ
         else

@@ -104,6 +104,32 @@ pub const StreamTable = struct {
         return index;
     }
 
+    pub fn bind(self: *StreamTable, index: u8, route: types.Route) void {
+        assert(self.entries[index].claimed and !self.entries[index].closed_pending);
+        self.entries[index].route = route;
+    }
+
+    pub fn stop(self: *StreamTable, index: u8, code: u64) void {
+        assert(self.entries[index].claimed and !self.entries[index].closed_pending);
+        self.entries[index].stopped = true;
+        self.entries[index].reset_code = code;
+        self.markReady(index, .{ .writable = true });
+    }
+
+    pub fn shutdownRead(self: *StreamTable, index: u8) void {
+        self.markFinReceived(index);
+        self.entries[index].ready.readable = false;
+        self.readDone(index);
+        self.settle(index);
+    }
+
+    pub fn shutdownWrite(self: *StreamTable, index: u8) void {
+        self.markFinSent(index);
+        self.entries[index].ready.writable = false;
+        self.disarm(index);
+        self.settle(index);
+    }
+
     pub fn markFinSent(self: *StreamTable, index: u8) void {
         assert(index < limits.streams_per_connection);
         assert(self.entries[index].claimed);
@@ -134,6 +160,9 @@ pub const StreamTable = struct {
         assert(index < limits.streams_per_connection);
         assert(lowat > 0);
         assert(self.entries[index].claimed and !self.entries[index].closed_pending);
+        // A replacement interest must earn its own edge at the new watermark.
+        self.entries[index].ready.writable = false;
+        self.settle(index);
         self.entries[index].write_lowat = lowat;
         self.armed |= bit(index);
     }

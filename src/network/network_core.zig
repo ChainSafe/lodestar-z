@@ -217,11 +217,7 @@ pub const NetworkCore = struct {
             pm.dialing.shutdown(&pm.catalog, &self.transport.engine, now.mono_ms);
         }
         if (self.discovery) |owned| owned.cancel();
-        // Include handshakes not yet admitted to the catalog.
-        for (self.transport.engine.registry.slots, 0..) |slot, index| {
-            const handle: engine.Handle = .{ .index = @intCast(index), .generation = slot.generation };
-            if (!self.transport.engine.abandon(handle)) _ = self.transport.engine.close(handle, 0);
-        }
+        self.transport.engine.shutdownAll();
     }
     pub fn isClosed(self: *const NetworkCore) bool {
         return self.peer_manager.stopped and self.transport.engine.registry.active_len == 0;

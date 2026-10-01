@@ -185,3 +185,45 @@ test "stream table delivery resumes after the last delivered entry" {
     table.advanceCursor(second);
     try std.testing.expectEqual(first, table.nextPending().?);
 }
+
+test "stream table new watermark replaces an undelivered writable edge" {
+    var table = StreamTable.init(.outbound);
+    table.claimLocal(0, 0);
+    table.markReady(0, .{ .readable = true, .writable = true });
+    table.arm(0, 4096);
+    try std.testing.expect(!table.entries[0].ready.writable);
+    try std.testing.expect(table.entries[0].ready.readable);
+    try std.testing.expectEqual(@as(u32, 4096), table.entries[0].write_lowat);
+    try std.testing.expectEqual(@as(u16, 1), table.pendingCount());
+}
+
+test "stream table half shutdown clears only that half's readiness" {
+    var table = StreamTable.init(.outbound);
+    const peer = table.claimPeer(1).?;
+    table.takeOpened(peer);
+    table.markReady(peer, .{ .readable = true, .writable = true });
+    table.shutdownRead(peer);
+    try std.testing.expect(!table.readOpen(peer));
+    try std.testing.expect(!table.entries[peer].ready.readable);
+    try std.testing.expect(table.entries[peer].ready.writable);
+    try std.testing.expect(table.entries[peer].fin_received);
+    try std.testing.expect(!table.entries[peer].fin_sent);
+    table.shutdownWrite(peer);
+    try std.testing.expectEqual(@as(u16, 0), table.pendingCount());
+    try std.testing.expectEqual(@as(stream_table.Mask, 0), table.armed);
+}
+
+test "stream table stop preserves read interest and code until acknowledgement" {
+    var table = StreamTable.init(.outbound);
+    table.claimLocal(0, 0);
+    table.arm(0, 1024);
+    table.markReady(0, .{ .readable = true });
+    table.stop(0, 77);
+    try std.testing.expect(table.entries[0].stopped);
+    try std.testing.expectEqual(@as(u64, 77), table.entries[0].reset_code);
+    try std.testing.expectEqual(@as(stream_table.Mask, 0), table.armed);
+    const ready = table.takeReady(0);
+    try std.testing.expect(ready.readable and ready.writable);
+    try std.testing.expect(table.readOpen(0));
+    try std.testing.expect(!table.entries[0].fin_sent and !table.entries[0].fin_received);
+}
