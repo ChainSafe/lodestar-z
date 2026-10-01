@@ -16,7 +16,6 @@ pub const ResponsePlan = @import("ResponsePlan.zig");
 pub const RoutingTable = @import("RoutingTable.zig");
 pub const SessionStore = @import("SessionStore.zig");
 pub const identity = @import("identity/root.zig");
-pub const lookup_batch = @import("lookup_batch.zig");
 pub const types = @import("types.zig");
 pub const wire = @import("wire/root.zig");
 
@@ -34,7 +33,6 @@ test {
     _ = RoutingTable;
     _ = SessionStore;
     _ = identity;
-    _ = lookup_batch;
     _ = types;
     _ = wire;
 }

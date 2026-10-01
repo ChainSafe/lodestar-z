@@ -215,7 +215,7 @@ test "peer discovery publishes authenticated lookup responders outside a full ro
         const progress = try a.transport.stepUntil(std.testing.io, &expiries, tick);
         if (progress.failure) |err| return err;
         const selected = progress.event == .response and progress.event.response.matched.terminal and
-            (controller.lookup != null and controller.lookup.?.ownsCall(progress.event.response.matched.handle));
+            progress.event.response.matched.response == .nodes;
         const consumed = controller.consume(&progress, expiries[0..progress.calls_expired], &output);
         if (consumed.failure) |err| return err;
         if (selected) {
@@ -265,31 +265,36 @@ test "peer discovery reserves output for the responder alongside a full referral
     var output: [@import("../network_core.zig").candidates_per_turn]adapter.Candidate = undefined;
     try std.testing.expectEqual(records.len + 1, output.len);
     for ([_]usize{ 0, 1, records.len, output.len }) |capacity| {
-        const controller = try a.configure(&context, &.{}, now, .{});
-        try controller.request(.{ .general = true }, now);
-        var lookup: d.Lookup = undefined;
-        try lookup.init(&controller.storage.candidates, a.transport.engine.localRecord().node_id, peer.node_id, &.{seed}, .dual);
-        var packet: [1280]u8 = undefined;
-        var entropy: d.Engine.StartEntropy = undefined;
-        try std.Io.randomSecure(std.testing.io, std.mem.asBytes(&entropy));
-        const id = try d.wire.message.RequestId.init(&.{1});
-        const started = (try lookup.startNext(&a.transport.engine, &packet, id, now, &entropy)).?;
-        defer _ = a.transport.engine.cancelCall(started.call.handle);
-        controller.lookup = lookup;
-        const progress: d.Transport.StepResult = .{ .now_ms = now, .event = .{ .response = .{
-            .peer = peer,
-            .matched = .{ .handle = started.call.handle, .response = .{ .nodes = .{ .request_id = id, .total = 1, .enrs = &raw } }, .terminal = true },
-            .record = null,
-            .node_records = &records,
-        } } };
-        const result = controller.consume(&progress, &.{}, output[0..capacity]);
-        if (result.failure) |err| return err;
-        try std.testing.expectEqual(capacity, result.candidates);
-        try std.testing.expectEqual(output.len - capacity, result.dropped);
-        if (capacity > 0) try adapter.requireIdentity(b.transport.engine.localRecord(), &output[0].peer);
-        if (capacity == output.len) for (records, output[1..]) |record, candidate| {
-            try std.testing.expectEqualSlices(u8, &record.node_id, &candidate.node_id);
-        };
+        for ([_]bool{ false, true }) |terminal| {
+            const controller = try a.configure(&context, &.{}, now, .{});
+            try controller.request(.{ .general = true }, now);
+            var lookup: d.Lookup = undefined;
+            try lookup.init(&controller.storage.candidates, a.transport.engine.localRecord().node_id, peer.node_id, &.{seed}, .dual);
+            var packet: [1280]u8 = undefined;
+            var entropy: d.Engine.StartEntropy = undefined;
+            try std.Io.randomSecure(std.testing.io, std.mem.asBytes(&entropy));
+            const id = try d.wire.message.RequestId.init(&.{1});
+            const started = (try lookup.startNext(&a.transport.engine, &packet, id, now, &entropy)).?;
+            defer _ = a.transport.engine.cancelCall(started.call.handle);
+            controller.lookup = lookup;
+            const progress: d.Transport.StepResult = .{ .now_ms = now, .event = .{ .response = .{
+                .peer = peer,
+                .matched = .{ .handle = started.call.handle, .response = .{ .nodes = .{ .request_id = id, .total = if (terminal) 1 else 2, .enrs = &raw } }, .terminal = terminal },
+                .record = null,
+                .node_records = &records,
+            } } };
+            const result = controller.consume(&progress, &.{}, output[0..capacity]);
+            if (result.failure) |err| return err;
+            const responders: usize = @intFromBool(terminal);
+            const published = @min(capacity, records.len + responders);
+            try std.testing.expectEqual(published, result.candidates);
+            try std.testing.expectEqual(records.len + responders - published, result.dropped);
+            try std.testing.expectEqual(@as(u16, 0), result.unowned);
+            if (capacity > 0 and terminal) try adapter.requireIdentity(b.transport.engine.localRecord(), &output[0].peer);
+            if (capacity == output.len) for (records, output[responders..published]) |record, candidate| {
+                try std.testing.expectEqualSlices(u8, &record.node_id, &candidate.node_id);
+            };
+        }
     }
 }
 

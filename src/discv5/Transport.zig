@@ -24,9 +24,6 @@ pub const Error = Engine.Error || Sockets.DatagramError ||
 
 pub const StartResult = struct { started: bool = false, failure: ?Error = null };
 
-pub const Config = struct {
-    poll_interval_ms: u32 = 100,
-};
 pub const FailureStage = enum { coordinator, clock, receive, process };
 
 pub const DatagramResult = union(enum) {
@@ -53,7 +50,7 @@ pub const StepResult = struct {
 };
 
 /// A clock reading and fresh entropy for one outbound packet.
-pub const SendContext = struct {
+const SendContext = struct {
     now_ms: u64,
     entropy: Engine.StartEntropy,
 };
@@ -63,7 +60,7 @@ const Transport = @This();
 engine: Engine,
 sockets: Sockets,
 send_drops: Sockets.SendDrops = .{},
-config: Config,
+poll_interval_ms: u32,
 scratch: Engine.Scratch = .{},
 response: ResponsePlan = .{},
 output: [constants.packet_size_max]u8 = undefined,
@@ -77,8 +74,8 @@ pub const Options = struct {
 /// Takes ownership of bound sockets on success. Initialize at the final address.
 pub fn init(self: *Transport, allocator: std.mem.Allocator, sockets: Sockets, key: @import("identity/crypto.zig").KeyPair, record: enr.Record, options: Options) !void {
     if (options.poll_interval_ms == 0) return error.InvalidPollInterval;
-    self.* = .{ .engine = undefined, .sockets = sockets, .config = .{ .poll_interval_ms = options.poll_interval_ms } };
-    try self.engine.initWithConfig(allocator, key, record, options.engine);
+    self.* = .{ .engine = undefined, .sockets = sockets, .poll_interval_ms = options.poll_interval_ms };
+    try self.engine.init(allocator, key, record, options.engine);
 }
 
 pub fn deinit(self: *Transport, allocator: std.mem.Allocator, io: std.Io) void {
@@ -124,7 +121,7 @@ pub fn startLookup(self: *Transport, io: std.Io, lookup: *Lookup, now_ms: u64) (
     defer std.crypto.secureZero(u8, std.mem.asBytes(&entropy));
     const started = try lookup.startNext(&self.engine, &self.output, try Transport.requestId(io), now_ms, &entropy) orelse return .{};
     self.transmit(io, started.peer.address, self.output[0..started.call.packet_length]) catch |err| {
-        lookup.onFailure(&self.engine, started.call.handle) catch unreachable;
+        std.debug.assert(lookup.onFailure(&self.engine, started.call.handle));
         return .{ .started = true, .failure = err };
     };
     return .{ .started = true };
@@ -262,7 +259,7 @@ fn recordFailure(result: *StepResult, err: Error, stage: FailureStage) void {
 
 fn receiveDatagram(self: *Transport, io: std.Io, wake_ms: u64, ready: ?*[2]bool, result: *StepResult) Error!?Sockets.Datagram {
     const deadline_ms = @min(wake_ms, self.engine.nextDeadlineMs() orelse wake_ms);
-    const wait_ms = @min(self.config.poll_interval_ms, deadline_ms -| result.now_ms);
+    const wait_ms = @min(self.poll_interval_ms, deadline_ms -| result.now_ms);
     const timeout = std.Io.Timeout{ .duration = .{
         .raw = .fromMilliseconds(wait_ms),
         .clock = .awake,
@@ -371,11 +368,11 @@ pub fn monotonicMilliseconds(io: std.Io) Error!u64 {
     return @intCast(value);
 }
 
-pub fn sendContext(io: std.Io) Error!SendContext {
+fn sendContext(io: std.Io) Error!SendContext {
     return .{ .now_ms = try monotonicMilliseconds(io), .entropy = try startEntropy(io) };
 }
 
-pub fn requestId(io: std.Io) std.Io.RandomSecureError!message.RequestId {
+fn requestId(io: std.Io) std.Io.RandomSecureError!message.RequestId {
     var bytes: [8]u8 = undefined;
     try std.Io.randomSecure(io, &bytes);
     return message.RequestId.init(&bytes) catch unreachable;

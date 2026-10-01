@@ -26,9 +26,9 @@ const Network = struct {
             const key = try support.keyPair(@intCast(0x11 + index * 0x11));
             self.records[index] = try enr.Record.create(&key, 1, support.loopback(@intCast(index + 1), @intCast(9_001 + index)));
         }
-        try self.nodes[0].initWithConfig(std.testing.allocator, try support.keyPair(0x11), self.records[0], support.engineConfig());
+        try self.nodes[0].init(std.testing.allocator, try support.keyPair(0x11), self.records[0], support.engineConfig());
         errdefer self.nodes[0].deinit(std.testing.allocator);
-        try self.nodes[1].initWithConfig(std.testing.allocator, try support.keyPair(0x22), self.records[1], support.engineConfig());
+        try self.nodes[1].init(std.testing.allocator, try support.keyPair(0x22), self.records[1], support.engineConfig());
     }
 
     fn deinit(self: *Network) void {

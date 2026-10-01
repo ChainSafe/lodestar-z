@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const discv5 = @import("discv5");
+const lookup_batch = @import("discv5/lookup_batch.zig");
 
 const net = std.Io.net;
 const bootstrap_capacity: usize = 64;
@@ -193,7 +194,7 @@ fn crawl(
         .stale_after_ms = 15_000,
     }, transport.sockets.mode());
     defer maintenance.cancel(&transport.engine);
-    var cursor: discv5.lookup_batch.Cursor = .{};
+    var cursor: lookup_batch.Cursor = .{};
     var statistics: CrawlStatistics = .{};
     var slots = [_]LookupSlot{.{}} ** lookup_concurrency;
     defer for (&slots) |*slot| slot.cancel(&transport.engine);
@@ -209,7 +210,7 @@ fn crawl(
         try startLookups(io, transport, &slots, candidates[0..lookup_concurrency], &launched);
 
         const active = activeLookups(&slots, &operations);
-        const result = try discv5.lookup_batch.step(transport, io, active, &cursor, &expired);
+        const result = try lookup_batch.step(transport, io, active, &cursor, &expired);
         switch (result.transport.datagram) {
             .rejected => |reason| rejections.getPtr(reason).* += 1,
             .timeout, .accepted => {},
@@ -217,7 +218,7 @@ fn crawl(
         for (expired[0..result.transport.calls_expired]) |item| {
             _ = maintenance.onFailure(&transport.engine, item.handle, result.transport.now_ms, .expired);
         }
-        _ = try maintenance.onEvent(&transport.engine, &result.transport.event, result.transport.now_ms);
+        _ = maintenance.onEvent(&transport.engine, &result.transport.event, result.transport.now_ms);
         if (result.transport.event == .response) {
             for (result.transport.event.response.node_records) |*record| _ = records.add(record);
         }
@@ -347,7 +348,7 @@ fn printRecord(record: *const discv5.identity.enr.Record) void {
 
 comptime {
     std.debug.assert(transport_steps_max <= std.math.maxInt(u32));
-    std.debug.assert(lookup_concurrency <= discv5.lookup_batch.operations_max);
+    std.debug.assert(lookup_concurrency <= lookup_batch.operations_max);
     std.debug.assert(lookup_concurrency * discv5.Lookup.parallelism + 1 <= call_capacity);
     std.debug.assert(record_capacity <= std.math.maxInt(u16));
     std.debug.assert(record_capacity >= discv5.RoutingTable.table_capacity);

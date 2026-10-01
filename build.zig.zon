@@ -474,6 +474,12 @@
             .root_module = .discv5,
             .test_runner = .{ .path = "test/test_runner.zig", .mode = .server },
         },
+        .discv5_crawl_batch = .{
+            .root_module = .{
+                .root_source_file = "examples/discv5/lookup_batch.zig",
+                .imports = .{ .discv5, .udp },
+            },
+        },
         .network = .{
             .root_module = .network,
             .test_runner = .{ .path = "test/test_runner.zig", .mode = .server },

@@ -118,43 +118,42 @@ pub fn startNext(
     return null;
 }
 
-pub fn knownRecord(self: *const Maintenance, handle: CallTable.Handle) ?*const enr.Record {
-    if (self.pending) |*pending| if (std.meta.eql(pending.handle, handle)) return &pending.entry.record;
-    return null;
-}
-
 pub fn onEvent(
     self: *Maintenance,
     core: *Engine,
     event: *const Engine.Event,
     now_ms: u64,
-) Error!bool {
+) Engine.Event.Consumption {
     switch (event.*) {
         .response => |*response| {
             if (self.pending) |*pending| {
                 if (pending.handle) |handle| {
                     if (std.meta.eql(handle, response.matched.handle)) {
+                        const result = Engine.Event.Consumption{
+                            .consumed = true,
+                            .responder = if (response.matched.terminal) pending.entry.record else null,
+                        };
                         self.onProbeResponse(core, response, now_ms);
                         self.next_start_ms = now_ms;
-                        return true;
+                        return result;
                     }
                 }
             }
             if (self.pending == null and self.next_start_ms != null and
                 response.matched.response == .pong)
             {
-                const entry = core.peerRecord(&response.peer.node_id) orelse return false;
-                if (!entry.peer.eql(&response.peer)) return false;
+                const entry = core.peerRecord(&response.peer.node_id) orelse return .{};
+                if (!entry.peer.eql(&response.peer)) return .{};
                 if (response.matched.response.pong.enr_sequence > entry.record.sequence) {
                     self.pending = .{ .entry = entry, .kind = .enr, .ready_ms = now_ms };
                     self.next_start_ms = now_ms;
                 }
             }
         },
-        .failed => |failed| return self.onFailure(core, failed.handle, now_ms, .local),
+        .failed => |failed| return .{ .consumed = self.onFailure(core, failed.handle, now_ms, .local) },
         else => {},
     }
-    return false;
+    return .{};
 }
 
 pub fn onFailure(
