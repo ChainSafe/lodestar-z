@@ -30,7 +30,7 @@ pub export fn zig_fuzz_test(buf: [*]const u8, len: usize) callconv(.c) void {
     var scratch: [codec.frame_scratch_max]u8 = undefined;
     const control = which.isControl();
     var decoder = if (control)
-        codec.Decoder.initResponse(.{ .min = which.info().response_min, .max = which.info().response_max }, false, &sink, scratch[0..rr.reqresp.control_scratch_length])
+        codec.Decoder.initResponse(.{ .min = which.info().response_min, .max = which.info().response_max }, false, &sink, scratch[0..rr.protocol.control_scratch_length])
     else
         codec.Decoder.initResponseWithContext(.{ .min = 0, .max = payload_max }, &sink, &scratch);
     var offset: usize = 0;

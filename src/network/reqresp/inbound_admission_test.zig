@@ -1,7 +1,8 @@
+const RequestIO = @import("RequestIO.zig");
 const std = @import("std");
-const rr = @import("reqresp.zig");
+const rr = @import("ReqResp.zig");
 const Protocol = @import("protocol.zig").Protocol;
-const Plan = @import("receive_plan.zig").Plan;
+const Plan = @import("ReceivePlan.zig");
 const PeerId = @import("../wire/peer_id.zig").PeerId;
 const types = @import("../types.zig");
 const support = @import("../quic/test_support.zig");
@@ -41,7 +42,7 @@ test "inbound admission receive exhaustion and selected handoff checks precede t
         try pair.init(.{}, .{});
         defer pair.deinit();
         const handles = try support.connectPair(&pair);
-        var owner = try rr.ReqResp.init(std.testing.allocator, options(128));
+        var owner = try rr.init(std.testing.allocator, options(128));
         defer owner.deinit();
         var router = try routing.Router.init(std.testing.allocator, .{});
         defer router.deinit();
@@ -55,7 +56,7 @@ test "inbound admission receive exhaustion and selected handoff checks precede t
         const first = Plan.first(handles.server.index, .metadata_v1);
         owner.inbound[first].request.generation = std.math.maxInt(u32);
         if (!handoff) owner.inbound[first + 1].request.generation = std.math.maxInt(u32);
-        var bytes: [rr.read_buffer_length]u8 = @splat(0);
+        var bytes: [RequestIO.read_buffer_length]u8 = @splat(0);
         const leftover: []const u8 = if (handoff) bytes[0 .. owner.inbound[first + 1].receive.read.len + 1] else &.{};
         const refused = try inboundStream(&pair, handles.client);
         defer pair.server.closeStream(refused, 0);
@@ -75,7 +76,7 @@ test "inbound admission receive exhaustion and selected handoff checks precede t
     }
 }
 
-fn readySlot(owner: *rr.ReqResp, peer: u16, which: Protocol, ordinal: u16, identity: PeerId, accepted_ms: u64) u16 {
+fn readySlot(owner: *rr, peer: u16, which: Protocol, ordinal: u16, identity: PeerId, accepted_ms: u64) u16 {
     const index: u16 = @intCast(Plan.first(peer, which) + ordinal);
     const slot = &owner.inbound[index];
     const conn: types.Handle = .{ .index = peer, .generation = 1 };
@@ -94,7 +95,7 @@ fn readySlot(owner: *rr.ReqResp, peer: u16, which: Protocol, ordinal: u16, ident
     return index;
 }
 
-fn deferStart(owner: *rr.ReqResp, index: u16, now_ms: u64) void {
+fn deferStart(owner: *rr, index: u16, now_ms: u64) void {
     const slot = &owner.inbound[index];
     slot.admission.start_pending = true;
     slot.admission.eligible_ms = owner.admission.limiter.startAt(&slot.identity, slot.request.protocol.isControl(), now_ms);
@@ -103,7 +104,7 @@ fn deferStart(owner: *rr.ReqResp, index: u16, now_ms: u64) void {
 }
 
 test "inbound admission delayed decode and equal timestamps retain acceptance then slot ordering" {
-    var owner = try rr.ReqResp.init(std.testing.allocator, options(1));
+    var owner = try rr.init(std.testing.allocator, options(1));
     defer owner.deinit();
     const identity: PeerId = .{ .bytes = @splat(1) };
     const late = readySlot(&owner, 0, .blocks_by_root_v2, 0, identity, 10);
@@ -118,7 +119,7 @@ test "inbound admission delayed decode and equal timestamps retain acceptance th
     owner.admission.promoteReady(&owner, .{ .mono_ms = 10, .unix_s = 0 });
     try std.testing.expect(owner.inbound[late].request.pendingEvent() != null);
 
-    var ties = try rr.ReqResp.init(std.testing.allocator, options(1));
+    var ties = try rr.init(std.testing.allocator, options(1));
     defer ties.deinit();
     const low = readySlot(&ties, 0, .blocks_by_root_v2, 0, identity, 20);
     const high = readySlot(&ties, 0, .blob_sidecars_by_root_v1, 0, identity, 20);
@@ -132,7 +133,7 @@ test "inbound admission delayed decode and equal timestamps retain acceptance th
 }
 
 test "inbound admission keeps an incomplete older request out of the ready start order" {
-    var owner = try rr.ReqResp.init(std.testing.allocator, options(1));
+    var owner = try rr.init(std.testing.allocator, options(1));
     defer owner.deinit();
     const identity: PeerId = .{ .bytes = @splat(2) };
     const early = readySlot(&owner, 0, .blocks_by_root_v2, 0, identity, 1);
@@ -146,7 +147,7 @@ test "inbound admission keeps an incomplete older request out of the ready start
 }
 
 test "inbound admission wide costs keep incremental credit and share identity quota across connections" {
-    var owner = try rr.ReqResp.init(std.testing.allocator, options(2));
+    var owner = try rr.init(std.testing.allocator, options(2));
     defer owner.deinit();
     const identity: PeerId = .{ .bytes = @splat(3) };
     const large = readySlot(&owner, 0, .blocks_by_root_v2, 0, identity, 0);
@@ -177,7 +178,7 @@ test "inbound admission wide costs keep incremental credit and share identity qu
 test "inbound admission cancellation removes each wait without refunding or spinning" {
     const Wait = enum { start, tokens, serving };
     for ([_]Wait{ .start, .tokens, .serving }) |wait| {
-        var owner = try rr.ReqResp.init(std.testing.allocator, options(1));
+        var owner = try rr.init(std.testing.allocator, options(1));
         defer owner.deinit();
         const identity: PeerId = .{ .bytes = @splat(4) };
         const index = readySlot(&owner, 0, .blocks_by_root_v2, 0, identity, 0);

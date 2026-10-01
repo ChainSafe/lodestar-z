@@ -146,7 +146,7 @@ pub const GossipProcessor = struct {
     waiting_items: [limits_mod.kind_count]usize = @splat(0),
     executing_items: [limits_mod.kind_count]usize = @splat(0),
     executing_bytes: [limits_mod.kind_count]usize = @splat(0),
-    forks: [native.topic_policy.boundary_max]@import("../reqresp/root.zig").ForkEntry = undefined,
+    forks: [native.topic_policy.boundary_max]@import("../reqresp/root.zig").ReqResp.ForkEntry = undefined,
     fork_count: usize = 0,
     source_maximum: [limits_mod.kind_count]usize = @splat(payload_max),
     sources: [@import("../gossipsub/peer_book.zig").capacity]struct {

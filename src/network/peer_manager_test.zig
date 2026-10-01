@@ -38,7 +38,7 @@ fn startProbe(manager: *PeerManager, generation: u32, now: Now) !wire.ControlRep
     const due = manager.nextControl(&pass, now) orelse return error.NoProbe;
     const probe = due.request orelse return error.NoProbe;
     try std.testing.expect(due.close == null);
-    const request: rr.RequestHandle = .{ .index = 0, .generation = generation, .direction = .outbound };
+    const request: rr.ReqResp.RequestHandle = .{ .index = 0, .generation = generation, .direction = .outbound };
     manager.controlStarted(&due, true, request, now);
     try std.testing.expect(manager.nextControl(&pass, now) == null);
     return .{ .peer = due.peer, .conn = due.conn, .request = request, .protocol = probe.protocol, .after_ready = probe.after_ready };

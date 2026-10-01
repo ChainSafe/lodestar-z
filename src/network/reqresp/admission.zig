@@ -2,14 +2,14 @@ const std = @import("std");
 const ForkSeq = @import("config").ForkSeq;
 const PeerId = @import("../wire/peer_id.zig").PeerId;
 const Protocol = @import("protocol.zig").Protocol;
-const limiter = @import("limiter.zig");
+const quota_config = @import("quotas.zig");
 
-pub const ByFork = [ForkSeq.count]limiter.Quotas;
+pub const ByFork = [ForkSeq.count]quota_config.Quotas;
 pub const Options = struct {
     identities: u16,
     peer: ByFork,
     global: ByFork,
-    starts: limiter.Quota = .{
+    starts: quota_config.Quota = .{
         .tokens = Protocol.count * @import("constants.zig").MAX_CONCURRENT_REQUESTS,
         .period_ms = @import("constants.zig").progress_timeout_ms_default,
     },
@@ -187,13 +187,13 @@ pub const Limiter = struct {
     }
 };
 
-fn available(debt: u128, quota: limiter.Quota, now_ns: u128) u128 {
+fn available(debt: u128, quota: quota_config.Quota, now_ns: u128) u128 {
     const period = @as(u128, quota.period_ms) * ns_per_ms;
     const room = (now_ns + period) -| @max(now_ns, debt);
     return room * quota.tokens / period;
 }
 
-fn next(previous: u128, cost: u128, quota: limiter.Quota, now_ns: u128) ?u128 {
+fn next(previous: u128, cost: u128, quota: quota_config.Quota, now_ns: u128) ?u128 {
     std.debug.assert(cost > 0 and cost <= quota.tokens);
     const period_ns = @as(u128, quota.period_ms) * ns_per_ms;
     const charge_ns = (cost * period_ns + quota.tokens - 1) / quota.tokens;

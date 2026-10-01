@@ -17,7 +17,7 @@ pub const Cell = struct {
     sequence: u64 = 0,
     identity: n.PeerId = undefined,
     connection: n.quic.Engine.Handle = undefined,
-    handle: rr.RequestHandle = undefined,
+    handle: rr.ReqResp.RequestHandle = undefined,
     native: bool = false,
     serving_retained: bool = false,
     release_requested: bool = false,
@@ -26,7 +26,7 @@ pub const Cell = struct {
     response: []u8 = &.{},
     reservation: usize = 0,
     response_reservation: usize = 0,
-    context: ?rr.ForkEntry = null,
+    context: ?rr.ReqResp.ForkEntry = null,
     copying: bool = false,
     exposed: bool = false,
     /// The host's stream awaits its close, which an exchange delivers once the stream ends.
@@ -282,7 +282,7 @@ fn rejection(err: anyerror) !Rejection {
         else => err,
     };
 }
-fn failure(reason: rr.Failure) !Failure {
+fn failure(reason: rr.ReqResp.Failure) !Failure {
     return switch (reason) {
         .timeout => .timeout,
         .host_timeout => .host_timeout,
@@ -377,7 +377,7 @@ pub fn flags(runtime: *Runtime, now: n.Now) !bool {
     table.cursor = (table.cursor + 4) % table.cells.len;
     return more;
 }
-pub fn captureLocked(runtime: *Runtime, event: rr.Event, now: n.Now) !void {
+pub fn captureLocked(runtime: *Runtime, event: rr.ReqResp.Event, now: n.Now) !void {
     const table = if (runtime.incoming) |*table| table else return;
     if (event == .request) return admitLocked(runtime, event.request, now) catch |err| switch (@as(anyerror, err)) {
         error.OutOfMemory => {
@@ -442,7 +442,7 @@ pub fn captureLocked(runtime: *Runtime, event: rr.Event, now: n.Now) !void {
         break;
     }
 }
-fn admitLocked(runtime: *Runtime, request: @FieldType(rr.Event, "request"), now: n.Now) !void {
+fn admitLocked(runtime: *Runtime, request: @FieldType(rr.ReqResp.Event, "request"), now: n.Now) !void {
     const table = &runtime.incoming.?;
     const core = &runtime.heavy.?.core;
     const identity = core.transport.engine.peerId(request.peer) orelse {

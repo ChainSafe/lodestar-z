@@ -1,5 +1,5 @@
 const std = @import("std");
-const rr = @import("reqresp.zig");
+const rr = @import("ReqResp.zig");
 const codec = @import("codec.zig");
 const Protocol = @import("protocol.zig").Protocol;
 const harness = @import("test_pair.zig");

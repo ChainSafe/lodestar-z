@@ -9,7 +9,7 @@ const rr = @import("reqresp/root.zig");
 const Engine = @import("quic/Engine.zig");
 
 /// Hands peer control a reply the remote did not send, as the owner hands it a real one, and rekeys.
-fn reply(node: *@import("network_core.zig").NetworkCore, op: *const @import("control_protocol.zig").Operation, event: rr.Event, now: @import("types.zig").Now) void {
+fn reply(node: *@import("network_core.zig").NetworkCore, op: *const @import("control_protocol.zig").Operation, event: rr.ReqResp.Event, now: @import("types.zig").Now) void {
     const manager = &node.peer_manager;
     const observed = op.reply();
     manager.controlReplied(&observed, event, now, node.current_slot);
@@ -42,7 +42,7 @@ test "core fork revalidation protects retention but old replies never restore ap
     try std.testing.expectEqual(rr.Protocol.status_v2, op.protocol);
     var bytes: [wire.status_size_max]u8 = undefined;
     const length = try wire.encodeStatus(.status_v2, &setup.server.peer_manager.local.status, &bytes);
-    const old: rr.Event = .{ .chunk = .{ .request = op.request.?, .bytes = bytes[0..length], .fork = null } };
+    const old: rr.ReqResp.Event = .{ .chunk = .{ .request = op.request.?, .bytes = bytes[0..length], .fork = null } };
     reply(&setup.client, op, old, setup.pair.now);
     try std.testing.expect(!setup.client.peer_manager.catalog.get(peer.peer).?.relevant);
     try std.testing.expect(setup.client.peer_manager.catalog.get(peer.peer).?.disconnect_reason == null);
@@ -338,7 +338,7 @@ test "core control accepts zero custody metadata without retaining previous cust
     for (0..80) |_| {
         try setup.pair.pump();
         var transport: [32]Engine.Event = undefined;
-        var output: [16]rr.Event = undefined;
+        var output: [16]rr.ReqResp.Event = undefined;
         const counts = setup.server.service.process(setup.pair.server, setup.pair.events(setup.pair.server, &transport), setup.pair.now, .{ .control = &output });
         for (output[0..counts.control]) |event| switch (event) {
             .request => |incoming| {
@@ -490,7 +490,7 @@ fn previousStatus(setup: *Setup) !void {
         try setup.pair.pump();
         var events: [32]Engine.Event = undefined;
         _ = try setup.turn(&setup.server, .{});
-        var out: [1]rr.Event = undefined;
+        var out: [1]rr.ReqResp.Event = undefined;
         const count = setup.client.service.process(setup.pair.client, setup.pair.events(setup.pair.client, &events), setup.pair.now, .{ .application = &.{}, .control = &out });
         for (out[0..count.control]) |event| switch (event) {
             .chunk => |chunk| {
@@ -572,7 +572,7 @@ test "core control native Fulu serves older schemas but old Status cannot establ
                     goodbye_writer = true;
                 };
             }
-            var output: [1]rr.Event = undefined;
+            var output: [1]rr.ReqResp.Event = undefined;
             const counts = setup.client.service.process(setup.pair.client, setup.pair.events(
                 setup.pair.client,
                 &transport,
@@ -641,7 +641,7 @@ test "core native application response borrows survive same turn hard close" {
     var sent = false;
     for (0..50) |_| {
         try setup.pair.pump();
-        var output: [1]rr.Event = undefined;
+        var output: [1]rr.ReqResp.Event = undefined;
         const server = (try setup.turn(&setup.server, .{ .application = &output })).counts;
         if (server.application == 1) switch (output[0]) {
             .request => |incoming| {
@@ -779,9 +779,9 @@ test "core native inbound application per peer cap protects control from extra r
     for (0..40) |_| try setup.step(0);
     try std.testing.expectEqual(@as(u16, 1), setup.client.peer_manager.peerCounts().relevant);
     var count: usize = 0;
-    var first: ?rr.RequestHandle = null;
+    var first: ?rr.ReqResp.RequestHandle = null;
     for (0..20) |_| {
-        var output: [1]rr.Event = undefined;
+        var output: [1]rr.ReqResp.Event = undefined;
         const result = (try setup.turn(&setup.server, .{ .application = &output })).counts;
         if (result.application == 1 and output[0] == .request) {
             count += 1;
@@ -878,7 +878,7 @@ test "core control native Goodbye maps shutdown incompatibility and fault wire r
             try setup.pair.pump();
             var transport: [32]Engine.Event = undefined;
             _ = try setup.turn(&setup.client, .{});
-            var control: [1]rr.Event = undefined;
+            var control: [1]rr.ReqResp.Event = undefined;
             const counts = setup.server.service.process(setup.pair.server, setup.pair.events(setup.pair.server, &transport), setup.pair.now, .{ .application = &.{}, .control = &control });
             if (counts.control == 0) continue;
             try std.testing.expectEqual(rr.Protocol.goodbye_v1, control[0].request.protocol);
@@ -1061,7 +1061,7 @@ test "core control capabilities pre-Fulu Metadata3 serves configured custody cou
         try setup.pair.pump();
         var events: [32]Engine.Event = undefined;
         _ = try setup.turn(&setup.server, .{});
-        var out: [1]rr.Event = undefined;
+        var out: [1]rr.ReqResp.Event = undefined;
         const counts = setup.client.service.process(setup.pair.client, setup.pair.events(setup.pair.client, &events), setup.pair.now, .{ .application = &.{}, .control = &out });
         for (out[0..counts.control]) |event| switch (event) {
             .chunk => |chunk| {
@@ -1255,7 +1255,7 @@ test "core native application response borrows survive immediate public close" {
     var received = false;
     for (0..50) |_| {
         try setup.pair.pump();
-        var output: [1]rr.Event = undefined;
+        var output: [1]rr.ReqResp.Event = undefined;
         const server = (try setup.turn(&setup.server, .{ .application = &output })).counts;
         if (server.application == 1) switch (output[0]) {
             .request => |incoming| {
@@ -1294,7 +1294,7 @@ test "application graceful quiescence sends shutdown Goodbye and suppresses admi
         try setup.pair.pump();
         var transport: [32]Engine.Event = undefined;
         _ = try setup.turn(&setup.client, .{});
-        var control: [1]rr.Event = undefined;
+        var control: [1]rr.ReqResp.Event = undefined;
         const counts = setup.server.service.process(setup.pair.server, setup.pair.events(setup.pair.server, &transport), setup.pair.now, .{ .application = &.{}, .control = &control });
         if (counts.control == 0) continue;
         try std.testing.expectEqual(rr.Protocol.goodbye_v1, control[0].request.protocol);
@@ -1319,7 +1319,7 @@ fn expectQuiescentGoodbye(setup: *Setup, serving: usize) !void {
         for (setup.client.service.reqresp.inbound) |slot| {
             if (slot.request.occupied() and !slot.request.protocol.isControl()) try std.testing.expect(slot.request.pendingEvent() == null);
         }
-        var control: [8]rr.Event = undefined;
+        var control: [8]rr.ReqResp.Event = undefined;
         const counts = setup.server.service.process(setup.pair.server, setup.pair.events(setup.pair.server, &transport), setup.pair.now, .{ .application = &.{}, .control = &control });
         for (control[0..counts.control]) |event| {
             if (event != .request or event.request.protocol != .goodbye_v1) continue;
@@ -1366,7 +1366,7 @@ fn quiescenceRequest(mode: enum { fin, selection, borrowed }) !void {
     try std.testing.expect(held);
     var borrowed: []const u8 = &.{};
     if (mode == .borrowed) {
-        var application: [1]rr.Event = undefined;
+        var application: [1]rr.ReqResp.Event = undefined;
         const counts = (try setup.turn(&setup.client, .{ .application = &application })).counts;
         try std.testing.expectEqual(@as(usize, 1), counts.application);
         borrowed = application[0].request.bytes;
@@ -1490,7 +1490,7 @@ test "core control response deadline survives continuous peer progress" {
     const conn = snapshots[0].connection.?;
     try std.testing.expect(setup.client.peer_manager.reStatusPeer(peer, conn, setup.pair.now));
     _ = try setup.turn(&setup.client, .{});
-    var request: ?rr.RequestHandle = null;
+    var request: ?rr.ReqResp.RequestHandle = null;
     for (setup.client.control_protocol.operations) |op| if (op.request != null and op.protocol == .status_v1) {
         request = op.request;
     };
@@ -1499,7 +1499,7 @@ test "core control response deadline survives continuous peer progress" {
     for (0..80) |_| {
         try setup.pair.pump();
         var transport: [32]Engine.Event = undefined;
-        var incoming: [16]rr.Event = undefined;
+        var incoming: [16]rr.ReqResp.Event = undefined;
         const counts = setup.server.service.process(setup.pair.server, setup.pair.events(setup.pair.server, &transport), setup.pair.now, .{ .control = &incoming });
         for (incoming[0..counts.control]) |event| if (event == .request and event.request.protocol == .status_v1) {
             remote_stream = setup.server.service.reqresp.inbound[event.request.request.index].request.stream;
@@ -1551,7 +1551,7 @@ test "core coalesces silent inbound request owners before host request delivery"
     try std.testing.expectEqual(@as(u16, 2), setup.server.service.reqresp.active().inbound);
     setup.pair.advance(10_000);
     // Both expired slots are serviced from the deadline heap in one turn.
-    var events: [2]rr.Event = undefined;
+    var events: [2]rr.ReqResp.Event = undefined;
     const result = (try setup.turn(&setup.server, .{ .application = &events })).counts;
     try std.testing.expectEqual(@as(usize, 2), result.application);
     for (events) |event| try std.testing.expect(event == .failed and event.failed.reason == .timeout);
@@ -1589,7 +1589,7 @@ test "core control scores intrinsic decoding once and keeps custody schema limit
         for (0..80) |_| {
             try setup.pair.pump();
             var transport: [32]Engine.Event = undefined;
-            var output: [16]rr.Event = undefined;
+            var output: [16]rr.ReqResp.Event = undefined;
             const counts = setup.server.service.process(setup.pair.server, setup.pair.events(setup.pair.server, &transport), setup.pair.now, .{ .control = &output });
             for (output[0..counts.control]) |event| switch (event) {
                 .request => |incoming| {
@@ -1630,14 +1630,14 @@ test "core request terminal scores captured identity without a JavaScript consum
     for (0..60) |_| {
         try setup.pair.pump();
         var transport: [32]Engine.Event = undefined;
-        var incoming: [16]rr.Event = undefined;
+        var incoming: [16]rr.ReqResp.Event = undefined;
         const accepted = setup.server.service.process(setup.pair.server, setup.pair.events(setup.pair.server, &transport), setup.pair.now, .{ .application = &incoming });
         for (incoming[0..accepted.application]) |event| if (event == .request) {
             const stream = setup.server.service.reqresp.inbound[event.request.request.index].request.stream;
             try std.testing.expectEqual(@as(usize, 5), try setup.pair.server.write(stream, &.{ 0, 99, 99, 99, 99 }, true));
             sent = true;
         };
-        var output: [32]rr.Event = undefined;
+        var output: [32]rr.ReqResp.Event = undefined;
         const received = (try setup.turn(&setup.client, .{ .application = &output })).counts;
         for (output[0..received.application]) |event| if (event == .failed) {
             try std.testing.expect(!terminal);

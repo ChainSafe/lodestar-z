@@ -527,7 +527,7 @@ const Spoke = struct {
         try shared.chain.subscribe(&self.core, options, self.index, now);
         const schedule = shared.schedule.of(self.index);
         var peer_events: [16]t.Event = undefined;
-        var application: [4]network.reqresp.Event = undefined;
+        var application: [4]network.reqresp.ReqResp.Event = undefined;
         const outputs: network.network_core.Outputs = .{ .peers = &peer_events, .application = &application };
         var cursor: usize = 0;
         var signalled = false;
@@ -754,7 +754,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     }
 
     var peer_events: [64]t.Event = undefined;
-    var application: [16]network.reqresp.Event = undefined;
+    var application: [16]network.reqresp.ReqResp.Event = undefined;
     const outputs: network.network_core.Outputs = .{ .peers = &peer_events, .application = &application };
     const setup_start = try network.transport.currentTime(io);
     for (0..1 << 20) |_| {

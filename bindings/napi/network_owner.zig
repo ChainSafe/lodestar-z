@@ -23,7 +23,7 @@ pub const Owner = struct {
     key: n.KeyPair = undefined,
     records: [n.peers.discovery.bootstrap_max]d.identity.enr.Record = undefined,
     outputs: [32]n.peers.Event = undefined,
-    application_outputs: [32]n.reqresp.Event = undefined,
+    application_outputs: [32]n.reqresp.ReqResp.Event = undefined,
     application: application_config.Config = undefined,
     /// The bridge measurements of the latest render.
     bridge: bridge.Snapshot = .{},

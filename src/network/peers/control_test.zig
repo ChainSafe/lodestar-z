@@ -58,7 +58,7 @@ test "control start quota and cursor preserve order across Identify and RPC star
             try std.testing.expectEqual(expected.work[seen].request, if (due.request) |probe| probe.protocol else null);
             control.identifyStarted(due, true, now);
             if (due.request != null) {
-                const request: rr.RequestHandle = .{ .index = @intCast(due.index), .generation = 1, .direction = .outbound };
+                const request: rr.ReqResp.RequestHandle = .{ .index = @intCast(due.index), .generation = 1, .direction = .outbound };
                 control.requestStarted(due, request, now);
                 control.replied(&catalog, &.{ .peer = due.peer, .conn = due.conn, .request = request, .protocol = due.request.?.protocol, .cancelled = true }, .{ .done = .{ .request = request, .chunks = 1 } }, &local, now, 0);
             }
@@ -113,7 +113,7 @@ fn statusVerdict(local: *const t.LocalState, remote: *const t.Status, slot: u64)
     const protocol: w.Protocol = if (remote.earliest_available_slot == null) .status_v1 else .status_v2;
     var bytes: [w.status_size_max]u8 = undefined;
     const len = try w.encodeStatus(protocol, remote, &bytes);
-    const request: rr.RequestHandle = .{ .index = 0, .generation = 1, .direction = .inbound };
+    const request: rr.ReqResp.RequestHandle = .{ .index = 0, .generation = 1, .direction = .inbound };
     control.requested(&catalog, peer, &.{ .request = request, .peer = conn, .protocol = protocol, .bytes = bytes[0..len] }, local, now, slot);
     const snapshot = catalog.get(peer).?;
     if (snapshot.disconnect_reason) |reason| {

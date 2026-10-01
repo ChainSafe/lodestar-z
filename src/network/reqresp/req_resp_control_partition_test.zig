@@ -1,9 +1,8 @@
 const std = @import("std");
-const rr = @import("reqresp.zig");
+const rr = @import("ReqResp.zig");
 const protocol = @import("protocol.zig");
 const routing = @import("../router.zig");
 const support = @import("../quic/test_support.zig");
-const service_mod = @import("../service.zig");
 const Engine = @import("../quic/Engine.zig");
 const reservedOptions = @import("control_fixture.zig").reservedOptions;
 
@@ -14,7 +13,7 @@ test "reqresp drain retains blocked terminals across control and application par
     const handles = try support.connectPair(&pair);
     var router = try routing.Router.init(std.testing.allocator, .{});
     defer router.deinit();
-    var requests = try rr.ReqResp.init(std.testing.allocator, try reservedOptions());
+    var requests = try rr.init(std.testing.allocator, try reservedOptions());
     defer requests.deinit();
     const size = protocol.Protocol.blocks_by_root_v2.info().response_max;
     const sink = try std.testing.allocator.alloc(u8, 2 * size);

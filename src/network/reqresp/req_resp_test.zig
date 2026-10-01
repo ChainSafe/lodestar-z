@@ -1,9 +1,7 @@
 const std = @import("std");
 const ct = @import("consensus_types");
 const protocol = @import("protocol.zig");
-const protocol_mod = protocol;
-const reqresp = @import("reqresp.zig");
-const ReqResp = reqresp.ReqResp;
+const ReqResp = @import("ReqResp.zig");
 const Engine = @import("../quic/Engine.zig");
 const Protocol = protocol.Protocol;
 const test_pair = @import("test_pair.zig");
@@ -17,7 +15,7 @@ const Exchange = struct {
     served: bool = false,
     chunks: u32 = 0,
     done: bool = false,
-    failed: ?reqresp.Failure = null,
+    failed: ?ReqResp.Failure = null,
 };
 
 fn serveStatus(setup: *Pair, reply: []const u8, exchange: *Exchange) !void {
@@ -180,7 +178,7 @@ test "reqresp streams blocks by range chunks with fork context" {
     for (&blocks, 0..) |*block, which| {
         for (block, 0..) |*byte, index| byte.* = @truncate(index *% (which + 3) +% which);
     }
-    var served_handle: ?reqresp.RequestHandle = null;
+    var served_handle: ?ReqResp.RequestHandle = null;
     var sent: u32 = 0;
     var received: u32 = 0;
     var done = false;
@@ -256,7 +254,7 @@ test "reqresp rejects undersized sinks and stale handles" {
         .{},
         setup.shared.pair.now,
     ));
-    const stale = reqresp.RequestHandle{ .index = 0, .generation = 99, .direction = .outbound };
+    const stale = ReqResp.RequestHandle{ .index = 0, .generation = 99, .direction = .outbound };
     try std.testing.expect(!setup.shared.client.reqresp.consume(stale, setup.shared.pair.now));
     try std.testing.expect(!setup.shared.server.reqresp.finish(.{ .index = 0, .generation = 99, .direction = .inbound }, setup.shared.pair.now));
     try std.testing.expectEqual(@as(usize, 0), setup.shared.client.reqresp.errorMessage(stale).len);

@@ -1,6 +1,6 @@
 const limits_mod = @import("../gossip_limits.zig");
 const policy = @import("../gossipsub/topic_policy.zig");
-const ForkEntry = @import("../reqresp/root.zig").ForkEntry;
+const ForkEntry = @import("../reqresp/root.zig").ReqResp.ForkEntry;
 
 pub const Plan = struct {
     capacity: usize,

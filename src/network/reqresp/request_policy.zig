@@ -3,7 +3,7 @@ const ForkSeq = @import("config").ForkSeq;
 const constants = @import("constants");
 const preset = @import("preset");
 const Protocol = @import("protocol.zig").Protocol;
-const limiter = @import("limiter.zig");
+const quota_config = @import("quotas.zig");
 const ct = @import("consensus_types");
 
 pub const BlobLimit = struct { start_slot: u64, max_blobs: u32 };
@@ -127,8 +127,8 @@ pub const Policy = struct {
         return maximum;
     }
 
-    pub fn defaultQuotas(self: *const Policy, fork: ForkSeq) limiter.Quotas {
-        var out = limiter.defaultQuotas();
+    pub fn defaultQuotas(self: *const Policy, fork: ForkSeq) quota_config.Quotas {
+        var out = quota_config.defaultQuotas();
         for ([_]Protocol{ .blocks_by_range_v2, .blocks_by_root_v2 }) |which|
             out[@intFromEnum(which)].tokens = self.blocks(fork);
         out[@intFromEnum(Protocol.blocks_by_head_v1)].tokens = self.config.blocks_deneb;

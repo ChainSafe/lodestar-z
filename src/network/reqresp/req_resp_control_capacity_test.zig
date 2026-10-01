@@ -1,5 +1,6 @@
+const RequestIO = @import("RequestIO.zig");
 const std = @import("std");
-const rr = @import("reqresp.zig");
+const rr = @import("ReqResp.zig");
 const protocol = @import("protocol.zig");
 const routing = @import("../router.zig");
 const support = @import("../quic/test_support.zig");
@@ -15,7 +16,7 @@ test "reqresp blocked control writers leave other admitted identities able to se
         .application_requests_max = 8,
         .admission_policy = @import("policy_fixture.zig").config(),
     });
-    var requests = try rr.ReqResp.init(std.testing.allocator, resolved.core.service.reqresp);
+    var requests = try rr.init(std.testing.allocator, resolved.core.service.reqresp);
     defer requests.deinit();
     const now: @import("../types.zig").Now = .{ .mono_ms = 1, .unix_s = 0 };
     const metadata: [16]u8 = @splat(0);
@@ -27,7 +28,7 @@ test "reqresp blocked control writers leave other admitted identities able to se
         try std.testing.expectEqual(.admitted, requests.admission.promote(&requests, @intCast(index), now));
         const incoming = slot.deliver(true, now).?.request;
         try requests.respond(incoming.request, &metadata, null, now);
-        try std.testing.expectEqual(@import("server.zig").State.writing_chunk, slot.state);
+        try std.testing.expectEqual(@import("Server.zig").State.writing_chunk, slot.state);
         try std.testing.expect(slot.request.io.scratch.len < 1024);
         const frame = try slot.request.io.writer.next(slot.request.io.scratch);
         try std.testing.expect(frame.len > 0);
@@ -50,7 +51,7 @@ test "reqresp decoder captures configured root byte bounds before reading a body
     options.admission.policy.blob_identifiers_deneb = 2;
     options.admission.policy.blob_identifiers_electra = 3;
     options.request_fork = .deneb;
-    var requests = try rr.ReqResp.init(std.testing.allocator, options);
+    var requests = try rr.init(std.testing.allocator, options);
     defer requests.deinit();
     defer requests.shutdown(&pair.server, &router);
     const first = try requests.accept(&pair.server, try inboundStream(&pair, handles.client), .{
@@ -76,21 +77,21 @@ test "reqresp decoder captures configured root byte bounds before reading a body
 
 test "reqresp partitions compact outbound control storage without consuming application capacity" {
     const options = try reservedOptions();
-    var requests = try rr.ReqResp.init(std.testing.allocator, options);
+    var requests = try rr.init(std.testing.allocator, options);
     defer requests.deinit();
     for (0..options.outbound_control_reserved) |index| {
         try std.testing.expectEqual(@as(?u16, @intCast(index)), requests.availableOutboundFor(.status_v2));
         const slot = &requests.outbound[index];
-        try std.testing.expectEqual(rr.control_scratch_length, slot.request.io.scratch.len);
-        try std.testing.expectEqual(rr.control_read_buffer_length, slot.request.io.read_buffer.len);
+        try std.testing.expectEqual(protocol.control_scratch_length, slot.request.io.scratch.len);
+        try std.testing.expectEqual(RequestIO.control_read_buffer_length, slot.request.io.read_buffer.len);
         slot.request.completion = .active;
         slot.request.protocol = .status_v2;
     }
     try std.testing.expectEqual(@as(?u16, null), requests.availableOutboundFor(.ping_v1));
     try std.testing.expectEqual(@as(?u16, options.outbound_control_reserved), requests.availableOutboundFor(.blocks_by_root_v2));
     for (requests.outbound[options.outbound_control_reserved..]) |*slot| {
-        try std.testing.expectEqual(rr.scratch_length, slot.request.io.scratch.len);
-        try std.testing.expectEqual(rr.read_buffer_length, slot.request.io.read_buffer.len);
+        try std.testing.expectEqual(RequestIO.scratch_length, slot.request.io.scratch.len);
+        try std.testing.expectEqual(RequestIO.read_buffer_length, slot.request.io.read_buffer.len);
     }
 }
 
@@ -101,11 +102,11 @@ test "reqresp compact control admission rejects oversized handoffs before claimi
     const handles = try support.connectPair(&pair);
     var router = try routing.Router.init(std.testing.allocator, .{});
     defer router.deinit();
-    var requests = try rr.ReqResp.init(std.testing.allocator, try reservedOptions());
+    var requests = try rr.init(std.testing.allocator, try reservedOptions());
     defer requests.deinit();
     defer requests.shutdown(&pair.server, &router);
     const stream = try inboundStream(&pair, handles.client);
-    var bytes: [rr.control_read_buffer_length + 1]u8 = @splat(0);
+    var bytes: [RequestIO.control_read_buffer_length + 1]u8 = @splat(0);
     try std.testing.expectError(error.InvalidHandoff, requests.accept(&pair.server, stream, .{
         .protocol = .{ .reqresp = .ping_v1 },
         .leftover = &bytes,
@@ -122,7 +123,7 @@ test "reqresp control capacity protects outbound slots and retains terminal owne
     const handles = try support.connectPair(&pair);
     var router = try routing.Router.init(std.testing.allocator, .{});
     defer router.deinit();
-    var requests = try rr.ReqResp.init(std.testing.allocator, try reservedOptions());
+    var requests = try rr.init(std.testing.allocator, try reservedOptions());
     defer requests.deinit();
     const size = protocol.Protocol.blocks_by_root_v2.info().response_max;
     const sinks = try std.testing.allocator.alloc(u8, size * 3);
@@ -261,9 +262,9 @@ test "reqresp control capacity bounds application requests per peer across proto
     const handles = try support.connectPair(&pair);
     var router = try routing.Router.init(std.testing.allocator, .{});
     defer router.deinit();
-    var options: rr.Options = .{ .admission = try rr.AdmissionOptions.defaults(&@import("policy_fixture.zig").config(), 8, 2, 4), .outbound_max = 4, .inbound_max = 4, .forks = &.{} };
+    var options: rr.Options = .{ .admission = try rr.Options.Admission.defaults(&@import("policy_fixture.zig").config(), 8, 2, 4), .outbound_max = 4, .inbound_max = 4, .forks = &.{} };
     options.outbound_per_peer_max = 2;
-    var requests = try rr.ReqResp.init(std.testing.allocator, options);
+    var requests = try rr.init(std.testing.allocator, options);
     defer requests.deinit();
     const size = protocol.Protocol.blocks_by_root_v2.info().response_max;
     const sinks = try std.testing.allocator.alloc(u8, 3 * size);
@@ -422,13 +423,13 @@ test "reqresp admission refusals distinguish capacity and concurrency without fa
         const handles = try support.connectPair(&pair);
         var router = try routing.Router.init(std.testing.allocator, .{});
         defer router.deinit();
-        var requests = try rr.ReqResp.init(std.testing.allocator, .{
+        var requests = try rr.init(std.testing.allocator, .{
             .outbound_max = 1,
             .inbound_max = case.slots,
             .inbound_per_peer_max = case.peer_limit,
             .inbound_application_per_peer_max = case.application_limit,
             .forks = &.{},
-            .admission = try rr.AdmissionOptions.defaults(&@import("policy_fixture.zig").config(), 8, 2, case.slots),
+            .admission = try rr.Options.Admission.defaults(&@import("policy_fixture.zig").config(), 8, 2, case.slots),
         });
         defer requests.deinit();
         defer requests.shutdown(&pair.server, &router);
@@ -460,34 +461,34 @@ test "reqresp control capacity validates headroom and cleans every allocation pr
     options.outbound_control_reserved = 5;
     try std.testing.expectError(
         error.InvalidOptions,
-        rr.ReqResp.init(std.testing.allocator, options),
+        rr.init(std.testing.allocator, options),
     );
     options = try reservedOptions();
     options.inbound_control_reserved = 5;
     try std.testing.expectError(
         error.InvalidOptions,
-        rr.ReqResp.init(std.testing.allocator, options),
+        rr.init(std.testing.allocator, options),
     );
     options = try reservedOptions();
     options.outbound_per_peer_max = 3;
     try std.testing.expectError(
         error.InvalidOptions,
-        rr.ReqResp.init(std.testing.allocator, options),
+        rr.init(std.testing.allocator, options),
     );
     options = try reservedOptions();
     options.inbound_application_per_peer_max = 3;
     options.inbound_max = 16;
     options.inbound_per_peer_max = 2;
-    try std.testing.expectError(error.InvalidOptions, rr.ReqResp.init(std.testing.allocator, options));
+    try std.testing.expectError(error.InvalidOptions, rr.init(std.testing.allocator, options));
     options = try reservedOptions();
     options.outbound_max = 64;
     options.outbound_per_peer_max = 61;
     try std.testing.expectError(
         error.InvalidOptions,
-        rr.ReqResp.init(std.testing.allocator, options),
+        rr.init(std.testing.allocator, options),
     );
     options.outbound_per_peer_max = 60;
-    var valid = try rr.ReqResp.init(std.testing.allocator, options);
+    var valid = try rr.init(std.testing.allocator, options);
     defer valid.deinit();
     try std.testing.expectError(
         error.InvalidLimits,
@@ -503,9 +504,9 @@ test "reqresp control capacity zero defaults retain all ordinary slots and admis
     try pair.init(.{}, .{});
     defer pair.deinit();
     const handles = try support.connectPair(&pair);
-    var requests = try rr.ReqResp.init(
+    var requests = try rr.init(
         std.testing.allocator,
-        .{ .outbound_max = 4, .inbound_max = 4, .forks = &.{}, .admission = try rr.AdmissionOptions.defaults(&@import("policy_fixture.zig").config(), 8, 2, 4) },
+        .{ .outbound_max = 4, .inbound_max = 4, .forks = &.{}, .admission = try rr.Options.Admission.defaults(&@import("policy_fixture.zig").config(), 8, 2, 4) },
     );
     defer requests.deinit();
     var router = try routing.Router.init(std.testing.allocator, .{ .negotiations_max = 4 });

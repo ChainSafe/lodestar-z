@@ -1,9 +1,9 @@
 const std = @import("std");
-const rr = @import("reqresp.zig");
+const rr = @import("ReqResp.zig");
 const codec = @import("codec.zig");
 const Protocol = @import("protocol.zig").Protocol;
 const Pair = @import("test_pair.zig").Pair;
-const Server = @import("server.zig").Server;
+const Server = @import("Server.zig");
 
 fn incoming(setup: *Pair) *Server {
     for (setup.shared.server.reqresp.inbound) |*slot| if (slot.request.occupied()) return slot;

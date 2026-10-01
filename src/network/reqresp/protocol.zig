@@ -11,6 +11,7 @@ const assert = std.debug.assert;
 
 pub const prefix = "/eth2/beacon_chain/req/";
 pub const suffix = "/ssz_snappy";
+pub const control_scratch_length = codec.frameLengthMax(@max(payloadMaxControl(), codec.error_message_max));
 
 pub const Protocol = enum(u8) {
     status_v1,

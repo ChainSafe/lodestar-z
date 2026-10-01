@@ -327,7 +327,7 @@ fn writeRequests(self: *const Context, w: *prom.Encoder) prom.Error!void {
     });
     for (rr.protocol.methods, 0..) |method, index| {
         if (!firstMethod(index)) continue;
-        inline for (std.meta.fields(rr.reqresp.metrics.AdmissionRefusal)) |reason| {
+        inline for (std.meta.fields(rr.ReqResp.metrics.AdmissionRefusal)) |reason| {
             var count: u64 = 0;
             for (rr.protocol.methods, &self.owner.service.reqresp.protocol_counters) |candidate, *values| {
                 if (std.mem.eql(u8, candidate, method)) count +|= values.admission_refusals[reason.value];
@@ -340,7 +340,7 @@ fn writeRequests(self: *const Context, w: *prom.Encoder) prom.Error!void {
         .kind = .gauge,
         .help = "Occupied incoming request slots by current phase, including terminal owners awaiting recycling",
         .labels = &.{"phase"},
-    }, rr.reqresp.metrics.InboundPhase, &self.live(self.owner.service.reqresp.resourceSnapshot().inbound_phases));
+    }, rr.ReqResp.metrics.InboundPhase, &self.live(self.owner.service.reqresp.resourceSnapshot().inbound_phases));
 }
 
 fn writeRequestTimes(self: *const Context, w: *prom.Encoder) prom.Error!void {
@@ -369,7 +369,7 @@ fn writeRequestTimes(self: *const Context, w: *prom.Encoder) prom.Error!void {
         .kind = .counter,
         .help = "Terminal outgoing native failures using host request error labels",
         .labels = &.{"reason"},
-    }, rr.reqresp.metrics.ErrorReason, &self.owner.service.reqresp.outgoing_error_reasons);
+    }, rr.ReqResp.metrics.ErrorReason, &self.owner.service.reqresp.outgoing_error_reasons);
 }
 
 fn writeBridge(self: *const Context, w: *prom.Encoder) prom.Error!void {

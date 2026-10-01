@@ -1,5 +1,5 @@
 const std = @import("std");
-const rr = @import("reqresp.zig");
+const rr = @import("ReqResp.zig");
 const Pair = @import("test_pair.zig").Pair;
 
 fn request(pair: *Pair, bytes: []const u8, sink: []u8) !rr.RequestHandle {
