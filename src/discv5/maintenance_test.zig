@@ -333,7 +333,7 @@ fn start(
     out: []u8,
     id: u8,
     now_ms: u64,
-) !?Lookup.Started {
+) !?Engine.OutboundCall {
     return controller.startNext(
         core,
         out,
@@ -649,4 +649,29 @@ test "observation family rotation survives intervening routing probes" {
     }
     const ipv6 = (try start(&controller, &core, &out, 5, 2000)).?;
     try std.testing.expect(ipv6.peer.address == .ip6);
+}
+
+test "maintenance replaces an expired incumbent but preserves later authenticated liveness" {
+    const Pair = @import("transport_test_support.zig").Pair;
+    for ([_]bool{ false, true }) |authenticated_later| {
+        var setup_io: test_support.ManualIo = .{};
+        var pair: Pair = undefined;
+        try pair.init(setup_io.io(), 1, true);
+        defer pair.deinit();
+        try pair.fillBucket();
+        var controller: Maintenance = undefined;
+        try controller.init(0, .{}, .ip4);
+        defer controller.cancel(&pair.transport_a.engine);
+        var out: [1_280]u8 = undefined;
+        const started = (try controller.startNext(&pair.transport_a.engine, &out, try .init(&.{1}), 0, &test_support.sealEntropy(10))).?;
+        if (authenticated_later) _ = try pair.transport_a.engine.confirmPeer(&started.peer, &pair.record_b, std.math.maxInt(u64));
+        var expired: [4]CallTable.Expired = undefined;
+        const result = pair.transport_a.engine.tick(1, &expired);
+        try std.testing.expectEqual(@as(usize, 1), result.calls);
+        try std.testing.expect(controller.onFailure(&pair.transport_a.engine, expired[0].handle, 1, .expired));
+        try std.testing.expectEqual(@as(usize, 0), pair.transport_a.engine.routing.pendingCount());
+        try std.testing.expectEqual(authenticated_later, pair.transport_a.engine.routing.contains(&pair.record_b.node_id));
+        try std.testing.expectEqual(!authenticated_later, pair.transport_a.engine.routing.contains(&pair.candidate_id));
+        try std.testing.expectEqual(@as(usize, 0), pair.transport_a.engine.calls.count());
+    }
 }

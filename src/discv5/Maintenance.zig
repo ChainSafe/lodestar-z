@@ -4,7 +4,6 @@ const std = @import("std");
 const CallTable = @import("CallTable.zig");
 const Engine = @import("Engine.zig");
 const enr = @import("identity/enr.zig");
-const Lookup = @import("Lookup.zig");
 const message = @import("wire/message.zig");
 const RoutingTable = @import("RoutingTable.zig");
 const types = @import("types.zig");
@@ -76,7 +75,7 @@ pub fn startNext(
     request_id: message.RequestId,
     now_ms: u64,
     entropy: *const Engine.StartEntropy,
-) Error!?Lookup.Started {
+) Error!?Engine.OutboundCall {
     if (now_ms < (self.nextDeadlineMs(core) orelse return null)) return null;
     self.next_start_ms = now_ms +| self.config.retry_interval_ms;
     self.selectProbe(core, now_ms);

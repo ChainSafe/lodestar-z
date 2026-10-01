@@ -6,5 +6,4 @@ test {
     _ = crypto;
     _ = enr;
     _ = handshake;
-    _ = @import("root_test.zig");
 }

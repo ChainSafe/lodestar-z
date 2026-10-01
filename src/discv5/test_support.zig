@@ -108,6 +108,7 @@ pub fn channelConfig() Channel.Config {
 }
 
 pub const ManualIo = struct {
+    sockets: [2]bool = @splat(false),
     now_ms: u64 = 0,
     receive_advance_ms: u64 = 0,
     receive_failure: ?std.Io.Batch.AwaitConcurrentError = null,
@@ -118,6 +119,8 @@ pub const ManualIo = struct {
         const vtable = comptime blk: {
             var value = std.Io.failing.vtable.*;
             value.now = now;
+            value.netBindIp = bind;
+            value.netClose = close;
             value.randomSecure = random;
             value.netSend = send;
             value.batchAwaitConcurrent = receive;
@@ -125,6 +128,30 @@ pub const ManualIo = struct {
             break :blk value;
         };
         return .{ .userdata = self, .vtable = &vtable };
+    }
+
+    fn bind(context: ?*anyopaque, address: *const std.Io.net.IpAddress, options: std.Io.net.IpAddress.BindOptions) std.Io.net.IpAddress.BindError!std.Io.net.Socket {
+        const self: *ManualIo = @ptrCast(@alignCast(context.?));
+        std.debug.assert(address.* == .ip4 and address.getPort() == 0);
+        std.debug.assert(options.mode == .dgram and options.protocol == .udp);
+        for (&self.sockets, 0..) |*live, i| {
+            if (live.*) continue;
+            live.* = true;
+            var bound = address.*;
+            bound.ip4.port = @intCast(9_001 + i);
+            return .{ .handle = @intCast(i + 1), .address = bound };
+        }
+        return error.SystemResources;
+    }
+
+    fn close(context: ?*anyopaque, handles: []const std.Io.net.Socket.Handle) void {
+        const self: *ManualIo = @ptrCast(@alignCast(context.?));
+        for (handles) |handle| {
+            std.debug.assert(handle > 0 and handle <= self.sockets.len);
+            const live = &self.sockets[@intCast(handle - 1)];
+            std.debug.assert(live.*);
+            live.* = false;
+        }
     }
 
     fn now(context: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {

@@ -91,3 +91,7 @@ comptime {
     std.debug.assert(proof_label.len == 27);
     std.debug.assert(@sizeOf(Keys) == 32);
 }
+
+test {
+    _ = @import("handshake_test.zig");
+}

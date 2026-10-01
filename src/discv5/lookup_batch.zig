@@ -100,7 +100,7 @@ fn startCall(
     operation: *Lookup,
     progress: *Progress,
 ) Error!bool {
-    const result = try @import("lookup_io.zig").startLookup(transport, io, operation, try Transport.monotonicMilliseconds(io));
+    const result = try transport.startLookup(io, operation, try Transport.monotonicMilliseconds(io));
     if (result.failure) |err| {
         progress.failures += 1;
         return err;

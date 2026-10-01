@@ -10,8 +10,7 @@ const SessionStore = @import("SessionStore.zig");
 const types = @import("types.zig");
 const constants = @import("wire/constants.zig");
 const packet = @import("wire/packet.zig");
-const admission_mod = @import("admission.zig");
-const Admission = admission_mod.Admission;
+const Admission = @import("Admission.zig");
 
 pub const Error = crypto.Error || enr.Error || packet.Error || SessionStore.Error || error{
     InvalidLocalRecord,
@@ -139,7 +138,7 @@ pub fn init(
     if (config.challenge_capacity == 0 or config.challenge_capacity > SessionStore.challenge_capacity_max)
         return InitError.InvalidCapacity;
     var resolved = config;
-    resolved.challenge_capacity = @intCast(@min(config.challenge_capacity, admission_mod.global_quota.maximumDuring(config.challenge_timeout_ms)));
+    resolved.challenge_capacity = @intCast(@min(config.challenge_capacity, Admission.global_quota.maximumDuring(config.challenge_timeout_ms)));
     try self.sessions.init(allocator, resolved.session_capacity, resolved.challenge_capacity);
     errdefer self.sessions.deinit(allocator);
     self.admission = try Admission.init(allocator);

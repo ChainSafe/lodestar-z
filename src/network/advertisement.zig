@@ -66,7 +66,7 @@ pub fn validate(endpoints: Endpoints) error{InvalidAdvertisement}!void {
 fn validIp(ip: anytype) bool {
     const address: Address = if (ip.len == 4) .{ .ip4 = .{ .octets = ip, .port = 1 } } else .{ .ip6 = .{ .octets = ip, .port = 1 } };
     if (ip.len == 16 and ip[0] == 0xfe and ip[1] & 0xc0 == 0x80) return false;
-    return address.isUsable() and d.RoutingTable.relayAllowed(address, address);
+    return address.isUsable() and d.address_policy.relayAllowed(address, address);
 }
 
 test {

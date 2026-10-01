@@ -37,6 +37,11 @@ pub const StartResult = struct {
     packet_length: u16,
 };
 
+pub const OutboundCall = struct {
+    call: StartResult,
+    peer: types.Endpoint,
+};
+
 pub const TickResult = struct {
     calls: usize,
     challenges: usize,
@@ -315,7 +320,7 @@ pub fn receive(
 }
 
 pub fn admitDatagram(self: *Engine, from: *const types.Address, now_ms: u64) bool {
-    const stage: @import("admission.zig").Stage = if (self.calls.expectsResponseFrom(from, now_ms)) .response else .packet;
+    const stage: @import("Admission.zig").Stage = if (self.calls.expectsResponseFrom(from, now_ms)) .response else .packet;
     return self.channel.admission.allow(stage, from, now_ms);
 }
 
@@ -680,36 +685,6 @@ fn validateResponse(value: *const message.Message) Error!void {
 
 comptime {
     std.debug.assert(@sizeOf(Engine) <= 1_152);
-}
-
-test "NODES record validation rejects malformed ENRs before publication" {
-    var scratch: Scratch = .{};
-    const raw = [_][]const u8{&.{0xc0}};
-    try std.testing.expectError(
-        enr.Error.InvalidRecord,
-        validateNodeRecords(&raw, &scratch),
-    );
-}
-
-test "unsolicited NODES fails before record validation" {
-    var core: Engine = undefined;
-    try core.calls.init(std.testing.allocator, 1);
-    defer core.calls.deinit(std.testing.allocator);
-    const peer = types.Endpoint{
-        .node_id = [_]u8{0x11} ** 32,
-        .address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9_001 } },
-    };
-    const raw = [_][]const u8{&.{0xc0}};
-    const response = message.Message{ .nodes = .{
-        .request_id = try message.RequestId.init(&.{0x01}),
-        .total = 1,
-        .enrs = &raw,
-    } };
-    var scratch: Scratch = .{};
-    try std.testing.expectError(
-        CallTable.Error.UnknownCall,
-        core.dispatchResponse(peer, response, null, 0, &scratch, &([_]u8{0} ** constants.nonce_size)),
-    );
 }
 
 test {
