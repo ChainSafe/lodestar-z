@@ -324,11 +324,11 @@ export declare class BeaconStateView {
     isBlinded: boolean,
     proposerRewards?: ProposerRewards
   ): BlockRewards;
-  computeAttestationsRewards(validatorIds?: (number | string)[]): Promise<AttestationsRewards>;
+  computeAttestationsRewards(validatorIds?: (number | string)[]): AttestationsRewards;
   computeSyncCommitteeRewards(
     block: SyncCommitteeRewardsBlock,
     validatorIds?: (number | string)[]
-  ): Promise<SyncCommitteeReward[]>;
+  ): SyncCommitteeReward[];
   getLatestWeakSubjectivityCheckpointEpoch(): number;
 
   getVoluntaryExitValidity(signedVoluntaryExit: SignedVoluntaryExit, verifySignature: boolean): VoluntaryExitValidity;

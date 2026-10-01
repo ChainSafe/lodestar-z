@@ -1714,17 +1714,7 @@ fn optionalU64(obj: napi.Value, name: [:0]const u8) !u64 {
     return js_types.wrap(js.Number, try obj.getNamedProperty(name)).toU64Exact();
 }
 
-pub fn computeAttestationsRewards(self: *BeaconStateView, validator_ids: ?js.Value) !js.Value {
-    const promise = try js.createPromise(js.Value);
-    const result = self.attestationsRewardsValue(validator_ids) catch |err| {
-        try rejectRewardsPromise(promise, err);
-        return .{ .val = promise.val };
-    };
-    try promise.resolve(.{ .val = result });
-    return .{ .val = promise.val };
-}
-
-fn attestationsRewardsValue(self: *BeaconStateView, validator_ids: ?js.Value) !napi.Value {
+pub fn computeAttestationsRewards(self: *BeaconStateView, validator_ids: ?js.Value) !js_types.AttestationsRewards {
     const cached_state = try self.acquireState();
     defer self.finishState();
     const allocator = cached_state.allocator;
@@ -1735,31 +1725,34 @@ fn attestationsRewardsValue(self: *BeaconStateView, validator_ids: ?js.Value) !n
     defer rewards.deinit(allocator);
 
     const env = js.env();
-    const ideal = try env.createArrayWithLength(rewards.ideal_rewards.len);
+    const ideal = js.Array{ .val = try env.createArrayWithLength(rewards.ideal_rewards.len) };
     for (rewards.ideal_rewards, 0..) |reward, i| {
-        const row = try env.createObject();
-        try row.setNamedProperty("effectiveBalance", js.Number.from(reward.effective_balance).val);
-        try row.setNamedProperty("head", js.Number.from(reward.head).val);
-        try row.setNamedProperty("target", js.Number.from(reward.target).val);
-        try row.setNamedProperty("source", js.Number.from(reward.source).val);
-        try row.setNamedProperty("inclusionDelay", js.Number.from(0).val);
-        try row.setNamedProperty("inactivity", js.Number.from(0).val);
-        try ideal.setElement(@intCast(i), row);
+        const row = js_types.IdealAttestationsReward{ .val = try env.createObject() };
+        try row.set(.{
+            .effectiveBalance = js.Number.from(reward.effective_balance),
+            .head = js.Number.from(reward.head),
+            .target = js.Number.from(reward.target),
+            .source = js.Number.from(reward.source),
+            .inclusionDelay = js.Number.from(0),
+            .inactivity = js.Number.from(0),
+        });
+        try ideal.set(@intCast(i), row);
     }
-    const total = try env.createArrayWithLength(rewards.total_rewards.len);
+    const total = js.Array{ .val = try env.createArrayWithLength(rewards.total_rewards.len) };
     for (rewards.total_rewards, 0..) |reward, i| {
-        const row = try env.createObject();
-        try row.setNamedProperty("validatorIndex", js.Number.from(reward.validator_index).val);
-        try row.setNamedProperty("head", js.Number.from(reward.head).val);
-        try row.setNamedProperty("target", js.Number.from(reward.target).val);
-        try row.setNamedProperty("source", js.Number.from(reward.source).val);
-        try row.setNamedProperty("inclusionDelay", js.Number.from(0).val);
-        try row.setNamedProperty("inactivity", js.Number.from(reward.inactivity).val);
-        try total.setElement(@intCast(i), row);
+        const row = js_types.TotalAttestationsReward{ .val = try env.createObject() };
+        try row.set(.{
+            .validatorIndex = js.Number.from(reward.validator_index),
+            .head = js.Number.from(reward.head),
+            .target = js.Number.from(reward.target),
+            .source = js.Number.from(reward.source),
+            .inclusionDelay = js.Number.from(0),
+            .inactivity = js.Number.from(reward.inactivity),
+        });
+        try total.set(@intCast(i), row);
     }
-    const result = try env.createObject();
-    try result.setNamedProperty("idealRewards", ideal);
-    try result.setNamedProperty("totalRewards", total);
+    const result = js_types.AttestationsRewards{ .val = try env.createObject() };
+    try result.set(.{ .idealRewards = ideal, .totalRewards = total });
     return result;
 }
 
@@ -1804,32 +1797,7 @@ fn parseAttestationRewardFilters(allocator: std.mem.Allocator, value: ?js.Value)
     return try indices.toOwnedSlice(allocator);
 }
 
-pub fn computeSyncCommitteeRewards(self: *BeaconStateView, block: js.Value, validator_ids: ?js.Value) !js.Value {
-    const promise = try js.createPromise(js.Value);
-    const result = self.syncCommitteeRewardsValue(block, validator_ids) catch |err| {
-        try rejectRewardsPromise(promise, err);
-        return .{ .val = promise.val };
-    };
-    try promise.resolve(.{ .val = result });
-    return .{ .val = promise.val };
-}
-
-fn rejectRewardsPromise(promise: js.Promise(js.Value), err: anyerror) !void {
-    const env = js.env();
-    if (try env.isExceptionPending()) {
-        try promise.reject(try env.getAndClearLastException());
-    } else {
-        const message = if (err == error.SyncCommitteeRewardsUnsupportedFork)
-            "Cannot get sync rewards as phase0 block does not have sync committee"
-        else if (err == error.AttestationsRewardsUnsupportedFork)
-            "Unsupported fork. Attestations rewards calculation is not available in phase0"
-        else
-            @errorName(err);
-        try promise.rejectWithMessage(js.String.from(message));
-    }
-}
-
-fn syncCommitteeRewardsValue(self: *BeaconStateView, block: js.Value, validator_ids: ?js.Value) !napi.Value {
+pub fn computeSyncCommitteeRewards(self: *BeaconStateView, block: js.Value, validator_ids: ?js.Value) !js.Array {
     const env = js.env();
     const cached_state = try self.acquireState();
     defer self.finishState();
@@ -1857,16 +1825,18 @@ fn syncCommitteeRewardsValue(self: *BeaconStateView, block: js.Value, validator_
     const rewards = try st.computeSyncCommitteeRewards(allocator, cached_state, &sync_aggregate);
     defer allocator.free(rewards);
 
-    const result = try env.createArray();
+    const result = js.Array{ .val = try env.createArray() };
     var output_index: u32 = 0;
     for (rewards) |reward| {
         if (filters) |indices| {
             if (std.mem.indexOfScalar(u64, indices, reward.validator_index) == null) continue;
         }
-        const row = try env.createObject();
-        try row.setNamedProperty("validatorIndex", js.Number.from(reward.validator_index).val);
-        try row.setNamedProperty("reward", js.Number.from(reward.reward).val);
-        try result.setElement(output_index, row);
+        const row = js_types.SyncCommitteeReward{ .val = try env.createObject() };
+        try row.set(.{
+            .validatorIndex = js.Number.from(reward.validator_index),
+            .reward = js.Number.from(reward.reward),
+        });
+        try result.set(output_index, row);
         output_index += 1;
     }
     return result;

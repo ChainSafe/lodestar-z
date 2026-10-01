@@ -69,13 +69,11 @@ describe("attestation rewards", () => {
     return {config, native, reference, value};
   }
 
-  it.each(["altair", "bellatrix", "electra"] as const)("floors rewards and uses the %s quotient", async (fork) => {
+  it.each(["altair", "bellatrix", "electra"] as const)("floors rewards and uses the %s quotient", (fork) => {
     for (const leak of [false, true]) {
       const {config, native, reference, value} = fixture(fork, leak);
       const root = native.hashTreeRoot();
-      const promise = native.computeAttestationsRewards();
-      expect(promise).toBeInstanceOf(Promise);
-      const rewards = await promise;
+      const rewards = native.computeAttestationsRewards();
       const base = BigInt(reference.epochCtx.baseRewardPerIncrement);
       const active = BigInt(value.validators.filter((v) => v.activationEpoch === 0).length * 32);
       const participants = BigInt(
@@ -114,47 +112,43 @@ describe("attestation rewards", () => {
     }
   });
 
-  it("includes the Electra ideal balance range", async () => {
+  it("includes the Electra ideal balance range", () => {
     const {native} = fixture("electra");
-    const rewards = await native.computeAttestationsRewards([0]);
+    const rewards = native.computeAttestationsRewards([0]);
     expect(rewards.idealRewards).toHaveLength(2049);
     expect(rewards.idealRewards[2048].effectiveBalance).toBe(2_048_000_000_000);
     expect(rewards.totalRewards).toHaveLength(1);
   });
 
-  it("sorts and deduplicates selection while accepting mixed-case and unprefixed pubkeys", async () => {
+  it("sorts and deduplicates selection while accepting mixed-case and unprefixed pubkeys", () => {
     const {native, value} = fixture();
     const hex = Buffer.from(value.validators[0].pubkey).toString("hex");
     const filters = [3, hex.toUpperCase(), `0x${hex}`, 3];
-    const all = await native.computeAttestationsRewards();
-    expect(await native.computeAttestationsRewards(filters)).toEqual({
+    const all = native.computeAttestationsRewards();
+    expect(native.computeAttestationsRewards(filters)).toEqual({
       idealRewards: all.idealRewards,
       totalRewards: all.totalRewards.filter((reward) => reward.validatorIndex === 0 || reward.validatorIndex === 3),
     });
-    expect((await native.computeAttestationsRewards([`0x${"00".repeat(48)}`])).totalRewards).toEqual([]);
-    expect((await native.computeAttestationsRewards([])).totalRewards).toHaveLength(63);
+    expect(native.computeAttestationsRewards([`0x${"00".repeat(48)}`]).totalRewards).toEqual([]);
+    expect(native.computeAttestationsRewards([]).totalRewards).toHaveLength(63);
   });
 
-  it("rejects malformed hexadecimal filters through the Promise", async () => {
+  it("rejects malformed hexadecimal filters", () => {
     const {native} = fixture();
-    await expect(native.computeAttestationsRewards(["0xabc"])).rejects.toThrow(
-      "hex string length 3 must be multiple of 2"
-    );
-    await expect(native.computeAttestationsRewards(["0xzz"])).rejects.toThrow("hex string contains invalid characters");
+    expect(() => native.computeAttestationsRewards(["0xabc"])).toThrow("hex string length 3 must be multiple of 2");
+    expect(() => native.computeAttestationsRewards(["0xzz"])).toThrow("hex string contains invalid characters");
   });
 
-  it("rejects Phase0 before reading validator filters", async () => {
+  it("rejects Phase0 before reading validator filters", () => {
     const value = ssz.phase0.BeaconState.defaultValue();
     const config = createBeaconConfig({ALTAIR_FORK_EPOCH: Infinity}, value.genesisValidatorsRoot);
     const nativeConfig = new bindings.BeaconConfig(config, value.genesisValidatorsRoot);
     const native = bindings.BeaconStateView.createFromBytes(ssz.phase0.BeaconState.serialize(value), nativeConfig);
     views.push(native);
-    await expect(native.computeAttestationsRewards()).rejects.toThrow(
-      "Unsupported fork. Attestations rewards calculation is not available in phase0"
-    );
+    expect(() => native.computeAttestationsRewards()).toThrow("AttestationsRewardsUnsupportedFork");
   });
 
-  it("retains the active call when a filter getter releases the state", async () => {
+  it("retains the active call when a filter getter releases the state", () => {
     const {native} = fixture();
     const ids = [0];
     Object.defineProperty(ids, "0", {
@@ -163,12 +157,12 @@ describe("attestation rewards", () => {
         return 0;
       },
     });
-    const expected = await native.computeAttestationsRewards([0]);
-    await expect(native.computeAttestationsRewards(ids)).resolves.toEqual(expected);
-    await expect(native.computeAttestationsRewards()).rejects.toThrow("InvalidState");
+    const expected = native.computeAttestationsRewards([0]);
+    expect(native.computeAttestationsRewards(ids)).toEqual(expected);
+    expect(() => native.computeAttestationsRewards()).toThrow("InvalidState");
   });
 
-  it("preserves thrown getter errors", async () => {
+  it("preserves thrown getter errors", () => {
     const {native} = fixture();
     const failure = new Error("filter getter failed");
     const ids = [0];
@@ -177,10 +171,10 @@ describe("attestation rewards", () => {
         throw failure;
       },
     });
-    await expect(native.computeAttestationsRewards(ids)).rejects.toBe(failure);
+    expect(() => native.computeAttestationsRewards(ids)).toThrow(failure);
   });
 
-  it("keeps owned results valid when output setters release the state", async () => {
+  it("keeps owned results valid when output setters release the state", () => {
     const {native} = fixture();
     const descriptor = Object.getOwnPropertyDescriptor(Object.prototype, "head");
     let calls = 0;
@@ -192,9 +186,9 @@ describe("attestation rewards", () => {
         Object.defineProperty(this, "head", {configurable: true, enumerable: true, value: head});
       },
     });
-    let result: Awaited<ReturnType<typeof native.computeAttestationsRewards>>;
+    let result: ReturnType<typeof native.computeAttestationsRewards>;
     try {
-      result = await native.computeAttestationsRewards([0]);
+      result = native.computeAttestationsRewards([0]);
     } finally {
       if (descriptor) Object.defineProperty(Object.prototype, "head", descriptor);
       else Reflect.deleteProperty(Object.prototype, "head");

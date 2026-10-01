@@ -91,12 +91,10 @@ describe("sync committee rewards", () => {
     return blockValue;
   }
 
-  it.each([false, true])("returns signed deltas in first-seen order, blinded=%s", async (blinded) => {
+  it.each([false, true])("returns signed deltas in first-seen order, blinded=%s", (blinded) => {
     const view = state();
     const root = view.hashTreeRoot();
-    const promise = view.computeSyncCommitteeRewards(block(blinded));
-    expect(promise).toBeInstanceOf(Promise);
-    const rewards = await promise;
+    const rewards = view.computeSyncCommitteeRewards(block(blinded));
     expect(rewards).toEqual([
       {reward: 0, validatorIndex: 2},
       {reward: appearances * participantReward, validatorIndex: 0},
@@ -109,32 +107,30 @@ describe("sync committee rewards", () => {
     expect(view.hashTreeRoot()).toEqual(root);
   });
 
-  it("filters canonical pubkeys and numeric indices without changing order or duplicating rows", async () => {
+  it("filters canonical pubkeys and numeric indices without changing order or duplicating rows", () => {
     const view = state();
     const pubkey = `0x${Buffer.from(value.validators[0].pubkey).toString("hex")}`;
-    expect(await view.computeSyncCommitteeRewards(block(), [0, 2, pubkey, 0])).toEqual([
+    expect(view.computeSyncCommitteeRewards(block(), [0, 2, pubkey, 0])).toEqual([
       {reward: 0, validatorIndex: 2},
       {reward: appearances * participantReward, validatorIndex: 0},
     ]);
-    expect(await view.computeSyncCommitteeRewards(block(), ["0", pubkey.toUpperCase(), "unknown", 99999])).toEqual([]);
-    expect(await view.computeSyncCommitteeRewards(block(), [])).toHaveLength(validatorCount);
+    expect(view.computeSyncCommitteeRewards(block(), ["0", pubkey.toUpperCase(), "unknown", 99999])).toEqual([]);
+    expect(view.computeSyncCommitteeRewards(block(), [])).toHaveLength(validatorCount);
   });
 
-  it("rejects a Phase0 block before reading absent sync aggregate fields", async () => {
-    await expect(state().computeSyncCommitteeRewards(ssz.phase0.BeaconBlock.defaultValue())).rejects.toThrow(
-      "Cannot get sync rewards as phase0 block does not have sync committee"
+  it("rejects a Phase0 block before reading absent sync aggregate fields", () => {
+    expect(() => state().computeSyncCommitteeRewards(ssz.phase0.BeaconBlock.defaultValue())).toThrow(
+      "SyncCommitteeRewardsUnsupportedFork"
     );
   });
 
-  it("rejects malformed bits through a Promise", async () => {
+  it("rejects malformed bits", () => {
     const input = block();
     const malformed = {
       body: {...input.body, syncAggregate: {syncCommitteeBits: {bitLen: 512, uint8Array: new Uint8Array(1)}}},
       slot: input.slot,
     };
-    const promise = state().computeSyncCommitteeRewards(malformed);
-    expect(promise).toBeInstanceOf(Promise);
-    await expect(promise).rejects.toThrow("InvalidByteArrayLength");
+    expect(() => state().computeSyncCommitteeRewards(malformed)).toThrow("InvalidByteArrayLength");
   });
 
   it.each([
@@ -156,7 +152,7 @@ describe("sync committee rewards", () => {
     ).toThrow("InvalidUnsignedInteger");
   });
 
-  it("preserves a throwing getter as the Promise rejection", async () => {
+  it("preserves a throwing getter", () => {
     const failure = new Error("input getter failed");
     const input = {
       body: block().body,
@@ -164,12 +160,10 @@ describe("sync committee rewards", () => {
         throw failure;
       },
     };
-    const promise = state().computeSyncCommitteeRewards(input);
-    expect(promise).toBeInstanceOf(Promise);
-    await expect(promise).rejects.toBe(failure);
+    expect(() => state().computeSyncCommitteeRewards(input)).toThrow(failure);
   });
 
-  it("retains the active call when an input getter releases the state", async () => {
+  it("retains the active call when an input getter releases the state", () => {
     const view = state();
     const input = {
       body: block().body,
@@ -178,11 +172,11 @@ describe("sync committee rewards", () => {
         return value.slot;
       },
     };
-    const expected = await view.computeSyncCommitteeRewards(block());
-    await expect(view.computeSyncCommitteeRewards(input)).resolves.toEqual(expected);
-    await expect(view.computeSyncCommitteeRewards(block())).rejects.toThrow("InvalidState");
+    const expected = view.computeSyncCommitteeRewards(block());
+    expect(view.computeSyncCommitteeRewards(input)).toEqual(expected);
+    expect(() => view.computeSyncCommitteeRewards(block())).toThrow("InvalidState");
   });
-  it("keeps native results valid when an output setter releases the state", async () => {
+  it("keeps native results valid when an output setter releases the state", () => {
     const view = state();
     const descriptor = Object.getOwnPropertyDescriptor(Object.prototype, "reward");
     let calls = 0;
@@ -194,9 +188,9 @@ describe("sync committee rewards", () => {
         Object.defineProperty(this, "reward", {configurable: true, enumerable: true, value: reward});
       },
     });
-    let result: Awaited<ReturnType<typeof view.computeSyncCommitteeRewards>>;
+    let result: ReturnType<typeof view.computeSyncCommitteeRewards>;
     try {
-      result = await view.computeSyncCommitteeRewards(block());
+      result = view.computeSyncCommitteeRewards(block());
     } finally {
       if (descriptor) Object.defineProperty(Object.prototype, "reward", descriptor);
       else Reflect.deleteProperty(Object.prototype, "reward");
