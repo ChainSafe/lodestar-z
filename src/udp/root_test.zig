@@ -23,11 +23,12 @@ test "UDP rejects mapped IPv6 listeners before any provider acquisition" {
     var vtable = std.testing.io.vtable.*;
     vtable.netBindIp = Provider.bind;
     const io: std.Io = .{ .userdata = null, .vtable = &vtable };
-    const mapped: net.Ip6Address = .{ .bytes = .{0} ** 10 ++ .{ 0xff, 0xff, 127, 0, 0, 1 }, .port = 0 };
+    const mapped: net.Ip6Address = .{ .bytes = .{0} ** 10 ++ .{ 0xff, 0xff, 127, 0, 0, 1 }, .port = 4001 };
     try std.testing.expectError(error.AddressFamilyUnsupported, udp.Sockets.bind(io, .{ .ip6 = mapped }));
     try std.testing.expectError(error.AddressFamilyUnsupported, udp.Sockets.bind(io, .{ .dual = .{ .ip4 = .loopback(0), .ip6 = mapped } }));
     const received = udp.Address.fromNetwork(.{ .ip6 = mapped });
-    try std.testing.expectEqualDeep(udp.Address{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 0 } }, received);
+    try std.testing.expectEqualDeep(udp.Address{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 4001 } }, received);
+    try std.testing.expectEqualDeep(net.IpAddress{ .ip4 = .loopback(4001) }, received.toNetwork());
     try std.testing.expect(!(udp.Address{ .ip6 = .{ .octets = mapped.bytes, .port = 9000 } }).isUsable());
 }
 
@@ -61,7 +62,6 @@ test "UDP wildcard listeners share a port and keep datagrams in their address fa
         try std.testing.expectEqualStrings("same port", packet.data);
     }
     sockets.close(std.testing.io);
-    sockets = .{};
     sockets = try udp.Sockets.bind(std.testing.io, .{ .dual = .{ .ip4 = .unspecified(port), .ip6 = .unspecified(port) } });
     try std.testing.expectEqual(port, sockets.values[0].?.address.getPort());
     try std.testing.expectEqual(port, sockets.values[1].?.address.getPort());
@@ -239,9 +239,9 @@ test "UDP records a failed size readback as unknown and not below the request" {
     try std.testing.expectEqual([2]?u64{ null, null }, sockets.drops());
 }
 
-test "UDP distinguishes refused sends from nonblocking send pressure" {
+test "UDP distinguishes destination refusal from access denial for native single and batch sends" {
     if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
-    var sockets: [4]udp.Sockets = undefined;
+    var sockets: [2]udp.Sockets = undefined;
     for (&sockets, 0..) |*socket, index| {
         errdefer for (sockets[0..index]) |*bound| bound.close(std.testing.io);
         socket.* = try udp.Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
@@ -250,40 +250,28 @@ test "UDP distinguishes refused sends from nonblocking send pressure" {
     var outcome: Refusal = .{};
     const thread = try std.Thread.spawn(.{}, Refusal.run, .{ &outcome, &sockets });
     thread.join();
-    // Kernels without seccomp filters cannot produce the errnos.
-    if (!outcome.installed) return error.SkipZigTest;
+    try outcome.installation.require();
     try std.testing.expectError(error.DestinationRefused, outcome.results[0]);
     try std.testing.expectError(error.AccessDenied, outcome.results[1]);
-    try std.testing.expectError(error.WouldBlock, outcome.results[2]);
-    try std.testing.expectError(error.SystemResources, outcome.results[3]);
     try std.testing.expectEqual(udp.SendOutcome{ .sent = 0, .failure = error.DestinationRefused }, outcome.batches[0]);
     try std.testing.expectEqual(udp.SendOutcome{ .sent = 0, .failure = error.AccessDenied }, outcome.batches[1]);
-    try std.testing.expectEqual(udp.SendOutcome{ .sent = 0, .failure = error.WouldBlock }, outcome.batches[2]);
-    try std.testing.expectEqual(udp.SendOutcome{ .sent = 0, .failure = error.SystemResources }, outcome.batches[3]);
     var buffer: [16]u8 = undefined;
     try std.testing.expectEqual(null, try readAny(&sockets[0], std.testing.io, &buffer));
 }
 
-/// Filters one thread's sends: EPERM from the first socket, as an egress firewall drop reports
-/// it, EACCES from the second, EAGAIN from the third when the send asks not to wait, as a full
-/// send buffer reports it, and ENOBUFS from the fourth. Each socket sends once alone and once as
-/// a batch. The filter ends with the thread.
 const Refusal = struct {
-    installed: bool = false,
-    results: [4]udp.SendError!void = @splat({}),
-    batches: [4]udp.SendOutcome = undefined,
+    installation: udp.testing.Seccomp.Installation = undefined,
+    results: [2]udp.SendError!void = @splat({}),
+    batches: [2]udp.SendOutcome = undefined,
 
-    const Instruction = udp.testing.SendFilter.Instruction;
-    const Program = udp.testing.SendFilter.Program;
-
-    fn run(self: *Refusal, sockets: *const [4]udp.Sockets) void {
-        const errnos = [_]std.os.linux.E{ .PERM, .ACCES, .AGAIN, .NOBUFS };
-        var rules: [4]udp.testing.SendFilter.Rule = undefined;
-        for (&rules, sockets, errnos, 0..) |*rule, socket, errno, index| {
-            rule.* = .{ .socket = socket.primary().handle, .errno = errno, .nonblocking_only = index == 2 };
+    fn run(self: *Refusal, sockets: *const [2]udp.Sockets) void {
+        const errnos = [_]std.os.linux.E{ .PERM, .ACCES };
+        var rules: [2]udp.testing.SendFilter.Rule = undefined;
+        for (&rules, sockets, errnos) |*rule, socket, errno| {
+            rule.* = .{ .socket = socket.primary().handle, .errno = errno };
         }
-        if (!udp.testing.SendFilter.install(&rules)) return;
-        self.installed = true;
+        self.installation = udp.testing.SendFilter.install(&rules);
+        if (self.installation != .installed) return;
         const destination = sockets[0].primary().address;
         for (sockets, &self.results, &self.batches) |*socket, *result, *batch| {
             result.* = socket.sendTo(std.testing.io, udp.Address.fromNetwork(destination), "filtered", 16);
@@ -315,8 +303,9 @@ test "UDP batches report the exact prefix before a failing datagram and resume a
     try std.testing.expectEqual(null, try readAny(&sockets, std.testing.io, &buffer));
 }
 
-test "UDP native batches check cancellation before sending" {
-    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+test "UDP native single batch and ready receive check cancellation before I/O" {
+    const os = @import("builtin").os.tag;
+    if (os != .linux and os != .macos) return error.SkipZigTest;
     const Canceled = struct {
         fn check(_: ?*anyopaque) std.Io.Cancelable!void {
             return error.Canceled;
@@ -329,9 +318,45 @@ test "UDP native batches check cancellation before sending" {
     const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
     const destination = sockets.primary().address;
     const message: udp.Outgoing = .{ .to = udp.Address.fromNetwork(destination), .bytes = "canceled" };
+    try std.testing.expectError(error.Canceled, sockets.sendTo(io, message.to, message.bytes, 16));
     try std.testing.expectEqual(udp.SendOutcome{ .sent = 0, .failure = error.Canceled }, sendMany(&sockets, io, (&message)[0..1]));
     var buffer: [16]u8 = undefined;
     try std.testing.expectEqual(null, try readAny(&sockets, std.testing.io, &buffer));
+    try sockets.sendTo(std.testing.io, message.to, "retained", 16);
+    var ready: [2]bool = .{ true, false };
+    try std.testing.expectError(error.Canceled, sockets.receiveReady(io, &buffer, &ready));
+    try std.testing.expectEqual([2]bool{ true, false }, ready);
+    try std.testing.expectEqualStrings("retained", (try sockets.receiveReady(std.testing.io, &buffer, &ready)).?.data);
+}
+
+test "UDP native retry cancellation preserves a same-family successful prefix" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const Cancel = struct {
+        checks: usize = 0,
+        fn check(context: ?*anyopaque) std.Io.Cancelable!void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.checks += 1;
+            if (self.checks == 2) return error.Canceled;
+        }
+    };
+    var sockets = try udp.Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
+    defer sockets.close(std.testing.io);
+    var cancel: Cancel = .{};
+    var vtable = std.testing.io.vtable.*;
+    vtable.checkCancel = Cancel.check;
+    const io: std.Io = .{ .userdata = &cancel, .vtable = &vtable };
+    const messages = [_]udp.Outgoing{
+        .{ .to = sockets.localAddress(), .bytes = "prefix" },
+        .{ .to = .{ .ip4 = .{ .octets = @splat(255), .port = sockets.localAddress().port() } }, .bytes = "refused" },
+        .{ .to = sockets.localAddress(), .bytes = "suffix" },
+    };
+    try std.testing.expectEqual(udp.SendOutcome{ .sent = 1, .failure = error.Canceled }, sendMany(&sockets, io, &messages));
+    try std.testing.expectEqual(@as(usize, 2), cancel.checks);
+    var buffer: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("prefix", (try readAny(&sockets, std.testing.io, &buffer)).?.data);
+    try std.testing.expectEqual(null, try readAny(&sockets, std.testing.io, &buffer));
+    try std.testing.expectEqual(udp.SendOutcome{ .sent = 1, .failure = null }, sendMany(&sockets, std.testing.io, messages[2..]));
+    try std.testing.expectEqualStrings("suffix", (try readAny(&sockets, std.testing.io, &buffer)).?.data);
 }
 
 test "UDP native pressure returns without polling writable for EAGAIN ENOBUFS and ENOMEM" {
@@ -342,7 +367,7 @@ test "UDP native pressure returns without polling writable for EAGAIN ENOBUFS an
         var pressure: Pressure = .{ .errno = errno };
         const thread = try std.Thread.spawn(.{}, Pressure.run, .{ &pressure, &sockets });
         thread.join();
-        if (!pressure.installed) return error.SkipZigTest;
+        try pressure.installation.require();
         try std.testing.expectEqual(@as(usize, 0), Pressure.waits);
         const expected: udp.SendError = if (errno == .AGAIN) error.WouldBlock else error.SystemResources;
         try std.testing.expectError(expected, pressure.single);
@@ -354,14 +379,14 @@ test "UDP native pressure returns without polling writable for EAGAIN ENOBUFS an
 
 const Pressure = struct {
     errno: std.os.linux.E,
-    installed: bool = false,
+    installation: udp.testing.Seccomp.Installation = undefined,
     single: udp.SendError!void = {},
     batch: udp.SendOutcome = undefined,
     var waits: usize = 0;
 
     fn run(self: *Pressure, sockets: *const udp.Sockets) void {
-        if (!udp.testing.SendFilter.install(&.{.{ .socket = sockets.primary().handle, .errno = self.errno, .nonblocking_only = true }})) return;
-        self.installed = true;
+        self.installation = udp.testing.SendFilter.install(&.{.{ .socket = sockets.primary().handle, .errno = self.errno, .nonblocking_only = true }});
+        if (self.installation != .installed) return;
         waits = 0;
         var vtable = std.testing.io.vtable.*;
         vtable.batchAwaitConcurrent = wait;
@@ -460,8 +485,7 @@ test "UDP native ready reads cost one receive each, never poll and never read an
     var outcome: NoPoll = .{};
     const thread = try std.Thread.spawn(.{}, NoPoll.run, .{ &outcome, &sockets, &single });
     thread.join();
-    // Kernels without seccomp filters cannot refuse the calls.
-    if (!outcome.installed) return error.SkipZigTest;
+    try outcome.installation.require();
     // The filter refuses every poll, which Threaded reports as ConcurrencyUnavailable, and every
     // read of the IPv6 socket.
     try std.testing.expectError(error.ConcurrencyUnavailable, outcome.polled);
@@ -477,7 +501,7 @@ test "UDP native ready reads cost one receive each, never poll and never read an
 /// on the IPv6 socket with ENETDOWN. Counts native reads through the cancellation check each one
 /// makes. The filter ends with the thread.
 const NoPoll = struct {
-    installed: bool = false,
+    installation: udp.testing.Seccomp.Installation = undefined,
     drained: udp.ReceiveError!void = {},
     received: usize = 0,
     reads: usize = 0,
@@ -485,9 +509,6 @@ const NoPoll = struct {
     timed: udp.ReceiveError!void = {},
     polled: udp.ReceiveError!void = {},
     unmarked: udp.ReceiveError!void = {},
-
-    const Instruction = Refusal.Instruction;
-    const Program = Refusal.Program;
 
     threadlocal var checks: usize = 0;
 
@@ -502,7 +523,7 @@ const NoPoll = struct {
         const little = comptime @import("builtin").cpu.arch.endian() == .little;
         const descriptor: u32 = @offsetOf(linux.SECCOMP.data, "arg0") + if (little) 0 else 4;
         const poll: u32 = if (@hasField(linux.SYS, "poll")) @intFromEnum(linux.SYS.poll) else @intFromEnum(linux.SYS.ppoll);
-        const filter = [_]Instruction{
+        const filter = [_]udp.testing.Seccomp.Instruction{
             .{ .code = bpf.LD | bpf.W | bpf.ABS, .jt = 0, .jf = 0, .k = @offsetOf(linux.SECCOMP.data, "nr") },
             .{ .code = bpf.JMP | bpf.JEQ | bpf.K, .jt = 0, .jf = 3, .k = @intFromEnum(linux.SYS.recvmsg) },
             .{ .code = bpf.LD | bpf.W | bpf.ABS, .jt = 0, .jf = 0, .k = descriptor },
@@ -513,10 +534,8 @@ const NoPoll = struct {
             .{ .code = bpf.RET | bpf.K, .jt = 0, .jf = 0, .k = linux.SECCOMP.RET.ERRNO | @as(u32, @intFromEnum(linux.E.PERM)) },
             .{ .code = bpf.RET | bpf.K, .jt = 0, .jf = 0, .k = linux.SECCOMP.RET.ALLOW },
         };
-        const program: Program = .{ .len = filter.len, .filter = &filter };
-        if (linux.errno(linux.prctl(@intFromEnum(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0)) != .SUCCESS) return;
-        if (linux.errno(linux.seccomp(linux.SECCOMP.SET_MODE_FILTER, 0, &program)) != .SUCCESS) return;
-        self.installed = true;
+        self.installation = udp.testing.Seccomp.install(&filter);
+        if (self.installation != .installed) return;
         var vtable = std.testing.io.vtable.*;
         vtable.checkCancel = check;
         const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
@@ -544,14 +563,13 @@ test "UDP native batch preserves its successful prefix when the next call report
     var sockets = try udp.Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
     defer sockets.close(std.testing.io);
     const Partial = struct {
-        installed: bool = false,
+        installation: udp.testing.Seccomp.Installation = undefined,
         outcome: udp.SendOutcome = undefined,
         fn run(self: *@This(), sender: *const udp.Sockets) void {
             const linux = std.os.linux;
             const bpf = linux.BPF;
             const word: u32 = if (comptime @import("builtin").cpu.arch.endian() == .little) 0 else 4;
-            const I = udp.testing.SendFilter.Instruction;
-            const filter = [_]I{
+            const filter = [_]udp.testing.Seccomp.Instruction{
                 .{ .code = bpf.LD | bpf.W | bpf.ABS, .jt = 0, .jf = 0, .k = @offsetOf(linux.SECCOMP.data, "nr") },
                 .{ .code = bpf.JMP | bpf.JEQ | bpf.K, .jt = 0, .jf = 5, .k = @intFromEnum(linux.SYS.sendmmsg) },
                 .{ .code = bpf.LD | bpf.W | bpf.ABS, .jt = 0, .jf = 0, .k = @offsetOf(linux.SECCOMP.data, "arg0") + word },
@@ -561,10 +579,8 @@ test "UDP native batch preserves its successful prefix when the next call report
                 .{ .code = bpf.RET | bpf.K, .jt = 0, .jf = 0, .k = linux.SECCOMP.RET.ERRNO | @as(u32, @intFromEnum(linux.E.AGAIN)) },
                 .{ .code = bpf.RET | bpf.K, .jt = 0, .jf = 0, .k = linux.SECCOMP.RET.ALLOW },
             };
-            const program: udp.testing.SendFilter.Program = .{ .len = filter.len, .filter = &filter };
-            if (linux.errno(linux.prctl(@intFromEnum(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0)) != .SUCCESS) return;
-            if (linux.errno(linux.seccomp(linux.SECCOMP.SET_MODE_FILTER, 0, &program)) != .SUCCESS) return;
-            self.installed = true;
+            self.installation = udp.testing.Seccomp.install(&filter);
+            if (self.installation != .installed) return;
             const destination = sender.primary().address;
             const broadcast: net.IpAddress = .{ .ip4 = .{ .bytes = @splat(255), .port = destination.ip4.port } };
             // The first call sends one datagram before broadcast refusal. Its successful prefix
@@ -579,7 +595,7 @@ test "UDP native batch preserves its successful prefix when the next call report
     var partial: Partial = .{};
     const thread = try std.Thread.spawn(.{}, Partial.run, .{ &partial, &sockets });
     thread.join();
-    if (!partial.installed) return error.SkipZigTest;
+    try partial.installation.require();
     try std.testing.expectEqual(udp.SendOutcome{ .sent = 1, .failure = error.WouldBlock }, partial.outcome);
     var buffer: [16]u8 = undefined;
     try std.testing.expectEqualStrings("prefix", (try readAny(&sockets, std.testing.io, &buffer)).?.data);

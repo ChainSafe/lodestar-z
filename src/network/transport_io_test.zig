@@ -430,13 +430,13 @@ test "transport fails only the connection whose destination the host refuses and
     try peers[1].init(113);
     defer peers[1].deinit();
     const Refused = struct {
-        installed: bool = false,
+        installation: @import("udp").testing.Seccomp.Installation = undefined,
         result: anyerror!void = {},
 
         fn run(self: *@This(), node: *transport_mod.Transport, remotes: *[2]Node) void {
             const filter = @import("udp").testing.SendFilter;
-            if (!filter.install(&.{.{ .socket = node.sockets.values[1].?.handle, .errno = .PERM }})) return;
-            self.installed = true;
+            self.installation = filter.install(&.{.{ .socket = node.sockets.values[1].?.handle, .errno = .PERM }});
+            if (self.installation != .installed) return;
             self.result = serve(node, remotes);
         }
 
@@ -493,8 +493,7 @@ test "transport fails only the connection whose destination the host refuses and
     var refused: Refused = .{};
     const thread = try std.Thread.spawn(.{}, Refused.run, .{ &refused, &hub, &peers });
     thread.join();
-    // Kernels without seccomp filters cannot refuse the sends.
-    if (!refused.installed) return error.SkipZigTest;
+    try refused.installation.require();
     try refused.result;
 }
 
