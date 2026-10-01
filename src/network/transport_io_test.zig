@@ -1,4 +1,4 @@
-const FaultIo = @import("udp").testing.FaultIo;
+const FaultIo = @import("fault_io");
 const std = @import("std");
 const constants = @import("constants.zig");
 const transport_mod = @import("transport.zig");
@@ -342,8 +342,6 @@ test "transport startup allocation failure releases transferred engine and TLS o
 
 test "transport requires startup seed entropy but no entropy for later dial and receive" {
     var faults: FaultIo = .{ .entropy = .{ .at = 2 } };
-    faults.init(std.testing.io);
-    defer faults.deinit();
     const io = faults.io();
     const key = try @import("wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{41}));
     var refused: @import("transport.zig").Transport = .{};
@@ -418,7 +416,6 @@ test "transport isolates a failing destination in a mixed-owner batch" {
 }
 
 test "transport fails only the connection whose destination the host refuses and keeps serving its batch" {
-    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
     const limits: engine_mod.Limits = .{ .connections_max = 3, .handshaking_max = 3, .dialing_max = 3, .outbound_max = 3 };
     const hub_key = try @import("wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{111}));
     var hub: transport_mod.Transport = .{};
@@ -430,20 +427,12 @@ test "transport fails only the connection whose destination the host refuses and
     try peers[1].init(113);
     defer peers[1].deinit();
     const Refused = struct {
-        installation: @import("udp").testing.Seccomp.Installation = undefined,
-        result: anyerror!void = {},
-
-        fn run(self: *@This(), node: *transport_mod.Transport, remotes: *[2]Node) void {
-            const filter = @import("udp").testing.SendFilter;
-            self.installation = filter.install(&.{.{ .socket = node.sockets.values[1].?.handle, .errno = .PERM }});
-            if (self.installation != .installed) return;
-            self.result = serve(node, remotes);
-        }
-
-        /// The filter refuses every send from the hub's IPv6 socket; turns never wait, so no Io
-        /// task starts on the filtered thread.
         fn serve(node: *transport_mod.Transport, remotes: *[2]Node) !void {
-            const io = std.testing.io;
+            var faults: FaultIo = .{
+                .send = .{ .socket = node.sockets.values[1].?.handle },
+                .send_failure = error.AccessDenied,
+            };
+            const io = faults.io();
             const turn: transport_mod.StepOptions = .{ .wait_max_ms = 0 };
             const refused_address: types.Address = .{ .ip6 = .{ .octets = .{0} ** 15 ++ .{1}, .port = 9 } };
             const expected = remotes[0].transport.peerId();
@@ -490,11 +479,7 @@ test "transport fails only the connection whose destination the host refuses and
             try std.testing.expectEqual([2]bool{ true, true }, connected);
         }
     };
-    var refused: Refused = .{};
-    const thread = try std.Thread.spawn(.{}, Refused.run, .{ &refused, &hub, &peers });
-    thread.join();
-    try refused.installation.require();
-    try refused.result;
+    try Refused.serve(&hub, &peers);
 }
 
 test "transport bounds each turn's receive drain without active connections" {
@@ -671,8 +656,6 @@ test "transport receive cancellation retains progress and events while deferring
     node.transport.engine.failSend(failed.index);
     try sink.primary().send(std.testing.io, &node.transport.sockets.primary().address, "invalid");
     var faults: FaultIo = .{ .receive = .{ .at = 2 } };
-    faults.init(std.testing.io);
-    defer faults.deinit();
     const io = faults.io();
     var events: [4]engine_mod.Event = undefined;
     const result = node.transport.step(io, &events, .{ .wait_max_ms = 0 });
@@ -696,8 +679,6 @@ test "transport progress early clock failure does not begin or publish a turn" {
     const failed = try node.transport.engine.dial(&support.server_address, node.transport.peerId(), now);
     node.transport.engine.failSend(failed.index);
     var faults: FaultIo = .{ .clock = .{} };
-    faults.init(std.testing.io);
-    defer faults.deinit();
     const io = faults.io();
     var events: [4]engine_mod.Event = undefined;
     const result = node.transport.step(io, &events, .{ .wait_max_ms = 0 });
@@ -883,8 +864,6 @@ test "transport recovers a locally dropped first flight through QUIC loss recove
     try server.init(124);
     defer server.deinit();
     var faults: FaultIo = .{ .send = .{}, .send_failure = error.SystemResources };
-    faults.init(std.testing.io);
-    defer faults.deinit();
     const handle = try client.transport.dialPeer(faults.io(), server.transport.localAddress(), server.transport.peerId());
     try std.testing.expectEqual(@as(usize, 1), faults.send_calls);
     try std.testing.expectEqual(@as(u64, 0), client.transport.counters.sent_datagrams);
@@ -930,8 +909,6 @@ test "network owner progresses and shuts down while UDP sends are under local pr
     try node.init(std.testing.allocator, std.testing.io, &options.resolved, options.startup);
     defer node.deinit(std.testing.io);
     var faults: FaultIo = .{ .send = .{}, .send_failure = error.SystemResources };
-    faults.init(std.testing.io);
-    defer faults.deinit();
     const now = node.last_now;
     try node.connectUntil(&identity, &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9 } }}, now, now.mono_ms + 5_000);
     const progress = node.step(faults.io(), now, .{}, .deadlineOnly(now.mono_ms));
@@ -958,8 +935,6 @@ test "transport pressure drops later families with exact cumulative accounting" 
     var owners: [3]engine_mod.Handle = undefined;
     for (&owners, [_]usize{ 0, 1, 0 }) |*owner, family| owner.* = try node.engine.dial(&local[family].?, node.peerId(), now);
     var faults: FaultIo = .{ .send = .{ .socket = node.sockets.values[1].?.handle }, .send_failure = error.SystemResources };
-    faults.init(std.testing.io);
-    defer faults.deinit();
     var result: transport_mod.StepResult = .{ .now = now };
     try node.flush(faults.io(), now, &result);
     try std.testing.expectEqual(@as(usize, 2), faults.send_calls);
@@ -1078,8 +1053,6 @@ test "established transport survives canceled output and recovers its lost paylo
     const payload = "cancel preserves this stream payload";
     try std.testing.expectEqual(payload.len, try client.transport.engine.write(stream, payload, false));
     var fault: FaultIo = .{ .send = .{}, .send_failure = error.Canceled };
-    fault.init(std.testing.io);
-    defer fault.deinit();
     const stopped = client.transport.step(fault.io(), &client_events, .{ .wait_max_ms = 0 });
     try std.testing.expectEqual(error.Canceled, stopped.failure.?);
     try std.testing.expectEqual(@as(usize, 1), fault.send_calls);

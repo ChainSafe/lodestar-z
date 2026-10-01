@@ -127,6 +127,7 @@ jobs:
         run: |
           cargo --version
           cmake --version
+          zig build test:fault_io
           zig build test:udp
           zig build test:network
           zig build test:network_runtime
