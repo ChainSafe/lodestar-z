@@ -105,7 +105,8 @@ test "gossip direct processor admission drains paged RPCs while the host queue s
 }
 
 test "gossip full processor preserves duplicate attribution without runtime allocations" {
-    var ledger: @import("../reservations.zig").Reservations = .{ .backing = t.allocator };
+    var backing = std.testing.FailingAllocator.init(t.allocator, .{});
+    var ledger: @import("../reservations.zig").Reservations = .{ .backing = backing.allocator() };
     var g = try support.init(ledger.allocator(), options);
     defer g.deinit();
     const limits: processor.limits_mod.Limits = @splat(.{ .items = 2, .bytes = 4096 });
@@ -117,7 +118,7 @@ test "gossip full processor preserves duplicate attribution without runtime allo
     g.message_sink = &sink;
     try support.subscribe(&g, block);
     for (0..2) |i| _ = support.addPeer(&g, .{ .index = @intCast(i), .generation = 1 }, .v1_2).?;
-    const allocations = ledger.allocation_calls;
+    const allocations = backing.allocations;
     ledger.byte_limit = ledger.bytes;
     try receive(&g, 1, block, "filler");
     try receive(&g, 0, block, "pending");
@@ -131,7 +132,7 @@ test "gossip full processor preserves duplicate attribution without runtime allo
     try t.expectEqual(gossip.ReportOutcome{ .applied = .reject }, g.report(handle, .reject, .{ .mono_ms = 2, .unix_s = 0 }));
     try t.expectEqual(@as(f64, 2), support.invalidDeliveries(&g));
     try t.expectEqual(@as(u64, 2), g.messages.storage_refusals[@intFromEnum(messages.StorageRefusal.processor_capacity)]);
-    try t.expectEqual(allocations, ledger.allocation_calls);
+    try t.expectEqual(allocations, backing.allocations);
 }
 
 test "gossip saturated attestation intake preserves block priority and storage" {

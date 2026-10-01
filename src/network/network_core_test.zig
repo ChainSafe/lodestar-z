@@ -35,7 +35,7 @@ fn stepAfter(node: *runtime.NetworkCore, wait_ms: u32) !runtime.Result {
 const MaintenancePeers = struct {
     nodes: []runtime.NetworkCore,
 
-    fn init() !MaintenancePeers {
+    fn init(hub_allocator: std.mem.Allocator) !MaintenancePeers {
         const nodes = try std.testing.allocator.alloc(runtime.NetworkCore, 4);
         errdefer std.testing.allocator.free(nodes);
         var initialized: usize = 0;
@@ -51,7 +51,7 @@ const MaintenancePeers = struct {
             opts.resolved.core.service.reqresp.inbound_control_reserved = 4;
             opts.resolved.core.service.reqresp.outbound_per_peer_max = 2;
             opts.resolved.core.service.router = .{ .negotiations_max = 16, .outbound_control_reserved = 4, .outbound_reserved = 8 };
-            try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
+            try node.init(if (index == 0) hub_allocator else std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
             initialized += 1;
         }
         const hub = &nodes[0];
@@ -101,7 +101,8 @@ test "core rejects incomplete serving state before startup allocation" {
 
 test "core maintenance isolates slow peers and full application capacity" {
     const rr = @import("reqresp/root.zig");
-    var fixture = try MaintenancePeers.init();
+    var backing_hub = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var fixture = try MaintenancePeers.init(backing_hub.allocator());
     defer fixture.deinit();
     const hub = &fixture.nodes[0];
     errdefer |err| std.debug.print("maintenance isolation failed: {t}, peers={any}, operations={any}, requests={any}\n", .{ err, hub.peerCounts(), core_test.controlOperations(hub), hub.service.reqresp.active() });
@@ -115,7 +116,7 @@ test "core maintenance isolates slow peers and full application capacity" {
         hub.service.reqresp.shutdown(&hub.transport.engine, &hub.service.router);
         std.testing.allocator.free(sinks);
     }
-    const calls = hub.reservations.allocation_calls;
+    const calls = backing_hub.allocations;
     for (0..2) |index| _ = try hub.sendReqRespRequest(&fixture.nodes[1].peerId(), .blocks_by_root_v2, &([_]u8{1} ** 32), sinks[index * size ..][0..size], .{}, hub.last_now);
     for (0..10) |_| _ = try hub.service.router.beginMeshsub(&hub.transport.engine, conn, hub.last_now);
     try std.testing.expectError(error.NegotiationTableFull, hub.service.router.beginMeshsub(&hub.transport.engine, conn, hub.last_now));
@@ -139,7 +140,7 @@ test "core maintenance isolates slow peers and full application capacity" {
     try std.testing.expectEqual(@as(u64, 42), hub.peer_manager.catalog.get(healthy_peer).?.status.?.head_slot);
     try std.testing.expectEqual(@as(usize, 2), core_test.controlOperations(hub));
     try std.testing.expectEqual(@as(u16, 2), hub.service.reqresp.outboundApplicationCount(conn));
-    try std.testing.expectEqual(calls, hub.reservations.allocation_calls);
+    try std.testing.expectEqual(calls, backing_hub.allocations);
 }
 
 test "core validates capacities and current application fork before allocation" {
@@ -247,13 +248,15 @@ test "core signed bootstrap reaches relevant peer with zero and one outputs" {
         .call_capacity = 8,
     } };
     var b: runtime.NetworkCore = undefined;
-    try b.init(std.testing.allocator, std.testing.io, &opts_b.resolved, opts_b.startup);
+    var backing_b = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    try b.init(backing_b.allocator(), std.testing.io, &opts_b.resolved, opts_b.startup);
     defer b.deinit(std.testing.io);
     var opts_a = options(&key_a);
     opts_a.startup.discovery = opts_b.startup.discovery;
     opts_a.startup.discovery.?.bootstrap = &.{b.localRecord().?.*};
     var a: runtime.NetworkCore = undefined;
-    try a.init(std.testing.allocator, std.testing.io, &opts_a.resolved, opts_a.startup);
+    var backing_a = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    try a.init(backing_a.allocator(), std.testing.io, &opts_a.resolved, opts_a.startup);
     defer a.deinit(std.testing.io);
     var a_inbox: Inbox = .{};
     defer a_inbox.deinit();
@@ -261,8 +264,8 @@ test "core signed bootstrap reaches relevant peer with zero and one outputs" {
     var b_inbox: Inbox = .{};
     defer b_inbox.deinit();
     b_inbox.attach(b.service.gossipsub);
-    const calls_a = a.reservations.allocation_calls;
-    const calls_b = b.reservations.allocation_calls;
+    const calls_a = backing_a.allocations;
+    const calls_b = backing_b.allocations;
     var events: [1]t.Event = undefined;
     var ready = false;
     const start = try @import("transport.zig").currentTime(std.testing.io);
@@ -293,8 +296,8 @@ test "core signed bootstrap reaches relevant peer with zero and one outputs" {
     _ = try updateLocal(&a, &local, .{}, hint_now);
     try applicationAndFork(&a, &b, &b_inbox);
     try failureAndReplacement(&a, &b);
-    try std.testing.expectEqual(calls_a, a.reservations.allocation_calls);
-    try std.testing.expectEqual(calls_b, b.reservations.allocation_calls);
+    try std.testing.expectEqual(calls_a, backing_a.allocations);
+    try std.testing.expectEqual(calls_b, backing_b.allocations);
     const now = try @import("transport.zig").currentTime(std.testing.io);
     a.shutdown(now);
     a.shutdown(now);
@@ -459,11 +462,11 @@ test "core every allocation prefix cleans up and reservations count owned storag
     std.debug.print("local intent memory: allocated={} inline={} workspace={} prefixes={}\n", .{ allocated, @sizeOf(runtime.NetworkCore), @sizeOf(@import("gossipsub/local_intent.zig").Workspace), allocation.alloc_index });
     try std.testing.expectEqual(allocation.allocated_bytes, allocated);
     const allocations = allocation.alloc_index;
-    const runtime_calls = node.reservations.allocation_calls;
+    const runtime_calls = allocation.allocations;
     const now = try @import("transport.zig").currentTime(std.testing.io);
     for (0..4) |_| _ = node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms));
     try std.testing.expectEqual(allocation.allocated_bytes, allocated);
-    try std.testing.expectEqual(runtime_calls, node.reservations.allocation_calls);
+    try std.testing.expectEqual(runtime_calls, allocation.allocations);
     node.deinit(std.testing.io);
     node.deinit(std.testing.io);
     try std.testing.expectEqual(allocation.allocated_bytes, allocation.freed_bytes);
@@ -681,7 +684,8 @@ test "core socket faults preserve the other owner and local dial refusal is defe
     var opts = options(&key);
     opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .coordinator = .{ .query_interval_ms = 100 } };
     var node: runtime.NetworkCore = undefined;
-    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
+    var backing_node = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    try node.init(backing_node.allocator(), std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const now = try @import("transport.zig").currentTime(std.testing.io);
     var faults: FaultIo = .{};
@@ -724,10 +728,10 @@ test "core socket faults preserve the other owner and local dial refusal is defe
         try std.testing.expectEqual(@as(u8, 0), row.intent.failures);
         try std.testing.expect(row.attempt == null);
     };
-    const calls = node.reservations.allocation_calls;
+    const calls = backing_node.allocations;
     const clean = node.step(std.testing.io, settled, .{}, .deadlineOnly(settled.mono_ms));
     try std.testing.expect(clean.failure == null);
-    try std.testing.expectEqual(calls, node.reservations.allocation_calls);
+    try std.testing.expectEqual(calls, backing_node.allocations);
 }
 
 test "core discovery drain is nonblocking under the standalone default interval" {
@@ -940,12 +944,14 @@ test "core native host wake validates rollback detaches and preserves bytes" {
 }
 
 test "core native wait source failure retains completed protocol progress" {
+    const runner = @import("root");
     if (!runtime.wait.supported) return error.SkipZigTest;
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{34}));
     var opts = options(&key);
     opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
     var node: runtime.NetworkCore = undefined;
-    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
+    var backing_node = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    try node.init(backing_node.allocator(), std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     var pipe: [2]std.c.fd_t = undefined;
     try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&pipe));
@@ -954,13 +960,19 @@ test "core native wait source failure retains completed protocol progress" {
     try std.testing.expectEqual(@as(c_int, 0), std.c.close(pipe[1]));
     try node.transport.sockets.primary().send(std.testing.io, &node.transport.sockets.primary().address, "invalid");
     try node.transport.sockets.primary().send(std.testing.io, &node.discovery.?.transport.sockets.primary().address, "invalid");
-    const allocations = node.reservations.allocation_calls;
+    const allocations = backing_node.allocations;
+    var buffer: [128]u8 = undefined;
+    var expected: runner.LogExpectation = .{ .level = .err, .scope = "network_runtime", .message = try std.fmt.bufPrint(&buffer, "owner_poll_source_failed role=host family=none descriptor={d} revents={x}", .{ pipe[0], @as(c_short, std.c.POLL.HUP) }) };
+    const previous = runner.expected_log;
+    defer runner.expected_log = previous;
+    runner.expected_log = &expected;
     const result = try stepAfter(&node, 100);
     try std.testing.expectEqual(error.WaitSourceClosed, result.failure.?);
+    try std.testing.expect(expected.matched);
     try std.testing.expect(result.readiness.quicReady() and result.readiness.discoveryReady());
     try std.testing.expectEqual(@as(u32, 1), result.transport.datagrams_received);
     try std.testing.expectEqualSlices(u8, "invalid", node.discovery.?.transport.receive_buffer[0..7]);
-    try std.testing.expectEqual(allocations, node.reservations.allocation_calls);
+    try std.testing.expectEqual(allocations, backing_node.allocations);
     try node.setHostWake(null);
     const clean = node.step(std.testing.io, node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms));
     try std.testing.expect(clean.failure == null);
@@ -1061,9 +1073,10 @@ test "core subscriptions use copied startup policy and reject atomically" {
     opts.resolved.core.service.gossipsub.topic_policy = &@import("gossipsub/topic_fixture.zig").churn;
     opts.resolved.core.service.gossipsub.topic_params = @splat(.{ .params = .{ .weight = 2 } });
     var node: runtime.NetworkCore = undefined;
-    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
+    var backing_node = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    try node.init(backing_node.allocator(), std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
-    const calls = node.reservations.allocation_calls;
+    const calls = backing_node.allocations;
     try std.testing.expectEqual(@as(usize, 4), node.transport.engine.registry.slots.len);
     try std.testing.expectEqual(@as(usize, 0), node.transport.engine.resourceSnapshot().active);
     const owner = node.service.gossipsub;
@@ -1089,14 +1102,15 @@ test "core subscriptions use copied startup policy and reject atomically" {
     node.shutdown(node.last_now);
     try std.testing.expectError(error.Stopped, core_test.subscribe(&node, owner.overlay.topicString(0)));
     try std.testing.expectEqual(full_revision, owner.peers.scores.revision);
-    try std.testing.expectEqual(calls, node.reservations.allocation_calls);
+    try std.testing.expectEqual(calls, backing_node.allocations);
 }
 
 test "core beacon idle scans do not manufacture immediate deadlines" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{11}));
     const resolved = try @import("configuration.zig").resolve(.{ .profile = .beacon_node, .seed = 7, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }}, .admission_policy = @import("reqresp/policy_fixture.zig").config() });
     var node: runtime.NetworkCore = undefined;
-    try node.init(std.testing.allocator, std.testing.io, &resolved, .{
+    var backing_node = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    try node.init(backing_node.allocator(), std.testing.io, &resolved, .{
         .host = &key,
         .bind = .{ .ip4 = .loopback(0) },
         .local = @import("network_core_test_support.zig").localState(.{}),
@@ -1104,14 +1118,14 @@ test "core beacon idle scans do not manufacture immediate deadlines" {
     });
     defer node.deinit(std.testing.io);
     const now = try @import("transport.zig").currentTime(std.testing.io);
-    const calls = node.reservations.allocation_calls;
+    const calls = backing_node.allocations;
     for (0..8) |_| {
         const result = node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms));
         try std.testing.expect(result.failure == null);
         try std.testing.expectEqual(@as(?u64, null), node.service.reqresp.nextWakeup(now, .{}));
         try std.testing.expect(node.nextWakeup(now, .{}).? > now.mono_ms);
     }
-    try std.testing.expectEqual(calls, node.reservations.allocation_calls);
+    try std.testing.expectEqual(calls, backing_node.allocations);
 }
 
 test "core idle turns with pending negotiations are never due for reqresp or negotiation" {
@@ -1321,14 +1335,15 @@ test "core capabilities activation commits fork BPO and copied directional value
     };
     opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
     var node: runtime.NetworkCore = undefined;
-    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
+    var backing_node = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    try node.init(backing_node.allocator(), std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const admission = &node.service.reqresp.admission.limiter;
     const identity = node.peerId();
     try std.testing.expectEqual(.allowed, admission.take(&identity, .blocks_by_root_v2, 1, .phase0, node.last_now.mono_ms));
     const admitted_debt = admission.global;
     const admitted_row = admission.rows[0];
-    const allocations = node.reservations.allocation_calls;
+    const allocations = backing_node.allocations;
     const before = ActivationSnapshot.capture(&node);
     var update: runtime.LocalUpdate = .{ .local = before.local, .schedule = before.schedule, .endpoints = before.endpoints, .capabilities = before.capabilities };
     update.capabilities.request = .initEmpty();
@@ -1358,7 +1373,7 @@ test "core capabilities activation commits fork BPO and copied directional value
     try std.testing.expectEqual(before.local.metadata.seq_number, node.localState().metadata.seq_number);
     try std.testing.expectEqualDeep(admitted_debt, admission.global);
     try std.testing.expectEqualDeep(admitted_row, admission.rows[0]);
-    try std.testing.expectEqual(allocations, node.reservations.allocation_calls);
+    try std.testing.expectEqual(allocations, backing_node.allocations);
     const committed = ActivationSnapshot.capture(&node);
     try std.testing.expect(!try applyLocal(&node, &update, node.last_now));
     update.local.metadata.attnets[0] = 1;
@@ -1405,7 +1420,8 @@ test "core targeted Status serves two current schedules and immediate close is l
     opts.resolved.core.peers.capacity = 3;
     opts.resolved.core.peers.min_outbound = 0;
     opts.resolved.core.service.identify = .{ .agent = "peer-operations" };
-    try a.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
+    var backing_a = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    try a.init(backing_a.allocator(), std.testing.io, &opts.resolved, opts.startup);
     defer a.deinit(std.testing.io);
     opts = options(&key_b);
     opts.resolved.core.service.identify = .{ .agent = "peer-operations" };
@@ -1436,7 +1452,7 @@ test "core targeted Status serves two current schedules and immediate close is l
         }
     }
     try std.testing.expect(ready);
-    const calls = a.reservations.allocation_calls;
+    const calls = backing_a.allocations;
     const selected = rows[0];
     const other = rows[1];
     const now = try @import("transport.zig").currentTime(std.testing.io);
@@ -1465,7 +1481,7 @@ test "core targeted Status serves two current schedules and immediate close is l
     try std.testing.expect(a.removeDirectPeer(&selected.identity));
     try std.testing.expect(!a.removeDirectPeer(&selected.identity));
     try std.testing.expectEqual(@as(usize, 1), try owner.directPeers(&direct));
-    try std.testing.expectEqual(calls, a.reservations.allocation_calls);
+    try std.testing.expectEqual(calls, backing_a.allocations);
     try recycledPeerOperations(&a, &b, &c, &selected);
 }
 
@@ -1558,7 +1574,8 @@ test "core Status-only update preserves local owners and permits a regressing he
     opts.resolved.core.service.identify = .{ .agent = "status-only" };
     opts.resolved.core.service.gossipsub.topic_policy = &.{@import("gossipsub/topic_fixture.zig").full(.{ 1, 2, 3, 4 })};
     var node: runtime.NetworkCore = undefined;
-    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
+    var backing_node = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    try node.init(backing_node.allocator(), std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     var desired = intentFor(&node);
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
@@ -1568,7 +1585,7 @@ test "core Status-only update preserves local owners and permits a regressing he
     var expected = ActivationSnapshot.capture(&node);
     const identify = node.service.identify.local;
     const now = node.last_now;
-    const allocations = node.reservations.allocation_calls;
+    const allocations = backing_node.allocations;
     const gossip = node.service.gossipsub;
     const topic = gossip.overlay.findTopic(name).?;
     const revision = gossip.peers.scores.revision;
@@ -1588,7 +1605,7 @@ test "core Status-only update preserves local owners and permits a regressing he
         try std.testing.expectEqual(revision, gossip.peers.scores.revision);
         try std.testing.expect(gossip.overlay.subscribed(topic));
         try std.testing.expectEqual(@as(?u16, topic), gossip.overlay.findTopic(name));
-        try std.testing.expectEqual(allocations, node.reservations.allocation_calls);
+        try std.testing.expectEqual(allocations, backing_node.allocations);
         try std.testing.expect(node.peer_manager.selection_revision == null);
     }
 }
@@ -1662,12 +1679,13 @@ test "core local intent topic demand no-op preserves Status scheduling and count
     opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
     opts.resolved.core.service.gossipsub.topic_policy = &.{@import("gossipsub/topic_fixture.zig").full(.{ 1, 2, 3, 4 })};
     var node: runtime.NetworkCore = undefined;
-    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
+    var backing_node = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    try node.init(backing_node.allocator(), std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const g = node.service.gossipsub;
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
     const before = ActivationSnapshot.capture(&node);
-    const calls = node.reservations.allocation_calls;
+    const calls = backing_node.allocations;
     node.peer_manager.control.schedules[0].peer = .{ .index = 0, .generation = 1 };
     node.peer_manager.control.schedules[0].status_due_ms = node.last_now.mono_ms + 500;
     const schedule = node.peer_manager.control.schedules[0];
@@ -1696,7 +1714,7 @@ test "core local intent topic demand no-op preserves Status scheduling and count
     const deadline = g.overlay.rows[row].retire_after_ms;
     try std.testing.expect(!try node.applyIntent(&desired, .{ .mono_ms = node.last_now.mono_ms + 1, .unix_s = node.last_now.unix_s }));
     try std.testing.expectEqual(deadline, g.overlay.rows[row].retire_after_ms);
-    try std.testing.expectEqual(calls, node.reservations.allocation_calls);
+    try std.testing.expectEqual(calls, backing_node.allocations);
 }
 
 const IntentPair = struct {
@@ -1787,7 +1805,8 @@ test "core local intent fork BPO announcements remembered peer and event borrows
     try pair.a.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer pair.a.deinit(std.testing.io);
     opts.startup.host = &key_b;
-    try pair.b.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
+    var backing_pair_b = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    try pair.b.init(backing_pair_b.allocator(), std.testing.io, &opts.resolved, opts.startup);
     defer pair.b.deinit(std.testing.io);
     pair.attachInboxes();
     var a_intent = intentFor(&pair.a);
@@ -1811,7 +1830,7 @@ test "core local intent fork BPO announcements remembered peer and event borrows
     }
     try std.testing.expect(connected);
     try std.testing.expect(gb.overlay.findTopic(active) == null);
-    const calls = pair.b.reservations.allocation_calls;
+    const calls = backing_pair_b.allocations;
     for ([_]*runtime.LocalIntent{ &a_intent, &b_intent }) |intent| {
         intent.update.local.fork.fork = .fulu;
         intent.update.local.fork.digest = .{ 1, 2, 3, 4 };
@@ -1883,7 +1902,7 @@ test "core local intent fork BPO announcements remembered peer and event borrows
         if (got_request and got_message) break;
     }
     try std.testing.expect(got_request and got_message);
-    try std.testing.expectEqual(calls, pair.b.reservations.allocation_calls);
+    try std.testing.expectEqual(calls, backing_pair_b.allocations);
 }
 
 fn intentBorrowUpdate(node: *runtime.NetworkCore, desired: *runtime.LocalIntent) !void {

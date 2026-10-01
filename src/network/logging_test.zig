@@ -7,6 +7,19 @@ const logFn = @import("logging.zig").logFn;
 const message_capacity = @import("logging.zig").message_capacity;
 const std = @import("std");
 
+test "native logging retains fatal context at the error threshold" {
+    var sink: Sink = .{ .level = .err };
+    const previous = bind(&sink);
+    defer _ = bind(previous);
+    logFn(.debug, .network_runtime, "owner_poll_failed errno=NOMEM", .{});
+    logFn(.err, .network_runtime, "owner_poll_failed errno=NOMEM", .{});
+    var records: [1]Record = undefined;
+    try std.testing.expectEqual(@as(usize, 1), sink.peek(&records).count);
+    try std.testing.expectEqual(.err, records[0].level);
+    try std.testing.expectEqual(.network_runtime, records[0].scope);
+    try std.testing.expectEqualStrings("owner_poll_failed errno=NOMEM", records[0].message[0..records[0].len]);
+}
+
 test "native logging bounds records, sanitizes text and isolates sinks" {
     var first: Sink = .{};
     const second: Sink = .{};

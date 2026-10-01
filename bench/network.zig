@@ -145,12 +145,13 @@ pub fn main(init: std.process.Init) !void {
     const key_b = try network.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{12}));
     const a = try allocator.create(network.NetworkCore);
     defer allocator.destroy(a);
-    try initialize(a, allocator, io, &key_a, profile, &plan);
+    var backing_a = std.testing.FailingAllocator.init(allocator, .{});
+    try initialize(a, backing_a.allocator(), io, &key_a, profile, &plan);
     defer a.deinit(io);
-    std.debug.print("history_entry_bytes={} history_owner_bytes={} startup_requested_zig_bytes={} inline_bytes={} gossip_bytes={} allocation_calls={} native_allocator_os_excluded=true\n", .{ @sizeOf(network.gossipsub.mcache.HistoryEntry), @sizeOf(network.gossipsub.mcache.History), a.reservations.bytes, @sizeOf(network.NetworkCore), a.service.gossipsub.memoryPlan().total_bytes, a.reservations.allocation_calls });
+    std.debug.print("history_entry_bytes={} history_owner_bytes={} startup_requested_zig_bytes={} inline_bytes={} gossip_bytes={} allocation_calls={} native_allocator_os_excluded=true\n", .{ @sizeOf(network.gossipsub.mcache.HistoryEntry), @sizeOf(network.gossipsub.mcache.History), a.reservations.bytes, @sizeOf(network.NetworkCore), a.service.gossipsub.memoryPlan().total_bytes, backing_a.allocations });
     std.debug.print("gossip_metadata_bytes={}\n", .{a.service.gossipsub.memoryPlan().metadata_bytes});
     for (0..warmup_turns) |_| _ = try turn(a, io, .{});
-    const idle_allocations = a.reservations.allocation_calls;
+    const idle_allocations = backing_a.allocations;
     var samples: Samples = .begin(a);
     for (0..turns) |i| {
         const now = try network.transport.currentTime(io);
@@ -161,11 +162,12 @@ pub fn main(init: std.process.Init) !void {
         try samples.record(a, i, timestamp(io) - start, due_before, result, immediate);
     }
     samples.print(a, "idle");
-    std.debug.print("case=idle turn_allocation_calls={}\n", .{a.reservations.allocation_calls - idle_allocations});
+    std.debug.print("case=idle turn_allocation_calls={}\n", .{backing_a.allocations - idle_allocations});
     printReconciliation(a, "idle");
     const b = try allocator.create(network.NetworkCore);
     defer allocator.destroy(b);
-    try initialize(b, allocator, io, &key_b, profile, &plan);
+    var backing_b = std.testing.FailingAllocator.init(allocator, .{});
+    try initialize(b, backing_b.allocator(), io, &key_b, profile, &plan);
     defer b.deinit(io);
     var topic_buffer: [network.gossipsub.topic.topic_max_len]u8 = undefined;
     const topic = network.gossipsub.topic.build(plan.forks[0].digest, "beacon_block", &topic_buffer);
@@ -174,11 +176,11 @@ pub fn main(init: std.process.Init) !void {
         _ = try turn(a, io, .{});
         _ = try turn(b, io, .{});
     }
-    const allocations_a = a.reservations.allocation_calls;
-    const allocations_b = b.reservations.allocation_calls;
+    const allocations_a = backing_a.allocations;
+    const allocations_b = backing_b.allocations;
     try pressure(a, b, sinks, io, topic, plan.forks[0]);
     printReconciliation(a, "connected_cumulative");
-    std.debug.print("turn_allocation_calls_a={} turn_allocation_calls_b={} process_rss=external_time_maximum_resident_set_kbytes\n", .{ a.reservations.allocation_calls - allocations_a, b.reservations.allocation_calls - allocations_b });
+    std.debug.print("turn_allocation_calls_a={} turn_allocation_calls_b={} process_rss=external_time_maximum_resident_set_kbytes\n", .{ backing_a.allocations - allocations_a, backing_b.allocations - allocations_b });
 }
 
 fn initialize(node: *network.NetworkCore, a: std.mem.Allocator, io: std.Io, key: *const network.KeyPair, profile: network.configuration.Profile, plan: *const network.chain.Plan) !void {
@@ -383,7 +385,8 @@ fn idleWait(init: std.process.Init) !void {
     const node = try init.gpa.create(network.NetworkCore);
     defer init.gpa.destroy(node);
     const plan = try network.chain.Plan.init(chain_config, false);
-    try initialize(node, init.gpa, io, &key, .small, &plan);
+    var backing = std.testing.FailingAllocator.init(init.gpa, .{});
+    try initialize(node, backing.allocator(), io, &key, .small, &plan);
     defer node.deinit(io);
     var host: IdleHost = .{ .pipe = undefined };
     if (std.c.pipe(&host.pipe) != 0) return error.PipeFailed;
@@ -394,7 +397,7 @@ fn idleWait(init: std.process.Init) !void {
     const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
     if (flags < 0 or std.c.fcntl(host.pipe[0], std.c.F.SETFL, flags | nonblock) < 0) return error.PipeFailed;
     try node.setHostWake(host.pipe[0]);
-    const calls = node.reservations.allocation_calls;
+    const calls = backing.allocations;
     const start = timestamp(io);
     const window_end_ms = (try network.transport.currentTime(io)).mono_ms + 1_000;
     var count: u32 = 0;
@@ -412,7 +415,7 @@ fn idleWait(init: std.process.Init) !void {
     }
     const elapsed = timestamp(io) - start;
     if (elapsed < 1_000_000_000) return error.TurnLimit;
-    std.debug.print("case=idle_wait profile=small window_ms=1000 elapsed_ns={} turns={} host_applies={} immediate_deadlines={} turn_elapsed_ns={} turn_allocation_calls={} turns_max={}\n", .{ elapsed, count, host.applies, immediate, elapsed_turns, node.reservations.allocation_calls - calls, idle_wait_turns_max });
+    std.debug.print("case=idle_wait profile=small window_ms=1000 elapsed_ns={} turns={} host_applies={} immediate_deadlines={} turn_elapsed_ns={} turn_allocation_calls={} turns_max={}\n", .{ elapsed, count, host.applies, immediate, elapsed_turns, backing.allocations - calls, idle_wait_turns_max });
     std.debug.print("case=idle_wait due_now", .{});
     inline for (std.meta.fields(Source)) |field| std.debug.print(" {s}={}", .{ field.name, node.due_now_turns[field.value] });
     std.debug.print("\n", .{});

@@ -83,7 +83,6 @@ pub fn initialize(self: *Runtime) !void {
     try self.heavy.?.core.setHostWake(self.wake.?.read_fd);
 
     self.diag.nativeRequestedBytes = @sizeOf(n.NetworkCore) + self.heavy.?.core.reservations.bytes;
-    self.diag.nativeAllocationCount = self.heavy.?.core.reservations.allocation_calls;
     const plan = self.heavy.?.core.transport.engine.memoryPlan();
     self.diag.quicReceiveWindowBytes = plan.receive_window_bytes;
     self.diag.quicConnectionWindowBytes = plan.connection_window_bytes;
