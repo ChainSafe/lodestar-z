@@ -1823,7 +1823,7 @@ pub fn computeSyncCommitteeRewards(self: *BeaconStateView, block: js.Value, vali
     var output_index: u32 = 0;
     for (rewards) |reward| {
         if (filters) |indices| {
-            if (std.mem.indexOfScalar(u64, indices, reward.validator_index) == null) continue;
+            if (std.mem.findScalar(u64, indices, reward.validator_index) == null) continue;
         }
         const row = js_types.SyncCommitteeReward{ .val = try env.createObject() };
         try row.set(.{
