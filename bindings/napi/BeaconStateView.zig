@@ -225,13 +225,7 @@ pub fn eth1Data(self: *BeaconStateView) !js_types.Eth1Data {
     var eth1_data_view = try cached_state.state.eth1Data();
     var eth1_data: ct.phase0.Eth1Data.Type = undefined;
     try eth1_data_view.toValue(allocator, &eth1_data);
-    // Manually create 'obj' since proposers can vote in any u64 deposit count,
-    // which does not fit a JS number.
-    const obj = try env.createObject();
-    try obj.setNamedProperty("depositRoot", try sszValueToNapiValue(env, ct.primitive.Root, &eth1_data.deposit_root));
-    try obj.setNamedProperty("depositCount", try env.createBigintUint64(eth1_data.deposit_count));
-    try obj.setNamedProperty("blockHash", try sszValueToNapiValue(env, ct.primitive.Bytes32, &eth1_data.block_hash));
-    return js_types.wrap(js_types.Eth1Data, obj);
+    return js_types.wrap(js_types.Eth1Data, try sszValueToNapiValue(env, ct.phase0.Eth1Data, &eth1_data));
 }
 
 pub fn latestBlockHeader(self: *BeaconStateView) !js_types.BeaconBlockHeader {
@@ -1057,7 +1051,7 @@ pub fn getFinalizedRootProof(self: *BeaconStateView) !js.Array {
     var proof = try cached_state.state.getFinalizedRootProof(allocator);
     defer proof.deinit(allocator);
 
-    const witnesses = std.ArrayListUnmanaged([32]u8).fromOwnedSlice(proof.witnesses);
+    const witnesses = std.ArrayList([32]u8).fromOwnedSlice(proof.witnesses);
     return js_types.wrap(js.Array, try sszValueToNapiValue(
         env,
         ct.phase0.HistoricalRoots,
@@ -2049,7 +2043,7 @@ fn executionPayloadFromJs(allocator: std.mem.Allocator, payload: napi.Value, out
         const tx_value = try transactions.getElement(i);
         const tx_info = try tx_value.getTypedarrayInfo();
         if (tx_info.array_type != .uint8) return error.InvalidTransaction;
-        var tx: std.ArrayListUnmanaged(u8) = .empty;
+        var tx: std.ArrayList(u8) = .empty;
         errdefer tx.deinit(allocator);
         try tx.appendSlice(allocator, tx_info.data);
         out.transactions.appendAssumeCapacity(tx);

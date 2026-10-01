@@ -64,9 +64,9 @@ test "ProgressiveContainerType - variable" {
     }, &[_]u1{ 1, 1, 0, 1 });
 
     var f: Foo.Type = undefined;
-    f.a = try std.ArrayListUnmanaged(u8).initCapacity(allocator, 10);
-    f.b = try std.ArrayListUnmanaged(u8).initCapacity(allocator, 10);
-    f.c = try std.ArrayListUnmanaged(u8).initCapacity(allocator, 10);
+    f.a = try std.ArrayList(u8).initCapacity(allocator, 10);
+    f.b = try std.ArrayList(u8).initCapacity(allocator, 10);
+    f.c = try std.ArrayList(u8).initCapacity(allocator, 10);
     defer f.a.deinit(allocator);
     defer f.b.deinit(allocator);
     defer f.c.deinit(allocator);

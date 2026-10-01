@@ -146,7 +146,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
         }
 
         fn parseProofYaml(allocator: std.mem.Allocator, contents: []const u8) !MerkleProof {
-            var branch: std.ArrayListUnmanaged([66]u8) = .empty;
+            var branch: std.ArrayList([66]u8) = .empty;
             errdefer branch.deinit(allocator);
             var leaf: ?[66]u8 = null;
             var leaf_gindex: ?Gindex = null;
