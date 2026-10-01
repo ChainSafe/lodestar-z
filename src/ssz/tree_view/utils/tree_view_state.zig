@@ -150,9 +150,8 @@ pub const TreeViewState = struct {
         while (value_iter.next()) |node_id_ptr| {
             const node_id = node_id_ptr.*;
             const state = node_id.getState(self.pool);
-            // A cached child root can already be freed via children_data — a child
-            // view owns the same node — when a failed commit left it here. Skip it
-            // rather than re-unref (which would hit the .free slot).
+            // A defensive check since a cached node should never be free here,
+            // a failed composite commit removes the child roots it borrowed
             if (state.isFree()) continue;
             if (state.refCount() == 0) {
                 self.pool.unref(node_id);

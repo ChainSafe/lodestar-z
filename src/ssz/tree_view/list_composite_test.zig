@@ -1193,6 +1193,136 @@ test "memory_safety: TreeView composite list commit - OOM does not double-free" 
     return error.TestUnexpectedResult;
 }
 
+// When view.commit() fails in commitNodes, asserts that:
+// 1. child 0's root is not left in the cache
+// 2. unrelated child is not freed
+test "memory_safety: failed composite commit does not retain a borrowed child root" {
+    const allocator = std.testing.allocator;
+    const ListType = FixedListType(Checkpoint, 16, .{});
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 64 });
+    defer pool.deinit();
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    try list.append(allocator, .{ .epoch = 1, .root = [_]u8{1} ** 32 });
+
+    const root = try ListType.tree.fromValue(&pool, &list);
+    var view = try ListType.TreeView.init(allocator, &pool, root);
+    defer view.deinit();
+
+    // Give child 0 a fresh root that only its view owns.
+    const first: Checkpoint.Type = .{ .epoch = 2, .root = [_]u8{2} ** 32 };
+    try view.setValue(0, &first);
+    const borrowed_root = (try view.get(0)).getRoot();
+
+    // Fill the pool so commitNodes cannot allocate.
+    var fillers: [64]Node.Id = undefined;
+    var filler_count: usize = 0;
+    defer for (fillers[0..filler_count]) |node| pool.unref(node);
+    while (filler_count < fillers.len) : (filler_count += 1) {
+        fillers[filler_count] = pool.createLeafFromUint(filler_count + 100) catch break;
+    }
+
+    // view.commit() stores child 0's root, then fails in commitNodes.
+    try std.testing.expectError(error.PoolExhausted, view.commit());
+
+    // Make room in the pool again.
+    for (fillers[0..filler_count]) |node| pool.unref(node);
+    filler_count = 0;
+
+    // Replacing child 0 frees its old root.
+    const second: Checkpoint.Type = .{ .epoch = 3, .root = [_]u8{3} ** 32 };
+    try view.setValue(0, &second);
+    try std.testing.expect(borrowed_root.getState(&pool).isFree());
+
+    // Allocate until an unrelated node reuses the freed slot.
+    var unrelated_nodes: [16]Node.Id = undefined;
+    var unrelated_count: usize = 0;
+    defer for (unrelated_nodes[0..unrelated_count]) |node| pool.unref(node);
+    while (unrelated_count < unrelated_nodes.len) {
+        const node = try pool.createLeafFromUint(unrelated_count + 1_000);
+        unrelated_nodes[unrelated_count] = node;
+        unrelated_count += 1;
+        if (node == borrowed_root) break;
+    }
+    try std.testing.expectEqual(borrowed_root, unrelated_nodes[unrelated_count - 1]);
+
+    // clearCache must not free the unrelated node.
+    view.clearCache();
+    try std.testing.expect(!borrowed_root.getState(&pool).isFree());
+}
+
+// When view.commit() fails on child 1's commit, asserts that:
+// 1. child 0's root is not left in the cache
+// 2. unrelated child is not freed
+test "memory_safety: failed child commit does not retain an earlier borrowed child root" {
+    const allocator = std.testing.allocator;
+    const ListType = FixedListType(Checkpoint, 16, .{});
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 64 });
+    defer pool.deinit();
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    try list.append(allocator, .{ .epoch = 1, .root = [_]u8{1} ** 32 });
+    try list.append(allocator, .{ .epoch = 2, .root = [_]u8{2} ** 32 });
+
+    const root = try ListType.tree.fromValue(&pool, &list);
+    var view = try ListType.TreeView.init(allocator, &pool, root);
+    defer view.deinit();
+
+    // Give child 0 a fresh root that only its view owns.
+    const first: Checkpoint.Type = .{ .epoch = 3, .root = [_]u8{3} ** 32 };
+    try view.setValue(0, &first);
+    const borrowed_root = (try view.get(0)).getRoot();
+
+    // Give child 1 a pending change so its commit needs a pool node.
+    const failing_child = try view.get(1);
+    try failing_child.set("epoch", @as(u64, 4));
+
+    // The commit loop must reach child 0 before child 1.
+    const changed = view.chunks.state.changed.keys();
+    try std.testing.expectEqual(2, changed.len);
+    try std.testing.expect(@intFromEnum(changed[0]) < @intFromEnum(changed[1]));
+
+    // Fill the pool so child 1's commit cannot allocate.
+    var fillers: [64]Node.Id = undefined;
+    var filler_count: usize = 0;
+    defer for (fillers[0..filler_count]) |node| pool.unref(node);
+    while (filler_count < fillers.len) : (filler_count += 1) {
+        fillers[filler_count] = pool.createLeafFromUint(filler_count + 100) catch break;
+    }
+
+    // Child 1 cannot commit with a full pool, so view.commit() stores child 0's root and then
+    // fails in the loop on child 1.
+    try std.testing.expectError(error.PoolExhausted, failing_child.commit());
+    try std.testing.expectError(error.PoolExhausted, view.commit());
+
+    // Make room in the pool again.
+    for (fillers[0..filler_count]) |node| pool.unref(node);
+    filler_count = 0;
+
+    // Replacing child 0 frees its old root.
+    const second: Checkpoint.Type = .{ .epoch = 5, .root = [_]u8{5} ** 32 };
+    try view.setValue(0, &second);
+    try std.testing.expect(borrowed_root.getState(&pool).isFree());
+
+    // Allocate until an unrelated node reuses the freed slot.
+    var unrelated_nodes: [16]Node.Id = undefined;
+    var unrelated_count: usize = 0;
+    defer for (unrelated_nodes[0..unrelated_count]) |node| pool.unref(node);
+    while (unrelated_count < unrelated_nodes.len) {
+        const node = try pool.createLeafFromUint(unrelated_count + 1_000);
+        unrelated_nodes[unrelated_count] = node;
+        unrelated_count += 1;
+        if (node == borrowed_root) break;
+    }
+    try std.testing.expectEqual(borrowed_root, unrelated_nodes[unrelated_count - 1]);
+
+    // clearCache must not free the unrelated node.
+    view.clearCache();
+    try std.testing.expect(!borrowed_root.getState(&pool).isFree());
+}
+
 test "memory_safety: TreeView composite list sliceTo doesn't leak pool nodes" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });

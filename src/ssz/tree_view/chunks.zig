@@ -331,9 +331,16 @@ pub fn CompositeChunks(
                 return;
             }
 
-            // Reserve first so storing each committed root can't fail. Otherwise a getOrPut OOM
-            // after a child already committed would leave a stale entry pointing at its freed root.
             try self.state.children_nodes.ensureUnusedCapacity(self.state.allocator, @intCast(self.state.changed.count()));
+
+            errdefer for (self.state.changed.keys()) |gindex| {
+                const child_ptr = self.children_data.get(gindex) orelse continue;
+                const child_root = child_ptr.getRoot();
+                const cached_root = self.state.children_nodes.get(gindex) orelse continue;
+                if (cached_root == child_root) {
+                    _ = self.state.children_nodes.remove(gindex);
+                }
+            };
 
             // Flush child views into children_nodes so commitNodes can handle them uniformly.
             for (self.state.changed.keys()) |gindex| {
