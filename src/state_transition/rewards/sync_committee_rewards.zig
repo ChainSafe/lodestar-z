@@ -18,19 +18,19 @@ pub fn computeSyncCommitteeRewards(
 
     const committee = pre_state.epoch_cache.current_sync_committee_indexed.get();
     const indices = try committee.getValidatorIndices();
+    std.debug.assert(indices.len == preset.SYNC_COMMITTEE_SIZE);
     const positions_by_validator = try committee.getValidatorIndexMap();
     const participant_reward: i64 = @intCast(pre_state.epoch_cache.sync_participant_reward);
     var rewards: [preset.SYNC_COMMITTEE_SIZE]SyncCommitteeReward = undefined;
     var rewards_len: usize = 0;
 
-    for (indices[0..@min(indices.len, preset.SYNC_COMMITTEE_SIZE)], 0..) |validator_index, i| {
+    for (indices, 0..) |validator_index, i| {
         const positions = positions_by_validator.get(validator_index).?.items;
         if (positions[0] != i) continue;
 
         // A validator may occupy multiple positions, each with its own participation bit.
         var reward: i64 = 0;
         for (positions) |position| {
-            if (position >= preset.SYNC_COMMITTEE_SIZE) break;
             reward += if (try sync_aggregate.sync_committee_bits.get(position))
                 participant_reward
             else
