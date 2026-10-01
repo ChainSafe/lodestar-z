@@ -4,7 +4,7 @@ const gossipsub = @import("gossipsub.zig");
 const service_mod = @import("../service.zig");
 const topic_mod = @import("topic.zig");
 const Engine = @import("../quic/Engine.zig");
-const support = @import("../test_support.zig");
+const support = @import("../quic/test_support.zig");
 
 const Service = service_mod.Service;
 const digest = topic_mod.ForkDigest{ 0x6a, 0x95, 0xa1, 0xa9 };

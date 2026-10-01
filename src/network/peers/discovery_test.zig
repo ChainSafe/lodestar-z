@@ -706,7 +706,7 @@ test "peer discovery refused maintenance probe stays a local failure and the ste
 }
 
 fn handoff(candidate: *const adapter.Candidate) !void {
-    const support = @import("../test_support.zig");
+    const support = @import("../quic/test_support.zig");
     const dial = @import("dialing.zig");
     var pair = support.Pair{};
     try pair.init(.{ .connections_max = 4, .handshaking_max = 4, .handshaking_per_source_max = 4, .dialing_max = 2 }, .{ .connections_max = 4, .handshaking_max = 4, .handshaking_per_source_max = 4, .dialing_max = 2 });

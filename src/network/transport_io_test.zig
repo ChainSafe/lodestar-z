@@ -1,10 +1,12 @@
+const quic_test = @import("quic/test_support.zig");
+const core_test = @import("network_core_test_support.zig");
 const FaultIo = @import("fault_io");
 const std = @import("std");
 const constants = @import("constants.zig");
 const transport_mod = @import("transport.zig");
 const Engine = @import("quic/Engine.zig");
 const multistream = @import("wire/multistream.zig");
-const support = @import("test_support.zig");
+const support = @import("transport_test_support.zig");
 const types = @import("types.zig");
 const udp_mod = @import("udp");
 
@@ -676,7 +678,7 @@ test "transport progress early clock failure does not begin or publish a turn" {
     try node.init(39);
     defer node.deinit();
     const now = try transport_mod.currentTime(std.testing.io);
-    const failed = try node.transport.engine.dial(&support.server_address, node.transport.peerId(), now);
+    const failed = try node.transport.engine.dial(&quic_test.server_address, node.transport.peerId(), now);
     try std.testing.expect(node.transport.engine.failSend(failed));
     var faults: FaultIo = .{ .clock = .{} };
     const io = faults.io();
@@ -904,7 +906,7 @@ test "network owner progresses and shuts down while UDP sends are under local pr
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{125}));
     const remote = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{126}));
     const identity = @import("wire/peer_id.zig").PeerId.fromPublicKey(&remote.publicKey());
-    const options = support.networkOptions(&key);
+    const options = core_test.networkOptions(&key);
     var node: core.NetworkCore = undefined;
     try node.init(std.testing.allocator, std.testing.io, &options.resolved, options.startup);
     defer node.deinit(std.testing.io);

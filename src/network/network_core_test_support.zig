@@ -3,7 +3,7 @@
 //! sends. `Link.pump` delivers them and drains the engines directly until the transport settles,
 //! so `Setup.step` settles the link and then runs one owner turn on each side.
 const std = @import("std");
-const support = @import("test_support.zig");
+const support = @import("quic/test_support.zig");
 const configuration = @import("configuration.zig");
 const core_mod = @import("network_core.zig");
 const constants = @import("constants.zig");
@@ -13,6 +13,8 @@ const rr = @import("reqresp/root.zig");
 const t = @import("peers/types.zig");
 const transport_mod = @import("transport.zig");
 const types = @import("types.zig");
+const local_intent = @import("gossipsub/local_intent.zig");
+const topic_policy = @import("gossipsub/topic_policy.zig");
 const Inbox = @import("gossipsub/test_support.zig").Inbox;
 
 const NetworkCore = core_mod.NetworkCore;
@@ -98,7 +100,7 @@ pub fn updateDemand(node: *NetworkCore, demand: *const t.Demand, now: Now) !void
 /// endpoints, capabilities and subscriptions.
 pub fn updateLocalDemand(node: *NetworkCore, local: *const t.LocalState, demand: *const t.Demand, now: Now) !void {
     var boundaries: [@import("gossipsub/topic_policy.zig").boundary_max]@import("gossipsub/local_intent.zig").Boundary = undefined;
-    var desired = support.intent(node, try @import("gossipsub/test_support.zig").subscriptionUpdate(node.service.gossipsub, null, false, &boundaries));
+    var desired = intent(node, try @import("gossipsub/test_support.zig").subscriptionUpdate(node.service.gossipsub, null, false, &boundaries));
     desired.update.local = local.*;
     desired.demand = demand.*;
     _ = try node.applyIntent(&desired, now);
@@ -107,7 +109,7 @@ pub fn updateLocalDemand(node: *NetworkCore, local: *const t.LocalState, demand:
 /// Moves the owner's wall-clock slot forward through the intent path, changing nothing else.
 pub fn advanceSlot(node: *NetworkCore, slot: u64, now: Now) !void {
     var boundaries: [@import("gossipsub/topic_policy.zig").boundary_max]@import("gossipsub/local_intent.zig").Boundary = undefined;
-    var desired = support.intent(node, try @import("gossipsub/test_support.zig").subscriptionUpdate(node.service.gossipsub, null, false, &boundaries));
+    var desired = intent(node, try @import("gossipsub/test_support.zig").subscriptionUpdate(node.service.gossipsub, null, false, &boundaries));
     desired.slot = slot;
     _ = try node.applyIntent(&desired, now);
     std.debug.assert(node.current_slot == slot);
@@ -138,7 +140,7 @@ pub const Link = struct {
     vtable: std.Io.VTable = undefined,
     entropy: std.Random.DefaultCsprng = undefined,
     sent: std.ArrayList(Datagram) = .empty,
-    batch: transport_mod.SendBatch = undefined,
+    batch: support.Batch = undefined,
 
     threadlocal var active: ?*Link = null;
 
@@ -233,7 +235,7 @@ pub const Link = struct {
             var budget: u32 = 0;
             var drained = false;
             while (budget < transport_mod.send_burst_max) {
-                const count = support.sendBatch(from, index, self.now, &self.batch);
+                const count = self.batch.fill(from, index, self.now);
                 budget += count;
                 moved = moved or count > 0;
                 for (self.batch.outgoing[0..count]) |sent| {
@@ -387,3 +389,66 @@ pub const Setup = struct {
         return result;
     }
 };
+
+pub const NetworkOptions = struct {
+    resolved: configuration.Resolved,
+    startup: core_mod.Startup,
+};
+
+/// The owner harness request resolved for a NetworkCore on loopback.
+pub fn networkOptions(key: *const keys.KeyPair) NetworkOptions {
+    var requested = request();
+    requested.forks = &.{
+        .{ .digest = @splat(0), .fork = .phase0 },
+        .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu },
+    };
+    requested.reqresp.outbound_per_peer_max = 4;
+    requested.gossip.topic_policy = comptime &.{
+        @import("gossipsub/topic_fixture.zig").bytes(@splat(0)),
+        @import("gossipsub/topic_fixture.zig").bytes(.{ 1, 2, 3, 4 }),
+    };
+    return .{
+        .resolved = configuration.resolve(requested) catch unreachable,
+        .startup = .{
+            .host = key,
+            .bind = .{ .ip4 = .loopback(0) },
+            .local = localState(.{}),
+            .slot = 100,
+        },
+    };
+}
+
+pub fn intent(node: *const core_mod.NetworkCore, subscriptions: []const local_intent.Boundary) core_mod.LocalIntent {
+    return .{
+        .update = .{
+            .local = node.localState(),
+            .schedule = node.schedule,
+            .endpoints = node.advertisementEndpoints(),
+            .capabilities = node.service.router.capabilities(),
+        },
+        .demand = node.peer_manager.demand,
+        .subscriptions = subscriptions,
+        .slot = node.service.gossipsub.overlay.slot,
+    };
+}
+
+/// Control operations holding a request, which retirement tests watch drain.
+pub fn controlOperations(node: *const core_mod.NetworkCore) usize {
+    var count: usize = 0;
+    for (node.control_protocol.operations) |*op| count += @intFromBool(op.request != null);
+    return count;
+}
+
+pub fn subscribe(node: *core_mod.NetworkCore, name: []const u8) !void {
+    try setSubscription(node, name, true);
+}
+
+pub fn unsubscribe(node: *core_mod.NetworkCore, name: []const u8) !void {
+    try setSubscription(node, name, false);
+}
+
+fn setSubscription(node: *core_mod.NetworkCore, name: []const u8, subscribed: bool) !void {
+    var boundaries: [topic_policy.boundary_max]local_intent.Boundary = undefined;
+    const desired = intent(node, try @import("gossipsub/test_support.zig").subscriptionUpdate(node.service.gossipsub, name, subscribed, &boundaries));
+    _ = try node.applyIntent(&desired, node.last_now);
+}

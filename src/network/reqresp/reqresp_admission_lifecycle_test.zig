@@ -3,7 +3,7 @@ const rr = @import("reqresp.zig");
 const Protocol = @import("protocol.zig").Protocol;
 const Plan = @import("receive_plan.zig").Plan;
 const harness = @import("test_pair.zig");
-const support = @import("../test_support.zig");
+const support = @import("../quic/test_support.zig");
 const policy = @import("policy_fixture.zig").config;
 
 fn application(setup: *harness.Pair, which: Protocol, bytes: []const u8, sink: []u8) !rr.RequestHandle {

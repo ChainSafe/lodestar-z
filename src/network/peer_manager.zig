@@ -286,7 +286,7 @@ pub const PeerManager = struct {
     /// these bounded facts without borrowing transport or executing I/O.
     pub fn transportProgress(self: *PeerManager, engine: *const Engine) void {
         self.dialing.syncAnswered(engine);
-        self.native_dial_room = engine.limits.connections_max -| engine.registry.active_len;
+        self.native_dial_room = engine.limits.connections_max -| engine.resourceSnapshot().active;
     }
 
     pub fn peerWakeup(self: *const PeerManager, now: Now, capacity: usize) ?u64 {

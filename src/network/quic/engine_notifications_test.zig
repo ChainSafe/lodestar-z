@@ -1,5 +1,5 @@
 const std = @import("std");
-const support = @import("../test_support.zig");
+const support = @import("test_support.zig");
 const Engine = @import("Engine.zig");
 
 test "engine notifications deliver a later close during sustained earlier stream churn" {

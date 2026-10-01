@@ -219,7 +219,7 @@ pub const NetworkCore = struct {
         self.transport.engine.shutdownAll();
     }
     pub fn isClosed(self: *const NetworkCore) bool {
-        return self.peer_manager.stopped and self.transport.engine.registry.active_len == 0;
+        return self.peer_manager.stopped and self.transport.engine.resourceSnapshot().active == 0;
     }
     pub fn peerId(self: *const NetworkCore) t.PeerId {
         return self.transport.peerId();
@@ -588,7 +588,7 @@ pub const NetworkCore = struct {
             // This turn's coverage selection already ran, without a second protocol pump.
             if (self.discovery != null) self.discover(io, tick, &result);
             var intents: [dials_per_turn]manager.DialIntent = undefined;
-            const room = self.transport.engine.limits.dialing_max -| self.transport.engine.registry.dialing;
+            const room = self.transport.engine.limits.dialing_max -| self.transport.engine.resourceSnapshot().dialing;
             const count = self.peer_manager.dialIntents(self.service.gossipsub, &self.transport.engine, tick, intents[0..@min(room, intents.len)]);
             for (intents[0..count], 0..) |intent, index| {
                 const handle = self.transport.dialPeer(io, intent.address, intent.peer) catch |err| {

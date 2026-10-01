@@ -2,7 +2,7 @@ const std = @import("std");
 const constants = @import("../constants.zig");
 const Engine = @import("Engine.zig");
 const limits = @import("limits.zig");
-const support = @import("../test_support.zig");
+const support = @import("test_support.zig");
 const types = @import("../types.zig");
 
 const Pair = support.Pair;

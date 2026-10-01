@@ -312,7 +312,7 @@ test "gossipsub legal maximum host acceptance forwards retained pages through ac
 }
 
 test "gossipsub rotates the legal atomic allowance past a duplicate flood" {
-    var pair: @import("../test_support.zig").Pair = .{};
+    var pair: @import("../quic/test_support.zig").Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1, .decompress_per_peer_bytes = 1 });

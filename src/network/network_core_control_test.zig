@@ -1142,7 +1142,7 @@ test "identify replacement generation starts a fresh query and rejects stale com
     options.core.service.identify = .{ .agent = "first", .inbound_max = 1, .outbound_max = 1 };
     try setup.initOwnersWithOptions(&.{}, options);
     defer setup.deinit();
-    _ = try setup.pair.server.dial(&@import("test_support.zig").client_address, setup.client.peerId(), setup.pair.now);
+    _ = try setup.pair.server.dial(&@import("quic/test_support.zig").client_address, setup.client.peerId(), setup.pair.now);
     for (0..100) |_| try setup.step(1);
     var snapshots: [4]t.Snapshot = undefined;
     _ = setup.client.peer_manager.snapshots(&snapshots);
@@ -1779,7 +1779,7 @@ test "local intent failing at ENR sequence exhaustion preserves control schedule
     var before: [@import("gossipsub/topic_policy.zig").boundary_max]@import("gossipsub/local_intent.zig").Boundary = undefined;
     const subscribed = try gossip_test.subscriptionUpdate(node.service.gossipsub, null, false, &before);
     var boundaries: [@import("gossipsub/topic_policy.zig").boundary_max]@import("gossipsub/local_intent.zig").Boundary = undefined;
-    var desired = @import("test_support.zig").intent(node, try gossip_test.subscriptionUpdate(node.service.gossipsub, "/eth2/00000000/beacon_block/ssz_snappy", true, &boundaries));
+    var desired = @import("network_core_test_support.zig").intent(node, try gossip_test.subscriptionUpdate(node.service.gossipsub, "/eth2/00000000/beacon_block/ssz_snappy", true, &boundaries));
     desired.update.local.fork = .{ .fork = .fulu, .digest = @splat(1) };
     desired.update.local.status.fork_digest = @splat(1);
     desired.update.local.metadata.attnets[0] = 1;

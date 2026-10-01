@@ -182,7 +182,7 @@ test "gossip policy mesh queue pressure preserves required action ownership" {
 test "gossip partial peer turn queues subscription before outgoing GRAFT" {
     var f = try Fixture.init(2);
     defer f.g.deinit();
-    var pair: @import("../test_support.zig").Pair = .{};
+    var pair: @import("../quic/test_support.zig").Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
     f.g.options.peers_per_pump = 1;

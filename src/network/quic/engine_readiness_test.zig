@@ -2,7 +2,7 @@ const std = @import("std");
 const binding = @import("binding.zig");
 const constants = @import("../constants.zig");
 const Engine = @import("Engine.zig");
-const support = @import("../test_support.zig");
+const support = @import("test_support.zig");
 
 const Event = Engine.Event;
 const Pair = support.Pair;

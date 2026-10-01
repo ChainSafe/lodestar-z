@@ -46,11 +46,11 @@ pub const Pair = struct {
     /// Routes the client's stream events polled since the last call to its gossip sessions,
     /// for tests that drive the gossip turn directly.
     pub fn forwardClient(self: *Pair) void {
-        self.shared.pair.forward(&self.shared.pair.client, .{ .gossip = self.shared.client.gossipsub });
+        @import("../service_test_support.zig").forward(&self.shared.pair, &self.shared.pair.client, .{ .gossip = self.shared.client.gossipsub });
     }
 
     pub fn forwardServer(self: *Pair) void {
-        self.shared.pair.forward(&self.shared.pair.server, .{ .gossip = self.shared.server.gossipsub });
+        @import("../service_test_support.zig").forward(&self.shared.pair, &self.shared.pair.server, .{ .gossip = self.shared.server.gossipsub });
     }
 
     /// Messages the client admitted in the last step.

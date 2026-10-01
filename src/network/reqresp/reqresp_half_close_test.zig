@@ -39,7 +39,7 @@ fn negotiate(pair: *Pair, method: protocol.Protocol, bytes: []const u8, sink: []
 fn pump(pair: *Pair) ![]const rr.Event {
     try pair.shared.pair.pump();
     pair.shared.client.reqresp.cleanupPending(&pair.shared.pair.client, &pair.shared.client.router);
-    pair.shared.pair.forward(&pair.shared.pair.client, .{ .reqresp = &pair.shared.client.reqresp });
+    @import("../service_test_support.zig").forward(&pair.shared.pair, &pair.shared.pair.client, .{ .reqresp = &pair.shared.client.reqresp });
     const counts = pair.shared.client.reqresp.pump(&pair.shared.pair.client, &pair.shared.client.router, pair.shared.pair.now, .{ .application = pair.client_events[0..16], .control = pair.client_events[16..] });
     std.mem.copyForwards(rr.Event, pair.client_events[counts.application..], pair.client_events[16..][0..counts.control]);
     pair.client_count = counts.application + counts.control;
@@ -211,7 +211,7 @@ test "reqresp dispatches a complete Goodbye before FIN and keeps other request f
         var requests: usize = 0;
         for (0..8) |_| {
             try pair.shared.pair.pump();
-            pair.shared.pair.forward(&pair.shared.pair.server, .{ .reqresp = &pair.shared.server.reqresp });
+            @import("../service_test_support.zig").forward(&pair.shared.pair, &pair.shared.pair.server, .{ .reqresp = &pair.shared.server.reqresp });
             const count = pair.shared.server.reqresp.pump(&pair.shared.pair.server, &pair.shared.server.router, pair.shared.pair.now, .{ .control = &pair.server_events }).control;
             for (pair.server_events[0..count]) |event| if (event == .request) {
                 try std.testing.expectEqualSlices(u8, &payload, event.request.bytes);
@@ -226,7 +226,7 @@ test "reqresp dispatches a complete Goodbye before FIN and keeps other request f
         }
         for (0..8) |_| {
             try pair.shared.pair.pump();
-            pair.shared.pair.forward(&pair.shared.pair.server, .{ .reqresp = &pair.shared.server.reqresp });
+            @import("../service_test_support.zig").forward(&pair.shared.pair, &pair.shared.pair.server, .{ .reqresp = &pair.shared.server.reqresp });
             const count = pair.shared.server.reqresp.pump(&pair.shared.pair.server, &pair.shared.server.router, pair.shared.pair.now, .{ .control = &pair.server_events }).control;
             for (pair.server_events[0..count]) |event| if (event == .request) {
                 try std.testing.expectEqualSlices(u8, &payload, event.request.bytes);

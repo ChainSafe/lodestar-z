@@ -1,6 +1,6 @@
 const std = @import("std");
 const invariant = @import("route_invariant.zig");
-const support = @import("../test_support.zig");
+const support = @import("../quic/test_support.zig");
 const Client = @import("client.zig").Client;
 const Server = @import("server.zig").Server;
 

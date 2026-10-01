@@ -2,7 +2,7 @@ const std = @import("std");
 const retry = @import("retry.zig");
 const binding = @import("binding.zig");
 const limits = @import("limits.zig");
-const support = @import("../test_support.zig");
+const support = @import("test_support.zig");
 
 test "QUIC Retry admits an address-validated handshake" {
     var pair: support.Pair = .{};

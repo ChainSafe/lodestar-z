@@ -1,6 +1,6 @@
 const std = @import("std");
 const d = @import("discv5");
-const core_test = @import("test_support.zig");
+const core_test = @import("network_core_test_support.zig");
 const runtime = @import("network_core.zig");
 const keys = @import("wire/keys.zig");
 

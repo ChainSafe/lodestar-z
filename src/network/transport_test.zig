@@ -1,5 +1,5 @@
 const std = @import("std");
-const support = @import("test_support.zig");
+const support = @import("transport_test_support.zig");
 const Engine = @import("quic/Engine.zig");
 const keys = @import("wire/keys.zig");
 const multiaddr = @import("wire/multiaddr.zig");

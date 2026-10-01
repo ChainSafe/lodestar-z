@@ -1,8 +1,9 @@
+const service_test = @import("service_test_support.zig");
 const std = @import("std");
 const Engine = @import("quic/Engine.zig");
 const multistream = @import("wire/multistream.zig");
 const negotiate = @import("negotiate.zig");
-const support = @import("test_support.zig");
+const support = @import("quic/test_support.zig");
 
 const Pair = support.Pair;
 const Negotiator = negotiate.Negotiator;
@@ -45,7 +46,7 @@ const Setup = struct {
             if (event == .stream_opened and negotiator == &self.listener) try negotiator.acceptInbound(engine, event.stream_opened, self.pair.now);
             if (event == .closed) negotiator.connectionClosed(engine, event.closed.conn);
         }
-        (support.Owners{ .negotiator = negotiator }).route(engine, events);
+        (service_test.Owners{ .negotiator = negotiator }).route(engine, events);
     }
 
     fn pumpDialer(self: *Setup, protocols: []const negotiate.Protocol, outcomes: []Outcome) usize {
