@@ -131,12 +131,4 @@ pub const RequestState = struct {
         } else types.app_error_normal;
         return true;
     }
-
-    pub fn closeProtocol(self: *RequestState, engine: *Engine) void {
-        if (self.stream_owner != .protocol) return;
-        const code = self.close_code orelse return;
-        engine.closeStream(self.stream, code);
-        self.stream_owner = .closed;
-        self.close_code = null;
-    }
 };

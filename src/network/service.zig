@@ -177,6 +177,7 @@ pub const Service = struct {
             if (self.applications != .active or event == .connected) continue;
             self.gossipsub.transportEvents(&self.router, engine, &.{event}, now);
         }
+        self.reqresp.cleanupPending(engine, &self.router);
         const count = self.router.pump(engine, now, &self.outcomes);
         defer self.router.releaseOutcomes();
         for (self.outcomes[0..count]) |outcome| {

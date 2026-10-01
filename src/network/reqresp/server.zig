@@ -35,22 +35,20 @@ pub const Server = struct {
     execution: ?u16 = null,
     admission: @import("inbound_admission.zig").State = .{},
 
-    pub fn complete(self: *Server, owner: *ReqResp, index: u16, event: Event, engine: ?*Engine) void {
+    pub fn complete(self: *Server, owner: *ReqResp, index: u16, event: Event) void {
         owner.complete(&self.request, index, event, .{ .phase_name = @tagName(self.state), .rejection = self.rejection, .result_code = self.pending_result });
-        if (engine) |live| self.request.closeProtocol(live);
-        owner.settleSlot(.inbound, index);
     }
 
-    pub fn fail(self: *Server, owner: *ReqResp, index: u16, reason: Failure, engine: ?*Engine) void {
-        self.complete(owner, index, .{ .failed = .{ .request = self.request.handle(index), .reason = reason, .phase = null } }, engine);
+    pub fn fail(self: *Server, owner: *ReqResp, index: u16, reason: Failure) void {
+        self.complete(owner, index, .{ .failed = .{ .request = self.request.handle(index), .reason = reason, .phase = null } });
     }
 
-    fn failStream(self: *Server, owner: *ReqResp, index: u16, err: engine_mod.StreamError, engine: *Engine) void {
+    fn failIo(self: *Server, owner: *ReqResp, index: u16, err: (engine_mod.StreamError || codec.Error)) void {
         self.request.failure_detail = @errorName(err);
         self.fail(owner, index, switch (err) {
             error.StaleHandle, error.UnknownStream, error.StreamStopped => .stream_closed,
             else => .transport,
-        }, engine);
+        });
     }
 
     /// A finishing slot resumes its FIN once the host has taken its last event.
@@ -102,7 +100,7 @@ pub const Server = struct {
             if (reason == .timeout and self.state == .receiving_request and !request.protocol.isControl() and
                 !request.io.unread(engine, request.stream))
                 request.peer_fault = .non_completion;
-            self.fail(ctx, index, reason, engine);
+            self.fail(ctx, index, reason);
             return;
         };
         // A peer stop surfaces here while the host holds the slot. With an event still queued
@@ -111,7 +109,7 @@ pub const Server = struct {
             _ = engine.streamCapacity(request.stream) catch |err| switch (err) {
                 error.WouldBlock => 0,
                 else => {
-                    self.failStream(ctx, index, err, engine);
+                    self.failIo(ctx, index, err);
                     return;
                 },
             };
@@ -125,16 +123,16 @@ pub const Server = struct {
         }
     }
 
-    pub fn readRequest(owner: *ReqResp, engine: *Engine, slot: *Server, index: u16, now: Now) void {
+    fn readRequest(owner: *ReqResp, engine: *Engine, slot: *Server, index: u16, now: Now) void {
         const request = &slot.request;
         var reads: u32 = 0;
         while (reads < reads_per_pump_max) : (reads += 1) {
             const input = request.io.read(engine, request.stream) catch |err| {
-                slot.failStream(owner, index, err, engine);
+                slot.failIo(owner, index, err);
                 return;
             };
             if (input.reset) {
-                slot.fail(owner, index, .stream_closed, engine);
+                slot.fail(owner, index, .stream_closed);
                 return;
             }
             if (input.progressed) slot.progress_ms = now.mono_ms;
@@ -184,6 +182,30 @@ pub const Server = struct {
             }
         }
         owner.markReady(.inbound, index);
+    }
+
+    /// The connection is authenticated before admission. Both undecided complete input and
+    /// an undelivered request notification can carry its final Goodbye, including before FIN.
+    pub fn closingGoodbye(self: *Server, owner: *ReqResp, engine: *Engine, index: u16, now: Now) ?u64 {
+        const request = &self.request;
+        assert(request.running() and request.protocol == .goodbye_v1);
+        if (self.state != .receiving_request and self.state != .ready and
+            (request.pendingEvent() == null or request.pendingEvent().? != .request)) return null;
+        if (self.state == .receiving_request and request.pendingEvent() == null) readRequest(owner, engine, self, index, now);
+        if (request.running() and self.state == .ready) {
+            const bytes = request.io.decoder.payload();
+            const code = @import("../control_wire.zig").decodeScalar(bytes) catch unreachable;
+            self.state = .serving;
+            return code;
+        }
+        if (request.pendingEvent()) |event| if (event == .request) {
+            const code = @import("../control_wire.zig").decodeScalar(event.request.bytes) catch unreachable;
+            request.notification = .none;
+            self.state = .serving;
+            return code;
+        };
+        std.log.scoped(.network_reqresp_errors).debug("goodbye_incomplete_on_close request={d}:{d} connection={d}:{d} stream={d} buffered_bytes={d} decoded_bytes={d} decoder_phase={s} fin={any} detail={s}", .{ index, request.generation, request.conn.index, request.conn.generation, request.stream.id, request.io.buffered_end - request.io.buffered_start, if (request.io.decoding) request.io.decoder.written else 0, if (request.io.decoding) @tagName(request.io.decoder.phase) else "cleared", request.io.fin_seen, request.failure_detail });
+        return null;
     }
 
     pub fn admit(self: *Server, index: u16, lease: *const @import("inbound_admission.zig").Lease, now: Now) void {
@@ -263,12 +285,7 @@ pub const Server = struct {
     fn writeChunk(owner: *ReqResp, engine: *Engine, slot: *Server, index: u16, now: Now) void {
         const request = &slot.request;
         const flushed = request.io.flush(engine, request.stream, false) catch |err| {
-            request.failure_detail = @errorName(err);
-            const reason: Failure = switch (err) {
-                error.StaleHandle, error.UnknownStream, error.StreamStopped => .stream_closed,
-                else => .transport,
-            };
-            slot.fail(owner, index, reason, engine);
+            slot.failIo(owner, index, err);
             return;
         };
         if (!flushed.done) {
@@ -308,7 +325,7 @@ pub const Server = struct {
             // An error chunk ends the response, so a peer can stop the stream once it has read one.
             const answered = request.chunks > 0 or slot.pending_result != constants.result_success;
             if (err != error.StreamStopped or !answered or request.io.outbox.offset != request.io.outbox.bytes.len) {
-                slot.failStream(owner, index, err, engine);
+                slot.failIo(owner, index, err);
                 return;
             }
             std.log.scoped(.network_reqresp).debug("response_finish_stopped request={d}:{d} connection={d}:{d} stream={d} method={s} chunks={d}", .{ index, request.generation, request.conn.index, request.conn.generation, request.stream.id, @tagName(request.protocol), request.chunks });
@@ -320,12 +337,7 @@ pub const Server = struct {
             return;
         }
         slot.progress_ms = now.mono_ms;
-        slot.complete(
-            owner,
-            index,
-            .{ .served = .{ .request = request.handle(index), .chunks = request.chunks } },
-            null,
-        );
+        slot.complete(owner, index, .{ .served = .{ .request = request.handle(index), .chunks = request.chunks } });
     }
 
     /// The coordinator has checked all capacity and handoff bounds before charging the start.
@@ -414,10 +426,12 @@ pub const Server = struct {
         Server.queueChunk(slot, constants.result_success, digest, ssz, false, now);
     }
 
-    pub fn reserveResponse(self: *Server) bool {
+    pub fn responseReadiness(self: *const Server) reqresp.ResponseReadiness {
         const request = &self.request;
-        if (!request.running() or request.waitingHost() or self.state != .serving) return false;
-        return true;
+        assert(request.active());
+        if (!request.running()) return .terminal;
+        if (request.waitingHost() or self.state != .serving) return .backpressured;
+        return .ready;
     }
 
     pub fn respondError(

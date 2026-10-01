@@ -177,7 +177,8 @@ fn failStatus(setup: *Setup, failure: rr.Failure) !void {
         if (operation.protocol != .status_v1) continue;
         const service = &setup.client.service.reqresp;
         const slot = service.outboundSlot(request).?;
-        slot.fail(service, request.index, failure, setup.pair.client);
+        slot.fail(service, request.index, failure);
+        service.cleanupPending(setup.pair.client, &setup.client.service.router);
         return;
     };
     return error.TestUnexpectedResult;
