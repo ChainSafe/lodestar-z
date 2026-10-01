@@ -440,10 +440,11 @@ test "gossip topic retirement clears expired scores while backoff remains" {
 }
 
 test "fanout interning snapshots aliased text under full capacity" {
-    var ledger: @import("../reservations.zig").Reservations = .{ .backing = std.testing.allocator };
+    var backing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var ledger: @import("../reservations.zig").Reservations = .{ .backing = backing.allocator() };
     var g = try Gossipsub.init(ledger.allocator(), .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1 });
     defer g.deinit();
-    const calls = ledger.allocation_calls;
+    const calls = backing.allocations;
     const original = "/eth2/00000000/a/ssz_snappy/b/ssz_snappy";
     const shorter = "/eth2/00000000/a/ssz_snappy";
     _ = support.intern(&g, original).?;
@@ -458,7 +459,7 @@ test "fanout interning snapshots aliased text under full capacity" {
     try std.testing.expectEqualStrings(shorter, g.overlay.topicString(0));
     try std.testing.expectEqual(generation + 1, g.overlay.rows[0].generation);
     try std.testing.expectEqual(@as(f64, 1), g.peers.scores.topic_params[0].weight);
-    try std.testing.expectEqual(calls, ledger.allocation_calls);
+    try std.testing.expectEqual(calls, backing.allocations);
 }
 
 test "publication subscribed fanout expires through owner maintenance" {

@@ -64,10 +64,11 @@ test "gossip default owner memory reconciles requested allocations" {
 }
 
 test "gossip resource snapshot releases queued bytes and transmit retains with the owner" {
-    var ledger: @import("../reservations.zig").Reservations = .{ .backing = std.testing.allocator };
+    var backing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var ledger: @import("../reservations.zig").Reservations = .{ .backing = backing.allocator() };
     var g = try support.init(ledger.allocator(), .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1 });
     defer g.deinit();
-    const calls = ledger.allocation_calls;
+    const calls = backing.allocations;
     const conn: Handle = .{ .index = 0, .generation = 1 };
     const peer = @import("test_support.zig").addPeer(&g, conn, .v1_2).?;
     const io = &g.sessions.rows[peer.index].io;
@@ -85,7 +86,7 @@ test "gossip resource snapshot releases queued bytes and transmit retains with t
     const released = g.resourceSnapshot();
     try std.testing.expectEqual(@as(usize, 0), released.queued_bytes);
     try std.testing.expectEqual(@as(usize, 0), released.held_tx_retains);
-    try std.testing.expectEqual(calls, ledger.allocation_calls);
+    try std.testing.expectEqual(calls, backing.allocations);
 }
 
 test "gossip lifecycle sequence preserves ownership under pressure reconnect and late verdicts" {

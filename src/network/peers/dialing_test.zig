@@ -192,7 +192,8 @@ test "peer dial time samples each retired attempt once from its own selection" {
 
 test "peer dial custody diagnostics count unfinished derivations without mutating retained coverage" {
     const custody = @import("custody.zig");
-    var ledger: @import("../reservations.zig").Reservations = .{ .backing = a };
+    var backing = std.testing.FailingAllocator.init(a, .{});
+    var ledger: @import("../reservations.zig").Reservations = .{ .backing = backing.allocator() };
     var q = try mod.Dialing.init(.{ .capacity = 4, .seed = 4 });
     var catalog = try initCatalog(ledger.allocator(), q.options);
     defer catalog.deinit(ledger.allocator());
@@ -221,7 +222,7 @@ test "peer dial custody diagnostics count unfinished derivations without mutatin
     const cursor = q.cursor;
     const custody_cursor = catalog.candidate_custody_cursor;
     const random = q.random;
-    const calls = ledger.allocation_calls;
+    const calls = backing.allocations;
     const bytes = ledger.bytes;
     try std.testing.expectEqual(@as(usize, 1), custodyIncomplete(&catalog));
     for (0..4) |_| {
@@ -236,7 +237,7 @@ test "peer dial custody diagnostics count unfinished derivations without mutatin
         try std.testing.expectEqualDeep(random, q.random);
         try std.testing.expect(!q.selection_dirty);
         try std.testing.expectEqual(@as(?u64, catalog_mod.hint_freshness_ms), q.selection_deadline);
-        try std.testing.expectEqual(calls, ledger.allocation_calls);
+        try std.testing.expectEqual(calls, backing.allocations);
         try std.testing.expectEqual(bytes, ledger.bytes);
     }
 }

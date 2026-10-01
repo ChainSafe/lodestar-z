@@ -8,7 +8,8 @@
 //!   --record=<path>       record each run test's duration to `path`
 //!
 //! `scripts/test-shards.sh` drives these. Only the argument parsing, `mainTerminal` and the
-//! selection code after it differ from upstream, so a Zig upgrade is a fresh copy plus this diff.
+//! selection code after it and exact expected-log capture differ from upstream, so a Zig upgrade
+//! is a fresh copy plus this diff.
 const builtin = @import("builtin");
 
 const std = @import("std");
@@ -24,6 +25,13 @@ pub const std_options: std.Options = .{
 };
 
 var log_err_count: usize = 0;
+pub const LogExpectation = struct {
+    level: std.log.Level,
+    scope: []const u8,
+    message: []const u8,
+    matched: bool = false,
+};
+pub threadlocal var expected_log: ?*LogExpectation = null;
 var fba: std.heap.FixedBufferAllocator = .init(&fba_buffer);
 var fba_buffer: [8192]u8 = undefined;
 var stdin_buffer: [4096]u8 = undefined;
@@ -482,6 +490,7 @@ pub fn log(
     args: anytype,
 ) void {
     @disableInstrumentation();
+    if (consumeExpectedLog(message_level, scope, format, args)) return;
     if (@intFromEnum(message_level) <= @intFromEnum(std.log.Level.err)) {
         log_err_count +|= 1;
     }
@@ -491,6 +500,33 @@ pub fn log(
             args,
         );
     }
+}
+
+fn consumeExpectedLog(comptime level: std.log.Level, comptime scope: @EnumLiteral(), comptime format: []const u8, args: anytype) bool {
+    const expected = expected_log orelse return false;
+    if (expected.matched or expected.level != level or !std.mem.eql(u8, expected.scope, @tagName(scope))) return false;
+    var buffer: [1024]u8 = undefined;
+    const message = std.fmt.bufPrint(&buffer, format, args) catch return false;
+    if (!std.mem.eql(u8, expected.message, message)) return false;
+    expected.matched = true;
+    return true;
+}
+
+test "expected log capture consumes one exact bounded record" {
+    var expected: LogExpectation = .{ .level = .err, .scope = "capture_test", .message = "failure=7" };
+    const previous = expected_log;
+    defer expected_log = previous;
+    expected_log = null;
+    try testing.expect(!consumeExpectedLog(.err, .capture_test, "failure={d}", .{7}));
+    expected_log = &expected;
+    try testing.expect(!consumeExpectedLog(.warn, .capture_test, "failure={d}", .{7}));
+    try testing.expect(!consumeExpectedLog(.err, .other, "failure={d}", .{7}));
+    try testing.expect(!consumeExpectedLog(.err, .capture_test, "failure={d}", .{8}));
+    try testing.expect(!consumeExpectedLog(.err, .capture_test, "{s}", .{&([_]u8{'x'} ** 1025)}));
+    try testing.expect(!expected.matched);
+    try testing.expect(consumeExpectedLog(.err, .capture_test, "failure={d}", .{7}));
+    try testing.expect(expected.matched);
+    try testing.expect(!consumeExpectedLog(.err, .capture_test, "failure={d}", .{7}));
 }
 
 /// Simpler main(), exercising fewer language features, so that

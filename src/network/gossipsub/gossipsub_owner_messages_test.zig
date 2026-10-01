@@ -851,7 +851,8 @@ test "gossip unsent IWANT expiry refunds recovery slots without blaming the peer
 }
 
 test "gossip paged RPC cursors survive shared workspace reuse without runtime allocation" {
-    var ledger: @import("../reservations.zig").Reservations = .{ .backing = std.testing.allocator };
+    var backing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var ledger: @import("../reservations.zig").Reservations = .{ .backing = backing.allocator() };
     var g = try support.init(ledger.allocator(), .{
         .random_seed = 1,
         .connected_capacity = 4,
@@ -860,7 +861,7 @@ test "gossip paged RPC cursors survive shared workspace reuse without runtime al
         .body_buffer_bytes = 2,
     });
     defer g.deinit();
-    const calls = ledger.allocation_calls;
+    const calls = backing.allocations;
     ledger.byte_limit = ledger.bytes;
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
     try support.subscribe(&g, name);
@@ -912,7 +913,7 @@ test "gossip paged RPC cursors survive shared workspace reuse without runtime al
     }
     for (0..2) |i| try std.testing.expect(g.sessions.resetRx(@intCast(i)));
     try std.testing.expectEqual(g.sessions.receive_pool.next.len, g.sessions.receive_pool.free_pages);
-    try std.testing.expectEqual(calls, ledger.allocation_calls);
+    try std.testing.expectEqual(calls, backing.allocations);
 }
 
 fn feedPagedTestFrame(g: *Gossipsub, index: u16, wire: []const u8) !void {

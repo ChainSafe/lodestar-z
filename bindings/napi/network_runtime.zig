@@ -89,7 +89,6 @@ pub const Diagnostics = struct {
     peerLaneBytes: usize = 0,
     ownerShellBytes: usize = @sizeOf(Runtime),
     nativeRequestedBytes: usize = 0,
-    nativeAllocationCount: usize = 0,
     quicReceiveWindowBytes: u64 = 0,
     quicConnectionWindowBytes: u64 = 0,
     quicStreamWindowBytes: u64 = 0,

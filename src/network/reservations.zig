@@ -6,7 +6,6 @@ pub const Reservations = struct {
     backing: std.mem.Allocator,
     bytes: usize = 0,
     byte_limit: ?usize = null,
-    allocation_calls: usize = 0,
 
     pub fn allocator(self: *Reservations) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &.{
@@ -22,7 +21,6 @@ pub const Reservations = struct {
         if (self.byte_limit) |limit| if (total > limit) return null;
         const result = self.backing.rawAlloc(len, alignment, ret) orelse return null;
         self.bytes = total;
-        self.allocation_calls += 1;
         return result;
     }
     fn resize(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, len: usize, ret: usize) bool {

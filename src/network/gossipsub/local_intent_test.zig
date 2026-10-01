@@ -65,7 +65,8 @@ test "intent and publication prefer unused rows and reclaim only their selected 
 }
 
 test "local intent exact capacity excess and namespace refusal" {
-    var ledger: @import("../reservations.zig").Reservations = .{ .backing = std.testing.allocator };
+    var backing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var ledger: @import("../reservations.zig").Reservations = .{ .backing = backing.allocator() };
     var g = try gossip.Gossipsub.init(ledger.allocator(), options());
     defer g.deinit();
     const w = try std.testing.allocator.create(local.Workspace);
@@ -79,7 +80,7 @@ test "local intent exact capacity excess and namespace refusal" {
         const kind: []const u8 = if (i % 256 < 128) "blob_sidecar" else "data_column_sidecar";
         entry.* = try std.fmt.bufPrint(&names[i], "/eth2/{x:0>8}/{s}_{d}/ssz_snappy", .{ digest, kind, i % 128 });
     }
-    const calls = ledger.allocation_calls;
+    const calls = backing.allocations;
     try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
     try std.testing.expect(g.overlay.findTopic(desired[0]) == null);
     try std.testing.expect(try apply(&g, w, desired[0..512]));
@@ -93,7 +94,7 @@ test "local intent exact capacity excess and namespace refusal" {
     const deadline = g.overlay.rows[0].retire_after_ms;
     try std.testing.expect(!try g.prepareSubscriptions(&.{}, w, .{ .mono_ms = 200, .unix_s = 0 }, 0));
     try std.testing.expectEqual(deadline, g.overlay.rows[0].retire_after_ms);
-    try std.testing.expectEqual(calls, ledger.allocation_calls);
+    try std.testing.expectEqual(calls, backing.allocations);
     var generic = try gossip.Gossipsub.init(std.testing.allocator, .{ .random_seed = 1 });
     defer generic.deinit();
     try std.testing.expectError(error.TopicPolicyRequired, apply(&generic, w, &.{desired[0]}));
