@@ -34,7 +34,7 @@ test "shuffling job records completed builds" {
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
     try metrics.write(&aw.writer);
-    try std.testing.expect(std.mem.indexOf(u8, aw.written(), "lodestar_stfn_epoch_shuffling_job_seconds_count 2\n") != null);
+    try std.testing.expect(std.mem.find(u8, aw.written(), "lodestar_stfn_epoch_shuffling_job_seconds_count 2\n") != null);
 }
 
 test "EpochTransitionCache - finalProcessEpoch" {

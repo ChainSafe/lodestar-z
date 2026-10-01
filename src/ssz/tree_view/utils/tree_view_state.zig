@@ -18,7 +18,7 @@ pub const TreeViewState = struct {
     children_nodes: std.AutoHashMapUnmanaged(Gindex, Node.Id),
 
     /// whether the corresponding child node/data has changed since the last update of the root
-    changed: std.AutoArrayHashMapUnmanaged(Gindex, void),
+    changed: std.array_hash_map.Auto(Gindex, void),
 
     pub fn init(self: *TreeViewState, allocator: Allocator, pool: *Node.Pool, root: Node.Id) !void {
         try pool.ref(root);

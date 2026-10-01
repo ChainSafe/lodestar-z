@@ -132,7 +132,7 @@ fn isSafeCheckpointState(state_bytes: []const u8, epoch: Epoch) bool {
 /// order and a write of an existing key is a no-op (no reorder).
 pub const InMemoryCPStateDatastore = struct {
     allocator: Allocator,
-    states: std.AutoArrayHashMapUnmanaged(DatastoreKey, []u8),
+    states: std.array_hash_map.Auto(DatastoreKey, []u8),
 
     pub fn init(allocator: Allocator) InMemoryCPStateDatastore {
         return .{ .allocator = allocator, .states = .empty };
@@ -361,7 +361,7 @@ pub const FileCPStateDatastore = struct {
         const self: *FileCPStateDatastore = @ptrCast(@alignCast(ctx));
         const dir = self.dir orelse return error.DatastoreNotInitialized;
 
-        var keys: std.ArrayListUnmanaged(DatastoreKey) = .empty;
+        var keys: std.ArrayList(DatastoreKey) = .empty;
         errdefer keys.deinit(allocator);
 
         var it = dir.iterate();

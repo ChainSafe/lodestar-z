@@ -92,7 +92,7 @@ pub fn main(init: std.process.Init) !void {
             const type_name = getTypeName(test_dir_name, test_name);
 
             // we must skip some invalid types (that would have gotten caught at compile time)
-            if (std.mem.indexOf(u8, type_name, "vec_") != null and std.mem.indexOf(u8, type_name, "_0") != null) {
+            if (std.mem.find(u8, type_name, "vec_") != null and std.mem.find(u8, type_name, "_0") != null) {
                 continue;
             }
 
@@ -121,10 +121,10 @@ fn getTypeName(test_dir_name: []const u8, test_name: []const u8) []const u8 {
         return test_name[0 .. (split_it.index orelse (split_it.buffer.len + 1)) - 1];
     }
     if (std.mem.eql(u8, test_dir_name, "progressive_containers")) {
-        if (std.mem.indexOf(u8, test_name, "TestStruct")) |idx| {
+        if (std.mem.find(u8, test_name, "TestStruct")) |idx| {
             return test_name[0 .. idx + "TestStruct".len];
         }
-        if (std.mem.indexOf(u8, test_name, "Struct")) |idx| {
+        if (std.mem.find(u8, test_name, "Struct")) |idx| {
             return test_name[0 .. idx + "Struct".len];
         }
         return test_name;
