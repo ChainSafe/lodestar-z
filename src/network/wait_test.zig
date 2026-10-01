@@ -100,7 +100,7 @@ const Cancellation = struct {
 
 test "dual-stack native wait observes all four protocol sockets and host wake without consuming data" {
     if (!wait.supported) return error.SkipZigTest;
-    const bindings: @import("udp").Bindings = .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } };
+    const bindings: @import("udp").Sockets.Bindings = .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } };
     var quic = try @import("udp").Sockets.bind(std.testing.io, bindings);
     defer quic.close(std.testing.io);
     var discovery = try @import("udp").Sockets.bind(std.testing.io, bindings);
@@ -125,7 +125,7 @@ test "dual-stack native wait observes all four protocol sockets and host wake wi
 
 test "native wait reports each QUIC family and a datagram arriving after its snapshot wakes the next poll" {
     if (!wait.supported) return error.SkipZigTest;
-    const bindings: @import("udp").Bindings = .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } };
+    const bindings: @import("udp").Sockets.Bindings = .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } };
     var quic = try @import("udp").Sockets.bind(std.testing.io, bindings);
     defer quic.close(std.testing.io);
     const ip4 = quic.values[0].?;

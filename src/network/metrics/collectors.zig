@@ -93,7 +93,7 @@ fn writeNativeCounters(self: *const Context, w: *prom.Encoder) prom.Error!void {
         .help = metric[1],
     }, @field(self.owner.transport.counters, metric[0]));
     const udp = @import("udp");
-    const discovery_drops = if (self.owner.discovery) |d| d.transport.send_drops else udp.SendDrops{};
+    const discovery_drops = if (self.owner.discovery) |d| d.transport.send_drops else udp.Sockets.SendDrops{};
     inline for (.{ "datagrams", "bytes" }) |measure| {
         const dropped = try w.family(.{
             .name = "lodestar_native_udp_send_dropped_" ++ measure ++ "_total",
@@ -101,7 +101,7 @@ fn writeNativeCounters(self: *const Context, w: *prom.Encoder) prom.Error!void {
             .help = "UDP " ++ measure ++ " discarded before kernel acceptance due to temporary local send pressure",
             .labels = &.{ "role", "reason" },
         });
-        inline for (std.meta.fields(udp.SendPressure)) |reason| {
+        inline for (std.meta.fields(udp.Sockets.SendDrops.Reason)) |reason| {
             try dropped.sample(.{ "quic", reason.name }, @field(self.owner.transport.send_drops, measure)[reason.value]);
             try dropped.sample(.{ "discovery", reason.name }, @field(discovery_drops, measure)[reason.value]);
         }

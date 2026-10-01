@@ -860,7 +860,7 @@ test "transport drops a pressure suffix once and preserves every connection and 
         try std.testing.expectEqual(@as(u32, @intCast(prefix)), result.datagrams_sent);
         try std.testing.expectEqual(@as(u32, 0), result.send_failures);
         try std.testing.expectEqual(@as(u8, 0), node.transport.batch_len);
-        const reason = @intFromEnum(@import("udp").SendPressure.system_resources);
+        const reason = @intFromEnum(@import("udp").Sockets.SendDrops.Reason.system_resources);
         try std.testing.expectEqual(@as(u64, 3 - prefix), node.transport.send_drops.datagrams[reason]);
         try std.testing.expectEqual(@as(u64, Prefix.dropped_bytes), node.transport.send_drops.bytes[reason]);
         try std.testing.expect(Prefix.dropped_bytes > 0);
@@ -888,7 +888,7 @@ test "transport recovers a locally dropped first flight through QUIC loss recove
     const handle = try client.transport.dialPeer(faults.io(), server.transport.localAddress(), server.transport.peerId());
     try std.testing.expectEqual(@as(usize, 1), faults.send_calls);
     try std.testing.expectEqual(@as(u64, 0), client.transport.counters.sent_datagrams);
-    const reason = @intFromEnum(@import("udp").SendPressure.system_resources);
+    const reason = @intFromEnum(@import("udp").Sockets.SendDrops.Reason.system_resources);
     try std.testing.expectEqual(@as(u64, 1), client.transport.send_drops.datagrams[reason]);
     const c = @import("quic/binding.zig").c;
     var stats: c.quiche_stats = undefined;
@@ -938,7 +938,7 @@ test "network owner progresses and shuts down while UDP sends are under local pr
     try std.testing.expect(progress.failure == null);
     try std.testing.expect(faults.send_calls > 0 and faults.send_calls <= transport_mod.send_burst_max);
     try std.testing.expect(!node.peer_manager.stopped);
-    try std.testing.expect(node.transport.send_drops.datagrams[@intFromEnum(@import("udp").SendPressure.system_resources)] > 0);
+    try std.testing.expect(node.transport.send_drops.datagrams[@intFromEnum(@import("udp").Sockets.SendDrops.Reason.system_resources)] > 0);
     node.shutdown(node.last_now);
     for (0..4) |_| {
         const stopped = node.step(faults.io(), node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms));
@@ -968,7 +968,7 @@ test "transport pressure drops later families with exact cumulative accounting" 
     try std.testing.expectEqual(@as(u32, 0), result.send_failures);
     try std.testing.expectEqual(@as(u64, 1), node.counters.sent_datagrams);
     try std.testing.expectEqual(node.batch.outgoing[0].bytes.len, node.counters.sent_bytes);
-    const reason = @intFromEnum(udp_mod.SendPressure.system_resources);
+    const reason = @intFromEnum(udp_mod.Sockets.SendDrops.Reason.system_resources);
     try std.testing.expectEqual(@as(u64, 2), node.send_drops.datagrams[reason]);
     try std.testing.expectEqual(node.batch.outgoing[1].bytes.len + node.batch.outgoing[2].bytes.len, node.send_drops.bytes[reason]);
     for (owners) |owner| {
@@ -1016,7 +1016,7 @@ test "transport cancellation stops final and capacity flushes without failing ow
             try std.testing.expectEqual(Canceled.accepted_bytes, node.counters.sent_bytes);
             try std.testing.expectEqual(@as(u32, 0), result.send_failures);
             try std.testing.expectEqual(@as(u8, 0), node.batch_len);
-            try std.testing.expectEqualDeep(udp_mod.SendDrops{}, node.send_drops);
+            try std.testing.expectEqualDeep(udp_mod.Sockets.SendDrops{}, node.send_drops);
             for (owners[0..count]) |owner| {
                 try std.testing.expectEqual(@as(?engine_mod.Handle, owner), node.engine.sendOwner(owner.index));
                 try std.testing.expect(node.engine.registry.timers.get(owner.index) != null);
@@ -1085,7 +1085,7 @@ test "established transport survives canceled output and recovers its lost paylo
     try std.testing.expectEqual(@as(usize, 1), fault.send_calls);
     try std.testing.expectEqual(@as(u32, 0), stopped.progress.send_failures);
     try std.testing.expectEqual(@as(?engine_mod.Handle, handle), client.transport.engine.sendOwner(handle.index));
-    try std.testing.expectEqualDeep(udp_mod.SendDrops{}, client.transport.send_drops);
+    try std.testing.expectEqualDeep(udp_mod.Sockets.SendDrops{}, client.transport.send_drops);
     var incoming: ?engine_mod.StreamHandle = null;
     var recovered: [payload.len]u8 = undefined;
     var count: usize = 0;

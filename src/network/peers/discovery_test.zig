@@ -340,7 +340,7 @@ const Node = struct {
     fn initAddress(self: *Node, scalar: u8, quic: ?u16, bind_address: std.Io.net.IpAddress, alternate_ip4: ?[4]u8) !void {
         return self.initBindings(scalar, quic, .single(bind_address), alternate_ip4);
     }
-    fn initBindings(self: *Node, scalar: u8, quic: ?u16, bindings: @import("udp").Bindings, alternate_ip4: ?[4]u8) !void {
+    fn initBindings(self: *Node, scalar: u8, quic: ?u16, bindings: @import("udp").Sockets.Bindings, alternate_ip4: ?[4]u8) !void {
         var sockets = try @import("udp").Sockets.bind(std.testing.io, bindings);
         errdefer sockets.close(std.testing.io);
         const address = sockets.localAddress();

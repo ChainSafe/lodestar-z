@@ -42,7 +42,7 @@ pub const discovery_session_idle_timeout_ms = peers.discovery.discovery_session_
 pub const DiscoveryOptions = peers.discovery.Config;
 pub const Startup = struct {
     host: *const @import("wire/keys.zig").KeyPair,
-    bind: @import("udp").Bindings,
+    bind: @import("udp").Sockets.Bindings,
     local: t.LocalState,
     schedule: ForkSchedule = .{},
     discovery: ?DiscoveryOptions = null,

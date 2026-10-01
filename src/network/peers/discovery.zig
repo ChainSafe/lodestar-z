@@ -19,7 +19,7 @@ pub const discovery_session_idle_timeout_ms: u64 = 10 * 60_000;
 pub const Config = struct {
     advertisement: ?advertisement.Hints = null,
     fixed: advertisement.Endpoints = .{},
-    bind: @import("udp").Bindings,
+    bind: @import("udp").Sockets.Bindings,
     sequence: u64 = 1,
     bootstrap: []const d.identity.enr.Record = &.{},
     engine: d.Engine.Config = .{ .session_capacity = discovery_session_capacity, .session_idle_timeout_ms = discovery_session_idle_timeout_ms },
@@ -108,7 +108,7 @@ pub const Discovery = struct {
     lookup_published: u64 = 0,
     empty_lookups: u3 = 0,
 
-    pub fn init(self: *Discovery, allocator: std.mem.Allocator, io: std.Io, options: Config, buffers: @import("udp").Buffers, host: *const @import("../wire/keys.zig").KeyPair, local: *const types.LocalState, schedule: ForkSchedule, quic: [2]?types.Address, now_ms: u64) !void {
+    pub fn init(self: *Discovery, allocator: std.mem.Allocator, io: std.Io, options: Config, buffers: @import("udp").Sockets.Buffers, host: *const @import("../wire/keys.zig").KeyPair, local: *const types.LocalState, schedule: ForkSchedule, quic: [2]?types.Address, now_ms: u64) !void {
         var sockets = try @import("udp").Sockets.bind(io, options.bind);
         errdefer sockets.close(io);
         @import("../configuration.zig").requestBuffers(&sockets, io, buffers, .network_discovery);

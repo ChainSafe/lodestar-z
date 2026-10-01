@@ -98,10 +98,6 @@ pub const SendFilter = struct {
     }
 };
 
-test {
-    _ = @import("test_io_test.zig");
-}
-
 pub const FaultIo = struct {
     base: std.Io = undefined,
     vtable: std.Io.VTable = undefined,
@@ -183,3 +179,7 @@ pub const FaultIo = struct {
         return self.base.vtable.randomSecure(self.base.userdata, bytes);
     }
 };
+
+test {
+    _ = @import("test_io_test.zig");
+}

@@ -8,17 +8,17 @@ const multiaddr = @import("wire/multiaddr.zig");
 const peer_id = @import("wire/peer_id.zig");
 const tls = @import("tls/context.zig");
 const types = @import("types.zig");
-const udp_mod = @import("udp");
+const Sockets = @import("udp").Sockets;
 
 const assert = std.debug.assert;
 
 pub const Options = struct {
     host: *const keys.KeyPair,
-    bind: udp_mod.Bindings,
+    bind: Sockets.Bindings,
     limits: engine_mod.Limits = .{},
     work_limits: WorkLimits = .{},
     /// Null keeps the system's default socket buffer sizes.
-    socket_buffers: ?udp_mod.Buffers = null,
+    socket_buffers: ?Sockets.Buffers = null,
 };
 
 pub const InitError = tls.Error || engine_mod.Error || std.Io.net.IpAddress.BindError ||
@@ -44,9 +44,9 @@ pub const WorkLimits = struct {
 /// different connections share a batch.
 pub const SendBatch = struct {
     buffers: [constants.send_batch_max][constants.datagram_size_max]u8 = undefined,
-    outgoing: [constants.send_batch_max]udp_mod.Outgoing = undefined,
+    outgoing: [constants.send_batch_max]Sockets.Outgoing = undefined,
     release_times: [constants.send_batch_max]u64 = undefined,
-    scratch: udp_mod.BatchScratch = undefined,
+    scratch: Sockets.BatchScratch = undefined,
     owners: [constants.send_batch_max]types.Handle = undefined,
 };
 
@@ -57,8 +57,8 @@ pub const MemoryPlan = struct {
     ready_batch_storage_bytes: u64 = @sizeOf(SendBatch),
 };
 
-pub const StepError = udp_mod.DatagramError || error{ClockOutOfRange};
-pub const DialError = udp_mod.SendError || engine_mod.DialError || error{ ClockOutOfRange, DestinationUnreachable, MissingPeerId };
+pub const StepError = Sockets.DatagramError || error{ClockOutOfRange};
+pub const DialError = Sockets.SendError || engine_mod.DialError || error{ ClockOutOfRange, DestinationUnreachable, MissingPeerId };
 
 /// Options of the standalone `step`, which also waits for the socket. NetworkCore polls its
 /// sockets itself and drives the phases directly.
@@ -67,7 +67,7 @@ pub const StepOptions = struct {
 };
 
 const Received = union(enum) {
-    datagram: udp_mod.Datagram,
+    datagram: Sockets.Datagram,
     dropped,
     timeout,
 };
@@ -102,9 +102,9 @@ pub const Counters = struct {
 
 pub const Transport = struct {
     engine: engine_mod.Engine = undefined,
-    sockets: udp_mod.Sockets = .{},
+    sockets: Sockets = .{},
     counters: Counters = .{},
-    send_drops: udp_mod.SendDrops = .{},
+    send_drops: Sockets.SendDrops = .{},
     work_limits: WorkLimits = .{},
     batch: SendBatch = .{},
     batch_len: u8 = 0,
@@ -128,7 +128,7 @@ pub const Transport = struct {
         var context = try tls.Context.init(options.host, now.unix_s, serial);
         var context_owned = true;
         errdefer if (context_owned) context.deinit();
-        target.sockets = try udp_mod.Sockets.bind(io, options.bind);
+        target.sockets = try Sockets.bind(io, options.bind);
         errdefer target.sockets.close(io);
         if (options.socket_buffers) |request| @import("configuration.zig").requestBuffers(&target.sockets, io, request, .network_quic);
         target.engine = try engine_mod.Engine.init(allocator, .{
@@ -334,12 +334,12 @@ pub const Transport = struct {
     /// Returns cancellation immediately, or the first destination failure after failing its owner. QUIC already accounts
     /// for produced packets as sent: local pressure drops their bytes without rolling back packet
     /// state or closing connections, so loss timers can retransmit the frames.
-    fn submit(self: *Transport, io: std.Io, result: *StepResult) ?udp_mod.SendError {
+    fn submit(self: *Transport, io: std.Io, result: *StepResult) ?Sockets.SendError {
         const count = self.batch_len;
         if (count == 0) return null;
         defer self.batch_len = 0;
         if (builtin.mode == .Debug) assertReleased(io, self.batch.release_times[0..count]);
-        var first: ?udp_mod.SendError = null;
+        var first: ?Sockets.SendError = null;
         var begin: usize = 0;
         while (begin < count) {
             result.send_calls += 1;
@@ -352,7 +352,7 @@ pub const Transport = struct {
             result.datagrams_sent += @intCast(outcome.sent);
             begin += outcome.sent;
             const err = outcome.failure orelse break;
-            if (udp_mod.sendPressure(err)) |reason| {
+            if (Sockets.SendDrops.Reason.fromError(err)) |reason| {
                 for (self.batch.outgoing[begin..count]) |unsent| self.send_drops.add(reason, unsent.bytes.len);
                 break;
             }
@@ -409,7 +409,7 @@ pub const Transport = struct {
         wait_ms: u32,
         ready: *[2]bool,
     ) StepError!Received {
-        const received: udp_mod.DatagramError!?udp_mod.Datagram = if (wait_ms == 0)
+        const received: Sockets.DatagramError!?Sockets.Datagram = if (wait_ms == 0)
             self.sockets.receiveReadyDatagram(io, &self.receive_buffer, ready)
         else if (self.sockets.receiveDatagram(io, &self.receive_buffer, receiveTimeout(wait_ms))) |packet| packet else |err| err;
         const datagram = received catch |err| switch (err) {
@@ -431,9 +431,9 @@ pub const Transport = struct {
         self.counters.received_bytes +|= packet.bytes.len;
         return .{ .datagram = packet };
     }
-    fn sendReply(self: *Transport, io: std.Io, destination: types.Address, bytes: []const u8) udp_mod.SendError!void {
+    fn sendReply(self: *Transport, io: std.Io, destination: types.Address, bytes: []const u8) Sockets.SendError!void {
         self.sockets.sendTo(io, destination, bytes, constants.datagram_size_max) catch |err| {
-            if (udp_mod.sendPressure(err)) |reason| self.send_drops.add(reason, bytes.len);
+            if (Sockets.SendDrops.Reason.fromError(err)) |reason| self.send_drops.add(reason, bytes.len);
             return err;
         };
         self.counters.sent_bytes +|= bytes.len;
@@ -455,7 +455,7 @@ fn receiveTimeout(wait_ms: u32) std.Io.Timeout {
     } };
 }
 
-fn mapSendError(err: udp_mod.SendError) DialError {
+fn mapSendError(err: Sockets.SendError) DialError {
     return switch (err) {
         error.AccessDenied,
         error.AddressFamilyUnsupported,

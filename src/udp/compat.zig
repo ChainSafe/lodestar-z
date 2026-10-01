@@ -2,13 +2,13 @@
 //! Re-audit these assumptions when upgrading Zig, including the Darwin socket ABI.
 const std = @import("std");
 const builtin = @import("builtin");
-const udp = @import("root.zig");
+const Sockets = @import("sockets.zig").Sockets;
 const net = std.Io.net;
 const assert = std.debug.assert;
-const SendError = udp.SendError;
-const SendOutcome = udp.SendOutcome;
-const ReceiveError = udp.ReceiveError;
-const BindError = udp.BindError;
+const SendError = Sockets.SendError;
+const SendOutcome = Sockets.SendOutcome;
+const ReceiveError = Sockets.ReceiveError;
+const BindError = Sockets.BindError;
 const os = builtin.os.tag;
 pub const native_sockets = std.options.networking and (os == .linux or os == .macos);
 comptime {
@@ -82,15 +82,15 @@ pub fn sendNative(io: std.Io, handle: net.Socket.Handle, address: *const net.IpA
 }
 
 pub const NativeScratch = if (os == .linux) struct {
-    headers: [udp.batch_capacity]std.posix.system.mmsghdr,
-    addresses: [udp.batch_capacity]std.Io.Threaded.PosixAddress,
-    vectors: [udp.batch_capacity]std.posix.iovec,
+    headers: [Sockets.BatchScratch.capacity]std.posix.system.mmsghdr,
+    addresses: [Sockets.BatchScratch.capacity]std.Io.Threaded.PosixAddress,
+    vectors: [Sockets.BatchScratch.capacity]std.posix.iovec,
 } else struct {};
 
 /// Positive sendmmsg results hide the next datagram's errno. Retry exactly that suffix.
-pub fn sendManyNative(io: std.Io, handle: net.Socket.Handle, messages: []const udp.Outgoing, scratch: *NativeScratch) SendOutcome {
+pub fn sendManyNative(io: std.Io, handle: net.Socket.Handle, messages: []const Sockets.Outgoing, scratch: *NativeScratch) SendOutcome {
     const p = std.posix;
-    assert(messages.len > 0 and messages.len <= udp.batch_capacity);
+    assert(messages.len > 0 and messages.len <= Sockets.BatchScratch.capacity);
     if (comptime os != .linux) {
         for (messages, 0..) |message, sent| {
             const address = message.to.toNetwork();

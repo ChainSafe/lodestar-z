@@ -1,5 +1,7 @@
 const std = @import("std");
-const udp = @import("root.zig");
+const Sockets = @import("sockets.zig").Sockets;
+const Address = @import("address.zig").Address;
+const test_io = @import("test_io.zig");
 const payload_max = 1500;
 
 const net = std.Io.net;
@@ -11,9 +13,9 @@ fn oneSecond() std.Io.Timeout {
 test "UDP receives into caller storage and recovers after truncation" {
     var buffer: [payload_max]u8 = undefined;
     const loopback = net.IpAddress{ .ip4 = .loopback(0) };
-    var receiver = try udp.Sockets.bind(std.testing.io, .single(loopback));
+    var receiver = try Sockets.bind(std.testing.io, .single(loopback));
     defer receiver.close(std.testing.io);
-    var sender = try udp.Sockets.bind(std.testing.io, .single(loopback));
+    var sender = try Sockets.bind(std.testing.io, .single(loopback));
     defer sender.close(std.testing.io);
     try std.testing.expect(receiver.localAddress().port() != 0);
 
@@ -29,7 +31,7 @@ test "UDP receives into caller storage and recovers after truncation" {
     var raw_sender = try loopback.bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
     defer raw_sender.close(std.testing.io);
     const oversized = [_]u8{0x55} ** (payload_max + 1);
-    const destination = udp.Address.toNetwork(receiver.localAddress());
+    const destination = Address.toNetwork(receiver.localAddress());
     try raw_sender.send(std.testing.io, &destination, &oversized);
     try std.testing.expectError(error.DatagramTooLarge, receiver.receiveDatagram(std.testing.io, &buffer, oneSecond()));
 
@@ -41,17 +43,17 @@ test "UDP receives into caller storage and recovers after truncation" {
 test "UDP receive times out without traffic" {
     var buffer: [payload_max]u8 = undefined;
     const loopback = net.IpAddress{ .ip4 = .loopback(0) };
-    var receiver = try udp.Sockets.bind(std.testing.io, .single(loopback));
+    var receiver = try Sockets.bind(std.testing.io, .single(loopback));
     defer receiver.close(std.testing.io);
     const short = std.Io.Timeout{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } };
     try std.testing.expectError(error.Timeout, receiver.receiveDatagram(std.testing.io, &buffer, short));
 }
 
 test "UDP rejects oversized sends before I/O" {
-    var transport = try udp.Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
+    var transport = try Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
     defer transport.close(std.testing.io);
     const oversized = [_]u8{0x44} ** (payload_max + 1);
-    const destination = udp.Address{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9_001 } };
+    const destination = Address{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9_001 } };
     try std.testing.expectError(
         error.DatagramTooLarge,
         transport.sendTo(undefined, destination, &oversized, payload_max),
@@ -61,17 +63,17 @@ test "UDP rejects oversized sends before I/O" {
 test "dual-stack UDP stops at pressure without sending or retaining later families" {
     if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
     var buffer: [payload_max]u8 = undefined;
-    var target = try udp.Sockets.bind(std.testing.io, .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } });
+    var target = try Sockets.bind(std.testing.io, .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } });
     defer target.close(std.testing.io);
     // IPv6 pressure must stop the batch before its later IPv4 entry.
     const Refused = struct {
-        installation: udp.testing.Seccomp.Installation = undefined,
-        outcomes: [2]udp.SendOutcome = undefined,
+        installation: test_io.Seccomp.Installation = undefined,
+        outcomes: [2]Sockets.SendOutcome = undefined,
 
         var socket: std.Io.net.Socket.Handle = -1;
         var waits: usize = 0;
 
-        fn run(self: *@This(), sockets: *udp.Sockets) void {
+        fn run(self: *@This(), sockets: *Sockets) void {
             const filter = @import("root.zig").testing.SendFilter;
             socket = sockets.values[1].?.handle;
             self.installation = filter.install(&.{.{ .socket = socket, .errno = .AGAIN, .nonblocking_only = true }});
@@ -81,15 +83,15 @@ test "dual-stack UDP stops at pressure without sending or retaining later famili
             const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
             const local = sockets.localAddresses();
             var payload = [_]u8{ 1, 2, 3 };
-            const batch = [_]udp.Outgoing{
+            const batch = [_]Sockets.Outgoing{
                 .{ .to = local[0].?, .bytes = payload[0..1] },
                 .{ .to = local[1].?, .bytes = payload[1..2] },
                 .{ .to = local[0].?, .bytes = payload[2..3] },
             };
-            var scratch2: udp.BatchScratch = undefined;
+            var scratch2: Sockets.BatchScratch = undefined;
             self.outcomes[0] = sockets.sendMany(io, &batch, payload_max, &scratch2);
             var fresh: [1]u8 = .{4};
-            var scratch3: udp.BatchScratch = undefined;
+            var scratch3: Sockets.BatchScratch = undefined;
             self.outcomes[1] = sockets.sendMany(io, &.{.{ .to = local[0].?, .bytes = &fresh }}, payload_max, &scratch3);
         }
 
@@ -104,8 +106,8 @@ test "dual-stack UDP stops at pressure without sending or retaining later famili
     thread.join();
     try refused.installation.require();
     try std.testing.expectEqual(@as(usize, 0), Refused.waits);
-    try std.testing.expectEqual(udp.SendOutcome{ .sent = 1, .failure = error.WouldBlock }, refused.outcomes[0]);
-    try std.testing.expectEqual(udp.SendOutcome{ .sent = 1, .failure = null }, refused.outcomes[1]);
+    try std.testing.expectEqual(Sockets.SendOutcome{ .sent = 1, .failure = error.WouldBlock }, refused.outcomes[0]);
+    try std.testing.expectEqual(Sockets.SendOutcome{ .sent = 1, .failure = null }, refused.outcomes[1]);
     var ready: [2]bool = @splat(true);
     for ([_]u8{ 1, 4 }) |expected| {
         const message = (try target.receiveReadyDatagram(std.testing.io, &buffer, &ready)).?;
@@ -119,8 +121,8 @@ test "UDP reuses the same scratch for a smaller batch with new payloads and dest
     const Recorder = struct {
         calls: usize = 0,
         fail_after: ?usize = null,
-        ports: [udp.batch_capacity]u16 = undefined,
-        payloads: [udp.batch_capacity][]const u8 = undefined,
+        ports: [Sockets.BatchScratch.capacity]u16 = undefined,
+        payloads: [Sockets.BatchScratch.capacity][]const u8 = undefined,
         len: usize = 0,
 
         fn send(userdata: ?*anyopaque, _: net.Socket.Handle, messages: []net.OutgoingMessage, _: net.SendFlags) struct { ?net.Socket.SendError, usize } {
@@ -128,24 +130,24 @@ test "UDP reuses the same scratch for a smaller batch with new payloads and dest
             self.calls += 1;
             self.len = messages.len;
             for (messages, 0..) |message, i| {
-                self.ports[i] = udp.Address.fromNetwork(message.address.*).port();
+                self.ports[i] = Address.fromNetwork(message.address.*).port();
                 self.payloads[i] = message.data_ptr[0..message.data_len];
             }
             if (self.fail_after) |sent| return .{ error.NetworkUnreachable, sent };
             return .{ null, messages.len };
         }
     };
-    var socket = try udp.Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
+    var socket = try Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
     defer socket.close(std.testing.io);
     var recorder: Recorder = .{};
     var vtable = std.testing.io.vtable.*;
     vtable.netSend = Recorder.send;
     const io: std.Io = .{ .userdata = &recorder, .vtable = &vtable };
-    const first: udp.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9_001 } };
-    const second: udp.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9_002 } };
+    const first: Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9_001 } };
+    const second: Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9_002 } };
     var payloads = [_]u8{ 1, 2, 3, 4, 5 };
     recorder.fail_after = 1;
-    var scratch: udp.BatchScratch = undefined;
+    var scratch: Sockets.BatchScratch = undefined;
     const failed = socket.sendMany(io, &.{
         .{ .to = first, .bytes = payloads[0..1] },
         .{ .to = first, .bytes = payloads[1..2] },
@@ -165,17 +167,17 @@ test "UDP reuses the same scratch for a smaller batch with new payloads and dest
 
 test "dual-stack UDP sends an ordered mixed batch and receives both datagram families" {
     var buffer: [payload_max]u8 = undefined;
-    var target = try udp.Sockets.bind(std.testing.io, .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } });
+    var target = try Sockets.bind(std.testing.io, .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } });
     defer target.close(std.testing.io);
     const local = target.localAddresses();
     try std.testing.expect(local[0].? == .ip4 and local[1].? == .ip6);
     var payload = [_]u8{ 1, 2, 3 };
-    const batch = [_]udp.Outgoing{
+    const batch = [_]Sockets.Outgoing{
         .{ .to = local[0].?, .bytes = payload[0..1] },
         .{ .to = local[1].?, .bytes = payload[1..2] },
         .{ .to = local[0].?, .bytes = payload[2..3] },
     };
-    var scratch6: udp.BatchScratch = undefined;
+    var scratch6: Sockets.BatchScratch = undefined;
     const outcome = target.sendMany(std.testing.io, &batch, payload_max, &scratch6);
     try std.testing.expectEqual(batch.len, outcome.sent);
     try std.testing.expect(outcome.failure == null);
@@ -187,28 +189,28 @@ test "dual-stack UDP sends an ordered mixed batch and receives both datagram fam
 }
 
 test "dual-stack UDP binds explicit addresses on the same port and rolls back partial binding" {
-    const bindings: udp.Bindings = blk: {
-        var ipv6 = try udp.Sockets.bind(std.testing.io, .{ .ip6 = .loopback(0) });
+    const bindings: Sockets.Bindings = blk: {
+        var ipv6 = try Sockets.bind(std.testing.io, .{ .ip6 = .loopback(0) });
         defer ipv6.close(std.testing.io);
         const port = ipv6.localAddress().port();
-        const pair: udp.Bindings = .{ .dual = .{
+        const pair: Sockets.Bindings = .{ .dual = .{
             .ip4 = .loopback(port),
             .ip6 = .loopback(port),
         } };
-        try std.testing.expectError(error.AddressInUse, udp.Sockets.bind(std.testing.io, pair));
-        var ipv4 = try udp.Sockets.bind(std.testing.io, .{ .ip4 = .loopback(port) });
+        try std.testing.expectError(error.AddressInUse, Sockets.bind(std.testing.io, pair));
+        var ipv4 = try Sockets.bind(std.testing.io, .{ .ip4 = .loopback(port) });
         defer ipv4.close(std.testing.io);
         break :blk pair;
     };
-    var both = try udp.Sockets.bind(std.testing.io, bindings);
+    var both = try Sockets.bind(std.testing.io, bindings);
     defer both.close(std.testing.io);
     for (both.localAddresses()) |address| try std.testing.expectEqual(bindings.dual.ip4.port, address.?.port());
 }
 
 test "dual-stack UDP cancels both pending peek waits and leaves sockets usable" {
-    var target = try udp.Sockets.bind(std.testing.io, .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } });
+    var target = try Sockets.bind(std.testing.io, .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } });
     defer target.close(std.testing.io);
-    var sender = try udp.Sockets.bind(std.testing.io, .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } });
+    var sender = try Sockets.bind(std.testing.io, .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } });
     defer sender.close(std.testing.io);
     const destinations = target.localAddresses();
     const Worker = struct {
@@ -250,7 +252,7 @@ test "dual-stack UDP cancels both pending peek waits and leaves sockets usable" 
             return error.Timeout;
         }
 
-        fn receive(receiver: *udp.Sockets, io: std.Io) udp.DatagramError!void {
+        fn receive(receiver: *Sockets, io: std.Io) Sockets.DatagramError!void {
             var buffer: [payload_max]u8 = undefined;
             _ = try receiver.receiveDatagram(io, &buffer, .none);
         }
@@ -294,13 +296,13 @@ test "dual-stack UDP cancels both pending peek waits and leaves sockets usable" 
 
 test "dual-stack UDP ready reads reject a truncated datagram and keep reading its family" {
     var buffer: [payload_max]u8 = undefined;
-    var target = try udp.Sockets.bind(std.testing.io, .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } });
+    var target = try Sockets.bind(std.testing.io, .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } });
     defer target.close(std.testing.io);
     const local = target.localAddresses();
     var raw_sender = try (net.IpAddress{ .ip4 = .loopback(0) }).bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
     defer raw_sender.close(std.testing.io);
     const oversized = [_]u8{0x55} ** (payload_max + 1);
-    try raw_sender.send(std.testing.io, &udp.Address.toNetwork(local[0].?), &oversized);
+    try raw_sender.send(std.testing.io, &Address.toNetwork(local[0].?), &oversized);
     try target.sendTo(std.testing.io, local[0].?, "ip4", payload_max);
     try target.sendTo(std.testing.io, local[1].?, "ip6", payload_max);
     var ready: [2]bool = @splat(true);
@@ -328,16 +330,16 @@ test "ordered UDP batches preserve every prefix across chunks families and inval
             return .{ null, messages.len };
         }
     };
-    var sockets = try udp.Sockets.bind(std.testing.io, .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } });
+    var sockets = try Sockets.bind(std.testing.io, .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } });
     defer sockets.close(std.testing.io);
-    var scratch: udp.BatchScratch = undefined;
+    var scratch: Sockets.BatchScratch = undefined;
     var payload: [21]u8 = undefined;
-    var outgoing: [21]udp.Outgoing = undefined;
+    var outgoing: [21]Sockets.Outgoing = undefined;
     for (&payload, &outgoing, 0..) |*byte, *packet, i| {
         byte.* = @intCast(i);
         // The first run crosses scratch capacity; later runs alternate families.
         const address: net.IpAddress = if (i < 17 or i % 2 == 0) .{ .ip4 = .loopback(@intCast(9000 + i)) } else .{ .ip6 = .loopback(@intCast(9000 + i)) };
-        packet.* = .{ .to = udp.Address.fromNetwork(address), .bytes = byte[0..1] };
+        packet.* = .{ .to = Address.fromNetwork(address), .bytes = byte[0..1] };
     }
     var recorder: Recorder = .{};
     var vtable = std.testing.io.vtable.*;
@@ -356,15 +358,15 @@ test "ordered UDP batches preserve every prefix across chunks families and inval
         const bytes = outgoing[invalid].bytes;
         outgoing[invalid].bytes = "oversized";
         recorder = .{};
-        try std.testing.expectEqual(udp.SendOutcome{ .sent = invalid, .failure = error.DatagramTooLarge }, sockets.sendMany(io, &outgoing, 1, &scratch));
+        try std.testing.expectEqual(Sockets.SendOutcome{ .sent = invalid, .failure = error.DatagramTooLarge }, sockets.sendMany(io, &outgoing, 1, &scratch));
         if (invalid > 0) {
             recorder = .{ .stop = invalid - 1 };
-            try std.testing.expectEqual(udp.SendOutcome{ .sent = invalid - 1, .failure = error.NetworkUnreachable }, sockets.sendMany(io, &outgoing, 1, &scratch));
+            try std.testing.expectEqual(Sockets.SendOutcome{ .sent = invalid - 1, .failure = error.NetworkUnreachable }, sockets.sendMany(io, &outgoing, 1, &scratch));
         }
         outgoing[invalid].bytes = bytes;
     }
     // Reusing provider scratch for native sends must replace every descriptor.
-    try std.testing.expectEqual(udp.SendOutcome{ .sent = 1, .failure = null }, sockets.sendMany(std.testing.io, &.{.{ .to = sockets.localAddress(), .bytes = "native" }}, 6, &scratch));
+    try std.testing.expectEqual(Sockets.SendOutcome{ .sent = 1, .failure = null }, sockets.sendMany(std.testing.io, &.{.{ .to = sockets.localAddress(), .bytes = "native" }}, 6, &scratch));
     var buffer: [8]u8 = undefined;
     try std.testing.expectEqualStrings("native", (try sockets.receiveDatagram(std.testing.io, &buffer, oneSecond())).bytes);
     recorder = .{};
@@ -372,19 +374,19 @@ test "ordered UDP batches preserve every prefix across chunks families and inval
 }
 
 test "UDP missing family and native cancellation retain the exact mixed prefix" {
-    var sockets = try udp.Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
+    var sockets = try Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
     defer sockets.close(std.testing.io);
-    var scratch: udp.BatchScratch = undefined;
-    const batch = [_]udp.Outgoing{
+    var scratch: Sockets.BatchScratch = undefined;
+    const batch = [_]Sockets.Outgoing{
         .{ .to = sockets.localAddress(), .bytes = "first" },
-        .{ .to = udp.Address.fromNetwork(.{ .ip6 = .loopback(9) }), .bytes = "second" },
+        .{ .to = Address.fromNetwork(.{ .ip6 = .loopback(9) }), .bytes = "second" },
         .{ .to = sockets.localAddress(), .bytes = "third" },
     };
-    try std.testing.expectEqual(udp.SendOutcome{ .sent = 1, .failure = error.AddressFamilyUnsupported }, sockets.sendMany(std.testing.io, &batch, 8, &scratch));
+    try std.testing.expectEqual(Sockets.SendOutcome{ .sent = 1, .failure = error.AddressFamilyUnsupported }, sockets.sendMany(std.testing.io, &batch, 8, &scratch));
     var buffer: [8]u8 = undefined;
     try std.testing.expectEqualStrings("first", (try sockets.receiveDatagram(std.testing.io, &buffer, oneSecond())).bytes);
     if (@import("builtin").os.tag != .linux and @import("builtin").os.tag != .macos) return;
-    var dual = try udp.Sockets.bind(std.testing.io, .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } });
+    var dual = try Sockets.bind(std.testing.io, .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } });
     defer dual.close(std.testing.io);
     const Cancel = struct {
         checks: usize = 0,
@@ -398,7 +400,7 @@ test "UDP missing family and native cancellation retain the exact mixed prefix" 
     var vtable = std.testing.io.vtable.*;
     vtable.checkCancel = Cancel.check;
     const io: std.Io = .{ .userdata = &cancel, .vtable = &vtable };
-    try std.testing.expectEqual(udp.SendOutcome{ .sent = 1, .failure = error.Canceled }, dual.sendMany(io, &batch, 8, &scratch));
+    try std.testing.expectEqual(Sockets.SendOutcome{ .sent = 1, .failure = error.Canceled }, dual.sendMany(io, &batch, 8, &scratch));
     try std.testing.expectEqual(@as(usize, 2), cancel.checks);
     try std.testing.expectEqualStrings("first", (try sockets.receiveDatagram(std.testing.io, &buffer, oneSecond())).bytes);
 }
@@ -420,10 +422,10 @@ test "UDP provider lifetime clears descriptors and telemetry without probing fab
     vtable.netBindIp = Provider.bind;
     vtable.netClose = Provider.close;
     const io: std.Io = .{ .userdata = &provider, .vtable = &vtable };
-    var sockets = try udp.Sockets.bind(io, .{ .ip4 = .loopback(0) });
+    var sockets = try Sockets.bind(io, .{ .ip4 = .loopback(0) });
     try std.testing.expectEqual([2]bool{ false, false }, sockets.native);
-    _ = sockets.requestBuffers(std.testing.io, .{ .receive = udp.Buffers.bytes_min, .send = udp.Buffers.bytes_min });
-    try std.testing.expectEqual([2]?udp.Buffers.Reported{ null, null }, sockets.buffers);
+    _ = sockets.requestBuffers(std.testing.io, .{ .receive = Sockets.Buffers.bytes_min, .send = Sockets.Buffers.bytes_min });
+    try std.testing.expectEqual([2]?Sockets.Buffers.Reported{ null, null }, sockets.buffers);
     try std.testing.expectEqual([2]?u64{ null, null }, sockets.drops());
     try std.testing.expectError(error.IncompatibleProvider, sockets.sendTo(std.testing.io, sockets.localAddress(), "fake", 4));
     var buffer: [8]u8 = undefined;
@@ -433,7 +435,7 @@ test "UDP provider lifetime clears descriptors and telemetry without probing fab
     try std.testing.expectEqual(@as(usize, 1), provider.closes);
     try std.testing.expectEqual([2]?net.Socket.Handle{ null, null }, sockets.handles());
     try std.testing.expectEqual([2]?u64{ null, null }, sockets.drops());
-    sockets = try udp.Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
+    sockets = try Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
     defer sockets.close(std.testing.io);
     try std.testing.expect(sockets.localAddress().port() > 0);
     if (sockets.drops()[0]) |drops| try std.testing.expectEqual(@as(u64, 0), drops);

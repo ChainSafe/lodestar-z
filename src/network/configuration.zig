@@ -211,8 +211,8 @@ const mib = 1024 * 1024;
 /// caps a request at net.core.rmem_max or wmem_max and doubles it: at a 16 MiB rmem_max, the QUIC
 /// receive buffer holds about 14,560 datagrams at a truesize of 2,304 bytes.
 pub const SocketBuffers = struct {
-    quic: udp.Buffers = .{ .receive = 16 * mib, .send = 4 * mib },
-    discovery: udp.Buffers = .{ .receive = 2 * mib, .send = 1 * mib },
+    quic: udp.Sockets.Buffers = .{ .receive = 16 * mib, .send = 4 * mib },
+    discovery: udp.Sockets.Buffers = .{ .receive = 2 * mib, .send = 1 * mib },
 
     pub fn validate(self: SocketBuffers) error{InvalidLimits}!void {
         if (!self.quic.valid() or !self.discovery.valid()) return error.InvalidLimits;
@@ -220,7 +220,7 @@ pub const SocketBuffers = struct {
 };
 
 /// Requests `request` on every socket and logs one warning per socket the kernel caps below it.
-pub fn requestBuffers(sockets: *udp.Sockets, io: std.Io, request: udp.Buffers, comptime scope: @EnumLiteral()) void {
+pub fn requestBuffers(sockets: *udp.Sockets, io: std.Io, request: udp.Sockets.Buffers, comptime scope: @EnumLiteral()) void {
     const short = sockets.requestBuffers(io, request);
     for (short, sockets.buffers, [_][]const u8{ "ip4", "ip6" }) |below, reported, family| {
         if (!below) continue;
