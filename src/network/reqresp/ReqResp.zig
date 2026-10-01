@@ -249,7 +249,7 @@ visits: u64 = 0,
 policy: request_policy.Policy,
 admission: InboundAdmission,
 request_fork: config.ForkSeq,
-last_now_ms: u64 = 0,
+last_pump_ms: u64 = 0,
 protocol_counters: [Protocol.count]metrics.ProtocolCounters = @splat(.{}),
 outgoing_error_reasons: [metrics.error_reason_count]u64 = @splat(0),
 forks: [64]ForkEntry = undefined,
@@ -401,14 +401,14 @@ pub fn setRequestFork(self: *ReqResp, fork: config.ForkSeq) void {
     self.request_fork = fork;
 }
 
-pub fn active(self: *const ReqResp) struct { outbound: u16, inbound: u16 } {
+pub fn pendingCounts(self: *const ReqResp) struct { outbound: u16, inbound: u16 } {
     var out: u16 = 0;
     for (self.outbound) |*slot| {
-        if (slot.request.active()) out += 1;
+        if (slot.request.awaitingTerminal()) out += 1;
     }
     var in: u16 = 0;
     for (self.inbound) |*slot| {
-        if (slot.request.active()) in += 1;
+        if (slot.request.awaitingTerminal()) in += 1;
     }
     assert(out <= self.outbound.len);
     assert(in <= self.inbound.len);
@@ -429,26 +429,66 @@ pub fn request(
     now: Now,
 ) RequestError!RequestHandle {
     if (!router.capabilities().request.contains(.{ .reqresp = which })) return error.ProtocolDisabled;
-    const handle = try Client.start(
-        self,
-        engine,
-        router,
-        conn,
-        which,
-        request_ssz,
-        sink,
-        request_options,
-        now,
-    );
-    self.settle(handle.index);
-    return handle;
+    const bounds = self.requestBounds(which);
+    const identity = engine.peerId(conn) orelse return error.StaleHandle;
+    try self.validateTransportCapacity(engine);
+    if (conn.index >= self.options.peers) return error.InvalidCapacity;
+    inline for (.{ "negotiation_ms", "request_ms", "response_ms" }) |field| {
+        const duration = @field(request_options.absolute_timeouts, field);
+        if (duration == 0 or duration > 60_000) return error.InvalidRequestOptions;
+    }
+    if (request_ssz.len > bounds.request_max) return error.RequestTooLarge;
+    if (request_ssz.len < bounds.request_min) return error.RequestTooSmall;
+    const request_ceiling = (self.inspectRequest(which, request_ssz, self.request_fork) catch return error.InvalidRequest).chunks_max;
+    const chunks_max = request_options.expected_chunks orelse request_ceiling;
+    if (chunks_max > request_ceiling) return error.InvalidRequestOptions;
+    if (sink.len < bounds.response_max) return error.SinkTooSmall;
+    if (self.outboundProtocolPendingCount(conn, which) >= constants.MAX_CONCURRENT_REQUESTS) {
+        return error.TooManyRequests;
+    }
+    if (!which.isControl() and self.options.outbound_per_peer_max > 0 and
+        self.outboundApplicationOccupiedCount(conn) >= self.options.outbound_per_peer_max)
+        return error.TooManyRequests;
+    const index = self.availableOutboundFor(which) orelse return error.SlotsExhausted;
+    const slot = &self.outbound[index];
+    assert(!slot.conn_link.linked);
+    const stream = router.beginReqRespTimed(engine, conn, which, now, request_options.absolute_timeouts.negotiation_ms) catch |err| {
+        return switch (err) {
+            error.NegotiationTableFull => error.NegotiationTableFull,
+            error.ProtocolDisabled => error.ProtocolDisabled,
+            error.StaleHandle => error.StaleHandle,
+            else => error.Transport,
+        };
+    };
+    slot.start(&.{
+        .identity = identity,
+        .stream = stream,
+        .protocol = which,
+        .request_ssz = request_ssz,
+        .sink = sink,
+        .absolute_timeouts = request_options.absolute_timeouts,
+        .protocol_chunks_max = request_ceiling,
+        .chunks_max = chunks_max,
+    }, now);
+    self.outbound_by_connection[conn.index].append(self.outbound, "conn_link", index);
+    self.protocol_counters[@intFromEnum(which)].outgoing +|= 1;
+    std.log.scoped(.network_reqresp).debug("request_started direction=outbound request={d}:{d} connection={d}:{d} stream={d} method={s} bytes={d} max_chunks={d}", .{ index, slot.request.generation, conn.index, conn.generation, stream.id, @tagName(which), request_ssz.len, chunks_max });
+    self.settle(index);
+    return slot.request.handle(index);
 }
 
 /// Hands a negotiated stream to the outbound slot waiting for it. Returns false when none is.
 pub fn negotiated(self: *ReqResp, engine: *Engine, outcome: routing.Outcome, now: Now) bool {
-    const index = Client.negotiated(self, engine, outcome, now) orelse return false;
-    self.settle(index);
-    return true;
+    for (self.outbound, 0..) |*slot, position| {
+        if (!slot.request.running() or slot.phase != .negotiation) continue;
+        if (!std.meta.eql(slot.request.stream, outcome.stream)) continue;
+        const index: u16 = @intCast(position);
+        slot.negotiated(self, engine, index, outcome, now);
+        if (slot.request.running()) self.markReady(.outbound, index);
+        self.settle(index);
+        return true;
+    }
+    return false;
 }
 
 /// Borrows request bytes from the owned inbound slot through served/failed delivery.
@@ -459,9 +499,19 @@ pub fn accept(
     ready: routing.Selection,
     now: Now,
 ) AcceptError!RequestHandle {
-    const handle = try self.admission.accept(self, engine, stream, ready, now);
-    self.settle(self.inboundId(handle.index));
-    return handle;
+    const accepted = try self.admission.accept(self, engine, stream, ready, now);
+    const index = accepted.index;
+    const which = accepted.protocol;
+    const slot = &self.inbound[index];
+    slot.acceptPrepared(stream, ready, &accepted, self.request_fork, now);
+    self.protocol_counters[@intFromEnum(which)].incoming +|= 1;
+    std.log.scoped(.network_reqresp).debug("request_started direction=inbound request={d}:{d} connection={d}:{d} stream={d} method={s}", .{ index, slot.request.generation, stream.conn.index, stream.conn.generation, stream.id, @tagName(which) });
+    if (slot.admission.start_pending) std.log.scoped(.network_reqresp_errors).debug("request_start_wait request={d}:{d} connection={d}:{d} stream={d} method={s} due_in_ms={d}", .{ index, slot.request.generation, stream.conn.index, stream.conn.generation, stream.id, @tagName(which), slot.admission.eligible_ms - now.mono_ms });
+    // A stream that is already gone fails on the slot's first read.
+    engine.bindStream(stream, .{ .owner = .reqresp_inbound, .row = index }) catch {};
+    self.markReady(.inbound, index);
+    self.settle(self.inboundId(index));
+    return slot.request.handle(index);
 }
 
 /// Response bytes stay immutable through chunk_sent or terminal delivery.
@@ -472,7 +522,23 @@ pub fn respond(
     context: ?ForkEntry,
     now: Now,
 ) RespondError!void {
-    try Server.respond(self, handle, ssz, context, now);
+    const slot = try self.servingSlot(handle);
+    const request_state = &slot.request;
+    const bounds = self.requestBounds(request_state.protocol);
+    if (request_state.chunks >= request_state.chunks_max) return error.TooManyChunks;
+    var response = codec.Bounds{ .min = bounds.response_min, .max = bounds.response_max };
+    var digest: ?[constants.context_bytes_length]u8 = null;
+    if (bounds.context_bytes) {
+        const selected = context orelse return error.UnknownFork;
+        const known = self.forkFor(selected.digest) orelse return error.UnknownFork;
+        if (known != selected.fork) return error.UnknownFork;
+        response = self.responseBounds(request_state.protocol, known) catch return error.InvalidContext;
+        digest = selected.digest;
+    }
+    if (!bounds.context_bytes and context != null) return error.InvalidContext;
+    if (ssz.len > response.max) return error.ChunkTooLarge;
+    if (ssz.len < response.min) return error.ChunkTooSmall;
+    slot.respond(ssz, digest, now);
     self.markReady(.inbound, handle.index);
     self.settle(self.inboundId(handle.index));
 }
@@ -485,7 +551,9 @@ pub fn respondError(
     message: []const u8,
     now: Now,
 ) RespondError!void {
-    try Server.respondError(self, handle, code, message, now);
+    if (!constants.isErrorResult(code) or message.len > codec.error_message_max) return error.InvalidError;
+    const slot = try self.servingSlot(handle);
+    slot.respondError(code, message, now);
     self.markReady(.inbound, handle.index);
     self.settle(self.inboundId(handle.index));
 }
@@ -493,7 +561,11 @@ pub fn respondError(
 /// Queues FIN, or asks the current chunk writer to finish after its bytes. A pending
 /// chunk_sent is delivered first. False includes an already finishing, terminal or stale slot.
 pub fn finish(self: *ReqResp, handle: RequestHandle, now: Now) bool {
-    if (!Server.finish(self, handle, now)) return false;
+    if (handle.direction != .inbound) return false;
+    const slot = self.inboundSlot(handle) orelse return false;
+    const was_serving = slot.state == .serving;
+    if (!slot.finish(now)) return false;
+    if (was_serving) self.markReady(.inbound, handle.index);
     self.settle(self.inboundId(handle.index));
     return true;
 }
@@ -520,7 +592,10 @@ pub fn responseReadiness(self: *ReqResp, handle: RequestHandle) ResponseReadines
 
 /// Supply fresh owner time so host-held chunks cannot become remote timeout evidence.
 pub fn consume(self: *ReqResp, handle: RequestHandle, now: Now) bool {
-    if (!Client.consume(self, handle, now)) return false;
+    if (handle.direction != .outbound) return false;
+    const slot = self.outboundSlot(handle) orelse return false;
+    if (!slot.consume(self, handle.index, now)) return false;
+    if (slot.request.running()) self.markReady(.outbound, handle.index);
     self.settle(handle.index);
     return true;
 }
@@ -539,8 +614,6 @@ pub fn errorMessage(self: *const ReqResp, handle: RequestHandle) []const u8 {
 /// Recovers one complete Goodbye before the caller cancels the connection's requests.
 /// Reads may latch failures, so the cleanup barrier runs even outside pump.
 pub fn closingGoodbye(self: *ReqResp, engine: *Engine, router: *routing.Router, conn: Handle, now: Now) ?u64 {
-    assert(now.mono_ms >= self.last_now_ms);
-    self.last_now_ms = now.mono_ms;
     defer self.cleanupPending(engine, router);
     if (conn.index >= self.options.peers) return null;
     const first = ReceivePlan.first(conn.index, .goodbye_v1);
@@ -555,7 +628,7 @@ pub fn closingGoodbye(self: *ReqResp, engine: *Engine, router: *routing.Router, 
 }
 
 /// Fails the connection's slots: its outbound list and its inbound block of the receive plan.
-pub fn connectionClosed(self: *ReqResp, conn: Handle) void {
+pub fn connectionClosed(self: *ReqResp, conn: Handle, now: Now) void {
     if (conn.index >= self.options.peers) return;
     const list = &self.outbound_by_connection[conn.index];
     var cursor = list.head;
@@ -564,15 +637,15 @@ pub fn connectionClosed(self: *ReqResp, conn: Handle) void {
         const index: u16 = @intCast(cursor);
         cursor = self.outbound[index].conn_link.next;
         const slot = &self.outbound[index];
-        if (!slot.request.active() or !std.meta.eql(slot.request.conn, conn)) continue;
-        slot.fail(self, index, .connection_closed);
+        if (!slot.request.awaitingTerminal() or !std.meta.eql(slot.request.conn, conn)) continue;
+        slot.fail(self, index, .connection_closed, now);
     }
     const first = ReceivePlan.first(conn.index, @enumFromInt(0));
     for (first..first + ReceivePlan.slots_per_peer) |position| {
         const index: u16 = @intCast(position);
         const slot = &self.inbound[index];
-        if (!slot.request.active() or !std.meta.eql(slot.request.conn, conn)) continue;
-        slot.fail(self, index, .connection_closed);
+        if (!slot.request.awaitingTerminal() or !std.meta.eql(slot.request.conn, conn)) continue;
+        slot.fail(self, index, .connection_closed, now);
     }
 }
 
@@ -584,13 +657,13 @@ pub fn streamReady(self: *ReqResp, route: types.Route, stream: StreamHandle) voi
 
 /// A routed stream close. A reset fails an inbound slot that is not writing its response;
 /// any other close is observed by the slot's next stream call.
-pub fn streamClosed(self: *ReqResp, route: types.Route, stream: StreamHandle, reset_code: ?u64) void {
+pub fn streamClosed(self: *ReqResp, route: types.Route, stream: StreamHandle, reset_code: ?u64, now: Now) void {
     const id = self.routedSlot(route, stream) orelse return;
     if (reset_code != null and route.owner == .reqresp_inbound) {
         const index: u16 = @intCast(route.row);
         const slot = &self.inbound[index];
         if (slot.state != .writing_chunk and slot.state != .finishing) {
-            slot.fail(self, index, .stream_closed);
+            slot.fail(self, index, .stream_closed, now);
             return;
         }
     }
@@ -665,14 +738,9 @@ pub fn nextWakeup(self: *const ReqResp, now: Now, capacities: Capacities) ?u64 {
     return @max(top.deadline, now.mono_ms);
 }
 
-/// Validate every raw admission against the attached transport capacity.
-pub fn attach(self: *const ReqResp, engine: *const Engine) error{InvalidCapacity}!void {
+/// Checks that the receive plan covers every possible transport connection.
+pub fn validateTransportCapacity(self: *const ReqResp, engine: *const Engine) error{InvalidCapacity}!void {
     if (engine.limits.connections_max > self.options.peers) return error.InvalidCapacity;
-}
-
-pub fn inboundSink(self: *ReqResp, index: u16) []u8 {
-    assert(index < self.inbound.len);
-    return self.inbound[index].receive.sink;
 }
 
 fn inboundId(self: *const ReqResp, index: u16) u32 {
@@ -747,7 +815,7 @@ fn settle(self: *ReqResp, id: u32) void {
     if (id >= self.outbound.len) self.admission.settle(self.inbound, @intCast(id - self.outbound.len));
 }
 
-pub fn availableOutboundFor(self: *ReqResp, which: Protocol) ?u16 {
+fn availableOutboundFor(self: *ReqResp, which: Protocol) ?u16 {
     const reserved = self.options.outbound_control_reserved;
     const start: usize = if (which.isControl()) 0 else reserved;
     const end: usize = if (which.isControl() and reserved > 0) reserved else self.outbound.len;
@@ -763,22 +831,22 @@ pub const CompletionInfo = struct {
     result_code: u8 = constants.result_success,
 };
 
-pub fn complete(owner: *ReqResp, record: *RequestState, index: u16, event: Event, info: CompletionInfo) void {
+pub fn complete(owner: *ReqResp, record: *RequestState, index: u16, event: Event, info: CompletionInfo, now: Now) void {
     if (!record.terminate(event)) return;
     owner.settleSlot(record.direction, index);
     const counts = &owner.protocol_counters[@intFromEnum(record.protocol)];
-    const duration_ms = owner.last_now_ms -| record.started_ms;
+    assert(now.mono_ms >= record.started_ms);
+    const duration_ms = now.mono_ms - record.started_ms;
     if (event == .served and info.result_code != constants.result_success) {
         std.log.scoped(.network_reqresp_errors).debug("request_error_response request={d}:{d} connection={d}:{d} method={s} code={d} detail={s} chunks={d} elapsed_ms={d}", .{ index, record.generation, record.conn.index, record.conn.generation, @tagName(record.protocol), info.result_code, if (info.rejection) |err| @errorName(err) else "", record.chunks, duration_ms });
     } else if (event != .failed) std.log.scoped(.network_reqresp).debug("request_completed direction={s} request={d}:{d} connection={d}:{d} method={s} chunks={d} elapsed_ms={d}", .{ @tagName(record.direction), index, record.generation, record.conn.index, record.conn.generation, @tagName(record.protocol), record.chunks, duration_ms });
     if (record.direction == .outbound) counts.outgoing_time.observe(duration_ms) else counts.incoming_time.observe(duration_ms);
-    if (event == .failed) owner.recordFailure(record, index, event, info);
+    if (event == .failed) owner.recordFailure(record, index, event, info, duration_ms);
 }
 
-fn recordFailure(owner: *ReqResp, record: *const RequestState, index: u16, event: Event, info: CompletionInfo) void {
+fn recordFailure(owner: *ReqResp, record: *const RequestState, index: u16, event: Event, info: CompletionInfo, duration_ms: u64) void {
     const reason = event.failed.reason;
     const counts = &owner.protocol_counters[@intFromEnum(record.protocol)];
-    const duration_ms = owner.last_now_ms -| record.started_ms;
     const request_detail = info.rejection;
     if (reason == .cancelled) {
         std.log.scoped(.network_reqresp).debug("request_cancelled direction={s} request={d}:{d} connection={d}:{d} method={s} request_detail={s} chunks={d} elapsed_ms={d}", .{ @tagName(record.direction), index, record.generation, record.conn.index, record.conn.generation, @tagName(record.protocol), if (request_detail) |err| @errorName(err) else "", record.chunks, duration_ms });
@@ -799,15 +867,15 @@ fn recordFailure(owner: *ReqResp, record: *const RequestState, index: u16, event
 }
 
 /// Latches one terminal result. Call cleanupPending before the next Router pump.
-pub fn cancel(self: *ReqResp, handle: RequestHandle) bool {
+pub fn cancel(self: *ReqResp, handle: RequestHandle, now: Now) bool {
     if (handle.direction == .outbound) {
         const slot = self.outboundSlot(handle) orelse return false;
         if (slot.request.terminalEvent() != null) return false;
-        slot.fail(self, handle.index, .cancelled);
+        slot.fail(self, handle.index, .cancelled, now);
     } else {
         const slot = self.inboundSlot(handle) orelse return false;
         if (slot.request.terminalEvent() != null) return false;
-        slot.fail(self, handle.index, .cancelled);
+        slot.fail(self, handle.index, .cancelled, now);
     }
     return true;
 }
@@ -825,22 +893,22 @@ pub fn cleanupPending(self: *ReqResp, engine: *Engine, router: *routing.Router) 
     }
 }
 
-pub fn cancelApplications(self: *ReqResp, engine: *Engine, router: *routing.Router) void {
-    for (self.outbound, 0..) |*slot, index| if (slot.request.active() and !slot.request.protocol.isControl()) {
-        _ = self.cancel(slot.request.handle(@intCast(index)));
+pub fn cancelApplications(self: *ReqResp, engine: *Engine, router: *routing.Router, now: Now) void {
+    for (self.outbound, 0..) |*slot, index| if (slot.request.awaitingTerminal() and !slot.request.protocol.isControl()) {
+        _ = self.cancel(slot.request.handle(@intCast(index)), now);
     };
-    for (self.inbound, 0..) |*slot, index| if (slot.request.active() and !slot.request.protocol.isControl()) {
-        _ = self.cancel(slot.request.handle(@intCast(index)));
+    for (self.inbound, 0..) |*slot, index| if (slot.request.awaitingTerminal() and !slot.request.protocol.isControl()) {
+        _ = self.cancel(slot.request.handle(@intCast(index)), now);
     };
     self.cleanupPending(engine, router);
 }
 
-pub fn shutdown(self: *ReqResp, engine: *Engine, router: *routing.Router) void {
-    for (self.outbound, 0..) |*slot, index| if (slot.request.active()) {
-        _ = self.cancel(slot.request.handle(@intCast(index)));
+pub fn shutdown(self: *ReqResp, engine: *Engine, router: *routing.Router, now: Now) void {
+    for (self.outbound, 0..) |*slot, index| if (slot.request.awaitingTerminal()) {
+        _ = self.cancel(slot.request.handle(@intCast(index)), now);
     };
-    for (self.inbound, 0..) |*slot, index| if (slot.request.active()) {
-        _ = self.cancel(slot.request.handle(@intCast(index)));
+    for (self.inbound, 0..) |*slot, index| if (slot.request.awaitingTerminal()) {
+        _ = self.cancel(slot.request.handle(@intCast(index)), now);
     };
     self.cleanupPending(engine, router);
 }
@@ -861,8 +929,8 @@ pub fn pump(self: *ReqResp, engine: *Engine, router: *routing.Router, now: Now, 
 /// one retires its slot or moves its key into the future. A slot re-marked while serviced
 /// waits for the next pump, behind the slots marked before it.
 fn advance(self: *ReqResp, engine: *Engine, router: *routing.Router, now: Now) bool {
-    assert(now.mono_ms >= self.last_now_ms or self.last_now_ms == 0);
-    self.last_now_ms = now.mono_ms;
+    assert(now.mono_ms >= self.last_pump_ms or self.last_pump_ms == 0);
+    self.last_pump_ms = now.mono_ms;
     self.cleanupPending(engine, router);
     self.recycleDelivered();
     // The slots marked before this pump that are still on `ready`.
@@ -984,7 +1052,7 @@ fn checkInvariants(self: *const ReqResp, engine: *const Engine, now: Now, exhaus
             assert(slot.state == .ready and slot.admission.wait == .tokens and slot.admission.eligible_ms == now.mono_ms);
         };
         if (direction == .inbound) self.admission.checkSlot(&self.inbound[index], index);
-        if (!record.active() or record.stream_owner != .protocol) continue;
+        if (!record.awaitingTerminal() or record.stream_owner != .protocol) continue;
         const bound = engine.route(record.stream) orelse continue;
         assert(bound.owner == (if (direction == .outbound) types.StreamOwner.reqresp_outbound else .reqresp_inbound) and bound.row == index);
         if (!record.running() or links.ready.linked) continue;
@@ -1024,7 +1092,7 @@ fn assertDrained(record: *const RequestState, waits: Engine.StreamWaits) void {
     assert(!waits.read_open);
 }
 
-pub fn servingSlot(self: *ReqResp, handle: RequestHandle) RespondError!*Server {
+fn servingSlot(self: *ReqResp, handle: RequestHandle) RespondError!*Server {
     if (handle.direction != .inbound) return error.StaleHandle;
     const slot = self.inboundSlot(handle) orelse return error.StaleHandle;
     return switch (slot.responseReadiness()) {
@@ -1035,36 +1103,36 @@ pub fn servingSlot(self: *ReqResp, handle: RequestHandle) RespondError!*Server {
     };
 }
 
-pub fn outboundSlot(self: *ReqResp, handle: RequestHandle) ?*Client {
+fn outboundSlot(self: *ReqResp, handle: RequestHandle) ?*Client {
     const slots = self.outbound;
     if (handle.index >= slots.len) return null;
     const slot = &slots[handle.index];
-    if (slot.request.generation != handle.generation or !slot.request.active()) return null;
+    if (slot.request.generation != handle.generation or !slot.request.awaitingTerminal()) return null;
     return slot;
 }
-pub fn inboundSlot(self: *ReqResp, handle: RequestHandle) ?*Server {
+fn inboundSlot(self: *ReqResp, handle: RequestHandle) ?*Server {
     const slots = self.inbound;
     if (handle.index >= slots.len) return null;
     const slot = &slots[handle.index];
-    if (slot.request.generation != handle.generation or !slot.request.active()) return null;
+    if (slot.request.generation != handle.generation or !slot.request.awaitingTerminal()) return null;
     return slot;
 }
 
-pub fn outboundCount(self: *const ReqResp, conn: Handle, which: Protocol) u8 {
+pub fn outboundProtocolPendingCount(self: *const ReqResp, conn: Handle, which: Protocol) u8 {
     var count: u8 = 0;
     var cursor = if (conn.index < self.options.peers) self.outbound_by_connection[conn.index].head else index_list.none;
     for (0..self.outbound.len) |_| {
         if (cursor == index_list.none) break;
         const slot = &self.outbound[cursor];
         cursor = slot.conn_link.next;
-        if (!slot.request.active() or slot.request.protocol != which) continue;
+        if (!slot.request.awaitingTerminal() or slot.request.protocol != which) continue;
         if (!std.meta.eql(slot.request.conn, conn)) continue;
         count +|= 1;
     }
     return count;
 }
 
-pub fn outboundApplicationCount(self: *const ReqResp, conn: Handle) u16 {
+pub fn outboundApplicationOccupiedCount(self: *const ReqResp, conn: Handle) u16 {
     var count: u16 = 0;
     var cursor = if (conn.index < self.options.peers) self.outbound_by_connection[conn.index].head else index_list.none;
     for (0..self.outbound.len) |_| {
@@ -1083,7 +1151,7 @@ fn inboundOf(self: *const ReqResp, conn: Handle) []const Server {
     return self.inbound[ReceivePlan.first(conn.index, @enumFromInt(0))..][0..ReceivePlan.slots_per_peer];
 }
 
-pub fn inboundApplicationCount(self: *const ReqResp, conn: Handle) u16 {
+pub fn inboundApplicationOccupiedCount(self: *const ReqResp, conn: Handle) u16 {
     var count: u16 = 0;
     for (self.inboundOf(conn)) |*slot| {
         if (!slot.request.occupied() or slot.request.protocol.isControl()) continue;
@@ -1092,12 +1160,20 @@ pub fn inboundApplicationCount(self: *const ReqResp, conn: Handle) u16 {
     return count;
 }
 
-pub fn inboundCount(self: *const ReqResp, conn: Handle, which: ?Protocol) u8 {
+pub fn inboundProtocolRunningCount(self: *const ReqResp, conn: Handle, which: Protocol) u8 {
     var count: u8 = 0;
     for (self.inboundOf(conn)) |*slot| {
-        if (!slot.request.active() or !std.meta.eql(slot.request.conn, conn)) continue;
-        if (which) |wanted| if (!slot.request.running() or slot.request.protocol != wanted) continue;
-        count +|= 1;
+        if (!slot.request.running() or slot.request.protocol != which) continue;
+        if (std.meta.eql(slot.request.conn, conn)) count +|= 1;
+    }
+    return count;
+}
+
+pub fn inboundPendingCount(self: *const ReqResp, conn: Handle) u8 {
+    var count: u8 = 0;
+    for (self.inboundOf(conn)) |*slot| {
+        if (!slot.request.awaitingTerminal()) continue;
+        if (std.meta.eql(slot.request.conn, conn)) count +|= 1;
     }
     return count;
 }
@@ -1134,6 +1210,11 @@ test {
     _ = @import("req_resp_control_capacity_test.zig");
     _ = @import("req_resp_control_partition_test.zig");
     _ = @import("req_resp_failures_test.zig");
+    _ = @import("req_resp_metrics_test.zig");
+    _ = @import("req_resp_deadlines_test.zig");
+    _ = @import("req_resp_validation_test.zig");
+    _ = @import("req_resp_flow_control_test.zig");
+    _ = @import("req_resp_scheduling_test.zig");
     _ = @import("req_resp_half_close_test.zig");
     _ = @import("req_resp_request_start_test.zig");
     _ = @import("req_resp_service_test.zig");

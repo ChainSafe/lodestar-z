@@ -97,8 +97,8 @@ pub fn waitEnded(self: *InboundAdmission, slot: *Server) void {
     self.pending = true;
 }
 
-pub fn accept(self: *InboundAdmission, owner: *ReqResp, engine: *Engine, stream: StreamHandle, ready: routing.Selection, now: Now) ReqResp.AcceptError!ReqResp.RequestHandle {
-    try owner.attach(engine);
+pub fn accept(self: *InboundAdmission, owner: *ReqResp, engine: *Engine, stream: StreamHandle, ready: routing.Selection, now: Now) ReqResp.AcceptError!Acceptance {
+    try owner.validateTransportCapacity(engine);
     if (stream.conn.index >= owner.options.peers) return error.InvalidCapacity;
     const identity = engine.peerId(stream.conn) orelse return error.StaleHandle;
     if (ready.leftover.len > RequestIO.read_buffer_length) return error.InvalidHandoff;
@@ -107,7 +107,7 @@ pub fn accept(self: *InboundAdmission, owner: *ReqResp, engine: *Engine, stream:
         else => return error.UnknownProtocol,
     };
     const bounds = owner.requestBounds(which);
-    if (owner.inboundCount(stream.conn, which) >= constants.MAX_CONCURRENT_REQUESTS) {
+    if (owner.inboundProtocolRunningCount(stream.conn, which) >= constants.MAX_CONCURRENT_REQUESTS) {
         owner.recordAdmissionRefusal(stream, which, .protocol_concurrency, 0);
         return error.ProtocolConcurrency;
     }
@@ -116,13 +116,13 @@ pub fn accept(self: *InboundAdmission, owner: *ReqResp, engine: *Engine, stream:
         owner.recordAdmissionRefusal(stream, which, .identity_capacity, 1);
         return error.TooManyRequests;
     }
-    if (owner.inboundCount(stream.conn, null) >= owner.options.inbound_per_peer_max) {
+    if (owner.inboundPendingCount(stream.conn) >= owner.options.inbound_per_peer_max) {
         owner.recordAdmissionRefusal(stream, which, .peer_capacity, 0);
         return error.PeerSlotsExhausted;
     }
     const available = availableInbound(owner.inbound, stream.conn, which);
     if (!which.isControl() and owner.options.inbound_application_per_peer_max > 0 and
-        owner.inboundApplicationCount(stream.conn) >= owner.options.inbound_application_per_peer_max)
+        owner.inboundApplicationOccupiedCount(stream.conn) >= owner.options.inbound_application_per_peer_max)
     {
         owner.recordAdmissionRefusal(stream, which, .peer_capacity, 0);
         return error.PeerSlotsExhausted;
@@ -133,7 +133,7 @@ pub fn accept(self: *InboundAdmission, owner: *ReqResp, engine: *Engine, stream:
     };
     const slot = &owner.inbound[index];
     if (ready.leftover.len > slot.receive.read.len) return error.InvalidHandoff;
-    const request_sink = owner.inboundSink(index);
+    const request_sink = slot.receive.sink;
     assert(request_sink.len >= bounds.request_max);
     const control = which.isControl();
     // A responder rate-limits by withholding its response, never by closing the stream, so a
@@ -147,14 +147,13 @@ pub fn accept(self: *InboundAdmission, owner: *ReqResp, engine: *Engine, stream:
         .identity_capacity => unreachable,
         else => limiter.startAt(&identity, control, now.mono_ms),
     };
-    const accepted: Acceptance = .{
+    return .{
         .index = index,
         .identity = identity,
         .protocol = which,
         .bounds = bounds,
         .state = .{ .eligible_ms = start_due orelse 0, .start_pending = start_due != null },
     };
-    return Server.acceptPrepared(owner, engine, stream, ready, &accepted, now);
 }
 
 fn availableInbound(slots: []Server, peer: Handle, which: Protocol) ?u16 {

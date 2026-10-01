@@ -47,8 +47,8 @@ pub const ServicePair = struct {
     }
 
     pub fn deinit(self: *ServicePair) void {
-        self.client.shutdown(&self.pair.client);
-        self.server.shutdown(&self.pair.server);
+        self.client.shutdown(&self.pair.client, self.pair.now);
+        self.server.shutdown(&self.pair.server, self.pair.now);
         self.server.deinit();
         self.client.deinit();
         self.server_inbox.deinit();

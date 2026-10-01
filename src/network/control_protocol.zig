@@ -137,14 +137,14 @@ pub const ControlProtocol = struct {
 
     /// Cancels the peer's in-flight request on this connection. Its operation stays held until
     /// the request's terminal event.
-    pub fn cancel(self: *ControlProtocol, reqresp: *rr.ReqResp, peer: t.PeerRef, conn: t.Handle) void {
+    pub fn cancel(self: *ControlProtocol, reqresp: *rr.ReqResp, peer: t.PeerRef, conn: t.Handle, now: Now) void {
         if (peer.index >= self.operation_by_peer.len) return;
         const index = self.operation_by_peer[peer.index];
         if (index == no_operation) return;
         const op = &self.operations[index];
         if (!std.meta.eql(op.peer, peer) or !std.meta.eql(op.conn, conn)) return;
         op.cancelled = true;
-        _ = reqresp.cancel(op.request.?);
+        _ = reqresp.cancel(op.request.?, now);
     }
 
     /// Cancels the connection's in-flight request and the responses it is being served, and
@@ -156,11 +156,12 @@ pub const ControlProtocol = struct {
         engine: *Engine,
         peer: t.PeerRef,
         conn: t.Handle,
+        now: Now,
     ) void {
-        self.cancel(reqresp, peer, conn);
+        self.cancel(reqresp, peer, conn, now);
         for (self.responses) |*response| if (response.request) |request| {
             if (std.meta.eql(response.peer, peer) and std.meta.eql(response.conn, conn)) {
-                _ = reqresp.cancel(request);
+                _ = reqresp.cancel(request, now);
             }
         };
         reqresp.cleanupPending(engine, router);
@@ -184,12 +185,12 @@ pub const ControlProtocol = struct {
         response.conn = event.peer;
         const len: usize = switch (event.protocol) {
             .status_v1, .status_v2 => wire.encodeStatus(event.protocol, &local.status, &response.bytes) catch {
-                _ = reqresp.cancel(event.request);
+                _ = reqresp.cancel(event.request, now);
                 return;
             },
             .ping_v1 => blk: {
                 _ = wire.decodeScalar(event.bytes) catch {
-                    _ = reqresp.cancel(event.request);
+                    _ = reqresp.cancel(event.request, now);
                     return;
                 };
                 break :blk wire.encodeScalar(local.metadata.seq_number, &response.bytes) catch unreachable;
@@ -200,14 +201,14 @@ pub const ControlProtocol = struct {
                 local.fork,
                 &response.bytes,
             ) catch {
-                _ = reqresp.cancel(event.request);
+                _ = reqresp.cancel(event.request, now);
                 return;
             },
             .goodbye_v1 => wire.encodeScalar(1, &response.bytes) catch unreachable,
             else => unreachable,
         };
         reqresp.respond(event.request, response.bytes[0..len], null, now) catch {
-            _ = reqresp.cancel(event.request);
+            _ = reqresp.cancel(event.request, now);
             return;
         };
         response.request = event.request;

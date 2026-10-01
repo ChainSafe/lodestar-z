@@ -93,8 +93,8 @@ test "reqresp active new methods enforce request ceilings through real exchanges
             try std.testing.expect(done and served);
             try std.testing.expectEqual(@as(u32, case[2]), chunks);
             try setup.pumpOnce();
-            try std.testing.expectEqual(@as(u16, 0), setup.shared.client.reqresp.active().outbound);
-            try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.active().inbound);
+            try std.testing.expectEqual(@as(u16, 0), setup.shared.client.reqresp.pendingCounts().outbound);
+            try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.pendingCounts().inbound);
         }
     }
 }
@@ -191,11 +191,11 @@ test "reqresp active hostile coalesced context rejects before sink writes with o
             }
             try std.testing.expect(failed);
             try std.testing.expect(std.mem.allEqual(u8, sink, 0xaa));
-            setup.shared.server.reqresp.shutdown(&setup.shared.pair.server, &setup.shared.server.router);
+            setup.shared.server.reqresp.shutdown(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now);
             try setup.pumpOnce();
             try setup.pumpOnce();
-            try std.testing.expectEqual(@as(u16, 0), setup.shared.client.reqresp.active().outbound);
-            try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.active().inbound);
+            try std.testing.expectEqual(@as(u16, 0), setup.shared.client.reqresp.pendingCounts().outbound);
+            try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.pendingCounts().inbound);
         }
     }
 }
@@ -237,11 +237,11 @@ test "reqresp active zero ceiling rejects malicious success and permits remote e
             if (failed) break;
         }
         try std.testing.expect(failed);
-        setup.shared.server.reqresp.shutdown(&setup.shared.pair.server, &setup.shared.server.router);
+        setup.shared.server.reqresp.shutdown(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now);
         try setup.pumpOnce();
         try setup.pumpOnce();
-        try std.testing.expectEqual(@as(u16, 0), setup.shared.client.reqresp.active().outbound);
-        try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.active().inbound);
+        try std.testing.expectEqual(@as(u16, 0), setup.shared.client.reqresp.pendingCounts().outbound);
+        try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.pendingCounts().inbound);
     }
 }
 
@@ -283,7 +283,7 @@ test "reqresp active inbound invalid head range and no-body requests never reach
         try std.testing.expectEqual(@as(u8, 1), decoder.result());
         try std.testing.expectEqualStrings("invalid request", decoder.payload());
         try setup.pumpOnce();
-        try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.active().inbound);
+        try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.pendingCounts().inbound);
     }
 }
 
@@ -302,7 +302,7 @@ test "reqresp active light client traffic preserves control reserve and cancella
     const capacity = protocol.Protocol.light_client_updates_by_range_v1.info().response_max;
     const sink = try std.testing.allocator.alloc(u8, capacity * 2);
     defer {
-        owner.shutdown(&pair.client, &router);
+        owner.shutdown(&pair.client, &router, pair.now);
         std.testing.allocator.free(sink);
     }
     for (0..2) |_| {
@@ -311,9 +311,9 @@ test "reqresp active light client traffic preserves control reserve and cancella
         try std.testing.expectError(error.SlotsExhausted, owner.request(&pair.client, &router, handles.client, .light_client_updates_by_range_v1, &([_]u8{0} ** 16), sink, .{}, pair.now));
         var ping: [8]u8 = @splat(0);
         const control = try owner.request(&pair.client, &router, handles.client, .ping_v1, &ping, &ping, .{}, pair.now);
-        try std.testing.expect(owner.cancel(a));
-        try std.testing.expect(owner.cancel(b));
-        try std.testing.expect(owner.cancel(control));
+        try std.testing.expect(owner.cancel(a, pair.now));
+        try std.testing.expect(owner.cancel(b, pair.now));
+        try std.testing.expect(owner.cancel(control, pair.now));
         var events: [2]reqresp.Event = undefined;
         const controls = owner.pump(&pair.client, &router, pair.now, .{ .application = &.{}, .control = &events });
         try std.testing.expectEqual(@as(usize, 0), controls.application);
@@ -323,7 +323,7 @@ test "reqresp active light client traffic preserves control reserve and cancella
         try std.testing.expectEqual(@as(usize, 2), applications.application);
         for (events) |event| try std.testing.expect(event.failed.reason == .cancelled);
         _ = owner.pump(&pair.client, &router, pair.now, .{ .application = &.{} }).application;
-        try std.testing.expectEqual(@as(u16, 0), owner.active().outbound);
+        try std.testing.expectEqual(@as(u16, 0), owner.pendingCounts().outbound);
         try std.testing.expectEqual(@as(usize, 0), router.negotiator.active());
     }
 }
@@ -405,8 +405,8 @@ fn emptyExchange(setup: *harness.Pair, which: protocol.Protocol, bytes: []const 
     try std.testing.expect(terminal and served);
     try std.testing.expectEqual(@as(u32, if (allowed) 1 else 0), received);
     try setup.pumpOnce();
-    try std.testing.expectEqual(@as(u16, 0), setup.shared.client.reqresp.active().outbound);
-    try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.active().inbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.shared.client.reqresp.pendingCounts().outbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.pendingCounts().inbound);
 }
 
 fn waitExchange(setup: *harness.Pair, which: protocol.Protocol, bytes: []const u8) !void {
@@ -426,17 +426,17 @@ fn waitExchange(setup: *harness.Pair, which: protocol.Protocol, bytes: []const u
         if (waiting) break;
     }
     try std.testing.expect(waiting);
-    try std.testing.expect(setup.shared.client.reqresp.cancel(handle));
+    try std.testing.expect(setup.shared.client.reqresp.cancel(handle, setup.shared.pair.now));
     for (0..20) |_| {
         try setup.pumpOnce();
         for (setup.serverEvents()) |event| {
             try std.testing.expectEqual(.failed, std.meta.activeTag(event));
             try std.testing.expectEqual(reqresp.Failure.stream_closed, event.failed.reason);
         }
-        if (setup.shared.server.reqresp.active().inbound == 0) break;
+        if (setup.shared.server.reqresp.pendingCounts().inbound == 0) break;
     }
     try setup.pumpOnce();
-    try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.active().inbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.pendingCounts().inbound);
 }
 
 fn refusedStart(setup: *harness.Pair, which: protocol.Protocol) !void {
@@ -509,7 +509,7 @@ test "reqresp request admission outbound validation ceiling and owner fork snaps
     defer std.testing.allocator.free(sink);
     var roots = [_]u8{0} ** (129 * 32);
     try std.testing.expectError(error.InvalidRequest, request(&setup, .blocks_by_root_v2, roots[0..1], sink, .{}));
-    try std.testing.expectEqual(@as(u16, 0), setup.shared.client.reqresp.active().outbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.shared.client.reqresp.pendingCounts().outbound);
     try std.testing.expectError(error.InvalidRequestOptions, request(&setup, .blocks_by_root_v2, &roots, sink, .{ .expected_chunks = 130 }));
     const handle = try request(&setup, .blocks_by_root_v2, &roots, sink, .{});
     setup.shared.client.reqresp.setRequestFork(.fulu);
@@ -595,7 +595,7 @@ fn changeClientIdentity(setup: *harness.Pair, seed: u8) !void {
         failed_context.deinit();
         return err;
     };
-    setup.shared.client.reqresp.shutdown(&setup.shared.pair.client, &setup.shared.client.router);
+    setup.shared.client.reqresp.shutdown(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now);
     setup.shared.pair.client.deinit();
     setup.shared.pair.client = replacement;
     setup.shared.pair.client_ctx = ctx;

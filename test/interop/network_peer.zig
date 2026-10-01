@@ -344,7 +344,7 @@ pub fn main(init: std.process.Init) !void {
     defer a.free(peer.response);
 
     defer peer.service.identify.shutdown(&peer.service.router, &peer.transport.engine);
-    defer peer.service.reqresp.shutdown(&peer.transport.engine, &peer.service.router);
+    defer peer.service.reqresp.shutdown(&peer.transport.engine, &peer.service.router, peer.now);
     try control.run(peer);
 }
 

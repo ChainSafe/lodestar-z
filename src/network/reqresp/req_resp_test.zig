@@ -93,8 +93,8 @@ test "reqresp rejects non-null status context then completes a status round trip
     try std.testing.expectEqual(@as(u64, 1), setup.shared.client.reqresp.protocol_counters[@intFromEnum(Protocol.status_v1)].outgoing_time.count);
     try std.testing.expectEqual(@as(u64, 1), setup.shared.server.reqresp.protocol_counters[@intFromEnum(Protocol.status_v1)].incoming_time.count);
     try setup.pumpOnce();
-    try std.testing.expectEqual(@as(u16, 0), setup.shared.client.reqresp.active().outbound);
-    try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.active().inbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.shared.client.reqresp.pendingCounts().outbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.pendingCounts().inbound);
 }
 
 test "reqresp completes ping and metadata round trips" {
@@ -258,5 +258,5 @@ test "reqresp rejects undersized sinks and stale handles" {
     try std.testing.expect(!setup.shared.client.reqresp.consume(stale, setup.shared.pair.now));
     try std.testing.expect(!setup.shared.server.reqresp.finish(.{ .index = 0, .generation = 99, .direction = .inbound }, setup.shared.pair.now));
     try std.testing.expectEqual(@as(usize, 0), setup.shared.client.reqresp.errorMessage(stale).len);
-    try std.testing.expectEqual(@as(u16, 0), setup.shared.client.reqresp.active().outbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.shared.client.reqresp.pendingCounts().outbound);
 }

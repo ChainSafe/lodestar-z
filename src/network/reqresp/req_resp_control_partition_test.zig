@@ -18,7 +18,7 @@ test "reqresp drain retains blocked terminals across control and application par
     const size = protocol.Protocol.blocks_by_root_v2.info().response_max;
     const sink = try std.testing.allocator.alloc(u8, 2 * size);
     defer {
-        requests.shutdown(&pair.client, &router);
+        requests.shutdown(&pair.client, &router, pair.now);
         std.testing.allocator.free(sink);
     }
     const application = try requests.request(
@@ -63,10 +63,10 @@ test "reqresp drain retains blocked terminals across control and application par
         .{},
         pair.now,
     );
-    try std.testing.expect(requests.cancel(application_second));
-    try std.testing.expect(requests.cancel(control_second));
-    try std.testing.expect(requests.cancel(application));
-    try std.testing.expect(requests.cancel(control));
+    try std.testing.expect(requests.cancel(application_second, pair.now));
+    try std.testing.expect(requests.cancel(control_second, pair.now));
+    try std.testing.expect(requests.cancel(application, pair.now));
+    try std.testing.expect(requests.cancel(control, pair.now));
     try std.testing.expectEqual(
         rr.OutputCounts{ .application = 0, .control = 0 },
         requests.pump(&pair.client, &router, pair.now, .{ .application = &.{}, .control = &.{} }),
@@ -83,7 +83,7 @@ test "reqresp drain retains blocked terminals across control and application par
     try std.testing.expectEqual(1, requests.pump(&pair.client, &router, pair.now, .{ .application = &output, .control = &.{} }).application);
     try std.testing.expectEqual(application, output[0].failed.request);
     _ = requests.pump(&pair.client, &router, pair.now, .{ .application = &.{}, .control = &.{} });
-    try std.testing.expectEqual(0, requests.active().outbound);
+    try std.testing.expectEqual(0, requests.pendingCounts().outbound);
 }
 
 test "reqresp service retains request and chunk bytes through control progress" {
@@ -97,13 +97,13 @@ test "reqresp service retains request and chunk bytes through control progress" 
     defer client.deinit();
     var server = try @import("../service_test_support.zig").initService(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } }, &pair.server);
     defer server.deinit();
-    defer server.reqresp.shutdown(&pair.server, &server.router);
+    defer server.reqresp.shutdown(&pair.server, &server.router, pair.now);
     const sink = try std.testing.allocator.alloc(
         u8,
         protocol.Protocol.blocks_by_root_v2.info().response_max,
     );
     defer {
-        client.reqresp.shutdown(&pair.client, &client.router);
+        client.reqresp.shutdown(&pair.client, &client.router, pair.now);
         std.testing.allocator.free(sink);
     }
     const root = [_]u8{0xa5} ** 32;
@@ -180,7 +180,7 @@ test "reqresp service retains request and chunk bytes through control progress" 
         pair.now.mono_ms,
         client.reqresp.nextWakeup(pair.now, .{ .application = 1, .control = 0 }),
     );
-    try std.testing.expect(client.reqresp.cancel(app));
+    try std.testing.expect(client.reqresp.cancel(app, pair.now));
     _ = client.reqresp.pump(&pair.client, &client.router, pair.now, .{ .application = &.{}, .control = &.{} });
     try std.testing.expectEqual(
         1,

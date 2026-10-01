@@ -133,3 +133,52 @@ pub fn statusBytes(seed: u8) [ct.phase0.Status.fixed_size]u8 {
     _ = ct.phase0.Status.serializeIntoBytes(&status, &bytes);
     return bytes;
 }
+
+pub fn requestStatus(setup: *Pair, request_ssz: *[ct.phase0.Status.fixed_size]u8, sink: []u8) !reqresp.RequestHandle {
+    request_ssz.* = statusBytes(5);
+    return setup.shared.client.reqresp.request(
+        &setup.shared.pair.client,
+        &setup.shared.client.router,
+        setup.shared.handles.client,
+        .status_v1,
+        request_ssz,
+        sink,
+        .{},
+        setup.shared.pair.now,
+    );
+}
+
+pub fn requestBlocks(setup: *Pair, request_ssz: *[24]u8, count: u64, sink: []u8) !reqresp.RequestHandle {
+    const Request = ct.phase0.BeaconBlocksByRangeRequest;
+    const request = Request.Type{ .start_slot = 1, .count = count, .step = 1 };
+    _ = Request.serializeIntoBytes(&request, request_ssz);
+    return setup.shared.client.reqresp.request(
+        &setup.shared.pair.client,
+        &setup.shared.client.router,
+        setup.shared.handles.client,
+        .blocks_by_range_v2,
+        request_ssz,
+        sink,
+        .{},
+        setup.shared.pair.now,
+    );
+}
+
+pub fn firstFailure(events: []const Event) ?reqresp.Failure {
+    for (events) |event| {
+        if (event == .failed) return event.failed.reason;
+    }
+    return null;
+}
+
+pub fn waitForRequest(setup: *Pair) !void {
+    var request_seen = false;
+    var rounds: usize = 0;
+    while (rounds < 10 and !request_seen) : (rounds += 1) {
+        try setup.pumpOnce();
+        for (setup.serverEvents()) |event| {
+            if (event == .request) request_seen = true;
+        }
+    }
+    try std.testing.expect(request_seen);
+}

@@ -1,5 +1,5 @@
-const RequestIO = @import("RequestIO.zig");
 const std = @import("std");
+const RequestIO = @import("RequestIO.zig");
 const rr = @import("ReqResp.zig");
 const Protocol = @import("protocol.zig").Protocol;
 const Plan = @import("ReceivePlan.zig");
@@ -46,7 +46,7 @@ test "inbound admission receive exhaustion and selected handoff checks precede t
         defer owner.deinit();
         var router = try routing.Router.init(std.testing.allocator, .{});
         defer router.deinit();
-        defer owner.shutdown(&pair.server, &router);
+        defer owner.shutdown(&pair.server, &router, pair.now);
         const identity = pair.server.peerId(handles.server).?;
         _ = try owner.accept(&pair.server, try inboundStream(&pair, handles.client), .{
             .protocol = .{ .reqresp = .ping_v1 },
@@ -85,7 +85,7 @@ fn readySlot(owner: *rr, peer: u16, which: Protocol, ordinal: u16, identity: Pee
     slot.progress_ms = accepted_ms;
     slot.request = .{
         .direction = .inbound,
-        .completion = .active,
+        .completion = .running,
         .generation = 1,
         .conn = conn,
         .stream = .{ .conn = conn, .id = ordinal * 4, .slot = @intCast(ordinal) },
@@ -207,7 +207,7 @@ test "inbound admission cancellation removes each wait without refunding or spin
         if (wait == .tokens) try std.testing.expectEqual(@as(u128, 1), slot.admission.paid);
         const start_due = owner.admission.limiter.startAt(&identity, false, 0);
         const tokens_due = owner.admission.limiter.eligibleAt(&identity, .blocks_by_root_v2, 1, .phase0, 0);
-        try std.testing.expect(owner.cancel(slot.request.handle(index)));
+        try std.testing.expect(owner.cancel(slot.request.handle(index), .{ .mono_ms = 0, .unix_s = 0 }));
         if (wait == .serving) try std.testing.expect(owner.releaseServing(holder));
         try std.testing.expectEqual(start_due, owner.admission.limiter.startAt(&identity, false, 0));
         try std.testing.expectEqual(tokens_due, owner.admission.limiter.eligibleAt(&identity, .blocks_by_root_v2, 1, .phase0, 0));

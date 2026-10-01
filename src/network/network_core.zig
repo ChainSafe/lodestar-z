@@ -173,7 +173,7 @@ pub const NetworkCore = struct {
         self.peer_manager = try manager.PeerManager.init(allocator, &self.transport.peerId(), &local, resolved.core.peerManager(), self.service.router.capabilities().receive, self.transport.engine.limits.connections_max);
         errdefer self.peer_manager.deinit();
         const peer_capacity: u16 = @intCast(self.peer_manager.catalog.rows.len);
-        self.control_protocol = try ControlProtocol.init(allocator, peer_capacity, resolved.core.peers.max_peers, self.service.reqresp.serving.control_reserved);
+        self.control_protocol = try ControlProtocol.init(allocator, peer_capacity, resolved.core.peers.max_peers, service_options.reqresp.inbound_control_reserved);
         errdefer self.control_protocol.deinit(allocator);
         self.peer_manager.loadRemembered(startup.remembered, self.last_now);
         self.service.gossipsub.clock = io;
@@ -188,7 +188,8 @@ pub const NetworkCore = struct {
 
     pub fn deinit(self: *NetworkCore, io: std.Io) void {
         if (!self.initialized) return;
-        self.shutdown(self.last_now);
+        const read = transport_mod.currentTime(io) catch self.last_now;
+        self.shutdown(if (read.mono_ms >= self.last_now.mono_ms) read else self.last_now);
         if (self.discovery) |owned| {
             owned.deinit(io);
             self.allocator.destroy(owned);
@@ -208,7 +209,7 @@ pub const NetworkCore = struct {
         self.last_now = now;
         const pm = &self.peer_manager;
         if (pm.stop()) {
-            self.service.shutdown(&self.transport.engine);
+            self.service.shutdown(&self.transport.engine, now);
             const count = pm.catalog.snapshots(pm.snapshot_scratch);
             for (pm.snapshot_scratch[0..count]) |snapshot| if (snapshot.connection) |conn| {
                 self.closeConnection(snapshot.peer, conn, .shutdown, now);
@@ -301,8 +302,8 @@ pub const NetworkCore = struct {
     pub fn finish(self: *NetworkCore, request: rr.ReqResp.RequestHandle, now: Now) bool {
         return self.service.reqresp.finish(request, now);
     }
-    pub fn cancel(self: *NetworkCore, request: rr.ReqResp.RequestHandle) bool {
-        return self.service.reqresp.cancel(request);
+    pub fn cancel(self: *NetworkCore, request: rr.ReqResp.RequestHandle, now: Now) bool {
+        return self.service.reqresp.cancel(request, now);
     }
     pub fn errorMessage(self: *const NetworkCore, request: rr.ReqResp.RequestHandle) []const u8 {
         return self.service.reqresp.errorMessage(request);
@@ -432,7 +433,7 @@ pub const NetworkCore = struct {
         if (!std.meta.eql(pm.local.fork, prepared.local.fork)) {
             for (0..pm.control.schedules.len) |index| {
                 const stale = pm.revalidateConnection(index, now) orelse continue;
-                self.control_protocol.cancel(&self.service.reqresp, stale.peer, stale.conn);
+                self.control_protocol.cancel(&self.service.reqresp, stale.peer, stale.conn, now);
             }
         }
         pm.commitLocal(&prepared.local, now);
@@ -687,7 +688,7 @@ pub const NetworkCore = struct {
                     return;
                 };
                 if (admission.displaced) |old| {
-                    self.control_protocol.cancelConnection(&self.service.reqresp, &self.service.router, quic, admission.peer, old);
+                    self.control_protocol.cancelConnection(&self.service.reqresp, &self.service.router, quic, admission.peer, old, now);
                     self.service.gossipsub.retireConnection(&self.service.router, quic, old, now);
                     _ = quic.close(old, 0);
                 }
@@ -715,7 +716,7 @@ pub const NetworkCore = struct {
     }
     fn releaseConnection(self: *NetworkCore, retired: manager.PeerManager.Retired, now: Now) void {
         const quic = &self.transport.engine;
-        self.control_protocol.cancelConnection(&self.service.reqresp, &self.service.router, quic, retired.peer, retired.conn);
+        self.control_protocol.cancelConnection(&self.service.reqresp, &self.service.router, quic, retired.peer, retired.conn, now);
         self.service.gossipsub.retireConnection(&self.service.router, quic, retired.conn, now);
         _ = quic.close(retired.conn, 0);
     }
@@ -730,7 +731,7 @@ pub const NetworkCore = struct {
         for (batch) |*event| switch (event.*) {
             .request => |*request| {
                 const peer = pm.controlRequested(request, now, self.current_slot) orelse {
-                    _ = reqresp.cancel(request.request);
+                    _ = reqresp.cancel(request.request, now);
                     continue;
                 };
                 requests.respond(reqresp, peer, request, &pm.local, now);

@@ -14,7 +14,7 @@ const Event = events.Event;
 
 const RequestState = @This();
 
-completion: union(enum) { free, active, terminal: Event, reported } = .free,
+completion: union(enum) { free, running, terminal: Event, reported } = .free,
 notification: union(enum) { none, pending: Event, borrowed_chunk } = .none,
 stream_owner: enum { router, protocol, closed } = .protocol,
 close_code: ?u64 = null,
@@ -38,12 +38,12 @@ pub fn occupied(self: *const RequestState) bool {
     return self.completion != .free;
 }
 
-pub fn active(self: *const RequestState) bool {
-    return self.completion == .active or self.completion == .terminal;
+pub fn awaitingTerminal(self: *const RequestState) bool {
+    return self.completion == .running or self.completion == .terminal;
 }
 
 pub fn running(self: *const RequestState) bool {
-    return self.completion == .active;
+    return self.completion == .running;
 }
 
 pub fn available(self: *const RequestState) bool {

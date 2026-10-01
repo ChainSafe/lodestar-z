@@ -56,7 +56,7 @@ const MaintenancePeers = struct {
             initialized += 1;
         }
         const hub = &nodes[0];
-        errdefer |err| std.debug.print("maintenance bootstrap failed: {t}, peers={any}, operations={any}, requests={any}\n", .{ err, hub.peerCounts(), core_test.controlOperations(hub), hub.service.reqresp.active() });
+        errdefer |err| std.debug.print("maintenance bootstrap failed: {t}, peers={any}, operations={any}, requests={any}\n", .{ err, hub.peerCounts(), core_test.controlOperations(hub), hub.service.reqresp.pendingCounts() });
         for (nodes[1..]) |*remote| try hub.connectUntil(&remote.peerId(), &.{remote.transport.localAddress()}, hub.last_now, hub.last_now.mono_ms +| @import("peers/dialing.zig").connect_timeout_ms);
         for (0..3000) |_| {
             try step(&.{ &nodes[0], &nodes[1], &nodes[2], &nodes[3] });
@@ -106,7 +106,7 @@ test "core maintenance isolates slow peers and full application capacity" {
     var fixture = try MaintenancePeers.init(backing_hub.allocator());
     defer fixture.deinit();
     const hub = &fixture.nodes[0];
-    errdefer |err| std.debug.print("maintenance isolation failed: {t}, peers={any}, operations={any}, requests={any}\n", .{ err, hub.peerCounts(), core_test.controlOperations(hub), hub.service.reqresp.active() });
+    errdefer |err| std.debug.print("maintenance isolation failed: {t}, peers={any}, operations={any}, requests={any}\n", .{ err, hub.peerCounts(), core_test.controlOperations(hub), hub.service.reqresp.pendingCounts() });
     const healthy = &fixture.nodes[3];
     const slow = hub.peer_manager.catalog.find(&fixture.nodes[1].peerId()).?;
     const healthy_peer = hub.peer_manager.catalog.find(&healthy.peerId()).?;
@@ -114,7 +114,7 @@ test "core maintenance isolates slow peers and full application capacity" {
     const size = rr.Protocol.blocks_by_root_v2.info().response_max;
     const sinks = try std.testing.allocator.alloc(u8, 2 * size);
     defer {
-        hub.service.reqresp.shutdown(&hub.transport.engine, &hub.service.router);
+        hub.service.reqresp.shutdown(&hub.transport.engine, &hub.service.router, hub.last_now);
         std.testing.allocator.free(sinks);
     }
     const calls = backing_hub.allocations;
@@ -140,7 +140,7 @@ test "core maintenance isolates slow peers and full application capacity" {
     }
     try std.testing.expectEqual(@as(u64, 42), hub.peer_manager.catalog.get(healthy_peer).?.status.?.head_slot);
     try std.testing.expectEqual(@as(usize, 2), core_test.controlOperations(hub));
-    try std.testing.expectEqual(@as(u16, 2), hub.service.reqresp.outboundApplicationCount(conn));
+    try std.testing.expectEqual(@as(u16, 2), hub.service.reqresp.outboundApplicationOccupiedCount(conn));
     try std.testing.expectEqual(calls, backing_hub.allocations);
 }
 
@@ -300,9 +300,9 @@ test "core signed bootstrap reaches relevant peer with zero and one outputs" {
     try std.testing.expectEqual(calls_a, backing_a.allocations);
     try std.testing.expectEqual(calls_b, backing_b.allocations);
     const now = try @import("transport.zig").currentTime(std.testing.io);
-    a.shutdown(now);
-    a.shutdown(now);
-    b.shutdown(now);
+    a.shutdown(a.last_now);
+    a.shutdown(a.last_now);
+    b.shutdown(b.last_now);
     // Closing needs only a datagram exchange, so the bound stays far below the QUIC timers (the
     // 5 s handshake limit, the 10 s idle timeout) that would retire a connection whose close was lost.
     var tick = now;
@@ -787,7 +787,7 @@ fn failureAndReplacement(a: *runtime.NetworkCore, b: *runtime.NetworkCore) !void
     try std.testing.expectEqual(@as(u16, 1), a.peerCounts().relevant);
     try std.testing.expectEqual(@as(u16, 1), replacement.peerCounts().relevant);
     try std.testing.expect(replacement.counters.dial_started > 0);
-    replacement.shutdown(now);
+    replacement.shutdown(try @import("transport.zig").currentTime(std.testing.io));
 }
 
 test "core profiles measure reservations and unwind byte exhaustion" {

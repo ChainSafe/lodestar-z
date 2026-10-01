@@ -56,7 +56,7 @@ test "incoming submission recognizes a genuine native terminal awaiting output c
     defer pair.deinit();
     const sink = try std.testing.allocator.alloc(u8, rr.Protocol.blocks_by_root_v2.info().response_max);
     defer {
-        pair.shared.client.reqresp.shutdown(&pair.shared.pair.client, &pair.shared.client.router);
+        pair.shared.client.reqresp.shutdown(&pair.shared.pair.client, &pair.shared.client.router, pair.shared.pair.now);
         std.testing.allocator.free(sink);
     }
     const query = [_]u8{0} ** 32;
@@ -71,7 +71,7 @@ test "incoming submission recognizes a genuine native terminal awaiting output c
     }
     const request = handle.?;
     try std.testing.expectEqual(.ready, pair.shared.server.reqresp.responseReadiness(request));
-    try std.testing.expect(pair.shared.server.reqresp.cancel(request));
+    try std.testing.expect(pair.shared.server.reqresp.cancel(request, pair.shared.pair.now));
     pair.server_event_capacity = 0;
     try pair.pumpOnce();
     try std.testing.expectEqual(@as(usize, 0), pair.serverEvents().len);

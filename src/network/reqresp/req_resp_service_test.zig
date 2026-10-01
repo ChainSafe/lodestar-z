@@ -55,8 +55,8 @@ test "service round trips a status request through the collapsed host loop" {
     defer setup.deinit();
 
     try roundTrip(&setup, 5);
-    try std.testing.expectEqual(@as(u16, 0), setup.shared.client.reqresp.active().outbound);
-    try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.active().inbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.shared.client.reqresp.pendingCounts().outbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.pendingCounts().inbound);
 }
 
 test "service reclaims inbound sinks across more requests than it has slots" {
@@ -71,7 +71,7 @@ test "service reclaims inbound sinks across more requests than it has slots" {
 
     var seed: u8 = 0;
     while (seed < 12) : (seed += 1) try roundTrip(&setup, seed);
-    try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.active().inbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.pendingCounts().inbound);
 }
 
 test "service fails in-flight requests when the connection closes" {
@@ -115,7 +115,7 @@ test "service fails in-flight requests when the connection closes" {
     }
     try std.testing.expect(client_failed);
     try std.testing.expect(server_failed);
-    try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.active().inbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.pendingCounts().inbound);
 }
 
 test "service control wakeup includes negotiation after application quiescence" {
@@ -128,7 +128,7 @@ test "service control wakeup includes negotiation after application quiescence" 
     const handle = try setup.shared.client.request(&setup.shared.pair.client, setup.shared.handles.client, .ping_v1, &bytes, &sink, .{ .absolute_timeouts = .{ .response_ms = 60_000 } }, setup.shared.pair.now);
     _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{ .control = &.{} }).control;
     try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms + 5_000), setup.shared.client.nextWakeup(setup.shared.pair.now, .{ .control = 0 }));
-    try std.testing.expect(setup.shared.client.reqresp.cancel(handle));
+    try std.testing.expect(setup.shared.client.reqresp.cancel(handle, setup.shared.pair.now));
     _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{ .control = &.{} }).control;
     try std.testing.expectEqual(@as(?u64, null), setup.shared.client.nextWakeup(setup.shared.pair.now, .{ .control = 0 }));
     var events: [1]Event = undefined;
@@ -235,7 +235,7 @@ test "service reqresp slot is serviced only after a stream event or its deadline
     try setup.awaitRawSelection(fed, .ping_v1);
     const starved = try setup.openRaw(.ping_v1);
     try setup.awaitRawSelection(starved, .ping_v1);
-    try std.testing.expectEqual(@as(u8, 2), server.inboundCount(setup.shared.handles.server, .ping_v1));
+    try std.testing.expectEqual(@as(u8, 2), server.inboundProtocolRunningCount(setup.shared.handles.server, .ping_v1));
     for (0..2) |_| try setup.pumpOnce();
     const idle = server.visits;
     for (0..8) |_| {
@@ -364,13 +364,13 @@ test "service reqresp slots stay indexed by connection across a reconnect at the
 
     _ = try setup.shared.client.request(&setup.shared.pair.client, fresh_client, .ping_v1, &bytes, &sinks[1], .{}, setup.shared.pair.now);
     for (0..8) |_| try setup.pumpOnce();
-    try std.testing.expectEqual(@as(u8, 1), server.inboundCount(fresh_server, .ping_v1));
-    try std.testing.expectEqual(@as(u8, 1), server.inboundCount(old.server, null));
-    try std.testing.expectEqual(@as(u8, 1), client.outboundCount(fresh_client, .ping_v1));
-    try std.testing.expectEqual(@as(u8, 0), client.outboundCount(old.client, .ping_v1));
+    try std.testing.expectEqual(@as(u8, 1), server.inboundProtocolRunningCount(fresh_server, .ping_v1));
+    try std.testing.expectEqual(@as(u8, 1), server.inboundPendingCount(old.server));
+    try std.testing.expectEqual(@as(u8, 1), client.outboundProtocolPendingCount(fresh_client, .ping_v1));
+    try std.testing.expectEqual(@as(u8, 0), client.outboundProtocolPendingCount(old.client, .ping_v1));
     // A repeated close of the old connection leaves the new one's slot running.
-    server.connectionClosed(old.server);
-    try std.testing.expectEqual(@as(u8, 1), server.inboundCount(fresh_server, .ping_v1));
+    server.connectionClosed(old.server, setup.shared.pair.now);
+    try std.testing.expectEqual(@as(u8, 1), server.inboundProtocolRunningCount(fresh_server, .ping_v1));
 
     setup.server_event_capacity = 16;
     var fresh: ?reqresp.RequestHandle = null;
