@@ -380,7 +380,7 @@ test "reqresp control capacity raw and service inbound admission select the same
     const handles = try support.connectPair(&pair);
     var options = try reservedOptions();
     options.inbound_per_peer_max = 4;
-    var server = try service_mod.Service.init(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } });
+    var server = try @import("../service_test_support.zig").initService(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } }, &pair.server);
     defer server.deinit();
     defer server.reqresp.shutdown(&pair.server, &server.router);
     const ordinary: routing.Selection = .{
@@ -631,7 +631,7 @@ fn allocationFailures(allocator: std.mem.Allocator) !void {
         .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 },
         .reqresp = options,
         .router = .{ .negotiations_max = 4, .outbound_control_reserved = 2 },
-    });
+    }, &try @import("../service_test_support.zig").fixtureLocal(.{}));
     defer service.deinit();
     const plan = service.reqresp.memoryPlan();
     try std.testing.expectEqual(plan.facade_bytes + plan.slot_bytes + plan.io_bytes +
@@ -645,7 +645,7 @@ test "reqresp reserved physical sinks admit full native control wave and recycle
     const handles = try support.connectPair(&pair);
     var options = try reservedOptions();
     options.inbound_per_peer_max = 4;
-    var server = try service_mod.Service.init(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } });
+    var server = try @import("../service_test_support.zig").initService(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } }, &pair.server);
     defer server.deinit();
     defer server.reqresp.shutdown(&pair.server, &server.router);
     var wave: [4]rr.RequestHandle = undefined;

@@ -1235,6 +1235,7 @@ const ActivationSnapshot = struct {
     capabilities: @import("capabilities.zig").Directional,
     request_fork: t.ForkSeq,
     record: d.identity.enr.Record,
+    identify: @import("identify/root.zig").Local,
 
     fn capture(node: *const runtime.NetworkCore) ActivationSnapshot {
         return .{
@@ -1244,11 +1245,13 @@ const ActivationSnapshot = struct {
             .capabilities = node.service.router.capabilities(),
             .request_fork = node.service.reqresp.request_fork,
             .record = node.localRecord().?.*,
+            .identify = node.service.identify.local,
         };
     }
 
     fn expectUnchanged(self: *const ActivationSnapshot, node: *const runtime.NetworkCore) !void {
         try std.testing.expectEqualDeep(self.local, node.localState());
+        try std.testing.expectEqualDeep(self.identify, node.service.identify.local);
         try std.testing.expectEqualDeep(self.schedule, node.schedule);
         try std.testing.expectEqualDeep(self.endpoints, node.advertisementEndpoints());
         try std.testing.expectEqualDeep(self.capabilities, node.service.router.capabilities());
@@ -1271,19 +1274,19 @@ test "core capabilities activation rolls back all owners on rejected candidates"
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const before = ActivationSnapshot.capture(&node);
-    const identify = node.service.identify.local;
     const now = node.last_now;
     var update: runtime.LocalUpdate = .{ .local = before.local, .schedule = before.schedule, .endpoints = before.endpoints, .capabilities = before.capabilities };
+    update.local.metadata.custody_group_count = 0;
+    try std.testing.expectError(error.InvalidCustodyCount, applyLocal(&node, &update, now));
+    try before.expectUnchanged(&node);
     update.local.metadata.custody_group_count = null;
     try std.testing.expectError(error.MissingCustodyAdvertisement, applyLocal(&node, &update, now));
     try before.expectUnchanged(&node);
-    try std.testing.expectEqualDeep(identify, node.service.identify.local);
     update.local = before.local;
     update.local.status.earliest_available_slot = null;
     update.capabilities.receive.insert(.{ .reqresp = .status_v2 });
     try std.testing.expectError(error.MissingAvailability, applyLocal(&node, &update, now));
     try before.expectUnchanged(&node);
-    try std.testing.expectEqualDeep(identify, node.service.identify.local);
     update.local = before.local;
     update.capabilities = before.capabilities;
     update.local.status.head_slot = 10;
@@ -1376,19 +1379,19 @@ test "identify advertisement follows committed endpoints and rejected updates pr
     var node: runtime.NetworkCore = undefined;
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
-    const initial = node.service.identify.local.?;
+    const initial = node.service.identify.local;
     const address = try @import("wire/multiaddr.zig").Multiaddr.decode(initial.addresses[0].bytes[0..initial.addresses[0].len]);
     try std.testing.expectEqual(node.transport.localAddress(), address.address);
     var endpoints = node.advertisementEndpoints().?;
     endpoints.quic = 443;
     const now = node.last_now;
     try std.testing.expect(try updateLocalWithEndpoints(&node, &node.peer_manager.local, node.schedule, endpoints, now));
-    const updated = node.service.identify.local.?;
+    const updated = node.service.identify.local;
     const next = try @import("wire/multiaddr.zig").Multiaddr.decode(updated.addresses[0].bytes[0..updated.addresses[0].len]);
     try std.testing.expectEqual(@as(u16, 443), next.address.port());
     endpoints.quic = 0;
     try std.testing.expectError(error.InvalidAdvertisement, updateLocalWithEndpoints(&node, &node.peer_manager.local, node.schedule, endpoints, now));
-    try std.testing.expectEqualDeep(updated, node.service.identify.local.?);
+    try std.testing.expectEqualDeep(updated, node.service.identify.local);
 }
 
 test "core targeted Status serves two current schedules and immediate close is local" {

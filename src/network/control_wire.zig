@@ -1,6 +1,6 @@
 const std = @import("std");
 const ct = @import("consensus_types");
-const t = @import("peers/types.zig");
+const t = @import("control_values.zig");
 pub const Protocol = @import("reqresp/protocol.zig").Protocol;
 /// Work selected by peer policy and executed by the control protocol.
 pub const Probe = struct {
@@ -20,18 +20,29 @@ pub const ControlReply = struct {
     after_ready: bool = false,
 };
 pub const status_size_max = 92;
-pub const Error = error{
+pub const Error = t.ValidationError || error{
     InvalidLength,
     InvalidEncoding,
     InvalidProtocol,
     BufferTooSmall,
-    InvalidSyncnets,
-    InvalidCustodyCount,
-    InvalidForkContext,
-    MissingAvailability,
-    InvalidForkDigest,
-    MissingCustodyAdvertisement,
 };
+
+// Compatibility exports for existing raw callers. Values own the validation contract.
+pub const validateMetadata = t.validateMetadata;
+pub const copyLocal = t.copyLocal;
+pub const copyServingLocal = t.copyServingLocal;
+
+/// Ping sequence numbers and Goodbye codes use the same fixed SSZ uint64 layout.
+pub fn encodeScalar(value: u64, out: []u8) Error!usize {
+    if (out.len < 8) return error.BufferTooSmall;
+    std.mem.writeInt(u64, out[0..8], value, .little);
+    return 8;
+}
+
+pub fn decodeScalar(bytes: []const u8) Error!u64 {
+    if (bytes.len != 8) return error.InvalidLength;
+    return std.mem.readInt(u64, bytes[0..8], .little);
+}
 
 pub fn statusProtocol(fork: t.ForkContext) Protocol {
     return if (fork.fork.gte(.fulu)) .status_v2 else .status_v1;
@@ -92,26 +103,13 @@ fn decodeStatusType(comptime Schema: type, bytes: []const u8) Error!t.Status {
     };
 }
 
-pub fn validateMetadata(metadata: *const t.Metadata, fork: t.ForkContext) Error!void {
-    try fork.validate();
-    if (metadata.syncnets & 0xf0 != 0) return error.InvalidSyncnets;
-    if (metadata.custody_group_count) |count| {
-        if (count > fork.custody_groups) return error.InvalidCustodyCount;
-    }
-}
-
-fn validateLocalMetadata(metadata: *const t.Metadata, fork: t.ForkContext) Error!void {
-    try validateMetadata(metadata, fork);
-    if (metadata.custody_group_count == 0) return error.InvalidCustodyCount;
-}
-
 pub fn encodeMetadata(
     protocol: Protocol,
     metadata: *const t.Metadata,
     fork: t.ForkContext,
     out: []u8,
 ) Error!usize {
-    try validateLocalMetadata(metadata, fork);
+    try t.validateLocalMetadata(metadata, fork);
     return switch (protocol) {
         .metadata_v1 => encodeMetadataType(ct.phase0.MetaDataV1, metadata, out),
         .metadata_v2 => encodeMetadataType(ct.altair.MetaDataV2, metadata, out),
@@ -140,7 +138,7 @@ pub fn decodeMetadata(protocol: Protocol, bytes: []const u8, fork: t.ForkContext
         .metadata_v3 => try decodeMetadataType(ct.fulu.MetaDataV3, bytes),
         else => return error.InvalidProtocol,
     };
-    try validateMetadata(&metadata, fork);
+    try t.validateMetadata(&metadata, fork);
     return metadata;
 }
 
@@ -160,25 +158,6 @@ fn decodeMetadataType(comptime Schema: type, bytes: []const u8) Error!t.Metadata
         else
             null,
     };
-}
-
-pub fn copyLocal(out: *t.LocalState, source: *const t.LocalState) Error!void {
-    try validateLocalMetadata(&source.metadata, source.fork);
-    if (!std.mem.eql(u8, &source.status.fork_digest, &source.fork.digest))
-        return error.InvalidForkDigest;
-    if (source.fork.fork.gte(.fulu)) {
-        if (source.status.earliest_available_slot == null) return error.MissingAvailability;
-        if (source.metadata.custody_group_count == null) return error.InvalidCustodyCount;
-    }
-    out.* = source.*;
-}
-
-pub fn copyServingLocal(out: *t.LocalState, source: *const t.LocalState, receive: @import("capabilities.zig").Set) Error!void {
-    if (receive.contains(.{ .reqresp = .metadata_v3 }) and source.metadata.custody_group_count == null)
-        return error.MissingCustodyAdvertisement;
-    if (receive.contains(.{ .reqresp = .status_v2 }) and source.status.earliest_available_slot == null)
-        return error.MissingAvailability;
-    try copyLocal(out, source);
 }
 
 test {

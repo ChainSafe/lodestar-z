@@ -36,7 +36,9 @@ pub const Service = struct {
         try @import("gossipsub/options.zig").validate(&options.gossipsub);
     }
 
-    pub fn init(allocator: std.mem.Allocator, options: Options) InitError!Service {
+    /// The caller constructs Local from the transport identity and resolved advertisement.
+    /// The supplied value is authoritative; Identify options retain startup validation and limits.
+    pub fn init(allocator: std.mem.Allocator, options: Options, local: *const identify_mod.Local) InitError!Service {
         try validateOptions(options);
         var router = try routing.Router.init(allocator, options.router);
         errdefer router.deinit();
@@ -46,7 +48,7 @@ pub const Service = struct {
         errdefer allocator.destroy(gossipsub);
         gossipsub.* = try gossip_mod.Gossipsub.init(allocator, options.gossipsub);
         errdefer gossipsub.deinit();
-        const identify = try identify_mod.Handler.init(allocator, options.identify);
+        const identify = try identify_mod.Handler.init(allocator, options.identify.limits(), local);
         return .{
             .identify = identify,
             .router = router,

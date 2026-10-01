@@ -5,41 +5,10 @@ pub const Address = @import("../types.zig").Address;
 pub const CloseReason = @import("../types.zig").CloseReason;
 pub const ForkSeq = @import("config").ForkSeq;
 pub const PeerRef = @import("../types.zig").PeerRef;
-pub const Status = struct {
-    fork_digest: [4]u8 = @splat(0),
-    finalized_root: [32]u8 = @splat(0),
-    finalized_epoch: u64 = 0,
-    head_root: [32]u8 = @splat(0),
-    head_slot: u64 = 0,
-    earliest_available_slot: ?u64 = null,
-};
-pub const Metadata = struct {
-    seq_number: u64 = 0,
-    attnets: [8]u8 = @splat(0),
-    syncnets: u8 = 0,
-    /// A smaller count is a lower bound on the peer's custody prefix; zero advertises no custody.
-    custody_group_count: ?u64 = null,
-};
-pub const ForkContext = struct {
-    fork: ForkSeq = .phase0,
-    digest: [4]u8 = @splat(0),
-    custody_groups: u16 = @min(128, @import("preset").NUMBER_OF_COLUMNS),
-    minimum_sampling_groups: u16 = 0,
-    custody_requirement: u16 = 0,
-
-    pub fn validate(self: ForkContext) error{InvalidForkContext}!void {
-        if (self.custody_groups == 0 or self.custody_groups > 128 or
-            self.minimum_sampling_groups > self.custody_groups or
-            self.custody_requirement > self.custody_groups or
-            @import("preset").NUMBER_OF_COLUMNS % self.custody_groups != 0)
-            return error.InvalidForkContext;
-    }
-};
-pub const LocalState = struct {
-    status: Status = .{},
-    metadata: Metadata = .{},
-    fork: ForkContext = .{},
-};
+pub const Status = @import("../control_values.zig").Status;
+pub const Metadata = @import("../control_values.zig").Metadata;
+pub const ForkContext = @import("../control_values.zig").ForkContext;
+pub const LocalState = @import("../control_values.zig").LocalState;
 pub const PeerAction = enum { fatal, low_tolerance, mid_tolerance, high_tolerance };
 pub const ReputationDecision = enum { none, disconnect, ban };
 pub const DisconnectReason = enum {

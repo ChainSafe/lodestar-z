@@ -4,7 +4,8 @@
 //! means; the owner executes both, so this module changes no peer state and closes no connection.
 
 const std = @import("std");
-const t = @import("peers/types.zig");
+const t = @import("types.zig");
+const values = @import("control_values.zig");
 const wire = @import("control_wire.zig");
 const rr = @import("reqresp/root.zig");
 const Router = @import("router.zig").Router;
@@ -91,7 +92,7 @@ pub const ControlProtocol = struct {
         peer: t.PeerRef,
         conn: t.Handle,
         probe: *const Probe,
-        local: *const t.LocalState,
+        local: *const values.LocalState,
         now: Now,
     ) ?rr.RequestHandle {
         assert(self.operation_by_peer[peer.index] == no_operation);
@@ -104,18 +105,10 @@ pub const ControlProtocol = struct {
                     &local.status,
                     &op.bytes,
                 ) catch return null,
-                .ping_v1, .goodbye_v1 => blk: {
-                    std.mem.writeInt(
-                        u64,
-                        op.bytes[0..8],
-                        if (probe.protocol == .ping_v1)
-                            local.metadata.seq_number
-                        else
-                            probe.code,
-                        .little,
-                    );
-                    break :blk 8;
-                },
+                .ping_v1, .goodbye_v1 => wire.encodeScalar(
+                    if (probe.protocol == .ping_v1) local.metadata.seq_number else probe.code,
+                    &op.bytes,
+                ) catch unreachable,
                 .metadata_v1, .metadata_v2, .metadata_v3 => 0,
                 else => unreachable,
             };
@@ -180,7 +173,7 @@ pub const ControlProtocol = struct {
         reqresp: *rr.ReqResp,
         peer: t.PeerRef,
         event: *const RequestEvent,
-        local: *const t.LocalState,
+        local: *const values.LocalState,
         now: Now,
     ) void {
         const response = available: {
@@ -195,12 +188,11 @@ pub const ControlProtocol = struct {
                 return;
             },
             .ping_v1 => blk: {
-                if (event.bytes.len != 8) {
+                _ = wire.decodeScalar(event.bytes) catch {
                     _ = reqresp.cancel(event.request);
                     return;
-                }
-                std.mem.writeInt(u64, response.bytes[0..8], local.metadata.seq_number, .little);
-                break :blk 8;
+                };
+                break :blk wire.encodeScalar(local.metadata.seq_number, &response.bytes) catch unreachable;
             },
             .metadata_v1, .metadata_v2, .metadata_v3 => wire.encodeMetadata(
                 event.protocol,
@@ -211,10 +203,7 @@ pub const ControlProtocol = struct {
                 _ = reqresp.cancel(event.request);
                 return;
             },
-            .goodbye_v1 => blk: {
-                std.mem.writeInt(u64, response.bytes[0..8], 1, .little);
-                break :blk 8;
-            },
+            .goodbye_v1 => wire.encodeScalar(1, &response.bytes) catch unreachable,
             else => unreachable,
         };
         reqresp.respond(event.request, response.bytes[0..len], null, now) catch {

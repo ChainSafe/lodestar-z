@@ -22,9 +22,9 @@ test "router composes simultaneous ping and meshsub on one connection" {
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
-    var client = try @import("service.zig").Service.init(std.testing.allocator, try rrOptions());
+    var client = try @import("service_test_support.zig").initService(std.testing.allocator, try rrOptions(), &pair.client);
     defer client.deinit();
-    var server = try @import("service.zig").Service.init(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1, .topic_policy = &.{@import("gossipsub/topic_fixture.zig").bytes(.{ 1, 2, 3, 4 })} }, .reqresp = (try rrOptions()).reqresp });
+    var server = try @import("service_test_support.zig").initService(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1, .topic_policy = &.{@import("gossipsub/topic_fixture.zig").bytes(.{ 1, 2, 3, 4 })} }, .reqresp = (try rrOptions()).reqresp }, &pair.server);
     defer server.deinit();
     const requests = &server.reqresp;
     const gossip = server.gossipsub;
@@ -214,16 +214,16 @@ test "router composed service handles native stream events past empty request ca
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
-    var client = try @import("service.zig").Service.init(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1 }, .reqresp = .{
+    var client = try @import("service_test_support.zig").initService(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1 }, .reqresp = .{
         .forks = &.{},
         .outbound_max = 64,
         .inbound_max = 64,
         .work_per_pump_max = 1,
         .admission = try rr.reqresp.AdmissionOptions.defaults(&@import("reqresp/policy_fixture.zig").config(), 128, 128, 64),
-    } });
+    } }, &pair.client);
     defer client.deinit();
     defer client.reqresp.shutdown(&pair.client, &client.router);
-    var server = try @import("service.zig").Service.init(std.testing.allocator, try rrOptions());
+    var server = try @import("service_test_support.zig").initService(std.testing.allocator, try rrOptions(), &pair.server);
     defer server.deinit();
     defer server.reqresp.shutdown(&pair.server, &server.router);
     const handles = try support.connectPair(&pair);
@@ -260,10 +260,10 @@ test "router gossip capacity refusal preserves reqresp and explicit host retry" 
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
-    var client = try @import("service.zig").Service.init(std.testing.allocator, try rrOptions());
+    var client = try @import("service_test_support.zig").initService(std.testing.allocator, try rrOptions(), &pair.client);
     defer client.deinit();
     defer client.reqresp.shutdown(&pair.client, &client.router);
-    var server = try @import("service.zig").Service.init(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1 }, .reqresp = (try rrOptions()).reqresp });
+    var server = try @import("service_test_support.zig").initService(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1 }, .reqresp = (try rrOptions()).reqresp }, &pair.server);
     defer server.deinit();
     defer server.reqresp.shutdown(&pair.server, &server.router);
     const handles = try support.connectPair(&pair);
@@ -344,11 +344,11 @@ test "router capabilities disabled outbound preserves stream and request owners"
     try pair.init(.{}, .{});
     defer pair.deinit();
     const handles = try support.connectPair(&pair);
-    var service = try @import("service.zig").Service.init(std.testing.allocator, .{
+    var service = try @import("service_test_support.zig").initService(std.testing.allocator, .{
         .reqresp = (try rrOptions()).reqresp,
         .gossipsub = .{ .random_seed = 1 },
         .router = .{ .capabilities = caps.Directional{ .receive = .initEmpty(), .request = .initEmpty() } },
-    });
+    }, &pair.client);
     defer service.deinit();
     const before = pair.client.resourceSnapshot();
     const requests = service.reqresp.active();

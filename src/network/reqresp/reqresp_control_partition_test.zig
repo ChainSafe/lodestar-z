@@ -94,9 +94,9 @@ test "reqresp service retains request and chunk bytes through control progress" 
     const handles = try support.connectPair(&pair);
     var options = try reservedOptions();
     options.forks = &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .deneb }};
-    var client = try service_mod.Service.init(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } });
+    var client = try @import("../service_test_support.zig").initService(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } }, &pair.client);
     defer client.deinit();
-    var server = try service_mod.Service.init(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } });
+    var server = try @import("../service_test_support.zig").initService(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } }, &pair.server);
     defer server.deinit();
     defer server.reqresp.shutdown(&pair.server, &server.router);
     const sink = try std.testing.allocator.alloc(
