@@ -6,7 +6,7 @@ const assert = std.debug.assert;
 const Cid = binding.Cid;
 
 pub const probe_max: usize = 64;
-pub const routes_per_slot: usize = 2;
+const entries_per_slot: usize = 4;
 
 pub const Error = error{Full};
 
@@ -29,7 +29,7 @@ pub fn init(
 ) std.mem.Allocator.Error!RouteTable {
     assert(slots > 0);
     assert(slots <= limits.connections_max_ceiling);
-    const wanted = 2 * routes_per_slot * @as(usize, slots);
+    const wanted = entries_per_slot * @as(usize, slots);
     const entry_count = std.math.ceilPowerOfTwoAssert(usize, wanted);
     const entries = try allocator.alloc(Entry, entry_count);
     @memset(entries, .{});

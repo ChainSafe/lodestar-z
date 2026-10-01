@@ -984,7 +984,7 @@ test "core native wait honors engine timers and pending lifecycle work" {
     const timer = node.step(std.testing.io, current, .{}, .deadlineOnly(current.mono_ms +| 100));
     try std.testing.expect(timer.failure == null);
     const failed = try node.transport.engine.dial(&destination, node.peerId(), node.last_now);
-    node.transport.engine.failSend(failed.index);
+    try std.testing.expect(node.transport.engine.failSend(failed));
     try std.testing.expect(node.transport.engine.eventsPending());
     const lifecycle = node.step(std.testing.io, node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms +| 100));
     try std.testing.expect(lifecycle.failure == null);

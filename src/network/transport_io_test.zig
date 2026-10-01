@@ -653,7 +653,7 @@ test "transport receive cancellation retains progress and events while deferring
     const now = try transport_mod.currentTime(std.testing.io);
     _ = try node.transport.engine.dial(&destination, node.transport.peerId(), now);
     const failed = try node.transport.engine.dial(&destination, node.transport.peerId(), now);
-    node.transport.engine.failSend(failed.index);
+    try std.testing.expect(node.transport.engine.failSend(failed));
     try sink.primary().send(std.testing.io, &node.transport.sockets.primary().address, "invalid");
     var faults: FaultIo = .{ .receive = .{ .at = 2 } };
     const io = faults.io();
@@ -677,7 +677,7 @@ test "transport progress early clock failure does not begin or publish a turn" {
     defer node.deinit();
     const now = try transport_mod.currentTime(std.testing.io);
     const failed = try node.transport.engine.dial(&support.server_address, node.transport.peerId(), now);
-    node.transport.engine.failSend(failed.index);
+    try std.testing.expect(node.transport.engine.failSend(failed));
     var faults: FaultIo = .{ .clock = .{} };
     const io = faults.io();
     var events: [4]Engine.Event = undefined;

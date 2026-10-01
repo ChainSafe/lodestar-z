@@ -131,6 +131,7 @@ const Stream = struct {
 };
 
 pub const Options = struct {
+    /// Engine owns this context after init succeeds; the caller retains it on failure.
     tls: TlsContext,
     limits: Limits = .{},
     local: [2]?Address,
@@ -226,12 +227,11 @@ pub fn sendOwner(self: *const Engine, index: u16) ?Handle {
     return .{ .index = index, .generation = slot.generation };
 }
 
-pub fn failSend(self: *Engine, index: u16) void {
-    assert(index < self.registry.slots.len);
-    const slot = &self.registry.slots[index];
-    assert(slot.state != .free);
-    if (slot.state == .closed) return;
-    self.markClosed(index, .send_failed);
+pub fn failSend(self: *Engine, conn: Handle) bool {
+    const slot = self.liveView(conn) orelse return false;
+    if (slot.state == .closed) return false;
+    self.markClosed(conn.index, .send_failed);
+    return true;
 }
 
 pub fn memoryPlan(self: *const Engine) MemoryPlan {
@@ -270,7 +270,7 @@ pub fn dial(
         self.registry.unclaim(index);
         return error.OpenFailed;
     };
-    self.registry.addRoute(&slot.scid, index) catch {
+    self.registry.addRoute(index) catch {
         self.registry.retire(index);
         return error.TableFull;
     };
@@ -579,7 +579,7 @@ pub fn receive(
         self.registry.unclaim(index);
         return .dropped;
     };
-    self.registry.addRoute(&slot.scid, index) catch {
+    self.registry.addRoute(index) catch {
         self.registry.retire(index);
         return .dropped;
     };
@@ -996,7 +996,7 @@ fn markClosed(self: *Engine, index: u16, reason: CloseReason) void {
         self.registry.outbound -= 1;
     }
     slot.markClosed(reason);
-    self.registry.removeRoutesFor(index);
+    self.registry.removeRoute(index);
     const slots = self.registry.slots;
     if (slot.deferred_link.linked) self.registry.deferred.remove(slots, "deferred_link", index);
     if (slot.collect_link.linked) self.registry.collect.remove(slots, "collect_link", index);

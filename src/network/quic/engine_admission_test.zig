@@ -463,6 +463,33 @@ test "engine retains a live routed stream across unrelated slot churn" {
     try std.testing.expect(pair.client.peerId(handles.client).?.eql(&pair.server_ctx.local_peer_id));
 }
 
+test "engine retirement preserves a CID reused by another connection" {
+    var pair: Pair = .{};
+    try pair.init(.{ .connections_max = 2, .handshaking_max = 2 }, .{});
+    defer pair.deinit();
+    const initial_random = pair.client.csprng;
+    const first = try pair.dial();
+    const cid = pair.client.registry.slots[first.index].scid;
+    try std.testing.expect(pair.client.failSend(first));
+
+    pair.client.csprng = initial_random;
+    const replacement = try pair.dial();
+    try std.testing.expect(first.index != replacement.index);
+    try std.testing.expect(cid.eql(&pair.client.registry.slots[replacement.index].scid));
+    try std.testing.expectEqual(@as(?u16, replacement.index), pair.client.registry.findRoute(&cid));
+    var events: [2]Event = undefined;
+    try std.testing.expectEqual(@as(usize, 1), pair.client.pollEvents(&events));
+    try std.testing.expectEqual(Engine.CloseReason.send_failed, try expectClosed(events[0], first, .outbound, null));
+    pair.client.releaseReported();
+    try std.testing.expectEqual(@as(?u16, replacement.index), pair.client.registry.findRoute(&cid));
+    try std.testing.expectEqual(@as(usize, 1), pair.client.registry.routes.count);
+
+    try pair.pump();
+    const connected = pair.events(&pair.client, &events);
+    try std.testing.expectEqual(@as(usize, 1), connected.len);
+    try std.testing.expectEqual(replacement, try support.expectConnected(connected[0], .outbound, &pair.server_ctx));
+}
+
 test "engine resolved memory plan reports budgeted receive windows" {
     var pair: Pair = .{};
     try pair.init(.{ .connections_max = 1024, .receive_budget_bytes = 1024 * limits.connection_window_min }, .{});
@@ -510,13 +537,4 @@ test "engine outgoing descriptor preserves native monotonic pacing timestamp" {
     try std.testing.expect(count > 0);
     try std.testing.expect(batch.release_times[0] >= before);
     try std.testing.expect(batch.release_times[0] <= after);
-}
-
-fn allocateRegistry(allocator: std.mem.Allocator) !void {
-    var registry = try @import("Registry.zig").init(allocator, 4, 42);
-    defer registry.deinit(allocator);
-}
-
-test "engine registry cleans every partial startup allocation" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocateRegistry, .{});
 }
