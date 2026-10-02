@@ -1,7 +1,7 @@
 const gossip_test = @import("gossipsub/test_support.zig");
 const std = @import("std");
 const PeerManager = @import("peer_manager.zig").PeerManager;
-const DialIntent = @import("peers/dialing.zig").DialIntent;
+const DialIntent = @import("peers/dialing.zig").Dialing.DialIntent;
 const DiscoveryNeed = @import("peer_manager.zig").DiscoveryNeed;
 const support = @import("quic/test_support.zig");
 const t = @import("peers/types.zig");
@@ -192,7 +192,7 @@ fn failStatusRound(setup: *Setup, failure: rr.ReqResp.Failure) !void {
 }
 
 test "core native control disconnects only after consecutive health failures" {
-    const status = @intFromEnum(@import("peers/control.zig").HealthProbe.status);
+    const status = @intFromEnum(@import("peers/control.zig").Control.HealthProbe.status);
     const Case = struct { failure: rr.ReqResp.Failure, reason: ?t.DisconnectReason };
     for ([_]Case{
         .{ .failure = .stream_closed, .reason = .health_error },
@@ -239,7 +239,7 @@ test "core native control retries a failed probe on the turn its retry deadline 
     for (0..50) |_| try setup.step(0);
     const peer = setup.client.peer_manager.catalog.find(&setup.server.peerId()).?;
     const row = &setup.client.peer_manager.control.schedules[peer.index];
-    const status = @intFromEnum(@import("peers/control.zig").HealthProbe.status);
+    const status = @intFromEnum(@import("peers/control.zig").Control.HealthProbe.status);
     try failStatusRound(&setup, .timeout);
     try std.testing.expectEqual(@as(u8, 1), row.health_failures[status]);
     const retry = row.retry_ms;
@@ -265,7 +265,7 @@ test "core native control success clears a health failure streak" {
     defer setup.deinit();
     for (0..50) |_| try setup.step(0);
     const peer = setup.client.peer_manager.catalog.find(&setup.server.peerId()).?;
-    const status = @intFromEnum(@import("peers/control.zig").HealthProbe.status);
+    const status = @intFromEnum(@import("peers/control.zig").Control.HealthProbe.status);
     const limit = setup.client.peer_manager.control.options.health_failures_max;
     for (0..2) |_| {
         for (0..limit - 1) |_| {
@@ -580,7 +580,7 @@ test "core direct removal clears both pins and gossip score reads have no feedba
     try std.testing.expect(!snapshots[0].direct);
     const logical = setup.client.service.gossipsub.peers.find(&identity).?;
     try std.testing.expect(!setup.client.service.gossipsub.peers.rows[logical.index].direct);
-    var intents: [2]@import("peers/dialing.zig").DialIntent = undefined;
+    var intents: [2]@import("peers/dialing.zig").Dialing.DialIntent = undefined;
     try std.testing.expectEqual(
         @as(usize, 0),
         setup.client.peer_manager.dialIntents(setup.client.service.gossipsub, setup.pair.client, setup.pair.now, &intents),
@@ -757,6 +757,7 @@ test "core native dial expiry closes authenticated attempt before connected even
         try std.testing.expect(setup.pair.client.peerId(conn) != null);
         if (shutdown) setup.client.shutdown(setup.pair.now) else {
             setup.pair.advance(10_000);
+            setup.client.peer_manager.expireDials(setup.pair.client, setup.pair.now);
             _ = setup.client.peer_manager.dialIntents(setup.client.service.gossipsub, setup.pair.client, setup.pair.now, &output);
         }
         for (0..8) |_| {
@@ -912,7 +913,7 @@ fn refuseStatus(setup: *Setup) !void {
 fn expectRefusals(setup: *Setup, count: u64, rejections: u64) !void {
     const manager = &setup.client.peer_manager;
     try std.testing.expectEqual(@as(u16, 0), manager.catalog.connectedCount());
-    try std.testing.expectEqual(count, manager.control.counters.health_failures[@intFromEnum(@import("peers/control.zig").HealthProbe.status)]);
+    try std.testing.expectEqual(count, manager.control.counters.health_failures[@intFromEnum(@import("peers/control.zig").Control.HealthProbe.status)]);
     try std.testing.expectEqual(count, manager.control.counters.closed[@intFromEnum(t.DisconnectReason.health_error)]);
     try std.testing.expectEqual(rejections, manager.catalog.rejections[@intFromEnum(t.Rejection.early_close)]);
 }
@@ -999,7 +1000,7 @@ test "core refused Status inside the fork transition grace neither closes nor re
     try std.testing.expect(setup.pair.now.mono_ms < row.transition_until_ms);
     try std.testing.expect(manager.catalog.get(peer).?.disconnect_reason == null);
     try std.testing.expectEqual(@as(?t.Rejection, null), row.rejection);
-    try std.testing.expectEqual(@as(u64, 0), manager.control.counters.health_failures[@intFromEnum(@import("peers/control.zig").HealthProbe.status)]);
+    try std.testing.expectEqual(@as(u64, 0), manager.control.counters.health_failures[@intFromEnum(@import("peers/control.zig").Control.HealthProbe.status)]);
     // Past the grace, the same refusal closes and records.
     setup.pair.advance(row.transition_until_ms - setup.pair.now.mono_ms);
     try setup.step(1);
@@ -1556,7 +1557,7 @@ test "core native immediate close preserves direct membership and rejects stale 
         try std.testing.expectEqual(@as(usize, 1), try setup.client.peer_manager.directPeers(&identities));
         _ = setup.server.peer_manager.catalog.pollEvents(&closed);
         setup.pair.advance(60_000);
-        var intents: [1]@import("peers/dialing.zig").DialIntent = undefined;
+        var intents: [1]@import("peers/dialing.zig").Dialing.DialIntent = undefined;
         try std.testing.expectEqual(@as(usize, 1), setup.client.peer_manager.dialIntents(setup.client.service.gossipsub, setup.pair.client, setup.pair.now, &intents));
         const replacement = try setup.pair.client.dial(&intents[0].address, intents[0].peer, setup.pair.now);
         try std.testing.expect(setup.client.peer_manager.dialStarted(intents[0].token, replacement));

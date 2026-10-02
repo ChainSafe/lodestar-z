@@ -71,40 +71,7 @@ pub const Event = union(enum) {
         reason: DisconnectReason,
     },
 };
-pub const Admission = union(enum) {
-    admitted: struct { peer: PeerRef, displaced: ?Handle = null, fresh: bool },
-    duplicate,
-    pending,
-    banned,
-    cooldown,
-    capacity,
-};
-pub const AdmissionOptions = struct {
-    direction: Direction,
-    endpoint: Address,
-    now_ms: u64,
-    outbound_reserved: u16 = 0,
-    pending_dials: u16 = 0,
-    /// The authenticated identity owns a live selected dial commitment.
-    selected_dial: bool = false,
-    /// Derived from the same identity in a verified discovery record.
-    node_id: ?[32]u8 = null,
-};
-pub const Options = struct {
-    capacity: u16 = 512,
-    outbound_reserve: u16 = 32,
-    target_peers: u16 = 64,
-    max_peers: u16 = 96,
-    min_outbound: u16 = 16,
 
-    pub fn validate(self: Options) error{InvalidOptions}!void {
-        if (self.capacity == 0 or self.capacity > 4096 or
-            self.outbound_reserve >= self.capacity or self.max_peers == 0 or
-            self.max_peers > self.capacity or
-            self.max_peers > 256 or self.target_peers > self.max_peers or
-            self.min_outbound > self.target_peers) return error.InvalidOptions;
-    }
-};
 pub const Coverage = struct {
     attnets: u64 = 0,
     syncnets: u4 = 0,

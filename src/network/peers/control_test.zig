@@ -56,13 +56,11 @@ test "control start quota and cursor preserve order across Identify and RPC star
             try std.testing.expectEqual(expected.work[seen].index, due.index);
             try std.testing.expect(due.close == null and due.identify);
             try std.testing.expectEqual(expected.work[seen].request, if (due.request) |probe| probe.protocol else null);
-            control.identifyStarted(due, true, now);
             if (due.request != null) {
                 const request: rr.ReqResp.RequestHandle = .{ .index = @intCast(due.index), .generation = 1, .direction = .outbound };
-                control.requestStarted(due, request, now);
+                control.started(&catalog, due, true, request, now);
                 control.replied(&catalog, &.{ .peer = due.peer, .conn = due.conn, .request = request, .protocol = due.request.?.protocol, .cancelled = true }, .{ .done = .{ .request = request, .chunks = 1 } }, &local, now, 0);
-            }
-            control.rekey(&catalog, due.index);
+            } else control.started(&catalog, due, true, null, now);
         }
         try std.testing.expectEqual(expected.work.len, seen);
         try std.testing.expectEqual(expected.cursor, control.cursor);

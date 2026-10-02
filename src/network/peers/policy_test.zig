@@ -1,9 +1,10 @@
+const Catalog = @import("catalog.zig").Catalog;
 const std = @import("std");
 const p = @import("policy.zig");
 const t = @import("types.zig");
 const expect = std.testing.expect;
 const equal = std.testing.expectEqual;
-const options: t.Options = .{ .capacity = 8, .outbound_reserve = 1, .target_peers = 2, .max_peers = 4, .min_outbound = 1 };
+const options: Catalog.Options = .{ .capacity = 8, .outbound_reserve = 1, .target_peers = 2, .max_peers = 4, .min_outbound = 1 };
 
 test "peer policy separates sampling routes from custody service deficits" {
     var demand: t.Demand = .{};
@@ -37,7 +38,7 @@ test "peer policy protects scarce custodians and duties before broad publication
 
 test "peer policy prefers stable subscribers without denying temporary duty coverage" {
     var inputs = [_]p.Input{ .{ .coverage = .{ .attnets = 1 }, .stable = .{ .attnets = 1 } }, .{ .coverage = .{ .attnets = 1 } } };
-    const configured: t.Options = .{ .target_peers = 1, .max_peers = 3, .min_outbound = 0 };
+    const configured: Catalog.Options = .{ .target_peers = 1, .max_peers = 3, .min_outbound = 0 };
     var result = p.select(&inputs, &.{ .attnets = 1 }, configured, 2);
     try expect(result.retained.isSet(0));
     inputs[0].coverage = .{};
@@ -48,7 +49,7 @@ test "peer policy prefers stable subscribers without denying temporary duty cove
 }
 
 test "peer policy replacement cooldown preserves unmet deficits and independent count floors" {
-    const configured: t.Options = .{ .target_peers = 2, .max_peers = 3, .min_outbound = 0 };
+    const configured: Catalog.Options = .{ .target_peers = 2, .max_peers = 3, .min_outbound = 0 };
     const inputs = [_]p.Input{ .{}, .{} };
     const held = p.selectWithPacing(&inputs, &.{ .attnets = 1 }, configured, 1, false);
     try equal(@as(u16, 2), held.retained_count);
@@ -65,7 +66,7 @@ test "peer policy does not sacrifice satisfied duties to chase broad publication
     var demand: t.Demand = .{ .attnets = 3 };
     demand.group_targets[5] = 1;
     const inputs = [_]p.Input{ .{ .coverage = .{ .attnets = 1 } }, .{ .coverage = .{ .attnets = 2 } } };
-    const configured: t.Options = .{ .target_peers = 2, .max_peers = 3, .min_outbound = 0 };
+    const configured: Catalog.Options = .{ .target_peers = 2, .max_peers = 3, .min_outbound = 0 };
     const held = p.select(&inputs, &demand, configured, 1);
     try equal(@as(u16, 2), held.retained_count);
     try equal(@as(u16, 0), held.deficits.attestation);
@@ -78,7 +79,7 @@ test "peer policy does not sacrifice satisfied duties to chase broad publication
     try equal(@as(u16, 1), replace.dial_budget);
 }
 test "peer policy coverage cannot pin the connection ceiling with unmet demand" {
-    const configured: t.Options = .{ .target_peers = 2, .max_peers = 3, .min_outbound = 1 };
+    const configured: Catalog.Options = .{ .target_peers = 2, .max_peers = 3, .min_outbound = 1 };
     const inputs = [_]p.Input{
         .{ .coverage = .{ .attnets = 1 } },
         .{ .coverage = .{ .attnets = 2 } },
@@ -92,7 +93,7 @@ test "peer policy coverage cannot pin the connection ceiling with unmet demand" 
 }
 
 test "peer policy poor health precedes redundant advertised breadth" {
-    const configured: t.Options = .{ .target_peers = 2, .max_peers = 3, .min_outbound = 0 };
+    const configured: Catalog.Options = .{ .target_peers = 2, .max_peers = 3, .min_outbound = 0 };
     const inputs = [_]p.Input{
         .{ .coverage = .{ .attnets = 1 } },
         .{ .coverage = .{ .attnets = 2 } },
@@ -106,7 +107,7 @@ test "peer policy poor health precedes redundant advertised breadth" {
 }
 
 test "peer policy coverage trials retain the steady target while using headroom" {
-    const configured: t.Options = .{ .target_peers = 2, .max_peers = 3, .min_outbound = 0 };
+    const configured: Catalog.Options = .{ .target_peers = 2, .max_peers = 3, .min_outbound = 0 };
     const inputs = [_]p.Input{ .{ .coverage = .{ .attnets = 1 } }, .{ .coverage = .{ .attnets = 2 } } };
     const demand: t.Demand = .{ .attnets = 7 };
     const result = p.select(&inputs, &demand, configured, 1);
@@ -117,7 +118,7 @@ test "peer policy coverage trials retain the steady target while using headroom"
 }
 
 test "peer policy evaluates newcomers in headroom before pruning established peers" {
-    const configured: t.Options = .{ .target_peers = 2, .max_peers = 3, .min_outbound = 1 };
+    const configured: Catalog.Options = .{ .target_peers = 2, .max_peers = 3, .min_outbound = 1 };
     var inputs = [_]p.Input{
         .{ .coverage = .{ .attnets = 1 }, .outbound = true },
         .{ .coverage = .{ .attnets = 2 } },
@@ -137,7 +138,7 @@ test "peer policy evaluates newcomers in headroom before pruning established pee
 }
 
 test "peer policy ordinary negative scores preserve scarce coverage" {
-    const configured: t.Options = .{ .target_peers = 1, .max_peers = 3, .min_outbound = 0 };
+    const configured: Catalog.Options = .{ .target_peers = 1, .max_peers = 3, .min_outbound = 0 };
     const inputs = [_]p.Input{
         .{ .coverage = .{ .attnets = 1 }, .score = -0.5 },
         .{},
@@ -256,7 +257,7 @@ test "peer policy explicit group targets match Hoodi sampling deficits" {
         demand.group_targets[group] = 6;
         inputs[0].coverage.groups.set(group);
     }
-    const configured: t.Options = .{ .capacity = 256, .max_peers = 256, .target_peers = 1, .min_outbound = 0 };
+    const configured: Catalog.Options = .{ .capacity = 256, .max_peers = 256, .target_peers = 1, .min_outbound = 0 };
     const result = p.select(&inputs, &demand, configured, 1);
     try equal(@as(u16, 520), result.deficits.groups);
     try equal(@as(usize, 128), result.deficits.missing.groups.count());
@@ -281,7 +282,7 @@ test "peer policy group targets validate boundaries and saturate exactly" {
     demand.group_targets[127] = 1;
     try std.testing.expectError(error.InvalidDemand, demand.validate(&.{ .custody_groups = 64 }, 256));
     demand = .{ .group_targets = @splat(256) };
-    const configured: t.Options = .{ .capacity = 256, .max_peers = 256, .target_peers = 255, .min_outbound = 0 };
+    const configured: Catalog.Options = .{ .capacity = 256, .max_peers = 256, .target_peers = 255, .min_outbound = 0 };
     try equal(@as(u16, 32768), p.select(&.{}, &demand, configured, 1).deficits.groups);
     var inputs: [256]p.Input = @splat(.{ .evaluating = true });
     for (&inputs) |*input| input.coverage.groups.setRangeValue(.{ .start = 0, .end = 128 }, true);

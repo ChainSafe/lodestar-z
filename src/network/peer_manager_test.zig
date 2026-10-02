@@ -28,7 +28,7 @@ fn outbound(manager: *PeerManager, now: Now) !t.PeerRef {
     try manager.connect(&identity, &.{endpoint}, now);
     // Select the operator's already-admitted dial without running gossip or transport. The owner
     // still receives the real started/admitted transitions and records the original dial endpoint.
-    var intents: [1]@import("peers/dialing.zig").DialIntent = undefined;
+    var intents: [1]@import("peers/dialing.zig").Dialing.DialIntent = undefined;
     try std.testing.expectEqual(@as(usize, 1), manager.dialing.poll(&manager.catalog, now.mono_ms, &intents));
     try std.testing.expect(manager.dialStarted(intents[0].token, conn));
     return admit(manager, conn, .outbound, now);

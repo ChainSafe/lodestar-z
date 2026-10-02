@@ -1,12 +1,12 @@
-const Distribution = @import("peers.zig").Distribution;
-const catalog = @import("../peers/catalog.zig");
-const client = @import("../peers/client.zig");
-const prom = @import("registry.zig");
+const Population = @import("population.zig").Population;
+const catalog = @import("catalog.zig");
+const client = @import("client.zig");
+const prom = @import("../metrics/registry.zig");
 const std = @import("std");
 
 test "peer population metrics count direction, client and connection age" {
-    var snapshot: Distribution = .{};
-    var row: catalog.Row = .{ .connection = .{ .index = 0, .generation = 0 }, .connected_at_ms = 1000 };
+    var snapshot: Population = .{};
+    var row: catalog.Catalog.Row = .{ .connection = .{ .index = 0, .generation = 0 }, .connected_at_ms = 1000 };
     snapshot.observe(&row, .Unknown, 6000);
     row.direction = .outbound;
     snapshot.observe(&row, .Unknown, 500);
