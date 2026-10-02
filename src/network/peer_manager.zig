@@ -2,8 +2,6 @@ const std = @import("std");
 const capabilities = @import("capabilities.zig");
 const t = @import("peers/types.zig");
 const peers = @import("peers/root.zig");
-const control_mod = @import("peers/control.zig");
-const dial_mod = @import("peers/dialing.zig");
 const policy = peers.policy;
 const Engine = @import("quic/Engine.zig");
 const gossip = @import("gossipsub/root.zig");
@@ -16,12 +14,12 @@ pub const coverage_reconcile_interval_ms = 1_000;
 pub const replacement_interval_ms = 5_000;
 
 pub const Options = struct {
-    peers: t.Options = .{},
-    control: control_mod.Options = .{},
-    dial: dial_mod.Options,
+    peers: peers.Catalog.Options = .{},
+    control: peers.Control.Options = .{},
+    dial: peers.Dialing.Options,
     metadata_freshness_ms: u64 = 60_000,
 };
-pub const DialIntent = dial_mod.DialIntent;
+pub const DialIntent = peers.Dialing.DialIntent;
 pub const DiscoveryNeed = struct {
     general: bool = false,
     attnets: [8]u8 = @splat(0),
@@ -29,7 +27,7 @@ pub const DiscoveryNeed = struct {
     custody: bool = false,
 
     /// Query lifetime bounds discovery work independently of the desired peer coverage.
-    pub fn query(self: DiscoveryNeed, expires_ms: u64) peers.discovery.Demand {
+    pub fn query(self: DiscoveryNeed, expires_ms: u64) peers.Discovery.Demand {
         return .{ .general = self.general, .attnets = self.attnets, .syncnets = self.syncnets, .custody = self.custody, .expires_ms = expires_ms };
     }
 };
@@ -47,8 +45,8 @@ const SelectionRevision = struct {
 pub const PeerManager = struct {
     allocator: std.mem.Allocator,
     catalog: peers.Catalog,
-    control: control_mod.Control,
-    dialing: dial_mod.Dialing,
+    control: peers.Control,
+    dialing: peers.Dialing,
     local_identity: t.PeerId,
     local: t.LocalState,
     snapshot_scratch: []t.Snapshot,
@@ -84,8 +82,8 @@ pub const PeerManager = struct {
         if (options.peers.target_peers >= options.peers.max_peers or
             options.dial.outbound_reserved > options.peers.max_peers - options.peers.target_peers) return error.InvalidOptions;
         if (options.metadata_freshness_ms == 0 or options.metadata_freshness_ms > 86_400_000) return error.InvalidOptions;
-        try control_mod.Control.validateOptions(options.control);
-        try dial_mod.Dialing.validateOptions(options.dial);
+        try peers.Control.validateOptions(options.control);
+        try peers.Dialing.validateOptions(options.dial);
     }
 
     pub fn init(
@@ -101,9 +99,9 @@ pub const PeerManager = struct {
         try validateOptions(options);
         var catalog = try peers.Catalog.initWithIntents(a, options.peers, options.dial.capacity, connections_max, options.dial.seed);
         errdefer catalog.deinit(a);
-        var control = try control_mod.Control.init(a, options.control, @intCast(catalog.rows.len));
+        var control = try peers.Control.init(a, options.control, @intCast(catalog.rows.len));
         errdefer control.deinit(a);
-        const dialing = try dial_mod.Dialing.init(options.dial);
+        const dialing = try peers.Dialing.init(options.dial);
         const scratch = try a.alloc(t.Snapshot, options.peers.capacity);
         errdefer a.free(scratch);
         const policy_scratch = try a.alloc(policy.Input, options.peers.max_peers);
@@ -137,7 +135,7 @@ pub const PeerManager = struct {
         event: *const @FieldType(Engine.Event, "connected"),
         endpoint: t.Address,
         now: Now,
-    ) ?@FieldType(t.Admission, "admitted") {
+    ) ?@FieldType(peers.Catalog.Admission, "admitted") {
         const identity = event.peer_id;
         const decision = self.catalog.admit(
             &identity,
@@ -199,8 +197,8 @@ pub const PeerManager = struct {
         const peer = self.catalog.findConnection(closed.conn) orelse return null;
         if (goodbye) |code| self.control.receivedGoodbye(&self.catalog, peer, closed.conn, code, true);
         if (closed.reason == .peer_closed) self.control.remoteClosed(peer, closed.conn);
-        const snapshot = self.catalog.get(peer).?;
-        const reason = snapshot.disconnect_reason orelse if (goodbye != null) t.DisconnectReason.remote_goodbye else .transport_closed;
+        const row = self.catalog.rowFor(peer).?;
+        const reason = row.closing_reason orelse if (goodbye != null) t.DisconnectReason.remote_goodbye else .transport_closed;
         return self.retireConnection(peer, closed.conn, reason, now);
     }
     /// Completes policy retirement before returning the connection whose I/O the caller releases.
@@ -215,16 +213,14 @@ pub const PeerManager = struct {
     }
     /// Starts one bounded qualification/health maintenance pass. Its outcomes must be reported
     /// before taking more work so the scheduling quota, resource reservation and deadlines agree.
-    pub fn beginControl(self: *PeerManager, now: Now) control_mod.Control.Pass {
+    pub fn beginControl(self: *PeerManager, now: Now) peers.Control.Pass {
         return self.control.beginMaintenance(now);
     }
-    pub fn nextControl(self: *PeerManager, pass: *control_mod.Control.Pass, now: Now) ?control_mod.Control.Due {
+    pub fn nextControl(self: *PeerManager, pass: *peers.Control.Pass, now: Now) ?peers.Control.Due {
         return self.control.nextDue(pass, &self.catalog, &self.local, now);
     }
-    pub fn controlStarted(self: *PeerManager, due: *const control_mod.Control.Due, identify_started: bool, request: ?@import("reqresp/root.zig").ReqResp.RequestHandle, now: Now) void {
-        if (due.identify) self.control.identifyStarted(due, identify_started, now);
-        if (due.request != null) self.control.requestStarted(due, request, now);
-        self.control.rekey(&self.catalog, due.index);
+    pub fn controlStarted(self: *PeerManager, due: *const peers.Control.Due, identify_started: bool, request: ?@import("reqresp/root.zig").ReqResp.RequestHandle, now: Now) void {
+        self.control.started(&self.catalog, due, identify_started, request, now);
     }
     pub fn controlRequested(self: *PeerManager, request: *const @FieldType(@import("reqresp/root.zig").ReqResp.Event, "request"), now: Now, slot: u64) ?t.PeerRef {
         const peer = self.catalog.findConnection(request.peer) orelse return null;
@@ -243,7 +239,7 @@ pub const PeerManager = struct {
     }
     /// Revalidates the connection at this bounded cursor after a fork change. The caller cancels
     /// the returned request; its reservation survives until the protocol's terminal event.
-    pub fn revalidateConnection(self: *PeerManager, index: usize, now: Now) ?control_mod.Control.Connection {
+    pub fn revalidateConnection(self: *PeerManager, index: usize, now: Now) ?peers.Control.Connection {
         return self.control.revalidate(&self.catalog, index, self.local.fork, now);
     }
     fn catalogDeadline(self: *PeerManager, now_ms: u64) ?u64 {
@@ -311,7 +307,7 @@ pub const PeerManager = struct {
     pub const DiscoveryIntake = struct { accepted: u16 = 0, refused: u16 = 0 };
     /// Requires Discovery.step output or equivalent authenticated-source scope authorization.
     pub fn discoveredBatch(self: *PeerManager, gossipsub: *gossip.Gossipsub, candidates: []const peers.enr.Candidate, now: Now) DiscoveryIntake {
-        std.debug.assert(candidates.len <= 16);
+        std.debug.assert(candidates.len <= peers.Discovery.candidates_per_step);
         self.reconcile(gossipsub, now);
         var result: DiscoveryIntake = .{};
         for (candidates) |*candidate| {
@@ -365,16 +361,18 @@ pub const PeerManager = struct {
         local_subscriptions: *const gossip.topic_policy.Subnets,
         now: Now,
     ) policy.Input {
+        const revalidation = self.control.revalidationDeadline(snapshot.peer, conn, now);
+        const gossip_score = self.gossipScore(gossipsub, snapshot.peer, now) orelse 0;
         var input: policy.Input = .{
             .peer = snapshot.peer,
             .direct = snapshot.direct,
             .outbound = snapshot.direction == .outbound,
             .relevant = snapshot.relevant,
-            .revalidating = self.control.revalidationDeadline(snapshot.peer, conn, now) != null,
+            .revalidating = revalidation != null,
             .ready = false,
             .score = peers.reputation.selectionScore(
                 snapshot.score,
-                self.gossipScore(gossipsub, snapshot.peer, now) orelse 0,
+                gossip_score,
                 gossipsub.graylistThreshold(),
             ),
         };
@@ -392,7 +390,7 @@ pub const PeerManager = struct {
             if (snapshot.relevant and !snapshot.direct and input.reject == null)
                 input.reject = .gossip_unavailable;
         }
-        if (self.control.revalidationDeadline(snapshot.peer, conn, now)) |deadline|
+        if (revalidation) |deadline|
             self.selection_deadline = @min(self.selection_deadline orelse deadline, deadline);
         if ((!snapshot.relevant and !input.revalidating) or input.reject != null) return input;
         const subscriptions = gossipsub.coverageSubscriptions(conn, self.local.fork.digest, local_subscriptions, now);
@@ -407,7 +405,7 @@ pub const PeerManager = struct {
             input.stable = coverage.stable(&input.coverage, &metadata, snapshot.sampling_groups);
         }
         if (self.local.fork.fork.gte(.fulu) and snapshot.score >= peers.reputation.prune_score and
-            (gossipsub.scoreSnapshot(conn, now) orelse 0) >= 0)
+            gossip_score >= 0)
             input.coverage.custody_groups = snapshot.custody_groups orelse .initEmpty();
         return input;
     }
@@ -470,7 +468,7 @@ pub const PeerManager = struct {
         addresses: []const t.Address,
         now: Now,
     ) !void {
-        return self.connectUntil(identity, addresses, now, now.mono_ms +| dial_mod.connect_timeout_ms);
+        return self.connectUntil(identity, addresses, now, now.mono_ms +| peers.Dialing.connect_timeout_ms);
     }
     pub fn connectUntil(self: *PeerManager, identity: *const t.PeerId, addresses: []const t.Address, now: Now, deadline_ms: u64) !void {
         if (self.stopped) return error.Stopped;
@@ -479,8 +477,26 @@ pub const PeerManager = struct {
         self.selection_revision = null;
     }
     pub fn cancelConnect(self: *PeerManager, engine: *Engine, identity: *const t.PeerId, now: Now) void {
-        self.dialing.cancelConnect(&self.catalog, engine, identity, now.mono_ms);
+        if (self.dialing.cancelConnect(&self.catalog, identity, now.mono_ms)) |conn| closeDial(engine, conn);
         self.selection_revision = null;
+    }
+    pub fn expireDials(self: *PeerManager, engine: *Engine, now: Now) void {
+        var close: [peers.Dialing.attempts_max]t.Handle = undefined;
+        const count = self.dialing.expire(&self.catalog, now.mono_ms, &close);
+        for (close[0..count]) |conn| closeDial(engine, conn);
+    }
+    pub fn shutdownDials(self: *PeerManager, engine: *Engine, now: Now) void {
+        var close: [peers.Dialing.attempts_max]t.Handle = undefined;
+        const count = self.dialing.shutdown(&self.catalog, now.mono_ms, &close);
+        for (close[0..count]) |conn| closeDial(engine, conn);
+    }
+    fn closeDial(engine: *Engine, conn: t.Handle) void {
+        if (engine.peerId(conn) != null) _ = engine.close(conn, 0) else _ = engine.abandon(conn);
+    }
+    pub fn advanceCustody(self: *PeerManager, now: Now) void {
+        var budget: u16 = peers.custody.hashes_per_turn;
+        self.custody_pending = self.catalog.advanceCustody(&self.local.fork, now.mono_ms, self.metadata_freshness_ms, &budget);
+        self.counters.custody_hashes +|= peers.custody.hashes_per_turn - budget;
     }
     /// Returns the peer's current connection, which the owner marks direct in gossip.
     pub fn addDirectPeer(
@@ -508,12 +524,12 @@ pub const PeerManager = struct {
         const peer = self.catalog.find(identity) orelse return false;
         if (!self.catalog.rowFor(peer).?.direct) return false;
         _ = self.catalog.setDirect(peer, false);
-        dial_mod.Dialing.releaseIfUnused(&self.catalog, peer);
+        peers.Dialing.releaseIfUnused(&self.catalog, peer);
         self.selection_revision = null;
         return true;
     }
     pub fn disconnect(self: *PeerManager, peer: t.PeerRef, reason: t.DisconnectReason, now: Now) bool {
-        const snapshot = self.catalog.get(peer) orelse return false;
+        const snapshot = self.catalog.rowFor(peer) orelse return false;
         return self.control.disconnect(
             &self.catalog,
             peer,
@@ -522,15 +538,15 @@ pub const PeerManager = struct {
             now,
         );
     }
+    /// Run `expireDials` before admitting transport events and selecting dials at this time.
     pub fn dialIntents(
         self: *PeerManager,
         gossipsub: *gossip.Gossipsub,
         engine: *Engine,
         now: Now,
-        out: []dial_mod.DialIntent,
+        out: []peers.Dialing.DialIntent,
     ) usize {
         if (self.stopped) return 0;
-        self.dialing.expire(&self.catalog, engine, now.mono_ms);
         self.reconcile(gossipsub, now);
         self.transportProgress(engine);
         const count = self.dialing.poll(&self.catalog, now.mono_ms, out[0..@min(out.len, self.dialRoom())]);
@@ -543,13 +559,13 @@ pub const PeerManager = struct {
         }
         return count;
     }
-    pub fn dialStarted(self: *PeerManager, token: dial_mod.Token, conn: t.Handle) bool {
+    pub fn dialStarted(self: *PeerManager, token: peers.Dialing.Token, conn: t.Handle) bool {
         return self.dialing.dialStarted(token, conn);
     }
-    pub fn dialDeferred(self: *PeerManager, token: dial_mod.Token, now: Now) bool {
+    pub fn dialDeferred(self: *PeerManager, token: peers.Dialing.Token, now: Now) bool {
         return self.dialing.dialDeferred(&self.catalog, token, now.mono_ms);
     }
-    pub fn dialFailed(self: *PeerManager, token: dial_mod.Token, now: Now) bool {
+    pub fn dialFailed(self: *PeerManager, token: peers.Dialing.Token, now: Now) bool {
         return self.dialing.dialFailed(&self.catalog, token, now.mono_ms);
     }
     pub fn snapshots(self: *const PeerManager, out: []t.Snapshot) usize {
@@ -580,7 +596,7 @@ pub const PeerManager = struct {
         return result;
     }
     pub fn gossipScore(self: *PeerManager, gossipsub: *gossip.Gossipsub, peer: t.PeerRef, now: Now) ?f64 {
-        const snapshot = self.catalog.get(peer) orelse return null;
+        const snapshot = self.catalog.rowFor(peer) orelse return null;
         return gossipsub.scoreSnapshot(
             snapshot.connection orelse return null,
             now,

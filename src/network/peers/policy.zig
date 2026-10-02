@@ -1,3 +1,4 @@
+const Catalog = @import("catalog.zig").Catalog;
 const std = @import("std");
 const t = @import("types.zig");
 const reputation = @import("reputation.zig");
@@ -147,7 +148,7 @@ fn removal(
     inputs: []const Input,
     result: *const Result,
     demand: *const t.Demand,
-    options: t.Options,
+    options: Catalog.Options,
     ties: []const u32,
 ) ?u16 {
     const scarce = result.coverage.scarce(demand);
@@ -190,11 +191,11 @@ fn removal(
 }
 
 /// Inputs are stable copied values, bounded by the managed connection ceiling.
-pub fn select(inputs: []const Input, demand: *const t.Demand, options: t.Options, seed: u64) Result {
+pub fn select(inputs: []const Input, demand: *const t.Demand, options: Catalog.Options, seed: u64) Result {
     return selectWithPacing(inputs, demand, options, seed, true);
 }
 
-pub fn selectWithPacing(inputs: []const Input, demand: *const t.Demand, options: t.Options, seed: u64, allow_trials: bool) Result {
+pub fn selectWithPacing(inputs: []const Input, demand: *const t.Demand, options: Catalog.Options, seed: u64, allow_trials: bool) Result {
     std.debug.assert(inputs.len <= 256);
     std.debug.assert(options.target_peers <= options.max_peers);
     var result: Result = .{};

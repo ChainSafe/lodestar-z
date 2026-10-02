@@ -1,7 +1,6 @@
 const std = @import("std");
 const network = @import("../network_core.zig");
-const peers = @import("peers.zig");
-const client = @import("../peers/client.zig");
+const Population = @import("../peers/population.zig").Population;
 
 /// Borrowed only on the network owner while it is not advancing protocol state.
 pub const Context = struct {
@@ -11,9 +10,7 @@ pub const Context = struct {
     expired_executing: usize = 0,
     /// The host's bridge measurements, copied under its runtime mutex. Null renders zeros.
     bridge: ?*const @import("bridge.zig").Snapshot = null,
-    population: peers.Distribution = .{},
-    peer_count: usize = 0,
-    relevant: usize = 0,
+    population: Population = .{},
     /// Kernel drop totals per family of the QUIC and discovery UDP sockets. Reading them extends
     /// each socket's 32-bit kernel count, so `init` takes the owner mutably.
     socket_drops: [2][2]?u64 = @splat(@splat(null)),
@@ -23,12 +20,7 @@ pub const Context = struct {
         result.socket_drops[0] = owner.transport.sockets.drops();
         if (owner.discovery) |discovery| result.socket_drops[1] = discovery.transport.sockets.drops();
         if (!running) return result;
-        for (owner.peer_manager.catalog.rows) |*row| {
-            if (row.connection == null) continue;
-            result.peer_count += 1;
-            result.relevant += @intFromBool(row.status != null);
-            result.population.observe(row, client.fromIdentify(&row.identify), now.mono_ms);
-        }
+        result.population = .collect(&owner.peer_manager.catalog, now.mono_ms);
         return result;
     }
 

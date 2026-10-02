@@ -6,77 +6,6 @@ const adapter = @import("enr.zig");
 const types = @import("types.zig");
 const advertisement = @import("../advertisement.zig");
 
-pub const ForkSchedule = struct {
-    fulu_scheduled: bool = false,
-    next_version: [4]u8 = @splat(0),
-    next_epoch: u64 = std.math.maxInt(u64),
-    next_digest: [4]u8 = @splat(0),
-};
-/// Lookup queries touch many one-off nodes. Idle expiry keeps the discv5 session store at recent
-/// contacts instead of pinning it at capacity; routing-table peers are revalidated every 300 s.
-pub const discovery_session_capacity: usize = 2_048;
-pub const discovery_session_idle_timeout_ms: u64 = 10 * 60_000;
-pub const Config = struct {
-    advertisement: ?advertisement.Hints = null,
-    fixed: advertisement.Endpoints = .{},
-    bind: @import("udp").Sockets.Bindings,
-    sequence: u64 = 1,
-    bootstrap: []const d.identity.enr.Record = &.{},
-    engine: d.Engine.Config = .{ .session_capacity = discovery_session_capacity, .session_idle_timeout_ms = discovery_session_idle_timeout_ms },
-    coordinator: Options = .{},
-};
-
-pub const Error = d.Transport.Error || d.Maintenance.Error || d.Lookup.Error || adapter.Error || std.mem.Allocator.Error || error{ Stopped, InvalidOptions, InvalidDemand, InvalidBootstrap, TooManyBootstraps };
-pub const bootstrap_max: usize = 64;
-pub const queries_max = 128;
-pub const candidates_per_step = d.types.findnode_result_max + 1;
-pub const Rejection = enum { missing_eth2, incompatible_fork, invalid_enr, no_quic, endpoint_family, endpoint_scope, demand, output_capacity };
-pub const rejection_count = @typeInfo(Rejection).@"enum".fields.len;
-pub const datagram_rejection_count = @typeInfo(d.types.RejectReason).@"enum".fields.len;
-/// Foreground lookups started and candidates handed to peer selection.
-pub const Counters = struct {
-    lookups_started: u64 = 0,
-    candidates_published: u64 = 0,
-};
-pub const Options = struct {
-    quic_mode: d.types.Mode = .dual,
-    query_interval_ms: u64 = 1_000,
-    local_retry_ms: u64 = 1_000,
-    maintenance: d.Maintenance.Config = .{},
-    observations: [2]d.AddressVotes.Policy = .{ .{}, .{} },
-};
-pub const Demand = struct {
-    general: bool = false,
-    attnets: [8]u8 = @splat(0),
-    syncnets: u8 = 0,
-    custody: bool = false,
-    expires_ms: u64 = std.math.maxInt(u64),
-
-    fn active(self: *const Demand, now_ms: u64) bool {
-        return now_ms < self.expires_ms and (self.general or self.custody or self.syncnets != 0 or !std.mem.allEqual(u8, &self.attnets, 0));
-    }
-    fn matches(self: *const Demand, candidate: *const adapter.Candidate, context: *const types.ForkContext) bool {
-        if (self.general or (self.custody and (candidate.custody_group_count != null or context.custody_requirement > 0))) return true;
-        if (candidate.syncnets) |bits| if (bits & self.syncnets != 0) return true;
-        if (candidate.attnets) |bits| {
-            for (bits, self.attnets) |actual, wanted| if (actual & wanted != 0) return true;
-        }
-        return false;
-    }
-};
-pub const Result = struct {
-    learned: [2]?d.types.Address = .{ null, null },
-    candidates: usize = 0,
-    started: u8 = 0,
-    expired: u16 = 0,
-    rejected: u16 = 0,
-    dropped: u16 = 0,
-    unowned: u16 = 0,
-    /// Datagrams dequeued from the sockets, admitted or not. One step dequeues at most one.
-    datagrams: u16 = 0,
-    failure: ?Error = null,
-    failure_stage: d.Transport.FailureStage = .coordinator,
-};
 const Storage = struct {
     observations: d.AddressVotes,
     candidates: d.Lookup.Candidates,
@@ -84,6 +13,77 @@ const Storage = struct {
 };
 
 pub const Discovery = struct {
+    pub const ForkSchedule = struct {
+        fulu_scheduled: bool = false,
+        next_version: [4]u8 = @splat(0),
+        next_epoch: u64 = std.math.maxInt(u64),
+        next_digest: [4]u8 = @splat(0),
+    };
+    /// Lookup queries touch many one-off nodes. Idle expiry keeps the discv5 session store at recent
+    /// contacts instead of pinning it at capacity; routing-table peers are revalidated every 300 s.
+    pub const discovery_session_capacity: usize = 2_048;
+    pub const discovery_session_idle_timeout_ms: u64 = 10 * 60_000;
+    pub const Config = struct {
+        advertisement: ?advertisement.Hints = null,
+        fixed: advertisement.Endpoints = .{},
+        bind: @import("udp").Sockets.Bindings,
+        sequence: u64 = 1,
+        bootstrap: []const d.identity.enr.Record = &.{},
+        engine: d.Engine.Config = .{ .session_capacity = discovery_session_capacity, .session_idle_timeout_ms = discovery_session_idle_timeout_ms },
+        coordinator: Options = .{},
+    };
+    pub const Error = d.Transport.Error || d.Maintenance.Error || d.Lookup.Error || adapter.Error || std.mem.Allocator.Error || error{ Stopped, InvalidOptions, InvalidDemand, InvalidBootstrap, TooManyBootstraps };
+    pub const bootstrap_max: usize = 64;
+    pub const queries_max = 128;
+    pub const candidates_per_step = d.types.findnode_result_max + 1;
+    pub const Rejection = enum { missing_eth2, incompatible_fork, invalid_enr, no_quic, endpoint_family, endpoint_scope, demand, output_capacity };
+    pub const rejection_count = @typeInfo(Rejection).@"enum".fields.len;
+    pub const datagram_rejection_count = @typeInfo(d.types.RejectReason).@"enum".fields.len;
+    /// Foreground lookups started and candidates handed to peer selection.
+    pub const Counters = struct {
+        lookups_started: u64 = 0,
+        candidates_published: u64 = 0,
+    };
+    pub const Options = struct {
+        quic_mode: d.types.Mode = .dual,
+        query_interval_ms: u64 = 1_000,
+        local_retry_ms: u64 = 1_000,
+        maintenance: d.Maintenance.Config = .{},
+        observations: [2]d.AddressVotes.Policy = .{ .{}, .{} },
+    };
+    pub const Demand = struct {
+        general: bool = false,
+        attnets: [8]u8 = @splat(0),
+        syncnets: u8 = 0,
+        custody: bool = false,
+        expires_ms: u64 = std.math.maxInt(u64),
+
+        fn active(self: *const Demand, now_ms: u64) bool {
+            return now_ms < self.expires_ms and (self.general or self.custody or self.syncnets != 0 or !std.mem.allEqual(u8, &self.attnets, 0));
+        }
+        fn matches(self: *const Demand, candidate: *const adapter.Candidate, context: *const types.ForkContext) bool {
+            if (self.general or (self.custody and (candidate.custody_group_count != null or context.custody_requirement > 0))) return true;
+            if (candidate.syncnets) |bits| if (bits & self.syncnets != 0) return true;
+            if (candidate.attnets) |bits| {
+                for (bits, self.attnets) |actual, wanted| if (actual & wanted != 0) return true;
+            }
+            return false;
+        }
+    };
+    pub const Result = struct {
+        learned: [2]?d.types.Address = .{ null, null },
+        candidates: usize = 0,
+        started: u8 = 0,
+        expired: u16 = 0,
+        rejected: u16 = 0,
+        dropped: u16 = 0,
+        unowned: u16 = 0,
+        /// Datagrams dequeued from the sockets, admitted or not. One step dequeues at most one.
+        datagrams: u16 = 0,
+        failure: ?Error = null,
+        failure_stage: d.Transport.FailureStage = .coordinator,
+    };
+
     allocator: std.mem.Allocator,
     transport: d.Transport,
     endpoints: advertisement.Endpoints = .{},
@@ -473,7 +473,7 @@ pub const Discovery = struct {
     }
 };
 
-pub fn advertisementFor(local: *const types.LocalState, schedule: ForkSchedule, endpoints: advertisement.Endpoints) adapter.LocalAdvertisement {
+pub fn advertisementFor(local: *const types.LocalState, schedule: Discovery.ForkSchedule, endpoints: advertisement.Endpoints) adapter.LocalAdvertisement {
     return .{
         .fork = .{ .digest = local.fork.digest, .next_version = schedule.next_version, .next_epoch = schedule.next_epoch },
         .next_fork_digest = if (schedule.fulu_scheduled or local.fork.fork.gte(.fulu)) schedule.next_digest else null,
@@ -514,4 +514,5 @@ pub fn relayAllowed(source: d.types.Address, candidate: types.Address) bool {
 
 test {
     _ = @import("discovery_test.zig");
+    _ = @import("discovery_socket_test.zig");
 }

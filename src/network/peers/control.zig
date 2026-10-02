@@ -8,21 +8,8 @@ const client = @import("client.zig");
 const goodbye = @import("goodbye.zig");
 const DeadlineHeap = @import("../deadline_heap.zig").DeadlineHeap;
 const assert = std.debug.assert;
-pub const Options = struct {
-    starts_per_turn_max: u16 = 8,
-    inbound_status_grace_ms: u64 = 15_000,
-    status_interval_ms: u64 = 300_000,
-    ping_inbound_ms: u64 = 15_000,
-    ping_outbound_ms: u64 = 20_000,
-    status_transition_grace_ms: u64 = 10_000,
-    local_retry_ms: u64 = 1_000,
-    /// Consecutive failures of one probe that disconnect the peer.
-    health_failures_max: u8 = 3,
-    failure_retry_ms: u64 = 5_000,
-};
-/// Control probes whose failures count toward a health disconnect.
-pub const HealthProbe = enum { status, metadata, ping };
-const health_probe_count = @typeInfo(HealthProbe).@"enum".fields.len;
+
+const health_probe_count = @typeInfo(Control.HealthProbe).@"enum".fields.len;
 const Schedule = struct {
     /// A started request keeps its catalog index reserved through cancellation and replacement.
     /// Only its matching terminal event releases this token; retiring a connection does not.
@@ -54,6 +41,21 @@ const Schedule = struct {
 /// rejection attribution and disconnect decisions. Started request tokens and their terminal
 /// outcomes keep schedules current; the owner executes the requests and closes it chooses.
 pub const Control = struct {
+    pub const Options = struct {
+        starts_per_turn_max: u16 = 8,
+        inbound_status_grace_ms: u64 = 15_000,
+        status_interval_ms: u64 = 300_000,
+        ping_inbound_ms: u64 = 15_000,
+        ping_outbound_ms: u64 = 20_000,
+        status_transition_grace_ms: u64 = 10_000,
+        local_retry_ms: u64 = 1_000,
+        /// Consecutive failures of one probe that disconnect the peer.
+        health_failures_max: u8 = 3,
+        failure_retry_ms: u64 = 5_000,
+    };
+    /// Control probes whose failures count toward a health disconnect.
+    pub const HealthProbe = enum { status, metadata, ping };
+
     schedules: []Schedule,
     /// Connected schedules keyed on the earliest time `decide` acts on them, in ms.
     deadlines: DeadlineHeap,
@@ -165,7 +167,7 @@ pub const Control = struct {
         return dueAt(row, current.status != null, row.pending_request != null);
     }
     /// The catalog row a schedule acts for, when the catalog still holds it on that connection.
-    fn connectedRow(catalog: *const Catalog, peer: t.PeerRef, conn: t.Handle) ?*const @import("catalog.zig").Row {
+    fn connectedRow(catalog: *const Catalog, peer: t.PeerRef, conn: t.Handle) ?*const Catalog.Row {
         const current = catalog.rowFor(peer) orelse return null;
         if (current.established_slot == null or !std.meta.eql(current.connection, conn)) return null;
         return current;
@@ -200,7 +202,7 @@ pub const Control = struct {
             } else if (reason != .shutdown and reason != .remote_goodbye) {
                 _ = catalog.cooldown(peer, conn, now.mono_ms, goodbye.cooldownMs(goodbyeReason(reason)));
             }
-            const snapshot = catalog.get(peer).?;
+            const snapshot = catalog.rowFor(peer).?;
             const agent = client.agent(&snapshot.identify);
             std.log.scoped(.network_peers).debug("peer_disconnect_scheduled peer={f} connection={d}:{d} reason={s} grace_ms=2000 agent={f}", .{ @import("../logging.zig").peer(&snapshot.identity), conn.index, conn.generation, @tagName(reason), std.json.fmt(agent, .{}) });
             row.closing = .{ .reason = reason, .deadline_ms = now.mono_ms +| 2_000 };
@@ -233,7 +235,7 @@ pub const Control = struct {
         const row = &self.schedules[index];
         const peer = row.peer orelse return null;
         if (row.closing != null) return null;
-        const relevant = (catalog.get(peer) orelse return null).relevant;
+        const relevant = (connectedRow(catalog, peer, row.conn) orelse return null).status != null;
         if (!catalog.invalidateStatus(peer, row.conn)) return null;
         row.previous_digest = previous.digest;
         row.previous_protocol = wire.statusProtocol(previous);
@@ -343,15 +345,20 @@ pub const Control = struct {
             return (a + self.len - self.start) % self.len < (b + self.len - self.start) % self.len;
         }
     };
-    pub fn identifyStarted(self: *Control, due: *const Due, started: bool, now: Now) void {
+    pub fn started(self: *Control, catalog: *const Catalog, due: *const Due, identify_started: bool, request: ?rr.ReqResp.RequestHandle, now: Now) void {
+        if (due.identify) self.identifyStarted(due, identify_started, now);
+        if (due.request != null) self.requestStarted(due, request, now);
+        self.rekey(catalog, due.index);
+    }
+    fn identifyStarted(self: *Control, due: *const Due, succeeded: bool, now: Now) void {
         const row = self.schedule(due.peer, due.conn) orelse return;
-        if (!started) {
+        if (!succeeded) {
             row.identify_retry_ms = now.mono_ms +| 1_000;
             return;
         }
         row.identify_state = .started;
     }
-    pub fn requestStarted(self: *Control, due: *const Due, request: ?rr.ReqResp.RequestHandle, now: Now) void {
+    fn requestStarted(self: *Control, due: *const Due, request: ?rr.ReqResp.RequestHandle, now: Now) void {
         const row = self.schedule(due.peer, due.conn) orelse return;
         std.debug.assert(row.pending_request == null);
         if (request == null) {
@@ -375,12 +382,12 @@ pub const Control = struct {
             switch (completion.outcome) {
                 .success => |*metadata| {
                     if (catalog.updateIdentify(completion.peer, completion.conn, metadata)) {
-                        const snapshot = catalog.get(completion.peer).?;
+                        const snapshot = catalog.rowFor(completion.peer).?;
                         std.log.scoped(.network_peers).debug("identify_completed peer={f} connection={d}:{d} agent={f}", .{ @import("../logging.zig").peer(&snapshot.identity), completion.conn.index, completion.conn.generation, std.json.fmt(client.agent(&snapshot.identify), .{}) });
                     }
                 },
                 .failed => |failure| {
-                    const snapshot = catalog.get(completion.peer).?;
+                    const snapshot = catalog.rowFor(completion.peer).?;
                     std.log.scoped(.network_peers).debug("identify_failed peer={f} connection={d}:{d} reason={s}", .{ @import("../logging.zig").peer(&snapshot.identity), completion.conn.index, completion.conn.generation, @tagName(failure) });
                 },
             }
@@ -389,7 +396,7 @@ pub const Control = struct {
 
     pub fn receivedGoodbye(self: *Control, catalog: *Catalog, peer: t.PeerRef, conn: t.Handle, code: u64, during_close: bool) void {
         const reason = goodbye.reason(code);
-        const snapshot = catalog.get(peer).?;
+        const snapshot = catalog.rowFor(peer).?;
         self.counters.events.goodbyeReceived(code);
         std.log.scoped(.network_peers).debug("peer_goodbye_received peer={f} connection={d}:{d} code={d} reason={s} during_close={any} agent={f}", .{ @import("../logging.zig").peer(&snapshot.identity), conn.index, conn.generation, code, @tagName(reason), during_close, std.json.fmt(client.agent(&snapshot.identify), .{}) });
         const row = self.schedule(peer, conn) orelse return;
@@ -450,7 +457,7 @@ pub const Control = struct {
             std.mem.eql(u8, &status.fork_digest, &row.previous_digest) and
             (protocol != wire.statusProtocol(local.fork) or !std.mem.eql(u8, &status.fork_digest, &local.fork.digest)))
         {
-            if (!(catalog.get(peer) orelse return).relevant)
+            if ((connectedRow(catalog, peer, conn) orelse return).status == null)
                 row.retry_ms = @min(row.transition_until_ms, now.mono_ms +| self.options.local_retry_ms);
             return;
         }
@@ -460,7 +467,7 @@ pub const Control = struct {
         }
         if (!catalog.updateStatus(peer, conn, &status, now.mono_ms)) return;
         row.status_due_ms = now.mono_ms +| self.options.status_interval_ms;
-        if (catalog.get(peer).?.metadata == null) row.metadata_due_ms = row.metadata_due_ms orelse now.mono_ms;
+        if (connectedRow(catalog, peer, conn).?.metadata == null) row.metadata_due_ms = row.metadata_due_ms orelse now.mono_ms;
         applicationReady(catalog, row, peer, conn);
     }
     /// Marks the connection ready once it holds a valid relevant Status and a valid Metadata.
@@ -480,8 +487,8 @@ pub const Control = struct {
         now: Now,
     ) void {
         const row = self.schedule(peer, conn) orelse return;
-        const snapshot = catalog.get(peer) orelse return;
-        if (!snapshot.relevant or row.closing != null) return;
+        const snapshot = connectedRow(catalog, peer, conn) orelse return;
+        if (snapshot.status == null or row.closing != null) return;
         if (snapshot.metadata) |metadata| {
             if (seq < metadata.seq_number) return;
             if (seq == metadata.seq_number) {
@@ -597,7 +604,7 @@ pub const Control = struct {
                 const metadata = wire.decodeMetadata(op.protocol, bytes, local.fork) catch |err| {
                     if (err == error.InvalidLength or err == error.InvalidEncoding or err == error.InvalidSyncnets)
                         _ = catalog.report(op.peer, .low_tolerance, now.mono_ms);
-                    if (catalog.get(op.peer)) |snapshot| {
+                    if (connectedRow(catalog, op.peer, op.conn)) |snapshot| {
                         std.log.scoped(.network_peers).debug("metadata_rejected peer={f} connection={d}:{d} method={s} reason={s} bytes={d}", .{
                             @import("../logging.zig").peer(&snapshot.identity),
                             op.conn.index,
@@ -651,14 +658,14 @@ pub const Control = struct {
                     row.evidence = .proven;
                     catalog.clearHealthStrikes(op.peer, op.conn);
                 }
-                const snapshot = catalog.get(op.peer) orelse return;
+                const snapshot = connectedRow(catalog, op.peer, op.conn) orelse return;
                 if (probe != .status) row.ping_due_ms = now.mono_ms +| self.pingInterval(snapshot.direction);
             },
             else => unreachable,
         }
     }
 
-    fn healthFailure(self: *Control, catalog: *Catalog, row: *Schedule, op: *const wire.ControlReply, probe: HealthProbe, failure: rr.ReqResp.Failure, now: Now) void {
+    fn healthFailure(self: *Control, catalog: *Catalog, row: *Schedule, op: *const wire.ControlReply, probe: Control.HealthProbe, failure: rr.ReqResp.Failure, now: Now) void {
         const failures = &row.health_failures[@intFromEnum(probe)];
         failures.* +|= 1;
         const at_limit = failures.* >= self.options.health_failures_max;
@@ -672,7 +679,7 @@ pub const Control = struct {
     }
     /// Counts a failed probe once and logs it with the probe's streak and the close it causes:
     /// none, the streak's limit, or an immediate one for a refused probe, which skips the streak.
-    fn countHealthFailure(self: *Control, row: *const Schedule, op: *const wire.ControlReply, probe: HealthProbe, failure: rr.ReqResp.Failure, closes: enum { none, at_limit, immediate }) void {
+    fn countHealthFailure(self: *Control, row: *const Schedule, op: *const wire.ControlReply, probe: Control.HealthProbe, failure: rr.ReqResp.Failure, closes: enum { none, at_limit, immediate }) void {
         self.counters.health_failures[@intFromEnum(probe)] +|= 1;
         std.log.scoped(.network_peers).debug("peer_health_failure connection={d}:{d} probe={s} reason={s} failures={d} limit={d} close={s}", .{ op.conn.index, op.conn.generation, @tagName(probe), @tagName(failure), row.health_failures[@intFromEnum(probe)], self.options.health_failures_max, @tagName(closes) });
     }
@@ -765,7 +772,7 @@ fn decide(row: *const Schedule, relevant: bool, active_request: bool, now: u64) 
     return decision;
 }
 
-fn healthProbe(protocol: rr.Protocol) ?HealthProbe {
+fn healthProbe(protocol: rr.Protocol) ?Control.HealthProbe {
     return switch (protocol) {
         .status_v1, .status_v2 => .status,
         .metadata_v1, .metadata_v2, .metadata_v3 => .metadata,

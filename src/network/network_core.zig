@@ -20,8 +20,8 @@ pub const discovery_batch_max: u32 = @import("constants.zig").receive_batch_max;
 pub const controls_per_turn = 32;
 pub const identify_per_turn = 8;
 pub const dials_per_turn = 4;
-pub const candidates_per_turn = peers.discovery.candidates_per_step;
-pub const ForkSchedule = peers.discovery.ForkSchedule;
+pub const candidates_per_turn = peers.Discovery.candidates_per_step;
+pub const ForkSchedule = peers.Discovery.ForkSchedule;
 const advertisement = @import("advertisement.zig");
 pub const AdvertisementEndpoints = advertisement.Endpoints;
 pub const AdvertisementHints = advertisement.Hints;
@@ -37,9 +37,9 @@ pub const LocalIntent = struct {
     subscriptions: []const gossip.local_intent.Boundary,
     slot: u64 = 0,
 };
-pub const discovery_session_capacity = peers.discovery.discovery_session_capacity;
-pub const discovery_session_idle_timeout_ms = peers.discovery.discovery_session_idle_timeout_ms;
-pub const DiscoveryOptions = peers.discovery.Config;
+pub const discovery_session_capacity = peers.Discovery.discovery_session_capacity;
+pub const discovery_session_idle_timeout_ms = peers.Discovery.discovery_session_idle_timeout_ms;
+pub const DiscoveryOptions = peers.Discovery.Config;
 pub const Startup = struct {
     host: *const @import("wire/keys.zig").KeyPair,
     bind: @import("udp").Sockets.Bindings,
@@ -76,7 +76,7 @@ pub const Outputs = struct {
     peers: []t.Event = &.{},
     application: []rr.ReqResp.Event = &.{},
 };
-pub const OperationalError = transport_mod.StepError || transport_mod.DialError || peers.discovery.Error || wait.Error;
+pub const OperationalError = transport_mod.StepError || transport_mod.DialError || peers.Discovery.Error || wait.Error;
 pub const Counts = struct { peers: usize, application: usize };
 pub const Result = struct {
     counts: Counts = .{ .peers = 0, .application = 0 },
@@ -214,7 +214,7 @@ pub const NetworkCore = struct {
             for (pm.snapshot_scratch[0..count]) |snapshot| if (snapshot.connection) |conn| {
                 self.closeConnection(snapshot.peer, conn, .shutdown, now);
             };
-            pm.dialing.shutdown(&pm.catalog, &self.transport.engine, now.mono_ms);
+            pm.shutdownDials(&self.transport.engine, now);
         }
         if (self.discovery) |owned| owned.cancel();
         self.transport.engine.shutdownAll();
@@ -639,7 +639,7 @@ pub const NetworkCore = struct {
             .peers = pm.catalog.pollEvents(outputs.peers),
             .application = 0,
         };
-        if (!pm.quiescing) pm.dialing.expire(&pm.catalog, quic, now.mono_ms);
+        if (!pm.quiescing) pm.expireDials(quic, now);
         for (events) |*event| self.transportEvent(event, now);
         const controls = &self.controls;
         const identify_results = &self.identify_results;
@@ -661,9 +661,7 @@ pub const NetworkCore = struct {
         self.controlEvents(controls[0..counts.control], now);
         self.maintainControl(now);
         if (pm.quiescing) return .{ .peers = pm.catalog.pollEvents(outputs.peers), .application = counts.application };
-        var budget: u16 = peers.custody.hashes_per_turn;
-        pm.custody_pending = pm.catalog.advanceCustody(&pm.local.fork, now.mono_ms, pm.metadata_freshness_ms, &budget);
-        pm.counters.custody_hashes +|= peers.custody.hashes_per_turn - budget;
+        pm.advanceCustody(now);
         pm.reconcile(self.service.gossipsub, now);
         pm.transportProgress(quic);
         return .{
@@ -794,7 +792,7 @@ pub const NetworkCore = struct {
         const candidates = &owned.candidates;
         var eligible: [2]bool = if (result.readiness.failure == null) result.readiness.discovery else @splat(true);
         for (0..discovery_batch_max) |_| {
-            const progress = owned.stepReady(io, tick.mono_ms, &eligible, candidates) catch |err| peers.discovery.Result{ .failure = err };
+            const progress = owned.stepReady(io, tick.mono_ms, &eligible, candidates) catch |err| peers.Discovery.Result{ .failure = err };
             const endpoints = owned.learnedEndpoints(progress.learned);
             if (!std.meta.eql(endpoints, owned.endpoints)) {
                 _ = self.updateLocalWithEndpoints(&self.peer_manager.local, self.schedule, endpoints, tick) catch |err| {
@@ -829,7 +827,7 @@ fn validateSchedule(local: *const t.LocalState, schedule: ForkSchedule) !void {
     if (schedule.next_epoch == std.math.maxInt(u64) and !std.mem.allEqual(u8, &schedule.next_digest, 0)) return error.InvalidSchedule;
     if ((schedule.fulu_scheduled or local.fork.fork.gte(.fulu)) and local.metadata.custody_group_count == null) return error.MissingCustodyAdvertisement;
 }
-const advertisementFor = peers.discovery.advertisementFor;
+const advertisementFor = @import("peers/discovery.zig").advertisementFor;
 
 test {
     _ = @import("network_core_test.zig");

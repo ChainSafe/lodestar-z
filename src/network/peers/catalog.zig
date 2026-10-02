@@ -11,63 +11,96 @@ const Now = @import("../types.zig").Now;
 const DeadlineHeap = @import("../deadline_heap.zig").DeadlineHeap;
 const assert = std.debug.assert;
 
-pub const history_retention_ms: u64 = 600_000;
-pub const hint_freshness_ms: u64 = 300_000;
-
-pub const Intent = struct {
-    automatic: bool = false,
-    selected: bool = true,
-    priority: u2 = 0,
-    hints: ?enr.Hints = null,
-    hints_at_ms: u64 = 0,
-    addresses: [2]t.Address = undefined,
-    address_count: u8 = 0,
-    address_index: u8 = 0,
-    manual_until_ms: u64 = 0,
-    eligible_at_ms: u64 = 0,
-    history_until_ms: u64 = 0,
-    failures: u8 = 0,
-    /// Replay queued this automatic intent from a remembered record; its first attempt is preferred.
-    replay: enum { none, untried, tried } = .none,
-};
-pub const Row = struct {
-    free_link: lists.Link = .{},
-    established_slot: ?u16 = null,
-    intent: Intent = .{},
-    attempt: ?u8 = null,
-    identify: ?@import("../identify/root.zig").Metadata = null,
-    custody_work: ?custody.SamplingDerivation = null,
-    custody_context: ?t.ForkContext = null,
-    generation: u64 = 0,
-    occupied: bool = false,
-    identity: t.PeerId = undefined,
-    node_id: ?[32]u8 = null,
-    connection: ?t.Handle = null,
-    closing_reason: ?t.DisconnectReason = null,
-    direction: t.Direction = .inbound,
-    endpoint: t.Address = .unspecified,
-    /// The endpoint the connection was dialed to, kept after its attempt retires; null for an
-    /// inbound connection.
-    dialed: ?t.Address = null,
-    /// Where an automatic dial's candidate came from, until the connection is counted as kept.
-    origin: ?remembered.Origin = null,
-    status: ?t.Status = null,
-    metadata: ?t.Metadata = null,
-    status_at_ms: u64 = 0,
-    metadata_at_ms: u64 = 0,
-    connected_at_ms: u64 = 0,
-    direct: bool = false,
-    reputation: reputation.State = .{},
-    published: bool = false,
-    pending_update: bool = false,
-    pending_close: ?struct { connection: t.Handle, reason: t.DisconnectReason } = null,
-};
-
 pub const Catalog = struct {
+    pub const history_retention_ms: u64 = 600_000;
+    pub const hint_freshness_ms: u64 = 300_000;
+    pub const Intent = struct {
+        automatic: bool = false,
+        selected: bool = true,
+        priority: u2 = 0,
+        hints: ?enr.Hints = null,
+        hints_at_ms: u64 = 0,
+        addresses: [2]t.Address = undefined,
+        address_count: u8 = 0,
+        address_index: u8 = 0,
+        manual_until_ms: u64 = 0,
+        eligible_at_ms: u64 = 0,
+        history_until_ms: u64 = 0,
+        failures: u8 = 0,
+        /// Replay queued this automatic intent from a remembered record; its first attempt is preferred.
+        replay: enum { none, untried, tried } = .none,
+    };
+    pub const Row = struct {
+        free_link: lists.Link = .{},
+        established_slot: ?u16 = null,
+        intent: Intent = .{},
+        attempt: ?u8 = null,
+        identify: ?@import("../identify/root.zig").Metadata = null,
+        custody_work: ?custody.SamplingDerivation = null,
+        custody_context: ?t.ForkContext = null,
+        generation: u64 = 0,
+        occupied: bool = false,
+        identity: t.PeerId = undefined,
+        node_id: ?[32]u8 = null,
+        connection: ?t.Handle = null,
+        closing_reason: ?t.DisconnectReason = null,
+        direction: t.Direction = .inbound,
+        endpoint: t.Address = .unspecified,
+        /// The endpoint the connection was dialed to, kept after its attempt retires; null for an
+        /// inbound connection.
+        dialed: ?t.Address = null,
+        /// Where an automatic dial's candidate came from, until the connection is counted as kept.
+        origin: ?remembered.Origin = null,
+        status: ?t.Status = null,
+        metadata: ?t.Metadata = null,
+        status_at_ms: u64 = 0,
+        metadata_at_ms: u64 = 0,
+        connected_at_ms: u64 = 0,
+        direct: bool = false,
+        reputation: reputation.State = .{},
+        published: bool = false,
+        pending_update: bool = false,
+        pending_close: ?struct { connection: t.Handle, reason: t.DisconnectReason } = null,
+    };
+    pub const Admission = union(enum) {
+        admitted: struct { peer: t.PeerRef, displaced: ?t.Handle = null, fresh: bool },
+        duplicate,
+        pending,
+        banned,
+        cooldown,
+        capacity,
+    };
+    pub const AdmissionOptions = struct {
+        direction: t.Direction,
+        endpoint: t.Address,
+        now_ms: u64,
+        outbound_reserved: u16 = 0,
+        pending_dials: u16 = 0,
+        /// The authenticated identity owns a live selected dial commitment.
+        selected_dial: bool = false,
+        /// Derived from the same identity in a verified discovery record.
+        node_id: ?[32]u8 = null,
+    };
+    pub const Options = struct {
+        capacity: u16 = 512,
+        outbound_reserve: u16 = 32,
+        target_peers: u16 = 64,
+        max_peers: u16 = 96,
+        min_outbound: u16 = 16,
+
+        pub fn validate(self: Options) error{InvalidOptions}!void {
+            if (self.capacity == 0 or self.capacity > 4096 or
+                self.outbound_reserve >= self.capacity or self.max_peers == 0 or
+                self.max_peers > self.capacity or
+                self.max_peers > 256 or self.target_peers > self.max_peers or
+                self.min_outbound > self.target_peers) return error.InvalidOptions;
+        }
+    };
+
     rows: []Row,
     by_identity: identity_index.Index,
     by_connection: []?u16,
-    options: t.Options,
+    options: Options,
     intent_capacity: u16,
     intent_count: u16 = 0,
     intents: std.DynamicBitSetUnmanaged,
@@ -113,11 +146,11 @@ pub const Catalog = struct {
         scratch: []u32,
     };
 
-    pub fn init(a: std.mem.Allocator, options: t.Options, connections_max: u16, seed: u64) !Catalog {
+    pub fn init(a: std.mem.Allocator, options: Options, connections_max: u16, seed: u64) !Catalog {
         return initWithIntents(a, options, 0, connections_max, seed);
     }
 
-    pub fn initWithIntents(a: std.mem.Allocator, options: t.Options, intent_capacity: u16, connections_max: u16, seed: u64) !Catalog {
+    pub fn initWithIntents(a: std.mem.Allocator, options: Options, intent_capacity: u16, connections_max: u16, seed: u64) !Catalog {
         try options.validate();
         if (intent_capacity > 4096) return error.InvalidOptions;
         if (connections_max == 0 or connections_max > @import("../quic/limits.zig").connections_max_ceiling) return error.InvalidOptions;
@@ -392,8 +425,8 @@ pub const Catalog = struct {
         identity: *const t.PeerId,
         local: *const t.PeerId,
         conn: t.Handle,
-        options: *const t.AdmissionOptions,
-    ) t.Admission {
+        options: *const AdmissionOptions,
+    ) Admission {
         std.debug.assert(conn.index < self.by_connection.len);
         if (identity.eql(local)) return .duplicate;
         if (self.find(identity)) |ref| {
@@ -444,7 +477,7 @@ pub const Catalog = struct {
         return .{ .admitted = .{ .peer = ref, .fresh = true } };
     }
 
-    fn admissionRoom(self: *const Catalog, direct: bool, options: *const t.AdmissionOptions) bool {
+    fn admissionRoom(self: *const Catalog, direct: bool, options: *const AdmissionOptions) bool {
         const remaining = self.options.max_peers -| self.connectedCount();
         if (remaining <= options.pending_dials) return false;
         return options.direction == .outbound or direct or options.selected_dial or remaining > options.outbound_reserved;
@@ -555,7 +588,7 @@ pub const Catalog = struct {
         return victim;
     }
 
-    fn connect(row: *Row, conn: t.Handle, options: *const t.AdmissionOptions) void {
+    fn connect(row: *Row, conn: t.Handle, options: *const AdmissionOptions) void {
         std.log.scoped(.network_peers).debug("peer_admitted peer={f} connection={d}:{d} direction={s}", .{ @import("../logging.zig").peer(&row.identity), conn.index, conn.generation, @tagName(options.direction) });
         row.identify = null;
         row.custody_work = null;

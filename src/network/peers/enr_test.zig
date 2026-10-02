@@ -5,6 +5,11 @@ const types = @import("types.zig");
 const vectors = @import("enr_vectors.zig").vectors;
 const context = types.ForkContext{ .digest = .{ 1, 2, 3, 4 }, .custody_groups = 128 };
 
+const support = @import("enr_test_support.zig");
+const signingKey = support.signingKey;
+const advertisement = support.advertisement;
+const changedRecord = support.changedRecord;
+
 test "peer ENR independent signed Ethereum fields and same-key identity" {
     inline for (vectors, 0..) |fixture, index| {
         var record = try d.identity.enr.Record.initText(fixture.text);
@@ -31,23 +36,6 @@ test "peer ENR independent signed Ethereum fields and same-key identity" {
             try std.testing.expect(candidate.peer.eql(&expected));
         }
     }
-}
-
-fn signingKey() !d.identity.crypto.KeyPair {
-    return d.identity.crypto.keyPairFromSecret(&(.{0} ** 31 ++ .{1}));
-}
-
-fn advertisement() adapter.LocalAdvertisement {
-    return .{
-        .fork = .{ .digest = .{ 1, 2, 3, 4 }, .next_version = .{ 5, 0, 0, 0 }, .next_epoch = std.math.maxInt(u64) },
-        .ip4 = .{ 127, 0, 0, 1 },
-        .udp = 9000,
-        .quic = 9001,
-        .next_fork_digest = .{ 9, 10, 11, 12 },
-        .attnets = .{ 1, 0, 0, 0, 0, 0, 0, 128 },
-        .syncnets = 5,
-        .custody_group_count = 4,
-    };
 }
 
 test "peer ENR mapped IPv6 projection preserves signed content and IPv4 fallback" {
@@ -123,78 +111,6 @@ test "peer ENR builder matches independent bytes and refuses invalid local prepa
     const decoded = try adapter.decode(&absent, &context);
     try std.testing.expect(decoded.attnets == null and decoded.syncnets == null and decoded.custody_group_count == null and decoded.next_fork_digest == null);
     try std.testing.expectEqual(@as(u8, 0), decoded.address_count);
-}
-
-fn changedRecord(name: []const u8, replacement: ?d.identity.enr.Field.Value) !d.identity.enr.Record {
-    const record = try d.identity.enr.Record.initText(vectors[0].text);
-    const key = try signingKey();
-    var fields: [11]d.identity.enr.Field = undefined;
-    var count: usize = 0;
-    for ([_][]const u8{ "attnets", "cgc", "eth2", "id", "ip", "nfd", "quic", "secp256k1", "syncnets", "udp" }) |field_name| {
-        const value = if (std.mem.eql(u8, name, field_name)) replacement orelse continue else d.identity.enr.Field.Value{ .raw = (try record.field(field_name)).? };
-        fields[count] = .{ .key = field_name, .value = value };
-        count += 1;
-    }
-    if (std.mem.eql(u8, name, "x-test")) {
-        fields[count] = .{ .key = name, .value = replacement.? };
-        count += 1;
-    }
-    return d.identity.enr.Record.createFields(&key, 8, fields[0..count]);
-}
-
-test "peer ENR canonical fingerprint rejects equal sequence changes outside dial hints" {
-    const key = try signingKey();
-    const original = try adapter.build(&key, 8, &advertisement(), &context);
-    const candidate = try adapter.decode(&original, &context);
-    const Queue = @import("dialing.zig").Dialing;
-    var queue = try Queue.init(.{ .capacity = 1, .concurrent_max = 1, .seed = 1 });
-    var catalog = try @import("catalog.zig").Catalog.initWithIntents(std.testing.allocator, .{}, 1, 1024, 1);
-    defer catalog.deinit(std.testing.allocator);
-    try queue.enqueueDiscovered(&catalog, &candidate, &context, &.{}, 0);
-    @memset(catalog.rows[0].intent.addresses[catalog.rows[0].intent.address_count..], .unspecified);
-    const before = catalog.rows[0];
-    for ([_]struct { name: []const u8, value: d.identity.enr.Field.Value }{
-        .{ .name = "udp", .value = .{ .uint = 9002 } },
-        .{ .name = "x-test", .value = .{ .bytes = "extra signed content" } },
-    }) |change| {
-        const changed = try changedRecord(change.name, change.value);
-        const conflicting = try adapter.decode(&changed, &context);
-        try std.testing.expectEqual(candidate.sequence, conflicting.sequence);
-        try std.testing.expectEqualDeep(candidate.addresses, conflicting.addresses);
-        try std.testing.expect(!std.mem.eql(u8, &candidate.record_hash, &conflicting.record_hash));
-        try std.testing.expectError(error.StaleRecord, queue.enqueueDiscovered(&catalog, &conflicting, &context, &.{}, 100));
-        try std.testing.expectEqualDeep(before, catalog.rows[0]);
-    }
-    try queue.enqueueDiscovered(&catalog, &candidate, &context, &.{}, 200);
-    try std.testing.expectEqual(@as(u64, 200), catalog.rows[0].intent.hints_at_ms);
-}
-
-test "peer ENR zero custody remains dialable for subnet demand without custody credit" {
-    const record = try d.identity.enr.Record.initText(vectors[5].text);
-    const candidate = try adapter.decode(&record, &context);
-    const Catalog = @import("catalog.zig").Catalog;
-    var catalog = try Catalog.initWithIntents(std.testing.allocator, .{}, 1, 1024, 1);
-    defer catalog.deinit(std.testing.allocator);
-    var queue = try @import("dialing.zig").Dialing.init(.{ .capacity = 1, .concurrent_max = 1, .seed = 1 });
-    const wanted: types.Coverage = .{ .syncnets = 1 };
-    var fork = context;
-    fork.fork = .fulu;
-    fork.custody_requirement = 4;
-    try queue.enqueueDiscovered(&catalog, &candidate, &fork, &wanted, 0);
-    var budget: u16 = 64;
-    try std.testing.expect(!catalog.advanceCustody(&fork, 0, 60_000, &budget));
-    try std.testing.expectEqual(@as(u16, 64), budget);
-    const row = catalog.rowFor(catalog.find(&candidate.peer).?).?;
-    try std.testing.expectEqual(@as(?u64, 0), row.intent.hints.?.custody_group_count);
-    const coverage = Catalog.candidateCoverage(row, &fork, 0);
-    try std.testing.expectEqual(@as(u64, 0x8000000000000001), coverage.attnets);
-    try std.testing.expectEqual(@as(u4, 5), coverage.syncnets);
-    try std.testing.expectEqual(@as(usize, 0), coverage.groups.count());
-    try std.testing.expectEqual(@as(usize, 0), coverage.custody_groups.count());
-    queue.configureSelection(&catalog, &wanted, false, &fork, 0);
-    var out: [1]@import("dialing.zig").DialIntent = undefined;
-    try std.testing.expectEqual(@as(usize, 1), queue.poll(&catalog, 0, &out));
-    try std.testing.expect(out[0].peer.eql(&candidate.peer));
 }
 
 test "peer ENR strict known optional field shapes integer bounds and missing mandatory field" {

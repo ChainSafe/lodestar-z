@@ -7,8 +7,7 @@ const udp = @import("udp");
 const rr = @import("reqresp/ReqResp.zig");
 const gossip = @import("gossipsub/options.zig");
 const c = @import("gossipsub/constants.zig");
-const peers = @import("peers/types.zig");
-const dial = @import("peers/dialing.zig");
+const peers = @import("peers/root.zig");
 const router = @import("router.zig");
 
 pub const Profile = enum { small, beacon_node };
@@ -25,23 +24,23 @@ pub const Request = struct {
     limits: ?Engine.Limits = null,
     work_limits: transport.WorkLimits = .{},
     socket_buffers: SocketBuffers = .{},
-    peers: ?peers.Options = null,
-    dial: ?dial.Options = null,
+    peers: ?peers.Catalog.Options = null,
+    dial: ?peers.Dialing.Options = null,
     reqresp: ReqRespOverrides = .{},
     gossip: GossipOverrides = .{},
     router: RouterOverrides = .{},
     identify: IdentifyOverrides = .{},
     application_requests_max: ?u16 = null,
     admission_policy: @import("reqresp/request_policy.zig").Config,
-    control: ?@import("peers/control.zig").Options = null,
+    control: ?peers.Control.Options = null,
     byte_limit: ?usize = null,
 };
 /// NetworkCore's peer policy and protocol options.
 pub const Core = struct {
-    peers: peers.Options = .{},
+    peers: peers.Catalog.Options = .{},
     service: service.Options,
-    control: @import("peers/control.zig").Options = .{},
-    dial: dial.Options,
+    control: peers.Control.Options = .{},
+    dial: peers.Dialing.Options,
     metadata_freshness_ms: u64 = 60_000,
 
     /// The part of the options peer policy owns.
@@ -69,7 +68,7 @@ pub fn resolve(request: Request) !Resolved {
         .dialing_max = if (small) 4 else 32,
         .receive_budget_bytes = if (small) 64 * 1024 * 1024 else 512 * 1024 * 1024,
     };
-    const peer_options: peers.Options = request.peers orelse .{
+    const peer_options: peers.Catalog.Options = request.peers orelse .{
         .capacity = if (small) 64 else 512,
         .outbound_reserve = if (small) 4 else 32,
         .target_peers = if (small) 8 else 64,
@@ -78,13 +77,13 @@ pub fn resolve(request: Request) !Resolved {
     };
     try peer_options.validate();
     if (peer_options.target_peers >= peer_options.max_peers) return error.InvalidOptions;
-    const dial_options = request.dial orelse dial.Options{
+    const dial_options = request.dial orelse peers.Dialing.Options{
         .capacity = if (small) 32 else 256,
         .concurrent_max = limits.dialing_max,
         .outbound_reserved = @min(outbound_reserved_max, limits.dialing_max, peer_options.max_peers - peer_options.target_peers),
         .seed = request.seed,
     };
-    try dial.Dialing.validateOptions(dial_options);
+    try peers.Dialing.validateOptions(dial_options);
     if (dial_options.concurrent_max != limits.dialing_max) return error.InvalidOptions;
     limits.outbound_reserved = dial_options.outbound_reserved;
     limits.outbound_max = limits.connections_max;

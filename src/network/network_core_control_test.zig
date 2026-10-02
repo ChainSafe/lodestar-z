@@ -1,6 +1,6 @@
 const gossip_test = @import("gossipsub/test_support.zig");
 const std = @import("std");
-const DialIntent = @import("peers/dialing.zig").DialIntent;
+const DialIntent = @import("peers/dialing.zig").Dialing.DialIntent;
 const localState = @import("network_core_test_support.zig").localState;
 const Setup = @import("network_core_test_support.zig").Setup;
 const t = @import("peers/types.zig");

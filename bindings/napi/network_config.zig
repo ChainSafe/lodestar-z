@@ -5,7 +5,7 @@ const d = @import("discv5");
 const Value = napi.Value;
 const t = n.peers.types;
 const enr_max = d.wire.constants.enr_size_max;
-const bootstrap_max = n.peers.discovery.bootstrap_max;
+const bootstrap_max = n.peers.Discovery.bootstrap_max;
 
 pub const Config = struct {
     profile: n.configuration.Profile,
