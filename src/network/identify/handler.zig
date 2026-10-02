@@ -6,67 +6,6 @@ const types = @import("../types.zig");
 const PeerRef = types.PeerRef;
 const Outbox = @import("../stream_io.zig").Outbox;
 
-pub const Limits = struct {
-    inbound_max: u16 = 2,
-    outbound_max: u16 = 2,
-
-    pub fn validate(self: Limits) error{InvalidLimits}!void {
-        if (self.inbound_max == 0 or self.inbound_max > 64 or self.outbound_max == 0 or self.outbound_max > 64) return error.InvalidLimits;
-    }
-};
-pub const Options = struct {
-    inbound_max: u16 = 2,
-    outbound_max: u16 = 2,
-    agent: []const u8 = "",
-    protocol_version: []const u8 = "ipfs/0.1.0",
-    addresses: []const types.Address = &.{},
-
-    pub fn limits(self: Options) Limits {
-        return .{ .inbound_max = self.inbound_max, .outbound_max = self.outbound_max };
-    }
-
-    /// Resolve the complete local value at startup. Explicit addresses replace the usable
-    /// bound fallback, and the result owns its text, key and encoded addresses.
-    pub fn makeLocal(self: Options, peer: *const @import("../wire/peer_id.zig").PeerId, bound: *const [2]?types.Address) InitError!codec.Local {
-        try Handler.validate(self);
-        if (self.addresses.len > 0) return codec.Local.init(peer, self.agent, self.protocol_version, self.addresses);
-        var addresses: [2]types.Address = undefined;
-        var count: usize = 0;
-        for (bound) |address| if (address) |value| {
-            if (!value.isUsable()) continue;
-            addresses[count] = value;
-            count += 1;
-        };
-        return codec.Local.init(peer, self.agent, self.protocol_version, addresses[0..count]);
-    }
-};
-pub const Failure = enum { negotiation, malformed, timeout, reset, transport, shutdown };
-pub const Result = struct {
-    peer: PeerRef,
-    conn: Engine.Handle,
-    outcome: union(enum) { success: codec.Metadata, failed: Failure },
-};
-pub const InitError = std.mem.Allocator.Error || codec.Error || error{InvalidLimits};
-pub const StartError = routing.Error || error{ PeerLimit, IdentifyCapacity, Stopped };
-const deadline_ms = 5_000;
-const Inbound = struct {
-    stream: ?Engine.StreamHandle = null,
-    deadline: u64 = 0,
-    ready: bool = false,
-    bytes: [codec.frame_max + 2]u8 = undefined,
-    outbox: Outbox = .{},
-};
-const Outbound = struct {
-    stream: ?Engine.StreamHandle = null,
-    peer: PeerRef = undefined,
-    deadline: u64 = 0,
-    ready: bool = false,
-    phase: enum { negotiating, reading, terminal } = .negotiating,
-    sent_fin: bool = false,
-    decoder: codec.Decoder = undefined,
-    result: Result = undefined,
-};
-
 pub const Handler = struct {
     allocator: std.mem.Allocator,
     inbound: []Inbound,
@@ -75,15 +14,149 @@ pub const Handler = struct {
     stopped: bool = false,
     delivery_cursor: usize = 0,
 
-    pub fn validate(options: Options) InitError!void {
-        try options.limits().validate();
-        _ = try codec.Text(256).init(options.agent);
-        _ = try codec.Text(64).init(options.protocol_version);
-        if (options.addresses.len > 8) return error.OccurrenceLimit;
-        var check: codec.Local = undefined;
-        check.addresses = @splat(.{});
-        try check.setAddresses(options.addresses);
-    }
+    pub const Limits = struct {
+        inbound_max: u16 = 2,
+        outbound_max: u16 = 2,
+
+        pub fn validate(self: Limits) error{InvalidLimits}!void {
+            if (self.inbound_max == 0 or self.inbound_max > 64 or self.outbound_max == 0 or self.outbound_max > 64) return error.InvalidLimits;
+        }
+    };
+    pub const Options = struct {
+        inbound_max: u16 = 2,
+        outbound_max: u16 = 2,
+        agent: []const u8 = "",
+        protocol_version: []const u8 = "ipfs/0.1.0",
+        addresses: []const types.Address = &.{},
+
+        pub const Error = codec.Error || error{InvalidLimits};
+
+        pub fn validate(self: Options) Error!void {
+            try self.limits().validate();
+            try codec.Local.validate(self.agent, self.protocol_version, self.addresses);
+        }
+
+        pub fn limits(self: Options) Limits {
+            return .{ .inbound_max = self.inbound_max, .outbound_max = self.outbound_max };
+        }
+
+        /// Resolve the complete local value at startup. Explicit addresses replace the usable
+        /// bound fallback, and the result owns its text, key and encoded addresses.
+        pub fn makeLocal(self: Options, peer: *const @import("../wire/peer_id.zig").PeerId, bound: *const [2]?types.Address) Error!codec.Local {
+            try self.limits().validate();
+            if (self.addresses.len > 0) return codec.Local.init(peer, self.agent, self.protocol_version, self.addresses);
+            var addresses: [2]types.Address = undefined;
+            var count: usize = 0;
+            for (bound) |address| if (address) |value| {
+                if (!value.isUsable()) continue;
+                addresses[count] = value;
+                count += 1;
+            };
+            return codec.Local.init(peer, self.agent, self.protocol_version, addresses[0..count]);
+        }
+    };
+    pub const Failure = enum { negotiation, malformed, timeout, reset, transport, shutdown };
+    pub const Result = struct {
+        peer: PeerRef,
+        conn: Engine.Handle,
+        outcome: union(enum) { success: codec.Metadata, failed: Failure },
+    };
+    pub const InitError = std.mem.Allocator.Error || error{InvalidLimits};
+    pub const StartError = routing.Error || error{ PeerLimit, IdentifyCapacity, Stopped };
+    const deadline_ms = 5_000;
+    const outbound_steps_per_pump = 8;
+    const Inbound = struct {
+        stream: ?Engine.StreamHandle = null,
+        deadline: u64 = 0,
+        ready: bool = false,
+        bytes: [codec.encoded_frame_max]u8 = undefined,
+        outbox: Outbox = .{},
+
+        fn close(self: *Inbound, engine: *Engine) void {
+            const stream = self.stream orelse return;
+            engine.closeStream(stream, types.app_error_normal);
+            self.* = .{};
+        }
+
+        fn advance(self: *Inbound, engine: *Engine, now_ms: u64) void {
+            const stream = self.stream orelse return;
+            if (now_ms >= self.deadline) return self.close(engine);
+            if (!self.ready) return;
+            self.ready = false;
+            const done = self.outbox.pump(engine, stream) catch return self.close(engine);
+            self.ready = done == .yielded;
+            if (done == .done) self.close(engine);
+        }
+    };
+    const Outbound = struct {
+        stream: ?Engine.StreamHandle = null,
+        peer: PeerRef = undefined,
+        deadline: u64 = 0,
+        ready: bool = false,
+        phase: enum { negotiating, reading, terminal } = .negotiating,
+        sent_fin: bool = false,
+        decoder: codec.Decoder = undefined,
+        result: Result = undefined,
+
+        fn finish(self: *Outbound, engine: *Engine, outcome: @FieldType(Result, "outcome")) void {
+            const stream = self.stream.?;
+            engine.closeStream(stream, types.app_error_normal);
+            self.result = .{ .peer = self.peer, .conn = stream.conn, .outcome = outcome };
+            self.phase = .terminal;
+            self.ready = false;
+        }
+
+        fn cancel(self: *Outbound, router: *routing.Router, engine: *Engine, failure: Failure) void {
+            if (self.stream == null or self.phase == .terminal) return;
+            if (self.phase == .negotiating) router.cancel(engine, self.stream.?);
+            self.finish(engine, .{ .failed = failure });
+        }
+
+        fn advance(self: *Outbound, router: *routing.Router, engine: *Engine, now_ms: u64) void {
+            const stream = self.stream orelse return;
+            if (self.phase == .terminal) return;
+            if (now_ms >= self.deadline) return self.cancel(router, engine, .timeout);
+            if (self.phase != .reading or !self.ready) return;
+            for (0..outbound_steps_per_pump) |_| {
+                self.ready = false;
+                if (!self.sent_fin) {
+                    // The responder may stop its unused request half before this empty FIN.
+                    _ = engine.write(stream, &.{}, true) catch |err| switch (err) {
+                        error.StreamStopped => 0,
+                        error.WouldBlock => break,
+                        else => {
+                            self.finish(engine, .{ .failed = .transport });
+                            break;
+                        },
+                    };
+                    self.sent_fin = true;
+                } else if (self.decoder.result()) |metadata| {
+                    self.finish(engine, .{ .success = metadata });
+                    break;
+                } else {
+                    var bytes: [2048]u8 = undefined;
+                    const read = engine.read(stream, &bytes) catch |err| {
+                        if (err != error.WouldBlock) self.finish(engine, .{ .failed = .transport });
+                        break;
+                    };
+                    if (read.reset_code != null) {
+                        self.finish(engine, .{ .failed = .reset });
+                        break;
+                    }
+                    self.decoder.feed(bytes[0..read.len], read.fin) catch {
+                        self.finish(engine, .{ .failed = .malformed });
+                        break;
+                    };
+                    if (self.decoder.result()) |metadata| {
+                        self.finish(engine, .{ .success = metadata });
+                        break;
+                    }
+                    if (read.len == 0) break;
+                }
+                self.ready = true;
+            }
+        }
+    };
 
     /// Copies a complete Local constructed for this transport identity. Each inbound stream
     /// encodes its own snapshot, so later publication cannot change an active response.
@@ -157,12 +230,11 @@ pub const Handler = struct {
     fn closeMatching(self: *Handler, engine: *Engine, conn: Engine.Handle, which: ?Engine.StreamHandle, failure: Failure) void {
         for (self.inbound) |*slot| if (slot.stream) |stream| {
             if (std.meta.eql(stream.conn, conn) and (which == null or std.meta.eql(which.?, stream))) {
-                engine.closeStream(stream, types.app_error_normal);
-                slot.* = .{};
+                slot.close(engine);
             }
         };
         for (self.outbound) |*slot| if (slot.stream) |stream| {
-            if (std.meta.eql(stream.conn, conn) and (which == null or std.meta.eql(which.?, stream)) and slot.phase != .terminal) finish(slot, engine, .{ .failed = failure });
+            if (std.meta.eql(stream.conn, conn) and (which == null or std.meta.eql(which.?, stream)) and slot.phase != .terminal) slot.finish(engine, .{ .failed = failure });
         };
     }
 
@@ -175,11 +247,11 @@ pub const Handler = struct {
                         slot.phase = .reading;
                         slot.ready = true;
                         slot.decoder.feed(selected.leftover, selected.fin) catch {
-                            finish(slot, engine, .{ .failed = .malformed });
+                            slot.finish(engine, .{ .failed = .malformed });
                             return;
                         };
                     },
-                    else => finish(slot, engine, .{ .failed = .negotiation }),
+                    else => slot.finish(engine, .{ .failed = .negotiation }),
                 }
                 return;
             };
@@ -191,7 +263,7 @@ pub const Handler = struct {
             engine.closeStream(outcome.stream, types.app_error_normal);
             return;
         }
-        for (self.inbound) |slot| if (slot.stream) |stream| {
+        for (self.inbound) |*slot| if (slot.stream) |stream| {
             if (std.meta.eql(stream.conn, outcome.stream.conn)) {
                 engine.closeStream(outcome.stream, types.app_error_normal);
                 return;
@@ -201,8 +273,7 @@ pub const Handler = struct {
             bindRow(engine, outcome.stream, index);
             slot.* = .{ .stream = outcome.stream, .deadline = now.mono_ms +| deadline_ms, .ready = true };
             const bytes = self.local.encode(router.capabilities().receive, engine.peerAddress(outcome.stream.conn), &slot.bytes) catch {
-                engine.closeStream(outcome.stream, types.app_error_normal);
-                slot.* = .{};
+                slot.close(engine);
                 return;
             };
             slot.outbox.queue(bytes, true);
@@ -211,85 +282,14 @@ pub const Handler = struct {
         engine.closeStream(outcome.stream, types.app_error_normal);
     }
 
-    fn finish(slot: *Outbound, engine: *Engine, outcome: @FieldType(Result, "outcome")) void {
-        const stream = slot.stream.?;
-        engine.closeStream(stream, types.app_error_normal);
-        slot.result = .{ .peer = slot.peer, .conn = stream.conn, .outcome = outcome };
-        slot.phase = .terminal;
-        slot.ready = false;
-    }
-
     pub fn pump(self: *Handler, router: *routing.Router, engine: *Engine, now: types.Now, out: []Result) usize {
-        for (self.inbound) |*slot| if (slot.stream) |stream| {
-            if (now.mono_ms >= slot.deadline) {
-                engine.closeStream(stream, types.app_error_normal);
-                slot.* = .{};
-                continue;
-            }
-            if (!slot.ready) continue;
-            slot.ready = false;
-            const done = slot.outbox.pump(engine, stream) catch {
-                engine.closeStream(stream, types.app_error_normal);
-                slot.* = .{};
-                continue;
-            };
-            slot.ready = done == .yielded;
-            if (done == .done) {
-                engine.closeStream(stream, types.app_error_normal);
-                slot.* = .{};
-            }
-        };
+        for (self.inbound) |*slot| slot.advance(engine, now.mono_ms);
         var count: usize = 0;
         const start_index = self.delivery_cursor;
         for (0..self.outbound.len) |offset| {
             const index = (start_index + offset) % self.outbound.len;
             const slot = &self.outbound[index];
-            const stream = slot.stream orelse continue;
-            if (slot.phase != .terminal and now.mono_ms >= slot.deadline) {
-                if (slot.phase == .negotiating) router.cancel(engine, stream);
-                finish(slot, engine, .{ .failed = .timeout });
-            }
-            if (slot.phase == .reading and slot.ready) {
-                slot.ready = false;
-                for (0..8) |_| {
-                    slot.ready = false;
-                    if (!slot.sent_fin) {
-                        // The responder may stop its unused request half before this empty FIN.
-                        _ = engine.write(stream, &.{}, true) catch |err| switch (err) {
-                            error.StreamStopped => 0,
-                            error.WouldBlock => break,
-                            else => {
-                                finish(slot, engine, .{ .failed = .transport });
-                                break;
-                            },
-                        };
-                        slot.sent_fin = true;
-                    } else if (slot.decoder.result()) |metadata| {
-                        finish(slot, engine, .{ .success = metadata });
-                        break;
-                    } else {
-                        var bytes: [2048]u8 = undefined;
-                        const read = engine.read(stream, &bytes) catch |err| {
-                            if (err != error.WouldBlock) finish(slot, engine, .{ .failed = .transport });
-                            break;
-                        };
-                        if (read.reset_code != null) {
-                            finish(slot, engine, .{ .failed = .reset });
-                            break;
-                        }
-                        slot.decoder.feed(bytes[0..read.len], read.fin) catch {
-                            finish(slot, engine, .{ .failed = .malformed });
-                            break;
-                        };
-                        if (slot.decoder.result()) |metadata| {
-                            finish(slot, engine, .{ .success = metadata });
-                            break;
-                        }
-                        if (read.len == 0) break;
-                    }
-                    slot.ready = true;
-                }
-            }
+            slot.advance(router, engine, now.mono_ms);
             if (slot.phase == .terminal and count < out.len) {
                 out[count] = slot.result;
                 count += 1;
@@ -302,11 +302,11 @@ pub const Handler = struct {
 
     pub fn nextWakeup(self: *const Handler, now: types.Now, result_capacity: usize) ?u64 {
         var due: ?u64 = null;
-        for (self.inbound) |slot| if (slot.stream != null) {
+        for (self.inbound) |*slot| if (slot.stream != null) {
             const next = if (slot.ready) now.mono_ms else @max(now.mono_ms, slot.deadline);
             due = @min(due orelse next, next);
         };
-        for (self.outbound) |slot| if (slot.stream != null) {
+        for (self.outbound) |*slot| if (slot.stream != null) {
             if (slot.phase == .terminal) {
                 if (result_capacity > 0) return now.mono_ms;
                 continue;
@@ -319,20 +319,13 @@ pub const Handler = struct {
 
     pub fn shutdown(self: *Handler, router: *routing.Router, engine: *Engine) void {
         self.stopped = true;
-        for (self.inbound) |*slot| if (slot.stream) |stream| {
-            engine.closeStream(stream, types.app_error_normal);
-            slot.* = .{};
-        };
-        for (self.outbound) |*slot| if (slot.stream) |stream| {
-            if (slot.phase != .terminal) {
-                if (slot.phase == .negotiating) router.cancel(engine, stream);
-                finish(slot, engine, .{ .failed = .shutdown });
-            }
-        };
+        for (self.inbound) |*slot| slot.close(engine);
+        for (self.outbound) |*slot| slot.cancel(router, engine, .shutdown);
     }
 };
 
 test {
-    _ = @import("handler_snapshot_test.zig");
+    _ = @import("handler_options_test.zig");
+    _ = @import("handler_service_test.zig");
     _ = @import("handler_test.zig");
 }

@@ -88,7 +88,7 @@ test "identify canonical key and reordered uncompressed equivalent bind full ide
 
 test "identify ten maximum frames use one buffer and bound aggregate" {
     const peer = try identity();
-    var frame: [8194]u8 = @splat(0);
+    var frame: [codec.encoded_frame_max]u8 = @splat(0);
     frame[0] = 0x80;
     frame[1] = 0x40;
     frame[2] = 0x42;
@@ -114,7 +114,7 @@ fn fieldFrame(out: []u8, field: u32, value: []const u8, occurrences: usize) []co
 
 test "identify enforces exact string and occurrence bounds including ignored addresses" {
     const peer = try identity();
-    var frame: [8194]u8 = undefined;
+    var frame: [codec.encoded_frame_max]u8 = undefined;
     const Cases = struct { field: u32, cap: usize };
     for ([_]Cases{ .{ .field = 6, .cap = 256 }, .{ .field = 5, .cap = 64 }, .{ .field = 3, .cap = 256 }, .{ .field = 2, .cap = 1024 }, .{ .field = 4, .cap = 1024 } }) |case| {
         const bytes: [1025]u8 = @splat('x');
@@ -196,7 +196,7 @@ test "identify repeated scalar fields use last valid occurrence and merge known 
 test "identify validates every key and bounds semantic key envelope" {
     const peer = try identity();
     const key = (try peer.publicKey()).encodeProtobuf();
-    var frame: [8194]u8 = undefined;
+    var frame: [codec.encoded_frame_max]u8 = undefined;
     var decoder = codec.Decoder.init(&peer);
     try decoder.feed(fieldFrame(&frame, 1, &key, 1), false);
     var wrong = key;
@@ -235,7 +235,7 @@ test "identify encoder uses canonical identity copied binary QUIC addresses and 
     addresses[0].ip4.port = 1;
     var protocols: @import("../capabilities.zig").Set = .initEmpty();
     protocols.insert(.identify);
-    var frame: [8194]u8 = undefined;
+    var frame: [codec.encoded_frame_max]u8 = undefined;
     const bytes = try local.encode(protocols, null, &frame);
     const expected = [_]u8{ 0x0a, 37 } ++ (try peer.publicKey()).encodeProtobuf() ++ [_]u8{ 0x12, 11, 4, 127, 0, 0, 1, 0x91, 2, 0x23, 0x28, 0xcd, 3, 0x1a, 14 } ++ "/ipfs/id/1.0.0".* ++ [_]u8{ 0x2a, 10 } ++ "ipfs/0.1.0".* ++ [_]u8{ 0x32, 5 } ++ "stock".*;
     try std.testing.expectEqualSlices(u8, &expected, bytes[1..]);
@@ -257,7 +257,7 @@ test "identify maximum key envelope and advertisement respect all exact local bo
     writer.bytes(&key);
     writer.bytesField(9, &([_]u8{0} ** 216));
     try std.testing.expectEqual(@as(usize, 256), writer.len);
-    var frame: [8194]u8 = undefined;
+    var frame: [codec.encoded_frame_max]u8 = undefined;
     var decoder = codec.Decoder.init(&peer);
     try decoder.feed(fieldFrame(&frame, 1, writer.written(), 1), true);
     const malformed = [_]u8{ 8, 2, 18, 33 } ++ [_]u8{0} ** 33;
@@ -271,7 +271,7 @@ test "identify maximum key envelope and advertisement respect all exact local bo
     for (std.enums.values(@import("../reqresp/protocol.zig").Protocol)) |which| protocols.insert(.{ .reqresp = which });
     for (std.enums.values(@import("../gossipsub/protocol.zig").Version)) |version| protocols.insert(.{ .meshsub = version });
     const encoded = try local.encode(protocols, null, &frame);
-    try std.testing.expect(encoded.len <= 8194);
+    try std.testing.expect(encoded.len <= codec.encoded_frame_max);
     decoder = codec.Decoder.init(&peer);
     try decoder.feed(encoded, true);
     try std.testing.expectEqual(protocols, decoder.result().?.protocols);
@@ -284,7 +284,7 @@ test "identify includes the current observed QUIC endpoint" {
     const peer = try identity();
     const local = try codec.Local.init(&peer, "stock", "ipfs/0.1.0", &.{});
     const endpoint: @import("../types.zig").Address = .{ .ip4 = .{ .octets = .{ 192, 0, 2, 10 }, .port = 9010 } };
-    var frame: [8194]u8 = undefined;
+    var frame: [codec.encoded_frame_max]u8 = undefined;
     const bytes = try local.encode(.initEmpty(), endpoint, &frame);
     var reader = @import("../wire/protobuf.zig").Reader.init(bytes);
     _ = try reader.varint();

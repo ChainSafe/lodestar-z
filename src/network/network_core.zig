@@ -126,7 +126,7 @@ pub const NetworkCore = struct {
     /// The Service's control events and Identify results that `process` consumes within its turn.
     /// Fields rather than locals so ReleaseSafe does not fill them every turn.
     controls: [controls_per_turn]rr.ReqResp.Event = undefined,
-    identify_results: [identify_per_turn]@import("identify/root.zig").Result = undefined,
+    identify_results: [identify_per_turn]@import("identify/root.zig").Handler.Result = undefined,
 
     pub fn init(self: *NetworkCore, backing: std.mem.Allocator, io: std.Io, resolved: *const @import("configuration.zig").Resolved, startup: Startup) !void {
         try @import("configuration.zig").validate(resolved.limits, resolved.core);
@@ -365,7 +365,7 @@ pub const NetworkCore = struct {
             };
             try local.setAddresses(addresses[0..count]);
         }
-        var encoded: [@import("identify/codec.zig").frame_max + 2]u8 = undefined;
+        var encoded: [@import("identify/codec.zig").encoded_frame_max]u8 = undefined;
         _ = try local.encode(capabilities.receive, null, &encoded);
         return local;
     }

@@ -9,7 +9,7 @@ pub fn initService(allocator: std.mem.Allocator, options: service.Options, trans
     return service.Service.init(allocator, options, &local);
 }
 
-pub fn fixtureLocal(options: @import("identify/root.zig").Options) !@import("identify/root.zig").Local {
+pub fn fixtureLocal(options: @import("identify/root.zig").Handler.Options) !@import("identify/root.zig").Local {
     const key = try @import("wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{1}));
     const peer = @import("wire/peer_id.zig").PeerId.fromPublicKey(&key.publicKey());
     return @import("identify/root.zig").Local.init(&peer, options.agent, options.protocol_version, if (options.addresses.len == 0) &.{support.client_address} else options.addresses);
@@ -89,7 +89,7 @@ pub const ServicePair = struct {
 /// the test.
 pub const Owners = struct {
     negotiator: ?*@import("negotiate.zig").Negotiator = null,
-    identify: ?*@import("identify/handler.zig").Handler = null,
+    identify: ?*@import("identify/root.zig").Handler = null,
     reqresp: ?*@import("reqresp/ReqResp.zig") = null,
     gossip: ?*@import("gossipsub/Gossipsub.zig") = null,
 

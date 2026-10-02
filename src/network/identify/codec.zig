@@ -8,11 +8,12 @@ const Address = @import("udp").Address;
 const multiaddr = @import("../wire/multiaddr.zig");
 
 pub const frame_max = 8192;
+pub const encoded_frame_max = frame_max + pb.varintLen(frame_max);
 pub const frames_max = 10;
 pub const aggregate_max = frame_max * frames_max;
 pub const Error = pb.Error || error{ InvalidField, FrameLimit, StringLimit, OccurrenceLimit, InvalidUtf8, InvalidKey, IdentityMismatch, Finished, InvalidAddress, BufferTooSmall };
 
-pub fn Text(comptime capacity: usize) type {
+fn Text(comptime capacity: usize) type {
     return struct {
         bytes: [capacity]u8 = @splat(0),
         len: u16 = 0,
@@ -39,8 +40,17 @@ pub const Local = struct {
     public_key: [keys.protobuf_length]u8,
     agent: Text(256),
     protocol_version: Text(64),
-    addresses: [8]struct { bytes: [multiaddr.binary_length_max]u8 = @splat(0), len: u8 = 0 } = @splat(.{}),
+    addresses: [8]EncodedAddress = @splat(.{}),
     address_count: u8 = 0,
+
+    const EncodedAddress = struct { bytes: [multiaddr.binary_length_max]u8 = @splat(0), len: u8 = 0 };
+
+    pub fn validate(agent: []const u8, version: []const u8, addresses: []const Address) Error!void {
+        _ = try @FieldType(Local, "agent").init(agent);
+        _ = try @FieldType(Local, "protocol_version").init(version);
+        var encoded: @FieldType(Local, "addresses") = undefined;
+        try encodeAddresses(addresses, &encoded);
+    }
 
     pub fn init(peer: *const PeerId, agent: []const u8, version: []const u8, addresses: []const Address) Error!Local {
         const key = peer.publicKey() catch return error.InvalidKey;
@@ -50,15 +60,19 @@ pub const Local = struct {
     }
 
     pub fn setAddresses(self: *Local, addresses: []const Address) Error!void {
-        if (addresses.len > 8) return error.OccurrenceLimit;
         var copied = self.addresses;
+        try encodeAddresses(addresses, &copied);
+        self.addresses = copied;
+        self.address_count = @intCast(addresses.len);
+    }
+
+    fn encodeAddresses(addresses: []const Address, copied: *@FieldType(Local, "addresses")) Error!void {
+        if (addresses.len > copied.len) return error.OccurrenceLimit;
         for (addresses, 0..) |address, i| {
             if (!address.isUsable()) return error.InvalidAddress;
             const encoded = (multiaddr.Multiaddr{ .address = address }).encode(&copied[i].bytes) catch return error.InvalidAddress;
             copied[i].len = @intCast(encoded.len);
         }
-        self.addresses = copied;
-        self.address_count = @intCast(addresses.len);
     }
 
     pub fn encode(self: *const Local, receive: Set, observed: ?Address, out: []u8) Error![]const u8 {
@@ -89,7 +103,7 @@ pub const Local = struct {
 };
 
 /// Merges protobuf fields without retaining slices into the reusable frame.
-pub const Merge = struct {
+const Merge = struct {
     expected: PeerId,
     metadata: Metadata = .{},
     fields: usize = 0,
@@ -101,7 +115,7 @@ pub const Merge = struct {
         self.fields += 1;
     }
 
-    pub fn message(self: *Merge, bytes: []const u8) Error!void {
+    fn message(self: *Merge, bytes: []const u8) Error!void {
         if (bytes.len > frame_max) return error.FrameLimit;
         var reader = pb.Reader.init(bytes);
         var fields: usize = 0;

@@ -372,7 +372,7 @@ pub const Control = struct {
         if (due.request.?.protocol == .goodbye_v1) row.closing.?.sent = true;
     }
 
-    pub fn identifyResults(self: *Control, catalog: *Catalog, results: []const @import("../identify/root.zig").Result) void {
+    pub fn identifyResults(self: *Control, catalog: *Catalog, results: []const @import("../identify/root.zig").Handler.Result) void {
         std.debug.assert(results.len <= 64);
         for (results) |*completion| {
             const row = self.schedule(completion.peer, completion.conn) orelse continue;

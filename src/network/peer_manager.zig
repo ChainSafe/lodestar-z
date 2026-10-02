@@ -231,7 +231,7 @@ pub const PeerManager = struct {
     pub fn controlReplied(self: *PeerManager, reply: *const control_wire.ControlReply, event: @import("reqresp/root.zig").ReqResp.Event, now: Now, slot: u64) void {
         self.control.replied(&self.catalog, reply, event, &self.local, now, slot);
     }
-    pub fn identified(self: *PeerManager, results: []const @import("identify/root.zig").Result) void {
+    pub fn identified(self: *PeerManager, results: []const @import("identify/root.zig").Handler.Result) void {
         self.control.identifyResults(&self.catalog, results);
     }
     pub fn controlWakeup(self: *const PeerManager, now: Now) ?u64 {
