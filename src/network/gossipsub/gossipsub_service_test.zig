@@ -191,7 +191,7 @@ test "gossipsub service subscribes only after negotiation and retirement cancels
     _ = setup.shared.client.gossipsub.pump(&setup.shared.client.router, &setup.shared.pair.client, setup.shared.pair.now);
     try std.testing.expect(setup.shared.client.gossipsub.admitted(setup.shared.handles.client));
     @import("session_io.zig").retirePeer(setup.shared.client.gossipsub, &setup.shared.client.router, &setup.shared.pair.client, index);
-    try std.testing.expectEqual(@as(?u64, null), setup.shared.client.router.nextWakeup(setup.shared.pair.now, 16));
+    try std.testing.expectEqual(@as(?u64, null), setup.shared.client.router.schedule(16).nextWakeup(setup.shared.pair.now.mono_ms));
     try std.testing.expect(setup.shared.pair.client.peerId(setup.shared.handles.client) != null);
 }
 
@@ -338,7 +338,7 @@ test "gossipsub negotiation timeout releases resources without creating a retry 
     setup.shared.pair.advance(@import("../negotiate.zig").Negotiator.negotiate_timeout_ms + 1);
     _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{});
     _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{});
-    try std.testing.expect(setup.shared.client.router.nextWakeup(setup.shared.pair.now, 16) == null);
+    try std.testing.expect(setup.shared.client.router.schedule(16).nextWakeup(setup.shared.pair.now.mono_ms) == null);
     const index = setup.shared.client.gossipsub.sessions.find(setup.shared.handles.client).?;
     try std.testing.expect(setup.shared.client.gossipsub.sessions.rows[index].outbound == .none);
     try std.testing.expect(setup.shared.client.gossipsub.sessions.rows[index].io.deadlines(&setup.shared.client.gossipsub.options).next() == null);

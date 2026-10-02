@@ -59,7 +59,7 @@ test "gossip idle mesh of 200 sessions costs no session visits" {
         setup.shared.pair.advance(30);
         try setup.pumpOnce();
         try std.testing.expectEqual(@as(usize, 0), g.sessions.ready.len);
-        try std.testing.expect(g.nextWakeup(setup.shared.pair.now).? > setup.shared.pair.now.mono_ms);
+        try std.testing.expect(g.schedule().nextWakeup(setup.shared.pair.now.mono_ms).? > setup.shared.pair.now.mono_ms);
     }
     try std.testing.expect(g.cycle.epoch - cycles >= 4);
     try std.testing.expectEqual(visits, g.sessions.visits);
@@ -135,11 +135,11 @@ test "gossip retries a flow-blocked session only when send capacity grows" {
     try std.testing.expectEqual(deadline, g.sessions.deadlines.get(index).?);
     try std.testing.expectEqual(io.tx.progress_ms.? + g.options.large_frame_timeout_ms, deadline);
     setup.shared.pair.advance(deadline - 1 - setup.shared.pair.now.mono_ms);
-    try std.testing.expect(g.nextWakeup(setup.shared.pair.now).? > setup.shared.pair.now.mono_ms);
+    try std.testing.expect(g.schedule().nextWakeup(setup.shared.pair.now.mono_ms).? > setup.shared.pair.now.mono_ms);
     _ = processClient(&setup);
     try std.testing.expect(g.sessions.rows[index].outStream() != null);
     setup.shared.pair.advance(1);
-    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), g.nextWakeup(setup.shared.pair.now));
+    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), g.schedule().nextWakeup(setup.shared.pair.now.mono_ms));
     _ = processClient(&setup);
     try std.testing.expect(g.sessions.rows[index].outStream() == null);
     try std.testing.expect(!io.tx.pending());
@@ -195,7 +195,7 @@ test "gossip publish reaches a mesh peer in the turn after it and leaves no read
     try std.testing.expectEqual(@as(usize, 0), g.sessions.ready.len);
     try std.testing.expectEqual(@as(u16, 1), (try g.publish(topic, "same turn", setup.shared.pair.now)).queued);
     try std.testing.expect(g.sessions.rows[index].ready_link.linked);
-    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), g.nextWakeup(setup.shared.pair.now));
+    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), g.schedule().nextWakeup(setup.shared.pair.now.mono_ms));
     _ = setup.shared.processClient(.{});
     try std.testing.expect(!g.sessions.rows[index].io.tx.pending());
     try std.testing.expectEqual(@as(usize, 0), g.sessions.ready.len);

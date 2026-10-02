@@ -27,9 +27,9 @@ test "identify service completes both directions with zero application output an
         _ = server.process(&pair.server, pair.events(&pair.server, &events), pair.now, .{});
         try pair.pump();
     }
-    try std.testing.expect(client.identify.nextWakeup(pair.now, 0) == null);
-    if (client.nextWakeup(pair.now, .{})) |due| try std.testing.expect(due > pair.now.mono_ms);
-    try std.testing.expectEqual(pair.now.mono_ms, client.identify.nextWakeup(pair.now, 1).?);
+    try std.testing.expect(client.identify.schedule(0).nextWakeup(pair.now.mono_ms) == null);
+    if (client.schedule(.{}).nextWakeup(pair.now.mono_ms)) |due| try std.testing.expect(due > pair.now.mono_ms);
+    try std.testing.expectEqual(pair.now.mono_ms, client.identify.schedule(1).nextWakeup(pair.now.mono_ms).?);
     var results: [1]identify.Handler.Result = undefined;
     var counts = client.process(&pair.client, &.{}, pair.now, .{ .identify = &results });
     try std.testing.expectEqual(@as(usize, 1), counts.identify);
@@ -103,8 +103,8 @@ test "identify saturation leaves reserved Ping negotiation usable" {
         try pair.pump();
     }
     try std.testing.expect(received);
-    try std.testing.expect(client.identify.nextWakeup(pair.now, 0) == null);
-    try std.testing.expectEqual(pair.now.mono_ms, client.identify.nextWakeup(pair.now, 1).?);
+    try std.testing.expect(client.identify.schedule(0).nextWakeup(pair.now.mono_ms) == null);
+    try std.testing.expectEqual(pair.now.mono_ms, client.identify.schedule(1).nextWakeup(pair.now.mono_ms).?);
 }
 
 test "identify blocked responder finishes immutable advertisement while new requests observe updates" {

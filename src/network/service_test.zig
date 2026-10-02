@@ -106,10 +106,10 @@ test "service handles native stream events past empty request capacity" {
         for (requests[0..count]) |event| if (event == .request) {
             incoming = event.request.request;
         };
-        if (incoming != null and client.nextWakeup(pair.now, .{ .control = 1 }) != pair.now.mono_ms) break;
+        if (incoming != null and client.schedule(.{ .control = 1 }).nextWakeup(pair.now.mono_ms) != pair.now.mono_ms) break;
     }
     try std.testing.expect(incoming != null);
-    try std.testing.expect(client.nextWakeup(pair.now, .{ .control = 1 }).? > pair.now.mono_ms);
+    try std.testing.expect(client.schedule(.{ .control = 1 }).nextWakeup(pair.now.mono_ms).? > pair.now.mono_ms);
     var wire: [rr.codec.frame_scratch_max]u8 = undefined;
     const encoded = try rr.codec.encodeChunk(0, null, &ping, &wire);
     const stream = server.reqresp.inbound[incoming.?.index].request.stream;

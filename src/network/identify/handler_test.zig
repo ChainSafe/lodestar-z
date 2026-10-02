@@ -41,7 +41,7 @@ test "identify delivers retained completions before recycled lower slots" {
         try std.testing.expectEqual(@as(u64, 2), result.peer.generation);
         try std.testing.expectEqual(identify.Handler.Failure.timeout, result.outcome.failed);
     }
-    try std.testing.expect(handler.nextWakeup(pair.now, 1) == null);
+    try std.testing.expect(handler.schedule(1).nextWakeup(pair.now.mono_ms) == null);
 }
 
 test "identify validates capacities and cleans every allocation prefix" {
@@ -71,10 +71,10 @@ test "identify deadline includes stalled negotiation and retained completion doe
     pair.now.mono_ms = start + 4999;
     var results: [1]identify.Handler.Result = undefined;
     try std.testing.expectEqual(@as(usize, 0), client.identify.pump(&client.router, &pair.client, pair.now, &results));
-    try std.testing.expectEqual(start + 5000, client.identify.nextWakeup(pair.now, 1).?);
+    try std.testing.expectEqual(start + 5000, client.identify.schedule(1).nextWakeup(pair.now.mono_ms).?);
     pair.now.mono_ms += 1;
     try std.testing.expectEqual(@as(usize, 0), client.identify.pump(&client.router, &pair.client, pair.now, &.{}));
-    try std.testing.expect(client.identify.nextWakeup(pair.now, 0) == null);
+    try std.testing.expect(client.identify.schedule(0).nextWakeup(pair.now.mono_ms) == null);
     try std.testing.expectEqual(@as(usize, 1), client.identify.pump(&client.router, &pair.client, pair.now, &results));
     try std.testing.expectEqual(identify.Handler.Failure.timeout, results[0].outcome.failed);
     try std.testing.expectEqual(@as(usize, 0), client.identify.pump(&client.router, &pair.client, pair.now, &results));
@@ -97,8 +97,8 @@ test "identify deadline includes stalled negotiation and retained completion doe
     try std.testing.expect(closed);
     try pair.pump();
     try std.testing.expectEqual(@as(usize, 0), step(&pair, &client, false, &results));
-    try std.testing.expect(client.router.nextWakeup(pair.now, 1) == null);
-    try std.testing.expect(client.identify.nextWakeup(pair.now, 1) == null);
+    try std.testing.expect(client.router.schedule(1).nextWakeup(pair.now.mono_ms) == null);
+    try std.testing.expect(client.identify.schedule(1).nextWakeup(pair.now.mono_ms) == null);
     client.identify.shutdown(&client.router, &pair.client);
     try std.testing.expectEqual(@as(usize, 0), client.identify.pump(&client.router, &pair.client, pair.now, &results));
 }

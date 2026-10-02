@@ -466,7 +466,7 @@ const Host = struct {
             self.len -= 1;
         }
         self.applies += @intFromBool(count > 0);
-        return .{ .more = self.len > 0 and self.ring[self.head].due_ms <= tick.mono_ms };
+        return .{ .runnable = self.len > 0 and self.ring[self.head].due_ms <= tick.mono_ms };
     }
 
     fn deadline(self: *const Host) ?u64 {
@@ -547,7 +547,7 @@ const Spoke = struct {
                 now = try network.Transport.currentTime(io);
                 wake = now.mono_ms;
             }
-            const result = self.core.step(io, now, outputs, .deadlineOnly(wake));
+            const result = network.driver.step(&self.core, io, now, outputs, .deadlineOnly(wake));
             if (result.readiness.failure) |err| return err;
         }
         // A spoke runs without a host, so it refuses every message it receives for storage.
@@ -759,7 +759,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     const setup_start = try network.Transport.currentTime(io);
     for (0..1 << 20) |_| {
         const now = try network.Transport.currentTime(io);
-        const result = hub.step(io, now, outputs, .{ .context = &host, .apply = Host.apply, .deadline_ms = now.mono_ms + 5 });
+        const result = network.driver.step(hub, io, now, outputs, .{ .context = &host, .apply = Host.apply, .deadline_ms = now.mono_ms + 5 });
         if (result.readiness.failure) |err| return err;
         if (shared.failed.load(.acquire)) return spokeFailure(spokes);
         if (shared.ready.load(.acquire) == options.peers and hubReady(hub, chain, options)) break;
@@ -797,7 +797,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
         }
         const deadline = @min(host.deadline() orelse next_sample, next_sample, bounds[window]);
         const before = hub.step_duration.sum;
-        const result = hub.step(io, now, outputs, .{ .context = &host, .apply = Host.apply, .deadline_ms = deadline });
+        const result = network.driver.step(hub, io, now, outputs, .{ .context = &host, .apply = Host.apply, .deadline_ms = deadline });
         if (result.readiness.failure) |err| return err;
         if (shared.failed.load(.acquire)) return spokeFailure(spokes);
         step_count += 1;

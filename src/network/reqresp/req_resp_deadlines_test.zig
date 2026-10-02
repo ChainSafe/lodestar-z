@@ -72,7 +72,7 @@ test "reqresp negotiated handoff starts a fresh progress interval" {
         try std.testing.expectEqual(@as(usize, 1), count);
         setup.shared.pair.advance(2000);
         try std.testing.expect(setup.shared.client.reqresp.negotiated(&setup.shared.pair.client, outcomes[0], setup.shared.pair.now));
-        try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), setup.shared.client.reqresp.nextWakeup(setup.shared.pair.now, .{ .control = 1 }));
+        try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), setup.shared.client.reqresp.schedule(.{ .control = 1 }).nextWakeup(setup.shared.pair.now.mono_ms));
         ready = true;
         break;
     }
@@ -106,7 +106,7 @@ test "reqresp admission wait expires as local policy and not peer timeout" {
     var ready: usize = 0;
     for (setup.shared.server.reqresp.inbound) |*slot| ready += @intFromBool(slot.request.running() and slot.state == .ready);
     try std.testing.expectEqual(@as(usize, 1), ready);
-    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms + 1000), setup.shared.server.reqresp.nextWakeup(setup.shared.pair.now, .{ .control = 0 }));
+    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms + 1000), setup.shared.server.reqresp.schedule(.{ .control = 0 }).nextWakeup(setup.shared.pair.now.mono_ms));
     setup.shared.pair.advance(1000);
     var events: [4]Event = undefined;
     const count = setup.shared.server.reqresp.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .control = &events }).control;
@@ -142,12 +142,12 @@ test "reqresp blocked response writes expire and do not advertise ready local wo
     }
     try std.testing.expect(blocked);
     try setup.shared.server.reqresp.respond(incoming, &bytes, null, setup.shared.pair.now);
-    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), setup.shared.server.reqresp.nextWakeup(setup.shared.pair.now, .{ .control = 0 }));
+    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), setup.shared.server.reqresp.schedule(.{ .control = 0 }).nextWakeup(setup.shared.pair.now.mono_ms));
     const due = setup.shared.pair.now.mono_ms + 2000;
     for (0..3) |_| {
         setup.shared.pair.advance(500);
         _ = setup.shared.server.reqresp.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .control = &.{} }).control;
-        try std.testing.expectEqual(@as(?u64, due), setup.shared.server.reqresp.nextWakeup(setup.shared.pair.now, .{ .control = 0 }));
+        try std.testing.expectEqual(@as(?u64, due), setup.shared.server.reqresp.schedule(.{ .control = 0 }).nextWakeup(setup.shared.pair.now.mono_ms));
     }
     setup.shared.pair.advance(500);
     var events: [1]Event = undefined;

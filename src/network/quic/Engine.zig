@@ -768,6 +768,10 @@ fn checkInvariants(self: *Engine, now: Now) void {
     }
 }
 
+pub fn releasesPending(self: *const Engine) bool {
+    return self.registry.released.len > 0;
+}
+
 /// Retires the connections whose close event was delivered by an earlier pollEvents call.
 pub fn releaseReported(self: *Engine) void {
     const slots = self.registry.slots;

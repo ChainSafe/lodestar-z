@@ -53,16 +53,16 @@ pub const NetworkCore = struct {
         remembered: []const peers.remembered.Record = &.{},
     };
     pub const HostProgress = struct {
-        /// A per-turn cap stopped the host with work left, so the next turn is due now.
-        more: bool = false,
+        /// A per-turn cap stopped work that can continue without another external event.
+        runnable: bool = false,
     };
-    /// The owner host seam. `step` calls `apply` after receive, timers and collect and before the
+    /// The owner host seam. `advance` calls `apply` after receive, timers and collect and before the
     /// protocols run, when the host wake descriptor was readable, the previous call returned
-    /// `more`, or `deadline_ms` has passed, so the host's work is flushed in the same step.
+    /// `runnable`, or `deadline_ms` has passed, so the host's work is flushed in the same turn.
     pub const Host = struct {
         context: ?*anyopaque = null,
         /// Drains the host wake descriptor before reading any host queue, so a submission that
-        /// lands after the drain wakes the next poll. Must not read `transportEvents()`.
+        /// lands after the drain wakes the next poll. Must not retain events from an earlier turn.
         /// Passes this turn's `now` to core mutations; the protocol work that follows uses it too.
         apply: ?*const fn (context: *anyopaque, core: *NetworkCore, now: Now) HostProgress = null,
         /// Earliest host-owned deadline, kept by the host without scanning its queues.
@@ -83,7 +83,9 @@ pub const NetworkCore = struct {
         counts: Counts = .{ .peers = 0, .application = 0 },
         transport: Transport.StepResult,
         readiness: wait.Result = .{},
-        /// Only the discovery sockets had work, so the transport and protocols did not run.
+        /// Authenticated transport events, borrowed until the next advance, shutdown or deinit.
+        transport_events: []const Engine.Event = &.{},
+        /// Only discovery performed protocol work; transport retirement still ran.
         discovery_only: bool = false,
         failure: ?OperationalError = null,
         dial_started: u8 = 0,
@@ -107,7 +109,6 @@ pub const NetworkCore = struct {
     service: Service,
     discovery: ?*peers.Discovery,
     native_events: []Engine.Event,
-    native_event_count: usize = 0,
     local_intent_workspace: *gossip.local_intent.Workspace,
     schedule: ForkSchedule,
     counters: Counters = .{},
@@ -121,7 +122,7 @@ pub const NetworkCore = struct {
     /// The host's wall-clock slot for status validation. Intents only advance it.
     current_slot: u64 = 0,
     /// The last host apply stopped at a per-turn cap.
-    host_more: bool = false,
+    host_runnable: bool = false,
     /// The Service's control events and Identify results that `process` consumes within its turn.
     /// Fields rather than locals so ReleaseSafe does not fill them every turn.
     controls: [controls_per_turn]rr.ReqResp.Event = undefined,
@@ -147,8 +148,7 @@ pub const NetworkCore = struct {
         self.due_now_turns = @splat(0);
         self.host_wake = null;
         self.current_slot = startup.slot;
-        self.host_more = false;
-        self.native_event_count = 0;
+        self.host_runnable = false;
         self.discovery = null;
         self.last_now = try Transport.currentTime(io);
         try self.transport.init(allocator, io, .{ .host = startup.host, .bind = startup.bind, .limits = resolved.limits, .work_limits = resolved.work_limits, .socket_buffers = resolved.socket_buffers.quic });
@@ -315,10 +315,6 @@ pub const NetworkCore = struct {
     pub fn reportValidation(self: *NetworkCore, handle: gossip.Gossipsub.ValidationHandle, verdict: gossip.Gossipsub.Verdict, now: Now) gossip.Gossipsub.ReportOutcome {
         return self.service.gossipsub.report(handle, verdict, now);
     }
-    /// Borrows the last step's authenticated transport events until the next step.
-    pub fn transportEvents(self: *const NetworkCore) []const Engine.Event {
-        return self.native_events[0..self.native_event_count];
-    }
     pub fn completeSnapshots(self: *const NetworkCore, out: []t.Snapshot) error{OutputTooSmall}!usize {
         if (out.len < self.peer_manager.catalog.options.capacity) return error.OutputTooSmall;
         return self.peer_manager.snapshots(out);
@@ -483,88 +479,49 @@ pub const NetworkCore = struct {
         self.host_wake = descriptor;
     }
 
-    /// The earliest wakeup of every source except host-owned deadlines, which only the host knows.
-    pub fn nextWakeup(self: *NetworkCore, now: Now, outputs: Outputs) ?u64 {
-        var wakeups: wake_sources.Wakeups = .{};
-        self.collectWakeups(now, outputs, &wakeups);
-        return wakeups.earliest();
-    }
-
-    fn collectWakeups(self: *NetworkCore, now: Now, outputs: Outputs, wakeups: *wake_sources.Wakeups) void {
+    /// Scheduling is a snapshot for the supplied output capacities; recompute after mutation.
+    pub fn wakeups(self: *NetworkCore, now: Now, outputs: Outputs) wake_sources.Wakeups {
+        var result: wake_sources.Wakeups = .{};
         const pm = &self.peer_manager;
-        wakeups.note(.peer_events, pm.peerWakeup(now, outputs.peers.len));
+        result.note(.peer_events, .{ .deadline_ms = pm.peerWakeup(now, outputs.peers.len) });
         if (!pm.stopped) {
             const application = if (pm.quiescing) 0 else outputs.application.len;
-            self.service.collectWakeups(now, .{ .application = application, .control = controls_per_turn, .identify = identify_per_turn }, wakeups);
-            wakeups.note(.control, pm.controlWakeup(now));
+            self.service.collectWakeups(.{ .application = application, .control = controls_per_turn, .identify = identify_per_turn }, &result);
+            result.note(.control, .{ .deadline_ms = pm.controlWakeup(now) });
         }
         if (!pm.stopped and !pm.quiescing) {
-            wakeups.note(.dial, pm.dialing.nextWakeup(&pm.catalog, now.mono_ms, @min(dials_per_turn, pm.dialRoom())));
-            wakeups.note(.dial, if (pm.dialing.selectionNeeded(&pm.catalog)) now.mono_ms else null);
-            wakeups.note(.dial, pm.dialing.selection_deadline);
-            wakeups.note(.peer_policy, pm.policyWakeup(self.service.gossipsub, now));
-            wakeups.note(.peer_policy, pm.reconciliation_deadline);
-            wakeups.note(.peer_policy, if (pm.custody_pending) now.mono_ms +| 1 else null);
+            result.note(.dial, .{ .deadline_ms = pm.dialing.nextWakeup(&pm.catalog, now.mono_ms, @min(dials_per_turn, pm.dialRoom())) });
+            result.note(.dial, .{ .runnable = pm.dialing.selectionNeeded(&pm.catalog), .deadline_ms = pm.dialing.selection_deadline });
+            result.note(.peer_policy, .{ .deadline_ms = pm.policyWakeup(self.service.gossipsub, now) });
+            result.note(.peer_policy, .{ .deadline_ms = pm.reconciliation_deadline });
+            result.note(.peer_policy, .{ .deadline_ms = if (pm.custody_pending) now.mono_ms +| 1 else null });
         }
         const quic = &self.transport.engine;
-        if (quic.backlog()) wakeups.note(.transport_backlog, now.mono_ms);
-        if (quic.eventsPending()) wakeups.note(.transport_events, now.mono_ms);
-        if (quic.nextDeadlineNs()) |deadline| wakeups.note(.transport_timer, ceilMs(deadline));
-        if (!self.peer_manager.quiescing) if (self.discovery) |owned| wakeups.note(.discovery, owned.nextWakeup(now.mono_ms));
-        if (self.host_more) wakeups.note(.host, now.mono_ms);
+        result.note(.transport_backlog, .{ .runnable = quic.backlog() });
+        result.note(.transport_events, .{ .runnable = quic.eventsPending() or quic.releasesPending() });
+        result.note(.transport_timer, .{ .deadline_ms = if (quic.nextDeadlineNs()) |deadline| ceilMs(deadline) else null });
+        if (!pm.quiescing and !pm.stopped) if (self.discovery) |owned| result.note(.discovery, .{ .deadline_ms = owned.nextWakeup(now.mono_ms) });
+        result.note(.host, .{ .runnable = self.host_runnable });
+        return result;
     }
 
-    fn observeWait(self: *NetworkCore, wakeups: *const wake_sources.Wakeups, now_ms: u64, chosen_wait: u32) void {
-        if (chosen_wait != 0) return;
-        for (wakeups.due, &self.due_now_turns) |deadline, *turns| {
-            const value = deadline orelse continue;
-            if (value <= now_ms) turns.* +|= 1;
-        }
-    }
-
-    /// One Service borrow window per turn. Returned counts remain valid even when failure is set.
-    /// A turn waits for the earliest wakeup of any source, host deadlines included, bounded by
-    /// the readiness backstop. It then receives, expires timers, collects engine events, applies
-    /// host work, runs the protocols, discovery and dials, and flushes, so its own output and the
-    /// host's leave in the same turn. When only discovery has work, the turn drains discovery alone.
-    pub fn step(self: *NetworkCore, io: std.Io, now: Now, outputs: Outputs, host: Host) Result {
-        self.last_now = now;
-        var result: Result = .{ .transport = .{ .now = now } };
-        var wakeups: wake_sources.Wakeups = .{};
-        self.collectWakeups(now, outputs, &wakeups);
-        wakeups.note(.host, host.deadline_ms);
-        const chosen_wait: u32 = if (self.peer_manager.stopped) 0 else if (wakeups.earliest()) |earliest|
-            @intCast(@min(earliest -| now.mono_ms, wait.native_wait_max_ms))
-        else
-            wait.native_wait_max_ms;
-        if (!self.peer_manager.stopped) self.observeWait(&wakeups, now.mono_ms, chosen_wait);
-        if (comptime wait.supported) {
-            result.readiness = wait.poll(io, .{
-                .quic = self.transport.sockets.handles(),
-                .discovery = if (!self.peer_manager.quiescing and self.discovery != null) self.discovery.?.transport.sockets.handles() else .{ null, null },
-                .host = self.host_wake,
-            }, chosen_wait);
-        } else result.readiness.failure = error.UnsupportedWait;
-        self.counters.readiness_failures +|= @intFromBool(result.readiness.failure != null);
-        result.failure = result.readiness.failure;
-        const step_start = @import("metrics/timing.zig").now(io);
-        defer self.step_duration.observe(@import("metrics/timing.zig").now(io) -| step_start);
-        const read = Transport.currentTime(io) catch |err| blk: {
-            result.failure = result.failure orelse err;
-            self.counters.transport_failures +|= 1;
-            break :blk now;
-        };
-        const tick: Now = if (read.mono_ms >= now.mono_ms) read else now;
+    /// Advances one bounded turn from supplied readiness and time; never waits for readiness.
+    /// Receive/expire/collect precede host apply, protocols, discovery, dials and flush. The I/O
+    /// provider must complete datagram operations without waiting. Consume returned event borrows
+    /// before advancing again, shutting down or deinitializing. Counts remain valid on failure.
+    pub fn advance(self: *NetworkCore, io: std.Io, tick: Now, readiness: wait.Result, outputs: Outputs, host: Host) Result {
+        std.debug.assert(self.initialized);
         self.last_now = tick;
-        result.transport.now = tick;
+        var result: Result = .{
+            .transport = self.transport.beginTurn(tick),
+            .readiness = readiness,
+            .failure = readiness.failure,
+        };
         if (self.discoveryOnly(&result.readiness, tick, outputs, host)) {
             result.discovery_only = true;
-            // The previous turn's events were consumed by its caller; this turn reports none.
-            self.native_event_count = 0;
             self.discover(io, tick, &result);
             return result;
         }
-        self.transport.engine.releaseReported();
         // A failed poll reports no readiness, so both sockets are drained anyway.
         const quic: [2]bool = if (result.readiness.failure == null) result.readiness.quic else @splat(true);
         if (quic[0] or quic[1]) {
@@ -576,13 +533,13 @@ pub const NetworkCore = struct {
         self.transport.expire(tick);
         result.transport.events = self.transport.collect(tick, self.native_events);
         result.transport.events_pending = self.transport.engine.eventsPending();
-        self.native_event_count = result.transport.events;
+        result.transport_events = self.native_events[0..result.transport.events];
         if (host.apply) |apply| {
             const due = if (host.deadline_ms) |deadline| deadline <= tick.mono_ms else false;
-            if (result.readiness.host or result.readiness.failure != null or self.host_more or due) {
-                self.host_more = apply(host.context.?, self, tick).more;
+            if (result.readiness.host or result.readiness.failure != null or self.host_runnable or due) {
+                self.host_runnable = apply(host.context.?, self, tick).runnable;
             }
-        } else self.host_more = false;
+        } else self.host_runnable = false;
         result.counts = self.process(self.native_events[0..result.transport.events], tick, outputs);
         if (!self.peer_manager.stopped and !self.peer_manager.quiescing and (result.failure == null or result.failure.? != error.Canceled)) {
             // This turn's coverage selection already ran, without a second protocol pump.
@@ -773,15 +730,13 @@ pub const NetworkCore = struct {
     fn discoveryOnly(self: *NetworkCore, readiness: *const wait.Result, tick: Now, outputs: Outputs, host: Host) bool {
         if (readiness.quicReady() or readiness.host or readiness.failure != null) return false;
         if (self.discovery == null or self.peer_manager.stopped or self.peer_manager.quiescing) return false;
-        var wakeups: wake_sources.Wakeups = .{};
-        self.collectWakeups(tick, outputs, &wakeups);
-        wakeups.note(.host, host.deadline_ms);
-        const discovery_slot = &wakeups.due[@intFromEnum(wake_sources.Source.discovery)];
-        const discovery_due = if (discovery_slot.*) |deadline| deadline <= tick.mono_ms else false;
+        var pending = self.wakeups(tick, outputs);
+        pending.note(.host, .{ .deadline_ms = host.deadline_ms });
+        const discovery_slot = &pending.sources[@intFromEnum(wake_sources.Source.discovery)];
+        const discovery_due = discovery_slot.due(tick.mono_ms);
         if (!readiness.discoveryReady() and !discovery_due) return false;
-        discovery_slot.* = null;
-        const earliest = wakeups.earliest() orelse return true;
-        return earliest > tick.mono_ms;
+        discovery_slot.* = .{};
+        return !pending.schedule().due(tick.mono_ms);
     }
 
     /// Steps discovery once per datagram, up to discovery_batch_max, handling each step's
@@ -835,7 +790,7 @@ test {
     _ = @import("network_core_intent_test.zig");
     _ = @import("network_core_metrics_test.zig");
     _ = @import("network_core_endpoint_test.zig");
-    _ = @import("network_core_turn_test.zig");
+    _ = @import("network_core_advance_test.zig");
     _ = @import("network_core_peer_test.zig");
     _ = @import("network_core_control_test.zig");
     _ = @import("network_core_coverage_test.zig");

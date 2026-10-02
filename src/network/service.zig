@@ -98,18 +98,21 @@ pub const Service = struct {
         );
     }
 
-    /// Combine protocol deadlines and independent host output capacities with the transport wakeup.
-    pub fn nextWakeup(self: *Service, now: types.Now, capacities: Capacities) ?u64 {
+    pub fn schedule(self: *const Service, capacities: Capacities) types.Schedule {
         var wakeups: wake_sources.Wakeups = .{};
-        self.collectWakeups(now, capacities, &wakeups);
-        return wakeups.earliest();
+        self.collectWakeups(capacities, &wakeups);
+        return wakeups.schedule();
     }
 
-    pub fn collectWakeups(self: *Service, now: types.Now, capacities: Capacities, wakeups: *wake_sources.Wakeups) void {
-        wakeups.note(.reqresp, self.reqresp.nextWakeup(now, .{ .application = capacities.application, .control = capacities.control }));
-        if (self.applications == .active) wakeups.note(.gossip, self.gossipsub.nextWakeup(now));
-        wakeups.note(.identify, self.identify.nextWakeup(now, capacities.identify));
-        wakeups.note(.negotiation, self.router.nextWakeup(now, Router.outcomes_per_pump));
+    pub fn collectWakeups(self: *const Service, capacities: Capacities, wakeups: *wake_sources.Wakeups) void {
+        wakeups.note(.reqresp, self.reqresp.schedule(.{ .application = capacities.application, .control = capacities.control }));
+        switch (self.applications) {
+            .active => wakeups.note(.gossip, self.gossipsub.schedule()),
+            .quiescing => wakeups.note(.gossip, .{ .runnable = true }),
+            .closed => {},
+        }
+        wakeups.note(.identify, self.identify.schedule(capacities.identify));
+        wakeups.note(.negotiation, self.router.schedule(Router.outcomes_per_pump));
     }
 
     /// Delivers one turn of engine events, then pumps each owner's ready work and due deadlines.

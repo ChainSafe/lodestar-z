@@ -4,6 +4,7 @@ pub const ForkEntry = struct {
 };
 
 pub const Address = @import("udp").Address;
+pub const Schedule = @import("schedule.zig").Schedule;
 pub const Handle = struct {
     index: u16,
     generation: u32,

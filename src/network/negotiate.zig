@@ -279,11 +279,12 @@ pub const Negotiator = struct {
     }
 
     /// Output pressure alone is ready only when the host supplies outcome capacity. O(1).
-    pub fn nextWakeup(self: *const Negotiator, now: types.Now, outcome_capacity: usize) ?u64 {
-        if (self.ready.len > 0) return now.mono_ms;
-        if (self.pending.len > 0 and outcome_capacity > 0) return now.mono_ms;
-        const top = self.timeouts.peek() orelse return null;
-        return @max(now.mono_ms, top.deadline);
+    pub fn schedule(self: *const Negotiator, outcome_capacity: usize) types.Schedule {
+        return .{
+            .runnable = self.ready.len > 0 or self.reported.len > 0 or
+                (self.pending.len > 0 and outcome_capacity > 0),
+            .deadline_ms = if (self.timeouts.peek()) |top| top.deadline else null,
+        };
     }
 
     /// Retains a selected listener's existing row until a bounded final response and FIN are queued.

@@ -1,3 +1,4 @@
+const driver = @import("driver.zig");
 const transport_test = @import("transport_test_support.zig");
 const core_test = @import("network_core_test_support.zig");
 const FaultIo = @import("fault_io");
@@ -30,7 +31,7 @@ fn updateLocal(node: *NetworkCore, local: *const t.LocalState, schedule: Network
 /// Steps at the current time with a host that only bounds the wait at `wait_ms`.
 fn stepAfter(node: *NetworkCore, wait_ms: u32) !NetworkCore.Result {
     const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
-    return node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| wait_ms));
+    return driver.step(node, std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| wait_ms));
 }
 
 const MaintenancePeers = struct {
@@ -81,7 +82,7 @@ const MaintenancePeers = struct {
     fn step(nodes: []const *NetworkCore) !void {
         for (nodes) |node| {
             const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
-            const result = node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| 1));
+            const result = driver.step(node, std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| 1));
             if (result.failure) |err| return err;
         }
     }
@@ -129,7 +130,7 @@ test "core maintenance isolates slow peers and full application capacity" {
     const started = control.counters.started;
     for (0..3) |turn| {
         const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
-        _ = hub.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms));
+        _ = driver.step(hub, std.testing.io, now, .{}, .deadlineOnly(now.mono_ms));
         try std.testing.expectEqual(started + turn + 1, control.counters.started);
     }
     try std.testing.expectEqual(@as(usize, 3), core_test.controlOperations(hub));
@@ -234,10 +235,10 @@ test "core signed bootstrap reaches relevant peer with zero and one outputs" {
     for (0..3000) |turn| {
         const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
         if (now.mono_ms - start.mono_ms > 10_000) break;
-        const result_a = a.step(std.testing.io, now, .{ .peers = events[0..@intFromBool(turn > 10)] }, .deadlineOnly(now.mono_ms +| 1));
+        const result_a = driver.step(&a, std.testing.io, now, .{ .peers = events[0..@intFromBool(turn > 10)] }, .deadlineOnly(now.mono_ms +| 1));
         if (result_a.failure) |err| return err;
         if (result_a.counts.peers > 0 and events[0] == .ready) ready = true;
-        const result_b = b.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| 1));
+        const result_b = driver.step(&b, std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| 1));
         if (result_b.failure) |err| return err;
         if (ready and a.peerCounts().relevant == 1 and b.peerCounts().relevant == 1) break;
     }
@@ -269,8 +270,8 @@ test "core signed bootstrap reaches relevant peer with zero and one outputs" {
     for (0..100_000) |_| {
         if (a.isClosed() and b.isClosed()) break;
         if (tick.mono_ms -| now.mono_ms >= 1_000) break;
-        _ = a.step(std.testing.io, tick, .{}, .deadlineOnly(tick.mono_ms +| 1));
-        _ = b.step(std.testing.io, tick, .{}, .deadlineOnly(tick.mono_ms +| 1));
+        _ = driver.step(&a, std.testing.io, tick, .{}, .deadlineOnly(tick.mono_ms +| 1));
+        _ = driver.step(&b, std.testing.io, tick, .{}, .deadlineOnly(tick.mono_ms +| 1));
         tick = try @import("transport.zig").Transport.currentTime(std.testing.io);
     }
     try std.testing.expect(a.isClosed());
@@ -300,8 +301,8 @@ fn applicationAndFork(a: *NetworkCore, b: *NetworkCore, b_inbox: *Inbox) !void {
     var peer_b: ?t.PeerRef = null;
     for (0..2000) |_| {
         const tick = try @import("transport.zig").Transport.currentTime(std.testing.io);
-        _ = a.step(std.testing.io, tick, .{}, .deadlineOnly(tick.mono_ms +| 1));
-        _ = b.step(std.testing.io, tick, .{}, .deadlineOnly(tick.mono_ms +| 1));
+        _ = driver.step(a, std.testing.io, tick, .{}, .deadlineOnly(tick.mono_ms +| 1));
+        _ = driver.step(b, std.testing.io, tick, .{}, .deadlineOnly(tick.mono_ms +| 1));
         for (rows[0..a.peer_manager.snapshots(&rows)]) |row| {
             if (row.relevant and row.status != null and row.status.?.earliest_available_slot != null and row.custody_groups != null) peer_a = row.peer;
         }
@@ -328,8 +329,8 @@ fn applicationAndFork(a: *NetworkCore, b: *NetworkCore, b_inbox: *Inbox) !void {
     b.peer_manager.reStatusPeers(now);
     for (0..20) |_| {
         const tick = try @import("transport.zig").Transport.currentTime(std.testing.io);
-        _ = a.step(std.testing.io, tick, .{}, .deadlineOnly(tick.mono_ms +| 1));
-        _ = b.step(std.testing.io, tick, .{}, .deadlineOnly(tick.mono_ms +| 1));
+        _ = driver.step(a, std.testing.io, tick, .{}, .deadlineOnly(tick.mono_ms +| 1));
+        _ = driver.step(b, std.testing.io, tick, .{}, .deadlineOnly(tick.mono_ms +| 1));
     }
     const response = [_]u8{9} ** @import("consensus_types").fulu.SignedBeaconBlock.min_size;
     var app: [1]rr.ReqResp.Event = undefined;
@@ -338,7 +339,7 @@ fn applicationAndFork(a: *NetworkCore, b: *NetworkCore, b_inbox: *Inbox) !void {
     var chunks: usize = 0;
     for (0..3000) |_| {
         const tick = try @import("transport.zig").Transport.currentTime(std.testing.io);
-        const received = b.step(std.testing.io, tick, .{ .application = &app }, .deadlineOnly(tick.mono_ms +| 1));
+        const received = driver.step(b, std.testing.io, tick, .{ .application = &app }, .deadlineOnly(tick.mono_ms +| 1));
         if (received.failure) |err| return err;
         for (app[0..received.counts.application]) |event| switch (event) {
             .request => |value| try b.respond(value.request, &response, .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }, tick),
@@ -346,7 +347,7 @@ fn applicationAndFork(a: *NetworkCore, b: *NetworkCore, b_inbox: *Inbox) !void {
             .failed => return error.ApplicationFailed,
             else => {},
         };
-        const sent = a.step(std.testing.io, tick, .{ .application = &app, .peers = &peer_events }, .deadlineOnly(tick.mono_ms +| 1));
+        const sent = driver.step(a, std.testing.io, tick, .{ .application = &app, .peers = &peer_events }, .deadlineOnly(tick.mono_ms +| 1));
         if (sent.failure) |err| return err;
         for (app[0..sent.counts.application]) |event| switch (event) {
             .chunk => |value| {
@@ -373,7 +374,7 @@ fn applicationAndFork(a: *NetworkCore, b: *NetworkCore, b_inbox: *Inbox) !void {
     var published = false;
     for (0..3000) |turn| {
         const tick = try @import("transport.zig").Transport.currentTime(std.testing.io);
-        _ = a.step(std.testing.io, tick, .{}, .deadlineOnly(tick.mono_ms +| 1));
+        _ = driver.step(a, std.testing.io, tick, .{}, .deadlineOnly(tick.mono_ms +| 1));
         if (!published and turn > 20 and a.service.gossipsub.resourceSnapshot().remote_subscriptions > 0 and
             a.service.gossipsub.peers.rows[0].direct)
         {
@@ -383,7 +384,7 @@ fn applicationAndFork(a: *NetworkCore, b: *NetworkCore, b_inbox: *Inbox) !void {
             published = sent.queued > 0;
         }
         b_inbox.clear();
-        _ = b.step(std.testing.io, tick, .{}, .deadlineOnly(tick.mono_ms +| 1));
+        _ = driver.step(b, std.testing.io, tick, .{}, .deadlineOnly(tick.mono_ms +| 1));
         for (b_inbox.messages()) |message| {
             try std.testing.expectEqualSlices(u8, &response, message.bytes);
             try std.testing.expect(b.reportValidation(message.handle, .accept, tick) == .applied);
@@ -425,7 +426,7 @@ test "core every allocation prefix cleans up and reservations count owned storag
     const allocations = allocation.alloc_index;
     const runtime_calls = allocation.allocations;
     const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
-    for (0..4) |_| _ = node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms));
+    for (0..4) |_| _ = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(now.mono_ms));
     try std.testing.expectEqual(allocation.allocated_bytes, allocated);
     try std.testing.expectEqual(runtime_calls, allocation.allocations);
     node.deinit(std.testing.io);
@@ -452,32 +453,32 @@ test "core demand persists until replacement and reaches discovery after selecti
     desired.demand = .{ .attnets = 1 };
     _ = try node.applyIntent(&desired, node.last_now);
     const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
-    _ = node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms));
+    _ = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(now.mono_ms));
     try std.testing.expectEqual(@as(u8, 1), node.discovery.?.demand.attnets[0]);
     const view: *const NetworkCore = &node;
     const evaluated = view.peer_manager.coverageDeficits();
     desired.demand = .{ .attnets = 2 };
     _ = try node.applyIntent(&desired, node.last_now);
-    try std.testing.expectEqual(node.last_now.mono_ms, node.nextWakeup(node.last_now, .{}).?);
+    try std.testing.expectEqual(node.last_now.mono_ms, node.wakeups(node.last_now, .{}).schedule().nextWakeup(node.last_now.mono_ms).?);
     try std.testing.expectEqualDeep(evaluated, view.peer_manager.coverageDeficits());
     try std.testing.expectEqual(@as(u8, 1), view.peer_manager.discoveryNeed().attnets[0]);
     try std.testing.expectEqual(@as(u8, 1), node.discovery.?.demand.attnets[0]);
-    _ = node.step(std.testing.io, node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms));
+    _ = driver.step(&node, std.testing.io, node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms));
     try std.testing.expectEqual(@as(u8, 2), view.peer_manager.discoveryNeed().attnets[0]);
     try std.testing.expectEqual(@as(u8, 2), node.discovery.?.demand.attnets[0]);
-    _ = node.step(std.testing.io, node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms));
+    _ = driver.step(&node, std.testing.io, node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms));
     try std.testing.expectEqual(@as(u16, 1), view.peer_manager.coverageDeficits().attestation);
     try std.testing.expectEqual(@as(u8, 2), view.peer_manager.discoveryNeed().attnets[0]);
     try std.testing.expectEqual(@as(u8, 2), node.discovery.?.demand.attnets[0]);
     desired.demand = .{ .attnets = 4, .attestation_target = 0 };
     try std.testing.expectError(error.InvalidDemand, node.applyIntent(&desired, node.last_now));
-    _ = node.step(std.testing.io, node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms));
+    _ = driver.step(&node, std.testing.io, node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms));
     try std.testing.expectEqual(@as(u16, 1), view.peer_manager.coverageDeficits().attestation);
     try std.testing.expectEqual(@as(u8, 2), view.peer_manager.discoveryNeed().attnets[0]);
     try std.testing.expectEqual(@as(u8, 2), node.discovery.?.demand.attnets[0]);
     desired.demand = .{};
     _ = try node.applyIntent(&desired, node.last_now);
-    _ = node.step(std.testing.io, node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms));
+    _ = driver.step(&node, std.testing.io, node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms));
     try std.testing.expectEqual(@as(u16, 0), view.peer_manager.coverageDeficits().attestation);
     try std.testing.expectEqual(@as(u8, 0), view.peer_manager.discoveryNeed().attnets[0]);
     try std.testing.expectEqual(@as(u8, 0), node.discovery.?.demand.attnets[0]);
@@ -497,7 +498,7 @@ test "core fails a dial the host refuses without failing the turn or penalizing 
         .send = .{ .socket = node.transport.sockets.primary().handle },
         .send_failure = error.AccessDenied,
     };
-    const refused = node.step(faults.io(), now, .{}, .deadlineOnly(now.mono_ms));
+    const refused = driver.step(&node, faults.io(), now, .{}, .deadlineOnly(now.mono_ms));
     try std.testing.expect(refused.failure == null);
     try std.testing.expectEqual(@as(u8, 1), refused.dial_failed);
     try std.testing.expectEqual(@as(u8, 0), refused.dial_deferred);
@@ -530,25 +531,25 @@ test "core socket faults preserve the other owner and local dial refusal is defe
         try sender.send(std.testing.io, &socket.address, "invalid");
         faults.receive = .{ .socket = socket.handle };
         faults.receive_calls = 0;
-        const result = node.step(io, now, .{}, .deadlineOnly(now.mono_ms +| 1000));
+        const result = driver.step(&node, io, now, .{}, .deadlineOnly(now.mono_ms +| 1000));
         try std.testing.expectEqual(error.Canceled, result.failure.?);
         try std.testing.expect(faults.receive_calls >= 1);
         try std.testing.expect(node.last_now.mono_ms >= now.mono_ms);
         faults.receive = null;
-        _ = node.step(io, node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms));
+        _ = driver.step(&node, io, node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms));
     }
     faults.receive = null;
-    const idle = node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms));
+    const idle = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(now.mono_ms));
     try std.testing.expect(idle.failure == null);
     const settled = node.last_now;
     const discovery_due = node.discovery.?.nextWakeup(settled.mono_ms).?;
     try std.testing.expect(discovery_due > settled.mono_ms);
-    try std.testing.expectEqual(discovery_due, node.nextWakeup(settled, .{}).?);
+    try std.testing.expectEqual(discovery_due, node.wakeups(settled, .{}).schedule().nextWakeup(settled.mono_ms).?);
     const peer = t.PeerId.fromPublicKey(&remote_key.publicKey());
     try node.connectUntil(&peer, &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 19003 } }}, settled, settled.mono_ms +| @import("peers/dialing.zig").Dialing.connect_timeout_ms);
-    try std.testing.expectEqual(settled.mono_ms, node.nextWakeup(settled, .{}).?);
+    try std.testing.expectEqual(settled.mono_ms, node.wakeups(settled, .{}).schedule().nextWakeup(settled.mono_ms).?);
     faults.clock = .{};
-    const refused = node.step(io, settled, .{}, .deadlineOnly(settled.mono_ms));
+    const refused = driver.step(&node, io, settled, .{}, .deadlineOnly(settled.mono_ms));
     try std.testing.expectEqual(@as(u8, 1), refused.dial_deferred);
     try std.testing.expectEqual(error.ClockOutOfRange, refused.failure.?);
     try std.testing.expectEqual(@as(u8, 0), refused.dial_started);
@@ -557,7 +558,7 @@ test "core socket faults preserve the other owner and local dial refusal is defe
         try std.testing.expect(row.attempt == null);
     };
     const calls = backing_node.allocations;
-    const clean = node.step(std.testing.io, settled, .{}, .deadlineOnly(settled.mono_ms));
+    const clean = driver.step(&node, std.testing.io, settled, .{}, .deadlineOnly(settled.mono_ms));
     try std.testing.expect(clean.failure == null);
     try std.testing.expectEqual(calls, backing_node.allocations);
 }
@@ -577,13 +578,13 @@ test "core discovery drain is nonblocking under the standalone default interval"
     try sender.send(std.testing.io, &node.discovery.?.transport.sockets.primary().address, "invalid");
     const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
     // The readable datagram keeps the drain going until a receive finds the socket empty.
-    const drained = node.step(faults.io(), now, .{}, .deadlineOnly(now.mono_ms));
+    const drained = driver.step(&node, faults.io(), now, .{}, .deadlineOnly(now.mono_ms));
     try std.testing.expect(drained.failure == null);
     const rejected = &node.discovery.?.datagram_rejections[@intFromEnum(d.types.RejectReason.malformed_packet)];
     try std.testing.expectEqual(@as(u64, 1), rejected.*);
     const after_datagram = faults.receive_calls;
     try std.testing.expect(after_datagram >= 2);
-    const idle = node.step(faults.io(), node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms));
+    const idle = driver.step(&node, faults.io(), node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms));
     try std.testing.expect(idle.failure == null);
     try std.testing.expectEqual(@as(u64, 1), rejected.*);
     try std.testing.expectEqual(after_datagram, faults.receive_calls);
@@ -604,13 +605,13 @@ fn failureAndReplacement(a: *NetworkCore, b: *NetworkCore) !void {
     const deadline = a.peer_manager.control.schedules[target.?.index].closing.?.deadline_ms;
     var after_deadline = now;
     after_deadline.mono_ms = deadline;
-    const result = a.step(faulty_io, after_deadline, .{}, .deadlineOnly(after_deadline.mono_ms));
+    const result = driver.step(a, faulty_io, after_deadline, .{}, .deadlineOnly(after_deadline.mono_ms));
     try std.testing.expectEqual(error.Canceled, result.failure.?);
     try std.testing.expectEqual(@as(u16, 0), a.peerCounts().relevant);
     try std.testing.expect(a.peer_manager.catalog.get(target.?).?.connection == null);
     for (0..100) |_| {
-        _ = a.step(std.testing.io, a.last_now, .{}, .deadlineOnly(a.last_now.mono_ms));
-        _ = b.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms));
+        _ = driver.step(a, std.testing.io, a.last_now, .{}, .deadlineOnly(a.last_now.mono_ms));
+        _ = driver.step(b, std.testing.io, now, .{}, .deadlineOnly(now.mono_ms));
         if (a.peerCounts().connected == 0) break;
     }
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{24}));
@@ -623,11 +624,11 @@ fn failureAndReplacement(a: *NetworkCore, b: *NetworkCore) !void {
     try replacement.connectUntil(&a.peerId(), &.{a.transport.localAddress()}, now, now.mono_ms +| @import("peers/dialing.zig").Dialing.connect_timeout_ms);
     for (0..2000) |_| {
         const tick = try @import("transport.zig").Transport.currentTime(std.testing.io);
-        const added = replacement.step(std.testing.io, tick, .{}, .deadlineOnly(tick.mono_ms +| 1));
+        const added = driver.step(&replacement, std.testing.io, tick, .{}, .deadlineOnly(tick.mono_ms +| 1));
         if (added.failure) |err| return err;
         var host_tick = tick;
         host_tick.mono_ms = @max(host_tick.mono_ms, a.last_now.mono_ms);
-        const accepted = a.step(std.testing.io, host_tick, .{}, .deadlineOnly(host_tick.mono_ms +| 1));
+        const accepted = driver.step(a, std.testing.io, host_tick, .{}, .deadlineOnly(host_tick.mono_ms +| 1));
         if (accepted.failure) |err| return err;
         if (a.peerCounts().relevant == 1 and replacement.peerCounts().relevant == 1) break;
     }
@@ -745,7 +746,7 @@ test "core native host wake validates rollback detaches and preserves bytes" {
     try std.testing.expect(!detached.readiness.host);
     try node.setHostWake(host.handle);
     node.shutdown(node.last_now);
-    const stopped = node.step(std.testing.io, node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms +| 100));
+    const stopped = driver.step(&node, std.testing.io, node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms +| 100));
     try std.testing.expect(!stopped.readiness.host);
     try std.testing.expectError(error.Stopped, node.setHostWake(host.handle));
     var buffer: [8]u8 = undefined;
@@ -784,7 +785,7 @@ test "core native wait source failure retains completed protocol progress" {
     try std.testing.expectEqualSlices(u8, "invalid", node.discovery.?.transport.receive_buffer[0..7]);
     try std.testing.expectEqual(allocations, backing_node.allocations);
     try node.setHostWake(null);
-    const clean = node.step(std.testing.io, node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms));
+    const clean = driver.step(&node, std.testing.io, node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms));
     try std.testing.expect(clean.failure == null);
     try std.testing.expectEqual(@as(u64, 1), node.counters.readiness_failures);
 }
@@ -803,7 +804,7 @@ test "core native wait honors engine timers and pending lifecycle work" {
     const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
     _ = try node.transport.engine.dial(&destination, node.peerId(), now);
     try std.testing.expect(node.transport.engine.backlog());
-    const first = node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| 100));
+    const first = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| 100));
     try std.testing.expect(first.failure == null);
     try std.testing.expect(first.transport.datagrams_sent > 0);
     try std.testing.expect(!first.transport.backlog);
@@ -811,16 +812,16 @@ test "core native wait honors engine timers and pending lifecycle work" {
     const deadline = node.transport.nextDeadlineNs().?;
     const deadline_ms = deadline / std.time.ns_per_ms + @intFromBool(deadline % std.time.ns_per_ms != 0);
     try std.testing.expect(deadline_ms <= now.mono_ms + 80);
-    try std.testing.expect(node.nextWakeup(current, .{}).? <= deadline_ms);
-    const timer = node.step(std.testing.io, current, .{}, .deadlineOnly(current.mono_ms +| 100));
+    try std.testing.expect(node.wakeups(current, .{}).schedule().nextWakeup(current.mono_ms).? <= deadline_ms);
+    const timer = driver.step(&node, std.testing.io, current, .{}, .deadlineOnly(current.mono_ms +| 100));
     try std.testing.expect(timer.failure == null);
     const failed = try node.transport.engine.dial(&destination, node.peerId(), node.last_now);
     try std.testing.expect(node.transport.engine.failSend(failed));
     try std.testing.expect(node.transport.engine.eventsPending());
-    const lifecycle = node.step(std.testing.io, node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms +| 100));
+    const lifecycle = driver.step(&node, std.testing.io, node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms +| 100));
     try std.testing.expect(lifecycle.failure == null);
     try std.testing.expect(lifecycle.transport.events > 0);
-    const repeated = node.step(std.testing.io, node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms));
+    const repeated = driver.step(&node, std.testing.io, node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms));
     try std.testing.expectEqual(@as(usize, 0), repeated.transport.events);
 }
 
@@ -892,10 +893,10 @@ test "core beacon idle scans do not manufacture immediate deadlines" {
     const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
     const calls = backing_node.allocations;
     for (0..8) |_| {
-        const result = node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms));
+        const result = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(now.mono_ms));
         try std.testing.expect(result.failure == null);
-        try std.testing.expectEqual(@as(?u64, null), node.service.reqresp.nextWakeup(now, .{}));
-        try std.testing.expect(node.nextWakeup(now, .{}).? > now.mono_ms);
+        try std.testing.expectEqual(@as(?u64, null), node.service.reqresp.schedule(.{}).nextWakeup(now.mono_ms));
+        try std.testing.expect(node.wakeups(now, .{}).schedule().nextWakeup(now.mono_ms).? > now.mono_ms);
     }
     try std.testing.expectEqual(calls, backing_node.allocations);
 }
@@ -924,9 +925,9 @@ test "core idle turns with pending negotiations are never due for reqresp or neg
     const visits = .{ node.service.reqresp.visits, node.service.router.negotiator.visits };
     for (0..64) |_| {
         const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
-        if (node.service.reqresp.nextWakeup(now, .{ .application = 1, .control = 1 })) |wakeup| try std.testing.expect(wakeup > now.mono_ms);
-        try std.testing.expect(node.service.router.nextWakeup(now, 1).? > now.mono_ms);
-        try std.testing.expect(node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms)).failure == null);
+        if (node.service.reqresp.schedule(.{ .application = 1, .control = 1 }).nextWakeup(now.mono_ms)) |wakeup| try std.testing.expect(wakeup > now.mono_ms);
+        try std.testing.expect(node.service.router.schedule(1).nextWakeup(now.mono_ms).? > now.mono_ms);
+        try std.testing.expect(driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(now.mono_ms)).failure == null);
     }
     try std.testing.expectEqual(due[@intFromEnum(Source.reqresp)], node.due_now_turns[@intFromEnum(Source.reqresp)]);
     try std.testing.expectEqual(due[@intFromEnum(Source.negotiation)], node.due_now_turns[@intFromEnum(Source.negotiation)]);
@@ -978,7 +979,7 @@ test "core targeted Status serves two current schedules and immediate close is l
         const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
         if (now.mono_ms - start.mono_ms > 10_000) break;
         for ([_]*NetworkCore{ &a, &b, &c }) |node| {
-            const result = node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| 1));
+            const result = driver.step(node, std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| 1));
             if (result.failure) |err| return err;
         }
         const count = a.peer_manager.snapshots(&rows);
@@ -1002,7 +1003,7 @@ test "core targeted Status serves two current schedules and immediate close is l
     expected.status_due_ms = now.mono_ms;
     try std.testing.expectEqualDeep(expected, a.peer_manager.control.schedules[selected.peer.index]);
     try std.testing.expectEqualDeep(unselected, a.peer_manager.control.schedules[other.peer.index]);
-    const result = a.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms));
+    const result = driver.step(&a, std.testing.io, now, .{}, .deadlineOnly(now.mono_ms));
     if (result.failure) |err| return err;
     var status_started: usize = 0;
     for (a.control_protocol.operations) |op| if (op.request != null and op.protocol == .status_v1) {
@@ -1040,7 +1041,7 @@ fn recycledPeerOperations(a: *NetworkCore, b: *NetworkCore, c: *NetworkCore, pre
             const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
             if (now.mono_ms - start.mono_ms > 10_000) break;
             for ([_]*NetworkCore{ a, b, c, &replacement }) |node| {
-                const result = node.step(std.testing.io, now, .{ .peers = &events }, .deadlineOnly(now.mono_ms +| 1));
+                const result = driver.step(node, std.testing.io, now, .{ .peers = &events }, .deadlineOnly(now.mono_ms +| 1));
                 if (result.failure) |err| return err;
             }
             const ref = a.peer_manager.catalog.find(&replacement.peerId()) orelse continue;
@@ -1089,13 +1090,13 @@ test "application transport borrow authenticates while remote Status remains una
     var authenticated = false;
     for (0..300) |_| {
         const tick = try @import("transport.zig").Transport.currentTime(std.testing.io);
-        const result = a.step(std.testing.io, tick, .{}, .deadlineOnly(tick.mono_ms +| 1));
+        const result = driver.step(&a, std.testing.io, tick, .{}, .deadlineOnly(tick.mono_ms +| 1));
         if (result.failure) |err| return err;
-        for (a.transportEvents()) |event| if (event == .connected) {
+        for (result.transport_events) |event| if (event == .connected) {
             try std.testing.expect(event.connected.peer_id.eql(&b.peerId()));
             authenticated = true;
         };
-        _ = b.step(std.testing.io, tick, .{}, .deadlineOnly(tick.mono_ms +| 1));
+        _ = driver.step(&b, std.testing.io, tick, .{}, .deadlineOnly(tick.mono_ms +| 1));
     }
     try std.testing.expect(authenticated);
     try std.testing.expectEqual(@as(u16, 1), a.peerCounts().connected);
@@ -1210,7 +1211,7 @@ test "core cancellation releases every selected dial without blaming unstarted p
         try node.connectUntil(peer, &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 19003 } }}, now, now.mono_ms + 30_000);
     }
     var faults: FaultIo = .{ .send = .{}, .send_failure = error.Canceled };
-    const stopped = node.step(faults.io(), now, .{}, .deadlineOnly(now.mono_ms));
+    const stopped = driver.step(&node, faults.io(), now, .{}, .deadlineOnly(now.mono_ms));
     try std.testing.expectEqual(error.Canceled, stopped.failure.?);
     try std.testing.expectEqual(@as(u8, 3), stopped.dial_deferred);
     try std.testing.expectEqual(@as(u8, 0), stopped.dial_started);
