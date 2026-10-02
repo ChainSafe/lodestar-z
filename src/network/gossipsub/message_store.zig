@@ -137,7 +137,7 @@ pub const Store = struct {
         return if (len <= inline_bytes) 0 else (len + page_bytes - 1) / page_bytes;
     }
 
-    pub fn kindRoom(self: *const Store, kind: topic.Kind, len: usize) bool {
+    fn kindRoom(self: *const Store, kind: topic.Kind, len: usize) bool {
         const limits = self.limits orelse return true;
         const k = @intFromEnum(kind);
         const pages = pagesFor(len);

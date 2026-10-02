@@ -12,8 +12,8 @@ const range = [_]u8{0} ** 8 ++ ping ++ ping;
 
 /// A gossip message admitted through the sink, reported after the service turn.
 const Delivery = struct {
-    handle: Gossip.ValidationHandle,
-    id: Gossip.MessageId,
+    handle: Gossip.Gossipsub.ValidationHandle,
+    id: Gossip.Gossipsub.MessageId,
     topic: [Gossip.topic.topic_max_len]u8,
     topic_len: usize,
     length: usize,
@@ -45,7 +45,7 @@ pub const Peer = struct {
     application: bool = false,
     /// One response per inbound request slot, since chunks borrow their bytes until sent.
     control_responses: [][92]u8 = &.{},
-    gossip_sink: Gossip.MessageSink = undefined,
+    gossip_sink: Gossip.Gossipsub.MessageSink = undefined,
     deliveries: [16]Delivery = undefined,
     delivery_count: usize = 0,
 
@@ -60,7 +60,7 @@ pub const Peer = struct {
         return self.delivery_count < self.deliveries.len;
     }
 
-    fn admit(context: *anyopaque, candidate: *Gossip.Admission) bool {
+    fn admit(context: *anyopaque, candidate: *Gossip.Gossipsub.MessageAdmission) bool {
         const self: *Peer = @ptrCast(@alignCast(context));
         if (self.delivery_count == self.deliveries.len) return false;
         const usage = candidate.usage(&.{});
@@ -74,7 +74,7 @@ pub const Peer = struct {
         return true;
     }
 
-    fn deliver(self: *Peer, name: []const u8, length: usize, sha256: [64]u8, id: Gossip.MessageId, handle: Gossip.ValidationHandle) !void {
+    fn deliver(self: *Peer, name: []const u8, length: usize, sha256: [64]u8, id: Gossip.Gossipsub.MessageId, handle: Gossip.Gossipsub.ValidationHandle) !void {
         self.emitted += 1;
         try control.emit(self.allocator, .{ .event = "message", .topic = name, .length = length, .sha256 = sha256, .messageId = std.fmt.bytesToHex(id, .lower) });
         const report = self.service.gossipsub.report(handle, .accept, self.now);

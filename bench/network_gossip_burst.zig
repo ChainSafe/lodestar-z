@@ -295,11 +295,11 @@ const Chain = struct {
 
 /// Processor limits as Lodestar's `createNativeConfig` derives them, with the attestation items
 /// sized from one slot's messages as Lodestar sizes them from active validators.
-fn processorLimits(chain: *const Chain, options: *const Options) network.gossip_processor.limits_mod.Limits {
+fn processorLimits(chain: *const Chain, options: *const Options) network.gossip_processor.limits.Limits {
     const items = [_]u32{ 8, 2048, 0, 32, 32, 128, 128, 1024, 8, 8, 128, 256, 256 };
     const weights_mib = [_]usize{ 24, 8, 8, 1, 4, 1, 2, 2, 2, 2, 1, 8, 16 };
     const slot_messages = @as(u64, options.burst) + @as(u64, options.background) * chain_config.chain.SLOT_DURATION_MS / 1000;
-    var limits: network.gossip_processor.limits_mod.Limits = undefined;
+    var limits: network.gossip_processor.limits.Limits = undefined;
     for (&limits, items, weights_mib, 0..) |*limit, count, weight, kind| {
         var largest: usize = 0;
         for (chain.plan.topics[0..chain.plan.boundary_count]) |boundary| largest = @max(largest, boundary.rules[kind].ssz_max);
@@ -313,7 +313,7 @@ fn processorLimits(chain: *const Chain, options: *const Options) network.gossip_
 
 /// The feat4 sas owner: 210 peers and Lodestar's gossip policy and processor limits.
 fn hubResolved(chain: *const Chain, options: *const Options) !network.configuration.Resolved {
-    const limits_mod = network.gossip_processor.limits_mod;
+    const limits_mod = network.gossip_processor.limits;
     const limits = processorLimits(chain, options);
     return network.configuration.resolve(.{
         .profile = .beacon_node,
@@ -416,7 +416,7 @@ fn spokeResolved(chain: *const Chain, options: *const Options, index: u16, slow:
 /// Admits every feasible message and applies `accept` verdicts `delay_ms` after admission, handed
 /// over at the next `exchange_ms` tick, at most `batch` per owner apply, as the host's gossip flags do.
 const Host = struct {
-    const Pending = struct { handle: gossip.ValidationHandle, due_ms: u64 };
+    const Pending = struct { handle: gossip.Gossipsub.ValidationHandle, due_ms: u64 };
     const ring_len = 65_536;
 
     ring: []Pending,
@@ -425,7 +425,7 @@ const Host = struct {
     delay_ms: u64,
     exchange_ms: u64,
     batch: usize,
-    sink: gossip.MessageSink = undefined,
+    sink: gossip.Gossipsub.MessageSink = undefined,
     admitted: u64 = 0,
     refused: u64 = 0,
     applied: u64 = 0,
@@ -443,7 +443,7 @@ const Host = struct {
         return self.len < self.ring.len;
     }
 
-    fn admit(context: *anyopaque, candidate: *gossip.Admission) bool {
+    fn admit(context: *anyopaque, candidate: *gossip.Gossipsub.MessageAdmission) bool {
         const self: *Host = @ptrCast(@alignCast(context));
         if (self.len == self.ring.len or !network.gossip_processor.policy.sourceRoom(candidate) or !network.gossip_processor.policy.feasible(candidate, &.{})) {
             self.refused += 1;

@@ -116,7 +116,10 @@ pub const Namespace = struct {
     }
 
     pub fn lookup(self: *const Namespace, name: []const u8) ?Match {
-        const parsed = topic.parseCanonical(name) orelse return null;
+        return self.lookupCanonical(topic.parseCanonical(name) orelse return null);
+    }
+
+    pub fn lookupCanonical(self: *const Namespace, parsed: topic.Canonical) ?Match {
         const k = @intFromEnum(parsed.name.kind);
         for (self.boundaries, self.offsets) |*boundary, *starts| {
             if (!std.mem.eql(u8, &boundary.digest, &parsed.digest)) continue;

@@ -278,7 +278,7 @@ test "router gossip capacity refusal preserves reqresp and explicit host retry" 
         server.gossipsub.peers.scores.penalize(ref.index, 20);
         server.gossipsub.peers.disconnect(ref, pair.now.mono_ms);
     }
-    try std.testing.expectEqual(gs.Gossipsub.Admission.capacity, server.gossipsub.peerConnected(&pair.server, handles.server, false, pair.now));
+    try std.testing.expectEqual(gs.Gossipsub.ConnectionAdmission.capacity, server.gossipsub.peerConnected(&pair.server, handles.server, false, pair.now));
     try std.testing.expect(!server.gossipsub.admitted(handles.server));
     const ping = [_]u8{7} ** 8;
     var sink: [8]u8 = undefined;
@@ -305,7 +305,7 @@ test "router gossip capacity refusal preserves reqresp and explicit host retry" 
     try std.testing.expect(pong);
     try std.testing.expect(!server.gossipsub.admitted(handles.server));
     for (retained) |ref| server.gossipsub.peers.release(ref);
-    try std.testing.expectEqual(gs.Gossipsub.Admission.admitted, server.gossipsub.peerConnected(&pair.server, handles.server, false, pair.now));
+    try std.testing.expectEqual(gs.Gossipsub.ConnectionAdmission.admitted, server.gossipsub.peerConnected(&pair.server, handles.server, false, pair.now));
     try std.testing.expect(server.gossipsub.admitted(handles.server));
 }
 
@@ -515,7 +515,7 @@ test "router accepted selection survives capability changes while ACK is flow co
 test "router capabilities activation preserves negotiated response context and captured ceiling" {
     const harness = @import("reqresp/test_pair.zig");
     const ct = @import("consensus_types");
-    const context: rr.ReqResp.ForkEntry = .{ .digest = .{ 9, 10, 11, 12 }, .fork = .phase0 };
+    const context: @import("types.zig").ForkEntry = .{ .digest = .{ 9, 10, 11, 12 }, .fork = .phase0 };
     var setup: harness.Pair = .{};
     const limits = @import("reqresp/admission_fixture.zig").quotas(2048, 1000);
     const options: harness.Overrides = .{

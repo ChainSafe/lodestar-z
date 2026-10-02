@@ -86,18 +86,18 @@ pub const Table = struct {
             self.diag.byteRefusals +|= 1;
             return error.ResourceExhausted;
         }
-        if (!n.gossip_processor.limits_mod.urgent(kind) and self.ordinary >= self.diag.capacity - self.diag.urgentReserved) {
+        if (!n.gossip_processor.limits.urgent(kind) and self.ordinary >= self.diag.capacity - self.diag.urgentReserved) {
             self.diag.refusals +|= 1;
             return error.PublicationQueueFull;
         }
         for (self.cells, 0..) |*cell, i| {
             if (cell.state != .free or cell.generation == std.math.maxInt(u64)) continue;
-            self.budget.reserve(if (n.gossip_processor.limits_mod.urgent(kind)) .urgent_publication else .publication, bytes) catch |err| {
+            self.budget.reserve(if (n.gossip_processor.limits.urgent(kind)) .urgent_publication else .publication, bytes) catch |err| {
                 self.diag.byteRefusals +|= 1;
                 return err;
             };
             cell.* = .{ .state = .preparing, .generation = cell.generation + 1, .kind = kind, .reservation = bytes };
-            self.ordinary += @intFromBool(!n.gossip_processor.limits_mod.urgent(kind));
+            self.ordinary += @intFromBool(!n.gossip_processor.limits.urgent(kind));
             self.diag.occupied += 1;
             self.diag.highWater = @max(self.diag.highWater, self.diag.occupied);
             self.diag.reservedBytes += bytes;
@@ -120,7 +120,7 @@ pub const Table = struct {
     pub fn releasePayload(self: *Table, cell: *Cell) void {
         self.backing.free(cell.payload);
         cell.payload = &.{};
-        self.budget.release(if (n.gossip_processor.limits_mod.urgent(cell.kind)) .urgent_publication else .publication, cell.reservation);
+        self.budget.release(if (n.gossip_processor.limits.urgent(cell.kind)) .urgent_publication else .publication, cell.reservation);
         self.diag.reservedBytes -= cell.reservation;
         cell.reservation = 0;
     }
@@ -128,7 +128,7 @@ pub const Table = struct {
         const cell = self.get(token).?;
         std.debug.assert(cell.state != .executing);
         self.releasePayload(cell);
-        self.ordinary -= @intFromBool(!n.gossip_processor.limits_mod.urgent(cell.kind));
+        self.ordinary -= @intFromBool(!n.gossip_processor.limits.urgent(cell.kind));
         self.diag.occupied -= 1;
         self.transition(cell, .free);
         cell.* = .{ .generation = cell.generation };

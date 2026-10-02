@@ -21,7 +21,7 @@ pub const RouterOverrides = Overrides(router.Options, &.{ "outbound_control_rese
 pub const Request = struct {
     profile: Profile = .beacon_node,
     seed: u64,
-    forks: []const rr.ForkEntry,
+    forks: []const @import("types.zig").ForkEntry,
     limits: ?Engine.Limits = null,
     work_limits: transport.WorkLimits = .{},
     socket_buffers: SocketBuffers = .{},

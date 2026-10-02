@@ -1,4 +1,4 @@
-const gossip = @import("gossipsub.zig");
+const Gossipsub = @import("Gossipsub.zig");
 const Engine = @import("../quic/Engine.zig");
 const MessageEvent = @import("messages.zig").MessageEvent;
 
@@ -9,13 +9,13 @@ pub const Pair = struct {
         try self.initOpts(.{ .random_seed = 1 }, .{ .random_seed = 1 });
     }
 
-    pub fn initOpts(self: *Pair, client: gossip.Options, server: gossip.Options) !void {
+    pub fn initOpts(self: *Pair, client: Gossipsub.Options, server: Gossipsub.Options) !void {
         try self.initWindow(client, server, null);
     }
 
     /// As `initOpts`, with the server granting `stream_window` bytes of credit on each stream the
     /// client opens until it reads them.
-    pub fn initWindow(self: *Pair, client: gossip.Options, server: gossip.Options, stream_window: ?u64) !void {
+    pub fn initWindow(self: *Pair, client: Gossipsub.Options, server: Gossipsub.Options, stream_window: ?u64) !void {
         const reqresp: @import("../reqresp/ReqResp.zig").Options = .{ .forks = &.{}, .peers = 128, .outbound_max = 1, .inbound_max = 1, .inbound_per_peer_max = 1, .admission = try @import("../reqresp/ReqResp.zig").Options.Admission.defaults(&@import("../reqresp/policy_fixture.zig").config(), 128, 128, 1) };
         const topics = &.{ @import("topic_fixture.zig").bytes(.{ 1, 2, 3, 4 }), @import("topic_fixture.zig").bytes(.{ 0x6a, 0x95, 0xa1, 0xa9 }) };
         var client_options = client;
@@ -23,6 +23,14 @@ pub const Pair = struct {
         var server_options = server;
         server_options.topic_policy = server.topic_policy orelse topics;
         try self.shared.initWindow(.{ .reqresp = reqresp, .gossipsub = client_options, .router = .{ .negotiations_max = 8 } }, .{ .reqresp = reqresp, .gossipsub = server_options, .router = .{ .negotiations_max = 8 } }, stream_window);
+    }
+
+    pub fn connectMesh(self: *Pair) !void {
+        try @import("test_support.zig").subscribe(self.shared.client.gossipsub, "/eth2/01020304/beacon_block/ssz_snappy");
+        try @import("test_support.zig").subscribe(self.shared.server.gossipsub, "/eth2/01020304/beacon_block/ssz_snappy");
+        for (0..20) |_| try self.pumpOnce();
+        self.shared.pair.advance(@import("constants.zig").heartbeat_interval_ms + 1);
+        for (0..20) |_| try self.pumpOnce();
     }
 
     pub fn deinit(self: *Pair) void {

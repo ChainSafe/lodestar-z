@@ -16,7 +16,7 @@ pub const Boundary = struct { epoch: u64, fork: config.ForkSeq, digest: [4]u8, v
 pub const Plan = struct {
     boundaries: [boundary_max]Boundary = undefined,
     boundary_count: u8 = 0,
-    forks: [boundary_max]@import("reqresp/root.zig").ReqResp.ForkEntry = undefined,
+    forks: [boundary_max]@import("types.zig").ForkEntry = undefined,
     topics: [boundary_max]topics.Boundary = undefined,
     policy: policy.Policy,
     phase0_digest: ?[4]u8 = null,

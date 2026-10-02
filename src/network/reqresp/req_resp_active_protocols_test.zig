@@ -7,9 +7,9 @@ const response_bounds = @import("response_bounds.zig");
 const reqresp = @import("ReqResp.zig");
 const harness = @import("test_pair.zig");
 
-const first: reqresp.ForkEntry = .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu };
-const second: reqresp.ForkEntry = .{ .digest = .{ 5, 6, 7, 8 }, .fork = .fulu };
-const phase0: reqresp.ForkEntry = .{ .digest = .{ 9, 10, 11, 12 }, .fork = .phase0 };
+const first: @import("../types.zig").ForkEntry = .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu };
+const second: @import("../types.zig").ForkEntry = .{ .digest = .{ 5, 6, 7, 8 }, .fork = .fulu };
+const phase0: @import("../types.zig").ForkEntry = .{ .digest = .{ 9, 10, 11, 12 }, .fork = .phase0 };
 
 /// Admission refusals for `reason`, summed over every method.
 fn refusals(owner: *const reqresp, reason: reqresp.metrics.AdmissionRefusal) u64 {
@@ -34,7 +34,7 @@ test "reqresp active new methods enforce request ceilings through real exchanges
     try setup.init(.{ .outbound_max = 1, .forks = &.{ first, second, phase0 } }, .{ .inbound_max = 1, .inbound_per_peer_max = 1, .forks = &.{ first, second, phase0 } });
     defer setup.deinit();
     inline for (cases) |case| {
-        for ([_]reqresp.ForkEntry{ first, second }) |context| {
+        for ([_]@import("../types.zig").ForkEntry{ first, second }) |context| {
             var bytes = [_]u8{0} ** case[1];
             if (case[0] == .blocks_by_head_v1) std.mem.writeInt(u64, bytes[32..40], 2, .little);
             var payload = [_]u8{0} ** (case[3] + 1);
@@ -148,7 +148,7 @@ test "reqresp active light client bounds select each actual fork type before dec
 
 test "reqresp active hostile coalesced context rejects before sink writes with one terminal" {
     const cases = .{
-        .{ reqresp.ForkEntry{ .digest = .{ 99, 99, 99, 99 }, .fork = .fulu }, reqresp.Failure{ .unknown_context = .{ 99, 99, 99, 99 } } },
+        .{ @import("../types.zig").ForkEntry{ .digest = .{ 99, 99, 99, 99 }, .fork = .fulu }, reqresp.Failure{ .unknown_context = .{ 99, 99, 99, 99 } } },
         .{ phase0, reqresp.Failure{ .invalid_response = error.InvalidResponseContext } },
         .{ first, reqresp.Failure{ .invalid_response = error.LengthOutOfBounds } },
     };

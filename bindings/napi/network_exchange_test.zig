@@ -12,9 +12,9 @@ const outgoing = @import("network_requests.zig");
 const tsfn = @import("network_runtime_test.zig");
 const fatal = @import("network_fatal.zig");
 const Runtime = r.Runtime;
-const Kind = n.gossip_processor.limits_mod.Kind;
-const limits_mod = n.gossip_processor.limits_mod;
-const State = n.gossip_processor.State;
+const Kind = n.gossip_processor.limits.Kind;
+const limits_mod = n.gossip_processor.limits;
+const State = n.gossip_processor.GossipProcessor.State;
 
 const Part = enum { peers, serving, checks, gossip, acknowledged, completions, closed };
 
@@ -164,7 +164,7 @@ const Fixture = struct {
         self.runtime.lane = &self.lane;
         self.runtime.incoming = try incoming.Table.init(std.testing.allocator, serving, &self.runtime.payload_budget);
         const limits: limits_mod.Limits = @splat(.{ .items = 4, .bytes = 4096 });
-        self.runtime.gossip = try g.Table.init(std.testing.allocator, .{ .capacity = limits_mod.items(&limits), .bytes = limits_mod.bytes(&limits), .limits = limits });
+        self.runtime.gossip = try g.Table.init(std.testing.allocator, .{ .limits = limits });
     }
     fn deinit(self: *Fixture) void {
         retireQueued(&self.runtime);
@@ -439,7 +439,7 @@ test "a 128-column burst reaches the host within two exchanges under saturated o
     var limits: limits_mod.Limits = @splat(.{ .items = 2, .bytes = 4096 });
     limits[@intFromEnum(Kind.data_column_sidecar)] = .{ .items = 256, .bytes = 4 << 20 };
     limits[@intFromEnum(Kind.voluntary_exit)] = .{ .items = 1024, .bytes = 1 << 20 };
-    runtime.gossip = try g.Table.init(std.testing.allocator, .{ .capacity = limits_mod.items(&limits), .bytes = limits_mod.bytes(&limits), .limits = limits, .execution = limits });
+    runtime.gossip = try g.Table.init(std.testing.allocator, .{ .limits = limits, .execution = limits });
     defer runtime.gossip.?.deinit();
     const table = &runtime.gossip.?;
     for (0..incoming.capacity_max) |_| _ = try queueRequest(&runtime);

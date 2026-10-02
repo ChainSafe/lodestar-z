@@ -1,7 +1,6 @@
 const std = @import("std");
 const p = @import("topic_policy.zig");
-const gossip = @import("gossipsub.zig");
-const Gossipsub = gossip.Gossipsub;
+const Gossipsub = @import("Gossipsub.zig");
 const Pair = @import("test_pair.zig").Pair;
 const validation = @import("validation.zig");
 const support = @import("test_support.zig");
@@ -13,8 +12,8 @@ fn boundary() p.Boundary {
     b.rules[0] = .{ .count = 1, .ssz_min = 10, .ssz_max = 20 };
     return b;
 }
-fn options(boundaries: []const p.Boundary) gossip.Options {
-    var out: gossip.Options = .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1, .seen_capacity = 16, .mcache_capacity = 16, .validation_capacity = 8 };
+fn options(boundaries: []const p.Boundary) Gossipsub.Options {
+    var out: Gossipsub.Options = .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1, .seen_capacity = 16, .mcache_capacity = 16, .validation_capacity = 8 };
     out.topic_policy = boundaries;
     return out;
 }
@@ -130,8 +129,8 @@ test "topic policy incoming lengths precede decode work arena store and validati
         const len = try @import("snappy").raw.compress(payload[0..size], &compressed);
         const received = g.messages.receive(&context, &workspace, &source, .{ .topic = name, .data = compressed[0..len] }, 1);
         try std.testing.expect(received == .admitted);
-        try std.testing.expectEqualSlices(u8, payload[0..size], received.admitted.bytes);
-        _ = g.report(received.admitted.handle, .ignore, .{ .mono_ms = 2, .unix_s = 0 });
+        try std.testing.expectEqualSlices(u8, payload[0..size], inbox.last().bytes);
+        _ = g.report(inbox.last().handle, .ignore, .{ .mono_ms = 2, .unix_s = 0 });
     }
     try std.testing.expect(peer_work < g.options.decompress_per_peer_bytes);
 }
@@ -218,7 +217,7 @@ test "topic policy real wire receives only bounded SSZ and keeps borrowed payloa
                 _ = try pair.shared.server.gossipsub.publish(message.topic, &local, pair.shared.pair.now);
                 try std.testing.expectEqualStrings(name, message.topic);
                 try std.testing.expectEqualSlices(u8, payload[0..size], message.bytes);
-                try std.testing.expectEqual(gossip.ReportOutcome{ .applied = .ignore }, pair.shared.server.gossipsub.report(message.handle, .ignore, pair.shared.pair.now));
+                try std.testing.expectEqual(Gossipsub.ReportOutcome{ .applied = .ignore }, pair.shared.server.gossipsub.report(message.handle, .ignore, pair.shared.pair.now));
             }
         }
     }
@@ -274,7 +273,7 @@ test "topic policy copied startup allocation prefixes and whole owner memory rec
     var raw_options = options(&boundaries);
     raw_options.topic_policy = null;
     var raw_ledger: @import("../reservations.zig").Reservations = .{ .backing = std.testing.allocator };
-    var raw = try gossip.Gossipsub.init(raw_ledger.allocator(), raw_options);
+    var raw = try Gossipsub.init(raw_ledger.allocator(), raw_options);
     defer raw.deinit();
     try std.testing.expectEqual(raw.memoryPlan().total_bytes - @sizeOf(Gossipsub), raw_ledger.bytes);
     try std.testing.expectEqual(configured_bytes - raw_ledger.bytes, g.memoryPlan().total_bytes - raw.memoryPlan().total_bytes);
@@ -310,7 +309,8 @@ test "topic policy remembered ordinals remain independent of retained validation
     const workspace: @import("turn.zig").Workspace = .{ .scratch = g.msg_scratch, .peer_work = &peer_work, .work = &work, .large_used = &large_used, .sink = g.message_sink };
     var compressed: [64]u8 = undefined;
     const len = try @import("snappy").raw.compress("0123456789", &compressed);
-    const received = g.messages.receive(&context, &workspace, &source, .{ .topic = name, .data = compressed[0..len] }, 1).admitted;
+    try std.testing.expect(g.messages.receive(&context, &workspace, &source, .{ .topic = name, .data = compressed[0..len] }, 1) == .admitted);
+    const received = inbox.last();
     try support.unsubscribe(&g, name);
     g.sessions.rows[peer.index].io.tx.subscription_dirty.unset(old);
     var buffer: [@import("topic.zig").topic_max_len]u8 = undefined;
@@ -324,7 +324,7 @@ test "topic policy remembered ordinals remain independent of retained validation
     try std.testing.expectEqual(generation, g.overlay.rows[old].generation);
     try std.testing.expectEqualStrings(name, received.topic);
     try std.testing.expectEqualStrings("0123456789", received.bytes);
-    try std.testing.expectEqual(gossip.ReportOutcome{ .applied = .ignore }, g.report(received.handle, .ignore, .{ .mono_ms = 2, .unix_s = 0 }));
+    try std.testing.expectEqual(Gossipsub.ReportOutcome{ .applied = .ignore }, g.report(received.handle, .ignore, .{ .mono_ms = 2, .unix_s = 0 }));
     try std.testing.expectEqual(@as(?u16, null), support.intern(&g, replacement));
     g.messages.validation.expire(&g.messages.store, &g.peers, 100000);
     _ = support.intern(&g, replacement).?;

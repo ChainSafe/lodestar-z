@@ -15,44 +15,8 @@ pub const sessions = @import("sessions.zig");
 pub const frame = @import("frame.zig");
 pub const score = @import("score.zig");
 pub const metrics = @import("metrics.zig");
-pub const gossipsub = @import("gossipsub.zig");
-
-pub const Gossipsub = gossipsub.Gossipsub;
-pub const Options = gossipsub.Options;
-pub const Admission = gossipsub.Admission;
-pub const MessageSink = gossipsub.MessageSink;
-pub const MessageEvent = @import("messages.zig").MessageEvent;
-pub const MessageId = gossipsub.MessageId;
-pub const ValidationHandle = gossipsub.ValidationHandle;
-pub const ReportOutcome = gossipsub.ReportOutcome;
-pub const Verdict = gossipsub.Verdict;
-pub const ResourceSnapshot = gossipsub.ResourceSnapshot;
+pub const Gossipsub = @import("Gossipsub.zig");
 
 test {
-    _ = @import("gossipsub.zig");
-    _ = delivery;
-    _ = metrics;
-    _ = @import("options.zig");
-    _ = @import("protobuf_schema.zig");
-    _ = diagnostics;
-    _ = @import("local_intent.zig");
-    _ = @import("topic_policy.zig");
-    _ = admission;
-    _ = recovery;
-    _ = receive_pool;
-    _ = @import("overlay.zig");
-    _ = @import("peer_book.zig");
-    _ = @import("message_store.zig");
-    _ = @import("validation.zig");
-    _ = @import("peer_io.zig");
-    _ = @import("outbox.zig");
-    _ = constants;
-    _ = protobuf;
-    _ = topic;
-    _ = sha256;
-    _ = mcache;
-    _ = sessions;
-    _ = frame;
-    _ = score;
-    _ = gossipsub;
+    @import("std").testing.refAllDecls(@This());
 }

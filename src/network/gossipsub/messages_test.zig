@@ -1,0 +1,77 @@
+const std = @import("std");
+const t = std.testing;
+const messages = @import("messages.zig");
+const Gossipsub = @import("Gossipsub.zig");
+const support = @import("test_support.zig");
+const topic = @import("topic.zig");
+const constants = @import("constants.zig");
+const limits_mod = @import("../gossip_limits.zig");
+const policy = @import("../gossip_processor/policy.zig");
+
+test "message admission retains canonical topic bounds and namespace-free fallbacks" {
+    const Sink = struct {
+        canonical: ?topic.Canonical = null,
+        maximum: usize = 0,
+        source_maximum: usize = 0,
+        handle: Gossipsub.ValidationHandle = undefined,
+        id: Gossipsub.MessageId = undefined,
+
+        fn hasCapacity(_: *anyopaque, _: topic.Kind, _: usize) bool {
+            return true;
+        }
+
+        fn admit(context: *anyopaque, candidate: *Gossipsub.MessageAdmission) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.canonical = candidate.canonical;
+            self.maximum = candidate.maximum_compressed;
+            self.source_maximum = candidate.sourceUsage().maximum_bytes;
+            if (!policy.sourceRoom(candidate) or !policy.feasible(candidate, &.{})) return false;
+            candidate.commit();
+            self.handle = candidate.event.handle;
+            self.id = candidate.event.id;
+            return true;
+        }
+    };
+    const Case = enum { namespace, canonical, generic, limited };
+    for (std.meta.tags(Case)) |case| {
+        const name = if (case == .generic) "/eth2/01020304/custom/ssz_snappy" else "/eth2/01020304/beacon_block/ssz_snappy";
+        var boundary: @import("topic_policy.zig").Boundary = .{ .digest = .{ 1, 2, 3, 4 } };
+        boundary.rules[0] = .{ .count = 1, .ssz_min = 4, .ssz_max = 6000 };
+        var options: Gossipsub.Options = .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1, .seen_capacity = 16, .mcache_capacity = 16, .validation_capacity = 8 };
+        if (case == .namespace) options.topic_policy = &.{boundary};
+        if (case == .limited) {
+            const limits: limits_mod.Limits = @splat(.{ .items = 2, .bytes = 4096 });
+            options.payload_limits = limits;
+            options.validation_capacity = limits_mod.items(&limits);
+        }
+        var g = try Gossipsub.init(t.allocator, options);
+        defer g.deinit();
+        const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+        const index = support.intern(&g, name).?;
+        g.overlay.rows[index].subscribed = true;
+        const context: messages.Context = .{ .overlay = g.overlay, .peers = &g.peers, .options = &g.options, .epoch = g.cycle.epoch };
+        const source: messages.Source = .{ .peer = g.sessions.rows[peer.index].logical, .session = peer, .connection = g.sessions.rows[peer.index].conn };
+        var sink: Sink = .{};
+        const callback: messages.MessageSink = .{ .context = &sink, .has_capacity = Sink.hasCapacity, .admit = Sink.admit };
+        var turn = Gossipsub.beginPump(&g, .{ .mono_ms = 1, .unix_s = 0 });
+        turn.sink = &callback;
+        var credits = @import("turn.zig").Credits.peer(&g.options);
+        const workspace = turn.workspace(&credits);
+        var compressed: [64]u8 = undefined;
+        const len = try @import("snappy").raw.compress("data", &compressed);
+        const received = g.messages.receive(&context, &workspace, &source, .{ .topic = name, .data = compressed[0..len] }, 1);
+        try t.expect(received == .admitted);
+        try t.expectEqual(index, received.admitted.topic_index);
+        try t.expectEqual(sink.id, received.admitted.id);
+        try t.expectEqual(case != .generic, sink.canonical != null);
+        if (sink.canonical) |canonical| try t.expectEqual(topic.Kind.beacon_block, canonical.name.kind);
+        const maximum = switch (case) {
+            .namespace => constants.maxCompressedLen(6000),
+            .limited => 4096,
+            .canonical, .generic => constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE),
+        };
+        try t.expectEqual(maximum, sink.maximum);
+        try t.expectEqual(@import("validation.zig").Validation.chargedBytes(maximum), sink.source_maximum);
+        try t.expectEqual(Gossipsub.ReportOutcome{ .applied = .ignore }, g.report(sink.handle, .ignore, .{ .mono_ms = 2, .unix_s = 0 }));
+    }
+}

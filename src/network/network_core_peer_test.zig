@@ -615,7 +615,7 @@ test "core native preserves gossip events under one output and caller validation
         for (setup.server_inbox.messages()) |message| {
             try std.testing.expectEqualStrings(payload, message.bytes);
             try std.testing.expectEqual(
-                gossip.ReportOutcome{ .applied = .accept },
+                gossip.Gossipsub.ReportOutcome{ .applied = .accept },
                 setup.server.service.gossipsub.report(message.handle, .accept, setup.pair.now),
             );
             try std.testing.expectEqualStrings(payload, message.bytes);

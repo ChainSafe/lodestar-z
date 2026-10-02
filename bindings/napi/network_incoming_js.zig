@@ -48,7 +48,7 @@ pub fn descriptorValue(runtime: *Runtime, token: incoming.Token, cell: *const in
     try object.setNamedProperty("data", data);
     return object;
 }
-fn contextFor(value: Value) !?@import("network").reqresp.ReqResp.ForkEntry {
+fn contextFor(value: Value) !?@import("network").types.ForkEntry {
     if (try value.typeof() == .null) return null;
     try cfg.completeObject(value, &.{ "digest", "fork" });
     const digest = try cfg.get(value, "digest");

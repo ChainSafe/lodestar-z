@@ -1,42 +1,44 @@
 const limits_mod = @import("../gossip_limits.zig");
 const policy = @import("../gossipsub/topic_policy.zig");
-const ForkEntry = @import("../reqresp/root.zig").ReqResp.ForkEntry;
+const ForkEntry = @import("../types.zig").ForkEntry;
 
 pub const Plan = struct {
-    capacity: usize,
-    bytes: usize,
     limits: limits_mod.Limits,
+    /// Defaults derive from work limits; explicit overrides also obey execution-specific ceilings.
     execution: ?limits_mod.Limits = null,
-    source_maximum: [limits_mod.kind_count]usize = @splat(10 * 1024 * 1024),
+    source_maximum: [limits_mod.kind_count]usize = @splat(@import("../constants.zig").MAX_PAYLOAD_SIZE),
     forks: []const ForkEntry = &.{},
     random_seed: u64 = 0,
 
     pub fn resolve(limits: limits_mod.Limits, execution: ?limits_mod.Limits, boundaries: []const policy.Boundary, forks: []const ForkEntry, seed: u64) !Plan {
         var plan: Plan = .{
-            .capacity = limits_mod.items(&limits),
-            .bytes = limits_mod.bytes(&limits),
             .limits = limits,
             .execution = execution,
             .source_maximum = @splat(0),
             .forks = forks,
             .random_seed = seed,
         };
-        try limits_mod.validate(&limits);
+        try plan.validate();
         for (boundaries) |boundary| for (boundary.rules, 0..) |rule, k| {
             plan.source_maximum[k] = @max(plan.source_maximum[k], rule.ssz_max);
         };
-        try plan.validateExecution();
-        if (plan.execution == null) {
-            plan.execution = plan.limits;
-            for (&plan.execution.?) |*limit| limit.items = @max(1, limit.items / 2);
-        }
-        for (boundaries) |boundary| for (boundary.rules, plan.execution.?) |rule, limit| {
+        const resolved_execution = plan.executionLimits();
+        for (boundaries) |boundary| for (boundary.rules, resolved_execution) |rule, limit| {
             if (rule.count > 0 and rule.ssz_max > limit.bytes) return error.InvalidGossipProcessorLimits;
         };
         return plan;
     }
 
-    fn validateExecution(self: *const Plan) !void {
+    pub fn executionLimits(self: *const Plan) limits_mod.Limits {
+        if (self.execution) |execution| return execution;
+        var execution = self.limits;
+        for (&execution) |*limit| limit.items = @max(1, limit.items / 2);
+        return execution;
+    }
+
+    pub fn validate(self: *const Plan) !void {
+        if (self.forks.len > policy.boundary_max) return error.InvalidGossipProcessorLimits;
+        try limits_mod.validate(&self.limits);
         const execution = self.execution orelse return;
         var total_items: usize = 0;
         var total_bytes: usize = 0;

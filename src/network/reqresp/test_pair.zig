@@ -17,14 +17,14 @@ pub const Overrides = struct {
     progress_timeout_ms: u64 = 10_000,
     host_timeout_ms: u64 = 60_000,
     quota_timeout_ms: u64 = 60_000,
-    forks: ?[]const reqresp.ForkEntry = null,
+    forks: ?[]const @import("../types.zig").ForkEntry = null,
     request_fork: @import("config").ForkSeq = .phase0,
     admission: ?reqresp.Options.Admission = null,
 };
 
 pub const Pair = struct {
     shared: @import("../service_test_support.zig").ServicePair = .{},
-    forks: [2]reqresp.ForkEntry = .{
+    forks: [2]@import("../types.zig").ForkEntry = .{
         .{ .digest = deneb_digest, .fork = .deneb },
         .{ .digest = fulu_digest, .fork = .fulu },
     },
@@ -38,12 +38,12 @@ pub const Pair = struct {
         try self.shared.init(try serviceOptions(client, &self.forks), try serviceOptions(server, &self.forks));
     }
 
-    fn serviceOptions(overrides: Overrides, forks: []const reqresp.ForkEntry) !@import("../service.zig").Options {
+    fn serviceOptions(overrides: Overrides, forks: []const @import("../types.zig").ForkEntry) !@import("../service.zig").Options {
         return .{ .reqresp = try options(overrides, forks), .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1, .seen_capacity = 128, .mcache_capacity = 16, .validation_capacity = 8 } };
     }
 
     /// Admission defaults over the fixture policy unless the caller supplies admission.
-    fn options(overrides: Overrides, forks: []const reqresp.ForkEntry) !reqresp.Options {
+    fn options(overrides: Overrides, forks: []const @import("../types.zig").ForkEntry) !reqresp.Options {
         const peers = 128;
         return .{
             .peers = peers,

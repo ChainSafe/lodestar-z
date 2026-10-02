@@ -6,10 +6,10 @@ const policy = @import("policy.zig");
 const none = @import("../index_list.zig").none;
 const assert = std.debug.assert;
 
-pub fn admit(table: *processor.GossipProcessor, owner: *gossip.Gossipsub, candidate: *gossip.Admission, now: u64, received_at: u64, slot: u64) bool {
+pub fn admit(table: *processor.GossipProcessor, owner: *gossip.Gossipsub, candidate: *gossip.Gossipsub.MessageAdmission, now: u64, received_at: u64, slot: u64) bool {
     const message = &candidate.event;
     if (table.closed or now >= message.deadline or table.order == std.math.maxInt(u64)) return false;
-    const topic = gossip.topic.parseCanonical(message.topic) orelse return false;
+    const topic = candidate.canonical orelse return false;
     const kind = topic.name.kind;
     const fork = table.fork(topic.digest) orelse {
         table.refuse(kind, .ineligible);
@@ -17,8 +17,8 @@ pub fn admit(table: *processor.GossipProcessor, owner: *gossip.Gossipsub, candid
     };
     const deneb = @intFromEnum(fork) >= @intFromEnum(@as(@TypeOf(fork), .deneb));
     const electra = @intFromEnum(fork) >= @intFromEnum(@as(@TypeOf(fork), .electra));
-    const metadata = processor.metadata_mod.extract(kind, electra, message.bytes);
-    if (!processor.metadata_mod.eligible(&metadata, kind, deneb, slot)) {
+    const metadata = processor.metadata.extract(kind, electra, message.bytes);
+    if (!processor.metadata.eligible(&metadata, kind, deneb, slot)) {
         table.diag.slotRefusals +|= 1;
         table.refuse(kind, .ineligible);
         return false;
@@ -35,22 +35,22 @@ pub fn admit(table: *processor.GossipProcessor, owner: *gossip.Gossipsub, candid
     var cursor = table.expiry.head;
     var inspected: usize = 0;
     while (count <= tokens.len) {
-        if (!candidate.charge(count * @sizeOf(processor.Cell))) break;
+        if (!candidate.charge(count * @sizeOf(processor.GossipProcessor.Cell))) break;
         if (capacityAfter(table, kind, message.bytes.len, tokens[0..count]) and policy.feasible(candidate, handles[0..count])) {
             for (tokens[0..count], handles[0..count]) |token, handle| {
                 table.outcome(owner.report(handle, .ignore, .{ .mono_ms = now, .unix_s = 0 }));
                 table.retire(token);
             }
             candidate.commit();
-            table.capture(message, &metadata, deneb, received_at) catch unreachable;
+            table.capture(message, kind, &metadata, deneb, received_at) catch unreachable;
             return true;
         }
-        if (count == tokens.len or !processor.limits_mod.newestFirst(kind)) break;
+        if (count == tokens.len or !processor.limits.newestFirst(kind)) break;
         var selected: u32 = none;
         // This chain retains network admission order across dependency promotion
         // and copy rollback. State and ready queues deliberately do not.
         while (cursor != none and inspected < table.cells.len) {
-            if (!candidate.charge(@sizeOf(processor.Cell))) break;
+            if (!candidate.charge(@sizeOf(processor.GossipProcessor.Cell))) break;
             const index = cursor;
             const cell = &table.cells[index];
             cursor = cell.expiry_link.next;
@@ -63,7 +63,7 @@ pub fn admit(table: *processor.GossipProcessor, owner: *gossip.Gossipsub, candid
         const index = selected;
         const cell = &table.cells[index];
         const cost = cell.input.len + candidate.victimBytes(cell.handle);
-        if (cost > processor.batch_bytes -| bytes or !candidate.charge(cost)) break;
+        if (cost > processor.GossipProcessor.batch_bytes -| bytes or !candidate.charge(cost)) break;
         bytes += cost;
         tokens[count] = .{ .index = @intCast(index), .generation = cell.generation };
         handles[count] = cell.handle;
@@ -74,10 +74,10 @@ pub fn admit(table: *processor.GossipProcessor, owner: *gossip.Gossipsub, candid
     return false;
 }
 
-fn capacityAfter(table: *const processor.GossipProcessor, kind: processor.limits_mod.Kind, len: usize, victims: []const processor.Token) bool {
+fn capacityAfter(table: *const processor.GossipProcessor, kind: processor.limits.Kind, len: usize, victims: []const processor.GossipProcessor.Token) bool {
     if (victims.len == 0) return table.hasCapacity(kind, len);
     const k = @intFromEnum(kind);
-    var free_cells: usize = table.queues[k][@intFromEnum(processor.State.free)].len;
+    var free_cells: usize = table.queues[k][@intFromEnum(processor.GossipProcessor.State.free)].len;
     var pages = table.store.free_pages - table.staging_pages;
     var entries = table.store.entries.len - table.store.used_entries - table.store.retired_entries - table.staging_items;
     var used = table.used_bytes[k];

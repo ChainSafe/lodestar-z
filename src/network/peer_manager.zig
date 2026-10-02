@@ -333,7 +333,7 @@ pub const PeerManager = struct {
         self.counters.selection_rows +|= self.catalog.rows.len;
         self.selection_deadline = null;
         const count = self.catalog.snapshots(self.snapshot_scratch);
-        const local_subscriptions = gossipsub.overlay.subnetSubscriptions(null, self.local.fork.digest);
+        const local_subscriptions = gossipsub.localSubscriptions(self.local.fork.digest);
         var input_count: usize = 0;
         for (self.snapshot_scratch[0..count]) |*snapshot| {
             const conn = snapshot.connection orelse continue;
@@ -375,7 +375,7 @@ pub const PeerManager = struct {
             .score = peers.reputation.selectionScore(
                 snapshot.score,
                 self.gossipScore(gossipsub, snapshot.peer, now) orelse 0,
-                gossipsub.options.score_params.graylist_threshold,
+                gossipsub.graylistThreshold(),
             ),
         };
         if (snapshot.ban_until_ms > now.mono_ms or snapshot.score <= peers.reputation.ban_score)

@@ -838,7 +838,7 @@ fn profileAllocationFailures(a: std.mem.Allocator) !void {
 }
 
 test "core invalid complete sections reject before allocation" {
-    const forks: []const @import("reqresp/ReqResp.zig").ForkEntry = &.{.{ .digest = @splat(0), .fork = .phase0 }};
+    const forks: []const @import("types.zig").ForkEntry = &.{.{ .digest = @splat(0), .fork = .phase0 }};
     inline for (.{ error.InvalidOptions, error.InvalidOptions, error.InvalidOptions, error.InvalidLimits, error.InvalidLimits, error.InvalidOptions }, 0..) |expected, section| {
         var request: @import("configuration.zig").Request = .{ .profile = .small, .seed = 1, .forks = forks, .admission_policy = @import("reqresp/policy_fixture.zig").config() };
         switch (section) {
@@ -1144,9 +1144,8 @@ test "core idle turns with pending negotiations are never due for reqresp or neg
 }
 
 test "core BPO same-fork digest transition updates status and advertisement" {
-    const rr = @import("reqresp/ReqResp.zig");
-    const first: rr.ForkEntry = .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu };
-    const second: rr.ForkEntry = .{ .digest = .{ 5, 6, 7, 8 }, .fork = .fulu };
+    const first: @import("types.zig").ForkEntry = .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu };
+    const second: @import("types.zig").ForkEntry = .{ .digest = .{ 5, 6, 7, 8 }, .fork = .fulu };
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{1}));
     const resolved = try @import("configuration.zig").resolve(.{ .profile = .small, .seed = 1, .forks = &.{ first, second }, .admission_policy = @import("reqresp/policy_fixture.zig").config() });
     var node: runtime.NetworkCore = undefined;
@@ -1175,7 +1174,7 @@ test "core BPO same-fork digest transition updates status and advertisement" {
     try std.testing.expectEqual(initial + 1, node.localRecord().?.sequence);
     const candidate = try @import("peers/enr.zig").decode(node.localRecord().?, &local.fork);
     try std.testing.expectEqual(second.digest, candidate.fork.digest);
-    for ([_]rr.ForkEntry{
+    for ([_]@import("types.zig").ForkEntry{
         .{ .digest = .{ 9, 9, 9, 9 }, .fork = .fulu },
         .{ .digest = second.digest, .fork = .gloas },
     }) |invalid| {

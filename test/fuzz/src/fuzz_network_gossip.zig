@@ -9,7 +9,7 @@ pub export fn zig_fuzz_init() callconv(.c) void {}
 
 pub export fn zig_fuzz_test(buf: [*]const u8, len: usize) callconv(.c) void {
     if (len == 0 or len > input_max) return;
-    const metadata = @import("network").gossip_processor.metadata_mod;
+    const metadata = @import("network").gossip_processor.metadata;
     inline for (std.meta.tags(gossip.topic.Kind)) |kind| {
         const value = metadata.extract(kind, buf[0] % 2 == 0, buf[0..len]);
         std.mem.doNotOptimizeAway(metadata.eligible(&value, kind, buf[0] % 3 == 0, len));

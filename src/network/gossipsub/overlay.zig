@@ -162,7 +162,7 @@ pub const Overlay = struct {
         return self.initializeTopic(context, index);
     }
 
-    pub fn validTopic(self: *const Overlay, name: []const u8) bool {
+    fn validTopic(self: *const Overlay, name: []const u8) bool {
         if (self.namespace) |*ns| return ns.lookup(name) != null;
         return name.len <= topic_mod.topic_max_len and topic_mod.parse(name) != null;
     }

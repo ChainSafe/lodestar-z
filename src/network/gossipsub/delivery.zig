@@ -113,7 +113,7 @@ pub const Queue = struct {
     run_frames: usize = 0,
     run_bytes: usize = 0,
 
-    pub fn classOf(origin: Origin) Class {
+    fn classOf(origin: Origin) Class {
         return if (origin == .publication) .local else .ordinary;
     }
 

@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 const n = @import("network");
 const rr = n.reqresp;
 const Budget = @import("network_budget.zig").Budget;
-pub fn forkLabel(fork: ?@FieldType(rr.ReqResp.ForkEntry, "fork")) ?[]const u8 {
+pub fn forkLabel(fork: ?@FieldType(@import("network").types.ForkEntry, "fork")) ?[]const u8 {
     return if (fork) |value| @tagName(value) else null;
 }
 
@@ -22,7 +22,7 @@ pub const Terminal = union(enum) {
     failed: struct { reason: rr.ReqResp.Failure, phase: ?rr.ReqResp.RequestPhase },
 };
 pub const Rejection = enum { disconnected, protocol_disabled, invalid_request, invalid_request_options, too_many_requests, slots_exhausted, negotiation_table_full, transport };
-pub const Chunk = struct { len: usize, fork: ?@FieldType(rr.ReqResp.ForkEntry, "fork") };
+pub const Chunk = struct { len: usize, fork: ?@FieldType(@import("network").types.ForkEntry, "fork") };
 pub const Cell = struct {
     state: State = .free,
     generation: u64 = 0,

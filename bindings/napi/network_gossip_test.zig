@@ -1,11 +1,11 @@
 const std = @import("std");
 const g = @import("network_gossip.zig");
-const limits_mod = @import("network").gossip_processor.limits_mod;
+const limits_mod = @import("network").gossip_processor.limits;
 
-fn plan(block: limits_mod.Limit) @import("network").gossip_processor.Plan {
+fn plan(block: limits_mod.Limit) @import("network").gossip_processor.GossipProcessor.Plan {
     var limits: limits_mod.Limits = @splat(.{ .items = 2, .bytes = 4096 });
     limits[@intFromEnum(limits_mod.Kind.beacon_block)] = block;
-    return .{ .capacity = limits_mod.items(&limits), .bytes = limits_mod.bytes(&limits), .limits = limits, .execution = limits };
+    return .{ .limits = limits, .execution = limits };
 }
 
 test "gossip exact shared 2Q admission and generation exhaustion" {

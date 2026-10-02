@@ -1,6 +1,5 @@
 const std = @import("std");
-const gossip = @import("gossipsub.zig");
-const Gossipsub = gossip.Gossipsub;
+const Gossipsub = @import("Gossipsub.zig");
 const constants = @import("constants.zig");
 const local_intent = @import("local_intent.zig");
 const protobuf = @import("protobuf.zig");
@@ -174,7 +173,7 @@ test "gossip policy sent promise survives reconnect without token rearming" {
     const next = g.addPeer(.{ .index = 0, .generation = 2 }, &metadata, now).admitted;
     g.recovery.controlSent(g.sessions.rows[next.index].conn, 9, g.options.iwant_followup_ms, 2000);
     try std.testing.expectEqual(@as(?u64, 3010), g.recovery.batches[0].expiry);
-    @import("session_io.zig").finishPump(&g, .{ .mono_ms = 3010, .unix_s = 0 });
+    Gossipsub.finishPump(&g, .{ .mono_ms = 3010, .unix_s = 0 });
     try std.testing.expectEqual(@as(u64, 1), g.counters.broken_promises);
     try std.testing.expectEqual(@as(u32, 0), g.peers.rows[ref.index].pins);
 }
@@ -309,7 +308,7 @@ test "gossip policy review I4 heartbeat fanout and advertisements share one snap
     _ = try g.publish(first_name, "first", start);
     _ = try g.publish(second_name, "second", start);
     support.heartbeat(&g, start);
-    @import("session_io.zig").finishPump(&g, start);
+    Gossipsub.finishPump(&g, start);
     try std.testing.expectEqual(@as(usize, 1), g.cycle.cursor);
     try std.testing.expect(g.cycle.isActive());
     const epoch = g.cycle.epoch;
@@ -326,19 +325,19 @@ test "gossip policy review I4 heartbeat fanout and advertisements share one snap
     support.heartbeat(&g, .{ .mono_ms = 2, .unix_s = 0 });
     try std.testing.expect(!g.cycle.opportunistic);
     try std.testing.expectEqual(epoch, g.cycle.epoch);
-    @import("session_io.zig").finishPump(&g, .{ .mono_ms = 2, .unix_s = 0 });
+    Gossipsub.finishPump(&g, .{ .mono_ms = 2, .unix_s = 0 });
     try std.testing.expect(g.overlay.fanoutMembers(second).isSet(retained));
     try std.testing.expectEqual(@as(usize, 8), g.overlay.fanoutMembers(second).count());
     try std.testing.expectEqual(@as(usize, 1), g.sessions.rows[advertised].io.tx.control.count);
     try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[retained].io.tx.control.count);
-    @import("session_io.zig").finishPump(&g, .{ .mono_ms = 3, .unix_s = 0 });
+    Gossipsub.finishPump(&g, .{ .mono_ms = 3, .unix_s = 0 });
     try std.testing.expect(!g.cycle.isActive());
     try std.testing.expectEqual(epoch, g.cycle.epoch);
     for (g.sessions.rows) |*peer| peer.io.tx.cancelStream(&g.messages.store);
     g.last_now_ms = 701;
     support.heartbeat(&g, .{ .mono_ms = 701, .unix_s = 0 });
-    @import("session_io.zig").finishPump(&g, .{ .mono_ms = 701, .unix_s = 0 });
-    @import("session_io.zig").finishPump(&g, .{ .mono_ms = 702, .unix_s = 0 });
+    Gossipsub.finishPump(&g, .{ .mono_ms = 701, .unix_s = 0 });
+    Gossipsub.finishPump(&g, .{ .mono_ms = 702, .unix_s = 0 });
     try std.testing.expect(!g.overlay.fanoutMembers(second).isSet(retained));
     try std.testing.expectEqual(@as(usize, 7), g.overlay.fanoutMembers(second).count());
     try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[advertised].io.tx.control.count);
@@ -350,7 +349,7 @@ test "gossip policy review I4 heartbeat fanout and advertisements share one snap
 }
 
 test "gossip topic rejection preserves expired scores and retained obligations" {
-    var opts: gossip.Options = .{
+    var opts: Gossipsub.Options = .{
         .topic_policy = &@import("topic_fixture.zig").churn,
         .random_seed = 1,
         .connected_capacity = 2,
@@ -475,10 +474,10 @@ test "publication subscribed fanout expires through owner maintenance" {
     _ = try g.publish(name, "fanout expiry", .{ .mono_ms = 0, .unix_s = 0 });
     try std.testing.expectEqual(@as(usize, 1), g.overlay.fanoutMembers(t).count());
     support.heartbeat(&g, .{ .mono_ms = 59_999, .unix_s = 0 });
-    @import("session_io.zig").finishPump(&g, .{ .mono_ms = 59_999, .unix_s = 0 });
+    Gossipsub.finishPump(&g, .{ .mono_ms = 59_999, .unix_s = 0 });
     try std.testing.expectEqual(@as(usize, 1), g.overlay.fanoutMembers(t).count());
     support.heartbeat(&g, .{ .mono_ms = 60_000, .unix_s = 0 });
-    @import("session_io.zig").finishPump(&g, .{ .mono_ms = 60_000, .unix_s = 0 });
+    Gossipsub.finishPump(&g, .{ .mono_ms = 60_000, .unix_s = 0 });
     try std.testing.expectEqual(@as(usize, 0), g.overlay.fanoutMembers(t).count());
     _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), p.index, name, false);
     g.sessions.rows[p.index].io.tx.cancelStream(&g.messages.store);
@@ -565,7 +564,7 @@ test "gossip advertisements sample the whole burst independently for each recipi
     g.overlay.rows[t].fanout = .initEmpty();
     const context = g.overlayContext(1);
     g.cycle.begin(context.sessions, context.peers, context.now, false);
-    @import("session_io.zig").finishPump(&g, .{ .mono_ms = context.now, .unix_s = 0 });
+    Gossipsub.finishPump(&g, .{ .mono_ms = context.now, .unix_s = 0 });
     const first = g.sessions.rows[0].io.tx.segment(&g.messages.store);
     const second = g.sessions.rows[1].io.tx.segment(&g.messages.store);
     try std.testing.expect(first.len > 0 and second.len > 0);

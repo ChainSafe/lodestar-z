@@ -19,7 +19,7 @@ test "gossip maintenance yields between bounded topics and resumes without repea
         }
     };
     var clock: Clock = .{};
-    var vtable = std.Io.Threaded.global_single_threaded.io().vtable.*;
+    var vtable = std.Io.failing.vtable.*;
     vtable.now = Clock.now;
     g.clock = .{ .userdata = &clock, .vtable = &vtable };
     const now: @import("../types.zig").Now = .{ .mono_ms = 1, .unix_s = 0 };

@@ -3,11 +3,15 @@ const Engine = @import("../quic/Engine.zig");
 const routing = @import("../router.zig");
 const sessions_mod = @import("sessions.zig");
 const types = @import("../types.zig");
-const gossipsub_mod = @import("gossipsub.zig");
+const Gossipsub = @import("Gossipsub.zig");
+const ConnectionAdmission = Gossipsub.ConnectionAdmission;
 const constants = @import("constants.zig");
 const protobuf = @import("protobuf.zig");
 const peer_io_mod = @import("peer_io.zig");
 const PeerIo = peer_io_mod.PeerIo;
+const Session = @import("peer_session.zig").Session;
+const PeerId = @import("../wire/peer_id.zig").PeerId;
+const Options = @import("options.zig").Options;
 const Version = sessions_mod.Version;
 const assert = std.debug.assert;
 
@@ -15,8 +19,6 @@ const Handle = Engine.Handle;
 const StreamHandle = Engine.StreamHandle;
 const TransportEvent = Engine.Event;
 const Now = types.Now;
-const index_list = @import("../index_list.zig");
-const Gossipsub = gossipsub_mod.Gossipsub;
 const Turn = @import("turn.zig").Turn;
 const Credits = @import("turn.zig").Credits;
 const Progress = @import("turn.zig").Progress;
@@ -24,32 +26,7 @@ const Progress = @import("turn.zig").Progress;
 pub const openings_per_pump: usize = 16;
 pub const direct_retry_delay_ms: u64 = 30_000;
 
-pub fn shutdown(self: *Gossipsub, router: *routing.Router, engine: *Engine) void {
-    for (self.sessions.rows, 0..) |*peer, index| {
-        if (peer.active) retirePeer(self, router, engine, @intCast(index));
-    }
-}
-
-pub fn admitted(self: *Gossipsub, conn: Handle) bool {
-    return self.sessions.find(conn) != null;
-}
-
-pub const Delivery = enum { unavailable, pending, available };
-
-pub fn deliveryStatus(self: *Gossipsub, conn: Handle) Delivery {
-    const index = self.sessions.find(conn) orelse return .unavailable;
-    return switch (self.sessions.rows[index].outbound) {
-        .none, .closing => .unavailable,
-        .pending, .retry_at, .negotiating => .pending,
-        .live => .available,
-    };
-}
-
-pub fn deliveryAvailable(self: *Gossipsub, conn: Handle) bool {
-    return deliveryStatus(self, conn) == .available;
-}
-
-pub fn peerConnected(self: *Gossipsub, engine: *Engine, conn: Handle, direct: bool, now: Now) Admission {
+pub fn peerConnected(self: *Gossipsub, engine: *Engine, conn: Handle, direct: bool, now: Now) ConnectionAdmission {
     if (self.sessions.find(conn) != null) return .admitted;
     const identity = engine.peerId(conn) orelse return .unauthenticated;
     const address = engine.peerAddress(conn) orelse return .unauthenticated;
@@ -178,27 +155,6 @@ pub fn streamReady(self: *Gossipsub, engine: *Engine, route: types.Route, stream
         else => return,
     }
     self.settle(index);
-}
-
-/// Now when a session is ready; otherwise the earliest session deadline, heartbeat or
-/// maintenance deadline. Reads the list length and heap top only.
-pub fn nextWakeup(self: *const Gossipsub, now: Now) ?u64 {
-    if (self.sessions.ready.len > 0) return now.mono_ms;
-    var deadline = nextMaintenance(self, now);
-    if (self.sessions.deadlines.peek()) |top| deadline = @min(deadline, top.deadline);
-    return @max(now.mono_ms, deadline);
-}
-
-pub fn pump(
-    self: *Gossipsub,
-    router: *routing.Router,
-    engine: *Engine,
-    now: Now,
-) void {
-    self.last_now_ms = @max(self.last_now_ms, now.mono_ms);
-    var turn = beginPump(self, now);
-    runTurn(self, router, engine, &turn);
-    if (@import("builtin").is_test) checkRoutes(self, engine);
 }
 
 fn openOutbound(
@@ -427,62 +383,13 @@ fn flush(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *Turn
     }
 }
 
-fn logSendPressure(self: *Gossipsub, index: u16, now_ms: u64) void {
-    const io = &self.sessions.rows[index].io;
-    if (!io.tx.pressure_pending or now_ms < io.tx.pressure_log_due_ms) return;
-    io.tx.pressure_pending = false;
-    io.tx.pressure_log_due_ms = now_ms +| 1_000;
-    const row = &self.sessions.rows[index];
-    const identity = &self.peers.rows[row.logical.index].identity;
-    std.log.scoped(.network_gossip_errors).debug("gossip_send_pressure peer={f} connection={d}:{d} reason={s} total={d} data_queued={d}/{d} data_bytes={d}/{d} control_frames={d} control_bytes={d} oldest_ms={d} write_blocked_ms={d} write_zero={d} budget_deferred={d}", .{ @import("../logging.zig").peer(identity), row.conn.index, row.conn.generation, @tagName(io.tx.last_drop), io.tx.drops[@intFromEnum(io.tx.last_drop)], io.tx.data.count, @import("outbox.zig").data_capacity, io.tx.data.bytes, self.options.tx_peer_bytes, io.tx.control.count, io.tx.control.used, if (io.tx.oldest()) |oldest| now_ms -| oldest else 0, if (io.tx.blocked_since) |since| now_ms -| since else 0, io.write_zero, io.write_budget_deferred });
-}
-
-fn logIoTimeout(self: *Gossipsub, index: u16, reason: []const u8, now_ms: u64) void {
-    const row = &self.sessions.rows[index];
-    const io = &self.sessions.rows[index].io;
-    const identity = &self.peers.rows[row.logical.index].identity;
-    std.log.scoped(.network_gossip_errors).debug("gossip_io_timeout peer={f} connection={d}:{d} reason={s} inbound={any} outbound={any} subscriptions={d} data_queued={d} data_bytes={d} control_bytes={d} critical_bytes={d} oldest_ms={d}", .{ @import("../logging.zig").peer(identity), row.conn.index, row.conn.generation, reason, row.in_stream != null, row.outStream() != null, io.tx.subscription_dirty.count(), io.tx.data.count, io.tx.data.bytes, io.tx.control.used, io.tx.critical.used, if (io.tx.oldest()) |oldest| now_ms -| oldest else 0 });
-}
-
-/// Expires the due session deadlines, runs the heartbeat, then services up to `peers_per_pump`
-/// of the sessions that were ready when the turn began, in the order they became ready. A
-/// session that still wants service after its turn goes back to the tail; sessions marked
-/// during the turn wait for the next one.
-pub fn runTurn(self: *Gossipsub, router: *routing.Router, engine: *Engine, turn: *Turn) void {
-    const now = turn.now;
-    expireDue(self, router, engine, turn);
-    self.tick(now);
-    const marked = @min(self.sessions.ready.len, self.options.peers_per_pump);
-    var openings: usize = 0;
-    for (0..marked) |_| {
-        const index: u16 = @intCast(self.sessions.ready.pop(self.sessions.rows, "ready_link") orelse break);
-        self.sessions.visits +|= 1;
-        serviceSession(self, router, engine, index, turn, &openings);
-        self.sessions.serviced(index, &self.options);
-        if (turn.exhausted().count() > 0) break;
-    }
-    // Writers a spent call or output budget left waiting, for the send-pressure log.
-    const exhausted = turn.exhausted();
-    if (exhausted.contains(.calls) or exhausted.contains(.output)) {
-        var next = self.sessions.ready.head;
-        for (0..self.sessions.ready.len) |_| {
-            if (next == index_list.none) break;
-            const row = &self.sessions.rows[next];
-            next = row.ready_link.next;
-            if (row.outStream() != null and row.io.tx.ready and row.io.tx.pending()) row.io.write_budget_deferred +|= 1;
-        }
-    }
-    finishPump(self, now);
-    if (@import("builtin").is_test) checkSessions(self);
-}
-
-fn serviceSession(self: *Gossipsub, router: *routing.Router, engine: *Engine, index: u16, turn: *Turn, openings: *usize) void {
+pub fn serviceSession(self: *Gossipsub, router: *routing.Router, engine: *Engine, index: u16, turn: *Turn, openings: *usize) void {
     const now = turn.now;
     const session = &self.sessions.rows[index];
     assert(session.active);
     switch (session.outbound) {
         .closing => {
-            logSendPressure(self, index, now.mono_ms);
+            logSendPressure(session, &self.peers.rows[session.logical.index].identity, &self.options, now.mono_ms);
             retirePeer(self, router, engine, index);
             return;
         },
@@ -499,7 +406,7 @@ fn serviceSession(self: *Gossipsub, router: *routing.Router, engine: *Engine, in
     if (write_first and io.tx.ready) flush(self, engine, index, io, turn, &peer);
     if (session.in_stream != null and io.rx_ready) readPeer(self, engine, index, io, turn, &peer);
     if (!write_first and io.tx.ready) flush(self, engine, index, io, turn, &peer);
-    logSendPressure(self, index, now.mono_ms);
+    logSendPressure(session, &self.peers.rows[session.logical.index].identity, &self.options, now.mono_ms);
     if (session.active and session.outbound == .closing) retirePeer(self, router, engine, index);
 }
 
@@ -556,19 +463,7 @@ fn discardInboundFrame(self: *Gossipsub, index: u16) usize {
     return work;
 }
 
-/// Pops the sessions whose earliest deadline passed. Handling an expiry clears it or retires the
-/// session, so a key set here lies in the future and each session is popped at most once.
-fn expireDue(self: *Gossipsub, router: *routing.Router, engine: *Engine, turn: *Turn) void {
-    const now_ms = turn.now.mono_ms;
-    for (0..self.sessions.deadlines.len) |_| {
-        const index: u16 = @intCast(self.sessions.deadlines.popDue(now_ms) orelse break);
-        self.sessions.visits +|= 1;
-        expireSession(self, router, engine, index, turn);
-        self.settle(index);
-    }
-}
-
-fn expireSession(self: *Gossipsub, router: *routing.Router, engine: *Engine, index: u16, turn: *Turn) void {
+pub fn expireSession(self: *Gossipsub, router: *routing.Router, engine: *Engine, index: u16, turn: *Turn) void {
     const now_ms = turn.now.mono_ms;
     const g = self;
     const peer = &g.sessions.rows[index];
@@ -579,7 +474,7 @@ fn expireSession(self: *Gossipsub, router: *routing.Router, engine: *Engine, ind
     const io = &peer.io;
     for (0..3) |_| {
         const reason = io.deadlines(&g.options).expired(now_ms) orelse break;
-        logIoTimeout(self, index, @tagName(reason), now_ms);
+        logIoTimeout(peer, &self.peers.rows[peer.logical.index].identity, @tagName(reason), now_ms);
         switch (reason) {
             .subscriptions => {
                 g.counters.local_pressure_resets += 1;
@@ -610,64 +505,15 @@ fn expireSession(self: *Gossipsub, router: *routing.Router, engine: *Engine, ind
     }
 }
 
-/// Test builds check after every turn that the ready list holds every session that wants
-/// service, that each session off the list is keyed on its recomputed deadline, and that the
-/// connection index finds each active session.
-fn checkSessions(self: *const Gossipsub) void {
-    const sessions = self.sessions;
-    var linked: usize = 0;
-    for (sessions.rows, 0..) |*row, position| {
-        const index: u16 = @intCast(position);
-        linked += @intFromBool(row.ready_link.linked);
-        if (!row.active) {
-            assert(!row.ready_link.linked and sessions.deadlines.get(index) == null);
-            continue;
-        }
-        assert(sessions.find(row.conn).? == index);
-        if (row.wants()) assert(row.ready_link.linked);
-        if (!row.ready_link.linked) assert(sessions.deadlines.get(index) == row.deadline(&self.options));
-    }
-    assert(linked == sessions.ready.len);
+fn logSendPressure(row: *Session, identity: *const PeerId, options: *const Options, now_ms: u64) void {
+    const io = &row.io;
+    if (!io.tx.pressure_pending or now_ms < io.tx.pressure_log_due_ms) return;
+    io.tx.pressure_pending = false;
+    io.tx.pressure_log_due_ms = now_ms +| 1_000;
+    std.log.scoped(.network_gossip_errors).debug("gossip_send_pressure peer={f} connection={d}:{d} reason={s} total={d} data_queued={d}/{d} data_bytes={d}/{d} control_frames={d} control_bytes={d} oldest_ms={d} write_blocked_ms={d} write_zero={d} budget_deferred={d}", .{ @import("../logging.zig").peer(identity), row.conn.index, row.conn.generation, @tagName(io.tx.last_drop), io.tx.drops[@intFromEnum(io.tx.last_drop)], io.tx.data.count, @import("outbox.zig").data_capacity, io.tx.data.bytes, options.tx_peer_bytes, io.tx.control.count, io.tx.control.used, if (io.tx.oldest()) |oldest| now_ms -| oldest else 0, if (io.tx.blocked_since) |since| now_ms -| since else 0, io.write_zero, io.write_budget_deferred });
 }
 
-/// Test builds check after every pump that each stream a session holds routes to it, that a
-/// session off the ready list holds no inbound stream with an unread readable edge, and that a
-/// blocked out stream with queued output waits on armed write interest.
-fn checkRoutes(self: *const Gossipsub, engine: *const Engine) void {
-    for (self.sessions.rows, 0..) |*row, position| {
-        if (!row.active) continue;
-        const index: u24 = @intCast(position);
-        if (row.in_stream) |stream| if (engine.route(stream)) |bound| {
-            assert(bound.owner == .gossip_inbound and bound.row == index);
-            if (!row.ready_link.linked) if (engine.streamWaits(stream)) |waits| assert(!waits.read_open);
-        };
-        if (row.outStream()) |stream| if (engine.route(stream)) |bound| {
-            assert(bound.owner == .gossip_outbound and bound.row == index);
-            const tx = &row.io.tx;
-            if (!tx.ready and (tx.pending() or tx.subscription_dirty.count() > 0)) if (engine.streamWaits(stream)) |waits| assert(waits.write_waiting);
-        };
-    }
-}
-
-pub const Admission = enum { admitted, duplicate, capacity, unauthenticated };
-
-pub fn beginPump(self: *Gossipsub, now: Now) Turn {
-    self.last_now_ms = now.mono_ms;
-    self.messages.expire(&self.peers, now.mono_ms);
-    var turn = Turn.init(&self.options, now, self.msg_scratch);
-    turn.sink = self.message_sink;
-    return turn;
-}
-
-pub fn finishPump(self: *Gossipsub, now: Now) void {
-    self.maintainTopics(now);
-    self.expirePromises(now.mono_ms);
-}
-
-fn nextMaintenance(self: *const Gossipsub, now: Now) u64 {
-    if (self.cycle.isActive()) return now.mono_ms;
-    var deadline = if (self.heartbeat_at == 0) now.mono_ms else self.heartbeat_at;
-    if (self.messages.nextDeadline()) |d| deadline = @min(deadline, d);
-    if (self.recovery.nextExpiry()) |expiry| deadline = @min(deadline, expiry);
-    return @max(now.mono_ms, deadline);
+fn logIoTimeout(row: *const Session, identity: *const PeerId, reason: []const u8, now_ms: u64) void {
+    const io = &row.io;
+    std.log.scoped(.network_gossip_errors).debug("gossip_io_timeout peer={f} connection={d}:{d} reason={s} inbound={any} outbound={any} subscriptions={d} data_queued={d} data_bytes={d} control_bytes={d} critical_bytes={d} oldest_ms={d}", .{ @import("../logging.zig").peer(identity), row.conn.index, row.conn.generation, reason, row.in_stream != null, row.outStream() != null, io.tx.subscription_dirty.count(), io.tx.data.count, io.tx.data.bytes, io.tx.control.used, io.tx.critical.used, if (io.tx.oldest()) |oldest| now_ms -| oldest else 0 });
 }

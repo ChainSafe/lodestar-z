@@ -71,7 +71,7 @@ pub const Layout = struct {
 
     pub fn plan(self: *const Layout) Plan {
         const peers = @import("peer_book.zig");
-        const metadata = @sizeOf(@import("gossipsub.zig").Gossipsub) +
+        const metadata = @sizeOf(@import("Gossipsub.zig")) +
             @sizeOf(@import("sessions.zig").Sessions) + @sizeOf(@import("overlay.zig").Overlay) +
             @import("sessions.zig").Sessions.metadataBytes(self) +
             peers.PeerBook.backingBytesForTopics(self.retained, self.topics) +
