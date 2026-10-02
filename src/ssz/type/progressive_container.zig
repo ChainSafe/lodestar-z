@@ -159,19 +159,22 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
         }
 
         pub fn hashTreeRoot(value: *const Type, out: *[32]u8) !void {
-            var chunks: [chunk_count][32]u8 = undefined;
-            @memset(&chunks, [_]u8{0} ** 32);
-
+            var accumulator = try progressive.MerkleAccumulator.init(chunk_count);
+            var next_index: usize = 0;
             inline for (fields, 0..) |field, i| {
                 const field_idx = comptime getActiveFieldIndex(active_fields, i);
-                try field.type.hashTreeRoot(&@field(value, field.name), &chunks[field_idx]);
+                while (next_index < field_idx) : (next_index += 1) {
+                    try accumulator.append(&@as([32]u8, @splat(0)));
+                }
+                var chunk: [32]u8 = undefined;
+                try field.type.hashTreeRoot(&@field(value, field.name), &chunk);
+                try accumulator.append(&chunk);
+                next_index += 1;
             }
-
-            var temp_root: [32]u8 = undefined;
-            try progressive.merkleizeChunksComptime(chunk_count, &chunks, &temp_root);
-
+            var content_root: [32]u8 = undefined;
+            try accumulator.finish(&content_root);
             const active_fields_packed = comptime packActiveFields(active_fields);
-            hashOne(out, &temp_root, &active_fields_packed);
+            hashOne(out, &content_root, &active_fields_packed);
         }
 
         pub fn serializeIntoBytes(value: *const Type, out: []u8) usize {
@@ -212,21 +215,25 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
             }
 
             pub fn hashTreeRoot(data: []const u8, out: *[32]u8) !void {
-                var chunks: [chunk_count][32]u8 = undefined;
-                @memset(&chunks, [_]u8{0} ** 32);
-
-                var i: usize = 0;
-                inline for (fields, 0..) |field, field_i| {
-                    const field_idx = comptime getActiveFieldIndex(active_fields, field_i);
-                    try field.type.serialized.hashTreeRoot(data[i .. i + field.type.fixed_size], &chunks[field_idx]);
-                    i += field.type.fixed_size;
+                if (data.len != fixed_size) return error.InvalidSize;
+                var offset: usize = 0;
+                var accumulator = try progressive.MerkleAccumulator.init(chunk_count);
+                var next_index: usize = 0;
+                inline for (fields, 0..) |field, i| {
+                    const field_idx = comptime getActiveFieldIndex(active_fields, i);
+                    while (next_index < field_idx) : (next_index += 1) {
+                        try accumulator.append(&@as([32]u8, @splat(0)));
+                    }
+                    var chunk: [32]u8 = undefined;
+                    try field.type.serialized.hashTreeRoot(data[offset..][0..field.type.fixed_size], &chunk);
+                    try accumulator.append(&chunk);
+                    next_index += 1;
+                    offset += field.type.fixed_size;
                 }
-
-                var temp_root: [32]u8 = undefined;
-                try progressive.merkleizeChunksComptime(chunk_count, &chunks, &temp_root);
-
+                var content_root: [32]u8 = undefined;
+                try accumulator.finish(&content_root);
                 const active_fields_packed = comptime packActiveFields(active_fields);
-                hashOne(out, &temp_root, &active_fields_packed);
+                hashOne(out, &content_root, &active_fields_packed);
             }
         };
 
@@ -475,24 +482,26 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
         }
 
         pub fn hashTreeRoot(allocator: std.mem.Allocator, value: *const Type, out: *[32]u8) !void {
-            const chunks = try allocator.alloc([32]u8, chunk_count);
-            defer allocator.free(chunks);
-            @memset(chunks, [_]u8{0} ** 32);
-
+            var accumulator = try progressive.MerkleAccumulator.init(chunk_count);
+            var next_index: usize = 0;
             inline for (fields, 0..) |field, i| {
                 const field_idx = comptime getActiveFieldIndex(active_fields, i);
-                if (comptime isFixedType(field.type)) {
-                    try field.type.hashTreeRoot(&@field(value, field.name), &chunks[field_idx]);
-                } else {
-                    try field.type.hashTreeRoot(allocator, &@field(value, field.name), &chunks[field_idx]);
+                while (next_index < field_idx) : (next_index += 1) {
+                    try accumulator.append(&@as([32]u8, @splat(0)));
                 }
+                var chunk: [32]u8 = undefined;
+                if (comptime isFixedType(field.type)) {
+                    try field.type.hashTreeRoot(&@field(value, field.name), &chunk);
+                } else {
+                    try field.type.hashTreeRoot(allocator, &@field(value, field.name), &chunk);
+                }
+                try accumulator.append(&chunk);
+                next_index += 1;
             }
-
-            var temp_root: [32]u8 = undefined;
-            try progressive.merkleizeChunks(allocator, chunks, &temp_root);
-
+            var content_root: [32]u8 = undefined;
+            try accumulator.finish(&content_root);
             const active_fields_packed = comptime packActiveFields(active_fields);
-            hashOne(out, &temp_root, &active_fields_packed);
+            hashOne(out, &content_root, &active_fields_packed);
         }
 
         /// Creates a new `VariableProgressiveContainerType` and clones all underlying fields in the container.
@@ -674,33 +683,28 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
             }
 
             pub fn hashTreeRoot(allocator: std.mem.Allocator, data: []const u8, out: *[32]u8) !void {
-                const chunks = try allocator.alloc([32]u8, chunk_count);
-                defer allocator.free(chunks);
-                @memset(chunks, [_]u8{0} ** 32);
-
+                if (data.len > max_size or data.len < min_size) return error.InvalidSize;
                 const ranges = try readFieldRanges(data);
-
+                var accumulator = try progressive.MerkleAccumulator.init(chunk_count);
+                var next_index: usize = 0;
                 inline for (fields, 0..) |field, i| {
                     const field_idx = comptime getActiveFieldIndex(active_fields, i);
-                    if (comptime isFixedType(field.type)) {
-                        try field.type.serialized.hashTreeRoot(
-                            data[ranges[i][0]..ranges[i][1]],
-                            &chunks[field_idx],
-                        );
-                    } else {
-                        try field.type.serialized.hashTreeRoot(
-                            allocator,
-                            data[ranges[i][0]..ranges[i][1]],
-                            &chunks[field_idx],
-                        );
+                    while (next_index < field_idx) : (next_index += 1) {
+                        try accumulator.append(&@as([32]u8, @splat(0)));
                     }
+                    var chunk: [32]u8 = undefined;
+                    if (comptime isFixedType(field.type)) {
+                        try field.type.serialized.hashTreeRoot(data[ranges[i][0]..ranges[i][1]], &chunk);
+                    } else {
+                        try field.type.serialized.hashTreeRoot(allocator, data[ranges[i][0]..ranges[i][1]], &chunk);
+                    }
+                    try accumulator.append(&chunk);
+                    next_index += 1;
                 }
-
-                var temp_root: [32]u8 = undefined;
-                try progressive.merkleizeChunks(allocator, chunks, &temp_root);
-
+                var content_root: [32]u8 = undefined;
+                try accumulator.finish(&content_root);
                 const active_fields_packed = comptime packActiveFields(active_fields);
-                hashOne(out, &temp_root, &active_fields_packed);
+                hashOne(out, &content_root, &active_fields_packed);
             }
         };
 

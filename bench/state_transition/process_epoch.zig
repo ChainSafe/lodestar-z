@@ -46,12 +46,11 @@ fn ProcessBeforeProcessEpochBench(comptime fork: ForkSeq) type {
     return struct {
         io: std.Io,
 
-        pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
+        pub fn run(_: *@This(), allocator: std.mem.Allocator) void {
             BenchState.cloned_cached_state.state.commit() catch unreachable;
 
             var epoch_transition_cache = EpochTransitionCache.init(
                 allocator,
-                self.io,
                 BenchState.cloned_cached_state.config,
                 BenchState.cloned_cached_state.epoch_cache,
                 BenchState.cloned_cached_state.state,
@@ -397,7 +396,6 @@ fn ProcessEpochBench(comptime fork: ForkSeq) type {
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             var cache = EpochTransitionCache.init(
                 allocator,
-                self.io,
                 BenchState.cloned_cached_state.config,
                 BenchState.cloned_cached_state.epoch_cache,
                 BenchState.cloned_cached_state.state,
@@ -432,7 +430,6 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
             BenchState.cloned_cached_state.state.commit() catch unreachable;
             var cache_val = EpochTransitionCache.init(
                 allocator,
-                io,
                 BenchState.cloned_cached_state.config,
                 BenchState.cloned_cached_state.epoch_cache,
                 BenchState.cloned_cached_state.state,
@@ -682,7 +679,7 @@ fn runBenchmark(
     state_bytes: []const u8,
     chain_config: config.ChainConfig,
 ) !void {
-    defer state_transition.deinitReusedEpochTransitionCache(io);
+    defer state_transition.deinitReusedEpochTransitionCache();
 
     var beacon_state: ?*AnyBeaconState = try loadState(fork, allocator, pool, state_bytes);
     defer if (beacon_state) |state| {
@@ -726,7 +723,6 @@ fn runBenchmark(
 
     var epoch_transition_cache = try EpochTransitionCache.init(
         allocator,
-        io,
         cached_state.config,
         cached_state.epoch_cache,
         cached_state.state,

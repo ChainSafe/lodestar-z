@@ -1051,7 +1051,7 @@ pub fn getFinalizedRootProof(self: *BeaconStateView) !js.Array {
     var proof = try cached_state.state.getFinalizedRootProof(allocator);
     defer proof.deinit(allocator);
 
-    const witnesses = std.ArrayListUnmanaged([32]u8).fromOwnedSlice(proof.witnesses);
+    const witnesses = std.ArrayList([32]u8).fromOwnedSlice(proof.witnesses);
     return js_types.wrap(js.Array, try sszValueToNapiValue(
         env,
         ct.phase0.HistoricalRoots,
@@ -1176,7 +1176,7 @@ pub fn computeUnrealizedCheckpoints(self: *BeaconStateView) !js_types.Unrealized
     const cached_state = try self.acquireState();
     defer self.finishState();
     const allocator = cached_state.allocator;
-    const result = try st.computeUnrealizedCheckpoints(allocator, js.io(), cached_state);
+    const result = try st.computeUnrealizedCheckpoints(allocator, cached_state);
 
     const obj = try env.createObject();
     try obj.setNamedProperty(
@@ -1884,7 +1884,7 @@ fn executionPayloadFromJs(allocator: std.mem.Allocator, payload: napi.Value, out
         const tx_value = try transactions.getElement(i);
         const tx_info = try tx_value.getTypedarrayInfo();
         if (tx_info.array_type != .uint8) return error.InvalidTransaction;
-        var tx: std.ArrayListUnmanaged(u8) = .empty;
+        var tx: std.ArrayList(u8) = .empty;
         errdefer tx.deinit(allocator);
         try tx.appendSlice(allocator, tx_info.data);
         out.transactions.appendAssumeCapacity(tx);
