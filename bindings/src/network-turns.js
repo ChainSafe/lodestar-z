@@ -1,0 +1,105 @@
+const RETRY_MS = 25;
+/** Consecutive exchanges that could not run before escalating. */
+export const FAILURES_MAX = 3;
+
+export const SETTLE_CELLS = 32;
+/** Settlement and acknowledgements only: every payload quota zero and the capacities unchanged. */
+export const CONTROL = Object.freeze({
+  bytes: 0,
+  capacity: null,
+  checks: 0,
+  claimOrdinary: false,
+  messages: 0,
+  peers: 0,
+  servingStarts: 0,
+  settleCells: SETTLE_CELLS,
+});
+/** Formats `cause` for native `fail`, which terminates the process. */
+export function escalate(runtime, site, cause) {
+  const reason = typeof cause === "string" ? cause : cause instanceof Error ? cause.message : "unknown";
+  runtime.fail(site, reason.replace(/[^\x20-\x7e]/g, "?").slice(0, 64));
+  throw Error("Native escalation returned");
+}
+
+/**
+ * One runtime's scheduled turns, with its one scheduling flag and one retry timer. A turn is the bound pump's while it
+ * lives; once the pump was collected, it is a control-only exchange through the completion owner's `route`, until
+ * native reports closed. It holds the pump weakly and the route strongly, so a scheduled turn roots the completion
+ * owner but never the pump or its host.
+ */
+export class Turns {
+  #route;
+  #pump = null;
+  #scheduled = false;
+  #running = false;
+  #stopped = false;
+  #retry = undefined;
+  /** Consecutive control-only exchanges that could not run. */
+  #failures = 0;
+
+  constructor(route) {
+    this.#route = route;
+  }
+
+  /** Makes each later turn `pump`'s while it lives. */
+  bind(pump) {
+    this.#pump = new WeakRef(pump);
+  }
+
+  schedule() {
+    if (this.#scheduled || this.#running || this.#stopped) return;
+    this.#scheduled = true;
+    setImmediate(Turns.#run, this);
+  }
+
+  /** Native reported closed, or a turn escalated. */
+  stop() {
+    this.#stopped = true;
+    if (this.#retry) clearTimeout(this.#retry);
+    this.#retry = undefined;
+  }
+
+  static #run(turns) {
+    turns.#scheduled = false;
+    if (turns.#stopped) return;
+    turns.#running = true;
+    // A turn that throws runs again, since native may hold more.
+    let next = "now";
+    try {
+      const pump = turns.#pump?.deref();
+      next = pump ? pump.turn() : turns.#drain();
+    } finally {
+      turns.#running = false;
+      if (next === "now") turns.schedule();
+      else if (next !== "idle") turns.#retryLater(next === "retry");
+    }
+  }
+
+  /** A control-only exchange; the route settles what it delivers. Notifications bring the next. */
+  #drain() {
+    let result;
+    try {
+      result = this.#route.exchange([], CONTROL);
+    } catch (error) {
+      if (++this.#failures >= FAILURES_MAX) {
+        this.stop();
+        escalate(this.#route, "failed_turns", error);
+      }
+      return "retry";
+    }
+    this.#failures = 0;
+    return result.more ? "now" : "idle";
+  }
+
+  #retryLater(failed) {
+    if (this.#stopped) return;
+    this.#retry ??= setTimeout(Turns.#retryFired, RETRY_MS, this).unref();
+    // A failed exchange retries until it settles or escalates, also when nothing else keeps the process alive.
+    if (failed) this.#retry.ref();
+  }
+
+  static #retryFired(turns) {
+    turns.#retry = undefined;
+    turns.schedule();
+  }
+}

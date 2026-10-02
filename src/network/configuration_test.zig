@@ -257,3 +257,20 @@ test "application request limits preserve control capacity and size admission fr
     try std.testing.expectError(error.InvalidOptions, resolve(.{ .seed = 1, .forks = &.{}, .application_requests_max = 0, .admission_policy = policy_fixture.config() }));
     try std.testing.expectError(error.InvalidOptions, resolve(.{ .seed = 1, .forks = &.{}, .application_requests_max = 32, .reqresp = .{ .inbound_max = 1 }, .admission_policy = policy_fixture.config() }));
 }
+
+test "configuration rejects invalid complete sections" {
+    const forks: []const @import("types.zig").ForkEntry = &.{.{ .digest = @splat(0), .fork = .phase0 }};
+    inline for (.{ error.InvalidOptions, error.InvalidOptions, error.InvalidOptions, error.InvalidLimits, error.InvalidLimits, error.InvalidOptions }, 0..) |expected, section| {
+        var request: @import("configuration.zig").Request = .{ .profile = .small, .seed = 1, .forks = forks, .admission_policy = @import("reqresp/policy_fixture.zig").config() };
+        switch (section) {
+            0 => request.reqresp.work_per_pump_max = 0,
+            1 => request.control = .{ .ping_inbound_ms = 0 },
+            2 => request.dial = .{ .seed = 1, .concurrent_max = 0 },
+            3 => request.gossip.score_params = .{ .decay_interval_ms = 0 },
+            4 => request.limits = .{ .handshaking_max = 0 },
+            5 => request.peers = .{ .capacity = 0 },
+            else => unreachable,
+        }
+        try std.testing.expectError(expected, @import("configuration.zig").resolve(request));
+    }
+}

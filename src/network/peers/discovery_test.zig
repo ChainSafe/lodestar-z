@@ -273,7 +273,7 @@ test "peer discovery reserves output for the responder alongside a full referral
         record.* = try adapter.build(&key, 1, &.{ .fork = .{ .digest = context.digest, .next_version = @splat(0), .next_epoch = std.math.maxInt(u64) }, .ip4 = .{ 127, 0, 0, 1 }, .udp = 9000, .quic = 9001 }, &context);
         bytes.* = record.slice();
     }
-    var output: [@import("../network_core.zig").candidates_per_turn]adapter.Candidate = undefined;
+    var output: [@import("discovery.zig").Discovery.candidates_per_step]adapter.Candidate = undefined;
     try std.testing.expectEqual(records.len + 1, output.len);
     for ([_]usize{ 0, 1, records.len, output.len }) |capacity| {
         for ([_]bool{ false, true }) |terminal| {

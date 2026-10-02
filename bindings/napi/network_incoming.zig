@@ -381,7 +381,7 @@ pub fn captureLocked(runtime: *Runtime, event: rr.ReqResp.Event, now: n.Now) !vo
     const table = if (runtime.incoming) |*table| table else return;
     if (event == .request) return admitLocked(runtime, event.request, now) catch |err| switch (@as(anyerror, err)) {
         error.OutOfMemory => {
-            runtime.diag.operationalFailures +|= 1;
+            runtime.operational_failures +|= 1;
             runtime.heavy.?.core.respondError(event.request.request, 2, "local serving allocation failed", now) catch {
                 _ = runtime.heavy.?.core.cancel(event.request.request, now);
             };

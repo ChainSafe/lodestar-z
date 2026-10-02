@@ -5,11 +5,10 @@
 const std = @import("std");
 const support = @import("quic/test_support.zig");
 const configuration = @import("configuration.zig");
-const core_mod = @import("network_core.zig");
+const NetworkCore = @import("network_core.zig").NetworkCore;
 const constants = @import("constants.zig");
 const Engine = @import("quic/Engine.zig");
 const keys = @import("wire/keys.zig");
-const rr = @import("reqresp/root.zig");
 const t = @import("peers/types.zig");
 const transport_mod = @import("transport.zig");
 const types = @import("types.zig");
@@ -17,7 +16,6 @@ const local_intent = @import("gossipsub/local_intent.zig");
 const topic_policy = @import("gossipsub/topic_policy.zig");
 const Inbox = @import("gossipsub/test_support.zig").Inbox;
 
-const NetworkCore = core_mod.NetworkCore;
 const Event = Engine.Event;
 const Now = Engine.Now;
 const net = std.Io.net;
@@ -304,7 +302,7 @@ pub const Setup = struct {
     server: NetworkCore = undefined,
     forks: [4]@import("types.zig").ForkEntry = undefined,
     /// Discovery for the client, set before init, so its local updates publish an ENR.
-    client_discovery: ?core_mod.DiscoveryOptions = null,
+    client_discovery: ?NetworkCore.DiscoveryOptions = null,
     initialized: [2]bool = .{ false, false },
     client_inbox: Inbox = .{},
     server_inbox: Inbox = .{},
@@ -383,7 +381,7 @@ pub const Setup = struct {
     }
 
     /// One owner turn of `node` at the link's clock, with no wait.
-    pub fn turn(self: *Setup, node: *NetworkCore, outputs: core_mod.Outputs) !core_mod.Result {
+    pub fn turn(self: *Setup, node: *NetworkCore, outputs: NetworkCore.Outputs) !NetworkCore.Result {
         const result = node.step(self.pair.io(), self.pair.now, outputs, .deadlineOnly(self.pair.now.mono_ms));
         if (result.failure) |err| return err;
         return result;
@@ -392,7 +390,7 @@ pub const Setup = struct {
 
 pub const NetworkOptions = struct {
     resolved: configuration.Resolved,
-    startup: core_mod.Startup,
+    startup: NetworkCore.Startup,
 };
 
 /// The owner harness request resolved for a NetworkCore on loopback.
@@ -418,7 +416,7 @@ pub fn networkOptions(key: *const keys.KeyPair) NetworkOptions {
     };
 }
 
-pub fn intent(node: *const core_mod.NetworkCore, subscriptions: []const local_intent.Boundary) core_mod.LocalIntent {
+pub fn intent(node: *const NetworkCore, subscriptions: []const local_intent.Boundary) NetworkCore.LocalIntent {
     return .{
         .update = .{
             .local = node.localState(),
@@ -433,21 +431,21 @@ pub fn intent(node: *const core_mod.NetworkCore, subscriptions: []const local_in
 }
 
 /// Control operations holding a request, which retirement tests watch drain.
-pub fn controlOperations(node: *const core_mod.NetworkCore) usize {
+pub fn controlOperations(node: *const NetworkCore) usize {
     var count: usize = 0;
     for (node.control_protocol.operations) |*op| count += @intFromBool(op.request != null);
     return count;
 }
 
-pub fn subscribe(node: *core_mod.NetworkCore, name: []const u8) !void {
+pub fn subscribe(node: *NetworkCore, name: []const u8) !void {
     try setSubscription(node, name, true);
 }
 
-pub fn unsubscribe(node: *core_mod.NetworkCore, name: []const u8) !void {
+pub fn unsubscribe(node: *NetworkCore, name: []const u8) !void {
     try setSubscription(node, name, false);
 }
 
-fn setSubscription(node: *core_mod.NetworkCore, name: []const u8, subscribed: bool) !void {
+fn setSubscription(node: *NetworkCore, name: []const u8, subscribed: bool) !void {
     var boundaries: [topic_policy.boundary_max]local_intent.Boundary = undefined;
     const desired = intent(node, try @import("gossipsub/test_support.zig").subscriptionUpdate(node.service.gossipsub, name, subscribed, &boundaries));
     _ = try node.applyIntent(&desired, node.last_now);

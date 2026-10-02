@@ -1,3 +1,6 @@
+import {LogDelivery} from "./network-log-delivery.js";
+import {CONTROL, FAILURES_MAX, SETTLE_CELLS, escalate} from "./network-turns.js";
+
 /** Actions one exchange applies; native refuses a longer batch. */
 export const ACTION_MAX = 256;
 /** Imported roots coalesced between exchanges; more become one recheck of every waiting message. */
@@ -5,36 +8,12 @@ const BLOCK_MAX = 256;
 /** Coalesced peer penalty entries, each saturating as native does; more are dropped and counted. */
 const REPORT_ENTRY_MAX = 512;
 const REPORT_COUNT_MAX = 100;
-const RETRY_MS = 25;
-/** Consecutive exchanges that could not run before escalating. */
-const FAILURES_MAX = 3;
 /** One turn's time budget; the rest yields to the next turn. */
 export const BUDGET_MS = 8;
-/** Completions settled or delivered per family in one turn. */
-const SETTLE_CELLS = 32;
 /** Serving capacity native accepts. */
 const SERVING_MAX = 32;
 /** Per-turn quotas of each payload source. */
 export const QUOTAS = Object.freeze({bytes: 8 * 1024 * 1024, checks: 64, messages: 64, peers: 32, servingStarts: 8});
-/** Settlement and acknowledgements only: every payload quota zero and the capacities unchanged. */
-const CONTROL = Object.freeze({
-  bytes: 0,
-  capacity: null,
-  checks: 0,
-  claimOrdinary: false,
-  messages: 0,
-  peers: 0,
-  servingStarts: 0,
-  settleCells: SETTLE_CELLS,
-});
-/** Native log records delivered to the host every `LOG_MS`, at most `LOG_RECORDS` per delivery. */
-export const LOG_MS = 250;
-export const LOG_RECORDS = 32;
-/** Deliveries of the final drain once native closed. */
-const LOG_FINAL = 4;
-/** Record loss is reported at most this often, with every loss since the last report. */
-const LOG_LOSS_MS = 30000;
-export const LOG_ERRORS_NAME = "lodestar_native_log_delivery_errors_total";
 export const BURST_NAME = "lodestar_native_drain_burst_seconds";
 export const BURST_BUCKETS = Object.freeze([0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2]);
 const VERDICTS = new Set(["accept", "reject", "ignore"]);
@@ -111,96 +90,6 @@ class IncomingRequest {
   }
 }
 
-/** Formats `cause` for native `fail`, which terminates the process. */
-function escalate(runtime, site, cause) {
-  const reason = typeof cause === "string" ? cause : cause instanceof Error ? cause.message : "unknown";
-  runtime.fail(site, reason.replace(/[^\x20-\x7e]/g, "?").slice(0, 64));
-  throw Error("Native escalation returned");
-}
-
-/**
- * One runtime's scheduled turns, with its one scheduling flag and one retry timer. A turn is the bound pump's while it
- * lives; once the pump was collected, it is a control-only exchange through the completion owner's `route`, until
- * native reports closed. It holds the pump weakly and the route strongly, so a scheduled turn roots the completion
- * owner but never the pump or its host.
- */
-export class Turns {
-  #route;
-  #pump = null;
-  #scheduled = false;
-  #running = false;
-  #stopped = false;
-  #retry = undefined;
-  /** Consecutive control-only exchanges that could not run. */
-  #failures = 0;
-
-  constructor(route) {
-    this.#route = route;
-  }
-
-  /** Makes each later turn `pump`'s while it lives. */
-  bind(pump) {
-    this.#pump = new WeakRef(pump);
-  }
-
-  schedule() {
-    if (this.#scheduled || this.#running || this.#stopped) return;
-    this.#scheduled = true;
-    setImmediate(Turns.#run, this);
-  }
-
-  /** Native reported closed, or a turn escalated. */
-  stop() {
-    this.#stopped = true;
-    if (this.#retry) clearTimeout(this.#retry);
-    this.#retry = undefined;
-  }
-
-  static #run(turns) {
-    turns.#scheduled = false;
-    if (turns.#stopped) return;
-    turns.#running = true;
-    // A turn that throws runs again, since native may hold more.
-    let next = "now";
-    try {
-      const pump = turns.#pump?.deref();
-      next = pump ? pump.turn() : turns.#drain();
-    } finally {
-      turns.#running = false;
-      if (next === "now") turns.schedule();
-      else if (next !== "idle") turns.#retryLater(next === "retry");
-    }
-  }
-
-  /** A control-only exchange; the route settles what it delivers. Notifications bring the next. */
-  #drain() {
-    let result;
-    try {
-      result = this.#route.exchange([], CONTROL);
-    } catch (error) {
-      if (++this.#failures >= FAILURES_MAX) {
-        this.stop();
-        escalate(this.#route, "failed_turns", error);
-      }
-      return "retry";
-    }
-    this.#failures = 0;
-    return result.more ? "now" : "idle";
-  }
-
-  #retryLater(failed) {
-    if (this.#stopped) return;
-    this.#retry ??= setTimeout(Turns.#retryFired, RETRY_MS, this).unref();
-    // A failed exchange retries until it settles or escalates, also when nothing else keeps the process alive.
-    if (failed) this.#retry.ref();
-  }
-
-  static #retryFired(turns) {
-    turns.#retry = undefined;
-    turns.schedule();
-  }
-}
-
 /**
  * Drains one runtime for one host: native exchanges in bounded macrotasks, each sending queued obligations first,
  * then coalesced requests, and handing peers, serving starts, dependency checks and gossip jobs to the host in that
@@ -242,11 +131,7 @@ export class NativePump {
    */
   #unsettled = new Set();
   #burst = {buckets: new Array(BURST_BUCKETS.length).fill(0), count: 0, sum: 0};
-  #logTimer = undefined;
-  /** Records that left the native queue but did not reach the host's log handler. */
-  #logErrors = 0;
-  /** Record loss reported to the host, and when. */
-  #logLoss = {at: Number.NEGATIVE_INFINITY, dropped: 0n, suppressed: 0n, truncated: 0n};
+  #logs = null;
   /** Peer penalties dropped because the coalescing table was full. */
   reportsDropped = 0;
 
@@ -261,7 +146,8 @@ export class NativePump {
     this.#turns = runtime.turns;
     this.#turns.bind(this);
     NativePump.#observe(this.#weak, this.#unsettled, runtime.closed);
-    this.#logLater();
+    this.#logs = new LogDelivery(runtime, this.#host, (error) => this.#error(error));
+    this.#logs.start();
   }
 
   static #observe(weak, unsettled, closed) {
@@ -419,62 +305,9 @@ export class NativePump {
   #stop() {
     this.#stopped = true;
     this.#turns.stop();
-    if (this.#logTimer) clearTimeout(this.#logTimer);
-    this.#logTimer = undefined;
     this.close();
     // Native keeps its records past close, so the last ones, the shutdown's included, still reach the host.
-    this.#deliverLogs(LOG_FINAL);
-  }
-
-  #logLater() {
-    this.#logTimer = setTimeout(NativePump.#logFired, LOG_MS, this.#weak).unref();
-  }
-
-  static #logFired(weak) {
-    const pump = weak.deref();
-    if (!pump || pump.#stopped) return;
-    pump.#deliverLogs(1);
-    pump.#logLater();
-  }
-
-  /**
-   * Hands up to `deliveries` batches of native log records to the host, with the record loss since the last report
-   * when it grew. Records a throwing handler did not take count as delivery errors; delivery never fails the network.
-   */
-  #deliverLogs(deliveries) {
-    for (let i = 0; i < deliveries; i++) {
-      let batch;
-      try {
-        batch = this.#runtime.drainLogs(LOG_RECORDS);
-      } catch (error) {
-        this.#logErrors++;
-        this.#error(error);
-        return;
-      }
-      const loss = this.#lostLogs(batch);
-      if (batch.records.length > 0 || loss !== null) {
-        try {
-          this.#host.logs(batch.records, loss);
-        } catch {
-          this.#logErrors += batch.records.length;
-        }
-      }
-      if (!batch.more) return;
-    }
-  }
-
-  /** Record loss since the last report, once dropped or truncated records grew, at most every `LOG_LOSS_MS`. */
-  #lostLogs(batch) {
-    const reported = this.#logLoss;
-    if (batch.dropped === reported.dropped && batch.truncated === reported.truncated) return null;
-    const now = Date.now();
-    if (now - reported.at < LOG_LOSS_MS) return null;
-    this.#logLoss = {at: now, dropped: batch.dropped, suppressed: batch.suppressed, truncated: batch.truncated};
-    return {
-      dropped: batch.dropped - reported.dropped,
-      suppressed: batch.suppressed - reported.suppressed,
-      truncated: batch.truncated - reported.truncated,
-    };
+    this.#logs.stop();
   }
 
   #escalate(site, cause) {
@@ -824,11 +657,6 @@ export class NativePump {
     for (let i = 0; i < BURST_BUCKETS.length; i++)
       lines.push(`${BURST_NAME}_bucket{le="${BURST_BUCKETS[i]}"} ${buckets[i]}`);
     lines.push(`${BURST_NAME}_bucket{le="+Inf"} ${count}`, `${BURST_NAME}_sum ${sum}`, `${BURST_NAME}_count ${count}`);
-    lines.push(
-      `# HELP ${LOG_ERRORS_NAME} Native log records that left the native queue but did not reach the host's log handler`,
-      `# TYPE ${LOG_ERRORS_NAME} counter`,
-      `${LOG_ERRORS_NAME} ${this.#logErrors}`
-    );
-    return `${lines.join("\n")}\n`;
+    return `${lines.join("\n")}\n${this.#logs.metrics()}`;
   }
 }

@@ -2,7 +2,6 @@ const std = @import("std");
 const n = @import("network");
 const r = @import("network_runtime.zig");
 const Runtime = r.Runtime;
-const Stores = r.Stores;
 const Owner = r.Owner;
 const commands = r.commands;
 const publications_mod = r.publications_mod;
@@ -87,6 +86,7 @@ pub fn expectFatal(comptime run: fn () void, expected: []const u8) !void {
 
 test {
     _ = commands;
+    _ = @import("network_storage.zig");
     _ = publications_mod;
     _ = projection;
     _ = @import("network_peer_reports.zig");
@@ -95,50 +95,8 @@ test {
     _ = @import("network.zig");
 }
 
-test "application typed store allocation prefixes release all requested bytes" {
-    for ([_]usize{ 64, 512 }) |capacity| {
-        for ([_]usize{ 1, 615, 1082 }) |topics| {
-            var measured = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-            const stores = try Stores.createForTopics(measured.allocator(), capacity, topics);
-            try std.testing.expectEqual(Stores.bytesForTopics(capacity, topics), measured.allocated_bytes);
-            for (&stores.gossip_diagnostics) |*page| {
-                try std.testing.expectEqual(topics, page.topics.len);
-                for (page.peers) |peer| try std.testing.expectEqual(topics, peer.topics.len);
-            }
-            stores.destroy();
-            try std.testing.expectEqual(measured.allocated_bytes, measured.freed_bytes);
-            for (0..measured.alloc_index) |prefix| {
-                var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = prefix });
-                try std.testing.expectError(error.OutOfMemory, Stores.createForTopics(failing.allocator(), capacity, topics));
-                try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
-            }
-        }
-    }
-}
-
-test "authenticated connect completion latches before a later close in the borrowed batch" {
-    const key = try n.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{2}));
-    const peer = n.PeerId.fromPublicKey(&key.publicKey());
-    const handle: n.Handle = .{ .index = 3, .generation = 7 };
-    const events = [_]n.Event{
-        .{ .connected = .{ .conn = handle, .peer_id = peer, .direction = .outbound } },
-        .{ .closed = .{ .conn = handle, .peer_id = peer, .direction = .outbound, .reason = .host } },
-    };
-    var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 100 }, .notify_live = false, .env_alive = false };
-    const token = try runtime.table.reserve(.connect);
-    runtime.table.transition(runtime.table.get(token), .waiting);
-    runtime.table.cells[token.index].input.peer = peer;
-    runtime.table.cells[token.index].deadline = 2;
-    try std.testing.expect(commands.latchConnects(&runtime.table, &events, .{ .mono_ms = 3, .unix_s = 0 }));
-    try std.testing.expectEqual(commands.State.terminal, runtime.table.get(token).state);
-    try std.testing.expect(runtime.table.cells[token.index].failure == null);
-    try std.testing.expect(!commands.latchConnects(&runtime.table, &events, .{ .mono_ms = 4, .unix_s = 0 }));
-    try std.testing.expect(runtime.table.cells[token.index].failure == null);
-    runtime.table.retire(token);
-}
-
 test "stop preserves latched success and cancels accepted nonterminal commands" {
-    var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 100 }, .notify_live = false, .env_alive = false };
+    var runtime: Runtime = .{ .env = undefined, .notify_live = false, .env_alive = false };
     const success = try runtime.table.reserve(.getIdentity);
     const waiting = try runtime.table.reserve(.connect);
     const queued = try runtime.table.reserve(.getIdentity);
@@ -161,7 +119,7 @@ test {
 }
 
 test "request table storage retires only after physical quiescence and final pins" {
-    var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 } };
+    var runtime: Runtime = .{ .env = undefined };
     runtime.payload_budget.limit = 32 + 2 * n.reqresp.Protocol.blocks_by_root_v2.info().response_max;
     runtime.requests = try requests_mod.Table.init(std.testing.allocator, 1, &runtime.payload_budget);
     defer runtime.requests.?.deinit();
@@ -200,7 +158,7 @@ test "one runtime is live per process until its last release" {
 }
 
 test "a payload release while the owner waits for budget wakes the owner once" {
-    var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 }, .notify_live = false, .env_alive = false };
+    var runtime: Runtime = .{ .env = undefined, .notify_live = false, .env_alive = false };
     runtime.wake = try @import("network_wake.zig").Wake.init();
     defer runtime.wake.?.deinit();
     runtime.payload_budget.limit = 64;
@@ -218,7 +176,7 @@ test "a payload release while the owner waits for budget wakes the owner once" {
 }
 
 test "an owner completion notifies once while armed and leaves settlement to the exchange" {
-    var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 } };
+    var runtime: Runtime = .{ .env = undefined };
     const before = notifications.load(.acquire);
     const token = try runtime.table.reserve(.getIdentity);
     runtime.table.transition(runtime.table.get(token), .terminal);
@@ -245,7 +203,7 @@ test "an owner completion notifies once while armed and leaves settlement to the
 }
 
 test "the first terminal failure is the close result's, also after a requested stop" {
-    var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 } };
+    var runtime: Runtime = .{ .env = undefined };
     runtime.requestStop();
     try std.testing.expectEqual(r.Reason.requested, runtime.reason);
     // A notification the host cannot receive fails the stopping owner; a later failure keeps the first.
@@ -260,7 +218,7 @@ test "the first terminal failure is the close result's, also after a requested s
     try std.testing.expectEqual(r.Reason.failed, runtime.reason);
     try std.testing.expect(first != error.NetworkWakeFailed);
     try std.testing.expectEqual(first, runtime.terminal_error.?);
-    try std.testing.expect(runtime.diag.state == .failed);
+    try std.testing.expect(runtime.state == .failed);
 }
 
 /// An exchange host that builds only the peer count.
@@ -280,7 +238,7 @@ const PeerHost = struct {
 };
 
 test "owner work that races an exchange's check and arm always reaches a later exchange" {
-    var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 } };
+    var runtime: Runtime = .{ .env = undefined };
     var lane: projection.Lane = .{};
     runtime.lane = &lane;
     const Producer = struct {
@@ -330,7 +288,7 @@ test "owner work that races an exchange's check and arm always reaches a later e
 }
 
 test "a pull that makes a completion due notifies once while armed, and only an exchange delivers it" {
-    var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 } };
+    var runtime: Runtime = .{ .env = undefined };
     runtime.payload_budget.limit = 32 + 2 * n.reqresp.Protocol.blocks_by_root_v2.info().response_max;
     runtime.requests = try requests_mod.Table.init(std.testing.allocator, 1, &runtime.payload_budget);
     defer runtime.requests.?.deinit();
@@ -421,7 +379,7 @@ fn expectDueMatchesScan(runtime: *Runtime) !void {
 }
 
 test "the O(1) settle-able state matches a full scan across state transitions" {
-    var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 }, .notify_live = false, .env_alive = false };
+    var runtime: Runtime = .{ .env = undefined, .notify_live = false, .env_alive = false };
     runtime.payload_budget.limit = 1 << 30;
     runtime.publications = try publications_mod.Table.init(std.testing.allocator, 4, &runtime.payload_budget);
     defer runtime.publications.?.deinit();

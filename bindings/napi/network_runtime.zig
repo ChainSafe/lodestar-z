@@ -41,7 +41,7 @@ pub fn create(env: napi.Env) !*Runtime {
     if (runtime_live.swap(true, .acq_rel)) return error.NetworkAlreadyInitialized;
     errdefer runtime_live.store(false, .release);
     const runtime = try allocator.create(Runtime);
-    runtime.* = .{ .env = env, .diag = .{ .currentSlot = 0 } };
+    runtime.* = .{ .env = env };
     return runtime;
 }
 
@@ -54,98 +54,8 @@ pub const Identity = struct {
     enr: [d.wire.constants.enr_size_max]u8,
     enr_len: u16,
 };
-pub const ResolvedCapacities = struct {
-    peerCapacity: u16 = 0,
-    targetPeers: u16 = 0,
-    maxPeers: u16 = 0,
-    minOutbound: u16 = 0,
-    outboundReserve: u16 = 0,
-    connectionCapacity: u16 = 0,
-    handshakingCapacity: u16 = 0,
-    dialingCapacity: u16 = 0,
-    requestPeerCapacity: u16 = 0,
-    admissionIdentityCapacity: u16 = 0,
-    gossipConnectedCapacity: u16 = 0,
-    gossipRetainedCapacity: u16 = 0,
-    dialEngineCapacity: u16 = 0,
-};
-pub const Diagnostics = struct {
-    state: State = .running,
-    terminal_error: ?anyerror = null,
-    currentSlot: u64,
-    ownerTurns: u64 = 0,
-    operationalFailures: u64 = 0,
-    operationOccupied: u8 = 0,
-    peerReportsIgnored: u64 = 0,
-    connectOccupied: u8 = 0,
-    preparingPins: u16 = 0,
-    copyingPins: u16 = 0,
-    peerLaneOccupied: u8 = 0,
-    ownerSequence: u64 = 0,
-    liveNativeRequestedBytes: usize = 0,
-    liveBridgeRequestedBytes: usize = 0,
-    typedStoreBytes: usize = 0,
-    metricsExportBytes: usize = 0,
-    peerLaneBytes: usize = 0,
-    ownerShellBytes: usize = @sizeOf(Runtime),
-    nativeRequestedBytes: usize = 0,
-    quicReceiveWindowBytes: u64 = 0,
-    quicConnectionWindowBytes: u64 = 0,
-    quicStreamWindowBytes: u64 = 0,
-    resolvedCapacities: ResolvedCapacities = .{},
-    publications: publications_mod.Diagnostics = .{},
-    requests: requests_mod.Diagnostics = .{},
-    incoming: incoming_mod.Diagnostics = .{},
-    gossip: gossip_mod.Diagnostics = .{},
-    payloadBudget: @import("network_budget.zig").Diagnostics = .{},
-    bridgeRequestedBytes: usize = @sizeOf(Runtime) + @sizeOf(Owner) - @sizeOf(n.NetworkCore),
-};
-
-/// A remembered peers snapshot and the network it belongs to.
-pub const RememberedPage = struct {
-    genesis_root: [32]u8,
-    records: [n.peers.remembered.capacity]n.peers.remembered.Record,
-};
-
 /// The host's standing capacities: serving starts it can take now, and whether it executes ordinary gossip.
 pub const Capacity = struct { serving: u32 = 0, ordinary: bool = false };
-
-pub const Stores = struct {
-    backing: std.mem.Allocator,
-    intents: [2]application_config.Intent = undefined,
-    snapshots: [2][]n.peers.types.Snapshot,
-    gossip_diagnostics: [2]n.gossipsub.diagnostics.Page = undefined,
-    direct: [2][256]n.PeerId = undefined,
-    targets: [2][256]n.PeerId = undefined,
-    remembered: [2]RememberedPage = undefined,
-    pub fn create(backing: std.mem.Allocator, capacity: usize) !*Stores {
-        return createForTopics(backing, capacity, n.gossipsub.constants.topics_cap);
-    }
-    pub fn createForTopics(backing: std.mem.Allocator, capacity: usize, topics: usize) !*Stores {
-        const self = try backing.create(Stores);
-        errdefer backing.destroy(self);
-        self.* = .{ .backing = backing, .snapshots = undefined };
-        self.snapshots[0] = try backing.alloc(n.peers.types.Snapshot, capacity);
-        errdefer backing.free(self.snapshots[0]);
-        self.snapshots[1] = try backing.alloc(n.peers.types.Snapshot, capacity);
-        errdefer backing.free(self.snapshots[1]);
-        self.gossip_diagnostics[0] = try n.gossipsub.diagnostics.Page.init(backing, topics);
-        errdefer self.gossip_diagnostics[0].deinit(backing);
-        self.gossip_diagnostics[1] = try n.gossipsub.diagnostics.Page.init(backing, topics);
-        return self;
-    }
-    pub fn destroy(self: *Stores) void {
-        for (&self.gossip_diagnostics) |*page| page.deinit(self.backing);
-        for (self.snapshots) |snapshots| self.backing.free(snapshots);
-        self.backing.destroy(self);
-    }
-    pub fn bytes(capacity: usize) usize {
-        return bytesForTopics(capacity, n.gossipsub.constants.topics_cap);
-    }
-    pub fn bytesForTopics(capacity: usize, topics: usize) usize {
-        return @sizeOf(Stores) + 2 * capacity * @sizeOf(n.peers.types.Snapshot) + 2 * n.gossipsub.diagnostics.Page.backingBytes(topics);
-    }
-};
 
 pub const Runtime = struct {
     logs: n.logging.Sink = .{},
@@ -158,7 +68,7 @@ pub const Runtime = struct {
     heavy: ?*Owner = null,
     graceful: bool = false,
     closing_deadline: ?u64 = null,
-    stores: ?*Stores = null,
+    stores: ?*@import("network_storage.zig").Stores = null,
     lane: ?*projection.Lane = null,
     table: commands.Table = .{},
     reports: @import("network_peer_reports.zig").Table = .{},
@@ -180,7 +90,7 @@ pub const Runtime = struct {
     /// JS thread: an exchange is running, so a nested one is refused.
     in_exchange: bool = false,
     /// The exchange results created at initialize, which idle exchanges and rollbacks return.
-    results: @import("network_exchange.zig").Results = .{},
+    results: @import("network_exchange_js.zig").Results = .{},
     /// Owner thread: an event capture left host work for the next apply, so the next turn is due now.
     host_due: bool = false,
     /// The owner leaves reported verdicts unapplied while an ownership test holds them.
@@ -199,7 +109,9 @@ pub const Runtime = struct {
     terminal_error: ?anyerror = null,
     identity: Identity = undefined,
     slot: u64 = 0,
-    diag: Diagnostics,
+    state: State = .running,
+    owner_turns: u64 = 0,
+    operational_failures: u64 = 0,
 
     /// No admitted operation awaits its outcome and the owner runs, so the event loop need not wait for this runtime.
     pub fn idleLocked(self: *const Runtime) bool {
@@ -303,7 +215,7 @@ pub const Runtime = struct {
         if (self.stop or self.quiescent) return;
         self.stop = true;
         self.reason = .requested;
-        self.diag.state = .stopping;
+        self.state = .stopping;
         self.signalLocked();
         self.refreshLocked();
     }
@@ -317,7 +229,7 @@ pub const Runtime = struct {
         if (self.reason == .failed) return;
         self.reason = .failed;
         self.terminal_error = err;
-        self.diag.state = .failed;
+        self.state = .failed;
     }
     /// Where `row` belongs now. Neither checks nor serving starts are served after a stop, no claim after
     /// quiescence, and nothing once the close result was delivered, so a host may stop exchanging.
@@ -481,8 +393,8 @@ pub const Runtime = struct {
         self.quiescent = true;
         self.retireStoresLocked();
         self.retireRequestStorageLocked();
-        self.diag.state = if (self.reason == .failed) .failed else .closed;
-        std.log.scoped(.network_runtime).info("owner_stopped reason={s} turns={d} operational_failures={d}", .{ @tagName(self.reason), self.diag.ownerTurns, self.diag.operationalFailures });
+        self.state = if (self.reason == .failed) .failed else .closed;
+        std.log.scoped(.network_runtime).info("owner_stopped reason={s} turns={d} operational_failures={d}", .{ @tagName(self.reason), self.owner_turns, self.operational_failures });
         // Every host sees quiescence, also one whose waiting payload left it disarmed or one already collected.
         self.readiness.armed = false;
         self.refreshLocked();

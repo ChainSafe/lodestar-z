@@ -1,4 +1,4 @@
-import {Turns} from "./network-pump.js";
+import {Turns} from "./network-turns.js";
 
 /** The families whose completions the owner settles, each with a record per native cell. */
 const FAMILIES = ["publication", "command", "request", "incoming"];

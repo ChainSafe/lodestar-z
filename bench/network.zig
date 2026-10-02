@@ -45,7 +45,7 @@ const Samples = struct {
         };
     }
 
-    fn record(self: *Samples, node: *const network.NetworkCore, index: usize, elapsed: u64, due_before: [source_count]u64, result: network.network_core.Result, immediate: bool) !void {
+    fn record(self: *Samples, node: *const network.NetworkCore, index: usize, elapsed: u64, due_before: [source_count]u64, result: network.NetworkCore.Result, immediate: bool) !void {
         if (result.failure) |err| return err;
         self.ns[index] = elapsed;
         self.received += result.transport.datagrams_received;
@@ -116,7 +116,7 @@ fn timestamp(io: std.Io) u64 {
     return @intCast(std.Io.Clock.awake.now(io).nanoseconds);
 }
 
-fn turn(node: *network.NetworkCore, io: std.Io, outputs: network.network_core.Outputs) !network.network_core.Result {
+fn turn(node: *network.NetworkCore, io: std.Io, outputs: network.NetworkCore.Outputs) !network.NetworkCore.Result {
     const now = try network.transport.currentTime(io);
     const result = node.step(io, now, outputs, .deadlineOnly(now.mono_ms));
     if (result.failure) |err| return err;
@@ -221,7 +221,7 @@ fn connectPair(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, top
     subscription.mask(.beacon_block)[0] = 1;
     subscription.lengths[@intFromEnum(network.gossipsub.topic.Kind.beacon_block)] = 1;
     for ([_]*network.NetworkCore{ a, b }) |node| {
-        const intent: network.network_core.LocalIntent = .{
+        const intent: network.NetworkCore.LocalIntent = .{
             .update = .{ .local = node.localState(), .schedule = node.schedule, .endpoints = node.advertisementEndpoints(), .capabilities = node.service.router.capabilities() },
             .demand = node.peer_manager.demand,
             .subscriptions = &.{subscription},
@@ -368,7 +368,7 @@ const IdleHost = struct {
     pipe: [2]std.c.fd_t,
     applies: u32 = 0,
 
-    fn apply(context: *anyopaque, _: *network.NetworkCore, _: network.Now) network.network_core.HostProgress {
+    fn apply(context: *anyopaque, _: *network.NetworkCore, _: network.Now) network.NetworkCore.HostProgress {
         const self: *IdleHost = @ptrCast(@alignCast(context));
         self.applies += 1;
         var buffer: [64]u8 = undefined;
@@ -569,7 +569,7 @@ fn idleConnections(init: std.process.Init) !void {
     }
     var events: [1024]network.Event = undefined;
     var peer_events: [64]t.Event = undefined;
-    const outputs: network.network_core.Outputs = .{ .peers = &peer_events };
+    const outputs: network.NetworkCore.Outputs = .{ .peers = &peer_events };
     var dialed: usize = 0;
     var admitted_at: u64 = 0;
     for (0..20_000) |_| {

@@ -1,20 +1,21 @@
+const core_test = @import("network_core_test_support.zig");
 const gossip_test = @import("gossipsub/test_support.zig");
 const std = @import("std");
-const core = @import("network_core.zig");
+const NetworkCore = @import("network_core.zig").NetworkCore;
 const metrics = @import("metrics/export.zig");
 const policy = @import("gossipsub/topic_policy.zig");
 const protocol = @import("reqresp/root.zig").Protocol;
 
 const Fixture = struct {
-    node: *core.NetworkCore,
+    node: *NetworkCore,
     buffer: []u8,
 
     fn init(boundaries: []const policy.Boundary) !Fixture {
         return initWith(boundaries, null);
     }
 
-    fn initWith(boundaries: []const policy.Boundary, discovery: ?core.DiscoveryOptions) !Fixture {
-        const node = try std.testing.allocator.create(core.NetworkCore);
+    fn initWith(boundaries: []const policy.Boundary, discovery: ?NetworkCore.DiscoveryOptions) !Fixture {
+        const node = try std.testing.allocator.create(NetworkCore);
         errdefer std.testing.allocator.destroy(node);
         const key = try @import("wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{93}));
         var options = @import("network_core_test_support.zig").networkOptions(&key);
@@ -543,4 +544,34 @@ test "metrics expose local UDP send drops by role and pressure without clearing 
         try contains(output, "lodestar_native_udp_send_dropped_datagrams_total{role=\"quic\",reason=\"system_resources\"} 0\n");
         try contains(output, "lodestar_native_udp_send_dropped_datagrams_total{role=\"discovery\",reason=\"would_block\"} 0\n");
     }
+}
+
+test "core metrics aggregate subnets and count distinct mesh peers" {
+    const full = @import("gossipsub/topic_fixture.zig").full;
+    const pair = try std.testing.allocator.create(core_test.Setup);
+    defer std.testing.allocator.destroy(pair);
+    pair.* = .{};
+    var opts = core_test.options();
+    opts.core.service.gossipsub.topic_policy = &.{full(@splat(0))};
+    try pair.initOwnersWithOptions(&.{}, opts);
+    defer pair.deinit();
+    var a_intent = core_test.intent(&pair.client, &.{});
+    a_intent.subscriptions = @import("gossipsub/topic_fixture.zig").subscriptions(&.{ "/eth2/00000000/beacon_block/ssz_snappy", "/eth2/00000000/blob_sidecar_0/ssz_snappy", "/eth2/00000000/blob_sidecar_1/ssz_snappy" });
+    var b_intent = core_test.intent(&pair.server, &.{});
+    b_intent.subscriptions = a_intent.subscriptions;
+    try std.testing.expect(try pair.client.applyIntent(&a_intent, pair.client.last_now));
+    try std.testing.expect(try pair.server.applyIntent(&b_intent, pair.server.last_now));
+    try pair.client.connectUntil(&pair.server.peerId(), &.{@import("quic/test_support.zig").server_address}, pair.client.last_now, pair.client.last_now.mono_ms +| @import("peers/dialing.zig").Dialing.connect_timeout_ms);
+    const start = pair.client.last_now.mono_ms;
+    var mesh_count: usize = 0;
+    for (0..3000) |_| {
+        try pair.step(1);
+        pair.pair.advance(10);
+        if (pair.client.last_now.mono_ms - start > 10_000) break;
+        mesh_count = pair.client.service.gossipsub.resourceSnapshot().mesh_members;
+        if (mesh_count == 3) break;
+    }
+    const context = metrics.Context.init(&pair.client, pair.client.last_now, true);
+    try std.testing.expectEqual(@as(usize, 3), mesh_count);
+    try std.testing.expectEqual(@as(usize, 1), context.population.count);
 }
