@@ -13,7 +13,7 @@ const router = @import("router.zig");
 pub const Profile = enum { small, beacon_node };
 pub const ReqRespOverrides = Overrides(rr.Options, &.{ "peers", "forks", "request_fork", "outbound_control_reserved", "inbound_control_reserved", "admission" });
 pub const GossipOverrides = Overrides(gossip.Options, &.{ "connected_capacity", "connection_slots", "retained_capacity", "retained_outbound_reserve", "random_seed" });
-pub const IdentifyOverrides = Overrides(@import("identify/root.zig").Options, &.{});
+pub const IdentifyOverrides = Overrides(@import("identify/root.zig").Handler.Options, &.{});
 pub const RouterOverrides = Overrides(router.Options, &.{ "outbound_control_reserved", "inbound_connections" });
 
 /// Req/resp, gossip and router fields override profile defaults; shared capacities are derived.
@@ -108,7 +108,7 @@ pub fn resolve(request: Request) !Resolved {
     }
 
     requests.admission = try rr.Options.Admission.defaults(&request.admission_policy, peer_options.capacity, peer_options.max_peers, requests.inbound_max - requests.inbound_control_reserved);
-    var identify: @import("identify/root.zig").Options = .{ .inbound_max = if (small) 2 else 4, .outbound_max = if (small) 2 else 4 };
+    var identify: @import("identify/root.zig").Handler.Options = .{ .inbound_max = if (small) 2 else 4, .outbound_max = if (small) 2 else 4 };
     applyOverrides(&identify, request.identify);
     var protocols: router.Options = .{
         .negotiations_max = peer_options.max_peers + @as(u16, if (small) 30 else 248),

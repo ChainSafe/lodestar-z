@@ -108,7 +108,7 @@ pub const Peer = struct {
             else => {},
         };
         var controls: [16]network.reqresp.ReqResp.Event = undefined;
-        var identified: [4]network.identify.Result = undefined;
+        var identified: [4]network.identify.Handler.Result = undefined;
         const counts = self.service.process(&self.transport.engine, events[0..result.events], self.now, .{ .application = &requests, .control = &controls, .identify = &identified });
         for (requests[0..counts.application]) |event| try self.requestEvent(event);
         for (controls[0..counts.control]) |event| try self.requestEvent(event);

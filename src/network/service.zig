@@ -9,15 +9,15 @@ const identify_mod = @import("identify/root.zig");
 const wake_sources = @import("wake_sources.zig");
 
 pub const Options = struct {
-    identify: identify_mod.Options = .{},
+    identify: identify_mod.Handler.Options = .{},
     router: routing.Options = .{},
     reqresp: reqresp_mod.ReqResp.Options,
     gossipsub: gossip_mod.Gossipsub.Options = .{},
 };
-pub const Outputs = struct { application: []reqresp_mod.ReqResp.Event = &.{}, control: []reqresp_mod.ReqResp.Event = &.{}, identify: []identify_mod.Result = &.{} };
+pub const Outputs = struct { application: []reqresp_mod.ReqResp.Event = &.{}, control: []reqresp_mod.ReqResp.Event = &.{}, identify: []identify_mod.Handler.Result = &.{} };
 pub const OutputCounts = struct { application: usize, control: usize, identify: usize };
 pub const Capacities = struct { application: usize = 0, control: usize = 0, identify: usize = 0 };
-pub const InitError = routing.Error || reqresp_mod.ReqResp.InitError || gossip_mod.Gossipsub.InitError || identify_mod.handler.InitError;
+pub const InitError = routing.Error || reqresp_mod.ReqResp.InitError || gossip_mod.Gossipsub.InitError || identify_mod.Handler.InitError || identify_mod.Handler.Options.Error;
 
 pub const Service = struct {
     identify: identify_mod.Handler,
@@ -31,7 +31,7 @@ pub const Service = struct {
 
     pub fn validateOptions(options: Options) InitError!void {
         try routing.Router.validateOptions(options.router);
-        try identify_mod.Handler.validate(options.identify);
+        try options.identify.validate();
         try options.reqresp.validate();
         try options.gossipsub.validate();
     }
