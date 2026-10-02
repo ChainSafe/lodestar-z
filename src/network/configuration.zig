@@ -1,20 +1,20 @@
 const std = @import("std");
-const service = @import("service.zig");
+const Service = @import("service.zig").Service;
 const peer_manager = @import("peer_manager.zig");
 const Engine = @import("quic/Engine.zig");
-const transport = @import("transport.zig");
+const Transport = @import("transport.zig").Transport;
 const udp = @import("udp");
 const rr = @import("reqresp/ReqResp.zig");
 const gossip = @import("gossipsub/options.zig");
 const c = @import("gossipsub/constants.zig");
 const peers = @import("peers/root.zig");
-const router = @import("router.zig");
+const Router = @import("router.zig").Router;
 
 pub const Profile = enum { small, beacon_node };
 pub const ReqRespOverrides = Overrides(rr.Options, &.{ "peers", "forks", "request_fork", "outbound_control_reserved", "inbound_control_reserved", "admission" });
 pub const GossipOverrides = Overrides(gossip.Options, &.{ "connected_capacity", "connection_slots", "retained_capacity", "retained_outbound_reserve", "random_seed" });
 pub const IdentifyOverrides = Overrides(@import("identify/root.zig").Handler.Options, &.{});
-pub const RouterOverrides = Overrides(router.Options, &.{ "outbound_control_reserved", "inbound_connections" });
+pub const RouterOverrides = Overrides(Router.Options, &.{ "outbound_control_reserved", "inbound_connections" });
 
 /// Req/resp, gossip and router fields override profile defaults; shared capacities are derived.
 pub const Request = struct {
@@ -22,7 +22,7 @@ pub const Request = struct {
     seed: u64,
     forks: []const @import("types.zig").ForkEntry,
     limits: ?Engine.Limits = null,
-    work_limits: transport.WorkLimits = .{},
+    work_limits: Transport.WorkLimits = .{},
     socket_buffers: SocketBuffers = .{},
     peers: ?peers.Catalog.Options = null,
     dial: ?peers.Dialing.Options = null,
@@ -38,7 +38,7 @@ pub const Request = struct {
 /// NetworkCore's peer policy and protocol options.
 pub const Core = struct {
     peers: peers.Catalog.Options = .{},
-    service: service.Options,
+    service: Service.Options,
     control: peers.Control.Options = .{},
     dial: peers.Dialing.Options,
     metadata_freshness_ms: u64 = 60_000,
@@ -50,7 +50,7 @@ pub const Core = struct {
 };
 pub const Resolved = struct {
     limits: Engine.Limits,
-    work_limits: transport.WorkLimits,
+    work_limits: Transport.WorkLimits,
     socket_buffers: SocketBuffers,
     core: Core,
     byte_limit: usize,
@@ -110,7 +110,7 @@ pub fn resolve(request: Request) !Resolved {
     requests.admission = try rr.Options.Admission.defaults(&request.admission_policy, peer_options.capacity, peer_options.max_peers, requests.inbound_max - requests.inbound_control_reserved);
     var identify: @import("identify/root.zig").Handler.Options = .{ .inbound_max = if (small) 2 else 4, .outbound_max = if (small) 2 else 4 };
     applyOverrides(&identify, request.identify);
-    var protocols: router.Options = .{
+    var protocols: Router.Options = .{
         .negotiations_max = peer_options.max_peers + @as(u16, if (small) 30 else 248),
         .outbound_control_reserved = requests.outbound_control_reserved,
         .outbound_reserved = peer_options.max_peers + @as(u16, if (small) 8 else 64),
@@ -160,7 +160,7 @@ pub fn resolve(request: Request) !Resolved {
 pub fn validate(limits: Engine.Limits, options: Core) !void {
     _ = try limits.validate();
     try peer_manager.PeerManager.validateOptions(options.peerManager());
-    try service.Service.validateOptions(options.service);
+    try Service.validateOptions(options.service);
     if (options.peers.max_peers > limits.connections_max or
         options.service.reqresp.peers < limits.connections_max or
         options.service.gossipsub.connection_slots < limits.connections_max or

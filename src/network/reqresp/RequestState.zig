@@ -6,7 +6,7 @@ const codec = @import("codec.zig");
 const constants = @import("constants.zig");
 const RequestIO = @import("RequestIO.zig");
 const Engine = @import("../quic/Engine.zig");
-const routing = @import("../router.zig");
+const Router = @import("../router.zig").Router;
 const types = @import("../types.zig");
 
 const assert = std.debug.assert;
@@ -92,7 +92,7 @@ pub fn consume(self: *RequestState) bool {
     return true;
 }
 
-pub fn closePending(self: *RequestState, engine: *Engine, router: *routing.Router) void {
+pub fn closePending(self: *RequestState, engine: *Engine, router: *Router) void {
     if (self.close_code) |code| {
         switch (self.stream_owner) {
             .router => router.cancel(engine, self.stream),

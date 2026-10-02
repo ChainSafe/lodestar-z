@@ -36,7 +36,7 @@ const Peers = struct {
             var expired: [d.CallTable.capacity_max]d.CallTable.Expired = undefined;
             var completed = false;
             for (0..100) |_| {
-                const now = try @import("transport.zig").currentTime(std.testing.io);
+                const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
                 const response = try remote.stepUntil(std.testing.io, &expired, now.mono_ms);
                 if (response.failure) |err| return err;
                 const result = node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms));

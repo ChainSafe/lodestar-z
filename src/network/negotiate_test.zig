@@ -2,18 +2,17 @@ const service_test = @import("service_test_support.zig");
 const std = @import("std");
 const Engine = @import("quic/Engine.zig");
 const multistream = @import("wire/multistream.zig");
-const negotiate = @import("negotiate.zig");
+const Negotiator = @import("negotiate.zig").Negotiator;
 const support = @import("quic/test_support.zig");
 
 const Pair = support.Pair;
-const Negotiator = negotiate.Negotiator;
-const Outcome = negotiate.Outcome;
+const Outcome = Negotiator.Outcome;
 const connectPair = support.connectPair;
 
 const ping = "/ipfs/ping/1.0.0";
-const ping_protocol = negotiate.Protocol{ .id = ping, .index = 7 };
-const other_protocol = negotiate.Protocol{ .id = "/other/1.0.0", .index = 29 };
-const supported = [_]negotiate.Protocol{ ping_protocol, other_protocol };
+const ping_protocol = Negotiator.Protocol{ .id = ping, .index = 7 };
+const other_protocol = Negotiator.Protocol{ .id = "/other/1.0.0", .index = 29 };
+const supported = [_]Negotiator.Protocol{ ping_protocol, other_protocol };
 
 const Setup = struct {
     pair: Pair = .{},
@@ -49,12 +48,12 @@ const Setup = struct {
         (service_test.Owners{ .negotiator = negotiator }).route(engine, events);
     }
 
-    fn pumpDialer(self: *Setup, protocols: []const negotiate.Protocol, outcomes: []Outcome) usize {
+    fn pumpDialer(self: *Setup, protocols: []const Negotiator.Protocol, outcomes: []Outcome) usize {
         self.deliver(&self.pair.client, &self.dialer) catch unreachable;
         return self.dialer.pump(&self.pair.client, self.pair.now, protocols, outcomes);
     }
 
-    fn pumpListener(self: *Setup, protocols: []const negotiate.Protocol, outcomes: []Outcome) usize {
+    fn pumpListener(self: *Setup, protocols: []const Negotiator.Protocol, outcomes: []Outcome) usize {
         self.deliver(&self.pair.server, &self.listener) catch unreachable;
         return self.listener.pump(&self.pair.server, self.pair.now, protocols, outcomes);
     }
@@ -119,7 +118,7 @@ test "negotiator reports rejection to the dialer and a closed stream to the list
     try std.testing.expect(rejected.result == .rejected);
     try std.testing.expectEqual(@as(?u8, 81), rejected.protocol_index);
     const closed = outcomes.listener orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(negotiate.Failure.stream_closed, closed.result.failed);
+    try std.testing.expectEqual(Negotiator.Failure.stream_closed, closed.result.failed);
     try std.testing.expectEqual(@as(?u8, null), closed.protocol_index);
 }
 
@@ -134,7 +133,7 @@ test "negotiator fails a listener fed with garbage" {
     const outcomes = try setup.run(8);
     try std.testing.expect(outcomes.dialer == null);
     const failed = outcomes.listener orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(negotiate.Failure.malformed, failed.result.failed);
+    try std.testing.expectEqual(Negotiator.Failure.malformed, failed.result.failed);
 }
 
 test "negotiator expires a stalled negotiation" {
@@ -143,11 +142,11 @@ test "negotiator expires a stalled negotiation" {
     defer setup.deinit();
 
     const stream = try setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, &.{ping_protocol}, setup.pair.now, .{});
-    setup.pair.advance(negotiate.negotiate_timeout_ms);
+    setup.pair.advance(Negotiator.negotiate_timeout_ms);
     var outcomes: [4]Outcome = undefined;
     try std.testing.expectEqual(@as(usize, 1), setup.pumpDialer(&supported, &outcomes));
     try std.testing.expectEqual(stream, outcomes[0].stream);
-    try std.testing.expectEqual(negotiate.Failure.timeout, outcomes[0].result.failed);
+    try std.testing.expectEqual(Negotiator.Failure.timeout, outcomes[0].result.failed);
     try std.testing.expectEqual(@as(?u8, ping_protocol.index), outcomes[0].protocol_index);
     try std.testing.expectEqual(@as(usize, 0), setup.pumpDialer(&supported, &outcomes));
     try std.testing.expectEqual(@as(usize, 0), setup.dialer.active());
@@ -190,7 +189,7 @@ test "negotiator copies outbound preference and falls back on the same stream to
     var setup: Setup = .{};
     try setup.init(4);
     defer setup.deinit();
-    var offered = [_]negotiate.Protocol{
+    var offered = [_]Negotiator.Protocol{
         .{ .id = "/meshsub/1.2.0", .index = 42 },
         .{ .id = "/meshsub/1.1.0", .index = 17 },
     };
@@ -225,7 +224,7 @@ test "negotiator sends four outbound proposals in preference order" {
     var setup: Setup = .{};
     try setup.init(1);
     defer setup.deinit();
-    const offered = [_]negotiate.Protocol{
+    const offered = [_]Negotiator.Protocol{
         .{ .id = "/first/1.0.0", .index = 83 },
         .{ .id = "/second/1.0.0", .index = 41 },
         .{ .id = "/third/1.0.0", .index = 9 },
@@ -322,12 +321,12 @@ test "negotiator expires with no outcome capacity and reports later" {
     try setup.init(1);
     defer setup.deinit();
     _ = try setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, &.{ping_protocol}, setup.pair.now, .{});
-    setup.pair.advance(negotiate.negotiate_timeout_ms);
+    setup.pair.advance(Negotiator.negotiate_timeout_ms);
     try std.testing.expectEqual(@as(usize, 0), setup.pumpDialer(&supported, &.{}));
     try std.testing.expectEqual(@as(usize, 0), setup.dialer.active());
     var out: [1]Outcome = undefined;
     try std.testing.expectEqual(@as(usize, 1), setup.pumpDialer(&supported, &out));
-    try std.testing.expectEqual(negotiate.Failure.timeout, out[0].result.failed);
+    try std.testing.expectEqual(Negotiator.Failure.timeout, out[0].result.failed);
 }
 
 test "negotiator delivers retained outcomes before recycled lower slots" {
@@ -336,7 +335,7 @@ test "negotiator delivers retained outcomes before recycled lower slots" {
     defer setup.deinit();
     var initial: [5]Engine.StreamHandle = undefined;
     for (&initial) |*stream| stream.* = try setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, &.{ping_protocol}, setup.pair.now, .{});
-    setup.pair.advance(negotiate.negotiate_timeout_ms);
+    setup.pair.advance(Negotiator.negotiate_timeout_ms);
     try std.testing.expectEqual(@as(usize, 0), setup.pumpDialer(&supported, &.{}));
     var out: [1]Outcome = undefined;
     for (initial, 0..) |stream, index| {
@@ -346,11 +345,11 @@ test "negotiator delivers retained outcomes before recycled lower slots" {
         }
         try std.testing.expectEqual(@as(usize, 1), setup.pumpDialer(&supported, &out));
         try std.testing.expectEqual(stream, out[0].stream);
-        try std.testing.expectEqual(negotiate.Failure.timeout, out[0].result.failed);
+        try std.testing.expectEqual(Negotiator.Failure.timeout, out[0].result.failed);
     }
     var remaining: [5]Outcome = undefined;
     try std.testing.expectEqual(@as(usize, 3), setup.pumpDialer(&supported, &remaining));
-    for (remaining[0..3]) |outcome| try std.testing.expectEqual(negotiate.Failure.stream_closed, outcome.result.failed);
+    for (remaining[0..3]) |outcome| try std.testing.expectEqual(Negotiator.Failure.stream_closed, outcome.result.failed);
     try std.testing.expectEqual(@as(usize, 0), setup.pumpDialer(&supported, &remaining));
     try std.testing.expect(setup.dialer.nextWakeup(setup.pair.now, 1) == null);
 }
@@ -374,7 +373,7 @@ test "negotiator connection teardown invalidates an undelivered ready outcome" {
     var outcomes: [1]Outcome = undefined;
     try std.testing.expectEqual(@as(usize, 1), setup.pumpListener(&supported, &outcomes));
     try std.testing.expect(outcomes[0].result == .failed);
-    try std.testing.expectEqual(negotiate.Failure.stream_closed, outcomes[0].result.failed);
+    try std.testing.expectEqual(Negotiator.Failure.stream_closed, outcomes[0].result.failed);
 }
 
 test "negotiator cancellation releases pending outcomes and checks full stream identity" {
@@ -382,7 +381,7 @@ test "negotiator cancellation releases pending outcomes and checks full stream i
     try setup.init(1);
     defer setup.deinit();
     const stream = try setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, &.{ping_protocol}, setup.pair.now, .{});
-    setup.pair.advance(negotiate.negotiate_timeout_ms);
+    setup.pair.advance(Negotiator.negotiate_timeout_ms);
     _ = setup.pumpDialer(&supported, &.{});
     var stale = stream;
     stale.conn.generation +%= 1;
@@ -521,7 +520,7 @@ test "negotiator retains an accepted tag across blocked acknowledgement and dela
         if (read.len == 0) break;
     }
     try std.testing.expectEqual(sent, received);
-    const reordered = [_]negotiate.Protocol{ other_protocol, ping_protocol };
+    const reordered = [_]Negotiator.Protocol{ other_protocol, ping_protocol };
     try std.testing.expectEqual(@as(usize, 0), setup.pumpListener(&reordered, &.{}));
     try std.testing.expectEqual(@as(usize, 0), setup.listener.active());
     try std.testing.expectEqual(@as(usize, 1), setup.pumpListener(&.{}, &outcomes));
@@ -534,7 +533,7 @@ test "negotiator reports the current outbound fallback tag on timeout" {
     var setup: Setup = .{};
     try setup.init(1);
     defer setup.deinit();
-    const offered = [_]negotiate.Protocol{
+    const offered = [_]Negotiator.Protocol{
         .{ .id = "/missing/1.0.0", .index = 81 },
         ping_protocol,
     };
@@ -547,9 +546,9 @@ test "negotiator reports the current outbound fallback tag on timeout" {
     try std.testing.expectEqual(@as(usize, 0), setup.pumpListener(&.{}, &outcomes));
     try setup.pair.pump();
     try std.testing.expectEqual(@as(usize, 0), setup.pumpDialer(&.{}, &outcomes));
-    setup.pair.advance(negotiate.negotiate_timeout_ms);
+    setup.pair.advance(Negotiator.negotiate_timeout_ms);
     try std.testing.expectEqual(@as(usize, 1), setup.pumpDialer(&.{}, &outcomes));
-    try std.testing.expectEqual(negotiate.Failure.timeout, outcomes[0].result.failed);
+    try std.testing.expectEqual(Negotiator.Failure.timeout, outcomes[0].result.failed);
     try std.testing.expectEqual(@as(?u8, ping_protocol.index), outcomes[0].protocol_index);
 }
 
@@ -659,7 +658,7 @@ test "negotiator final selected write retires on timeout reset connection close 
         try std.testing.expectEqual(@as(usize, 1), setup.listener.active());
         switch (case) {
             .timeout => {
-                setup.pair.advance(negotiate.negotiate_timeout_ms);
+                setup.pair.advance(Negotiator.negotiate_timeout_ms);
                 _ = setup.pumpListener(&supported, &.{});
             },
             .reset => {

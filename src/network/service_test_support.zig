@@ -1,12 +1,12 @@
 const std = @import("std");
 const support = @import("quic/test_support.zig");
-const service = @import("service.zig");
+const Service = @import("service.zig").Service;
 const Engine = @import("quic/Engine.zig");
 const Inbox = @import("gossipsub/test_support.zig").Inbox;
 
-pub fn initService(allocator: std.mem.Allocator, options: service.Options, transport: *const Engine) !service.Service {
+pub fn initService(allocator: std.mem.Allocator, options: Service.Options, transport: *const Engine) !Service {
     const local = try options.identify.makeLocal(&transport.tls.local_peer_id, &transport.local);
-    return service.Service.init(allocator, options, &local);
+    return Service.init(allocator, options, &local);
 }
 
 pub fn fixtureLocal(options: @import("identify/root.zig").Handler.Options) !@import("identify/root.zig").Local {
@@ -18,19 +18,19 @@ pub fn fixtureLocal(options: @import("identify/root.zig").Handler.Options) !@imp
 /// Services admit gossip peers explicitly, as PeerManager does, and deliver gossip through inboxes.
 pub const ServicePair = struct {
     pair: support.Pair = .{},
-    client: service.Service = undefined,
-    server: service.Service = undefined,
+    client: Service = undefined,
+    server: Service = undefined,
     client_inbox: Inbox = .{},
     server_inbox: Inbox = .{},
     handles: struct { client: Engine.Handle, server: Engine.Handle } = undefined,
 
-    pub fn init(self: *ServicePair, client: service.Options, server: service.Options) !void {
+    pub fn init(self: *ServicePair, client: Service.Options, server: Service.Options) !void {
         try self.initWindow(client, server, null);
     }
 
     /// As `init`, with the server granting `stream_window` bytes of credit on each stream the
     /// client opens until it reads them.
-    pub fn initWindow(self: *ServicePair, client: service.Options, server: service.Options, stream_window: ?u64) !void {
+    pub fn initWindow(self: *ServicePair, client: Service.Options, server: Service.Options, stream_window: ?u64) !void {
         try self.pair.init(.{}, .{});
         errdefer self.pair.deinit();
         if (stream_window) |window| @import("quic/binding.zig").c.quiche_config_set_initial_max_stream_data_bidi_remote(self.pair.server.config.ptr, window);
@@ -56,11 +56,11 @@ pub const ServicePair = struct {
         self.pair.deinit();
     }
 
-    pub const Counts = struct { client: service.OutputCounts, server: service.OutputCounts };
+    pub const Counts = struct { client: Service.OutputCounts, server: Service.OutputCounts };
 
     /// Processes each Service exactly once. Transport delivery does not advance the clock.
     /// Gossip delivered in earlier steps is cleared first.
-    pub fn step(self: *ServicePair, client: service.Outputs, server: service.Outputs) !Counts {
+    pub fn step(self: *ServicePair, client: Service.Outputs, server: Service.Outputs) !Counts {
         self.client_inbox.clear();
         self.server_inbox.clear();
         try self.pair.pump();
@@ -70,15 +70,15 @@ pub const ServicePair = struct {
         return .{ .client = client_count, .server = server_count };
     }
 
-    pub fn processClient(self: *ServicePair, outputs: service.Outputs) service.OutputCounts {
+    pub fn processClient(self: *ServicePair, outputs: Service.Outputs) Service.OutputCounts {
         return self.process(&self.client, &self.pair.client, outputs);
     }
 
-    pub fn processServer(self: *ServicePair, outputs: service.Outputs) service.OutputCounts {
+    pub fn processServer(self: *ServicePair, outputs: Service.Outputs) Service.OutputCounts {
         return self.process(&self.server, &self.pair.server, outputs);
     }
 
-    fn process(self: *ServicePair, owner: *service.Service, transport: *Engine, outputs: service.Outputs) service.OutputCounts {
+    fn process(self: *ServicePair, owner: *Service, transport: *Engine, outputs: Service.Outputs) Service.OutputCounts {
         var events: [@import("quic/limits.zig").events_per_turn_max]Engine.Event = undefined;
         return owner.process(transport, self.pair.events(transport, &events), self.pair.now, outputs);
     }

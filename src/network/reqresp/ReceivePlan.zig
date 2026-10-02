@@ -13,7 +13,7 @@ comptime {
     std.debug.assert(slots_per_peer * constants.slots_ceiling <= std.math.maxInt(u16));
 }
 const read_max = 16 * 1024;
-const handoff_max = @import("../negotiate.zig").inbox_capacity;
+const handoff_max = @import("../negotiate.zig").Negotiator.inbox_capacity;
 
 const Entry = struct {
     sink_offset: usize,

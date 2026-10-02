@@ -23,7 +23,7 @@ const Client = @import("Client.zig");
 const Server = @import("Server.zig");
 const RequestState = @import("RequestState.zig");
 const RequestIO = @import("RequestIO.zig");
-const routing = @import("../router.zig");
+const Router = @import("../router.zig").Router;
 const types = @import("../types.zig");
 const ReceivePlan = @import("ReceivePlan.zig");
 const ServingPool = @import("ServingPool.zig");
@@ -417,7 +417,7 @@ pub fn pendingCounts(self: *const ReqResp) struct { outbound: u16, inbound: u16 
 pub fn request(
     self: *ReqResp,
     engine: *Engine,
-    router: *routing.Router,
+    router: *Router,
     conn: Handle,
     which: Protocol,
     request_ssz: []const u8,
@@ -474,8 +474,27 @@ pub fn request(
     return slot.request.handle(index);
 }
 
+pub fn negotiationResult(self: *ReqResp, router: *Router, engine: *Engine, outcome: Router.Outcome, now: Now) void {
+    if (outcome.direction == .outbound) {
+        if (!self.negotiated(engine, outcome, now)) engine.closeStream(outcome.stream, 0);
+        return;
+    }
+    switch (outcome.result) {
+        .ready => |selection| _ = self.accept(engine, outcome.stream, selection, now) catch |err| {
+            if (err == error.ProtocolConcurrency) {
+                const message = std.fmt.comptimePrint("Rate limited: already {d} active requests for this protocol", .{constants.MAX_CONCURRENT_REQUESTS});
+                var wire: [codec.encodedLengthMax(message.len)]u8 = undefined;
+                const response = codec.encodeChunk(constants.result_rate_limited, null, message, &wire) catch unreachable;
+                if (router.finishSelected(engine, outcome.stream, response, now)) return;
+            }
+            engine.closeStream(outcome.stream, if (err == error.TooManyRequests) constants.app_error_over_limit else 0);
+        },
+        else => {},
+    }
+}
+
 /// Hands a negotiated stream to the outbound slot waiting for it. Returns false when none is.
-pub fn negotiated(self: *ReqResp, engine: *Engine, outcome: routing.Outcome, now: Now) bool {
+pub fn negotiated(self: *ReqResp, engine: *Engine, outcome: Router.Outcome, now: Now) bool {
     for (self.outbound, 0..) |*slot, position| {
         if (!slot.request.running() or slot.phase != .negotiation) continue;
         if (!std.meta.eql(slot.request.stream, outcome.stream)) continue;
@@ -493,7 +512,7 @@ pub fn accept(
     self: *ReqResp,
     engine: *Engine,
     stream: StreamHandle,
-    ready: routing.Selection,
+    ready: Router.Selection,
     now: Now,
 ) AcceptError!RequestHandle {
     const accepted = try self.admission.accept(self, engine, stream, ready, now);
@@ -610,7 +629,7 @@ pub fn errorMessage(self: *const ReqResp, handle: RequestHandle) []const u8 {
 
 /// Recovers one complete Goodbye before the caller cancels the connection's requests.
 /// Reads may latch failures, so the cleanup barrier runs even outside pump.
-pub fn closingGoodbye(self: *ReqResp, engine: *Engine, router: *routing.Router, conn: Handle, now: Now) ?u64 {
+pub fn closingGoodbye(self: *ReqResp, engine: *Engine, router: *Router, conn: Handle, now: Now) ?u64 {
     defer self.cleanupPending(engine, router);
     if (conn.index >= self.options.peers) return null;
     const first = ReceivePlan.first(conn.index, .goodbye_v1);
@@ -880,7 +899,7 @@ pub fn cancel(self: *ReqResp, handle: RequestHandle, now: Now) bool {
 /// Issues each latched stream close once, without delivering events or recycling slots.
 /// Raw owners call this after cancellation/connection events and before pumping Router
 /// or releasing request buffers. pump also drains it before and after protocol work.
-pub fn cleanupPending(self: *ReqResp, engine: *Engine, router: *routing.Router) void {
+pub fn cleanupPending(self: *ReqResp, engine: *Engine, router: *Router) void {
     var closed: usize = 0;
     while (self.closing.pop(self.links, "close")) |id| : (closed += 1) {
         assert(closed < self.links.len);
@@ -890,7 +909,7 @@ pub fn cleanupPending(self: *ReqResp, engine: *Engine, router: *routing.Router) 
     }
 }
 
-pub fn cancelApplications(self: *ReqResp, engine: *Engine, router: *routing.Router, now: Now) void {
+pub fn cancelApplications(self: *ReqResp, engine: *Engine, router: *Router, now: Now) void {
     for (self.outbound, 0..) |*slot, index| if (slot.request.awaitingTerminal() and !slot.request.protocol.isControl()) {
         _ = self.cancel(slot.request.handle(@intCast(index)), now);
     };
@@ -900,7 +919,7 @@ pub fn cancelApplications(self: *ReqResp, engine: *Engine, router: *routing.Rout
     self.cleanupPending(engine, router);
 }
 
-pub fn shutdown(self: *ReqResp, engine: *Engine, router: *routing.Router, now: Now) void {
+pub fn shutdown(self: *ReqResp, engine: *Engine, router: *Router, now: Now) void {
     for (self.outbound, 0..) |*slot, index| if (slot.request.awaitingTerminal()) {
         _ = self.cancel(slot.request.handle(@intCast(index)), now);
     };
@@ -910,7 +929,7 @@ pub fn shutdown(self: *ReqResp, engine: *Engine, router: *routing.Router, now: N
     self.cleanupPending(engine, router);
 }
 
-pub fn pump(self: *ReqResp, engine: *Engine, router: *routing.Router, now: Now, outputs: Outputs) OutputCounts {
+pub fn pump(self: *ReqResp, engine: *Engine, router: *Router, now: Now, outputs: Outputs) OutputCounts {
     const exhausted = self.advance(engine, router, now);
     const counts: OutputCounts = .{
         .application = self.drain(now, outputs.application, false),
@@ -925,7 +944,7 @@ pub fn pump(self: *ReqResp, engine: *Engine, router: *routing.Router, now: Now, 
 /// A due key goes first, so runnable slots cannot hold a deadline past its time; servicing
 /// one retires its slot or moves its key into the future. A slot re-marked while serviced
 /// waits for the next pump, behind the slots marked before it.
-fn advance(self: *ReqResp, engine: *Engine, router: *routing.Router, now: Now) bool {
+fn advance(self: *ReqResp, engine: *Engine, router: *Router, now: Now) bool {
     assert(now.mono_ms >= self.last_pump_ms or self.last_pump_ms == 0);
     self.last_pump_ms = now.mono_ms;
     self.cleanupPending(engine, router);

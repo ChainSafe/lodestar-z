@@ -3,12 +3,12 @@ const Engine = @import("../quic/Engine.zig");
 const codec = @import("codec.zig");
 const stream_io = @import("../stream_io.zig");
 const protocol = @import("protocol.zig");
-const negotiate = @import("../negotiate.zig");
+const Negotiator = @import("../negotiate.zig").Negotiator;
 
 pub const read_buffer_length: usize = 16 * 1024;
 pub const reads_per_pump_max: u32 = 8;
 pub const scratch_length: usize = codec.frame_scratch_max;
-pub const control_read_buffer_length: usize = negotiate.inbox_capacity;
+pub const control_read_buffer_length: usize = Negotiator.inbox_capacity;
 
 const RequestIO = @This();
 
@@ -109,5 +109,5 @@ comptime {
     std.debug.assert(read_buffer_length >= 1024);
     std.debug.assert(scratch_length >= codec.frame_scratch_max);
     std.debug.assert(protocol.control_scratch_length < scratch_length);
-    std.debug.assert(control_read_buffer_length >= negotiate.inbox_capacity);
+    std.debug.assert(control_read_buffer_length >= Negotiator.inbox_capacity);
 }

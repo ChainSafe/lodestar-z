@@ -3,7 +3,7 @@ const rr = @import("ReqResp.zig");
 const codec = @import("codec.zig");
 const Protocol = @import("protocol.zig").Protocol;
 const Server = @import("Server.zig");
-const negotiate = @import("../router.zig");
+const Router = @import("../router.zig").Router;
 const harness = @import("test_pair.zig");
 const Pair = harness.Pair;
 const Event = rr.Event;
@@ -143,7 +143,7 @@ test "reqresp router negotiation timeout contributes once to aggregate timeout c
     var sink: [8]u8 = undefined;
     const handle = try setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .ping_v1, &bytes, &sink, .{ .absolute_timeouts = .{ .negotiation_ms = 100 } }, setup.shared.pair.now);
     setup.shared.pair.advance(100);
-    var outcomes: [1]@import("../router.zig").Outcome = undefined;
+    var outcomes: [1]@import("../router.zig").Router.Outcome = undefined;
     try std.testing.expectEqual(@as(usize, 1), setup.shared.client.router.pump(&setup.shared.pair.client, setup.shared.pair.now, &outcomes));
     try std.testing.expectEqual(.timeout, outcomes[0].result.failed);
     try std.testing.expect(setup.shared.client.reqresp.negotiated(&setup.shared.pair.client, outcomes[0], setup.shared.pair.now));
@@ -173,7 +173,7 @@ test "reqresp cancellation removes Router ownership before output delivery" {
     try std.testing.expectEqual(@as(usize, 1), setup.shared.client.reqresp.resourceSnapshot().pending_terminals);
     _ = setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &.{} }).control;
     try std.testing.expect(!setup.shared.pair.client.registry.slots[stream.conn.index].table.matches(stream.slot, stream.id));
-    var outcomes: [8]negotiate.Outcome = undefined;
+    var outcomes: [8]Router.Outcome = undefined;
     setup.forwardEvents();
     try std.testing.expectEqual(@as(usize, 0), setup.shared.client.router.pump(&setup.shared.pair.client, setup.shared.pair.now, &outcomes));
     var events: [1]Event = undefined;

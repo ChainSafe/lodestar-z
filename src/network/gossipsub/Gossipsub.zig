@@ -1,6 +1,6 @@
 const std = @import("std");
 const session_io = @import("session_io.zig");
-const routing = @import("../router.zig");
+const Router = @import("../router.zig").Router;
 const index_list = @import("../index_list.zig");
 const snappy = @import("snappy");
 const constants = @import("constants.zig");
@@ -790,7 +790,7 @@ fn onSubscription(
     _ = self.overlay.peerSubscription(&context, index, sub.topic, sub.subscribe) orelse return;
 }
 
-pub fn shutdown(self: *Gossipsub, router: *routing.Router, engine: *Engine) void {
+pub fn shutdown(self: *Gossipsub, router: *Router, engine: *Engine) void {
     for (self.sessions.rows, 0..) |*peer, index| {
         if (peer.active) session_io.retirePeer(self, router, engine, @intCast(index));
     }
@@ -824,7 +824,7 @@ pub fn nextWakeup(self: *const Gossipsub, now: Now) ?u64 {
 
 pub fn pump(
     self: *Gossipsub,
-    router: *routing.Router,
+    router: *Router,
     engine: *Engine,
     now: Now,
 ) void {
@@ -837,7 +837,7 @@ pub fn pump(
 /// of the sessions that were ready when the turn began, in the order they became ready. A
 /// session that still wants service after its turn goes back to the tail; sessions marked
 /// during the turn wait for the next one.
-pub fn runTurn(self: *Gossipsub, router: *routing.Router, engine: *Engine, turn: *Turn) void {
+pub fn runTurn(self: *Gossipsub, router: *Router, engine: *Engine, turn: *Turn) void {
     const now = turn.now;
     self.expireSessions(router, engine, turn);
     self.tick(now);
@@ -867,7 +867,7 @@ pub fn runTurn(self: *Gossipsub, router: *routing.Router, engine: *Engine, turn:
 
 /// Pops the sessions whose earliest deadline passed. Handling an expiry clears it or retires the
 /// session, so a key set here lies in the future and each session is popped at most once.
-fn expireSessions(self: *Gossipsub, router: *routing.Router, engine: *Engine, turn: *Turn) void {
+fn expireSessions(self: *Gossipsub, router: *Router, engine: *Engine, turn: *Turn) void {
     const now_ms = turn.now.mono_ms;
     for (0..self.sessions.deadlines.len) |_| {
         const index: u16 = @intCast(self.sessions.deadlines.popDue(now_ms) orelse break);

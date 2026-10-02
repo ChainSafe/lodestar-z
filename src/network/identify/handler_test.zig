@@ -127,7 +127,7 @@ test "identify inbound timeout closes only withheld writer and shutdown releases
     const duplicate = try client.router.beginOutbound(&pair.client, handles.client, .identify, pair.now);
     var refused = false;
     for (0..32) |_| {
-        var outcomes: [8]@import("../router.zig").Outcome = undefined;
+        var outcomes: [8]@import("../router.zig").Router.Outcome = undefined;
         @import("../service_test_support.zig").forward(&pair, &pair.client, .{ .negotiator = &client.router.negotiator });
         _ = client.router.pump(&pair.client, pair.now, &outcomes);
         try pair.pump();

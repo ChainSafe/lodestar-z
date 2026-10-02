@@ -27,7 +27,7 @@ fn updateLocal(node: *NetworkCore, local: *const t.LocalState, schedule: Network
 
 /// Steps at the current time with a host that only bounds the wait at `wait_ms`.
 fn stepAfter(node: *NetworkCore, wait_ms: u32) !NetworkCore.Result {
-    const now = try @import("transport.zig").currentTime(std.testing.io);
+    const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
     return node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| wait_ms));
 }
 
@@ -60,7 +60,7 @@ const IntentPair = struct {
     fn pump(self: *IntentPair) !struct { a: NetworkCore.Result, b: NetworkCore.Result } {
         self.a_inbox.clear();
         self.b_inbox.clear();
-        const now = try @import("transport.zig").currentTime(std.testing.io);
+        const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
         const a = self.a.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| 1));
         if (a.failure) |err| return err;
         const b = self.b.step(std.testing.io, now, .{ .application = &self.b_app }, .deadlineOnly(now.mono_ms +| 1));
@@ -149,7 +149,7 @@ test "core local transaction sequences no-op schedule and rollback" {
     var node: NetworkCore = undefined;
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
-    const now = try @import("transport.zig").currentTime(std.testing.io);
+    const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
     const initial = node.localRecord().?.*;
     try @import("peers/enr.zig").requireIdentity(&initial, &node.peerId());
     var local = node.localState();
@@ -186,7 +186,7 @@ test "core sequence exhaustion rolls back and future fork hints stay advisory" {
     var node: NetworkCore = undefined;
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
-    const now = try @import("transport.zig").currentTime(std.testing.io);
+    const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
     const before = node.localState();
     const record = node.localRecord().?.*;
     var desired = before;
@@ -212,7 +212,7 @@ test "core explicit advertisement is independent and atomic" {
     opts.startup.discovery.?.fixed = .{ .ip4 = .{ 127, 0, 0, 1 }, .udp = 19000, .quic = 19001 };
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
-    const now = try @import("transport.zig").currentTime(std.testing.io);
+    const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
     const before = node.localRecord().?.*;
     var local = node.localState();
     var endpoints = node.advertisementEndpoints().?;
@@ -302,7 +302,7 @@ test "core BPO same-fork digest transition updates status and advertisement" {
     try std.testing.expectEqual(first.fork, node.service.reqresp.request_fork);
     local.fork.digest = second.digest;
     local.status.fork_digest = second.digest;
-    try std.testing.expect(try updateLocal(&node, &local, .{}, try @import("transport.zig").currentTime(std.testing.io)));
+    try std.testing.expect(try updateLocal(&node, &local, .{}, try @import("transport.zig").Transport.currentTime(std.testing.io)));
     try std.testing.expectEqual(second.digest, node.localState().status.fork_digest);
     try std.testing.expectEqual(second.digest, node.localState().fork.digest);
     try std.testing.expectEqual(second.fork, node.localState().fork.fork);
@@ -337,7 +337,7 @@ test "core request admission selector commits with validated local fork" {
     local.status.fork_digest = local.fork.digest;
     local.status.earliest_available_slot = 0;
     local.metadata.custody_group_count = 1;
-    const now = try @import("transport.zig").currentTime(std.testing.io);
+    const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
     try std.testing.expect(try updateLocal(&node, &local, .{}, now));
     try std.testing.expectEqual(t.ForkSeq.fulu, node.service.reqresp.request_fork);
     local.fork.fork = .gloas;

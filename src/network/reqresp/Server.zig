@@ -9,7 +9,7 @@ const assert = std.debug.assert;
 const StreamHandle = Engine.StreamHandle;
 const protocol = @import("protocol.zig");
 const Now = types.Now;
-const routing = @import("../router.zig");
+const Router = @import("../router.zig").Router;
 
 const Event = ReqResp.Event;
 const Failure = ReqResp.Failure;
@@ -342,7 +342,7 @@ fn finishStream(
 pub fn acceptPrepared(
     slot: *Server,
     stream: StreamHandle,
-    ready: routing.Selection,
+    ready: Router.Selection,
     accepted: *const @import("InboundAdmission.zig").Acceptance,
     request_fork: @import("config").ForkSeq,
     now: Now,

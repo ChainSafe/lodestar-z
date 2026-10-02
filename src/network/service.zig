@@ -1,5 +1,5 @@
 const std = @import("std");
-const routing = @import("router.zig");
+const Router = @import("router.zig").Router;
 const Engine = @import("quic/Engine.zig");
 const types = @import("types.zig");
 const reqresp_mod = @import("reqresp/root.zig");
@@ -8,29 +8,29 @@ const gossip_mod = @import("gossipsub/root.zig");
 const identify_mod = @import("identify/root.zig");
 const wake_sources = @import("wake_sources.zig");
 
-pub const Options = struct {
-    identify: identify_mod.Handler.Options = .{},
-    router: routing.Options = .{},
-    reqresp: reqresp_mod.ReqResp.Options,
-    gossipsub: gossip_mod.Gossipsub.Options = .{},
-};
-pub const Outputs = struct { application: []reqresp_mod.ReqResp.Event = &.{}, control: []reqresp_mod.ReqResp.Event = &.{}, identify: []identify_mod.Handler.Result = &.{} };
-pub const OutputCounts = struct { application: usize, control: usize, identify: usize };
-pub const Capacities = struct { application: usize = 0, control: usize = 0, identify: usize = 0 };
-pub const InitError = routing.Error || reqresp_mod.ReqResp.InitError || gossip_mod.Gossipsub.InitError || identify_mod.Handler.InitError || identify_mod.Handler.Options.Error;
-
 pub const Service = struct {
     identify: identify_mod.Handler,
     applications: enum { active, quiescing, closed } = .active,
-    router: routing.Router,
+    router: Router,
     reqresp: reqresp_mod.ReqResp,
     gossipsub: *gossip_mod.Gossipsub,
     /// The router outcomes `dispatch` hands to their owners. A field rather than a local so
     /// ReleaseSafe does not fill it every turn.
-    outcomes: [routing.outcomes_per_pump]routing.Outcome = undefined,
+    outcomes: [Router.outcomes_per_pump]Router.Outcome = undefined,
+
+    pub const Options = struct {
+        identify: identify_mod.Handler.Options = .{},
+        router: Router.Options = .{},
+        reqresp: reqresp_mod.ReqResp.Options,
+        gossipsub: gossip_mod.Gossipsub.Options = .{},
+    };
+    pub const Outputs = struct { application: []reqresp_mod.ReqResp.Event = &.{}, control: []reqresp_mod.ReqResp.Event = &.{}, identify: []identify_mod.Handler.Result = &.{} };
+    pub const OutputCounts = struct { application: usize, control: usize, identify: usize };
+    pub const Capacities = struct { application: usize = 0, control: usize = 0, identify: usize = 0 };
+    pub const InitError = Router.Error || reqresp_mod.ReqResp.InitError || gossip_mod.Gossipsub.InitError || identify_mod.Handler.InitError || identify_mod.Handler.Options.Error;
 
     pub fn validateOptions(options: Options) InitError!void {
-        try routing.Router.validateOptions(options.router);
+        try Router.validateOptions(options.router);
         try options.identify.validate();
         try options.reqresp.validate();
         try options.gossipsub.validate();
@@ -40,7 +40,7 @@ pub const Service = struct {
     /// The supplied value is authoritative; Identify options retain startup validation and limits.
     pub fn init(allocator: std.mem.Allocator, options: Options, local: *const identify_mod.Local) InitError!Service {
         try validateOptions(options);
-        var router = try routing.Router.init(allocator, options.router);
+        var router = try Router.init(allocator, options.router);
         errdefer router.deinit();
         var reqresp = try reqresp_mod.ReqResp.init(allocator, options.reqresp);
         errdefer reqresp.deinit();
@@ -109,7 +109,7 @@ pub const Service = struct {
         wakeups.note(.reqresp, self.reqresp.nextWakeup(now, .{ .application = capacities.application, .control = capacities.control }));
         if (self.applications == .active) wakeups.note(.gossip, self.gossipsub.nextWakeup(now));
         wakeups.note(.identify, self.identify.nextWakeup(now, capacities.identify));
-        wakeups.note(.negotiation, self.router.nextWakeup(now, routing.outcomes_per_pump));
+        wakeups.note(.negotiation, self.router.nextWakeup(now, Router.outcomes_per_pump));
     }
 
     /// Delivers one turn of engine events, then pumps each owner's ready work and due deadlines.
@@ -125,7 +125,7 @@ pub const Service = struct {
         if (self.applications == .active) self.applications = .quiescing;
     }
 
-    fn rejectApplication(self: *const Service, outcome: *const routing.Outcome) bool {
+    fn rejectApplication(self: *const Service, outcome: *const Router.Outcome) bool {
         if (self.applications == .active) return false;
         return switch (outcome.result) {
             .ready => |selection| switch (selection.protocol) {
@@ -190,25 +190,13 @@ pub const Service = struct {
             if (outcome.result == .ready) engine.bindStream(outcome.stream, .{}) catch {};
             switch (owner) {
                 .identify => self.identify.negotiationResult(&self.router, engine, outcome, now),
-                .reqresp => {
-                    if (outcome.direction == .outbound) {
-                        if (!self.reqresp.negotiated(engine, outcome, now)) engine.closeStream(outcome.stream, 0);
-                    } else switch (outcome.result) {
-                        .ready => |selection| _ = self.reqresp.accept(engine, outcome.stream, selection, now) catch |err| {
-                            if (err == error.ProtocolConcurrency) {
-                                const codec = @import("reqresp/codec.zig");
-                                const message = "Rate limited: already 2 active requests for this protocol";
-                                var wire: [codec.encodedLengthMax(message.len)]u8 = undefined;
-                                const response = codec.encodeChunk(@import("reqresp/constants.zig").result_rate_limited, null, message, &wire) catch unreachable;
-                                if (self.router.finishSelected(engine, outcome.stream, response, now)) continue;
-                            }
-                            engine.closeStream(outcome.stream, if (err == error.TooManyRequests) @import("reqresp/constants.zig").app_error_over_limit else 0);
-                        },
-                        else => {},
-                    }
-                },
+                .reqresp => self.reqresp.negotiationResult(&self.router, engine, outcome, now),
                 .meshsub => self.gossipsub.negotiationResult(engine, outcome, now),
             }
         }
     }
 };
+
+test {
+    _ = @import("service_test.zig");
+}

@@ -16,7 +16,7 @@ const Now = types.Now;
 const protocol = @import("protocol.zig");
 const Protocol = protocol.Protocol;
 const PeerId = @import("../wire/peer_id.zig").PeerId;
-const routing = @import("../router.zig");
+const Router = @import("../router.zig").Router;
 const assert = std.debug.assert;
 
 pub const State = struct {
@@ -97,7 +97,7 @@ pub fn waitEnded(self: *InboundAdmission, slot: *Server) void {
     self.pending = true;
 }
 
-pub fn accept(self: *InboundAdmission, owner: *ReqResp, engine: *Engine, stream: StreamHandle, ready: routing.Selection, now: Now) ReqResp.AcceptError!Acceptance {
+pub fn accept(self: *InboundAdmission, owner: *ReqResp, engine: *Engine, stream: StreamHandle, ready: Router.Selection, now: Now) ReqResp.AcceptError!Acceptance {
     try owner.validateTransportCapacity(engine);
     if (stream.conn.index >= owner.options.peers) return error.InvalidCapacity;
     const identity = engine.peerId(stream.conn) orelse return error.StaleHandle;

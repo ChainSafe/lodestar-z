@@ -15,7 +15,7 @@ const Peer = struct {
     emitted: u16 = 0,
 
     pub fn pump(self: *Peer) !void {
-        self.now = try network.transport.currentTime(self.io);
+        self.now = try network.Transport.currentTime(self.io);
         var events: [1]t.Event = undefined;
         const result = self.node.step(self.io, self.now, .{ .peers = events[0..self.capacity] }, .deadlineOnly(self.now.mono_ms +| 1));
         if (result.failure) |err| return err;
@@ -95,7 +95,7 @@ pub fn main(init: std.process.Init) !void {
     defer a.destroy(peer);
     peer.allocator = a;
     peer.io = init.io;
-    peer.now = try network.transport.currentTime(init.io);
+    peer.now = try network.Transport.currentTime(init.io);
     peer.paused = false;
     peer.quit = false;
     peer.peer = null;

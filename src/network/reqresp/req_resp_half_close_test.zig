@@ -4,7 +4,7 @@ const protocol = @import("protocol.zig");
 const rr = @import("ReqResp.zig");
 const harness = @import("test_pair.zig");
 const Engine = @import("../quic/Engine.zig");
-const router = @import("../router.zig");
+const Router = @import("../router.zig").Router;
 
 const Pair = harness.Pair;
 const Request = struct { handle: rr.RequestHandle, remote: Engine.StreamHandle };
@@ -19,7 +19,7 @@ fn negotiate(pair: *Pair, method: protocol.Protocol, bytes: []const u8, sink: []
             .stream_opened => |stream| try pair.shared.server.router.negotiator.acceptInbound(&pair.shared.pair.server, stream, pair.shared.pair.now),
             else => {},
         };
-        var outcomes: [8]router.Outcome = undefined;
+        var outcomes: [8]Router.Outcome = undefined;
         pair.forwardEvents();
         const clients = pair.shared.client.router.pump(&pair.shared.pair.client, pair.shared.pair.now, &outcomes);
         for (outcomes[0..clients]) |outcome| try std.testing.expect(pair.shared.client.reqresp.negotiated(&pair.shared.pair.client, outcome, pair.shared.pair.now));

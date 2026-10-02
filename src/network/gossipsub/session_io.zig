@@ -1,6 +1,6 @@
 const std = @import("std");
 const Engine = @import("../quic/Engine.zig");
-const routing = @import("../router.zig");
+const Router = @import("../router.zig").Router;
 const sessions_mod = @import("sessions.zig");
 const types = @import("../types.zig");
 const Gossipsub = @import("Gossipsub.zig");
@@ -42,7 +42,7 @@ pub fn peerConnected(self: *Gossipsub, engine: *Engine, conn: Handle, direct: bo
 
 pub fn transportEvents(
     self: *Gossipsub,
-    router: *routing.Router,
+    router: *Router,
     engine: *Engine,
     events: []const TransportEvent,
     now: Now,
@@ -59,7 +59,7 @@ pub fn transportEvents(
     };
 }
 
-pub fn retireConnection(self: *Gossipsub, router: *routing.Router, engine: *Engine, conn: Handle, now: Now) void {
+pub fn retireConnection(self: *Gossipsub, router: *Router, engine: *Engine, conn: Handle, now: Now) void {
     self.last_now_ms = @max(self.last_now_ms, now.mono_ms);
     const index = self.sessions.find(conn) orelse return;
     retirePeer(self, router, engine, index);
@@ -68,7 +68,7 @@ pub fn retireConnection(self: *Gossipsub, router: *routing.Router, engine: *Engi
 pub fn negotiationResult(
     self: *Gossipsub,
     engine: *Engine,
-    outcome: routing.Outcome,
+    outcome: Router.Outcome,
     now: Now,
 ) void {
     self.last_now_ms = @max(self.last_now_ms, now.mono_ms);
@@ -80,7 +80,7 @@ pub fn negotiationResult(
     self.settle(index);
 }
 
-fn takeNegotiated(self: *Gossipsub, engine: *Engine, index: u16, outcome: routing.Outcome) void {
+fn takeNegotiated(self: *Gossipsub, engine: *Engine, index: u16, outcome: Router.Outcome) void {
     const session = &self.sessions.rows[index];
     if (session.outbound == .closing) {
         engine.closeStream(outcome.stream, 0);
@@ -159,7 +159,7 @@ pub fn streamReady(self: *Gossipsub, engine: *Engine, route: types.Route, stream
 
 fn openOutbound(
     self: *Gossipsub,
-    router: *routing.Router,
+    router: *Router,
     engine: *Engine,
     index: u16,
     now: Now,
@@ -244,7 +244,7 @@ fn replaceOutbound(
     self.sendSubscriptions(index);
 }
 
-pub fn retirePeer(self: *Gossipsub, router: *routing.Router, engine: *Engine, index: u16) void {
+pub fn retirePeer(self: *Gossipsub, router: *Router, engine: *Engine, index: u16) void {
     const peer = &self.sessions.rows[index];
     if (peer.outbound == .closing) std.log.scoped(.network_gossip_errors).debug("gossip_relationship_closed connection={d}:{d} reason={s} critical_frames={d} critical_bytes={d}", .{ peer.conn.index, peer.conn.generation, @tagName(peer.io.tx.last_drop), peer.io.tx.critical.count, peer.io.tx.critical.used });
     if (peer.outbound == .negotiating) {
@@ -383,7 +383,7 @@ fn flush(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *Turn
     }
 }
 
-pub fn serviceSession(self: *Gossipsub, router: *routing.Router, engine: *Engine, index: u16, turn: *Turn, openings: *usize) void {
+pub fn serviceSession(self: *Gossipsub, router: *Router, engine: *Engine, index: u16, turn: *Turn, openings: *usize) void {
     const now = turn.now;
     const session = &self.sessions.rows[index];
     assert(session.active);
@@ -463,7 +463,7 @@ fn discardInboundFrame(self: *Gossipsub, index: u16) usize {
     return work;
 }
 
-pub fn expireSession(self: *Gossipsub, router: *routing.Router, engine: *Engine, index: u16, turn: *Turn) void {
+pub fn expireSession(self: *Gossipsub, router: *Router, engine: *Engine, index: u16, turn: *Turn) void {
     const now_ms = turn.now.mono_ms;
     const g = self;
     const peer = &g.sessions.rows[index];

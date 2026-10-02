@@ -6,7 +6,7 @@ const reqresp = @import("ReqResp.zig");
 const harness = @import("test_pair.zig");
 const Engine = @import("../quic/Engine.zig");
 const multistream = @import("../wire/multistream.zig");
-const negotiate = @import("../router.zig");
+const Router = @import("../router.zig").Router;
 const Event = reqresp.Event;
 const Protocol = protocol.Protocol;
 const Pair = harness.Pair;
@@ -27,7 +27,7 @@ fn pumpRawServer(setup: *Pair, comptime reply: RawReply) !usize {
         else => {},
     };
     var leftover: usize = 0;
-    var outcomes: [8]negotiate.Outcome = undefined;
+    var outcomes: [8]Router.Outcome = undefined;
     setup.forwardEvents();
     const dialed = setup.shared.client.router.pump(&setup.shared.pair.client, now, &outcomes);
     for (outcomes[0..dialed]) |outcome| {

@@ -288,13 +288,13 @@ test "reqresp active inbound invalid head range and no-body requests never reach
 }
 
 test "reqresp active light client traffic preserves control reserve and cancellation reuse" {
-    const routing = @import("../router.zig");
+    const Router = @import("../router.zig").Router;
     const support = @import("../quic/test_support.zig");
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
     const handles = try support.connectPair(&pair);
-    var router = try routing.Router.init(std.testing.allocator, .{});
+    var router = try Router.init(std.testing.allocator, .{});
     defer router.deinit();
     var owner = try reqresp.init(std.testing.allocator, try @import("control_fixture.zig").reservedOptions());
     defer owner.deinit();
