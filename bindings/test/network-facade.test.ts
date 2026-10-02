@@ -22,6 +22,7 @@ import {
   topicKinds,
   topicName,
   unreachableConnect,
+  waitForGossipReady,
 } from "./utils/network.js";
 import {BLOCKS} from "./utils/network-incoming.js";
 import {type PeerRuntime, startPeer} from "./utils/network-peer.js";
@@ -81,7 +82,16 @@ async function facadeWithPeers(
         network.setDirectPeer(identity.peerId, [identity.localEndpoint]),
       ]);
     }
-    await delay(1250);
+    const identities = await Promise.all(peers.map((peer) => peer.identity));
+    await Promise.all([
+      waitForGossipReady(
+        network,
+        identities.map(({peerId}) => peerId),
+        [TOPIC],
+        network.metrics.bind(network)
+      ),
+      ...peers.map((peer) => waitForGossipReady(peer, [remote.peerId], [TOPIC], () => peer.getMetrics())),
+    ]);
     return {network, peers, remote};
   } catch (error) {
     await Promise.allSettled([network?.close(), ...peers.map((peer) => peer.close())]);

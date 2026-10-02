@@ -56,6 +56,21 @@ pub const Sockets = struct {
         /// (EPERM). Native single and batch sends name it on Linux and macOS.
         DestinationRefused,
     };
+
+    pub fn destinationUnreachable(err: SendError) bool {
+        return switch (err) {
+            error.AccessDenied,
+            error.AddressFamilyUnsupported,
+            error.ConnectionRefused,
+            error.ConnectionResetByPeer,
+            error.DestinationRefused,
+            error.HostUnreachable,
+            error.NetworkUnreachable,
+            => true,
+            else => false,
+        };
+    }
+
     /// `sent` datagrams went out; `failure` is the error of the next one, null when all did.
     pub const SendOutcome = struct { sent: usize, failure: ?SendError };
     pub const SendDrops = struct {

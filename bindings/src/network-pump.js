@@ -495,14 +495,16 @@ export class NativePump {
       start.adopted = true;
       pending.push(start.incoming);
     }
-    if (pending.length > 0 && performance.now() >= deadline) {
-      this.#heldStarts = pending;
-      return true;
-    }
     // Starts after a serve that closed the network are cancelled instead.
-    for (const incoming of pending) {
+    for (const [index, incoming] of pending.entries()) {
       if (this.#closing) void incoming.cancel().catch(noop);
-      else this.#serve(incoming);
+      else {
+        if (performance.now() >= deadline) {
+          this.#heldStarts = pending.slice(index);
+          return true;
+        }
+        this.#serve(incoming);
+      }
     }
     return false;
   }

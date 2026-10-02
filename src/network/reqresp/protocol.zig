@@ -259,14 +259,6 @@ pub fn requestMaxAll() usize {
     return longest;
 }
 
-pub fn requestMaxControl() usize {
-    comptime var longest: usize = 0;
-    inline for (table, 0..) |bounds, index| {
-        if (comptime @as(Protocol, @enumFromInt(index)).isControl()) longest = @max(longest, bounds.request_max);
-    }
-    return longest;
-}
-
 pub fn payloadMaxControl() usize {
     comptime var longest: usize = 0;
     inline for (table, 0..) |bounds, index| {

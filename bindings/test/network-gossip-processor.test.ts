@@ -19,6 +19,7 @@ import {
   startRuntime,
   subscriptions,
   topicName,
+  waitForGossipReady,
 } from "./utils/network.js";
 import {incomingPair} from "./utils/network-incoming.js";
 
@@ -115,7 +116,10 @@ test("native processor retains dependencies, protects blocks, batches ready work
       pair.left.addDirectPeer(pair.remote.peerId, [pair.remote.localEndpoint]),
       pair.right.addDirectPeer(pair.identity.peerId, [pair.identity.localEndpoint]),
     ]);
-    await delay(1250);
+    await Promise.all([
+      waitForGossipReady(pair.left, [pair.remote.peerId], [BLOCK, ATTESTATION], () => pair.left.getMetrics()),
+      waitForGossipReady(pair.right, [pair.identity.peerId], [BLOCK, ATTESTATION], () => pair.right.getMetrics()),
+    ]);
     const data = new Uint8Array(229);
     const view = new DataView(data.buffer);
     view.setUint32(0, 228, true);
@@ -237,7 +241,10 @@ test("expired validation execution remains visible until late host completion", 
       pair.left.addDirectPeer(pair.remote.peerId, [pair.remote.localEndpoint]),
       pair.right.addDirectPeer(pair.identity.peerId, [pair.identity.localEndpoint]),
     ]);
-    await delay(1250);
+    await Promise.all([
+      waitForGossipReady(pair.left, [pair.remote.peerId], [BLOCK], () => pair.left.getMetrics()),
+      waitForGossipReady(pair.right, [pair.identity.peerId], [BLOCK], () => pair.right.getMetrics()),
+    ]);
     const block = new Uint8Array(4000);
     new DataView(block.buffer).setBigUint64(100, pair.rightConfig.initialSlot, true);
     await pair.left.publishGossip(BLOCK, block);

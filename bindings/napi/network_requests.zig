@@ -320,19 +320,19 @@ pub fn submit(runtime: *Runtime, token: Token, now: n.Now) !void {
     table.refresh(cell);
     runtime.recomputeLocked(.completions);
 }
-pub fn flags(runtime: *Runtime, io: std.Io) void {
+pub fn flags(runtime: *Runtime, now: n.Now) void {
     runtime.lock();
     defer runtime.unlock();
     if (runtime.requests) |*table| for (table.cells) |*cell| {
         if (cell.state == .free or cell.state == .preparing or cell.state == .queued or cell.copying) continue;
         if (cell.cancel or runtime.stop) {
             cell.chunk = null;
-            if (cell.native) |handle| _ = runtime.heavy.?.core.cancel(handle, @import("network_owner.zig").now(io));
+            if (cell.native) |handle| _ = runtime.heavy.?.core.cancel(handle, now);
         } else if (cell.consume) {
             cell.consume = false;
             cell.chunk = null;
             cell.delivered = false;
-            if (cell.native) |handle| _ = runtime.heavy.?.core.consume(handle, @import("network_owner.zig").now(io));
+            if (cell.native) |handle| _ = runtime.heavy.?.core.consume(handle, now);
         }
         table.releasePayload(cell);
         table.refresh(cell);

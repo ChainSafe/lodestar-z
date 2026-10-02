@@ -15,6 +15,7 @@ import {
   subscriptions,
   topicKinds,
   topicName,
+  waitForGossipReady,
 } from "./utils/network.js";
 import {startPeer} from "./utils/network-peer.js";
 
@@ -85,7 +86,10 @@ async function gossipPair(timeoutMs = 30000n, budget?: number, configure?: (conf
       pair.left.addDirectPeer(pair.remote.peerId, [pair.remote.localEndpoint]),
       pair.right.addDirectPeer(pair.identity.peerId, [pair.identity.localEndpoint]),
     ]);
-    await delay(1250);
+    await Promise.all([
+      waitForGossipReady(pair.left, [pair.remote.peerId], [TOPIC], () => pair.left.getMetrics()),
+      waitForGossipReady(pair.right, [pair.identity.peerId], [TOPIC], () => pair.right.getMetrics()),
+    ]);
     return pair;
   } catch (error) {
     await Promise.allSettled([pair.left.close(), pair.right.close()]);

@@ -186,14 +186,15 @@ pub const Table = struct {
     }
 };
 
-pub fn execute(runtime: *Runtime, token: Token, now: n.Now) void {
+/// Queue latency uses the actual execution time: a publication can arrive after the core's turn began.
+pub fn execute(runtime: *Runtime, token: Token, now: n.Now, executed_ms: u64) void {
     runtime.lock();
     const table = &runtime.publications.?;
     const cell = table.get(token).?;
     std.debug.assert(cell.state == .queued);
     table.transition(cell, .executing);
-    std.debug.assert(now.mono_ms >= cell.queued_ms);
-    const latency = now.mono_ms - cell.queued_ms;
+    std.debug.assert(executed_ms >= cell.queued_ms);
+    const latency = executed_ms - cell.queued_ms;
     table.latency.observe(latency);
     runtime.unlock();
 

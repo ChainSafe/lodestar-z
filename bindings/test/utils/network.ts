@@ -1,5 +1,6 @@
 import {type SpawnSyncReturns, spawnSync} from "node:child_process";
 import {basename} from "node:path";
+import {setTimeout as delay} from "node:timers/promises";
 import {publicKeyFromProtobuf} from "@libp2p/crypto/keys";
 import {peerIdFromPublicKey} from "@libp2p/peer-id";
 import {testChain} from "../../../test/interop/network_chain.mjs";
@@ -14,6 +15,7 @@ import type {
   NativeDiscoveryConfig,
   NativeGossipProcessorLimit,
   NativeLocalIntent,
+  NativeNetwork,
   NativeRuntimeConfig,
   NativeSubscriptionSet,
   NativeTopicKind,
@@ -514,4 +516,33 @@ function childFailure(
 export function metricValue(text: string, series: string): number | undefined {
   const line = text.split("\n").find((line) => line.startsWith(`${series} `));
   return line === undefined ? undefined : Number(line.slice(series.length + 1));
+}
+
+export async function waitForGossipReady(
+  runtime: Pick<NativeNetwork, "getGossipDiagnostics">,
+  peerIds: readonly string[],
+  topics: readonly string[],
+  readMetrics: () => string | Promise<string>
+): Promise<void> {
+  const deadline = performance.now() + 5000;
+  let waiting = "";
+  for (let attempt = 0; attempt < 500 && performance.now() < deadline; attempt++) {
+    const ready = new Set<string>();
+    let cursor = 0;
+    for (let page = 0; page < 64; page++) {
+      const snapshot = await runtime.getGossipDiagnostics(cursor);
+      for (const peer of snapshot.peers) if (peer.connected && peer.outboundReady) ready.add(peer.identity);
+      if (snapshot.nextCursor === null) break;
+      cursor = snapshot.nextCursor;
+    }
+    const metrics = await readMetrics();
+    const missingPeers = peerIds.filter((peer) => !ready.has(peer));
+    const missingTopics = topics.filter(
+      (topic) => (metricValue(metrics, `gossipsub_topic_peer_count{topicStr="${topic}"}`) ?? 0) < peerIds.length
+    );
+    if (missingPeers.length === 0 && missingTopics.length === 0) return;
+    waiting = `peers=${missingPeers.join(",")} topics=${missingTopics.join(",")}`;
+    await delay(10);
+  }
+  throw new Error(`Gossip readiness deadline: ${waiting}`);
 }

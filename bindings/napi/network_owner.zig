@@ -191,10 +191,10 @@ fn applyWork(self: *Runtime, io: std.Io, tick: n.Now) !n.NetworkCore.HostProgres
     var more = false;
     if (!stop) {
         more = applyReports(self, tick) or more;
-        more = try executeWork(self, io) or more;
+        more = try executeWork(self, io, tick) or more;
     }
-    more = try gossip_mod.flags(self, io) or more;
-    requests_mod.flags(self, io);
+    more = try gossip_mod.flags(self, io, tick) or more;
+    requests_mod.flags(self, tick);
     more = try incoming_mod.flags(self, tick) or more;
     return .{ .more = more };
 }
@@ -219,7 +219,7 @@ fn applyReports(self: *Runtime, tick: n.Now) bool {
 
 /// Executes queued commands, publications and requests in admission order under their per-turn
 /// caps. Returns whether a cap stopped it with work left.
-fn executeWork(self: *Runtime, io: std.Io) !bool {
+fn executeWork(self: *Runtime, io: std.Io, tick: n.Now) !bool {
     var controls: usize = 0;
     var requests: usize = 0;
     var publishes: usize = 0;
@@ -253,7 +253,7 @@ fn executeWork(self: *Runtime, io: std.Io) !bool {
             };
             self.table.transition(cell, .executing);
             self.unlock();
-            commands.execute(self, command.?, now(io));
+            commands.execute(self, command.?, tick);
             controls += 1;
         } else if (order == publish_order) {
             const len = self.publications.?.get(publication.?).?.payload.len;
@@ -266,7 +266,7 @@ fn executeWork(self: *Runtime, io: std.Io) !bool {
                 return err;
             };
             self.unlock();
-            publications.execute(self, publication.?, now(io));
+            publications.execute(self, publication.?, tick, now(io).mono_ms);
             publishes += 1;
             bytes += len;
         } else {
@@ -279,12 +279,13 @@ fn executeWork(self: *Runtime, io: std.Io) !bool {
                 return err;
             };
             self.unlock();
-            try requests_mod.submit(self, request.?, now(io));
+            try requests_mod.submit(self, request.?, tick);
             requests += 1;
         }
     }
     return true;
 }
+
 fn publishTurn(self: *Runtime, result: *const n.NetworkCore.Result, timestamp: n.Now, sequence: u64) void {
     const counts = self.heavy.?.core.peerCounts();
     if (timestamp.mono_ms >= self.metrics_due_ms) {
@@ -417,4 +418,65 @@ test "a command queued while the owner waits executes in the turn whose poll saw
     try std.testing.expect(runtime.table.get(submitter.token.?).failure == null);
     runtime.abortCommand(submitter.token.?);
     runtime.heavy = null;
+}
+
+test "queued owner operations share the protocol turn clock while latency uses execution time" {
+    const testing = std.testing.allocator;
+    var runtime: Runtime = .{ .env = undefined, .notify_live = false, .env_alive = false };
+    const owner = try testing.create(Owner);
+    defer testing.destroy(owner);
+    owner.* = .{};
+    runtime.heavy = owner;
+    const key = try n.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{71}));
+    const resolved = try n.configuration.resolve(.{
+        .profile = .small,
+        .seed = 1,
+        .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }},
+        .admission_policy = .{ .deneb_start_slot = 0, .blocks_pre_deneb = 1024, .blocks_deneb = 128, .blob_identifiers_deneb = 768, .blob_identifiers_electra = 1152, .number_of_columns = 128, .column_chunks = 16384, .blob_schedule = &.{.{ .start_slot = 0, .max_blobs = 6 }} },
+    });
+    try owner.core.init(testing, std.testing.io, &resolved, .{
+        .host = &key,
+        .bind = .{ .ip4 = .loopback(0) },
+        .local = .{ .metadata = .{ .custody_group_count = 1 }, .status = .{ .earliest_available_slot = 0 } },
+    });
+    defer owner.core.deinit(std.testing.io);
+    const tick = owner.core.last_now;
+    const Clock = struct {
+        var time: n.Now = undefined;
+        fn read(_: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
+            return .{ .nanoseconds = if (clock == .real) @as(i96, time.unix_s) * std.time.ns_per_s else @as(i96, time.mono_ms) * std.time.ns_per_ms };
+        }
+    };
+    Clock.time = .{ .mono_ms = tick.mono_ms + 100, .unix_s = tick.unix_s };
+    var vtable = std.testing.io.vtable.*;
+    vtable.now = Clock.read;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    runtime.payload_budget.limit = 1 << 20;
+    runtime.publications = try publications.Table.init(testing, 1, &runtime.payload_budget);
+    defer runtime.publications.?.deinit();
+    runtime.requests = try requests_mod.Table.init(testing, 1, &runtime.payload_budget);
+    defer runtime.requests.?.deinit();
+
+    const peer_key = try n.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{72}));
+    const connect = try runtime.table.reserve(.connect);
+    defer runtime.table.retire(connect);
+    const command = runtime.table.get(connect);
+    command.input.peer = n.PeerId.fromPublicKey(&peer_key.publicKey());
+    command.input.addresses[0] = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9000 } };
+    command.input.address_count = 1;
+    command.input.timeout_ms = 1000;
+    runtime.table.transition(command, .queued);
+
+    const publication = try runtime.publications.?.reserve(.beacon_block, 0);
+    defer runtime.publications.?.retire(publication);
+    const cell = runtime.publications.?.get(publication).?;
+    cell.order = try runtime.table.nextOrder();
+    cell.queued_ms = tick.mono_ms + 50;
+    runtime.publications.?.transition(cell, .queued);
+    try std.testing.expect(!try executeWork(&runtime, io, tick));
+    try std.testing.expect(command.failure == null);
+    try std.testing.expectEqual(tick.mono_ms + 1000, command.deadline);
+    try std.testing.expectEqual(error.UnknownTopic, cell.failure.?);
+    try std.testing.expectEqual(tick.mono_ms, owner.core.service.gossipsub.last_now_ms);
+    try std.testing.expectEqual(@as(u128, 50), runtime.publications.?.latency.sum);
 }
