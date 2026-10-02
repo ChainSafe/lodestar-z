@@ -211,8 +211,7 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
         },
     }
 }
-pub fn completeConnects(self: *Runtime, timestamp: n.Now) void {
-    const events = self.heavy.?.core.transportEvents();
+pub fn completeConnects(self: *Runtime, events: []const n.Event, timestamp: n.Now) void {
     self.lock();
     defer self.unlock();
     if (self.stop) return;

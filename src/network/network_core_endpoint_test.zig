@@ -1,3 +1,4 @@
+const driver = @import("driver.zig");
 const std = @import("std");
 const d = @import("discv5");
 const core_test = @import("network_core_test_support.zig");
@@ -39,7 +40,7 @@ const Peers = struct {
                 const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
                 const response = try remote.stepUntil(std.testing.io, &expired, now.mono_ms);
                 if (response.failure) |err| return err;
-                const result = node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms));
+                const result = driver.step(node, std.testing.io, now, .{}, .deadlineOnly(now.mono_ms));
                 if (result.failure) |err| return err;
                 if (owner.transport.engine.calls.count() == 0) {
                     completed = true;

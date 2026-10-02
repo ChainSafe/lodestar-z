@@ -69,8 +69,8 @@ pub const Transport = struct {
     pub const StepError = Sockets.DatagramError || error{ClockOutOfRange};
     pub const DialError = Sockets.SendError || Engine.DialError || error{ ClockOutOfRange, DestinationUnreachable, MissingPeerId };
 
-    /// Options of the standalone `step`, which also waits for the socket. NetworkCore polls its
-    /// sockets itself and drives the phases directly.
+    /// Options of the standalone `step`, which also waits for the socket. The network driver
+    /// supplies readiness to NetworkCore, which drives the phases directly.
     pub const StepOptions = struct {
         wait_max_ms: u32 = constants.poll_interval_ms,
     };
@@ -214,6 +214,12 @@ pub const Transport = struct {
         return handle;
     }
 
+    /// Ends the preceding turn's transport-event borrow and retires reported connections.
+    pub fn beginTurn(self: *Transport, now: Engine.Now) StepResult {
+        self.engine.releaseReported();
+        return .{ .now = now };
+    }
+
     /// Standalone turn for programs that own only a Transport: waits up to `wait_max_ms` for a
     /// datagram when nothing is due, then receives, expires timers, collects events and flushes.
     /// Publishes completed work on failure. A failure to read the initial clock leaves the turn
@@ -228,7 +234,7 @@ pub const Transport = struct {
             .progress = .{ .now = .{ .mono_ms = 0, .unix_s = 0 } },
             .failure = err,
         } };
-        self.engine.releaseReported();
+        result = self.beginTurn(result.now);
         const wait_ms = self.idleWaitMs(result.now, options.wait_max_ms);
         var failure: ?StepError = if (self.receiveBatch(io, &result, wait_ms, @splat(true))) |_| null else |err| err;
         // The wait may have slept; timers use a fresh clock when one can be read.

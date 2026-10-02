@@ -70,7 +70,7 @@ test "gossipsub rotates the legal atomic allowance past a duplicate flood" {
     g.sessions.rows[first.index].io.rx_ready = true;
     g.sessions.rows[first.index].io.startRpc(w1.written());
     g.settle(first.index);
-    try std.testing.expectEqual(@as(?u64, pair.now.mono_ms), g.nextWakeup(pair.now));
+    try std.testing.expectEqual(@as(?u64, pair.now.mono_ms), g.schedule().nextWakeup(pair.now.mono_ms));
     try std.testing.expectEqual(@as(usize, 1), @import("test_support.zig").pump(&g, &pair.server, pair.now));
     try std.testing.expectEqualStrings("two", inbox.last().bytes);
 }

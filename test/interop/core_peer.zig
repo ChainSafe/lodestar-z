@@ -17,7 +17,7 @@ const Peer = struct {
     pub fn pump(self: *Peer) !void {
         self.now = try network.Transport.currentTime(self.io);
         var events: [1]t.Event = undefined;
-        const result = self.node.step(self.io, self.now, .{ .peers = events[0..self.capacity] }, .deadlineOnly(self.now.mono_ms +| 1));
+        const result = network.driver.step(&self.node, self.io, self.now, .{ .peers = events[0..self.capacity] }, .deadlineOnly(self.now.mono_ms +| 1));
         if (result.failure) |err| return err;
         for (events[0..result.counts.peers]) |event| {
             if (self.emitted == 512) return error.EventBound;

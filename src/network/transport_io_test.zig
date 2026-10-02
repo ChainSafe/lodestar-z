@@ -1,3 +1,4 @@
+const driver = @import("driver.zig");
 const quic_test = @import("quic/test_support.zig");
 const core_test = @import("network_core_test_support.zig");
 const FaultIo = @import("fault_io");
@@ -913,14 +914,14 @@ test "network owner progresses and shuts down while UDP sends are under local pr
     var faults: FaultIo = .{ .send = .{}, .send_failure = error.SystemResources };
     const now = node.last_now;
     try node.connectUntil(&identity, &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9 } }}, now, now.mono_ms + 5_000);
-    const progress = node.step(faults.io(), now, .{}, .deadlineOnly(now.mono_ms));
+    const progress = driver.step(&node, faults.io(), now, .{}, .deadlineOnly(now.mono_ms));
     try std.testing.expect(progress.failure == null);
     try std.testing.expect(faults.send_calls > 0 and faults.send_calls <= Transport.send_burst_max);
     try std.testing.expect(!node.peer_manager.stopped);
     try std.testing.expect(node.transport.send_drops.datagrams[@intFromEnum(@import("udp").Sockets.SendDrops.Reason.system_resources)] > 0);
     node.shutdown(node.last_now);
     for (0..4) |_| {
-        const stopped = node.step(faults.io(), node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms));
+        const stopped = driver.step(&node, faults.io(), node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms));
         try std.testing.expect(stopped.failure == null);
         if (node.isClosed()) break;
     }

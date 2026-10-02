@@ -813,13 +813,15 @@ pub fn deliveryAvailable(self: *Gossipsub, conn: Handle) bool {
     return self.deliveryStatus(conn) == .available;
 }
 
-/// Now when a session is ready; otherwise the earliest session deadline, heartbeat or
-/// maintenance deadline. Reads the list length and heap top only.
-pub fn nextWakeup(self: *const Gossipsub, now: Now) ?u64 {
-    if (self.sessions.ready.len > 0) return now.mono_ms;
-    var deadline = self.nextMaintenance(now);
-    if (self.sessions.deadlines.peek()) |top| deadline = @min(deadline, top.deadline);
-    return @max(now.mono_ms, deadline);
+/// Session work, an unfinished maintenance pass, and the next protocol timer.
+pub fn schedule(self: *const Gossipsub) types.Schedule {
+    var result: types.Schedule = .{
+        .runnable = self.sessions.ready.len > 0 or self.cycle.isActive() or self.heartbeat_at == 0,
+        .deadline_ms = self.heartbeat_at,
+    };
+    if (self.sessions.deadlines.peek()) |top| result = result.merge(.{ .deadline_ms = top.deadline });
+    result = result.merge(.{ .deadline_ms = self.messages.nextDeadline() });
+    return result.merge(.{ .deadline_ms = self.recovery.nextExpiry() });
 }
 
 pub fn pump(
@@ -888,14 +890,6 @@ pub fn beginPump(self: *Gossipsub, now: Now) Turn {
 pub fn finishPump(self: *Gossipsub, now: Now) void {
     self.maintainTopics(now);
     self.expirePromises(now.mono_ms);
-}
-
-fn nextMaintenance(self: *const Gossipsub, now: Now) u64 {
-    if (self.cycle.isActive()) return now.mono_ms;
-    var deadline = if (self.heartbeat_at == 0) now.mono_ms else self.heartbeat_at;
-    if (self.messages.nextDeadline()) |d| deadline = @min(deadline, d);
-    if (self.recovery.nextExpiry()) |expiry| deadline = @min(deadline, expiry);
-    return @max(now.mono_ms, deadline);
 }
 
 /// Test builds check after every turn that the ready list holds every session that wants

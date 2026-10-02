@@ -213,8 +213,8 @@ pub const Router = struct {
         self.negotiator.releaseReported();
     }
 
-    pub fn nextWakeup(self: *const Router, now: types.Now, outcome_capacity: usize) ?u64 {
-        return self.negotiator.nextWakeup(now, outcome_capacity);
+    pub fn schedule(self: *const Router, outcome_capacity: usize) types.Schedule {
+        return self.negotiator.schedule(outcome_capacity);
     }
 
     pub fn pump(self: *Router, engine: *Engine, now: types.Now, out: []Outcome) usize {

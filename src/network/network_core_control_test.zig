@@ -391,10 +391,10 @@ test "core native stalled fork transition only wakes for eligible work" {
         active += 1;
     };
     try std.testing.expect(active > 0);
-    const service_due = setup.client.service.nextWakeup(setup.pair.now, .{ .application = 0, .control = 32 }).?;
+    const service_due = setup.client.service.schedule(.{ .application = 0, .control = 32 }).nextWakeup(setup.pair.now.mono_ms).?;
     try std.testing.expect(service_due > setup.pair.now.mono_ms);
     try std.testing.expect(setup.client.peer_manager.control.nextWakeup(&setup.client.peer_manager.catalog, setup.pair.now) == null);
-    const core_due = setup.client.nextWakeup(setup.pair.now, .{}).?;
+    const core_due = setup.client.wakeups(setup.pair.now, .{}).schedule().nextWakeup(setup.pair.now.mono_ms).?;
     try std.testing.expect(core_due > setup.pair.now.mono_ms and core_due <= service_due);
     try @import("network_core_test_support.zig").updateLocal(&setup.server, &updated, setup.pair.now);
     for (0..80) |_| try setup.step(0);

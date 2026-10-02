@@ -88,16 +88,16 @@ test "router wakeups separate negotiation work from outcome capacity" {
     var router = try Router.init(std.testing.allocator, .{});
     defer router.deinit();
     const stream = try router.beginOutbound(&pair.client, handles.client, .{ .reqresp = .ping_v1 }, pair.now);
-    try std.testing.expectEqual(@as(?u64, pair.now.mono_ms), router.nextWakeup(pair.now, 0));
+    try std.testing.expectEqual(@as(?u64, pair.now.mono_ms), router.schedule(0).nextWakeup(pair.now.mono_ms));
     _ = pumpRouter(&router, &pair, &pair.client, pair.now, &.{});
-    try std.testing.expectEqual(@as(?u64, pair.now.mono_ms + 10_000), router.nextWakeup(pair.now, 0));
+    try std.testing.expectEqual(@as(?u64, pair.now.mono_ms + 10_000), router.schedule(0).nextWakeup(pair.now.mono_ms));
     pair.advance(10_000);
     _ = pumpRouter(&router, &pair, &pair.client, pair.now, &.{});
-    try std.testing.expectEqual(@as(?u64, null), router.nextWakeup(pair.now, 0));
-    try std.testing.expectEqual(@as(?u64, pair.now.mono_ms), router.nextWakeup(pair.now, 1));
+    try std.testing.expectEqual(@as(?u64, null), router.schedule(0).nextWakeup(pair.now.mono_ms));
+    try std.testing.expectEqual(@as(?u64, pair.now.mono_ms), router.schedule(1).nextWakeup(pair.now.mono_ms));
     try std.testing.expect(!pair.client.registry.slots[stream.conn.index].table.matches(stream.slot, stream.id));
     router.cancel(&pair.client, stream);
-    try std.testing.expectEqual(@as(?u64, null), router.nextWakeup(pair.now, 1));
+    try std.testing.expectEqual(@as(?u64, null), router.schedule(1).nextWakeup(pair.now.mono_ms));
 }
 
 test "router accepted selection survives capability changes behind outcome pressure" {
@@ -120,10 +120,10 @@ test "router accepted selection survives capability changes behind outcome press
     }
     client.setCapabilities(.{ .receive = .initEmpty(), .request = .initEmpty() });
     server.setCapabilities(.{ .receive = .initEmpty(), .request = .initEmpty() });
-    try std.testing.expectEqual(@as(?u64, null), client.nextWakeup(pair.now, 0));
-    try std.testing.expectEqual(@as(?u64, pair.now.mono_ms), client.nextWakeup(pair.now, 1));
-    try std.testing.expectEqual(@as(?u64, null), server.nextWakeup(pair.now, 0));
-    try std.testing.expectEqual(@as(?u64, pair.now.mono_ms), server.nextWakeup(pair.now, 1));
+    try std.testing.expectEqual(@as(?u64, null), client.schedule(0).nextWakeup(pair.now.mono_ms));
+    try std.testing.expectEqual(@as(?u64, pair.now.mono_ms), client.schedule(1).nextWakeup(pair.now.mono_ms));
+    try std.testing.expectEqual(@as(?u64, null), server.schedule(0).nextWakeup(pair.now.mono_ms));
+    try std.testing.expectEqual(@as(?u64, pair.now.mono_ms), server.schedule(1).nextWakeup(pair.now.mono_ms));
     var out: [1]Router.Outcome = undefined;
     try std.testing.expectEqual(@as(usize, 1), pumpRouter(&client, &pair, &pair.client, pair.now, &out));
     try std.testing.expect(out[0].result == .ready);

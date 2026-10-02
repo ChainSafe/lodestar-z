@@ -743,15 +743,15 @@ fn schedulerBytes(self: *const ReqResp) usize {
         self.deadlines.entries.len * (@sizeOf(DeadlineHeap.Entry) + @sizeOf(u32)) + self.outbound_by_connection.len * @sizeOf(index_list.List);
 }
 
-/// Monotonic milliseconds; zero capacity suppresses event-only wakeups. Reads list lengths and
-/// the heap top only. Router negotiation and transport deadlines remain separate.
-pub fn nextWakeup(self: *const ReqResp, now: Now, capacities: Capacities) ?u64 {
-    if (self.ready.len > 0 or self.closing.len > 0 or self.reported.len > 0) return now.mono_ms;
-    if (capacities.application > 0 and self.deliver[0].len > 0) return now.mono_ms;
-    if (capacities.control > 0 and self.deliver[1].len > 0) return now.mono_ms;
-    if (self.admission.due()) return now.mono_ms;
-    const top = self.deadlines.peek() orelse return null;
-    return @max(top.deadline, now.mono_ms);
+/// Zero capacity suppresses event-only work. Reads list lengths and the heap top only.
+/// Router negotiation and transport deadlines remain separate.
+pub fn schedule(self: *const ReqResp, capacities: Capacities) types.Schedule {
+    return .{
+        .runnable = self.ready.len > 0 or self.closing.len > 0 or self.reported.len > 0 or
+            (capacities.application > 0 and self.deliver[0].len > 0) or
+            (capacities.control > 0 and self.deliver[1].len > 0) or self.admission.due(),
+        .deadline_ms = if (self.deadlines.peek()) |top| top.deadline else null,
+    };
 }
 
 /// Checks that the receive plan covers every possible transport connection.

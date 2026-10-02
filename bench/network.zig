@@ -118,7 +118,7 @@ fn timestamp(io: std.Io) u64 {
 
 fn turn(node: *network.NetworkCore, io: std.Io, outputs: network.NetworkCore.Outputs) !network.NetworkCore.Result {
     const now = try network.Transport.currentTime(io);
-    const result = node.step(io, now, outputs, .deadlineOnly(now.mono_ms));
+    const result = network.driver.step(node, io, now, outputs, .deadlineOnly(now.mono_ms));
     if (result.failure) |err| return err;
     return result;
 }
@@ -155,7 +155,7 @@ pub fn main(init: std.process.Init) !void {
     var samples: Samples = .begin(a);
     for (0..turns) |i| {
         const now = try network.Transport.currentTime(io);
-        const immediate = if (a.nextWakeup(now, .{})) |deadline| deadline <= now.mono_ms else false;
+        const immediate = a.wakeups(now, .{}).schedule().due(now.mono_ms);
         const due_before = a.due_now_turns;
         const start = timestamp(io);
         const result = try turn(a, io, .{});
@@ -231,10 +231,10 @@ fn connectPair(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, top
     }
     for (0..4000) |_| {
         const now_a = try network.Transport.currentTime(io);
-        const result_a = a.step(io, now_a, .{ .peers = &peer_events }, .deadlineOnly(now_a.mono_ms +| 1));
+        const result_a = network.driver.step(a, io, now_a, .{ .peers = &peer_events }, .deadlineOnly(now_a.mono_ms +| 1));
         if (result_a.failure) |err| return err;
         const now_b = try network.Transport.currentTime(io);
-        const result_b = b.step(io, now_b, .{ .peers = &peer_events }, .deadlineOnly(now_b.mono_ms +| 1));
+        const result_b = network.driver.step(b, io, now_b, .{ .peers = &peer_events }, .deadlineOnly(now_b.mono_ms +| 1));
         if (result_b.failure) |err| return err;
         if (a.service.gossipsub.resourceSnapshot().remote_subscriptions > 0 and a.service.gossipsub.peers.rows[0].direct) break;
         try io.sleep(.fromMilliseconds(1), .awake);
@@ -283,7 +283,7 @@ fn pressure(a: *network.NetworkCore, b: *network.NetworkCore, sinks: []u8, io: s
         peak_descriptors = @max(peak_descriptors, sender.queued_descriptors);
         peak_validations = @max(peak_validations, receiver.pending_validations);
         const now = try network.Transport.currentTime(io);
-        const immediate = if (a.nextWakeup(now, .{})) |deadline| deadline <= now.mono_ms else false;
+        const immediate = a.wakeups(now, .{}).schedule().due(now.mono_ms);
         const due_before = a.due_now_turns;
         const start = timestamp(io);
         const result = try turn(a, io, .{});
@@ -407,8 +407,8 @@ fn idleWait(init: std.process.Init) !void {
         const before = timestamp(io);
         if (before - start >= 1_000_000_000) break;
         const now = try network.Transport.currentTime(io);
-        immediate += @intFromBool(if (node.nextWakeup(now, .{})) |due| due <= now.mono_ms else false);
-        const result = node.step(io, now, .{}, .{ .context = &host, .apply = IdleHost.apply, .deadline_ms = window_end_ms });
+        immediate += @intFromBool(node.wakeups(now, .{}).schedule().due(now.mono_ms));
+        const result = network.driver.step(node, io, now, .{}, .{ .context = &host, .apply = IdleHost.apply, .deadline_ms = window_end_ms });
         if (result.failure) |err| return err;
         elapsed_turns += timestamp(io) - before;
         count += 1;
@@ -609,7 +609,7 @@ fn idleConnections(init: std.process.Init) !void {
     var samples: Samples = .begin(hub);
     for (0..turns) |i| {
         const now = try network.Transport.currentTime(io);
-        const immediate = if (hub.nextWakeup(now, outputs)) |deadline| deadline <= now.mono_ms else false;
+        const immediate = hub.wakeups(now, outputs).schedule().due(now.mono_ms);
         const due_before = hub.due_now_turns;
         const start = timestamp(io);
         const result = try turn(hub, io, outputs);

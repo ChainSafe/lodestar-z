@@ -382,7 +382,7 @@ pub const Setup = struct {
 
     /// One owner turn of `node` at the link's clock, with no wait.
     pub fn turn(self: *Setup, node: *NetworkCore, outputs: NetworkCore.Outputs) !NetworkCore.Result {
-        const result = node.step(self.pair.io(), self.pair.now, outputs, .deadlineOnly(self.pair.now.mono_ms));
+        const result = node.advance(self.pair.io(), self.pair.now, .{}, outputs, .deadlineOnly(self.pair.now.mono_ms));
         if (result.failure) |err| return err;
         return result;
     }

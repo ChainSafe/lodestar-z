@@ -167,7 +167,7 @@ test "reqresp cancellation removes Router ownership before output delivery" {
     const stream = setup.shared.client.reqresp.outbound[handle.index].request.stream;
     setup.shared.client.reqresp.options.work_per_pump_max = 1;
     try std.testing.expect(setup.shared.client.reqresp.cancel(handle, setup.shared.pair.now));
-    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), setup.shared.client.reqresp.nextWakeup(setup.shared.pair.now, .{ .control = 0 }));
+    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), setup.shared.client.reqresp.schedule(.{ .control = 0 }).nextWakeup(setup.shared.pair.now.mono_ms));
     try std.testing.expect(!setup.shared.client.reqresp.cancel(handle, setup.shared.pair.now));
     try std.testing.expectEqual(@as(usize, 1), setup.shared.client.reqresp.resourceSnapshot().outbound_occupied);
     try std.testing.expectEqual(@as(usize, 1), setup.shared.client.reqresp.resourceSnapshot().pending_terminals);

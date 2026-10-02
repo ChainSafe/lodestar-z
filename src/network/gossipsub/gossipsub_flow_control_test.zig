@@ -58,7 +58,7 @@ test "gossipsub readiness behind a partial turn stays queued and is generation c
     setup.forwardServer();
     try std.testing.expect(g.sessions.rows[real_peer].ready_link.linked);
     try std.testing.expectEqual(@as(usize, 0), support.pump(g, &setup.shared.pair.server, setup.shared.pair.now));
-    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), g.nextWakeup(setup.shared.pair.now));
+    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), g.schedule().nextWakeup(setup.shared.pair.now.mono_ms));
     try std.testing.expectEqual(@as(usize, 1), support.pump(g, &setup.shared.pair.server, setup.shared.pair.now));
     try std.testing.expectEqualStrings("arrived behind a ready session", setup.serverMessages()[0].bytes);
     for (0..8) |_| {
@@ -110,7 +110,7 @@ test "gossipsub native write credit behind a ready session resumes and blocked w
     setup.forwardClient();
     try std.testing.expect(io.tx.ready and g.sessions.rows[index].ready_link.linked);
     _ = support.pump(g, &setup.shared.pair.client, setup.shared.pair.now);
-    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), g.nextWakeup(setup.shared.pair.now));
+    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), g.schedule().nextWakeup(setup.shared.pair.now.mono_ms));
     _ = support.pump(g, &setup.shared.pair.client, setup.shared.pair.now);
     try std.testing.expect(io.tx.data.next(&g.messages.store).?.cursor.sent > before);
     g.connectionClosed(setup.shared.handles.client);

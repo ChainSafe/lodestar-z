@@ -300,21 +300,22 @@ pub const Handler = struct {
         return count;
     }
 
-    pub fn nextWakeup(self: *const Handler, now: types.Now, result_capacity: usize) ?u64 {
-        var due: ?u64 = null;
+    pub fn schedule(self: *const Handler, result_capacity: usize) types.Schedule {
+        var result: types.Schedule = .{};
         for (self.inbound) |*slot| if (slot.stream != null) {
-            const next = if (slot.ready) now.mono_ms else @max(now.mono_ms, slot.deadline);
-            due = @min(due orelse next, next);
+            result = result.merge(.{ .runnable = slot.ready, .deadline_ms = slot.deadline });
         };
         for (self.outbound) |*slot| if (slot.stream != null) {
             if (slot.phase == .terminal) {
-                if (result_capacity > 0) return now.mono_ms;
+                result.runnable = result.runnable or result_capacity > 0;
                 continue;
             }
-            const next = if (slot.phase == .reading and slot.ready) now.mono_ms else @max(now.mono_ms, slot.deadline);
-            due = @min(due orelse next, next);
+            result = result.merge(.{
+                .runnable = slot.phase == .reading and slot.ready,
+                .deadline_ms = slot.deadline,
+            });
         };
-        return due;
+        return result;
     }
 
     pub fn shutdown(self: *Handler, router: *Router, engine: *Engine) void {

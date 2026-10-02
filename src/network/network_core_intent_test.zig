@@ -1,3 +1,4 @@
+const driver = @import("driver.zig");
 const core_test = @import("network_core_test_support.zig");
 const std = @import("std");
 const NetworkCore = @import("network_core.zig").NetworkCore;
@@ -28,7 +29,7 @@ fn updateLocal(node: *NetworkCore, local: *const t.LocalState, schedule: Network
 /// Steps at the current time with a host that only bounds the wait at `wait_ms`.
 fn stepAfter(node: *NetworkCore, wait_ms: u32) !NetworkCore.Result {
     const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
-    return node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| wait_ms));
+    return driver.step(node, std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| wait_ms));
 }
 
 fn intentFor(node: *const NetworkCore) NetworkCore.LocalIntent {
@@ -61,9 +62,9 @@ const IntentPair = struct {
         self.a_inbox.clear();
         self.b_inbox.clear();
         const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
-        const a = self.a.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| 1));
+        const a = driver.step(&self.a, std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| 1));
         if (a.failure) |err| return err;
-        const b = self.b.step(std.testing.io, now, .{ .application = &self.b_app }, .deadlineOnly(now.mono_ms +| 1));
+        const b = driver.step(&self.b, std.testing.io, now, .{ .application = &self.b_app }, .deadlineOnly(now.mono_ms +| 1));
         if (b.failure) |err| return err;
         return .{ .a = a, .b = b };
     }

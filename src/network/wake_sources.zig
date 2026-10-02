@@ -1,4 +1,5 @@
 const std = @import("std");
+const Schedule = @import("schedule.zig").Schedule;
 
 /// Owner-loop wakeup sources.
 pub const Source = enum {
@@ -18,22 +19,18 @@ pub const Source = enum {
 };
 pub const source_count = std.meta.fields(Source).len;
 
-/// The earliest monotonic deadline of each source for one owner turn.
+/// Scheduling state by source, retained separately for owner wakeup metrics.
 pub const Wakeups = struct {
-    due: [source_count]?u64 = @splat(null),
+    sources: [source_count]Schedule = @splat(.{}),
 
-    pub fn note(self: *Wakeups, source: Source, deadline: ?u64) void {
-        const value = deadline orelse return;
-        const slot = &self.due[@intFromEnum(source)];
-        slot.* = @min(slot.* orelse value, value);
+    pub fn note(self: *Wakeups, source: Source, value: Schedule) void {
+        const slot = &self.sources[@intFromEnum(source)];
+        slot.* = slot.merge(value);
     }
 
-    pub fn earliest(self: *const Wakeups) ?u64 {
-        var result: ?u64 = null;
-        for (self.due) |deadline| {
-            const value = deadline orelse continue;
-            result = @min(result orelse value, value);
-        }
+    pub fn schedule(self: *const Wakeups) Schedule {
+        var result: Schedule = .{};
+        for (self.sources) |source| result = result.merge(source);
         return result;
     }
 };

@@ -135,13 +135,13 @@ fn turn(self: *Runtime, io: std.Io, host: *Host, ingress: *const gossip_mod.Ingr
     const deadline = hostDeadline(self, timestamp);
     self.unlock();
     const sequence = try self.advanceSequence();
-    const result = self.heavy.?.core.step(io, timestamp, .{ .peers = self.heavy.?.outputs[0..@min(peer_room, self.heavy.?.outputs.len)], .application = &self.heavy.?.application_outputs }, .{ .context = host, .apply = Host.apply, .deadline_ms = deadline });
+    const result = n.driver.step(&self.heavy.?.core, io, timestamp, .{ .peers = self.heavy.?.outputs[0..@min(peer_room, self.heavy.?.outputs.len)], .application = &self.heavy.?.application_outputs }, .{ .context = host, .apply = Host.apply, .deadline_ms = deadline });
     if (host.failure) |err| return err;
     if (ingress.failure) |err| return err;
     // The step's clock was read after its poll, so deadlines that ended the wait are due.
     const tick = result.transport.now;
     try requests_mod.capture(self, self.heavy.?.application_outputs[0..result.counts.application], tick);
-    commands.completeConnects(self, tick);
+    commands.completeConnects(self, result.transport_events, tick);
     publishTurn(self, &result, tick, sequence);
     return result;
 }
@@ -196,7 +196,7 @@ fn applyWork(self: *Runtime, io: std.Io, tick: n.Now) !n.NetworkCore.HostProgres
     more = try gossip_mod.flags(self, io, tick) or more;
     requests_mod.flags(self, tick);
     more = try incoming_mod.flags(self, tick) or more;
-    return .{ .more = more };
+    return .{ .runnable = more };
 }
 
 /// Applies up to 32 queued peer reports. Returns whether more remain.

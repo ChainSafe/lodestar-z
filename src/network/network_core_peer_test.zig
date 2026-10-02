@@ -15,7 +15,7 @@ const Setup = @import("network_core_test_support.zig").Setup;
 const updateDemand = @import("network_core_test_support.zig").updateDemand;
 
 fn clientWakeup(setup: *Setup) ?u64 {
-    return setup.client.nextWakeup(setup.pair.now, .{});
+    return setup.client.wakeups(setup.pair.now, .{}).schedule().nextWakeup(setup.pair.now.mono_ms);
 }
 
 fn subscribeServer(setup: *Setup, name: []const u8) !void {

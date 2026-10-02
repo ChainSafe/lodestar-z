@@ -351,7 +351,7 @@ test "negotiator delivers retained outcomes before recycled lower slots" {
     try std.testing.expectEqual(@as(usize, 3), setup.pumpDialer(&supported, &remaining));
     for (remaining[0..3]) |outcome| try std.testing.expectEqual(Negotiator.Failure.stream_closed, outcome.result.failed);
     try std.testing.expectEqual(@as(usize, 0), setup.pumpDialer(&supported, &remaining));
-    try std.testing.expect(setup.dialer.nextWakeup(setup.pair.now, 1) == null);
+    try std.testing.expect(setup.dialer.schedule(1).nextWakeup(setup.pair.now.mono_ms) == null);
 }
 
 test "negotiator connection teardown invalidates an undelivered ready outcome" {
@@ -418,6 +418,9 @@ test "negotiator preserves coalesced acceptance payload and FIN for the dialer" 
     try std.testing.expectEqualStrings("pong", outcomes[0].result.ready.leftover);
     try std.testing.expect(outcomes[0].result.ready.fin);
     try std.testing.expectEqual(@import("types.zig").Direction.outbound, outcomes[0].direction);
+    try std.testing.expect(setup.dialer.schedule(0).runnable);
+    try std.testing.expectEqual(@as(usize, 0), setup.pumpDialer(&supported, &.{}));
+    try std.testing.expect(!setup.dialer.schedule(0).runnable);
 }
 
 test "negotiator uses current support for a fragmented proposal and its fallback" {
@@ -563,7 +566,7 @@ test "negotiation timed entry owns exact expiry below and above the default" {
         const due = pair.now.mono_ms + duration;
         var outcomes: [1]Outcome = undefined;
         try std.testing.expectEqual(@as(usize, 0), negotiator.pump(&pair.client, pair.now, &supported, &outcomes));
-        try std.testing.expectEqual(@as(?u64, due), negotiator.nextWakeup(pair.now, 1));
+        try std.testing.expectEqual(@as(?u64, due), negotiator.schedule(1).nextWakeup(pair.now.mono_ms));
         pair.now.mono_ms = due - 1;
         try std.testing.expectEqual(@as(usize, 0), negotiator.pump(&pair.client, pair.now, &supported, &outcomes));
         pair.now.mono_ms = due;
@@ -642,7 +645,7 @@ test "negotiator retains final selected bytes through blocked writes and release
     try std.testing.expect(finished and received > padding);
     try std.testing.expectEqualStrings("final selected response", &tail);
     try std.testing.expectEqual(@as(usize, 0), setup.listener.active());
-    try std.testing.expectEqual(@as(?u64, null), setup.listener.nextWakeup(setup.pair.now, 1));
+    try std.testing.expectEqual(@as(?u64, null), setup.listener.schedule(1).nextWakeup(setup.pair.now.mono_ms));
 }
 
 test "negotiator final selected write retires on timeout reset connection close and shutdown" {
@@ -674,7 +677,7 @@ test "negotiator final selected write retires on timeout reset connection close 
             .shutdown => setup.listener.shutdown(&setup.pair.server),
         }
         try std.testing.expectEqual(@as(usize, 0), setup.listener.active());
-        try std.testing.expectEqual(@as(?u64, null), setup.listener.nextWakeup(setup.pair.now, 1));
+        try std.testing.expectEqual(@as(?u64, null), setup.listener.schedule(1).nextWakeup(setup.pair.now.mono_ms));
         if (case == .connection_closed) continue;
         const replacement = try setup.pair.client.openStream(setup.handles.client);
         var hello: [256]u8 = undefined;
