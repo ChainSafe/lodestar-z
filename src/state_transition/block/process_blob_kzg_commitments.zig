@@ -9,14 +9,11 @@ pub fn processBlobKzgCommitments(external_data: BlockExternalData) !void {
     }
 }
 
-test "process blob kzg commitments - sanity" {
+test "process blob kzg commitments" {
     try processBlobKzgCommitments(.{
         .execution_payload_status = .valid,
         .data_availability_status = .available,
     });
-}
-
-test "process blob kzg commitments - rejects unverified payload statuses" {
     try std.testing.expectError(error.InvalidExecutionPayload, processBlobKzgCommitments(.{ .execution_payload_status = .invalid }));
     try std.testing.expectError(error.ExecutionPayloadStatusPreMerge, processBlobKzgCommitments(.{ .execution_payload_status = .pre_merge }));
 }
