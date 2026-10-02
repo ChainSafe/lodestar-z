@@ -1,12 +1,12 @@
 const std = @import("std");
 const js = @import("zapi:zapi").js;
 const Value = @import("zapi:zapi").napi.Value;
+const decode = @import("network_js_input.zig");
 const logging = @import("network").logging;
-const cfg = @import("network_config.zig");
 const Runtime = @import("network_runtime.zig").Runtime;
 
 pub fn drain(runtime: *Runtime, limit: Value) !js.Value {
-    const max = cfg.integer(limit, logging.drain_max) catch return error.InvalidDrainLimit;
+    const max = decode.integer(limit, logging.drain_max) catch return error.InvalidDrainLimit;
     if (max == 0) return error.InvalidDrainLimit;
     var records: [logging.drain_max]logging.Record = undefined;
     const batch = runtime.logs.peek(records[0..@intCast(max)]);
@@ -40,7 +40,7 @@ pub fn configure(runtime: *Runtime, value: Value) !void {
 /// A threshold by name: error, warn, info or debug, or null for off.
 pub fn level(value: Value) !?std.log.Level {
     var buffer: [5]u8 = undefined;
-    const len = @import("network_application_config.zig").text(value, &buffer) catch return error.InvalidNetworkLogLevel;
+    const len = decode.text(value, &buffer) catch return error.InvalidNetworkLogLevel;
     const text = buffer[0..len];
     inline for (.{ "error", "warn", "info", "debug", "off" }, 0..) |name, index| {
         if (std.mem.eql(u8, text, name)) return if (index == 4) null else @enumFromInt(index);

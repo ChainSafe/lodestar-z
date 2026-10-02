@@ -107,8 +107,6 @@ pub const Runtime = struct {
     reason: Reason = .requested,
     quiescent: bool = false,
     terminal_error: ?anyerror = null,
-    identity: Identity = undefined,
-    slot: u64 = 0,
     state: State = .running,
     owner_turns: u64 = 0,
     operational_failures: u64 = 0,
@@ -338,7 +336,7 @@ pub const Runtime = struct {
         self.hook_live = false;
         self.forceStop(true);
         self.retireClosedPublications();
-        for (0..32) |i| {
+        for (0..self.table.cells.len) |i| {
             self.lock();
             const cell = &self.table.cells[i];
             const token: ?commands.Token = if (cell.state == .free) null else .{ .index = @intCast(i), .generation = cell.generation };

@@ -1,10 +1,9 @@
 const n = @import("network");
 const napi = @import("zapi:zapi").napi;
 const Value = napi.Value;
+const decode = @import("network_js_input.zig");
 const r = @import("network_runtime.zig");
 const p = @import("network_publications.zig");
-const cfg = @import("network_config.zig");
-const app = @import("network_application_config.zig");
 const g = @import("network_gossip_js.zig");
 const clock = @import("network_gossip.zig");
 const js = @import("network_js.zig");
@@ -15,11 +14,9 @@ fn rejectInput(env: napi.Env, err: anyerror) anyerror {
     return error.PendingException;
 }
 fn payloadLength(data: Value) !usize {
-    if (!try data.isTypedarray()) return error.InvalidNetworkBytes;
-    const view = try data.getTypedarrayInfo();
-    if (view.array_type != .uint8 or try view.arraybuffer.isDetachedArrayBuffer()) return error.InvalidNetworkBytes;
-    if (view.length > clock.payload_max) return error.PayloadTooLarge;
-    return view.length;
+    const len = (try decode.byteView(data)).len;
+    if (len > clock.payload_max) return error.PayloadTooLarge;
+    return len;
 }
 /// Admits one publication and returns its handle, which JavaScript's record holds before an exchange can deliver the
 /// completion. A refusal leaves no cell.
@@ -27,7 +24,7 @@ pub fn publish(runtime: *r.Runtime, topic: Value, data: Value, options: Value) !
     runtime.retain();
     defer runtime.release();
     var name: [n.gossipsub.topic.topic_max_len]u8 = undefined;
-    const topic_len = try app.text(topic, &name);
+    const topic_len = try decode.text(topic, &name);
     const canonical = n.gossipsub.topic.parseCanonical(name[0..topic_len]) orelse return rejectInput(runtime.env, error.UnknownTopic);
     const publish_options = try g.optionsFor(options);
     const len = try payloadLength(data);
@@ -41,7 +38,7 @@ pub fn publish(runtime: *r.Runtime, topic: Value, data: Value, options: Value) !
     errdefer r.allocator.free(copy);
     // Prepared before admission commits, so every admitted publication has a handle to complete.
     const handle = try js.handle(runtime.env, token.index, token.generation);
-    try cfg.bytes(data, copy);
+    try decode.bytes(data, copy);
     const queued_ms = try clock.monotonic();
     runtime.lock();
     defer runtime.unlock();

@@ -1,5 +1,6 @@
 //! Command submission and results for JavaScript: a completed command's record, whose result copies the command's typed store before
 //! the exchange that delivers it retires the cell.
+const decode = @import("network_js_input.zig");
 const napi = @import("zapi:zapi").napi;
 const Value = napi.Value;
 const r = @import("network_runtime.zig");
@@ -93,10 +94,10 @@ pub fn identity(env: napi.Env, value: *const r.Identity) !Value {
 }
 
 fn parseAddresses(value: Value, input: *commands.Input) !void {
-    input.address_count = @intCast(try cfg.array(value, 2));
+    input.address_count = @intCast(try decode.array(value, 2));
     if (input.address_count == 0) return error.InvalidNetworkConfig;
     for (input.addresses[0..input.address_count], 0..) |*address, i| {
-        const parsed = try cfg.endpoint(try value.getElement(@intCast(i)));
+        const parsed = try decode.endpoint(try value.getElement(@intCast(i)));
         address.* = switch (parsed) {
             .ip4 => |ip| .{ .ip4 = .{ .octets = ip.bytes, .port = ip.port } },
             .ip6 => |ip| .{ .ip6 = .{ .octets = ip.bytes, .port = ip.port } },
@@ -111,24 +112,24 @@ pub fn submit(env: napi.Env, runtime: *Runtime, comptime command: commands.Comma
     const store = runtime.table.cells[token.index].store;
     switch (command) {
         .applyIntent => {
-            operation.input.slot = try cfg.bigint(args[1]);
+            operation.input.slot = try decode.bigint(args[1]);
             try application_cfg.parseIntent(args[0], &runtime.stores.?.intents[store.?], runtime.max_peers);
         },
         .updateStatus => try cfg.parseStatus(args[0], &operation.input.status),
         .getIdentity, .getPeers, .getDirectPeers, .getRememberedPeers => {},
-        .getGossipDiagnostics => operation.input.diagnostics_cursor = @intCast(try cfg.integer(args[0], 512)),
+        .getGossipDiagnostics => operation.input.diagnostics_cursor = @intCast(try decode.integer(args[0], 512)),
         .reStatusPeers => {
-            operation.input.target_count = @intCast(try cfg.array(args[0], 256));
+            operation.input.target_count = @intCast(try decode.array(args[0], 256));
             for (runtime.stores.?.targets[store.?][0..operation.input.target_count], 0..) |*peer, i| {
-                peer.* = try cfg.peerIdFrom(try args[0].getElement(@intCast(i)));
+                peer.* = try decode.peerIdFrom(try args[0].getElement(@intCast(i)));
                 for (runtime.stores.?.targets[store.?][0..i]) |*prior| if (peer.eql(prior)) return error.InvalidNetworkConfig;
             }
         },
         else => {
-            operation.input.peer = try cfg.peerIdFrom(args[0]);
+            operation.input.peer = try decode.peerIdFrom(args[0]);
             if (command == .connect or command == .addDirectPeer) try parseAddresses(args[1], &operation.input);
             if (command == .connect) {
-                operation.input.timeout_ms = try cfg.bigint(args[2]);
+                operation.input.timeout_ms = try decode.bigint(args[2]);
                 if (operation.input.timeout_ms == 0 or operation.input.timeout_ms > 60_000) return error.InvalidNetworkInteger;
             }
         },

@@ -444,7 +444,7 @@
         .leveldb = .{ .root_module = .leveldb },
         .network_runtime = .{
             .root_module = .{
-                .root_source_file = "bindings/napi/network_runtime.zig",
+                .root_source_file = "bindings/napi/network_test_root.zig",
                 .imports = .{ .network, .discv5, "zapi:zapi" },
             },
         },

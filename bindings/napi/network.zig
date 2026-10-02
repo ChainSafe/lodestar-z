@@ -2,10 +2,10 @@ const std = @import("std");
 const zapi = @import("zapi:zapi");
 const js = zapi.js;
 const napi = zapi.napi;
-const cfg = @import("network_config.zig");
 const r = @import("network_runtime.zig");
 const Runtime = r.Runtime;
 const Value = napi.Value;
+const decode = @import("network_js_input.zig");
 const gossip = @import("network_gossip.zig");
 const publication_js = @import("network_publication_js.zig");
 const incoming_js = @import("network_incoming_js.zig");
@@ -40,11 +40,10 @@ pub fn initialize(self: *@This(), config: js.Value, callback: js.Value) !js.Valu
     runtime.logs.configure(runtime.heavy.?.application.log_level);
     try @import("network_owner.zig").prepareConfiguration(runtime);
     try @import("network_storage.zig").initialize(runtime, &runtime.heavy.?.application);
-    runtime.slot = runtime.heavy.?.config.slot;
     runtime.wake = try @import("network_wake.zig").Wake.init();
     errdefer if (runtime.wake) |*wake| wake.deinit();
     try @import("network_owner.zig").initialize(runtime);
-    runtime.identity = try runtime.heavy.?.readIdentity();
+    const identity = try runtime.heavy.?.readIdentity();
 
     const env = js.env();
     const name = try env.createStringUtf8("NativeNetworkRuntime");
@@ -58,7 +57,7 @@ pub fn initialize(self: *@This(), config: js.Value, callback: js.Value) !js.Valu
     errdefer runtime.removeHook();
     try runtime.results.prepare(env);
     const holder = try env.createObject();
-    try holder.setNamedProperty("identity", try command_js.identity(env, &runtime.identity));
+    try holder.setNamedProperty("identity", try command_js.identity(env, &identity));
     try holder.setNamedProperty("limits", try resolvedLimits(env, runtime));
     try holder.setNamedProperty("capacities", try capacities(env, runtime));
     runtime.retain();
@@ -140,7 +139,7 @@ pub fn abandon(self: *@This()) void {
 /// acknowledgement follows them, though expiry still disposes of them; a release wakes the owner.
 pub fn holdVerdicts(self: *@This(), held: js.Value) !void {
     const runtime = try self.owner();
-    const value = try cfg.boolean(held.val);
+    const value = try decode.boolean(held.val);
     runtime.lock();
     defer runtime.unlock();
     runtime.verdicts_held = value;
@@ -151,7 +150,7 @@ pub fn holdVerdicts(self: *@This(), held: js.Value) !void {
 /// request, which keep their admission order; a release wakes the owner.
 pub fn holdOperations(self: *@This(), held: js.Value) !void {
     const runtime = try self.owner();
-    const value = try cfg.boolean(held.val);
+    const value = try decode.boolean(held.val);
     runtime.lock();
     defer runtime.unlock();
     runtime.operations_held = value;
@@ -162,13 +161,13 @@ pub fn holdOperations(self: *@This(), held: js.Value) !void {
 /// bytes.
 pub fn fail(_: *@This(), site_value: js.Value, reason_value: js.Value) !void {
     var name: [fatal.name_max]u8 = undefined;
-    const site = std.meta.stringToEnum(fatal.Site, name[0..try application_cfg.text(site_value.val, &name)]) orelse return error.InvalidNetworkConfig;
+    const site = std.meta.stringToEnum(fatal.Site, name[0..try decode.text(site_value.val, &name)]) orelse return error.InvalidNetworkConfig;
     switch (site) {
         .generated_batch, .failed_turns, .completion_contract => {},
         .exchange_build, .exchange_finish => return error.InvalidNetworkConfig,
     }
     var reason: [fatal.detail_max]u8 = undefined;
-    fatal.terminate(js.env(), site, reason[0..try application_cfg.text(reason_value.val, &reason)]);
+    fatal.terminate(js.env(), site, reason[0..try decode.text(reason_value.val, &reason)]);
 }
 
 const Exchange = exchange_js.Host;
@@ -292,7 +291,7 @@ pub fn requestPull(self: *@This(), handle: js.Value) !void {
 pub fn requestRetire(self: *@This(), handle: js.Value, abandoned: js.Value) !void {
     const call = r.call(self.runtime, .request_retire);
     defer call.end();
-    try request_js.retire(try self.owner(), handle.val, try cfg.boolean(abandoned.val));
+    try request_js.retire(try self.owner(), handle.val, try decode.boolean(abandoned.val));
 }
 
 pub fn incomingRespond(self: *@This(), handle: js.Value, data: js.Value, context: js.Value) !void {
@@ -322,27 +321,11 @@ pub fn publishGossip(self: *@This(), topic: js.Value, data: js.Value, options: j
     return .{ .val = try publication_js.publish(try self.owner(), topic.val, data.val, options.val) };
 }
 
-test "a notification JavaScript cannot run stops locally, and exchange failures classify as stopped or contract" {
-    const shim = @import("network_runtime_test.zig");
+test "a notification JavaScript cannot run stops locally" {
+    const shim = @import("network_test_support.zig");
     shim.undefined_status = napi.c.napi_cannot_run_js;
     defer shim.undefined_status = napi.c.napi_ok;
     var notified: Runtime = .{ .env = undefined, .notify_live = false };
     onNotify(undefined, undefined, &notified, undefined);
     try std.testing.expect(notified.disposed and notified.stop and !notified.env_alive);
-    // An exception that clears is the bridge's contract failure; a pending-exception status with none pending is how
-    // N-API reports JavaScript that cannot run.
-    var classified: Runtime = .{ .env = undefined, .notify_live = false };
-    var host: Exchange = .{ .env = undefined, .runtime = &classified };
-    for ([_]struct { anyerror, bool, exchange_mod.Failure }{
-        .{ error.Closing, true, .stopped },
-        .{ error.CannotRunJS, true, .stopped },
-        .{ error.PendingException, false, .stopped },
-        .{ error.PendingException, true, .contract },
-        .{ error.GenericFailure, false, .contract },
-        .{ error.GenericFailure, true, .contract },
-    }) |case| {
-        shim.exception_pending = case[1];
-        try std.testing.expectEqual(case[2], host.classify(case[0]));
-        try std.testing.expectEqual(case[1] and case[2] == .stopped, shim.exception_pending);
-    }
 }

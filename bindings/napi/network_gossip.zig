@@ -39,16 +39,17 @@ pub fn flags(runtime: *Runtime, io: std.Io) !bool {
     runtime.lock();
     defer runtime.unlock();
     const table = if (runtime.gossip) |*table| table else return false;
+    const core = &runtime.heavy.?.core;
     const clock = try sample(io);
     const now: n.Now = .{ .mono_ms = clock.mono_ms, .unix_s = @intCast(clock.unix_ms / 1000) };
-    table.maintain(now.mono_ms, runtime.slot);
+    table.maintain(now.mono_ms, core.current_slot);
     var retired_bytes: usize = 0;
     for (0..if (runtime.verdicts_held) 0 else batch_max) |_| {
         const token = table.nextVerdict() orelse break;
         const cell = table.get(token).?;
         if (retired_bytes > 0 and cell.input.len > batch_bytes -| retired_bytes) break;
         retired_bytes += cell.input.len;
-        const result = runtime.heavy.?.core.reportValidation(cell.handle, cell.verdict, now);
+        const result = core.reportValidation(cell.handle, cell.verdict, now);
         table.outcome(result);
         table.retire(token);
     }
@@ -92,7 +93,8 @@ pub const Ingress = struct {
         runtime.lock();
         defer runtime.unlock();
         if (runtime.stop or self.failure != null) return false;
-        const accepted = runtime.gossip.?.admit(runtime.heavy.?.core.service.gossipsub, candidate, clock.mono_ms, received_at, runtime.slot);
+        const core = &runtime.heavy.?.core;
+        const accepted = runtime.gossip.?.admit(core.service.gossipsub, candidate, clock.mono_ms, received_at, core.current_slot);
         runtime.recomputeLocked(.checks);
         runtime.recomputeLocked(.gossip);
         return accepted;

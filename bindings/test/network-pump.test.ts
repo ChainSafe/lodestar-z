@@ -9,7 +9,6 @@ import type {
   NativeTopicKind,
   Verdict,
 } from "../src/network.js";
-import {LOG_ERRORS_NAME, LOG_MS, LOG_RECORDS} from "../src/network-log-delivery.js";
 import {ACTION_MAX, BUDGET_MS, BURST_NAME, NativePump, closeResult} from "../src/network-pump.js";
 import type {
   NativeAction,
@@ -24,6 +23,7 @@ import type {
 } from "../src/network-runtime.js";
 import {Turns} from "../src/network-turns.js";
 import {childTestTimeout, spawnChild} from "./utils/network.js";
+import {Escalated, immediates, runUntilEscalated} from "./utils/network-turns.js";
 
 const MIB = 1024 * 1024;
 const full: NativeExchangeDemand = {
@@ -66,8 +66,6 @@ const running: {resolve(result: {reason: "requested"}): void}[] = [];
 const LOG_TIMER = 1;
 const noLogs = {dropped: 0n, more: false, records: [], suppressed: 0n, truncated: 0n};
 
-class Escalated extends Error {}
-
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (error: unknown) => void;
@@ -80,33 +78,6 @@ function deferred<T>() {
 
 function macrotask(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
-}
-
-/** Holds every setImmediate callback for the test to run, so a throwing turn does not escape the test. */
-function immediates(): (() => void)[] {
-  const queued: (() => void)[] = [];
-  const hold = (callback: (...args: unknown[]) => void, ...args: unknown[]) => {
-    queued.push(() => callback(...args));
-  };
-  vi.spyOn(globalThis, "setImmediate").mockImplementation(hold as unknown as typeof setImmediate);
-  return queued;
-}
-
-/**
- * Runs held callbacks, firing the fake timers whenever none is held, until the pump escalates or `max` ran. Returns
- * whether it escalated.
- */
-function runUntilEscalated(queued: (() => void)[], max: number): boolean {
-  for (let i = 0; i < max; i++) {
-    if (queued.length === 0) vi.advanceTimersByTime(25);
-    try {
-      queued.shift()?.();
-    } catch (error) {
-      if (error instanceof Escalated) return true;
-      throw error;
-    }
-  }
-  return false;
 }
 
 function message(index: number, generation = 1n): NativeGossipMessage {
@@ -234,6 +205,29 @@ afterEach(async () => {
 });
 
 describe("binding pump scheduling", () => {
+  it.each(["Uint8Array", "Buffer"])("copies queued roots from a reused %s", async (kind) => {
+    const node = fixture();
+    const root = kind === "Buffer" ? Buffer.alloc(32, 1) : new Uint8Array(32).fill(1);
+    node.pump.block(root);
+    root.fill(2);
+    node.pump.block(root);
+    root.fill(3);
+    await macrotask();
+    expect(node.actions(0)).toEqual([
+      {root: new Uint8Array(32).fill(1), type: "block"},
+      {root: new Uint8Array(32).fill(2), type: "block"},
+    ]);
+  });
+
+  it("keeps a queued root after the caller transfers its buffer", async () => {
+    const node = fixture();
+    const root = new Uint8Array(32).fill(7);
+    node.pump.block(root);
+    structuredClone(root, {transfer: [root.buffer]});
+    await macrotask();
+    expect(node.actions(0)).toEqual([{root: new Uint8Array(32).fill(7), type: "block"}]);
+  });
+
   it("only schedules on notification and makes one exchange per turn", async () => {
     const node = fixture();
     node.pump.request();
@@ -646,36 +640,6 @@ describe("binding pump scheduling", () => {
       expect(child.stdout).not.toContain("survived");
     }
   );
-
-  it("without a live pump, turns drain control while native reports more, and escalate a third failed drain", () => {
-    vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
-    const queued = immediates();
-    const failure = new Error("exchange failed");
-    const results: (NativeExchange | Error)[] = [{...idle, more: true}, idle, failure, failure, failure];
-    const route = {
-      exchange: vi.fn((_actions: readonly NativeAction[], _demand: NativeExchangeDemand): NativeExchange => {
-        const result = results.shift() ?? idle;
-        if (result instanceof Error) throw result;
-        return result;
-      }),
-      fail: vi.fn((site: string, _reason: string): never => {
-        throw new Escalated(site);
-      }),
-    };
-    const turns = new Turns(route);
-    turns.schedule();
-    turns.schedule();
-    expect(runUntilEscalated(queued, 5)).toBe(false);
-    expect(route.exchange.mock.calls).toEqual([
-      [[], control],
-      [[], control],
-    ]);
-    // Only a notification brings the next drain, and failed ones retry on the timer.
-    turns.schedule();
-    expect(runUntilEscalated(queued, 20)).toBe(true);
-    expect(route.exchange).toHaveBeenCalledTimes(5);
-    expect(route.fail).toHaveBeenCalledExactlyOnceWith("failed_turns", "exchange failed");
-  });
 
   it("never escalates turns without deliveries: external capacity polling and held jobs", async () => {
     vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
@@ -1464,90 +1428,14 @@ describe("binding pump close results", () => {
   });
 });
 
-function logRecord(sequence: number): NativeLogRecord {
-  return {
-    level: "info",
-    message: `record ${sequence}`,
-    monotonicMs: 1n,
-    scope: "network_runtime",
-    sequence: BigInt(sequence),
-    timestampMs: 1n,
-    truncated: false,
-  };
-}
-
-describe("binding pump log delivery", () => {
-  it("delivers up to 32 native records every 250 ms, one batch each time", () => {
-    vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
-    const node = fixture();
-    const records = [logRecord(1), logRecord(2)];
-    node.runtime.drainLogs.mockReturnValue({...noLogs, more: true, records});
-    vi.advanceTimersByTime(LOG_MS - 1);
-    expect(node.runtime.drainLogs).not.toHaveBeenCalled();
-    vi.advanceTimersByTime(1);
-    expect(node.runtime.drainLogs).toHaveBeenCalledExactlyOnceWith(LOG_RECORDS);
-    expect(node.host.logs).toHaveBeenCalledExactlyOnceWith(records, null);
-    vi.advanceTimersByTime(LOG_MS);
-    expect(node.host.logs).toHaveBeenCalledTimes(2);
-    // An empty batch is not delivered.
-    node.runtime.drainLogs.mockReturnValue(noLogs);
-    vi.advanceTimersByTime(LOG_MS);
-    expect(node.host.logs).toHaveBeenCalledTimes(2);
-  });
-
-  it("counts a throwing log handler's records as delivery errors and never fails the network", () => {
-    vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
-    const node = fixture();
-    node.runtime.drainLogs.mockReturnValue({...noLogs, records: [logRecord(1), logRecord(2)]});
-    node.host.logs.mockImplementation(() => {
-      throw new Error("logger failed");
-    });
-    vi.advanceTimersByTime(LOG_MS);
-    const failure = new Error("drain failed");
-    node.runtime.drainLogs.mockImplementationOnce(() => {
-      throw failure;
-    });
-    vi.advanceTimersByTime(LOG_MS);
-    vi.advanceTimersByTime(LOG_MS);
-    expect(node.host.logs).toHaveBeenCalledTimes(2);
-    expect(node.pump.metrics()).toContain(`${LOG_ERRORS_NAME} 5\n`);
-    expect(node.host.error).toHaveBeenCalledExactlyOnceWith(failure);
-    expect(node.host.failed).not.toHaveBeenCalled();
-    expect(node.terminal.failure).toBeNull();
-  });
-
-  it("drains at most four more batches once native closes, then stops", async () => {
-    vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
-    const node = fixture();
-    node.runtime.drainLogs.mockReturnValue({...noLogs, more: true, records: [logRecord(1)]});
-    node.closed.resolve({reason: "requested"});
-    await macrotask();
-    expect(node.host.logs).toHaveBeenCalledTimes(4);
-    expect(vi.getTimerCount()).toBe(0);
-    vi.advanceTimersByTime(10 * LOG_MS);
-    expect(node.host.logs).toHaveBeenCalledTimes(4);
-  });
-
-  it("reports the records native lost since the last report once dropped or truncated ones grew, at most every 30 s", () => {
-    vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
-    let now = 1_000_000;
-    vi.spyOn(Date, "now").mockImplementation(() => now);
-    const node = fixture();
-    const deliver = (stats: {dropped: bigint; suppressed: bigint; truncated: bigint}) => {
-      node.runtime.drainLogs.mockReturnValueOnce({...noLogs, ...stats});
-      vi.advanceTimersByTime(LOG_MS);
-      return node.host.logs.mock.calls.at(-1)?.[1];
-    };
-    expect(deliver({dropped: 3n, suppressed: 1n, truncated: 0n})).toEqual({dropped: 3n, suppressed: 1n, truncated: 0n});
-    const reports = node.host.logs.mock.calls.length;
-    now += 29_000;
-    deliver({dropped: 5n, suppressed: 1n, truncated: 1n});
-    expect(node.host.logs).toHaveBeenCalledTimes(reports);
-    now += 1_000;
-    expect(deliver({dropped: 5n, suppressed: 4n, truncated: 1n})).toEqual({dropped: 2n, suppressed: 3n, truncated: 1n});
-    // Suppression alone is not reported.
-    now += 30_000;
-    deliver({dropped: 5n, suppressed: 9n, truncated: 1n});
-    expect(node.host.logs).toHaveBeenCalledTimes(reports + 1);
-  });
+it("stops log delivery with a final drain when native closes", async () => {
+  vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
+  const node = fixture();
+  node.runtime.drainLogs.mockReturnValue({...noLogs, more: true});
+  node.closed.resolve({reason: "requested"});
+  await macrotask();
+  expect(node.runtime.drainLogs).toHaveBeenCalledTimes(4);
+  expect(vi.getTimerCount()).toBe(0);
+  vi.advanceTimersByTime(2500);
+  expect(node.runtime.drainLogs).toHaveBeenCalledTimes(4);
 });

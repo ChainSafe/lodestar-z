@@ -27,6 +27,13 @@ pub fn handle(env: napi.Env, index: u32, generation: u64) !Value {
     return object;
 }
 
+pub fn connection(env: napi.Env, value: @import("network").quic.Engine.Handle) !Value {
+    const object = try env.createObject();
+    try object.setNamedProperty("index", try env.createUint32(value.index));
+    try object.setNamedProperty("generation", try env.createUint32(value.generation));
+    return object;
+}
+
 pub fn bytes(env: napi.Env, value: []const u8) !Value {
     return env.createTypedarray(.uint8, value.len, try env.createArrayBufferCopy(value, null), 0);
 }

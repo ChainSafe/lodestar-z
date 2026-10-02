@@ -2,7 +2,7 @@ const std = @import("std");
 const n = @import("network");
 const napi = @import("zapi:zapi").napi;
 const Value = napi.Value;
-const cfg = @import("network_config.zig");
+const decode = @import("network_js_input.zig");
 const r = @import("network_runtime.zig");
 const g = @import("network_gossip.zig");
 const Runtime = r.Runtime;
@@ -11,14 +11,8 @@ const bytes = @import("network_js.zig").bytes;
 pub fn descriptor(runtime: *Runtime, token: g.Token, cell: *const g.Cell) !Value {
     const env = runtime.env;
     const object = try env.createObject();
-    const handle = try env.createObject();
-    try handle.setNamedProperty("index", try env.createUint32(token.index));
-    try handle.setNamedProperty("generation", try env.createBigintUint64(token.generation));
-    try object.setNamedProperty("handle", handle);
-    const connection = try env.createObject();
-    try connection.setNamedProperty("index", try env.createUint32(cell.connection.index));
-    try connection.setNamedProperty("generation", try env.createUint32(cell.connection.generation));
-    try object.setNamedProperty("connection", connection);
+    try object.setNamedProperty("handle", try @import("network_js.zig").handle(env, token.index, token.generation));
+    try object.setNamedProperty("connection", try @import("network_js.zig").connection(env, cell.connection));
     try object.setNamedProperty("peerId", try @import("network_js.zig").peerIdValue(env, &cell.identity));
     try object.setNamedProperty("topic", try env.createStringUtf8(cell.topic[0..cell.topic_len]));
     try object.setNamedProperty("id", try bytes(env, &cell.id));
@@ -36,10 +30,10 @@ pub fn descriptor(runtime: *Runtime, token: g.Token, cell: *const g.Cell) !Value
 pub fn optionsFor(value: Value) !n.gossipsub.Gossipsub.PublishOptions {
     var result: n.gossipsub.Gossipsub.PublishOptions = .{};
     if (try value.typeof() == .undefined) return result;
-    try cfg.object(value, &.{ "allowZeroPeers", "ignoreDuplicate", "flood" });
+    try decode.object(value, &.{ "allowZeroPeers", "ignoreDuplicate", "flood" });
     inline for (.{ .{ "allowZeroPeers", "allow_zero_peers" }, .{ "ignoreDuplicate", "ignore_duplicate" }, .{ "flood", "flood" } }) |field| {
-        const option = try cfg.get(value, field[0]);
-        if (try option.typeof() != .undefined) @field(result, field[1]) = try cfg.boolean(option);
+        const option = try decode.get(value, field[0]);
+        if (try option.typeof() != .undefined) @field(result, field[1]) = try decode.boolean(option);
     }
     return result;
 }

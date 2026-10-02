@@ -596,7 +596,8 @@ export interface NativeHost {
   /**
    * Native log records at or above the configured level, up to 32 every 250 ms and a final few after close, with the
    * records native lost since the last report when that grew, at most every 30 s. A throw counts the delivery's
-   * records in lodestar_native_log_delivery_errors_total and never fails the network.
+   * records in lodestar_native_log_delivery_errors_total and never fails the network. Failed native drains count
+   * separately in lodestar_native_log_drain_errors_total.
    */
   logs(records: readonly NativeLogRecord[], lost: NativeLogLoss | null): void;
   /** A failure the binding recovered from: one of the above that threw, rejected or broke its contract. */
@@ -610,7 +611,7 @@ export interface NativeNetwork {
   applyIntent(intent: NativeLocalIntent, slot: bigint): Promise<NativeIntentResult>;
   /** Updates Status for the active fork; preserves clock, subscriptions, Metadata, ENR and demand. */
   updateStatus(status: NetworkStatusUpdate): Promise<void>;
-  /** Throws InvalidNetworkBytes, queueing nothing, unless `root` is a 32-byte Uint8Array. */
+  /** Copies `root` before returning. Throws InvalidNetworkBytes unless it is a 32-byte Uint8Array. */
   blockImported(root: Uint8Array): void;
   /** Throws, queueing nothing, for a malformed peer id or an unknown action. */
   reportPeer(peerId: PeerIdStr, action: NativePeerAction): void;
