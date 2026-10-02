@@ -102,7 +102,7 @@ const NextPathItem = union(enum) {
 };
 
 fn nextPathItem(comptime ST: type, comptime path_str: []const u8) NextPathItem {
-    const first_delimiter = std.mem.indexOfScalar(u8, path_str, '.');
+    const first_delimiter = std.mem.findScalar(u8, path_str, '.');
     if (first_delimiter == null) {
         return .{ .last = getPathItem(ST, path_str) };
     } else {

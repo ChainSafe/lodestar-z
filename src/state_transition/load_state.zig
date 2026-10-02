@@ -62,30 +62,19 @@ fn deserializeBeaconStateTreeViewWithSeedOverrides(
     seed_validators_node: Node.Id,
 ) !*StateST.TreeView {
     if (comptime out_fork.gte(.altair)) {
-        const scores_field_index = comptime StateST.getFieldIndex("inactivity_scores");
-        const scores_range = ranges[scores_field_index];
-        const inactivity_scores_bytes = state_bytes[scores_range[0]..scores_range[1]];
-        const ScoresType = comptime StateST.getFieldType("inactivity_scores");
-
-        // If the seed fork is pre-altair, there are no scores to reuse, so we fully
-        // deserialize inactivity_scores here (diff optimization only applies when seed_fork >= altair).
-        const scores_node = if (seed_fork.gte(.altair)) blk: {
-            break :blk try inactivityScoresNodeId(seed_state);
-        } else blk: {
-            const node_id = try ScoresType.tree.deserializeFromBytes(pool, inactivity_scores_bytes);
-            errdefer pool.unref(node_id);
-
-            break :blk node_id;
-        };
-
-        return try ssz_container.deserializeContainerOverrideFieldsWithRanges(
-            allocator,
-            pool,
-            StateST,
-            state_bytes,
-            ranges,
-            .{ .validators = seed_validators_node, .inactivity_scores = scores_node },
-        );
+        // If the seed fork is pre-altair, there are no scores to reuse, so the container
+        // deserializes inactivity_scores (diff optimization only applies when seed_fork >= altair).
+        if (seed_fork.gte(.altair)) {
+            const scores_node = try inactivityScoresNodeId(seed_state);
+            return try ssz_container.deserializeContainerOverrideFieldsWithRanges(
+                allocator,
+                pool,
+                StateST,
+                state_bytes,
+                ranges,
+                .{ .validators = seed_validators_node, .inactivity_scores = scores_node },
+            );
+        }
     }
 
     return try ssz_container.deserializeContainerOverrideFieldsWithRanges(
@@ -183,7 +172,13 @@ fn loadInactivityScores(
     else
         inactivity_scores_bytes;
 
-    try findModifiedInactivityScores(allocator, old_scores_slice, new_scores_slice, &modified_validators, 0);
+    try findModifiedIndices(
+        INACTIVITY_SCORE_SIZE,
+        allocator,
+        old_scores_slice,
+        new_scores_slice,
+        &modified_validators,
+    );
     try applyScoreDiffs(migrated_scores, inactivity_scores_bytes, modified_validators.items);
     migrated_scores = try syncScoresLength(allocator, migrated_scores, inactivity_scores_bytes, diff_ctx.old_validator_count, diff_ctx.new_validator_count);
 
@@ -241,7 +236,13 @@ fn loadValidators(
 
     const old_validators_slice = seed_bytes[0 .. min_count * types.phase0.Validator.fixed_size];
     const new_validators_slice = new_validators_bytes[0 .. min_count * types.phase0.Validator.fixed_size];
-    try findModifiedValidators(allocator, old_validators_slice, new_validators_slice, &modified_validators, 0);
+    try findModifiedIndices(
+        types.phase0.Validator.fixed_size,
+        allocator,
+        old_validators_slice,
+        new_validators_slice,
+        &modified_validators,
+    );
 
     try applyModifiedValidators(
         allocator,
@@ -458,82 +459,27 @@ fn loadValidator(
     return try types.phase0.Validator.TreeView.init(allocator, pool, root);
 }
 
-/// Append the absolute indices (offset by `validator_offset`) of validators that
-/// differ between the two equal-length, validator-fixed-size-aligned slices.
-fn findModifiedValidators(
+/// Appends, in ascending order, the indices of `element_size`-byte elements that differ
+/// between two equal-length slices.
+fn findModifiedIndices(
+    comptime element_size: usize,
     allocator: Allocator,
-    validators_bytes: []const u8,
-    validators_bytes2: []const u8,
-    modified_validators: *std.ArrayList(ValidatorIndex),
-    validator_offset: usize,
+    old_bytes: []const u8,
+    new_bytes: []const u8,
+    modified: *std.ArrayList(ValidatorIndex),
 ) !void {
-    std.debug.assert(validators_bytes.len == validators_bytes2.len);
-    std.debug.assert(validators_bytes.len % types.phase0.Validator.fixed_size == 0);
+    std.debug.assert(old_bytes.len == new_bytes.len);
+    std.debug.assert(old_bytes.len % element_size == 0);
 
-    if (std.mem.eql(u8, validators_bytes, validators_bytes2)) return;
+    // One wide comparison keeps the common unchanged case on the vectorized path.
+    if (std.mem.eql(u8, old_bytes, new_bytes)) return;
 
-    if (validators_bytes.len == types.phase0.Validator.fixed_size) {
-        try modified_validators.append(allocator, @intCast(validator_offset));
-        return;
+    for (0..old_bytes.len / element_size) |index| {
+        const start = index * element_size;
+        const old = old_bytes[start..][0..element_size];
+        const new = new_bytes[start..][0..element_size];
+        if (!std.mem.eql(u8, old, new)) try modified.append(allocator, @intCast(index));
     }
-
-    const num_validator = validators_bytes.len / types.phase0.Validator.fixed_size;
-    const half_validator = num_validator / 2;
-    const split = half_validator * types.phase0.Validator.fixed_size;
-
-    try findModifiedValidators(
-        allocator,
-        validators_bytes[0..split],
-        validators_bytes2[0..split],
-        modified_validators,
-        validator_offset,
-    );
-    try findModifiedValidators(
-        allocator,
-        validators_bytes[split..],
-        validators_bytes2[split..],
-        modified_validators,
-        validator_offset + half_validator,
-    );
-}
-
-/// Append the absolute indices (offset by `validator_offset`) of inactivity scores
-/// that differ between the two equal-length, INACTIVITY_SCORE_SIZE-aligned slices.
-fn findModifiedInactivityScores(
-    allocator: Allocator,
-    inactivity_scores_bytes: []const u8,
-    inactivity_scores_bytes2: []const u8,
-    modified_validators: *std.ArrayList(ValidatorIndex),
-    validator_offset: usize,
-) !void {
-    std.debug.assert(inactivity_scores_bytes.len == inactivity_scores_bytes2.len);
-    std.debug.assert(inactivity_scores_bytes.len % INACTIVITY_SCORE_SIZE == 0);
-
-    if (std.mem.eql(u8, inactivity_scores_bytes, inactivity_scores_bytes2)) return;
-
-    if (inactivity_scores_bytes.len == INACTIVITY_SCORE_SIZE) {
-        try modified_validators.append(allocator, @intCast(validator_offset));
-        return;
-    }
-
-    const num_validator = inactivity_scores_bytes.len / INACTIVITY_SCORE_SIZE;
-    const half_validator = num_validator / 2;
-    const split = half_validator * INACTIVITY_SCORE_SIZE;
-
-    try findModifiedInactivityScores(
-        allocator,
-        inactivity_scores_bytes[0..split],
-        inactivity_scores_bytes2[0..split],
-        modified_validators,
-        validator_offset,
-    );
-    try findModifiedInactivityScores(
-        allocator,
-        inactivity_scores_bytes[split..],
-        inactivity_scores_bytes2[split..],
-        modified_validators,
-        validator_offset + half_validator,
-    );
 }
 
 test "loadState scenarios" {
@@ -575,7 +521,7 @@ test "loadState scenarios" {
         .{ .name = "trim validators to 0 (struct)", .mutation = .{ .trim_struct = .{ .new_len = 0 } }, .expect_modified = expect_none[0..], .expect_validators_len = 0, .expect_scores_len = 0 },
     };
 
-    inline for (cases) |case| {
+    for (cases) |case| {
         var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 750_000 });
         defer pool.deinit();
 
@@ -722,17 +668,21 @@ test "diff helpers cases" {
         name: []const u8,
         kind: Kind,
         count: usize,
-        modified: []const usize,
+        modified: []const usize = &.{},
+        all_modified: bool = false,
     };
 
-    const mod_none = [_]usize{};
     const mod_some_validators = [_]usize{ 0, 1, 63, 64, 127 };
     const mod_some_scores = [_]usize{ 0, 7, 31, 32, 63 };
 
     const cases = [_]Case{
-        .{ .name = "validators: no diff", .kind = .validators, .count = 128, .modified = mod_none[0..] },
+        .{ .name = "validators: empty", .kind = .validators, .count = 0 },
+        .{ .name = "scores: empty", .kind = .scores, .count = 0 },
+        .{ .name = "validators: single", .kind = .validators, .count = 1, .modified = &.{0} },
+        .{ .name = "scores: single", .kind = .scores, .count = 1, .modified = &.{0} },
+        .{ .name = "validators: dense", .kind = .validators, .count = 257, .all_modified = true },
+        .{ .name = "scores: dense", .kind = .scores, .count = 257, .all_modified = true },
         .{ .name = "validators: some diff", .kind = .validators, .count = 128, .modified = mod_some_validators[0..] },
-        .{ .name = "scores: no diff", .kind = .scores, .count = 64, .modified = mod_none[0..] },
         .{ .name = "scores: some diff", .kind = .scores, .count = 64, .modified = mod_some_scores[0..] },
     };
 
@@ -756,12 +706,21 @@ test "diff helpers cases" {
             }
             @memcpy(new_bytes, old_bytes);
 
+            if (case.all_modified) {
+                for (0..case.count) |idx| new_bytes[idx * types.phase0.Validator.fixed_size] ^= 0x5a;
+            }
             for (case.modified) |idx| {
                 const start = idx * types.phase0.Validator.fixed_size;
                 new_bytes[start] ^= 0x5a;
             }
 
-            try findModifiedValidators(allocator, old_bytes, new_bytes, &got, 0);
+            try findModifiedIndices(
+                types.phase0.Validator.fixed_size,
+                allocator,
+                old_bytes,
+                new_bytes,
+                &got,
+            );
         } else {
             const total = case.count * INACTIVITY_SCORE_SIZE;
             const old_bytes = try allocator.alloc(u8, total);
@@ -776,18 +735,85 @@ test "diff helpers cases" {
             }
             @memcpy(new_bytes, old_bytes);
 
+            if (case.all_modified) {
+                for (0..case.count) |idx| new_bytes[idx * INACTIVITY_SCORE_SIZE] ^= 0xa5;
+            }
             for (case.modified) |idx| {
                 const start = idx * INACTIVITY_SCORE_SIZE;
                 new_bytes[start] ^= 0xa5;
             }
 
-            try findModifiedInactivityScores(allocator, old_bytes, new_bytes, &got, 0);
+            try findModifiedIndices(
+                INACTIVITY_SCORE_SIZE,
+                allocator,
+                old_bytes,
+                new_bytes,
+                &got,
+            );
         }
 
-        try std.testing.expectEqual(case.modified.len, got.items.len);
-        for (case.modified, got.items) |e, g| {
-            try std.testing.expectEqual(@as(ValidatorIndex, @intCast(e)), g);
+        try std.testing.expectEqual(if (case.all_modified) case.count else case.modified.len, got.items.len);
+        for (got.items, 0..) |got_index, i| {
+            const expected = if (case.all_modified) i else case.modified[i];
+            try std.testing.expectEqual(@as(ValidatorIndex, @intCast(expected)), got_index);
         }
+    }
+}
+
+test "diff helpers: unchanged inputs do not allocate" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct { element_size: usize, count: usize }{
+        .{ .element_size = types.phase0.Validator.fixed_size, .count = 128 },
+        .{ .element_size = INACTIVITY_SCORE_SIZE, .count = 64 },
+    };
+
+    inline for (cases) |case| {
+        const total = case.count * case.element_size;
+        const old_bytes = try allocator.alloc(u8, total);
+        defer allocator.free(old_bytes);
+        @memset(old_bytes, 0x5a);
+
+        const new_bytes = try allocator.alloc(u8, total);
+        defer allocator.free(new_bytes);
+        @memcpy(new_bytes, old_bytes);
+
+        var got: std.ArrayList(ValidatorIndex) = .empty;
+        defer got.deinit(allocator);
+
+        try findModifiedIndices(case.element_size, std.testing.failing_allocator, old_bytes, new_bytes, &got);
+        try std.testing.expectEqual(@as(usize, 0), got.items.len);
+    }
+}
+
+test "memory_safety: diff helpers preserve appended indices on allocation failure" {
+    inline for (.{ types.phase0.Validator.fixed_size, INACTIVITY_SCORE_SIZE }) |element_size| {
+        const old_bytes = [_]u8{0} ** (257 * element_size);
+        const new_bytes = [_]u8{1} ** (257 * element_size);
+        var saw_oom = false;
+
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+            fn run(allocator: Allocator, before: []const u8, after: []const u8, failed: *bool) !void {
+                var got: std.ArrayList(ValidatorIndex) = .empty;
+                defer got.deinit(allocator);
+                try got.append(allocator, 3);
+
+                findModifiedIndices(element_size, allocator, before, after, &got) catch |err| {
+                    failed.* = true;
+                    try std.testing.expectEqual(error.OutOfMemory, err);
+                    try std.testing.expectEqual(@as(ValidatorIndex, 3), got.items[0]);
+                    for (got.items[1..], 0..) |index, i| {
+                        try std.testing.expectEqual(@as(ValidatorIndex, i), index);
+                    }
+                    return err;
+                };
+                try std.testing.expectEqual(@as(usize, 258), got.items.len);
+                try std.testing.expectEqual(@as(ValidatorIndex, 3), got.items[0]);
+                for (got.items[1..], 0..) |index, i| {
+                    try std.testing.expectEqual(@as(ValidatorIndex, i), index);
+                }
+            }
+        }.run, .{ &old_bytes, &new_bytes, &saw_oom });
+        try std.testing.expect(saw_oom);
     }
 }
 
@@ -837,4 +863,62 @@ test "loadValidators/loadInactivityScores: rejection scenarios" {
             loadInactivityScores(allocator, StateST, migrated_view, &pool, seed_scores_node, bad_bytes[0..]),
         );
     }
+}
+
+test "memory_safety: loadState releases new inactivity scores on failure" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 345_000 });
+    defer pool.deinit();
+
+    var chain_config = @import("config").minimal.chain_config;
+    chain_config.ALTAIR_FORK_EPOCH = 1;
+    const beacon_config = BeaconConfig.init(chain_config, .{0} ** 32);
+
+    var seed_value = types.phase0.BeaconState.default_value;
+    defer types.phase0.BeaconState.deinit(allocator, &seed_value);
+    try seed_value.validators.append(allocator, types.phase0.Validator.default_value);
+    try seed_value.balances.append(allocator, 32_000_000_000);
+    var seed = try AnyBeaconState.fromValue(allocator, &pool, .phase0, &seed_value);
+    defer seed.deinit();
+    const seed_root = (try seed.hashTreeRoot()).*;
+
+    var target_value = types.altair.BeaconState.default_value;
+    defer types.altair.BeaconState.deinit(allocator, &target_value);
+    target_value.slot = @import("preset").preset.SLOTS_PER_EPOCH;
+    try target_value.validators.append(allocator, types.phase0.Validator.default_value);
+    try target_value.balances.append(allocator, 32_000_000_000);
+    try target_value.previous_epoch_participation.append(allocator, 0);
+    try target_value.current_epoch_participation.append(allocator, 0);
+    try target_value.inactivity_scores.append(allocator, 123);
+
+    const bytes = try allocator.alloc(u8, types.altair.BeaconState.serializedSize(&target_value));
+    defer allocator.free(bytes);
+    _ = types.altair.BeaconState.serializeIntoBytes(&target_value, bytes);
+    const ranges = try types.altair.BeaconState.readFieldRanges(bytes);
+    const justification_offset = ranges[comptime types.altair.BeaconState.getFieldIndex("justification_bits")][0];
+    const baseline = pool.getNodesInUse();
+
+    bytes[justification_offset] = 0x80;
+    try std.testing.expectError(error.trailingData, loadState(allocator, &beacon_config, &seed, bytes, null));
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+    try std.testing.expectEqualSlices(u8, &seed_root, try seed.hashTreeRoot());
+    bytes[justification_offset] = 0;
+
+    // The pool uses its own allocator; the first loadState allocation creates the completed container's view.
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, loadState(failing.allocator(), &beacon_config, &seed, bytes, null));
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+    try std.testing.expectEqualSlices(u8, &seed_root, try seed.hashTreeRoot());
+
+    {
+        var loaded = try loadState(allocator, &beacon_config, &seed, bytes, null);
+        defer loaded.state.deinit();
+        defer allocator.free(loaded.modified_validators);
+        var expected_root: [32]u8 = undefined;
+        try types.altair.BeaconState.hashTreeRoot(allocator, &target_value, &expected_root);
+        try std.testing.expectEqualSlices(u8, &expected_root, try loaded.state.hashTreeRoot());
+    }
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+    try std.testing.expectEqualSlices(u8, &seed_root, try seed.hashTreeRoot());
 }

@@ -1,4 +1,4 @@
-export {BeaconStateView} from "./index.js";
+export {BeaconStateView, BeaconConfig} from "./index.js";
 export type {
   ProcessSlotsOpts,
   SignedVoluntaryExit,
@@ -7,5 +7,5 @@ export type {
   VoluntaryExitValidity,
 } from "./index.js";
 
-/** Callers must exclude STF operations across all workers until teardown returns. */
+/** Callers must exclude STF operations in this thread until teardown returns. */
 export declare function deinitReusedEpochTransitionCache(): void;

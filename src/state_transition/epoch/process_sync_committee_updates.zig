@@ -28,7 +28,7 @@ pub fn processSyncCommitteeUpdates(
 
         // Rotate syncCommittee cache
         // next_sync_committee_indices ownership is transferred to epoch_cache
-        try epoch_cache.rotateSyncCommitteeIndexed(allocator, &next_sync_committee_info.indices);
+        try epoch_cache.rotateSyncCommitteeIndexed(&next_sync_committee_info.indices);
     }
 }
 

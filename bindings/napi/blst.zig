@@ -1,6 +1,6 @@
 //! NAPI bindings for BLS (blst) cryptographic operations used by lodestar.
 //!
-//! This module uses a **Zig ThreadPool** (`state.thread_pool`) — a fixed-size pool of OS threads
+//! This file uses a **Zig ThreadPool** (`state.thread_pool`) — a fixed-size pool of OS threads
 //! initialized once via `state.init`. Used by synchronous NAPI functions (`aggregateVerify`,
 //! `verifyMultipleAggregateSignatures`) to fan out pairing checks across worker threads. The
 //! call still blocks the JS thread while it waits for the pool to finish, but the crypto work

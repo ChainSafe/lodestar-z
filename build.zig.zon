@@ -28,8 +28,8 @@
             },
         },
         .hashtree = .{
-            .url = "git+https://github.com/ChainSafe/hashtree-z.git#f5c1b81da167f84376fb94aef29a57fc6c08dc28",
-            .hash = "hashtree-0.1.0-sBOovj8WAAAGCN62cybnffy7b4ITTQsog2oOG2AQZl9L",
+            .url = "git+https://github.com/ChainSafe/hashtree-z.git#9b0fdad8f5159b8d7ccc3b5d74f18f63a3881482",
+            .hash = "hashtree-0.1.0-sBOovn0WAAC0xm013qX6iNDJGmZ3OVnomsF-F19Y_Yxy",
         },
         .snappy = .{
             .url = "git+https://github.com/ChainSafe/snappy.zig#713942410426051da6107a955b29f3f152815622",
@@ -40,8 +40,8 @@
             .hash = "zig_yaml-0.1.0-C1161kFWAwDxjKAFmklKwWVDvz2mmq0Q__bDhGGjeyd3",
         },
         .zapi = .{
-            .url = "https://github.com/ChainSafe/zapi/archive/ca55a240a07cbeaba7ac543125a108bca4076a5a.tar.gz",
-            .hash = "zapi-4.0.0-rIqzUasFBQBedS0-MCZXl1BnemstdjIhb5OUdGD305rI",
+            .url = "https://github.com/ChainSafe/zapi/archive/ff6e70e820781bda86d49bdb99fadc2d1d3bf3a0.tar.gz",
+            .hash = "zapi-4.1.0-rIqzUaUlBQAhcLLX5ucd8L0BfxosVdV5ywYO9rVb7gYT",
         },
         .zbench = .{
             .url = "git+https://github.com/hendriknielaender/zBench#b2b89c475e3ef1bb2bd71255c80478a82d3e0ca8",
@@ -146,6 +146,9 @@
         .bounded_array = .{
             .root_source_file = "src/bounded_array.zig",
         },
+        .diagnostics = .{
+            .root_source_file = "src/diagnostics.zig",
+        },
         .clock = .{
             .root_source_file = "src/clock/root.zig",
             .imports = .{ .zio, .consensus_types, .bounded_array, .time },
@@ -194,6 +197,7 @@
         .state_transition = .{
             .root_source_file = "src/state_transition/root.zig",
             .imports = .{
+                .diagnostics,
                 .build_options,
                 .swap_or_not_shuffle,
                 .ssz,
@@ -385,6 +389,7 @@
         .hex = .{ .root_module = .hex },
         .bit_array = .{ .root_module = .bit_array },
         .bounded_array = .{ .root_module = .bounded_array },
+        .diagnostics = .{ .root_module = .diagnostics },
         .cpu_count = .{ .root_module = .cpu_count },
         .hashing = .{ .root_module = .hashing },
         .preset = .{ .root_module = .preset },
@@ -400,6 +405,12 @@
         .fork_choice = .{ .root_module = .fork_choice },
         .clock = .{ .root_module = .clock },
         .beacon_node = .{ .root_module = .beacon_node },
+        .bindings_allocator = .{
+            .root_module = .{
+                .root_source_file = "bindings/napi/tracked_allocator.zig",
+                .imports = .{.persistent_merkle_tree},
+            },
+        },
 
         .tidy = .{
             .root_module = .{

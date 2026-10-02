@@ -56,7 +56,7 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
         pub const Element: type = ST;
         pub const limit: usize = _limit;
         pub const opts: TypeOpts = _opts;
-        pub const Type: type = std.ArrayListUnmanaged(Element.Type);
+        pub const Type: type = std.ArrayList(Element.Type);
         pub const TreeView: type = if (isBasicType(Element))
             ListBasicTreeView(@This())
         else
@@ -687,7 +687,7 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
         pub const kind = TypeKind.list;
         pub const Element: type = ST;
         pub const limit: usize = _limit;
-        pub const Type: type = std.ArrayListUnmanaged(Element.Type);
+        pub const Type: type = std.ArrayList(Element.Type);
         pub const TreeView: type = if (isBasicType(Element))
             ListBasicTreeView(@This())
         else

@@ -13,7 +13,7 @@ pub const Fork = js.Object(struct {
 
 pub const Eth1Data = js.Object(struct {
     depositRoot: js.Uint8Array,
-    depositCount: js.Number,
+    depositCount: js.BigInt,
     blockHash: js.Uint8Array,
 });
 
@@ -33,6 +33,15 @@ pub const Checkpoint = js.Object(struct {
 pub const SyncCommittee = js.Object(struct {
     pubkeys: js.Array,
     aggregatePubkey: js.Uint8Array,
+});
+
+pub const BlockRewards = js.Object(struct {
+    proposerIndex: js.Number,
+    total: js.Number,
+    attestations: js.Number,
+    syncAggregate: js.Number,
+    proposerSlashings: js.Number,
+    attesterSlashings: js.Number,
 });
 
 pub const IndexedSyncCommittee = js.Object(struct {

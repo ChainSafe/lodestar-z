@@ -1,4 +1,5 @@
 const std = @import("std");
+const diagnostics = @import("diagnostics");
 const Allocator = std.mem.Allocator;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const BeaconState = @import("fork_types").BeaconState;
@@ -32,6 +33,7 @@ pub fn processWithdrawals(
     state: *BeaconState(fork),
     expected_withdrawals_result: WithdrawalsResult,
     payload_withdrawals_root: Root,
+    diag: ?*diagnostics.Diagnostics,
 ) !void {
     // processedPartialWithdrawalsCount is withdrawals coming from EL since electra (EIP-7002)
     const processed_partial_withdrawals_count = expected_withdrawals_result.processed_partial_withdrawals_count;
@@ -42,7 +44,11 @@ pub fn processWithdrawals(
     try types.capella.Withdrawals.hashTreeRoot(allocator, &expected_withdrawals_result.withdrawals, &expected_withdrawals_root);
 
     if (!std.mem.eql(u8, &expected_withdrawals_root, &payload_withdrawals_root)) {
-        return error.WithdrawalsRootMismatch;
+        return diagnostics.state_transition.withdrawalsRootMismatch(
+            diag,
+            &expected_withdrawals_root,
+            &payload_withdrawals_root,
+        );
     }
 
     for (0..num_withdrawals) |i| {
@@ -156,7 +162,7 @@ pub fn getExpectedWithdrawals(
         // Get next validator in turn
         const validator_index = (next_withdrawal_validator_index + n) % validators_count;
         n += 1;
-        var validator = try validators.get(validator_index);
+        var validator = try validators.getReadonly(validator_index);
         const withdraw_balance: u64 = @intCast(withdrawal_balances.get(validator_index) orelse 0);
         const val_balance = try balances.get(validator_index);
         const balance = if (comptime fork.gte(.electra))
@@ -216,7 +222,7 @@ pub fn getExpectedWithdrawals(
 }
 const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
 
-test "process withdrawals should count every swept validator including the one filling the payload" {
+test "getExpectedWithdrawals counts swept validators without rebuilding validators tree" {
     const allocator = std.testing.allocator;
     const validator_count = 256;
     const pool_size = 180_000;
@@ -235,6 +241,9 @@ test "process withdrawals should count every swept validator including the one f
             try validator.set("withdrawable_epoch", 0);
         }
 
+        try state.commit();
+        const validators_root_before = validators.getRoot();
+
         var withdrawals_buf: [preset.MAX_WITHDRAWALS_PER_PAYLOAD]types.capella.Withdrawal.Type = undefined;
         var withdrawals_result = WithdrawalsResult{
             .withdrawals = Withdrawals.initBuffer(&withdrawals_buf),
@@ -249,6 +258,9 @@ test "process withdrawals should count every swept validator including the one f
             &withdrawals_result,
             &withdrawal_balances,
         );
+        try state.commit();
+        try std.testing.expectEqual(validators_root_before, validators.getRoot());
+
         const expected_sampled = if (withdrawal_count == preset.MAX_WITHDRAWALS_PER_PAYLOAD)
             withdrawal_count + 1
         else
@@ -261,6 +273,6 @@ test "process withdrawals should count every swept validator including the one f
 
         var root: Root = undefined;
         try types.capella.Withdrawals.hashTreeRoot(allocator, &withdrawals_result.withdrawals, &root);
-        try processWithdrawals(.electra, allocator, state, withdrawals_result, root);
+        try processWithdrawals(.electra, allocator, state, withdrawals_result, root, null);
     }
 }

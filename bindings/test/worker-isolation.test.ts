@@ -3,6 +3,7 @@ import {Worker} from "node:worker_threads";
 import {describe, expect, it} from "vitest";
 import {PublicKey, SecretKey, Signature, verify} from "../src/blst.js";
 import {pubkeyCache} from "../src/pubkeys.js";
+import type {IsolationScenario} from "./fixtures/workerIsolation.js";
 
 /**
  * Tests that the per-context instance data (blst InstanceData) and
@@ -66,26 +67,7 @@ describe("worker isolation", () => {
       save: string | null;
       load: string | null;
       reset: string | null;
-    }>(`
-      import {parentPort} from "node:worker_threads";
-      import {pubkeyCache} from ${JSON.stringify(pubkeysModulePath)};
-
-      function capture(operation) {
-        try {
-          operation();
-          return null;
-        } catch (error) {
-          return String(error?.message ?? error);
-        }
-      }
-
-      parentPort.postMessage({
-        pubkey: pubkeyCache.getOrThrow(0).toBytes(),
-        save: capture(() => pubkeyCache.save("")),
-        load: capture(() => pubkeyCache.load("", 1)),
-        reset: capture(() => pubkeyCache.reset()),
-      });
-    `);
+    }>("pubkeys");
 
     expect(result).toEqual({
       load: "PubkeyCacheControlEnvironmentOnly",
@@ -98,37 +80,18 @@ describe("worker isolation", () => {
   });
 });
 
-const pubkeysModulePath = new URL("../src/pubkeys.js", import.meta.url).href;
-const blstModulePath = new URL("../src/blst.js", import.meta.url).href;
-
 function runBlstWorker(): Promise<string> {
-  return runWorker(`
-      import crypto from "node:crypto";
-      import {parentPort} from "node:worker_threads";
-      import {SecretKey, verify} from "${blstModulePath}";
-
-      try {
-        const sk = SecretKey.fromKeygen(crypto.randomBytes(32));
-        const pk = sk.toPublicKey();
-        const msg = crypto.randomBytes(32);
-        const sig = sk.sign(msg);
-
-        if (!verify(msg, pk, sig)) {
-          parentPort.postMessage("verify failed in worker");
-        } else {
-          parentPort.postMessage("ok");
-        }
-      } catch (e) {
-        parentPort.postMessage("error: " + e.message);
-      }
-  `);
+  return runWorker("blst");
 }
 
-function runWorker<T>(source: string): Promise<T> {
+function runWorker<T>(scenario: IsolationScenario): Promise<T> {
   return new Promise((resolve, reject) => {
     let received = false;
     let result: T;
-    const worker = new Worker(source, {eval: true});
+    const worker = new Worker(new URL("./fixtures/workerIsolation.ts", import.meta.url), {
+      execArgv: ["--import", "tsx"],
+      workerData: scenario,
+    });
 
     worker.on("message", (message: T) => {
       received = true;
