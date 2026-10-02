@@ -901,13 +901,13 @@ test "transport recovers a locally dropped first flight through QUIC loss recove
 }
 
 test "network owner progresses and shuts down while UDP sends are under local pressure" {
-    const core = @import("network_core.zig");
+    const NetworkCore = @import("network_core.zig").NetworkCore;
     const keys = @import("wire/keys.zig");
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{125}));
     const remote = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{126}));
     const identity = @import("wire/peer_id.zig").PeerId.fromPublicKey(&remote.publicKey());
     const options = core_test.networkOptions(&key);
-    var node: core.NetworkCore = undefined;
+    var node: NetworkCore = undefined;
     try node.init(std.testing.allocator, std.testing.io, &options.resolved, options.startup);
     defer node.deinit(std.testing.io);
     var faults: FaultIo = .{ .send = .{}, .send_failure = error.SystemResources };

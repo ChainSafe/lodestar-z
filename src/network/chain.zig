@@ -5,7 +5,7 @@ const preset = @import("preset");
 const constants = @import("constants");
 const topics = @import("gossipsub/topic_policy.zig");
 const policy = @import("reqresp/request_policy.zig");
-const core = @import("network_core.zig");
+const NetworkCore = @import("network_core.zig").NetworkCore;
 const values = @import("control_values.zig");
 const capabilities = @import("capabilities.zig");
 
@@ -115,7 +115,7 @@ pub const Plan = struct {
         return result;
     }
 
-    pub fn update(self: *const Plan, local: values.LocalState, endpoints: ?core.AdvertisementEndpoints, slot: u64) !core.LocalUpdate {
+    pub fn update(self: *const Plan, local: values.LocalState, endpoints: ?NetworkCore.AdvertisementEndpoints, slot: u64) !NetworkCore.LocalUpdate {
         const epoch = slot / preset.preset.SLOTS_PER_EPOCH;
         var index: usize = 0;
         for (self.boundaries[0..self.boundary_count], 0..) |boundary, i| {
@@ -124,7 +124,7 @@ pub const Plan = struct {
         }
         const current = self.boundaries[index];
         if (current.fork.gte(.gloas)) return error.UnsupportedNetworkFork;
-        var result: core.LocalUpdate = .{
+        var result: NetworkCore.LocalUpdate = .{
             .local = local,
             .endpoints = endpoints,
             .schedule = .{ .fulu_scheduled = self.fulu_scheduled, .next_version = current.version },

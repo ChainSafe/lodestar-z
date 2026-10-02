@@ -131,7 +131,7 @@ fn parseRemembered(value: Value, out: *Config) !void {
 }
 
 pub const Intent = struct {
-    value: n.network_core.LocalIntent,
+    value: n.NetworkCore.LocalIntent,
     subscriptions: [n.gossipsub.topic_policy.boundary_max]n.gossipsub.local_intent.Boundary,
 };
 pub fn parseIntent(value: Value, out: *Intent, max_peers: u16) !void {

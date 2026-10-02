@@ -159,7 +159,7 @@ const Fixture = struct {
     /// A runtime with a lane, two serving cells and a small gossip table. `notified` makes its notifications
     /// reach the counting test notifier.
     fn init(self: *Fixture, notified: bool, serving: usize) !void {
-        self.* = .{ .runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 }, .env_alive = notified } };
+        self.* = .{ .runtime = .{ .env = undefined, .env_alive = notified } };
         self.runtime.payload_budget.limit = 64 << 20;
         self.runtime.lane = &self.lane;
         self.runtime.incoming = try incoming.Table.init(std.testing.allocator, serving, &self.runtime.payload_budget);
@@ -432,7 +432,7 @@ test "actions apply before selection, so a check classified in an exchange is cl
 }
 
 test "a 128-column burst reaches the host within two exchanges under saturated ordinary gossip and serving" {
-    var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 }, .notify_live = false, .env_alive = false };
+    var runtime: Runtime = .{ .env = undefined, .notify_live = false, .env_alive = false };
     runtime.payload_budget.limit = 64 << 20;
     runtime.incoming = try incoming.Table.init(std.testing.allocator, incoming.capacity_max, &runtime.payload_budget);
     defer runtime.incoming.?.deinit();
@@ -599,7 +599,7 @@ test "command completions arrive at most `settle` per exchange, fairly under ref
     try fixture.init(false, 2);
     defer fixture.deinit();
     const runtime = &fixture.runtime;
-    var stores = try r.Stores.create(std.testing.allocator, 4);
+    var stores = try @import("network_storage.zig").Stores.create(std.testing.allocator, 4);
     defer stores.destroy();
     runtime.stores = stores;
     defer runtime.stores = null;

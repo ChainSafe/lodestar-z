@@ -13,93 +13,91 @@ const wake_sources = @import("wake_sources.zig");
 const control_wire = @import("control_wire.zig");
 const control_values = @import("control_values.zig");
 const ControlProtocol = @import("control_protocol.zig").ControlProtocol;
-pub const wait = @import("wait.zig");
-
-/// Discovery datagrams drained per turn, matching the QUIC receive batch.
-pub const discovery_batch_max: u32 = @import("constants.zig").receive_batch_max;
-pub const controls_per_turn = 32;
-pub const identify_per_turn = 8;
-pub const dials_per_turn = 4;
-pub const candidates_per_turn = peers.Discovery.candidates_per_step;
-pub const ForkSchedule = peers.Discovery.ForkSchedule;
 const advertisement = @import("advertisement.zig");
-pub const AdvertisementEndpoints = advertisement.Endpoints;
-pub const AdvertisementHints = advertisement.Hints;
-pub const LocalUpdate = struct {
-    local: t.LocalState,
-    schedule: ForkSchedule,
-    endpoints: ?AdvertisementEndpoints,
-    capabilities: @import("capabilities.zig").Directional,
-};
-pub const LocalIntent = struct {
-    update: LocalUpdate,
-    demand: peers.Demand,
-    subscriptions: []const gossip.local_intent.Boundary,
-    slot: u64 = 0,
-};
-pub const discovery_session_capacity = peers.Discovery.discovery_session_capacity;
-pub const discovery_session_idle_timeout_ms = peers.Discovery.discovery_session_idle_timeout_ms;
-pub const DiscoveryOptions = peers.Discovery.Config;
-pub const Startup = struct {
-    host: *const @import("wire/keys.zig").KeyPair,
-    bind: @import("udp").Sockets.Bindings,
-    local: t.LocalState,
-    schedule: ForkSchedule = .{},
-    discovery: ?DiscoveryOptions = null,
-    /// The host's wall-clock slot until its first intent.
-    slot: u64 = 0,
-    /// Peers an earlier run remembered, at most `peers.remembered.capacity`, replayed as paced
-    /// automatic candidates. Native drops expired, unusable and duplicate records.
-    remembered: []const peers.remembered.Record = &.{},
-};
-pub const HostProgress = struct {
-    /// A per-turn cap stopped the host with work left, so the next turn is due now.
-    more: bool = false,
-};
-/// The owner host seam. `step` calls `apply` after receive, timers and collect and before the
-/// protocols run, when the host wake descriptor was readable, the previous call returned
-/// `more`, or `deadline_ms` has passed, so the host's work is flushed in the same step.
-pub const Host = struct {
-    context: ?*anyopaque = null,
-    /// Drains the host wake descriptor before reading any host queue, so a submission that
-    /// lands after the drain wakes the next poll. Must not read `transportEvents()`.
-    apply: ?*const fn (context: *anyopaque, core: *NetworkCore, now: Now) HostProgress = null,
-    /// Earliest host-owned deadline, kept by the host without scanning its queues.
-    deadline_ms: ?u64 = null,
-
-    /// A host with no queued work that only bounds the wait.
-    pub fn deadlineOnly(deadline_ms: ?u64) Host {
-        return .{ .deadline_ms = deadline_ms };
-    }
-};
-pub const Outputs = struct {
-    peers: []t.Event = &.{},
-    application: []rr.ReqResp.Event = &.{},
-};
-pub const OperationalError = transport_mod.StepError || transport_mod.DialError || peers.Discovery.Error || wait.Error;
-pub const Counts = struct { peers: usize, application: usize };
-pub const Result = struct {
-    counts: Counts = .{ .peers = 0, .application = 0 },
-    transport: transport_mod.StepResult,
-    readiness: wait.Result = .{},
-    /// Only the discovery sockets had work, so the transport and protocols did not run.
-    discovery_only: bool = false,
-    failure: ?OperationalError = null,
-    dial_started: u8 = 0,
-    dial_deferred: u8 = 0,
-    dial_failed: u8 = 0,
-};
-/// Dials the owner started or deferred, which the health log reports, and failed clock reads,
-/// transport steps and readiness polls.
-pub const Counters = struct {
-    dial_started: u64 = 0,
-    dial_deferred: u64 = 0,
-    transport_failures: u64 = 0,
-    readiness_failures: u64 = 0,
-};
 
 /// Initialize at its final address. Serialize every call, including reads and teardown.
 pub const NetworkCore = struct {
+    pub const wait = @import("wait.zig");
+
+    /// Discovery datagrams drained per turn, matching the QUIC receive batch.
+    pub const discovery_batch_max: u32 = @import("constants.zig").receive_batch_max;
+    pub const controls_per_turn = 32;
+    pub const identify_per_turn = 8;
+    pub const dials_per_turn = 4;
+    pub const ForkSchedule = peers.Discovery.ForkSchedule;
+    pub const AdvertisementEndpoints = advertisement.Endpoints;
+    pub const AdvertisementHints = advertisement.Hints;
+    pub const LocalUpdate = struct {
+        local: t.LocalState,
+        schedule: ForkSchedule,
+        endpoints: ?AdvertisementEndpoints,
+        capabilities: @import("capabilities.zig").Directional,
+    };
+    pub const LocalIntent = struct {
+        update: LocalUpdate,
+        demand: peers.Demand,
+        subscriptions: []const gossip.local_intent.Boundary,
+        slot: u64 = 0,
+    };
+    pub const DiscoveryOptions = peers.Discovery.Config;
+    pub const Startup = struct {
+        host: *const @import("wire/keys.zig").KeyPair,
+        bind: @import("udp").Sockets.Bindings,
+        local: t.LocalState,
+        schedule: ForkSchedule = .{},
+        discovery: ?DiscoveryOptions = null,
+        /// The host's wall-clock slot until its first intent.
+        slot: u64 = 0,
+        /// Peers an earlier run remembered, at most `peers.remembered.capacity`, replayed as paced
+        /// automatic candidates. Native drops expired, unusable and duplicate records.
+        remembered: []const peers.remembered.Record = &.{},
+    };
+    pub const HostProgress = struct {
+        /// A per-turn cap stopped the host with work left, so the next turn is due now.
+        more: bool = false,
+    };
+    /// The owner host seam. `step` calls `apply` after receive, timers and collect and before the
+    /// protocols run, when the host wake descriptor was readable, the previous call returned
+    /// `more`, or `deadline_ms` has passed, so the host's work is flushed in the same step.
+    pub const Host = struct {
+        context: ?*anyopaque = null,
+        /// Drains the host wake descriptor before reading any host queue, so a submission that
+        /// lands after the drain wakes the next poll. Must not read `transportEvents()`.
+        apply: ?*const fn (context: *anyopaque, core: *NetworkCore, now: Now) HostProgress = null,
+        /// Earliest host-owned deadline, kept by the host without scanning its queues.
+        deadline_ms: ?u64 = null,
+
+        /// A host with no queued work that only bounds the wait.
+        pub fn deadlineOnly(deadline_ms: ?u64) Host {
+            return .{ .deadline_ms = deadline_ms };
+        }
+    };
+    pub const Outputs = struct {
+        peers: []t.Event = &.{},
+        application: []rr.ReqResp.Event = &.{},
+    };
+    pub const OperationalError = transport_mod.StepError || transport_mod.DialError || peers.Discovery.Error || wait.Error;
+    pub const Counts = struct { peers: usize, application: usize };
+    pub const Result = struct {
+        counts: Counts = .{ .peers = 0, .application = 0 },
+        transport: transport_mod.StepResult,
+        readiness: wait.Result = .{},
+        /// Only the discovery sockets had work, so the transport and protocols did not run.
+        discovery_only: bool = false,
+        failure: ?OperationalError = null,
+        dial_started: u8 = 0,
+        dial_deferred: u8 = 0,
+        dial_failed: u8 = 0,
+    };
+    /// Dials the owner started or deferred, which the health log reports, and failed clock reads,
+    /// transport steps and readiness polls.
+    pub const Counters = struct {
+        dial_started: u64 = 0,
+        dial_deferred: u64 = 0,
+        transport_failures: u64 = 0,
+        readiness_failures: u64 = 0,
+    };
+
     reservations: @import("reservations.zig").Reservations,
     allocator: std.mem.Allocator,
     transport: transport_mod.Transport,
@@ -588,43 +586,47 @@ pub const NetworkCore = struct {
         if (!self.peer_manager.stopped and !self.peer_manager.quiescing and (result.failure == null or result.failure.? != error.Canceled)) {
             // This turn's coverage selection already ran, without a second protocol pump.
             if (self.discovery != null) self.discover(io, tick, &result);
-            var intents: [dials_per_turn]manager.DialIntent = undefined;
-            const room = self.transport.engine.limits.dialing_max -| self.transport.engine.resourceSnapshot().dialing;
-            const count = self.peer_manager.dialIntents(self.service.gossipsub, &self.transport.engine, tick, intents[0..@min(room, intents.len)]);
-            for (intents[0..count], 0..) |intent, index| {
-                const handle = self.transport.dialPeer(io, intent.address, intent.peer) catch |err| {
-                    if (err == error.DestinationUnreachable) {
-                        std.log.scoped(.network_core).debug("dial_failed peer={f} endpoint={any} reason={s}", .{ @import("logging.zig").peer(&intent.peer), intent.address, @errorName(err) });
-                        std.debug.assert(self.peer_manager.dialFailed(intent.token, tick));
-                        result.dial_failed += 1;
-                    } else {
-                        std.log.scoped(.network_core).debug("dial_deferred peer={f} endpoint={any} reason={s}", .{ @import("logging.zig").peer(&intent.peer), intent.address, @errorName(err) });
-                        std.debug.assert(self.peer_manager.dialDeferred(intent.token, tick));
-                        result.dial_deferred += 1;
-                        result.failure = result.failure orelse err;
-                    }
-                    if (err == error.Canceled) {
-                        for (intents[index + 1 .. count]) |pending| {
-                            std.debug.assert(self.peer_manager.dialDeferred(pending.token, tick));
-                            result.dial_deferred += 1;
-                        }
-                        result.failure = err;
-                        break;
-                    }
-                    continue;
-                };
-                std.debug.assert(self.peer_manager.dialStarted(intent.token, handle));
-                std.log.scoped(.network_core).debug("dial_started peer={f} endpoint={any} connection={d}:{d}", .{ @import("logging.zig").peer(&intent.peer), intent.address, handle.index, handle.generation });
-                result.dial_started += 1;
-            }
-            self.counters.dial_started +|= result.dial_started;
-            self.counters.dial_deferred +|= result.dial_deferred;
+            self.dial(io, tick, &result);
         }
         if ((result.failure == null or result.failure.? != error.Canceled)) self.transport.flush(io, tick, &result.transport) catch |err| {
             result.failure = err;
             self.counters.transport_failures +|= 1;
         };
         return result;
+    }
+
+    fn dial(self: *NetworkCore, io: std.Io, tick: Now, result: *Result) void {
+        var intents: [dials_per_turn]manager.DialIntent = undefined;
+        const room = self.transport.engine.limits.dialing_max -| self.transport.engine.resourceSnapshot().dialing;
+        const count = self.peer_manager.dialIntents(self.service.gossipsub, &self.transport.engine, tick, intents[0..@min(room, intents.len)]);
+        for (intents[0..count], 0..) |intent, index| {
+            const handle = self.transport.dialPeer(io, intent.address, intent.peer) catch |err| {
+                if (err == error.DestinationUnreachable) {
+                    std.log.scoped(.network_core).debug("dial_failed peer={f} endpoint={any} reason={s}", .{ @import("logging.zig").peer(&intent.peer), intent.address, @errorName(err) });
+                    std.debug.assert(self.peer_manager.dialFailed(intent.token, tick));
+                    result.dial_failed += 1;
+                } else {
+                    std.log.scoped(.network_core).debug("dial_deferred peer={f} endpoint={any} reason={s}", .{ @import("logging.zig").peer(&intent.peer), intent.address, @errorName(err) });
+                    std.debug.assert(self.peer_manager.dialDeferred(intent.token, tick));
+                    result.dial_deferred += 1;
+                    result.failure = result.failure orelse err;
+                }
+                if (err == error.Canceled) {
+                    for (intents[index + 1 .. count]) |pending| {
+                        std.debug.assert(self.peer_manager.dialDeferred(pending.token, tick));
+                        result.dial_deferred += 1;
+                    }
+                    result.failure = err;
+                    break;
+                }
+                continue;
+            };
+            std.debug.assert(self.peer_manager.dialStarted(intent.token, handle));
+            std.log.scoped(.network_core).debug("dial_started peer={f} endpoint={any} connection={d}:{d}", .{ @import("logging.zig").peer(&intent.peer), intent.address, handle.index, handle.generation });
+            result.dial_started += 1;
+        }
+        self.counters.dial_started +|= result.dial_started;
+        self.counters.dial_deferred +|= result.dial_deferred;
     }
 
     /// Delivers the turn's transport events, runs the one Service pass, applies its faults and
@@ -686,9 +688,7 @@ pub const NetworkCore = struct {
                     return;
                 };
                 if (admission.displaced) |old| {
-                    self.control_protocol.cancelConnection(&self.service.reqresp, &self.service.router, quic, admission.peer, old, now);
-                    self.service.gossipsub.retireConnection(&self.service.router, quic, old, now);
-                    _ = quic.close(old, 0);
+                    self.releaseConnection(.{ .peer = admission.peer, .conn = old }, now);
                 }
                 _ = self.service.gossipsub.peerConnected(quic, connected.conn, pm.catalog.rowFor(admission.peer).?.direct, now);
             },
@@ -823,7 +823,7 @@ fn validateForkTable(table: []const @import("types.zig").ForkEntry, context: *co
     }
     if (!found) return error.UnknownFork;
 }
-fn validateSchedule(local: *const t.LocalState, schedule: ForkSchedule) !void {
+fn validateSchedule(local: *const t.LocalState, schedule: NetworkCore.ForkSchedule) !void {
     if (schedule.next_epoch == std.math.maxInt(u64) and !std.mem.allEqual(u8, &schedule.next_digest, 0)) return error.InvalidSchedule;
     if ((schedule.fulu_scheduled or local.fork.fork.gte(.fulu)) and local.metadata.custody_group_count == null) return error.MissingCustodyAdvertisement;
 }
@@ -831,6 +831,7 @@ const advertisementFor = @import("peers/discovery.zig").advertisementFor;
 
 test {
     _ = @import("network_core_test.zig");
+    _ = @import("network_core_intent_test.zig");
     _ = @import("network_core_metrics_test.zig");
     _ = @import("network_core_endpoint_test.zig");
     _ = @import("network_core_turn_test.zig");

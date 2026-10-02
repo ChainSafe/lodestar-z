@@ -6,17 +6,18 @@ const cfg = @import("network_config.zig");
 const r = @import("network_runtime.zig");
 const Runtime = r.Runtime;
 const Value = napi.Value;
-const requests = @import("network_requests.zig");
 const gossip = @import("network_gossip.zig");
 const publication_js = @import("network_publication_js.zig");
-const publications = @import("network_publications.zig");
-const gossip_js = @import("network_gossip_js.zig");
-const incoming = @import("network_incoming.zig");
 const incoming_js = @import("network_incoming_js.zig");
 const request_js = @import("network_request_js.zig");
 const exchange_mod = @import("network_exchange.zig");
+const exchange_js = @import("network_exchange_js.zig");
 const command_js = @import("network_command_js.zig");
 const fatal = @import("network_fatal.zig");
+
+const commands = @import("network_commands.zig");
+
+const application_cfg = @import("network_application_config.zig");
 
 pub const js_meta = js.class(.{});
 
@@ -38,9 +39,8 @@ pub fn initialize(self: *@This(), config: js.Value, callback: js.Value) !js.Valu
     try application_cfg.parse(config.val, &runtime.heavy.?.config, &runtime.heavy.?.application);
     runtime.logs.configure(runtime.heavy.?.application.log_level);
     try @import("network_owner.zig").prepareConfiguration(runtime);
-    try prepareApplicationStorage(runtime, &runtime.heavy.?.application);
+    try @import("network_storage.zig").initialize(runtime, &runtime.heavy.?.application);
     runtime.slot = runtime.heavy.?.config.slot;
-    runtime.diag.currentSlot = runtime.slot;
     runtime.wake = try @import("network_wake.zig").Wake.init();
     errdefer if (runtime.wake) |*wake| wake.deinit();
     try @import("network_owner.zig").initialize(runtime);
@@ -66,59 +66,6 @@ pub fn initialize(self: *@This(), config: js.Value, callback: js.Value) !js.Valu
     runtime.thread = try std.Thread.spawn(.{ .stack_size = std.Thread.SpawnConfig.default_stack_size }, @import("network_owner.zig").run, .{runtime});
     self.runtime = runtime;
     return .{ .val = holder };
-}
-
-fn prepareApplicationStorage(runtime: *Runtime, app: *const application_cfg.Config) !void {
-    const resolved = &runtime.heavy.?.resolved;
-    runtime.peer_capacity = resolved.core.peers.capacity;
-    runtime.max_peers = resolved.core.peers.max_peers;
-    runtime.diag.resolvedCapacities = .{
-        .peerCapacity = resolved.core.peers.capacity,
-        .targetPeers = resolved.core.peers.target_peers,
-        .maxPeers = resolved.core.peers.max_peers,
-        .minOutbound = resolved.core.peers.min_outbound,
-        .outboundReserve = resolved.core.peers.outbound_reserve,
-        .connectionCapacity = resolved.limits.connections_max,
-        .handshakingCapacity = resolved.limits.handshaking_max,
-        .dialingCapacity = resolved.limits.dialing_max,
-        .requestPeerCapacity = resolved.core.service.reqresp.peers,
-        .admissionIdentityCapacity = resolved.core.service.reqresp.admission.limits.identities,
-        .gossipConnectedCapacity = resolved.core.service.gossipsub.connected_capacity,
-        .gossipRetainedCapacity = resolved.core.service.gossipsub.retained_capacity,
-        .dialEngineCapacity = resolved.limits.dialing_max,
-    };
-    const limits = resolved.core.service.reqresp;
-    const request_capacity: usize = limits.outbound_max - limits.outbound_control_reserved;
-    const incoming_capacity: usize = limits.inbound_max - limits.inbound_control_reserved;
-    const gossip_options = &resolved.core.service.gossipsub;
-    const chain = &runtime.heavy.?.config.chain;
-    const gossip_plan = try n.gossip_processor.GossipProcessor.Plan.resolve(runtime.heavy.?.config.processor_limits, runtime.heavy.?.config.execution_limits, gossip_options.topic_policy.?, chain.forks[0..chain.boundary_count], gossip_options.random_seed.?);
-    const gossip_backing = gossip.Table.backingBytes(&gossip_plan);
-    const resident_topics = try n.gossipsub.topic_policy.validate(gossip_options.topic_policy.?);
-    const metrics_capacity = n.metrics.textCapacity(chain.topics[0..chain.boundary_count]);
-    const publication_capacity: usize = if (runtime.heavy.?.config.profile == .small) 32 else publications.capacity_max;
-    const bridge = publication_capacity * @sizeOf(publications.Cell) + 2 * metrics_capacity + gossip_backing + incoming_capacity * @sizeOf(incoming.Cell) + request_capacity * @sizeOf(requests.Cell) + @sizeOf(Runtime) + @sizeOf(r.Owner) - @sizeOf(n.NetworkCore) + r.Stores.bytesForTopics(runtime.peer_capacity, resident_topics) + @sizeOf(projection.Lane);
-    if (bridge > app.resources.bridgeBudgetBytes) return error.NetworkBridgeBudgetExceeded;
-    runtime.metrics = try @import("network_metrics.zig").Export.init(metrics_capacity);
-    runtime.requests = try requests.Table.init(r.allocator, request_capacity, &runtime.payload_budget);
-    runtime.payload_budget.limit = app.resources.bridgeBudgetBytes - bridge;
-    var response_max: usize = 0;
-    var request_max: usize = 0;
-    for (0..n.reqresp.Protocol.count) |i| {
-        const protocol: n.reqresp.Protocol = @enumFromInt(i);
-        if (protocol.isControl()) continue;
-        response_max = @max(response_max, protocol.info().response_max);
-        request_max = @max(request_max, protocol.info().request_max);
-    }
-    // Keep one serving response, two local RPCs, and two urgent publications independently admissible.
-    try runtime.payload_budget.protect(response_max + 2 * request_max * incoming_capacity, 2 * (request_max + 2 * response_max), 2 * gossip.payload_max);
-    runtime.publications = try publications.Table.init(r.allocator, publication_capacity, &runtime.payload_budget);
-    runtime.incoming = try incoming.Table.init(r.allocator, incoming_capacity, &runtime.payload_budget);
-    runtime.gossip = try gossip.Table.init(r.allocator, gossip_plan);
-    runtime.stores = try r.Stores.createForTopics(r.allocator, runtime.peer_capacity, resident_topics);
-    runtime.lane = try r.allocator.create(projection.Lane);
-    runtime.lane.?.* = .{};
-    runtime.diag.bridgeRequestedBytes = bridge;
 }
 
 pub fn deinit(self: *@This()) void {
@@ -168,8 +115,8 @@ pub fn exchange(self: *@This(), actions_value: js.Value, demand_value: js.Value)
     runtime.in_exchange = true;
     defer runtime.in_exchange = false;
     var actions: [exchange_mod.action_max]exchange_mod.Action = undefined;
-    const count = try exchange_mod.parseActions(actions_value.val, &actions);
-    const demand = try exchange_mod.Demand.parse(demand_value.val);
+    const count = try exchange_js.parseActions(actions_value.val, &actions);
+    const demand = try exchange_js.parseDemand(demand_value.val);
     var host: Exchange = .{ .env = js.env(), .runtime = runtime };
     const now = try gossip.monotonic();
     const result = exchange_mod.run(runtime, actions[0..count], &demand, now, &host) catch |err| {
@@ -181,7 +128,7 @@ pub fn exchange(self: *@This(), actions_value: js.Value, demand_value: js.Value)
 
 /// Throws what an exchange would for `action`, applying nothing, so a host's invalid input fails its own call.
 pub fn checkAction(_: *@This(), action: js.Value) !void {
-    _ = try exchange_mod.parseAction(action.val);
+    _ = try exchange_js.parseAction(action.val);
 }
 
 /// Stops the owner at once for a wrapper collected without close. JavaScript still drains every result.
@@ -224,41 +171,7 @@ pub fn fail(_: *@This(), site_value: js.Value, reason_value: js.Value) !void {
     fatal.terminate(js.env(), site, reason[0..try application_cfg.text(reason_value.val, &reason)]);
 }
 
-/// The N-API side of an exchange: the result's JS values.
-const Exchange = struct {
-    env: napi.Env,
-    runtime: *Runtime,
-
-    pub const Result = Value;
-
-    /// A fresh result, or null when there is nothing to deliver and a prepared one serves.
-    pub fn build(self: *Exchange, selection: *exchange_mod.Selection) !?Value {
-        if (!selection.delivers()) return null;
-        return try exchange_mod.build(self.env, self.runtime, selection);
-    }
-    pub fn finish(self: *Exchange, output: ?Value, outcome: exchange_mod.Outcome) !Value {
-        return exchange_mod.finish(self.env, self.runtime, output, outcome);
-    }
-    pub fn keepAlive(self: *Exchange) void {
-        self.runtime.notify.ref(self.env) catch {};
-    }
-    pub fn idle(self: *Exchange) void {
-        self.runtime.notify.unref(self.env) catch {};
-    }
-    /// An exception that clears means the bridge broke its contract. One that will not clear means JavaScript cannot
-    /// run, as does a pending-exception status with none pending, which N-API returns for cannot_run_js to this
-    /// module version.
-    pub fn classify(self: *Exchange, err: anyerror) exchange_mod.Failure {
-        if (err == error.Closing or err == error.CannotRunJS) return .stopped;
-        const pending = self.env.isExceptionPending() catch return .stopped;
-        if (!pending) return if (err == error.PendingException) .stopped else .contract;
-        _ = self.env.getAndClearLastException() catch return .stopped;
-        return .contract;
-    }
-    pub fn terminate(self: *Exchange, site: fatal.Site, err: anyerror) noreturn {
-        fatal.terminate(self.env, site, @errorName(err));
-    }
-};
+const Exchange = exchange_js.Host;
 
 fn owner(self: *@This()) !*Runtime {
     return self.runtime orelse error.NetworkClosed;
@@ -267,7 +180,7 @@ fn owner(self: *@This()) !*Runtime {
 pub fn getState(self: *@This()) !js.Value {
     const runtime = try self.owner();
     runtime.lock();
-    const state = runtime.diag.state;
+    const state = runtime.state;
     runtime.unlock();
     return .{ .val = try js.env().createStringUtf8(@tagName(state)) };
 }
@@ -330,95 +243,41 @@ pub fn setLogLevel(self: *@This(), level: js.Value) !void {
     try @import("network_logs.zig").configure(try self.owner(), level.val);
 }
 
-const commands = @import("network_commands.zig");
-const application_cfg = @import("network_application_config.zig");
-const projection = @import("network_peer_projection.zig");
-const n = @import("network");
-
-fn parseAddresses(value: Value, input: *commands.Input) !void {
-    input.address_count = @intCast(try cfg.array(value, 2));
-    if (input.address_count == 0) return error.InvalidNetworkConfig;
-    for (input.addresses[0..input.address_count], 0..) |*address, i| {
-        const parsed = try cfg.endpoint(try value.getElement(@intCast(i)));
-        address.* = switch (parsed) {
-            .ip4 => |ip| .{ .ip4 = .{ .octets = ip.bytes, .port = ip.port } },
-            .ip6 => |ip| .{ .ip6 = .{ .octets = ip.bytes, .port = ip.port } },
-        };
-        if (address.port() == 0) return error.InvalidNetworkConfig;
-    }
-}
-fn submit(self: *@This(), comptime command: commands.Command, args: []const Value) !js.Value {
-    const runtime = try self.owner();
-    const token = try runtime.reserveCommand(command);
-    errdefer runtime.abortCommand(token);
-    const operation = &runtime.table.cells[token.index];
-    const store = runtime.table.cells[token.index].store;
-    switch (command) {
-        .applyIntent => {
-            operation.input.slot = try cfg.bigint(args[1]);
-            try application_cfg.parseIntent(args[0], &runtime.stores.?.intents[store.?], runtime.max_peers);
-        },
-        .updateStatus => try cfg.parseStatus(args[0], &operation.input.status),
-        .getIdentity, .getPeers, .getDirectPeers, .getRememberedPeers => {},
-        .getGossipDiagnostics => operation.input.diagnostics_cursor = @intCast(try cfg.integer(args[0], 512)),
-        .reStatusPeers => {
-            operation.input.target_count = @intCast(try cfg.array(args[0], 256));
-            for (runtime.stores.?.targets[store.?][0..operation.input.target_count], 0..) |*peer, i| {
-                peer.* = try cfg.peerIdFrom(try args[0].getElement(@intCast(i)));
-                for (runtime.stores.?.targets[store.?][0..i]) |*prior| if (peer.eql(prior)) return error.InvalidNetworkConfig;
-            }
-        },
-        else => {
-            operation.input.peer = try cfg.peerIdFrom(args[0]);
-            if (command == .connect or command == .addDirectPeer) try parseAddresses(args[1], &operation.input);
-            if (command == .connect) {
-                operation.input.timeout_ms = try cfg.bigint(args[2]);
-                if (operation.input.timeout_ms == 0 or operation.input.timeout_ms > 60_000) return error.InvalidNetworkInteger;
-            }
-        },
-    }
-    const env = js.env();
-    // Prepared before admission commits, so every admitted command has a handle to complete.
-    const handle = try @import("network_js.zig").handle(env, token.index, token.generation);
-    try runtime.queueCommand(token);
-    runtime.notify.ref(env) catch {};
-    return .{ .val = handle };
-}
 pub fn applyIntent(self: *@This(), intent: js.Value, slot: js.Value) !js.Value {
-    return self.submit(.applyIntent, &.{ intent.val, slot.val });
+    return .{ .val = try command_js.submit(js.env(), try self.owner(), .applyIntent, &.{ intent.val, slot.val }) };
 }
 pub fn updateStatus(self: *@This(), status: js.Value) !js.Value {
-    return self.submit(.updateStatus, &.{status.val});
+    return .{ .val = try command_js.submit(js.env(), try self.owner(), .updateStatus, &.{status.val}) };
 }
 pub fn getIdentity(self: *@This()) !js.Value {
-    return self.submit(.getIdentity, &.{});
+    return .{ .val = try command_js.submit(js.env(), try self.owner(), .getIdentity, &.{}) };
 }
 pub fn getPeers(self: *@This()) !js.Value {
-    return self.submit(.getPeers, &.{});
+    return .{ .val = try command_js.submit(js.env(), try self.owner(), .getPeers, &.{}) };
 }
 pub fn getGossipDiagnostics(self: *@This(), cursor: js.Value) !js.Value {
-    return self.submit(.getGossipDiagnostics, &.{cursor.val});
+    return .{ .val = try command_js.submit(js.env(), try self.owner(), .getGossipDiagnostics, &.{cursor.val}) };
 }
 pub fn connect(self: *@This(), peer: js.Value, addresses: js.Value, timeout: js.Value) !js.Value {
-    return self.submit(.connect, &.{ peer.val, addresses.val, timeout.val });
+    return .{ .val = try command_js.submit(js.env(), try self.owner(), .connect, &.{ peer.val, addresses.val, timeout.val }) };
 }
 pub fn disconnect(self: *@This(), peer: js.Value) !js.Value {
-    return self.submit(.disconnect, &.{peer.val});
+    return .{ .val = try command_js.submit(js.env(), try self.owner(), .disconnect, &.{peer.val}) };
 }
 pub fn reStatusPeers(self: *@This(), peers: js.Value) !js.Value {
-    return self.submit(.reStatusPeers, &.{peers.val});
+    return .{ .val = try command_js.submit(js.env(), try self.owner(), .reStatusPeers, &.{peers.val}) };
 }
 pub fn addDirectPeer(self: *@This(), peer: js.Value, addresses: js.Value) !js.Value {
-    return self.submit(.addDirectPeer, &.{ peer.val, addresses.val });
+    return .{ .val = try command_js.submit(js.env(), try self.owner(), .addDirectPeer, &.{ peer.val, addresses.val }) };
 }
 pub fn removeDirectPeer(self: *@This(), peer: js.Value) !js.Value {
-    return self.submit(.removeDirectPeer, &.{peer.val});
+    return .{ .val = try command_js.submit(js.env(), try self.owner(), .removeDirectPeer, &.{peer.val}) };
 }
 pub fn getDirectPeers(self: *@This()) !js.Value {
-    return self.submit(.getDirectPeers, &.{});
+    return .{ .val = try command_js.submit(js.env(), try self.owner(), .getDirectPeers, &.{}) };
 }
 pub fn getRememberedPeers(self: *@This()) !js.Value {
-    return self.submit(.getRememberedPeers, &.{});
+    return .{ .val = try command_js.submit(js.env(), try self.owner(), .getRememberedPeers, &.{}) };
 }
 pub fn requestStart(self: *@This(), peer: js.Value, protocol: js.Value, data: js.Value, options: js.Value) !js.Value {
     const call = r.call(self.runtime, .request_start);
@@ -467,12 +326,12 @@ test "a notification JavaScript cannot run stops locally, and exchange failures 
     const shim = @import("network_runtime_test.zig");
     shim.undefined_status = napi.c.napi_cannot_run_js;
     defer shim.undefined_status = napi.c.napi_ok;
-    var notified: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 }, .notify_live = false };
+    var notified: Runtime = .{ .env = undefined, .notify_live = false };
     onNotify(undefined, undefined, &notified, undefined);
     try std.testing.expect(notified.disposed and notified.stop and !notified.env_alive);
     // An exception that clears is the bridge's contract failure; a pending-exception status with none pending is how
     // N-API reports JavaScript that cannot run.
-    var classified: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 }, .notify_live = false };
+    var classified: Runtime = .{ .env = undefined, .notify_live = false };
     var host: Exchange = .{ .env = undefined, .runtime = &classified };
     for ([_]struct { anyerror, bool, exchange_mod.Failure }{
         .{ error.Closing, true, .stopped },

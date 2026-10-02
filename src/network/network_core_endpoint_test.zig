@@ -1,7 +1,7 @@
 const std = @import("std");
 const d = @import("discv5");
 const core_test = @import("network_core_test_support.zig");
-const runtime = @import("network_core.zig");
+const NetworkCore = @import("network_core.zig").NetworkCore;
 const keys = @import("wire/keys.zig");
 
 const Peers = struct {
@@ -25,7 +25,7 @@ const Peers = struct {
         for (self.nodes) |*node| node.deinit(std.testing.allocator, std.testing.io);
         std.testing.allocator.free(self.nodes);
     }
-    fn observe(self: *Peers, node: *runtime.NetworkCore, peers: usize, id: u8) !void {
+    fn observe(self: *Peers, node: *NetworkCore, peers: usize, id: u8) !void {
         const owner = node.discovery.?;
         for (self.nodes[0..peers]) |*remote| {
             const record = remote.engine.localRecord();
@@ -61,7 +61,7 @@ test "address-less discovery learns from ten authenticated prefixes and updates 
     opts.resolved.core.peers.min_outbound = 0;
     opts.startup.bind = .{ .ip4 = .{ .bytes = @splat(0), .port = 0 } };
     opts.startup.discovery = .{ .bind = opts.startup.bind };
-    var node: runtime.NetworkCore = undefined;
+    var node: NetworkCore = undefined;
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     try std.testing.expect(node.localRecord().?.ip4 == null);
@@ -96,7 +96,7 @@ test "failed learned endpoint publication preserves the previous ENR and Identif
     opts.resolved.core.peers.min_outbound = 0;
     opts.startup.bind = .{ .ip4 = .{ .bytes = @splat(0), .port = 0 } };
     opts.startup.discovery = .{ .bind = opts.startup.bind, .sequence = std.math.maxInt(u64) };
-    var node: runtime.NetworkCore = undefined;
+    var node: NetworkCore = undefined;
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const before = node.localRecord().?.*;
@@ -128,7 +128,7 @@ test "core constructs complete dual-family Identify with existing address preced
             opts.startup.bind = .{ .dual = .{ .ip4 = .{ .bytes = @splat(0), .port = 0 }, .ip6 = .{ .bytes = @splat(0), .port = 0 } } };
             opts.startup.discovery = .{ .bind = opts.startup.bind };
         }
-        var node: runtime.NetworkCore = undefined;
+        var node: NetworkCore = undefined;
         try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
         defer node.deinit(std.testing.io);
         const local = node.service.identify.local;

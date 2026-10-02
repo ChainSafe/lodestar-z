@@ -1,10 +1,10 @@
 const std = @import("std");
-const network = @import("../network_core.zig");
+const NetworkCore = @import("../network_core.zig").NetworkCore;
 const Population = @import("../peers/population.zig").Population;
 
 /// Borrowed only on the network owner while it is not advancing protocol state.
 pub const Context = struct {
-    owner: *const network.NetworkCore,
+    owner: *const NetworkCore,
     now: @import("../types.zig").Now,
     running: bool,
     expired_executing: usize = 0,
@@ -15,7 +15,7 @@ pub const Context = struct {
     /// each socket's 32-bit kernel count, so `init` takes the owner mutably.
     socket_drops: [2][2]?u64 = @splat(@splat(null)),
 
-    pub fn init(owner: *network.NetworkCore, now: @import("../types.zig").Now, running: bool) Context {
+    pub fn init(owner: *NetworkCore, now: @import("../types.zig").Now, running: bool) Context {
         var result: Context = .{ .owner = owner, .now = now, .running = running };
         result.socket_drops[0] = owner.transport.sockets.drops();
         if (owner.discovery) |discovery| result.socket_drops[1] = discovery.transport.sockets.drops();

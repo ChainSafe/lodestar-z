@@ -1,4 +1,4 @@
-//! Command results for JavaScript: a completed command's record, whose result copies the command's typed store before
+//! Command submission and results for JavaScript: a completed command's record, whose result copies the command's typed store before
 //! the exchange that delivers it retires the cell.
 const napi = @import("zapi:zapi").napi;
 const Value = napi.Value;
@@ -7,6 +7,8 @@ const commands = @import("network_commands.zig");
 const projection = @import("network_peer_projection.zig");
 const js = @import("network_js.zig");
 const Runtime = r.Runtime;
+const cfg = @import("network_config.zig");
+const application_cfg = @import("network_application_config.zig");
 
 /// A completed command's record: the result its promise resolves with, or the error it rejects with.
 pub fn completion(env: napi.Env, runtime: *Runtime, token: commands.Token) !Value {
@@ -88,4 +90,52 @@ pub fn identity(env: napi.Env, value: *const r.Identity) !Value {
     try object.setNamedProperty("localMultiaddr", try js.bytes(env, value.multiaddr[0..value.multiaddr_len]));
     try object.setNamedProperty("localEnr", if (value.enr_len == 0) try env.getNull() else try js.bytes(env, value.enr[0..value.enr_len]));
     return object;
+}
+
+fn parseAddresses(value: Value, input: *commands.Input) !void {
+    input.address_count = @intCast(try cfg.array(value, 2));
+    if (input.address_count == 0) return error.InvalidNetworkConfig;
+    for (input.addresses[0..input.address_count], 0..) |*address, i| {
+        const parsed = try cfg.endpoint(try value.getElement(@intCast(i)));
+        address.* = switch (parsed) {
+            .ip4 => |ip| .{ .ip4 = .{ .octets = ip.bytes, .port = ip.port } },
+            .ip6 => |ip| .{ .ip6 = .{ .octets = ip.bytes, .port = ip.port } },
+        };
+        if (address.port() == 0) return error.InvalidNetworkConfig;
+    }
+}
+pub fn submit(env: napi.Env, runtime: *Runtime, comptime command: commands.Command, args: []const Value) !Value {
+    const token = try runtime.reserveCommand(command);
+    errdefer runtime.abortCommand(token);
+    const operation = &runtime.table.cells[token.index];
+    const store = runtime.table.cells[token.index].store;
+    switch (command) {
+        .applyIntent => {
+            operation.input.slot = try cfg.bigint(args[1]);
+            try application_cfg.parseIntent(args[0], &runtime.stores.?.intents[store.?], runtime.max_peers);
+        },
+        .updateStatus => try cfg.parseStatus(args[0], &operation.input.status),
+        .getIdentity, .getPeers, .getDirectPeers, .getRememberedPeers => {},
+        .getGossipDiagnostics => operation.input.diagnostics_cursor = @intCast(try cfg.integer(args[0], 512)),
+        .reStatusPeers => {
+            operation.input.target_count = @intCast(try cfg.array(args[0], 256));
+            for (runtime.stores.?.targets[store.?][0..operation.input.target_count], 0..) |*peer, i| {
+                peer.* = try cfg.peerIdFrom(try args[0].getElement(@intCast(i)));
+                for (runtime.stores.?.targets[store.?][0..i]) |*prior| if (peer.eql(prior)) return error.InvalidNetworkConfig;
+            }
+        },
+        else => {
+            operation.input.peer = try cfg.peerIdFrom(args[0]);
+            if (command == .connect or command == .addDirectPeer) try parseAddresses(args[1], &operation.input);
+            if (command == .connect) {
+                operation.input.timeout_ms = try cfg.bigint(args[2]);
+                if (operation.input.timeout_ms == 0 or operation.input.timeout_ms > 60_000) return error.InvalidNetworkInteger;
+            }
+        },
+    }
+    // Prepared before admission commits, so every admitted command has a handle to complete.
+    const handle = try @import("network_js.zig").handle(env, token.index, token.generation);
+    try runtime.queueCommand(token);
+    runtime.notify.ref(env) catch {};
+    return handle;
 }

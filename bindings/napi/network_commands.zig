@@ -1,14 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-test "application admission reserves 32 commands and at most 16 connects" {
-    var table: Table = .{};
-    for (0..16) |_| _ = try table.reserve(.connect);
-    try std.testing.expectError(error.NetworkCommandFull, table.reserve(.connect));
-    for (0..16) |_| _ = try table.reserve(.getIdentity);
-    try std.testing.expectError(error.NetworkCommandFull, table.reserve(.getIdentity));
-}
-
 pub const capacity = 32;
 pub const connect_max = 16;
 pub const turn_max = 4;
@@ -125,25 +117,6 @@ pub const Table = struct {
     }
 };
 
-test "typed reservations unwind and identities never wrap" {
-    var table: Table = .{};
-    const first = try table.reserve(.applyIntent);
-    _ = try table.reserve(.applyIntent);
-    try std.testing.expectError(error.NetworkCommandFull, table.reserve(.applyIntent));
-    try std.testing.expectEqual(@as(u8, 2), table.occupied);
-    table.retire(first);
-    const next = try table.reserve(.applyIntent);
-    try std.testing.expectEqual(first.generation + 1, next.generation);
-    table.retire(next);
-    table.cells[0].generation = std.math.maxInt(u64);
-    try std.testing.expectError(error.NetworkSequenceExhausted, table.reserve(.getIdentity));
-    table.sequence = std.math.maxInt(u64);
-    try std.testing.expectError(error.NetworkSequenceExhausted, table.advance());
-    table.admission_sequence = std.math.maxInt(u64) - 2;
-    try std.testing.expectEqual(std.math.maxInt(u64) - 1, try table.nextOrder());
-    try std.testing.expectError(error.NetworkSequenceExhausted, table.nextOrder());
-}
-
 const n = @import("network");
 pub const Command = enum { applyIntent, updateStatus, getIdentity, getPeers, getGossipDiagnostics, connect, disconnect, reStatusPeers, addDirectPeer, removeDirectPeer, getDirectPeers, getRememberedPeers };
 fn storageKind(command: Command) Kind {
@@ -196,8 +169,7 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
             operation.boolean = try core.applyIntent(intent, timestamp);
             self.lock();
             self.slot = input.slot;
-            self.diag.currentSlot = input.slot;
-            if (!self.stop) self.diag.state = .running;
+            if (!self.stop) self.state = .running;
             self.unlock();
         },
         .updateStatus => {
@@ -276,4 +248,8 @@ pub fn connectDeadline(table: *const Table) ?u64 {
         if (cell.state == .waiting) deadline = @min(deadline orelse cell.deadline, cell.deadline);
     }
     return deadline;
+}
+
+test {
+    _ = @import("network_commands_test.zig");
 }

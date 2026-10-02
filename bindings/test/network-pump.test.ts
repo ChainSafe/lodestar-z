@@ -9,17 +9,8 @@ import type {
   NativeTopicKind,
   Verdict,
 } from "../src/network.js";
-import {
-  ACTION_MAX,
-  BUDGET_MS,
-  BURST_NAME,
-  LOG_ERRORS_NAME,
-  LOG_MS,
-  LOG_RECORDS,
-  NativePump,
-  Turns,
-  closeResult,
-} from "../src/network-pump.js";
+import {LOG_ERRORS_NAME, LOG_MS, LOG_RECORDS} from "../src/network-log-delivery.js";
+import {ACTION_MAX, BUDGET_MS, BURST_NAME, NativePump, closeResult} from "../src/network-pump.js";
 import type {
   NativeAction,
   NativeExchange,
@@ -31,6 +22,7 @@ import type {
   NativeIncomingRequest,
   NativeLogBatch,
 } from "../src/network-runtime.js";
+import {Turns} from "../src/network-turns.js";
 import {childTestTimeout, spawnChild} from "./utils/network.js";
 
 const MIB = 1024 * 1024;

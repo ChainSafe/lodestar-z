@@ -227,7 +227,7 @@ const Schedule = struct {
 /// The newest chain boundary, so topics carry the current fork's message sizes.
 const Chain = struct {
     plan: network.chain.Plan,
-    update: network.network_core.LocalUpdate,
+    update: network.NetworkCore.LocalUpdate,
     boundary: usize,
     slot: u64,
     attestation_bytes: usize,
@@ -267,7 +267,7 @@ const Chain = struct {
                 boundary.lengths[@intFromEnum(kind)] = @max(boundary.lengths[@intFromEnum(kind)], @as(u8, @intCast(subnet / 8 + 1)));
             }
         }
-        const intent: network.network_core.LocalIntent = .{
+        const intent: network.NetworkCore.LocalIntent = .{
             .update = .{ .local = node.localState(), .schedule = node.schedule, .endpoints = node.advertisementEndpoints(), .capabilities = node.service.router.capabilities() },
             .demand = node.peer_manager.demand,
             .subscriptions = &.{boundary},
@@ -457,7 +457,7 @@ const Host = struct {
         return true;
     }
 
-    fn apply(context: *anyopaque, core: *network.NetworkCore, tick: Now) network.network_core.HostProgress {
+    fn apply(context: *anyopaque, core: *network.NetworkCore, tick: Now) network.NetworkCore.HostProgress {
         const self: *Host = @ptrCast(@alignCast(context));
         var count: usize = 0;
         while (count < self.batch and self.len > 0 and self.ring[self.head].due_ms <= tick.mono_ms) : (count += 1) {
@@ -528,7 +528,7 @@ const Spoke = struct {
         const schedule = shared.schedule.of(self.index);
         var peer_events: [16]t.Event = undefined;
         var application: [4]network.reqresp.ReqResp.Event = undefined;
-        const outputs: network.network_core.Outputs = .{ .peers = &peer_events, .application = &application };
+        const outputs: network.NetworkCore.Outputs = .{ .peers = &peer_events, .application = &application };
         var cursor: usize = 0;
         var signalled = false;
         var next_tick: u64 = 0;
@@ -755,7 +755,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
 
     var peer_events: [64]t.Event = undefined;
     var application: [16]network.reqresp.ReqResp.Event = undefined;
-    const outputs: network.network_core.Outputs = .{ .peers = &peer_events, .application = &application };
+    const outputs: network.NetworkCore.Outputs = .{ .peers = &peer_events, .application = &application };
     const setup_start = try network.transport.currentTime(io);
     for (0..1 << 20) |_| {
         const now = try network.transport.currentTime(io);

@@ -1,5 +1,5 @@
 const std = @import("std");
-const runtime = @import("network_core.zig");
+const NetworkCore = @import("network_core.zig").NetworkCore;
 const keys = @import("wire/keys.zig");
 const options = @import("network_core_test_support.zig").networkOptions;
 const Now = @import("types.zig").Now;
@@ -42,11 +42,11 @@ const TestHost = struct {
         std.debug.assert(std.c.write(self.pipe[1], "w", 1) == 1);
     }
 
-    fn seam(self: *TestHost, deadline_ms: ?u64) runtime.Host {
+    fn seam(self: *TestHost, deadline_ms: ?u64) NetworkCore.Host {
         return .{ .context = self, .apply = apply, .deadline_ms = deadline_ms };
     }
 
-    fn apply(context: *anyopaque, core: *runtime.NetworkCore, now: Now) runtime.HostProgress {
+    fn apply(context: *anyopaque, core: *NetworkCore, now: Now) NetworkCore.HostProgress {
         const self: *TestHost = @ptrCast(@alignCast(context));
         self.applies += 1;
         var buffer: [64]u8 = undefined;
@@ -76,15 +76,15 @@ fn delayedSignal(host: *const TestHost, delay_ms: i64, written_ns: *std.atomic.V
 }
 
 const Pair = struct {
-    a: runtime.NetworkCore = undefined,
-    b: runtime.NetworkCore = undefined,
+    a: NetworkCore = undefined,
+    b: NetworkCore = undefined,
     a_inbox: Inbox = .{},
     b_inbox: Inbox = .{},
 
     fn pump(self: *Pair) !void {
         self.a_inbox.clear();
         self.b_inbox.clear();
-        for ([_]*runtime.NetworkCore{ &self.a, &self.b }) |node| {
+        for ([_]*NetworkCore{ &self.a, &self.b }) |node| {
             const now = try currentTime();
             const result = node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| 1));
             if (result.failure) |err| return err;
@@ -92,7 +92,7 @@ const Pair = struct {
     }
 };
 
-fn intent(node: *const runtime.NetworkCore, subscriptions: []const @import("gossipsub/local_intent.zig").Boundary) runtime.LocalIntent {
+fn intent(node: *const NetworkCore, subscriptions: []const @import("gossipsub/local_intent.zig").Boundary) NetworkCore.LocalIntent {
     return .{
         .update = .{ .local = node.localState(), .schedule = node.schedule, .endpoints = node.advertisementEndpoints(), .capabilities = node.service.router.capabilities() },
         .demand = node.peer_manager.demand,
@@ -101,7 +101,7 @@ fn intent(node: *const runtime.NetworkCore, subscriptions: []const @import("goss
 }
 
 test "a host publication submitted while the owner waits leaves in the flush of the turn that saw the wake" {
-    if (!runtime.wait.supported) return error.SkipZigTest;
+    if (!NetworkCore.wait.supported) return error.SkipZigTest;
     const topic = "/eth2/00000000/beacon_block/ssz_snappy";
     const key_a = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{61}));
     const key_b = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{62}));
@@ -146,7 +146,7 @@ test "a host publication submitted while the owner waits leaves in the flush of 
     host.publication = topic;
     var written_ns = std.atomic.Value(u64).init(0);
     const writer = try std.Thread.spawn(.{}, delayedSignal, .{ &host, 30, &written_ns });
-    var woke: ?runtime.Result = null;
+    var woke: ?NetworkCore.Result = null;
     var returned_ns: u64 = 0;
     var turns: usize = 0;
     // Each turn waits for its earliest deadline or the wake; the host deadline lies beyond both.
@@ -189,10 +189,10 @@ test "a host publication submitted while the owner waits leaves in the flush of 
 }
 
 test "a host applies only on its wake, a carried-over cap or its deadline" {
-    if (!runtime.wait.supported) return error.SkipZigTest;
+    if (!NetworkCore.wait.supported) return error.SkipZigTest;
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{63}));
     const opts = options(&key);
-    var node: runtime.NetworkCore = undefined;
+    var node: NetworkCore = undefined;
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     var host: TestHost = .{};
@@ -261,7 +261,7 @@ const Visits = struct {
     control: u64,
     dial: u64,
 
-    fn capture(node: *const runtime.NetworkCore) Visits {
+    fn capture(node: *const NetworkCore) Visits {
         const engine = node.transport.engine.visits;
         return .{
             .timer = engine.timer,
@@ -276,7 +276,7 @@ const Visits = struct {
     }
 };
 
-fn datagramsCounted(node: *const runtime.NetworkCore) u64 {
+fn datagramsCounted(node: *const NetworkCore) u64 {
     const coordinator = node.discovery.?;
     var total: u64 = 0;
     for (coordinator.datagram_rejections) |count| total += count;
@@ -284,11 +284,11 @@ fn datagramsCounted(node: *const runtime.NetworkCore) u64 {
 }
 
 test "a junk flood on the discovery socket costs discovery-only turns in batches" {
-    if (!runtime.wait.supported) return error.SkipZigTest;
+    if (!NetworkCore.wait.supported) return error.SkipZigTest;
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{64}));
     var opts = options(&key);
     opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
-    var node: runtime.NetworkCore = undefined;
+    var node: NetworkCore = undefined;
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     for (0..4) |_| {
@@ -303,7 +303,7 @@ test "a junk flood on the discovery socket costs discovery-only turns in batches
     for (0..40) |_| try sender.send(std.testing.io, &target, "junk datagram");
     const visits = Visits.capture(&node);
     const counted = datagramsCounted(&node);
-    for ([_]u16{ runtime.discovery_batch_max, 40 - runtime.discovery_batch_max }) |expected| {
+    for ([_]u16{ NetworkCore.discovery_batch_max, 40 - NetworkCore.discovery_batch_max }) |expected| {
         const before = datagramsCounted(&node);
         const now = try currentTime();
         const result = node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| 5_000));
@@ -317,11 +317,11 @@ test "a junk flood on the discovery socket costs discovery-only turns in batches
 }
 
 test "discovery readiness with other work due runs a full turn" {
-    if (!runtime.wait.supported) return error.SkipZigTest;
+    if (!NetworkCore.wait.supported) return error.SkipZigTest;
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{65}));
     var opts = options(&key);
     opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
-    var node: runtime.NetworkCore = undefined;
+    var node: NetworkCore = undefined;
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     for (0..4) |_| {
@@ -342,7 +342,7 @@ test "discovery readiness with other work due runs a full turn" {
     try std.testing.expect(result.transport.datagrams_sent > 0);
 }
 
-fn initOwner(node: *runtime.NetworkCore) !void {
+fn initOwner(node: *NetworkCore) !void {
     const key = try @import("wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{94}));
     const resolved = try @import("configuration.zig").resolve(.{ .profile = .beacon_node, .seed = 7, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }}, .admission_policy = @import("reqresp/policy_fixture.zig").config() });
     try node.init(std.testing.allocator, std.testing.io, &resolved, .{
@@ -354,7 +354,7 @@ fn initOwner(node: *runtime.NetworkCore) !void {
 }
 
 test "owner zero-wait turns count under every due source until the owner settles" {
-    const node = try std.testing.allocator.create(runtime.NetworkCore);
+    const node = try std.testing.allocator.create(NetworkCore);
     defer std.testing.allocator.destroy(node);
     try initOwner(node);
     defer node.deinit(std.testing.io);
@@ -369,7 +369,7 @@ test "owner zero-wait turns count under every due source until the owner settles
 }
 
 test "owner zero-wait turn counts once under each of its two due sources" {
-    const node = try std.testing.allocator.create(runtime.NetworkCore);
+    const node = try std.testing.allocator.create(NetworkCore);
     defer std.testing.allocator.destroy(node);
     try initOwner(node);
     defer node.deinit(std.testing.io);
@@ -389,32 +389,12 @@ test "owner zero-wait turn counts once under each of its two due sources" {
     }
 }
 
-test "owner applies host work for a due host deadline and again for work the apply left" {
-    const node = try std.testing.allocator.create(runtime.NetworkCore);
-    defer std.testing.allocator.destroy(node);
-    try initOwner(node);
-    defer node.deinit(std.testing.io);
-    const Host = struct {
-        applies: usize = 0,
-        fn apply(context: *anyopaque, _: *runtime.NetworkCore, _: @import("types.zig").Now) runtime.HostProgress {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            self.applies += 1;
-            return .{ .more = self.applies == 1 };
-        }
-    };
-    var host: Host = .{};
-    const now = try @import("transport.zig").currentTime(std.testing.io);
-    try std.testing.expect(node.step(std.testing.io, now, .{}, .{ .context = &host, .apply = Host.apply, .deadline_ms = now.mono_ms }).failure == null);
-    try std.testing.expect(node.step(std.testing.io, now, .{}, .{ .context = &host, .apply = Host.apply }).failure == null);
-    try std.testing.expectEqual(@as(usize, 2), host.applies);
-}
-
 test "a continuous QUIC flood on both families shares each receive quota and leaves the host progressing" {
-    if (!runtime.wait.supported) return error.SkipZigTest;
+    if (!NetworkCore.wait.supported) return error.SkipZigTest;
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{66}));
     var opts = options(&key);
     opts.startup.bind = .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } };
-    var node: runtime.NetworkCore = undefined;
+    var node: NetworkCore = undefined;
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     var host: TestHost = .{};
@@ -452,4 +432,28 @@ test "a continuous QUIC flood on both families shares each receive quota and lea
         try std.testing.expectEqual(expected.received, result.transport.datagrams_dropped);
         try std.testing.expectEqual(@as(u32, @intCast(@min(index + 1, 3))), host.applies);
     }
+}
+
+test "owner applies host work for a due host deadline and again for work the apply left" {
+    const support = @import("network_core_test_support.zig");
+    const setup = try std.testing.allocator.create(support.Setup);
+    defer std.testing.allocator.destroy(setup);
+    setup.* = .{};
+    try setup.initOwners(&.{});
+    defer setup.deinit();
+    const node = &setup.client;
+    const Host = struct {
+        applies: usize = 0,
+        fn apply(context: *anyopaque, _: *NetworkCore, _: @import("types.zig").Now) NetworkCore.HostProgress {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.applies += 1;
+            return .{ .more = self.applies == 1 };
+        }
+    };
+    var host: Host = .{};
+    setup.pair.advance(50);
+    const now = setup.pair.now;
+    try std.testing.expect(node.step(setup.pair.io(), now, .{}, .{ .context = &host, .apply = Host.apply, .deadline_ms = now.mono_ms }).failure == null);
+    try std.testing.expect(node.step(setup.pair.io(), now, .{}, .{ .context = &host, .apply = Host.apply }).failure == null);
+    try std.testing.expectEqual(@as(usize, 2), host.applies);
 }

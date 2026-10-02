@@ -82,13 +82,8 @@ pub fn initialize(self: *Runtime) !void {
     self.heavy.?.core_live = true;
     try self.heavy.?.core.setHostWake(self.wake.?.read_fd);
 
-    self.diag.nativeRequestedBytes = @sizeOf(n.NetworkCore) + self.heavy.?.core.reservations.bytes;
-    const plan = self.heavy.?.core.transport.engine.memoryPlan();
-    self.diag.quicReceiveWindowBytes = plan.receive_window_bytes;
-    self.diag.quicConnectionWindowBytes = plan.connection_window_bytes;
-    self.diag.quicStreamWindowBytes = plan.stream_window_bytes;
     try publishMetrics(self, now(io));
-    std.log.scoped(.network_runtime).info("owner_initialized target_peers={d} max_peers={d}", .{ self.diag.resolvedCapacities.targetPeers, self.diag.resolvedCapacities.maxPeers });
+    std.log.scoped(.network_runtime).info("owner_initialized target_peers={d} max_peers={d}", .{ self.heavy.?.resolved.core.peers.target_peers, self.heavy.?.resolved.core.peers.max_peers });
 }
 pub fn run(self: *Runtime) void {
     defer self.release();
@@ -115,7 +110,7 @@ fn serve(self: *Runtime) !void {
 /// One owner turn: the stop check, then one core step that applies host work after its readiness
 /// poll, then the turn's application events, connect completions and publication. Returns null
 /// once the owner stops.
-fn turn(self: *Runtime, io: std.Io, host: *Host, ingress: *const gossip_mod.Ingress) !?n.network_core.Result {
+fn turn(self: *Runtime, io: std.Io, host: *Host, ingress: *const gossip_mod.Ingress) !?n.NetworkCore.Result {
     self.lock();
     const stop = self.stop;
     const graceful = self.graceful and self.reason == .requested;
@@ -171,7 +166,7 @@ const Host = struct {
     io: std.Io,
     failure: ?anyerror = null,
 
-    fn apply(context: *anyopaque, core: *n.NetworkCore, tick: n.Now) n.network_core.HostProgress {
+    fn apply(context: *anyopaque, core: *n.NetworkCore, tick: n.Now) n.NetworkCore.HostProgress {
         const self: *Host = @ptrCast(@alignCast(context));
         std.debug.assert(core == &self.runtime.heavy.?.core);
         if (self.failure != null) return .{};
@@ -185,7 +180,7 @@ const Host = struct {
 /// Drains the wake pipe before reading any queue, so a submission that lands after the drain
 /// wakes the next poll. Then applies reports, commands, publications and requests in admission
 /// order, gossip verdicts and processor maintenance, and request and response flags.
-fn applyWork(self: *Runtime, io: std.Io, tick: n.Now) !n.network_core.HostProgress {
+fn applyWork(self: *Runtime, io: std.Io, tick: n.Now) !n.NetworkCore.HostProgress {
     self.lock();
     self.wake.?.drain() catch self.failLocked(error.NetworkWakeFailed);
     self.host_due = false;
@@ -290,7 +285,7 @@ fn executeWork(self: *Runtime, io: std.Io) !bool {
     }
     return true;
 }
-fn publishTurn(self: *Runtime, result: *const n.network_core.Result, timestamp: n.Now, sequence: u64) void {
+fn publishTurn(self: *Runtime, result: *const n.NetworkCore.Result, timestamp: n.Now, sequence: u64) void {
     const counts = self.heavy.?.core.peerCounts();
     if (timestamp.mono_ms >= self.metrics_due_ms) {
         publishMetrics(self, now(self.heavy.?.threaded.io())) catch |err| {
@@ -310,10 +305,10 @@ fn publishTurn(self: *Runtime, result: *const n.network_core.Result, timestamp: 
     self.recomputeLocked(.peers);
     if (result.failure) |err| {
         std.log.scoped(.network_runtime).debug("owner_turn_failed reason={s} fatal={any}", .{ @errorName(err), result.readiness.failure != null });
-        self.diag.operationalFailures +|= 1;
+        self.operational_failures +|= 1;
         if (result.readiness.failure != null) self.failLocked(err);
     }
-    self.diag.ownerTurns +|= 1;
+    self.owner_turns +|= 1;
     self.unlock();
 }
 pub fn now(io: std.Io) n.Now {
@@ -339,9 +334,9 @@ fn publishMetrics(self: *Runtime, timestamp: n.Now) n.metrics.registry.Error!voi
 }
 
 test "a command queued while the owner waits executes in the turn whose poll saw the wake" {
-    if (!n.network_core.wait.supported) return error.SkipZigTest;
+    if (!n.NetworkCore.wait.supported) return error.SkipZigTest;
     const testing = std.testing.allocator;
-    var runtime: Runtime = .{ .env = undefined, .diag = .{ .currentSlot = 0 }, .notify_live = false, .env_alive = false };
+    var runtime: Runtime = .{ .env = undefined, .notify_live = false, .env_alive = false };
     const owner = try testing.create(Owner);
     defer testing.destroy(owner);
     owner.* = .{};
