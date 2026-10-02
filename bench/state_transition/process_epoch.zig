@@ -432,7 +432,6 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
             BenchState.cloned_cached_state.state.commit() catch unreachable;
             var cache_val = EpochTransitionCache.init(
                 allocator,
-                io,
                 BenchState.cloned_cached_state.config,
                 BenchState.cloned_cached_state.epoch_cache,
                 BenchState.cloned_cached_state.state,
@@ -682,7 +681,7 @@ fn runBenchmark(
     state_bytes: []const u8,
     chain_config: config.ChainConfig,
 ) !void {
-    defer state_transition.deinitReusedEpochTransitionCache(io);
+    defer state_transition.deinitReusedEpochTransitionCache();
 
     var beacon_state: ?*AnyBeaconState = try loadState(fork, allocator, pool, state_bytes);
     defer if (beacon_state) |state| {
@@ -726,7 +725,6 @@ fn runBenchmark(
 
     var epoch_transition_cache = try EpochTransitionCache.init(
         allocator,
-        io,
         cached_state.config,
         cached_state.epoch_cache,
         cached_state.state,

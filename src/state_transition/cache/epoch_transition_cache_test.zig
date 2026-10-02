@@ -90,7 +90,6 @@ test "EpochTransitionCache.beforeProcessEpoch" {
 
         var epoch_transition_cache = try EpochTransitionCache.init(
             allocator,
-            std.testing.io,
             test_state.cached_state.config,
             test_state.cached_state.epoch_cache,
             test_state.cached_state.state,
@@ -98,7 +97,7 @@ test "EpochTransitionCache.beforeProcessEpoch" {
         defer epoch_transition_cache.deinit();
     }
 
-    deinitReusedEpochTransitionCache(std.testing.io);
+    deinitReusedEpochTransitionCache();
 }
 
 test "memory_safety: fixed compounding flag tail does not allocate for sequential callers" {
@@ -114,7 +113,7 @@ test "memory_safety: fixed compounding flag tail does not allocate for sequentia
         allocator.destroy(test_state.cached_state);
         test_state.pubkey_cache.deinit();
         allocator.destroy(test_state.pubkey_cache);
-        deinitReusedEpochTransitionCache(std.testing.io);
+        deinitReusedEpochTransitionCache();
         allocator.destroy(test_state.config);
     }
 
@@ -122,7 +121,6 @@ test "memory_safety: fixed compounding flag tail does not allocate for sequentia
 
     var cache = try EpochTransitionCache.init(
         second_caller.allocator(),
-        std.testing.io,
         test_state.cached_state.config,
         test_state.cached_state.epoch_cache,
         test_state.cached_state.state,

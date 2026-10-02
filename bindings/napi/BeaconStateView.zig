@@ -1176,7 +1176,7 @@ pub fn computeUnrealizedCheckpoints(self: *BeaconStateView) !js_types.Unrealized
     const cached_state = try self.acquireState();
     defer self.finishState();
     const allocator = cached_state.allocator;
-    const result = try st.computeUnrealizedCheckpoints(allocator, js.io(), cached_state);
+    const result = try st.computeUnrealizedCheckpoints(allocator, cached_state);
 
     const obj = try env.createObject();
     try obj.setNamedProperty(
