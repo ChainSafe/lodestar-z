@@ -963,9 +963,9 @@ pub fn proposerRewards(self: *BeaconStateView) !js_types.ProposerRewards {
     const rewards = cached_state.getProposerRewards();
 
     const obj = try env.createObject();
-    try obj.setNamedProperty("attestations", try env.createDouble(@floatFromInt(rewards.attestations)));
-    try obj.setNamedProperty("syncAggregate", try env.createDouble(@floatFromInt(rewards.sync_aggregate)));
-    try obj.setNamedProperty("slashing", try env.createDouble(@floatFromInt(rewards.slashing)));
+    try obj.setNamedProperty("attestations", js.Number.from(rewards.attestations).val);
+    try obj.setNamedProperty("syncAggregate", js.Number.from(rewards.sync_aggregate).val);
+    try obj.setNamedProperty("slashing", js.Number.from(rewards.slashing).val);
     return .{ .val = obj };
 }
 
@@ -1705,16 +1705,175 @@ fn parseProposerRewards(value: ?js.Value) !?st.ProposerRewards {
 
 fn optionalU64(obj: napi.Value, name: [:0]const u8) !u64 {
     if (!try obj.hasNamedProperty(name)) return 0;
-    const raw = try (try obj.getNamedProperty(name)).getValueInt64();
-    return if (raw < 0) 0 else @intCast(raw);
+    return js_types.wrap(js.Number, try obj.getNamedProperty(name)).toU64Exact();
 }
 
-pub fn computeAttestationsRewards(_: *const BeaconStateView, _: ?js.Value) !js.Value {
-    return throwNotImpl(js.Value, "computeAttestationsRewards not implemented");
+pub fn computeAttestationsRewards(self: *BeaconStateView, validator_ids: ?js.Value) !js_types.AttestationsRewards {
+    const cached_state = try self.acquireState();
+    defer self.finishState();
+    const allocator = cached_state.allocator;
+    if (cached_state.state.forkSeq() == .phase0) return error.AttestationsRewardsUnsupportedFork;
+    const filters = try parseAttestationRewardFilters(allocator, validator_ids);
+    defer if (filters) |indices| allocator.free(indices);
+    const rewards = try st.computeAttestationsRewards(allocator, js.io(), cached_state, filters);
+    defer rewards.deinit(allocator);
+
+    const env = js.env();
+    const ideal = js.Array{ .val = try env.createArrayWithLength(rewards.ideal_rewards.len) };
+    for (rewards.ideal_rewards, 0..) |reward, i| {
+        const row = js_types.IdealAttestationsReward{ .val = try env.createObject() };
+        try row.set(.{
+            .effectiveBalance = js.Number.from(reward.effective_balance),
+            .head = js.Number.from(reward.head),
+            .target = js.Number.from(reward.target),
+            .source = js.Number.from(reward.source),
+            .inclusionDelay = js.Number.from(0),
+            .inactivity = js.Number.from(0),
+        });
+        try ideal.set(@intCast(i), row);
+    }
+    const total = js.Array{ .val = try env.createArrayWithLength(rewards.total_rewards.len) };
+    for (rewards.total_rewards, 0..) |reward, i| {
+        const row = js_types.TotalAttestationsReward{ .val = try env.createObject() };
+        try row.set(.{
+            .validatorIndex = js.Number.from(reward.validator_index),
+            .head = js.Number.from(reward.head),
+            .target = js.Number.from(reward.target),
+            .source = js.Number.from(reward.source),
+            .inclusionDelay = js.Number.from(0),
+            .inactivity = js.Number.from(reward.inactivity),
+        });
+        try total.set(@intCast(i), row);
+    }
+    const result = js_types.AttestationsRewards{ .val = try env.createObject() };
+    try result.set(.{ .idealRewards = ideal, .totalRewards = total });
+    return result;
 }
 
-pub fn computeSyncCommitteeRewards(_: *const BeaconStateView, _: js.Value, _: js.Value) !js.Value {
-    return throwNotImpl(js.Value, "computeSyncCommitteeRewards not implemented");
+fn parseAttestationRewardFilters(allocator: std.mem.Allocator, value: ?js.Value) !?[]u64 {
+    const raw = (value orelse return null).val;
+    const count = try raw.getArrayLength();
+    if (count == 0) return null;
+    var indices: std.ArrayList(u64) = .empty;
+    errdefer indices.deinit(allocator);
+    for (0..count) |i| {
+        const id = try raw.getElement(@intCast(i));
+        if (try id.typeof() == .number) {
+            const index = js_types.wrap(js.Number, id).toU64Exact() catch |err| {
+                if (err == error.InvalidUnsignedInteger) continue;
+                return err;
+            };
+            try indices.append(allocator, index);
+        } else {
+            const string = js.String{ .val = id };
+            const text = try string.toOwnedSlice(allocator);
+            defer allocator.free(text);
+            const hex = if (std.mem.startsWith(u8, text, "0x")) text[2..] else text;
+            if (hex.len % 2 != 0) {
+                var buffer: [96]u8 = undefined;
+                const message = try std.fmt.bufPrintZ(&buffer, "hex string length {d} must be multiple of 2", .{hex.len});
+                try js.env().throwError("INVALID_ARGUMENT", message);
+                return error.InvalidPubkeyHex;
+            }
+            for (hex) |char| {
+                if (!std.ascii.isHex(char)) {
+                    try js.env().throwError("INVALID_ARGUMENT", "hex string contains invalid characters");
+                    return error.InvalidPubkeyHex;
+                }
+            }
+            if (hex.len != 96) return error.InvalidPubkeyLength;
+            var key: [48]u8 = undefined;
+            _ = try std.fmt.hexToBytes(&key, hex);
+            if (pubkey.state.cache.get(js.io(), key)) |index| try indices.append(allocator, index);
+        }
+    }
+    std.mem.sort(u64, indices.items, {}, std.sort.asc(u64));
+    return try indices.toOwnedSlice(allocator);
+}
+
+pub fn computeSyncCommitteeRewards(self: *BeaconStateView, block: js.Value, validator_ids: ?js.Value) !js.Array {
+    const env = js.env();
+    const cached_state = try self.acquireState();
+    defer self.finishState();
+    const allocator = cached_state.allocator;
+    const slot_number = js_types.wrap(js.Number, try block.val.getNamedProperty("slot"));
+    const block_slot = slot_number.toU64Exact() catch |err| {
+        if (err == error.InvalidUnsignedInteger) return error.InvalidSlot;
+        return err;
+    };
+    if (cached_state.config.forkSeq(block_slot) == .phase0) return error.SyncCommitteeRewardsUnsupportedFork;
+    const body = try block.val.getNamedProperty("body");
+    const aggregate = try body.getNamedProperty("syncAggregate");
+    const bits = try aggregate.getNamedProperty("syncCommitteeBits");
+    const bit_len = js_types.wrap(js.Number, try bits.getNamedProperty("bitLen")).toU32Exact() catch |err| {
+        if (err == error.InvalidUnsignedInteger) return error.InvalidSyncCommitteeBitsLength;
+        return err;
+    };
+    if (bit_len != preset.SYNC_COMMITTEE_SIZE) return error.InvalidSyncCommitteeBitsLength;
+    var sync_aggregate: ct.altair.SyncAggregate.Type = undefined;
+    // Copy before subsequent JS getters can detach or resize the backing buffer.
+    try readByteArrayInto(bits, "uint8Array", &sync_aggregate.sync_committee_bits.data);
+    const filters = try parseSyncRewardFilters(allocator, validator_ids);
+    defer if (filters) |indices| allocator.free(indices);
+
+    const rewards = try st.computeSyncCommitteeRewards(allocator, cached_state, &sync_aggregate);
+    defer allocator.free(rewards);
+
+    const result = js.Array{ .val = try env.createArray() };
+    var output_index: u32 = 0;
+    for (rewards) |reward| {
+        if (filters) |indices| {
+            if (std.mem.findScalar(u64, indices, reward.validator_index) == null) continue;
+        }
+        const row = js_types.SyncCommitteeReward{ .val = try env.createObject() };
+        try row.set(.{
+            .validatorIndex = js.Number.from(reward.validator_index),
+            .reward = js.Number.from(reward.reward),
+        });
+        try result.set(output_index, row);
+        output_index += 1;
+    }
+    return result;
+}
+
+fn parseSyncRewardFilters(allocator: std.mem.Allocator, value: ?js.Value) !?[]u64 {
+    const raw = (value orelse return null).val;
+    const count = try raw.getArrayLength();
+    if (count == 0) return null;
+    var indices: std.ArrayList(u64) = .empty;
+    errdefer indices.deinit(allocator);
+    for (0..count) |i| {
+        const id = try raw.getElement(@intCast(i));
+        switch (try id.typeof()) {
+            .number => {
+                const index = js_types.wrap(js.Number, id).toU64Exact() catch |err| {
+                    if (err == error.InvalidUnsignedInteger) continue;
+                    return err;
+                };
+                try indices.append(allocator, index);
+            },
+            .string => {
+                const string = js.String{ .val = id };
+                if (try string.len() != 98) continue;
+                var buffer: [99]u8 = undefined;
+                const hex = try string.toSlice(&buffer);
+                if (!std.mem.startsWith(u8, hex, "0x")) continue;
+                var canonical = true;
+                for (hex[2..]) |char| {
+                    if (!std.ascii.isDigit(char) and !(char >= 'a' and char <= 'f')) {
+                        canonical = false;
+                        break;
+                    }
+                }
+                if (!canonical) continue;
+                var key: [48]u8 = undefined;
+                _ = try std.fmt.hexToBytes(&key, hex[2..]);
+                if (pubkey.state.cache.get(js.io(), key)) |index| try indices.append(allocator, index);
+            },
+            else => {},
+        }
+    }
+    return try indices.toOwnedSlice(allocator);
 }
 
 // --- Misc not-yet-implemented ---

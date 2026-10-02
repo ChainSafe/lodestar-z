@@ -25,7 +25,7 @@ const hasMarkers = attester_status.hasMarkers;
 
 const isInInactivityLeak = @import("inactivity_leak.zig").isInInactivityLeak;
 
-const RewardPenaltyItem = struct {
+pub const RewardPenaltyItem = struct {
     base_reward: u64,
     timely_source_reward: u64,
     timely_source_penalty: u64,
@@ -33,6 +33,34 @@ const RewardPenaltyItem = struct {
     timely_target_penalty: u64,
     timely_head_reward: u64,
 };
+
+pub fn computeRewardPenaltyItem(cache: *const EpochTransitionCache, effective_balance_increment: u64) RewardPenaltyItem {
+    const base_reward = effective_balance_increment * cache.base_reward_per_increment;
+    const ts_weigh = PARTICIPATION_FLAG_WEIGHTS[TIMELY_SOURCE_FLAG_INDEX];
+    const tt_weigh = PARTICIPATION_FLAG_WEIGHTS[TIMELY_TARGET_FLAG_INDEX];
+    const th_weigh = PARTICIPATION_FLAG_WEIGHTS[TIMELY_HEAD_FLAG_INDEX];
+    const ts_reward_numerator = base_reward * ts_weigh * cache.prev_epoch_unslashed_stake_source_by_increment;
+    const tt_reward_numerator = base_reward * tt_weigh * cache.prev_epoch_unslashed_stake_target_by_increment;
+    const th_reward_numerator = base_reward * th_weigh * cache.prev_epoch_unslashed_stake_head_by_increment;
+    const denominator = cache.total_active_stake_by_increment * WEIGHT_DENOMINATOR;
+    return .{
+        .base_reward = base_reward,
+        .timely_source_reward = @divFloor(ts_reward_numerator, denominator),
+        .timely_target_reward = @divFloor(tt_reward_numerator, denominator),
+        .timely_head_reward = @divFloor(th_reward_numerator, denominator),
+        .timely_source_penalty = @divFloor(base_reward * ts_weigh, WEIGHT_DENOMINATOR),
+        .timely_target_penalty = @divFloor(base_reward * tt_weigh, WEIGHT_DENOMINATOR),
+    };
+}
+
+pub fn inactivityPenaltyDenominator(config: *const BeaconConfig, fork: ForkSeq) u64 {
+    const quotient: u64 = if (fork == .altair) INACTIVITY_PENALTY_QUOTIENT_ALTAIR else INACTIVITY_PENALTY_QUOTIENT_BELLATRIX;
+    return config.chain.INACTIVITY_SCORE_BIAS * quotient;
+}
+
+pub fn computeInactivityPenalty(effective_balance_increment: u64, inactivity_score: u64, denominator: u64) u64 {
+    return @divFloor(effective_balance_increment * EFFECTIVE_BALANCE_INCREMENT * inactivity_score, denominator);
+}
 
 /// consumer should deinit `rewards` and `penalties` arrays
 pub fn getRewardsAndPenaltiesAltair(
@@ -45,7 +73,6 @@ pub fn getRewardsAndPenaltiesAltair(
     penalties: []u64,
 ) !void {
     const validator_count = try state.validatorsCount();
-    const active_increments = cache.total_active_stake_by_increment;
     if (rewards.len != validator_count or penalties.len != validator_count) {
         return error.InvalidArrayLength;
     }
@@ -59,9 +86,7 @@ pub fn getRewardsAndPenaltiesAltair(
     const max_increment = comptime max_effective / EFFECTIVE_BALANCE_INCREMENT + 1;
     var reward_penalty_item_cache: [max_increment]?RewardPenaltyItem = .{null} ** max_increment;
 
-    const inactivity_penality_multiplier: u64 =
-        if (fork == ForkSeq.altair) INACTIVITY_PENALTY_QUOTIENT_ALTAIR else INACTIVITY_PENALTY_QUOTIENT_BELLATRIX;
-    const penalty_denominator = config.chain.INACTIVITY_SCORE_BIAS * inactivity_penality_multiplier;
+    const penalty_denominator = inactivityPenaltyDenominator(config, fork);
 
     const flags = cache.flags;
     const effective_balance_increments = epoch_cache.getEffectiveBalanceIncrements().items;
@@ -74,24 +99,7 @@ pub fn getRewardsAndPenaltiesAltair(
         const effective_balance_increment = effective_balance_increments[i];
 
         const reward_penalty_item = if (reward_penalty_item_cache[effective_balance_increment]) |rpi| rpi else blk: {
-            const base_reward = effective_balance_increment * cache.base_reward_per_increment;
-            const ts_weigh = PARTICIPATION_FLAG_WEIGHTS[TIMELY_SOURCE_FLAG_INDEX];
-            const tt_weigh = PARTICIPATION_FLAG_WEIGHTS[TIMELY_TARGET_FLAG_INDEX];
-            const th_weigh = PARTICIPATION_FLAG_WEIGHTS[TIMELY_HEAD_FLAG_INDEX];
-            const ts_unslashed_participating_increments = cache.prev_epoch_unslashed_stake_source_by_increment;
-            const tt_unslashed_participating_increments = cache.prev_epoch_unslashed_stake_target_by_increment;
-            const th_unslashed_participating_increments = cache.prev_epoch_unslashed_stake_head_by_increment;
-            const ts_reward_numerator = base_reward * ts_weigh * ts_unslashed_participating_increments;
-            const tt_reward_numerator = base_reward * tt_weigh * tt_unslashed_participating_increments;
-            const th_reward_numerator = base_reward * th_weigh * th_unslashed_participating_increments;
-            const rpi = RewardPenaltyItem{
-                .base_reward = base_reward,
-                .timely_source_reward = @divFloor(ts_reward_numerator, active_increments * WEIGHT_DENOMINATOR),
-                .timely_target_reward = @divFloor(tt_reward_numerator, active_increments * WEIGHT_DENOMINATOR),
-                .timely_head_reward = @divFloor(th_reward_numerator, active_increments * WEIGHT_DENOMINATOR),
-                .timely_source_penalty = @divFloor(base_reward * ts_weigh, WEIGHT_DENOMINATOR),
-                .timely_target_penalty = @divFloor(base_reward * tt_weigh, WEIGHT_DENOMINATOR),
-            };
+            const rpi = computeRewardPenaltyItem(cache, effective_balance_increment);
             reward_penalty_item_cache[effective_balance_increment] = rpi;
             break :blk rpi;
         };
@@ -126,8 +134,7 @@ pub fn getRewardsAndPenaltiesAltair(
         // Same logic to getInactivityPenaltyDeltas
         // TODO: if we have limited value in inactivityScores we can provide a cache too
         if (!hasMarkers(flag, FLAG_PREV_TARGET_ATTESTER_UNSLASHED)) {
-            const penalty_numerator: u64 = @as(u64, effective_balance_increment) * EFFECTIVE_BALANCE_INCREMENT * (try inactivity_scores.get(i));
-            penalties[i] += @divFloor(penalty_numerator, penalty_denominator);
+            penalties[i] += computeInactivityPenalty(effective_balance_increment, try inactivity_scores.get(i), penalty_denominator);
         }
     }
 }
