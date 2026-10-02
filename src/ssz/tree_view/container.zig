@@ -52,7 +52,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
                 .child_data = .{null} ** ST.chunk_count,
                 .original_nodes = .{null} ** ST.chunk_count,
                 .root = root,
-                .changed = std.StaticBitSet(ST.chunk_count).initEmpty(),
+                .changed = std.StaticBitSet(ST.chunk_count).empty,
                 .field_root_cache = undefined,
             };
             try pool.ref(root);
@@ -86,7 +86,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
             // clear self's caches
             self.child_data = .{null} ** ST.chunk_count;
             self.original_nodes = .{null} ** ST.chunk_count;
-            self.changed = std.StaticBitSet(ST.chunk_count).initEmpty();
+            self.changed = std.StaticBitSet(ST.chunk_count).empty;
 
             return ptr;
         }
@@ -110,7 +110,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
                 // these nodes are unref by root
                 self.original_nodes[i] = null;
             }
-            self.changed = std.StaticBitSet(ST.chunk_count).initEmpty();
+            self.changed = std.StaticBitSet(ST.chunk_count).empty;
         }
 
         pub fn commit(self: *Self) !void {
@@ -158,7 +158,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
             }
 
             if (changed_idx == 0) {
-                self.changed = std.StaticBitSet(ST.chunk_count).initEmpty();
+                self.changed = std.StaticBitSet(ST.chunk_count).empty;
                 return;
             }
             const new_root = try self.root.setNodesAtDepth(
@@ -186,7 +186,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
             for (indices[0..changed_idx], nodes[0..changed_idx]) |index, node| {
                 self.original_nodes[index] = node;
             }
-            self.changed = std.StaticBitSet(ST.chunk_count).initEmpty();
+            self.changed = std.StaticBitSet(ST.chunk_count).empty;
         }
 
         pub fn getRoot(self: *const Self) Node.Id {
@@ -484,7 +484,7 @@ pub fn StructContainerTreeView(comptime ST: type) type {
             ptr.allocator = allocator;
             ptr.pool = pool;
             ptr.root = root;
-            ptr.changed = std.StaticBitSet(ST.chunk_count).initEmpty();
+            ptr.changed = std.StaticBitSet(ST.chunk_count).empty;
             ptr.field_root_cache = undefined;
             try pool.ref(root);
             return ptr;
@@ -502,7 +502,7 @@ pub fn StructContainerTreeView(comptime ST: type) type {
             ptr.allocator = self.allocator;
             ptr.pool = self.pool;
             ptr.root = self.root;
-            ptr.changed = std.StaticBitSet(ST.chunk_count).initEmpty();
+            ptr.changed = std.StaticBitSet(ST.chunk_count).empty;
 
             if (opts.transfer_cache and self.changed.count() == 0) {
                 ptr.value = self.value;
@@ -511,7 +511,7 @@ pub fn StructContainerTreeView(comptime ST: type) type {
             }
             if (opts.transfer_cache and self.changed.count() != 0) {
                 self.value = ptr.value;
-                self.changed = std.StaticBitSet(ST.chunk_count).initEmpty();
+                self.changed = std.StaticBitSet(ST.chunk_count).empty;
             }
 
             return ptr;
@@ -529,7 +529,7 @@ pub fn StructContainerTreeView(comptime ST: type) type {
             try self.pool.ref(new_root);
             self.pool.unref(self.root);
             self.root = new_root;
-            self.changed = std.StaticBitSet(ST.chunk_count).initEmpty();
+            self.changed = std.StaticBitSet(ST.chunk_count).empty;
         }
 
         pub fn getRoot(self: *const Self) Node.Id {

@@ -331,19 +331,21 @@ pub fn CompositeChunks(
                 return;
             }
 
-            // Reserve first so storing each committed root can't fail. Otherwise a getOrPut OOM
-            // after a child already committed would leave a stale entry pointing at its freed root.
-            try self.state.children_nodes.ensureUnusedCapacity(self.state.allocator, @intCast(self.state.changed.count()));
+            const nodes = try self.state.allocator.alloc(Node.Id, self.state.changed.count());
+            defer self.state.allocator.free(nodes);
 
-            // Flush child views into children_nodes so commitNodes can handle them uniformly.
-            for (self.state.changed.keys()) |gindex| {
+            // A child can commit before a later step fails. Keep its root local until the parent
+            // owns it, so replacing that child cannot leave a dangling node in the parent cache.
+            for (self.state.sortedChangedGindices(), 0..) |gindex, i| {
                 if (self.children_data.get(gindex)) |child_ptr| {
                     try child_ptr.commit();
-                    self.state.children_nodes.putAssumeCapacity(gindex, child_ptr.getRoot());
+                    nodes[i] = child_ptr.getRoot();
+                } else {
+                    nodes[i] = self.state.children_nodes.get(gindex) orelse return error.ChildNotFound;
                 }
             }
 
-            try self.state.commitNodes();
+            try self.state.commitStagedNodes(nodes);
         }
 
         pub fn clearCache(self: *Self) void {
@@ -467,7 +469,7 @@ pub fn CompositeChunks(
                     try ST.Element.tree.toValue(node, self.state.pool, &values[i]);
                 } else {
                     // Initialize value to default before toValue for variable types
-                    // (e.g. BitList fields need initialized ArrayListUnmanaged)
+                    // (e.g. BitList fields need initialized ArrayList)
                     if (comptime @hasDecl(ST.Element, "default_value")) {
                         values[i] = ST.Element.default_value;
                     } else {
@@ -506,4 +508,8 @@ pub fn CompositeChunks(
             self.children_data.clearRetainingCapacity();
         }
     };
+}
+
+test {
+    _ = @import("chunks_test.zig");
 }

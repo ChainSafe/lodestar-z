@@ -77,14 +77,14 @@ test "state transition - electra block" {
         }
     }
 
-    deinitReusedEpochTransitionCache(std.testing.io);
+    deinitReusedEpochTransitionCache();
 }
 
 test "state transition - a rejected block leaves the pre-state unchanged" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 180_000 });
     defer pool.deinit();
-    defer deinitReusedEpochTransitionCache(std.testing.io);
+    defer deinitReusedEpochTransitionCache();
 
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
     defer test_state.deinit();
@@ -133,7 +133,7 @@ test "state transition - records per-block and per-epoch metrics" {
 
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 180_000 });
     defer pool.deinit();
-    defer deinitReusedEpochTransitionCache(std.testing.io);
+    defer deinitReusedEpochTransitionCache();
 
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
     defer test_state.deinit();

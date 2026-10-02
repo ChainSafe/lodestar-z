@@ -202,6 +202,19 @@ Important requirements include:
 - Name error values `error.Name`, never through their set as `Error.Name` or `MyError.Name`.
   Declared error sets stay in signatures. `zig build test:tidy` enforces this.
 - Run `zig fmt` on every Zig change.
+
+#### Zig 0.16 standard-library names
+
+Use the current names from the Zig 0.16 standard library. The old aliases below are deprecated:
+
+- `std.ArrayListUnmanaged` and `std.ArrayListAligned*` become `std.ArrayList` or
+  `std.array_list.Aligned`.
+- `std.AutoArrayHashMapUnmanaged`, `std.ArrayHashMapUnmanaged`, and
+  `std.StringArrayHashMapUnmanaged` become `std.array_hash_map.Auto`,
+  `std.array_hash_map.Custom`, and `std.array_hash_map.String`.
+- `std.mem.indexOf*` and `std.mem.lastIndexOf*` become the corresponding `find*` functions.
+- Static bit sets use `.empty` and `.full` instead of `initEmpty()` and `initFull()`.
+
 ### JavaScript and TypeScript
 
 Bindings use ES modules and Biome:

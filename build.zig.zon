@@ -28,8 +28,8 @@
             },
         },
         .hashtree = .{
-            .url = "git+https://github.com/ChainSafe/hashtree-z.git#f5c1b81da167f84376fb94aef29a57fc6c08dc28",
-            .hash = "hashtree-0.1.0-sBOovj8WAAAGCN62cybnffy7b4ITTQsog2oOG2AQZl9L",
+            .url = "git+https://github.com/ChainSafe/hashtree-z.git#9b0fdad8f5159b8d7ccc3b5d74f18f63a3881482",
+            .hash = "hashtree-0.1.0-sBOovn0WAAC0xm013qX6iNDJGmZ3OVnomsF-F19Y_Yxy",
         },
         .snappy = .{
             .url = "git+https://github.com/ChainSafe/snappy.zig#713942410426051da6107a955b29f3f152815622",

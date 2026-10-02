@@ -40,9 +40,9 @@ test "ContainerType - sanity" {
         c: FixedListType(UintType(8), 32, .{}),
     });
     var f: Foo.Type = undefined;
-    f.a = try std.ArrayListUnmanaged(u8).initCapacity(allocator, 10);
-    f.b = try std.ArrayListUnmanaged(u8).initCapacity(allocator, 10);
-    f.c = try std.ArrayListUnmanaged(u8).initCapacity(allocator, 10);
+    f.a = try std.ArrayList(u8).initCapacity(allocator, 10);
+    f.b = try std.ArrayList(u8).initCapacity(allocator, 10);
+    f.c = try std.ArrayList(u8).initCapacity(allocator, 10);
     defer f.a.deinit(allocator);
     defer f.b.deinit(allocator);
     defer f.c.deinit(allocator);

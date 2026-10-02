@@ -224,7 +224,7 @@ pub const ValidatorVoteMap = std.AutoHashMapUnmanaged(ValidatorIndex, PayloadSta
 pub const BlockAttestationMap = std.AutoHashMapUnmanaged(Root, ValidatorVoteMap);
 
 /// Slot -> BlockAttestationMap for all queued attestations.
-pub const QueuedAttestationMap = std.AutoArrayHashMapUnmanaged(Slot, BlockAttestationMap);
+pub const QueuedAttestationMap = std.array_hash_map.Auto(Slot, BlockAttestationMap);
 
 /// Set of validated attestation data roots (cleared each slot).
 pub const RootSet = std.HashMapUnmanaged(Root, void, RootContext, 80);
@@ -2132,7 +2132,7 @@ fn range(comptime from: Slot, comptime to_inclusive: Slot) [to_inclusive - from 
 fn makeTestAttesterSlashing(
     indices: []const ValidatorIndex,
 ) consensus_types.phase0.AttesterSlashing.Type {
-    const list = std.ArrayListUnmanaged(ValidatorIndex){ .items = @constCast(indices), .capacity = indices.len };
+    const list = std.ArrayList(ValidatorIndex){ .items = @constCast(indices), .capacity = indices.len };
     const indexed_attestation = std.mem.zeroInit(consensus_types.phase0.IndexedAttestation.Type, .{
         .attesting_indices = list,
     });
@@ -3654,7 +3654,7 @@ fn makeTestIndexedAttestation(
     source_root: Root,
     index: u64,
 ) consensus_types.phase0.IndexedAttestation.Type {
-    const list = std.ArrayListUnmanaged(ValidatorIndex){ .items = @constCast(indices), .capacity = indices.len };
+    const list = std.ArrayList(ValidatorIndex){ .items = @constCast(indices), .capacity = indices.len };
     return std.mem.zeroInit(consensus_types.phase0.IndexedAttestation.Type, .{
         .attesting_indices = list,
         .data = std.mem.zeroInit(consensus_types.phase0.AttestationData.Type, .{
