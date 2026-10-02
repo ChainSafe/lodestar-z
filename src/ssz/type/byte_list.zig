@@ -27,7 +27,7 @@ pub fn ByteListType(comptime _limit: comptime_int) type {
         pub const Element: type = UintType(8);
         pub const limit: usize = _limit;
         pub const opts: @import("list.zig").TypeOpts = .{};
-        pub const Type: type = std.ArrayListUnmanaged(Element.Type);
+        pub const Type: type = std.ArrayList(Element.Type);
         pub const TreeView: type = ListBasicTreeView(@This());
         pub const min_size: usize = 0;
         pub const max_size: usize = Element.fixed_size * limit;

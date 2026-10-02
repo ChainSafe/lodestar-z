@@ -48,6 +48,19 @@ test "progressive Merkleization matches tree roots without scratch allocation" {
     }
 }
 
+test "progressive accumulator enforces length and finish state" {
+    var accumulator = try progressive.MerkleAccumulator.init(2);
+    var root: [32]u8 = undefined;
+    try std.testing.expectError(error.InvalidLength, accumulator.finish(&root));
+    try accumulator.append(&@as([32]u8, @splat(1)));
+    try accumulator.append(&@as([32]u8, @splat(2)));
+    try std.testing.expectError(error.InputTooLong, accumulator.append(&root));
+    try accumulator.finish(&root);
+    try std.testing.expectError(error.InvalidState, accumulator.finish(&root));
+    try std.testing.expectError(error.InvalidState, accumulator.append(&root));
+    try std.testing.expectError(error.InputTooLong, progressive.MerkleAccumulator.init(std.math.maxInt(usize)));
+}
+
 test "memory_safety: progressive streaming builder reclaims every partial tree" {
     const allocator = std.testing.allocator;
     for ([_]usize{ 0, 1, 2, 5, 6, 21, 22, 85, 86 }) |count| {

@@ -40,14 +40,17 @@ pub fn ProgressiveBitListType() type {
             return (value.bit_len + 255) / 256;
         }
 
-        pub fn hashTreeRoot(allocator: std.mem.Allocator, value: *const Type, out: *[32]u8) !void {
-            const chunks = try allocator.alloc([32]u8, chunkCount(value));
-            defer allocator.free(chunks);
-
-            @memset(chunks, [_]u8{0} ** 32);
-            @memcpy(@as([]u8, @ptrCast(chunks))[0..value.data.items.len], value.data.items);
-
-            try progressive.merkleizeChunks(allocator, chunks, out);
+        pub fn hashTreeRoot(_: std.mem.Allocator, value: *const Type, out: *[32]u8) !void {
+            var accumulator = try progressive.MerkleAccumulator.init(chunkCount(value));
+            var offset: usize = 0;
+            while (offset < value.data.items.len) {
+                var chunk: [32]u8 = @splat(0);
+                const count = @min(32, value.data.items.len - offset);
+                @memcpy(chunk[0..count], value.data.items[offset..][0..count]);
+                try accumulator.append(&chunk);
+                offset += count;
+            }
+            try accumulator.finish(out);
             mixInLength(value.bit_len, out);
         }
 
@@ -145,34 +148,22 @@ pub fn ProgressiveBitListType() type {
                 return bit_len;
             }
 
-            pub fn hashTreeRoot(allocator: std.mem.Allocator, data: []const u8, out: *[32]u8) !void {
-                if (data.len == 0) {
-                    return error.InvalidSize;
+            pub fn hashTreeRoot(_: std.mem.Allocator, data: []const u8, out: *[32]u8) !void {
+                const bit_len = try length(data);
+                const byte_len = bit_len / 8 + @intFromBool(bit_len % 8 != 0);
+                var accumulator = try progressive.MerkleAccumulator.init(bit_len / 256 + @intFromBool(bit_len % 256 != 0));
+                var offset: usize = 0;
+                while (offset < byte_len) {
+                    var chunk: [32]u8 = @splat(0);
+                    const count = @min(32, byte_len - offset);
+                    @memcpy(chunk[0..count], data[offset..][0..count]);
+                    if (offset + count == byte_len and bit_len % 8 != 0) {
+                        chunk[count - 1] ^= @as(u8, 1) << @intCast(bit_len % 8);
+                    }
+                    try accumulator.append(&chunk);
+                    offset += count;
                 }
-
-                // ensure padding bit and trailing zeros in last byte
-                const last_byte = data[data.len - 1];
-
-                const last_byte_clz = @clz(last_byte);
-                if (last_byte_clz == 8) {
-                    return error.noPaddingBit;
-                }
-                const last_1_index: u3 = @intCast(7 - last_byte_clz);
-                const bit_len = (data.len - 1) * 8 + last_1_index;
-                const chunk_count = (bit_len + 255) / 256;
-                const chunks = try allocator.alloc([32]u8, chunk_count);
-                defer allocator.free(chunks);
-
-                @memset(chunks, [_]u8{0} ** 32);
-                if (bit_len % 8 == 0) {
-                    @memcpy(@as([]u8, @ptrCast(chunks))[0 .. data.len - 1], data[0 .. data.len - 1]);
-                } else {
-                    @memcpy(@as([]u8, @ptrCast(chunks))[0..data.len], data);
-                    // remove padding bit
-                    @as([]u8, @ptrCast(chunks))[data.len - 1] ^= @as(u8, 1) << last_1_index;
-                }
-
-                try progressive.merkleizeChunks(allocator, chunks, out);
+                try accumulator.finish(out);
                 mixInLength(bit_len, out);
             }
         };

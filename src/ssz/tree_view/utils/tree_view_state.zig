@@ -14,11 +14,11 @@ pub const TreeViewState = struct {
     pool: *Node.Pool,
     root: Node.Id,
 
-    /// cached nodes for faster access of already-visited children
+    /// Nodes borrowed from `root`, or owned rc-zero replacements staged by `setChildNode`.
     children_nodes: std.AutoHashMapUnmanaged(Gindex, Node.Id),
 
     /// whether the corresponding child node/data has changed since the last update of the root
-    changed: std.AutoArrayHashMapUnmanaged(Gindex, void),
+    changed: std.array_hash_map.Auto(Gindex, void),
 
     pub fn init(self: *TreeViewState, allocator: Allocator, pool: *Node.Pool, root: Node.Id) !void {
         try pool.ref(root);
@@ -115,6 +115,13 @@ pub const TreeViewState = struct {
         const nodes = try self.allocator.alloc(Node.Id, self.changed.count());
         defer self.allocator.free(nodes);
 
+        for (self.sortedChangedGindices(), 0..) |gindex, i| {
+            nodes[i] = self.children_nodes.get(gindex) orelse return error.ChildNotFound;
+        }
+        try self.commitStagedNodes(nodes);
+    }
+
+    pub fn sortedChangedGindices(self: *TreeViewState) []const Gindex {
         const SortContext = struct {
             keys: []const Gindex,
 
@@ -123,22 +130,31 @@ pub const TreeViewState = struct {
             }
         };
         self.changed.sortUnstable(SortContext{ .keys = self.changed.keys() });
+        return self.changed.keys();
+    }
+
+    /// `nodes` must match `sortedChangedGindices()`. Publishes the root and cached nodes together;
+    /// on failure, both stay unchanged and the dirty set remains available for retry.
+    pub fn commitStagedNodes(self: *TreeViewState, nodes: []Node.Id) !void {
         const gindices = self.changed.keys();
+        std.debug.assert(nodes.len == gindices.len);
+        if (nodes.len == 0) return;
 
         // Failed tree rebuilds can reclaim their inputs. Keep pending nodes alive until
         // publication, then drop only these temporary references, even when their count reaches zero.
         var retained: usize = 0;
         defer for (nodes[0..retained]) |node| self.pool.unrefUnsafe(node);
 
-        for (gindices, 0..) |gindex, i| {
-            const child_node = self.children_nodes.get(gindex) orelse return error.ChildNotFound;
-            try self.pool.ref(child_node);
-            nodes[i] = child_node;
+        for (nodes) |node| {
+            try self.pool.ref(node);
             retained += 1;
         }
 
         const new_root = try self.root.setNodesGrouped(self.pool, gindices, nodes);
         try self.pool.ref(new_root);
+        for (gindices, nodes) |gindex, node| {
+            if (self.children_nodes.getPtr(gindex)) |cached| cached.* = node;
+        }
         self.pool.unref(self.root);
         self.root = new_root;
 
@@ -150,9 +166,6 @@ pub const TreeViewState = struct {
         while (value_iter.next()) |node_id_ptr| {
             const node_id = node_id_ptr.*;
             const state = node_id.getState(self.pool);
-            // A cached child root can already be freed via children_data — a child
-            // view owns the same node — when a failed commit left it here. Skip it
-            // rather than re-unref (which would hit the .free slot).
             if (state.isFree()) continue;
             if (state.refCount() == 0) {
                 self.pool.unref(node_id);

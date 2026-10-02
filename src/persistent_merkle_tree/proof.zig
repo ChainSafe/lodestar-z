@@ -91,7 +91,7 @@ fn materializeIfOpaque(
     allocator: Allocator,
     pool: *Node.Pool,
     node_id: Node.Id,
-    temporary_roots: *std.ArrayListUnmanaged(Node.Id),
+    temporary_roots: *std.ArrayList(Node.Id),
 ) (Node.Error || Error)!Node.Id {
     var current = node_id;
     while (isOpaqueNode(pool, current)) {
@@ -123,7 +123,7 @@ pub fn createSingleProof(
     // is legal: e.g. StructContainerType holding a FixedVectorType with
     // .chunked_leaf=true. Track every materialized temporary root and unref
     // them on exit, matching createCompactMultiProof's pattern.
-    var temporary_roots: std.ArrayListUnmanaged(Node.Id) = .empty;
+    var temporary_roots: std.ArrayList(Node.Id) = .empty;
     defer {
         for (temporary_roots.items) |temp_root| {
             pool.unref(temp_root);
@@ -386,7 +386,7 @@ pub fn createCompactMultiProof(
     var leaves: std.ArrayList([32]u8) = .empty;
     errdefer leaves.deinit(allocator);
 
-    var temporary_roots: std.ArrayListUnmanaged(Node.Id) = .empty;
+    var temporary_roots: std.ArrayList(Node.Id) = .empty;
     defer {
         for (temporary_roots.items) |temp_root| pool.unref(temp_root);
         temporary_roots.deinit(allocator);

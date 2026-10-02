@@ -39,7 +39,7 @@ pub fn SlotsTestCase(comptime fork: ForkSeq) type {
             var tc = try Self.init(allocator, pool, dir);
             defer {
                 tc.deinit();
-                state_transition.deinitReusedEpochTransitionCache(std.testing.io);
+                state_transition.deinitReusedEpochTransitionCache();
             }
 
             try tc.runTest();
@@ -110,7 +110,7 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
             var tc = try Self.init(allocator, pool, dir);
             defer {
                 tc.deinit();
-                state_transition.deinitReusedEpochTransitionCache(std.testing.io);
+                state_transition.deinitReusedEpochTransitionCache();
             }
 
             try tc.runTest();
@@ -136,10 +136,10 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
             defer allocator.free(meta_content);
             // Parse YAML for blocks_count (simplified; assume "blocks_count: N")
             const blocks_count_str = std.mem.trim(u8, meta_content, " \n{}");
-            const blocks_count = if (std.mem.indexOf(u8, blocks_count_str, "blocks_count: ")) |start| blk: {
+            const blocks_count = if (std.mem.find(u8, blocks_count_str, "blocks_count: ")) |start| blk: {
                 const num_start = start + "blocks_count: ".len;
                 const num_str = blocks_count_str[num_start..];
-                const end = std.mem.indexOf(u8, num_str, ",") orelse num_str.len;
+                const end = std.mem.find(u8, num_str, ",") orelse num_str.len;
                 break :blk std.fmt.parseInt(usize, std.mem.trim(u8, num_str[0..end], " "), 10) catch 1;
             } else 1;
 

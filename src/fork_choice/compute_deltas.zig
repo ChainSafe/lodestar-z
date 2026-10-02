@@ -11,7 +11,7 @@ const ValidatorIndex = consensus_types.primitive.ValidatorIndex.Type;
 pub const VoteIndex = u32;
 
 /// Set of equivocating validator indices.
-pub const EquivocatingIndices = std.AutoArrayHashMapUnmanaged(ValidatorIndex, void);
+pub const EquivocatingIndices = std.array_hash_map.Auto(ValidatorIndex, void);
 
 /// Diagnostic counters from a computeDeltas call.
 /// Used for monitoring fork choice health (not for correctness).
@@ -25,7 +25,7 @@ pub const ComputeDeltasResult = struct {
 };
 
 /// Type alias for the per-node deltas buffer, instantiated by the caller (typically ForkChoice).
-pub const DeltasCache = std.ArrayListUnmanaged(i64);
+pub const DeltasCache = std.ArrayList(i64);
 
 /// Computes per-node weight deltas from vote changes and balance updates.
 ///

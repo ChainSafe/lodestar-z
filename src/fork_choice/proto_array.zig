@@ -479,7 +479,7 @@ pub const VariantIndices = union(enum) {
 pub const ProtoArray = struct {
     /// Flat array DAG — nodes stored in insertion order.
     /// Parent always has a lower index than any of its children.
-    nodes: std.ArrayListUnmanaged(ProtoNode),
+    nodes: std.ArrayList(ProtoNode),
 
     /// Block root -> node index(es) mapping.
     indices: std.HashMapUnmanaged(Root, VariantIndices, RootContext, 80),
@@ -1886,10 +1886,10 @@ pub const ProtoArray = struct {
         allocator: Allocator,
         root: Root,
         status: PayloadStatus,
-    ) (Allocator.Error || ProtoArrayError)!std.ArrayListUnmanaged(ProtoBlock) {
+    ) (Allocator.Error || ProtoArrayError)!std.ArrayList(ProtoBlock) {
         const start_node = self.getNode(root, status) orelse return .empty;
 
-        var result: std.ArrayListUnmanaged(ProtoBlock) = .empty;
+        var result: std.ArrayList(ProtoBlock) = .empty;
         errdefer result.deinit(allocator);
 
         // Include start node if not PENDING (Gloas only; pre-Gloas always included).
@@ -1908,7 +1908,7 @@ pub const ProtoArray = struct {
     /// Collect non-PENDING blocks between upper_index and lower_index (exclusive both ends).
     fn appendBlocksBetween(
         self: *const ProtoArray,
-        result: *std.ArrayListUnmanaged(ProtoBlock),
+        result: *std.ArrayList(ProtoBlock),
         allocator: Allocator,
         upper_index: u32,
         lower_index: u32,
@@ -1931,11 +1931,11 @@ pub const ProtoArray = struct {
         allocator: Allocator,
         root: Root,
         status: PayloadStatus,
-    ) (Allocator.Error || ProtoArrayError)!std.ArrayListUnmanaged(ProtoBlock) {
+    ) (Allocator.Error || ProtoArrayError)!std.ArrayList(ProtoBlock) {
         const start_idx = self.getNodeIndexByRootAndStatus(root, status) orelse return .empty;
         assert(start_idx < self.nodes.items.len);
 
-        var result: std.ArrayListUnmanaged(ProtoBlock) = .empty;
+        var result: std.ArrayList(ProtoBlock) = .empty;
         errdefer result.deinit(allocator);
 
         var node_index = start_idx;
@@ -1958,8 +1958,8 @@ pub const ProtoArray = struct {
     /// Result of getAllAncestorAndNonAncestorNodes.
     pub const AncestorAndNonAncestorResult = struct {
         allocator: Allocator,
-        ancestors: std.ArrayListUnmanaged(ProtoBlock),
-        non_ancestors: std.ArrayListUnmanaged(ProtoBlock),
+        ancestors: std.ArrayList(ProtoBlock),
+        non_ancestors: std.ArrayList(ProtoBlock),
 
         pub fn deinit(self_result: *AncestorAndNonAncestorResult) void {
             self_result.ancestors.deinit(self_result.allocator);
@@ -1981,9 +1981,9 @@ pub const ProtoArray = struct {
         assert(start_idx < self.nodes.items.len);
         const start_node = &self.nodes.items[start_idx];
 
-        var ancestors: std.ArrayListUnmanaged(ProtoBlock) = .empty;
+        var ancestors: std.ArrayList(ProtoBlock) = .empty;
         errdefer ancestors.deinit(allocator);
-        var non_ancestors: std.ArrayListUnmanaged(ProtoBlock) = .empty;
+        var non_ancestors: std.ArrayList(ProtoBlock) = .empty;
         errdefer non_ancestors.deinit(allocator);
 
         try ancestors.append(allocator, start_node.toBlock());
