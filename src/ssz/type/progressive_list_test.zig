@@ -311,6 +311,54 @@ test "fixed progressive tree serialization checks terminators and expands implic
     try std.testing.expectError(error.InvalidTerminatorNode, List.tree.serializeIntoBytes(bad_root, &pool, &out));
 }
 
+test "progressive list hashing streams packed and composite values without allocation" {
+    const allocator = std.testing.allocator;
+    const Pair = FixedContainerType(struct { a: UintType(64), b: UintType(64) });
+    inline for (.{ UintType(8), UintType(64), BoolType(), Pair }) |Element| {
+        const List = FixedProgressiveListType(Element);
+        const per_chunk = if (Element.kind == .container) 1 else 32 / Element.fixed_size;
+        for ([_]usize{ 0, 1, per_chunk, per_chunk + 1, 5 * per_chunk, 5 * per_chunk + 1, 21 * per_chunk, 21 * per_chunk + 1, 85 * per_chunk + 1, 341 * per_chunk + 1 }) |len| {
+            var value = List.default_value;
+            defer List.deinit(allocator, &value);
+            try value.resize(allocator, len);
+            for (value.items, 0..) |*item, i| item.* = switch (Element.kind) {
+                .uint => @truncate(i),
+                .bool => i % 3 == 0,
+                .container => .{ .a = i, .b = i + 1 },
+                else => unreachable,
+            };
+            try expectStreamingProgressiveHash(List, &value);
+        }
+    }
+    const Inner = FixedProgressiveListType(UintType(8));
+    const Outer = VariableProgressiveListType(Inner);
+    var value = Outer.default_value;
+    defer Outer.deinit(allocator, &value);
+    for (0..86) |i| {
+        try value.append(allocator, .empty);
+        try value.items[i].appendNTimes(allocator, @truncate(i), i % 35);
+    }
+    try expectStreamingProgressiveHash(Outer, &value);
+}
+
+fn expectStreamingProgressiveHash(comptime ST: type, value: *const ST.Type) !void {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 8192 });
+    defer pool.deinit();
+    const root = try ST.tree.fromValue(&pool, value);
+    defer pool.unref(root);
+    const bytes = try allocator.alloc(u8, ST.serializedSize(value));
+    defer allocator.free(bytes);
+    _ = ST.serializeIntoBytes(value, bytes);
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var actual: [32]u8 = undefined;
+    try ST.hashTreeRoot(failing.allocator(), value, &actual);
+    try std.testing.expectEqualSlices(u8, root.getRoot(&pool), &actual);
+    try ST.serialized.hashTreeRoot(failing.allocator(), bytes, &actual);
+    try std.testing.expectEqualSlices(u8, root.getRoot(&pool), &actual);
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
 test "progressive tree construction streams packed and nested values" {
     const allocator = std.testing.allocator;
     const Pair = FixedContainerType(struct { a: UintType(64), b: BoolType() });

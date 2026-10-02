@@ -46,7 +46,7 @@ test "registerValidatorStatuses records metrics" {
         "validator_monitor_prev_epoch_on_chain_balance 63000000000",
     };
     for (expectations) |expected| {
-        std.testing.expect(std.mem.indexOf(u8, list.items, expected) != null) catch |err| {
+        std.testing.expect(std.mem.find(u8, list.items, expected) != null) catch |err| {
             std.debug.print("expected metric not found: {s}\n", .{expected});
             return err;
         };

@@ -51,35 +51,63 @@ pub fn merkleizeChunks(_: std.mem.Allocator, chunks: [][32]u8, out: *[32]u8) !vo
 }
 
 fn merkleizeChunksBounded(chunks: []const [32]u8, out: *[32]u8) !void {
+    var accumulator = try MerkleAccumulator.init(chunks.len);
+    for (chunks) |*chunk| try accumulator.append(chunk);
+    try accumulator.finish(out);
+}
+
+/// Accumulates progressive subtrees in order with bounded scratch. `finish` consumes the result.
+pub const MerkleAccumulator = struct {
+    const Subtree = @import("hashing").MerkleAccumulator;
     const max_subtrees = @min(@import("hashing").max_depth, @bitSizeOf(usize) - 1) / 2 + 1;
-    const max_chunks = comptime blk: {
+    const max_chunks = blk: {
         var count: usize = 0;
         for (0..max_subtrees) |i| count += @as(usize, 1) << @intCast(2 * i);
         break :blk count;
     };
-    if (chunks.len > max_chunks) return error.InputTooLong;
 
-    var subtree_roots: [max_subtrees][32]u8 = undefined;
-    var subtree_count: usize = 0;
-    var start: usize = 0;
-    for (0..max_subtrees) |i| {
-        if (start == chunks.len) break;
-        const subtree_length = @as(usize, 1) << @intCast(2 * i);
-        const end = start + @min(subtree_length, chunks.len - start);
-        var accumulator = @import("hashing").MerkleAccumulator.init(@intCast(2 * i));
-        for (chunks[start..end]) |*chunk| try accumulator.append(chunk);
-        try accumulator.finish(&subtree_roots[i]);
-        subtree_count += 1;
-        start = end;
-    }
-    std.debug.assert(start == chunks.len);
+    roots: [max_subtrees][32]u8 = undefined,
+    subtree: Subtree = Subtree.init(0),
+    subtree_count: usize = 0,
+    remaining: usize,
+    finished: bool = false,
 
-    out.* = @splat(0);
-    while (subtree_count > 0) {
-        subtree_count -= 1;
-        hashOne(out, &subtree_roots[subtree_count], out);
+    pub fn init(chunk_count: usize) !MerkleAccumulator {
+        if (chunk_count > max_chunks) return error.InputTooLong;
+        return .{ .remaining = chunk_count };
     }
-}
+
+    pub fn append(self: *MerkleAccumulator, chunk: *const [32]u8) !void {
+        if (self.finished) return error.InvalidState;
+        if (self.remaining == 0) return error.InputTooLong;
+        std.debug.assert(self.subtree_count < max_subtrees);
+        try self.subtree.append(chunk);
+        self.remaining -= 1;
+        if (self.subtree.count == @as(usize, 1) << @intCast(2 * self.subtree_count)) {
+            try self.subtree.finish(&self.roots[self.subtree_count]);
+            self.subtree_count += 1;
+            if (self.subtree_count < max_subtrees) {
+                self.subtree = Subtree.init(@intCast(2 * self.subtree_count));
+            }
+        }
+    }
+
+    pub fn finish(self: *MerkleAccumulator, out: *[32]u8) !void {
+        if (self.finished) return error.InvalidState;
+        if (self.remaining != 0) return error.InvalidLength;
+        if (self.subtree_count < max_subtrees and self.subtree.count != 0) {
+            try self.subtree.finish(&self.roots[self.subtree_count]);
+            self.subtree_count += 1;
+        }
+        out.* = @splat(0);
+        var i = self.subtree_count;
+        while (i > 0) {
+            i -= 1;
+            hashOne(out, &self.roots[i], out);
+        }
+        self.finished = true;
+    }
+};
 
 /// Visits progressive content chunks in order. Exhaustion validates the right-spine terminator.
 pub const NodeIterator = struct {

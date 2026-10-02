@@ -29,7 +29,7 @@ pub fn Transition(comptime fork: ForkSeq) type {
             var tc = try Self.init(allocator, &pool, dir);
             defer {
                 tc.deinit();
-                state_transition.deinitReusedEpochTransitionCache(std.testing.io);
+                state_transition.deinitReusedEpochTransitionCache();
             }
             try tc.runTest();
         }
@@ -47,9 +47,9 @@ pub fn Transition(comptime fork: ForkSeq) type {
             const meta_content_one_line = std.mem.trim(u8, meta_content, " \n");
             // sample content of meta.yaml: {post_fork: electra, fork_epoch: 2, blocks_count: 96, fork_block: 62}
             // Parse YAML for fork_epoch (simplified; assume "fork_epoch: N")
-            const fork_epoch = if (std.mem.indexOf(u8, meta_content_one_line, "fork_epoch: ")) |start| blk: {
+            const fork_epoch = if (std.mem.find(u8, meta_content_one_line, "fork_epoch: ")) |start| blk: {
                 const str = meta_content_one_line[start + "fork_epoch: ".len ..];
-                if (std.mem.indexOf(u8, str, ",")) |end| {
+                if (std.mem.find(u8, str, ",")) |end| {
                     const num_str = str[0..end];
                     break :blk std.fmt.parseInt(usize, std.mem.trim(u8, num_str, " "), 10) catch 1;
                 } else unreachable;
@@ -57,17 +57,17 @@ pub fn Transition(comptime fork: ForkSeq) type {
 
             // block_count could be ended with "," or "}"
             // for example: {post_fork: altair, fork_epoch: 6, blocks_count: 2}
-            const blocks_count = if (std.mem.indexOf(u8, meta_content_one_line, "blocks_count: ")) |start| blk: {
+            const blocks_count = if (std.mem.find(u8, meta_content_one_line, "blocks_count: ")) |start| blk: {
                 const str = meta_content_one_line[start + "blocks_count: ".len ..];
-                const end = std.mem.indexOf(u8, str, ",") orelse std.mem.indexOf(u8, str, "}") orelse unreachable;
+                const end = std.mem.find(u8, str, ",") orelse std.mem.find(u8, str, "}") orelse unreachable;
                 const num_str = str[0..end];
                 break :blk std.fmt.parseInt(usize, std.mem.trim(u8, num_str, " "), 10) catch 1;
             } else unreachable;
 
             // fork_block is optional
-            const fork_block_idx = if (std.mem.indexOf(u8, meta_content_one_line, "fork_block: ")) |start| blk: {
+            const fork_block_idx = if (std.mem.find(u8, meta_content_one_line, "fork_block: ")) |start| blk: {
                 const str = meta_content_one_line[start + "fork_block: ".len ..];
-                if (std.mem.indexOf(u8, str, "}")) |end| {
+                if (std.mem.find(u8, str, "}")) |end| {
                     const num_str = str[0..end];
                     break :blk std.fmt.parseInt(u64, std.mem.trim(u8, num_str, " "), 10) catch 0;
                 } else unreachable;
