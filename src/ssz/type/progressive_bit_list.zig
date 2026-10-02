@@ -225,57 +225,44 @@ pub fn ProgressiveBitListType() type {
             }
 
             pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
-                const allocator = pool.allocator;
-                var value = Self.default_value;
-                defer Self.deinit(allocator, &value);
-
-                try Self.deserializeFromBytes(allocator, data, &value);
-                return fromValue(pool, &value);
+                const bit_len = try serialized.length(data);
+                const byte_len = bit_len / 8 + @intFromBool(bit_len % 8 != 0);
+                var builder = try progressive.TreeBuilder.init(pool, bit_len / 256 + @intFromBool(bit_len % 256 != 0));
+                defer builder.deinit();
+                var offset: usize = 0;
+                while (offset < byte_len) {
+                    var chunk: [32]u8 = @splat(0);
+                    const count = @min(32, byte_len - offset);
+                    @memcpy(chunk[0..count], data[offset..][0..count]);
+                    if (offset + count == byte_len and bit_len % 8 != 0) {
+                        chunk[count - 1] ^= @as(u8, 1) << @intCast(bit_len % 8);
+                    }
+                    try builder.append(try pool.createLeaf(&chunk));
+                    offset += count;
+                }
+                const contents = try builder.finish();
+                errdefer pool.unref(contents);
+                const length_leaf = try pool.createLeafFromUint(bit_len);
+                errdefer pool.unref(length_leaf);
+                return try pool.createBranch(contents, length_leaf);
             }
 
             pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
-                const allocator = pool.allocator;
-                const chunk_count = chunkCount(value);
-                if (chunk_count == 0) {
-                    const length_leaf = try pool.createLeafFromUint(0);
-                    errdefer pool.unref(length_leaf);
-
-                    return try pool.createBranch(@enumFromInt(0), length_leaf);
+                var builder = try progressive.TreeBuilder.init(pool, chunkCount(value));
+                defer builder.deinit();
+                var offset: usize = 0;
+                while (offset < value.data.items.len) {
+                    var chunk: [32]u8 = @splat(0);
+                    const count = @min(32, value.data.items.len - offset);
+                    @memcpy(chunk[0..count], value.data.items[offset..][0..count]);
+                    try builder.append(try pool.createLeaf(&chunk));
+                    offset += count;
                 }
-                const byte_length = (value.bit_len + 7) / 8;
-
-                const nodes = try allocator.alloc(Node.Id, chunk_count);
-                defer allocator.free(nodes);
-                @memset(nodes, @as(Node.Id, @enumFromInt(0)));
-                var content_owns_nodes = false;
-                errdefer if (!content_owns_nodes) pool.free(nodes);
-                for (0..chunk_count) |i| {
-                    var leaf_buf = [_]u8{0} ** 32;
-                    const start_idx = i * 32;
-                    const remaining_bytes = byte_length - start_idx;
-
-                    // Determine how many bytes to copy for this chunk
-                    const bytes_to_copy = @min(remaining_bytes, 32);
-
-                    // Copy data if there are bytes to copy
-                    if (bytes_to_copy > 0) {
-                        @memcpy(leaf_buf[0..bytes_to_copy], value.data.items[start_idx..][0..bytes_to_copy]);
-                    }
-
-                    nodes[i] = try pool.createLeaf(&leaf_buf);
-                }
-
-                const contents_tree = try progressive.fillWithContents(allocator, pool, nodes);
-                content_owns_nodes = true;
-                errdefer pool.unref(contents_tree);
-
+                const contents = try builder.finish();
+                errdefer pool.unref(contents);
                 const length_leaf = try pool.createLeafFromUint(value.bit_len);
                 errdefer pool.unref(length_leaf);
-
-                return try pool.createBranch(
-                    contents_tree,
-                    length_leaf,
-                );
+                return try pool.createBranch(contents, length_leaf);
             }
         };
 
