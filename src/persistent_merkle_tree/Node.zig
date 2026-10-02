@@ -160,6 +160,7 @@ pub const State = enum(u32) {
 /// caller-supplied wrapped struct that implements the required methods:
 ///   - `init(allocator, *const T) Error!*const T` — clone the struct into the pool
 ///   - `deinit(allocator) void` — free the cloned struct
+///     Must not allocate nodes from the owning Pool during cleanup.
 ///   - `getRoot(out: *[32]u8) void` — compute the merkle root from cached fields
 ///   - `toTree(pool: *Pool) Error!Id` — materialize a temporary, fully-navigable
 ///     PMT subtree from the cached struct so that proof traversal can walk
@@ -655,77 +656,70 @@ pub const Pool = struct {
     }
 
     pub fn unref(self: *Pool, node_id: Id) void {
-        var stack: [max_depth]Id = undefined;
-        var current: ?Id = node_id;
-        var sp: Depth = 0;
+        const states = self.nodes.items(.state);
+        const payloads = self.nodes.items(.payload);
+        // Once a branch's refcount reaches zero, its original child links are no
+        // longer needed after reading them. Reuse its payload as a stack entry:
+        // low 32 bits = right child still to visit, high 32 bits = previous entry.
+        // `pending` points to the top entry; `next` selects the child to visit now.
+        // This stores traversal state in reclaimed nodes instead of allocating a
+        // separate stack or limiting cleanup to the hashing depth.
+        //
+        // Before retirement:  branch.payload = (left_child, right_child)
+        // After retirement:   pending -> [right_child, previous_pending]
+        //                                      -> [right_child, previous_pending]
+        //                                      -> Id(0)
+        // `unpackLeft` reads the deferred right child; `unpackRight` follows
+        // the link to the previous pending frame.
+        //
+        // Stack entries also enter the free list, whose links live in `state`.
+        // Writing `state` leaves `payload` intact. No allocation from this pool
+        // may occur during cleanup, including from payload destructors, because
+        // reusing a slot could overwrite a pending entry before it is read.
+        // Id(0) is the stack's end marker; user nodes start at max_depth.
+        const end: Id = @enumFromInt(0);
+        var pending: Id = end;
+        var next: ?Id = node_id;
 
         while (true) {
-            const id = current orelse {
-                if (sp == 0) {
-                    break;
-                }
-                sp -= 1;
-                current = stack[sp];
+            const id = next orelse {
+                if (pending == end) return;
+                // The popped entry selects its saved right child. Its high bits
+                // link to the previous entry, not to a tree child anymore.
+                const p = payloads[@intFromEnum(pending)];
+                next = unpackLeft(p);
+                pending = unpackRight(p);
                 continue;
             };
+            next = null;
 
-            // Continue if the node is out of bounds.
-            if (@intFromEnum(id) >= self.nodes.len) {
-                current = null;
-                continue;
-            }
-
-            const states = self.nodes.items(.state);
+            if (@intFromEnum(id) >= states.len) continue;
             const k = states[@intFromEnum(id)].kind();
-
             // Rollback errdefers unref the same spine twice (via node_id and
             // path_parents); tolerate the already-freed slot, don't panic.
-            if (k == .free) {
-                current = null;
-                continue;
-            }
-            // Zero nodes are not ref counted; nothing to do.
-            if (k == .zero) {
-                current = null;
-                continue;
-            }
+            // Zero nodes are not ref counted.
+            if (k == .free or k == .zero) continue;
+            // A node at rc==0 (freshly created and never additionally ref'd)
+            // still gets freed on unref (legacy semantics).
+            if (states[@intFromEnum(id)].decRefCount() != 0) continue;
 
-            // Decrement the reference count, saturating at zero. A node at
-            // rc==0 (freshly created and never additionally ref'd) still
-            // gets freed on unref (legacy semantics).
-            const new_rc = states[@intFromEnum(id)].decRefCount();
-
-            if (new_rc != 0) {
-                current = null;
-                continue;
-            }
-
-            // Reached zero: traverse children before freeing the slot.
             switch (k) {
                 .branch => {
-                    const c = self.nodes.items(.payload)[@intFromEnum(id)];
-                    stack[sp] = unpackRight(c);
-                    sp += 1;
-                    current = unpackLeft(c);
+                    const c = payloads[@intFromEnum(id)];
+                    // Save the right child for later and link this entry to the
+                    // previous stack top. The left child is visited immediately.
+                    payloads[@intFromEnum(id)] = packChildren(unpackRight(c), pending);
+                    pending = id;
+                    next = unpackLeft(c);
                 },
-                .chunked_leaf => {
-                    const storage = chunkedLeafPtr(self.nodes.items(.payload), @intFromEnum(id));
-                    self.allocator.destroy(storage);
-                    current = null;
-                },
+                .chunked_leaf => self.allocator.destroy(chunkedLeafPtr(payloads, @intFromEnum(id))),
                 .container_struct => {
-                    // Free the wrapped struct + the ContainerStructRef heap-allocation.
-                    const ref_ptr = containerStructRef(self.nodes.items(.payload), @intFromEnum(id));
+                    const ref_ptr = containerStructRef(payloads, @intFromEnum(id));
                     ref_ptr.deinit(ref_ptr.ptr, self.allocator);
                     self.allocator.destroy(ref_ptr);
-                    current = null;
                 },
-                else => {
-                    current = null;
-                },
+                else => {},
             }
-            // Return the node to the free list. Free-list link is encoded
-            // in `state` (the State.initFree representation).
             states[@intFromEnum(id)] = State.initFree(self.next_free_node);
             self.next_free_node = id;
             self.nodes_in_use -= 1;
