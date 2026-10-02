@@ -6,7 +6,7 @@ const Plan = @import("ReceivePlan.zig");
 const PeerId = @import("../wire/peer_id.zig").PeerId;
 const types = @import("../types.zig");
 const support = @import("../quic/test_support.zig");
-const routing = @import("../router.zig");
+const Router = @import("../router.zig").Router;
 const quotas = @import("admission_fixture.zig").quotas;
 
 fn options(peers: u16) rr.Options {
@@ -44,7 +44,7 @@ test "inbound admission receive exhaustion and selected handoff checks precede t
         const handles = try support.connectPair(&pair);
         var owner = try rr.init(std.testing.allocator, options(128));
         defer owner.deinit();
-        var router = try routing.Router.init(std.testing.allocator, .{});
+        var router = try Router.init(std.testing.allocator, .{});
         defer router.deinit();
         defer owner.shutdown(&pair.server, &router, pair.now);
         const identity = pair.server.peerId(handles.server).?;

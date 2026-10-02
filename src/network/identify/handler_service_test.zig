@@ -6,7 +6,7 @@ const fixtures = @import("test_support.zig");
 const options = fixtures.serviceOptions;
 const step = fixtures.step;
 
-const service = @import("../service.zig");
+const Service = @import("../service.zig").Service;
 
 test "identify service completes both directions with zero application output and retains pressured results" {
     var pair: support.Pair = .{};
@@ -48,7 +48,7 @@ test "identify service completes both directions with zero application output an
 
 test "identify configured handler controls default and explicit directional capabilities" {
     var opts = try options("");
-    var enabled = try service.Service.init(std.testing.allocator, opts, &try @import("../service_test_support.zig").fixtureLocal(opts.identify));
+    var enabled = try Service.init(std.testing.allocator, opts, &try @import("../service_test_support.zig").fixtureLocal(opts.identify));
     defer enabled.deinit();
     try std.testing.expect(enabled.router.capabilities().receive.contains(.identify));
     try std.testing.expect(enabled.router.capabilities().request.contains(.identify));
@@ -58,7 +58,7 @@ test "identify configured handler controls default and explicit directional capa
     try std.testing.expect(both.receive.contains(.identify) and both.request.contains(.identify));
     for ([_]caps.Directional{ empty, .{ .receive = both.receive, .request = empty.request }, .{ .receive = empty.receive, .request = both.request } }) |active| {
         opts.router.capabilities = active;
-        var configured = try service.Service.init(std.testing.allocator, opts, &try @import("../service_test_support.zig").fixtureLocal(opts.identify));
+        var configured = try Service.init(std.testing.allocator, opts, &try @import("../service_test_support.zig").fixtureLocal(opts.identify));
         defer configured.deinit();
         try std.testing.expectEqualDeep(active, configured.router.capabilities());
     }

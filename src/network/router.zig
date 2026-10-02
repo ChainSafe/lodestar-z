@@ -1,49 +1,50 @@
 const std = @import("std");
-const negotiate = @import("negotiate.zig");
+const Negotiator = @import("negotiate.zig").Negotiator;
 const Engine = @import("quic/Engine.zig");
 const types = @import("types.zig");
 const reqresp = @import("reqresp/protocol.zig");
 const capability = @import("capabilities.zig");
 const Version = @import("gossipsub/protocol.zig").Version;
 
-pub const Kind = @import("protocol.zig").Kind;
-pub const Protocol = @import("protocol.zig").Protocol;
-
-/// Leftover bytes remain borrowed until the next router pump. The selected
-/// handler must copy or consume them synchronously, including a coalesced FIN.
-/// The selection echo is queued, not necessarily sent.
-pub const Selection = struct { protocol: Protocol, leftover: []const u8, fin: bool };
-pub const Outcome = struct {
-    stream: Engine.StreamHandle,
-    direction: types.Direction,
-    owner: ?Kind,
-    result: union(enum) { ready: Selection, rejected, failed: negotiate.Failure },
-};
-
-pub const Error = negotiate.Error || error{ InvalidCapabilities, ProtocolDisabled };
-pub const Options = struct {
-    capabilities: ?capability.Directional = null,
-    negotiations_max: u16 = negotiate.negotiations_max_default,
-    outbound_control_reserved: u16 = 0,
-    outbound_reserved: ?u16 = null,
-    inbound_per_connection_max: u16 = 16,
-    inbound_connections: u16 = 0,
-    meshsub_versions: []const Version = &.{ .v1_2, .v1_1, .v1_0 },
-};
-
 pub const Router = struct {
-    negotiator: negotiate.Negotiator,
-    supported: [capability.protocol_count]negotiate.Protocol = undefined,
+    negotiator: Negotiator,
+    supported: [capability.protocol_count]Negotiator.Protocol = undefined,
     supported_count: u8 = 0,
     available: capability.Set,
     active_capabilities: capability.Directional = .{ .receive = .initEmpty(), .request = .initEmpty() },
     meshsub_versions: [3]Version = undefined,
     meshsub_versions_count: u8,
-    meshsub_candidates: [3]negotiate.Protocol = undefined,
+    meshsub_candidates: [3]Negotiator.Protocol = undefined,
     meshsub_count: u8 = 0,
     /// The negotiator's results that `pump` translates. A field rather than a local so
     /// ReleaseSafe does not fill it every turn.
-    raw_outcomes: [outcomes_per_pump]negotiate.Outcome = undefined,
+    raw_outcomes: [outcomes_per_pump]Negotiator.Outcome = undefined,
+
+    pub const Kind = @import("protocol.zig").Kind;
+    pub const Protocol = @import("protocol.zig").Protocol;
+    pub const outcomes_per_pump: usize = 16;
+
+    /// Leftover bytes remain borrowed until the next router pump. The selected
+    /// handler must copy or consume them synchronously, including a coalesced FIN.
+    /// The selection echo is queued, not necessarily sent.
+    pub const Selection = struct { protocol: Protocol, leftover: []const u8, fin: bool };
+    pub const Outcome = struct {
+        stream: Engine.StreamHandle,
+        direction: types.Direction,
+        owner: ?Kind,
+        result: union(enum) { ready: Selection, rejected, failed: Negotiator.Failure },
+    };
+
+    pub const Error = Negotiator.Error || error{ InvalidCapabilities, ProtocolDisabled };
+    pub const Options = struct {
+        capabilities: ?capability.Directional = null,
+        negotiations_max: u16 = Negotiator.negotiations_max_default,
+        outbound_control_reserved: u16 = 0,
+        outbound_reserved: ?u16 = null,
+        inbound_per_connection_max: u16 = 16,
+        inbound_connections: u16 = 0,
+        meshsub_versions: []const Version = &.{ .v1_2, .v1_1, .v1_0 },
+    };
 
     pub fn validateOptions(options: Options) Error!void {
         if (options.meshsub_versions.len == 0 or options.meshsub_versions.len > 3) {
@@ -55,7 +56,7 @@ pub const Router = struct {
             }
         }
         if (options.capabilities) |active| try validateSet(availableFor(options), active);
-        try negotiate.Negotiator.validateOptions(.{
+        try Negotiator.validateOptions(.{
             .negotiations_max = options.negotiations_max,
             .outbound_control_reserved = options.outbound_control_reserved,
             .outbound_reserved = options.outbound_reserved,
@@ -66,7 +67,7 @@ pub const Router = struct {
 
     pub fn init(allocator: std.mem.Allocator, options: Options) Error!Router {
         try validateOptions(options);
-        var negotiator = try negotiate.Negotiator.init(allocator, .{
+        var negotiator = try Negotiator.init(allocator, .{
             .negotiations_max = options.negotiations_max,
             .outbound_control_reserved = options.outbound_control_reserved,
             .outbound_reserved = options.outbound_reserved,
@@ -242,17 +243,15 @@ pub const Router = struct {
         }
         return count;
     }
+
+    fn descriptor(protocol: Protocol) Negotiator.Protocol {
+        return .{ .id = protocol.id(), .index = protocol.index() };
+    }
+
+    comptime {
+        std.debug.assert(capability.protocol_count <= Negotiator.supported_max);
+    }
 };
-
-fn descriptor(protocol: Protocol) negotiate.Protocol {
-    return .{ .id = protocol.id(), .index = protocol.index() };
-}
-
-pub const outcomes_per_pump: usize = 16;
-
-comptime {
-    std.debug.assert(capability.protocol_count <= negotiate.supported_max);
-}
 
 test {
     _ = @import("router_test.zig");

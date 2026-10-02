@@ -1,7 +1,7 @@
 const config = @import("config");
 const codec = @import("codec.zig");
 const constants = @import("constants.zig");
-const negotiate = @import("../negotiate.zig");
+const Negotiator = @import("../negotiate.zig").Negotiator;
 const types = @import("../types.zig");
 const Handle = types.Handle;
 const Protocol = @import("protocol.zig").Protocol;
@@ -20,7 +20,7 @@ pub const Failure = union(enum) {
     quota_timeout,
     cancelled,
     negotiation_rejected,
-    negotiation_failed: negotiate.Failure,
+    negotiation_failed: Negotiator.Failure,
     invalid_response: (codec.Error || error{InvalidResponseContext}),
     invalid_request: codec.Error,
     too_many_chunks,

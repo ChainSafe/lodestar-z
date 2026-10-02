@@ -10,7 +10,7 @@ const assert = std.debug.assert;
 const protocol = @import("protocol.zig");
 const Protocol = protocol.Protocol;
 const Now = types.Now;
-const routing = @import("../router.zig");
+const Router = @import("../router.zig").Router;
 const RequestOptions = ReqResp.RequestOptions;
 
 const Event = ReqResp.Event;
@@ -255,7 +255,7 @@ pub fn start(self: *Client, input: *const Start, now: Now) void {
     };
 }
 
-pub fn negotiated(slot: *Client, owner: *ReqResp, engine: *Engine, index: u16, outcome: routing.Outcome, now: Now) void {
+pub fn negotiated(slot: *Client, owner: *ReqResp, engine: *Engine, index: u16, outcome: Router.Outcome, now: Now) void {
     const request = &slot.request;
     assert(request.running() and slot.phase == .negotiation);
     assert(std.meta.eql(request.stream, outcome.stream));

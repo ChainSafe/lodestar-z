@@ -1,6 +1,6 @@
 const std = @import("std");
 const codec = @import("codec.zig");
-const routing = @import("../router.zig");
+const Router = @import("../router.zig").Router;
 const Engine = @import("../quic/Engine.zig");
 const types = @import("../types.zig");
 const PeerRef = types.PeerRef;
@@ -62,7 +62,7 @@ pub const Handler = struct {
         outcome: union(enum) { success: codec.Metadata, failed: Failure },
     };
     pub const InitError = std.mem.Allocator.Error || error{InvalidLimits};
-    pub const StartError = routing.Error || error{ PeerLimit, IdentifyCapacity, Stopped };
+    pub const StartError = Router.Error || error{ PeerLimit, IdentifyCapacity, Stopped };
     const deadline_ms = 5_000;
     const outbound_steps_per_pump = 8;
     const Inbound = struct {
@@ -106,13 +106,13 @@ pub const Handler = struct {
             self.ready = false;
         }
 
-        fn cancel(self: *Outbound, router: *routing.Router, engine: *Engine, failure: Failure) void {
+        fn cancel(self: *Outbound, router: *Router, engine: *Engine, failure: Failure) void {
             if (self.stream == null or self.phase == .terminal) return;
             if (self.phase == .negotiating) router.cancel(engine, self.stream.?);
             self.finish(engine, .{ .failed = failure });
         }
 
-        fn advance(self: *Outbound, router: *routing.Router, engine: *Engine, now_ms: u64) void {
+        fn advance(self: *Outbound, router: *Router, engine: *Engine, now_ms: u64) void {
             const stream = self.stream orelse return;
             if (self.phase == .terminal) return;
             if (now_ms >= self.deadline) return self.cancel(router, engine, .timeout);
@@ -181,7 +181,7 @@ pub const Handler = struct {
         return self.inbound.len * @sizeOf(Inbound) + self.outbound.len * @sizeOf(Outbound);
     }
 
-    pub fn start(self: *Handler, router: *routing.Router, engine: *Engine, peer: PeerRef, conn: Engine.Handle, now: types.Now) StartError!void {
+    pub fn start(self: *Handler, router: *Router, engine: *Engine, peer: PeerRef, conn: Engine.Handle, now: types.Now) StartError!void {
         if (self.stopped) return error.Stopped;
         for (self.outbound) |*slot| if (slot.stream) |stream| {
             if (std.meta.eql(stream.conn, conn)) return error.PeerLimit;
@@ -238,7 +238,7 @@ pub const Handler = struct {
         };
     }
 
-    pub fn negotiationResult(self: *Handler, router: *const routing.Router, engine: *Engine, outcome: routing.Outcome, now: types.Now) void {
+    pub fn negotiationResult(self: *Handler, router: *const Router, engine: *Engine, outcome: Router.Outcome, now: types.Now) void {
         if (outcome.direction == .outbound) {
             for (self.outbound, 0..) |*slot, index| if (std.meta.eql(slot.stream, outcome.stream) and slot.phase == .negotiating) {
                 switch (outcome.result) {
@@ -282,7 +282,7 @@ pub const Handler = struct {
         engine.closeStream(outcome.stream, types.app_error_normal);
     }
 
-    pub fn pump(self: *Handler, router: *routing.Router, engine: *Engine, now: types.Now, out: []Result) usize {
+    pub fn pump(self: *Handler, router: *Router, engine: *Engine, now: types.Now, out: []Result) usize {
         for (self.inbound) |*slot| slot.advance(engine, now.mono_ms);
         var count: usize = 0;
         const start_index = self.delivery_cursor;
@@ -317,7 +317,7 @@ pub const Handler = struct {
         return due;
     }
 
-    pub fn shutdown(self: *Handler, router: *routing.Router, engine: *Engine) void {
+    pub fn shutdown(self: *Handler, router: *Router, engine: *Engine) void {
         self.stopped = true;
         for (self.inbound) |*slot| slot.close(engine);
         for (self.outbound) |*slot| slot.cancel(router, engine, .shutdown);

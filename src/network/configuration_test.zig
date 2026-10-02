@@ -3,7 +3,7 @@ const policy_fixture = @import("reqresp/policy_fixture.zig");
 const resolve = @import("configuration.zig").resolve;
 const rr = @import("reqresp/ReqResp.zig");
 const std = @import("std");
-const transport = @import("transport.zig");
+const Transport = @import("transport.zig").Transport;
 const udp = @import("udp");
 const validate = @import("configuration.zig").validate;
 
@@ -191,7 +191,7 @@ test "configuration request admission memory plan measures both retained profile
 }
 
 test "configuration preserves independent transport work limits" {
-    const limits: transport.WorkLimits = .{ .send_per_step_max = 3, .receive_per_step_max = 2, .burst_per_connection = 2 };
+    const limits: Transport.WorkLimits = .{ .send_per_step_max = 3, .receive_per_step_max = 2, .burst_per_connection = 2 };
     const resolved = try resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .work_limits = limits, .admission_policy = policy_fixture.config() });
     try std.testing.expectEqual(limits, resolved.work_limits);
     try std.testing.expectError(error.InvalidLimits, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .work_limits = .{ .send_per_step_max = 0 }, .admission_policy = policy_fixture.config() }));

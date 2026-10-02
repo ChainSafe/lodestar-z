@@ -5,7 +5,7 @@ const protocol = @import("protocol.zig");
 const reqresp = @import("ReqResp.zig");
 const harness = @import("test_pair.zig");
 const Engine = @import("../quic/Engine.zig");
-const negotiate = @import("../router.zig");
+const Router = @import("../router.zig").Router;
 const Event = reqresp.Event;
 const Protocol = protocol.Protocol;
 const Pair = harness.Pair;
@@ -63,7 +63,7 @@ test "reqresp negotiated handoff starts a fresh progress interval" {
         try setup.shared.pair.pump();
         var storage: [16]Engine.Event = undefined;
         setup.shared.server.router.transportEvents(&setup.shared.pair.server, setup.shared.pair.events(&setup.shared.pair.server, &storage), setup.shared.pair.now);
-        var outcomes: [8]negotiate.Outcome = undefined;
+        var outcomes: [8]Router.Outcome = undefined;
         setup.forwardEvents();
         _ = setup.shared.server.router.pump(&setup.shared.pair.server, setup.shared.pair.now, &outcomes);
         setup.forwardEvents();
@@ -205,7 +205,7 @@ test "reqresp absolute request phase expires under real stream backpressure" {
             ),
             else => {},
         };
-        var outcomes: [8]negotiate.Outcome = undefined;
+        var outcomes: [8]Router.Outcome = undefined;
         setup.forwardEvents();
         const listened = setup.shared.server.router.pump(&setup.shared.pair.server, setup.shared.pair.now, &outcomes);
         for (outcomes[0..listened]) |outcome| try std.testing.expect(outcome.result == .ready);

@@ -10,7 +10,7 @@ const constants = @import("constants.zig");
 const Engine = @import("quic/Engine.zig");
 const keys = @import("wire/keys.zig");
 const t = @import("peers/types.zig");
-const transport_mod = @import("transport.zig");
+const Transport = @import("transport.zig").Transport;
 const types = @import("types.zig");
 const local_intent = @import("gossipsub/local_intent.zig");
 const topic_policy = @import("gossipsub/topic_policy.zig");
@@ -232,7 +232,7 @@ pub const Link = struct {
             var retry: ?struct { bytes: [constants.datagram_size_max]u8, len: usize, from: types.Address } = null;
             var budget: u32 = 0;
             var drained = false;
-            while (budget < transport_mod.send_burst_max) {
+            while (budget < Transport.send_burst_max) {
                 const count = self.batch.fill(from, index, self.now);
                 budget += count;
                 moved = moved or count > 0;

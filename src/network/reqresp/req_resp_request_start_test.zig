@@ -523,7 +523,7 @@ fn expectRateLimitResponse(setup: *harness.Pair, stream: @import("../types.zig")
         if (read.fin) {
             try std.testing.expect(selected and decoder.isDone());
             try std.testing.expectEqual(@as(u8, 139), decoder.result());
-            try std.testing.expect(std.mem.startsWith(u8, decoder.payload(), "Rate limited"));
+            try std.testing.expectEqualStrings("Rate limited: already 2 active requests for this protocol", decoder.payload());
             return;
         }
     }

@@ -38,7 +38,7 @@ pub const Pair = struct {
         try self.shared.init(try serviceOptions(client, &self.forks), try serviceOptions(server, &self.forks));
     }
 
-    fn serviceOptions(overrides: Overrides, forks: []const @import("../types.zig").ForkEntry) !@import("../service.zig").Options {
+    fn serviceOptions(overrides: Overrides, forks: []const @import("../types.zig").ForkEntry) !@import("../service.zig").Service.Options {
         return .{ .reqresp = try options(overrides, forks), .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1, .seen_capacity = 128, .mcache_capacity = 16, .validation_capacity = 8 } };
     }
 

@@ -522,7 +522,7 @@ const Spoke = struct {
         defer self.core.deinit(io);
         const payload = try shared.allocator.alloc(u8, @max(shared.chain.attestation_bytes, options.column_bytes));
         defer shared.allocator.free(payload);
-        var now = try network.transport.currentTime(io);
+        var now = try network.Transport.currentTime(io);
         try self.core.connectUntil(&shared.hub_id, &.{shared.hub_address}, now, now.mono_ms + 10_000);
         try shared.chain.subscribe(&self.core, options, self.index, now);
         const schedule = shared.schedule.of(self.index);
@@ -534,7 +534,7 @@ const Spoke = struct {
         var next_tick: u64 = 0;
         for (0..1 << 40) |_| {
             if (shared.stop.load(.acquire)) break;
-            now = try network.transport.currentTime(io);
+            now = try network.Transport.currentTime(io);
             if (!signalled and shared.chain.meshed(&self.core, options, self.index, null)) {
                 signalled = true;
                 _ = shared.ready.fetchAdd(1, .acq_rel);
@@ -544,7 +544,7 @@ const Spoke = struct {
             if (slow) {
                 if (now.mono_ms < next_tick) try io.sleep(.fromMilliseconds(@intCast(next_tick - now.mono_ms)), .awake);
                 next_tick = @max(next_tick, now.mono_ms) + slow_tick_ms;
-                now = try network.transport.currentTime(io);
+                now = try network.Transport.currentTime(io);
                 wake = now.mono_ms;
             }
             const result = self.core.step(io, now, outputs, .deadlineOnly(wake));
@@ -736,7 +736,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     defer allocator.free(host.ring);
     host.attach(hub);
     defer hub.service.gossipsub.message_sink = null;
-    try chain.subscribe(hub, options, null, try network.transport.currentTime(io));
+    try chain.subscribe(hub, options, null, try network.Transport.currentTime(io));
 
     var shared: Shared = .{ .io = io, .allocator = allocator, .chain = chain, .options = options, .schedule = &schedule, .hub_id = hub.peerId(), .hub_address = hub.transport.localAddress() };
     const spokes = try allocator.alloc(Spoke, options.peers);
@@ -756,9 +756,9 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     var peer_events: [64]t.Event = undefined;
     var application: [16]network.reqresp.ReqResp.Event = undefined;
     const outputs: network.NetworkCore.Outputs = .{ .peers = &peer_events, .application = &application };
-    const setup_start = try network.transport.currentTime(io);
+    const setup_start = try network.Transport.currentTime(io);
     for (0..1 << 20) |_| {
-        const now = try network.transport.currentTime(io);
+        const now = try network.Transport.currentTime(io);
         const result = hub.step(io, now, outputs, .{ .context = &host, .apply = Host.apply, .deadline_ms = now.mono_ms + 5 });
         if (result.readiness.failure) |err| return err;
         if (shared.failed.load(.acquire)) return spokeFailure(spokes);
@@ -768,7 +768,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
             return error.SetupDeadline;
         }
     }
-    const setup_end = try network.transport.currentTime(io);
+    const setup_end = try network.Transport.currentTime(io);
     const start_ms = setup_end.mono_ms + 20;
     std.debug.print("case=gossip_burst setup_ms={d} connected={d}\n", .{ setup_end.mono_ms - setup_start.mono_ms, hub.peerCounts().connected });
 
@@ -787,7 +787,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     var next_sample = start_ms + options.sample_ms;
     shared.start_ms.store(start_ms, .release);
     for (0..1 << 40) |_| {
-        const now = try network.transport.currentTime(io);
+        const now = try network.Transport.currentTime(io);
         while (window < bounds.len and now.mono_ms >= bounds[window]) : (window += 1) edges[window] = .read(hub, &host, step_count, now.mono_ms);
         if (window == bounds.len) break;
         if (now.mono_ms >= next_sample and sample_count < samples.len) {

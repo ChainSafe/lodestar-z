@@ -1,8 +1,8 @@
 const std = @import("std");
 const d = @import("discv5");
 const manager = @import("peer_manager.zig");
-const service_mod = @import("service.zig");
-const transport_mod = @import("transport.zig");
+const Service = @import("service.zig").Service;
+const Transport = @import("transport.zig").Transport;
 const Engine = @import("quic/Engine.zig");
 const t = @import("peers/types.zig");
 const peers = @import("peers/root.zig");
@@ -77,11 +77,11 @@ pub const NetworkCore = struct {
         peers: []t.Event = &.{},
         application: []rr.ReqResp.Event = &.{},
     };
-    pub const OperationalError = transport_mod.StepError || transport_mod.DialError || peers.Discovery.Error || wait.Error;
+    pub const OperationalError = Transport.StepError || Transport.DialError || peers.Discovery.Error || wait.Error;
     pub const Counts = struct { peers: usize, application: usize };
     pub const Result = struct {
         counts: Counts = .{ .peers = 0, .application = 0 },
-        transport: transport_mod.StepResult,
+        transport: Transport.StepResult,
         readiness: wait.Result = .{},
         /// Only the discovery sockets had work, so the transport and protocols did not run.
         discovery_only: bool = false,
@@ -101,10 +101,10 @@ pub const NetworkCore = struct {
 
     reservations: @import("reservations.zig").Reservations,
     allocator: std.mem.Allocator,
-    transport: transport_mod.Transport,
+    transport: Transport,
     peer_manager: manager.PeerManager,
     control_protocol: ControlProtocol,
-    service: service_mod.Service,
+    service: Service,
     discovery: ?*peers.Discovery,
     native_events: []Engine.Event,
     native_event_count: usize = 0,
@@ -150,7 +150,7 @@ pub const NetworkCore = struct {
         self.host_more = false;
         self.native_event_count = 0;
         self.discovery = null;
-        self.last_now = try transport_mod.currentTime(io);
+        self.last_now = try Transport.currentTime(io);
         try self.transport.init(allocator, io, .{ .host = startup.host, .bind = startup.bind, .limits = resolved.limits, .work_limits = resolved.work_limits, .socket_buffers = resolved.socket_buffers.quic });
         errdefer self.transport.deinit(io);
         if (startup.discovery) |discovery_options| {
@@ -167,7 +167,7 @@ pub const NetworkCore = struct {
         service_options.reqresp.request_fork = local.fork.fork;
         const identify_base = try service_options.identify.makeLocal(&self.transport.peerId(), &self.transport.sockets.localAddresses());
         const identify_local = try prepareIdentifyLocal(&identify_base, self.advertisementEndpoints(), @import("router.zig").Router.initialCapabilities(service_options.router));
-        self.service = try service_mod.Service.init(allocator, service_options, &identify_local);
+        self.service = try Service.init(allocator, service_options, &identify_local);
         errdefer self.service.deinit();
         self.peer_manager = try manager.PeerManager.init(allocator, &self.transport.peerId(), &local, resolved.core.peerManager(), self.service.router.capabilities().receive, self.transport.engine.limits.connections_max);
         errdefer self.peer_manager.deinit();
@@ -187,7 +187,7 @@ pub const NetworkCore = struct {
 
     pub fn deinit(self: *NetworkCore, io: std.Io) void {
         if (!self.initialized) return;
-        const read = transport_mod.currentTime(io) catch self.last_now;
+        const read = Transport.currentTime(io) catch self.last_now;
         self.shutdown(if (read.mono_ms >= self.last_now.mono_ms) read else self.last_now);
         if (self.discovery) |owned| {
             owned.deinit(io);
@@ -549,7 +549,7 @@ pub const NetworkCore = struct {
         result.failure = result.readiness.failure;
         const step_start = @import("metrics/timing.zig").now(io);
         defer self.step_duration.observe(@import("metrics/timing.zig").now(io) -| step_start);
-        const read = transport_mod.currentTime(io) catch |err| blk: {
+        const read = Transport.currentTime(io) catch |err| blk: {
             result.failure = result.failure orelse err;
             self.counters.transport_failures +|= 1;
             break :blk now;

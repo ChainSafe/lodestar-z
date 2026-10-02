@@ -2,7 +2,7 @@ const std = @import("std");
 const RequestIO = @import("RequestIO.zig");
 const rr = @import("ReqResp.zig");
 const protocol = @import("protocol.zig");
-const routing = @import("../router.zig");
+const Router = @import("../router.zig").Router;
 const support = @import("../quic/test_support.zig");
 
 const reservedOptions = @import("control_fixture.zig").reservedOptions;
@@ -45,7 +45,7 @@ test "reqresp decoder captures configured root byte bounds before reading a body
     try pair.init(.{}, .{});
     defer pair.deinit();
     const handles = try support.connectPair(&pair);
-    var router = try routing.Router.init(std.testing.allocator, .{});
+    var router = try Router.init(std.testing.allocator, .{});
     defer router.deinit();
     var options = try reservedOptions();
     options.admission.policy.blob_identifiers_deneb = 2;
@@ -95,7 +95,7 @@ test "reqresp compact control admission rejects oversized handoffs before claimi
     try pair.init(.{}, .{});
     defer pair.deinit();
     const handles = try support.connectPair(&pair);
-    var router = try routing.Router.init(std.testing.allocator, .{});
+    var router = try Router.init(std.testing.allocator, .{});
     defer router.deinit();
     var requests = try rr.init(std.testing.allocator, try reservedOptions());
     defer requests.deinit();
@@ -116,7 +116,7 @@ test "reqresp control capacity protects outbound slots and retains terminal owne
     try pair.init(.{}, .{});
     defer pair.deinit();
     const handles = try support.connectPair(&pair);
-    var router = try routing.Router.init(std.testing.allocator, .{});
+    var router = try Router.init(std.testing.allocator, .{});
     defer router.deinit();
     var requests = try rr.init(std.testing.allocator, try reservedOptions());
     defer requests.deinit();
@@ -220,9 +220,9 @@ test "router control capacity protects outbound negotiations from unknown inboun
     try pair.init(.{}, .{});
     defer pair.deinit();
     const handles = try support.connectPair(&pair);
-    var options: routing.Options = .{ .negotiations_max = 4 };
+    var options: Router.Options = .{ .negotiations_max = 4 };
     options.outbound_control_reserved = 2;
-    var router = try routing.Router.init(std.testing.allocator, options);
+    var router = try Router.init(std.testing.allocator, options);
     defer router.deinit();
     const first = try router.beginOutbound(
         &pair.client,
@@ -255,7 +255,7 @@ test "reqresp control capacity bounds application requests per peer across proto
     try pair.init(.{}, .{});
     defer pair.deinit();
     const handles = try support.connectPair(&pair);
-    var router = try routing.Router.init(std.testing.allocator, .{});
+    var router = try Router.init(std.testing.allocator, .{});
     defer router.deinit();
     var options: rr.Options = .{ .admission = try rr.Options.Admission.defaults(&@import("policy_fixture.zig").config(), 8, 2, 4), .outbound_max = 4, .inbound_max = 4, .forks = &.{} };
     options.outbound_per_peer_max = 2;
@@ -355,7 +355,7 @@ test "reqresp control capacity bounds application requests per peer across proto
     );
 }
 
-const service_mod = @import("../service.zig");
+const Service = @import("../service.zig").Service;
 const Engine = @import("../quic/Engine.zig");
 
 fn inboundStream(pair: *support.Pair, conn: Engine.Handle) !Engine.StreamHandle {
@@ -379,7 +379,7 @@ test "reqresp control capacity raw and service inbound admission select the same
     var server = try @import("../service_test_support.zig").initService(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } }, &pair.server);
     defer server.deinit();
     defer server.reqresp.shutdown(&pair.server, &server.router, pair.now);
-    const ordinary: routing.Selection = .{
+    const ordinary: Router.Selection = .{
         .protocol = .{ .reqresp = .blocks_by_root_v2 },
         .leftover = &.{},
         .fin = false,
@@ -416,7 +416,7 @@ test "reqresp admission refusals distinguish capacity and concurrency without fa
         try pair.init(.{}, .{});
         defer pair.deinit();
         const handles = try support.connectPair(&pair);
-        var router = try routing.Router.init(std.testing.allocator, .{});
+        var router = try Router.init(std.testing.allocator, .{});
         defer router.deinit();
         var requests = try rr.init(std.testing.allocator, .{
             .outbound_max = 1,
@@ -487,7 +487,7 @@ test "reqresp control capacity validates headroom and cleans every allocation pr
     defer valid.deinit();
     try std.testing.expectError(
         error.InvalidLimits,
-        routing.Router.init(
+        Router.init(
             std.testing.allocator,
             .{ .negotiations_max = 4, .outbound_control_reserved = 5 },
         ),
@@ -504,7 +504,7 @@ test "reqresp control capacity zero defaults retain all ordinary slots and admis
         .{ .outbound_max = 4, .inbound_max = 4, .forks = &.{}, .admission = try rr.Options.Admission.defaults(&@import("policy_fixture.zig").config(), 8, 2, 4) },
     );
     defer requests.deinit();
-    var router = try routing.Router.init(std.testing.allocator, .{ .negotiations_max = 4 });
+    var router = try Router.init(std.testing.allocator, .{ .negotiations_max = 4 });
     defer router.deinit();
     const size = protocol.Protocol.blocks_by_root_v2.info().response_max;
     const sinks = try std.testing.allocator.alloc(u8, 4 * size);
@@ -585,7 +585,7 @@ test "router control capacity counts pending and reported negotiations until rec
     try pair.init(.{}, .{});
     defer pair.deinit();
     const handles = try support.connectPair(&pair);
-    var router = try routing.Router.init(
+    var router = try Router.init(
         std.testing.allocator,
         .{ .negotiations_max = 2, .outbound_control_reserved = 1 },
     );
@@ -598,10 +598,10 @@ test "router control capacity counts pending and reported negotiations until rec
         error.NegotiationTableFull,
         router.beginMeshsub(&pair.client, handles.client, pair.now),
     );
-    var output: [1]routing.Outcome = undefined;
+    var output: [1]Router.Outcome = undefined;
     try std.testing.expectEqual(1, router.pump(&pair.client, pair.now, &output));
     try std.testing.expectEqual(
-        @import("../negotiate.zig").Failure.timeout,
+        @import("../negotiate.zig").Negotiator.Failure.timeout,
         output[0].result.failed,
     );
     try std.testing.expectError(
@@ -623,7 +623,7 @@ test "router control capacity counts pending and reported negotiations until rec
 fn allocationFailures(allocator: std.mem.Allocator) !void {
     var options = try reservedOptions();
     options.outbound_per_peer_max = 2;
-    var service = try service_mod.Service.init(allocator, .{
+    var service = try Service.init(allocator, .{
         .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 },
         .reqresp = options,
         .router = .{ .negotiations_max = 4, .outbound_control_reserved = 2 },

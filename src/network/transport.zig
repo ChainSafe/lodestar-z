@@ -11,94 +11,6 @@ const Sockets = @import("udp").Sockets;
 
 const assert = std.debug.assert;
 
-pub const Options = struct {
-    host: *const keys.KeyPair,
-    bind: Sockets.Bindings,
-    limits: Engine.Limits = .{},
-    work_limits: WorkLimits = .{},
-    /// Null keeps the system's default socket buffer sizes.
-    socket_buffers: ?Sockets.Buffers = null,
-};
-
-pub const InitError = tls.Error || Engine.Error || std.Io.net.IpAddress.BindError ||
-    std.Io.RandomSecureError || error{ClockOutOfRange};
-
-pub const send_burst_max: u16 = 256;
-
-pub const WorkLimits = struct {
-    /// Datagrams sent per turn.
-    send_per_step_max: u16 = send_burst_max,
-    receive_per_step_max: u16 = constants.receive_batch_max,
-    /// Datagrams sent per dirty-connection visit.
-    burst_per_connection: u16 = constants.send_batch_max,
-
-    pub fn validate(self: WorkLimits) error{InvalidLimits}!void {
-        if (self.send_per_step_max == 0 or self.send_per_step_max > send_burst_max) return error.InvalidLimits;
-        if (self.receive_per_step_max == 0 or self.receive_per_step_max > constants.receive_batch_max) return error.InvalidLimits;
-        if (self.burst_per_connection == 0 or self.burst_per_connection > self.send_per_step_max) return error.InvalidLimits;
-    }
-};
-
-/// One sendmmsg batch. quiche writes each datagram straight into `buffers`, and datagrams of
-/// different connections share a batch.
-pub const SendBatch = struct {
-    buffers: [constants.send_batch_max][constants.datagram_size_max]u8 = undefined,
-    outgoing: [constants.send_batch_max]Sockets.Outgoing = undefined,
-    release_times: [constants.send_batch_max]u64 = undefined,
-    scratch: Sockets.BatchScratch = undefined,
-    owners: [constants.send_batch_max]types.Handle = undefined,
-};
-
-/// Configured QUIC windows and the send batch, excluding native overhead.
-pub const MemoryPlan = struct {
-    engine: Engine.MemoryPlan,
-    ready_batch_datagrams: u8 = constants.send_batch_max,
-    ready_batch_storage_bytes: u64 = @sizeOf(SendBatch),
-};
-
-pub const StepError = Sockets.DatagramError || error{ClockOutOfRange};
-pub const DialError = Sockets.SendError || Engine.DialError || error{ ClockOutOfRange, DestinationUnreachable, MissingPeerId };
-
-/// Options of the standalone `step`, which also waits for the socket. NetworkCore polls its
-/// sockets itself and drives the phases directly.
-pub const StepOptions = struct {
-    wait_max_ms: u32 = constants.poll_interval_ms,
-};
-
-const Received = union(enum) {
-    datagram: Sockets.Datagram,
-    dropped,
-    timeout,
-};
-
-pub const StepResult = struct {
-    now: Engine.Now,
-    datagrams_received: u32 = 0,
-    datagrams_accepted: u32 = 0,
-    datagrams_dropped: u32 = 0,
-    version_negotiations: u32 = 0,
-    datagrams_sent: u32 = 0,
-    send_calls: u32 = 0,
-    receive_errors: u32 = 0,
-    send_failures: u32 = 0,
-    events: usize = 0,
-    events_pending: bool = false,
-    /// A flush stopped at a burst or turn budget, so connections still have output.
-    backlog: bool = false,
-};
-
-pub const ProgressResult = struct {
-    progress: StepResult,
-    failure: ?StepError = null,
-};
-
-pub const Counters = struct {
-    received_bytes: u64 = 0,
-    sent_bytes: u64 = 0,
-    received_datagrams: u64 = 0,
-    sent_datagrams: u64 = 0,
-};
-
 pub const Transport = struct {
     engine: Engine = undefined,
     sockets: Sockets = .{},
@@ -108,6 +20,94 @@ pub const Transport = struct {
     batch: SendBatch = .{},
     batch_len: u8 = 0,
     receive_buffer: [constants.datagram_size_max]u8 = undefined,
+
+    pub const Options = struct {
+        host: *const keys.KeyPair,
+        bind: Sockets.Bindings,
+        limits: Engine.Limits = .{},
+        work_limits: WorkLimits = .{},
+        /// Null keeps the system's default socket buffer sizes.
+        socket_buffers: ?Sockets.Buffers = null,
+    };
+
+    pub const InitError = tls.Error || Engine.Error || std.Io.net.IpAddress.BindError ||
+        std.Io.RandomSecureError || error{ClockOutOfRange};
+
+    pub const send_burst_max: u16 = 256;
+
+    pub const WorkLimits = struct {
+        /// Datagrams sent per turn.
+        send_per_step_max: u16 = send_burst_max,
+        receive_per_step_max: u16 = constants.receive_batch_max,
+        /// Datagrams sent per dirty-connection visit.
+        burst_per_connection: u16 = constants.send_batch_max,
+
+        pub fn validate(self: WorkLimits) error{InvalidLimits}!void {
+            if (self.send_per_step_max == 0 or self.send_per_step_max > send_burst_max) return error.InvalidLimits;
+            if (self.receive_per_step_max == 0 or self.receive_per_step_max > constants.receive_batch_max) return error.InvalidLimits;
+            if (self.burst_per_connection == 0 or self.burst_per_connection > self.send_per_step_max) return error.InvalidLimits;
+        }
+    };
+
+    /// One sendmmsg batch. quiche writes each datagram straight into `buffers`, and datagrams of
+    /// different connections share a batch.
+    pub const SendBatch = struct {
+        buffers: [constants.send_batch_max][constants.datagram_size_max]u8 = undefined,
+        outgoing: [constants.send_batch_max]Sockets.Outgoing = undefined,
+        release_times: [constants.send_batch_max]u64 = undefined,
+        scratch: Sockets.BatchScratch = undefined,
+        owners: [constants.send_batch_max]types.Handle = undefined,
+    };
+
+    /// Configured QUIC windows and the send batch, excluding native overhead.
+    pub const MemoryPlan = struct {
+        engine: Engine.MemoryPlan,
+        ready_batch_datagrams: u8 = constants.send_batch_max,
+        ready_batch_storage_bytes: u64 = @sizeOf(SendBatch),
+    };
+
+    pub const StepError = Sockets.DatagramError || error{ClockOutOfRange};
+    pub const DialError = Sockets.SendError || Engine.DialError || error{ ClockOutOfRange, DestinationUnreachable, MissingPeerId };
+
+    /// Options of the standalone `step`, which also waits for the socket. NetworkCore polls its
+    /// sockets itself and drives the phases directly.
+    pub const StepOptions = struct {
+        wait_max_ms: u32 = constants.poll_interval_ms,
+    };
+
+    const Received = union(enum) {
+        datagram: Sockets.Datagram,
+        dropped,
+        timeout,
+    };
+
+    pub const StepResult = struct {
+        now: Engine.Now,
+        datagrams_received: u32 = 0,
+        datagrams_accepted: u32 = 0,
+        datagrams_dropped: u32 = 0,
+        version_negotiations: u32 = 0,
+        datagrams_sent: u32 = 0,
+        send_calls: u32 = 0,
+        receive_errors: u32 = 0,
+        send_failures: u32 = 0,
+        events: usize = 0,
+        events_pending: bool = false,
+        /// A flush stopped at a burst or turn budget, so connections still have output.
+        backlog: bool = false,
+    };
+
+    pub const ProgressResult = struct {
+        progress: StepResult,
+        failure: ?StepError = null,
+    };
+
+    pub const Counters = struct {
+        received_bytes: u64 = 0,
+        sent_bytes: u64 = 0,
+        received_datagrams: u64 = 0,
+        sent_datagrams: u64 = 0,
+    };
 
     /// The I/O provider must honor std.Io.randomSecure's external entropy contract.
     pub fn init(
@@ -437,37 +437,37 @@ pub const Transport = struct {
         self.counters.sent_bytes +|= bytes.len;
         self.counters.sent_datagrams +|= 1;
     }
+
+    /// quiche 0.28 under CUBIC releases every datagram at its send time. A controller that paces
+    /// would need held datagrams, which this transport does not keep.
+    fn assertReleased(io: std.Io, release_times: []const u64) void {
+        const now = currentTime(io) catch return;
+        for (release_times) |release_time| assert(release_time <= now.nanos());
+    }
+
+    fn receiveTimeout(wait_ms: u32) std.Io.Timeout {
+        return .{ .duration = .{
+            .raw = .fromMilliseconds(wait_ms),
+            .clock = .awake,
+        } };
+    }
+
+    pub fn currentTime(io: std.Io) error{ClockOutOfRange}!Engine.Now {
+        const mono = std.Io.Clock.awake.now(io).nanoseconds;
+        const wall = std.Io.Clock.real.now(io).toSeconds();
+        if (mono < 0 or mono > std.math.maxInt(u64) or wall < 0) return error.ClockOutOfRange;
+        return .{ .mono_ms = @intCast(@divTrunc(mono, std.time.ns_per_ms)), .mono_ns = @intCast(mono), .unix_s = wall };
+    }
+
+    comptime {
+        assert(@sizeOf(Transport) <= 32 * 1_024);
+        assert(send_burst_max % constants.send_batch_max == 0);
+    }
 };
 
-/// quiche 0.28 under CUBIC releases every datagram at its send time. A controller that paces
-/// would need held datagrams, which this transport does not keep.
-fn assertReleased(io: std.Io, release_times: []const u64) void {
-    const now = currentTime(io) catch return;
-    for (release_times) |release_time| assert(release_time <= now.nanos());
-}
-
-fn receiveTimeout(wait_ms: u32) std.Io.Timeout {
-    return .{ .duration = .{
-        .raw = .fromMilliseconds(wait_ms),
-        .clock = .awake,
-    } };
-}
-
-pub fn currentTime(io: std.Io) error{ClockOutOfRange}!Engine.Now {
-    const mono = std.Io.Clock.awake.now(io).nanoseconds;
-    const wall = std.Io.Clock.real.now(io).toSeconds();
-    if (mono < 0 or mono > std.math.maxInt(u64) or wall < 0) return error.ClockOutOfRange;
-    return .{ .mono_ms = @intCast(@divTrunc(mono, std.time.ns_per_ms)), .mono_ns = @intCast(mono), .unix_s = wall };
-}
-
-comptime {
-    assert(@sizeOf(Transport) <= 32 * 1_024);
-    assert(send_burst_max % constants.send_batch_max == 0);
-}
-
 test "transport zero wait remains an actual nonblocking timeout" {
-    try std.testing.expectEqual(@as(i96, 0), receiveTimeout(0).duration.raw.nanoseconds);
-    try std.testing.expectEqual(@as(i96, 5 * std.time.ns_per_ms), receiveTimeout(5).duration.raw.nanoseconds);
+    try std.testing.expectEqual(@as(i96, 0), Transport.receiveTimeout(0).duration.raw.nanoseconds);
+    try std.testing.expectEqual(@as(i96, 5 * std.time.ns_per_ms), Transport.receiveTimeout(5).duration.raw.nanoseconds);
 }
 
 test {

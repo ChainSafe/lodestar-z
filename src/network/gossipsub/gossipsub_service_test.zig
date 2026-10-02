@@ -1,11 +1,10 @@
 const gossip_test = @import("test_support.zig");
 const std = @import("std");
-const service_mod = @import("../service.zig");
+const Service = @import("../service.zig").Service;
 const topic_mod = @import("topic.zig");
 const Engine = @import("../quic/Engine.zig");
 const support = @import("../quic/test_support.zig");
 
-const Service = service_mod.Service;
 const digest = topic_mod.ForkDigest{ 0x6a, 0x95, 0xa1, 0xa9 };
 const heartbeat = @import("constants.zig").heartbeat_interval_ms;
 
@@ -112,7 +111,7 @@ test "gossipsub direct send timeout retries once after a bounded delay" {
         } else {
             if (recovery == .negotiation_timeout) {
                 try std.testing.expectEqual(started + 1, g.counters.negotiation_started);
-                setup.shared.pair.advance(@import("../negotiate.zig").negotiate_timeout_ms + 1);
+                setup.shared.pair.advance(@import("../negotiate.zig").Negotiator.negotiate_timeout_ms + 1);
                 _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{});
             }
             try std.testing.expect(g.sessions.rows[index].outbound == .none);
@@ -336,7 +335,7 @@ test "gossipsub negotiation timeout releases resources without creating a retry 
     setup.shared.client.gossipsub.markDirect(setup.shared.handles.client);
     try gossip_test.subscribe(setup.shared.client.gossipsub, "/eth2/6a95a1a9/beacon_block/ssz_snappy");
     _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{});
-    setup.shared.pair.advance(@import("../negotiate.zig").negotiate_timeout_ms + 1);
+    setup.shared.pair.advance(@import("../negotiate.zig").Negotiator.negotiate_timeout_ms + 1);
     _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{});
     _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{});
     try std.testing.expect(setup.shared.client.router.nextWakeup(setup.shared.pair.now, 16) == null);

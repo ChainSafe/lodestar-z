@@ -4,7 +4,7 @@ const protocol = @import("protocol.zig");
 const reqresp = @import("ReqResp.zig");
 const harness = @import("test_pair.zig");
 const Engine = @import("../quic/Engine.zig");
-const negotiate = @import("../router.zig");
+const Router = @import("../router.zig").Router;
 const Event = reqresp.Event;
 const Protocol = protocol.Protocol;
 const Pair = harness.Pair;
@@ -300,7 +300,7 @@ test "reqresp request write preserves already readable native response" {
             .stream_opened => |stream| try setup.shared.server.router.negotiator.acceptInbound(&setup.shared.pair.server, stream, setup.shared.pair.now),
             else => {},
         };
-        var outcomes: [8]negotiate.Outcome = undefined;
+        var outcomes: [8]Router.Outcome = undefined;
         setup.forwardEvents();
         const client_count = setup.shared.client.router.pump(&setup.shared.pair.client, setup.shared.pair.now, &outcomes);
         for (outcomes[0..client_count]) |outcome| try std.testing.expect(setup.shared.client.reqresp.negotiated(&setup.shared.pair.client, outcome, setup.shared.pair.now));

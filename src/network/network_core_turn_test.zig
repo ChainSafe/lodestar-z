@@ -7,7 +7,7 @@ const Source = @import("wake_sources.zig").Source;
 const Inbox = @import("gossipsub/test_support.zig").Inbox;
 
 fn currentTime() !Now {
-    return @import("transport.zig").currentTime(std.testing.io);
+    return @import("transport.zig").Transport.currentTime(std.testing.io);
 }
 
 fn monotonicNs() u64 {
@@ -358,7 +358,7 @@ test "owner zero-wait turns count under every due source until the owner settles
     defer std.testing.allocator.destroy(node);
     try initOwner(node);
     defer node.deinit(std.testing.io);
-    const now = try @import("transport.zig").currentTime(std.testing.io);
+    const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
     for (0..8) |_| try std.testing.expect(node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms)).failure == null);
     const host = @intFromEnum(@import("wake_sources.zig").Source.host);
     try std.testing.expectEqual(@as(u64, 8), node.due_now_turns[host]);
@@ -373,7 +373,7 @@ test "owner zero-wait turn counts once under each of its two due sources" {
     defer std.testing.allocator.destroy(node);
     try initOwner(node);
     defer node.deinit(std.testing.io);
-    const now = try @import("transport.zig").currentTime(std.testing.io);
+    const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
     for (0..8) |_| try std.testing.expect(node.step(std.testing.io, now, .{}, .deadlineOnly(now.mono_ms)).failure == null);
     try std.testing.expect(node.nextWakeup(now, .{}).? > now.mono_ms);
     const remote = try @import("wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{95}));

@@ -3,10 +3,9 @@ const support = @import("transport_test_support.zig");
 const Engine = @import("quic/Engine.zig");
 const keys = @import("wire/keys.zig");
 const multiaddr = @import("wire/multiaddr.zig");
-const transport_mod = @import("transport.zig");
+const Transport = @import("transport.zig").Transport;
 
-const Transport = transport_mod.Transport;
-const step_options = transport_mod.StepOptions{ .wait_max_ms = 10 };
+const step_options = Transport.StepOptions{ .wait_max_ms = 10 };
 const payload_len = 64 * 1024;
 
 fn initTransport(target: *Transport, seed: u8) !void {
@@ -144,9 +143,9 @@ test "dual-stack transport authenticates both families through one connection bu
 
 test "transport validates socket work limits before startup allocation" {
     const key = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{27}));
-    const invalid = [_]transport_mod.WorkLimits{
+    const invalid = [_]Transport.WorkLimits{
         .{ .send_per_step_max = 0 },
-        .{ .send_per_step_max = transport_mod.send_burst_max + 1 },
+        .{ .send_per_step_max = Transport.send_burst_max + 1 },
         .{ .receive_per_step_max = 0 },
         .{ .receive_per_step_max = @import("constants.zig").receive_batch_max + 1 },
         .{ .burst_per_connection = 0 },
@@ -160,8 +159,8 @@ test "transport validates socket work limits before startup allocation" {
             .work_limits = work_limits,
         }));
     }
-    try (transport_mod.WorkLimits{ .send_per_step_max = 1, .receive_per_step_max = 1, .burst_per_connection = 1 }).validate();
-    try (transport_mod.WorkLimits{ .burst_per_connection = transport_mod.send_burst_max }).validate();
+    try (Transport.WorkLimits{ .send_per_step_max = 1, .receive_per_step_max = 1, .burst_per_connection = 1 }).validate();
+    try (Transport.WorkLimits{ .burst_per_connection = Transport.send_burst_max }).validate();
 }
 
 test "transport requests configured socket buffers and records the kernel's sizes" {

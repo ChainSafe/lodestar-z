@@ -3,7 +3,7 @@ const core_test = @import("network_core_test_support.zig");
 const FaultIo = @import("fault_io");
 const std = @import("std");
 const constants = @import("constants.zig");
-const transport_mod = @import("transport.zig");
+const Transport = @import("transport.zig").Transport;
 const Engine = @import("quic/Engine.zig");
 const multistream = @import("wire/multistream.zig");
 const support = @import("transport_test_support.zig");
@@ -14,7 +14,7 @@ const net = std.Io.net;
 const Node = support.Node;
 
 const ping_protocol = "/ipfs/ping/1.0.0";
-const step_options = transport_mod.StepOptions{ .wait_max_ms = 10 };
+const step_options = Transport.StepOptions{ .wait_max_ms = 10 };
 
 fn writeSome(engine: *Engine, stream: Engine.StreamHandle, bytes: []const u8, fin: bool) !usize {
     return engine.write(stream, bytes, fin) catch |err| switch (err) {
@@ -177,7 +177,7 @@ test "transport surfaces a send failure to an unreachable destination" {
         .octets = @splat(255),
         .port = 4_001,
     } };
-    const now = try transport_mod.currentTime(std.testing.io);
+    const now = try Transport.currentTime(std.testing.io);
     _ = try node.transport.engine.dial(
         &unreachable_peer,
         node.transport.peerId(),
@@ -307,7 +307,7 @@ test "transport rotates dirty connections under one aggregate send allowance" {
     var sink = try udp_mod.Sockets.bind(std.testing.io, .single(loopback));
     defer sink.close(std.testing.io);
     const destination = sink.localAddress();
-    const now = try transport_mod.currentTime(std.testing.io);
+    const now = try Transport.currentTime(std.testing.io);
     for (0..3) |_| {
         _ = try node.transport.engine.dial(&destination, node.transport.peerId(), now);
     }
@@ -388,7 +388,7 @@ test "transport isolates a failing destination in a mixed-owner batch" {
         .octets = @splat(255),
         .port = 4001,
     } };
-    const now = try transport_mod.currentTime(std.testing.io);
+    const now = try Transport.currentTime(std.testing.io);
     const failing = try node.transport.engine.dial(
         &failing_address,
         node.transport.peerId(),
@@ -420,7 +420,7 @@ test "transport isolates a failing destination in a mixed-owner batch" {
 test "transport fails only the connection whose destination the host refuses and keeps serving its batch" {
     const limits: Engine.Limits = .{ .connections_max = 3, .handshaking_max = 3, .dialing_max = 3, .outbound_max = 3 };
     const hub_key = try @import("wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{111}));
-    var hub: transport_mod.Transport = .{};
+    var hub: Transport = .{};
     try hub.init(std.testing.allocator, std.testing.io, .{ .host = &hub_key, .bind = .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } }, .limits = limits });
     defer hub.deinit(std.testing.io);
     var peers: [2]Node = .{ .{}, .{} };
@@ -429,19 +429,19 @@ test "transport fails only the connection whose destination the host refuses and
     try peers[1].init(113);
     defer peers[1].deinit();
     const Refused = struct {
-        fn serve(node: *transport_mod.Transport, remotes: *[2]Node) !void {
+        fn serve(node: *Transport, remotes: *[2]Node) !void {
             var faults: FaultIo = .{
                 .send = .{ .socket = node.sockets.values[1].?.handle },
                 .send_failure = error.AccessDenied,
             };
             const io = faults.io();
-            const turn: transport_mod.StepOptions = .{ .wait_max_ms = 0 };
+            const turn: Transport.StepOptions = .{ .wait_max_ms = 0 };
             const refused_address: types.Address = .{ .ip6 = .{ .octets = .{0} ** 15 ++ .{1}, .port = 9 } };
             const expected = remotes[0].transport.peerId();
             try std.testing.expectError(error.DestinationUnreachable, node.dialPeer(io, refused_address, expected));
             try std.testing.expectEqual(@as(u16, 0), node.engine.registry.active_len);
             try std.testing.expectEqual(@as(u16, 0), node.engine.registry.outbound);
-            const now = try transport_mod.currentTime(io);
+            const now = try Transport.currentTime(io);
             const first = try node.engine.dial(&remotes[0].transport.localAddress(), expected, now);
             const refused = try node.engine.dial(&refused_address, expected, now);
             const second = try node.engine.dial(&remotes[1].transport.localAddress(), remotes[1].transport.peerId(), now);
@@ -514,7 +514,7 @@ test "transport drains dirty connections across small send budgets" {
     var sink = try udp_mod.Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
     defer sink.close(std.testing.io);
     const destination = sink.localAddress();
-    const now = try transport_mod.currentTime(std.testing.io);
+    const now = try Transport.currentTime(std.testing.io);
     for (0..3) |_| {
         _ = try node.transport.engine.dial(
             &destination,
@@ -620,10 +620,10 @@ test "transport keys quiche's timer from a clock read after the flush so it neve
     // A slow turn: the host writes, then the turn runs 20 ms before its flush. The server never
     // answers, so the connection's earliest timer is quiche's loss probe.
     const stream = try transport.engine.openStream(handle);
-    const tick = try transport_mod.currentTime(io);
+    const tick = try Transport.currentTime(io);
     try std.testing.expectEqual(@as(usize, 4), try transport.engine.write(stream, "slow", false));
     try std.Io.sleep(io, .fromMilliseconds(20), .awake);
-    var result: transport_mod.StepResult = .{ .now = tick };
+    var result: Transport.StepResult = .{ .now = tick };
     try transport.flush(io, tick, &result);
     try std.testing.expect(result.datagrams_sent > 0);
     // Each turn waits for the timer key as the owner loop does, and each popped key finds
@@ -631,14 +631,14 @@ test "transport keys quiche's timer from a clock read after the flush so it neve
     const pops = transport.engine.visits.timer;
     const fired = transport.engine.visits.timeouts;
     for (0..2) |_| {
-        const now = try transport_mod.currentTime(io);
+        const now = try Transport.currentTime(io);
         const deadline_ms = (transport.nextDeadlineNs().? + std.time.ns_per_ms - 1) / std.time.ns_per_ms;
         try std.testing.expect(deadline_ms > now.mono_ms);
         try std.Io.sleep(io, .fromMilliseconds(@intCast(deadline_ms - now.mono_ms)), .awake);
-        const turn = try transport_mod.currentTime(io);
+        const turn = try Transport.currentTime(io);
         transport.expire(turn);
         transport.engine.collect(turn);
-        var flushed: transport_mod.StepResult = .{ .now = turn };
+        var flushed: Transport.StepResult = .{ .now = turn };
         try transport.flush(io, turn, &flushed);
     }
     try std.testing.expectEqual(pops + 2, transport.engine.visits.timer);
@@ -652,7 +652,7 @@ test "transport receive cancellation retains progress and events while deferring
     var sink = try udp_mod.Sockets.bind(std.testing.io, .{ .ip4 = .loopback(0) });
     defer sink.close(std.testing.io);
     const destination = sink.localAddress();
-    const now = try transport_mod.currentTime(std.testing.io);
+    const now = try Transport.currentTime(std.testing.io);
     _ = try node.transport.engine.dial(&destination, node.transport.peerId(), now);
     const failed = try node.transport.engine.dial(&destination, node.transport.peerId(), now);
     try std.testing.expect(node.transport.engine.failSend(failed));
@@ -677,7 +677,7 @@ test "transport progress early clock failure does not begin or publish a turn" {
     var node: Node = .{};
     try node.init(39);
     defer node.deinit();
-    const now = try transport_mod.currentTime(std.testing.io);
+    const now = try Transport.currentTime(std.testing.io);
     const failed = try node.transport.engine.dial(&quic_test.server_address, node.transport.peerId(), now);
     try std.testing.expect(node.transport.engine.failSend(failed));
     var faults: FaultIo = .{ .clock = .{} };
@@ -712,7 +712,7 @@ test "transport progress keeps a received datagram when the post-wait clock read
 }
 
 const ReceiveClockFault = struct {
-    threadlocal var udp: ?*const transport_mod.Transport = null;
+    threadlocal var udp: ?*const Transport = null;
     fn clock(userdata: ?*anyopaque, value: std.Io.Clock) std.Io.Timestamp {
         if (udp.?.counters.received_datagrams > 0) return .{ .nanoseconds = -1 };
         return std.testing.io.vtable.now(userdata, value);
@@ -731,10 +731,10 @@ test "transport bursts one busy connection among many idle ones in one flush vis
     };
     const hub_key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{61}));
     const spoke_key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{62}));
-    var hub: transport_mod.Transport = .{};
+    var hub: Transport = .{};
     try hub.init(std.testing.allocator, std.testing.io, .{ .host = &hub_key, .bind = .{ .ip4 = .loopback(0) }, .limits = limits });
     defer hub.deinit(std.testing.io);
-    var spoke: transport_mod.Transport = .{};
+    var spoke: Transport = .{};
     try spoke.init(std.testing.allocator, std.testing.io, .{ .host = &spoke_key, .bind = .{ .ip4 = .loopback(0) }, .limits = limits });
     defer spoke.deinit(std.testing.io);
     var handles: [connections]Engine.Handle = undefined;
@@ -765,7 +765,7 @@ test "transport bursts one busy connection among many idle ones in one flush vis
     try std.testing.expect(try spoke.engine.write(stream, &payload, false) > 0);
     try std.testing.expectEqual(@as(usize, 1), spoke.engine.dirtyCount());
     const visits = spoke.engine.visits;
-    var result = transport_mod.StepResult{ .now = try transport_mod.currentTime(std.testing.io) };
+    var result = Transport.StepResult{ .now = try Transport.currentTime(std.testing.io) };
     try spoke.flush(std.testing.io, result.now, &result);
     try std.testing.expectEqual(visits.flush + 1, spoke.engine.visits.flush);
     try std.testing.expectEqual(visits.timer, spoke.engine.visits.timer);
@@ -779,7 +779,7 @@ test "transport reads only the ready families up to the turn quota and resumes t
     const wait = @import("wait.zig");
     if (!wait.supported) return error.SkipZigTest;
     const key = try @import("wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{41}));
-    var hub: transport_mod.Transport = .{};
+    var hub: Transport = .{};
     try hub.init(std.testing.allocator, std.testing.io, .{ .host = &key, .bind = .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } } });
     defer hub.deinit(std.testing.io);
     const quota = hub.work_limits.receive_per_step_max;
@@ -793,7 +793,7 @@ test "transport reads only the ready families up to the turn quota and resumes t
     for (0..quota + 7) |_| try stranger.send(std.testing.io, &sockets[0].?.address, &.{0});
     for (0..3) |_| try sockets[1].?.send(std.testing.io, &sockets[1].?.address, &.{0});
 
-    var result: transport_mod.StepResult = .{ .now = try transport_mod.currentTime(std.testing.io) };
+    var result: Transport.StepResult = .{ .now = try Transport.currentTime(std.testing.io) };
     try hub.receive(std.testing.io, &result, .{ false, true });
     try std.testing.expectEqual(@as(u32, 3), result.datagrams_received);
     try std.testing.expectEqual(@as(u32, 3), result.datagrams_dropped);
@@ -802,7 +802,7 @@ test "transport reads only the ready families up to the turn quota and resumes t
     for ([_]u32{ quota - 1, 8 }, [_]u32{ 1, 0 }) |received, errors| {
         const readiness = wait.poll(std.testing.io, sources, 0);
         try std.testing.expectEqual([2]bool{ true, false }, readiness.quic);
-        result = .{ .now = try transport_mod.currentTime(std.testing.io) };
+        result = .{ .now = try Transport.currentTime(std.testing.io) };
         try hub.receive(std.testing.io, &result, readiness.quic);
         try std.testing.expectEqual(received, result.datagrams_received);
         try std.testing.expectEqual(received, result.datagrams_dropped);
@@ -828,7 +828,7 @@ test "transport drops a pressure suffix once and preserves every connection and 
         var node: Node = .{};
         try node.init(122);
         defer node.deinit();
-        const now = try transport_mod.currentTime(std.testing.io);
+        const now = try Transport.currentTime(std.testing.io);
         var handles: [3]Engine.Handle = undefined;
         for (&handles) |*handle| handle.* = try node.transport.engine.dial(&node.transport.localAddress(), node.transport.peerId(), now);
         Prefix.count = prefix;
@@ -837,7 +837,7 @@ test "transport drops a pressure suffix once and preserves every connection and 
         var vtable = std.testing.io.vtable.*;
         vtable.netSend = Prefix.send;
         const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
-        var result: transport_mod.StepResult = .{ .now = now };
+        var result: Transport.StepResult = .{ .now = now };
         try node.transport.flush(io, now, &result);
         try std.testing.expectEqual(@as(usize, 1), Prefix.calls);
         try std.testing.expectEqual(@as(u32, @intCast(prefix)), result.datagrams_sent);
@@ -850,7 +850,7 @@ test "transport drops a pressure suffix once and preserves every connection and 
         for (handles) |handle| try std.testing.expectEqual(@as(?Engine.Handle, handle), node.transport.engine.sendOwner(handle.index));
         try std.testing.expect(node.transport.nextDeadlineNs().? > now.nanos());
         try std.testing.expect(!result.backlog);
-        var idle: transport_mod.StepResult = .{ .now = now };
+        var idle: Transport.StepResult = .{ .now = now };
         try node.transport.flush(io, now, &idle);
         try std.testing.expectEqual(@as(u32, 0), idle.send_calls);
         try std.testing.expectEqual(@as(usize, 1), Prefix.calls);
@@ -876,13 +876,13 @@ test "transport recovers a locally dropped first flight through QUIC loss recove
     c.quiche_conn_stats(client.transport.engine.registry.slots[handle.index].conn.?, &stats);
     try std.testing.expect(stats.sent > 0);
     try std.testing.expect(!client.transport.engine.backlog());
-    const now = try transport_mod.currentTime(std.testing.io);
+    const now = try Transport.currentTime(std.testing.io);
     const deadline_ms = (client.transport.nextDeadlineNs().? + std.time.ns_per_ms - 1) / std.time.ns_per_ms;
     try std.testing.expect(deadline_ms > now.mono_ms and deadline_ms - now.mono_ms < 3_000);
     try std.Io.sleep(std.testing.io, .fromMilliseconds(@intCast(deadline_ms - now.mono_ms)), .awake);
-    const after = try transport_mod.currentTime(std.testing.io);
+    const after = try Transport.currentTime(std.testing.io);
     client.transport.expire(after);
-    var retransmitted: transport_mod.StepResult = .{ .now = after };
+    var retransmitted: Transport.StepResult = .{ .now = after };
     try client.transport.flush(std.testing.io, after, &retransmitted);
     try std.testing.expect(retransmitted.datagrams_sent > 0);
     try std.testing.expectEqual(@as(u32, 0), retransmitted.send_failures);
@@ -915,7 +915,7 @@ test "network owner progresses and shuts down while UDP sends are under local pr
     try node.connectUntil(&identity, &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9 } }}, now, now.mono_ms + 5_000);
     const progress = node.step(faults.io(), now, .{}, .deadlineOnly(now.mono_ms));
     try std.testing.expect(progress.failure == null);
-    try std.testing.expect(faults.send_calls > 0 and faults.send_calls <= transport_mod.send_burst_max);
+    try std.testing.expect(faults.send_calls > 0 and faults.send_calls <= Transport.send_burst_max);
     try std.testing.expect(!node.peer_manager.stopped);
     try std.testing.expect(node.transport.send_drops.datagrams[@intFromEnum(@import("udp").Sockets.SendDrops.Reason.system_resources)] > 0);
     node.shutdown(node.last_now);
@@ -929,15 +929,15 @@ test "network owner progresses and shuts down while UDP sends are under local pr
 
 test "transport pressure drops later families with exact cumulative accounting" {
     const key = try @import("wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{127}));
-    var node: transport_mod.Transport = .{};
+    var node: Transport = .{};
     try node.init(std.testing.allocator, std.testing.io, .{ .host = &key, .bind = .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } } });
     defer node.deinit(std.testing.io);
-    const now = try transport_mod.currentTime(std.testing.io);
+    const now = try Transport.currentTime(std.testing.io);
     const local = node.sockets.localAddresses();
     var owners: [3]Engine.Handle = undefined;
     for (&owners, [_]usize{ 0, 1, 0 }) |*owner, family| owner.* = try node.engine.dial(&local[family].?, node.peerId(), now);
     var faults: FaultIo = .{ .send = .{ .socket = node.sockets.values[1].?.handle }, .send_failure = error.SystemResources };
-    var result: transport_mod.StepResult = .{ .now = now };
+    var result: Transport.StepResult = .{ .now = now };
     try node.flush(faults.io(), now, &result);
     try std.testing.expectEqual(@as(usize, 2), faults.send_calls);
     try std.testing.expectEqual(@as(u32, 1), result.send_calls);
@@ -952,7 +952,7 @@ test "transport pressure drops later families with exact cumulative accounting" 
         try std.testing.expectEqual(@as(?Engine.Handle, owner), node.engine.sendOwner(owner.index));
         try std.testing.expect(node.engine.registry.timers.get(owner.index) != null);
     }
-    var idle: transport_mod.StepResult = .{ .now = now };
+    var idle: Transport.StepResult = .{ .now = now };
     try node.flush(faults.io(), now, &idle);
     try std.testing.expectEqual(@as(usize, 2), faults.send_calls);
     try std.testing.expectEqual(@as(u8, 0), node.batch_len);
@@ -974,10 +974,10 @@ test "transport cancellation stops final and capacity flushes without failing ow
         for ([_]usize{ 0, 1 }) |prefix| {
             const key = try @import("wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{123}));
             const limits: Engine.Limits = .{ .connections_max = 20, .handshaking_max = 20, .dialing_max = 20, .outbound_max = 20 };
-            var node: transport_mod.Transport = .{};
+            var node: Transport = .{};
             try node.init(std.testing.allocator, std.testing.io, .{ .host = &key, .bind = .{ .ip4 = .loopback(0) }, .limits = limits });
             defer node.deinit(std.testing.io);
-            const now = try transport_mod.currentTime(std.testing.io);
+            const now = try Transport.currentTime(std.testing.io);
             var owners: [17]Engine.Handle = undefined;
             for (owners[0..count]) |*owner| owner.* = try node.engine.dial(&node.localAddress(), node.peerId(), now);
             var vtable = std.testing.io.vtable.*;
@@ -986,7 +986,7 @@ test "transport cancellation stops final and capacity flushes without failing ow
             Canceled.calls = 0;
             Canceled.accepted_bytes = 0;
             Canceled.prefix = prefix;
-            var result: transport_mod.StepResult = .{ .now = now };
+            var result: Transport.StepResult = .{ .now = now };
             try std.testing.expectError(error.Canceled, node.flush(io, now, &result));
             try std.testing.expectEqual(@as(usize, 1), Canceled.calls);
             try std.testing.expectEqual(prefix, result.datagrams_sent);
@@ -1020,7 +1020,7 @@ test "transport canceled step retains accepted progress and canceled dial releas
     Canceled.calls = 0;
     try std.testing.expectError(error.Canceled, node.transport.dialPeer(io, node.transport.localAddress(), node.transport.peerId()));
     try std.testing.expectEqual(@as(u16, 0), node.transport.engine.registry.active_len);
-    const now = try transport_mod.currentTime(std.testing.io);
+    const now = try Transport.currentTime(std.testing.io);
     for (0..3) |_| _ = try node.transport.engine.dial(&node.transport.localAddress(), node.transport.peerId(), now);
     var events: [8]Engine.Event = undefined;
     const result = node.transport.step(io, &events, .{ .wait_max_ms = 0 });

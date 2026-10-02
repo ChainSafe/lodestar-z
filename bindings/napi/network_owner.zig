@@ -420,7 +420,7 @@ test "a command queued while the owner waits executes in the turn whose poll saw
     runtime.heavy = null;
 }
 
-test "queued owner operations share the protocol turn clock while latency uses execution time" {
+test "queued request and disconnect share the protocol turn clock while latency uses execution time" {
     const testing = std.testing.allocator;
     var runtime: Runtime = .{ .env = undefined, .notify_live = false, .env_alive = false };
     const owner = try testing.create(Owner);
@@ -440,7 +440,26 @@ test "queued owner operations share the protocol turn clock while latency uses e
         .local = .{ .metadata = .{ .custody_group_count = 1 }, .status = .{ .earliest_available_slot = 0 } },
     });
     defer owner.core.deinit(std.testing.io);
-    const tick = owner.core.last_now;
+    const remote_key = try n.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{73}));
+    var remote: n.Transport = .{};
+    try remote.init(testing, std.testing.io, .{ .host = &remote_key, .bind = .{ .ip4 = .loopback(0) } });
+    defer remote.deinit(std.testing.io);
+    const remote_id = remote.peerId();
+    _ = try owner.core.transport.dialPeer(std.testing.io, remote.localAddress(), remote_id);
+    for (0..64) |_| {
+        var events: [32]n.Engine.Event = undefined;
+        const progress = owner.core.transport.step(std.testing.io, &events, .{ .wait_max_ms = 0 });
+        if (progress.failure) |err| return err;
+        for (events[0..progress.progress.events]) |event| if (event == .connected) {
+            owner.core.peer_manager.transportProgress(&owner.core.transport.engine);
+            try std.testing.expect(owner.core.peer_manager.admit(&event.connected, remote.localAddress(), progress.progress.now) != null);
+        };
+        if (owner.core.isConnected(&remote_id)) break;
+        const reply = remote.step(std.testing.io, &events, .{ .wait_max_ms = 0 });
+        if (reply.failure) |err| return err;
+    }
+    try std.testing.expect(owner.core.isConnected(&remote_id));
+    const tick = try n.Transport.currentTime(std.testing.io);
     const Clock = struct {
         var time: n.Now = undefined;
         fn read(_: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
@@ -451,7 +470,7 @@ test "queued owner operations share the protocol turn clock while latency uses e
     var vtable = std.testing.io.vtable.*;
     vtable.now = Clock.read;
     const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
-    runtime.payload_budget.limit = 1 << 20;
+    runtime.payload_budget.limit = 64 << 20;
     runtime.publications = try publications.Table.init(testing, 1, &runtime.payload_budget);
     defer runtime.publications.?.deinit();
     runtime.requests = try requests_mod.Table.init(testing, 1, &runtime.payload_budget);
@@ -473,10 +492,41 @@ test "queued owner operations share the protocol turn clock while latency uses e
     cell.order = try runtime.table.nextOrder();
     cell.queued_ms = tick.mono_ms + 50;
     runtime.publications.?.transition(cell, .queued);
+
+    const request = try runtime.requests.?.reserve(.blocks_by_root_v2, 32);
+    defer {
+        owner.core.shutdown(Clock.time);
+        requests_mod.closeLocked(&runtime);
+        runtime.requests.?.retire(request);
+    }
+    try runtime.requests.?.allocate(request, 32);
+    const request_cell = runtime.requests.?.get(request).?;
+    request_cell.peer = remote_id;
+    @memset(request_cell.input, 0);
+    request_cell.order = try runtime.table.nextOrder();
+    request_cell.state = .queued;
+    runtime.requests.?.refresh(request_cell);
+
+    const disconnect = try runtime.table.reserve(.disconnect);
+    defer runtime.table.retire(disconnect);
+    runtime.table.get(disconnect).input.peer = remote_id;
+    runtime.table.transition(runtime.table.get(disconnect), .queued);
     try std.testing.expect(!try executeWork(&runtime, io, tick));
     try std.testing.expect(command.failure == null);
     try std.testing.expectEqual(tick.mono_ms + 1000, command.deadline);
     try std.testing.expectEqual(error.UnknownTopic, cell.failure.?);
     try std.testing.expectEqual(tick.mono_ms, owner.core.service.gossipsub.last_now_ms);
     try std.testing.expectEqual(@as(u128, 50), runtime.publications.?.latency.sum);
+    try std.testing.expect(runtime.table.get(disconnect).failure == null);
+    try std.testing.expect(!owner.core.isConnected(&remote_id));
+    try std.testing.expect(request_cell.native != null);
+
+    const counts = owner.core.service.process(&owner.core.transport.engine, &.{}, tick, .{ .application = &owner.application_outputs });
+    try requests_mod.capture(&runtime, owner.application_outputs[0..counts.application], tick);
+    try std.testing.expectEqual(@as(usize, 1), counts.application);
+    try std.testing.expectEqual(requests_mod.State.terminal, request_cell.state);
+    try std.testing.expectEqual(n.reqresp.ReqResp.Failure{ .negotiation_failed = .stream_closed }, request_cell.terminal.?.failed.reason);
+    const counters = &owner.core.service.reqresp.protocol_counters[@intFromEnum(n.reqresp.Protocol.blocks_by_root_v2)];
+    try std.testing.expectEqual(@as(u64, 1), counters.outgoing_time.count);
+    try std.testing.expectEqual(@as(u128, 0), counters.outgoing_time.sum);
 }
