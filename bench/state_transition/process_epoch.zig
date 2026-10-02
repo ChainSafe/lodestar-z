@@ -46,12 +46,11 @@ fn ProcessBeforeProcessEpochBench(comptime fork: ForkSeq) type {
     return struct {
         io: std.Io,
 
-        pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
+        pub fn run(_: *@This(), allocator: std.mem.Allocator) void {
             BenchState.cloned_cached_state.state.commit() catch unreachable;
 
             var epoch_transition_cache = EpochTransitionCache.init(
                 allocator,
-                self.io,
                 BenchState.cloned_cached_state.config,
                 BenchState.cloned_cached_state.epoch_cache,
                 BenchState.cloned_cached_state.state,
@@ -397,7 +396,6 @@ fn ProcessEpochBench(comptime fork: ForkSeq) type {
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             var cache = EpochTransitionCache.init(
                 allocator,
-                self.io,
                 BenchState.cloned_cached_state.config,
                 BenchState.cloned_cached_state.epoch_cache,
                 BenchState.cloned_cached_state.state,
