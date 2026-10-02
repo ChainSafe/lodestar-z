@@ -199,6 +199,7 @@
             .imports = .{
                 .diagnostics,
                 .build_options,
+                .bounded_array,
                 .swap_or_not_shuffle,
                 .ssz,
                 .config,
@@ -335,6 +336,18 @@
             .root_module = .{
                 .root_source_file = "bench/state_transition/process_epoch.zig",
                 .imports = .{ .state_transition, .fork_types, .consensus_types, .config, .zbench, .persistent_merkle_tree, .download_era_options, .era, .time },
+            },
+        },
+        .bench_flat_cache = .{
+            .root_module = .{
+                .root_source_file = "bench/state_transition/flat_cache.zig",
+                .imports = .{ .state_transition, .fork_types, .config, .persistent_merkle_tree, .time },
+            },
+        },
+        .bench_locality_decay = .{
+            .root_module = .{
+                .root_source_file = "bench/state_transition/locality_decay.zig",
+                .imports = .{ .state_transition, .fork_types, .consensus_types, .config, .persistent_merkle_tree, .time },
             },
         },
         .bench_fork_choice_compute_deltas = .{
