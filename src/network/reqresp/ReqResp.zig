@@ -48,10 +48,7 @@ pub fn validateForkTable(table: []const ForkEntry) error{InvalidOptions}!void {
     }
 }
 
-pub const ForkEntry = struct {
-    digest: [constants.context_bytes_length]u8,
-    fork: config.ForkSeq,
-};
+const ForkEntry = types.ForkEntry;
 
 const InboundAdmission = @import("InboundAdmission.zig");
 

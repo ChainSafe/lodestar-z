@@ -302,7 +302,7 @@ pub const Setup = struct {
     pair: Link = .{},
     client: NetworkCore = undefined,
     server: NetworkCore = undefined,
-    forks: [4]rr.ReqResp.ForkEntry = undefined,
+    forks: [4]@import("types.zig").ForkEntry = undefined,
     /// Discovery for the client, set before init, so its local updates publish an ENR.
     client_discovery: ?core_mod.DiscoveryOptions = null,
     initialized: [2]bool = .{ false, false },
@@ -333,7 +333,7 @@ pub const Setup = struct {
         self.pair.init();
         errdefer self.deinit();
         var count: usize = 0;
-        for ([_]rr.ReqResp.ForkEntry{
+        for ([_]@import("types.zig").ForkEntry{
             .{ .digest = local.fork.digest, .fork = local.fork.fork },
             .{ .digest = @splat(1), .fork = .fulu },
             .{ .digest = @splat(2), .fork = .fulu },

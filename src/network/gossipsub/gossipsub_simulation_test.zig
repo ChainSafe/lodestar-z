@@ -1,12 +1,12 @@
 const gossip_test = @import("test_support.zig");
 const std = @import("std");
-const gossip = @import("gossipsub.zig");
+const Gossipsub = @import("Gossipsub.zig");
 const SessionRef = @import("sessions.zig").SessionRef;
 const Now = @import("../types.zig").Now;
 const name = "/eth2/01020304/beacon_block/ssz_snappy";
 
 const Node = struct {
-    core: gossip.Gossipsub,
+    core: Gossipsub,
     session: SessionRef,
 
     fn init(identity: u8, seed: u64) !Node {
@@ -35,7 +35,7 @@ const Node = struct {
     }
 
     fn begin(self: *Node, now: Now) !void {
-        _ = @import("session_io.zig").beginPump(&self.core, now);
+        _ = Gossipsub.beginPump(&self.core, now);
         self.core.tick(now);
     }
 };
@@ -49,7 +49,7 @@ test "gossip simulation ignores decoded items and write receipts from a retired 
     try std.testing.expect(old.generation != node.session.generation);
     const now: Now = .{ .mono_ms = 2, .unix_s = 0 };
     try node.begin(now);
-    var turn = @import("session_io.zig").beginPump(&node.core, now);
+    var turn = Gossipsub.beginPump(&node.core, now);
     var peer = @import("turn.zig").Credits.peer(&node.core.options);
     try std.testing.expectEqual(.done, node.core.receiveItem(old, .{ .subscription = .{ .topic = name, .subscribe = true } }, &turn, &peer));
     node.core.writeCompleted(old, .{ .control = .{ .token = 1 } }, now.mono_ms);

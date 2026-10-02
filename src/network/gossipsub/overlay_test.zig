@@ -8,7 +8,7 @@ const c = @import("constants.zig");
 const Context = @import("overlay.zig").Context;
 const assert = std.debug.assert;
 const Fixture = struct {
-    g: @import("gossipsub.zig").Gossipsub,
+    g: @import("Gossipsub.zig"),
     topic: u16,
 
     fn init(count: usize) !Fixture {
@@ -365,7 +365,7 @@ test "gossip policy topic capacity supports two full fork subnet sets" {
 }
 
 test "gossip state intern snapshots an aliased retiring topic string" {
-    var g = try @import("gossipsub.zig").Gossipsub.init(std.testing.allocator, .{ .random_seed = 1 });
+    var g = try @import("Gossipsub.zig").init(std.testing.allocator, .{ .random_seed = 1 });
     defer g.deinit();
     const overlay = g.overlay;
     const oversized = [_]u8{'x'} ** (topic_mod.topic_max_len + 1);

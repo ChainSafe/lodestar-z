@@ -17,13 +17,13 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
     const a = arena.allocator();
     var peers = Peers.init(a, &.{ .retained_score_ms = 20, .retained_capacity = 4, .retained_outbound_reserve = 1 }) catch unreachable;
     defer peers.deinit(a);
-    const options: @import("network").gossipsub.Options = .{ .random_seed = 1, .mcache_capacity = 4, .validation_capacity = 2, .seen_capacity = 8, .retained_capacity = 4, .mcache_arena_bytes = 12288, .validation_timeout_ms = 10, .validation_tombstone_ms = 20 };
+    const options: gossip.Gossipsub.Options = .{ .random_seed = 1, .mcache_capacity = 4, .validation_capacity = 2, .seen_capacity = 8, .retained_capacity = 4, .mcache_arena_bytes = 12288, .validation_timeout_ms = 10, .validation_tombstone_ms = 20 };
     const layout = Layout.init(&options);
     var messages = Messages.init(a, &options, &layout) catch unreachable;
     defer messages.deinit(a, &peers);
     const source = peers.admit(.{ .index = 0, .generation = 1 }, &.{ .identity = .{ .bytes = @splat(1) }, .address = .unspecified, .direction = .inbound }, 0).admitted.peer;
     const duplicate = peers.admit(.{ .index = 1, .generation = 1 }, &.{ .identity = .{ .bytes = @splat(2) }, .address = .unspecified, .direction = .inbound }, 0).admitted.peer;
-    var handles: [16]gossip.ValidationHandle = @splat(.{ .index = 0, .generation = 0 });
+    var handles: [16]gossip.Gossipsub.ValidationHandle = @splat(.{ .index = 0, .generation = 0 });
     var deliveries = gossip.delivery.Pool.init(a, 3, gossip.delivery.Pool.capacity(3, 1)) catch unreachable;
     defer deliveries.deinit(a);
     var queues: [3]gossip.delivery.Queue = @splat(.{ .pool = &deliveries });
@@ -37,7 +37,7 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
         const validation = &messages.validation;
         switch (byte % 10) {
             0, 1 => {
-                var id: gossip.MessageId = @splat(0);
+                var id: gossip.Gossipsub.MessageId = @splat(0);
                 std.mem.writeInt(u64, id[0..8], step + 1, .little);
                 if (validation.reserve(id)) |reserved| {
                     var reservation = reserved;

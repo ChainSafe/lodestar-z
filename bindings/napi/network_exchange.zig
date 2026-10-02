@@ -71,7 +71,7 @@ fn object(value: Value) !Value {
 
 /// A host obligation or request, applied in O(1) under the mutex.
 pub const Action = union(enum) {
-    verdict: struct { token: g.Token, verdict: n.gossipsub.Verdict },
+    verdict: struct { token: g.Token, verdict: n.gossipsub.Gossipsub.Verdict },
     classify: struct { token: g.Token, available: bool },
     block: [32]u8,
     recheck,
@@ -93,7 +93,7 @@ pub fn parseAction(value: Value) !Action {
     return switch (try name(ActionType, try cfg.get(value, "type"), error.InvalidNetworkAction)) {
         .verdict => .{ .verdict = .{
             .token = try handle(try cfg.get(value, "handle")),
-            .verdict = try name(n.gossipsub.Verdict, try cfg.get(value, "verdict"), error.InvalidGossipVerdict),
+            .verdict = try name(n.gossipsub.Gossipsub.Verdict, try cfg.get(value, "verdict"), error.InvalidGossipVerdict),
         } },
         .classify => .{ .classify = .{ .token = try handle(try cfg.get(value, "handle")), .available = try cfg.boolean(try cfg.get(value, "available")) } },
         .block => .{ .block = try cfg.fixed(32, try cfg.get(value, "root")) },
@@ -115,7 +115,7 @@ fn name(comptime T: type, value: Value, invalid: anyerror) !T {
 
 fn handle(value: Value) !g.Token {
     if (try value.typeof() != .object) return error.InvalidGossipHandle;
-    const index = try cfg.integer(try cfg.get(value, "index"), n.gossip_processor.limits_mod.capacity_max - 1);
+    const index = try cfg.integer(try cfg.get(value, "index"), n.gossip_processor.limits.capacity_max - 1);
     const generation = try cfg.bigint(try cfg.get(value, "generation"));
     if (generation == 0) return error.InvalidGossipHandle;
     return .{ .index = @intCast(index), .generation = generation };
@@ -604,7 +604,7 @@ fn jobs(env: napi.Env, runtime: *Runtime, batch: *const g.Batch) !Value {
         try value.setNamedProperty("start", try env.createUint32(@intCast(job.start)));
         try value.setNamedProperty("length", try env.createUint32(@intCast(job.len)));
         try value.setNamedProperty("grouped", try env.getBoolean(job.grouped));
-        try value.setNamedProperty("urgent", try env.getBoolean(n.gossip_processor.limits_mod.urgent(job.kind)));
+        try value.setNamedProperty("urgent", try env.getBoolean(n.gossip_processor.limits.urgent(job.kind)));
         try list.setElement(@intCast(i), value);
     }
     try result.setNamedProperty("jobs", list);

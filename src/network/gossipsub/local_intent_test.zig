@@ -1,6 +1,6 @@
 const std = @import("std");
 const local = @import("local_intent.zig");
-const gossip = @import("gossipsub.zig");
+const Gossipsub = @import("Gossipsub.zig");
 const topic = @import("topic.zig");
 const support = @import("test_support.zig");
 const full = @import("topic_fixture.zig").full;
@@ -9,15 +9,15 @@ const next = "/eth2/01020304/voluntary_exit/ssz_snappy";
 const boundaries = [_]@import("topic_policy.zig").Boundary{ full(.{ 1, 2, 3, 4 }), full(.{ 5, 6, 7, 8 }), full(.{ 9, 10, 11, 12 }) };
 const now: @import("../types.zig").Now = .{ .mono_ms = 100, .unix_s = 0 };
 
-fn options() gossip.Options {
+fn options() Gossipsub.Options {
     return .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1, .seen_capacity = 16, .mcache_capacity = 16, .validation_capacity = 8, .topic_policy = &boundaries };
 }
 
-fn unavailableExcept(g: *gossip.Gossipsub, count: usize) void {
+fn unavailableExcept(g: *Gossipsub, count: usize) void {
     for (g.overlay.rows[count..]) |*row| row.generation = std.math.maxInt(u64);
 }
 
-fn apply(g: *gossip.Gossipsub, w: *local.Workspace, desired: []const []const u8) !bool {
+fn apply(g: *Gossipsub, w: *local.Workspace, desired: []const []const u8) !bool {
     var buffer: [64]local.Boundary = undefined;
     const changed = try g.prepareSubscriptions(try @import("topic_fixture.zig").subscriptionsInto(desired, &buffer), w, now, 0);
     if (changed) g.commitSubscriptions(w);
@@ -28,7 +28,7 @@ test "intent and publication prefer unused rows and reclaim only their selected 
     for ([_]bool{ false, true }) |subscribe| {
         var opts = options();
         opts.retained_score_ms = 1;
-        var g = try gossip.Gossipsub.init(std.testing.allocator, opts);
+        var g = try Gossipsub.init(std.testing.allocator, opts);
         defer g.deinit();
         unavailableExcept(&g, 3);
         try support.subscribe(&g, name);
@@ -67,7 +67,7 @@ test "intent and publication prefer unused rows and reclaim only their selected 
 test "local intent exact capacity excess and namespace refusal" {
     var backing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     var ledger: @import("../reservations.zig").Reservations = .{ .backing = backing.allocator() };
-    var g = try gossip.Gossipsub.init(ledger.allocator(), options());
+    var g = try Gossipsub.init(ledger.allocator(), options());
     defer g.deinit();
     const w = try std.testing.allocator.create(local.Workspace);
     defer std.testing.allocator.destroy(w);
@@ -95,7 +95,7 @@ test "local intent exact capacity excess and namespace refusal" {
     try std.testing.expect(!try g.prepareSubscriptions(&.{}, w, .{ .mono_ms = 200, .unix_s = 0 }, 0));
     try std.testing.expectEqual(deadline, g.overlay.rows[0].retire_after_ms);
     try std.testing.expectEqual(calls, backing.allocations);
-    var generic = try gossip.Gossipsub.init(std.testing.allocator, .{ .random_seed = 1 });
+    var generic = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1 });
     defer generic.deinit();
     try std.testing.expectError(error.TopicPolicyRequired, apply(&generic, w, &.{desired[0]}));
     var generic_workspace = try local.Workspace.init(std.testing.allocator, generic.overlay.rows.len);
@@ -104,7 +104,7 @@ test "local intent exact capacity excess and namespace refusal" {
 }
 
 test "local intent reserves reclaimable desired rows and copies alias before replacement" {
-    var g = try gossip.Gossipsub.init(std.testing.allocator, options());
+    var g = try Gossipsub.init(std.testing.allocator, options());
     defer g.deinit();
     const w = try std.testing.allocator.create(local.Workspace);
     defer std.testing.allocator.destroy(w);
@@ -124,7 +124,7 @@ test "local intent reserves reclaimable desired rows and copies alias before rep
 }
 
 test "local intent separate validation control score backoff and generation pins" {
-    var g = try gossip.Gossipsub.init(std.testing.allocator, options());
+    var g = try Gossipsub.init(std.testing.allocator, options());
     defer g.deinit();
     const w = try std.testing.allocator.create(local.Workspace);
     defer std.testing.allocator.destroy(w);
@@ -173,7 +173,7 @@ test "local intent separate validation control score backoff and generation pins
 }
 
 test "local intent history survives former row reuse and real retransmission descriptor" {
-    var g = try gossip.Gossipsub.init(std.testing.allocator, options());
+    var g = try Gossipsub.init(std.testing.allocator, options());
     defer g.deinit();
     const w = try std.testing.allocator.create(local.Workspace);
     defer std.testing.allocator.destroy(w);
@@ -201,7 +201,7 @@ test "local intent history survives former row reuse and real retransmission des
 }
 
 test "local intent copies retired row input before another assignment reuses it" {
-    var g = try gossip.Gossipsub.init(std.testing.allocator, options());
+    var g = try Gossipsub.init(std.testing.allocator, options());
     defer g.deinit();
     const w = try std.testing.allocator.create(local.Workspace);
     defer std.testing.allocator.destroy(w);
@@ -239,7 +239,7 @@ fn cachedRetirement(complete_intent: bool) !void {
     for ([_]bool{ false, true }) |negative| {
         var opts = options();
         opts.retained_score_ms = 1;
-        var g = try gossip.Gossipsub.init(std.testing.allocator, opts);
+        var g = try Gossipsub.init(std.testing.allocator, opts);
         defer g.deinit();
         const w = try std.testing.allocator.create(local.Workspace);
         defer std.testing.allocator.destroy(w);
@@ -297,7 +297,7 @@ test "compact intent validates masks and boundary identities before mutation" {
     allowed[0].rules[@intFromEnum(topic.Kind.data_column_sidecar)] = .{};
     var opts = options();
     opts.topic_policy = &allowed;
-    var g = try gossip.Gossipsub.init(std.testing.allocator, opts);
+    var g = try Gossipsub.init(std.testing.allocator, opts);
     defer g.deinit();
     const w = try std.testing.allocator.create(local.Workspace);
     defer std.testing.allocator.destroy(w);
@@ -325,7 +325,7 @@ test "compact intent validates masks and boundary identities before mutation" {
 }
 
 test "compact intent resubscribes a pinned retained row with its score and generation" {
-    var g = try gossip.Gossipsub.init(std.testing.allocator, options());
+    var g = try Gossipsub.init(std.testing.allocator, options());
     defer g.deinit();
     const w = try std.testing.allocator.create(local.Workspace);
     defer std.testing.allocator.destroy(w);
@@ -349,7 +349,7 @@ test "compact intent resubscribes a pinned retained row with its score and gener
 test "local intent startup kind scores activate on accepted slots without resetting topic history" {
     var opts = options();
     opts.topic_params = @splat(.{ .params = .{ .weight = 2 }, .mesh_delivery_start_slot = 3 });
-    var g = try gossip.Gossipsub.init(std.testing.allocator, opts);
+    var g = try Gossipsub.init(std.testing.allocator, opts);
     defer g.deinit();
     const w = try std.testing.allocator.create(local.Workspace);
     defer std.testing.allocator.destroy(w);
@@ -379,12 +379,12 @@ test "local intent startup kind scores activate on accepted slots without resett
     try std.testing.expectEqualDeep(counters, g.peers.scores.topics[@as(usize, logical) * g.overlay.rows.len]);
     try std.testing.expect(!try g.prepareSubscriptions(sets, w, now, 4));
     opts.topic_params.?[2].params.weight = std.math.nan(f64);
-    try std.testing.expectError(error.InvalidLimits, gossip.Gossipsub.init(std.testing.allocator, opts));
+    try std.testing.expectError(error.InvalidLimits, Gossipsub.init(std.testing.allocator, opts));
 }
 
 test "resident topics above the live limit preserve pins scores diagnostics and session reuse" {
     const a = std.testing.allocator;
-    var g = try gossip.Gossipsub.init(a, options());
+    var g = try Gossipsub.init(a, options());
     defer g.deinit();
     const high: u16 = 614;
     for (g.overlay.rows[0..high]) |*row| row.generation = std.math.maxInt(u64);
@@ -442,14 +442,14 @@ test "resident allocation accounting follows namespace dimensions and frees ever
     var measured = std.testing.FailingAllocator.init(a, .{});
     var opts = options();
     opts.mcache_arena_bytes = @import("constants.zig").maxCompressedLen(@import("constants.zig").MAX_PAYLOAD_SIZE) + @import("message_store.zig").page_bytes;
-    var g = try gossip.Gossipsub.init(measured.allocator(), opts);
+    var g = try Gossipsub.init(measured.allocator(), opts);
     try std.testing.expectEqual(g.overlay.namespace.?.topic_count, g.overlay.rows.len);
-    try std.testing.expectEqual(measured.allocated_bytes, g.memoryPlan().total_bytes - @sizeOf(gossip.Gossipsub));
+    try std.testing.expectEqual(measured.allocated_bytes, g.memoryPlan().total_bytes - @sizeOf(Gossipsub));
     g.deinit();
     try std.testing.expectEqual(measured.allocated_bytes, measured.freed_bytes);
     for (0..measured.alloc_index) |prefix| {
         var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = prefix });
-        try std.testing.expectError(error.OutOfMemory, gossip.Gossipsub.init(failing.allocator(), opts));
+        try std.testing.expectError(error.OutOfMemory, Gossipsub.init(failing.allocator(), opts));
         try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
     }
 }
@@ -481,7 +481,7 @@ test "resident score and bitset dimensions cover the validated namespace maximum
 
 test "resident namespace lookup and score scans are included in IWANT work estimates" {
     const score = @import("score.zig");
-    const low = gossip.Gossipsub.ihaveWorkBound(128, 512, 4, 1, 1);
-    const high = gossip.Gossipsub.ihaveWorkBound(128, 615, 4, 1, 1);
+    const low = Gossipsub.ihaveWorkBound(128, 512, 4, 1, 1);
+    const high = Gossipsub.ihaveWorkBound(128, 615, 4, 1, 1);
     try std.testing.expectEqual(@as(usize, 103) * (topic.topic_max_len + @sizeOf(score.TopicParams) + @sizeOf(score.TopicCounters) + @sizeOf(score.TopicWeights)), high - low);
 }

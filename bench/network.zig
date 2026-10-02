@@ -84,10 +84,10 @@ const Samples = struct {
 
 /// Admits gossip as the gossip processor does and keeps each validation handle.
 const GossipSink = struct {
-    handles: [256]network.gossipsub.ValidationHandle = undefined,
+    handles: [256]network.gossipsub.Gossipsub.ValidationHandle = undefined,
     count: usize = 0,
     excess: bool = false,
-    sink: network.gossipsub.MessageSink = undefined,
+    sink: network.gossipsub.Gossipsub.MessageSink = undefined,
 
     /// The sink must not move while the node holds it.
     fn attach(self: *GossipSink, node: *network.NetworkCore) void {
@@ -102,7 +102,7 @@ const GossipSink = struct {
         return false;
     }
 
-    fn admit(context: *anyopaque, candidate: *network.gossipsub.Admission) bool {
+    fn admit(context: *anyopaque, candidate: *network.gossipsub.Gossipsub.MessageAdmission) bool {
         const self: *GossipSink = @ptrCast(@alignCast(context));
         if (self.count == self.handles.len or !network.gossip_processor.policy.sourceRoom(candidate) or !network.gossip_processor.policy.feasible(candidate, &.{})) return false;
         candidate.commit();
@@ -245,7 +245,7 @@ fn connectPair(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, top
     }
 }
 
-fn pressure(a: *network.NetworkCore, b: *network.NetworkCore, sinks: []u8, io: std.Io, topic: []const u8, context: rr.ReqResp.ForkEntry) !void {
+fn pressure(a: *network.NetworkCore, b: *network.NetworkCore, sinks: []u8, io: std.Io, topic: []const u8, context: @import("network").types.ForkEntry) !void {
     var payload: [64 * 1024]u8 = undefined;
     var random = std.Random.DefaultPrng.init(123);
     random.random().bytes(&payload);
@@ -310,7 +310,7 @@ fn pressure(a: *network.NetworkCore, b: *network.NetworkCore, sinks: []u8, io: s
     try drain(a, b, io, requests.len, &payload, context, &gossip, delivered_gossip);
 }
 
-fn drain(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, expected: usize, payload: []const u8, context: rr.ReqResp.ForkEntry, gossip: *GossipSink, delivered_gossip: usize) !void {
+fn drain(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, expected: usize, payload: []const u8, context: @import("network").types.ForkEntry, gossip: *GossipSink, delivered_gossip: usize) !void {
     var events: [8]rr.ReqResp.Event = undefined;
     var received: usize = 0;
     var chunks: usize = 0;

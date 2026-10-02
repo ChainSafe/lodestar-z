@@ -12,6 +12,8 @@ pub const Admission = struct {
     context: *const messages.Context,
     source: *const messages.Source,
     topic_index: u16,
+    canonical: ?topic.Canonical,
+    maximum_compressed: usize,
     compressed: []const u8,
     event: messages.MessageEvent,
     workspace: *const @import("turn.zig").Workspace,
@@ -38,16 +40,18 @@ pub const Admission = struct {
 
     pub fn sourceUsage(self: *const Admission) SourceUsage {
         const pending = &self.messages.validation;
-        const kind = if (topic.parseCanonical(self.event.topic)) |canonical| canonical.name.kind else .beacon_block;
-        const k = @intFromEnum(kind);
-        const maximum = if (self.context.overlay.namespace) |ns| @import("constants.zig").maxCompressedLen(ns.lookup(self.event.topic).?.rule.ssz_max) else @min(if (self.context.options.payload_limits) |limits| limits[k].bytes else @import("constants.zig").maxCompressedLen(@import("constants.zig").MAX_PAYLOAD_SIZE), @import("constants.zig").maxCompressedLen(@import("constants.zig").MAX_PAYLOAD_SIZE));
+        const k = @intFromEnum(self.kind());
         return .{
             .items = pending.pending_per_peer[self.source.peer.index],
             .kind_items = pending.pending_per_peer_kind[self.source.peer.index][k],
             .kind_bytes = pending.bytes_per_peer_kind[self.source.peer.index][k],
-            .maximum_bytes = validation.Validation.chargedBytes(maximum),
+            .maximum_bytes = validation.Validation.chargedBytes(self.maximum_compressed),
             .validation_capacity = pending.entries.len,
         };
+    }
+
+    fn kind(self: *const Admission) topic.Kind {
+        return if (self.canonical) |canonical| canonical.name.kind else .beacon_block;
     }
 
     pub fn charge(self: *const Admission, cost: usize) bool {
@@ -66,8 +70,8 @@ pub const Admission = struct {
         const owner = self.messages;
         const pending = &owner.validation;
         const store = &owner.store;
-        const kind = if (topic.parseCanonical(self.event.topic)) |canonical| canonical.name.kind else .beacon_block;
-        const k = @intFromEnum(kind);
+        const incoming_kind = self.kind();
+        const k = @intFromEnum(incoming_kind);
         var available = pending.available_entries.len;
         var records = pending.free_records.len + pending.resolved_records.len;
         var kind_pending: usize = pending.pending_per_kind[k];
@@ -83,12 +87,12 @@ pub const Admission = struct {
             available += @intFromBool(entry.generation != std.math.maxInt(u64));
             records += 1;
             const payload = store.get(entry.state.pending.message).?;
-            if (payload.kind == kind) kind_pending -= 1;
+            if (payload.kind == incoming_kind) kind_pending -= 1;
             if (payload.provisional or payload.history or payload.tx != 0) continue;
             const released = storage.Store.pagesFor(payload.len);
             pages += released;
             entries += @intFromBool(payload.generation != std.math.maxInt(u64));
-            if (payload.kind == kind and !payload.retention_charged) {
+            if (payload.kind == incoming_kind and !payload.retention_charged) {
                 kind_pages -= released;
                 kind_entries -= 1;
             }

@@ -12,12 +12,12 @@ pub const Options = struct {
     identify: identify_mod.Options = .{},
     router: routing.Options = .{},
     reqresp: reqresp_mod.ReqResp.Options,
-    gossipsub: gossip_mod.Options = .{},
+    gossipsub: gossip_mod.Gossipsub.Options = .{},
 };
 pub const Outputs = struct { application: []reqresp_mod.ReqResp.Event = &.{}, control: []reqresp_mod.ReqResp.Event = &.{}, identify: []identify_mod.Result = &.{} };
 pub const OutputCounts = struct { application: usize, control: usize, identify: usize };
 pub const Capacities = struct { application: usize = 0, control: usize = 0, identify: usize = 0 };
-pub const InitError = routing.Error || reqresp_mod.ReqResp.InitError || gossip_mod.gossipsub.InitError || identify_mod.handler.InitError;
+pub const InitError = routing.Error || reqresp_mod.ReqResp.InitError || gossip_mod.Gossipsub.InitError || identify_mod.handler.InitError;
 
 pub const Service = struct {
     identify: identify_mod.Handler,
@@ -33,7 +33,7 @@ pub const Service = struct {
         try routing.Router.validateOptions(options.router);
         try identify_mod.Handler.validate(options.identify);
         try options.reqresp.validate();
-        try @import("gossipsub/options.zig").validate(&options.gossipsub);
+        try options.gossipsub.validate();
     }
 
     /// The caller constructs Local from the transport identity and resolved advertisement.

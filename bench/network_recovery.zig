@@ -9,7 +9,7 @@ const preset = @import("preset");
 
 const Recovery = network.gossipsub.recovery.Recovery;
 const PeerBook = @FieldType(network.gossipsub.Gossipsub, "peers");
-const MessageId = network.gossipsub.MessageId;
+const MessageId = network.gossipsub.Gossipsub.MessageId;
 const promises_cap = network.gossipsub.constants.promises_cap;
 const batch_ids = 32;
 const levels = [_]usize{ 0, 32, 128, 512, 1024, 2048, 4096, promises_cap };

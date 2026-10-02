@@ -90,7 +90,7 @@ test "configuration resolves shared capacities from their owners" {
 }
 
 test "configuration overrides preserve profile defaults and derive shared fields" {
-    const forks: []const rr.ForkEntry = &.{.{ .digest = @splat(1), .fork = .fulu }};
+    const forks: []const @import("types.zig").ForkEntry = &.{.{ .digest = @splat(1), .fork = .fulu }};
     const resolved = try resolve(.{
         .profile = .small,
         .seed = 17,
@@ -104,7 +104,7 @@ test "configuration overrides preserve profile defaults and derive shared fields
     });
     const service = &resolved.core.service;
     try std.testing.expectEqual(@as(u16, 8), service.reqresp.peers);
-    try std.testing.expectEqualSlices(rr.ForkEntry, forks, service.reqresp.forks);
+    try std.testing.expectEqualSlices(@import("types.zig").ForkEntry, forks, service.reqresp.forks);
     try std.testing.expectEqual(@as(u16, 12), service.reqresp.outbound_max);
     try std.testing.expectEqual(@as(u16, 7), service.reqresp.work_per_pump_max);
     try std.testing.expectEqual(resolved.core.peers.max_peers, service.reqresp.inbound_control_reserved);

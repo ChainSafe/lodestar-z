@@ -5,14 +5,14 @@ const r = @import("network_runtime.zig");
 const Runtime = r.Runtime;
 const assert = std.debug.assert;
 const processor = n.gossip_processor;
-pub const batch_max = processor.batch_max;
-pub const batch_bytes = processor.batch_bytes;
-pub const payload_max = processor.payload_max;
-pub const topic_max = processor.topic_max;
-pub const Token = processor.Token;
-pub const Cell = processor.Cell;
-pub const Diagnostics = processor.Diagnostics;
-pub const Batch = processor.Batch;
+pub const batch_max = processor.GossipProcessor.batch_max;
+pub const batch_bytes = processor.GossipProcessor.batch_bytes;
+pub const payload_max = processor.GossipProcessor.payload_max;
+pub const topic_max = processor.GossipProcessor.topic_max;
+pub const Token = processor.GossipProcessor.Token;
+pub const Cell = processor.GossipProcessor.Cell;
+pub const Diagnostics = processor.GossipProcessor.Diagnostics;
+pub const Batch = processor.GossipProcessor.Batch;
 pub const Table = processor.GossipProcessor;
 pub const Clock = struct { mono_ms: u64, unix_ms: u64 };
 pub fn sample(io: std.Io) !Clock {
@@ -62,7 +62,7 @@ pub const Ingress = struct {
     io: std.Io,
     failure: ?anyerror = null,
 
-    pub fn sink(self: *Ingress) native.MessageSink {
+    pub fn sink(self: *Ingress) native.Gossipsub.MessageSink {
         return .{ .context = self, .has_capacity = hasCapacity, .admit = admit };
     }
 
@@ -77,7 +77,7 @@ pub const Ingress = struct {
         return table.admissible(kind, len);
     }
 
-    fn admit(context: *anyopaque, candidate: *native.Admission) bool {
+    fn admit(context: *anyopaque, candidate: *native.Gossipsub.MessageAdmission) bool {
         const self: *Ingress = @ptrCast(@alignCast(context));
         return self.capture(candidate) catch |err| {
             self.failure = err;
@@ -85,7 +85,7 @@ pub const Ingress = struct {
         };
     }
 
-    fn capture(self: *Ingress, candidate: *native.Admission) !bool {
+    fn capture(self: *Ingress, candidate: *native.Gossipsub.MessageAdmission) !bool {
         const runtime = self.runtime;
         const clock = try sample(self.io);
         const received_at = try projectWall(candidate.event.admitted_ms, clock);

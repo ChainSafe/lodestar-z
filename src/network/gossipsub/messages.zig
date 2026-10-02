@@ -3,6 +3,7 @@ const mcache = @import("mcache.zig");
 const storage = @import("message_store.zig");
 const validation = @import("validation.zig");
 const Options = @import("options.zig").Options;
+const constants = @import("constants.zig");
 const topic_mod = @import("topic.zig");
 const MessageId = topic_mod.MessageId;
 const protobuf = @import("protobuf.zig");
@@ -18,6 +19,7 @@ const Attribution = validation.Attribution;
 const Validation = validation.Validation;
 const Peers = @import("peer_book.zig").PeerBook;
 
+/// Topic and payload slices are borrowed for the synchronous admission callback only.
 pub const MessageEvent = struct {
     source: ?PeerRef = null,
     handle: Handle,
@@ -42,7 +44,7 @@ pub const MessageSink = struct {
 pub const InvalidReason = enum { signed, compressed_size, ssz_size, snappy };
 /// Identified receipt proves the valid-domain ID, not successful gossip validation.
 pub const Refusal = union(enum) { identified: MessageId, unidentified };
-pub const Received = union(enum) { ignored, invalid: InvalidReason, duplicate: MessageId, admitted: MessageEvent, refused: Refusal, deferred };
+pub const Received = union(enum) { ignored, invalid: InvalidReason, duplicate: MessageId, admitted: struct { id: MessageId, topic_index: u16 }, refused: Refusal, deferred };
 pub const StorageRefusal = enum { kind_validations, kind_payload, peer_validations, validation_capacity, payload_capacity, processor_capacity };
 pub const StorageRefusals = [std.meta.fields(StorageRefusal).len]u64;
 pub const Applied = struct {
@@ -201,7 +203,8 @@ pub const Messages = struct {
     }
 
     pub fn receive(self: *Messages, context: *const Context, workspace: *const Workspace, source: *const Source, msg: protobuf.Message, now: u64) Received {
-        const rule = if (context.overlay.namespace) |*ns| (ns.lookup(msg.topic) orelse return .ignored).rule else null;
+        const canonical = topic_mod.parseCanonical(msg.topic);
+        const rule = if (context.overlay.namespace) |*ns| (ns.lookupCanonical(canonical orelse return .ignored) orelse return .ignored).rule else null;
         const topic = context.overlay.findTopic(msg.topic) orelse return .ignored;
         if (!context.overlay.subscribed(topic)) return .ignored;
         if (msg.signed) return invalid(context, source, topic, .signed);
@@ -214,7 +217,7 @@ pub const Messages = struct {
         }
         const size = header.payload;
         if (rule) |bounds| if (size < bounds.ssz_min or size > bounds.ssz_max) return invalid(context, source, topic, .ssz_size);
-        const kind = if (topic_mod.parseCanonical(msg.topic)) |canonical| canonical.name.kind else .beacon_block;
+        const kind = if (canonical) |parsed| parsed.name.kind else .beacon_block;
         const refusal: ?StorageRefusal = if (workspace.sink) |sink| (if (!sink.has_capacity(sink.context, kind, size)) .processor_capacity else null) else .processor_capacity;
         const cost = if (refusal != null) msg.data.len else msg.data.len * 2 + size * 2;
         if (!workspace.chargeWork(context.options, cost)) return .deferred;
@@ -243,7 +246,27 @@ pub const Messages = struct {
         }
         const id = decoded.valid.id;
         if (self.duplicateId(context, source, topic, id, now)) return .{ .duplicate = id };
-        return self.admitReceived(context, workspace, source, topic, msg, id, size, now);
+        assert(context.peers.matches(source.peer));
+        const maximum_compressed = constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE);
+        const maximum = if (rule) |bounds| constants.maxCompressedLen(bounds.ssz_max) else @min(if (context.options.payload_limits) |limits| limits[@intFromEnum(kind)].bytes else maximum_compressed, maximum_compressed);
+        var candidate: Admission = .{
+            .messages = self,
+            .workspace = workspace,
+            .context = context,
+            .source = source,
+            .topic_index = topic,
+            .canonical = canonical,
+            .maximum_compressed = maximum,
+            .compressed = msg.data,
+            .event = .{ .source = source.peer, .identity = context.peers.rows[source.peer.index].identity, .admitted_ms = now, .deadline = now +| self.validation.timeout_ms, .handle = undefined, .id = id, .peer = source.connection, .topic = msg.topic, .bytes = workspace.scratch[0..size] },
+        };
+        const sink = workspace.sink.?;
+        if (!sink.admit(sink.context, &candidate)) {
+            assert(!candidate.committed);
+            return self.refuseStorage(candidate.refusal, id);
+        }
+        assert(candidate.committed);
+        return .{ .admitted = .{ .id = id, .topic_index = topic } };
     }
 
     fn duplicateId(self: *Messages, context: *const Context, source: *const Source, topic: u16, id: topic_mod.MessageId, now: u64) bool {
@@ -259,26 +282,6 @@ pub const Messages = struct {
         const ref = source.peer;
         context.peers.invalid(ref, topic);
         return .{ .invalid = reason };
-    }
-
-    fn admitReceived(self: *Messages, context: *const Context, workspace: *const Workspace, source: *const Source, topic: u16, msg: protobuf.Message, id: topic_mod.MessageId, written: usize, now: u64) Received {
-        assert(context.peers.matches(source.peer));
-        var candidate: Admission = .{
-            .messages = self,
-            .workspace = workspace,
-            .context = context,
-            .source = source,
-            .topic_index = topic,
-            .compressed = msg.data,
-            .event = .{ .source = source.peer, .identity = context.peers.rows[source.peer.index].identity, .admitted_ms = now, .deadline = now +| self.validation.timeout_ms, .handle = undefined, .id = id, .peer = source.connection, .topic = msg.topic, .bytes = workspace.scratch[0..written] },
-        };
-        const sink = workspace.sink.?;
-        if (!sink.admit(sink.context, &candidate)) {
-            assert(!candidate.committed);
-            return self.refuseStorage(candidate.refusal, id);
-        }
-        assert(candidate.committed);
-        return .{ .admitted = candidate.event };
     }
 
     fn retain(self: *Messages, message: storage.Handle) bool {
@@ -337,4 +340,8 @@ fn recordDuplicate(context: *const Context, entry: *Attribution, source: *const 
     if (entry.verdict == .reject) {
         context.peers.invalid(ref, topic);
     } else if (entry.verdict == .accept and eligible) context.peers.scores.creditMesh(ref.index, topic);
+}
+
+test {
+    _ = @import("messages_test.zig");
 }

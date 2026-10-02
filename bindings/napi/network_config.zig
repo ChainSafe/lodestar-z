@@ -22,8 +22,8 @@ pub const Config = struct {
     bootstrap_count: u8,
     slot: u64,
     gossip: n.configuration.GossipOverrides,
-    processor_limits: n.gossip_processor.limits_mod.Limits = undefined,
-    execution_limits: ?n.gossip_processor.limits_mod.Limits = null,
+    processor_limits: n.gossip_processor.limits.Limits = undefined,
+    execution_limits: ?n.gossip_processor.limits.Limits = null,
     allowlist: [32][16]u8,
     allowlist_count: u8,
 
@@ -213,7 +213,7 @@ fn parseGossip(value: Value, out: *Config) !void {
     try object(policy, &.{ "iwantFollowupMs", "idontwantMinDataSize", "heartbeatIntervalMs", "validationTimeoutMs", "validationTombstoneMs", "pressureTimeoutMs", "txTimeoutMs", "largeFrameTimeoutMs", "seenTtlMs", "retainedScoreMs", "opportunisticGraftIntervalMs", "gossipFactor", "ipAllowlist", "score", "processor", "execution" });
     const processor = try get(policy, "processor");
     {
-        const limits_mod = n.gossip_processor.limits_mod;
+        const limits_mod = n.gossip_processor.limits;
         const count = try array(processor, limits_mod.kind_count);
         if (count != limits_mod.kind_count) return error.InvalidGossipProcessorLimits;
         var limits: limits_mod.Limits = undefined;
@@ -233,7 +233,7 @@ fn parseGossip(value: Value, out: *Config) !void {
     }
     const execution = try get(policy, "execution");
     if (try execution.typeof() != .undefined) {
-        const limits_mod = n.gossip_processor.limits_mod;
+        const limits_mod = n.gossip_processor.limits;
         if (try array(execution, limits_mod.kind_count) != limits_mod.kind_count) return error.InvalidGossipExecutionLimits;
         var limits: limits_mod.Limits = undefined;
         for (&limits, 0..) |*limit, i| {

@@ -1,6 +1,5 @@
 const gossip_test = @import("test_support.zig");
 const std = @import("std");
-const gossipsub = @import("gossipsub.zig");
 const service_mod = @import("../service.zig");
 const topic_mod = @import("topic.zig");
 const Engine = @import("../quic/Engine.zig");

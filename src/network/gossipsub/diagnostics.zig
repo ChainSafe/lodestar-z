@@ -2,7 +2,7 @@ const std = @import("std");
 const score = @import("score.zig");
 const topic = @import("topic.zig");
 const PeerId = @import("../wire/peer_id.zig").PeerId;
-const Gossipsub = @import("gossipsub.zig").Gossipsub;
+const Gossipsub = @import("Gossipsub.zig");
 pub const peers_per_page = 8;
 
 pub const Topic = struct {

@@ -2,9 +2,9 @@ const std = @import("std");
 const t = std.testing;
 const p = @import("root.zig");
 const lists = @import("../index_list.zig");
-const Kind = p.limits_mod.Kind;
+const Kind = p.limits.Kind;
 
-fn add(table: *p.GossipProcessor, kind: Kind, now: u64, metadata: p.metadata_mod.Metadata) !p.Token {
+fn add(table: *p.GossipProcessor, kind: Kind, now: u64, metadata: p.metadata.Metadata) !p.GossipProcessor.Token {
     const token = try table.reserveKind(kind, 4);
     const cell = table.get(token).?;
     cell.id = @splat(1);
@@ -28,12 +28,12 @@ fn verify(table: *const p.GossipProcessor) !void {
         payload += cell.input.len;
         if (cell.state != .free) try t.expectEqual(cell.state_link.linked, true);
         if (cell.group_index != lists.none) {
-            try t.expectEqual(p.State.queued, cell.state);
+            try t.expectEqual(p.GossipProcessor.State.queued, cell.state);
             try t.expect(cell.group_link.linked);
             try t.expectEqual(cell.group_index, table.groups.index.find(table.groups.rows, &table.groups.rows[cell.group_index].key).?);
         }
         if (cell.root_index != lists.none) {
-            try t.expectEqual(p.State.waiting, cell.state);
+            try t.expectEqual(p.GossipProcessor.State.waiting, cell.state);
             try t.expect(cell.root_link.linked);
         }
         if (cell.expiry_link.next != lists.none) try t.expect(cell.deadline <= table.cells[cell.expiry_link.next].deadline);
@@ -62,8 +62,8 @@ fn verify(table: *const p.GossipProcessor) !void {
 }
 
 test "gossip scheduler batches kinds as separate validator jobs in native priority order" {
-    const limits: p.limits_mod.Limits = @splat(.{ .items = 64, .bytes = 4096 });
-    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits });
+    const limits: p.limits.Limits = @splat(.{ .items = 64, .bytes = 4096 });
+    var table = try p.GossipProcessor.init(t.allocator, .{ .limits = limits });
     defer table.deinit();
     defer table.close();
     _ = try add(&table, .voluntary_exit, 1, .{});
@@ -76,7 +76,7 @@ test "gossip scheduler batches kinds as separate validator jobs in native priori
     const batch = table.claim(51);
     try t.expectEqual(@as(usize, 5), batch.len);
     try t.expectEqual(@as(usize, 4), batch.job_count);
-    try t.expectEqualSlices(p.Job, &.{
+    try t.expectEqualSlices(p.GossipProcessor.Job, &.{
         .{ .kind = .beacon_block, .start = 0, .len = 1, .grouped = false },
         .{ .kind = .voluntary_exit, .start = 1, .len = 1, .grouped = false },
         .{ .kind = .voluntary_exit, .start = 2, .len = 1, .grouped = false },
@@ -87,11 +87,11 @@ test "gossip scheduler batches kinds as separate validator jobs in native priori
 }
 
 test "gossip scheduler keeps execution charged across timeout until real completion" {
-    const limits: p.limits_mod.Limits = @splat(.{ .items = 8, .bytes = 4096 });
-    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits });
+    const limits: p.limits.Limits = @splat(.{ .items = 8, .bytes = 4096 });
+    var table = try p.GossipProcessor.init(t.allocator, .{ .limits = limits });
     defer table.deinit();
     defer table.close();
-    table.execution.?[0].items = 1;
+    table.execution[0].items = 1;
     const first = try add(&table, .beacon_block, 1, .{});
     const batch = table.claim(1);
     table.finish(&batch, true);
@@ -109,14 +109,14 @@ test "gossip scheduler keeps execution charged across timeout until real complet
 }
 
 test "gossip scheduler budgets mass expiry and root promotion without releasing detached waiters early" {
-    const limits: p.limits_mod.Limits = @splat(.{ .items = 512, .bytes = 4096 });
-    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits });
+    const limits: p.limits.Limits = @splat(.{ .items = 512, .bytes = 4096 });
+    var table = try p.GossipProcessor.init(t.allocator, .{ .limits = limits });
     defer table.deinit();
     defer table.close();
     const root: [32]u8 = @splat(3);
     for (0..130) |_| _ = try add(&table, .beacon_attestation, 1, .{ .slot = 1, .root = root });
     for (0..3) |_| {
-        const checks = table.claimChecks(1, p.batch_max);
+        const checks = table.claimChecks(1, p.GossipProcessor.batch_max);
         for (checks.tokens[0..checks.len]) |token| try t.expect(table.classify(token, false));
     }
     table.notifyBlock(root);
@@ -138,8 +138,8 @@ test "gossip scheduler budgets mass expiry and root promotion without releasing 
 }
 
 test "gossip scheduler indexes survive bounded randomized lifecycle interleavings" {
-    const limits: p.limits_mod.Limits = @splat(.{ .items = 16, .bytes = 4096 });
-    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits });
+    const limits: p.limits.Limits = @splat(.{ .items = 16, .bytes = 4096 });
+    var table = try p.GossipProcessor.init(t.allocator, .{ .limits = limits });
     defer table.deinit();
     defer table.close();
     var random = std.Random.DefaultPrng.init(19);
@@ -153,29 +153,29 @@ test "gossip scheduler indexes survive bounded randomized lifecycle interleaving
             _ = try add(&table, kind, now, .{ .root = root, .group = group, .slot = 1 });
         }
         table.maintain(now, 0);
-        const checks = table.claimChecks(now, p.batch_max);
+        const checks = table.claimChecks(now, p.GossipProcessor.batch_max);
         if (step % 7 == 0) table.notifyBlock(@splat(7));
         for (checks.tokens[0..checks.len]) |token| _ = table.classify(token, step % 2 == 0);
         const batch = table.claimDemand(now, .{ .items = 3, .ordinary = step % 4 != 0 });
         if (step % 13 == 0) table.expire(now + 1);
         table.finish(&batch, step % 3 != 0);
         for (kinds) |selected| {
-            const queue = table.queues[@intFromEnum(selected)][@intFromEnum(p.State.delivered)];
+            const queue = table.queues[@intFromEnum(selected)][@intFromEnum(p.GossipProcessor.State.delivered)];
             if (queue.head != lists.none and step % 4 != 0) _ = table.report(.{ .index = @intCast(queue.head), .generation = table.cells[queue.head].generation }, .accept, now);
         }
-        for (0..p.batch_max) |_| table.retire(table.nextVerdict() orelse break);
+        for (0..p.GossipProcessor.batch_max) |_| table.retire(table.nextVerdict() orelse break);
         try verify(&table);
     }
 }
 
 test "gossip scheduler source limits cover unfinished execution and survive peer slot reuse" {
-    const limits: p.limits_mod.Limits = @splat(.{ .items = 4, .bytes = 4096 });
-    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits });
+    const limits: p.limits.Limits = @splat(.{ .items = 4, .bytes = 4096 });
+    var table = try p.GossipProcessor.init(t.allocator, .{ .limits = limits });
     defer table.deinit();
     defer table.close();
-    const source: p.Source = .{ .index = 0, .generation = 1 };
+    const source: p.GossipProcessor.Source = .{ .index = 0, .generation = 1 };
     const topic = "/eth2/01020304/beacon_block/ssz_snappy";
-    var message: @import("../gossipsub/root.zig").MessageEvent = .{
+    var message: @import("../gossipsub/root.zig").Gossipsub.MessageEvent = .{
         .source = source,
         .handle = .{ .index = 0, .generation = 1 },
         .id = @splat(1),
@@ -186,9 +186,9 @@ test "gossip scheduler source limits cover unfinished execution and survive peer
         .admitted_ms = 1,
         .deadline = 101,
     };
-    try table.capture(&message, &.{}, false, 1);
-    try table.capture(&message, &.{}, false, 1);
-    try t.expectError(error.NetworkGossipFull, table.capture(&message, &.{}, false, 1));
+    try table.capture(&message, .beacon_block, &.{}, false, 1);
+    try table.capture(&message, .beacon_block, &.{}, false, 1);
+    try t.expectError(error.NetworkGossipFull, table.capture(&message, .beacon_block, &.{}, false, 1));
     try t.expect(table.sourceRoom(.{ .index = 1, .generation = 1 }, .beacon_block, 4));
     const batch = table.claim(1);
     table.finish(&batch, true);
@@ -199,15 +199,15 @@ test "gossip scheduler source limits cover unfinished execution and survive peer
     message.source.?.generation = 2;
     message.admitted_ms = 102;
     message.deadline = 202;
-    try table.capture(&message, &.{}, false, 102);
+    try table.capture(&message, .beacon_block, &.{}, false, 102);
     try t.expect(!table.report(batch.tokens[1], .ignore, 103));
     try t.expectEqual(@as(usize, 1), table.sources[0].items[0]);
     try verify(&table);
 }
 
 test "gossip scheduler prefilter permits replacement only for eligible queued kinds" {
-    const limits: p.limits_mod.Limits = @splat(.{ .items = 2, .bytes = 4096 });
-    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits });
+    const limits: p.limits.Limits = @splat(.{ .items = 2, .bytes = 4096 });
+    var table = try p.GossipProcessor.init(t.allocator, .{ .limits = limits });
     defer table.deinit();
     defer table.close();
     const oldest = try add(&table, .beacon_attestation, 1, .{});
@@ -217,7 +217,7 @@ test "gossip scheduler prefilter permits replacement only for eligible queued ki
     try t.expectEqual(newest, batch.tokens[0]);
     table.finish(&batch, true);
     // Protect delivered execution and copying simultaneously.
-    table.execution.?[@intFromEnum(Kind.beacon_attestation)].items = 2;
+    table.execution[@intFromEnum(Kind.beacon_attestation)].items = 2;
     const copying = table.claimDemand(2, .{ .items = 1 });
     try t.expectEqual(oldest, copying.tokens[0]);
     try t.expect(!table.admissible(.beacon_attestation, 1));
@@ -230,12 +230,12 @@ test "gossip scheduler prefilter permits replacement only for eligible queued ki
 }
 
 test "gossip readiness reports checks and executable urgent and ordinary jobs" {
-    const limits: p.limits_mod.Limits = @splat(.{ .items = 8, .bytes = 4096 });
-    var table = try p.GossipProcessor.init(t.allocator, .{ .capacity = p.limits_mod.items(&limits), .bytes = p.limits_mod.bytes(&limits), .limits = limits });
+    const limits: p.limits.Limits = @splat(.{ .items = 8, .bytes = 4096 });
+    var table = try p.GossipProcessor.init(t.allocator, .{ .limits = limits });
     defer table.deinit();
     defer table.close();
     const Work = p.GossipProcessor.Work;
-    table.execution.?[@intFromEnum(Kind.data_column_sidecar)].items = 1;
+    table.execution[@intFromEnum(Kind.data_column_sidecar)].items = 1;
     try t.expectEqual(Work{}, table.readiness());
     _ = try add(&table, .voluntary_exit, 1, .{});
     try t.expectEqual(Work{ .ordinary = true }, table.readiness());
@@ -251,7 +251,7 @@ test "gossip readiness reports checks and executable urgent and ordinary jobs" {
     try t.expectEqual(@as(usize, 1), batch.len);
     try t.expectEqual(Work{ .checks = true, .ordinary = true }, table.readiness());
     table.finish(&batch, true);
-    const checks = table.claimChecks(1, p.batch_max);
+    const checks = table.claimChecks(1, p.GossipProcessor.batch_max);
     try t.expectEqual(@as(usize, 1), checks.len);
     try t.expectEqual(Work{ .ordinary = true }, table.readiness());
     try t.expect(table.report(batch.tokens[0], .accept, 1));

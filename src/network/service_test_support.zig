@@ -91,7 +91,7 @@ pub const Owners = struct {
     negotiator: ?*@import("negotiate.zig").Negotiator = null,
     identify: ?*@import("identify/handler.zig").Handler = null,
     reqresp: ?*@import("reqresp/ReqResp.zig") = null,
-    gossip: ?*@import("gossipsub/gossipsub.zig").Gossipsub = null,
+    gossip: ?*@import("gossipsub/Gossipsub.zig") = null,
 
     pub fn route(self: Owners, engine: *Engine, events: []const Engine.Event) void {
         for (events) |event| {

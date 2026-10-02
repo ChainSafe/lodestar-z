@@ -181,7 +181,7 @@ pub const NetworkCore = struct {
         errdefer allocator.free(self.native_events);
         self.local_intent_workspace = try allocator.create(gossip.local_intent.Workspace);
         errdefer allocator.destroy(self.local_intent_workspace);
-        self.local_intent_workspace.* = try gossip.local_intent.Workspace.init(allocator, self.service.gossipsub.overlay.rows.len);
+        self.local_intent_workspace.* = try gossip.local_intent.Workspace.init(allocator, self.service.gossipsub.topicCapacity());
         errdefer self.local_intent_workspace.deinit(allocator);
         self.initialized = true;
     }
@@ -293,7 +293,7 @@ pub const NetworkCore = struct {
     pub fn consume(self: *NetworkCore, request: rr.ReqResp.RequestHandle, now: Now) bool {
         return self.service.reqresp.consume(request, now);
     }
-    pub fn respond(self: *NetworkCore, request: rr.ReqResp.RequestHandle, bytes: []const u8, context: ?rr.ReqResp.ForkEntry, now: Now) !void {
+    pub fn respond(self: *NetworkCore, request: rr.ReqResp.RequestHandle, bytes: []const u8, context: ?@import("types.zig").ForkEntry, now: Now) !void {
         try self.service.reqresp.respond(request, bytes, context, now);
     }
     pub fn respondError(self: *NetworkCore, request: rr.ReqResp.RequestHandle, code: u8, message: []const u8, now: Now) !void {
@@ -313,7 +313,7 @@ pub const NetworkCore = struct {
         if (self.peer_manager.stopped or self.peer_manager.quiescing) return error.Stopped;
         return self.service.gossipsub.publishWithOptions(topic, bytes, options, now);
     }
-    pub fn reportValidation(self: *NetworkCore, handle: gossip.ValidationHandle, verdict: gossip.Verdict, now: Now) gossip.ReportOutcome {
+    pub fn reportValidation(self: *NetworkCore, handle: gossip.Gossipsub.ValidationHandle, verdict: gossip.Gossipsub.Verdict, now: Now) gossip.Gossipsub.ReportOutcome {
         return self.service.gossipsub.report(handle, verdict, now);
     }
     /// Borrows the last step's authenticated transport events until the next step.
@@ -817,7 +817,7 @@ fn ceilMs(ns: u64) u64 {
     return ns / std.time.ns_per_ms + @intFromBool(ns % std.time.ns_per_ms != 0);
 }
 
-fn validateForkTable(table: []const rr.ReqResp.ForkEntry, context: *const t.ForkContext) !void {
+fn validateForkTable(table: []const @import("types.zig").ForkEntry, context: *const t.ForkContext) !void {
     try rr.ReqResp.validateForkTable(table);
     var found = false;
     for (table) |entry| {
