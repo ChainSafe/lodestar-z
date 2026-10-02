@@ -73,8 +73,10 @@ pub fn processExecutionPayload(
     // the state transition sync
     //
     // Equivalent to `assert executionEngine.notifyNewPayload(payload)
-    if (external_data.execution_payload_status == .invalid) {
-        return error.InvalidExecutionPayload;
+    switch (external_data.execution_payload_status) {
+        .pre_merge => return error.ExecutionPayloadStatusPreMerge,
+        .invalid => return error.InvalidExecutionPayload,
+        .valid => {},
     }
 
     var payload_header = ForkTypes(fork).ExecutionPayloadHeader.default_value;
