@@ -15,6 +15,7 @@ import {
   subscriptions,
   topicName,
   unreachableConnect,
+  waitForGossipReady,
 } from "../utils/network.js";
 
 const mode = process.argv[2];
@@ -121,7 +122,10 @@ if (mode === "exit") {
     remote.addDirectPeer(identity.peerId, [identity.localEndpoint]),
     network.setDirectPeer(remoteIdentity.peerId, [remoteIdentity.localEndpoint]),
   ]);
-  await delay(1250);
+  await Promise.all([
+    waitForGossipReady(network, [remoteIdentity.peerId], [topicName()], () => network.metrics()),
+    waitForGossipReady(remote, [identity.peerId], [topicName()], () => remote.getMetrics()),
+  ]);
   const block = new Uint8Array(4000).fill(7);
   new DataView(block.buffer).setBigUint64(100, 100n, true);
   await remote.publishGossip(topicName(), block, {allowZeroPeers: false});

@@ -167,17 +167,7 @@ pub fn transmit(
     return self.sockets.sendTo(io, destination, bytes, constants.packet_size_max) catch |err| {
         if (Sockets.SendDrops.Reason.fromError(err)) |reason| self.send_drops.add(reason, bytes.len);
         std.log.scoped(.network_discovery).debug("discovery_send_failed endpoint={any} bytes={d} reason={s}", .{ destination, bytes.len, @errorName(err) });
-        return switch (err) {
-            error.AccessDenied,
-            error.AddressFamilyUnsupported,
-            error.ConnectionRefused,
-            error.ConnectionResetByPeer,
-            error.DestinationRefused,
-            error.HostUnreachable,
-            error.NetworkUnreachable,
-            => error.DestinationUnreachable,
-            else => err,
-        };
+        return if (Sockets.destinationUnreachable(err)) error.DestinationUnreachable else err;
     };
 }
 

@@ -63,11 +63,7 @@ test {
     _ = stream_io;
     _ = reqresp;
     _ = gossipsub;
-    _ = @import("types.zig");
-    _ = @import("udp");
     _ = @import("wait.zig");
-    _ = @import("transport.zig");
-    _ = @import("negotiate.zig");
     _ = @import("router.zig");
     _ = @import("network_core.zig");
     _ = @import("reservations.zig");

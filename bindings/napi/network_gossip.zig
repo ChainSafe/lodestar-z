@@ -35,21 +35,20 @@ pub fn projectWall(admitted: u64, clock: Clock) !u64 {
 /// Runs processor maintenance and applies queued verdicts, unless the host holds them. Each message the host was
 /// handed then awaits acknowledgement of its disposition. Returns whether bounded carry-over work remains for the
 /// next turn.
-pub fn flags(runtime: *Runtime, io: std.Io) !bool {
+pub fn flags(runtime: *Runtime, io: std.Io, tick: n.Now) !bool {
     runtime.lock();
     defer runtime.unlock();
     const table = if (runtime.gossip) |*table| table else return false;
     const core = &runtime.heavy.?.core;
     const clock = try sample(io);
-    const now: n.Now = .{ .mono_ms = clock.mono_ms, .unix_s = @intCast(clock.unix_ms / 1000) };
-    table.maintain(now.mono_ms, core.current_slot);
+    table.maintain(clock.mono_ms, core.current_slot);
     var retired_bytes: usize = 0;
     for (0..if (runtime.verdicts_held) 0 else batch_max) |_| {
         const token = table.nextVerdict() orelse break;
         const cell = table.get(token).?;
         if (retired_bytes > 0 and cell.input.len > batch_bytes -| retired_bytes) break;
         retired_bytes += cell.input.len;
-        const result = core.reportValidation(cell.handle, cell.verdict, now);
+        const result = core.reportValidation(cell.handle, cell.verdict, tick);
         table.outcome(result);
         table.retire(token);
     }
@@ -90,11 +89,12 @@ pub const Ingress = struct {
         const runtime = self.runtime;
         const clock = try sample(self.io);
         const received_at = try projectWall(candidate.event.admitted_ms, clock);
+        if (clock.mono_ms >= candidate.event.deadline) return false;
         runtime.lock();
         defer runtime.unlock();
         if (runtime.stop or self.failure != null) return false;
         const core = &runtime.heavy.?.core;
-        const accepted = runtime.gossip.?.admit(core.service.gossipsub, candidate, clock.mono_ms, received_at, core.current_slot);
+        const accepted = runtime.gossip.?.admit(core.service.gossipsub, candidate, candidate.event.admitted_ms, received_at, core.current_slot);
         runtime.recomputeLocked(.checks);
         runtime.recomputeLocked(.gossip);
         return accepted;

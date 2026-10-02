@@ -367,14 +367,6 @@ fn parsePort(bytes: []const u8) Error!u16 {
     return value;
 }
 
-/// Hashes the uncompressed point without its 0x04 prefix with keccak256, per the v4 scheme.
-pub fn nodeIdFromPublicKey(public_key: *const [33]u8) Error!types.NodeId {
-    const uncompressed = try crypto.uncompressedPublicKey(public_key);
-    var node_id: types.NodeId = undefined;
-    Keccak256.hash(uncompressed[1..], &node_id, .{});
-    return node_id;
-}
-
 // The signed content is the record list without its signature, so the list prefix has to be
 // rebuilt for the shorter payload.
 fn hashSignedPayload(payload: []const u8, digest: *[32]u8) void {

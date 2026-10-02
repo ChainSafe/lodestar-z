@@ -1029,6 +1029,28 @@ describe("binding pump delivery", () => {
     expect(node.host.error).toHaveBeenCalledExactlyOnceWith(thrown);
   });
 
+  it("checks the budget between serving starts and keeps their order and capacity across turns", () => {
+    const node = fixture();
+    const starts = Array.from({length: 8}, (_, i) => incoming(`start-${i}`));
+    const queue = starts.slice();
+    node.runtime.exchange.mockImplementation((_actions, demand) => ({
+      ...idle,
+      serving: queue.splice(0, Math.min(demand.servingStarts, demand.capacity?.serving ?? 0)),
+    }));
+    node.host.serve.mockImplementation(() => {
+      node.advance(BUDGET_MS);
+      return new Promise(() => undefined);
+    });
+    for (let i = 0; i < starts.length; i++) {
+      expect(node.pump.turn()).toBe(i === starts.length - 1 ? "idle" : "now");
+      expect(node.host.serve).toHaveBeenCalledTimes(i + 1);
+      expect(starts[i].retainUntil).toHaveBeenCalledOnce();
+      const held = i === 0 ? 0 : starts.length - i;
+      expect(node.calls()[i][1]).toMatchObject({capacity: {serving: 32 - held}, servingStarts: 8 - held});
+    }
+    expect(starts.every((start) => start.cancel.mock.calls.length === 0)).toBe(true);
+  });
+
   it("holds serving starts once the budget is spent and starts them first next turn, counted once", async () => {
     const node = fixture();
     const starts = Array.from({length: 6}, (_, i) => incoming(`start-${i}`));

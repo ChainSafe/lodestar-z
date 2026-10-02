@@ -63,6 +63,7 @@ pub const NetworkCore = struct {
         context: ?*anyopaque = null,
         /// Drains the host wake descriptor before reading any host queue, so a submission that
         /// lands after the drain wakes the next poll. Must not read `transportEvents()`.
+        /// Passes this turn's `now` to core mutations; the protocol work that follows uses it too.
         apply: ?*const fn (context: *anyopaque, core: *NetworkCore, now: Now) HostProgress = null,
         /// Earliest host-owned deadline, kept by the host without scanning its queues.
         deadline_ms: ?u64 = null,

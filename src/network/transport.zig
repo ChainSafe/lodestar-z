@@ -209,7 +209,7 @@ pub const Transport = struct {
         self.engine.sent(handle.index, keyClock(io, now), drained);
         if (failure) |err| {
             _ = self.engine.abandon(handle);
-            return mapSendError(err);
+            return if (Sockets.destinationUnreachable(err)) error.DestinationUnreachable else err;
         }
         return handle;
     }
@@ -451,20 +451,6 @@ fn receiveTimeout(wait_ms: u32) std.Io.Timeout {
         .raw = .fromMilliseconds(wait_ms),
         .clock = .awake,
     } };
-}
-
-fn mapSendError(err: Sockets.SendError) DialError {
-    return switch (err) {
-        error.AccessDenied,
-        error.AddressFamilyUnsupported,
-        error.ConnectionRefused,
-        error.ConnectionResetByPeer,
-        error.DestinationRefused,
-        error.HostUnreachable,
-        error.NetworkUnreachable,
-        => error.DestinationUnreachable,
-        else => err,
-    };
 }
 
 pub fn currentTime(io: std.Io) error{ClockOutOfRange}!Engine.Now {
