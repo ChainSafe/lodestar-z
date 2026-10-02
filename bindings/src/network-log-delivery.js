@@ -6,6 +6,7 @@ const LOG_FINAL = 4;
 /** Record loss is reported at most this often, with every loss since the last report. */
 const LOG_LOSS_MS = 30000;
 export const LOG_ERRORS_NAME = "lodestar_native_log_delivery_errors_total";
+export const LOG_DRAIN_ERRORS_NAME = "lodestar_native_log_drain_errors_total";
 
 /** Delivers bounded log batches; its timer holds it weakly so it cannot retain a dropped facade. */
 export class LogDelivery {
@@ -16,6 +17,7 @@ export class LogDelivery {
   #stopped = false;
   #logTimer = undefined;
   #logErrors = 0;
+  #drainErrors = 0;
   #logLoss = {at: Number.NEGATIVE_INFINITY, dropped: 0n, suppressed: 0n, truncated: 0n};
 
   constructor(runtime, host, onError) {
@@ -52,7 +54,7 @@ export class LogDelivery {
       try {
         batch = this.#runtime.drainLogs(LOG_RECORDS);
       } catch (error) {
-        this.#logErrors++;
+        this.#drainErrors++;
         this.#onError(error);
         return;
       }
@@ -72,7 +74,7 @@ export class LogDelivery {
   #lostLogs(batch) {
     const reported = this.#logLoss;
     if (batch.dropped === reported.dropped && batch.truncated === reported.truncated) return null;
-    const now = Date.now();
+    const now = performance.now();
     if (now - reported.at < LOG_LOSS_MS) return null;
     this.#logLoss = {at: now, dropped: batch.dropped, suppressed: batch.suppressed, truncated: batch.truncated};
     return {
@@ -87,6 +89,9 @@ export class LogDelivery {
       `# HELP ${LOG_ERRORS_NAME} Native log records that left the native queue but did not reach the host's log handler`,
       `# TYPE ${LOG_ERRORS_NAME} counter`,
       `${LOG_ERRORS_NAME} ${this.#logErrors}`,
+      `# HELP ${LOG_DRAIN_ERRORS_NAME} Failed attempts to drain native log records`,
+      `# TYPE ${LOG_DRAIN_ERRORS_NAME} counter`,
+      `${LOG_DRAIN_ERRORS_NAME} ${this.#drainErrors}`,
       "",
     ].join("\n");
   }

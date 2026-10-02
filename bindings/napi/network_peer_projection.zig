@@ -28,12 +28,6 @@ pub const Lane = struct {
 };
 const bytes = @import("network_js.zig").bytes;
 const endpoint = @import("network_js.zig").endpoint;
-fn connection(env: napi.Env, handle: t.Handle) !Value {
-    const object = try env.createObject();
-    try object.setNamedProperty("index", try env.createUint32(handle.index));
-    try object.setNamedProperty("generation", try env.createUint32(handle.generation));
-    return object;
-}
 fn groups(env: napi.Env, set: ?n.peers.custody.Groups) !Value {
     const value = set orelse return env.getNull();
     const array = try env.createArrayWithLength(value.count());
@@ -79,7 +73,7 @@ fn identify(env: napi.Env, value: *const n.identify.Metadata) !Value {
 pub fn state(env: napi.Env, value: *const t.Snapshot) !Value {
     const object = try env.createObject();
     try object.setNamedProperty("identity", try @import("network_js.zig").peerIdValue(env, &value.identity));
-    try object.setNamedProperty("connection", if (value.connection) |handle| try connection(env, handle) else try env.getNull());
+    try object.setNamedProperty("connection", if (value.connection) |handle| try @import("network_js.zig").connection(env, handle) else try env.getNull());
     try object.setNamedProperty("direction", try env.createStringUtf8(@tagName(value.direction)));
     try object.setNamedProperty("endpoint", try endpoint(env, value.endpoint));
     try object.setNamedProperty("relevant", try env.getBoolean(value.relevant));
@@ -103,7 +97,7 @@ pub fn observation(env: napi.Env, entry: *const Entry) !Value {
     switch (entry.event) {
         .ready, .updated => |*value| try object.setNamedProperty("state", try state(env, value)),
         .closed => |value| {
-            try object.setNamedProperty("connection", try connection(env, value.connection));
+            try object.setNamedProperty("connection", try @import("network_js.zig").connection(env, value.connection));
             try object.setNamedProperty("identity", try @import("network_js.zig").peerIdValue(env, &value.identity));
             try object.setNamedProperty("reason", try env.createStringUtf8(@tagName(value.reason)));
         },

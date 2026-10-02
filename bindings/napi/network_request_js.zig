@@ -1,31 +1,24 @@
 const std = @import("std");
 const napi = @import("zapi:zapi").napi;
 const Value = napi.Value;
+const decode = @import("network_js_input.zig");
 const n = @import("network");
-const cfg = @import("network_config.zig");
-const app = @import("network_application_config.zig");
 const r = @import("network_runtime.zig");
 const requests = @import("network_requests.zig");
 const Runtime = r.Runtime;
 
 const bytes = @import("network_js.zig").bytes;
 const errorValue = @import("network_js.zig").errorValue;
-fn tokenFor(value: Value) !requests.Token {
-    try cfg.completeObject(value, &.{ "index", "generation" });
-    const index = try cfg.integer(try cfg.get(value, "index"), 31);
-    const generation = try cfg.bigint(try cfg.get(value, "generation"));
-    return .{ .index = @intCast(index), .generation = generation };
-}
 fn optionsFor(value: Value) !n.reqresp.ReqResp.RequestOptions {
     var result_options: n.reqresp.ReqResp.RequestOptions = .{};
     if (try value.typeof() == .undefined) return result_options;
-    try cfg.object(value, &.{ "expectedChunks", "negotiationTimeoutMs", "requestTimeoutMs", "responseTimeoutMs" });
-    const expected = try cfg.get(value, "expectedChunks");
-    if (try expected.typeof() != .undefined) result_options.expected_chunks = @intCast(try cfg.integer(expected, std.math.maxInt(u32)));
+    try decode.object(value, &.{ "expectedChunks", "negotiationTimeoutMs", "requestTimeoutMs", "responseTimeoutMs" });
+    const expected = try decode.get(value, "expectedChunks");
+    if (try expected.typeof() != .undefined) result_options.expected_chunks = @intCast(try decode.integer(expected, std.math.maxInt(u32)));
     inline for (.{ .{ "negotiationTimeoutMs", "negotiation_ms" }, .{ "requestTimeoutMs", "request_ms" }, .{ "responseTimeoutMs", "response_ms" } }) |names| {
-        const duration = try cfg.get(value, names[0]);
+        const duration = try decode.get(value, names[0]);
         if (try duration.typeof() != .undefined) {
-            const ms = try cfg.integer(duration, 60000);
+            const ms = try decode.integer(duration, 60000);
             if (ms == 0) return error.InvalidNetworkInteger;
             @field(result_options.absolute_timeouts, names[1]) = ms;
         }
@@ -36,15 +29,12 @@ pub fn start(runtime: *Runtime, peer: Value, protocol: Value, data: Value, optio
     runtime.retain();
     defer runtime.release();
     var protocol_buffer: [128]u8 = undefined;
-    const protocol_len = try app.text(protocol, &protocol_buffer);
+    const protocol_len = try decode.text(protocol, &protocol_buffer);
     const which = n.reqresp.Protocol.fromId(protocol_buffer[0..protocol_len]) orelse return error.UnknownProtocol;
     if (which.isControl()) return error.ControlProtocol;
     const request_options = try optionsFor(options);
-    const identity = try cfg.peerIdFrom(peer);
-    if (!try data.isTypedarray()) return error.InvalidNetworkBytes;
-    const view = try data.getTypedarrayInfo();
-    if (view.array_type != .uint8 or try view.arraybuffer.isDetachedArrayBuffer()) return error.InvalidNetworkBytes;
-    const len = view.length;
+    const identity = try decode.peerIdFrom(peer);
+    const len = (try decode.byteView(data)).len;
     if (len < which.info().request_min) return error.RequestTooSmall;
     if (len > which.info().request_max) return error.RequestTooLarge;
     runtime.lock();
@@ -70,7 +60,7 @@ pub fn start(runtime: *Runtime, peer: Value, protocol: Value, data: Value, optio
     cell.peer = identity;
     cell.options = request_options;
     const value = try @import("network_js.zig").handle(runtime.env, token.index, token.generation);
-    try cfg.bytes(data, cell.input);
+    try decode.bytes(data, cell.input);
     runtime.lock();
     defer runtime.unlock();
     if (runtime.stop or runtime.quiescent) return error.NetworkClosed;
@@ -89,7 +79,7 @@ fn rejectAdmission(env: napi.Env) anyerror {
 /// Arms a pull, whose chunk or terminal outcome an exchange delivers. The iterator allows one pull at a time, so a
 /// second one breaks its contract.
 pub fn pull(runtime: *Runtime, handle: Value) !void {
-    const token = try tokenFor(handle);
+    const token = try decode.handle(requests.Token, handle, requests.capacity_max);
     runtime.lock();
     const cell = runtime.requests.?.get(token) orelse {
         runtime.unlock();
@@ -107,7 +97,7 @@ pub fn pull(runtime: *Runtime, handle: Value) !void {
 /// Cancels and retires the request. Its terminal completion ends a retirement the iterator awaits, one not
 /// `abandoned`; a stale handle's request already retired.
 pub fn retire(runtime: *Runtime, handle: Value, abandoned: bool) !void {
-    const token = try tokenFor(handle);
+    const token = try decode.handle(requests.Token, handle, requests.capacity_max);
     runtime.lock();
     const cell = runtime.requests.?.get(token) orelse {
         runtime.unlock();

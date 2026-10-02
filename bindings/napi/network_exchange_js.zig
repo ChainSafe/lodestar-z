@@ -2,8 +2,7 @@ const std = @import("std");
 const n = @import("network");
 const napi = @import("zapi:zapi").napi;
 const Value = napi.Value;
-const cfg = @import("network_config.zig");
-const app = @import("network_application_config.zig");
+const decode = @import("network_js_input.zig");
 const r = @import("network_runtime.zig");
 const Runtime = r.Runtime;
 const g = @import("network_gossip.zig");
@@ -25,18 +24,18 @@ const bytes = @import("network_js.zig").bytes;
 
 pub fn parseDemand(value: Value) !Demand {
     _ = try object(value);
-    const capacity = try cfg.get(value, "capacity");
+    const capacity = try decode.get(value, "capacity");
     const demand: Demand = .{
-        .settle = @intCast(try cfg.integer(try cfg.get(value, "settleCells"), settle_max)),
-        .peers = @intCast(try cfg.integer(try cfg.get(value, "peers"), peers_max)),
-        .checks = @intCast(try cfg.integer(try cfg.get(value, "checks"), g.batch_max)),
-        .serving = @intCast(try cfg.integer(try cfg.get(value, "servingStarts"), serving_max)),
-        .messages = @intCast(try cfg.integer(try cfg.get(value, "messages"), g.batch_max)),
-        .bytes = @intCast(try cfg.integer(try cfg.get(value, "bytes"), g.batch_bytes)),
-        .claim_ordinary = try cfg.boolean(try cfg.get(value, "claimOrdinary")),
+        .settle = @intCast(try decode.integer(try decode.get(value, "settleCells"), settle_max)),
+        .peers = @intCast(try decode.integer(try decode.get(value, "peers"), peers_max)),
+        .checks = @intCast(try decode.integer(try decode.get(value, "checks"), g.batch_max)),
+        .serving = @intCast(try decode.integer(try decode.get(value, "servingStarts"), serving_max)),
+        .messages = @intCast(try decode.integer(try decode.get(value, "messages"), g.batch_max)),
+        .bytes = @intCast(try decode.integer(try decode.get(value, "bytes"), g.batch_bytes)),
+        .claim_ordinary = try decode.boolean(try decode.get(value, "claimOrdinary")),
         .capacity = if (try capacity.typeof() == .null) null else .{
-            .serving = @intCast(try cfg.integer(try cfg.get(try object(capacity), "serving"), incoming.capacity_max)),
-            .ordinary = try cfg.boolean(try cfg.get(capacity, "ordinary")),
+            .serving = @intCast(try decode.integer(try decode.get(try object(capacity), "serving"), incoming.capacity_max)),
+            .ordinary = try decode.boolean(try decode.get(capacity, "ordinary")),
         },
     };
     if (demand.settle == 0) return error.InvalidNetworkInteger;
@@ -60,39 +59,39 @@ pub fn parseActions(value: Value, into: *[action_max]Action) !usize {
 
 pub fn parseAction(value: Value) !Action {
     _ = object(value) catch return error.InvalidNetworkAction;
-    return switch (try name(ActionType, try cfg.get(value, "type"), error.InvalidNetworkAction)) {
+    return switch (try name(ActionType, try decode.get(value, "type"), error.InvalidNetworkAction)) {
         .verdict => .{ .verdict = .{
-            .token = try handle(try cfg.get(value, "handle")),
-            .verdict = try name(n.gossipsub.Gossipsub.Verdict, try cfg.get(value, "verdict"), error.InvalidGossipVerdict),
+            .token = try handle(try decode.get(value, "handle")),
+            .verdict = try name(n.gossipsub.Gossipsub.Verdict, try decode.get(value, "verdict"), error.InvalidGossipVerdict),
         } },
-        .classify => .{ .classify = .{ .token = try handle(try cfg.get(value, "handle")), .available = try cfg.boolean(try cfg.get(value, "available")) } },
-        .block => .{ .block = try cfg.fixed(32, try cfg.get(value, "root")) },
+        .classify => .{ .classify = .{ .token = try handle(try decode.get(value, "handle")), .available = try decode.boolean(try decode.get(value, "available")) } },
+        .block => .{ .block = try decode.fixed(32, try decode.get(value, "root")) },
         .recheck => .recheck,
         .dropQueued => .drop_queued,
         .reportPeer => .{ .report_peer = .{
-            .identity = try cfg.peerIdFrom(try cfg.get(value, "peerId")),
-            .action = try name(n.peers.types.PeerAction, try cfg.get(value, "action"), error.InvalidNetworkAction),
-            .count = try reportCount(try cfg.get(value, "count")),
+            .identity = try decode.peerIdFrom(try decode.get(value, "peerId")),
+            .action = try name(n.peers.types.PeerAction, try decode.get(value, "action"), error.InvalidNetworkAction),
+            .count = try reportCount(try decode.get(value, "count")),
         } },
     };
 }
 
 fn name(comptime T: type, value: Value, invalid: anyerror) !T {
     var text: [16]u8 = undefined;
-    const len = app.text(value, &text) catch return invalid;
+    const len = decode.text(value, &text) catch return invalid;
     return std.meta.stringToEnum(T, text[0..len]) orelse invalid;
 }
 
 fn handle(value: Value) !g.Token {
     if (try value.typeof() != .object) return error.InvalidGossipHandle;
-    const index = try cfg.integer(try cfg.get(value, "index"), n.gossip_processor.limits.capacity_max - 1);
-    const generation = try cfg.bigint(try cfg.get(value, "generation"));
+    const index = try decode.integer(try decode.get(value, "index"), n.gossip_processor.limits.capacity_max - 1);
+    const generation = try decode.bigint(try decode.get(value, "generation"));
     if (generation == 0) return error.InvalidGossipHandle;
     return .{ .index = @intCast(index), .generation = generation };
 }
 
 fn reportCount(value: Value) !u8 {
-    const result = try cfg.integer(value, @import("network_peer_reports.zig").report_max);
+    const result = try decode.integer(value, @import("network_peer_reports.zig").report_max);
     if (result == 0) return error.InvalidNetworkInteger;
     return @intCast(result);
 }
@@ -186,9 +185,7 @@ fn buildResult(env: napi.Env, runtime: *Runtime, selection: *Selection) !Value {
     const checks = try env.createArrayWithLength(selection.checks.len);
     for (selection.checks.tokens[0..selection.checks.len], selection.views[0..selection.checks.len], 0..) |token, *view, i| {
         const check = try env.createObject();
-        const reference = try env.createObject();
-        try reference.setNamedProperty("index", try env.createUint32(token.index));
-        try reference.setNamedProperty("generation", try env.createBigintUint64(token.generation));
+        const reference = try @import("network_js.zig").handle(env, token.index, token.generation);
         try check.setNamedProperty("handle", reference);
         try check.setNamedProperty("root", try bytes(env, &view.root));
         try check.setNamedProperty("slot", try env.createBigintUint64(view.slot));
@@ -200,9 +197,7 @@ fn buildResult(env: napi.Env, runtime: *Runtime, selection: *Selection) !Value {
     try result.setNamedProperty("gossip", if (selection.gossip) |*batch| try jobs(env, runtime, batch) else try env.getNull());
     const acknowledged = try env.createArrayWithLength(selection.acknowledged_count);
     for (selection.acknowledged[0..selection.acknowledged_count], 0..) |token, i| {
-        const reference = try env.createObject();
-        try reference.setNamedProperty("index", try env.createUint32(token.index));
-        try reference.setNamedProperty("generation", try env.createBigintUint64(token.generation));
+        const reference = try @import("network_js.zig").handle(env, token.index, token.generation);
         try acknowledged.setElement(@intCast(i), reference);
     }
     try result.setNamedProperty("acknowledged", acknowledged);
@@ -260,4 +255,8 @@ fn jobs(env: napi.Env, runtime: *Runtime, batch: *const g.Batch) !Value {
     }
     try result.setNamedProperty("jobs", list);
     return result;
+}
+
+test {
+    _ = @import("network_exchange_js_test.zig");
 }

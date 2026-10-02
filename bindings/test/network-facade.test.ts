@@ -374,6 +374,11 @@ test("refuses an invalid peer report or imported root with an ordinary throw bef
   }
 });
 
+test("queued block roots survive caller buffer reuse and transfer", childTestTimeout(), () => {
+  const output = runChild(["--import", "tsx", "bindings/test/fixtures/network-block-imported.mjs"]);
+  expect(output).toContain("queued roots survived buffer reuse and transfer");
+});
+
 test("the facade validates its host, starts without host callbacks and hides the exchange", async () => {
   expect(() => createNativeNetwork(applicationConfig(), {} as NativeHost)).toThrow(
     "NativeHost.capacity must be a function"
@@ -404,7 +409,7 @@ test("the facade validates its host, starts without host callbacks and hides the
     expect((await network.getDirectPeers()).identities).toEqual([direct]);
     expect(await network.setDirectPeer(direct, null)).toBe(true);
     expect(await network.setDirectPeer(direct, null)).toBe(false);
-    // The native registry's families and the binding's two, each exactly once.
+    // The native registry's families and the binding's families, each exactly once.
     const families = (text: string) => [...text.matchAll(/^# TYPE (\S+) /gm)].map(([, name]) => name);
     const native = families(runtimeOf(network)?.getMetrics() ?? "");
     const rendered = families(network.metrics());
@@ -413,6 +418,7 @@ test("the facade validates its host, starts without host callbacks and hides the
       ...native,
       "lodestar_native_drain_burst_seconds",
       "lodestar_native_log_delivery_errors_total",
+      "lodestar_native_log_drain_errors_total",
     ]);
     expect(new Set(rendered).size).toBe(rendered.length);
   } finally {

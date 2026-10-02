@@ -166,7 +166,7 @@ export class NativePump {
   request = () => this.#schedule();
 
   block(root) {
-    this.#coalesce({root, type: "block"});
+    this.#coalesce({root: new Uint8Array(root), type: "block"});
   }
   dropQueued() {
     this.#coalesce({type: "dropQueued"});
@@ -645,8 +645,8 @@ export class NativePump {
   }
 
   /**
-   * The drain burst histogram, whose duration includes intervening event-loop work, and the log delivery errors, in
-   * exposition format.
+   * The drain burst histogram, whose duration includes intervening event-loop work, and separate counters for
+   * undelivered log records and failed log drains, in exposition format.
    */
   metrics() {
     const {buckets, sum, count} = this.#burst;

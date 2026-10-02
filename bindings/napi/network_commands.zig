@@ -162,15 +162,11 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
     const store = self.table.cells[index].store;
     switch (input.command) {
         .applyIntent => {
-            if (input.slot < self.slot) return error.ClockRegression;
+            if (input.slot < core.current_slot) return error.ClockRegression;
             const intent = &self.stores.?.intents[store.?].value;
             intent.update = try self.heavy.?.config.chain.update(intent.update.local, core.advertisementEndpoints(), input.slot);
             intent.slot = input.slot;
             operation.boolean = try core.applyIntent(intent, timestamp);
-            self.lock();
-            self.slot = input.slot;
-            if (!self.stop) self.state = .running;
-            self.unlock();
         },
         .updateStatus => {
             var status = input.status;
