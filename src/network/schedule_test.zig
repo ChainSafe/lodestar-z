@@ -3,6 +3,24 @@ const schedule_test_support = @import("schedule_test_support.zig");
 const time = @import("time.zig");
 const Schedule = @import("schedule.zig").Schedule;
 
+test "schedule merge retains the earliest deadline independently of runnable work" {
+    const early = time.milliseconds(25).addDuration(.{ .clock = .awake, .raw = .fromNanoseconds(1) });
+    const late = time.milliseconds(25).addDuration(.{ .clock = .awake, .raw = .fromNanoseconds(2) });
+    for ([_]bool{ false, true }) |a_runnable| {
+        for ([_]bool{ false, true }) |b_runnable| {
+            const a: Schedule = .{ .deadline = early, .runnable = a_runnable };
+            const b: Schedule = .{ .deadline = late, .runnable = b_runnable };
+            const expected: Schedule = .{ .deadline = early, .runnable = a_runnable or b_runnable };
+            try std.testing.expectEqualDeep(expected, a.merge(b));
+            try std.testing.expectEqualDeep(expected, b.merge(a));
+        }
+    }
+    const due: Schedule = .{ .deadline = time.milliseconds(0) };
+    const distant: Schedule = .{ .deadline = time.milliseconds(std.math.maxInt(u64)) };
+    try std.testing.expectEqualDeep(due, due.merge(distant));
+    try std.testing.expectEqualDeep(due, distant.merge(due));
+}
+
 test "schedule merge has an identity and is associative commutative and idempotent" {
     const schedules = [_]Schedule{
         .{},

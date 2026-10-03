@@ -607,4 +607,5 @@ pub const PeerManager = struct {
 
 test {
     _ = @import("peer_manager_test.zig");
+    _ = @import("peer_manager_selection_test.zig");
 }

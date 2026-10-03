@@ -12,10 +12,6 @@ fn currentTime() !Now {
     return @import("transport.zig").Transport.currentTime(std.testing.io);
 }
 
-fn monotonicNs() u64 {
-    return @intCast(std.Io.Clock.awake.now(std.testing.io).nanoseconds);
-}
-
 /// A scripted host: a nonblocking wake pipe, and an apply that drains it and then runs the
 /// test's host work.
 const TestHost = struct {
@@ -71,12 +67,6 @@ const TestHost = struct {
     }
 };
 
-fn delayedSignal(host: *const TestHost, delay_ms: i64, written_ns: *std.atomic.Value(u64)) void {
-    std.testing.io.sleep(.fromMilliseconds(delay_ms), .awake) catch unreachable;
-    written_ns.store(monotonicNs(), .release);
-    host.signal();
-}
-
 const Pair = struct {
     a: NetworkCore = undefined,
     b: NetworkCore = undefined,
@@ -102,7 +92,7 @@ fn intent(node: *const NetworkCore, subscriptions: []const @import("gossipsub/lo
     };
 }
 
-test "a host publication submitted while the owner waits leaves in the flush of the turn that saw the wake" {
+test "a host publication submitted after wait planning leaves in the turn that observes the wake" {
     if (!NetworkCore.wait.supported) return error.SkipZigTest;
     const topic = "/eth2/00000000/beacon_block/ssz_snappy";
     const key_a = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{61}));
@@ -147,34 +137,34 @@ test "a host publication submitted while the owner waits leaves in the flush of 
     try pair.b.setHostWake(host.pipe[0]);
     defer pair.b.setHostWake(null) catch unreachable;
     host.publication = topic;
-    var written_ns = std.atomic.Value(u64).init(0);
-    const writer = try std.Thread.spawn(.{}, delayedSignal, .{ &host, 30, &written_ns });
-    var woke: ?NetworkCore.Result = null;
-    var returned_ns: u64 = 0;
-    var turns: usize = 0;
-    // Each turn waits for its earliest deadline or the wake; the host deadline lies beyond both.
-    for (0..64) |_| {
-        const now = try currentTime();
-        const result = driver.step(&pair.b, std.testing.io, now, .{}, host.seam(now.millis() +| 5_000));
-        returned_ns = monotonicNs();
-        turns += 1;
-        if (result.failure) |err| return err;
-        if (result.readiness.host) {
-            woke = result;
-            break;
+    const SubmitAtPoll = struct {
+        threadlocal var target: ?*TestHost = null;
+
+        fn checkCancel(userdata: ?*anyopaque) std.Io.Cancelable!void {
+            // The native wait checks cancellation after planning and before polling.
+            if (target) |pending| {
+                target = null;
+                std.debug.assert(pending.applies == 0);
+                pending.signal();
+            }
+            return std.testing.io.vtable.checkCancel(userdata);
         }
-        try std.testing.expectEqual(@as(u32, 0), host.applies);
-    }
-    writer.join();
-    const turn = woke orelse return error.TestUnexpectedResult;
+    };
+    SubmitAtPoll.target = &host;
+    defer SubmitAtPoll.target = null;
+    var vtable = std.testing.io.vtable.*;
+    vtable.checkCancel = SubmitAtPoll.checkCancel;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    const submitted_at = try currentTime();
+    const turn = driver.step(&pair.b, io, submitted_at, .{}, host.seam(submitted_at.millis() +| 5_000));
+    try std.testing.expect(SubmitAtPoll.target == null);
+    try std.testing.expect(turn.failure == null);
+    try std.testing.expect(turn.readiness.host);
     try std.testing.expect(host.failure == null);
     try std.testing.expectEqual(@as(u32, 1), host.applies);
     try std.testing.expectEqual(@as(usize, 1), host.published);
     try std.testing.expect(turn.transport.datagrams_sent > 0);
     try std.testing.expect(!turn.transport.backlog);
-    const latency_ns = returned_ns - written_ns.load(.acquire);
-    std.debug.print("host publication wake_to_flush_us={d} turns={d}\n", .{ latency_ns / std.time.ns_per_us, turns });
-    try std.testing.expect(latency_ns < 100 * std.time.ns_per_ms);
 
     var delivered = false;
     for (0..3000) |_| {
@@ -461,4 +451,29 @@ test "owner applies host work for a due host deadline and again for work the app
     try std.testing.expect(driver.step(node, setup.pair.io(), now, .{}, .{ .handler = .{ .context = &host, .apply = Host.apply }, .deadline = now.monotonic }).failure == null);
     try std.testing.expect(driver.step(node, setup.pair.io(), now, .{}, .{ .handler = .{ .context = &host, .apply = Host.apply } }).failure == null);
     try std.testing.expectEqual(@as(usize, 2), host.applies);
+}
+
+test "network owner progresses and shuts down while UDP sends are under local pressure" {
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{125}));
+    const remote = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{126}));
+    const identity = @import("wire/peer_id.zig").PeerId.fromPublicKey(&remote.publicKey());
+    const opts = options(&key);
+    var node: NetworkCore = undefined;
+    try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
+    defer node.deinit(std.testing.io);
+    var faults: @import("fault_io") = .{ .send = .{}, .send_failure = error.SystemResources };
+    const now = node.last_now;
+    try node.connectUntil(&identity, &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9 } }}, now, @import("time.zig").milliseconds(now.millis() + 5_000));
+    const progress = driver.step(&node, faults.io(), now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis())));
+    try std.testing.expect(progress.failure == null);
+    try std.testing.expect(faults.send_calls > 0 and faults.send_calls <= @import("transport.zig").Transport.send_burst_max);
+    try std.testing.expect(node.phase() != .stopping);
+    try std.testing.expect(node.transport.send_drops.datagrams[@intFromEnum(@import("udp").Sockets.SendDrops.Reason.system_resources)] > 0);
+    node.shutdown(node.last_now);
+    for (0..4) |_| {
+        const stopped = driver.step(&node, faults.io(), node.last_now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(node.last_now.millis())));
+        try std.testing.expect(stopped.failure == null);
+        if (node.isClosed()) break;
+    }
+    try std.testing.expect(node.isClosed());
 }

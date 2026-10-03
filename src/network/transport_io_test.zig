@@ -1,6 +1,3 @@
-const driver = @import("driver.zig");
-const quic_test = @import("quic/test_support.zig");
-const core_test = @import("network_core_test_support.zig");
 const FaultIo = @import("fault_io");
 const std = @import("std");
 const constants = @import("constants.zig");
@@ -842,33 +839,6 @@ test "transport recovers a locally dropped first flight through QUIC loss recove
     }
     try std.testing.expect(connected);
     try std.testing.expectEqual(@as(u64, 1), client.transport.send_drops.datagrams[reason]);
-}
-
-test "network owner progresses and shuts down while UDP sends are under local pressure" {
-    const NetworkCore = @import("network_core.zig").NetworkCore;
-    const keys = @import("wire/keys.zig");
-    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{125}));
-    const remote = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{126}));
-    const identity = @import("wire/peer_id.zig").PeerId.fromPublicKey(&remote.publicKey());
-    const options = core_test.networkOptions(&key);
-    var node: NetworkCore = undefined;
-    try node.init(std.testing.allocator, std.testing.io, &options.resolved, options.startup);
-    defer node.deinit(std.testing.io);
-    var faults: FaultIo = .{ .send = .{}, .send_failure = error.SystemResources };
-    const now = node.last_now;
-    try node.connectUntil(&identity, &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9 } }}, now, @import("time.zig").milliseconds(now.millis() + 5_000));
-    const progress = driver.step(&node, faults.io(), now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis())));
-    try std.testing.expect(progress.failure == null);
-    try std.testing.expect(faults.send_calls > 0 and faults.send_calls <= Transport.send_burst_max);
-    try std.testing.expect(node.phase() != .stopping);
-    try std.testing.expect(node.transport.send_drops.datagrams[@intFromEnum(@import("udp").Sockets.SendDrops.Reason.system_resources)] > 0);
-    node.shutdown(node.last_now);
-    for (0..4) |_| {
-        const stopped = driver.step(&node, faults.io(), node.last_now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(node.last_now.millis())));
-        try std.testing.expect(stopped.failure == null);
-        if (node.isClosed()) break;
-    }
-    try std.testing.expect(node.isClosed());
 }
 
 test "transport pressure drops later families with exact cumulative accounting" {

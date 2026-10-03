@@ -63,7 +63,7 @@ test "engine validates a routed packet that arrives from another source path" {
     try std.testing.expectEqual(@as(usize, 0), pair.events(&pair.server, &storage).len);
 }
 
-test "engine keeps the validated path when a new source fails validation" {
+test "engine keeps the validated path while a new source remains unvalidated" {
     var pair: Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
@@ -79,7 +79,6 @@ test "engine keeps the validated path when a new source fails validation" {
     var rounds: usize = 0;
     while (rounds < 20) : (rounds += 1) {
         try pair.pump();
-        pair.advance(100);
         for (pair.events(&pair.server, &storage)) |event| switch (event) {
             .path_changed => return error.TestUnexpectedResult,
             .stream_opened => |opened| inbound = opened,

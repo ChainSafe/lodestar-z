@@ -315,3 +315,78 @@ fn pumpRouter(router: *Router, pair: *support.Pair, transport: *Engine, now: @im
     @import("service_test_support.zig").forward(pair, transport, .{ .negotiator = &router.negotiator });
     return router.pump(transport, now, outcomes);
 }
+
+test "router control capacity protects outbound negotiations from unknown inbound" {
+    var pair: support.Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try support.connectPair(&pair);
+    var options: Router.Options = .{ .negotiations_max = 4 };
+    options.outbound_control_reserved = 2;
+    var router = try Router.init(std.testing.allocator, options);
+    defer router.deinit();
+    const first = try router.beginOutbound(
+        &pair.client,
+        handles.client,
+        .{ .reqresp = .blocks_by_root_v2 },
+        pair.now,
+    );
+    defer router.cancel(&pair.client, first);
+    const second = try router.beginMeshsub(&pair.client, handles.client, pair.now);
+    defer router.cancel(&pair.client, second);
+    try std.testing.expectError(
+        error.NegotiationTableFull,
+        router.beginMeshsub(&pair.client, handles.client, pair.now),
+    );
+    try std.testing.expectError(
+        error.NegotiationTableFull,
+        router.negotiator.acceptInbound(&pair.client, first, pair.now),
+    );
+    const ping = try router.beginOutbound(
+        &pair.client,
+        handles.client,
+        .{ .reqresp = .ping_v1 },
+        pair.now,
+    );
+    defer router.cancel(&pair.client, ping);
+}
+
+test "router control capacity counts pending and reported negotiations until recycle" {
+    var pair: support.Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try support.connectPair(&pair);
+    var router = try Router.init(
+        std.testing.allocator,
+        .{ .negotiations_max = 2, .outbound_control_reserved = 1 },
+    );
+    defer router.deinit();
+    _ = try router.beginMeshsub(&pair.client, handles.client, pair.now);
+    pair.advance(10_000);
+    try std.testing.expectEqual(0, router.pump(&pair.client, pair.now, &.{}));
+    try std.testing.expectEqual(0, router.negotiator.active());
+    try std.testing.expectError(
+        error.NegotiationTableFull,
+        router.beginMeshsub(&pair.client, handles.client, pair.now),
+    );
+    var output: [1]Router.Outcome = undefined;
+    try std.testing.expectEqual(1, router.pump(&pair.client, pair.now, &output));
+    try std.testing.expectEqual(
+        @import("negotiate.zig").Negotiator.Failure.timeout,
+        output[0].result.failed,
+    );
+    try std.testing.expectError(
+        error.NegotiationTableFull,
+        router.beginMeshsub(&pair.client, handles.client, pair.now),
+    );
+    const ping = try router.beginOutbound(
+        &pair.client,
+        handles.client,
+        .{ .reqresp = .ping_v1 },
+        pair.now,
+    );
+    defer router.cancel(&pair.client, ping);
+    _ = router.pump(&pair.client, pair.now, &.{});
+    const ordinary = try router.beginMeshsub(&pair.client, handles.client, pair.now);
+    defer router.cancel(&pair.client, ordinary);
+}

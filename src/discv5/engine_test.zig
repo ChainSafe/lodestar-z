@@ -64,9 +64,179 @@ test "paired engines recover a session and complete one call without queues" {
     const recovery = try pair.beginRecovery();
     const request = try pair.authenticate(recovery.handshake_length);
     try pair.completePong(recovery.started, &request);
-    try pair.standardFindNodeResponse();
-    try pair.filterFindNodeRecords();
-    try pair.directSessionTimeout();
+}
+
+test "paired engines return the local record for FINDNODE distance zero" {
+    var pair: Pair = undefined;
+    try pair.init();
+    defer pair.deinit();
+    const recovery = try pair.beginRecovery();
+    const handshake_request = try pair.authenticate(recovery.handshake_length);
+    try pair.completePong(recovery.started, &handshake_request);
+
+    const request = message.Message{ .find_node = .{
+        .request_id = try message.RequestId.init(&.{0x04}),
+        .distances = &.{0},
+    } };
+    const started = try pair.node_b.startCall(
+        &pair.b_to_a,
+        pair.peerA(),
+        &pair.record_a,
+        &request,
+        8,
+        &sealEntropy(0xb0),
+    );
+    const received = try pair.node_a.receive(
+        &pair.a_to_b,
+        pair.b_to_a[0..started.packet_length],
+        pair.address_b,
+        receiveArgs(9, 0xb1),
+        &pair.scratch_a,
+    );
+    try std.testing.expect(received.accepted.event == .request);
+    var response: ResponsePlan = .{};
+    try pair.node_a.prepareStandardResponse(
+        &received.accepted.event.request,
+        &response,
+    );
+    const response_length = (try pair.node_a.sendNextStandardResponse(
+        &pair.a_to_b,
+        &response,
+        10,
+        &sealEntropy(0xb2),
+    )).?;
+    try std.testing.expect(response.complete());
+    const completed = try pair.node_b.receive(
+        &pair.b_to_a,
+        pair.a_to_b[0..response_length],
+        pair.address_a,
+        receiveArgs(11, 0xb3),
+        &pair.scratch_b,
+    );
+    try std.testing.expect(completed.accepted.event == .response);
+    try std.testing.expectEqual(
+        started.handle,
+        completed.accepted.event.response.matched.handle,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        completed.accepted.event.response.node_records.len,
+    );
+    try std.testing.expectEqual(
+        pair.record_a.node_id,
+        completed.accepted.event.response.node_records[0].node_id,
+    );
+}
+
+test "paired engines filter NODES records by the requested distance" {
+    var pair: Pair = undefined;
+    try pair.init();
+    defer pair.deinit();
+    const recovery = try pair.beginRecovery();
+    const handshake_request = try pair.authenticate(recovery.handshake_length);
+    try pair.completePong(recovery.started, &handshake_request);
+
+    const requested_distance = types.logDistance(
+        &pair.record_b.node_id,
+        &pair.record_a.node_id,
+    );
+    const request = message.Message{ .find_node = .{
+        .request_id = try message.RequestId.init(&.{0x03}),
+        .distances = &.{requested_distance},
+    } };
+    const started = try pair.node_a.startCall(
+        &pair.a_to_b,
+        pair.peerB(),
+        &pair.record_b,
+        &request,
+        12,
+        &sealEntropy(0x81),
+    );
+    const received = try pair.node_b.receive(
+        &pair.b_to_a,
+        pair.a_to_b[0..started.packet_length],
+        pair.address_a,
+        receiveArgs(13, 0x82),
+        &pair.scratch_b,
+    );
+    try std.testing.expect(received.accepted.event == .request);
+
+    const raw_records = [_][]const u8{ pair.record_a.slice(), pair.record_b.slice() };
+    const response = message.Message{ .nodes = .{
+        .request_id = request.find_node.request_id,
+        .total = 1,
+        .enrs = &raw_records,
+    } };
+    const response_length = try pair.node_b.sendResponse(
+        &pair.b_to_a,
+        pair.peerA(),
+        &response,
+        14,
+        &sealEntropy(0x83),
+    );
+    const completed = try pair.node_a.receive(
+        &pair.a_to_b,
+        pair.b_to_a[0..response_length],
+        pair.address_b,
+        receiveArgs(15, 0x84),
+        &pair.scratch_a,
+    );
+    try std.testing.expect(completed.accepted.event == .response);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        completed.accepted.event.response.node_records.len,
+    );
+    try std.testing.expectEqual(
+        pair.record_a.node_id,
+        completed.accepted.event.response.node_records[0].node_id,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        completed.accepted.event.response.matched.response.nodes.enrs.len,
+    );
+}
+
+test "paired engines expire an unanswered call over an established session" {
+    var pair: Pair = undefined;
+    try pair.init();
+    defer pair.deinit();
+    const recovery = try pair.beginRecovery();
+    const handshake_request = try pair.authenticate(recovery.handshake_length);
+    try pair.completePong(recovery.started, &handshake_request);
+
+    const ping_message = pair.ping(2);
+    const started = try pair.node_a.startCall(
+        &pair.a_to_b,
+        pair.peerB(),
+        &pair.record_b,
+        &ping_message,
+        16,
+        &sealEntropy(0x90),
+    );
+    const direct_packet = try packet.decode(
+        pair.a_to_b[0..started.packet_length],
+        &pair.record_b.node_id,
+        &pair.scratch_b.channel.packet_decode,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0, 0, 0, 2 },
+        direct_packet.static_header.nonce[0..4],
+    );
+    const received = try pair.node_b.receive(
+        &pair.b_to_a,
+        pair.a_to_b[0..started.packet_length],
+        pair.address_a,
+        receiveArgs(17, 0xa0),
+        &pair.scratch_b,
+    );
+    try std.testing.expectEqual(@as(u16, 0), received.accepted.packet_length);
+    try std.testing.expect(received.accepted.event == .request);
+    try std.testing.expect(received.accepted.event.request.record == null);
+    var expired: [1]CallTable.Expired = undefined;
+    const tick = pair.node_a.tick(116, &expired);
+    try std.testing.expectEqual(@as(usize, 1), tick.calls);
+    try std.testing.expectEqual(started.handle, expired[0].handle);
 }
 
 test "engine reports source admission pressure without a local failure" {
@@ -384,158 +554,6 @@ const Pair = struct {
         try std.testing.expectEqual(@as(usize, 2), selected.len);
         try std.testing.expectEqual(self.record_a.node_id, selected[0].node_id);
         try std.testing.expectEqual(self.record_b.node_id, selected[1].node_id);
-    }
-
-    fn directSessionTimeout(self: *Pair) !void {
-        const ping_message = self.ping(2);
-        const started = try self.node_a.startCall(
-            &self.a_to_b,
-            self.peerB(),
-            &self.record_b,
-            &ping_message,
-            16,
-            &sealEntropy(0x90),
-        );
-        const direct_packet = try packet.decode(
-            self.a_to_b[0..started.packet_length],
-            &self.record_b.node_id,
-            &self.scratch_b.channel.packet_decode,
-        );
-        try std.testing.expectEqualSlices(
-            u8,
-            &.{ 0, 0, 0, 4 },
-            direct_packet.static_header.nonce[0..4],
-        );
-        const received = try self.node_b.receive(
-            &self.b_to_a,
-            self.a_to_b[0..started.packet_length],
-            self.address_a,
-            receiveArgs(17, 0xa0),
-            &self.scratch_b,
-        );
-        try std.testing.expectEqual(@as(u16, 0), received.accepted.packet_length);
-        try std.testing.expect(received.accepted.event == .request);
-        try std.testing.expect(received.accepted.event.request.record == null);
-        var expired: [1]CallTable.Expired = undefined;
-        const tick = self.node_a.tick(116, &expired);
-        try std.testing.expectEqual(@as(usize, 1), tick.calls);
-        try std.testing.expectEqual(started.handle, expired[0].handle);
-    }
-
-    fn filterFindNodeRecords(self: *Pair) !void {
-        const requested_distance = types.logDistance(
-            &self.record_b.node_id,
-            &self.record_a.node_id,
-        );
-        const request = message.Message{ .find_node = .{
-            .request_id = try message.RequestId.init(&.{0x03}),
-            .distances = &.{requested_distance},
-        } };
-        const started = try self.node_a.startCall(
-            &self.a_to_b,
-            self.peerB(),
-            &self.record_b,
-            &request,
-            12,
-            &sealEntropy(0x81),
-        );
-        const received = try self.node_b.receive(
-            &self.b_to_a,
-            self.a_to_b[0..started.packet_length],
-            self.address_a,
-            receiveArgs(13, 0x82),
-            &self.scratch_b,
-        );
-        try std.testing.expect(received.accepted.event == .request);
-
-        const raw_records = [_][]const u8{ self.record_a.slice(), self.record_b.slice() };
-        const response = message.Message{ .nodes = .{
-            .request_id = request.find_node.request_id,
-            .total = 1,
-            .enrs = &raw_records,
-        } };
-        const response_length = try self.node_b.sendResponse(
-            &self.b_to_a,
-            self.peerA(),
-            &response,
-            14,
-            &sealEntropy(0x83),
-        );
-        const completed = try self.node_a.receive(
-            &self.a_to_b,
-            self.b_to_a[0..response_length],
-            self.address_b,
-            receiveArgs(15, 0x84),
-            &self.scratch_a,
-        );
-        try std.testing.expect(completed.accepted.event == .response);
-        try std.testing.expectEqual(
-            @as(usize, 1),
-            completed.accepted.event.response.node_records.len,
-        );
-        try std.testing.expectEqual(
-            self.record_a.node_id,
-            completed.accepted.event.response.node_records[0].node_id,
-        );
-        try std.testing.expectEqual(
-            @as(usize, 1),
-            completed.accepted.event.response.matched.response.nodes.enrs.len,
-        );
-    }
-
-    fn standardFindNodeResponse(self: *Pair) !void {
-        const request = message.Message{ .find_node = .{
-            .request_id = try message.RequestId.init(&.{0x04}),
-            .distances = &.{0},
-        } };
-        const started = try self.node_b.startCall(
-            &self.b_to_a,
-            self.peerA(),
-            &self.record_a,
-            &request,
-            8,
-            &sealEntropy(0xb0),
-        );
-        const received = try self.node_a.receive(
-            &self.a_to_b,
-            self.b_to_a[0..started.packet_length],
-            self.address_b,
-            receiveArgs(9, 0xb1),
-            &self.scratch_a,
-        );
-        try std.testing.expect(received.accepted.event == .request);
-        var response: ResponsePlan = .{};
-        try self.node_a.prepareStandardResponse(
-            &received.accepted.event.request,
-            &response,
-        );
-        const response_length = (try self.node_a.sendNextStandardResponse(
-            &self.a_to_b,
-            &response,
-            10,
-            &sealEntropy(0xb2),
-        )).?;
-        try std.testing.expect(response.complete());
-        const completed = try self.node_b.receive(
-            &self.b_to_a,
-            self.a_to_b[0..response_length],
-            self.address_a,
-            receiveArgs(11, 0xb3),
-            &self.scratch_b,
-        );
-        try std.testing.expect(completed.accepted.event == .response);
-        try std.testing.expectEqual(
-            started.handle,
-            completed.accepted.event.response.matched.handle,
-        );
-        try std.testing.expectEqual(
-            @as(usize, 1),
-            completed.accepted.event.response.node_records.len,
-        );
-        try std.testing.expectEqual(
-            self.record_a.node_id,
-            completed.accepted.event.response.node_records[0].node_id,
-        );
     }
 
     fn ping(self: *const Pair, id: u8) message.Message {

@@ -450,3 +450,31 @@ fn setSubscription(node: *NetworkCore, name: []const u8, subscribed: bool) !void
     const desired = intent(node, try @import("gossipsub/test_support.zig").subscriptionUpdate(node.service.gossipsub, name, subscribed, &boundaries));
     _ = try node.applyIntent(&desired, node.last_now);
 }
+
+pub fn clientWakeup(setup: *Setup) ?u64 {
+    return @import("schedule_test_support.zig").wakeupMilliseconds(setup.client.wakeups(setup.pair.now, .{}).schedule(), setup.pair.now.millis());
+}
+
+pub fn stepAfter(node: *NetworkCore, wait_ms: u32) !NetworkCore.Result {
+    const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
+    return @import("driver.zig").step(node, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis() +| wait_ms)));
+}
+
+pub fn failStatus(setup: *Setup, failure: @import("reqresp/ReqResp.zig").Failure) !void {
+    for (setup.client.control_protocol.operations) |operation| if (operation.request) |handle| {
+        if (operation.protocol != .status_v1) continue;
+        const service = &setup.client.service.reqresp;
+        const slot = &service.outbound[handle.index];
+        slot.fail(service, handle.index, failure, setup.pair.now);
+        service.cleanupPending(setup.pair.client, &setup.client.service.router);
+        return;
+    };
+    return error.TestUnexpectedResult;
+}
+
+pub fn failStatusRound(setup: *Setup, failure: @import("reqresp/ReqResp.zig").Failure) !void {
+    setup.client.peer_manager.reStatusPeers(setup.pair.now);
+    try setup.step(0);
+    try failStatus(setup, failure);
+    for (0..4) |_| try setup.step(0);
+}
