@@ -322,7 +322,7 @@ test "metrics preserve outgoing queue refusals across session retirement and reu
     try contains(try f.render(false), "lodestar_native_gossip_queue_drops_total{reason=\"data_descriptors\"} 5\n");
 }
 
-test "metrics use retained usable coverage and accepted demand until replacement or shutdown" {
+test "metrics render retained usable coverage and suppress deficits when stopped" {
     var f = try Fixture.init(&.{});
     defer f.deinit();
     const manager = &f.node.peer_manager;
@@ -339,9 +339,31 @@ test "metrics use retained usable coverage and accepted demand until replacement
     try contains(output, "lodestar_discovery_subnet_peers_to_connect{type=\"attnets\"} 3\n");
     try contains(try f.render(false), "lodestar_discovery_subnet_peers_to_connect{type=\"attnets\"} 0\n");
     try contains(try f.render(true), "lodestar_discovery_subnet_peers_to_connect{type=\"attnets\"} 3\n");
-    try @import("network_core_test_support.zig").updateDemand(f.node, &.{}, f.node.last_now);
-    manager.selection = .{};
-    try contains(try f.render(true), "lodestar_discovery_subnet_peers_to_connect{type=\"attnets\"} 0\n");
+}
+
+test "metrics follow demand replacement and owner shutdown" {
+    var f = try Fixture.init(&.{});
+    defer f.deinit();
+    const demand: @import("peers/types.zig").Demand = .{ .attnets = 3, .attestation_target = 2 };
+    try core_test.updateDemand(f.node, &demand, f.node.last_now);
+    var result = f.node.advance(std.testing.io, .{ .now = f.node.last_now, .readiness = .{} }, .{}, .{});
+    try std.testing.expect(result.failure == null);
+    try contains(try f.render(f.node.phase() == .running), "lodestar_discovery_subnet_peers_to_connect{type=\"attnets\"} 4\n");
+
+    try core_test.updateDemand(f.node, &.{}, f.node.last_now);
+    result = f.node.advance(std.testing.io, .{ .now = f.node.last_now, .readiness = .{} }, .{}, .{});
+    try std.testing.expect(result.failure == null);
+    try contains(try f.render(f.node.phase() == .running), "lodestar_discovery_subnet_peers_to_connect{type=\"attnets\"} 0\n");
+
+    try core_test.updateDemand(f.node, &demand, f.node.last_now);
+    result = f.node.advance(std.testing.io, .{ .now = f.node.last_now, .readiness = .{} }, .{}, .{});
+    try std.testing.expect(result.failure == null);
+    try contains(try f.render(f.node.phase() == .running), "lodestar_discovery_subnet_peers_to_connect{type=\"attnets\"} 4\n");
+    f.node.shutdown(f.node.last_now);
+    result = f.node.advance(std.testing.io, .{ .now = f.node.last_now, .readiness = .{} }, .{}, .{});
+    try std.testing.expect(result.failure == null);
+    try std.testing.expect(f.node.isClosed());
+    try contains(try f.render(f.node.phase() == .running), "lodestar_discovery_subnet_peers_to_connect{type=\"attnets\"} 0\n");
 }
 
 test "metrics render exactly the measurement contract families with their types and labels" {

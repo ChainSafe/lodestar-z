@@ -78,8 +78,11 @@ test "inbound admission receive exhaustion and selected handoff checks precede t
 }
 
 fn readySlot(owner: *rr, peer: u16, which: Protocol, ordinal: u16, identity: PeerId, accepted_ms: u64) u16 {
+    std.debug.assert(peer < owner.options.peers);
+    std.debug.assert(ordinal < @import("constants.zig").MAX_CONCURRENT_REQUESTS);
     const index: u16 = @intCast(Plan.first(peer, which) + ordinal);
     const slot = &owner.inbound[index];
+    std.debug.assert(slot.request.available());
     const conn: types.Handle = .{ .index = peer, .generation = 1 };
     slot.identity = identity;
     slot.state = .ready;
@@ -221,4 +224,33 @@ test "inbound admission cancellation removes each wait without refunding or spin
         try std.testing.expectEqual(@as(u32, 0), owner.admission.ready[0].len);
         owner.admission.checkSlot(slot, index);
     }
+}
+
+test "inbound admission fair dispatch advances to the next peer before another request from a busy peer" {
+    var opts = options(3);
+    opts.work_per_pump_max = 1;
+    var owner = try rr.init(std.testing.allocator, opts);
+    defer owner.deinit();
+    const now = Now.fromMilliseconds(.{ .mono_ms = 1000, .unix_s = 0 });
+    var indexes: [4]u16 = undefined;
+    for ([_]u16{ 0, 0, 1, 2 }, 0..) |peer, ordinal| {
+        indexes[ordinal] = readySlot(&owner, peer, .blocks_by_root_v2, @intFromBool(ordinal == 1), .{ .bytes = @splat(@as(u8, @intCast(peer + 1))) }, now.millis());
+        owner.settleSlot(.inbound, indexes[ordinal]);
+        owner.admission.checkSlot(&owner.inbound[indexes[ordinal]], indexes[ordinal]);
+    }
+    var admitted: [4]bool = @splat(false);
+    for ([_]usize{ 0, 2, 3, 1 }) |expected| {
+        owner.admission.promoteReady(&owner, now);
+        admitted[expected] = true;
+        for (indexes, admitted) |index, ready| {
+            const event = owner.inbound[index].request.pendingEvent();
+            try std.testing.expectEqual(ready, event != null);
+            if (event) |value| {
+                try std.testing.expect(value == .request);
+                try std.testing.expectEqual(index, value.request.request.index);
+            }
+            owner.admission.checkSlot(&owner.inbound[index], index);
+        }
+    }
+    try std.testing.expect(!owner.admission.due());
 }

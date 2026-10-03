@@ -336,7 +336,7 @@ fn publishMetrics(self: *Runtime, timestamp: n.Now) n.metrics.registry.Error!voi
     self.unlock();
 }
 
-test "a command queued while the owner waits executes in the turn whose poll saw the wake" {
+test "a command queued after wait planning executes in the turn whose poll observes the wake" {
     if (!n.NetworkCore.wait.supported) return error.SkipZigTest;
     const testing = std.testing.allocator;
     var runtime: Runtime = .{ .env = undefined, .notify_live = false, .env_alive = false };
@@ -373,52 +373,45 @@ test "a command queued while the owner waits executes in the turn whose poll saw
     // The first turns render metrics and write the health log, then only deadlines remain.
     for (0..4) |_| _ = (try turn(&runtime, io, &host, &ingress)).?;
 
-    const Submitter = struct {
-        token: ?commands.Token = null,
-        written_ns: u64 = 0,
-        failure: ?anyerror = null,
-        fn run(self: *@This(), target: *Runtime, clock: std.Io) void {
-            clock.sleep(.fromMilliseconds(30), .awake) catch unreachable;
-            self.written_ns = @intCast(std.Io.Clock.awake.now(clock).nanoseconds);
-            const token = target.reserveCommand(.getIdentity) catch |err| {
-                self.failure = err;
-                return;
-            };
-            self.token = token;
-            target.queueCommand(token) catch |err| {
-                self.failure = err;
-            };
+    const SubmitAtPoll = struct {
+        threadlocal var target: ?*Runtime = null;
+        threadlocal var token: ?commands.Token = null;
+        threadlocal var failure: ?anyerror = null;
+        threadlocal var base: std.Io = undefined;
+
+        fn checkCancel(userdata: ?*anyopaque) std.Io.Cancelable!void {
+            // The native wait checks cancellation after planning and before polling.
+            if (target) |pending| {
+                target = null;
+                token = pending.reserveCommand(.getIdentity) catch |err| {
+                    failure = err;
+                    return error.Canceled;
+                };
+                pending.queueCommand(token.?) catch |err| {
+                    failure = err;
+                    return error.Canceled;
+                };
+            }
+            return base.vtable.checkCancel(userdata);
         }
     };
-    var submitter: Submitter = .{};
-    const thread = try std.Thread.spawn(.{}, Submitter.run, .{ &submitter, &runtime, io });
-    var woke = false;
-    var returned_ns: u64 = 0;
-    var turns: usize = 0;
-    var executed_before_wake = false;
-    for (0..64) |_| {
-        const result = (try turn(&runtime, io, &host, &ingress)).?;
-        returned_ns = @intCast(std.Io.Clock.awake.now(io).nanoseconds);
-        turns += 1;
-        runtime.lock();
-        var terminal = false;
-        for (&runtime.table.cells) |*cell| terminal = terminal or cell.state == .terminal;
-        runtime.unlock();
-        if (result.readiness.host) {
-            try std.testing.expect(terminal);
-            woke = true;
-            break;
-        }
-        executed_before_wake = executed_before_wake or terminal;
-    }
-    thread.join();
-    try std.testing.expect(submitter.failure == null);
-    try std.testing.expect(woke and !executed_before_wake);
-    const latency_ns = returned_ns - submitter.written_ns;
-    std.debug.print("owner command wake_to_execution_us={d} turns={d}\n", .{ latency_ns / std.time.ns_per_us, turns });
-    try std.testing.expect(latency_ns < 100 * std.time.ns_per_ms);
-    try std.testing.expect(runtime.table.get(submitter.token.?).failure == null);
-    runtime.abortCommand(submitter.token.?);
+    SubmitAtPoll.target = &runtime;
+    defer SubmitAtPoll.target = null;
+    SubmitAtPoll.token = null;
+    SubmitAtPoll.failure = null;
+    SubmitAtPoll.base = io;
+    var vtable = io.vtable.*;
+    vtable.checkCancel = SubmitAtPoll.checkCancel;
+    const poll_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    const result = (try turn(&runtime, poll_io, &host, &ingress)).?;
+    try std.testing.expect(SubmitAtPoll.target == null);
+    try std.testing.expect(SubmitAtPoll.failure == null);
+    try std.testing.expect(result.failure == null);
+    try std.testing.expect(result.readiness.host);
+    const token = SubmitAtPoll.token orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(.terminal, runtime.table.get(token).state);
+    try std.testing.expect(runtime.table.get(token).failure == null);
+    runtime.abortCommand(token);
     runtime.heavy = null;
 }
 

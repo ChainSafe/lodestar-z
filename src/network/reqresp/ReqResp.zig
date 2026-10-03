@@ -1246,7 +1246,6 @@ test {
     _ = @import("req_resp_scheduling_test.zig");
     _ = @import("req_resp_half_close_test.zig");
     _ = @import("req_resp_request_start_test.zig");
-    _ = @import("req_resp_service_test.zig");
     _ = @import("req_resp_terminal_test.zig");
     _ = @import("req_resp_host_contract_test.zig");
     _ = @import("req_resp_test.zig");

@@ -1,8 +1,8 @@
+const Plan = @import("ReceivePlan.zig");
 const std = @import("std");
 const ct = @import("consensus_types");
 const rr = @import("ReqResp.zig");
 const Protocol = @import("protocol.zig").Protocol;
-const Plan = @import("ReceivePlan.zig");
 const harness = @import("test_pair.zig");
 const support = @import("../quic/test_support.zig");
 const policy = @import("policy_fixture.zig").config;
@@ -119,39 +119,6 @@ test "reqresp admission lifecycle cancellation retains execution until host reti
     const resumed = try receive(&setup);
     try std.testing.expectEqual(Protocol.blob_sidecars_by_root_v1, resumed.protocol);
     try std.testing.expectEqual(@as(usize, 0), owner.resourceSnapshot().retiring);
-}
-
-test "reqresp admission lifecycle fair dispatch advances to the next peer before another request from a busy peer" {
-    var setup: harness.Pair = .{};
-    try setup.init(.{}, .{ .inbound_max = 2 });
-    defer setup.deinit();
-    const owner = &setup.shared.server.reqresp;
-    for ([_]u16{ 0, 0, 1, 2 }, 0..) |peer, ordinal| {
-        const index = Plan.first(peer, .blocks_by_root_v2) + @intFromBool(ordinal == 1);
-        const slot = &owner.inbound[index];
-        slot.identity = .{ .bytes = @splat(@as(u8, @intCast(peer + 1))) };
-        slot.state = .ready;
-        slot.progress_ms = setup.shared.pair.now.millis();
-        slot.request = .{
-            .direction = .inbound,
-            .generation = 1,
-            .completion = .running,
-            .protocol = .blocks_by_root_v2,
-            .conn = .{ .index = peer, .generation = std.math.maxInt(u32) },
-            .stream = .{ .conn = .{ .index = peer, .generation = std.math.maxInt(u32) }, .slot = 0, .id = ordinal * 4 },
-        };
-        owner.settleSlot(.inbound, @intCast(index));
-    }
-    var events: [4]rr.Event = undefined;
-    const first = owner.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .application = &events });
-    try std.testing.expectEqual(@as(usize, 2), first.application);
-    try std.testing.expectEqual(@as(u16, 0), events[0].request.peer.index);
-    try std.testing.expectEqual(@as(u16, 1), events[1].request.peer.index);
-    try std.testing.expect(owner.cancel(events[0].request.request, setup.shared.pair.now));
-    _ = owner.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .application = &events });
-    const next = owner.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .application = &events });
-    try std.testing.expectEqual(@as(usize, 1), next.application);
-    try std.testing.expectEqual(@as(u16, 2), events[0].request.peer.index);
 }
 
 fn allocation(allocator: std.mem.Allocator) !void {

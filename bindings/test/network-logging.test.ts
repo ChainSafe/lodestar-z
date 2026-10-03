@@ -70,10 +70,14 @@ test("ReleaseSafe debug logs correlate real requests without draining request da
       expect(started).toBeDefined();
       expect(completed, allRecords.map((r) => r.message).join("\n")).toBeDefined();
       expect(started?.level).toBe("debug");
-      expect(started?.message.match(/request=(\d+:\d+)/)?.[1]).toBe(completed?.message.match(/request=(\d+:\d+)/)?.[1]);
-      expect(started?.message.match(/connection=(\d+:\d+)/)?.[1]).toBe(
-        completed?.message.match(/connection=(\d+:\d+)/)?.[1]
-      );
+      for (const field of ["request", "connection"]) {
+        const pattern = new RegExp(`\\b${field}=(\\d+:\\d+)\\b`);
+        const startedId = started?.message.match(pattern)?.[1];
+        const completedId = completed?.message.match(pattern)?.[1];
+        expect(startedId, started?.message).toBeDefined();
+        expect(completedId, completed?.message).toBeDefined();
+        expect(startedId).toBe(completedId);
+      }
     }
     const failed = pair.left.request(pair.remote.peerId, BLOCKS, new Uint8Array(32));
     const failedNext = failed.next();

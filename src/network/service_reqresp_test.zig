@@ -1,10 +1,10 @@
 const std = @import("std");
-const schedule_test_support = @import("../schedule_test_support.zig");
+const schedule_test_support = @import("schedule_test_support.zig");
 const ct = @import("consensus_types");
-const protocol = @import("protocol.zig");
-const reqresp = @import("ReqResp.zig");
-const Engine = @import("../quic/Engine.zig");
-const harness = @import("test_pair.zig");
+const protocol = @import("reqresp/protocol.zig");
+const reqresp = @import("reqresp/ReqResp.zig");
+const Engine = @import("quic/Engine.zig");
+const harness = @import("reqresp/test_pair.zig");
 
 const Event = reqresp.Event;
 const Protocol = protocol.Protocol;
@@ -61,10 +61,10 @@ test "service round trips a status request through the collapsed host loop" {
 }
 
 test "service reclaims inbound sinks across more requests than it has slots" {
-    const admission: reqresp.Options.Admission = .{ .policy = @import("policy_fixture.zig").config(), .limits = .{
+    const admission: reqresp.Options.Admission = .{ .policy = @import("reqresp/policy_fixture.zig").config(), .limits = .{
         .identities = 2,
-        .peer = @import("admission_fixture.zig").quotas(1_000, 1_000),
-        .global = @import("admission_fixture.zig").quotas(1_000, 1_000),
+        .peer = @import("reqresp/admission_fixture.zig").quotas(1_000, 1_000),
+        .global = @import("reqresp/admission_fixture.zig").quotas(1_000, 1_000),
     } };
     var setup: Pair = .{};
     try setup.init(.{ .outbound_max = 4, .inbound_max = 4 }, .{ .outbound_max = 4, .inbound_max = 4, .admission = admission });
@@ -156,7 +156,7 @@ test "service preserves drained native stream events across a partial request sw
     const stream = setup.shared.server.reqresp.inbound[incoming.?.index].request.stream;
     setup.shared.client.reqresp.options.work_per_pump_max = 1;
     _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{ .control = &.{} }).control;
-    const codec = @import("codec.zig");
+    const codec = @import("reqresp/codec.zig");
     var wire: [codec.frame_scratch_max]u8 = undefined;
     const encoded = try codec.encodeChunk(0, null, &bytes, &wire);
     try std.testing.expectEqual(encoded.len, try setup.shared.pair.server.write(stream, encoded, false));
@@ -203,7 +203,7 @@ test "service request work remains bounded and rotates between live streams" {
         if (received == incoming.len) break;
     }
     try std.testing.expectEqual(incoming.len, received);
-    const codec = @import("codec.zig");
+    const codec = @import("reqresp/codec.zig");
     var wire: [codec.frame_scratch_max]u8 = undefined;
     const encoded = try codec.encodeChunk(0, null, &bytes, &wire);
     for (incoming) |handle| {
@@ -211,7 +211,7 @@ test "service request work remains bounded and rotates between live streams" {
         try std.testing.expectEqual(encoded.len, try setup.shared.pair.server.write(stream, encoded, false));
     }
     try setup.shared.pair.pump();
-    @import("../service_test_support.zig").forward(&setup.shared.pair, &setup.shared.pair.client, .{ .reqresp = &setup.shared.client.reqresp });
+    @import("service_test_support.zig").forward(&setup.shared.pair, &setup.shared.pair.client, .{ .reqresp = &setup.shared.client.reqresp });
     setup.shared.client.reqresp.options.work_per_pump_max = 1;
     var events: [2]Event = undefined;
     var delivered: [2]reqresp.RequestHandle = undefined;
@@ -230,7 +230,7 @@ test "service reqresp slot is serviced only after a stream event or its deadline
     try setup.init(.{}, .{ .progress_timeout_ms = 1_000 });
     defer setup.deinit();
     const server = &setup.shared.server.reqresp;
-    const codec = @import("codec.zig");
+    const codec = @import("reqresp/codec.zig");
     // Two accepted ping streams whose request bytes have not arrived.
     const fed = try setup.openRaw(.ping_v1);
     try setup.awaitRawSelection(fed, .ping_v1);
@@ -284,7 +284,7 @@ test "service reqresp slot is serviced only after a stream event or its deadline
 
 test "service reqresp deadline fires on time while more slots than the pump budget stay ready" {
     // One client identity opens every stream, so its request starts need a larger burst.
-    var admission = try reqresp.Options.Admission.defaults(&@import("policy_fixture.zig").config(), 128, 128, 8);
+    var admission = try reqresp.Options.Admission.defaults(&@import("reqresp/policy_fixture.zig").config(), 128, 128, 8);
     admission.limits.starts.tokens = 64;
     var setup: Pair = .{};
     try setup.init(.{}, .{ .progress_timeout_ms = 1_000, .admission = admission });
@@ -348,7 +348,7 @@ test "service reqresp slots stay indexed by connection across a reconnect at the
     var sinks: [2][8]u8 = undefined;
     _ = try setup.shared.client.request(&setup.shared.pair.client, old.client, .ping_v1, &bytes, &sinks[0], .{}, setup.shared.pair.now);
     const stale = try awaitRequest(&setup);
-    const slots_per_peer = @import("ReceivePlan.zig").slots_per_peer;
+    const slots_per_peer = @import("reqresp/ReceivePlan.zig").slots_per_peer;
     try std.testing.expectEqual(@as(usize, old.server.index), stale.index / slots_per_peer);
 
     // The server holds its host events while the connection closes and a new one takes its index.

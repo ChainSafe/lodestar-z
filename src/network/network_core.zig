@@ -891,6 +891,10 @@ test {
     _ = @import("network_core_endpoint_test.zig");
     _ = @import("network_core_advance_test.zig");
     _ = @import("network_core_peer_test.zig");
+    _ = @import("network_core_dial_test.zig");
+    _ = @import("network_core_lifecycle_test.zig");
+    _ = @import("network_core_identify_test.zig");
+    _ = @import("network_core_socket_test.zig");
     _ = @import("network_core_control_test.zig");
     _ = @import("network_core_coverage_test.zig");
 }

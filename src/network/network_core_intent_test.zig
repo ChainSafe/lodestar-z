@@ -1,3 +1,4 @@
+const gossip_test = @import("gossipsub/test_support.zig");
 const driver = @import("driver.zig");
 const core_test = @import("network_core_test_support.zig");
 const std = @import("std");
@@ -5,10 +6,10 @@ const NetworkCore = @import("network_core.zig").NetworkCore;
 const t = @import("peers/types.zig");
 const keys = @import("wire/keys.zig");
 const d = @import("discv5");
-
 const options = @import("network_core_test_support.zig").networkOptions;
 const Inbox = @import("gossipsub/test_support.zig").Inbox;
 const Now = @import("types.zig").Now;
+const Setup = @import("network_core_test_support.zig").Setup;
 
 /// Applies a local update through the host intent path with the current subscriptions and demand.
 fn applyLocal(node: *NetworkCore, update: *const NetworkCore.LocalUpdate, now: Now) !bool {
@@ -820,4 +821,122 @@ test "core local intent three boundaries fit and all-column overlap refuses atom
     };
     try std.testing.expectEqual(@as(usize, 423), count);
     try std.testing.expect(g.overlay.findTopic("/eth2/05060708/data_column_sidecar_127/ssz_snappy") == null);
+}
+
+test "local intent failing at ENR sequence exhaustion preserves control schedules request fork subscriptions and demand" {
+    var setup: Setup = .{};
+    // The client's ENR sits at its last sequence, so an intent that changes what it advertises
+    // fails while the owner prepares it: building the record exhausts the sequence before the
+    // subscriptions are staged. Once a record is built, installing it cannot fail, so no
+    // publication-only failure is reachable.
+    setup.client_discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .sequence = std.math.maxInt(u64) };
+    try setup.init(&.{});
+    defer setup.deinit();
+    for (0..80) |_| try setup.step(0);
+    const node = &setup.client;
+    const manager = &node.peer_manager;
+    var snapshots: [4]t.Snapshot = undefined;
+    try std.testing.expectEqual(@as(usize, 1), manager.snapshots(&snapshots));
+    const peer = snapshots[0];
+    try std.testing.expect(peer.relevant);
+    manager.reStatusPeers(setup.pair.now);
+    _ = try setup.turn(node, .{});
+    const probe = for (node.control_protocol.operations) |*op| {
+        if (op.request != null) break op;
+    } else return error.TestUnexpectedResult;
+    const probe_request = probe.request.?;
+    const schedule = manager.control.schedules[peer.peer.index];
+    const key = manager.control.deadlines.get(peer.peer.index);
+    const local = node.localState();
+    const request_fork = node.service.reqresp.request_fork;
+    const demand = manager.demand;
+    const identify = node.service.identify.local;
+    const capabilities = node.service.router.capabilities();
+    const record = node.localRecord().?.*;
+    const slot = node.current_slot;
+    var before: [@import("gossipsub/topic_policy.zig").boundary_max]@import("gossipsub/local_intent.zig").Boundary = undefined;
+    const subscribed = try gossip_test.subscriptionUpdate(node.service.gossipsub, null, false, &before);
+    var boundaries: [@import("gossipsub/topic_policy.zig").boundary_max]@import("gossipsub/local_intent.zig").Boundary = undefined;
+    var desired = @import("network_core_test_support.zig").intent(node, try gossip_test.subscriptionUpdate(node.service.gossipsub, "/eth2/00000000/beacon_block/ssz_snappy", true, &boundaries));
+    desired.update.local.fork = .{ .fork = .fulu, .digest = @splat(1) };
+    desired.update.local.status.fork_digest = @splat(1);
+    desired.update.local.metadata.attnets[0] = 1;
+    desired.demand = .{ .syncnets = 1 };
+    desired.slot = slot + 10;
+    try std.testing.expectError(error.SequenceExhausted, node.applyIntent(&desired, setup.pair.now));
+    try std.testing.expectEqualDeep(schedule, manager.control.schedules[peer.peer.index]);
+    try std.testing.expectEqual(key, manager.control.deadlines.get(peer.peer.index));
+    try std.testing.expectEqual(probe_request, probe.request.?);
+    try std.testing.expect(!probe.cancelled);
+    try std.testing.expect(manager.catalog.get(peer.peer).?.relevant);
+    try std.testing.expectEqualDeep(local, node.localState());
+    try std.testing.expectEqual(request_fork, node.service.reqresp.request_fork);
+    try std.testing.expectEqualDeep(demand, manager.demand);
+    try std.testing.expectEqualDeep(identify, node.service.identify.local);
+    try std.testing.expectEqualDeep(capabilities, node.service.router.capabilities());
+    try std.testing.expectEqualSlices(u8, record.slice(), node.localRecord().?.slice());
+    try std.testing.expectEqual(slot, node.current_slot);
+    var after: [@import("gossipsub/topic_policy.zig").boundary_max]@import("gossipsub/local_intent.zig").Boundary = undefined;
+    try std.testing.expectEqualDeep(subscribed, try gossip_test.subscriptionUpdate(node.service.gossipsub, null, false, &after));
+    // The same intent without the advertisement change commits every participant.
+    desired.update.local.metadata.attnets[0] = local.metadata.attnets[0];
+    desired.update.local.fork = local.fork;
+    desired.update.local.status.fork_digest = local.status.fork_digest;
+    try std.testing.expect(try node.applyIntent(&desired, setup.pair.now));
+    try std.testing.expectEqualDeep(desired.demand, manager.demand);
+    try std.testing.expectEqual(slot + 10, node.current_slot);
+    try std.testing.expect(!std.meta.eql(subscribed, try gossip_test.subscriptionUpdate(node.service.gossipsub, null, false, &after)));
+}
+
+test "local intent refuses sampling demand beyond its fork atomically and a valid replacement persists" {
+    var setup: Setup = .{};
+    try setup.initOwners(&.{ .fork = .{ .fork = .fulu, .minimum_sampling_groups = 8 }, .status = .{ .earliest_available_slot = 0 }, .metadata = .{ .custody_group_count = 4 } });
+    defer setup.deinit();
+    const node = &setup.client;
+    const manager = &node.peer_manager;
+    const owner = @import("network_core_test_support.zig");
+    const local = node.localState();
+    var demand: t.Demand = .{};
+    demand.group_targets[0] = 1;
+    demand.custody_group_targets[0] = 1;
+    demand.group_targets[127] = manager.catalog.options.max_peers;
+    try owner.updateLocalDemand(node, &local, &demand, setup.pair.now);
+    try std.testing.expectEqualDeep(demand, manager.demand);
+    // A demand change past the peer ceiling and a fork too narrow for the committed demand are
+    // both refused before any owner commits.
+    var excessive = demand;
+    excessive.group_targets[1] = manager.catalog.options.max_peers + 1;
+    try std.testing.expectError(error.InvalidDemand, owner.updateLocalDemand(node, &local, &excessive, setup.pair.now));
+    var narrower = local;
+    narrower.fork.custody_groups = 64;
+    const request_fork = node.service.reqresp.request_fork;
+    try std.testing.expectError(error.InvalidDemand, owner.updateLocal(node, &narrower, setup.pair.now));
+    try std.testing.expectEqualDeep(demand, manager.demand);
+    try std.testing.expectEqualDeep(local, node.localState());
+    try std.testing.expectEqual(request_fork, node.service.reqresp.request_fork);
+    manager.reconcile(node.service.gossipsub, setup.pair.now);
+    try std.testing.expectEqual(@as(u16, 4), manager.coverageDeficits().groups);
+    // The narrower fork commits with a demand inside it; selection keeps its last result until
+    // the next evaluation.
+    var within = demand;
+    within.group_targets[127] = 0;
+    try owner.updateLocalDemand(node, &narrower, &within, setup.pair.now);
+    try std.testing.expectEqual(@as(u16, 64), node.localState().fork.custody_groups);
+    try std.testing.expectEqualDeep(within, manager.demand);
+    try std.testing.expectEqual(@as(u16, 4), manager.coverageDeficits().groups);
+    manager.reconcile(node.service.gossipsub, setup.pair.now);
+    try std.testing.expectEqual(@as(u16, 1), manager.coverageDeficits().groups);
+    _ = try setup.turn(node, .{});
+    try std.testing.expectEqual(@as(u16, 1), manager.coverageDeficits().groups);
+    try owner.advanceSlot(node, 10_000, setup.pair.now);
+    _ = try setup.turn(node, .{});
+    try std.testing.expectEqual(@as(u16, 1), manager.coverageDeficits().groups);
+    try std.testing.expectEqual(@as(u16, 1), manager.coverageDeficits().custody_groups);
+    try std.testing.expect(manager.discoveryNeed().custody);
+    try owner.updateLocalDemand(node, &node.localState(), &.{}, setup.pair.now);
+    _ = try setup.turn(node, .{});
+    try std.testing.expectEqual(@as(u16, 0), manager.coverageDeficits().groups);
+    try std.testing.expectEqual(@as(u16, 0), manager.coverageDeficits().custody_groups);
+    try std.testing.expect(!manager.discoveryNeed().custody);
+    try std.testing.expectEqualDeep(t.Demand{}, manager.demand);
 }
