@@ -856,7 +856,7 @@ test "network owner progresses and shuts down while UDP sends are under local pr
     defer node.deinit(std.testing.io);
     var faults: FaultIo = .{ .send = .{}, .send_failure = error.SystemResources };
     const now = node.last_now;
-    try node.connectUntil(&identity, &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9 } }}, now, now.millis() + 5_000);
+    try node.connectUntil(&identity, &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9 } }}, now, @import("time.zig").milliseconds(now.millis() + 5_000));
     const progress = driver.step(&node, faults.io(), now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis())));
     try std.testing.expect(progress.failure == null);
     try std.testing.expect(faults.send_calls > 0 and faults.send_calls <= Transport.send_burst_max);

@@ -44,7 +44,7 @@ const Peer = struct {
         if (std.mem.eql(u8, instruction.op, "dial")) {
             const target = try network.Multiaddr.parse(instruction.address orelse return error.MissingAddress);
             if (target.address != .ip4 or !std.mem.eql(u8, &target.address.ip4.octets, &.{ 127, 0, 0, 1 })) return error.NotLoopback;
-            try self.node.connectUntil(&(target.peer orelse return error.MissingPeer), &.{target.address}, self.now, self.now.millis() +| network.peers.Dialing.connect_timeout_ms);
+            try self.node.connectUntil(&(target.peer orelse return error.MissingPeer), &.{target.address}, self.now, network.time.milliseconds(self.now.millis() +| network.peers.Dialing.connect_timeout_ms));
         } else if (std.mem.eql(u8, instruction.op, "capacity")) {
             const capacity = instruction.capacity orelse return error.MissingCapacity;
             if (capacity > 1) return error.InvalidCapacity;

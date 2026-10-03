@@ -190,7 +190,7 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
         .connect => {
             if (core.isConnected(&input.peer)) return;
             operation.deadline = timestamp.millis() +| input.timeout_ms;
-            try core.connectUntil(&input.peer, input.addresses[0..input.address_count], timestamp, operation.deadline);
+            try core.connectUntil(&input.peer, input.addresses[0..input.address_count], timestamp, n.time.milliseconds(operation.deadline));
             self.lock();
             self.table.transition(operation, .waiting);
             self.unlock();

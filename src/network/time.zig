@@ -32,6 +32,11 @@ pub const Now = struct {
         return @intCast(self.monotonic.raw.nanoseconds);
     }
 
+    pub fn deadlineMilliseconds(self: *const Now, timeout: Io.Duration) u64 {
+        std.debug.assert(timeout.nanoseconds >= 0);
+        return ceilMilliseconds(self.monotonic.addDuration(.{ .clock = .awake, .raw = timeout }));
+    }
+
     pub fn unixSeconds(self: *const Now) i64 {
         std.debug.assert(self.wall.clock == .real);
         return self.wall.raw.toSeconds();
@@ -50,9 +55,9 @@ pub fn optionalMilliseconds(value: ?u64) ?Io.Clock.Timestamp {
     return if (value) |ms| milliseconds(ms) else null;
 }
 
-pub fn durationMilliseconds(value: Io.Duration) u64 {
-    std.debug.assert(value.nanoseconds >= 0);
-    return @intCast(@divTrunc(value.nanoseconds, std.time.ns_per_ms) + @intFromBool(@mod(value.nanoseconds, std.time.ns_per_ms) != 0));
+pub fn ceilMilliseconds(value: Io.Clock.Timestamp) u64 {
+    std.debug.assert(value.clock == .awake and value.raw.nanoseconds >= 0);
+    return @intCast(@divTrunc(value.raw.nanoseconds, std.time.ns_per_ms) + @intFromBool(@mod(value.raw.nanoseconds, std.time.ns_per_ms) != 0));
 }
 
 /// Clamp before narrowing, and round a future deadline up so a sub-millisecond remainder

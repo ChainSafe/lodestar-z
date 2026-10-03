@@ -1,5 +1,4 @@
 const std = @import("std");
-const time = @import("../time.zig");
 const config = @import("config");
 const codec = @import("codec.zig");
 const constants = @import("constants.zig");
@@ -98,7 +97,7 @@ fn sendRequest(owner: *ReqResp, engine: *Engine, slot: *Client, index: u16, now:
     request.io.payload = &.{};
     request.io.writer = undefined;
     slot.phase = .response;
-    slot.phase_deadline_ms = now.millis() +| time.durationMilliseconds(slot.timeouts.response);
+    slot.phase_deadline_ms = now.deadlineMilliseconds(slot.timeouts.response);
     slot.resetResponseDecoder(owner);
     // Response bytes may have arrived while the request was still being written.
     owner.markReady(.outbound, index);
@@ -241,7 +240,7 @@ pub fn start(self: *Client, input: *const Start, now: Now) void {
         .identity = input.identity,
         .protocol_chunks_max = input.protocol_chunks_max,
         .timeouts = input.timeouts,
-        .phase_deadline_ms = now.millis() +| time.durationMilliseconds(input.timeouts.negotiation),
+        .phase_deadline_ms = now.deadlineMilliseconds(input.timeouts.negotiation),
         .request = .{
             .completion = .running,
             .stream_owner = .router,
@@ -277,7 +276,7 @@ pub fn negotiated(slot: *Client, owner: *ReqResp, engine: *Engine, index: u16, o
             request.io.buffered_end = ready.leftover.len;
             request.io.fin_seen = ready.fin;
             slot.phase = .request;
-            slot.phase_deadline_ms = now.millis() +| time.durationMilliseconds(slot.timeouts.request);
+            slot.phase_deadline_ms = now.deadlineMilliseconds(slot.timeouts.request);
             request.io.writer = codec.ChunkWriter.initRequest(request.io.payload);
             request.io.writing = request.protocol.info().request_max > 0;
             if (!request.io.writing) request.io.outbox.queue("", true);

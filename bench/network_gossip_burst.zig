@@ -523,7 +523,7 @@ const Spoke = struct {
         const payload = try shared.allocator.alloc(u8, @max(shared.chain.attestation_bytes, options.column_bytes));
         defer shared.allocator.free(payload);
         var now = try network.Transport.currentTime(io);
-        try self.core.connectUntil(&shared.hub_id, &.{shared.hub_address}, now, now.millis() + 10_000);
+        try self.core.connectUntil(&shared.hub_id, &.{shared.hub_address}, now, network.time.milliseconds(now.millis() + 10_000));
         try shared.chain.subscribe(&self.core, options, self.index, now);
         const schedule = shared.schedule.of(self.index);
         var peer_events: [16]t.Event = undefined;

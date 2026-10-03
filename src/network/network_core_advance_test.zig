@@ -2,6 +2,33 @@ const std = @import("std");
 const Setup = @import("network_core_test_support.zig").Setup;
 const Source = @import("wake_sources.zig").Source;
 
+test "core connection deadlines preserve fractions through millisecond expiry" {
+    const setup = try std.testing.allocator.create(Setup);
+    defer std.testing.allocator.destroy(setup);
+    setup.* = .{};
+    try setup.initOwners(&.{});
+    defer setup.deinit();
+    const core = &setup.client;
+    var now = setup.pair.now;
+    now.monotonic.raw.nanoseconds += 900_000;
+    const identity = setup.server.peerId();
+    const addresses = [_]@import("types.zig").Address{setup.server.transport.localAddress()};
+    try std.testing.expectError(error.InvalidDeadline, core.connectUntil(&identity, &addresses, now, now.monotonic));
+    const deadline = now.monotonic.addDuration(.{ .clock = .awake, .raw = .fromNanoseconds(500_000) });
+    try core.connectUntil(&identity, &addresses, now, deadline);
+    const catalog = &core.peer_manager.catalog;
+    const peer = catalog.find(&identity).?;
+    const due_ms = now.millis() + 2;
+    try std.testing.expectEqual(due_ms, catalog.rowFor(peer).?.intent.manual_until_ms);
+    now.monotonic = @import("time.zig").milliseconds(due_ms - 1);
+    core.peer_manager.expireDials(&core.transport.engine, now);
+    try std.testing.expectEqual(due_ms, catalog.rowFor(peer).?.intent.manual_until_ms);
+    try std.testing.expectError(error.InvalidDeadline, core.connectUntil(&identity, &addresses, now, setup.pair.now.monotonic));
+    now.monotonic = @import("time.zig").milliseconds(due_ms);
+    core.peer_manager.expireDials(&core.transport.engine, now);
+    try std.testing.expect(catalog.find(&identity) == null);
+}
+
 test "core advance uses supplied time and schedules deferred application shutdown" {
     const setup = try std.testing.allocator.create(Setup);
     defer std.testing.allocator.destroy(setup);
@@ -173,7 +200,7 @@ test "core clock failure preserves dial intent without starting a connection" {
     try setup.initOwners(&.{});
     defer setup.deinit();
     const core = &setup.client;
-    try core.connectUntil(&setup.server.peerId(), &.{setup.server.transport.localAddress()}, setup.pair.now, setup.pair.now.millis() + 10_000);
+    try core.connectUntil(&setup.server.peerId(), &.{setup.server.transport.localAddress()}, setup.pair.now, @import("time.zig").milliseconds(setup.pair.now.millis() + 10_000));
     const pending = core.waitPlan(setup.pair.now, .{}, .{});
     const dirty = core.peer_manager.catalog.dial.dirty_count;
     const visits = core.peer_manager.dialing.visits;
@@ -202,7 +229,7 @@ test "core lifecycle only advances and closed owners reject new connections" {
             core.beginGracefulClose(setup.pair.now);
             core.beginGracefulClose(setup.pair.now);
             try std.testing.expectEqual(.quiescing, core.phase());
-            try std.testing.expectError(error.Stopped, core.connectUntil(&setup.client.peerId(), &.{}, setup.pair.now, setup.pair.now.millis() + 1));
+            try std.testing.expectError(error.Stopped, core.connectUntil(&setup.client.peerId(), &.{}, setup.pair.now, @import("time.zig").milliseconds(setup.pair.now.millis() + 1)));
             try std.testing.expectError(error.Stopped, core.addDirectPeer(&setup.client.peerId(), &.{}, setup.pair.now));
         } else core.shutdown(setup.pair.now);
         _ = try setup.pair.dial();
@@ -240,7 +267,7 @@ test "core cancellation preserves prior failure and events while stopping furthe
         const core = &setup.client;
         const failed = try setup.pair.dial();
         try std.testing.expect(core.transport.engine.failSend(failed));
-        try core.connectUntil(&setup.server.peerId(), &.{@import("quic/test_support.zig").server_address}, setup.pair.now, setup.pair.now.millis() + 1000);
+        try core.connectUntil(&setup.server.peerId(), &.{@import("quic/test_support.zig").server_address}, setup.pair.now, @import("time.zig").milliseconds(setup.pair.now.millis() + 1000));
         var host: Host = .{};
         var faults: @import("fault_io") = .{ .base = setup.pair.io(), .receive = .{} };
         const result = core.advance(faults.io(), .{
