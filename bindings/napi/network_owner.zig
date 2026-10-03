@@ -1,4 +1,5 @@
 const std = @import("std");
+const Now = @import("network").Now;
 const n = @import("network");
 const d = @import("discv5");
 const r = @import("network_runtime.zig");
@@ -82,7 +83,7 @@ pub fn initialize(self: *Runtime) !void {
     self.heavy.?.core_live = true;
     try self.heavy.?.core.setHostWake(self.wake.?.read_fd);
 
-    try publishMetrics(self, now(io));
+    try publishMetrics(self, try now(io));
     std.log.scoped(.network_runtime).info("owner_initialized target_peers={d} max_peers={d}", .{ self.heavy.?.resolved.core.peers.target_peers, self.heavy.?.resolved.core.peers.max_peers });
 }
 pub fn run(self: *Runtime) void {
@@ -104,7 +105,9 @@ fn serve(self: *Runtime) !void {
     self.heavy.?.core.service.gossipsub.message_sink = &sink;
     defer self.heavy.?.core.service.gossipsub.message_sink = null;
     var host: Host = .{ .runtime = self, .io = io };
-    while (try turn(self, io, &host, &ingress)) |_| {}
+    while (try turn(self, io, &host, &ingress)) |result| {
+        if (result.cancelled) return error.Canceled;
+    }
 }
 
 /// One owner turn: the stop check, then one core step that applies host work after its readiness
@@ -116,7 +119,7 @@ fn turn(self: *Runtime, io: std.Io, host: *Host, ingress: *const gossip_mod.Ingr
     const graceful = self.graceful and self.reason == .requested;
     self.unlock();
     if (stop and !graceful) return null;
-    const timestamp = now(io);
+    const timestamp = try now(io);
     if (stop) {
         if (self.closing_deadline == null) {
             std.log.scoped(.network_runtime).info("owner_stopping mode=graceful peers={d}", .{self.heavy.?.core.peerCounts().connected});
@@ -125,17 +128,17 @@ fn turn(self: *Runtime, io: std.Io, host: *Host, ingress: *const gossip_mod.Ingr
             self.publications.?.close(self.terminal_error orelse error.NetworkClosed);
             self.refreshLocked();
             self.unlock();
-            self.closing_deadline = timestamp.mono_ms +| 2000;
+            self.closing_deadline = timestamp.millis() +| 2000;
             self.heavy.?.core.beginGracefulClose(timestamp);
         }
-        if (timestamp.mono_ms >= self.closing_deadline.? or self.heavy.?.core.peerCounts().connected == 0) return null;
+        if (timestamp.millis() >= self.closing_deadline.? or self.heavy.?.core.peerCounts().connected == 0) return null;
     }
     self.lock();
     const peer_room: usize = if (self.lane) |lane| 64 - @as(usize, lane.len) else self.heavy.?.outputs.len;
     const deadline = hostDeadline(self, timestamp);
     self.unlock();
     const sequence = try self.advanceSequence();
-    const result = n.driver.step(&self.heavy.?.core, io, timestamp, .{ .peers = self.heavy.?.outputs[0..@min(peer_room, self.heavy.?.outputs.len)], .application = &self.heavy.?.application_outputs }, .{ .context = host, .apply = Host.apply, .deadline_ms = deadline });
+    const result = n.driver.step(&self.heavy.?.core, io, timestamp, .{ .peers = self.heavy.?.outputs[0..@min(peer_room, self.heavy.?.outputs.len)], .application = &self.heavy.?.application_outputs }, .{ .handler = .{ .context = host, .apply = Host.apply }, .deadline = @import("network").time.optionalMilliseconds(deadline) });
     if (host.failure) |err| return err;
     if (ingress.failure) |err| return err;
     // The step's clock was read after its poll, so deadlines that ended the wait are due.
@@ -150,7 +153,7 @@ fn turn(self: *Runtime, io: std.Io, host: *Host, ingress: *const gossip_mod.Ingr
 /// connect timeouts, the graceful close and the gossip processor's groups and expiry. Host work
 /// found by the previous turn's event capture is due now.
 fn hostDeadline(self: *Runtime, timestamp: n.Now) u64 {
-    if (self.host_due) return timestamp.mono_ms;
+    if (self.host_due) return timestamp.millis();
     var deadline = @min(self.metrics_due_ms, self.health_log_due_ms);
     if (commands.connectDeadline(&self.table)) |value| deadline = @min(deadline, value);
     if (self.closing_deadline) |value| deadline = @min(deadline, value);
@@ -266,7 +269,7 @@ fn executeWork(self: *Runtime, io: std.Io, tick: n.Now) !bool {
                 return err;
             };
             self.unlock();
-            publications.execute(self, publication.?, tick, now(io).mono_ms);
+            publications.execute(self, publication.?, tick, (try now(io)).millis());
             publishes += 1;
             bytes += len;
         } else {
@@ -288,19 +291,19 @@ fn executeWork(self: *Runtime, io: std.Io, tick: n.Now) !bool {
 
 fn publishTurn(self: *Runtime, result: *const n.NetworkCore.Result, timestamp: n.Now, sequence: u64) void {
     const counts = self.heavy.?.core.peerCounts();
-    if (timestamp.mono_ms >= self.metrics_due_ms) {
-        publishMetrics(self, now(self.heavy.?.threaded.io())) catch |err| {
+    if (timestamp.millis() >= self.metrics_due_ms) {
+        publishMetrics(self, timestamp) catch |err| {
             self.lock();
             self.metrics.failure = err;
             self.unlock();
         };
-        self.metrics_due_ms = timestamp.mono_ms +| n.metrics.interval_ms;
+        self.metrics_due_ms = timestamp.millis() +| n.metrics.interval_ms;
     }
     self.lock();
-    if (timestamp.mono_ms >= self.health_log_due_ms) {
+    if (timestamp.millis() >= self.health_log_due_ms) {
         const active_requests = self.heavy.?.core.service.reqresp.pendingCounts();
         std.log.scoped(.network_runtime).info("network_health peers={d} relevant={d} target={d} requests_outbound={d} requests_inbound={d} dial_started={d} dial_deferred={d} discovery_peers={d} gossip_pressure_resets={d} received_bytes={d} sent_bytes={d}", .{ counts.connected, counts.relevant, self.heavy.?.resolved.core.peers.target_peers, active_requests.outbound, active_requests.inbound, self.heavy.?.core.counters.dial_started, self.heavy.?.core.counters.dial_deferred, if (self.heavy.?.core.discovery) |discovery| discovery.transport.engine.peerCount() else 0, self.heavy.?.core.service.gossipsub.counters.local_pressure_resets, self.heavy.?.core.transport.counters.received_bytes, self.heavy.?.core.transport.counters.sent_bytes });
-        self.health_log_due_ms = timestamp.mono_ms +| 30000;
+        self.health_log_due_ms = timestamp.millis() +| 30000;
     }
     if (self.lane) |lane| lane.publish(self.heavy.?.outputs[0..result.counts.peers], sequence);
     self.recomputeLocked(.peers);
@@ -312,16 +315,15 @@ fn publishTurn(self: *Runtime, result: *const n.NetworkCore.Result, timestamp: n
     self.owner_turns +|= 1;
     self.unlock();
 }
-pub fn now(io: std.Io) n.Now {
-    const mono = std.Io.Timestamp.now(io, .awake);
-    return .{ .mono_ms = @intCast(@max(0, mono.toMilliseconds())), .unix_s = std.Io.Timestamp.now(io, .real).toSeconds() };
+pub fn now(io: std.Io) error{ClockOutOfRange}!n.Now {
+    return n.Now.read(io);
 }
 
 fn publishMetrics(self: *Runtime, timestamp: n.Now) n.metrics.registry.Error!void {
     var context = n.metrics.Context.init(&self.heavy.?.core, timestamp, true);
     self.lock();
     if (self.gossip) |*table| {
-        const state = table.snapshot(timestamp.mono_ms);
+        const state = table.snapshot(timestamp.millis());
         context.expired_executing = state.expiredExecuting;
     }
     self.captureBridgeLocked(&self.heavy.?.bridge);
@@ -448,14 +450,14 @@ test "queued request and disconnect share the protocol turn clock while latency 
     _ = try owner.core.transport.dialPeer(std.testing.io, remote.localAddress(), remote_id, try n.Transport.currentTime(std.testing.io));
     for (0..64) |_| {
         var events: [32]n.Engine.Event = undefined;
-        const progress = n.transport_driver.step(&owner.core.transport, std.testing.io, &events, .{ .wait_max_ms = 0 });
+        const progress = n.transport_driver.step(&owner.core.transport, std.testing.io, &events, .{ .wait_max = .fromMilliseconds(0) });
         if (progress.failure) |err| return err;
         for (events[0..progress.progress.events]) |event| if (event == .connected) {
             owner.core.peer_manager.transportProgress(&owner.core.transport.engine);
             try std.testing.expect(owner.core.peer_manager.admit(&event.connected, remote.localAddress(), progress.progress.now) != null);
         };
         if (owner.core.isConnected(&remote_id)) break;
-        const reply = n.transport_driver.step(&remote, std.testing.io, &events, .{ .wait_max_ms = 0 });
+        const reply = n.transport_driver.step(&remote, std.testing.io, &events, .{ .wait_max = .fromMilliseconds(0) });
         if (reply.failure) |err| return err;
     }
     try std.testing.expect(owner.core.isConnected(&remote_id));
@@ -463,10 +465,10 @@ test "queued request and disconnect share the protocol turn clock while latency 
     const Clock = struct {
         var time: n.Now = undefined;
         fn read(_: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
-            return .{ .nanoseconds = if (clock == .real) @as(i96, time.unix_s) * std.time.ns_per_s else @as(i96, time.mono_ms) * std.time.ns_per_ms };
+            return .{ .nanoseconds = if (clock == .real) @as(i96, time.unixSeconds()) * std.time.ns_per_s else @as(i96, time.millis()) * std.time.ns_per_ms };
         }
     };
-    Clock.time = .{ .mono_ms = tick.mono_ms + 100, .unix_s = tick.unix_s };
+    Clock.time = Now.fromMilliseconds(.{ .mono_ms = tick.millis() + 100, .unix_s = tick.unixSeconds() });
     var vtable = std.testing.io.vtable.*;
     vtable.now = Clock.read;
     const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
@@ -490,7 +492,7 @@ test "queued request and disconnect share the protocol turn clock while latency 
     defer runtime.publications.?.retire(publication);
     const cell = runtime.publications.?.get(publication).?;
     cell.order = try runtime.table.nextOrder();
-    cell.queued_ms = tick.mono_ms + 50;
+    cell.queued_ms = tick.millis() + 50;
     runtime.publications.?.transition(cell, .queued);
 
     const request = try runtime.requests.?.reserve(.blocks_by_root_v2, 32);
@@ -513,9 +515,9 @@ test "queued request and disconnect share the protocol turn clock while latency 
     runtime.table.transition(runtime.table.get(disconnect), .queued);
     try std.testing.expect(!try executeWork(&runtime, io, tick));
     try std.testing.expect(command.failure == null);
-    try std.testing.expectEqual(tick.mono_ms + 1000, command.deadline);
+    try std.testing.expectEqual(tick.millis() + 1000, command.deadline);
     try std.testing.expectEqual(error.UnknownTopic, cell.failure.?);
-    try std.testing.expectEqual(tick.mono_ms, owner.core.service.gossipsub.last_now_ms);
+    try std.testing.expectEqual(tick.millis(), owner.core.service.gossipsub.last_now_ms);
     try std.testing.expectEqual(@as(u128, 50), runtime.publications.?.latency.sum);
     try std.testing.expect(runtime.table.get(disconnect).failure == null);
     try std.testing.expect(!owner.core.isConnected(&remote_id));

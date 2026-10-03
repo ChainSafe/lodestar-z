@@ -1,4 +1,5 @@
 const std = @import("std");
+const schedule_test_support = @import("../schedule_test_support.zig");
 const ct = @import("consensus_types");
 const protocol = @import("protocol.zig");
 const reqresp = @import("ReqResp.zig");
@@ -125,12 +126,12 @@ test "service control wakeup includes negotiation after application quiescence" 
     setup.shared.client.quiesceApplications();
     const bytes = [_]u8{0} ** 8;
     var sink: [8]u8 = undefined;
-    const handle = try setup.shared.client.request(&setup.shared.pair.client, setup.shared.handles.client, .ping_v1, &bytes, &sink, .{ .absolute_timeouts = .{ .response_ms = 60_000 } }, setup.shared.pair.now);
+    const handle = try setup.shared.client.request(&setup.shared.pair.client, setup.shared.handles.client, .ping_v1, &bytes, &sink, .{ .timeouts = .{ .response = .fromMilliseconds(60_000) } }, setup.shared.pair.now);
     _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{ .control = &.{} }).control;
-    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms + 5_000), setup.shared.client.schedule(.{ .control = 0 }).nextWakeup(setup.shared.pair.now.mono_ms));
+    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.millis() + 5_000), schedule_test_support.wakeupMilliseconds(setup.shared.client.schedule(.{ .control = 0 }), setup.shared.pair.now.millis()));
     try std.testing.expect(setup.shared.client.reqresp.cancel(handle, setup.shared.pair.now));
     _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{ .control = &.{} }).control;
-    try std.testing.expectEqual(@as(?u64, null), setup.shared.client.schedule(.{ .control = 0 }).nextWakeup(setup.shared.pair.now.mono_ms));
+    try std.testing.expectEqual(@as(?u64, null), schedule_test_support.wakeupMilliseconds(setup.shared.client.schedule(.{ .control = 0 }), setup.shared.pair.now.millis()));
     var events: [1]Event = undefined;
     try std.testing.expectEqual(@as(usize, 1), setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{ .control = &events }).control);
     try std.testing.expect(events[0].failed.reason == .cancelled);
@@ -168,7 +169,7 @@ test "service preserves drained native stream events across a partial request sw
     var received = first_count == 1;
     for (0..10) |_| {
         if (received) break;
-        try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), setup.shared.client.schedule(.{ .control = 1 }).nextWakeup(setup.shared.pair.now.mono_ms));
+        try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.millis()), schedule_test_support.wakeupMilliseconds(setup.shared.client.schedule(.{ .control = 1 }), setup.shared.pair.now.millis()));
         const count = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{ .control = &events }).control;
         if (count == 1) {
             try std.testing.expectEqualSlices(u8, &bytes, events[0].chunk.bytes);
@@ -241,7 +242,7 @@ test "service reqresp slot is serviced only after a stream event or its deadline
     for (0..8) |_| {
         try setup.pumpOnce();
         try std.testing.expectEqual(idle, server.visits);
-        try std.testing.expect(server.schedule(.{ .control = 1 }).nextWakeup(setup.shared.pair.now.mono_ms).? > setup.shared.pair.now.mono_ms);
+        try std.testing.expect(schedule_test_support.wakeupMilliseconds(server.schedule(.{ .control = 1 }), setup.shared.pair.now.millis()).? > setup.shared.pair.now.millis());
     }
 
     const ping = [_]u8{3} ** 8;
@@ -323,7 +324,7 @@ test "service reqresp deadline fires on time while more slots than the pump budg
     try std.testing.expectEqual(busy.len, count);
 
     setup.shared.pair.advance(500);
-    try std.testing.expectEqual(deadline, setup.shared.pair.now.mono_ms);
+    try std.testing.expectEqual(deadline, setup.shared.pair.now.millis());
     for (busy) |index| server.markReady(.inbound, index);
     try std.testing.expect(server.ready.len > server.options.work_per_pump_max);
     try setup.pumpOnce();
@@ -468,6 +469,6 @@ test "service reqresp request on one connection among 64 visits only its own slo
     // would visit every slot of every connection.
     try std.testing.expect(client.visits - idle[0] <= 16);
     try std.testing.expect(server.visits - idle[1] <= 16);
-    try std.testing.expectEqual(@as(?u64, null), server.schedule(.{ .control = 1 }).nextWakeup(setup.shared.pair.now.mono_ms));
-    try std.testing.expectEqual(@as(?u64, null), client.schedule(.{ .control = 1 }).nextWakeup(setup.shared.pair.now.mono_ms));
+    try std.testing.expectEqual(@as(?u64, null), schedule_test_support.wakeupMilliseconds(server.schedule(.{ .control = 1 }), setup.shared.pair.now.millis()));
+    try std.testing.expectEqual(@as(?u64, null), schedule_test_support.wakeupMilliseconds(client.schedule(.{ .control = 1 }), setup.shared.pair.now.millis()));
 }

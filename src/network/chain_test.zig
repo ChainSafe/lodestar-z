@@ -1,4 +1,5 @@
 const std = @import("std");
+const Now = @import("types.zig").Now;
 const config = @import("config");
 const preset = @import("preset");
 const constants = @import("constants");
@@ -243,7 +244,7 @@ fn applyScheduled(g: *gossip.Gossipsub, plan: *const chain.Plan, epoch: u64) !us
     var workspace = try gossip.local_intent.Workspace.init(std.testing.allocator, g.overlay.rows.len);
     defer workspace.deinit(std.testing.allocator);
     const slot = epoch * preset.preset.SLOTS_PER_EPOCH;
-    if (try g.prepareSubscriptions(desired[0..count], &workspace, .{ .mono_ms = slot * 12_000, .unix_s = 0 }, slot)) g.commitSubscriptions(&workspace);
+    if (try g.prepareSubscriptions(desired[0..count], &workspace, Now.fromMilliseconds(.{ .mono_ms = slot * 12_000, .unix_s = 0 }), slot)) g.commitSubscriptions(&workspace);
     return workspace.len;
 }
 

@@ -30,15 +30,7 @@ pub const PeerRef = struct { index: u16, generation: u64 };
 pub const Direction = enum { inbound, outbound };
 pub const ShutdownDirection = enum { read, write };
 
-pub const Now = struct {
-    mono_ms: u64,
-    unix_s: i64,
-    mono_ns: ?u64 = null,
-
-    pub fn nanos(self: Now) u64 {
-        return self.mono_ns orelse self.mono_ms *| 1_000_000;
-    }
-};
+pub const Now = @import("time.zig").Now;
 
 pub const CloseReason = union(enum) {
     host,

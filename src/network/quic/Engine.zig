@@ -37,6 +37,7 @@ pub const StreamError = error{
 };
 
 pub const DialError = error{
+    Stopped,
     AddressFamilyUnsupported,
     TableFull,
     DialLimit,
@@ -150,6 +151,7 @@ csprng: std.Random.DefaultCsprng,
 retry_key: [32]u8,
 visits: Visits = .{},
 connection_metrics: ConnectionCounters = .{},
+admission_open: bool = true,
 /// The received packet's token, borrowed by its header until the next receive. A field
 /// rather than a local so ReleaseSafe does not fill it for every datagram.
 header_token: [binding.Header.token_max]u8 = undefined,
@@ -257,6 +259,7 @@ pub fn dial(
     expected: peer_id.PeerId,
     now: Now,
 ) DialError!Handle {
+    if (!self.admission_open) return error.Stopped;
     assert(self.registry.active_len <= self.registry.active.len);
     assert(self.registry.dialing <= self.registry.outbound);
     if (self.registry.dialing >= self.limits.dialing_max) return error.DialLimit;
@@ -325,9 +328,15 @@ pub fn abandon(self: *Engine, conn: Handle) bool {
     return true;
 }
 
-/// Includes handshakes not yet admitted to the peer catalog. Retirement can reorder the
+/// Permanently rejects new inbound and outbound connections. Existing routes remain usable
+/// for graceful close; opening a control stream on an existing connection remains allowed.
+pub fn stopAdmission(self: *Engine) void {
+    self.admission_open = false;
+}
+
+/// Closes current connections without changing admission. Includes handshakes not yet admitted to the peer catalog. Retirement can reorder the
 /// active list, so walk the bounded slot storage rather than that list.
-pub fn shutdownAll(self: *Engine) void {
+pub fn closeAll(self: *Engine) void {
     for (self.registry.slots, 0..) |*slot, index| {
         const handle: Handle = .{ .index = @intCast(index), .generation = slot.generation };
         if (!self.abandon(handle)) _ = self.close(handle, 0);
@@ -544,6 +553,7 @@ pub fn receive(
         if (!self.feed(index, datagram, from, now, true)) return .dropped;
         return .{ .accepted = self.toHandle(index) };
     }
+    if (!self.admission_open) return .dropped;
     if (datagram.len < bounds.client_initial_min) {
         return .dropped;
     }
@@ -565,7 +575,7 @@ pub fn receive(
     if (!retry.isLocal(header.token)) {
         return self.sendRetry(&header, from, now, out);
     }
-    const original = retry.validate(&self.retry_key, from, &header.dcid, header.token, now.mono_ms, self.limits.handshake_timeout_ms) orelse return .dropped;
+    const original = retry.validate(&self.retry_key, from, &header.dcid, header.token, now.millis(), self.limits.handshake_timeout_ms) orelse return .dropped;
     const scid = header.dcid.bytes[0..bounds.local_cid_length].*;
     const reserved = self.limits.outbound_reserved -| self.registry.dialing;
     if (self.limits.connections_max - self.registry.active_len <= reserved)
@@ -600,7 +610,7 @@ fn sendRetry(self: *Engine, header: *const binding.Header, from: *const Address,
     const bytes = self.connectionId();
     const scid = binding.Cid.fromSlice(&bytes);
     var buffer: [retry.token_max]u8 = undefined;
-    const token = retry.mint(&self.retry_key, from, &header.dcid, &scid, now.mono_ms, &buffer);
+    const token = retry.mint(&self.retry_key, from, &header.dcid, &scid, now.millis(), &buffer);
     const length = (binding.check(c.quiche_retry(header.scid.slice().ptr, header.scid.len, header.dcid.slice().ptr, header.dcid.len, scid.slice().ptr, scid.len, token.ptr, token.len, header.version, out.ptr, out.len)) catch return .dropped) orelse return .dropped;
     return .{ .retry = out[0..length] };
 }
@@ -646,16 +656,16 @@ fn fire(self: *Engine, index: u16, now: Now) void {
         self.visits.timeouts +|= 1;
     };
     if (slot.state == .handshaking and slot.closing == .none and
-        now.mono_ms -| slot.created_ms >= self.handshakeLimitMs(slot))
+        now.millis() -| slot.created_ms >= self.handshakeLimitMs(slot))
     {
         const unanswered = slot.direction == .outbound and !slot.answered;
         slot.close(if (unanswered) .dial_unanswered else .handshake_timeout, types.app_error_handshake_timeout);
     }
     if (slot.state == .established and slot.closing == .none and
-        now.mono_ms -| slot.last_send_ms >= self.limits.keep_alive_ms and
+        now.millis() -| slot.last_send_ms >= self.limits.keep_alive_ms and
         slot.keepAlive())
     {
-        slot.last_send_ms = now.mono_ms;
+        slot.last_send_ms = now.millis();
     }
     slot.closeAfterFlight();
     self.refresh(index);
@@ -687,7 +697,7 @@ pub fn sendOne(self: *Engine, index: u16, now: Now, out: []u8) ?Sent {
     if (index >= self.registry.slots.len) return null;
     const slot = &self.registry.slots[index];
     if (slot.state == .free or slot.state == .closed) return null;
-    const datagram = slot.send(now.mono_ms, out) catch {
+    const datagram = slot.send(now.millis(), out) catch {
         self.refresh(index);
         return null;
     };

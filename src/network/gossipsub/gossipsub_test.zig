@@ -103,5 +103,5 @@ test "gossipsub subscription cursors synchronize all topics through small critic
     setup.shared.client.gossipsub.sessions.setOutbound(peer, .pending);
     for (0..128) |_| try setup.pumpOnce();
     for (0..8) |_| try setup.pumpOnce();
-    try std.testing.expect(support.sessionWakeup(setup.shared.client.gossipsub, setup.shared.pair.now) > setup.shared.pair.now.mono_ms);
+    try std.testing.expect(support.sessionWakeup(setup.shared.client.gossipsub, setup.shared.pair.now) > setup.shared.pair.now.millis());
 }

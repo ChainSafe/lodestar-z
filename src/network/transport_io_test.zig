@@ -15,7 +15,7 @@ const net = std.Io.net;
 const Node = support.Node;
 
 const ping_protocol = "/ipfs/ping/1.0.0";
-const step_options = @import("transport_driver.zig").Options{ .wait_max_ms = 10 };
+const step_options = @import("transport_driver.zig").Options{ .wait_max = .fromMilliseconds(10) };
 
 fn writeSome(engine: *Engine, stream: Engine.StreamHandle, bytes: []const u8, fin: bool) !usize {
     return engine.write(stream, bytes, fin) catch |err| switch (err) {
@@ -168,8 +168,8 @@ test "transport surfaces a send failure to an unreachable destination" {
     try std.testing.expectEqual(@as(u32, 1), result.send_failures);
     try std.testing.expectEqual(@as(u32, 0), result.datagrams_sent);
     try std.testing.expectEqual(@as(usize, 0), result.events);
-    try std.testing.expect(node.transport.schedule().runnable);
-    const delivered = try support.step(&node.transport, std.testing.io, &events, .{ .wait_max_ms = 0 });
+    try std.testing.expect(node.transport.schedule(1).runnable);
+    const delivered = try support.step(&node.transport, std.testing.io, &events, .{ .wait_max = .fromMilliseconds(0) });
     try std.testing.expectEqual(@as(usize, 1), delivered.events);
     switch (events[0]) {
         .closed => |closed| {
@@ -297,13 +297,13 @@ test "transport rotates dirty connections under one aggregate send allowance" {
     var served: [3]u16 = undefined;
     for (&served) |*index| {
         index.* = node.transport.engine.nextDirty().?;
-        const result = try support.step(&node.transport, std.testing.io, &events, .{ .wait_max_ms = 0 });
+        const result = try support.step(&node.transport, std.testing.io, &events, .{ .wait_max = .fromMilliseconds(0) });
         try std.testing.expectEqual(@as(u32, 1), result.datagrams_sent);
         try std.testing.expect(result.backlog);
         _ = try sink.receiveDatagram(std.testing.io, &receive_buffer, .{ .duration = .{ .raw = .fromMilliseconds(10), .clock = .awake } });
     }
     try std.testing.expect(served[0] != served[1] and served[1] != served[2] and served[0] != served[2]);
-    const drained = try support.step(&node.transport, std.testing.io, &events, .{ .wait_max_ms = 0 });
+    const drained = try support.step(&node.transport, std.testing.io, &events, .{ .wait_max = .fromMilliseconds(0) });
     try std.testing.expectEqual(@as(u32, 0), drained.datagrams_sent);
     try std.testing.expect(!drained.backlog);
 }
@@ -344,13 +344,13 @@ test "transport requires startup seed entropy but no entropy for later dial and 
     _ = try node.transport.dialPeer(io, remote.transport.localAddress(), remote.transport.peerId(), try Transport.currentTime(io));
     _ = try remote.transport.dialPeer(io, node.transport.localAddress(), node.transport.peerId(), try Transport.currentTime(io));
     var events: [4]Engine.Event = undefined;
-    const received = try support.step(&node.transport, io, &events, .{ .wait_max_ms = 10 });
+    const received = try support.step(&node.transport, io, &events, .{ .wait_max = .fromMilliseconds(10) });
     try std.testing.expect(received.datagrams_received > 0);
     try std.testing.expectEqual(@as(u32, 0), received.datagrams_accepted);
     var accepted: u32 = 0;
     for (0..8) |_| {
-        _ = try support.step(&remote.transport, io, &events, .{ .wait_max_ms = 10 });
-        accepted += (try support.step(&node.transport, io, &events, .{ .wait_max_ms = 10 })).datagrams_accepted;
+        _ = try support.step(&remote.transport, io, &events, .{ .wait_max = .fromMilliseconds(10) });
+        accepted += (try support.step(&node.transport, io, &events, .{ .wait_max = .fromMilliseconds(10) })).datagrams_accepted;
         if (node.transport.engine.registry.active_len == 2) break;
     }
     try std.testing.expect(accepted > 0);
@@ -382,15 +382,15 @@ test "transport isolates a failing destination in a mixed-owner batch" {
         now,
     );
     var events: [4]Engine.Event = undefined;
-    const result = try support.step(&node.transport, std.testing.io, &events, .{ .wait_max_ms = 0 });
+    const result = try support.step(&node.transport, std.testing.io, &events, .{ .wait_max = .fromMilliseconds(0) });
     try std.testing.expectEqual(@as(?Engine.Handle, healthy), node.transport.engine.sendOwner(healthy.index));
     try std.testing.expectEqual(@as(u32, 1), result.send_failures);
     try std.testing.expectEqual(@as(u32, 1), result.datagrams_sent);
     try std.testing.expectEqual(@as(u32, 2), result.send_calls);
     try std.testing.expectEqual(@as(u16, 1), node.transport.engine.registry.outbound);
     try std.testing.expectEqual(@as(usize, 0), result.events);
-    try std.testing.expect(node.transport.schedule().runnable);
-    const delivered = try support.step(&node.transport, std.testing.io, &events, .{ .wait_max_ms = 0 });
+    try std.testing.expect(node.transport.schedule(1).runnable);
+    const delivered = try support.step(&node.transport, std.testing.io, &events, .{ .wait_max = .fromMilliseconds(0) });
     try std.testing.expectEqual(@as(usize, 1), delivered.events);
     try std.testing.expect(events[0] == .closed);
     try std.testing.expectEqual(failing, events[0].closed.conn);
@@ -420,7 +420,7 @@ test "transport fails only the connection whose destination the host refuses and
                 .send_failure = error.AccessDenied,
             };
             const io = faults.io();
-            const turn: @import("transport_driver.zig").Options = .{ .wait_max_ms = 0 };
+            const turn: @import("transport_driver.zig").Options = .{ .wait_max = .fromMilliseconds(0) };
             const refused_address: types.Address = .{ .ip6 = .{ .octets = .{0} ** 15 ++ .{1}, .port = 9 } };
             const expected = remotes[0].transport.peerId();
             try std.testing.expectError(error.DestinationUnreachable, node.dialPeer(io, refused_address, expected, try Transport.currentTime(io)));
@@ -483,13 +483,13 @@ test "transport bounds each turn's receive drain without active connections" {
     const destination = node.transport.localAddress();
     for (0..3) |_| try source.sendTo(std.testing.io, destination, &.{0}, constants.datagram_size_max);
     var events: [4]Engine.Event = undefined;
-    const result = try support.step(&node.transport, std.testing.io, &events, .{ .wait_max_ms = 10 });
+    const result = try support.step(&node.transport, std.testing.io, &events, .{ .wait_max = .fromMilliseconds(10) });
     try std.testing.expectEqual(@as(u32, 2), result.datagrams_received);
     try std.testing.expectEqual(@as(u32, 2), result.datagrams_dropped);
     try std.testing.expectEqual(@as(usize, 0), node.transport.engine.registry.activeIndices().len);
     try std.testing.expect(!result.backlog);
     try std.testing.expect(node.transport.nextDeadlineNs() == null);
-    const drained = try support.step(&node.transport, std.testing.io, &events, .{ .wait_max_ms = 0 });
+    const drained = try support.step(&node.transport, std.testing.io, &events, .{ .wait_max = .fromMilliseconds(0) });
     try std.testing.expectEqual(@as(u32, 1), drained.datagrams_received);
     try std.testing.expectEqual(@as(u32, 1), drained.datagrams_dropped);
 }
@@ -515,7 +515,7 @@ test "transport drains dirty connections across small send budgets" {
     var sent: u32 = 0;
     var quiescent = false;
     for (0..16) |_| {
-        const result = try support.step(&node.transport, std.testing.io, &events, .{ .wait_max_ms = 0 });
+        const result = try support.step(&node.transport, std.testing.io, &events, .{ .wait_max = .fromMilliseconds(0) });
         try std.testing.expect(result.datagrams_sent <= 2);
         sent += result.datagrams_sent;
         if (!result.backlog) {
@@ -532,8 +532,8 @@ test "transport drains dirty connections across small send budgets" {
 fn quietConnectedNodes(client: *Node, server: *Node) !void {
     var events: [8]Engine.Event = undefined;
     for (0..128) |_| {
-        const a = try support.step(&client.transport, std.testing.io, &events, .{ .wait_max_ms = 1 });
-        const b = try support.step(&server.transport, std.testing.io, &events, .{ .wait_max_ms = 1 });
+        const a = try support.step(&client.transport, std.testing.io, &events, .{ .wait_max = .fromMilliseconds(1) });
+        const b = try support.step(&server.transport, std.testing.io, &events, .{ .wait_max = .fromMilliseconds(1) });
         const a_due = client.transport.nextDeadlineNs();
         const b_due = server.transport.nextDeadlineNs();
         if (!a.backlog and !b.backlog and a.datagrams_sent == 0 and b.datagrams_sent == 0 and
@@ -622,8 +622,8 @@ test "transport keys quiche's timer from a clock read after the flush so it neve
     for (0..2) |_| {
         const now = try Transport.currentTime(io);
         const deadline_ms = (transport.nextDeadlineNs().? + std.time.ns_per_ms - 1) / std.time.ns_per_ms;
-        try std.testing.expect(deadline_ms > now.mono_ms);
-        try std.Io.sleep(io, .fromMilliseconds(@intCast(deadline_ms - now.mono_ms)), .awake);
+        try std.testing.expect(deadline_ms > now.millis());
+        try std.Io.sleep(io, .fromMilliseconds(@intCast(deadline_ms - now.millis())), .awake);
         const turn = try Transport.currentTime(io);
         transport.expire(turn);
         transport.engine.collect(turn);
@@ -649,7 +649,8 @@ test "transport receive cancellation retains progress and events while deferring
     var faults: FaultIo = .{ .receive = .{ .at = 2 } };
     const io = faults.io();
     var events: [4]Engine.Event = undefined;
-    const result = @import("transport_driver.zig").step(&node.transport, io, &events, .{ .wait_max_ms = 0 });
+    const result = @import("transport_driver.zig").step(&node.transport, io, &events, .{ .wait_max = .fromMilliseconds(0) });
+    try std.testing.expect(result.cancelled);
     try std.testing.expectEqual(error.Canceled, result.failure.?);
     try std.testing.expectEqual(@as(u32, 1), result.progress.datagrams_received);
     try std.testing.expectEqual(@as(u32, 0), result.progress.datagrams_sent);
@@ -657,7 +658,7 @@ test "transport receive cancellation retains progress and events while deferring
     try std.testing.expectEqual(@as(usize, 1), result.progress.events);
     try std.testing.expectEqual(failed, events[0].closed.conn);
     try std.testing.expectEqual(@as(u8, 0), node.transport.batch_len);
-    const next = try support.step(&node.transport, std.testing.io, &events, .{ .wait_max_ms = 0 });
+    const next = try support.step(&node.transport, std.testing.io, &events, .{ .wait_max = .fromMilliseconds(0) });
     try std.testing.expectEqual(@as(usize, 0), next.events);
     try std.testing.expect(next.datagrams_sent > 0);
 }
@@ -688,16 +689,16 @@ test "transport bursts one busy connection among many idle ones in one flush vis
         while (dialed < connections and spoke.engine.registry.dialing < limits.dialing_max) : (dialed += 1) {
             handles[dialed] = try spoke.dialPeer(std.testing.io, hub.localAddress(), hub.peerId(), try Transport.currentTime(std.testing.io));
         }
-        const spoke_step = try support.step(&spoke, std.testing.io, &events, .{ .wait_max_ms = 1 });
+        const spoke_step = try support.step(&spoke, std.testing.io, &events, .{ .wait_max = .fromMilliseconds(1) });
         for (events[0..spoke_step.events]) |event| established += @intFromBool(event == .connected);
-        _ = try support.step(&hub, std.testing.io, &events, .{ .wait_max_ms = 1 });
+        _ = try support.step(&hub, std.testing.io, &events, .{ .wait_max = .fromMilliseconds(1) });
         if (established == connections) break;
     }
     try std.testing.expectEqual(@as(usize, connections), established);
     // Settle until neither side sends.
     for (0..200) |_| {
-        const a = try support.step(&spoke, std.testing.io, &events, .{ .wait_max_ms = 2 });
-        const b = try support.step(&hub, std.testing.io, &events, .{ .wait_max_ms = 2 });
+        const a = try support.step(&spoke, std.testing.io, &events, .{ .wait_max = .fromMilliseconds(2) });
+        const b = try support.step(&hub, std.testing.io, &events, .{ .wait_max = .fromMilliseconds(2) });
         if (a.datagrams_sent == 0 and b.datagrams_sent == 0 and !a.backlog and !b.backlog) break;
     }
     try std.testing.expect(!spoke.engine.backlog());
@@ -743,7 +744,7 @@ test "transport reads only the ready families up to the turn quota and resumes t
     try std.testing.expectEqual(@as(u32, 0), result.receive_errors);
     // The quota counts the truncated datagram; the rest of the backlog keeps the socket readable.
     for ([_]u32{ quota - 1, 8 }, [_]u32{ 1, 0 }) |received, errors| {
-        const readiness = wait.poll(std.testing.io, sources, 0);
+        const readiness = wait.poll(std.testing.io, sources, .{ .duration = .{ .clock = .awake, .raw = .fromMilliseconds(0) } });
         try std.testing.expectEqual([2]bool{ true, false }, readiness.quic);
         result = .{ .now = try Transport.currentTime(std.testing.io) };
         try hub.receive(std.testing.io, &result, readiness.quic);
@@ -751,7 +752,7 @@ test "transport reads only the ready families up to the turn quota and resumes t
         try std.testing.expectEqual(received, result.datagrams_dropped);
         try std.testing.expectEqual(errors, result.receive_errors);
     }
-    try std.testing.expectEqual([2]bool{ false, false }, wait.poll(std.testing.io, sources, 0).quic);
+    try std.testing.expectEqual([2]bool{ false, false }, wait.poll(std.testing.io, sources, .{ .duration = .{ .clock = .awake, .raw = .fromMilliseconds(0) } }).quic);
     try std.testing.expectEqual(@as(u64, quota + 11), hub.counters.received_datagrams);
 }
 
@@ -821,8 +822,8 @@ test "transport recovers a locally dropped first flight through QUIC loss recove
     try std.testing.expect(!client.transport.engine.backlog());
     const now = try Transport.currentTime(std.testing.io);
     const deadline_ms = (client.transport.nextDeadlineNs().? + std.time.ns_per_ms - 1) / std.time.ns_per_ms;
-    try std.testing.expect(deadline_ms > now.mono_ms and deadline_ms - now.mono_ms < 3_000);
-    try std.Io.sleep(std.testing.io, .fromMilliseconds(@intCast(deadline_ms - now.mono_ms)), .awake);
+    try std.testing.expect(deadline_ms > now.millis() and deadline_ms - now.millis() < 3_000);
+    try std.Io.sleep(std.testing.io, .fromMilliseconds(@intCast(deadline_ms - now.millis())), .awake);
     const after = try Transport.currentTime(std.testing.io);
     client.transport.expire(after);
     var retransmitted: Transport.StepResult = .{ .now = after };
@@ -855,15 +856,15 @@ test "network owner progresses and shuts down while UDP sends are under local pr
     defer node.deinit(std.testing.io);
     var faults: FaultIo = .{ .send = .{}, .send_failure = error.SystemResources };
     const now = node.last_now;
-    try node.connectUntil(&identity, &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9 } }}, now, now.mono_ms + 5_000);
-    const progress = driver.step(&node, faults.io(), now, .{}, .deadlineOnly(now.mono_ms));
+    try node.connectUntil(&identity, &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9 } }}, now, now.millis() + 5_000);
+    const progress = driver.step(&node, faults.io(), now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis())));
     try std.testing.expect(progress.failure == null);
     try std.testing.expect(faults.send_calls > 0 and faults.send_calls <= Transport.send_burst_max);
-    try std.testing.expect(!node.peer_manager.stopped);
+    try std.testing.expect(node.phase() != .stopping);
     try std.testing.expect(node.transport.send_drops.datagrams[@intFromEnum(@import("udp").Sockets.SendDrops.Reason.system_resources)] > 0);
     node.shutdown(node.last_now);
     for (0..4) |_| {
-        const stopped = driver.step(&node, faults.io(), node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms));
+        const stopped = driver.step(&node, faults.io(), node.last_now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(node.last_now.millis())));
         try std.testing.expect(stopped.failure == null);
         if (node.isClosed()) break;
     }
@@ -966,7 +967,8 @@ test "transport canceled step retains accepted progress and canceled dial releas
     const now = try Transport.currentTime(std.testing.io);
     for (0..3) |_| _ = try node.transport.engine.dial(&node.transport.localAddress(), node.transport.peerId(), now);
     var events: [8]Engine.Event = undefined;
-    const result = @import("transport_driver.zig").step(&node.transport, io, &events, .{ .wait_max_ms = 0 });
+    const result = @import("transport_driver.zig").step(&node.transport, io, &events, .{ .wait_max = .fromMilliseconds(0) });
+    try std.testing.expect(result.cancelled);
     try std.testing.expectEqual(error.Canceled, result.failure.?);
     try std.testing.expectEqual(@as(u32, 2), result.progress.datagrams_sent);
     try std.testing.expectEqual(@as(u32, 0), result.progress.send_failures);
@@ -998,7 +1000,7 @@ test "established transport survives canceled output and recovers its lost paylo
     const payload = "cancel preserves this stream payload";
     try std.testing.expectEqual(payload.len, try client.transport.engine.write(stream, payload, false));
     var fault: FaultIo = .{ .send = .{}, .send_failure = error.Canceled };
-    const stopped = @import("transport_driver.zig").step(&client.transport, fault.io(), &client_events, .{ .wait_max_ms = 0 });
+    const stopped = @import("transport_driver.zig").step(&client.transport, fault.io(), &client_events, .{ .wait_max = .fromMilliseconds(0) });
     try std.testing.expectEqual(error.Canceled, stopped.failure.?);
     try std.testing.expectEqual(@as(usize, 1), fault.send_calls);
     try std.testing.expectEqual(@as(u32, 0), stopped.progress.send_failures);
@@ -1028,9 +1030,10 @@ test "transport wait cancellation publishes existing events without flushing new
     _ = try node.transport.engine.dial(&node.transport.localAddress(), node.transport.peerId(), now);
     var events: [4]Engine.Event = undefined;
     const result = node.transport.advance(std.testing.io, .{ .now = now, .cancelled = true }, &events);
+    try std.testing.expect(result.cancelled);
     try std.testing.expectEqual(error.Canceled, result.failure.?);
     try std.testing.expectEqual(@as(usize, 1), result.progress.events);
     try std.testing.expectEqual(failed, events[0].closed.conn);
     try std.testing.expectEqual(@as(u32, 0), result.progress.datagrams_sent);
-    try std.testing.expect(node.transport.schedule().runnable);
+    try std.testing.expect(node.transport.schedule(1).runnable);
 }

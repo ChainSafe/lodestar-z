@@ -10,6 +10,7 @@
 //! - retainServing/releaseServing cover asynchronous host execution independently of stream lifetime.
 //! - cancel and connection events latch close intent. Raw callers drain cleanupPending before Router
 //!   work or buffer reuse; Service and pump provide their documented cleanup barriers.
+const time = @import("../time.zig");
 const std = @import("std");
 const codec = @import("codec.zig");
 const constants = @import("constants.zig");
@@ -141,12 +142,12 @@ const Settings = struct {
 
 pub const RequestOptions = struct {
     expected_chunks: ?u32 = null,
-    absolute_timeouts: AbsoluteTimeouts = .{},
+    timeouts: Timeouts = .{},
 
-    pub const AbsoluteTimeouts = struct {
-        negotiation_ms: u64 = 5_000,
-        request_ms: u64 = 5_000,
-        response_ms: u64 = 10_000,
+    pub const Timeouts = struct {
+        negotiation: std.Io.Duration = .fromMilliseconds(5_000),
+        request: std.Io.Duration = .fromMilliseconds(5_000),
+        response: std.Io.Duration = .fromMilliseconds(10_000),
     };
 };
 
@@ -438,9 +439,9 @@ pub fn request(
     const identity = engine.peerId(conn) orelse return error.StaleHandle;
     try self.validateTransportCapacity(engine);
     if (conn.index >= self.options.peers) return error.InvalidCapacity;
-    inline for (.{ "negotiation_ms", "request_ms", "response_ms" }) |field| {
-        const duration = @field(request_options.absolute_timeouts, field);
-        if (duration == 0 or duration > 60_000) return error.InvalidRequestOptions;
+    inline for (.{ "negotiation", "request", "response" }) |field| {
+        const duration = @field(request_options.timeouts, field);
+        if (duration.nanoseconds <= 0 or duration.nanoseconds > std.Io.Duration.fromSeconds(60).nanoseconds) return error.InvalidRequestOptions;
     }
     if (request_ssz.len > bounds.request_max) return error.RequestTooLarge;
     if (request_ssz.len < bounds.request_min) return error.RequestTooSmall;
@@ -457,7 +458,7 @@ pub fn request(
     const index = self.availableOutboundFor(which) orelse return error.SlotsExhausted;
     const slot = &self.outbound[index];
     assert(!slot.conn_link.linked);
-    const stream = router.beginReqRespTimed(engine, conn, which, now, request_options.absolute_timeouts.negotiation_ms) catch |err| {
+    const stream = router.beginReqRespTimed(engine, conn, which, now, time.durationMilliseconds(request_options.timeouts.negotiation)) catch |err| {
         return switch (err) {
             error.NegotiationTableFull => error.NegotiationTableFull,
             error.ProtocolDisabled => error.ProtocolDisabled,
@@ -471,7 +472,7 @@ pub fn request(
         .protocol = which,
         .request_ssz = request_ssz,
         .sink = sink,
-        .absolute_timeouts = request_options.absolute_timeouts,
+        .timeouts = request_options.timeouts,
         .protocol_chunks_max = request_ceiling,
         .chunks_max = chunks_max,
     }, now);
@@ -530,7 +531,7 @@ pub fn accept(
     slot.acceptPrepared(stream, ready, &accepted, self.request_fork, now);
     self.protocol_counters[@intFromEnum(which)].incoming +|= 1;
     std.log.scoped(.network_reqresp).debug("request_started direction=inbound request={d}:{d} connection={d}:{d} stream={d} method={s}", .{ index, slot.request.generation, stream.conn.index, stream.conn.generation, stream.id, @tagName(which) });
-    if (slot.admission.start_pending) std.log.scoped(.network_reqresp_errors).debug("request_start_wait request={d}:{d} connection={d}:{d} stream={d} method={s} due_in_ms={d}", .{ index, slot.request.generation, stream.conn.index, stream.conn.generation, stream.id, @tagName(which), slot.admission.eligible_ms - now.mono_ms });
+    if (slot.admission.start_pending) std.log.scoped(.network_reqresp_errors).debug("request_start_wait request={d}:{d} connection={d}:{d} stream={d} method={s} due_in_ms={d}", .{ index, slot.request.generation, stream.conn.index, stream.conn.generation, stream.id, @tagName(which), slot.admission.eligible_ms - now.millis() });
     // A stream that is already gone fails on the slot's first read.
     engine.bindStream(stream, .{ .owner = .reqresp_inbound, .row = index }) catch {};
     self.markReady(.inbound, index);
@@ -594,13 +595,16 @@ pub fn finish(self: *ReqResp, handle: RequestHandle, now: Now) bool {
     return true;
 }
 
-/// Hold execution capacity until asynchronous host work actually retires.
-pub fn retainServing(self: *ReqResp, handle: RequestHandle) bool {
+pub const ServingHandle = ServingPool.Handle;
+
+/// Holds execution capacity independently of the request. Does not extend payload borrows.
+/// Release the returned handle when host execution ends, even if the request already ended.
+pub fn retainServing(self: *ReqResp, handle: RequestHandle) ?ServingHandle {
     return self.serving.retain(handle);
 }
 
 /// A release may free serving capacity for a `.ready` slot.
-pub fn releaseServing(self: *ReqResp, handle: RequestHandle) bool {
+pub fn releaseServing(self: *ReqResp, handle: ServingHandle) bool {
     if (!self.serving.release(handle)) return false;
     self.admission.capacityReleased();
     return true;
@@ -758,7 +762,7 @@ pub fn schedule(self: *const ReqResp, capacities: Capacities) types.Schedule {
         .runnable = self.ready.len > 0 or self.closing.len > 0 or self.reported.len > 0 or
             (capacities.application > 0 and self.deliver[0].len > 0) or
             (capacities.control > 0 and self.deliver[1].len > 0) or self.admission.due(),
-        .deadline_ms = if (self.deadlines.peek()) |top| top.deadline else null,
+        .deadline = time.optionalMilliseconds(if (self.deadlines.peek()) |top| top.deadline else null),
     };
 }
 
@@ -859,8 +863,8 @@ pub fn complete(owner: *ReqResp, record: *RequestState, index: u16, event: Event
     if (!record.terminate(event)) return;
     owner.settleSlot(record.direction, index);
     const counts = &owner.protocol_counters[@intFromEnum(record.protocol)];
-    assert(now.mono_ms >= record.started_ms);
-    const duration_ms = now.mono_ms - record.started_ms;
+    assert(now.millis() >= record.started_ms);
+    const duration_ms = now.millis() - record.started_ms;
     if (event == .served and info.result_code != constants.result_success) {
         std.log.scoped(.network_reqresp_errors).debug("request_error_response request={d}:{d} connection={d}:{d} method={s} code={d} detail={s} chunks={d} elapsed_ms={d}", .{ index, record.generation, record.conn.index, record.conn.generation, @tagName(record.protocol), info.result_code, if (info.rejection) |err| @errorName(err) else "", record.chunks, duration_ms });
     } else if (event != .failed) std.log.scoped(.network_reqresp).debug("request_completed direction={s} request={d}:{d} connection={d}:{d} method={s} chunks={d} elapsed_ms={d}", .{ @tagName(record.direction), index, record.generation, record.conn.index, record.conn.generation, @tagName(record.protocol), record.chunks, duration_ms });
@@ -954,8 +958,8 @@ pub fn pump(self: *ReqResp, engine: *Engine, router: *Router, now: Now, outputs:
 /// one retires its slot or moves its key into the future. A slot re-marked while serviced
 /// waits for the next pump, behind the slots marked before it.
 fn advance(self: *ReqResp, engine: *Engine, router: *Router, now: Now) bool {
-    assert(now.mono_ms >= self.last_pump_ms or self.last_pump_ms == 0);
-    self.last_pump_ms = now.mono_ms;
+    assert(now.millis() >= self.last_pump_ms or self.last_pump_ms == 0);
+    self.last_pump_ms = now.millis();
     self.cleanupPending(engine, router);
     self.recycleDelivered();
     // The slots marked before this pump that are still on `ready`.
@@ -966,7 +970,7 @@ fn advance(self: *ReqResp, engine: *Engine, router: *Router, now: Now) bool {
     // deadline.
     for (0..marked + 2 * keyed + 1) |_| {
         if (serviced == self.options.work_per_pump_max) break;
-        const due = self.deadlines.popDue(now.mono_ms);
+        const due = self.deadlines.popDue(now.millis());
         const id: u32 = due orelse ready: {
             if (marked == 0) break;
             marked -= 1;
@@ -975,7 +979,7 @@ fn advance(self: *ReqResp, engine: *Engine, router: *Router, now: Now) bool {
         self.visits +|= 1;
         if (due != null and id >= self.outbound.len) {
             const slot = &self.inbound[id - self.outbound.len];
-            if (slot.request.running() and slot.state == .ready and now.mono_ms < slot.deadline(self).?) {
+            if (slot.request.running() and slot.state == .ready and now.millis() < slot.deadline(self).?) {
                 // Only its start or token wait ended.
                 self.admission.waitEnded(slot);
                 self.settle(id);
@@ -1071,10 +1075,10 @@ fn checkInvariants(self: *const ReqResp, engine: *const Engine, now: Now, exhaus
         const index: u16 = @intCast(if (direction == .outbound) id else id - self.outbound.len);
         // Admission, which runs after servicing, alone keys a slot due now: a token wait
         // that ends within this millisecond.
-        if (!exhausted) if (self.deadlines.get(id)) |key| if (key <= now.mono_ms) {
+        if (!exhausted) if (self.deadlines.get(id)) |key| if (key <= now.millis()) {
             assert(direction == .inbound);
             const slot = &self.inbound[index];
-            assert(slot.state == .ready and slot.admission.wait == .tokens and slot.admission.eligible_ms == now.mono_ms);
+            assert(slot.state == .ready and slot.admission.wait == .tokens and slot.admission.eligible_ms == now.millis());
         };
         if (direction == .inbound) self.admission.checkSlot(&self.inbound[index], index);
         if (!record.awaitingTerminal() or record.stream_owner != .protocol) continue;

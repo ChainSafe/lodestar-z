@@ -1,3 +1,4 @@
+const schedule_test_support = @import("../schedule_test_support.zig");
 const support = @import("test_support.zig");
 const std = @import("std");
 const Gossipsub = @import("Gossipsub.zig");
@@ -58,11 +59,11 @@ test "gossipsub readiness behind a partial turn stays queued and is generation c
     setup.forwardServer();
     try std.testing.expect(g.sessions.rows[real_peer].ready_link.linked);
     try std.testing.expectEqual(@as(usize, 0), support.pump(g, &setup.shared.pair.server, setup.shared.pair.now));
-    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), g.schedule().nextWakeup(setup.shared.pair.now.mono_ms));
+    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.millis()), schedule_test_support.wakeupMilliseconds(g.schedule(), setup.shared.pair.now.millis()));
     try std.testing.expectEqual(@as(usize, 1), support.pump(g, &setup.shared.pair.server, setup.shared.pair.now));
     try std.testing.expectEqualStrings("arrived behind a ready session", setup.serverMessages()[0].bytes);
     for (0..8) |_| {
-        if (support.sessionWakeup(g, setup.shared.pair.now) > setup.shared.pair.now.mono_ms) break;
+        if (support.sessionWakeup(g, setup.shared.pair.now) > setup.shared.pair.now.millis()) break;
         _ = support.pump(g, &setup.shared.pair.server, setup.shared.pair.now);
     }
     try std.testing.expect(!g.sessions.rows[real_peer].io.rx_ready);
@@ -71,7 +72,7 @@ test "gossipsub readiness behind a partial turn stays queued and is generation c
     stale.conn.generation += 1;
     g.streamReady(&setup.shared.pair.server, .{ .owner = .gossip_inbound, .row = real_peer }, stale, .{ .readable = true });
     try std.testing.expect(!g.sessions.rows[real_peer].io.rx_ready);
-    try std.testing.expect(support.sessionWakeup(g, setup.shared.pair.now) > setup.shared.pair.now.mono_ms);
+    try std.testing.expect(support.sessionWakeup(g, setup.shared.pair.now) > setup.shared.pair.now.millis());
 }
 
 test "gossipsub native write credit behind a ready session resumes and blocked writes quiesce" {
@@ -90,7 +91,7 @@ test "gossipsub native write credit behind a ready session resumes and blocked w
     _ = try g.publish(test_topic, payload, setup.shared.pair.now);
     for (0..512) |_| {
         setup.forwardClient();
-        if (support.sessionWakeup(g, setup.shared.pair.now) > setup.shared.pair.now.mono_ms) break;
+        if (support.sessionWakeup(g, setup.shared.pair.now) > setup.shared.pair.now.millis()) break;
         _ = support.pump(g, &setup.shared.pair.client, setup.shared.pair.now);
         try setup.shared.pair.pump();
     }
@@ -98,7 +99,7 @@ test "gossipsub native write credit behind a ready session resumes and blocked w
     try std.testing.expect(io.tx.data.count > 0);
     try std.testing.expect(!io.tx.ready);
     try std.testing.expect(io.tx.blocked_since != null);
-    try std.testing.expect(support.sessionWakeup(g, setup.shared.pair.now) > setup.shared.pair.now.mono_ms);
+    try std.testing.expect(support.sessionWakeup(g, setup.shared.pair.now) > setup.shared.pair.now.millis());
     const before = io.tx.data.next(&g.messages.store).?.cursor.sent;
     // A session added now is ready ahead of the writable edge the server's reads will grant.
     _ = support.addPeer(g, .{ .index = 77, .generation = 1 }, .v1_2).?;
@@ -110,7 +111,7 @@ test "gossipsub native write credit behind a ready session resumes and blocked w
     setup.forwardClient();
     try std.testing.expect(io.tx.ready and g.sessions.rows[index].ready_link.linked);
     _ = support.pump(g, &setup.shared.pair.client, setup.shared.pair.now);
-    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), g.schedule().nextWakeup(setup.shared.pair.now.mono_ms));
+    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.millis()), schedule_test_support.wakeupMilliseconds(g.schedule(), setup.shared.pair.now.millis()));
     _ = support.pump(g, &setup.shared.pair.client, setup.shared.pair.now);
     try std.testing.expect(io.tx.data.next(&g.messages.store).?.cursor.sent > before);
     g.connectionClosed(setup.shared.handles.client);

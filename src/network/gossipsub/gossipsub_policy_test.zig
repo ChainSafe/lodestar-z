@@ -41,7 +41,7 @@ test "gossip accepts a full namespace subscription transition in one RPC" {
     for (0..128) |_| {
         var count: usize = 0;
         var items: usize = 16;
-        if (try support.processRpc(&g, peer.index, .{ .mono_ms = 1, .unix_s = 1 }, &count, &items)) break;
+        if (try support.processRpc(&g, peer.index, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 1 }), &count, &items)) break;
     }
     try std.testing.expectEqual(@as(usize, 0), g.resourceSnapshot().remote_subscriptions);
     _ = g.sessions.finishFrame(io);
@@ -65,7 +65,7 @@ test "gossipsub IHAVE security ignores unknown and unsubscribed topics through R
         io.startRpc(writer.written());
         var items: usize = 128;
         var count: usize = 0;
-        try std.testing.expect(try @import("test_support.zig").processRpc(&g, peer.index, .{ .mono_ms = 1, .unix_s = 1 }, &count, &items));
+        try std.testing.expect(try @import("test_support.zig").processRpc(&g, peer.index, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 1 }), &count, &items));
         try std.testing.expectEqual(@as(usize, @intFromBool(std.mem.eql(u8, name, subscribed))), g.recovery.len);
         try std.testing.expect(!g.sessions.finishFrame(io));
     }
@@ -81,7 +81,7 @@ test "gossip policy reconnect retains authenticated penalty" {
         .address = .unspecified,
         .direction = .inbound,
     };
-    const now: Now = .{ .mono_ms = 1, .unix_s = 0 };
+    const now: Now = Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 });
     const first = g.addPeer(.{ .index = 0, .generation = 1 }, &metadata, now).admitted;
     const original = g.sessions.rows[first.index].logical;
     g.peers.scores.penalize(original.index, 20);
@@ -109,7 +109,7 @@ test "gossip policy GRAFT rejects negative peers and excludes direct peers" {
     try support.subscribe(&g, topic_str);
     const topic = g.overlay.findTopic(topic_str).?;
     support.penalize(&g, conn, 7);
-    support.control(&g, peer.index, .{ .graft = topic_str }, .{ .mono_ms = 1, .unix_s = 0 });
+    support.control(&g, peer.index, .{ .graft = topic_str }, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
     try std.testing.expectEqual(@as(usize, 0), g.overlay.mesh(topic).count());
     g.peers.scores.rows[g.sessions.rows[peer.index].logical.index].behaviour = 0;
     support.penalize(&g, conn, 0);
@@ -135,7 +135,7 @@ test "gossip policy combined transport calls respect one shared peer allowance" 
         var write_turns: usize = 0;
         for (0..8) |_| {
             // One empty frame each way: queued output and a readable edge on the same session.
-            try std.testing.expect(g.sessions.rows[peer].io.tx.inject(&.{0}, setup.shared.pair.now.mono_ms));
+            try std.testing.expect(g.sessions.rows[peer].io.tx.inject(&.{0}, setup.shared.pair.now.millis()));
             g.settle(peer);
             try std.testing.expectEqual(@as(usize, 1), try setup.shared.pair.server.write(setup.serverStream(), &.{0}, false));
             try setup.shared.pair.pump();
@@ -149,12 +149,12 @@ test "gossip policy combined transport calls respect one shared peer allowance" 
         }
         try std.testing.expect(read_turns > 0 and write_turns > 0);
         for (0..32) |_| {
-            if (support.sessionWakeup(g, setup.shared.pair.now) > setup.shared.pair.now.mono_ms) break;
+            if (support.sessionWakeup(g, setup.shared.pair.now) > setup.shared.pair.now.millis()) break;
             const turn = @import("test_support.zig").pumpTurn(g, &setup.shared.pair.client, setup.shared.pair.now);
             try std.testing.expect(global - turn.budget.calls <= 1);
         }
         try std.testing.expect(!g.sessions.rows[peer].io.tx.pending());
-        try std.testing.expect(support.sessionWakeup(g, setup.shared.pair.now) > setup.shared.pair.now.mono_ms);
+        try std.testing.expect(support.sessionWakeup(g, setup.shared.pair.now) > setup.shared.pair.now.millis());
     }
 }
 
@@ -162,7 +162,7 @@ test "gossip policy sent promise survives reconnect without token rearming" {
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
     defer g.deinit();
     const metadata: peers_mod.Metadata = .{ .identity = .{ .bytes = [_]u8{1} ** @import("../wire/peer_id.zig").length }, .address = .unspecified, .direction = .inbound };
-    const now: Now = .{ .mono_ms = 1, .unix_s = 0 };
+    const now: Now = Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 });
     const conn: Handle = .{ .index = 0, .generation = 1 };
     const first = g.addPeer(conn, &metadata, now).admitted;
     const ref = g.sessions.rows[first.index].logical;
@@ -173,7 +173,7 @@ test "gossip policy sent promise survives reconnect without token rearming" {
     const next = g.addPeer(.{ .index = 0, .generation = 2 }, &metadata, now).admitted;
     g.recovery.controlSent(g.sessions.rows[next.index].conn, 9, g.options.iwant_followup_ms, 2000);
     try std.testing.expectEqual(@as(?u64, 3010), g.recovery.batches[0].expiry);
-    Gossipsub.finishPump(&g, .{ .mono_ms = 3010, .unix_s = 0 });
+    Gossipsub.finishPump(&g, Now.fromMilliseconds(.{ .mono_ms = 3010, .unix_s = 0 }));
     try std.testing.expectEqual(@as(u64, 1), g.counters.broken_promises);
     try std.testing.expectEqual(@as(u32, 0), g.peers.rows[ref.index].pins);
 }
@@ -182,7 +182,7 @@ test "gossip policy duplicate connections preserve one logical owner and direct 
     var g = try support.init(std.testing.allocator, .{ .random_seed = 1 });
     defer g.deinit();
     var metadata: peers_mod.Metadata = .{ .identity = .{ .bytes = [_]u8{1} ** @import("../wire/peer_id.zig").length }, .address = .unspecified, .direction = .outbound };
-    const now: Now = .{ .mono_ms = 1, .unix_s = 0 };
+    const now: Now = Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 });
     const conn: Handle = .{ .index = 0, .generation = 1 };
     const first = g.addPeer(conn, &metadata, now).admitted;
     const second: Handle = .{ .index = 1, .generation = 1 };
@@ -232,7 +232,7 @@ test "gossip policy topic reuse waits for attribution and preserves copied event
     g.connectionClosed(conn);
     g.overlay.reclaimTopic(&g.overlayContext(g.last_now_ms), &g.messages.topicPins(), topic);
     try std.testing.expect(g.overlay.rows[topic].active);
-    _ = g.report(event.handle, .ignore, .{ .mono_ms = 2, .unix_s = 0 });
+    _ = g.report(event.handle, .ignore, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 }));
     g.messages.validation.expire(&g.messages.store, &g.peers, 30_002);
     g.last_now_ms = 30_002;
     g.overlay.reclaimTopic(&g.overlayContext(g.last_now_ms), &g.messages.topicPins(), topic);
@@ -273,7 +273,7 @@ test "gossip policy unsent subscriptions cannot pin retired topics indefinitely"
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
     try support.subscribe(&g, name);
     try support.unsubscribe(&g, name);
-    _ = @import("test_support.zig").pump(&g, &pair.server, .{ .mono_ms = 11, .unix_s = 0 });
+    _ = @import("test_support.zig").pump(&g, &pair.server, Now.fromMilliseconds(.{ .mono_ms = 11, .unix_s = 0 }));
     try std.testing.expect(g.sessions.find(conn) == null);
     try std.testing.expectEqual(@as(u64, 1), g.counters.local_pressure_resets);
     const topic = g.overlay.findTopic(name).?;
@@ -304,7 +304,7 @@ test "gossip policy review I4 heartbeat fanout and advertisements share one snap
         _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), peer.index, second_name, true);
         g.sessions.rows[peer.index].outbound = .{ .live = .{ .stream = .{ .conn = g.sessions.rows[peer.index].conn, .id = 2, .slot = 0 }, .version = .v1_2 } };
     }
-    const start: Now = .{ .mono_ms = 1, .unix_s = 0 };
+    const start: Now = Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 });
     _ = try g.publish(first_name, "first", start);
     _ = try g.publish(second_name, "second", start);
     support.heartbeat(&g, start);
@@ -322,29 +322,29 @@ test "gossip policy review I4 heartbeat fanout and advertisements share one snap
     for (g.sessions.rows) |*peer| peer.io.tx.cancelStream(&g.messages.store);
     g.last_now_ms = 2;
     g.opportunistic_at = 2;
-    support.heartbeat(&g, .{ .mono_ms = 2, .unix_s = 0 });
+    support.heartbeat(&g, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 }));
     try std.testing.expect(!g.cycle.opportunistic);
     try std.testing.expectEqual(epoch, g.cycle.epoch);
-    Gossipsub.finishPump(&g, .{ .mono_ms = 2, .unix_s = 0 });
+    Gossipsub.finishPump(&g, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 }));
     try std.testing.expect(g.overlay.fanoutMembers(second).isSet(retained));
     try std.testing.expectEqual(@as(usize, 8), g.overlay.fanoutMembers(second).count());
     try std.testing.expectEqual(@as(usize, 1), g.sessions.rows[advertised].io.tx.control.count);
     try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[retained].io.tx.control.count);
-    Gossipsub.finishPump(&g, .{ .mono_ms = 3, .unix_s = 0 });
+    Gossipsub.finishPump(&g, Now.fromMilliseconds(.{ .mono_ms = 3, .unix_s = 0 }));
     try std.testing.expect(!g.cycle.isActive());
     try std.testing.expectEqual(epoch, g.cycle.epoch);
     for (g.sessions.rows) |*peer| peer.io.tx.cancelStream(&g.messages.store);
     g.last_now_ms = 701;
-    support.heartbeat(&g, .{ .mono_ms = 701, .unix_s = 0 });
-    Gossipsub.finishPump(&g, .{ .mono_ms = 701, .unix_s = 0 });
-    Gossipsub.finishPump(&g, .{ .mono_ms = 702, .unix_s = 0 });
+    support.heartbeat(&g, Now.fromMilliseconds(.{ .mono_ms = 701, .unix_s = 0 }));
+    Gossipsub.finishPump(&g, Now.fromMilliseconds(.{ .mono_ms = 701, .unix_s = 0 }));
+    Gossipsub.finishPump(&g, Now.fromMilliseconds(.{ .mono_ms = 702, .unix_s = 0 }));
     try std.testing.expect(!g.overlay.fanoutMembers(second).isSet(retained));
     try std.testing.expectEqual(@as(usize, 7), g.overlay.fanoutMembers(second).count());
     try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[advertised].io.tx.control.count);
     try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[retained].io.tx.control.count);
     const live = g.overlay.fanoutMembers(second).findFirstSet().?;
     g.peers.scores.penalize(g.sessions.rows[@intCast(live)].logical.index, 50);
-    _ = try g.publish(second_name, "live publish", .{ .mono_ms = 703, .unix_s = 0 });
+    _ = try g.publish(second_name, "live publish", Now.fromMilliseconds(.{ .mono_ms = 703, .unix_s = 0 }));
     try std.testing.expect(!g.overlay.fanoutMembers(second).isSet(live));
 }
 
@@ -471,13 +471,13 @@ test "publication subscribed fanout expires through owner maintenance" {
     const t = g.overlay.findTopic(name).?;
     _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), p.index, name, true);
     g.sessions.rows[p.index].outbound = .{ .live = .{ .stream = .{ .conn = conn, .id = 2, .slot = 0 }, .version = .v1_2 } };
-    _ = try g.publish(name, "fanout expiry", .{ .mono_ms = 0, .unix_s = 0 });
+    _ = try g.publish(name, "fanout expiry", Now.fromMilliseconds(.{ .mono_ms = 0, .unix_s = 0 }));
     try std.testing.expectEqual(@as(usize, 1), g.overlay.fanoutMembers(t).count());
-    support.heartbeat(&g, .{ .mono_ms = 59_999, .unix_s = 0 });
-    Gossipsub.finishPump(&g, .{ .mono_ms = 59_999, .unix_s = 0 });
+    support.heartbeat(&g, Now.fromMilliseconds(.{ .mono_ms = 59_999, .unix_s = 0 }));
+    Gossipsub.finishPump(&g, Now.fromMilliseconds(.{ .mono_ms = 59_999, .unix_s = 0 }));
     try std.testing.expectEqual(@as(usize, 1), g.overlay.fanoutMembers(t).count());
-    support.heartbeat(&g, .{ .mono_ms = 60_000, .unix_s = 0 });
-    Gossipsub.finishPump(&g, .{ .mono_ms = 60_000, .unix_s = 0 });
+    support.heartbeat(&g, Now.fromMilliseconds(.{ .mono_ms = 60_000, .unix_s = 0 }));
+    Gossipsub.finishPump(&g, Now.fromMilliseconds(.{ .mono_ms = 60_000, .unix_s = 0 }));
     try std.testing.expectEqual(@as(usize, 0), g.overlay.fanoutMembers(t).count());
     _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), p.index, name, false);
     g.sessions.rows[p.index].io.tx.cancelStream(&g.messages.store);
@@ -485,7 +485,7 @@ test "publication subscribed fanout expires through owner maintenance" {
     const next = @import("test_support.zig").addPeer(&g, next_conn, .v1_2).?;
     _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), next.index, name, true);
     g.sessions.rows[next.index].outbound = .{ .live = .{ .stream = .{ .conn = next_conn, .id = 2, .slot = 0 }, .version = .v1_2 } };
-    const result = try g.publish(name, "fresh fanout", .{ .mono_ms = 60_001, .unix_s = 0 });
+    const result = try g.publish(name, "fresh fanout", Now.fromMilliseconds(.{ .mono_ms = 60_001, .unix_s = 0 }));
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 1, .queued = 1 }, result);
     try std.testing.expectEqual(@as(usize, 1), g.overlay.fanoutMembers(t).count());
     try std.testing.expect(g.overlay.fanoutMembers(t).isSet(next.index));
@@ -510,7 +510,7 @@ test "local intent reclaimed history answers actual IWANT with original wire top
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
     const replacement = "/eth2/01020304/voluntary_exit/ssz_snappy";
     for (g.overlay.rows[1..]) |*row| row.generation = std.math.maxInt(u64);
-    const now: Now = .{ .mono_ms = 1, .unix_s = 0 };
+    const now: Now = Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 });
     _ = try g.publish(name, "original payload", now);
     const id = topic_mod.validMessageId(name, "original payload", .{});
     const message = g.messages.history.message(g.messages.history.get(&g.messages.store, id).?);
@@ -522,7 +522,7 @@ test "local intent reclaimed history answers actual IWANT with original wire top
     protobuf.beginIwantRpc(&writer, 1, id.len);
     protobuf.writeIwantId(&writer, &id);
     var reader = protobuf.RpcReader.init(writer.written());
-    support.control(&g, peer.index, .{ .iwant = (try reader.next()).?.iwant }, .{ .mono_ms = g.last_now_ms, .unix_s = 0 });
+    support.control(&g, peer.index, .{ .iwant = (try reader.next()).?.iwant }, Now.fromMilliseconds(.{ .mono_ms = g.last_now_ms, .unix_s = 0 }));
     const io = &g.sessions.rows[peer.index].io;
     try std.testing.expectEqual(@as(usize, 1), io.tx.data.count);
     try std.testing.expectEqual(message, io.tx.data.next(&g.messages.store).?.message);
@@ -558,13 +558,13 @@ test "gossip advertisements sample the whole burst independently for each recipi
     for (0..512) |i| {
         var bytes: [8]u8 = undefined;
         std.mem.writeInt(u64, &bytes, i, .little);
-        _ = try g.publish(name, &bytes, .{ .mono_ms = 1, .unix_s = 0 });
+        _ = try g.publish(name, &bytes, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
     }
     for (g.sessions.rows) |*peer| peer.io.tx.cancelStream(&g.messages.store);
     g.overlay.rows[t].fanout = .initEmpty();
     const context = g.overlayContext(1);
     g.cycle.begin(context.sessions, context.peers, context.now, false);
-    Gossipsub.finishPump(&g, .{ .mono_ms = context.now, .unix_s = 0 });
+    Gossipsub.finishPump(&g, Now.fromMilliseconds(.{ .mono_ms = context.now, .unix_s = 0 }));
     const first = g.sessions.rows[0].io.tx.segment(&g.messages.store);
     const second = g.sessions.rows[1].io.tx.segment(&g.messages.store);
     try std.testing.expect(first.len > 0 and second.len > 0);
@@ -591,7 +591,7 @@ test "gossip disconnect classifies active mesh score before pruning and records 
         defer g.deinit();
         const conn: Handle = .{ .index = 0, .generation = 1 };
         const metadata: peers_mod.Metadata = .{ .identity = .{ .bytes = @splat(1) }, .address = .unspecified, .direction = .inbound };
-        const first = g.addPeer(conn, &metadata, .{ .mono_ms = 0, .unix_s = 0 }).admitted;
+        const first = g.addPeer(conn, &metadata, Now.fromMilliseconds(.{ .mono_ms = 0, .unix_s = 0 })).admitted;
         const ref = g.sessions.rows[first.index].logical;
         const name = "/eth2/01020304/beacon_block/ssz_snappy";
         try support.subscribe(&g, name);
@@ -610,7 +610,7 @@ test "gossip disconnect classifies active mesh score before pruning and records 
         const counters = g.peers.scores.topics[@as(usize, ref.index) * g.overlay.rows.len + topic];
         try std.testing.expect(!counters.in_mesh);
         try std.testing.expectEqual(@as(f64, if (elapsed > 40) 0 else 4), counters.mesh_failures);
-        const second = g.addPeer(.{ .index = 0, .generation = 2 }, &metadata, .{ .mono_ms = elapsed + 1, .unix_s = 0 }).admitted;
+        const second = g.addPeer(.{ .index = 0, .generation = 2 }, &metadata, Now.fromMilliseconds(.{ .mono_ms = elapsed + 1, .unix_s = 0 })).admitted;
         try std.testing.expectEqual(ref, g.sessions.rows[second.index].logical);
         try std.testing.expectEqual(@as(f64, if (elapsed > 40) 0 else -4), g.peers.score(ref, elapsed + 1));
     }

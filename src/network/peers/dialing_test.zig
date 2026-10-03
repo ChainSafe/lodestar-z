@@ -542,5 +542,5 @@ test "peer dial scheduling observes dirty intents without applying them" {
     queue.refresh(&catalog, 100);
     try std.testing.expectEqual(@as(u32, 0), catalog.dial.dirty_count);
     try std.testing.expect(!queue.schedule(&catalog, 0).runnable);
-    try std.testing.expect(queue.schedule(&catalog, 1).due(100));
+    try std.testing.expect(queue.schedule(&catalog, 1).due(@import("../time.zig").milliseconds(100)));
 }

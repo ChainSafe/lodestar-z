@@ -1,4 +1,5 @@
 const std = @import("std");
+const Now = @import("../types.zig").Now;
 const RequestIO = @import("RequestIO.zig");
 const rr = @import("ReqResp.zig");
 const Protocol = @import("protocol.zig").Protocol;
@@ -65,14 +66,14 @@ test "inbound admission receive exhaustion and selected handoff checks precede t
             .leftover = leftover,
             .fin = false,
         }, pair.now));
-        try std.testing.expectEqual(pair.now.mono_ms, owner.admission.limiter.startAt(&identity, true, pair.now.mono_ms));
+        try std.testing.expectEqual(pair.now.millis(), owner.admission.limiter.startAt(&identity, true, pair.now.millis()));
         const third = try owner.accept(&pair.server, try inboundStream(&pair, handles.client), .{
             .protocol = .{ .reqresp = .metadata_v2 },
             .leftover = &.{},
             .fin = false,
         }, pair.now);
         try std.testing.expect(!owner.inbound[third.index].admission.start_pending);
-        try std.testing.expectEqual(pair.now.mono_ms + 500, owner.admission.limiter.startAt(&identity, true, pair.now.mono_ms));
+        try std.testing.expectEqual(pair.now.millis() + 500, owner.admission.limiter.startAt(&identity, true, pair.now.millis()));
     }
 }
 
@@ -113,10 +114,10 @@ test "inbound admission delayed decode and equal timestamps retain acceptance th
     // The older request decodes after the newer one has joined admission.
     deferStart(&owner, late, 10);
     deferStart(&owner, early, 10);
-    owner.admission.promoteReady(&owner, .{ .mono_ms = 10, .unix_s = 0 });
+    owner.admission.promoteReady(&owner, Now.fromMilliseconds(.{ .mono_ms = 10, .unix_s = 0 }));
     try std.testing.expect(owner.inbound[early].request.pendingEvent() != null);
     try std.testing.expect(owner.inbound[late].admission.start_pending);
-    owner.admission.promoteReady(&owner, .{ .mono_ms = 10, .unix_s = 0 });
+    owner.admission.promoteReady(&owner, Now.fromMilliseconds(.{ .mono_ms = 10, .unix_s = 0 }));
     try std.testing.expect(owner.inbound[late].request.pendingEvent() != null);
 
     var ties = try rr.init(std.testing.allocator, options(1));
@@ -127,7 +128,7 @@ test "inbound admission delayed decode and equal timestamps retain acceptance th
     deferStart(&ties, high, 20);
     deferStart(&ties, low, 20);
     ties.admission.peer_cursors[0].admission[0] = @intCast(high);
-    ties.admission.promoteReady(&ties, .{ .mono_ms = 20, .unix_s = 0 });
+    ties.admission.promoteReady(&ties, Now.fromMilliseconds(.{ .mono_ms = 20, .unix_s = 0 }));
     try std.testing.expect(ties.inbound[low].request.pendingEvent() != null);
     try std.testing.expect(ties.inbound[high].admission.start_pending);
 }
@@ -141,7 +142,7 @@ test "inbound admission keeps an incomplete older request out of the ready start
     deferStart(&owner, early, 2);
     const complete = readySlot(&owner, 0, .blob_sidecars_by_root_v1, 0, identity, 2);
     deferStart(&owner, complete, 2);
-    owner.admission.promoteReady(&owner, .{ .mono_ms = 2, .unix_s = 0 });
+    owner.admission.promoteReady(&owner, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 }));
     try std.testing.expect(owner.inbound[complete].request.pendingEvent() != null);
     try std.testing.expect(owner.inbound[early].admission.start_pending);
 }
@@ -156,9 +157,9 @@ test "inbound admission wide costs keep incremental credit and share identity qu
     try std.testing.expectEqual(.allowed, owner.admission.limiter.take(&identity, .blocks_by_root_v2, 4, .phase0, 0));
     owner.settleSlot(.inbound, large);
     owner.settleSlot(.inbound, small);
-    owner.admission.promoteReady(&owner, .{ .mono_ms = 0, .unix_s = 0 });
+    owner.admission.promoteReady(&owner, Now.fromMilliseconds(.{ .mono_ms = 0, .unix_s = 0 }));
     for (1..5) |installment| {
-        const now: types.Now = .{ .mono_ms = installment * 250, .unix_s = 0 };
+        const now: types.Now = Now.fromMilliseconds(.{ .mono_ms = installment * 250, .unix_s = 0 });
         owner.admission.waitEnded(&owner.inbound[large]);
         if (owner.inbound[small].state == .ready) owner.admission.waitEnded(&owner.inbound[small]);
         owner.admission.promoteReady(&owner, now);
@@ -170,7 +171,7 @@ test "inbound admission wide costs keep incremental credit and share identity qu
     }
     try std.testing.expectEqual(@as(u128, std.math.maxInt(u64)) * 2, owner.inbound[large].admission.cost);
     owner.admission.waitEnded(&owner.inbound[large]);
-    owner.admission.promoteReady(&owner, .{ .mono_ms = 1250, .unix_s = 0 });
+    owner.admission.promoteReady(&owner, Now.fromMilliseconds(.{ .mono_ms = 1250, .unix_s = 0 }));
     try std.testing.expectEqual(@as(u128, 4), owner.inbound[large].admission.paid);
     try std.testing.expect(owner.inbound[large].request.pendingEvent() != null);
 }
@@ -183,6 +184,7 @@ test "inbound admission cancellation removes each wait without refunding or spin
         const identity: PeerId = .{ .bytes = @splat(4) };
         const index = readySlot(&owner, 0, .blocks_by_root_v2, 0, identity, 0);
         const slot = &owner.inbound[index];
+        var serving: ?rr.ServingHandle = null;
         const holder: rr.RequestHandle = .{ .direction = .inbound, .index = index + 1, .generation = 1 };
         switch (wait) {
             .start => {
@@ -197,23 +199,23 @@ test "inbound admission cancellation removes each wait without refunding or spin
                 owner.serving.per_peer_max = 1;
                 const execution = owner.serving.available(&identity, false).?;
                 _ = owner.serving.acquire(execution, holder, &identity, false);
-                try std.testing.expect(owner.retainServing(holder));
+                serving = owner.retainServing(holder) orelse return error.TestUnexpectedResult;
                 owner.serving.retire(execution);
             },
         }
         owner.settleSlot(.inbound, index);
-        owner.admission.promoteReady(&owner, .{ .mono_ms = 0, .unix_s = 0 });
+        owner.admission.promoteReady(&owner, Now.fromMilliseconds(.{ .mono_ms = 0, .unix_s = 0 }));
         try std.testing.expectEqualStrings(@tagName(wait), @tagName(slot.admission.wait));
         if (wait == .tokens) try std.testing.expectEqual(@as(u128, 1), slot.admission.paid);
         const start_due = owner.admission.limiter.startAt(&identity, false, 0);
         const tokens_due = owner.admission.limiter.eligibleAt(&identity, .blocks_by_root_v2, 1, .phase0, 0);
-        try std.testing.expect(owner.cancel(slot.request.handle(index), .{ .mono_ms = 0, .unix_s = 0 }));
-        if (wait == .serving) try std.testing.expect(owner.releaseServing(holder));
+        try std.testing.expect(owner.cancel(slot.request.handle(index), Now.fromMilliseconds(.{ .mono_ms = 0, .unix_s = 0 })));
+        if (wait == .serving) try std.testing.expect(owner.releaseServing(serving.?));
         try std.testing.expectEqual(start_due, owner.admission.limiter.startAt(&identity, false, 0));
         try std.testing.expectEqual(tokens_due, owner.admission.limiter.eligibleAt(&identity, .blocks_by_root_v2, 1, .phase0, 0));
         try std.testing.expect(!owner.admission.due());
         const visits = owner.visits;
-        for (0..32) |_| owner.admission.promoteReady(&owner, .{ .mono_ms = 1000, .unix_s = 0 });
+        for (0..32) |_| owner.admission.promoteReady(&owner, Now.fromMilliseconds(.{ .mono_ms = 1000, .unix_s = 0 }));
         try std.testing.expectEqual(visits, owner.visits);
         try std.testing.expectEqual(@as(usize, 0), owner.resourceSnapshot().serving_occupied);
         try std.testing.expectEqual(@as(u32, 0), owner.admission.ready[0].len);

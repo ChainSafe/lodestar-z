@@ -1,3 +1,4 @@
+const schedule_test_support = @import("../schedule_test_support.zig");
 const Catalog = @import("catalog.zig").Catalog;
 const std = @import("std");
 const mod = @import("dialing.zig");
@@ -46,5 +47,5 @@ pub fn expire(queue: *@import("dialing.zig").Dialing, catalog: *Catalog, now_ms:
 /// Refreshes pending mutations before observing the next timer in driver-style tests.
 pub fn refreshAndWakeup(dialing: *mod.Dialing, catalog: *Catalog, now_ms: u64, capacity: usize) ?u64 {
     dialing.refresh(catalog, now_ms);
-    return dialing.schedule(catalog, capacity).nextWakeup(now_ms);
+    return schedule_test_support.wakeupMilliseconds(dialing.schedule(catalog, capacity), now_ms);
 }

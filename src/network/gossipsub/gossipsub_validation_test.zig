@@ -1,3 +1,4 @@
+const Now = @import("../types.zig").Now;
 const support = @import("test_support.zig");
 const std = @import("std");
 const Gossipsub = @import("Gossipsub.zig");
@@ -70,7 +71,7 @@ test "gossipsub prunes a peer whose messages are rejected" {
 
     // the server's score for the client is now negative and the heartbeat prunes it
     const client_index = setup.shared.server.gossipsub.sessions.find(setup.shared.handles.server).?;
-    try std.testing.expect(setup.shared.server.gossipsub.peers.score(.{ .index = client_index, .generation = setup.shared.server.gossipsub.peers.rows[client_index].generation }, setup.shared.pair.now.mono_ms) < 0);
+    try std.testing.expect(setup.shared.server.gossipsub.peers.score(.{ .index = client_index, .generation = setup.shared.server.gossipsub.peers.rows[client_index].generation }, setup.shared.pair.now.millis()) < 0);
     setup.shared.pair.advance(constants_heartbeat + 100);
     rounds = 0;
     while (rounds < 10) : (rounds += 1) try setup.pumpOnce();
@@ -105,9 +106,9 @@ test "gossipsub credits first delivery only after the host accepts" {
 
     // receiving the message must not credit the sender; only the host's accept does
     const client_index = setup.shared.server.gossipsub.sessions.find(setup.shared.handles.server).?;
-    const before = setup.shared.server.gossipsub.peers.score(.{ .index = client_index, .generation = setup.shared.server.gossipsub.peers.rows[client_index].generation }, setup.shared.pair.now.mono_ms);
+    const before = setup.shared.server.gossipsub.peers.score(.{ .index = client_index, .generation = setup.shared.server.gossipsub.peers.rows[client_index].generation }, setup.shared.pair.now.millis());
     _ = setup.shared.server.gossipsub.report(handle.?, .accept, setup.shared.pair.now);
-    const after = setup.shared.server.gossipsub.peers.score(.{ .index = client_index, .generation = setup.shared.server.gossipsub.peers.rows[client_index].generation }, setup.shared.pair.now.mono_ms);
+    const after = setup.shared.server.gossipsub.peers.score(.{ .index = client_index, .generation = setup.shared.server.gossipsub.peers.rows[client_index].generation }, setup.shared.pair.now.millis());
     try std.testing.expect(after > before);
 }
 
@@ -146,7 +147,7 @@ test "gossipsub uses configured message IDs on publish and wire receive" {
         for (0..10) |_| try setup.pumpOnce();
         _ = try setup.shared.client.gossipsub.publish(topic, "hello", setup.shared.pair.now);
         const valid = idFromHex(vector.valid);
-        try std.testing.expect(setup.shared.client.gossipsub.messages.seen.contains(valid, setup.shared.pair.now.mono_ms));
+        try std.testing.expect(setup.shared.client.gossipsub.messages.seen.contains(valid, setup.shared.pair.now.millis()));
         var received = false;
         for (0..20) |_| {
             try setup.pumpOnce();
@@ -171,7 +172,7 @@ test "gossipsub uses configured message IDs on publish and wire receive" {
                 try setup.shared.pair.client.write(setup.clientStream(), wire, false),
             );
             for (0..4) |_| try setup.pumpOnce();
-            try std.testing.expect(setup.shared.server.gossipsub.messages.seen.contains(idFromHex(expected), setup.shared.pair.now.mono_ms));
+            try std.testing.expect(setup.shared.server.gossipsub.messages.seen.contains(idFromHex(expected), setup.shared.pair.now.millis()));
         }
     }
 }
@@ -191,11 +192,11 @@ test "gossipsub tombstones suppress Seen eviction replays and expire for natural
     try std.testing.expectEqual(@as(usize, 0), setup.shared.server.gossipsub.messages.store.used_entries);
     _ = try setup.shared.server.gossipsub.publish(test_topic, "B", setup.shared.pair.now);
     const id = topic_mod.validMessageId(test_topic, "A", .{});
-    try std.testing.expect(!setup.shared.server.gossipsub.messages.wants(id, setup.shared.pair.now.mono_ms));
+    try std.testing.expect(!setup.shared.server.gossipsub.messages.wants(id, setup.shared.pair.now.millis()));
     const suppressed = try publishAdmissionA(&setup);
     try std.testing.expectEqual(@as(usize, 0), suppressed.count);
     setup.shared.pair.advance(100);
-    try std.testing.expect(setup.shared.server.gossipsub.messages.wants(id, setup.shared.pair.now.mono_ms));
+    try std.testing.expect(setup.shared.server.gossipsub.messages.wants(id, setup.shared.pair.now.millis()));
     const second = try publishAdmissionA(&setup);
     try std.testing.expectEqual(@as(usize, 1), second.count);
     const current = second.handle.?;
@@ -203,7 +204,7 @@ test "gossipsub tombstones suppress Seen eviction replays and expire for natural
     for (0..8) |i| {
         const payload = [_]u8{@as(u8, @intCast(i)) + 'C'};
         _ = try setup.shared.server.gossipsub.publish(test_topic, &payload, setup.shared.pair.now);
-        try std.testing.expect(!setup.shared.server.gossipsub.messages.seen.contains(id, setup.shared.pair.now.mono_ms));
+        try std.testing.expect(!setup.shared.server.gossipsub.messages.seen.contains(id, setup.shared.pair.now.millis()));
         const duplicate = try publishAdmissionA(&setup);
         try std.testing.expectEqual(@as(usize, 0), duplicate.count);
         var pending: usize = 0;
@@ -241,19 +242,19 @@ test "gossipsub pending validation survives history churn and report publish eve
     for (0..20) |i| {
         var bytes: [8]u8 = undefined;
         std.mem.writeInt(u64, &bytes, i, .little);
-        _ = try g.publish(topic, &bytes, .{ .mono_ms = 2, .unix_s = 1 });
+        _ = try g.publish(topic, &bytes, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 1 }));
         @import("test_support.zig").ageHistory(&g);
     }
     try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, peer.index, "pending", 3));
-    try std.testing.expectEqual(ReportOutcome{ .applied = .ignore }, g.report(event.handle, .ignore, .{ .mono_ms = 4, .unix_s = 1 }));
-    _ = try g.publish("/eth2/01020304/voluntary_exit/ssz_snappy", "reuse", .{ .mono_ms = 5, .unix_s = 1 });
+    try std.testing.expectEqual(ReportOutcome{ .applied = .ignore }, g.report(event.handle, .ignore, Now.fromMilliseconds(.{ .mono_ms = 4, .unix_s = 1 })));
+    _ = try g.publish("/eth2/01020304/voluntary_exit/ssz_snappy", "reuse", Now.fromMilliseconds(.{ .mono_ms = 5, .unix_s = 1 }));
     try std.testing.expectEqualStrings("pending", event.bytes);
     try std.testing.expectEqualStrings(topic, event.topic);
-    try std.testing.expectEqual(ReportOutcome.already_resolved, g.report(event.handle, .accept, .{ .mono_ms = 6, .unix_s = 1 }));
+    try std.testing.expectEqual(ReportOutcome.already_resolved, g.report(event.handle, .accept, Now.fromMilliseconds(.{ .mono_ms = 6, .unix_s = 1 })));
     try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, peer.index, "expires", 7));
     const expires = inbox.last().handle;
-    try std.testing.expectEqual(ReportOutcome.expired, g.report(expires, .accept, .{ .mono_ms = 30_007, .unix_s = 1 }));
-    try std.testing.expectEqual(ReportOutcome.stale_handle, g.report(expires, .accept, .{ .mono_ms = 60_007, .unix_s = 1 }));
+    try std.testing.expectEqual(ReportOutcome.expired, g.report(expires, .accept, Now.fromMilliseconds(.{ .mono_ms = 30_007, .unix_s = 1 })));
+    try std.testing.expectEqual(ReportOutcome.stale_handle, g.report(expires, .accept, Now.fromMilliseconds(.{ .mono_ms = 60_007, .unix_s = 1 })));
 }
 
 test "gossipsub validation attribution cannot penalize reused source or duplicate slots" {
@@ -277,7 +278,7 @@ test "gossipsub validation attribution cannot penalize reused source or duplicat
     g.connectionClosed(duplicate_conn);
     const replacement1 = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 2 }, .v1_2).?;
     const replacement2 = @import("test_support.zig").addPeer(&g, .{ .index = 1, .generation = 2 }, .v1_2).?;
-    try std.testing.expectEqual(ReportOutcome{ .applied = .reject }, g.report(handle, .reject, .{ .mono_ms = 3, .unix_s = 1 }));
+    try std.testing.expectEqual(ReportOutcome{ .applied = .reject }, g.report(handle, .reject, Now.fromMilliseconds(.{ .mono_ms = 3, .unix_s = 1 })));
     try std.testing.expectEqual(@as(f64, 0), g.peers.score(g.sessions.rows[replacement1.index].logical, 3));
     try std.testing.expectEqual(@as(f64, 0), g.peers.score(g.sessions.rows[replacement2.index].logical, 3));
 }
@@ -297,10 +298,10 @@ test "gossip duplicate fast path ignores host capacity and malformed bodies rece
     try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, peer.index, "pending", 2));
     inbox.full = false;
     try std.testing.expectEqual(@as(u64, 0), g.messages.storage_refusals[@intFromEnum(@import("messages.zig").StorageRefusal.processor_capacity)]);
-    _ = g.report(handle, .ignore, .{ .mono_ms = 3, .unix_s = 1 });
+    _ = g.report(handle, .ignore, Now.fromMilliseconds(.{ .mono_ms = 3, .unix_s = 1 }));
     try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, peer.index, "pending", 4));
     for (0..20) |_| {
-        _ = receiveForTest(&g, peer.index, .{ .topic = name, .data = &.{5} }, .{ .mono_ms = 5, .unix_s = 1 });
+        _ = receiveForTest(&g, peer.index, .{ .topic = name, .data = &.{5} }, Now.fromMilliseconds(.{ .mono_ms = 5, .unix_s = 1 }));
     }
     try std.testing.expectEqual(@as(f64, 20), support.invalidDeliveries(&g));
 }
@@ -317,7 +318,7 @@ test "gossip recent attribution survives validation slot reuse and duplicate pre
     inbox.attach(&g);
     try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, source.index, "rejected", 1));
     const old = inbox.last().handle;
-    _ = g.report(old, .reject, .{ .mono_ms = 2, .unix_s = 0 });
+    _ = g.report(old, .reject, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 }));
     try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, source.index, "pending", 3));
     const current = inbox.last();
     try std.testing.expectEqual(old.index, current.handle.index);
@@ -326,12 +327,12 @@ test "gossip recent attribution survives validation slot reuse and duplicate pre
     try std.testing.expectEqual(@as(f64, 2), support.invalidDeliveries(&g));
     try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, duplicate.index, "rejected", 5));
     try std.testing.expectEqual(@as(f64, 2), support.invalidDeliveries(&g));
-    try std.testing.expectEqual(ReportOutcome.stale_handle, g.report(old, .accept, .{ .mono_ms = 6, .unix_s = 0 }));
+    try std.testing.expectEqual(ReportOutcome.stale_handle, g.report(old, .accept, Now.fromMilliseconds(.{ .mono_ms = 6, .unix_s = 0 })));
     @memset(g.messages.fast, .{});
     try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, source.index, "pending", 7));
     try std.testing.expectEqualStrings("pending", current.bytes);
     try std.testing.expectEqualStrings(name, current.topic);
-    try std.testing.expectEqual(ReportOutcome{ .applied = .ignore }, g.report(current.handle, .ignore, .{ .mono_ms = 8, .unix_s = 0 }));
+    try std.testing.expectEqual(ReportOutcome{ .applied = .ignore }, g.report(current.handle, .ignore, Now.fromMilliseconds(.{ .mono_ms = 8, .unix_s = 0 })));
     g.messages.expire(&g.peers, 30_008);
     try std.testing.expectEqual(@as(u32, 0), g.peers.rows[g.sessions.rows[source.index].logical.index].pins);
     try std.testing.expectEqual(@as(u32, 0), g.peers.rows[g.sessions.rows[duplicate.index].logical.index].pins);
@@ -356,7 +357,7 @@ test "gossip pending validation quota preserves room for another peer and refund
         try std.testing.expectEqual(@as(u64, 1), g.messages.storage_refusals[@intFromEnum(@import("messages.zig").StorageRefusal.peer_validations)]);
         try std.testing.expectEqual(@as(f64, 0), g.peers.score(g.sessions.rows[first.index].logical, 3));
         try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, second.index, "other peer", 4));
-        try std.testing.expectEqual(ReportOutcome{ .applied = .ignore }, g.report(held, .ignore, .{ .mono_ms = 5, .unix_s = 0 }));
+        try std.testing.expectEqual(ReportOutcome{ .applied = .ignore }, g.report(held, .ignore, Now.fromMilliseconds(.{ .mono_ms = 5, .unix_s = 0 })));
         try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, first.index, "third", 6));
     }
 }

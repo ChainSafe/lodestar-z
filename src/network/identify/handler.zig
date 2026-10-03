@@ -1,4 +1,5 @@
 const std = @import("std");
+const time = @import("../time.zig");
 const codec = @import("codec.zig");
 const Router = @import("../router.zig").Router;
 const Engine = @import("../quic/Engine.zig");
@@ -194,7 +195,7 @@ pub const Handler = struct {
         const slot = free orelse return error.IdentifyCapacity;
         const expected = engine.peerId(conn) orelse return error.StaleHandle;
         const stream = try router.beginOutbound(engine, conn, .identify, now);
-        slot.* = .{ .stream = stream, .peer = peer, .deadline = now.mono_ms +| deadline_ms, .decoder = .init(&expected) };
+        slot.* = .{ .stream = stream, .peer = peer, .deadline = now.millis() +| deadline_ms, .decoder = .init(&expected) };
     }
 
     /// A routed stream event. Inbound slot `i` is row `i`; outbound slot `j` is row
@@ -271,7 +272,7 @@ pub const Handler = struct {
         };
         for (self.inbound, 0..) |*slot, index| if (slot.stream == null) {
             bindRow(engine, outcome.stream, index);
-            slot.* = .{ .stream = outcome.stream, .deadline = now.mono_ms +| deadline_ms, .ready = true };
+            slot.* = .{ .stream = outcome.stream, .deadline = now.millis() +| deadline_ms, .ready = true };
             const bytes = self.local.encode(router.capabilities().receive, engine.peerAddress(outcome.stream.conn), &slot.bytes) catch {
                 slot.close(engine);
                 return;
@@ -283,13 +284,13 @@ pub const Handler = struct {
     }
 
     pub fn pump(self: *Handler, router: *Router, engine: *Engine, now: types.Now, out: []Result) usize {
-        for (self.inbound) |*slot| slot.advance(engine, now.mono_ms);
+        for (self.inbound) |*slot| slot.advance(engine, now.millis());
         var count: usize = 0;
         const start_index = self.delivery_cursor;
         for (0..self.outbound.len) |offset| {
             const index = (start_index + offset) % self.outbound.len;
             const slot = &self.outbound[index];
-            slot.advance(router, engine, now.mono_ms);
+            slot.advance(router, engine, now.millis());
             if (slot.phase == .terminal and count < out.len) {
                 out[count] = slot.result;
                 count += 1;
@@ -309,7 +310,7 @@ pub const Handler = struct {
     pub fn schedule(self: *const Handler, result_capacity: usize) types.Schedule {
         var result: types.Schedule = .{};
         for (self.inbound) |*slot| if (slot.stream != null) {
-            result = result.merge(.{ .runnable = slot.ready, .deadline_ms = slot.deadline });
+            result = result.merge(.{ .runnable = slot.ready, .deadline = time.optionalMilliseconds(slot.deadline) });
         };
         for (self.outbound) |*slot| if (slot.stream != null) {
             if (slot.phase == .terminal) {
@@ -318,7 +319,7 @@ pub const Handler = struct {
             }
             result = result.merge(.{
                 .runnable = slot.phase == .reading and slot.ready,
-                .deadline_ms = slot.deadline,
+                .deadline = time.optionalMilliseconds(slot.deadline),
             });
         };
         return result;

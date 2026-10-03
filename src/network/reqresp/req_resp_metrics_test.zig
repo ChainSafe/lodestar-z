@@ -11,7 +11,7 @@ test "reqresp duration includes the final chunk hold until consume" {
     var request: [ct.phase0.Status.fixed_size]u8 = undefined;
     var sink: [ct.phase0.Status.fixed_size]u8 = undefined;
     const reply = harness.statusBytes(9);
-    const started = setup.shared.pair.now.mono_ms;
+    const started = setup.shared.pair.now.millis();
     const handle = try harness.requestStatus(&setup, &request, &sink);
     var got_chunk = false;
     for (0..30) |_| {
@@ -35,11 +35,11 @@ test "reqresp duration includes the final chunk hold until consume" {
     const owner = &setup.shared.client.reqresp;
     const times = &owner.protocol_counters[@intFromEnum(Protocol.status_v1)].outgoing_time;
     try std.testing.expectEqual(0, times.count);
-    setup.shared.pair.now.mono_ms += 5000;
+    setup.shared.pair.now.monotonic = @import("../time.zig").milliseconds(setup.shared.pair.now.millis() + 5000);
     try std.testing.expect(owner.consume(handle, setup.shared.pair.now));
     try std.testing.expectEqual(1, times.count);
-    try std.testing.expectEqual(setup.shared.pair.now.mono_ms - started, times.sum);
-    setup.shared.pair.now.mono_ms += 1000;
+    try std.testing.expectEqual(setup.shared.pair.now.millis() - started, times.sum);
+    setup.shared.pair.now.monotonic = @import("../time.zig").milliseconds(setup.shared.pair.now.millis() + 1000);
     try std.testing.expect(!owner.consume(handle, setup.shared.pair.now));
     try std.testing.expect(!owner.cancel(handle, setup.shared.pair.now));
     try std.testing.expectEqual(1, times.count);
@@ -56,7 +56,7 @@ test "reqresp duration uses event time for cancellation negotiation and connecti
         var sink: [ct.phase0.Status.fixed_size]u8 = undefined;
         const handle = try harness.requestStatus(&setup, &request, &sink);
         const owner = &setup.shared.client.reqresp;
-        setup.shared.pair.now.mono_ms += 3000;
+        setup.shared.pair.now.monotonic = @import("../time.zig").milliseconds(setup.shared.pair.now.millis() + 3000);
         const now = setup.shared.pair.now;
         switch (cause) {
             .cancel => try std.testing.expect(owner.cancel(handle, now)),
@@ -102,7 +102,7 @@ test "reqresp duration uses current time for inbound termination" {
         const handle = setup.serverEvents()[0].request.request;
         const slot = &owner.inbound[handle.index];
         const started = slot.request.started_ms;
-        setup.shared.pair.now.mono_ms += 2000;
+        setup.shared.pair.now.monotonic = @import("../time.zig").milliseconds(setup.shared.pair.now.millis() + 2000);
         const now = setup.shared.pair.now;
         switch (cause) {
             .cancel => try std.testing.expect(owner.cancel(handle, now)),
@@ -111,7 +111,7 @@ test "reqresp duration uses current time for inbound termination" {
         }
         const times = &owner.protocol_counters[@intFromEnum(Protocol.status_v1)].incoming_time;
         try std.testing.expectEqual(1, times.count);
-        try std.testing.expectEqual(now.mono_ms - started, times.sum);
+        try std.testing.expectEqual(now.millis() - started, times.sum);
         try std.testing.expect(!owner.cancel(handle, now));
         try std.testing.expectEqual(1, times.count);
     }

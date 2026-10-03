@@ -319,7 +319,7 @@ test "reqresp half close without a response retains the absolute response deadli
         defer pair.deinit();
         var sink: [25]u8 = undefined;
         const request = try negotiate(&pair, .metadata_v3, &.{}, &sink, if (duration == 100)
-            .{ .absolute_timeouts = .{ .response_ms = duration } }
+            .{ .timeouts = .{ .response = .fromMilliseconds(@intCast(duration)) } }
         else
             .{});
         pair.shared.pair.server.shutdown(request.remote, .read, 0);

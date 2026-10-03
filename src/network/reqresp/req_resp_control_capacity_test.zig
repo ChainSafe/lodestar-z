@@ -1,4 +1,5 @@
 const std = @import("std");
+const Now = @import("../types.zig").Now;
 const RequestIO = @import("RequestIO.zig");
 const rr = @import("ReqResp.zig");
 const protocol = @import("protocol.zig");
@@ -18,7 +19,7 @@ test "reqresp blocked control writers leave other admitted identities able to se
     });
     var requests = try rr.init(std.testing.allocator, resolved.core.service.reqresp);
     defer requests.deinit();
-    const now: @import("../types.zig").Now = .{ .mono_ms = 1, .unix_s = 0 };
+    const now: @import("../types.zig").Now = Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 });
     const metadata: [16]u8 = @splat(0);
     for (requests.inbound[0..200], 0..) |*slot, index| {
         const conn: Engine.Handle = .{ .index = @intCast(index), .generation = 1 };

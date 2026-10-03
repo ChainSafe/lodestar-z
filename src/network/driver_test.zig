@@ -1,3 +1,4 @@
+const schedule_test_support = @import("schedule_test_support.zig");
 const driver = @import("driver.zig");
 const std = @import("std");
 const NetworkCore = @import("network_core.zig").NetworkCore;
@@ -44,7 +45,7 @@ const TestHost = struct {
     }
 
     fn seam(self: *TestHost, deadline_ms: ?u64) NetworkCore.Host {
-        return .{ .context = self, .apply = apply, .deadline_ms = deadline_ms };
+        return .{ .handler = .{ .context = self, .apply = apply }, .deadline = @import("time.zig").optionalMilliseconds(deadline_ms) };
     }
 
     fn apply(context: *anyopaque, core: *NetworkCore, now: Now) NetworkCore.HostProgress {
@@ -87,7 +88,7 @@ const Pair = struct {
         self.b_inbox.clear();
         for ([_]*NetworkCore{ &self.a, &self.b }) |node| {
             const now = try currentTime();
-            const result = driver.step(node, std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| 1));
+            const result = driver.step(node, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis() +| 1)));
             if (result.failure) |err| return err;
         }
     }
@@ -154,7 +155,7 @@ test "a host publication submitted while the owner waits leaves in the flush of 
     // Each turn waits for its earliest deadline or the wake; the host deadline lies beyond both.
     for (0..64) |_| {
         const now = try currentTime();
-        const result = driver.step(&pair.b, std.testing.io, now, .{}, host.seam(now.mono_ms +| 5_000));
+        const result = driver.step(&pair.b, std.testing.io, now, .{}, host.seam(now.millis() +| 5_000));
         returned_ns = monotonicNs();
         turns += 1;
         if (result.failure) |err| return err;
@@ -178,7 +179,7 @@ test "a host publication submitted while the owner waits leaves in the flush of 
     var delivered = false;
     for (0..3000) |_| {
         const now = try currentTime();
-        _ = driver.step(&pair.a, std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| 1));
+        _ = driver.step(&pair.a, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis() +| 1)));
         for (pair.a_inbox.messages()) |message| {
             try std.testing.expectEqualStrings("host publication", message.bytes);
             _ = pair.a.reportValidation(message.handle, .accept, pair.a.last_now);
@@ -204,7 +205,7 @@ test "a host applies only on its wake, a carried-over cap or its deadline" {
     defer node.setHostWake(null) catch unreachable;
     for (0..4) |_| {
         const now = try currentTime();
-        _ = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(now.mono_ms));
+        _ = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis())));
     }
     const host_source = @intFromEnum(Source.host);
 
@@ -213,17 +214,17 @@ test "a host applies only on its wake, a carried-over cap or its deadline" {
     defer sender.close(std.testing.io);
     try sender.send(std.testing.io, &node.transport.sockets.primary().address, "junk");
     var now = try currentTime();
-    const quic = driver.step(&node, std.testing.io, now, .{}, host.seam(now.mono_ms +| 5_000));
+    const quic = driver.step(&node, std.testing.io, now, .{}, host.seam(now.millis() +| 5_000));
     try std.testing.expect(quic.failure == null and quic.readiness.quicReady() and !quic.readiness.host);
     try std.testing.expectEqual(@as(u32, 0), host.applies);
 
     // The host deadline bounds the wait and is applied when it passes.
     now = try currentTime();
-    const expected = node.wakeups(now, .{}).schedule().waitMs(now.mono_ms, 150);
-    const timed = driver.step(&node, std.testing.io, now, .{}, host.seam(now.mono_ms + 150));
+    const expected = schedule_test_support.waitMilliseconds(node.wakeups(now, .{}).schedule(), now.millis(), 150);
+    const timed = driver.step(&node, std.testing.io, now, .{}, host.seam(now.millis() + 150));
     try std.testing.expect(timed.failure == null and !timed.readiness.host);
     if (expected == 150) {
-        try std.testing.expect(timed.transport.now.mono_ms >= now.mono_ms + 150);
+        try std.testing.expect(timed.transport.now.millis() >= now.millis() + 150);
         try std.testing.expectEqual(@as(u32, 1), host.applies);
     }
     const applied = host.applies;
@@ -232,12 +233,12 @@ test "a host applies only on its wake, a carried-over cap or its deadline" {
     host.more = 1;
     host.signal();
     now = try currentTime();
-    const capped = driver.step(&node, std.testing.io, now, .{}, host.seam(now.mono_ms +| 5_000));
+    const capped = driver.step(&node, std.testing.io, now, .{}, host.seam(now.millis() +| 5_000));
     try std.testing.expect(capped.readiness.host);
     try std.testing.expectEqual(applied + 1, host.applies);
     const due = node.due_now_turns[host_source];
     now = try currentTime();
-    const carried = driver.step(&node, std.testing.io, now, .{}, host.seam(now.mono_ms +| 5_000));
+    const carried = driver.step(&node, std.testing.io, now, .{}, host.seam(now.millis() +| 5_000));
     try std.testing.expect(!carried.readiness.host);
     try std.testing.expectEqual(due + 1, node.due_now_turns[host_source]);
     try std.testing.expectEqual(applied + 2, host.applies);
@@ -246,10 +247,10 @@ test "a host applies only on its wake, a carried-over cap or its deadline" {
     host.resubmit = true;
     host.signal();
     now = try currentTime();
-    const drained = driver.step(&node, std.testing.io, now, .{}, host.seam(now.mono_ms +| 5_000));
+    const drained = driver.step(&node, std.testing.io, now, .{}, host.seam(now.millis() +| 5_000));
     try std.testing.expect(drained.readiness.host);
     now = try currentTime();
-    const rewoken = driver.step(&node, std.testing.io, now, .{}, host.seam(now.mono_ms +| 5_000));
+    const rewoken = driver.step(&node, std.testing.io, now, .{}, host.seam(now.millis() +| 5_000));
     try std.testing.expect(rewoken.readiness.host);
     try std.testing.expectEqual(applied + 4, host.applies);
 }
@@ -296,10 +297,10 @@ test "a junk flood on the discovery socket costs discovery-only turns in batches
     defer node.deinit(std.testing.io);
     for (0..4) |_| {
         const now = try currentTime();
-        _ = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(now.mono_ms));
+        _ = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis())));
     }
     const settled = try currentTime();
-    try std.testing.expect(node.wakeups(settled, .{}).schedule().nextWakeup(settled.mono_ms).? > settled.mono_ms);
+    try std.testing.expect(schedule_test_support.wakeupMilliseconds(node.wakeups(settled, .{}).schedule(), settled.millis()).? > settled.millis());
     const sender = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
     defer sender.close(std.testing.io);
     const target = node.discovery.?.transport.sockets.primary().address;
@@ -309,7 +310,7 @@ test "a junk flood on the discovery socket costs discovery-only turns in batches
     for ([_]u16{ NetworkCore.discovery_batch_max, 40 - NetworkCore.discovery_batch_max }) |expected| {
         const before = datagramsCounted(&node);
         const now = try currentTime();
-        const result = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| 5_000));
+        const result = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis() +| 5_000)));
         try std.testing.expect(result.failure == null);
         try std.testing.expect(result.readiness.discoveryReady() and result.discovery_only);
         try std.testing.expectEqual(expected, datagramsCounted(&node) - before);
@@ -329,7 +330,7 @@ test "discovery readiness with other work due runs a full turn" {
     defer node.deinit(std.testing.io);
     for (0..4) |_| {
         const now = try currentTime();
-        _ = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(now.mono_ms));
+        _ = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis())));
     }
     const remote = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
     defer remote.close(std.testing.io);
@@ -338,7 +339,7 @@ test "discovery readiness with other work due runs a full turn" {
     try std.testing.expect(node.transport.engine.backlog());
     try remote.send(std.testing.io, &node.discovery.?.transport.sockets.primary().address, "junk datagram");
     const now = try currentTime();
-    const result = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| 5_000));
+    const result = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis() +| 5_000)));
     try std.testing.expect(result.failure == null and result.readiness.discoveryReady());
     try std.testing.expect(!result.discovery_only);
     try std.testing.expectEqual(@as(u64, 1), datagramsCounted(&node));
@@ -362,12 +363,12 @@ test "owner zero-wait turns count under every due source until the owner settles
     try initOwner(node);
     defer node.deinit(std.testing.io);
     const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
-    for (0..8) |_| try std.testing.expect(driver.step(node, std.testing.io, now, .{}, .deadlineOnly(now.mono_ms)).failure == null);
+    for (0..8) |_| try std.testing.expect(driver.step(node, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis()))).failure == null);
     const host = @intFromEnum(@import("wake_sources.zig").Source.host);
     try std.testing.expectEqual(@as(u64, 8), node.due_now_turns[host]);
-    try std.testing.expect(node.wakeups(now, .{}).schedule().nextWakeup(now.mono_ms).? > now.mono_ms);
+    try std.testing.expect(schedule_test_support.wakeupMilliseconds(node.wakeups(now, .{}).schedule(), now.millis()).? > now.millis());
     const settled = node.due_now_turns;
-    try std.testing.expect(driver.step(node, std.testing.io, node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms +| 2)).failure == null);
+    try std.testing.expect(driver.step(node, std.testing.io, node.last_now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(node.last_now.millis() +| 2))).failure == null);
     try std.testing.expectEqualDeep(settled, node.due_now_turns);
 }
 
@@ -377,15 +378,15 @@ test "owner zero-wait turn counts once under each of its two due sources" {
     try initOwner(node);
     defer node.deinit(std.testing.io);
     const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
-    for (0..8) |_| try std.testing.expect(driver.step(node, std.testing.io, now, .{}, .deadlineOnly(now.mono_ms)).failure == null);
-    try std.testing.expect(node.wakeups(now, .{}).schedule().nextWakeup(now.mono_ms).? > now.mono_ms);
+    for (0..8) |_| try std.testing.expect(driver.step(node, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis()))).failure == null);
+    try std.testing.expect(schedule_test_support.wakeupMilliseconds(node.wakeups(now, .{}).schedule(), now.millis()).? > now.millis());
     const remote = try @import("wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{95}));
     const remote_key = remote.publicKey();
     const peer = @import("wire/peer_id.zig").PeerId.fromPublicKey(&remote_key);
     // The node binds IPv4 only, so this dial fails before sending a datagram.
-    try node.connectUntil(&peer, &.{.{ .ip6 = .{ .octets = .{0} ** 15 ++ .{1}, .port = 9000 } }}, now, now.mono_ms + 60_000);
+    try node.connectUntil(&peer, &.{.{ .ip6 = .{ .octets = .{0} ** 15 ++ .{1}, .port = 9000 } }}, now, now.millis() + 60_000);
     const before = node.due_now_turns;
-    try std.testing.expect(driver.step(node, std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| 100)).failure == null);
+    try std.testing.expect(driver.step(node, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis() +| 100))).failure == null);
     for (before, node.due_now_turns, 0..) |previous, current, index| {
         const due = index == @intFromEnum(Source.dial) or index == @intFromEnum(Source.peer_policy);
         try std.testing.expectEqual(previous + @intFromBool(due), current);
@@ -407,7 +408,7 @@ test "a continuous QUIC flood on both families shares each receive quota and lea
     defer node.setHostWake(null) catch unreachable;
     for (0..4) |_| {
         const now = try currentTime();
-        _ = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(now.mono_ms));
+        _ = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis())));
     }
     const quota = node.transport.work_limits.receive_per_step_max;
     const sockets = node.transport.sockets.values;
@@ -429,7 +430,7 @@ test "a continuous QUIC flood on both families shares each receive quota and lea
     for (turns, 0..) |expected, index| {
         if (expected.wake) host.signal();
         const now = try currentTime();
-        const result = driver.step(&node, std.testing.io, now, .{}, host.seam(if (expected.due) now.mono_ms else now.mono_ms +| 5_000));
+        const result = driver.step(&node, std.testing.io, now, .{}, host.seam(if (expected.due) now.millis() else now.millis() +| 5_000));
         try std.testing.expect(result.failure == null);
         try std.testing.expectEqual(expected.quic, result.readiness.quic);
         try std.testing.expectEqual(expected.received, result.transport.datagrams_received);
@@ -457,7 +458,7 @@ test "owner applies host work for a due host deadline and again for work the app
     var host: Host = .{};
     setup.pair.advance(50);
     const now = setup.pair.now;
-    try std.testing.expect(driver.step(node, setup.pair.io(), now, .{}, .{ .context = &host, .apply = Host.apply, .deadline_ms = now.mono_ms }).failure == null);
-    try std.testing.expect(driver.step(node, setup.pair.io(), now, .{}, .{ .context = &host, .apply = Host.apply }).failure == null);
+    try std.testing.expect(driver.step(node, setup.pair.io(), now, .{}, .{ .handler = .{ .context = &host, .apply = Host.apply }, .deadline = now.monotonic }).failure == null);
+    try std.testing.expect(driver.step(node, setup.pair.io(), now, .{}, .{ .handler = .{ .context = &host, .apply = Host.apply } }).failure == null);
     try std.testing.expectEqual(@as(usize, 2), host.applies);
 }

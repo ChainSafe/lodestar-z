@@ -189,7 +189,7 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
         .addDirectPeer => try core.addDirectPeer(&input.peer, input.addresses[0..input.address_count], timestamp),
         .connect => {
             if (core.isConnected(&input.peer)) return;
-            operation.deadline = timestamp.mono_ms +| input.timeout_ms;
+            operation.deadline = timestamp.millis() +| input.timeout_ms;
             try core.connectUntil(&input.peer, input.addresses[0..input.address_count], timestamp, operation.deadline);
             self.lock();
             self.table.transition(operation, .waiting);
@@ -228,7 +228,7 @@ pub fn latchConnects(table: *Table, events: []const n.Event, timestamp: n.Now) b
             connected = true;
             break;
         };
-        if (!connected and timestamp.mono_ms < operation.deadline) continue;
+        if (!connected and timestamp.millis() < operation.deadline) continue;
         operation.failure = if (connected) null else error.NetworkConnectTimeout;
         table.transition(cell, .terminal);
         terminal = true;

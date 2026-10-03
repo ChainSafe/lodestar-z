@@ -138,7 +138,7 @@ fn setSubscription(g: *Gossipsub, name: []const u8, subscribed: bool) !void {
     var boundaries: [topic_policy.boundary_max]local_intent.Boundary = undefined;
     var workspace = try local_intent.Workspace.init(std.testing.allocator, g.overlay.rows.len);
     defer workspace.deinit(std.testing.allocator);
-    _ = try g.prepareSubscriptions(try subscriptionUpdate(g, name, subscribed, &boundaries), &workspace, .{ .mono_ms = g.last_now_ms, .unix_s = 0 }, g.overlay.slot);
+    _ = try g.prepareSubscriptions(try subscriptionUpdate(g, name, subscribed, &boundaries), &workspace, Now.fromMilliseconds(.{ .mono_ms = g.last_now_ms, .unix_s = 0 }), g.overlay.slot);
     g.commitSubscriptions(&workspace);
 }
 
@@ -150,7 +150,7 @@ pub fn addPeer(g: *Gossipsub, conn: Engine.Handle, version: sessions_mod.Version
     };
     std.mem.writeInt(u64, metadata.identity.bytes[0..8], conn.generation, .little);
     std.mem.writeInt(u16, metadata.identity.bytes[8..10], conn.index, .little);
-    const peer = switch (g.addPeer(conn, &metadata, .{ .mono_ms = g.last_now_ms, .unix_s = 0 })) {
+    const peer = switch (g.addPeer(conn, &metadata, Now.fromMilliseconds(.{ .mono_ms = g.last_now_ms, .unix_s = 0 }))) {
         .admitted => |peer| peer,
         else => return null,
     };
@@ -190,9 +190,9 @@ pub fn pumpTurn(g: *Gossipsub, transport: *Engine, now: @import("../types.zig").
 /// Now while a session is ready, else the earliest session deadline; heartbeat and
 /// maintenance deadlines are left out.
 pub fn sessionWakeup(g: *const Gossipsub, now: @import("../types.zig").Now) u64 {
-    if (g.sessions.ready.len > 0) return now.mono_ms;
+    if (g.sessions.ready.len > 0) return now.millis();
     const top = g.sessions.deadlines.peek() orelse return std.math.maxInt(u64);
-    return @max(now.mono_ms, top.deadline);
+    return @max(now.millis(), top.deadline);
 }
 
 pub fn processRpc(g: *Gossipsub, index: u16, now: @import("../types.zig").Now, count: *usize, items: *usize) !bool {
@@ -241,7 +241,7 @@ pub fn message(g: *Gossipsub, peer: u16, text: []const u8, now_ms: u64) !?usize 
     const topic = "/eth2/01020304/beacon_block/ssz_snappy";
     var compressed: [256]u8 = undefined;
     const n = try snappy.raw.compress(text, &compressed);
-    return receiveMessage(g, peer, .{ .data = compressed[0..n], .topic = topic }, .{ .mono_ms = now_ms, .unix_s = 1 });
+    return receiveMessage(g, peer, .{ .data = compressed[0..n], .topic = topic }, Now.fromMilliseconds(.{ .mono_ms = now_ms, .unix_s = 1 }));
 }
 
 pub fn control(g: *Gossipsub, index: u16, item: protobuf.Item, now: Now) void {
@@ -251,7 +251,7 @@ pub fn control(g: *Gossipsub, index: u16, item: protobuf.Item, now: Now) void {
 }
 
 pub fn heartbeat(g: *Gossipsub, now: Now) void {
-    std.debug.assert(now.mono_ms > 0);
-    g.heartbeat_at = now.mono_ms;
+    std.debug.assert(now.millis() > 0);
+    g.heartbeat_at = now.millis();
     g.tick(now);
 }

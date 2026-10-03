@@ -19,7 +19,7 @@ pub const Cell = struct {
     connection: n.quic.Engine.Handle = undefined,
     handle: rr.ReqResp.RequestHandle = undefined,
     native: bool = false,
-    serving_retained: bool = false,
+    serving: ?rr.ReqResp.ServingHandle = null,
     release_requested: bool = false,
     protocol: rr.Protocol = .blocks_by_root_v2,
     input: []u8 = &.{},
@@ -172,7 +172,7 @@ pub const Table = struct {
     }
     pub fn retire(self: *Table, token: Token) void {
         const cell = self.get(token).?;
-        std.debug.assert(!cell.native and !cell.copying and !cell.serving_retained);
+        std.debug.assert(!cell.native and !cell.copying and cell.serving == null);
         cell.state = .terminal;
         self.releasePayload(cell);
         cell.* = .{ .generation = cell.generation };
@@ -224,7 +224,7 @@ pub const Table = struct {
         }
         self.releasePayload(cell);
         self.refresh(cell);
-        if (!cell.native and !cell.serving_retained and !awaited(cell)) {
+        if (!cell.native and cell.serving == null and !awaited(cell)) {
             self.retire(completion.token);
             return false;
         }
@@ -254,7 +254,7 @@ pub const Table = struct {
         for (self.cells) |*cell| {
             if (cell.state == .free) continue;
             result.queued += @intFromBool(cell.state == .queued);
-            result.retiring += @intFromBool(!cell.native and cell.serving_retained);
+            result.retiring += @intFromBool(!cell.native and cell.serving != null);
             result.closedPromises += @intFromBool(cell.closed_awaited);
             result.pendingResponses += @intFromBool(cell.response_awaited);
             result.pendingPermissions += @intFromBool(cell.permission_awaited);
@@ -306,7 +306,7 @@ pub fn settleable(cell: *const Cell) bool {
 }
 /// A retained serving slot whose host released it and awaits nothing, so the owner returns it.
 pub fn releasable(cell: *const Cell) bool {
-    return cell.serving_retained and cell.release_requested and !cell.native and !cell.copying and !awaited(cell);
+    return cell.serving != null and cell.release_requested and !cell.native and !cell.copying and !awaited(cell);
 }
 /// Work the owner does for a cell at its next host apply: a release or a response permission.
 fn ownerWork(cell: *const Cell) bool {
@@ -328,19 +328,19 @@ pub fn flags(runtime: *Runtime, now: n.Now) !bool {
         const cell = &table.cells[(table.cursor + offset) % table.cells.len];
         defer table.refresh(cell);
         if (releasable(cell)) {
-            const released = runtime.heavy.?.core.service.reqresp.releaseServing(cell.handle);
+            const released = runtime.heavy.?.core.releaseServing(cell.serving.?);
             std.debug.assert(released);
-            cell.serving_retained = false;
+            cell.serving = null;
             table.retire(.{ .index = @intCast((table.cursor + offset) % table.cells.len), .generation = cell.generation });
             continue;
         }
         if (!cell.native) continue;
         const core = &runtime.heavy.?.core;
         if (cell.action == .cancel or runtime.stop) {
-            _ = core.cancel(cell.handle, now);
+            _ = core.cancelRequest(cell.handle, now);
             continue;
         }
-        if (cell.permission_awaited and !cell.permission_ready and core.service.reqresp.responseReadiness(cell.handle) == .ready) {
+        if (cell.permission_awaited and !cell.permission_ready and core.responseReadiness(cell.handle) == .ready) {
             table.reserveResponse(cell, cell.protocol.info().response_max) catch {
                 // A payload release wakes the owner to retry.
                 table.budget.waiting = true;
@@ -361,7 +361,7 @@ pub fn flags(runtime: *Runtime, now: n.Now) !bool {
             cell.state = .response_native;
         }
         switch (cell.action) {
-            .finish => if (core.finish(cell.handle, now)) {
+            .finish => if (core.finishResponse(cell.handle, now)) {
                 cell.action = .submitted;
             },
             .fail => {
@@ -383,7 +383,7 @@ pub fn captureLocked(runtime: *Runtime, event: rr.ReqResp.Event, now: n.Now) !vo
         error.OutOfMemory => {
             runtime.operational_failures +|= 1;
             runtime.heavy.?.core.respondError(event.request.request, 2, "local serving allocation failed", now) catch {
-                _ = runtime.heavy.?.core.cancel(event.request.request, now);
+                _ = runtime.heavy.?.core.cancelRequest(event.request.request, now);
             };
         },
         else => return err,
@@ -427,10 +427,10 @@ pub fn captureLocked(runtime: *Runtime, event: rr.ReqResp.Event, now: n.Now) !vo
             if (cell.state != .response_preparing) cell.state = .terminal;
             table.releasePayload(cell);
             if (!cell.exposed and !cell.copying) {
-                if (cell.serving_retained) {
-                    const released = runtime.heavy.?.core.service.reqresp.releaseServing(cell.handle);
+                if (cell.serving != null) {
+                    const released = runtime.heavy.?.core.releaseServing(cell.serving.?);
                     std.debug.assert(released);
-                    cell.serving_retained = false;
+                    cell.serving = null;
                 }
                 table.retire(.{ .index = @intCast(i), .generation = cell.generation });
             }
@@ -445,14 +445,14 @@ pub fn captureLocked(runtime: *Runtime, event: rr.ReqResp.Event, now: n.Now) !vo
 fn admitLocked(runtime: *Runtime, request: @FieldType(rr.ReqResp.Event, "request"), now: n.Now) !void {
     const table = &runtime.incoming.?;
     const core = &runtime.heavy.?.core;
-    const identity = core.transport.engine.peerId(request.peer) orelse {
-        _ = core.cancel(request.request, now);
+    const identity = core.peerIdentity(request.peer) orelse {
+        _ = core.cancelRequest(request.request, now);
         return;
     };
     const token = table.reserve(request.protocol, request.bytes.len) catch |err| switch (err) {
         error.NetworkIncomingFull, error.NetworkBridgeFull => {
             core.respondError(request.request, 2, "application capacity exhausted", now) catch {
-                _ = core.cancel(request.request, now);
+                _ = core.cancelRequest(request.request, now);
             };
             return;
         },
@@ -465,9 +465,7 @@ fn admitLocked(runtime: *Runtime, request: @FieldType(rr.ReqResp.Event, "request
     cell.connection = request.peer;
     cell.handle = request.request;
     cell.native = true;
-    const retained = core.service.reqresp.retainServing(request.request);
-    std.debug.assert(retained);
-    cell.serving_retained = true;
+    cell.serving = core.retainServing(request.request) orelse unreachable;
     table.refresh(cell);
     runtime.recomputeLocked(.serving);
 }
@@ -477,7 +475,7 @@ pub fn closeLocked(runtime: *Runtime) void {
     if (runtime.incoming) |*table| for (table.cells, 0..) |*cell, i| {
         if (cell.state == .free) continue;
         cell.native = false;
-        cell.serving_retained = false;
+        cell.serving = null;
         if (cell.response_awaited and cell.ack == null) cell.ack = .closed;
         if (cell.state != .response_preparing) cell.state = .terminal;
         table.releasePayload(cell);

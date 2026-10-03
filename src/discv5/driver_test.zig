@@ -23,14 +23,14 @@ test "transport returns call expiries when rejecting a malformed datagram" {
     host.datagram = .{ .from = pair.transport_b.localAddress(), .bytes = &.{0xff} };
 
     var expired: [4]CallTable.Expired = undefined;
-    const result = try @import("driver.zig").step(&pair.transport_a, host.io(), &expired, .{ .wait_max_ms = 10 });
-    try std.testing.expectEqual(@as(?Transport.Error, null), result.failure);
+    const result = try @import("driver.zig").step(&pair.transport_a, host.io(), &expired, .{ .wait_max = .fromMilliseconds(10) });
+    try std.testing.expectEqual(@as(?Transport.Failure, null), result.failure);
     try std.testing.expect(result.datagram == .rejected);
     try std.testing.expectEqual(types.RejectReason.malformed_packet, result.datagram.rejected);
     try std.testing.expectEqual(@as(usize, 1), result.calls_expired);
     try std.testing.expectEqual(handle, expired[0].handle);
     try std.testing.expectEqual(@as(u64, 1), result.now_ms);
-    const next = try @import("driver.zig").step(&pair.transport_a, host.io(), &expired, .{ .wait_max_ms = 10 });
+    const next = try @import("driver.zig").step(&pair.transport_a, host.io(), &expired, .{ .wait_max = .fromMilliseconds(10) });
     try std.testing.expectEqual(@as(usize, 0), next.calls_expired);
 }
 
@@ -54,11 +54,11 @@ test "transport polls no later than a pending call deadline" {
     );
     var host: test_support.ManualIo = .{ .now_ms = 100, .receive_failure = error.ConcurrencyUnavailable };
     var expired: [4]CallTable.Expired = undefined;
-    const result = try @import("driver.zig").step(&pair.transport_a, host.io(), &expired, .{ .wait_max_ms = 10 });
-    try std.testing.expectEqual(error.ConcurrencyUnavailable, result.failure.?);
-    try std.testing.expectEqual(Transport.FailureStage.receive, result.failure_stage);
+    const result = try @import("driver.zig").step(&pair.transport_a, host.io(), &expired, .{ .wait_max = .fromMilliseconds(10) });
+    try std.testing.expectEqual(error.ConcurrencyUnavailable, result.failure.?.cause);
+    try std.testing.expectEqual(Transport.FailureStage.receive, result.failure.?.stage);
     try std.testing.expectEqual(@as(i96, 5), host.poll_ms.?);
-    _ = try @import("driver.zig").step(&pair.transport_a, host.io(), &expired, .{ .deadline_ms = 102, .wait_max_ms = 10 });
+    _ = try @import("driver.zig").step(&pair.transport_a, host.io(), &expired, .{ .deadline = .{ .clock = .awake, .raw = .fromNanoseconds(@as(i96, 102) * std.time.ns_per_ms) }, .wait_max = .fromMilliseconds(10) });
     try std.testing.expectEqual(@as(i96, 2), host.poll_ms.?);
 }
 
@@ -79,8 +79,8 @@ test "discovery driver preserves received input when its post-wait clock fails" 
     const io: std.Io = .{ .userdata = &host, .vtable = &vtable };
     var expired: [1]CallTable.Expired = undefined;
     const result = try @import("driver.zig").step(&pair.transport_a, io, &expired, .{});
-    try std.testing.expectEqual(error.ClockOutOfRange, result.failure.?);
-    try std.testing.expectEqual(Transport.FailureStage.clock, result.failure_stage);
+    try std.testing.expectEqual(error.ClockOutOfRange, result.failure.?.cause);
+    try std.testing.expectEqual(Transport.FailureStage.clock, result.failure.?.stage);
     try std.testing.expectEqual(@as(u64, 100), result.now_ms);
     try std.testing.expectEqual(types.RejectReason.malformed_packet, result.datagram.rejected);
 }

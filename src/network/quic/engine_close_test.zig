@@ -477,7 +477,7 @@ test "engine deferred host close delays peer claims until the final flight drain
     try std.testing.expect(read.fin);
 }
 
-test "engine shutdown all includes precatalog handshakes and is repeatable" {
+test "engine close all includes precatalog handshakes and is repeatable" {
     var pair: Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
@@ -485,7 +485,7 @@ test "engine shutdown all includes precatalog handshakes and is repeatable" {
     _ = try pair.dial();
     try std.testing.expectEqual(@as(u16, 1), pair.client.registry.dialing);
     try std.testing.expectEqual(@as(u16, 2), pair.client.registry.outbound);
-    pair.client.shutdownAll();
+    pair.client.closeAll();
     try std.testing.expectEqual(@as(u16, 0), pair.client.registry.dialing);
     try std.testing.expectEqual(@as(u16, 1), pair.client.registry.outbound);
     try pair.pump();
@@ -493,19 +493,19 @@ test "engine shutdown all includes precatalog handshakes and is repeatable" {
     const events = pair.events(&pair.client, &storage);
     try std.testing.expectEqual(@as(usize, 1), events.len);
     try std.testing.expectEqual(Engine.CloseReason.host, try expectClosed(events[0], handles.client, .outbound, &pair.server_ctx));
-    pair.client.shutdownAll();
-    pair.client.shutdownAll();
+    pair.client.closeAll();
+    pair.client.closeAll();
     try std.testing.expectEqual(@as(u16, 0), pair.client.registry.outbound);
     try std.testing.expectEqual(@as(usize, 0), pair.client.registry.activeIndices().len);
 }
 
-test "engine shutdown all abandons inbound precatalog handshakes" {
+test "engine close all abandons inbound precatalog handshakes" {
     var pair: Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
     _ = try establishClient(&pair);
     try std.testing.expectEqual(@as(u16, 1), pair.server.registry.handshaking);
-    pair.server.shutdownAll();
+    pair.server.closeAll();
     try std.testing.expectEqual(@as(u16, 0), pair.server.registry.handshaking);
     try std.testing.expectEqual(@as(usize, 0), pair.server.registry.activeIndices().len);
     try std.testing.expect(!pair.server.eventsPending());

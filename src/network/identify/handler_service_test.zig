@@ -1,4 +1,5 @@
 const std = @import("std");
+const schedule_test_support = @import("../schedule_test_support.zig");
 const support = @import("../quic/test_support.zig");
 const Engine = @import("../quic/Engine.zig");
 const identify = @import("root.zig");
@@ -27,9 +28,9 @@ test "identify service completes both directions with zero application output an
         _ = server.process(&pair.server, pair.events(&pair.server, &events), pair.now, .{});
         try pair.pump();
     }
-    try std.testing.expect(client.identify.schedule(0).nextWakeup(pair.now.mono_ms) == null);
-    if (client.schedule(.{}).nextWakeup(pair.now.mono_ms)) |due| try std.testing.expect(due > pair.now.mono_ms);
-    try std.testing.expectEqual(pair.now.mono_ms, client.identify.schedule(1).nextWakeup(pair.now.mono_ms).?);
+    try std.testing.expect(schedule_test_support.wakeupMilliseconds(client.identify.schedule(0), pair.now.millis()) == null);
+    if (schedule_test_support.wakeupMilliseconds(client.schedule(.{}), pair.now.millis())) |due| try std.testing.expect(due > pair.now.millis());
+    try std.testing.expectEqual(pair.now.millis(), schedule_test_support.wakeupMilliseconds(client.identify.schedule(1), pair.now.millis()).?);
     var results: [1]identify.Handler.Result = undefined;
     var counts = client.process(&pair.client, &.{}, pair.now, .{ .identify = &results });
     try std.testing.expectEqual(@as(usize, 1), counts.identify);
@@ -103,8 +104,8 @@ test "identify saturation leaves reserved Ping negotiation usable" {
         try pair.pump();
     }
     try std.testing.expect(received);
-    try std.testing.expect(client.identify.schedule(0).nextWakeup(pair.now.mono_ms) == null);
-    try std.testing.expectEqual(pair.now.mono_ms, client.identify.schedule(1).nextWakeup(pair.now.mono_ms).?);
+    try std.testing.expect(schedule_test_support.wakeupMilliseconds(client.identify.schedule(0), pair.now.millis()) == null);
+    try std.testing.expectEqual(pair.now.millis(), schedule_test_support.wakeupMilliseconds(client.identify.schedule(1), pair.now.millis()).?);
 }
 
 test "identify blocked responder finishes immutable advertisement while new requests observe updates" {

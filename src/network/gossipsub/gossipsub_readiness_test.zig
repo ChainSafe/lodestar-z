@@ -1,4 +1,5 @@
 const std = @import("std");
+const schedule_test_support = @import("../schedule_test_support.zig");
 const gossip_test = @import("test_support.zig");
 const Engine = @import("../quic/Engine.zig");
 const Pair = @import("test_pair.zig").Pair;
@@ -43,7 +44,7 @@ test "gossip idle mesh of 200 sessions costs no session visits" {
         tx.subscription_dirty.setRangeValue(.{ .start = 0, .end = tx.subscription_dirty.bit_length }, false);
         tx.subscription_since = null;
         g.settle(peer.index);
-        const context = g.overlayContext(setup.shared.pair.now.mono_ms);
+        const context = g.overlayContext(setup.shared.pair.now.millis());
         _ = g.overlay.peerSubscription(&context, peer.index, topic, true);
         if (i < 8) g.overlay.onGraft(&context, index, peer.index);
     }
@@ -59,7 +60,7 @@ test "gossip idle mesh of 200 sessions costs no session visits" {
         setup.shared.pair.advance(30);
         try setup.pumpOnce();
         try std.testing.expectEqual(@as(usize, 0), g.sessions.ready.len);
-        try std.testing.expect(g.schedule().nextWakeup(setup.shared.pair.now.mono_ms).? > setup.shared.pair.now.mono_ms);
+        try std.testing.expect(schedule_test_support.wakeupMilliseconds(g.schedule(), setup.shared.pair.now.millis()).? > setup.shared.pair.now.millis());
     }
     try std.testing.expect(g.cycle.epoch - cycles >= 4);
     try std.testing.expectEqual(visits, g.sessions.visits);
@@ -98,7 +99,7 @@ test "gossip retries a flow-blocked session only when send capacity grows" {
         try std.testing.expectEqual(@as(usize, 1), try setup.shared.pair.client.write(probe, "x", false));
         try setup.shared.pair.pump();
         try std.testing.expect(!processClient(&setup));
-        try std.testing.expect(gossip_test.sessionWakeup(g, setup.shared.pair.now) > setup.shared.pair.now.mono_ms);
+        try std.testing.expect(gossip_test.sessionWakeup(g, setup.shared.pair.now) > setup.shared.pair.now.millis());
     }
     try std.testing.expect(setup.shared.pair.client_accepted - received >= 100);
     try std.testing.expectEqual(visits, g.sessions.visits);
@@ -134,12 +135,12 @@ test "gossip retries a flow-blocked session only when send capacity grows" {
     const deadline = io.deadlines(&g.options).next().?;
     try std.testing.expectEqual(deadline, g.sessions.deadlines.get(index).?);
     try std.testing.expectEqual(io.tx.progress_ms.? + g.options.large_frame_timeout_ms, deadline);
-    setup.shared.pair.advance(deadline - 1 - setup.shared.pair.now.mono_ms);
-    try std.testing.expect(g.schedule().nextWakeup(setup.shared.pair.now.mono_ms).? > setup.shared.pair.now.mono_ms);
+    setup.shared.pair.advance(deadline - 1 - setup.shared.pair.now.millis());
+    try std.testing.expect(schedule_test_support.wakeupMilliseconds(g.schedule(), setup.shared.pair.now.millis()).? > setup.shared.pair.now.millis());
     _ = processClient(&setup);
     try std.testing.expect(g.sessions.rows[index].outStream() != null);
     setup.shared.pair.advance(1);
-    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), g.schedule().nextWakeup(setup.shared.pair.now.mono_ms));
+    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.millis()), schedule_test_support.wakeupMilliseconds(g.schedule(), setup.shared.pair.now.millis()));
     _ = processClient(&setup);
     try std.testing.expect(g.sessions.rows[index].outStream() == null);
     try std.testing.expect(!io.tx.pending());
@@ -167,7 +168,7 @@ test "gossip busy session cannot starve the others" {
     for (g.sessions.rows, 0..) |*row, position| {
         g.sessions.setOutbound(@intCast(position), .{ .live = .{ .stream = stream, .version = .v1_2 } });
         const frames: usize = if (position == busy) 64 else 1;
-        for (0..frames) |_| try std.testing.expect(row.io.tx.inject(&.{0}, setup.shared.pair.now.mono_ms));
+        for (0..frames) |_| try std.testing.expect(row.io.tx.inject(&.{0}, setup.shared.pair.now.millis()));
         g.settle(@intCast(position));
     }
     try std.testing.expectEqual(@as(usize, 3 * per_turn), g.sessions.ready.len);
@@ -195,11 +196,11 @@ test "gossip publish reaches a mesh peer in the turn after it and leaves no read
     try std.testing.expectEqual(@as(usize, 0), g.sessions.ready.len);
     try std.testing.expectEqual(@as(u16, 1), (try g.publish(topic, "same turn", setup.shared.pair.now)).queued);
     try std.testing.expect(g.sessions.rows[index].ready_link.linked);
-    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), g.schedule().nextWakeup(setup.shared.pair.now.mono_ms));
+    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.millis()), schedule_test_support.wakeupMilliseconds(g.schedule(), setup.shared.pair.now.millis()));
     _ = setup.shared.processClient(.{});
     try std.testing.expect(!g.sessions.rows[index].io.tx.pending());
     try std.testing.expectEqual(@as(usize, 0), g.sessions.ready.len);
-    try std.testing.expect(gossip_test.sessionWakeup(g, setup.shared.pair.now) > setup.shared.pair.now.mono_ms);
+    try std.testing.expect(gossip_test.sessionWakeup(g, setup.shared.pair.now) > setup.shared.pair.now.millis());
     try std.testing.expect(setup.shared.pair.client.backlog() or setup.shared.pair.client.dirtyCount() > 0);
     try setup.shared.pair.pump();
     _ = setup.shared.processServer(.{});
@@ -276,7 +277,7 @@ test "gossip local publications lead each turn for a bounded run and cannot star
     try std.testing.expect(!io.tx.pending());
     const retained = g.messages.history.message(g.messages.history.get(&g.messages.store, @import("topic.zig").validMessageId(topic, "retained", g.options.message_id_policy)).?);
     const ordinary = [_]Origin{ .forward, .forward, .forward, .iwant, .forward, .forward };
-    for (ordinary) |origin| try std.testing.expectEqual(.queued, io.tx.queueData(&g.messages.store, retained, origin, .{ .bytes = g.options.tx_peer_bytes }, setup.shared.pair.now.mono_ms));
+    for (ordinary) |origin| try std.testing.expectEqual(.queued, io.tx.queueData(&g.messages.store, retained, origin, .{ .bytes = g.options.tx_peer_bytes }, setup.shared.pair.now.millis()));
     for (0..8) |i| {
         var payload: [8]u8 = undefined;
         std.mem.writeInt(u64, &payload, i, .little);

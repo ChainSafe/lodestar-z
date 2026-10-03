@@ -26,7 +26,7 @@ const Node = struct {
             .identity = .{ .bytes = @splat(identity) },
             .address = .unspecified,
             .direction = .outbound,
-        }, .{ .mono_ms = 0, .unix_s = 0 }).admitted;
+        }, Now.fromMilliseconds(.{ .mono_ms = 0, .unix_s = 0 })).admitted;
         core.sessions.setOutbound(session.index, .{ .live = .{ .stream = .{ .conn = .{ .index = 0, .generation = 1 }, .id = 0, .slot = 0 }, .version = .v1_2 } });
         core.sessions.rows[session.index].in_stream = .{ .conn = .{ .index = 0, .generation = 1 }, .id = 1, .slot = 1 };
         core.sessions.rows[session.index].io.rx_ready = true;
@@ -45,13 +45,13 @@ test "gossip simulation ignores decoded items and write receipts from a retired 
     defer node.core.deinit();
     const old = node.session;
     node.core.connectionClosed(node.core.sessions.rows[old.index].conn);
-    node.session = node.core.addPeer(.{ .index = 0, .generation = 2 }, &.{ .identity = .{ .bytes = @splat(2) }, .address = .unspecified, .direction = .outbound }, .{ .mono_ms = 1, .unix_s = 0 }).admitted;
+    node.session = node.core.addPeer(.{ .index = 0, .generation = 2 }, &.{ .identity = .{ .bytes = @splat(2) }, .address = .unspecified, .direction = .outbound }, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 })).admitted;
     try std.testing.expect(old.generation != node.session.generation);
-    const now: Now = .{ .mono_ms = 2, .unix_s = 0 };
+    const now: Now = Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 });
     try node.begin(now);
     var turn = Gossipsub.beginPump(&node.core, now);
     var peer = @import("turn.zig").Credits.peer(&node.core.options);
     try std.testing.expectEqual(.done, node.core.receiveItem(old, .{ .subscription = .{ .topic = name, .subscribe = true } }, &turn, &peer));
-    node.core.writeCompleted(old, .{ .control = .{ .token = 1 } }, now.mono_ms);
+    node.core.writeCompleted(old, .{ .control = .{ .token = 1 } }, now.millis());
     try std.testing.expectEqual(@as(usize, 0), node.core.resourceSnapshot().remote_subscriptions);
 }

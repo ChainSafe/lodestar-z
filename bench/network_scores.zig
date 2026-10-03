@@ -4,6 +4,7 @@
 //! three occupancies, no topic state, a typical one (mesh on 8 topics and first deliveries on 32)
 //! and every cell active, each with stale and then valid caches. The peers are gossip sessions
 //! without transport connections.
+const Now = @import("network").Now;
 const std = @import("std");
 const network = @import("network");
 const config = @import("config");
@@ -46,7 +47,7 @@ pub fn run(init: std.process.Init) !void {
         var identity: network.PeerId = .{ .bytes = @splat(0) };
         std.mem.writeInt(u16, identity.bytes[0..2], @intCast(index + 1), .little);
         const address: network.Address = .{ .ip4 = .{ .octets = .{ 10, 0, @intCast(index >> 8), @intCast(index & 0xff) }, .port = 9000 } };
-        const admitted = g.addPeer(.{ .index = @intCast(index), .generation = 1 }, &.{ .identity = identity, .address = address, .direction = .inbound }, .{ .mono_ms = 0, .unix_s = 0 });
+        const admitted = g.addPeer(.{ .index = @intCast(index), .generation = 1 }, &.{ .identity = identity, .address = address, .direction = .inbound }, Now.fromMilliseconds(.{ .mono_ms = 0, .unix_s = 0 }));
         if (admitted != .admitted) return error.PeerAdmission;
     }
     const buffer = try allocator.alloc(u8, network.metrics.textCapacity(plan.topics[0..plan.boundary_count]));
@@ -74,9 +75,9 @@ pub fn run(init: std.process.Init) !void {
             var connected: u64 = 0;
             var bytes: usize = 0;
             for (&collect_ns, &export_ns, 0..) |*collect_elapsed, *export_elapsed, round| {
-                const now: network.types.Now = .{ .mono_ms = 60_000 + round, .unix_s = 1 };
+                const now: network.types.Now = Now.fromMilliseconds(.{ .mono_ms = 60_000 + round, .unix_s = 1 });
                 var start = timestamp(io);
-                const populations = ScorePopulations.collect(&g.peers, g.overlay, g.sessions, now.mono_ms);
+                const populations = ScorePopulations.collect(&g.peers, g.overlay, g.sessions, now.millis());
                 collect_elapsed.* = timestamp(io) - start;
                 connected += populations.populations[0].peers[0];
                 start = timestamp(io);

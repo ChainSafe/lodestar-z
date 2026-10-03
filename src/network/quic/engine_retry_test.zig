@@ -57,7 +57,7 @@ test "QUIC invalid local Retry tokens do not receive another Retry" {
     const original = binding.Cid.fromSlice(&(@as([limits.local_cid_length]u8, @splat(3))));
     const scid = binding.Cid.fromSlice(&(@as([limits.local_cid_length]u8, @splat(4))));
     var token: [retry.token_max]u8 = undefined;
-    const issued = retry.mint(&pair.server.retry_key, &support.client_address, &original, &scid, pair.now.mono_ms, &token);
+    const issued = retry.mint(&pair.server.retry_key, &support.client_address, &original, &scid, pair.now.millis(), &token);
     try std.testing.expect(retry.isLocal(issued));
     var packet: [@import("../constants.zig").datagram_size_max]u8 = undefined;
     var output: [packet.len]u8 = undefined;

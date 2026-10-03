@@ -1,4 +1,5 @@
 const std = @import("std");
+const schedule_test_support = @import("../schedule_test_support.zig");
 const ct = @import("consensus_types");
 const codec = @import("codec.zig");
 const protocol = @import("protocol.zig");
@@ -23,7 +24,7 @@ test "reqresp fails a request whose peer stops making progress" {
     var sink: [ct.phase0.Status.fixed_size]u8 = undefined;
     var request_storage_1: [ct.phase0.Status.fixed_size]u8 = undefined;
     request_storage_1 = statusBytes(5);
-    _ = try setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .status_v1, &request_storage_1, &sink, .{ .absolute_timeouts = .{ .response_ms = 2000 } }, setup.shared.pair.now);
+    _ = try setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .status_v1, &request_storage_1, &sink, .{ .timeouts = .{ .response = .fromMilliseconds(2000) } }, setup.shared.pair.now);
     try waitForRequest(&setup);
 
     setup.shared.pair.advance(1_000);
@@ -72,7 +73,7 @@ test "reqresp negotiated handoff starts a fresh progress interval" {
         try std.testing.expectEqual(@as(usize, 1), count);
         setup.shared.pair.advance(2000);
         try std.testing.expect(setup.shared.client.reqresp.negotiated(&setup.shared.pair.client, outcomes[0], setup.shared.pair.now));
-        try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), setup.shared.client.reqresp.schedule(.{ .control = 1 }).nextWakeup(setup.shared.pair.now.mono_ms));
+        try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.millis()), schedule_test_support.wakeupMilliseconds(setup.shared.client.reqresp.schedule(.{ .control = 1 }), setup.shared.pair.now.millis()));
         ready = true;
         break;
     }
@@ -106,7 +107,7 @@ test "reqresp admission wait expires as local policy and not peer timeout" {
     var ready: usize = 0;
     for (setup.shared.server.reqresp.inbound) |*slot| ready += @intFromBool(slot.request.running() and slot.state == .ready);
     try std.testing.expectEqual(@as(usize, 1), ready);
-    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms + 1000), setup.shared.server.reqresp.schedule(.{ .control = 0 }).nextWakeup(setup.shared.pair.now.mono_ms));
+    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.millis() + 1000), schedule_test_support.wakeupMilliseconds(setup.shared.server.reqresp.schedule(.{ .control = 0 }), setup.shared.pair.now.millis()));
     setup.shared.pair.advance(1000);
     var events: [4]Event = undefined;
     const count = setup.shared.server.reqresp.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .control = &events }).control;
@@ -142,12 +143,12 @@ test "reqresp blocked response writes expire and do not advertise ready local wo
     }
     try std.testing.expect(blocked);
     try setup.shared.server.reqresp.respond(incoming, &bytes, null, setup.shared.pair.now);
-    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), setup.shared.server.reqresp.schedule(.{ .control = 0 }).nextWakeup(setup.shared.pair.now.mono_ms));
-    const due = setup.shared.pair.now.mono_ms + 2000;
+    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.millis()), schedule_test_support.wakeupMilliseconds(setup.shared.server.reqresp.schedule(.{ .control = 0 }), setup.shared.pair.now.millis()));
+    const due = setup.shared.pair.now.millis() + 2000;
     for (0..3) |_| {
         setup.shared.pair.advance(500);
         _ = setup.shared.server.reqresp.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .control = &.{} }).control;
-        try std.testing.expectEqual(@as(?u64, due), setup.shared.server.reqresp.schedule(.{ .control = 0 }).nextWakeup(setup.shared.pair.now.mono_ms));
+        try std.testing.expectEqual(@as(?u64, due), schedule_test_support.wakeupMilliseconds(setup.shared.server.reqresp.schedule(.{ .control = 0 }), setup.shared.pair.now.millis()));
     }
     setup.shared.pair.advance(500);
     var events: [1]Event = undefined;
@@ -163,14 +164,14 @@ test "reqresp absolute response deadline captures the live phase" {
     const request = statusBytes(5);
     var sink: [ct.phase0.Status.fixed_size]u8 = undefined;
     const handle = try setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .status_v1, &request, &sink, .{
-        .absolute_timeouts = .{ .negotiation_ms = 5_000, .request_ms = 5_000, .response_ms = 100 },
+        .timeouts = .{ .negotiation = .fromMilliseconds(5_000), .request = .fromMilliseconds(5_000), .response = .fromMilliseconds(100) },
     }, setup.shared.pair.now);
     try waitForRequest(&setup);
     const due = setup.shared.client.reqresp.outbound[handle.index].deadline().?;
-    setup.shared.pair.now.mono_ms = due - 1;
+    setup.shared.pair.now.monotonic = @import("../time.zig").milliseconds(due - 1);
     var events: [1]Event = undefined;
     try std.testing.expectEqual(@as(usize, 0), setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &events }).control);
-    setup.shared.pair.now.mono_ms = due;
+    setup.shared.pair.now.monotonic = @import("../time.zig").milliseconds(due);
     try std.testing.expectEqual(@as(usize, 1), setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &events }).control);
     try std.testing.expectEqual(.timeout, events[0].failed.reason);
     try std.testing.expectEqual(.response, events[0].failed.phase.?);
@@ -190,7 +191,7 @@ test "reqresp absolute request phase expires under real stream backpressure" {
         .ping_v1,
         &request,
         &sink,
-        .{ .absolute_timeouts = .{ .negotiation_ms = 5000, .request_ms = 2000, .response_ms = 10000 } },
+        .{ .timeouts = .{ .negotiation = .fromMilliseconds(5000), .request = .fromMilliseconds(2000), .response = .fromMilliseconds(10000) } },
         setup.shared.pair.now,
     );
     var negotiated = false;
@@ -266,15 +267,15 @@ test "reqresp absolute negotiation timeout phase survives terminal cleanup" {
         defer setup.deinit();
         const request = statusBytes(5);
         var sink: [ct.phase0.Status.fixed_size]u8 = undefined;
-        const handle = try setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .status_v1, &request, &sink, .{ .absolute_timeouts = .{ .negotiation_ms = duration, .request_ms = 5000, .response_ms = 10000 } }, setup.shared.pair.now);
+        const handle = try setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .status_v1, &request, &sink, .{ .timeouts = .{ .negotiation = .fromMilliseconds(@intCast(duration)), .request = .fromMilliseconds(5000), .response = .fromMilliseconds(10000) } }, setup.shared.pair.now);
         const stream = setup.shared.client.reqresp.outbound[handle.index].request.stream;
         try std.testing.expectEqual(@as(usize, 1), setup.shared.client.router.negotiator.active());
-        const due = setup.shared.pair.now.mono_ms + duration;
+        const due = setup.shared.pair.now.millis() + duration;
         var events: [1]Event = undefined;
         _ = setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &events }).control;
-        setup.shared.pair.now.mono_ms = due - 1;
+        setup.shared.pair.now.monotonic = @import("../time.zig").milliseconds(due - 1);
         try std.testing.expectEqual(@as(usize, 0), setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &events }).control);
-        setup.shared.pair.now.mono_ms = due;
+        setup.shared.pair.now.monotonic = @import("../time.zig").milliseconds(due);
         try std.testing.expectEqual(@as(usize, 1), setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &events }).control);
         try std.testing.expectEqual(handle, events[0].failed.request);
         try std.testing.expectEqual(.timeout, events[0].failed.reason);
@@ -293,7 +294,7 @@ test "reqresp absolute response includes paused host time without renewing at ch
         defer std.testing.allocator.free(sink);
         const block = [_]u8{7} ** 4000;
         const roots = [_]u8{0} ** 64;
-        const handle = try setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .blocks_by_root_v2, &roots, sink, .{ .absolute_timeouts = .{ .negotiation_ms = 5000, .request_ms = 5000, .response_ms = 1000 } }, setup.shared.pair.now);
+        const handle = try setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .blocks_by_root_v2, &roots, sink, .{ .timeouts = .{ .negotiation = .fromMilliseconds(5000), .request = .fromMilliseconds(5000), .response = .fromMilliseconds(1000) } }, setup.shared.pair.now);
         var held = false;
         for (0..80) |_| {
             try setup.pumpOnce();
@@ -305,12 +306,12 @@ test "reqresp absolute response includes paused host time without renewing at ch
         }
         try std.testing.expect(held);
         const due = setup.shared.client.reqresp.outbound[handle.index].deadline().?;
-        setup.shared.pair.now.mono_ms = due - 1;
+        setup.shared.pair.now.monotonic = @import("../time.zig").milliseconds(due - 1);
         if (consume) try std.testing.expect(setup.shared.client.reqresp.consume(handle, setup.shared.pair.now));
         try std.testing.expectEqual(@as(?u64, due), setup.shared.client.reqresp.outbound[handle.index].deadline());
         var events: [1]Event = undefined;
         try std.testing.expectEqual(@as(usize, 0), setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .application = &events }).application);
-        setup.shared.pair.now.mono_ms = due;
+        setup.shared.pair.now.monotonic = @import("../time.zig").milliseconds(due);
         try std.testing.expectEqual(@as(usize, 1), setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .application = &events }).application);
         try std.testing.expectEqual(if (consume) std.meta.Tag(reqresp.Failure).timeout else .host_timeout, std.meta.activeTag(events[0].failed.reason));
         try std.testing.expectEqual(.response, events[0].failed.phase.?);
@@ -324,7 +325,7 @@ test "reqresp absolute response expires despite continuous wire progress" {
         defer setup.deinit();
         const request = statusBytes(5);
         var sink: [ct.phase0.Status.fixed_size]u8 = undefined;
-        const options: reqresp.RequestOptions = if (duration == 100) .{ .absolute_timeouts = .{ .response_ms = duration } } else .{};
+        const options: reqresp.RequestOptions = if (duration == 100) .{ .timeouts = .{ .response = .fromMilliseconds(@intCast(duration)) } } else .{};
         const handle = try setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .status_v1, &request, &sink, options, setup.shared.pair.now);
         try waitForRequest(&setup);
         const due = setup.shared.client.reqresp.outbound[handle.index].deadline().?;
@@ -334,14 +335,14 @@ test "reqresp absolute response expires despite continuous wire progress" {
         try std.testing.expect(encoded.len > 10);
         var events: [1]Event = undefined;
         for (0..9) |i| {
-            setup.shared.pair.now.mono_ms = due - 90 + i * 10;
+            setup.shared.pair.now.monotonic = @import("../time.zig").milliseconds(due - 90 + i * 10);
             try std.testing.expectEqual(@as(usize, 1), try setup.shared.pair.server.write(stream, encoded[i .. i + 1], false));
             try setup.shared.pair.pump();
             @import("../service_test_support.zig").forward(&setup.shared.pair, &setup.shared.pair.client, .{ .reqresp = &setup.shared.client.reqresp });
             try std.testing.expectEqual(@as(usize, 0), setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &events }).control);
             try std.testing.expectEqual(@as(?u64, due), setup.shared.client.reqresp.outbound[handle.index].deadline());
         }
-        setup.shared.pair.now.mono_ms = due;
+        setup.shared.pair.now.monotonic = @import("../time.zig").milliseconds(due);
         const count = setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &events }).control;
         try std.testing.expectEqual(@as(usize, 1), count);
         try std.testing.expectEqual(.timeout, events[0].failed.reason);

@@ -1,4 +1,5 @@
 const std = @import("std");
+const Now = @import("network").Now;
 const network = @import("network");
 const control = @import("peer_control.zig");
 const snapshot = @import("peer_snapshot.zig");
@@ -26,7 +27,7 @@ pub const Peer = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
     conn: ?Engine.Handle = null,
-    now: network.Now = .{ .mono_ms = 0, .unix_s = 0 },
+    now: network.Now = Now.fromMilliseconds(.{ .mono_ms = 0, .unix_s = 0 }),
     clock_offset: u64 = 0,
     emitted: usize = 0,
     steps: usize = 0,
@@ -86,11 +87,11 @@ pub const Peer = struct {
         self.steps += 1;
         var events: [32]Engine.Event = undefined;
         var requests: [16]network.reqresp.ReqResp.Event = undefined;
-        const stepped = network.transport_driver.step(&self.transport, self.io, &events, .{ .wait_max_ms = 1 });
+        const stepped = network.transport_driver.step(&self.transport, self.io, &events, .{ .wait_max = .fromMilliseconds(1) });
         const result = stepped.progress;
         self.now = result.now;
-        self.now.mono_ms += self.clock_offset;
-        if (self.held_since) |since| if (self.now.mono_ms -| since >= 10_000) return error.FinHoldTimeout;
+        self.now.monotonic = @import("network").time.milliseconds(self.now.millis() + self.clock_offset);
+        if (self.held_since) |since| if (self.now.millis() -| since >= 10_000) return error.FinHoldTimeout;
         for (events[0..result.events]) |event| switch (event) {
             .connected => |c| {
                 self.conn = c.conn;
@@ -184,7 +185,7 @@ pub const Peer = struct {
             .chunk_sent => |c| {
                 if (self.hold_fin) {
                     self.held_finish = c.request;
-                    self.held_since = self.now.mono_ms;
+                    self.held_since = self.now.millis();
                 } else {
                     self.finish_calls += 1;
                     std.debug.assert(self.service.reqresp.finish(c.request, self.now));

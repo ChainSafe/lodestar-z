@@ -1,4 +1,5 @@
 const std = @import("std");
+const Now = @import("../types.zig").Now;
 const local = @import("local_intent.zig");
 const Gossipsub = @import("Gossipsub.zig");
 const topic = @import("topic.zig");
@@ -7,7 +8,7 @@ const full = @import("topic_fixture.zig").full;
 const name = "/eth2/01020304/beacon_block/ssz_snappy";
 const next = "/eth2/01020304/voluntary_exit/ssz_snappy";
 const boundaries = [_]@import("topic_policy.zig").Boundary{ full(.{ 1, 2, 3, 4 }), full(.{ 5, 6, 7, 8 }), full(.{ 9, 10, 11, 12 }) };
-const now: @import("../types.zig").Now = .{ .mono_ms = 100, .unix_s = 0 };
+const now: @import("../types.zig").Now = Now.fromMilliseconds(.{ .mono_ms = 100, .unix_s = 0 });
 
 fn options() Gossipsub.Options {
     return .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1, .seen_capacity = 16, .mcache_capacity = 16, .validation_capacity = 8, .topic_policy = &boundaries };
@@ -92,7 +93,7 @@ test "local intent exact capacity excess and namespace refusal" {
     for (0..512) |i| try std.testing.expect(g.overlay.subscribed(@intCast(i)));
     try std.testing.expect(try apply(&g, w, &.{}));
     const deadline = g.overlay.rows[0].retire_after_ms;
-    try std.testing.expect(!try g.prepareSubscriptions(&.{}, w, .{ .mono_ms = 200, .unix_s = 0 }, 0));
+    try std.testing.expect(!try g.prepareSubscriptions(&.{}, w, Now.fromMilliseconds(.{ .mono_ms = 200, .unix_s = 0 }), 0));
     try std.testing.expectEqual(deadline, g.overlay.rows[0].retire_after_ms);
     try std.testing.expectEqual(calls, backing.allocations);
     var generic = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1 });
@@ -138,10 +139,10 @@ test "local intent separate validation control score backoff and generation pins
     const desired = [_][]const u8{next};
     const message = g.messages.store.put([_]u8{1} ** 20, name, "payload").?;
     var reservation = g.messages.validation.reserve(g.messages.store.get(message).?.id).?;
-    const handle = reservation.commit(&g.messages.store, &g.peers, message, logical, .{ .index = 0, .generation = 1 }, now.mono_ms);
+    const handle = reservation.commit(&g.messages.store, &g.peers, message, logical, .{ .index = 0, .generation = 1 }, now.millis());
     g.messages.store.seal(message);
     try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
-    g.messages.validation.finish(&g.messages.store, handle, .ignore, now.mono_ms);
+    g.messages.validation.finish(&g.messages.store, handle, .ignore, now.millis());
     try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
     g.messages.validation.expire(&g.messages.store, &g.peers, std.math.maxInt(u64));
     io.tx.subscription_dirty.set(0);
@@ -156,9 +157,9 @@ test "local intent separate validation control score backoff and generation pins
 
     g.peers.scores.invalid(logical.index, 0);
     try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
-    g.overlay.rows[0].retire_after_ms = now.mono_ms;
+    g.overlay.rows[0].retire_after_ms = now.millis();
     const generation = g.overlay.rows[0].generation;
-    g.peers.backoffs[logical.index * g.overlay.rows.len] = .{ .topic_generation = generation, .until = now.mono_ms + 1 };
+    g.peers.backoffs[logical.index * g.overlay.rows.len] = .{ .topic_generation = generation, .until = now.millis() + 1 };
     const revision = g.peers.scores.revision;
     try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
     try std.testing.expect(g.peers.scores.retainsTopic(0));
@@ -192,7 +193,7 @@ test "local intent history survives former row reuse and real retransmission des
     try std.testing.expectEqualStrings("history payload", payload[0..read]);
     const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const io = &g.sessions.rows[peer.index].io;
-    const served = g.messages.serve(&io.tx, g.sessions.rows[peer.index].logical, id, .{ .bytes = g.options.tx_peer_bytes }, now.mono_ms);
+    const served = g.messages.serve(&io.tx, g.sessions.rows[peer.index].logical, id, .{ .bytes = g.options.tx_peer_bytes }, now.millis());
     try std.testing.expect(served == .known);
     try std.testing.expectEqual(.queued, served.known);
     try std.testing.expectEqual(retained, io.tx.data.next(&g.messages.store).?.message);
@@ -252,17 +253,17 @@ fn cachedRetirement(complete_intent: bool) !void {
         const logical = g.sessions.rows[peer.index].logical.index;
         if (negative) g.peers.scores.invalid(logical, 0) else g.peers.scores.deliverEligible(logical, 0, false);
         const expected: f64 = if (negative) -100 else 1;
-        try std.testing.expectEqual(expected, g.peers.score(g.sessions.rows[peer.index].logical, now.mono_ms));
+        try std.testing.expectEqual(expected, g.peers.score(g.sessions.rows[peer.index].logical, now.millis()));
         try std.testing.expect(!g.peers.scores.rows[logical].dirty);
         try std.testing.expectEqual(@as(?u64, null), g.peers.scores.nextChange(logical));
         const revision = g.peers.scores.revision;
         const params = g.peers.scores.topic_params[0];
         const generation = g.overlay.rows[0].generation;
-        try std.testing.expect(now.mono_ms >= g.overlay.rows[0].retire_after_ms.?);
+        try std.testing.expect(now.millis() >= g.overlay.rows[0].retire_after_ms.?);
         if (complete_intent) {
             try std.testing.expect(try apply(&g, w, &.{next}));
         } else {
-            g.last_now_ms = now.mono_ms;
+            g.last_now_ms = now.millis();
             _ = try g.publish(next, "0123456789", now);
         }
         try std.testing.expectEqualStrings(next, g.overlay.topicString(0));
@@ -271,10 +272,10 @@ fn cachedRetirement(complete_intent: bool) !void {
         try std.testing.expect(!g.peers.scores.retainsTopic(0));
         try std.testing.expect(g.peers.scores.revision > revision);
         try std.testing.expect(g.peers.scores.rows[logical].dirty);
-        try std.testing.expectEqual(@as(f64, 0), g.peers.score(g.sessions.rows[peer.index].logical, now.mono_ms));
+        try std.testing.expectEqual(@as(f64, 0), g.peers.score(g.sessions.rows[peer.index].logical, now.millis()));
         const retired_revision = g.peers.scores.revision;
         const calculations = g.peers.scores.calculations;
-        const refreshed = now.mono_ms + g.peers.scores.params.decay_interval_ms;
+        const refreshed = now.millis() + g.peers.scores.params.decay_interval_ms;
         g.peers.scores.refresh(refreshed);
         try std.testing.expectEqual(@as(f64, 0), g.peers.score(g.sessions.rows[peer.index].logical, refreshed));
         try std.testing.expectEqual(retired_revision, g.peers.scores.revision);
@@ -407,7 +408,7 @@ test "resident topics above the live limit preserve pins scores diagnostics and 
     const diag = @import("diagnostics.zig");
     var page = try diag.Page.init(a, g.overlay.rows.len);
     defer page.deinit(a);
-    try diag.capture(&g, 0, .{ .mono_ms = 2, .unix_s = 0 }, &page);
+    try diag.capture(&g, 0, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 }), &page);
     try std.testing.expectEqual(@as(u16, 1), page.topic_count);
     try std.testing.expectEqual(high, page.topics[0].index);
     try std.testing.expectEqual(high, page.peers[0].topics[0].index);

@@ -1,4 +1,5 @@
 const std = @import("std");
+const Now = @import("../types.zig").Now;
 const t = std.testing;
 const messages = @import("messages.zig");
 const Gossipsub = @import("Gossipsub.zig");
@@ -53,7 +54,7 @@ test "message admission retains canonical topic bounds and namespace-free fallba
         const source: messages.Source = .{ .peer = g.sessions.rows[peer.index].logical, .session = peer, .connection = g.sessions.rows[peer.index].conn };
         var sink: Sink = .{};
         const callback: messages.MessageSink = .{ .context = &sink, .has_capacity = Sink.hasCapacity, .admit = Sink.admit };
-        var turn = Gossipsub.beginPump(&g, .{ .mono_ms = 1, .unix_s = 0 });
+        var turn = Gossipsub.beginPump(&g, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
         turn.sink = &callback;
         var credits = @import("turn.zig").Credits.peer(&g.options);
         const workspace = turn.workspace(&credits);
@@ -72,6 +73,6 @@ test "message admission retains canonical topic bounds and namespace-free fallba
         };
         try t.expectEqual(maximum, sink.maximum);
         try t.expectEqual(@import("validation.zig").Validation.chargedBytes(maximum), sink.source_maximum);
-        try t.expectEqual(Gossipsub.ReportOutcome{ .applied = .ignore }, g.report(sink.handle, .ignore, .{ .mono_ms = 2, .unix_s = 0 }));
+        try t.expectEqual(Gossipsub.ReportOutcome{ .applied = .ignore }, g.report(sink.handle, .ignore, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 })));
     }
 }

@@ -17,7 +17,7 @@ const Peer = struct {
     pub fn pump(self: *Peer) !void {
         self.now = try network.Transport.currentTime(self.io);
         var events: [1]t.Event = undefined;
-        const result = network.driver.step(&self.node, self.io, self.now, .{ .peers = events[0..self.capacity] }, .deadlineOnly(self.now.mono_ms +| 1));
+        const result = network.driver.step(&self.node, self.io, self.now, .{ .peers = events[0..self.capacity] }, .deadlineOnly(@import("network").time.optionalMilliseconds(self.now.millis() +| 1)));
         if (result.failure) |err| return err;
         for (events[0..result.counts.peers]) |event| {
             if (self.emitted == 512) return error.EventBound;
@@ -44,7 +44,7 @@ const Peer = struct {
         if (std.mem.eql(u8, instruction.op, "dial")) {
             const target = try network.Multiaddr.parse(instruction.address orelse return error.MissingAddress);
             if (target.address != .ip4 or !std.mem.eql(u8, &target.address.ip4.octets, &.{ 127, 0, 0, 1 })) return error.NotLoopback;
-            try self.node.connectUntil(&(target.peer orelse return error.MissingPeer), &.{target.address}, self.now, self.now.mono_ms +| network.peers.Dialing.connect_timeout_ms);
+            try self.node.connectUntil(&(target.peer orelse return error.MissingPeer), &.{target.address}, self.now, self.now.millis() +| network.peers.Dialing.connect_timeout_ms);
         } else if (std.mem.eql(u8, instruction.op, "capacity")) {
             const capacity = instruction.capacity orelse return error.MissingCapacity;
             if (capacity > 1) return error.InvalidCapacity;
@@ -68,7 +68,7 @@ const Peer = struct {
                 if (row.disconnect_reason) |value| reason = @tagName(value);
                 if (self.node.peer_manager.control.schedules[row.peer.index].closing) |closing| deadline = closing.deadline_ms;
             };
-            return control.emit(self.allocator, .{ .id = instruction.id, .ok = true, .connected = self.node.peerCounts().connected, .relevant = self.node.peerCounts().relevant, .generation = native_generation, .sequence = metadata_sequence, .custody = custody, .sampling = sampling, .closed = self.node.isClosed(), .reason = reason, .deadline = deadline, .now = self.now.mono_ms });
+            return control.emit(self.allocator, .{ .id = instruction.id, .ok = true, .connected = self.node.peerCounts().connected, .relevant = self.node.peerCounts().relevant, .generation = native_generation, .sequence = metadata_sequence, .custody = custody, .sampling = sampling, .closed = self.node.isClosed(), .reason = reason, .deadline = deadline, .now = self.now.millis() });
         } else if (std.mem.eql(u8, instruction.op, "disconnect")) {
             if (!self.node.peer_manager.disconnect(self.peer orelse return error.NoPeer, .host, self.now)) return error.NoPeer;
         } else if (std.mem.eql(u8, instruction.op, "shutdown")) {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const Now = @import("network").Now;
 const n = @import("network");
 const r = @import("network_runtime.zig");
 const Runtime = r.Runtime;
@@ -302,7 +303,7 @@ test "the O(1) settle-able state matches a full scan across state transitions" {
     runtime.table.transition(runtime.table.get(connect), .waiting);
     runtime.table.get(connect).deadline = 5;
     try expectDueMatchesScan(&runtime);
-    try std.testing.expect(commands.latchConnects(&runtime.table, &.{}, .{ .mono_ms = 5, .unix_s = 0 }));
+    try std.testing.expect(commands.latchConnects(&runtime.table, &.{}, Now.fromMilliseconds(.{ .mono_ms = 5, .unix_s = 0 })));
     try expectDueMatchesScan(&runtime);
     runtime.cancelCommandsLocked();
     try expectDueMatchesScan(&runtime);

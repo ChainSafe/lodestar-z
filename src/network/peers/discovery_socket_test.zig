@@ -1,4 +1,5 @@
 const std = @import("std");
+const schedule_test_support = @import("../schedule_test_support.zig");
 const d = @import("discv5");
 const adapter = @import("enr.zig");
 
@@ -23,9 +24,9 @@ test "peer discovery independent local nodes confirm signed candidates and cance
     for (0..100) |_| {
         const tick = try d.Transport.monotonicMilliseconds(io);
         const result = try @import("discovery_test_support.zig").advance(controller, io, tick, &output);
-        if (result.failure) |err| return err;
-        const remote = try @import("discv5").driver.step(b.transport, io, &expiries, .{ .deadline_ms = tick, .wait_max_ms = 10 });
-        if (remote.failure) |err| return err;
+        if (result.failure) |failure| return failure.cause;
+        const remote = try @import("discv5").driver.step(b.transport, io, &expiries, .{ .deadline = .{ .clock = .awake, .raw = .fromNanoseconds(@as(i96, tick) * std.time.ns_per_ms) }, .wait_max = .fromMilliseconds(10) });
+        if (remote.failure) |failure| return failure.cause;
         for (output[0..result.candidates]) |candidate| {
             try adapter.requireIdentity(b.transport.engine.localRecord(), &candidate.peer);
             try std.testing.expectEqual(@as(u16, 9002), candidate.addresses[0].port());
@@ -38,10 +39,10 @@ test "peer discovery independent local nodes confirm signed candidates and cance
     try std.testing.expectEqual(@as(u64, 1), controller.counters.candidates_published);
     try std.testing.expect(controller.counters.lookups_started > 0);
     try handoff(&output[0]);
-    controller.cancel();
-    controller.cancel();
+    controller.shutdown();
+    controller.shutdown();
     try std.testing.expectEqual(@as(usize, 0), a.transport.engine.calls.count());
-    try std.testing.expect(controller.schedule(now).nextWakeup(now) == null);
+    try std.testing.expect(schedule_test_support.wakeupMilliseconds(controller.schedule(now), now) == null);
     try std.testing.expectError(error.Stopped, controller.request(.{ .general = true }, now));
 }
 
@@ -63,10 +64,10 @@ test "dual-stack discovery confirms both families in one routing table" {
     for (0..400) |_| {
         const tick = try d.Transport.monotonicMilliseconds(io);
         const result = try @import("discovery_test_support.zig").advance(controller, io, tick, &.{});
-        if (result.failure) |err| return err;
+        if (result.failure) |failure| return failure.cause;
         for ([_]*Node{ &ipv4, &ipv6 }) |node| {
-            const remote = try @import("discv5").driver.step(node.transport, io, &expiries, .{ .deadline_ms = tick, .wait_max_ms = 10 });
-            if (remote.failure) |err| return err;
+            const remote = try @import("discv5").driver.step(node.transport, io, &expiries, .{ .deadline = .{ .clock = .awake, .raw = .fromNanoseconds(@as(i96, tick) * std.time.ns_per_ms) }, .wait_max = .fromMilliseconds(10) });
+            if (remote.failure) |failure| return failure.cause;
         }
         if (hub.transport.engine.peerRecord(&ipv4.transport.engine.localRecord().node_id).?.last_verified_ms != null and
             hub.transport.engine.peerRecord(&ipv6.transport.engine.localRecord().node_id).?.last_verified_ms != null) break;
@@ -93,9 +94,9 @@ test "IPv6-only discovery bootstraps a dual-stack record over IPv6" {
     for (0..100) |_| {
         const tick = try d.Transport.monotonicMilliseconds(io);
         const result = try @import("discovery_test_support.zig").advance(controller, io, tick, &.{});
-        if (result.failure) |err| return err;
-        const response = try @import("discv5").driver.step(seed.transport, io, &expiries, .{ .deadline_ms = tick, .wait_max_ms = 10 });
-        if (response.failure) |err| return err;
+        if (result.failure) |failure| return failure.cause;
+        const response = try @import("discv5").driver.step(seed.transport, io, &expiries, .{ .deadline = .{ .clock = .awake, .raw = .fromNanoseconds(@as(i96, tick) * std.time.ns_per_ms) }, .wait_max = .fromMilliseconds(10) });
+        if (response.failure) |failure| return failure.cause;
         if (node.transport.engine.peerRecord(&seed.transport.engine.localRecord().node_id).?.last_verified_ms != null) break;
     }
     try std.testing.expect(node.transport.engine.peerRecord(&seed.transport.engine.localRecord().node_id).?.peer.address == .ip6);

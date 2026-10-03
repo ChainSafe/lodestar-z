@@ -118,7 +118,7 @@ fn timestamp(io: std.Io) u64 {
 
 fn turn(node: *network.NetworkCore, io: std.Io, outputs: network.NetworkCore.Outputs) !network.NetworkCore.Result {
     const now = try network.Transport.currentTime(io);
-    const result = network.driver.step(node, io, now, outputs, .deadlineOnly(now.mono_ms));
+    const result = network.driver.step(node, io, now, outputs, .deadlineOnly(@import("network").time.optionalMilliseconds(now.millis())));
     if (result.failure) |err| return err;
     return result;
 }
@@ -155,7 +155,7 @@ pub fn main(init: std.process.Init) !void {
     var samples: Samples = .begin(a);
     for (0..turns) |i| {
         const now = try network.Transport.currentTime(io);
-        const immediate = a.wakeups(now, .{}).schedule().due(now.mono_ms);
+        const immediate = a.wakeups(now, .{}).schedule().due(now.monotonic);
         const due_before = a.due_now_turns;
         const start = timestamp(io);
         const result = try turn(a, io, .{});
@@ -231,10 +231,10 @@ fn connectPair(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, top
     }
     for (0..4000) |_| {
         const now_a = try network.Transport.currentTime(io);
-        const result_a = network.driver.step(a, io, now_a, .{ .peers = &peer_events }, .deadlineOnly(now_a.mono_ms +| 1));
+        const result_a = network.driver.step(a, io, now_a, .{ .peers = &peer_events }, .deadlineOnly(@import("network").time.optionalMilliseconds(now_a.millis() +| 1)));
         if (result_a.failure) |err| return err;
         const now_b = try network.Transport.currentTime(io);
-        const result_b = network.driver.step(b, io, now_b, .{ .peers = &peer_events }, .deadlineOnly(now_b.mono_ms +| 1));
+        const result_b = network.driver.step(b, io, now_b, .{ .peers = &peer_events }, .deadlineOnly(@import("network").time.optionalMilliseconds(now_b.millis() +| 1)));
         if (result_b.failure) |err| return err;
         if (a.service.gossipsub.resourceSnapshot().remote_subscriptions > 0 and a.service.gossipsub.peers.rows[0].direct) break;
         try io.sleep(.fromMilliseconds(1), .awake);
@@ -283,7 +283,7 @@ fn pressure(a: *network.NetworkCore, b: *network.NetworkCore, sinks: []u8, io: s
         peak_descriptors = @max(peak_descriptors, sender.queued_descriptors);
         peak_validations = @max(peak_validations, receiver.pending_validations);
         const now = try network.Transport.currentTime(io);
-        const immediate = a.wakeups(now, .{}).schedule().due(now.mono_ms);
+        const immediate = a.wakeups(now, .{}).schedule().due(now.monotonic);
         const due_before = a.due_now_turns;
         const start = timestamp(io);
         const result = try turn(a, io, .{});
@@ -329,7 +329,7 @@ fn drain(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, expected:
                 received += 1;
                 try b.respond(value.request, payload, context, try network.Transport.currentTime(io));
             },
-            .chunk_sent => |value| if (!b.finish(value.request, try network.Transport.currentTime(io))) {
+            .chunk_sent => |value| if (!b.finishResponse(value.request, try network.Transport.currentTime(io))) {
                 return error.FinishFailed;
             },
             .served => served += 1,
@@ -339,7 +339,7 @@ fn drain(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, expected:
         for (events[0..sent.counts.application]) |event| switch (event) {
             .chunk => |value| {
                 if (value.fork != context.fork or !std.mem.eql(u8, value.bytes, payload)) return error.InvalidResponse;
-                if (!a.consume(value.request, try network.Transport.currentTime(io))) return error.ConsumeFailed;
+                if (!a.consumeResponse(value.request, try network.Transport.currentTime(io))) return error.ConsumeFailed;
                 chunks += 1;
             },
             .done => |value| {
@@ -399,7 +399,7 @@ fn idleWait(init: std.process.Init) !void {
     try node.setHostWake(host.pipe[0]);
     const calls = backing.allocations;
     const start = timestamp(io);
-    const window_end_ms = (try network.Transport.currentTime(io)).mono_ms + 1_000;
+    const window_end_ms = (try network.Transport.currentTime(io)).millis() + 1_000;
     var count: u32 = 0;
     var immediate: u32 = 0;
     var elapsed_turns: u64 = 0;
@@ -407,8 +407,8 @@ fn idleWait(init: std.process.Init) !void {
         const before = timestamp(io);
         if (before - start >= 1_000_000_000) break;
         const now = try network.Transport.currentTime(io);
-        immediate += @intFromBool(node.wakeups(now, .{}).schedule().due(now.mono_ms));
-        const result = network.driver.step(node, io, now, .{}, .{ .context = &host, .apply = IdleHost.apply, .deadline_ms = window_end_ms });
+        immediate += @intFromBool(node.wakeups(now, .{}).schedule().due(now.monotonic));
+        const result = network.driver.step(node, io, now, .{}, .{ .handler = .{ .context = &host, .apply = IdleHost.apply }, .deadline = network.time.optionalMilliseconds(window_end_ms) });
         if (result.failure) |err| return err;
         elapsed_turns += timestamp(io) - before;
         count += 1;
@@ -468,10 +468,10 @@ fn idleTransport(init: std.process.Init) !void {
             _ = try spokes[dialed].dialPeer(io, hub.localAddress(), hub.peerId(), try network.Transport.currentTime(io));
         }
         for (spokes[0..dialed]) |*spoke| {
-            const stepped = network.transport_driver.step(spoke, io, &events, .{ .wait_max_ms = 0 });
+            const stepped = network.transport_driver.step(spoke, io, &events, .{ .wait_max = .fromMilliseconds(0) });
             if (stepped.failure) |err| return err;
         }
-        const stepped = network.transport_driver.step(hub, io, &events, .{ .wait_max_ms = 1 });
+        const stepped = network.transport_driver.step(hub, io, &events, .{ .wait_max = .fromMilliseconds(1) });
         if (stepped.failure) |err| return err;
         for (events[0..stepped.progress.events]) |event| switch (event) {
             .connected => established += 1,
@@ -486,11 +486,11 @@ fn idleTransport(init: std.process.Init) !void {
     for (0..2_000) |_| {
         var sent: u64 = 0;
         for (spokes) |*spoke| {
-            const stepped = network.transport_driver.step(spoke, io, &events, .{ .wait_max_ms = 0 });
+            const stepped = network.transport_driver.step(spoke, io, &events, .{ .wait_max = .fromMilliseconds(0) });
             if (stepped.failure) |err| return err;
             sent += stepped.progress.datagrams_sent;
         }
-        const stepped = network.transport_driver.step(hub, io, &events, .{ .wait_max_ms = 2 });
+        const stepped = network.transport_driver.step(hub, io, &events, .{ .wait_max = .fromMilliseconds(2) });
         if (stepped.failure) |err| return err;
         sent += stepped.progress.datagrams_sent;
         quiet = if (sent == 0 and !stepped.progress.backlog) quiet + 1 else 0;
@@ -579,7 +579,7 @@ fn idleConnections(init: std.process.Init) !void {
             _ = try spokes[dialed].dialPeer(io, hub.transport.localAddress(), hub.peerId(), try network.Transport.currentTime(io));
         }
         for (spokes[0..dialed]) |*spoke| {
-            const stepped = network.transport_driver.step(spoke, io, &events, .{ .wait_max_ms = 0 });
+            const stepped = network.transport_driver.step(spoke, io, &events, .{ .wait_max = .fromMilliseconds(0) });
             if (stepped.failure) |err| return err;
         }
         _ = try turn(hub, io, outputs);
@@ -594,7 +594,7 @@ fn idleConnections(init: std.process.Init) !void {
     for (0..2_000) |_| {
         var sent: u64 = 0;
         for (spokes) |*spoke| {
-            const stepped = network.transport_driver.step(spoke, io, &events, .{ .wait_max_ms = 0 });
+            const stepped = network.transport_driver.step(spoke, io, &events, .{ .wait_max = .fromMilliseconds(0) });
             if (stepped.failure) |err| return err;
             sent += stepped.progress.datagrams_sent;
         }
@@ -609,7 +609,7 @@ fn idleConnections(init: std.process.Init) !void {
     var samples: Samples = .begin(hub);
     for (0..turns) |i| {
         const now = try network.Transport.currentTime(io);
-        const immediate = hub.wakeups(now, outputs).schedule().due(now.mono_ms);
+        const immediate = hub.wakeups(now, outputs).schedule().due(now.monotonic);
         const due_before = hub.due_now_turns;
         const start = timestamp(io);
         const result = try turn(hub, io, outputs);

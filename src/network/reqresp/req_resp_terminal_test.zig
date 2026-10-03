@@ -1,4 +1,5 @@
 const std = @import("std");
+const schedule_test_support = @import("../schedule_test_support.zig");
 const rr = @import("ReqResp.zig");
 const codec = @import("codec.zig");
 const Protocol = @import("protocol.zig").Protocol;
@@ -33,7 +34,7 @@ test "reqresp complete incoming transfer deadline survives partial bytes and mis
             const encoded = try codec.encodeRequest(body[0..if (which == .ping_v1) 8 else 32], &storage);
             var sent: usize = 0;
             for ([_]u64{ 25, 50, 75, 99 }) |elapsed| {
-                setup.shared.pair.now.mono_ms = started + elapsed;
+                setup.shared.pair.now.monotonic = @import("../time.zig").milliseconds(started + elapsed);
                 const end = if (complete_body) encoded.len else sent + 1;
                 if (end > sent) try std.testing.expectEqual(end - sent, try setup.shared.pair.client.write(stream, encoded[sent..end], false));
                 sent = end;
@@ -42,7 +43,7 @@ test "reqresp complete incoming transfer deadline survives partial bytes and mis
                 try std.testing.expectEqual(@as(?u64, deadline), slot.deadline(&setup.shared.server.reqresp));
             }
             try std.testing.expect(slot.progress_ms > started);
-            setup.shared.pair.now.mono_ms = deadline;
+            setup.shared.pair.now.monotonic = @import("../time.zig").milliseconds(deadline);
             try setup.pumpOnce();
             try std.testing.expectEqual(rr.Failure.timeout, slot.request.terminalEvent().?.failed.reason);
             for (0..3) |_| try setup.pumpOnce();
@@ -72,14 +73,14 @@ test "reqresp incoming transfer completed at the boundary starts the host deadli
     const started = slot.request.started_ms;
     var storage: [codec.encodedLengthMax(8) + 1]u8 = undefined;
     const encoded = try codec.encodeRequest(&(@as([8]u8, @splat(0))), &storage);
-    setup.shared.pair.now.mono_ms = started + 99;
+    setup.shared.pair.now.monotonic = @import("../time.zig").milliseconds(started + 99);
     try std.testing.expectEqual(encoded.len, try setup.shared.pair.client.write(stream, encoded, true));
     try setup.pumpOnce();
     try std.testing.expectEqual(@as(usize, 1), setup.serverEvents().len);
     try std.testing.expect(setup.serverEvents()[0] == .request);
     const handle = setup.serverEvents()[0].request.request;
     try std.testing.expectEqual(@as(?u64, started + 1099), slot.deadline(&setup.shared.server.reqresp));
-    setup.shared.pair.now.mono_ms = started + 100;
+    setup.shared.pair.now.monotonic = @import("../time.zig").milliseconds(started + 100);
     try setup.pumpOnce();
     try std.testing.expect(slot.request.running());
     try std.testing.expect(setup.shared.server.reqresp.finish(handle, setup.shared.pair.now));
@@ -141,7 +142,7 @@ test "reqresp router negotiation timeout contributes once to aggregate timeout c
     defer setup.deinit();
     const bytes = [_]u8{0} ** 8;
     var sink: [8]u8 = undefined;
-    const handle = try setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .ping_v1, &bytes, &sink, .{ .absolute_timeouts = .{ .negotiation_ms = 100 } }, setup.shared.pair.now);
+    const handle = try setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .ping_v1, &bytes, &sink, .{ .timeouts = .{ .negotiation = .fromMilliseconds(100) } }, setup.shared.pair.now);
     setup.shared.pair.advance(100);
     var outcomes: [1]@import("../router.zig").Router.Outcome = undefined;
     try std.testing.expectEqual(@as(usize, 1), setup.shared.client.router.pump(&setup.shared.pair.client, setup.shared.pair.now, &outcomes));
@@ -167,7 +168,7 @@ test "reqresp cancellation removes Router ownership before output delivery" {
     const stream = setup.shared.client.reqresp.outbound[handle.index].request.stream;
     setup.shared.client.reqresp.options.work_per_pump_max = 1;
     try std.testing.expect(setup.shared.client.reqresp.cancel(handle, setup.shared.pair.now));
-    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), setup.shared.client.reqresp.schedule(.{ .control = 0 }).nextWakeup(setup.shared.pair.now.mono_ms));
+    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.millis()), schedule_test_support.wakeupMilliseconds(setup.shared.client.reqresp.schedule(.{ .control = 0 }), setup.shared.pair.now.millis()));
     try std.testing.expect(!setup.shared.client.reqresp.cancel(handle, setup.shared.pair.now));
     try std.testing.expectEqual(@as(usize, 1), setup.shared.client.reqresp.resourceSnapshot().outbound_occupied);
     try std.testing.expectEqual(@as(usize, 1), setup.shared.client.reqresp.resourceSnapshot().pending_terminals);

@@ -1,3 +1,4 @@
+const Now = @import("../types.zig").Now;
 const gossip_test = @import("test_support.zig");
 const topic_mod = @import("topic.zig");
 const protobuf = @import("protobuf.zig");
@@ -190,7 +191,7 @@ test "gossip partial peer turn queues subscription before outgoing GRAFT" {
     const target = &f.g.sessions.rows[1].io.tx;
     try std.testing.expect(target.subscription_dirty.isSet(f.topic));
     f.g.heartbeat_at = 1;
-    _ = @import("test_support.zig").pump(&f.g, &pair.client, .{ .mono_ms = 1, .unix_s = 0 });
+    _ = @import("test_support.zig").pump(&f.g, &pair.client, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
     // The turn took only the first ready session; the second stays ready for the next one.
     try std.testing.expect(!f.g.sessions.rows[0].ready_link.linked);
     try std.testing.expectEqual(@as(u32, 1), f.g.sessions.ready.head);

@@ -119,7 +119,7 @@ pub fn open(
     assert(self.conn == null);
     assert(!self.collect_link.linked and !self.dirty_link.linked and !self.event_link.linked and !self.release_link.linked);
     assert(!self.deferred_link.linked);
-    self.handshake = .{ .now_unix = params.now.unix_s };
+    self.handshake = .{ .now_unix = params.now.unixSeconds() };
     self.direction = params.direction;
     self.peer = params.peer;
     self.peer_sockaddr = binding.SockAddr.fromAddress(params.peer);
@@ -127,8 +127,8 @@ pub fn open(
     self.expected_peer_id = params.expected_peer_id;
     self.peer_id = null;
     self.scid = binding.Cid.fromSlice(&params.scid);
-    self.created_ms = params.now.mono_ms;
-    self.last_send_ms = params.now.mono_ms;
+    self.created_ms = params.now.millis();
+    self.last_send_ms = params.now.millis();
     self.closing = .none;
     self.flight_pending = false;
     self.connected_pending = false;

@@ -1,4 +1,5 @@
 const std = @import("std");
+const schedule_test_support = @import("../schedule_test_support.zig");
 const rr = @import("ReqResp.zig");
 const protocol = @import("protocol.zig");
 const Router = @import("../router.zig").Router;
@@ -173,12 +174,12 @@ test "reqresp service retains request and chunk bytes through control progress" 
     try std.testing.expect(client.reqresp.outbound[app.index].request.pendingEvent() != null);
     try std.testing.expectEqualSlices(u8, &block, sink[0..block.len]);
     try std.testing.expectEqual(
-        pair.now.mono_ms + 10_000,
-        client.reqresp.schedule(.{ .application = 0, .control = 1 }).nextWakeup(pair.now.mono_ms),
+        pair.now.millis() + 10_000,
+        schedule_test_support.wakeupMilliseconds(client.reqresp.schedule(.{ .application = 0, .control = 1 }), pair.now.millis()),
     );
     try std.testing.expectEqual(
-        pair.now.mono_ms,
-        client.reqresp.schedule(.{ .application = 1, .control = 0 }).nextWakeup(pair.now.mono_ms),
+        pair.now.millis(),
+        schedule_test_support.wakeupMilliseconds(client.reqresp.schedule(.{ .application = 1, .control = 0 }), pair.now.millis()),
     );
     try std.testing.expect(client.reqresp.cancel(app, pair.now));
     _ = client.reqresp.pump(&pair.client, &client.router, pair.now, .{ .application = &.{}, .control = &.{} });

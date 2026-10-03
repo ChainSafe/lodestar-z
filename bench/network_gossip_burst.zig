@@ -460,13 +460,13 @@ const Host = struct {
     fn apply(context: *anyopaque, core: *network.NetworkCore, tick: Now) network.NetworkCore.HostProgress {
         const self: *Host = @ptrCast(@alignCast(context));
         var count: usize = 0;
-        while (count < self.batch and self.len > 0 and self.ring[self.head].due_ms <= tick.mono_ms) : (count += 1) {
+        while (count < self.batch and self.len > 0 and self.ring[self.head].due_ms <= tick.millis()) : (count += 1) {
             if (core.reportValidation(self.ring[self.head].handle, .accept, tick) == .applied) self.applied += 1 else self.failed_verdicts += 1;
             self.head = (self.head + 1) % self.ring.len;
             self.len -= 1;
         }
         self.applies += @intFromBool(count > 0);
-        return .{ .runnable = self.len > 0 and self.ring[self.head].due_ms <= tick.mono_ms };
+        return .{ .runnable = self.len > 0 and self.ring[self.head].due_ms <= tick.millis() };
     }
 
     fn deadline(self: *const Host) ?u64 {
@@ -523,7 +523,7 @@ const Spoke = struct {
         const payload = try shared.allocator.alloc(u8, @max(shared.chain.attestation_bytes, options.column_bytes));
         defer shared.allocator.free(payload);
         var now = try network.Transport.currentTime(io);
-        try self.core.connectUntil(&shared.hub_id, &.{shared.hub_address}, now, now.mono_ms + 10_000);
+        try self.core.connectUntil(&shared.hub_id, &.{shared.hub_address}, now, now.millis() + 10_000);
         try shared.chain.subscribe(&self.core, options, self.index, now);
         const schedule = shared.schedule.of(self.index);
         var peer_events: [16]t.Event = undefined;
@@ -540,14 +540,14 @@ const Spoke = struct {
                 _ = shared.ready.fetchAdd(1, .acq_rel);
             }
             const start = shared.start_ms.load(.acquire);
-            var wake = if (start == 0) now.mono_ms + 10 else self.publishDue(schedule, &cursor, start, payload, now);
+            var wake = if (start == 0) now.millis() + 10 else self.publishDue(schedule, &cursor, start, payload, now);
             if (slow) {
-                if (now.mono_ms < next_tick) try io.sleep(.fromMilliseconds(@intCast(next_tick - now.mono_ms)), .awake);
-                next_tick = @max(next_tick, now.mono_ms) + slow_tick_ms;
+                if (now.millis() < next_tick) try io.sleep(.fromMilliseconds(@intCast(next_tick - now.millis())), .awake);
+                next_tick = @max(next_tick, now.millis()) + slow_tick_ms;
                 now = try network.Transport.currentTime(io);
-                wake = now.mono_ms;
+                wake = now.millis();
             }
-            const result = network.driver.step(&self.core, io, now, outputs, .deadlineOnly(wake));
+            const result = network.driver.step(&self.core, io, now, outputs, .deadlineOnly(@import("network").time.optionalMilliseconds(wake)));
             if (result.readiness.failure) |err| return err;
         }
         // A spoke runs without a host, so it refuses every message it receives for storage.
@@ -557,13 +557,13 @@ const Spoke = struct {
     /// Publishes up to 64 due messages and returns when the spoke should step again.
     fn publishDue(self: *Spoke, schedule: []const Message, cursor: *usize, start_ms: u64, payload: []u8, now: Now) u64 {
         for (0..64) |_| {
-            if (cursor.* == schedule.len) return now.mono_ms + 10;
+            if (cursor.* == schedule.len) return now.millis() + 10;
             const due = start_ms + schedule[cursor.*].at_us / 1000;
-            if (due > now.mono_ms) return @min(due, now.mono_ms + 10);
+            if (due > now.millis()) return @min(due, now.millis() + 10);
             self.publish(&schedule[cursor.*], payload, now);
             cursor.* += 1;
         }
-        return now.mono_ms;
+        return now.millis();
     }
 
     fn publish(self: *Spoke, message: *const Message, payload: []u8, now: Now) void {
@@ -759,18 +759,18 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     const setup_start = try network.Transport.currentTime(io);
     for (0..1 << 20) |_| {
         const now = try network.Transport.currentTime(io);
-        const result = network.driver.step(hub, io, now, outputs, .{ .context = &host, .apply = Host.apply, .deadline_ms = now.mono_ms + 5 });
+        const result = network.driver.step(hub, io, now, outputs, .{ .handler = .{ .context = &host, .apply = Host.apply }, .deadline = network.time.milliseconds(now.millis() + 5) });
         if (result.readiness.failure) |err| return err;
         if (shared.failed.load(.acquire)) return spokeFailure(spokes);
         if (shared.ready.load(.acquire) == options.peers and hubReady(hub, chain, options)) break;
-        if (now.mono_ms > setup_start.mono_ms + 20_000) {
+        if (now.millis() > setup_start.millis() + 20_000) {
             std.debug.print("case=gossip_burst setup_failed ready={d} peers={any} gossip={any}\n", .{ shared.ready.load(.acquire), hub.peerCounts(), hub.service.gossipsub.resourceSnapshot() });
             return error.SetupDeadline;
         }
     }
     const setup_end = try network.Transport.currentTime(io);
-    const start_ms = setup_end.mono_ms + 20;
-    std.debug.print("case=gossip_burst setup_ms={d} connected={d}\n", .{ setup_end.mono_ms - setup_start.mono_ms, hub.peerCounts().connected });
+    const start_ms = setup_end.millis() + 20;
+    std.debug.print("case=gossip_burst setup_ms={d} connected={d}\n", .{ setup_end.millis() - setup_start.millis(), hub.peerCounts().connected });
 
     const steps = try allocator.alloc(u32, windows.len * step_samples_max);
     defer allocator.free(steps);
@@ -788,16 +788,16 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     shared.start_ms.store(start_ms, .release);
     for (0..1 << 40) |_| {
         const now = try network.Transport.currentTime(io);
-        while (window < bounds.len and now.mono_ms >= bounds[window]) : (window += 1) edges[window] = .read(hub, &host, step_count, now.mono_ms);
+        while (window < bounds.len and now.millis() >= bounds[window]) : (window += 1) edges[window] = .read(hub, &host, step_count, now.millis());
         if (window == bounds.len) break;
-        if (now.mono_ms >= next_sample and sample_count < samples.len) {
-            samples[sample_count] = .read(hub, &host, step_count, now.mono_ms);
+        if (now.millis() >= next_sample and sample_count < samples.len) {
+            samples[sample_count] = .read(hub, &host, step_count, now.millis());
             sample_count += 1;
-            next_sample += options.sample_ms * ((now.mono_ms - next_sample) / options.sample_ms + 1);
+            next_sample += options.sample_ms * ((now.millis() - next_sample) / options.sample_ms + 1);
         }
         const deadline = @min(host.deadline() orelse next_sample, next_sample, bounds[window]);
         const before = hub.step_duration.sum;
-        const result = network.driver.step(hub, io, now, outputs, .{ .context = &host, .apply = Host.apply, .deadline_ms = deadline });
+        const result = network.driver.step(hub, io, now, outputs, .{ .handler = .{ .context = &host, .apply = Host.apply }, .deadline = network.time.optionalMilliseconds(deadline) });
         if (result.readiness.failure) |err| return err;
         if (shared.failed.load(.acquire)) return spokeFailure(spokes);
         step_count += 1;

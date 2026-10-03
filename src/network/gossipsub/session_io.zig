@@ -47,7 +47,7 @@ pub fn transportEvents(
     events: []const TransportEvent,
     now: Now,
 ) void {
-    self.last_now_ms = @max(self.last_now_ms, now.mono_ms);
+    self.last_now_ms = @max(self.last_now_ms, now.millis());
     for (events) |event| switch (event) {
         .connected => |connected| {
             _ = peerConnected(self, engine, connected.conn, false, now);
@@ -60,7 +60,7 @@ pub fn transportEvents(
 }
 
 pub fn retireConnection(self: *Gossipsub, router: *Router, engine: *Engine, conn: Handle, now: Now) void {
-    self.last_now_ms = @max(self.last_now_ms, now.mono_ms);
+    self.last_now_ms = @max(self.last_now_ms, now.millis());
     const index = self.sessions.find(conn) orelse return;
     retirePeer(self, router, engine, index);
 }
@@ -71,7 +71,7 @@ pub fn negotiationResult(
     outcome: Router.Outcome,
     now: Now,
 ) void {
-    self.last_now_ms = @max(self.last_now_ms, now.mono_ms);
+    self.last_now_ms = @max(self.last_now_ms, now.millis());
     const index = self.sessions.find(outcome.stream.conn) orelse {
         engine.closeStream(outcome.stream, 0);
         return;
@@ -287,13 +287,13 @@ fn readPeer(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *T
             if (peer.input == 0 or turn.budget.input == 0) return;
             const logical = self.sessions.rows[index].logical;
             if ((io.reader.declaredLen() orelse 0) > io.body.len and
-                now.mono_ms < self.peers.rows[logical.index].large_frame_denied_until)
+                now.millis() < self.peers.rows[logical.index].large_frame_denied_until)
             {
                 resetInbound(self, engine, index);
                 return;
             }
             const take = @min(io.unread_end - io.unread_start, peer.input, turn.budget.input);
-            const result = io.feedUnread(&self.sessions.receive_pool, take, now.mono_ms) catch |err| {
+            const result = io.feedUnread(&self.sessions.receive_pool, take, now.millis()) catch |err| {
                 if (err == error.ReceiveCapacity) {
                     const work = discardInboundFrame(self, index);
                     turn.budget.work -|= work;
@@ -355,11 +355,11 @@ fn flush(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *Turn
         io.write_first = false;
         turn.budget.calls -= 1;
         self.sessions.writes +|= 1;
-        if (io.tx.progress_ms == null) io.tx.progress_ms = now.mono_ms;
+        if (io.tx.progress_ms == null) io.tx.progress_ms = now.millis();
         const written = engine.write(stream, segment[0..take], false) catch |err| {
             if (err == error.WouldBlock) {
                 self.sessions.blocked_writes +|= 1;
-                io.tx.blocked(now.mono_ms);
+                io.tx.blocked(now.millis());
             } else {
                 std.log.scoped(.network_gossip_errors).debug("gossip_write_failed connection={d}:{d} stream={d} reason={s} queued={d} bytes={d}", .{ stream.conn.index, stream.conn.generation, stream.id, @errorName(err), io.tx.data.count, io.tx.data.bytes });
                 resetOutbound(self, engine, index);
@@ -368,16 +368,16 @@ fn flush(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *Turn
         };
         if (written == 0) {
             io.write_zero +|= 1;
-            io.tx.blocked(now.mono_ms);
+            io.tx.blocked(now.millis());
             return;
         }
         peer.output -= written;
         turn.budget.output -= written;
-        io.tx.progress_ms = now.mono_ms;
-        self.advanceWrite(self.sessions.ref(index), written, now.mono_ms);
+        io.tx.progress_ms = now.millis();
+        self.advanceWrite(self.sessions.ref(index), written, now.millis());
         if (written < take) {
             self.sessions.blocked_writes +|= 1;
-            io.tx.blocked(now.mono_ms);
+            io.tx.blocked(now.millis());
             return;
         }
     }
@@ -389,7 +389,7 @@ pub fn serviceSession(self: *Gossipsub, router: *Router, engine: *Engine, index:
     assert(session.active);
     switch (session.outbound) {
         .closing => {
-            logSendPressure(session, &self.peers.rows[session.logical.index].identity, &self.options, now.mono_ms);
+            logSendPressure(session, &self.peers.rows[session.logical.index].identity, &self.options, now.millis());
             retirePeer(self, router, engine, index);
             return;
         },
@@ -406,7 +406,7 @@ pub fn serviceSession(self: *Gossipsub, router: *Router, engine: *Engine, index:
     if (write_first and io.tx.ready) flush(self, engine, index, io, turn, &peer);
     if (session.in_stream != null and io.rx_ready) readPeer(self, engine, index, io, turn, &peer);
     if (!write_first and io.tx.ready) flush(self, engine, index, io, turn, &peer);
-    logSendPressure(session, &self.peers.rows[session.logical.index].identity, &self.options, now.mono_ms);
+    logSendPressure(session, &self.peers.rows[session.logical.index].identity, &self.options, now.millis());
     if (session.active and session.outbound == .closing) retirePeer(self, router, engine, index);
 }
 
@@ -464,7 +464,7 @@ fn discardInboundFrame(self: *Gossipsub, index: u16) usize {
 }
 
 pub fn expireSession(self: *Gossipsub, router: *Router, engine: *Engine, index: u16, turn: *Turn) void {
-    const now_ms = turn.now.mono_ms;
+    const now_ms = turn.now.millis();
     const g = self;
     const peer = &g.sessions.rows[index];
     assert(peer.active);

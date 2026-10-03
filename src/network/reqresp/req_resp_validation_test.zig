@@ -78,7 +78,7 @@ test "reqresp caller cardinality rejects invalid bounds before opening a stream"
     const bytes = [_]u8{0} ** 8;
     var sink: [8]u8 = undefined;
     const options = [_]reqresp.RequestOptions{
-        .{ .expected_chunks = 2 }, .{ .absolute_timeouts = .{ .response_ms = 0 } },
+        .{ .expected_chunks = 2 }, .{ .timeouts = .{ .response = .fromMilliseconds(0) } },
     };
     for (options) |invalid| {
         try std.testing.expectError(error.InvalidRequestOptions, setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .ping_v1, &bytes, &sink, invalid, setup.shared.pair.now));
@@ -164,17 +164,17 @@ test "reqresp rejects duplicate digests before allocating" {
     }
 }
 
-test "reqresp absolute policies validate all durations before stream admission" {
+test "reqresp validates all timeout durations before stream admission" {
     var setup: Pair = .{};
     try setup.init(.{}, .{});
     defer setup.deinit();
     const request = statusBytes(5);
     var sink: [ct.phase0.Status.fixed_size]u8 = undefined;
-    inline for (.{ "negotiation_ms", "request_ms", "response_ms" }) |field| {
-        for ([_]u64{ 0, 60001, std.math.maxInt(u64) }) |invalid| {
-            var policy: reqresp.RequestOptions.AbsoluteTimeouts = .{ .negotiation_ms = 1, .request_ms = 1, .response_ms = 1 };
-            @field(policy, field) = invalid;
-            try std.testing.expectError(error.InvalidRequestOptions, setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .status_v1, &request, &sink, .{ .absolute_timeouts = policy }, setup.shared.pair.now));
+    inline for (.{ "negotiation", "request", "response" }) |field| {
+        for ([_]i96{ -1, 0, 60001, std.math.maxInt(u64) }) |invalid| {
+            var policy: reqresp.RequestOptions.Timeouts = .{ .negotiation = .fromMilliseconds(1), .request = .fromMilliseconds(1), .response = .fromMilliseconds(1) };
+            @field(policy, field) = .fromNanoseconds(@as(i96, invalid) * std.time.ns_per_ms);
+            try std.testing.expectError(error.InvalidRequestOptions, setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .status_v1, &request, &sink, .{ .timeouts = policy }, setup.shared.pair.now));
         }
     }
     try std.testing.expectEqual(@as(usize, 0), setup.shared.client.router.negotiator.active());

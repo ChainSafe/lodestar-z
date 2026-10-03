@@ -1,4 +1,5 @@
 const std = @import("std");
+const Now = @import("../types.zig").Now;
 const constants = @import("../constants.zig");
 const Engine = @import("Engine.zig");
 const limits = @import("limits.zig");
@@ -16,7 +17,7 @@ const expectClosed = support.expectClosed;
 
 const client_ip6: types.Address = .{ .ip6 = .{ .octets = .{ 0x20, 1, 0xd, 0xb8 } ++ .{0} ** 11 ++ .{1}, .port = 4_001 } };
 const server_ip6: types.Address = .{ .ip6 = .{ .octets = .{0} ** 15 ++ .{1}, .port = 4_002 } };
-const admission_now: Engine.Now = .{ .mono_ms = 1_000, .unix_s = support.now_unix };
+const admission_now: Engine.Now = Now.fromMilliseconds(.{ .mono_ms = 1_000, .unix_s = support.now_unix });
 
 fn initAdmissionEngine(local: *const [2]?types.Address, seed: u8) !Engine {
     const key = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{seed}));
@@ -561,4 +562,48 @@ test "engine resources distinguish handshake direction and retain closed slots u
     try std.testing.expectEqual(@as(u16, 1), pair.server.resourceSnapshot().active);
     pair.server.releaseReported();
     try std.testing.expectEqualDeep(Engine.Resources{ .active = 0, .handshaking = 0, .dialing = 0 }, pair.server.resourceSnapshot());
+}
+
+test "engine stopped admission rejects both initial flights without allocating" {
+    for ([_]bool{ false, true }) |validated| {
+        var pair: Pair = .{};
+        try pair.init(.{}, .{});
+        defer pair.deinit();
+        var packet: [constants.datagram_size_max]u8 = undefined;
+        var response: [constants.datagram_size_max]u8 = undefined;
+        const initial = if (validated) try dialValidatedInitial(&pair, &packet) else try dialInitial(&pair, &packet);
+        pair.server.stopAdmission();
+        pair.server.stopAdmission();
+        const before = pair.server.resourceSnapshot();
+        const random = pair.server.csprng;
+        try std.testing.expectEqual(.dropped, pair.server.receive(initial, &client_address, pair.now, &response));
+        try std.testing.expectError(error.Stopped, pair.server.dial(&client_address, pair.client_ctx.local_peer_id, pair.now));
+        pair.server.closeAll();
+        try std.testing.expectEqual(.dropped, pair.server.receive(initial, &client_address, pair.now, &response));
+        try std.testing.expectEqualDeep(before, pair.server.resourceSnapshot());
+        try std.testing.expectEqualDeep(random, pair.server.csprng);
+    }
+}
+
+test "engine stopped admission preserves streams and close progress on existing routes" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+    pair.client.stopAdmission();
+    pair.server.stopAdmission();
+    const stream = try pair.client.openStream(handles.client);
+    try std.testing.expectEqual(@as(usize, 7), try pair.client.write(stream, "goodbye", true));
+    try pair.pump();
+    var events: [8]Event = undefined;
+    const inbound = try support.expectStreamOpened(pair.events(&pair.server, &events)[0], handles.server);
+    var bytes: [7]u8 = undefined;
+    const read = try pair.server.read(inbound, &bytes);
+    try std.testing.expectEqualStrings("goodbye", bytes[0..read.len]);
+    try std.testing.expect(read.fin);
+    try std.testing.expect(pair.server.close(handles.server, 0));
+    try pair.pump();
+    const closed = pair.events(&pair.client, &events);
+    try std.testing.expect(closed.len > 0);
+    try std.testing.expect(closed[closed.len - 1] == .closed);
 }

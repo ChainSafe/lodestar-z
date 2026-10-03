@@ -15,11 +15,11 @@ test "control repeated Status intent preserves the first due time" {
     const second: t.PeerRef = .{ .index = 1, .generation = 1 };
     const first_conn: t.Handle = .{ .index = 0, .generation = 1 };
     const second_conn: t.Handle = .{ .index = 1, .generation = 1 };
-    control.connected(&catalog, first, first_conn, .outbound, .{ .mono_ms = 10, .unix_s = 0 });
-    control.connected(&catalog, second, second_conn, .inbound, .{ .mono_ms = 10, .unix_s = 0 });
+    control.connected(&catalog, first, first_conn, .outbound, Now.fromMilliseconds(.{ .mono_ms = 10, .unix_s = 0 }));
+    control.connected(&catalog, second, second_conn, .inbound, Now.fromMilliseconds(.{ .mono_ms = 10, .unix_s = 0 }));
     for ([_]u64{ 20, 30, 40 }) |now| {
-        control.reStatusPeers(&catalog, .{ .mono_ms = now, .unix_s = 0 });
-        try std.testing.expect(control.reStatusPeer(&catalog, second, second_conn, .{ .mono_ms = now, .unix_s = 0 }));
+        control.reStatusPeers(&catalog, Now.fromMilliseconds(.{ .mono_ms = now, .unix_s = 0 }));
+        try std.testing.expect(control.reStatusPeer(&catalog, second, second_conn, Now.fromMilliseconds(.{ .mono_ms = now, .unix_s = 0 })));
         try std.testing.expectEqual(@as(u64, 10), control.schedules[0].status_due_ms);
         try std.testing.expectEqual(@as(u64, 20), control.schedules[1].status_due_ms);
     }
@@ -31,14 +31,14 @@ test "control start quota and cursor preserve order across Identify and RPC star
     defer catalog.deinit(a);
     var control = try Control.init(a, .{ .starts_per_turn_max = 3 }, 4);
     defer control.deinit(a);
-    const now: Now = .{ .mono_ms = 10, .unix_s = 0 };
+    const now: Now = Now.fromMilliseconds(.{ .mono_ms = 10, .unix_s = 0 });
     const local: t.LocalState = .{};
     const local_identity: t.PeerId = .{ .bytes = @splat(0) };
     for (0..4) |index| {
         const identity: t.PeerId = .{ .bytes = @splat(@intCast(index + 1)) };
         const conn: t.Handle = .{ .index = @intCast(index), .generation = 1 };
-        const peer = catalog.admit(&identity, &local_identity, conn, &.{ .direction = .outbound, .endpoint = .unspecified, .now_ms = now.mono_ms }).admitted.peer;
-        try std.testing.expect(catalog.updateStatus(peer, conn, &local.status, now.mono_ms));
+        const peer = catalog.admit(&identity, &local_identity, conn, &.{ .direction = .outbound, .endpoint = .unspecified, .now_ms = now.millis() }).admitted.peer;
+        try std.testing.expect(catalog.updateStatus(peer, conn, &local.status, now.millis()));
         control.connected(&catalog, peer, conn, .outbound, now);
     }
     // Every row is due for an Identify and a Status start. Nothing holds an operation here, so a
@@ -103,9 +103,9 @@ fn statusVerdict(local: *const t.LocalState, remote: *const t.Status, slot: u64)
     defer catalog.deinit(a);
     var control = try Control.init(a, .{}, 1);
     defer control.deinit(a);
-    const now: Now = .{ .mono_ms = 10, .unix_s = 0 };
+    const now: Now = Now.fromMilliseconds(.{ .mono_ms = 10, .unix_s = 0 });
     const conn: t.Handle = .{ .index = 0, .generation = 1 };
-    const peer = catalog.admit(&.{ .bytes = @splat(1) }, &.{ .bytes = @splat(0) }, conn, &.{ .direction = .inbound, .endpoint = .unspecified, .now_ms = now.mono_ms }).admitted.peer;
+    const peer = catalog.admit(&.{ .bytes = @splat(1) }, &.{ .bytes = @splat(0) }, conn, &.{ .direction = .inbound, .endpoint = .unspecified, .now_ms = now.millis() }).admitted.peer;
     control.connected(&catalog, peer, conn, .inbound, now);
     // Status v1 carries no earliest available slot.
     const protocol: w.Protocol = if (remote.earliest_available_slot == null) .status_v1 else .status_v2;

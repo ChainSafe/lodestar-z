@@ -1,4 +1,5 @@
 const std = @import("std");
+const time = @import("../time.zig");
 const Catalog = @import("catalog.zig").Catalog;
 const Row = Catalog.Row;
 const policy = @import("policy.zig");
@@ -191,7 +192,7 @@ pub const Dialing = struct {
             // Each pass takes one loaded record, so a call visits every record at most once.
             for (0..remembered.capacity) |_| {
                 const record = memory.nextReplay(remembered.seconds(now)) orelse return queued;
-                const outcome = self.queueRemembered(catalog, &record, context, wanted, now.mono_ms);
+                const outcome = self.queueRemembered(catalog, &record, context, wanted, now.millis());
                 memory.counters.replays[@intFromEnum(outcome)] +|= 1;
                 if (outcome != .queued) continue;
                 waiting.* = catalog.find(&record.peer).?;
@@ -703,10 +704,10 @@ pub const Dialing = struct {
     pub fn schedule(self: *const Dialing, catalog: *const Catalog, output_capacity: usize) Schedule {
         var result: Schedule = .{
             .runnable = catalog.dial.dirty_count != 0,
-            .deadline_ms = if (catalog.dial.expiries.peek()) |top| top.deadline else null,
+            .deadline = time.optionalMilliseconds(if (catalog.dial.expiries.peek()) |top| top.deadline else null),
         };
         if (output_capacity != 0 and self.freeAttempt() != null) if (catalog.dial.eligible.peek()) |top| {
-            result = result.merge(.{ .deadline_ms = top.deadline });
+            result = result.merge(.{ .deadline = time.optionalMilliseconds(top.deadline) });
         };
         return result;
     }
@@ -724,7 +725,7 @@ pub const Dialing = struct {
             assert(catalog.intents.isSet(peer.index));
         };
         assert(std.meta.eql(held, self.held));
-        for (self.outcomes, self.durations) |count, time| assert(time.count == count);
+        for (self.outcomes, self.durations) |count, duration| assert(duration.count == count);
         for (catalog.rows, 0..) |*row, index| {
             const retained = catalog.intents.isSet(index);
             assert(catalog.dial.expiries.get(@intCast(index)) == self.expiryOf(catalog, index));

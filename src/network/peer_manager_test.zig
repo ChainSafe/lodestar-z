@@ -1,4 +1,5 @@
 const std = @import("std");
+const schedule_test_support = @import("schedule_test_support.zig");
 const PeerManager = @import("peer_manager.zig").PeerManager;
 const t = @import("peers/types.zig");
 const wire = @import("control_wire.zig");
@@ -18,7 +19,7 @@ fn init() !PeerManager {
     }, .initEmpty(), 4);
 }
 fn at(ms: u64) Now {
-    return .{ .mono_ms = ms, .unix_s = @intCast(1_000 + ms / 1_000) };
+    return Now.fromMilliseconds(.{ .mono_ms = ms, .unix_s = @intCast(1_000 + ms / 1_000) });
 }
 fn admit(manager: *PeerManager, connection: t.Handle, direction: t.Direction, now: Now) !t.PeerRef {
     const admitted = manager.admit(&.{ .conn = connection, .peer_id = identity, .direction = direction }, endpoint, now) orelse return error.AdmissionRefused;
@@ -29,7 +30,7 @@ fn outbound(manager: *PeerManager, now: Now) !t.PeerRef {
     // Select the operator's already-admitted dial without running gossip or transport. The owner
     // still receives the real started/admitted transitions and records the original dial endpoint.
     var intents: [1]@import("peers/dialing.zig").Dialing.DialIntent = undefined;
-    try std.testing.expectEqual(@as(usize, 1), manager.dialing.poll(&manager.catalog, now.mono_ms, &intents));
+    try std.testing.expectEqual(@as(usize, 1), manager.dialing.poll(&manager.catalog, now.millis(), &intents));
     try std.testing.expect(manager.dialStarted(intents[0].token, conn));
     return admit(manager, conn, .outbound, now);
 }
@@ -67,17 +68,17 @@ test "peer owner replacement waits for cancelled request settlement without inhe
     const replacement: t.Handle = .{ .index = 1, .generation = 2 };
     try std.testing.expectEqualDeep(peer, try admit(&manager, replacement, .outbound, at(20_001)));
     try std.testing.expect(manager.retireConnection(peer, conn, .health_error, at(20_001)) == null);
-    try std.testing.expect(manager.controlSchedule(at(20_001)).nextWakeup(at(20_001).mono_ms) == null);
+    try std.testing.expect(schedule_test_support.wakeupMilliseconds(manager.controlSchedule(at(20_001)), at(20_001).millis()) == null);
     try std.testing.expect(manager.catalog.get(peer).?.status == null);
 
     old.cancelled = true;
     manager.controlReplied(&old, .{ .failed = .{ .request = old.request.?, .reason = .cancelled } }, at(20_002), 0);
-    try std.testing.expectEqual(at(20_002).mono_ms, manager.controlSchedule(at(20_002)).nextWakeup(at(20_002).mono_ms).?);
+    try std.testing.expectEqual(at(20_002).millis(), schedule_test_support.wakeupMilliseconds(manager.controlSchedule(at(20_002)), at(20_002).millis()).?);
     const current = try startProbe(&manager, 2, at(20_002));
     try std.testing.expectEqualDeep(replacement, current.conn);
     // A repeated terminal result for the old generation cannot free the new request reservation.
     manager.controlReplied(&old, .{ .failed = .{ .request = old.request.?, .reason = .cancelled } }, at(20_003), 0);
-    try std.testing.expect(manager.controlSchedule(at(20_003)).nextWakeup(at(20_003).mono_ms) == null);
+    try std.testing.expect(schedule_test_support.wakeupMilliseconds(manager.controlSchedule(at(20_003)), at(20_003).millis()) == null);
     try std.testing.expectEqual(@as(u64, 0), manager.control.counters.closed[@intFromEnum(t.DisconnectReason.health_error)]);
     try std.testing.expectEqual(@as(u8, 0), manager.catalog.rowFor(peer).?.intent.failures);
 }
@@ -118,7 +119,7 @@ test "peer owner retirement preserves remembered and rejection lifetimes and set
         try std.testing.expectEqual(@as(u64, 1), manager.control.counters.closed[@intFromEnum(t.DisconnectReason.host)]);
         var records: [remembered.capacity]remembered.Record = undefined;
         try std.testing.expectEqual(@as(usize, @intFromBool(lifetime >= remembered.qualify_ms)), manager.rememberedPeers(now, &records));
-        const block = manager.catalog.history.reject(key, .too_many_peers, now.mono_ms);
+        const block = manager.catalog.history.reject(key, .too_many_peers, now.millis());
         try std.testing.expectEqual(@as(u64, if (lifetime >= history.kept_connection_ms) 5 * 60_000 else 15 * 60_000), block);
     }
 }
@@ -131,7 +132,7 @@ test "peer owner local probe refusal defers without peer evidence" {
     const due = manager.nextControl(&pass, at(10)).?;
     manager.controlStarted(&due, false, null, at(10));
     try std.testing.expect(manager.nextControl(&pass, at(10)) == null);
-    try std.testing.expectEqual(@as(u64, 1_010), manager.controlSchedule(at(10)).nextWakeup(at(10).mono_ms).?);
+    try std.testing.expectEqual(@as(u64, 1_010), schedule_test_support.wakeupMilliseconds(manager.controlSchedule(at(10)), at(10).millis()).?);
     try std.testing.expectEqual(@as(u64, 1), manager.control.counters.deferred);
     try std.testing.expectEqual(@as(u8, 0), manager.catalog.rowFor(peer).?.intent.failures);
     try std.testing.expectEqual(@as(f64, 0), manager.catalog.get(peer).?.score);

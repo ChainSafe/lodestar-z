@@ -125,7 +125,7 @@ const Datagram = struct {
 /// server from `client_source`, and everything the server sends reaches the client from
 /// `server_source`, unless a drop rule applies.
 pub const Link = struct {
-    now: Now = .{ .mono_ms = 1_000, .unix_s = support.now_unix },
+    now: Now = Now.fromMilliseconds(.{ .mono_ms = 1_000, .unix_s = support.now_unix }),
     client: *Engine = undefined,
     server: *Engine = undefined,
     client_sockets: [2]?net.Socket.Handle = .{ null, null },
@@ -156,7 +156,7 @@ pub const Link = struct {
         // quiche stamps each datagram's release time from the real clock, and the transport
         // asserts the release against its Io clock, so the virtual clock runs well ahead.
         const real_ms: u64 = @intCast(@divTrunc(std.Io.Clock.awake.now(self.base).nanoseconds, std.time.ns_per_ms));
-        self.now.mono_ms = real_ms + 1_000_000;
+        self.now.monotonic = @import("time.zig").milliseconds(real_ms + 1_000_000);
         active = self;
     }
 
@@ -172,7 +172,7 @@ pub const Link = struct {
     }
 
     pub fn advance(self: *Link, ms: u64) void {
-        self.now.mono_ms += ms;
+        self.now.monotonic = @import("time.zig").milliseconds(self.now.millis() + ms);
     }
 
     /// Dials the server from the client engine, outside the client's dialing policy.
@@ -266,8 +266,8 @@ pub const Link = struct {
     fn clockHook(_: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
         const self = active.?;
         return switch (clock) {
-            .awake => .{ .nanoseconds = @as(i96, self.now.mono_ms) * std.time.ns_per_ms },
-            .real => .{ .nanoseconds = @as(i96, self.now.unix_s) * std.time.ns_per_s },
+            .awake => .{ .nanoseconds = @as(i96, self.now.millis()) * std.time.ns_per_ms },
+            .real => .{ .nanoseconds = @as(i96, self.now.unixSeconds()) * std.time.ns_per_s },
             else => self.base.vtable.now(self.base.userdata, clock),
         };
     }
@@ -382,7 +382,7 @@ pub const Setup = struct {
 
     /// One owner turn of `node` at the link's clock, with no wait.
     pub fn turn(self: *Setup, node: *NetworkCore, outputs: NetworkCore.Outputs) !NetworkCore.Result {
-        const result = node.advance(self.pair.io(), .{ .now = self.pair.now, .readiness = .{} }, outputs, .deadlineOnly(self.pair.now.mono_ms));
+        const result = node.advance(self.pair.io(), .{ .now = self.pair.now, .readiness = .{} }, outputs, .deadlineOnly(@import("time.zig").optionalMilliseconds(self.pair.now.millis())));
         if (result.failure) |err| return err;
         return result;
     }

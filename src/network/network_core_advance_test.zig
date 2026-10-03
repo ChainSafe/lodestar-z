@@ -13,7 +13,7 @@ test "core advance uses supplied time and schedules deferred application shutdow
     const before = core.wakeups(setup.pair.now, .{});
     try std.testing.expect(before.sources[@intFromEnum(Source.gossip)].runnable);
     var tick = setup.pair.now;
-    tick.mono_ms += 1;
+    tick.monotonic = @import("time.zig").milliseconds(tick.millis() + 1);
     const result = core.advance(setup.pair.io(), .{ .now = tick, .readiness = .{} }, .{}, .{});
     try std.testing.expect(result.failure == null);
     try std.testing.expectEqual(tick, result.transport.now);
@@ -84,9 +84,9 @@ test "core shutdown drains a cancelled request once before retirement" {
     _ = core.advance(setup.pair.io(), .{ .now = setup.pair.now, .readiness = .{} }, .{}, .{});
     try std.testing.expect(!core.isClosed());
     const blocked = core.waitPlan(setup.pair.now, .{}, .{});
-    try std.testing.expect(blocked.timeout_ms > 0);
+    try std.testing.expect(blocked.timeout.deadline.compare(.gt, blocked.now.monotonic));
     var output: [1]rr.ReqResp.Event = undefined;
-    try std.testing.expectEqual(@as(u32, 0), core.waitPlan(setup.pair.now, .{ .application = &output }, .{}).timeout_ms);
+    try std.testing.expect(core.waitPlan(setup.pair.now, .{ .application = &output }, .{}).timeout.deadline.compare(.eq, setup.pair.now.monotonic));
     const delivered = core.advance(setup.pair.io(), .{ .now = setup.pair.now, .readiness = .{} }, .{ .application = &output }, .{});
     try std.testing.expectEqual(@as(usize, 1), delivered.counts.application);
     try std.testing.expectEqual(request, output[0].failed.request);
@@ -112,13 +112,14 @@ test "core shutdown waits for retained host serving work after stream retirement
     const core = &setup.server;
     var output: [1]rr.ReqResp.Event = undefined;
     var retained: ?rr.ReqResp.RequestHandle = null;
+    var serving: ?rr.ReqResp.ServingHandle = null;
     for (0..50) |_| {
         try setup.pair.pump();
         _ = try setup.turn(&setup.client, .{});
         const result = try setup.turn(core, .{ .application = &output });
         if (result.counts.application == 1 and output[0] == .request) {
             retained = output[0].request.request;
-            try std.testing.expect(core.service.reqresp.retainServing(retained.?));
+            serving = core.retainServing(retained.?) orelse return error.TestUnexpectedResult;
             break;
         }
     }
@@ -141,25 +142,25 @@ test "core shutdown waits for retained host serving work after stream retirement
     try std.testing.expectEqual(@as(usize, 1), terminal_count);
     try std.testing.expectEqual(@as(u16, 0), core.transport.engine.resourceSnapshot().active);
     try std.testing.expect(!core.isClosed());
-    try std.testing.expect(core.waitPlan(setup.pair.now, .{ .application = &output }, .{}).timeout_ms > 0);
+    try std.testing.expect(core.waitPlan(setup.pair.now, .{ .application = &output }, .{}).timeout.deadline.compare(.gt, setup.pair.now.monotonic));
     const Completion = struct {
         socket: std.Io.net.Socket,
-        request: rr.ReqResp.RequestHandle,
+        serving: rr.ReqResp.ServingHandle,
         released: bool = false,
 
         fn apply(context: *anyopaque, owner: *@import("network_core.zig").NetworkCore, _: @import("types.zig").Now) @import("network_core.zig").NetworkCore.HostProgress {
             const self: *@This() = @ptrCast(@alignCast(context));
             var byte: [1]u8 = undefined;
             const packet = self.socket.receiveTimeout(std.testing.io, &byte, .{ .duration = .{ .clock = .awake, .raw = .zero } }) catch return .{};
-            if (std.mem.eql(u8, packet.data, "c")) self.released = owner.service.reqresp.releaseServing(self.request);
+            if (std.mem.eql(u8, packet.data, "c")) self.released = owner.releaseServing(self.serving);
             return .{};
         }
     };
-    var completion: Completion = .{ .socket = host_socket, .request = retained.? };
+    var completion: Completion = .{ .socket = host_socket, .serving = serving.? };
     try host_socket.send(std.testing.io, &host_socket.address, "c");
-    const ready = @import("wait.zig").poll(std.testing.io, core.waitPlan(setup.pair.now, .{}, .{}).sources, 0);
+    const ready = @import("wait.zig").poll(std.testing.io, core.waitPlan(setup.pair.now, .{}, .{}).sources, .{ .duration = .{ .clock = .awake, .raw = .zero } });
     try std.testing.expect(ready.host);
-    const result = core.advance(setup.pair.io(), .{ .now = setup.pair.now, .readiness = ready }, .{}, .{ .context = &completion, .apply = Completion.apply });
+    const result = core.advance(setup.pair.io(), .{ .now = setup.pair.now, .readiness = ready }, .{}, .{ .handler = .{ .context = &completion, .apply = Completion.apply } });
     try std.testing.expect(result.failure == null);
     try std.testing.expect(completion.released);
     try std.testing.expect(core.isClosed());
@@ -172,7 +173,7 @@ test "core clock failure preserves dial intent without starting a connection" {
     try setup.initOwners(&.{});
     defer setup.deinit();
     const core = &setup.client;
-    try core.connectUntil(&setup.server.peerId(), &.{setup.server.transport.localAddress()}, setup.pair.now, setup.pair.now.mono_ms + 10_000);
+    try core.connectUntil(&setup.server.peerId(), &.{setup.server.transport.localAddress()}, setup.pair.now, setup.pair.now.millis() + 10_000);
     const pending = core.waitPlan(setup.pair.now, .{}, .{});
     const dirty = core.peer_manager.catalog.dial.dirty_count;
     const visits = core.peer_manager.dialing.visits;
@@ -186,4 +187,73 @@ test "core clock failure preserves dial intent without starting a connection" {
     const resumed = core.advance(setup.pair.io(), .{ .now = setup.pair.now }, .{}, .{});
     try std.testing.expect(resumed.failure == null);
     try std.testing.expectEqual(@as(u8, 1), resumed.dial_started);
+}
+
+test "core lifecycle only advances and closed owners reject new connections" {
+    for ([_]bool{ false, true }) |graceful| {
+        const setup = try std.testing.allocator.create(Setup);
+        defer std.testing.allocator.destroy(setup);
+        setup.* = .{};
+        try setup.initOwners(&.{});
+        defer setup.deinit();
+        const core = &setup.server;
+        try std.testing.expectEqual(.running, core.phase());
+        if (graceful) {
+            core.beginGracefulClose(setup.pair.now);
+            core.beginGracefulClose(setup.pair.now);
+            try std.testing.expectEqual(.quiescing, core.phase());
+            try std.testing.expectError(error.Stopped, core.connectUntil(&setup.client.peerId(), &.{}, setup.pair.now, setup.pair.now.millis() + 1));
+            try std.testing.expectError(error.Stopped, core.addDirectPeer(&setup.client.peerId(), &.{}, setup.pair.now));
+        } else core.shutdown(setup.pair.now);
+        _ = try setup.pair.dial();
+        try setup.pair.pump();
+        try std.testing.expectEqual(@as(u16, 0), core.transport.engine.resourceSnapshot().active);
+        core.shutdown(setup.pair.now);
+        core.shutdown(setup.pair.now);
+        core.beginGracefulClose(setup.pair.now);
+        try std.testing.expectEqual(.stopping, core.phase());
+        for (0..3) |_| _ = core.advance(setup.pair.io(), .{ .now = setup.pair.now }, .{}, .{});
+        try std.testing.expect(core.isClosed());
+        try std.testing.expectError(error.Stopped, core.transport.engine.dial(&@import("quic/test_support.zig").client_address, setup.client.peerId(), setup.pair.now));
+        try setup.pair.pump();
+        _ = core.advance(setup.pair.io(), .{ .now = setup.pair.now }, .{}, .{});
+        try std.testing.expect(core.isClosed());
+    }
+}
+
+test "core cancellation preserves prior failure and events while stopping further I/O" {
+    const Core = @import("network_core.zig").NetworkCore;
+    const Host = struct {
+        calls: usize = 0,
+        fn apply(context: *anyopaque, _: *Core, _: @import("types.zig").Now) Core.HostProgress {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            return .{};
+        }
+    };
+    for ([_]bool{ false, true }) |already_cancelled| {
+        const setup = try std.testing.allocator.create(Setup);
+        defer std.testing.allocator.destroy(setup);
+        setup.* = .{};
+        try setup.initOwners(&.{});
+        defer setup.deinit();
+        const core = &setup.client;
+        const failed = try setup.pair.dial();
+        try std.testing.expect(core.transport.engine.failSend(failed));
+        try core.connectUntil(&setup.server.peerId(), &.{@import("quic/test_support.zig").server_address}, setup.pair.now, setup.pair.now.millis() + 1000);
+        var host: Host = .{};
+        var faults: @import("fault_io") = .{ .base = setup.pair.io(), .receive = .{} };
+        const result = core.advance(faults.io(), .{
+            .now = setup.pair.now,
+            .readiness = .{ .cancelled = already_cancelled, .failure = error.WaitFailed, .host = true },
+        }, .{}, .{ .handler = .{ .context = &host, .apply = Host.apply } });
+        try std.testing.expect(result.cancelled);
+        try std.testing.expectEqual(error.WaitFailed, result.failure.?);
+        try std.testing.expectEqual(@as(usize, if (already_cancelled) 0 else 1), faults.receive_calls);
+        try std.testing.expectEqual(@as(usize, 0), faults.send_calls);
+        try std.testing.expectEqual(@as(usize, 0), host.calls);
+        try std.testing.expectEqual(@as(u8, 0), result.dial_started);
+        try std.testing.expectEqual(@as(usize, 1), result.transport_events.len);
+        try std.testing.expectEqual(failed, result.transport_events[0].closed.conn);
+    }
 }

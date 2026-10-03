@@ -29,7 +29,7 @@ fn updateLocal(node: *NetworkCore, local: *const t.LocalState, schedule: Network
 /// Steps at the current time with a host that only bounds the wait at `wait_ms`.
 fn stepAfter(node: *NetworkCore, wait_ms: u32) !NetworkCore.Result {
     const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
-    return driver.step(node, std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| wait_ms));
+    return driver.step(node, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis() +| wait_ms)));
 }
 
 fn intentFor(node: *const NetworkCore) NetworkCore.LocalIntent {
@@ -62,9 +62,9 @@ const IntentPair = struct {
         self.a_inbox.clear();
         self.b_inbox.clear();
         const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
-        const a = driver.step(&self.a, std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| 1));
+        const a = driver.step(&self.a, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis() +| 1)));
         if (a.failure) |err| return err;
-        const b = driver.step(&self.b, std.testing.io, now, .{ .application = &self.b_app }, .deadlineOnly(now.mono_ms +| 1));
+        const b = driver.step(&self.b, std.testing.io, now, .{ .application = &self.b_app }, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis() +| 1)));
         if (b.failure) |err| return err;
         return .{ .a = a, .b = b };
     }
@@ -411,7 +411,7 @@ test "core capabilities activation commits fork BPO and copied directional value
     defer node.deinit(std.testing.io);
     const admission = &node.service.reqresp.admission.limiter;
     const identity = node.peerId();
-    try std.testing.expectEqual(.allowed, admission.take(&identity, .blocks_by_root_v2, 1, .phase0, node.last_now.mono_ms));
+    try std.testing.expectEqual(.allowed, admission.take(&identity, .blocks_by_root_v2, 1, .phase0, node.last_now.millis()));
     const admitted_debt = admission.global;
     const admitted_row = admission.rows[0];
     const allocations = backing_node.allocations;
@@ -633,7 +633,7 @@ test "core local intent topic demand no-op preserves Status scheduling and count
     const before = ActivationSnapshot.capture(&node);
     const calls = backing_node.allocations;
     node.peer_manager.control.schedules[0].peer = .{ .index = 0, .generation = 1 };
-    node.peer_manager.control.schedules[0].status_due_ms = node.last_now.mono_ms + 500;
+    node.peer_manager.control.schedules[0].status_due_ms = node.last_now.millis() + 500;
     const schedule = node.peer_manager.control.schedules[0];
     defer node.peer_manager.control.schedules[0].peer = null;
     var desired = intentFor(&node);
@@ -658,7 +658,7 @@ test "core local intent topic demand no-op preserves Status scheduling and count
     try std.testing.expect(try node.applyIntent(&desired, node.last_now));
     try std.testing.expect(!g.overlay.subscribed(row));
     const deadline = g.overlay.rows[row].retire_after_ms;
-    try std.testing.expect(!try node.applyIntent(&desired, .{ .mono_ms = node.last_now.mono_ms + 1, .unix_s = node.last_now.unix_s }));
+    try std.testing.expect(!try node.applyIntent(&desired, Now.fromMilliseconds(.{ .mono_ms = node.last_now.millis() + 1, .unix_s = node.last_now.unixSeconds() })));
     try std.testing.expectEqual(deadline, g.overlay.rows[row].retire_after_ms);
     try std.testing.expectEqual(calls, backing_node.allocations);
 }
@@ -695,12 +695,12 @@ test "core local intent fork BPO announcements remembered peer and event borrows
     try std.testing.expect(try pair.a.applyIntent(&a_intent, pair.a.last_now));
     try std.testing.expect(try pair.b.applyIntent(&b_intent, pair.b.last_now));
     try pair.a.addDirectPeer(&pair.b.peerId(), &.{pair.b.transport.localAddress()}, pair.a.last_now);
-    const start = pair.a.last_now.mono_ms;
+    const start = pair.a.last_now.millis();
     const gb = pair.b.service.gossipsub;
     var connected = false;
     for (0..3000) |_| {
         _ = try pair.pump();
-        if (pair.a.last_now.mono_ms - start > 10_000) break;
+        if (pair.a.last_now.millis() - start > 10_000) break;
         const ns = &gb.overlay.namespace.?;
         if (pair.a.peerCounts().relevant == 1 and pair.b.peerCounts().relevant == 1 and ns.subscribed(0, ns.lookup(active).?.ordinal) and ns.subscribed(0, ns.lookup(bpo).?.ordinal) and gb.sessions.rows[0].outStream() != null and pair.a.service.gossipsub.sessions.rows[0].outStream() != null) {
             connected = true;
@@ -766,7 +766,7 @@ test "core local intent fork BPO announcements remembered peer and event borrows
             try std.testing.expectEqualSlices(u8, &request, bytes);
             try intentBorrowUpdate(&pair.b, &b_intent);
             try std.testing.expectEqualSlices(u8, &request, bytes);
-            try std.testing.expect(pair.b.finish(event.request.request, pair.b.last_now));
+            try std.testing.expect(pair.b.finishResponse(event.request.request, pair.b.last_now));
             got_request = true;
         };
         for (pair.b_inbox.messages()) |message| {

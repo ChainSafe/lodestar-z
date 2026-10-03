@@ -1,4 +1,5 @@
 const std = @import("std");
+const schedule_test_support = @import("../schedule_test_support.zig");
 const codec = @import("codec.zig");
 const protocol = @import("protocol.zig");
 const reqresp = @import("ReqResp.zig");
@@ -17,14 +18,14 @@ test "reqresp wakeup distinguishes host and quota waits and bounds idle scans" {
     defer setup.deinit();
     setup.shared.client.reqresp.options.work_per_pump_max = 1;
     for (0..16) |_| _ = setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &.{} }).control;
-    try std.testing.expectEqual(@as(?u64, null), setup.shared.client.reqresp.schedule(.{ .control = 1 }).nextWakeup(setup.shared.pair.now.mono_ms));
+    try std.testing.expectEqual(@as(?u64, null), schedule_test_support.wakeupMilliseconds(setup.shared.client.reqresp.schedule(.{ .control = 1 }), setup.shared.pair.now.millis()));
     const bytes = [_]u8{0} ** 8;
     var sink: [8]u8 = undefined;
     _ = try setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .ping_v1, &bytes, &sink, .{}, setup.shared.pair.now);
     setup.shared.client.reqresp.options.work_per_pump_max = 32;
     try waitForRequest(&setup);
-    const due = setup.shared.pair.now.mono_ms + 2000;
-    try std.testing.expectEqual(@as(?u64, due), setup.shared.server.reqresp.schedule(.{ .control = 1 }).nextWakeup(setup.shared.pair.now.mono_ms));
+    const due = setup.shared.pair.now.millis() + 2000;
+    try std.testing.expectEqual(@as(?u64, due), schedule_test_support.wakeupMilliseconds(setup.shared.server.reqresp.schedule(.{ .control = 1 }), setup.shared.pair.now.millis()));
     setup.shared.pair.advance(2000);
     var events: [1]Event = undefined;
     try std.testing.expectEqual(@as(usize, 1), setup.shared.server.reqresp.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .control = &events }).control);
@@ -62,15 +63,15 @@ test "reqresp terminal pressure quiesces without capacity and wakes when host un
     var sink: [8]u8 = undefined;
     const handle = try setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .ping_v1, &bytes, &sink, .{}, setup.shared.pair.now);
     try std.testing.expect(setup.shared.client.reqresp.cancel(handle, setup.shared.pair.now));
-    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), setup.shared.client.reqresp.schedule(.{ .control = 0 }).nextWakeup(setup.shared.pair.now.mono_ms));
+    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.millis()), schedule_test_support.wakeupMilliseconds(setup.shared.client.reqresp.schedule(.{ .control = 0 }), setup.shared.pair.now.millis()));
     _ = setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &.{} }).control;
-    try std.testing.expectEqual(@as(?u64, null), setup.shared.client.reqresp.schedule(.{ .control = 0 }).nextWakeup(setup.shared.pair.now.mono_ms));
-    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), setup.shared.client.reqresp.schedule(.{ .control = 1 }).nextWakeup(setup.shared.pair.now.mono_ms));
+    try std.testing.expectEqual(@as(?u64, null), schedule_test_support.wakeupMilliseconds(setup.shared.client.reqresp.schedule(.{ .control = 0 }), setup.shared.pair.now.millis()));
+    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.millis()), schedule_test_support.wakeupMilliseconds(setup.shared.client.reqresp.schedule(.{ .control = 1 }), setup.shared.pair.now.millis()));
     var events: [1]Event = undefined;
     try std.testing.expectEqual(@as(usize, 1), setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &events }).control);
     try std.testing.expect(events[0].failed.reason == .cancelled);
     _ = setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &.{} }).control;
-    try std.testing.expectEqual(@as(?u64, null), setup.shared.client.reqresp.schedule(.{ .control = 0 }).nextWakeup(setup.shared.pair.now.mono_ms));
+    try std.testing.expectEqual(@as(?u64, null), schedule_test_support.wakeupMilliseconds(setup.shared.client.reqresp.schedule(.{ .control = 0 }), setup.shared.pair.now.millis()));
 }
 
 test "reqresp empty capacity does not delay buffered response chunks" {
@@ -97,8 +98,8 @@ test "reqresp empty capacity does not delay buffered response chunks" {
     setup.shared.client.reqresp.options.work_per_pump_max = 1;
     _ = setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .application = &.{} }).application;
     try std.testing.expect(setup.shared.client.reqresp.consume(handle, setup.shared.pair.now));
-    const due = setup.shared.client.reqresp.schedule(.{ .application = 1 }).nextWakeup(setup.shared.pair.now.mono_ms);
-    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), due);
+    const due = schedule_test_support.wakeupMilliseconds(setup.shared.client.reqresp.schedule(.{ .application = 1 }), setup.shared.pair.now.millis());
+    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.millis()), due);
     const count = setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .application = &events }).application;
     try std.testing.expectEqual(@as(usize, 1), count);
     try std.testing.expectEqualSlices(u8, &second, events[0].chunk.bytes);
@@ -120,7 +121,7 @@ test "reqresp host response retains write work behind a partial cursor" {
     var events: [1]Event = undefined;
     var sent = false;
     for (0..10) |_| {
-        try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), setup.shared.server.reqresp.schedule(.{ .control = 1 }).nextWakeup(setup.shared.pair.now.mono_ms));
+        try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.millis()), schedule_test_support.wakeupMilliseconds(setup.shared.server.reqresp.schedule(.{ .control = 1 }), setup.shared.pair.now.millis()));
         const count = setup.shared.server.reqresp.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .control = &events }).control;
         if (count == 1) {
             try std.testing.expect(events[0] == .chunk_sent);
@@ -132,7 +133,7 @@ test "reqresp host response retains write work behind a partial cursor" {
     try std.testing.expect(setup.shared.server.reqresp.finish(incoming, setup.shared.pair.now));
     var done = false;
     for (0..4) |_| {
-        try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), setup.shared.server.reqresp.schedule(.{ .control = 1 }).nextWakeup(setup.shared.pair.now.mono_ms));
+        try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.millis()), schedule_test_support.wakeupMilliseconds(setup.shared.server.reqresp.schedule(.{ .control = 1 }), setup.shared.pair.now.millis()));
         if (setup.shared.server.reqresp.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .control = &events }).control == 1) {
             try std.testing.expect(events[0] == .served);
             done = true;
@@ -161,7 +162,7 @@ test "reqresp native bytes arriving behind cursor remain ready after a routed re
     var events: [1]Event = undefined;
     var received = false;
     for (0..3) |_| {
-        try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), setup.shared.client.reqresp.schedule(.{ .control = 1 }).nextWakeup(setup.shared.pair.now.mono_ms));
+        try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.millis()), schedule_test_support.wakeupMilliseconds(setup.shared.client.reqresp.schedule(.{ .control = 1 }), setup.shared.pair.now.millis()));
         const emitted = setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &events }).control;
         if (emitted == 1) {
             try std.testing.expectEqualSlices(u8, &bytes, events[0].chunk.bytes);
@@ -214,7 +215,7 @@ test "reqresp native write credit behind cursor resumes from a routed writable e
     var events: [1]Event = undefined;
     var sent = false;
     for (0..10) |_| {
-        try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), setup.shared.server.reqresp.schedule(.{ .control = 1 }).nextWakeup(setup.shared.pair.now.mono_ms));
+        try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.millis()), schedule_test_support.wakeupMilliseconds(setup.shared.server.reqresp.schedule(.{ .control = 1 }), setup.shared.pair.now.millis()));
         const emitted = setup.shared.server.reqresp.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .control = &events }).control;
         if (emitted == 1) {
             try std.testing.expect(events[0] == .chunk_sent);
@@ -234,21 +235,21 @@ test "reqresp routed readiness checks the stream generation and quiets after one
     const handle = try setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .ping_v1, &bytes, &sink, .{}, setup.shared.pair.now);
     try waitForRequest(&setup);
     setup.shared.client.reqresp.options.work_per_pump_max = 1;
-    const deadline = setup.shared.client.reqresp.schedule(.{ .control = 0 }).nextWakeup(setup.shared.pair.now.mono_ms);
-    try std.testing.expect(deadline.? > setup.shared.pair.now.mono_ms);
+    const deadline = schedule_test_support.wakeupMilliseconds(setup.shared.client.reqresp.schedule(.{ .control = 0 }), setup.shared.pair.now.millis());
+    try std.testing.expect(deadline.? > setup.shared.pair.now.millis());
     const stream = setup.shared.client.reqresp.outbound[handle.index].request.stream;
     const route = setup.shared.pair.client.route(stream).?;
     try std.testing.expectEqual(@import("../types.zig").StreamOwner.reqresp_outbound, route.owner);
     var stale = stream;
     stale.conn.generation += 1;
     setup.shared.client.reqresp.streamReady(route, stale);
-    try std.testing.expectEqual(deadline, setup.shared.client.reqresp.schedule(.{ .control = 0 }).nextWakeup(setup.shared.pair.now.mono_ms));
+    try std.testing.expectEqual(deadline, schedule_test_support.wakeupMilliseconds(setup.shared.client.reqresp.schedule(.{ .control = 0 }), setup.shared.pair.now.millis()));
     setup.shared.client.reqresp.streamReady(route, stream);
     for (0..4) |_| {
-        if (setup.shared.client.reqresp.schedule(.{ .control = 0 }).nextWakeup(setup.shared.pair.now.mono_ms) != setup.shared.pair.now.mono_ms) break;
+        if (schedule_test_support.wakeupMilliseconds(setup.shared.client.reqresp.schedule(.{ .control = 0 }), setup.shared.pair.now.millis()) != setup.shared.pair.now.millis()) break;
         _ = setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &.{} }).control;
     }
-    try std.testing.expectEqual(deadline, setup.shared.client.reqresp.schedule(.{ .control = 0 }).nextWakeup(setup.shared.pair.now.mono_ms));
+    try std.testing.expectEqual(deadline, schedule_test_support.wakeupMilliseconds(setup.shared.client.reqresp.schedule(.{ .control = 0 }), setup.shared.pair.now.millis()));
 }
 
 test "reqresp partial beacon scans preserve host waits and elapsed deadlines" {
@@ -257,7 +258,7 @@ test "reqresp partial beacon scans preserve host waits and elapsed deadlines" {
     defer setup.deinit();
     for (0..8) |_| {
         _ = setup.shared.server.reqresp.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .control = &.{} }).control;
-        try std.testing.expectEqual(@as(?u64, null), setup.shared.server.reqresp.schedule(.{ .control = 0 }).nextWakeup(setup.shared.pair.now.mono_ms));
+        try std.testing.expectEqual(@as(?u64, null), schedule_test_support.wakeupMilliseconds(setup.shared.server.reqresp.schedule(.{ .control = 0 }), setup.shared.pair.now.millis()));
     }
     const bytes = [_]u8{0} ** 8;
     var sink: [8]u8 = undefined;
@@ -267,13 +268,13 @@ test "reqresp partial beacon scans preserve host waits and elapsed deadlines" {
     const due = setup.shared.server.reqresp.inbound[incoming.index].progress_ms + 2000;
     for (0..4) |_| {
         _ = setup.shared.server.reqresp.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .control = &.{} }).control;
-        try std.testing.expectEqual(@as(?u64, due), setup.shared.server.reqresp.schedule(.{ .control = 1 }).nextWakeup(setup.shared.pair.now.mono_ms));
+        try std.testing.expectEqual(@as(?u64, due), schedule_test_support.wakeupMilliseconds(setup.shared.server.reqresp.schedule(.{ .control = 1 }), setup.shared.pair.now.millis()));
     }
     setup.shared.pair.advance(2000);
     var events: [1]Event = undefined;
     var failed = false;
     for (0..4) |_| {
-        try std.testing.expect(setup.shared.server.reqresp.schedule(.{ .control = 1 }).nextWakeup(setup.shared.pair.now.mono_ms).? <= setup.shared.pair.now.mono_ms);
+        try std.testing.expect(schedule_test_support.wakeupMilliseconds(setup.shared.server.reqresp.schedule(.{ .control = 1 }), setup.shared.pair.now.millis()).? <= setup.shared.pair.now.millis());
         if (setup.shared.server.reqresp.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .control = &events }).control == 1) {
             try std.testing.expect(events[0].failed.reason == .host_timeout);
             failed = true;
@@ -282,7 +283,7 @@ test "reqresp partial beacon scans preserve host waits and elapsed deadlines" {
     }
     try std.testing.expect(failed);
     _ = setup.shared.server.reqresp.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .control = &.{} }).control;
-    try std.testing.expectEqual(@as(?u64, null), setup.shared.server.reqresp.schedule(.{ .control = 1 }).nextWakeup(setup.shared.pair.now.mono_ms));
+    try std.testing.expectEqual(@as(?u64, null), schedule_test_support.wakeupMilliseconds(setup.shared.server.reqresp.schedule(.{ .control = 1 }), setup.shared.pair.now.millis()));
 }
 
 test "reqresp request write preserves already readable native response" {
@@ -324,7 +325,7 @@ test "reqresp request write preserves already readable native response" {
         if (setup.shared.client.reqresp.outbound[handle.index].phase == .response) break;
     }
     try std.testing.expectEqual(.response, setup.shared.client.reqresp.outbound[handle.index].phase);
-    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), setup.shared.client.reqresp.schedule(.{ .control = 1 }).nextWakeup(setup.shared.pair.now.mono_ms));
+    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.millis()), schedule_test_support.wakeupMilliseconds(setup.shared.client.reqresp.schedule(.{ .control = 1 }), setup.shared.pair.now.millis()));
     var events: [1]Event = undefined;
     try std.testing.expectEqual(@as(usize, 1), setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &events }).control);
     try std.testing.expectEqualSlices(u8, &bytes, events[0].chunk.bytes);

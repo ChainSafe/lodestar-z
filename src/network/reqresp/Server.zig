@@ -53,7 +53,7 @@ fn failIo(self: *Server, owner: *ReqResp, index: u16, err: (Engine.StreamError |
 pub fn deliver(self: *Server, control: bool, now: Now) ?Event {
     const request = &self.request;
     const event = request.deliver(control) orelse return null;
-    if (request.running() and self.state == .finishing) self.progress_ms = now.mono_ms;
+    if (request.running() and self.state == .finishing) self.progress_ms = now.millis();
     return event;
 }
 
@@ -88,7 +88,7 @@ pub fn deadline(self: *const Server, ctx: *const ReqResp) ?u64 {
 pub fn advance(self: *Server, ctx: *ReqResp, engine: *Engine, index: u16, now: Now) void {
     const request = &self.request;
     if (!request.running()) return;
-    if (self.deadline(ctx)) |due| if (now.mono_ms >= due) {
+    if (self.deadline(ctx)) |due| if (now.millis() >= due) {
         const reason: Failure = if (self.waitingHost())
             .host_timeout
         else if (self.state == .ready)
@@ -133,7 +133,7 @@ fn readRequest(owner: *ReqResp, engine: *Engine, slot: *Server, index: u16, now:
             slot.fail(owner, index, .stream_closed, now);
             return;
         }
-        if (input.progressed) slot.progress_ms = now.mono_ms;
+        if (input.progressed) slot.progress_ms = now.millis();
         if (input.bytes.len == 0 and !input.fin) return;
         if (input.bytes.len > 0) {
             if (!request.io.decoding or request.io.decoder.isDone()) {
@@ -173,8 +173,8 @@ fn readRequest(owner: *ReqResp, engine: *Engine, slot: *Server, index: u16, now:
                 return;
             };
             request.chunks_max = inspected.chunks_max;
-            slot.progress_ms = now.mono_ms;
-            slot.admission.decoded(inspected.charged_cost, now.mono_ms);
+            slot.progress_ms = now.millis();
+            slot.admission.decoded(inspected.charged_cost, now.millis());
             slot.state = .ready;
             return;
         }
@@ -215,7 +215,7 @@ pub fn admit(self: *Server, index: u16, lease: *const @import("InboundAdmission.
     request.io.scratch = lease.scratch;
     self.execution = lease.execution;
     self.state = .serving;
-    self.progress_ms = now.mono_ms;
+    self.progress_ms = now.millis();
     request.queue(.{ .request = .{
         .request = request.handle(index),
         .peer = request.conn,
@@ -264,7 +264,7 @@ fn queueChunk(
     slot.pending_context = context;
     slot.pending_result = result;
     slot.close_after_write = close_after;
-    slot.progress_ms = now.mono_ms;
+    slot.progress_ms = now.millis();
     Server.beginWrite(slot);
 }
 
@@ -299,11 +299,11 @@ fn writeChunk(owner: *ReqResp, engine: *Engine, slot: *Server, index: u16, now: 
         request.io.outbox.queue("", true);
         slot.state = .finishing;
         owner.markReady(.inbound, index);
-        slot.progress_ms = now.mono_ms;
+        slot.progress_ms = now.millis();
         return;
     }
     slot.state = .serving;
-    slot.progress_ms = now.mono_ms;
+    slot.progress_ms = now.millis();
     request.queue(.{ .chunk_sent = .{
         .request = request.handle(index),
         .chunks = request.chunks,
@@ -334,7 +334,7 @@ fn finishStream(
         if (flushed == .yielded) owner.markReady(.inbound, index);
         return;
     }
-    slot.progress_ms = now.mono_ms;
+    slot.progress_ms = now.millis();
     slot.complete(owner, index, .{ .served = .{ .request = request.handle(index), .chunks = request.chunks } }, now);
 }
 
@@ -357,7 +357,7 @@ pub fn acceptPrepared(
         .receive = slot.receive,
         .identity = accepted.identity,
         .request_fork = request_fork,
-        .progress_ms = now.mono_ms,
+        .progress_ms = now.millis(),
         .admission = accepted.state,
         .request = .{
             .completion = .running,
@@ -366,7 +366,7 @@ pub fn acceptPrepared(
             .conn = stream.conn,
             .stream = stream,
             .protocol = which,
-            .started_ms = now.mono_ms,
+            .started_ms = now.millis(),
             .io = .{
                 .sink = request_sink,
                 .scratch = slot.receive.scratch,
@@ -420,7 +420,7 @@ pub fn finish(slot: *Server, now: Now) bool {
             if (!request.io.outbox.idle()) return false;
             request.io.outbox.queue("", true);
             slot.state = .finishing;
-            slot.progress_ms = now.mono_ms;
+            slot.progress_ms = now.millis();
         },
         .writing_chunk => {
             if (slot.close_after_write) return false;

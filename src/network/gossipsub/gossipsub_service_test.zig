@@ -1,3 +1,4 @@
+const schedule_test_support = @import("../schedule_test_support.zig");
 const gossip_test = @import("test_support.zig");
 const std = @import("std");
 const Service = @import("../service.zig").Service;
@@ -83,7 +84,7 @@ test "gossipsub direct send timeout retries once after a bounded delay" {
         try std.testing.expectEqual(@as(u16, 1), (try g.publish(topic, "stalled", setup.shared.pair.now)).queued);
         setup.shared.pair.advance(g.options.tx_timeout_ms);
         for (0..4) |_| try setup.pumpOnce();
-        try std.testing.expectEqual(setup.shared.pair.now.mono_ms + driver.direct_retry_delay_ms, g.sessions.rows[index].outbound.retry_at);
+        try std.testing.expectEqual(setup.shared.pair.now.millis() + driver.direct_retry_delay_ms, g.sessions.rows[index].outbound.retry_at);
         try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[index].io.tx.data.count);
         try std.testing.expectEqual(.pending, setup.shared.client.gossipsub.deliveryStatus(setup.shared.handles.client));
         setup.shared.pair.advance(driver.direct_retry_delay_ms - 1);
@@ -191,7 +192,7 @@ test "gossipsub service subscribes only after negotiation and retirement cancels
     _ = setup.shared.client.gossipsub.pump(&setup.shared.client.router, &setup.shared.pair.client, setup.shared.pair.now);
     try std.testing.expect(setup.shared.client.gossipsub.admitted(setup.shared.handles.client));
     @import("session_io.zig").retirePeer(setup.shared.client.gossipsub, &setup.shared.client.router, &setup.shared.pair.client, index);
-    try std.testing.expectEqual(@as(?u64, null), setup.shared.client.router.schedule(16).nextWakeup(setup.shared.pair.now.mono_ms));
+    try std.testing.expectEqual(@as(?u64, null), schedule_test_support.wakeupMilliseconds(setup.shared.client.router.schedule(16), setup.shared.pair.now.millis()));
     try std.testing.expect(setup.shared.pair.client.peerId(setup.shared.handles.client) != null);
 }
 
@@ -338,7 +339,7 @@ test "gossipsub negotiation timeout releases resources without creating a retry 
     setup.shared.pair.advance(@import("../negotiate.zig").Negotiator.negotiate_timeout_ms + 1);
     _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{});
     _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, setup.shared.pair.now, .{});
-    try std.testing.expect(setup.shared.client.router.schedule(16).nextWakeup(setup.shared.pair.now.mono_ms) == null);
+    try std.testing.expect(schedule_test_support.wakeupMilliseconds(setup.shared.client.router.schedule(16), setup.shared.pair.now.millis()) == null);
     const index = setup.shared.client.gossipsub.sessions.find(setup.shared.handles.client).?;
     try std.testing.expect(setup.shared.client.gossipsub.sessions.rows[index].outbound == .none);
     try std.testing.expect(setup.shared.client.gossipsub.sessions.rows[index].io.deadlines(&setup.shared.client.gossipsub.options).next() == null);
@@ -365,8 +366,8 @@ test "gossipsub PRUNE exhaustion closes gossip streams and leaves the transport 
     const full = try std.testing.allocator.alloc(u8, g.options.critical_bytes);
     defer std.testing.allocator.free(full);
     @memset(full, 0);
-    try std.testing.expect(tx.injectFrame(full, true, setup.shared.pair.now.mono_ms) != null);
-    g.overlay.prune(&g.overlayContext(setup.shared.pair.now.mono_ms), topic_index, index, 60_000, .excess);
+    try std.testing.expect(tx.injectFrame(full, true, setup.shared.pair.now.millis()) != null);
+    g.overlay.prune(&g.overlayContext(setup.shared.pair.now.millis()), topic_index, index, 60_000, .excess);
     try std.testing.expect(g.sessions.rows[index].outbound == .closing);
     try std.testing.expect(!setup.shared.client.gossipsub.deliveryAvailable(setup.shared.handles.client));
     _ = setup.shared.client.gossipsub.pump(&setup.shared.client.router, &setup.shared.pair.client, setup.shared.pair.now);

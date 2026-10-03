@@ -235,7 +235,7 @@ fn expired(qualified_at_s: u64, now_s: u64) bool {
 
 /// Wall-clock seconds, clamped at the epoch.
 pub fn seconds(now: Now) u64 {
-    return @intCast(@max(0, now.unix_s));
+    return @intCast(@max(0, now.unixSeconds()));
 }
 
 /// The IPv4 /16 or IPv6 /32 an address belongs to, which replay spreads its order across.

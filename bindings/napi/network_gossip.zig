@@ -14,23 +14,24 @@ pub const Cell = processor.GossipProcessor.Cell;
 pub const Diagnostics = processor.GossipProcessor.Diagnostics;
 pub const Batch = processor.GossipProcessor.Batch;
 pub const Table = processor.GossipProcessor;
-pub const Clock = struct { mono_ms: u64, unix_ms: u64 };
-pub fn sample(io: std.Io) !Clock {
-    const mono = std.Io.Timestamp.now(io, .awake).toMilliseconds();
-    const wall = std.Io.Timestamp.now(io, .real).toMilliseconds();
-    if (mono < 0 or mono > std.math.maxInt(u64) or wall < 0 or wall > 9007199254740991) return error.InvalidNetworkClock;
-    return .{ .mono_ms = @intCast(mono), .unix_ms = @intCast(wall) };
+pub fn sample(io: std.Io) error{InvalidNetworkClock}!n.Now {
+    const now = n.Now.read(io) catch return error.InvalidNetworkClock;
+    if (now.wall.raw.nanoseconds > @as(i96, 9007199254740991) * std.time.ns_per_ms) return error.InvalidNetworkClock;
+    return now;
 }
 pub fn monotonic() !u64 {
-    const value = std.Io.Timestamp.now(std.Io.Threaded.global_single_threaded.io(), .awake).toMilliseconds();
+    const stamp = std.Io.Timestamp.now(std.Io.Threaded.global_single_threaded.io(), .awake);
+    if (stamp.nanoseconds < 0) return error.InvalidNetworkClock;
+    const value = stamp.toMilliseconds();
     if (value < 0 or value > std.math.maxInt(u64)) return error.InvalidNetworkClock;
     return @intCast(value);
 }
-pub fn projectWall(admitted: u64, clock: Clock) !u64 {
-    if (admitted > clock.mono_ms) return error.InvalidNetworkClock;
-    const elapsed = clock.mono_ms - admitted;
-    if (elapsed > clock.unix_ms or clock.unix_ms > 9007199254740991) return error.InvalidNetworkClock;
-    return clock.unix_ms - elapsed;
+pub fn projectWall(admitted: u64, clock: n.Now) !u64 {
+    if (admitted > clock.millis()) return error.InvalidNetworkClock;
+    const elapsed = clock.millis() - admitted;
+    const wall_ms = clock.wall.raw.toMilliseconds();
+    if (wall_ms < 0 or wall_ms > 9007199254740991 or elapsed > wall_ms) return error.InvalidNetworkClock;
+    return @as(u64, @intCast(wall_ms)) - elapsed;
 }
 /// Runs processor maintenance and applies queued verdicts, unless the host holds them. Each message the host was
 /// handed then awaits acknowledgement of its disposition. Returns whether bounded carry-over work remains for the
@@ -41,7 +42,7 @@ pub fn flags(runtime: *Runtime, io: std.Io, tick: n.Now) !bool {
     const table = if (runtime.gossip) |*table| table else return false;
     const core = &runtime.heavy.?.core;
     const clock = try sample(io);
-    table.maintain(clock.mono_ms, core.current_slot);
+    table.maintain(clock.millis(), core.current_slot);
     var retired_bytes: usize = 0;
     for (0..if (runtime.verdicts_held) 0 else batch_max) |_| {
         const token = table.nextVerdict() orelse break;
@@ -89,7 +90,7 @@ pub const Ingress = struct {
         const runtime = self.runtime;
         const clock = try sample(self.io);
         const received_at = try projectWall(candidate.event.admitted_ms, clock);
-        if (clock.mono_ms >= candidate.event.deadline) return false;
+        if (clock.millis() >= candidate.event.deadline) return false;
         runtime.lock();
         defer runtime.unlock();
         if (runtime.stop or self.failure != null) return false;

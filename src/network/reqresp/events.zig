@@ -33,10 +33,13 @@ pub const Failure = union(enum) {
 };
 
 pub const Event = union(enum) {
+    /// Borrows the caller's sink until consume or terminal delivery.
     chunk: struct { request: RequestHandle, bytes: []const u8, fork: ?config.ForkSeq },
     done: struct { request: RequestHandle, chunks: u32 },
     failed: struct { request: RequestHandle, reason: Failure, phase: ?RequestPhase = null },
+    /// Borrows receive bytes until served/failed delivery, regardless of retained host execution.
     request: struct { request: RequestHandle, peer: Handle, protocol: Protocol, bytes: []const u8 },
+    /// Releases the response bytes passed to respond.
     chunk_sent: struct { request: RequestHandle, chunks: u32 },
     served: struct { request: RequestHandle, chunks: u32 },
 };

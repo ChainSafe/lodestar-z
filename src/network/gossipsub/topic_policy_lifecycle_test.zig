@@ -1,4 +1,5 @@
 const std = @import("std");
+const Now = @import("../types.zig").Now;
 const p = @import("topic_policy.zig");
 const Gossipsub = @import("Gossipsub.zig");
 const Pair = @import("test_pair.zig").Pair;
@@ -63,7 +64,7 @@ test "gossip accepted mesh membership does not invent a declared subscription ac
     const topic = g.overlay.findTopic(name).?;
     const grafted = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const declared = support.addPeer(&g, .{ .index = 1, .generation = 1 }, .v1_2).?;
-    const now: @import("../types.zig").Now = .{ .mono_ms = 1, .unix_s = 0 };
+    const now: @import("../types.zig").Now = Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 });
     support.control(&g, grafted.index, .{ .graft = name }, now);
     support.control(&g, declared.index, .{ .subscription = .{ .topic = name, .subscribe = true } }, now);
     const ns = &g.overlay.namespace.?;
@@ -71,7 +72,7 @@ test "gossip accepted mesh membership does not invent a declared subscription ac
     try std.testing.expect(!g.overlay.subscribers(topic).isSet(grafted.index));
     try std.testing.expect(!ns.subscribed(grafted.index, 0));
     try std.testing.expect(ns.subscribed(declared.index, 0));
-    var context = g.overlayContext(now.mono_ms);
+    var context = g.overlayContext(now.millis());
     g.overlay.maintain(&context, topic);
     try std.testing.expect(g.overlay.inMesh(topic, grafted.index));
     try std.testing.expect(g.overlay.publicationRecipients(&context, topic, false).isSet(grafted.index));
@@ -130,7 +131,7 @@ test "topic policy incoming lengths precede decode work arena store and validati
         const received = g.messages.receive(&context, &workspace, &source, .{ .topic = name, .data = compressed[0..len] }, 1);
         try std.testing.expect(received == .admitted);
         try std.testing.expectEqualSlices(u8, payload[0..size], inbox.last().bytes);
-        _ = g.report(inbox.last().handle, .ignore, .{ .mono_ms = 2, .unix_s = 0 });
+        _ = g.report(inbox.last().handle, .ignore, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 }));
     }
     try std.testing.expect(peer_work < g.options.decompress_per_peer_bytes);
 }
@@ -138,17 +139,17 @@ test "topic policy incoming lengths precede decode work arena store and validati
 test "topic policy local publication enforces both size bounds before state" {
     var g = try support.init(std.testing.allocator, options(&.{boundary()}));
     defer g.deinit();
-    try std.testing.expectError(error.PayloadTooLarge, g.publish(name, "012345678901234567890", .{ .mono_ms = 1, .unix_s = 0 }));
+    try std.testing.expectError(error.PayloadTooLarge, g.publish(name, "012345678901234567890", Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 })));
     try std.testing.expectEqual(@as(usize, 0), live(&g));
     try std.testing.expectEqual(@as(usize, 0), g.messages.store.used_entries);
-    try std.testing.expectError(error.UnknownTopic, g.publish(unknown, "", .{ .mono_ms = 1, .unix_s = 0 }));
+    try std.testing.expectError(error.UnknownTopic, g.publish(unknown, "", Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 })));
     try std.testing.expectError(error.InvalidTopic, support.subscribe(&g, unknown));
     try std.testing.expectEqual(@as(usize, 0), live(&g));
-    try std.testing.expectError(error.PayloadTooSmall, g.publish(name, "short", .{ .mono_ms = 1, .unix_s = 0 }));
+    try std.testing.expectError(error.PayloadTooSmall, g.publish(name, "short", Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 })));
     try std.testing.expectEqual(@as(usize, 0), live(&g));
-    _ = try g.publish(name, "0123456789", .{ .mono_ms = 1, .unix_s = 0 });
+    _ = try g.publish(name, "0123456789", Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
     try std.testing.expectEqual(@as(usize, 1), g.messages.store.used_entries);
-    try std.testing.expectError(error.Duplicate, g.publish(name, "0123456789", .{ .mono_ms = 1, .unix_s = 0 }));
+    try std.testing.expectError(error.Duplicate, g.publish(name, "0123456789", Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 })));
 }
 
 test "topic policy physical close clears bits while same connection stream replacement preserves them" {
@@ -324,7 +325,7 @@ test "topic policy remembered ordinals remain independent of retained validation
     try std.testing.expectEqual(generation, g.overlay.rows[old].generation);
     try std.testing.expectEqualStrings(name, received.topic);
     try std.testing.expectEqualStrings("0123456789", received.bytes);
-    try std.testing.expectEqual(Gossipsub.ReportOutcome{ .applied = .ignore }, g.report(received.handle, .ignore, .{ .mono_ms = 2, .unix_s = 0 }));
+    try std.testing.expectEqual(Gossipsub.ReportOutcome{ .applied = .ignore }, g.report(received.handle, .ignore, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 })));
     try std.testing.expectEqual(@as(?u16, null), support.intern(&g, replacement));
     g.messages.validation.expire(&g.messages.store, &g.peers, 100000);
     _ = support.intern(&g, replacement).?;

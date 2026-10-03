@@ -1,3 +1,4 @@
+const schedule_test_support = @import("schedule_test_support.zig");
 const service_test = @import("service_test_support.zig");
 const std = @import("std");
 const Engine = @import("quic/Engine.zig");
@@ -351,7 +352,7 @@ test "negotiator delivers retained outcomes before recycled lower slots" {
     try std.testing.expectEqual(@as(usize, 3), setup.pumpDialer(&supported, &remaining));
     for (remaining[0..3]) |outcome| try std.testing.expectEqual(Negotiator.Failure.stream_closed, outcome.result.failed);
     try std.testing.expectEqual(@as(usize, 0), setup.pumpDialer(&supported, &remaining));
-    try std.testing.expect(setup.dialer.schedule(1).nextWakeup(setup.pair.now.mono_ms) == null);
+    try std.testing.expect(schedule_test_support.wakeupMilliseconds(setup.dialer.schedule(1), setup.pair.now.millis()) == null);
 }
 
 test "negotiator connection teardown invalidates an undelivered ready outcome" {
@@ -563,13 +564,13 @@ test "negotiation timed entry owns exact expiry below and above the default" {
         const pair = &setup.pair;
         const negotiator = &setup.dialer;
         const stream = try negotiator.beginOutbound(&pair.client, setup.handles.client, &.{ping_protocol}, pair.now, .{ .control = true, .timeout_ms = duration });
-        const due = pair.now.mono_ms + duration;
+        const due = pair.now.millis() + duration;
         var outcomes: [1]Outcome = undefined;
         try std.testing.expectEqual(@as(usize, 0), negotiator.pump(&pair.client, pair.now, &supported, &outcomes));
-        try std.testing.expectEqual(@as(?u64, due), negotiator.schedule(1).nextWakeup(pair.now.mono_ms));
-        pair.now.mono_ms = due - 1;
+        try std.testing.expectEqual(@as(?u64, due), schedule_test_support.wakeupMilliseconds(negotiator.schedule(1), pair.now.millis()));
+        pair.now.monotonic = @import("time.zig").milliseconds(due - 1);
         try std.testing.expectEqual(@as(usize, 0), negotiator.pump(&pair.client, pair.now, &supported, &outcomes));
-        pair.now.mono_ms = due;
+        pair.now.monotonic = @import("time.zig").milliseconds(due);
         try std.testing.expectEqual(@as(usize, 1), negotiator.pump(&pair.client, pair.now, &supported, &outcomes));
         try std.testing.expectEqual(stream, outcomes[0].stream);
         try std.testing.expectEqual(.timeout, outcomes[0].result.failed);
@@ -645,7 +646,7 @@ test "negotiator retains final selected bytes through blocked writes and release
     try std.testing.expect(finished and received > padding);
     try std.testing.expectEqualStrings("final selected response", &tail);
     try std.testing.expectEqual(@as(usize, 0), setup.listener.active());
-    try std.testing.expectEqual(@as(?u64, null), setup.listener.schedule(1).nextWakeup(setup.pair.now.mono_ms));
+    try std.testing.expectEqual(@as(?u64, null), schedule_test_support.wakeupMilliseconds(setup.listener.schedule(1), setup.pair.now.millis()));
 }
 
 test "negotiator final selected write retires on timeout reset connection close and shutdown" {
@@ -677,7 +678,7 @@ test "negotiator final selected write retires on timeout reset connection close 
             .shutdown => setup.listener.cancelAll(&setup.pair.server),
         }
         try std.testing.expectEqual(@as(usize, 0), setup.listener.active());
-        try std.testing.expectEqual(@as(?u64, null), setup.listener.schedule(1).nextWakeup(setup.pair.now.mono_ms));
+        try std.testing.expectEqual(@as(?u64, null), schedule_test_support.wakeupMilliseconds(setup.listener.schedule(1), setup.pair.now.millis()));
         if (case == .connection_closed) continue;
         const replacement = try setup.pair.client.openStream(setup.handles.client);
         var hello: [256]u8 = undefined;

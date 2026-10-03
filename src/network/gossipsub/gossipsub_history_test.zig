@@ -1,3 +1,4 @@
+const Now = @import("../types.zig").Now;
 const support = @import("test_support.zig");
 const std = @import("std");
 const Gossipsub = @import("Gossipsub.zig");
@@ -11,7 +12,7 @@ fn requestOne(g: *Gossipsub, peer: u16, id: *const @import("topic.zig").MessageI
     var body: [32]u8 = undefined;
     var writer = @import("protobuf.zig").Writer.init(&body);
     writer.bytesField(1, id);
-    support.control(g, peer, .{ .iwant = .{ .body = writer.written() } }, .{ .mono_ms = g.last_now_ms, .unix_s = 0 });
+    support.control(g, peer, .{ .iwant = .{ .body = writer.written() } }, Now.fromMilliseconds(.{ .mono_ms = g.last_now_ms, .unix_s = 0 }));
 }
 
 test "gossipsub duplicate invalid bytes do not evict useful history" {
@@ -20,12 +21,12 @@ test "gossipsub duplicate invalid bytes do not evict useful history" {
     const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const topic = "/eth2/01020304/beacon_block/ssz_snappy";
     try support.subscribe(&g, topic);
-    _ = try g.publish(topic, "useful", .{ .mono_ms = 1, .unix_s = 1 });
+    _ = try g.publish(topic, "useful", Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 1 }));
     const useful = topic_mod.validMessageId(topic, "useful", .{});
     const retained = g.messages.history.message(g.messages.history.get(&g.messages.store, useful).?);
     for (0..20) |_| {
         try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, peer.index, "useful", 2));
-        _ = receiveForTest(&g, peer.index, .{ .topic = topic, .data = &.{ 5, 0 } }, .{ .mono_ms = 2, .unix_s = 1 });
+        _ = receiveForTest(&g, peer.index, .{ .topic = topic, .data = &.{ 5, 0 } }, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 1 }));
         try std.testing.expectEqual(retained, g.messages.history.message(g.messages.history.get(&g.messages.store, useful).?));
     }
 }
@@ -59,13 +60,13 @@ test "gossip history at capacity serves IWANT until each message's sixth heartbe
         if (epoch > 0) support.ageHistory(&g);
         for (window, 0..) |*id, i| {
             var payload: [2]u8 = .{ @intCast(epoch), @intCast(i) };
-            _ = try g.publish(name, &payload, .{ .mono_ms = 1 + epoch, .unix_s = 0 });
+            _ = try g.publish(name, &payload, Now.fromMilliseconds(.{ .mono_ms = 1 + epoch, .unix_s = 0 }));
             id.* = topic_mod.validMessageId(name, &payload, .{});
         }
     }
     try std.testing.expectEqual(history.entries.len, history.count);
     // A full history evicts its oldest message while that message still has a window left.
-    _ = try g.publish(name, "one more", .{ .mono_ms = 10, .unix_s = 0 });
+    _ = try g.publish(name, "one more", Now.fromMilliseconds(.{ .mono_ms = 10, .unix_s = 0 }));
     try std.testing.expectEqual(history.entries.len, history.count);
     try std.testing.expect(history.get(&g.messages.store, ids[0][0]) == null);
     const misses = &g.iwant_outcomes[@intFromEnum(@import("metrics.zig").IwantOutcome.miss)];
@@ -96,9 +97,9 @@ test "gossip retention makes room from its own kind's oldest copy and refuses wh
     const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
     const kind = @intFromEnum(topic_mod.Kind.beacon_block);
-    for (0..4) |i| _ = try g.publish(name, &[_]u8{@intCast(i)}, .{ .mono_ms = 1, .unix_s = 0 });
+    for (0..4) |i| _ = try g.publish(name, &[_]u8{@intCast(i)}, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
     try std.testing.expectEqual(@as(usize, 4), g.messages.store.retained_entries_by_kind[kind]);
-    _ = try g.publish(name, "fifth", .{ .mono_ms = 2, .unix_s = 0 });
+    _ = try g.publish(name, "fifth", Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 }));
     try std.testing.expect(g.messages.history.get(&g.messages.store, topic_mod.validMessageId(name, &[_]u8{0}, .{})) == null);
     try std.testing.expectEqual(@as(usize, 4), g.messages.history.count);
     // Copies queued to a peer stay retained, so a full allowance refuses the next message.
@@ -107,7 +108,7 @@ test "gossip retention makes room from its own kind's oldest copy and refuses wh
         try std.testing.expectEqual(.queued, g.sessions.rows[peer.index].io.tx.queueData(&g.messages.store, g.messages.history.message(slot), .forward, .{ .bytes = g.options.tx_peer_bytes }, 2));
         slot = g.messages.history.entries[slot].next;
     }
-    try std.testing.expectError(error.ResourceExhausted, g.publish(name, "sixth", .{ .mono_ms = 3, .unix_s = 0 }));
+    try std.testing.expectError(error.ResourceExhausted, g.publish(name, "sixth", Now.fromMilliseconds(.{ .mono_ms = 3, .unix_s = 0 })));
     try std.testing.expectEqual(@as(u64, 1), g.messages.retention_refusals[kind]);
     try std.testing.expectEqual(@as(usize, 4), g.messages.history.count);
     g.cancelWrites(g.sessions.ref(peer.index));
@@ -141,13 +142,13 @@ test "gossip refused retention leaves the history unchanged" {
         var kept: usize = 0;
         for (case.kept) |payload| {
             if (payload.len == 0) continue;
-            _ = try g.publish(case.name, payload, .{ .mono_ms = 1, .unix_s = 0 });
+            _ = try g.publish(case.name, payload, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
             handles[kept] = history.message(history.get(&g.messages.store, topic_mod.validMessageId(case.name, payload, .{})).?);
             kept += 1;
         }
         try std.testing.expectEqual(.queued, g.sessions.rows[peer.index].io.tx.queueData(&g.messages.store, handles[case.queued], .forward, .{ .bytes = g.options.tx_peer_bytes }, 1));
         const count = history.count;
-        try std.testing.expectError(error.ResourceExhausted, g.publish(case.name, case.refused, .{ .mono_ms = 2, .unix_s = 0 }));
+        try std.testing.expectError(error.ResourceExhausted, g.publish(case.name, case.refused, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 })));
         try std.testing.expectEqual(count, history.count);
         for (handles[0..kept]) |h| try std.testing.expect(history.get(&g.messages.store, g.messages.store.get(h).?.id) != null);
     }

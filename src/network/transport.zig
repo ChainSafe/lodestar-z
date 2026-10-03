@@ -93,6 +93,7 @@ pub const Transport = struct {
 
     pub const ProgressResult = struct {
         progress: StepResult,
+        cancelled: bool = false,
         failure: ?StepError = null,
     };
 
@@ -118,7 +119,7 @@ pub const Transport = struct {
         defer std.crypto.secureZero(u8, &seed_bytes);
         try std.Io.randomSecure(io, &seed_bytes);
         const now = try currentTime(io);
-        var context = try tls.Context.init(options.host, now.unix_s, serial);
+        var context = try tls.Context.init(options.host, now.unixSeconds(), serial);
         var context_owned = true;
         errdefer if (context_owned) context.deinit();
         target.sockets = try Sockets.bind(io, options.bind);
@@ -226,17 +227,20 @@ pub const Transport = struct {
     pub fn advance(self: *Transport, io: std.Io, input: Input, events: []Engine.Event) ProgressResult {
         const now = input.now;
         var result = self.beginTurn(now);
-        var failure: ?StepError = if (input.cancelled) error.Canceled else null;
-        self.receive(io, &result, input.ready) catch |err| {
-            failure = if (err == error.Canceled) err else failure orelse err;
+        var cancelled = input.cancelled;
+        var failure: ?StepError = if (cancelled) error.Canceled else null;
+        if (!cancelled) self.receive(io, &result, input.ready) catch |err| {
+            cancelled = cancelled or err == error.Canceled;
+            failure = failure orelse err;
         };
         self.expire(now);
         result.events = self.collect(now, events);
         result.events_pending = self.engine.eventsPending();
-        if (failure == null or failure.? != error.Canceled) self.flush(io, now, &result) catch |err| {
-            failure = err;
+        if (!cancelled) self.flush(io, now, &result) catch |err| {
+            cancelled = true;
+            failure = failure orelse err;
         };
-        return .{ .progress = result, .failure = failure };
+        return .{ .progress = result, .cancelled = cancelled, .failure = failure };
     }
 
     /// Non-blocking drain of the QUIC sockets into the engine, up to the receive budget. Reads
@@ -296,12 +300,11 @@ pub const Transport = struct {
 
     /// quiche reports the time left on its timer from its own clock read, so a timer key built on
     /// a clock read earlier in the turn lands early by the time the turn has run since.
-    /// Refresh Io-based timestamps after the burst; millisecond-only caller timestamps stay fixed.
+    /// Refresh the supplied timestamp after the burst, using the same I/O clock as the driver.
     fn keyClock(io: std.Io, after: Engine.Now) Engine.Now {
-        const previous = after.mono_ns orelse return after;
-        const read = std.math.cast(u64, std.Io.Clock.awake.now(io).nanoseconds) orelse return after;
-        if (read <= previous) return after;
-        return .{ .mono_ms = read / std.time.ns_per_ms, .mono_ns = read, .unix_s = after.unix_s };
+        const read = std.Io.Clock.Timestamp.now(io, .awake);
+        if (read.raw.nanoseconds > std.math.maxInt(u64) or !read.compare(.gt, after.monotonic)) return after;
+        return .{ .monotonic = read, .wall = after.wall };
     }
 
     /// Sends up to burst_per_connection datagrams of one connection into the shared batch.
@@ -358,11 +361,11 @@ pub const Transport = struct {
         return first;
     }
 
-    pub fn schedule(self: *const Transport) types.Schedule {
+    pub fn schedule(self: *const Transport, event_capacity: usize) types.Schedule {
         const deadline = self.engine.nextDeadlineNs();
         return .{
-            .runnable = self.engine.backlog() or self.engine.eventsPending() or self.engine.releasesPending(),
-            .deadline_ms = if (deadline) |ns| ns / std.time.ns_per_ms + @intFromBool(ns % std.time.ns_per_ms != 0) else null,
+            .runnable = self.engine.backlog() or (event_capacity > 0 and self.engine.eventsPending()) or self.engine.releasesPending(),
+            .deadline = if (deadline) |ns| .{ .clock = .awake, .raw = .fromNanoseconds(ns) } else null,
         };
     }
 
@@ -434,10 +437,7 @@ pub const Transport = struct {
     }
 
     pub fn currentTime(io: std.Io) error{ClockOutOfRange}!Engine.Now {
-        const mono = std.Io.Clock.awake.now(io).nanoseconds;
-        const wall = std.Io.Clock.real.now(io).toSeconds();
-        if (mono < 0 or mono > std.math.maxInt(u64) or wall < 0) return error.ClockOutOfRange;
-        return .{ .mono_ms = @intCast(@divTrunc(mono, std.time.ns_per_ms)), .mono_ns = @intCast(mono), .unix_s = wall };
+        return Engine.Now.read(io);
     }
 
     comptime {

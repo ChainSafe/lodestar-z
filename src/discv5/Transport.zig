@@ -23,6 +23,7 @@ pub const Error = Engine.Error || Sockets.DatagramError ||
 pub const StartResult = struct { started: bool = false, failure: ?Error = null };
 
 pub const FailureStage = enum { coordinator, clock, receive, process };
+pub const Failure = struct { stage: FailureStage, cause: Error };
 
 pub const DatagramResult = union(enum) {
     timeout,
@@ -43,8 +44,8 @@ pub const StepResult = struct {
     datagram: DatagramResult = .timeout,
     calls_expired: usize = 0,
     progress: Progress = .{},
-    failure: ?Error = null,
-    failure_stage: FailureStage = .coordinator,
+    cancelled: bool = false,
+    failure: ?Failure = null,
 };
 
 const Transport = @This();
@@ -197,9 +198,9 @@ pub fn advance(self: *Transport, io: std.Io, now_ms: u64, expired_calls: []CallT
 }
 
 fn recordFailure(result: *StepResult, err: Error, stage: FailureStage) void {
+    result.cancelled = result.cancelled or err == error.Canceled;
     if (result.failure != null) return;
-    result.failure = err;
-    result.failure_stage = stage;
+    result.failure = .{ .cause = err, .stage = stage };
 }
 
 fn processDatagram(

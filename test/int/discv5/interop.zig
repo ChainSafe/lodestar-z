@@ -74,7 +74,7 @@ pub fn main(init: std.process.Init) !void {
             return;
         }
 
-        const result = try @import("discv5").driver.step(&driver, io, &expired, .{ .deadline_ms = deadline_ms, .wait_max_ms = 10 });
+        const result = try @import("discv5").driver.step(&driver, io, &expired, .{ .deadline = .{ .clock = .awake, .raw = .fromNanoseconds(@as(i96, deadline_ms) * std.time.ns_per_ms) }, .wait_max = .fromMilliseconds(10) });
         served += result.progress.standard_responses;
         var call_expired = false;
         for (expired[0..result.calls_expired]) |entry| {
@@ -121,7 +121,7 @@ pub fn main(init: std.process.Init) !void {
             .none => {},
             .request => return error.UnexpectedRequest,
         }
-        if (result.failure) |failure| return failure;
+        if (result.failure) |failure| return failure.cause;
         if (call_failure) |failure| return failure;
         if (call_expired) return error.RequestTimedOut;
         if (result.datagram == .rejected) {

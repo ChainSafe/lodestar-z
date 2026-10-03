@@ -18,6 +18,7 @@ pub const control_values = @import("control_values.zig");
 pub const control_wire = @import("control_wire.zig");
 pub const constants = @import("constants.zig");
 pub const types = @import("types.zig");
+pub const time = @import("time.zig");
 pub const wire = @import("wire/root.zig");
 pub const quic = @import("quic/root.zig");
 pub const tls = @import("tls/root.zig");
