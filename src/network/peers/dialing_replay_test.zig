@@ -234,7 +234,7 @@ test "replay paces remembered first attempts as they start while direct and fres
         var it = c.intents.iterator(.{});
         while (it.next()) |index| waiting += @intFromBool(c.rows[index].intent.replay == .untried);
         try std.testing.expect(waiting <= remembered.replay_burst);
-        if (waiting > 0 and d.attempts().total < 16) try std.testing.expect(d.nextWakeup(&c, now, 4).? <= @max(now, c.remembered.replayDue()));
+        if (waiting > 0 and d.attempts().total < 16) try std.testing.expect(@import("dialing_test_support.zig").refreshAndWakeup(&d, &c, now, 4).? <= @max(now, c.remembered.replayDue()));
     }
     // Any run of remembered first attempts fits a burst of four plus one per 250 ms between them.
     for (0..started) |i| for (i..started) |j| {

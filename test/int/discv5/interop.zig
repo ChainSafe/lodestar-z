@@ -32,7 +32,7 @@ pub fn main(init: std.process.Init) !void {
         .{ .key = "secp256k1", .value = .{ .bytes = &public_key } },
     }) else try discv5.identity.enr.Record.create(&key, 1, discv5.types.Address.fromNetwork(sockets.primary().address));
     var driver: discv5.Transport = undefined;
-    try driver.init(allocator, sockets, key, local, .{ .poll_interval_ms = 25, .engine = .{
+    try driver.init(allocator, sockets, key, local, .{ .engine = .{
         .session_capacity = 4,
         .challenge_capacity = 4,
         .call_capacity = call_capacity,
@@ -60,21 +60,21 @@ pub fn main(init: std.process.Init) !void {
                 .request_id = try discv5.wire.message.RequestId.init(&.{1}),
                 .enr_sequence = local.sequence,
             } };
-            pending = try driver.startCall(io, peer, &remote, &ping);
+            pending = try driver.startCall(io, peer, &remote, &ping, try @import("discv5").Transport.monotonicMilliseconds(io));
             phase = .ping;
         } else if (phase == .ping_complete) {
             const find_node = discv5.wire.message.Message{ .find_node = .{
                 .request_id = try discv5.wire.message.RequestId.init(&.{2}),
                 .distances = &.{0},
             } };
-            pending = try driver.startCall(io, peer, &remote, &find_node);
+            pending = try driver.startCall(io, peer, &remote, &find_node, try @import("discv5").Transport.monotonicMilliseconds(io));
             phase = .nodes;
         } else if (phase == .done and (unadvertised or served >= 2)) {
             try std.Io.File.stdout().writeStreamingAll(io, "DONE\n");
             return;
         }
 
-        const result = try driver.stepUntil(io, &expired, deadline_ms);
+        const result = try @import("discv5").driver.step(&driver, io, &expired, .{ .deadline_ms = deadline_ms, .wait_max_ms = 10 });
         served += result.progress.standard_responses;
         var call_expired = false;
         for (expired[0..result.calls_expired]) |entry| {

@@ -125,7 +125,7 @@ pub const Control = struct {
         a.free(self.schedules);
         self.* = undefined;
     }
-    fn schedule(self: *Control, peer: t.PeerRef, conn: t.Handle) ?*Schedule {
+    fn connectionSchedule(self: *Control, peer: t.PeerRef, conn: t.Handle) ?*Schedule {
         if (peer.index >= self.schedules.len) return null;
         const row = &self.schedules[peer.index];
         return if (std.meta.eql(row.peer, peer) and std.meta.eql(row.conn, conn)) row else null;
@@ -181,7 +181,7 @@ pub const Control = struct {
     /// Retires the schedule of a connection that closed or lost its catalog index to a
     /// replacement. The protocol cancels the connection's requests separately.
     pub fn retire(self: *Control, peer: t.PeerRef, conn: t.Handle) void {
-        if (self.schedule(peer, conn)) |row| {
+        if (self.connectionSchedule(peer, conn)) |row| {
             row.peer = null;
             self.deadlines.clear(peer.index);
         }
@@ -194,7 +194,7 @@ pub const Control = struct {
         reason: t.DisconnectReason,
         now: Now,
     ) bool {
-        const row = self.schedule(peer, conn) orelse return false;
+        const row = self.connectionSchedule(peer, conn) orelse return false;
         if (!catalog.markUnavailable(peer, conn, reason)) return false;
         if (row.closing == null) {
             if (reason == .capacity or reason == .count_pruning) {
@@ -211,7 +211,7 @@ pub const Control = struct {
         return true;
     }
     pub fn reStatusPeer(self: *Control, catalog: *const Catalog, peer: t.PeerRef, conn: t.Handle, now: Now) bool {
-        const row = self.schedule(peer, conn) orelse return false;
+        const row = self.connectionSchedule(peer, conn) orelse return false;
         if (row.closing != null) return false;
         row.status_due_ms = @min(row.status_due_ms, now.mono_ms);
         self.rekey(catalog, peer.index);
@@ -351,7 +351,7 @@ pub const Control = struct {
         self.rekey(catalog, due.index);
     }
     fn identifyStarted(self: *Control, due: *const Due, succeeded: bool, now: Now) void {
-        const row = self.schedule(due.peer, due.conn) orelse return;
+        const row = self.connectionSchedule(due.peer, due.conn) orelse return;
         if (!succeeded) {
             row.identify_retry_ms = now.mono_ms +| 1_000;
             return;
@@ -359,7 +359,7 @@ pub const Control = struct {
         row.identify_state = .started;
     }
     fn requestStarted(self: *Control, due: *const Due, request: ?rr.ReqResp.RequestHandle, now: Now) void {
-        const row = self.schedule(due.peer, due.conn) orelse return;
+        const row = self.connectionSchedule(due.peer, due.conn) orelse return;
         std.debug.assert(row.pending_request == null);
         if (request == null) {
             self.counters.deferred +|= 1;
@@ -375,7 +375,7 @@ pub const Control = struct {
     pub fn identifyResults(self: *Control, catalog: *Catalog, results: []const @import("../identify/root.zig").Handler.Result) void {
         std.debug.assert(results.len <= 64);
         for (results) |*completion| {
-            const row = self.schedule(completion.peer, completion.conn) orelse continue;
+            const row = self.connectionSchedule(completion.peer, completion.conn) orelse continue;
             if (row.identify_state != .started) continue;
             row.identify_state = .done;
             defer self.rekey(catalog, completion.peer.index);
@@ -399,14 +399,14 @@ pub const Control = struct {
         const snapshot = catalog.rowFor(peer).?;
         self.counters.events.goodbyeReceived(code);
         std.log.scoped(.network_peers).debug("peer_goodbye_received peer={f} connection={d}:{d} code={d} reason={s} during_close={any} agent={f}", .{ @import("../logging.zig").peer(&snapshot.identity), conn.index, conn.generation, code, @tagName(reason), during_close, std.json.fmt(client.agent(&snapshot.identify), .{}) });
-        const row = self.schedule(peer, conn) orelse return;
+        const row = self.connectionSchedule(peer, conn) orelse return;
         if (row.closing == null and row.rejection == null) row.rejection = goodbye.rejection(code);
     }
 
     /// Notes a close the remote initiated. On our dial before the Status and Metadata exchange
     /// completed, it is an early close.
     pub fn remoteClosed(self: *Control, peer: t.PeerRef, conn: t.Handle) void {
-        earlyClose(self.schedule(peer, conn) orelse return);
+        earlyClose(self.connectionSchedule(peer, conn) orelse return);
     }
 
     /// Records the remote turning our dial away before the Status and Metadata exchange completed,
@@ -427,7 +427,7 @@ pub const Control = struct {
         reason: t.DisconnectReason,
         now: Now,
     ) bool {
-        const row = self.schedule(peer, conn) orelse return false;
+        const row = self.connectionSchedule(peer, conn) orelse return false;
         catalog.settleRejections(peer, conn, row.evidence != .pending, row.rejection, now.mono_ms);
         catalog.rememberClosed(peer, conn, row.evidence != .pending, reason, row.rejection, now);
         self.retire(peer, conn);
@@ -445,7 +445,7 @@ pub const Control = struct {
         now: Now,
         slot: u64,
     ) void {
-        const row = self.schedule(peer, conn) orelse return;
+        const row = self.connectionSchedule(peer, conn) orelse return;
         if (row.closing != null) return;
         const status = wire.decodeStatus(protocol, bytes) catch |err| {
             if (err == error.InvalidLength or err == error.InvalidEncoding)
@@ -486,7 +486,7 @@ pub const Control = struct {
         seq: u64,
         now: Now,
     ) void {
-        const row = self.schedule(peer, conn) orelse return;
+        const row = self.connectionSchedule(peer, conn) orelse return;
         const snapshot = connectedRow(catalog, peer, conn) orelse return;
         if (snapshot.status == null or row.closing != null) return;
         if (snapshot.metadata) |metadata| {
@@ -562,7 +562,7 @@ pub const Control = struct {
             const row = &self.schedules[op.peer.index];
             if (op.request != null and std.meta.eql(row.pending_request, op.request)) row.pending_request = null;
         }
-        if (self.schedule(op.peer, op.conn) == null or op.cancelled) return;
+        if (self.connectionSchedule(op.peer, op.conn) == null or op.cancelled) return;
         switch (event) {
             .chunk => |chunk| self.acceptChunk(catalog, op, chunk.bytes, local, now, slot),
             .done, .failed => self.complete(catalog, op, event, now),
@@ -578,7 +578,7 @@ pub const Control = struct {
         now: Now,
         slot: u64,
     ) void {
-        const row = self.schedule(op.peer, op.conn) orelse return;
+        const row = self.connectionSchedule(op.peer, op.conn) orelse return;
         if (row.closing != null) return;
         switch (op.protocol) {
             .status_v1, .status_v2 => self.acceptStatus(
@@ -625,7 +625,7 @@ pub const Control = struct {
         }
     }
     fn complete(self: *Control, catalog: *Catalog, op: *const wire.ControlReply, event: rr.ReqResp.Event, now: Now) void {
-        const row = self.schedule(op.peer, op.conn) orelse return;
+        const row = self.connectionSchedule(op.peer, op.conn) orelse return;
         if (row.closing != null) return;
         switch (event) {
             .failed => |failed| switch (failed.reason) {
@@ -683,11 +683,9 @@ pub const Control = struct {
         self.counters.health_failures[@intFromEnum(probe)] +|= 1;
         std.log.scoped(.network_peers).debug("peer_health_failure connection={d}:{d} probe={s} reason={s} failures={d} limit={d} close={s}", .{ op.conn.index, op.conn.generation, @tagName(probe), @tagName(failure), row.health_failures[@intFromEnum(probe)], self.options.health_failures_max, @tagName(closes) });
     }
-    /// The earliest schedule deadline, bounded below by now. O(1).
-    pub fn nextWakeup(self: *const Control, catalog: *const Catalog, now: Now) ?u64 {
+    pub fn schedule(self: *const Control, catalog: *const Catalog, now: Now) @import("../types.zig").Schedule {
         if (@import("builtin").is_test) self.checkSchedules(catalog, now.mono_ms);
-        const top = self.deadlines.peek() orelse return null;
-        return @max(top.deadline, now.mono_ms);
+        return .{ .deadline_ms = if (self.deadlines.peek()) |top| top.deadline else null };
     }
 
     /// Test builds check that each schedule's key is the deadline a scan of every row computes

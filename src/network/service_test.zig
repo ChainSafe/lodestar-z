@@ -88,10 +88,10 @@ test "service handles native stream events past empty request capacity" {
         .admission = try rr.ReqResp.Options.Admission.defaults(&@import("reqresp/policy_fixture.zig").config(), 128, 128, 64),
     } }, &pair.client);
     defer client.deinit();
-    defer client.reqresp.shutdown(&pair.client, &client.router, pair.now);
+    defer client.reqresp.cancelAll(&pair.client, &client.router, pair.now);
     var server = try @import("service_test_support.zig").initService(std.testing.allocator, try rrOptions(), &pair.server);
     defer server.deinit();
-    defer server.reqresp.shutdown(&pair.server, &server.router, pair.now);
+    defer server.reqresp.cancelAll(&pair.server, &server.router, pair.now);
     const handles = try support.connectPair(&pair);
     const ping = [_]u8{3} ** 8;
     var sink: [8]u8 = undefined;
@@ -128,10 +128,10 @@ test "service gossip capacity refusal preserves reqresp and explicit host retry"
     defer pair.deinit();
     var client = try @import("service_test_support.zig").initService(std.testing.allocator, try rrOptions(), &pair.client);
     defer client.deinit();
-    defer client.reqresp.shutdown(&pair.client, &client.router, pair.now);
+    defer client.reqresp.cancelAll(&pair.client, &client.router, pair.now);
     var server = try @import("service_test_support.zig").initService(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1 }, .reqresp = (try rrOptions()).reqresp }, &pair.server);
     defer server.deinit();
-    defer server.reqresp.shutdown(&pair.server, &server.router, pair.now);
+    defer server.reqresp.cancelAll(&pair.server, &server.router, pair.now);
     const handles = try support.connectPair(&pair);
     const peers = @import("gossipsub/peer_book.zig");
     var retained: [peers.capacity - peers.outbound_reserve]peers.Ref = undefined;

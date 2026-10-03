@@ -295,7 +295,7 @@ test "reqresp request start shutdown cancels its waiters without charging them" 
     _ = try request(&setup, .ping_v1, &pongs[2]);
     try exchange.pumps(20);
     try std.testing.expectEqual(@as(usize, 2), waitingStarts(owner));
-    owner.shutdown(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now);
+    owner.cancelAll(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now);
     var application: [4]rr.Event = undefined;
     var control: [4]rr.Event = undefined;
     var cancelled: usize = 0;

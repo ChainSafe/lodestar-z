@@ -66,14 +66,8 @@ pub const Transport = struct {
         ready_batch_storage_bytes: u64 = @sizeOf(SendBatch),
     };
 
-    pub const StepError = Sockets.DatagramError || error{ClockOutOfRange};
-    pub const DialError = Sockets.SendError || Engine.DialError || error{ ClockOutOfRange, DestinationUnreachable, MissingPeerId };
-
-    /// Options of the standalone `step`, which also waits for the socket. The network driver
-    /// supplies readiness to NetworkCore, which drives the phases directly.
-    pub const StepOptions = struct {
-        wait_max_ms: u32 = constants.poll_interval_ms,
-    };
+    pub const StepError = Sockets.DatagramError;
+    pub const DialError = Sockets.SendError || Engine.DialError || error{ DestinationUnreachable, MissingPeerId };
 
     const Received = union(enum) {
         datagram: Sockets.Datagram,
@@ -173,9 +167,10 @@ pub const Transport = struct {
         self: *Transport,
         io: std.Io,
         target: *const multiaddr.Multiaddr,
+        now: Engine.Now,
     ) DialError!Engine.Handle {
         const expected = target.peer orelse return error.MissingPeerId;
-        return self.dialPeer(io, target.address, expected);
+        return self.dialPeer(io, target.address, expected, now);
     }
 
     /// Earliest engine timer key in monotonic nanoseconds. O(1).
@@ -190,8 +185,8 @@ pub const Transport = struct {
         io: std.Io,
         peer: types.Address,
         expected: peer_id.PeerId,
+        now: Engine.Now,
     ) DialError!Engine.Handle {
-        const now = try currentTime(io);
         const handle = self.engine.dial(&peer, expected, now) catch |err| switch (err) {
             error.AddressFamilyUnsupported => return error.DestinationUnreachable,
             else => return err,
@@ -220,36 +215,27 @@ pub const Transport = struct {
         return .{ .now = now };
     }
 
-    /// Standalone turn for programs that own only a Transport: waits up to `wait_max_ms` for a
-    /// datagram when nothing is due, then receives, expires timers, collects events and flushes.
-    /// Publishes completed work on failure. A failure to read the initial clock leaves the turn
-    /// and pending events untouched.
-    pub fn step(
-        self: *Transport,
-        io: std.Io,
-        events: []Engine.Event,
-        options: StepOptions,
-    ) ProgressResult {
-        var result = StepResult{ .now = currentTime(io) catch |err| return .{
-            .progress = .{ .now = .{ .mono_ms = 0, .unix_s = 0 } },
-            .failure = err,
-        } };
-        result = self.beginTurn(result.now);
-        const wait_ms = self.idleWaitMs(result.now, options.wait_max_ms);
-        var failure: ?StepError = if (self.receiveBatch(io, &result, wait_ms, @splat(true))) |_| null else |err| err;
-        // The wait may have slept; timers use a fresh clock when one can be read.
-        if (currentTime(io)) |fresh| {
-            if (fresh.mono_ms >= result.now.mono_ms) result.now = fresh;
-        } else |err| failure = failure orelse err;
-        self.expire(result.now);
-        self.engine.collect(result.now);
-        if (failure == null or failure.? != error.Canceled) self.flush(io, result.now, &result) catch |err| {
+    pub const Input = struct {
+        now: Engine.Now,
+        ready: [2]bool = @splat(false),
+        cancelled: bool = false,
+    };
+
+    /// Uses the same receive/expire/collect/flush ordering as NetworkCore. Events caused by
+    /// flush remain pending for the next turn. Consume event borrows before advancing again.
+    pub fn advance(self: *Transport, io: std.Io, input: Input, events: []Engine.Event) ProgressResult {
+        const now = input.now;
+        var result = self.beginTurn(now);
+        var failure: ?StepError = if (input.cancelled) error.Canceled else null;
+        self.receive(io, &result, input.ready) catch |err| {
+            failure = if (err == error.Canceled) err else failure orelse err;
+        };
+        self.expire(now);
+        result.events = self.collect(now, events);
+        result.events_pending = self.engine.eventsPending();
+        if (failure == null or failure.? != error.Canceled) self.flush(io, now, &result) catch |err| {
             failure = err;
         };
-        // Events from this turn's sends, such as a close reached by sending CONNECTION_CLOSE, are
-        // published with the rest.
-        result.events = self.engine.pollEvents(events);
-        result.events_pending = self.engine.eventsPending();
         return .{ .progress = result, .failure = failure };
     }
 
@@ -258,7 +244,7 @@ pub const Transport = struct {
     /// datagrams. A family found empty is not read again this turn; a later arrival keeps its
     /// socket readable for the owner's next poll.
     pub fn receive(self: *Transport, io: std.Io, result: *StepResult, ready: [2]bool) StepError!void {
-        return self.receiveBatch(io, result, 0, ready);
+        return self.receiveBatch(io, result, ready);
     }
 
     pub fn expire(self: *Transport, now: Engine.Now) void {
@@ -372,20 +358,19 @@ pub const Transport = struct {
         return first;
     }
 
-    fn idleWaitMs(self: *const Transport, now: Engine.Now, wait_max_ms: u32) u32 {
-        if (wait_max_ms == 0 or self.engine.backlog() or self.engine.eventsPending()) return 0;
-        const deadline = self.engine.nextDeadlineNs() orelse return wait_max_ms;
-        const remaining = deadline -| now.nanos();
-        const ceiling = remaining / std.time.ns_per_ms + @intFromBool(remaining % std.time.ns_per_ms != 0);
-        return @intCast(@min(wait_max_ms, ceiling));
+    pub fn schedule(self: *const Transport) types.Schedule {
+        const deadline = self.engine.nextDeadlineNs();
+        return .{
+            .runnable = self.engine.backlog() or self.engine.eventsPending() or self.engine.releasesPending(),
+            .deadline_ms = if (deadline) |ns| ns / std.time.ns_per_ms + @intFromBool(ns % std.time.ns_per_ms != 0) else null,
+        };
     }
 
-    fn receiveBatch(self: *Transport, io: std.Io, result: *StepResult, first_wait_ms: u32, ready: [2]bool) StepError!void {
+    fn receiveBatch(self: *Transport, io: std.Io, result: *StepResult, ready: [2]bool) StepError!void {
         var eligible = ready;
         var count: u32 = 0;
         while (count < self.work_limits.receive_per_step_max) : (count += 1) {
-            const wait_ms: u32 = if (count == 0) first_wait_ms else 0;
-            const admitted = switch (try self.receiveDatagram(io, result, wait_ms, &eligible)) {
+            const admitted = switch (try self.receiveDatagram(io, result, &eligible)) {
                 .timeout => break,
                 .dropped => continue,
                 .datagram => |datagram| datagram,
@@ -410,12 +395,9 @@ pub const Transport = struct {
         self: *Transport,
         io: std.Io,
         result: *StepResult,
-        wait_ms: u32,
         ready: *[2]bool,
     ) StepError!Received {
-        const received: Sockets.DatagramError!?Sockets.Datagram = if (wait_ms == 0)
-            self.sockets.receiveReadyDatagram(io, &self.receive_buffer, ready)
-        else if (self.sockets.receiveDatagram(io, &self.receive_buffer, receiveTimeout(wait_ms))) |packet| packet else |err| err;
+        const received = self.sockets.receiveReadyDatagram(io, &self.receive_buffer, ready);
         const datagram = received catch |err| switch (err) {
             error.Timeout => return .timeout,
             error.DatagramTooLarge,
@@ -451,13 +433,6 @@ pub const Transport = struct {
         for (release_times) |release_time| assert(release_time <= now.nanos());
     }
 
-    fn receiveTimeout(wait_ms: u32) std.Io.Timeout {
-        return .{ .duration = .{
-            .raw = .fromMilliseconds(wait_ms),
-            .clock = .awake,
-        } };
-    }
-
     pub fn currentTime(io: std.Io) error{ClockOutOfRange}!Engine.Now {
         const mono = std.Io.Clock.awake.now(io).nanoseconds;
         const wall = std.Io.Clock.real.now(io).toSeconds();
@@ -470,11 +445,6 @@ pub const Transport = struct {
         assert(send_burst_max % constants.send_batch_max == 0);
     }
 };
-
-test "transport zero wait remains an actual nonblocking timeout" {
-    try std.testing.expectEqual(@as(i96, 0), Transport.receiveTimeout(0).duration.raw.nanoseconds);
-    try std.testing.expectEqual(@as(i96, 5 * std.time.ns_per_ms), Transport.receiveTimeout(5).duration.raw.nanoseconds);
-}
 
 test {
     _ = @import("transport_io_test.zig");

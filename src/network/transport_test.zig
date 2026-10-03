@@ -5,7 +5,7 @@ const keys = @import("wire/keys.zig");
 const multiaddr = @import("wire/multiaddr.zig");
 const Transport = @import("transport.zig").Transport;
 
-const step_options = Transport.StepOptions{ .wait_max_ms = 10 };
+const step_options = @import("transport_driver.zig").Options{ .wait_max_ms = 10 };
 const payload_len = 64 * 1024;
 
 fn initTransport(target: *Transport, seed: u8) !void {
@@ -37,7 +37,7 @@ test "transport moves a bulk payload over loopback sockets with batched sends" {
 
     const target = listener.localMultiaddr();
     try std.testing.expect(target.peer.?.eql(&listener.peerId()));
-    const handle = try dialer.dial(std.testing.io, &target);
+    const handle = try dialer.dial(std.testing.io, &target, try Transport.currentTime(std.testing.io));
 
     var dialer_events: [8]Engine.Event = undefined;
     var listener_events: [8]Engine.Event = undefined;
@@ -94,7 +94,7 @@ test "transport refuses to dial a multiaddr without a peer id" {
     defer dialer.deinit(std.testing.io);
 
     const target = multiaddr.Multiaddr{ .address = dialer.localAddress() };
-    try std.testing.expectError(error.MissingPeerId, dialer.dial(std.testing.io, &target));
+    try std.testing.expectError(error.MissingPeerId, dialer.dial(std.testing.io, &target, try Transport.currentTime(std.testing.io)));
     try std.testing.expectEqual(@as(usize, 0), dialer.engine.registry.activeIndices().len);
 }
 
@@ -115,11 +115,11 @@ test "dual-stack transport authenticates both families through one connection bu
         defer peer6.deinit(std.testing.io);
         const addresses = hub.sockets.localAddresses();
         if (inbound) {
-            _ = try peer4.dialPeer(std.testing.io, addresses[0].?, hub.peerId());
-            _ = try peer6.dialPeer(std.testing.io, addresses[1].?, hub.peerId());
+            _ = try peer4.dialPeer(std.testing.io, addresses[0].?, hub.peerId(), try Transport.currentTime(std.testing.io));
+            _ = try peer6.dialPeer(std.testing.io, addresses[1].?, hub.peerId(), try Transport.currentTime(std.testing.io));
         } else {
-            _ = try hub.dialPeer(std.testing.io, peer4.localAddress(), peer4.peerId());
-            _ = try hub.dialPeer(std.testing.io, peer6.localAddress(), peer6.peerId());
+            _ = try hub.dialPeer(std.testing.io, peer4.localAddress(), peer4.peerId(), try Transport.currentTime(std.testing.io));
+            _ = try hub.dialPeer(std.testing.io, peer6.localAddress(), peer6.peerId(), try Transport.currentTime(std.testing.io));
         }
         var connected: [2]bool = .{ false, false };
         var events: [8]Engine.Event = undefined;
@@ -136,8 +136,8 @@ test "dual-stack transport authenticates both families through one connection bu
         try std.testing.expect(connected[0] and connected[1]);
         try std.testing.expectEqual(@as(usize, 2), hub.engine.registry.active_len);
         try std.testing.expectEqual(@as(usize, 2), hub.engine.registry.slots.len);
-        try std.testing.expectError(error.DestinationUnreachable, peer4.dialPeer(std.testing.io, addresses[1].?, hub.peerId()));
-        if (!inbound) try std.testing.expectError(error.DialLimit, hub.dialPeer(std.testing.io, peer4.localAddress(), peer4.peerId()));
+        try std.testing.expectError(error.DestinationUnreachable, peer4.dialPeer(std.testing.io, addresses[1].?, hub.peerId(), try Transport.currentTime(std.testing.io)));
+        if (!inbound) try std.testing.expectError(error.DialLimit, hub.dialPeer(std.testing.io, peer4.localAddress(), peer4.peerId(), try Transport.currentTime(std.testing.io)));
     }
 }
 

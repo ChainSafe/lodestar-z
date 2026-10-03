@@ -674,7 +674,7 @@ test "negotiator final selected write retires on timeout reset connection close 
                 try setup.pair.pump();
                 _ = setup.pumpListener(&supported, &.{});
             },
-            .shutdown => setup.listener.shutdown(&setup.pair.server),
+            .shutdown => setup.listener.cancelAll(&setup.pair.server),
         }
         try std.testing.expectEqual(@as(usize, 0), setup.listener.active());
         try std.testing.expectEqual(@as(?u64, null), setup.listener.schedule(1).nextWakeup(setup.pair.now.mono_ms));

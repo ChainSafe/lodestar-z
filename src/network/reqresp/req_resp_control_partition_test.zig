@@ -18,7 +18,7 @@ test "reqresp drain retains blocked terminals across control and application par
     const size = protocol.Protocol.blocks_by_root_v2.info().response_max;
     const sink = try std.testing.allocator.alloc(u8, 2 * size);
     defer {
-        requests.shutdown(&pair.client, &router, pair.now);
+        requests.cancelAll(&pair.client, &router, pair.now);
         std.testing.allocator.free(sink);
     }
     const application = try requests.request(
@@ -97,13 +97,13 @@ test "reqresp service retains request and chunk bytes through control progress" 
     defer client.deinit();
     var server = try @import("../service_test_support.zig").initService(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } }, &pair.server);
     defer server.deinit();
-    defer server.reqresp.shutdown(&pair.server, &server.router, pair.now);
+    defer server.reqresp.cancelAll(&pair.server, &server.router, pair.now);
     const sink = try std.testing.allocator.alloc(
         u8,
         protocol.Protocol.blocks_by_root_v2.info().response_max,
     );
     defer {
-        client.reqresp.shutdown(&pair.client, &client.router, pair.now);
+        client.reqresp.cancelAll(&pair.client, &client.router, pair.now);
         std.testing.allocator.free(sink);
     }
     const root = [_]u8{0xa5} ** 32;

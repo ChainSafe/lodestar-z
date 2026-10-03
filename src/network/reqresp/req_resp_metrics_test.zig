@@ -107,7 +107,7 @@ test "reqresp duration uses current time for inbound termination" {
         switch (cause) {
             .cancel => try std.testing.expect(owner.cancel(handle, now)),
             .reset => owner.streamClosed(.{ .owner = .reqresp_inbound, .row = handle.index }, slot.request.stream, 7, now),
-            .shutdown => owner.shutdown(&setup.shared.pair.server, &setup.shared.server.router, now),
+            .shutdown => owner.cancelAll(&setup.shared.pair.server, &setup.shared.server.router, now),
         }
         const times = &owner.protocol_counters[@intFromEnum(Protocol.status_v1)].incoming_time;
         try std.testing.expectEqual(1, times.count);

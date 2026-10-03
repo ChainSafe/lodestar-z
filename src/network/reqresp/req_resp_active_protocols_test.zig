@@ -191,7 +191,7 @@ test "reqresp active hostile coalesced context rejects before sink writes with o
             }
             try std.testing.expect(failed);
             try std.testing.expect(std.mem.allEqual(u8, sink, 0xaa));
-            setup.shared.server.reqresp.shutdown(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now);
+            setup.shared.server.reqresp.cancelAll(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now);
             try setup.pumpOnce();
             try setup.pumpOnce();
             try std.testing.expectEqual(@as(u16, 0), setup.shared.client.reqresp.pendingCounts().outbound);
@@ -237,7 +237,7 @@ test "reqresp active zero ceiling rejects malicious success and permits remote e
             if (failed) break;
         }
         try std.testing.expect(failed);
-        setup.shared.server.reqresp.shutdown(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now);
+        setup.shared.server.reqresp.cancelAll(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now);
         try setup.pumpOnce();
         try setup.pumpOnce();
         try std.testing.expectEqual(@as(u16, 0), setup.shared.client.reqresp.pendingCounts().outbound);
@@ -302,7 +302,7 @@ test "reqresp active light client traffic preserves control reserve and cancella
     const capacity = protocol.Protocol.light_client_updates_by_range_v1.info().response_max;
     const sink = try std.testing.allocator.alloc(u8, capacity * 2);
     defer {
-        owner.shutdown(&pair.client, &router, pair.now);
+        owner.cancelAll(&pair.client, &router, pair.now);
         std.testing.allocator.free(sink);
     }
     for (0..2) |_| {
@@ -595,7 +595,7 @@ fn changeClientIdentity(setup: *harness.Pair, seed: u8) !void {
         failed_context.deinit();
         return err;
     };
-    setup.shared.client.reqresp.shutdown(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now);
+    setup.shared.client.reqresp.cancelAll(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now);
     setup.shared.pair.client.deinit();
     setup.shared.pair.client = replacement;
     setup.shared.pair.client_ctx = ctx;

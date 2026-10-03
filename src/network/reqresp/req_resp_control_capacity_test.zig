@@ -53,7 +53,7 @@ test "reqresp decoder captures configured root byte bounds before reading a body
     options.request_fork = .deneb;
     var requests = try rr.init(std.testing.allocator, options);
     defer requests.deinit();
-    defer requests.shutdown(&pair.server, &router, pair.now);
+    defer requests.cancelAll(&pair.server, &router, pair.now);
     const first = try requests.accept(&pair.server, try inboundStream(&pair, handles.client), .{
         .protocol = .{ .reqresp = .blob_sidecars_by_root_v1 },
         .leftover = &.{},
@@ -99,7 +99,7 @@ test "reqresp compact control admission rejects oversized handoffs before claimi
     defer router.deinit();
     var requests = try rr.init(std.testing.allocator, try reservedOptions());
     defer requests.deinit();
-    defer requests.shutdown(&pair.server, &router, pair.now);
+    defer requests.cancelAll(&pair.server, &router, pair.now);
     const stream = try inboundStream(&pair, handles.client);
     var bytes: [RequestIO.control_read_buffer_length + 1]u8 = @splat(0);
     try std.testing.expectError(error.InvalidHandoff, requests.accept(&pair.server, stream, .{
@@ -123,7 +123,7 @@ test "reqresp control capacity protects outbound slots and retains terminal owne
     const size = protocol.Protocol.blocks_by_root_v2.info().response_max;
     const sinks = try std.testing.allocator.alloc(u8, size * 3);
     defer {
-        requests.shutdown(&pair.client, &router, pair.now);
+        requests.cancelAll(&pair.client, &router, pair.now);
         std.testing.allocator.free(sinks);
     }
     const first = try requests.request(
@@ -264,7 +264,7 @@ test "reqresp control capacity bounds application requests per peer across proto
     const size = protocol.Protocol.blocks_by_root_v2.info().response_max;
     const sinks = try std.testing.allocator.alloc(u8, 3 * size);
     defer {
-        requests.shutdown(&pair.client, &router, pair.now);
+        requests.cancelAll(&pair.client, &router, pair.now);
         std.testing.allocator.free(sinks);
     }
     const first = try requests.request(
@@ -378,7 +378,7 @@ test "reqresp control capacity raw and service inbound admission select the same
     options.inbound_per_peer_max = 4;
     var server = try @import("../service_test_support.zig").initService(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } }, &pair.server);
     defer server.deinit();
-    defer server.reqresp.shutdown(&pair.server, &server.router, pair.now);
+    defer server.reqresp.cancelAll(&pair.server, &server.router, pair.now);
     const ordinary: Router.Selection = .{
         .protocol = .{ .reqresp = .blocks_by_root_v2 },
         .leftover = &.{},
@@ -427,7 +427,7 @@ test "reqresp admission refusals distinguish capacity and concurrency without fa
             .admission = try rr.Options.Admission.defaults(&@import("policy_fixture.zig").config(), 8, 2, case.slots),
         });
         defer requests.deinit();
-        defer requests.shutdown(&pair.server, &router, pair.now);
+        defer requests.cancelAll(&pair.server, &router, pair.now);
         for (0..case.held) |_| {
             _ = try requests.accept(&pair.server, try inboundStream(&pair, handles.client), .{
                 .protocol = .{ .reqresp = case.accepted },
@@ -509,7 +509,7 @@ test "reqresp control capacity zero defaults retain all ordinary slots and admis
     const size = protocol.Protocol.blocks_by_root_v2.info().response_max;
     const sinks = try std.testing.allocator.alloc(u8, 4 * size);
     defer {
-        requests.shutdown(&pair.client, &router, pair.now);
+        requests.cancelAll(&pair.client, &router, pair.now);
         std.testing.allocator.free(sinks);
     }
     const dead = Engine.Handle{
@@ -573,7 +573,7 @@ test "reqresp control capacity zero defaults retain all ordinary slots and admis
         error.NegotiationTableFull,
         router.beginOutbound(&pair.client, handles.client, .{ .reqresp = .ping_v1 }, pair.now),
     );
-    requests.shutdown(&pair.client, &router, pair.now);
+    requests.cancelAll(&pair.client, &router, pair.now);
     try std.testing.expectEqual(0, router.negotiator.active());
     var events: [4]rr.Event = undefined;
     try std.testing.expectEqual(4, requests.pump(&pair.client, &router, pair.now, .{ .application = &events }).application);
@@ -643,7 +643,7 @@ test "reqresp reserved physical sinks admit full native control wave and recycle
     options.inbound_per_peer_max = 4;
     var server = try @import("../service_test_support.zig").initService(std.testing.allocator, .{ .reqresp = options, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } }, &pair.server);
     defer server.deinit();
-    defer server.reqresp.shutdown(&pair.server, &server.router, pair.now);
+    defer server.reqresp.cancelAll(&pair.server, &server.router, pair.now);
     var wave: [4]rr.RequestHandle = undefined;
     for ([_]protocol.Protocol{ .status_v1, .ping_v1, .metadata_v3, .goodbye_v1 }, 0..) |which, i| {
         wave[i] = (server.reqresp.accept(&pair.server, try inboundStream(&pair, handles.client), .{ .protocol = .{ .reqresp = which }, .leftover = &.{}, .fin = false }, pair.now) catch null).?;

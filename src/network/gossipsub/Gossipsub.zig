@@ -790,7 +790,8 @@ fn onSubscription(
     _ = self.overlay.peerSubscription(&context, index, sub.topic, sub.subscribe) orelse return;
 }
 
-pub fn shutdown(self: *Gossipsub, router: *Router, engine: *Engine) void {
+/// Closes current sessions. Configuration, message state and future admission remain owned here.
+pub fn closeSessions(self: *Gossipsub, router: *Router, engine: *Engine) void {
     for (self.sessions.rows, 0..) |*peer, index| {
         if (peer.active) session_io.retirePeer(self, router, engine, @intCast(index));
     }

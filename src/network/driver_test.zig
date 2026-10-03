@@ -144,6 +144,7 @@ test "a host publication submitted while the owner waits leaves in the flush of 
     try host.init();
     defer host.deinit();
     try pair.b.setHostWake(host.pipe[0]);
+    defer pair.b.setHostWake(null) catch unreachable;
     host.publication = topic;
     var written_ns = std.atomic.Value(u64).init(0);
     const writer = try std.Thread.spawn(.{}, delayedSignal, .{ &host, 30, &written_ns });
@@ -200,6 +201,7 @@ test "a host applies only on its wake, a carried-over cap or its deadline" {
     try host.init();
     defer host.deinit();
     try node.setHostWake(host.pipe[0]);
+    defer node.setHostWake(null) catch unreachable;
     for (0..4) |_| {
         const now = try currentTime();
         _ = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(now.mono_ms));
@@ -365,7 +367,7 @@ test "owner zero-wait turns count under every due source until the owner settles
     try std.testing.expectEqual(@as(u64, 8), node.due_now_turns[host]);
     try std.testing.expect(node.wakeups(now, .{}).schedule().nextWakeup(now.mono_ms).? > now.mono_ms);
     const settled = node.due_now_turns;
-    try std.testing.expect(driver.step(node, std.testing.io, now, .{}, .deadlineOnly(now.mono_ms +| 2)).failure == null);
+    try std.testing.expect(driver.step(node, std.testing.io, node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms +| 2)).failure == null);
     try std.testing.expectEqualDeep(settled, node.due_now_turns);
 }
 
@@ -402,6 +404,7 @@ test "a continuous QUIC flood on both families shares each receive quota and lea
     try host.init();
     defer host.deinit();
     try node.setHostWake(host.pipe[0]);
+    defer node.setHostWake(null) catch unreachable;
     for (0..4) |_| {
         const now = try currentTime();
         _ = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(now.mono_ms));

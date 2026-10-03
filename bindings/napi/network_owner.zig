@@ -445,17 +445,17 @@ test "queued request and disconnect share the protocol turn clock while latency 
     try remote.init(testing, std.testing.io, .{ .host = &remote_key, .bind = .{ .ip4 = .loopback(0) } });
     defer remote.deinit(std.testing.io);
     const remote_id = remote.peerId();
-    _ = try owner.core.transport.dialPeer(std.testing.io, remote.localAddress(), remote_id);
+    _ = try owner.core.transport.dialPeer(std.testing.io, remote.localAddress(), remote_id, try n.Transport.currentTime(std.testing.io));
     for (0..64) |_| {
         var events: [32]n.Engine.Event = undefined;
-        const progress = owner.core.transport.step(std.testing.io, &events, .{ .wait_max_ms = 0 });
+        const progress = n.transport_driver.step(&owner.core.transport, std.testing.io, &events, .{ .wait_max_ms = 0 });
         if (progress.failure) |err| return err;
         for (events[0..progress.progress.events]) |event| if (event == .connected) {
             owner.core.peer_manager.transportProgress(&owner.core.transport.engine);
             try std.testing.expect(owner.core.peer_manager.admit(&event.connected, remote.localAddress(), progress.progress.now) != null);
         };
         if (owner.core.isConnected(&remote_id)) break;
-        const reply = remote.step(std.testing.io, &events, .{ .wait_max_ms = 0 });
+        const reply = n.transport_driver.step(&remote, std.testing.io, &events, .{ .wait_max_ms = 0 });
         if (reply.failure) |err| return err;
     }
     try std.testing.expect(owner.core.isConnected(&remote_id));

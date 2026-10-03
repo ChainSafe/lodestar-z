@@ -300,6 +300,12 @@ pub const Handler = struct {
         return count;
     }
 
+    pub fn isDrained(self: *const Handler) bool {
+        for (self.inbound) |slot| if (slot.stream != null) return false;
+        for (self.outbound) |slot| if (slot.stream != null) return false;
+        return true;
+    }
+
     pub fn schedule(self: *const Handler, result_capacity: usize) types.Schedule {
         var result: types.Schedule = .{};
         for (self.inbound) |*slot| if (slot.stream != null) {
@@ -318,6 +324,7 @@ pub const Handler = struct {
         return result;
     }
 
+    /// Permanently stops admission. Pump still delivers the cancelled outbound results.
     pub fn shutdown(self: *Handler, router: *Router, engine: *Engine) void {
         self.stopped = true;
         for (self.inbound) |*slot| slot.close(engine);

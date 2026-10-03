@@ -40,7 +40,7 @@ test "reqresp terminal notification rotates fairly and exhausted generations nev
     var sinks: [2][8]u8 = undefined;
     var handles: [2]reqresp.RequestHandle = undefined;
     for (&handles, 0..) |*handle, index| handle.* = try setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .ping_v1, &bytes, &sinks[index], .{}, setup.shared.pair.now);
-    setup.shared.client.reqresp.shutdown(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now);
+    setup.shared.client.reqresp.cancelAll(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now);
     var seen = [_]bool{false} ** 2;
     var events: [1]Event = undefined;
     for (0..2) |_| {

@@ -140,7 +140,7 @@ test "peer dial review group shrink invalidates all hints while preserving owner
     try std.testing.expectEqual(@as(usize, 0), q.poll(&catalog, eligible, &out));
     q.configureSelection(&catalog, &wanted, true, &context, eligible);
     try std.testing.expectEqual(@as(usize, 0), q.poll(&catalog, eligible, &out));
-    try std.testing.expectEqual(@as(?u64, null), q.nextWakeup(&catalog, eligible, 1));
+    try std.testing.expectEqual(@as(?u64, null), support.refreshAndWakeup(&q, &catalog, eligible, 1));
     try std.testing.expectEqual(eligible, candidates[0].intent.eligible_at_ms);
     try std.testing.expectEqual(horizon, candidates[0].intent.history_until_ms);
     try std.testing.expectEqual(failures, candidates[0].intent.failures);
@@ -159,7 +159,7 @@ test "peer dial review group shrink invalidates all hints while preserving owner
     _ = catalog.advanceCustody(&smaller, eligible, 60_000, &budget);
     q.configureSelection(&catalog, &wanted, true, &smaller, eligible);
     try std.testing.expectEqual(conn, q.active[0].connection.?);
-    try std.testing.expectEqual(lease, q.nextWakeup(&catalog, eligible, 1).?);
+    try std.testing.expectEqual(lease, support.refreshAndWakeup(&q, &catalog, eligible, 1).?);
     try std.testing.expectEqual(failures, candidates[0].intent.failures);
     try std.testing.expectEqual(horizon, candidates[0].intent.history_until_ms);
     const manual: t.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 9 }, .port = 9999 } };
@@ -170,7 +170,7 @@ test "peer dial review group shrink invalidates all hints while preserving owner
     try std.testing.expectEqual(conn, q.active[0].connection.?);
     try std.testing.expectEqual(@as(usize, 0), q.poll(&catalog, eligible, &out));
     try std.testing.expect(q.dialClosed(&catalog, conn, .handshake_timeout, eligible));
-    const next = q.nextWakeup(&catalog, eligible, 1).?;
+    const next = support.refreshAndWakeup(&q, &catalog, eligible, 1).?;
     try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, next, &out));
     try std.testing.expect(out[0].address.eql(manual));
 }

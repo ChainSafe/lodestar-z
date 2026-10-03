@@ -27,7 +27,7 @@ test "peer dial metrics count selections including local deferrals and ignore du
     accept(&q, &catalog, &peer, conn, 1250);
     accept(&q, &catalog, &peer, conn, 1300);
     disconnect(&catalog, &peer, 1250, .transport_closed, 1500);
-    const due = q.nextWakeup(&catalog, 1500, 1).?;
+    const due = support.refreshAndWakeup(&q, &catalog, 1500, 1).?;
     try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, due, &out));
     try std.testing.expect(q.dialStarted(out[0].token, conn));
     try std.testing.expect(q.dialClosed(&catalog, conn, .handshake_timeout, due + 250));
@@ -107,7 +107,7 @@ test "peer dial time samples each retired attempt once from its own selection" {
     try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 1_300, &out));
     try std.testing.expectEqual(connected.index, out[0].token.index);
     try expire(&q, &catalog, 4_300);
-    _ = q.nextWakeup(&catalog, 4_300, 1);
+    _ = support.refreshAndWakeup(&q, &catalog, 4_300, 1);
     for ([_]t.DialOutcome{ .deferred, .connected, .cancelled }, [_]u64{ 0, 180, 3_000 }, [_]usize{ 0, 4, 8 }) |outcome, elapsed, bucket| {
         const time = &q.durations[@intFromEnum(outcome)];
         try std.testing.expectEqual(@as(u64, 1), time.count);
