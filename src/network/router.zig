@@ -168,9 +168,11 @@ pub const Router = struct {
         conn: Engine.Handle,
         protocol: @import("reqresp/protocol.zig").Protocol,
         now: types.Now,
-        timeout_ms: u64,
+        timeout: std.Io.Duration,
     ) Error!Engine.StreamHandle {
         if (!self.active_capabilities.request.contains(.{ .reqresp = protocol })) return error.ProtocolDisabled;
+        if (timeout.nanoseconds <= 0) return error.InvalidLimits;
+        const timeout_ms = now.deadlineMilliseconds(timeout) - now.millis();
         return self.negotiator.beginOutbound(engine, conn, &.{descriptor(.{ .reqresp = protocol })}, now, .{ .control = protocol.isControl(), .timeout_ms = timeout_ms });
     }
 

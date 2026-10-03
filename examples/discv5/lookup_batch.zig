@@ -45,7 +45,11 @@ pub fn step(
     refill(transport, io, operations, first, &result) catch |err| {
         result.failure = err;
     };
-    result.transport = @import("discv5").driver.step(transport, io, expired_calls, .{ .wait_max = .fromMilliseconds(25) }) catch |err| {
+    const cancelled = if (result.failure) |err| err == error.Canceled else false;
+    result.transport = (if (cancelled) advance: {
+        const now_ms = Transport.monotonicMilliseconds(io) catch |err| break :advance err;
+        break :advance transport.advance(io, now_ms, expired_calls, error.Canceled);
+    } else discv5.driver.step(transport, io, expired_calls, .{ .wait_max = .fromMilliseconds(25) })) catch |err| {
         result.failure = result.failure orelse err;
         return result;
     };

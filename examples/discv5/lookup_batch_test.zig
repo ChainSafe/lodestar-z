@@ -202,6 +202,81 @@ test "lookup batch consumes only owned failed-call events" {
     }
 }
 
+test "lookup batch cancellation skips receive and preserves owned and unrelated expiry" {
+    var network: Network = undefined;
+    try network.init(3);
+    defer network.deinit();
+    const seeds = [_]RoutingTable.Entry{ network.seed(1), network.seed(2) };
+    const unrelated = network.seed(3);
+    const request: message.Message = .{ .ping = .{
+        .request_id = try message.RequestId.init(&.{0xff}),
+        .enr_sequence = 1,
+    } };
+    const handle = try network.transport.engine.calls.begin(unrelated.peer, &unrelated.record.public_key, &request, 0, 100_000);
+    var operation: Lookup = undefined;
+    var candidates: Lookup.Candidates = undefined;
+    try operation.init(&candidates, network.transport.engine.localRecord().node_id, [_]u8{0} ** 32, &seeds, .dual);
+    defer operation.cancel(&network.transport.engine);
+    var buffer: [1_280]u8 = undefined;
+    _ = (try operation.startNext(&network.transport.engine, &buffer, try message.RequestId.init(&.{1}), 0, &sealEntropy(1))).?;
+
+    var host: CancelSendIo = .{};
+    var cursor: lookup_batch.Cursor = .{};
+    var expired: [3]CallTable.Expired = undefined;
+    const result = try lookup_batch.step(&network.transport, host.io(), &.{&operation}, &cursor, &expired);
+    try std.testing.expectEqual(error.Canceled, result.failure.?);
+    try std.testing.expect(result.transport.cancelled);
+    try std.testing.expectEqual(@as(usize, 1), host.sends);
+    try std.testing.expectEqual(@as(usize, 0), host.receives);
+    try std.testing.expectEqual(@as(u16, 2), result.progress.failures);
+    try std.testing.expectEqual(@as(usize, 1), result.transport.calls_expired);
+    try std.testing.expectEqual(handle, expired[0].handle);
+    try std.testing.expectEqual(@as(usize, 0), operation.waitingCount());
+    try std.testing.expectEqual(@as(usize, 0), network.transport.engine.calls.count());
+}
+
+const CancelSendIo = struct {
+    sends: usize = 0,
+    receives: usize = 0,
+
+    fn io(self: *CancelSendIo) std.Io {
+        const vtable = comptime blk: {
+            var value = std.Io.failing.vtable.*;
+            value.now = now;
+            value.randomSecure = random;
+            value.netSend = send;
+            value.batchAwaitConcurrent = receive;
+            value.batchCancel = cancel;
+            break :blk value;
+        };
+        return .{ .userdata = self, .vtable = &vtable };
+    }
+
+    fn now(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+        return .{ .nanoseconds = 100_000 * std.time.ns_per_ms };
+    }
+
+    fn random(_: ?*anyopaque, bytes: []u8) std.Io.RandomSecureError!void {
+        @memset(bytes, 0x55);
+    }
+
+    fn send(context: ?*anyopaque, _: net.Socket.Handle, _: []net.OutgoingMessage, _: net.SendFlags) struct { ?net.Socket.SendError, usize } {
+        const self: *CancelSendIo = @ptrCast(@alignCast(context.?));
+        self.sends += 1;
+        return .{ error.Canceled, 0 };
+    }
+
+    fn receive(context: ?*anyopaque, _: *std.Io.Batch, _: std.Io.Timeout) std.Io.Batch.AwaitConcurrentError!void {
+        const self: *CancelSendIo = @ptrCast(@alignCast(context.?));
+        self.receives += 1;
+        return error.Timeout;
+    }
+
+    fn cancel(_: ?*anyopaque, batch: *std.Io.Batch) void {
+        std.debug.assert(batch.pending.head == .none);
+    }
+};
+
 const Network = struct {
     remote: Sockets,
     transport: Transport,

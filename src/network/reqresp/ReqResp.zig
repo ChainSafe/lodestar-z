@@ -458,7 +458,7 @@ pub fn request(
     const index = self.availableOutboundFor(which) orelse return error.SlotsExhausted;
     const slot = &self.outbound[index];
     assert(!slot.conn_link.linked);
-    const stream = router.beginReqRespTimed(engine, conn, which, now, time.durationMilliseconds(request_options.timeouts.negotiation)) catch |err| {
+    const stream = router.beginReqRespTimed(engine, conn, which, now, request_options.timeouts.negotiation) catch |err| {
         return switch (err) {
             error.NegotiationTableFull => error.NegotiationTableFull,
             error.ProtocolDisabled => error.ProtocolDisabled,

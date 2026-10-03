@@ -42,6 +42,15 @@ test "owner clock validates before narrowing either sample" {
         clock = invalid;
         try std.testing.expectError(error.ClockOutOfRange, time.Now.read(io));
     }
-    try std.testing.expectEqual(@as(u64, 1), time.durationMilliseconds(.fromNanoseconds(1)));
-    try std.testing.expectEqual(@as(u64, 2), time.durationMilliseconds(.fromNanoseconds(std.time.ns_per_ms + 1)));
+}
+
+test "millisecond deadlines round after adding the duration" {
+    var now = time.Now.fromMilliseconds(.{ .mono_ms = 100, .unix_s = 0 });
+    try std.testing.expectEqual(@as(u64, 101), now.deadlineMilliseconds(.fromMilliseconds(1)));
+    try std.testing.expectEqual(@as(u64, 101), now.deadlineMilliseconds(.fromNanoseconds(1)));
+    now.monotonic.raw.nanoseconds += 900_000;
+    try std.testing.expectEqual(@as(u64, 101), now.deadlineMilliseconds(.fromNanoseconds(100_000)));
+    try std.testing.expectEqual(@as(u64, 102), now.deadlineMilliseconds(.fromNanoseconds(100_001)));
+    try std.testing.expectEqual(@as(u64, 102), now.deadlineMilliseconds(.fromNanoseconds(500_000)));
+    try std.testing.expectEqual(@as(u64, 102), now.deadlineMilliseconds(.fromMilliseconds(1)));
 }

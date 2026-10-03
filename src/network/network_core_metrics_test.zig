@@ -562,7 +562,7 @@ test "core metrics aggregate subnets and count distinct mesh peers" {
     b_intent.subscriptions = a_intent.subscriptions;
     try std.testing.expect(try pair.client.applyIntent(&a_intent, pair.client.last_now));
     try std.testing.expect(try pair.server.applyIntent(&b_intent, pair.server.last_now));
-    try pair.client.connectUntil(&pair.server.peerId(), &.{@import("quic/test_support.zig").server_address}, pair.client.last_now, pair.client.last_now.millis() +| @import("peers/dialing.zig").Dialing.connect_timeout_ms);
+    try pair.client.connectUntil(&pair.server.peerId(), &.{@import("quic/test_support.zig").server_address}, pair.client.last_now, @import("time.zig").milliseconds(pair.client.last_now.millis() +| @import("peers/dialing.zig").Dialing.connect_timeout_ms));
     const start = pair.client.last_now.millis();
     var mesh_count: usize = 0;
     for (0..3000) |_| {

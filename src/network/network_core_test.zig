@@ -59,7 +59,7 @@ const MaintenancePeers = struct {
         }
         const hub = &nodes[0];
         errdefer |err| std.debug.print("maintenance bootstrap failed: {t}, peers={any}, operations={any}, requests={any}\n", .{ err, hub.peerCounts(), core_test.controlOperations(hub), hub.service.reqresp.pendingCounts() });
-        for (nodes[1..]) |*remote| try hub.connectUntil(&remote.peerId(), &.{remote.transport.localAddress()}, hub.last_now, hub.last_now.millis() +| @import("peers/dialing.zig").Dialing.connect_timeout_ms);
+        for (nodes[1..]) |*remote| try hub.connectUntil(&remote.peerId(), &.{remote.transport.localAddress()}, hub.last_now, @import("time.zig").milliseconds(hub.last_now.millis() +| @import("peers/dialing.zig").Dialing.connect_timeout_ms));
         for (0..3000) |_| {
             try step(&.{ &nodes[0], &nodes[1], &nodes[2], &nodes[3] });
             if (hub.peerCounts().relevant != 3 or core_test.controlOperations(hub) != 0) continue;
@@ -495,7 +495,7 @@ test "core fails a dial the host refuses without failing the turn or penalizing 
     defer node.deinit(std.testing.io);
     const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
     const peer = t.PeerId.fromPublicKey(&remote.publicKey());
-    try node.connectUntil(&peer, &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 19003 } }}, now, now.millis() +| @import("peers/dialing.zig").Dialing.connect_timeout_ms);
+    try node.connectUntil(&peer, &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 19003 } }}, now, @import("time.zig").milliseconds(now.millis() +| @import("peers/dialing.zig").Dialing.connect_timeout_ms));
     var faults: FaultIo = .{
         .send = .{ .socket = node.transport.sockets.primary().handle },
         .send_failure = error.AccessDenied,
@@ -548,7 +548,7 @@ test "core socket faults preserve the other owner and local dial refusal is defe
     try std.testing.expect(discovery_due > settled.millis());
     try std.testing.expectEqual(discovery_due, schedule_test_support.wakeupMilliseconds(node.wakeups(settled, .{}).schedule(), settled.millis()).?);
     const peer = t.PeerId.fromPublicKey(&remote_key.publicKey());
-    try node.connectUntil(&peer, &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 19003 } }}, settled, settled.millis() +| @import("peers/dialing.zig").Dialing.connect_timeout_ms);
+    try node.connectUntil(&peer, &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 19003 } }}, settled, @import("time.zig").milliseconds(settled.millis() +| @import("peers/dialing.zig").Dialing.connect_timeout_ms));
     try std.testing.expectEqual(settled.millis(), schedule_test_support.wakeupMilliseconds(node.wakeups(settled, .{}).schedule(), settled.millis()).?);
     faults.send = .{};
     faults.send_calls = 0;
@@ -623,7 +623,7 @@ fn failureAndReplacement(a: *NetworkCore, b: *NetworkCore) !void {
     var replacement: NetworkCore = undefined;
     try replacement.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer replacement.deinit(std.testing.io);
-    try replacement.connectUntil(&a.peerId(), &.{a.transport.localAddress()}, now, now.millis() +| @import("peers/dialing.zig").Dialing.connect_timeout_ms);
+    try replacement.connectUntil(&a.peerId(), &.{a.transport.localAddress()}, now, @import("time.zig").milliseconds(now.millis() +| @import("peers/dialing.zig").Dialing.connect_timeout_ms));
     for (0..2000) |_| {
         const tick = try @import("transport.zig").Transport.currentTime(std.testing.io);
         const added = driver.step(&replacement, std.testing.io, tick, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(tick.millis() +| 1)));
@@ -1091,7 +1091,7 @@ test "application transport borrow authenticates while remote Status remains una
     try b.init(std.testing.allocator, std.testing.io, &opts_b.resolved, opts_b.startup);
     defer b.deinit(std.testing.io);
     const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
-    try a.connectUntil(&b.peerId(), &.{b.transport.localAddress()}, now, now.millis() +| @import("peers/dialing.zig").Dialing.connect_timeout_ms);
+    try a.connectUntil(&b.peerId(), &.{b.transport.localAddress()}, now, @import("time.zig").milliseconds(now.millis() +| @import("peers/dialing.zig").Dialing.connect_timeout_ms));
     var authenticated = false;
     for (0..300) |_| {
         const tick = try @import("transport.zig").Transport.currentTime(std.testing.io);
@@ -1213,7 +1213,7 @@ test "core cancellation releases every selected dial without blaming unstarted p
     for (&peers, 122..) |*peer, seed| {
         const remote = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{@as(u8, @intCast(seed))}));
         peer.* = t.PeerId.fromPublicKey(&remote.publicKey());
-        try node.connectUntil(peer, &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 19003 } }}, now, now.millis() + 30_000);
+        try node.connectUntil(peer, &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 19003 } }}, now, @import("time.zig").milliseconds(now.millis() + 30_000));
     }
     var faults: FaultIo = .{ .send = .{}, .send_failure = error.Canceled };
     const stopped = driver.step(&node, faults.io(), now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis())));
@@ -1248,7 +1248,7 @@ test "core unreachable destination backs off and rotates to its alternate addres
     try node.connectUntil(&peer, &.{
         .{ .ip6 = .{ .octets = .{0} ** 15 ++ .{1}, .port = 19003 } },
         .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 19003 } },
-    }, now, now.millis() +| @import("peers/dialing.zig").Dialing.connect_timeout_ms);
+    }, now, @import("time.zig").milliseconds(now.millis() +| @import("peers/dialing.zig").Dialing.connect_timeout_ms));
     const refused = try setup.turn(node, .{});
     try std.testing.expectEqual(@as(u8, 1), refused.dial_failed);
     try std.testing.expectEqual(@as(u8, 0), refused.dial_deferred);

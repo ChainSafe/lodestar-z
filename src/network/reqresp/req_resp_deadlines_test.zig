@@ -161,13 +161,16 @@ test "reqresp absolute response deadline captures the live phase" {
     var setup: Pair = .{};
     try setup.init(.{}, .{});
     defer setup.deinit();
+    setup.shared.pair.now.monotonic.raw.nanoseconds += 900_000;
+    const started_ms = setup.shared.pair.now.millis();
     const request = statusBytes(5);
     var sink: [ct.phase0.Status.fixed_size]u8 = undefined;
     const handle = try setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .status_v1, &request, &sink, .{
-        .timeouts = .{ .negotiation = .fromMilliseconds(5_000), .request = .fromMilliseconds(5_000), .response = .fromMilliseconds(100) },
+        .timeouts = .{ .negotiation = .fromMilliseconds(5_000), .request = .fromMilliseconds(5_000), .response = .fromNanoseconds(500_000) },
     }, setup.shared.pair.now);
     try waitForRequest(&setup);
     const due = setup.shared.client.reqresp.outbound[handle.index].deadline().?;
+    try std.testing.expectEqual(started_ms + 2, due);
     setup.shared.pair.now.monotonic = @import("../time.zig").milliseconds(due - 1);
     var events: [1]Event = undefined;
     try std.testing.expectEqual(@as(usize, 0), setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &events }).control);
@@ -181,6 +184,7 @@ test "reqresp absolute request phase expires under real stream backpressure" {
     var setup: Pair = .{};
     try setup.init(.{ .progress_timeout_ms = 2_000 }, .{});
     defer setup.deinit();
+    setup.shared.pair.now.monotonic.raw.nanoseconds += 900_000;
     _ = setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &.{} }).control;
     const request = [_]u8{0} ** 8;
     var sink: [8]u8 = undefined;
@@ -191,7 +195,7 @@ test "reqresp absolute request phase expires under real stream backpressure" {
         .ping_v1,
         &request,
         &sink,
-        .{ .timeouts = .{ .negotiation = .fromMilliseconds(5000), .request = .fromMilliseconds(2000), .response = .fromMilliseconds(10000) } },
+        .{ .timeouts = .{ .negotiation = .fromMilliseconds(5000), .request = .fromNanoseconds(2_000_500_000), .response = .fromMilliseconds(10000) } },
         setup.shared.pair.now,
     );
     var negotiated = false;
@@ -233,6 +237,7 @@ test "reqresp absolute request phase expires under real stream backpressure" {
     }
     try std.testing.expect(blocked);
     const deadline_ms = setup.shared.client.reqresp.outbound[handle.index].deadline();
+    try std.testing.expectEqual(setup.shared.pair.now.millis() + 2002, deadline_ms.?);
     var events: [8]Event = undefined;
     _ = setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &events });
     try setup.shared.pair.flush(&setup.shared.pair.client);
@@ -248,7 +253,7 @@ test "reqresp absolute request phase expires under real stream backpressure" {
         try std.testing.expectEqual(deadline_ms, setup.shared.client.reqresp.outbound[handle.index].deadline());
         try std.testing.expect(!setup.shared.pair.client.backlog());
     }
-    setup.shared.pair.advance(500);
+    setup.shared.pair.now.monotonic = @import("../time.zig").milliseconds(deadline_ms.?);
     try std.testing.expectEqual(
         @as(usize, 1),
         setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &events }).control,
@@ -258,6 +263,43 @@ test "reqresp absolute request phase expires under real stream backpressure" {
     try std.testing.expect(
         !setup.shared.pair.client.registry.slots[stream.conn.index].table.matches(stream.slot, stream.id),
     );
+}
+
+test "reqresp sub-millisecond negotiation timeout agrees with the router deadline" {
+    for ([_]bool{ false, true }) |router_first| {
+        var setup: Pair = .{};
+        try setup.init(.{}, .{});
+        defer setup.deinit();
+        setup.shared.pair.now.monotonic.raw.nanoseconds += 900_000;
+        const started_ms = setup.shared.pair.now.millis();
+        const request = statusBytes(5);
+        var sink: [ct.phase0.Status.fixed_size]u8 = undefined;
+        const handle = try setup.shared.client.reqresp.request(
+            &setup.shared.pair.client,
+            &setup.shared.client.router,
+            setup.shared.handles.client,
+            .status_v1,
+            &request,
+            &sink,
+            .{ .timeouts = .{ .negotiation = .fromNanoseconds(500_000) } },
+            setup.shared.pair.now,
+        );
+        var outcomes: [1]Router.Outcome = undefined;
+        var events: [1]Event = undefined;
+        setup.shared.pair.now.monotonic = @import("../time.zig").milliseconds(started_ms + 1);
+        if (router_first) try std.testing.expectEqual(@as(usize, 0), setup.shared.client.router.pump(&setup.shared.pair.client, setup.shared.pair.now, &outcomes));
+        try std.testing.expectEqual(@as(usize, 0), setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &events }).control);
+        setup.shared.pair.now.monotonic = @import("../time.zig").milliseconds(started_ms + 2);
+        if (router_first) {
+            try std.testing.expectEqual(@as(usize, 1), setup.shared.client.router.pump(&setup.shared.pair.client, setup.shared.pair.now, &outcomes));
+            try std.testing.expectEqual(.timeout, outcomes[0].result.failed);
+            try std.testing.expect(setup.shared.client.reqresp.negotiated(&setup.shared.pair.client, outcomes[0], setup.shared.pair.now));
+        }
+        try std.testing.expectEqual(@as(usize, 1), setup.shared.client.reqresp.pump(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now, .{ .control = &events }).control);
+        try std.testing.expectEqual(handle, events[0].failed.request);
+        try std.testing.expectEqual(.timeout, events[0].failed.reason);
+        try std.testing.expectEqual(.negotiation, events[0].failed.phase.?);
+    }
 }
 
 test "reqresp absolute negotiation timeout phase survives terminal cleanup" {

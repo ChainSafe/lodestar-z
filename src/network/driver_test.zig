@@ -384,7 +384,7 @@ test "owner zero-wait turn counts once under each of its two due sources" {
     const remote_key = remote.publicKey();
     const peer = @import("wire/peer_id.zig").PeerId.fromPublicKey(&remote_key);
     // The node binds IPv4 only, so this dial fails before sending a datagram.
-    try node.connectUntil(&peer, &.{.{ .ip6 = .{ .octets = .{0} ** 15 ++ .{1}, .port = 9000 } }}, now, now.millis() + 60_000);
+    try node.connectUntil(&peer, &.{.{ .ip6 = .{ .octets = .{0} ** 15 ++ .{1}, .port = 9000 } }}, now, @import("time.zig").milliseconds(now.millis() + 60_000));
     const before = node.due_now_turns;
     try std.testing.expect(driver.step(node, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis() +| 100))).failure == null);
     for (before, node.due_now_turns, 0..) |previous, current, index| {

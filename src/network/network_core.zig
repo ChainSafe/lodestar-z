@@ -235,7 +235,7 @@ pub const NetworkCore = struct {
     pub fn isClosed(self: *const NetworkCore) bool {
         return self.phase() == .stopping and self.isDrained();
     }
-    pub fn isDrained(self: *const NetworkCore) bool {
+    fn isDrained(self: *const NetworkCore) bool {
         return self.transport.engine.resourceSnapshot().active == 0 and self.service.isDrained();
     }
     pub fn phase(self: *const NetworkCore) manager.PeerManager.Phase {
@@ -259,8 +259,10 @@ pub const NetworkCore = struct {
     pub fn peerCounts(self: *const NetworkCore) manager.PeerManager.PeerCounts {
         return self.peer_manager.peerCounts();
     }
-    pub fn connectUntil(self: *NetworkCore, identity: *const t.PeerId, addresses: []const t.Address, now: Now, deadline_ms: u64) !void {
-        try self.peer_manager.connectUntil(identity, addresses, now, deadline_ms);
+    /// Takes an awake-clock deadline, rounded up to the protocol timer's millisecond precision.
+    pub fn connectUntil(self: *NetworkCore, identity: *const t.PeerId, addresses: []const t.Address, now: Now, deadline: std.Io.Clock.Timestamp) !void {
+        if (deadline.compare(.lte, now.monotonic)) return error.InvalidDeadline;
+        try self.peer_manager.connectUntil(identity, addresses, now, time.ceilMilliseconds(deadline));
     }
     pub fn cancelConnect(self: *NetworkCore, identity: *const t.PeerId, now: Now) void {
         self.peer_manager.cancelConnect(&self.transport.engine, identity, now);
