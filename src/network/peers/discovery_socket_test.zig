@@ -22,9 +22,9 @@ test "peer discovery independent local nodes confirm signed candidates and cance
     var found = false;
     for (0..100) |_| {
         const tick = try d.Transport.monotonicMilliseconds(io);
-        const result = try controller.step(io, tick, tick, &output);
+        const result = try @import("discovery_test_support.zig").advance(controller, io, tick, &output);
         if (result.failure) |err| return err;
-        const remote = try b.transport.stepUntil(io, &expiries, tick);
+        const remote = try @import("discv5").driver.step(b.transport, io, &expiries, .{ .deadline_ms = tick, .wait_max_ms = 10 });
         if (remote.failure) |err| return err;
         for (output[0..result.candidates]) |candidate| {
             try adapter.requireIdentity(b.transport.engine.localRecord(), &candidate.peer);
@@ -41,7 +41,7 @@ test "peer discovery independent local nodes confirm signed candidates and cance
     controller.cancel();
     controller.cancel();
     try std.testing.expectEqual(@as(usize, 0), a.transport.engine.calls.count());
-    try std.testing.expect(controller.nextWakeup(now) == null);
+    try std.testing.expect(controller.schedule(now).nextWakeup(now) == null);
     try std.testing.expectError(error.Stopped, controller.request(.{ .general = true }, now));
 }
 
@@ -62,10 +62,10 @@ test "dual-stack discovery confirms both families in one routing table" {
     var expiries: [d.CallTable.capacity_max]d.CallTable.Expired = undefined;
     for (0..400) |_| {
         const tick = try d.Transport.monotonicMilliseconds(io);
-        const result = try controller.step(io, tick, tick, &.{});
+        const result = try @import("discovery_test_support.zig").advance(controller, io, tick, &.{});
         if (result.failure) |err| return err;
         for ([_]*Node{ &ipv4, &ipv6 }) |node| {
-            const remote = try node.transport.stepUntil(io, &expiries, tick);
+            const remote = try @import("discv5").driver.step(node.transport, io, &expiries, .{ .deadline_ms = tick, .wait_max_ms = 10 });
             if (remote.failure) |err| return err;
         }
         if (hub.transport.engine.peerRecord(&ipv4.transport.engine.localRecord().node_id).?.last_verified_ms != null and
@@ -92,9 +92,9 @@ test "IPv6-only discovery bootstraps a dual-stack record over IPv6" {
     var expiries: [d.CallTable.capacity_max]d.CallTable.Expired = undefined;
     for (0..100) |_| {
         const tick = try d.Transport.monotonicMilliseconds(io);
-        const result = try controller.step(io, tick, tick, &.{});
+        const result = try @import("discovery_test_support.zig").advance(controller, io, tick, &.{});
         if (result.failure) |err| return err;
-        const response = try seed.transport.stepUntil(io, &expiries, tick);
+        const response = try @import("discv5").driver.step(seed.transport, io, &expiries, .{ .deadline_ms = tick, .wait_max_ms = 10 });
         if (response.failure) |err| return err;
         if (node.transport.engine.peerRecord(&seed.transport.engine.localRecord().node_id).?.last_verified_ms != null) break;
     }

@@ -1,6 +1,5 @@
-//! The Transport is the synchronous host loop. Each step handles at most one datagram, sends
-//! without a queue, and does expiry work on every poll, so progress never depends on inbound
-//! traffic.
+//! Owns discovery protocol state and bounded datagram I/O. The owner supplies time and received
+//! input to advance; the standalone driver owns waiting and clock reads.
 
 const std = @import("std");
 const CallTable = @import("CallTable.zig");
@@ -18,7 +17,6 @@ pub const Error = Engine.Error || Sockets.DatagramError ||
     Sockets.SendError || std.Io.RandomSecureError || error{
     ClockOutOfRange,
     DestinationUnreachable,
-    InvalidPollInterval,
     MissingExpiryStorage,
 };
 
@@ -32,7 +30,7 @@ pub const DatagramResult = union(enum) {
     rejected: types.RejectReason,
 };
 
-/// These counters exist for observability. Nothing in `step` depends on them.
+/// These counters exist for observability. Nothing in `advance` depends on them.
 pub const Progress = struct {
     challenges_expired: usize = 0,
     sessions_expired: usize = 0,
@@ -49,18 +47,11 @@ pub const StepResult = struct {
     failure_stage: FailureStage = .coordinator,
 };
 
-/// A clock reading and fresh entropy for one outbound packet.
-const SendContext = struct {
-    now_ms: u64,
-    entropy: Engine.StartEntropy,
-};
-
 const Transport = @This();
 
 engine: Engine,
 sockets: Sockets,
 send_drops: Sockets.SendDrops = .{},
-poll_interval_ms: u32,
 scratch: Engine.Scratch = .{},
 response: ResponsePlan = .{},
 output: [constants.packet_size_max]u8 = undefined,
@@ -68,13 +59,11 @@ receive_buffer: [constants.packet_size_max]u8 = undefined,
 
 pub const Options = struct {
     engine: Engine.Config = .{},
-    poll_interval_ms: u32 = 100,
 };
 
 /// Takes ownership of bound sockets on success. Initialize at the final address.
 pub fn init(self: *Transport, allocator: std.mem.Allocator, sockets: Sockets, key: @import("identity/crypto.zig").KeyPair, record: enr.Record, options: Options) !void {
-    if (options.poll_interval_ms == 0) return error.InvalidPollInterval;
-    self.* = .{ .engine = undefined, .sockets = sockets, .poll_interval_ms = options.poll_interval_ms };
+    self.* = .{ .engine = undefined, .sockets = sockets };
     try self.engine.init(allocator, key, record, options.engine);
 }
 
@@ -96,16 +85,17 @@ pub fn startCall(
     peer: types.Endpoint,
     record: *const enr.Record,
     request: *const message.Message,
+    now_ms: u64,
 ) Error!CallTable.Handle {
-    var context = try sendContext(io);
-    defer std.crypto.secureZero(u8, std.mem.asBytes(&context.entropy));
+    var entropy = try startEntropy(io);
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&entropy));
     const started = try self.engine.startCall(
         &self.output,
         peer,
         record,
         request,
-        context.now_ms,
-        &context.entropy,
+        now_ms,
+        &entropy,
     );
     self.transmit(io, peer.address, self.output[0..started.packet_length]) catch |err| {
         const cancelled = self.engine.cancelCall(started.handle);
@@ -144,15 +134,16 @@ pub fn sendResponse(
     io: std.Io,
     peer: types.Endpoint,
     response: *const message.Message,
+    now_ms: u64,
 ) Error!void {
-    var context = try sendContext(io);
-    defer std.crypto.secureZero(u8, std.mem.asBytes(&context.entropy));
+    var entropy = try startEntropy(io);
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&entropy));
     const packet_length = try self.engine.sendResponse(
         &self.output,
         peer,
         response,
-        context.now_ms,
-        &context.entropy,
+        now_ms,
+        &entropy,
     );
     try self.transmit(io, peer.address, self.output[0..packet_length]);
 }
@@ -171,100 +162,44 @@ pub fn transmit(
     };
 }
 
-/// Runs one poll. It expires state, waits up to the poll interval
-/// for one datagram, processes it, and drains any standard response. The returned event
-/// borrows transport scratch and stays valid until the next step.
-pub fn step(
-    self: *Transport,
-    io: std.Io,
-    expired_calls: []CallTable.Expired,
-) Error!StepResult {
-    return self.stepUntil(io, expired_calls, std.math.maxInt(u64));
+pub const Input = Sockets.DatagramError!?Sockets.Datagram;
+
+/// Reads at most one datagram without waiting. Input bytes borrow receive_buffer until the next
+/// receive. Pass this result to advance even on failure, so expiry delivery still progresses.
+pub fn receive(self: *Transport, io: std.Io, ready: *[2]bool) Input {
+    return self.sockets.receiveReadyDatagram(io, &self.receive_buffer, ready);
 }
 
-/// Preserves events and expiries alongside local faults. The host must consume progress before
-/// handling `failure`. `wake_ms` can shorten the wait for host-owned maintenance or shutdown.
-pub fn stepUntil(
-    self: *Transport,
-    io: std.Io,
-    expired_calls: []CallTable.Expired,
-    wake_ms: u64,
-) Error!StepResult {
-    return self.stepWithReadiness(io, expired_calls, wake_ms, null);
-}
-
-/// Runs timers and protocol work even when no family is eligible for receiving.
-pub fn stepReady(self: *Transport, io: std.Io, expired_calls: []CallTable.Expired, ready: *[2]bool) Error!StepResult {
-    return self.stepWithReadiness(io, expired_calls, 0, ready);
-}
-
-fn stepWithReadiness(self: *Transport, io: std.Io, expired_calls: []CallTable.Expired, wake_ms: u64, ready: ?*[2]bool) Error!StepResult {
+/// Expires once at the supplied time, then processes input and sends standard replies. Consume
+/// every result, including failures, before the next advance; events borrow protocol scratch.
+pub fn advance(self: *Transport, io: std.Io, now_ms: u64, expired_calls: []CallTable.Expired, input: Input) Error!StepResult {
     if (expired_calls.len == 0) return error.MissingExpiryStorage;
-    var result = StepResult{};
-    self.runStep(io, expired_calls, wake_ms, ready, &result) catch |err| {
-        recordFailure(&result, err, .clock);
+    var result: StepResult = .{ .now_ms = now_ms };
+    const expired = self.engine.tick(now_ms, expired_calls);
+    result.calls_expired = expired.calls;
+    result.progress.challenges_expired = expired.challenges;
+    result.progress.sessions_expired = expired.sessions;
+    const datagram = input catch |err| switch (err) {
+        error.Timeout => null,
+        error.DatagramTooLarge => blk: {
+            result.datagram = .{ .rejected = .oversized_datagram };
+            break :blk null;
+        },
+        else => {
+            recordFailure(&result, err, .receive);
+            return result;
+        },
+    };
+    if (datagram) |packet| self.processDatagram(io, packet, &result) catch |err| {
+        recordFailure(&result, err, .process);
     };
     return result;
-}
-
-fn runStep(
-    self: *Transport,
-    io: std.Io,
-    expired_calls: []CallTable.Expired,
-    wake_ms: u64,
-    ready: ?*[2]bool,
-    result: *StepResult,
-) Error!void {
-    try self.advance(io, expired_calls, result);
-
-    const datagram = self.receiveDatagram(io, wake_ms, ready, result) catch |err| {
-        recordFailure(result, err, .receive);
-        return;
-    };
-    try self.advance(io, expired_calls, result);
-    if (datagram) |admitted| self.processDatagram(io, admitted, result) catch |err| {
-        recordFailure(result, err, .process);
-    };
-}
-
-fn advance(
-    self: *Transport,
-    io: std.Io,
-    expired_calls: []CallTable.Expired,
-    result: *StepResult,
-) Error!void {
-    result.now_ms = try monotonicMilliseconds(io);
-    const available = expired_calls[result.calls_expired..];
-    const expired = self.engine.tick(result.now_ms, available);
-    result.calls_expired += expired.calls;
-    result.progress.challenges_expired += expired.challenges;
-    result.progress.sessions_expired += expired.sessions;
 }
 
 fn recordFailure(result: *StepResult, err: Error, stage: FailureStage) void {
     if (result.failure != null) return;
     result.failure = err;
     result.failure_stage = stage;
-}
-
-fn receiveDatagram(self: *Transport, io: std.Io, wake_ms: u64, ready: ?*[2]bool, result: *StepResult) Error!?Sockets.Datagram {
-    const deadline_ms = @min(wake_ms, self.engine.nextDeadlineMs() orelse wake_ms);
-    const wait_ms = @min(self.poll_interval_ms, deadline_ms -| result.now_ms);
-    const timeout = std.Io.Timeout{ .duration = .{
-        .raw = .fromMilliseconds(wait_ms),
-        .clock = .awake,
-    } };
-    const received: Sockets.DatagramError!?Sockets.Datagram = if (ready) |eligible|
-        self.sockets.receiveReadyDatagram(io, &self.receive_buffer, eligible)
-    else if (self.sockets.receiveDatagram(io, &self.receive_buffer, timeout)) |packet| packet else |err| err;
-    return received catch |err| switch (err) {
-        error.Timeout => null,
-        error.DatagramTooLarge => blk: {
-            result.datagram = .{ .rejected = .oversized_datagram };
-            break :blk null;
-        },
-        else => err,
-    };
 }
 
 fn processDatagram(
@@ -352,14 +287,12 @@ fn reply(self: *Transport, io: std.Io, destination: types.Address, bytes: []cons
     return true;
 }
 
-pub fn monotonicMilliseconds(io: std.Io) Error!u64 {
-    const value = std.Io.Clock.awake.now(io).toMilliseconds();
-    if (value < 0) return error.ClockOutOfRange;
-    return @intCast(value);
-}
-
-fn sendContext(io: std.Io) Error!SendContext {
-    return .{ .now_ms = try monotonicMilliseconds(io), .entropy = try startEntropy(io) };
+pub fn monotonicMilliseconds(io: std.Io) error{ClockOutOfRange}!u64 {
+    const nanos = std.Io.Clock.awake.now(io).nanoseconds;
+    if (nanos < 0) return error.ClockOutOfRange;
+    const millis = @divTrunc(nanos, std.time.ns_per_ms);
+    if (millis > std.math.maxInt(u64)) return error.ClockOutOfRange;
+    return @intCast(millis);
 }
 
 fn requestId(io: std.Io) std.Io.RandomSecureError!message.RequestId {

@@ -56,7 +56,7 @@ test "incoming submission recognizes a genuine native terminal awaiting output c
     defer pair.deinit();
     const sink = try std.testing.allocator.alloc(u8, rr.Protocol.blocks_by_root_v2.info().response_max);
     defer {
-        pair.shared.client.reqresp.shutdown(&pair.shared.pair.client, &pair.shared.client.router, pair.shared.pair.now);
+        pair.shared.client.reqresp.cancelAll(&pair.shared.pair.client, &pair.shared.client.router, pair.shared.pair.now);
         std.testing.allocator.free(sink);
     }
     const query = [_]u8{0} ** 32;

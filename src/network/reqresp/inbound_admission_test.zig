@@ -46,7 +46,7 @@ test "inbound admission receive exhaustion and selected handoff checks precede t
         defer owner.deinit();
         var router = try Router.init(std.testing.allocator, .{});
         defer router.deinit();
-        defer owner.shutdown(&pair.server, &router, pair.now);
+        defer owner.cancelAll(&pair.server, &router, pair.now);
         const identity = pair.server.peerId(handles.server).?;
         _ = try owner.accept(&pair.server, try inboundStream(&pair, handles.client), .{
             .protocol = .{ .reqresp = .ping_v1 },

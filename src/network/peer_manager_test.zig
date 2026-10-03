@@ -67,17 +67,17 @@ test "peer owner replacement waits for cancelled request settlement without inhe
     const replacement: t.Handle = .{ .index = 1, .generation = 2 };
     try std.testing.expectEqualDeep(peer, try admit(&manager, replacement, .outbound, at(20_001)));
     try std.testing.expect(manager.retireConnection(peer, conn, .health_error, at(20_001)) == null);
-    try std.testing.expect(manager.controlWakeup(at(20_001)) == null);
+    try std.testing.expect(manager.controlSchedule(at(20_001)).nextWakeup(at(20_001).mono_ms) == null);
     try std.testing.expect(manager.catalog.get(peer).?.status == null);
 
     old.cancelled = true;
     manager.controlReplied(&old, .{ .failed = .{ .request = old.request.?, .reason = .cancelled } }, at(20_002), 0);
-    try std.testing.expectEqual(at(20_002).mono_ms, manager.controlWakeup(at(20_002)).?);
+    try std.testing.expectEqual(at(20_002).mono_ms, manager.controlSchedule(at(20_002)).nextWakeup(at(20_002).mono_ms).?);
     const current = try startProbe(&manager, 2, at(20_002));
     try std.testing.expectEqualDeep(replacement, current.conn);
     // A repeated terminal result for the old generation cannot free the new request reservation.
     manager.controlReplied(&old, .{ .failed = .{ .request = old.request.?, .reason = .cancelled } }, at(20_003), 0);
-    try std.testing.expect(manager.controlWakeup(at(20_003)) == null);
+    try std.testing.expect(manager.controlSchedule(at(20_003)).nextWakeup(at(20_003).mono_ms) == null);
     try std.testing.expectEqual(@as(u64, 0), manager.control.counters.closed[@intFromEnum(t.DisconnectReason.health_error)]);
     try std.testing.expectEqual(@as(u8, 0), manager.catalog.rowFor(peer).?.intent.failures);
 }
@@ -131,7 +131,7 @@ test "peer owner local probe refusal defers without peer evidence" {
     const due = manager.nextControl(&pass, at(10)).?;
     manager.controlStarted(&due, false, null, at(10));
     try std.testing.expect(manager.nextControl(&pass, at(10)) == null);
-    try std.testing.expectEqual(@as(u64, 1_010), manager.controlWakeup(at(10)).?);
+    try std.testing.expectEqual(@as(u64, 1_010), manager.controlSchedule(at(10)).nextWakeup(at(10).mono_ms).?);
     try std.testing.expectEqual(@as(u64, 1), manager.control.counters.deferred);
     try std.testing.expectEqual(@as(u8, 0), manager.catalog.rowFor(peer).?.intent.failures);
     try std.testing.expectEqual(@as(f64, 0), manager.catalog.get(peer).?.score);

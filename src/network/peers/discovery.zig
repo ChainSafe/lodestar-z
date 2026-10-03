@@ -109,7 +109,7 @@ pub const Discovery = struct {
     lookup_published: u64 = 0,
     empty_lookups: u3 = 0,
 
-    pub fn init(self: *Discovery, allocator: std.mem.Allocator, io: std.Io, options: Config, buffers: @import("udp").Sockets.Buffers, host: *const @import("../wire/keys.zig").KeyPair, local: *const types.LocalState, schedule: ForkSchedule, quic: [2]?types.Address, now_ms: u64) !void {
+    pub fn init(self: *Discovery, allocator: std.mem.Allocator, io: std.Io, options: Config, buffers: @import("udp").Sockets.Buffers, host: *const @import("../wire/keys.zig").KeyPair, local: *const types.LocalState, fork_schedule: ForkSchedule, quic: [2]?types.Address, now_ms: u64) !void {
         var sockets = try @import("udp").Sockets.bind(io, options.bind);
         errdefer sockets.close(io);
         @import("../configuration.zig").requestBuffers(&sockets, io, buffers, .network_discovery);
@@ -121,7 +121,7 @@ pub const Discovery = struct {
         try advertisement.validate(plan.endpoints);
         const quic_bound = [2]bool{ quic[0] != null, quic[1] != null };
         try validateEndpointFamilies(plan.endpoints, quic_bound, &sockets);
-        const announced = advertisementFor(local, schedule, plan.endpoints);
+        const announced = advertisementFor(local, fork_schedule, plan.endpoints);
         const record = try adapter.build(&host.inner, options.sequence, &announced, &local.fork);
         try adapter.requireIdentity(&record, &types.PeerId.fromPublicKey(&host.publicKey()));
         var coordinator_options = options.coordinator;
@@ -231,38 +231,27 @@ pub const Discovery = struct {
         self.context = context.*;
     }
 
-    pub fn nextWakeup(self: *const Discovery, now_ms: u64) ?u64 {
-        if (self.stopped) return null;
+    pub fn schedule(self: *const Discovery, now_ms: u64) @import("../types.zig").Schedule {
+        if (self.stopped) return .{};
         var next = self.transport.engine.nextDeadlineMs() orelse std.math.maxInt(u64);
         if (self.maintenance.nextDeadlineMs(&self.transport.engine)) |deadline| next = @min(next, @max(deadline, self.resource_retry_ms));
         if (self.lookup) |*lookup| {
             if (lookup.waitingCount() < d.Lookup.parallelism) next = @min(next, @max(self.refill_due_ms, self.resource_retry_ms));
         } else if (self.demand.active(now_ms)) next = @min(next, @max(self.query_due_ms, self.resource_retry_ms));
         if (self.demand.active(now_ms)) next = @min(next, self.demand.expires_ms);
-        return @max(now_ms, next);
+        return .{ .deadline_ms = next };
     }
 
-    /// Runs one Transport step, then consumes all borrowed progress before exposing a local fault.
-    /// The caller's monotonic time must use the same domain as the Transport's host I/O clock.
-    pub fn step(self: *Discovery, io: std.Io, now_ms: u64, wake_ms: u64, out: []adapter.Candidate) Error!Result {
-        return self.stepWithReadiness(io, now_ms, wake_ms, null, out);
-    }
-
-    pub fn stepReady(self: *Discovery, io: std.Io, now_ms: u64, ready: *[2]bool, out: []adapter.Candidate) Error!Result {
-        return self.stepWithReadiness(io, now_ms, now_ms, ready, out);
-    }
-
-    fn stepWithReadiness(self: *Discovery, io: std.Io, now_ms: u64, wake_ms: u64, ready: ?*[2]bool, out: []adapter.Candidate) Error!Result {
+    /// Advances one bounded turn using the owner's clock and readiness. No event borrow escapes.
+    pub fn advance(self: *Discovery, io: std.Io, now_ms: u64, ready: *[2]bool, out: []adapter.Candidate) Error!Result {
         if (self.stopped) return error.Stopped;
         var result = Result{};
         self.refill(io, now_ms, &result) catch |err| {
             result.failure = err;
             self.resource_retry_ms = now_ms +| self.options.local_retry_ms;
         };
-        const progress = if (ready) |eligible|
-            try self.transport.stepReady(io, &self.storage.expiries, eligible)
-        else
-            try self.transport.stepUntil(io, &self.storage.expiries, @min(wake_ms, self.nextWakeup(now_ms).?));
+        const input = self.transport.receive(io, ready);
+        const progress = try self.transport.advance(io, now_ms, &self.storage.expiries, input);
         var consumed = self.consume(&progress, self.storage.expiries[0..progress.calls_expired], out);
         if (progress.event == .request and progress.event.request.message == .talk_request) {
             const incoming = progress.event.request;
@@ -270,7 +259,7 @@ pub const Discovery = struct {
                 .request_id = incoming.message.talk_request.request_id,
                 .response = &.{},
             } };
-            self.transport.sendResponse(io, incoming.peer, &response) catch |err| {
+            self.transport.sendResponse(io, incoming.peer, &response, now_ms) catch |err| {
                 if (err != error.DestinationUnreachable and consumed.failure == null) {
                     consumed.failure = err;
                     consumed.failure_stage = .process;
@@ -281,8 +270,8 @@ pub const Discovery = struct {
     }
 
     /// Supports hosts that drive this owner's Transport themselves. Consume every result exactly
-    /// once before another Transport step, including results containing failure. The host answers
-    /// TALK requests itself; step supplies the unsupported-protocol response. No slice escapes.
+    /// once before another Transport advance, including results containing failure. The host answers
+    /// TALK requests itself; advance supplies the unsupported-protocol response. No slice escapes.
     pub fn consume(self: *Discovery, progress: *const d.Transport.StepResult, expiries: []const d.CallTable.Expired, out: []adapter.Candidate) Result {
         std.debug.assert(expiries.len == progress.calls_expired and expiries.len <= d.CallTable.capacity_max);
         var result = Result{ .datagrams = @intFromBool(progress.datagram != .timeout), .failure = progress.failure, .failure_stage = progress.failure_stage };

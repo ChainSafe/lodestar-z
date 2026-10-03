@@ -37,7 +37,7 @@ pub const Node = struct {
         };
         const record = try adapter.build(&key, 1, &local, &options.fork);
         const now = try d.Transport.monotonicMilliseconds(io);
-        try self.owner.initBound(std.testing.allocator, sockets, &key, &record, &options.fork, options.bootstrap, now, options.discovery, .{ .poll_interval_ms = 1, .engine = .{
+        try self.owner.initBound(std.testing.allocator, sockets, &key, &record, &options.fork, options.bootstrap, now, options.discovery, .{ .engine = .{
             .session_capacity = 8,
             .challenge_capacity = 8,
             .call_capacity = 8,
@@ -108,4 +108,9 @@ pub fn admitBatch(candidates: []const adapter.Candidate) !void {
         try std.testing.expectEqual(candidate.sequence, row.intent.hints.?.sequence);
         try std.testing.expectEqualSlices(types.Address, candidate.addresses[0..candidate.address_count], row.intent.addresses[0..row.intent.address_count]);
     }
+}
+
+pub fn advance(owner: *@import("discovery.zig").Discovery, io: std.Io, now_ms: u64, output: []adapter.Candidate) !@import("discovery.zig").Discovery.Result {
+    var ready: [2]bool = @splat(true);
+    return owner.advance(io, now_ms, &ready, output);
 }

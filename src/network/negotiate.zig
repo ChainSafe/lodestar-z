@@ -399,7 +399,8 @@ pub const Negotiator = struct {
         engine.closeStream(stream, types.app_error_negotiation_failed);
     }
 
-    pub fn shutdown(self: *Negotiator, engine: *Engine) void {
+    /// Cancels current negotiations and ends outcome borrows. Future admission remains enabled.
+    pub fn cancelAll(self: *Negotiator, engine: *Engine) void {
         for (self.entries, 0..) |*entry, index| {
             if (entry.state == .free) continue;
             engine.closeStream(entry.stream, types.app_error_negotiation_failed);

@@ -86,7 +86,7 @@ pub const Peer = struct {
         self.steps += 1;
         var events: [32]Engine.Event = undefined;
         var requests: [16]network.reqresp.ReqResp.Event = undefined;
-        const stepped = self.transport.step(self.io, &events, .{ .wait_max_ms = 1 });
+        const stepped = network.transport_driver.step(&self.transport, self.io, &events, .{ .wait_max_ms = 1 });
         const result = stepped.progress;
         self.now = result.now;
         self.now.mono_ms += self.clock_offset;
@@ -207,7 +207,7 @@ pub const Peer = struct {
                 .ip4 => |a| if (!std.mem.eql(u8, &a.octets, &.{ 127, 0, 0, 1 })) return error.NotLoopback,
                 else => return error.NotLoopback,
             }
-            self.conn = try self.transport.dial(self.io, &target);
+            self.conn = try self.transport.dial(self.io, &target, try network.Transport.currentTime(self.io));
         } else if (std.mem.eql(u8, c.op, "identifyMode") or std.mem.eql(u8, c.op, "enableGossipRequest")) {
             var active = network.capabilities.withIdentify(try network.capabilities.forFork(.fulu, true, &.{ .v1_2, .v1_1 }));
             if (std.mem.eql(u8, c.op, "identifyMode")) {
@@ -344,7 +344,7 @@ pub fn main(init: std.process.Init) !void {
     defer a.free(peer.response);
 
     defer peer.service.identify.shutdown(&peer.service.router, &peer.transport.engine);
-    defer peer.service.reqresp.shutdown(&peer.transport.engine, &peer.service.router, peer.now);
+    defer peer.service.reqresp.cancelAll(&peer.transport.engine, &peer.service.router, peer.now);
     try control.run(peer);
 }
 

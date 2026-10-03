@@ -18,7 +18,7 @@ pub fn initCatalog(allocator: std.mem.Allocator, options: mod.Dialing.Options) !
 }
 pub fn selectNext(q: *mod.Dialing, catalog: *Catalog, now: *u64) !mod.Dialing.Token {
     var out: [1]mod.Dialing.DialIntent = undefined;
-    now.* = q.nextWakeup(catalog, now.*, 1).?;
+    now.* = refreshAndWakeup(q, catalog, now.*, 1).?;
     try std.testing.expectEqual(@as(usize, 1), q.poll(catalog, now.*, &out));
     return out[0].token;
 }
@@ -41,4 +41,10 @@ pub fn disconnect(catalog: *Catalog, peer: *const t.PeerId, connected_at_ms: u64
 pub fn expire(queue: *@import("dialing.zig").Dialing, catalog: *Catalog, now_ms: u64) !void {
     var close: [@import("dialing.zig").Dialing.attempts_max]t.Handle = undefined;
     try std.testing.expectEqual(@as(usize, 0), queue.expire(catalog, now_ms, &close));
+}
+
+/// Refreshes pending mutations before observing the next timer in driver-style tests.
+pub fn refreshAndWakeup(dialing: *mod.Dialing, catalog: *Catalog, now_ms: u64, capacity: usize) ?u64 {
+    dialing.refresh(catalog, now_ms);
+    return dialing.schedule(catalog, capacity).nextWakeup(now_ms);
 }

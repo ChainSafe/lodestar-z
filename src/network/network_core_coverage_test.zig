@@ -84,7 +84,7 @@ test "core coverage coalesces subscription and score changes with operation elig
     gossip_test.control(g, index, .{ .subscription = .{ .topic = attestation, .subscribe = true } }, setup.pair.now);
     setup.client.peer_manager.reconcile(setup.client.service.gossipsub, setup.pair.now);
     try equal(baseline, setup.client.peer_manager.counters.selections);
-    const due = setup.client.peer_manager.policyWakeup(setup.client.service.gossipsub, setup.pair.now).?;
+    const due = setup.client.peer_manager.policySchedule(setup.client.service.gossipsub).nextWakeup(setup.pair.now.mono_ms).?;
     try equal(setup.pair.now.mono_ms + manager.coverage_reconcile_interval_ms, due);
     const revision = g.coverageRevision();
     for (0..100) |_| gossip_test.control(g, index, .{ .subscription = .{ .topic = attestation, .subscribe = true } }, setup.pair.now);

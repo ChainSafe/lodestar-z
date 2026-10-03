@@ -25,9 +25,9 @@ test "maintenance retains a routing incumbent that answers through Transport" {
     const started = (try controller.startNext(&pair.transport_a.engine, &out, try .init(&.{1}), now_ms, &test_support.sealEntropy(10))).?;
     try pair.transport_a.transmit(std.testing.io, started.peer.address, out[0..started.call.packet_length]);
     var expired: [4]CallTable.Expired = undefined;
-    const answered = try pair.transport_b.step(std.testing.io, &expired);
+    const answered = try @import("driver.zig").step(&pair.transport_b, std.testing.io, &expired, .{ .wait_max_ms = 10 });
     try std.testing.expectEqual(@as(u8, 1), answered.progress.standard_responses);
-    const completed = try pair.transport_a.step(std.testing.io, &expired);
+    const completed = try @import("driver.zig").step(&pair.transport_a, std.testing.io, &expired, .{ .wait_max_ms = 10 });
     try std.testing.expect(completed.event == .response);
     try std.testing.expect(controller.onEvent(&pair.transport_a.engine, &completed.event, completed.now_ms).consumed);
     try std.testing.expectEqual(@as(usize, 0), pair.transport_a.engine.routing.pendingCount());
@@ -45,18 +45,13 @@ test "transport completes a cold call through challenge and handshake" {
         .request_id = try message.RequestId.init(&.{0x42}),
         .enr_sequence = pair.record_a.sequence,
     } };
-    const handle = try pair.transport_a.startCall(
-        std.testing.io,
-        endpoint(&pair.record_b),
-        &pair.record_b,
-        &request,
-    );
+    const handle = try pair.transport_a.startCall(std.testing.io, endpoint(&pair.record_b), &pair.record_b, &request, try Transport.monotonicMilliseconds(std.testing.io));
     var expired: [4]CallTable.Expired = undefined;
-    try std.testing.expect((try pair.transport_b.step(std.testing.io, &expired)).event == .none);
-    try std.testing.expect((try pair.transport_a.step(std.testing.io, &expired)).event == .none);
-    const request_step = try pair.transport_b.step(std.testing.io, &expired);
+    try std.testing.expect((try @import("driver.zig").step(&pair.transport_b, std.testing.io, &expired, .{ .wait_max_ms = 10 })).event == .none);
+    try std.testing.expect((try @import("driver.zig").step(&pair.transport_a, std.testing.io, &expired, .{ .wait_max_ms = 10 })).event == .none);
+    const request_step = try @import("driver.zig").step(&pair.transport_b, std.testing.io, &expired, .{ .wait_max_ms = 10 });
     try std.testing.expectEqual(@as(u8, 1), request_step.progress.standard_responses);
-    const response_step = try pair.transport_a.step(std.testing.io, &expired);
+    const response_step = try @import("driver.zig").step(&pair.transport_a, std.testing.io, &expired, .{ .wait_max_ms = 10 });
     try std.testing.expect(response_step.event == .response);
     try std.testing.expectEqual(handle, response_step.event.response.matched.handle);
     try std.testing.expect(response_step.event.response.matched.response == .pong);
@@ -74,14 +69,9 @@ test "transport leaves TALK response policy with the application" {
         .protocol = "test",
         .request = "request",
     } };
-    const handle = try pair.transport_a.startCall(
-        std.testing.io,
-        endpoint(&pair.record_b),
-        &pair.record_b,
-        &request,
-    );
+    const handle = try pair.transport_a.startCall(std.testing.io, endpoint(&pair.record_b), &pair.record_b, &request, try Transport.monotonicMilliseconds(std.testing.io));
     var expired: [4]CallTable.Expired = undefined;
-    const received = try pair.transport_b.step(std.testing.io, &expired);
+    const received = try @import("driver.zig").step(&pair.transport_b, std.testing.io, &expired, .{ .wait_max_ms = 10 });
     try std.testing.expect(received.event == .request);
     try std.testing.expect(received.event.request.message == .talk_request);
     try std.testing.expectEqual(@as(u8, 0), received.progress.standard_responses);
@@ -90,12 +80,8 @@ test "transport leaves TALK response policy with the application" {
         .request_id = request_id,
         .response = "response",
     } };
-    try pair.transport_b.sendResponse(
-        std.testing.io,
-        endpoint(&pair.record_a),
-        &response,
-    );
-    const completed = try pair.transport_a.step(std.testing.io, &expired);
+    try pair.transport_b.sendResponse(std.testing.io, endpoint(&pair.record_a), &response, try Transport.monotonicMilliseconds(std.testing.io));
+    const completed = try @import("driver.zig").step(&pair.transport_a, std.testing.io, &expired, .{ .wait_max_ms = 10 });
     try std.testing.expect(completed.event == .response);
     try std.testing.expectEqual(handle, completed.event.response.matched.handle);
     try std.testing.expectEqualStrings(
@@ -116,7 +102,7 @@ test "transport releases a malformed datagram before the next step" {
         @import("wire/constants.zig").packet_size_max,
     );
     var expired: [4]CallTable.Expired = undefined;
-    const rejected = try pair.transport_a.step(std.testing.io, &expired);
+    const rejected = try @import("driver.zig").step(&pair.transport_a, std.testing.io, &expired, .{ .wait_max_ms = 10 });
     try std.testing.expect(rejected.datagram == .rejected);
     try std.testing.expectEqual(types.RejectReason.malformed_packet, rejected.datagram.rejected);
 
@@ -124,15 +110,10 @@ test "transport releases a malformed datagram before the next step" {
         .request_id = try message.RequestId.init(&.{0x44}),
         .enr_sequence = pair.record_b.sequence,
     } };
-    const handle = try pair.transport_b.startCall(
-        std.testing.io,
-        endpoint(&pair.record_a),
-        &pair.record_a,
-        &request,
-    );
-    const answered = try pair.transport_a.step(std.testing.io, &expired);
+    const handle = try pair.transport_b.startCall(std.testing.io, endpoint(&pair.record_a), &pair.record_a, &request, try Transport.monotonicMilliseconds(std.testing.io));
+    const answered = try @import("driver.zig").step(&pair.transport_a, std.testing.io, &expired, .{ .wait_max_ms = 10 });
     try std.testing.expectEqual(@as(u8, 1), answered.progress.standard_responses);
-    const completed = try pair.transport_b.step(std.testing.io, &expired);
+    const completed = try @import("driver.zig").step(&pair.transport_b, std.testing.io, &expired, .{ .wait_max_ms = 10 });
     try std.testing.expect(completed.event == .response);
     try std.testing.expectEqual(handle, completed.event.response.matched.handle);
 }
@@ -155,11 +136,11 @@ test "transport drops replies its destination refuses and keeps the step's expir
             0,
             &test_support.sealEntropy(0x33),
         );
-        _ = try pair.transport_b.startCall(std.testing.io, endpoint(&pair.record_a), &pair.record_a, &request);
+        _ = try pair.transport_b.startCall(std.testing.io, endpoint(&pair.record_a), &pair.record_a, &request, try Transport.monotonicMilliseconds(std.testing.io));
         // A challenge answers the cold request and a PONG the established one.
         var host = @import("fault_io"){ .send = .{ .socket = pair.transport_a.sockets.primary().handle } };
         var expired: [4]CallTable.Expired = undefined;
-        const result = try pair.transport_a.step(host.io(), &expired);
+        const result = try @import("driver.zig").step(&pair.transport_a, host.io(), &expired, .{ .wait_max_ms = 10 });
         try std.testing.expectEqual(@as(?Transport.Error, null), result.failure);
         try std.testing.expect(result.datagram == .accepted);
         try std.testing.expect(result.event == .none);
@@ -187,10 +168,10 @@ test "transport fails a call whose handshake is not sent so maintenance keeps th
         try std.testing.expectEqual(endpoint(&pair.record_b), started.peer);
         try pair.transport_a.transmit(std.testing.io, started.peer.address, out[0..started.call.packet_length]);
         var expired: [4]CallTable.Expired = undefined;
-        const challenged = try pair.transport_b.step(std.testing.io, &expired);
+        const challenged = try @import("driver.zig").step(&pair.transport_b, std.testing.io, &expired, .{ .wait_max_ms = 10 });
         try std.testing.expect(challenged.failure == null and challenged.datagram == .accepted);
         var host = @import("fault_io"){ .send = .{ .socket = pair.transport_a.sockets.primary().handle }, .send_failure = send_failure };
-        const unsent = try pair.transport_a.step(host.io(), &expired);
+        const unsent = try @import("driver.zig").step(&pair.transport_a, host.io(), &expired, .{ .wait_max_ms = 10 });
         try std.testing.expectEqual(if (send_failure == error.SystemResources) @as(?Transport.Error, error.SystemResources) else null, unsent.failure);
         const dropped = &pair.transport_a.send_drops;
         const pressure = @intFromEnum(@import("udp").Sockets.SendDrops.Reason.system_resources);
@@ -228,17 +209,17 @@ test "discovery ready steps expire calls with no eligible socket and preserve la
     var faults: @import("fault_io") = .{ .receive = .{} };
     var eligible: [2]bool = @splat(false);
     var expired: [4]CallTable.Expired = undefined;
-    const result = try pair.transport_a.stepReady(faults.io(), &expired, &eligible);
+    const result = try pair.transport_a.advance(faults.io(), try Transport.monotonicMilliseconds(faults.io()), &expired, pair.transport_a.receive(faults.io(), &eligible));
     try std.testing.expect(result.failure == null);
     try std.testing.expectEqual(@as(usize, 1), result.calls_expired);
     try std.testing.expectEqual(started.handle, expired[0].handle);
     try std.testing.expectEqual(@as(usize, 0), faults.receive_calls);
     try pair.transport_b.sockets.sendTo(std.testing.io, pair.transport_a.localAddress(), &.{0xff}, 1280);
-    const late = try pair.transport_a.stepReady(faults.io(), &expired, &eligible);
+    const late = try pair.transport_a.advance(faults.io(), try Transport.monotonicMilliseconds(faults.io()), &expired, pair.transport_a.receive(faults.io(), &eligible));
     try std.testing.expect(late.datagram == .timeout and late.failure == null);
     try std.testing.expectEqual(@as(usize, 0), faults.receive_calls);
     eligible = .{ true, false };
-    const next = try pair.transport_a.stepReady(std.testing.io, &expired, &eligible);
+    const next = try pair.transport_a.advance(std.testing.io, try Transport.monotonicMilliseconds(std.testing.io), &expired, pair.transport_a.receive(std.testing.io, &eligible));
     try std.testing.expect(next.datagram == .rejected and next.failure == null);
     try std.testing.expectEqual(@as(usize, 0), next.calls_expired);
 }
@@ -258,15 +239,15 @@ test "discovery ready steps retain one family mask through the drain" {
     var faults: @import("fault_io") = .{ .receive = .{ .socket = transport.sockets.values[1].?.handle } };
     var eligible: [2]bool = .{ true, false };
     var expired: [4]CallTable.Expired = undefined;
-    const first = try transport.stepReady(faults.io(), &expired, &eligible);
+    const first = try transport.advance(faults.io(), try Transport.monotonicMilliseconds(faults.io()), &expired, transport.receive(faults.io(), &eligible));
     try std.testing.expect(first.datagram == .rejected and first.failure == null);
-    const empty = try transport.stepReady(faults.io(), &expired, &eligible);
+    const empty = try transport.advance(faults.io(), try Transport.monotonicMilliseconds(faults.io()), &expired, transport.receive(faults.io(), &eligible));
     try std.testing.expect(empty.datagram == .timeout and empty.failure == null);
     try std.testing.expectEqual([2]bool{ false, false }, eligible);
     const reads = faults.receive_calls;
-    _ = try transport.stepReady(faults.io(), &expired, &eligible);
+    _ = try transport.advance(faults.io(), try Transport.monotonicMilliseconds(faults.io()), &expired, transport.receive(faults.io(), &eligible));
     try std.testing.expectEqual(reads, faults.receive_calls);
     eligible = .{ false, true };
-    const next = try transport.stepReady(std.testing.io, &expired, &eligible);
+    const next = try transport.advance(std.testing.io, try Transport.monotonicMilliseconds(std.testing.io), &expired, transport.receive(std.testing.io, &eligible));
     try std.testing.expect(next.datagram == .rejected and next.failure == null);
 }

@@ -234,8 +234,8 @@ pub const PeerManager = struct {
     pub fn identified(self: *PeerManager, results: []const @import("identify/root.zig").Handler.Result) void {
         self.control.identifyResults(&self.catalog, results);
     }
-    pub fn controlWakeup(self: *const PeerManager, now: Now) ?u64 {
-        return self.control.nextWakeup(&self.catalog, now);
+    pub fn controlSchedule(self: *const PeerManager, now: Now) @import("types.zig").Schedule {
+        return self.control.schedule(&self.catalog, now);
     }
     /// Revalidates the connection at this bounded cursor after a fork change. The caller cancels
     /// the returned request; its reservation survives until the protocol's terminal event.
@@ -251,7 +251,7 @@ pub const PeerManager = struct {
         if (self.stopped or self.quiescing) return;
         self.catalog.refresh(now.mono_ms);
         const expired = if (self.reconciliation_deadline) |due| now.mono_ms >= due else false;
-        if ((if (self.policyWakeup(gossipsub, now)) |due| now.mono_ms >= due else false) or expired) {
+        if (self.policySchedule(gossipsub).due(now.mono_ms) or expired) {
             self.refreshSelection(gossipsub, now);
             self.coverage_reconcile_after_ms = now.mono_ms +| coverage_reconcile_interval_ms;
             self.refreshDiscoveryNeed();
@@ -270,13 +270,13 @@ pub const PeerManager = struct {
     fn currentSelectionRevision(self: *const PeerManager, gossipsub: *const gossip.Gossipsub) SelectionRevision {
         return .{ .catalog = self.catalog.revision, .delivery = gossipsub.deliveryRevision(), .gossip = gossipsub.coverageRevision() };
     }
-    pub fn policyWakeup(self: *const PeerManager, gossipsub: *const gossip.Gossipsub, now: Now) ?u64 {
-        const before = self.selection_revision orelse return now.mono_ms;
+    pub fn policySchedule(self: *const PeerManager, gossipsub: *const gossip.Gossipsub) @import("types.zig").Schedule {
+        const before = self.selection_revision orelse return .{ .runnable = true };
         const after = self.currentSelectionRevision(gossipsub);
-        if (before.catalog != after.catalog or before.delivery != after.delivery) return now.mono_ms;
+        if (before.catalog != after.catalog or before.delivery != after.delivery) return .{ .runnable = true };
         if (!after.cacheable() or !std.meta.eql(before.gossip, after.gossip))
-            return @max(now.mono_ms, self.coverage_reconcile_after_ms);
-        return null;
+            return .{ .deadline_ms = self.coverage_reconcile_after_ms };
+        return .{};
     }
     /// Observes transport progress before admission or dial selection. Admission itself consumes
     /// these bounded facts without borrowing transport or executing I/O.
@@ -285,10 +285,8 @@ pub const PeerManager = struct {
         self.native_dial_room = engine.limits.connections_max -| engine.resourceSnapshot().active;
     }
 
-    pub fn peerWakeup(self: *const PeerManager, now: Now, capacity: usize) ?u64 {
-        if (capacity == 0) return null;
-        if (self.catalog.eventsPending()) return now.mono_ms;
-        return null;
+    pub fn peerSchedule(self: *const PeerManager, capacity: usize) @import("types.zig").Schedule {
+        return .{ .runnable = capacity > 0 and self.catalog.eventsPending() };
     }
     /// Requires demand validated against the local fork before publication.
     pub fn commitDemand(self: *PeerManager, demand: *const t.Demand) void {
@@ -417,7 +415,7 @@ pub const PeerManager = struct {
         self.discovery_need.syncnets = self.selection.deficits.missing.syncnets;
         self.discovery_need.custody = self.selection.deficits.groups > 0 or self.selection.deficits.custody_groups > 0;
     }
-    pub fn dialRoom(self: *PeerManager) u16 {
+    pub fn dialRoom(self: *const PeerManager) u16 {
         const attempts = self.dialing.attempts();
         const demand = self.dialing.demandCounts(&self.catalog);
         const capacity = self.catalog.options.max_peers -| self.catalog.connectedCount() -| demand.pending;

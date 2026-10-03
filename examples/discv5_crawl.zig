@@ -17,7 +17,6 @@ const transport_steps_max: usize = 12_000;
 const key_generation_attempts_max: usize = 16;
 const lookup_concurrency: usize = 16;
 const lookup_total_max: usize = 64;
-const poll_interval_ms: u32 = 25;
 const record_capacity: usize = 8_192;
 
 const LookupSlot = struct {
@@ -115,7 +114,7 @@ pub fn main(init: std.process.Init) !void {
         advertised_address,
     );
     var transport: discv5.Transport = undefined;
-    try transport.init(allocator, sockets, key_pair, local_record, .{ .poll_interval_ms = poll_interval_ms, .engine = .{
+    try transport.init(allocator, sockets, key_pair, local_record, .{ .engine = .{
         .session_capacity = 256,
         .challenge_capacity = 1024,
         .call_capacity = call_capacity,

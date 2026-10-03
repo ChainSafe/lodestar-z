@@ -465,13 +465,13 @@ fn idleTransport(init: std.process.Init) !void {
     for (0..20_000) |_| {
         // A few handshakes at a time keep the hub's socket buffer from dropping Initials.
         while (dialed < spokes.len and dialed - established < 16) : (dialed += 1) {
-            _ = try spokes[dialed].dialPeer(io, hub.localAddress(), hub.peerId());
+            _ = try spokes[dialed].dialPeer(io, hub.localAddress(), hub.peerId(), try network.Transport.currentTime(io));
         }
         for (spokes[0..dialed]) |*spoke| {
-            const stepped = spoke.step(io, &events, .{ .wait_max_ms = 0 });
+            const stepped = network.transport_driver.step(spoke, io, &events, .{ .wait_max_ms = 0 });
             if (stepped.failure) |err| return err;
         }
-        const stepped = hub.step(io, &events, .{ .wait_max_ms = 1 });
+        const stepped = network.transport_driver.step(hub, io, &events, .{ .wait_max_ms = 1 });
         if (stepped.failure) |err| return err;
         for (events[0..stepped.progress.events]) |event| switch (event) {
             .connected => established += 1,
@@ -486,11 +486,11 @@ fn idleTransport(init: std.process.Init) !void {
     for (0..2_000) |_| {
         var sent: u64 = 0;
         for (spokes) |*spoke| {
-            const stepped = spoke.step(io, &events, .{ .wait_max_ms = 0 });
+            const stepped = network.transport_driver.step(spoke, io, &events, .{ .wait_max_ms = 0 });
             if (stepped.failure) |err| return err;
             sent += stepped.progress.datagrams_sent;
         }
-        const stepped = hub.step(io, &events, .{ .wait_max_ms = 2 });
+        const stepped = network.transport_driver.step(hub, io, &events, .{ .wait_max_ms = 2 });
         if (stepped.failure) |err| return err;
         sent += stepped.progress.datagrams_sent;
         quiet = if (sent == 0 and !stepped.progress.backlog) quiet + 1 else 0;
@@ -576,10 +576,10 @@ fn idleConnections(init: std.process.Init) !void {
         // A few handshakes at a time keep the hub's socket buffer from dropping Initials.
         const connected = hub.peerCounts().connected;
         while (dialed < spokes.len and dialed - connected < 16) : (dialed += 1) {
-            _ = try spokes[dialed].dialPeer(io, hub.transport.localAddress(), hub.peerId());
+            _ = try spokes[dialed].dialPeer(io, hub.transport.localAddress(), hub.peerId(), try network.Transport.currentTime(io));
         }
         for (spokes[0..dialed]) |*spoke| {
-            const stepped = spoke.step(io, &events, .{ .wait_max_ms = 0 });
+            const stepped = network.transport_driver.step(spoke, io, &events, .{ .wait_max_ms = 0 });
             if (stepped.failure) |err| return err;
         }
         _ = try turn(hub, io, outputs);
@@ -594,7 +594,7 @@ fn idleConnections(init: std.process.Init) !void {
     for (0..2_000) |_| {
         var sent: u64 = 0;
         for (spokes) |*spoke| {
-            const stepped = spoke.step(io, &events, .{ .wait_max_ms = 0 });
+            const stepped = network.transport_driver.step(spoke, io, &events, .{ .wait_max_ms = 0 });
             if (stepped.failure) |err| return err;
             sent += stepped.progress.datagrams_sent;
         }

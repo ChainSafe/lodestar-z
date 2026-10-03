@@ -380,7 +380,7 @@ pub fn init(allocator: std.mem.Allocator, options: Options) InitError!ReqResp {
     return result;
 }
 
-/// Call shutdown first, or destroy the attached transport and Router before deinit.
+/// Call cancelAll first, or destroy the attached transport and Router before deinit.
 pub fn deinit(self: *ReqResp) void {
     self.admission.deinit(self.allocator);
     self.serving.deinit(self.allocator);
@@ -396,6 +396,14 @@ pub fn deinit(self: *ReqResp) void {
 
 pub fn setRequestFork(self: *ReqResp, fork: config.ForkSeq) void {
     self.request_fork = fork;
+}
+
+/// Includes reported slots and serving capacity retained by asynchronous host work.
+pub fn isDrained(self: *const ReqResp) bool {
+    for (self.outbound) |*slot| if (slot.request.occupied()) return false;
+    for (self.inbound) |*slot| if (slot.request.occupied()) return false;
+    for (self.serving.entries) |entry| if (entry.request != null) return false;
+    return true;
 }
 
 pub fn pendingCounts(self: *const ReqResp) struct { outbound: u16, inbound: u16 } {
@@ -919,7 +927,8 @@ pub fn cancelApplications(self: *ReqResp, engine: *Engine, router: *Router, now:
     self.cleanupPending(engine, router);
 }
 
-pub fn shutdown(self: *ReqResp, engine: *Engine, router: *Router, now: Now) void {
+/// Cancels current operations. Admission stays enabled; pump delivers notifications and terminals.
+pub fn cancelAll(self: *ReqResp, engine: *Engine, router: *Router, now: Now) void {
     for (self.outbound, 0..) |*slot, index| if (slot.request.awaitingTerminal()) {
         _ = self.cancel(slot.request.handle(@intCast(index)), now);
     };

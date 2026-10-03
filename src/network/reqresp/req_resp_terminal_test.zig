@@ -212,8 +212,8 @@ test "reqresp cancellation releases read held chunk and response write states on
         const server_stream = setup.shared.server.reqresp.inbound[incoming.index].request.stream;
         try std.testing.expect(setup.shared.client.reqresp.cancel(handle, setup.shared.pair.now));
         try std.testing.expect(setup.shared.server.reqresp.cancel(incoming, setup.shared.pair.now));
-        setup.shared.client.reqresp.shutdown(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now);
-        setup.shared.server.reqresp.shutdown(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now);
+        setup.shared.client.reqresp.cancelAll(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.pair.now);
+        setup.shared.server.reqresp.cancelAll(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now);
         try std.testing.expect(!setup.shared.client.reqresp.cancel(handle, setup.shared.pair.now));
         try std.testing.expect(!setup.shared.server.reqresp.cancel(incoming, setup.shared.pair.now));
         try std.testing.expect(!setup.shared.pair.client.registry.slots[stream.conn.index].table.matches(stream.slot, stream.id));

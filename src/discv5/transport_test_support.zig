@@ -41,9 +41,9 @@ pub const Pair = struct {
             .challenge_timeout_ms = 1_000,
             .session_idle_timeout_ms = std.math.maxInt(u64),
         };
-        try self.transport_a.init(std.testing.allocator, self.transport_a.sockets, key_a, self.record_a, .{ .engine = config, .poll_interval_ms = 10 });
+        try self.transport_a.init(std.testing.allocator, self.transport_a.sockets, key_a, self.record_a, .{ .engine = config });
         errdefer self.transport_a.engine.deinit(std.testing.allocator);
-        try self.transport_b.init(std.testing.allocator, self.transport_b.sockets, key_b, self.record_b, .{ .engine = config, .poll_interval_ms = 10 });
+        try self.transport_b.init(std.testing.allocator, self.transport_b.sockets, key_b, self.record_b, .{ .engine = config });
         errdefer self.transport_b.engine.deinit(std.testing.allocator);
 
         if (install_session) {

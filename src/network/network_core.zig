@@ -185,10 +185,12 @@ pub const NetworkCore = struct {
         self.initialized = true;
     }
 
+    /// Immediately destroys the owner, ending all borrows and discarding undelivered results.
     pub fn deinit(self: *NetworkCore, io: std.Io) void {
         if (!self.initialized) return;
         const read = Transport.currentTime(io) catch self.last_now;
         self.shutdown(if (read.mono_ms >= self.last_now.mono_ms) read else self.last_now);
+        self.host_wake = null;
         if (self.discovery) |owned| {
             owned.deinit(io);
             self.allocator.destroy(owned);
@@ -203,8 +205,10 @@ pub const NetworkCore = struct {
         std.debug.assert(self.reservations.bytes == 0);
         self.initialized = false;
     }
+    /// Stops admission and cancels active work. Continue advancing with application output capacity
+    /// to receive terminal results, and release retained serving work, until isClosed returns true.
+    /// Deinit instead discards those obligations and ends all borrows immediately.
     pub fn shutdown(self: *NetworkCore, now: Now) void {
-        self.host_wake = null;
         self.last_now = now;
         const pm = &self.peer_manager;
         if (pm.stop()) {
@@ -218,8 +222,10 @@ pub const NetworkCore = struct {
         if (self.discovery) |owned| owned.cancel();
         self.transport.engine.shutdownAll();
     }
+    /// Transport and request/Identify work have retired, including retained request handlers.
+    /// Copied host events and gossip validation tasks have independent lifetimes; deinit frees owner storage.
     pub fn isClosed(self: *const NetworkCore) bool {
-        return self.peer_manager.stopped and self.transport.engine.resourceSnapshot().active == 0;
+        return self.peer_manager.stopped and self.transport.engine.resourceSnapshot().active == 0 and self.service.isDrained();
     }
     pub fn peerId(self: *const NetworkCore) t.PeerId {
         return self.transport.peerId();
@@ -465,7 +471,8 @@ pub const NetworkCore = struct {
 
     /// Borrows a readable OS descriptor. The host drains it after a returned
     /// readiness.host indication and detaches before closing or reusing it.
-    /// Shutdown/deinit detach without draining or closing caller storage.
+    /// Shutdown keeps it attached for host completions. Explicit detach or deinit ends the borrow
+    /// without draining or closing caller storage.
     pub fn setHostWake(self: *NetworkCore, descriptor: ?i32) error{ UnsupportedWait, InvalidWakeSource, Stopped }!void {
         if (descriptor) |fd| {
             if (self.peer_manager.stopped) return error.Stopped;
@@ -480,19 +487,16 @@ pub const NetworkCore = struct {
     }
 
     /// Scheduling is a snapshot for the supplied output capacities; recompute after mutation.
-    pub fn wakeups(self: *NetworkCore, now: Now, outputs: Outputs) wake_sources.Wakeups {
+    pub fn wakeups(self: *const NetworkCore, now: Now, outputs: Outputs) wake_sources.Wakeups {
         var result: wake_sources.Wakeups = .{};
         const pm = &self.peer_manager;
-        result.note(.peer_events, .{ .deadline_ms = pm.peerWakeup(now, outputs.peers.len) });
-        if (!pm.stopped) {
-            const application = if (pm.quiescing) 0 else outputs.application.len;
-            self.service.collectWakeups(.{ .application = application, .control = controls_per_turn, .identify = identify_per_turn }, &result);
-            result.note(.control, .{ .deadline_ms = pm.controlWakeup(now) });
-        }
+        result.note(.peer_events, pm.peerSchedule(outputs.peers.len));
+        self.service.collectWakeups(.{ .application = outputs.application.len, .control = controls_per_turn, .identify = identify_per_turn }, &result);
+        if (!pm.stopped) result.note(.control, pm.controlSchedule(now));
         if (!pm.stopped and !pm.quiescing) {
-            result.note(.dial, .{ .deadline_ms = pm.dialing.nextWakeup(&pm.catalog, now.mono_ms, @min(dials_per_turn, pm.dialRoom())) });
+            result.note(.dial, pm.dialing.schedule(&pm.catalog, @min(dials_per_turn, pm.dialRoom())));
             result.note(.dial, .{ .runnable = pm.dialing.selectionNeeded(&pm.catalog), .deadline_ms = pm.dialing.selection_deadline });
-            result.note(.peer_policy, .{ .deadline_ms = pm.policyWakeup(self.service.gossipsub, now) });
+            result.note(.peer_policy, pm.policySchedule(self.service.gossipsub));
             result.note(.peer_policy, .{ .deadline_ms = pm.reconciliation_deadline });
             result.note(.peer_policy, .{ .deadline_ms = if (pm.custody_pending) now.mono_ms +| 1 else null });
         }
@@ -500,22 +504,70 @@ pub const NetworkCore = struct {
         result.note(.transport_backlog, .{ .runnable = quic.backlog() });
         result.note(.transport_events, .{ .runnable = quic.eventsPending() or quic.releasesPending() });
         result.note(.transport_timer, .{ .deadline_ms = if (quic.nextDeadlineNs()) |deadline| ceilMs(deadline) else null });
-        if (!pm.quiescing and !pm.stopped) if (self.discovery) |owned| result.note(.discovery, .{ .deadline_ms = owned.nextWakeup(now.mono_ms) });
+        if (!pm.quiescing and !pm.stopped) if (self.discovery) |owned| result.note(.discovery, owned.schedule(now.mono_ms));
         result.note(.host, .{ .runnable = self.host_runnable });
         return result;
     }
 
+    pub const WaitPlan = struct {
+        now: Now,
+        sources: wait.Sources,
+        timeout_ms: u32,
+        due: [wake_sources.source_count]bool,
+    };
+
+    /// Borrows descriptors until the next owner mutation. Waiting does not consume events.
+    pub fn waitPlan(self: *const NetworkCore, observed: Now, outputs: Outputs, host: Host) WaitPlan {
+        const now = if (observed.mono_ms >= self.last_now.mono_ms) observed else self.last_now;
+        var pending = self.wakeups(now, outputs);
+        pending.note(.host, .{ .deadline_ms = host.deadline_ms });
+        var plan: WaitPlan = .{
+            .now = now,
+            .sources = .{
+                .quic = self.transport.sockets.handles(),
+                .discovery = if (!self.peer_manager.quiescing and !self.peer_manager.stopped and self.discovery != null)
+                    self.discovery.?.transport.sockets.handles()
+                else
+                    .{ null, null },
+                .host = self.host_wake,
+            },
+            .timeout_ms = pending.schedule().waitMs(now.mono_ms, wait.native_wait_max_ms),
+            .due = undefined,
+        };
+        for (pending.sources, &plan.due) |source, *due| due.* = source.due(now.mono_ms);
+        return plan;
+    }
+
+    /// Records driver observations separately from the read-only scheduling snapshot.
+    pub fn observeWait(self: *NetworkCore, plan: *const WaitPlan) void {
+        for (plan.due, &self.due_now_turns) |due, *turns| turns.* +|= @intFromBool(due);
+    }
+
+    pub const Input = struct {
+        now: Now,
+        readiness: wait.Result = .{},
+        clock_failure: ?error{ClockOutOfRange} = null,
+    };
+
     /// Advances one bounded turn from supplied readiness and time; never waits for readiness.
     /// Receive/expire/collect precede host apply, protocols, discovery, dials and flush. The I/O
     /// provider must complete datagram operations without waiting. Consume returned event borrows
-    /// before advancing again, shutting down or deinitializing. Counts remain valid on failure.
-    pub fn advance(self: *NetworkCore, io: std.Io, tick: Now, readiness: wait.Result, outputs: Outputs, host: Host) Result {
+    /// before advancing again, shutting down or deinitializing. Time must not move backwards.
+    /// Counts remain valid on failure.
+    pub fn advance(self: *NetworkCore, io: std.Io, input: Input, outputs: Outputs, host: Host) Result {
         std.debug.assert(self.initialized);
+        std.debug.assert(input.now.mono_ms >= self.last_now.mono_ms);
+        const tick = input.now;
+        const readiness = input.readiness;
+        self.counters.readiness_failures +|= @intFromBool(readiness.failure != null);
+        self.counters.transport_failures +|= @intFromBool(input.clock_failure != null);
+        const start = @import("metrics/timing.zig").now(io);
+        defer self.step_duration.observe(@import("metrics/timing.zig").now(io) -| start);
         self.last_now = tick;
         var result: Result = .{
             .transport = self.transport.beginTurn(tick),
             .readiness = readiness,
-            .failure = readiness.failure,
+            .failure = readiness.failure orelse input.clock_failure,
         };
         if (self.discoveryOnly(&result.readiness, tick, outputs, host)) {
             result.discovery_only = true;
@@ -544,7 +596,7 @@ pub const NetworkCore = struct {
         if (!self.peer_manager.stopped and !self.peer_manager.quiescing and (result.failure == null or result.failure.? != error.Canceled)) {
             // This turn's coverage selection already ran, without a second protocol pump.
             if (self.discovery != null) self.discover(io, tick, &result);
-            self.dial(io, tick, &result);
+            if (input.clock_failure == null) self.dial(io, tick, &result);
         }
         if ((result.failure == null or result.failure.? != error.Canceled)) self.transport.flush(io, tick, &result.transport) catch |err| {
             result.failure = err;
@@ -558,7 +610,7 @@ pub const NetworkCore = struct {
         const room = self.transport.engine.limits.dialing_max -| self.transport.engine.resourceSnapshot().dialing;
         const count = self.peer_manager.dialIntents(self.service.gossipsub, &self.transport.engine, tick, intents[0..@min(room, intents.len)]);
         for (intents[0..count], 0..) |intent, index| {
-            const handle = self.transport.dialPeer(io, intent.address, intent.peer) catch |err| {
+            const handle = self.transport.dialPeer(io, intent.address, intent.peer, tick) catch |err| {
                 if (err == error.DestinationUnreachable) {
                     std.log.scoped(.network_core).debug("dial_failed peer={f} endpoint={any} reason={s}", .{ @import("logging.zig").peer(&intent.peer), intent.address, @errorName(err) });
                     std.debug.assert(self.peer_manager.dialFailed(intent.token, tick));
@@ -583,6 +635,7 @@ pub const NetworkCore = struct {
             std.log.scoped(.network_core).debug("dial_started peer={f} endpoint={any} connection={d}:{d}", .{ @import("logging.zig").peer(&intent.peer), intent.address, handle.index, handle.generation });
             result.dial_started += 1;
         }
+        self.peer_manager.dialing.refresh(&self.peer_manager.catalog, tick.mono_ms);
         self.counters.dial_started +|= result.dial_started;
         self.counters.dial_deferred +|= result.dial_deferred;
     }
@@ -595,10 +648,15 @@ pub const NetworkCore = struct {
         std.debug.assert(events.len <= @import("quic/limits.zig").events_per_turn_max);
         const pm = &self.peer_manager;
         const quic = &self.transport.engine;
-        if (pm.stopped) return .{
-            .peers = pm.catalog.pollEvents(outputs.peers),
-            .application = 0,
-        };
+        if (pm.stopped) {
+            const counts = self.service.process(quic, &.{}, now, .{
+                .application = outputs.application,
+                .control = &self.controls,
+                .identify = &self.identify_results,
+            });
+            self.controlEvents(self.controls[0..counts.control], now);
+            return .{ .peers = pm.catalog.pollEvents(outputs.peers), .application = counts.application };
+        }
         if (!pm.quiescing) pm.expireDials(quic, now);
         for (events) |*event| self.transportEvent(event, now);
         const controls = &self.controls;
@@ -748,7 +806,7 @@ pub const NetworkCore = struct {
         const candidates = &owned.candidates;
         var eligible: [2]bool = if (result.readiness.failure == null) result.readiness.discovery else @splat(true);
         for (0..discovery_batch_max) |_| {
-            const progress = owned.stepReady(io, tick.mono_ms, &eligible, candidates) catch |err| peers.Discovery.Result{ .failure = err };
+            const progress = owned.advance(io, tick.mono_ms, &eligible, candidates) catch |err| peers.Discovery.Result{ .failure = err };
             const endpoints = owned.learnedEndpoints(progress.learned);
             if (!std.meta.eql(endpoints, owned.endpoints)) {
                 _ = self.updateLocalWithEndpoints(&self.peer_manager.local, self.schedule, endpoints, tick) catch |err| {

@@ -214,7 +214,7 @@ const Network = struct {
         errdefer self.remote.close(std.testing.io);
         const key = try keyPair(0x11);
         const record = try enr.Record.create(&key, 1, discv5.types.Address.fromNetwork(self.transport.sockets.primary().address));
-        try self.transport.init(std.testing.allocator, self.transport.sockets, key, record, .{ .poll_interval_ms = 1, .engine = .{
+        try self.transport.init(std.testing.allocator, self.transport.sockets, key, record, .{ .engine = .{
             .session_capacity = 8,
             .challenge_capacity = 4,
             .call_capacity = call_capacity,
@@ -315,7 +315,7 @@ test "transport completes a caller-owned lookup across multiple peers" {
     try std.testing.expectEqual(@as(u16, 1), first.progress.started);
     try std.testing.expectEqual(@as(usize, 0), first.transport.calls_expired);
 
-    const from_b = try network.transport_b.step(std.testing.io, &expired);
+    const from_b = try @import("discv5").driver.step(&network.transport_b, std.testing.io, &expired, .{ .wait_max_ms = 25 });
     try std.testing.expectEqual(@as(u8, 1), from_b.progress.standard_responses);
     const second = try lookup_batch.step(
         &network.transport_a,
@@ -328,7 +328,7 @@ test "transport completes a caller-owned lookup across multiple peers" {
     try std.testing.expectEqual(@as(u16, 1), second.progress.started);
     try std.testing.expectEqual(@as(?u16, 0), second.consumed);
 
-    const from_c = try network.transport_c.step(std.testing.io, &expired);
+    const from_c = try @import("discv5").driver.step(&network.transport_c, std.testing.io, &expired, .{ .wait_max_ms = 25 });
     try std.testing.expectEqual(@as(u8, 1), from_c.progress.standard_responses);
     const completed = try lookup_batch.step(
         &network.transport_a,
@@ -427,15 +427,10 @@ test "lookup step preserves an unrelated response event" {
         .request_id = try message.RequestId.init(&.{0x25}),
         .enr_sequence = network.record_a.sequence,
     } };
-    const caller_handle = try network.transport_a.startCall(
-        std.testing.io,
-        endpoint(&network.record_c),
-        &network.record_c,
-        &request,
-    );
+    const caller_handle = try network.transport_a.startCall(std.testing.io, endpoint(&network.record_c), &network.record_c, &request, try @import("discv5").Transport.monotonicMilliseconds(std.testing.io));
     var cursor: lookup_batch.Cursor = .{};
     var expired: [4]CallTable.Expired = undefined;
-    const answered = try network.transport_c.step(std.testing.io, &expired);
+    const answered = try @import("discv5").driver.step(&network.transport_c, std.testing.io, &expired, .{ .wait_max_ms = 25 });
     try std.testing.expectEqual(@as(u8, 1), answered.progress.standard_responses);
 
     var seed_buffer: [Lookup.result_max]RoutingTable.Entry = undefined;
@@ -529,8 +524,8 @@ test "two caller-owned lookups share one transport" {
                 else => return error.TestUnexpectedResult,
             }
         }
-        _ = try network.transport_b.step(std.testing.io, &expired);
-        _ = try network.transport_c.step(std.testing.io, &expired);
+        _ = try @import("discv5").driver.step(&network.transport_b, std.testing.io, &expired, .{ .wait_max_ms = 25 });
+        _ = try @import("discv5").driver.step(&network.transport_c, std.testing.io, &expired, .{ .wait_max_ms = 25 });
     }
     try std.testing.expect(operation_b.isFinished());
     try std.testing.expect(operation_c.isFinished());
@@ -572,11 +567,11 @@ const LookupNetwork = struct {
             .challenge_timeout_ms = 1_000,
             .session_idle_timeout_ms = std.math.maxInt(u64),
         };
-        try self.transport_a.init(std.testing.allocator, self.transport_a.sockets, key_a, self.record_a, .{ .engine = config, .poll_interval_ms = 10 });
+        try self.transport_a.init(std.testing.allocator, self.transport_a.sockets, key_a, self.record_a, .{ .engine = config });
         errdefer self.transport_a.engine.deinit(std.testing.allocator);
-        try self.transport_b.init(std.testing.allocator, self.transport_b.sockets, key_b, self.record_b, .{ .engine = config, .poll_interval_ms = 10 });
+        try self.transport_b.init(std.testing.allocator, self.transport_b.sockets, key_b, self.record_b, .{ .engine = config });
         errdefer self.transport_b.engine.deinit(std.testing.allocator);
-        try self.transport_c.init(std.testing.allocator, self.transport_c.sockets, key_c, self.record_c, .{ .engine = config, .poll_interval_ms = 10 });
+        try self.transport_c.init(std.testing.allocator, self.transport_c.sockets, key_c, self.record_c, .{ .engine = config });
         errdefer self.transport_c.engine.deinit(std.testing.allocator);
 
         installSession(&self.transport_a.engine, endpoint(&self.record_b), 0x51);

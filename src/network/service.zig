@@ -11,6 +11,7 @@ const wake_sources = @import("wake_sources.zig");
 pub const Service = struct {
     identify: identify_mod.Handler,
     applications: enum { active, quiescing, closed } = .active,
+    stopped: bool = false,
     router: Router,
     reqresp: reqresp_mod.ReqResp,
     gossipsub: *gossip_mod.Gossipsub,
@@ -57,14 +58,22 @@ pub const Service = struct {
         };
     }
 
+    /// Stops admission permanently and cancels streams. Process drains promised results afterwards.
     pub fn shutdown(self: *Service, engine: *Engine, now: types.Now) void {
+        if (self.stopped) return;
+        self.stopped = true;
         self.identify.shutdown(&self.router, engine);
-        self.reqresp.shutdown(engine, &self.router, now);
-        self.gossipsub.shutdown(&self.router, engine);
-        self.router.negotiator.shutdown(engine);
+        self.reqresp.cancelAll(engine, &self.router, now);
+        self.gossipsub.closeSessions(&self.router, engine);
+        self.router.negotiator.cancelAll(engine);
         self.applications = .closed;
     }
 
+    pub fn isDrained(self: *const Service) bool {
+        return self.reqresp.isDrained() and self.identify.isDrained();
+    }
+
+    /// Ends all borrows and discards results that the caller has not drained.
     pub fn deinit(self: *Service) void {
         self.identify.deinit();
         const allocator = self.gossipsub.allocator;
@@ -85,7 +94,7 @@ pub const Service = struct {
         options: reqresp_mod.ReqResp.RequestOptions,
         now: types.Now,
     ) reqresp_mod.ReqResp.RequestError!reqresp_mod.ReqResp.RequestHandle {
-        if (self.applications != .active and !protocol.isControl()) return error.ProtocolDisabled;
+        if (self.stopped or (self.applications != .active and !protocol.isControl())) return error.ProtocolDisabled;
         return self.reqresp.request(
             engine,
             &self.router,
@@ -117,7 +126,7 @@ pub const Service = struct {
 
     /// Delivers one turn of engine events, then pumps each owner's ready work and due deadlines.
     pub fn process(self: *Service, engine: *Engine, events: []const Engine.Event, now: types.Now, outputs: Outputs) OutputCounts {
-        self.dispatch(engine, events, now);
+        if (!self.stopped) self.dispatch(engine, events, now);
         const counts = self.reqresp.pump(engine, &self.router, now, .{ .application = outputs.application, .control = outputs.control });
         if (self.applications == .active) self.gossipsub.pump(&self.router, engine, now);
         return .{ .application = counts.application, .control = counts.control, .identify = self.identify.pump(&self.router, engine, now, outputs.identify) };
@@ -151,9 +160,28 @@ pub const Service = struct {
     ) void {
         if (self.applications == .quiescing) {
             self.reqresp.cancelApplications(engine, &self.router, now);
-            self.gossipsub.shutdown(&self.router, engine);
+            self.gossipsub.closeSessions(&self.router, engine);
             self.applications = .closed;
         }
+        self.routeReadiness(engine, events);
+        // Cancellation must detach stream I/O before the router can advance or reuse its buffers.
+        self.reqresp.cleanupPending(engine, &self.router);
+        self.router.transportEvents(engine, events, now);
+        for (events) |event| switch (event) {
+            .closed => |closed| self.reqresp.connectionClosed(closed.conn, now),
+            .stream_closed => |closed| self.reqresp.streamClosed(closed.route, closed.stream, closed.reset_code, now),
+            else => {},
+        };
+        self.identify.transportEvents(engine, events);
+        for (events) |event| {
+            if (self.applications != .active or event == .connected) continue;
+            self.gossipsub.transportEvents(&self.router, engine, &.{event}, now);
+        }
+        self.reqresp.cleanupPending(engine, &self.router);
+        self.negotiate(engine, now);
+    }
+
+    fn routeReadiness(self: *Service, engine: *Engine, events: []const Engine.Event) void {
         for (events) |event| {
             const ready = switch (event) {
                 .stream_ready => |ready| ready,
@@ -168,19 +196,9 @@ pub const Service = struct {
                 .none => {},
             }
         }
-        self.reqresp.cleanupPending(engine, &self.router);
-        self.router.transportEvents(engine, events, now);
-        for (events) |event| switch (event) {
-            .closed => |closed| self.reqresp.connectionClosed(closed.conn, now),
-            .stream_closed => |closed| self.reqresp.streamClosed(closed.route, closed.stream, closed.reset_code, now),
-            else => {},
-        };
-        self.identify.transportEvents(engine, events);
-        for (events) |event| {
-            if (self.applications != .active or event == .connected) continue;
-            self.gossipsub.transportEvents(&self.router, engine, &.{event}, now);
-        }
-        self.reqresp.cleanupPending(engine, &self.router);
+    }
+
+    fn negotiate(self: *Service, engine: *Engine, now: types.Now) void {
         const count = self.router.pump(engine, now, &self.outcomes);
         defer self.router.releaseOutcomes();
         for (self.outcomes[0..count]) |outcome| {

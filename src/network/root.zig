@@ -10,6 +10,7 @@ pub const peer_manager = @import("peer_manager.zig");
 pub const PeerManager = peer_manager.PeerManager;
 pub const wake_sources = @import("wake_sources.zig");
 pub const NetworkCore = @import("network_core.zig").NetworkCore;
+pub const transport_driver = @import("transport_driver.zig");
 pub const driver = @import("driver.zig");
 pub const Schedule = types.Schedule;
 pub const peers = @import("peers/root.zig");
@@ -64,6 +65,7 @@ test {
     _ = Service;
     _ = @import("network_core.zig");
     _ = driver;
+    _ = transport_driver;
     _ = @import("reservations.zig");
     _ = @import("deadline_heap.zig");
     _ = index_list;

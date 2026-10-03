@@ -380,6 +380,8 @@ pub const Runtime = struct {
             self.unlock();
         }
         self.lock();
+        // Destroy native borrows before the bridge completes its host-owned operations.
+        // Core terminal events are intentionally discarded by this immediate teardown path.
         self.destroyOwner();
         requests_mod.closeLocked(self);
         incoming_mod.closeLocked(self);

@@ -58,11 +58,11 @@ test "peer dial discovered refresh replaces addresses preserves lease history an
     try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 0, &out));
     const token = out[0].token;
     try std.testing.expect(q.dialFailed(&catalog, token, 1));
-    const due = q.nextWakeup(&catalog, 1, 1).?;
+    const due = support.refreshAndWakeup(&q, &catalog, 1, 1).?;
     candidate.sequence = 2;
     candidate.addresses[0] = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 2 }, .port = 2222 } };
     try q.enqueueDiscovered(&catalog, &candidate, &.{}, &.{}, 2);
-    try std.testing.expectEqual(due, q.nextWakeup(&catalog, 2, 1).?);
+    try std.testing.expectEqual(due, support.refreshAndWakeup(&q, &catalog, 2, 1).?);
     try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, due, &out));
     try std.testing.expectEqual(@as(u16, 2222), out[0].address.port());
     const live = out[0].token;
@@ -128,7 +128,7 @@ test "peer dial scarce untried candidate resists general flood and fork change" 
         q.enqueueDiscovered(&catalog, &general, &.{}, &wanted, 0) catch |err| try std.testing.expectEqual(error.Capacity, err);
     }
     q.configureSelection(&catalog, &wanted, false, &.{ .digest = @splat(1) }, 0);
-    try std.testing.expectEqual(@as(?u64, null), q.nextWakeup(&catalog, 0, 1));
+    try std.testing.expectEqual(@as(?u64, null), support.refreshAndWakeup(&q, &catalog, 0, 1));
     q.configureSelection(&catalog, &wanted, false, &.{}, 0);
     var out: [1]mod.Dialing.DialIntent = undefined;
     try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 0, &out));
@@ -144,10 +144,10 @@ test "peer dial confirmed equal ENR refresh renews provisional hint freshness wi
     const wanted: t.Coverage = .{ .syncnets = 1 };
     try q.enqueueDiscovered(&catalog, &candidate, &.{}, &wanted, 0);
     q.configureSelection(&catalog, &wanted, false, &.{}, 300_000);
-    try std.testing.expectEqual(@as(?u64, null), q.nextWakeup(&catalog, 300_000, 1));
+    try std.testing.expectEqual(@as(?u64, null), support.refreshAndWakeup(&q, &catalog, 300_000, 1));
     try q.enqueueDiscovered(&catalog, &candidate, &.{}, &wanted, 300_000);
     q.configureSelection(&catalog, &wanted, false, &.{}, 300_000);
-    try std.testing.expectEqual(@as(?u64, 300_000), q.nextWakeup(&catalog, 300_000, 1));
+    try std.testing.expectEqual(@as(?u64, 300_000), support.refreshAndWakeup(&q, &catalog, 300_000, 1));
     try std.testing.expectEqual(@as(u64, 600_000), candidates[0].intent.history_until_ms);
     var conflicting = candidate;
     conflicting.syncnets = 2;
@@ -243,7 +243,7 @@ test "peer failed discovery candidate yields its slot after retry backoff" {
     var out: [1]mod.Dialing.DialIntent = undefined;
     try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, 0, &out));
     try std.testing.expect(q.dialFailed(&catalog, out[0].token, 1));
-    const retry_at = q.nextWakeup(&catalog, 1, 1).?;
+    const retry_at = support.refreshAndWakeup(&q, &catalog, 1, 1).?;
     try q.enqueueDiscovered(&catalog, &replacement, &.{}, &.{ .syncnets = 15 }, retry_at);
     try std.testing.expectEqual(@as(usize, 1), q.poll(&catalog, retry_at, &out));
     try std.testing.expectEqualDeep(replacement.peer, out[0].peer);

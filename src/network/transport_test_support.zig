@@ -19,8 +19,8 @@ pub const Node = struct {
     }
 };
 
-pub fn step(transport: *Transport, io: std.Io, events: []Event, options: Transport.StepOptions) Transport.StepError!Transport.StepResult {
-    const result = transport.step(io, events, options);
+pub fn step(transport: *Transport, io: std.Io, events: []Event, options: @import("transport_driver.zig").Options) @import("transport_driver.zig").Error!Transport.StepResult {
+    const result = @import("transport_driver.zig").step(transport, io, events, options);
     if (result.failure) |err| return err;
     return result.progress;
 }

@@ -244,7 +244,7 @@ test "core native control retries a failed probe on the turn its retry deadline 
     try std.testing.expectEqual(@as(u8, 1), row.health_failures[status]);
     const retry = row.retry_ms;
     try std.testing.expectEqual(setup.pair.now.mono_ms + setup.client.peer_manager.control.options.failure_retry_ms, retry);
-    try std.testing.expectEqual(retry, setup.client.peer_manager.control.nextWakeup(&setup.client.peer_manager.catalog, setup.pair.now).?);
+    try std.testing.expectEqual(retry, setup.client.peer_manager.control.schedule(&setup.client.peer_manager.catalog, setup.pair.now).nextWakeup(setup.pair.now.mono_ms).?);
     const counter = &setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing;
     const started = counter.*;
     const visits = setup.client.peer_manager.control.visits;
@@ -519,7 +519,7 @@ test "core native local control capacity defers with future wakeup and no peer p
     _ = setup.client.peer_manager.snapshots(&snapshots);
     try std.testing.expectEqual(@as(f64, 0), snapshots[0].score);
     try std.testing.expect(snapshots[0].relevant);
-    const control_due = setup.client.peer_manager.control.nextWakeup(&setup.client.peer_manager.catalog, setup.pair.now).?;
+    const control_due = setup.client.peer_manager.control.schedule(&setup.client.peer_manager.catalog, setup.pair.now).nextWakeup(setup.pair.now.mono_ms).?;
     try std.testing.expect(control_due > setup.pair.now.mono_ms);
     setup.client.shutdown(setup.pair.now);
 }
@@ -730,7 +730,7 @@ test "core native leased dial retires uncompleted handshake and rejects late ack
     try std.testing.expect(setup.pair.client.registry.slots[conn.index].conn == null);
     try std.testing.expect(!setup.client.peer_manager.dialStarted(intent.token, conn));
     try std.testing.expect(!setup.client.peer_manager.dialFailed(intent.token, setup.pair.now));
-    try std.testing.expect(setup.client.peer_manager.dialing.nextWakeup(&setup.client.peer_manager.catalog, setup.pair.now.mono_ms, 1).? >
+    try std.testing.expect(setup.client.peer_manager.dialing.schedule(&setup.client.peer_manager.catalog, 1).nextWakeup(setup.pair.now.mono_ms).? >
         setup.pair.now.mono_ms);
 }
 
@@ -844,7 +844,7 @@ test "core competing one-shot attempt expires during selected peer ban cooldown"
     try std.testing.expect(!setup.client.peer_manager.dialStarted(token, attempt));
     try std.testing.expect(!setup.client.peer_manager.dialFailed(token, setup.pair.now));
     try std.testing.expectEqual(@as(u16, 0), setup.pair.client.registry.outbound);
-    try std.testing.expectEqual(@as(?u64, null), setup.client.peer_manager.dialing.nextWakeup(&setup.client.peer_manager.catalog, setup.pair.now.mono_ms, 1));
+    try std.testing.expectEqual(@as(?u64, null), setup.client.peer_manager.dialing.schedule(&setup.client.peer_manager.catalog, 1).nextWakeup(setup.pair.now.mono_ms));
     try std.testing.expectEqual(@as(usize, 0), setup.client.peer_manager.catalog.intent_count);
 }
 
@@ -1636,7 +1636,7 @@ test "core native public close cancels overlapping attempts and preserves bounde
     for (0..8) |_| try setup.step(0);
     try std.testing.expect(row.connection == null and row.attempt == null);
     try std.testing.expect(!setup.client.peer_manager.dialing.dialClosed(&setup.client.peer_manager.catalog, attempt, .handshake_timeout, setup.pair.now.mono_ms));
-    const due = setup.client.peer_manager.dialing.nextWakeup(&setup.client.peer_manager.catalog, setup.pair.now.mono_ms, 1) orelse return error.MissingRetryDeadline;
+    const due = setup.client.peer_manager.dialing.schedule(&setup.client.peer_manager.catalog, 1).nextWakeup(setup.pair.now.mono_ms) orelse return error.MissingRetryDeadline;
     try std.testing.expect(due >= setup.pair.now.mono_ms + 60_000);
     setup.pair.advance(due - setup.pair.now.mono_ms);
     try std.testing.expectEqual(@as(usize, 1), setup.client.peer_manager.dialIntents(setup.client.service.gossipsub, setup.pair.client, setup.pair.now, &intents));

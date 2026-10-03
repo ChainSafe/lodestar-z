@@ -56,8 +56,6 @@ const inline_test_allowlist = [_][]const u8{
     "src/network/gossipsub/sha256.zig",
     // Private score counters: PeerScore.load, PeerScore.store.
     "src/network/gossipsub/score.zig",
-    // Private conversion of the bounded poll timeout: receiveTimeout.
-    "src/network/transport.zig",
     // Private helper: compatibleUnionOptionsAreCompatible.
     "src/ssz/type/compatible_union.zig",
     // Private diff internals: findModifiedValidators, loadValidators.

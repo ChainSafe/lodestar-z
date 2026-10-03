@@ -393,13 +393,13 @@ test "core native stalled fork transition only wakes for eligible work" {
     try std.testing.expect(active > 0);
     const service_due = setup.client.service.schedule(.{ .application = 0, .control = 32 }).nextWakeup(setup.pair.now.mono_ms).?;
     try std.testing.expect(service_due > setup.pair.now.mono_ms);
-    try std.testing.expect(setup.client.peer_manager.control.nextWakeup(&setup.client.peer_manager.catalog, setup.pair.now) == null);
+    try std.testing.expect(setup.client.peer_manager.control.schedule(&setup.client.peer_manager.catalog, setup.pair.now).nextWakeup(setup.pair.now.mono_ms) == null);
     const core_due = setup.client.wakeups(setup.pair.now, .{}).schedule().nextWakeup(setup.pair.now.mono_ms).?;
     try std.testing.expect(core_due > setup.pair.now.mono_ms and core_due <= service_due);
     try @import("network_core_test_support.zig").updateLocal(&setup.server, &updated, setup.pair.now);
     for (0..80) |_| try setup.step(0);
     try std.testing.expect(setup.client.peer_manager.catalog.get(peer).?.relevant);
-    try std.testing.expect(setup.client.peer_manager.control.nextWakeup(&setup.client.peer_manager.catalog, setup.pair.now).? > setup.pair.now.mono_ms);
+    try std.testing.expect(setup.client.peer_manager.control.schedule(&setup.client.peer_manager.catalog, setup.pair.now).nextWakeup(setup.pair.now.mono_ms).? > setup.pair.now.mono_ms);
 }
 
 test "core native host fork transition cancels old maintenance without reviving closing peers" {
@@ -909,7 +909,7 @@ test "core control irrelevant metadata cannot create an ineligible wakeup" {
     const started = setup.client.peer_manager.control.counters.started;
     _ = try setup.turn(&setup.client, .{});
     try std.testing.expectEqual(started, setup.client.peer_manager.control.counters.started);
-    try std.testing.expectEqual(setup.pair.now.mono_ms + 100, setup.client.peer_manager.control.nextWakeup(&setup.client.peer_manager.catalog, setup.pair.now).?);
+    try std.testing.expectEqual(setup.pair.now.mono_ms + 100, setup.client.peer_manager.control.schedule(&setup.client.peer_manager.catalog, setup.pair.now).nextWakeup(setup.pair.now.mono_ms).?);
     setup.pair.advance(100);
     _ = try setup.turn(&setup.client, .{});
     try std.testing.expectEqual(started + 1, setup.client.peer_manager.control.counters.started);
@@ -927,12 +927,12 @@ test "core control does not schedule gossip admission alongside active request" 
     setup.client.peer_manager.reStatusPeers(setup.pair.now);
     _ = try setup.turn(&setup.client, .{});
     const started = setup.client.peer_manager.control.counters.started;
-    try std.testing.expect(setup.client.peer_manager.control.nextWakeup(&setup.client.peer_manager.catalog, setup.pair.now) == null);
+    try std.testing.expect(setup.client.peer_manager.control.schedule(&setup.client.peer_manager.catalog, setup.pair.now).nextWakeup(setup.pair.now.mono_ms) == null);
     _ = try setup.turn(&setup.client, .{});
     try std.testing.expectEqual(started, setup.client.peer_manager.control.counters.started);
     try std.testing.expect(setup.client.peer_manager.disconnect(peer, .host, setup.pair.now));
     const deadline = row.closing.?.deadline_ms;
-    try std.testing.expectEqual(deadline, setup.client.peer_manager.control.nextWakeup(&setup.client.peer_manager.catalog, setup.pair.now).?);
+    try std.testing.expectEqual(deadline, setup.client.peer_manager.control.schedule(&setup.client.peer_manager.catalog, setup.pair.now).nextWakeup(setup.pair.now.mono_ms).?);
     setup.pair.advance(2000);
     _ = try setup.turn(&setup.client, .{});
     try std.testing.expect(setup.client.peer_manager.catalog.get(peer).?.connection == null);
@@ -967,7 +967,7 @@ test "core control cancelled canonical requests retain buffers until local retir
     try std.testing.expectEqual(request, op.request.?);
     try std.testing.expectEqualSlices(u8, bytes[0..84], op.bytes[0..84]);
     // The held operation keeps the schedule off the heap, so nothing can start or defer.
-    try std.testing.expectEqual(@as(?u64, null), setup.client.peer_manager.control.nextWakeup(&setup.client.peer_manager.catalog, setup.pair.now));
+    try std.testing.expectEqual(@as(?u64, null), setup.client.peer_manager.control.schedule(&setup.client.peer_manager.catalog, setup.pair.now).nextWakeup(setup.pair.now.mono_ms));
     const started = setup.client.peer_manager.control.counters.started;
     const deferred = setup.client.peer_manager.control.counters.deferred;
     const grace = setup.client.peer_manager.control.schedules[peer.index].transition_until_ms;
@@ -1703,7 +1703,7 @@ test "core control starts a due ping or Status on the turn its deadline passes" 
         const row = &setup.client.peer_manager.control.schedules[peer.index];
         const due = if (protocol == .ping_v1) row.ping_due_ms else row.status_due_ms;
         try std.testing.expect(due > setup.pair.now.mono_ms);
-        try std.testing.expectEqual(due, setup.client.peer_manager.control.nextWakeup(&setup.client.peer_manager.catalog, setup.pair.now).?);
+        try std.testing.expectEqual(due, setup.client.peer_manager.control.schedule(&setup.client.peer_manager.catalog, setup.pair.now).nextWakeup(setup.pair.now.mono_ms).?);
         const counter = &setup.client.service.reqresp.protocol_counters[@intFromEnum(protocol)].outgoing;
         const started = counter.*;
         const visits = setup.client.peer_manager.control.visits;
@@ -1731,7 +1731,7 @@ test "core control retries a start refused for want of a request slot after the 
     for (0..80) |_| try setup.step(0);
     const peer = setup.client.peer_manager.catalog.find(&setup.server.peerId()).?;
     const row = &setup.client.peer_manager.control.schedules[peer.index];
-    try std.testing.expectEqual(row.ping_due_ms, setup.client.peer_manager.control.nextWakeup(&setup.client.peer_manager.catalog, setup.pair.now).?);
+    try std.testing.expectEqual(row.ping_due_ms, setup.client.peer_manager.control.schedule(&setup.client.peer_manager.catalog, setup.pair.now).nextWakeup(setup.pair.now.mono_ms).?);
     // Requests the control does not own hold both control slots.
     var sinks: [2][wire.status_size_max]u8 = undefined;
     const ping = [_]u8{0} ** 8;
@@ -1742,7 +1742,7 @@ test "core control retries a start refused for want of a request slot after the 
     _ = try setup.turn(&setup.client, .{});
     try std.testing.expectEqual(deferred + 1, setup.client.peer_manager.control.counters.deferred);
     try std.testing.expectEqual(setup.pair.now.mono_ms + opts.core.control.local_retry_ms, row.retry_ms);
-    try std.testing.expectEqual(row.retry_ms, setup.client.peer_manager.control.nextWakeup(&setup.client.peer_manager.catalog, setup.pair.now).?);
+    try std.testing.expectEqual(row.retry_ms, setup.client.peer_manager.control.schedule(&setup.client.peer_manager.catalog, setup.pair.now).nextWakeup(setup.pair.now.mono_ms).?);
 }
 
 test "local intent failing at ENR sequence exhaustion preserves control schedules request fork subscriptions and demand" {

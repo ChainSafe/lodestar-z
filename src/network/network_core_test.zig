@@ -115,7 +115,7 @@ test "core maintenance isolates slow peers and full application capacity" {
     const size = rr.Protocol.blocks_by_root_v2.info().response_max;
     const sinks = try std.testing.allocator.alloc(u8, 2 * size);
     defer {
-        hub.service.reqresp.shutdown(&hub.transport.engine, &hub.service.router, hub.last_now);
+        hub.service.reqresp.cancelAll(&hub.transport.engine, &hub.service.router, hub.last_now);
         std.testing.allocator.free(sinks);
     }
     const calls = backing_hub.allocations;
@@ -266,12 +266,13 @@ test "core signed bootstrap reaches relevant peer with zero and one outputs" {
     b.shutdown(b.last_now);
     // Closing needs only a datagram exchange, so the bound stays far below the QUIC timers (the
     // 5 s handshake limit, the 10 s idle timeout) that would retire a connection whose close was lost.
+    var terminal_output: [32]@import("reqresp/root.zig").ReqResp.Event = undefined;
     var tick = now;
     for (0..100_000) |_| {
         if (a.isClosed() and b.isClosed()) break;
         if (tick.mono_ms -| now.mono_ms >= 1_000) break;
-        _ = driver.step(&a, std.testing.io, tick, .{}, .deadlineOnly(tick.mono_ms +| 1));
-        _ = driver.step(&b, std.testing.io, tick, .{}, .deadlineOnly(tick.mono_ms +| 1));
+        _ = driver.step(&a, std.testing.io, tick, .{ .application = &terminal_output }, .deadlineOnly(tick.mono_ms +| 1));
+        _ = driver.step(&b, std.testing.io, tick, .{ .application = &terminal_output }, .deadlineOnly(tick.mono_ms +| 1));
         tick = try @import("transport.zig").Transport.currentTime(std.testing.io);
     }
     try std.testing.expect(a.isClosed());
@@ -542,16 +543,18 @@ test "core socket faults preserve the other owner and local dial refusal is defe
     const idle = driver.step(&node, std.testing.io, now, .{}, .deadlineOnly(now.mono_ms));
     try std.testing.expect(idle.failure == null);
     const settled = node.last_now;
-    const discovery_due = node.discovery.?.nextWakeup(settled.mono_ms).?;
+    const discovery_due = node.discovery.?.schedule(settled.mono_ms).nextWakeup(settled.mono_ms).?;
     try std.testing.expect(discovery_due > settled.mono_ms);
     try std.testing.expectEqual(discovery_due, node.wakeups(settled, .{}).schedule().nextWakeup(settled.mono_ms).?);
     const peer = t.PeerId.fromPublicKey(&remote_key.publicKey());
     try node.connectUntil(&peer, &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 19003 } }}, settled, settled.mono_ms +| @import("peers/dialing.zig").Dialing.connect_timeout_ms);
     try std.testing.expectEqual(settled.mono_ms, node.wakeups(settled, .{}).schedule().nextWakeup(settled.mono_ms).?);
-    faults.clock = .{};
+    faults.send = .{};
+    faults.send_calls = 0;
+    faults.send_failure = error.Unexpected;
     const refused = driver.step(&node, io, settled, .{}, .deadlineOnly(settled.mono_ms));
     try std.testing.expectEqual(@as(u8, 1), refused.dial_deferred);
-    try std.testing.expectEqual(error.ClockOutOfRange, refused.failure.?);
+    try std.testing.expectEqual(error.Unexpected, refused.failure.?);
     try std.testing.expectEqual(@as(u8, 0), refused.dial_started);
     for (node.peer_manager.catalog.rows) |row| if (row.occupied) {
         try std.testing.expectEqual(@as(u8, 0), row.intent.failures);
@@ -563,15 +566,13 @@ test "core socket faults preserve the other owner and local dial refusal is defe
     try std.testing.expectEqual(calls, backing_node.allocations);
 }
 
-test "core discovery drain is nonblocking under the standalone default interval" {
+test "core discovery advancement does not wait for datagrams" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{26}));
     var opts = options(&key);
     opts.startup.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
     var node: NetworkCore = undefined;
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
-    const standalone: d.Transport.Options = .{};
-    try std.testing.expectEqual(standalone.poll_interval_ms, node.discovery.?.transport.poll_interval_ms);
     var faults: FaultIo = .{};
     const sender = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
     defer sender.close(std.testing.io);
@@ -720,7 +721,7 @@ fn delayedRuntimeDatagram(sender: std.Io.net.Socket, address: std.Io.net.IpAddre
     sender.send(std.testing.io, &address, "invalid") catch unreachable;
 }
 
-test "core native host wake validates rollback detaches and preserves bytes" {
+test "core native host wake validates rollback stays attached through shutdown and preserves bytes" {
     if (!NetworkCore.wait.supported) return error.SkipZigTest;
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{32}));
     var opts = options(&key);
@@ -731,6 +732,7 @@ test "core native host wake validates rollback detaches and preserves bytes" {
     const host = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
     defer host.close(std.testing.io);
     try node.setHostWake(host.handle);
+    defer node.setHostWake(null) catch unreachable;
     try std.testing.expectError(error.InvalidWakeSource, node.setHostWake(-1));
     try std.testing.expectError(error.InvalidWakeSource, node.setHostWake(node.transport.sockets.primary().handle));
     try std.testing.expectError(error.InvalidWakeSource, node.setHostWake(node.discovery.?.transport.sockets.primary().handle));
@@ -747,8 +749,9 @@ test "core native host wake validates rollback detaches and preserves bytes" {
     try node.setHostWake(host.handle);
     node.shutdown(node.last_now);
     const stopped = driver.step(&node, std.testing.io, node.last_now, .{}, .deadlineOnly(node.last_now.mono_ms +| 100));
-    try std.testing.expect(!stopped.readiness.host);
+    try std.testing.expect(stopped.readiness.host);
     try std.testing.expectError(error.Stopped, node.setHostWake(host.handle));
+    try node.setHostWake(null);
     var buffer: [8]u8 = undefined;
     const message = try host.receiveTimeout(std.testing.io, &buffer, .{ .duration = .{ .clock = .awake, .raw = .fromMilliseconds(0) } });
     try std.testing.expectEqualStrings("invalid", message.data);
@@ -768,6 +771,7 @@ test "core native wait source failure retains completed protocol progress" {
     try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&pipe));
     defer _ = std.c.close(pipe[0]);
     try node.setHostWake(pipe[0]);
+    defer node.setHostWake(null) catch unreachable;
     try std.testing.expectEqual(@as(c_int, 0), std.c.close(pipe[1]));
     try node.transport.sockets.primary().send(std.testing.io, &node.transport.sockets.primary().address, "invalid");
     try node.transport.sockets.primary().send(std.testing.io, &node.discovery.?.transport.sockets.primary().address, "invalid");
@@ -836,7 +840,7 @@ test "core flushes a protocol reply in the turn that wrote it" {
     var spoke: @import("transport.zig").Transport = .{};
     try spoke.init(std.testing.allocator, std.testing.io, .{ .host = &spoke_key, .bind = .{ .ip4 = .loopback(0) } });
     defer spoke.deinit(std.testing.io);
-    const conn = try spoke.dialPeer(std.testing.io, node.transport.localAddress(), node.peerId());
+    const conn = try spoke.dialPeer(std.testing.io, node.transport.localAddress(), node.peerId(), try @import("transport.zig").Transport.currentTime(std.testing.io));
     var events: [32]@import("quic/Engine.zig").Event = undefined;
     var connected = false;
     for (0..400) |_| {
@@ -913,7 +917,7 @@ test "core idle turns with pending negotiations are never due for reqresp or neg
     var spoke: @import("transport.zig").Transport = .{};
     try spoke.init(std.testing.allocator, std.testing.io, .{ .host = &spoke_key, .bind = .{ .ip4 = .loopback(0) } });
     defer spoke.deinit(std.testing.io);
-    _ = try spoke.dialPeer(std.testing.io, node.transport.localAddress(), node.peerId());
+    _ = try spoke.dialPeer(std.testing.io, node.transport.localAddress(), node.peerId(), try @import("transport.zig").Transport.currentTime(std.testing.io));
     var events: [32]@import("quic/Engine.zig").Event = undefined;
     for (0..40) |_| {
         _ = try transport_test.step(&spoke, std.testing.io, &events, .{ .wait_max_ms = 1 });

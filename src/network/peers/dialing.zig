@@ -8,6 +8,7 @@ const dial_history = @import("dial_history.zig");
 const remembered = @import("remembered.zig");
 const Engine = @import("../quic/Engine.zig");
 const Now = @import("../types.zig").Now;
+const Schedule = @import("../types.zig").Schedule;
 const DeadlineHeap = @import("../deadline_heap.zig").DeadlineHeap;
 const assert = std.debug.assert;
 
@@ -312,14 +313,13 @@ pub const Dialing = struct {
     }
     pub const DemandCounts = struct { pending: u16, host: u16 };
     /// Pending peers and host demand, rescanned only when the catalog or the attempt table changed.
-    pub fn demandCounts(self: *Dialing, catalog: *const Catalog) DemandCounts {
+    pub fn demandCounts(self: *const Dialing, catalog: *const Catalog) DemandCounts {
         const saturated = std.math.maxInt(u64);
         const cacheable = catalog.revision != saturated and catalog.intent_revision != saturated and self.version != saturated;
         if (self.demand) |cached| if (cacheable and cached.revision == catalog.revision and
             cached.intent_revision == catalog.intent_revision and cached.version == self.version)
             return .{ .pending = cached.pending, .host = cached.host };
         const result: DemandCounts = .{ .pending = self.pendingPeers(catalog, null), .host = self.hostDemand(catalog) };
-        self.demand = .{ .revision = catalog.revision, .intent_revision = catalog.intent_revision, .version = self.version, .pending = result.pending, .host = result.host };
         return result;
     }
     pub fn pendingPeers(self: *const Dialing, catalog: *const Catalog, except: ?*const t.PeerId) u16 {
@@ -527,7 +527,7 @@ pub const Dialing = struct {
     /// Close the returned connections before delivering transport events or selecting more dials.
     pub fn expire(self: *Dialing, catalog: *Catalog, now_ms: u64, close: *[attempts_max]t.Handle) usize {
         var count: usize = 0;
-        self.sync(catalog, now_ms);
+        self.refresh(catalog, now_ms);
         const due = self.takeDue(catalog, &catalog.dial.expiries, now_ms);
         if (due.len == 0) return 0;
         std.sort.pdq(u32, due, {}, std.sort.asc(u32));
@@ -563,7 +563,7 @@ pub const Dialing = struct {
             }
             self.failed(catalog, index, now_ms, .expired, false);
         }
-        self.sync(catalog, now_ms);
+        self.refresh(catalog, now_ms);
         return count;
     }
     /// Takes every row whose key in `heap` is due and marks it for rekeying.
@@ -578,14 +578,17 @@ pub const Dialing = struct {
         self.visits +|= count;
         return catalog.dial.scratch[0..count];
     }
-    /// Rekeys the rows marked since the last read of the heaps.
-    fn sync(self: *Dialing, catalog: *Catalog, now_ms: u64) void {
+    /// Applies pending intent changes to the deadline heaps before the next selection.
+    pub fn refresh(self: *Dialing, catalog: *Catalog, now_ms: u64) void {
+        const result = self.demandCounts(catalog);
+        self.demand = .{ .revision = catalog.revision, .intent_revision = catalog.intent_revision, .version = self.version, .pending = result.pending, .host = result.host };
         if (catalog.dial.dirty_count == 0) return;
         var it = catalog.dial.dirty.iterator(.{});
         while (it.next()) |index| self.rekey(catalog, index, now_ms);
         self.visits +|= catalog.dial.dirty_count;
         @memset(catalog.dial.dirty_masks, 0);
         catalog.dial.dirty_count = 0;
+        if (@import("builtin").is_test) self.checkIntents(catalog, now_ms);
     }
     fn rekey(self: *const Dialing, catalog: *Catalog, index: usize, now_ms: u64) void {
         const row = &catalog.rows[index];
@@ -616,7 +619,7 @@ pub const Dialing = struct {
     /// eligibility key is due, the same set a scan of every intent would accept.
     /// Call `expire` and close its returned connections before selecting attempts at this time.
     pub fn poll(self: *Dialing, catalog: *Catalog, now_ms: u64, out: []DialIntent) usize {
-        self.sync(catalog, now_ms);
+        self.refresh(catalog, now_ms);
         if (out.len == 0 or self.freeAttempt() == null) return 0;
         const due = self.takeDue(catalog, &catalog.dial.eligible, now_ms);
         var candidates: usize = 0;
@@ -664,7 +667,7 @@ pub const Dialing = struct {
             out[count] = .{ .token = .{ .index = slot, .generation = attempt.generation }, .peer = row.identity, .address = attempt.address };
             count += 1;
         }
-        self.sync(catalog, now_ms);
+        self.refresh(catalog, now_ms);
         return count;
     }
     /// Orders by dial tier, then remembered first attempts ahead of other candidates when
@@ -696,17 +699,16 @@ pub const Dialing = struct {
         if (row.intent.replay == .untried) due = @max(due, catalog.remembered.replayDue());
         return due;
     }
-    /// The earliest manual expiry or lease, and with dial room the earliest eligible intent,
-    /// bounded below by now. It reads the heap tops after rekeying marked rows.
-    pub fn nextWakeup(self: *Dialing, catalog: *Catalog, now_ms: u64, output_capacity: usize) ?u64 {
-        self.sync(catalog, now_ms);
-        if (@import("builtin").is_test) self.checkIntents(catalog, now_ms);
-        var due: ?u64 = if (catalog.dial.expiries.peek()) |top| @max(now_ms, top.deadline) else null;
-        if (output_capacity != 0 and self.freeAttempt() != null) if (catalog.dial.eligible.peek()) |top| {
-            const eligible = @max(now_ms, top.deadline);
-            due = @min(due orelse eligible, eligible);
+    /// Dirty intents need one refresh even when output capacity prevents starting a dial.
+    pub fn schedule(self: *const Dialing, catalog: *const Catalog, output_capacity: usize) Schedule {
+        var result: Schedule = .{
+            .runnable = catalog.dial.dirty_count != 0,
+            .deadline_ms = if (catalog.dial.expiries.peek()) |top| top.deadline else null,
         };
-        return due;
+        if (output_capacity != 0 and self.freeAttempt() != null) if (catalog.dial.eligible.peek()) |top| {
+            result = result.merge(.{ .deadline_ms = top.deadline });
+        };
+        return result;
     }
     /// Test builds check that the heaps hold every key a scan of every intent and attempt would
     /// compute, that a dialable row due now is due on the heap unless it waits out a forgotten

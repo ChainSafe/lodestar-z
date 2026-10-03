@@ -33,12 +33,12 @@ const Peers = struct {
             _ = try owner.transport.startCall(std.testing.io, .{ .node_id = record.node_id, .address = remote.localAddress() }, record, &.{ .ping = .{
                 .request_id = try .init(&.{id}),
                 .enr_sequence = node.localRecord().?.sequence,
-            } });
+            } }, try @import("discv5").Transport.monotonicMilliseconds(std.testing.io));
             var expired: [d.CallTable.capacity_max]d.CallTable.Expired = undefined;
             var completed = false;
             for (0..100) |_| {
                 const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
-                const response = try remote.stepUntil(std.testing.io, &expired, now.mono_ms);
+                const response = try @import("discv5").driver.step(remote, std.testing.io, &expired, .{ .deadline_ms = now.mono_ms, .wait_max_ms = 10 });
                 if (response.failure) |err| return err;
                 const result = driver.step(node, std.testing.io, now, .{}, .deadlineOnly(now.mono_ms));
                 if (result.failure) |err| return err;
