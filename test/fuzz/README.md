@@ -216,3 +216,31 @@ and calling `__sanitizer_cov_trace_pc_guard_init` crashes at startup.
 AFL++ has its own coverage tracking that does not depend on this call, so
 commenting it out is safe.
 
+## External campaigns
+
+[lodestar-fuzzer](https://github.com/ChainSafe/lodestar-fuzzer) owns scheduled campaigns,
+persistent corpora and result reporting. From `test/fuzz`, its build and replay contract is:
+
+```sh
+zig build fuzz-metadata
+zig build -Doptimize=ReleaseSafe -Dfuzz-target=ssz_basic
+zig build replay-corpus -Doptimize=ReleaseSafe -Dfuzz-target=ssz_basic
+```
+
+`fuzz-metadata` writes `zig-out/share/lodestar-z-fuzz/targets.json` without requiring AFL++.
+Each entry supplies the target name, maximum input length and corpus version. Omit
+`-Dfuzz-target` to build or replay all 13 targets; unknown target names are rejected.
+The controller enforces input limits through AFL++'s `-G`; reproducers reject oversized inputs.
+Eight existing bootstrap files exceeding those limits are excluded from the committed corpus.
+The two opaque-tree targets also receive bootstrap seeds for their existing input shapes, since
+their corpus directories were absent.
+
+The build also produces `zig-out/bin/repro-<target>`. It runs the same target callback without AFL++:
+
+```sh
+zig build run-repro-ssz_basic -Doptimize=ReleaseSafe -- path/to/input
+zig build run-repro-ssz_basic -Doptimize=ReleaseSafe -- corpus/ssz_basic-cmin
+zig build run-repro-ssz_basic -Doptimize=ReleaseSafe -- --base64 'AAA='
+```
+
+Directory replay is flat and bounded. `--base64` supports the reproduction commands in Pages reports.
