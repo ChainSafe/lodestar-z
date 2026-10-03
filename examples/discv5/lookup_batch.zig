@@ -45,7 +45,7 @@ pub fn step(
     refill(transport, io, operations, first, &result) catch |err| {
         result.failure = err;
     };
-    result.transport = @import("discv5").driver.step(transport, io, expired_calls, .{ .wait_max_ms = 25 }) catch |err| {
+    result.transport = @import("discv5").driver.step(transport, io, expired_calls, .{ .wait_max = .fromMilliseconds(25) }) catch |err| {
         result.failure = result.failure orelse err;
         return result;
     };
@@ -53,7 +53,7 @@ pub fn step(
     consumeEvent(transport, operations, &result) catch |err| {
         result.failure = result.failure orelse err;
     };
-    result.failure = result.failure orelse result.transport.failure;
+    result.failure = result.failure orelse if (result.transport.failure) |failure| failure.cause else null;
     if (result.failure == null) {
         refill(transport, io, operations, first, &result) catch |err| {
             result.failure = err;

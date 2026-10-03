@@ -38,9 +38,9 @@ const Peers = struct {
             var completed = false;
             for (0..100) |_| {
                 const now = try @import("transport.zig").Transport.currentTime(std.testing.io);
-                const response = try @import("discv5").driver.step(remote, std.testing.io, &expired, .{ .deadline_ms = now.mono_ms, .wait_max_ms = 10 });
-                if (response.failure) |err| return err;
-                const result = driver.step(node, std.testing.io, now, .{}, .deadlineOnly(now.mono_ms));
+                const response = try @import("discv5").driver.step(remote, std.testing.io, &expired, .{ .deadline = now.monotonic, .wait_max = .fromMilliseconds(10) });
+                if (response.failure) |failure| return failure.cause;
+                const result = driver.step(node, std.testing.io, now, .{}, .deadlineOnly(@import("time.zig").optionalMilliseconds(now.millis())));
                 if (result.failure) |err| return err;
                 if (owner.transport.engine.calls.count() == 0) {
                     completed = true;

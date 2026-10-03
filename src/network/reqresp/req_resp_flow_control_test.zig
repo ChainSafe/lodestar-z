@@ -1,4 +1,5 @@
 const std = @import("std");
+const schedule_test_support = @import("../schedule_test_support.zig");
 const ct = @import("consensus_types");
 const codec = @import("codec.zig");
 const protocol = @import("protocol.zig");
@@ -101,9 +102,9 @@ fn finishAfterNotification(delay_ms: u64) !void {
     var events: [1]Event = undefined;
     try std.testing.expectEqual(@as(usize, 1), setup.shared.server.reqresp.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .control = &events }).control);
     try std.testing.expect(events[0] == .chunk_sent);
-    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), setup.shared.server.reqresp.schedule(.{ .control = 1 }).nextWakeup(setup.shared.pair.now.mono_ms));
-    const next = setup.shared.server.reqresp.schedule(.{ .control = 1 }).nextWakeup(setup.shared.pair.now.mono_ms).?;
-    setup.shared.pair.advance(next - setup.shared.pair.now.mono_ms);
+    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.millis()), schedule_test_support.wakeupMilliseconds(setup.shared.server.reqresp.schedule(.{ .control = 1 }), setup.shared.pair.now.millis()));
+    const next = schedule_test_support.wakeupMilliseconds(setup.shared.server.reqresp.schedule(.{ .control = 1 }), setup.shared.pair.now.millis()).?;
+    setup.shared.pair.advance(next - setup.shared.pair.now.millis());
     try std.testing.expectEqual(@as(usize, 1), setup.shared.server.reqresp.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .control = &events }).control);
     try std.testing.expect(events[0] == .served);
 }

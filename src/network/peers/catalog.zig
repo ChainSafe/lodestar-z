@@ -777,15 +777,15 @@ pub const Catalog = struct {
     /// A ready connection that served `qualify_ms` counts once as kept, and refreshes the record of
     /// its dialed endpoint while the peer stays eligible. Inbound connections prove no endpoint.
     fn serve(self: *Catalog, row: *Row, eligible: bool, now: Now) void {
-        if (now.mono_ms -| row.connected_at_ms < remembered.qualify_ms) return;
+        if (now.millis() -| row.connected_at_ms < remembered.qualify_ms) return;
         if (row.origin) |origin| {
             self.remembered.note(origin, .kept);
             row.origin = null;
         }
         const endpoint = row.dialed orelse return;
         var current = row.reputation;
-        current.decay(now.mono_ms);
-        if (!eligible or current.banned(now.mono_ms) or !endpoint.isUsable()) return;
+        current.decay(now.millis());
+        if (!eligible or current.banned(now.millis()) or !endpoint.isUsable()) return;
         self.remembered.qualify(&row.identity, endpoint, remembered.seconds(now));
     }
 

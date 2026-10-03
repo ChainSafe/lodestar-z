@@ -1,4 +1,5 @@
 const std = @import("std");
+const time = @import("../time.zig");
 const config = @import("config");
 const codec = @import("codec.zig");
 const constants = @import("constants.zig");
@@ -21,7 +22,7 @@ const Client = @This();
 
 request: @import("RequestState.zig") = .{},
 phase: ReqResp.RequestPhase = .negotiation,
-absolute_timeouts: ReqResp.RequestOptions.AbsoluteTimeouts = .{},
+timeouts: ReqResp.RequestOptions.Timeouts = .{},
 phase_deadline_ms: u64 = 0,
 identity: @import("../wire/peer_id.zig").PeerId = undefined,
 protocol_chunks_max: u32 = 1,
@@ -53,7 +54,7 @@ pub fn deadline(self: *const Client) ?u64 {
 pub fn advance(self: *Client, ctx: *ReqResp, engine: *Engine, index: u16, now: Now) void {
     const request = &self.request;
     if (!request.running()) return;
-    if (self.deadline()) |due| if (now.mono_ms >= due) {
+    if (self.deadline()) |due| if (now.millis() >= due) {
         const reason: Failure = if (request.waitingHost())
             .host_timeout
         else
@@ -97,7 +98,7 @@ fn sendRequest(owner: *ReqResp, engine: *Engine, slot: *Client, index: u16, now:
     request.io.payload = &.{};
     request.io.writer = undefined;
     slot.phase = .response;
-    slot.phase_deadline_ms = now.mono_ms +| slot.absolute_timeouts.response_ms;
+    slot.phase_deadline_ms = now.millis() +| time.durationMilliseconds(slot.timeouts.response);
     slot.resetResponseDecoder(owner);
     // Response bytes may have arrived while the request was still being written.
     owner.markReady(.outbound, index);
@@ -203,7 +204,7 @@ fn completeChunk(
         };
     }
     request.chunks += 1;
-    slot.host_hold_started_ms = now.mono_ms;
+    slot.host_hold_started_ms = now.millis();
     request.queue(.{ .chunk = .{
         .request = request.handle(index),
         .bytes = payload,
@@ -228,7 +229,7 @@ pub const Start = struct {
     protocol: Protocol,
     request_ssz: []const u8,
     sink: []u8,
-    absolute_timeouts: RequestOptions.AbsoluteTimeouts,
+    timeouts: RequestOptions.Timeouts,
     protocol_chunks_max: u32,
     chunks_max: u32,
 };
@@ -239,8 +240,8 @@ pub fn start(self: *Client, input: *const Start, now: Now) void {
     self.* = .{
         .identity = input.identity,
         .protocol_chunks_max = input.protocol_chunks_max,
-        .absolute_timeouts = input.absolute_timeouts,
-        .phase_deadline_ms = now.mono_ms +| input.absolute_timeouts.negotiation_ms,
+        .timeouts = input.timeouts,
+        .phase_deadline_ms = now.millis() +| time.durationMilliseconds(input.timeouts.negotiation),
         .request = .{
             .completion = .running,
             .stream_owner = .router,
@@ -248,7 +249,7 @@ pub fn start(self: *Client, input: *const Start, now: Now) void {
             .conn = input.stream.conn,
             .stream = input.stream,
             .protocol = input.protocol,
-            .started_ms = now.mono_ms,
+            .started_ms = now.millis(),
             .io = .{ .payload = input.request_ssz, .sink = input.sink, .scratch = self.request.io.scratch, .read_buffer = self.request.io.read_buffer },
             .chunks_max = input.chunks_max,
         },
@@ -276,7 +277,7 @@ pub fn negotiated(slot: *Client, owner: *ReqResp, engine: *Engine, index: u16, o
             request.io.buffered_end = ready.leftover.len;
             request.io.fin_seen = ready.fin;
             slot.phase = .request;
-            slot.phase_deadline_ms = now.mono_ms +| slot.absolute_timeouts.request_ms;
+            slot.phase_deadline_ms = now.millis() +| time.durationMilliseconds(slot.timeouts.request);
             request.io.writer = codec.ChunkWriter.initRequest(request.io.payload);
             request.io.writing = request.protocol.info().request_max > 0;
             if (!request.io.writing) request.io.outbox.queue("", true);
@@ -293,8 +294,8 @@ pub fn consume(slot: *Client, owner: *ReqResp, index: u16, now: Now) bool {
     const request = &slot.request;
     if (!request.consume()) return false;
     if (slot.host_hold_started_ms) |since| {
-        assert(now.mono_ms >= since);
-        slot.host_held_ms +|= now.mono_ms - since;
+        assert(now.millis() >= since);
+        slot.host_held_ms +|= now.millis() - since;
         slot.host_hold_started_ms = null;
     }
     if (!request.running()) return true;

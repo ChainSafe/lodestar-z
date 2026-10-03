@@ -112,7 +112,7 @@ pub fn accept(self: *InboundAdmission, owner: *ReqResp, engine: *Engine, stream:
         return error.ProtocolConcurrency;
     }
     const limiter = &self.limiter;
-    if (!limiter.tracks(&identity, now.mono_ms)) {
+    if (!limiter.tracks(&identity, now.millis())) {
         owner.recordAdmissionRefusal(stream, which, .identity_capacity, 1);
         return error.TooManyRequests;
     }
@@ -141,11 +141,11 @@ pub fn accept(self: *InboundAdmission, owner: *ReqResp, engine: *Engine, stream:
     // request still owed its start waits too, uncharged, so it cannot take the refill that one
     // awaits; it still needs a limiter row for its identity.
     const start_due: ?u64 = if (startsPending(owner.inbound, stream.conn, control))
-        limiter.startAt(&identity, control, now.mono_ms)
-    else switch (limiter.start(&identity, control, now.mono_ms)) {
+        limiter.startAt(&identity, control, now.millis())
+    else switch (limiter.start(&identity, control, now.millis())) {
         .allowed => null,
         .identity_capacity => unreachable,
-        else => limiter.startAt(&identity, control, now.mono_ms),
+        else => limiter.startAt(&identity, control, now.millis()),
     };
     return .{
         .index = index,
@@ -243,7 +243,7 @@ pub fn promote(self: *InboundAdmission, owner: *ReqResp, index: u16, now: Now) P
     const slot = &owner.inbound[index];
     const request = &slot.request;
     const state = &slot.admission;
-    if (!request.running() or slot.state != .ready or now.mono_ms < state.eligible_ms) return .waiting;
+    if (!request.running() or slot.state != .ready or now.millis() < state.eligible_ms) return .waiting;
     var progress: Progress = .waiting;
     if (state.start_pending) {
         if (!self.chargeStart(owner.inbound, index, now)) return .waiting;
@@ -255,11 +255,11 @@ pub fn promote(self: *InboundAdmission, owner: *ReqResp, index: u16, now: Now) P
     };
     const cost = self.limiter.requestCost(request.protocol, state.cost, slot.request_fork);
     if (state.paid < cost) {
-        const granted = self.limiter.grant(&slot.identity, request.protocol, cost - state.paid, slot.request_fork, now.mono_ms);
+        const granted = self.limiter.grant(&slot.identity, request.protocol, cost - state.paid, slot.request_fork, now.millis());
         state.paid += granted;
         if (granted > 0) progress = .charged;
         if (state.paid < cost) {
-            state.eligible_ms = self.limiter.eligibleAt(&slot.identity, request.protocol, 1, slot.request_fork, now.mono_ms).?;
+            state.eligible_ms = self.limiter.eligibleAt(&slot.identity, request.protocol, 1, slot.request_fork, now.millis()).?;
             state.wait = .tokens;
             return progress;
         }
@@ -277,13 +277,13 @@ fn chargeStart(self: *InboundAdmission, slots: []Server, index: u16, now: Now) b
     const state = &slot.admission;
     const limiter = &self.limiter;
     const control = slot.request.protocol.isControl();
-    if (!self.startQueued(slots, index) and limiter.start(&slot.identity, control, now.mono_ms) == .allowed) {
+    if (!self.startQueued(slots, index) and limiter.start(&slot.identity, control, now.millis()) == .allowed) {
         state.start_pending = false;
         return true;
     }
-    state.eligible_ms = limiter.startAt(&slot.identity, control, now.mono_ms);
+    state.eligible_ms = limiter.startAt(&slot.identity, control, now.millis());
     // A start due now goes to the longer waiter, so this one stays due an admission attempt.
-    state.wait = if (state.eligible_ms > now.mono_ms) .start else .none;
+    state.wait = if (state.eligible_ms > now.millis()) .start else .none;
     return false;
 }
 
@@ -320,7 +320,7 @@ fn startQueued(self: *const InboundAdmission, slots: []const Server, index: u16)
 pub fn chargeRejected(self: *InboundAdmission, owner: *ReqResp, engine: *Engine, slot: *const Server, now: Now) void {
     const request = &slot.request;
     const identity = engine.peerId(request.conn) orelse return;
-    const decision = self.limiter.take(&identity, request.protocol, 1, slot.request_fork, now.mono_ms);
+    const decision = self.limiter.take(&identity, request.protocol, 1, slot.request_fork, now.millis());
     if (decision == .allowed) return;
     owner.recordAdmissionRefusal(request.stream, request.protocol, switch (decision) {
         .allowed => unreachable,

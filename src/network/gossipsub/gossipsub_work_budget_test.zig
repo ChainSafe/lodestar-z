@@ -1,3 +1,5 @@
+const Now = @import("../types.zig").Now;
+const schedule_test_support = @import("../schedule_test_support.zig");
 const support = @import("test_support.zig");
 const std = @import("std");
 const Gossipsub = @import("Gossipsub.zig");
@@ -26,7 +28,7 @@ test "gossip turn separates credit exhaustion from host pressure and preserves e
     const io = &g.sessions.rows[session.index].io;
     io.startRpc(writer.written());
     const driver = @import("session_io.zig");
-    var turn = Gossipsub.beginPump(&g, .{ .mono_ms = 1, .unix_s = 0 });
+    var turn = Gossipsub.beginPump(&g, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
     var peer = Credits.peer(&g.options);
     try std.testing.expectEqual(Progress.credits, try driver.processRpc(&g, session.index, &turn, &peer));
     try std.testing.expect(io.rpc.?.item != null);
@@ -70,7 +72,7 @@ test "gossipsub rotates the legal atomic allowance past a duplicate flood" {
     g.sessions.rows[first.index].io.rx_ready = true;
     g.sessions.rows[first.index].io.startRpc(w1.written());
     g.settle(first.index);
-    try std.testing.expectEqual(@as(?u64, pair.now.mono_ms), g.schedule().nextWakeup(pair.now.mono_ms));
+    try std.testing.expectEqual(@as(?u64, pair.now.millis()), schedule_test_support.wakeupMilliseconds(g.schedule(), pair.now.millis()));
     try std.testing.expectEqual(@as(usize, 1), @import("test_support.zig").pump(&g, &pair.server, pair.now));
     try std.testing.expectEqualStrings("two", inbox.last().bytes);
 }
@@ -89,7 +91,7 @@ test "gossipsub IHAVE work preflight defers without consuming the advertisement"
     const io = &g.sessions.rows[session.index].io;
     io.startRpc(writer.written());
     const driver = @import("session_io.zig");
-    var turn = @import("turn.zig").Turn.init(&g.options, .{ .mono_ms = 1, .unix_s = 0 }, &.{});
+    var turn = @import("turn.zig").Turn.init(&g.options, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }), &.{});
     var peer = Credits.peer(&g.options);
     turn.budget.work = 0;
     for (0..2) |_| {
@@ -158,20 +160,20 @@ test "gossipsub IHAVE maximum advertisement shares oversized allowance with data
     defer inbox.deinit();
     inbox.attach(&g);
     var scratch: [64]u8 = undefined;
-    var turn = @import("turn.zig").Turn.init(&g.options, .{ .mono_ms = 1, .unix_s = 0 }, &scratch);
+    var turn = @import("turn.zig").Turn.init(&g.options, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }), &scratch);
     turn.sink = g.message_sink;
     var peer = Credits.peer(&g.options);
     try std.testing.expectEqual(Progress.credits, try driver.processRpc(&g, session.index, &turn, &peer));
     try std.testing.expect(turn.large_used);
     try std.testing.expectEqual(@as(usize, 1), g.recovery.len);
     try std.testing.expectEqual(@as(u16, 1), io.ihave_recv);
-    turn = @import("turn.zig").Turn.init(&g.options, .{ .mono_ms = 2, .unix_s = 0 }, &scratch);
+    turn = @import("turn.zig").Turn.init(&g.options, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 }), &scratch);
     turn.sink = g.message_sink;
     peer = Credits.peer(&g.options);
     try std.testing.expectEqual(Progress.credits, try driver.processRpc(&g, session.index, &turn, &peer));
     try std.testing.expect(turn.large_used);
     try std.testing.expectEqual(@as(u16, 2), io.ihave_recv);
-    turn = @import("turn.zig").Turn.init(&g.options, .{ .mono_ms = 3, .unix_s = 0 }, &scratch);
+    turn = @import("turn.zig").Turn.init(&g.options, Now.fromMilliseconds(.{ .mono_ms = 3, .unix_s = 0 }), &scratch);
     turn.sink = g.message_sink;
     peer = Credits.peer(&g.options);
     try std.testing.expectEqual(Progress.done, try driver.processRpc(&g, session.index, &turn, &peer));

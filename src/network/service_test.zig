@@ -1,3 +1,4 @@
+const schedule_test_support = @import("schedule_test_support.zig");
 const gossip_test = @import("gossipsub/test_support.zig");
 const std = @import("std");
 const support = @import("quic/test_support.zig");
@@ -106,10 +107,10 @@ test "service handles native stream events past empty request capacity" {
         for (requests[0..count]) |event| if (event == .request) {
             incoming = event.request.request;
         };
-        if (incoming != null and client.schedule(.{ .control = 1 }).nextWakeup(pair.now.mono_ms) != pair.now.mono_ms) break;
+        if (incoming != null and schedule_test_support.wakeupMilliseconds(client.schedule(.{ .control = 1 }), pair.now.millis()) != pair.now.millis()) break;
     }
     try std.testing.expect(incoming != null);
-    try std.testing.expect(client.schedule(.{ .control = 1 }).nextWakeup(pair.now.mono_ms).? > pair.now.mono_ms);
+    try std.testing.expect(schedule_test_support.wakeupMilliseconds(client.schedule(.{ .control = 1 }), pair.now.millis()).? > pair.now.millis());
     var wire: [rr.codec.frame_scratch_max]u8 = undefined;
     const encoded = try rr.codec.encodeChunk(0, null, &ping, &wire);
     const stream = server.reqresp.inbound[incoming.?.index].request.stream;
@@ -138,11 +139,11 @@ test "service gossip capacity refusal preserves reqresp and explicit host retry"
     for (0..peers.capacity - peers.outbound_reserve) |i| {
         var metadata: peers.Metadata = .{ .identity = .{ .bytes = [_]u8{0} ** @import("wire/peer_id.zig").length }, .address = .unspecified, .direction = .inbound };
         std.mem.writeInt(u16, metadata.identity.bytes[0..2], @intCast(i), .little);
-        const ref = server.gossipsub.peers.admit(.{ .index = 0, .generation = 1 }, &metadata, pair.now.mono_ms).admitted.peer;
+        const ref = server.gossipsub.peers.admit(.{ .index = 0, .generation = 1 }, &metadata, pair.now.millis()).admitted.peer;
         retained[i] = ref;
         server.gossipsub.peers.retain(ref);
         server.gossipsub.peers.scores.penalize(ref.index, 20);
-        server.gossipsub.peers.disconnect(ref, pair.now.mono_ms);
+        server.gossipsub.peers.disconnect(ref, pair.now.millis());
     }
     try std.testing.expectEqual(gs.Gossipsub.ConnectionAdmission.capacity, server.gossipsub.peerConnected(&pair.server, handles.server, false, pair.now));
     try std.testing.expect(!server.gossipsub.admitted(handles.server));

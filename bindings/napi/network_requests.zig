@@ -327,12 +327,12 @@ pub fn flags(runtime: *Runtime, now: n.Now) void {
         if (cell.state == .free or cell.state == .preparing or cell.state == .queued or cell.copying) continue;
         if (cell.cancel or runtime.stop) {
             cell.chunk = null;
-            if (cell.native) |handle| _ = runtime.heavy.?.core.cancel(handle, now);
+            if (cell.native) |handle| _ = runtime.heavy.?.core.cancelRequest(handle, now);
         } else if (cell.consume) {
             cell.consume = false;
             cell.chunk = null;
             cell.delivered = false;
-            if (cell.native) |handle| _ = runtime.heavy.?.core.consume(handle, now);
+            if (cell.native) |handle| _ = runtime.heavy.?.core.consumeResponse(handle, now);
         }
         table.releasePayload(cell);
         table.refresh(cell);

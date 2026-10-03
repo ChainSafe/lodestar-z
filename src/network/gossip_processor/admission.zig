@@ -1,4 +1,5 @@
 const std = @import("std");
+const Now = @import("../types.zig").Now;
 const processor = @import("root.zig");
 const gossip = @import("../gossipsub/root.zig");
 const storage = @import("../gossipsub/message_store.zig");
@@ -38,7 +39,7 @@ pub fn admit(table: *processor.GossipProcessor, owner: *gossip.Gossipsub, candid
         if (!candidate.charge(count * @sizeOf(processor.GossipProcessor.Cell))) break;
         if (capacityAfter(table, kind, message.bytes.len, tokens[0..count]) and policy.feasible(candidate, handles[0..count])) {
             for (tokens[0..count], handles[0..count]) |token, handle| {
-                table.outcome(owner.report(handle, .ignore, .{ .mono_ms = now, .unix_s = 0 }));
+                table.outcome(owner.report(handle, .ignore, Now.fromMilliseconds(.{ .mono_ms = now, .unix_s = 0 })));
                 table.retire(token);
             }
             candidate.commit();

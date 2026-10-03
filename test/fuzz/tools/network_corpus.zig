@@ -43,12 +43,12 @@ pub fn main(init: std.process.Init) !void {
         return err;
     };
     defer engine.deinit();
-    const now: network.Now = .{ .mono_ms = 0, .unix_s = fixture.unix_s };
+    const now: network.Now = @import("network").Now.fromMilliseconds(.{ .mono_ms = 0, .unix_s = fixture.unix_s });
     const handle = try engine.dial(&remote, context.local_peer_id, now);
     const sent = engine.sendOne(handle.index, now, &buffer) orelse return error.MissingInitial;
     try write(root, io, "network_quic_receive", "initial", sent.bytes);
 
-    var server_context = try network.tls.context.Context.init(&key, now.unix_s, @splat(1));
+    var server_context = try network.tls.context.Context.init(&key, now.unixSeconds(), @splat(1));
     var server = network.Engine.init(std.heap.page_allocator, .{
         .tls = server_context,
         .limits = .{ .connections_max = 4, .handshaking_max = 2, .handshaking_per_source_max = 1, .dialing_max = 1 },

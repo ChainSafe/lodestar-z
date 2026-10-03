@@ -1,3 +1,4 @@
+const schedule_test_support = @import("schedule_test_support.zig");
 const Router = @import("router.zig").Router;
 const std = @import("std");
 const support = @import("quic/test_support.zig");
@@ -88,16 +89,16 @@ test "router wakeups separate negotiation work from outcome capacity" {
     var router = try Router.init(std.testing.allocator, .{});
     defer router.deinit();
     const stream = try router.beginOutbound(&pair.client, handles.client, .{ .reqresp = .ping_v1 }, pair.now);
-    try std.testing.expectEqual(@as(?u64, pair.now.mono_ms), router.schedule(0).nextWakeup(pair.now.mono_ms));
+    try std.testing.expectEqual(@as(?u64, pair.now.millis()), schedule_test_support.wakeupMilliseconds(router.schedule(0), pair.now.millis()));
     _ = pumpRouter(&router, &pair, &pair.client, pair.now, &.{});
-    try std.testing.expectEqual(@as(?u64, pair.now.mono_ms + 10_000), router.schedule(0).nextWakeup(pair.now.mono_ms));
+    try std.testing.expectEqual(@as(?u64, pair.now.millis() + 10_000), schedule_test_support.wakeupMilliseconds(router.schedule(0), pair.now.millis()));
     pair.advance(10_000);
     _ = pumpRouter(&router, &pair, &pair.client, pair.now, &.{});
-    try std.testing.expectEqual(@as(?u64, null), router.schedule(0).nextWakeup(pair.now.mono_ms));
-    try std.testing.expectEqual(@as(?u64, pair.now.mono_ms), router.schedule(1).nextWakeup(pair.now.mono_ms));
+    try std.testing.expectEqual(@as(?u64, null), schedule_test_support.wakeupMilliseconds(router.schedule(0), pair.now.millis()));
+    try std.testing.expectEqual(@as(?u64, pair.now.millis()), schedule_test_support.wakeupMilliseconds(router.schedule(1), pair.now.millis()));
     try std.testing.expect(!pair.client.registry.slots[stream.conn.index].table.matches(stream.slot, stream.id));
     router.cancel(&pair.client, stream);
-    try std.testing.expectEqual(@as(?u64, null), router.schedule(1).nextWakeup(pair.now.mono_ms));
+    try std.testing.expectEqual(@as(?u64, null), schedule_test_support.wakeupMilliseconds(router.schedule(1), pair.now.millis()));
 }
 
 test "router accepted selection survives capability changes behind outcome pressure" {
@@ -120,10 +121,10 @@ test "router accepted selection survives capability changes behind outcome press
     }
     client.setCapabilities(.{ .receive = .initEmpty(), .request = .initEmpty() });
     server.setCapabilities(.{ .receive = .initEmpty(), .request = .initEmpty() });
-    try std.testing.expectEqual(@as(?u64, null), client.schedule(0).nextWakeup(pair.now.mono_ms));
-    try std.testing.expectEqual(@as(?u64, pair.now.mono_ms), client.schedule(1).nextWakeup(pair.now.mono_ms));
-    try std.testing.expectEqual(@as(?u64, null), server.schedule(0).nextWakeup(pair.now.mono_ms));
-    try std.testing.expectEqual(@as(?u64, pair.now.mono_ms), server.schedule(1).nextWakeup(pair.now.mono_ms));
+    try std.testing.expectEqual(@as(?u64, null), schedule_test_support.wakeupMilliseconds(client.schedule(0), pair.now.millis()));
+    try std.testing.expectEqual(@as(?u64, pair.now.millis()), schedule_test_support.wakeupMilliseconds(client.schedule(1), pair.now.millis()));
+    try std.testing.expectEqual(@as(?u64, null), schedule_test_support.wakeupMilliseconds(server.schedule(0), pair.now.millis()));
+    try std.testing.expectEqual(@as(?u64, pair.now.millis()), schedule_test_support.wakeupMilliseconds(server.schedule(1), pair.now.millis()));
     var out: [1]Router.Outcome = undefined;
     try std.testing.expectEqual(@as(usize, 1), pumpRouter(&client, &pair, &pair.client, pair.now, &out));
     try std.testing.expect(out[0].result == .ready);

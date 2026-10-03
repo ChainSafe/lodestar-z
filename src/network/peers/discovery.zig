@@ -1,5 +1,6 @@
 //! Owns the application discovery transport, one demand-driven walk and liveness probes.
 //! Initialize at the final address and serialize entry, including cancellation and teardown.
+const time = @import("../time.zig");
 const std = @import("std");
 const d = @import("discv5");
 const adapter = @import("enr.zig");
@@ -70,6 +71,8 @@ pub const Discovery = struct {
             return false;
         }
     };
+    pub const Failure = struct { cause: Error, stage: d.Transport.FailureStage };
+
     pub const Result = struct {
         learned: [2]?d.types.Address = .{ null, null },
         candidates: usize = 0,
@@ -80,8 +83,8 @@ pub const Discovery = struct {
         unowned: u16 = 0,
         /// Datagrams dequeued from the sockets, admitted or not. One step dequeues at most one.
         datagrams: u16 = 0,
-        failure: ?Error = null,
-        failure_stage: d.Transport.FailureStage = .coordinator,
+        cancelled: bool = false,
+        failure: ?Failure = null,
     };
 
     allocator: std.mem.Allocator,
@@ -159,7 +162,7 @@ pub const Discovery = struct {
     }
 
     pub fn deinit(self: *Discovery, io: std.Io) void {
-        self.cancel();
+        self.shutdown();
         self.transport.deinit(self.allocator, io);
         self.allocator.destroy(self.storage);
         self.* = undefined;
@@ -239,7 +242,7 @@ pub const Discovery = struct {
             if (lookup.waitingCount() < d.Lookup.parallelism) next = @min(next, @max(self.refill_due_ms, self.resource_retry_ms));
         } else if (self.demand.active(now_ms)) next = @min(next, @max(self.query_due_ms, self.resource_retry_ms));
         if (self.demand.active(now_ms)) next = @min(next, self.demand.expires_ms);
-        return .{ .deadline_ms = next };
+        return .{ .deadline = time.optionalMilliseconds(next) };
     }
 
     /// Advances one bounded turn using the owner's clock and readiness. No event borrow escapes.
@@ -247,26 +250,27 @@ pub const Discovery = struct {
         if (self.stopped) return error.Stopped;
         var result = Result{};
         self.refill(io, now_ms, &result) catch |err| {
-            result.failure = err;
+            result.cancelled = err == error.Canceled;
+            result.failure = .{ .cause = err, .stage = .coordinator };
             self.resource_retry_ms = now_ms +| self.options.local_retry_ms;
         };
-        const input = self.transport.receive(io, ready);
+        const input: d.Transport.Input = if (result.cancelled) error.Canceled else self.transport.receive(io, ready);
         const progress = try self.transport.advance(io, now_ms, &self.storage.expiries, input);
         var consumed = self.consume(&progress, self.storage.expiries[0..progress.calls_expired], out);
-        if (progress.event == .request and progress.event.request.message == .talk_request) {
+        if (!consumed.cancelled and progress.event == .request and progress.event.request.message == .talk_request) {
             const incoming = progress.event.request;
             const response: d.wire.message.Message = .{ .talk_response = .{
                 .request_id = incoming.message.talk_request.request_id,
                 .response = &.{},
             } };
             self.transport.sendResponse(io, incoming.peer, &response, now_ms) catch |err| {
+                consumed.cancelled = consumed.cancelled or err == error.Canceled;
                 if (err != error.DestinationUnreachable and consumed.failure == null) {
-                    consumed.failure = err;
-                    consumed.failure_stage = .process;
+                    consumed.failure = .{ .cause = err, .stage = .process };
                 }
             };
         }
-        return .{ .learned = consumed.learned, .candidates = consumed.candidates, .started = result.started, .expired = consumed.expired, .rejected = consumed.rejected, .dropped = consumed.dropped, .unowned = consumed.unowned, .datagrams = consumed.datagrams, .failure = result.failure orelse consumed.failure, .failure_stage = if (result.failure != null) .coordinator else consumed.failure_stage };
+        return .{ .learned = consumed.learned, .candidates = consumed.candidates, .started = result.started, .expired = consumed.expired, .rejected = consumed.rejected, .dropped = consumed.dropped, .unowned = consumed.unowned, .datagrams = consumed.datagrams, .cancelled = result.cancelled or consumed.cancelled, .failure = result.failure orelse consumed.failure };
     }
 
     /// Supports hosts that drive this owner's Transport themselves. Consume every result exactly
@@ -274,7 +278,7 @@ pub const Discovery = struct {
     /// TALK requests itself; advance supplies the unsupported-protocol response. No slice escapes.
     pub fn consume(self: *Discovery, progress: *const d.Transport.StepResult, expiries: []const d.CallTable.Expired, out: []adapter.Candidate) Result {
         std.debug.assert(expiries.len == progress.calls_expired and expiries.len <= d.CallTable.capacity_max);
-        var result = Result{ .datagrams = @intFromBool(progress.datagram != .timeout), .failure = progress.failure, .failure_stage = progress.failure_stage };
+        var result = Result{ .datagrams = @intFromBool(progress.datagram != .timeout), .cancelled = progress.cancelled, .failure = if (progress.failure) |failure| .{ .cause = failure.cause, .stage = failure.stage } else null };
         if (self.stopped) return result;
         switch (progress.datagram) {
             .timeout, .accepted => {},
@@ -306,7 +310,7 @@ pub const Discovery = struct {
         return result;
     }
 
-    pub fn cancel(self: *Discovery) void {
+    pub fn shutdown(self: *Discovery) void {
         if (self.stopped) return;
         self.cancelForeground();
         self.maintenance.cancel(&self.transport.engine);
@@ -373,7 +377,7 @@ pub const Discovery = struct {
         var consumption: d.Engine.Event.Consumption = .{};
         if (self.lookup) |*lookup| {
             consumption = lookup.onEvent(&self.transport.engine, &progress.event, progress.now_ms) catch |err| {
-                result.failure = result.failure orelse err;
+                result.failure = result.failure orelse .{ .cause = err, .stage = .coordinator };
                 return;
             };
             if (consumption.consumed) self.refill_due_ms = progress.now_ms;

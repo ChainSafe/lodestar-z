@@ -1,4 +1,5 @@
 const std = @import("std");
+const Now = @import("../types.zig").Now;
 const support = @import("test_support.zig");
 const Pair = @import("test_pair.zig").Pair;
 const Budget = @import("turn.zig").Budget;
@@ -22,7 +23,7 @@ test "gossip maintenance yields between bounded topics and resumes without repea
     var vtable = std.Io.failing.vtable.*;
     vtable.now = Clock.now;
     g.clock = .{ .userdata = &clock, .vtable = &vtable };
-    const now: @import("../types.zig").Now = .{ .mono_ms = 1, .unix_s = 0 };
+    const now: @import("../types.zig").Now = Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 });
     support.heartbeat(&g, now);
     for (1..4) |serviced| {
         g.maintainTopics(now);
@@ -66,7 +67,7 @@ fn saturatedPeers(peers: u16, budget: Budget) !void {
     const rounds = @divExact(peers, 4);
     for (0..rounds) |_| {
         for (g.sessions.rows, 0..) |*row, index| {
-            for (row.io.tx.control.count..64) |_| try std.testing.expect(row.io.tx.inject(&.{0}, setup.shared.pair.now.mono_ms));
+            for (row.io.tx.control.count..64) |_| try std.testing.expect(row.io.tx.inject(&.{0}, setup.shared.pair.now.millis()));
             g.settle(@intCast(index));
         }
         const turn = support.pumpTurn(g, &setup.shared.pair.client, setup.shared.pair.now);
@@ -101,7 +102,7 @@ fn readerAhead(setup: *Pair, writers: *[3]u16) !u16 {
     for (writers) |index| {
         g.sessions.setOutbound(index, .{ .live = .{ .stream = stream, .version = .v1_2 } });
         g.sendSubscriptions(index);
-        try std.testing.expect(g.sessions.rows[index].io.tx.inject(&.{0}, setup.shared.pair.now.mono_ms));
+        try std.testing.expect(g.sessions.rows[index].io.tx.inject(&.{0}, setup.shared.pair.now.millis()));
         g.settle(index);
     }
     try std.testing.expectEqual(reader, g.sessions.ready.head);

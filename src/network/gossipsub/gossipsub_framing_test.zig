@@ -91,17 +91,17 @@ test "gossipsub receive page exhaustion discards only the requesting frame witho
     }
     const peer = g.sessions.find(setup.shared.handles.server).?;
     const logical = g.sessions.rows[peer].logical;
-    const before = g.peers.score(logical, setup.shared.pair.now.mono_ms);
+    const before = g.peers.score(logical, setup.shared.pair.now.millis());
     var payload: [65536]u8 = undefined;
     var rng = std.Random.DefaultPrng.init(113);
     rng.random().bytes(&payload);
     _ = try setup.shared.client.gossipsub.publish(test_topic, &payload, setup.shared.pair.now);
     for (0..64) |_| try setup.pumpOnce();
-    try std.testing.expect(!g.messages.wasSeen(topic_mod.validMessageId(test_topic, &payload, .{}), setup.shared.pair.now.mono_ms));
+    try std.testing.expect(!g.messages.wasSeen(topic_mod.validMessageId(test_topic, &payload, .{}), setup.shared.pair.now.millis()));
     try std.testing.expectEqual(@as(usize, 0), setup.serverMessages().len);
     try std.testing.expectEqual(@as(u64, 0), g.counters.local_pressure_resets);
     try std.testing.expectEqual(@as(u64, 0), g.counters.malformed_rpcs);
-    try std.testing.expectEqual(before, g.peers.score(logical, setup.shared.pair.now.mono_ms));
+    try std.testing.expectEqual(before, g.peers.score(logical, setup.shared.pair.now.millis()));
     try std.testing.expectEqual(@as(u64, 0), g.peers.rows[logical.index].large_frame_denied_until);
     for (g.peers.scores.penalties) |count| try std.testing.expectEqual(@as(u64, 0), count);
     try std.testing.expect(g.sessions.rows[peer].in_stream != null);
@@ -177,7 +177,7 @@ test "gossipsub malformed framing and RPCs penalize authenticated sources across
         try std.testing.expect(row.in_stream == null);
         try std.testing.expectEqual(source, row.logical);
         try std.testing.expectEqual(@as(f64, @floatFromInt(i + 1)), g.peers.scores.rows[source.index].behaviour);
-        try std.testing.expect(g.peers.score(source, setup.shared.pair.now.mono_ms) < 0);
+        try std.testing.expect(g.peers.score(source, setup.shared.pair.now.millis()) < 0);
         try std.testing.expectEqual(@as(f64, 0), support.invalidDeliveries(g));
         try std.testing.expectEqual(g.sessions.receive_pool.next.len, g.sessions.receive_pool.free_pages);
         for (0..16) |_| try setup.pumpOnce();
@@ -214,7 +214,7 @@ test "gossip graylist drops an RPC before decoding or admitting messages" {
     g.sessions.rows[session.index].io.startRpc(writer.written());
     var count: usize = 0;
     var items = g.options.items_per_peer;
-    try std.testing.expect(try support.processRpc(&g, session.index, .{ .mono_ms = 1, .unix_s = 0 }, &count, &items));
+    try std.testing.expect(try support.processRpc(&g, session.index, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }), &count, &items));
     // The graylist ends the RPC before it takes an item credit or decodes a field.
     try std.testing.expectEqual(g.options.items_per_peer, items);
     try std.testing.expectEqual(@as(usize, 0), inbox.count);
@@ -236,7 +236,7 @@ test "gossip IWANT admits 5000 IDs and rejects larger envelopes before service" 
         io.startRpc(writer.written());
         var emitted: usize = 0;
         var items = g.options.items_per_peer;
-        const result = support.processRpc(&g, session.index, .{ .mono_ms = 1, .unix_s = 0 }, &emitted, &items);
+        const result = support.processRpc(&g, session.index, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }), &emitted, &items);
         if (count == constants.max_iwant_ids_per_rpc) {
             try std.testing.expect(try result);
         } else {
@@ -275,9 +275,9 @@ test "gossip independent RPC enumerates every receive split through admission" {
         expected[1][i] = @intCast(255 - i);
     }
     for (0..wire.len + 1) |split| {
-        const now: Now = .{ .mono_ms = 1 + split * 10, .unix_s = 1 };
-        g.last_now_ms = now.mono_ms;
-        g.messages.validation.expire(&g.messages.store, &g.peers, now.mono_ms);
+        const now: Now = Now.fromMilliseconds(.{ .mono_ms = 1 + split * 10, .unix_s = 1 });
+        g.last_now_ms = now.millis();
+        g.messages.validation.expire(&g.messages.store, &g.peers, now.millis());
         const io = &g.sessions.rows[peer.index].io;
         try std.testing.expect(!g.sessions.resetRx(peer.index));
         var count: usize = 0;
@@ -287,7 +287,7 @@ test "gossip independent RPC enumerates every receive split through admission" {
             try std.testing.expect(g.sessions.receiveHandoff(peer.index, fragment, false));
             for (0..wire.len + 1) |_| {
                 if (io.unread_start == io.unread_end) break;
-                const result = try io.feedUnread(&g.sessions.receive_pool, io.unread_end - io.unread_start, now.mono_ms);
+                const result = try io.feedUnread(&g.sessions.receive_pool, io.unread_end - io.unread_start, now.millis());
                 try std.testing.expect(result.consumed > 0);
                 consumed += result.consumed;
                 if (result.complete) {
@@ -358,7 +358,7 @@ test "gossip paged RPC cursors survive shared workspace reuse without runtime al
     var inbox: support.Inbox = .{};
     defer inbox.deinit();
     inbox.attach(&g);
-    const now: Now = .{ .mono_ms = 2, .unix_s = 1 };
+    const now: Now = Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 1 });
     for (0..2) |round| {
         for (0..2) |i| {
             var count: usize = 0;

@@ -1,4 +1,5 @@
 const std = @import("std");
+const Now = @import("../types.zig").Now;
 const score = @import("score.zig");
 const topic = @import("topic.zig");
 const PeerId = @import("../wire/peer_id.zig").PeerId;
@@ -69,8 +70,8 @@ pub const Page = struct {
 pub fn capture(g: *const Gossipsub, cursor: u16, now: @import("../types.zig").Now, out: *Page) error{InvalidDiagnosticsCursor}!void {
     std.debug.assert(out.topics.len == g.overlay.rows.len);
     if (cursor > g.peers.rows.len) return error.InvalidDiagnosticsCursor;
-    out.mono_ms = now.mono_ms;
-    out.unix_s = now.unix_s;
+    out.mono_ms = now.millis();
+    out.unix_s = now.unixSeconds();
     out.next = null;
     out.peer_count = 0;
     out.topic_count = 0;
@@ -91,7 +92,7 @@ pub fn capture(g: *const Gossipsub, cursor: u16, now: @import("../types.zig").No
         if (!row.occupied) continue;
         const session = if (row.connection) |conn| g.sessions.find(conn) else null;
         var weights: score.Breakdown = .{ .topics = out.weights };
-        const total = g.peers.snapshotWeights(.{ .index = @intCast(index), .generation = row.generation }, now.mono_ms, &weights);
+        const total = g.peers.snapshotWeights(.{ .index = @intCast(index), .generation = row.generation }, now.millis(), &weights);
         const peer = &out.peers[out.peer_count];
         peer.* = .{ .identity = row.identity, .connected = row.connection != null, .outbound_ready = if (session) |i| g.sessions.rows[i].outStream() != null else false, .address = row.address, .retain_until = row.retain_until, .score = total, .behaviour = g.peers.scores.rows[index].behaviour, .weights = weights.global, .topics = peer.topics };
         for (out.topics[0..out.topic_count]) |*known| {
@@ -126,7 +127,7 @@ test "gossip diagnostic pages bound peers preserve scores and include empty mesh
     const revision = g.peers.scores.revision;
     const rows = try a.dupe(score.PeerScore.PeerState, g.peers.scores.rows);
     defer a.free(rows);
-    try capture(&g, 0, .{ .mono_ms = 200, .unix_s = 1000 }, page);
+    try capture(&g, 0, Now.fromMilliseconds(.{ .mono_ms = 200, .unix_s = 1000 }), page);
     try std.testing.expectEqual(@as(u8, 8), page.peer_count);
     try std.testing.expectEqual(@as(?u16, 8), page.next);
     try std.testing.expectEqual(@as(u16, 1), page.topic_count);
@@ -134,11 +135,11 @@ test "gossip diagnostic pages bound peers preserve scores and include empty mesh
     try std.testing.expect(!page.peers[0].topics[0].mesh_member);
     try std.testing.expectEqual(@as(f64, 1), page.peers[0].topics[0].counters.invalid);
     try std.testing.expectEqual(g.peers.snapshot(g.sessions.rows[0].logical, 200), page.peers[0].score);
-    try capture(&g, page.next.?, .{ .mono_ms = 200, .unix_s = 1000 }, page);
+    try capture(&g, page.next.?, Now.fromMilliseconds(.{ .mono_ms = 200, .unix_s = 1000 }), page);
     try std.testing.expectEqual(@as(u8, 2), page.peer_count);
     try std.testing.expectEqual(@as(?u16, null), page.next);
     try std.testing.expectEqual(calculations, g.peers.scores.calculations);
     try std.testing.expectEqual(revision, g.peers.scores.revision);
     try std.testing.expectEqualDeep(rows, g.peers.scores.rows);
-    try std.testing.expectError(error.InvalidDiagnosticsCursor, capture(&g, 17, .{ .mono_ms = 200, .unix_s = 1000 }, page));
+    try std.testing.expectError(error.InvalidDiagnosticsCursor, capture(&g, 17, Now.fromMilliseconds(.{ .mono_ms = 200, .unix_s = 1000 }), page));
 }

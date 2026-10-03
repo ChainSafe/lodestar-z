@@ -1,4 +1,5 @@
 const std = @import("std");
+const time = @import("time.zig");
 const Engine = @import("quic/Engine.zig");
 const index_list = @import("index_list.zig");
 const multistream = @import("wire/multistream.zig");
@@ -172,7 +173,7 @@ pub const Negotiator = struct {
         engine.bindStream(stream, routeOf(index)) catch unreachable;
         entry.control = control;
         entry.stream = stream;
-        entry.started_ms = now.mono_ms;
+        entry.started_ms = now.millis();
         entry.timeout_ms = timeout_ms;
         entry.role = .{ .dialer = dialer };
         entry.selected = null;
@@ -221,7 +222,7 @@ pub const Negotiator = struct {
         // A stale handle has no events to route; its entry fails on the first read.
         engine.bindStream(stream, routeOf(index)) catch {};
         entry.stream = stream;
-        entry.started_ms = now.mono_ms;
+        entry.started_ms = now.millis();
         entry.timeout_ms = negotiate_timeout_ms;
         entry.control = false;
         entry.role = .{ .listener = .{} };
@@ -283,7 +284,7 @@ pub const Negotiator = struct {
         return .{
             .runnable = self.ready.len > 0 or self.reported.len > 0 or
                 (self.pending.len > 0 and outcome_capacity > 0),
-            .deadline_ms = if (self.timeouts.peek()) |top| top.deadline else null,
+            .deadline = time.optionalMilliseconds(if (self.timeouts.peek()) |top| top.deadline else null),
         };
     }
 
@@ -301,7 +302,7 @@ pub const Negotiator = struct {
             @memcpy(entry.out_buffer[0..bytes.len], bytes);
             entry.outbox.queue(entry.out_buffer[0..bytes.len], true);
             entry.finishing_selected = true;
-            entry.started_ms = now.mono_ms;
+            entry.started_ms = now.millis();
             self.begin(row);
             return true;
         }
@@ -329,7 +330,7 @@ pub const Negotiator = struct {
         self.releaseReported();
         // An expired entry fails on its next advance.
         var expired: usize = 0;
-        while (self.timeouts.popDue(now.mono_ms)) |row| : (expired += 1) {
+        while (self.timeouts.popDue(now.millis())) |row| : (expired += 1) {
             assert(expired < self.entries.len);
             self.markReady(row);
         }
@@ -431,7 +432,7 @@ pub const Negotiator = struct {
             self.finishSelectedWrite(engine, index, now);
             return null;
         }
-        const waited_ms = now.mono_ms -| entry.started_ms;
+        const waited_ms = now.millis() -| entry.started_ms;
         if (waited_ms >= entry.timeout_ms) return fail(engine, entry, .timeout);
         const flushed = entry.outbox.pump(engine, entry.stream) catch |err|
             return failStream(engine, entry, err);
@@ -493,7 +494,7 @@ pub const Negotiator = struct {
 
     fn finishSelectedWrite(self: *Negotiator, engine: *Engine, index: usize, now: types.Now) void {
         const entry = &self.entries[index];
-        if (now.mono_ms -| entry.started_ms >= entry.timeout_ms) {
+        if (now.millis() -| entry.started_ms >= entry.timeout_ms) {
             engine.closeStream(entry.stream, types.app_error_negotiation_failed);
             self.release(index);
             return;
@@ -530,7 +531,7 @@ pub const Negotiator = struct {
             }
             assert(key.? == entry.started_ms +| entry.timeout_ms);
             // An expired entry is serviced by the pump that sees its key due.
-            assert(key.? > now.mono_ms or entry.ready_link.linked);
+            assert(key.? > now.millis() or entry.ready_link.linked);
             const bound = engine.route(entry.stream) orelse continue;
             assert(bound.owner == .negotiation and bound.row == index);
             if (entry.ready_link.linked) continue;

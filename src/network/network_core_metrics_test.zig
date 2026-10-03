@@ -1,3 +1,4 @@
+const Now = @import("types.zig").Now;
 const core_test = @import("network_core_test_support.zig");
 const gossip_test = @import("gossipsub/test_support.zig");
 const std = @import("std");
@@ -34,7 +35,7 @@ const Fixture = struct {
     }
 
     fn render(self: *Fixture, running: bool) ![]const u8 {
-        var context = metrics.Context.init(self.node, .{ .mono_ms = 2500, .unix_s = 123456 }, running);
+        var context = metrics.Context.init(self.node, Now.fromMilliseconds(.{ .mono_ms = 2500, .unix_s = 123456 }), running);
         context.expired_executing = if (running) 3 else 0;
         var writer = std.Io.Writer.fixed(self.buffer);
         try metrics.write(&context, &writer);
@@ -561,13 +562,13 @@ test "core metrics aggregate subnets and count distinct mesh peers" {
     b_intent.subscriptions = a_intent.subscriptions;
     try std.testing.expect(try pair.client.applyIntent(&a_intent, pair.client.last_now));
     try std.testing.expect(try pair.server.applyIntent(&b_intent, pair.server.last_now));
-    try pair.client.connectUntil(&pair.server.peerId(), &.{@import("quic/test_support.zig").server_address}, pair.client.last_now, pair.client.last_now.mono_ms +| @import("peers/dialing.zig").Dialing.connect_timeout_ms);
-    const start = pair.client.last_now.mono_ms;
+    try pair.client.connectUntil(&pair.server.peerId(), &.{@import("quic/test_support.zig").server_address}, pair.client.last_now, pair.client.last_now.millis() +| @import("peers/dialing.zig").Dialing.connect_timeout_ms);
+    const start = pair.client.last_now.millis();
     var mesh_count: usize = 0;
     for (0..3000) |_| {
         try pair.step(1);
         pair.pair.advance(10);
-        if (pair.client.last_now.mono_ms - start > 10_000) break;
+        if (pair.client.last_now.millis() - start > 10_000) break;
         mesh_count = pair.client.service.gossipsub.resourceSnapshot().mesh_members;
         if (mesh_count == 3) break;
     }

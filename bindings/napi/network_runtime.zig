@@ -150,10 +150,10 @@ pub const Runtime = struct {
     fn destroyOwner(self: *Runtime) void {
         if (self.heavy) |heavy| {
             if (heavy.core_live) {
-                heavy.core.shutdown(@import("network_owner.zig").now(heavy.threaded.io()));
+                heavy.core.shutdown((@import("network_owner.zig").now(heavy.threaded.io()) catch heavy.core.last_now).floor(heavy.core.last_now));
                 if (self.metrics.allocatedBytes() > 0) {
                     self.captureBridgeLocked(&heavy.bridge);
-                    var context = n.metrics.Context.init(&heavy.core, @import("network_owner.zig").now(heavy.threaded.io()), false);
+                    var context = n.metrics.Context.init(&heavy.core, (@import("network_owner.zig").now(heavy.threaded.io()) catch heavy.core.last_now).floor(heavy.core.last_now), false);
                     context.bridge = &heavy.bridge;
                     if (self.metrics.render(&context)) |index| {
                         self.metrics.published = index;

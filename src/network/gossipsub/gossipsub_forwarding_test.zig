@@ -1,3 +1,4 @@
+const Now = @import("../types.zig").Now;
 const support = @import("test_support.zig");
 const std = @import("std");
 const Gossipsub = @import("Gossipsub.zig");
@@ -68,25 +69,25 @@ test "gossipsub configured IDONTWANT uses admitted compressed wire bytes" {
         g.sessions.rows[destination.index].io.tx.cancelStream(&g.messages.store);
         const len = try snappy.raw.compress(payload[0..size], &compressed);
         try std.testing.expectEqual(wire_size, len);
-        try std.testing.expectEqual(@as(?usize, 1), receiveForTest(&g, source.index, .{ .topic = name, .data = compressed[0..len] }, .{ .mono_ms = 1, .unix_s = 0 }));
+        try std.testing.expectEqual(@as(?usize, 1), receiveForTest(&g, source.index, .{ .topic = name, .data = compressed[0..len] }, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 })));
         try std.testing.expectEqual(wire_size >= 128, g.sessions.rows[destination.index].io.tx.control.used > 0);
         g.sessions.rows[destination.index].io.tx.cancelStream(&g.messages.store);
-        try std.testing.expectEqual(@as(?usize, 0), receiveForTest(&g, source.index, .{ .topic = name, .data = compressed[0..len] }, .{ .mono_ms = 1, .unix_s = 0 }));
+        try std.testing.expectEqual(@as(?usize, 0), receiveForTest(&g, source.index, .{ .topic = name, .data = compressed[0..len] }, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 })));
         try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[destination.index].io.tx.control.used);
     }
     const len = try snappy.raw.compress(&([_]u8{0} ** 256), &compressed);
     try std.testing.expect(len < 128);
-    try std.testing.expectEqual(@as(?usize, 1), receiveForTest(&g, source.index, .{ .topic = name, .data = compressed[0..len] }, .{ .mono_ms = 1, .unix_s = 0 }));
+    try std.testing.expectEqual(@as(?usize, 1), receiveForTest(&g, source.index, .{ .topic = name, .data = compressed[0..len] }, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 })));
     try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[destination.index].io.tx.control.used);
-    _ = receiveForTest(&g, source.index, .{ .topic = name, .data = &.{ 5, 0 } }, .{ .mono_ms = 1, .unix_s = 0 });
+    _ = receiveForTest(&g, source.index, .{ .topic = name, .data = &.{ 5, 0 } }, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
     try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[destination.index].io.tx.control.used);
     const fresh_len = try snappy.raw.compress("nonadmitted", &compressed);
     g.options.idontwant_min_data_size = 0;
     inbox.full = true;
-    try std.testing.expectEqual(@as(?usize, 0), receiveForTest(&g, source.index, .{ .topic = name, .data = compressed[0..fresh_len] }, .{ .mono_ms = 1, .unix_s = 0 }));
+    try std.testing.expectEqual(@as(?usize, 0), receiveForTest(&g, source.index, .{ .topic = name, .data = compressed[0..fresh_len] }, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 })));
     try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[destination.index].io.tx.control.used);
     inbox.full = false;
-    try std.testing.expectEqual(@as(?usize, 1), receiveForTest(&g, source.index, .{ .topic = name, .data = compressed[0..fresh_len] }, .{ .mono_ms = 1, .unix_s = 0 }));
+    try std.testing.expectEqual(@as(?usize, 1), receiveForTest(&g, source.index, .{ .topic = name, .data = compressed[0..fresh_len] }, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 })));
     try std.testing.expect(g.sessions.rows[destination.index].io.tx.control.used > 0);
 }
 
@@ -102,8 +103,8 @@ test "gossipsub remote forwarding honors IDONTWANT and preserves borrowed event 
     const source = @import("test_support.zig").addPeer(pair.shared.server.gossipsub, .{ .index = 77, .generation = 1 }, .v1_2).?;
     pair.shared.server.gossipsub.overlay.rows[pair.shared.server.gossipsub.overlay.findTopic(name).?].mesh.set(destination);
     const suppressed_id = topic_mod.validMessageId(name, "remote suppressed", .{});
-    pair.shared.server.gossipsub.sessions.suppress(destination, suppressed_id, pair.shared.pair.now.mono_ms, 60_000);
-    try std.testing.expectEqual(@as(?usize, 1), try testMessage(pair.shared.server.gossipsub, source.index, "remote suppressed", pair.shared.pair.now.mono_ms));
+    pair.shared.server.gossipsub.sessions.suppress(destination, suppressed_id, pair.shared.pair.now.millis(), 60_000);
+    try std.testing.expectEqual(@as(?usize, 1), try testMessage(pair.shared.server.gossipsub, source.index, "remote suppressed", pair.shared.pair.now.millis()));
     const borrowed = pair.shared.server_inbox.last();
     try std.testing.expectEqual(ReportOutcome{ .applied = .accept }, pair.shared.server.gossipsub.report(borrowed.handle, .accept, pair.shared.pair.now));
     try std.testing.expectEqual(@as(usize, 0), pair.shared.server.gossipsub.sessions.rows[destination].io.tx.data.count);
@@ -123,7 +124,7 @@ test "gossipsub remote forwarding honors IDONTWANT and preserves borrowed event 
     }
     try std.testing.expectEqual(@as(usize, 1), received);
     try std.testing.expectEqual(@as(u64, 0), pair.shared.server.gossipsub.topic_metrics.get(name).forwarded);
-    try std.testing.expectEqual(@as(?usize, 1), try testMessage(pair.shared.server.gossipsub, source.index, "remote forwarded", pair.shared.pair.now.mono_ms));
+    try std.testing.expectEqual(@as(?usize, 1), try testMessage(pair.shared.server.gossipsub, source.index, "remote forwarded", pair.shared.pair.now.millis()));
     try std.testing.expectEqual(ReportOutcome{ .applied = .accept }, pair.shared.server.gossipsub.report(pair.shared.server_inbox.last().handle, .accept, pair.shared.pair.now));
     try std.testing.expectEqual(@as(usize, 1), pair.shared.server.gossipsub.sessions.rows[destination].io.tx.data.count);
     received = 0;
@@ -154,7 +155,7 @@ test "gossip forwarding excludes recorded duplicate senders but reaches other me
     try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, peers[0], "shared payload", 1));
     const handle = inbox.last().handle;
     try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, peers[1], "shared payload", 2));
-    try std.testing.expectEqual(ReportOutcome{ .applied = .accept }, g.report(handle, .accept, .{ .mono_ms = 3, .unix_s = 0 }));
+    try std.testing.expectEqual(ReportOutcome{ .applied = .accept }, g.report(handle, .accept, Now.fromMilliseconds(.{ .mono_ms = 3, .unix_s = 0 })));
     try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[peers[0]].io.tx.data.count);
     try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[peers[1]].io.tx.data.count);
     try std.testing.expectEqual(@as(usize, 1), g.sessions.rows[peers[2]].io.tx.data.count);

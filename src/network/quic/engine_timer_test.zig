@@ -81,7 +81,7 @@ test "engine calls on_timeout only for keys whose quiche timer expired" {
 
 fn readClock() Engine.Now {
     const ns: u64 = @intCast(std.Io.Clock.awake.now(std.testing.io).nanoseconds);
-    return .{ .mono_ms = ns / std.time.ns_per_ms, .mono_ns = ns, .unix_s = support.now_unix };
+    return .{ .monotonic = .{ .clock = .awake, .raw = .fromNanoseconds(ns) }, .wall = .{ .clock = .real, .raw = .fromNanoseconds(@as(i96, support.now_unix) * std.time.ns_per_s) } };
 }
 
 test "engine timer invariants tolerate time passing after scheduling" {

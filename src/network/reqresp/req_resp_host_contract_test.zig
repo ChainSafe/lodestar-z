@@ -36,7 +36,7 @@ test "reqresp host readiness distinguishes notification pressure terminal race a
     const before = owner.resourceSnapshot();
     try std.testing.expectEqual(.ready, owner.responseReadiness(handle));
     try std.testing.expectEqualDeep(before, owner.resourceSnapshot());
-    try std.testing.expect(owner.retainServing(handle));
+    const serving = owner.retainServing(handle) orelse return error.TestUnexpectedResult;
     try std.testing.expect(owner.cancel(handle, pair.shared.pair.now));
     try std.testing.expect(!owner.cancel(handle, pair.shared.pair.now));
     try std.testing.expectEqual(@as(u32, 1), owner.closing.len);
@@ -67,7 +67,7 @@ test "reqresp host readiness distinguishes notification pressure terminal race a
     try std.testing.expectEqual(@as(usize, 0), drain(&pair, &events));
     try std.testing.expect(!owner.inbound[handle.index].request.occupied());
     try std.testing.expectEqual(@as(usize, 1), owner.resourceSnapshot().serving_occupied);
-    try std.testing.expect(owner.releaseServing(handle));
+    try std.testing.expect(owner.releaseServing(serving));
     try std.testing.expectEqual(@as(usize, 0), owner.resourceSnapshot().serving_occupied);
 }
 

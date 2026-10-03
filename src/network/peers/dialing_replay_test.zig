@@ -1,4 +1,5 @@
 const std = @import("std");
+const Now = @import("../types.zig").Now;
 const t = @import("types.zig");
 const enr = @import("enr.zig");
 const Catalog = @import("catalog.zig").Catalog;
@@ -18,7 +19,7 @@ const unix_s: u64 = 1_700_000_000;
 const replay_interval_ms: u64 = 250;
 
 fn at(ms: u64) @import("../types.zig").Now {
-    return .{ .mono_ms = ms, .unix_s = @intCast(unix_s + ms / 1000) };
+    return Now.fromMilliseconds(.{ .mono_ms = ms, .unix_s = @intCast(unix_s + ms / 1000) });
 }
 
 fn funnel(c: *const Catalog, origin: remembered.Origin) [3]u64 {
@@ -104,24 +105,24 @@ test "remembered records refresh at a served close and drop on rejection, health
     var conns: [6]t.Handle = undefined;
     for (&conns, 0..) |*conn, i| conn.* = .{ .index = @intCast(i), .generation = 1 };
     // A remote shutdown ends service without rejecting us, so it refreshes the record.
-    c.settleRejections(peers[0], conns[0], true, .shutdown, now.mono_ms);
+    c.settleRejections(peers[0], conns[0], true, .shutdown, now.millis());
     c.rememberClosed(peers[0], conns[0], true, .remote_goodbye, .shutdown, now);
     // A close that shows the peer ineligible keeps the record as it was.
     c.rememberClosed(peers[1], conns[1], true, .incompatible_fork, null, now);
-    c.settleRejections(peers[2], conns[2], true, .too_many_peers, now.mono_ms);
+    c.settleRejections(peers[2], conns[2], true, .too_many_peers, now.millis());
     c.rememberClosed(peers[2], conns[2], true, .remote_goodbye, .too_many_peers, now);
     c.rememberClosed(peers[3], conns[3], true, .health_timeout, null, now);
-    try std.testing.expect(c.disconnect(peers[3], conns[3], .health_timeout, now.mono_ms));
+    try std.testing.expect(c.disconnect(peers[3], conns[3], .health_timeout, now.millis()));
     // A ban during an already scheduled close forgets the peer, and the close does not restore it.
     try std.testing.expect(c.markUnavailable(peers[4], conns[4], .count_pruning));
-    _ = c.report(peers[4], .fatal, now.mono_ms);
+    _ = c.report(peers[4], .fatal, now.millis());
     c.rememberClosed(peers[4], conns[4], true, .count_pruning, null, now);
-    try std.testing.expect(c.disconnect(peers[4], conns[4], .count_pruning, now.mono_ms));
+    try std.testing.expect(c.disconnect(peers[4], conns[4], .count_pruning, now.millis()));
     // A host verdict can ban a peer after its connection closed.
     c.rememberClosed(peers[5], conns[5], true, .transport_closed, null, now);
-    try std.testing.expect(c.disconnect(peers[5], conns[5], .transport_closed, now.mono_ms));
+    try std.testing.expect(c.disconnect(peers[5], conns[5], .transport_closed, now.millis()));
     try std.testing.expectEqual(@as(usize, 4), rememberedAt(&c, remembered.qualify_ms).len);
-    try std.testing.expectEqual(t.ReputationDecision.ban, c.report(peers[5], .fatal, now.mono_ms).?);
+    try std.testing.expectEqual(t.ReputationDecision.ban, c.report(peers[5], .fatal, now.millis()).?);
     // Another identity answered at the seventh peer's endpoint.
     try d.enqueueDiscovered(&c, &candidates[6], &.{}, &.{}, 0);
     var out: [1]dialing.Dialing.DialIntent = undefined;

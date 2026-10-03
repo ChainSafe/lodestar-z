@@ -146,11 +146,11 @@ pub const Control = struct {
             .direction = direction,
             .peer = peer,
             .conn = conn,
-            .status_due_ms = now.mono_ms +| if (direction == .inbound)
+            .status_due_ms = now.millis() +| if (direction == .inbound)
                 self.options.inbound_status_grace_ms
             else
                 0,
-            .ping_due_ms = now.mono_ms +| self.pingInterval(direction),
+            .ping_due_ms = now.millis() +| self.pingInterval(direction),
         };
         self.rekey(catalog, peer.index);
     }
@@ -198,14 +198,14 @@ pub const Control = struct {
         if (!catalog.markUnavailable(peer, conn, reason)) return false;
         if (row.closing == null) {
             if (reason == .capacity or reason == .count_pruning) {
-                _ = catalog.deferRedial(peer, conn, now.mono_ms, goodbye.cooldownMs(129));
+                _ = catalog.deferRedial(peer, conn, now.millis(), goodbye.cooldownMs(129));
             } else if (reason != .shutdown and reason != .remote_goodbye) {
-                _ = catalog.cooldown(peer, conn, now.mono_ms, goodbye.cooldownMs(goodbyeReason(reason)));
+                _ = catalog.cooldown(peer, conn, now.millis(), goodbye.cooldownMs(goodbyeReason(reason)));
             }
             const snapshot = catalog.rowFor(peer).?;
             const agent = client.agent(&snapshot.identify);
             std.log.scoped(.network_peers).debug("peer_disconnect_scheduled peer={f} connection={d}:{d} reason={s} grace_ms=2000 agent={f}", .{ @import("../logging.zig").peer(&snapshot.identity), conn.index, conn.generation, @tagName(reason), std.json.fmt(agent, .{}) });
-            row.closing = .{ .reason = reason, .deadline_ms = now.mono_ms +| 2_000 };
+            row.closing = .{ .reason = reason, .deadline_ms = now.millis() +| 2_000 };
         }
         self.rekey(catalog, peer.index);
         return true;
@@ -213,13 +213,13 @@ pub const Control = struct {
     pub fn reStatusPeer(self: *Control, catalog: *const Catalog, peer: t.PeerRef, conn: t.Handle, now: Now) bool {
         const row = self.connectionSchedule(peer, conn) orelse return false;
         if (row.closing != null) return false;
-        row.status_due_ms = @min(row.status_due_ms, now.mono_ms);
+        row.status_due_ms = @min(row.status_due_ms, now.millis());
         self.rekey(catalog, peer.index);
         return true;
     }
     pub fn reStatusPeers(self: *Control, catalog: *const Catalog, now: Now) void {
         for (self.schedules, 0..) |*row, index| if (row.peer != null) {
-            row.status_due_ms = @min(row.status_due_ms, now.mono_ms);
+            row.status_due_ms = @min(row.status_due_ms, now.millis());
             self.rekey(catalog, index);
         };
     }
@@ -239,17 +239,17 @@ pub const Control = struct {
         if (!catalog.invalidateStatus(peer, row.conn)) return null;
         row.previous_digest = previous.digest;
         row.previous_protocol = wire.statusProtocol(previous);
-        row.transition_until_ms = if (relevant) now.mono_ms +| self.options.status_transition_grace_ms else 0;
-        row.status_due_ms = now.mono_ms;
+        row.transition_until_ms = if (relevant) now.millis() +| self.options.status_transition_grace_ms else 0;
+        row.status_due_ms = now.millis();
         row.retry_ms = 0;
-        row.metadata_due_ms = row.metadata_due_ms orelse now.mono_ms;
+        row.metadata_due_ms = row.metadata_due_ms orelse now.millis();
         self.rekey(catalog, index);
         return .{ .peer = peer, .conn = row.conn };
     }
     pub fn revalidationDeadline(self: *const Control, peer: t.PeerRef, conn: t.Handle, now: Now) ?u64 {
         if (peer.index >= self.schedules.len) return null;
         const row = &self.schedules[peer.index];
-        if (!std.meta.eql(row.peer, peer) or !std.meta.eql(row.conn, conn) or row.closing != null or now.mono_ms >= row.transition_until_ms) return null;
+        if (!std.meta.eql(row.peer, peer) or !std.meta.eql(row.conn, conn) or row.closing != null or now.millis() >= row.transition_until_ms) return null;
         return row.transition_until_ms;
     }
     fn goodbyeReason(reason: t.DisconnectReason) u64 {
@@ -272,7 +272,7 @@ pub const Control = struct {
     pub fn beginMaintenance(self: *Control, now: Now) Pass {
         var count: usize = 0;
         // Each row holds at most one key, so the heap empties within schedules.len pops.
-        while (self.deadlines.popDue(now.mono_ms)) |index| {
+        while (self.deadlines.popDue(now.millis())) |index| {
             self.due[count] = index;
             count += 1;
         }
@@ -298,7 +298,7 @@ pub const Control = struct {
             if (self.dueWork(pass, catalog, index, local, now)) |due| return due;
             self.rekey(catalog, index);
         }
-        if (@import("builtin").is_test) self.checkSchedules(catalog, now.mono_ms);
+        if (@import("builtin").is_test) self.checkSchedules(catalog, now.millis());
         return null;
     }
     fn dueWork(
@@ -313,13 +313,13 @@ pub const Control = struct {
         const peer = row.peer orelse return null;
         const current = connectedRow(catalog, peer, row.conn) orelse return null;
         const relevant = current.status != null;
-        const decision = decide(row, relevant, row.pending_request != null, now.mono_ms);
+        const decision = decide(row, relevant, row.pending_request != null, now.millis());
         var due: Due = .{ .index = index, .peer = peer, .conn = row.conn };
         if (decision.close) {
             due.close = row.closing.?.reason;
             return due;
         }
-        if (pass.starts_remaining > 0 and relevant and row.closing == null and row.identify_state == .pending and now.mono_ms >= row.identify_retry_ms) {
+        if (pass.starts_remaining > 0 and relevant and row.closing == null and row.identify_state == .pending and now.millis() >= row.identify_retry_ms) {
             pass.starts_remaining -= 1;
             self.cursor = (index + 1) % self.schedules.len;
             due.identify = true;
@@ -353,7 +353,7 @@ pub const Control = struct {
     fn identifyStarted(self: *Control, due: *const Due, succeeded: bool, now: Now) void {
         const row = self.connectionSchedule(due.peer, due.conn) orelse return;
         if (!succeeded) {
-            row.identify_retry_ms = now.mono_ms +| 1_000;
+            row.identify_retry_ms = now.millis() +| 1_000;
             return;
         }
         row.identify_state = .started;
@@ -363,7 +363,7 @@ pub const Control = struct {
         std.debug.assert(row.pending_request == null);
         if (request == null) {
             self.counters.deferred +|= 1;
-            row.retry_ms = now.mono_ms +| self.options.local_retry_ms;
+            row.retry_ms = now.millis() +| self.options.local_retry_ms;
             return;
         }
         row.pending_request = request;
@@ -428,7 +428,7 @@ pub const Control = struct {
         now: Now,
     ) bool {
         const row = self.connectionSchedule(peer, conn) orelse return false;
-        catalog.settleRejections(peer, conn, row.evidence != .pending, row.rejection, now.mono_ms);
+        catalog.settleRejections(peer, conn, row.evidence != .pending, row.rejection, now.millis());
         catalog.rememberClosed(peer, conn, row.evidence != .pending, reason, row.rejection, now);
         self.retire(peer, conn);
         self.counters.closed[@intFromEnum(reason)] +|= 1;
@@ -449,25 +449,25 @@ pub const Control = struct {
         if (row.closing != null) return;
         const status = wire.decodeStatus(protocol, bytes) catch |err| {
             if (err == error.InvalidLength or err == error.InvalidEncoding)
-                _ = catalog.report(peer, .low_tolerance, now.mono_ms);
+                _ = catalog.report(peer, .low_tolerance, now.millis());
             _ = self.disconnect(catalog, peer, conn, .invalid_status, now);
             return;
         };
-        if (now.mono_ms < row.transition_until_ms and protocol == row.previous_protocol and
+        if (now.millis() < row.transition_until_ms and protocol == row.previous_protocol and
             std.mem.eql(u8, &status.fork_digest, &row.previous_digest) and
             (protocol != wire.statusProtocol(local.fork) or !std.mem.eql(u8, &status.fork_digest, &local.fork.digest)))
         {
             if ((connectedRow(catalog, peer, conn) orelse return).status == null)
-                row.retry_ms = @min(row.transition_until_ms, now.mono_ms +| self.options.local_retry_ms);
+                row.retry_ms = @min(row.transition_until_ms, now.millis() +| self.options.local_retry_ms);
             return;
         }
         if (relevance(local, &status, slot)) |reason| {
             _ = self.disconnect(catalog, peer, conn, reason, now);
             return;
         }
-        if (!catalog.updateStatus(peer, conn, &status, now.mono_ms)) return;
-        row.status_due_ms = now.mono_ms +| self.options.status_interval_ms;
-        if (connectedRow(catalog, peer, conn).?.metadata == null) row.metadata_due_ms = row.metadata_due_ms orelse now.mono_ms;
+        if (!catalog.updateStatus(peer, conn, &status, now.millis())) return;
+        row.status_due_ms = now.millis() +| self.options.status_interval_ms;
+        if (connectedRow(catalog, peer, conn).?.metadata == null) row.metadata_due_ms = row.metadata_due_ms orelse now.millis();
         applicationReady(catalog, row, peer, conn);
     }
     /// Marks the connection ready once it holds a valid relevant Status and a valid Metadata.
@@ -492,11 +492,11 @@ pub const Control = struct {
         if (snapshot.metadata) |metadata| {
             if (seq < metadata.seq_number) return;
             if (seq == metadata.seq_number) {
-                _ = catalog.updateMetadata(peer, conn, &metadata, now.mono_ms);
+                _ = catalog.updateMetadata(peer, conn, &metadata, now.millis());
                 return;
             }
         }
-        row.metadata_due_ms = row.metadata_due_ms orelse now.mono_ms;
+        row.metadata_due_ms = row.metadata_due_ms orelse now.millis();
     }
     /// Applies a peer's control request to its schedule before the owner answers it through the
     /// control protocol.
@@ -603,7 +603,7 @@ pub const Control = struct {
             .metadata_v1, .metadata_v2, .metadata_v3 => {
                 const metadata = wire.decodeMetadata(op.protocol, bytes, local.fork) catch |err| {
                     if (err == error.InvalidLength or err == error.InvalidEncoding or err == error.InvalidSyncnets)
-                        _ = catalog.report(op.peer, .low_tolerance, now.mono_ms);
+                        _ = catalog.report(op.peer, .low_tolerance, now.millis());
                     if (connectedRow(catalog, op.peer, op.conn)) |snapshot| {
                         std.log.scoped(.network_peers).debug("metadata_rejected peer={f} connection={d}:{d} method={s} reason={s} bytes={d}", .{
                             @import("../logging.zig").peer(&snapshot.identity),
@@ -617,7 +617,7 @@ pub const Control = struct {
                     _ = self.disconnect(catalog, op.peer, op.conn, .invalid_metadata, now);
                     return;
                 };
-                _ = catalog.updateMetadata(op.peer, op.conn, &metadata, now.mono_ms);
+                _ = catalog.updateMetadata(op.peer, op.conn, &metadata, now.millis());
                 row.metadata_due_ms = null;
                 applicationReady(catalog, row, op.peer, op.conn);
             },
@@ -630,12 +630,12 @@ pub const Control = struct {
         switch (event) {
             .failed => |failed| switch (failed.reason) {
                 .cancelled, .host_timeout, .quota_timeout => {
-                    row.retry_ms = now.mono_ms +| self.options.local_retry_ms;
+                    row.retry_ms = now.millis() +| self.options.local_retry_ms;
                 },
                 .negotiation_rejected => {
                     const status = op.protocol == .status_v1 or op.protocol == .status_v2;
-                    if (status and now.mono_ms < row.transition_until_ms) {
-                        row.retry_ms = @min(row.transition_until_ms, now.mono_ms +| self.options.local_retry_ms);
+                    if (status and now.millis() < row.transition_until_ms) {
+                        row.retry_ms = @min(row.transition_until_ms, now.millis() +| self.options.local_retry_ms);
                         return;
                     }
                     if (healthProbe(op.protocol)) |probe| self.countHealthFailure(row, op, probe, failed.reason, .immediate);
@@ -659,7 +659,7 @@ pub const Control = struct {
                     catalog.clearHealthStrikes(op.peer, op.conn);
                 }
                 const snapshot = connectedRow(catalog, op.peer, op.conn) orelse return;
-                if (probe != .status) row.ping_due_ms = now.mono_ms +| self.pingInterval(snapshot.direction);
+                if (probe != .status) row.ping_due_ms = now.millis() +| self.pingInterval(snapshot.direction);
             },
             else => unreachable,
         }
@@ -675,7 +675,7 @@ pub const Control = struct {
             _ = self.disconnect(catalog, op.peer, op.conn, if (timed_out) .health_timeout else .health_error, now);
             return;
         }
-        row.retry_ms = now.mono_ms +| self.options.failure_retry_ms;
+        row.retry_ms = now.millis() +| self.options.failure_retry_ms;
     }
     /// Counts a failed probe once and logs it with the probe's streak and the close it causes:
     /// none, the streak's limit, or an immediate one for a refused probe, which skips the streak.
@@ -684,8 +684,8 @@ pub const Control = struct {
         std.log.scoped(.network_peers).debug("peer_health_failure connection={d}:{d} probe={s} reason={s} failures={d} limit={d} close={s}", .{ op.conn.index, op.conn.generation, @tagName(probe), @tagName(failure), row.health_failures[@intFromEnum(probe)], self.options.health_failures_max, @tagName(closes) });
     }
     pub fn schedule(self: *const Control, catalog: *const Catalog, now: Now) @import("../types.zig").Schedule {
-        if (@import("builtin").is_test) self.checkSchedules(catalog, now.mono_ms);
-        return .{ .deadline_ms = if (self.deadlines.peek()) |top| top.deadline else null };
+        if (@import("builtin").is_test) self.checkSchedules(catalog, now.millis());
+        return .{ .deadline = @import("../time.zig").optionalMilliseconds(if (self.deadlines.peek()) |top| top.deadline else null) };
     }
 
     /// Test builds check that each schedule's key is the deadline a scan of every row computes

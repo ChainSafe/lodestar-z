@@ -68,9 +68,9 @@ test "gossip batch bounds, rollback and expiry keep pins until full completion" 
 }
 
 test "gossip original admission wall projection is precise and independent of drain" {
-    try std.testing.expectEqual(@as(u64, 1700000000123), try g.projectWall(100, .{ .mono_ms = 150, .unix_ms = 1700000000173 }));
-    try std.testing.expectEqual(@as(u64, 1700000000623), try g.projectWall(100, .{ .mono_ms = 150, .unix_ms = 1700000000673 }));
-    try std.testing.expectError(error.InvalidNetworkClock, g.projectWall(151, .{ .mono_ms = 150, .unix_ms = 1700000000173 }));
+    try std.testing.expectEqual(@as(u64, 1700000000123), try g.projectWall(100, .{ .monotonic = @import("network").time.milliseconds(150), .wall = .{ .clock = .real, .raw = .fromNanoseconds(@as(i96, 1700000000173) * std.time.ns_per_ms) } }));
+    try std.testing.expectEqual(@as(u64, 1700000000623), try g.projectWall(100, .{ .monotonic = @import("network").time.milliseconds(150), .wall = .{ .clock = .real, .raw = .fromNanoseconds(@as(i96, 1700000000673) * std.time.ns_per_ms) } }));
+    try std.testing.expectError(error.InvalidNetworkClock, g.projectWall(151, .{ .monotonic = @import("network").time.milliseconds(150), .wall = .{ .clock = .real, .raw = .fromNanoseconds(@as(i96, 1700000000173) * std.time.ns_per_ms) } }));
 }
 
 test "gossip flags remain independent of full command capacity and reject stale generations" {

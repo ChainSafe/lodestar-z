@@ -1,4 +1,5 @@
 const std = @import("std");
+const Now = @import("../types.zig").Now;
 const t = std.testing;
 const Gossipsub = @import("Gossipsub.zig");
 const processor = @import("../gossip_processor/root.zig");
@@ -40,7 +41,7 @@ const Consumer = struct {
 fn receive(g: *Gossipsub, source: u16, topic: []const u8, payload: []const u8) !void {
     var compressed: [8192]u8 = undefined;
     const len = try snappy.raw.compress(payload, &compressed);
-    var turn = Gossipsub.beginPump(g, .{ .mono_ms = 1, .unix_s = 0 });
+    var turn = Gossipsub.beginPump(g, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
     var credit = @import("turn.zig").Credits.peer(&g.options);
     try t.expectEqual(.done, g.receiveItem(g.sessions.ref(source), .{ .message = .{ .topic = topic, .data = compressed[0..len] } }, &turn, &credit));
 }
@@ -76,7 +77,7 @@ test "gossip direct processor admission drains paged RPCs while the host queue s
     const wire = @import("frame.zig").writeFrame(&framed, writer.written());
     const source = g.sessions.find(pair.shared.handles.server).?;
     const row = &g.sessions.rows[source];
-    const score = g.peers.score(row.logical, pair.shared.pair.now.mono_ms);
+    const score = g.peers.score(row.logical, pair.shared.pair.now.millis());
     var sent: usize = 0;
     for (0..128) |_| {
         if (sent < wire.len) sent += pair.shared.pair.client.write(pair.clientStream(), wire[sent..], false) catch |err| switch (err) {
@@ -93,7 +94,7 @@ test "gossip direct processor admission drains paged RPCs while the host queue s
     try t.expectEqual(g.sessions.receive_pool.next.len, g.sessions.receive_pool.free_pages);
     try t.expect(row.io.rpc == null and row.in_stream != null);
     try t.expectEqual(@as(u64, 0), g.counters.local_pressure_resets);
-    try t.expectEqual(score, g.peers.score(row.logical, pair.shared.pair.now.mono_ms));
+    try t.expectEqual(score, g.peers.score(row.logical, pair.shared.pair.now.millis()));
     @memset(g.msg_scratch, 0xa5);
     @memset(g.sessions.decode_scratch, 0xa5);
     @memset(row.io.body, 0xa5);
@@ -125,11 +126,11 @@ test "gossip full processor preserves duplicate attribution without runtime allo
     const handle = table.cells[1].handle;
     try receive(&g, 1, block, "pending");
     try receive(&g, 1, block, "unexamined");
-    var turn = Gossipsub.beginPump(&g, .{ .mono_ms = 1, .unix_s = 0 });
+    var turn = Gossipsub.beginPump(&g, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
     var credit = @import("turn.zig").Credits.peer(&g.options);
     try t.expectEqual(.done, g.receiveItem(g.sessions.ref(1), .{ .message = .{ .topic = block, .data = &.{7} } }, &turn, &credit));
     try t.expectEqual(@as(f64, 0), support.invalidDeliveries(&g));
-    try t.expectEqual(Gossipsub.ReportOutcome{ .applied = .reject }, g.report(handle, .reject, .{ .mono_ms = 2, .unix_s = 0 }));
+    try t.expectEqual(Gossipsub.ReportOutcome{ .applied = .reject }, g.report(handle, .reject, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 })));
     try t.expectEqual(@as(f64, 2), support.invalidDeliveries(&g));
     try t.expectEqual(@as(u64, 2), g.messages.storage_refusals[@intFromEnum(messages.StorageRefusal.processor_capacity)]);
     try t.expectEqual(allocations, backing.allocations);
@@ -177,7 +178,7 @@ test "gossip invalid verdict stops remaining publications in the same RPC" {
     for (0..3) |_| protobuf.writeMessage(&writer, &.{5}, block);
     const io = &g.sessions.rows[source.index].io;
     io.startRpc(writer.written());
-    var turn = Gossipsub.beginPump(&g, .{ .mono_ms = 1, .unix_s = 0 });
+    var turn = Gossipsub.beginPump(&g, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
     var credit = @import("turn.zig").Credits.peer(&g.options);
     try t.expectEqual(.done, try @import("session_io.zig").processRpc(&g, source.index, &turn, &credit));
     try t.expectEqual(@as(f64, 1), support.invalidDeliveries(&g));
@@ -228,7 +229,7 @@ test "gossip admission rejects ineligible candidates without replacing work and 
     try t.expectEqual(@as(u64, 1), table.diag.reportsAppliedIgnore);
     try t.expectEqual(@as(usize, 4), table.diag.occupied);
     try t.expectEqual(@as(usize, 4), g.resourceSnapshot().pending_validations);
-    try t.expectEqual(Gossipsub.ReportOutcome.already_resolved, g.report(handle, .reject, .{ .mono_ms = 2, .unix_s = 0 }));
+    try t.expectEqual(Gossipsub.ReportOutcome.already_resolved, g.report(handle, .reject, Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 })));
     try t.expectEqual(@as(f64, 0), support.invalidDeliveries(&g));
 }
 
@@ -369,7 +370,7 @@ const IwantFixture = struct {
         const io = &self.g.sessions.rows[source].io;
         io.startRpc(bytes);
         defer _ = self.g.sessions.finishFrame(io);
-        var turn = Gossipsub.beginPump(&self.g, .{ .mono_ms = self.now, .unix_s = 0 });
+        var turn = Gossipsub.beginPump(&self.g, Now.fromMilliseconds(.{ .mono_ms = self.now, .unix_s = 0 }));
         var credit = @import("turn.zig").Credits.peer(&self.g.options);
         try t.expectEqual(.done, try @import("session_io.zig").processRpc(&self.g, source, &turn, &credit));
         return self.g.options.work_per_pump - turn.budget.work;
@@ -546,12 +547,12 @@ test "gossip deferred receipt neither settles nor forgives promises before resum
     const io = &f.g.sessions.rows[0].io;
     io.startRpc(writer.written());
     defer _ = f.g.sessions.finishFrame(io);
-    var turn = Gossipsub.beginPump(&f.g, .{ .mono_ms = 300, .unix_s = 0 });
+    var turn = Gossipsub.beginPump(&f.g, Now.fromMilliseconds(.{ .mono_ms = 300, .unix_s = 0 }));
     var credit = @import("turn.zig").Credits.peer(&f.g.options);
     turn.budget.work = 0;
     try t.expectEqual(.credits, try @import("session_io.zig").processRpc(&f.g, 0, &turn, &credit));
     try t.expectEqual(@as(usize, 3), f.g.recovery.len);
-    turn = Gossipsub.beginPump(&f.g, .{ .mono_ms = 301, .unix_s = 0 });
+    turn = Gossipsub.beginPump(&f.g, Now.fromMilliseconds(.{ .mono_ms = 301, .unix_s = 0 }));
     credit = @import("turn.zig").Credits.peer(&f.g.options);
     try t.expectEqual(.done, try @import("session_io.zig").processRpc(&f.g, 0, &turn, &credit));
     try t.expectEqual(@as(usize, 1), f.g.recovery.len);
@@ -702,7 +703,7 @@ test "gossip replacement keeps original arrival age across dependency promotion 
         for (later.tokens[0..later.len]) |token| try t.expect(f.table.get(token) != null);
         try t.expectEqual(@as(usize, 4), f.table.diag.occupied);
         try t.expectEqual(@as(u64, 1), f.table.diag.reportsAppliedIgnore);
-        try t.expectEqual(Gossipsub.ReportOutcome.already_resolved, f.g.report(first_handle, .reject, .{ .mono_ms = f.now, .unix_s = 0 }));
+        try t.expectEqual(Gossipsub.ReportOutcome.already_resolved, f.g.report(first_handle, .reject, Now.fromMilliseconds(.{ .mono_ms = f.now, .unix_s = 0 })));
         try t.expectEqual(@as(f64, 0), support.invalidDeliveries(&f.g));
     }
 }
@@ -729,7 +730,7 @@ test "gossip eviction scan is work charged and leaves candidates untouched on ex
         const id = @import("topic.zig").validMessageId(attestation, &data, .{});
         var compressed: [8192]u8 = undefined;
         const length = try snappy.raw.compress(&data, &compressed);
-        var turn = Gossipsub.beginPump(&f.g, .{ .mono_ms = f.now, .unix_s = 0 });
+        var turn = Gossipsub.beginPump(&f.g, Now.fromMilliseconds(.{ .mono_ms = f.now, .unix_s = 0 }));
         var credit = @import("turn.zig").Credits.peer(&f.g.options);
         // Stop either after inspecting the older other-kind cell or after selecting
         // and charging a victim, immediately before its repeated joint preflight.
@@ -797,7 +798,7 @@ test "gossip local replacement suppresses push and IHAVE through the retained ig
     try t.expectEqual(@as(u64, 1), f.table.diag.reportsAppliedIgnore);
     try t.expect(!f.g.messages.wasSeen(id, f.now));
     try t.expectEqual(until, f.g.messages.validation.find(id, f.now).?.until);
-    try t.expectEqual(Gossipsub.ReportOutcome.already_resolved, f.g.report(handle, .reject, .{ .mono_ms = f.now, .unix_s = 0 }));
+    try t.expectEqual(Gossipsub.ReportOutcome.already_resolved, f.g.report(handle, .reject, Now.fromMilliseconds(.{ .mono_ms = f.now, .unix_s = 0 })));
     try t.expectEqual(@as(f64, 0), support.invalidDeliveries(&f.g));
 }
 

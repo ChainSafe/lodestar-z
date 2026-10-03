@@ -20,7 +20,7 @@ pub const Pair = struct {
     server_ctx: tls.Context = undefined,
     client: Engine = undefined,
     server: Engine = undefined,
-    now: Now = .{ .mono_ms = 1_000, .unix_s = now_unix },
+    now: Now = Now.fromMilliseconds(.{ .mono_ms = 1_000, .unix_s = now_unix }),
     first_initial: [constants.datagram_size_max]u8 = undefined,
     first_initial_len: usize = 0,
     drop_to_server: bool = false,
@@ -60,7 +60,7 @@ pub const Pair = struct {
             self.server_ctx.deinit();
             return err;
         };
-        self.now = .{ .mono_ms = 1_000, .unix_s = now_unix };
+        self.now = Now.fromMilliseconds(.{ .mono_ms = 1_000, .unix_s = now_unix });
         self.first_initial_len = 0;
         self.drop_to_server = false;
         self.client_source = client_address;
@@ -87,7 +87,7 @@ pub const Pair = struct {
     }
 
     pub fn advance(self: *Pair, ms: u64) void {
-        self.now.mono_ms += ms;
+        self.now.monotonic = @import("../time.zig").milliseconds(self.now.millis() + ms);
     }
 
     /// Delivers datagrams both ways and runs both engines' timer and readiness phases until

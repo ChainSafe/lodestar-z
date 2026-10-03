@@ -5,7 +5,7 @@ const keys = @import("wire/keys.zig");
 const multiaddr = @import("wire/multiaddr.zig");
 const Transport = @import("transport.zig").Transport;
 
-const step_options = @import("transport_driver.zig").Options{ .wait_max_ms = 10 };
+const step_options = @import("transport_driver.zig").Options{ .wait_max = .fromMilliseconds(10) };
 const payload_len = 64 * 1024;
 
 fn initTransport(target: *Transport, seed: u8) !void {
@@ -124,13 +124,13 @@ test "dual-stack transport authenticates both families through one connection bu
         var connected: [2]bool = .{ false, false };
         var events: [8]Engine.Event = undefined;
         for (0..400) |_| {
-            const result = try support.step(&hub, std.testing.io, &events, .{ .wait_max_ms = 1 });
+            const result = try support.step(&hub, std.testing.io, &events, .{ .wait_max = .fromMilliseconds(1) });
             for (events[0..result.events]) |event| if (event == .connected) {
                 const peer = hub.engine.peerAddress(event.connected.conn).?;
                 connected[if (peer == .ip4) @as(usize, 0) else 1] = true;
             };
-            _ = try support.step(&peer4, std.testing.io, &events, .{ .wait_max_ms = 1 });
-            _ = try support.step(&peer6, std.testing.io, &events, .{ .wait_max_ms = 1 });
+            _ = try support.step(&peer4, std.testing.io, &events, .{ .wait_max = .fromMilliseconds(1) });
+            _ = try support.step(&peer6, std.testing.io, &events, .{ .wait_max = .fromMilliseconds(1) });
             if (connected[0] and connected[1]) break;
         }
         try std.testing.expect(connected[0] and connected[1]);

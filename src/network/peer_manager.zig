@@ -1,4 +1,5 @@
 const std = @import("std");
+const time = @import("time.zig");
 const capabilities = @import("capabilities.zig");
 const t = @import("peers/types.zig");
 const peers = @import("peers/root.zig");
@@ -63,9 +64,10 @@ pub const PeerManager = struct {
     native_dial_room: u16 = 0,
     metadata_freshness_ms: u64,
     policy_seed: u64,
-    stopped: bool = false,
-    quiescing: bool = false,
+    phase: Phase = .running,
     counters: Counters = .{},
+
+    pub const Phase = enum { running, quiescing, stopping };
 
     /// Uncached selection work, which the caching and bounded-work tests and the network bench read.
     pub const Counters = struct {
@@ -136,6 +138,7 @@ pub const PeerManager = struct {
         endpoint: t.Address,
         now: Now,
     ) ?@FieldType(peers.Catalog.Admission, "admitted") {
+        if (self.phase != .running) return null;
         const identity = event.peer_id;
         const decision = self.catalog.admit(
             &identity,
@@ -144,10 +147,10 @@ pub const PeerManager = struct {
             &.{
                 .direction = event.direction,
                 .endpoint = endpoint,
-                .now_ms = now.mono_ms,
+                .now_ms = now.millis(),
                 .outbound_reserved = self.dialing.options.outbound_reserved,
                 .pending_dials = self.dialing.answeredPeers(&self.catalog, &identity),
-                .selected_dial = self.dialing.selectedPeer(&self.catalog, &identity, now.mono_ms),
+                .selected_dial = self.dialing.selectedPeer(&self.catalog, &identity, now.millis()),
             },
         );
         switch (decision) {
@@ -158,7 +161,7 @@ pub const PeerManager = struct {
             },
             else => {
                 std.log.scoped(.network_peers).debug("peer_admission_refused peer={f} connection={d}:{d} reason={s}", .{ @import("logging.zig").peer(&identity), event.conn.index, event.conn.generation, @tagName(decision) });
-                _ = self.dialing.deferConnection(&self.catalog, event.conn, now.mono_ms);
+                _ = self.dialing.deferConnection(&self.catalog, event.conn, now.millis());
                 return null;
             },
         }
@@ -167,20 +170,20 @@ pub const PeerManager = struct {
     /// cancelling, so the old request reservation remains until its terminal event.
     fn connected(self: *PeerManager, peer: t.PeerRef, conn: t.Handle, direction: t.Direction, now: Now) void {
         self.control.connected(&self.catalog, peer, conn, direction, now);
-        self.dialing.accepted(&self.catalog, peer, conn, now.mono_ms);
+        self.dialing.accepted(&self.catalog, peer, conn, now.millis());
     }
     /// Stops selecting new work once, while the core releases existing I/O.
     pub fn stop(self: *PeerManager) bool {
-        if (self.stopped) return false;
-        self.stopped = true;
+        if (self.phase == .stopping) return false;
+        self.phase = .stopping;
         self.selection = .{};
         self.discovery_need = .{};
         return true;
     }
     /// Stops application demand while preserving control progress for graceful Goodbye.
     pub fn quiesce(self: *PeerManager, now: Now) bool {
-        if (self.stopped or self.quiescing) return false;
-        self.quiescing = true;
+        if (self.phase != .running) return false;
+        self.phase = .quiescing;
         self.selection = .{};
         self.discovery_need = .{};
         for (self.catalog.rows, 0..) |row, index| {
@@ -193,7 +196,7 @@ pub const PeerManager = struct {
     /// Settles an ended dial and connection once. Preserve remote evidence before retirement
     /// releases Status, Metadata and intent state. The caller then cancels protocol/gossip I/O.
     pub fn transportClosed(self: *PeerManager, closed: *const @FieldType(Engine.Event, "closed"), goodbye: ?u64, now: Now) ?Retired {
-        _ = self.dialing.dialClosed(&self.catalog, closed.conn, closed.reason, now.mono_ms);
+        _ = self.dialing.dialClosed(&self.catalog, closed.conn, closed.reason, now.millis());
         const peer = self.catalog.findConnection(closed.conn) orelse return null;
         if (goodbye) |code| self.control.receivedGoodbye(&self.catalog, peer, closed.conn, code, true);
         if (closed.reason == .peer_closed) self.control.remoteClosed(peer, closed.conn);
@@ -207,7 +210,7 @@ pub const PeerManager = struct {
         const current = self.catalog.findConnection(conn) orelse return null;
         if (!std.meta.eql(current, peer)) return null;
         if (!self.control.close(&self.catalog, peer, conn, reason, now)) return null;
-        const disconnected = self.catalog.disconnect(peer, conn, reason, now.mono_ms);
+        const disconnected = self.catalog.disconnect(peer, conn, reason, now.millis());
         std.debug.assert(disconnected);
         return .{ .peer = peer, .conn = conn };
     }
@@ -248,23 +251,23 @@ pub const PeerManager = struct {
     }
     /// Reconciles at the supplied clock without pumping protocols or borrowing an Engine.
     pub fn reconcile(self: *PeerManager, gossipsub: *gossip.Gossipsub, now: Now) void {
-        if (self.stopped or self.quiescing) return;
-        self.catalog.refresh(now.mono_ms);
-        const expired = if (self.reconciliation_deadline) |due| now.mono_ms >= due else false;
-        if (self.policySchedule(gossipsub).due(now.mono_ms) or expired) {
+        if (self.phase != .running) return;
+        self.catalog.refresh(now.millis());
+        const expired = if (self.reconciliation_deadline) |due| now.millis() >= due else false;
+        if (self.policySchedule(gossipsub).due(now.monotonic) or expired) {
             self.refreshSelection(gossipsub, now);
-            self.coverage_reconcile_after_ms = now.mono_ms +| coverage_reconcile_interval_ms;
+            self.coverage_reconcile_after_ms = now.millis() +| coverage_reconcile_interval_ms;
             self.refreshDiscoveryNeed();
             const revision = self.currentSelectionRevision(gossipsub);
             self.selection_revision = if (revision.cacheable()) revision else null;
-            const catalog_deadline = self.catalogDeadline(now.mono_ms);
+            const catalog_deadline = self.catalogDeadline(now.millis());
             self.reconciliation_deadline = catalog_deadline;
             if (self.selection_deadline) |due| self.reconciliation_deadline = @min(self.reconciliation_deadline orelse due, due);
             self.dialing.selection_dirty = true;
         }
-        if (self.dialing.selectionNeeded(&self.catalog) or (if (self.dialing.selection_deadline) |due| now.mono_ms >= due else false)) {
+        if (self.dialing.selectionNeeded(&self.catalog) or (if (self.dialing.selection_deadline) |due| now.millis() >= due else false)) {
             self.counters.candidate_selections +|= 1;
-            self.dialing.configureSelection(&self.catalog, &self.selection.deficits.missing, self.selection.retained_count < self.catalog.options.target_peers or self.selection.deficits.outbound > 0, &self.local.fork, now.mono_ms);
+            self.dialing.configureSelection(&self.catalog, &self.selection.deficits.missing, self.selection.retained_count < self.catalog.options.target_peers or self.selection.deficits.outbound > 0, &self.local.fork, now.millis());
         }
     }
     fn currentSelectionRevision(self: *const PeerManager, gossipsub: *const gossip.Gossipsub) SelectionRevision {
@@ -275,7 +278,7 @@ pub const PeerManager = struct {
         const after = self.currentSelectionRevision(gossipsub);
         if (before.catalog != after.catalog or before.delivery != after.delivery) return .{ .runnable = true };
         if (!after.cacheable() or !std.meta.eql(before.gossip, after.gossip))
-            return .{ .deadline_ms = self.coverage_reconcile_after_ms };
+            return .{ .deadline = time.optionalMilliseconds(self.coverage_reconcile_after_ms) };
         return .{};
     }
     /// Observes transport progress before admission or dial selection. Admission itself consumes
@@ -318,9 +321,9 @@ pub const PeerManager = struct {
         return result;
     }
     fn enqueueDiscovered(self: *PeerManager, candidate: *const peers.enr.Candidate, now: Now) !void {
-        if (self.stopped) return error.Stopped;
+        if (self.phase != .running) return error.Stopped;
         if (candidate.peer.eql(&self.local_identity)) return error.SelfDial;
-        try self.dialing.enqueueDiscovered(&self.catalog, candidate, &self.local.fork, &self.selection.deficits.missing, now.mono_ms);
+        try self.dialing.enqueueDiscovered(&self.catalog, candidate, &self.local.fork, &self.selection.deficits.missing, now.millis());
     }
     fn refreshSelection(self: *PeerManager, gossipsub: *gossip.Gossipsub, now: Now) void {
         self.counters.selections +|= 1;
@@ -337,17 +340,17 @@ pub const PeerManager = struct {
             input_count += 1;
             input.* = self.selectionInput(gossipsub, snapshot, conn, &local_subscriptions, now);
             const grace = snapshot.connected_at_ms +| self.control.options.inbound_status_grace_ms;
-            if (input.reject == null and now.mono_ms < grace) {
+            if (input.reject == null and now.millis() < grace) {
                 input.evaluating = true;
                 self.selection_deadline = @min(self.selection_deadline orelse grace, grace);
             }
         }
-        self.selection = policy.selectWithPacing(self.policy_scratch[0..input_count], &self.demand, self.catalog.options, self.policy_seed, now.mono_ms >= self.replacement_after_ms);
+        self.selection = policy.selectWithPacing(self.policy_scratch[0..input_count], &self.demand, self.catalog.options, self.policy_seed, now.millis() >= self.replacement_after_ms);
         for (self.policy_scratch[0..input_count], 0..) |input, i| if (self.selection.reasons[i]) |reason| {
             _ = self.disconnect(input.peer, reason, now);
-            if (reason == .count_pruning) self.replacement_after_ms = now.mono_ms +| replacement_interval_ms;
+            if (reason == .count_pruning) self.replacement_after_ms = now.millis() +| replacement_interval_ms;
         };
-        if (now.mono_ms < self.replacement_after_ms)
+        if (now.millis() < self.replacement_after_ms)
             self.selection_deadline = @min(self.selection_deadline orelse self.replacement_after_ms, self.replacement_after_ms);
     }
 
@@ -374,7 +377,7 @@ pub const PeerManager = struct {
                 gossipsub.graylistThreshold(),
             ),
         };
-        if (snapshot.ban_until_ms > now.mono_ms or snapshot.score <= peers.reputation.ban_score)
+        if (snapshot.ban_until_ms > now.millis() or snapshot.score <= peers.reputation.ban_score)
             input.reject = .banned;
         if (snapshot.status) |status| {
             if (!std.mem.eql(u8, &status.fork_digest, &self.local.fork.digest))
@@ -396,7 +399,7 @@ pub const PeerManager = struct {
         const metadata = snapshot.metadata orelse return input;
         control_values.validateMetadata(&metadata, self.local.fork) catch return input;
         const deadline = snapshot.metadata_at_ms +| self.metadata_freshness_ms;
-        if (now.mono_ms >= deadline) return input;
+        if (now.millis() >= deadline) return input;
         self.selection_deadline = @min(self.selection_deadline orelse deadline, deadline);
         if (delivery == .available) {
             input.ready = !self.local.fork.fork.gte(.fulu) or snapshot.sampling_groups != null;
@@ -435,11 +438,11 @@ pub const PeerManager = struct {
     pub fn commitLocal(self: *PeerManager, local: *const t.LocalState, now: Now) void {
         self.local = local.*;
         var budget: u16 = 0;
-        _ = self.catalog.advanceCustody(&self.local.fork, now.mono_ms, self.metadata_freshness_ms, &budget);
+        _ = self.catalog.advanceCustody(&self.local.fork, now.millis(), self.metadata_freshness_ms, &budget);
         self.selection_revision = null;
     }
     pub fn reStatusPeer(self: *PeerManager, peer: t.PeerRef, connection: t.Handle, now: Now) bool {
-        if (self.stopped) return false;
+        if (self.phase == .stopping) return false;
         return self.control.reStatusPeer(&self.catalog, peer, connection, now);
     }
     pub fn reStatusPeers(self: *PeerManager, now: Now) void {
@@ -451,7 +454,7 @@ pub const PeerManager = struct {
         action: t.PeerAction,
         now: Now,
     ) ?t.ReputationDecision {
-        const decision = self.catalog.report(peer, action, now.mono_ms) orelse return null;
+        const decision = self.catalog.report(peer, action, now.millis()) orelse return null;
         self.selection_revision = null;
         if (decision != .none) _ = self.disconnect(
             peer,
@@ -466,26 +469,26 @@ pub const PeerManager = struct {
         addresses: []const t.Address,
         now: Now,
     ) !void {
-        return self.connectUntil(identity, addresses, now, now.mono_ms +| peers.Dialing.connect_timeout_ms);
+        return self.connectUntil(identity, addresses, now, now.millis() +| peers.Dialing.connect_timeout_ms);
     }
     pub fn connectUntil(self: *PeerManager, identity: *const t.PeerId, addresses: []const t.Address, now: Now, deadline_ms: u64) !void {
-        if (self.stopped) return error.Stopped;
+        if (self.phase != .running) return error.Stopped;
         if (identity.eql(&self.local_identity)) return error.SelfDial;
-        try self.dialing.enqueueUntil(&self.catalog, identity, addresses, false, now.mono_ms, deadline_ms);
+        try self.dialing.enqueueUntil(&self.catalog, identity, addresses, false, now.millis(), deadline_ms);
         self.selection_revision = null;
     }
     pub fn cancelConnect(self: *PeerManager, engine: *Engine, identity: *const t.PeerId, now: Now) void {
-        if (self.dialing.cancelConnect(&self.catalog, identity, now.mono_ms)) |conn| closeDial(engine, conn);
+        if (self.dialing.cancelConnect(&self.catalog, identity, now.millis())) |conn| closeDial(engine, conn);
         self.selection_revision = null;
     }
     pub fn expireDials(self: *PeerManager, engine: *Engine, now: Now) void {
         var close: [peers.Dialing.attempts_max]t.Handle = undefined;
-        const count = self.dialing.expire(&self.catalog, now.mono_ms, &close);
+        const count = self.dialing.expire(&self.catalog, now.millis(), &close);
         for (close[0..count]) |conn| closeDial(engine, conn);
     }
     pub fn shutdownDials(self: *PeerManager, engine: *Engine, now: Now) void {
         var close: [peers.Dialing.attempts_max]t.Handle = undefined;
-        const count = self.dialing.shutdown(&self.catalog, now.mono_ms, &close);
+        const count = self.dialing.shutdown(&self.catalog, now.millis(), &close);
         for (close[0..count]) |conn| closeDial(engine, conn);
     }
     fn closeDial(engine: *Engine, conn: t.Handle) void {
@@ -493,7 +496,7 @@ pub const PeerManager = struct {
     }
     pub fn advanceCustody(self: *PeerManager, now: Now) void {
         var budget: u16 = peers.custody.hashes_per_turn;
-        self.custody_pending = self.catalog.advanceCustody(&self.local.fork, now.mono_ms, self.metadata_freshness_ms, &budget);
+        self.custody_pending = self.catalog.advanceCustody(&self.local.fork, now.millis(), self.metadata_freshness_ms, &budget);
         self.counters.custody_hashes +|= peers.custody.hashes_per_turn - budget;
     }
     /// Returns the peer's current connection, which the owner marks direct in gossip.
@@ -503,12 +506,12 @@ pub const PeerManager = struct {
         addresses: []const t.Address,
         now: Now,
     ) !?t.Handle {
-        if (self.stopped) return error.Stopped;
+        if (self.phase != .running) return error.Stopped;
         if (identity.eql(&self.local_identity)) return error.SelfDial;
         const already_direct = if (self.catalog.find(identity)) |peer| self.catalog.rowFor(peer).?.direct else false;
         if (!already_direct and self.catalog.direct_count >= self.catalog.options.target_peers - self.catalog.options.min_outbound)
             return error.DirectPeerCapacity;
-        try self.dialing.enqueue(&self.catalog, identity, addresses, true, now.mono_ms);
+        try self.dialing.enqueue(&self.catalog, identity, addresses, true, now.millis());
         self.selection_revision = null;
         const peer = self.catalog.find(identity) orelse return null;
         _ = self.catalog.setDirect(peer, true);
@@ -544,15 +547,15 @@ pub const PeerManager = struct {
         now: Now,
         out: []peers.Dialing.DialIntent,
     ) usize {
-        if (self.stopped) return 0;
+        if (self.phase != .running) return 0;
         self.reconcile(gossipsub, now);
         self.transportProgress(engine);
-        const count = self.dialing.poll(&self.catalog, now.mono_ms, out[0..@min(out.len, self.dialRoom())]);
+        const count = self.dialing.poll(&self.catalog, now.millis(), out[0..@min(out.len, self.dialRoom())]);
         // Replay refills the remembered candidates waiting for a paced first attempt after poll
         // started some, so their eligibility keys wake the owner for the next.
         if (self.discovery_need.general) _ = self.dialing.replayRemembered(&self.catalog, &self.local.fork, &self.selection.deficits.missing, now);
         if (count > 0 and self.selection.retained_count >= self.catalog.options.target_peers and self.selection.deficits.outbound == 0) {
-            self.replacement_after_ms = now.mono_ms +| replacement_interval_ms;
+            self.replacement_after_ms = now.millis() +| replacement_interval_ms;
             self.selection_revision = null;
         }
         return count;
@@ -561,10 +564,10 @@ pub const PeerManager = struct {
         return self.dialing.dialStarted(token, conn);
     }
     pub fn dialDeferred(self: *PeerManager, token: peers.Dialing.Token, now: Now) bool {
-        return self.dialing.dialDeferred(&self.catalog, token, now.mono_ms);
+        return self.dialing.dialDeferred(&self.catalog, token, now.millis());
     }
     pub fn dialFailed(self: *PeerManager, token: peers.Dialing.Token, now: Now) bool {
-        return self.dialing.dialFailed(&self.catalog, token, now.mono_ms);
+        return self.dialing.dialFailed(&self.catalog, token, now.millis());
     }
     pub fn snapshots(self: *const PeerManager, out: []t.Snapshot) usize {
         return self.catalog.snapshots(out);

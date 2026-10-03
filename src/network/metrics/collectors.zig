@@ -40,7 +40,7 @@ fn writeRuntime(self: *const Context, w: *prom.Encoder) prom.Error!void {
         try w.scalar(.{ .name = "lodestar_discv5_active_session_count", .kind = .gauge, .help = "Stored discovery sessions" }, self.live(discovery.transport.engine.channel.sessions.sessionCount()));
         try w.scalar(.{ .name = "lodestar_discv5_kad_table_size", .kind = .gauge, .help = "Discovery routing table entries" }, self.live(discovery.transport.engine.peerCount()));
     }
-    try w.scalar(.{ .name = "lodestar_native_network_metrics_updated_timestamp_seconds", .kind = .gauge, .help = "Unix time at which the owner last collected this metrics export", .unit = .seconds }, self.now.unix_s);
+    try w.scalar(.{ .name = "lodestar_native_network_metrics_updated_timestamp_seconds", .kind = .gauge, .help = "Unix time at which the owner last collected this metrics export", .unit = .seconds }, self.now.unixSeconds());
     try w.scalar(.{ .name = "lodestar_native_network_running", .kind = .gauge, .help = "Network owner is running" }, @intFromBool(self.running));
     try w.scalar(.{ .name = "lodestar_native_network_transport_failures_total", .kind = .counter, .help = "Failed owner clock reads and transport receive steps" }, self.owner.counters.transport_failures);
     try w.scalar(.{ .name = "lodestar_native_network_readiness_failures_total", .kind = .counter, .help = "Failed owner readiness polls" }, self.owner.counters.readiness_failures);
@@ -252,7 +252,7 @@ fn writeGossip(self: *const Context, w: *prom.Encoder) prom.Error!void {
 }
 
 fn writeGossipScores(self: *const Context, w: *prom.Encoder) prom.Error!void {
-    try gossip_metrics.writeScores(self.owner.service.gossipsub, self.running, self.now.mono_ms, w);
+    try gossip_metrics.writeScores(self.owner.service.gossipsub, self.running, self.now.millis(), w);
 }
 
 fn writeGossipTopics(self: *const Context, w: *prom.Encoder) prom.Error!void {

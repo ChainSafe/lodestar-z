@@ -46,7 +46,7 @@ test "gossipsub pinned payload pressure drops the publication and releases recei
     try std.testing.expectEqual(@as(usize, 1), g.messages.pendingValidations());
     try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[peer].io.overflow.pages);
     try std.testing.expect(g.sessions.rows[peer].io.rpc == null);
-    try std.testing.expect(!g.messages.wasSeen(refused_id, setup.shared.pair.now.mono_ms));
+    try std.testing.expect(!g.messages.wasSeen(refused_id, setup.shared.pair.now.millis()));
     try std.testing.expectEqual(@as(u64, 0), g.counters.local_pressure_resets);
     _ = g.report(handle.?, .ignore, setup.shared.pair.now);
     payload[0] ^= 1;
@@ -148,13 +148,13 @@ test "gossip lifecycle sequence preserves ownership under pressure reconnect and
     inbox.attach(&g);
     var handles: [8]?ValidationHandle = @splat(null);
     for (0..512) |step| {
-        const now: Now = .{ .mono_ms = step * 17 + 1, .unix_s = 0 };
-        g.last_now_ms = now.mono_ms;
+        const now: Now = Now.fromMilliseconds(.{ .mono_ms = step * 17 + 1, .unix_s = 0 });
+        g.last_now_ms = now.millis();
         const value = rng.random().uintLessThan(u8, 8);
         const payload = [_]u8{'a' + value};
         switch (rng.random().uintLessThan(u8, 9)) {
             0, 1 => {
-                if (try testMessage(&g, source.index, &payload, now.mono_ms)) |count| {
+                if (try testMessage(&g, source.index, &payload, now.millis())) |count| {
                     if (count == 1) handles[value] = inbox.last().handle;
                     inbox.clear();
                 }
@@ -168,7 +168,7 @@ test "gossip lifecycle sequence preserves ownership under pressure reconnect and
                     else => return err,
                 };
             },
-            4 => g.messages.expire(&g.peers, now.mono_ms),
+            4 => g.messages.expire(&g.peers, now.millis()),
             5 => {
                 g.connectionClosed(conn);
                 conn.generation += 1;
@@ -251,7 +251,7 @@ test "gossip validation finishes without allocation while shared deliveries are 
     allocator.fail_index = allocator.alloc_index;
     var compressed: [64]u8 = undefined;
     const len = try @import("snappy").raw.compress("valid message", &compressed);
-    const now: @import("../types.zig").Now = .{ .mono_ms = 1, .unix_s = 0 };
+    const now: @import("../types.zig").Now = Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 });
     var inbox: support.Inbox = .{};
     defer inbox.deinit();
     inbox.attach(&g);

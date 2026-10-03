@@ -43,7 +43,7 @@ const Exchange = struct {
         const now = self.setup.shared.pair.now;
         for (events) |event| switch (event) {
             .request => |incoming| {
-                self.delivered[self.delivered_len] = .{ .index = incoming.request.index, .protocol = incoming.protocol, .at_ms = now.mono_ms };
+                self.delivered[self.delivered_len] = .{ .index = incoming.request.index, .protocol = incoming.protocol, .at_ms = now.millis() };
                 self.delivered_len += 1;
                 if (incoming.protocol.requiresResponse()) {
                     try owner.respond(incoming.request, &ping, null, now);
@@ -106,7 +106,7 @@ test "reqresp request start sequential requests past the quota negotiate, wait f
     defer std.testing.allocator.free(sink);
     for ([_]u64{ 0, 0, refill_ms, refill_ms }, 0..) |wait, ordinal| {
         const handle = try request(&setup, .blocks_by_root_v2, sink);
-        const sent = setup.shared.pair.now.mono_ms;
+        const sent = setup.shared.pair.now.millis();
         if (wait > 0) {
             try exchange.pumps(20);
             try std.testing.expectEqual(@as(?rr.Failure, null), exchange.client_failure);
@@ -139,7 +139,7 @@ test "reqresp request start waiters take one refill each in arrival order, not s
     var sinks: [methods.len][]u8 = undefined;
     for (methods, &sinks) |which, *sink| sink.* = try std.testing.allocator.alloc(u8, which.info().response_max);
     defer for (sinks) |sink| std.testing.allocator.free(sink);
-    const start = setup.shared.pair.now.mono_ms;
+    const start = setup.shared.pair.now.millis();
     for (methods[0..2], sinks[0..2]) |which, sink| _ = try request(&setup, which, sink);
     try exchange.pumps(20);
     try std.testing.expectEqual(@as(usize, 2), exchange.done);
@@ -148,13 +148,13 @@ test "reqresp request start waiters take one refill each in arrival order, not s
         setup.shared.pair.advance(@intFromBool(ordinal > 0));
         _ = try request(&setup, which, sink);
         try exchange.pumps(20);
-        arrival.* = try waiterAt(owner, setup.shared.pair.now.mono_ms);
+        arrival.* = try waiterAt(owner, setup.shared.pair.now.millis());
     }
     try std.testing.expectEqual(@as(usize, 4), waitingStarts(owner));
     try std.testing.expect(arrivals[1] < arrivals[0] and arrivals[3] < arrivals[2]);
     for (arrivals, 0..) |arrival, refill| {
         const due = start + (refill + 1) * refill_ms;
-        setup.shared.pair.advance(due - 1 - setup.shared.pair.now.mono_ms);
+        setup.shared.pair.advance(due - 1 - setup.shared.pair.now.millis());
         try exchange.pumps(5);
         try std.testing.expectEqual(2 + refill, exchange.delivered_len);
         setup.shared.pair.advance(1);
@@ -180,7 +180,7 @@ test "reqresp request start a request arriving as a refill falls due cannot take
     defer std.testing.allocator.free(blocks);
     const blobs = try std.testing.allocator.alloc(u8, Protocol.blob_sidecars_by_root_v1.info().response_max);
     defer std.testing.allocator.free(blobs);
-    const start = setup.shared.pair.now.mono_ms;
+    const start = setup.shared.pair.now.millis();
     for (0..2) |_| _ = try request(&setup, .blocks_by_root_v2, blocks);
     try exchange.pumps(20);
     _ = try request(&setup, .blob_sidecars_by_root_v1, blobs);
@@ -220,7 +220,7 @@ test "reqresp request start control requests keep their own starts while applica
     const sink = try std.testing.allocator.alloc(u8, Protocol.blocks_by_root_v2.info().response_max);
     defer std.testing.allocator.free(sink);
     var pongs: [3][8]u8 = undefined;
-    const start = setup.shared.pair.now.mono_ms;
+    const start = setup.shared.pair.now.millis();
     for (0..3) |_| {
         _ = try request(&setup, .blocks_by_root_v2, sink);
         try exchange.pumps(20);
@@ -254,7 +254,7 @@ test "reqresp request start a cancelled waiter leaves no start reserved" {
     const identity = setup.shared.pair.server.peerId(setup.shared.handles.server).?;
     const sink = try std.testing.allocator.alloc(u8, Protocol.blocks_by_root_v2.info().response_max);
     defer std.testing.allocator.free(sink);
-    const start = setup.shared.pair.now.mono_ms;
+    const start = setup.shared.pair.now.millis();
     for (0..2) |_| _ = try request(&setup, .blocks_by_root_v2, sink);
     try exchange.pumps(20);
     try std.testing.expectEqual(start + refill_ms, owner.admission.limiter.startAt(&identity, false, start));
@@ -286,7 +286,7 @@ test "reqresp request start shutdown cancels its waiters without charging them" 
     const sink = try std.testing.allocator.alloc(u8, Protocol.blocks_by_root_v2.info().response_max);
     defer std.testing.allocator.free(sink);
     var pongs: [3][8]u8 = undefined;
-    const start = setup.shared.pair.now.mono_ms;
+    const start = setup.shared.pair.now.millis();
     for (0..2) |_| _ = try request(&setup, .blocks_by_root_v2, sink);
     for (pongs[0..2]) |*pong| _ = try request(&setup, .ping_v1, pong);
     try exchange.pumps(20);
@@ -325,14 +325,14 @@ test "reqresp request start preserves distinct protocol peer and identity capaci
     defer std.testing.allocator.free(blobs);
     // Another identity holds the only limiter row until its start expires.
     const stranger: PeerId = .{ .bytes = @splat(9) };
-    try std.testing.expectEqual(.allowed, owner.admission.limiter.start(&stranger, false, setup.shared.pair.now.mono_ms));
+    try std.testing.expectEqual(.allowed, owner.admission.limiter.start(&stranger, false, setup.shared.pair.now.millis()));
     _ = try request(&setup, .blocks_by_root_v2, blocks);
     try exchange.pumps(20);
     try std.testing.expectEqual(rr.Failure{ .negotiation_failed = .stream_closed }, exchange.client_failure.?);
     try std.testing.expectEqual(@as(u64, 1), refusals(owner, .blocks_by_root_v2, .identity_capacity));
     exchange.client_failure = null;
     setup.shared.pair.advance(refill_ms);
-    const start = setup.shared.pair.now.mono_ms;
+    const start = setup.shared.pair.now.millis();
     for (0..2) |_| _ = try request(&setup, .blocks_by_root_v2, blocks);
     try exchange.pumps(20);
     try std.testing.expectEqual(@as(usize, 2), exchange.done);
@@ -365,7 +365,7 @@ test "reqresp request start a request behind a waiter is still refused without a
     defer std.testing.allocator.free(blocks);
     const blobs = try std.testing.allocator.alloc(u8, Protocol.blob_sidecars_by_root_v1.info().response_max);
     defer std.testing.allocator.free(blobs);
-    const start = setup.shared.pair.now.mono_ms;
+    const start = setup.shared.pair.now.millis();
     for (0..2) |_| _ = try request(&setup, .blocks_by_root_v2, blocks);
     try exchange.pumps(20);
     try std.testing.expectEqual(@as(usize, 2), exchange.done);
@@ -375,7 +375,7 @@ test "reqresp request start a request behind a waiter is still refused without a
     const waiter = try waiterAt(owner, start);
     setup.shared.pair.advance(2 * refill_ms);
     const stranger: PeerId = .{ .bytes = @splat(9) };
-    try std.testing.expectEqual(.allowed, owner.admission.limiter.start(&stranger, false, setup.shared.pair.now.mono_ms));
+    try std.testing.expectEqual(.allowed, owner.admission.limiter.start(&stranger, false, setup.shared.pair.now.millis()));
     _ = try request(&setup, .blob_sidecars_by_root_v1, blobs);
     try exchange.pumps(20);
     try std.testing.expectEqual(@as(?rr.Failure, .{ .negotiation_failed = .stream_closed }), exchange.client_failure);
@@ -432,7 +432,7 @@ test "reqresp request start another identity progresses while one waits" {
     const limiter = &owner.admission.limiter;
     const waiting: PeerId = .{ .bytes = @splat(1) };
     const other: PeerId = .{ .bytes = @splat(2) };
-    const start = setup.shared.pair.now.mono_ms;
+    const start = setup.shared.pair.now.millis();
     for (0..2) |_| try std.testing.expectEqual(.allowed, limiter.start(&waiting, false, start));
     const held = deferredSlot(owner, 1, .blocks_by_root_v2, &waiting, start);
     const free = deferredSlot(owner, 2, .blocks_by_root_v2, &other, start);
@@ -448,7 +448,7 @@ test "reqresp request start another identity progresses while one waits" {
     setup.shared.pair.advance(1);
     try std.testing.expectEqual(@as(usize, 1), pumpOwner(&setup, &events));
     try std.testing.expectEqual(held, events[0].request.request.index);
-    try std.testing.expectEqual(start + 2 * refill_ms, limiter.startAt(&waiting, false, setup.shared.pair.now.mono_ms));
+    try std.testing.expectEqual(start + 2 * refill_ms, limiter.startAt(&waiting, false, setup.shared.pair.now.millis()));
 }
 
 test "reqresp request start a waiter that then waits for serving is charged its start once" {
@@ -458,25 +458,25 @@ test "reqresp request start a waiter that then waits for serving is charged its 
     const owner = &setup.shared.server.reqresp;
     const limiter = &owner.admission.limiter;
     const identity: PeerId = .{ .bytes = @splat(1) };
-    const start = setup.shared.pair.now.mono_ms;
+    const start = setup.shared.pair.now.millis();
     for (0..2) |_| try std.testing.expectEqual(.allowed, limiter.start(&identity, false, start));
     // Retired but retained host work holds the identity's only serving entry.
     const holder: rr.RequestHandle = .{ .index = 0, .generation = 1, .direction = .inbound };
     const entry = owner.serving.available(&identity, false).?;
     _ = owner.serving.acquire(entry, holder, &identity, false);
-    try std.testing.expect(owner.retainServing(holder));
+    const serving = owner.retainServing(holder) orelse return error.TestUnexpectedResult;
     owner.serving.retire(entry);
     const index = deferredSlot(owner, 1, .blocks_by_root_v2, &identity, start);
     var events: [4]rr.Event = undefined;
     try std.testing.expectEqual(@as(usize, 0), pumpOwner(&setup, &events));
     setup.shared.pair.advance(refill_ms);
     for (0..3) |_| try std.testing.expectEqual(@as(usize, 0), pumpOwner(&setup, &events));
-    try std.testing.expectEqual(start + 2 * refill_ms, limiter.startAt(&identity, false, setup.shared.pair.now.mono_ms));
+    try std.testing.expectEqual(start + 2 * refill_ms, limiter.startAt(&identity, false, setup.shared.pair.now.millis()));
     setup.shared.pair.advance(refill_ms);
-    try std.testing.expect(owner.releaseServing(holder));
+    try std.testing.expect(owner.releaseServing(serving));
     try std.testing.expectEqual(@as(usize, 1), pumpOwner(&setup, &events));
     try std.testing.expectEqual(index, events[0].request.request.index);
-    try std.testing.expectEqual(start + 2 * refill_ms, limiter.startAt(&identity, false, setup.shared.pair.now.mono_ms));
+    try std.testing.expectEqual(start + 2 * refill_ms, limiter.startAt(&identity, false, setup.shared.pair.now.millis()));
 }
 
 test "reqresp protocol concurrency refusal preserves selection and returns a complete rate-limit response" {
@@ -537,7 +537,7 @@ test "reqresp request start hard capacity refusal preserves an available start w
         defer setup.deinit();
         const owner = &setup.shared.server.reqresp;
         if (application_cap) owner.options.inbound_application_per_peer_max = 1;
-        const now_ms = setup.shared.pair.now.mono_ms;
+        const now_ms = setup.shared.pair.now.millis();
         const held_stream = try setup.openRaw(.blocks_by_root_v2);
         try setup.awaitRawSelection(held_stream, .blocks_by_root_v2);
         const held_index: u16 = @intCast(Plan.first(setup.shared.handles.server.index, .blocks_by_root_v2));
@@ -559,7 +559,7 @@ test "reqresp request start hard capacity refusal preserves an available start w
         try exchange.pumps(20);
         try std.testing.expectEqual(@as(usize, 1), exchange.delivered_len);
         try std.testing.expectEqual(now_ms, exchange.delivered[0].at_ms);
-        try std.testing.expectEqual(now_ms, setup.shared.pair.now.mono_ms);
+        try std.testing.expectEqual(now_ms, setup.shared.pair.now.millis());
         try std.testing.expectEqual(@as(usize, 0), waitingStarts(owner));
         try std.testing.expectEqual(@as(?rr.Failure, null), exchange.client_failure);
     }

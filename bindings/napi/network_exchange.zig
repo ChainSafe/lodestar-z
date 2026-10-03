@@ -320,7 +320,7 @@ fn restoreLocked(runtime: *Runtime, selection: *const Selection) void {
             cell.state = .terminal;
             table.releasePayload(cell);
             table.refresh(cell);
-            if (cell.serving_retained) cell.release_requested = true else table.retire(token);
+            if (cell.serving != null) cell.release_requested = true else table.retire(token);
         }
     }
     if (selection.checks.len > 0) runtime.gossip.?.retryChecks(&selection.checks);

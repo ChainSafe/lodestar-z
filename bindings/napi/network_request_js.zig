@@ -15,12 +15,12 @@ fn optionsFor(value: Value) !n.reqresp.ReqResp.RequestOptions {
     try decode.object(value, &.{ "expectedChunks", "negotiationTimeoutMs", "requestTimeoutMs", "responseTimeoutMs" });
     const expected = try decode.get(value, "expectedChunks");
     if (try expected.typeof() != .undefined) result_options.expected_chunks = @intCast(try decode.integer(expected, std.math.maxInt(u32)));
-    inline for (.{ .{ "negotiationTimeoutMs", "negotiation_ms" }, .{ "requestTimeoutMs", "request_ms" }, .{ "responseTimeoutMs", "response_ms" } }) |names| {
+    inline for (.{ .{ "negotiationTimeoutMs", "negotiation" }, .{ "requestTimeoutMs", "request" }, .{ "responseTimeoutMs", "response" } }) |names| {
         const duration = try decode.get(value, names[0]);
         if (try duration.typeof() != .undefined) {
             const ms = try decode.integer(duration, 60000);
             if (ms == 0) return error.InvalidNetworkInteger;
-            @field(result_options.absolute_timeouts, names[1]) = ms;
+            @field(result_options.timeouts, names[1]) = .fromMilliseconds(@intCast(ms));
         }
     }
     return result_options;

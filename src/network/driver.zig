@@ -8,14 +8,14 @@ const wait = @import("wait.zig");
 /// The core and its borrowed descriptors must remain owned by this thread throughout the call.
 pub fn step(core: *NetworkCore, io: std.Io, now: Now, outputs: NetworkCore.Outputs, host: NetworkCore.Host) NetworkCore.Result {
     const plan = core.waitPlan(now, outputs, host);
-    const readiness = wait.poll(io, plan.sources, plan.timeout_ms);
+    const readiness = wait.poll(io, plan.sources, plan.timeout);
     var clock_failure: ?error{ClockOutOfRange} = null;
     const read = Transport.currentTime(io) catch |err| blk: {
         clock_failure = err;
         break :blk plan.now;
     };
     core.observeWait(&plan);
-    const tick = if (read.mono_ms >= plan.now.mono_ms) read else plan.now;
+    const tick = read.floor(plan.now);
     return core.advance(io, .{ .now = tick, .readiness = readiness, .clock_failure = clock_failure }, outputs, host);
 }
 

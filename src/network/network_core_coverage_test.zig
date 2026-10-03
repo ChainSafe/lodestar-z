@@ -1,3 +1,4 @@
+const schedule_test_support = @import("schedule_test_support.zig");
 const gossip_test = @import("gossipsub/test_support.zig");
 const std = @import("std");
 const manager = @import("peer_manager.zig");
@@ -84,8 +85,8 @@ test "core coverage coalesces subscription and score changes with operation elig
     gossip_test.control(g, index, .{ .subscription = .{ .topic = attestation, .subscribe = true } }, setup.pair.now);
     setup.client.peer_manager.reconcile(setup.client.service.gossipsub, setup.pair.now);
     try equal(baseline, setup.client.peer_manager.counters.selections);
-    const due = setup.client.peer_manager.policySchedule(setup.client.service.gossipsub).nextWakeup(setup.pair.now.mono_ms).?;
-    try equal(setup.pair.now.mono_ms + manager.coverage_reconcile_interval_ms, due);
+    const due = schedule_test_support.wakeupMilliseconds(setup.client.peer_manager.policySchedule(setup.client.service.gossipsub), setup.pair.now.millis()).?;
+    try equal(setup.pair.now.millis() + manager.coverage_reconcile_interval_ms, due);
     const revision = g.coverageRevision();
     for (0..100) |_| gossip_test.control(g, index, .{ .subscription = .{ .topic = attestation, .subscribe = true } }, setup.pair.now);
     try equal(revision, g.coverageRevision());
@@ -134,7 +135,7 @@ test "core coverage gives initial subscriptions finite grace even after metadata
     try expect(snapshots[0].metadata != null);
     try equal(@as(u16, 1), setup.client.peer_manager.selection.retained_count);
     const grace = snapshots[0].connected_at_ms + setup.client.peer_manager.control.options.inbound_status_grace_ms;
-    setup.pair.advance(grace - setup.pair.now.mono_ms - 1);
+    setup.pair.advance(grace - setup.pair.now.millis() - 1);
     try support.updateDemand(&setup.client, &.{ .attnets = 3 }, setup.pair.now);
     setup.client.peer_manager.reconcile(setup.client.service.gossipsub, setup.pair.now);
     try equal(@as(u16, 1), setup.client.peer_manager.selection.retained_count);
@@ -143,7 +144,7 @@ test "core coverage gives initial subscriptions finite grace even after metadata
     try equal(@as(u16, 0), setup.client.peer_manager.selection.retained_count);
     const closing = &setup.client.peer_manager.control.schedules[snapshots[0].peer.index];
     try expect(closing.closing != null);
-    try equal(setup.pair.now.mono_ms + manager.replacement_interval_ms, setup.client.peer_manager.replacement_after_ms);
+    try equal(setup.pair.now.millis() + manager.replacement_interval_ms, setup.client.peer_manager.replacement_after_ms);
     try equal(@as(u16, 1), setup.client.peer_manager.selection.dial_budget);
     try equal(@as(u16, 2), setup.client.peer_manager.coverageDeficits().attestation);
     const closed = closing.closing.?;

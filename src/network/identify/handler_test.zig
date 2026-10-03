@@ -1,4 +1,5 @@
 const std = @import("std");
+const schedule_test_support = @import("../schedule_test_support.zig");
 const support = @import("../quic/test_support.zig");
 const Engine = @import("../quic/Engine.zig");
 const identify = @import("root.zig");
@@ -41,7 +42,7 @@ test "identify delivers retained completions before recycled lower slots" {
         try std.testing.expectEqual(@as(u64, 2), result.peer.generation);
         try std.testing.expectEqual(identify.Handler.Failure.timeout, result.outcome.failed);
     }
-    try std.testing.expect(handler.schedule(1).nextWakeup(pair.now.mono_ms) == null);
+    try std.testing.expect(schedule_test_support.wakeupMilliseconds(handler.schedule(1), pair.now.millis()) == null);
 }
 
 test "identify validates capacities and cleans every allocation prefix" {
@@ -66,15 +67,15 @@ test "identify deadline includes stalled negotiation and retained completion doe
     const handles = try support.connectPair(&pair);
     var client = try @import("../service_test_support.zig").initService(std.testing.allocator, try options("client"), &pair.client);
     defer client.deinit();
-    const start = pair.now.mono_ms;
+    const start = pair.now.millis();
     try client.identify.start(&client.router, &pair.client, .{ .index = 0, .generation = 1 }, handles.client, pair.now);
-    pair.now.mono_ms = start + 4999;
+    pair.now.monotonic = @import("../time.zig").milliseconds(start + 4999);
     var results: [1]identify.Handler.Result = undefined;
     try std.testing.expectEqual(@as(usize, 0), client.identify.pump(&client.router, &pair.client, pair.now, &results));
-    try std.testing.expectEqual(start + 5000, client.identify.schedule(1).nextWakeup(pair.now.mono_ms).?);
-    pair.now.mono_ms += 1;
+    try std.testing.expectEqual(start + 5000, schedule_test_support.wakeupMilliseconds(client.identify.schedule(1), pair.now.millis()).?);
+    pair.now.monotonic = @import("../time.zig").milliseconds(pair.now.millis() + 1);
     try std.testing.expectEqual(@as(usize, 0), client.identify.pump(&client.router, &pair.client, pair.now, &.{}));
-    try std.testing.expect(client.identify.schedule(0).nextWakeup(pair.now.mono_ms) == null);
+    try std.testing.expect(schedule_test_support.wakeupMilliseconds(client.identify.schedule(0), pair.now.millis()) == null);
     try std.testing.expectEqual(@as(usize, 1), client.identify.pump(&client.router, &pair.client, pair.now, &results));
     try std.testing.expectEqual(identify.Handler.Failure.timeout, results[0].outcome.failed);
     try std.testing.expectEqual(@as(usize, 0), client.identify.pump(&client.router, &pair.client, pair.now, &results));
@@ -97,8 +98,8 @@ test "identify deadline includes stalled negotiation and retained completion doe
     try std.testing.expect(closed);
     try pair.pump();
     try std.testing.expectEqual(@as(usize, 0), step(&pair, &client, false, &results));
-    try std.testing.expect(client.router.schedule(1).nextWakeup(pair.now.mono_ms) == null);
-    try std.testing.expect(client.identify.schedule(1).nextWakeup(pair.now.mono_ms) == null);
+    try std.testing.expect(schedule_test_support.wakeupMilliseconds(client.router.schedule(1), pair.now.millis()) == null);
+    try std.testing.expect(schedule_test_support.wakeupMilliseconds(client.identify.schedule(1), pair.now.millis()) == null);
     client.identify.shutdown(&client.router, &pair.client);
     try std.testing.expectEqual(@as(usize, 0), client.identify.pump(&client.router, &pair.client, pair.now, &results));
 }
@@ -144,7 +145,7 @@ test "identify inbound timeout closes only withheld writer and shutdown releases
     }
     try std.testing.expect(refused);
     try std.testing.expectEqual(deadline, server.identify.inbound[0].deadline);
-    pair.now.mono_ms = deadline;
+    pair.now.monotonic = @import("../time.zig").milliseconds(deadline);
     _ = server.identify.pump(&server.router, &pair.server, pair.now, &.{});
     try std.testing.expect(server.identify.inbound[0].stream == null);
     try std.testing.expect(pair.server.peerId(handles.server) != null);

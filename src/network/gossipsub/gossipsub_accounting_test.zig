@@ -28,11 +28,11 @@ test "IWANT outcomes separate misses, suppression, the retransmission limit, que
     for (&known, 0..) |*id, i| {
         var text: [8]u8 = undefined;
         const payload = try std.fmt.bufPrint(&text, "iwant {d}", .{i});
-        _ = try g.publish(test_topic, payload, .{ .mono_ms = 1, .unix_s = 0 });
+        _ = try g.publish(test_topic, payload, Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 }));
         id.* = topic_mod.validMessageId(test_topic, payload, .{});
     }
     var body: [256]u8 = undefined;
-    const now: @import("../types.zig").Now = .{ .mono_ms = 2, .unix_s = 0 };
+    const now: @import("../types.zig").Now = Now.fromMilliseconds(.{ .mono_ms = 2, .unix_s = 0 });
     support.control(&g, peer.index, .{ .idontwant = .{ .body = ids(&body, 1, &.{known[2]}) } }, now);
     const unknown: MessageId = @splat(9);
     support.control(&g, peer.index, .{ .iwant = .{ .body = ids(&body, 1, &.{ unknown, known[2], known[0], known[0], known[0], known[0] }) } }, now);
@@ -60,7 +60,7 @@ test "gossip counts each consumed message once by topic kind and never on a work
     inbox.attach(&g);
     var compressed: [64]u8 = undefined;
     const message: protobuf.Message = .{ .topic = name, .data = compressed[0..try snappy.raw.compress("payload", &compressed)] };
-    const now: Now = .{ .mono_ms = 1, .unix_s = 0 };
+    const now: Now = Now.fromMilliseconds(.{ .mono_ms = 1, .unix_s = 0 });
     var turn = @import("turn.zig").Turn.init(&g.options, now, g.msg_scratch);
     turn.sink = g.message_sink;
     turn.large_used = true;

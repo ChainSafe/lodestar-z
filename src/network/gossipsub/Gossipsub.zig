@@ -1,4 +1,5 @@
 const std = @import("std");
+const time = @import("../time.zig");
 const session_io = @import("session_io.zig");
 const Router = @import("../router.zig").Router;
 const index_list = @import("../index_list.zig");
@@ -131,7 +132,7 @@ pub fn coverageSubscriptions(self: *Gossipsub, conn: Handle, digest: [4]u8, loca
     if (self.sessions.rows[index].outStream() == null) return .{};
     var result = self.overlay.subnetSubscriptions(index, digest);
     if (self.peers.rows[self.logical(index).index].direct) return result;
-    const value = self.peerScore(index, now.mono_ms);
+    const value = self.peerScore(index, now.millis());
     if (value < self.options.score_params.publish_threshold) return .{};
     if (value < 0) {
         result.attnets &= ~local.attnets;
@@ -229,7 +230,7 @@ fn reclaimTopic(self: *Gossipsub, topic: u16) void {
 pub fn prepareSubscriptions(self: *Gossipsub, subscriptions: []const local_intent.Boundary, workspace: *local_intent.Workspace, now: Now, slot: u64) local_intent.Error!bool {
     const context = self.overlayContext(self.last_now_ms);
     const pins = self.messages.topicPins();
-    return self.overlay.prepareSubscriptions(&context, &pins, subscriptions, workspace, now.mono_ms, slot);
+    return self.overlay.prepareSubscriptions(&context, &pins, subscriptions, workspace, now.millis(), slot);
 }
 
 pub fn commitSubscriptions(self: *Gossipsub, workspace: *local_intent.Workspace) void {
@@ -244,14 +245,14 @@ pub const PeerAdmission = union(enum) { admitted: sessions_mod.SessionRef, dupli
 
 /// Metadata must come from an authenticated transport connection. Refusal leaves transport usable.
 pub fn addPeer(self: *Gossipsub, conn: Handle, metadata: *const peers_mod.Metadata, now: Now) PeerAdmission {
-    self.last_now_ms = @max(self.last_now_ms, now.mono_ms);
+    self.last_now_ms = @max(self.last_now_ms, now.millis());
     if (self.sessions.find(conn)) |index| return .{ .admitted = .{ .index = index, .generation = self.sessions.peerGeneration(index) } };
     if (self.peers.find(&metadata.identity)) |ref| {
         if (self.peers.rows[ref.index].connection != null) return .duplicate;
     }
     const handle = self.sessions.addPeer(conn) orelse return .capacity;
     if (self.overlay.namespace) |*ns| ns.clearPeer(handle.index);
-    const admission_result = self.peers.admit(conn, metadata, now.mono_ms);
+    const admission_result = self.peers.admit(conn, metadata, now.millis());
     if (admission_result != .admitted) {
         self.sessions.removePeer(handle.index);
         return if (admission_result == .duplicate) .duplicate else .capacity;
@@ -302,7 +303,7 @@ pub fn publish(self: *Gossipsub, topic_str: []const u8, ssz: []const u8, now: No
 
 /// Admits one shared history payload; queued counts live stream queue admissions.
 pub fn publishWithOptions(self: *Gossipsub, topic_str: []const u8, ssz: []const u8, options: PublishOptions, now: Now) PublishError!PublishOutcome {
-    self.last_now_ms = @max(self.last_now_ms, now.mono_ms);
+    self.last_now_ms = @max(self.last_now_ms, now.millis());
     const now_ms = self.last_now_ms;
     if (ssz.len > constants.MAX_PAYLOAD_SIZE) return error.PayloadTooLarge;
     if (self.overlay.namespace) |*ns| {
@@ -332,9 +333,9 @@ fn messageContext(self: *Gossipsub) @import("messages.zig").Context {
 }
 
 pub fn report(self: *Gossipsub, handle: ValidationHandle, verdict: Verdict, now: Now) ReportOutcome {
-    self.last_now_ms = @max(self.last_now_ms, now.mono_ms);
+    self.last_now_ms = @max(self.last_now_ms, now.millis());
     const context = self.messageContext();
-    const result = self.messages.report(&context, handle, verdict, now.mono_ms);
+    const result = self.messages.report(&context, handle, verdict, now.millis());
     if (result == .applied) {
         const applied = &result.applied;
         const counts = self.topic_metrics.get(applied.topicString());
@@ -343,10 +344,10 @@ pub fn report(self: *Gossipsub, handle: ValidationHandle, verdict: Verdict, now:
             .reject => counts.rejected +|= 1,
             .ignore => counts.ignored +|= 1,
         }
-        self.validation_time.observe(now.mono_ms -| applied.admitted_ms);
-        if (verdict != .accept) std.log.scoped(.network_gossip).debug("validation_verdict validation={d}:{d} message_id={x} verdict={s} topic={s} peer={f} elapsed_ms={d}", .{ handle.index, handle.generation, applied.id, @tagName(verdict), applied.topicString(), @import("../logging.zig").peer(&applied.source), now.mono_ms -| applied.admitted_ms });
+        self.validation_time.observe(now.millis() -| applied.admitted_ms);
+        if (verdict != .accept) std.log.scoped(.network_gossip).debug("validation_verdict validation={d}:{d} message_id={x} verdict={s} topic={s} peer={f} elapsed_ms={d}", .{ handle.index, handle.generation, applied.id, @tagName(verdict), applied.topicString(), @import("../logging.zig").peer(&applied.source), now.millis() -| applied.admitted_ms });
         if (applied.forward) |forward| {
-            if (self.deliver(self.overlay.mesh(forward.topic.index), forward.message, forward.source, now.mono_ms).queued > 0) counts.forwarded +|= 1;
+            if (self.deliver(self.overlay.mesh(forward.topic.index), forward.message, forward.source, now.millis()).queued > 0) counts.forwarded +|= 1;
         }
     } else {
         std.log.scoped(.network_gossip).debug("validation_report_refused validation={d}:{d} verdict={s} reason={s}", .{ handle.index, handle.generation, @tagName(verdict), @tagName(result) });
@@ -401,10 +402,10 @@ pub fn overlayContext(self: *Gossipsub, now_ms: u64) overlay_mod.Context {
 
 pub fn tick(self: *Gossipsub, now: Now) void {
     if (self.heartbeat_at == 0) {
-        self.heartbeat_at = now.mono_ms +| self.options.heartbeat_interval_ms;
-    } else if (now.mono_ms >= self.heartbeat_at) {
+        self.heartbeat_at = now.millis() +| self.options.heartbeat_interval_ms;
+    } else if (now.millis() >= self.heartbeat_at) {
         self.heartbeat(now);
-        self.heartbeat_at = now.mono_ms +| self.options.heartbeat_interval_ms;
+        self.heartbeat_at = now.millis() +| self.options.heartbeat_interval_ms;
     }
 }
 
@@ -441,7 +442,7 @@ pub fn receiveItem(self: *Gossipsub, session: sessions_mod.SessionRef, item: pro
 
 pub fn acceptsRpc(self: *Gossipsub, index: u16, now: Now) bool {
     return self.peers.rows[self.logical(index).index].direct or
-        self.peerScore(index, now.mono_ms) >= self.options.score_params.graylist_threshold;
+        self.peerScore(index, now.millis()) >= self.options.score_params.graylist_threshold;
 }
 
 pub fn memoryPlan(self: *const Gossipsub) MemoryPlan {
@@ -481,7 +482,7 @@ pub fn resourceSnapshot(self: *const Gossipsub) ResourceSnapshot {
 
 fn heartbeat(self: *Gossipsub, now: Now) void {
     for (self.sessions.rows) |*peer| peer.io.resetHeartbeat();
-    self.peers.refresh(now.mono_ms);
+    self.peers.refresh(now.millis());
     // A frame held for a peer whose score fell below the graylist is released by its next
     // service, which resets the inbound stream.
     for (self.sessions.rows, 0..) |*peer, index| {
@@ -489,9 +490,9 @@ fn heartbeat(self: *Gossipsub, now: Now) void {
         if (!self.acceptsRpc(@intCast(index), now)) self.sessions.markReady(@intCast(index));
     }
     if (self.cycle.isActive()) return;
-    const opportunistic = self.opportunistic_at != 0 and now.mono_ms >= self.opportunistic_at;
-    if (self.opportunistic_at == 0 or opportunistic) self.opportunistic_at = now.mono_ms +| self.options.opportunistic_graft_interval_ms;
-    self.cycle.begin(self.sessions, &self.peers, now.mono_ms, opportunistic);
+    const opportunistic = self.opportunistic_at != 0 and now.millis() >= self.opportunistic_at;
+    if (self.opportunistic_at == 0 or opportunistic) self.opportunistic_at = now.millis() +| self.options.opportunistic_graft_interval_ms;
+    self.cycle.begin(self.sessions, &self.peers, now.millis(), opportunistic);
 }
 
 pub fn maintainTopics(self: *Gossipsub, now: Now) void {
@@ -502,7 +503,7 @@ pub fn maintainTopics(self: *Gossipsub, now: Now) void {
         const index = self.cycle.next() orelse break;
         const topic = &self.overlay.rows[index];
         if (!topic.active) continue;
-        var context = self.overlayContext(now.mono_ms);
+        var context = self.overlayContext(now.millis());
         context.snapshot = &self.cycle.scores;
         if (topic.fanout.count() > 0) _ = self.overlay.maintainFanout(&context, index, false);
         self.overlay.maintain(&context, index);
@@ -581,7 +582,7 @@ fn belowGossip(self: *Gossipsub, index: u16, now_ms: u64) bool {
 
 pub fn scoreSnapshot(self: *Gossipsub, conn: Handle, now: Now) ?f64 {
     const index = self.sessions.find(conn) orelse return null;
-    return self.peerScore(index, now.mono_ms);
+    return self.peerScore(index, now.millis());
 }
 
 pub fn unmarkDirect(self: *Gossipsub, identity: *const @import("../wire/peer_id.zig").PeerId) void {
@@ -605,7 +606,7 @@ fn onMessage(self: *Gossipsub, index: u16, msg: protobuf.Message, turn: *Turn, p
     const context = self.messageContext();
     const workspace = turn.workspace(peer);
     const source: @import("messages.zig").Source = .{ .peer = self.logical(index), .session = self.sessions.ref(index), .connection = self.sessions.rows[index].conn };
-    const result = self.messages.receive(&context, &workspace, &source, msg, now.mono_ms);
+    const result = self.messages.receive(&context, &workspace, &source, msg, now.millis());
     // The turn offers a message refused for work again, so only its final outcome counts.
     if (result == .deferred) return .credits;
     const counts = self.topic_metrics.get(msg.topic);
@@ -668,7 +669,7 @@ pub fn ihaveWorkBound(body_len: usize, topics: usize, probes: usize, batches: us
 }
 
 fn onIhave(self: *Gossipsub, index: u16, ihave: protobuf.IHave, now: Now) void {
-    if (self.belowGossip(index, now.mono_ms)) return;
+    if (self.belowGossip(index, now.millis())) return;
     const io = &self.sessions.rows[index].io;
     if (io.ihave_recv >= constants.max_ihave_per_heartbeat) return;
     io.ihave_recv += 1;
@@ -690,7 +691,7 @@ fn onIhave(self: *Gossipsub, index: u16, ihave: protobuf.IHave, now: Now) void {
     const limit = @min(constants.gossip_ids_max, id_budget, selected.capacity);
     count = 0;
     for (candidates[0..selected.count]) |id| {
-        if (!self.messages.wants(id, now.mono_ms)) continue;
+        if (!self.messages.wants(id, now.millis())) continue;
         candidates[count] = id;
         count += 1;
     }
@@ -700,7 +701,7 @@ fn onIhave(self: *Gossipsub, index: u16, ihave: protobuf.IHave, now: Now) void {
         const chosen = i + @as(usize, @intCast(self.overlay.rng.random().uintLessThanBiased(u64, @intCast(count - i))));
         std.mem.swap(MessageId, &candidates[i], &candidates[chosen]);
     }
-    self.recovery.requestBatch(&self.peers, &io.tx, &self.sessions.control_scratch, candidates[0..requested], self.logical(index), self.sessions.rows[index].conn, self.overlay.rng.random(), self.options.iwant_followup_ms, now.mono_ms) catch return;
+    self.recovery.requestBatch(&self.peers, &io.tx, &self.sessions.control_scratch, candidates[0..requested], self.logical(index), self.sessions.rows[index].conn, self.overlay.rng.random(), self.options.iwant_followup_ms, now.millis()) catch return;
     io.iwant_ids_sent += @intCast(requested);
     self.settle(index);
 }
@@ -771,13 +772,13 @@ fn onIdontwant(self: *Gossipsub, index: u16, idontwant: protobuf.IdList) void {
 
 fn onGraft(self: *Gossipsub, index: u16, topic_str: []const u8, now: Now) void {
     const topic = self.overlay.findTopic(topic_str) orelse return;
-    const context = self.overlayContext(now.mono_ms);
+    const context = self.overlayContext(now.millis());
     self.overlay.onGraft(&context, topic, index);
 }
 
 fn onPrune(self: *Gossipsub, index: u16, prune: protobuf.Prune, now: Now) void {
     const topic = self.overlay.findTopic(prune.topic) orelse return;
-    const context = self.overlayContext(now.mono_ms);
+    const context = self.overlayContext(now.millis());
     self.overlay.onPrune(&context, topic, index, if (prune.backoff == 0) constants.prune_backoff_ms else prune.backoff *| 1000);
 }
 
@@ -818,11 +819,11 @@ pub fn deliveryAvailable(self: *Gossipsub, conn: Handle) bool {
 pub fn schedule(self: *const Gossipsub) types.Schedule {
     var result: types.Schedule = .{
         .runnable = self.sessions.ready.len > 0 or self.cycle.isActive() or self.heartbeat_at == 0,
-        .deadline_ms = self.heartbeat_at,
+        .deadline = time.optionalMilliseconds(self.heartbeat_at),
     };
-    if (self.sessions.deadlines.peek()) |top| result = result.merge(.{ .deadline_ms = top.deadline });
-    result = result.merge(.{ .deadline_ms = self.messages.nextDeadline() });
-    return result.merge(.{ .deadline_ms = self.recovery.nextExpiry() });
+    if (self.sessions.deadlines.peek()) |top| result = result.merge(.{ .deadline = time.optionalMilliseconds(top.deadline) });
+    result = result.merge(.{ .deadline = time.optionalMilliseconds(self.messages.nextDeadline()) });
+    return result.merge(.{ .deadline = time.optionalMilliseconds(self.recovery.nextExpiry()) });
 }
 
 pub fn pump(
@@ -871,7 +872,7 @@ pub fn runTurn(self: *Gossipsub, router: *Router, engine: *Engine, turn: *Turn) 
 /// Pops the sessions whose earliest deadline passed. Handling an expiry clears it or retires the
 /// session, so a key set here lies in the future and each session is popped at most once.
 fn expireSessions(self: *Gossipsub, router: *Router, engine: *Engine, turn: *Turn) void {
-    const now_ms = turn.now.mono_ms;
+    const now_ms = turn.now.millis();
     for (0..self.sessions.deadlines.len) |_| {
         const index: u16 = @intCast(self.sessions.deadlines.popDue(now_ms) orelse break);
         self.sessions.visits +|= 1;
@@ -881,8 +882,8 @@ fn expireSessions(self: *Gossipsub, router: *Router, engine: *Engine, turn: *Tur
 }
 
 pub fn beginPump(self: *Gossipsub, now: Now) Turn {
-    self.last_now_ms = now.mono_ms;
-    self.messages.expire(&self.peers, now.mono_ms);
+    self.last_now_ms = now.millis();
+    self.messages.expire(&self.peers, now.millis());
     var turn = Turn.init(&self.options, now, self.msg_scratch);
     turn.sink = self.message_sink;
     return turn;
@@ -890,7 +891,7 @@ pub fn beginPump(self: *Gossipsub, now: Now) Turn {
 
 pub fn finishPump(self: *Gossipsub, now: Now) void {
     self.maintainTopics(now);
-    self.expirePromises(now.mono_ms);
+    self.expirePromises(now.millis());
 }
 
 /// Test builds check after every turn that the ready list holds every session that wants

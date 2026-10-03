@@ -1,4 +1,5 @@
 const std = @import("std");
+const schedule_test_support = @import("../schedule_test_support.zig");
 const d = @import("discv5");
 const adapter = @import("enr.zig");
 const discovery = @import("discovery.zig");
@@ -37,7 +38,7 @@ test "peer discovery seeds the configured list without claiming reachability or 
         try std.testing.expectEqualDeep(record.*, entry.record);
     }
     const idle = try @import("discovery_test_support.zig").advance(controller, io, now, &.{});
-    if (idle.failure) |err| return err;
+    if (idle.failure) |failure| return failure.cause;
     try std.testing.expectEqual(@as(u8, 0), idle.started);
     try std.testing.expectEqual(@as(u64, 0), controller.counters.lookups_started);
     var output: [1280]u8 = undefined;
@@ -73,10 +74,10 @@ test "peer discovery answers unknown TALK protocols without demand or candidate 
         for (0..100) |_| {
             const tick = try d.Transport.monotonicMilliseconds(io);
             const result = try @import("discovery_test_support.zig").advance(controller, io, tick, &.{});
-            if (result.failure) |err| return err;
+            if (result.failure) |failure| return failure.cause;
             try std.testing.expectEqual(@as(usize, 0), result.candidates);
-            const received = try @import("discv5").driver.step(requester.transport, io, &expiries, .{ .deadline_ms = tick, .wait_max_ms = 10 });
-            if (received.failure) |err| return err;
+            const received = try @import("discv5").driver.step(requester.transport, io, &expiries, .{ .deadline = .{ .clock = .awake, .raw = .fromNanoseconds(@as(i96, tick) * std.time.ns_per_ms) }, .wait_max = .fromMilliseconds(10) });
+            if (received.failure) |failure| return failure.cause;
             if (received.event == .response) {
                 const response = received.event.response.matched;
                 try std.testing.expectEqual(handle, response.handle);
@@ -117,7 +118,7 @@ test "peer discovery refused TALK reply fails only its destination and preserves
     const expired = try responder.transport.engine.calls.begin(from, &requester.transport.engine.localRecord().public_key, &request, now, d.wire.constants.ordinary_plaintext_size_max);
     var host: SendFailure = .{ .base = io, .receive_enabled = true };
     const result = try @import("discovery_test_support.zig").advance(controller, host.io(), now, &.{});
-    if (result.failure) |err| return err;
+    if (result.failure) |failure| return failure.cause;
     try std.testing.expectEqual(@as(usize, 1), host.sends);
     try std.testing.expectEqual(@as(u16, 1), result.unowned);
     try std.testing.expect(responder.transport.engine.calls.endpoint(expired) == null);
@@ -172,9 +173,9 @@ fn referralCase(rejection: ?discovery.Discovery.Rejection, custody_only: bool) !
     for (0..100) |_| {
         const tick = try d.Transport.monotonicMilliseconds(io);
         const result = try @import("discovery_test_support.zig").advance(controller, io, tick, output[0..if (rejection == .output_capacity) @as(usize, 0) else output.len]);
-        if (result.failure) |err| return err;
-        const remote = try @import("discv5").driver.step(b.transport, io, &expiries, .{ .deadline_ms = tick, .wait_max_ms = 10 });
-        if (remote.failure) |err| return err;
+        if (result.failure) |failure| return failure.cause;
+        const remote = try @import("discv5").driver.step(b.transport, io, &expiries, .{ .deadline = .{ .clock = .awake, .raw = .fromNanoseconds(@as(i96, tick) * std.time.ns_per_ms) }, .wait_max = .fromMilliseconds(10) });
+        if (remote.failure) |failure| return failure.cause;
         for (output[0..result.candidates]) |candidate| {
             if (std.mem.eql(u8, &candidate.node_id, &c_peer.node_id)) found = candidate;
         }
@@ -188,7 +189,7 @@ fn referralCase(rejection: ?discovery.Discovery.Rejection, custody_only: bool) !
     }
     try std.testing.expect(found != null);
     if (custody_only) try std.testing.expect(found.?.custody_group_count == null);
-    _ = try @import("discv5").driver.step(a.transport, io, &expiries, .{ .deadline_ms = now, .wait_max_ms = 10 });
+    _ = try @import("discv5").driver.step(a.transport, io, &expiries, .{ .deadline = .{ .clock = .awake, .raw = .fromNanoseconds(@as(i96, now) * std.time.ns_per_ms) }, .wait_max = .fromMilliseconds(10) });
     try adapter.requireIdentity(c.transport.engine.localRecord(), &found.?.peer);
     try std.testing.expectEqual(@as(u16, 9003), found.?.addresses[0].port());
     try handoff(&found.?);
@@ -223,15 +224,15 @@ test "peer discovery publishes authenticated lookup responders outside a full ro
     for (0..300) |_| {
         const tick = try d.Transport.monotonicMilliseconds(io);
         const result = try @import("discovery_test_support.zig").advance(controller, io, tick, &output);
-        if (result.failure) |err| return err;
-        const remote = try @import("discv5").driver.step(b.transport, io, &expiries, .{ .deadline_ms = tick, .wait_max_ms = 10 });
-        if (remote.failure) |err| return err;
-        const progress = try @import("discv5").driver.step(a.transport, io, &expiries, .{ .deadline_ms = tick, .wait_max_ms = 10 });
-        if (progress.failure) |err| return err;
+        if (result.failure) |failure| return failure.cause;
+        const remote = try @import("discv5").driver.step(b.transport, io, &expiries, .{ .deadline = .{ .clock = .awake, .raw = .fromNanoseconds(@as(i96, tick) * std.time.ns_per_ms) }, .wait_max = .fromMilliseconds(10) });
+        if (remote.failure) |failure| return failure.cause;
+        const progress = try @import("discv5").driver.step(a.transport, io, &expiries, .{ .deadline = .{ .clock = .awake, .raw = .fromNanoseconds(@as(i96, tick) * std.time.ns_per_ms) }, .wait_max = .fromMilliseconds(10) });
+        if (progress.failure) |failure| return failure.cause;
         const selected = progress.event == .response and progress.event.response.matched.terminal and
             progress.event.response.matched.response == .nodes;
         const consumed = controller.consume(&progress, expiries[0..progress.calls_expired], &output);
-        if (consumed.failure) |err| return err;
+        if (consumed.failure) |failure| return failure.cause;
         if (selected) {
             try std.testing.expect(a.transport.engine.peerRecord(&b.transport.engine.localRecord().node_id) == null);
             try std.testing.expectEqual(@as(usize, 1), consumed.candidates);
@@ -300,7 +301,7 @@ test "peer discovery reserves output for the responder alongside a full referral
                 .node_records = &records,
             } } };
             const result = controller.consume(&progress, &.{}, output[0..capacity]);
-            if (result.failure) |err| return err;
+            if (result.failure) |failure| return failure.cause;
             const responders: usize = @intFromBool(terminal);
             const published = @min(capacity, records.len + responders);
             try std.testing.expectEqual(published, result.candidates);
@@ -334,9 +335,9 @@ test "peer discovery clears an active foreground walk at demand expiry and can r
         var confirmed = false;
         for (0..100) |_| {
             const result = try @import("discovery_test_support.zig").advance(controller, io, network.now_ms, &candidates);
-            if (result.failure) |err| return err;
-            const remote = try @import("discv5").driver.step(b.transport, io, &expiries, .{ .deadline_ms = network.now_ms, .wait_max_ms = 10 });
-            if (remote.failure) |err| return err;
+            if (result.failure) |failure| return failure.cause;
+            const remote = try @import("discv5").driver.step(b.transport, io, &expiries, .{ .deadline = .{ .clock = .awake, .raw = .fromNanoseconds(@as(i96, network.now_ms) * std.time.ns_per_ms) }, .wait_max = .fromMilliseconds(10) });
+            if (remote.failure) |failure| return failure.cause;
             if (result.candidates > 0) {
                 confirmed = true;
                 break;
@@ -387,7 +388,7 @@ test "peer discovery empty lookup backs off and counts completion once" {
         try std.testing.expect(result.failure == null);
         try std.testing.expectEqual(@as(usize, 0), result.candidates);
         const deadline = network.now_ms + delay;
-        try std.testing.expectEqual(@as(?u64, deadline), controller.schedule(network.now_ms).nextWakeup(network.now_ms));
+        try std.testing.expectEqual(@as(?u64, deadline), schedule_test_support.wakeupMilliseconds(controller.schedule(network.now_ms), network.now_ms));
         try std.testing.expectEqual(completed, controller.lookup_finishes[@intFromEnum(d.Lookup.FinishReason.exhausted)]);
         network.now_ms = deadline - 1;
         _ = try @import("discovery_test_support.zig").advance(controller, host.io(), network.now_ms, &out);
@@ -460,25 +461,24 @@ test "peer discovery consumes actual response and expiry alongside failure befor
     var candidate: ?adapter.Candidate = null;
     for (0..30) |_| {
         const tick = try d.Transport.monotonicMilliseconds(io);
-        const remote = try @import("discv5").driver.step(b.transport, io, &expiries, .{ .deadline_ms = tick, .wait_max_ms = 10 });
-        if (remote.failure) |err| return err;
-        var progress = try @import("discv5").driver.step(a.transport, io, &expiries, .{ .deadline_ms = tick, .wait_max_ms = 10 });
+        const remote = try @import("discv5").driver.step(b.transport, io, &expiries, .{ .deadline = .{ .clock = .awake, .raw = .fromNanoseconds(@as(i96, tick) * std.time.ns_per_ms) }, .wait_max = .fromMilliseconds(10) });
+        if (remote.failure) |failure| return failure.cause;
+        var progress = try @import("discv5").driver.step(a.transport, io, &expiries, .{ .deadline = .{ .clock = .awake, .raw = .fromNanoseconds(@as(i96, tick) * std.time.ns_per_ms) }, .wait_max = .fromMilliseconds(10) });
         const response = progress.event == .response;
         if (response) {
-            progress.failure = error.DestinationUnreachable;
-            progress.failure_stage = .process;
+            progress.failure = .{ .cause = error.DestinationUnreachable, .stage = .process };
         }
         const consumed = controller.consume(&progress, expiries[0..progress.calls_expired], &output);
         if (response) {
-            try std.testing.expectEqual(error.DestinationUnreachable, consumed.failure.?);
-            try std.testing.expectEqual(d.Transport.FailureStage.process, consumed.failure_stage);
+            try std.testing.expectEqual(error.DestinationUnreachable, consumed.failure.?.cause);
+            try std.testing.expectEqual(d.Transport.FailureStage.process, consumed.failure.?.stage);
             try std.testing.expectEqual(@as(usize, 1), consumed.candidates);
             candidate = output[0];
             break;
         }
     }
     try std.testing.expect(candidate != null);
-    _ = try @import("discv5").driver.step(a.transport, io, &expiries, .{ .deadline_ms = now, .wait_max_ms = 10 });
+    _ = try @import("discv5").driver.step(a.transport, io, &expiries, .{ .deadline = .{ .clock = .awake, .raw = .fromNanoseconds(@as(i96, now) * std.time.ns_per_ms) }, .wait_max = .fromMilliseconds(10) });
     try adapter.requireIdentity(b.transport.engine.localRecord(), &candidate.?.peer);
     try std.testing.expectEqual(@as(u16, 9002), candidate.?.addresses[0].port());
     const completed_ms = try d.Transport.monotonicMilliseconds(io);
@@ -488,14 +488,14 @@ test "peer discovery consumes actual response and expiry alongside failure befor
     _ = try @import("discovery_test_support.zig").advance(controller, io, network.now_ms, &.{});
     try std.testing.expect(a.transport.engine.calls.count() > 0);
     network.now_ms += 1_000;
-    var progress = try @import("discv5").driver.step(a.transport, io, &expiries, .{ .deadline_ms = network.now_ms, .wait_max_ms = 10 });
+    var progress = try @import("discv5").driver.step(a.transport, io, &expiries, .{ .deadline = .{ .clock = .awake, .raw = .fromNanoseconds(@as(i96, network.now_ms) * std.time.ns_per_ms) }, .wait_max = .fromMilliseconds(10) });
     try std.testing.expect(progress.calls_expired > 0);
-    progress.failure = error.DestinationUnreachable;
+    progress.failure = .{ .cause = error.DestinationUnreachable, .stage = .process };
     const consumed = controller.consume(&progress, expiries[0..progress.calls_expired], &.{});
     try std.testing.expectEqual(progress.calls_expired, consumed.expired);
-    try std.testing.expectEqual(error.DestinationUnreachable, consumed.failure.?);
+    try std.testing.expectEqual(error.DestinationUnreachable, consumed.failure.?.cause);
     try std.testing.expect(a.transport.engine.peerRecord(&b.transport.engine.localRecord().node_id) != null);
-    controller.cancel();
+    controller.shutdown();
     try std.testing.expectEqual(@as(usize, 0), a.transport.engine.calls.count());
 }
 
@@ -517,16 +517,16 @@ test "peer discovery no QUIC nodes remain confirmed but produce no dial candidat
     for (0..30) |_| {
         const tick = try d.Transport.monotonicMilliseconds(io);
         const result = try @import("discovery_test_support.zig").advance(controller, io, tick, &output);
-        if (result.failure) |err| return err;
+        if (result.failure) |failure| return failure.cause;
         rejected += result.rejected;
         try std.testing.expectEqual(@as(usize, 0), result.candidates);
-        const remote = try @import("discv5").driver.step(b.transport, io, &expiries, .{ .deadline_ms = tick, .wait_max_ms = 10 });
-        if (remote.failure) |err| return err;
+        const remote = try @import("discv5").driver.step(b.transport, io, &expiries, .{ .deadline = .{ .clock = .awake, .raw = .fromNanoseconds(@as(i96, tick) * std.time.ns_per_ms) }, .wait_max = .fromMilliseconds(10) });
+        if (remote.failure) |failure| return failure.cause;
         if (rejected > 0) break;
     }
     try std.testing.expect(rejected > 0);
     try std.testing.expectEqual(@as(usize, 1), a.transport.engine.peerCount());
-    controller.cancel();
+    controller.shutdown();
     try std.testing.expectEqual(@as(usize, 0), a.transport.engine.calls.count());
 }
 
@@ -595,7 +595,7 @@ test "peer discovery refused lookup send releases its call and continues with ot
     var host = SendFailure{ .base = io, .receive_enabled = true, .refused_port = c.transport.localAddress().port() };
     var output: [1]adapter.Candidate = undefined;
     const result = try @import("discovery_test_support.zig").advance(controller, host.io(), now, &output);
-    if (result.failure) |err| return err;
+    if (result.failure) |failure| return failure.cause;
     try std.testing.expectEqual(@as(u8, 2), result.started);
     try std.testing.expectEqual(@as(usize, 1), host.sends);
     try std.testing.expectEqual(@as(u64, 0), controller.resource_retry_ms);
@@ -610,10 +610,10 @@ test "peer discovery refused lookup send releases its call and continues with ot
     var found = false;
     for (0..30) |_| {
         const tick = try d.Transport.monotonicMilliseconds(io);
-        const remote = try @import("discv5").driver.step(b.transport, io, &expiries, .{ .deadline_ms = tick, .wait_max_ms = 10 });
-        if (remote.failure) |err| return err;
+        const remote = try @import("discv5").driver.step(b.transport, io, &expiries, .{ .deadline = .{ .clock = .awake, .raw = .fromNanoseconds(@as(i96, tick) * std.time.ns_per_ms) }, .wait_max = .fromMilliseconds(10) });
+        if (remote.failure) |failure| return failure.cause;
         const next = try @import("discovery_test_support.zig").advance(controller, io, tick, &output);
-        if (next.failure) |err| return err;
+        if (next.failure) |failure| return failure.cause;
         if (next.candidates > 0) {
             try adapter.requireIdentity(b.transport.engine.localRecord(), &output[0].peer);
             found = true;
@@ -645,7 +645,7 @@ test "peer discovery refused maintenance probe stays a local failure and the ste
     const tick = network.now_ms;
     var host = SendFailure{ .base = io, .receive_enabled = true, .refused_port = refused.address.port() };
     const result = try @import("discovery_test_support.zig").advance(controller, host.io(), tick, &.{});
-    if (result.failure) |err| return err;
+    if (result.failure) |failure| return failure.cause;
     // The stale probe to the verified peer and both lookup seeds start; both sends to it are refused.
     try std.testing.expectEqual(@as(u8, 3), result.started);
     try std.testing.expectEqual(@as(usize, 2), host.sends);
@@ -688,11 +688,11 @@ test "peer discovery fork and subnet filtering plus output pressure preserve con
         for (0..30) |_| {
             const tick = try d.Transport.monotonicMilliseconds(io);
             const result = try @import("discovery_test_support.zig").advance(controller, io, tick, output[0..if (mode == 2) @as(usize, 0) else 1]);
-            if (result.failure) |err| return err;
+            if (result.failure) |failure| return failure.cause;
             filtered += if (mode == 2) result.dropped else result.rejected;
             try std.testing.expectEqual(@as(usize, 0), result.candidates);
-            const remote = try @import("discv5").driver.step(b.transport, io, &expiries, .{ .deadline_ms = tick, .wait_max_ms = 10 });
-            if (remote.failure) |err| return err;
+            const remote = try @import("discv5").driver.step(b.transport, io, &expiries, .{ .deadline = .{ .clock = .awake, .raw = .fromNanoseconds(@as(i96, tick) * std.time.ns_per_ms) }, .wait_max = .fromMilliseconds(10) });
+            if (remote.failure) |failure| return failure.cause;
             if (filtered > 0) break;
         }
         try std.testing.expect(filtered > 0);
@@ -706,7 +706,7 @@ test "peer discovery fork and subnet filtering plus output pressure preserve con
         };
         try std.testing.expect(controller.rejections[@intFromEnum(reason)] > 0);
         try std.testing.expectEqual(@as(usize, 1), a.transport.engine.peerCount());
-        controller.cancel();
+        controller.shutdown();
         try std.testing.expectEqual(@as(usize, 0), a.transport.engine.calls.count());
     }
 }
@@ -722,9 +722,9 @@ test "peer discovery coalesced demand retains query deadline" {
     try controller.request(.{ .general = true }, 0);
     const result = try @import("discovery_test_support.zig").advance(controller, io, 0, &.{});
     try std.testing.expectEqual(@as(usize, 0), result.candidates);
-    const next = controller.schedule(0).nextWakeup(0);
+    const next = schedule_test_support.wakeupMilliseconds(controller.schedule(0), 0);
     for (0..100) |_| try controller.request(.{ .general = true }, 0);
-    try std.testing.expectEqual(next, controller.schedule(0).nextWakeup(0));
+    try std.testing.expectEqual(next, schedule_test_support.wakeupMilliseconds(controller.schedule(0), 0));
     var invalid = context;
     invalid.custody_groups = 0;
     try std.testing.expectError(error.InvalidForkContext, controller.updateFork(&invalid));
@@ -746,10 +746,10 @@ test "peer discovery foreground retains authenticated IPv6 source over alternate
         var authenticated = false;
         for (0..30) |_| {
             const now = try d.Transport.monotonicMilliseconds(io);
-            const incoming = try @import("discv5").driver.step(a.transport, io, &expiries, .{ .deadline_ms = now, .wait_max_ms = 10 });
-            if (incoming.failure) |err| return err;
-            const response = try @import("discv5").driver.step(b.transport, io, &expiries, .{ .deadline_ms = now, .wait_max_ms = 10 });
-            if (response.failure) |err| return err;
+            const incoming = try @import("discv5").driver.step(a.transport, io, &expiries, .{ .deadline = .{ .clock = .awake, .raw = .fromNanoseconds(@as(i96, now) * std.time.ns_per_ms) }, .wait_max = .fromMilliseconds(10) });
+            if (incoming.failure) |failure| return failure.cause;
+            const response = try @import("discv5").driver.step(b.transport, io, &expiries, .{ .deadline = .{ .clock = .awake, .raw = .fromNanoseconds(@as(i96, now) * std.time.ns_per_ms) }, .wait_max = .fromMilliseconds(10) });
+            if (response.failure) |failure| return failure.cause;
             if (response.event == .response) {
                 authenticated = true;
                 break;
@@ -767,18 +767,18 @@ test "peer discovery foreground retains authenticated IPv6 source over alternate
         for (0..30) |_| {
             const tick = try d.Transport.monotonicMilliseconds(io);
             const result = try @import("discovery_test_support.zig").advance(controller, io, tick, &output);
-            if (result.failure) |err| return err;
+            if (result.failure) |failure| return failure.cause;
             try std.testing.expectEqual(@as(usize, 0), result.candidates);
             if (result.rejected > 0) {
                 completed = true;
                 break;
             }
-            const remote = try @import("discv5").driver.step(b.transport, io, &expiries, .{ .deadline_ms = tick, .wait_max_ms = 10 });
-            if (remote.failure) |err| return err;
+            const remote = try @import("discv5").driver.step(b.transport, io, &expiries, .{ .deadline = .{ .clock = .awake, .raw = .fromNanoseconds(@as(i96, tick) * std.time.ns_per_ms) }, .wait_max = .fromMilliseconds(10) });
+            if (remote.failure) |failure| return failure.cause;
         }
         try std.testing.expect(completed);
         try std.testing.expect(controller.lookup != null);
-        controller.cancel();
+        controller.shutdown();
         try std.testing.expectEqual(@as(usize, 0), a.transport.engine.calls.count());
     }
 }
@@ -860,7 +860,25 @@ test "peer discovery prepared advertisements reject stale and foreign installati
     const foreign_record: discovery.Discovery.PreparedAdvertisement = .{ .record = try adapter.build(&foreign, first.record.sequence + 1, &announced, &context), .previous_sequence = first.record.sequence };
     try std.testing.expectError(error.InvalidLocalRecord, node.owner.installAdvertisement(&foreign_record));
     try std.testing.expectEqualDeep(first.record, node.owner.localRecord().*);
-    node.owner.cancel();
+    node.owner.shutdown();
     try std.testing.expectError(error.Stopped, node.owner.prepareAdvertisement(&announced, &context));
     try std.testing.expectError(error.Stopped, node.owner.installAdvertisement(&first));
+}
+
+test "discovery keeps the refill failure when receive then cancels" {
+    var network: Network = .{};
+    var node: Node = undefined;
+    try node.init(network.io(), 1, 9001, &.{});
+    defer node.deinit();
+    try node.owner.request(.{ .general = true, .expires_ms = 1000 }, 0);
+    var faults: @import("fault_io") = .{ .base = network.io(), .entropy = .{}, .receive = .{} };
+    var candidates: [1]adapter.Candidate = undefined;
+    var ready: [2]bool = @splat(true);
+    const result = try node.owner.advance(faults.io(), 0, &ready, &candidates);
+    try std.testing.expect(result.cancelled);
+    try std.testing.expectEqual(error.EntropyUnavailable, result.failure.?.cause);
+    try std.testing.expectEqual(.coordinator, result.failure.?.stage);
+    try std.testing.expectEqual(@as(usize, 1), faults.receive_calls);
+    try std.testing.expectEqual(@as(usize, 0), faults.send_calls);
+    try std.testing.expectEqual(@as(u16, 0), result.datagrams);
 }

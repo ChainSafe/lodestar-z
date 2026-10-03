@@ -1,4 +1,5 @@
 const std = @import("std");
+const Now = @import("network").Now;
 const n = @import("network");
 const commands = @import("network_commands.zig");
 const Table = commands.Table;
@@ -43,10 +44,10 @@ test "authenticated connect completion latches before a later close in the borro
     table.transition(table.get(token), .waiting);
     table.cells[token.index].input.peer = peer;
     table.cells[token.index].deadline = 2;
-    try std.testing.expect(commands.latchConnects(&table, &events, .{ .mono_ms = 3, .unix_s = 0 }));
+    try std.testing.expect(commands.latchConnects(&table, &events, Now.fromMilliseconds(.{ .mono_ms = 3, .unix_s = 0 })));
     try std.testing.expectEqual(commands.State.terminal, table.get(token).state);
     try std.testing.expect(table.cells[token.index].failure == null);
-    try std.testing.expect(!commands.latchConnects(&table, &events, .{ .mono_ms = 4, .unix_s = 0 }));
+    try std.testing.expect(!commands.latchConnects(&table, &events, Now.fromMilliseconds(.{ .mono_ms = 4, .unix_s = 0 })));
     try std.testing.expect(table.cells[token.index].failure == null);
     table.retire(token);
 }

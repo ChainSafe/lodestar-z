@@ -92,8 +92,8 @@ test "reqresp admission lifecycle cancellation retains execution until host reti
     const first = try application(&setup, .blocks_by_root_v2, &.{}, sink);
     const incoming = try receive(&setup);
     const owner = &setup.shared.server.reqresp;
-    try std.testing.expect(owner.retainServing(incoming.request));
-    try std.testing.expect(!owner.retainServing(incoming.request));
+    const serving = owner.retainServing(incoming.request) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(owner.retainServing(incoming.request) == null);
     const extra = try std.testing.allocator.alloc(u8, Protocol.blob_sidecars_by_root_v1.info().response_max);
     defer std.testing.allocator.free(extra);
     _ = try application(&setup, .blob_sidecars_by_root_v1, &.{}, extra);
@@ -114,8 +114,8 @@ test "reqresp admission lifecycle cancellation retains execution until host reti
     try std.testing.expect(terminal);
     try std.testing.expectEqual(@as(usize, 1), owner.resourceSnapshot().retiring);
     try std.testing.expectEqual(@as(usize, 1), owner.resourceSnapshot().serving_occupied);
-    try std.testing.expect(owner.releaseServing(incoming.request));
-    try std.testing.expect(!owner.releaseServing(incoming.request));
+    try std.testing.expect(owner.releaseServing(serving));
+    try std.testing.expect(!owner.releaseServing(serving));
     const resumed = try receive(&setup);
     try std.testing.expectEqual(Protocol.blob_sidecars_by_root_v1, resumed.protocol);
     try std.testing.expectEqual(@as(usize, 0), owner.resourceSnapshot().retiring);
@@ -131,7 +131,7 @@ test "reqresp admission lifecycle fair dispatch advances to the next peer before
         const slot = &owner.inbound[index];
         slot.identity = .{ .bytes = @splat(@as(u8, @intCast(peer + 1))) };
         slot.state = .ready;
-        slot.progress_ms = setup.shared.pair.now.mono_ms;
+        slot.progress_ms = setup.shared.pair.now.millis();
         slot.request = .{
             .direction = .inbound,
             .generation = 1,
@@ -189,7 +189,7 @@ test "reqresp admission lifecycle control traffic preserves application quota fa
         slot.identity = .{ .bytes = @splat(@as(u8, @intCast(peer + 1))) };
         slot.state = .ready;
         slot.admission.cost = if (peer == 0) 4 else 1;
-        slot.progress_ms = setup.shared.pair.now.mono_ms;
+        slot.progress_ms = setup.shared.pair.now.millis();
         const conn: @import("../types.zig").Handle = .{ .index = @intCast(peer), .generation = std.math.maxInt(u32) };
         slot.request = .{
             .direction = .inbound,
@@ -201,7 +201,7 @@ test "reqresp admission lifecycle control traffic preserves application quota fa
         };
     }
     const heavy = &owner.inbound[Plan.first(0, .blocks_by_root_v2)];
-    try std.testing.expectEqual(.allowed, owner.admission.limiter.take(&heavy.identity, .blocks_by_root_v2, 4, .fulu, setup.shared.pair.now.mono_ms));
+    try std.testing.expectEqual(.allowed, owner.admission.limiter.take(&heavy.identity, .blocks_by_root_v2, 4, .fulu, setup.shared.pair.now.millis()));
     var application_events: [4]rr.Event = undefined;
     var control_events: [4]rr.Event = undefined;
     setup.shared.pair.advance(250);
@@ -240,7 +240,7 @@ test "reqresp admission lifecycle a fresh burst starts full requests before spli
         slot.identity = .{ .bytes = @splat(@as(u8, @intCast(peer + 1))) };
         slot.state = .ready;
         slot.admission.cost = 4;
-        slot.progress_ms = setup.shared.pair.now.mono_ms;
+        slot.progress_ms = setup.shared.pair.now.millis();
         const conn: @import("../types.zig").Handle = .{ .index = @intCast(peer), .generation = std.math.maxInt(u32) };
         slot.request = .{
             .direction = .inbound,

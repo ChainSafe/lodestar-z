@@ -11,6 +11,8 @@ pub const Result = struct {
     quic: [2]bool = .{ false, false },
     discovery: [2]bool = .{ false, false },
     host: bool = false,
+    /// Cancellation stops further I/O even when failure records an earlier diagnostic.
+    cancelled: bool = false,
     failure: ?Error = null,
 
     pub fn discoveryReady(self: *const Result) bool {
@@ -26,8 +28,18 @@ pub const Result = struct {
 /// Cancellation is checked around one poll, bounded to 1 s. Host readiness and
 /// signals can wake it sooner; arbitrary Io cancellation cannot interrupt libc.
 /// Only observes readiness. Descriptor owners retain all bytes and close duties.
-pub fn poll(io: std.Io, sources: Sources, timeout_ms: u32) Result {
-    return pollWith(io, sources, timeout_ms, std.c.poll);
+pub fn poll(io: std.Io, sources: Sources, timeout: std.Io.Timeout) Result {
+    const maximum = std.Io.Duration.fromMilliseconds(native_wait_max_ms);
+    const now = std.Io.Clock.Timestamp.now(io, .awake);
+    const deadline = switch (timeout) {
+        .none => now.addDuration(.{ .clock = .awake, .raw = maximum }),
+        .deadline => |deadline| deadline,
+        .duration => |duration| blk: {
+            std.debug.assert(duration.clock == .awake and duration.raw.nanoseconds >= 0);
+            break :blk now.addDuration(.{ .clock = .awake, .raw = .fromNanoseconds(@min(duration.raw.nanoseconds, maximum.nanoseconds)) });
+        },
+    };
+    return pollWith(io, sources, @import("time.zig").waitMilliseconds(deadline, now, maximum), std.c.poll);
 }
 
 fn pollWith(io: std.Io, sources: Sources, timeout_ms: u32, comptime pollFn: anytype) Result {
@@ -35,7 +47,7 @@ fn pollWith(io: std.Io, sources: Sources, timeout_ms: u32, comptime pollFn: anyt
     const handles = sources.quic ++ sources.discovery ++ [_]?i32{sources.host};
     if (sources.quic[0] == null and sources.quic[1] == null) return .{ .failure = error.InvalidWakeSource };
     for (handles) |fd| if (fd) |value| if (value < 0) return .{ .failure = error.InvalidWakeSource };
-    io.checkCancel() catch |err| return .{ .failure = err };
+    io.checkCancel() catch |err| return .{ .cancelled = true, .failure = err };
     var descriptors: [5]std.c.pollfd = undefined;
     for (handles, &descriptors) |fd, *descriptor| descriptor.* = .{ .fd = fd orelse -1, .events = std.c.POLL.IN, .revents = 0 };
     var result: Result = .{};
@@ -62,6 +74,7 @@ fn pollWith(io: std.Io, sources: Sources, timeout_ms: u32, comptime pollFn: anyt
         }
     }
     io.checkCancel() catch |err| {
+        result.cancelled = true;
         result.failure = result.failure orelse err;
     };
     return result;
@@ -102,6 +115,16 @@ test "native wait bounds interruption and preserves fatal context at error level
         }
     };
     const sources: Sources = .{ .quic = .{ 11, 12 }, .discovery = .{ 13, 14 }, .host = 15 };
+    const CancelAfter = struct {
+        threadlocal var checks: u8 = 0;
+        fn check(_: ?*anyopaque) std.Io.Cancelable!void {
+            checks += 1;
+            if (checks == 2) return error.Canceled;
+        }
+    };
+    var vtable = std.testing.io.vtable.*;
+    vtable.checkCancel = CancelAfter.check;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
     for ([_]std.posix.E{ .NOMEM, .INVAL }) |errno| {
         Failed.errno = errno;
         var buffer: [64]u8 = undefined;
@@ -109,7 +132,9 @@ test "native wait bounds interruption and preserves fatal context at error level
         const previous = runner.expected_log;
         defer runner.expected_log = previous;
         runner.expected_log = &expected;
-        const failed = pollWith(std.testing.io, sources, 0, Failed.pollErrno);
+        CancelAfter.checks = 0;
+        const failed = pollWith(io, sources, 0, Failed.pollErrno);
+        try std.testing.expect(failed.cancelled);
         try std.testing.expectEqual(error.WaitFailed, failed.failure.?);
         try std.testing.expect(expected.matched);
     }
