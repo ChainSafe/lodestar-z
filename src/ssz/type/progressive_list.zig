@@ -187,29 +187,30 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
                 return len;
             }
 
+            /// Initializes `out` only on success, without reading or freeing its previous contents.
+            /// The caller owns the result and must separately release any previous value.
             pub fn toValue(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: *Type) !void {
                 const len = try length(node, pool);
                 var it = try progressive.NodeIterator.init(pool, try node.getLeft(pool), chunkCountForLength(len));
-                var replacement: Type = .empty;
-                errdefer replacement.deinit(allocator);
-                try replacement.resize(allocator, len);
-                @memset(replacement.items, Element.default_value);
+                var value: Type = .empty;
+                errdefer value.deinit(allocator);
+                try value.resize(allocator, len);
+                @memset(value.items, Element.default_value);
                 var index: usize = 0;
                 while (try it.next()) |chunk| {
                     if (comptime isBasicType(Element)) {
                         const count = @min(32 / Element.fixed_size, len - index);
                         for (0..count) |i| {
-                            try Element.tree.toValuePacked(chunk, pool, i, &replacement.items[index + i]);
+                            try Element.tree.toValuePacked(chunk, pool, i, &value.items[index + i]);
                         }
                         index += count;
                     } else {
-                        try Element.tree.toValue(chunk, pool, &replacement.items[index]);
+                        try Element.tree.toValue(chunk, pool, &value.items[index]);
                         index += 1;
                     }
                 }
                 std.debug.assert(index == len);
-                deinit(allocator, out);
-                out.* = replacement;
+                out.* = value;
             }
 
             pub fn serializedSize(node: Node.Id, pool: *Node.Pool) !usize {
@@ -427,21 +428,22 @@ pub fn VariableProgressiveListType(comptime ST: type) type {
                 return len;
             }
 
+            /// Initializes `out` only on success, without reading or freeing its previous contents.
+            /// The caller owns the result and must separately release any previous value.
             pub fn toValue(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: *Type) !void {
                 const len = try length(node, pool);
                 var it = try progressive.NodeIterator.init(pool, try node.getLeft(pool), len);
-                var replacement: Type = .empty;
-                errdefer deinit(allocator, &replacement);
-                try replacement.resize(allocator, len);
-                @memset(replacement.items, Element.default_value);
+                var value: Type = .empty;
+                errdefer deinit(allocator, &value);
+                try value.resize(allocator, len);
+                @memset(value.items, Element.default_value);
                 var index: usize = 0;
                 while (try it.next()) |chunk| {
-                    try Element.tree.toValue(allocator, chunk, pool, &replacement.items[index]);
+                    try Element.tree.toValue(allocator, chunk, pool, &value.items[index]);
                     index += 1;
                 }
                 std.debug.assert(index == len);
-                deinit(allocator, out);
-                out.* = replacement;
+                out.* = value;
             }
 
             pub fn serializedSize(node: Node.Id, pool: *Node.Pool) !usize {

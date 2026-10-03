@@ -175,22 +175,23 @@ pub fn ProgressiveBitListType() type {
                 return std.mem.readInt(usize, hash[0..8], .little);
             }
 
+            /// Initializes `out` only on success, without reading or freeing its previous contents.
+            /// The caller owns the result and must separately release any previous value.
             pub fn toValue(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: *Type) !void {
                 const bit_len = try length(node, pool);
                 const chunk_count = bit_len / 256 + @intFromBool(bit_len % 256 != 0);
                 var it = try progressive.NodeIterator.init(pool, try node.getLeft(pool), chunk_count);
-                var replacement = Self.default_value;
-                errdefer Self.deinit(allocator, &replacement);
-                try replacement.resize(allocator, bit_len);
+                var value = Self.default_value;
+                errdefer Self.deinit(allocator, &value);
+                try value.resize(allocator, bit_len);
                 var offset: usize = 0;
                 while (try it.next()) |chunk| {
-                    const count = @min(32, replacement.data.items.len - offset);
-                    @memcpy(replacement.data.items[offset..][0..count], chunk.getRoot(pool)[0..count]);
+                    const count = @min(32, value.data.items.len - offset);
+                    @memcpy(value.data.items[offset..][0..count], chunk.getRoot(pool)[0..count]);
                     offset += count;
                 }
-                std.debug.assert(offset == replacement.data.items.len);
-                Self.deinit(allocator, out);
-                out.* = replacement;
+                std.debug.assert(offset == value.data.items.len);
+                out.* = value;
             }
 
             pub fn serializedSize(node: Node.Id, pool: *Node.Pool) !usize {

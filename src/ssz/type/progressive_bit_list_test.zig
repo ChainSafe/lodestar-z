@@ -122,9 +122,9 @@ test "progressive bitlist tree reads stream data and delimiters" {
         defer pool.unref(root);
         failing.fail_index = failing.alloc_index;
         var output_allocator = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 1 });
-        var actual = Bits.default_value;
-        defer actual.deinit(output_allocator.allocator());
+        var actual: Bits.Type = undefined;
         try Bits.tree.toValue(output_allocator.allocator(), root, &pool, &actual);
+        defer actual.deinit(output_allocator.allocator());
         try std.testing.expect(Bits.equals(&value, &actual));
         try std.testing.expect(!output_allocator.has_induced_failure);
         const size = Bits.serializedSize(&value);
@@ -164,4 +164,32 @@ test "memory_safety: progressive bitlist tree reads preserve output on malformed
         var bytes: [33]u8 = undefined;
         try std.testing.expectError(error.InvalidTerminatorNode, Bits.tree.serializeIntoBytes(bad, &pool, &bytes));
     }
+}
+
+test "memory_safety: progressive bitlist tree.toValue leaves previous storage caller-owned" {
+    const allocator = std.testing.allocator;
+    const Bits = ProgressiveBitListType();
+    var source = try Bits.Type.fromBitLen(allocator, 257);
+    defer source.deinit(allocator);
+    source.setAssumeCapacity(256, true);
+    var previous = try Bits.Type.fromBitLen(allocator, 5);
+    defer previous.deinit(allocator);
+    previous.setAssumeCapacity(4, true);
+
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 32 });
+    defer pool.deinit();
+    const root = try Bits.tree.fromValue(&pool, &source);
+    defer pool.unref(root);
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var out: Bits.Type = undefined;
+    try std.testing.expectError(error.OutOfMemory, Bits.tree.toValue(failing.allocator(), root, &pool, &out));
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+
+    out = previous;
+    try Bits.tree.toValue(allocator, root, &pool, &out);
+    defer out.deinit(allocator);
+    try std.testing.expect(Bits.equals(&source, &out));
+    try std.testing.expectEqual(@as(usize, 5), previous.bit_len);
+    try std.testing.expect(try previous.get(4));
 }

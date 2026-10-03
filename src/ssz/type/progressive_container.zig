@@ -238,10 +238,11 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
         };
 
         pub const tree = struct {
+            /// Initializes `out` only on success, without reading or freeing its previous contents.
             pub fn toValue(node: Node.Id, pool: *Node.Pool, out: *Type) !void {
                 var it = try progressive.NodeIterator.init(pool, try node.getLeft(pool), chunk_count);
                 var next_index: usize = 0;
-                var replacement = default_value;
+                var value = default_value;
                 inline for (fields, 0..) |field, i| {
                     const field_idx = comptime getActiveFieldIndex(active_fields, i);
                     while (next_index < field_idx) : (next_index += 1) {
@@ -249,10 +250,10 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
                     }
                     const child = (try it.next()).?;
                     next_index += 1;
-                    try field.type.tree.toValue(child, pool, &@field(replacement, field.name));
+                    try field.type.tree.toValue(child, pool, &@field(value, field.name));
                 }
                 if (try it.next() != null) return error.InvalidLength;
-                out.* = replacement;
+                out.* = value;
             }
 
             pub fn serializedSize(_: Node.Id, _: *Node.Pool) !usize {
@@ -709,11 +710,13 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
         };
 
         pub const tree = struct {
+            /// Initializes `out` only on success, without reading or freeing its previous contents.
+            /// The caller owns the result and must separately release any previous value.
             pub fn toValue(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: *Type) !void {
                 var it = try progressive.NodeIterator.init(pool, try node.getLeft(pool), chunk_count);
                 var next_index: usize = 0;
-                var replacement = default_value;
-                errdefer deinit(allocator, &replacement);
+                var value = default_value;
+                errdefer deinit(allocator, &value);
                 inline for (fields, 0..) |field, i| {
                     const field_idx = comptime getActiveFieldIndex(active_fields, i);
                     while (next_index < field_idx) : (next_index += 1) {
@@ -722,14 +725,13 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
                     const child = (try it.next()).?;
                     next_index += 1;
                     if (comptime isFixedType(field.type)) {
-                        try field.type.tree.toValue(child, pool, &@field(replacement, field.name));
+                        try field.type.tree.toValue(child, pool, &@field(value, field.name));
                     } else {
-                        try field.type.tree.toValue(allocator, child, pool, &@field(replacement, field.name));
+                        try field.type.tree.toValue(allocator, child, pool, &@field(value, field.name));
                     }
                 }
                 if (try it.next() != null) return error.InvalidLength;
-                deinit(allocator, out);
-                out.* = replacement;
+                out.* = value;
             }
 
             pub fn serializedSize(node: Node.Id, pool: *Node.Pool) !usize {
