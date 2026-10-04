@@ -221,4 +221,5 @@ pub const Service = struct {
 test {
     _ = @import("service_test.zig");
     _ = @import("service_reqresp_test.zig");
+    _ = @import("service_gossipsub_test.zig");
 }

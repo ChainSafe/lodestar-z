@@ -18,7 +18,7 @@ import {
   testChain,
   topicName,
 } from "./utils/network.js";
-import {startPeer} from "./utils/network-peer.js";
+import {type PeerRuntime, startPeer} from "./utils/network-peer.js";
 
 test("running application advances fork state only when the host updates intent", async () => {
   const config = applicationConfig();
@@ -108,8 +108,9 @@ test("Status-only updates copy inputs and preserve advertisement and subscriptio
   const other = applicationConfig();
   other.identitySecretKey[31] = 2;
   const a = startRuntime(config, () => undefined);
-  const b = await startPeer(other);
+  let b: PeerRuntime | undefined;
   try {
+    b = await startPeer(other);
     const [identity] = await Promise.all([a.identity, b.identity]);
     const intent = localIntent(config);
     intent.subscriptions = subscriptions(topicName());
@@ -143,7 +144,7 @@ test("Status-only updates copy inputs and preserve advertisement and subscriptio
       expect(current.localEnr).toEqual(identity.localEnr);
     }
   } finally {
-    await Promise.all([a.close(), b.close()]);
+    await Promise.all([a.close(), b?.stop()]);
   }
 }, 15000);
 
@@ -226,8 +227,9 @@ test("complete getters, membership and command results survive a throwing notifi
   });
   const other = applicationConfig();
   other.identitySecretKey[31] = 8;
-  const remote = await startPeer(other);
+  let remote: PeerRuntime | undefined;
   try {
+    remote = await startPeer(other);
     const ready = await runtime.identity;
     const identity = await runtime.getIdentity();
     expect(identity.peerId).toEqual(ready.peerId);
@@ -257,7 +259,7 @@ test("complete getters, membership and command results survive a throwing notifi
   } finally {
     const close = runtime.close();
     expect(runtime.close()).toBe(close);
-    await Promise.all([close, remote.close()]);
+    await Promise.all([close, remote?.stop()]);
   }
 }, 15000);
 
@@ -320,8 +322,9 @@ test("real authenticated connect, direct membership and generation-preserving im
   const other = applicationConfig();
   other.identitySecretKey[31] = 2;
   const a = startRuntime(config, () => undefined);
-  const b = await startPeer(other);
+  let b: PeerRuntime | undefined;
   try {
+    b = await startPeer(other);
     const [identityA, identityB] = await Promise.all([a.identity, b.identity]);
     await Promise.all([a.applyIntent(localIntent(config), 100n), b.applyIntent(localIntent(other), 100n)]);
     await a.connect(identityB.peerId, [identityB.localEndpoint], 5000n);
@@ -346,7 +349,7 @@ test("real authenticated connect, direct membership and generation-preserving im
     expect(closed[0].reason).toBe("host");
     expect(identityA.peerId).not.toEqual(identityB.peerId);
   } finally {
-    await Promise.all([a.close(), b.close()]);
+    await Promise.all([a.close(), b?.stop()]);
   }
 }, 15000);
 
@@ -373,8 +376,9 @@ test("peer penalties accumulate while the command lane is full", async () => {
   const second = applicationConfig();
   second.identitySecretKey[31] = 2;
   const a = startRuntime(first, () => undefined);
-  const b = await startPeer(second);
+  let b: PeerRuntime | undefined;
   try {
+    b = await startPeer(second);
     const [, remote] = await Promise.all([a.identity, b.identity]);
     await Promise.all([a.applyIntent(localIntent(first), 100n), b.applyIntent(localIntent(second), 100n)]);
     await a.connect(remote.peerId, [remote.localEndpoint], 5000n);
@@ -405,7 +409,7 @@ test("peer penalties accumulate while the command lane is full", async () => {
     expect(retained?.connection).toBeNull();
     expect(retained?.score).toBeLessThan(-12.9);
   } finally {
-    await Promise.all([a.close(), b.close()]);
+    await Promise.all([a.close(), b?.stop()]);
   }
 }, 15000);
 
@@ -414,8 +418,9 @@ test("disconnect cancels pending one-shot connects and releases their dial inten
   const other = applicationConfig();
   other.identitySecretKey[31] = 3;
   const a = startRuntime(config, () => undefined);
-  const b = await startPeer(other);
+  let b: PeerRuntime | undefined;
   try {
+    b = await startPeer(other);
     await a.identity;
     const identity = await b.identity;
     await a.applyIntent(localIntent(config), 100n);
@@ -428,7 +433,7 @@ test("disconnect cancels pending one-shot connects and releases their dial inten
     await a.disconnect(identity.peerId);
     expect((await a.getPeers()).counts.connected).toBe(0);
   } finally {
-    await Promise.all([a.close(), b.close()]);
+    await Promise.all([a.close(), b?.stop()]);
   }
 }, 15000);
 
@@ -527,8 +532,9 @@ test("graceful physical shutdown progresses while host callbacks are stalled", a
   const other = applicationConfig();
   other.identitySecretKey[31] = 21;
   const a = startRuntime(config, () => undefined);
-  const b = await startPeer(other);
+  let b: PeerRuntime | undefined;
   try {
+    b = await startPeer(other);
     const [, identity] = await Promise.all([a.identity, b.identity]);
     await Promise.all([a.applyIntent(localIntent(config), 100n), b.applyIntent(localIntent(other), 100n)]);
     await a.connect(identity.peerId, [identity.localEndpoint], 5000n);
@@ -539,7 +545,7 @@ test("graceful physical shutdown progresses while host callbacks are stalled", a
 
     expect(await closed).toEqual({reason: "requested"});
   } finally {
-    await Promise.all([a.close(), b.close()]);
+    await Promise.all([a.close(), b?.stop()]);
   }
 }, 15000);
 

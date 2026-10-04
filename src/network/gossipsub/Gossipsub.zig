@@ -947,7 +947,6 @@ test {
     _ = @import("gossipsub_recovery_test.zig");
     _ = @import("gossipsub_resources_test.zig");
     _ = @import("gossipsub_scheduler_test.zig");
-    _ = @import("gossipsub_service_test.zig");
     _ = @import("gossipsub_simulation_test.zig");
     _ = @import("gossipsub_test.zig");
     _ = @import("gossipsub_validation_test.zig");

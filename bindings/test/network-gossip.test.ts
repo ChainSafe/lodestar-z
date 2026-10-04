@@ -92,7 +92,7 @@ async function gossipPair(timeoutMs = 30000n, budget?: number, configure?: (conf
     ]);
     return pair;
   } catch (error) {
-    await Promise.allSettled([pair.left.close(), pair.right.close()]);
+    await Promise.allSettled([pair.left.stop(), pair.right.close()]);
     throw error;
   }
 }
@@ -237,12 +237,13 @@ test.each([
     scored.ip.fill(0);
     scored.topics.length = 0;
     expect((await pair.right.getGossipDiagnostics()).peers[0].identity).toEqual(pair.identity.peerId);
-  } finally {
     await Promise.all([pair.left.close(), pair.right.close()]);
+    expect(await pair.left.getMetrics()).toContain(
+      'lodestar_native_gossip_data_recipients_total{origin="publication",outcome="completed"} 1\n'
+    );
+  } finally {
+    await Promise.all([pair.left.stop(), pair.right.close()]);
   }
-  expect(await pair.left.getMetrics()).toContain(
-    'lodestar_native_gossip_data_recipients_total{origin="publication",outcome="completed"} 1\n'
-  );
 }, 15000);
 
 test("an acknowledgement follows only the owner's disposition of a delivered message", async () => {
@@ -278,7 +279,7 @@ test("an acknowledgement follows only the owner's disposition of a delivered mes
   } finally {
     // Close settles through the host's exchanges.
     holdSettling(pair.right, false);
-    await Promise.all([pair.left.close(), pair.right.close()]);
+    await Promise.all([pair.left.stop(), pair.right.close()]);
   }
 }, 15000);
 
@@ -296,7 +297,7 @@ test("an expired delivery is acknowledged without a verdict and close drops held
     pair.right.holdVerdicts(true);
     exchange(pair.right, settleOnly, [{handle: held.handle, type: "verdict", verdict: "accept"}]);
   } finally {
-    await Promise.all([pair.left.close(), pair.right.close()]);
+    await Promise.all([pair.left.stop(), pair.right.close()]);
   }
 
   expect(exchange(pair.right, settleOnly).acknowledged).toEqual([]);
@@ -311,7 +312,7 @@ test("gossip payload credit retires on close while descriptors remain held", asy
     expect(message.data).toEqual(blockPayload(4000, 2));
     report(pair.right, message.handle, "accept");
   } finally {
-    await Promise.all([pair.left.close(), pair.right.close()]);
+    await Promise.all([pair.left.stop(), pair.right.close()]);
   }
 }, 15000);
 test("gossip and both request directions retain independent payload capacity", async () => {
@@ -354,7 +355,7 @@ test("gossip and both request directions retain independent payload capacity", a
     }
     expect(statusUpdated).toBe(true);
   } finally {
-    await Promise.all([pair.left.close(), pair.right.close()]);
+    await Promise.all([pair.left.stop(), pair.right.close()]);
   }
 }, 20000);
 
@@ -498,7 +499,7 @@ test("closed runtime rejects a retained verdict", async () => {
     await pair.right.close();
     report(pair.right, old.handle, "accept");
   } finally {
-    await Promise.all([pair.left.close(), pair.right.close()]);
+    await Promise.all([pair.left.stop(), pair.right.close()]);
   }
 }, 15000);
 
@@ -548,7 +549,7 @@ test("gossip diagnostics paginate retained peers and peer drains expose remainin
         );
         await runtime.disconnect(identity.peerId);
       } finally {
-        await remote.close();
+        await remote.stop();
       }
     }
     const first = await runtime.getGossipDiagnostics();
@@ -565,7 +566,10 @@ test("gossip diagnostics paginate retained peers and peer drains expose remainin
     expect(head.more).toBe(true);
     const remaining = exchange(runtime, {...settleOnly, peers: 64}).peers;
     expect(remaining.length).toBeGreaterThan(0);
-    expect(remaining.filter((event) => event.type === "closed").every((event) => event.reason === "host")).toBe(true);
+    const closed = [...head.peers, ...remaining].filter((event) => event.type === "closed");
+    expect(closed).toHaveLength(identities.size);
+    expect(new Set(closed.map((event) => event.identity))).toEqual(identities);
+    expect(closed.every((event) => event.reason === "host")).toBe(true);
   } finally {
     await runtime.close();
   }

@@ -46,7 +46,7 @@ test("incoming cancellation retains execution until host work retires", async ()
     await expect.poll(retiring, {timeout: 5000}).toBe(0);
   } finally {
     retire();
-    await Promise.all([pair.left.close(), pair.right.close()]);
+    await Promise.all([pair.left.stop(), pair.right.close()]);
   }
 }, 15000);
 
@@ -67,7 +67,7 @@ test("incoming response permission reserves quota before payload production", as
     await incoming.finish();
     await expect(incoming.ready()).rejects.toMatchObject({code: "NetworkIncomingClosed"});
   } finally {
-    await Promise.all([pair.left.close(), pair.right.close()]);
+    await Promise.all([pair.left.stop(), pair.right.close()]);
   }
 }, 15000);
 
@@ -108,7 +108,7 @@ test("incoming copied metadata and acknowledged multiple contexts preserve wire 
     expect(await done).toEqual({done: true, value: undefined});
     await expect(incoming.respond(payload, null)).rejects.toMatchObject({code: "NetworkIncomingClosed"});
   } finally {
-    await Promise.all([pair.left.close(), pair.right.close()]);
+    await Promise.all([pair.left.stop(), pair.right.close()]);
   }
 }, 15000);
 
@@ -129,7 +129,7 @@ test.each([1, 2, 3, 128, 139, 255])("incoming error status %s preserves exact en
     expect(await incoming.closed).toBeUndefined();
     await rejection;
   } finally {
-    await Promise.all([pair.left.close(), pair.right.close()]);
+    await Promise.all([pair.left.stop(), pair.right.close()]);
   }
 }, 15000);
 
@@ -155,7 +155,7 @@ test("incoming invalid context keeps the serving slot and empty finish reaches w
     expect(await incoming.closed).toBeUndefined();
     expect(await pending).toEqual({done: true, value: undefined});
   } finally {
-    await Promise.all([pair.left.close(), pair.right.close()]);
+    await Promise.all([pair.left.stop(), pair.right.close()]);
   }
 }, 15000);
 
@@ -199,7 +199,7 @@ test("incoming input validation rolls back before a later valid response", async
     await incoming.finish();
     expect((await stream.next()).done).toBe(true);
   } finally {
-    await Promise.all([pair.left.close(), pair.right.close()]);
+    await Promise.all([pair.left.stop(), pair.right.close()]);
   }
 }, 15000);
 
@@ -220,7 +220,7 @@ test("incoming chunk ceiling rejects an extra response without losing finish", a
     expect(await incoming.finish()).toBeUndefined();
     expect((await stream.next()).done).toBe(true);
   } finally {
-    await Promise.all([pair.left.close(), pair.right.close()]);
+    await Promise.all([pair.left.stop(), pair.right.close()]);
   }
 }, 15000);
 const stock = test.skipIf(!process.env.LODESTAR_Z_NETWORK_STOCK_HOST);
@@ -353,7 +353,7 @@ test("terminal before take never exposes a retired request", async () => {
     await expect.poll(waiting, {timeout: 5000}).toBe(0);
     expect(nextIncoming(pair.right)).toBeNull();
   } finally {
-    await Promise.all([pair.left.close(), pair.right.close()]);
+    await Promise.all([pair.left.stop(), pair.right.close()]);
   }
 }, 15000);
 
@@ -374,7 +374,7 @@ test("a ready incoming response delivers its bytes and preserves control progres
     await pair.right.reStatusPeers([pair.identity.peerId]);
     expect((await pair.right.getIdentity()).peerId).toEqual(pair.remote.peerId);
   } finally {
-    await Promise.all([pair.left.close(), pair.right.close()]);
+    await Promise.all([pair.left.stop(), pair.right.close()]);
   }
 }, 20000);
 
@@ -435,7 +435,7 @@ test("a permission the stream's end overtakes arrives with the close and settles
     expect(order).toEqual(["closed", "NetworkIncomingClosed"]);
   } finally {
     holdSettling(pair.right, false);
-    await Promise.all([pair.left.close(), pair.right.close()]);
+    await Promise.all([pair.left.stop(), pair.right.close()]);
   }
 }, 20000);
 
@@ -462,7 +462,7 @@ test("an acknowledgement due with the stream's close arrives in one completion a
     expect(order).toEqual(["pending", "closed"]);
   } finally {
     holdSettling(pair.right, false);
-    await Promise.all([pair.left.close(), pair.right.close()]);
+    await Promise.all([pair.left.stop(), pair.right.close()]);
   }
 }, 20000);
 
@@ -499,6 +499,6 @@ test("a response held in native borrow while its stream is cancelled and the net
 
     await stream.return?.();
   } finally {
-    await Promise.all([pair.left.close(), pair.right.close()]);
+    await Promise.all([pair.left.stop(), pair.right.close()]);
   }
 }, 20000);

@@ -43,5 +43,5 @@ for (const outcome of outcomes)
   if (outcome.status === "rejected" && outcome.reason.code !== "NetworkClosed")
     assert.equal(outcome.reason.reason, "resource_exhausted");
 assert.equal(weak.deref(), undefined);
-await remote.close();
+await remote.stop();
 console.log(JSON.stringify({accepted: outcomes.length, settled: outcomes.length, collected: true, notifierErrors}));

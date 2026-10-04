@@ -79,6 +79,6 @@ if (!isMainThread) {
     console.log("live-worker-resources-released");
   } finally {
     await worker.terminate();
-    await runtime.close();
+    await runtime.stop();
   }
 }

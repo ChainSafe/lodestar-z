@@ -56,27 +56,27 @@ test "gossipsub prunes a peer whose messages are rejected" {
     rounds = 0;
     while (rounds < 10) : (rounds += 1) try setup.pumpOnce();
 
-    // the client publishes, the server rejects it as invalid
+    const client_index = setup.shared.server.gossipsub.sessions.find(setup.shared.handles.server).?;
+    const server_topic = setup.shared.server.gossipsub.overlay.findTopic(beacon_block).?;
+    try std.testing.expect(setup.shared.server.gossipsub.overlay.mesh(server_topic).isSet(client_index));
+
     _ = try setup.shared.client.gossipsub.publish(beacon_block, "an invalid block", setup.shared.pair.now);
     rounds = 0;
     var rejected = false;
     while (rounds < 20 and !rejected) : (rounds += 1) {
         try setup.pumpOnce();
         for (setup.serverMessages()) |m| {
-            _ = setup.shared.server.gossipsub.report(m.handle, .reject, setup.shared.pair.now);
+            try std.testing.expectEqual(ReportOutcome{ .applied = .reject }, setup.shared.server.gossipsub.report(m.handle, .reject, setup.shared.pair.now));
             rejected = true;
         }
     }
     try std.testing.expect(rejected);
 
-    // the server's score for the client is now negative and the heartbeat prunes it
-    const client_index = setup.shared.server.gossipsub.sessions.find(setup.shared.handles.server).?;
     try std.testing.expect(setup.shared.server.gossipsub.peers.score(.{ .index = client_index, .generation = setup.shared.server.gossipsub.peers.rows[client_index].generation }, setup.shared.pair.now.millis()) < 0);
     setup.shared.pair.advance(constants_heartbeat + 100);
     rounds = 0;
     while (rounds < 10) : (rounds += 1) try setup.pumpOnce();
-    const server_topic = setup.shared.server.gossipsub.overlay.findTopic(beacon_block).?;
-    try std.testing.expectEqual(@as(usize, 0), setup.shared.server.gossipsub.overlay.mesh(server_topic).count());
+    try std.testing.expect(!setup.shared.server.gossipsub.overlay.mesh(server_topic).isSet(client_index));
 }
 
 test "gossipsub credits first delivery only after the host accepts" {
@@ -95,6 +95,12 @@ test "gossipsub credits first delivery only after the host accepts" {
     rounds = 0;
     while (rounds < 10) : (rounds += 1) try setup.pumpOnce();
 
+    const client_index = setup.shared.server.gossipsub.sessions.find(setup.shared.handles.server).?;
+    const topic_index = setup.shared.server.gossipsub.overlay.findTopic(beacon_block).?;
+    const scores = &setup.shared.server.gossipsub.peers.scores;
+    const counters = &scores.topics[@as(usize, client_index) * scores.topic_params.len + topic_index];
+    try std.testing.expectEqual(@as(f64, 0), counters.first_deliveries);
+
     _ = try setup.shared.client.gossipsub.publish(beacon_block, "a beacon block payload", setup.shared.pair.now);
     var handle: ?Gossipsub.ValidationHandle = null;
     rounds = 0;
@@ -104,12 +110,11 @@ test "gossipsub credits first delivery only after the host accepts" {
     }
     try std.testing.expect(handle != null);
 
-    // receiving the message must not credit the sender; only the host's accept does
-    const client_index = setup.shared.server.gossipsub.sessions.find(setup.shared.handles.server).?;
-    const before = setup.shared.server.gossipsub.peers.score(.{ .index = client_index, .generation = setup.shared.server.gossipsub.peers.rows[client_index].generation }, setup.shared.pair.now.millis());
-    _ = setup.shared.server.gossipsub.report(handle.?, .accept, setup.shared.pair.now);
-    const after = setup.shared.server.gossipsub.peers.score(.{ .index = client_index, .generation = setup.shared.server.gossipsub.peers.rows[client_index].generation }, setup.shared.pair.now.millis());
-    try std.testing.expect(after > before);
+    try std.testing.expectEqual(@as(f64, 0), counters.first_deliveries);
+    try std.testing.expectEqual(ReportOutcome{ .applied = .accept }, setup.shared.server.gossipsub.report(handle.?, .accept, setup.shared.pair.now));
+    try std.testing.expectEqual(@as(f64, 1), counters.first_deliveries);
+    try std.testing.expectEqual(ReportOutcome.already_resolved, setup.shared.server.gossipsub.report(handle.?, .accept, setup.shared.pair.now));
+    try std.testing.expectEqual(@as(f64, 1), counters.first_deliveries);
 }
 
 test "gossipsub uses configured message IDs on publish and wire receive" {

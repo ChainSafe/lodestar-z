@@ -305,7 +305,7 @@ if (mode === "exit") {
   await settlements.settled();
   assert.deepEqual(await unsettled, []);
   assert(settlements.counts.every((count) => count === 1));
-  await left.close();
+  await left.stop();
   right = null;
   served.length = 0;
   await runtimeReleased();
@@ -371,7 +371,7 @@ if (mode === "exit") {
     assert(calls > 0);
     console.log("callback-closed");
   } finally {
-    await Promise.all([pair.left.close(), pair.right.close()]);
+    await Promise.all([pair.left.stop(), pair.right.close()]);
   }
 } else if (mode === "rearm") {
   // A notifier that throws before scheduling an exchange leaves nothing queued, so a later completion notifies again.

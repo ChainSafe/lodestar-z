@@ -19,8 +19,9 @@ async function drain(
 
 test("native std.log captures lifecycle, timestamps and isolated processes through close", async () => {
   const left = startRuntime(applicationConfig(), () => undefined);
-  const right = await startPeer(applicationConfig());
+  let right: PeerRuntime | undefined;
   try {
+    right = await startPeer(applicationConfig());
     await Promise.all([left.close(), right.close()]);
     for (const runtime of [left, right]) {
       const records = await drain(runtime);
@@ -39,7 +40,7 @@ test("native std.log captures lifecycle, timestamps and isolated processes throu
       expect((await runtime.drainLogs()).records).toEqual([]);
     }
   } finally {
-    await Promise.all([left.close(), right.close()]);
+    await Promise.all([left.close(), right?.stop()]);
   }
 }, 20000);
 
@@ -103,7 +104,7 @@ test("ReleaseSafe debug logs correlate real requests without draining request da
       )
     ).toBe(true);
   } finally {
-    await Promise.all([pair.left.close(), pair.right.close()]);
+    await Promise.all([pair.left.stop(), pair.right.close()]);
   }
 }, 20000);
 
@@ -151,6 +152,6 @@ test.each([
       expect(records.every((record) => ranks[record.level] <= ranks[level])).toBe(true);
     }
   } finally {
-    await Promise.all([pair.left.close(), pair.right.close()]);
+    await Promise.all([pair.left.stop(), pair.right.close()]);
   }
 }, 15000);

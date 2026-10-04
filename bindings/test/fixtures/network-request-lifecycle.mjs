@@ -75,7 +75,7 @@ if (mode === "pull-gc") {
   assert.equal(weak.deref(), undefined);
 
   await incoming.closed;
-  await Promise.all([runtime.close(), server.close()]);
+  await Promise.all([runtime.close(), server.stop()]);
   console.log("request-lifecycle", mode, "ok");
   process.exit(0);
 }

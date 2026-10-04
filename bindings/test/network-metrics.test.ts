@@ -135,14 +135,15 @@ test("real request and peer metrics are isolated, cumulative and do not drain re
       {timeout: 5000}
     );
     for (let i = 0; i < 10; i++) expect(samples(await pair.left.getMetrics()).get(outgoing)).toBe(1);
-  } finally {
     await Promise.all([pair.left.close(), pair.right.close()]);
+    expect(samples(await pair.left.getMetrics()).get(outgoing)).toBe(1);
+    expect(samples(pair.right.getMetrics()).get(incoming)).toBe(1);
+    expect(samples(await pair.left.getMetrics()).get("libp2p_peers")).toBe(0);
+    expect(
+      samples(await pair.left.getMetrics()).get('lodestar_native_peer_dial_outcomes_total{outcome="connected"}')
+    ).toBe(1);
+    expect(samples(await pair.left.getMetrics()).get("lodestar_peer_connection_seconds_count")).toBe(0);
+  } finally {
+    await Promise.all([pair.left.stop(), pair.right.close()]);
   }
-  expect(samples(await pair.left.getMetrics()).get(outgoing)).toBe(1);
-  expect(samples(pair.right.getMetrics()).get(incoming)).toBe(1);
-  expect(samples(await pair.left.getMetrics()).get("libp2p_peers")).toBe(0);
-  expect(
-    samples(await pair.left.getMetrics()).get('lodestar_native_peer_dial_outcomes_total{outcome="connected"}')
-  ).toBe(1);
-  expect(samples(await pair.left.getMetrics()).get("lodestar_peer_connection_seconds_count")).toBe(0);
 }, 20000);
