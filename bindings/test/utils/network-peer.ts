@@ -141,7 +141,7 @@ export async function startPeer(config: NativeApplicationConfig): Promise<PeerRu
           id: number;
           peerId: string;
           connection: NativeIncomingRequest["connection"];
-          protocol: string;
+          protocol: NativeIncomingRequest["protocol"];
           data: Uint8Array;
         } | null>("takeIncomingRequest");
         if (!descriptor) return null;

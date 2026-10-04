@@ -1,3 +1,5 @@
+const advertisement = @import("advertisement.zig");
+const control_values = @import("control_values.zig");
 const schedule_test_support = @import("schedule_test_support.zig");
 const driver = @import("driver.zig");
 const core_test = @import("network_core_test_support.zig");
@@ -12,18 +14,18 @@ const Inbox = @import("gossipsub/test_support.zig").Inbox;
 const Now = @import("types.zig").Now;
 
 /// Applies a local update through the host intent path with the current subscriptions and demand.
-fn applyLocal(node: *NetworkCore, update: *const NetworkCore.LocalUpdate, now: Now) !bool {
+fn applyLocal(node: *NetworkCore, update: *const control_values.LocalUpdate, now: Now) !bool {
     var boundaries: [@import("gossipsub/topic_policy.zig").boundary_max]@import("gossipsub/local_intent.zig").Boundary = undefined;
     var desired = core_test.intent(node, try @import("gossipsub/test_support.zig").subscriptionUpdate(node.protocols.gossipsub, null, false, &boundaries));
     desired.update = update.*;
     return node.applyIntent(&desired, now);
 }
 
-fn updateLocalWithEndpoints(node: *NetworkCore, local: *const t.LocalState, schedule: NetworkCore.ForkSchedule, endpoints: ?NetworkCore.AdvertisementEndpoints, now: Now) !bool {
+fn updateLocalWithEndpoints(node: *NetworkCore, local: *const t.LocalState, schedule: control_values.ForkSchedule, endpoints: ?advertisement.Endpoints, now: Now) !bool {
     return applyLocal(node, &.{ .local = local.*, .schedule = schedule, .endpoints = endpoints, .capabilities = node.protocols.router.capabilities() }, now);
 }
 
-fn updateLocal(node: *NetworkCore, local: *const t.LocalState, schedule: NetworkCore.ForkSchedule, now: Now) !bool {
+fn updateLocal(node: *NetworkCore, local: *const t.LocalState, schedule: control_values.ForkSchedule, now: Now) !bool {
     return updateLocalWithEndpoints(node, local, schedule, node.advertisementEndpoints(), now);
 }
 
@@ -43,8 +45,8 @@ const MaintenancePeers = struct {
             opts.resolved.core.control.starts_per_turn_max = 1;
             opts.resolved.core.protocols.reqresp.outbound_max = 6;
             opts.resolved.core.protocols.reqresp.outbound_control_reserved = 4;
-            opts.resolved.core.protocols.reqresp.inbound_control_reserved = 4;
-            opts.resolved.core.protocols.reqresp.outbound_per_peer_max = 2;
+            opts.resolved.core.protocols.reqresp.serving_control_reserved = 4;
+            opts.resolved.core.protocols.reqresp.outbound_per_connection_max = 2;
             opts.resolved.core.protocols.router = .{ .negotiations_max = 16, .outbound_control_reserved = 4, .outbound_reserved = 8 };
             try node.init(if (index == 0) hub_allocator else std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
             initialized += 1;
@@ -144,7 +146,7 @@ test "core validates capacities and current application fork before allocation" 
     var opts = options(&key);
     opts.resolved.core.peers.capacity = 5;
     opts.resolved.core.peers.max_peers = 5;
-    opts.resolved.core.protocols.reqresp.peers = 5;
+    opts.resolved.core.protocols.reqresp.connections = 5;
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     try std.testing.expectError(error.InvalidOptions, node.init(failing.allocator(), std.testing.io, &opts.resolved, opts.startup));
     opts = options(&key);
@@ -963,7 +965,8 @@ test "core cancellation releases every selected dial without blaming unstarted p
     try std.testing.expectEqual(@as(u16, 0), node.peer_manager.dialing.held.total);
     try std.testing.expectEqual(@as(u16, 0), node.peer_manager.dialing.held.unstarted);
     try std.testing.expectEqual(@as(u16, 0), node.transport.engine.registry.active_len);
-    node.peer_manager.expireDials(&node.transport.engine, Now.fromMilliseconds(.{ .mono_ms = now.millis() + 10_001, .unix_s = now.unixSeconds() }));
+    var close: [@import("peers/dialing.zig").Dialing.attempts_max]t.Handle = undefined;
+    try std.testing.expectEqual(@as(usize, 0), node.peer_manager.expireDials(Now.fromMilliseconds(.{ .mono_ms = now.millis() + 10_001, .unix_s = now.unixSeconds() }), &close).len);
     for (peers) |peer| {
         const row = node.peer_manager.catalog.rowFor(node.peer_manager.catalog.find(&peer).?).?;
         try std.testing.expect(row.attempt == null);

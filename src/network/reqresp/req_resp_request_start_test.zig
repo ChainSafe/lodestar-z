@@ -2,7 +2,7 @@ const std = @import("std");
 const rr = @import("ReqResp.zig");
 const codec = @import("codec.zig");
 const Protocol = @import("protocol.zig").Protocol;
-const Plan = @import("ReceiveLayout.zig");
+const ReceiveLayout = @import("ReceiveLayout.zig");
 const PeerId = @import("../wire/peer_id.zig").PeerId;
 const Handle = @import("../types.zig").Handle;
 const harness = @import("test_pair.zig");
@@ -312,9 +312,9 @@ test "reqresp request start shutdown cancels its waiters without charging them" 
     for ([_]bool{ false, true }) |class| try std.testing.expectEqual(start + refill_ms, owner.admission.limiter.startAt(&identity, class, start));
 }
 
-test "reqresp request start preserves distinct protocol peer and identity capacity limits" {
+test "reqresp request start preserves distinct protocol connection and identity capacity limits" {
     var setup: harness.Pair = .{};
-    try setup.init(.{}, .{ .inbound_per_peer_max = 3, .admission = limits(1) });
+    try setup.init(.{}, .{ .inbound_per_connection_max = 3, .admission = limits(1) });
     defer setup.deinit();
     var exchange: Exchange = .{ .setup = &setup };
     const owner = &setup.shared.server.reqresp;
@@ -328,7 +328,7 @@ test "reqresp request start preserves distinct protocol peer and identity capaci
     try std.testing.expectEqual(.allowed, owner.admission.limiter.start(&stranger, false, setup.shared.pair.now.millis()));
     _ = try request(&setup, .blocks_by_root_v2, blocks);
     try exchange.pumps(20);
-    try std.testing.expectEqual(rr.Failure{ .negotiation_failed = .stream_closed }, exchange.client_failure.?);
+    try std.testing.expectEqual(rr.Failure{ .peer_error = .{ .code = 139, .message_len = "Rate limited: identity capacity exhausted".len } }, exchange.client_failure.?);
     try std.testing.expectEqual(@as(u64, 1), refusals(owner, .blocks_by_root_v2, .identity_capacity));
     exchange.client_failure = null;
     setup.shared.pair.advance(refill_ms);
@@ -348,7 +348,7 @@ test "reqresp request start preserves distinct protocol peer and identity capaci
     try std.testing.expectEqual(@as(usize, 3), waitingStarts(owner));
     _ = try setup.openRaw(.blocks_by_range_v2);
     try exchange.pumps(10);
-    try std.testing.expectEqual(@as(u64, 1), refusals(owner, .blocks_by_range_v2, .peer_capacity));
+    try std.testing.expectEqual(@as(u64, 1), refusals(owner, .blocks_by_range_v2, .connection_capacity));
     try std.testing.expectEqual(@as(u64, 3), allRefusals(owner));
     try std.testing.expectEqual(start + refill_ms, owner.admission.limiter.startAt(&identity, false, start));
     try std.testing.expectEqual(@as(?rr.Failure, null), exchange.client_failure);
@@ -378,7 +378,7 @@ test "reqresp request start a request behind a waiter is still refused without a
     try std.testing.expectEqual(.allowed, owner.admission.limiter.start(&stranger, false, setup.shared.pair.now.millis()));
     _ = try request(&setup, .blob_sidecars_by_root_v1, blobs);
     try exchange.pumps(20);
-    try std.testing.expectEqual(@as(?rr.Failure, .{ .negotiation_failed = .stream_closed }), exchange.client_failure);
+    try std.testing.expectEqual(@as(?rr.Failure, .{ .peer_error = .{ .code = 139, .message_len = "Rate limited: identity capacity exhausted".len } }), exchange.client_failure);
     try std.testing.expectEqual(@as(u64, 1), refusals(owner, .blob_sidecars_by_root_v1, .identity_capacity));
     try std.testing.expectEqual(@as(u16, 1), owner.pendingCounts().inbound);
     try std.testing.expect(owner.inbound[waiter].request.running());
@@ -396,11 +396,11 @@ test "reqresp request start a request behind a waiter is still refused without a
     try std.testing.expectEqual(start + 3 * refill_ms, exchange.delivered[2].at_ms);
 }
 
-/// A `.ready` request on connection index `peer` whose start accept deferred.
-fn deferredSlot(owner: *rr, peer: u16, which: Protocol, identity: *const PeerId, now_ms: u64) u16 {
-    const index: u16 = @intCast(Plan.first(peer, which));
+/// A `.ready` request on connection index `connection` whose start accept deferred.
+fn deferredSlot(owner: *rr, connection: u16, which: Protocol, identity: *const PeerId, now_ms: u64) u16 {
+    const index: u16 = @intCast(ReceiveLayout.first(connection, which));
     const slot = &owner.inbound[index];
-    const conn: Handle = .{ .index = peer, .generation = std.math.maxInt(u32) };
+    const conn: Handle = .{ .index = connection, .generation = std.math.maxInt(u32) };
     slot.identity = identity.*;
     slot.state = .ready;
     slot.progress_ms = now_ms;
@@ -480,23 +480,23 @@ test "reqresp request start a waiter that then waits for serving is charged its 
 }
 
 test "reqresp protocol concurrency refusal preserves selection and returns a complete rate-limit response" {
-    for ([_]u8{ 2, 8 }) |peer_limit| {
+    for ([_]u8{ 2, 8 }) |connection_limit| {
         var setup: harness.Pair = .{};
-        try setup.init(.{}, .{ .inbound_per_peer_max = peer_limit });
+        try setup.init(.{}, .{ .inbound_per_connection_max = connection_limit });
         defer setup.deinit();
         for (0..2) |_| {
             const held = try setup.openRaw(.blocks_by_root_v2);
             try setup.awaitRawSelection(held, .blocks_by_root_v2);
         }
         const refused = try setup.openRaw(.blocks_by_root_v2);
-        try expectRateLimitResponse(&setup, refused);
+        try expectRateLimitResponse(&setup, refused, "Rate limited: already 2 active requests for this protocol");
         const owner = &setup.shared.server.reqresp;
         try std.testing.expectEqual(@as(u64, 1), refusals(owner, .blocks_by_root_v2, .protocol_concurrency));
         try std.testing.expectEqual(@as(u16, 2), owner.pendingCounts().inbound);
     }
 }
 
-fn expectRateLimitResponse(setup: *harness.Pair, stream: @import("../types.zig").StreamHandle) !void {
+fn expectRateLimitResponse(setup: *harness.Pair, stream: @import("../types.zig").StreamHandle, message: []const u8) !void {
     var dialer = try @import("../wire/multistream.zig").Dialer.init(Protocol.blocks_by_root_v2.id());
     var selected = false;
     var wire: [1024]u8 = undefined;
@@ -523,7 +523,7 @@ fn expectRateLimitResponse(setup: *harness.Pair, stream: @import("../types.zig")
         if (read.fin) {
             try std.testing.expect(selected and decoder.isDone());
             try std.testing.expectEqual(@as(u8, 139), decoder.result());
-            try std.testing.expectEqualStrings("Rate limited: already 2 active requests for this protocol", decoder.payload());
+            try std.testing.expectEqualStrings(message, decoder.payload());
             return;
         }
     }
@@ -533,14 +533,14 @@ fn expectRateLimitResponse(setup: *harness.Pair, stream: @import("../types.zig")
 test "reqresp request start hard capacity refusal preserves an available start without a waiter" {
     for ([_]bool{ false, true }) |application_cap| {
         var setup: harness.Pair = .{};
-        try setup.init(.{}, .{ .inbound_max = 1, .inbound_per_peer_max = if (application_cap) 8 else 1, .admission = limits(4) });
+        try setup.init(.{}, .{ .serving_max = 1, .inbound_per_connection_max = if (application_cap) 8 else 1, .admission = limits(4) });
         defer setup.deinit();
         const owner = &setup.shared.server.reqresp;
-        if (application_cap) owner.options.inbound_application_per_peer_max = 1;
+        if (application_cap) owner.options.inbound_application_per_connection_max = 1;
         const now_ms = setup.shared.pair.now.millis();
         const held_stream = try setup.openRaw(.blocks_by_root_v2);
         try setup.awaitRawSelection(held_stream, .blocks_by_root_v2);
-        const held_index: u16 = @intCast(Plan.first(setup.shared.handles.server.index, .blocks_by_root_v2));
+        const held_index: u16 = @intCast(ReceiveLayout.first(setup.shared.handles.server.index, .blocks_by_root_v2));
         const held = owner.inbound[held_index].request.handle(held_index);
         try std.testing.expectEqual(@as(usize, 0), waitingStarts(owner));
         var exchange: Exchange = .{ .setup = &setup };
@@ -548,8 +548,8 @@ test "reqresp request start hard capacity refusal preserves an available start w
         defer std.testing.allocator.free(blobs);
         _ = try request(&setup, .blob_sidecars_by_root_v1, blobs);
         try exchange.pumps(20);
-        try std.testing.expectEqual(@as(u64, 1), refusals(owner, .blob_sidecars_by_root_v1, .peer_capacity));
-        try std.testing.expectEqual(@as(?rr.Failure, .{ .negotiation_failed = .stream_closed }), exchange.client_failure);
+        try std.testing.expectEqual(@as(u64, 1), refusals(owner, .blob_sidecars_by_root_v1, .connection_capacity));
+        try std.testing.expectEqual(@as(?rr.Failure, .{ .peer_error = .{ .code = 139, .message_len = "Rate limited: connection receive capacity exhausted".len } }), exchange.client_failure);
         try std.testing.expect(owner.cancel(held, setup.shared.pair.now));
         try exchange.pumps(10);
         exchange.client_failure = null;
@@ -562,5 +562,30 @@ test "reqresp request start hard capacity refusal preserves an available start w
         try std.testing.expectEqual(now_ms, setup.shared.pair.now.millis());
         try std.testing.expectEqual(@as(usize, 0), waitingStarts(owner));
         try std.testing.expectEqual(@as(?rr.Failure, null), exchange.client_failure);
+    }
+}
+
+test "reqresp capacity refusals preserve selection and finish the error response" {
+    for ([_]enum { connection, application, identity }{ .connection, .application, .identity }) |capacity| {
+        var setup: harness.Pair = .{};
+        try setup.init(.{}, .{ .inbound_per_connection_max = if (capacity == .connection) 1 else 8, .admission = limits(1) });
+        defer setup.deinit();
+        const owner = &setup.shared.server.reqresp;
+        if (capacity == .identity) {
+            const other: PeerId = .{ .bytes = @splat(1) };
+            try std.testing.expectEqual(.allowed, owner.admission.limiter.start(&other, false, setup.shared.pair.now.millis()));
+        } else {
+            if (capacity == .application) owner.options.inbound_application_per_connection_max = 1;
+            const held = try setup.openRaw(.blob_sidecars_by_root_v1);
+            try setup.awaitRawSelection(held, .blob_sidecars_by_root_v1);
+        }
+        const refused = try setup.openRaw(.blocks_by_root_v2);
+        try expectRateLimitResponse(&setup, refused, if (capacity == .identity)
+            "Rate limited: identity capacity exhausted"
+        else
+            "Rate limited: connection receive capacity exhausted");
+        try std.testing.expectEqual(@as(u64, 1), refusals(owner, .blocks_by_root_v2, if (capacity == .identity) .identity_capacity else .connection_capacity));
+        try std.testing.expectEqual(@as(u64, 1), allRefusals(owner));
+        try std.testing.expectEqual(@as(u16, if (capacity == .identity) 0 else 1), owner.pendingCounts().inbound);
     }
 }

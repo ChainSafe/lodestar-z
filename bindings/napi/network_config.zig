@@ -13,12 +13,12 @@ pub const Config = struct {
     secret: [32]u8,
     bind: n.udp.Sockets.Bindings,
     local: t.LocalState,
-    schedule: n.NetworkCore.ForkSchedule,
+    schedule: n.control_values.ForkSchedule,
     chain: n.chain.Config,
     discovery_bind: ?n.udp.Sockets.Bindings,
     discovery_sequence: u64,
-    advertisement: ?n.NetworkCore.AdvertisementHints,
-    fixed: n.NetworkCore.AdvertisementEndpoints,
+    advertisement: ?n.advertisement.Hints,
+    fixed: n.advertisement.Endpoints,
     bootstrap: [bootstrap_max]struct { bytes: [enr_max]u8, len: u16 },
     bootstrap_count: u8,
     slot: u64,
@@ -243,10 +243,10 @@ pub fn parseTopicParams(topic: Value, out: *n.gossipsub.score.TopicParams) !void
     out.*.invalid_decay = try decode.number(try decode.get(topic, "invalidDecay"));
 }
 
-pub fn parseEndpoints(ad: Value) !?n.NetworkCore.AdvertisementEndpoints {
+pub fn parseEndpoints(ad: Value) !?n.advertisement.Endpoints {
     if (try ad.typeof() != .null) {
         try decode.object(ad, &.{ "ip4", "ip6", "udp", "udp6", "quic", "quic6" });
-        var result: n.NetworkCore.AdvertisementEndpoints = .{};
+        var result: n.advertisement.Endpoints = .{};
         inline for (.{ "ip4", "ip6" }) |key| {
             if (try ad.hasNamedProperty(key)) @field(result, key) = try decode.fixed(if (std.mem.eql(u8, key, "ip4")) 4 else 16, try decode.get(ad, key));
         }

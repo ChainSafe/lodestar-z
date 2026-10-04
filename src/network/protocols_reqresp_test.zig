@@ -52,7 +52,7 @@ fn roundTrip(setup: *Pair, seed: u8) !void {
 
 test "protocol stack round trips a status request through the collapsed host loop" {
     var setup: Pair = .{};
-    try setup.init(.{ .outbound_max = 4, .inbound_max = 4 }, .{ .outbound_max = 4, .inbound_max = 4 });
+    try setup.init(.{ .outbound_max = 4, .serving_max = 4 }, .{ .outbound_max = 4, .serving_max = 4 });
     defer setup.deinit();
 
     try roundTrip(&setup, 5);
@@ -67,7 +67,7 @@ test "protocol stack reclaims inbound sinks across more requests than it has slo
         .global = @import("reqresp/admission_fixture.zig").quotas(1_000, 1_000),
     } };
     var setup: Pair = .{};
-    try setup.init(.{ .outbound_max = 4, .inbound_max = 4 }, .{ .outbound_max = 4, .inbound_max = 4, .admission = admission });
+    try setup.init(.{ .outbound_max = 4, .serving_max = 4 }, .{ .outbound_max = 4, .serving_max = 4, .admission = admission });
     defer setup.deinit();
 
     var seed: u8 = 0;
@@ -77,7 +77,7 @@ test "protocol stack reclaims inbound sinks across more requests than it has slo
 
 test "protocol stack fails in-flight requests when the connection closes" {
     var setup: Pair = .{};
-    try setup.init(.{ .outbound_max = 4, .inbound_max = 4 }, .{ .outbound_max = 4, .inbound_max = 4 });
+    try setup.init(.{ .outbound_max = 4, .serving_max = 4 }, .{ .outbound_max = 4, .serving_max = 4 });
     defer setup.deinit();
 
     const request_ssz = statusBytes(1);
@@ -121,7 +121,7 @@ test "protocol stack fails in-flight requests when the connection closes" {
 
 test "protocol stack control wakeup includes negotiation after application quiescence" {
     var setup: Pair = .{};
-    try setup.init(.{ .outbound_max = 4, .inbound_max = 4 }, .{ .outbound_max = 4, .inbound_max = 4 });
+    try setup.init(.{ .outbound_max = 4, .serving_max = 4 }, .{ .outbound_max = 4, .serving_max = 4 });
     defer setup.deinit();
     setup.shared.client.quiesceApplications();
     const bytes = [_]u8{0} ** 8;
@@ -139,7 +139,7 @@ test "protocol stack control wakeup includes negotiation after application quies
 
 test "protocol stack preserves drained native stream events across a partial request sweep" {
     var setup: Pair = .{};
-    try setup.init(.{ .outbound_max = 4, .inbound_max = 4 }, .{ .outbound_max = 4, .inbound_max = 4 });
+    try setup.init(.{ .outbound_max = 4, .serving_max = 4 }, .{ .outbound_max = 4, .serving_max = 4 });
     defer setup.deinit();
     const bytes = [_]u8{9} ** 8;
     var sink: [8]u8 = undefined;
@@ -183,7 +183,7 @@ test "protocol stack preserves drained native stream events across a partial req
 
 test "protocol stack request work remains bounded and rotates between live streams" {
     var setup: Pair = .{};
-    try setup.init(.{ .outbound_max = 64, .inbound_max = 64 }, .{});
+    try setup.init(.{ .outbound_max = 64, .serving_max = 64 }, .{});
     defer setup.deinit();
     const bytes = [_]u8{9} ** 8;
     var sinks: [2][8]u8 = undefined;
@@ -348,8 +348,8 @@ test "protocol stack reqresp slots stay indexed by connection across a reconnect
     var sinks: [2][8]u8 = undefined;
     _ = try setup.shared.client.request(&setup.shared.pair.client, old.client, .ping_v1, &bytes, &sinks[0], .{}, setup.shared.pair.now);
     const stale = try awaitRequest(&setup);
-    const slots_per_peer = @import("reqresp/ReceiveLayout.zig").slots_per_peer;
-    try std.testing.expectEqual(@as(usize, old.server.index), stale.index / slots_per_peer);
+    const slots_per_connection = @import("reqresp/ReceiveLayout.zig").slots_per_connection;
+    try std.testing.expectEqual(@as(usize, old.server.index), stale.index / slots_per_connection);
 
     // The server holds its host events while the connection closes and a new one takes its index.
     setup.server_event_capacity = 0;
@@ -380,8 +380,8 @@ test "protocol stack reqresp slots stay indexed by connection across a reconnect
         try setup.pumpOnce();
         for (setup.serverEvents()) |event| switch (event) {
             .request => |incoming| {
-                try std.testing.expectEqual(fresh_server, incoming.peer);
-                try std.testing.expectEqual(stale.index / slots_per_peer, incoming.request.index / slots_per_peer);
+                try std.testing.expectEqual(fresh_server, incoming.conn);
+                try std.testing.expectEqual(stale.index / slots_per_connection, incoming.request.index / slots_per_connection);
                 try std.testing.expect(incoming.request.index != stale.index);
                 fresh = incoming.request;
             },

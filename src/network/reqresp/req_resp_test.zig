@@ -75,7 +75,7 @@ test "reqresp rejects non-null status context then completes a status round trip
         for (setup.serverEvents()) |event| switch (event) {
             .request => |incoming| {
                 try std.testing.expectEqual(Protocol.status_v1, incoming.protocol);
-                try std.testing.expectEqual(setup.shared.handles.server, incoming.peer);
+                try std.testing.expectEqual(setup.shared.handles.server, incoming.conn);
                 try std.testing.expectEqualSlices(u8, &request_ssz, incoming.bytes);
             },
             else => {},

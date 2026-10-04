@@ -47,6 +47,7 @@ pub const transport_driver = @import("transport_driver.zig");
 pub const driver = @import("driver.zig");
 pub const Schedule = types.Schedule;
 pub const peers = @import("peers/root.zig");
+pub const advertisement = @import("advertisement.zig");
 pub const control_values = @import("control_values.zig");
 pub const control_wire = @import("control_wire.zig");
 pub const constants = @import("constants.zig");

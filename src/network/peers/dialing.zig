@@ -219,7 +219,7 @@ pub const Dialing = struct {
         const row = catalog.rowFor(ref).?;
         row.dial.automatic = true;
         row.dial.replay = .untried;
-        row.dial.eligible_at_ms = @max(row.dial.eligible_at_ms, now_ms);
+        row.dial.deferUntil(now_ms);
         row.dial.history_until_ms = @max(row.dial.history_until_ms, now_ms +| history_retention_ms);
         applyAddresses(&row.dial, &admitted);
         self.selection_dirty = true;
@@ -361,7 +361,7 @@ pub const Dialing = struct {
             if (!std.meta.eql(attempt.connection, conn)) continue;
             const row = catalog.rowFor(peer).?;
             self.retire(catalog, @intCast(index), .admission_refused, now_ms);
-            row.dial.eligible_at_ms = @max(row.dial.eligible_at_ms, now_ms +| 1_000);
+            row.dial.deferUntil(now_ms +| 1_000);
             catalog.markDial(peer.index);
             releaseUnused(catalog, peer);
             return true;
@@ -390,7 +390,7 @@ pub const Dialing = struct {
             }
             self.retire(catalog, index, .connected, now_ms);
         }
-        row.dial.eligible_at_ms = @max(row.dial.eligible_at_ms, now_ms +| 1_000);
+        row.dial.deferUntil(now_ms +| 1_000);
         releaseUnused(catalog, peer);
     }
     pub fn cancelConnect(self: *Dialing, catalog: *Catalog, peer: *const t.PeerId, now_ms: u64) ?t.Handle {
@@ -404,7 +404,7 @@ pub const Dialing = struct {
             close = self.active[index].connection;
             self.retire(catalog, index, .cancelled, now_ms);
         }
-        row.dial.eligible_at_ms = @max(row.dial.eligible_at_ms, now_ms +| 60_000);
+        row.dial.deferUntil(now_ms +| 60_000);
         releaseUnused(catalog, ref);
         return close;
     }
@@ -441,7 +441,7 @@ pub const Dialing = struct {
         const peer = attempt.peer.?;
         const row = catalog.rowFor(peer).?;
         self.retire(catalog, @intCast(token.index), .deferred, now_ms);
-        row.dial.eligible_at_ms = @max(row.dial.eligible_at_ms, now_ms +| 1_000);
+        row.dial.deferUntil(now_ms +| 1_000);
         releaseUnused(catalog, peer);
         return true;
     }
@@ -467,11 +467,8 @@ pub const Dialing = struct {
         const redundant = row.connection != null;
         self.retire(catalog, index, if (redundant) .cancelled else failureOutcome(failure), now_ms);
         if (!redundant) {
-            row.dial.failures = @min(row.dial.failures +| 1, 7);
             catalog.history.markRetry(dialedKey(catalog, row, &attempt), failure, now_ms);
-            const base: u64 = @min(@as(u64, 1_000) << @intCast(row.dial.failures - 1), 60_000);
-            const jitter = self.random.random().int(u16) % 1_001;
-            row.dial.eligible_at_ms = @max(row.dial.eligible_at_ms, now_ms +| @min(base + jitter, 60_000));
+            row.dial.dialFailed(now_ms, self.random.random().int(u16) % 1_001);
         }
         if (failure == .peer_id_mismatch) catalog.remembered.forgetEndpoint(&row.identity, attempt.address);
         // A redundant attempt leaves the backoff alone but still records its endpoint evidence.

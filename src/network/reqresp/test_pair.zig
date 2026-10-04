@@ -10,9 +10,9 @@ pub const deneb_digest = [4]u8{ 0x6a, 0x95, 0xa1, 0xa9 };
 pub const fulu_digest = [4]u8{ 0x2f, 0x2f, 0x2f, 0x2f };
 pub const Overrides = struct {
     outbound_max: u16 = 8,
-    inbound_max: u16 = 8,
-    inbound_per_peer_max: u8 = 8,
-    inbound_control_reserved: u16 = 0,
+    serving_max: u16 = 8,
+    inbound_per_connection_max: u8 = 8,
+    serving_control_reserved: u16 = 0,
     serving_per_peer_max: u8 = 4,
     progress_timeout_ms: u64 = 10_000,
     host_timeout_ms: u64 = 60_000,
@@ -44,18 +44,18 @@ pub const Pair = struct {
 
     /// Admission defaults over the fixture policy unless the caller supplies admission.
     fn options(overrides: Overrides, forks: []const @import("../types.zig").ForkEntry) !reqresp.Options {
-        const peers = 128;
+        const connections = 128;
         return .{
-            .peers = peers,
+            .connections = connections,
             .outbound_max = overrides.outbound_max,
-            .inbound_max = overrides.inbound_max,
-            .inbound_per_peer_max = overrides.inbound_per_peer_max,
-            .inbound_control_reserved = overrides.inbound_control_reserved,
+            .serving_max = overrides.serving_max,
+            .inbound_per_connection_max = overrides.inbound_per_connection_max,
+            .serving_control_reserved = overrides.serving_control_reserved,
             .serving_per_peer_max = overrides.serving_per_peer_max,
             .progress_timeout_ms = overrides.progress_timeout_ms,
             .forks = overrides.forks orelse forks,
             .request_fork = overrides.request_fork,
-            .admission = overrides.admission orelse try reqresp.Options.Admission.defaults(&@import("policy_fixture.zig").config(), peers, peers, overrides.inbound_max -| overrides.inbound_control_reserved),
+            .admission = overrides.admission orelse try reqresp.Options.Admission.defaults(&@import("policy_fixture.zig").config(), connections, connections, overrides.serving_max -| overrides.serving_control_reserved),
             .host_timeout_ms = overrides.host_timeout_ms,
             .quota_timeout_ms = overrides.quota_timeout_ms,
         };

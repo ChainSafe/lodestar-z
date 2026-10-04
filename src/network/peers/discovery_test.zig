@@ -294,7 +294,7 @@ test "peer discovery reserves output for the responder alongside a full referral
             const started = (try lookup.startNext(&a.transport.engine, &packet, id, now, &entropy)).?;
             defer _ = a.transport.engine.cancelCall(started.call.handle);
             controller.lookup = lookup;
-            const progress: d.Transport.StepResult = .{ .now_ms = now, .event = .{ .response = .{
+            const progress: d.Transport.AdvanceResult = .{ .now_ms = now, .event = .{ .response = .{
                 .peer = peer,
                 .matched = .{ .handle = started.call.handle, .response = .{ .nodes = .{ .request_id = id, .total = if (terminal) 1 else 2, .enrs = &raw } }, .terminal = terminal },
                 .record = null,

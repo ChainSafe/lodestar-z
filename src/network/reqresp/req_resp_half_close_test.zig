@@ -190,7 +190,7 @@ test "reqresp dispatches a complete Goodbye before FIN and keeps other request f
     const Case = enum { goodbye, ping, truncated, trailing };
     for (std.enums.values(Case)) |case| {
         var pair: Pair = .{};
-        try pair.init(.{ .outbound_max = 1 }, .{ .inbound_max = 1 });
+        try pair.init(.{ .outbound_max = 1 }, .{ .serving_max = 1 });
         defer pair.deinit();
         const method: protocol.Protocol = if (case == .ping) .ping_v1 else .goodbye_v1;
         var payload: [8]u8 = undefined;
@@ -243,7 +243,7 @@ test "reqresp half close preserves early metadata and nonempty request responses
             for ([_]bool{ false, true }) |buffered| {
                 errdefer std.debug.print("half close case method={s} stop={any} buffered={any}\n", .{ @tagName(method), stop, buffered });
                 var pair: Pair = .{};
-                try pair.init(.{ .outbound_max = 1, .inbound_max = 1 }, .{});
+                try pair.init(.{ .outbound_max = 1, .serving_max = 1 }, .{});
                 defer pair.deinit();
                 const bytes = [_]u8{7} ** 25;
                 var sink: [25]u8 = undefined;
@@ -265,7 +265,7 @@ test "reqresp half close preserves early metadata and nonempty request responses
 
 test "reqresp half close accepts a later response and releases the request buffer" {
     var pair: Pair = .{};
-    try pair.init(.{ .outbound_max = 1, .inbound_max = 1 }, .{});
+    try pair.init(.{ .outbound_max = 1, .serving_max = 1 }, .{});
     defer pair.deinit();
     const bytes = [_]u8{7} ** 8;
     var sink: [8]u8 = undefined;
@@ -285,7 +285,7 @@ test "reqresp half close still reports peer errors malformed responses and respo
     const Case = enum { peer_error, malformed, truncated, reset };
     for (std.enums.values(Case)) |case| {
         var pair: Pair = .{};
-        try pair.init(.{ .outbound_max = 1, .inbound_max = 1 }, .{});
+        try pair.init(.{ .outbound_max = 1, .serving_max = 1 }, .{});
         defer pair.deinit();
         var sink: [25]u8 = undefined;
         const request = try negotiate(&pair, .metadata_v3, &.{}, &sink, .{});
@@ -315,7 +315,7 @@ test "reqresp half close still reports peer errors malformed responses and respo
 test "reqresp half close without a response retains the absolute response deadline" {
     for ([_]u64{ 100, 10_000 }) |duration| {
         var pair: Pair = .{};
-        try pair.init(.{ .outbound_max = 1, .inbound_max = 1 }, .{});
+        try pair.init(.{ .outbound_max = 1, .serving_max = 1 }, .{});
         defer pair.deinit();
         var sink: [25]u8 = undefined;
         const request = try negotiate(&pair, .metadata_v3, &.{}, &sink, if (duration == 100)
@@ -335,7 +335,7 @@ test "reqresp half close without a response retains the absolute response deadli
 
 test "reqresp half close cancellation frees the only slot for a subsequent request" {
     var pair: Pair = .{};
-    try pair.init(.{ .outbound_max = 1, .inbound_max = 1 }, .{});
+    try pair.init(.{ .outbound_max = 1, .serving_max = 1 }, .{});
     defer pair.deinit();
     var sink: [25]u8 = undefined;
     const first = try negotiate(&pair, .metadata_v3, &.{}, &sink, .{});
@@ -356,7 +356,7 @@ test "reqresp half close cancellation frees the only slot for a subsequent reque
 
 test "reqresp half close preserves context and successive response chunks" {
     var pair: Pair = .{};
-    try pair.init(.{ .outbound_max = 1, .inbound_max = 1 }, .{});
+    try pair.init(.{ .outbound_max = 1, .serving_max = 1 }, .{});
     defer pair.deinit();
     const sink = try std.testing.allocator.alloc(u8, protocol.Protocol.blocks_by_root_v2.info().response_max);
     defer std.testing.allocator.free(sink);
@@ -401,7 +401,7 @@ test "reqresp half close preserves context and successive response chunks" {
 
 test "reqresp half close does not hide a retired stream without response EOF" {
     var pair: Pair = .{};
-    try pair.init(.{ .outbound_max = 1, .inbound_max = 1 }, .{});
+    try pair.init(.{ .outbound_max = 1, .serving_max = 1 }, .{});
     defer pair.deinit();
     var sink: [25]u8 = undefined;
     const request = try negotiate(&pair, .metadata_v3, &.{}, &sink, .{});
@@ -412,7 +412,7 @@ test "reqresp half close does not hide a retired stream without response EOF" {
 test "reqresp FIN before the first chunk fails single-response methods with empty_response" {
     for ([_]protocol.Protocol{ .ping_v1, .metadata_v2 }) |method| {
         var pair: Pair = .{};
-        try pair.init(.{ .outbound_max = 1, .inbound_max = 1 }, .{});
+        try pair.init(.{ .outbound_max = 1, .serving_max = 1 }, .{});
         defer pair.deinit();
         const bytes = [_]u8{7} ** 25;
         var sink: [25]u8 = undefined;
@@ -425,7 +425,7 @@ test "reqresp FIN before the first chunk fails single-response methods with empt
 
 test "reqresp FIN before the first chunk still completes Goodbye" {
     var pair: Pair = .{};
-    try pair.init(.{ .outbound_max = 1, .inbound_max = 1 }, .{});
+    try pair.init(.{ .outbound_max = 1, .serving_max = 1 }, .{});
     defer pair.deinit();
     var payload: [8]u8 = undefined;
     std.mem.writeInt(u64, &payload, 1, .little);

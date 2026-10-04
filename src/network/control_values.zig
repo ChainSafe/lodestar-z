@@ -39,6 +39,19 @@ pub const LocalState = struct {
     fork: ForkContext = .{},
 };
 
+pub const ForkSchedule = struct {
+    fulu_scheduled: bool = false,
+    next_version: [4]u8 = @splat(0),
+    next_epoch: u64 = std.math.maxInt(u64),
+    next_digest: [4]u8 = @splat(0),
+};
+pub const LocalUpdate = struct {
+    local: LocalState,
+    schedule: ForkSchedule,
+    endpoints: ?@import("advertisement.zig").Endpoints,
+    capabilities: @import("capabilities.zig").Directional,
+};
+
 pub const ValidationError = error{
     InvalidSyncnets,
     InvalidCustodyCount,

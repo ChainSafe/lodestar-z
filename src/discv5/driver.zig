@@ -9,7 +9,7 @@ pub const Options = struct {
 
 /// Standalone std.Io driver. Waiting receives at most one datagram; protocol advancement uses
 /// the clock read after that wait. Dual-family sockets require Io concurrency support.
-pub fn step(transport: *Transport, io: std.Io, expired: []CallTable.Expired, options: Options) Transport.Error!Transport.StepResult {
+pub fn step(transport: *Transport, io: std.Io, expired: []CallTable.Expired, options: Options) Transport.Error!Transport.AdvanceResult {
     if (expired.len == 0) return error.MissingExpiryStorage;
     const before_stamp = std.Io.Clock.Timestamp.now(io, .awake);
     const before_ms = @divTrunc(before_stamp.raw.nanoseconds, std.time.ns_per_ms);

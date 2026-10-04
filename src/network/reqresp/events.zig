@@ -38,7 +38,7 @@ pub const Event = union(enum) {
     done: struct { request: RequestHandle, chunks: u32 },
     failed: struct { request: RequestHandle, reason: Failure, phase: ?RequestPhase = null },
     /// Borrows receive bytes until served/failed delivery, regardless of retained host execution.
-    request: struct { request: RequestHandle, peer: Handle, protocol: Protocol, bytes: []const u8 },
+    request: struct { request: RequestHandle, conn: Handle, protocol: Protocol, bytes: []const u8 },
     /// Releases the response bytes passed to respond.
     chunk_sent: struct { request: RequestHandle, chunks: u32 },
     served: struct { request: RequestHandle, chunks: u32 },

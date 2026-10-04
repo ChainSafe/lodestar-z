@@ -21,7 +21,7 @@ pub const Cursor = struct {
 };
 
 pub const StepResult = struct {
-    transport: Transport.StepResult = .{},
+    transport: Transport.AdvanceResult = .{},
     /// The index into `operations` of the lookup that consumed `transport.event`, if any.
     consumed: ?u16 = null,
     progress: Progress = .{},
@@ -154,7 +154,7 @@ fn consumeEvent(
 comptime {
     std.debug.assert(operations_max == 85);
     std.debug.assert(operations_max * Lookup.parallelism * 2 <= std.math.maxInt(u16));
-    std.debug.assert(@sizeOf(StepResult) <= @sizeOf(Transport.StepResult) + 16);
+    std.debug.assert(@sizeOf(StepResult) <= @sizeOf(Transport.AdvanceResult) + 16);
 }
 
 test {

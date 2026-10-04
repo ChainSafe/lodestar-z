@@ -687,3 +687,36 @@ test "peer catalog uses empty established slots before reclaiming disconnected i
         }
     }
 }
+
+test "peer retry transitions preserve dial and established connection delay policies" {
+    var dial: Catalog.DialState = .{};
+    var connection: Catalog.DialState = .{};
+    const dial_delays = [_]u64{ 2_000, 3_000, 5_000, 9_000, 17_000, 33_000, 60_000, 60_000 };
+    const connection_delays = [_]u64{ 6_000, 11_000, 21_000, 41_000, 81_000, 161_000, 301_000, 301_000 };
+    for (dial_delays, connection_delays, 0..) |dial_delay, connection_delay, i| {
+        const now_ms = i * 400_000;
+        dial.dialFailed(now_ms, 1_000);
+        connection.connectionClosed(now_ms, 1, 1_000);
+        try std.testing.expectEqual(now_ms + dial_delay, dial.eligible_at_ms);
+        try std.testing.expectEqual(now_ms + connection_delay, connection.eligible_at_ms);
+        try std.testing.expectEqual(@as(u8, @intCast(@min(i + 1, 7))), dial.failures);
+        try std.testing.expectEqual(dial.failures, connection.failures);
+    }
+    connection.connectionClosed(4_000_000, 300_000, 0);
+    try std.testing.expectEqual(@as(u8, 1), connection.failures);
+    try std.testing.expectEqual(@as(u64, 4_005_000), connection.eligible_at_ms);
+}
+
+test "peer retry transitions preserve later deferrals and saturate time" {
+    var dial: Catalog.DialState = .{};
+    dial.deferUntil(60_000);
+    dial.deferUntil(1_000);
+    dial.dialFailed(0, 0);
+    try std.testing.expectEqual(@as(u64, 60_000), dial.eligible_at_ms);
+    dial.connectionClosed(0, 300_000, 0);
+    try std.testing.expectEqual(@as(u64, 60_000), dial.eligible_at_ms);
+    dial.dialFailed(std.math.maxInt(u64) - 1, 1_000);
+    try std.testing.expectEqual(std.math.maxInt(u64), dial.eligible_at_ms);
+    dial.connectionClosed(std.math.maxInt(u64), 0, 1_000);
+    try std.testing.expectEqual(std.math.maxInt(u64), dial.eligible_at_ms);
+}

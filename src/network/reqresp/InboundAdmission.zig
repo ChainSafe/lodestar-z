@@ -61,26 +61,26 @@ pub const Progress = enum { waiting, charged, admitted };
 const InboundAdmission = @This();
 
 limiter: admission.Limiter,
-peer_cursors: []PeerCursor,
+connection_cursors: []ConnectionCursor,
 ready: [2]index_list.List = .{ .{}, .{} },
 pending: bool = false,
 
-pub fn init(allocator: std.mem.Allocator, options: admission.Options, peers: u16) admission.InitError!InboundAdmission {
+pub fn init(allocator: std.mem.Allocator, options: admission.Options, connections: u16) admission.InitError!InboundAdmission {
     var limiter = try admission.Limiter.init(allocator, options);
     errdefer limiter.deinit(allocator);
-    const cursors = try allocator.alloc(PeerCursor, peers);
+    const cursors = try allocator.alloc(ConnectionCursor, connections);
     @memset(cursors, .{});
-    return .{ .limiter = limiter, .peer_cursors = cursors };
+    return .{ .limiter = limiter, .connection_cursors = cursors };
 }
 
 pub fn deinit(self: *InboundAdmission, allocator: std.mem.Allocator) void {
-    allocator.free(self.peer_cursors);
+    allocator.free(self.connection_cursors);
     self.limiter.deinit(allocator);
     self.* = undefined;
 }
 
 pub fn schedulerBytes(self: *const InboundAdmission) usize {
-    return self.peer_cursors.len * @sizeOf(PeerCursor);
+    return self.connection_cursors.len * @sizeOf(ConnectionCursor);
 }
 
 pub fn due(self: *const InboundAdmission) bool {
@@ -99,7 +99,7 @@ pub fn waitEnded(self: *InboundAdmission, slot: *Server) void {
 
 pub fn accept(self: *InboundAdmission, owner: *ReqResp, engine: *Engine, stream: StreamHandle, ready: Router.Selection, now: Now) ReqResp.AcceptError!Acceptance {
     try owner.validateTransportCapacity(engine);
-    if (stream.conn.index >= owner.options.peers) return error.InvalidCapacity;
+    if (stream.conn.index >= owner.options.connections) return error.InvalidCapacity;
     const identity = engine.peerId(stream.conn) orelse return error.StaleHandle;
     if (ready.leftover.len > RequestIO.read_buffer_length) return error.InvalidHandoff;
     const which = switch (ready.protocol) {
@@ -116,19 +116,19 @@ pub fn accept(self: *InboundAdmission, owner: *ReqResp, engine: *Engine, stream:
         owner.recordAdmissionRefusal(stream, which, .identity_capacity, 1);
         return error.TooManyRequests;
     }
-    if (owner.inboundPendingCount(stream.conn) >= owner.options.inbound_per_peer_max) {
-        owner.recordAdmissionRefusal(stream, which, .peer_capacity, 0);
-        return error.PeerSlotsExhausted;
+    if (owner.inboundPendingCount(stream.conn) >= owner.options.inbound_per_connection_max) {
+        owner.recordAdmissionRefusal(stream, which, .connection_capacity, 0);
+        return error.ConnectionSlotsExhausted;
     }
     const available = availableInbound(owner.inbound, stream.conn, which);
-    if (!which.isControl() and owner.options.inbound_application_per_peer_max > 0 and
-        owner.inboundApplicationOccupiedCount(stream.conn) >= owner.options.inbound_application_per_peer_max)
+    if (!which.isControl() and owner.options.inbound_application_per_connection_max > 0 and
+        owner.inboundApplicationOccupiedCount(stream.conn) >= owner.options.inbound_application_per_connection_max)
     {
-        owner.recordAdmissionRefusal(stream, which, .peer_capacity, 0);
-        return error.PeerSlotsExhausted;
+        owner.recordAdmissionRefusal(stream, which, .connection_capacity, 0);
+        return error.ConnectionSlotsExhausted;
     }
     const index = available orelse {
-        owner.recordAdmissionRefusal(stream, which, .peer_capacity, 0);
+        owner.recordAdmissionRefusal(stream, which, .connection_capacity, 0);
         return error.SlotsExhausted;
     };
     const slot = &owner.inbound[index];
@@ -156,8 +156,8 @@ pub fn accept(self: *InboundAdmission, owner: *ReqResp, engine: *Engine, stream:
     };
 }
 
-fn availableInbound(slots: []Server, peer: Handle, which: Protocol) ?u16 {
-    const first = ReceiveLayout.first(peer.index, which);
+fn availableInbound(slots: []Server, conn: Handle, which: Protocol) ?u16 {
+    const first = ReceiveLayout.first(conn.index, which);
     for (slots[first..][0..constants.MAX_CONCURRENT_REQUESTS], first..) |*slot, index| {
         if (slot.request.available()) return @intCast(index);
     }
@@ -166,19 +166,19 @@ fn availableInbound(slots: []Server, peer: Handle, which: Protocol) ?u16 {
 
 pub fn settle(self: *InboundAdmission, slots: []Server, index: u16) void {
     const slot = &slots[index];
-    const peer = index / ReceiveLayout.slots_per_peer;
-    const bit = @as(u64, 1) << @intCast(index % ReceiveLayout.slots_per_peer);
+    const conn = index / ReceiveLayout.slots_per_connection;
+    const bit = @as(u64, 1) << @intCast(index % ReceiveLayout.slots_per_connection);
     const class: u1 = @intFromBool(slot.request.protocol.isControl());
-    const cursor = &self.peer_cursors[peer];
+    const cursor = &self.connection_cursors[conn];
     const waiting = slot.request.running() and slot.state == .ready;
     if (waiting and cursor.ready_mask[class] & bit == 0 and slot.admission.wait == .none) self.pending = true;
     if (waiting) cursor.ready_mask[class] |= bit else cursor.ready_mask[class] &= ~bit;
     switch (class) {
         inline else => |which| {
-            const field = PeerCursor.link_fields[which];
+            const field = ConnectionCursor.link_fields[which];
             const linked = @field(cursor, field).linked;
-            if (cursor.ready_mask[which] != 0 and !linked) self.ready[which].append(self.peer_cursors, field, peer);
-            if (cursor.ready_mask[which] == 0 and linked) self.ready[which].remove(self.peer_cursors, field, peer);
+            if (cursor.ready_mask[which] != 0 and !linked) self.ready[which].append(self.connection_cursors, field, conn);
+            if (cursor.ready_mask[which] == 0 and linked) self.ready[which].remove(self.connection_cursors, field, conn);
         },
     }
 }
@@ -190,7 +190,7 @@ pub fn promoteReady(self: *InboundAdmission, owner: *ReqResp, now: Now) void {
     self.pending = false;
     var promoted: usize = 0;
     inline for (.{ 1, 0 }) |class| {
-        const field = PeerCursor.link_fields[class];
+        const field = ConnectionCursor.link_fields[class];
         const list = &self.ready[class];
         var next = list.head;
         // Each visited connection is behind every unvisited one once moved, so each
@@ -201,16 +201,16 @@ pub fn promoteReady(self: *InboundAdmission, owner: *ReqResp, now: Now) void {
                 self.pending = true;
                 return;
             }
-            const peer: u16 = @intCast(next);
-            const cursor = &self.peer_cursors[peer];
+            const conn: u16 = @intCast(next);
+            const cursor = &self.connection_cursors[conn];
             next = @field(cursor, field).next;
-            if (self.promotePeer(owner, peer, class, now)) {
+            if (self.promoteConnection(owner, conn, class, now)) {
                 promoted += 1;
                 // The connection's other `.ready` slots wait for the next round.
                 if (cursor.ready_mask[class] != 0) {
                     self.pending = true;
-                    list.remove(self.peer_cursors, field, peer);
-                    list.append(self.peer_cursors, field, peer);
+                    list.remove(self.connection_cursors, field, conn);
+                    list.append(self.connection_cursors, field, conn);
                 }
             }
         }
@@ -219,19 +219,19 @@ pub fn promoteReady(self: *InboundAdmission, owner: *ReqResp, now: Now) void {
 
 /// Tries the connection's `.ready` slots of the class in turn until one is admitted, is
 /// charged its start or pays toward its cost.
-fn promotePeer(self: *InboundAdmission, owner: *ReqResp, peer: u16, comptime class: u1, now: Now) bool {
-    const cursor = &self.peer_cursors[peer];
-    const first = @as(usize, peer) * ReceiveLayout.slots_per_peer;
+fn promoteConnection(self: *InboundAdmission, owner: *ReqResp, conn: u16, comptime class: u1, now: Now) bool {
+    const cursor = &self.connection_cursors[conn];
+    const first = @as(usize, conn) * ReceiveLayout.slots_per_connection;
     const start = cursor.admission[class];
-    for (0..ReceiveLayout.slots_per_peer) |offset| {
-        const local: u8 = @intCast((start + offset) % ReceiveLayout.slots_per_peer);
+    for (0..ReceiveLayout.slots_per_connection) |offset| {
+        const local: u8 = @intCast((start + offset) % ReceiveLayout.slots_per_connection);
         if (cursor.ready_mask[class] & (@as(u64, 1) << @intCast(local)) == 0) continue;
         const index: u16 = @intCast(first + local);
         owner.visits +|= 1;
         const result = self.promote(owner, index, now);
         owner.settleSlot(.inbound, index);
         if (result != .waiting) {
-            cursor.admission[class] = @intCast((local + 1) % ReceiveLayout.slots_per_peer);
+            cursor.admission[class] = @intCast((local + 1) % ReceiveLayout.slots_per_connection);
             return true;
         }
     }
@@ -289,7 +289,7 @@ fn chargeStart(self: *InboundAdmission, slots: []Server, index: u16, now: Now) b
 
 /// Whether a running request of the class on the connection is still owed its start.
 fn startsPending(slots: []const Server, conn: Handle, control: bool) bool {
-    for (slots[ReceiveLayout.first(conn.index, @enumFromInt(0))..][0..ReceiveLayout.slots_per_peer]) |*slot| {
+    for (slots[ReceiveLayout.first(conn.index, @enumFromInt(0))..][0..ReceiveLayout.slots_per_connection]) |*slot| {
         if (!slot.admission.start_pending or !slot.request.running() or slot.request.protocol.isControl() != control) continue;
         if (std.meta.eql(slot.request.conn, conn)) return true;
     }
@@ -302,10 +302,10 @@ fn startsPending(slots: []const Server, conn: Handle, control: bool) bool {
 /// waiter is charged its start within one refill per request ahead of it.
 fn startQueued(self: *const InboundAdmission, slots: []const Server, index: u16) bool {
     const slot = &slots[index];
-    const peer = index / ReceiveLayout.slots_per_peer;
-    const first = @as(usize, peer) * ReceiveLayout.slots_per_peer;
-    var mask = self.peer_cursors[peer].ready_mask[@intFromBool(slot.request.protocol.isControl())];
-    for (0..ReceiveLayout.slots_per_peer) |_| {
+    const conn = index / ReceiveLayout.slots_per_connection;
+    const first = @as(usize, conn) * ReceiveLayout.slots_per_connection;
+    var mask = self.connection_cursors[conn].ready_mask[@intFromBool(slot.request.protocol.isControl())];
+    for (0..ReceiveLayout.slots_per_connection) |_| {
         if (mask == 0) break;
         const other = first + @ctz(mask);
         mask &= mask - 1;
@@ -331,18 +331,18 @@ pub fn chargeRejected(self: *InboundAdmission, owner: *ReqResp, engine: *Engine,
 }
 
 pub fn checkSlot(self: *const InboundAdmission, slot: *const Server, index: u16) void {
-    const bit = @as(u64, 1) << @intCast(index % ReceiveLayout.slots_per_peer);
+    const bit = @as(u64, 1) << @intCast(index % ReceiveLayout.slots_per_connection);
     const class: u1 = @intFromBool(slot.request.protocol.isControl());
     const waiting = slot.request.running() and slot.state == .ready;
-    const cursor = &self.peer_cursors[index / ReceiveLayout.slots_per_peer];
+    const cursor = &self.connection_cursors[index / ReceiveLayout.slots_per_connection];
     assert((cursor.ready_mask[class] & bit != 0) == waiting);
-    if (waiting) assert(PeerCursor.linked(self.peer_cursors, class, index / ReceiveLayout.slots_per_peer));
+    if (waiting) assert(ConnectionCursor.linked(self.connection_cursors, class, index / ReceiveLayout.slots_per_connection));
     if (waiting and slot.admission.wait == .none) assert(self.pending);
 }
 
 /// Per connection index: where the next admission attempt starts, the `.ready` inbound slots and
 /// the admission list links, per class (application, control).
-const PeerCursor = struct {
+const ConnectionCursor = struct {
     admission: [2]u8 = @splat(0),
     ready_mask: [2]u64 = @splat(0),
     application_link: index_list.Link = .{},
@@ -350,13 +350,13 @@ const PeerCursor = struct {
 
     const link_fields = [2][]const u8{ "application_link", "control_link" };
 
-    fn linked(rows: []const PeerCursor, class: u1, peer: u32) bool {
-        return if (class == 0) rows[peer].application_link.linked else rows[peer].control_link.linked;
+    fn linked(rows: []const ConnectionCursor, class: u1, conn: u32) bool {
+        return if (class == 0) rows[conn].application_link.linked else rows[conn].control_link.linked;
     }
 };
 
 comptime {
-    assert(ReceiveLayout.slots_per_peer <= 64);
+    assert(ReceiveLayout.slots_per_connection <= 64);
 }
 
 test {

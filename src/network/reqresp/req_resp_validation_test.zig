@@ -88,7 +88,7 @@ test "reqresp caller cardinality rejects invalid bounds before opening a stream"
 
 test "reqresp validates transport capacity and copies its fork table" {
     var forks = [_]@import("../types.zig").ForkEntry{.{ .digest = deneb_digest, .fork = .deneb }};
-    var rr = try reqresp.init(std.testing.allocator, .{ .peers = 1, .forks = &forks, .admission = try reqresp.Options.Admission.defaults(&@import("policy_fixture.zig").config(), 1, 1, 64) });
+    var rr = try reqresp.init(std.testing.allocator, .{ .connections = 1, .forks = &forks, .admission = try reqresp.Options.Admission.defaults(&@import("policy_fixture.zig").config(), 1, 1, 64) });
     defer rr.deinit();
     forks[0].digest = fulu_digest;
     try std.testing.expectEqual(@as(?@import("config").ForkSeq, .deneb), rr.forkFor(deneb_digest));
@@ -97,7 +97,7 @@ test "reqresp validates transport capacity and copies its fork table" {
     try setup.init(.{}, .{});
     defer setup.deinit();
     try std.testing.expectError(error.InvalidCapacity, rr.validateTransportCapacity(&setup.shared.pair.client));
-    try std.testing.expectError(error.InvalidOptions, reqresp.init(std.testing.allocator, .{ .peers = 1025, .forks = &.{}, .admission = try reqresp.Options.Admission.defaults(&@import("policy_fixture.zig").config(), 1, 1, 64) }));
+    try std.testing.expectError(error.InvalidOptions, reqresp.init(std.testing.allocator, .{ .connections = 1025, .forks = &.{}, .admission = try reqresp.Options.Admission.defaults(&@import("policy_fixture.zig").config(), 1, 1, 64) }));
     const plan = rr.memoryPlan();
     try std.testing.expectEqual(plan.total_bytes, plan.facade_bytes + plan.slot_bytes + plan.io_bytes + plan.admission_bytes + plan.request_sink_bytes + plan.serving_bytes + plan.scheduler_bytes);
     try std.testing.expect(plan.io_bytes > 0 and plan.slot_bytes > 0);

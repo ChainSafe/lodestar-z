@@ -1,3 +1,5 @@
+const advertisement = @import("advertisement.zig");
+const control_values = @import("control_values.zig");
 const gossip_test = @import("gossipsub/test_support.zig");
 const driver = @import("driver.zig");
 const core_test = @import("network_core_test_support.zig");
@@ -12,18 +14,18 @@ const Now = @import("types.zig").Now;
 const Setup = @import("network_core_test_support.zig").Setup;
 
 /// Applies a local update through the host intent path with the current subscriptions and demand.
-fn applyLocal(node: *NetworkCore, update: *const NetworkCore.LocalUpdate, now: Now) !bool {
+fn applyLocal(node: *NetworkCore, update: *const control_values.LocalUpdate, now: Now) !bool {
     var boundaries: [@import("gossipsub/topic_policy.zig").boundary_max]@import("gossipsub/local_intent.zig").Boundary = undefined;
     var desired = core_test.intent(node, try @import("gossipsub/test_support.zig").subscriptionUpdate(node.protocols.gossipsub, null, false, &boundaries));
     desired.update = update.*;
     return node.applyIntent(&desired, now);
 }
 
-fn updateLocalWithEndpoints(node: *NetworkCore, local: *const t.LocalState, schedule: NetworkCore.ForkSchedule, endpoints: ?NetworkCore.AdvertisementEndpoints, now: Now) !bool {
+fn updateLocalWithEndpoints(node: *NetworkCore, local: *const t.LocalState, schedule: control_values.ForkSchedule, endpoints: ?advertisement.Endpoints, now: Now) !bool {
     return applyLocal(node, &.{ .local = local.*, .schedule = schedule, .endpoints = endpoints, .capabilities = node.protocols.router.capabilities() }, now);
 }
 
-fn updateLocal(node: *NetworkCore, local: *const t.LocalState, schedule: NetworkCore.ForkSchedule, now: Now) !bool {
+fn updateLocal(node: *NetworkCore, local: *const t.LocalState, schedule: control_values.ForkSchedule, now: Now) !bool {
     return updateLocalWithEndpoints(node, local, schedule, node.advertisementEndpoints(), now);
 }
 
@@ -73,8 +75,8 @@ const IntentPair = struct {
 
 const ActivationSnapshot = struct {
     local: t.LocalState,
-    schedule: NetworkCore.ForkSchedule,
-    endpoints: ?NetworkCore.AdvertisementEndpoints,
+    schedule: control_values.ForkSchedule,
+    endpoints: ?advertisement.Endpoints,
     capabilities: @import("capabilities.zig").Directional,
     request_fork: t.ForkSeq,
     record: d.identity.enr.Record,
@@ -167,7 +169,7 @@ test "core local transaction sequences no-op schedule and rollback" {
     try std.testing.expectEqual(@as(u64, 1), node.localState().metadata.seq_number);
     try std.testing.expectEqual(initial.sequence + 1, node.localRecord().?.sequence);
     const before = node.localRecord().?.*;
-    const scheduled: NetworkCore.ForkSchedule = .{ .fulu_scheduled = true };
+    const scheduled: control_values.ForkSchedule = .{ .fulu_scheduled = true };
     local.metadata.custody_group_count = null;
     try std.testing.expectError(error.MissingCustodyAdvertisement, updateLocal(&node, &local, scheduled, now));
     try std.testing.expectEqualSlices(u8, before.slice(), node.localRecord().?.slice());
@@ -176,7 +178,7 @@ test "core local transaction sequences no-op schedule and rollback" {
     const candidate = try @import("peers/enr.zig").decode(node.localRecord().?, &local.fork);
     try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, candidate.next_fork_digest.?);
     try std.testing.expectEqual(@as(u64, 1), candidate.custody_group_count.?);
-    const invalid: NetworkCore.ForkSchedule = .{ .fulu_scheduled = true, .next_digest = .{ 1, 2, 3, 4 } };
+    const invalid: control_values.ForkSchedule = .{ .fulu_scheduled = true, .next_digest = .{ 1, 2, 3, 4 } };
     try std.testing.expectError(error.InvalidSchedule, updateLocal(&node, &local, invalid, now));
 }
 
@@ -196,7 +198,7 @@ test "core sequence exhaustion rolls back and future fork hints stay advisory" {
     try std.testing.expectError(error.SequenceExhausted, updateLocal(&node, &desired, .{}, now));
     try std.testing.expectEqualDeep(before, node.localState());
     try std.testing.expectEqual(before.fork.fork, node.protocols.reqresp.request_fork);
-    const schedule: NetworkCore.ForkSchedule = .{ .next_epoch = 100, .next_version = .{ 1, 2, 3, 4 } };
+    const schedule: control_values.ForkSchedule = .{ .next_epoch = 100, .next_version = .{ 1, 2, 3, 4 } };
     try std.testing.expectError(error.SequenceExhausted, updateLocal(&node, &before, schedule, now));
     try std.testing.expectEqualSlices(u8, record.slice(), node.localRecord().?.slice());
     desired = before;
@@ -230,14 +232,14 @@ test "core explicit advertisement is independent and atomic" {
     try std.testing.expectError(error.InvalidAdvertisement, updateLocalWithEndpoints(&node, &local, .{}, endpoints, now));
     try std.testing.expectEqualSlices(u8, committed.slice(), node.localRecord().?.slice());
     try std.testing.expectEqual(@as(u64, 0), node.localState().metadata.seq_number);
-    for ([_]NetworkCore.AdvertisementEndpoints{
+    for ([_]advertisement.Endpoints{
         .{ .ip4 = .{ 0, 1, 2, 3 }, .udp = 19000, .quic = 19001 },
         .{ .ip6 = .{ 0xfe, 0x80 } ++ .{0} ** 13 ++ .{1}, .udp6 = 19000, .quic6 = 19001 },
     }) |invalid| try std.testing.expectError(error.InvalidAdvertisement, updateLocalWithEndpoints(&node, &local, .{}, invalid, now));
-    const privileged: NetworkCore.AdvertisementEndpoints = .{ .ip4 = .{ 127, 0, 0, 1 }, .udp = 443, .quic = 443 };
+    const privileged: advertisement.Endpoints = .{ .ip4 = .{ 127, 0, 0, 1 }, .udp = 443, .quic = 443 };
     try std.testing.expect(try updateLocalWithEndpoints(&node, &local, .{}, privileged, now));
     try std.testing.expectEqual(@as(u16, 443), node.advertisementEndpoints().?.quic.?);
-    const ipv6: NetworkCore.AdvertisementEndpoints = .{ .ip6 = .{0} ** 15 ++ .{1}, .udp6 = 19000, .quic6 = 19001 };
+    const ipv6: advertisement.Endpoints = .{ .ip6 = .{0} ** 15 ++ .{1}, .udp6 = 19000, .quic6 = 19001 };
     const previous = node.localRecord().?.*;
     try std.testing.expectError(error.InvalidAdvertisement, updateLocalWithEndpoints(&node, &local, .{}, ipv6, now));
     try std.testing.expectEqualSlices(u8, previous.slice(), node.localRecord().?.slice());
@@ -361,7 +363,7 @@ test "core capabilities activation rolls back all owners on rejected candidates"
     defer node.deinit(std.testing.io);
     const before = ActivationSnapshot.capture(&node);
     const now = node.last_now;
-    var update: NetworkCore.LocalUpdate = .{ .local = before.local, .schedule = before.schedule, .endpoints = before.endpoints, .capabilities = before.capabilities };
+    var update: control_values.LocalUpdate = .{ .local = before.local, .schedule = before.schedule, .endpoints = before.endpoints, .capabilities = before.capabilities };
     update.local.metadata.custody_group_count = 0;
     try std.testing.expectError(error.InvalidCustodyCount, applyLocal(&node, &update, now));
     try before.expectUnchanged(&node);
@@ -417,7 +419,7 @@ test "core capabilities activation commits fork BPO and copied directional value
     const admitted_row = admission.rows[0];
     const allocations = backing_node.allocations;
     const before = ActivationSnapshot.capture(&node);
-    var update: NetworkCore.LocalUpdate = .{ .local = before.local, .schedule = before.schedule, .endpoints = before.endpoints, .capabilities = before.capabilities };
+    var update: control_values.LocalUpdate = .{ .local = before.local, .schedule = before.schedule, .endpoints = before.endpoints, .capabilities = before.capabilities };
     update.capabilities.request = .initEmpty();
     try std.testing.expect(try applyLocal(&node, &update, node.last_now));
     try std.testing.expectEqualDeep(before.local, node.localState());
@@ -491,7 +493,7 @@ test "core complete local intent rejects invalid last topic atomically" {
     try node.init(std.testing.allocator, std.testing.io, &opts.resolved, opts.startup);
     defer node.deinit(std.testing.io);
     const block_topic = "/eth2/01020304/beacon_block/ssz_snappy";
-    const update: NetworkCore.LocalUpdate = .{ .local = node.localState(), .schedule = node.schedule, .endpoints = node.advertisementEndpoints(), .capabilities = node.protocols.router.capabilities() };
+    const update: control_values.LocalUpdate = .{ .local = node.localState(), .schedule = node.schedule, .endpoints = node.advertisementEndpoints(), .capabilities = node.protocols.router.capabilities() };
     var desired: NetworkCore.LocalIntent = .{ .update = update, .demand = .{}, .subscriptions = @import("gossipsub/topic_fixture.zig").subscriptions(&.{block_topic}) };
     const now = node.last_now;
     try std.testing.expect(try node.applyIntent(&desired, now));

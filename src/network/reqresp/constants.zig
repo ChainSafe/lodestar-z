@@ -4,9 +4,9 @@ pub const MAX_PAYLOAD_SIZE = @import("../constants.zig").MAX_PAYLOAD_SIZE;
 pub const MAX_CONCURRENT_REQUESTS: u8 = 2;
 
 pub const outbound_max_default: u16 = 64;
-pub const inbound_max_default: u16 = 64;
+pub const serving_max_default: u16 = 64;
 pub const slots_ceiling: u16 = 1_024;
-pub const inbound_per_peer_max_default: u8 = 8;
+pub const inbound_per_connection_max_default: u8 = 8;
 pub const progress_timeout_ms_default: u64 = 10_000;
 
 pub const frame_uncompressed_max: usize = 65_536;
@@ -34,8 +34,8 @@ pub fn maxEncodedLength(uncompressed: usize) usize {
 
 comptime {
     std.debug.assert(outbound_max_default <= slots_ceiling);
-    std.debug.assert(inbound_max_default <= slots_ceiling);
-    std.debug.assert(inbound_per_peer_max_default >= MAX_CONCURRENT_REQUESTS);
+    std.debug.assert(serving_max_default <= slots_ceiling);
+    std.debug.assert(inbound_per_connection_max_default >= MAX_CONCURRENT_REQUESTS);
     std.debug.assert(result_resource_unavailable < result_reserved_max);
     std.debug.assert(app_error_timeout > 4);
 }

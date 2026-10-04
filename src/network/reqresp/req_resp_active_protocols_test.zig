@@ -31,7 +31,7 @@ test "reqresp active new methods enforce request ceilings through real exchanges
         .{ protocol.Protocol.light_client_optimistic_update_v1, 0, 1, ct.fulu.LightClientOptimisticUpdate.min_size },
     };
     var setup: harness.Pair = .{};
-    try setup.init(.{ .outbound_max = 1, .forks = &.{ first, second, phase0 } }, .{ .inbound_max = 1, .inbound_per_peer_max = 1, .forks = &.{ first, second, phase0 } });
+    try setup.init(.{ .outbound_max = 1, .forks = &.{ first, second, phase0 } }, .{ .serving_max = 1, .inbound_per_connection_max = 1, .forks = &.{ first, second, phase0 } });
     defer setup.deinit();
     inline for (cases) |case| {
         for ([_]@import("../types.zig").ForkEntry{ first, second }) |context| {
@@ -449,7 +449,7 @@ fn refusedStart(setup: *harness.Pair, which: protocol.Protocol) !void {
         try std.testing.expectEqual(@as(usize, 0), setup.serverEvents().len);
         for (setup.clientEvents()) |event| {
             try std.testing.expectEqual(.failed, std.meta.activeTag(event));
-            try std.testing.expectEqual(reqresp.Failure{ .negotiation_failed = .stream_closed }, event.failed.reason);
+            try std.testing.expectEqual(reqresp.Failure{ .peer_error = .{ .code = 139, .message_len = "Rate limited: identity capacity exhausted".len } }, event.failed.reason);
             refused = true;
         }
         if (refused) break;
@@ -542,7 +542,7 @@ fn admissionAllocation(allocator: std.mem.Allocator) !void {
     var owner = try reqresp.init(allocator, .{
         .forks = &.{},
         .outbound_max = 1,
-        .inbound_max = 1,
+        .serving_max = 1,
 
         .admission = .{ .policy = policy_fixture(), .limits = .{ .identities = 2, .peer = admission_quotas(2, 1000), .global = admission_quotas(100, 1000) } },
     });

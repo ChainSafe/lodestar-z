@@ -22,7 +22,7 @@ test "configuration resolves dial concurrency independently of peer headroom" {
         try std.testing.expectEqual(reserved, resolved.core.dial.outbound_reserved);
         try std.testing.expectEqual(reserved, resolved.limits.outbound_reserved);
         try std.testing.expectEqual(@as(?u16, 242), resolved.limits.outbound_max);
-        try std.testing.expectEqual(200 + headroom, resolved.core.protocols.reqresp.inbound_control_reserved);
+        try std.testing.expectEqual(200 + headroom, resolved.core.protocols.reqresp.serving_control_reserved);
     }
     const beacon = try resolve(.{ .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
     try std.testing.expectEqual(@as(u16, 32), beacon.core.dial.concurrent_max);
@@ -76,7 +76,7 @@ test "configuration control admission quotas permit the full two hundred peer wo
 
 test "configuration resolves shared capacities from their owners" {
     const small = try resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .admission_policy = policy_fixture.config() });
-    try std.testing.expectEqual(small.limits.connections_max, small.core.protocols.reqresp.peers);
+    try std.testing.expectEqual(small.limits.connections_max, small.core.protocols.reqresp.connections);
     try std.testing.expectEqual(small.core.peers.max_peers, small.core.protocols.gossipsub.connected_capacity);
     try std.testing.expectEqual(small.core.peers.max_peers, small.core.protocols.reqresp.outbound_control_reserved);
     try std.testing.expectEqual(@as(u16, 18), small.core.protocols.reqresp.outbound_max);
@@ -103,11 +103,11 @@ test "configuration overrides preserve profile defaults and derive shared fields
         .admission_policy = policy_fixture.config(),
     });
     const protocols = &resolved.core.protocols;
-    try std.testing.expectEqual(@as(u16, 8), protocols.reqresp.peers);
+    try std.testing.expectEqual(@as(u16, 8), protocols.reqresp.connections);
     try std.testing.expectEqualSlices(@import("types.zig").ForkEntry, forks, protocols.reqresp.forks);
     try std.testing.expectEqual(@as(u16, 12), protocols.reqresp.outbound_max);
     try std.testing.expectEqual(@as(u16, 7), protocols.reqresp.work_per_pump_max);
-    try std.testing.expectEqual(resolved.core.peers.max_peers, protocols.reqresp.inbound_control_reserved);
+    try std.testing.expectEqual(resolved.core.peers.max_peers, protocols.reqresp.serving_control_reserved);
     try std.testing.expectEqual(@as(u16, 6), protocols.router.outbound_control_reserved);
     try std.testing.expectEqual(@as(u16, 20), protocols.router.negotiations_max);
     try std.testing.expectEqual(@as(u16, 6), protocols.gossipsub.connected_capacity);
@@ -125,7 +125,7 @@ test "configuration rejects inconsistent capacity sections before owners" {
     options.protocols.router.outbound_control_reserved += 1;
     try validate(resolved.limits, options);
     options = resolved.core;
-    options.protocols.reqresp.inbound_control_reserved = options.protocols.reqresp.inbound_max + 1;
+    options.protocols.reqresp.serving_control_reserved = options.protocols.reqresp.serving_max + 1;
     try std.testing.expectError(error.InvalidOptions, validate(resolved.limits, options));
     options = resolved.core;
     options.protocols.router.outbound_control_reserved = 0;
@@ -134,7 +134,7 @@ test "configuration rejects inconsistent capacity sections before owners" {
     options.protocols.reqresp.outbound_control_reserved = options.peers.max_peers - 1;
     try std.testing.expectError(error.InvalidOptions, validate(resolved.limits, options));
     options = resolved.core;
-    options.protocols.reqresp.peers = resolved.limits.connections_max - 1;
+    options.protocols.reqresp.connections = resolved.limits.connections_max - 1;
     try std.testing.expectError(error.InvalidOptions, validate(resolved.limits, options));
     options = resolved.core;
     options.peers.max_peers = resolved.limits.connections_max + 1;
@@ -223,7 +223,7 @@ test "resolved admission and Identify overrides use final profile capacities" {
         .profile = .small,
         .seed = 91,
         .forks = &.{},
-        .reqresp = .{ .inbound_max = 256 },
+        .reqresp = .{ .serving_max = 256 },
         .admission_policy = @import("reqresp/policy_fixture.zig").config(),
         .identify = .{ .agent = "resolved-agent", .protocol_version = "resolved-version" },
     });
@@ -248,14 +248,14 @@ test "application request limits preserve control capacity and size admission fr
         });
         const requests = resolved.core.protocols.reqresp;
         const application_max: u16 = if (profile == .small) 6 else 32;
-        try std.testing.expectEqual(application_max, requests.inbound_max - requests.inbound_control_reserved);
+        try std.testing.expectEqual(application_max, requests.serving_max - requests.serving_control_reserved);
         try std.testing.expectEqual(application_max, requests.outbound_max - requests.outbound_control_reserved);
         try std.testing.expectEqual(resolved.core.peers.max_peers, requests.outbound_control_reserved);
         const ping = requests.admission.limits.global[@intFromEnum(@import("config").ForkSeq.fulu)][@intFromEnum(@import("reqresp/protocol.zig").Protocol.ping_v1)];
         try std.testing.expectEqual(@as(u32, resolved.core.peers.max_peers) * requests.admission.limits.peer[@intFromEnum(@import("config").ForkSeq.fulu)][@intFromEnum(@import("reqresp/protocol.zig").Protocol.ping_v1)].tokens, ping.tokens);
     }
     try std.testing.expectError(error.InvalidOptions, resolve(.{ .seed = 1, .forks = &.{}, .application_requests_max = 0, .admission_policy = policy_fixture.config() }));
-    try std.testing.expectError(error.InvalidOptions, resolve(.{ .seed = 1, .forks = &.{}, .application_requests_max = 32, .reqresp = .{ .inbound_max = 1 }, .admission_policy = policy_fixture.config() }));
+    try std.testing.expectError(error.InvalidOptions, resolve(.{ .seed = 1, .forks = &.{}, .application_requests_max = 32, .reqresp = .{ .serving_max = 1 }, .admission_policy = policy_fixture.config() }));
 }
 
 test "configuration rejects invalid complete sections" {

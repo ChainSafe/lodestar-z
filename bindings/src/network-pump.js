@@ -1,5 +1,28 @@
+// @ts-check
+import assert from "node:assert/strict";
 import {LogDelivery} from "./network-log-delivery.js";
 import {CONTROL, FAILURES_MAX, SETTLE_CELLS, escalate} from "./network-turn-scheduler.js";
+
+/**
+ * @typedef {import("./network-turn-scheduler.js").Continuation} Continuation
+ * @typedef {import("./network-runtime.js").NativeAction} Action
+ * @typedef {Extract<Action, {type: "block" | "reportPeer" | "dropQueued" | "recheck"}>} CoalescedAction
+ * @typedef {import("./network-runtime.js").NativeGossipHandle} Handle
+ * @typedef {import("./network-runtime.js").NativeIncomingRequest} Incoming
+ * @typedef {import("./network-runtime.js").NativeExchange} Exchange
+ * @typedef {import("./network.js").NativeHost} Host
+ * @typedef {import("./network.js").CloseResult} CloseResult
+ * @typedef {{failure: Error | null}} Terminal
+ * @typedef {{resolve(): void, reject(error: unknown): void, remaining: number, weak: WeakRef<Settler> | null}} Settler
+ * @typedef {{adopted: boolean, handles: Handle[], job: import("./network.js").GossipJob | null, urgent: boolean}} Job
+ * @typedef {{adopted: boolean, incoming: Incoming}} Start
+ * @typedef {Pick<import("./network-runtime.js").NativeNetworkApplicationRuntime, "exchange" | "fail" | "drainLogs"> & {
+ * scheduler: import("./network-turn-scheduler.js").TurnScheduler,
+ * closed: Promise<CloseResult>,
+ * close(): Promise<CloseResult>,
+ * state: string
+ * }} Runtime
+ */
 
 /** Actions one exchange applies; native refuses a longer batch. */
 export const ACTION_MAX = 256;
@@ -22,6 +45,8 @@ const noop = () => undefined;
  * Each report's settler, kept alive by the report itself. The pump also holds every unfinished settler while it lives;
  * once it is collected, only a report still reachable keeps its settler, and a promise derived from a report does not
  * keep the report.
+ *
+ * @type {WeakMap<Promise<void>, Settler>}
  */
 const settlers = new WeakMap();
 
@@ -29,14 +54,17 @@ function closedError() {
   return Object.assign(new Error("NetworkClosed"), {code: "NetworkClosed"});
 }
 
+/** @param {string} callback */
 function contractError(callback) {
   return Object.assign(new Error(`NativeHostContract: ${callback}`), {callback, code: "NativeHostContract"});
 }
 
+/** @param {Handle} handle */
 function keyOf(handle) {
   return `${handle.index}:${handle.generation}`;
 }
 
+/** @param {CoalescedAction} action */
 function coalescingKey(action) {
   switch (action.type) {
     case "block":
@@ -52,6 +80,10 @@ function coalescingKey(action) {
  * The network's close result once the completion owner settled the runtime's close: the first failure, a delivery
  * failure or the owner's terminal error, whichever came first, even when a requested close was already underway; else
  * a requested close. It holds no host or pump reference, since the completion owner roots its reaction.
+ *
+ * @param {Promise<CloseResult>} closed
+ * @param {Terminal} terminal
+ * @returns {Promise<CloseResult>}
  */
 export function closeResult(closed, terminal) {
   return closed.then((result) => {
@@ -64,6 +96,7 @@ export function closeResult(closed, terminal) {
 class IncomingRequest {
   #incoming;
 
+  /** @param {Incoming} incoming */
   constructor(incoming) {
     this.#incoming = incoming;
     this.peerId = incoming.peerId;
@@ -76,12 +109,20 @@ class IncomingRequest {
   ready() {
     return this.#incoming.ready();
   }
+  /**
+   * @param {Uint8Array} data
+   * @param {import("./network.js").NativeForkEntry | null} context
+   */
   respond(data, context) {
     return this.#incoming.respond(data, context);
   }
   finish() {
     return this.#incoming.finish();
   }
+  /**
+   * @param {number} status
+   * @param {Uint8Array} message
+   */
   fail(status, message) {
     return this.#incoming.fail(status, message);
   }
@@ -101,7 +142,9 @@ class IncomingRequest {
  * The runtime's scheduler and the closed observation hold the pump weakly, so a dropped facade and host can be collected.
  */
 export class NativePump {
+  /** @type {Runtime | null} */
   #runtime = null;
+  /** @type {import("./network-turn-scheduler.js").TurnScheduler | null} */
   #scheduler = null;
   #host;
   /** Terminal bookkeeping the facade shares; it holds no host reference. */
@@ -114,42 +157,70 @@ export class NativePump {
   /** A delivery failure was arbitrated, and the host's `failed` received the first. */
   #arbitrated = false;
   #notified = false;
+  /** @type {Action[]} */
   #obligations = [];
-  /** One entry per imported root, per penalized peer and action, and for a recheck or a drop, in arrival order. */
+  /**
+   * One entry per imported root, per penalized peer and action, and for a recheck or a drop, in arrival order.
+   * @type {Map<string, CoalescedAction>}
+   */
   #coalesced = new Map();
   #blocks = 0;
   #reports = 0;
-  /** Delivered ordinary jobs a spent time budget left for the next turn, at most one batch. */
+  /**
+   * Delivered ordinary jobs a spent time budget left for the next turn, at most one batch.
+   * @type {Job[]}
+   */
   #heldJobs = [];
-  /** Delivered serving starts a spent time budget left for the next turn, at most one turn's quota. */
+  /**
+   * Delivered serving starts a spent time budget left for the next turn, at most one turn's quota.
+   * @type {Incoming[]}
+   */
   #heldStarts = [];
-  /** Each delivered message awaiting its owner disposition, by native handle. */
+  /**
+   * Each delivered message awaiting its owner disposition, by native handle.
+   * @type {Map<string, Settler>}
+   */
   #reported = new Map();
   /**
    * Each unsettled report's settler, held weakly: a report retained elsewhere settles at close although the pump and
    * host were collected, and one nobody retains roots neither its reactions nor the host they capture.
+   *
+   * @type {Set<WeakRef<Settler>>}
    */
   #unsettled = new Set();
   #burst = {buckets: new Array(BURST_BUCKETS.length).fill(0), count: 0, sum: 0};
+  /** @type {LogDelivery | null} */
   #logs = null;
   /** Peer penalties dropped because the coalescing table was full. */
   reportsDropped = 0;
 
+  /**
+   * @param {Host} host
+   * @param {Terminal} terminal
+   */
   constructor(host, terminal) {
     this.#host = host;
     this.#terminal = terminal;
   }
 
-  /** Starts draining `runtime` on its scheduler, whose notifications call `request`, and delivering its log records. */
+  /**
+   * Starts draining `runtime` on its scheduler, whose notifications call `request`, and delivering its log records.
+   * @param {Runtime} runtime
+   */
   attach(runtime) {
     this.#runtime = runtime;
     this.#scheduler = runtime.scheduler;
     this.#scheduler.bind(this);
     NativePump.#observe(this.#weak, this.#unsettled, runtime.closed);
-    this.#logs = new LogDelivery(runtime, this.#host, (error) => this.#error(error));
+    this.#logs = new LogDelivery(runtime, this.#host, /** @param {unknown} error */ (error) => this.#error(error));
     this.#logs.start();
   }
 
+  /**
+   * @param {WeakRef<NativePump>} weak
+   * @param {Set<WeakRef<Settler>>} unsettled
+   * @param {Promise<CloseResult>} closed
+   */
   static #observe(weak, unsettled, closed) {
     const stop = () => {
       // Shutdown prevents the owner from disposing of whatever it has not acknowledged.
@@ -165,12 +236,17 @@ export class NativePump {
   /** A native notification, or capacity the host released. */
   request = () => this.#schedule();
 
+  /** @param {Uint8Array} root */
   block(root) {
     this.#coalesce({root: new Uint8Array(root), type: "block"});
   }
   dropQueued() {
     this.#coalesce({type: "dropQueued"});
   }
+  /**
+   * @param {string} peerId
+   * @param {import("./network.js").NativePeerAction} action
+   */
   reportPeer(peerId, action) {
     this.#coalesce({action, count: 1, peerId, type: "reportPeer"});
   }
@@ -193,6 +269,8 @@ export class NativePump {
   /**
    * Decides whether a delivery failure is the network's first, before cleanup whose native calls could record a later
    * owner failure: the first is the close result's error, and one that follows an owner failure goes to the error sink.
+   *
+   * @param {unknown} error
    */
   #arbitrate(error) {
     if (this.#stopped || this.#arbitrated) return;
@@ -200,7 +278,7 @@ export class NativePump {
     const failure = error instanceof Error ? error : Object.assign(new Error("NativeHostFailure"), {cause: error});
     let ownerFailed = false;
     try {
-      ownerFailed = this.#runtime.state === "failed";
+      ownerFailed = this.#runtime?.state === "failed";
     } catch {
       // A runtime without state has closed.
     }
@@ -224,14 +302,17 @@ export class NativePump {
       // A host that cannot clean up leaves nothing to wait for.
       this.#error(thrown);
       try {
-        this.#runtime.close();
+        this.#runtime?.close();
       } catch {
         // A runtime that cannot close is already closing.
       }
     }
   }
 
-  /** An operational failure the pump recovered from, for the host to log. */
+  /**
+   * An operational failure the pump recovered from, for the host to log.
+   * @param {unknown} error
+   */
   #error(error) {
     try {
       this.#host.error?.(error);
@@ -240,13 +321,17 @@ export class NativePump {
     }
   }
 
+  /** @param {CoalescedAction} action */
   #coalesce(action) {
     if (this.#stopped) return;
     this.#add(action);
     this.#schedule();
   }
 
-  /** Queues a coalesced request, merging a penalty into its entry, within the ledger's bounds. */
+  /**
+   * Queues a coalesced request, merging a penalty into its entry, within the ledger's bounds.
+   * @param {CoalescedAction} action
+   */
   #add(action) {
     const key = coalescingKey(action);
     const queued = this.#coalesced.get(key);
@@ -288,7 +373,10 @@ export class NativePump {
     return batch;
   }
 
-  /** Returns a batch native never applied to the ledger. */
+  /**
+   * Returns a batch native never applied to the ledger.
+   * @param {Action[]} batch
+   */
   #requeue(batch) {
     this.#obligations.unshift(...batch.filter(({type}) => type === "verdict" || type === "classify"));
     for (const action of batch) if (action.type !== "verdict" && action.type !== "classify") this.#add(action);
@@ -304,18 +392,27 @@ export class NativePump {
 
   #stop() {
     this.#stopped = true;
-    this.#scheduler.stop();
+    this.#scheduler?.stop();
     this.close();
     // Native keeps its records past close, so the last ones, the shutdown's included, still reach the host.
-    this.#logs.stop();
+    this.#logs?.stop();
   }
 
+  /**
+   * @param {import("./network-runtime.js").NativeEscalation} site
+   * @param {unknown} cause
+   * @returns {never}
+   */
   #escalate(site, cause) {
     this.#stop();
+    assert(this.#runtime !== null);
     escalate(this.#runtime, site, cause);
   }
 
-  /** One of the runtime's turns. Returns when the next is due: now, later, on the retry timer, or idle. */
+  /**
+   * One of the runtime's turns. Returns when the next is due: now, later, on the retry timer, or idle.
+   * @returns {Continuation}
+   */
   turn() {
     if (this.#stopped) return "idle";
     const started = performance.now();
@@ -329,7 +426,10 @@ export class NativePump {
     }
   }
 
-  /** The host's demand for this turn, or null for settlement only. Throws what the host's capacity read threw. */
+  /**
+   * The host's demand for this turn, or null for settlement only. Throws what the host's capacity read threw.
+   * @param {number} deadline
+   */
   #demand(deadline) {
     if (this.#closing) return null;
     const capacity = this.#host.capacity();
@@ -355,7 +455,12 @@ export class NativePump {
     };
   }
 
+  /**
+   * @param {number} deadline
+   * @returns {Continuation}
+   */
   #turn(deadline) {
+    assert(this.#runtime !== null);
     let demand = null;
     let capacityFailed = false;
     try {
@@ -372,7 +477,7 @@ export class NativePump {
     } catch (error) {
       // Native refuses only an invalid batch or a nested exchange, so a refusal of this generated batch is a
       // broken contract. Anything else left native untouched: the batch requeues and the turn retries.
-      const code = error?.code;
+      const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
       if (typeof code === "string") this.#escalate("generated_batch", code);
       this.#requeue(batch);
       if (++this.#failures >= FAILURES_MAX) this.#escalate("failed_turns", error);
@@ -393,6 +498,7 @@ export class NativePump {
     }
     // Ordinary work the time budget left unclaimed waits for the next turn, as held jobs do.
     const budgetEnded = demand !== null && demand.messages > 0 && !demand.claimOrdinary;
+    /** @type {Continuation} */
     let next = "idle";
     if (result.more || held || (budgetEnded && result.disabledWaiting)) next = "now";
     else if (capacityFailed || result.parked.serving || result.parked.ordinary || result.disabledWaiting)
@@ -401,7 +507,10 @@ export class NativePump {
     return next;
   }
 
-  /** Resolves each job whose every message the owner has now disposed of. */
+  /**
+   * Resolves each job whose every message the owner has now disposed of.
+   * @param {readonly Handle[]} acknowledged
+   */
   #acknowledge(acknowledged) {
     for (const handle of acknowledged ?? []) {
       const key = keyOf(handle);
@@ -409,7 +518,7 @@ export class NativePump {
       if (!job) continue;
       this.#reported.delete(key);
       if (--job.remaining > 0) continue;
-      this.#unsettled.delete(job.weak);
+      if (job.weak) this.#unsettled.delete(job.weak);
       job.resolve();
     }
   }
@@ -419,6 +528,9 @@ export class NativePump {
    * If the host's peer handler throws, or the host closes the network, the delivery stops there and the pump retires
    * what it never handed over: every job gets an ignore verdict, every serving start is cancelled once and every check
    * is classified unavailable. Returns whether delivered work waits for the next turn.
+   *
+   * @param {Exchange} result
+   * @param {number} deadline
    */
   #deliver(result, deadline) {
     const jobs = this.#jobs(result.gossip);
@@ -447,19 +559,20 @@ export class NativePump {
     }
   }
 
-  /** Jobs with host records that physically omit native handles, each awaiting every message's disposition. */
+  /**
+   * Jobs with host records that physically omit native handles, each awaiting every message's disposition.
+   * @param {import("./network-runtime.js").NativeGossipBatch | null} gossip
+   * @returns {Job[]}
+   */
   #jobs(gossip) {
     if (!gossip) return [];
     return gossip.jobs.map(({kind, grouped, urgent, start, length}) => {
       const natives = gossip.messages.slice(start, start + length);
-      let resolve;
-      let reject;
-      const reported = new Promise((res, rej) => {
-        resolve = res;
-        reject = rej;
-      });
+      /** @type {PromiseWithResolvers<void>} */
+      const {promise: reported, resolve, reject} = Promise.withResolvers();
       // A host that does not await a job's disposition sees no unhandled rejection at shutdown.
       reported.catch(noop);
+      /** @type {Settler} */
       const settle = {reject, remaining: natives.length, resolve, weak: null};
       settle.weak = new WeakRef(settle);
       settlers.set(reported, settle);
@@ -487,6 +600,9 @@ export class NativePump {
   /**
    * Starts the held and delivered serving starts in that order, unless the budget is spent: they then wait for the
    * next turn. Returns whether starts wait.
+   *
+   * @param {Start[]} starts
+   * @param {number} deadline
    */
   #start(starts, deadline) {
     const pending = this.#heldStarts;
@@ -512,12 +628,12 @@ export class NativePump {
   /**
    * Hands one serving start to the host. Its serving capacity stays charged until the host's promise settles, which
    * the binding registers before host code runs. A throw or rejection fails the stream.
+   *
+   * @param {Incoming} incoming
    */
   #serve(incoming) {
-    let release;
-    const retired = new Promise((resolve) => {
-      release = resolve;
-    });
+    /** @type {PromiseWithResolvers<void>} */
+    const {promise: retired, resolve: release} = Promise.withResolvers();
     try {
       incoming.retainUntil(retired);
     } catch {
@@ -534,6 +650,12 @@ export class NativePump {
     NativePump.#served(this.#weak, served, incoming, release);
   }
 
+  /**
+   * @param {WeakRef<NativePump>} weak
+   * @param {Promise<void>} served
+   * @param {Incoming} incoming
+   * @param {() => void} release
+   */
   static #served(weak, served, incoming, release) {
     served.then(
       () => {
@@ -552,7 +674,10 @@ export class NativePump {
     );
   }
 
-  /** Classifies every check with the host's answers, or unavailable when it cannot answer them all. */
+  /**
+   * Classifies every check with the host's answers, or unavailable when it cannot answer them all.
+   * @param {readonly import("./network-runtime.js").NativeGossipDependencyCheck[]} checks
+   */
   #check(checks) {
     if (checks.length === 0) return;
     let available = null;
@@ -575,6 +700,9 @@ export class NativePump {
   /**
    * Starts every urgent job now, whatever the budget, and queues ordinary jobs, which start until `deadline`: at least
    * one per turn unless the budget was spent before this delivery and no job was held. Returns whether jobs wait.
+   *
+   * @param {Job[]} jobs
+   * @param {number} deadline
    */
   #dispatch(jobs, deadline) {
     // Ordinary work delivered at the turn's start is new work, which a spent budget defers like the claim it replaced.
@@ -591,14 +719,20 @@ export class NativePump {
     while (this.#heldJobs.length > 0 && !this.#closing) {
       if ((started > 0 || !progress) && performance.now() >= deadline) break;
       started++;
-      this.#validate(this.#heldJobs.shift());
+      const job = this.#heldJobs.shift();
+      assert(job !== undefined);
+      this.#validate(job);
     }
     return this.#heldJobs.length > 0;
   }
 
-  /** Hands one job to the host. A throw, a rejection or the wrong verdicts ignore every message. */
+  /**
+   * Hands one job to the host. A throw, a rejection or the wrong verdicts ignore every message.
+   * @param {Job} record
+   */
   #validate(record) {
     const {job} = record;
+    assert(job !== null);
     record.job = null;
     let verdicts;
     try {
@@ -609,6 +743,11 @@ export class NativePump {
     NativePump.#validated(this.#weak, verdicts, record);
   }
 
+  /**
+   * @param {WeakRef<NativePump>} weak
+   * @param {Promise<readonly import("./network.js").Verdict[]>} verdicts
+   * @param {Job} record
+   */
   static #validated(weak, verdicts, record) {
     verdicts.then(
       (values) => {
@@ -624,7 +763,11 @@ export class NativePump {
     );
   }
 
-  /** Queues one verdict per message, in order; anything but one valid verdict per message ignores them all. */
+  /**
+   * Queues one verdict per message, in order; anything but one valid verdict per message ignores them all.
+   * @param {Job} record
+   * @param {unknown} values
+   */
   #verdicts(record, values) {
     if (this.#stopped) return;
     const count = record.handles.length;
@@ -636,6 +779,10 @@ export class NativePump {
     this.#schedule();
   }
 
+  /**
+   * @param {WeakRef<NativePump>} weak
+   * @param {number} started
+   */
   static #burstEnd(weak, started) {
     const pump = weak.deref();
     if (!pump) return;
@@ -659,6 +806,7 @@ export class NativePump {
     for (let i = 0; i < BURST_BUCKETS.length; i++)
       lines.push(`${BURST_NAME}_bucket{le="${BURST_BUCKETS[i]}"} ${buckets[i]}`);
     lines.push(`${BURST_NAME}_bucket{le="+Inf"} ${count}`, `${BURST_NAME}_sum ${sum}`, `${BURST_NAME}_count ${count}`);
+    assert(this.#logs !== null);
     return `${lines.join("\n")}\n${this.#logs.metrics()}`;
   }
 }

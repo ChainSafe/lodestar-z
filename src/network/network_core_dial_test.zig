@@ -186,7 +186,8 @@ test "core native dial expiry closes authenticated attempt before connected even
         try std.testing.expect(setup.pair.client.peerId(conn) != null);
         if (shutdown) setup.client.shutdown(setup.pair.now) else {
             setup.pair.advance(10_000);
-            setup.client.peer_manager.expireDials(setup.pair.client, setup.pair.now);
+            const progress = setup.client.advance(setup.pair.io(), .{ .now = setup.pair.now, .readiness = .{} }, .{}, .{});
+            try std.testing.expect(progress.failure == null);
             _ = setup.client.peer_manager.selectDials(setup.client.protocols.gossipsub, setup.pair.client, setup.pair.now, &output);
         }
         for (0..8) |_| {

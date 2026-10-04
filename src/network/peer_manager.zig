@@ -226,7 +226,7 @@ pub const PeerManager = struct {
         self.control.started(&self.catalog, due, identify_started, request, now);
     }
     pub fn controlRequested(self: *PeerManager, request: *const @FieldType(@import("reqresp/root.zig").ReqResp.Event, "request"), now: Now, slot: u64) ?t.PeerRef {
-        const peer = self.catalog.findConnection(request.peer) orelse return null;
+        const peer = self.catalog.findConnection(request.conn) orelse return null;
         self.control.requested(&self.catalog, peer, request, &self.local, now, slot);
         return peer;
     }
@@ -477,22 +477,19 @@ pub const PeerManager = struct {
         try self.dialing.enqueueUntil(&self.catalog, identity, addresses, false, now.millis(), deadline_ms);
         self.selection_revision = null;
     }
-    pub fn cancelConnect(self: *PeerManager, engine: *Engine, identity: *const t.PeerId, now: Now) void {
-        if (self.dialing.cancelConnect(&self.catalog, identity, now.millis())) |conn| closeDial(engine, conn);
+    /// Retires dial ownership before returning the connection for the owner to close or abandon.
+    pub fn cancelConnect(self: *PeerManager, identity: *const t.PeerId, now: Now) ?t.Handle {
+        const close = self.dialing.cancelConnect(&self.catalog, identity, now.millis());
         self.selection_revision = null;
+        return close;
     }
-    pub fn expireDials(self: *PeerManager, engine: *Engine, now: Now) void {
-        var close: [peers.Dialing.attempts_max]t.Handle = undefined;
-        const count = self.dialing.expire(&self.catalog, now.millis(), &close);
-        for (close[0..count]) |conn| closeDial(engine, conn);
+    pub fn expireDials(self: *PeerManager, now: Now, close: *[peers.Dialing.attempts_max]t.Handle) []const t.Handle {
+        const count = self.dialing.expire(&self.catalog, now.millis(), close);
+        return close[0..count];
     }
-    pub fn shutdownDials(self: *PeerManager, engine: *Engine, now: Now) void {
-        var close: [peers.Dialing.attempts_max]t.Handle = undefined;
-        const count = self.dialing.shutdown(&self.catalog, now.millis(), &close);
-        for (close[0..count]) |conn| closeDial(engine, conn);
-    }
-    fn closeDial(engine: *Engine, conn: t.Handle) void {
-        if (engine.peerId(conn) != null) _ = engine.close(conn, 0) else _ = engine.abandon(conn);
+    pub fn shutdownDials(self: *PeerManager, now: Now, close: *[peers.Dialing.attempts_max]t.Handle) []const t.Handle {
+        const count = self.dialing.shutdown(&self.catalog, now.millis(), close);
+        return close[0..count];
     }
     pub fn advanceCustody(self: *PeerManager, now: Now) void {
         var budget: u16 = peers.custody.hashes_per_turn;
